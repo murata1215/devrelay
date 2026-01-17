@@ -93,6 +93,18 @@ DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）か�
 - 8秒ごとにメッセージを編集して経過時間と出力を表示
 - 完了時に進捗メッセージを最終結果で置き換え
 
+#### 11. プロジェクト名変更 (DevBridge → DevRelay)
+- 既存企業「Devbridge」（Cognizant傘下）との混同を避けるためリネーム
+- 変更内容:
+  - パッケージ名: `@devbridge/*` → `@devrelay/*`
+  - 設定ディレクトリ: `~/.devbridge/` → `~/.devrelay/`
+  - 環境変数: `DEVBRIDGE_*` → `DEVRELAY_*`
+  - CLI コマンド: `devbridge` → `devrelay`
+  - シンボリックリンク: `devbridge-claude` → `devrelay-claude`
+  - 出力ディレクトリ: `.devbridge-output/` → `.devrelay-output/`
+  - ファイルディレクトリ: `.devbridge-files/` → `.devrelay-files/`
+- GitHub リポジトリも `devrelay` にリネーム済み
+
 ## アーキテクチャ
 
 ### ディレクトリ構造
