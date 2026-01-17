@@ -103,10 +103,12 @@ Bot: 🤖 了解、修正中...
 |---------|-------------|
 | `m` | マシン一覧 |
 | `p` | プロジェクト一覧 |
+| `c` | 前回の接続先に再接続 |
 | `s` | ステータス |
 | `r` | 直近の作業一覧 |
 | `1`, `2`, `3`... | 一覧から選択 |
 | `log` | 会話ログ |
+| `x` | 会話履歴をクリア |
 | `sum` | 要約 |
 | `ai:claude` | Claude Code に切り替え |
 | `ai:gemini` | Gemini CLI に切り替え |
@@ -186,7 +188,8 @@ agents/linux/
 │       ├── config.ts         # Config management
 │       ├── connection.ts     # WebSocket to server
 │       ├── projects.ts       # Project management
-│       └── ai-runner.ts      # AI CLI execution
+│       ├── ai-runner.ts      # AI CLI execution
+│       └── conversation-store.ts # Conversation persistence
 ```
 
 ## 🔐 Security
@@ -200,6 +203,9 @@ agents/linux/
 
 - [x] Discord Bot
 - [x] Linux Agent
+- [x] Conversation Persistence (file-based)
+- [x] Quick Reconnect (`c` command)
+- [x] Real-time Progress Display
 - [ ] Telegram Bot
 - [ ] LINE Bot
 - [ ] Web UI
