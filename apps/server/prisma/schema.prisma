@@ -1,0 +1,99 @@
+// DevBridge Database Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ユーザー
+model User {
+  id            String    @id @default(cuid())
+  email         String?   @unique
+  apiKey        String?   // Anthropic API Key (encrypted)
+  plan          String    @default("free") // free, pro, team
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  machines      Machine[]
+  sessions      Session[]
+  platformLinks PlatformLink[]
+}
+
+// プラットフォーム連携
+model PlatformLink {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  platform    String   // discord, telegram, line, slack
+  platformUserId String // プラットフォーム側のユーザーID
+  chatId      String?  // DMのチャットID
+  createdAt   DateTime @default(now())
+  
+  @@unique([platform, platformUserId])
+}
+
+// マシン
+model Machine {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  name          String
+  token         String    @unique // 接続トークン
+  status        String    @default("offline") // online, offline
+  lastSeenAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  projects      Project[]
+  sessions      Session[]
+  
+  @@unique([userId, name])
+}
+
+// プロジェクト
+model Project {
+  id          String    @id @default(cuid())
+  machineId   String
+  machine     Machine   @relation(fields: [machineId], references: [id])
+  name        String
+  path        String
+  defaultAi   String    @default("claude")
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  
+  sessions    Session[]
+  
+  @@unique([machineId, name])
+}
+
+// セッション
+model Session {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  machineId     String
+  machine       Machine   @relation(fields: [machineId], references: [id])
+  projectId     String
+  project       Project   @relation(fields: [projectId], references: [id])
+  aiTool        String    @default("claude")
+  status        String    @default("active") // active, ended
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  
+  messages      Message[]
+}
+
+// メッセージ履歴
+model Message {
+  id          String    @id @default(cuid())
+  sessionId   String
+  session     Session   @relation(fields: [sessionId], references: [id])
+  role        String    // user, ai, system
+  content     String
+  platform    String    // どのプラットフォームから送信されたか
+  createdAt   DateTime  @default(now())
+}

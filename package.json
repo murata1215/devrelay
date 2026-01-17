@@ -1,0 +1,27 @@
+{
+  "name": "devbridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote AI CLI development hub - Control Claude Code, Gemini CLI, and more from anywhere",
+  "scripts": {
+    "dev:server": "pnpm --filter @devbridge/server dev",
+    "dev:agent": "pnpm --filter @devbridge/agent-linux dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "clean": "pnpm -r clean"
+  },
+  "keywords": [
+    "ai",
+    "claude-code",
+    "remote-development",
+    "cli",
+    "discord",
+    "telegram"
+  ],
+  "author": "DevBridge",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

@@ -1,0 +1,107 @@
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
+import yaml from 'yaml';
+import type { AiTool } from '@devbridge/shared';
+
+export interface AgentConfig {
+  machineName: string;
+  machineId: string;
+  serverUrl: string;
+  token: string;
+  projectsDir: string;
+  aiTools: {
+    default: AiTool;
+    claude?: { command: string };
+    gemini?: { command: string };
+    codex?: { command: string };
+    aider?: { command: string };
+  };
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
+}
+
+export interface ProjectConfig {
+  name: string;
+  path: string;
+  defaultAi: AiTool;
+}
+
+const CONFIG_DIR = path.join(os.homedir(), '.devbridge');
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yaml');
+const PROJECTS_FILE = path.join(CONFIG_DIR, 'projects.yaml');
+
+export async function ensureConfigDir() {
+  try {
+    await fs.mkdir(CONFIG_DIR, { recursive: true });
+    await fs.mkdir(path.join(CONFIG_DIR, 'logs'), { recursive: true });
+  } catch (err) {
+    // Ignore if exists
+  }
+}
+
+export async function loadConfig(): Promise<AgentConfig> {
+  await ensureConfigDir();
+
+  try {
+    const content = await fs.readFile(CONFIG_FILE, 'utf-8');
+    const config = yaml.parse(content) as Partial<AgentConfig>;
+
+    return {
+      machineName: config.machineName || os.hostname(),
+      machineId: config.machineId || '',
+      serverUrl: config.serverUrl || 'wss://devbridge.io/ws/agent',
+      token: config.token || '',
+      projectsDir: config.projectsDir || path.join(os.homedir(), 'projects'),
+      aiTools: config.aiTools || {
+        default: 'claude',
+        claude: { command: 'claude' },
+        gemini: { command: 'gemini' },
+      },
+      logLevel: config.logLevel || 'info',
+    };
+  } catch (err) {
+    // Return default config
+    return {
+      machineName: os.hostname(),
+      machineId: '',
+      serverUrl: 'wss://devbridge.io/ws/agent',
+      token: '',
+      projectsDir: path.join(os.homedir(), 'projects'),
+      aiTools: {
+        default: 'claude',
+        claude: { command: 'claude' },
+      },
+      logLevel: 'info',
+    };
+  }
+}
+
+export async function saveConfig(config: AgentConfig) {
+  await ensureConfigDir();
+  const content = yaml.stringify(config);
+  await fs.writeFile(CONFIG_FILE, content, 'utf-8');
+}
+
+export async function loadProjectsConfig(): Promise<ProjectConfig[]> {
+  try {
+    const content = await fs.readFile(PROJECTS_FILE, 'utf-8');
+    const data = yaml.parse(content);
+    return data.projects || [];
+  } catch (err) {
+    return [];
+  }
+}
+
+export async function saveProjectsConfig(projects: ProjectConfig[]) {
+  await ensureConfigDir();
+  const content = yaml.stringify({ projects });
+  await fs.writeFile(PROJECTS_FILE, content, 'utf-8');
+}
+
+export function getConfigDir() {
+  return CONFIG_DIR;
+}
+
+export function getLogDir() {
+  return path.join(CONFIG_DIR, 'logs');
+}
