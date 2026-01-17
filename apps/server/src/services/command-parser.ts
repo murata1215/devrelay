@@ -62,6 +62,10 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       return { type: 'status' };
     case 'r':
       return { type: 'recent' };
+    case 'c':
+      return { type: 'continue' };
+    case 'x':
+      return { type: 'clear' };
     case 'q':
       return { type: 'quit' };
     case 'h':
@@ -85,6 +89,7 @@ export function getHelpText(): string {
 **基本操作**
 \`m\` - マシン一覧
 \`p\` - プロジェクト一覧
+\`c\` - 前回の接続先に再接続
 \`s\` - ステータス
 \`1\`, \`2\`, \`3\`... - 一覧から選択
 
@@ -100,6 +105,7 @@ export function getHelpText(): string {
 \`ai:codex\` - Codex CLI
 
 **その他**
+\`x\` - 会話履歴をクリア
 \`q\` - 切断
 \`h\` - このヘルプ
 

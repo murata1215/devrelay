@@ -57,41 +57,102 @@ export async function sendPromptToAi(
 ): Promise<void> {
   console.log(`📝 Sending prompt to ${aiTool}: ${prompt.substring(0, 50)}...`);
 
-  // Use --print mode for non-interactive execution
   const command = getAiCommand(aiTool, config);
   if (!command) {
     onOutput(`Error: AI tool not configured: ${aiTool}`, true);
     return;
   }
 
-  // Escape prompt for shell and build full command
-  // History is managed by DevBridge, not Claude Code sessions
-  const escapedPrompt = prompt.replace(/'/g, "'\\''");
-  const fullCommand = aiTool === 'claude'
-    ? `${command} -p '${escapedPrompt}' --dangerously-skip-permissions`
-    : `${command} '${escapedPrompt}'`;
+  let proc;
 
-  console.log(`🔧 Running: ${fullCommand.substring(0, 100)}...`);
+  if (aiTool === 'claude') {
+    // Use devbridge-claude symlink so process name is clearly identifiable in ps
+    // The symlink should be at ~/.devbridge/bin/devbridge-claude -> claude
+    const devbridgeClaude = `${process.env.HOME}/.devbridge/bin/devbridge-claude`;
+    const args = [
+      '-p',
+      '--dangerously-skip-permissions',
+      '--output-format', 'stream-json',
+      '--include-partial-messages',
+      '--verbose'
+    ];
 
-  const proc = spawn(fullCommand, [], {
-    cwd: projectPath,
-    shell: '/bin/bash',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-    },
-  });
+    console.log(`🔧 Running: devbridge-claude -p [stdin] --output-format stream-json ...`);
 
-  // Close stdin immediately to signal no input
-  proc.stdin?.end();
+    proc = spawn(devbridgeClaude, args, {
+      cwd: projectPath,
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        DEVBRIDGE: '1',
+        DEVBRIDGE_SESSION_ID: sessionId,
+        DEVBRIDGE_PROJECT: projectPath,
+      },
+    });
 
-  let output = '';
+    // Write prompt to stdin (secure - not visible in process list)
+    proc.stdin?.write(prompt);
+    proc.stdin?.end();
+  } else {
+    // For other AI tools, use shell (legacy behavior)
+    const escapedPrompt = prompt.replace(/'/g, "'\\''");
+    const fullCommand = `${command} '${escapedPrompt}'`;
+
+    console.log(`🔧 Running: ${fullCommand.substring(0, 100)}...`);
+
+    proc = spawn(fullCommand, [], {
+      cwd: projectPath,
+      shell: '/bin/bash',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    proc.stdin?.end();
+  }
+
+  let fullOutput = '';
+  let lineBuffer = '';
 
   proc.stdout?.on('data', (data) => {
     const text = data.toString();
-    output += text;
-    console.log(`[${aiTool}] ${text}`);
-    onOutput(text, false);
+    lineBuffer += text;
+
+    // Process complete lines
+    const lines = lineBuffer.split('\n');
+    lineBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const json = JSON.parse(line);
+
+        // Extract text from streaming events
+        if (json.type === 'stream_event' &&
+            json.event?.type === 'content_block_delta' &&
+            json.event?.delta?.type === 'text_delta') {
+          const deltaText = json.event.delta.text;
+          fullOutput += deltaText;
+          console.log(`[${aiTool}] +${deltaText.length} chars`);
+          onOutput(deltaText, false);
+        }
+        // Also capture tool use for visibility
+        else if (json.type === 'stream_event' &&
+                 json.event?.type === 'content_block_start' &&
+                 json.event?.content_block?.type === 'tool_use') {
+          const toolName = json.event.content_block.name;
+          console.log(`[${aiTool}] 🔧 Using tool: ${toolName}`);
+          onOutput(`\n🔧 ${toolName}を使用中...\n`, false);
+        }
+        // Capture result for final output
+        else if (json.type === 'result') {
+          console.log(`[${aiTool}] ✅ Complete (${json.duration_ms}ms)`);
+        }
+      } catch {
+        // Not JSON or parse error - ignore
+      }
+    }
   });
 
   proc.stderr?.on('data', (data) => {
@@ -101,7 +162,7 @@ export async function sendPromptToAi(
 
   proc.on('close', (code) => {
     console.log(`[${aiTool}] Process exited with code ${code}`);
-    if (output.length === 0) {
+    if (fullOutput.length === 0) {
       onOutput('(No response from AI)', true);
     } else {
       onOutput('', true); // Signal completion

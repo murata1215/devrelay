@@ -9,7 +9,7 @@ import type {
   FileAttachment
 } from '@devbridge/shared';
 import { prisma } from '../db/client.js';
-import { broadcastToSession } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession } from './session-manager.js';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -166,23 +166,30 @@ async function handleProjectsUpdate(machineId: string, projects: Project[]) {
 async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[] }) {
   const { sessionId, output, isComplete, files } = payload;
 
-  // Save to DB
-  await prisma.message.create({
-    data: {
-      sessionId,
-      role: 'ai',
-      content: output,
-      platform: 'system'
+  console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}`);
+
+  if (isComplete) {
+    // Save final output to DB
+    await prisma.message.create({
+      data: {
+        sessionId,
+        role: 'ai',
+        content: output,
+        platform: 'system'
+      }
+    });
+
+    // Log files if present
+    if (files && files.length > 0) {
+      console.log(`📎 Received ${files.length} file(s) from agent for session ${sessionId}`);
     }
-  });
 
-  // Log files if present
-  if (files && files.length > 0) {
-    console.log(`📎 Received ${files.length} file(s) from agent for session ${sessionId}`);
+    // Finalize progress with final message
+    await finalizeProgress(sessionId, output, files);
+  } else {
+    // Append partial output to progress buffer
+    appendSessionOutput(sessionId, output);
   }
-
-  // Broadcast to all session participants
-  await broadcastToSession(sessionId, output, isComplete, files);
 }
 
 async function handleAiStatus(payload: { machineId: string; sessionId: string; status: string; error?: string }) {
@@ -251,5 +258,12 @@ export async function endSession(machineId: string, sessionId: string) {
   sendToAgent(machineId, {
     type: 'server:session:end',
     payload: { sessionId }
+  });
+}
+
+export async function clearConversation(machineId: string, sessionId: string, projectPath: string) {
+  sendToAgent(machineId, {
+    type: 'server:conversation:clear',
+    payload: { sessionId, projectPath }
   });
 }

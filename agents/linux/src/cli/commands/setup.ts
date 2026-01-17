@@ -56,11 +56,12 @@ export async function setupCommand() {
       return;
     }
 
-    // Projects directory
-    const projectsDir = await question(
-      'Projects directory',
-      existingConfig.projectsDir || `${os.homedir()}/projects`
+    // Projects directories (comma-separated)
+    const projectsDirsInput = await question(
+      'Projects directories (comma-separated)',
+      existingConfig.projectsDirs?.join(', ') || os.homedir()
     );
+    const projectsDirs = projectsDirsInput.split(',').map(d => d.trim()).filter(Boolean);
 
     // Generate machine ID if not exists
     const machineId = existingConfig.machineId || nanoid();
@@ -72,7 +73,7 @@ export async function setupCommand() {
       machineId,
       serverUrl,
       token,
-      projectsDir,
+      projectsDirs,
     };
 
     await saveConfig(config);

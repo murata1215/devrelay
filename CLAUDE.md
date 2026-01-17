@@ -1,5 +1,8 @@
 # DevBridge 開発記録
 
+> **重要**: 機能追加・変更を行ったら、必ずこのファイルを更新すること。
+> セッションが落ちても作業内容を引き継げるようにする。
+
 ## プロジェクト概要
 
 DevBridge は、メッセージングアプリ（Discord、Telegram、LINE）から AI CLI ツール（Claude Code、Gemini CLI など）をリモート操作できるハブシステム。
@@ -39,6 +42,57 @@ DevBridge は、メッセージングアプリ（Discord、Telegram、LINE）か
 - `.devbridge-files/` ディレクトリに保存
 - プロンプトにファイルパスを含めて Claude Code に渡す
 
+#### 5. プロジェクト自動検出
+- `CLAUDE.md` ファイルの存在でプロジェクトを自動検出
+- 複数ディレクトリのスキャン対応（`projectsDirs` 配列）
+- 最大5階層まで再帰検索
+
+#### 6. リアルタイム進捗表示
+- `--output-format stream-json --include-partial-messages --verbose` オプション使用
+- Claude Code の出力をリアルタイムでパース
+- Discord メッセージを8秒ごとに編集して進捗表示
+- ツール使用時は「🔧 Readを使用中...」のように表示
+
+#### 7. セキュアなプロセス管理
+- プロンプトを stdin 経由で渡す（`ps aux` に表示されない）
+- `devbridge-claude` シンボリックリンクでプロセス識別
+- 環境変数による識別:
+  - `DEVBRIDGE=1`
+  - `DEVBRIDGE_SESSION_ID=xxx`
+  - `DEVBRIDGE_PROJECT=/path/to/project`
+
+### Phase 1.1: 追加機能 (2026-01-18)
+
+#### 8. クイックコマンド追加
+- `c` - 前回の接続先に再接続（Continue）
+  - `lastProjectId` を DB（PlatformLink テーブル）に保存
+  - オフラインのマシンには接続不可のエラー表示
+- `x` - 会話履歴をクリア（Clear）
+  - Agent に `server:conversation:clear` メッセージを送信
+  - ファイルとメモリ両方をクリア
+
+#### 9. 会話履歴の永続化
+- メモリ管理から**ファイル保存**に変更
+- 保存先: `プロジェクト/.devbridge/conversation.json`
+- 保存内容:
+  ```json
+  {
+    "projectPath": "/path/to/project",
+    "lastUpdated": "2026-01-18T...",
+    "history": [
+      { "role": "user", "content": "...", "timestamp": "..." },
+      { "role": "assistant", "content": "...", "timestamp": "..." }
+    ]
+  }
+  ```
+- 保存は無制限、Claude に送るのは直近20件のみ（トークン節約）
+- Agent 起動時に自動ロード
+
+#### 10. 進捗表示の改善
+- プロンプト送信時に進捗メッセージを先に送信
+- 8秒ごとにメッセージを編集して経過時間と出力を表示
+- 完了時に進捗メッセージを最終結果で置き換え
+
 ## アーキテクチャ
 
 ### ディレクトリ構造
@@ -66,6 +120,7 @@ devbridge/
 - `agents/linux/src/services/ai-runner.ts` - Claude Code 実行
 - `agents/linux/src/services/output-collector.ts` - 出力ファイル収集
 - `agents/linux/src/services/file-handler.ts` - 受信ファイル保存
+- `agents/linux/src/services/conversation-store.ts` - 会話履歴の永続化
 
 #### Shared
 - `packages/shared/src/types.ts` - 共通型定義（FileAttachment など）
@@ -78,7 +133,9 @@ machineName: ubuntu-dev
 machineId: ""
 serverUrl: ws://localhost:3000/ws/agent
 token: machine_xxxxx
-projectsDir: /home/user/projects
+projectsDirs:      # 複数ディレクトリ対応
+  - /home/user
+  - /var/www
 aiTools:
   default: claude
   claude:
@@ -112,3 +169,5 @@ cd agents/linux && pnpm start
 - [ ] 要約機能（Anthropic API 使用）
 - [ ] 複数ユーザー同時接続
 - [ ] Agent の自動再接続改善
+- [ ] 進捗表示のUI改善（プログレスバーなど）
+- [ ] エラーハンドリング強化

@@ -1,11 +1,29 @@
 import type { Platform, UserContext, Session, FileAttachment } from '@devbridge/shared';
 import { prisma } from '../db/client.js';
-import { sendDiscordMessage } from '../platforms/discord.js';
+import {
+  sendDiscordMessage,
+  startTypingIndicator,
+  stopTypingIndicator,
+  sendDiscordMessageWithId,
+  editDiscordMessage
+} from '../platforms/discord.js';
 // import { sendTelegramMessage } from '../platforms/telegram.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
 const sessionParticipants = new Map<string, Array<{ platform: Platform; chatId: string }>>();
+
+// Progress tracking for streaming output
+interface ProgressTracker {
+  messageIds: Map<string, string>;  // chatId -> messageId
+  outputBuffer: string;
+  startTime: number;
+  updateInterval: NodeJS.Timeout | null;
+}
+const progressTrackers = new Map<string, ProgressTracker>();
+
+const PROGRESS_UPDATE_INTERVAL = 8000; // 8 seconds
+const MAX_OUTPUT_LINES = 15;
 
 export async function createSession(
   userId: string,
@@ -56,8 +74,139 @@ export async function broadcastToSession(sessionId: string, message: string, isC
   const participants = sessionParticipants.get(sessionId) || [];
 
   for (const { platform, chatId } of participants) {
+    // Stop typing indicator when response is complete
+    if (isComplete && platform === 'discord') {
+      stopTypingIndicator(chatId);
+    }
     await sendMessage(platform, chatId, message, files);
   }
+}
+
+export async function startTypingForSession(sessionId: string) {
+  const participants = sessionParticipants.get(sessionId) || [];
+
+  for (const { platform, chatId } of participants) {
+    if (platform === 'discord') {
+      await startTypingIndicator(chatId);
+    }
+  }
+}
+
+// Start progress tracking for a session
+export async function startProgressTracking(sessionId: string) {
+  const participants = sessionParticipants.get(sessionId) || [];
+
+  // Clean up any existing tracker
+  stopProgressTracking(sessionId);
+
+  const tracker: ProgressTracker = {
+    messageIds: new Map(),
+    outputBuffer: '',
+    startTime: Date.now(),
+    updateInterval: null,
+  };
+
+  // Send initial progress message to all participants
+  for (const { platform, chatId } of participants) {
+    if (platform === 'discord') {
+      const messageId = await sendDiscordMessageWithId(chatId, formatProgressMessage('', 0));
+      if (messageId) {
+        tracker.messageIds.set(chatId, messageId);
+      }
+    }
+  }
+
+  // Start periodic updates
+  tracker.updateInterval = setInterval(() => {
+    updateProgressMessages(sessionId);
+  }, PROGRESS_UPDATE_INTERVAL);
+
+  progressTrackers.set(sessionId, tracker);
+}
+
+// Add output to the buffer
+export function appendSessionOutput(sessionId: string, output: string) {
+  const tracker = progressTrackers.get(sessionId);
+  if (tracker) {
+    tracker.outputBuffer += output;
+    console.log(`📝 Buffer updated: ${tracker.outputBuffer.length} chars total`);
+  } else {
+    console.log(`⚠️ No tracker found for session ${sessionId}`);
+  }
+}
+
+// Update progress messages
+async function updateProgressMessages(sessionId: string) {
+  const tracker = progressTrackers.get(sessionId);
+  if (!tracker) return;
+
+  const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
+  const content = formatProgressMessage(tracker.outputBuffer, elapsed);
+
+  for (const [chatId, messageId] of tracker.messageIds) {
+    await editDiscordMessage(chatId, messageId, content);
+  }
+}
+
+// Format the progress message
+function formatProgressMessage(output: string, elapsedSeconds: number): string {
+  const lines = output.split('\n').filter(line => line.trim());
+  const lastLines = lines.slice(-MAX_OUTPUT_LINES);
+
+  let content = `🤖 **処理中...**\n`;
+  content += `⏱️ ${elapsedSeconds}秒経過\n`;
+
+  if (lastLines.length > 0) {
+    content += `\`\`\`\n`;
+    content += lastLines.join('\n');
+    content += `\n\`\`\``;
+  }
+
+  return content;
+}
+
+// Stop progress tracking and clean up
+export function stopProgressTracking(sessionId: string) {
+  const tracker = progressTrackers.get(sessionId);
+  if (tracker) {
+    if (tracker.updateInterval) {
+      clearInterval(tracker.updateInterval);
+    }
+    progressTrackers.delete(sessionId);
+  }
+}
+
+// Finalize progress with final message
+export async function finalizeProgress(sessionId: string, finalMessage: string, files?: FileAttachment[]) {
+  const tracker = progressTrackers.get(sessionId);
+  const participants = sessionParticipants.get(sessionId) || [];
+
+  // Stop the update interval
+  if (tracker?.updateInterval) {
+    clearInterval(tracker.updateInterval);
+  }
+
+  // Delete progress messages and send final response
+  for (const { platform, chatId } of participants) {
+    if (platform === 'discord') {
+      stopTypingIndicator(chatId);
+
+      // Edit progress message to show completion, or send new message
+      const messageId = tracker?.messageIds.get(chatId);
+      if (messageId && !files?.length) {
+        // Edit existing message with final content
+        await editDiscordMessage(chatId, messageId, finalMessage);
+      } else {
+        // Delete progress message and send new one with files
+        if (messageId) {
+          await editDiscordMessage(chatId, messageId, '✅ 完了');
+        }
+        await sendDiscordMessage(chatId, finalMessage, files);
+      }
+    }
+  }
+
+  progressTrackers.delete(sessionId);
 }
 
 export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[]) {

@@ -12,6 +12,13 @@ import type { AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession } from './ai-runner.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import { clearOutputDir, collectOutputFiles, OUTPUT_DIR_INSTRUCTION } from './output-collector.js';
+import {
+  loadConversation,
+  saveConversation,
+  getConversationContext,
+  clearConversation,
+  type ConversationEntry
+} from './conversation-store.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -23,7 +30,7 @@ interface SessionInfo {
   projectPath: string;
   aiTool: AiTool;
   claudeSessionId: string; // UUID for Claude Code --session-id
-  history: Array<{ role: 'user' | 'assistant'; content: string }>; // Conversation history
+  history: ConversationEntry[]; // Conversation history (persisted to file)
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -98,6 +105,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:ai:prompt':
       handleAiPrompt(message.payload);
       break;
+
+    case 'server:conversation:clear':
+      handleConversationClear(message.payload);
+      break;
   }
 }
 
@@ -111,9 +122,12 @@ async function handleSessionStart(
   console.log(`   Project: ${projectName} (${projectPath})`);
   console.log(`   AI Tool: ${aiTool}`);
 
+  // Load previous conversation history from file
+  const history = await loadConversation(projectPath);
+
   // Generate UUID for Claude Code session and store session info
   const claudeSessionId = uuidv4();
-  sessionInfoMap.set(sessionId, { projectPath, aiTool, claudeSessionId, history: [] });
+  sessionInfoMap.set(sessionId, { projectPath, aiTool, claudeSessionId, history });
   console.log(`📋 Session ${sessionId} -> Claude Session ${claudeSessionId}`);
 
   try {
@@ -156,6 +170,21 @@ async function handleSessionEnd(sessionId: string) {
   await stopAiSession(sessionId);
 }
 
+async function handleConversationClear(payload: { sessionId: string; projectPath: string }) {
+  const { sessionId, projectPath } = payload;
+  console.log(`🗑️ Clearing conversation for session ${sessionId}`);
+
+  // Clear the conversation file
+  await clearConversation(projectPath);
+
+  // Clear in-memory history if session exists
+  const sessionInfo = sessionInfoMap.get(sessionId);
+  if (sessionInfo) {
+    sessionInfo.history = [];
+    console.log(`📋 In-memory history cleared for session ${sessionId}`);
+  }
+}
+
 async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[] }) {
   const { sessionId, prompt, userId, files } = payload;
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -179,8 +208,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     }
   }
 
-  // Add user message to history
-  sessionInfo.history.push({ role: 'user', content: prompt });
+  // Add user message to history and save
+  sessionInfo.history.push({
+    role: 'user',
+    content: prompt,
+    timestamp: new Date().toISOString()
+  });
+  await saveConversation(sessionInfo.projectPath, sessionInfo.history);
 
   // Clear output directory before running
   await clearOutputDir(sessionInfo.projectPath);
@@ -188,9 +222,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Build prompt with history context and output directory instruction
   let fullPrompt = promptWithFiles + OUTPUT_DIR_INSTRUCTION;
   if (sessionInfo.history.length > 1) {
-    const historyContext = sessionInfo.history.slice(0, -1) // exclude current message
-      .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
-      .join('\n');
+    const historyContext = getConversationContext(sessionInfo.history.slice(0, -1)); // exclude current message
     fullPrompt = `Previous conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${OUTPUT_DIR_INSTRUCTION}`;
   }
 
@@ -219,18 +251,25 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           payload: {
             machineId: currentConfig!.machineId,
             sessionId,
-            output,
+            output: responseText,  // Send full accumulated response
             isComplete,
             files: files.length > 0 ? files : undefined,
           },
         });
 
-        // Save response to history when complete
+        // Save response to history and persist to file
         if (responseText.trim()) {
-          sessionInfo.history.push({ role: 'assistant', content: responseText.trim() });
+          sessionInfo.history.push({
+            role: 'assistant',
+            content: responseText.trim(),
+            timestamp: new Date().toISOString()
+          });
+          await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+          console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
         }
       } else {
         // Stream intermediate output without files
+        console.log(`📤 Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
         sendMessage({
           type: 'agent:ai:output',
           payload: {

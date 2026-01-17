@@ -42,7 +42,9 @@ export async function projectsCommand(
       break;
       
     case 'scan':
-      await scanProjectsAction(config.projectsDir);
+      for (const dir of config.projectsDirs) {
+        await scanProjectsAction(dir);
+      }
       break;
       
     default:

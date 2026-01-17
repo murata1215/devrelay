@@ -1,42 +1,62 @@
 import type { UserCommand, UserContext, Platform, FileAttachment } from '@devbridge/shared';
 import { STATUS_EMOJI, AI_TOOL_NAMES } from '@devbridge/shared';
 import { prisma } from '../db/client.js';
-import { 
-  getConnectedMachines, 
-  getMachine, 
+import {
+  getConnectedMachines,
+  getMachine,
   startSession as startAgentSession,
   sendPromptToAgent,
-  endSession as endAgentSession 
+  endSession as endAgentSession,
+  clearConversation
 } from './agent-manager.js';
-import { 
-  createSession, 
-  addParticipant, 
+import {
+  createSession,
+  addParticipant,
   endSession,
   getRecentSessions,
-  getSessionMessages 
+  getSessionMessages,
+  startProgressTracking
 } from './session-manager.js';
 import { getHelpText } from './command-parser.js';
 
-// User context storage (in production, use Redis)
+// User context storage (in-memory, lastProjectId is persisted to DB)
 const userContexts = new Map<string, UserContext>();
 
-export function getUserContext(userId: string, platform: Platform, chatId: string): UserContext {
+export async function getUserContext(userId: string, platform: Platform, chatId: string): Promise<UserContext> {
   const key = `${platform}:${userId}`;
   let context = userContexts.get(key);
-  
+
   if (!context) {
-    context = { userId, platform, chatId };
+    // Load lastProjectId from DB
+    const platformLink = await prisma.platformLink.findUnique({
+      where: { platform_platformUserId: { platform, platformUserId: userId } }
+    });
+
+    context = {
+      userId,
+      platform,
+      chatId,
+      lastProjectId: platformLink?.lastProjectId ?? undefined
+    };
     userContexts.set(key, context);
   }
-  
+
   return context;
 }
 
-export function updateUserContext(userId: string, platform: Platform, updates: Partial<UserContext>) {
+export async function updateUserContext(userId: string, platform: Platform, updates: Partial<UserContext>) {
   const key = `${platform}:${userId}`;
   const context = userContexts.get(key);
   if (context) {
     Object.assign(context, updates);
+
+    // Persist lastProjectId to DB when it changes
+    if ('lastProjectId' in updates) {
+      await prisma.platformLink.updateMany({
+        where: { platform, platformUserId: userId },
+        data: { lastProjectId: updates.lastProjectId ?? null }
+      });
+    }
   }
 }
 
@@ -60,6 +80,12 @@ export async function executeCommand(
 
     case 'recent':
       return handleRecent(context);
+
+    case 'continue':
+      return handleContinue(context);
+
+    case 'clear':
+      return handleClear(context);
 
     case 'log':
       return handleLog(context, command.count);
@@ -104,7 +130,7 @@ async function handleMachineList(context: UserContext): Promise<string> {
   }).join('\n');
   
   // Update context
-  updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, {
     lastListType: 'machine',
     lastListItems: machines.map(m => m.id)
   });
@@ -129,7 +155,7 @@ async function handleProjectList(context: UserContext): Promise<string> {
     return `${i + 1}. ${p.name}`;
   }).join('\n');
   
-  updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, {
     lastListType: 'project',
     lastListItems: projects.map(p => p.id)
   });
@@ -174,7 +200,7 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
     return `⚠️ ${machine.name} はオフラインです。`;
   }
   
-  updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, {
     currentMachineId: machine.id,
     currentMachineName: machine.name,
     lastListType: undefined,
@@ -234,13 +260,16 @@ async function handleProjectConnect(projectId: string, context: UserContext): Pr
     project.defaultAi as any
   );
   
-  updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, {
     currentSessionId: sessionId,
     currentProjectName: project.name,
+    currentMachineId: project.machineId,
+    currentMachineName: project.machine.name,
+    lastProjectId: project.id,  // 再接続用に保存
     lastListType: undefined,
     lastListItems: undefined
   });
-  
+
   const aiName = AI_TOOL_NAMES[project.defaultAi] || project.defaultAi;
   return `🚀 **${project.name}** に接続\n${aiName} 起動完了`;
 }
@@ -256,7 +285,7 @@ async function handleRecentConnect(sessionId: string, context: UserContext): Pro
   }
   
   // Connect to the same machine/project
-  updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, {
     currentMachineId: session.machineId,
     currentMachineName: session.machine.name
   });
@@ -303,12 +332,62 @@ async function handleRecent(context: UserContext): Promise<string> {
     return `${i + 1}. ${s.machine.name}/${s.project.name} (${date})`;
   }).join('\n');
   
-  updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, {
     lastListType: 'recent',
     lastListItems: sessions.map(s => s.id)
   });
   
   return `📜 **直近の作業**\n\n${list}`;
+}
+
+async function handleContinue(context: UserContext): Promise<string> {
+  // Check if we have a last project ID
+  if (!context.lastProjectId) {
+    return '⚠️ 前回の接続先がありません。\n\n`m` でマシン一覧を表示して接続してください。';
+  }
+
+  // Verify the project still exists and machine is online
+  const project = await prisma.project.findUnique({
+    where: { id: context.lastProjectId },
+    include: { machine: true }
+  });
+
+  if (!project) {
+    return '❌ 前回のプロジェクトが見つかりません。\n\n`m` でマシン一覧を表示して接続してください。';
+  }
+
+  if (project.machine.status !== 'online') {
+    return `⚠️ **${project.machine.name}** はオフラインです。\n\n`
+      + `前回: ${project.machine.name}/${project.name}`;
+  }
+
+  // Connect to the project
+  return handleProjectConnect(project.id, context);
+}
+
+async function handleClear(context: UserContext): Promise<string> {
+  if (!context.currentSessionId || !context.currentMachineId) {
+    return '⚠️ プロジェクトに接続されていません。';
+  }
+
+  // Get project path from session
+  const session = await prisma.session.findUnique({
+    where: { id: context.currentSessionId },
+    include: { project: true }
+  });
+
+  if (!session) {
+    return '❌ セッションが見つかりません。';
+  }
+
+  // Send clear command to agent
+  await clearConversation(
+    context.currentMachineId,
+    context.currentSessionId,
+    session.project.path
+  );
+
+  return '🗑️ 会話履歴をクリアしました';
 }
 
 async function handleLog(context: UserContext, count?: number): Promise<string> {
@@ -345,7 +424,7 @@ async function handleQuit(context: UserContext): Promise<string> {
     }
   }
   
-  updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, {
     currentMachineId: undefined,
     currentMachineName: undefined,
     currentSessionId: undefined,
@@ -386,6 +465,9 @@ async function handleAiPrompt(context: UserContext, text: string, files?: FileAt
 
   console.log(`📤 Sending prompt to agent ${context.currentMachineId}`);
 
+  // Start progress tracking (sends initial message)
+  await startProgressTracking(context.currentSessionId);
+
   // Send to agent with files
   await sendPromptToAgent(
     context.currentMachineId,
@@ -395,7 +477,8 @@ async function handleAiPrompt(context: UserContext, text: string, files?: FileAt
     files
   );
 
-  return '🤖 処理中...';
+  // Return empty since progress message is already sent
+  return '';
 }
 
 // -----------------------------------------------------------------------------

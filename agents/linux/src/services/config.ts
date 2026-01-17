@@ -9,7 +9,7 @@ export interface AgentConfig {
   machineId: string;
   serverUrl: string;
   token: string;
-  projectsDir: string;
+  projectsDirs: string[];  // 複数ディレクトリ対応
   aiTools: {
     default: AiTool;
     claude?: { command: string };
@@ -44,14 +44,24 @@ export async function loadConfig(): Promise<AgentConfig> {
 
   try {
     const content = await fs.readFile(CONFIG_FILE, 'utf-8');
-    const config = yaml.parse(content) as Partial<AgentConfig>;
+    const config = yaml.parse(content) as any;
+
+    // 後方互換: projectsDir (単数) と projectsDirs (複数) の両方をサポート
+    let projectsDirs: string[] = [];
+    if (config.projectsDirs && Array.isArray(config.projectsDirs)) {
+      projectsDirs = config.projectsDirs;
+    } else if (config.projectsDir) {
+      projectsDirs = [config.projectsDir];
+    } else {
+      projectsDirs = [os.homedir()];
+    }
 
     return {
       machineName: config.machineName || os.hostname(),
       machineId: config.machineId || '',
       serverUrl: config.serverUrl || 'wss://devbridge.io/ws/agent',
       token: config.token || '',
-      projectsDir: config.projectsDir || path.join(os.homedir(), 'projects'),
+      projectsDirs,
       aiTools: config.aiTools || {
         default: 'claude',
         claude: { command: 'claude' },
@@ -66,7 +76,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       machineId: '',
       serverUrl: 'wss://devbridge.io/ws/agent',
       token: '',
-      projectsDir: path.join(os.homedir(), 'projects'),
+      projectsDirs: [os.homedir()],
       aiTools: {
         default: 'claude',
         claude: { command: 'claude' },

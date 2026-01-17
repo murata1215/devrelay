@@ -8,6 +8,8 @@ export const SHORTCUTS: Record<string, string> = {
   'p': 'project:list',
   's': 'status',
   'r': 'recent',
+  'c': 'continue',  // 前回の接続先に再接続
+  'x': 'clear',     // 会話履歴をクリア
   'q': 'quit',
   'h': 'help',
   'log': 'log',

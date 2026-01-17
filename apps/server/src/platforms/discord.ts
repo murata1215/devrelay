@@ -70,7 +70,7 @@ export async function setupDiscordBot() {
 
     try {
       // Get or create user context
-      const context = getUserContext(
+      const context = await getUserContext(
         message.author.id,
         'discord',
         message.channel.id
@@ -93,8 +93,10 @@ export async function setupDiscordBot() {
       const command = parseCommand(content || '', context);
       const response = await executeCommand(command, context, files);
 
-      // Send response
-      await message.reply(response);
+      // Send response (skip if empty - progress tracking handles it)
+      if (response) {
+        await message.reply(response);
+      }
     } catch (error) {
       console.error('Discord message handling error:', error);
       await message.reply('❌ エラーが発生しました。しばらくしてからお試しください。');
@@ -141,4 +143,84 @@ export async function sendDiscordMessage(channelId: string, content: string, fil
 
 export function getDiscordClient() {
   return client;
+}
+
+// Typing indicator management
+const typingIntervals = new Map<string, NodeJS.Timeout>();
+
+export async function startTypingIndicator(channelId: string) {
+  if (!client) return;
+
+  // Stop any existing typing for this channel
+  stopTypingIndicator(channelId);
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (channel && channel.isTextBased() && 'sendTyping' in channel) {
+      // Send initial typing
+      await (channel as any).sendTyping();
+
+      // Keep sending typing every 8 seconds (Discord typing lasts ~10 seconds)
+      const interval = setInterval(async () => {
+        try {
+          await (channel as any).sendTyping();
+        } catch {
+          stopTypingIndicator(channelId);
+        }
+      }, 8000);
+
+      typingIntervals.set(channelId, interval);
+    }
+  } catch (err) {
+    console.error('Failed to start typing indicator:', err);
+  }
+}
+
+export function stopTypingIndicator(channelId: string) {
+  const interval = typingIntervals.get(channelId);
+  if (interval) {
+    clearInterval(interval);
+    typingIntervals.delete(channelId);
+  }
+}
+
+// Send a message and return the message ID for later editing
+export async function sendDiscordMessageWithId(channelId: string, content: string): Promise<string | null> {
+  if (!client) {
+    console.error('Discord client not initialized');
+    return null;
+  }
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (channel && channel.isTextBased() && 'send' in channel) {
+      const message = await (channel as any).send(content);
+      return message.id;
+    }
+  } catch (error) {
+    console.error('Failed to send Discord message:', error);
+  }
+  return null;
+}
+
+// Edit an existing message
+export async function editDiscordMessage(channelId: string, messageId: string, content: string): Promise<boolean> {
+  if (!client) {
+    console.error('Discord client not initialized');
+    return false;
+  }
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (channel && channel.isTextBased() && 'messages' in channel) {
+      const message = await (channel as any).messages.fetch(messageId);
+      if (message) {
+        await message.edit(content);
+        return true;
+      }
+    }
+  } catch (error) {
+    console.error('Failed to edit Discord message:', error);
+  }
+  return false;
 }

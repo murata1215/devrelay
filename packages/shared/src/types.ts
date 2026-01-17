@@ -95,7 +95,8 @@ export type ServerToAgentMessage =
   | { type: 'server:connect:ack'; payload: { success: boolean; error?: string } }
   | { type: 'server:session:start'; payload: SessionStartPayload }
   | { type: 'server:session:end'; payload: { sessionId: string } }
-  | { type: 'server:ai:prompt'; payload: AiPromptPayload };
+  | { type: 'server:ai:prompt'; payload: AiPromptPayload }
+  | { type: 'server:conversation:clear'; payload: { sessionId: string; projectPath: string } };
 
 export interface SessionStartPayload {
   sessionId: string;
@@ -123,6 +124,8 @@ export type UserCommand =
   | { type: 'select'; number: number }
   | { type: 'status' }
   | { type: 'recent' }
+  | { type: 'continue' }  // 前回の接続先に再接続
+  | { type: 'clear' }     // 会話履歴をクリア
   | { type: 'log'; count?: number }
   | { type: 'summary'; period?: string }
   | { type: 'quit' }
@@ -144,6 +147,7 @@ export interface UserContext {
   currentMachineName?: string;
   currentSessionId?: string;
   currentProjectName?: string;
+  lastProjectId?: string;  // 前回接続したプロジェクトID（再接続用）
 }
 
 // -----------------------------------------------------------------------------

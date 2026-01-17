@@ -25,14 +25,15 @@ model User {
 
 // プラットフォーム連携
 model PlatformLink {
-  id          String   @id @default(cuid())
-  userId      String
-  user        User     @relation(fields: [userId], references: [id])
-  platform    String   // discord, telegram, line, slack
-  platformUserId String // プラットフォーム側のユーザーID
-  chatId      String?  // DMのチャットID
-  createdAt   DateTime @default(now())
-  
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  platform       String   // discord, telegram, line, slack
+  platformUserId String   // プラットフォーム側のユーザーID
+  chatId         String?  // DMのチャットID
+  lastProjectId  String?  // 前回接続したプロジェクト（継続用）
+  createdAt      DateTime @default(now())
+
   @@unique([platform, platformUserId])
 }
 

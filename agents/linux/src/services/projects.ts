@@ -113,31 +113,51 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1): Promi
 }
 
 async function looksLikeProject(dir: string): Promise<boolean> {
-  const projectIndicators = [
-    'package.json',
-    'Cargo.toml',
-    'go.mod',
-    'pyproject.toml',
-    'requirements.txt',
-    'Gemfile',
-    'pom.xml',
-    'build.gradle',
-    '.git',
-    'Makefile',
-  ];
-
-  for (const indicator of projectIndicators) {
-    try {
-      await fs.access(path.join(dir, indicator));
-      return true;
-    } catch {
-      // Continue checking
-    }
+  // CLAUDE.md が存在すればプロジェクトとして認識
+  try {
+    await fs.access(path.join(dir, 'CLAUDE.md'));
+    return true;
+  } catch {
+    return false;
   }
-
-  return false;
 }
 
 export async function listProjects(): Promise<ProjectConfig[]> {
   return loadProjectsConfig();
+}
+
+/**
+ * 指定ディレクトリをスキャンして CLAUDE.md があるプロジェクトを自動登録
+ */
+export async function autoDiscoverProjects(baseDir: string, maxDepth: number = 5): Promise<number> {
+  console.log(`🔍 Scanning for projects with CLAUDE.md in ${baseDir}...`);
+
+  const discovered = await scanProjects(baseDir, maxDepth);
+
+  if (discovered.length === 0) {
+    console.log('   No new projects found');
+    return 0;
+  }
+
+  // 既存のプロジェクト一覧を取得
+  const existing = await loadProjectsConfig();
+
+  // 新規プロジェクトを追加
+  let added = 0;
+  for (const project of discovered) {
+    // 重複チェック
+    const isDuplicate = existing.some(p => p.path === project.path || p.name === project.name);
+    if (!isDuplicate) {
+      existing.push(project);
+      console.log(`   ✅ Added: ${project.name} (${project.path})`);
+      added++;
+    }
+  }
+
+  if (added > 0) {
+    await saveProjectsConfig(existing);
+  }
+
+  console.log(`   Found ${added} new project(s)`);
+  return added;
 }
