@@ -7,7 +7,7 @@ import { loadConfig, saveConfig, ensureConfigDir } from '../../services/config.j
 export async function setupCommand() {
   console.log(chalk.blue(`
 ┌─────────────────────────────────────────────────┐
-│  DevBridge Agent Setup                          │
+│  DevRelay Agent Setup                          │
 └─────────────────────────────────────────────────┘
   `));
 
@@ -38,12 +38,12 @@ export async function setupCommand() {
     // Server URL
     const serverUrl = await question(
       'Server URL',
-      existingConfig.serverUrl || 'wss://devbridge.io/ws/agent'
+      existingConfig.serverUrl || 'wss://devrelay.io/ws/agent'
     );
 
     // Connection token
     console.log(chalk.yellow('\nConnection token is required to authenticate with the server.'));
-    console.log(chalk.yellow('You can get it from: https://devbridge.io/dashboard\n'));
+    console.log(chalk.yellow('You can get it from: https://devrelay.io/dashboard\n'));
     
     const token = await question(
       'Connection token',
@@ -79,7 +79,7 @@ export async function setupCommand() {
     await saveConfig(config);
 
     console.log(chalk.green('\n✅ Configuration saved!'));
-    console.log(chalk.gray(`   Config: ~/.devbridge/config.yaml`));
+    console.log(chalk.gray(`   Config: ~/.devrelay/config.yaml`));
     console.log();
 
     // Ask about systemd service
@@ -95,9 +95,9 @@ export async function setupCommand() {
     console.log(chalk.green('\n🎉 Setup complete!'));
     console.log();
     console.log('Next steps:');
-    console.log(chalk.cyan('  1. Add projects:     devbridge projects add ~/projects/my-app'));
-    console.log(chalk.cyan('  2. Start agent:      devbridge start'));
-    console.log(chalk.cyan('  3. Check status:     devbridge status'));
+    console.log(chalk.cyan('  1. Add projects:     devrelay projects add ~/projects/my-app'));
+    console.log(chalk.cyan('  2. Start agent:      devrelay start'));
+    console.log(chalk.cyan('  3. Check status:     devrelay status'));
     console.log();
   } finally {
     rl.close();
@@ -110,7 +110,7 @@ async function installSystemdService(machineName: string) {
   const path = await import('path');
 
   const serviceContent = `[Unit]
-Description=DevBridge Agent (${machineName})
+Description=DevRelay Agent (${machineName})
 After=network.target
 
 [Service]
@@ -126,22 +126,22 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 `;
 
-  const servicePath = '/etc/systemd/system/devbridge.service';
+  const servicePath = '/etc/systemd/system/devrelay.service';
 
   try {
     // Write service file (requires sudo)
-    const tempPath = '/tmp/devbridge.service';
+    const tempPath = '/tmp/devrelay.service';
     await fs.writeFile(tempPath, serviceContent);
     
     execSync(`sudo mv ${tempPath} ${servicePath}`, { stdio: 'inherit' });
     execSync('sudo systemctl daemon-reload', { stdio: 'inherit' });
-    execSync('sudo systemctl enable devbridge', { stdio: 'inherit' });
+    execSync('sudo systemctl enable devrelay', { stdio: 'inherit' });
     
     console.log(chalk.green('\n✅ Systemd service installed!'));
-    console.log(chalk.gray('   Start with: sudo systemctl start devbridge'));
+    console.log(chalk.gray('   Start with: sudo systemctl start devrelay'));
   } catch (err: any) {
     console.log(chalk.yellow('\n⚠️ Could not install systemd service automatically.'));
-    console.log(chalk.yellow('   You can manually create: /etc/systemd/system/devbridge.service'));
+    console.log(chalk.yellow('   You can manually create: /etc/systemd/system/devrelay.service'));
     console.log();
     console.log(chalk.gray(serviceContent));
   }

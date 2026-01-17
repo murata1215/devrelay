@@ -1,5 +1,5 @@
 // =============================================================================
-// DevBridge Shared Constants
+// DevRelay Shared Constants
 // =============================================================================
 
 // Shortcut commands (works without API key)

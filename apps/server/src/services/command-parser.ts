@@ -1,5 +1,5 @@
-import type { UserCommand, UserContext, AiTool } from '@devbridge/shared';
-import { SHORTCUTS } from '@devbridge/shared';
+import type { UserCommand, UserContext, AiTool } from '@devrelay/shared';
+import { SHORTCUTS } from '@devrelay/shared';
 
 /**
  * Parse user input into a command
@@ -84,7 +84,7 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
  */
 export function getHelpText(): string {
   return `
-📖 **DevBridge コマンド一覧**
+📖 **DevRelay コマンド一覧**
 
 **基本操作**
 \`m\` - マシン一覧

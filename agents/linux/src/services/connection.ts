@@ -6,8 +6,8 @@ import type {
   Project,
   AiTool,
   FileAttachment
-} from '@devbridge/shared';
-import { DEFAULTS } from '@devbridge/shared';
+} from '@devrelay/shared';
+import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession } from './ai-runner.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';

@@ -1,4 +1,4 @@
-// DevBridge Database Schema
+// DevRelay Database Schema
 
 generator client {
   provider = "prisma-client-js"

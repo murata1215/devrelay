@@ -7,7 +7,7 @@ import type {
   Project,
   AiTool,
   FileAttachment
-} from '@devbridge/shared';
+} from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession } from './session-manager.js';
 

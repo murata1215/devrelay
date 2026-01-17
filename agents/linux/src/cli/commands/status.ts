@@ -3,7 +3,7 @@ import { loadProjects } from '../../services/projects.js';
 import { execSync } from 'child_process';
 
 export async function statusCommand() {
-  console.log('\n📊 DevBridge Agent Status\n');
+  console.log('\n📊 DevRelay Agent Status\n');
   
   const config = await loadConfig();
   
@@ -16,12 +16,12 @@ export async function statusCommand() {
   // Check if service is running
   let serviceStatus = 'unknown';
   try {
-    const result = execSync('systemctl is-active devbridge-agent 2>/dev/null', { encoding: 'utf-8' }).trim();
+    const result = execSync('systemctl is-active devrelay-agent 2>/dev/null', { encoding: 'utf-8' }).trim();
     serviceStatus = result;
   } catch {
     try {
       // Check if running as process
-      execSync('pgrep -f "devbridge.*agent"', { encoding: 'utf-8' });
+      execSync('pgrep -f "devrelay.*agent"', { encoding: 'utf-8' });
       serviceStatus = 'running (process)';
     } catch {
       serviceStatus = 'stopped';
@@ -35,7 +35,7 @@ export async function statusCommand() {
   if (config.token) {
     console.log(`Token:      ✅ configured`);
   } else {
-    console.log(`Token:      ⚠️  not configured (run: devbridge setup)`);
+    console.log(`Token:      ⚠️  not configured (run: devrelay setup)`);
   }
   
   // Projects

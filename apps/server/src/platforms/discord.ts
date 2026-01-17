@@ -1,5 +1,5 @@
 import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment } from 'discord.js';
-import type { FileAttachment } from '@devbridge/shared';
+import type { FileAttachment } from '@devrelay/shared';
 import { parseCommand } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
 

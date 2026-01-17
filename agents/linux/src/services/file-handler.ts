@@ -1,9 +1,9 @@
 import { writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
-import type { FileAttachment } from '@devbridge/shared';
+import type { FileAttachment } from '@devrelay/shared';
 
 // Directory to save received files (relative to project path)
-const RECEIVED_FILES_DIR = '.devbridge-files';
+const RECEIVED_FILES_DIR = '.devrelay-files';
 
 export async function saveReceivedFiles(
   projectPath: string,

@@ -26,6 +26,6 @@ Thumbs.db
 *.swp
 *.swo
 
-# DevBridge runtime files
-.devbridge-output/
-.devbridge-files/
+# DevRelay runtime files
+.devrelay-output/
+.devrelay-files/

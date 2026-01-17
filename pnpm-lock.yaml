@@ -10,7 +10,7 @@ importers:
 
   agents/linux:
     dependencies:
-      '@devbridge/shared':
+      '@devrelay/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       chalk:
@@ -53,7 +53,7 @@ importers:
 
   apps/server:
     dependencies:
-      '@devbridge/shared':
+      '@devrelay/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@fastify/cors':

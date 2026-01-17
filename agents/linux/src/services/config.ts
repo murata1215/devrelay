@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import yaml from 'yaml';
-import type { AiTool } from '@devbridge/shared';
+import type { AiTool } from '@devrelay/shared';
 
 export interface AgentConfig {
   machineName: string;
@@ -26,7 +26,7 @@ export interface ProjectConfig {
   defaultAi: AiTool;
 }
 
-const CONFIG_DIR = path.join(os.homedir(), '.devbridge');
+const CONFIG_DIR = path.join(os.homedir(), '.devrelay');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yaml');
 const PROJECTS_FILE = path.join(CONFIG_DIR, 'projects.yaml');
 
@@ -59,7 +59,7 @@ export async function loadConfig(): Promise<AgentConfig> {
     return {
       machineName: config.machineName || os.hostname(),
       machineId: config.machineId || '',
-      serverUrl: config.serverUrl || 'wss://devbridge.io/ws/agent',
+      serverUrl: config.serverUrl || 'wss://devrelay.io/ws/agent',
       token: config.token || '',
       projectsDirs,
       aiTools: config.aiTools || {
@@ -74,7 +74,7 @@ export async function loadConfig(): Promise<AgentConfig> {
     return {
       machineName: os.hostname(),
       machineId: '',
-      serverUrl: 'wss://devbridge.io/ws/agent',
+      serverUrl: 'wss://devrelay.io/ws/agent',
       token: '',
       projectsDirs: [os.homedir()],
       aiTools: {

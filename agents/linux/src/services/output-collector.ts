@@ -1,9 +1,9 @@
 import { readdir, readFile, stat, mkdir, rm } from 'fs/promises';
 import { join, basename, extname } from 'path';
-import type { FileAttachment } from '@devbridge/shared';
+import type { FileAttachment } from '@devrelay/shared';
 
 // Directory name for files to be sent to user
-export const OUTPUT_DIR_NAME = '.devbridge-output';
+export const OUTPUT_DIR_NAME = '.devrelay-output';
 
 // Max file size to transfer (5MB)
 const MAX_FILE_SIZE = 5 * 1024 * 1024;

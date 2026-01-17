@@ -1,4 +1,4 @@
-# 🌉 DevBridge
+# 🌉 DevRelay
 
 > どのメッセージアプリからでも、どのAI CLIにでも繋がる、リモート開発ハブ
 
@@ -20,7 +20,7 @@ LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS
 📱 Messaging Apps          ☁️ Center Server           🖥️ Work Machines
 ┌──────────────┐          ┌──────────────┐          ┌──────────────┐
 │ Discord      │          │              │          │ ubuntu01     │
-│ Telegram     │ ←──────→ │ DevBridge    │ ←──────→ │ ubuntu02     │
+│ Telegram     │ ←──────→ │ DevRelay    │ ←──────→ │ ubuntu02     │
 │ LINE         │  HTTPS   │ Server       │    WS    │ windows01    │
 └──────────────┘          └──────────────┘          └──────────────┘
                                  │                         │
@@ -34,7 +34,7 @@ LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS
 ## 📦 Packages
 
 ```
-devbridge/
+devrelay/
 ├── apps/
 │   ├── server/           # 中央サーバー (Fastify + WebSocket + Discord.js)
 │   └── web/              # Web UI (Next.js) - coming soon
@@ -51,27 +51,27 @@ devbridge/
 ### 1. Install Agent (on your dev machine)
 
 ```bash
-curl -fsSL https://devbridge.io/install.sh | bash
+curl -fsSL https://devrelay.io/install.sh | bash
 ```
 
 ### 2. Setup
 
 ```bash
-devbridge setup
-# Enter your token from https://devbridge.io/dashboard
+devrelay setup
+# Enter your token from https://devrelay.io/dashboard
 ```
 
 ### 3. Add Projects
 
 ```bash
-devbridge projects add ~/projects/my-app
+devrelay projects add ~/projects/my-app
 ```
 
 ### 4. Start Agent
 
 ```bash
-devbridge start
-# Or as a service: sudo systemctl start devbridge
+devrelay start
+# Or as a service: sudo systemctl start devrelay
 ```
 
 ### 5. Connect from Discord/Telegram
@@ -140,8 +140,8 @@ Bot: 🤖 了解、修正中...
 
 ```bash
 # Clone
-git clone https://github.com/your-org/devbridge.git
-cd devbridge
+git clone https://github.com/your-org/devrelay.git
+cd devrelay
 
 # Install dependencies
 pnpm install

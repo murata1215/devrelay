@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { Project, AiTool } from '@devbridge/shared';
+import type { Project, AiTool } from '@devrelay/shared';
 import type { AgentConfig, ProjectConfig } from './config.js';
 import { loadProjectsConfig, saveProjectsConfig } from './config.js';
 

@@ -2,7 +2,7 @@
 
 ## 📋 概要
 
-DevBridgeプロジェクトのサーバー＋Linux Agent部分の開発・テスト・デプロイを担当。
+DevRelayプロジェクトのサーバー＋Linux Agent部分の開発・テスト・デプロイを担当。
 ソースコードは80%完成済み。残りは依存関係インストール、動作テスト、本番デプロイ。
 
 ---
@@ -22,11 +22,11 @@ DevBridgeプロジェクトのサーバー＋Linux Agent部分の開発・テス
 
 ```bash
 # ソースコードを展開（tar.gzから）
-tar -xzvf devbridge-src.tar.gz
-cd devbridge
+tar -xzvf devrelay-src.tar.gz
+cd devrelay
 
 # または新規作成の場合
-mkdir devbridge && cd devbridge
+mkdir devrelay && cd devrelay
 # 各ファイルを配置
 ```
 
@@ -79,7 +79,7 @@ pnpm dev
 #### 1. Discord Bot作成・設定
 ```
 1. https://discord.com/developers/applications にアクセス
-2. New Application → 名前: DevBridge
+2. New Application → 名前: DevRelay
 3. Bot → Add Bot → Token取得
 4. OAuth2 → URL Generator
    - Scopes: bot
@@ -102,7 +102,7 @@ pnpm dev:server
 ```bash
 # Agent設定
 cd agents/linux
-# ~/.devbridge/config.yaml を編集
+# ~/.devrelay/config.yaml を編集
 # - serverUrl: ws://localhost:3000/ws/agent
 # - token: （サーバーDBで生成したトークン）
 

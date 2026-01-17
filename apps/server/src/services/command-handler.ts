@@ -1,5 +1,5 @@
-import type { UserCommand, UserContext, Platform, FileAttachment } from '@devbridge/shared';
-import { STATUS_EMOJI, AI_TOOL_NAMES } from '@devbridge/shared';
+import type { UserCommand, UserContext, Platform, FileAttachment } from '@devrelay/shared';
+import { STATUS_EMOJI, AI_TOOL_NAMES } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import {
   getConnectedMachines,
@@ -121,7 +121,7 @@ async function handleMachineList(context: UserContext): Promise<string> {
   });
   
   if (machines.length === 0) {
-    return '📡 登録されているマシンがありません。\n\nマシンを追加するには、対象マシンで `devbridge` コマンドを実行してください。';
+    return '📡 登録されているマシンがありません。\n\nマシンを追加するには、対象マシンで `devrelay` コマンドを実行してください。';
   }
   
   const list = machines.map((m, i) => {
@@ -148,7 +148,7 @@ async function handleProjectList(context: UserContext): Promise<string> {
   });
   
   if (projects.length === 0) {
-    return '📁 プロジェクトが登録されていません。\n\nマシン側で `devbridge projects add <path>` を実行してください。';
+    return '📁 プロジェクトが登録されていません。\n\nマシン側で `devrelay projects add <path>` を実行してください。';
   }
   
   const list = projects.map((p, i) => {

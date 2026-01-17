@@ -5,35 +5,35 @@ import { execSync } from 'child_process';
 import { existsSync, mkdirSync, symlinkSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
-// Ensure devbridge-claude symlink exists for identifiable process names
-function ensureDevbridgeSymlinks() {
-  const devbridgeBinDir = join(process.env.HOME || '', '.devbridge', 'bin');
-  const devbridgeClaude = join(devbridgeBinDir, 'devbridge-claude');
+// Ensure devrelay-claude symlink exists for identifiable process names
+function ensureDevrelaySymlinks() {
+  const devrelayBinDir = join(process.env.HOME || '', '.devrelay', 'bin');
+  const devrelayClaude = join(devrelayBinDir, 'devrelay-claude');
 
   try {
     // Create directory if not exists
-    if (!existsSync(devbridgeBinDir)) {
-      mkdirSync(devbridgeBinDir, { recursive: true });
+    if (!existsSync(devrelayBinDir)) {
+      mkdirSync(devrelayBinDir, { recursive: true });
     }
 
     // Find claude binary path
     const claudePath = execSync('which claude', { encoding: 'utf-8' }).trim();
 
     // Create or update symlink
-    if (existsSync(devbridgeClaude)) {
-      unlinkSync(devbridgeClaude);
+    if (existsSync(devrelayClaude)) {
+      unlinkSync(devrelayClaude);
     }
-    symlinkSync(claudePath, devbridgeClaude);
-    console.log(`🔗 Symlink: devbridge-claude -> ${claudePath}`);
+    symlinkSync(claudePath, devrelayClaude);
+    console.log(`🔗 Symlink: devrelay-claude -> ${claudePath}`);
   } catch (err) {
-    console.warn('⚠️ Could not create devbridge-claude symlink:', (err as Error).message);
+    console.warn('⚠️ Could not create devrelay-claude symlink:', (err as Error).message);
   }
 }
 
 async function main() {
   console.log(`
 ┌─────────────────────────────────────────────────┐
-│  DevBridge Agent                                │
+│  DevRelay Agent                                │
 └─────────────────────────────────────────────────┘
   `);
 
@@ -41,15 +41,15 @@ async function main() {
   const config = await loadConfig();
 
   if (!config.token) {
-    console.error('❌ Token not configured. Run: devbridge setup');
+    console.error('❌ Token not configured. Run: devrelay setup');
     process.exit(1);
   }
 
   console.log(`📡 Machine: ${config.machineName}`);
   console.log(`🔗 Server: ${config.serverUrl}`);
 
-  // Ensure devbridge-claude symlink exists
-  ensureDevbridgeSymlinks();
+  // Ensure devrelay-claude symlink exists
+  ensureDevrelaySymlinks();
 
   // Auto-discover projects with CLAUDE.md
   for (const dir of config.projectsDirs) {

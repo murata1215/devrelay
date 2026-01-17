@@ -10,8 +10,8 @@ import { logsCommand } from './commands/logs.js';
 const program = new Command();
 
 program
-  .name('devbridge')
-  .description('DevBridge Agent - Remote AI CLI development hub')
+  .name('devrelay')
+  .description('DevRelay Agent - Remote AI CLI development hub')
   .version('0.1.0');
 
 program
@@ -66,7 +66,7 @@ program
   .action(() => {
     const { execSync } = require('child_process');
     const editor = process.env.EDITOR || 'nano';
-    const configPath = `${process.env.HOME}/.devbridge/config.yaml`;
+    const configPath = `${process.env.HOME}/.devrelay/config.yaml`;
     execSync(`${editor} ${configPath}`, { stdio: 'inherit' });
   });
 
@@ -81,9 +81,9 @@ program
 
 program
   .command('uninstall')
-  .description('Uninstall DevBridge Agent')
+  .description('Uninstall DevRelay Agent')
   .action(() => {
-    console.log('Uninstalling DevBridge Agent...');
+    console.log('Uninstalling DevRelay Agent...');
     // TODO: Implement uninstall
   });
 

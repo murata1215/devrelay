@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
-import type { AiTool } from '@devbridge/shared';
+import type { AiTool } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 
 interface AiSession {
@@ -66,9 +66,9 @@ export async function sendPromptToAi(
   let proc;
 
   if (aiTool === 'claude') {
-    // Use devbridge-claude symlink so process name is clearly identifiable in ps
-    // The symlink should be at ~/.devbridge/bin/devbridge-claude -> claude
-    const devbridgeClaude = `${process.env.HOME}/.devbridge/bin/devbridge-claude`;
+    // Use devrelay-claude symlink so process name is clearly identifiable in ps
+    // The symlink should be at ~/.devrelay/bin/devrelay-claude -> claude
+    const devrelayClaude = `${process.env.HOME}/.devrelay/bin/devrelay-claude`;
     const args = [
       '-p',
       '--dangerously-skip-permissions',
@@ -77,17 +77,17 @@ export async function sendPromptToAi(
       '--verbose'
     ];
 
-    console.log(`🔧 Running: devbridge-claude -p [stdin] --output-format stream-json ...`);
+    console.log(`🔧 Running: devrelay-claude -p [stdin] --output-format stream-json ...`);
 
-    proc = spawn(devbridgeClaude, args, {
+    proc = spawn(devrelayClaude, args, {
       cwd: projectPath,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        DEVBRIDGE: '1',
-        DEVBRIDGE_SESSION_ID: sessionId,
-        DEVBRIDGE_PROJECT: projectPath,
+        DEVRELAY: '1',
+        DEVRELAY_SESSION_ID: sessionId,
+        DEVRELAY_PROJECT: projectPath,
       },
     });
 

@@ -1,11 +1,11 @@
-# DevBridge 開発記録
+# DevRelay 開発記録
 
 > **重要**: 機能追加・変更を行ったら、必ずこのファイルを更新すること。
 > セッションが落ちても作業内容を引き継げるようにする。
 
 ## プロジェクト概要
 
-DevBridge は、メッセージングアプリ（Discord、Telegram、LINE）から AI CLI ツール（Claude Code、Gemini CLI など）をリモート操作できるハブシステム。
+DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）から AI CLI ツール（Claude Code、Gemini CLI など）をリモート操作できるハブシステム。
 
 ```
 [Discord/Telegram/LINE] ↔ [Center Server] ↔ [Agent] ↔ [Claude Code/Gemini CLI]
@@ -28,18 +28,18 @@ DevBridge は、メッセージングアプリ（Discord、Telegram、LINE）か
 #### 3. セッション管理
 - マシン・プロジェクト選択
 - セッション開始・終了
-- 会話履歴の管理（DevBridge 側で管理、プロンプトに含める）
+- 会話履歴の管理（DevRelay 側で管理、プロンプトに含める）
 
 #### 4. 双方向ファイル転送
 
 ##### Claude Code → Discord
-- `.devbridge-output/` ディレクトリを監視
-- プロンプトに自動で指示を追加：「ユーザーに渡すファイルは `.devbridge-output/` に保存してください」
+- `.devrelay-output/` ディレクトリを監視
+- プロンプトに自動で指示を追加：「ユーザーに渡すファイルは `.devrelay-output/` に保存してください」
 - 実行完了後にディレクトリからファイルを収集し、Discord に添付
 
 ##### Discord → Claude Code
 - Discord の添付ファイルをダウンロード
-- `.devbridge-files/` ディレクトリに保存
+- `.devrelay-files/` ディレクトリに保存
 - プロンプトにファイルパスを含めて Claude Code に渡す
 
 #### 5. プロジェクト自動検出
@@ -55,11 +55,11 @@ DevBridge は、メッセージングアプリ（Discord、Telegram、LINE）か
 
 #### 7. セキュアなプロセス管理
 - プロンプトを stdin 経由で渡す（`ps aux` に表示されない）
-- `devbridge-claude` シンボリックリンクでプロセス識別
+- `devrelay-claude` シンボリックリンクでプロセス識別
 - 環境変数による識別:
-  - `DEVBRIDGE=1`
-  - `DEVBRIDGE_SESSION_ID=xxx`
-  - `DEVBRIDGE_PROJECT=/path/to/project`
+  - `DEVRELAY=1`
+  - `DEVRELAY_SESSION_ID=xxx`
+  - `DEVRELAY_PROJECT=/path/to/project`
 
 ### Phase 1.1: 追加機能 (2026-01-18)
 
@@ -73,7 +73,7 @@ DevBridge は、メッセージングアプリ（Discord、Telegram、LINE）か
 
 #### 9. 会話履歴の永続化
 - メモリ管理から**ファイル保存**に変更
-- 保存先: `プロジェクト/.devbridge/conversation.json`
+- 保存先: `プロジェクト/.devrelay/conversation.json`
 - 保存内容:
   ```json
   {
@@ -97,7 +97,7 @@ DevBridge は、メッセージングアプリ（Discord、Telegram、LINE）か
 
 ### ディレクトリ構造
 ```
-devbridge/
+devrelay/
 ├── apps/
 │   └── server/          # Center Server (Fastify + WebSocket)
 ├── agents/
@@ -127,7 +127,7 @@ devbridge/
 
 ## 設定ファイル
 
-### Agent 設定 (`~/.devbridge/config.yaml`)
+### Agent 設定 (`~/.devrelay/config.yaml`)
 ```yaml
 machineName: ubuntu-dev
 machineId: ""
@@ -143,11 +143,11 @@ aiTools:
 logLevel: debug
 ```
 
-### プロジェクト設定 (`~/.devbridge/projects.yaml`)
+### プロジェクト設定 (`~/.devrelay/projects.yaml`)
 ```yaml
 projects:
-  - name: devbridge
-    path: /home/user/devbridge
+  - name: devrelay
+    path: /home/user/devrelay
     defaultAi: claude
 ```
 

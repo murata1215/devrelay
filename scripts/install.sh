@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# DevBridge Agent Installer for Linux
-# Usage: curl -fsSL https://devbridge.io/install.sh | bash
+# DevRelay Agent Installer for Linux
+# Usage: curl -fsSL https://devrelay.io/install.sh | bash
 
 set -e
 
@@ -13,14 +13,14 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Config
-DEVBRIDGE_VERSION="${DEVBRIDGE_VERSION:-latest}"
-INSTALL_DIR="/opt/devbridge"
-CONFIG_DIR="$HOME/.devbridge"
+DEVRELAY_VERSION="${DEVRELAY_VERSION:-latest}"
+INSTALL_DIR="/opt/devrelay"
+CONFIG_DIR="$HOME/.devrelay"
 BIN_DIR="/usr/local/bin"
 
 echo ""
 echo -e "${BLUE}┌─────────────────────────────────────────────────┐${NC}"
-echo -e "${BLUE}│  DevBridge Agent Installer                      │${NC}"
+echo -e "${BLUE}│  DevRelay Agent Installer                      │${NC}"
 echo -e "${BLUE}└─────────────────────────────────────────────────┘${NC}"
 echo ""
 
@@ -75,7 +75,7 @@ echo -e "${GREEN}✅ Dependencies OK${NC}"
 echo ""
 
 # Step 2: Download and install
-echo -e "[2/5] Installing DevBridge Agent..."
+echo -e "[2/5] Installing DevRelay Agent..."
 
 # Create directories
 sudo mkdir -p "$INSTALL_DIR"
@@ -83,15 +83,15 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$CONFIG_DIR/logs"
 
 # Download (TODO: replace with actual download URL)
-if [ "$DEVBRIDGE_VERSION" = "latest" ]; then
-  DOWNLOAD_URL="https://github.com/devbridge/agent/releases/latest/download/devbridge-agent-linux.tar.gz"
+if [ "$DEVRELAY_VERSION" = "latest" ]; then
+  DOWNLOAD_URL="https://github.com/devrelay/agent/releases/latest/download/devrelay-agent-linux.tar.gz"
 else
-  DOWNLOAD_URL="https://github.com/devbridge/agent/releases/download/v$DEVBRIDGE_VERSION/devbridge-agent-linux.tar.gz"
+  DOWNLOAD_URL="https://github.com/devrelay/agent/releases/download/v$DEVRELAY_VERSION/devrelay-agent-linux.tar.gz"
 fi
 
 # For now, install via npm (development)
 echo "  Installing via npm..."
-sudo npm install -g @devbridge/agent-linux 2>/dev/null || {
+sudo npm install -g @devrelay/agent-linux 2>/dev/null || {
   echo -e "${YELLOW}  Using local development installation...${NC}"
   # Local dev: just copy files
   if [ -d "./agents/linux" ]; then
@@ -104,16 +104,16 @@ echo ""
 
 # Step 3: Create symlink
 echo -e "[3/5] Creating command link..."
-sudo ln -sf "$INSTALL_DIR/cli/index.js" "$BIN_DIR/devbridge" 2>/dev/null || {
+sudo ln -sf "$INSTALL_DIR/cli/index.js" "$BIN_DIR/devrelay" 2>/dev/null || {
   # Alternative: add to PATH via wrapper script
-  cat > /tmp/devbridge << 'EOF'
+  cat > /tmp/devrelay << 'EOF'
 #!/bin/bash
-node /opt/devbridge/cli/index.js "$@"
+node /opt/devrelay/cli/index.js "$@"
 EOF
-  sudo mv /tmp/devbridge "$BIN_DIR/devbridge"
-  sudo chmod +x "$BIN_DIR/devbridge"
+  sudo mv /tmp/devrelay "$BIN_DIR/devrelay"
+  sudo chmod +x "$BIN_DIR/devrelay"
 }
-echo -e "${GREEN}✅ Command 'devbridge' available${NC}"
+echo -e "${GREEN}✅ Command 'devrelay' available${NC}"
 echo ""
 
 # Step 4: Initial config
@@ -122,10 +122,10 @@ echo -e "[4/5] Initial setup..."
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
   HOSTNAME=$(hostname)
   cat > "$CONFIG_DIR/config.yaml" << EOF
-# DevBridge Agent Configuration
+# DevRelay Agent Configuration
 machineName: $HOSTNAME
 machineId: ""
-serverUrl: wss://devbridge.io/ws/agent
+serverUrl: wss://devrelay.io/ws/agent
 token: ""
 projectsDir: $HOME/projects
 aiTools:
@@ -141,8 +141,8 @@ fi
 
 if [ ! -f "$CONFIG_DIR/projects.yaml" ]; then
   cat > "$CONFIG_DIR/projects.yaml" << EOF
-# DevBridge Projects
-# Add projects with: devbridge projects add /path/to/project
+# DevRelay Projects
+# Add projects with: devrelay projects add /path/to/project
 projects: []
 EOF
   echo -e "  Created: $CONFIG_DIR/projects.yaml"
@@ -155,19 +155,19 @@ echo ""
 echo -e "[5/5] Setting up systemd service..."
 
 if command -v systemctl &> /dev/null; then
-  SERVICE_FILE="/etc/systemd/system/devbridge.service"
+  SERVICE_FILE="/etc/systemd/system/devrelay.service"
   
   if [ ! -f "$SERVICE_FILE" ]; then
     sudo tee "$SERVICE_FILE" > /dev/null << EOF
 [Unit]
-Description=DevBridge Agent
+Description=DevRelay Agent
 After=network.target
 
 [Service]
 Type=simple
 User=$USER
 WorkingDirectory=$HOME
-ExecStart=/usr/local/bin/devbridge start
+ExecStart=/usr/local/bin/devrelay start
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
@@ -178,7 +178,7 @@ EOF
     
     sudo systemctl daemon-reload
     echo -e "  Created systemd service"
-    echo -e "  ${YELLOW}Run 'sudo systemctl enable devbridge' to start on boot${NC}"
+    echo -e "  ${YELLOW}Run 'sudo systemctl enable devrelay' to start on boot${NC}"
   else
     echo -e "  Systemd service already exists"
   fi
@@ -196,20 +196,20 @@ echo -e "${GREEN}└────────────────────
 echo ""
 echo "Next steps:"
 echo ""
-echo -e "  ${BLUE}1.${NC} Get your token from: ${YELLOW}https://devbridge.io/dashboard${NC}"
+echo -e "  ${BLUE}1.${NC} Get your token from: ${YELLOW}https://devrelay.io/dashboard${NC}"
 echo ""
 echo -e "  ${BLUE}2.${NC} Run setup:"
-echo -e "     ${GREEN}devbridge setup${NC}"
+echo -e "     ${GREEN}devrelay setup${NC}"
 echo ""
 echo -e "  ${BLUE}3.${NC} Add projects:"
-echo -e "     ${GREEN}devbridge projects add ~/my-project${NC}"
+echo -e "     ${GREEN}devrelay projects add ~/my-project${NC}"
 echo ""
 echo -e "  ${BLUE}4.${NC} Start the agent:"
-echo -e "     ${GREEN}devbridge start${NC}"
+echo -e "     ${GREEN}devrelay start${NC}"
 echo ""
 echo "Commands:"
-echo -e "  ${GREEN}devbridge status${NC}     - Check status"
-echo -e "  ${GREEN}devbridge projects${NC}   - List projects"
-echo -e "  ${GREEN}devbridge logs -f${NC}    - View logs"
-echo -e "  ${GREEN}devbridge --help${NC}     - Show all commands"
+echo -e "  ${GREEN}devrelay status${NC}     - Check status"
+echo -e "  ${GREEN}devrelay projects${NC}   - List projects"
+echo -e "  ${GREEN}devrelay logs -f${NC}    - View logs"
+echo -e "  ${GREEN}devrelay --help${NC}     - Show all commands"
 echo ""

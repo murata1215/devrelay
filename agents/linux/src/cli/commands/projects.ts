@@ -1,4 +1,4 @@
-import type { AiTool } from '@devbridge/shared';
+import type { AiTool } from '@devrelay/shared';
 import { loadConfig } from '../../services/config.js';
 import { 
   listProjects, 
@@ -26,7 +26,7 @@ export async function projectsCommand(
       
     case 'add':
       if (!path) {
-        console.error('❌ Path required. Usage: devbridge projects add <path>');
+        console.error('❌ Path required. Usage: devrelay projects add <path>');
         process.exit(1);
       }
       await addProjectAction(path, options?.ai as AiTool);
@@ -35,7 +35,7 @@ export async function projectsCommand(
     case 'remove':
     case 'rm':
       if (!path) {
-        console.error('❌ Name or path required. Usage: devbridge projects remove <name|path>');
+        console.error('❌ Name or path required. Usage: devrelay projects remove <name|path>');
         process.exit(1);
       }
       await removeProjectAction(path);
@@ -61,10 +61,10 @@ async function listProjectsAction() {
     console.log('📁 No projects registered.');
     console.log('');
     console.log('Add a project:');
-    console.log('  devbridge projects add /path/to/project');
+    console.log('  devrelay projects add /path/to/project');
     console.log('');
     console.log('Or scan for projects:');
-    console.log('  devbridge projects scan');
+    console.log('  devrelay projects scan');
     return;
   }
   
@@ -119,5 +119,5 @@ async function scanProjectsAction(baseDir: string) {
   
   console.log('');
   console.log('To add a project, run:');
-  console.log('  devbridge projects add <path>');
+  console.log('  devrelay projects add <path>');
 }

@@ -1,11 +1,11 @@
 {
-  "name": "devbridge",
+  "name": "devrelay",
   "version": "0.1.0",
   "private": true,
   "description": "Remote AI CLI development hub - Control Claude Code, Gemini CLI, and more from anywhere",
   "scripts": {
-    "dev:server": "pnpm --filter @devbridge/server dev",
-    "dev:agent": "pnpm --filter @devbridge/agent-linux dev",
+    "dev:server": "pnpm --filter @devrelay/server dev",
+    "dev:agent": "pnpm --filter @devrelay/agent-linux dev",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean"
@@ -18,7 +18,7 @@
     "discord",
     "telegram"
   ],
-  "author": "DevBridge",
+  "author": "DevRelay",
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0",

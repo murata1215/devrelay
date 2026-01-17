@@ -2,7 +2,7 @@
 
 ## 📋 概要
 
-DevBridgeプロジェクトのWindows Agent開発を担当。
+DevRelayプロジェクトのWindows Agent開発を担当。
 Linux Agentとは**別リポジトリ**で開発し、共通の型定義のみ共有。
 
 ---
@@ -18,7 +18,7 @@ Linux Agentとは**別リポジトリ**で開発し、共通の型定義のみ�
 ## 📦 リポジトリ構成
 
 ```
-devbridge-agent-windows/
+devrelay-agent-windows/
 ├── src/
 │   ├── index.ts              # エントリポイント
 │   ├── services/
@@ -41,8 +41,8 @@ devbridge-agent-windows/
 ### 1. リポジトリ作成
 
 ```powershell
-mkdir devbridge-agent-windows
-cd devbridge-agent-windows
+mkdir devrelay-agent-windows
+cd devrelay-agent-windows
 npm init -y
 ```
 
@@ -50,12 +50,12 @@ npm init -y
 
 ```json
 {
-  "name": "@devbridge/agent-windows",
+  "name": "@devrelay/agent-windows",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "devbridge": "./dist/cli/index.js"
+    "devrelay": "./dist/cli/index.js"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -101,7 +101,7 @@ mkdir src/shared
 
 | 項目 | Linux | Windows |
 |------|-------|---------|
-| 設定ディレクトリ | `~/.devbridge/` | `%USERPROFILE%\.devbridge\` |
+| 設定ディレクトリ | `~/.devrelay/` | `%USERPROFILE%\.devrelay\` |
 | サービス | systemd | Windows Service |
 | インストーラ | install.sh | install.ps1 or MSI |
 | パス区切り | `/` | `\` |
@@ -116,7 +116,7 @@ mkdir src/shared
 #### 1. 設定管理 (`src/services/config.ts`)
 ```typescript
 // Windowsパス対応
-const CONFIG_DIR = path.join(process.env.USERPROFILE || '', '.devbridge');
+const CONFIG_DIR = path.join(process.env.USERPROFILE || '', '.devrelay');
 ```
 
 #### 2. WebSocket接続 (`src/services/connection.ts`)
@@ -211,7 +211,7 @@ const proc = spawn(command, args, {
 # config.yaml の serverUrl を設定
 # トークンはサーバーDBで発行
 
-devbridge start
+devrelay start
 # → 接続成功を確認
 ```
 
@@ -219,7 +219,7 @@ devbridge start
 ```powershell
 # Claude Codeインストール済みの環境で
 # プロジェクト登録
-devbridge projects add C:\Users\xxx\projects\my-app
+devrelay projects add C:\Users\xxx\projects\my-app
 
 # 接続テスト
 # Discordから操作して動作確認
@@ -248,10 +248,10 @@ devbridge projects add C:\Users\xxx\projects\my-app
 ### パス区切り
 ```typescript
 // NG
-const configPath = homeDir + '/.devbridge/config.yaml';
+const configPath = homeDir + '/.devrelay/config.yaml';
 
 // OK
-const configPath = path.join(homeDir, '.devbridge', 'config.yaml');
+const configPath = path.join(homeDir, '.devrelay', 'config.yaml');
 ```
 
 ### 改行コード

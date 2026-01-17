@@ -1,4 +1,4 @@
-import type { Platform, UserContext, Session, FileAttachment } from '@devbridge/shared';
+import type { Platform, UserContext, Session, FileAttachment } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import {
   sendDiscordMessage,

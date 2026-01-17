@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 
-const CONVERSATION_DIR = '.devbridge';
+const CONVERSATION_DIR = '.devrelay';
 const CONVERSATION_FILE = 'conversation.json';
 const MAX_CONTEXT_MESSAGES = 20;  // Claudeに送る最大メッセージ数（保存は無制限）
 

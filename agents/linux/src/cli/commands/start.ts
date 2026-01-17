@@ -5,7 +5,7 @@ import { connectToServer, disconnect } from '../../services/connection.js';
 export async function startCommand() {
   console.log(`
 ┌─────────────────────────────────────────────────┐
-│  DevBridge Agent                                │
+│  DevRelay Agent                                │
 └─────────────────────────────────────────────────┘
   `);
 
@@ -13,7 +13,7 @@ export async function startCommand() {
   const config = await loadConfig();
   
   if (!config.token) {
-    console.error('❌ Token not configured. Run: devbridge setup');
+    console.error('❌ Token not configured. Run: devrelay setup');
     process.exit(1);
   }
 
