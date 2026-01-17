@@ -105,6 +105,16 @@ DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）か�
   - ファイルディレクトリ: `.devbridge-files/` → `.devrelay-files/`
 - GitHub リポジトリも `devrelay` にリネーム済み
 
+#### 12. チャンネルごとのセッション分離
+- Discord のチャンネルごとに独立したセッションを持てるように変更
+- 変更前: `${platform}:${userId}` でセッション管理（ユーザーごと）
+- 変更後: `${platform}:${chatId}` でセッション管理（チャンネルごと）
+- 使用例:
+  - チャンネルA で `p` → AnimeChaosMap に接続
+  - チャンネルB で `p` → devrelay に接続
+  - 同時並行で作業可能
+- `lastProjectId`（`c` コマンド用）はユーザーごとに DB 保存（従来通り）
+
 ## アーキテクチャ
 
 ### ディレクトリ構造

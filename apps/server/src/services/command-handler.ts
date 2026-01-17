@@ -19,15 +19,17 @@ import {
 } from './session-manager.js';
 import { getHelpText } from './command-parser.js';
 
-// User context storage (in-memory, lastProjectId is persisted to DB)
+// User context storage (in-memory, keyed by chatId for channel-based sessions)
+// This allows different channels to have different active sessions
 const userContexts = new Map<string, UserContext>();
 
 export async function getUserContext(userId: string, platform: Platform, chatId: string): Promise<UserContext> {
-  const key = `${platform}:${userId}`;
+  // Key by chatId to allow different sessions per channel
+  const key = `${platform}:${chatId}`;
   let context = userContexts.get(key);
 
   if (!context) {
-    // Load lastProjectId from DB
+    // Load lastProjectId from DB (still per-user, not per-channel)
     const platformLink = await prisma.platformLink.findUnique({
       where: { platform_platformUserId: { platform, platformUserId: userId } }
     });
@@ -44,13 +46,13 @@ export async function getUserContext(userId: string, platform: Platform, chatId:
   return context;
 }
 
-export async function updateUserContext(userId: string, platform: Platform, updates: Partial<UserContext>) {
-  const key = `${platform}:${userId}`;
+export async function updateUserContext(userId: string, platform: Platform, chatId: string, updates: Partial<UserContext>) {
+  const key = `${platform}:${chatId}`;
   const context = userContexts.get(key);
   if (context) {
     Object.assign(context, updates);
 
-    // Persist lastProjectId to DB when it changes
+    // Persist lastProjectId to DB when it changes (per-user)
     if ('lastProjectId' in updates) {
       await prisma.platformLink.updateMany({
         where: { platform, platformUserId: userId },
@@ -130,7 +132,7 @@ async function handleMachineList(context: UserContext): Promise<string> {
   }).join('\n');
   
   // Update context
-  await updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, context.chatId, {
     lastListType: 'machine',
     lastListItems: machines.map(m => m.id)
   });
@@ -155,7 +157,7 @@ async function handleProjectList(context: UserContext): Promise<string> {
     return `${i + 1}. ${p.name}`;
   }).join('\n');
   
-  await updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, context.chatId, {
     lastListType: 'project',
     lastListItems: projects.map(p => p.id)
   });
@@ -200,7 +202,7 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
     return `⚠️ ${machine.name} はオフラインです。`;
   }
   
-  await updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, context.chatId, {
     currentMachineId: machine.id,
     currentMachineName: machine.name,
     lastListType: undefined,
@@ -260,7 +262,7 @@ async function handleProjectConnect(projectId: string, context: UserContext): Pr
     project.defaultAi as any
   );
   
-  await updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, context.chatId, {
     currentSessionId: sessionId,
     currentProjectName: project.name,
     currentMachineId: project.machineId,
@@ -285,7 +287,7 @@ async function handleRecentConnect(sessionId: string, context: UserContext): Pro
   }
   
   // Connect to the same machine/project
-  await updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, context.chatId, {
     currentMachineId: session.machineId,
     currentMachineName: session.machine.name
   });
@@ -332,7 +334,7 @@ async function handleRecent(context: UserContext): Promise<string> {
     return `${i + 1}. ${s.machine.name}/${s.project.name} (${date})`;
   }).join('\n');
   
-  await updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, context.chatId, {
     lastListType: 'recent',
     lastListItems: sessions.map(s => s.id)
   });
@@ -424,7 +426,7 @@ async function handleQuit(context: UserContext): Promise<string> {
     }
   }
   
-  await updateUserContext(context.userId, context.platform, {
+  await updateUserContext(context.userId, context.platform, context.chatId, {
     currentMachineId: undefined,
     currentMachineName: undefined,
     currentSessionId: undefined,
