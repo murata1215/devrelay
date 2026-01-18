@@ -40,16 +40,30 @@ model AuthSession {
 
 // プラットフォーム連携
 model PlatformLink {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   userId         String
-  user           User     @relation(fields: [userId], references: [id])
-  platform       String   // discord, telegram, line, slack
-  platformUserId String   // プラットフォーム側のユーザーID
-  chatId         String?  // DMのチャットID
-  lastProjectId  String?  // 前回接続したプロジェクト（継続用）
-  createdAt      DateTime @default(now())
+  user           User      @relation(fields: [userId], references: [id])
+  platform       String    // discord, telegram, line, slack
+  platformUserId String    // プラットフォーム側のユーザーID
+  platformName   String?   // プラットフォーム側のユーザー名（Discord username など）
+  chatId         String?   // DMのチャットID
+  lastProjectId  String?   // 前回接続したプロジェクト（継続用）
+  linkedAt       DateTime? // リンクコードでリンクされた日時
+  createdAt      DateTime  @default(now())
 
   @@unique([platform, platformUserId])
+}
+
+// プラットフォームリンクコード（一時的な認証コード）
+model PlatformLinkCode {
+  id             String   @id @default(cuid())
+  code           String   @unique  // 6桁コード (例: ABC123)
+  platform       String   // discord, telegram
+  platformUserId String   // プラットフォーム側のユーザーID
+  platformName   String?  // Discord username など
+  chatId         String?  // 返信用チャットID
+  expiresAt      DateTime // 5分後
+  createdAt      DateTime @default(now())
 }
 
 // マシン

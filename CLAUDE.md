@@ -3,6 +3,25 @@
 > **重要**: 機能追加・変更を行ったら、必ずこのファイルを更新すること。
 > セッションが落ちても作業内容を引き継げるようにする。
 
+---
+
+## Claude Code への指示
+
+【重要】ユーザーに渡すファイルを作成する場合は、必ず `.devrelay-output/` ディレクトリに保存してください。このディレクトリに置かれたファイルは自動的にユーザーに送信されます。
+
+【プランモード】
+現在はプランモードです。コードの書き換えや新規ファイルの作成は行わず、以下のみを行ってください：
+- 調査・分析
+- 実装プランの立案
+- 質問や確認
+
+プランが完成したら、最後に必ず以下のように伝えてください：
+「このプランでよければ `e` または `exec` を送信してください。実装を開始します。」
+
+ユーザーが `exec` を送信するまで、コードの変更は行わないでください。
+
+---
+
 ## プロジェクト概要
 
 DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）から AI CLI ツール（Claude Code、Gemini CLI など）をリモート操作できるハブシステム。
@@ -211,16 +230,23 @@ cd agents/linux && pnpm start
 cd apps/server && pnpm setup:service   # 初回のみ
 systemctl --user start devrelay-server
 
+# WebUI（開発サーバー）
+cd apps/web && pnpm setup:service   # 初回のみ
+systemctl --user start devrelay-web
+
 # Agent
 cd agents/linux && node dist/cli/index.js setup  # 初回のみ（サービス化を選択）
 systemctl --user start devrelay-agent
 
 # 管理コマンド
-systemctl --user status devrelay-server devrelay-agent
-systemctl --user restart devrelay-server devrelay-agent
+systemctl --user status devrelay-server devrelay-web devrelay-agent
+systemctl --user restart devrelay-server devrelay-web devrelay-agent
 journalctl --user -u devrelay-server -f
+journalctl --user -u devrelay-web -f
 journalctl --user -u devrelay-agent -f
 ```
+
+### Phase 1.2: 追加機能（続き）
 
 #### 14. Agent の自動再接続改善
 - エクスポネンシャルバックオフを実装
@@ -335,6 +361,35 @@ journalctl --user -u devrelay-agent -f
 - マシンが DB に存在しない場合でもサーバーがクラッシュしない
 - `apps/server/src/services/agent-manager.ts` で実装
 
+#### 25. WebUI サービス化サポート
+- `apps/web/scripts/setup-service.sh` でサービス化
+- 実行方法: `cd apps/web && pnpm setup:service`
+- ユーザーサービスとして `~/.config/systemd/user/devrelay-web.service` を作成
+- Vite 開発サーバー（HMR 付き）を systemd で管理
+- **注意**: 本番では nginx + 静的ファイル配信を推奨
+
+#### 26. プラットフォームアカウント連携
+- Discord/Telegram ユーザーと WebUI ユーザーをリンク
+- **問題**: Discord から接続するとユーザーが自動作成されるが、WebUI で登録したマシンにアクセスできない
+- **解決方法**: リンクコード方式
+  1. Discord/Telegram で `link` コマンド → 6桁のコードを生成
+  2. WebUI Settings ページでコードを入力 → アカウントをリンク
+  3. 既存の Discord ユーザーのデータを WebUI ユーザーにマージ
+- **コード仕様**:
+  - 6桁英数字（紛らわしい文字 0,O,I,1 を除外）
+  - 有効期限: 5分
+  - 使用後は自動削除
+- **DB スキーマ**:
+  - `PlatformLinkCode` テーブル追加（一時コード保存）
+  - `PlatformLink` テーブルに `platformName`, `linkedAt` フィールド追加
+- **主要ファイル**:
+  - `apps/server/prisma/schema.prisma` - DB スキーマ
+  - `apps/server/src/services/platform-link.ts` - リンクコード生成・検証・マージ
+  - `apps/server/src/routes/api.ts` - `/api/platforms/*` エンドポイント
+  - `apps/server/src/services/command-handler.ts` - `link` コマンド、linked user 検証
+  - `apps/web/src/pages/SettingsPage.tsx` - Connected Platforms UI
+  - `apps/web/src/lib/api.ts` - platforms API クライアント
+
 ## 今後の課題
 
 - [ ] LINE 対応
@@ -345,3 +400,4 @@ journalctl --user -u devrelay-agent -f
 - [ ] 進捗表示のUI改善（プログレスバーなど）
 - [ ] エラーハンドリング強化
 - [ ] WebUI（ユーザー設定画面）
+- [ ] WebUI 本番対応: nginx + 静的ファイル配信（`pnpm build` → nginx で配信）

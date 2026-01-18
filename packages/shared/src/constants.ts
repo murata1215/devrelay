@@ -12,6 +12,7 @@ export const SHORTCUTS: Record<string, string> = {
   'x': 'clear',     // 会話履歴をクリア
   'e': 'exec',      // プラン実行開始
   'exec': 'exec',   // プラン実行開始（フルコマンド）
+  'link': 'link',   // プラットフォームリンクコード生成
   'q': 'quit',
   'h': 'help',
   'log': 'log',

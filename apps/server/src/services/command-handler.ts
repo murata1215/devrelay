@@ -19,6 +19,7 @@ import {
   startProgressTracking
 } from './session-manager.js';
 import { getHelpText } from './command-parser.js';
+import { createLinkCode } from './platform-link.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
 // This allows different channels to have different active sessions
@@ -93,6 +94,9 @@ export async function executeCommand(
     case 'exec':
       return handleExec(context);
 
+    case 'link':
+      return handleLink(context);
+
     case 'log':
       return handleLog(context, command.count);
 
@@ -121,26 +125,47 @@ export async function executeCommand(
 // -----------------------------------------------------------------------------
 
 async function handleMachineList(context: UserContext): Promise<string> {
-  // Get machines for this user
-  const machines = await prisma.machine.findMany({
-    where: { user: { platformLinks: { some: { platformUserId: context.userId } } } }
+  // Check if the user is linked to a WebUI account
+  const platformLink = await prisma.platformLink.findUnique({
+    where: {
+      platform_platformUserId: {
+        platform: context.platform,
+        platformUserId: context.userId
+      }
+    },
+    include: { user: true }
   });
-  
-  if (machines.length === 0) {
-    return '📡 登録されているマシンがありません。\n\nマシンを追加するには、対象マシンで `devrelay` コマンドを実行してください。';
+
+  if (!platformLink?.linkedAt) {
+    // Not linked to WebUI account
+    return '⚠️ WebUI アカウントに連携されていません。\n\n'
+      + '`link` コマンドでリンクコードを取得し、WebUI の Settings ページで入力してください。';
   }
-  
+
+  // Get machines for the linked WebUI user
+  const machines = await prisma.machine.findMany({
+    where: { userId: platformLink.userId }
+  });
+
+  if (machines.length === 0) {
+    return '📡 登録されているマシンがありません。\n\n'
+      + 'マシンを追加するには:\n'
+      + '1. WebUI の Machines ページで「Add Machine」をクリック\n'
+      + '2. 生成されたトークンをコピー\n'
+      + '3. 対象マシンで `devrelay setup` を実行してトークンを入力';
+  }
+
   const list = machines.map((m, i) => {
     const emoji = m.status === 'online' ? STATUS_EMOJI.online : STATUS_EMOJI.offline;
     return `${i + 1}. ${m.name} ${emoji}`;
   }).join('\n');
-  
+
   // Update context
   await updateUserContext(context.userId, context.platform, context.chatId, {
     lastListType: 'machine',
     lastListItems: machines.map(m => m.id)
   });
-  
+
   return `📡 **マシン一覧**\n\n${list}`;
 }
 
@@ -419,6 +444,43 @@ async function handleExec(context: UserContext): Promise<string> {
   );
 
   return '🚀 **実行モード開始**\n会話履歴がリセットされました。実装を開始します。';
+}
+
+async function handleLink(context: UserContext): Promise<string> {
+  // Get platform username if available (Discord: tag, Telegram: username)
+  let platformName: string | undefined;
+
+  // Check if already linked
+  const existingLink = await prisma.platformLink.findUnique({
+    where: {
+      platform_platformUserId: {
+        platform: context.platform,
+        platformUserId: context.userId
+      }
+    },
+    include: { user: true }
+  });
+
+  if (existingLink?.linkedAt) {
+    // Already linked to a WebUI account
+    return `✅ このアカウントは既に WebUI にリンクされています。\n\n`
+      + `リンク先: ${existingLink.user.email || existingLink.user.name || 'WebUI User'}\n`
+      + `リンク日: ${existingLink.linkedAt.toLocaleDateString('ja-JP')}`;
+  }
+
+  // Generate a link code
+  const code = await createLinkCode(
+    context.platform,
+    context.userId,
+    platformName,
+    context.chatId
+  );
+
+  return `🔗 **アカウント連携コード**\n\n`
+    + `\`${code}\`\n\n`
+    + `このコードを DevRelay WebUI の Settings ページで入力してください。\n`
+    + `⏰ 有効期限: 5分\n\n`
+    + `WebUI: https://ribbon-re.jp/devrelay/settings`;
 }
 
 async function handleLog(context: UserContext, count?: number): Promise<string> {

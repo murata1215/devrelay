@@ -135,6 +135,7 @@ export type UserCommand =
   | { type: 'continue' }  // 前回の接続先に再接続
   | { type: 'clear' }     // 会話履歴をクリア
   | { type: 'exec' }      // プラン実行（会話履歴リセットポイント）
+  | { type: 'link' }      // プラットフォームリンクコード生成
   | { type: 'log'; count?: number }
   | { type: 'summary'; period?: string }
   | { type: 'quit' }

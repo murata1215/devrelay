@@ -175,6 +175,8 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     case 'e':
     case 'exec':
       return { type: 'exec' };
+    case 'link':
+      return { type: 'link' };
     case 'q':
       return { type: 'quit' };
     case 'h':
@@ -215,6 +217,9 @@ export function getHelpText(): string {
 \`ai:claude\` - Claude Code
 \`ai:gemini\` - Gemini CLI
 \`ai:codex\` - Codex CLI
+
+**アカウント連携**
+\`link\` - WebUI アカウントとリンク
 
 **その他**
 \`x\` - 会話履歴をクリア
