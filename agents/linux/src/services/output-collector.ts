@@ -97,3 +97,23 @@ export async function collectOutputFiles(projectPath: string): Promise<FileAttac
 export const OUTPUT_DIR_INSTRUCTION = `
 
 【重要】ユーザーに渡すファイルを作成する場合は、必ず \`${OUTPUT_DIR_NAME}/\` ディレクトリに保存してください。このディレクトリに置かれたファイルは自動的にユーザーに送信されます。`;
+
+// Instruction for plan mode (when user hasn't sent 'exec' yet)
+export const PLAN_MODE_INSTRUCTION = `
+
+【プランモード】
+現在はプランモードです。コードの書き換えや新規ファイルの作成は行わず、以下のみを行ってください：
+- 調査・分析
+- 実装プランの立案
+- 質問や確認
+
+プランが完成したら、最後に必ず以下のように伝えてください：
+「このプランでよければ \`e\` または \`exec\` を送信してください。実装を開始します。」
+
+ユーザーが \`exec\` を送信するまで、コードの変更は行わないでください。`;
+
+// Instruction for exec mode (after user sends 'exec')
+export const EXEC_MODE_INSTRUCTION = `
+
+【実行モード】
+ユーザーが実装開始を承認しました。プランに従ってコードの変更を実行してください。`;

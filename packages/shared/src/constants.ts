@@ -10,6 +10,8 @@ export const SHORTCUTS: Record<string, string> = {
   'r': 'recent',
   'c': 'continue',  // 前回の接続先に再接続
   'x': 'clear',     // 会話履歴をクリア
+  'e': 'exec',      // プラン実行開始
+  'exec': 'exec',   // プラン実行開始（フルコマンド）
   'q': 'quit',
   'h': 'help',
   'log': 'log',

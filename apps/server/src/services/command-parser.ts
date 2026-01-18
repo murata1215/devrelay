@@ -1,9 +1,115 @@
 import type { UserCommand, UserContext, AiTool } from '@devrelay/shared';
 import { SHORTCUTS } from '@devrelay/shared';
+import {
+  parseNaturalLanguage,
+  isTraditionalCommand,
+  toTraditionalCommand,
+  type ParsedCommand,
+} from './natural-language-parser.js';
+import { isNaturalLanguageEnabled } from './user-settings.js';
+import { prisma } from '../db/client.js';
 
 /**
- * Parse user input into a command
- * 
+ * Parse user input into a command (with natural language support)
+ *
+ * Flow:
+ * 1. Check if input is a traditional command (m, p, 1, 2, etc.)
+ * 2. If not and user has OpenAI API key, use NLP to interpret
+ * 3. Fall back to treating as AI prompt
+ */
+export async function parseCommandWithNLP(
+  input: string,
+  context: UserContext
+): Promise<UserCommand> {
+  const trimmed = input.trim();
+
+  // 1. First try traditional command parsing
+  if (isTraditionalCommand(trimmed)) {
+    return parseCommand(trimmed, context);
+  }
+
+  // 2. If already connected to a project (has active session), skip NLP and send directly to AI
+  //    (NLP is only needed for navigation commands like p, c, x, q, h)
+  if (context.currentSessionId) {
+    console.log('🧠 NLP: Skipping - already connected to project');
+    return { type: 'ai:prompt', text: trimmed };
+  }
+
+  // 3. Check if natural language is enabled for this user
+  const user = await prisma.user.findFirst({
+    where: { platformLinks: { some: { platformUserId: context.userId } } },
+  });
+
+  if (user && (await isNaturalLanguageEnabled(user.id))) {
+    // Get available projects for context
+    let availableProjects: string[] = [];
+    if (context.currentMachineId) {
+      const projects = await prisma.project.findMany({
+        where: { machineId: context.currentMachineId },
+        select: { name: true },
+      });
+      availableProjects = projects.map((p) => p.name);
+    }
+
+    // Parse with NLP
+    const parsed = await parseNaturalLanguage(user.id, trimmed, {
+      currentSession: !!context.currentSessionId,
+      availableProjects,
+      pendingSelection: !!context.lastListItems,
+    });
+
+    // Convert parsed command to UserCommand
+    if (parsed.type !== 'unknown' && parsed.confidence >= 0.7) {
+      return nlpToUserCommand(parsed, context, trimmed);
+    }
+  }
+
+  // 4. Fall back to traditional parsing (will treat as AI prompt)
+  return parseCommand(trimmed, context);
+}
+
+/**
+ * Convert NLP parsed command to UserCommand
+ */
+function nlpToUserCommand(
+  parsed: ParsedCommand,
+  context: UserContext,
+  originalInput: string
+): UserCommand {
+  switch (parsed.type) {
+    case 'message':
+      return { type: 'ai:prompt', text: parsed.message || originalInput };
+
+    case 'select_project':
+      // Trigger project list first, then user can select
+      return { type: 'project:list' };
+
+    case 'select_option':
+      if (parsed.optionNumber !== undefined) {
+        return { type: 'select', number: parsed.optionNumber };
+      }
+      return { type: 'ai:prompt', text: originalInput };
+
+    case 'continue':
+      return { type: 'continue' };
+
+    case 'clear':
+      return { type: 'clear' };
+
+    case 'quit':
+      return { type: 'quit' };
+
+    case 'help':
+      return { type: 'help' };
+
+    default:
+      return { type: 'ai:prompt', text: originalInput };
+  }
+}
+
+/**
+ * Parse user input into a command (traditional mode)
+ *
  * Supports:
  * - Shortcuts: m, p, s, r, q, h, log, sum
  * - Numbers: 1, 2, 3... (select from last list)
@@ -66,6 +172,9 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       return { type: 'continue' };
     case 'x':
       return { type: 'clear' };
+    case 'e':
+    case 'exec':
+      return { type: 'exec' };
     case 'q':
       return { type: 'quit' };
     case 'h':
@@ -92,6 +201,9 @@ export function getHelpText(): string {
 \`c\` - 前回の接続先に再接続
 \`s\` - ステータス
 \`1\`, \`2\`, \`3\`... - 一覧から選択
+
+**プラン実行**
+\`e\` または \`exec\` - プラン実行開始（会話履歴をリセットして実装開始）
 
 **履歴**
 \`r\` - 直近の作業一覧

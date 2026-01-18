@@ -1,10 +1,47 @@
 import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment } from 'discord.js';
 import type { FileAttachment } from '@devrelay/shared';
-import { parseCommand } from '../services/command-parser.js';
+import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
+
+// Discord message limit (using 1500 for safety with emojis/multibyte chars)
+const MAX_MESSAGE_LENGTH = 1500;
+
+/**
+ * Split a long message into chunks that fit within Discord's limit
+ * Tries to split at newlines for better readability
+ */
+function splitMessage(content: string): string[] {
+  const chunks: string[] = [];
+  let remaining = content;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= MAX_MESSAGE_LENGTH) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Find the last newline within the limit
+    let splitIndex = remaining.lastIndexOf('\n', MAX_MESSAGE_LENGTH);
+
+    // If no newline found, try to split at a space
+    if (splitIndex <= 0) {
+      splitIndex = remaining.lastIndexOf(' ', MAX_MESSAGE_LENGTH);
+    }
+
+    // If still no good split point, force split at max length
+    if (splitIndex <= 0) {
+      splitIndex = MAX_MESSAGE_LENGTH;
+    }
+
+    chunks.push(remaining.slice(0, splitIndex));
+    remaining = remaining.slice(splitIndex).trimStart();
+  }
+
+  return chunks;
+}
 
 async function downloadAttachment(attachment: Attachment): Promise<FileAttachment | null> {
   try {
@@ -89,8 +126,8 @@ export async function setupDiscordBot() {
         }
       }
 
-      // Parse and execute command
-      const command = parseCommand(content || '', context);
+      // Parse and execute command (with NLP if enabled)
+      const command = await parseCommandWithNLP(content || '', context);
       const response = await executeCommand(command, context, files);
 
       // Send response (skip if empty - progress tracking handles it)
@@ -126,14 +163,24 @@ export async function sendDiscordMessage(channelId: string, content: string, fil
         }
       }
 
-      // Send message with attachments
+      // Split content into chunks if needed
+      const chunks = content ? splitMessage(content) : [''];
+
+      // Send first chunk with attachments
       if (attachments.length > 0) {
         await (channel as any).send({
-          content: content || undefined,
+          content: chunks[0] || undefined,
           files: attachments,
         });
+        // Send remaining chunks without attachments
+        for (let i = 1; i < chunks.length; i++) {
+          await (channel as any).send(chunks[i]);
+        }
       } else if (content) {
-        await (channel as any).send(content);
+        // Send all chunks
+        for (const chunk of chunks) {
+          await (channel as any).send(chunk);
+        }
       }
     }
   } catch (error) {
@@ -185,6 +232,7 @@ export function stopTypingIndicator(channelId: string) {
 }
 
 // Send a message and return the message ID for later editing
+// Note: If content exceeds limit, only first chunk is returned for editing
 export async function sendDiscordMessageWithId(channelId: string, content: string): Promise<string | null> {
   if (!client) {
     console.error('Discord client not initialized');
@@ -194,7 +242,16 @@ export async function sendDiscordMessageWithId(channelId: string, content: strin
   try {
     const channel = await client.channels.fetch(channelId);
     if (channel && channel.isTextBased() && 'send' in channel) {
-      const message = await (channel as any).send(content);
+      const chunks = splitMessage(content);
+
+      // Send first chunk and get message ID
+      const message = await (channel as any).send(chunks[0]);
+
+      // Send remaining chunks (won't be editable)
+      for (let i = 1; i < chunks.length; i++) {
+        await (channel as any).send(chunks[i]);
+      }
+
       return message.id;
     }
   } catch (error) {
@@ -203,7 +260,7 @@ export async function sendDiscordMessageWithId(channelId: string, content: strin
   return null;
 }
 
-// Edit an existing message
+// Edit an existing message (splits if content exceeds limit)
 export async function editDiscordMessage(channelId: string, messageId: string, content: string): Promise<boolean> {
   if (!client) {
     console.error('Discord client not initialized');
@@ -215,7 +272,16 @@ export async function editDiscordMessage(channelId: string, messageId: string, c
     if (channel && channel.isTextBased() && 'messages' in channel) {
       const message = await (channel as any).messages.fetch(messageId);
       if (message) {
-        await message.edit(content);
+        const chunks = splitMessage(content);
+
+        // Edit original message with first chunk
+        await message.edit(chunks[0]);
+
+        // Send remaining chunks as new messages
+        for (let i = 1; i < chunks.length; i++) {
+          await (channel as any).send(chunks[i]);
+        }
+
         return true;
       }
     }

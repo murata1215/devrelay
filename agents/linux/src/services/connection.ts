@@ -11,19 +11,33 @@ import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession } from './ai-runner.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
-import { clearOutputDir, collectOutputFiles, OUTPUT_DIR_INSTRUCTION } from './output-collector.js';
+import { clearOutputDir, collectOutputFiles, OUTPUT_DIR_INSTRUCTION, PLAN_MODE_INSTRUCTION, EXEC_MODE_INSTRUCTION } from './output-collector.js';
 import {
   loadConversation,
   saveConversation,
   getConversationContext,
   clearConversation,
+  markExecPoint,
   type ConversationEntry
 } from './conversation-store.js';
+import {
+  loadWorkState,
+  saveWorkState,
+  archiveWorkState,
+  formatWorkStateForPrompt
+} from './work-state-store.js';
+import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let pingTimer: NodeJS.Timeout | null = null;
 let currentConfig: AgentConfig | null = null;
+
+// Reconnection state
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 15;
+const BASE_RECONNECT_DELAY = 1000; // 1 second
+const MAX_RECONNECT_DELAY = 60000; // 60 seconds
 
 // Store session info for prompt handling
 interface SessionInfo {
@@ -31,6 +45,7 @@ interface SessionInfo {
   aiTool: AiTool;
   claudeSessionId: string; // UUID for Claude Code --session-id
   history: ConversationEntry[]; // Conversation history (persisted to file)
+  pendingWorkState?: WorkState; // Work state to include in next prompt
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -43,6 +58,9 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
 
     ws.on('open', () => {
       console.log('✅ Connected to server');
+
+      // Reset reconnect attempts on successful connection
+      reconnectAttempts = 0;
 
       // Send connect message
       sendMessage({
@@ -109,6 +127,14 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:conversation:clear':
       handleConversationClear(message.payload);
       break;
+
+    case 'server:conversation:exec':
+      handleConversationExec(message.payload);
+      break;
+
+    case 'server:workstate:save':
+      handleWorkStateSave(message.payload);
+      break;
   }
 }
 
@@ -125,9 +151,15 @@ async function handleSessionStart(
   // Load previous conversation history from file
   const history = await loadConversation(projectPath);
 
+  // Check for pending work state (auto-continue feature)
+  const pendingWorkState = await loadWorkState(projectPath);
+  if (pendingWorkState) {
+    console.log(`📂 Found pending work state: ${pendingWorkState.summary}`);
+  }
+
   // Generate UUID for Claude Code session and store session info
   const claudeSessionId = uuidv4();
-  sessionInfoMap.set(sessionId, { projectPath, aiTool, claudeSessionId, history });
+  sessionInfoMap.set(sessionId, { projectPath, aiTool, claudeSessionId, history, pendingWorkState: pendingWorkState || undefined });
   console.log(`📋 Session ${sessionId} -> Claude Session ${claudeSessionId}`);
 
   try {
@@ -185,6 +217,34 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
+async function handleConversationExec(payload: { sessionId: string; projectPath: string }) {
+  const { sessionId, projectPath } = payload;
+  console.log(`🚀 Marking exec point for session ${sessionId}`);
+
+  const sessionInfo = sessionInfoMap.get(sessionId);
+  if (sessionInfo) {
+    // Mark exec point in history (this becomes the reset point)
+    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
+    console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
+  } else {
+    // Session not in memory, just mark in file
+    const history = await loadConversation(projectPath);
+    await markExecPoint(projectPath, history);
+  }
+}
+
+async function handleWorkStateSave(payload: WorkStateSavePayload) {
+  const { sessionId, projectPath, workState } = payload;
+  console.log(`💾 Saving work state for session ${sessionId}`);
+
+  try {
+    await saveWorkState(projectPath, workState);
+    console.log(`✅ Work state saved: ${workState.summary}`);
+  } catch (err) {
+    console.error(`❌ Failed to save work state:`, (err as Error).message);
+  }
+}
+
 async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[] }) {
   const { sessionId, prompt, userId, files } = payload;
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -219,11 +279,27 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Clear output directory before running
   await clearOutputDir(sessionInfo.projectPath);
 
-  // Build prompt with history context and output directory instruction
-  let fullPrompt = promptWithFiles + OUTPUT_DIR_INSTRUCTION;
+  // Check if exec marker exists in history (determines plan/exec mode)
+  const hasExecMarker = sessionInfo.history.some(h => h.role === 'exec');
+  const modeInstruction = hasExecMarker ? EXEC_MODE_INSTRUCTION : PLAN_MODE_INSTRUCTION;
+  console.log(`📋 Mode: ${hasExecMarker ? 'EXEC (implementation)' : 'PLAN (no code changes)'}`);
+
+  // Check for pending work state (auto-continue feature)
+  let workStatePrompt = '';
+  if (sessionInfo.pendingWorkState) {
+    console.log(`📂 Including work state in prompt: ${sessionInfo.pendingWorkState.summary}`);
+    workStatePrompt = '\n\n' + formatWorkStateForPrompt(sessionInfo.pendingWorkState);
+
+    // Archive the work state file and clear from session
+    await archiveWorkState(sessionInfo.projectPath);
+    sessionInfo.pendingWorkState = undefined;
+  }
+
+  // Build prompt with history context and instructions
+  let fullPrompt = promptWithFiles + workStatePrompt + OUTPUT_DIR_INSTRUCTION + modeInstruction;
   if (sessionInfo.history.length > 1) {
     const historyContext = getConversationContext(sessionInfo.history.slice(0, -1)); // exclude current message
-    fullPrompt = `Previous conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${OUTPUT_DIR_INSTRUCTION}`;
+    fullPrompt = `Previous conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}${modeInstruction}`;
   }
 
   console.log(`📜 History length: ${sessionInfo.history.length}`);
@@ -317,12 +393,31 @@ function stopPing() {
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
 
-  console.log(`🔄 Reconnecting in ${DEFAULTS.websocketReconnectDelay / 1000}s...`);
+  // Check max attempts
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.error(`❌ Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Giving up.`);
+    console.error('💡 Restart the agent manually or check if the server is running.');
+    return;
+  }
+
+  // Calculate delay with exponential backoff + jitter
+  const exponentialDelay = Math.min(
+    BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts),
+    MAX_RECONNECT_DELAY
+  );
+  const jitter = Math.random() * 1000; // 0-1 second random jitter
+  const delay = exponentialDelay + jitter;
+
+  reconnectAttempts++;
+  console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connectToServer(config, projects).catch(console.error);
-  }, DEFAULTS.websocketReconnectDelay);
+    connectToServer(config, projects).catch((err) => {
+      console.error('Reconnection failed:', err.message);
+      // scheduleReconnect will be called from the 'close' event
+    });
+  }, delay);
 }
 
 export function disconnect() {

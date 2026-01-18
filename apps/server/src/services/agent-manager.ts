@@ -6,7 +6,8 @@ import type {
   Machine,
   Project,
   AiTool,
-  FileAttachment
+  FileAttachment,
+  WorkState
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession } from './session-manager.js';
@@ -210,6 +211,10 @@ export function getConnectedMachines(userId: string): Machine[] {
   return Array.from(machineCache.values());
 }
 
+export function getConnectedAgents(): Map<string, WebSocket> {
+  return connectedAgents;
+}
+
 export function getMachine(machineId: string): Machine | undefined {
   return machineCache.get(machineId);
 }
@@ -265,5 +270,19 @@ export async function clearConversation(machineId: string, sessionId: string, pr
   sendToAgent(machineId, {
     type: 'server:conversation:clear',
     payload: { sessionId, projectPath }
+  });
+}
+
+export async function execConversation(machineId: string, sessionId: string, projectPath: string) {
+  sendToAgent(machineId, {
+    type: 'server:conversation:exec',
+    payload: { sessionId, projectPath }
+  });
+}
+
+export async function saveWorkState(machineId: string, sessionId: string, projectPath: string, workState: WorkState) {
+  sendToAgent(machineId, {
+    type: 'server:workstate:save',
+    payload: { sessionId, projectPath, workState }
   });
 }

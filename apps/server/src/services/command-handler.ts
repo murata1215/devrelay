@@ -7,7 +7,8 @@ import {
   startSession as startAgentSession,
   sendPromptToAgent,
   endSession as endAgentSession,
-  clearConversation
+  clearConversation,
+  execConversation
 } from './agent-manager.js';
 import {
   createSession,
@@ -88,6 +89,9 @@ export async function executeCommand(
 
     case 'clear':
       return handleClear(context);
+
+    case 'exec':
+      return handleExec(context);
 
     case 'log':
       return handleLog(context, command.count);
@@ -390,6 +394,31 @@ async function handleClear(context: UserContext): Promise<string> {
   );
 
   return '🗑️ 会話履歴をクリアしました';
+}
+
+async function handleExec(context: UserContext): Promise<string> {
+  if (!context.currentSessionId || !context.currentMachineId) {
+    return '⚠️ プロジェクトに接続されていません。';
+  }
+
+  // Get project path from session
+  const session = await prisma.session.findUnique({
+    where: { id: context.currentSessionId },
+    include: { project: true }
+  });
+
+  if (!session) {
+    return '❌ セッションが見つかりません。';
+  }
+
+  // Send exec command to agent (marks the conversation reset point)
+  await execConversation(
+    context.currentMachineId,
+    context.currentSessionId,
+    session.project.path
+  );
+
+  return '🚀 **実行モード開始**\n会話履歴がリセットされました。実装を開始します。';
 }
 
 async function handleLog(context: UserContext, count?: number): Promise<string> {

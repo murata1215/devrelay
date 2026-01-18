@@ -13,14 +13,29 @@ datasource db {
 model User {
   id            String    @id @default(cuid())
   email         String?   @unique
+  passwordHash  String?   // メール/パスワード認証用
+  name          String?   // 表示名
+  googleId      String?   @unique // Google OAuth 用
   apiKey        String?   // Anthropic API Key (encrypted)
   plan          String    @default("free") // free, pro, team
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
-  
+
   machines      Machine[]
   sessions      Session[]
   platformLinks PlatformLink[]
+  settings      UserSettings[]
+  authSessions  AuthSession[]
+}
+
+// WebUI 認証セッション
+model AuthSession {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
 }
 
 // プラットフォーム連携
@@ -97,4 +112,18 @@ model Message {
   content     String
   platform    String    // どのプラットフォームから送信されたか
   createdAt   DateTime  @default(now())
+}
+
+// ユーザー設定（汎用的なKey-Value形式）
+model UserSettings {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  key       String   // 設定キー（例: openai_api_key, theme, language など）
+  value     String   // 設定値（暗号化が必要な場合は暗号化して保存）
+  encrypted Boolean  @default(false) // 暗号化されているかどうか
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, key])
 }

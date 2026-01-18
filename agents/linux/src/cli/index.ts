@@ -6,6 +6,7 @@ import { statusCommand } from './commands/status.js';
 import { projectsCommand } from './commands/projects.js';
 import { startCommand } from './commands/start.js';
 import { logsCommand } from './commands/logs.js';
+import { uninstallCommand } from './commands/uninstall.js';
 
 const program = new Command();
 
@@ -82,9 +83,6 @@ program
 program
   .command('uninstall')
   .description('Uninstall DevRelay Agent')
-  .action(() => {
-    console.log('Uninstalling DevRelay Agent...');
-    // TODO: Implement uninstall
-  });
+  .action(uninstallCommand);
 
 program.parse();

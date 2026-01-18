@@ -115,6 +115,24 @@ DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）か�
   - 同時並行で作業可能
 - `lastProjectId`（`c` コマンド用）はユーザーごとに DB 保存（従来通り）
 
+#### 13. Systemd サービス化サポート
+
+##### Agent 側
+- `devrelay setup` 実行時にサービスインストールの選択肢を表示
+- **ユーザーサービス（推奨）**: `~/.config/systemd/user/devrelay-agent.service`
+  - sudo 不要
+  - `systemctl --user start/stop/status devrelay-agent`
+  - `loginctl enable-linger` で自動起動対応
+- **システムサービス**: `/etc/systemd/system/devrelay-agent.service`
+  - sudo 必要
+  - `sudo systemctl start/stop/status devrelay-agent`
+- セットアップ完了後に適切なコマンドを案内
+
+##### Server 側
+- `apps/server/scripts/setup-service.sh` でサービス化
+- 実行方法: `cd apps/server && pnpm setup:service`
+- ユーザーサービスとして `~/.config/systemd/user/devrelay-server.service` を作成
+
 ## アーキテクチャ
 
 ### ディレクトリ構造
@@ -133,6 +151,7 @@ devrelay/
 
 #### Server
 - `apps/server/src/platforms/discord.ts` - Discord Bot
+- `apps/server/src/platforms/telegram.ts` - Telegram Bot
 - `apps/server/src/services/agent-manager.ts` - Agent 通信管理
 - `apps/server/src/services/session-manager.ts` - セッション管理
 - `apps/server/src/services/command-handler.ts` - コマンド処理
@@ -175,6 +194,7 @@ projects:
 
 ## 起動方法
 
+### 開発時（手動起動）
 ```bash
 # Server
 cd apps/server && pnpm start
@@ -183,13 +203,117 @@ cd apps/server && pnpm start
 cd agents/linux && pnpm start
 ```
 
+### 本番（サービス起動）
+```bash
+# Server
+cd apps/server && pnpm setup:service   # 初回のみ
+systemctl --user start devrelay-server
+
+# Agent
+cd agents/linux && node dist/cli/index.js setup  # 初回のみ（サービス化を選択）
+systemctl --user start devrelay-agent
+
+# 管理コマンド
+systemctl --user status devrelay-server devrelay-agent
+systemctl --user restart devrelay-server devrelay-agent
+journalctl --user -u devrelay-server -f
+journalctl --user -u devrelay-agent -f
+```
+
+#### 14. Agent の自動再接続改善
+- エクスポネンシャルバックオフを実装
+- 再接続間隔: 1秒 → 2秒 → 4秒 → 8秒 → ... → 最大60秒
+- ジッター（0-1秒のランダム遅延）で接続の集中を回避
+- 最大15回のリトライ後に停止（サービス再起動を促すメッセージ表示）
+- 接続成功時にリトライカウンターをリセット
+
+#### 15. Telegram Bot 対応
+- `node-telegram-bot-api` ライブラリ使用
+- ポーリングモード（Webhook 不要）
+- 実装機能:
+  - メッセージ受信・送信
+  - ファイル添付（ドキュメント・写真）
+  - タイピングインジケーター
+  - 進捗メッセージの編集
+  - 長いメッセージの自動分割（4096文字制限対応）
+- 環境変数: `TELEGRAM_BOT_TOKEN`
+- Bot 作成: @BotFather で `/newbot` コマンド
+
+#### 16. 自然言語コマンド対応
+- OpenAI API を使って自然言語をコマンドに変換
+- ユーザーごとに OpenAI API キーを設定可能
+- **DB スキーマ**: `UserSettings` テーブル（汎用 Key-Value 形式）
+  ```sql
+  UserSettings: id, userId, key, value, encrypted, createdAt, updatedAt
+  -- key 例: openai_api_key, natural_language_enabled, theme, language
+  ```
+- **暗号化**: API キーなどの機密情報は AES-256-CBC で暗号化して保存
+- **対応コマンド**:
+  - 「バグ直して」→ `m バグ直して`
+  - 「AnimeChaosMapに接続」→ `p` → プロジェクト選択
+  - 「前回の続き」→ `c`
+  - 「履歴クリア」→ `x`
+- **フォールバック**: API キーがない場合は従来のコマンド形式のみ
+- **主要ファイル**:
+  - `apps/server/src/services/user-settings.ts` - 設定の保存・取得・暗号化
+  - `apps/server/src/services/natural-language-parser.ts` - OpenAI API 連携
+  - `apps/server/src/services/command-parser.ts` - NLP 統合
+
+#### 17. プランモード / 実行モード
+- **目的**: Claude がいきなりコードを書き換えるのを防ぎ、プラン立案→承認→実装のフローを強制
+- **動作**:
+  1. 通常は「プランモード」で、Claude はコード変更をせず調査・プラン立案のみ
+  2. プラン完了時、Claude は「このプランでよければ `e` または `exec` を送信してください」と促す
+  3. ユーザーが `e` または `exec` を送信すると「実行モード」に切り替わり、コード変更を開始
+- **会話履歴の管理**:
+  - `exec` 送信時に履歴にマーカーを記録
+  - 以降の Claude への送信は、`exec` マーカー以降の直近20件のみ（プラン会話は送らない）
+  - これによりトークン消費を抑えつつ、実装に必要なコンテキストを維持
+- **コマンド**: `e` または `exec`
+- **会話履歴フォーマット**:
+  ```json
+  {
+    "history": [
+      { "role": "user", "content": "...", "timestamp": "..." },
+      { "role": "assistant", "content": "...", "timestamp": "..." },
+      { "role": "exec", "content": "--- EXEC: Implementation Started ---", "timestamp": "..." },
+      { "role": "user", "content": "...", "timestamp": "..." }
+    ]
+  }
+  ```
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `exec` コマンド型、`server:conversation:exec` メッセージ型
+  - `packages/shared/src/constants.ts` - `e`, `exec` ショートカット
+  - `apps/server/src/services/command-handler.ts` - `handleExec()` 関数
+  - `apps/server/src/services/agent-manager.ts` - `execConversation()` 関数
+  - `agents/linux/src/services/conversation-store.ts` - `markExecPoint()`, exec マーカー対応の `getConversationContext()`
+  - `agents/linux/src/services/connection.ts` - `handleConversationExec()`, プランモード指示の追加
+  - `agents/linux/src/services/output-collector.ts` - `PLAN_MODE_INSTRUCTION`, `EXEC_MODE_INSTRUCTION`
+
+#### 18. Agent アンインストールコマンド
+- `devrelay uninstall` でクリーンアンインストール
+- **削除内容**:
+  - Systemd サービス（ユーザー/システム両方）の停止・無効化・削除
+  - `~/.devrelay/` 設定ディレクトリの削除
+  - 各プロジェクトの `.devrelay/` ディレクトリの削除（オプション）
+- **主要ファイル**:
+  - `agents/linux/src/cli/commands/uninstall.ts`
+
+#### 19. セットアップ簡素化
+- `devrelay setup` は**トークンのみ**を入力
+- 以下は自動設定（後から `~/.devrelay/config.yaml` で変更可能）:
+  - マシン名: ホスト名を使用
+  - サーバーURL: `ws://localhost:3000/ws/agent`
+  - プロジェクトディレクトリ: ホームディレクトリ
+- ESM 対応: `__dirname` → `import.meta.url` を使用するよう修正
+
 ## 今後の課題
 
-- [ ] Telegram / LINE 対応
+- [ ] LINE 対応
 - [ ] Gemini CLI / Codex / Aider 対応
 - [ ] Windows Agent
 - [ ] 要約機能（Anthropic API 使用）
 - [ ] 複数ユーザー同時接続
-- [ ] Agent の自動再接続改善
 - [ ] 進捗表示のUI改善（プログレスバーなど）
 - [ ] エラーハンドリング強化
+- [ ] WebUI（ユーザー設定画面）

@@ -96,7 +96,15 @@ export type ServerToAgentMessage =
   | { type: 'server:session:start'; payload: SessionStartPayload }
   | { type: 'server:session:end'; payload: { sessionId: string } }
   | { type: 'server:ai:prompt'; payload: AiPromptPayload }
-  | { type: 'server:conversation:clear'; payload: { sessionId: string; projectPath: string } };
+  | { type: 'server:conversation:clear'; payload: { sessionId: string; projectPath: string } }
+  | { type: 'server:conversation:exec'; payload: { sessionId: string; projectPath: string } }
+  | { type: 'server:workstate:save'; payload: WorkStateSavePayload };
+
+export interface WorkStateSavePayload {
+  sessionId: string;
+  projectPath: string;
+  workState: WorkState;
+}
 
 export interface SessionStartPayload {
   sessionId: string;
@@ -126,6 +134,7 @@ export type UserCommand =
   | { type: 'recent' }
   | { type: 'continue' }  // 前回の接続先に再接続
   | { type: 'clear' }     // 会話履歴をクリア
+  | { type: 'exec' }      // プラン実行（会話履歴リセットポイント）
   | { type: 'log'; count?: number }
   | { type: 'summary'; period?: string }
   | { type: 'quit' }
@@ -173,4 +182,28 @@ export interface SessionSummary {
   messageCount: number;
   lastMessage?: string;
   platform: Platform;
+}
+
+// -----------------------------------------------------------------------------
+// Work State (作業状態の保存・継続)
+// -----------------------------------------------------------------------------
+
+export interface WorkStateTodo {
+  task: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+export interface WorkState {
+  createdAt: string;
+  status: 'pending_restart' | 'completed';
+  summary: string;
+  todoList: WorkStateTodo[];
+  restartInfo?: {
+    reason: string;
+    commands: string[];
+  };
+  context: {
+    lastMessage: string;
+    filesModified: string[];
+  };
 }

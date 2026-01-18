@@ -7,7 +7,7 @@ const CONVERSATION_FILE = 'conversation.json';
 const MAX_CONTEXT_MESSAGES = 20;  // Claudeに送る最大メッセージ数（保存は無制限）
 
 export interface ConversationEntry {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'exec';  // 'exec' = 実行モード開始マーカー
   content: string;
   timestamp: string;
 }
@@ -103,8 +103,33 @@ export async function clearConversation(projectPath: string): Promise<void> {
 }
 
 /**
+ * Mark exec point in conversation history
+ * This creates a reset point for context - only messages after exec are sent to Claude
+ */
+export async function markExecPoint(
+  projectPath: string,
+  history: ConversationEntry[]
+): Promise<ConversationEntry[]> {
+  const entry: ConversationEntry = {
+    role: 'exec',
+    content: '--- EXEC: Implementation Started ---',
+    timestamp: new Date().toISOString()
+  };
+
+  const updatedHistory = [...history, entry];
+  await saveConversation(projectPath, updatedHistory);
+  console.log(`🚀 Exec point marked at position ${updatedHistory.length}`);
+
+  return updatedHistory;
+}
+
+/**
  * Get a summary of recent conversation for context
- * Limits to last N messages to avoid token overflow
+ *
+ * 動作:
+ * 1. 履歴に exec マーカーがある場合、最後の exec から数えて直近 maxMessages 件を返す
+ * 2. exec マーカーがない場合、全体から直近 maxMessages 件を返す
+ * 3. exec マーカー自体は Claude に送るコンテキストには含めない
  */
 export function getConversationContext(
   history: ConversationEntry[],
@@ -114,7 +139,25 @@ export function getConversationContext(
     return '';
   }
 
-  const recentHistory = history.slice(-maxMessages);
+  // Find the last exec marker
+  let startIndex = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'exec') {
+      startIndex = i + 1;  // Start from the message after exec
+      break;
+    }
+  }
+
+  // Get messages from startIndex onwards
+  const messagesAfterExec = history.slice(startIndex);
+
+  // Filter out exec markers and get only user/assistant messages
+  const filteredMessages = messagesAfterExec.filter(h => h.role === 'user' || h.role === 'assistant');
+
+  // Limit to maxMessages
+  const recentHistory = filteredMessages.slice(-maxMessages);
+
+  console.log(`📚 Context: ${filteredMessages.length} messages after exec, sending ${recentHistory.length}`);
 
   return recentHistory
     .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)

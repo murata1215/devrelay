@@ -2,20 +2,30 @@ import type { Platform, UserContext, Session, FileAttachment } from '@devrelay/s
 import { prisma } from '../db/client.js';
 import {
   sendDiscordMessage,
-  startTypingIndicator,
-  stopTypingIndicator,
+  startTypingIndicator as startDiscordTyping,
+  stopTypingIndicator as stopDiscordTyping,
   sendDiscordMessageWithId,
   editDiscordMessage
 } from '../platforms/discord.js';
-// import { sendTelegramMessage } from '../platforms/telegram.js';
+import {
+  sendTelegramMessage,
+  startTypingIndicator as startTelegramTyping,
+  stopTypingIndicator as stopTelegramTyping,
+  sendTelegramMessageWithId,
+  editTelegramMessage
+} from '../platforms/telegram.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
 const sessionParticipants = new Map<string, Array<{ platform: Platform; chatId: string }>>();
 
 // Progress tracking for streaming output
+interface MessageInfo {
+  messageId: string | number;  // string for Discord, number for Telegram
+  platform: Platform;
+}
 interface ProgressTracker {
-  messageIds: Map<string, string>;  // chatId -> messageId
+  messages: Map<string, MessageInfo>;  // chatId -> { messageId, platform }
   outputBuffer: string;
   startTime: number;
   updateInterval: NodeJS.Timeout | null;
@@ -75,8 +85,12 @@ export async function broadcastToSession(sessionId: string, message: string, isC
 
   for (const { platform, chatId } of participants) {
     // Stop typing indicator when response is complete
-    if (isComplete && platform === 'discord') {
-      stopTypingIndicator(chatId);
+    if (isComplete) {
+      if (platform === 'discord') {
+        stopDiscordTyping(chatId);
+      } else if (platform === 'telegram') {
+        stopTelegramTyping(chatId);
+      }
     }
     await sendMessage(platform, chatId, message, files);
   }
@@ -87,7 +101,9 @@ export async function startTypingForSession(sessionId: string) {
 
   for (const { platform, chatId } of participants) {
     if (platform === 'discord') {
-      await startTypingIndicator(chatId);
+      await startDiscordTyping(chatId);
+    } else if (platform === 'telegram') {
+      await startTelegramTyping(chatId);
     }
   }
 }
@@ -100,7 +116,7 @@ export async function startProgressTracking(sessionId: string) {
   stopProgressTracking(sessionId);
 
   const tracker: ProgressTracker = {
-    messageIds: new Map(),
+    messages: new Map(),
     outputBuffer: '',
     startTime: Date.now(),
     updateInterval: null,
@@ -111,7 +127,12 @@ export async function startProgressTracking(sessionId: string) {
     if (platform === 'discord') {
       const messageId = await sendDiscordMessageWithId(chatId, formatProgressMessage('', 0));
       if (messageId) {
-        tracker.messageIds.set(chatId, messageId);
+        tracker.messages.set(chatId, { messageId, platform });
+      }
+    } else if (platform === 'telegram') {
+      const messageId = await sendTelegramMessageWithId(chatId, formatProgressMessage('', 0));
+      if (messageId) {
+        tracker.messages.set(chatId, { messageId, platform });
       }
     }
   }
@@ -143,8 +164,12 @@ async function updateProgressMessages(sessionId: string) {
   const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
   const content = formatProgressMessage(tracker.outputBuffer, elapsed);
 
-  for (const [chatId, messageId] of tracker.messageIds) {
-    await editDiscordMessage(chatId, messageId, content);
+  for (const [chatId, { messageId, platform }] of tracker.messages) {
+    if (platform === 'discord') {
+      await editDiscordMessage(chatId, messageId as string, content);
+    } else if (platform === 'telegram') {
+      await editTelegramMessage(chatId, messageId as number, content);
+    }
   }
 }
 
@@ -188,20 +213,35 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
 
   // Delete progress messages and send final response
   for (const { platform, chatId } of participants) {
+    const msgInfo = tracker?.messages.get(chatId);
+
     if (platform === 'discord') {
-      stopTypingIndicator(chatId);
+      stopDiscordTyping(chatId);
 
       // Edit progress message to show completion, or send new message
-      const messageId = tracker?.messageIds.get(chatId);
-      if (messageId && !files?.length) {
+      if (msgInfo && !files?.length) {
         // Edit existing message with final content
-        await editDiscordMessage(chatId, messageId, finalMessage);
+        await editDiscordMessage(chatId, msgInfo.messageId as string, finalMessage);
       } else {
         // Delete progress message and send new one with files
-        if (messageId) {
-          await editDiscordMessage(chatId, messageId, '✅ 完了');
+        if (msgInfo) {
+          await editDiscordMessage(chatId, msgInfo.messageId as string, '✅ 完了');
         }
         await sendDiscordMessage(chatId, finalMessage, files);
+      }
+    } else if (platform === 'telegram') {
+      stopTelegramTyping(chatId);
+
+      // Edit progress message to show completion, or send new message
+      if (msgInfo && !files?.length) {
+        // Edit existing message with final content
+        await editTelegramMessage(chatId, msgInfo.messageId as number, finalMessage);
+      } else {
+        // Delete progress message and send new one with files
+        if (msgInfo) {
+          await editTelegramMessage(chatId, msgInfo.messageId as number, '✅ 完了');
+        }
+        await sendTelegramMessage(chatId, finalMessage, files);
       }
     }
   }
@@ -215,8 +255,7 @@ export async function sendMessage(platform: Platform, chatId: string, message: s
       await sendDiscordMessage(chatId, message, files);
       break;
     case 'telegram':
-      // await sendTelegramMessage(chatId, message, files);
-      console.log(`[Telegram] ${chatId}: ${message}`);
+      await sendTelegramMessage(chatId, message, files);
       break;
     case 'line':
       // await sendLineMessage(chatId, message, files);

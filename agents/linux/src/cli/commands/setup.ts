@@ -29,22 +29,21 @@ export async function setupCommand() {
   };
 
   try {
-    // Machine name
-    const machineName = await question(
-      'Machine name',
-      existingConfig.machineName || os.hostname()
-    );
+    // Connection token (required)
+    console.log(chalk.yellow('━'.repeat(50)));
+    console.log(chalk.yellow(' Connection token is required to authenticate.'));
+    console.log(chalk.yellow(''));
+    console.log(chalk.yellow(' To get your token:'));
+    console.log(chalk.cyan('  1. Go to the DevRelay dashboard'));
+    console.log(chalk.cyan('  2. Navigate to "Machines"'));
+    console.log(chalk.cyan('  3. Click "+ Add Machine"'));
+    console.log(chalk.cyan('  4. Copy the generated token'));
+    console.log(chalk.yellow(''));
+    console.log(chalk.gray(' Dashboard URL: https://ribbon-re.jp/devrelay/machines'));
+    console.log(chalk.gray('               (or your self-hosted URL)'));
+    console.log(chalk.yellow('━'.repeat(50)));
+    console.log();
 
-    // Server URL
-    const serverUrl = await question(
-      'Server URL',
-      existingConfig.serverUrl || 'wss://devrelay.io/ws/agent'
-    );
-
-    // Connection token
-    console.log(chalk.yellow('\nConnection token is required to authenticate with the server.'));
-    console.log(chalk.yellow('You can get it from: https://devrelay.io/dashboard\n'));
-    
     const token = await question(
       'Connection token',
       existingConfig.token
@@ -56,12 +55,10 @@ export async function setupCommand() {
       return;
     }
 
-    // Projects directories (comma-separated)
-    const projectsDirsInput = await question(
-      'Projects directories (comma-separated)',
-      existingConfig.projectsDirs?.join(', ') || os.homedir()
-    );
-    const projectsDirs = projectsDirsInput.split(',').map(d => d.trim()).filter(Boolean);
+    // Use defaults for machine name and server URL (can be changed later in config.yaml)
+    const machineName = existingConfig.machineName || os.hostname();
+    const serverUrl = existingConfig.serverUrl || 'ws://localhost:3000/ws/agent';
+    const projectsDirs = existingConfig.projectsDirs || [os.homedir()];
 
     // Generate machine ID if not exists
     const machineId = existingConfig.machineId || nanoid();
@@ -83,31 +80,110 @@ export async function setupCommand() {
     console.log();
 
     // Ask about systemd service
-    const installService = await question(
-      'Install as systemd service? (y/n)',
-      'y'
+    console.log();
+    console.log(chalk.blue('Systemd service options:'));
+    console.log(chalk.gray('  1. User service (recommended) - no sudo required'));
+    console.log(chalk.gray('  2. System service - requires sudo'));
+    console.log(chalk.gray('  3. Skip - start manually with pnpm start'));
+    console.log();
+
+    const serviceChoice = await question(
+      'Install systemd service? (1/2/3)',
+      '1'
     );
 
-    if (installService.toLowerCase() === 'y') {
-      await installSystemdService(machineName);
+    if (serviceChoice === '1') {
+      await installUserService(machineName);
+    } else if (serviceChoice === '2') {
+      await installSystemService(machineName);
     }
 
     console.log(chalk.green('\n🎉 Setup complete!'));
     console.log();
     console.log('Next steps:');
-    console.log(chalk.cyan('  1. Add projects:     devrelay projects add ~/projects/my-app'));
-    console.log(chalk.cyan('  2. Start agent:      devrelay start'));
-    console.log(chalk.cyan('  3. Check status:     devrelay status'));
+    if (serviceChoice === '1') {
+      console.log(chalk.cyan('  1. Start agent:      systemctl --user start devrelay-agent'));
+      console.log(chalk.cyan('  2. Check status:     systemctl --user status devrelay-agent'));
+      console.log(chalk.cyan('  3. View logs:        journalctl --user -u devrelay-agent -f'));
+    } else if (serviceChoice === '2') {
+      console.log(chalk.cyan('  1. Start agent:      sudo systemctl start devrelay-agent'));
+      console.log(chalk.cyan('  2. Check status:     sudo systemctl status devrelay-agent'));
+      console.log(chalk.cyan('  3. View logs:        sudo journalctl -u devrelay-agent -f'));
+    } else {
+      console.log(chalk.cyan('  1. Start agent:      cd agents/linux && pnpm start'));
+    }
     console.log();
   } finally {
     rl.close();
   }
 }
 
-async function installSystemdService(machineName: string) {
+async function installUserService(machineName: string) {
   const { execSync } = await import('child_process');
   const fs = await import('fs/promises');
   const path = await import('path');
+  const { fileURLToPath } = await import('url');
+
+  // Find the agent directory (relative to this CLI file)
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const agentDir = path.resolve(__dirname, '../..');
+  const agentIndex = path.join(agentDir, 'index.js');
+
+  const serviceContent = `[Unit]
+Description=DevRelay Agent (${machineName})
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${agentDir}
+ExecStart=${process.execPath} ${agentIndex}
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target
+`;
+
+  const userServiceDir = path.join(process.env.HOME || '', '.config', 'systemd', 'user');
+  const servicePath = path.join(userServiceDir, 'devrelay-agent.service');
+
+  try {
+    // Create user systemd directory if not exists
+    await fs.mkdir(userServiceDir, { recursive: true });
+
+    // Write service file (no sudo needed)
+    await fs.writeFile(servicePath, serviceContent);
+
+    execSync('systemctl --user daemon-reload', { stdio: 'inherit' });
+    execSync('systemctl --user enable devrelay-agent', { stdio: 'inherit' });
+
+    // Enable lingering so service runs even when logged out
+    execSync(`loginctl enable-linger ${process.env.USER}`, { stdio: 'pipe' });
+
+    console.log(chalk.green('\n✅ User service installed!'));
+    console.log(chalk.gray(`   Service file: ${servicePath}`));
+    console.log(chalk.gray('   Start with: systemctl --user start devrelay-agent'));
+  } catch (err: any) {
+    console.log(chalk.yellow('\n⚠️ Could not install user service automatically.'));
+    console.log(chalk.yellow(`   You can manually create: ${servicePath}`));
+    console.log();
+    console.log(chalk.gray(serviceContent));
+  }
+}
+
+async function installSystemService(machineName: string) {
+  const { execSync } = await import('child_process');
+  const fs = await import('fs/promises');
+  const path = await import('path');
+  const { fileURLToPath } = await import('url');
+
+  // Find the agent directory
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const agentDir = path.resolve(__dirname, '../..');
+  const agentIndex = path.join(agentDir, 'index.js');
 
   const serviceContent = `[Unit]
 Description=DevRelay Agent (${machineName})
@@ -116,8 +192,8 @@ After=network.target
 [Service]
 Type=simple
 User=${process.env.USER}
-WorkingDirectory=${process.env.HOME}
-ExecStart=${process.execPath} ${path.resolve(__dirname, '../../index.js')}
+WorkingDirectory=${agentDir}
+ExecStart=${process.execPath} ${agentIndex}
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
@@ -126,22 +202,23 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 `;
 
-  const servicePath = '/etc/systemd/system/devrelay.service';
+  const servicePath = '/etc/systemd/system/devrelay-agent.service';
 
   try {
     // Write service file (requires sudo)
-    const tempPath = '/tmp/devrelay.service';
+    const tempPath = '/tmp/devrelay-agent.service';
     await fs.writeFile(tempPath, serviceContent);
-    
+
     execSync(`sudo mv ${tempPath} ${servicePath}`, { stdio: 'inherit' });
     execSync('sudo systemctl daemon-reload', { stdio: 'inherit' });
-    execSync('sudo systemctl enable devrelay', { stdio: 'inherit' });
-    
-    console.log(chalk.green('\n✅ Systemd service installed!'));
-    console.log(chalk.gray('   Start with: sudo systemctl start devrelay'));
+    execSync('sudo systemctl enable devrelay-agent', { stdio: 'inherit' });
+
+    console.log(chalk.green('\n✅ System service installed!'));
+    console.log(chalk.gray(`   Service file: ${servicePath}`));
+    console.log(chalk.gray('   Start with: sudo systemctl start devrelay-agent'));
   } catch (err: any) {
-    console.log(chalk.yellow('\n⚠️ Could not install systemd service automatically.'));
-    console.log(chalk.yellow('   You can manually create: /etc/systemd/system/devrelay.service'));
+    console.log(chalk.yellow('\n⚠️ Could not install system service automatically.'));
+    console.log(chalk.yellow(`   You can manually create: ${servicePath}`));
     console.log();
     console.log(chalk.gray(serviceContent));
   }
