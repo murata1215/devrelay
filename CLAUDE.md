@@ -20,6 +20,21 @@
 
 ユーザーが `exec` を送信するまで、コードの変更は行わないでください。
 
+【DevRelay 自身の開発時】
+DevRelay（このプロジェクト）のサーバーやエージェントを修正した場合：
+- ビルド（`pnpm build`）は実行してOK
+- **サービスの再起動は実行しない**（`systemctl restart` 禁止）
+- 「ビルド完了。以下のコマンドでサービスを再起動してください」と案内する
+
+理由：自分自身を再起動すると WebSocket 接続が切れ、応答が途中で消失するため。
+
+案内例：
+```
+ビルド完了。以下のコマンドでサービスを再起動してください：
+systemctl --user restart devrelay-server
+systemctl --user restart devrelay-agent
+```
+
 ---
 
 ## プロジェクト概要
@@ -84,7 +99,7 @@ DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）か�
 
 #### 8. クイックコマンド追加
 - `c` - 前回の接続先に再接続（Continue）
-  - `lastProjectId` を DB（PlatformLink テーブル）に保存
+  - `lastProjectId` を DB（ChannelSession テーブル）に**チャンネルごとに保存**
   - オフラインのマシンには接続不可のエラー表示
 - `x` - 会話履歴をクリア（Clear）
   - Agent に `server:conversation:clear` メッセージを送信
@@ -132,7 +147,9 @@ DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）か�
   - チャンネルA で `p` → AnimeChaosMap に接続
   - チャンネルB で `p` → devrelay に接続
   - 同時並行で作業可能
-- `lastProjectId`（`c` コマンド用）はユーザーごとに DB 保存（従来通り）
+- `lastProjectId`（`c` コマンド用）も**チャンネルごとに DB 保存**
+  - DB テーブル: `ChannelSession`（`platform` + `chatId` で一意）
+  - Discord、Telegram、LINE 全て対応
 
 #### 13. Systemd サービス化サポート
 
@@ -443,6 +460,24 @@ cd agents/windows && pnpm build && npx electron .
 # 配布用ビルド
 cd agents/windows && pnpm dist  # release/ にインストーラー生成
 ```
+
+#### 28. AI プロンプト送信時の自動再接続
+- **問題**: サーバー再起動後、セッションが切断され、AI プロンプト送信時に「接続されていません」エラー
+- **解決**: 未接続状態で AI プロンプトを送信した際、`lastProjectId` があれば自動的に再接続
+- **動作フロー**:
+  1. ユーザーが AI プロンプト（例: 「バグ直して」）を送信
+  2. 未接続を検出 → `lastProjectId` を DB から取得
+  3. `handleContinue()` を内部実行して再接続
+  4. 成功時: 再接続メッセージを**先に送信**してから AI 処理を開始
+  5. 失敗時（オフライン等）: エラーメッセージを返す
+- **メッセージ順序**:
+  ```
+  1. 🔄 前回の接続先（ubuntu-dev / devrelay）に再接続しました
+  2. 🤖 AI Status: running
+  3. [Claude Code の応答...]
+  ```
+- **主要ファイル**:
+  - `apps/server/src/services/command-handler.ts` - `handleAiPrompt()` に自動再接続ロジック追加
 
 ## 今後の課題
 

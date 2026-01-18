@@ -40,16 +40,18 @@ model AuthSession {
 
 // プラットフォーム連携
 model PlatformLink {
-  id             String    @id @default(cuid())
-  userId         String
-  user           User      @relation(fields: [userId], references: [id])
-  platform       String    // discord, telegram, line, slack
-  platformUserId String    // プラットフォーム側のユーザーID
-  platformName   String?   // プラットフォーム側のユーザー名（Discord username など）
-  chatId         String?   // DMのチャットID
-  lastProjectId  String?   // 前回接続したプロジェクト（継続用）
-  linkedAt       DateTime? // リンクコードでリンクされた日時
-  createdAt      DateTime  @default(now())
+  id                   String    @id @default(cuid())
+  userId               String
+  user                 User      @relation(fields: [userId], references: [id])
+  platform             String    // discord, telegram, line, slack
+  platformUserId       String    // プラットフォーム側のユーザーID
+  platformName         String?   // プラットフォーム側のユーザー名（Discord username など）
+  chatId               String?   // DMのチャットID
+  lastProjectId        String?   // 前回接続したプロジェクト（継続用）
+  lastMentionMessageId String?   // 前回メンションしたメッセージID（過去メッセージ取得用）
+  lastMentionAt        DateTime? // 前回メンション日時
+  linkedAt             DateTime? // リンクコードでリンクされた日時
+  createdAt            DateTime  @default(now())
 
   @@unique([platform, platformUserId])
 }
@@ -140,4 +142,16 @@ model UserSettings {
   updatedAt DateTime @updatedAt
 
   @@unique([userId, key])
+}
+
+// チャンネルセッション（チャンネルごとの前回接続先を記録）
+model ChannelSession {
+  id            String    @id @default(cuid())
+  platform      String    // discord, telegram, line
+  chatId        String    // チャンネルID（Discord: channel.id, Telegram: chat.id, LINE: groupId/roomId/userId）
+  lastProjectId String?   // 前回接続したプロジェクトID
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([platform, chatId])
 }

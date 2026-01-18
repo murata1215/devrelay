@@ -251,16 +251,23 @@ export async function startSession(
   });
 }
 
+export interface MissedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
 export async function sendPromptToAgent(
   machineId: string,
   sessionId: string,
   prompt: string,
   userId: string,
-  files?: FileAttachment[]
+  files?: FileAttachment[],
+  missedMessages?: MissedMessage[]
 ) {
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files }
+    payload: { sessionId, prompt, userId, files, missedMessages }
   });
 }
 

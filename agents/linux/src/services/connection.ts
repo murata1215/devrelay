@@ -5,7 +5,8 @@ import type {
   ServerToAgentMessage,
   Project,
   AiTool,
-  FileAttachment
+  FileAttachment,
+  MissedMessage
 } from '@devrelay/shared';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
@@ -245,11 +246,14 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[] }) {
-  const { sessionId, prompt, userId, files } = payload;
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[] }) {
+  const { sessionId, prompt, userId, files, missedMessages } = payload;
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
     console.log(`📎 Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
+  }
+  if (missedMessages && missedMessages.length > 0) {
+    console.log(`📨 Received ${missedMessages.length} missed message(s) from Discord`);
   }
 
   const sessionInfo = sessionInfoMap.get(sessionId);
@@ -266,6 +270,18 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       promptWithFiles = buildPromptWithFiles(prompt, savedPaths);
       console.log(`📁 Files saved to: ${savedPaths.join(', ')}`);
     }
+  }
+
+  // Add missed messages to history (messages between last mention and current mention)
+  if (missedMessages && missedMessages.length > 0) {
+    for (const msg of missedMessages) {
+      sessionInfo.history.push({
+        role: msg.role === 'assistant' ? 'assistant' : 'user',
+        content: msg.content,
+        timestamp: new Date(msg.timestamp).toISOString()
+      });
+    }
+    console.log(`📋 Added ${missedMessages.length} missed messages to history`);
   }
 
   // Add user message to history and save

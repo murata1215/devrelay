@@ -66,13 +66,8 @@ export async function parseNaturalLanguage(
     pendingSelection?: boolean;   // 選択待ちかどうか
   }
 ): Promise<ParsedCommand> {
-  // OpenAI API キーを取得（ユーザー設定 → 環境変数の順でフォールバック）
-  let apiKey = await getUserSetting(userId, SettingKeys.OPENAI_API_KEY);
-
-  // ユーザー設定になければ環境変数を使用
-  if (!apiKey) {
-    apiKey = process.env.OPENAI_API_KEY || null;
-  }
+  // OpenAI API キーを取得（ユーザー設定のみ、環境変数へのフォールバックなし）
+  const apiKey = await getUserSetting(userId, SettingKeys.OPENAI_API_KEY);
 
   if (!apiKey) {
     // API キーがない場合は unknown を返す（従来のコマンドパーサーにフォールバック）

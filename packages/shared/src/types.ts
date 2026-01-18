@@ -113,11 +113,19 @@ export interface SessionStartPayload {
   aiTool: AiTool;
 }
 
+// Missed messages (messages between last mention and current mention)
+export interface MissedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
 export interface AiPromptPayload {
   sessionId: string;
   prompt: string;
   userId: string;
   files?: FileAttachment[];
+  missedMessages?: MissedMessage[];
 }
 
 // -----------------------------------------------------------------------------

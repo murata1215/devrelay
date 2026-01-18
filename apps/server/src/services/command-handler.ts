@@ -16,7 +16,8 @@ import {
   endSession,
   getRecentSessions,
   getSessionMessages,
-  startProgressTracking
+  startProgressTracking,
+  sendMessage
 } from './session-manager.js';
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
@@ -31,16 +32,16 @@ export async function getUserContext(userId: string, platform: Platform, chatId:
   let context = userContexts.get(key);
 
   if (!context) {
-    // Load lastProjectId from DB (still per-user, not per-channel)
-    const platformLink = await prisma.platformLink.findUnique({
-      where: { platform_platformUserId: { platform, platformUserId: userId } }
+    // Load lastProjectId from ChannelSession (per-channel, not per-user)
+    const channelSession = await prisma.channelSession.findUnique({
+      where: { platform_chatId: { platform, chatId } }
     });
 
     context = {
       userId,
       platform,
       chatId,
-      lastProjectId: platformLink?.lastProjectId ?? undefined
+      lastProjectId: channelSession?.lastProjectId ?? undefined
     };
     userContexts.set(key, context);
   }
@@ -54,20 +55,33 @@ export async function updateUserContext(userId: string, platform: Platform, chat
   if (context) {
     Object.assign(context, updates);
 
-    // Persist lastProjectId to DB when it changes (per-user)
+    // Persist lastProjectId to ChannelSession (per-channel, not per-user)
     if ('lastProjectId' in updates) {
-      await prisma.platformLink.updateMany({
-        where: { platform, platformUserId: userId },
-        data: { lastProjectId: updates.lastProjectId ?? null }
+      await prisma.channelSession.upsert({
+        where: { platform_chatId: { platform, chatId } },
+        update: { lastProjectId: updates.lastProjectId ?? null },
+        create: {
+          platform,
+          chatId,
+          lastProjectId: updates.lastProjectId ?? null
+        }
       });
     }
   }
 }
 
+// Missed messages from Discord (messages between last mention and current mention)
+export interface MissedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
 export async function executeCommand(
   command: UserCommand,
   context: UserContext,
-  files?: FileAttachment[]
+  files?: FileAttachment[],
+  missedMessages?: MissedMessage[]
 ): Promise<string> {
   switch (command.type) {
     case 'machine:list':
@@ -113,7 +127,7 @@ export async function executeCommand(
       return handleAiSwitch(context, command.tool);
 
     case 'ai:prompt':
-      return handleAiPrompt(context, command.text, files);
+      return handleAiPrompt(context, command.text, files, missedMessages);
 
     default:
       return '❓ 不明なコマンドです。`h` でヘルプを表示できます。';
@@ -535,15 +549,72 @@ async function handleAiSwitch(context: UserContext, tool: string): Promise<strin
   return `🔄 AI を **${name}** に切り替えました`;
 }
 
-async function handleAiPrompt(context: UserContext, text: string, files?: FileAttachment[]): Promise<string> {
+async function handleAiPrompt(
+  context: UserContext,
+  text: string,
+  files?: FileAttachment[],
+  missedMessages?: MissedMessage[]
+): Promise<string> {
   console.log(`📝 handleAiPrompt called with text: ${text.substring(0, 50)}...`);
   console.log(`   Session: ${context.currentSessionId}, Machine: ${context.currentMachineId}`);
   if (files && files.length > 0) {
     console.log(`   Files: ${files.map(f => f.filename).join(', ')}`);
   }
+  if (missedMessages && missedMessages.length > 0) {
+    console.log(`   Missed messages: ${missedMessages.length}`);
+  }
 
+  // プロジェクト未接続の場合、自動再接続を試みる
   if (!context.currentSessionId || !context.currentMachineId) {
+    // 前回の接続先がある場合は自動再接続を試みる
+    if (context.lastProjectId) {
+      console.log(`🔄 Auto-reconnecting to last project: ${context.lastProjectId}`);
+      const reconnectResult = await handleContinue(context);
+
+      // 再接続成功（「🚀」で始まる）なら、そのままプロンプトを続行
+      if (reconnectResult.startsWith('🚀')) {
+        // context が更新されているので、再取得
+        const updatedContext = await getUserContext(context.userId, context.platform, context.chatId);
+
+        if (updatedContext.currentSessionId && updatedContext.currentMachineId) {
+          // 再接続成功メッセージを取得（マシン名・プロジェクト名を含む）
+          const machine = await prisma.machine.findUnique({
+            where: { id: updatedContext.currentMachineId }
+          });
+          const projectName = updatedContext.currentProjectName || context.lastProjectId.split('/').pop() || context.lastProjectId;
+          const machineName = machine?.name || 'Unknown';
+
+          console.log(`✅ Auto-reconnect successful: ${machineName}/${projectName}`);
+
+          // 再接続メッセージを先に送信（Discord/Telegram に直接送信）
+          const reconnectMessage = `🔄 前回の接続先（${machineName} / ${projectName}）に再接続しました`;
+          await sendMessage(updatedContext.platform, updatedContext.chatId, reconnectMessage);
+
+          // AI にプロンプト送信（再帰呼び出し）- 結果をそのまま返す
+          return handleAiPrompt(updatedContext, text, files, missedMessages);
+        }
+      }
+      // 再接続失敗（オフラインなど）→ エラーメッセージを返す
+      return reconnectResult;
+    }
+
+    // 前回の接続先がない場合
     return '⚠️ プロジェクトに接続されていません。\n\n`m` → マシン選択 → `p` → プロジェクト選択 の順で接続してください。';
+  }
+
+  // Save missed messages to DB (for history)
+  if (missedMessages && missedMessages.length > 0) {
+    for (const msg of missedMessages) {
+      await prisma.message.create({
+        data: {
+          sessionId: context.currentSessionId,
+          role: msg.role === 'user' ? 'user' : 'ai',
+          content: msg.content,
+          platform: context.platform,
+          createdAt: msg.timestamp
+        }
+      });
+    }
   }
 
   // Save user message
@@ -561,13 +632,14 @@ async function handleAiPrompt(context: UserContext, text: string, files?: FileAt
   // Start progress tracking (sends initial message)
   await startProgressTracking(context.currentSessionId);
 
-  // Send to agent with files
+  // Send to agent with files and missed messages
   await sendPromptToAgent(
     context.currentMachineId,
     context.currentSessionId,
     text,
     context.userId,
-    files
+    files,
+    missedMessages
   );
 
   // Return empty since progress message is already sent

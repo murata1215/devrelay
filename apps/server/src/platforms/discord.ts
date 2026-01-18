@@ -1,7 +1,8 @@
-import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment, Collection, TextChannel, DMChannel } from 'discord.js';
 import type { FileAttachment } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
+import { prisma } from '../db/client.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
@@ -41,6 +42,111 @@ function splitMessage(content: string): string[] {
   }
 
   return chunks;
+}
+
+// Max messages to fetch when catching up on missed messages
+const MAX_CATCHUP_MESSAGES = 50;
+
+/**
+ * Fetch messages between the last mention and now
+ * Returns messages in chronological order (oldest first)
+ */
+async function fetchMessagesSinceLastMention(
+  channel: TextChannel | DMChannel,
+  lastMentionMessageId: string | null,
+  currentMessageId: string,
+  botId: string
+): Promise<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }>> {
+  const messages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
+
+  if (!lastMentionMessageId) {
+    // No previous mention, skip catching up
+    return messages;
+  }
+
+  try {
+    // Fetch messages after the last mention
+    const fetchedMessages = await channel.messages.fetch({
+      after: lastMentionMessageId,
+      limit: MAX_CATCHUP_MESSAGES
+    });
+
+    // Filter and convert messages
+    for (const [id, msg] of fetchedMessages) {
+      // Skip the current message (it will be handled separately)
+      if (id === currentMessageId) continue;
+
+      // Skip system messages
+      if (msg.system) continue;
+
+      // Determine role
+      const isBot = msg.author.id === botId;
+      const role = isBot ? 'assistant' : 'user';
+
+      // Get content (remove mention if present)
+      let content = msg.content;
+      if (!isBot) {
+        content = content.replace(/<@!?\d+>/g, '').trim();
+      }
+
+      // Skip empty messages
+      if (!content) continue;
+
+      messages.push({
+        role,
+        content,
+        timestamp: msg.createdAt
+      });
+    }
+
+    // Sort by timestamp (oldest first)
+    messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    console.log(`📨 Fetched ${messages.length} messages since last mention`);
+  } catch (err) {
+    console.error('Failed to fetch messages since last mention:', err);
+  }
+
+  return messages;
+}
+
+/**
+ * Update the last mention message ID in the database
+ */
+async function updateLastMentionMessageId(
+  platform: string,
+  platformUserId: string,
+  messageId: string
+): Promise<void> {
+  try {
+    await prisma.platformLink.updateMany({
+      where: { platform, platformUserId },
+      data: {
+        lastMentionMessageId: messageId,
+        lastMentionAt: new Date()
+      }
+    });
+  } catch (err) {
+    console.error('Failed to update last mention message ID:', err);
+  }
+}
+
+/**
+ * Get the last mention message ID from the database
+ */
+async function getLastMentionMessageId(
+  platform: string,
+  platformUserId: string
+): Promise<string | null> {
+  try {
+    const link = await prisma.platformLink.findUnique({
+      where: { platform_platformUserId: { platform, platformUserId } }
+    });
+    return link?.lastMentionMessageId || null;
+  } catch (err) {
+    console.error('Failed to get last mention message ID:', err);
+    return null;
+  }
 }
 
 async function downloadAttachment(attachment: Attachment): Promise<FileAttachment | null> {
@@ -113,6 +219,21 @@ export async function setupDiscordBot() {
         message.channel.id
       );
 
+      // If this is a mention in a guild channel, fetch messages since last mention
+      let missedMessages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
+      if (isMentioned && !isDM && message.channel.isTextBased()) {
+        const lastMentionMessageId = await getLastMentionMessageId('discord', message.author.id);
+        missedMessages = await fetchMessagesSinceLastMention(
+          message.channel as TextChannel,
+          lastMentionMessageId,
+          message.id,
+          client!.user!.id
+        );
+
+        // Update last mention message ID
+        await updateLastMentionMessageId('discord', message.author.id, message.id);
+      }
+
       // Download attachments if present
       const files: FileAttachment[] = [];
       if (message.attachments.size > 0) {
@@ -128,7 +249,7 @@ export async function setupDiscordBot() {
 
       // Parse and execute command (with NLP if enabled)
       const command = await parseCommandWithNLP(content || '', context);
-      const response = await executeCommand(command, context, files);
+      const response = await executeCommand(command, context, files, missedMessages);
 
       // Send response (skip if empty - progress tracking handles it)
       if (response) {

@@ -138,26 +138,21 @@ export async function getAllUserSettings(userId: string): Promise<Record<string,
 
 /**
  * OpenAI API キーが設定されているかチェック
- * ユーザー設定 → .env のフォールバック
+ * ユーザー個別の設定のみを確認（サーバー共通キーは使用しない）
  */
 export async function hasOpenAiApiKey(userId: string): Promise<boolean> {
   const key = await getUserSetting(userId, SettingKeys.OPENAI_API_KEY);
-  if (key !== null && key.length > 0) return true;
-
-  // .env にグローバルキーがあればそれを使う
-  return !!process.env.OPENAI_API_KEY;
+  return key !== null && key.length > 0;
 }
 
 /**
  * OpenAI API キーを取得
- * ユーザー設定 → .env のフォールバック
+ * ユーザー個別の設定のみを返す（サーバー共通キーは使用しない）
  */
 export async function getOpenAiApiKey(userId: string): Promise<string | null> {
   const key = await getUserSetting(userId, SettingKeys.OPENAI_API_KEY);
   if (key !== null && key.length > 0) return key;
-
-  // .env にグローバルキーがあればそれを使う
-  return process.env.OPENAI_API_KEY || null;
+  return null;
 }
 
 /**
