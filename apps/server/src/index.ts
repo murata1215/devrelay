@@ -15,6 +15,12 @@ const HOST = process.env.HOST || '0.0.0.0';
 async function main() {
   const app = Fastify({ logger: true });
 
+  // Reset all machines to offline on startup
+  // (In case server crashed without proper disconnect handling)
+  await prisma.machine.updateMany({
+    data: { status: 'offline' }
+  });
+
   // Plugins
   await app.register(cors, { origin: true });
   await app.register(websocket);

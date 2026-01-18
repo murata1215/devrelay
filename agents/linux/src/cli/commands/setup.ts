@@ -158,13 +158,13 @@ WantedBy=default.target
 
     execSync('systemctl --user daemon-reload', { stdio: 'inherit' });
     execSync('systemctl --user enable devrelay-agent', { stdio: 'inherit' });
+    execSync('systemctl --user start devrelay-agent', { stdio: 'inherit' });
 
     // Enable lingering so service runs even when logged out
     execSync(`loginctl enable-linger ${process.env.USER}`, { stdio: 'pipe' });
 
-    console.log(chalk.green('\n✅ User service installed!'));
+    console.log(chalk.green('\n✅ User service installed and started!'));
     console.log(chalk.gray(`   Service file: ${servicePath}`));
-    console.log(chalk.gray('   Start with: systemctl --user start devrelay-agent'));
   } catch (err: any) {
     console.log(chalk.yellow('\n⚠️ Could not install user service automatically.'));
     console.log(chalk.yellow(`   You can manually create: ${servicePath}`));
@@ -212,8 +212,9 @@ WantedBy=multi-user.target
     execSync(`sudo mv ${tempPath} ${servicePath}`, { stdio: 'inherit' });
     execSync('sudo systemctl daemon-reload', { stdio: 'inherit' });
     execSync('sudo systemctl enable devrelay-agent', { stdio: 'inherit' });
+    execSync('sudo systemctl start devrelay-agent', { stdio: 'inherit' });
 
-    console.log(chalk.green('\n✅ System service installed!'));
+    console.log(chalk.green('\n✅ System service installed and started!'));
     console.log(chalk.gray(`   Service file: ${servicePath}`));
     console.log(chalk.gray('   Start with: sudo systemctl start devrelay-agent'));
   } catch (err: any) {

@@ -134,11 +134,16 @@ async function handleAgentConnect(
 async function handleAgentDisconnect(machineId: string) {
   connectedAgents.delete(machineId);
   machineCache.delete(machineId);
-  
-  await prisma.machine.update({
-    where: { id: machineId },
-    data: { status: 'offline' }
-  });
+
+  try {
+    await prisma.machine.update({
+      where: { id: machineId },
+      data: { status: 'offline' }
+    });
+  } catch (err) {
+    // Machine may not exist in DB (e.g., already deleted)
+    console.log(`⚠️ Could not update machine status for ${machineId}:`, err);
+  }
 }
 
 async function handleProjectsUpdate(machineId: string, projects: Project[]) {

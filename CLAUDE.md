@@ -139,9 +139,11 @@ DevRelay は、メッセージングアプリ（Discord、Telegram、LINE）か�
 ```
 devrelay/
 ├── apps/
-│   └── server/          # Center Server (Fastify + WebSocket)
+│   ├── server/          # Center Server (Fastify + WebSocket)
+│   └── web/             # WebUI (Vite + React)
 ├── agents/
-│   └── linux/           # Linux Agent
+│   ├── linux/           # Linux Agent
+│   └── windows/         # Windows Agent (開発中)
 ├── packages/
 │   └── shared/          # 共通型定義
 └── CLAUDE.md
@@ -306,6 +308,32 @@ journalctl --user -u devrelay-agent -f
   - サーバーURL: `ws://localhost:3000/ws/agent`
   - プロジェクトディレクトリ: ホームディレクトリ
 - ESM 対応: `__dirname` → `import.meta.url` を使用するよう修正
+
+#### 20. サーバー起動時マシン状態リセット
+- サーバー起動時に全マシンの status を `offline` にリセット
+- サーバーがクラッシュした場合などに、DB上でオンラインのまま残る問題を解決
+- `apps/server/src/index.ts` の `main()` 関数冒頭で `prisma.machine.updateMany()` を実行
+
+#### 21. デフォルト serverUrl 変更
+- `ws://localhost:3000/ws/agent` → `wss://ribbon-re.jp/devrelay-api/ws/agent`
+- 外部マシンからも Agent を接続可能に
+- `agents/linux/src/services/config.ts` で設定
+
+#### 22. Setup 後のサービス自動起動
+- `devrelay setup` 完了時にサービスを自動的に `start`
+- ユーザーサービス/システムサービス両方に対応
+- `agents/linux/src/cli/commands/setup.ts` で実装
+
+#### 23. WebUI ポーリングエラー改善
+- ポーリング中のエラーは無視（次のポーリングで回復）
+- 初回ロード時のみエラー表示
+- Agent 切断時の「Unknown error」表示を解消
+- `apps/web/src/pages/MachinesPage.tsx` で実装
+
+#### 24. Agent 切断時のエラーハンドリング
+- `handleAgentDisconnect` で DB 更新エラーをキャッチ
+- マシンが DB に存在しない場合でもサーバーがクラッシュしない
+- `apps/server/src/services/agent-manager.ts` で実装
 
 ## 今後の課題
 
