@@ -24,6 +24,16 @@ export interface Project {
 export type AiTool = 'claude' | 'gemini' | 'codex' | 'aider';
 
 // -----------------------------------------------------------------------------
+// Proxy Configuration
+// -----------------------------------------------------------------------------
+
+export interface ProxyConfig {
+  url: string;          // Proxy URL (http://, https://, socks4://, socks5://)
+  username?: string;    // Optional: username for authentication
+  password?: string;    // Optional: password for authentication
+}
+
+// -----------------------------------------------------------------------------
 // Session
 // -----------------------------------------------------------------------------
 
@@ -58,7 +68,15 @@ export type AgentMessage =
   | { type: 'agent:disconnect'; payload: { machineId: string } }
   | { type: 'agent:projects'; payload: { machineId: string; projects: Project[] } }
   | { type: 'agent:ai:output'; payload: AiOutputPayload }
-  | { type: 'agent:ai:status'; payload: AiStatusPayload };
+  | { type: 'agent:ai:status'; payload: AiStatusPayload }
+  | { type: 'agent:session:restore'; payload: SessionRestorePayload };
+
+export interface SessionRestorePayload {
+  machineId: string;
+  projectPath: string;
+  projectName: string;
+  agreementStatus: boolean;
+}
 
 export interface AgentConnectPayload {
   machineId: string;
@@ -88,6 +106,7 @@ export interface AiStatusPayload {
   sessionId: string;
   status: 'starting' | 'running' | 'stopped' | 'error';
   error?: string;
+  agreementStatus?: boolean;  // Whether CLAUDE.md has DevRelay Agreement
 }
 
 // Server -> Agent
@@ -97,13 +116,34 @@ export type ServerToAgentMessage =
   | { type: 'server:session:end'; payload: { sessionId: string } }
   | { type: 'server:ai:prompt'; payload: AiPromptPayload }
   | { type: 'server:conversation:clear'; payload: { sessionId: string; projectPath: string } }
-  | { type: 'server:conversation:exec'; payload: { sessionId: string; projectPath: string } }
-  | { type: 'server:workstate:save'; payload: WorkStateSavePayload };
+  | { type: 'server:conversation:exec'; payload: ConversationExecPayload }
+  | { type: 'server:workstate:save'; payload: WorkStateSavePayload }
+  | { type: 'server:agreement:apply'; payload: AgreementApplyPayload }
+  | { type: 'server:session:restored'; payload: SessionRestoredPayload };
+
+export interface ConversationExecPayload {
+  sessionId: string;
+  projectPath: string;
+  userId: string;
+}
+
+export interface SessionRestoredPayload {
+  sessionId: string;
+  projectPath: string;
+  chatId: string;
+  platform: string;
+}
 
 export interface WorkStateSavePayload {
   sessionId: string;
   projectPath: string;
   workState: WorkState;
+}
+
+export interface AgreementApplyPayload {
+  sessionId: string;
+  projectPath: string;
+  userId: string;
 }
 
 export interface SessionStartPayload {
@@ -144,6 +184,7 @@ export type UserCommand =
   | { type: 'clear' }     // 会話履歴をクリア
   | { type: 'exec' }      // プラン実行（会話履歴リセットポイント）
   | { type: 'link' }      // プラットフォームリンクコード生成
+  | { type: 'agreement' } // DevRelay Agreement を CLAUDE.md に追加
   | { type: 'log'; count?: number }
   | { type: 'summary'; period?: string }
   | { type: 'quit' }

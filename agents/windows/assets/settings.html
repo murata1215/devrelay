@@ -393,7 +393,25 @@
       <p class="help-text">Machine name is configured on the web dashboard</p>
     </div>
 
-    <button type="button" class="save-btn" id="saveBtn">Save Token</button>
+    <hr style="border: none; border-top: 1px solid #333; margin: 20px 0;">
+
+    <div class="form-group">
+      <label>Proxy URL <span style="color: #666;">(optional)</span></label>
+      <input type="text" id="proxyUrl" placeholder="http://proxy:8080 or socks5://proxy:1080">
+      <p class="help-text">Leave empty for direct connection</p>
+    </div>
+
+    <div class="form-group">
+      <label>Proxy Username <span style="color: #666;">(optional)</span></label>
+      <input type="text" id="proxyUsername" placeholder="username">
+    </div>
+
+    <div class="form-group">
+      <label>Proxy Password <span style="color: #666;">(optional)</span></label>
+      <input type="password" id="proxyPassword" placeholder="password">
+    </div>
+
+    <button type="button" class="save-btn" id="saveBtn">Save Settings</button>
 
     <div class="form-group" style="margin-top: 24px;">
       <label class="checkbox-label">
@@ -437,6 +455,9 @@
     const connectBtn = document.getElementById('connectBtn');
     const tokenInput = document.getElementById('token');
     const machineNameDisplay = document.getElementById('machineNameDisplay');
+    const proxyUrlInput = document.getElementById('proxyUrl');
+    const proxyUsernameInput = document.getElementById('proxyUsername');
+    const proxyPasswordInput = document.getElementById('proxyPassword');
     const saveBtn = document.getElementById('saveBtn');
     const autoLaunchCheckbox = document.getElementById('autoLaunch');
     const dirList = document.getElementById('dirList');
@@ -456,6 +477,11 @@
         config = await devrelayApi.getConfig();
         tokenInput.value = config.token || '';
         machineNameDisplay.textContent = config.machineName || '-';
+
+        // Load proxy settings
+        proxyUrlInput.value = config.proxy?.url || '';
+        proxyUsernameInput.value = config.proxy?.username || '';
+        proxyPasswordInput.value = config.proxy?.password || '';
 
         // Load auto-launch setting
         const autoLaunch = await devrelayApi.getAutoLaunch();
@@ -504,14 +530,29 @@
 
     // Save settings
     saveBtn.addEventListener('click', async () => {
+      // Build proxy config (only include if URL is provided)
+      let proxy = null;
+      if (proxyUrlInput.value.trim()) {
+        proxy = {
+          url: proxyUrlInput.value.trim(),
+        };
+        if (proxyUsernameInput.value.trim()) {
+          proxy.username = proxyUsernameInput.value.trim();
+        }
+        if (proxyPasswordInput.value) {
+          proxy.password = proxyPasswordInput.value;
+        }
+      }
+
       const newConfig = {
         token: tokenInput.value,
+        proxy: proxy,
       };
 
       await devrelayApi.saveConfig(newConfig);
       config = await devrelayApi.getConfig();
 
-      showToast('Token saved');
+      showToast('Settings saved');
     });
 
     // Auto-launch toggle

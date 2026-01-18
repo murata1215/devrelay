@@ -8,7 +8,8 @@ import {
   sendPromptToAgent,
   endSession as endAgentSession,
   clearConversation,
-  execConversation
+  execConversation,
+  applyAgreement
 } from './agent-manager.js';
 import {
   createSession,
@@ -110,6 +111,9 @@ export async function executeCommand(
 
     case 'link':
       return handleLink(context);
+
+    case 'agreement':
+      return handleAgreement(context);
 
     case 'log':
       return handleLog(context, command.count);
@@ -488,7 +492,8 @@ async function handleExec(context: UserContext): Promise<string> {
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
-    session.project.path
+    session.project.path,
+    context.userId
   );
 
   return '🚀 **実行モード開始**\n会話履歴がリセットされました。実装を開始します。';
@@ -529,6 +534,36 @@ async function handleLink(context: UserContext): Promise<string> {
     + `このコードを DevRelay WebUI の Settings ページで入力してください。\n`
     + `⏰ 有効期限: 5分\n\n`
     + `WebUI: https://ribbon-re.jp/devrelay/settings`;
+}
+
+async function handleAgreement(context: UserContext): Promise<string> {
+  if (!context.currentSessionId || !context.currentMachineId) {
+    return '⚠️ プロジェクトに接続されていません。';
+  }
+
+  // Get project path from session
+  const session = await prisma.session.findUnique({
+    where: { id: context.currentSessionId },
+    include: { project: true }
+  });
+
+  if (!session) {
+    return '❌ セッションが見つかりません。';
+  }
+
+  // Start progress tracking
+  await startProgressTracking(context.currentSessionId);
+
+  // Send agreement apply command to agent
+  await applyAgreement(
+    context.currentMachineId,
+    context.currentSessionId,
+    session.project.path,
+    context.userId
+  );
+
+  // Return empty since progress message is already sent
+  return '';
 }
 
 async function handleLog(context: UserContext, count?: number): Promise<string> {

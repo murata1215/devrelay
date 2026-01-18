@@ -13,6 +13,8 @@ export const SHORTCUTS: Record<string, string> = {
   'e': 'exec',      // プラン実行開始
   'exec': 'exec',   // プラン実行開始（フルコマンド）
   'link': 'link',   // プラットフォームリンクコード生成
+  'a': 'agreement', // DevRelay Agreement を CLAUDE.md に追加
+  'agreement': 'agreement',
   'q': 'quit',
   'h': 'help',
   'log': 'log',
@@ -45,4 +47,11 @@ export const DEFAULTS = {
   sessionTimeoutMinutes: 30,
   websocketPingInterval: 30000,
   websocketReconnectDelay: 5000,
+  // Reconnection settings (shorter delays for stable connections)
+  reconnect: {
+    baseDelay: 500,       // Initial delay: 0.5 seconds
+    maxDelay: 10000,      // Maximum delay: 10 seconds
+    maxAttempts: 30,      // More attempts since delays are shorter
+    jitterRange: 500,     // 0-0.5 second random jitter
+  },
 } as const;

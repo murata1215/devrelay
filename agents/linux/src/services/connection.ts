@@ -1,18 +1,33 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import type { Agent } from 'http';
 import type {
   AgentMessage,
   ServerToAgentMessage,
   Project,
   AiTool,
   FileAttachment,
-  MissedMessage
+  MissedMessage,
+  ProxyConfig,
+  AgreementApplyPayload
 } from '@devrelay/shared';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession } from './ai-runner.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
-import { clearOutputDir, collectOutputFiles, OUTPUT_DIR_INSTRUCTION, PLAN_MODE_INSTRUCTION, EXEC_MODE_INSTRUCTION } from './output-collector.js';
+import {
+  clearOutputDir,
+  collectOutputFiles,
+  OUTPUT_DIR_INSTRUCTION,
+  PLAN_MODE_INSTRUCTION,
+  EXEC_MODE_INSTRUCTION,
+  DEVRELAY_AGREEMENT_MARKER,
+  AGREEMENT_APPLY_PROMPT
+} from './output-collector.js';
+import { readFile } from 'fs/promises';
+import { join } from 'path';
 import {
   loadConversation,
   saveConversation,
@@ -34,11 +49,8 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 let pingTimer: NodeJS.Timeout | null = null;
 let currentConfig: AgentConfig | null = null;
 
-// Reconnection state
+// Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 15;
-const BASE_RECONNECT_DELAY = 1000; // 1 second
-const MAX_RECONNECT_DELAY = 60000; // 60 seconds
 
 // Store session info for prompt handling
 interface SessionInfo {
@@ -50,12 +62,46 @@ interface SessionInfo {
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
+/**
+ * Build a proxy URL with optional authentication credentials
+ */
+function buildProxyUrl(proxy: ProxyConfig): string {
+  const url = new URL(proxy.url);
+  if (proxy.username) {
+    url.username = proxy.username;
+    url.password = proxy.password || '';
+  }
+  return url.toString();
+}
+
+/**
+ * Create an HTTP/SOCKS proxy agent based on the proxy URL scheme
+ */
+function createProxyAgent(proxyConfig: ProxyConfig): Agent {
+  const proxyUrl = buildProxyUrl(proxyConfig);
+
+  if (proxyUrl.startsWith('socks4://') || proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks://')) {
+    return new SocksProxyAgent(proxyUrl);
+  } else {
+    // HTTP/HTTPS proxy
+    return new HttpsProxyAgent(proxyUrl);
+  }
+}
+
 export async function connectToServer(config: AgentConfig, projects: Project[]) {
   currentConfig = config;
   return new Promise<void>((resolve, reject) => {
-    console.log(`🔌 Connecting to ${config.serverUrl}...`);
+    // Build WebSocket options with optional proxy
+    const wsOptions: WebSocket.ClientOptions = {};
 
-    ws = new WebSocket(config.serverUrl);
+    if (config.proxy?.url) {
+      wsOptions.agent = createProxyAgent(config.proxy);
+      console.log(`🔌 Connecting to ${config.serverUrl} via proxy ${config.proxy.url}...`);
+    } else {
+      console.log(`🔌 Connecting to ${config.serverUrl}...`);
+    }
+
+    ws = new WebSocket(config.serverUrl, wsOptions);
 
     ws.on('open', () => {
       console.log('✅ Connected to server');
@@ -136,6 +182,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:workstate:save':
       handleWorkStateSave(message.payload);
       break;
+
+    case 'server:agreement:apply':
+      handleAgreementApply(message.payload);
+      break;
   }
 }
 
@@ -157,6 +207,10 @@ async function handleSessionStart(
   if (pendingWorkState) {
     console.log(`📂 Found pending work state: ${pendingWorkState.summary}`);
   }
+
+  // Check DevRelay Agreement status
+  const agreementStatus = await checkAgreementStatus(projectPath);
+  console.log(`📋 DevRelay Agreement: ${agreementStatus ? 'compliant' : 'not compliant'}`);
 
   // Generate UUID for Claude Code session and store session info
   const claudeSessionId = uuidv4();
@@ -182,6 +236,7 @@ async function handleSessionStart(
         machineId: config.machineId,
         sessionId,
         status: 'running',
+        agreementStatus,
       },
     });
   } catch (err: any) {
@@ -218,20 +273,42 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string }) {
-  const { sessionId, projectPath } = payload;
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string }) {
+  const { sessionId, projectPath, userId } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}`);
 
-  const sessionInfo = sessionInfoMap.get(sessionId);
+  let sessionInfo = sessionInfoMap.get(sessionId);
+
   if (sessionInfo) {
     // Mark exec point in history (this becomes the reset point)
     sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
     console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   } else {
-    // Session not in memory, just mark in file
+    // Session not in memory (e.g., after server restart), initialize from file
+    console.log(`📋 Session not found in memory, initializing from file...`);
     const history = await loadConversation(projectPath);
-    await markExecPoint(projectPath, history);
+    const claudeSessionId = uuidv4();
+    const aiTool: AiTool = currentConfig?.aiTools?.default || 'claude';
+
+    // Create session info and add to map
+    sessionInfo = { projectPath, aiTool, claudeSessionId, history };
+    sessionInfoMap.set(sessionId, sessionInfo);
+    console.log(`📋 Session ${sessionId} initialized with ${history.length} history entries`);
+
+    // Mark exec point in history
+    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
+    console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
+
+  // Auto-execute AI with the implementation prompt
+  console.log(`🚀 Auto-starting AI execution after exec...`);
+  const autoPrompt = '実装を開始してください。直前のプランに従って作業を進めてください。';
+  await handleAiPrompt({
+    sessionId,
+    prompt: autoPrompt,
+    userId,
+    files: undefined
+  });
 }
 
 async function handleWorkStateSave(payload: WorkStateSavePayload) {
@@ -314,7 +391,24 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Build prompt with history context and instructions
   let fullPrompt = promptWithFiles + workStatePrompt + OUTPUT_DIR_INSTRUCTION + modeInstruction;
   if (sessionInfo.history.length > 1) {
-    const historyContext = getConversationContext(sessionInfo.history.slice(0, -1)); // exclude current message
+    // Check if this is the first message after exec (need to include plan context)
+    const historyForContext = sessionInfo.history.slice(0, -1); // exclude current message
+    let execIndex = -1;
+    for (let i = historyForContext.length - 1; i >= 0; i--) {
+      if (historyForContext[i].role === 'exec') {
+        execIndex = i;
+        break;
+      }
+    }
+    const messagesAfterExec = execIndex >= 0 ? historyForContext.slice(execIndex + 1) : historyForContext;
+    const isFirstMessageAfterExec = hasExecMarker && messagesAfterExec.filter(h => h.role === 'user' || h.role === 'assistant').length === 0;
+
+    // If this is the first message after exec, include the plan context
+    const historyContext = getConversationContext(
+      historyForContext,
+      undefined,
+      { includePlanBeforeExec: isFirstMessageAfterExec }
+    );
     fullPrompt = `Previous conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}${modeInstruction}`;
   }
 
@@ -409,23 +503,25 @@ function stopPing() {
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
 
+  const { baseDelay, maxDelay, maxAttempts, jitterRange } = DEFAULTS.reconnect;
+
   // Check max attempts
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.error(`❌ Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Giving up.`);
+  if (reconnectAttempts >= maxAttempts) {
+    console.error(`❌ Max reconnect attempts (${maxAttempts}) reached. Giving up.`);
     console.error('💡 Restart the agent manually or check if the server is running.');
     return;
   }
 
   // Calculate delay with exponential backoff + jitter
   const exponentialDelay = Math.min(
-    BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts),
-    MAX_RECONNECT_DELAY
+    baseDelay * Math.pow(2, reconnectAttempts),
+    maxDelay
   );
-  const jitter = Math.random() * 1000; // 0-1 second random jitter
+  const jitter = Math.random() * jitterRange;
   const delay = exponentialDelay + jitter;
 
   reconnectAttempts++;
-  console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+  console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts}/${maxAttempts})...`);
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -446,4 +542,43 @@ export function disconnect() {
     ws.close();
     ws = null;
   }
+}
+
+// Check if CLAUDE.md has DevRelay Agreement
+export async function checkAgreementStatus(projectPath: string): Promise<boolean> {
+  try {
+    const claudeMdPath = join(projectPath, 'CLAUDE.md');
+    const content = await readFile(claudeMdPath, 'utf-8');
+    return content.includes(DEVRELAY_AGREEMENT_MARKER);
+  } catch (err: any) {
+    // CLAUDE.md doesn't exist
+    return false;
+  }
+}
+
+// Handle agreement apply command - run Claude Code to update CLAUDE.md
+async function handleAgreementApply(payload: AgreementApplyPayload) {
+  const { sessionId, projectPath, userId } = payload;
+  console.log(`📝 Applying DevRelay Agreement for session ${sessionId}`);
+
+  let sessionInfo = sessionInfoMap.get(sessionId);
+
+  if (!sessionInfo || !currentConfig) {
+    // Session not in memory, initialize from file
+    console.log(`📋 Session not found in memory, initializing...`);
+    const history = await loadConversation(projectPath);
+    const claudeSessionId = uuidv4();
+    const aiTool: AiTool = currentConfig?.aiTools?.default || 'claude';
+
+    sessionInfo = { projectPath, aiTool, claudeSessionId, history, pendingWorkState: undefined };
+    sessionInfoMap.set(sessionId, sessionInfo);
+  }
+
+  // Use the agreement apply prompt
+  await handleAiPrompt({
+    sessionId,
+    prompt: AGREEMENT_APPLY_PROMPT,
+    userId,
+    files: undefined,
+  });
 }

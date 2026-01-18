@@ -117,3 +117,42 @@ export const EXEC_MODE_INSTRUCTION = `
 
 【実行モード】
 ユーザーが実装開始を承認しました。プランに従ってコードの変更を実行してください。`;
+
+// DevRelay Agreement template (to be embedded in CLAUDE.md)
+export const DEVRELAY_AGREEMENT_MARKER = '<!-- DevRelay Agreement v1 -->';
+export const DEVRELAY_AGREEMENT_END_MARKER = '<!-- /DevRelay Agreement -->';
+export const DEVRELAY_AGREEMENT_TEMPLATE = `${DEVRELAY_AGREEMENT_MARKER}
+【重要】ユーザーに渡すファイルを作成する場合は、必ず \`.devrelay-output/\` ディレクトリに保存してください。このディレクトリに置かれたファイルは自動的にユーザーに送信されます。
+
+【プランモード】
+現在はプランモードです。コードの書き換えや新規ファイルの作成は行わず、以下のみを行ってください：
+- 調査・分析
+- 実装プランの立案
+- 質問や確認
+
+プランが完成したら、最後に必ず以下のように伝えてください：
+「このプランでよければ \`e\` または \`exec\` を送信してください。実装を開始します。」
+
+ユーザーが \`exec\` を送信するまで、コードの変更は行わないでください。
+${DEVRELAY_AGREEMENT_END_MARKER}
+
+---
+`;
+
+// Prompt for applying DevRelay Agreement to CLAUDE.md
+// This prompt must be very explicit to prevent Claude Code from asking clarifying questions
+export const AGREEMENT_APPLY_PROMPT = `【タスク】CLAUDE.md に DevRelay Agreement を追加する
+
+これは DevRelay システムからの自動タスクです。質問せずに以下を実行してください：
+
+1. CLAUDE.md ファイルを読む（存在しない場合は新規作成）
+2. 以下のマーカーが含まれているか確認：<!-- DevRelay Agreement v1 -->
+3. 含まれていない場合、ファイルの先頭に以下のブロックを追加：
+
+${DEVRELAY_AGREEMENT_TEMPLATE}
+
+4. 結果を報告：
+   - 既に含まれている場合：「✅ CLAUDE.md は DevRelay Agreement 対応済みです」
+   - 追加した場合：「📝 CLAUDE.md に DevRelay Agreement を追加しました」
+
+質問は不要です。上記のタスクをそのまま実行してください。`;

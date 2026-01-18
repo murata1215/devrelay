@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import yaml from 'yaml';
-import type { AiTool } from '@devrelay/shared';
+import type { AiTool, ProxyConfig } from '@devrelay/shared';
 
 export interface AgentConfig {
   machineName: string;
@@ -18,6 +18,7 @@ export interface AgentConfig {
     aider?: { command: string };
   };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+  proxy?: ProxyConfig;  // プロキシ設定（オプション）
 }
 
 export interface ProjectConfig {
@@ -68,6 +69,7 @@ export async function loadConfig(): Promise<AgentConfig> {
         gemini: { command: 'gemini' },
       },
       logLevel: config.logLevel || 'info',
+      proxy: config.proxy,  // プロキシ設定を読み込み
     };
   } catch (err) {
     // Return default config
@@ -82,6 +84,7 @@ export async function loadConfig(): Promise<AgentConfig> {
         claude: { command: 'claude' },
       },
       logLevel: 'info',
+      proxy: undefined,
     };
   }
 }

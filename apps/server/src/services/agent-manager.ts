@@ -198,12 +198,21 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
   }
 }
 
-async function handleAiStatus(payload: { machineId: string; sessionId: string; status: string; error?: string }) {
-  // Notify participants about status change
-  const statusMessage = payload.error 
+async function handleAiStatus(payload: { machineId: string; sessionId: string; status: string; error?: string; agreementStatus?: boolean }) {
+  // Build status message
+  let statusMessage = payload.error
     ? `❌ Error: ${payload.error}`
     : `🤖 AI Status: ${payload.status}`;
-  
+
+  // Add agreement status if provided
+  if (payload.agreementStatus !== undefined && payload.status === 'running') {
+    if (payload.agreementStatus) {
+      statusMessage += '\n✅ DevRelay Agreement 対応済み';
+    } else {
+      statusMessage += '\n⚠️ DevRelay Agreement 未対応 - `a` または `agreement` で対応できます';
+    }
+  }
+
   await broadcastToSession(payload.sessionId, statusMessage, false);
 }
 
@@ -285,10 +294,10 @@ export async function clearConversation(machineId: string, sessionId: string, pr
   });
 }
 
-export async function execConversation(machineId: string, sessionId: string, projectPath: string) {
+export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string) {
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
-    payload: { sessionId, projectPath }
+    payload: { sessionId, projectPath, userId }
   });
 }
 
@@ -296,5 +305,12 @@ export async function saveWorkState(machineId: string, sessionId: string, projec
   sendToAgent(machineId, {
     type: 'server:workstate:save',
     payload: { sessionId, projectPath, workState }
+  });
+}
+
+export async function applyAgreement(machineId: string, sessionId: string, projectPath: string, userId: string) {
+  sendToAgent(machineId, {
+    type: 'server:agreement:apply',
+    payload: { sessionId, projectPath, userId }
   });
 }

@@ -123,6 +123,13 @@ export async function markExecPoint(
   return updatedHistory;
 }
 
+export interface GetContextOptions {
+  /** Include plan conversation before exec marker (for exec start) */
+  includePlanBeforeExec?: boolean;
+  /** Max messages to include from plan (default: 10) */
+  maxPlanMessages?: number;
+}
+
 /**
  * Get a summary of recent conversation for context
  *
@@ -130,25 +137,48 @@ export async function markExecPoint(
  * 1. If exec marker exists in history, return recent maxMessages from the last exec marker
  * 2. If no exec marker, return recent maxMessages from the entire history
  * 3. exec marker itself is not included in context sent to Claude
+ * 4. If includePlanBeforeExec is true, also include plan messages before exec marker
  */
 export function getConversationContext(
   history: ConversationEntry[],
-  maxMessages: number = MAX_CONTEXT_MESSAGES
+  maxMessages: number = MAX_CONTEXT_MESSAGES,
+  options: GetContextOptions = {}
 ): string {
   if (history.length === 0) {
     return '';
   }
 
+  const { includePlanBeforeExec = false, maxPlanMessages = 10 } = options;
+
   // Find the last exec marker
-  let startIndex = 0;
+  let execIndex = -1;
   for (let i = history.length - 1; i >= 0; i--) {
     if (history[i].role === 'exec') {
-      startIndex = i + 1;  // Start from the message after exec
+      execIndex = i;
       break;
     }
   }
 
-  // Get messages from startIndex onwards
+  // If includePlanBeforeExec and exec marker exists, include plan messages
+  let planContext = '';
+  if (includePlanBeforeExec && execIndex >= 0) {
+    // Get messages before exec marker (the plan conversation)
+    const planMessages = history.slice(0, execIndex)
+      .filter(h => h.role === 'user' || h.role === 'assistant')
+      .slice(-maxPlanMessages);
+
+    if (planMessages.length > 0) {
+      planContext = '--- Previous Plan Conversation ---\n' +
+        planMessages
+          .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
+          .join('\n') +
+        '\n--- End of Plan ---\n\n';
+      console.log(`Including ${planMessages.length} plan messages before exec`);
+    }
+  }
+
+  // Get messages from after exec marker (or from start if no exec)
+  const startIndex = execIndex >= 0 ? execIndex + 1 : 0;
   const messagesAfterExec = history.slice(startIndex);
 
   // Filter out exec markers and get only user/assistant messages
@@ -159,7 +189,9 @@ export function getConversationContext(
 
   console.log(`Context: ${filteredMessages.length} messages after exec, sending ${recentHistory.length}`);
 
-  return recentHistory
+  const currentContext = recentHistory
     .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
     .join('\n');
+
+  return planContext + currentContext;
 }
