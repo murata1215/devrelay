@@ -1,0 +1,140 @@
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
+import yaml from 'yaml';
+import type { AiTool } from '@devrelay/shared';
+
+export interface AgentConfig {
+  machineName: string;
+  machineId: string;
+  serverUrl: string;
+  token: string;
+  projectsDirs: string[];  // Multiple directory support
+  aiTools: {
+    default: AiTool;
+    claude?: { command: string };
+    gemini?: { command: string };
+    codex?: { command: string };
+    aider?: { command: string };
+  };
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
+}
+
+export interface ProjectConfig {
+  name: string;
+  path: string;
+  defaultAi: AiTool;
+}
+
+// Windows: %APPDATA%\devrelay\
+// Linux/Mac: ~/.devrelay/
+const CONFIG_DIR = process.platform === 'win32'
+  ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'devrelay')
+  : path.join(os.homedir(), '.devrelay');
+
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yaml');
+const PROJECTS_FILE = path.join(CONFIG_DIR, 'projects.yaml');
+
+// Default projects directories for Windows
+function getDefaultProjectsDirs(): string[] {
+  const dirs: string[] = [os.homedir()];
+
+  // Add Documents folder if it exists
+  const documentsPath = path.join(os.homedir(), 'Documents');
+  if (process.platform === 'win32') {
+    dirs.push(documentsPath);
+  }
+
+  return dirs;
+}
+
+export async function ensureConfigDir() {
+  try {
+    await fs.mkdir(CONFIG_DIR, { recursive: true });
+    await fs.mkdir(path.join(CONFIG_DIR, 'logs'), { recursive: true });
+    await fs.mkdir(path.join(CONFIG_DIR, 'bin'), { recursive: true });
+  } catch (err) {
+    // Ignore if exists
+  }
+}
+
+export async function loadConfig(): Promise<AgentConfig> {
+  await ensureConfigDir();
+
+  try {
+    const content = await fs.readFile(CONFIG_FILE, 'utf-8');
+    const config = yaml.parse(content) as any;
+
+    // Backward compatibility: support both projectsDir (singular) and projectsDirs (plural)
+    let projectsDirs: string[] = [];
+    if (config.projectsDirs && Array.isArray(config.projectsDirs)) {
+      projectsDirs = config.projectsDirs;
+    } else if (config.projectsDir) {
+      projectsDirs = [config.projectsDir];
+    } else {
+      projectsDirs = getDefaultProjectsDirs();
+    }
+
+    return {
+      machineName: config.machineName || os.hostname(),
+      machineId: config.machineId || '',
+      serverUrl: config.serverUrl || 'wss://ribbon-re.jp/devrelay-api/ws/agent',
+      token: config.token || '',
+      projectsDirs,
+      aiTools: config.aiTools || {
+        default: 'claude',
+        claude: { command: 'claude' },
+        gemini: { command: 'gemini' },
+      },
+      logLevel: config.logLevel || 'info',
+    };
+  } catch (err) {
+    // Return default config
+    return {
+      machineName: os.hostname(),
+      machineId: '',
+      serverUrl: 'wss://ribbon-re.jp/devrelay-api/ws/agent',
+      token: '',
+      projectsDirs: getDefaultProjectsDirs(),
+      aiTools: {
+        default: 'claude',
+        claude: { command: 'claude' },
+      },
+      logLevel: 'info',
+    };
+  }
+}
+
+export async function saveConfig(config: AgentConfig) {
+  await ensureConfigDir();
+  const content = yaml.stringify(config);
+  await fs.writeFile(CONFIG_FILE, content, 'utf-8');
+}
+
+export async function loadProjectsConfig(): Promise<ProjectConfig[]> {
+  try {
+    const content = await fs.readFile(PROJECTS_FILE, 'utf-8');
+    const data = yaml.parse(content);
+    return data.projects || [];
+  } catch (err) {
+    return [];
+  }
+}
+
+export async function saveProjectsConfig(projects: ProjectConfig[]) {
+  await ensureConfigDir();
+  const content = yaml.stringify({ projects });
+  await fs.writeFile(PROJECTS_FILE, content, 'utf-8');
+}
+
+export function getConfigDir() {
+  return CONFIG_DIR;
+}
+
+export function getLogDir() {
+  return path.join(CONFIG_DIR, 'logs');
+}
+
+export function getBinDir() {
+  return path.join(CONFIG_DIR, 'bin');
+}

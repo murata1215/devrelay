@@ -1,0 +1,68 @@
+{
+  "name": "@devrelay/agent-windows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/electron/main.js",
+  "bin": {
+    "devrelay": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:cli": "node dist/cli/index.js start",
+    "electron": "electron .",
+    "electron:dev": "tsc && electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "clean": "rmdir /s /q dist 2>nul || exit 0"
+  },
+  "build": {
+    "appId": "jp.ribbon-re.devrelay-agent",
+    "productName": "DevRelay Agent",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/",
+        "to": "assets/"
+      }
+    ]
+  },
+  "dependencies": {
+    "@devrelay/shared": "workspace:*",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "electron-store": "^8.1.0",
+    "nanoid": "^5.0.4",
+    "ora": "^8.0.1",
+    "uuid": "^13.0.0",
+    "ws": "^8.16.0",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/uuid": "^11.0.0",
+    "@types/ws": "^8.5.10",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}

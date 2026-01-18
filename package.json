@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Remote AI CLI development hub - Control Claude Code, Gemini CLI, and more from anywhere",
+  "pnpm": {
+    "onlyBuiltDependencies": ["electron", "esbuild", "@prisma/client", "@prisma/engines", "prisma"]
+  },
   "scripts": {
     "dev:server": "pnpm --filter @devrelay/server dev",
     "dev:agent": "pnpm --filter @devrelay/agent-linux dev",

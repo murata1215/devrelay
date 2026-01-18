@@ -287,11 +287,104 @@ agents/linux/src/
 └── index.ts                # 100行程度
 ```
 
+## プロジェクト巡回
+linuxはホームディレクトリとvar/www
+windowsはホームディレクトリとドキュメント、あとタスクトレイのモジュールで巡回ディレクトリを設定したい。
+
 ## 完了条件
 
-- [ ] Windows で `devrelay setup` が動作
-- [ ] サーバーに接続して WebUI でオンライン表示
-- [ ] Discord/Telegram からプロンプト送信→Claude Code 実行→結果返却
-- [ ] ファイル転送（双方向）が動作
-- [ ] `devrelay uninstall` でクリーンアンインストール
-- [ ] Windows Service または スタートアップ登録で自動起動
+- [x] Windows で `devrelay setup` が動作 (スタートアップ登録対応)
+- [x] サーバーに接続して WebUI でオンライン表示
+- [x] Discord/Telegram からプロンプト送信→Claude Code 実行→結果返却
+- [x] ファイル転送（双方向）が動作
+- [x] `devrelay uninstall` でクリーンアンインストール
+- [x] Windows スタートアップ登録で自動起動
+- [x] Electron タスクトレイアプリ化
+
+## 実装済みファイル
+
+```
+agents/windows/
+├── package.json
+├── tsconfig.json
+├── DEVELOPMENT.md
+├── assets/
+│   ├── settings.html           # 設定画面 UI
+│   └── preload.js              # IPC ブリッジ（CommonJS）
+└── src/
+    ├── index.ts                # CLI用メインエントリポイント
+    ├── electron/
+    │   ├── main.ts             # Electron メインプロセス
+    │   └── preload.ts          # (ソース版、ビルド時は assets/preload.js を使用)
+    ├── cli/
+    │   ├── index.ts            # CLI エントリポイント
+    │   └── commands/
+    │       ├── setup.ts        # セットアップ
+    │       ├── start.ts        # エージェント開始
+    │       ├── status.ts       # ステータス確認
+    │       ├── uninstall.ts    # アンインストール
+    │       ├── projects.ts     # プロジェクト管理
+    │       └── logs.ts         # ログ表示
+    └── services/
+        ├── config.ts           # 設定管理（%APPDATA%\devrelay\）
+        ├── connection.ts       # WebSocket接続
+        ├── ai-runner.ts        # Claude Code実行
+        ├── conversation-store.ts
+        ├── output-collector.ts
+        ├── file-handler.ts
+        ├── projects.ts
+        └── work-state-store.ts
+```
+
+## 使い方
+
+### Electron アプリ（推奨）
+
+```powershell
+cd agents/windows
+pnpm build
+npx electron .
+```
+
+タスクトレイに常駐し、設定画面から操作可能。
+
+### CLI（オプション）
+
+```powershell
+node dist/cli/index.js setup
+node dist/cli/index.js start
+node dist/cli/index.js status
+```
+
+## 機能
+
+### タスクトレイ
+- 接続状態をアイコン色で表示（緑=接続中、グレー=切断）
+- 右クリックメニュー: Connect/Disconnect, Settings, Quit
+
+### 設定画面
+- **Connection タブ**: トークン入力、自動起動ON/OFF
+- **Directories タブ**: プロジェクトスキャン対象ディレクトリの追加/削除
+- **Projects タブ**: 検出されたプロジェクト一覧、手動スキャン
+
+### 自動起動
+- 設定画面のチェックボックスで有効化
+- `app.setLoginItemSettings()` を使用（Windowsレジストリに登録）
+
+## Linux版との主な違い
+
+| 項目 | Linux | Windows |
+|------|-------|---------|
+| UI | CLI のみ | Electron タスクトレイアプリ |
+| 設定ディレクトリ | `~/.devrelay/` | `%APPDATA%\devrelay\` |
+| 自動起動 | systemd サービス | Windows ログイン項目 |
+| Claude実行 | シンボリックリンク経由 | 直接 `claude` コマンド |
+
+## 配布用ビルド
+
+```powershell
+pnpm dist
+```
+
+`release/` フォルダにインストーラー（.exe）が生成される。
+

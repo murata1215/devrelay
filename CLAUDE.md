@@ -162,7 +162,7 @@ devrelay/
 │   └── web/             # WebUI (Vite + React)
 ├── agents/
 │   ├── linux/           # Linux Agent
-│   └── windows/         # Windows Agent (開発中)
+│   └── windows/         # Windows Agent (Electron タスクトレイアプリ)
 ├── packages/
 │   └── shared/          # 共通型定義
 └── CLAUDE.md
@@ -177,27 +177,37 @@ devrelay/
 - `apps/server/src/services/session-manager.ts` - セッション管理
 - `apps/server/src/services/command-handler.ts` - コマンド処理
 
-#### Agent
+#### Agent (Linux)
 - `agents/linux/src/services/connection.ts` - サーバー接続・メッセージ処理
 - `agents/linux/src/services/ai-runner.ts` - Claude Code 実行
 - `agents/linux/src/services/output-collector.ts` - 出力ファイル収集
 - `agents/linux/src/services/file-handler.ts` - 受信ファイル保存
 - `agents/linux/src/services/conversation-store.ts` - 会話履歴の永続化
 
+#### Agent (Windows)
+- `agents/windows/src/electron/main.ts` - Electron メインプロセス、タスクトレイ、IPC
+- `agents/windows/src/services/connection.ts` - サーバー接続（Linux版と同等）
+- `agents/windows/src/services/config.ts` - 設定管理（%APPDATA%\devrelay\）
+- `agents/windows/assets/settings.html` - 設定画面 UI
+- `agents/windows/assets/preload.js` - IPC ブリッジ（CommonJS）
+
 #### Shared
 - `packages/shared/src/types.ts` - 共通型定義（FileAttachment など）
 
 ## 設定ファイル
 
-### Agent 設定 (`~/.devrelay/config.yaml`)
+### Agent 設定
+- Linux: `~/.devrelay/config.yaml`
+- Windows: `%APPDATA%\devrelay\config.yaml`
+
 ```yaml
 machineName: ubuntu-dev
 machineId: ""
-serverUrl: ws://localhost:3000/ws/agent
+serverUrl: wss://ribbon-re.jp/devrelay-api/ws/agent
 token: machine_xxxxx
 projectsDirs:      # 複数ディレクトリ対応
-  - /home/user
-  - /var/www
+  - /home/user         # Linux
+  - C:\Users\username  # Windows
 aiTools:
   default: claude
   claude:
@@ -220,11 +230,16 @@ projects:
 # Server
 cd apps/server && pnpm start
 
-# Agent
+# Linux Agent
 cd agents/linux && pnpm start
+
+# Windows Agent (Electron)
+cd agents/windows && pnpm build && npx electron .
 ```
 
 ### 本番（サービス起動）
+
+#### Linux
 ```bash
 # Server
 cd apps/server && pnpm setup:service   # 初回のみ
@@ -244,6 +259,17 @@ systemctl --user restart devrelay-server devrelay-web devrelay-agent
 journalctl --user -u devrelay-server -f
 journalctl --user -u devrelay-web -f
 journalctl --user -u devrelay-agent -f
+```
+
+#### Windows
+```powershell
+# 開発時
+cd agents/windows && pnpm build && npx electron .
+
+# 配布用インストーラー作成
+cd agents/windows && pnpm dist
+
+# 自動起動は設定画面の「Start automatically when Windows starts」で有効化
 ```
 
 ### Phase 1.2: 追加機能（続き）
@@ -390,11 +416,39 @@ journalctl --user -u devrelay-agent -f
   - `apps/web/src/pages/SettingsPage.tsx` - Connected Platforms UI
   - `apps/web/src/lib/api.ts` - platforms API クライアント
 
+#### 27. Windows Agent (2026-01-18)
+- Linux Agent をベースに Windows 対応版を実装
+- **Electron タスクトレイアプリ**として常駐
+- 設定ディレクトリ: `%APPDATA%\devrelay\`
+- サーバーURL: `wss://ribbon-re.jp/devrelay-api/ws/agent`（固定）
+- **タスクトレイ機能**:
+  - 接続状態をアイコン色で表示（緑=接続中、グレー=切断）
+  - 右クリックメニュー: Connect/Disconnect, Settings, Open Config Folder, Quit
+  - 左クリック: 設定画面を開く
+- **設定画面（3タブ）**:
+  - **Connection**: トークン入力、自動起動ON/OFF（マシン名・サーバーURLは読み取り専用）
+  - **Directories**: プロジェクトスキャン対象ディレクトリの追加/削除
+  - **Projects**: 検出されたプロジェクト一覧、手動スキャン
+- **自動起動**: `app.setLoginItemSettings()` でWindowsログイン項目に登録
+- **主要ファイル**:
+  - `agents/windows/src/electron/main.ts` - Electron メインプロセス
+  - `agents/windows/assets/settings.html` - 設定画面 UI
+  - `agents/windows/assets/preload.js` - IPC ブリッジ（CommonJS必須）
+- 詳細は `agents/windows/DEVELOPMENT.md` 参照
+
+```powershell
+# 開発時
+cd agents/windows && pnpm build && npx electron .
+
+# 配布用ビルド
+cd agents/windows && pnpm dist  # release/ にインストーラー生成
+```
+
 ## 今後の課題
 
 - [ ] LINE 対応
 - [ ] Gemini CLI / Codex / Aider 対応
-- [ ] Windows Agent
+- [x] Windows Agent (2026-01-18 実装完了)
 - [ ] 要約機能（Anthropic API 使用）
 - [ ] 複数ユーザー同時接続
 - [ ] 進捗表示のUI改善（プログレスバーなど）
