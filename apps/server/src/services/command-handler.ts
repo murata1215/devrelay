@@ -436,8 +436,42 @@ async function handleClear(context: UserContext): Promise<string> {
 }
 
 async function handleExec(context: UserContext): Promise<string> {
+  // プロジェクト未接続の場合、自動再接続を試みる
   if (!context.currentSessionId || !context.currentMachineId) {
-    return '⚠️ プロジェクトに接続されていません。';
+    // 前回の接続先がある場合は自動再接続を試みる
+    if (context.lastProjectId) {
+      console.log(`🔄 [exec] Auto-reconnecting to last project: ${context.lastProjectId}`);
+      const reconnectResult = await handleContinue(context);
+
+      // 再接続成功（「🚀」で始まる）なら、そのまま exec を続行
+      if (reconnectResult.startsWith('🚀')) {
+        // context が更新されているので、再取得
+        const updatedContext = await getUserContext(context.userId, context.platform, context.chatId);
+
+        if (updatedContext.currentSessionId && updatedContext.currentMachineId) {
+          // 再接続成功メッセージを取得（マシン名・プロジェクト名を含む）
+          const machine = await prisma.machine.findUnique({
+            where: { id: updatedContext.currentMachineId }
+          });
+          const projectName = updatedContext.currentProjectName || context.lastProjectId.split('/').pop() || context.lastProjectId;
+          const machineName = machine?.name || 'Unknown';
+
+          console.log(`✅ [exec] Auto-reconnect successful: ${machineName}/${projectName}`);
+
+          // 再接続メッセージを先に送信（Discord/Telegram に直接送信）
+          const reconnectMessage = `🔄 前回の接続先（${machineName} / ${projectName}）に再接続しました`;
+          await sendMessage(updatedContext.platform, updatedContext.chatId, reconnectMessage);
+
+          // exec を再帰呼び出し
+          return handleExec(updatedContext);
+        }
+      }
+      // 再接続失敗（オフラインなど）→ エラーメッセージを返す
+      return reconnectResult;
+    }
+
+    // 前回の接続先がない場合
+    return '⚠️ プロジェクトに接続されていません。\n\n`m` → マシン選択 → `p` → プロジェクト選択 の順で接続してください。';
   }
 
   // Get project path from session
