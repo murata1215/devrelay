@@ -230,6 +230,35 @@ aiTools:
   claude:
     command: claude
 logLevel: debug
+
+# プロキシ設定（オプション）
+proxy:
+  url: http://proxy.example.com:8080      # または socks5://proxy:1080
+  # 認証が必要な場合（オプション）
+  username: user
+  password: pass
+```
+
+### プロキシ設定
+Agent がプロキシ経由でサーバーに接続する場合は、`~/.devrelay/config.yaml`（Linux）または `%APPDATA%\devrelay\config.yaml`（Windows）に `proxy` セクションを追加します。
+
+**サポートするプロキシタイプ**:
+- HTTP/HTTPS: `http://proxy:8080`, `https://proxy:8080`
+- SOCKS5: `socks5://proxy:1080`
+- SOCKS4: `socks4://proxy:1080`
+
+**認証付きプロキシ**:
+```yaml
+proxy:
+  url: http://proxy.example.com:8080
+  username: myuser
+  password: mypassword
+```
+
+または URL に直接埋め込む形式も対応:
+```yaml
+proxy:
+  url: http://myuser:mypassword@proxy.example.com:8080
 ```
 
 ### プロジェクト設定 (`~/.devrelay/projects.yaml`)
@@ -481,6 +510,42 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   ```
 - **主要ファイル**:
   - `apps/server/src/services/command-handler.ts` - `handleAiPrompt()` に自動再接続ロジック追加
+
+#### 29. Proxy 対応 (2026-01-19)
+- Agent がプロキシ経由でサーバーに接続可能に
+- **サポートするプロキシタイプ**:
+  - HTTP/HTTPS プロキシ: `https-proxy-agent` ライブラリ使用
+  - SOCKS4/SOCKS5 プロキシ: `socks-proxy-agent` ライブラリ使用
+- **設定方法**: `~/.devrelay/config.yaml` に `proxy` セクションを追加
+- **認証対応**: `username`/`password` フィールドまたは URL 埋め込み形式
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `ProxyConfig` 型定義
+  - `agents/linux/src/services/config.ts` - プロキシ設定読み込み
+  - `agents/linux/src/services/connection.ts` - `createProxyAgent()` 関数、プロキシ経由接続
+  - `agents/windows/src/services/config.ts` - プロキシ設定読み込み
+  - `agents/windows/src/services/connection.ts` - `createProxyAgent()` 関数、プロキシ経由接続
+
+#### 30. DevRelay Agreement 機能 (2026-01-19)
+- プロジェクト接続時に CLAUDE.md の DevRelay Agreement 対応状況を表示
+- **目的**: プランモード / ファイル出力指示が CLAUDE.md に含まれているか確認
+- **動作**:
+  1. プロジェクト接続時に CLAUDE.md をチェック
+  2. `<!-- DevRelay Agreement v1 -->` マーカーの有無を確認
+  3. 接続メッセージに対応状況を表示:
+     - 対応済み: `✅ DevRelay Agreement 対応済み`
+     - 未対応: `⚠️ DevRelay Agreement 未対応 - \`a\` または \`agreement\` で対応できます`
+- **コマンド**: `a` または `agreement` で CLAUDE.md に Agreement を追加
+  - Claude Code が自動的に CLAUDE.md を確認・更新
+- **Agreement 内容**:
+  - `.devrelay-output/` ディレクトリへのファイル出力指示
+  - プランモード / 実行モードの切り替え指示
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `AgreementApplyPayload` 型、`agreement` コマンド追加
+  - `packages/shared/src/constants.ts` - `a`, `agreement` ショートカット
+  - `agents/*/src/services/output-collector.ts` - `DEVRELAY_AGREEMENT_MARKER`, `AGREEMENT_APPLY_PROMPT`
+  - `agents/*/src/services/connection.ts` - `checkAgreementStatus()`, `handleAgreementApply()`
+  - `apps/server/src/services/command-handler.ts` - `handleAgreement()`
+  - `apps/server/src/services/agent-manager.ts` - `applyAgreement()`
 
 ## 今後の課題
 
