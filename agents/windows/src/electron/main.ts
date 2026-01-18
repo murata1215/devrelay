@@ -267,16 +267,27 @@ ipcMain.handle('get-config', async () => {
   return await loadConfig();
 });
 
+// Helper to get login item settings options for dev environment
+function getLoginItemOptions() {
+  if (app.isPackaged) {
+    return { path: process.execPath };
+  } else {
+    const appPath = path.resolve(__dirname, '..', '..');
+    return { path: process.execPath, args: [appPath] };
+  }
+}
+
 ipcMain.handle('get-auto-launch', () => {
-  return app.getLoginItemSettings().openAtLogin;
+  return app.getLoginItemSettings(getLoginItemOptions()).openAtLogin;
 });
 
 ipcMain.handle('set-auto-launch', (_event, enabled: boolean) => {
+  const options = getLoginItemOptions();
   app.setLoginItemSettings({
+    ...options,
     openAtLogin: enabled,
-    path: process.execPath,
   });
-  return app.getLoginItemSettings().openAtLogin;
+  return app.getLoginItemSettings(options).openAtLogin;
 });
 
 ipcMain.handle('save-config', async (_event, config: Partial<AgentConfig>) => {

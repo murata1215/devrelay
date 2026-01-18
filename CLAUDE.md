@@ -447,6 +447,9 @@ cd agents/windows && pnpm dist
   - **Directories**: プロジェクトスキャン対象ディレクトリの追加/削除
   - **Projects**: 検出されたプロジェクト一覧、手動スキャン
 - **自動起動**: `app.setLoginItemSettings()` でWindowsログイン項目に登録
+  - 開発環境では `args` パラメータでアプリパスを渡す（`electron.exe` 単体起動を回避）
+  - `getLoginItemSettings()` も同じ `args` を指定しないと状態を取得できない
+  - `getLoginItemOptions()` ヘルパー関数で設定・取得時のオプションを統一
 - **主要ファイル**:
   - `agents/windows/src/electron/main.ts` - Electron メインプロセス
   - `agents/windows/assets/settings.html` - 設定画面 UI
