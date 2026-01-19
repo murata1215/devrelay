@@ -562,7 +562,7 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `agents/windows/src/electron/main.ts` - `getLoginItemOptions()` パスクォート、`add-projects-dir` 自動スキャン
   - `agents/windows/src/services/ai-runner.ts` - `shell: true` 追加
 
-#### 32. Windows Agent スリープ防止機能 (2026-01-19)
+#### 32. Windows Agent スリープ防止機能 (2026-01-19, 修正 2026-01-20)
 - **問題**: Windows の Modern Standby (S0 Low Power Idle) により、画面オフ後にシステムがスリープ状態に入り、WebSocket 接続が切断される
 - **解決**: Windows API `PowerCreateRequest` / `PowerSetRequest` を使用してスリープを防止
   - 注: `SetThreadExecutionState` は Modern Standby には効果がないため、`PowerSetRequest` API を採用
@@ -570,13 +570,14 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - 接続時に `PowerSetRequest(PowerRequestSystemRequired)` でスリープを防止
   - 切断時に `PowerClearRequest` + `CloseHandle` で電源要求を解除
   - **画面オフは許可**（システムスリープのみ防止）
-  - `powercfg /requests` コマンドで「DevRelay Agent: Maintaining server connection」と表示される
+  - `powercfg /requests` コマンドの SYSTEM セクションに「DevRelay Agent: Maintaining server connection」と表示される
 - **設定方法**:
   - 設定画面 > Connection タブ > 「Prevent sleep while connected」チェックボックス
   - または `%APPDATA%\devrelay\config.yaml` に `preventSleep: true` を追加
 - **実装**:
   - `koffi` パッケージで Windows API (kernel32.dll) を呼び出し
   - ネイティブモジュール不要（pure JavaScript FFI）
+  - `POWER_REQUEST_TYPE` 定数: `PowerRequestDisplayRequired=0`, `PowerRequestSystemRequired=1`
 - **主要ファイル**:
   - `agents/windows/src/services/sleep-preventer.ts` - `enableSleepPrevention()`, `disableSleepPrevention()`
   - `agents/windows/src/services/config.ts` - `preventSleep` 設定
