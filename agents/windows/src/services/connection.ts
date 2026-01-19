@@ -41,6 +41,10 @@ import {
   archiveWorkState,
   formatWorkStateForPrompt
 } from './work-state-store.js';
+import {
+  enableSleepPrevention,
+  disableSleepPrevention
+} from './sleep-preventer.js';
 import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
 
 let ws: WebSocket | null = null;
@@ -131,6 +135,11 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
 
       // Start ping
       startPing();
+
+      // Enable sleep prevention if configured
+      if (config.preventSleep) {
+        enableSleepPrevention();
+      }
 
       // If reconnecting with an active session, send session restore request
       if (isReconnection && currentProjectPath && currentProjectName) {
@@ -562,6 +571,7 @@ function scheduleReconnect(config: AgentConfig, projects: Project[]) {
 
 export function disconnect() {
   stopPing();
+  disableSleepPrevention();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;

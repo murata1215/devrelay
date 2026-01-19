@@ -19,6 +19,7 @@ export interface AgentConfig {
   };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   proxy?: ProxyConfig;  // Proxy configuration (optional)
+  preventSleep?: boolean;  // Prevent Windows sleep while connected (optional)
 }
 
 export interface ProjectConfig {
@@ -89,6 +90,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       },
       logLevel: config.logLevel || 'info',
       proxy: config.proxy,  // Load proxy configuration
+      preventSleep: config.preventSleep ?? false,  // Load sleep prevention setting
     };
   } catch (err) {
     // Return default config
@@ -104,6 +106,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       },
       logLevel: 'info',
       proxy: undefined,
+      preventSleep: false,
     };
   }
 }

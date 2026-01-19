@@ -562,6 +562,25 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `agents/windows/src/electron/main.ts` - `getLoginItemOptions()` パスクォート、`add-projects-dir` 自動スキャン
   - `agents/windows/src/services/ai-runner.ts` - `shell: true` 追加
 
+#### 32. Windows Agent スリープ防止機能 (2026-01-19)
+- **問題**: Windows の Modern Standby により、画面オフ後にシステムがスリープ状態に入り、WebSocket 接続が切断される
+- **解決**: Windows API `SetThreadExecutionState` を使用してスリープを防止
+- **動作**:
+  - 接続時に `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` フラグを設定してスリープを防止
+  - 切断時にフラグをクリアして通常の電源管理に戻す
+  - **画面オフは許可**（`ES_DISPLAY_REQUIRED` は使用しない）
+- **設定方法**:
+  - 設定画面 > Connection タブ > 「Prevent sleep while connected」チェックボックス
+  - または `%APPDATA%\devrelay\config.yaml` に `preventSleep: true` を追加
+- **実装**:
+  - `koffi` パッケージで Windows API (kernel32.dll) を呼び出し
+  - ネイティブモジュール不要（pure JavaScript FFI）
+- **主要ファイル**:
+  - `agents/windows/src/services/sleep-preventer.ts` - `enableSleepPrevention()`, `disableSleepPrevention()`
+  - `agents/windows/src/services/config.ts` - `preventSleep` 設定
+  - `agents/windows/src/services/connection.ts` - 接続/切断時のスリープ防止制御
+  - `agents/windows/assets/settings.html` - 設定画面 UI
+
 ## 今後の課題
 
 - [ ] LINE 対応

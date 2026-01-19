@@ -419,6 +419,14 @@
         <span>Start automatically when Windows starts</span>
       </label>
     </div>
+
+    <div class="form-group" style="margin-top: 12px;">
+      <label class="checkbox-label">
+        <input type="checkbox" id="preventSleep">
+        <span>Prevent sleep while connected</span>
+      </label>
+      <p class="help-text" style="margin-left: 26px;">Keep system awake when connected (screen can still turn off)</p>
+    </div>
   </div>
 
   <div class="tab-content" id="directories">
@@ -460,6 +468,7 @@
     const proxyPasswordInput = document.getElementById('proxyPassword');
     const saveBtn = document.getElementById('saveBtn');
     const autoLaunchCheckbox = document.getElementById('autoLaunch');
+    const preventSleepCheckbox = document.getElementById('preventSleep');
     const dirList = document.getElementById('dirList');
     const addDirBtn = document.getElementById('addDirBtn');
     const projectList = document.getElementById('projectList');
@@ -486,6 +495,9 @@
         // Load auto-launch setting
         const autoLaunch = await devrelayApi.getAutoLaunch();
         autoLaunchCheckbox.checked = autoLaunch;
+
+        // Load prevent-sleep setting
+        preventSleepCheckbox.checked = config.preventSleep || false;
 
         renderDirectories();
         await loadProjects();
@@ -547,6 +559,7 @@
       const newConfig = {
         token: tokenInput.value,
         proxy: proxy,
+        preventSleep: preventSleepCheckbox.checked,
       };
 
       await devrelayApi.saveConfig(newConfig);
