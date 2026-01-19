@@ -1,19 +1,28 @@
 /**
  * Sleep Prevention Service for Windows
- * Uses SetThreadExecutionState API to prevent system sleep while connected.
- * Screen can still turn off, but the system won't enter sleep/standby mode.
+ * Uses PowerCreateRequest/PowerSetRequest API to prevent Modern Standby.
+ * This is more effective than SetThreadExecutionState for S0 Low Power Idle systems.
  */
 
 import koffi from 'koffi';
 
-// Windows API constants
-const ES_CONTINUOUS = 0x80000000;
-const ES_SYSTEM_REQUIRED = 0x00000001;
-// const ES_DISPLAY_REQUIRED = 0x00000002;  // Uncomment to also prevent display off
+// Power request type
+const PowerRequestSystemRequired = 0;  // Prevents system from entering sleep
+
+// REASON_CONTEXT flags
+const POWER_REQUEST_CONTEXT_VERSION = 0;
+const POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x00000001;
 
 let isPreventingEnabled = false;
 let kernel32: any = null;
-let setThreadExecutionState: any = null;
+let powerCreateRequest: any = null;
+let powerSetRequest: any = null;
+let powerClearRequest: any = null;
+let closeHandle: any = null;
+let powerRequestHandle: any = null;
+
+// Define REASON_CONTEXT structure for koffi
+let REASON_CONTEXT: any = null;
 
 /**
  * Initialize the Windows API binding
@@ -23,7 +32,27 @@ function initializeApi(): boolean {
 
   try {
     kernel32 = koffi.load('kernel32.dll');
-    setThreadExecutionState = kernel32.func('SetThreadExecutionState', 'uint32', ['uint32']);
+
+    // Define the REASON_CONTEXT structure (simplified version for simple string)
+    REASON_CONTEXT = koffi.struct('REASON_CONTEXT', {
+      Version: 'uint32',
+      Flags: 'uint32',
+      SimpleReasonString: 'str16',  // LPWSTR (UTF-16 string pointer)
+    });
+
+    // PowerCreateRequest(PREASON_CONTEXT Context) -> HANDLE
+    powerCreateRequest = kernel32.func('PowerCreateRequest', 'void*', [koffi.pointer(REASON_CONTEXT)]);
+
+    // PowerSetRequest(HANDLE PowerRequest, POWER_REQUEST_TYPE RequestType) -> BOOL
+    powerSetRequest = kernel32.func('PowerSetRequest', 'int', ['void*', 'int']);
+
+    // PowerClearRequest(HANDLE PowerRequest, POWER_REQUEST_TYPE RequestType) -> BOOL
+    powerClearRequest = kernel32.func('PowerClearRequest', 'int', ['void*', 'int']);
+
+    // CloseHandle(HANDLE hObject) -> BOOL
+    closeHandle = kernel32.func('CloseHandle', 'int', ['void*']);
+
+    console.log('✅ Power API initialized successfully');
     return true;
   } catch (err) {
     console.error('Failed to load kernel32.dll:', err);
@@ -32,9 +61,9 @@ function initializeApi(): boolean {
 }
 
 /**
- * Enable sleep prevention.
- * The system will not enter sleep mode while this is active.
- * Screen may still turn off based on power settings.
+ * Enable sleep prevention using PowerSetRequest.
+ * This prevents Modern Standby (S0 Low Power Idle) from sleeping.
+ * Screen can still turn off based on power settings.
  */
 export function enableSleepPrevention(): boolean {
   if (process.platform !== 'win32') {
@@ -52,14 +81,32 @@ export function enableSleepPrevention(): boolean {
   }
 
   try {
-    // ES_CONTINUOUS | ES_SYSTEM_REQUIRED = Keep system awake, allow display off
-    const result = setThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+    // Create REASON_CONTEXT with simple string
+    const context = {
+      Version: POWER_REQUEST_CONTEXT_VERSION,
+      Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+      SimpleReasonString: 'DevRelay Agent: Maintaining server connection',
+    };
+
+    // Create power request
+    powerRequestHandle = powerCreateRequest(context);
+
+    if (!powerRequestHandle) {
+      console.error('PowerCreateRequest failed');
+      return false;
+    }
+
+    // Set the power request (prevent system sleep)
+    const result = powerSetRequest(powerRequestHandle, PowerRequestSystemRequired);
+
     if (result !== 0) {
       isPreventingEnabled = true;
-      console.log('✅ Sleep prevention enabled (system will not sleep while connected)');
+      console.log('✅ Sleep prevention enabled (PowerSetRequest - Modern Standby compatible)');
       return true;
     } else {
-      console.error('SetThreadExecutionState returned 0 (failure)');
+      console.error('PowerSetRequest failed');
+      closeHandle(powerRequestHandle);
+      powerRequestHandle = null;
       return false;
     }
   } catch (err) {
@@ -77,17 +124,19 @@ export function disableSleepPrevention(): boolean {
     return true;
   }
 
-  if (!kernel32 || !setThreadExecutionState) {
-    isPreventingEnabled = false;
-    return true;
-  }
-
   try {
-    // ES_CONTINUOUS alone clears the flags
-    const result = setThreadExecutionState(ES_CONTINUOUS);
+    if (powerRequestHandle) {
+      // Clear the power request
+      powerClearRequest(powerRequestHandle, PowerRequestSystemRequired);
+
+      // Close the handle
+      closeHandle(powerRequestHandle);
+      powerRequestHandle = null;
+    }
+
     isPreventingEnabled = false;
     console.log('💤 Sleep prevention disabled (normal power management restored)');
-    return result !== 0;
+    return true;
   } catch (err) {
     console.error('Failed to disable sleep prevention:', err);
     isPreventingEnabled = false;

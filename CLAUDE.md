@@ -563,12 +563,14 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `agents/windows/src/services/ai-runner.ts` - `shell: true` 追加
 
 #### 32. Windows Agent スリープ防止機能 (2026-01-19)
-- **問題**: Windows の Modern Standby により、画面オフ後にシステムがスリープ状態に入り、WebSocket 接続が切断される
-- **解決**: Windows API `SetThreadExecutionState` を使用してスリープを防止
+- **問題**: Windows の Modern Standby (S0 Low Power Idle) により、画面オフ後にシステムがスリープ状態に入り、WebSocket 接続が切断される
+- **解決**: Windows API `PowerCreateRequest` / `PowerSetRequest` を使用してスリープを防止
+  - 注: `SetThreadExecutionState` は Modern Standby には効果がないため、`PowerSetRequest` API を採用
 - **動作**:
-  - 接続時に `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` フラグを設定してスリープを防止
-  - 切断時にフラグをクリアして通常の電源管理に戻す
-  - **画面オフは許可**（`ES_DISPLAY_REQUIRED` は使用しない）
+  - 接続時に `PowerSetRequest(PowerRequestSystemRequired)` でスリープを防止
+  - 切断時に `PowerClearRequest` + `CloseHandle` で電源要求を解除
+  - **画面オフは許可**（システムスリープのみ防止）
+  - `powercfg /requests` コマンドで「DevRelay Agent: Maintaining server connection」と表示される
 - **設定方法**:
   - 設定画面 > Connection タブ > 「Prevent sleep while connected」チェックボックス
   - または `%APPDATA%\devrelay\config.yaml` に `preventSleep: true` を追加
