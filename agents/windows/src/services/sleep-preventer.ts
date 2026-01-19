@@ -6,8 +6,9 @@
 
 import koffi from 'koffi';
 
-// Power request type
-const PowerRequestSystemRequired = 0;  // Prevents system from entering sleep
+// Power request types (POWER_REQUEST_TYPE enum)
+const PowerRequestDisplayRequired = 0;  // Prevents display from turning off
+const PowerRequestSystemRequired = 1;   // Prevents system from entering sleep
 
 // REASON_CONTEXT flags
 const POWER_REQUEST_CONTEXT_VERSION = 0;
