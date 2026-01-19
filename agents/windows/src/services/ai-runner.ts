@@ -95,7 +95,7 @@ export async function sendPromptToAi(
 
     proc = spawn(claudePath, args, {
       cwd: projectPath,
-      shell: false,
+      shell: true,  // Windows でリアルタイム出力を得るために必要
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,

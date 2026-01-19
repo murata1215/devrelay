@@ -273,7 +273,9 @@ function getLoginItemOptions() {
     return { path: process.execPath };
   } else {
     const appPath = path.resolve(__dirname, '..', '..');
-    return { path: process.execPath, args: [appPath] };
+    // Windows ではスペースを含むパスをダブルクォートで囲む
+    const quotedPath = appPath.includes(' ') ? `"${appPath}"` : appPath;
+    return { path: process.execPath, args: [quotedPath] };
   }
 }
 
@@ -341,6 +343,8 @@ ipcMain.handle('add-projects-dir', async () => {
     if (!config.projectsDirs.includes(newDir)) {
       config.projectsDirs.push(newDir);
       await saveConfig(config);
+      // 新しいディレクトリを即座にスキャン
+      await autoDiscoverProjects(newDir);
     }
 
     return { added: newDir, config };

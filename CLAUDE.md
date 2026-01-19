@@ -547,6 +547,21 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/services/command-handler.ts` - `handleAgreement()`
   - `apps/server/src/services/agent-manager.ts` - `applyAgreement()`
 
+#### 31. Windows Agent 改善 (2026-01-19)
+- **自動起動パスのクォート対応**
+  - スペースを含むパス（例: `D:\My Programs\...`）でも自動起動が動作するように修正
+  - `getLoginItemOptions()` でパスをダブルクォートで囲む
+- **ディレクトリ追加時の自動スキャン**
+  - Directories タブでディレクトリ追加後、即座にプロジェクトスキャンを実行
+  - 手動で「Scan」ボタンを押す必要がなくなった
+- **リアルタイム進捗表示の修正**
+  - Windows での stdout バッファリング問題を解決
+  - `spawn` の `shell: true` オプションでリアルタイム出力を実現
+  - これにより Discord/Telegram でリアルタイムに進捗が表示されるように
+- **主要ファイル**:
+  - `agents/windows/src/electron/main.ts` - `getLoginItemOptions()` パスクォート、`add-projects-dir` 自動スキャン
+  - `agents/windows/src/services/ai-runner.ts` - `shell: true` 追加
+
 ## 今後の課題
 
 - [ ] LINE 対応
