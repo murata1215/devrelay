@@ -199,6 +199,7 @@ export type UserCommand =
   | { type: 'exec' }      // プラン実行（会話履歴リセットポイント）
   | { type: 'link' }      // プラットフォームリンクコード生成
   | { type: 'agreement' } // DevRelay Agreement を CLAUDE.md に追加
+  | { type: 'session' }   // 現在のセッション情報を表示
   | { type: 'log'; count?: number }
   | { type: 'summary'; period?: string }
   | { type: 'quit' }

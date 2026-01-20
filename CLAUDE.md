@@ -584,6 +584,23 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `agents/windows/src/services/connection.ts` - 接続/切断時のスリープ防止制御
   - `agents/windows/assets/settings.html` - 設定画面 UI
 
+#### 33. セッション情報表示コマンド (2026-01-21)
+- `se` または `session` コマンドで現在のセッション情報を表示
+- **表示内容**:
+  - マシン名、プロジェクト名、AI ツール
+  - セッションステータス（アクティブ/アイドル）
+  - 会話履歴の件数
+  - セッション継続時間
+  - 最終メッセージからの経過時間
+- **未接続時**:
+  - 前回の接続先情報（`lastProjectId` がある場合）
+  - `c` コマンドで再接続可能であることを案内
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `UserCommand` 型に `{ type: 'session' }` を追加
+  - `packages/shared/src/constants.ts` - `SHORTCUTS` に `se`, `session` を追加
+  - `apps/server/src/services/command-parser.ts` - `parseShortcut()` と `getHelpText()` を更新
+  - `apps/server/src/services/command-handler.ts` - `handleSession()` 関数を実装
+
 ## 今後の課題
 
 - [ ] LINE 対応

@@ -177,6 +177,12 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       return { type: 'exec' };
     case 'link':
       return { type: 'link' };
+    case 'a':
+    case 'agreement':
+      return { type: 'agreement' };
+    case 'se':
+    case 'session':
+      return { type: 'session' };
     case 'q':
       return { type: 'quit' };
     case 'h':
@@ -222,6 +228,8 @@ export function getHelpText(): string {
 \`link\` - WebUI アカウントとリンク
 
 **その他**
+\`se\` - セッション情報を表示
+\`a\` - DevRelay Agreement を適用
 \`x\` - 会話履歴をクリア
 \`q\` - 切断
 \`h\` - このヘルプ

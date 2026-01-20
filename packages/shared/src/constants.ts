@@ -15,6 +15,8 @@ export const SHORTCUTS: Record<string, string> = {
   'link': 'link',   // プラットフォームリンクコード生成
   'a': 'agreement', // DevRelay Agreement を CLAUDE.md に追加
   'agreement': 'agreement',
+  'se': 'session',   // セッション情報を表示
+  'session': 'session',
   'q': 'quit',
   'h': 'help',
   'log': 'log',

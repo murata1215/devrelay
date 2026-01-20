@@ -115,6 +115,9 @@ export async function executeCommand(
     case 'agreement':
       return handleAgreement(context);
 
+    case 'session':
+      return handleSession(context);
+
     case 'log':
       return handleLog(context, command.count);
 
@@ -564,6 +567,86 @@ async function handleAgreement(context: UserContext): Promise<string> {
 
   // Return empty since progress message is already sent
   return '';
+}
+
+async function handleSession(context: UserContext): Promise<string> {
+  // 未接続の場合
+  if (!context.currentSessionId || !context.currentMachineId) {
+    const parts = ['📋 **セッション情報**', ''];
+    parts.push('ステータス: 未接続');
+
+    if (context.lastProjectId) {
+      const lastProject = await prisma.project.findUnique({
+        where: { id: context.lastProjectId },
+        include: { machine: true }
+      });
+      if (lastProject) {
+        parts.push('');
+        parts.push(`前回の接続先: ${lastProject.machine.name} / ${lastProject.name}`);
+        parts.push('`c` で再接続できます');
+      }
+    } else {
+      parts.push('');
+      parts.push('`m` でマシン一覧を表示して接続してください');
+    }
+
+    return parts.join('\n');
+  }
+
+  // セッション情報を取得
+  const session = await prisma.session.findUnique({
+    where: { id: context.currentSessionId },
+    include: {
+      project: true,
+      machine: true,
+      messages: {
+        orderBy: { createdAt: 'desc' },
+        take: 1
+      }
+    }
+  });
+
+  if (!session) {
+    return '❌ セッションが見つかりません。';
+  }
+
+  // 会話履歴件数を取得
+  const messageCount = await prisma.message.count({
+    where: { sessionId: context.currentSessionId }
+  });
+
+  // セッション情報を構築
+  const parts = ['📋 **セッション情報**', ''];
+  parts.push(`マシン: ${session.machine.name}`);
+  parts.push(`プロジェクト: ${session.project.name}`);
+  parts.push(`AI ツール: ${AI_TOOL_NAMES[session.aiTool] || session.aiTool}`);
+  parts.push(`ステータス: ${session.status === 'active' ? '🟢 アクティブ' : '⏹️ 終了'}`);
+  parts.push(`会話履歴: ${messageCount}件`);
+
+  // セッション開始時刻
+  const startedAt = new Date(session.startedAt);
+  const now = new Date();
+  const diffMs = now.getTime() - startedAt.getTime();
+  const diffMins = Math.floor(diffMs / (1000 * 60));
+  const diffHours = Math.floor(diffMins / 60);
+
+  let duration: string;
+  if (diffHours > 0) {
+    duration = `${diffHours}時間${diffMins % 60}分`;
+  } else {
+    duration = `${diffMins}分`;
+  }
+  parts.push(`セッション時間: ${duration}`);
+
+  // 最後のメッセージ
+  if (session.messages.length > 0) {
+    const lastMsg = session.messages[0];
+    const lastMsgTime = new Date(lastMsg.createdAt);
+    const lastMsgDiff = Math.floor((now.getTime() - lastMsgTime.getTime()) / (1000 * 60));
+    parts.push(`最終メッセージ: ${lastMsgDiff}分前`);
+  }
+
+  return parts.join('\n');
 }
 
 async function handleLog(context: UserContext, count?: number): Promise<string> {
