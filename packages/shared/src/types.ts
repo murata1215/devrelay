@@ -107,6 +107,7 @@ export interface AiStatusPayload {
   status: 'starting' | 'running' | 'stopped' | 'error';
   error?: string;
   agreementStatus?: boolean;  // Whether CLAUDE.md has DevRelay Agreement
+  hasStorageContext?: boolean;  // Whether storage context exists for this project
 }
 
 // Server -> Agent
@@ -119,7 +120,9 @@ export type ServerToAgentMessage =
   | { type: 'server:conversation:exec'; payload: ConversationExecPayload }
   | { type: 'server:workstate:save'; payload: WorkStateSavePayload }
   | { type: 'server:agreement:apply'; payload: AgreementApplyPayload }
-  | { type: 'server:session:restored'; payload: SessionRestoredPayload };
+  | { type: 'server:session:restored'; payload: SessionRestoredPayload }
+  | { type: 'server:storage:save'; payload: StorageSavePayload }
+  | { type: 'server:storage:clear'; payload: StorageClearPayload };
 
 export interface ConversationExecPayload {
   sessionId: string;
@@ -144,6 +147,17 @@ export interface AgreementApplyPayload {
   sessionId: string;
   projectPath: string;
   userId: string;
+}
+
+export interface StorageSavePayload {
+  sessionId: string;
+  projectPath: string;
+  content: string;
+}
+
+export interface StorageClearPayload {
+  sessionId: string;
+  projectPath: string;
 }
 
 export interface SessionStartPayload {

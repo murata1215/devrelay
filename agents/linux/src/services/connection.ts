@@ -11,7 +11,9 @@ import type {
   FileAttachment,
   MissedMessage,
   ProxyConfig,
-  AgreementApplyPayload
+  AgreementApplyPayload,
+  StorageSavePayload,
+  StorageClearPayload
 } from '@devrelay/shared';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
@@ -26,8 +28,8 @@ import {
   DEVRELAY_AGREEMENT_MARKER,
   AGREEMENT_APPLY_PROMPT
 } from './output-collector.js';
-import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
+import { join, dirname } from 'path';
 import {
   loadConversation,
   saveConversation,
@@ -47,10 +49,15 @@ import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let pingTimer: NodeJS.Timeout | null = null;
+let pongCheckInterval: NodeJS.Timeout | null = null;
 let currentConfig: AgentConfig | null = null;
 
 // Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
+
+// Pong timeout detection
+const PONG_TIMEOUT = 45000; // 45 seconds
+let lastPongReceived = Date.now();
 
 // Store session info for prompt handling
 interface SessionInfo {
@@ -121,9 +128,21 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
         },
       });
 
-      // Start ping
+      // Start ping and pong timeout check
       startPing();
+      lastPongReceived = Date.now();
+      pongCheckInterval = setInterval(() => {
+        const timeSinceLastPong = Date.now() - lastPongReceived;
+        if (timeSinceLastPong > PONG_TIMEOUT) {
+          console.error(`⚠️ Pong timeout detected (${timeSinceLastPong}ms since last pong), reconnecting...`);
+          ws?.terminate();
+        }
+      }, 15000);
       resolve();
+    });
+
+    ws.on('pong', () => {
+      lastPongReceived = Date.now();
     });
 
     ws.on('message', (data) => {
@@ -186,6 +205,14 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:agreement:apply':
       handleAgreementApply(message.payload);
       break;
+
+    case 'server:storage:save':
+      handleStorageSave(message.payload);
+      break;
+
+    case 'server:storage:clear':
+      handleStorageClear(message.payload);
+      break;
   }
 }
 
@@ -212,6 +239,12 @@ async function handleSessionStart(
   const agreementStatus = await checkAgreementStatus(projectPath);
   console.log(`📋 DevRelay Agreement: ${agreementStatus ? 'compliant' : 'not compliant'}`);
 
+  // Check for storage context
+  const hasStorageContext = await loadStorageContext(projectPath) !== null;
+  if (hasStorageContext) {
+    console.log(`📂 Storage context found for project`);
+  }
+
   // Generate UUID for Claude Code session and store session info
   const claudeSessionId = uuidv4();
   sessionInfoMap.set(sessionId, { projectPath, aiTool, claudeSessionId, history, pendingWorkState: pendingWorkState || undefined });
@@ -237,6 +270,7 @@ async function handleSessionStart(
         sessionId,
         status: 'running',
         agreementStatus,
+        hasStorageContext,
       },
     });
   } catch (err: any) {
@@ -388,8 +422,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     sessionInfo.pendingWorkState = undefined;
   }
 
+  // Load storage context if exists
+  let storageContextPrompt = '';
+  const storageContext = await loadStorageContext(sessionInfo.projectPath);
+  if (storageContext) {
+    console.log(`📂 Including storage context in prompt (${storageContext.length} chars)`);
+    storageContextPrompt = '\n\n--- Storage Context ---\n' + storageContext + '\n--- End Storage Context ---';
+  }
+
   // Build prompt with history context and instructions
-  let fullPrompt = promptWithFiles + workStatePrompt + OUTPUT_DIR_INSTRUCTION + modeInstruction;
+  let fullPrompt = promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION + modeInstruction;
   if (sessionInfo.history.length > 1) {
     // Check if this is the first message after exec (need to include plan context)
     const historyForContext = sessionInfo.history.slice(0, -1); // exclude current message
@@ -532,8 +574,66 @@ function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   }, delay);
 }
 
+// Storage context functions
+const STORAGE_CONTEXT_FILENAME = 'storage-context.md';
+
+function getStorageContextPath(projectPath: string): string {
+  return join(projectPath, '.devrelay', STORAGE_CONTEXT_FILENAME);
+}
+
+async function loadStorageContext(projectPath: string): Promise<string | null> {
+  try {
+    const content = await readFile(getStorageContextPath(projectPath), 'utf-8');
+    return content;
+  } catch {
+    return null;
+  }
+}
+
+async function saveStorageContext(projectPath: string, content: string): Promise<void> {
+  const filePath = getStorageContextPath(projectPath);
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, content, 'utf-8');
+}
+
+async function clearStorageContext(projectPath: string): Promise<void> {
+  try {
+    await unlink(getStorageContextPath(projectPath));
+  } catch {
+    // Ignore if file doesn't exist
+  }
+}
+
+async function handleStorageSave(payload: StorageSavePayload) {
+  const { sessionId, projectPath, content } = payload;
+  console.log(`💾 Saving storage context for session ${sessionId}`);
+
+  try {
+    await saveStorageContext(projectPath, content);
+    console.log(`✅ Storage context saved (${content.length} chars)`);
+  } catch (err) {
+    console.error(`❌ Failed to save storage context:`, (err as Error).message);
+  }
+}
+
+async function handleStorageClear(payload: StorageClearPayload) {
+  const { sessionId, projectPath } = payload;
+  console.log(`🗑️ Clearing storage context for session ${sessionId}`);
+
+  try {
+    await clearStorageContext(projectPath);
+    console.log(`✅ Storage context cleared`);
+  } catch (err) {
+    console.error(`❌ Failed to clear storage context:`, (err as Error).message);
+  }
+}
+
 export function disconnect() {
   stopPing();
+  if (pongCheckInterval) {
+    clearInterval(pongCheckInterval);
+    pongCheckInterval = null;
+  }
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
