@@ -69,7 +69,8 @@ export type AgentMessage =
   | { type: 'agent:projects'; payload: { machineId: string; projects: Project[] } }
   | { type: 'agent:ai:output'; payload: AiOutputPayload }
   | { type: 'agent:ai:status'; payload: AiStatusPayload }
-  | { type: 'agent:session:restore'; payload: SessionRestorePayload };
+  | { type: 'agent:session:restore'; payload: SessionRestorePayload }
+  | { type: 'agent:storage:saved'; payload: StorageSavedPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -158,6 +159,13 @@ export interface StorageSavePayload {
 export interface StorageClearPayload {
   sessionId: string;
   projectPath: string;
+}
+
+export interface StorageSavedPayload {
+  machineId: string;
+  sessionId: string;
+  projectPath: string;
+  contentLength: number;
 }
 
 export interface SessionStartPayload {

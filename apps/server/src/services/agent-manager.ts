@@ -49,6 +49,10 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
         case 'agent:ai:status':
           await handleAiStatus(message.payload);
           break;
+
+        case 'agent:storage:saved':
+          await handleStorageSaved(message.payload);
+          break;
       }
     } catch (err) {
       console.error('Error processing agent message:', err);
@@ -216,6 +220,12 @@ async function handleAiStatus(payload: { machineId: string; sessionId: string; s
   await broadcastToSession(payload.sessionId, statusMessage, false);
 }
 
+async function handleStorageSaved(payload: { machineId: string; sessionId: string; projectPath: string; contentLength: number }) {
+  const { sessionId, contentLength } = payload;
+  const message = `💾 ストレージコンテキストを保存しました（${contentLength}文字）`;
+  await broadcastToSession(sessionId, message, false);
+}
+
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
@@ -312,5 +322,19 @@ export async function applyAgreement(machineId: string, sessionId: string, proje
   sendToAgent(machineId, {
     type: 'server:agreement:apply',
     payload: { sessionId, projectPath, userId }
+  });
+}
+
+export async function saveStorageContext(machineId: string, sessionId: string, projectPath: string, content: string) {
+  sendToAgent(machineId, {
+    type: 'server:storage:save',
+    payload: { sessionId, projectPath, content }
+  });
+}
+
+export async function clearStorageContext(machineId: string, sessionId: string, projectPath: string) {
+  sendToAgent(machineId, {
+    type: 'server:storage:clear',
+    payload: { sessionId, projectPath }
   });
 }

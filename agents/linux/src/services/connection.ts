@@ -611,6 +611,19 @@ async function handleStorageSave(payload: StorageSavePayload) {
   try {
     await saveStorageContext(projectPath, content);
     console.log(`✅ Storage context saved (${content.length} chars)`);
+
+    // Notify server that storage context was saved
+    if (currentConfig) {
+      sendMessage({
+        type: 'agent:storage:saved',
+        payload: {
+          machineId: currentConfig.machineId,
+          sessionId,
+          projectPath,
+          contentLength: content.length,
+        },
+      });
+    }
   } catch (err) {
     console.error(`❌ Failed to save storage context:`, (err as Error).message);
   }
