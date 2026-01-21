@@ -45,28 +45,28 @@ export function DashboardPage() {
       <h1 className="text-2xl font-bold text-white">Dashboard</h1>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-6">
-          <div className="text-gray-400 text-sm">Machines</div>
-          <div className="text-2xl font-bold text-white">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        <div className="bg-gray-800 rounded-lg p-4 sm:p-6">
+          <div className="text-gray-400 text-xs sm:text-sm">Machines</div>
+          <div className="text-xl sm:text-2xl font-bold text-white">
             {stats.machines.online}/{stats.machines.total}
           </div>
-          <div className="text-green-400 text-sm">online</div>
+          <div className="text-green-400 text-xs sm:text-sm">online</div>
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-6">
-          <div className="text-gray-400 text-sm">Projects</div>
-          <div className="text-2xl font-bold text-white">{stats.projects}</div>
+        <div className="bg-gray-800 rounded-lg p-4 sm:p-6">
+          <div className="text-gray-400 text-xs sm:text-sm">Projects</div>
+          <div className="text-xl sm:text-2xl font-bold text-white">{stats.projects}</div>
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-6">
-          <div className="text-gray-400 text-sm">Sessions</div>
-          <div className="text-2xl font-bold text-white">{stats.sessions}</div>
+        <div className="bg-gray-800 rounded-lg p-4 sm:p-6 col-span-2 sm:col-span-1">
+          <div className="text-gray-400 text-xs sm:text-sm">Sessions</div>
+          <div className="text-xl sm:text-2xl font-bold text-white">{stats.sessions}</div>
         </div>
       </div>
 
       {/* Recent sessions */}
-      <div className="bg-gray-800 rounded-lg p-6">
+      <div className="bg-gray-800 rounded-lg p-4 sm:p-6">
         <h2 className="text-lg font-semibold text-white mb-4">Recent Sessions</h2>
         {stats.recentSessions.length === 0 ? (
           <p className="text-gray-400">No recent sessions</p>
@@ -75,17 +75,17 @@ export function DashboardPage() {
             {stats.recentSessions.map((session) => (
               <div
                 key={session.id}
-                className="flex items-center justify-between py-2 border-b border-gray-700 last:border-0"
+                className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2 border-b border-gray-700 last:border-0 gap-1"
               >
                 <div>
-                  <div className="text-white font-medium">{session.projectName}</div>
-                  <div className="text-gray-400 text-sm">
+                  <div className="text-white font-medium text-sm sm:text-base">{session.projectName}</div>
+                  <div className="text-gray-400 text-xs sm:text-sm">
                     {session.machineName} - {session.aiTool}
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="sm:text-right flex sm:flex-col items-center sm:items-end gap-2 sm:gap-0">
                   <div
-                    className={`text-sm ${
+                    className={`text-xs sm:text-sm ${
                       session.status === 'active' ? 'text-green-400' : 'text-gray-400'
                     }`}
                   >

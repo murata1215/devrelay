@@ -186,3 +186,23 @@ export const platforms = {
     await request('DELETE', `/platforms/${platform}`);
   },
 };
+
+// サービス管理API
+export interface ServiceStatus {
+  server: 'active' | 'inactive';
+  agent: 'active' | 'inactive';
+}
+
+export const services = {
+  async status(): Promise<ServiceStatus> {
+    return request('GET', '/services/status');
+  },
+
+  async restartServer(): Promise<{ success: boolean; message: string }> {
+    return request('POST', '/services/restart/server');
+  },
+
+  async restartAgent(): Promise<{ success: boolean; message: string }> {
+    return request('POST', '/services/restart/agent');
+  },
+};

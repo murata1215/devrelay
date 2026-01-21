@@ -1,5 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomBytes } from 'crypto';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
@@ -10,6 +12,8 @@ import {
   validateAndConsumeLinkCode,
   unlinkPlatform,
 } from '../services/platform-link.js';
+
+const execAsync = promisify(exec);
 
 // Type for machine with projects
 type MachineWithProjects = Machine & {
@@ -341,6 +345,72 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     return { success: true };
+  });
+
+  // ========================================
+  // サービス再起動
+  // ========================================
+
+  // サーバー再起動
+  app.post('/api/services/restart/server', async (request, reply) => {
+    try {
+      // バックグラウンドで再起動（レスポンスを返してから再起動）
+      setTimeout(async () => {
+        try {
+          await execAsync('systemctl --user restart devrelay-server');
+        } catch (err) {
+          console.error('Failed to restart server:', err);
+        }
+      }, 500);
+
+      return { success: true, message: 'Server restart initiated' };
+    } catch (err) {
+      console.error('Failed to initiate server restart:', err);
+      return reply.status(500).send({ error: 'Failed to restart server' });
+    }
+  });
+
+  // Agent 再起動
+  app.post('/api/services/restart/agent', async (request, reply) => {
+    try {
+      // バックグラウンドで再起動
+      setTimeout(async () => {
+        try {
+          await execAsync('systemctl --user restart devrelay-agent');
+        } catch (err) {
+          console.error('Failed to restart agent:', err);
+        }
+      }, 500);
+
+      return { success: true, message: 'Agent restart initiated' };
+    } catch (err) {
+      console.error('Failed to initiate agent restart:', err);
+      return reply.status(500).send({ error: 'Failed to restart agent' });
+    }
+  });
+
+  // サービスステータス取得
+  app.get('/api/services/status', async (request, reply) => {
+    try {
+      const [serverStatus, agentStatus] = await Promise.all([
+        execAsync('systemctl --user is-active devrelay-server').then(
+          () => 'active',
+          () => 'inactive'
+        ),
+        execAsync('systemctl --user is-active devrelay-agent').then(
+          () => 'active',
+          () => 'inactive'
+        ),
+      ]);
+
+      return {
+        server: serverStatus,
+        agent: agentStatus,
+      };
+    } catch (err) {
+      console.error('Failed to get service status:', err);
+      return reply.status(500).send({ error: 'Failed to get service status' });
+    }
   });
 }
 

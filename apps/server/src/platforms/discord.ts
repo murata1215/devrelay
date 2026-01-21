@@ -253,7 +253,16 @@ export async function setupDiscordBot() {
 
       // Send response (skip if empty - progress tracking handles it)
       if (response) {
-        await message.reply(response);
+        // Split response if it exceeds Discord's limit
+        const chunks = splitMessage(response);
+
+        // Reply with first chunk
+        await message.reply(chunks[0]);
+
+        // Send remaining chunks as follow-up messages
+        for (let i = 1; i < chunks.length; i++) {
+          await (message.channel as TextChannel | DMChannel).send(chunks[i]);
+        }
       }
     } catch (error) {
       console.error('Discord message handling error:', error);

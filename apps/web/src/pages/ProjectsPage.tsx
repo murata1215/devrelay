@@ -50,55 +50,85 @@ export function ProjectsPage() {
           </p>
         </div>
       ) : (
-        <div className="bg-gray-800 rounded-lg overflow-hidden">
-          <table className="min-w-full divide-y divide-gray-700">
-            <thead className="bg-gray-700/50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                  Project
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                  Machine
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                  Path
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                  Last Used
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-700">
-              {data.map((project) => (
-                <tr key={project.id}>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-white font-medium">{project.name}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {project.machine && (
-                      <div className="flex items-center space-x-2">
-                        <span
-                          className={`w-2 h-2 rounded-full ${
-                            project.machine.online ? 'bg-green-400' : 'bg-gray-400'
-                          }`}
-                        />
-                        <span className="text-gray-300">{project.machine.name}</span>
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-6 py-4">
-                    <code className="text-gray-400 text-sm">{project.path}</code>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
-                    {project.lastUsedAt
-                      ? new Date(project.lastUsedAt).toLocaleString()
-                      : '-'}
-                  </td>
+        <>
+          {/* Desktop table view */}
+          <div className="hidden md:block bg-gray-800 rounded-lg overflow-hidden">
+            <table className="min-w-full divide-y divide-gray-700">
+              <thead className="bg-gray-700/50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Project
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Machine
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Path
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Last Used
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-gray-700">
+                {data.map((project) => (
+                  <tr key={project.id}>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-white font-medium">{project.name}</div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {project.machine && (
+                        <div className="flex items-center space-x-2">
+                          <span
+                            className={`w-2 h-2 rounded-full ${
+                              project.machine.online ? 'bg-green-400' : 'bg-gray-400'
+                            }`}
+                          />
+                          <span className="text-gray-300">{project.machine.name}</span>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-6 py-4">
+                      <code className="text-gray-400 text-sm">{project.path}</code>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
+                      {project.lastUsedAt
+                        ? new Date(project.lastUsedAt).toLocaleString()
+                        : '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile card view */}
+          <div className="md:hidden space-y-4">
+            {data.map((project) => (
+              <div key={project.id} className="bg-gray-800 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-white font-medium">{project.name}</div>
+                  {project.machine && (
+                    <div className="flex items-center space-x-2">
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          project.machine.online ? 'bg-green-400' : 'bg-gray-400'
+                        }`}
+                      />
+                      <span className="text-gray-300 text-sm">{project.machine.name}</span>
+                    </div>
+                  )}
+                </div>
+                <code className="text-gray-400 text-xs break-all">{project.path}</code>
+                {project.lastUsedAt && (
+                  <div className="text-gray-500 text-xs mt-2">
+                    Last used: {new Date(project.lastUsedAt).toLocaleString()}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

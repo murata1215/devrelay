@@ -146,7 +146,7 @@ export function isTraditionalCommand(input: string): boolean {
   const trimmed = input.trim().toLowerCase();
 
   // 単一文字コマンド
-  if (/^[mpqhcxeao]$/i.test(trimmed)) return true;
+  if (/^[mpqhcxeaos]$/i.test(trimmed)) return true;
 
   // m から始まるメッセージ
   if (/^m\s+/i.test(trimmed)) return true;
@@ -154,8 +154,8 @@ export function isTraditionalCommand(input: string): boolean {
   // 数字のみ
   if (/^\d+$/.test(trimmed)) return true;
 
-  // その他のコマンド: exec, link, agreement, log, sum, st, storage, se, session
-  if (/^(exec|link|agreement|log\d*|sum\d*d?|st|storage(\s+(list|(get|delete)\s+.+))?|se|session)$/i.test(trimmed)) return true;
+  // その他のコマンド: exec, link, agreement, log, sum, storage
+  if (/^(exec|link|agreement|log\d*|sum\d*d?|storage(\s+(list|(get|delete)\s+.+))?)$/i.test(trimmed)) return true;
 
   return false;
 }

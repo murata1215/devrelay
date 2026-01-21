@@ -576,70 +576,142 @@ async function handleAgreement(context: UserContext): Promise<string> {
 }
 
 async function handleSession(context: UserContext): Promise<string> {
-  // アクティブセッション一覧を取得
+  // メモリ内のアクティブセッション（参加者がいるセッション）を取得
   const activeSessions = await getActiveSessions();
 
-  if (activeSessions.length === 0) {
-    const parts = ['📋 **アクティブセッション**', ''];
-    parts.push('アクティブなセッションはありません');
-    parts.push('');
-    parts.push('`m` でマシン一覧を表示して接続してください');
+  // 現在接続中のセッションの詳細情報を表示
+  if (!context.currentSessionId) {
+    // 未接続の場合
+    const parts: string[] = [];
+    parts.push('📍 未接続');
+
+    // 前回の接続先情報があれば表示
+    if (context.lastProjectId) {
+      const lastProject = await prisma.project.findUnique({
+        where: { id: context.lastProjectId },
+        include: { machine: true }
+      });
+      if (lastProject) {
+        parts.push(`   前回: ${lastProject.machine.name} / ${lastProject.name} (c で再接続)`);
+      }
+    }
+
+    // 他のアクティブセッションを表示（同じマシン+プロジェクトの重複を排除）
+    if (activeSessions.length > 0) {
+      const uniqueSessions = new Map<string, typeof activeSessions[0]>();
+      for (const sess of activeSessions) {
+        const key = `${sess.machineName}:${sess.projectName}`;
+        const existing = uniqueSessions.get(key);
+        // より新しいセッションを優先
+        if (!existing || new Date(sess.startedAt) > new Date(existing.startedAt)) {
+          uniqueSessions.set(key, sess);
+        }
+      }
+      for (const sess of uniqueSessions.values()) {
+        const durationMs = Date.now() - new Date(sess.startedAt).getTime();
+        const durationStr = formatDuration(durationMs);
+        parts.push(`• ${sess.machineName} / ${sess.projectName} (${durationStr})`);
+      }
+    }
+
+    // オンラインのマシン一覧を表示（アクティブセッションがないマシン）
+    const onlineMachines = await prisma.machine.findMany({
+      where: { status: 'online' }
+    });
+
+    const activeSessionMachineNames = new Set(activeSessions.map(s => s.machineName));
+    const idleMachines = onlineMachines.filter(m => !activeSessionMachineNames.has(m.name));
+
+    if (idleMachines.length > 0) {
+      for (const machine of idleMachines) {
+        parts.push(`• ${machine.name} (idle)`);
+      }
+    }
+
     return parts.join('\n');
   }
 
-  // マシン名 + プロジェクト名でグループ化（重複排除）
-  const uniqueSessions = new Map<string, {
-    machineName: string;
-    projectName: string;
-    platforms: Set<string>;
-    startedAt: Date;
-    sessionIds: string[];
-  }>();
-
-  for (const session of activeSessions) {
-    const key = `${session.machineName}:${session.projectName}`;
-    const existing = uniqueSessions.get(key);
-
-    if (existing) {
-      // 既存エントリにプラットフォームとセッションIDを追加
-      session.participants.forEach(p => existing.platforms.add(p.platform));
-      existing.sessionIds.push(session.sessionId);
-      // 最も古い開始時刻を保持
-      if (session.startedAt < existing.startedAt) {
-        existing.startedAt = session.startedAt;
+  // 現在のセッション情報を取得
+  const session = await prisma.session.findUnique({
+    where: { id: context.currentSessionId },
+    include: {
+      machine: true,
+      project: true,
+      messages: {
+        orderBy: { createdAt: 'desc' },
+        take: 1
+      },
+      _count: {
+        select: { messages: true }
       }
-    } else {
-      uniqueSessions.set(key, {
-        machineName: session.machineName,
-        projectName: session.projectName,
-        platforms: new Set(session.participants.map(p => p.platform)),
-        startedAt: session.startedAt,
-        sessionIds: [session.sessionId],
-      });
     }
-  }
-
-  const uniqueList = Array.from(uniqueSessions.values());
-  const parts = [`📋 アクティブセッション (${uniqueList.length}件)`, ''];
-
-  uniqueList.forEach((session, index) => {
-    // 日付を取得（今日なら「今日」、それ以外は日付）
-    const now = new Date();
-    const sessionDate = new Date(session.startedAt);
-    const isToday = sessionDate.toDateString() === now.toDateString();
-    const dateStr = isToday ? '今日' : sessionDate.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
-
-    // 参加プラットフォームをリスト
-    const platforms = Array.from(session.platforms).join(', ');
-
-    // 現在のセッションかどうか
-    const isCurrent = context.currentSessionId && session.sessionIds.includes(context.currentSessionId);
-    const currentMarker = isCurrent ? ' 👈 (現在)' : '';
-
-    parts.push(`${index + 1}. **${session.machineName}** / ${session.projectName}${currentMarker}💬 ${platforms} - ${dateStr}`);
   });
 
+  if (!session) {
+    return '⚠️ セッション情報を取得できませんでした';
+  }
+
+  const now = new Date();
+  const startedAt = new Date(session.startedAt);
+  const durationMs = now.getTime() - startedAt.getTime();
+  const durationStr = formatDuration(durationMs);
+
+  const parts: string[] = [];
+
+  // 現在のセッション（1行形式）
+  parts.push(`📍 ${session.machine.name} / ${session.project.name} (${durationStr})`);
+
+  // 他のアクティブセッション（現在のセッション以外、同じマシン+プロジェクトの重複を排除）
+  const otherActiveSessions = activeSessions.filter(s => s.sessionId !== context.currentSessionId);
+  const uniqueOtherSessions = new Map<string, typeof otherActiveSessions[0]>();
+  for (const sess of otherActiveSessions) {
+    const key = `${sess.machineName}:${sess.projectName}`;
+    // 現在のセッションと同じマシン+プロジェクトはスキップ
+    if (key === `${session.machine.name}:${session.project.name}`) continue;
+    const existing = uniqueOtherSessions.get(key);
+    // より新しいセッションを優先
+    if (!existing || new Date(sess.startedAt) > new Date(existing.startedAt)) {
+      uniqueOtherSessions.set(key, sess);
+    }
+  }
+  for (const sess of uniqueOtherSessions.values()) {
+    const sessDurationMs = Date.now() - new Date(sess.startedAt).getTime();
+    const sessDurationStr = formatDuration(sessDurationMs);
+    parts.push(`• ${sess.machineName} / ${sess.projectName} (${sessDurationStr})`);
+  }
+
+  // アクティブセッションがないオンラインマシン
+  const onlineMachines = await prisma.machine.findMany({
+    where: {
+      status: 'online',
+      id: { not: session.machineId }
+    }
+  });
+
+  const activeSessionMachineNames = new Set(otherActiveSessions.map(s => s.machineName));
+  const idleMachines = onlineMachines.filter(m => !activeSessionMachineNames.has(m.name));
+
+  for (const machine of idleMachines) {
+    parts.push(`• ${machine.name} (idle)`);
+  }
+
   return parts.join('\n');
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+
+  if (hours > 0) {
+    const remainingMinutes = minutes % 60;
+    return `${hours}時間${remainingMinutes}分`;
+  } else if (minutes > 0) {
+    const remainingSeconds = seconds % 60;
+    return `${minutes}分${remainingSeconds}秒`;
+  } else {
+    return `${seconds}秒`;
+  }
 }
 
 async function handleLog(context: UserContext, count?: number): Promise<string> {

@@ -165,8 +165,8 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       return { type: 'machine:list' };
     case 'p':
       return { type: 'project:list' };
-    case 's':
-      return { type: 'status' };
+    // case 's': 現在未使用
+    //   return { type: 'status' };
     case 'r':
       return { type: 'recent' };
     case 'c':
@@ -181,7 +181,7 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     case 'a':
     case 'agreement':
       return { type: 'agreement' };
-    case 'se':
+    case 's':
     case 'session':
       return { type: 'session' };
     case 'q':
@@ -208,7 +208,7 @@ export function getHelpText(): string {
 \`m\` - マシン一覧
 \`p\` - プロジェクト一覧
 \`c\` - 前回の接続先に再接続
-\`s\` - ステータス
+\`s\` - セッション情報
 \`1\`, \`2\`, \`3\`... - 一覧から選択
 
 **プラン実行**
@@ -229,7 +229,6 @@ export function getHelpText(): string {
 \`link\` - WebUI アカウントとリンク
 
 **その他**
-\`se\` - セッション情報を表示
 \`a\` - DevRelay Agreement を適用
 \`x\` - 会話履歴をクリア
 \`q\` - 切断

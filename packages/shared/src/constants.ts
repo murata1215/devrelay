@@ -6,7 +6,7 @@
 export const SHORTCUTS: Record<string, string> = {
   'm': 'machine:list',
   'p': 'project:list',
-  's': 'status',
+  // 's': 'status',  // 現在未使用
   'r': 'recent',
   'c': 'continue',  // 前回の接続先に再接続
   'x': 'clear',     // 会話履歴をクリア
@@ -15,7 +15,7 @@ export const SHORTCUTS: Record<string, string> = {
   'link': 'link',   // プラットフォームリンクコード生成
   'a': 'agreement', // DevRelay Agreement を CLAUDE.md に追加
   'agreement': 'agreement',
-  'se': 'session',   // セッション情報を表示
+  's': 'session',    // セッション情報を表示
   'session': 'session',
   'q': 'quit',
   'h': 'help',

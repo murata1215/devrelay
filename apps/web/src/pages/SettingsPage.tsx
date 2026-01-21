@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { settings, platforms, type LinkedPlatform } from '../lib/api';
+import { settings, platforms, services, type LinkedPlatform, type ServiceStatus } from '../lib/api';
 
 export function SettingsPage() {
   const [data, setData] = useState<Record<string, string>>({});
   const [linkedPlatforms, setLinkedPlatforms] = useState<LinkedPlatform[]>([]);
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -15,18 +16,72 @@ export function SettingsPage() {
   const [linking, setLinking] = useState(false);
   const [unlinking, setUnlinking] = useState<string | null>(null);
 
+  // Service restart state
+  const [restartingServer, setRestartingServer] = useState(false);
+  const [restartingAgent, setRestartingAgent] = useState(false);
+
   const loadSettings = async () => {
     try {
-      const [settingsResult, platformsResult] = await Promise.all([
+      const [settingsResult, platformsResult, serviceStatusResult] = await Promise.all([
         settings.get(),
         platforms.list(),
+        services.status().catch(() => null),
       ]);
       setData(settingsResult);
       setLinkedPlatforms(platformsResult);
+      setServiceStatus(serviceStatusResult);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRestartServer = async () => {
+    if (!confirm('Are you sure you want to restart the server? This will temporarily disconnect all agents.')) {
+      return;
+    }
+
+    setRestartingServer(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      await services.restartServer();
+      setSuccess('Server restart initiated. The page will reload shortly...');
+      // Wait a bit and reload the page
+      setTimeout(() => {
+        window.location.reload();
+      }, 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to restart server');
+      setRestartingServer(false);
+    }
+  };
+
+  const handleRestartAgent = async () => {
+    if (!confirm('Are you sure you want to restart the agent?')) {
+      return;
+    }
+
+    setRestartingAgent(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      await services.restartAgent();
+      setSuccess('Agent restart initiated');
+      // Refresh status after a short delay
+      setTimeout(async () => {
+        try {
+          const status = await services.status();
+          setServiceStatus(status);
+        } catch {}
+        setRestartingAgent(false);
+      }, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to restart agent');
+      setRestartingAgent(false);
     }
   };
 
@@ -190,20 +245,20 @@ export function SettingsPage() {
             </p>
 
             {data.openai_api_key ? (
-              <div className="flex items-center space-x-4">
-                <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
                   {data.openai_api_key}
                 </code>
                 <button
                   onClick={() => handleDeleteApiKey('openai_api_key', 'OpenAI API Key')}
                   disabled={saving === 'openai_api_key'}
-                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded disabled:opacity-50"
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
                 >
                   {saving === 'openai_api_key' ? 'Removing...' : 'Remove'}
                 </button>
               </div>
             ) : (
-              <div className="flex items-center space-x-4">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
                 <input
                   type="password"
                   value={openaiKey}
@@ -214,7 +269,7 @@ export function SettingsPage() {
                 <button
                   onClick={() => handleSaveApiKey('openai_api_key', openaiKey, 'OpenAI API Key')}
                   disabled={saving === 'openai_api_key' || !openaiKey}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50"
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
                 >
                   {saving === 'openai_api_key' ? 'Saving...' : 'Save'}
                 </button>
@@ -239,19 +294,19 @@ export function SettingsPage() {
           <p className="text-gray-500 text-xs mb-2">
             Send <code className="bg-gray-700 px-1 rounded">link</code> to the DevRelay bot on Discord or Telegram to get a code.
           </p>
-          <form onSubmit={handleLinkPlatform} className="flex items-center space-x-4">
+          <form onSubmit={handleLinkPlatform} className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
             <input
               type="text"
               value={linkCode}
               onChange={(e) => setLinkCode(e.target.value.toUpperCase())}
               placeholder="ABC123"
               maxLength={6}
-              className="w-32 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-center text-lg font-mono tracking-widest placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full sm:w-32 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-center text-lg font-mono tracking-widest placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <button
               type="submit"
               disabled={linking || linkCode.length !== 6}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
             >
               {linking ? 'Linking...' : 'Link'}
             </button>
@@ -266,7 +321,7 @@ export function SettingsPage() {
               {linkedPlatforms.map((platform) => (
                 <div
                   key={platform.platform}
-                  className="flex items-center justify-between bg-gray-700 px-4 py-3 rounded"
+                  className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-gray-700 px-4 py-3 rounded gap-2"
                 >
                   <div className="flex items-center space-x-3">
                     <span className="text-xl">{getPlatformIcon(platform.platform)}</span>
@@ -287,7 +342,7 @@ export function SettingsPage() {
                   <button
                     onClick={() => handleUnlinkPlatform(platform.platform)}
                     disabled={unlinking === platform.platform}
-                    className="px-3 py-1 text-sm bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded disabled:opacity-50"
+                    className="px-3 py-1 text-sm bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded disabled:opacity-50 w-full sm:w-auto"
                   >
                     {unlinking === platform.platform ? 'Unlinking...' : 'Unlink'}
                   </button>
@@ -302,6 +357,66 @@ export function SettingsPage() {
             No platforms linked yet. Send <code className="bg-gray-700 px-1 rounded">link</code> to the bot to get started.
           </div>
         )}
+      </div>
+
+      {/* Service Management Section */}
+      <div className="bg-gray-800 rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-white mb-4">Service Management</h2>
+        <p className="text-gray-400 text-sm mb-6">
+          Restart DevRelay services. Use with caution.
+        </p>
+
+        <div className="space-y-4">
+          {/* Server */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-gray-700 px-4 py-3 rounded gap-2">
+            <div className="flex items-center space-x-3">
+              <span className="text-xl">🖥️</span>
+              <div>
+                <div className="text-white font-medium">DevRelay Server</div>
+                <div className="text-gray-500 text-xs">
+                  Status:{' '}
+                  <span className={serviceStatus?.server === 'active' ? 'text-green-400' : 'text-red-400'}>
+                    {serviceStatus?.server || 'unknown'}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={handleRestartServer}
+              disabled={restartingServer}
+              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
+            >
+              {restartingServer ? 'Restarting...' : 'Restart'}
+            </button>
+          </div>
+
+          {/* Agent */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-gray-700 px-4 py-3 rounded gap-2">
+            <div className="flex items-center space-x-3">
+              <span className="text-xl">🤖</span>
+              <div>
+                <div className="text-white font-medium">DevRelay Agent (Local)</div>
+                <div className="text-gray-500 text-xs">
+                  Status:{' '}
+                  <span className={serviceStatus?.agent === 'active' ? 'text-green-400' : 'text-red-400'}>
+                    {serviceStatus?.agent || 'unknown'}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={handleRestartAgent}
+              disabled={restartingAgent}
+              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
+            >
+              {restartingAgent ? 'Restarting...' : 'Restart'}
+            </button>
+          </div>
+        </div>
+
+        <p className="text-gray-500 text-xs mt-4">
+          Note: Restarting the server will temporarily disconnect all agents. They will automatically reconnect.
+        </p>
       </div>
 
       {/* Preferences Section */}
