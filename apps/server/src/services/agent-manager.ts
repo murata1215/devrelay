@@ -27,31 +27,39 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
   ws.on('message', async (data) => {
     try {
       const message: AgentMessage = JSON.parse(data.toString());
-      
+
       switch (message.type) {
         case 'agent:connect':
           await handleAgentConnect(ws, message.payload);
           machineId = message.payload.machineId;
           break;
-          
+
         case 'agent:disconnect':
           await handleAgentDisconnect(message.payload.machineId);
           break;
-          
+
         case 'agent:projects':
           await handleProjectsUpdate(message.payload.machineId, message.payload.projects);
           break;
-          
+
         case 'agent:ai:output':
           await handleAiOutput(message.payload);
           break;
-          
+
         case 'agent:ai:status':
           await handleAiStatus(message.payload);
           break;
 
         case 'agent:storage:saved':
           await handleStorageSaved(message.payload);
+          break;
+
+        case 'agent:ping':
+          await handleAgentPing(ws, message.payload);
+          break;
+
+        case 'agent:session:restore':
+          await handleSessionRestore(ws, message.payload);
           break;
       }
     } catch (err) {
@@ -76,16 +84,16 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 // -----------------------------------------------------------------------------
 
 async function handleAgentConnect(
-  ws: WebSocket, 
+  ws: WebSocket,
   payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[] }
 ) {
   const { machineId, machineName, token, projects, availableAiTools } = payload;
-  
+
   // Verify token
   const machine = await prisma.machine.findUnique({
     where: { token }
   });
-  
+
   if (!machine) {
     sendToAgent(ws, {
       type: 'server:connect:ack',
@@ -94,17 +102,17 @@ async function handleAgentConnect(
     ws.close();
     return;
   }
-  
+
   // Update machine status
   await prisma.machine.update({
     where: { id: machine.id },
     data: { status: 'online', lastSeenAt: new Date() }
   });
-  
+
   // Update projects
   for (const project of projects) {
     await prisma.project.upsert({
-      where: { 
+      where: {
         machineId_name: { machineId: machine.id, name: project.name }
       },
       update: { path: project.path, defaultAi: project.defaultAi },
@@ -116,7 +124,7 @@ async function handleAgentConnect(
       }
     });
   }
-  
+
   // Store connection
   connectedAgents.set(machine.id, ws);
   machineCache.set(machine.id, {
@@ -126,12 +134,12 @@ async function handleAgentConnect(
     lastSeen: new Date(),
     projects
   });
-  
+
   sendToAgent(ws, {
     type: 'server:connect:ack',
-    payload: { success: true }
+    payload: { success: true, machineId: machine.id }
   });
-  
+
   console.log(`✅ Agent connected: ${machine.name} (${machine.id})`);
 }
 
@@ -155,11 +163,11 @@ async function handleProjectsUpdate(machineId: string, projects: Project[]) {
   if (cached) {
     cached.projects = projects;
   }
-  
+
   // Update DB
   for (const project of projects) {
     await prisma.project.upsert({
-      where: { 
+      where: {
         machineId_name: { machineId, name: project.name }
       },
       update: { path: project.path, defaultAi: project.defaultAi },
@@ -226,6 +234,79 @@ async function handleStorageSaved(payload: { machineId: string; sessionId: strin
   await broadcastToSession(sessionId, message, false);
 }
 
+async function handleAgentPing(ws: WebSocket, payload: { machineId: string; timestamp: string }) {
+  const { machineId, timestamp } = payload;
+
+  // Update lastSeenAt in database
+  try {
+    await prisma.machine.update({
+      where: { id: machineId },
+      data: { lastSeenAt: new Date() }
+    });
+
+    // Update cache
+    const cached = machineCache.get(machineId);
+    if (cached) {
+      cached.lastSeen = new Date();
+    }
+  } catch (err) {
+    // Machine may not exist in DB - this is expected during reconnection
+  }
+
+  // Send pong response
+  sendToAgent(ws, {
+    type: 'server:pong',
+    payload: { timestamp: new Date().toISOString() }
+  });
+}
+
+async function handleSessionRestore(ws: WebSocket, payload: { machineId: string; projectPath: string; projectName: string; agreementStatus: boolean }) {
+  const { machineId, projectPath, projectName, agreementStatus } = payload;
+
+  console.log(`🔄 Session restore request: ${machineId} / ${projectName}`);
+
+  // Find active session for this machine and project
+  const session = await prisma.session.findFirst({
+    where: {
+      machineId,
+      status: 'active',
+      project: {
+        path: projectPath
+      }
+    },
+    include: {
+      project: true
+    }
+  });
+
+  if (session) {
+    // Find the chat that was using this session (from ChannelSession)
+    const channelSession = await prisma.channelSession.findFirst({
+      where: {
+        lastProjectId: session.projectId
+      }
+    });
+
+    if (channelSession) {
+      sendToAgent(ws, {
+        type: 'server:session:restored',
+        payload: {
+          sessionId: session.id,
+          projectPath,
+          chatId: channelSession.chatId,
+          platform: channelSession.platform
+        }
+      });
+
+      console.log(`✅ Session restored: ${session.id} for chat ${channelSession.chatId}`);
+    } else {
+      console.log(`⚠️ No channel session found for project ${session.projectId}`);
+    }
+  } else {
+    console.log(`⚠️ No active session found for ${machineId} / ${projectPath}`);
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
@@ -248,17 +329,17 @@ export function isAgentConnected(machineId: string): boolean {
 }
 
 export function sendToAgent(machineIdOrWs: string | WebSocket, message: ServerToAgentMessage) {
-  const ws = typeof machineIdOrWs === 'string' 
+  const ws = typeof machineIdOrWs === 'string'
     ? connectedAgents.get(machineIdOrWs)
     : machineIdOrWs;
-    
+
   if (ws && ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(message));
   }
 }
 
 export async function startSession(
-  machineId: string, 
+  machineId: string,
   sessionId: string,
   projectName: string,
   projectPath: string,
@@ -337,4 +418,74 @@ export async function clearStorageContext(machineId: string, sessionId: string, 
     type: 'server:storage:clear',
     payload: { sessionId, projectPath }
   });
+}
+
+// -----------------------------------------------------------------------------
+// Heartbeat Monitoring
+// -----------------------------------------------------------------------------
+
+const HEARTBEAT_CHECK_INTERVAL = 60000; // 60 seconds
+const HEARTBEAT_TIMEOUT = 60000; // 60 seconds without ping = offline
+let heartbeatMonitorInterval: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Start the heartbeat monitor that checks for stale connections
+ * and marks machines as offline if they haven't sent a ping recently
+ */
+export function startHeartbeatMonitor() {
+  if (heartbeatMonitorInterval) {
+    console.log('⚠️ Heartbeat monitor already running');
+    return;
+  }
+
+  console.log('💓 Starting heartbeat monitor (checking every 60s)');
+
+  heartbeatMonitorInterval = setInterval(async () => {
+    const now = new Date();
+    const cutoffTime = new Date(now.getTime() - HEARTBEAT_TIMEOUT);
+
+    try {
+      // Find machines that are marked as online but haven't sent a ping recently
+      const staleMachines = await prisma.machine.findMany({
+        where: {
+          status: 'online',
+          OR: [
+            { lastSeenAt: { lt: cutoffTime } },
+            { lastSeenAt: null }
+          ]
+        }
+      });
+
+      if (staleMachines.length > 0) {
+        console.log(`💔 Found ${staleMachines.length} stale machine(s), marking offline...`);
+
+        for (const machine of staleMachines) {
+          // Update DB
+          await prisma.machine.update({
+            where: { id: machine.id },
+            data: { status: 'offline' }
+          });
+
+          // Remove from cache and connected agents
+          connectedAgents.delete(machine.id);
+          machineCache.delete(machine.id);
+
+          console.log(`   - ${machine.name} (${machine.id}) marked offline (last seen: ${machine.lastSeenAt?.toISOString() || 'never'})`);
+        }
+      }
+    } catch (err) {
+      console.error('❌ Error in heartbeat monitor:', err);
+    }
+  }, HEARTBEAT_CHECK_INTERVAL);
+}
+
+/**
+ * Stop the heartbeat monitor
+ */
+export function stopHeartbeatMonitor() {
+  if (heartbeatMonitorInterval) {
+    clearInterval(heartbeatMonitorInterval);
+    heartbeatMonitorInterval = null;
+    console.log('💔 Heartbeat monitor stopped');
+  }
 }

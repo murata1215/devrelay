@@ -288,3 +288,41 @@ export async function getSessionMessages(sessionId: string, limit: number = 10) 
     take: limit
   });
 }
+
+// Get all active sessions (in-memory sessions with participants)
+export async function getActiveSessions() {
+  const activeSessions: Array<{
+    sessionId: string;
+    machineName: string;
+    projectName: string;
+    aiTool: string;
+    participants: Array<{ platform: Platform; chatId: string }>;
+    startedAt: Date;
+  }> = [];
+
+  for (const [sessionId, participants] of sessionParticipants.entries()) {
+    if (participants.length === 0) continue;
+
+    // Get session info from DB
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      include: {
+        machine: true,
+        project: true,
+      },
+    });
+
+    if (session && session.status === 'active') {
+      activeSessions.push({
+        sessionId,
+        machineName: session.machine.name,
+        projectName: session.project.name,
+        aiTool: session.aiTool,
+        participants,
+        startedAt: session.startedAt,
+      });
+    }
+  }
+
+  return activeSessions;
+}

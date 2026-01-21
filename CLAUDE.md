@@ -601,6 +601,29 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/services/command-parser.ts` - `parseShortcut()` と `getHelpText()` を更新
   - `apps/server/src/services/command-handler.ts` - `handleSession()` 関数を実装
 
+#### 34. Heartbeat 機能（Agent 生存確認）(2026-01-21)
+- **問題**: Agent がクラッシュ/切断しても DB 上は `online` のまま残り続ける
+- **解決**: アプリケーションレベルの ping/pong と定期監視で正確なオンライン状態を維持
+- **動作**:
+  1. Agent は 30 秒ごとに `agent:ping` メッセージを送信
+  2. Server は `server:pong` を返信し、`lastSeenAt` を更新
+  3. Server は 60 秒ごとに全マシンをチェック
+  4. `lastSeenAt` が 60 秒以上前の Agent を自動的に `offline` に更新
+- **追加機能**:
+  - Agent 側でも pong タイムアウト検出（45秒以上 pong がなければ再接続）
+  - 接続時に即座に ping を送信（初回 lastSeenAt 更新）
+- **machineId 修正** (2026-01-21):
+  - Agent の設定ファイル (`config.yaml`) の `machineId` と DB 上の `machineId` が不一致の場合があった
+  - サーバーが `server:connect:ack` で正しい `machineId` を返すように修正
+  - Agent は受け取った `machineId` を使って ping を送信
+  - `ServerConnectAckPayload` に `machineId?: string` フィールドを追加
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `AgentPingPayload`, `ServerPongPayload`, `ServerConnectAckPayload` 型
+  - `agents/linux/src/services/connection.ts` - `startAppPing()`, `stopAppPing()` 関数、`currentMachineId` 管理
+  - `agents/windows/src/services/connection.ts` - 同上
+  - `apps/server/src/services/agent-manager.ts` - `handleAgentPing()`, `startHeartbeatMonitor()`, `stopHeartbeatMonitor()`, 認証時に `machineId` を返す
+  - `apps/server/src/index.ts` - サーバー起動時に heartbeat monitor を開始
+
 ## 今後の課題
 
 - [ ] LINE 対応

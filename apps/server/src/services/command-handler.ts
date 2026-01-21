@@ -18,7 +18,8 @@ import {
   getRecentSessions,
   getSessionMessages,
   startProgressTracking,
-  sendMessage
+  sendMessage,
+  getActiveSessions
 } from './session-manager.js';
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
@@ -570,81 +571,68 @@ async function handleAgreement(context: UserContext): Promise<string> {
 }
 
 async function handleSession(context: UserContext): Promise<string> {
-  // 未接続の場合
-  if (!context.currentSessionId || !context.currentMachineId) {
-    const parts = ['📋 **セッション情報**', ''];
-    parts.push('ステータス: 未接続');
+  // アクティブセッション一覧を取得
+  const activeSessions = await getActiveSessions();
 
-    if (context.lastProjectId) {
-      const lastProject = await prisma.project.findUnique({
-        where: { id: context.lastProjectId },
-        include: { machine: true }
-      });
-      if (lastProject) {
-        parts.push('');
-        parts.push(`前回の接続先: ${lastProject.machine.name} / ${lastProject.name}`);
-        parts.push('`c` で再接続できます');
-      }
-    } else {
-      parts.push('');
-      parts.push('`m` でマシン一覧を表示して接続してください');
-    }
-
+  if (activeSessions.length === 0) {
+    const parts = ['📋 **アクティブセッション**', ''];
+    parts.push('アクティブなセッションはありません');
+    parts.push('');
+    parts.push('`m` でマシン一覧を表示して接続してください');
     return parts.join('\n');
   }
 
-  // セッション情報を取得
-  const session = await prisma.session.findUnique({
-    where: { id: context.currentSessionId },
-    include: {
-      project: true,
-      machine: true,
-      messages: {
-        orderBy: { createdAt: 'desc' },
-        take: 1
+  // マシン名 + プロジェクト名でグループ化（重複排除）
+  const uniqueSessions = new Map<string, {
+    machineName: string;
+    projectName: string;
+    platforms: Set<string>;
+    startedAt: Date;
+    sessionIds: string[];
+  }>();
+
+  for (const session of activeSessions) {
+    const key = `${session.machineName}:${session.projectName}`;
+    const existing = uniqueSessions.get(key);
+
+    if (existing) {
+      // 既存エントリにプラットフォームとセッションIDを追加
+      session.participants.forEach(p => existing.platforms.add(p.platform));
+      existing.sessionIds.push(session.sessionId);
+      // 最も古い開始時刻を保持
+      if (session.startedAt < existing.startedAt) {
+        existing.startedAt = session.startedAt;
       }
+    } else {
+      uniqueSessions.set(key, {
+        machineName: session.machineName,
+        projectName: session.projectName,
+        platforms: new Set(session.participants.map(p => p.platform)),
+        startedAt: session.startedAt,
+        sessionIds: [session.sessionId],
+      });
     }
+  }
+
+  const uniqueList = Array.from(uniqueSessions.values());
+  const parts = [`📋 アクティブセッション (${uniqueList.length}件)`, ''];
+
+  uniqueList.forEach((session, index) => {
+    // 日付を取得（今日なら「今日」、それ以外は日付）
+    const now = new Date();
+    const sessionDate = new Date(session.startedAt);
+    const isToday = sessionDate.toDateString() === now.toDateString();
+    const dateStr = isToday ? '今日' : sessionDate.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+
+    // 参加プラットフォームをリスト
+    const platforms = Array.from(session.platforms).join(', ');
+
+    // 現在のセッションかどうか
+    const isCurrent = context.currentSessionId && session.sessionIds.includes(context.currentSessionId);
+    const currentMarker = isCurrent ? ' 👈 (現在)' : '';
+
+    parts.push(`${index + 1}. **${session.machineName}** / ${session.projectName}${currentMarker}💬 ${platforms} - ${dateStr}`);
   });
-
-  if (!session) {
-    return '❌ セッションが見つかりません。';
-  }
-
-  // 会話履歴件数を取得
-  const messageCount = await prisma.message.count({
-    where: { sessionId: context.currentSessionId }
-  });
-
-  // セッション情報を構築
-  const parts = ['📋 **セッション情報**', ''];
-  parts.push(`マシン: ${session.machine.name}`);
-  parts.push(`プロジェクト: ${session.project.name}`);
-  parts.push(`AI ツール: ${AI_TOOL_NAMES[session.aiTool] || session.aiTool}`);
-  parts.push(`ステータス: ${session.status === 'active' ? '🟢 アクティブ' : '⏹️ 終了'}`);
-  parts.push(`会話履歴: ${messageCount}件`);
-
-  // セッション開始時刻
-  const startedAt = new Date(session.startedAt);
-  const now = new Date();
-  const diffMs = now.getTime() - startedAt.getTime();
-  const diffMins = Math.floor(diffMs / (1000 * 60));
-  const diffHours = Math.floor(diffMins / 60);
-
-  let duration: string;
-  if (diffHours > 0) {
-    duration = `${diffHours}時間${diffMins % 60}分`;
-  } else {
-    duration = `${diffMins}分`;
-  }
-  parts.push(`セッション時間: ${duration}`);
-
-  // 最後のメッセージ
-  if (session.messages.length > 0) {
-    const lastMsg = session.messages[0];
-    const lastMsgTime = new Date(lastMsg.createdAt);
-    const lastMsgDiff = Math.floor((now.getTime() - lastMsgTime.getTime()) / (1000 * 60));
-    parts.push(`最終メッセージ: ${lastMsgDiff}分前`);
-  }
 
   return parts.join('\n');
 }

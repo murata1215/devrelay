@@ -50,10 +50,20 @@ import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
+let appPingTimer: ReturnType<typeof setInterval> | null = null; // Application-level ping (agent:ping)
+let pongCheckInterval: ReturnType<typeof setInterval> | null = null;
 let currentConfig: AgentConfig | null = null;
+let currentMachineId: string | null = null;
 
 // Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
+
+// Pong timeout detection
+const PONG_TIMEOUT = 45000; // 45 seconds
+let lastPongReceived = Date.now();
+
+// Application-level heartbeat interval (30 seconds)
+const APP_PING_INTERVAL = 30000;
 
 // Store session info for prompt handling
 interface SessionInfo {
@@ -121,6 +131,8 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       // Reset reconnect attempts on successful connection
       reconnectAttempts = 0;
 
+      // Note: currentMachineId will be set when server:connect:ack is received
+
       // Send connect message
       sendMessage({
         type: 'agent:connect',
@@ -133,8 +145,17 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
         },
       });
 
-      // Start ping
+      // Start ping (both WebSocket-level and application-level) and pong timeout check
       startPing();
+      startAppPing();
+      lastPongReceived = Date.now();
+      pongCheckInterval = setInterval(() => {
+        const timeSinceLastPong = Date.now() - lastPongReceived;
+        if (timeSinceLastPong > PONG_TIMEOUT) {
+          console.error(`Pong timeout detected (${timeSinceLastPong}ms since last pong), reconnecting...`);
+          ws?.terminate();
+        }
+      }, 15000);
 
       // Enable sleep prevention if configured
       if (config.preventSleep) {
@@ -168,9 +189,18 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       }
     });
 
+    ws.on('pong', () => {
+      lastPongReceived = Date.now();
+    });
+
     ws.on('close', () => {
       console.log('Disconnected from server');
       stopPing();
+      stopAppPing();
+      if (pongCheckInterval) {
+        clearInterval(pongCheckInterval);
+        pongCheckInterval = null;
+      }
       scheduleReconnect(config, projects);
     });
 
@@ -185,7 +215,13 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
   switch (message.type) {
     case 'server:connect:ack':
       if (message.payload.success) {
-        console.log('Authentication successful');
+        // Use machineId from server (DB ID) for heartbeat
+        if (message.payload.machineId) {
+          currentMachineId = message.payload.machineId;
+          console.log(`Authentication successful (machineId: ${currentMachineId})`);
+        } else {
+          console.log('Authentication successful');
+        }
       } else {
         console.error('Authentication failed:', message.payload.error);
         ws?.close();
@@ -222,6 +258,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:session:restored':
       handleSessionRestored(message.payload);
+      break;
+
+    case 'server:pong':
+      // Application-level pong received, update last pong time
+      lastPongReceived = Date.now();
       break;
   }
 }
@@ -537,6 +578,40 @@ function stopPing() {
   }
 }
 
+// Application-level ping for server-side lastSeenAt tracking
+function startAppPing() {
+  // Send immediately on connection
+  sendAppPing();
+
+  appPingTimer = setInterval(() => {
+    sendAppPing();
+  }, APP_PING_INTERVAL);
+}
+
+function sendAppPing() {
+  if (ws && ws.readyState === WebSocket.OPEN && currentMachineId) {
+    console.log(`💓 Sending app ping (machineId: ${currentMachineId})`);
+    sendMessage({
+      type: 'agent:ping',
+      payload: {
+        machineId: currentMachineId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  } else {
+    // Debug: log why ping was skipped
+    const wsState = ws ? ws.readyState : 'null';
+    console.log(`⏳ App ping skipped (ws: ${wsState}, machineId: ${currentMachineId || 'null'})`);
+  }
+}
+
+function stopAppPing() {
+  if (appPingTimer) {
+    clearInterval(appPingTimer);
+    appPingTimer = null;
+  }
+}
+
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
 
@@ -571,6 +646,11 @@ function scheduleReconnect(config: AgentConfig, projects: Project[]) {
 
 export function disconnect() {
   stopPing();
+  stopAppPing();
+  if (pongCheckInterval) {
+    clearInterval(pongCheckInterval);
+    pongCheckInterval = null;
+  }
   disableSleepPrevention();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);

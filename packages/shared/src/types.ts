@@ -70,13 +70,19 @@ export type AgentMessage =
   | { type: 'agent:ai:output'; payload: AiOutputPayload }
   | { type: 'agent:ai:status'; payload: AiStatusPayload }
   | { type: 'agent:session:restore'; payload: SessionRestorePayload }
-  | { type: 'agent:storage:saved'; payload: StorageSavedPayload };
+  | { type: 'agent:storage:saved'; payload: StorageSavedPayload }
+  | { type: 'agent:ping'; payload: AgentPingPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
   projectPath: string;
   projectName: string;
   agreementStatus: boolean;
+}
+
+export interface AgentPingPayload {
+  machineId: string;
+  timestamp: string;
 }
 
 export interface AgentConnectPayload {
@@ -113,7 +119,7 @@ export interface AiStatusPayload {
 
 // Server -> Agent
 export type ServerToAgentMessage =
-  | { type: 'server:connect:ack'; payload: { success: boolean; error?: string } }
+  | { type: 'server:connect:ack'; payload: ServerConnectAckPayload }
   | { type: 'server:session:start'; payload: SessionStartPayload }
   | { type: 'server:session:end'; payload: { sessionId: string } }
   | { type: 'server:ai:prompt'; payload: AiPromptPayload }
@@ -123,7 +129,18 @@ export type ServerToAgentMessage =
   | { type: 'server:agreement:apply'; payload: AgreementApplyPayload }
   | { type: 'server:session:restored'; payload: SessionRestoredPayload }
   | { type: 'server:storage:save'; payload: StorageSavePayload }
-  | { type: 'server:storage:clear'; payload: StorageClearPayload };
+  | { type: 'server:storage:clear'; payload: StorageClearPayload }
+  | { type: 'server:pong'; payload: ServerPongPayload };
+
+export interface ServerConnectAckPayload {
+  success: boolean;
+  machineId?: string;  // DB machine ID (only on success)
+  error?: string;
+}
+
+export interface ServerPongPayload {
+  timestamp: string;
+}
 
 export interface ConversationExecPayload {
   sessionId: string;

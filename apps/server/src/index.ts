@@ -2,7 +2,7 @@ import 'dotenv/config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
-import { setupAgentWebSocket } from './services/agent-manager.js';
+import { setupAgentWebSocket, startHeartbeatMonitor, stopHeartbeatMonitor } from './services/agent-manager.js';
 import { setupDiscordBot } from './platforms/discord.js';
 import { setupTelegramBot } from './platforms/telegram.js';
 import { prisma } from './db/client.js';
@@ -55,6 +55,9 @@ async function main() {
     console.log('⚠️  TELEGRAM_BOT_TOKEN not set, Telegram bot disabled');
   }
 
+  // Start heartbeat monitor for agent connection health
+  startHeartbeatMonitor();
+
   // Start server
   try {
     await app.listen({ port: PORT, host: HOST });
@@ -79,6 +82,7 @@ async function main() {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n👋 Shutting down...');
+  stopHeartbeatMonitor();
   await prisma.$disconnect();
   process.exit(0);
 });
