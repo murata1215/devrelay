@@ -1,5 +1,6 @@
 import type { UserCommand, UserContext, AiTool } from '@devrelay/shared';
 import { SHORTCUTS } from '@devrelay/shared';
+import { Project } from '@prisma/client';
 import {
   parseNaturalLanguage,
   isTraditionalCommand,
@@ -48,7 +49,7 @@ export async function parseCommandWithNLP(
         where: { machineId: context.currentMachineId },
         select: { name: true },
       });
-      availableProjects = projects.map((p) => p.name);
+      availableProjects = projects.map((p: { name: string }) => p.name);
     }
 
     // Parse with NLP

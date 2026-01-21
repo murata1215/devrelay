@@ -272,7 +272,14 @@ export async function getLinkedPlatforms(userId: string) {
     },
   });
 
-  return links.map((link) => ({
+  type LinkResult = {
+    platform: string;
+    platformUserId: string;
+    platformName: string | null;
+    linkedAt: Date | null;
+    createdAt: Date;
+  };
+  return links.map((link: LinkResult) => ({
     platform: link.platform,
     platformUserId: link.platformUserId,
     platformName: link.platformName,

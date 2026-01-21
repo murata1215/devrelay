@@ -1,5 +1,6 @@
 import type { UserCommand, UserContext, Platform, FileAttachment } from '@devrelay/shared';
 import { STATUS_EMOJI, AI_TOOL_NAMES } from '@devrelay/shared';
+import { Machine, Project, Session, Message } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import {
   getConnectedMachines,
@@ -177,7 +178,7 @@ async function handleMachineList(context: UserContext): Promise<string> {
       + '3. 対象マシンで `devrelay setup` を実行してトークンを入力';
   }
 
-  const list = machines.map((m, i) => {
+  const list = machines.map((m: Machine & { status: string }, i: number) => {
     const emoji = m.status === 'online' ? STATUS_EMOJI.online : STATUS_EMOJI.offline;
     return `${i + 1}. ${m.name} ${emoji}`;
   }).join('\n');
@@ -185,7 +186,7 @@ async function handleMachineList(context: UserContext): Promise<string> {
   // Update context
   await updateUserContext(context.userId, context.platform, context.chatId, {
     lastListType: 'machine',
-    lastListItems: machines.map(m => m.id)
+    lastListItems: machines.map((m: Machine) => m.id)
   });
 
   return `📡 **マシン一覧**\n\n${list}`;
@@ -204,13 +205,13 @@ async function handleProjectList(context: UserContext): Promise<string> {
     return '📁 プロジェクトが登録されていません。\n\nマシン側で `devrelay projects add <path>` を実行してください。';
   }
   
-  const list = projects.map((p, i) => {
+  const list = projects.map((p: Project, i: number) => {
     return `${i + 1}. ${p.name}`;
   }).join('\n');
-  
+
   await updateUserContext(context.userId, context.platform, context.chatId, {
     lastListType: 'project',
-    lastListItems: projects.map(p => p.id)
+    lastListItems: projects.map((p: Project) => p.id)
   });
   
   return `📁 **プロジェクト** (${context.currentMachineName})\n\n${list}`;
@@ -380,14 +381,18 @@ async function handleRecent(context: UserContext): Promise<string> {
     return '📜 作業履歴がありません。';
   }
   
-  const list = sessions.map((s, i) => {
+  type SessionWithRelations = Session & {
+    machine: { name: string };
+    project: { name: string };
+  };
+  const list = sessions.map((s: SessionWithRelations, i: number) => {
     const date = formatRelativeDate(s.startedAt);
     return `${i + 1}. ${s.machine.name}/${s.project.name} (${date})`;
   }).join('\n');
-  
+
   await updateUserContext(context.userId, context.platform, context.chatId, {
     lastListType: 'recent',
-    lastListItems: sessions.map(s => s.id)
+    lastListItems: sessions.map((s: Session) => s.id)
   });
   
   return `📜 **直近の作業**\n\n${list}`;
@@ -648,7 +653,7 @@ async function handleLog(context: UserContext, count?: number): Promise<string> 
     return '📝 メッセージがありません。';
   }
   
-  const log = messages.reverse().map(m => {
+  const log = messages.reverse().map((m: Message) => {
     const prefix = m.role === 'user' ? '👤' : '🤖';
     const content = m.content.length > 100 ? m.content.slice(0, 100) + '...' : m.content;
     return `${prefix} ${content}`;

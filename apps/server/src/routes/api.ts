@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomBytes } from 'crypto';
+import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { getConnectedAgents } from '../services/agent-manager.js';
@@ -9,6 +10,22 @@ import {
   validateAndConsumeLinkCode,
   unlinkPlatform,
 } from '../services/platform-link.js';
+
+// Type for machine with projects
+type MachineWithProjects = Machine & {
+  projects: Project[];
+};
+
+// Type for project with machine
+type ProjectWithMachine = Project & {
+  machine: { id: string; name: string };
+};
+
+// Type for session with relations
+type SessionWithRelations = Session & {
+  project: { name: string };
+  machine: { name: string };
+};
 
 export async function apiRoutes(app: FastifyInstance) {
   // すべてのルートに認証を適用
@@ -34,13 +51,13 @@ export async function apiRoutes(app: FastifyInstance) {
     // 接続中のエージェント情報を取得
     const connectedAgents = getConnectedAgents();
 
-    return machines.map((m) => ({
+    return machines.map((m: MachineWithProjects) => ({
       id: m.id,
       name: m.name,
       status: connectedAgents.has(m.id) ? 'online' : 'offline',
       lastSeenAt: m.lastSeenAt,
       projectCount: m.projects.length,
-      projects: m.projects.map((p) => ({
+      projects: m.projects.map((p: Project) => ({
         id: p.id,
         name: p.name,
         path: p.path,
@@ -109,7 +126,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
     // 関連するプロジェクト、セッション、メッセージも削除される（Cascade）
     // ただし、Prisma のデフォルトでは Cascade が設定されていないので、手動で削除
-    await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // セッションに紐づくメッセージを削除
       await tx.message.deleteMany({
         where: { session: { machineId: id } },
@@ -150,7 +167,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
     const connectedAgents = getConnectedAgents();
 
-    return projects.map((p) => ({
+    return projects.map((p: ProjectWithMachine) => ({
       id: p.id,
       name: p.name,
       path: p.path,
@@ -265,7 +282,7 @@ export async function apiRoutes(app: FastifyInstance) {
       machines: { total: machineCount, online: onlineMachines },
       projects: projectCount,
       sessions: sessionCount,
-      recentSessions: recentSessions.map((s) => ({
+      recentSessions: recentSessions.map((s: SessionWithRelations) => ({
         id: s.id,
         projectName: s.project.name,
         machineName: s.machine.name,
