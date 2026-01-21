@@ -27,6 +27,7 @@ interface MessageInfo {
 interface ProgressTracker {
   messages: Map<string, MessageInfo>;  // chatId -> { messageId, platform }
   outputBuffer: string;
+  contextInfo: string;  // Context usage info to prepend to final message
   startTime: number;
   updateInterval: NodeJS.Timeout | null;
 }
@@ -34,6 +35,44 @@ const progressTrackers = new Map<string, ProgressTracker>();
 
 const PROGRESS_UPDATE_INTERVAL = 8000; // 8 seconds
 const MAX_OUTPUT_LINES = 15;
+
+// Restore session participants from ChannelSession on server startup
+export async function restoreSessionParticipants() {
+  // Get all ChannelSession records with active sessions
+  const channelSessions = await prisma.channelSession.findMany({
+    where: {
+      currentSessionId: { not: null }
+    }
+  });
+
+  let restoredCount = 0;
+  for (const cs of channelSessions) {
+    if (cs.currentSessionId) {
+      // Check if session is still active in DB
+      const session = await prisma.session.findUnique({
+        where: { id: cs.currentSessionId }
+      });
+
+      if (session && session.status === 'active') {
+        addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
+        restoredCount++;
+        console.log(`✅ Restored session participant: ${cs.platform}:${cs.chatId} -> ${cs.currentSessionId}`);
+      } else {
+        // Session no longer active, clear ChannelSession
+        await prisma.channelSession.update({
+          where: { id: cs.id },
+          data: {
+            currentSessionId: null,
+            currentMachineId: null
+          }
+        });
+        console.log(`🧹 Cleared stale session: ${cs.platform}:${cs.chatId}`);
+      }
+    }
+  }
+
+  console.log(`📋 Restored ${restoredCount} session participant(s)`);
+}
 
 export async function createSession(
   userId: string,
@@ -118,6 +157,7 @@ export async function startProgressTracking(sessionId: string) {
   const tracker: ProgressTracker = {
     messages: new Map(),
     outputBuffer: '',
+    contextInfo: '',
     startTime: Date.now(),
     updateInterval: null,
   };
@@ -149,8 +189,14 @@ export async function startProgressTracking(sessionId: string) {
 export function appendSessionOutput(sessionId: string, output: string) {
   const tracker = progressTrackers.get(sessionId);
   if (tracker) {
-    tracker.outputBuffer += output;
-    console.log(`📝 Buffer updated: ${tracker.outputBuffer.length} chars total`);
+    // Check if this is context info (starts with 📊)
+    if (output.startsWith('📊') && tracker.contextInfo === '') {
+      tracker.contextInfo = output;
+      console.log(`📊 Context info captured: ${output.trim()}`);
+    } else {
+      tracker.outputBuffer += output;
+      console.log(`📝 Buffer updated: ${tracker.outputBuffer.length} chars total`);
+    }
   } else {
     console.log(`⚠️ No tracker found for session ${sessionId}`);
   }
@@ -211,6 +257,13 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
     clearInterval(tracker.updateInterval);
   }
 
+  // Prepend context info to final message if available
+  let messageToSend = finalMessage;
+  if (tracker?.contextInfo) {
+    messageToSend = tracker.contextInfo + finalMessage;
+    console.log(`📊 Prepending context info to final message`);
+  }
+
   // Delete progress messages and send final response
   for (const { platform, chatId } of participants) {
     const msgInfo = tracker?.messages.get(chatId);
@@ -221,13 +274,13 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       // Edit progress message to show completion, or send new message
       if (msgInfo && !files?.length) {
         // Edit existing message with final content
-        await editDiscordMessage(chatId, msgInfo.messageId as string, finalMessage);
+        await editDiscordMessage(chatId, msgInfo.messageId as string, messageToSend);
       } else {
         // Delete progress message and send new one with files
         if (msgInfo) {
           await editDiscordMessage(chatId, msgInfo.messageId as string, '✅ 完了');
         }
-        await sendDiscordMessage(chatId, finalMessage, files);
+        await sendDiscordMessage(chatId, messageToSend, files);
       }
     } else if (platform === 'telegram') {
       stopTelegramTyping(chatId);
@@ -235,13 +288,13 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       // Edit progress message to show completion, or send new message
       if (msgInfo && !files?.length) {
         // Edit existing message with final content
-        await editTelegramMessage(chatId, msgInfo.messageId as number, finalMessage);
+        await editTelegramMessage(chatId, msgInfo.messageId as number, messageToSend);
       } else {
         // Delete progress message and send new one with files
         if (msgInfo) {
           await editTelegramMessage(chatId, msgInfo.messageId as number, '✅ 完了');
         }
-        await sendTelegramMessage(chatId, finalMessage, files);
+        await sendTelegramMessage(chatId, messageToSend, files);
       }
     }
   }
@@ -287,6 +340,45 @@ export async function getSessionMessages(sessionId: string, limit: number = 10) 
     orderBy: { createdAt: 'desc' },
     take: limit
   });
+}
+
+// Clear all sessions for a specific machine (called when machine goes offline)
+export async function clearSessionsForMachine(machineId: string) {
+  const sessionsToClear: string[] = [];
+
+  for (const [sessionId, participants] of sessionParticipants.entries()) {
+    // Get session info from DB to check if it belongs to this machine
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { machineId: true },
+    });
+
+    if (session && session.machineId === machineId) {
+      sessionsToClear.push(sessionId);
+
+      // Notify participants that the session ended
+      for (const { platform, chatId } of participants) {
+        await sendMessage(platform, chatId, '⚠️ マシンがオフラインになったため、セッションが終了しました。`c` で再接続できます。');
+      }
+    }
+  }
+
+  // Clear the sessions
+  for (const sessionId of sessionsToClear) {
+    sessionParticipants.delete(sessionId);
+
+    // Update DB session status
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { status: 'ended', endedAt: new Date() },
+    }).catch(() => {
+      // Ignore errors if session doesn't exist
+    });
+  }
+
+  if (sessionsToClear.length > 0) {
+    console.log(`[SessionManager] Cleared ${sessionsToClear.length} sessions for machine ${machineId}`);
+  }
 }
 
 // Get all active sessions (in-memory sessions with participants)

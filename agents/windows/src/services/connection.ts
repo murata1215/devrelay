@@ -14,7 +14,8 @@ import type {
 } from '@devrelay/shared';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, type SendPromptOptions } from './ai-runner.js';
+import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
   clearOutputDir,
@@ -69,7 +70,8 @@ const APP_PING_INTERVAL = 30000;
 interface SessionInfo {
   projectPath: string;
   aiTool: AiTool;
-  claudeSessionId: string; // UUID for Claude Code --session-id
+  claudeSessionId: string; // UUID for Claude Code --session-id (legacy, not used with --resume)
+  claudeResumeSessionId?: string; // Session ID from Claude Code for --resume
   history: ConversationEntry[]; // Conversation history (persisted to file)
   pendingWorkState?: WorkState; // Work state to include in next prompt
 }
@@ -294,9 +296,22 @@ async function handleSessionStart(
   const agreementStatus = await checkAgreementStatus(projectPath);
   console.log(`📋 DevRelay Agreement: ${agreementStatus ? 'compliant' : 'not compliant'}`);
 
+  // Load existing Claude session ID for --resume
+  const claudeResumeSessionId = await loadClaudeSessionId(projectPath);
+  if (claudeResumeSessionId) {
+    console.log(`Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
+  }
+
   // Generate UUID for Claude Code session and store session info
   const claudeSessionId = uuidv4();
-  sessionInfoMap.set(sessionId, { projectPath, aiTool, claudeSessionId, history, pendingWorkState: pendingWorkState || undefined });
+  sessionInfoMap.set(sessionId, {
+    projectPath,
+    aiTool,
+    claudeSessionId,
+    claudeResumeSessionId: claudeResumeSessionId || undefined,
+    history,
+    pendingWorkState: pendingWorkState || undefined
+  });
   console.log(`Session ${sessionId} -> Claude Session ${claudeSessionId}`);
 
   try {
@@ -358,11 +373,15 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   // Clear the conversation file
   await clearConversation(projectPath);
 
-  // Clear in-memory history if session exists
+  // Clear Claude session ID (so next prompt starts fresh)
+  await clearClaudeSessionId(projectPath);
+
+  // Clear in-memory history and session ID if session exists
   const sessionInfo = sessionInfoMap.get(sessionId);
   if (sessionInfo) {
     sessionInfo.history = [];
-    console.log(`In-memory history cleared for session ${sessionId}`);
+    sessionInfo.claudeResumeSessionId = undefined;
+    console.log(`In-memory history and Claude session ID cleared for session ${sessionId}`);
   }
 }
 
@@ -393,14 +412,13 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     console.log(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
-  // Auto-execute AI with the implementation prompt
-  console.log(`Auto-starting AI execution after exec...`);
-  const autoPrompt = '実装を開始してください。直前のプランに従って作業を進めてください。';
+  // Automatically start implementation with exec mode
+  console.log(`Auto-starting implementation...`);
   await handleAiPrompt({
     sessionId,
-    prompt: autoPrompt,
+    prompt: 'プランに従って実装を開始してください。',
     userId,
-    files: undefined
+    files: undefined,
   });
 }
 
@@ -450,10 +468,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Clear output directory before running
   await clearOutputDir(sessionInfo.projectPath);
 
-  // Check if exec marker exists in history (determines plan/exec mode)
-  const hasExecMarker = sessionInfo.history.some(h => h.role === 'exec');
-  const modeInstruction = hasExecMarker ? EXEC_MODE_INSTRUCTION : PLAN_MODE_INSTRUCTION;
-  console.log(`Mode: ${hasExecMarker ? 'EXEC (implementation)' : 'PLAN (no code changes)'}`);
+  // Check if the last entry (before current user message) is an exec marker
+  // This means exec was just sent, so this prompt should run in exec mode
+  // After one exec-mode prompt, subsequent prompts return to plan mode
+  const historyBeforeThisMessage = sessionInfo.history.slice(0, -1);
+  const lastEntry = historyBeforeThisMessage[historyBeforeThisMessage.length - 1];
+  const isExecTriggered = lastEntry?.role === 'exec';
+  // Use CLI --permission-mode plan for plan mode, --dangerously-skip-permissions for exec mode
+  const usePlanMode = !isExecTriggered;
+  console.log(`Mode: ${isExecTriggered ? 'EXEC (--dangerously-skip-permissions)' : 'PLAN (--permission-mode plan)'}`);
 
   // Check for pending work state (auto-continue feature)
   let workStatePrompt = '';
@@ -466,10 +489,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     sessionInfo.pendingWorkState = undefined;
   }
 
-  // Build prompt with history context and instructions
-  let fullPrompt = promptWithFiles + workStatePrompt + OUTPUT_DIR_INSTRUCTION + modeInstruction;
-  if (sessionInfo.history.length > 1) {
-    // Check if this is the first message after exec (need to include plan context)
+  // Add plan/exec mode instruction to prompt
+  const modeInstruction = usePlanMode ? PLAN_MODE_INSTRUCTION : EXEC_MODE_INSTRUCTION;
+
+  // Build prompt with mode instruction and file output instruction
+  let fullPrompt = modeInstruction + '\n\n' + promptWithFiles + workStatePrompt + OUTPUT_DIR_INSTRUCTION;
+  // Include conversation history if:
+  // 1. We don't have a Claude session to resume, OR
+  // 2. We have missed messages (they're not in Claude's internal history)
+  const hasMissedMessages = false; // Windows Agent doesn't receive missed messages yet
+  if (sessionInfo.history.length > 1 && (!sessionInfo.claudeResumeSessionId || hasMissedMessages)) {
+    // Include conversation history when no resume session OR when there are missed messages
     const historyForContext = sessionInfo.history.slice(0, -1); // exclude current message
     let execIndex = -1;
     for (let i = historyForContext.length - 1; i >= 0; i--) {
@@ -479,7 +509,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       }
     }
     const messagesAfterExec = execIndex >= 0 ? historyForContext.slice(execIndex + 1) : historyForContext;
-    const isFirstMessageAfterExec = hasExecMarker && messagesAfterExec.filter(h => h.role === 'user' || h.role === 'assistant').length === 0;
+    const isFirstMessageAfterExec = isExecTriggered && messagesAfterExec.filter(h => h.role === 'user' || h.role === 'assistant').length === 0;
 
     // If this is the first message after exec, include the plan context
     const historyContext = getConversationContext(
@@ -487,13 +517,22 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       undefined,
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
-    fullPrompt = `Previous conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}${modeInstruction}`;
+    fullPrompt = `${modeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
   }
 
   console.log(`History length: ${sessionInfo.history.length}`);
+  if (sessionInfo.claudeResumeSessionId) {
+    console.log(`Using --resume with session: ${sessionInfo.claudeResumeSessionId.substring(0, 8)}...`);
+  }
+
+  // Prepare send options
+  const sendOptions: SendPromptOptions = {
+    resumeSessionId: sessionInfo.claudeResumeSessionId,
+    usePlanMode,
+  };
 
   let responseText = '';
-  await sendPromptToAi(
+  const aiResult = await sendPromptToAi(
     sessionId,
     fullPrompt,
     sessionInfo.projectPath,
@@ -544,8 +583,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           },
         });
       }
-    }
+    },
+    sendOptions
   );
+
+  // Update session info with new Claude session ID if extracted
+  if (aiResult.extractedSessionId) {
+    sessionInfo.claudeResumeSessionId = aiResult.extractedSessionId;
+    console.log(`Updated Claude session ID: ${aiResult.extractedSessionId.substring(0, 8)}...`);
+  }
 }
 
 function sendMessage(message: AgentMessage) {

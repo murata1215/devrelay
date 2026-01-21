@@ -199,10 +199,10 @@ export const services = {
   },
 
   async restartServer(): Promise<{ success: boolean; message: string }> {
-    return request('POST', '/services/restart/server');
+    return request('POST', '/services/restart/server', {});
   },
 
   async restartAgent(): Promise<{ success: boolean; message: string }> {
-    return request('POST', '/services/restart/agent');
+    return request('POST', '/services/restart/agent', {});
   },
 };

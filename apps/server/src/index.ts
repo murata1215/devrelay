@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { setupAgentWebSocket, startHeartbeatMonitor, stopHeartbeatMonitor } from './services/agent-manager.js';
+import { restoreSessionParticipants } from './services/session-manager.js';
 import { setupDiscordBot } from './platforms/discord.js';
 import { setupTelegramBot } from './platforms/telegram.js';
 import { prisma } from './db/client.js';
@@ -20,6 +21,10 @@ async function main() {
   await prisma.machine.updateMany({
     data: { status: 'offline' }
   });
+
+  // Restore session participants from ChannelSession
+  // (So users can continue conversations after server restart)
+  await restoreSessionParticipants();
 
   // Plugins
   await app.register(cors, { origin: true });

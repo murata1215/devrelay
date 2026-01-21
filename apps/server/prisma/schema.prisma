@@ -146,12 +146,14 @@ model UserSettings {
 
 // チャンネルセッション（チャンネルごとの前回接続先を記録）
 model ChannelSession {
-  id            String    @id @default(cuid())
-  platform      String    // discord, telegram, line
-  chatId        String    // チャンネルID（Discord: channel.id, Telegram: chat.id, LINE: groupId/roomId/userId）
-  lastProjectId String?   // 前回接続したプロジェクトID
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id               String    @id @default(cuid())
+  platform         String    // discord, telegram, line
+  chatId           String    // チャンネルID（Discord: channel.id, Telegram: chat.id, LINE: groupId/roomId/userId）
+  lastProjectId    String?   // 前回接続したプロジェクトID
+  currentSessionId String?   // 現在のセッションID（サーバー再起動後に復元用）
+  currentMachineId String?   // 現在のマシンID（サーバー再起動後に復元用）
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@unique([platform, chatId])
 }

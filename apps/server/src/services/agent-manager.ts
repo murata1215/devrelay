@@ -10,7 +10,7 @@ import type {
   WorkState
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { appendSessionOutput, finalizeProgress, broadcastToSession } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine } from './session-manager.js';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -156,6 +156,9 @@ async function handleAgentDisconnect(machineId: string) {
     // Machine may not exist in DB (e.g., already deleted)
     console.log(`⚠️ Could not update machine status for ${machineId}:`, err);
   }
+
+  // Clear any active sessions for this machine
+  await clearSessionsForMachine(machineId);
 }
 
 async function handleProjectsUpdate(machineId: string, projects: Project[]) {

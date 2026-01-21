@@ -35,7 +35,7 @@ export async function getUserContext(userId: string, platform: Platform, chatId:
   let context = userContexts.get(key);
 
   if (!context) {
-    // Load lastProjectId from ChannelSession (per-channel, not per-user)
+    // Load session info from ChannelSession (per-channel, not per-user)
     const channelSession = await prisma.channelSession.findUnique({
       where: { platform_chatId: { platform, chatId } }
     });
@@ -44,7 +44,10 @@ export async function getUserContext(userId: string, platform: Platform, chatId:
       userId,
       platform,
       chatId,
-      lastProjectId: channelSession?.lastProjectId ?? undefined
+      lastProjectId: channelSession?.lastProjectId ?? undefined,
+      // Restore currentSessionId and currentMachineId after server restart
+      currentSessionId: channelSession?.currentSessionId ?? undefined,
+      currentMachineId: channelSession?.currentMachineId ?? undefined
     };
     userContexts.set(key, context);
   }
@@ -58,15 +61,26 @@ export async function updateUserContext(userId: string, platform: Platform, chat
   if (context) {
     Object.assign(context, updates);
 
-    // Persist lastProjectId to ChannelSession (per-channel, not per-user)
+    // Persist session info to ChannelSession (per-channel, not per-user)
+    const dbUpdates: Record<string, string | null> = {};
     if ('lastProjectId' in updates) {
+      dbUpdates.lastProjectId = updates.lastProjectId ?? null;
+    }
+    if ('currentSessionId' in updates) {
+      dbUpdates.currentSessionId = updates.currentSessionId ?? null;
+    }
+    if ('currentMachineId' in updates) {
+      dbUpdates.currentMachineId = updates.currentMachineId ?? null;
+    }
+
+    if (Object.keys(dbUpdates).length > 0) {
       await prisma.channelSession.upsert({
         where: { platform_chatId: { platform, chatId } },
-        update: { lastProjectId: updates.lastProjectId ?? null },
+        update: dbUpdates,
         create: {
           platform,
           chatId,
-          lastProjectId: updates.lastProjectId ?? null
+          ...dbUpdates
         }
       });
     }
@@ -497,7 +511,10 @@ async function handleExec(context: UserContext): Promise<string> {
     return '❌ セッションが見つかりません。';
   }
 
-  // Send exec command to agent (marks the conversation reset point)
+  // Start progress tracking
+  await startProgressTracking(context.currentSessionId);
+
+  // Send exec command to agent (marks the conversation reset point and auto-starts AI)
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
@@ -505,7 +522,8 @@ async function handleExec(context: UserContext): Promise<string> {
     context.userId
   );
 
-  return '🚀 **実行モード開始**\n会話履歴がリセットされました。実装を開始します。';
+  // Return empty since progress message is already sent
+  return '';
 }
 
 async function handleLink(context: UserContext): Promise<string> {
