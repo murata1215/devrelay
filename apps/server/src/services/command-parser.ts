@@ -25,8 +25,13 @@ export async function parseCommandWithNLP(
   const trimmed = input.trim();
 
   // 1. First try traditional command parsing
-  if (isTraditionalCommand(trimmed)) {
-    return parseCommand(trimmed, context);
+  const isTraditional = isTraditionalCommand(trimmed);
+  console.log(`📝 Command parsing: input="${trimmed}", isTraditional=${isTraditional}, hasSession=${!!context.currentSessionId}`);
+
+  if (isTraditional) {
+    const cmd = parseCommand(trimmed, context);
+    console.log(`📝 Traditional command result: ${JSON.stringify(cmd)}`);
+    return cmd;
   }
 
   // 2. If already connected to a project (has active session), skip NLP and send directly to AI
