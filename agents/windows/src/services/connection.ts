@@ -10,7 +10,10 @@ import type {
   AiTool,
   FileAttachment,
   ProxyConfig,
-  AgreementApplyPayload
+  AgreementApplyPayload,
+  MissedMessage,
+  StorageSavePayload,
+  StorageClearPayload
 } from '@devrelay/shared';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
@@ -26,8 +29,8 @@ import {
   DEVRELAY_AGREEMENT_MARKER,
   AGREEMENT_APPLY_PROMPT
 } from './output-collector.js';
-import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
+import { join, dirname } from 'path';
 import {
   loadConversation,
   saveConversation,
@@ -266,6 +269,14 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
       // Application-level pong received, update last pong time
       lastPongReceived = Date.now();
       break;
+
+    case 'server:storage:save':
+      handleStorageSave(message.payload);
+      break;
+
+    case 'server:storage:clear':
+      handleStorageClear(message.payload);
+      break;
   }
 }
 
@@ -295,6 +306,13 @@ async function handleSessionStart(
   // Check DevRelay Agreement status
   const agreementStatus = await checkAgreementStatus(projectPath);
   console.log(`📋 DevRelay Agreement: ${agreementStatus ? 'compliant' : 'not compliant'}`);
+
+  // Check for storage context
+  const storageContext = await loadStorageContext(projectPath);
+  const hasStorageContext = !!storageContext;
+  if (hasStorageContext) {
+    console.log(`📦 Storage context found (${storageContext.length} chars)`);
+  }
 
   // Load existing Claude session ID for --resume
   const claudeResumeSessionId = await loadClaudeSessionId(projectPath);
@@ -334,6 +352,7 @@ async function handleSessionStart(
         sessionId,
         status: 'running',
         agreementStatus,
+        hasStorageContext,
       },
     });
   } catch (err: any) {
@@ -434,11 +453,14 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[] }) {
-  const { sessionId, prompt, userId, files } = payload;
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[] }) {
+  const { sessionId, prompt, userId, files, missedMessages } = payload;
   console.log(`Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
     console.log(`Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
+  }
+  if (missedMessages && missedMessages.length > 0) {
+    console.log(`Received ${missedMessages.length} missed message(s) from Discord`);
   }
 
   const sessionInfo = sessionInfoMap.get(sessionId);
@@ -455,6 +477,18 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       promptWithFiles = buildPromptWithFiles(prompt, savedPaths);
       console.log(`Files saved to: ${savedPaths.join(', ')}`);
     }
+  }
+
+  // Add missed messages to history (messages between last mention and current mention)
+  if (missedMessages && missedMessages.length > 0) {
+    for (const msg of missedMessages) {
+      sessionInfo.history.push({
+        role: msg.role === 'assistant' ? 'assistant' : 'user',
+        content: msg.content,
+        timestamp: new Date(msg.timestamp).toISOString()
+      });
+    }
+    console.log(`Added ${missedMessages.length} missed messages to history`);
   }
 
   // Add user message to history and save
@@ -492,12 +526,20 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Add plan/exec mode instruction to prompt
   const modeInstruction = usePlanMode ? PLAN_MODE_INSTRUCTION : EXEC_MODE_INSTRUCTION;
 
+  // Load storage context if exists
+  let storageContextPrompt = '';
+  const storageContext = await loadStorageContext(sessionInfo.projectPath);
+  if (storageContext) {
+    console.log(`Including storage context in prompt (${storageContext.length} chars)`);
+    storageContextPrompt = '\n\n--- Storage Context ---\n' + storageContext + '\n--- End Storage Context ---';
+  }
+
   // Build prompt with mode instruction and file output instruction
-  let fullPrompt = modeInstruction + '\n\n' + promptWithFiles + workStatePrompt + OUTPUT_DIR_INSTRUCTION;
+  let fullPrompt = modeInstruction + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
   // Include conversation history if:
   // 1. We don't have a Claude session to resume, OR
   // 2. We have missed messages (they're not in Claude's internal history)
-  const hasMissedMessages = false; // Windows Agent doesn't receive missed messages yet
+  const hasMissedMessages = missedMessages && missedMessages.length > 0;
   if (sessionInfo.history.length > 1 && (!sessionInfo.claudeResumeSessionId || hasMissedMessages)) {
     // Include conversation history when no resume session OR when there are missed messages
     const historyForContext = sessionInfo.history.slice(0, -1); // exclude current message
@@ -753,4 +795,71 @@ async function handleAgreementApply(payload: AgreementApplyPayload) {
     userId,
     files: undefined,
   });
+}
+
+// Storage context functions
+const STORAGE_CONTEXT_FILENAME = 'storage-context.md';
+
+function getStorageContextPath(projectPath: string): string {
+  return join(projectPath, '.devrelay', STORAGE_CONTEXT_FILENAME);
+}
+
+async function loadStorageContext(projectPath: string): Promise<string | null> {
+  try {
+    const content = await readFile(getStorageContextPath(projectPath), 'utf-8');
+    return content;
+  } catch {
+    return null;
+  }
+}
+
+async function saveStorageContext(projectPath: string, content: string): Promise<void> {
+  const filePath = getStorageContextPath(projectPath);
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, content, 'utf-8');
+}
+
+async function clearStorageContext(projectPath: string): Promise<void> {
+  try {
+    await unlink(getStorageContextPath(projectPath));
+  } catch {
+    // Ignore if file doesn't exist
+  }
+}
+
+async function handleStorageSave(payload: StorageSavePayload) {
+  const { sessionId, projectPath, content } = payload;
+  console.log(`Saving storage context for session ${sessionId}`);
+
+  try {
+    await saveStorageContext(projectPath, content);
+    console.log(`Storage context saved (${content.length} chars)`);
+
+    // Notify server that storage context was saved
+    if (currentConfig) {
+      sendMessage({
+        type: 'agent:storage:saved',
+        payload: {
+          machineId: currentConfig.machineId,
+          sessionId,
+          projectPath,
+          contentLength: content.length,
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`Failed to save storage context:`, (err as Error).message);
+  }
+}
+
+async function handleStorageClear(payload: StorageClearPayload) {
+  const { sessionId, projectPath } = payload;
+  console.log(`Clearing storage context for session ${sessionId}`);
+
+  try {
+    await clearStorageContext(projectPath);
+    console.log(`Storage context cleared`);
+  } catch (err) {
+    console.error(`Failed to clear storage context:`, (err as Error).message);
+  }
 }

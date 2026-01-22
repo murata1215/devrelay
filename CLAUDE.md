@@ -743,6 +743,20 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `agents/*/src/services/connection.ts` - `handleAiPrompt()` の履歴包含条件を修正
 
+#### 43. Windows Agent 機能追加 - Linux Agent との機能パリティ (2026-01-23)
+- **目的**: Linux Agent で実装済みの機能を Windows Agent にも追加
+- **追加機能**:
+  1. **Missed Messages 対応** - Discord でメンション前のメッセージをコンテキストとして拾える
+     - `handleAiPrompt` で `missedMessages` パラメータを処理し、履歴に追加
+  2. **Storage Context 対応** - 永続的なプロンプトコンテキスト管理
+     - `loadStorageContext()` - ストレージコンテキストの読み込み
+     - `saveStorageContext()` - ストレージコンテキストの保存
+     - `clearStorageContext()` - ストレージコンテキストのクリア
+     - `handleStorageSave()` - サーバーからの保存リクエスト処理
+     - `handleStorageClear()` - サーバーからのクリアリクエスト処理
+- **主要ファイル**:
+  - `agents/windows/src/services/connection.ts` - 全機能の実装
+
 ## 今後の課題
 
 - [ ] LINE 対応
