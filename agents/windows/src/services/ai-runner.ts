@@ -14,6 +14,7 @@ interface AiSession {
 export interface AiRunResult {
   extractedSessionId?: string;
   contextUsage?: ContextUsage;
+  resumeFailed?: boolean;  // True if --resume failed (exit code 1 + no output)
 }
 
 // Active AI sessions: sessionId -> AiSession
@@ -239,6 +240,12 @@ export async function sendPromptToAi(
 
     proc.on('close', (code) => {
       console.log(`[${aiTool}] Process exited with code ${code}`);
+
+      // Detect --resume failure: exit code 1 + no output
+      if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
+        console.log(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
+        result.resumeFailed = true;
+      }
 
       if (fullOutput.length === 0) {
         onOutput('(No response from AI)', true);
