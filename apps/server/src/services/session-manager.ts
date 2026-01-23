@@ -46,19 +46,44 @@ export async function restoreSessionParticipants() {
   });
 
   let restoredCount = 0;
+  let reactivatedCount = 0;
   for (const cs of channelSessions) {
     if (cs.currentSessionId) {
-      // Check if session is still active in DB
+      // Check if session exists and get machine status
       const session = await prisma.session.findUnique({
-        where: { id: cs.currentSessionId }
+        where: { id: cs.currentSessionId },
+        include: { machine: true }
       });
 
-      if (session && session.status === 'active') {
-        addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
-        restoredCount++;
-        console.log(`✅ Restored session participant: ${cs.platform}:${cs.chatId} -> ${cs.currentSessionId}`);
+      if (session) {
+        // Restore if machine is online (regardless of session status)
+        if (session.machine.status === 'online') {
+          addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
+          restoredCount++;
+          console.log(`✅ Restored session participant: ${cs.platform}:${cs.chatId} -> ${cs.currentSessionId}`);
+
+          // Reactivate ended sessions when machine is back online
+          if (session.status === 'ended') {
+            await prisma.session.update({
+              where: { id: cs.currentSessionId },
+              data: { status: 'active', endedAt: null }
+            });
+            reactivatedCount++;
+            console.log(`🔄 Reactivated session: ${cs.currentSessionId}`);
+          }
+        } else {
+          // Machine is offline, clear ChannelSession
+          await prisma.channelSession.update({
+            where: { id: cs.id },
+            data: {
+              currentSessionId: null,
+              currentMachineId: null
+            }
+          });
+          console.log(`🧹 Cleared offline session: ${cs.platform}:${cs.chatId}`);
+        }
       } else {
-        // Session no longer active, clear ChannelSession
+        // Session no longer exists, clear ChannelSession
         await prisma.channelSession.update({
           where: { id: cs.id },
           data: {
@@ -71,7 +96,7 @@ export async function restoreSessionParticipants() {
     }
   }
 
-  console.log(`📋 Restored ${restoredCount} session participant(s)`);
+  console.log(`📋 Restored ${restoredCount} session participant(s), reactivated ${reactivatedCount} session(s)`);
 }
 
 export async function createSession(

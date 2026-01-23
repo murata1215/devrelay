@@ -565,6 +565,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   console.log(`History length: ${sessionInfo.history.length}`);
   if (sessionInfo.claudeResumeSessionId) {
     console.log(`Using --resume with session: ${sessionInfo.claudeResumeSessionId.substring(0, 8)}...`);
+    // Send initial "session restoring" message to let user know to wait
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig!.machineId,
+        sessionId,
+        output: '🔄 セッション復元中... 初回は時間がかかることがあります\n\n',
+        isComplete: false,
+      },
+    });
   }
 
   // Prepare send options
