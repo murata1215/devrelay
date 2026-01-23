@@ -125,7 +125,7 @@ export async function sendPromptToAi(
 
     proc = spawn(claudePath, args, {
       cwd: projectPath,
-      shell: false,  // Use shell: false to properly pipe stdin (same as Linux)
+      shell: true,  // Windows needs shell: true to execute .cmd files (claude.cmd)
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
