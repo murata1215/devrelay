@@ -13,15 +13,7 @@ import type {
   AgreementApplyPayload,
   MissedMessage,
   StorageSavePayload,
-  StorageClearPayload,
-  TaskAssignedPayload,
-  TaskCompletedNotifyPayload,
-  TaskListPayload,
-  TaskFileCreate,
-  TaskFileComplete,
-  TaskFileFail,
-  TaskFileStart,
-  TaskFileComment,
+  StorageClearPayload
 } from '@devrelay/shared';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
@@ -57,14 +49,6 @@ import {
   enableSleepPrevention,
   disableSleepPrevention
 } from './sleep-preventer.js';
-import {
-  setTaskCallbacks,
-  startWatchingProject,
-  stopWatchingProject,
-  saveIncomingTask,
-  saveTaskCompletionNotification,
-  readFileAsAttachment,
-} from './task-watcher.js';
 import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
 
 let ws: WebSocket | null = null;
@@ -292,19 +276,6 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:storage:clear':
       handleStorageClear(message.payload);
-      break;
-
-    // Task messages
-    case 'server:task:assigned':
-      handleTaskAssigned(message.payload);
-      break;
-
-    case 'server:task:completed':
-      handleTaskCompleted(message.payload);
-      break;
-
-    case 'server:task:list':
-      handleTaskList(message.payload);
       break;
   }
 }
@@ -611,18 +582,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     sessionInfo.claudeSessionId,
     currentConfig,
     async (output, isComplete) => {
-      console.log(`📥 [CALLBACK] output=${output.length} chars, isComplete=${isComplete}`);
       responseText += output;
 
       if (isComplete) {
-        console.log(`📥 [CALLBACK] isComplete=true, total responseText=${responseText.length} chars`);
         // Collect files from the output directory
         const files = await collectOutputFiles(sessionInfo.projectPath);
         if (files.length > 0) {
-          console.log(`📎 Sending ${files.length} file(s) from output directory`);
+          console.log(`Sending ${files.length} file(s) from output directory`);
         }
 
-        console.log(`📤 [SEND] Sending agent:ai:output with isComplete=true`);
         sendMessage({
           type: 'agent:ai:output',
           payload: {
@@ -642,11 +610,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             timestamp: new Date().toISOString()
           });
           await saveConversation(sessionInfo.projectPath, sessionInfo.history);
-          console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
+          console.log(`Conversation saved (${sessionInfo.history.length} messages)`);
         }
       } else {
         // Stream intermediate output without files
-        console.log(`📤 Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
+        console.log(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
         sendMessage({
           type: 'agent:ai:output',
           payload: {
@@ -671,8 +639,6 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 function sendMessage(message: AgentMessage) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
-  } else {
-    console.warn(`⚠️ [SEND FAILED] WebSocket not ready. State: ${ws?.readyState}, message type: ${message.type}`);
   }
 }
 
@@ -896,167 +862,4 @@ async function handleStorageClear(payload: StorageClearPayload) {
   } catch (err) {
     console.error(`Failed to clear storage context:`, (err as Error).message);
   }
-}
-
-// -----------------------------------------------------------------------------
-// Task Handlers
-// -----------------------------------------------------------------------------
-
-async function handleTaskAssigned(payload: TaskAssignedPayload) {
-  console.log(`Incoming task: ${payload.name} (${payload.taskId})`);
-
-  // Save to incoming directory
-  await saveIncomingTask(payload.projectPath, payload);
-
-  console.log(`Task saved to .devrelay-tasks/incoming/`);
-}
-
-async function handleTaskCompleted(payload: TaskCompletedNotifyPayload) {
-  console.log(`Task completed notification: ${payload.name} (${payload.taskId})`);
-
-  // Save to incoming directory as result
-  await saveTaskCompletionNotification(payload.projectPath, payload);
-
-  console.log(`Task result saved to .devrelay-tasks/incoming/`);
-}
-
-async function handleTaskList(payload: TaskListPayload) {
-  console.log(`Received task list for ${payload.projectPath}: ${payload.tasks.length} tasks`);
-
-  // Save each task to incoming directory
-  for (const task of payload.tasks) {
-    await saveIncomingTask(payload.projectPath, {
-      taskId: task.id,
-      projectPath: payload.projectPath,
-      name: task.name,
-      description: task.description,
-      priority: task.priority,
-      senderProjectName: task.senderProjectName,
-      senderMachineName: task.senderMachineName,
-    });
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Task Watcher Setup
-// -----------------------------------------------------------------------------
-
-/**
- * Initialize task watcher with callbacks for sending messages to server
- */
-export function initializeTaskWatcher() {
-  setTaskCallbacks({
-    onCreate: async (projectPath: string, task: TaskFileCreate) => {
-      if (!currentConfig || !currentMachineId) return;
-
-      // Read attachments if specified
-      const attachments: FileAttachment[] = [];
-      if (task.attachments && task.attachments.length > 0) {
-        for (const filePath of task.attachments) {
-          const fullPath = join(projectPath, filePath);
-          const attachment = await readFileAsAttachment(fullPath);
-          if (attachment) {
-            attachments.push(attachment);
-          }
-        }
-      }
-
-      sendMessage({
-        type: 'agent:task:create',
-        payload: {
-          machineId: currentMachineId,
-          senderProjectPath: projectPath,
-          receiverProjectPath: task.receiver,
-          receiverMachineName: task.receiverMachine,
-          name: task.name,
-          description: task.description,
-          priority: task.priority,
-          parentTaskId: task.parentTaskId,
-          attachments: attachments.length > 0 ? attachments : undefined,
-        },
-      });
-    },
-
-    onComplete: async (projectPath: string, task: TaskFileComplete) => {
-      if (!currentConfig || !currentMachineId) return;
-
-      // Read result files if specified
-      const resultFiles: FileAttachment[] = [];
-      if (task.resultFiles && task.resultFiles.length > 0) {
-        for (const filePath of task.resultFiles) {
-          const fullPath = join(projectPath, filePath);
-          const attachment = await readFileAsAttachment(fullPath);
-          if (attachment) {
-            resultFiles.push(attachment);
-          }
-        }
-      }
-
-      sendMessage({
-        type: 'agent:task:complete',
-        payload: {
-          machineId: currentMachineId,
-          taskId: task.taskId,
-          projectPath,
-          resultNotes: task.resultNotes,
-          resultFiles: resultFiles.length > 0 ? resultFiles : undefined,
-        },
-      });
-    },
-
-    onFail: async (projectPath: string, task: TaskFileFail) => {
-      if (!currentConfig || !currentMachineId) return;
-
-      sendMessage({
-        type: 'agent:task:fail',
-        payload: {
-          machineId: currentMachineId,
-          taskId: task.taskId,
-          projectPath,
-          error: task.error,
-        },
-      });
-    },
-
-    onStart: async (projectPath: string, task: TaskFileStart) => {
-      if (!currentConfig || !currentMachineId) return;
-
-      sendMessage({
-        type: 'agent:task:start',
-        payload: {
-          machineId: currentMachineId,
-          taskId: task.taskId,
-          projectPath,
-        },
-      });
-    },
-
-    onComment: async (projectPath: string, task: TaskFileComment) => {
-      if (!currentConfig || !currentMachineId) return;
-
-      sendMessage({
-        type: 'agent:task:comment',
-        payload: {
-          machineId: currentMachineId,
-          taskId: task.taskId,
-          projectPath,
-          content: task.content,
-        },
-      });
-    },
-  });
-}
-
-/**
- * Start watching a project for task files
- */
-export async function startTaskWatcher(projectPath: string) {
-  await startWatchingProject(projectPath);
-}
-
-/**
- * Stop watching a project for task files
- */
-export function stopTaskWatcher(projectPath: string) {
-  stopWatchingProject(projectPath);
 }

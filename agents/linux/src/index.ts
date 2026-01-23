@@ -1,5 +1,5 @@
 import { loadConfig } from './services/config.js';
-import { connectToServer, initializeTaskWatcher, startTaskWatcher } from './services/connection.js';
+import { connectToServer } from './services/connection.js';
 import { loadProjects, autoDiscoverProjects } from './services/projects.js';
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, symlinkSync, unlinkSync } from 'fs';
@@ -59,14 +59,6 @@ async function main() {
   // Load projects
   const projects = await loadProjects(config);
   console.log(`📁 Projects: ${projects.length}`);
-
-  // Initialize task watcher callbacks
-  initializeTaskWatcher();
-
-  // Start task watchers for each project
-  for (const project of projects) {
-    await startTaskWatcher(project.path);
-  }
 
   // Connect to server
   await connectToServer(config, projects);
