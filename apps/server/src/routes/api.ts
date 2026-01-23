@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents } from '../services/agent-manager.js';
+import { getConnectedAgents, requestHistoryDates, requestHistoryExport } from '../services/agent-manager.js';
 import { encrypt, decrypt } from '../services/user-settings.js';
 import {
   getLinkedPlatforms,
@@ -410,6 +410,81 @@ export async function apiRoutes(app: FastifyInstance) {
     } catch (err) {
       console.error('Failed to get service status:', err);
       return reply.status(500).send({ error: 'Failed to get service status' });
+    }
+  });
+
+  // ========================================
+  // 履歴エクスポート
+  // ========================================
+
+  // 日付一覧取得
+  app.get('/api/projects/:projectId/history/dates', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId } = request.params as { projectId: string };
+
+    // プロジェクトの存在とユーザーの権限を確認
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+      include: { machine: true }
+    });
+
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    // Agent がオンラインか確認
+    const connectedAgents = getConnectedAgents();
+    if (!connectedAgents.has(project.machineId)) {
+      return reply.status(503).send({ error: 'Agent is offline' });
+    }
+
+    try {
+      const dates = await requestHistoryDates(project.machineId, project.path);
+      return { dates };
+    } catch (err: any) {
+      console.error('Failed to get history dates:', err);
+      return reply.status(500).send({ error: err.message || 'Failed to get history dates' });
+    }
+  });
+
+  // ZIP ダウンロード
+  app.get('/api/projects/:projectId/history/:date/download', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId, date } = request.params as { projectId: string; date: string };
+
+    // 日付フォーマット検証
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return reply.status(400).send({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+
+    // プロジェクトの存在とユーザーの権限を確認
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+      include: { machine: true }
+    });
+
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    // Agent がオンラインか確認
+    const connectedAgents = getConnectedAgents();
+    if (!connectedAgents.has(project.machineId)) {
+      return reply.status(503).send({ error: 'Agent is offline' });
+    }
+
+    try {
+      const zipContent = await requestHistoryExport(project.machineId, project.path, date);
+      const buffer = Buffer.from(zipContent, 'base64');
+
+      reply.header('Content-Type', 'application/zip');
+      reply.header('Content-Disposition', `attachment; filename="${project.name}_${date}.zip"`);
+      return reply.send(buffer);
+    } catch (err: any) {
+      console.error('Failed to export history:', err);
+      return reply.status(500).send({ error: err.message || 'Failed to export history' });
     }
   });
 }

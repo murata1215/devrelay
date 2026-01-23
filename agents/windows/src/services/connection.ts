@@ -13,8 +13,13 @@ import type {
   AgreementApplyPayload,
   MissedMessage,
   StorageSavePayload,
-  StorageClearPayload
+  StorageClearPayload,
+  HistoryDatesRequestPayload,
+  HistoryExportRequestPayload
 } from '@devrelay/shared';
+import archiver from 'archiver';
+import { PassThrough } from 'stream';
+import { readdirSync } from 'fs';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, type SendPromptOptions } from './ai-runner.js';
@@ -188,6 +193,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     ws.on('message', (data) => {
       try {
         const message: ServerToAgentMessage = JSON.parse(data.toString());
+        console.log(`📥 Received message: type=${message.type}`);
         handleServerMessage(message, config);
       } catch (err) {
         console.error('Error parsing server message:', err);
@@ -276,6 +282,14 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:storage:clear':
       handleStorageClear(message.payload);
+      break;
+
+    case 'server:history:dates':
+      handleHistoryDates(message.payload);
+      break;
+
+    case 'server:history:export':
+      handleHistoryExport(message.payload);
       break;
   }
 }
@@ -944,5 +958,192 @@ async function handleStorageClear(payload: StorageClearPayload) {
     console.log(`Storage context cleared`);
   } catch (err) {
     console.error(`Failed to clear storage context:`, (err as Error).message);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// History Export Functions
+// -----------------------------------------------------------------------------
+
+async function handleHistoryDates(payload: HistoryDatesRequestPayload) {
+  console.log(`📥 handleHistoryDates called`);
+  const { projectPath, requestId } = payload;
+  console.log(`📦 Getting history dates for ${projectPath}`);
+
+  try {
+    // Load conversation history
+    const history = await loadConversation(projectPath);
+
+    // Extract unique dates from timestamps
+    const dates = new Set<string>();
+    for (const message of history) {
+      if (message.timestamp) {
+        const date = message.timestamp.split('T')[0];  // YYYY-MM-DD
+        dates.add(date);
+      }
+    }
+
+    // Sort dates descending (newest first)
+    const sortedDates = Array.from(dates).sort((a, b) => b.localeCompare(a));
+
+    console.log(`Found ${sortedDates.length} dates with history`);
+
+    if (currentConfig) {
+      sendMessage({
+        type: 'agent:history:dates',
+        payload: {
+          machineId: currentConfig.machineId,
+          projectPath,
+          requestId,
+          dates: sortedDates,
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`Failed to get history dates:`, (err as Error).message);
+  }
+}
+
+async function handleHistoryExport(payload: HistoryExportRequestPayload) {
+  const { projectPath, requestId, date } = payload;
+  console.log(`Exporting history for ${projectPath} on ${date}`);
+
+  try {
+    // Load conversation history
+    const history = await loadConversation(projectPath);
+
+    // Filter messages for the specified date
+    const dayMessages = history.filter(m => m.timestamp?.startsWith(date));
+
+    if (dayMessages.length === 0) {
+      console.log(`No messages found for ${date}`);
+      if (currentConfig) {
+        sendMessage({
+          type: 'agent:history:export',
+          payload: {
+            machineId: currentConfig.machineId,
+            projectPath,
+            requestId,
+            date,
+            zipContent: '',
+            error: 'No messages found for this date',
+          },
+        });
+      }
+      return;
+    }
+
+    // Generate Markdown content
+    let markdown = `# 会話履歴 - ${date}\n\n`;
+
+    // Get files for this date from .devrelay-files/
+    const filesDir = join(projectPath, '.devrelay-files');
+    const imageFiles: { originalName: string; newName: string }[] = [];
+
+    try {
+      const files = readdirSync(filesDir);
+      // Filter files that match the date (YYYYMMDD_ prefix)
+      const datePrefix = date.replace(/-/g, '') + '_';
+      let imageIndex = 1;
+
+      for (const file of files) {
+        if (file.startsWith(datePrefix)) {
+          const ext = file.split('.').pop()?.toLowerCase();
+          if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext || '')) {
+            const newName = `image${imageIndex}.${ext}`;
+            imageFiles.push({ originalName: file, newName });
+            imageIndex++;
+          }
+        }
+      }
+    } catch {
+      // .devrelay-files directory doesn't exist
+    }
+
+    console.log(`Processing ${dayMessages.length} messages for ${date}`);
+    console.log(`Found ${imageFiles.length} images for ${date}`);
+
+    // Build markdown content
+    for (const message of dayMessages) {
+      const time = message.timestamp ? new Date(message.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '';
+      const role = message.role === 'user' ? 'ユーザー' : message.role === 'assistant' ? 'アシスタント' : message.role;
+
+      markdown += `## ${time} - ${role}\n\n`;
+      markdown += message.content + '\n\n';
+    }
+
+    // Add image references at the end if any
+    if (imageFiles.length > 0) {
+      markdown += `## 添付ファイル\n\n`;
+      for (const img of imageFiles) {
+        markdown += `![${img.newName}](./images/${img.newName})\n`;
+      }
+    }
+
+    console.log(`Markdown generated: ${markdown.length} chars`);
+
+    // Create ZIP file in memory
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const chunks: Buffer[] = [];
+
+    const passThrough = new PassThrough();
+    passThrough.on('data', (chunk: Buffer) => chunks.push(chunk));
+
+    // Promise を先に作成してから finalize() を呼ぶ
+    const endPromise = new Promise<void>((resolve, reject) => {
+      passThrough.on('end', resolve);
+      passThrough.on('error', reject);
+      archive.on('error', reject);
+    });
+
+    archive.pipe(passThrough);
+
+    // Add conversation.md
+    archive.append(markdown, { name: 'conversation.md' });
+
+    // Add images
+    for (const img of imageFiles) {
+      const filePath = join(filesDir, img.originalName);
+      archive.file(filePath, { name: `images/${img.newName}` });
+    }
+
+    console.log(`Starting ZIP finalization...`);
+    await archive.finalize();
+
+    // Wait for all chunks
+    await endPromise;
+
+    const zipBuffer = Buffer.concat(chunks);
+    const zipContent = zipBuffer.toString('base64');
+
+    console.log(`ZIP created: ${zipBuffer.length} bytes, ${imageFiles.length} images`);
+
+    if (currentConfig) {
+      sendMessage({
+        type: 'agent:history:export',
+        payload: {
+          machineId: currentConfig.machineId,
+          projectPath,
+          requestId,
+          date,
+          zipContent,
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`Failed to export history:`, (err as Error).message);
+    if (currentConfig) {
+      sendMessage({
+        type: 'agent:history:export',
+        payload: {
+          machineId: currentConfig.machineId,
+          projectPath,
+          requestId,
+          date,
+          zipContent: '',
+          error: (err as Error).message,
+        },
+      });
+    }
   }
 }

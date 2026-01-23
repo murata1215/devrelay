@@ -13,12 +13,23 @@ const SESSION_EXPIRES_DAYS = 30;
 
 // 認証ミドルウェア
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {
+  // まずヘッダーからトークンを取得
+  let token: string | undefined;
   const authHeader = request.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7);
+  }
+
+  // ヘッダーになければクエリパラメータから取得（ダウンロード用）
+  if (!token) {
+    const query = request.query as { token?: string };
+    token = query.token;
+  }
+
+  if (!token) {
     return reply.status(401).send({ error: 'Unauthorized' });
   }
 
-  const token = authHeader.substring(7);
   const session = await prisma.authSession.findUnique({
     where: { token },
     include: { user: true },

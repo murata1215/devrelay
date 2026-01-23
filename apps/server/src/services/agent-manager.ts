@@ -18,6 +18,15 @@ const connectedAgents = new Map<string, WebSocket>();
 // Machine info cache: machineId -> Machine
 const machineCache = new Map<string, Machine>();
 
+// Pending history requests: requestId -> { resolve, reject, timeout }
+interface HistoryRequest<T> {
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+const pendingHistoryDatesRequests = new Map<string, HistoryRequest<string[]>>();
+const pendingHistoryExportRequests = new Map<string, HistoryRequest<string>>();
+
 export function setupAgentWebSocket(connection: { socket: WebSocket }, req: FastifyRequest) {
   const ws = connection.socket;
   let machineId: string | null = null;
@@ -60,6 +69,14 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:session:restore':
           await handleSessionRestore(ws, message.payload);
+          break;
+
+        case 'agent:history:dates':
+          await handleHistoryDates(message.payload);
+          break;
+
+        case 'agent:history:export':
+          await handleHistoryExport(message.payload);
           break;
       }
     } catch (err) {
@@ -263,6 +280,35 @@ async function handleAgentPing(ws: WebSocket, payload: { machineId: string; time
   });
 }
 
+async function handleHistoryDates(payload: { machineId: string; projectPath: string; requestId: string; dates: string[] }) {
+  const { requestId, dates } = payload;
+  const pending = pendingHistoryDatesRequests.get(requestId);
+
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingHistoryDatesRequests.delete(requestId);
+    pending.resolve(dates);
+    console.log(`📅 History dates received: ${dates.length} dates for request ${requestId}`);
+  }
+}
+
+async function handleHistoryExport(payload: { machineId: string; projectPath: string; requestId: string; date: string; zipContent: string; error?: string }) {
+  const { requestId, zipContent, error } = payload;
+  const pending = pendingHistoryExportRequests.get(requestId);
+
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingHistoryExportRequests.delete(requestId);
+    if (error) {
+      pending.reject(new Error(error));
+      console.log(`❌ History export failed for request ${requestId}: ${error}`);
+    } else {
+      pending.resolve(zipContent);
+      console.log(`📦 History export received for request ${requestId}`);
+    }
+  }
+}
+
 async function handleSessionRestore(ws: WebSocket, payload: { machineId: string; projectPath: string; projectName: string; agreementStatus: boolean }) {
   const { machineId, projectPath, projectName, agreementStatus } = payload;
 
@@ -337,7 +383,10 @@ export function sendToAgent(machineIdOrWs: string | WebSocket, message: ServerTo
     : machineIdOrWs;
 
   if (ws && ws.readyState === ws.OPEN) {
+    console.log(`📤 sendToAgent: type=${message.type}`);
     ws.send(JSON.stringify(message));
+  } else {
+    console.log(`📤 sendToAgent FAILED: type=${message.type}, ws=${!!ws}, readyState=${ws?.readyState}`);
   }
 }
 
@@ -491,4 +540,74 @@ export function stopHeartbeatMonitor() {
     heartbeatMonitorInterval = null;
     console.log('💔 Heartbeat monitor stopped');
   }
+}
+
+// -----------------------------------------------------------------------------
+// History Export API
+// -----------------------------------------------------------------------------
+
+const HISTORY_REQUEST_TIMEOUT = 120000; // 120 seconds (ZIP creation can take time with many messages)
+
+/**
+ * Request available history dates from an agent
+ */
+export function requestHistoryDates(machineId: string, projectPath: string): Promise<string[]> {
+  console.log(`📤 requestHistoryDates: machineId=${machineId}, projectPath=${projectPath}`);
+
+  return new Promise((resolve, reject) => {
+    const ws = connectedAgents.get(machineId);
+    const hasAgent = connectedAgents.has(machineId);
+    console.log(`📤 connectedAgents.has(${machineId}): ${hasAgent}`);
+    console.log(`📤 connectedAgents keys: ${Array.from(connectedAgents.keys()).join(', ')}`);
+    console.log(`📤 ws.readyState: ${ws?.readyState} (OPEN=1)`);
+
+    if (!ws || ws.readyState !== ws.OPEN) {
+      console.log(`📤 Agent not connected or WebSocket not open`);
+      reject(new Error('Agent is not connected'));
+      return;
+    }
+
+    const requestId = `dates-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    console.log(`📤 Sending server:history:dates with requestId=${requestId}`);
+
+    const timeout = setTimeout(() => {
+      pendingHistoryDatesRequests.delete(requestId);
+      console.log(`📤 Request ${requestId} timed out`);
+      reject(new Error('Request timed out'));
+    }, HISTORY_REQUEST_TIMEOUT);
+
+    pendingHistoryDatesRequests.set(requestId, { resolve, reject, timeout });
+
+    sendToAgent(ws, {
+      type: 'server:history:dates',
+      payload: { projectPath, requestId }
+    });
+  });
+}
+
+/**
+ * Request history export for a specific date from an agent
+ */
+export function requestHistoryExport(machineId: string, projectPath: string, date: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const ws = connectedAgents.get(machineId);
+    if (!ws || ws.readyState !== ws.OPEN) {
+      reject(new Error('Agent is not connected'));
+      return;
+    }
+
+    const requestId = `export-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+    const timeout = setTimeout(() => {
+      pendingHistoryExportRequests.delete(requestId);
+      reject(new Error('Request timed out'));
+    }, HISTORY_REQUEST_TIMEOUT);
+
+    pendingHistoryExportRequests.set(requestId, { resolve, reject, timeout });
+
+    sendToAgent(ws, {
+      type: 'server:history:export',
+      payload: { projectPath, requestId, date }
+    });
+  });
 }

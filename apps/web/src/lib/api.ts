@@ -206,3 +206,15 @@ export const services = {
     return request('POST', '/services/restart/agent', {});
   },
 };
+
+// 履歴エクスポートAPI
+export const history = {
+  async getDates(projectId: string): Promise<{ dates: string[] }> {
+    return request('GET', `/projects/${projectId}/history/dates`);
+  },
+
+  getDownloadUrl(projectId: string, date: string): string {
+    const token = getToken();
+    return `${API_BASE}/projects/${projectId}/history/${date}/download?token=${token}`;
+  },
+};

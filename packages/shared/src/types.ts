@@ -71,7 +71,9 @@ export type AgentMessage =
   | { type: 'agent:ai:status'; payload: AiStatusPayload }
   | { type: 'agent:session:restore'; payload: SessionRestorePayload }
   | { type: 'agent:storage:saved'; payload: StorageSavedPayload }
-  | { type: 'agent:ping'; payload: AgentPingPayload };
+  | { type: 'agent:ping'; payload: AgentPingPayload }
+  | { type: 'agent:history:dates'; payload: HistoryDatesPayload }
+  | { type: 'agent:history:export'; payload: HistoryExportPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -83,6 +85,22 @@ export interface SessionRestorePayload {
 export interface AgentPingPayload {
   machineId: string;
   timestamp: string;
+}
+
+export interface HistoryDatesPayload {
+  machineId: string;
+  projectPath: string;
+  requestId: string;
+  dates: string[];  // Array of dates in YYYY-MM-DD format
+}
+
+export interface HistoryExportPayload {
+  machineId: string;
+  projectPath: string;
+  requestId: string;
+  date: string;  // YYYY-MM-DD format
+  zipContent: string;  // Base64 encoded ZIP file
+  error?: string;  // Error message if export failed
 }
 
 export interface AgentConnectPayload {
@@ -130,7 +148,20 @@ export type ServerToAgentMessage =
   | { type: 'server:session:restored'; payload: SessionRestoredPayload }
   | { type: 'server:storage:save'; payload: StorageSavePayload }
   | { type: 'server:storage:clear'; payload: StorageClearPayload }
-  | { type: 'server:pong'; payload: ServerPongPayload };
+  | { type: 'server:pong'; payload: ServerPongPayload }
+  | { type: 'server:history:dates'; payload: HistoryDatesRequestPayload }
+  | { type: 'server:history:export'; payload: HistoryExportRequestPayload };
+
+export interface HistoryDatesRequestPayload {
+  projectPath: string;
+  requestId: string;
+}
+
+export interface HistoryExportRequestPayload {
+  projectPath: string;
+  requestId: string;
+  date: string;  // YYYY-MM-DD format
+}
 
 export interface ServerConnectAckPayload {
   success: boolean;

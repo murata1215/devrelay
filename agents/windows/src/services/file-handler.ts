@@ -5,6 +5,21 @@ import type { FileAttachment } from '@devrelay/shared';
 // Directory to save received files (relative to project path)
 const RECEIVED_FILES_DIR = '.devrelay-files';
 
+/**
+ * Generate datetime prefix for filename
+ * Format: YYYYMMDD_HHmmss_
+ */
+function getDateTimePrefix(): string {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const min = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}_${hh}${min}${ss}_`;
+}
+
 export async function saveReceivedFiles(
   projectPath: string,
   files: FileAttachment[]
@@ -22,9 +37,14 @@ export async function saveReceivedFiles(
     }
   }
 
+  // Generate datetime prefix for this batch of files
+  const dateTimePrefix = getDateTimePrefix();
+
   for (const file of files) {
     try {
-      const filePath = join(filesDir, file.filename);
+      // Add datetime prefix to filename
+      const prefixedFilename = `${dateTimePrefix}${file.filename}`;
+      const filePath = join(filesDir, prefixedFilename);
       const buffer = Buffer.from(file.content, 'base64');
       await writeFile(filePath, buffer);
       console.log(`Saved file: ${filePath} (${file.size} bytes)`);
