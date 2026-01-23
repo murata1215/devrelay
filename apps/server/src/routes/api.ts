@@ -12,6 +12,14 @@ import {
   validateAndConsumeLinkCode,
   unlinkPlatform,
 } from '../services/platform-link.js';
+import {
+  getTasks,
+  getTask,
+  getTaskComments,
+  getTaskAttachments,
+  getTaskActivityLogs,
+} from '../services/task-manager.js';
+import type { TaskStatus } from '@devrelay/shared';
 
 const execAsync = promisify(exec);
 
@@ -411,6 +419,118 @@ export async function apiRoutes(app: FastifyInstance) {
       console.error('Failed to get service status:', err);
       return reply.status(500).send({ error: 'Failed to get service status' });
     }
+  });
+
+  // ========================================
+  // プロジェクト間タスク連携
+  // ========================================
+
+  // タスク一覧取得
+  app.get('/api/tasks', async (request) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { status, limit, offset } = request.query as {
+      status?: TaskStatus;
+      limit?: string;
+      offset?: string;
+    };
+
+    const result = await getTasks({
+      userId,
+      status,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    });
+
+    return result;
+  });
+
+  // タスク詳細取得
+  app.get('/api/tasks/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    const task = await getTask(id);
+    if (!task) {
+      return reply.status(404).send({ error: 'Task not found' });
+    }
+
+    return task;
+  });
+
+  // タスクのコメント一覧
+  app.get('/api/tasks/:id/comments', async (request) => {
+    const { id } = request.params as { id: string };
+    const comments = await getTaskComments(id);
+    return comments.map(c => ({
+      id: c.id,
+      taskId: c.taskId,
+      projectId: c.projectId,
+      projectName: c.project.name,
+      content: c.content,
+      createdAt: c.createdAt.toISOString(),
+    }));
+  });
+
+  // タスクの添付ファイル一覧
+  app.get('/api/tasks/:id/attachments', async (request) => {
+    const { id } = request.params as { id: string };
+    const attachments = await getTaskAttachments(id);
+    return attachments.map(a => ({
+      id: a.id,
+      taskId: a.taskId,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      size: a.size,
+      uploadedBy: a.uploadedBy,
+      createdAt: a.createdAt.toISOString(),
+    }));
+  });
+
+  // タスクの添付ファイル内容取得
+  app.get('/api/tasks/:id/attachments/:attachmentId/content', async (request, reply) => {
+    const { id, attachmentId } = request.params as { id: string; attachmentId: string };
+
+    const attachment = await prisma.taskAttachment.findFirst({
+      where: { id: attachmentId, taskId: id },
+    });
+
+    if (!attachment) {
+      return reply.status(404).send({ error: 'Attachment not found' });
+    }
+
+    return {
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      content: attachment.content,
+    };
+  });
+
+  // タスクのアクティビティログ
+  app.get('/api/tasks/:id/logs', async (request) => {
+    const { id } = request.params as { id: string };
+    const logs = await getTaskActivityLogs(id);
+    return logs.map(l => ({
+      id: l.id,
+      taskId: l.taskId,
+      projectId: l.projectId,
+      projectName: l.project.name,
+      action: l.action,
+      details: l.details,
+      createdAt: l.createdAt.toISOString(),
+    }));
+  });
+
+  // プロジェクト別タスク一覧
+  app.get('/api/projects/:id/tasks', async (request) => {
+    const { id } = request.params as { id: string };
+    const { status } = request.query as { status?: TaskStatus };
+
+    const result = await getTasks({
+      projectId: id,
+      status,
+    });
+
+    return result;
   });
 }
 

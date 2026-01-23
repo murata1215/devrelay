@@ -7,10 +7,27 @@ import type {
   Project,
   AiTool,
   FileAttachment,
-  WorkState
+  WorkState,
+  TaskCreatePayload,
+  TaskCompletePayload,
+  TaskFailPayload,
+  TaskProgressPayload,
+  TaskCommentPayload,
+  TaskStartPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine } from './session-manager.js';
+import {
+  createTask,
+  completeTask,
+  failTask,
+  startTask,
+  addComment,
+  getIncomingTasks,
+  buildTaskAssignedPayload,
+  buildTaskCompletedNotifyPayload,
+  getTaskAttachments,
+} from './task-manager.js';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -60,6 +77,31 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:session:restore':
           await handleSessionRestore(ws, message.payload);
+          break;
+
+        // Task messages
+        case 'agent:task:create':
+          await handleTaskCreate(message.payload);
+          break;
+
+        case 'agent:task:start':
+          await handleTaskStart(message.payload);
+          break;
+
+        case 'agent:task:complete':
+          await handleTaskComplete(message.payload);
+          break;
+
+        case 'agent:task:fail':
+          await handleTaskFail(message.payload);
+          break;
+
+        case 'agent:task:progress':
+          await handleTaskProgress(message.payload);
+          break;
+
+        case 'agent:task:comment':
+          await handleTaskComment(message.payload);
           break;
       }
     } catch (err) {
@@ -311,6 +353,161 @@ async function handleSessionRestore(ws: WebSocket, payload: { machineId: string;
 }
 
 // -----------------------------------------------------------------------------
+// Task Handlers
+// -----------------------------------------------------------------------------
+
+async function handleTaskCreate(payload: TaskCreatePayload) {
+  console.log(`📝 Task create request from ${payload.machineId}: ${payload.name}`);
+
+  try {
+    const { task, receiverMachineId } = await createTask(payload);
+    console.log(`✅ Task created: ${task.id} (${task.name})`);
+
+    // If receiver is specified and online, notify them
+    if (receiverMachineId && connectedAgents.has(receiverMachineId)) {
+      // Get receiver project path
+      const receiverProject = await prisma.project.findUnique({
+        where: { id: task.receiverProjectId! }
+      });
+
+      if (receiverProject) {
+        // Get attachments
+        const attachments = await getTaskAttachments(task.id);
+        const fileAttachments = attachments.map(a => ({
+          filename: a.filename,
+          content: a.content,
+          mimeType: a.mimeType,
+          size: a.size,
+        }));
+
+        const assignedPayload = buildTaskAssignedPayload(
+          task,
+          receiverProject.path,
+          fileAttachments.length > 0 ? fileAttachments : undefined
+        );
+
+        sendToAgent(receiverMachineId, {
+          type: 'server:task:assigned',
+          payload: assignedPayload,
+        });
+
+        console.log(`📨 Task assigned notification sent to ${receiverMachineId}`);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error creating task:', err);
+  }
+}
+
+async function handleTaskStart(payload: TaskStartPayload) {
+  console.log(`▶️ Task start: ${payload.taskId}`);
+
+  try {
+    const task = await startTask(payload);
+    if (task) {
+      console.log(`✅ Task started: ${task.id}`);
+    }
+  } catch (err) {
+    console.error('❌ Error starting task:', err);
+  }
+}
+
+async function handleTaskComplete(payload: TaskCompletePayload) {
+  console.log(`✅ Task complete: ${payload.taskId}`);
+
+  try {
+    const { task, senderMachineId } = await completeTask(payload);
+    console.log(`✅ Task completed: ${task.id}`);
+
+    // Notify sender if online
+    if (connectedAgents.has(senderMachineId)) {
+      // Get sender project path
+      const senderProject = await prisma.project.findUnique({
+        where: { id: task.senderProjectId }
+      });
+
+      if (senderProject) {
+        // Get result files
+        const attachments = await getTaskAttachments(task.id);
+        const resultFiles = attachments
+          .filter(a => a.uploadedBy === task.executorProjectId)
+          .map(a => ({
+            filename: a.filename,
+            content: a.content,
+            mimeType: a.mimeType,
+            size: a.size,
+          }));
+
+        const completedPayload = buildTaskCompletedNotifyPayload(
+          task,
+          senderProject.path,
+          resultFiles.length > 0 ? resultFiles : undefined
+        );
+
+        sendToAgent(senderMachineId, {
+          type: 'server:task:completed',
+          payload: completedPayload,
+        });
+
+        console.log(`📨 Task completion notification sent to ${senderMachineId}`);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error completing task:', err);
+  }
+}
+
+async function handleTaskFail(payload: TaskFailPayload) {
+  console.log(`❌ Task failed: ${payload.taskId} - ${payload.error}`);
+
+  try {
+    const { task, senderMachineId } = await failTask(payload);
+    console.log(`✅ Task marked as failed: ${task.id}`);
+
+    // Notify sender if online
+    if (connectedAgents.has(senderMachineId)) {
+      // Get sender project path
+      const senderProject = await prisma.project.findUnique({
+        where: { id: task.senderProjectId }
+      });
+
+      if (senderProject) {
+        const completedPayload = buildTaskCompletedNotifyPayload(
+          task,
+          senderProject.path
+        );
+
+        sendToAgent(senderMachineId, {
+          type: 'server:task:completed',
+          payload: completedPayload,
+        });
+
+        console.log(`📨 Task failure notification sent to ${senderMachineId}`);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error marking task as failed:', err);
+  }
+}
+
+async function handleTaskProgress(payload: TaskProgressPayload) {
+  console.log(`📊 Task progress: ${payload.taskId} - ${payload.progress}`);
+  // Progress updates are logged for now
+  // Future: Could store in a separate table or broadcast to interested parties
+}
+
+async function handleTaskComment(payload: TaskCommentPayload) {
+  console.log(`💬 Task comment: ${payload.taskId}`);
+
+  try {
+    await addComment(payload);
+    console.log(`✅ Comment added to task: ${payload.taskId}`);
+  } catch (err) {
+    console.error('❌ Error adding comment:', err);
+  }
+}
+
+// -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
 
@@ -420,6 +617,15 @@ export async function clearStorageContext(machineId: string, sessionId: string, 
   sendToAgent(machineId, {
     type: 'server:storage:clear',
     payload: { sessionId, projectPath }
+  });
+}
+
+export async function sendIncomingTasksToAgent(machineId: string, projectPath: string) {
+  const taskList = await getIncomingTasks(projectPath);
+
+  sendToAgent(machineId, {
+    type: 'server:task:list',
+    payload: taskList,
   });
 }
 

@@ -71,7 +71,14 @@ export type AgentMessage =
   | { type: 'agent:ai:status'; payload: AiStatusPayload }
   | { type: 'agent:session:restore'; payload: SessionRestorePayload }
   | { type: 'agent:storage:saved'; payload: StorageSavedPayload }
-  | { type: 'agent:ping'; payload: AgentPingPayload };
+  | { type: 'agent:ping'; payload: AgentPingPayload }
+  // Task messages
+  | { type: 'agent:task:create'; payload: TaskCreatePayload }
+  | { type: 'agent:task:complete'; payload: TaskCompletePayload }
+  | { type: 'agent:task:fail'; payload: TaskFailPayload }
+  | { type: 'agent:task:progress'; payload: TaskProgressPayload }
+  | { type: 'agent:task:comment'; payload: TaskCommentPayload }
+  | { type: 'agent:task:start'; payload: TaskStartPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -130,7 +137,11 @@ export type ServerToAgentMessage =
   | { type: 'server:session:restored'; payload: SessionRestoredPayload }
   | { type: 'server:storage:save'; payload: StorageSavePayload }
   | { type: 'server:storage:clear'; payload: StorageClearPayload }
-  | { type: 'server:pong'; payload: ServerPongPayload };
+  | { type: 'server:pong'; payload: ServerPongPayload }
+  // Task messages
+  | { type: 'server:task:assigned'; payload: TaskAssignedPayload }
+  | { type: 'server:task:completed'; payload: TaskCompletedNotifyPayload }
+  | { type: 'server:task:list'; payload: TaskListPayload };
 
 export interface ServerConnectAckPayload {
   success: boolean;
@@ -297,3 +308,188 @@ export interface WorkState {
     filesModified: string[];
   };
 }
+
+// -----------------------------------------------------------------------------
+// Cross-Project Task System
+// -----------------------------------------------------------------------------
+
+export type TaskStatus = 'pending' | 'assigned' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
+export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
+
+export interface CrossProjectTask {
+  id: string;
+  senderProjectId: string;
+  senderProjectName?: string;
+  senderMachineName?: string;
+  receiverProjectId?: string;
+  receiverProjectName?: string;
+  receiverMachineName?: string;
+  executorProjectId?: string;
+  name: string;
+  description: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  createdAt: string;
+  assignedAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  resultNotes?: string;
+  resultFileUrl?: string;
+  parentTaskId?: string;
+  metadata?: string;
+}
+
+export interface TaskCommentData {
+  id: string;
+  taskId: string;
+  projectId: string;
+  projectName?: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface TaskAttachmentData {
+  id: string;
+  taskId: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  content: string;
+  uploadedBy: string;
+  createdAt: string;
+}
+
+export interface TaskActivityLogData {
+  id: string;
+  taskId: string;
+  projectId: string;
+  projectName?: string;
+  action: string;
+  details?: string;
+  createdAt: string;
+}
+
+// Agent -> Server (Task messages)
+export interface TaskCreatePayload {
+  machineId: string;
+  senderProjectPath: string;
+  receiverProjectPath?: string;
+  receiverMachineName?: string;
+  name: string;
+  description: string;
+  priority?: TaskPriority;
+  parentTaskId?: string;
+  attachments?: FileAttachment[];
+}
+
+export interface TaskCompletePayload {
+  machineId: string;
+  taskId: string;
+  projectPath: string;
+  resultNotes: string;
+  resultFiles?: FileAttachment[];
+}
+
+export interface TaskFailPayload {
+  machineId: string;
+  taskId: string;
+  projectPath: string;
+  error: string;
+}
+
+export interface TaskProgressPayload {
+  machineId: string;
+  taskId: string;
+  projectPath: string;
+  progress: string;
+}
+
+export interface TaskCommentPayload {
+  machineId: string;
+  taskId: string;
+  projectPath: string;
+  content: string;
+}
+
+export interface TaskStartPayload {
+  machineId: string;
+  taskId: string;
+  projectPath: string;
+}
+
+// Server -> Agent (Task messages)
+export interface TaskAssignedPayload {
+  taskId: string;
+  projectPath: string;
+  name: string;
+  description: string;
+  priority: TaskPriority;
+  senderProjectName: string;
+  senderMachineName: string;
+  parentTaskId?: string;
+  attachments?: FileAttachment[];
+}
+
+export interface TaskCompletedNotifyPayload {
+  taskId: string;
+  projectPath: string;
+  name: string;
+  status: 'completed' | 'failed';
+  resultNotes?: string;
+  resultFiles?: FileAttachment[];
+  error?: string;
+  executorProjectName: string;
+  executorMachineName: string;
+}
+
+export interface TaskListPayload {
+  projectPath: string;
+  tasks: Array<{
+    id: string;
+    name: string;
+    description: string;
+    status: TaskStatus;
+    priority: TaskPriority;
+    senderProjectName: string;
+    senderMachineName: string;
+    createdAt: string;
+  }>;
+}
+
+// Task file format (for .devrelay-tasks/outgoing/)
+export interface TaskFileCreate {
+  action: 'create';
+  receiver?: string;
+  receiverMachine?: string;
+  name: string;
+  description: string;
+  priority?: TaskPriority;
+  parentTaskId?: string;
+  attachments?: string[];
+}
+
+export interface TaskFileComplete {
+  action: 'complete';
+  taskId: string;
+  resultNotes: string;
+  resultFiles?: string[];
+}
+
+export interface TaskFileFail {
+  action: 'fail';
+  taskId: string;
+  error: string;
+}
+
+export interface TaskFileStart {
+  action: 'start';
+  taskId: string;
+}
+
+export interface TaskFileComment {
+  action: 'comment';
+  taskId: string;
+  content: string;
+}
+
+export type TaskFile = TaskFileCreate | TaskFileComplete | TaskFileFail | TaskFileStart | TaskFileComment;

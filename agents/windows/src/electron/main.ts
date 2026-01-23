@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadConfig, saveConfig, ensureConfigDir, getConfigDir } from '../services/config.js';
 import { loadProjects, autoDiscoverProjects } from '../services/projects.js';
-import { connectToServer, disconnect } from '../services/connection.js';
+import { connectToServer, disconnect, initializeTaskWatcher, startTaskWatcher } from '../services/connection.js';
 import type { AgentConfig } from '../services/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -193,6 +193,14 @@ async function startAgent() {
     }
 
     const projects = await loadProjects(currentConfig);
+
+    // Initialize task watcher callbacks
+    initializeTaskWatcher();
+
+    // Start task watchers for each project
+    for (const project of projects) {
+      await startTaskWatcher(project.path);
+    }
 
     await connectToServer(currentConfig, projects);
 

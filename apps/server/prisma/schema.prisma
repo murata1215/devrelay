@@ -96,9 +96,16 @@ model Project {
   defaultAi   String    @default("claude")
   lastUsedAt  DateTime?
   createdAt   DateTime  @default(now())
-  
+
   sessions    Session[]
-  
+
+  // タスク連携用リレーション
+  sentTasks      CrossProjectTask[] @relation("SenderTasks")
+  receivedTasks  CrossProjectTask[] @relation("ReceiverTasks")
+  executedTasks  CrossProjectTask[] @relation("ExecutorTasks")
+  taskComments   TaskComment[]
+  taskActivities TaskActivityLog[]
+
   @@unique([machineId, name])
 }
 
@@ -156,4 +163,109 @@ model ChannelSession {
   updatedAt        DateTime  @updatedAt
 
   @@unique([platform, chatId])
+}
+
+// ============================================
+// プロジェクト間タスク連携
+// ============================================
+
+// プロジェクト間タスク
+model CrossProjectTask {
+  id                String    @id @default(cuid())
+
+  // 発信者・受信者
+  senderProjectId   String
+  senderProject     Project   @relation("SenderTasks", fields: [senderProjectId], references: [id])
+  receiverProjectId String?   // null = 未割り当て
+  receiverProject   Project?  @relation("ReceiverTasks", fields: [receiverProjectId], references: [id])
+
+  // タスク内容
+  name              String    // タスク名
+  description       String    // タスク概要（詳細な指示）
+
+  // 実施者
+  executorProjectId String?
+  executorProject   Project?  @relation("ExecutorTasks", fields: [executorProjectId], references: [id])
+
+  // 状態
+  status            String    @default("pending") // pending, assigned, in_progress, completed, failed, cancelled
+  priority          String    @default("normal")  // low, normal, high, urgent
+
+  // タイムスタンプ
+  createdAt         DateTime  @default(now())
+  assignedAt        DateTime? // 受信者に割り当てられた日時
+  startedAt         DateTime? // 実施開始日時
+  completedAt       DateTime? // 実施完了日時
+
+  // 結果
+  resultNotes       String?   // 結果のテキスト説明
+  resultFileUrl     String?   // 結果ファイルのURL
+
+  // 親子関係（サブタスク）
+  parentTaskId      String?
+  parentTask        CrossProjectTask?  @relation("SubTasks", fields: [parentTaskId], references: [id])
+  subTasks          CrossProjectTask[] @relation("SubTasks")
+
+  // メタデータ
+  metadata          String?   // JSON形式の追加データ
+
+  // リレーション
+  comments          TaskComment[]
+  attachments       TaskAttachment[]
+  activityLogs      TaskActivityLog[]
+
+  @@index([senderProjectId])
+  @@index([receiverProjectId])
+  @@index([status])
+  @@index([parentTaskId])
+  @@index([createdAt])
+}
+
+// タスクコメント
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      CrossProjectTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  projectId String   // コメントしたプロジェクト
+  project   Project  @relation(fields: [projectId], references: [id])
+
+  content   String   // コメント内容
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// タスク添付ファイル
+model TaskAttachment {
+  id         String   @id @default(cuid())
+  taskId     String
+  task       CrossProjectTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  filename   String   // ファイル名
+  mimeType   String   // MIMEタイプ
+  size       Int      // ファイルサイズ（バイト）
+  content    String   // base64エンコードされた内容
+
+  uploadedBy String   // アップロードしたプロジェクトID
+  createdAt  DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// タスク活動ログ
+model TaskActivityLog {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      CrossProjectTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  projectId String   // アクションを実行したプロジェクト
+  project   Project  @relation(fields: [projectId], references: [id])
+
+  action    String   // created, assigned, started, completed, failed, commented, attached, status_changed
+  details   String?  // 詳細（JSON形式）
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+  @@index([createdAt])
 }
