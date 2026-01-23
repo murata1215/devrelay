@@ -192,8 +192,21 @@ export async function sendPromptToAi(
             });
           }
 
-          // Extract text from streaming events
-          if (json.type === 'stream_event' &&
+          // Extract text from assistant messages (new format)
+          if (json.type === 'assistant' && json.message?.content) {
+            for (const block of json.message.content) {
+              if (block.type === 'text' && block.text) {
+                fullOutput += block.text;
+                console.log(`[${aiTool}] +${block.text.length} chars`);
+                onOutput(block.text, false);
+              } else if (block.type === 'tool_use' && block.name) {
+                console.log(`[${aiTool}] 🔧 Using tool: ${block.name}`);
+                onOutput(`\n🔧 ${block.name}を使用中...\n`, false);
+              }
+            }
+          }
+          // Extract text from streaming events (legacy format)
+          else if (json.type === 'stream_event' &&
               json.event?.type === 'content_block_delta' &&
               json.event?.delta?.type === 'text_delta') {
             const deltaText = json.event.delta.text;
@@ -201,17 +214,17 @@ export async function sendPromptToAi(
             console.log(`[${aiTool}] +${deltaText.length} chars`);
             onOutput(deltaText, false);
           }
-          // Also capture tool use for visibility
+          // Also capture tool use for visibility (legacy format)
           else if (json.type === 'stream_event' &&
                    json.event?.type === 'content_block_start' &&
                    json.event?.content_block?.type === 'tool_use') {
             const toolName = json.event.content_block.name;
-            console.log(`[${aiTool}] Using tool: ${toolName}`);
-            onOutput(`\n${toolName}...\n`, false);
+            console.log(`[${aiTool}] 🔧 Using tool: ${toolName}`);
+            onOutput(`\n🔧 ${toolName}を使用中...\n`, false);
           }
           // Capture result for final output
           else if (json.type === 'result') {
-            console.log(`[${aiTool}] Complete (${json.duration_ms}ms)`);
+            console.log(`[${aiTool}] ✅ Complete (${json.duration_ms}ms)`);
           }
         } catch {
           // Not JSON or parse error - ignore

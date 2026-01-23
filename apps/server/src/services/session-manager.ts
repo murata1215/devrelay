@@ -261,7 +261,6 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
   let messageToSend = finalMessage;
   if (tracker?.contextInfo) {
     messageToSend = tracker.contextInfo + finalMessage;
-    console.log(`📊 Prepending context info to final message`);
   }
 
   // Delete progress messages and send final response

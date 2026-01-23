@@ -15,10 +15,12 @@ import {
 import {
   createSession,
   addParticipant,
+  removeParticipant,
   endSession,
   getRecentSessions,
   getSessionMessages,
   startProgressTracking,
+  stopProgressTracking,
   sendMessage,
   getActiveSessions
 } from './session-manager.js';
@@ -279,15 +281,21 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
 }
 
 async function handleProjectConnect(projectId: string, context: UserContext): Promise<string> {
-  const project = await prisma.project.findUnique({ 
+  const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: { machine: true }
   });
-  
+
   if (!project) {
     return '❌ プロジェクトが見つかりません。';
   }
-  
+
+  // Clean up previous session's progress tracker if switching sessions
+  if (context.currentSessionId) {
+    stopProgressTracking(context.currentSessionId);
+    removeParticipant(context.currentSessionId, context.platform, context.chatId);
+  }
+
   // Get or create user
   let user = await prisma.user.findFirst({
     where: { platformLinks: { some: { platformUserId: context.userId } } }
@@ -759,8 +767,12 @@ async function handleSummary(context: UserContext, period?: string): Promise<str
 
 async function handleQuit(context: UserContext): Promise<string> {
   if (context.currentSessionId) {
+    // Clean up progress tracker before ending session
+    stopProgressTracking(context.currentSessionId);
+    removeParticipant(context.currentSessionId, context.platform, context.chatId);
+
     await endSession(context.currentSessionId);
-    
+
     if (context.currentMachineId) {
       await endAgentSession(context.currentMachineId, context.currentSessionId);
     }
