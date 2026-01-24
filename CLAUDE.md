@@ -757,6 +757,30 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `agents/windows/src/services/connection.ts` - 全機能の実装
 
+#### 44. 会話履歴エクスポート機能 (2026-01-24)
+- WebUI から会話履歴を日別に ZIP でダウンロード可能に
+- **機能**:
+  - Projects ページでプロジェクト名クリック → 日付一覧モーダル表示
+  - 日付クリック → その日の会話履歴を ZIP でダウンロード
+- **ZIP 内容**:
+  - `conversation.md` - 会話履歴（Markdown形式）
+  - `images/` - その日に添付された画像
+- **ファイル名フォーマット**:
+  - 添付ファイルに日時プレフィックスを追加: `YYYYMMDD_HHmmss_filename.png`
+  - これにより日付でファイルを特定可能
+- **API エンドポイント**:
+  - `GET /api/projects/:projectId/history/dates` - 日付一覧取得
+  - `GET /api/projects/:projectId/history/:date/download` - ZIP ダウンロード
+- **主要ファイル**:
+  - `apps/server/src/routes/api.ts` - History Export API エンドポイント
+  - `apps/server/src/services/agent-manager.ts` - Agent へのリクエスト送信
+  - `agents/linux/src/services/connection.ts` - handleHistoryDates, handleHistoryExport
+  - `agents/linux/src/services/file-handler.ts` - 日時プレフィックス付きファイル保存
+  - `agents/windows/src/services/connection.ts` - 同上（Windows版）
+  - `agents/windows/src/services/file-handler.ts` - 同上（Windows版）
+  - `apps/web/src/pages/ProjectsPage.tsx` - History Export モーダル UI
+  - `packages/shared/src/types.ts` - HistoryDatesRequestPayload, HistoryExportPayload 型
+
 ## 今後の課題
 
 - [ ] LINE 対応
