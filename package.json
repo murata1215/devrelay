@@ -22,7 +22,7 @@
     "telegram"
   ],
   "author": "DevRelay",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=8.0.0"

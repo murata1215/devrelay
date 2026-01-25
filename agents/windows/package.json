@@ -2,6 +2,7 @@
   "name": "@devrelay/agent-windows",
   "version": "0.1.0",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "./dist/electron/main.js",
   "bin": {
