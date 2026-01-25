@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
 import type { AiTool } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -124,8 +125,35 @@ export async function sendPromptToAi(
     // Write prompt to stdin (secure - not visible in process list)
     proc.stdin?.write(prompt);
     proc.stdin?.end();
+  } else if (aiTool === 'gemini') {
+    // Gemini CLI with auto_edit approval mode
+    // Use stdin to pass prompt (same as Claude) to avoid shell interpretation issues
+    const args = ['--approval-mode', 'auto_edit'];
+    console.log(`🔧 Running: ${command} --approval-mode auto_edit (prompt via stdin)`);
+
+    // Extract directory from gemini command path and add to PATH
+    // This ensures node can be found when running from systemd (no .bashrc/nvm)
+    const geminiDir = path.dirname(command);
+    const envPath = process.env.PATH ? `${geminiDir}:${process.env.PATH}` : geminiDir;
+
+    proc = spawn(command, args, {
+      cwd: projectPath,
+      shell: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PATH: envPath,  // Add gemini's directory to PATH so node can be found
+        DEVRELAY: '1',
+        DEVRELAY_SESSION_ID: sessionId,
+        DEVRELAY_PROJECT: projectPath,
+      },
+    });
+
+    // Write prompt to stdin (secure - not visible in process list)
+    proc.stdin?.write(prompt);
+    proc.stdin?.end();
   } else {
-    // For other AI tools, use shell (legacy behavior)
+    // For other AI tools (aider, codex), use shell (legacy behavior)
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     const fullCommand = `${command} '${escapedPrompt}'`;
 
