@@ -15,7 +15,8 @@
     "electron": "electron .",
     "electron:dev": "tsc && electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "dist": "node scripts/build-installer.js",
+    "dist:quick": "electron-builder",
     "clean": "rmdir /s /q dist 2>nul || exit 0"
   },
   "build": {
@@ -32,11 +33,17 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },
+    "asar": false,
+    "npmRebuild": false,
     "files": [
       "dist/**/*",
       "assets/**/*",
-      "node_modules/**/*",
-      "package.json"
+      "package.json",
+      {
+        "from": ".build-temp/node_modules",
+        "to": "node_modules",
+        "filter": ["**/*"]
+      }
     ],
     "extraResources": [
       {
