@@ -10,7 +10,9 @@ import {
   endSession as endAgentSession,
   clearConversation,
   execConversation,
-  applyAgreement
+  applyAgreement,
+  getAiToolList,
+  switchAiTool
 } from './agent-manager.js';
 import {
   createSession,
@@ -148,6 +150,9 @@ export async function executeCommand(
     case 'help':
       return getHelpText();
 
+    case 'ai:list':
+      return handleAiList(context);
+
     case 'ai:switch':
       return handleAiSwitch(context, command.tool);
 
@@ -254,8 +259,10 @@ async function handleSelect(number: number, context: UserContext): Promise<strin
     return handleProjectConnect(selectedId, context);
   } else if (listType === 'recent') {
     return handleRecentConnect(selectedId, context);
+  } else if (listType === 'ai') {
+    return handleAiSwitch(context, selectedId);
   }
-  
+
   return '⚠️ 不明な選択です。';
 }
 
@@ -790,10 +797,62 @@ async function handleQuit(context: UserContext): Promise<string> {
   return '👋 切断しました';
 }
 
+async function handleAiList(context: UserContext): Promise<string> {
+  if (!context.currentSessionId || !context.currentMachineId) {
+    return '⚠️ プロジェクトに接続されていません。\n\n`m` → マシン選択 → `p` → プロジェクト選択 の順で接続してください。';
+  }
+
+  try {
+    const result = await getAiToolList(context.currentMachineId, context.currentSessionId);
+
+    if (!result || result.available.length === 0) {
+      return '⚠️ AI ツールが設定されていません。';
+    }
+
+    const list = result.available.map((tool, i) => {
+      const name = AI_TOOL_NAMES[tool] || tool;
+      const current = tool === result.currentTool ? ' ✓' : '';
+      const defaultMark = tool === result.defaultTool ? ' (default)' : '';
+      return `${i + 1}. ${name}${current}${defaultMark}`;
+    }).join('\n');
+
+    // Update context for number selection
+    await updateUserContext(context.userId, context.platform, context.chatId, {
+      lastListType: 'ai',
+      lastListItems: result.available
+    });
+
+    return `🤖 **AI ツール**\n\n${list}\n\n\`a 1\` または \`a claude\` で切り替え`;
+  } catch (err) {
+    console.error('Failed to get AI tool list:', err);
+    return '❌ AI ツール一覧の取得に失敗しました。';
+  }
+}
+
 async function handleAiSwitch(context: UserContext, tool: string): Promise<string> {
-  // TODO: Implement AI tool switching
-  const name = AI_TOOL_NAMES[tool] || tool;
-  return `🔄 AI を **${name}** に切り替えました`;
+  if (!context.currentSessionId || !context.currentMachineId) {
+    return '⚠️ プロジェクトに接続されていません。';
+  }
+
+  try {
+    const result = await switchAiTool(context.currentMachineId, context.currentSessionId, tool as any);
+
+    if (result.success) {
+      // Update session's aiTool in DB
+      await prisma.session.update({
+        where: { id: context.currentSessionId },
+        data: { aiTool: tool }
+      });
+
+      const name = AI_TOOL_NAMES[tool] || tool;
+      return `🔄 AI を **${name}** に切り替えました`;
+    } else {
+      return `❌ AI 切り替えに失敗しました: ${result.error || '不明なエラー'}`;
+    }
+  } catch (err) {
+    console.error('Failed to switch AI tool:', err);
+    return '❌ AI 切り替えに失敗しました。';
+  }
 }
 
 async function handleAiPrompt(

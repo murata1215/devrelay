@@ -73,7 +73,10 @@ export type AgentMessage =
   | { type: 'agent:storage:saved'; payload: StorageSavedPayload }
   | { type: 'agent:ping'; payload: AgentPingPayload }
   | { type: 'agent:history:dates'; payload: HistoryDatesPayload }
-  | { type: 'agent:history:export'; payload: HistoryExportPayload };
+  | { type: 'agent:history:export'; payload: HistoryExportPayload }
+  | { type: 'agent:ai:list'; payload: AiListResponsePayload }
+  | { type: 'agent:ai:switched'; payload: AiSwitchedPayload }
+  | { type: 'agent:session:aiTool'; payload: SessionAiToolPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -150,7 +153,9 @@ export type ServerToAgentMessage =
   | { type: 'server:storage:clear'; payload: StorageClearPayload }
   | { type: 'server:pong'; payload: ServerPongPayload }
   | { type: 'server:history:dates'; payload: HistoryDatesRequestPayload }
-  | { type: 'server:history:export'; payload: HistoryExportRequestPayload };
+  | { type: 'server:history:export'; payload: HistoryExportRequestPayload }
+  | { type: 'server:ai:list'; payload: AiListPayload }
+  | { type: 'server:ai:switch'; payload: AiSwitchPayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -223,6 +228,40 @@ export interface SessionStartPayload {
   aiTool: AiTool;
 }
 
+// AI ツール切り替え関連
+export interface AiListPayload {
+  sessionId: string;
+  requestId: string;
+}
+
+export interface AiListResponsePayload {
+  machineId: string;
+  sessionId: string;
+  requestId: string;
+  available: AiTool[];
+  defaultTool: AiTool;
+  currentTool: AiTool;
+}
+
+export interface AiSwitchPayload {
+  sessionId: string;
+  aiTool: AiTool;
+}
+
+export interface AiSwitchedPayload {
+  machineId: string;
+  sessionId: string;
+  aiTool: AiTool;
+  success: boolean;
+  error?: string;
+}
+
+export interface SessionAiToolPayload {
+  machineId: string;
+  sessionId: string;
+  aiTool: AiTool;
+}
+
 // Missed messages (messages between last mention and current mention)
 export interface MissedMessage {
   role: 'user' | 'assistant';
@@ -260,6 +299,7 @@ export type UserCommand =
   | { type: 'summary'; period?: string }
   | { type: 'quit' }
   | { type: 'help' }
+  | { type: 'ai:list' }   // AI ツール一覧
   | { type: 'ai:switch'; tool: AiTool }
   | { type: 'ai:prompt'; text: string };
 
@@ -271,7 +311,7 @@ export interface UserContext {
   userId: string;
   platform: Platform;
   chatId: string;
-  lastListType?: 'machine' | 'project' | 'recent';
+  lastListType?: 'machine' | 'project' | 'recent' | 'ai';
   lastListItems?: string[];
   currentMachineId?: string;
   currentMachineName?: string;

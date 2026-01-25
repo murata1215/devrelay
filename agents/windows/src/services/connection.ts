@@ -15,7 +15,9 @@ import type {
   StorageSavePayload,
   StorageClearPayload,
   HistoryDatesRequestPayload,
-  HistoryExportRequestPayload
+  HistoryExportRequestPayload,
+  AiListPayload,
+  AiSwitchPayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -24,6 +26,7 @@ import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
+import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
   clearOutputDir,
@@ -290,6 +293,14 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:history:export':
       handleHistoryExport(message.payload);
+      break;
+
+    case 'server:ai:list':
+      handleAiList(message.payload, config);
+      break;
+
+    case 'server:ai:switch':
+      handleAiSwitch(message.payload, config);
       break;
   }
 }
@@ -1135,5 +1146,93 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
         },
       });
     }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// AI Tool Switching Functions
+// -----------------------------------------------------------------------------
+
+async function handleAiList(payload: AiListPayload, config: AgentConfig) {
+  const { sessionId, requestId } = payload;
+  console.log(`🤖 AI list requested for session ${sessionId}`);
+
+  const available = getAvailableAiTools(config);
+  const defaultTool = config.aiTools.default || 'claude';
+
+  // Get current tool from session info or load from state
+  const sessionInfo = sessionInfoMap.get(sessionId);
+  let currentTool = sessionInfo?.aiTool || await loadLastAiTool() || defaultTool;
+
+  console.log(`🤖 Available: ${available.join(', ')}, Current: ${currentTool}, Default: ${defaultTool}`);
+
+  sendMessage({
+    type: 'agent:ai:list',
+    payload: {
+      machineId: currentMachineId || config.machineId,
+      sessionId,
+      requestId,
+      available,
+      defaultTool,
+      currentTool,
+    },
+  });
+}
+
+async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {
+  const { sessionId, aiTool } = payload;
+  console.log(`🔄 Switching AI to ${aiTool} for session ${sessionId}`);
+
+  try {
+    // Verify the tool is available
+    const available = getAvailableAiTools(config);
+    if (!available.includes(aiTool)) {
+      console.error(`❌ AI tool ${aiTool} is not available`);
+      sendMessage({
+        type: 'agent:ai:switched',
+        payload: {
+          machineId: currentMachineId || config.machineId,
+          sessionId,
+          aiTool,
+          success: false,
+          error: `AI tool ${aiTool} is not configured`,
+        },
+      });
+      return;
+    }
+
+    // Update session info if exists
+    const sessionInfo = sessionInfoMap.get(sessionId);
+    if (sessionInfo) {
+      sessionInfo.aiTool = aiTool;
+      console.log(`📋 Updated session ${sessionId} to use ${aiTool}`);
+    }
+
+    // Save to state file for persistence across restarts
+    await saveLastAiTool(aiTool);
+
+    sendMessage({
+      type: 'agent:ai:switched',
+      payload: {
+        machineId: currentMachineId || config.machineId,
+        sessionId,
+        aiTool,
+        success: true,
+      },
+    });
+
+    console.log(`✅ AI switched to ${aiTool}`);
+  } catch (err) {
+    console.error(`❌ Failed to switch AI:`, (err as Error).message);
+    sendMessage({
+      type: 'agent:ai:switched',
+      payload: {
+        machineId: currentMachineId || config.machineId,
+        sessionId,
+        aiTool,
+        success: false,
+        error: (err as Error).message,
+      },
+    });
   }
 }

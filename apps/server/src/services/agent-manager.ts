@@ -7,7 +7,9 @@ import type {
   Project,
   AiTool,
   FileAttachment,
-  WorkState
+  WorkState,
+  AiListResponsePayload,
+  AiSwitchedPayload
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine } from './session-manager.js';
@@ -26,6 +28,10 @@ interface HistoryRequest<T> {
 }
 const pendingHistoryDatesRequests = new Map<string, HistoryRequest<string[]>>();
 const pendingHistoryExportRequests = new Map<string, HistoryRequest<string>>();
+
+// AI tool list/switch requests
+const pendingAiListRequests = new Map<string, HistoryRequest<AiListResponsePayload>>();
+const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload>>();
 
 export function setupAgentWebSocket(connection: { socket: WebSocket }, req: FastifyRequest) {
   const ws = connection.socket;
@@ -77,6 +83,18 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:history:export':
           await handleHistoryExport(message.payload);
+          break;
+
+        case 'agent:ai:list':
+          await handleAgentAiList(message.payload);
+          break;
+
+        case 'agent:ai:switched':
+          await handleAgentAiSwitched(message.payload);
+          break;
+
+        case 'agent:session:aiTool':
+          await handleSessionAiTool(message.payload);
           break;
       }
     } catch (err) {
@@ -356,6 +374,48 @@ async function handleSessionRestore(ws: WebSocket, payload: { machineId: string;
   }
 }
 
+async function handleAgentAiList(payload: AiListResponsePayload) {
+  const { requestId } = payload;
+  const pending = pendingAiListRequests.get(requestId);
+
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingAiListRequests.delete(requestId);
+    pending.resolve(payload);
+    console.log(`🤖 AI list received: ${payload.available.join(', ')} (current: ${payload.currentTool})`);
+  }
+}
+
+async function handleAgentAiSwitched(payload: AiSwitchedPayload) {
+  const { sessionId, aiTool, success, error } = payload;
+
+  // Find pending request by sessionId (we use sessionId as requestId for switch)
+  for (const [requestId, pending] of pendingAiSwitchRequests) {
+    if (requestId.startsWith(`switch-${sessionId}`)) {
+      clearTimeout(pending.timeout);
+      pendingAiSwitchRequests.delete(requestId);
+      pending.resolve(payload);
+      console.log(`🔄 AI switch result: ${aiTool} - ${success ? 'success' : `failed: ${error}`}`);
+      return;
+    }
+  }
+}
+
+async function handleSessionAiTool(payload: { machineId: string; sessionId: string; aiTool: AiTool }) {
+  const { sessionId, aiTool } = payload;
+  console.log(`📋 Session ${sessionId} using AI tool: ${aiTool}`);
+
+  // Update session in DB
+  try {
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { aiTool }
+    });
+  } catch (err) {
+    console.error(`⚠️ Could not update session AI tool:`, err);
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
@@ -608,6 +668,66 @@ export function requestHistoryExport(machineId: string, projectPath: string, dat
     sendToAgent(ws, {
       type: 'server:history:export',
       payload: { projectPath, requestId, date }
+    });
+  });
+}
+
+// -----------------------------------------------------------------------------
+// AI Tool Switching API
+// -----------------------------------------------------------------------------
+
+const AI_REQUEST_TIMEOUT = 10000; // 10 seconds
+
+/**
+ * Request AI tool list from an agent
+ */
+export function getAiToolList(machineId: string, sessionId: string): Promise<AiListResponsePayload> {
+  return new Promise((resolve, reject) => {
+    const ws = connectedAgents.get(machineId);
+    if (!ws || ws.readyState !== ws.OPEN) {
+      reject(new Error('Agent is not connected'));
+      return;
+    }
+
+    const requestId = `list-${sessionId}-${Date.now()}`;
+
+    const timeout = setTimeout(() => {
+      pendingAiListRequests.delete(requestId);
+      reject(new Error('Request timed out'));
+    }, AI_REQUEST_TIMEOUT);
+
+    pendingAiListRequests.set(requestId, { resolve, reject, timeout });
+
+    sendToAgent(ws, {
+      type: 'server:ai:list',
+      payload: { sessionId, requestId }
+    });
+  });
+}
+
+/**
+ * Switch AI tool for a session
+ */
+export function switchAiTool(machineId: string, sessionId: string, aiTool: AiTool): Promise<AiSwitchedPayload> {
+  return new Promise((resolve, reject) => {
+    const ws = connectedAgents.get(machineId);
+    if (!ws || ws.readyState !== ws.OPEN) {
+      reject(new Error('Agent is not connected'));
+      return;
+    }
+
+    const requestId = `switch-${sessionId}-${Date.now()}`;
+
+    const timeout = setTimeout(() => {
+      pendingAiSwitchRequests.delete(requestId);
+      reject(new Error('Request timed out'));
+    }, AI_REQUEST_TIMEOUT);
+
+    pendingAiSwitchRequests.set(requestId, { resolve, reject, timeout });
+
+    sendToAgent(ws, {
+      type: 'server:ai:switch',
+      payload: { sessionId, aiTool }
     });
   });
 }

@@ -13,7 +13,8 @@ export const SHORTCUTS: Record<string, string> = {
   'e': 'exec',      // プラン実行開始
   'exec': 'exec',   // プラン実行開始（フルコマンド）
   'link': 'link',   // プラットフォームリンクコード生成
-  'a': 'agreement', // DevRelay Agreement を CLAUDE.md に追加
+  'a': 'ai:list',   // AI ツール一覧・切り替え
+  'ag': 'agreement', // DevRelay Agreement を CLAUDE.md に追加
   'agreement': 'agreement',
   's': 'session',    // セッション情報を表示
   'session': 'session',

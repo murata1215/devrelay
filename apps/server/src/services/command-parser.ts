@@ -142,6 +142,19 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
       return { type: 'ai:switch', tool };
     }
   }
+
+  // 3.5. Check 'a <number>' or 'a <tool>' command
+  const aMatch = normalized.match(/^a\s+(\d+|claude|gemini|codex|aider)$/);
+  if (aMatch) {
+    const arg = aMatch[1];
+    if (/^\d+$/.test(arg)) {
+      // 'a 1', 'a 2' etc - select from AI list
+      return { type: 'select', number: parseInt(arg) };
+    } else {
+      // 'a claude', 'a gemini' etc - direct switch
+      return { type: 'ai:switch', tool: arg as AiTool };
+    }
+  }
   
   // 4. Check log with count
   if (normalized.startsWith('log')) {
@@ -184,6 +197,8 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     case 'link':
       return { type: 'link' };
     case 'a':
+      return { type: 'ai:list' };
+    case 'ag':
     case 'agreement':
       return { type: 'agreement' };
     case 's':
@@ -226,15 +241,14 @@ export function getHelpText(): string {
 \`sum\` - 直近セッションの要約
 
 **AI切り替え**
-\`ai:claude\` - Claude Code
-\`ai:gemini\` - Gemini CLI
-\`ai:codex\` - Codex CLI
+\`a\` - AI ツール一覧・切り替え
+\`a 1\`, \`a 2\` - 一覧から番号で選択
 
 **アカウント連携**
 \`link\` - WebUI アカウントとリンク
 
 **その他**
-\`a\` - DevRelay Agreement を適用
+\`ag\` - DevRelay Agreement を適用
 \`x\` - 会話履歴をクリア
 \`q\` - 切断
 \`h\` - このヘルプ
