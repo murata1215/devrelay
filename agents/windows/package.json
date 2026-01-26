@@ -34,7 +34,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },
-    "asar": false,
+    "asar": true,
     "npmRebuild": false,
     "files": [
       "dist/**/*",
@@ -43,7 +43,9 @@
       {
         "from": ".build-temp/node_modules",
         "to": "node_modules",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "extraResources": [
@@ -63,6 +65,7 @@
     "koffi": "^2.15.0",
     "nanoid": "^5.0.4",
     "ora": "^8.0.1",
+    "readable-stream": "^4.7.0",
     "socks-proxy-agent": "^8.0.5",
     "uuid": "^13.0.0",
     "ws": "^8.16.0",
