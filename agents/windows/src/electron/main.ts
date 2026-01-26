@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { loadConfig, saveConfig, ensureConfigDir, getConfigDir } from '../services/config.js';
 import { loadProjects, autoDiscoverProjects } from '../services/projects.js';
 import { connectToServer, disconnect, sendProjectsUpdate } from '../services/connection.js';
@@ -8,6 +9,11 @@ import type { AgentConfig } from '../services/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// package.json からバージョンを取得
+const require = createRequire(import.meta.url);
+const pkg = require('../../package.json');
+const APP_VERSION = pkg.version;
 
 let tray: Tray | null = null;
 let settingsWindow: BrowserWindow | null = null;
@@ -123,7 +129,7 @@ function updateTrayMenu() {
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: `DevRelay Agent`,
+      label: `DevRelay Agent v${APP_VERSION}`,
       enabled: false,
     },
     {
@@ -304,6 +310,10 @@ ipcMain.handle('get-status', () => {
     connected: isConnected,
     connecting: isConnecting,
   };
+});
+
+ipcMain.handle('get-version', () => {
+  return APP_VERSION;
 });
 
 ipcMain.handle('connect', async () => {

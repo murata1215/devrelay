@@ -14,7 +14,8 @@
     "dev:agent": "pnpm --filter @devrelay/agent-linux dev",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
-    "clean": "pnpm -r clean"
+    "clean": "pnpm -r clean",
+    "version:update": "node scripts/update-version.js"
   },
   "keywords": [
     "ai",

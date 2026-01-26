@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
+import { createRequire } from 'module';
 import { setupCommand } from './commands/setup.js';
 import { statusCommand } from './commands/status.js';
 import { projectsCommand } from './commands/projects.js';
@@ -8,12 +9,16 @@ import { startCommand } from './commands/start.js';
 import { logsCommand } from './commands/logs.js';
 import { uninstallCommand } from './commands/uninstall.js';
 
+// package.json からバージョンを動的に取得
+const require = createRequire(import.meta.url);
+const pkg = require('../../package.json');
+
 const program = new Command();
 
 program
   .name('devrelay')
   .description('DevRelay Agent - Remote AI CLI development hub')
-  .version('0.1.0');
+  .version(pkg.version);
 
 program
   .command('setup')

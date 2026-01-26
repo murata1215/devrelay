@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld('api', {
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config) => ipcRenderer.invoke('save-config', config),
 
+  // Version
+  getVersion: () => ipcRenderer.invoke('get-version'),
+
   // Connection status
   getStatus: () => ipcRenderer.invoke('get-status'),
   connect: () => ipcRenderer.invoke('connect'),

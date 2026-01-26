@@ -126,6 +126,13 @@ export function Layout({ children }: LayoutProps) {
       <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
         {children}
       </main>
+
+      {/* Footer with version */}
+      <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+        <div className="text-center text-gray-500 text-xs">
+          DevRelay v{__APP_VERSION__}
+        </div>
+      </footer>
     </div>
   );
 }
