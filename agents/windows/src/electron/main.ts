@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadConfig, saveConfig, ensureConfigDir, getConfigDir } from '../services/config.js';
 import { loadProjects, autoDiscoverProjects } from '../services/projects.js';
-import { connectToServer, disconnect } from '../services/connection.js';
+import { connectToServer, disconnect, sendProjectsUpdate } from '../services/connection.js';
 import type { AgentConfig } from '../services/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -327,6 +327,11 @@ ipcMain.handle('scan-projects', async () => {
   for (const dir of config.projectsDirs) {
     total += await autoDiscoverProjects(dir);
   }
+
+  // サーバーに最新のプロジェクト一覧を通知
+  const allProjects = await loadProjects(config);
+  sendProjectsUpdate(allProjects);
+
   return { added: total };
 });
 
@@ -345,6 +350,10 @@ ipcMain.handle('add-projects-dir', async () => {
       await saveConfig(config);
       // 新しいディレクトリを即座にスキャン
       await autoDiscoverProjects(newDir);
+
+      // サーバーに最新のプロジェクト一覧を通知
+      const allProjects = await loadProjects(config);
+      sendProjectsUpdate(allProjects);
     }
 
     return { added: newDir, config };

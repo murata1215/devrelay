@@ -855,6 +855,25 @@ export function disconnect() {
   }
 }
 
+/**
+ * Send updated project list to server (for use after scanning)
+ */
+export function sendProjectsUpdate(projects: Project[]) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !currentConfig) {
+    console.log('⚠️ Cannot send projects update: not connected');
+    return;
+  }
+
+  sendMessage({
+    type: 'agent:projects',
+    payload: {
+      machineId: currentMachineId || currentConfig.machineId,
+      projects,
+    },
+  });
+  console.log(`📤 Sent projects update: ${projects.length} projects`);
+}
+
 // Check if CLAUDE.md has DevRelay Agreement
 export async function checkAgreementStatus(projectPath: string): Promise<boolean> {
   try {
