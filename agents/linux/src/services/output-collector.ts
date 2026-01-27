@@ -119,8 +119,16 @@ export const EXEC_MODE_INSTRUCTION = `
 ユーザーが実装開始を承認しました。プランに従ってコードの変更を実行してください。`;
 
 // DevRelay Agreement template (to be embedded in CLAUDE.md)
-export const DEVRELAY_AGREEMENT_MARKER = '<!-- DevRelay Agreement v1 -->';
+// v2: AskUserQuestion 無効化の指示、日本語コメントの指示を追加
+export const DEVRELAY_AGREEMENT_VERSION = 'v2';
+export const DEVRELAY_AGREEMENT_MARKER = `<!-- DevRelay Agreement ${DEVRELAY_AGREEMENT_VERSION} -->`;
 export const DEVRELAY_AGREEMENT_END_MARKER = '<!-- /DevRelay Agreement -->';
+
+// 旧バージョンのマーカー（アップグレード検出用）
+export const DEVRELAY_AGREEMENT_OLD_MARKERS = [
+  '<!-- DevRelay Agreement v1 -->',
+];
+
 export const DEVRELAY_AGREEMENT_TEMPLATE = `${DEVRELAY_AGREEMENT_MARKER}
 【重要】ユーザーに渡すファイルを作成する場合は、必ず \`.devrelay-output/\` ディレクトリに保存してください。このディレクトリに置かれたファイルは自動的にユーザーに送信されます。
 
@@ -134,6 +142,19 @@ export const DEVRELAY_AGREEMENT_TEMPLATE = `${DEVRELAY_AGREEMENT_MARKER}
 「このプランでよければ \`e\` または \`exec\` を送信してください。実装を開始します。」
 
 ユーザーが \`exec\` を送信するまで、コードの変更は行わないでください。
+
+【ユーザーへの質問】
+AskUserQuestion ツールは使用しないでください（DevRelay 経由では応答を返せないため）。
+ユーザーに質問や確認が必要な場合は、テキストで質問を書いてください。
+ユーザーは Discord/Telegram 経由でテキストで回答します。
+
+【コーディングスタイル】
+ソースコードを書く際は、日本語のコメントを積極的に書いてください。
+特に以下の場面でコメントを追加してください：
+- 関数やクラスの説明
+- 複雑なロジックの説明
+- 重要な処理の意図
+- TODO や注意点
 ${DEVRELAY_AGREEMENT_END_MARKER}
 
 ---
@@ -141,18 +162,24 @@ ${DEVRELAY_AGREEMENT_END_MARKER}
 
 // Prompt for applying DevRelay Agreement to CLAUDE.md
 // This prompt must be very explicit to prevent Claude Code from asking clarifying questions
-export const AGREEMENT_APPLY_PROMPT = `【タスク】CLAUDE.md に DevRelay Agreement を追加する
+export const AGREEMENT_APPLY_PROMPT = `【タスク】CLAUDE.md に DevRelay Agreement を追加・更新する
 
 これは DevRelay システムからの自動タスクです。質問せずに以下を実行してください：
 
 1. CLAUDE.md ファイルを読む（存在しない場合は新規作成）
-2. 以下のマーカーが含まれているか確認：<!-- DevRelay Agreement v1 -->
-3. 含まれていない場合、ファイルの先頭に以下のブロックを追加：
+2. 以下のいずれかのマーカーが含まれているか確認：
+   - 最新版: <!-- DevRelay Agreement ${DEVRELAY_AGREEMENT_VERSION} -->
+   - 旧版: <!-- DevRelay Agreement v1 -->
+3. 処理：
+   - 最新版が含まれている場合 → 何もしない
+   - 旧版が含まれている場合 → 旧 Agreement ブロック（<!-- DevRelay Agreement v... --> から <!-- /DevRelay Agreement --> まで）を削除し、新しい Agreement を先頭に追加
+   - 含まれていない場合 → ファイルの先頭に以下のブロックを追加
 
 ${DEVRELAY_AGREEMENT_TEMPLATE}
 
 4. 結果を報告：
-   - 既に含まれている場合：「✅ CLAUDE.md は DevRelay Agreement 対応済みです」
-   - 追加した場合：「📝 CLAUDE.md に DevRelay Agreement を追加しました」
+   - 最新版が既にある場合：「✅ CLAUDE.md は DevRelay Agreement ${DEVRELAY_AGREEMENT_VERSION} 対応済みです」
+   - 旧版から更新した場合：「📝 CLAUDE.md の DevRelay Agreement を ${DEVRELAY_AGREEMENT_VERSION} に更新しました」
+   - 新規追加した場合：「📝 CLAUDE.md に DevRelay Agreement ${DEVRELAY_AGREEMENT_VERSION} を追加しました」
 
 質問は不要です。上記のタスクをそのまま実行してください。`;

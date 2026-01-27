@@ -248,7 +248,7 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
   }
 }
 
-async function handleAiStatus(payload: { machineId: string; sessionId: string; status: string; error?: string; agreementStatus?: boolean }) {
+async function handleAiStatus(payload: { machineId: string; sessionId: string; status: string; error?: string; agreementStatus?: string | boolean }) {
   // Build status message
   let statusMessage = payload.error
     ? `❌ Error: ${payload.error}`
@@ -256,10 +256,17 @@ async function handleAiStatus(payload: { machineId: string; sessionId: string; s
 
   // Add agreement status if provided
   if (payload.agreementStatus !== undefined && payload.status === 'running') {
-    if (payload.agreementStatus) {
+    // 新しい詳細ステータス（'latest', 'outdated', 'none'）または後方互換の boolean
+    const status = payload.agreementStatus;
+    if (status === 'latest') {
+      statusMessage += '\n✅ DevRelay Agreement v2 対応済み';
+    } else if (status === 'outdated') {
+      statusMessage += '\n⚠️ DevRelay Agreement 旧版 - `ag` で最新版に更新できます';
+    } else if (status === 'none' || status === false) {
+      statusMessage += '\n⚠️ DevRelay Agreement 未対応 - `ag` で対応できます';
+    } else if (status === true) {
+      // 後方互換: true の場合は対応済みとみなす
       statusMessage += '\n✅ DevRelay Agreement 対応済み';
-    } else {
-      statusMessage += '\n⚠️ DevRelay Agreement 未対応 - `a` または `agreement` で対応できます';
     }
   }
 
@@ -327,7 +334,7 @@ async function handleHistoryExport(payload: { machineId: string; projectPath: st
   }
 }
 
-async function handleSessionRestore(ws: WebSocket, payload: { machineId: string; projectPath: string; projectName: string; agreementStatus: boolean }) {
+async function handleSessionRestore(ws: WebSocket, payload: { machineId: string; projectPath: string; projectName: string; agreementStatus: string | boolean }) {
   const { machineId, projectPath, projectName, agreementStatus } = payload;
 
   console.log(`🔄 Session restore request: ${machineId} / ${projectName}`);

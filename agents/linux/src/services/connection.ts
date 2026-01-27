@@ -35,6 +35,7 @@ import {
   PLAN_MODE_INSTRUCTION,
   EXEC_MODE_INSTRUCTION,
   DEVRELAY_AGREEMENT_MARKER,
+  DEVRELAY_AGREEMENT_OLD_MARKERS,
   AGREEMENT_APPLY_PROMPT
 } from './output-collector.js';
 import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
@@ -281,9 +282,10 @@ async function handleSessionStart(
     console.log(`📂 Found pending work state: ${pendingWorkState.summary}`);
   }
 
-  // Check DevRelay Agreement status
-  const agreementStatus = await checkAgreementStatus(projectPath);
-  console.log(`📋 DevRelay Agreement: ${agreementStatus ? 'compliant' : 'not compliant'}`);
+  // Check DevRelay Agreement status（詳細な状態を取得）
+  const agreementStatus = await getAgreementStatusType(projectPath);
+  const statusLabels = { latest: '最新版', outdated: '旧版（更新推奨）', none: '未対応' };
+  console.log(`📋 DevRelay Agreement: ${statusLabels[agreementStatus]}`);
 
   // Check for storage context
   const hasStorageContext = await loadStorageContext(projectPath) !== null;
@@ -874,15 +876,39 @@ export function sendProjectsUpdate(projects: Project[]) {
   console.log(`📤 Sent projects update: ${projects.length} projects`);
 }
 
+// Agreement のステータスを表す型
+// 'latest' = 最新版あり, 'outdated' = 旧版あり（更新推奨）, 'none' = なし
+export type AgreementStatusType = 'latest' | 'outdated' | 'none';
+
 // Check if CLAUDE.md has DevRelay Agreement
+// 戻り値: boolean（後方互換性のため）- 最新版または旧版があれば true
 export async function checkAgreementStatus(projectPath: string): Promise<boolean> {
+  const status = await getAgreementStatusType(projectPath);
+  return status !== 'none';
+}
+
+// Agreement の詳細ステータスを取得
+export async function getAgreementStatusType(projectPath: string): Promise<AgreementStatusType> {
   try {
     const claudeMdPath = join(projectPath, 'CLAUDE.md');
     const content = await readFile(claudeMdPath, 'utf-8');
-    return content.includes(DEVRELAY_AGREEMENT_MARKER);
+
+    // 最新版のマーカーがあるか確認
+    if (content.includes(DEVRELAY_AGREEMENT_MARKER)) {
+      return 'latest';
+    }
+
+    // 旧版のマーカーがあるか確認
+    for (const oldMarker of DEVRELAY_AGREEMENT_OLD_MARKERS) {
+      if (content.includes(oldMarker)) {
+        return 'outdated';
+      }
+    }
+
+    return 'none';
   } catch (err: any) {
-    // CLAUDE.md doesn't exist
-    return false;
+    // CLAUDE.md が存在しない
+    return 'none';
   }
 }
 

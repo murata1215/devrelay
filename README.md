@@ -9,12 +9,23 @@ LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS
 
 - **マルチマシン**: ubuntu01, ubuntu02, windows01... 複数マシンを登録・切り替え
 - **マルチプロジェクト**: 各マシン内の複数プロジェクトを管理
-- **マルチAI**: Claude Code, Gemini CLI, Codex, Aider に対応
-- **マルチプラットフォーム**: Discord, Telegram, LINE, Slack から操作
-- **自然言語コマンド**: 「前の接続を復元して」→ 自動で `c` コマンド実行
+- **マルチAI**: Claude Code, Gemini CLI, Aider に対応
+- **マルチプラットフォーム**: Discord, Telegram から操作（LINE 対応予定）
+- **自然言語コマンド**: 「前の接続を復元して」→ 自動で `c` コマンド実行（OpenAI API 使用）
 - **プランモード / 実行モード**: プラン立案→承認→実行のワークフロー
-- **チーム機能**: 複数人で同じセッションに参加可能
-- **履歴・要約**: 全会話履歴を保存、AI要約機能
+- **DevRelay Agreement**: CLAUDE.md に統合するプロジェクト設定
+- **リアルタイム進捗表示**: AI の処理状況をリアルタイムで表示
+- **双方向ファイル転送**: Discord/Telegram ↔ 開発マシン間のファイル送受信
+- **履歴エクスポート**: 会話履歴を日別に ZIP でダウンロード可能
+- **プロキシ対応**: HTTP/HTTPS/SOCKS5 プロキシ経由での接続
+
+## 💡 トークン効率について
+
+DevRelay は Claude Code の `--resume` オプションを活用してセッションを継続するため、**通常の CLI 利用と同等のトークン効率**を実現しています。
+
+- **オーバーヘッド**: プランモード/実行モード指示で約200トークン/プロンプト
+- **セッション継続**: `--resume` により会話コンテキストが Claude Code 側で管理されるため、履歴の再送信は不要
+- **コンテキスト表示**: 使用量を Discord/Telegram で確認可能（`📊 Context: 131K / 200K tokens (66%)`）
 
 ## 🏗 Architecture
 
@@ -25,12 +36,12 @@ LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS
 │ Telegram     │ ←──────→ │ DevRelay    │ ←──────→ │ ubuntu02     │
 │ LINE         │  HTTPS   │ Server       │    WS    │ windows01    │
 └──────────────┘          └──────────────┘          └──────────────┘
-                                 │                         │
-                          ┌──────┴──────┐         ┌───────┴────────┐
-                          │ PostgreSQL  │         │ Claude Code    │
-                          │ Redis       │         │ Gemini CLI     │
-                          └─────────────┘         │ Codex / Aider  │
-                                                  └────────────────┘
+                                │                         │
+                         ┌──────┴──────┐         ┌───────┴────────┐
+                         │ PostgreSQL  │         │ Claude Code    │
+                         │ Redis       │         │ Gemini CLI     │
+                         └─────────────┘         │ Aider          │
+                                                 └────────────────┘
 ```
 
 ## 📦 Packages
@@ -39,22 +50,25 @@ LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS
 devrelay/
 ├── apps/
 │   ├── server/           # 中央サーバー (Fastify + WebSocket + Discord.js)
-│   └── web/              # Web UI (Next.js) - coming soon
+│   └── web/              # Web UI (Vite + React)
 ├── packages/
 │   └── shared/           # 共通型・定数
 ├── agents/
-│   └── linux/            # Linux Agent (Node.js)
+│   ├── linux/            # Linux Agent (Node.js CLI)
+│   └── windows/          # Windows Agent (Electron タスクトレイアプリ)
 └── scripts/
-    └── install.sh        # インストールスクリプト
+    └── update-version.js # バージョン一括更新スクリプト
 ```
 
 ## 🚀 Quick Start
 
 ### 1. Install Agent (on your dev machine)
 
+#### Linux Agent
+
 ```bash
 # Clone repository
-git clone https://github.com/your-org/devrelay.git
+git clone https://github.com/murata1215/devrelay.git
 cd devrelay
 
 # Install dependencies
@@ -65,7 +79,33 @@ cd agents/linux
 pnpm build
 ```
 
-### 2. Setup
+#### Windows Agent
+
+Windows では Electron タスクトレイアプリとして動作します。
+
+**インストール方法:**
+1. リリースページからインストーラー（`DevRelay-Agent-Setup-x.x.x.exe`）をダウンロード
+2. インストーラーを実行
+3. タスクトレイアイコンをクリックして設定画面を開く
+4. トークンを入力し、プロジェクトディレクトリを追加
+
+**機能:**
+- タスクトレイ常駐（接続状態をアイコン色で表示：緑=接続中、グレー=切断）
+- 設定画面（トークン、プロジェクトディレクトリ管理）
+- 自動起動設定（Windows ログイン時に自動起動）
+- スリープ防止機能（接続中は Modern Standby を抑制）
+
+**開発:**
+```powershell
+cd agents/windows
+pnpm build
+npx electron .
+
+# 配布用インストーラー作成
+pnpm dist
+```
+
+### 2. Setup (Linux)
 
 ```bash
 # Run setup (token only - machine name and URL auto-configured)
@@ -75,7 +115,7 @@ node dist/cli/index.js setup
 # Token can be obtained from dashboard or generated manually
 ```
 
-### 3. Start Agent
+### 3. Start Agent (Linux)
 
 ```bash
 # Manual start
@@ -128,14 +168,11 @@ Bot: 🤖 了解、修正中...
 | `p` | プロジェクト一覧 |
 | `c` | 前回の接続先に再接続 |
 | `e` / `exec` | 実行モードに切り替え（プラン承認） |
-| `s` | ステータス |
-| `r` | 直近の作業一覧 |
+| `se` / `session` | セッション情報表示 |
+| `ag` / `agreement` | DevRelay Agreement を CLAUDE.md に適用 |
+| `link` | Discord/Telegram アカウントを WebUI とリンク |
 | `1`, `2`, `3`... | 一覧から選択 |
-| `log` | 会話ログ |
 | `x` | 会話履歴をクリア |
-| `sum` | 要約 |
-| `ai:claude` | Claude Code に切り替え |
-| `ai:gemini` | Gemini CLI に切り替え |
 | `q` | 切断 |
 | `h` | ヘルプ |
 
@@ -153,7 +190,7 @@ Bot: 🤖 了解、修正中...
 
 ```bash
 # Clone
-git clone https://github.com/your-org/devrelay.git
+git clone https://github.com/murata1215/devrelay.git
 cd devrelay
 
 # Install dependencies
@@ -182,6 +219,11 @@ cd apps/server
 pnpm setup:service
 systemctl --user start devrelay-server
 
+# WebUI
+cd apps/web
+pnpm setup:service
+systemctl --user start devrelay-web
+
 # Agent
 cd agents/linux
 node dist/cli/index.js setup  # Choose "User service" option
@@ -190,9 +232,27 @@ systemctl --user start devrelay-agent
 
 管理コマンド:
 ```bash
-systemctl --user status devrelay-server devrelay-agent  # 状態確認
-systemctl --user restart devrelay-server devrelay-agent # 再起動
-journalctl --user -u devrelay-server -f                 # ログ確認
+systemctl --user status devrelay-server devrelay-web devrelay-agent  # 状態確認
+systemctl --user restart devrelay-server devrelay-web devrelay-agent # 再起動
+journalctl --user -u devrelay-server -f                               # ログ確認
+```
+
+### プロキシ設定
+
+Agent がプロキシ経由でサーバーに接続する場合は、`~/.devrelay/config.yaml` に設定を追加します。
+
+```yaml
+proxy:
+  url: http://proxy.example.com:8080  # または socks5://proxy:1080
+  username: user  # オプション
+  password: pass  # オプション
+```
+
+### バージョン管理
+
+全パッケージのバージョンを一括更新:
+```bash
+pnpm version:update 0.2.0
 ```
 
 ### Project Structure
@@ -203,7 +263,8 @@ apps/server/
 │   ├── index.ts              # Entry point
 │   ├── db/client.ts          # Prisma client
 │   ├── platforms/
-│   │   └── discord.ts        # Discord bot
+│   │   ├── discord.ts        # Discord bot
+│   │   └── telegram.ts       # Telegram bot
 │   └── services/
 │       ├── agent-manager.ts  # WebSocket connections
 │       ├── session-manager.ts # Active sessions
@@ -226,21 +287,36 @@ agents/linux/
 │       ├── connection.ts     # WebSocket to server
 │       ├── projects.ts       # Project management
 │       ├── ai-runner.ts      # AI CLI execution
-│       └── conversation-store.ts # Conversation persistence
+│       └── session-store.ts  # Session ID persistence
+
+agents/windows/
+├── src/
+│   ├── electron/
+│   │   └── main.ts           # Electron main process, tray, IPC
+│   └── services/
+│       ├── config.ts         # Config management (%APPDATA%\devrelay\)
+│       ├── connection.ts     # WebSocket to server
+│       ├── ai-runner.ts      # AI CLI execution
+│       └── sleep-preventer.ts # Modern Standby prevention
+└── assets/
+    ├── settings.html         # Settings UI
+    └── preload.js            # IPC bridge
 ```
 
 ## 🔐 Security
 
 - 接続トークンによるマシン認証
-- APIキーは暗号化保存
-- 危険コマンド確認機能（Pro以上）
+- APIキーは暗号化保存（AES-256-CBC）
 - 全通信TLS暗号化
+- プロンプトは stdin 経由（`ps aux` に表示されない）
 
 ## 🗺 Roadmap
 
 - [x] Discord Bot
 - [x] Telegram Bot
 - [x] Linux Agent
+- [x] Windows Agent
+- [x] Web UI
 - [x] Conversation Persistence (file-based)
 - [x] Quick Reconnect (`c` command)
 - [x] Real-time Progress Display
@@ -249,11 +325,14 @@ agents/linux/
 - [x] Plan Mode / Exec Mode
 - [x] Agent Uninstall Command
 - [x] Simplified Setup (token only)
+- [x] DevRelay Agreement 機能
+- [x] バージョン一元管理
+- [x] プロキシ対応
+- [x] 履歴エクスポート機能
 - [ ] LINE Bot
-- [ ] Web UI
-- [ ] Windows Agent
 - [ ] AI Summary
 - [ ] Team Features
+- [ ] AI 切り替え機能（Gemini/Aider）
 
 ## 📄 License
 

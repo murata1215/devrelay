@@ -23,6 +23,10 @@ export interface Project {
 
 export type AiTool = 'claude' | 'gemini' | 'codex' | 'aider';
 
+// Agreement ステータス
+// 'latest' = 最新版あり, 'outdated' = 旧版あり（更新推奨）, 'none' = なし
+export type AgreementStatus = 'latest' | 'outdated' | 'none';
+
 // -----------------------------------------------------------------------------
 // Proxy Configuration
 // -----------------------------------------------------------------------------
@@ -82,7 +86,7 @@ export interface SessionRestorePayload {
   machineId: string;
   projectPath: string;
   projectName: string;
-  agreementStatus: boolean;
+  agreementStatus: AgreementStatus | boolean;  // Agreement の状態（後方互換性のため boolean も可）
 }
 
 export interface AgentPingPayload {
@@ -134,7 +138,7 @@ export interface AiStatusPayload {
   sessionId: string;
   status: 'starting' | 'running' | 'stopped' | 'error';
   error?: string;
-  agreementStatus?: boolean;  // Whether CLAUDE.md has DevRelay Agreement
+  agreementStatus?: AgreementStatus | boolean;  // Agreement の状態（後方互換性のため boolean も可）
   hasStorageContext?: boolean;  // Whether storage context exists for this project
 }
 
