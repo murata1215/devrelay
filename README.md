@@ -74,6 +74,9 @@ cd devrelay
 # Install dependencies
 pnpm install
 
+# Generate Prisma client (required for first build)
+cd apps/server && npx prisma generate && cd ../..
+
 # Build all packages
 pnpm build
 ```
@@ -109,7 +112,7 @@ pnpm dist
 ```bash
 # Run setup (token only - machine name and URL auto-configured)
 cd agents/linux
-pnpm setup
+pnpm run setup  # Note: use "pnpm run setup", not "pnpm setup"
 
 # Enter your connection token when prompted
 # Token can be obtained from dashboard or generated manually
@@ -120,7 +123,7 @@ pnpm setup
 ```bash
 # Manual start
 cd agents/linux
-pnpm start
+pnpm run start
 
 # As systemd service (setup will ask to install)
 systemctl --user start devrelay-agent    # User service (recommended)
@@ -128,13 +131,13 @@ sudo systemctl start devrelay-agent       # System service
 
 # Check status
 systemctl --user status devrelay-agent
-pnpm status  # or from agents/linux directory
+pnpm run status  # or from agents/linux directory
 
 # View logs
 journalctl --user -u devrelay-agent -f
 
 # Uninstall (removes service, config, optionally project data)
-pnpm uninstall
+pnpm run uninstall
 ```
 
 ### 4. Connect from Discord/Telegram
@@ -226,7 +229,7 @@ systemctl --user start devrelay-web
 
 # Agent
 cd agents/linux
-pnpm setup  # Choose "User service" option
+pnpm run setup  # Choose "User service" option
 systemctl --user start devrelay-agent
 ```
 
