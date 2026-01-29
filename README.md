@@ -74,8 +74,7 @@ cd devrelay
 # Install dependencies
 pnpm install
 
-# Build agent
-cd agents/linux
+# Build all packages
 pnpm build
 ```
 
@@ -109,7 +108,8 @@ pnpm dist
 
 ```bash
 # Run setup (token only - machine name and URL auto-configured)
-node dist/cli/index.js setup
+cd agents/linux
+pnpm setup
 
 # Enter your connection token when prompted
 # Token can be obtained from dashboard or generated manually
@@ -119,8 +119,7 @@ node dist/cli/index.js setup
 
 ```bash
 # Manual start
-node dist/cli/index.js start
-# or
+cd agents/linux
 pnpm start
 
 # As systemd service (setup will ask to install)
@@ -129,12 +128,13 @@ sudo systemctl start devrelay-agent       # System service
 
 # Check status
 systemctl --user status devrelay-agent
+pnpm status  # or from agents/linux directory
 
 # View logs
 journalctl --user -u devrelay-agent -f
 
 # Uninstall (removes service, config, optionally project data)
-node dist/cli/index.js uninstall
+pnpm uninstall
 ```
 
 ### 4. Connect from Discord/Telegram
@@ -226,7 +226,7 @@ systemctl --user start devrelay-web
 
 # Agent
 cd agents/linux
-node dist/cli/index.js setup  # Choose "User service" option
+pnpm setup  # Choose "User service" option
 systemctl --user start devrelay-agent
 ```
 
