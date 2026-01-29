@@ -26,6 +26,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# DevRelay runtime files
+# DevRelay runtime files (per-project session data)
+.devrelay/
 .devrelay-output/
 .devrelay-files/
