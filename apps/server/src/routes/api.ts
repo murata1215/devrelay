@@ -204,12 +204,18 @@ export async function apiRoutes(app: FastifyInstance) {
       result[s.key] = s.encrypted ? decrypt(s.value) : s.value;
     }
 
-    // API キーはマスク表示
+    // API キー・トークンはマスク表示
     if (result.openai_api_key) {
       result.openai_api_key = maskApiKey(result.openai_api_key);
     }
     if (result.anthropic_api_key) {
       result.anthropic_api_key = maskApiKey(result.anthropic_api_key);
+    }
+    if (result.discord_bot_token) {
+      result.discord_bot_token = maskApiKey(result.discord_bot_token);
+    }
+    if (result.telegram_bot_token) {
+      result.telegram_bot_token = maskApiKey(result.telegram_bot_token);
     }
 
     return result;
@@ -226,8 +232,8 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'Value is required' });
     }
 
-    // API キーは暗号化して保存
-    const shouldEncrypt = key.includes('api_key') || key.includes('secret');
+    // API キー・トークンは暗号化して保存
+    const shouldEncrypt = key.includes('api_key') || key.includes('secret') || key.includes('token');
     const storedValue = shouldEncrypt ? encrypt(value) : value;
 
     await prisma.userSettings.upsert({

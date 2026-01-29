@@ -12,6 +12,8 @@ export function SettingsPage() {
 
   // Form state
   const [openaiKey, setOpenaiKey] = useState('');
+  const [discordToken, setDiscordToken] = useState('');
+  const [telegramToken, setTelegramToken] = useState('');
   const [linkCode, setLinkCode] = useState('');
   const [linking, setLinking] = useState(false);
   const [unlinking, setUnlinking] = useState<string | null>(null);
@@ -104,6 +106,8 @@ export function SettingsPage() {
       setSuccess(`${displayName} saved successfully`);
       // Clear the input
       if (key === 'openai_api_key') setOpenaiKey('');
+      if (key === 'discord_bot_token') setDiscordToken('');
+      if (key === 'telegram_bot_token') setTelegramToken('');
       // Reload settings
       const result = await settings.get();
       setData(result);
@@ -272,6 +276,118 @@ export function SettingsPage() {
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
                 >
                   {saving === 'openai_api_key' ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Bot Tokens Section */}
+      <div className="bg-gray-800 rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-white mb-4">Bot Tokens</h2>
+        <p className="text-gray-400 text-sm mb-6">
+          Configure bot tokens for Discord and Telegram.
+          <span className="text-yellow-400 ml-1">Server restart required after changes.</span>
+        </p>
+
+        <div className="space-y-6">
+          {/* Discord Bot Token */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">
+              Discord Bot Token
+            </label>
+            <p className="text-gray-500 text-xs mb-2">
+              Get from{' '}
+              <a
+                href="https://discord.com/developers/applications"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-400 hover:text-blue-300"
+              >
+                Discord Developer Portal
+              </a>
+            </p>
+
+            {data.discord_bot_token ? (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
+                  {data.discord_bot_token}
+                </code>
+                <button
+                  onClick={() => handleDeleteApiKey('discord_bot_token', 'Discord Bot Token')}
+                  disabled={saving === 'discord_bot_token'}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                >
+                  {saving === 'discord_bot_token' ? 'Removing...' : 'Remove'}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                <input
+                  type="password"
+                  value={discordToken}
+                  onChange={(e) => setDiscordToken(e.target.value)}
+                  placeholder="Bot token..."
+                  className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <button
+                  onClick={() => handleSaveApiKey('discord_bot_token', discordToken, 'Discord Bot Token')}
+                  disabled={saving === 'discord_bot_token' || !discordToken}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                >
+                  {saving === 'discord_bot_token' ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Telegram Bot Token */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">
+              Telegram Bot Token
+            </label>
+            <p className="text-gray-500 text-xs mb-2">
+              Get from{' '}
+              <a
+                href="https://t.me/BotFather"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-400 hover:text-blue-300"
+              >
+                @BotFather
+              </a>
+              {' '}on Telegram
+            </p>
+
+            {data.telegram_bot_token ? (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
+                  {data.telegram_bot_token}
+                </code>
+                <button
+                  onClick={() => handleDeleteApiKey('telegram_bot_token', 'Telegram Bot Token')}
+                  disabled={saving === 'telegram_bot_token'}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                >
+                  {saving === 'telegram_bot_token' ? 'Removing...' : 'Remove'}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                <input
+                  type="password"
+                  value={telegramToken}
+                  onChange={(e) => setTelegramToken(e.target.value)}
+                  placeholder="123456789:ABC..."
+                  className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <button
+                  onClick={() => handleSaveApiKey('telegram_bot_token', telegramToken, 'Telegram Bot Token')}
+                  disabled={saving === 'telegram_bot_token' || !telegramToken}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                >
+                  {saving === 'telegram_bot_token' ? 'Saving...' : 'Save'}
                 </button>
               </div>
             )}

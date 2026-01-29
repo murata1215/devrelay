@@ -177,7 +177,7 @@ async function downloadAttachment(attachment: Attachment): Promise<FileAttachmen
 
 let client: Client | null = null;
 
-export async function setupDiscordBot() {
+export async function setupDiscordBot(token?: string) {
   client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -270,7 +270,7 @@ export async function setupDiscordBot() {
     }
   });
 
-  await client.login(process.env.DISCORD_BOT_TOKEN);
+  await client.login(token || process.env.DISCORD_BOT_TOKEN);
 }
 
 export async function sendDiscordMessage(channelId: string, content: string, files?: FileAttachment[]) {

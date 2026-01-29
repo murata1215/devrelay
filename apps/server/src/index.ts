@@ -9,6 +9,7 @@ import { setupTelegramBot } from './platforms/telegram.js';
 import { prisma } from './db/client.js';
 import { authRoutes } from './routes/auth.js';
 import { apiRoutes } from './routes/api.js';
+import { decrypt } from './services/user-settings.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -44,17 +45,53 @@ async function main() {
     });
   });
 
+  // Bot Token の取得（UserSettings > 環境変数 の優先順）
+  // ユーザーに依存せず、設定されているトークンを直接検索
+  async function getBotTokenFromSettings(key: string): Promise<string | null> {
+    const setting = await prisma.userSettings.findFirst({
+      where: { key },
+    });
+    if (!setting) return null;
+
+    // 暗号化されている場合は復号化
+    if (setting.encrypted) {
+      try {
+        return decrypt(setting.value);
+      } catch {
+        console.error(`Failed to decrypt ${key}`);
+        return null;
+      }
+    }
+    return setting.value;
+  }
+
+  // Discord Bot Token を取得
+  let discordToken = await getBotTokenFromSettings('discord_bot_token');
+  if (discordToken) {
+    console.log('📝 Using Discord bot token from user settings');
+  } else {
+    discordToken = process.env.DISCORD_BOT_TOKEN || null;
+  }
+
+  // Telegram Bot Token を取得
+  let telegramToken = await getBotTokenFromSettings('telegram_bot_token');
+  if (telegramToken) {
+    console.log('📝 Using Telegram bot token from user settings');
+  } else {
+    telegramToken = process.env.TELEGRAM_BOT_TOKEN || null;
+  }
+
   // Start Discord bot
-  if (process.env.DISCORD_BOT_TOKEN) {
-    await setupDiscordBot();
+  if (discordToken) {
+    await setupDiscordBot(discordToken);
     console.log('✅ Discord bot started');
   } else {
     console.log('⚠️  DISCORD_BOT_TOKEN not set, Discord bot disabled');
   }
 
   // Start Telegram bot
-  if (process.env.TELEGRAM_BOT_TOKEN) {
-    await setupTelegramBot();
+  if (telegramToken) {
+    await setupTelegramBot(telegramToken);
     console.log('✅ Telegram bot started');
   } else {
     console.log('⚠️  TELEGRAM_BOT_TOKEN not set, Telegram bot disabled');

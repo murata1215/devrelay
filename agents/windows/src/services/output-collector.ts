@@ -119,14 +119,15 @@ export const EXEC_MODE_INSTRUCTION = `
 User has approved starting implementation. Execute code changes according to the plan.`;
 
 // DevRelay Agreement template (to be embedded in CLAUDE.md)
-// v2: AskUserQuestion 無効化の指示、日本語コメントの指示を追加
-export const DEVRELAY_AGREEMENT_VERSION = 'v2';
+// v3: プランの説明を強制する指示を追加
+export const DEVRELAY_AGREEMENT_VERSION = 'v3';
 export const DEVRELAY_AGREEMENT_MARKER = `<!-- DevRelay Agreement ${DEVRELAY_AGREEMENT_VERSION} -->`;
 export const DEVRELAY_AGREEMENT_END_MARKER = '<!-- /DevRelay Agreement -->';
 
 // 旧バージョンのマーカー（アップグレード検出用）
 export const DEVRELAY_AGREEMENT_OLD_MARKERS = [
   '<!-- DevRelay Agreement v1 -->',
+  '<!-- DevRelay Agreement v2 -->',
 ];
 
 export const DEVRELAY_AGREEMENT_TEMPLATE = `${DEVRELAY_AGREEMENT_MARKER}
@@ -143,18 +144,27 @@ export const DEVRELAY_AGREEMENT_TEMPLATE = `${DEVRELAY_AGREEMENT_MARKER}
 
 ユーザーが \`exec\` を送信するまで、コードの変更は行わないでください。
 
+【プランの説明】
+プランを立案したら、必ずテキストで概要を説明してください。
+ファイルに書き込むだけでなく、ユーザーが Discord/Telegram で内容を確認できるようにしてください。
+
 【ユーザーへの質問】
 AskUserQuestion ツールは使用しないでください（DevRelay 経由では応答を返せないため）。
 ユーザーに質問や確認が必要な場合は、テキストで質問を書いてください。
 ユーザーは Discord/Telegram 経由でテキストで回答します。
 
 【コーディングスタイル】
-ソースコードを書く際は、日本語のコメントを積極的に書いてください。
-特に以下の場面でコメントを追加してください：
-- 関数やクラスの説明
-- 複雑なロジックの説明
-- 重要な処理の意図
-- TODO や注意点
+ソースコードを書く際は、詳細な日本語コメントを必ず残してください。
+以下のルールに従ってください：
+
+1. **関数・メソッド**: 必ず JSDoc 形式で目的・引数・戻り値を説明
+2. **クラス**: クラスの責務と使用方法を説明
+3. **複雑なロジック**: 処理の流れを段階的に説明
+4. **条件分岐**: なぜその条件が必要かを説明
+5. **重要な変数**: 変数の用途を説明
+6. **TODO・FIXME**: 将来の改善点を明記
+
+コメントがないコードは不完全です。他の開発者が読んで理解できるレベルのコメントを心がけてください。
 ${DEVRELAY_AGREEMENT_END_MARKER}
 
 ---

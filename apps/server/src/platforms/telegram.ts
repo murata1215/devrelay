@@ -21,7 +21,7 @@ async function downloadFile(fileId: string): Promise<FileAttachment | null> {
       return null;
     }
 
-    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const fileUrl = `https://api.telegram.org/file/bot${currentToken || process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
     const response = await fetch(fileUrl);
     if (!response.ok) {
       console.error(`Failed to download file: ${response.status}`);
@@ -56,11 +56,15 @@ async function downloadFile(fileId: string): Promise<FileAttachment | null> {
   }
 }
 
-export async function setupTelegramBot() {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
+// トークンをモジュールレベルで保持（ファイルダウンロード用）
+let currentToken: string | null = null;
+
+export async function setupTelegramBot(providedToken?: string) {
+  const token = providedToken || process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     throw new Error('TELEGRAM_BOT_TOKEN is required');
   }
+  currentToken = token;
 
   // Create bot with polling (no webhook needed)
   bot = new TelegramBot(token, { polling: true });
@@ -110,7 +114,8 @@ export async function setupTelegramBot() {
       }
 
       // Parse and execute command (with NLP if enabled)
-      const content = msg.text || '';
+      // Note: msg.caption is used when photo/document has a caption instead of msg.text
+      const content = msg.text || msg.caption || '';
       const command = await parseCommandWithNLP(content, context);
       const response = await executeCommand(command, context, files);
 

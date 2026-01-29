@@ -11,6 +11,8 @@ import crypto from 'crypto';
 // 設定キーの定義
 export const SettingKeys = {
   OPENAI_API_KEY: 'openai_api_key',
+  DISCORD_BOT_TOKEN: 'discord_bot_token',
+  TELEGRAM_BOT_TOKEN: 'telegram_bot_token',
   NATURAL_LANGUAGE_ENABLED: 'natural_language_enabled',
   LANGUAGE: 'language',
   THEME: 'theme',
@@ -21,6 +23,8 @@ export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];
 // 暗号化が必要なキーのリスト
 const ENCRYPTED_KEYS: SettingKey[] = [
   SettingKeys.OPENAI_API_KEY,
+  SettingKeys.DISCORD_BOT_TOKEN,
+  SettingKeys.TELEGRAM_BOT_TOKEN,
 ];
 
 // 暗号化キー（環境変数から取得、なければデフォルト）
