@@ -110,7 +110,9 @@ export const PLAN_MODE_INSTRUCTION = `
 プランが完成したら、最後に必ず以下のように伝えてください：
 「このプランでよければ \`e\` または \`exec\` を送信してください。実装を開始します。」
 
-ユーザーが \`exec\` を送信するまで、コードの変更は行わないでください。`;
+ユーザーが \`exec\` を送信するまで、コードの変更は行わないでください。
+
+【重要】\`ExitPlanMode\` ツールは使用しないでください。DevRelay のプランモード解除はユーザーが \`e\` / \`exec\` を送信することで行います。`;
 
 // Instruction for exec mode (after user sends 'exec')
 export const EXEC_MODE_INSTRUCTION = `

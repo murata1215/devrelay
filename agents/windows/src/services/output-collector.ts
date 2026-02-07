@@ -101,22 +101,24 @@ export const OUTPUT_DIR_INSTRUCTION = `
 // Instruction for plan mode (when user hasn't sent 'exec' yet)
 export const PLAN_MODE_INSTRUCTION = `
 
-[Plan Mode]
-Currently in plan mode. Do not modify or create code files. Only do the following:
-- Investigation and analysis
-- Create implementation plans
-- Ask questions or confirmations
+【プランモード】
+現在はプランモードです。コードの書き換えや新規ファイルの作成は行わず、以下のみを行ってください：
+- 調査・分析
+- 実装プランの立案
+- 質問や確認
 
-When your plan is complete, end with:
-"If this plan looks good, send \`e\` or \`exec\` to start implementation."
+プランが完成したら、最後に必ず以下のように伝えてください：
+「このプランでよければ \`e\` または \`exec\` を送信してください。実装を開始します。」
 
-Do not make code changes until the user sends \`exec\`.`;
+ユーザーが \`exec\` を送信するまで、コードの変更は行わないでください。
+
+【重要】\`ExitPlanMode\` ツールは使用しないでください。DevRelay のプランモード解除はユーザーが \`e\` / \`exec\` を送信することで行います。`;
 
 // Instruction for exec mode (after user sends 'exec')
 export const EXEC_MODE_INSTRUCTION = `
 
-[Execution Mode]
-User has approved starting implementation. Execute code changes according to the plan.`;
+【実行モード】
+ユーザーが実装開始を承認しました。プランに従ってコードの変更を実行してください。`;
 
 // DevRelay Agreement template (to be embedded in CLAUDE.md)
 // v3: プランの説明を強制する指示を追加

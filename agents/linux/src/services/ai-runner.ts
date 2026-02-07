@@ -171,6 +171,8 @@ export async function sendPromptToAi(
 
   let fullOutput = '';
   let lineBuffer = '';
+  // stderr を収集してエラー検出に使用
+  let stderrOutput = '';
 
   return new Promise<AiRunResult>((resolve) => {
     proc.stdout?.on('data', (data) => {
@@ -252,6 +254,7 @@ export async function sendPromptToAi(
 
     proc.stderr?.on('data', (data) => {
       const text = data.toString();
+      stderrOutput += text;
       console.error(`[${aiTool}] stderr: ${text}`);
     });
 
@@ -262,6 +265,15 @@ export async function sendPromptToAi(
       if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
         console.log(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
         result.resumeFailed = true;
+      }
+
+      // "Prompt is too long" などのエラーを stderr から検出
+      if (stderrOutput.includes('Prompt is too long') ||
+          (stderrOutput.toLowerCase().includes('token') && stderrOutput.toLowerCase().includes('limit'))) {
+        console.log(`[${aiTool}] ⚠️ Prompt too long error detected`);
+        onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true);
+        resolve(result);
+        return;
       }
 
       if (fullOutput.length === 0) {

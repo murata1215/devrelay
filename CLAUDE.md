@@ -805,6 +805,78 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/web/src/pages/ProjectsPage.tsx` - History Export モーダル UI
   - `packages/shared/src/types.ts` - HistoryDatesRequestPayload, HistoryExportPayload 型
 
+#### 45. エラーハンドリング改善とログ強化 (2026-02-05)
+- **"Prompt is too long" エラー検知と通知**
+  - Claude Code の stderr から "Prompt is too long" エラーを検知
+  - ユーザーに「⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。」と通知
+  - **主要ファイル**: `agents/*/src/services/ai-runner.ts`
+- **プロンプトサイズ詳細ログ出力**
+  - プロンプト送信時に各コンポーネントのサイズをログ出力
+    - Mode instruction, User prompt, Work state, Storage context, Output instruction, History context
+    - 合計サイズと推定トークン数（`📦 TOTAL: xxx chars (~xxx tokens)`）
+  - **主要ファイル**: `agents/*/src/services/connection.ts`
+- **devrelay-claude シンボリックリンク自動作成**
+  - `devrelay setup` 実行時に `~/.devrelay/bin/devrelay-claude` シンボリックリンクを自動作成
+  - `which claude` で実際の claude パスを取得してリンク
+  - **主要ファイル**: `agents/linux/src/cli/commands/setup.ts`
+- **ExitPlanMode ツール使用禁止の警告**
+  - PLAN_MODE_INSTRUCTION に警告を追加
+  - Claude が `ExitPlanMode` ツールを使ってプランモードを解除することを防止
+  - 「`ExitPlanMode` ツールは使用しないでください。DevRelay のプランモード解除はユーザーが `e` / `exec` を送信することで行います。」
+  - **主要ファイル**: `agents/*/src/services/output-collector.ts`
+- **Windows Agent 日本語統一**
+  - PLAN_MODE_INSTRUCTION, EXEC_MODE_INSTRUCTION を英語から日本語に変更
+  - Linux Agent と同じ指示内容に統一
+  - **主要ファイル**: `agents/windows/src/services/output-collector.ts`
+- **Windows Agent ファイルログ出力**
+  - `electron-log` パッケージを使用
+  - ログ出力先: `%APPDATA%\devrelay\logs\agent.log`
+  - 1MB でローテーション（古いログは自動削除）
+  - `config.yaml` の `logLevel` 設定に対応
+  - **主要ファイル**:
+    - `agents/windows/src/services/logger.ts` (新規)
+    - `agents/windows/src/electron/main.ts`
+    - `agents/windows/src/services/connection.ts`
+    - `agents/windows/src/services/ai-runner.ts`
+    - `agents/windows/package.json` (`electron-log` 依存追加)
+
+#### 46. 会話履歴件数表示と警告 (2026-02-05)
+- プロンプト送信時に会話履歴件数を Discord/Telegram の先頭に表示
+- **警告レベル**:
+  - 通常（30件以下）: `📝 History: 25 messages`
+  - 黄色警告（30件超）: `⚠️ History: 35 messages (30件超)` + クリア案内
+  - 赤色警告（50件超）: `🚨 History: 52 messages (50件超)` + クリア推奨
+- **目的**: Claude Code のセッションコンテキストが蓄積されすぎる問題を防止
+  - `--resume` 使用時、Claude Code 側でも会話履歴が蓄積される
+  - 件数が多くなると「Prompt is too long」エラーが発生
+  - ユーザーに適切なタイミングで `x` コマンドでのクリアを促す
+- **実装**: `contextInfo` として検出され、最終メッセージの先頭に追加
+- **主要ファイル**:
+  - `agents/linux/src/services/connection.ts` - 履歴件数表示ロジック追加
+  - `agents/windows/src/services/connection.ts` - 同上
+
+#### 47. 会話履歴アーカイブ機能 (2026-02-06)
+- `x` コマンドで履歴クリア時、削除せずにアーカイブ保存
+- **目的**: 過去の会話を後から振り返れるようにする
+- **保存先**: `.devrelay/conversation-archive/conversation_YYYYMMDD_HHmmss.json`
+- **保存形式**:
+  ```json
+  {
+    "archivedAt": "2026-02-06T11:45:30.123Z",
+    "messageCount": 127,
+    "firstMessageAt": "2026-01-30T01:18:12.842Z",
+    "lastMessageAt": "2026-02-06T02:50:58.479Z",
+    "projectPath": "/home/user/devrelay",
+    "history": [...]
+  }
+  ```
+- **動作**: 履歴が1件以上ある場合のみアーカイブ。空の場合はスキップ
+- **主要ファイル**:
+  - `agents/linux/src/services/conversation-store.ts` - `archiveConversation()` 関数追加
+  - `agents/linux/src/services/connection.ts` - `handleConversationClear()` でアーカイブ呼び出し
+  - `agents/windows/src/services/conversation-store.ts` - 同上
+  - `agents/windows/src/services/connection.ts` - 同上
+
 ## 今後の課題
 
 - [ ] LINE 対応

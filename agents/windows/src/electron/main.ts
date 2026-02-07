@@ -6,6 +6,7 @@ import { loadConfig, saveConfig, ensureConfigDir, getConfigDir } from '../servic
 import { loadProjects, autoDiscoverProjects } from '../services/projects.js';
 import { connectToServer, disconnect, sendProjectsUpdate } from '../services/connection.js';
 import type { AgentConfig } from '../services/config.js';
+import log, { setLogLevel, getLogFilePath } from '../services/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,8 +39,19 @@ if (process.platform === 'darwin') {
 }
 
 app.whenReady().then(async () => {
+  // ログ初期化
+  log.info('='.repeat(50));
+  log.info('DevRelay Agent starting...');
+  log.info(`Version: ${APP_VERSION}`);
+  log.info(`Log file: ${getLogFilePath()}`);
+
   await ensureConfigDir();
   currentConfig = await loadConfig();
+
+  // config.yaml の logLevel を適用
+  if (currentConfig.logLevel) {
+    setLogLevel(currentConfig.logLevel);
+  }
 
   createTray();
 

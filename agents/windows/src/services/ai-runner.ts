@@ -4,6 +4,7 @@ import type { AiTool } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage } from './session-store.js';
+import log from './logger.js';
 
 interface AiSession {
   sessionId: string;
@@ -56,7 +57,7 @@ export async function startAiSession(
     throw new Error(`AI tool not configured: ${aiTool}`);
   }
 
-  console.log(`Starting session for ${aiTool} in ${projectPath}`);
+  log.info(`Starting session for ${aiTool} in ${projectPath}`);
 
   // Don't spawn process here - we'll use -p mode for each prompt
   // Just register the session
@@ -87,7 +88,7 @@ export async function sendPromptToAi(
   onOutput: OutputCallback,
   options: SendPromptOptions = {}
 ): Promise<AiRunResult> {
-  console.log(`Sending prompt to ${aiTool}: ${prompt.substring(0, 50)}...`);
+  log.info(`Sending prompt to ${aiTool}: ${prompt.substring(0, 50)}...`);
 
   const command = getAiCommand(aiTool, config);
   if (!command) {
@@ -110,19 +111,19 @@ export async function sendPromptToAi(
     // Add permission mode based on options
     if (options.usePlanMode) {
       args.push('--permission-mode', 'plan');
-      console.log(`Using plan mode (--permission-mode plan)`);
+      log.info(`Using plan mode (--permission-mode plan)`);
     } else {
       args.push('--dangerously-skip-permissions');
-      console.log(`Using exec mode (--dangerously-skip-permissions)`);
+      log.info(`Using exec mode (--dangerously-skip-permissions)`);
     }
 
     // Add resume option if we have a previous session ID
     if (options.resumeSessionId) {
       args.push('--resume', options.resumeSessionId);
-      console.log(`Resuming session: ${options.resumeSessionId.substring(0, 8)}...`);
+      log.info(`Resuming session: ${options.resumeSessionId.substring(0, 8)}...`);
     }
 
-    console.log(`Running: ${claudePath} ${args.join(' ')}`);
+    log.info(`Running: ${claudePath} ${args.join(' ')}`);
 
     proc = spawn(claudePath, args, {
       cwd: projectPath,
@@ -143,7 +144,7 @@ export async function sendPromptToAi(
     // Gemini CLI with auto_edit approval mode
     // Use stdin to pass prompt (same as Claude) to avoid shell interpretation issues
     const args = ['--approval-mode', 'auto_edit'];
-    console.log(`Running: ${command} --approval-mode auto_edit (prompt via stdin)`);
+    log.info(`Running: ${command} --approval-mode auto_edit (prompt via stdin)`);
 
     // Extract directory from gemini command path and add to PATH
     // This ensures node can be found when running as a Windows service
@@ -172,7 +173,7 @@ export async function sendPromptToAi(
     const escapedPrompt = prompt.replace(/"/g, '\\"');
     const fullCommand = `${command} "${escapedPrompt}"`;
 
-    console.log(`Running: ${fullCommand.substring(0, 100)}...`);
+    log.info(`Running: ${fullCommand.substring(0, 100)}...`);
 
     proc = spawn(fullCommand, [], {
       cwd: projectPath,
@@ -186,6 +187,8 @@ export async function sendPromptToAi(
 
   let fullOutput = '';
   let lineBuffer = '';
+  // stderr を収集してエラー検出に使用
+  let stderrOutput = '';
 
   return new Promise<AiRunResult>((resolve) => {
     proc.stdout?.on('data', (data) => {
@@ -206,18 +209,18 @@ export async function sendPromptToAi(
           const parsed = parseStreamJsonLine(line);
           if (parsed.sessionId) {
             result.extractedSessionId = parsed.sessionId;
-            console.log(`[${aiTool}] Session ID: ${parsed.sessionId.substring(0, 8)}...`);
+            log.info(`[${aiTool}] Session ID: ${parsed.sessionId.substring(0, 8)}...`);
             // Save session ID for future resumption
             saveClaudeSessionId(projectPath, parsed.sessionId).catch(err => {
-              console.error(`Failed to save session ID:`, err);
+              log.error(`Failed to save session ID:`, err);
             });
           }
           if (parsed.contextUsage) {
             result.contextUsage = parsed.contextUsage;
-            console.log(`[${aiTool}] ${formatContextUsage(parsed.contextUsage)}`);
+            log.info(`[${aiTool}] ${formatContextUsage(parsed.contextUsage)}`);
             // Save context usage for display at start of next prompt
             saveContextUsage(projectPath, parsed.contextUsage).catch(err => {
-              console.error(`Failed to save context usage:`, err);
+              log.error(`Failed to save context usage:`, err);
             });
           }
 
@@ -226,10 +229,10 @@ export async function sendPromptToAi(
             for (const block of json.message.content) {
               if (block.type === 'text' && block.text) {
                 fullOutput += block.text;
-                console.log(`[${aiTool}] +${block.text.length} chars`);
+                log.info(`[${aiTool}] +${block.text.length} chars`);
                 onOutput(block.text, false);
               } else if (block.type === 'tool_use' && block.name) {
-                console.log(`[${aiTool}] 🔧 Using tool: ${block.name}`);
+                log.info(`[${aiTool}] 🔧 Using tool: ${block.name}`);
                 onOutput(`\n🔧 ${block.name}を使用中...\n`, false);
               }
             }
@@ -240,7 +243,7 @@ export async function sendPromptToAi(
               json.event?.delta?.type === 'text_delta') {
             const deltaText = json.event.delta.text;
             fullOutput += deltaText;
-            console.log(`[${aiTool}] +${deltaText.length} chars`);
+            log.info(`[${aiTool}] +${deltaText.length} chars`);
             onOutput(deltaText, false);
           }
           // Also capture tool use for visibility (legacy format)
@@ -248,12 +251,12 @@ export async function sendPromptToAi(
                    json.event?.type === 'content_block_start' &&
                    json.event?.content_block?.type === 'tool_use') {
             const toolName = json.event.content_block.name;
-            console.log(`[${aiTool}] 🔧 Using tool: ${toolName}`);
+            log.info(`[${aiTool}] 🔧 Using tool: ${toolName}`);
             onOutput(`\n🔧 ${toolName}を使用中...\n`, false);
           }
           // Capture result for final output
           else if (json.type === 'result') {
-            console.log(`[${aiTool}] ✅ Complete (${json.duration_ms}ms)`);
+            log.info(`[${aiTool}] ✅ Complete (${json.duration_ms}ms)`);
           }
         } catch {
           // Not JSON or parse error - ignore
@@ -263,16 +266,26 @@ export async function sendPromptToAi(
 
     proc.stderr?.on('data', (data) => {
       const text = data.toString();
-      console.error(`[${aiTool}] stderr: ${text}`);
+      stderrOutput += text;
+      log.error(`[${aiTool}] stderr: ${text}`);
     });
 
     proc.on('close', (code) => {
-      console.log(`[${aiTool}] Process exited with code ${code}`);
+      log.info(`[${aiTool}] Process exited with code ${code}`);
 
       // Detect --resume failure: exit code 1 + no output
       if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
-        console.log(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
+        log.info(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
         result.resumeFailed = true;
+      }
+
+      // "Prompt is too long" などのエラーを stderr から検出
+      if (stderrOutput.includes('Prompt is too long') ||
+          (stderrOutput.toLowerCase().includes('token') && stderrOutput.toLowerCase().includes('limit'))) {
+        log.info(`[${aiTool}] ⚠️ Prompt too long error detected`);
+        onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true);
+        resolve(result);
+        return;
       }
 
       if (fullOutput.length === 0) {
@@ -284,7 +297,7 @@ export async function sendPromptToAi(
     });
 
     proc.on('error', (err) => {
-      console.error(`[${aiTool}] Process error:`, err);
+      log.error(`[${aiTool}] Process error:`, err);
       onOutput(`Error: ${err.message}`, true);
       resolve(result);
     });
@@ -298,7 +311,7 @@ export async function stopAiSession(sessionId: string): Promise<void> {
     return;
   }
 
-  console.log(`Stopping AI session: ${sessionId}`);
+  log.info(`Stopping AI session: ${sessionId}`);
   activeSessions.delete(sessionId);
 }
 

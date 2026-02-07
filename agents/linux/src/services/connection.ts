@@ -45,6 +45,7 @@ import {
   saveConversation,
   getConversationContext,
   clearConversation,
+  archiveConversation,
   markExecPoint,
   type ConversationEntry
 } from './conversation-store.js';
@@ -357,13 +358,19 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   const { sessionId, projectPath } = payload;
   console.log(`🗑️ Clearing conversation for session ${sessionId}`);
 
-  // Clear the conversation file
+  // 1. 現在の履歴をロードしてアーカイブ保存
+  const history = await loadConversation(projectPath);
+  if (history.length > 0) {
+    await archiveConversation(projectPath, history);
+  }
+
+  // 2. 会話履歴ファイルをクリア
   await clearConversation(projectPath);
 
-  // Clear Claude session ID (so next prompt starts fresh)
+  // 3. Claude セッション ID をクリア（次回プロンプトで新規セッション開始）
   await clearClaudeSessionId(projectPath);
 
-  // Clear in-memory history and session ID if session exists
+  // 4. メモリ内の履歴とセッション ID もクリア
   const sessionInfo = sessionInfoMap.get(sessionId);
   if (sessionInfo) {
     sessionInfo.history = [];
@@ -504,6 +511,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 
   // Build prompt with mode instruction and file output instruction
   let fullPrompt = modeInstruction + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+  // 会話履歴のサイズを記録（ログ出力用）
+  let historyContextSize = 0;
+
   // Include conversation history if:
   // 1. We don't have a Claude session to resume, OR
   // 2. We have missed messages (they're not in Claude's internal history)
@@ -527,10 +537,48 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       undefined,
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
+    historyContextSize = historyContext.length;
     fullPrompt = `${modeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
   }
 
+  // プロンプトサイズの詳細ログ（原因特定用）
+  console.log(`📊 Prompt size breakdown:`);
+  console.log(`   - Mode instruction: ${modeInstruction.length} chars`);
+  console.log(`   - User prompt: ${promptWithFiles.length} chars`);
+  console.log(`   - Work state: ${workStatePrompt.length} chars`);
+  console.log(`   - Storage context: ${storageContextPrompt.length} chars`);
+  console.log(`   - Output instruction: ${OUTPUT_DIR_INSTRUCTION.length} chars`);
+  if (historyContextSize > 0) {
+    console.log(`   - History context: ${historyContextSize} chars`);
+  }
+  console.log(`   📦 TOTAL: ${fullPrompt.length} chars (~${Math.round(fullPrompt.length / 4)} tokens)`);
+
   console.log(`📜 History length: ${sessionInfo.history.length}`);
+
+  // 会話履歴件数を Discord/Telegram に表示（警告レベル付き）
+  const historyCount = sessionInfo.history.length;
+  let historyMessage = '';
+  if (historyCount > 50) {
+    // 50件超: 赤色警告 + クリア推奨
+    historyMessage = `🚨 History: ${historyCount} messages (50件超)\n⚠️ 履歴が多くなっています。\`x\` コマンドでクリアすることを推奨します。`;
+  } else if (historyCount > 30) {
+    // 30件超: 黄色警告
+    historyMessage = `⚠️ History: ${historyCount} messages (30件超)\n💡 履歴が増えています。必要に応じて \`x\` でクリアしてください。`;
+  } else {
+    // 通常表示
+    historyMessage = `📝 History: ${historyCount} messages`;
+  }
+
+  // 履歴件数を先頭メッセージとして送信（contextInfo として検出される）
+  sendMessage({
+    type: 'agent:ai:output',
+    payload: {
+      machineId: currentConfig!.machineId,
+      sessionId,
+      output: historyMessage,
+      isComplete: false,
+    },
+  });
   if (sessionInfo.claudeResumeSessionId) {
     console.log(`🔄 Using --resume with session: ${sessionInfo.claudeResumeSessionId.substring(0, 8)}...`);
   }

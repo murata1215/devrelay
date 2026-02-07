@@ -4,6 +4,7 @@ import { join } from 'path';
 
 const CONVERSATION_DIR = '.devrelay';
 const CONVERSATION_FILE = 'conversation.json';
+const ARCHIVE_DIR = 'conversation-archive';  // アーカイブ保存用ディレクトリ
 const MAX_CONTEXT_MESSAGES = 20;  // Max messages to send to Claude (save is unlimited)
 
 export interface ConversationEntry {
@@ -100,6 +101,74 @@ export async function appendToConversation(
 export async function clearConversation(projectPath: string): Promise<void> {
   await saveConversation(projectPath, []);
   console.log(`Conversation history cleared for ${projectPath}`);
+}
+
+/**
+ * アーカイブファイルのメタデータ型
+ */
+export interface ArchivedConversation {
+  archivedAt: string;
+  messageCount: number;
+  firstMessageAt: string | null;
+  lastMessageAt: string | null;
+  projectPath: string;
+  history: ConversationEntry[];
+}
+
+/**
+ * 会話履歴をアーカイブ保存する
+ * クリア前に呼び出して、履歴を日時付きファイルとして退避保存する
+ * ファイル名: conversation_YYYYMMDD_HHmmss.json
+ *
+ * @param projectPath プロジェクトのパス
+ * @param history アーカイブする会話履歴
+ */
+export async function archiveConversation(
+  projectPath: string,
+  history: ConversationEntry[]
+): Promise<void> {
+  // 空の履歴はアーカイブしない
+  if (history.length === 0) {
+    console.log('No conversation to archive (empty history)');
+    return;
+  }
+
+  const archiveDir = join(projectPath, CONVERSATION_DIR, ARCHIVE_DIR);
+
+  try {
+    // アーカイブディレクトリを作成（存在しない場合）
+    if (!existsSync(archiveDir)) {
+      await mkdir(archiveDir, { recursive: true });
+    }
+
+    // ファイル名生成（YYYYMMDD_HHmmss形式）
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    const timestamp = `${year}${month}${day}_${hours}${minutes}${seconds}`;
+    const filename = `conversation_${timestamp}.json`;
+    const archivePath = join(archiveDir, filename);
+
+    // メタデータ付きでアーカイブデータを作成
+    const archiveData: ArchivedConversation = {
+      archivedAt: now.toISOString(),
+      messageCount: history.length,
+      firstMessageAt: history[0]?.timestamp || null,
+      lastMessageAt: history[history.length - 1]?.timestamp || null,
+      projectPath,
+      history
+    };
+
+    // ファイルに保存
+    await writeFile(archivePath, JSON.stringify(archiveData, null, 2), 'utf-8');
+    console.log(`Archived ${history.length} messages to ${filename}`);
+  } catch (err) {
+    console.error(`Could not archive conversation:`, (err as Error).message);
+  }
 }
 
 /**

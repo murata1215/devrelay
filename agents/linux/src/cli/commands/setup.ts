@@ -1,5 +1,8 @@
 import * as readline from 'readline';
 import os from 'os';
+import path from 'path';
+import fs from 'fs/promises';
+import { execSync } from 'child_process';
 import { nanoid } from 'nanoid';
 import chalk from 'chalk';
 import { loadConfig, saveConfig, ensureConfigDir } from '../../services/config.js';
@@ -78,6 +81,9 @@ export async function setupCommand() {
     console.log(chalk.green('\n✅ Configuration saved!'));
     console.log(chalk.gray(`   Config: ~/.devrelay/config.yaml`));
     console.log();
+
+    // Claude Code のシンボリックリンクを作成（プロセス識別用）
+    await ensureDevrelaySymlinks();
 
     // Ask about systemd service
     console.log();
@@ -222,5 +228,41 @@ WantedBy=multi-user.target
     console.log(chalk.yellow(`   You can manually create: ${servicePath}`));
     console.log();
     console.log(chalk.gray(serviceContent));
+  }
+}
+
+/**
+ * devrelay-claude シンボリックリンクを作成する
+ *
+ * Claude Code のプロセスを識別しやすくするため、
+ * ~/.devrelay/bin/devrelay-claude -> claude へのシンボリックリンクを作成する。
+ * これにより ps コマンドで DevRelay 経由の Claude 実行を識別できる。
+ */
+async function ensureDevrelaySymlinks() {
+  const devrelayBinDir = path.join(process.env.HOME || '', '.devrelay', 'bin');
+  const devrelayClaude = path.join(devrelayBinDir, 'devrelay-claude');
+
+  try {
+    // ディレクトリが存在しない場合は作成
+    await fs.mkdir(devrelayBinDir, { recursive: true });
+
+    // claude バイナリのパスを取得
+    const claudePath = execSync('which claude', { encoding: 'utf-8' }).trim();
+
+    // 既存のシンボリックリンクがあれば削除
+    try {
+      await fs.unlink(devrelayClaude);
+    } catch {
+      // 存在しない場合は無視
+    }
+
+    // シンボリックリンクを作成
+    await fs.symlink(claudePath, devrelayClaude);
+    console.log(chalk.green(`✅ Symlink created: devrelay-claude -> ${claudePath}`));
+  } catch (err) {
+    // Claude Code がインストールされていない場合などはエラーにせず警告のみ
+    console.log(chalk.yellow(`⚠️ Could not create devrelay-claude symlink: ${(err as Error).message}`));
+    console.log(chalk.gray('   Claude Code がインストールされていない場合は無視できます。'));
+    console.log(chalk.gray('   後でインストールした場合は、再度 devrelay setup を実行してください。'));
   }
 }

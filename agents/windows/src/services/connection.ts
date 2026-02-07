@@ -24,6 +24,7 @@ import { PassThrough } from 'stream';
 import { readdirSync } from 'fs';
 import { DEFAULTS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
+import log from './logger.js';
 import { startAiSession, sendPromptToAi, stopAiSession, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
@@ -45,6 +46,7 @@ import {
   saveConversation,
   getConversationContext,
   clearConversation,
+  archiveConversation,
   markExecPoint,
   type ConversationEntry
 } from './conversation-store.js';
@@ -129,15 +131,15 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
 
     if (config.proxy?.url) {
       wsOptions.agent = createProxyAgent(config.proxy);
-      console.log(`Connecting to ${config.serverUrl} via proxy ${config.proxy.url}...`);
+      log.info(`Connecting to ${config.serverUrl} via proxy ${config.proxy.url}...`);
     } else {
-      console.log(`Connecting to ${config.serverUrl}...`);
+      log.info(`Connecting to ${config.serverUrl}...`);
     }
 
     ws = new WebSocket(config.serverUrl, wsOptions);
 
     ws.on('open', async () => {
-      console.log('Connected to server');
+      log.info('Connected to server');
 
       // Check if this is a reconnection with an active session
       const isReconnection = reconnectAttempts > 0;
@@ -166,7 +168,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       pongCheckInterval = setInterval(() => {
         const timeSinceLastPong = Date.now() - lastPongReceived;
         if (timeSinceLastPong > PONG_TIMEOUT) {
-          console.error(`Pong timeout detected (${timeSinceLastPong}ms since last pong), reconnecting...`);
+          log.error(`Pong timeout detected (${timeSinceLastPong}ms since last pong), reconnecting...`);
           ws?.terminate();
         }
       }, 15000);
@@ -178,7 +180,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
 
       // If reconnecting with an active session, send session restore request
       if (isReconnection && currentProjectPath && currentProjectName) {
-        console.log(`Sending session restore request for ${currentProjectName}...`);
+        log.info(`Sending session restore request for ${currentProjectName}...`);
         const agreementStatus = await getAgreementStatusType(currentProjectPath);
         sendMessage({
           type: 'agent:session:restore',
@@ -197,10 +199,10 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     ws.on('message', (data) => {
       try {
         const message: ServerToAgentMessage = JSON.parse(data.toString());
-        console.log(`📥 Received message: type=${message.type}`);
+        log.info(`📥 Received message: type=${message.type}`);
         handleServerMessage(message, config);
       } catch (err) {
-        console.error('Error parsing server message:', err);
+        log.error('Error parsing server message:', err);
       }
     });
 
@@ -209,7 +211,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     });
 
     ws.on('close', () => {
-      console.log('Disconnected from server');
+      log.info('Disconnected from server');
       stopPing();
       stopAppPing();
       if (pongCheckInterval) {
@@ -220,7 +222,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     });
 
     ws.on('error', (err) => {
-      console.error('WebSocket error:', err.message);
+      log.error('WebSocket error:', err.message);
       reject(err);
     });
   });
@@ -233,12 +235,12 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         // Use machineId from server (DB ID) for heartbeat
         if (message.payload.machineId) {
           currentMachineId = message.payload.machineId;
-          console.log(`Authentication successful (machineId: ${currentMachineId})`);
+          log.info(`Authentication successful (machineId: ${currentMachineId})`);
         } else {
-          console.log('Authentication successful');
+          log.info('Authentication successful');
         }
       } else {
-        console.error('Authentication failed:', message.payload.error);
+        log.error('Authentication failed:', message.payload.error);
         ws?.close();
       }
       break;
@@ -312,9 +314,9 @@ async function handleSessionStart(
 ) {
   const { sessionId, projectName, projectPath, aiTool } = payload;
 
-  console.log(`Starting session: ${sessionId}`);
-  console.log(`   Project: ${projectName} (${projectPath})`);
-  console.log(`   AI Tool: ${aiTool}`);
+  log.info(`Starting session: ${sessionId}`);
+  log.info(`   Project: ${projectName} (${projectPath})`);
+  log.info(`   AI Tool: ${aiTool}`);
 
   // Store current session state for auto-restore after reconnection
   currentProjectPath = projectPath;
@@ -326,25 +328,25 @@ async function handleSessionStart(
   // Check for pending work state (auto-continue feature)
   const pendingWorkState = await loadWorkState(projectPath);
   if (pendingWorkState) {
-    console.log(`Found pending work state: ${pendingWorkState.summary}`);
+    log.info(`Found pending work state: ${pendingWorkState.summary}`);
   }
 
   // Check DevRelay Agreement status（詳細な状態を取得）
   const agreementStatus = await getAgreementStatusType(projectPath);
   const statusLabels = { latest: '最新版', outdated: '旧版（更新推奨）', none: '未対応' };
-  console.log(`📋 DevRelay Agreement: ${statusLabels[agreementStatus]}`);
+  log.info(`📋 DevRelay Agreement: ${statusLabels[agreementStatus]}`);
 
   // Check for storage context
   const storageContext = await loadStorageContext(projectPath);
   const hasStorageContext = !!storageContext;
   if (hasStorageContext) {
-    console.log(`📦 Storage context found (${storageContext.length} chars)`);
+    log.info(`📦 Storage context found (${storageContext.length} chars)`);
   }
 
   // Load existing Claude session ID for --resume
   const claudeResumeSessionId = await loadClaudeSessionId(projectPath);
   if (claudeResumeSessionId) {
-    console.log(`Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
+    log.info(`Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
   }
 
   // Generate UUID for Claude Code session and store session info
@@ -357,7 +359,7 @@ async function handleSessionStart(
     history,
     pendingWorkState: pendingWorkState || undefined
   });
-  console.log(`Session ${sessionId} -> Claude Session ${claudeSessionId}`);
+  log.info(`Session ${sessionId} -> Claude Session ${claudeSessionId}`);
 
   try {
     await startAiSession(sessionId, projectPath, aiTool, config, (output, isComplete) => {
@@ -383,7 +385,7 @@ async function handleSessionStart(
       },
     });
   } catch (err: any) {
-    console.error('Failed to start AI session:', err);
+    log.error('Failed to start AI session:', err);
     sendMessage({
       type: 'agent:ai:status',
       payload: {
@@ -397,7 +399,7 @@ async function handleSessionStart(
 }
 
 async function handleSessionEnd(sessionId: string) {
-  console.log(`Ending session: ${sessionId}`);
+  log.info(`Ending session: ${sessionId}`);
   await stopAiSession(sessionId);
 
   // Clear current session state
@@ -407,43 +409,49 @@ async function handleSessionEnd(sessionId: string) {
 
 function handleSessionRestored(payload: { sessionId: string; projectPath: string; chatId: string; platform: string }) {
   const { sessionId, projectPath, chatId, platform } = payload;
-  console.log(`Session restored: ${sessionId}`);
-  console.log(`   Project: ${projectPath}`);
-  console.log(`   Chat: ${chatId} (${platform})`);
+  log.info(`Session restored: ${sessionId}`);
+  log.info(`   Project: ${projectPath}`);
+  log.info(`   Chat: ${chatId} (${platform})`);
 }
 
 async function handleConversationClear(payload: { sessionId: string; projectPath: string }) {
   const { sessionId, projectPath } = payload;
-  console.log(`Clearing conversation for session ${sessionId}`);
+  log.info(`Clearing conversation for session ${sessionId}`);
 
-  // Clear the conversation file
+  // 1. 現在の履歴をロードしてアーカイブ保存
+  const history = await loadConversation(projectPath);
+  if (history.length > 0) {
+    await archiveConversation(projectPath, history);
+  }
+
+  // 2. 会話履歴ファイルをクリア
   await clearConversation(projectPath);
 
-  // Clear Claude session ID (so next prompt starts fresh)
+  // 3. Claude セッション ID をクリア（次回プロンプトで新規セッション開始）
   await clearClaudeSessionId(projectPath);
 
-  // Clear in-memory history and session ID if session exists
+  // 4. メモリ内の履歴とセッション ID もクリア
   const sessionInfo = sessionInfoMap.get(sessionId);
   if (sessionInfo) {
     sessionInfo.history = [];
     sessionInfo.claudeResumeSessionId = undefined;
-    console.log(`In-memory history and Claude session ID cleared for session ${sessionId}`);
+    log.info(`In-memory history and Claude session ID cleared for session ${sessionId}`);
   }
 }
 
 async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string }) {
   const { sessionId, projectPath, userId } = payload;
-  console.log(`Marking exec point for session ${sessionId}`);
+  log.info(`Marking exec point for session ${sessionId}`);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
 
   if (sessionInfo) {
     // Mark exec point in history (this becomes the reset point)
     sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
-    console.log(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
+    log.info(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
   } else {
     // Session not in memory (e.g., after server restart), initialize from file
-    console.log(`Session not found in memory, initializing from file...`);
+    log.info(`Session not found in memory, initializing from file...`);
     const history = await loadConversation(projectPath);
     const claudeSessionId = uuidv4();
     const aiTool: AiTool = currentConfig?.aiTools?.default || 'claude';
@@ -451,15 +459,15 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     // Create session info and add to map
     sessionInfo = { projectPath, aiTool, claudeSessionId, history };
     sessionInfoMap.set(sessionId, sessionInfo);
-    console.log(`Session ${sessionId} initialized with ${history.length} history entries`);
+    log.info(`Session ${sessionId} initialized with ${history.length} history entries`);
 
     // Mark exec point in history
     sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
-    console.log(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
+    log.info(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
   // Automatically start implementation with exec mode
-  console.log(`Auto-starting implementation...`);
+  log.info(`Auto-starting implementation...`);
   await handleAiPrompt({
     sessionId,
     prompt: 'プランに従って実装を開始してください。',
@@ -470,29 +478,29 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
 
 async function handleWorkStateSave(payload: WorkStateSavePayload) {
   const { sessionId, projectPath, workState } = payload;
-  console.log(`Saving work state for session ${sessionId}`);
+  log.info(`Saving work state for session ${sessionId}`);
 
   try {
     await saveWorkState(projectPath, workState);
-    console.log(`Work state saved: ${workState.summary}`);
+    log.info(`Work state saved: ${workState.summary}`);
   } catch (err) {
-    console.error(`Failed to save work state:`, (err as Error).message);
+    log.error(`Failed to save work state:`, (err as Error).message);
   }
 }
 
 async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[] }) {
   const { sessionId, prompt, userId, files, missedMessages } = payload;
-  console.log(`Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
+  log.info(`Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
-    console.log(`Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
+    log.info(`Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
   }
   if (missedMessages && missedMessages.length > 0) {
-    console.log(`Received ${missedMessages.length} missed message(s) from Discord`);
+    log.info(`Received ${missedMessages.length} missed message(s) from Discord`);
   }
 
   const sessionInfo = sessionInfoMap.get(sessionId);
   if (!sessionInfo || !currentConfig) {
-    console.error(`Session info not found for ${sessionId}`);
+    log.error(`Session info not found for ${sessionId}`);
     return;
   }
 
@@ -502,7 +510,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     const savedPaths = await saveReceivedFiles(sessionInfo.projectPath, files);
     if (savedPaths.length > 0) {
       promptWithFiles = buildPromptWithFiles(prompt, savedPaths);
-      console.log(`Files saved to: ${savedPaths.join(', ')}`);
+      log.info(`Files saved to: ${savedPaths.join(', ')}`);
     }
   }
 
@@ -515,7 +523,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         timestamp: new Date(msg.timestamp).toISOString()
       });
     }
-    console.log(`Added ${missedMessages.length} missed messages to history`);
+    log.info(`Added ${missedMessages.length} missed messages to history`);
   }
 
   // Add user message to history and save
@@ -537,12 +545,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const isExecTriggered = lastEntry?.role === 'exec';
   // Use CLI --permission-mode plan for plan mode, --dangerously-skip-permissions for exec mode
   const usePlanMode = !isExecTriggered;
-  console.log(`Mode: ${isExecTriggered ? 'EXEC (--dangerously-skip-permissions)' : 'PLAN (--permission-mode plan)'}`);
+  log.info(`Mode: ${isExecTriggered ? 'EXEC (--dangerously-skip-permissions)' : 'PLAN (--permission-mode plan)'}`);
 
   // Check for pending work state (auto-continue feature)
   let workStatePrompt = '';
   if (sessionInfo.pendingWorkState) {
-    console.log(`Including work state in prompt: ${sessionInfo.pendingWorkState.summary}`);
+    log.info(`Including work state in prompt: ${sessionInfo.pendingWorkState.summary}`);
     workStatePrompt = '\n\n' + formatWorkStateForPrompt(sessionInfo.pendingWorkState);
 
     // Archive the work state file and clear from session
@@ -557,12 +565,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   let storageContextPrompt = '';
   const storageContext = await loadStorageContext(sessionInfo.projectPath);
   if (storageContext) {
-    console.log(`Including storage context in prompt (${storageContext.length} chars)`);
+    log.info(`Including storage context in prompt (${storageContext.length} chars)`);
     storageContextPrompt = '\n\n--- Storage Context ---\n' + storageContext + '\n--- End Storage Context ---';
   }
 
   // Build prompt with mode instruction and file output instruction
   let fullPrompt = modeInstruction + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+  // 会話履歴のサイズを記録（ログ出力用）
+  let historyContextSize = 0;
+
   // Include conversation history if:
   // 1. We don't have a Claude session to resume, OR
   // 2. We have missed messages (they're not in Claude's internal history)
@@ -586,13 +597,51 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       undefined,
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
+    historyContextSize = historyContext.length;
     fullPrompt = `${modeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
   }
 
-  console.log(`History length: ${sessionInfo.history.length}`);
-  if (sessionInfo.claudeResumeSessionId) {
-    console.log(`Using --resume with session: ${sessionInfo.claudeResumeSessionId.substring(0, 8)}...`);
+  // プロンプトサイズの詳細ログ（原因特定用）
+  log.info(`Prompt size breakdown:`);
+  log.info(`   - Mode instruction: ${modeInstruction.length} chars`);
+  log.info(`   - User prompt: ${promptWithFiles.length} chars`);
+  log.info(`   - Work state: ${workStatePrompt.length} chars`);
+  log.info(`   - Storage context: ${storageContextPrompt.length} chars`);
+  log.info(`   - Output instruction: ${OUTPUT_DIR_INSTRUCTION.length} chars`);
+  if (historyContextSize > 0) {
+    log.info(`   - History context: ${historyContextSize} chars`);
   }
+  log.info(`   TOTAL: ${fullPrompt.length} chars (~${Math.round(fullPrompt.length / 4)} tokens)`);
+
+  log.info(`History length: ${sessionInfo.history.length}`);
+  if (sessionInfo.claudeResumeSessionId) {
+    log.info(`Using --resume with session: ${sessionInfo.claudeResumeSessionId.substring(0, 8)}...`);
+  }
+
+  // 会話履歴件数を Discord/Telegram に表示（警告レベル付き）
+  const historyCount = sessionInfo.history.length;
+  let historyMessage = '';
+  if (historyCount > 50) {
+    // 50件超: 赤色警告 + クリア推奨
+    historyMessage = `🚨 History: ${historyCount} messages (50件超)\n⚠️ 履歴が多くなっています。\`x\` コマンドでクリアすることを推奨します。`;
+  } else if (historyCount > 30) {
+    // 30件超: 黄色警告
+    historyMessage = `⚠️ History: ${historyCount} messages (30件超)\n💡 履歴が増えています。必要に応じて \`x\` でクリアしてください。`;
+  } else {
+    // 通常表示
+    historyMessage = `📝 History: ${historyCount} messages`;
+  }
+
+  // 履歴件数を先頭メッセージとして送信（contextInfo として検出される）
+  sendMessage({
+    type: 'agent:ai:output',
+    payload: {
+      machineId: currentConfig!.machineId,
+      sessionId,
+      output: historyMessage,
+      isComplete: false,
+    },
+  });
 
   // Prepare send options
   const sendOptions: SendPromptOptions = {
@@ -615,7 +664,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         // Collect files from the output directory
         const files = await collectOutputFiles(sessionInfo.projectPath);
         if (files.length > 0) {
-          console.log(`Sending ${files.length} file(s) from output directory`);
+          log.info(`Sending ${files.length} file(s) from output directory`);
         }
 
         sendMessage({
@@ -637,11 +686,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             timestamp: new Date().toISOString()
           });
           await saveConversation(sessionInfo.projectPath, sessionInfo.history);
-          console.log(`Conversation saved (${sessionInfo.history.length} messages)`);
+          log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
         }
       } else {
         // Stream intermediate output without files
-        console.log(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
+        log.info(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
         sendMessage({
           type: 'agent:ai:output',
           payload: {
@@ -658,7 +707,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 
   // If --resume failed, clear session ID and retry without it
   if (aiResult.resumeFailed) {
-    console.log(`🔄 Retrying without --resume due to session failure...`);
+    log.info(`🔄 Retrying without --resume due to session failure...`);
     sessionInfo.claudeResumeSessionId = undefined;
     await clearClaudeSessionId(sessionInfo.projectPath);
 
@@ -682,7 +731,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         if (isComplete) {
           const files = await collectOutputFiles(sessionInfo.projectPath);
           if (files.length > 0) {
-            console.log(`Sending ${files.length} file(s) from output directory`);
+            log.info(`Sending ${files.length} file(s) from output directory`);
           }
 
           sendMessage({
@@ -703,10 +752,10 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               timestamp: new Date().toISOString()
             });
             await saveConversation(sessionInfo.projectPath, sessionInfo.history);
-            console.log(`Conversation saved (${sessionInfo.history.length} messages)`);
+            log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
           }
         } else {
-          console.log(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
+          log.info(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
           sendMessage({
             type: 'agent:ai:output',
             payload: {
@@ -724,7 +773,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     // Update session info with new Claude session ID from retry
     if (retryResult.extractedSessionId) {
       sessionInfo.claudeResumeSessionId = retryResult.extractedSessionId;
-      console.log(`Updated Claude session ID (after retry): ${retryResult.extractedSessionId.substring(0, 8)}...`);
+      log.info(`Updated Claude session ID (after retry): ${retryResult.extractedSessionId.substring(0, 8)}...`);
     }
     return;
   }
@@ -732,7 +781,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Update session info with new Claude session ID if extracted
   if (aiResult.extractedSessionId) {
     sessionInfo.claudeResumeSessionId = aiResult.extractedSessionId;
-    console.log(`Updated Claude session ID: ${aiResult.extractedSessionId.substring(0, 8)}...`);
+    log.info(`Updated Claude session ID: ${aiResult.extractedSessionId.substring(0, 8)}...`);
   }
 }
 
@@ -778,7 +827,7 @@ function startAppPing() {
 
 function sendAppPing() {
   if (ws && ws.readyState === WebSocket.OPEN && currentMachineId) {
-    console.log(`💓 Sending app ping (machineId: ${currentMachineId})`);
+    log.info(`💓 Sending app ping (machineId: ${currentMachineId})`);
     sendMessage({
       type: 'agent:ping',
       payload: {
@@ -789,7 +838,7 @@ function sendAppPing() {
   } else {
     // Debug: log why ping was skipped
     const wsState = ws ? ws.readyState : 'null';
-    console.log(`⏳ App ping skipped (ws: ${wsState}, machineId: ${currentMachineId || 'null'})`);
+    log.info(`⏳ App ping skipped (ws: ${wsState}, machineId: ${currentMachineId || 'null'})`);
   }
 }
 
@@ -807,8 +856,8 @@ function scheduleReconnect(config: AgentConfig, projects: Project[]) {
 
   // Check max attempts
   if (reconnectAttempts >= maxAttempts) {
-    console.error(`Max reconnect attempts (${maxAttempts}) reached. Giving up.`);
-    console.error('Restart the agent manually or check if the server is running.');
+    log.error(`Max reconnect attempts (${maxAttempts}) reached. Giving up.`);
+    log.error('Restart the agent manually or check if the server is running.');
     return;
   }
 
@@ -821,12 +870,12 @@ function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   const delay = exponentialDelay + jitter;
 
   reconnectAttempts++;
-  console.log(`Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts}/${maxAttempts})...`);
+  log.info(`Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts}/${maxAttempts})...`);
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectToServer(config, projects).catch((err) => {
-      console.error('Reconnection failed:', err.message);
+      log.error('Reconnection failed:', err.message);
       // scheduleReconnect will be called from the 'close' event
     });
   }, delay);
@@ -856,7 +905,7 @@ export function disconnect() {
  */
 export function sendProjectsUpdate(projects: Project[]) {
   if (!ws || ws.readyState !== WebSocket.OPEN || !currentConfig) {
-    console.log('⚠️ Cannot send projects update: not connected');
+    log.info('⚠️ Cannot send projects update: not connected');
     return;
   }
 
@@ -867,7 +916,7 @@ export function sendProjectsUpdate(projects: Project[]) {
       projects,
     },
   });
-  console.log(`📤 Sent projects update: ${projects.length} projects`);
+  log.info(`📤 Sent projects update: ${projects.length} projects`);
 }
 
 // Agreement のステータスを表す型
@@ -909,13 +958,13 @@ export async function getAgreementStatusType(projectPath: string): Promise<Agree
 // Handle agreement apply command - run Claude Code to update CLAUDE.md
 async function handleAgreementApply(payload: AgreementApplyPayload) {
   const { sessionId, projectPath, userId } = payload;
-  console.log(`📝 Applying DevRelay Agreement for session ${sessionId}`);
+  log.info(`📝 Applying DevRelay Agreement for session ${sessionId}`);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
 
   if (!sessionInfo || !currentConfig) {
     // Session not in memory, initialize from file
-    console.log(`📋 Session not found in memory, initializing...`);
+    log.info(`📋 Session not found in memory, initializing...`);
     const history = await loadConversation(projectPath);
     const claudeSessionId = uuidv4();
     const aiTool: AiTool = currentConfig?.aiTools?.default || 'claude';
@@ -926,7 +975,7 @@ async function handleAgreementApply(payload: AgreementApplyPayload) {
 
   // Clear conversation history before applying Agreement
   // This ensures the new conversation starts fresh with plan mode enabled
-  console.log(`🗑️ Clearing conversation history for Agreement apply...`);
+  log.info(`🗑️ Clearing conversation history for Agreement apply...`);
   await clearConversation(projectPath);
   sessionInfo.history = [];
 
@@ -973,11 +1022,11 @@ async function clearStorageContext(projectPath: string): Promise<void> {
 
 async function handleStorageSave(payload: StorageSavePayload) {
   const { sessionId, projectPath, content } = payload;
-  console.log(`Saving storage context for session ${sessionId}`);
+  log.info(`Saving storage context for session ${sessionId}`);
 
   try {
     await saveStorageContext(projectPath, content);
-    console.log(`Storage context saved (${content.length} chars)`);
+    log.info(`Storage context saved (${content.length} chars)`);
 
     // Notify server that storage context was saved
     if (currentConfig) {
@@ -992,19 +1041,19 @@ async function handleStorageSave(payload: StorageSavePayload) {
       });
     }
   } catch (err) {
-    console.error(`Failed to save storage context:`, (err as Error).message);
+    log.error(`Failed to save storage context:`, (err as Error).message);
   }
 }
 
 async function handleStorageClear(payload: StorageClearPayload) {
   const { sessionId, projectPath } = payload;
-  console.log(`Clearing storage context for session ${sessionId}`);
+  log.info(`Clearing storage context for session ${sessionId}`);
 
   try {
     await clearStorageContext(projectPath);
-    console.log(`Storage context cleared`);
+    log.info(`Storage context cleared`);
   } catch (err) {
-    console.error(`Failed to clear storage context:`, (err as Error).message);
+    log.error(`Failed to clear storage context:`, (err as Error).message);
   }
 }
 
@@ -1013,9 +1062,9 @@ async function handleStorageClear(payload: StorageClearPayload) {
 // -----------------------------------------------------------------------------
 
 async function handleHistoryDates(payload: HistoryDatesRequestPayload) {
-  console.log(`📥 handleHistoryDates called`);
+  log.info(`📥 handleHistoryDates called`);
   const { projectPath, requestId } = payload;
-  console.log(`📦 Getting history dates for ${projectPath}`);
+  log.info(`📦 Getting history dates for ${projectPath}`);
 
   try {
     // Load conversation history
@@ -1033,7 +1082,7 @@ async function handleHistoryDates(payload: HistoryDatesRequestPayload) {
     // Sort dates descending (newest first)
     const sortedDates = Array.from(dates).sort((a, b) => b.localeCompare(a));
 
-    console.log(`Found ${sortedDates.length} dates with history`);
+    log.info(`Found ${sortedDates.length} dates with history`);
 
     if (currentConfig) {
       sendMessage({
@@ -1047,13 +1096,13 @@ async function handleHistoryDates(payload: HistoryDatesRequestPayload) {
       });
     }
   } catch (err) {
-    console.error(`Failed to get history dates:`, (err as Error).message);
+    log.error(`Failed to get history dates:`, (err as Error).message);
   }
 }
 
 async function handleHistoryExport(payload: HistoryExportRequestPayload) {
   const { projectPath, requestId, date } = payload;
-  console.log(`Exporting history for ${projectPath} on ${date}`);
+  log.info(`Exporting history for ${projectPath} on ${date}`);
 
   try {
     // Load conversation history
@@ -1063,7 +1112,7 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
     const dayMessages = history.filter(m => m.timestamp?.startsWith(date));
 
     if (dayMessages.length === 0) {
-      console.log(`No messages found for ${date}`);
+      log.info(`No messages found for ${date}`);
       if (currentConfig) {
         sendMessage({
           type: 'agent:history:export',
@@ -1107,8 +1156,8 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
       // .devrelay-files directory doesn't exist
     }
 
-    console.log(`Processing ${dayMessages.length} messages for ${date}`);
-    console.log(`Found ${imageFiles.length} images for ${date}`);
+    log.info(`Processing ${dayMessages.length} messages for ${date}`);
+    log.info(`Found ${imageFiles.length} images for ${date}`);
 
     // Build markdown content
     for (const message of dayMessages) {
@@ -1127,7 +1176,7 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
       }
     }
 
-    console.log(`Markdown generated: ${markdown.length} chars`);
+    log.info(`Markdown generated: ${markdown.length} chars`);
 
     // Create ZIP file in memory
     const archive = archiver('zip', { zlib: { level: 9 } });
@@ -1154,7 +1203,7 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
       archive.file(filePath, { name: `images/${img.newName}` });
     }
 
-    console.log(`Starting ZIP finalization...`);
+    log.info(`Starting ZIP finalization...`);
     await archive.finalize();
 
     // Wait for all chunks
@@ -1163,7 +1212,7 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
     const zipBuffer = Buffer.concat(chunks);
     const zipContent = zipBuffer.toString('base64');
 
-    console.log(`ZIP created: ${zipBuffer.length} bytes, ${imageFiles.length} images`);
+    log.info(`ZIP created: ${zipBuffer.length} bytes, ${imageFiles.length} images`);
 
     if (currentConfig) {
       sendMessage({
@@ -1178,7 +1227,7 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
       });
     }
   } catch (err) {
-    console.error(`Failed to export history:`, (err as Error).message);
+    log.error(`Failed to export history:`, (err as Error).message);
     if (currentConfig) {
       sendMessage({
         type: 'agent:history:export',
@@ -1201,7 +1250,7 @@ async function handleHistoryExport(payload: HistoryExportRequestPayload) {
 
 async function handleAiList(payload: AiListPayload, config: AgentConfig) {
   const { sessionId, requestId } = payload;
-  console.log(`🤖 AI list requested for session ${sessionId}`);
+  log.info(`🤖 AI list requested for session ${sessionId}`);
 
   const available = getAvailableAiTools(config);
   const defaultTool = config.aiTools.default || 'claude';
@@ -1210,7 +1259,7 @@ async function handleAiList(payload: AiListPayload, config: AgentConfig) {
   const sessionInfo = sessionInfoMap.get(sessionId);
   let currentTool = sessionInfo?.aiTool || await loadLastAiTool() || defaultTool;
 
-  console.log(`🤖 Available: ${available.join(', ')}, Current: ${currentTool}, Default: ${defaultTool}`);
+  log.info(`🤖 Available: ${available.join(', ')}, Current: ${currentTool}, Default: ${defaultTool}`);
 
   sendMessage({
     type: 'agent:ai:list',
@@ -1227,13 +1276,13 @@ async function handleAiList(payload: AiListPayload, config: AgentConfig) {
 
 async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {
   const { sessionId, aiTool } = payload;
-  console.log(`🔄 Switching AI to ${aiTool} for session ${sessionId}`);
+  log.info(`🔄 Switching AI to ${aiTool} for session ${sessionId}`);
 
   try {
     // Verify the tool is available
     const available = getAvailableAiTools(config);
     if (!available.includes(aiTool)) {
-      console.error(`❌ AI tool ${aiTool} is not available`);
+      log.error(`❌ AI tool ${aiTool} is not available`);
       sendMessage({
         type: 'agent:ai:switched',
         payload: {
@@ -1251,7 +1300,7 @@ async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {
     const sessionInfo = sessionInfoMap.get(sessionId);
     if (sessionInfo) {
       sessionInfo.aiTool = aiTool;
-      console.log(`📋 Updated session ${sessionId} to use ${aiTool}`);
+      log.info(`📋 Updated session ${sessionId} to use ${aiTool}`);
     }
 
     // Save to state file for persistence across restarts
@@ -1267,9 +1316,9 @@ async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {
       },
     });
 
-    console.log(`✅ AI switched to ${aiTool}`);
+    log.info(`✅ AI switched to ${aiTool}`);
   } catch (err) {
-    console.error(`❌ Failed to switch AI:`, (err as Error).message);
+    log.error(`❌ Failed to switch AI:`, (err as Error).message);
     sendMessage({
       type: 'agent:ai:switched',
       payload: {
