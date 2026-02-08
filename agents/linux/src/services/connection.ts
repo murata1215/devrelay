@@ -555,19 +555,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 
   console.log(`📜 History length: ${sessionInfo.history.length}`);
 
-  // 会話履歴件数を Discord/Telegram に表示（警告レベル付き）
-  const historyCount = sessionInfo.history.length;
-  let historyMessage = '';
-  if (historyCount > 50) {
-    // 50件超: 赤色警告 + クリア推奨
-    historyMessage = `🚨 History: ${historyCount} messages (50件超)\n⚠️ 履歴が多くなっています。\`x\` コマンドでクリアすることを推奨します。`;
-  } else if (historyCount > 30) {
-    // 30件超: 黄色警告
-    historyMessage = `⚠️ History: ${historyCount} messages (30件超)\n💡 履歴が増えています。必要に応じて \`x\` でクリアしてください。`;
-  } else {
-    // 通常表示
-    historyMessage = `📝 History: ${historyCount} messages`;
-  }
+  // 会話履歴件数を Discord/Telegram に表示
+  const historyMessage = `📝 History: ${sessionInfo.history.length} messages`;
 
   // 履歴件数を先頭メッセージとして送信（contextInfo として検出される）
   sendMessage({
