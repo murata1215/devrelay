@@ -840,16 +840,9 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
     - `agents/windows/src/services/ai-runner.ts`
     - `agents/windows/package.json` (`electron-log` 依存追加)
 
-#### 46. 会話履歴件数表示と警告 (2026-02-05)
+#### 46. 会話履歴件数表示 (2026-02-05)
 - プロンプト送信時に会話履歴件数を Discord/Telegram の先頭に表示
-- **警告レベル**:
-  - 通常（30件以下）: `📝 History: 25 messages`
-  - 黄色警告（30件超）: `⚠️ History: 35 messages (30件超)` + クリア案内
-  - 赤色警告（50件超）: `🚨 History: 52 messages (50件超)` + クリア推奨
-- **目的**: Claude Code のセッションコンテキストが蓄積されすぎる問題を防止
-  - `--resume` 使用時、Claude Code 側でも会話履歴が蓄積される
-  - 件数が多くなると「Prompt is too long」エラーが発生
-  - ユーザーに適切なタイミングで `x` コマンドでのクリアを促す
+- **表示例**: `📝 History: 47 messages`
 - **実装**: `contextInfo` として検出され、最終メッセージの先頭に追加
 - **主要ファイル**:
   - `agents/linux/src/services/connection.ts` - 履歴件数表示ロジック追加
