@@ -125,12 +125,23 @@ export async function sendPromptToAi(
 
     log.info(`Running: ${claudePath} ${args.join(' ')}`);
 
+    // プロキシ環境変数を追加（自動起動時には process.env に含まれていないことがある）
+    const proxyEnv: Record<string, string> = {};
+    if (config.proxy?.url) {
+      proxyEnv.HTTP_PROXY = config.proxy.url;
+      proxyEnv.HTTPS_PROXY = config.proxy.url;
+      proxyEnv.http_proxy = config.proxy.url;
+      proxyEnv.https_proxy = config.proxy.url;
+      log.info(`Setting proxy env for Claude: ${config.proxy.url}`);
+    }
+
     proc = spawn(claudePath, args, {
       cwd: projectPath,
       shell: true,  // Windows needs shell: true to execute .cmd files (claude.cmd)
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...proxyEnv,
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
@@ -151,12 +162,22 @@ export async function sendPromptToAi(
     const geminiDir = path.dirname(command);
     const envPath = process.env.PATH ? `${geminiDir};${process.env.PATH}` : geminiDir;
 
+    // プロキシ環境変数を追加（Gemini 用）
+    const geminiProxyEnv: Record<string, string> = {};
+    if (config.proxy?.url) {
+      geminiProxyEnv.HTTP_PROXY = config.proxy.url;
+      geminiProxyEnv.HTTPS_PROXY = config.proxy.url;
+      geminiProxyEnv.http_proxy = config.proxy.url;
+      geminiProxyEnv.https_proxy = config.proxy.url;
+    }
+
     proc = spawn(command, args, {
       cwd: projectPath,
       shell: true,  // Windows needs shell: true for .cmd files
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...geminiProxyEnv,
         PATH: envPath,  // Add gemini's directory to PATH so node can be found
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
