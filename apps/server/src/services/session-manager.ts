@@ -99,6 +99,49 @@ export async function restoreSessionParticipants() {
   console.log(`📋 Restored ${restoredCount} session participant(s), reactivated ${reactivatedCount} session(s)`);
 }
 
+/**
+ * 特定マシンのセッション参加者を復元する
+ * Agent再接続時に呼び出し、ChannelSessionからセッションを復元する
+ *
+ * @param machineId 復元対象のマシンID
+ */
+export async function restoreSessionParticipantsForMachine(machineId: string) {
+  // このマシンに関連する ChannelSession を取得
+  const channelSessions = await prisma.channelSession.findMany({
+    where: {
+      currentSessionId: { not: null },
+      currentMachineId: machineId
+    }
+  });
+
+  let restoredCount = 0;
+  for (const cs of channelSessions) {
+    if (cs.currentSessionId) {
+      const session = await prisma.session.findUnique({
+        where: { id: cs.currentSessionId }
+      });
+
+      if (session) {
+        addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
+        restoredCount++;
+
+        // ended のセッションを active に戻す
+        if (session.status === 'ended') {
+          await prisma.session.update({
+            where: { id: cs.currentSessionId },
+            data: { status: 'active', endedAt: null }
+          });
+          console.log(`🔄 Reactivated session: ${cs.currentSessionId}`);
+        }
+      }
+    }
+  }
+
+  if (restoredCount > 0) {
+    console.log(`📋 Restored ${restoredCount} session participant(s) for machine ${machineId}`);
+  }
+}
+
 export async function createSession(
   userId: string,
   machineId: string,

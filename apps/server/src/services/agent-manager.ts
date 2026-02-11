@@ -12,7 +12,7 @@ import type {
   AiSwitchedPayload
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine } from './session-manager.js';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -176,6 +176,9 @@ async function handleAgentConnect(
   });
 
   console.log(`✅ Agent connected: ${machine.name} (${machine.id})`);
+
+  // Agent再接続時にセッション参加者を復元（切断前のセッションを継続可能にする）
+  await restoreSessionParticipantsForMachine(machine.id);
 }
 
 async function handleAgentDisconnect(machineId: string) {

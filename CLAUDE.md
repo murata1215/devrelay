@@ -870,6 +870,19 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `agents/windows/src/services/conversation-store.ts` - 同上
   - `agents/windows/src/services/connection.ts` - 同上
 
+#### 48. Agent再接続時のセッション復元 (2026-02-12)
+- **問題**: Agentのみ再起動するとDiscordからのメッセージに応答しなくなる
+- **原因**: Agent切断時に `clearSessionsForMachine()` で `sessionParticipants` が削除されるが、Agent再接続時に復元されない
+- **解決策**: `handleAgentConnect()` 内で `restoreSessionParticipantsForMachine()` を呼び出し、ChannelSessionからセッションを復元
+- **動作フロー**:
+  1. Agent切断 → `sessionParticipants` 削除、Session status を `ended` に
+  2. Agent再接続 → `restoreSessionParticipantsForMachine()` で ChannelSession から復元
+  3. `ended` のセッションを `active` に戻す
+  4. ユーザーは `q` → `c` なしでそのまま会話継続可能
+- **主要ファイル**:
+  - `apps/server/src/services/session-manager.ts` - `restoreSessionParticipantsForMachine()` 追加
+  - `apps/server/src/services/agent-manager.ts` - `handleAgentConnect()` にセッション復元呼び出し追加
+
 ## 今後の課題
 
 - [ ] LINE 対応
