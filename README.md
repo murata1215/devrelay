@@ -175,7 +175,7 @@ Bot: 🤖 了解、修正中...
 | `ag` / `agreement` | DevRelay Agreement を CLAUDE.md に適用 |
 | `link` | Discord/Telegram アカウントを WebUI とリンク |
 | `1`, `2`, `3`... | 一覧から選択 |
-| `x` | 会話履歴をクリア |
+| `x` | 会話履歴をクリア（2回連続で実行） |
 | `q` | 切断 |
 | `h` | ヘルプ |
 
@@ -332,6 +332,10 @@ agents/windows/
 - [x] バージョン一元管理
 - [x] プロキシ対応
 - [x] 履歴エクスポート機能
+- [x] 会話履歴アーカイブ（クリア時に自動退避）
+- [x] 会話履歴件数表示
+- [x] Agent再接続時セッション自動復元
+- [x] x コマンド2回連続確認
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

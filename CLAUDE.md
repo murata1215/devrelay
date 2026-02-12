@@ -883,6 +883,17 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/services/session-manager.ts` - `restoreSessionParticipantsForMachine()` 追加
   - `apps/server/src/services/agent-manager.ts` - `handleAgentConnect()` にセッション復元呼び出し追加
 
+#### 49. x コマンドの2回連続確認 (2026-02-13)
+- **問題**: `e`（exec）と `x`（クリア）を押し間違えると、会話履歴が即座にクリアされる
+- **解決策**: `x` コマンドを2回連続で送信しないとクリアされない確認機能を追加
+- **動作**:
+  1. 1回目の `x`: `⚠️ 会話履歴をクリアしますか？ もう一度 x を送信してください。` と表示
+  2. 2回目の `x`: 実際にクリア処理を実行（アーカイブ → クリア）
+  3. `x` 以外のコマンドを送信すると、確認状態がリセットされる
+- **実装**: `pendingClear` Set（chatKey ベース）で確認状態を管理
+- **主要ファイル**:
+  - `apps/server/src/services/command-handler.ts` - `pendingClear` Set、`handleClear()` の確認ロジック
+
 ## 今後の課題
 
 - [ ] LINE 対応
