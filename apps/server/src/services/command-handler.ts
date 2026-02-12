@@ -33,6 +33,9 @@ import { createLinkCode } from './platform-link.js';
 // This allows different channels to have different active sessions
 const userContexts = new Map<string, UserContext>();
 
+// x コマンドの連続確認用: チャンネルごとに前回のコマンドが clear だったかを記録
+const pendingClear = new Set<string>();
+
 export async function getUserContext(userId: string, platform: Platform, chatId: string): Promise<UserContext> {
   // Key by chatId to allow different sessions per channel
   const key = `${platform}:${chatId}`;
@@ -104,6 +107,12 @@ export async function executeCommand(
   files?: FileAttachment[],
   missedMessages?: MissedMessage[]
 ): Promise<string> {
+  // clear 以外のコマンドが来たら確認状態をリセット
+  const chatKey = `${context.platform}:${context.chatId}`;
+  if (command.type !== 'clear') {
+    pendingClear.delete(chatKey);
+  }
+
   switch (command.type) {
     case 'machine:list':
       return handleMachineList(context);
@@ -456,6 +465,16 @@ async function handleClear(context: UserContext): Promise<string> {
   if (!context.currentSessionId || !context.currentMachineId) {
     return '⚠️ プロジェクトに接続されていません。';
   }
+
+  // 2回連続確認: 1回目は確認メッセージ、2回目で実行
+  const chatKey = `${context.platform}:${context.chatId}`;
+  if (!pendingClear.has(chatKey)) {
+    pendingClear.add(chatKey);
+    return '⚠️ 会話履歴をクリアしますか？ もう一度 `x` を送信してください。';
+  }
+
+  // 2回目: 確認状態をクリアして実行
+  pendingClear.delete(chatKey);
 
   // Get project path from session
   const session = await prisma.session.findUnique({
