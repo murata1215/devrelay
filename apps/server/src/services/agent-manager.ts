@@ -507,10 +507,10 @@ export async function clearConversation(machineId: string, sessionId: string, pr
   });
 }
 
-export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string) {
+export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string) {
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
-    payload: { sessionId, projectPath, userId }
+    payload: { sessionId, projectPath, userId, prompt }
   });
 }
 

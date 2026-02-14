@@ -186,6 +186,8 @@ export interface ConversationExecPayload {
   sessionId: string;
   projectPath: string;
   userId: string;
+  /** exec コマンドに付加されたカスタムプロンプト（例: "exec, コミットして"） */
+  prompt?: string;
 }
 
 export interface SessionRestoredPayload {
@@ -295,7 +297,7 @@ export type UserCommand =
   | { type: 'recent' }
   | { type: 'continue' }  // 前回の接続先に再接続
   | { type: 'clear' }     // 会話履歴をクリア
-  | { type: 'exec' }      // プラン実行（会話履歴リセットポイント）
+  | { type: 'exec'; prompt?: string }  // プラン実行（会話履歴リセットポイント）。prompt 付きで直接指示も可
   | { type: 'link' }      // プラットフォームリンクコード生成
   | { type: 'agreement' } // DevRelay Agreement を CLAUDE.md に追加
   | { type: 'session' }   // 現在のセッション情報を表示

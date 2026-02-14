@@ -379,9 +379,9 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string }) {
-  const { sessionId, projectPath, userId } = payload;
-  console.log(`🚀 Marking exec point for session ${sessionId}`);
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string }) {
+  const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
+  console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
 
@@ -406,11 +406,12 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
-  // Automatically start implementation with exec mode
-  console.log(`🚀 Auto-starting implementation...`);
+  // カスタムプロンプトがあればそれを使用、なければデフォルトのプラン実行プロンプト
+  const execPrompt = customPrompt || 'プランに従って実装を開始してください。';
+  console.log(`🚀 Auto-starting with prompt: ${execPrompt}`);
   await handleAiPrompt({
     sessionId,
-    prompt: 'プランに従って実装を開始してください。',
+    prompt: execPrompt,
     userId,
     files: undefined,
   });

@@ -124,7 +124,14 @@ function nlpToUserCommand(
  */
 export function parseCommand(input: string, context: UserContext): UserCommand {
   const normalized = input.trim().toLowerCase();
-  
+
+  // 0. 「e, 〜」「exec, 〜」パターン: カンマの後の指示を実行モードで直接実行
+  const execWithPromptMatch = input.trim().match(/^(?:e|exec)\s*,\s*(.+)$/is);
+  if (execWithPromptMatch) {
+    const prompt = execWithPromptMatch[1].trim();
+    return { type: 'exec', prompt };
+  }
+
   // 1. Check shortcuts
   if (normalized in SHORTCUTS) {
     return parseShortcut(normalized, context);
@@ -232,7 +239,8 @@ export function getHelpText(): string {
 \`1\`, \`2\`, \`3\`... - 一覧から選択
 
 **プラン実行**
-\`e\` または \`exec\` - プラン実行開始（会話履歴をリセットして実装開始）
+\`e\` または \`exec\` - プラン実行開始
+\`e, <指示>\` - プランをスキップして直接実行（例: \`e, コミットして\`）
 
 **履歴**
 \`r\` - 直近の作業一覧
@@ -249,7 +257,7 @@ export function getHelpText(): string {
 
 **その他**
 \`ag\` - DevRelay Agreement を適用
-\`x\` - 会話履歴をクリア
+\`x\` - 会話履歴をクリア（2回連続で実行）
 \`q\` - 切断
 \`h\` - このヘルプ
 

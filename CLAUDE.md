@@ -894,6 +894,60 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `apps/server/src/services/command-handler.ts` - `pendingClear` Set、`handleClear()` の確認ロジック
 
+#### 50. exec コマンドにカスタムプロンプト対応 (2026-02-13)
+- **目的**: `exec, コミットしてプッシュして` のように、exec と同時に指示を渡せるようにする
+- **問題**: プラン→exec→次のプロンプト、の3ステップが煩雑。特にコミット・プッシュのような単純な操作では非効率
+- **解決策**: `e,` / `exec,` の後にカンマ＋テキストがあれば、そのテキストをカスタムプロンプトとして実行モードで直接実行
+- **動作**:
+  - `exec` → 従来通り「プランに従って実装を開始してください。」で自動実行
+  - `exec, コミットしてプッシュして` → 実行モードで「コミットしてプッシュして」を直接実行
+  - `e, テスト実行して` → 実行モードで「テスト実行して」を直接実行
+- **実装フロー**:
+  1. コマンドパーサーが `e,`/`exec,` パターンを検出 → `{ type: 'exec', prompt: '...' }` を返す
+  2. `handleExec()` が `customPrompt` を `execConversation()` に渡す
+  3. `ConversationExecPayload` に `prompt` フィールドを追加して Agent に送信
+  4. Agent の `handleConversationExec()` でカスタムプロンプトがあればそれを使用
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `ConversationExecPayload` と `UserCommand` に `prompt?` 追加
+  - `apps/server/src/services/natural-language-parser.ts` - `isTraditionalCommand()` に `e,`/`exec,` パターン追加
+  - `apps/server/src/services/command-parser.ts` - `parseCommand()` に `e,`/`exec,` パース処理追加
+  - `apps/server/src/services/command-handler.ts` - `handleExec()` に `customPrompt` パラメータ追加
+  - `apps/server/src/services/agent-manager.ts` - `execConversation()` に `prompt` パラメータ追加
+  - `agents/linux/src/services/connection.ts` - `handleConversationExec()` でカスタムプロンプト対応
+  - `agents/windows/src/services/connection.ts` - 同上
+
+#### 51. Machines ページ テーブル形式化 + 名前順ソート (2026-02-13)
+- **問題1**: カードグリッド形式で一覧性が悪い
+- **問題2**: 5秒ポーリングのたびにAPIレスポンスの順序が変わり、マシンの並びがシャッフルされる
+- **解決策**:
+  1. デスクトップ: テーブル（明細一覧）形式に変更（Name, Status, Projects, Last Seen, 削除ボタン）
+  2. モバイル: カード形式を維持（レスポンシブ対応）
+  3. 名前順（`localeCompare` 昇順）でソート → ポーリングしても順番が安定
+- **主要ファイル**:
+  - `apps/web/src/pages/MachinesPage.tsx` - テーブル形式化、名前順ソート追加
+
+#### 52. ヘルプテキスト更新 (2026-02-13)
+- `h` コマンドのヘルプテキストを最新機能に合わせて更新
+- **変更内容**:
+  - `e` / `exec` の説明を改善、`e, <指示>` でプランスキップ＆直接実行の説明を追加
+  - `x` コマンドに「2回連続で実行」の注記を追加
+- **主要ファイル**:
+  - `apps/server/src/services/command-parser.ts` - `getHelpText()` 関数を更新
+
+#### 53. 出力ファイル履歴保存機能 (2026-02-15)
+- `.devrelay-output/` のクリア前に、既存ファイルを `.devrelay-output-history/` にコピーして保存
+- **目的**: 出力ファイルがプロンプト実行ごとにクリアされて消えてしまう問題を解決
+- **動作**:
+  1. 新しいプロンプト実行前に `clearOutputDir()` が呼ばれる
+  2. `.devrelay-output/` 内にファイルがあれば `.devrelay-output-history/` にコピー
+  3. ファイル名に日時プレフィックスを付与: `YYYYMMDD_HHmmss_filename`
+  4. その後 `.devrelay-output/` を削除→再作成
+- **例**:
+  - `.devrelay-output/plan.md` → `.devrelay-output-history/20260215_120000_plan.md`
+- **主要ファイル**:
+  - `agents/linux/src/services/output-collector.ts` - `clearOutputDir()` 修正、`archiveOutputFiles()` 追加
+  - `agents/windows/src/services/output-collector.ts` - 同上
+
 ## 今後の課題
 
 - [ ] LINE 対応

@@ -1,6 +1,9 @@
-import { readdir, readFile, stat, mkdir, rm } from 'fs/promises';
+import { readdir, readFile, stat, mkdir, rm, copyFile } from 'fs/promises';
 import { join, basename, extname } from 'path';
 import type { FileAttachment } from '@devrelay/shared';
+
+// 出力ファイルの履歴保存先ディレクトリ名
+const OUTPUT_HISTORY_DIR_NAME = '.devrelay-output-history';
 
 // Directory name for files to be sent to user
 export const OUTPUT_DIR_NAME = '.devrelay-output';
@@ -37,13 +40,67 @@ export async function ensureOutputDir(projectPath: string): Promise<string> {
   return outputDir;
 }
 
+/**
+ * 出力ディレクトリをクリアする前に、既存ファイルを履歴ディレクトリにコピーする
+ * コピー先: .devrelay-output-history/YYYYMMDD_HHmmss_filename
+ * @param projectPath - プロジェクトのルートパス
+ */
 export async function clearOutputDir(projectPath: string): Promise<void> {
   const outputDir = join(projectPath, OUTPUT_DIR_NAME);
   try {
+    // クリア前に既存ファイルを履歴ディレクトリにコピー
+    await archiveOutputFiles(projectPath);
     await rm(outputDir, { recursive: true, force: true });
     await mkdir(outputDir, { recursive: true });
   } catch (err) {
     // Directory might not exist, that's ok
+  }
+}
+
+/**
+ * .devrelay-output/ 内のファイルを .devrelay-output-history/ に日時プレフィックス付きでコピーする
+ * @param projectPath - プロジェクトのルートパス
+ */
+async function archiveOutputFiles(projectPath: string): Promise<void> {
+  const outputDir = join(projectPath, OUTPUT_DIR_NAME);
+  try {
+    const files = await readdir(outputDir);
+    // ファイルが無ければ何もしない
+    if (files.length === 0) return;
+
+    // 履歴ディレクトリを作成
+    const historyDir = join(projectPath, OUTPUT_HISTORY_DIR_NAME);
+    await mkdir(historyDir, { recursive: true });
+
+    // 日時プレフィックスを生成（YYYYMMDD_HHmmss 形式）
+    const now = new Date();
+    const prefix = now.getFullYear().toString() +
+      String(now.getMonth() + 1).padStart(2, '0') +
+      String(now.getDate()).padStart(2, '0') + '_' +
+      String(now.getHours()).padStart(2, '0') +
+      String(now.getMinutes()).padStart(2, '0') +
+      String(now.getSeconds()).padStart(2, '0');
+
+    for (const filename of files) {
+      const srcPath = join(outputDir, filename);
+      try {
+        const stats = await stat(srcPath);
+        // ファイルのみコピー（サブディレクトリはスキップ）
+        if (!stats.isFile()) continue;
+
+        const destFilename = `${prefix}_${filename}`;
+        const destPath = join(historyDir, destFilename);
+        await copyFile(srcPath, destPath);
+        console.log(`📁 Archived output file: ${destFilename}`);
+      } catch (err: any) {
+        console.error(`Failed to archive file ${filename}:`, err.message);
+      }
+    }
+  } catch (err: any) {
+    // 出力ディレクトリが存在しない場合はスキップ
+    if (err.code !== 'ENOENT') {
+      console.error('Failed to archive output files:', err.message);
+    }
   }
 }
 

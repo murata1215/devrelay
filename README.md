@@ -171,6 +171,7 @@ Bot: 🤖 了解、修正中...
 | `p` | プロジェクト一覧 |
 | `c` | 前回の接続先に再接続 |
 | `e` / `exec` | 実行モードに切り替え（プラン承認） |
+| `e, 〜` / `exec, 〜` | 実行モードでカスタム指示を直接実行 |
 | `se` / `session` | セッション情報表示 |
 | `ag` / `agreement` | DevRelay Agreement を CLAUDE.md に適用 |
 | `link` | Discord/Telegram アカウントを WebUI とリンク |
@@ -336,6 +337,10 @@ agents/windows/
 - [x] 会話履歴件数表示
 - [x] Agent再接続時セッション自動復元
 - [x] x コマンド2回連続確認
+- [x] exec カスタムプロンプト（`exec, コミットして` で直接実行）
+- [x] Machines ページ テーブル形式化 + 名前順ソート
+- [x] ヘルプテキスト更新（`e,` プランスキップ、`x` 2回確認の説明追加）
+- [x] 出力ファイル履歴保存（`.devrelay-output-history/` に自動コピー）
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

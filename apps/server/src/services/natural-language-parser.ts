@@ -154,6 +154,9 @@ export function isTraditionalCommand(input: string): boolean {
   // 数字のみ
   if (/^\d+$/.test(trimmed)) return true;
 
+  // 「e, 〜」「exec, 〜」パターン（カンマ付きプロンプト）
+  if (/^(?:e|exec)\s*,\s*.+/i.test(trimmed)) return true;
+
   // その他のコマンド: exec, link, agreement, log, sum, storage
   if (/^(exec|link|agreement|log\d*|sum\d*d?|storage(\s+(list|(get|delete)\s+.+))?)$/i.test(trimmed)) return true;
 

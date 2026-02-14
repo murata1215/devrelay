@@ -25,6 +25,8 @@ export function MachinesPage() {
   const loadMachines = async (isPolling = false) => {
     try {
       const result = await machines.list();
+      // 名前順でソート（ポーリングごとに順番が変わるのを防止）
+      result.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
       setData(result);
       // Clear error on successful load
       if (error) setError('');
@@ -142,64 +144,127 @@ export function MachinesPage() {
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {data.map((machine) => (
-            <div key={machine.id} className="bg-gray-800 rounded-lg p-6 relative group">
-              <button
-                onClick={() => setDeleteTarget(machine)}
-                className="absolute top-4 right-4 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                title="Delete machine"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-              </button>
+        <>
+          {/* デスクトップ: テーブル形式 */}
+          <div className="hidden md:block bg-gray-800 rounded-lg overflow-hidden">
+            <table className="min-w-full divide-y divide-gray-700">
+              <thead className="bg-gray-700/50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Name
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Projects
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                    Last Seen
+                  </th>
+                  <th className="px-6 py-3 w-10"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-700">
+                {data.map((machine) => (
+                  <tr key={machine.id} className="group hover:bg-gray-700/30 transition-colors">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className="text-white font-medium">{machine.name}</span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span
+                        className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${
+                          machine.status === 'online'
+                            ? 'bg-green-500/20 text-green-400'
+                            : 'bg-gray-500/20 text-gray-400'
+                        }`}
+                      >
+                        {/* ステータスインジケーター（丸ドット） */}
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full mr-1.5 ${
+                            machine.status === 'online' ? 'bg-green-400' : 'bg-gray-400'
+                          }`}
+                        />
+                        {machine.status}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      {/* プロジェクト一覧をカンマ区切りで表示（最大5件、超過分は +N more） */}
+                      <span className="text-gray-300 text-sm">
+                        {machine.projects.slice(0, 5).map((p) => p.name).join(', ')}
+                        {machine.projects.length > 5 && (
+                          <span className="text-gray-500"> +{machine.projects.length - 5} more</span>
+                        )}
+                        {machine.projects.length === 0 && (
+                          <span className="text-gray-500">-</span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
+                      {machine.lastSeenAt
+                        ? new Date(machine.lastSeenAt).toLocaleString()
+                        : '-'}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {/* 削除ボタン（ホバー時に表示） */}
+                      <button
+                        onClick={() => setDeleteTarget(machine)}
+                        className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Delete machine"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-white">{machine.name}</h3>
-                <span
-                  className={`px-2 py-1 rounded text-xs font-medium ${
-                    machine.status === 'online'
-                      ? 'bg-green-500/20 text-green-400'
-                      : 'bg-gray-500/20 text-gray-400'
-                  }`}
+          {/* モバイル: カード形式 */}
+          <div className="md:hidden space-y-4">
+            {data.map((machine) => (
+              <div key={machine.id} className="bg-gray-800 rounded-lg p-4 relative group">
+                <button
+                  onClick={() => setDeleteTarget(machine)}
+                  className="absolute top-3 right-3 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                  title="Delete machine"
                 >
-                  {machine.status}
-                </span>
-              </div>
-
-              <div className="text-gray-400 text-sm mb-4">
-                {machine.projectCount} project{machine.projectCount !== 1 ? 's' : ''}
-              </div>
-
-              {machine.projects.length > 0 && (
-                <div className="space-y-2">
-                  <div className="text-gray-500 text-xs uppercase tracking-wider">Projects</div>
-                  {machine.projects.slice(0, 5).map((project) => (
-                    <div
-                      key={project.id}
-                      className="text-sm text-gray-300 truncate"
-                      title={project.path}
-                    >
-                      {project.name}
-                    </div>
-                  ))}
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-white font-medium">{machine.name}</span>
+                  <span
+                    className={`px-2 py-1 rounded text-xs font-medium ${
+                      machine.status === 'online'
+                        ? 'bg-green-500/20 text-green-400'
+                        : 'bg-gray-500/20 text-gray-400'
+                    }`}
+                  >
+                    {machine.status}
+                  </span>
+                </div>
+                {/* プロジェクト一覧 */}
+                <div className="text-gray-400 text-sm">
+                  {machine.projects.slice(0, 5).map((p) => p.name).join(', ')}
                   {machine.projects.length > 5 && (
-                    <div className="text-gray-500 text-xs">
-                      +{machine.projects.length - 5} more
-                    </div>
+                    <span className="text-gray-500"> +{machine.projects.length - 5} more</span>
                   )}
+                  {machine.projects.length === 0 && '-'}
                 </div>
-              )}
-
-              {machine.lastSeenAt && (
-                <div className="text-gray-500 text-xs mt-4">
-                  Last seen: {new Date(machine.lastSeenAt).toLocaleString()}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+                {machine.lastSeenAt && (
+                  <div className="text-gray-500 text-xs mt-2">
+                    Last seen: {new Date(machine.lastSeenAt).toLocaleString()}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
       {/* 新規マシン作成モーダル */}

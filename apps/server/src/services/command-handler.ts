@@ -136,7 +136,7 @@ export async function executeCommand(
       return handleClear(context);
 
     case 'exec':
-      return handleExec(context);
+      return handleExec(context, command.prompt);
 
     case 'link':
       return handleLink(context);
@@ -496,7 +496,7 @@ async function handleClear(context: UserContext): Promise<string> {
   return '🗑️ 会話履歴をクリアしました';
 }
 
-async function handleExec(context: UserContext): Promise<string> {
+async function handleExec(context: UserContext, customPrompt?: string): Promise<string> {
   // プロジェクト未接続の場合、自動再接続を試みる
   if (!context.currentSessionId || !context.currentMachineId) {
     // 前回の接続先がある場合は自動再接続を試みる
@@ -523,8 +523,8 @@ async function handleExec(context: UserContext): Promise<string> {
           const reconnectMessage = `🔄 前回の接続先（${machineName} / ${projectName}）に再接続しました`;
           await sendMessage(updatedContext.platform, updatedContext.chatId, reconnectMessage);
 
-          // exec を再帰呼び出し
-          return handleExec(updatedContext);
+          // exec を再帰呼び出し（カスタムプロンプトも引き継ぐ）
+          return handleExec(updatedContext, customPrompt);
         }
       }
       // 再接続失敗（オフラインなど）→ エラーメッセージを返す
@@ -553,7 +553,8 @@ async function handleExec(context: UserContext): Promise<string> {
     context.currentMachineId,
     context.currentSessionId,
     session.project.path,
-    context.userId
+    context.userId,
+    customPrompt
   );
 
   // Return empty since progress message is already sent
