@@ -146,7 +146,7 @@ export function isTraditionalCommand(input: string): boolean {
   const trimmed = input.trim().toLowerCase();
 
 // 単一文字コマンド (s=status, r=recent も含む)
-  if (/^[mpqhcxeaosr]$/i.test(trimmed)) return true;
+  if (/^[mpqhcxeaosrw]$/i.test(trimmed)) return true;
 
   // m から始まるメッセージ
   if (/^m\s+/i.test(trimmed)) return true;

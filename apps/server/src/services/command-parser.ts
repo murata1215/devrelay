@@ -132,6 +132,14 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     return { type: 'exec', prompt };
   }
 
+  // 0.5. 「w」コマンド: ドキュメント更新＋コミットプッシュのワンショット実行
+  if (normalized === 'w') {
+    return {
+      type: 'exec',
+      prompt: 'CLAUDE.mdとREADME.mdを今回の変更内容で更新してください。セッションをクリアしてもいいようにMEMORY.mdも更新してください。更新後、変更内容を簡潔にまとめたコミットメッセージでコミットしてプッシュしてください。',
+    };
+  }
+
   // 1. Check shortcuts
   if (normalized in SHORTCUTS) {
     return parseShortcut(normalized, context);
@@ -201,6 +209,12 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     case 'e':
     case 'exec':
       return { type: 'exec' };
+    case 'w':
+      // w コマンドは parseCommand() の Step 0.5 で処理されるが、念のためフォールバック
+      return {
+        type: 'exec',
+        prompt: 'CLAUDE.mdとREADME.mdを今回の変更内容で更新してください。セッションをクリアしてもいいようにMEMORY.mdも更新してください。更新後、変更内容を簡潔にまとめたコミットメッセージでコミットしてプッシュしてください。',
+      };
     case 'link':
       return { type: 'link' };
     case 'a':
@@ -241,6 +255,7 @@ export function getHelpText(): string {
 **プラン実行**
 \`e\` または \`exec\` - プラン実行開始
 \`e, <指示>\` - プランをスキップして直接実行（例: \`e, コミットして\`）
+\`w\` - ドキュメント更新＋コミット＋プッシュ（wrap up）
 
 **履歴**
 \`r\` - 直近の作業一覧

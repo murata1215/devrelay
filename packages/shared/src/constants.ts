@@ -12,6 +12,7 @@ export const SHORTCUTS: Record<string, string> = {
   'x': 'clear',     // 会話履歴をクリア
   'e': 'exec',      // プラン実行開始
   'exec': 'exec',   // プラン実行開始（フルコマンド）
+  'w': 'wrap',       // ドキュメント更新＋コミットプッシュ（wrap up）
   'link': 'link',   // プラットフォームリンクコード生成
   'a': 'ai:list',   // AI ツール一覧・切り替え
   'ag': 'agreement', // DevRelay Agreement を CLAUDE.md に追加

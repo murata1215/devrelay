@@ -948,6 +948,16 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `agents/linux/src/services/output-collector.ts` - `clearOutputDir()` 修正、`archiveOutputFiles()` 追加
   - `agents/windows/src/services/output-collector.ts` - 同上
 
+#### 54. w コマンド（wrap up）(2026-02-15)
+- `w` コマンドで CLAUDE.md/README.md 更新＋コミット＋プッシュをワンショットで実行
+- **目的**: 作業完了時の定型操作（ドキュメント更新→コミット→プッシュ）を1文字で実行
+- **動作**: `w` を送信すると内部的に `exec` コマンドとして以下のプロンプトを実行：
+  - 「CLAUDE.mdとREADME.mdを今回の変更内容で更新してください。更新後、変更内容を簡潔にまとめたコミットメッセージでコミットしてプッシュしてください。」
+- **主要ファイル**:
+  - `packages/shared/src/constants.ts` - `SHORTCUTS` に `w` 追加
+  - `apps/server/src/services/command-parser.ts` - `parseCommand()` に `w` 処理追加、`getHelpText()` 更新
+  - `apps/server/src/services/natural-language-parser.ts` - `isTraditionalCommand()` に `w` 追加
+
 ## 今後の課題
 
 - [ ] LINE 対応
