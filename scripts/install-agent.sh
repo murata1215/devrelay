@@ -315,14 +315,28 @@ EOF
   echo -e "  ログ確認: ${YELLOW}journalctl --user -u $SERVICE_NAME -f${NC}"
 else
   SYSTEMD_REGISTERED=false
+  NOHUP_STARTED=false
   echo -e "${YELLOW}  ⚠️ systemd ユーザーサービスが利用できません${NC}"
   if command -v systemctl &> /dev/null; then
-    echo -e "${YELLOW}     D-Bus セッションバスに接続できません。以下を試してください:${NC}"
-    echo -e "     1. ${GREEN}loginctl enable-linger $(whoami)${NC} を root で実行後、再ログイン"
-    echo -e "     2. または手動で起動: ${GREEN}cd $AGENT_DIR/agents/linux && node dist/index.js &${NC}"
+    echo -e "${YELLOW}     D-Bus セッションバスに接続できません${NC}"
+  fi
+
+  # systemd が使えなくても nohup でバックグラウンド起動する
+  echo ""
+  echo -e "  Agent をバックグラウンドで起動中..."
+  cd "$AGENT_DIR/agents/linux"
+  nohup node dist/index.js > "$CONFIG_DIR/logs/agent.log" 2>&1 &
+  AGENT_PID=$!
+  sleep 3
+
+  # プロセス生存確認
+  if kill -0 $AGENT_PID 2>/dev/null; then
+    NOHUP_STARTED=true
+    echo -e "  ${GREEN}✅ Agent 起動成功 (PID: $AGENT_PID)${NC}"
+    echo -e "  ログ: ${YELLOW}tail -f $CONFIG_DIR/logs/agent.log${NC}"
   else
-    echo -e "     手動で起動してください:"
-    echo -e "     ${GREEN}cd $AGENT_DIR/agents/linux && node dist/index.js &${NC}"
+    echo -e "  ${RED}❌ Agent 起動に失敗しました${NC}"
+    echo -e "  ログを確認: ${YELLOW}cat $CONFIG_DIR/logs/agent.log${NC}"
   fi
 fi
 
@@ -345,11 +359,18 @@ if [ "$SYSTEMD_REGISTERED" = true ]; then
   echo -e "  ${GREEN}systemctl --user restart $SERVICE_NAME${NC}  - 再起動"
   echo -e "  ${GREEN}systemctl --user stop $SERVICE_NAME${NC}     - 停止"
   echo -e "  ${GREEN}journalctl --user -u $SERVICE_NAME -f${NC}   - ログ"
+elif [ "$NOHUP_STARTED" = true ]; then
+  echo -e "  Agent は nohup で起動済みです (PID: $AGENT_PID)"
+  echo ""
+  echo -e "管理コマンド:"
+  echo -e "  ログ確認:   ${GREEN}tail -f $CONFIG_DIR/logs/agent.log${NC}"
+  echo -e "  停止:       ${GREEN}kill $AGENT_PID${NC}"
+  echo -e "  再起動:     ${GREEN}cd $AGENT_DIR/agents/linux && nohup node dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
+  echo ""
+  echo -e "${YELLOW}  ※ OS 再起動後は手動で再起動が必要です。systemd を有効にするには:${NC}"
+  echo -e "  ${GREEN}sudo loginctl enable-linger $(whoami)${NC} を実行後、再ログインしてワンライナーを再実行"
 else
   echo -e "手動起動:"
-  echo -e "  ${GREEN}cd $AGENT_DIR/agents/linux && node dist/index.js${NC}"
-  echo ""
-  echo -e "バックグラウンド起動:"
   echo -e "  ${GREEN}cd $AGENT_DIR/agents/linux && nohup node dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
 fi
 echo ""
