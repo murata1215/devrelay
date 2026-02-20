@@ -8,10 +8,7 @@ export function MachinesPage() {
   const [error, setError] = useState('');
 
   // 新規マシン登録
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [newMachineName, setNewMachineName] = useState('');
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState('');
 
   // トークン表示モーダル
   const [showTokenModal, setShowTokenModal] = useState(false);
@@ -53,22 +50,17 @@ export function MachinesPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newMachineName.trim()) return;
-
+  /** 「+ Add Agent」クリック時: 名前入力なしで即座にトークン生成・表示 */
+  const handleAddAgent = async () => {
     setCreating(true);
-    setCreateError('');
 
     try {
-      const result = await machines.create(newMachineName.trim());
+      const result = await machines.create();
       setNewMachine(result);
-      setShowCreateModal(false);
       setShowTokenModal(true);
-      setNewMachineName('');
       loadMachines();
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : 'Failed to create machine');
+      alert(err instanceof Error ? err.message : 'Failed to create agent');
     } finally {
       setCreating(false);
     }
@@ -147,10 +139,11 @@ export function MachinesPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <h1 className="text-2xl font-bold text-white">Agents</h1>
         <button
-          onClick={() => setShowCreateModal(true)}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors w-full sm:w-auto"
+          onClick={handleAddAgent}
+          disabled={creating}
+          className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors w-full sm:w-auto"
         >
-          + Add Agent
+          {creating ? 'Creating...' : '+ Add Agent'}
         </button>
       </div>
 
@@ -286,62 +279,13 @@ export function MachinesPage() {
         </>
       )}
 
-      {/* 新規マシン作成モーダル */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md mx-4">
-            <h2 className="text-xl font-bold text-white mb-4">Add New Agent</h2>
-            <form onSubmit={handleCreate}>
-              <div className="mb-4">
-                <label className="block text-gray-400 text-sm mb-2">Agent Name</label>
-                <input
-                  type="text"
-                  value={newMachineName}
-                  onChange={(e) => setNewMachineName(e.target.value)}
-                  placeholder="e.g., ubuntu-dev, macbook-pro"
-                  className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  autoFocus
-                />
-              </div>
-              {createError && (
-                <div className="mb-4 text-red-400 text-sm">{createError}</div>
-              )}
-              <div className="flex justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowCreateModal(false);
-                    setNewMachineName('');
-                    setCreateError('');
-                  }}
-                  className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={creating || !newMachineName.trim()}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors"
-                >
-                  {creating ? 'Creating...' : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* トークン表示モーダル */}
       {showTokenModal && newMachine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg mx-4">
             <h2 className="text-xl font-bold text-white mb-4">Agent Created!</h2>
-            <div className="bg-yellow-500/20 border border-yellow-500 text-yellow-400 px-4 py-3 rounded mb-4">
-              <strong>Important:</strong> Copy this token now. It will not be shown again!
-            </div>
-            <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">Machine Name</label>
-              <div className="text-white">{newMachine.name}</div>
+            <div className="bg-blue-500/20 border border-blue-500 text-blue-400 px-4 py-3 rounded mb-4">
+              Run the install command below on your machine. The agent name will be set automatically from hostname.
             </div>
             <div className="mb-4">
               <label className="block text-gray-400 text-sm mb-2">Token</label>

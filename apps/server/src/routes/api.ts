@@ -77,19 +77,30 @@ export async function apiRoutes(app: FastifyInstance) {
   app.post('/api/machines', async (request, reply) => {
     // @ts-ignore
     const userId = request.user.id;
-    const { name } = request.body as { name: string };
+    const { name } = (request.body || {}) as { name?: string };
 
-    if (!name || name.trim().length === 0) {
-      return reply.status(400).send({ error: 'Machine name is required' });
-    }
-
-    // 同じユーザーで同じ名前のマシンがあるか確認
-    const existing = await prisma.machine.findFirst({
-      where: { userId, name: name.trim() },
-    });
-
-    if (existing) {
-      return reply.status(409).send({ error: 'Machine with this name already exists' });
+    // 名前が指定されていない場合は仮名を自動生成（agent-1, agent-2, ...）
+    let machineName: string;
+    if (name && name.trim().length > 0) {
+      machineName = name.trim();
+      // 同じユーザーで同じ名前のマシンがあるか確認
+      const existing = await prisma.machine.findFirst({
+        where: { userId, name: machineName },
+      });
+      if (existing) {
+        return reply.status(409).send({ error: 'Machine with this name already exists' });
+      }
+    } else {
+      // 仮名を自動生成: 同一ユーザーの agent-N を検索し、最大 N+1 で採番
+      const existingAgents = await prisma.machine.findMany({
+        where: { userId, name: { startsWith: 'agent-' } },
+        select: { name: true },
+      });
+      const maxNum = existingAgents.reduce((max, m) => {
+        const num = parseInt(m.name.replace('agent-', ''), 10);
+        return isNaN(num) ? max : Math.max(max, num);
+      }, 0);
+      machineName = `agent-${maxNum + 1}`;
     }
 
     // トークン生成（サーバーURLを埋め込んだ新形式）
@@ -102,7 +113,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const machine = await prisma.machine.create({
       data: {
         userId,
-        name: name.trim(),
+        name: machineName,
         token,
       },
     });

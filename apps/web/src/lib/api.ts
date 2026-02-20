@@ -108,8 +108,9 @@ export const machines = {
     return request('GET', '/machines');
   },
 
-  async create(name: string): Promise<MachineCreateResponse> {
-    return request('POST', '/machines', { name });
+  /** エージェントを作成（名前はオプション、省略時はサーバーが仮名を自動生成） */
+  async create(name?: string): Promise<MachineCreateResponse> {
+    return request('POST', '/machines', name ? { name } : {});
   },
 
   async delete(id: string): Promise<void> {

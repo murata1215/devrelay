@@ -141,10 +141,23 @@ async function handleAgentConnect(
     return;
   }
 
-  // Update machine status
+  // 仮名（agent-N）の場合、Agent から送信された machineName で自動更新
+  // ユーザーが手動で設定した名前は上書きしない
+  let updatedName = machine.name;
+  if (machine.name.startsWith('agent-') && machineName && machineName.trim().length > 0) {
+    // 同じユーザーに同名の Agent が既にないか確認（重複防止）
+    const duplicate = await prisma.machine.findFirst({
+      where: { userId: machine.userId, name: machineName.trim(), id: { not: machine.id } },
+    });
+    if (!duplicate) {
+      updatedName = machineName.trim();
+    }
+  }
+
+  // マシン状態を更新（仮名の場合は名前も更新）
   await prisma.machine.update({
     where: { id: machine.id },
-    data: { status: 'online', lastSeenAt: new Date() }
+    data: { status: 'online', lastSeenAt: new Date(), name: updatedName }
   });
 
   // Update projects
@@ -167,7 +180,7 @@ async function handleAgentConnect(
   connectedAgents.set(machine.id, ws);
   machineCache.set(machine.id, {
     id: machine.id,
-    name: machine.name,
+    name: updatedName,
     status: 'online',
     lastSeen: new Date(),
     projects
@@ -178,7 +191,7 @@ async function handleAgentConnect(
     payload: { success: true, machineId: machine.id }
   });
 
-  console.log(`✅ Agent connected: ${machine.name} (${machine.id})`);
+  console.log(`✅ Agent connected: ${updatedName} (${machine.id})`);
 
   // Agent再接続時にセッション参加者を復元（切断前のセッションを継続可能にする）
   await restoreSessionParticipantsForMachine(machine.id);
