@@ -262,9 +262,9 @@ fi
 echo ""
 
 # =============================================================================
-# Step 6: systemd ユーザーサービス登録・起動
+# Step 6: Agent 起動・自動起動設定
 # =============================================================================
-echo -e "[6/6] systemd サービスを登録中..."
+echo -e "[6/6] Agent を起動中..."
 
 # systemd ユーザーサービスが利用可能かチェック
 # D-Bus セッションバスに接続できない環境（一部の SSH セッション、コンテナ等）では
@@ -316,12 +316,7 @@ EOF
 else
   SYSTEMD_REGISTERED=false
   NOHUP_STARTED=false
-  echo -e "${YELLOW}  ⚠️ systemd ユーザーサービスが利用できません${NC}"
-  if command -v systemctl &> /dev/null; then
-    echo -e "${YELLOW}     D-Bus セッションバスに接続できません${NC}"
-  fi
-
-  # systemd が使えなくても nohup でバックグラウンド起動する
+  echo -e "  ${GREEN}ℹ${NC} nohup + crontab で起動します"
   echo ""
   echo -e "  Agent をバックグラウンドで起動中..."
   cd "$AGENT_DIR/agents/linux"
