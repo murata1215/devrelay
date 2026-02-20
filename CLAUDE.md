@@ -958,6 +958,60 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/services/command-parser.ts` - `parseCommand()` に `w` 処理追加、`getHelpText()` 更新
   - `apps/server/src/services/natural-language-parser.ts` - `isTraditionalCommand()` に `w` 追加
 
+#### 55. Heartbeat DB バッチ更新 + machineName デフォルト変更 (2026-02-21)
+- **Heartbeat DB バッチ更新**:
+  - Agent の ping ごとに DB 更新していたのを、メモリ内 Map で管理し 60 秒ごとにバッチ書き込みに変更
+  - `lastSeenMap` で最終確認時刻を保持、heartbeat monitor のループでまとめて flush
+  - DB 負荷を大幅に削減（100 Agent で 200 writes/min → 100 writes/min）
+- **machineName デフォルト変更**:
+  - `os.hostname()` → `${os.hostname()}-${os.userInfo().username}` に変更
+  - 1 Agent = 1 User モデルに対応（同一マシン上の複数ユーザーを区別）
+- **主要ファイル**:
+  - `apps/server/src/services/agent-manager.ts` - `lastSeenMap`、`handleAgentPing()` バッチ化、`startHeartbeatMonitor()` flush 追加
+  - `agents/linux/src/services/config.ts` - machineName デフォルト変更
+  - `agents/linux/src/cli/commands/setup.ts` - machineName デフォルト変更
+  - `agents/windows/src/services/config.ts` - machineName デフォルト変更
+
+#### 56. Agent ワンライナーインストール (2026-02-21)
+- `curl | bash` 形式のワンライナーで Agent をインストール可能に
+- **スクリプト**: `scripts/install-agent.sh`
+  - 引数: `--token`（必須）、`--server`（オプション）
+  - 処理: 依存チェック → clone → pnpm install → build → config.yaml 生成 → systemd サービス登録・起動
+- **WebUI**: トークンモーダルにワンライナー表示を追加
+  - トークン埋め込み済みのコマンドをコピー可能
+- **使い方**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
+  ```
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - ワンライナーインストールスクリプト（新規）
+  - `apps/web/src/pages/MachinesPage.tsx` - トークンモーダルにワンライナー表示追加
+
+#### 57. Machine→Agent 表記変更 + machineName スラッシュ区切り (2026-02-21)
+- **machineName フォーマット変更**:
+  - `hostname-username` → `hostname/username` に変更
+  - ホスト名にハイフンがよく使われるため（例: `ubuntu-dev`）、スラッシュ区切りで明確に区別
+  - 例: `ubuntu-dev/pixblog`、`ubuntu-prod/pixdraft`
+- **WebUI 表記変更**（表示ラベルのみ、DB・API・変数名は変更なし）:
+  - ナビゲーション: `Machines` → `Agents`
+  - MachinesPage: タイトル・ボタン・モーダル全て `Machine` → `Agent`
+  - DashboardPage: 統計カード `Machines` → `Agents`
+- **Discord/Telegram メッセージ**:
+  - `マシン` → `エージェント`（ユーザー向けメッセージ）
+  - `Machine:` → `Agent:`（ステータス表示）
+  - ヘルプテキスト: `マシン一覧` → `エージェント一覧`
+- **変更しないもの**: ファイル名、URL パス (`/machines`)、API パス、DB モデル名、TypeScript 型名、変数名
+- **主要ファイル**:
+  - `agents/linux/src/services/config.ts` - machineName スラッシュ区切り
+  - `agents/linux/src/cli/commands/setup.ts` - 同上 + ヘルプテキスト更新
+  - `agents/windows/src/services/config.ts` - 同上
+  - `scripts/install-agent.sh` - 同上 + 表記更新
+  - `apps/web/src/components/Layout.tsx` - ナビ「Agents」
+  - `apps/web/src/pages/MachinesPage.tsx` - 全ラベル「Agent」
+  - `apps/web/src/pages/DashboardPage.tsx` - 統計カード「Agents」
+  - `apps/server/src/services/command-handler.ts` - 日本語メッセージ「エージェント」
+  - `apps/server/src/services/command-parser.ts` - ヘルプテキスト「エージェント一覧」
+
 ## 今後の課題
 
 - [ ] LINE 対応

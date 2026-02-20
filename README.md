@@ -7,8 +7,8 @@ LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS
 
 ## ✨ Features
 
-- **マルチマシン**: ubuntu01, ubuntu02, windows01... 複数マシンを登録・切り替え
-- **マルチプロジェクト**: 各マシン内の複数プロジェクトを管理
+- **マルチエージェント**: ubuntu-dev/user1, ubuntu-prod/user2, windows01/dev... 複数エージェントを登録・切り替え
+- **マルチプロジェクト**: 各エージェント内の複数プロジェクトを管理
 - **マルチAI**: Claude Code, Gemini CLI, Aider に対応
 - **マルチプラットフォーム**: Discord, Telegram から操作（LINE 対応予定）
 - **自然言語コマンド**: 「前の接続を復元して」→ 自動で `c` コマンド実行（OpenAI API 使用）
@@ -64,7 +64,15 @@ devrelay/
 
 ### 1. Install Agent (on your dev machine)
 
-#### Linux Agent
+#### Linux Agent (One-liner)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
+```
+
+Node.js 20+ と git が必要です。トークンは WebUI の Agents ページで取得できます。
+
+#### Linux Agent (Manual)
 
 ```bash
 # Clone repository
@@ -144,12 +152,12 @@ pnpm run uninstall
 
 ```
 You: m
-Bot: 📡 マシン一覧
-     1. ubuntu01 🟢
-     2. ubuntu02 🟢
+Bot: 📡 エージェント一覧
+     1. ubuntu-dev/pixblog 🟢
+     2. ubuntu-prod/pixblog 🟢
 
 You: 1
-Bot: ✅ ubuntu01 に接続
+Bot: ✅ ubuntu-dev/pixblog に接続
 
 You: p
 Bot: 📁 プロジェクト
@@ -167,7 +175,7 @@ Bot: 🤖 了解、修正中...
 
 | Command | Description |
 |---------|-------------|
-| `m` | マシン一覧 |
+| `m` | エージェント一覧 |
 | `p` | プロジェクト一覧 |
 | `c` | 前回の接続先に再接続 |
 | `e` / `exec` | 実行モードに切り替え（プラン承認） |
@@ -343,6 +351,9 @@ agents/windows/
 - [x] ヘルプテキスト更新（`e,` プランスキップ、`x` 2回確認の説明追加）
 - [x] 出力ファイル履歴保存（`.devrelay-output-history/` に自動コピー）
 - [x] `w` コマンド（wrap up: ドキュメント更新＋コミット＋プッシュ）
+- [x] Heartbeat DB バッチ更新（ping ごとの DB 書き込みを 60 秒バッチに）
+- [x] Agent ワンライナーインストール（`curl | bash` で一発セットアップ）
+- [x] Machine→Agent 表記変更 + machineName スラッシュ区切り（`hostname/username`）
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

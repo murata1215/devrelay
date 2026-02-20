@@ -33,6 +33,9 @@ const pendingHistoryExportRequests = new Map<string, HistoryRequest<string>>();
 const pendingAiListRequests = new Map<string, HistoryRequest<AiListResponsePayload>>();
 const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload>>();
 
+// Heartbeat: メモリ内で lastSeenAt を管理し、60秒ごとにまとめて DB 更新（バッチ化）
+const lastSeenMap = new Map<string, Date>();
+
 export function setupAgentWebSocket(connection: { socket: WebSocket }, req: FastifyRequest) {
   const ws = connection.socket;
   let machineId: string | null = null;
@@ -285,23 +288,17 @@ async function handleStorageSaved(payload: { machineId: string; sessionId: strin
 async function handleAgentPing(ws: WebSocket, payload: { machineId: string; timestamp: string }) {
   const { machineId, timestamp } = payload;
 
-  // Update lastSeenAt in database
-  try {
-    await prisma.machine.update({
-      where: { id: machineId },
-      data: { lastSeenAt: new Date() }
-    });
+  // メモリ内の lastSeenMap のみ更新（DB 更新は heartbeat monitor でバッチ処理）
+  const now = new Date();
+  lastSeenMap.set(machineId, now);
 
-    // Update cache
-    const cached = machineCache.get(machineId);
-    if (cached) {
-      cached.lastSeen = new Date();
-    }
-  } catch (err) {
-    // Machine may not exist in DB - this is expected during reconnection
+  // キャッシュも更新
+  const cached = machineCache.get(machineId);
+  if (cached) {
+    cached.lastSeen = now;
   }
 
-  // Send pong response
+  // pong 返信
   sendToAgent(ws, {
     type: 'server:pong',
     payload: { timestamp: new Date().toISOString() }
@@ -567,7 +564,24 @@ export function startHeartbeatMonitor() {
     const cutoffTime = new Date(now.getTime() - HEARTBEAT_TIMEOUT);
 
     try {
-      // Find machines that are marked as online but haven't sent a ping recently
+      // lastSeenMap のデータをまとめて DB に書き込み（バッチ更新）
+      if (lastSeenMap.size > 0) {
+        const entries = Array.from(lastSeenMap.entries());
+        lastSeenMap.clear();
+
+        for (const [machineId, lastSeenAt] of entries) {
+          try {
+            await prisma.machine.update({
+              where: { id: machineId },
+              data: { lastSeenAt }
+            });
+          } catch {
+            // マシンが DB に存在しない場合は無視（再接続中など）
+          }
+        }
+      }
+
+      // stale チェック: オンラインだが ping が途絶えたマシンを offline に
       const staleMachines = await prisma.machine.findMany({
         where: {
           status: 'online',

@@ -78,7 +78,7 @@ export async function loadConfig(): Promise<AgentConfig> {
     }
 
     return {
-      machineName: config.machineName || os.hostname(),
+      machineName: config.machineName || `${os.hostname()}/${os.userInfo().username}`,
       machineId: config.machineId || '',
       serverUrl: config.serverUrl || 'wss://ribbon-re.jp/devrelay-api/ws/agent',
       token: config.token || '',
@@ -95,7 +95,7 @@ export async function loadConfig(): Promise<AgentConfig> {
   } catch (err) {
     // Return default config
     return {
-      machineName: os.hostname(),
+      machineName: `${os.hostname()}/${os.userInfo().username}`,
       machineId: '',
       serverUrl: 'wss://ribbon-re.jp/devrelay-api/ws/agent',
       token: '',

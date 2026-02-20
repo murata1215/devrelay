@@ -17,6 +17,7 @@ export function MachinesPage() {
   const [showTokenModal, setShowTokenModal] = useState(false);
   const [newMachine, setNewMachine] = useState<MachineCreateResponse | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
+  const [installCopied, setInstallCopied] = useState(false);
 
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
@@ -88,23 +89,41 @@ export function MachinesPage() {
     }
   };
 
-  const copyToken = async () => {
-    if (!newMachine) return;
+  // クリップボードにコピーする汎用関数
+  const copyToClipboard = async (text: string, onSuccess: () => void) => {
     try {
-      await navigator.clipboard.writeText(newMachine.token);
-      setTokenCopied(true);
-      setTimeout(() => setTokenCopied(false), 2000);
+      await navigator.clipboard.writeText(text);
+      onSuccess();
     } catch {
-      // Fallback for older browsers
       const textArea = document.createElement('textarea');
-      textArea.value = newMachine.token;
+      textArea.value = text;
       document.body.appendChild(textArea);
       textArea.select();
       document.execCommand('copy');
       document.body.removeChild(textArea);
+      onSuccess();
+    }
+  };
+
+  const copyToken = () => {
+    if (!newMachine) return;
+    copyToClipboard(newMachine.token, () => {
       setTokenCopied(true);
       setTimeout(() => setTokenCopied(false), 2000);
-    }
+    });
+  };
+
+  // ワンライナーインストールコマンドを生成
+  const getInstallCommand = () => {
+    if (!newMachine) return '';
+    return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${newMachine.token}`;
+  };
+
+  const copyInstallCommand = () => {
+    copyToClipboard(getInstallCommand(), () => {
+      setInstallCopied(true);
+      setTimeout(() => setInstallCopied(false), 2000);
+    });
   };
 
   if (loading) {
@@ -126,20 +145,20 @@ export function MachinesPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <h1 className="text-2xl font-bold text-white">Machines</h1>
+        <h1 className="text-2xl font-bold text-white">Agents</h1>
         <button
           onClick={() => setShowCreateModal(true)}
           className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors w-full sm:w-auto"
         >
-          + Add Machine
+          + Add Agent
         </button>
       </div>
 
       {data.length === 0 ? (
         <div className="bg-gray-800 rounded-lg p-6 text-center">
-          <p className="text-gray-400">No machines registered yet.</p>
+          <p className="text-gray-400">No agents registered yet.</p>
           <p className="text-gray-500 text-sm mt-2">
-            Click "Add Machine" to generate a token, then run{' '}
+            Click "Add Agent" to generate a token, then run{' '}
             <code className="bg-gray-700 px-2 py-1 rounded">devrelay setup</code> on your machine.
           </p>
         </div>
@@ -210,7 +229,7 @@ export function MachinesPage() {
                       <button
                         onClick={() => setDeleteTarget(machine)}
                         className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Delete machine"
+                        title="Delete agent"
                       >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -230,7 +249,7 @@ export function MachinesPage() {
                 <button
                   onClick={() => setDeleteTarget(machine)}
                   className="absolute top-3 right-3 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                  title="Delete machine"
+                  title="Delete agent"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -271,10 +290,10 @@ export function MachinesPage() {
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md mx-4">
-            <h2 className="text-xl font-bold text-white mb-4">Add New Machine</h2>
+            <h2 className="text-xl font-bold text-white mb-4">Add New Agent</h2>
             <form onSubmit={handleCreate}>
               <div className="mb-4">
-                <label className="block text-gray-400 text-sm mb-2">Machine Name</label>
+                <label className="block text-gray-400 text-sm mb-2">Agent Name</label>
                 <input
                   type="text"
                   value={newMachineName}
@@ -316,7 +335,7 @@ export function MachinesPage() {
       {showTokenModal && newMachine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg mx-4">
-            <h2 className="text-xl font-bold text-white mb-4">Machine Created!</h2>
+            <h2 className="text-xl font-bold text-white mb-4">Agent Created!</h2>
             <div className="bg-yellow-500/20 border border-yellow-500 text-yellow-400 px-4 py-3 rounded mb-4">
               <strong>Important:</strong> Copy this token now. It will not be shown again!
             </div>
@@ -338,13 +357,22 @@ export function MachinesPage() {
                 </button>
               </div>
             </div>
-            <div className="bg-gray-700/50 rounded-lg p-4 mb-4">
-              <div className="text-gray-400 text-sm mb-2">Next steps:</div>
-              <ol className="text-gray-300 text-sm list-decimal list-inside space-y-1">
-                <li>Copy the token above</li>
-                <li>Run <code className="bg-gray-600 px-1 rounded">devrelay setup</code> on your machine</li>
-                <li>Paste the token when prompted</li>
-              </ol>
+            <div className="mb-4">
+              <label className="block text-gray-400 text-sm mb-2">Quick Install (Linux)</label>
+              <div className="flex items-start space-x-2">
+                <code className="flex-1 bg-gray-900 text-blue-400 px-4 py-2 rounded-lg text-xs break-all leading-relaxed">
+                  {getInstallCommand()}
+                </code>
+                <button
+                  onClick={copyInstallCommand}
+                  className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0"
+                >
+                  {installCopied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <div className="text-gray-500 text-xs mt-2">
+                Node.js 20+ and git required
+              </div>
             </div>
             <div className="flex justify-end">
               <button
@@ -352,6 +380,7 @@ export function MachinesPage() {
                   setShowTokenModal(false);
                   setNewMachine(null);
                   setTokenCopied(false);
+                  setInstallCopied(false);
                 }}
                 className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
               >
@@ -366,7 +395,7 @@ export function MachinesPage() {
       {deleteTarget && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md mx-4">
-            <h2 className="text-xl font-bold text-white mb-4">Delete Machine?</h2>
+            <h2 className="text-xl font-bold text-white mb-4">Delete Agent?</h2>
             <p className="text-gray-400 mb-4">
               Are you sure you want to delete <strong className="text-white">{deleteTarget.name}</strong>?
               This will also delete all associated projects and sessions.

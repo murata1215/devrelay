@@ -201,9 +201,9 @@ async function handleMachineList(context: UserContext): Promise<string> {
   });
 
   if (machines.length === 0) {
-    return '📡 登録されているマシンがありません。\n\n'
-      + 'マシンを追加するには:\n'
-      + '1. WebUI の Machines ページで「Add Machine」をクリック\n'
+    return '📡 登録されているエージェントがありません。\n\n'
+      + 'エージェントを追加するには:\n'
+      + '1. WebUI の Agents ページで「Add Agent」をクリック\n'
       + '2. 生成されたトークンをコピー\n'
       + '3. 対象マシンで `devrelay setup` を実行してトークンを入力';
   }
@@ -219,12 +219,12 @@ async function handleMachineList(context: UserContext): Promise<string> {
     lastListItems: machines.map((m: Machine) => m.id)
   });
 
-  return `📡 **マシン一覧**\n\n${list}`;
+  return `📡 **エージェント一覧**\n\n${list}`;
 }
 
 async function handleProjectList(context: UserContext): Promise<string> {
   if (!context.currentMachineId) {
-    return '⚠️ マシンに接続されていません。\n`m` でマシン一覧を表示して接続してください。';
+    return '⚠️ エージェントに接続されていません。\n`m` でエージェント一覧を表示して接続してください。';
   }
   
   const projects = await prisma.project.findMany({
@@ -232,7 +232,7 @@ async function handleProjectList(context: UserContext): Promise<string> {
   });
   
   if (projects.length === 0) {
-    return '📁 プロジェクトが登録されていません。\n\nマシン側で `devrelay projects add <path>` を実行してください。';
+    return '📁 プロジェクトが登録されていません。\n\nエージェント側で `devrelay projects add <path>` を実行してください。';
   }
   
   const list = projects.map((p: Project, i: number) => {
@@ -279,7 +279,7 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
   const machine = await prisma.machine.findUnique({ where: { id: machineId } });
   
   if (!machine) {
-    return '❌ マシンが見つかりません。';
+    return '❌ エージェントが見つかりません。';
   }
   
   if (machine.status !== 'online') {
@@ -387,11 +387,11 @@ async function handleRecentConnect(sessionId: string, context: UserContext): Pro
 
 async function handleStatus(context: UserContext): Promise<string> {
   if (!context.currentMachineId) {
-    return '📊 未接続\n\n`m` でマシン一覧を表示';
+    return '📊 未接続\n\n`m` でエージェント一覧を表示';
   }
   
   const parts = [`📊 **ステータス**`];
-  parts.push(`├── Machine: ${context.currentMachineName}`);
+  parts.push(`├── Agent: ${context.currentMachineName}`);
   
   if (context.currentProjectName) {
     parts.push(`├── Project: ${context.currentProjectName}`);
@@ -439,7 +439,7 @@ async function handleRecent(context: UserContext): Promise<string> {
 async function handleContinue(context: UserContext): Promise<string> {
   // Check if we have a last project ID
   if (!context.lastProjectId) {
-    return '⚠️ 前回の接続先がありません。\n\n`m` でマシン一覧を表示して接続してください。';
+    return '⚠️ 前回の接続先がありません。\n\n`m` でエージェント一覧を表示して接続してください。';
   }
 
   // Verify the project still exists and machine is online
@@ -449,7 +449,7 @@ async function handleContinue(context: UserContext): Promise<string> {
   });
 
   if (!project) {
-    return '❌ 前回のプロジェクトが見つかりません。\n\n`m` でマシン一覧を表示して接続してください。';
+    return '❌ 前回のプロジェクトが見つかりません。\n\n`m` でエージェント一覧を表示して接続してください。';
   }
 
   if (project.machine.status !== 'online') {
@@ -532,7 +532,7 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
     }
 
     // 前回の接続先がない場合
-    return '⚠️ プロジェクトに接続されていません。\n\n`m` → マシン選択 → `p` → プロジェクト選択 の順で接続してください。';
+    return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
   }
 
   // Get project path from session
@@ -819,7 +819,7 @@ async function handleQuit(context: UserContext): Promise<string> {
 
 async function handleAiList(context: UserContext): Promise<string> {
   if (!context.currentSessionId || !context.currentMachineId) {
-    return '⚠️ プロジェクトに接続されていません。\n\n`m` → マシン選択 → `p` → プロジェクト選択 の順で接続してください。';
+    return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
   }
 
   try {
@@ -925,7 +925,7 @@ async function handleAiPrompt(
     }
 
     // 前回の接続先がない場合
-    return '⚠️ プロジェクトに接続されていません。\n\n`m` → マシン選択 → `p` → プロジェクト選択 の順で接続してください。';
+    return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
   }
 
   // Save missed messages to DB (for history)

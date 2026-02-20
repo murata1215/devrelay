@@ -38,8 +38,8 @@ export async function setupCommand() {
     console.log(chalk.yellow(''));
     console.log(chalk.yellow(' To get your token:'));
     console.log(chalk.cyan('  1. Go to the DevRelay dashboard'));
-    console.log(chalk.cyan('  2. Navigate to "Machines"'));
-    console.log(chalk.cyan('  3. Click "+ Add Machine"'));
+    console.log(chalk.cyan('  2. Navigate to "Agents"'));
+    console.log(chalk.cyan('  3. Click "+ Add Agent"'));
     console.log(chalk.cyan('  4. Copy the generated token'));
     console.log(chalk.yellow(''));
     console.log(chalk.gray(' Dashboard URL: https://ribbon-re.jp/devrelay/machines'));
@@ -59,7 +59,7 @@ export async function setupCommand() {
     }
 
     // Use defaults for machine name and server URL (can be changed later in config.yaml)
-    const machineName = existingConfig.machineName || os.hostname();
+    const machineName = existingConfig.machineName || `${os.hostname()}/${os.userInfo().username}`;
     const serverUrl = existingConfig.serverUrl || 'ws://localhost:3000/ws/agent';
     const projectsDirs = existingConfig.projectsDirs || [os.homedir()];
 

@@ -47,7 +47,7 @@ export function DashboardPage() {
       {/* Stats cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
         <div className="bg-gray-800 rounded-lg p-4 sm:p-6">
-          <div className="text-gray-400 text-xs sm:text-sm">Machines</div>
+          <div className="text-gray-400 text-xs sm:text-sm">Agents</div>
           <div className="text-xl sm:text-2xl font-bold text-white">
             {stats.machines.online}/{stats.machines.total}
           </div>
