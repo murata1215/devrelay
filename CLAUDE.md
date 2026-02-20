@@ -1073,6 +1073,34 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/services/command-handler.ts` - 日本語メッセージ「エージェント」
   - `apps/server/src/services/command-parser.ts` - ヘルプテキスト「エージェント一覧」
 
+#### 62. ワンライナーインストール改善 (2026-02-21)
+- **install-agent.sh の複数改善**:
+  - **serverUrl 自動抽出**: `drl_` 形式トークンから Base64URL デコードでサーバーURL を自動取得
+  - **projectsDirs に `/opt` 追加**: デフォルトスキャン対象にホームディレクトリと `/opt` を含める
+  - **systemd 失敗時の nohup 自動起動**: D-Bus 未対応環境でも Agent を自動でバックグラウンド起動
+  - **crontab @reboot 自動登録**: systemd 不可環境で OS 再起動後も自動起動
+  - **メッセージ改善**: 黄色警告を削除、「nohup + crontab で起動します」とポジティブ表示
+- **agents/linux/src/services/config.ts**: デフォルト projectsDirs に `/opt` を追加
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - ワンライナーインストーラー全般改善
+  - `agents/linux/src/services/config.ts` - デフォルト projectsDirs 変更
+
+#### 63. Agent 追加 UX 改善 - 名前入力スキップ + 自動命名 (2026-02-21)
+- **目的**: Agent 追加時の名前入力ステップを省略し、Agent 接続時に自動で hostname/username を設定
+- **新フロー**:
+  1. WebUI で「+ Add Agent」クリック → 即座にトークン＋ワンライナー表示（名前入力なし）
+  2. サーバーが仮名（`agent-1`, `agent-2`, ...）を自動生成して DB に登録
+  3. ユーザーがワンライナーを実行して Agent をインストール
+  4. Agent 接続時、DB の名前が仮名（`agent-` で始まる）なら Agent の `machineName`（hostname/username）で上書き
+  5. 手動設定した名前は上書きしない（ユーザー設定を尊重）
+- **仮名の自動生成**: 同一ユーザーの `agent-N` を検索し、最大 N+1 で連番採番
+- **重複防止**: 同名の Agent が既にある場合は仮名を維持
+- **主要ファイル**:
+  - `apps/web/src/pages/MachinesPage.tsx` - 名前入力モーダル削除、即座にトークン表示
+  - `apps/web/src/lib/api.ts` - `machines.create()` の name パラメータを任意に
+  - `apps/server/src/routes/api.ts` - POST /api/machines に仮名自動生成を追加
+  - `apps/server/src/services/agent-manager.ts` - `handleAgentConnect()` に仮名→正式名の自動更新を追加
+
 ## 今後の課題
 
 - [ ] LINE 対応

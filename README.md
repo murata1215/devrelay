@@ -73,7 +73,7 @@ devrelay/
 curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
 ```
 
-Node.js 20+ と git が必要です。トークンは WebUI の Agents ページで取得できます。
+Node.js 20+ and git required. Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname.
 
 #### Linux Agent (Manual)
 
@@ -343,6 +343,8 @@ agents/windows/
 - [x] Heartbeat DB batch update (60s batch instead of per-ping writes)
 - [x] One-liner agent install (`curl | bash`)
 - [x] Machine->Agent rename + machineName slash format (`hostname/username`)
+- [x] Installer improvements (auto serverUrl extraction, `/opt` scan, nohup+crontab fallback)
+- [x] Agent auto-naming (skip name input, auto-set from hostname on connect)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features
