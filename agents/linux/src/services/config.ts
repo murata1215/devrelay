@@ -54,7 +54,7 @@ export async function loadConfig(): Promise<AgentConfig> {
     } else if (config.projectsDir) {
       projectsDirs = [config.projectsDir];
     } else {
-      projectsDirs = [os.homedir()];
+      projectsDirs = [os.homedir(), '/opt'];
     }
 
     return {
@@ -78,7 +78,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       machineId: '',
       serverUrl: 'wss://devrelay.io/ws/agent',
       token: '',
-      projectsDirs: [os.homedir()],
+      projectsDirs: [os.homedir(), '/opt'],
       aiTools: {
         default: 'claude',
         claude: { command: 'claude' },

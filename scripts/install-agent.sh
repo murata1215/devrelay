@@ -39,7 +39,7 @@ SERVICE_NAME="devrelay-agent"
 
 # --- 引数パース ---
 TOKEN=""
-SERVER_URL="wss://ribbon-re.jp/devrelay-api/ws/agent"
+SERVER_URL="wss://devrelay.io/ws/agent"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --token   (必須) WebUI で生成したエージェントトークン"
-      echo "  --server  サーバーURL (デフォルト: wss://ribbon-re.jp/devrelay-api/ws/agent)"
+      echo "  --server  サーバーURL (デフォルト: wss://devrelay.io/ws/agent)"
       exit 0
       ;;
     *)
@@ -75,6 +75,22 @@ if [ -z "$TOKEN" ]; then
   echo ""
   echo "トークンは WebUI のエージェント作成画面で取得できます。"
   exit 1
+fi
+
+# --- 新形式トークン（drl_）からサーバーURL自動抽出 ---
+# トークン形式: drl_<base64url エンコードされたサーバーURL>_<ランダム hex>
+# --server が明示指定されていない場合のみ、トークンからURLを抽出する
+if [[ "$TOKEN" == drl_* ]]; then
+  # drl_ プレフィックスを除去し、最後の _<hex> 部分を除去して base64url 部分を取得
+  TOKEN_BODY="${TOKEN#drl_}"
+  B64_PART="${TOKEN_BODY%_*}"
+  if [ -n "$B64_PART" ]; then
+    # Base64URL → 標準 Base64 に変換（- → +, _ → /）してデコード
+    DECODED_URL=$(echo "$B64_PART" | tr '_-' '/+' | base64 -d 2>/dev/null || true)
+    if [ -n "$DECODED_URL" ]; then
+      SERVER_URL="$DECODED_URL"
+    fi
+  fi
 fi
 
 # --- ヘッダー表示 ---
@@ -210,6 +226,7 @@ serverUrl: "$SERVER_URL"
 token: "$TOKEN"
 projectsDirs:
   - $HOME
+  - /opt
 aiTools:
   default: claude
   claude:
@@ -249,7 +266,17 @@ echo ""
 # =============================================================================
 echo -e "[6/6] systemd サービスを登録中..."
 
+# systemd ユーザーサービスが利用可能かチェック
+# D-Bus セッションバスに接続できない環境（一部の SSH セッション、コンテナ等）では
+# systemctl --user が使えないため、事前にテストする
+SYSTEMD_USER_AVAILABLE=false
 if command -v systemctl &> /dev/null; then
+  if systemctl --user list-units &> /dev/null; then
+    SYSTEMD_USER_AVAILABLE=true
+  fi
+fi
+
+if [ "$SYSTEMD_USER_AVAILABLE" = true ]; then
   SERVICE_DIR="$HOME/.config/systemd/user"
   SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
   NODE_PATH=$(which node)
@@ -282,12 +309,21 @@ EOF
   # linger 有効化（ログアウト後もサービスを維持）
   loginctl enable-linger "$(whoami)" 2>/dev/null || true
 
+  SYSTEMD_REGISTERED=true
   echo -e "  ✅ サービス登録・起動完了"
   echo -e "  ステータス確認: ${YELLOW}systemctl --user status $SERVICE_NAME${NC}"
   echo -e "  ログ確認: ${YELLOW}journalctl --user -u $SERVICE_NAME -f${NC}"
 else
-  echo -e "${YELLOW}  ⚠️ systemd が利用できません。手動で起動してください:${NC}"
-  echo -e "     ${GREEN}cd $AGENT_DIR/agents/linux && node dist/index.js${NC}"
+  SYSTEMD_REGISTERED=false
+  echo -e "${YELLOW}  ⚠️ systemd ユーザーサービスが利用できません${NC}"
+  if command -v systemctl &> /dev/null; then
+    echo -e "${YELLOW}     D-Bus セッションバスに接続できません。以下を試してください:${NC}"
+    echo -e "     1. ${GREEN}loginctl enable-linger $(whoami)${NC} を root で実行後、再ログイン"
+    echo -e "     2. または手動で起動: ${GREEN}cd $AGENT_DIR/agents/linux && node dist/index.js &${NC}"
+  else
+    echo -e "     手動で起動してください:"
+    echo -e "     ${GREEN}cd $AGENT_DIR/agents/linux && node dist/index.js &${NC}"
+  fi
 fi
 
 echo ""
@@ -300,11 +336,20 @@ echo -e "${GREEN}│  🎉 インストール完了！                          
 echo -e "${GREEN}└─────────────────────────────────────────────────┘${NC}"
 echo ""
 echo -e "  エージェント名:  ${GREEN}$MACHINE_NAME${NC}"
-echo -e "  設定:      ${GREEN}$CONFIG_FILE${NC}"
-echo -e "  サービス:  ${GREEN}systemctl --user status $SERVICE_NAME${NC}"
+echo -e "  設定ファイル:    ${GREEN}$CONFIG_FILE${NC}"
+echo -e "  サーバーURL:     ${GREEN}$SERVER_URL${NC}"
 echo ""
-echo -e "管理コマンド:"
-echo -e "  ${GREEN}systemctl --user restart $SERVICE_NAME${NC}  - 再起動"
-echo -e "  ${GREEN}systemctl --user stop $SERVICE_NAME${NC}     - 停止"
-echo -e "  ${GREEN}journalctl --user -u $SERVICE_NAME -f${NC}   - ログ"
+
+if [ "$SYSTEMD_REGISTERED" = true ]; then
+  echo -e "管理コマンド:"
+  echo -e "  ${GREEN}systemctl --user restart $SERVICE_NAME${NC}  - 再起動"
+  echo -e "  ${GREEN}systemctl --user stop $SERVICE_NAME${NC}     - 停止"
+  echo -e "  ${GREEN}journalctl --user -u $SERVICE_NAME -f${NC}   - ログ"
+else
+  echo -e "手動起動:"
+  echo -e "  ${GREEN}cd $AGENT_DIR/agents/linux && node dist/index.js${NC}"
+  echo ""
+  echo -e "バックグラウンド起動:"
+  echo -e "  ${GREEN}cd $AGENT_DIR/agents/linux && nohup node dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
+fi
 echo ""
