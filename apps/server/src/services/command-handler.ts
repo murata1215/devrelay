@@ -12,7 +12,9 @@ import {
   execConversation,
   applyAgreement,
   getAiToolList,
-  switchAiTool
+  switchAiTool,
+  isAgentRestarted,
+  clearAgentRestarted
 } from './agent-manager.js';
 import {
   createSession,
@@ -351,7 +353,11 @@ async function handleProjectConnect(projectId: string, context: UserContext): Pr
     project.path,
     project.defaultAi as any
   );
-  
+
+  // Agent 再起動フラグをクリア（handleProjectConnect で新セッションを作成・開始済みのため、
+  // handleAiPrompt / handleExec での二重セッション作成を防止）
+  clearAgentRestarted(project.machineId);
+
   await updateUserContext(context.userId, context.platform, context.chatId, {
     currentSessionId: sessionId,
     currentProjectName: project.name,
@@ -533,6 +539,49 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
 
     // 前回の接続先がない場合
     return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
+  }
+
+  // Agent 再起動後の場合、セッションを再開始
+  if (isAgentRestarted(context.currentMachineId)) {
+    console.log(`🔄 [exec] Agent was restarted, re-establishing session for ${context.currentMachineId}`);
+
+    stopProgressTracking(context.currentSessionId);
+    removeParticipant(context.currentSessionId, context.platform, context.chatId);
+
+    const oldSession = await prisma.session.findUnique({
+      where: { id: context.currentSessionId },
+      include: { project: true }
+    });
+
+    if (!oldSession) {
+      clearAgentRestarted(context.currentMachineId);
+      return '❌ セッション情報が見つかりません。`c` で再接続してください。';
+    }
+
+    // oldSession.userId を使用（context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
+    const newSessionId = await createSession(
+      oldSession.userId,
+      context.currentMachineId,
+      oldSession.projectId,
+      oldSession.aiTool
+    );
+    addParticipant(newSessionId, context.platform, context.chatId);
+
+    await startAgentSession(
+      context.currentMachineId,
+      newSessionId,
+      oldSession.project.name,
+      oldSession.project.path,
+      oldSession.aiTool as any
+    );
+
+    await updateUserContext(context.userId, context.platform, context.chatId, {
+      currentSessionId: newSessionId
+    });
+    context.currentSessionId = newSessionId;
+
+    clearAgentRestarted(context.currentMachineId);
+    console.log(`✅ [exec] Session re-established: ${newSessionId}`);
   }
 
   // Get project path from session
@@ -926,6 +975,55 @@ async function handleAiPrompt(
 
     // 前回の接続先がない場合
     return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
+  }
+
+  // Agent 再起動後の場合、Agent 側の sessionInfoMap がクリアされているため
+  // セッションを再開始してから プロンプトを送信する
+  if (isAgentRestarted(context.currentMachineId)) {
+    console.log(`🔄 Agent was restarted, re-establishing session for ${context.currentMachineId}`);
+
+    // 旧セッションの進捗トラッカーをクリーンアップ
+    stopProgressTracking(context.currentSessionId);
+    removeParticipant(context.currentSessionId, context.platform, context.chatId);
+
+    // DB から旧セッションのプロジェクト情報を取得
+    const oldSession = await prisma.session.findUnique({
+      where: { id: context.currentSessionId },
+      include: { project: true }
+    });
+
+    if (!oldSession) {
+      clearAgentRestarted(context.currentMachineId);
+      return '❌ セッション情報が見つかりません。`c` で再接続してください。';
+    }
+
+    // 新しいセッションを作成（oldSession.userId を使用。context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
+    const newSessionId = await createSession(
+      oldSession.userId,
+      context.currentMachineId,
+      oldSession.projectId,
+      oldSession.aiTool
+    );
+    addParticipant(newSessionId, context.platform, context.chatId);
+
+    // Agent に server:session:start を送信（Agent 側の sessionInfoMap を初期化）
+    await startAgentSession(
+      context.currentMachineId,
+      newSessionId,
+      oldSession.project.name,
+      oldSession.project.path,
+      oldSession.aiTool as any
+    );
+
+    // context を新しいセッションIDで更新
+    await updateUserContext(context.userId, context.platform, context.chatId, {
+      currentSessionId: newSessionId
+    });
+    context.currentSessionId = newSessionId;
+
+    // フラグをクリア（次回以降は通常フロー）
+    clearAgentRestarted(context.currentMachineId);
+    console.log(`✅ Session re-established: ${newSessionId}`);
   }
 
   // Save missed messages to DB (for history)

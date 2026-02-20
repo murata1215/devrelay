@@ -345,6 +345,7 @@ agents/windows/
 - [x] Machine->Agent rename + machineName slash format (`hostname/username`)
 - [x] Installer improvements (auto serverUrl extraction, `/opt` scan, nohup+crontab fallback)
 - [x] Agent auto-naming (skip name input, auto-set from hostname on connect)
+- [x] Agent restart session continuity (seamless session recovery after agent restart)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

@@ -36,6 +36,10 @@ const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload
 // Heartbeat: メモリ内で lastSeenAt を管理し、60秒ごとにまとめて DB 更新（バッチ化）
 const lastSeenMap = new Map<string, Date>();
 
+// Agent 再接続フラグ: Agent が再接続した machineId を記録
+// 再接続後の最初のプロンプトでセッション再開始が必要かを判定するために使用
+const needsSessionRestart = new Set<string>();
+
 export function setupAgentWebSocket(connection: { socket: WebSocket }, req: FastifyRequest) {
   const ws = connection.socket;
   let machineId: string | null = null;
@@ -53,7 +57,7 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           break;
 
         case 'agent:disconnect':
-          await handleAgentDisconnect(message.payload.machineId);
+          await handleAgentDisconnect(message.payload.machineId, ws);
           break;
 
         case 'agent:projects':
@@ -107,7 +111,7 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
   ws.on('close', async () => {
     if (machineId) {
-      await handleAgentDisconnect(machineId);
+      await handleAgentDisconnect(machineId, ws);
       console.log(`🔌 Agent disconnected: ${machineId}`);
     }
   });
@@ -195,9 +199,28 @@ async function handleAgentConnect(
 
   // Agent再接続時にセッション参加者を復元（切断前のセッションを継続可能にする）
   await restoreSessionParticipantsForMachine(machine.id);
+
+  // Agent 再接続フラグを設定（次回プロンプト時にセッション再開始が必要）
+  // Agent 再起動で sessionInfoMap がクリアされるため、server:session:start の再送が必要
+  needsSessionRestart.add(machine.id);
 }
 
-async function handleAgentDisconnect(machineId: string) {
+/**
+ * Agent 切断時の処理
+ * pm2 restart 時などに旧接続の close イベントが新接続の後に遅延発火する場合があるため、
+ * 切断された WebSocket が現在の接続と同一かを確認し、異なればスキップする（Race Condition 防止）
+ *
+ * @param machineId 切断された Agent のマシンID
+ * @param disconnectedWs 切断された WebSocket インスタンス（close イベントから渡される）
+ */
+async function handleAgentDisconnect(machineId: string, disconnectedWs?: WebSocket) {
+  // 既に新しい接続に差し替わっている場合は、古い接続の切断として扱いスキップ
+  const currentWs = connectedAgents.get(machineId);
+  if (disconnectedWs && currentWs && currentWs !== disconnectedWs) {
+    console.log(`🔌 Stale connection closed for ${machineId} (new connection already active), skipping disconnect`);
+    return;
+  }
+
   connectedAgents.delete(machineId);
   machineCache.delete(machineId);
 
@@ -443,6 +466,26 @@ async function handleSessionAiTool(payload: { machineId: string; sessionId: stri
 export function getConnectedMachines(userId: string): Machine[] {
   // TODO: Filter by userId
   return Array.from(machineCache.values());
+}
+
+/**
+ * Agent が再接続してセッション再開始が必要かを判定する
+ * Agent 再起動後は sessionInfoMap がクリアされるため、server:session:start の再送が必要
+ *
+ * @param machineId 確認対象のマシンID
+ * @returns 再接続後でセッション再開始が必要なら true
+ */
+export function isAgentRestarted(machineId: string): boolean {
+  return needsSessionRestart.has(machineId);
+}
+
+/**
+ * Agent 再接続フラグをクリアする（セッション再開始完了後に呼び出す）
+ *
+ * @param machineId クリア対象のマシンID
+ */
+export function clearAgentRestarted(machineId: string): void {
+  needsSessionRestart.delete(machineId);
 }
 
 export function getConnectedAgents(): Map<string, WebSocket> {

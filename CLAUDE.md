@@ -1101,6 +1101,23 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/routes/api.ts` - POST /api/machines に仮名自動生成を追加
   - `apps/server/src/services/agent-manager.ts` - `handleAgentConnect()` に仮名→正式名の自動更新を追加
 
+#### 64. Agent 再起動後のセッション継続修正 (2026-02-21)
+- **問題**: Agent を `pm2 restart` で再起動すると、Discord からのメッセージに応答が返らなくなる
+- **根本原因（4つの問題）**:
+  1. **Race Condition**: 旧 WebSocket の `close` イベントが新接続の後に遅延発火し、`clearSessionsForMachine()` で復元済みセッションを破壊
+  2. **sessionInfoMap 消失**: Agent 再起動後、サーバーが `server:session:start` を送らず直接 `server:ai:prompt` を送るため、Agent 側で `sessionInfoMap` が空で処理不能
+  3. **userId 不整合**: セッション再開始コードで `context.userId`（Discord プラットフォーム ID）を `createSession()` に渡しており、DB の `User.id`（CUID 形式）との外部キー制約違反
+  4. **二重セッション作成**: 自動再接続（`handleProjectConnect`）後に `isAgentRestarted()` フラグがクリアされず、`handleAiPrompt()` で再度セッション作成
+- **修正内容**:
+  - `handleAgentDisconnect()`: 切断された WebSocket が現在の接続と同一か判定し、stale 接続の切断をスキップ
+  - `handleAgentConnect()`: `needsSessionRestart` Set に machineId を記録
+  - `handleAiPrompt()` / `handleExec()`: Agent 再接続フラグがある場合、新セッション作成 + `server:session:start` 再送してからプロンプト送信
+  - `createSession()` に渡す userId を `oldSession.userId` に修正
+  - `handleProjectConnect()` で `clearAgentRestarted()` を呼び二重作成を防止
+- **主要ファイル**:
+  - `apps/server/src/services/agent-manager.ts` - stale 接続判定、`needsSessionRestart` Set、`isAgentRestarted()` / `clearAgentRestarted()` API
+  - `apps/server/src/services/command-handler.ts` - セッション再開始ロジック、userId 修正、フラグクリア
+
 ## 今後の課題
 
 - [ ] LINE 対応
