@@ -334,6 +334,18 @@ else
     NOHUP_STARTED=true
     echo -e "  ${GREEN}✅ Agent 起動成功 (PID: $AGENT_PID)${NC}"
     echo -e "  ログ: ${YELLOW}tail -f $CONFIG_DIR/logs/agent.log${NC}"
+
+    # crontab @reboot で OS 再起動時の自動起動を設定
+    NODE_ABS_PATH=$(which node)
+    CRONTAB_CMD="@reboot cd $AGENT_DIR/agents/linux && $NODE_ABS_PATH dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1"
+    # 既存の devrelay エントリを除去してから新しいエントリを追加（重複防止）
+    ( crontab -l 2>/dev/null | grep -v "devrelay" ; echo "$CRONTAB_CMD" ) | crontab - 2>/dev/null && {
+      CRONTAB_REGISTERED=true
+      echo -e "  ${GREEN}✅ crontab @reboot 登録済み（OS 再起動時に自動起動）${NC}"
+    } || {
+      CRONTAB_REGISTERED=false
+      echo -e "${YELLOW}  ⚠️ crontab の登録に失敗しました${NC}"
+    }
   else
     echo -e "  ${RED}❌ Agent 起動に失敗しました${NC}"
     echo -e "  ログを確認: ${YELLOW}cat $CONFIG_DIR/logs/agent.log${NC}"
@@ -361,14 +373,15 @@ if [ "$SYSTEMD_REGISTERED" = true ]; then
   echo -e "  ${GREEN}journalctl --user -u $SERVICE_NAME -f${NC}   - ログ"
 elif [ "$NOHUP_STARTED" = true ]; then
   echo -e "  Agent は nohup で起動済みです (PID: $AGENT_PID)"
+  if [ "$CRONTAB_REGISTERED" = true ]; then
+    echo -e "  ${GREEN}✅ OS 再起動時も自動起動します（crontab @reboot）${NC}"
+  fi
   echo ""
   echo -e "管理コマンド:"
   echo -e "  ログ確認:   ${GREEN}tail -f $CONFIG_DIR/logs/agent.log${NC}"
   echo -e "  停止:       ${GREEN}kill $AGENT_PID${NC}"
   echo -e "  再起動:     ${GREEN}cd $AGENT_DIR/agents/linux && nohup node dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
-  echo ""
-  echo -e "${YELLOW}  ※ OS 再起動後は手動で再起動が必要です。systemd を有効にするには:${NC}"
-  echo -e "  ${GREEN}sudo loginctl enable-linger $(whoami)${NC} を実行後、再ログインしてワンライナーを再実行"
+  echo -e "  crontab:    ${GREEN}crontab -l | grep devrelay${NC}"
 else
   echo -e "手動起動:"
   echo -e "  ${GREEN}cd $AGENT_DIR/agents/linux && nohup node dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
