@@ -10,12 +10,12 @@
 # 前提条件:
 #   - Node.js 20+
 #   - git
-#   - systemd (Linux)
+#   - pnpm
 #
 # 処理内容:
-#   1. 依存ツールの確認（Node.js 20+, git, npm）
+#   1. 依存ツールの確認（Node.js 20+, git, pnpm）
 #   2. リポジトリを ~/.devrelay/agent/ に clone（既存なら git pull）
-#   3. pnpm をインストールし、shared + agent をビルド
+#   3. shared + agent をビルド
 #   4. config.yaml を自動生成（machineName = hostname/username）
 #   5. devrelay-claude シンボリックリンク作成（claude があれば）
 #   6. systemd ユーザーサービスを登録・起動・linger 有効化
@@ -103,38 +103,53 @@ echo ""
 # =============================================================================
 # Step 1: 依存ツール確認
 # =============================================================================
+# 全ての依存を先にチェックし、不足分をまとめて表示してから終了する
 echo -e "[1/6] 依存ツールを確認中..."
+
+MISSING=0
 
 # Node.js チェック
 if ! command -v node &> /dev/null; then
-  echo -e "${RED}❌ Node.js が見つかりません${NC}"
-  echo -e "   インストール: ${YELLOW}https://nodejs.org${NC}"
-  echo -e "   または: ${YELLOW}curl -fsSL https://fnm.vercel.app/install | bash && fnm install 20${NC}"
-  exit 1
+  echo -e "${RED}❌ Node.js 20 以上が必要です${NC}"
+  echo -e "   インストール: ${YELLOW}curl -fsSL https://fnm.vercel.app/install | bash && fnm install 20${NC}"
+  echo -e "   詳細: ${YELLOW}https://nodejs.org${NC}"
+  MISSING=$((MISSING + 1))
+else
+  # Node.js バージョンチェック
+  NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+  if [ "$NODE_VERSION" -lt 20 ]; then
+    echo -e "${RED}❌ Node.js 20 以上が必要です（現在: $(node -v)）${NC}"
+    echo -e "   アップグレード: ${YELLOW}fnm install 20 && fnm use 20${NC}"
+    MISSING=$((MISSING + 1))
+  else
+    echo -e "  ✅ Node.js $(node -v)"
+  fi
 fi
-
-# Node.js バージョンチェック
-NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
-if [ "$NODE_VERSION" -lt 20 ]; then
-  echo -e "${RED}❌ Node.js 20 以上が必要です（現在: $(node -v)）${NC}"
-  exit 1
-fi
-echo -e "  ✅ Node.js $(node -v)"
 
 # git チェック
 if ! command -v git &> /dev/null; then
-  echo -e "${RED}❌ git が見つかりません${NC}"
-  echo -e "   インストール: ${YELLOW}sudo apt install git${NC}"
-  exit 1
+  echo -e "${RED}❌ git が必要です${NC}"
+  echo -e "   インストール: ${YELLOW}sudo apt install git${NC}  または  ${YELLOW}sudo yum install git${NC}"
+  MISSING=$((MISSING + 1))
+else
+  echo -e "  ✅ git $(git --version | cut -d' ' -f3)"
 fi
-echo -e "  ✅ git $(git --version | cut -d' ' -f3)"
 
-# npm チェック
-if ! command -v npm &> /dev/null; then
-  echo -e "${RED}❌ npm が見つかりません${NC}"
+# pnpm チェック
+if ! command -v pnpm &> /dev/null; then
+  echo -e "${RED}❌ pnpm が必要です${NC}"
+  echo -e "   インストール: ${YELLOW}npm install -g pnpm${NC}"
+  MISSING=$((MISSING + 1))
+else
+  echo -e "  ✅ pnpm $(pnpm -v)"
+fi
+
+# 不足ツールがあれば終了
+if [ "$MISSING" -gt 0 ]; then
+  echo ""
+  echo -e "${RED}上記 ${MISSING} 件のツールをインストールしてから再実行してください。${NC}"
   exit 1
 fi
-echo -e "  ✅ npm $(npm -v)"
 
 echo -e "${GREEN}✅ 依存ツール OK${NC}"
 echo ""
@@ -170,22 +185,6 @@ echo ""
 echo -e "[3/6] ビルド中..."
 
 cd "$AGENT_DIR"
-
-# pnpm が無ければインストール
-if ! command -v pnpm &> /dev/null; then
-  echo "  pnpm をインストール中..."
-  npm install -g pnpm 2>/dev/null || {
-    # npm グローバルに権限がない場合は corepack を試す
-    if command -v corepack &> /dev/null; then
-      corepack enable
-      corepack prepare pnpm@latest --activate
-    else
-      echo -e "${RED}❌ pnpm のインストールに失敗しました${NC}"
-      echo -e "   手動で: ${YELLOW}npm install -g pnpm${NC}"
-      exit 1
-    fi
-  }
-fi
 
 # モノレポの依存関係をインストール・ビルド
 echo "  依存関係をインストール中..."

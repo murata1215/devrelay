@@ -1118,11 +1118,24 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/services/agent-manager.ts` - stale 接続判定、`needsSessionRestart` Set、`isAgentRestarted()` / `clearAgentRestarted()` API
   - `apps/server/src/services/command-handler.ts` - セッション再開始ロジック、userId 修正、フラグクリア
 
+#### 65. ワンライナーインストーラー依存チェック改善 (2026-02-21)
+- **問題**: 依存ツール不足時に1つ目で `exit 1` して止まるため、全ての不足を把握できない
+- **改善内容**:
+  - 全依存（Node.js 20+, git, pnpm）をまとめてチェックし、不足分を全て表示してから終了
+  - 各ツールにインストール方法のワンライナーを案内
+    - Node.js: `curl -fsSL https://fnm.vercel.app/install | bash && fnm install 20`
+    - git: `sudo apt install git` または `sudo yum install git`
+    - pnpm: `npm install -g pnpm`
+  - pnpm の自動インストール（`npm install -g pnpm` / `corepack`）を廃止 → 事前チェックに変更
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - Step 1 依存チェック全面改善、Step 3 自動インストール削除
+
 ## 今後の課題
 
 - [ ] LINE 対応
 - [ ] Gemini CLI / Codex / Aider 対応
 - [x] Windows Agent (2026-01-18 実装完了)
+- [ ] Windows CLI Agent（軽量版）+ PowerShell ワンライナー → 仕様書: `.devrelay-output/windows-cli-agent-spec.md`
 - [ ] 要約機能（Anthropic API 使用）
 - [ ] 複数ユーザー同時接続
 - [ ] 進捗表示のUI改善（プログレスバーなど）
