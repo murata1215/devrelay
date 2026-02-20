@@ -1,31 +1,33 @@
 # 🌉 DevRelay
 
-> どのメッセージアプリからでも、どのAI CLIにでも繋がる、リモート開発ハブ
+> [日本語版はこちら](README_JA.md)
 
-LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS。
-外出先からスマホで自宅PCの開発環境を制御できます。
+> A remote development hub that connects any messaging app to any AI CLI tool
+
+Control Claude Code, Gemini CLI, and more from Discord, Telegram, or LINE.
+Turn your phone into a remote terminal for AI-powered development.
 
 ## ✨ Features
 
-- **マルチエージェント**: ubuntu-dev/user1, ubuntu-prod/user2, windows01/dev... 複数エージェントを登録・切り替え
-- **マルチプロジェクト**: 各エージェント内の複数プロジェクトを管理
-- **マルチAI**: Claude Code, Gemini CLI, Aider に対応
-- **マルチプラットフォーム**: Discord, Telegram から操作（LINE 対応予定）
-- **自然言語コマンド**: 「前の接続を復元して」→ 自動で `c` コマンド実行（OpenAI API 使用）
-- **プランモード / 実行モード**: プラン立案→承認→実行のワークフロー
-- **DevRelay Agreement**: CLAUDE.md に統合するプロジェクト設定
-- **リアルタイム進捗表示**: AI の処理状況をリアルタイムで表示
-- **双方向ファイル転送**: Discord/Telegram ↔ 開発マシン間のファイル送受信
-- **履歴エクスポート**: 会話履歴を日別に ZIP でダウンロード可能
-- **プロキシ対応**: HTTP/HTTPS/SOCKS5 プロキシ経由での接続
+- **Multi-Agent**: Register and switch between ubuntu-dev/user1, ubuntu-prod/user2, windows01/dev...
+- **Multi-Project**: Manage multiple projects on each agent
+- **Multi-AI**: Support for Claude Code, Gemini CLI, Aider
+- **Multi-Platform**: Operate from Discord, Telegram (LINE coming soon)
+- **Natural Language Commands**: "reconnect to last project" auto-translates to the right command (OpenAI API)
+- **Plan / Execute Mode**: AI plans first, you review, then it implements
+- **DevRelay Agreement**: Project settings integrated into CLAUDE.md
+- **Real-time Progress**: Watch AI's progress live on Discord/Telegram
+- **Bidirectional File Transfer**: Send and receive files between chat and dev machines
+- **History Export**: Download conversation history as daily ZIP files
+- **Proxy Support**: Connect through HTTP/HTTPS/SOCKS5 proxies
 
-## 💡 トークン効率について
+## 💡 Token Efficiency
 
-DevRelay は Claude Code の `--resume` オプションを活用してセッションを継続するため、**通常の CLI 利用と同等のトークン効率**を実現しています。
+DevRelay uses Claude Code's `--resume` option to continue sessions, achieving **the same token efficiency as direct CLI usage**.
 
-- **オーバーヘッド**: プランモード/実行モード指示で約200トークン/プロンプト
-- **セッション継続**: `--resume` により会話コンテキストが Claude Code 側で管理されるため、履歴の再送信は不要
-- **コンテキスト表示**: 使用量を Discord/Telegram で確認可能（`📊 Context: 131K / 200K tokens (66%)`）
+- **Overhead**: ~200 tokens/prompt for plan/exec mode instructions
+- **Session Continuity**: `--resume` keeps conversation context in Claude Code, no history re-sending
+- **Context Display**: Monitor usage on Discord/Telegram (`📊 Context: 131K / 200K tokens (66%)`)
 
 ## 🏗 Architecture
 
@@ -49,15 +51,16 @@ DevRelay は Claude Code の `--resume` オプションを活用してセッシ�
 ```
 devrelay/
 ├── apps/
-│   ├── server/           # 中央サーバー (Fastify + WebSocket + Discord.js)
-│   └── web/              # Web UI (Vite + React)
+│   ├── server/           # Center server (Fastify + WebSocket + Discord.js)
+│   ├── web/              # Web UI (Vite + React)
+│   └── landing/          # Landing page (devrelay.io)
 ├── packages/
-│   └── shared/           # 共通型・定数
+│   └── shared/           # Shared types & constants
 ├── agents/
 │   ├── linux/            # Linux Agent (Node.js CLI)
-│   └── windows/          # Windows Agent (Electron タスクトレイアプリ)
+│   └── windows/          # Windows Agent (Electron tray app)
 └── scripts/
-    └── update-version.js # バージョン一括更新スクリプト
+    └── update-version.js # Batch version update script
 ```
 
 ## 🚀 Quick Start
@@ -91,27 +94,27 @@ pnpm build
 
 #### Windows Agent
 
-Windows では Electron タスクトレイアプリとして動作します。
+The Windows agent runs as an Electron tray application.
 
-**インストール方法:**
-1. リリースページからインストーラー（`DevRelay-Agent-Setup-x.x.x.exe`）をダウンロード
-2. インストーラーを実行
-3. タスクトレイアイコンをクリックして設定画面を開く
-4. トークンを入力し、プロジェクトディレクトリを追加
+**Installation:**
+1. Download the installer (`DevRelay-Agent-Setup-x.x.x.exe`) from the releases page
+2. Run the installer
+3. Click the tray icon to open settings
+4. Enter your token and add project directories
 
-**機能:**
-- タスクトレイ常駐（接続状態をアイコン色で表示：緑=接続中、グレー=切断）
-- 設定画面（トークン、プロジェクトディレクトリ管理）
-- 自動起動設定（Windows ログイン時に自動起動）
-- スリープ防止機能（接続中は Modern Standby を抑制）
+**Features:**
+- System tray icon (green = connected, gray = disconnected)
+- Settings UI (token, project directory management)
+- Auto-start on Windows login
+- Sleep prevention (blocks Modern Standby while connected)
 
-**開発:**
+**Development:**
 ```powershell
 cd agents/windows
 pnpm build
 npx electron .
 
-# 配布用インストーラー作成
+# Build installer for distribution
 pnpm dist
 ```
 
@@ -133,16 +136,14 @@ pnpm run setup  # Note: use "pnpm run setup", not "pnpm setup"
 cd agents/linux
 pnpm run start
 
-# As systemd service (setup will ask to install)
-systemctl --user start devrelay-agent    # User service (recommended)
-sudo systemctl start devrelay-agent       # System service
+# As PM2 service (recommended for production)
+pm2 start /opt/devrelay/agents/linux/dist/index.js --name devrelay-agent
 
 # Check status
-systemctl --user status devrelay-agent
-pnpm run status  # or from agents/linux directory
+pm2 status devrelay-agent
 
 # View logs
-journalctl --user -u devrelay-agent -f
+pm2 logs devrelay-agent
 
 # Uninstall (removes service, config, optionally project data)
 pnpm run uninstall
@@ -152,44 +153,44 @@ pnpm run uninstall
 
 ```
 You: m
-Bot: 📡 エージェント一覧
+Bot: 📡 Agents
      1. ubuntu-dev/pixblog 🟢
-     2. ubuntu-prod/pixblog 🟢
+     2. ubuntu-prod/pixdraft 🟢
 
 You: 1
-Bot: ✅ ubuntu-dev/pixblog に接続
+Bot: ✅ Connected to ubuntu-dev/pixblog
 
 You: p
-Bot: 📁 プロジェクト
+Bot: 📁 Projects
      1. my-app
      2. another-project
 
 You: 1
-Bot: 🚀 my-app に接続 / Claude Code 起動完了
+Bot: 🚀 Connected to my-app / Claude Code ready
 
-You: CSSのバグを直して
-Bot: 🤖 了解、修正中...
+You: Fix the CSS bug on the login page
+Bot: 🤖 Working on it...
 ```
 
 ## 📋 Commands
 
 | Command | Description |
 |---------|-------------|
-| `m` | エージェント一覧 |
-| `p` | プロジェクト一覧 |
-| `c` | 前回の接続先に再接続 |
-| `e` / `exec` | 実行モードに切り替え（プラン承認） |
-| `e, 〜` / `exec, 〜` | 実行モードでカスタム指示を直接実行 |
-| `w` | ドキュメント更新＋コミット＋プッシュ（wrap up） |
-| `se` / `session` | セッション情報表示 |
-| `ag` / `agreement` | DevRelay Agreement を CLAUDE.md に適用 |
-| `link` | Discord/Telegram アカウントを WebUI とリンク |
-| `1`, `2`, `3`... | 一覧から選択 |
-| `x` | 会話履歴をクリア（2回連続で実行） |
-| `q` | 切断 |
-| `h` | ヘルプ |
+| `m` | List agents |
+| `p` | List projects |
+| `c` | Reconnect to last project |
+| `e` / `exec` | Switch to execute mode (approve plan) |
+| `e, <instruction>` | Execute custom instruction directly |
+| `w` | Wrap up: update docs + commit + push |
+| `se` / `session` | Show session info |
+| `ag` / `agreement` | Apply DevRelay Agreement to CLAUDE.md |
+| `link` | Link Discord/Telegram account to WebUI |
+| `1`, `2`, `3`... | Select from list |
+| `x` | Clear conversation history (requires double confirmation) |
+| `q` | Disconnect |
+| `h` | Help |
 
-それ以外のメッセージはAIへの指示として処理されます。
+Any other message is sent as an instruction to the AI.
 
 ## 🛠 Development
 
@@ -222,48 +223,41 @@ pnpm dev:server   # Start server
 pnpm dev:agent    # Start agent (in another terminal)
 ```
 
-### Systemd Service (Production)
+### PM2 Service (Production)
 
-サービス化すると自動起動・自動再起動が有効になります。
+PM2 provides auto-restart and process management for production.
 
 ```bash
 # Server
-cd apps/server
-pnpm setup:service
-systemctl --user start devrelay-server
-
-# WebUI
-cd apps/web
-pnpm setup:service
-systemctl --user start devrelay-web
+pm2 start /opt/devrelay/apps/server/dist/index.js --name devrelay-server
 
 # Agent
-cd agents/linux
-pnpm run setup  # Choose "User service" option
-systemctl --user start devrelay-agent
+pm2 start /opt/devrelay/agents/linux/dist/index.js --name devrelay-agent
+
+# Management
+pm2 status                                    # Check status
+pm2 restart devrelay-server devrelay-agent     # Restart
+pm2 logs devrelay-server                       # View logs
+
+# Auto-start on boot
+pm2 save
+pm2 startup
 ```
 
-管理コマンド:
-```bash
-systemctl --user status devrelay-server devrelay-web devrelay-agent  # 状態確認
-systemctl --user restart devrelay-server devrelay-web devrelay-agent # 再起動
-journalctl --user -u devrelay-server -f                               # ログ確認
-```
+### Proxy Configuration
 
-### プロキシ設定
-
-Agent がプロキシ経由でサーバーに接続する場合は、`~/.devrelay/config.yaml` に設定を追加します。
+To connect through a proxy, add settings to `~/.devrelay/config.yaml`:
 
 ```yaml
 proxy:
-  url: http://proxy.example.com:8080  # または socks5://proxy:1080
-  username: user  # オプション
-  password: pass  # オプション
+  url: http://proxy.example.com:8080  # or socks5://proxy:1080
+  username: user  # optional
+  password: pass  # optional
 ```
 
-### バージョン管理
+### Version Management
 
-全パッケージのバージョンを一括更新:
+Update all package versions at once:
 ```bash
 pnpm version:update 0.2.0
 ```
@@ -291,8 +285,8 @@ agents/linux/
 │   ├── index.ts              # Agent entry
 │   ├── cli/                  # CLI commands
 │   │   └── commands/
-│   │       ├── setup.ts      # セットアップ（トークンのみ）
-│   │       ├── uninstall.ts  # アンインストール
+│   │       ├── setup.ts      # Setup (token only)
+│   │       ├── uninstall.ts  # Uninstall
 │   │       ├── status.ts
 │   │       └── projects.ts
 │   └── services/
@@ -318,10 +312,10 @@ agents/windows/
 
 ## 🔐 Security
 
-- 接続トークンによるマシン認証
-- APIキーは暗号化保存（AES-256-CBC）
-- 全通信TLS暗号化
-- プロンプトは stdin 経由（`ps aux` に表示されない）
+- Token-based machine authentication
+- API keys encrypted with AES-256-CBC
+- All communication over TLS
+- Prompts sent via stdin (invisible to `ps aux`)
 
 ## 🗺 Roadmap
 
@@ -333,31 +327,26 @@ agents/windows/
 - [x] Conversation Persistence (file-based)
 - [x] Quick Reconnect (`c` command)
 - [x] Real-time Progress Display
-- [x] Systemd Service Support
 - [x] Natural Language Commands (OpenAI API)
 - [x] Plan Mode / Exec Mode
 - [x] Agent Uninstall Command
 - [x] Simplified Setup (token only)
-- [x] DevRelay Agreement 機能
-- [x] バージョン一元管理
-- [x] プロキシ対応
-- [x] 履歴エクスポート機能
-- [x] 会話履歴アーカイブ（クリア時に自動退避）
-- [x] 会話履歴件数表示
-- [x] Agent再接続時セッション自動復元
-- [x] x コマンド2回連続確認
-- [x] exec カスタムプロンプト（`exec, コミットして` で直接実行）
-- [x] Machines ページ テーブル形式化 + 名前順ソート
-- [x] ヘルプテキスト更新（`e,` プランスキップ、`x` 2回確認の説明追加）
-- [x] 出力ファイル履歴保存（`.devrelay-output-history/` に自動コピー）
-- [x] `w` コマンド（wrap up: ドキュメント更新＋コミット＋プッシュ）
-- [x] Heartbeat DB バッチ更新（ping ごとの DB 書き込みを 60 秒バッチに）
-- [x] Agent ワンライナーインストール（`curl | bash` で一発セットアップ）
-- [x] Machine→Agent 表記変更 + machineName スラッシュ区切り（`hostname/username`）
+- [x] DevRelay Agreement
+- [x] Proxy Support
+- [x] History Export
+- [x] Conversation Archive (auto-backup on clear)
+- [x] Custom exec prompt (`exec, commit and push`)
+- [x] Output file history (`.devrelay-output-history/`)
+- [x] `w` command (wrap up: update docs + commit + push)
+- [x] Landing page (devrelay.io)
+- [x] Token URL embedding (server URL auto-detected from token)
+- [x] Heartbeat DB batch update (60s batch instead of per-ping writes)
+- [x] One-liner agent install (`curl | bash`)
+- [x] Machine->Agent rename + machineName slash format (`hostname/username`)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features
-- [ ] AI 切り替え機能（Gemini/Aider）
+- [ ] AI tool switching (Gemini/Aider)
 
 ## 📄 License
 

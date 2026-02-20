@@ -1,4 +1,5 @@
-const API_BASE = '/devrelay-api/api';
+// 開発環境ではViteのプロキシを使用（相対パス）、本番環境でも相対パスでOK（Caddyがリバースプロキシ）
+const API_BASE = '/api';
 
 // トークンをlocalStorageに保存
 export function getToken(): string | null {

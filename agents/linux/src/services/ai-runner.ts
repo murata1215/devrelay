@@ -1,5 +1,6 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import path from 'path';
+import fs from 'fs';
 import type { AiTool } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -84,9 +85,10 @@ export async function sendPromptToAi(
   let proc;
 
   if (aiTool === 'claude') {
-    // Use devrelay-claude symlink so process name is clearly identifiable in ps
-    // The symlink should be at ~/.devrelay/bin/devrelay-claude -> claude
-    const devrelayClaude = `${process.env.HOME}/.devrelay/bin/devrelay-claude`;
+    // devrelay-claude シンボリックリンクを使用してプロセスを識別可能にする
+    // シンボリックリンクが存在しない場合（setup 後に claude をインストールした場合など）は
+    // which claude でフォールバックし、シンボリックリンクも自動作成する
+    const devrelayClaude = resolveClaudePath();
     const args = [
       '-p',
       '--output-format', 'stream-json',
@@ -323,5 +325,56 @@ function getAiCommand(aiTool: AiTool, config: AgentConfig): string | undefined {
       return config.aiTools.aider?.command || 'aider';
     default:
       return undefined;
+  }
+}
+
+/**
+ * Claude Code の実行パスを解決する
+ *
+ * 以下の優先順位で探索:
+ * 1. ~/.devrelay/bin/devrelay-claude（シンボリックリンク）が存在すれば使用
+ * 2. 存在しなければ `which claude` でフォールバック
+ *    - 見つかった場合、シンボリックリンクも自動作成（次回以降は高速に）
+ * 3. どちらも見つからなければエラー
+ *
+ * setup 後に Claude Code をインストールしたケースに対応するため、
+ * シンボリックリンクが存在しない場合でも自動的に解決する。
+ *
+ * @returns Claude Code の実行パス
+ * @throws claude コマンドが見つからない場合
+ */
+function resolveClaudePath(): string {
+  const devrelayBinDir = path.join(process.env.HOME || '', '.devrelay', 'bin');
+  const devrelayClaudePath = path.join(devrelayBinDir, 'devrelay-claude');
+
+  // シンボリックリンクが存在すればそのまま使用
+  if (fs.existsSync(devrelayClaudePath)) {
+    return devrelayClaudePath;
+  }
+
+  // シンボリックリンクが存在しない → which claude でフォールバック
+  console.log(`⚠️ devrelay-claude symlink not found, searching for claude...`);
+
+  try {
+    const claudePath = execSync('which claude', { encoding: 'utf-8', timeout: 5000 }).trim();
+    console.log(`✅ Found claude at: ${claudePath}`);
+
+    // シンボリックリンクを自動作成（次回以降は高速に + ps でプロセス識別可能に）
+    try {
+      fs.mkdirSync(devrelayBinDir, { recursive: true });
+      fs.symlinkSync(claudePath, devrelayClaudePath);
+      console.log(`✅ Symlink created: devrelay-claude -> ${claudePath}`);
+      return devrelayClaudePath;
+    } catch (symlinkErr) {
+      // シンボリックリンク作成に失敗しても claude 自体は使える
+      console.log(`⚠️ Could not create symlink, using claude directly: ${(symlinkErr as Error).message}`);
+      return claudePath;
+    }
+  } catch {
+    throw new Error(
+      'Claude Code が見つかりません。以下を確認してください:\n' +
+      '  1. Claude Code をインストール: npm install -g @anthropic-ai/claude-code\n' +
+      '  2. インストール後、Agent を再起動してください'
+    );
   }
 }

@@ -21,7 +21,7 @@
     "clean": "rmdir /s /q dist 2>nul || exit 0"
   },
   "build": {
-    "appId": "jp.ribbon-re.devrelay-agent",
+    "appId": "io.devrelay.agent",
     "productName": "DevRelay Agent",
     "directories": {
       "output": "release"

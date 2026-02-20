@@ -60,7 +60,7 @@ export async function loadConfig(): Promise<AgentConfig> {
     return {
       machineName: config.machineName || `${os.hostname()}/${os.userInfo().username}`,
       machineId: config.machineId || '',
-      serverUrl: config.serverUrl || 'wss://ribbon-re.jp/devrelay-api/ws/agent',
+      serverUrl: config.serverUrl || 'wss://devrelay.io/ws/agent',
       token: config.token || '',
       projectsDirs,
       aiTools: config.aiTools || {
@@ -76,7 +76,7 @@ export async function loadConfig(): Promise<AgentConfig> {
     return {
       machineName: `${os.hostname()}/${os.userInfo().username}`,
       machineId: '',
-      serverUrl: 'wss://ribbon-re.jp/devrelay-api/ws/agent',
+      serverUrl: 'wss://devrelay.io/ws/agent',
       token: '',
       projectsDirs: [os.homedir()],
       aiTools: {

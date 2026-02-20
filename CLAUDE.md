@@ -55,8 +55,8 @@ DevRelay（このプロジェクト）のサーバーやエージェントを修
 案内例：
 ```
 ビルド完了。以下のコマンドでサービスを再起動してください：
-systemctl --user restart devrelay-server
-systemctl --user restart devrelay-agent
+pm2 restart devrelay-server
+pm2 restart devrelay-agent
 ```
 
 ---
@@ -244,7 +244,7 @@ devrelay/
 ```yaml
 machineName: ubuntu-dev
 machineId: ""
-serverUrl: wss://ribbon-re.jp/devrelay-api/ws/agent
+serverUrl: wss://devrelay.io/ws/agent
 token: machine_xxxxx
 projectsDirs:      # 複数ディレクトリ対応
   - /home/user         # Linux
@@ -307,28 +307,25 @@ cd agents/linux && pnpm start
 cd agents/windows && pnpm build && npx electron .
 ```
 
-### 本番（サービス起動）
+### 本番（PM2 でサービス起動）
 
 #### Linux
 ```bash
 # Server
-cd apps/server && pnpm setup:service   # 初回のみ
-systemctl --user start devrelay-server
-
-# WebUI（開発サーバー）
-cd apps/web && pnpm setup:service   # 初回のみ
-systemctl --user start devrelay-web
+pm2 start /opt/devrelay/apps/server/dist/index.js --name devrelay-server
 
 # Agent
-cd agents/linux && node dist/cli/index.js setup  # 初回のみ（サービス化を選択）
-systemctl --user start devrelay-agent
+pm2 start /opt/devrelay/agents/linux/dist/index.js --name devrelay-agent
 
 # 管理コマンド
-systemctl --user status devrelay-server devrelay-web devrelay-agent
-systemctl --user restart devrelay-server devrelay-web devrelay-agent
-journalctl --user -u devrelay-server -f
-journalctl --user -u devrelay-web -f
-journalctl --user -u devrelay-agent -f
+pm2 status
+pm2 restart devrelay-server devrelay-agent
+pm2 logs devrelay-server
+pm2 logs devrelay-agent
+
+# 自動起動設定（サーバー再起動後にも復活）
+pm2 save
+pm2 startup
 ```
 
 #### Windows
@@ -437,7 +434,7 @@ cd agents/windows && pnpm dist
 - `apps/server/src/index.ts` の `main()` 関数冒頭で `prisma.machine.updateMany()` を実行
 
 #### 21. デフォルト serverUrl 変更
-- `ws://localhost:3000/ws/agent` → `wss://ribbon-re.jp/devrelay-api/ws/agent`
+- `ws://localhost:3000/ws/agent` → `wss://devrelay.io/ws/agent`
 - 外部マシンからも Agent を接続可能に
 - `agents/linux/src/services/config.ts` で設定
 
@@ -462,7 +459,7 @@ cd agents/windows && pnpm dist
 - 実行方法: `cd apps/web && pnpm setup:service`
 - ユーザーサービスとして `~/.config/systemd/user/devrelay-web.service` を作成
 - Vite 開発サーバー（HMR 付き）を systemd で管理
-- **注意**: 本番では nginx + 静的ファイル配信を推奨
+- **注意**: 本番では Caddy + 静的ファイル配信を推奨
 
 #### 26. プラットフォームアカウント連携
 - Discord/Telegram ユーザーと WebUI ユーザーをリンク
@@ -490,7 +487,7 @@ cd agents/windows && pnpm dist
 - Linux Agent をベースに Windows 対応版を実装
 - **Electron タスクトレイアプリ**として常駐
 - 設定ディレクトリ: `%APPDATA%\devrelay\`
-- サーバーURL: `wss://ribbon-re.jp/devrelay-api/ws/agent`（固定）
+- サーバーURL: `wss://devrelay.io/ws/agent`（固定）
 - **タスクトレイ機能**:
   - 接続状態をアイコン色で表示（緑=接続中、グレー=切断）
   - 右クリックメニュー: Connect/Disconnect, Settings, Open Config Folder, Quit
@@ -658,7 +655,7 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `GET /api/services/status` - サービスステータス取得
   - `POST /api/services/restart/server` - サーバー再起動
   - `POST /api/services/restart/agent` - Agent 再起動
-- **実装**: `systemctl --user restart` コマンドを使用
+- **実装**: `pm2 restart` コマンドを使用
 - **主要ファイル**:
   - `apps/server/src/routes/api.ts` - サービス管理 API エンドポイント
   - `apps/web/src/lib/api.ts` - services API クライアント
@@ -958,13 +955,77 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/services/command-parser.ts` - `parseCommand()` に `w` 処理追加、`getHelpText()` 更新
   - `apps/server/src/services/natural-language-parser.ts` - `isTraditionalCommand()` に `w` 追加
 
-#### 55. Heartbeat DB バッチ更新 + machineName デフォルト変更 (2026-02-21)
+#### 55. ドメイン移行・インフラ整備 (2026-02-19)
+- `ribbon-re.jp` → `devrelay.io` へのドメイン移行
+- Apache2 → Caddy へのリバースプロキシ移行
+- SQLite → PostgreSQL へのDB移行
+- PM2 でのプロセス管理に統一
+- WebUI (`app.devrelay.io`) に `/api/*`, `/ws/*` のリバースプロキシ追加
+- **変更ファイル**:
+  - `agents/*/src/services/config.ts` - serverUrl を `wss://devrelay.io/ws/agent` に変更
+  - `agents/*/src/cli/commands/setup.ts` - ダッシュボード URL 変更
+  - `agents/windows/package.json` - appId を `io.devrelay.agent` に変更
+  - `apps/web/src/lib/api.ts` - API_BASE を `/api`（相対パス）に変更
+  - `apps/web/vite.config.ts` - allowedHosts 変更
+  - `apps/server/.env.example` - PostgreSQL 接続文字列に変更
+  - `apps/server/src/routes/api.ts` - サービス管理を PM2 コマンドに変更
+  - `/etc/caddy/Caddyfile` - `app.devrelay.io` に API/WS プロキシ追加
+
+#### 56. ランディングページ + README 英語化 (2026-02-19)
+- `devrelay.io` にアクセスしたときにランディングページを表示
+- **ランディングページ**: `apps/landing/index.html`
+  - ダークテーマ、ASCII アート風タイトル（各文字が異なるアクセントカラー）
+  - Hero + Architecture 図 + Features + Demo + CTA
+  - 単一 HTML ファイル（外部依存なし）
+- **Caddyfile 変更**: `devrelay.io` のルーティングを変更
+  - `/api/*`, `/ws/*`, `/health` → `localhost:3005`（バックエンド）
+  - それ以外 → `apps/landing/` の静的ファイル配信
+- **README 英語化**:
+  - `README.md` → 英語版に書き換え
+  - `README_JA.md` → 日本語版として新規作成（旧 README.md の内容を移動）
+  - 相互リンク付き（`README_JA.md` は ISO 639-1 言語コードに準拠）
+  - systemd の記述を PM2 に更新
+- **主要ファイル**:
+  - `apps/landing/index.html` - 新規作成
+  - `/etc/caddy/Caddyfile` - ルーティング変更（`.devrelay-output/Caddyfile` 経由で適用）
+  - `README.md` - 英語版に書き換え
+  - `README_JA.md` - 新規作成（日本語版）
+
+#### 57. トークンにサーバーURL埋め込み (2026-02-19)
+- **目的**: セルフホスト環境でトークンを貼るだけで正しいサーバーに自動接続
+- **トークンフォーマット**:
+  - 新形式: `drl_<serverUrl_base64url>_<random64hex>`
+  - 旧形式: `machine_<random64hex>`（後方互換のためサポート継続）
+- **動作**:
+  1. WebUI でマシン追加時、サーバーの Host ヘッダーから WebSocket URL を構築
+  2. URL を Base64URL エンコードしてトークンに埋め込み
+  3. Agent の `devrelay setup` でトークン入力時に URL を自動抽出
+  4. 旧形式トークンの場合はデフォルト URL（`wss://devrelay.io/ws/agent`）を使用
+- **Base64URL**: 標準 Base64 の `+` → `-`, `/` → `_`, パディング `=` を除去
+- **主要ファイル**:
+  - `packages/shared/src/token.ts` - `encodeToken()`, `decodeTokenUrl()`, `isNewFormatToken()`, `isLegacyToken()`
+  - `packages/shared/src/index.ts` - token.ts エクスポート追加
+  - `apps/server/src/routes/api.ts` - トークン生成を新フォーマットに変更
+  - `agents/linux/src/cli/commands/setup.ts` - トークンからURL自動抽出
+  - `agents/windows/src/cli/commands/setup.ts` - 同上
+
+#### 58. devrelay-claude シンボリックリンクのフォールバック (2026-02-19)
+- **問題**: `devrelay setup` 後に Claude Code をインストールすると、シンボリックリンクが存在せず ENOENT エラー
+- **解決**: `resolveClaudePath()` 関数で段階的に解決
+  1. `~/.devrelay/bin/devrelay-claude` が存在すればそのまま使用
+  2. 存在しなければ `which claude` でフォールバック
+  3. 見つかったらシンボリックリンクも自動作成（次回以降は高速に）
+  4. claude が見つからない場合は明確なエラーメッセージ
+- **主要ファイル**:
+  - `agents/linux/src/services/ai-runner.ts` - `resolveClaudePath()` 関数追加
+
+#### 59. Heartbeat DB バッチ更新 + machineName デフォルト変更 (2026-02-21)
 - **Heartbeat DB バッチ更新**:
   - Agent の ping ごとに DB 更新していたのを、メモリ内 Map で管理し 60 秒ごとにバッチ書き込みに変更
   - `lastSeenMap` で最終確認時刻を保持、heartbeat monitor のループでまとめて flush
   - DB 負荷を大幅に削減（100 Agent で 200 writes/min → 100 writes/min）
 - **machineName デフォルト変更**:
-  - `os.hostname()` → `${os.hostname()}-${os.userInfo().username}` に変更
+  - `os.hostname()` → `${os.hostname()}/{os.userInfo().username}` に変更
   - 1 Agent = 1 User モデルに対応（同一マシン上の複数ユーザーを区別）
 - **主要ファイル**:
   - `apps/server/src/services/agent-manager.ts` - `lastSeenMap`、`handleAgentPing()` バッチ化、`startHeartbeatMonitor()` flush 追加
@@ -972,7 +1033,7 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `agents/linux/src/cli/commands/setup.ts` - machineName デフォルト変更
   - `agents/windows/src/services/config.ts` - machineName デフォルト変更
 
-#### 56. Agent ワンライナーインストール (2026-02-21)
+#### 60. Agent ワンライナーインストール (2026-02-21)
 - `curl | bash` 形式のワンライナーで Agent をインストール可能に
 - **スクリプト**: `scripts/install-agent.sh`
   - 引数: `--token`（必須）、`--server`（オプション）
@@ -987,7 +1048,7 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `scripts/install-agent.sh` - ワンライナーインストールスクリプト（新規）
   - `apps/web/src/pages/MachinesPage.tsx` - トークンモーダルにワンライナー表示追加
 
-#### 57. Machine→Agent 表記変更 + machineName スラッシュ区切り (2026-02-21)
+#### 61. Machine→Agent 表記変更 + machineName スラッシュ区切り (2026-02-21)
 - **machineName フォーマット変更**:
   - `hostname-username` → `hostname/username` に変更
   - ホスト名にハイフンがよく使われるため（例: `ubuntu-dev`）、スラッシュ区切りで明確に区別
@@ -1022,4 +1083,5 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - [ ] 進捗表示のUI改善（プログレスバーなど）
 - [ ] エラーハンドリング強化
 - [ ] WebUI（ユーザー設定画面）
-- [ ] WebUI 本番対応: nginx + 静的ファイル配信（`pnpm build` → nginx で配信）
+- [x] WebUI 本番対応: Caddy + 静的ファイル配信
+- [x] ランディングページ (devrelay.io)

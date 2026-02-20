@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DevRelay - Remote Development Hub for AI CLI Tools</title>
+  <meta name="description" content="Control AI CLI tools like Claude Code and Gemini CLI from Discord, Telegram, or LINE. A remote development hub that connects messaging apps to your dev machines.">
+  <meta property="og:title" content="DevRelay - Remote Development Hub">
+  <meta property="og:description" content="Control AI CLI tools from any messaging app. Connect Discord, Telegram, LINE to Claude Code, Gemini CLI and more.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://devrelay.io">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌉</text></svg>">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #09090f;
+      --bg2: #111119;
+      --bg-card: #16162a;
+      --bg-card-h: #1e1e3a;
+      --tx: #e2e2f0;
+      --tx2: #8585a0;
+      --tx3: #4a4a65;
+      --border: #252540;
+      --red: #ff6b6b;
+      --orange: #ff9f43;
+      --yellow: #ffd166;
+      --green: #4ecdc4;
+      --cyan: #45b7d1;
+      --blue: #6c7aee;
+      --purple: #a55eea;
+      --pink: #ff6b9d;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--tx);
+      line-height: 1.6;
+    }
+
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { opacity: 0.85; }
+
+    /* === Nav === */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      padding: 1rem 2rem;
+      background: rgba(9,9,15,0.9);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-logo { font-size: 1.3rem; font-weight: 800; letter-spacing: -0.02em; }
+    .nav-links { display: flex; gap: 1.5rem; align-items: center; }
+    .nav-links a { color: var(--tx2); font-size: 0.9rem; }
+    .nav-links a:hover { color: var(--tx); opacity: 1; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.5rem 1.2rem; border-radius: 8px;
+      font-size: 0.85rem; font-weight: 600;
+      border: none; cursor: pointer; transition: all 0.15s;
+    }
+    .btn-primary { background: var(--cyan); color: #000; }
+    .btn-primary:hover { background: #3daabe; color: #000; opacity: 1; }
+    .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--tx); }
+    .btn-outline:hover { border-color: var(--cyan); color: var(--cyan); opacity: 1; }
+
+    /* === Hero === */
+    .hero {
+      min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 7rem 2rem 5rem;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::before {
+      content: '';
+      position: absolute; top: -200px; left: 50%; transform: translateX(-50%);
+      width: 1000px; height: 600px;
+      background: radial-gradient(ellipse, rgba(69,183,209,0.08) 0%, rgba(108,122,238,0.04) 40%, transparent 70%);
+      pointer-events: none;
+    }
+
+    /* タイトル: 各文字が異なるカラー */
+    .title {
+      font-size: clamp(4rem, 12vw, 8rem);
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      margin-bottom: 1.5rem;
+      position: relative;
+    }
+    .title .D  { color: var(--red); }
+    .title .e1 { color: var(--orange); }
+    .title .v  { color: var(--yellow); }
+    .title .R  { color: var(--green); }
+    .title .e2 { color: var(--cyan); }
+    .title .l  { color: var(--blue); }
+    .title .a  { color: var(--purple); }
+    .title .y  { color: var(--pink); }
+
+    /* グロー効果 */
+    .title-glow {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      font-size: inherit; font-weight: inherit; letter-spacing: inherit; line-height: inherit;
+      filter: blur(40px); opacity: 0.3;
+      pointer-events: none; user-select: none; aria-hidden: true;
+    }
+
+    .tagline {
+      font-size: clamp(1.1rem, 2.5vw, 1.6rem);
+      font-weight: 500;
+      color: var(--tx);
+      margin-bottom: 0.75rem;
+    }
+
+    .sub {
+      font-size: clamp(0.9rem, 1.5vw, 1.05rem);
+      color: var(--tx2);
+      max-width: 550px;
+      margin-bottom: 2.5rem;
+    }
+
+    .hero-btns { display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center; }
+    .hero-btns .btn { padding: 0.75rem 2rem; font-size: 0.95rem; }
+
+    /* === Architecture === */
+    .arch {
+      padding: 5rem 2rem;
+      text-align: center;
+    }
+    .stitle { font-size: 1.6rem; font-weight: 700; margin-bottom: 0.4rem; }
+    .ssub { color: var(--tx2); margin-bottom: 2.5rem; font-size: 0.95rem; }
+
+    .arch-box {
+      font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: clamp(0.55rem, 1.15vw, 0.82rem);
+      line-height: 1.45;
+      white-space: pre;
+      color: var(--tx2);
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 2rem 2.5rem;
+      display: inline-block;
+      text-align: left;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+    .h1 { color: var(--cyan); }
+    .h2 { color: var(--green); }
+    .h3 { color: var(--yellow); }
+
+    /* === Features === */
+    .feat {
+      padding: 4rem 2rem 6rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    .feat .stitle, .feat .ssub { text-align: center; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.25rem;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.5rem;
+      transition: background 0.2s, border-color 0.2s, transform 0.2s;
+    }
+    .card:hover {
+      background: var(--bg-card-h);
+      border-color: var(--tx3);
+      transform: translateY(-3px);
+    }
+    .card-icon { font-size: 1.8rem; margin-bottom: 0.6rem; }
+    .card-title { font-size: 1rem; font-weight: 700; margin-bottom: 0.4rem; }
+    .card-desc { color: var(--tx2); font-size: 0.88rem; line-height: 1.55; }
+
+    /* === Demo === */
+    .demo { padding: 4rem 2rem; text-align: center; }
+
+    .term {
+      font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: clamp(0.72rem, 1.1vw, 0.88rem);
+      line-height: 1.65;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 0;
+      display: inline-block;
+      text-align: left;
+      max-width: 620px;
+      width: 100%;
+      overflow: hidden;
+    }
+    .term-bar {
+      display: flex; align-items: center; gap: 6px;
+      padding: 0.65rem 1rem;
+      background: rgba(255,255,255,0.03);
+      border-bottom: 1px solid var(--border);
+    }
+    .term-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+    }
+    .term-dot.r { background: #ff5f57; }
+    .term-dot.y { background: #febc2e; }
+    .term-dot.g { background: #28c840; }
+    .term-body { padding: 1.2rem 1.5rem; }
+    .p { color: var(--green); }
+    .b { color: var(--cyan); }
+    .d { color: var(--tx3); }
+
+    /* === CTA === */
+    .cta {
+      padding: 6rem 2rem;
+      text-align: center;
+      position: relative;
+    }
+    .cta::before {
+      content: '';
+      position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+      width: 600px; height: 400px;
+      background: radial-gradient(ellipse, rgba(165,94,234,0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .cta .stitle { font-size: 2rem; margin-bottom: 0.8rem; }
+    .cta .ssub { margin-bottom: 2rem; }
+
+    /* === Footer === */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem;
+      text-align: center;
+      color: var(--tx3);
+      font-size: 0.85rem;
+    }
+    footer a { color: var(--tx2); }
+
+    /* === Responsive === */
+    @media (max-width: 768px) {
+      nav { padding: 0.75rem 1rem; }
+      .nav-links { gap: 0.6rem; }
+      .grid { grid-template-columns: 1fr; }
+      .arch-box { padding: 1rem; font-size: 0.48rem; }
+      .hero { padding: 5rem 1.2rem 3rem; }
+    }
+    @media (max-width: 480px) {
+      .nav-links .hm { display: none; }
+      .title { font-size: 3.5rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="nav-logo">
+      <span class="D">D</span><span class="e1">e</span><span class="v">v</span><span class="R">R</span><span class="e2">e</span><span class="l">l</span><span class="a">a</span><span class="y">y</span>
+    </div>
+    <div class="nav-links">
+      <a href="#features" class="hm">Features</a>
+      <a href="#demo" class="hm">Demo</a>
+      <a href="https://github.com/murata1215/devrelay" class="btn btn-outline">GitHub</a>
+      <a href="https://app.devrelay.io" class="btn btn-primary">Dashboard</a>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="title" aria-label="DevRelay">
+      <span class="title-glow" aria-hidden="true">
+        <span class="D">D</span><span class="e1">e</span><span class="v">v</span><span class="R">R</span><span class="e2">e</span><span class="l">l</span><span class="a">a</span><span class="y">y</span>
+      </span>
+      <span class="D">D</span><span class="e1">e</span><span class="v">v</span><span class="R">R</span><span class="e2">e</span><span class="l">l</span><span class="a">a</span><span class="y">y</span>
+    </div>
+    <p class="tagline">Remote Development Hub for AI CLI Tools</p>
+    <p class="sub">
+      Control Claude Code, Gemini CLI, and more from Discord, Telegram, or LINE.
+      Turn your phone into a remote terminal for AI-powered development.
+    </p>
+    <div class="hero-btns">
+      <a href="https://github.com/murata1215/devrelay" class="btn btn-primary">Get Started</a>
+      <a href="https://app.devrelay.io" class="btn btn-outline">Open Dashboard</a>
+    </div>
+  </section>
+
+  <section class="arch" id="architecture">
+    <h2 class="stitle">How It Works</h2>
+    <p class="ssub">A hub that bridges messaging apps, a central server, and your dev machines</p>
+    <div class="arch-box"><span class="h1">  Messaging Apps            Center Server             Work Machines</span>
+ ┌──────────────┐          ┌──────────────┐          ┌──────────────┐
+ │ <span class="h3">Discord</span>      │          │              │          │ <span class="h2">ubuntu01</span>     │
+ │ <span class="h3">Telegram</span>     │ &lt;──────&gt; │   <span class="h1">DevRelay</span>   │ &lt;──────&gt; │ <span class="h2">ubuntu02</span>     │
+ │ <span class="h3">LINE</span>         │  HTTPS   │   Server     │    WS    │ <span class="h2">windows01</span>    │
+ └──────────────┘          └──────────────┘          └──────────────┘
+                                  │                         │
+                           ┌──────┴──────┐         ┌───────┴────────┐
+                           │ <span class="h1">PostgreSQL</span>  │         │ <span class="h2">Claude Code</span>    │
+                           │             │         │ <span class="h2">Gemini CLI</span>     │
+                           └─────────────┘         │ <span class="h2">Aider</span>          │
+                                                   └────────────────┘</div>
+  </section>
+
+  <section class="feat" id="features">
+    <h2 class="stitle">Features</h2>
+    <p class="ssub">Everything you need for remote AI-powered development</p>
+    <div class="grid">
+      <div class="card">
+        <div class="card-icon">🖥️</div>
+        <h3 class="card-title">Multi-Machine</h3>
+        <p class="card-desc">Register and switch between multiple dev machines. Work on ubuntu01, then jump to windows01 — all from your phone.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🤖</div>
+        <h3 class="card-title">Multi-AI</h3>
+        <p class="card-desc">Support for Claude Code, Gemini CLI, Aider, and more. Use the best AI tool for each project.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">💬</div>
+        <h3 class="card-title">Multi-Platform</h3>
+        <p class="card-desc">Connect via Discord, Telegram, or LINE. Use whichever messaging app you prefer.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📋</div>
+        <h3 class="card-title">Plan &amp; Execute</h3>
+        <p class="card-desc">AI creates a plan first, you review and approve, then it implements. No surprise code changes.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📡</div>
+        <h3 class="card-title">Real-time Progress</h3>
+        <p class="card-desc">Watch AI's progress live on Discord/Telegram. See what tools it's using and how far along it is.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📁</div>
+        <h3 class="card-title">File Transfer</h3>
+        <p class="card-desc">Send files to your dev machine via chat, and receive generated files back. Screenshots, logs, exports — all through chat.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🗣️</div>
+        <h3 class="card-title">Natural Language</h3>
+        <p class="card-desc">Type naturally — "reconnect to last project" auto-translates to the right command. Powered by OpenAI.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🔐</div>
+        <h3 class="card-title">Secure by Design</h3>
+        <p class="card-desc">Token-based auth, AES-256 encrypted API keys, TLS everywhere, prompts via stdin (invisible to ps).</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="demo" id="demo">
+    <h2 class="stitle">Simple Commands</h2>
+    <p class="ssub">Powerful development workflow from any chat app</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="term-dot r"></span>
+        <span class="term-dot y"></span>
+        <span class="term-dot g"></span>
+      </div>
+      <div class="term-body">
+<span class="p">You:</span>  m
+<span class="b">Bot:</span>  📡 Machines
+      1. ubuntu01 🟢
+      2. windows01 🟢
+
+<span class="p">You:</span>  1
+<span class="b">Bot:</span>  ✅ Connected to ubuntu01
+
+<span class="p">You:</span>  p
+<span class="b">Bot:</span>  📁 Projects
+      1. my-app
+      2. api-server
+
+<span class="p">You:</span>  1
+<span class="b">Bot:</span>  🚀 my-app / Claude Code ready
+
+<span class="p">You:</span>  Fix the CSS bug on the login page
+<span class="b">Bot:</span>  📊 Context: 45K / 200K (23%)
+      🤖 Analyzing the issue...
+      <span class="d">[Plan mode — reviewing code]</span>
+
+<span class="p">You:</span>  e
+<span class="b">Bot:</span>  🔧 Implementing fix...
+      <span class="d">[3 files modified, tests passing]</span>
+      ✅ Done!</div>
+    </div>
+  </section>
+
+  <section class="cta">
+    <h2 class="stitle">Ready to code from anywhere?</h2>
+    <p class="ssub">Open source and free. Set up in minutes.</p>
+    <div class="hero-btns">
+      <a href="https://github.com/murata1215/devrelay" class="btn btn-primary">View on GitHub</a>
+      <a href="https://app.devrelay.io" class="btn btn-outline">Open Dashboard</a>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      MIT License &middot;
+      <a href="https://github.com/murata1215/devrelay">GitHub</a> &middot;
+      <a href="https://app.devrelay.io">Dashboard</a>
+    </p>
+  </footer>
+
+</body>
+</html>

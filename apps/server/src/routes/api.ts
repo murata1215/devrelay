@@ -12,6 +12,7 @@ import {
   validateAndConsumeLinkCode,
   unlinkPlatform,
 } from '../services/platform-link.js';
+import { encodeToken } from '@devrelay/shared';
 
 const execAsync = promisify(exec);
 
@@ -91,8 +92,12 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(409).send({ error: 'Machine with this name already exists' });
     }
 
-    // トークン生成（machine_ プレフィックス + 32バイトのランダム文字列）
-    const token = `machine_${randomBytes(32).toString('hex')}`;
+    // トークン生成（サーバーURLを埋め込んだ新形式）
+    // リクエストの Host ヘッダーからサーバーの WebSocket URL を構築
+    const host = request.headers.host || 'localhost:3000';
+    const protocol = request.headers['x-forwarded-proto'] === 'https' || host.includes('devrelay.io') ? 'wss' : 'ws';
+    const serverWsUrl = `${protocol}://${host}/ws/agent`;
+    const token = encodeToken(serverWsUrl, randomBytes(32).toString('hex'));
 
     const machine = await prisma.machine.create({
       data: {
@@ -354,7 +359,7 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
-  // サービス再起動
+  // サービス再起動（PM2 で管理）
   // ========================================
 
   // サーバー再起動
@@ -363,7 +368,7 @@ export async function apiRoutes(app: FastifyInstance) {
       // バックグラウンドで再起動（レスポンスを返してから再起動）
       setTimeout(async () => {
         try {
-          await execAsync('systemctl --user restart devrelay-server');
+          await execAsync('pm2 restart devrelay-server');
         } catch (err) {
           console.error('Failed to restart server:', err);
         }
@@ -382,7 +387,7 @@ export async function apiRoutes(app: FastifyInstance) {
       // バックグラウンドで再起動
       setTimeout(async () => {
         try {
-          await execAsync('systemctl --user restart devrelay-agent');
+          await execAsync('pm2 restart devrelay-agent');
         } catch (err) {
           console.error('Failed to restart agent:', err);
         }
@@ -395,16 +400,16 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // サービスステータス取得
+  // サービスステータス取得（PM2 の pid コマンドでプロセス存在チェック）
   app.get('/api/services/status', async (request, reply) => {
     try {
       const [serverStatus, agentStatus] = await Promise.all([
-        execAsync('systemctl --user is-active devrelay-server').then(
-          () => 'active',
+        execAsync('pm2 pid devrelay-server').then(
+          (result) => result.stdout.trim() !== '' && result.stdout.trim() !== '0' ? 'active' : 'inactive',
           () => 'inactive'
         ),
-        execAsync('systemctl --user is-active devrelay-agent').then(
-          () => 'active',
+        execAsync('pm2 pid devrelay-agent').then(
+          (result) => result.stdout.trim() !== '' && result.stdout.trim() !== '0' ? 'active' : 'inactive',
           () => 'inactive'
         ),
       ]);

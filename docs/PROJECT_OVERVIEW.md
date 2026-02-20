@@ -14,7 +14,7 @@
 |------|---------|------|
 | アーキテクチャ | モノレポ（pnpm workspace） | Server/Agent間で型共有が必要 |
 | サーバー | Fastify + WebSocket | 軽量・高速 |
-| DB | SQLite（MVP）→ PostgreSQL（本番） | 開発効率優先 |
+| DB | PostgreSQL | 型安全、高パフォーマンス |
 | ORM | Prisma | 型安全、マイグレーション容易 |
 | メッセージング | Discord優先 → Telegram → LINE | 無料・グローバル優先 |
 | Agent | Node.js + TypeScript | Serverと言語統一 |
@@ -33,8 +33,8 @@
 └──────────────┘          └──────────────┘          └──────────────┘
                                  │                         │
                           ┌──────┴──────┐         ┌───────┴────────┐
-                          │ SQLite/     │         │ Claude Code    │
-                          │ PostgreSQL  │         │ Gemini CLI     │
+                          │ PostgreSQL  │         │ Claude Code    │
+                          │             │         │ Gemini CLI     │
                           └─────────────┘         │ Codex / Aider  │
                                                   └────────────────┘
 ```
@@ -109,7 +109,7 @@ devrelay-agent-windows/
 | コンポーネント | 技術 |
 |--------------|------|
 | Server | Fastify, @fastify/websocket |
-| DB | Prisma + SQLite/PostgreSQL |
+| DB | Prisma + PostgreSQL |
 | Discord | discord.js v14 |
 | Agent | Node.js 20+, TypeScript |
 | Build | pnpm, tsx |

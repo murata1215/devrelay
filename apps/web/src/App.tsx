@@ -101,7 +101,7 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <BrowserRouter basename="/devrelay">
+    <BrowserRouter basename="/">
       <AuthProvider>
         <AppRoutes />
       </AuthProvider>

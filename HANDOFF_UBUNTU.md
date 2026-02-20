@@ -49,7 +49,7 @@ cp .env.example .env
 
 # .envを編集
 # - DISCORD_BOT_TOKEN: Discord Developer Portalで取得
-# - DATABASE_URL: そのままでOK（SQLite）
+# - DATABASE_URL: PostgreSQL接続文字列を設定
 ```
 
 ### 4. データベース初期化

@@ -175,7 +175,7 @@ const configPath = path.join(CONFIG_DIR, 'config.yaml');
 
 1. **config.ts** を Windows パス対応に修正
    - `CONFIG_DIR` を `%APPDATA%\devrelay` に
-   - デフォルト `serverUrl` は `wss://ribbon-re.jp/devrelay-api/ws/agent`
+   - デフォルト `serverUrl` は `wss://devrelay.io/ws/agent`
 
 2. **テスト**
    - 設定ファイルの読み書き

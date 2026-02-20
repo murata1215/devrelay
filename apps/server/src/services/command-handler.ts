@@ -595,7 +595,7 @@ async function handleLink(context: UserContext): Promise<string> {
     + `\`${code}\`\n\n`
     + `このコードを DevRelay WebUI の Settings ページで入力してください。\n`
     + `⏰ 有効期限: 5分\n\n`
-    + `WebUI: https://ribbon-re.jp/devrelay/settings`;
+    + `WebUI: https://devrelay.io/settings`;
 }
 
 async function handleAgreement(context: UserContext): Promise<string> {

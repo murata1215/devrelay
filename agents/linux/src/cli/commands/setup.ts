@@ -5,6 +5,7 @@ import fs from 'fs/promises';
 import { execSync } from 'child_process';
 import { nanoid } from 'nanoid';
 import chalk from 'chalk';
+import { decodeTokenUrl } from '@devrelay/shared';
 import { loadConfig, saveConfig, ensureConfigDir } from '../../services/config.js';
 
 export async function setupCommand() {
@@ -42,7 +43,7 @@ export async function setupCommand() {
     console.log(chalk.cyan('  3. Click "+ Add Agent"'));
     console.log(chalk.cyan('  4. Copy the generated token'));
     console.log(chalk.yellow(''));
-    console.log(chalk.gray(' Dashboard URL: https://ribbon-re.jp/devrelay/machines'));
+    console.log(chalk.gray(' Dashboard URL: https://devrelay.io/machines'));
     console.log(chalk.gray('               (or your self-hosted URL)'));
     console.log(chalk.yellow('━'.repeat(50)));
     console.log();
@@ -58,9 +59,15 @@ export async function setupCommand() {
       return;
     }
 
+    // トークンからサーバーURLを自動抽出（新形式トークンの場合）
+    const tokenUrl = decodeTokenUrl(token);
+    if (tokenUrl) {
+      console.log(chalk.green(`✅ Server URL detected from token: ${tokenUrl}`));
+    }
+
     // Use defaults for machine name and server URL (can be changed later in config.yaml)
     const machineName = existingConfig.machineName || `${os.hostname()}/${os.userInfo().username}`;
-    const serverUrl = existingConfig.serverUrl || 'ws://localhost:3000/ws/agent';
+    const serverUrl = tokenUrl || existingConfig.serverUrl || 'wss://devrelay.io/ws/agent';
     const projectsDirs = existingConfig.projectsDirs || [os.homedir()];
 
     // Generate machine ID if not exists
@@ -263,6 +270,6 @@ async function ensureDevrelaySymlinks() {
     // Claude Code がインストールされていない場合などはエラーにせず警告のみ
     console.log(chalk.yellow(`⚠️ Could not create devrelay-claude symlink: ${(err as Error).message}`));
     console.log(chalk.gray('   Claude Code がインストールされていない場合は無視できます。'));
-    console.log(chalk.gray('   後でインストールした場合は、再度 devrelay setup を実行してください。'));
+    console.log(chalk.gray('   後でインストールした場合、Agent が自動的に検出・設定します。'));
   }
 }

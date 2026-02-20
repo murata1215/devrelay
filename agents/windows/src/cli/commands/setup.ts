@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { nanoid } from 'nanoid';
 import chalk from 'chalk';
+import { decodeTokenUrl } from '@devrelay/shared';
 import { loadConfig, saveConfig, ensureConfigDir, getConfigDir } from '../../services/config.js';
 
 export async function setupCommand() {
@@ -40,7 +41,7 @@ export async function setupCommand() {
     console.log(chalk.cyan('  3. Click "+ Add Machine"'));
     console.log(chalk.cyan('  4. Copy the generated token'));
     console.log(chalk.yellow(''));
-    console.log(chalk.gray(' Dashboard URL: https://ribbon-re.jp/devrelay/machines'));
+    console.log(chalk.gray(' Dashboard URL: https://devrelay.io/machines'));
     console.log(chalk.gray('               (or your self-hosted URL)'));
     console.log(chalk.yellow('='.repeat(50)));
     console.log();
@@ -56,9 +57,15 @@ export async function setupCommand() {
       return;
     }
 
+    // トークンからサーバーURLを自動抽出（新形式トークンの場合）
+    const tokenUrl = decodeTokenUrl(token);
+    if (tokenUrl) {
+      console.log(chalk.green(`✅ Server URL detected from token: ${tokenUrl}`));
+    }
+
     // Use defaults for machine name and server URL (can be changed later in config.yaml)
     const machineName = existingConfig.machineName || os.hostname();
-    const serverUrl = existingConfig.serverUrl || 'wss://ribbon-re.jp/devrelay-api/ws/agent';
+    const serverUrl = tokenUrl || existingConfig.serverUrl || 'wss://devrelay.io/ws/agent';
 
     // Default projects directories for Windows
     const projectsDirs = existingConfig.projectsDirs || [

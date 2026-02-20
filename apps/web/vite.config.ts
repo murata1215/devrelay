@@ -5,14 +5,14 @@ import pkg from './package.json'
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/devrelay/',
+  base: '/',
   plugins: [react(), tailwindcss()],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
   server: {
     port: 5173,
-    allowedHosts: ['ribbon-re.jp', 'devrelay.io'],
+    allowedHosts: ['devrelay.io'],
     proxy: {
       '/api': {
         target: 'http://localhost:3000',
