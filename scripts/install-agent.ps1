@@ -373,10 +373,12 @@ try {
 }
 
 # --- 既存の Agent プロセスを停止（再インストール対応）---
-$ExistingAgents = Get-Process node -ErrorAction SilentlyContinue |
+# Get-Process では VBS→CMD→node 経由の間接起動時に CommandLine が空になるため、
+# WMI (Get-CimInstance) を使用してフルコマンドラインを取得する
+$ExistingAgents = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like '*devrelay*' }
 if ($ExistingAgents) {
-    $ExistingAgents | Stop-Process -Force
+    $ExistingAgents | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
     Write-Host "  既存の Agent プロセスを停止しました" -ForegroundColor Yellow
     Start-Sleep -Seconds 2
 }
@@ -421,7 +423,7 @@ Write-Host ""
 
 Write-Host "管理コマンド:" -ForegroundColor Cyan
 Write-Host "  ログ確認:        Get-Content `"$LogFile`" -Tail 50" -ForegroundColor Green
-Write-Host "  停止:            Get-Process node | Where-Object { `$_.Path -like '*devrelay*' } | Stop-Process" -ForegroundColor Green
+Write-Host "  停止:            Get-CimInstance Win32_Process -Filter `"Name='node.exe'`" | Where-Object { `$_.CommandLine -like '*devrelay*' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force }" -ForegroundColor Green
 Write-Host "  手動起動:        wscript.exe `"$VbsPath`"" -ForegroundColor Green
 if ($AutoStartRegistered) {
     $StartupVbsPath = Join-Path ([Environment]::GetFolderPath("Startup")) "DevRelay Agent.vbs"
