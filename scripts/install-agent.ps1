@@ -50,6 +50,7 @@ $TaskName = "DevRelay Agent"
 # --- トークン・プロキシ取得 ---
 $Token = $env:DEVRELAY_TOKEN
 $ProxyUrl = $env:DEVRELAY_PROXY
+$Force = $env:DEVRELAY_FORCE -eq "true" -or $env:DEVRELAY_FORCE -eq "1"
 $ServerUrl = "wss://devrelay.io/ws/agent"
 
 if (-not $Token) {
@@ -184,6 +185,58 @@ if ($ProxyUrl) {
     $env:HTTP_PROXY = $ProxyUrl
     $env:HTTPS_PROXY = $ProxyUrl
 }
+
+# =============================================================================
+# トークン事前検証
+# =============================================================================
+# サーバーに問い合わせて、トークンが別のマシンに割り当て済みでないか確認する
+# 仮名（agent-*）でないマシン名が登録されていて、現在のマシンと異なる場合は中断
+if (-not $Force) {
+    # WebSocket URL → HTTP URL に変換して API ベース URL を構築
+    $ApiBaseUrl = $ServerUrl -replace '^wss://', 'https://' -replace '^ws://', 'http://' -replace '/ws/agent$', ''
+
+    Write-Host "トークンを検証中..."
+
+    try {
+        $ValidateBody = @{ token = $Token } | ConvertTo-Json
+        $ValidateResponse = Invoke-RestMethod -Uri "$ApiBaseUrl/api/public/validate-token" `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $ValidateBody `
+            -ErrorAction Stop
+
+        if (-not $ValidateResponse.valid) {
+            Write-Host ""
+            Write-Host "X エラー: 無効なトークンです" -ForegroundColor Red
+            Write-Host "  WebUI で正しいトークンを確認してください。"
+            exit 1
+        }
+
+        if ($ValidateResponse.valid -and -not $ValidateResponse.provisional) {
+            # 仮名でないマシン名が登録されている場合、現在のマシンと比較
+            $CurrentMachineName = "$env:COMPUTERNAME/$env:USERNAME"
+            if ($ValidateResponse.machineName -ne $CurrentMachineName) {
+                Write-Host ""
+                Write-Host "X エラー: このトークンは別のエージェントに割り当て済みです" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "  トークンのエージェント名:  $($ValidateResponse.machineName)" -ForegroundColor Yellow
+                Write-Host "  このマシンの名前:          $CurrentMachineName" -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "  WebUI で新しいエージェントを作成するか、"
+                Write-Host '  強制インストールする場合は $env:DEVRELAY_FORCE="true" を設定してください。'
+                Write-Host ""
+                Write-Host '  例: $env:DEVRELAY_TOKEN="..."; $env:DEVRELAY_FORCE="true"; irm ... | iex' -ForegroundColor Green
+                exit 1
+            }
+        }
+
+        Write-Host "  OK トークン検証OK" -ForegroundColor Green
+    } catch {
+        # サーバーに接続できない場合はスキップして続行
+        Write-Host "  WARNING: トークン検証をスキップしました（サーバーに接続できません）" -ForegroundColor Yellow
+    }
+}
+Write-Host ""
 
 # =============================================================================
 # Step 2: リポジトリ取得
@@ -434,5 +487,6 @@ Write-Host ""
 # 環境変数をクリア（セキュリティ）
 $env:DEVRELAY_TOKEN = $null
 $env:DEVRELAY_PROXY = $null
+$env:DEVRELAY_FORCE = $null
 $env:HTTP_PROXY = $null
 $env:HTTPS_PROXY = $null

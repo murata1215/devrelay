@@ -44,6 +44,7 @@ SERVICE_NAME="devrelay-agent"
 TOKEN=""
 SERVER_URL="wss://devrelay.io/ws/agent"
 PROXY_URL=""
+FORCE=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -59,13 +60,18 @@ while [[ $# -gt 0 ]]; do
       PROXY_URL="$2"
       shift 2
       ;;
+    --force)
+      FORCE=true
+      shift 1
+      ;;
     --help|-h)
-      echo "Usage: $0 --token YOUR_TOKEN [--server SERVER_URL] [--proxy PROXY_URL]"
+      echo "Usage: $0 --token YOUR_TOKEN [--server SERVER_URL] [--proxy PROXY_URL] [--force]"
       echo ""
       echo "Options:"
       echo "  --token   (必須) WebUI で生成したエージェントトークン"
       echo "  --server  サーバーURL (デフォルト: wss://devrelay.io/ws/agent)"
       echo "  --proxy   プロキシURL (例: http://proxy:8080, socks5://proxy:1080)"
+      echo "  --force   トークン検証をスキップ（意図的なトークン再利用時に使用）"
       exit 0
       ;;
     *)
@@ -221,6 +227,59 @@ if [ -n "$PROXY_URL" ]; then
   export HTTP_PROXY="$PROXY_URL"
   export HTTPS_PROXY="$PROXY_URL"
 fi
+
+# =============================================================================
+# トークン事前検証
+# =============================================================================
+# サーバーに問い合わせて、トークンが別のマシンに割り当て済みでないか確認する
+# 仮名（agent-*）でないマシン名が登録されていて、現在のマシンと異なる場合は中断
+if [ "$FORCE" = false ]; then
+  # WebSocket URL → HTTP URL に変換して API ベース URL を構築
+  API_BASE_URL=$(echo "$SERVER_URL" | sed 's|^wss://|https://|; s|^ws://|http://|; s|/ws/agent$||')
+
+  echo -e "🔍 トークンを検証中..."
+
+  VALIDATE_RESPONSE=$(curl -s -f -X POST "${API_BASE_URL}/api/public/validate-token" \
+    -H "Content-Type: application/json" \
+    -d "{\"token\": \"$TOKEN\"}" 2>/dev/null) || {
+    # curl 自体が失敗した場合（サーバーに到達不可など）はスキップして続行
+    echo -e "${YELLOW}  ⚠️ トークン検証をスキップしました（サーバーに接続できません）${NC}"
+    VALIDATE_RESPONSE=""
+  }
+
+  if [ -n "$VALIDATE_RESPONSE" ]; then
+    # レスポンスを解析（jq が無い環境でも動作するよう grep + cut で処理）
+    VALID=$(echo "$VALIDATE_RESPONSE" | grep -o '"valid":[a-z]*' | cut -d: -f2)
+    PROVISIONAL=$(echo "$VALIDATE_RESPONSE" | grep -o '"provisional":[a-z]*' | cut -d: -f2)
+    MACHINE_NAME_FROM_SERVER=$(echo "$VALIDATE_RESPONSE" | grep -o '"machineName":"[^"]*"' | cut -d'"' -f4)
+
+    if [ "$VALID" = "false" ]; then
+      echo -e "${RED}❌ エラー: 無効なトークンです${NC}"
+      echo -e "   WebUI で正しいトークンを確認してください。"
+      exit 1
+    fi
+
+    if [ "$VALID" = "true" ] && [ "$PROVISIONAL" = "false" ]; then
+      # 仮名でないマシン名が登録されている場合、現在のマシンと比較
+      CURRENT_MACHINE_NAME="$(hostname)/$(whoami)"
+      if [ "$MACHINE_NAME_FROM_SERVER" != "$CURRENT_MACHINE_NAME" ]; then
+        echo -e "${RED}❌ エラー: このトークンは別のエージェントに割り当て済みです${NC}"
+        echo -e ""
+        echo -e "   トークンのエージェント名:  ${YELLOW}$MACHINE_NAME_FROM_SERVER${NC}"
+        echo -e "   このマシンの名前:          ${YELLOW}$CURRENT_MACHINE_NAME${NC}"
+        echo -e ""
+        echo -e "   WebUI で新しいエージェントを作成するか、"
+        echo -e "   強制インストールする場合は ${GREEN}--force${NC} オプションを使用してください。"
+        echo -e ""
+        echo -e "   例: curl -fsSL ... | bash -s -- --token YOUR_TOKEN ${GREEN}--force${NC}"
+        exit 1
+      fi
+    fi
+
+    echo -e "${GREEN}  ✅ トークン検証OK${NC}"
+  fi
+fi
+echo ""
 
 # =============================================================================
 # Step 2: リポジトリ取得

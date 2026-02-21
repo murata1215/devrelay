@@ -9,6 +9,7 @@ import { setupTelegramBot } from './platforms/telegram.js';
 import { prisma } from './db/client.js';
 import { authRoutes } from './routes/auth.js';
 import { apiRoutes } from './routes/api.js';
+import { publicApiRoutes } from './routes/public-api.js';
 import { decrypt } from './services/user-settings.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
@@ -35,6 +36,7 @@ async function main() {
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
 
   // API routes
+  await app.register(publicApiRoutes);  // 認証不要のパブリック API（インストーラー用トークン検証など）
   await app.register(authRoutes);
   await app.register(apiRoutes);
 
