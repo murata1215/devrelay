@@ -416,7 +416,7 @@ else
 
   echo -e "  Agent をバックグラウンドで起動中..."
   cd "$AGENT_DIR/agents/linux"
-  nohup node dist/index.js > "$CONFIG_DIR/logs/agent.log" 2>&1 &
+  nohup node dist/index.js < /dev/null > "$CONFIG_DIR/logs/agent.log" 2>&1 &
   AGENT_PID=$!
   sleep 3
 
