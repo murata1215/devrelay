@@ -189,10 +189,15 @@ async function installWindowsAutoStart(machineName: string) {
   // logs ディレクトリを確保
   await fs.mkdir(path.join(configDir, 'logs'), { recursive: true });
 
-  // VBS ランチャースクリプトを作成
+  // CMD バッチファイルを作成（node 実行 + ログリダイレクト担当）
+  const cmdPath = path.join(binDir, 'start-agent.cmd');
+  const cmdContent = `@echo off\r\n"${nodePath}" "${agentIndex}" >> "${logFile}" 2>&1\r\n`;
+  await fs.writeFile(cmdPath, cmdContent, 'utf-8');
+
+  // VBS ランチャースクリプトを作成（CMD を非表示で起動するだけ）
   // WScript.Shell.Run の第2引数=0 でウィンドウなし、第3引数=False で非同期実行
   const vbsPath = path.join(binDir, 'start-agent.vbs');
-  const vbsContent = `' DevRelay Agent ランチャー\r\n' ウィンドウなしで Agent をバックグラウンド起動する\r\nSet WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run "cmd /c """"${nodePath}"""" """"${agentIndex}"""" >> """"${logFile}"""" 2>&1", 0, False\r\n`;
+  const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run """${cmdPath}""", 0, False\r\n`;
   await fs.writeFile(vbsPath, vbsContent, 'utf-8');
 
   // Startup フォルダにコピーして自動起動を登録

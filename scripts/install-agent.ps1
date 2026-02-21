@@ -256,15 +256,15 @@ $AgentEntry = Join-Path $AgentDir "agents\linux\dist\index.js"
 $NodePath = (Get-Command node).Source
 $LogFile = Join-Path $LogDir "agent.log"
 
-# --- VBS ランチャースクリプトを作成 ---
-# WScript.Shell.Run でウィンドウなし（第2引数=0）＋ログリダイレクト付きで node を起動
+# --- CMD バッチファイルを作成（node 実行 + ログリダイレクト担当）---
+$CmdPath = Join-Path $BinDir "start-agent.cmd"
+$CmdContent = "@echo off`r`n`"$NodePath`" `"$AgentEntry`" >> `"$LogFile`" 2>&1`r`n"
+Set-Content -Path $CmdPath -Value $CmdContent -Encoding ASCII
+Write-Host "  OK バッチファイル作成: $CmdPath" -ForegroundColor Green
+
+# --- VBS ランチャースクリプトを作成（CMD を非表示で起動するだけ）---
 $VbsPath = Join-Path $BinDir "start-agent.vbs"
-$VbsContent = @"
-' DevRelay Agent ランチャー
-' ウィンドウなしで Agent をバックグラウンド起動する
-Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run "cmd /c """"$NodePath"""" """"$AgentEntry"""" >> """"$LogFile"""" 2>&1", 0, False
-"@
+$VbsContent = "Set WshShell = CreateObject(`"WScript.Shell`")`r`nWshShell.Run `"""""$CmdPath"""""`, 0, False`r`n"
 Set-Content -Path $VbsPath -Value $VbsContent -Encoding ASCII
 Write-Host "  OK ランチャー作成: $VbsPath" -ForegroundColor Green
 
