@@ -1285,6 +1285,12 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `agents/linux/src/services/connection.ts` - `handleAiPrompt()` に try/catch 追加
   - `agents/linux/src/services/ai-runner.ts` - `resolveClaudePath()` エラーメッセージ変更
+- **インストーラー追加修正**:
+  - **nohup stdin fix**: `curl|bash` で nohup 起動時に `< /dev/null` を追加（バックグラウンドプロセスが stdin を消費してスクリプト後半が実行されない問題を修正）
+  - **pgrep パターン修正**: `node.*devrelay.*index.js` → `\.devrelay.*index\.js` に変更（`~/.devrelay/node/bin/node agents/linux/dist/index.js` のように node パスに devrelay が含まれる場合にマッチしなかった問題を修正）
+  - **kill || true**: `set -e` 環境下で kill 失敗時にスクリプトが停止しないように `|| true` を追加
+- **主要ファイル（追加修正）**:
+  - `scripts/install-agent.sh` - nohup stdin fix、pgrep パターン修正、kill || true
 
 ## 今後の課題
 

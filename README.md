@@ -373,6 +373,7 @@ agents/windows/
 - [x] Auto-restart agent on re-install (stop existing process before starting new one)
 - [x] AI error handling improvement (catch errors, notify Discord/Telegram instead of crashing)
 - [x] nohup stdin fix for `curl|bash` compatibility
+- [x] Fix pgrep pattern for agent process detection on re-install
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features
