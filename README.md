@@ -251,7 +251,7 @@ pm2 startup
 
 ### Proxy Configuration
 
-The one-liner installers prompt for proxy settings during installation. You can also specify proxy via CLI arguments or environment variables:
+The one-liner installers prompt for proxy settings during installation. When a proxy is configured, `HTTP_PROXY`/`HTTPS_PROXY` are automatically set so that `git clone` and `pnpm install` also use the proxy. You can also specify proxy via CLI arguments or environment variables:
 
 ```bash
 # Linux: interactive prompt during install (answer y/N when asked)

@@ -137,6 +137,8 @@ if (-not $PnpmCmd) {
         try {
             # cmd /c 経由で npm.cmd を直接呼び出し（npm.ps1 の ExecutionPolicy 問題を回避）
             cmd /c "npm install -g pnpm" 2>$null
+            # npm install -g 後は PATH が更新されているので、PowerShell 側も環境変数をリフレッシュ
+            $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
             $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
         } catch {}
     }
@@ -175,6 +177,12 @@ if (-not $ProxyUrl) {
         }
     }
     Write-Host ""
+}
+
+# プロキシが設定されている場合、git/pnpm/npm でもプロキシを使うよう環境変数をセット
+if ($ProxyUrl) {
+    $env:HTTP_PROXY = $ProxyUrl
+    $env:HTTPS_PROXY = $ProxyUrl
 }
 
 # =============================================================================
@@ -413,3 +421,5 @@ Write-Host ""
 # 環境変数をクリア（セキュリティ）
 $env:DEVRELAY_TOKEN = $null
 $env:DEVRELAY_PROXY = $null
+$env:HTTP_PROXY = $null
+$env:HTTPS_PROXY = $null

@@ -1214,6 +1214,13 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - 依存チェック後に `Read-Host` で対話プロンプト（`irm | iex` 中でもコンソールから読み取れる）
   - config.yaml の新規作成・既存更新の両方で `proxy:` セクション対応
   - 完了メッセージにプロキシ URL 表示、`$env:DEVRELAY_PROXY` クリーンアップ
+- **プロキシ環境変数の自動設定**:
+  - プロキシ URL 入力後、`HTTP_PROXY` / `HTTPS_PROXY` 環境変数を自動セット
+  - `git clone`, `pnpm install`, Electron バイナリダウンロード等が全てプロキシ経由に
+  - 問題: config.yaml にのみ書き込み、環境変数未設定だと `pnpm install` がプロキシを通さず ECONNRESET で失敗していた
+- **pnpm 自動インストール後の PATH リフレッシュ**:
+  - `npm install -g pnpm` 成功後に `$env:Path` をレジストリから再読み込み
+  - 問題: PowerShell が PATH をキャッシュするため、インストール直後の `Get-Command pnpm` が失敗していた
 - **WebUI (`apps/web/src/pages/MachinesPage.tsx`)**:
   - 作成直後モーダル・設定モーダルのヒントテキストにプロキシ対応の案内追加
 - **使用例**:
