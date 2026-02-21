@@ -390,8 +390,10 @@ function resolveClaudePath(): string {
   } catch {
     throw new Error(
       'Claude Code が見つかりません。以下を確認してください:\n' +
-      '  1. Claude Code をインストール: curl -fsSL https://claude.ai/install.sh | bash\n' +
-      '  2. インストール後、Agent を再起動してください'
+      '  セットアップガイド: https://code.claude.com/docs/ja/setup\n' +
+      '  Linux:   curl -fsSL https://claude.ai/install.sh | bash\n' +
+      '  Windows: irm https://claude.ai/install.ps1 | iex\n' +
+      '  インストール後、Agent を再起動してください'
     );
   }
 }
