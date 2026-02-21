@@ -407,9 +407,9 @@ else
   echo ""
 
   # 既存の Agent プロセスを停止（再インストール対応）
-  EXISTING_PID=$(pgrep -u "$(whoami)" -f "node.*devrelay.*index.js" 2>/dev/null)
+  EXISTING_PID=$(pgrep -u "$(whoami)" -f "\.devrelay.*index\.js" 2>/dev/null)
   if [ -n "$EXISTING_PID" ]; then
-    kill $EXISTING_PID 2>/dev/null
+    kill $EXISTING_PID 2>/dev/null || true
     echo -e "  ${YELLOW}既存の Agent プロセスを停止しました (PID: $EXISTING_PID)${NC}"
     sleep 2
   fi
