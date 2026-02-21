@@ -1182,6 +1182,25 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `scripts/install-agent.ps1` - ExecutionPolicy 自動設定（冒頭）、pnpm 自動インストール（Step 1）
 
+#### 68. Agent 設定モーダル + アンインストール用ワンライナー (2026-02-21)
+- **目的**: Agent 作成直後しか表示されなかったトークンモーダルを、既存 Agent からも開けるようにする
+- **Agent 設定モーダル**:
+  - Agent 一覧でAgent 名をクリック → API でトークン取得 → 設定モーダル表示
+  - Token 表示 + Copy
+  - Quick Install（Linux/Windows タブ切り替え）+ Copy
+  - Uninstall（`<details>` で折りたたみ、OS タブ連動）+ Copy
+- **トークン取得 API**:
+  - `GET /api/machines/:id/token` エンドポイント追加
+  - ユーザーが所有するマシンのトークンのみ返す
+- **アンインストールコマンド**:
+  - Linux: `sudo systemctl stop devrelay-agent; ... rm -rf ~/.devrelay`
+  - Windows: `Get-Process node ... | Stop-Process -Force; Remove-Item ... -Recurse -Force`
+- **共通コンポーネント化**: `OsTabButtons`, `CommandBlock` を作成直後モーダルと設定モーダルで共有
+- **主要ファイル**:
+  - `apps/server/src/routes/api.ts` - `GET /api/machines/:id/token` エンドポイント
+  - `apps/web/src/lib/api.ts` - `machines.getToken()` メソッド追加
+  - `apps/web/src/pages/MachinesPage.tsx` - Agent 設定モーダル、アンインストールコマンド、共通コンポーネント
+
 ## 今後の課題
 
 - [ ] LINE 対応

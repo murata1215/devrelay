@@ -353,6 +353,7 @@ agents/windows/
 - [x] Agent restart session continuity (seamless session recovery after agent restart)
 - [x] Windows CLI Agent (cross-platform codebase + PowerShell one-liner installer)
 - [x] PowerShell installer auto-setup (ExecutionPolicy + pnpm auto-install)
+- [x] Agent settings modal (token re-display, install/uninstall commands)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

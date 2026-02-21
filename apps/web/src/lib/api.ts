@@ -116,6 +116,11 @@ export const machines = {
   async delete(id: string): Promise<void> {
     await request('DELETE', `/machines/${id}`);
   },
+
+  /** 既存エージェントのトークンを取得 */
+  async getToken(id: string): Promise<{ token: string }> {
+    return request('GET', `/machines/${id}/token`);
+  },
 };
 
 export const projects = {

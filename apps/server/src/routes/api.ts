@@ -128,6 +128,27 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // マシン（Agent）トークン取得
+  // ========================================
+  app.get('/api/machines/:id/token', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+
+    /** ユーザーが所有するマシンのトークンを取得 */
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId },
+      select: { token: true },
+    });
+
+    if (!machine) {
+      return reply.status(404).send({ error: 'Machine not found' });
+    }
+
+    return { token: machine.token };
+  });
+
+  // ========================================
   // マシン（Agent）削除
   // ========================================
   app.delete('/api/machines/:id', async (request, reply) => {

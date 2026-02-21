@@ -10,7 +10,7 @@ export function MachinesPage() {
   // 新規マシン登録
   const [creating, setCreating] = useState(false);
 
-  // トークン表示モーダル
+  // トークン表示モーダル（Agent 作成直後）
   const [showTokenModal, setShowTokenModal] = useState(false);
   const [newMachine, setNewMachine] = useState<MachineCreateResponse | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
@@ -18,6 +18,15 @@ export function MachinesPage() {
 
   // OS タブ切り替え（Linux / Windows）
   const [installOs, setInstallOs] = useState<'linux' | 'windows'>('linux');
+
+  // Agent 設定モーダル（既存 Agent の詳細表示）
+  const [settingsTarget, setSettingsTarget] = useState<Machine | null>(null);
+  const [settingsToken, setSettingsToken] = useState('');
+  const [settingsTokenLoading, setSettingsTokenLoading] = useState(false);
+  const [settingsTokenCopied, setSettingsTokenCopied] = useState(false);
+  const [settingsInstallCopied, setSettingsInstallCopied] = useState(false);
+  const [settingsUninstallCopied, setSettingsUninstallCopied] = useState(false);
+  const [settingsOs, setSettingsOs] = useState<'linux' | 'windows'>('linux');
 
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
@@ -69,6 +78,31 @@ export function MachinesPage() {
     }
   };
 
+  /** Agent 名クリック時: トークンを取得して設定モーダルを表示 */
+  const handleOpenSettings = async (machine: Machine) => {
+    setSettingsTarget(machine);
+    setSettingsTokenLoading(true);
+    setSettingsToken('');
+    try {
+      const result = await machines.getToken(machine.id);
+      setSettingsToken(result.token);
+    } catch (err) {
+      setSettingsToken('(Failed to load token)');
+    } finally {
+      setSettingsTokenLoading(false);
+    }
+  };
+
+  /** 設定モーダルを閉じる */
+  const closeSettings = () => {
+    setSettingsTarget(null);
+    setSettingsToken('');
+    setSettingsTokenCopied(false);
+    setSettingsInstallCopied(false);
+    setSettingsUninstallCopied(false);
+    setSettingsOs('linux');
+  };
+
   const handleDelete = async () => {
     if (!deleteTarget) return;
 
@@ -109,16 +143,25 @@ export function MachinesPage() {
   };
 
   // ワンライナーインストールコマンドを生成（OS 別）
-  const getInstallCommand = (os: 'linux' | 'windows' = 'linux') => {
-    if (!newMachine) return '';
+  const getInstallCommand = (token: string, os: 'linux' | 'windows' = 'linux') => {
+    if (!token) return '';
     if (os === 'windows') {
-      return `$env:DEVRELAY_TOKEN="${newMachine.token}"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex`;
+      return `$env:DEVRELAY_TOKEN="${token}"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex`;
     }
-    return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${newMachine.token}`;
+    return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${token}`;
+  };
+
+  /** アンインストールコマンドを生成（OS 別） */
+  const getUninstallCommand = (os: 'linux' | 'windows' = 'linux') => {
+    if (os === 'windows') {
+      return `Get-Process node -EA 0 | Where-Object { $_.Path -like '*devrelay*' } | Stop-Process -Force; Remove-Item "$([Environment]::GetFolderPath('Startup'))\\DevRelay Agent.vbs" -EA 0; Remove-Item "$env:APPDATA\\devrelay" -Recurse -Force`;
+    }
+    return `sudo systemctl stop devrelay-agent 2>/dev/null; sudo systemctl disable devrelay-agent 2>/dev/null; crontab -l 2>/dev/null | grep -v devrelay | crontab -; pkill -f "devrelay.*index.js"; rm -rf ~/.devrelay`;
   };
 
   const copyInstallCommand = () => {
-    copyToClipboard(getInstallCommand(installOs), () => {
+    if (!newMachine) return;
+    copyToClipboard(getInstallCommand(newMachine.token, installOs), () => {
       setInstallCopied(true);
       setTimeout(() => setInstallCopied(false), 2000);
     });
@@ -139,6 +182,61 @@ export function MachinesPage() {
       </div>
     );
   }
+
+  /** OS タブ切り替えボタンの共通コンポーネント */
+  const OsTabButtons = ({
+    currentOs,
+    onSwitch,
+  }: {
+    currentOs: 'linux' | 'windows';
+    onSwitch: (os: 'linux' | 'windows') => void;
+  }) => (
+    <div className="flex">
+      <button
+        onClick={() => onSwitch('linux')}
+        className={`px-3 py-1 text-xs rounded-l transition-colors ${
+          currentOs === 'linux'
+            ? 'bg-blue-600 text-white'
+            : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+        }`}
+      >
+        Linux
+      </button>
+      <button
+        onClick={() => onSwitch('windows')}
+        className={`px-3 py-1 text-xs rounded-r transition-colors ${
+          currentOs === 'windows'
+            ? 'bg-blue-600 text-white'
+            : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+        }`}
+      >
+        Windows
+      </button>
+    </div>
+  );
+
+  /** コマンド表示 + コピーボタンの共通コンポーネント */
+  const CommandBlock = ({
+    command,
+    copied,
+    onCopy,
+  }: {
+    command: string;
+    copied: boolean;
+    onCopy: () => void;
+  }) => (
+    <div className="flex items-start space-x-2">
+      <code className="flex-1 bg-gray-900 text-blue-400 px-4 py-2 rounded-lg text-xs break-all leading-relaxed">
+        {command}
+      </code>
+      <button
+        onClick={onCopy}
+        className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0"
+      >
+        {copied ? 'Copied!' : 'Copy'}
+      </button>
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -187,7 +285,14 @@ export function MachinesPage() {
                 {data.map((machine) => (
                   <tr key={machine.id} className="group hover:bg-gray-700/30 transition-colors">
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-white font-medium">{machine.name}</span>
+                      {/* Agent 名クリックで設定モーダルを開く */}
+                      <button
+                        onClick={() => handleOpenSettings(machine)}
+                        className="text-white font-medium hover:text-blue-400 transition-colors cursor-pointer"
+                        title="Open agent settings"
+                      >
+                        {machine.name}
+                      </button>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span
@@ -255,7 +360,14 @@ export function MachinesPage() {
                   </svg>
                 </button>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-white font-medium">{machine.name}</span>
+                  {/* モバイルでも Agent 名クリックで設定モーダルを開く */}
+                  <button
+                    onClick={() => handleOpenSettings(machine)}
+                    className="text-white font-medium hover:text-blue-400 transition-colors cursor-pointer"
+                    title="Open agent settings"
+                  >
+                    {machine.name}
+                  </button>
                   <span
                     className={`px-2 py-1 rounded text-xs font-medium ${
                       machine.status === 'online'
@@ -285,7 +397,7 @@ export function MachinesPage() {
         </>
       )}
 
-      {/* トークン表示モーダル */}
+      {/* トークン表示モーダル（Agent 作成直後） */}
       {showTokenModal && newMachine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg mx-4">
@@ -310,44 +422,17 @@ export function MachinesPage() {
             <div className="mb-4">
               <div className="flex items-center space-x-2 mb-2">
                 <label className="block text-gray-400 text-sm">Quick Install</label>
-                <div className="flex">
-                  <button
-                    onClick={() => setInstallOs('linux')}
-                    className={`px-3 py-1 text-xs rounded-l transition-colors ${
-                      installOs === 'linux'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                    }`}
-                  >
-                    Linux
-                  </button>
-                  <button
-                    onClick={() => setInstallOs('windows')}
-                    className={`px-3 py-1 text-xs rounded-r transition-colors ${
-                      installOs === 'windows'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                    }`}
-                  >
-                    Windows
-                  </button>
-                </div>
+                <OsTabButtons currentOs={installOs} onSwitch={setInstallOs} />
               </div>
-              <div className="flex items-start space-x-2">
-                <code className="flex-1 bg-gray-900 text-blue-400 px-4 py-2 rounded-lg text-xs break-all leading-relaxed">
-                  {getInstallCommand(installOs)}
-                </code>
-                <button
-                  onClick={copyInstallCommand}
-                  className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0"
-                >
-                  {installCopied ? 'Copied!' : 'Copy'}
-                </button>
-              </div>
+              <CommandBlock
+                command={getInstallCommand(newMachine.token, installOs)}
+                copied={installCopied}
+                onCopy={copyInstallCommand}
+              />
               <div className="text-gray-500 text-xs mt-2">
                 {installOs === 'linux'
-                  ? 'Requires: Node.js 20+, git, pnpm'
-                  : 'Run in PowerShell. Requires: Node.js 20+, git, pnpm'}
+                  ? 'Requires: Node.js 20+, git'
+                  : 'Run in PowerShell. Requires: Node.js 20+, git'}
               </div>
             </div>
             <div className="flex justify-end">
@@ -362,6 +447,98 @@ export function MachinesPage() {
                 className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Agent 設定モーダル（既存 Agent の詳細表示） */}
+      {settingsTarget && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-white mb-4">
+              Agent Settings: {settingsTarget.name}
+            </h2>
+
+            {/* トークン表示 */}
+            <div className="mb-4">
+              <label className="block text-gray-400 text-sm mb-2">Token</label>
+              {settingsTokenLoading ? (
+                <div className="bg-gray-900 px-4 py-2 rounded-lg text-gray-500 text-sm">Loading...</div>
+              ) : (
+                <div className="flex items-center space-x-2">
+                  <code className="flex-1 bg-gray-900 text-green-400 px-4 py-2 rounded-lg text-sm break-all">
+                    {settingsToken}
+                  </code>
+                  <button
+                    onClick={() => {
+                      copyToClipboard(settingsToken, () => {
+                        setSettingsTokenCopied(true);
+                        setTimeout(() => setSettingsTokenCopied(false), 2000);
+                      });
+                    }}
+                    className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0"
+                  >
+                    {settingsTokenCopied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* インストールコマンド */}
+            <div className="mb-4">
+              <div className="flex items-center space-x-2 mb-2">
+                <label className="block text-gray-400 text-sm">Quick Install</label>
+                <OsTabButtons currentOs={settingsOs} onSwitch={setSettingsOs} />
+              </div>
+              <CommandBlock
+                command={getInstallCommand(settingsToken, settingsOs)}
+                copied={settingsInstallCopied}
+                onCopy={() => {
+                  copyToClipboard(getInstallCommand(settingsToken, settingsOs), () => {
+                    setSettingsInstallCopied(true);
+                    setTimeout(() => setSettingsInstallCopied(false), 2000);
+                  });
+                }}
+              />
+              <div className="text-gray-500 text-xs mt-2">
+                {settingsOs === 'linux'
+                  ? 'Requires: Node.js 20+, git'
+                  : 'Run in PowerShell. Requires: Node.js 20+, git'}
+              </div>
+            </div>
+
+            {/* アンインストールコマンド（折りたたみ） */}
+            <details className="mb-4">
+              <summary className="text-gray-400 text-sm cursor-pointer hover:text-gray-300 transition-colors">
+                Uninstall
+              </summary>
+              <div className="mt-2">
+                <CommandBlock
+                  command={getUninstallCommand(settingsOs)}
+                  copied={settingsUninstallCopied}
+                  onCopy={() => {
+                    copyToClipboard(getUninstallCommand(settingsOs), () => {
+                      setSettingsUninstallCopied(true);
+                      setTimeout(() => setSettingsUninstallCopied(false), 2000);
+                    });
+                  }}
+                />
+                <div className="text-gray-500 text-xs mt-2">
+                  {settingsOs === 'linux'
+                    ? 'Stops agent, removes systemd service/crontab, deletes ~/.devrelay'
+                    : 'Stops agent, removes auto-start, deletes %APPDATA%\\devrelay'}
+                </div>
+              </div>
+            </details>
+
+            <div className="flex justify-end">
+              <button
+                onClick={closeSettings}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+              >
+                Close
               </button>
             </div>
           </div>
