@@ -248,7 +248,7 @@ if ($ClaudeCmd) {
 Write-Host ""
 
 # =============================================================================
-# Step 6: タスクスケジューラ登録 + 起動
+# Step 6: VBS ランチャー作成 + 自動起動登録 + 即時起動
 # =============================================================================
 Write-Host "[6/6] Agent を起動中..."
 
@@ -256,44 +256,58 @@ $AgentEntry = Join-Path $AgentDir "agents\linux\dist\index.js"
 $NodePath = (Get-Command node).Source
 $LogFile = Join-Path $LogDir "agent.log"
 
-# タスクスケジューラにログオン時自動起動を登録
-$TaskRegistered = $false
-try {
-    # 既存タスクを削除（エラーは無視）
-    schtasks /Delete /TN $TaskName /F 2>$null | Out-Null
+# --- VBS ランチャースクリプトを作成 ---
+# WScript.Shell.Run でウィンドウなし（第2引数=0）＋ログリダイレクト付きで node を起動
+$VbsPath = Join-Path $BinDir "start-agent.vbs"
+$VbsContent = @"
+' DevRelay Agent ランチャー
+' ウィンドウなしで Agent をバックグラウンド起動する
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "cmd /c """"$NodePath"""" """"$AgentEntry"""" >> """"$LogFile"""" 2>&1", 0, False
+"@
+Set-Content -Path $VbsPath -Value $VbsContent -Encoding ASCII
+Write-Host "  OK ランチャー作成: $VbsPath" -ForegroundColor Green
 
-    # 新規タスク登録
-    $TaskAction = "`"$NodePath`" `"$AgentEntry`""
-    schtasks /Create /TN $TaskName /TR $TaskAction /SC ONLOGON /F /RL LIMITED | Out-Null
-    $TaskRegistered = $true
-    Write-Host "  OK タスクスケジューラに登録完了（ログオン時自動起動）" -ForegroundColor Green
-    Write-Host "  ステータス確認: schtasks /Query /TN `"$TaskName`"" -ForegroundColor Yellow
+# --- 自動起動登録（Startup フォルダにコピー）---
+$AutoStartRegistered = $false
+try {
+    $StartupDir = [Environment]::GetFolderPath("Startup")
+    $StartupVbs = Join-Path $StartupDir "DevRelay Agent.vbs"
+    Copy-Item -Path $VbsPath -Destination $StartupVbs -Force
+    $AutoStartRegistered = $true
+    Write-Host "  OK 自動起動登録完了（Startup フォルダ）" -ForegroundColor Green
 } catch {
-    Write-Host "  WARNING: タスクスケジューラへの登録に失敗しました" -ForegroundColor Yellow
+    # Startup フォルダ失敗時はタスクスケジューラをフォールバック
+    try {
+        $TaskAction = "`"wscript.exe`" `"$VbsPath`""
+        schtasks /Delete /TN $TaskName /F 2>$null | Out-Null
+        schtasks /Create /TN $TaskName /TR $TaskAction /SC ONLOGON /F /RL LIMITED | Out-Null
+        $AutoStartRegistered = $true
+        Write-Host "  OK 自動起動登録完了（タスクスケジューラ）" -ForegroundColor Green
+    } catch {
+        Write-Host "  WARNING: 自動起動の登録に失敗しました（手動起動は可能）" -ForegroundColor Yellow
+    }
 }
 
-# Agent をバックグラウンドで即時起動
+# --- Agent をバックグラウンドで即時起動 ---
 $AgentStarted = $false
 try {
-    Start-Process -FilePath $NodePath -ArgumentList "`"$AgentEntry`"" -WindowStyle Hidden -RedirectStandardOutput $LogFile -RedirectStandardError $LogFile
+    # wscript.exe で VBS を実行（ウィンドウなしで node が起動する）
+    Start-Process -FilePath "wscript.exe" -ArgumentList "`"$VbsPath`""
     Start-Sleep -Seconds 3
 
     # プロセス確認
-    $AgentProcess = Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.CommandLine -like "*devrelay*" } catch { $false }
-    }
-    if ($AgentProcess) {
-        $AgentStarted = $true
-        Write-Host "  OK Agent 起動成功 (PID: $($AgentProcess.Id))" -ForegroundColor Green
-    } else {
-        # CommandLine が取得できない場合でも node プロセスが起動していれば成功とみなす
+    $NodeProcesses = Get-Process -Name "node" -ErrorAction SilentlyContinue
+    if ($NodeProcesses) {
         $AgentStarted = $true
         Write-Host "  OK Agent をバックグラウンドで起動しました" -ForegroundColor Green
+    } else {
+        Write-Host "  WARNING: Agent プロセスの確認に失敗（起動中の可能性あり）" -ForegroundColor Yellow
     }
     Write-Host "  ログ: $LogFile" -ForegroundColor Yellow
 } catch {
     Write-Host "  X Agent の起動に失敗しました" -ForegroundColor Red
-    Write-Host "  ログを確認: Get-Content `"$LogFile`"" -ForegroundColor Yellow
+    Write-Host "  手動起動: wscript.exe `"$VbsPath`"" -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -310,15 +324,13 @@ Write-Host "  設定ファイル:    $ConfigFile" -ForegroundColor Green
 Write-Host "  サーバーURL:     $ServerUrl" -ForegroundColor Green
 Write-Host ""
 
-if ($TaskRegistered) {
-    Write-Host "管理コマンド:" -ForegroundColor Cyan
-    Write-Host "  ステータス確認:  schtasks /Query /TN `"$TaskName`"" -ForegroundColor Green
-    Write-Host "  ログ確認:        Get-Content `"$LogFile`" -Tail 50" -ForegroundColor Green
-    Write-Host "  停止:            schtasks /End /TN `"$TaskName`"" -ForegroundColor Green
-    Write-Host "  アンインストール: schtasks /Delete /TN `"$TaskName`" /F" -ForegroundColor Green
-} else {
-    Write-Host "手動起動:" -ForegroundColor Cyan
-    Write-Host "  node `"$AgentEntry`"" -ForegroundColor Green
+Write-Host "管理コマンド:" -ForegroundColor Cyan
+Write-Host "  ログ確認:        Get-Content `"$LogFile`" -Tail 50" -ForegroundColor Green
+Write-Host "  停止:            Get-Process node | Where-Object { `$_.Path -like '*devrelay*' } | Stop-Process" -ForegroundColor Green
+Write-Host "  手動起動:        wscript.exe `"$VbsPath`"" -ForegroundColor Green
+if ($AutoStartRegistered) {
+    $StartupVbsPath = Join-Path ([Environment]::GetFolderPath("Startup")) "DevRelay Agent.vbs"
+    Write-Host "  自動起動解除:    Remove-Item `"$StartupVbsPath`"" -ForegroundColor Green
 }
 Write-Host ""
 

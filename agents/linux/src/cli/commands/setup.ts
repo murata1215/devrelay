@@ -100,21 +100,22 @@ export async function setupCommand() {
       // Windows: タスクスケジューラ
       console.log();
       console.log(chalk.blue('Auto-start options:'));
-      console.log(chalk.gray('  1. Task Scheduler (recommended) - starts agent at logon'));
+      console.log(chalk.gray('  1. Startup folder (recommended) - starts agent at logon'));
       console.log(chalk.gray('  2. Skip - start manually'));
       console.log();
 
       serviceChoice = await question('Install auto-start? (1/2)', '1');
 
       if (serviceChoice === '1') {
-        await installWindowsScheduledTask(machineName);
+        await installWindowsAutoStart(machineName);
       }
 
       console.log(chalk.green('\n🎉 Setup complete!'));
       console.log();
       console.log('Next steps:');
       if (serviceChoice === '1') {
-        console.log(chalk.cyan('  1. Check status:     schtasks /Query /TN "DevRelay Agent"'));
+        const vbsPath = path.join(getBinDir(), 'start-agent.vbs');
+        console.log(chalk.cyan(`  1. Start agent:      wscript.exe "${vbsPath}"`));
         console.log(chalk.cyan(`  2. View logs:        type "${path.join(getConfigDir(), 'logs', 'agent.log')}"`));
       } else {
         const agentIndex = getAgentIndexPath();
@@ -170,44 +171,64 @@ function getAgentIndexPath(): string {
 }
 
 /**
- * Windows タスクスケジューラに自動起動タスクを登録する
+ * Windows の自動起動を Startup フォルダ + VBS ランチャーで登録する
  *
- * schtasks コマンドを使用（全 PowerShell バージョンで動作）。
- * ログオン時に Agent を自動起動するタスクを作成し、即座に実行する。
+ * タスクスケジューラは管理者権限が必要なため、Startup フォルダを使用。
+ * VBS スクリプトで node をウィンドウなしバックグラウンド起動する。
+ * Startup フォルダ失敗時はタスクスケジューラにフォールバック。
  *
- * @param machineName - Agent のマシン名（タスク説明に使用）
+ * @param machineName - Agent のマシン名（表示用）
  */
-async function installWindowsScheduledTask(machineName: string) {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-  const agentDir = path.resolve(__dirname, '../..');
-  const agentIndex = path.join(agentDir, 'index.js');
+async function installWindowsAutoStart(machineName: string) {
+  const agentIndex = getAgentIndexPath();
   const nodePath = process.execPath;
+  const configDir = getConfigDir();
+  const binDir = getBinDir();
+  const logFile = path.join(configDir, 'logs', 'agent.log');
 
+  // logs ディレクトリを確保
+  await fs.mkdir(path.join(configDir, 'logs'), { recursive: true });
+
+  // VBS ランチャースクリプトを作成
+  // WScript.Shell.Run の第2引数=0 でウィンドウなし、第3引数=False で非同期実行
+  const vbsPath = path.join(binDir, 'start-agent.vbs');
+  const vbsContent = `' DevRelay Agent ランチャー\r\n' ウィンドウなしで Agent をバックグラウンド起動する\r\nSet WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run "cmd /c """"${nodePath}"""" """"${agentIndex}"""" >> """"${logFile}"""" 2>&1", 0, False\r\n`;
+  await fs.writeFile(vbsPath, vbsContent, 'utf-8');
+
+  // Startup フォルダにコピーして自動起動を登録
   try {
-    const taskName = 'DevRelay Agent';
+    // Startup フォルダパスを取得（PowerShell で [Environment]::GetFolderPath 相当）
+    const startupDir = path.join(
+      process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
+      'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'
+    );
+    await fs.mkdir(startupDir, { recursive: true });
+    const startupVbs = path.join(startupDir, 'DevRelay Agent.vbs');
+    await fs.copyFile(vbsPath, startupVbs);
 
-    // schtasks でログオン時自動起動タスクを登録
-    // /RL LIMITED: 管理者権限不要で実行
-    // /F: 既存タスクがあれば上書き
-    const createCmd = `schtasks /Create /TN "${taskName}" /TR "\\"${nodePath}\\" \\"${agentIndex}\\"" /SC ONLOGON /F /RL LIMITED`;
-    execSync(createCmd, { stdio: 'pipe' });
-
-    // タスクを即座に実行
+    console.log(chalk.green('\n✅ Auto-start registered (Startup folder)!'));
+    console.log(chalk.gray(`   VBS launcher: ${vbsPath}`));
+    console.log(chalk.gray(`   Startup: ${startupVbs}`));
+  } catch {
+    // フォールバック: タスクスケジューラを試す
     try {
-      execSync(`schtasks /Run /TN "${taskName}"`, { stdio: 'pipe' });
+      const taskName = 'DevRelay Agent';
+      const createCmd = `schtasks /Create /TN "${taskName}" /TR "wscript.exe \\"${vbsPath}\\"" /SC ONLOGON /F /RL LIMITED`;
+      execSync(createCmd, { stdio: 'pipe' });
+      console.log(chalk.green('\n✅ Auto-start registered (Task Scheduler)!'));
     } catch {
-      // タスク実行に失敗しても登録自体は成功
-      console.log(chalk.yellow('  ⚠️ Could not start task immediately. It will start at next logon.'));
+      console.log(chalk.yellow('\n⚠️ Could not register auto-start.'));
+      console.log(chalk.yellow(`You can start manually: wscript.exe "${vbsPath}"`));
     }
+  }
 
-    console.log(chalk.green('\n✅ Task Scheduler task registered and started!'));
-    console.log(chalk.gray(`   Task name: ${taskName}`));
-    console.log(chalk.gray(`   Check status: schtasks /Query /TN "${taskName}"`));
-  } catch (err: any) {
-    console.log(chalk.yellow('\n⚠️ Could not register scheduled task automatically.'));
-    console.log(chalk.yellow('You can register it manually via Task Scheduler or run:'));
-    console.log(chalk.gray(`   node "${agentIndex}"`));
+  // 即時起動
+  try {
+    execSync(`wscript.exe "${vbsPath}"`, { stdio: 'pipe' });
+    console.log(chalk.green('✅ Agent started in background!'));
+  } catch {
+    console.log(chalk.yellow('⚠️ Could not start agent immediately.'));
+    console.log(chalk.gray(`   Manual start: wscript.exe "${vbsPath}"`));
   }
 }
 

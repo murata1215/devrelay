@@ -51,8 +51,23 @@ export async function uninstallCommand() {
     const path = await import('path');
 
     if (isWindows) {
-      // === Windows: タスクスケジューラ削除 + プロセス停止 ===
-      console.log(chalk.blue('\n📦 Removing scheduled task...'));
+      // === Windows: Startup フォルダ + タスクスケジューラ削除 + プロセス停止 ===
+
+      // Startup フォルダの VBS を削除
+      console.log(chalk.blue('\n📦 Removing auto-start...'));
+      try {
+        const startupDir = path.join(
+          process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
+          'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'
+        );
+        const startupVbs = path.join(startupDir, 'DevRelay Agent.vbs');
+        await fs.unlink(startupVbs).catch(() => {});
+        console.log(chalk.green('  ✓ Startup folder entry removed'));
+      } catch {
+        console.log(chalk.gray('  ✓ No startup entry found'));
+      }
+
+      // タスクスケジューラも念のため削除（フォールバック登録されていた場合）
       try {
         execSync('schtasks /Delete /TN "DevRelay Agent" /F', { stdio: 'pipe' });
         console.log(chalk.green('  ✓ Scheduled task removed'));
@@ -62,8 +77,6 @@ export async function uninstallCommand() {
 
       console.log(chalk.blue('\n📦 Stopping agent processes...'));
       try {
-        // devrelay 関連の node プロセスを停止
-        // wmic は非推奨だが PowerShell の Get-Process よりシンプル
         execSync('taskkill /F /FI "WINDOWTITLE eq DevRelay*" 2>nul', { stdio: 'pipe' });
         console.log(chalk.green('  ✓ Agent processes stopped'));
       } catch {
