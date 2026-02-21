@@ -1130,12 +1130,49 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `scripts/install-agent.sh` - Step 1 依存チェック全面改善、Step 3 自動インストール削除
 
+#### 66. Windows CLI Agent - クロスプラットフォーム化 (2026-02-21)
+- **目的**: Linux Agent (`agents/linux/`) を Windows でも動作するクロスプラットフォームコードベースに拡張
+- **方針**: 新しいディレクトリを作らず、既存 `agents/linux/` に `process.platform === 'win32'` 分岐を追加
+- **パッケージリネーム**: `@devrelay/agent-linux` → `@devrelay/agent`
+- **主な変更**:
+  - **config.ts**: Windows は `%APPDATA%\devrelay`、Linux は `~/.devrelay`。`getBinDir()` 追加
+  - **ai-runner.ts**: `resolveClaudePath()` が Windows `.cmd` ラッパー / Linux シンボリックリンクを自動作成。`shell: true`（Windows）、PATH区切り `;`/`:` 分岐
+  - **index.ts**: `ensureDevrelaySymlinks()` が Windows `.cmd` / Linux symlink を切り替え
+  - **setup.ts**: Windows はタスクスケジューラ (`schtasks`)、Linux は systemd。`.cmd` バッチファイルラッパー作成
+  - **uninstall.ts**: Windows はタスクスケジューラ削除 + `taskkill`、Linux は systemd 停止
+  - **status.ts**: Windows は `schtasks /Query` + `tasklist`、Linux は `systemctl`
+  - **logs.ts**: Windows は `PowerShell Get-Content -Tail -Wait`、Linux は `tail -f`
+  - **cli/index.ts**: `config` コマンドが `getConfigDir()` 使用、Windows デフォルトエディタ `notepad`
+- **PowerShell ワンライナーインストーラー**: `scripts/install-agent.ps1`
+  - `$env:DEVRELAY_TOKEN="..."; irm https://raw.githubusercontent.com/.../install-agent.ps1 | iex`
+  - 依存チェック（Node.js 20+, git, pnpm）、`%APPDATA%\devrelay\agent\` にクローン・ビルド
+  - `drl_` トークンから Base64URL デコードでサーバーURL 自動抽出
+  - タスクスケジューラ登録 + バックグラウンド起動
+- **WebUI**: トークンモーダルに Linux / Windows タブ切り替え追加
+  - Linux タブ: `curl | bash` ワンライナー
+  - Windows タブ: PowerShell ワンライナー
+- **主要ファイル**:
+  - `agents/linux/src/services/config.ts` - OS 別パス、`getConfigDir()`, `getBinDir()`, `getDefaultProjectsDirs()`
+  - `agents/linux/src/services/agent-state.ts` - `getConfigDir()` インポートに変更
+  - `agents/linux/src/services/ai-runner.ts` - `resolveClaudePath()` クロスプラットフォーム化
+  - `agents/linux/src/index.ts` - `ensureDevrelaySymlinks()` クロスプラットフォーム化
+  - `agents/linux/src/cli/commands/setup.ts` - タスクスケジューラ対応
+  - `agents/linux/src/cli/commands/uninstall.ts` - Windows クリーンアップ
+  - `agents/linux/src/cli/commands/status.ts` - Windows ステータス確認
+  - `agents/linux/src/cli/commands/logs.ts` - Windows ログ表示
+  - `agents/linux/src/cli/index.ts` - `getConfigDir()` 使用
+  - `agents/linux/package.json` - `@devrelay/agent-linux` → `@devrelay/agent`
+  - `package.json`（ルート）- filter 名更新
+  - `scripts/install-agent.sh` - filter 名更新
+  - `scripts/install-agent.ps1` - 新規 PowerShell インストーラー
+  - `apps/web/src/pages/MachinesPage.tsx` - OS タブ切り替え
+
 ## 今後の課題
 
 - [ ] LINE 対応
 - [ ] Gemini CLI / Codex / Aider 対応
 - [x] Windows Agent (2026-01-18 実装完了)
-- [ ] Windows CLI Agent（軽量版）+ PowerShell ワンライナー → 仕様書: `.devrelay-output/windows-cli-agent-spec.md`
+- [x] Windows CLI Agent + PowerShell ワンライナー (2026-02-21 実装完了)
 - [ ] 要約機能（Anthropic API 使用）
 - [ ] 複数ユーザー同時接続
 - [ ] 進捗表示のUI改善（プログレスバーなど）

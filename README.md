@@ -57,10 +57,12 @@ devrelay/
 ├── packages/
 │   └── shared/           # Shared types & constants
 ├── agents/
-│   ├── linux/            # Linux Agent (Node.js CLI)
+│   ├── linux/            # Cross-platform CLI Agent (Linux + Windows)
 │   └── windows/          # Windows Agent (Electron tray app)
 └── scripts/
-    └── update-version.js # Batch version update script
+    ├── install-agent.sh    # Linux one-liner installer
+    ├── install-agent.ps1   # Windows one-liner installer
+    └── update-version.js   # Batch version update script
 ```
 
 ## 🚀 Quick Start
@@ -74,6 +76,14 @@ curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/in
 ```
 
 Node.js 20+ and git required. Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname.
+
+#### Windows CLI Agent (One-liner)
+
+```powershell
+$env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex
+```
+
+Node.js 20+, git, and pnpm required. Installs to `%APPDATA%\devrelay\agent\` with Task Scheduler auto-start.
 
 #### Linux Agent (Manual)
 
@@ -92,30 +102,25 @@ cd apps/server && npx prisma generate && cd ../..
 pnpm build
 ```
 
-#### Windows Agent
+#### Windows Agent (Two Options)
 
-The Windows agent runs as an Electron tray application.
+**Option 1: CLI Agent (Recommended)** - Lightweight, same codebase as Linux agent
+- Install via PowerShell one-liner (see above)
+- Uses Task Scheduler for auto-start
+- Config: `%APPDATA%\devrelay\config.yaml`
+- CLI commands: `devrelay setup`, `devrelay status`, `devrelay logs`, `devrelay uninstall`
 
-**Installation:**
-1. Download the installer (`DevRelay-Agent-Setup-x.x.x.exe`) from the releases page
-2. Run the installer
-3. Click the tray icon to open settings
-4. Enter your token and add project directories
-
-**Features:**
+**Option 2: Electron Tray App** - GUI-based with system tray
+- Download installer from releases page
 - System tray icon (green = connected, gray = disconnected)
-- Settings UI (token, project directory management)
-- Auto-start on Windows login
-- Sleep prevention (blocks Modern Standby while connected)
+- Settings UI, sleep prevention (blocks Modern Standby)
 
-**Development:**
 ```powershell
-cd agents/windows
-pnpm build
-npx electron .
+# Development (Electron)
+cd agents/windows && pnpm build && npx electron .
 
 # Build installer for distribution
-pnpm dist
+cd agents/windows && pnpm dist
 ```
 
 ### 2. Setup (Linux)
@@ -280,20 +285,20 @@ apps/server/
 └── prisma/
     └── schema.prisma         # Database schema
 
-agents/linux/
+agents/linux/                    # Cross-platform CLI Agent (Linux + Windows)
 ├── src/
 │   ├── index.ts              # Agent entry
 │   ├── cli/                  # CLI commands
 │   │   └── commands/
-│   │       ├── setup.ts      # Setup (token only)
-│   │       ├── uninstall.ts  # Uninstall
-│   │       ├── status.ts
+│   │       ├── setup.ts      # Setup (systemd / Task Scheduler)
+│   │       ├── uninstall.ts  # Uninstall (cross-platform)
+│   │       ├── status.ts     # Status (cross-platform)
 │   │       └── projects.ts
 │   └── services/
-│       ├── config.ts         # Config management
+│       ├── config.ts         # Config management (cross-platform paths)
 │       ├── connection.ts     # WebSocket to server
 │       ├── projects.ts       # Project management
-│       ├── ai-runner.ts      # AI CLI execution
+│       ├── ai-runner.ts      # AI CLI execution (cross-platform)
 │       └── session-store.ts  # Session ID persistence
 
 agents/windows/
@@ -346,6 +351,7 @@ agents/windows/
 - [x] Installer improvements (auto serverUrl extraction, `/opt` scan, nohup+crontab fallback)
 - [x] Agent auto-naming (skip name input, auto-set from hostname on connect)
 - [x] Agent restart session continuity (seamless session recovery after agent restart)
+- [x] Windows CLI Agent (cross-platform codebase + PowerShell one-liner installer)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

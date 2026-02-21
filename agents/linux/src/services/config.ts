@@ -27,14 +27,35 @@ export interface ProjectConfig {
   defaultAi: AiTool;
 }
 
-const CONFIG_DIR = path.join(os.homedir(), '.devrelay');
+/**
+ * OS 別の設定ディレクトリ
+ * Windows: %APPDATA%\devrelay\  (例: C:\Users\name\AppData\Roaming\devrelay)
+ * Linux/Mac: ~/.devrelay/
+ */
+const CONFIG_DIR = process.platform === 'win32'
+  ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'devrelay')
+  : path.join(os.homedir(), '.devrelay');
+
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yaml');
 const PROJECTS_FILE = path.join(CONFIG_DIR, 'projects.yaml');
+
+/**
+ * OS 別のデフォルトプロジェクトスキャンディレクトリ
+ * Windows: ホームディレクトリのみ（/opt は存在しない）
+ * Linux: ホームディレクトリ + /opt
+ */
+function getDefaultProjectsDirs(): string[] {
+  if (process.platform === 'win32') {
+    return [os.homedir()];
+  }
+  return [os.homedir(), '/opt'];
+}
 
 export async function ensureConfigDir() {
   try {
     await fs.mkdir(CONFIG_DIR, { recursive: true });
     await fs.mkdir(path.join(CONFIG_DIR, 'logs'), { recursive: true });
+    await fs.mkdir(path.join(CONFIG_DIR, 'bin'), { recursive: true });
   } catch (err) {
     // Ignore if exists
   }
@@ -54,7 +75,7 @@ export async function loadConfig(): Promise<AgentConfig> {
     } else if (config.projectsDir) {
       projectsDirs = [config.projectsDir];
     } else {
-      projectsDirs = [os.homedir(), '/opt'];
+      projectsDirs = getDefaultProjectsDirs();
     }
 
     return {
@@ -78,7 +99,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       machineId: '',
       serverUrl: 'wss://devrelay.io/ws/agent',
       token: '',
-      projectsDirs: [os.homedir(), '/opt'],
+      projectsDirs: getDefaultProjectsDirs(),
       aiTools: {
         default: 'claude',
         claude: { command: 'claude' },
@@ -117,4 +138,12 @@ export function getConfigDir() {
 
 export function getLogDir() {
   return path.join(CONFIG_DIR, 'logs');
+}
+
+/**
+ * devrelay-claude ラッパー/シンボリックリンク格納ディレクトリを返す
+ * @returns bin ディレクトリのパス
+ */
+export function getBinDir() {
+  return path.join(CONFIG_DIR, 'bin');
 }

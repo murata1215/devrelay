@@ -1,32 +1,51 @@
 import { loadConfig } from './services/config.js';
+import { getBinDir } from './services/config.js';
 import { connectToServer } from './services/connection.js';
 import { loadProjects, autoDiscoverProjects } from './services/projects.js';
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync, symlinkSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
-// Ensure devrelay-claude symlink exists for identifiable process names
+/**
+ * devrelay-claude ラッパーを作成する（クロスプラットフォーム対応）
+ *
+ * Claude Code のプロセスを識別しやすくするため、ラッパーを作成する。
+ * - Linux: シンボリックリンク（devrelay-claude -> claude）
+ * - Windows: .cmd バッチファイル（管理者権限不要）
+ */
 function ensureDevrelaySymlinks() {
-  const devrelayBinDir = join(process.env.HOME || '', '.devrelay', 'bin');
-  const devrelayClaude = join(devrelayBinDir, 'devrelay-claude');
+  const isWindows = process.platform === 'win32';
+  const devrelayBinDir = getBinDir();
+  const wrapperName = isWindows ? 'devrelay-claude.cmd' : 'devrelay-claude';
+  const devrelayClaude = join(devrelayBinDir, wrapperName);
 
   try {
-    // Create directory if not exists
+    // ディレクトリが存在しない場合は作成
     if (!existsSync(devrelayBinDir)) {
       mkdirSync(devrelayBinDir, { recursive: true });
     }
 
-    // Find claude binary path
-    const claudePath = execSync('which claude', { encoding: 'utf-8' }).trim();
+    // claude バイナリのパスを取得（Linux: which, Windows: where）
+    const findCmd = isWindows ? 'where' : 'which';
+    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8' }).trim();
+    // where コマンドは複数行を返す場合があるため、最初の行を使用
+    const claudePath = claudePathRaw.split(/\r?\n/)[0];
 
-    // Create or update symlink
+    // 既存のラッパーがあれば削除
     if (existsSync(devrelayClaude)) {
       unlinkSync(devrelayClaude);
     }
-    symlinkSync(claudePath, devrelayClaude);
-    console.log(`🔗 Symlink: devrelay-claude -> ${claudePath}`);
+
+    if (isWindows) {
+      // Windows: .cmd バッチファイルを作成
+      writeFileSync(devrelayClaude, `@echo off\r\n"${claudePath}" %*\r\n`);
+    } else {
+      // Linux: シンボリックリンクを作成
+      symlinkSync(claudePath, devrelayClaude);
+    }
+    console.log(`🔗 Wrapper: ${wrapperName} -> ${claudePath}`);
   } catch (err) {
-    console.warn('⚠️ Could not create devrelay-claude symlink:', (err as Error).message);
+    console.warn(`⚠️ Could not create ${wrapperName}:`, (err as Error).message);
   }
 }
 
@@ -48,7 +67,7 @@ async function main() {
   console.log(`📡 Machine: ${config.machineName}`);
   console.log(`🔗 Server: ${config.serverUrl}`);
 
-  // Ensure devrelay-claude symlink exists
+  // Ensure devrelay-claude wrapper exists
   ensureDevrelaySymlinks();
 
   // Auto-discover projects with CLAUDE.md

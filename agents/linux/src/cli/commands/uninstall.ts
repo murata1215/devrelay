@@ -1,6 +1,7 @@
 import * as readline from 'readline';
+import os from 'os';
 import chalk from 'chalk';
-import { loadConfig } from '../../services/config.js';
+import { loadConfig, getConfigDir } from '../../services/config.js';
 
 export async function uninstallCommand() {
   console.log(chalk.red(`
@@ -8,6 +9,8 @@ export async function uninstallCommand() {
 │  DevRelay Agent Uninstall                       │
 └─────────────────────────────────────────────────┘
   `));
+
+  const isWindows = process.platform === 'win32';
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -23,9 +26,17 @@ export async function uninstallCommand() {
   };
 
   try {
+    const configDir = getConfigDir();
+
     console.log('This will:');
-    console.log(chalk.gray('  • Stop and remove systemd service (if installed)'));
-    console.log(chalk.gray('  • Delete ~/.devrelay/ configuration directory'));
+    if (isWindows) {
+      console.log(chalk.gray('  • Remove Task Scheduler auto-start task (if registered)'));
+      console.log(chalk.gray('  • Stop running agent processes'));
+      console.log(chalk.gray(`  • Delete ${configDir} configuration directory`));
+    } else {
+      console.log(chalk.gray('  • Stop and remove systemd service (if installed)'));
+      console.log(chalk.gray(`  • Delete ${configDir} configuration directory`));
+    }
     console.log(chalk.gray('  • Optionally delete project .devrelay/ directories'));
     console.log();
 
@@ -39,71 +50,87 @@ export async function uninstallCommand() {
     const fs = await import('fs/promises');
     const path = await import('path');
 
-    // Stop and remove user service
-    console.log(chalk.blue('\n📦 Removing user service...'));
-    const userServicePath = path.join(
-      process.env.HOME || '',
-      '.config',
-      'systemd',
-      'user',
-      'devrelay-agent.service'
-    );
-
-    try {
-      // Check if user service exists
-      await fs.access(userServicePath);
-
-      // Stop and disable
+    if (isWindows) {
+      // === Windows: タスクスケジューラ削除 + プロセス停止 ===
+      console.log(chalk.blue('\n📦 Removing scheduled task...'));
       try {
-        execSync('systemctl --user stop devrelay-agent 2>/dev/null', { stdio: 'pipe' });
-      } catch { /* ignore if not running */ }
-
-      try {
-        execSync('systemctl --user disable devrelay-agent 2>/dev/null', { stdio: 'pipe' });
-      } catch { /* ignore if not enabled */ }
-
-      // Remove service file
-      await fs.unlink(userServicePath);
-      execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
-
-      console.log(chalk.green('  ✓ User service removed'));
-    } catch {
-      console.log(chalk.gray('  ✓ No user service found'));
-    }
-
-    // Stop and remove system service
-    console.log(chalk.blue('\n📦 Checking system service...'));
-    const systemServicePath = '/etc/systemd/system/devrelay-agent.service';
-
-    try {
-      await fs.access(systemServicePath);
-
-      console.log(chalk.yellow('  System service found. Attempting to remove (may require sudo)...'));
-
-      try {
-        execSync('sudo systemctl stop devrelay-agent 2>/dev/null', { stdio: 'pipe' });
-      } catch { /* ignore if not running */ }
-
-      try {
-        execSync('sudo systemctl disable devrelay-agent 2>/dev/null', { stdio: 'pipe' });
-      } catch { /* ignore if not enabled */ }
-
-      try {
-        execSync(`sudo rm ${systemServicePath}`, { stdio: 'pipe' });
-        execSync('sudo systemctl daemon-reload', { stdio: 'pipe' });
-        console.log(chalk.green('  ✓ System service removed'));
+        execSync('schtasks /Delete /TN "DevRelay Agent" /F', { stdio: 'pipe' });
+        console.log(chalk.green('  ✓ Scheduled task removed'));
       } catch {
-        console.log(chalk.yellow(`  ⚠ Could not remove system service. Run manually:`));
-        console.log(chalk.gray(`    sudo rm ${systemServicePath}`));
-        console.log(chalk.gray('    sudo systemctl daemon-reload'));
+        console.log(chalk.gray('  ✓ No scheduled task found'));
       }
-    } catch {
-      console.log(chalk.gray('  ✓ No system service found'));
+
+      console.log(chalk.blue('\n📦 Stopping agent processes...'));
+      try {
+        // devrelay 関連の node プロセスを停止
+        // wmic は非推奨だが PowerShell の Get-Process よりシンプル
+        execSync('taskkill /F /FI "WINDOWTITLE eq DevRelay*" 2>nul', { stdio: 'pipe' });
+        console.log(chalk.green('  ✓ Agent processes stopped'));
+      } catch {
+        console.log(chalk.gray('  ✓ No running agent processes found'));
+      }
+    } else {
+      // === Linux: systemd サービス削除 ===
+      console.log(chalk.blue('\n📦 Removing user service...'));
+      const userServicePath = path.join(
+        os.homedir(),
+        '.config',
+        'systemd',
+        'user',
+        'devrelay-agent.service'
+      );
+
+      try {
+        await fs.access(userServicePath);
+
+        try {
+          execSync('systemctl --user stop devrelay-agent 2>/dev/null', { stdio: 'pipe' });
+        } catch { /* ignore if not running */ }
+
+        try {
+          execSync('systemctl --user disable devrelay-agent 2>/dev/null', { stdio: 'pipe' });
+        } catch { /* ignore if not enabled */ }
+
+        await fs.unlink(userServicePath);
+        execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
+
+        console.log(chalk.green('  ✓ User service removed'));
+      } catch {
+        console.log(chalk.gray('  ✓ No user service found'));
+      }
+
+      console.log(chalk.blue('\n📦 Checking system service...'));
+      const systemServicePath = '/etc/systemd/system/devrelay-agent.service';
+
+      try {
+        await fs.access(systemServicePath);
+
+        console.log(chalk.yellow('  System service found. Attempting to remove (may require sudo)...'));
+
+        try {
+          execSync('sudo systemctl stop devrelay-agent 2>/dev/null', { stdio: 'pipe' });
+        } catch { /* ignore if not running */ }
+
+        try {
+          execSync('sudo systemctl disable devrelay-agent 2>/dev/null', { stdio: 'pipe' });
+        } catch { /* ignore if not enabled */ }
+
+        try {
+          execSync(`sudo rm ${systemServicePath}`, { stdio: 'pipe' });
+          execSync('sudo systemctl daemon-reload', { stdio: 'pipe' });
+          console.log(chalk.green('  ✓ System service removed'));
+        } catch {
+          console.log(chalk.yellow(`  ⚠ Could not remove system service. Run manually:`));
+          console.log(chalk.gray(`    sudo rm ${systemServicePath}`));
+          console.log(chalk.gray('    sudo systemctl daemon-reload'));
+        }
+      } catch {
+        console.log(chalk.gray('  ✓ No system service found'));
+      }
     }
 
-    // Remove ~/.devrelay/ directory
+    // 設定ディレクトリ削除（OS 共通）
     console.log(chalk.blue('\n📦 Removing configuration...'));
-    const configDir = path.join(process.env.HOME || '', '.devrelay');
 
     try {
       await fs.access(configDir);
@@ -113,7 +140,7 @@ export async function uninstallCommand() {
       console.log(chalk.gray('  ✓ No configuration directory found'));
     }
 
-    // Ask about project data
+    // プロジェクトデータの削除（OS 共通）
     console.log();
     const deleteProjectData = await question(
       chalk.yellow('Delete project data (.devrelay/ in each project)? (y/N): ')
@@ -122,18 +149,16 @@ export async function uninstallCommand() {
     if (deleteProjectData === 'y' || deleteProjectData === 'yes') {
       console.log(chalk.blue('\n📦 Removing project data...'));
 
-      // Load config to get projectsDirs (if still exists)
       try {
         const config = await loadConfig();
-        const projectsDirs = config.projectsDirs || [process.env.HOME || ''];
+        const projectsDirs = config.projectsDirs || [os.homedir()];
 
         for (const baseDir of projectsDirs) {
           await deleteProjectDevrelayDirs(baseDir, fs, path);
         }
       } catch {
-        // Config doesn't exist, scan home directory
-        const homeDir = process.env.HOME || '';
-        await deleteProjectDevrelayDirs(homeDir, fs, path);
+        // 設定ファイルが存在しない場合はホームディレクトリをスキャン
+        await deleteProjectDevrelayDirs(os.homedir(), fs, path);
       }
 
       console.log(chalk.green('  ✓ Project data removed'));
@@ -151,25 +176,46 @@ export async function uninstallCommand() {
   }
 }
 
+/**
+ * プロジェクト内の .devrelay/ ディレクトリを再帰検索して削除する
+ *
+ * - Linux: find コマンドを使用
+ * - Windows: PowerShell の Get-ChildItem を使用
+ *
+ * @param baseDir - 検索開始ディレクトリ
+ * @param fs - fs/promises モジュール
+ * @param path - path モジュール
+ */
 async function deleteProjectDevrelayDirs(
   baseDir: string,
   fs: typeof import('fs/promises'),
   path: typeof import('path')
 ) {
   const { execSync } = await import('child_process');
+  const configDir = getConfigDir();
 
   try {
-    // Find all .devrelay directories under baseDir (max depth 5)
-    const result = execSync(
-      `find "${baseDir}" -maxdepth 6 -type d -name ".devrelay" 2>/dev/null || true`,
-      { encoding: 'utf-8' }
-    );
+    let dirs: string[] = [];
 
-    const dirs = result.trim().split('\n').filter(Boolean);
+    if (process.platform === 'win32') {
+      // Windows: PowerShell で .devrelay ディレクトリを再帰検索
+      const result = execSync(
+        `powershell -Command "Get-ChildItem -Path '${baseDir}' -Filter '.devrelay' -Directory -Recurse -Depth 5 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName"`,
+        { encoding: 'utf-8' }
+      );
+      dirs = result.trim().split(/\r?\n/).filter(Boolean);
+    } else {
+      // Linux: find コマンドで .devrelay ディレクトリを再帰検索
+      const result = execSync(
+        `find "${baseDir}" -maxdepth 6 -type d -name ".devrelay" 2>/dev/null || true`,
+        { encoding: 'utf-8' }
+      );
+      dirs = result.trim().split('\n').filter(Boolean);
+    }
 
     for (const dir of dirs) {
-      // Skip the main config directory
-      if (dir === path.join(process.env.HOME || '', '.devrelay')) {
+      // メイン設定ディレクトリはスキップ
+      if (path.resolve(dir) === path.resolve(configDir)) {
         continue;
       }
 
@@ -181,6 +227,6 @@ async function deleteProjectDevrelayDirs(
       }
     }
   } catch {
-    // find command failed, ignore
+    // コマンド実行失敗は無視
   }
 }

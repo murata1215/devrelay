@@ -69,11 +69,15 @@ program
 program
   .command('config')
   .description('Open config file in editor')
-  .action(() => {
-    const { execSync } = require('child_process');
-    const editor = process.env.EDITOR || 'nano';
-    const configPath = `${process.env.HOME}/.devrelay/config.yaml`;
-    execSync(`${editor} ${configPath}`, { stdio: 'inherit' });
+  .action(async () => {
+    const { execSync } = await import('child_process');
+    const path = await import('path');
+    const { getConfigDir } = await import('../services/config.js');
+    const configPath = path.join(getConfigDir(), 'config.yaml');
+    // Windows: notepad をデフォルトエディタに、Linux: nano
+    const defaultEditor = process.platform === 'win32' ? 'notepad' : 'nano';
+    const editor = process.env.EDITOR || defaultEditor;
+    execSync(`${editor} "${configPath}"`, { stdio: 'inherit' });
   });
 
 program

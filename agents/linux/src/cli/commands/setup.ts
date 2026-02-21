@@ -5,8 +5,9 @@ import fs from 'fs/promises';
 import { execSync } from 'child_process';
 import { nanoid } from 'nanoid';
 import chalk from 'chalk';
+import { fileURLToPath } from 'url';
 import { decodeTokenUrl } from '@devrelay/shared';
-import { loadConfig, saveConfig, ensureConfigDir } from '../../services/config.js';
+import { loadConfig, saveConfig, ensureConfigDir, getConfigDir, getBinDir } from '../../services/config.js';
 
 export async function setupCommand() {
   console.log(chalk.blue(`
@@ -86,57 +87,131 @@ export async function setupCommand() {
     await saveConfig(config);
 
     console.log(chalk.green('\n✅ Configuration saved!'));
-    console.log(chalk.gray(`   Config: ~/.devrelay/config.yaml`));
+    console.log(chalk.gray(`   Config: ${path.join(getConfigDir(), 'config.yaml')}`));
     console.log();
 
-    // Claude Code のシンボリックリンクを作成（プロセス識別用）
+    // Claude Code のラッパーを作成（プロセス識別用）
     await ensureDevrelaySymlinks();
 
-    // Ask about systemd service
-    console.log();
-    console.log(chalk.blue('Systemd service options:'));
-    console.log(chalk.gray('  1. User service (recommended) - no sudo required'));
-    console.log(chalk.gray('  2. System service - requires sudo'));
-    console.log(chalk.gray('  3. Skip - start manually with pnpm start'));
-    console.log();
+    // OS に応じたサービス登録オプションを表示
+    let serviceChoice = '3'; // デフォルト: スキップ
 
-    const serviceChoice = await question(
-      'Install systemd service? (1/2/3)',
-      '1'
-    );
+    if (process.platform === 'win32') {
+      // Windows: タスクスケジューラ
+      console.log();
+      console.log(chalk.blue('Auto-start options:'));
+      console.log(chalk.gray('  1. Task Scheduler (recommended) - starts agent at logon'));
+      console.log(chalk.gray('  2. Skip - start manually'));
+      console.log();
 
-    if (serviceChoice === '1') {
-      await installUserService(machineName);
-    } else if (serviceChoice === '2') {
-      await installSystemService(machineName);
-    }
+      serviceChoice = await question('Install auto-start? (1/2)', '1');
 
-    console.log(chalk.green('\n🎉 Setup complete!'));
-    console.log();
-    console.log('Next steps:');
-    if (serviceChoice === '1') {
-      console.log(chalk.cyan('  1. Start agent:      systemctl --user start devrelay-agent'));
-      console.log(chalk.cyan('  2. Check status:     systemctl --user status devrelay-agent'));
-      console.log(chalk.cyan('  3. View logs:        journalctl --user -u devrelay-agent -f'));
-    } else if (serviceChoice === '2') {
-      console.log(chalk.cyan('  1. Start agent:      sudo systemctl start devrelay-agent'));
-      console.log(chalk.cyan('  2. Check status:     sudo systemctl status devrelay-agent'));
-      console.log(chalk.cyan('  3. View logs:        sudo journalctl -u devrelay-agent -f'));
+      if (serviceChoice === '1') {
+        await installWindowsScheduledTask(machineName);
+      }
+
+      console.log(chalk.green('\n🎉 Setup complete!'));
+      console.log();
+      console.log('Next steps:');
+      if (serviceChoice === '1') {
+        console.log(chalk.cyan('  1. Check status:     schtasks /Query /TN "DevRelay Agent"'));
+        console.log(chalk.cyan(`  2. View logs:        type "${path.join(getConfigDir(), 'logs', 'agent.log')}"`));
+      } else {
+        const agentIndex = getAgentIndexPath();
+        console.log(chalk.cyan(`  1. Start agent:      node "${agentIndex}"`));
+      }
     } else {
-      console.log(chalk.cyan('  1. Start agent:      cd agents/linux && pnpm start'));
+      // Linux: systemd
+      console.log();
+      console.log(chalk.blue('Systemd service options:'));
+      console.log(chalk.gray('  1. User service (recommended) - no sudo required'));
+      console.log(chalk.gray('  2. System service - requires sudo'));
+      console.log(chalk.gray('  3. Skip - start manually with pnpm start'));
+      console.log();
+
+      serviceChoice = await question('Install systemd service? (1/2/3)', '1');
+
+      if (serviceChoice === '1') {
+        await installUserService(machineName);
+      } else if (serviceChoice === '2') {
+        await installSystemService(machineName);
+      }
+
+      console.log(chalk.green('\n🎉 Setup complete!'));
+      console.log();
+      console.log('Next steps:');
+      if (serviceChoice === '1') {
+        console.log(chalk.cyan('  1. Start agent:      systemctl --user start devrelay-agent'));
+        console.log(chalk.cyan('  2. Check status:     systemctl --user status devrelay-agent'));
+        console.log(chalk.cyan('  3. View logs:        journalctl --user -u devrelay-agent -f'));
+      } else if (serviceChoice === '2') {
+        console.log(chalk.cyan('  1. Start agent:      sudo systemctl start devrelay-agent'));
+        console.log(chalk.cyan('  2. Check status:     sudo systemctl status devrelay-agent'));
+        console.log(chalk.cyan('  3. View logs:        sudo journalctl -u devrelay-agent -f'));
+      } else {
+        console.log(chalk.cyan('  1. Start agent:      cd agents/linux && pnpm start'));
+      }
     }
+
     console.log();
   } finally {
     rl.close();
   }
 }
 
-async function installUserService(machineName: string) {
-  const { execSync } = await import('child_process');
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  const { fileURLToPath } = await import('url');
+/**
+ * Agent の index.js パスを取得するヘルパー
+ * CLI ファイルからの相対パスで dist/index.js を解決する
+ */
+function getAgentIndexPath(): string {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  return path.join(path.resolve(__dirname, '../..'), 'index.js');
+}
 
+/**
+ * Windows タスクスケジューラに自動起動タスクを登録する
+ *
+ * schtasks コマンドを使用（全 PowerShell バージョンで動作）。
+ * ログオン時に Agent を自動起動するタスクを作成し、即座に実行する。
+ *
+ * @param machineName - Agent のマシン名（タスク説明に使用）
+ */
+async function installWindowsScheduledTask(machineName: string) {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const agentDir = path.resolve(__dirname, '../..');
+  const agentIndex = path.join(agentDir, 'index.js');
+  const nodePath = process.execPath;
+
+  try {
+    const taskName = 'DevRelay Agent';
+
+    // schtasks でログオン時自動起動タスクを登録
+    // /RL LIMITED: 管理者権限不要で実行
+    // /F: 既存タスクがあれば上書き
+    const createCmd = `schtasks /Create /TN "${taskName}" /TR "\\"${nodePath}\\" \\"${agentIndex}\\"" /SC ONLOGON /F /RL LIMITED`;
+    execSync(createCmd, { stdio: 'pipe' });
+
+    // タスクを即座に実行
+    try {
+      execSync(`schtasks /Run /TN "${taskName}"`, { stdio: 'pipe' });
+    } catch {
+      // タスク実行に失敗しても登録自体は成功
+      console.log(chalk.yellow('  ⚠️ Could not start task immediately. It will start at next logon.'));
+    }
+
+    console.log(chalk.green('\n✅ Task Scheduler task registered and started!'));
+    console.log(chalk.gray(`   Task name: ${taskName}`));
+    console.log(chalk.gray(`   Check status: schtasks /Query /TN "${taskName}"`));
+  } catch (err: any) {
+    console.log(chalk.yellow('\n⚠️ Could not register scheduled task automatically.'));
+    console.log(chalk.yellow('You can register it manually via Task Scheduler or run:'));
+    console.log(chalk.gray(`   node "${agentIndex}"`));
+  }
+}
+
+async function installUserService(machineName: string) {
   // Find the agent directory (relative to this CLI file)
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
@@ -187,12 +262,7 @@ WantedBy=default.target
 }
 
 async function installSystemService(machineName: string) {
-  const { execSync } = await import('child_process');
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  const { fileURLToPath } = await import('url');
-
-  // Find the agent directory
+  // Agent ディレクトリを解決（CLIファイルからの相対パス）
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const agentDir = path.resolve(__dirname, '../..');
@@ -239,36 +309,45 @@ WantedBy=multi-user.target
 }
 
 /**
- * devrelay-claude シンボリックリンクを作成する
+ * devrelay-claude ラッパーを作成する（クロスプラットフォーム対応）
  *
- * Claude Code のプロセスを識別しやすくするため、
- * ~/.devrelay/bin/devrelay-claude -> claude へのシンボリックリンクを作成する。
- * これにより ps コマンドで DevRelay 経由の Claude 実行を識別できる。
+ * Claude Code のプロセスを識別しやすくするためのラッパーを作成する。
+ * - Linux: シンボリックリンク（devrelay-claude -> claude）
+ * - Windows: .cmd バッチファイル（管理者権限不要）
  */
 async function ensureDevrelaySymlinks() {
-  const devrelayBinDir = path.join(process.env.HOME || '', '.devrelay', 'bin');
-  const devrelayClaude = path.join(devrelayBinDir, 'devrelay-claude');
+  const isWindows = process.platform === 'win32';
+  const devrelayBinDir = getBinDir();
+  const wrapperName = isWindows ? 'devrelay-claude.cmd' : 'devrelay-claude';
+  const devrelayClaude = path.join(devrelayBinDir, wrapperName);
 
   try {
     // ディレクトリが存在しない場合は作成
     await fs.mkdir(devrelayBinDir, { recursive: true });
 
-    // claude バイナリのパスを取得
-    const claudePath = execSync('which claude', { encoding: 'utf-8' }).trim();
+    // claude バイナリのパスを取得（Linux: which, Windows: where）
+    const findCmd = isWindows ? 'where' : 'which';
+    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8' }).trim();
+    const claudePath = claudePathRaw.split(/\r?\n/)[0];
 
-    // 既存のシンボリックリンクがあれば削除
+    // 既存のラッパーがあれば削除
     try {
       await fs.unlink(devrelayClaude);
     } catch {
       // 存在しない場合は無視
     }
 
-    // シンボリックリンクを作成
-    await fs.symlink(claudePath, devrelayClaude);
-    console.log(chalk.green(`✅ Symlink created: devrelay-claude -> ${claudePath}`));
+    if (isWindows) {
+      // Windows: .cmd バッチファイルを作成
+      await fs.writeFile(devrelayClaude, `@echo off\r\n"${claudePath}" %*\r\n`);
+    } else {
+      // Linux: シンボリックリンクを作成
+      await fs.symlink(claudePath, devrelayClaude);
+    }
+    console.log(chalk.green(`✅ Wrapper created: ${wrapperName} -> ${claudePath}`));
   } catch (err) {
     // Claude Code がインストールされていない場合などはエラーにせず警告のみ
-    console.log(chalk.yellow(`⚠️ Could not create devrelay-claude symlink: ${(err as Error).message}`));
+    console.log(chalk.yellow(`⚠️ Could not create ${wrapperName}: ${(err as Error).message}`));
     console.log(chalk.gray('   Claude Code がインストールされていない場合は無視できます。'));
     console.log(chalk.gray('   後でインストールした場合、Agent が自動的に検出・設定します。'));
   }

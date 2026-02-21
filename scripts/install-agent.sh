@@ -194,7 +194,7 @@ echo "  shared パッケージをビルド中..."
 pnpm --filter @devrelay/shared build
 
 echo "  Agent をビルド中..."
-pnpm --filter @devrelay/agent-linux build
+pnpm --filter @devrelay/agent build
 
 echo -e "${GREEN}✅ ビルド完了${NC}"
 echo ""

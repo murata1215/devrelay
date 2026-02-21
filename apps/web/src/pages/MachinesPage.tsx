@@ -16,6 +16,9 @@ export function MachinesPage() {
   const [tokenCopied, setTokenCopied] = useState(false);
   const [installCopied, setInstallCopied] = useState(false);
 
+  // OS タブ切り替え（Linux / Windows）
+  const [installOs, setInstallOs] = useState<'linux' | 'windows'>('linux');
+
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -105,14 +108,17 @@ export function MachinesPage() {
     });
   };
 
-  // ワンライナーインストールコマンドを生成
-  const getInstallCommand = () => {
+  // ワンライナーインストールコマンドを生成（OS 別）
+  const getInstallCommand = (os: 'linux' | 'windows' = 'linux') => {
     if (!newMachine) return '';
+    if (os === 'windows') {
+      return `$env:DEVRELAY_TOKEN="${newMachine.token}"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex`;
+    }
     return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${newMachine.token}`;
   };
 
   const copyInstallCommand = () => {
-    copyToClipboard(getInstallCommand(), () => {
+    copyToClipboard(getInstallCommand(installOs), () => {
       setInstallCopied(true);
       setTimeout(() => setInstallCopied(false), 2000);
     });
@@ -302,10 +308,34 @@ export function MachinesPage() {
               </div>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">Quick Install (Linux)</label>
+              <div className="flex items-center space-x-2 mb-2">
+                <label className="block text-gray-400 text-sm">Quick Install</label>
+                <div className="flex">
+                  <button
+                    onClick={() => setInstallOs('linux')}
+                    className={`px-3 py-1 text-xs rounded-l transition-colors ${
+                      installOs === 'linux'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                  >
+                    Linux
+                  </button>
+                  <button
+                    onClick={() => setInstallOs('windows')}
+                    className={`px-3 py-1 text-xs rounded-r transition-colors ${
+                      installOs === 'windows'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                  >
+                    Windows
+                  </button>
+                </div>
+              </div>
               <div className="flex items-start space-x-2">
                 <code className="flex-1 bg-gray-900 text-blue-400 px-4 py-2 rounded-lg text-xs break-all leading-relaxed">
-                  {getInstallCommand()}
+                  {getInstallCommand(installOs)}
                 </code>
                 <button
                   onClick={copyInstallCommand}
@@ -315,7 +345,9 @@ export function MachinesPage() {
                 </button>
               </div>
               <div className="text-gray-500 text-xs mt-2">
-                Node.js 20+ and git required
+                {installOs === 'linux'
+                  ? 'Requires: Node.js 20+, git, pnpm'
+                  : 'Run in PowerShell. Requires: Node.js 20+, git, pnpm'}
               </div>
             </div>
             <div className="flex justify-end">
@@ -325,6 +357,7 @@ export function MachinesPage() {
                   setNewMachine(null);
                   setTokenCopied(false);
                   setInstallCopied(false);
+                  setInstallOs('linux');
                 }}
                 className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
               >

@@ -1,11 +1,11 @@
 import fs from 'fs/promises';
 import path from 'path';
-import os from 'os';
 import { existsSync } from 'fs';
 import type { AiTool } from '@devrelay/shared';
+import { getConfigDir } from './config.js';
 
-const CONFIG_DIR = path.join(os.homedir(), '.devrelay');
-const STATE_FILE = path.join(CONFIG_DIR, 'state.json');
+/** Agent 状態ファイル（最後に使用した AI ツールなどを保存） */
+const STATE_FILE = path.join(getConfigDir(), 'state.json');
 
 interface AgentState {
   lastAiTool?: AiTool;
@@ -39,9 +39,10 @@ export async function loadLastAiTool(): Promise<AiTool | undefined> {
  */
 export async function saveLastAiTool(aiTool: AiTool): Promise<void> {
   try {
-    // Ensure config directory exists
-    if (!existsSync(CONFIG_DIR)) {
-      await fs.mkdir(CONFIG_DIR, { recursive: true });
+    // 設定ディレクトリが存在しない場合は作成
+    const configDir = getConfigDir();
+    if (!existsSync(configDir)) {
+      await fs.mkdir(configDir, { recursive: true });
     }
 
     // Load existing state or create new

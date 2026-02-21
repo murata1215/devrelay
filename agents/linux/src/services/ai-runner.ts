@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import type { AiTool } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
+import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage } from './session-store.js';
 
@@ -112,9 +113,10 @@ export async function sendPromptToAi(
 
     console.log(`🔧 Running: devrelay-claude ${args.join(' ')}`);
 
+    // Windows の .cmd ファイル実行には shell: true が必要
     proc = spawn(devrelayClaude, args, {
       cwd: projectPath,
-      shell: false,
+      shell: process.platform === 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
@@ -133,10 +135,10 @@ export async function sendPromptToAi(
     const args = ['--approval-mode', 'auto_edit'];
     console.log(`🔧 Running: ${command} --approval-mode auto_edit (prompt via stdin)`);
 
-    // Extract directory from gemini command path and add to PATH
-    // This ensures node can be found when running from systemd (no .bashrc/nvm)
+    // Gemini コマンドのディレクトリを PATH に追加（systemd 実行時に node が見つからない問題を回避）
     const geminiDir = path.dirname(command);
-    const envPath = process.env.PATH ? `${geminiDir}:${process.env.PATH}` : geminiDir;
+    const pathSep = process.platform === 'win32' ? ';' : ':';
+    const envPath = process.env.PATH ? `${geminiDir}${pathSep}${process.env.PATH}` : geminiDir;
 
     proc = spawn(command, args, {
       cwd: projectPath,
@@ -161,9 +163,10 @@ export async function sendPromptToAi(
 
     console.log(`🔧 Running: ${fullCommand.substring(0, 100)}...`);
 
+    // OS デフォルトシェルを使用（Linux: /bin/sh, Windows: cmd.exe）
     proc = spawn(fullCommand, [], {
       cwd: projectPath,
-      shell: '/bin/bash',
+      shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
     });
@@ -329,45 +332,59 @@ function getAiCommand(aiTool: AiTool, config: AgentConfig): string | undefined {
 }
 
 /**
- * Claude Code の実行パスを解決する
+ * Claude Code の実行パスを解決する（クロスプラットフォーム対応）
  *
  * 以下の優先順位で探索:
- * 1. ~/.devrelay/bin/devrelay-claude（シンボリックリンク）が存在すれば使用
- * 2. 存在しなければ `which claude` でフォールバック
- *    - 見つかった場合、シンボリックリンクも自動作成（次回以降は高速に）
+ * 1. devrelay-claude ラッパーが存在すれば使用
+ *    - Linux: ~/.devrelay/bin/devrelay-claude（シンボリックリンク）
+ *    - Windows: %APPDATA%\devrelay\bin\devrelay-claude.cmd（バッチファイル）
+ * 2. 存在しなければ which/where claude でフォールバック
+ *    - 見つかった場合、ラッパーも自動作成（次回以降は高速に）
  * 3. どちらも見つからなければエラー
  *
- * setup 後に Claude Code をインストールしたケースに対応するため、
- * シンボリックリンクが存在しない場合でも自動的に解決する。
+ * Windows ではシンボリックリンクに管理者権限が必要なため、
+ * .cmd バッチファイル（@echo off + claude パス + %*）を使用する。
  *
  * @returns Claude Code の実行パス
  * @throws claude コマンドが見つからない場合
  */
 function resolveClaudePath(): string {
-  const devrelayBinDir = path.join(process.env.HOME || '', '.devrelay', 'bin');
-  const devrelayClaudePath = path.join(devrelayBinDir, 'devrelay-claude');
+  const isWindows = process.platform === 'win32';
+  const devrelayBinDir = getBinDir();
+  // Windows: .cmd バッチファイル、Linux: シンボリックリンク
+  const wrapperName = isWindows ? 'devrelay-claude.cmd' : 'devrelay-claude';
+  const devrelayClaudePath = path.join(devrelayBinDir, wrapperName);
 
-  // シンボリックリンクが存在すればそのまま使用
+  // ラッパー/シンボリックリンクが存在すればそのまま使用
   if (fs.existsSync(devrelayClaudePath)) {
     return devrelayClaudePath;
   }
 
-  // シンボリックリンクが存在しない → which claude でフォールバック
-  console.log(`⚠️ devrelay-claude symlink not found, searching for claude...`);
+  // ラッパーが存在しない → which/where claude でフォールバック
+  const findCmd = isWindows ? 'where' : 'which';
+  console.log(`⚠️ ${wrapperName} not found, searching for claude...`);
 
   try {
-    const claudePath = execSync('which claude', { encoding: 'utf-8', timeout: 5000 }).trim();
+    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8', timeout: 5000 }).trim();
+    // where コマンドは複数行を返す場合があるため、最初の行を使用
+    const claudePath = claudePathRaw.split(/\r?\n/)[0];
     console.log(`✅ Found claude at: ${claudePath}`);
 
-    // シンボリックリンクを自動作成（次回以降は高速に + ps でプロセス識別可能に）
+    // ラッパーを自動作成（次回以降は高速に + ps でプロセス識別可能に）
     try {
       fs.mkdirSync(devrelayBinDir, { recursive: true });
-      fs.symlinkSync(claudePath, devrelayClaudePath);
-      console.log(`✅ Symlink created: devrelay-claude -> ${claudePath}`);
+      if (isWindows) {
+        // Windows: .cmd バッチファイルを作成（管理者権限不要）
+        fs.writeFileSync(devrelayClaudePath, `@echo off\r\n"${claudePath}" %*\r\n`);
+      } else {
+        // Linux: シンボリックリンクを作成
+        fs.symlinkSync(claudePath, devrelayClaudePath);
+      }
+      console.log(`✅ Wrapper created: ${wrapperName} -> ${claudePath}`);
       return devrelayClaudePath;
-    } catch (symlinkErr) {
-      // シンボリックリンク作成に失敗しても claude 自体は使える
-      console.log(`⚠️ Could not create symlink, using claude directly: ${(symlinkErr as Error).message}`);
+    } catch (wrapperErr) {
+      // ラッパー作成に失敗しても claude 自体は使える
+      console.log(`⚠️ Could not create wrapper, using claude directly: ${(wrapperErr as Error).message}`);
       return claudePath;
     }
   } catch {
