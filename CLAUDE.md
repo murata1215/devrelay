@@ -1167,6 +1167,21 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `scripts/install-agent.ps1` - 新規 PowerShell インストーラー
   - `apps/web/src/pages/MachinesPage.tsx` - OS タブ切り替え
 
+#### 67. PowerShell インストーラー ExecutionPolicy 自動設定 + pnpm 自動インストール (2026-02-21)
+- **問題**: Windows デフォルトの ExecutionPolicy `Restricted` では `npm.ps1`/`pnpm.ps1` 等の PowerShell ラッパースクリプトがブロックされる
+  - `irm ... | iex` 自体は文字列評価なので動作するが、スクリプト内で呼ぶ `npm`/`pnpm` コマンドが失敗
+- **解決策1: ExecutionPolicy 自動設定**:
+  - インストーラー冒頭で `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force` を自動実行
+  - 現在のポリシーが `Restricted` または `Undefined` の場合のみ変更
+  - `-Scope CurrentUser` なので管理者権限不要
+  - `iex` 内から実行可能なので、ユーザーの手動操作は不要
+- **解決策2: pnpm 自動インストール**:
+  - pnpm が未インストールの場合、`cmd /c "npm install -g pnpm"` で自動インストール
+  - `cmd /c` 経由で `npm.cmd` を直接呼ぶことで `.ps1` ラッパー問題も回避
+  - Node.js がある場合のみ試行、失敗時は従来通りエラー表示
+- **主要ファイル**:
+  - `scripts/install-agent.ps1` - ExecutionPolicy 自動設定（冒頭）、pnpm 自動インストール（Step 1）
+
 ## 今後の課題
 
 - [ ] LINE 対応

@@ -8,7 +8,7 @@
 # 前提条件:
 #   - Node.js 20+
 #   - git
-#   - pnpm
+#   - pnpm（未インストールなら自動インストール）
 #
 # 処理内容:
 #   1. 依存ツールの確認（Node.js 20+, git, pnpm）
@@ -20,6 +20,20 @@
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
+
+# --- ExecutionPolicy 自動設定 ---
+# Windows デフォルトの Restricted ポリシーでは npm.ps1/pnpm.ps1 等の
+# PowerShell ラッパースクリプトがブロックされるため、RemoteSigned に変更
+# -Scope CurrentUser: 管理者権限不要、現在のユーザーにのみ適用
+try {
+    $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+    if ($currentPolicy -eq "Restricted" -or $currentPolicy -eq "Undefined") {
+        Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+        Write-Host "ExecutionPolicy を RemoteSigned に設定しました" -ForegroundColor Green
+    }
+} catch {
+    # 失敗しても続行（既に適切なポリシーが設定されている場合など）
+}
 
 # --- 定数 ---
 $RepoUrl = "https://github.com/murata1215/devrelay.git"
@@ -110,12 +124,26 @@ if (-not $GitCmd) {
     Write-Host "  OK git $GitVersion" -ForegroundColor Green
 }
 
-# pnpm チェック
+# pnpm チェック（未インストールなら自動インストール）
 $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
 if (-not $PnpmCmd) {
-    Write-Host "  X pnpm が必要です" -ForegroundColor Red
-    Write-Host "    インストール: npm install -g pnpm" -ForegroundColor Yellow
-    $Missing++
+    # Node.js がある場合のみ自動インストールを試みる
+    if ($NodeCmd) {
+        Write-Host "  pnpm をインストール中..." -ForegroundColor Yellow
+        try {
+            # cmd /c 経由で npm.cmd を直接呼び出し（npm.ps1 の ExecutionPolicy 問題を回避）
+            cmd /c "npm install -g pnpm" 2>$null
+            $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
+        } catch {}
+    }
+    if (-not $PnpmCmd) {
+        Write-Host "  X pnpm が必要です" -ForegroundColor Red
+        Write-Host "    インストール: npm install -g pnpm" -ForegroundColor Yellow
+        $Missing++
+    } else {
+        $PnpmVersion = pnpm -v
+        Write-Host "  OK pnpm $PnpmVersion (自動インストール)" -ForegroundColor Green
+    }
 } else {
     $PnpmVersion = pnpm -v
     Write-Host "  OK pnpm $PnpmVersion" -ForegroundColor Green

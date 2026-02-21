@@ -83,7 +83,7 @@ Node.js 20+ and git required. Get your token from the WebUI Agents page (click "
 $env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex
 ```
 
-Node.js 20+, git, and pnpm required. Installs to `%APPDATA%\devrelay\agent\` with Task Scheduler auto-start.
+Node.js 20+ and git required (pnpm is auto-installed if missing). ExecutionPolicy is set automatically. Installs to `%APPDATA%\devrelay\agent\` with Startup folder auto-start.
 
 #### Linux Agent (Manual)
 
@@ -352,6 +352,7 @@ agents/windows/
 - [x] Agent auto-naming (skip name input, auto-set from hostname on connect)
 - [x] Agent restart session continuity (seamless session recovery after agent restart)
 - [x] Windows CLI Agent (cross-platform codebase + PowerShell one-liner installer)
+- [x] PowerShell installer auto-setup (ExecutionPolicy + pnpm auto-install)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features
