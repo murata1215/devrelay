@@ -154,7 +154,7 @@ export function MachinesPage() {
   /** アンインストールコマンドを生成（OS 別） */
   const getUninstallCommand = (os: 'linux' | 'windows' = 'linux') => {
     if (os === 'windows') {
-      return `Get-CimInstance Win32_Process -Filter "Name='node.exe'" -EA 0 | Where-Object { $_.CommandLine -like '*devrelay*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Remove-Item "$([Environment]::GetFolderPath('Startup'))\\DevRelay Agent.vbs" -EA 0; Remove-Item "$env:APPDATA\\devrelay" -Recurse -Force`;
+      return `Get-CimInstance Win32_Process -Filter "Name='node.exe'" -EA 0 | Where-Object { $_.CommandLine -like '*devrelay*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Start-Sleep -Seconds 2; Remove-Item "$([Environment]::GetFolderPath('Startup'))\\DevRelay Agent.vbs" -EA 0; Remove-Item "$env:APPDATA\\devrelay" -Recurse -Force`;
     }
     return `sudo systemctl stop devrelay-agent 2>/dev/null; sudo systemctl disable devrelay-agent 2>/dev/null; crontab -l 2>/dev/null | grep -v devrelay | crontab -; pkill -f "devrelay.*index.js"; rm -rf ~/.devrelay`;
   };
