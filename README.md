@@ -374,6 +374,9 @@ agents/windows/
 - [x] AI error handling improvement (catch errors, notify Discord/Telegram instead of crashing)
 - [x] nohup stdin fix for `curl|bash` compatibility
 - [x] Fix pgrep pattern for agent process detection on re-install
+- [x] Use absolute node path in nohup/crontab for PATH-independent startup
+- [x] Use Get-CimInstance for Windows agent process detection on re-install
+- [x] Add Windows install command and setup guide URL to Claude Code error message
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

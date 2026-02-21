@@ -1275,22 +1275,31 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `catch` ブロックでエラーメッセージを `agent:ai:output`（`isComplete: true`）で Discord/Telegram に送信
   - Agent プロセスはクラッシュせず ONLINE のまま維持される
 - **解決策2: エラーメッセージ更新**:
-  - `resolveClaudePath()` のインストール案内を `npm install -g @anthropic-ai/claude-code` → `curl -fsSL https://claude.ai/install.sh | bash` に変更（公式ワンライナー）
+  - `resolveClaudePath()` のインストール案内に Linux/Windows 両方のコマンドとセットアップガイド URL を追加
 - **表示例**（Discord/Telegram）:
   ```
   ❌ エラー: Claude Code が見つかりません。以下を確認してください:
-    1. Claude Code をインストール: curl -fsSL https://claude.ai/install.sh | bash
-    2. インストール後、Agent を再起動してください
+    セットアップガイド: https://code.claude.com/docs/ja/setup
+    Linux:   curl -fsSL https://claude.ai/install.sh | bash
+    Windows: irm https://claude.ai/install.ps1 | iex
+    インストール後、Agent を再起動してください
   ```
 - **主要ファイル**:
   - `agents/linux/src/services/connection.ts` - `handleAiPrompt()` に try/catch 追加
   - `agents/linux/src/services/ai-runner.ts` - `resolveClaudePath()` エラーメッセージ変更
-- **インストーラー追加修正**:
+- **Linux インストーラー追加修正**:
   - **nohup stdin fix**: `curl|bash` で nohup 起動時に `< /dev/null` を追加（バックグラウンドプロセスが stdin を消費してスクリプト後半が実行されない問題を修正）
   - **pgrep パターン修正**: `node.*devrelay.*index.js` → `\.devrelay.*index\.js` に変更（`~/.devrelay/node/bin/node agents/linux/dist/index.js` のように node パスに devrelay が含まれる場合にマッチしなかった問題を修正）
   - **kill || true**: `set -e` 環境下で kill 失敗時にスクリプトが停止しないように `|| true` を追加
+  - **node 絶対パス使用**: nohup/crontab で `node` → `$(which node)` の絶対パスを使用（`~/.devrelay/node/` にインストールされた Node.js が PATH にない環境で `Exit 127` になる問題を修正）
+  - **crontab/再起動コマンドも絶対パス化**: `dist/index.js` → `$AGENT_DIR/agents/linux/dist/index.js` に変更
+- **Windows インストーラー追加修正**:
+  - **プロセス検出を Get-CimInstance に変更**: `Get-Process` では VBS→CMD→node の間接起動時に `CommandLine` が空になるため、`Get-CimInstance Win32_Process` を使用して WMI 経由でフルコマンドラインを取得
+  - WebUI アンインストールコマンドも同様に修正
 - **主要ファイル（追加修正）**:
-  - `scripts/install-agent.sh` - nohup stdin fix、pgrep パターン修正、kill || true
+  - `scripts/install-agent.sh` - nohup stdin fix、pgrep パターン修正、kill || true、node 絶対パス
+  - `scripts/install-agent.ps1` - Get-CimInstance によるプロセス検出
+  - `apps/web/src/pages/MachinesPage.tsx` - アンインストールコマンド修正
 
 ## 今後の課題
 
