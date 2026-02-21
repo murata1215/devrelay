@@ -406,6 +406,9 @@ else
   echo -e "  ${GREEN}ℹ${NC} nohup + crontab で起動します"
   echo ""
 
+  # node の絶対パスを取得（nohup・crontab で PATH に依存しないため）
+  NODE_ABS_PATH=$(which node)
+
   # 既存の Agent プロセスを停止（再インストール対応）
   EXISTING_PID=$(pgrep -u "$(whoami)" -f "\.devrelay.*index\.js" 2>/dev/null)
   if [ -n "$EXISTING_PID" ]; then
@@ -416,7 +419,7 @@ else
 
   echo -e "  Agent をバックグラウンドで起動中..."
   cd "$AGENT_DIR/agents/linux"
-  nohup node "$AGENT_DIR/agents/linux/dist/index.js" < /dev/null > "$CONFIG_DIR/logs/agent.log" 2>&1 &
+  nohup "$NODE_ABS_PATH" "$AGENT_DIR/agents/linux/dist/index.js" < /dev/null > "$CONFIG_DIR/logs/agent.log" 2>&1 &
   AGENT_PID=$!
   sleep 3
 
@@ -427,8 +430,7 @@ else
     echo -e "  ログ: ${YELLOW}tail -f $CONFIG_DIR/logs/agent.log${NC}"
 
     # crontab @reboot で OS 再起動時の自動起動を設定
-    NODE_ABS_PATH=$(which node)
-    CRONTAB_CMD="@reboot cd $AGENT_DIR/agents/linux && $NODE_ABS_PATH dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1"
+    CRONTAB_CMD="@reboot cd $AGENT_DIR/agents/linux && $NODE_ABS_PATH $AGENT_DIR/agents/linux/dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1"
     # 既存の devrelay エントリを除去してから新しいエントリを追加（重複防止）
     ( crontab -l 2>/dev/null | grep -v "devrelay" ; echo "$CRONTAB_CMD" ) | crontab - 2>/dev/null && {
       CRONTAB_REGISTERED=true
@@ -474,10 +476,10 @@ elif [ "$NOHUP_STARTED" = true ]; then
   echo -e "管理コマンド:"
   echo -e "  ログ確認:   ${GREEN}tail -f $CONFIG_DIR/logs/agent.log${NC}"
   echo -e "  停止:       ${GREEN}kill $AGENT_PID${NC}"
-  echo -e "  再起動:     ${GREEN}cd $AGENT_DIR/agents/linux && nohup node dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
+  echo -e "  再起動:     ${GREEN}nohup $NODE_ABS_PATH $AGENT_DIR/agents/linux/dist/index.js < /dev/null > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
   echo -e "  crontab:    ${GREEN}crontab -l | grep devrelay${NC}"
 else
   echo -e "手動起動:"
-  echo -e "  ${GREEN}cd $AGENT_DIR/agents/linux && nohup node dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
+  echo -e "  ${GREEN}nohup $NODE_ABS_PATH $AGENT_DIR/agents/linux/dist/index.js < /dev/null > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
 fi
 echo ""
