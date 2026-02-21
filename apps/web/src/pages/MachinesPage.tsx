@@ -431,8 +431,8 @@ export function MachinesPage() {
               />
               <div className="text-gray-500 text-xs mt-2">
                 {installOs === 'linux'
-                  ? 'Requires: Node.js 20+, git'
-                  : 'Run in PowerShell. Requires: Node.js 20+, git'}
+                  ? 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'
+                  : 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'}
               </div>
             </div>
             <div className="flex justify-end">
@@ -504,8 +504,8 @@ export function MachinesPage() {
               />
               <div className="text-gray-500 text-xs mt-2">
                 {settingsOs === 'linux'
-                  ? 'Requires: Node.js 20+, git'
-                  : 'Run in PowerShell. Requires: Node.js 20+, git'}
+                  ? 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'
+                  : 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'}
               </div>
             </div>
 

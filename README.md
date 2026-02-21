@@ -251,7 +251,20 @@ pm2 startup
 
 ### Proxy Configuration
 
-To connect through a proxy, add settings to `~/.devrelay/config.yaml`:
+The one-liner installers prompt for proxy settings during installation. You can also specify proxy via CLI arguments or environment variables:
+
+```bash
+# Linux: interactive prompt during install (answer y/N when asked)
+curl -fsSL ... | bash -s -- --token YOUR_TOKEN
+
+# Linux: skip prompt with --proxy
+curl -fsSL ... | bash -s -- --token YOUR_TOKEN --proxy http://proxy:8080
+
+# Windows: skip prompt with $env:DEVRELAY_PROXY
+$env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_PROXY="http://proxy:8080"; irm ... | iex
+```
+
+To configure proxy manually, add settings to `~/.devrelay/config.yaml`:
 
 ```yaml
 proxy:
@@ -354,6 +367,7 @@ agents/windows/
 - [x] Windows CLI Agent (cross-platform codebase + PowerShell one-liner installer)
 - [x] PowerShell installer auto-setup (ExecutionPolicy + pnpm auto-install)
 - [x] Agent settings modal (token re-display, install/uninstall commands)
+- [x] Installer proxy support (interactive prompt + `--proxy` / `$env:DEVRELAY_PROXY`)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

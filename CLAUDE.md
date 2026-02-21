@@ -1201,6 +1201,40 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/web/src/lib/api.ts` - `machines.getToken()` メソッド追加
   - `apps/web/src/pages/MachinesPage.tsx` - Agent 設定モーダル、アンインストールコマンド、共通コンポーネント
 
+#### 69. ワンライナーインストーラー プロキシ対応 (2026-02-21)
+- **目的**: プロキシ環境でもワンライナーだけで Agent セットアップを完了できるようにする
+- **対話プロンプト方式**: インストール途中で「プロキシを使用しますか？」と聞き、必要なら URL を入力させる
+- **Linux (`scripts/install-agent.sh`)**:
+  - `--proxy URL` 引数追加（指定済みならプロンプトスキップ）
+  - 依存チェック後に対話プロンプト: `read ... < /dev/tty` で `curl | bash` でも入力可能
+  - config.yaml の新規作成・既存更新の両方で `proxy:` セクション対応
+  - 完了メッセージにプロキシ URL 表示
+- **Windows (`scripts/install-agent.ps1`)**:
+  - `$env:DEVRELAY_PROXY` 環境変数で事前指定可能（指定済みならプロンプトスキップ）
+  - 依存チェック後に `Read-Host` で対話プロンプト（`irm | iex` 中でもコンソールから読み取れる）
+  - config.yaml の新規作成・既存更新の両方で `proxy:` セクション対応
+  - 完了メッセージにプロキシ URL 表示、`$env:DEVRELAY_PROXY` クリーンアップ
+- **WebUI (`apps/web/src/pages/MachinesPage.tsx`)**:
+  - 作成直後モーダル・設定モーダルのヒントテキストにプロキシ対応の案内追加
+- **使用例**:
+  ```bash
+  # Linux: 対話的（インストール中にプロンプトが表示される）
+  curl -fsSL ... | bash -s -- --token YOUR_TOKEN
+
+  # Linux: 非対話（CI/CD 向け、プロンプトスキップ）
+  curl -fsSL ... | bash -s -- --token YOUR_TOKEN --proxy http://proxy:8080
+
+  # Windows: 対話的
+  $env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm ... | iex
+
+  # Windows: 非対話
+  $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_PROXY="http://proxy:8080"; irm ... | iex
+  ```
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - `--proxy` 引数パース、対話プロンプト、config.yaml プロキシ書き込み
+  - `scripts/install-agent.ps1` - `$env:DEVRELAY_PROXY` 読み取り、対話プロンプト、config.yaml プロキシ書き込み
+  - `apps/web/src/pages/MachinesPage.tsx` - プロキシヒントテキスト追加
+
 ## 今後の課題
 
 - [ ] LINE 対応

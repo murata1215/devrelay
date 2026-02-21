@@ -5,6 +5,9 @@
 # 使い方:
 #   $env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex
 #
+# プロキシ環境:
+#   $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_PROXY="http://proxy:8080"; irm ... | iex
+#
 # 前提条件:
 #   - Node.js 20+
 #   - git
@@ -44,8 +47,9 @@ $LogDir = Join-Path $ConfigDir "logs"
 $BinDir = Join-Path $ConfigDir "bin"
 $TaskName = "DevRelay Agent"
 
-# --- トークン取得 ---
+# --- トークン・プロキシ取得 ---
 $Token = $env:DEVRELAY_TOKEN
+$ProxyUrl = $env:DEVRELAY_PROXY
 $ServerUrl = "wss://devrelay.io/ws/agent"
 
 if (-not $Token) {
@@ -159,6 +163,20 @@ if ($Missing -gt 0) {
 Write-Host "OK 依存ツール OK" -ForegroundColor Green
 Write-Host ""
 
+# --- プロキシ設定プロンプト ---
+# $env:DEVRELAY_PROXY が未設定の場合、対話的にプロキシ使用の有無を確認する
+# Read-Host はパイプライン（irm | iex）中でもコンソールから読み取れる
+if (-not $ProxyUrl) {
+    $UseProxy = Read-Host "プロキシを使用しますか？ (y/N)"
+    if ($UseProxy -match "^[Yy]") {
+        $ProxyUrl = Read-Host "プロキシURL (例: http://proxy:8080)"
+        if ($ProxyUrl) {
+            Write-Host "  OK プロキシ: $ProxyUrl" -ForegroundColor Green
+        }
+    }
+    Write-Host ""
+}
+
 # =============================================================================
 # Step 2: リポジトリ取得
 # =============================================================================
@@ -230,8 +248,22 @@ if (Test-Path $ConfigFile) {
         $Content += "`ntoken: `"$Token`""
     }
     Set-Content -Path $ConfigFile -Value $Content -Encoding UTF8
+
+    # プロキシが指定されている場合、既存設定に追加/更新
+    if ($ProxyUrl) {
+        $Content = Get-Content $ConfigFile -Raw
+        if ($Content -match "(?m)^proxy:") {
+            # 既存の proxy.url を更新
+            $Content = $Content -replace '(?m)^(  url:).*', "`$1 `"$ProxyUrl`""
+        } else {
+            # proxy セクションを末尾に追加
+            $Content += "`nproxy:`n  url: `"$ProxyUrl`""
+        }
+        Set-Content -Path $ConfigFile -Value $Content -Encoding UTF8
+        Write-Host "  プロキシ設定を更新しました"
+    }
 } else {
-    # 新規作成
+    # 新規作成: 基本設定
     $ConfigContent = @"
 # DevRelay Agent 設定ファイル
 # 詳細: https://github.com/murata1215/devrelay
@@ -250,6 +282,12 @@ aiTools:
     command: gemini
 logLevel: info
 "@
+
+    # プロキシ設定がある場合は追記
+    if ($ProxyUrl) {
+        $ConfigContent += "`nproxy:`n  url: `"$ProxyUrl`""
+    }
+
     Set-Content -Path $ConfigFile -Value $ConfigContent -Encoding UTF8
     Write-Host "  作成: $ConfigFile"
 }
@@ -357,6 +395,9 @@ Write-Host ""
 Write-Host "  エージェント名:  $MachineName" -ForegroundColor Green
 Write-Host "  設定ファイル:    $ConfigFile" -ForegroundColor Green
 Write-Host "  サーバーURL:     $ServerUrl" -ForegroundColor Green
+if ($ProxyUrl) {
+    Write-Host "  プロキシ:        $ProxyUrl" -ForegroundColor Green
+}
 Write-Host ""
 
 Write-Host "管理コマンド:" -ForegroundColor Cyan
@@ -369,5 +410,6 @@ if ($AutoStartRegistered) {
 }
 Write-Host ""
 
-# トークン環境変数をクリア（セキュリティ）
+# 環境変数をクリア（セキュリティ）
 $env:DEVRELAY_TOKEN = $null
+$env:DEVRELAY_PROXY = $null

@@ -7,6 +7,9 @@
 # 使い方:
 #   curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
 #
+# プロキシ環境:
+#   curl -fsSL ... | bash -s -- --token YOUR_TOKEN --proxy http://proxy:8080
+#
 # 前提条件:
 #   - Node.js 20+
 #   - git
@@ -40,6 +43,7 @@ SERVICE_NAME="devrelay-agent"
 # --- 引数パース ---
 TOKEN=""
 SERVER_URL="wss://devrelay.io/ws/agent"
+PROXY_URL=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -51,12 +55,17 @@ while [[ $# -gt 0 ]]; do
       SERVER_URL="$2"
       shift 2
       ;;
+    --proxy)
+      PROXY_URL="$2"
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: $0 --token YOUR_TOKEN [--server SERVER_URL]"
+      echo "Usage: $0 --token YOUR_TOKEN [--server SERVER_URL] [--proxy PROXY_URL]"
       echo ""
       echo "Options:"
       echo "  --token   (必須) WebUI で生成したエージェントトークン"
       echo "  --server  サーバーURL (デフォルト: wss://devrelay.io/ws/agent)"
+      echo "  --proxy   プロキシURL (例: http://proxy:8080, socks5://proxy:1080)"
       exit 0
       ;;
     *)
@@ -154,6 +163,22 @@ fi
 echo -e "${GREEN}✅ 依存ツール OK${NC}"
 echo ""
 
+# --- プロキシ設定プロンプト ---
+# --proxy 引数が未指定の場合、対話的にプロキシ使用の有無を確認する
+# curl | bash でも /dev/tty から読み取ることで対話入力が可能
+if [ -z "$PROXY_URL" ]; then
+  echo -n -e "🔌 プロキシを使用しますか？ (y/N): "
+  read USE_PROXY < /dev/tty 2>/dev/null || USE_PROXY="n"
+  if [[ "$USE_PROXY" =~ ^[Yy] ]]; then
+    echo -n -e "   プロキシURL (例: http://proxy:8080): "
+    read PROXY_URL < /dev/tty 2>/dev/null || PROXY_URL=""
+    if [ -n "$PROXY_URL" ]; then
+      echo -e "  ${GREEN}✅ プロキシ: $PROXY_URL${NC}"
+    fi
+  fi
+  echo ""
+fi
+
 # =============================================================================
 # Step 2: リポジトリ取得
 # =============================================================================
@@ -214,6 +239,18 @@ if [ -f "$CONFIG_FILE" ]; then
   else
     echo "token: \"$TOKEN\"" >> "$CONFIG_FILE"
   fi
+
+  # プロキシが指定されている場合、既存設定に追加/更新
+  if [ -n "$PROXY_URL" ]; then
+    if grep -q "^proxy:" "$CONFIG_FILE"; then
+      # 既存の proxy.url を更新
+      sed -i "/^proxy:/,/^[^ ]/{s|^  url:.*|  url: \"$PROXY_URL\"|}" "$CONFIG_FILE"
+    else
+      # proxy セクションを末尾に追加
+      printf "\nproxy:\n  url: \"%s\"\n" "$PROXY_URL" >> "$CONFIG_FILE"
+    fi
+    echo -e "  プロキシ設定を更新しました"
+  fi
 else
   cat > "$CONFIG_FILE" << EOF
 # DevRelay Agent 設定ファイル
@@ -234,6 +271,12 @@ aiTools:
     command: gemini
 logLevel: info
 EOF
+
+  # プロキシ設定がある場合は config.yaml に追記
+  if [ -n "$PROXY_URL" ]; then
+    printf "proxy:\n  url: \"%s\"\n" "$PROXY_URL" >> "$CONFIG_FILE"
+  fi
+
   echo -e "  作成: $CONFIG_FILE"
 fi
 
@@ -358,6 +401,9 @@ echo ""
 echo -e "  エージェント名:  ${GREEN}$MACHINE_NAME${NC}"
 echo -e "  設定ファイル:    ${GREEN}$CONFIG_FILE${NC}"
 echo -e "  サーバーURL:     ${GREEN}$SERVER_URL${NC}"
+if [ -n "$PROXY_URL" ]; then
+  echo -e "  プロキシ:        ${GREEN}$PROXY_URL${NC}"
+fi
 echo ""
 
 if [ "$SYSTEMD_REGISTERED" = true ]; then
