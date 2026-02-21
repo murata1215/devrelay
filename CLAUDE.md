@@ -1268,6 +1268,24 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `scripts/install-agent.sh` - Step 1 の依存チェックを自動インストールに全面改修
 
+#### 71. AI実行エラーのハンドリング改善 (2026-02-21)
+- **問題**: Claude Code 未インストールの Agent にプロンプトを送ると、`resolveClaudePath()` の例外がキャッチされず Node.js プロセスがクラッシュ → Agent が OFFLINE になる
+- **解決策1: try/catch 追加**:
+  - `handleAiPrompt()` 内の `sendPromptToAi()` + リトライ処理全体を `try/catch` で囲む
+  - `catch` ブロックでエラーメッセージを `agent:ai:output`（`isComplete: true`）で Discord/Telegram に送信
+  - Agent プロセスはクラッシュせず ONLINE のまま維持される
+- **解決策2: エラーメッセージ更新**:
+  - `resolveClaudePath()` のインストール案内を `npm install -g @anthropic-ai/claude-code` → `curl -fsSL https://claude.ai/install.sh | bash` に変更（公式ワンライナー）
+- **表示例**（Discord/Telegram）:
+  ```
+  ❌ エラー: Claude Code が見つかりません。以下を確認してください:
+    1. Claude Code をインストール: curl -fsSL https://claude.ai/install.sh | bash
+    2. インストール後、Agent を再起動してください
+  ```
+- **主要ファイル**:
+  - `agents/linux/src/services/connection.ts` - `handleAiPrompt()` に try/catch 追加
+  - `agents/linux/src/services/ai-runner.ts` - `resolveClaudePath()` エラーメッセージ変更
+
 ## 今後の課題
 
 - [ ] LINE 対応

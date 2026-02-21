@@ -390,7 +390,7 @@ function resolveClaudePath(): string {
   } catch {
     throw new Error(
       'Claude Code が見つかりません。以下を確認してください:\n' +
-      '  1. Claude Code をインストール: npm install -g @anthropic-ai/claude-code\n' +
+      '  1. Claude Code をインストール: curl -fsSL https://claude.ai/install.sh | bash\n' +
       '  2. インストール後、Agent を再起動してください'
     );
   }
