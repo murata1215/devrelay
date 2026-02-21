@@ -242,9 +242,18 @@ if [ "$FORCE" = false ]; then
   VALIDATE_RESPONSE=$(curl -s -f -X POST "${API_BASE_URL}/api/public/validate-token" \
     -H "Content-Type: application/json" \
     -d "{\"token\": \"$TOKEN\"}" 2>/dev/null) || {
-    # curl 自体が失敗した場合（サーバーに到達不可など）はスキップして続行
-    echo -e "${YELLOW}  ⚠️ トークン検証をスキップしました（サーバーに接続できません）${NC}"
-    VALIDATE_RESPONSE=""
+    # サーバーに接続できない場合はインストールを中断
+    echo -e "${RED}❌ エラー: サーバーに接続できません${NC}"
+    echo -e ""
+    echo -e "   サーバー: ${YELLOW}${API_BASE_URL}${NC}"
+    if [ -n "$PROXY_URL" ]; then
+      echo -e "   プロキシ: ${YELLOW}${PROXY_URL}${NC}"
+      echo -e ""
+      echo -e "   プロキシURLが正しいか確認してください。"
+    fi
+    echo -e ""
+    echo -e "   強制インストールする場合は ${GREEN}--force${NC} オプションを使用してください。"
+    exit 1
   }
 
   if [ -n "$VALIDATE_RESPONSE" ]; then

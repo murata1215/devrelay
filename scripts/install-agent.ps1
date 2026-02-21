@@ -232,8 +232,19 @@ if (-not $Force) {
 
         Write-Host "  OK トークン検証OK" -ForegroundColor Green
     } catch {
-        # サーバーに接続できない場合はスキップして続行
-        Write-Host "  WARNING: トークン検証をスキップしました（サーバーに接続できません）" -ForegroundColor Yellow
+        # サーバーに接続できない場合はインストールを中断
+        Write-Host ""
+        Write-Host "X エラー: サーバーに接続できません" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  サーバー: $ApiBaseUrl" -ForegroundColor Yellow
+        if ($ProxyUrl) {
+            Write-Host "  プロキシ: $ProxyUrl" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  プロキシURLが正しいか確認してください。"
+        }
+        Write-Host ""
+        Write-Host '  強制インストールする場合は $env:DEVRELAY_FORCE="true" を設定してください。'
+        exit 1
     }
 }
 Write-Host ""
