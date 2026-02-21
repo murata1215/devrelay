@@ -222,10 +222,12 @@ Write-Host "[3/6] ビルド中..."
 Push-Location $AgentDir
 
 Write-Host "  依存関係をインストール中..."
+# --ignore-scripts: Electron 等の postinstall をスキップ（CLI Agent には不要）
+# 企業ネットワークで Electron バイナリ取得が ECONNRESET で失敗する問題を回避
 try {
-    pnpm install --frozen-lockfile 2>$null
+    pnpm install --frozen-lockfile --ignore-scripts 2>$null
 } catch {
-    pnpm install
+    pnpm install --ignore-scripts
 }
 
 Write-Host "  shared パッケージをビルド中..."

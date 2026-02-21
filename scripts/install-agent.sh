@@ -11,9 +11,9 @@
 #   curl -fsSL ... | bash -s -- --token YOUR_TOKEN --proxy http://proxy:8080
 #
 # 前提条件:
-#   - Node.js 20+
 #   - git
-#   - pnpm
+#   - curl, tar（ワンライナー実行時点で存在）
+#   ※ Node.js 20+ と pnpm は未インストールなら自動でダウンロード・インストール
 #
 # 処理内容:
 #   1. 依存ツールの確認（Node.js 20+, git, pnpm）
@@ -110,54 +110,91 @@ echo -e "${BLUE}└────────────────────�
 echo ""
 
 # =============================================================================
-# Step 1: 依存ツール確認
+# Step 1: 依存ツール確認・自動インストール
 # =============================================================================
-# 全ての依存を先にチェックし、不足分をまとめて表示してから終了する
+# git のみハード依存。Node.js と pnpm は未インストールなら自動でインストールする。
 echo -e "[1/6] 依存ツールを確認中..."
 
-MISSING=0
-
-# Node.js チェック
-if ! command -v node &> /dev/null; then
-  echo -e "${RED}❌ Node.js 20 以上が必要です${NC}"
-  echo -e "   インストール: ${YELLOW}curl -fsSL https://fnm.vercel.app/install | bash && fnm install 20${NC}"
-  echo -e "   詳細: ${YELLOW}https://nodejs.org${NC}"
-  MISSING=$((MISSING + 1))
+# --- git チェック（唯一の必須前提条件）---
+if ! command -v git &> /dev/null; then
+  echo -e "${RED}❌ git が必要です${NC}"
+  echo -e "   インストール: ${YELLOW}sudo apt install git${NC}  または  ${YELLOW}sudo yum install git${NC}"
+  echo ""
+  echo -e "${RED}git をインストールしてから再実行してください。${NC}"
+  exit 1
 else
-  # Node.js バージョンチェック
-  NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
-  if [ "$NODE_VERSION" -lt 20 ]; then
-    echo -e "${RED}❌ Node.js 20 以上が必要です（現在: $(node -v)）${NC}"
-    echo -e "   アップグレード: ${YELLOW}fnm install 20 && fnm use 20${NC}"
-    MISSING=$((MISSING + 1))
+  echo -e "  ✅ git $(git --version | cut -d' ' -f3)"
+fi
+
+# --- Node.js チェック・自動インストール ---
+# 未インストール or バージョン < 20 の場合、公式バイナリを ~/.devrelay/node/ にダウンロード
+NEED_NODE_INSTALL=false
+
+if ! command -v node &> /dev/null; then
+  NEED_NODE_INSTALL=true
+else
+  EXISTING_NODE_MAJOR=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+  if [ "$EXISTING_NODE_MAJOR" -lt 20 ]; then
+    echo -e "${YELLOW}  ⚠️ Node.js $(node -v) は古いバージョンです（20+ が必要）${NC}"
+    NEED_NODE_INSTALL=true
   else
     echo -e "  ✅ Node.js $(node -v)"
   fi
 fi
 
-# git チェック
-if ! command -v git &> /dev/null; then
-  echo -e "${RED}❌ git が必要です${NC}"
-  echo -e "   インストール: ${YELLOW}sudo apt install git${NC}  または  ${YELLOW}sudo yum install git${NC}"
-  MISSING=$((MISSING + 1))
-else
-  echo -e "  ✅ git $(git --version | cut -d' ' -f3)"
+if [ "$NEED_NODE_INSTALL" = true ]; then
+  echo -e "  📦 Node.js v20 をインストール中..."
+
+  # アーキテクチャ検出
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64)  NODE_ARCH="x64" ;;
+    aarch64) NODE_ARCH="arm64" ;;
+    armv7l)  NODE_ARCH="armv7l" ;;
+    *)
+      echo -e "${RED}❌ 未対応アーキテクチャ: $ARCH${NC}"
+      echo -e "   手動で Node.js 20+ をインストールしてください: ${YELLOW}https://nodejs.org${NC}"
+      exit 1
+      ;;
+  esac
+
+  # ~/.devrelay/ ディレクトリを事前に作成（CONFIG_DIR は後の Step でも使用）
+  mkdir -p "$CONFIG_DIR"
+
+  # Node.js 20 LTS バイナリをダウンロード・展開
+  NODE_DL_VERSION="v20.20.0"
+  NODE_DIR="$CONFIG_DIR/node"
+  NODE_URL="https://nodejs.org/dist/${NODE_DL_VERSION}/node-${NODE_DL_VERSION}-linux-${NODE_ARCH}.tar.xz"
+
+  mkdir -p "$NODE_DIR"
+  echo -e "     ダウンロード: ${NODE_URL}"
+  curl -fsSL "$NODE_URL" | tar -xJ -C "$NODE_DIR" --strip-components=1
+
+  if [ -x "$NODE_DIR/bin/node" ]; then
+    # PATH の先頭に追加（この後の pnpm install / ビルドでも使われる）
+    export PATH="$NODE_DIR/bin:$PATH"
+    echo -e "  ${GREEN}✅ Node.js $(node -v) をインストールしました ($NODE_DIR)${NC}"
+  else
+    echo -e "${RED}❌ Node.js のインストールに失敗しました${NC}"
+    echo -e "   手動でインストールしてください: ${YELLOW}https://nodejs.org${NC}"
+    exit 1
+  fi
 fi
 
-# pnpm チェック
+# --- pnpm チェック・自動インストール ---
+# npm は Node.js に同梱されているため、追加依存なし
 if ! command -v pnpm &> /dev/null; then
-  echo -e "${RED}❌ pnpm が必要です${NC}"
-  echo -e "   インストール: ${YELLOW}npm install -g pnpm${NC}"
-  MISSING=$((MISSING + 1))
+  echo -e "  📦 pnpm をインストール中..."
+  npm install -g pnpm 2>/dev/null
+  if command -v pnpm &> /dev/null; then
+    echo -e "  ${GREEN}✅ pnpm $(pnpm -v) をインストールしました${NC}"
+  else
+    echo -e "${RED}❌ pnpm のインストールに失敗しました${NC}"
+    echo -e "   手動でインストールしてください: ${YELLOW}npm install -g pnpm${NC}"
+    exit 1
+  fi
 else
   echo -e "  ✅ pnpm $(pnpm -v)"
-fi
-
-# 不足ツールがあれば終了
-if [ "$MISSING" -gt 0 ]; then
-  echo ""
-  echo -e "${RED}上記 ${MISSING} 件のツールをインストールしてから再実行してください。${NC}"
-  exit 1
 fi
 
 echo -e "${GREEN}✅ 依存ツール OK${NC}"
@@ -219,7 +256,9 @@ cd "$AGENT_DIR"
 
 # モノレポの依存関係をインストール・ビルド
 echo "  依存関係をインストール中..."
-pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+# --ignore-scripts: Electron 等の postinstall をスキップ（CLI Agent には不要）
+# 企業ネットワークで Electron バイナリ取得が ECONNRESET で失敗する問題を回避
+pnpm install --frozen-lockfile --ignore-scripts 2>/dev/null || pnpm install --ignore-scripts
 
 echo "  shared パッケージをビルド中..."
 pnpm --filter @devrelay/shared build

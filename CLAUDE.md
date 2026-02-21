@@ -1237,10 +1237,31 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   # Windows: 非対話
   $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_PROXY="http://proxy:8080"; irm ... | iex
   ```
+- **`--ignore-scripts` によるビルド改善**:
+  - `pnpm install` に `--ignore-scripts` フラグを追加（Linux / Windows 共通）
+  - Electron postinstall（GitHub からバイナリダウンロード）をスキップ
+  - CLI Agent は Electron を一切使わないため、postinstall スキップによる影響なし
+  - 企業ネットワークでの `ECONNRESET` → `ELIFECYCLE` → `tsc` 不在の連鎖障害を回避
 - **主要ファイル**:
-  - `scripts/install-agent.sh` - `--proxy` 引数パース、対話プロンプト、config.yaml プロキシ書き込み
-  - `scripts/install-agent.ps1` - `$env:DEVRELAY_PROXY` 読み取り、対話プロンプト、config.yaml プロキシ書き込み
+  - `scripts/install-agent.sh` - `--proxy` 引数パース、対話プロンプト、config.yaml プロキシ書き込み、`--ignore-scripts`
+  - `scripts/install-agent.ps1` - `$env:DEVRELAY_PROXY` 読み取り、対話プロンプト、config.yaml プロキシ書き込み、`--ignore-scripts`
   - `apps/web/src/pages/MachinesPage.tsx` - プロキシヒントテキスト追加
+
+#### 70. Linux インストーラー Node.js + pnpm 自動インストール (2026-02-21)
+- **目的**: Node.js 未インストールの Linux マシンでもワンライナーだけで Agent セットアップを完了できるようにする
+- **問題**: 従来は「fnm でインストールしてください」と案内して終了していたが、fnm 自体が `unzip` を要求し、最小構成 Linux には `unzip` もないためインストールに辿り着けない
+- **解決策: Node.js 公式バイナリ直接ダウンロード**:
+  - `~/.devrelay/node/` に Node.js 20 LTS（v20.20.0）バイナリを展開
+  - アーキテクチャ自動検出: `uname -m` → x64 / arm64 / armv7l
+  - `curl` + `tar` のみ使用（`sudo` 不要、`unzip` 不要）
+  - PATH の先頭に `~/.devrelay/node/bin` を追加
+- **pnpm 自動インストール**: `npm install -g pnpm`（npm は Node.js に同梱）
+- **git のみハード依存**: git だけは従来通り必須前提条件として残す
+- **依存チェックフローの変更**:
+  - 変更前: Node.js なし → エラー表示 → 終了、pnpm なし → エラー表示 → 終了
+  - 変更後: Node.js なし → 自動ダウンロード → 続行、pnpm なし → `npm install -g pnpm` → 続行
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - Step 1 の依存チェックを自動インストールに全面改修
 
 ## 今後の課題
 

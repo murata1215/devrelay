@@ -75,7 +75,7 @@ devrelay/
 curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
 ```
 
-Node.js 20+ and git required. Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname.
+Only `git` required. Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, no sudo needed). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname.
 
 #### Windows CLI Agent (One-liner)
 
@@ -368,6 +368,8 @@ agents/windows/
 - [x] PowerShell installer auto-setup (ExecutionPolicy + pnpm auto-install)
 - [x] Agent settings modal (token re-display, install/uninstall commands)
 - [x] Installer proxy support (interactive prompt + `--proxy` / `$env:DEVRELAY_PROXY`)
+- [x] Linux installer auto-install Node.js + pnpm (direct binary download, no sudo/unzip needed)
+- [x] `--ignore-scripts` for `pnpm install` (skip Electron postinstall in corporate networks)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features
