@@ -372,6 +372,15 @@ try {
     }
 }
 
+# --- 既存の Agent プロセスを停止（再インストール対応）---
+$ExistingAgents = Get-Process node -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*devrelay*' }
+if ($ExistingAgents) {
+    $ExistingAgents | Stop-Process -Force
+    Write-Host "  既存の Agent プロセスを停止しました" -ForegroundColor Yellow
+    Start-Sleep -Seconds 2
+}
+
 # --- Agent をバックグラウンドで即時起動 ---
 $AgentStarted = $false
 try {

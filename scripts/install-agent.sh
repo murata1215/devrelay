@@ -405,6 +405,15 @@ else
   NOHUP_STARTED=false
   echo -e "  ${GREEN}ℹ${NC} nohup + crontab で起動します"
   echo ""
+
+  # 既存の Agent プロセスを停止（再インストール対応）
+  EXISTING_PID=$(pgrep -u "$(whoami)" -f "node.*devrelay.*index.js" 2>/dev/null)
+  if [ -n "$EXISTING_PID" ]; then
+    kill $EXISTING_PID 2>/dev/null
+    echo -e "  ${YELLOW}既存の Agent プロセスを停止しました (PID: $EXISTING_PID)${NC}"
+    sleep 2
+  fi
+
   echo -e "  Agent をバックグラウンドで起動中..."
   cd "$AGENT_DIR/agents/linux"
   nohup node dist/index.js > "$CONFIG_DIR/logs/agent.log" 2>&1 &

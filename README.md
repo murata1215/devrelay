@@ -370,6 +370,7 @@ agents/windows/
 - [x] Installer proxy support (interactive prompt + `--proxy` / `$env:DEVRELAY_PROXY`)
 - [x] Linux installer auto-install Node.js + pnpm (direct binary download, no sudo/unzip needed)
 - [x] `--ignore-scripts` for `pnpm install` (skip Electron postinstall in corporate networks)
+- [x] Auto-restart agent on re-install (stop existing process before starting new one)
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features

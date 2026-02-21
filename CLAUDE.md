@@ -1242,9 +1242,14 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - Electron postinstall（GitHub からバイナリダウンロード）をスキップ
   - CLI Agent は Electron を一切使わないため、postinstall スキップによる影響なし
   - 企業ネットワークでの `ECONNRESET` → `ELIFECYCLE` → `tsc` 不在の連鎖障害を回避
+- **再インストール時の既存プロセス自動停止**:
+  - インストーラーの Step 6（Agent 起動）で、既存の Agent プロセスを自動停止してから新プロセスを起動
+  - Windows: `Get-Process node | Where-Object { $_.CommandLine -like '*devrelay*' } | Stop-Process`
+  - Linux（nohup パス）: `pgrep -f "node.*devrelay.*index.js"` → `kill`
+  - systemd パスは `systemctl --user restart` で元々対応済み
 - **主要ファイル**:
-  - `scripts/install-agent.sh` - `--proxy` 引数パース、対話プロンプト、config.yaml プロキシ書き込み、`--ignore-scripts`
-  - `scripts/install-agent.ps1` - `$env:DEVRELAY_PROXY` 読み取り、対話プロンプト、config.yaml プロキシ書き込み、`--ignore-scripts`
+  - `scripts/install-agent.sh` - `--proxy` 引数パース、対話プロンプト、config.yaml プロキシ書き込み、`--ignore-scripts`、既存プロセス停止
+  - `scripts/install-agent.ps1` - `$env:DEVRELAY_PROXY` 読み取り、対話プロンプト、config.yaml プロキシ書き込み、`--ignore-scripts`、既存プロセス停止
   - `apps/web/src/pages/MachinesPage.tsx` - プロキシヒントテキスト追加
 
 #### 70. Linux インストーラー Node.js + pnpm 自動インストール (2026-02-21)
