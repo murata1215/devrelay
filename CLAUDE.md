@@ -1301,12 +1301,52 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `scripts/install-agent.ps1` - Get-CimInstance によるプロセス検出
   - `apps/web/src/pages/MachinesPage.tsx` - アンインストールコマンド修正
 
+#### 72. インストール時のトークン事前検証 (2026-02-22)
+- **目的**: 別のマシン用のトークンを誤って使ってインストールするのを防止
+- **問題**: マシンAのトークンでマシンBにインストールすると、DBにマシンAの名前で2つ目のエントリが作成されてしまう
+- **解決策: インストール時のサーバー問い合わせ**:
+  1. パブリック API `POST /api/public/validate-token` を新設（認証不要）
+  2. インストーラーがビルド前にトークンを検証
+  3. トークンのマシン名が仮名（`agent-*`）でなく、現在の `hostname/username` と異なれば中断
+  4. `--force`（Linux）/ `$env:DEVRELAY_FORCE`（Windows）で強制続行可能
+- **API レスポンス**:
+  ```json
+  { "valid": true, "provisional": false, "machineName": "mouse01/user01" }
+  ```
+- **インストーラーの判定ロジック**:
+  - `valid: false` → 無効なトークン → 中断
+  - `provisional: true` → 仮名（新規Agent）→ 検証スキップ、続行
+  - `machineName !== hostname/username` → 別マシン用トークン → 中断（`--force` で回避）
+- **主要ファイル**:
+  - `apps/server/src/routes/public-api.ts` - **新規**: パブリック API エンドポイント
+  - `apps/server/src/index.ts` - publicApiRoutes の登録
+  - `scripts/install-agent.sh` - `--force` フラグ、トークン検証ステップ追加
+  - `scripts/install-agent.ps1` - `$env:DEVRELAY_FORCE`、トークン検証ステップ追加
+
+#### 73. サーバー接続不可時のインストール停止 (2026-02-22)
+- **目的**: プロキシ設定ミスなどでサーバーに接続できない場合、インストールを中断して原因を明示
+- **変更前**: トークン検証 API に接続できない場合は「スキップして続行」
+- **変更後**: 接続不可 → エラーメッセージ表示 → インストール停止
+- **エラーメッセージ**: プロキシ設定がある場合はプロキシ URL も表示し、設定ミスの診断を支援
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - サーバー接続エラー時の停止処理
+  - `scripts/install-agent.ps1` - 同上
+
+#### 74. Windows アンインストールコマンド修正 (2026-02-22)
+- **問題**: プロセス kill 直後にファイル削除すると「file in use」エラー
+- **原因**: `Stop-Process -Force` 後もプロセス終了に時間がかかり、ファイルロックが残る
+- **解決**: `Start-Sleep -Seconds 2` をプロセス kill と `Remove-Item` の間に追加
+- **修正箇所**: WebUI Agent 設定モーダルのアンインストールコマンド
+- **主要ファイル**:
+  - `apps/web/src/pages/MachinesPage.tsx` - Windows アンインストールコマンドに `Start-Sleep` 追加
+
 ## 今後の課題
 
 - [ ] LINE 対応
 - [ ] Gemini CLI / Codex / Aider 対応
 - [x] Windows Agent (2026-01-18 実装完了)
 - [x] Windows CLI Agent + PowerShell ワンライナー (2026-02-21 実装完了)
+- [ ] 共有ドキュメント機能（DevRelay Box）- pgvector + OpenAI Embedding で自動 RAG
 - [ ] 要約機能（Anthropic API 使用）
 - [ ] 複数ユーザー同時接続
 - [ ] 進捗表示のUI改善（プログレスバーなど）

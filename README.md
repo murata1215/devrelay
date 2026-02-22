@@ -377,6 +377,10 @@ agents/windows/
 - [x] Use absolute node path in nohup/crontab for PATH-independent startup
 - [x] Use Get-CimInstance for Windows agent process detection on re-install
 - [x] Add Windows install command and setup guide URL to Claude Code error message
+- [x] Pre-install token validation (prevent wrong-machine installs with `--force` override)
+- [x] Stop installation when server is unreachable (proxy misconfiguration detection)
+- [x] Windows uninstall fix (Start-Sleep between process kill and file removal)
+- [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] AI Summary
 - [ ] Team Features
