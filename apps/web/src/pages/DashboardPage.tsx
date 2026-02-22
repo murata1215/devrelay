@@ -80,7 +80,7 @@ export function DashboardPage() {
                 <div>
                   <div className="text-white font-medium text-sm sm:text-base">{session.projectName}</div>
                   <div className="text-gray-400 text-xs sm:text-sm">
-                    {session.machineName} - {session.aiTool}
+                    {session.machineDisplayName ?? session.machineName} - {session.aiTool}
                   </div>
                 </div>
                 <div className="sm:text-right flex sm:flex-col items-center sm:items-end gap-2 sm:gap-0">

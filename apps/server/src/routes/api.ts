@@ -23,13 +23,13 @@ type MachineWithProjects = Machine & {
 
 // Type for project with machine
 type ProjectWithMachine = Project & {
-  machine: { id: string; name: string };
+  machine: { id: string; name: string; displayName: string | null };
 };
 
 // Type for session with relations
 type SessionWithRelations = Session & {
   project: { name: string };
-  machine: { name: string };
+  machine: { name: string; displayName: string | null };
 };
 
 export async function apiRoutes(app: FastifyInstance) {
@@ -59,6 +59,7 @@ export async function apiRoutes(app: FastifyInstance) {
     return machines.map((m: MachineWithProjects) => ({
       id: m.id,
       name: m.name,
+      displayName: m.displayName ?? null,
       status: connectedAgents.has(m.id) ? 'online' : 'offline',
       lastSeenAt: m.lastSeenAt,
       managementInfo: m.managementInfo ?? null,
@@ -191,6 +192,60 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // ホスト名エイリアス設定
+  // 同じホスト名を持つ全マシンの displayName を一括更新
+  // ========================================
+  app.put('/api/machines/hostname-alias', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { hostname, alias } = request.body as { hostname: string; alias: string };
+
+    if (!hostname || hostname.trim().length === 0) {
+      return reply.status(400).send({ error: 'Hostname is required' });
+    }
+
+    // alias が空文字の場合は null に変換（エイリアス解除）
+    const displayAlias = alias && alias.trim().length > 0 ? alias.trim() : null;
+
+    // ユーザーが所有する同じホスト名のマシンを全て検索
+    // machineName は "hostname/username" 形式なので、hostname + "/" で前方一致
+    const machines = await prisma.machine.findMany({
+      where: {
+        userId,
+        name: { startsWith: `${hostname.trim()}/` },
+      },
+    });
+
+    if (machines.length === 0) {
+      return reply.status(404).send({ error: 'No machines found with this hostname' });
+    }
+
+    // displayName を計算: alias が設定されている場合 "alias/username" 形式に変換
+    // alias が null の場合は displayName を null にクリア
+    const updates = machines.map((m) => {
+      const parts = m.name.split('/');
+      const username = parts.length > 1 ? parts.slice(1).join('/') : '';
+      const newDisplayName = displayAlias
+        ? (username ? `${displayAlias}/${username}` : displayAlias)
+        : null;
+
+      return prisma.machine.update({
+        where: { id: m.id },
+        data: { displayName: newDisplayName },
+      });
+    });
+
+    await Promise.all(updates);
+
+    return {
+      success: true,
+      hostname: hostname.trim(),
+      alias: displayAlias,
+      updatedCount: machines.length,
+    };
+  });
+
+  // ========================================
   // プロジェクト一覧
   // ========================================
   app.get('/api/projects', async (request) => {
@@ -201,7 +256,7 @@ export async function apiRoutes(app: FastifyInstance) {
       where: { machine: { userId } },
       include: {
         machine: {
-          select: { id: true, name: true },
+          select: { id: true, name: true, displayName: true },
         },
       },
       orderBy: { lastUsedAt: 'desc' },
@@ -218,6 +273,7 @@ export async function apiRoutes(app: FastifyInstance) {
       machine: {
         id: p.machine.id,
         name: p.machine.name,
+        displayName: p.machine.displayName ?? null,
         online: connectedAgents.has(p.machine.id),
       },
     }));
@@ -313,7 +369,7 @@ export async function apiRoutes(app: FastifyInstance) {
         take: 5,
         include: {
           project: { select: { name: true } },
-          machine: { select: { name: true } },
+          machine: { select: { name: true, displayName: true } },
         },
       }),
     ]);
@@ -334,6 +390,7 @@ export async function apiRoutes(app: FastifyInstance) {
         id: s.id,
         projectName: s.project.name,
         machineName: s.machine.name,
+        machineDisplayName: s.machine.displayName ?? null,
         aiTool: s.aiTool,
         status: s.status,
         startedAt: s.startedAt,

@@ -29,6 +29,11 @@ export function MachinesPage() {
   const [settingsOs, setSettingsOs] = useState<'linux' | 'windows'>('linux');
   const [mgmtCopiedIndex, setMgmtCopiedIndex] = useState<number | null>(null);
 
+  // ホスト名エイリアス編集
+  const [aliasHostname, setAliasHostname] = useState('');
+  const [aliasValue, setAliasValue] = useState('');
+  const [aliasSaving, setAliasSaving] = useState(false);
+
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -84,6 +89,16 @@ export function MachinesPage() {
     setSettingsTarget(machine);
     setSettingsTokenLoading(true);
     setSettingsToken('');
+
+    // ホスト名エイリアスの初期値を設定
+    const hostname = machine.name.includes('/') ? machine.name.split('/')[0] : machine.name;
+    setAliasHostname(hostname);
+    // displayName が設定されていればエイリアス部分を抽出
+    const currentAlias = machine.displayName
+      ? machine.displayName.split('/')[0]
+      : '';
+    setAliasValue(currentAlias !== hostname ? currentAlias : '');
+
     try {
       const result = await machines.getToken(machine.id);
       setSettingsToken(result.token);
@@ -103,6 +118,8 @@ export function MachinesPage() {
     setSettingsUninstallCopied(false);
     setSettingsOs('linux');
     setMgmtCopiedIndex(null);
+    setAliasHostname('');
+    setAliasValue('');
   };
 
   const handleDelete = async () => {
@@ -117,6 +134,21 @@ export function MachinesPage() {
       alert(err instanceof Error ? err.message : 'Failed to delete machine');
     } finally {
       setDeleting(false);
+    }
+  };
+
+  /** ホスト名エイリアスを保存 */
+  const handleSaveAlias = async () => {
+    if (!aliasHostname) return;
+    setAliasSaving(true);
+    try {
+      await machines.setHostnameAlias(aliasHostname, aliasValue);
+      // 一覧を再読み込みして displayName を反映
+      await loadMachines();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save alias');
+    } finally {
+      setAliasSaving(false);
     }
   };
 
@@ -287,14 +319,18 @@ export function MachinesPage() {
                 {data.map((machine) => (
                   <tr key={machine.id} className="group hover:bg-gray-700/30 transition-colors">
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {/* Agent 名クリックで設定モーダルを開く */}
+                      {/* Agent 名クリックで設定モーダルを開く（displayName があればそちらを表示） */}
                       <button
                         onClick={() => handleOpenSettings(machine)}
                         className="text-white font-medium hover:text-blue-400 transition-colors cursor-pointer"
                         title="Open agent settings"
                       >
-                        {machine.name}
+                        {machine.displayName ?? machine.name}
                       </button>
+                      {/* displayName が設定されている場合、元の名前を小さく表示 */}
+                      {machine.displayName && (
+                        <div className="text-gray-500 text-xs">{machine.name}</div>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span
@@ -362,14 +398,19 @@ export function MachinesPage() {
                   </svg>
                 </button>
                 <div className="flex items-center justify-between mb-2">
-                  {/* モバイルでも Agent 名クリックで設定モーダルを開く */}
-                  <button
-                    onClick={() => handleOpenSettings(machine)}
-                    className="text-white font-medium hover:text-blue-400 transition-colors cursor-pointer"
-                    title="Open agent settings"
-                  >
-                    {machine.name}
-                  </button>
+                  {/* モバイルでも Agent 名クリックで設定モーダルを開く（displayName 対応） */}
+                  <div>
+                    <button
+                      onClick={() => handleOpenSettings(machine)}
+                      className="text-white font-medium hover:text-blue-400 transition-colors cursor-pointer"
+                      title="Open agent settings"
+                    >
+                      {machine.displayName ?? machine.name}
+                    </button>
+                    {machine.displayName && (
+                      <div className="text-gray-500 text-xs">{machine.name}</div>
+                    )}
+                  </div>
                   <span
                     className={`px-2 py-1 rounded text-xs font-medium ${
                       machine.status === 'online'
@@ -460,8 +501,42 @@ export function MachinesPage() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold text-white mb-4">
-              Agent Settings: {settingsTarget.name}
+              Agent Settings: {settingsTarget.displayName ?? settingsTarget.name}
             </h2>
+            {settingsTarget.displayName && (
+              <p className="text-gray-500 text-xs -mt-3 mb-4">({settingsTarget.name})</p>
+            )}
+
+            {/* ホスト名エイリアス編集 */}
+            <div className="mb-4">
+              <label className="block text-gray-400 text-sm mb-2">
+                Hostname Alias
+                <span className="text-gray-500 ml-2 text-xs">
+                  (applies to all agents with same hostname)
+                </span>
+              </label>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="text"
+                  value={aliasValue}
+                  onChange={(e) => setAliasValue(e.target.value)}
+                  placeholder={aliasHostname}
+                  className="flex-1 bg-gray-900 text-white px-4 py-2 rounded-lg text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                  onClick={handleSaveAlias}
+                  disabled={aliasSaving}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
+                >
+                  {aliasSaving ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+              <div className="text-gray-500 text-xs mt-1">
+                {aliasValue
+                  ? `Display: ${aliasValue}/${settingsTarget.name.includes('/') ? settingsTarget.name.split('/').slice(1).join('/') : ''}`
+                  : 'Leave empty to use original hostname'}
+              </div>
+            </div>
 
             {/* トークン表示 */}
             <div className="mb-4">
@@ -593,7 +668,7 @@ export function MachinesPage() {
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md mx-4">
             <h2 className="text-xl font-bold text-white mb-4">Delete Agent?</h2>
             <p className="text-gray-400 mb-4">
-              Are you sure you want to delete <strong className="text-white">{deleteTarget.name}</strong>?
+              Are you sure you want to delete <strong className="text-white">{deleteTarget.displayName ?? deleteTarget.name}</strong>?
               This will also delete all associated projects and sessions.
             </p>
             <div className="flex justify-end space-x-3">

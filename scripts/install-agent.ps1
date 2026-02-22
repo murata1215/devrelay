@@ -313,7 +313,7 @@ Write-Host "[4/6] 設定ファイルを生成中..."
 $MachineName = "$env:COMPUTERNAME/$env:USERNAME"
 
 if (Test-Path $ConfigFile) {
-    Write-Host "  WARNING: config.yaml が既に存在します。トークンとサーバーURLを更新します" -ForegroundColor Yellow
+    Write-Host "  WARNING: config.yaml が既に存在します。トークン・サーバーURL・マシン名を更新します" -ForegroundColor Yellow
     # 既存ファイルのトークンを更新
     $Content = Get-Content $ConfigFile -Raw
     if ($Content -match "(?m)^token:") {
@@ -326,6 +326,12 @@ if (Test-Path $ConfigFile) {
         $Content = $Content -replace '(?m)^serverUrl:.*', "serverUrl: `"$ServerUrl`""
     } else {
         $Content += "`nserverUrl: `"$ServerUrl`""
+    }
+    # machineName も更新（旧形式 hostname のみ → 新形式 hostname/username への移行対応）
+    if ($Content -match "(?m)^machineName:") {
+        $Content = $Content -replace '(?m)^machineName:.*', "machineName: `"$MachineName`""
+    } else {
+        $Content += "`nmachineName: `"$MachineName`""
     }
     Set-Content -Path $ConfigFile -Value $Content -Encoding UTF8
 

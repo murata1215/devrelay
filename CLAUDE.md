@@ -1384,6 +1384,55 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `scripts/install-agent.sh` - Step 4 に `serverUrl` の sed 置換を追加
   - `scripts/install-agent.ps1` - Step 4 に `serverUrl` の正規表現置換を追加
 
+#### 78. Machine Hostname Alias（表示名エイリアス）(2026-02-23)
+- **目的**: ホスト名ベースのエイリアスで Agent の表示名を変更可能にする
+- **例**: `x220-158-18-103/pixblog` → `ubuntu-prod/pixblog` のように分かりやすい名前で表示
+- **要件**: 「１個設定すれば他に反映」- 同じホスト名を持つ全 Agent に一括適用
+- **DB スキーマ**: Machine モデルに `displayName String?` フィールドを追加
+  - マイグレーション: `20260222130228_add_machine_display_name`
+- **表示名の計算**: `displayName ?? name`（displayName が設定されていれば displayName、なければ name）
+- **ホスト名レベルエイリアス**:
+  - `PUT /api/machines/hostname-alias` で `{ hostname, alias }` を送信
+  - 同じホスト名の全 Agent の displayName を一括更新
+  - 例: hostname=`x220` + alias=`ubuntu-prod` → `x220/user1` は `ubuntu-prod/user1` に
+  - alias を空にすると displayName を null に戻す（元の名前に復帰）
+- **自動計算**: 新しい Agent 接続時、兄弟マシンの displayName からエイリアスを自動計算
+  - 例: `x220/user1` に `ubuntu-prod/user1` が設定済み → `x220/user2` 接続時に `ubuntu-prod/user2` を自動設定
+- **表示更新箇所**: Discord/Telegram メッセージ、WebUI の全ページ（約15箇所）
+  - `handleMachineList`, `handleMachineConnect`, `handleProjectConnect`, `handleContinue`, `handleExec`, `handleSession`, `handleAiPrompt`, `handleRecent`, `handleRecentConnect` 等
+- **WebUI**: Agent 設定モーダルに Hostname Alias 入力フィールドを追加
+  - 元のホスト名を表示、エイリアスを入力して Save
+  - エイリアス設定済みの場合は元の名前を小さく表示
+- **主要ファイル**:
+  - `apps/server/prisma/schema.prisma` - Machine に `displayName String?` 追加
+  - `packages/shared/src/types.ts` - Machine に `displayName?: string | null` 追加
+  - `apps/server/src/routes/api.ts` - `PUT /api/machines/hostname-alias`、各 GET に displayName 追加
+  - `apps/server/src/services/agent-manager.ts` - 自動計算ロジック、`getMachineDisplayName()` ヘルパー
+  - `apps/server/src/services/command-handler.ts` - 全表示箇所で `displayName ?? name` 使用
+  - `apps/server/src/services/session-manager.ts` - `getActiveSessions()` に `machineDisplayName` 追加
+  - `apps/web/src/lib/api.ts` - `displayName` 型追加、`machines.setHostnameAlias()` メソッド
+  - `apps/web/src/pages/MachinesPage.tsx` - エイリアス編集 UI
+  - `apps/web/src/pages/ProjectsPage.tsx` - 表示名対応
+  - `apps/web/src/pages/DashboardPage.tsx` - 表示名対応
+
+#### 79. machineName 旧形式からの自動マイグレーション (2026-02-23)
+- **問題**: 再インストール時に `config.yaml` の `machineName` が旧形式（hostname のみ、`/username` なし）のまま残り、Agent が旧形式の名前でサーバーに接続する
+- **発見経緯**: WebUI で `agent-1` → `DESKTOP-Q43QT7L` になるべきところが `/fwjg2` なしで表示された
+- **原因**: インストーラーが既存 `config.yaml` の `token` と `serverUrl` のみ更新し、`machineName` を更新していなかった
+- **修正1: サーバー側自動マイグレーション** (`agent-manager.ts`):
+  - `handleAgentConnect()` の名前更新条件を拡張
+  - 従来: `agent-` で始まる仮名のみ更新
+  - 追加: Agent が `hostname/username` で接続し、DB の名前が hostname 部分と一致する場合も更新
+  - 例: DB `DESKTOP-Q43QT7L` + Agent `DESKTOP-Q43QT7L/fwjg2` → 自動的に `DESKTOP-Q43QT7L/fwjg2` に更新
+  - ユーザーが手動で別名を設定した場合は hostname が一致しないため上書きしない
+- **修正2: インストーラーで machineName も更新** (`install-agent.sh` / `install-agent.ps1`):
+  - 既存 `config.yaml` の更新時に `machineName` も最新の `hostname/username` 形式に書き換え
+  - #77 の `serverUrl` 更新と同じパターンで `machineName` も追加
+- **主要ファイル**:
+  - `apps/server/src/services/agent-manager.ts` - 名前更新条件の拡張（`isProvisional || isOldFormat`）
+  - `scripts/install-agent.sh` - Step 4 に machineName の sed 置換を追加
+  - `scripts/install-agent.ps1` - Step 4 に machineName の正規表現置換を追加
+
 ## 今後の課題
 
 - [ ] LINE 対応

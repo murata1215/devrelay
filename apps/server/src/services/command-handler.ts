@@ -210,9 +210,10 @@ async function handleMachineList(context: UserContext): Promise<string> {
       + '3. 対象マシンで `devrelay setup` を実行してトークンを入力';
   }
 
-  const list = machines.map((m: Machine & { status: string }, i: number) => {
+  const list = machines.map((m: Machine & { status: string; displayName: string | null }, i: number) => {
     const emoji = m.status === 'online' ? STATUS_EMOJI.online : STATUS_EMOJI.offline;
-    return `${i + 1}. ${m.name} ${emoji}`;
+    const displayName = m.displayName ?? m.name;
+    return `${i + 1}. ${displayName} ${emoji}`;
   }).join('\n');
 
   // Update context
@@ -246,6 +247,7 @@ async function handleProjectList(context: UserContext): Promise<string> {
     lastListItems: projects.map((p: Project) => p.id)
   });
   
+  // currentMachineName は既に displayName ?? name が設定されている
   return `📁 **プロジェクト** (${context.currentMachineName})\n\n${list}`;
 }
 
@@ -284,18 +286,20 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
     return '❌ エージェントが見つかりません。';
   }
   
+  const machineDisplayName = machine.displayName ?? machine.name;
+
   if (machine.status !== 'online') {
-    return `⚠️ ${machine.name} はオフラインです。`;
+    return `⚠️ ${machineDisplayName} はオフラインです。`;
   }
-  
+
   await updateUserContext(context.userId, context.platform, context.chatId, {
     currentMachineId: machine.id,
-    currentMachineName: machine.name,
+    currentMachineName: machineDisplayName,
     lastListType: undefined,
     lastListItems: undefined
   });
-  
-  return `✅ **${machine.name}** に接続しました`;
+
+  return `✅ **${machineDisplayName}** に接続しました`;
 }
 
 async function handleProjectConnect(projectId: string, context: UserContext): Promise<string> {
@@ -358,11 +362,14 @@ async function handleProjectConnect(projectId: string, context: UserContext): Pr
   // handleAiPrompt / handleExec での二重セッション作成を防止）
   clearAgentRestarted(project.machineId);
 
+  // 表示名は displayName があればそちらを使用
+  const projectMachineDisplayName = project.machine.displayName ?? project.machine.name;
+
   await updateUserContext(context.userId, context.platform, context.chatId, {
     currentSessionId: sessionId,
     currentProjectName: project.name,
     currentMachineId: project.machineId,
-    currentMachineName: project.machine.name,
+    currentMachineName: projectMachineDisplayName,
     lastProjectId: project.id,  // 再接続用に保存
     lastListType: undefined,
     lastListItems: undefined
@@ -382,12 +389,13 @@ async function handleRecentConnect(sessionId: string, context: UserContext): Pro
     return '❌ セッションが見つかりません。';
   }
   
-  // Connect to the same machine/project
+  // Connect to the same machine/project（displayName があればそちらを使用）
+  const recentMachineDisplayName = session.machine.displayName ?? session.machine.name;
   await updateUserContext(context.userId, context.platform, context.chatId, {
     currentMachineId: session.machineId,
-    currentMachineName: session.machine.name
+    currentMachineName: recentMachineDisplayName
   });
-  
+
   return handleProjectConnect(session.projectId, context);
 }
 
@@ -426,12 +434,13 @@ async function handleRecent(context: UserContext): Promise<string> {
   }
   
   type SessionWithRelations = Session & {
-    machine: { name: string };
+    machine: { name: string; displayName: string | null };
     project: { name: string };
   };
   const list = sessions.map((s: SessionWithRelations, i: number) => {
     const date = formatRelativeDate(s.startedAt);
-    return `${i + 1}. ${s.machine.name}/${s.project.name} (${date})`;
+    const machineDisplay = s.machine.displayName ?? s.machine.name;
+    return `${i + 1}. ${machineDisplay}/${s.project.name} (${date})`;
   }).join('\n');
 
   await updateUserContext(context.userId, context.platform, context.chatId, {
@@ -458,9 +467,10 @@ async function handleContinue(context: UserContext): Promise<string> {
     return '❌ 前回のプロジェクトが見つかりません。\n\n`m` でエージェント一覧を表示して接続してください。';
   }
 
+  const continueDisplayName = project.machine.displayName ?? project.machine.name;
   if (project.machine.status !== 'online') {
-    return `⚠️ **${project.machine.name}** はオフラインです。\n\n`
-      + `前回: ${project.machine.name}/${project.name}`;
+    return `⚠️ **${continueDisplayName}** はオフラインです。\n\n`
+      + `前回: ${continueDisplayName}/${project.name}`;
   }
 
   // Connect to the project
@@ -521,7 +531,8 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
             where: { id: updatedContext.currentMachineId }
           });
           const projectName = updatedContext.currentProjectName || context.lastProjectId.split('/').pop() || context.lastProjectId;
-          const machineName = machine?.name || 'Unknown';
+          // 表示名は displayName ?? name
+          const machineName = machine?.displayName ?? machine?.name ?? 'Unknown';
 
           console.log(`✅ [exec] Auto-reconnect successful: ${machineName}/${projectName}`);
 
@@ -694,7 +705,8 @@ async function handleSession(context: UserContext): Promise<string> {
         include: { machine: true }
       });
       if (lastProject) {
-        parts.push(`   前回: ${lastProject.machine.name} / ${lastProject.name} (c で再接続)`);
+        const lastDisplay = lastProject.machine.displayName ?? lastProject.machine.name;
+        parts.push(`   前回: ${lastDisplay} / ${lastProject.name} (c で再接続)`);
       }
     }
 
@@ -712,7 +724,7 @@ async function handleSession(context: UserContext): Promise<string> {
       for (const sess of uniqueSessions.values()) {
         const durationMs = Date.now() - new Date(sess.startedAt).getTime();
         const durationStr = formatDuration(durationMs);
-        parts.push(`• ${sess.machineName} / ${sess.projectName} (${durationStr})`);
+        parts.push(`• ${sess.machineDisplayName} / ${sess.projectName} (${durationStr})`);
       }
     }
 
@@ -726,7 +738,8 @@ async function handleSession(context: UserContext): Promise<string> {
 
     if (idleMachines.length > 0) {
       for (const machine of idleMachines) {
-        parts.push(`• ${machine.name} (idle)`);
+        const idleDisplayName = machine.displayName ?? machine.name;
+        parts.push(`• ${idleDisplayName} (idle)`);
       }
     }
 
@@ -760,8 +773,9 @@ async function handleSession(context: UserContext): Promise<string> {
 
   const parts: string[] = [];
 
-  // 現在のセッション（1行形式）
-  parts.push(`📍 ${session.machine.name} / ${session.project.name} (${durationStr})`);
+  // 現在のセッション（1行形式）- displayName があればそちらを表示
+  const currentMachineDisplay = session.machine.displayName ?? session.machine.name;
+  parts.push(`📍 ${currentMachineDisplay} / ${session.project.name} (${durationStr})`);
 
   // 他のアクティブセッション（現在のセッション以外、同じマシン+プロジェクトの重複を排除）
   const otherActiveSessions = activeSessions.filter(s => s.sessionId !== context.currentSessionId);
@@ -779,7 +793,7 @@ async function handleSession(context: UserContext): Promise<string> {
   for (const sess of uniqueOtherSessions.values()) {
     const sessDurationMs = Date.now() - new Date(sess.startedAt).getTime();
     const sessDurationStr = formatDuration(sessDurationMs);
-    parts.push(`• ${sess.machineName} / ${sess.projectName} (${sessDurationStr})`);
+    parts.push(`• ${sess.machineDisplayName} / ${sess.projectName} (${sessDurationStr})`);
   }
 
   // アクティブセッションがないオンラインマシン
@@ -794,7 +808,8 @@ async function handleSession(context: UserContext): Promise<string> {
   const idleMachines = onlineMachines.filter(m => !activeSessionMachineNames.has(m.name));
 
   for (const machine of idleMachines) {
-    parts.push(`• ${machine.name} (idle)`);
+    const idleMachineDisplay = machine.displayName ?? machine.name;
+    parts.push(`• ${idleMachineDisplay} (idle)`);
   }
 
   return parts.join('\n');
@@ -957,7 +972,8 @@ async function handleAiPrompt(
             where: { id: updatedContext.currentMachineId }
           });
           const projectName = updatedContext.currentProjectName || context.lastProjectId.split('/').pop() || context.lastProjectId;
-          const machineName = machine?.name || 'Unknown';
+          // 表示名は displayName ?? name
+          const machineName = machine?.displayName ?? machine?.name ?? 'Unknown';
 
           console.log(`✅ Auto-reconnect successful: ${machineName}/${projectName}`);
 

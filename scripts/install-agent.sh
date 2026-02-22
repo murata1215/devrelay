@@ -345,7 +345,7 @@ echo -e "[4/6] 設定ファイルを生成中..."
 MACHINE_NAME="$(hostname)/$(whoami)"
 
 if [ -f "$CONFIG_FILE" ]; then
-  echo -e "${YELLOW}  ⚠️ config.yaml が既に存在します。トークンとサーバーURLを更新します${NC}"
+  echo -e "${YELLOW}  ⚠️ config.yaml が既に存在します。トークン・サーバーURL・マシン名を更新します${NC}"
   # 既存ファイルのトークンを更新（sed で置換）
   if grep -q "^token:" "$CONFIG_FILE"; then
     sed -i "s|^token:.*|token: \"$TOKEN\"|" "$CONFIG_FILE"
@@ -357,6 +357,12 @@ if [ -f "$CONFIG_FILE" ]; then
     sed -i "s|^serverUrl:.*|serverUrl: \"$SERVER_URL\"|" "$CONFIG_FILE"
   else
     echo "serverUrl: \"$SERVER_URL\"" >> "$CONFIG_FILE"
+  fi
+  # machineName も更新（旧形式 hostname のみ → 新形式 hostname/username への移行対応）
+  if grep -q "^machineName:" "$CONFIG_FILE"; then
+    sed -i "s|^machineName:.*|machineName: \"$MACHINE_NAME\"|" "$CONFIG_FILE"
+  else
+    echo "machineName: \"$MACHINE_NAME\"" >> "$CONFIG_FILE"
   fi
 
   # プロキシが指定されている場合、既存設定に追加/更新

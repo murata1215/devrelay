@@ -164,7 +164,7 @@ export function ProjectsPage() {
                               project.machine.online ? 'bg-green-400' : 'bg-gray-400'
                             }`}
                           />
-                          <span className="text-gray-300">{project.machine.name}</span>
+                          <span className="text-gray-300">{project.machine.displayName ?? project.machine.name}</span>
                         </div>
                       )}
                     </td>
@@ -201,7 +201,7 @@ export function ProjectsPage() {
                           project.machine.online ? 'bg-green-400' : 'bg-gray-400'
                         }`}
                       />
-                      <span className="text-gray-300 text-sm">{project.machine.name}</span>
+                      <span className="text-gray-300 text-sm">{project.machine.displayName ?? project.machine.name}</span>
                     </div>
                   )}
                 </div>

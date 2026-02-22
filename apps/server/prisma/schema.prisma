@@ -74,6 +74,7 @@ model Machine {
   userId         String
   user           User      @relation(fields: [userId], references: [id])
   name           String
+  displayName    String?   // ユーザーが設定した表示名（ホスト名エイリアスから自動計算）
   token          String    @unique // 接続トークン
   status         String    @default("offline") // online, offline
   lastSeenAt     DateTime?

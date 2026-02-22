@@ -9,6 +9,7 @@
 export interface Machine {
   id: string;
   name: string;
+  displayName?: string | null;  // ユーザーが設定した表示名（ホスト名エイリアスから自動計算）
   status: 'online' | 'offline';
   lastSeen: Date;
   projects: Project[];

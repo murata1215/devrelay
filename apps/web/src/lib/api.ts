@@ -91,6 +91,7 @@ export interface ManagementInfo {
 export interface Machine {
   id: string;
   name: string;
+  displayName?: string | null;  // ホスト名エイリアスから自動計算された表示名
   status: 'online' | 'offline';
   lastSeenAt: string | null;
   managementInfo?: ManagementInfo | null;
@@ -106,6 +107,7 @@ export interface Project {
   machine?: {
     id: string;
     name: string;
+    displayName?: string | null;
     online: boolean;
   };
 }
@@ -134,6 +136,11 @@ export const machines = {
   /** 既存エージェントのトークンを取得 */
   async getToken(id: string): Promise<{ token: string }> {
     return request('GET', `/machines/${id}/token`);
+  },
+
+  /** ホスト名エイリアスを設定（同じホスト名の全マシンに一括適用） */
+  async setHostnameAlias(hostname: string, alias: string): Promise<{ success: boolean; updatedCount: number }> {
+    return request('PUT', '/machines/hostname-alias', { hostname, alias });
   },
 };
 
@@ -167,6 +174,7 @@ export interface DashboardStats {
     id: string;
     projectName: string;
     machineName: string;
+    machineDisplayName?: string | null;
     aiTool: string;
     status: string;
     startedAt: string;

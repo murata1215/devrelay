@@ -145,16 +145,26 @@ async function handleAgentConnect(
     return;
   }
 
-  // 仮名（agent-N）の場合、Agent から送信された machineName で自動更新
-  // ユーザーが手動で設定した名前は上書きしない
+  // Agent から送信された machineName で DB の名前を自動更新する条件:
+  // 1. 仮名（agent-N）→ 正式名への更新（初回接続時）
+  // 2. 旧形式（hostname のみ）→ 新形式（hostname/username）への自動マイグレーション
+  //    例: DB "DESKTOP-Q43QT7L" + Agent "DESKTOP-Q43QT7L/fwjg2" → 更新
+  //    ユーザーが手動で別名に設定した場合は上書きしない（hostname が一致しないため）
   let updatedName = machine.name;
-  if (machine.name.startsWith('agent-') && machineName && machineName.trim().length > 0) {
-    // 同じユーザーに同名の Agent が既にないか確認（重複防止）
-    const duplicate = await prisma.machine.findFirst({
-      where: { userId: machine.userId, name: machineName.trim(), id: { not: machine.id } },
-    });
-    if (!duplicate) {
-      updatedName = machineName.trim();
+  const trimmedName = machineName?.trim();
+  if (trimmedName && trimmedName.length > 0 && trimmedName !== machine.name) {
+    const isProvisional = machine.name.startsWith('agent-');
+    // 旧形式判定: Agent が hostname/username で送信し、DB の名前が hostname 部分と一致
+    const isOldFormat = trimmedName.includes('/') && machine.name === trimmedName.split('/')[0];
+
+    if (isProvisional || isOldFormat) {
+      // 同じユーザーに同名の Agent が既にないか確認（重複防止）
+      const duplicate = await prisma.machine.findFirst({
+        where: { userId: machine.userId, name: trimmedName, id: { not: machine.id } },
+      });
+      if (!duplicate) {
+        updatedName = trimmedName;
+      }
     }
   }
 
@@ -185,11 +195,44 @@ async function handleAgentConnect(
     });
   }
 
+  // 同じホスト名を持つ兄弟マシンから displayName を自動計算
+  // 例: 兄弟マシン "x220/user1" に displayName "vps-prod/user1" がある場合、
+  // 新しいマシン "x220/user2" には "vps-prod/user2" を自動設定
+  let autoDisplayName = machine.displayName;
+  if (!autoDisplayName && updatedName.includes('/')) {
+    const hostname = updatedName.split('/')[0];
+    const username = updatedName.split('/').slice(1).join('/');
+
+    // 同じユーザーの同じホスト名の兄弟マシンで displayName が設定されているものを検索
+    const sibling = await prisma.machine.findFirst({
+      where: {
+        userId: machine.userId,
+        name: { startsWith: `${hostname}/` },
+        displayName: { not: null },
+        id: { not: machine.id },
+      },
+      select: { displayName: true },
+    });
+
+    if (sibling?.displayName) {
+      // 兄弟の displayName からエイリアス部分を抽出して新しい displayName を構築
+      const siblingAlias = sibling.displayName.split('/')[0];
+      autoDisplayName = `${siblingAlias}/${username}`;
+
+      // DB に保存
+      await prisma.machine.update({
+        where: { id: machine.id },
+        data: { displayName: autoDisplayName },
+      });
+    }
+  }
+
   // Store connection
   connectedAgents.set(machine.id, ws);
   machineCache.set(machine.id, {
     id: machine.id,
     name: updatedName,
+    displayName: autoDisplayName,
     status: 'online',
     lastSeen: new Date(),
     projects
@@ -503,6 +546,21 @@ export function getMachine(machineId: string): Machine | undefined {
 
 export function isAgentConnected(machineId: string): boolean {
   return connectedAgents.has(machineId);
+}
+
+/**
+ * マシンの表示名を取得するヘルパー
+ * displayName が設定されていれば displayName、なければ name を返す
+ *
+ * @param machineId マシンID
+ * @returns 表示用のマシン名
+ */
+export function getMachineDisplayName(machineId: string): string | undefined {
+  const cached = machineCache.get(machineId);
+  if (cached) {
+    return cached.displayName ?? cached.name;
+  }
+  return undefined;
 }
 
 export function sendToAgent(machineIdOrWs: string | WebSocket, message: ServerToAgentMessage) {

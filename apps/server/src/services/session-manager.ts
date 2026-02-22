@@ -449,10 +449,15 @@ export async function clearSessionsForMachine(machineId: string) {
 }
 
 // Get all active sessions (in-memory sessions with participants)
+/**
+ * メモリ内のアクティブセッション（参加者がいるセッション）を取得
+ * displayName が設定されている場合は machineDisplayName に反映
+ */
 export async function getActiveSessions() {
   const activeSessions: Array<{
     sessionId: string;
     machineName: string;
+    machineDisplayName: string;
     projectName: string;
     aiTool: string;
     participants: Array<{ platform: Platform; chatId: string }>;
@@ -475,6 +480,7 @@ export async function getActiveSessions() {
       activeSessions.push({
         sessionId,
         machineName: session.machine.name,
+        machineDisplayName: session.machine.displayName ?? session.machine.name,
         projectName: session.project.name,
         aiTool: session.aiTool,
         participants,
