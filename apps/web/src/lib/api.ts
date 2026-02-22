@@ -74,12 +74,26 @@ export const auth = {
   },
 };
 
+// 管理コマンド型
+export interface ManagementCommand {
+  type: string;
+  label: string;
+  command: string;
+}
+
+export interface ManagementInfo {
+  os: string;
+  installType: string;
+  commands: ManagementCommand[];
+}
+
 // マシンAPI
 export interface Machine {
   id: string;
   name: string;
   status: 'online' | 'offline';
   lastSeenAt: string | null;
+  managementInfo?: ManagementInfo | null;
   projectCount: number;
   projects: Project[];
 }

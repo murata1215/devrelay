@@ -61,6 +61,7 @@ export async function apiRoutes(app: FastifyInstance) {
       name: m.name,
       status: connectedAgents.has(m.id) ? 'online' : 'offline',
       lastSeenAt: m.lastSeenAt,
+      managementInfo: m.managementInfo ?? null,
       projectCount: m.projects.length,
       projects: m.projects.map((p: Project) => ({
         id: p.id,

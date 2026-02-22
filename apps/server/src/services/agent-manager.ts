@@ -127,9 +127,9 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
 async function handleAgentConnect(
   ws: WebSocket,
-  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[] }
+  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any }
 ) {
-  const { machineId, machineName, token, projects, availableAiTools } = payload;
+  const { machineId, machineName, token, projects, availableAiTools, managementInfo } = payload;
 
   // Verify token
   const machine = await prisma.machine.findUnique({
@@ -158,10 +158,15 @@ async function handleAgentConnect(
     }
   }
 
-  // マシン状態を更新（仮名の場合は名前も更新）
+  // マシン状態を更新（仮名の場合は名前も更新、管理コマンド情報も保存）
   await prisma.machine.update({
     where: { id: machine.id },
-    data: { status: 'online', lastSeenAt: new Date(), name: updatedName }
+    data: {
+      status: 'online',
+      lastSeenAt: new Date(),
+      name: updatedName,
+      ...(managementInfo ? { managementInfo } : {}),
+    }
   });
 
   // Update projects

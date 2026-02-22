@@ -1349,6 +1349,31 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `scripts/install-agent.sh` - Step 6 の pgrep に `|| true` 追加
 
+#### 76. WebUI に Agent 管理コマンド表示 (2026-02-22)
+- **目的**: インストール後にターミナルに表示される管理コマンド（ログ確認、停止、再起動など）を WebUI から確認できるようにする
+- **問題**: ターミナルを閉じるとコマンドが見えなくなる。コマンドにはマシン依存のパスが含まれる
+- **アプローチ**: Agent が `agent:connect` 時に環境固有の管理コマンドを生成 → DB に JSON 保存 → WebUI で表示
+- **環境自動検出**:
+  - **systemd**: `systemctl --user is-enabled devrelay-agent` で判定
+  - **PM2**: `process.env.pm_id` の存在で判定。`process.env.name` でプロセス名を取得
+  - **nohup**: 上記以外のフォールバック。`process.execPath` と `import.meta.url` で絶対パスを取得
+  - **Windows**: Startup フォルダの VBS ランチャー有無で自動起動解除コマンドを制御
+- **DB スキーマ**: Machine モデルに `managementInfo Json?` フィールドを追加
+- **WebUI**: Agent 設定モーダルに Management Commands セクションを追加
+  - 各コマンドにラベル + コード表示 + Copy ボタン
+  - Agent 未接続の場合は「Agent が接続すると管理コマンドが表示されます」のフォールバック
+  - OS 種別とインストール方式を表示（例: `Linux / pm2`）
+- **後方互換性**: `managementInfo` は全てオプショナル。旧バージョン Agent は送信しない → DB は null → WebUI はフォールバック表示
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `ManagementInfo`, `ManagementCommand` 型追加、`AgentConnectPayload` に `managementInfo?` 追加
+  - `apps/server/prisma/schema.prisma` - Machine に `managementInfo Json?` 追加
+  - `agents/linux/src/services/management-info.ts` - **新規**: 環境検出 + コマンド生成（systemd/PM2/nohup/Windows）
+  - `agents/linux/src/services/connection.ts` - `agent:connect` に `managementInfo` を含めて送信
+  - `apps/server/src/services/agent-manager.ts` - `handleAgentConnect()` で managementInfo を DB 保存
+  - `apps/server/src/routes/api.ts` - GET /api/machines レスポンスに `managementInfo` 追加
+  - `apps/web/src/lib/api.ts` - `ManagementInfo` / `ManagementCommand` 型、`Machine` に追加
+  - `apps/web/src/pages/MachinesPage.tsx` - Agent 設定モーダルに Management Commands セクション追加
+
 ## 今後の課題
 
 - [ ] LINE 対応

@@ -110,12 +110,40 @@ export interface HistoryExportPayload {
   error?: string;  // Error message if export failed
 }
 
+/**
+ * 管理コマンドの1項目
+ * Agent の環境に応じたシェルコマンドを保持する
+ */
+export interface ManagementCommand {
+  /** コマンドの種類 */
+  type: 'logs' | 'stop' | 'restart' | 'status' | 'crontab' | 'auto-start-disable';
+  /** 表示ラベル（例: 「ログ」「停止」） */
+  label: string;
+  /** 実行するコマンド文字列（マシン固有のパスを含む） */
+  command: string;
+}
+
+/**
+ * Agent の管理情報
+ * OS・インストール方法に応じた管理コマンドの一覧を構造化して保持
+ */
+export interface ManagementInfo {
+  /** OS 種別: linux, win32, darwin */
+  os: string;
+  /** インストール方式 */
+  installType: 'systemd' | 'pm2' | 'nohup' | 'windows-startup' | 'manual';
+  /** 管理コマンド一覧 */
+  commands: ManagementCommand[];
+}
+
 export interface AgentConnectPayload {
   machineId: string;
   machineName: string;
   token: string;
   projects: Project[];
   availableAiTools: AiTool[];
+  /** Agent の管理コマンド情報（環境固有のパスを含む） */
+  managementInfo?: ManagementInfo;
 }
 
 export interface FileAttachment {

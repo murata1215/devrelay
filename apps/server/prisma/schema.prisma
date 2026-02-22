@@ -70,19 +70,20 @@ model PlatformLinkCode {
 
 // マシン
 model Machine {
-  id            String    @id @default(cuid())
-  userId        String
-  user          User      @relation(fields: [userId], references: [id])
-  name          String
-  token         String    @unique // 接続トークン
-  status        String    @default("offline") // online, offline
-  lastSeenAt    DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  
-  projects      Project[]
-  sessions      Session[]
-  
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id])
+  name           String
+  token          String    @unique // 接続トークン
+  status         String    @default("offline") // online, offline
+  lastSeenAt     DateTime?
+  managementInfo Json?     // Agent の管理コマンド情報（OS・パス固有）
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  projects       Project[]
+  sessions       Session[]
+
   @@unique([userId, name])
 }
 

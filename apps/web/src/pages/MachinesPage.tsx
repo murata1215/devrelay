@@ -27,6 +27,7 @@ export function MachinesPage() {
   const [settingsInstallCopied, setSettingsInstallCopied] = useState(false);
   const [settingsUninstallCopied, setSettingsUninstallCopied] = useState(false);
   const [settingsOs, setSettingsOs] = useState<'linux' | 'windows'>('linux');
+  const [mgmtCopiedIndex, setMgmtCopiedIndex] = useState<number | null>(null);
 
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
@@ -101,6 +102,7 @@ export function MachinesPage() {
     setSettingsInstallCopied(false);
     setSettingsUninstallCopied(false);
     setSettingsOs('linux');
+    setMgmtCopiedIndex(null);
   };
 
   const handleDelete = async () => {
@@ -508,6 +510,46 @@ export function MachinesPage() {
                   : 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'}
               </div>
             </div>
+
+            {/* 管理コマンド（Agent 接続時に環境固有のコマンドを自動取得・保存） */}
+            {settingsTarget.managementInfo && settingsTarget.managementInfo.commands.length > 0 ? (
+              <div className="mb-4">
+                <label className="block text-gray-400 text-sm mb-2">
+                  Management Commands
+                  <span className="text-gray-500 ml-2 text-xs">
+                    ({settingsTarget.managementInfo.os === 'win32' ? 'Windows' : 'Linux'} / {settingsTarget.managementInfo.installType})
+                  </span>
+                </label>
+                <div className="space-y-2">
+                  {settingsTarget.managementInfo.commands.map((cmd, i) => (
+                    <div key={i} className="flex items-start space-x-2">
+                      <span className="text-gray-400 text-xs w-24 shrink-0 pt-2 text-right">{cmd.label}</span>
+                      <code className="flex-1 bg-gray-900 text-blue-400 px-3 py-2 rounded text-xs break-all leading-relaxed select-all">
+                        {cmd.command}
+                      </code>
+                      <button
+                        onClick={() => {
+                          copyToClipboard(cmd.command, () => {
+                            setMgmtCopiedIndex(i);
+                            setTimeout(() => setMgmtCopiedIndex(null), 2000);
+                          });
+                        }}
+                        className="bg-gray-700 hover:bg-gray-600 text-white px-2 py-2 rounded transition-colors shrink-0 text-xs"
+                      >
+                        {mgmtCopiedIndex === i ? 'Copied!' : 'Copy'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="mb-4">
+                <label className="block text-gray-400 text-sm mb-2">Management Commands</label>
+                <p className="text-gray-500 text-xs">
+                  Agent が接続すると管理コマンドが表示されます。
+                </p>
+              </div>
+            )}
 
             {/* アンインストールコマンド（折りたたみ） */}
             <details className="mb-4">

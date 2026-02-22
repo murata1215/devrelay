@@ -56,6 +56,7 @@ import {
   formatWorkStateForPrompt
 } from './work-state-store.js';
 import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
+import { generateManagementInfo } from './management-info.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -144,6 +145,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           token: config.token,
           projects,
           availableAiTools: getAvailableAiTools(config),
+          managementInfo: generateManagementInfo(),
         },
       });
 
