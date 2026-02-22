@@ -1374,6 +1374,16 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/web/src/lib/api.ts` - `ManagementInfo` / `ManagementCommand` 型、`Machine` に追加
   - `apps/web/src/pages/MachinesPage.tsx` - Agent 設定モーダルに Management Commands セクション追加
 
+#### 77. 再インストール時に serverUrl も更新 (2026-02-22)
+- **問題**: 既存の `config.yaml` がある環境でインストーラーを再実行すると、トークンのみ更新され `serverUrl` が古いまま残る
+- **発見経緯**: `ribbon-re.jp` → `devrelay.io` のサーバー移行後、Windows Electron Agent が古い URL で接続を試みて失敗
+- **原因**: `install-agent.sh` と `install-agent.ps1` の Step 4 で、既存 config.yaml がある場合に `token` のみ書き換え、`serverUrl` は放置していた
+- **解決策**: 既存 config.yaml の更新処理に `serverUrl` の書き換えを追加
+  - `drl_` 形式トークンから抽出した URL、またはデフォルト `wss://devrelay.io/ws/agent` で上書き
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - Step 4 に `serverUrl` の sed 置換を追加
+  - `scripts/install-agent.ps1` - Step 4 に `serverUrl` の正規表現置換を追加
+
 ## 今後の課題
 
 - [ ] LINE 対応

@@ -313,13 +313,19 @@ Write-Host "[4/6] 設定ファイルを生成中..."
 $MachineName = "$env:COMPUTERNAME/$env:USERNAME"
 
 if (Test-Path $ConfigFile) {
-    Write-Host "  WARNING: config.yaml が既に存在します。トークンのみ更新します" -ForegroundColor Yellow
+    Write-Host "  WARNING: config.yaml が既に存在します。トークンとサーバーURLを更新します" -ForegroundColor Yellow
     # 既存ファイルのトークンを更新
     $Content = Get-Content $ConfigFile -Raw
     if ($Content -match "(?m)^token:") {
         $Content = $Content -replace '(?m)^token:.*', "token: `"$Token`""
     } else {
         $Content += "`ntoken: `"$Token`""
+    }
+    # serverUrl も更新（トークンから抽出した URL、またはデフォルト wss://devrelay.io/ws/agent）
+    if ($Content -match "(?m)^serverUrl:") {
+        $Content = $Content -replace '(?m)^serverUrl:.*', "serverUrl: `"$ServerUrl`""
+    } else {
+        $Content += "`nserverUrl: `"$ServerUrl`""
     }
     Set-Content -Path $ConfigFile -Value $Content -Encoding UTF8
 
