@@ -1340,6 +1340,15 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - **主要ファイル**:
   - `apps/web/src/pages/MachinesPage.tsx` - Windows アンインストールコマンドに `Start-Sleep` 追加
 
+#### 75. Linux インストーラー nohup 起動パスの pgrep 修正 (2026-02-22)
+- **問題**: nohup + crontab パスの Step 6 で、既存プロセス検出の `pgrep` がマッチなし（終了コード 1）を返した時に `set -e` によりスクリプトが即座に終了。nohup 起動・crontab 登録・完了メッセージが一切表示されない
+- **原因**: `EXISTING_PID=$(pgrep ...)` で `pgrep` がマッチなしの場合に終了コード 1 を返し、`set -e` がスクリプトを中断
+- **解決**: `pgrep` コマンドに `|| true` を追加して、マッチなしでも終了コード 0 を返すように修正
+- **変更前**: `EXISTING_PID=$(pgrep -u "$(whoami)" -f "\.devrelay.*index\.js" 2>/dev/null)`
+- **変更後**: `EXISTING_PID=$(pgrep -u "$(whoami)" -f "\.devrelay.*index\.js" 2>/dev/null || true)`
+- **主要ファイル**:
+  - `scripts/install-agent.sh` - Step 6 の pgrep に `|| true` 追加
+
 ## 今後の課題
 
 - [ ] LINE 対応
