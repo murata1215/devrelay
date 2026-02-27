@@ -225,6 +225,9 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     case 's':
     case 'session':
       return { type: 'session' };
+    case 'b':
+    case 'build':
+      return { type: 'build' };
     case 'q':
       return { type: 'quit' };
     case 'h':
@@ -269,6 +272,9 @@ export function getHelpText(): string {
 
 **アカウント連携**
 \`link\` - WebUI アカウントとリンク
+
+**ビルドログ**
+\`b\` - ビルドログ（exec 実行履歴・各マシンのビルド差分）
 
 **その他**
 \`ag\` - DevRelay Agreement を適用

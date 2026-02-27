@@ -7,22 +7,31 @@
 
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
+import type { AiProvider } from '@devrelay/shared';
 
 // 設定キーの定義
 export const SettingKeys = {
   OPENAI_API_KEY: 'openai_api_key',
+  ANTHROPIC_API_KEY: 'anthropic_api_key',
+  GEMINI_API_KEY: 'gemini_api_key',
   DISCORD_BOT_TOKEN: 'discord_bot_token',
   TELEGRAM_BOT_TOKEN: 'telegram_bot_token',
   NATURAL_LANGUAGE_ENABLED: 'natural_language_enabled',
+  /** BuildLog 要約に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
+  BUILD_SUMMARY_PROVIDER: 'build_summary_provider',
+  /** 自然言語コマンドパースに使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
+  CHAT_AI_PROVIDER: 'chat_ai_provider',
   LANGUAGE: 'language',
   THEME: 'theme',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];
 
-// 暗号化が必要なキーのリスト
+// 暗号化が必要なキーのリスト（API キー・トークン系は全て暗号化）
 const ENCRYPTED_KEYS: SettingKey[] = [
   SettingKeys.OPENAI_API_KEY,
+  SettingKeys.ANTHROPIC_API_KEY,
+  SettingKeys.GEMINI_API_KEY,
   SettingKeys.DISCORD_BOT_TOKEN,
   SettingKeys.TELEGRAM_BOT_TOKEN,
 ];
@@ -163,11 +172,90 @@ export async function getOpenAiApiKey(userId: string): Promise<string | null> {
  * 自然言語モードが有効かチェック
  */
 export async function isNaturalLanguageEnabled(userId: string): Promise<boolean> {
-  // OpenAI API キーがあり、かつ明示的に無効化されていない場合は有効
-  const hasKey = await hasOpenAiApiKey(userId);
-  if (!hasKey) return false;
+  // Chat AI 用の API キーがあり、かつ明示的に無効化されていない場合は有効
+  const apiKey = await getApiKeyForChatAi(userId);
+  if (!apiKey) return false;
 
   const enabled = await getUserSetting(userId, SettingKeys.NATURAL_LANGUAGE_ENABLED);
   // デフォルトは有効（API キーがあれば）
   return enabled !== 'false';
+}
+
+/** プロバイダー名と SettingKey のマッピング */
+const PROVIDER_KEY_MAP: Record<string, SettingKey> = {
+  openai: SettingKeys.OPENAI_API_KEY,
+  anthropic: SettingKeys.ANTHROPIC_API_KEY,
+  gemini: SettingKeys.GEMINI_API_KEY,
+};
+
+/** プロバイダー名と環境変数名のマッピング（フォールバック用） */
+const PROVIDER_ENV_MAP: Record<string, string> = {
+  openai: 'OPENAI_API_KEY',
+  anthropic: 'ANTHROPIC_API_KEY',
+  gemini: 'GEMINI_API_KEY',
+};
+
+/**
+ * 指定プロバイダーの API キーを取得
+ * ユーザー設定 → 環境変数の順でフォールバック
+ *
+ * @param userId ユーザーID
+ * @param provider AI プロバイダー名
+ * @returns API キー。見つからない場合は null
+ */
+export async function getApiKeyForProvider(userId: string, provider: AiProvider): Promise<string | null> {
+  if (provider === 'none') return null;
+
+  const settingKey = PROVIDER_KEY_MAP[provider];
+  if (!settingKey) return null;
+
+  // ユーザー個別設定を優先
+  const userKey = await getUserSetting(userId, settingKey);
+  if (userKey && userKey.length > 0) return userKey;
+
+  // 環境変数にフォールバック
+  const envKey = PROVIDER_ENV_MAP[provider];
+  const envValue = envKey ? process.env[envKey] : undefined;
+  return envValue && envValue.length > 0 ? envValue : null;
+}
+
+/**
+ * BuildLog 要約用の AI プロバイダーと API キーを取得
+ *
+ * @returns { provider, apiKey } のペア。使用不可の場合は null
+ */
+export async function getApiKeyForBuildSummary(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
+  const provider = (await getUserSetting(userId, SettingKeys.BUILD_SUMMARY_PROVIDER) || 'none') as AiProvider;
+  if (provider === 'none') return null;
+
+  const apiKey = await getApiKeyForProvider(userId, provider);
+  if (!apiKey) return null;
+
+  return { provider, apiKey };
+}
+
+/**
+ * Chat AI（自然言語コマンドパース）用の API キーを取得
+ * CHAT_AI_PROVIDER 設定に基づいてプロバイダーを選択
+ * 未設定の場合は後方互換のため OpenAI キーにフォールバック
+ *
+ * @returns { provider, apiKey } のペア。使用不可の場合は null
+ */
+export async function getApiKeyForChatAi(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
+  const provider = await getUserSetting(userId, SettingKeys.CHAT_AI_PROVIDER) as AiProvider | null;
+
+  // CHAT_AI_PROVIDER が明示設定されている場合
+  if (provider && provider !== 'none') {
+    const apiKey = await getApiKeyForProvider(userId, provider);
+    if (apiKey) return { provider, apiKey };
+    return null;
+  }
+
+  // 後方互換: CHAT_AI_PROVIDER 未設定 → 従来通り OpenAI キーがあれば使用
+  if (!provider) {
+    const openaiKey = await getApiKeyForProvider(userId, 'openai');
+    if (openaiKey) return { provider: 'openai', apiKey: openaiKey };
+  }
+
+  return null;
 }

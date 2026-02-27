@@ -1433,6 +1433,123 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `scripts/install-agent.sh` - Step 4 に machineName の sed 置換を追加
   - `scripts/install-agent.ps1` - Step 4 に machineName の正規表現置換を追加
 
+#### 80. Message Usage Data Storage (2026-02-27)
+- **目的**: AI 実行ごとのトークン使用量をDBに保存し、後から分析・表示できるようにする
+- **DB スキーマ**: Message モデルに `usageData Json?` フィールドを追加
+  - マイグレーション: `20260226213926_add_message_usage_data`
+- **保存データ**:
+  ```json
+  {
+    "usage": {
+      "input_tokens": 12345,
+      "output_tokens": 678,
+      "cache_read_input_tokens": 9000,
+      "cache_creation_input_tokens": 500
+    },
+    "modelUsage": { "contextWindow": 200000 },
+    "duration_ms": 15000,
+    "model": "claude-opus-4-6"
+  }
+  ```
+- **実装**: Claude Code の `result` メッセージの JSON から usage 情報を抽出、DB に保存
+- **主要ファイル**:
+  - `apps/server/prisma/schema.prisma` - Message に `usageData Json?` 追加
+  - `agents/linux/src/services/output-parser.ts` - `usageData` 抽出ロジック追加
+  - `apps/server/src/services/agent-manager.ts` - `handleAiOutput()` で usageData を DB 保存
+
+#### 81. Conversations ページ（使用量分析）(2026-02-27)
+- **目的**: 全 AI 会話を一覧表示し、トークン使用量を可視化
+- **新ページ**: `apps/web/src/pages/ConversationsPage.tsx`
+- **API エンドポイント**: `GET /api/conversations?offset=0&limit=50`
+  - ユーザー→AI のメッセージペアをフラットに一覧化
+  - `usageData` のある AI メッセージのみ対象
+  - N+1 回避: バッチフェッチ＋メモリ内ジョイン
+- **UI 機能**:
+  - **デスクトップ**: テーブル形式（日付、プロジェクト、ユーザーメッセージ、AI応答、モデル、実行時間、トークン数）
+  - **モバイル**: カード形式
+  - **展開表示**: 行クリックで詳細表示（フルメッセージ、トークン内訳: input/output/cache read/cache creation）
+  - **ページネーション**: 50件ごと、prev/next ナビゲーション
+  - **フォーマット**: トークン数を「20.0K」形式、実行時間を「5.2s」/「1.5m」形式、モデル名を短縮
+- **主要ファイル**:
+  - `apps/web/src/pages/ConversationsPage.tsx` - 新規ページ
+  - `apps/web/src/App.tsx` - `/conversations` ルート追加
+  - `apps/web/src/components/Layout.tsx` - ナビゲーションに追加
+  - `apps/web/src/lib/api.ts` - `ConversationItem`, `ConversationsResponse` 型、`conversations.list()` メソッド
+  - `apps/server/src/routes/api.ts` - Conversations API 実装
+
+#### 82. BuildLog（ビルド履歴）(2026-02-27)
+- **目的**: `exec` コマンド実行ごとにビルド履歴を自動記録
+- **DB スキーマ**: 新モデル `BuildLog` を追加
+  - マイグレーション: `20260226225852_add_build_log`
+  - フィールド: `buildNumber`（プロジェクトスコープの連番）、`projectName`、`summary`、`prompt`
+  - 外部キー: Project, Machine, Session, User
+  - ユニーク制約: `(projectName, buildNumber)`
+- **自動採番**: トランザクション内で `buildNumber` をインクリメント、リトライ 3 回
+- **サマリー生成**:
+  - 即時: 出力の先頭200文字をフォールバック要約として保存
+  - 非同期: AI で要約生成後に DB 更新（fire-and-forget パターン）
+- **API エンドポイント**: `GET /api/projects/:projectId/builds`（最大50件）
+- **主要ファイル**:
+  - `apps/server/prisma/schema.prisma` - BuildLog モデル
+  - `apps/server/src/services/agent-manager.ts` - `createBuildLog()`, `updateBuildLogSummaryAsync()`
+  - `apps/server/src/routes/api.ts` - builds API
+
+#### 83. Projects ページ LATEST BUILD 表示 + BuildHistoryModal (2026-02-27)
+- **目的**: Projects 一覧で直近のビルド情報を表示、クリックでビルド履歴を確認
+- **変更内容**:
+  - LAST USED 列 → LATEST BUILD 列に変更
+  - 最新ビルドの番号・サマリー・日時を表示
+  - プロジェクト名クリック → BuildHistoryModal を表示
+- **BuildHistoryModal**:
+  - ビルド一覧（番号、日時、Agent 名、サマリー）
+  - 各ビルドの展開/折りたたみ（サマリー全文表示）
+  - モバイル対応
+- **API 拡張**: `GET /api/projects` のレスポンスに `latestBuild` を追加
+  - `distinct: ['projectId']` + `orderBy: { buildNumber: 'desc' }` で N+1 回避
+- **主要ファイル**:
+  - `apps/web/src/pages/ProjectsPage.tsx` - LATEST BUILD 列、BuildHistoryModal
+  - `apps/web/src/lib/api.ts` - `BuildLog` 型、`projects.getBuildLogs()` メソッド
+  - `apps/server/src/routes/api.ts` - latestBuild 追加、builds API
+
+#### 84. マルチプロバイダー AI キー管理 + BuildLog AI 要約 (2026-02-27)
+- **目的**: OpenAI / Anthropic / Gemini の 3 社 API キーを WebUI で登録し、機能ごとにプロバイダーを選択可能にする
+- **API キー管理**:
+  - WebUI Settings に 3 つの API キー入力欄（OpenAI, Anthropic, Gemini）
+  - 全キー AES-256-CBC 暗号化で DB 保存（既存の暗号化パターンを踏襲）
+  - キーのマスク表示（`sk-***...abc`）
+- **プロバイダー選択**:
+  - 「Build Summary Provider」: ビルド要約に使う AI を選択
+  - 「Chat AI Provider」: 自然言語コマンド解析に使う AI を選択
+  - プロバイダー変更は即時保存（`onChange`）
+- **対応モデル**:
+  - OpenAI: `gpt-4o-mini`
+  - Anthropic: `claude-haiku-4-5-20251001`
+  - Gemini: `gemini-2.0-flash`
+- **BuildLog AI 要約**:
+  - `build-summarizer.ts`: マルチプロバイダー対応の要約サービス（新規）
+  - システムプロンプト: 出力から1-2文の日本語要約を生成（200文字制限）
+  - `execPrompt`（exec 時のカスタムプロンプト）を追加コンテキストとして利用
+  - 入力上限 8000 文字で切り詰め
+- **自然言語コマンド解析の拡張**:
+  - `natural-language-parser.ts` を OpenAI 固定からマルチプロバイダー対応に全面書き換え
+  - `parseWithOpenAI()`, `parseWithAnthropic()`, `parseWithGemini()` の 3 関数
+  - 後方互換: `CHAT_AI_PROVIDER` 未設定 → OpenAI キーがあれば OpenAI を使用
+- **Agent 側変更**: `execPrompt` の伝搬
+  - `handleConversationExec()` で exec 時のプロンプトを `handleAiPrompt()` に渡す
+  - `agent:ai:output` ペイロードに `execPrompt` を含めてサーバーに送信
+  - サーバーが AI 要約時にコンテキストとして利用
+- **SDK 追加**: `@anthropic-ai/sdk`, `@google/generative-ai`
+- **主要ファイル**:
+  - `packages/shared/src/types.ts` - `AiProvider` 型追加、`AiOutputPayload` に `execPrompt` 追加
+  - `apps/server/package.json` - Anthropic / Gemini SDK 追加
+  - `apps/server/src/services/user-settings.ts` - SettingKeys 拡張、`getApiKeyForBuildSummary()`, `getApiKeyForChatAi()` ヘルパー
+  - `apps/server/src/services/build-summarizer.ts` - **新規**: マルチプロバイダー AI 要約サービス
+  - `apps/server/src/services/agent-manager.ts` - fire-and-forget AI 要約呼び出し
+  - `apps/server/src/services/natural-language-parser.ts` - マルチプロバイダー NLP 対応に全面書き換え
+  - `agents/linux/src/services/connection.ts` - `execPrompt` 伝搬
+  - `apps/server/src/routes/api.ts` - `gemini_api_key` マスク処理
+  - `apps/web/src/pages/SettingsPage.tsx` - API キー 3 欄 + プロバイダー選択 2 つ
+
 ## 今後の課題
 
 - [ ] LINE 対応
@@ -1440,10 +1557,10 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
 - [x] Windows Agent (2026-01-18 実装完了)
 - [x] Windows CLI Agent + PowerShell ワンライナー (2026-02-21 実装完了)
 - [ ] 共有ドキュメント機能（DevRelay Box）- pgvector + OpenAI Embedding で自動 RAG
-- [ ] 要約機能（Anthropic API 使用）
+- [x] 要約機能（2026-02-27 実装完了 - マルチプロバイダー AI 要約 #84）
 - [ ] 複数ユーザー同時接続
 - [ ] 進捗表示のUI改善（プログレスバーなど）
 - [ ] エラーハンドリング強化
-- [ ] WebUI（ユーザー設定画面）
+- [x] WebUI（ユーザー設定画面）- API キー管理 + プロバイダー選択 #84
 - [x] WebUI 本番対応: Caddy + 静的ファイル配信
 - [x] ランディングページ (devrelay.io)

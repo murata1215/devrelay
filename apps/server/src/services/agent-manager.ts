@@ -13,6 +13,7 @@ import type {
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine } from './session-manager.js';
+import { summarizeBuildOutput } from './build-summarizer.js';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -309,21 +310,64 @@ async function handleProjectsUpdate(machineId: string, projects: Project[]) {
   }
 }
 
-async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[] }) {
-  const { sessionId, output, isComplete, files } = payload;
+async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[]; usageData?: any; isExec?: boolean; execPrompt?: string }) {
+  const { sessionId, output, isComplete, files, usageData, isExec, execPrompt } = payload;
 
-  console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}`);
+  console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}${isExec ? ' [EXEC]' : ''}`);
 
   if (isComplete) {
-    // Save final output to DB
+    // Save final output to DB（usageData がある場合は JSON として保存）
     await prisma.message.create({
       data: {
         sessionId,
         role: 'ai',
         content: output,
-        platform: 'system'
+        platform: 'system',
+        usageData: usageData ?? undefined,
       }
     });
+    if (usageData) {
+      const models = usageData.modelUsage ? Object.keys(usageData.modelUsage).join(', ') : 'unknown';
+      console.log(`💾 Usage data saved: duration=${usageData.durationMs}ms, models=${models}`);
+    }
+
+    // BuildLog: exec 実行完了時にビルドログを自動作成
+    // フォールバックサマリー（先頭200文字）で即座に作成し、
+    // 非同期で AI 要約を生成して DB を上書きする（fire-and-forget）
+    if (isExec && output.trim()) {
+      try {
+        const session = await prisma.session.findUnique({
+          where: { id: sessionId },
+          include: { project: true },
+        });
+
+        if (session) {
+          // フォールバックサマリーで即座に BuildLog 作成（ユーザー応答を遅延させない）
+          const fallbackSummary = extractBuildSummary(output);
+          const buildNumber = await createBuildLog({
+            projectName: session.project.name,
+            projectId: session.projectId,
+            machineId: session.machineId,
+            sessionId,
+            userId: session.userId,
+            summary: fallbackSummary,
+            prompt: execPrompt,
+          });
+          console.log(`📋 BuildLog #${buildNumber} created for ${session.project.name}`);
+
+          // AI 要約を非同期で生成し、完了後に DB を更新（fire-and-forget）
+          updateBuildLogSummaryAsync(
+            session.project.name,
+            buildNumber,
+            session.userId,
+            output,
+            execPrompt,
+          );
+        }
+      } catch (err) {
+        console.error('❌ Failed to create BuildLog:', (err as Error).message);
+      }
+    }
 
     // Log files if present
     if (files && files.length > 0) {
@@ -336,6 +380,128 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
     // Append partial output to progress buffer
     appendSessionOutput(sessionId, output);
   }
+}
+
+/**
+ * AI 応答テキストからビルドサマリーを抽出する
+ * Markdown 装飾を除去し、先頭 maxLength 文字を取得
+ */
+function extractBuildSummary(output: string, maxLength: number = 200): string {
+  let text = output;
+
+  // contextInfo 行を除去（📊, 📝 で始まる行）
+  text = text.replace(/^[📊📝].+\n?/gm, '');
+
+  // Markdown 見出しを除去（# ## ### など）
+  text = text.replace(/^#{1,6}\s+/gm, '');
+
+  // コードブロックを除去
+  text = text.replace(/```[\s\S]*?```/g, '[code]');
+
+  // Markdown の太字・斜体を除去
+  text = text.replace(/\*\*([^*]+)\*\*/g, '$1');
+  text = text.replace(/\*([^*]+)\*/g, '$1');
+
+  // 連続する空白行を1行に圧縮
+  text = text.replace(/\n{3,}/g, '\n\n');
+
+  // 先頭の空白行を除去
+  text = text.trimStart();
+
+  // 指定文字数で切り詰め
+  if (text.length > maxLength) {
+    text = text.substring(0, maxLength) + '...';
+  }
+
+  return text;
+}
+
+/**
+ * BuildLog の summary を AI 要約で非同期更新する（fire-and-forget）
+ *
+ * API 呼び出しに失敗しても、既にフォールバックサマリーが保存されているため
+ * ユーザーへの影響はない。エラーはログ出力のみ。
+ */
+async function updateBuildLogSummaryAsync(
+  projectName: string,
+  buildNumber: number,
+  userId: string,
+  output: string,
+  execPrompt?: string,
+): Promise<void> {
+  try {
+    const aiSummary = await summarizeBuildOutput(userId, output, execPrompt);
+    if (aiSummary) {
+      await prisma.buildLog.update({
+        where: {
+          projectName_buildNumber: { projectName, buildNumber },
+        },
+        data: { summary: aiSummary },
+      });
+      console.log(`📋 BuildLog #${buildNumber} summary updated with AI: ${aiSummary}`);
+    }
+  } catch (err) {
+    // fire-and-forget: エラーをログに出すだけ（フォールバックサマリーが残る）
+    console.error(`⚠️ Failed to update BuildLog #${buildNumber} summary:`, (err as Error).message);
+  }
+}
+
+/**
+ * BuildLog レコードを作成する
+ * projectName ごとの連番 buildNumber をトランザクション内で採番
+ * @@unique 制約違反（レースコンディション）時は最大3回リトライ
+ */
+async function createBuildLog(params: {
+  projectName: string;
+  projectId: string;
+  machineId: string;
+  sessionId: string;
+  userId: string;
+  summary: string;
+  prompt?: string;
+}): Promise<number> {
+  const MAX_RETRIES = 3;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const result = await prisma.$transaction(async (tx) => {
+        // 同一 projectName の最大 buildNumber を取得
+        const latest = await tx.buildLog.findFirst({
+          where: { projectName: params.projectName },
+          orderBy: { buildNumber: 'desc' },
+          select: { buildNumber: true },
+        });
+
+        const nextBuildNumber = (latest?.buildNumber ?? 0) + 1;
+
+        const log = await tx.buildLog.create({
+          data: {
+            buildNumber: nextBuildNumber,
+            projectName: params.projectName,
+            projectId: params.projectId,
+            machineId: params.machineId,
+            sessionId: params.sessionId,
+            userId: params.userId,
+            summary: params.summary,
+            prompt: params.prompt,
+          },
+        });
+
+        return log.buildNumber;
+      });
+
+      return result;
+    } catch (err: any) {
+      // @@unique 制約違反 = 同時挿入のレースコンディション → リトライ
+      if (err.code === 'P2002' && attempt < MAX_RETRIES - 1) {
+        console.log(`⚠️ BuildLog race condition, retrying (attempt ${attempt + 1})...`);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error('Failed to create BuildLog after retries');
 }
 
 async function handleAiStatus(payload: { machineId: string; sessionId: string; status: string; error?: string; agreementStatus?: string | boolean }) {

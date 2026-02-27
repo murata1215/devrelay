@@ -443,7 +443,7 @@ export function MachinesPage() {
       {/* トークン表示モーダル（Agent 作成直後） */}
       {showTokenModal && newMachine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg mx-4">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl mx-4">
             <h2 className="text-xl font-bold text-white mb-4">Agent Created!</h2>
             <div className="bg-blue-500/20 border border-blue-500 text-blue-400 px-4 py-3 rounded mb-4">
               Run the install command below on your machine. The agent name will be set automatically from hostname.
@@ -499,7 +499,7 @@ export function MachinesPage() {
       {/* Agent 設定モーダル（既存 Agent の詳細表示） */}
       {settingsTarget && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold text-white mb-4">
               Agent Settings: {settingsTarget.displayName ?? settingsTarget.name}
             </h2>

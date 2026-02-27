@@ -1,7 +1,9 @@
 /**
  * Parser for Claude Code stream-json output
- * Extracts session ID and context usage information
+ * セッション ID、コンテキスト使用量、使用量データを抽出する
  */
+
+import type { AiUsageData } from '@devrelay/shared';
 
 export interface ContextUsage {
   used: number;
@@ -12,6 +14,8 @@ export interface ContextUsage {
 export interface ParsedResult {
   sessionId?: string;
   contextUsage?: ContextUsage;
+  /** Claude Code の result メッセージから抽出した生の使用量データ */
+  usageData?: AiUsageData;
 }
 
 /**
@@ -70,6 +74,15 @@ export function parseStreamJsonLine(line: string): ParsedResult {
           percentage: Math.round((usedTokens / contextWindow) * 100)
         };
       }
+
+      // usage, modelUsage, duration_ms をそのまま保存用に抽出
+      // model: modelUsage の最初のキーから使用モデル名を取得（例: "claude-opus-4-6"）
+      result.usageData = {
+        usage: json.usage,
+        modelUsage: json.modelUsage,
+        durationMs: json.duration_ms,
+        model: json.modelUsage ? Object.keys(json.modelUsage)[0] : undefined,
+      };
     }
 
   } catch {

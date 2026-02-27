@@ -13,6 +13,7 @@ export function Layout({ children }: LayoutProps) {
 
   const navigation = [
     { name: 'Dashboard', href: '/' },
+    { name: 'Conversations', href: '/conversations' },
     { name: 'Agents', href: '/machines' },
     { name: 'Projects', href: '/projects' },
     { name: 'Settings', href: '/settings' },

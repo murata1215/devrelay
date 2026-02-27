@@ -110,6 +110,20 @@ export interface Project {
     displayName?: string | null;
     online: boolean;
   };
+  latestBuild?: {
+    buildNumber: number;
+    summary: string;
+    createdAt: string;
+  } | null;
+}
+
+/** ビルドログ一覧の各エントリ */
+export interface BuildLogItem {
+  buildNumber: number;
+  summary: string;
+  prompt?: string | null;
+  createdAt: string;
+  machineName: string;
 }
 
 export interface MachineCreateResponse {
@@ -147,6 +161,11 @@ export const machines = {
 export const projects = {
   async list(): Promise<Project[]> {
     return request('GET', '/projects');
+  },
+
+  /** プロジェクトのビルドログ一覧を取得（降順、最大50件） */
+  async getBuildLogs(projectId: string): Promise<{ builds: BuildLogItem[] }> {
+    return request('GET', `/projects/${projectId}/builds`);
   },
 };
 
@@ -233,6 +252,36 @@ export const services = {
 
   async restartAgent(): Promise<{ success: boolean; message: string }> {
     return request('POST', '/services/restart/agent', {});
+  },
+};
+
+// 会話一覧API（Conversations ページ用）
+export interface ConversationItem {
+  messageId: string;
+  sessionId: string;
+  projectName: string;
+  machineName: string;
+  userMessage: string;
+  aiMessage: string;
+  model: string | null;
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  createdAt: string;
+}
+
+export interface ConversationsResponse {
+  conversations: ConversationItem[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export const conversations = {
+  async list(offset = 0, limit = 50): Promise<ConversationsResponse> {
+    return request('GET', `/conversations?offset=${offset}&limit=${limit}`);
   },
 };
 

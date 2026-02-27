@@ -170,6 +170,10 @@ export async function apiRoutes(app: FastifyInstance) {
     // 関連するプロジェクト、セッション、メッセージも削除される（Cascade）
     // ただし、Prisma のデフォルトでは Cascade が設定されていないので、手動で削除
     await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      // ビルドログを削除
+      await tx.buildLog.deleteMany({
+        where: { machineId: id },
+      });
       // セッションに紐づくメッセージを削除
       await tx.message.deleteMany({
         where: { session: { machineId: id } },
@@ -264,19 +268,82 @@ export async function apiRoutes(app: FastifyInstance) {
 
     const connectedAgents = getConnectedAgents();
 
-    return projects.map((p: ProjectWithMachine) => ({
-      id: p.id,
-      name: p.name,
-      path: p.path,
-      defaultAi: p.defaultAi,
-      lastUsedAt: p.lastUsedAt,
-      machine: {
-        id: p.machine.id,
-        name: p.machine.name,
-        displayName: p.machine.displayName ?? null,
-        online: connectedAgents.has(p.machine.id),
+    // 各プロジェクトの最新ビルドログを一括取得（N+1 回避）
+    const projectIds = projects.map((p: ProjectWithMachine) => p.id);
+    const latestBuilds = await prisma.buildLog.findMany({
+      where: { projectId: { in: projectIds } },
+      orderBy: { buildNumber: 'desc' },
+      distinct: ['projectId'],
+      select: {
+        projectId: true,
+        buildNumber: true,
+        summary: true,
+        createdAt: true,
       },
-    }));
+    });
+    const buildMap = new Map(latestBuilds.map((b: any) => [b.projectId, b]));
+
+    return projects.map((p: ProjectWithMachine) => {
+      const build = buildMap.get(p.id);
+      return {
+        id: p.id,
+        name: p.name,
+        path: p.path,
+        defaultAi: p.defaultAi,
+        lastUsedAt: p.lastUsedAt,
+        machine: {
+          id: p.machine.id,
+          name: p.machine.name,
+          displayName: p.machine.displayName ?? null,
+          online: connectedAgents.has(p.machine.id),
+        },
+        latestBuild: build ? {
+          buildNumber: build.buildNumber,
+          summary: build.summary,
+          createdAt: build.createdAt,
+        } : null,
+      };
+    });
+  });
+
+  // ========================================
+  // プロジェクトのビルドログ一覧
+  // ========================================
+  app.get('/api/projects/:projectId/builds', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId } = request.params as { projectId: string };
+
+    // プロジェクトの存在とユーザーの権限を確認
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+    });
+
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    // ビルドログを降順で取得（最大50件）
+    const builds = await prisma.buildLog.findMany({
+      where: { projectId },
+      orderBy: { buildNumber: 'desc' },
+      take: 50,
+      include: {
+        machine: {
+          select: { name: true, displayName: true },
+        },
+      },
+    });
+
+    return {
+      builds: builds.map((b: any) => ({
+        buildNumber: b.buildNumber,
+        summary: b.summary,
+        prompt: b.prompt,
+        createdAt: b.createdAt,
+        machineName: b.machine.displayName ?? b.machine.name,
+      })),
+    };
   });
 
   // ========================================
@@ -304,6 +371,9 @@ export async function apiRoutes(app: FastifyInstance) {
     }
     if (result.anthropic_api_key) {
       result.anthropic_api_key = maskApiKey(result.anthropic_api_key);
+    }
+    if (result.gemini_api_key) {
+      result.gemini_api_key = maskApiKey(result.gemini_api_key);
     }
     if (result.discord_bot_token) {
       result.discord_bot_token = maskApiKey(result.discord_bot_token);
@@ -587,6 +657,249 @@ export async function apiRoutes(app: FastifyInstance) {
       console.error('Failed to export history:', err);
       return reply.status(500).send({ error: err.message || 'Failed to export history' });
     }
+  });
+
+  // ========================================
+  // セッション使用量 API
+  // ========================================
+
+  /**
+   * セッション内の会話使用量を取得する
+   * ユーザーメッセージ（IN）と AI 応答（OUT）をペアにして、各ペアの使用量データを返す
+   * @route GET /api/sessions/:sessionId/usage
+   */
+  app.get('/api/sessions/:sessionId/usage', async (request: FastifyRequest<{ Params: { sessionId: string } }>, reply: FastifyReply) => {
+    const { sessionId } = request.params;
+    const userId = (request as any).userId;
+
+    // セッション情報を取得（認可チェック含む）
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      include: {
+        project: { select: { name: true } },
+        machine: { select: { name: true, displayName: true } },
+      },
+    });
+
+    if (!session) {
+      return reply.status(404).send({ error: 'Session not found' });
+    }
+
+    // ユーザー認可: セッションの所有者のみアクセス可能
+    if (session.userId !== userId) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    // セッション内の全メッセージを時系列順に取得
+    const messages = await prisma.message.findMany({
+      where: { sessionId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        role: true,
+        content: true,
+        usageData: true,
+        createdAt: true,
+      },
+    });
+
+    // user → ai のペアを構築
+    // user メッセージの直後の ai メッセージをペアとして扱う
+    const conversations: Array<{
+      userMessage: { content: string; createdAt: string };
+      aiMessage: { content: string; createdAt: string } | null;
+      usage: {
+        model: string | null;
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheCreationTokens: number;
+        durationMs: number;
+      } | null;
+    }> = [];
+
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalDurationMs = 0;
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+
+      if (msg.role === 'user') {
+        // 直後の ai メッセージを探す
+        const aiMsg = (i + 1 < messages.length && messages[i + 1].role === 'ai')
+          ? messages[i + 1]
+          : null;
+
+        let usageInfo = null;
+        if (aiMsg?.usageData) {
+          const data = aiMsg.usageData as any;
+          const inputTokens = data.usage?.input_tokens ?? 0;
+          const outputTokens = data.usage?.output_tokens ?? 0;
+          const cacheReadTokens = data.usage?.cache_read_input_tokens ?? 0;
+          const cacheCreationTokens = data.usage?.cache_creation_input_tokens ?? 0;
+          const durationMs = data.durationMs ?? 0;
+
+          usageInfo = {
+            model: data.model ?? null,
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheCreationTokens,
+            durationMs,
+          };
+
+          totalInputTokens += inputTokens;
+          totalOutputTokens += outputTokens;
+          totalDurationMs += durationMs;
+        }
+
+        conversations.push({
+          userMessage: {
+            content: msg.content,
+            createdAt: msg.createdAt.toISOString(),
+          },
+          aiMessage: aiMsg ? {
+            content: aiMsg.content,
+            createdAt: aiMsg.createdAt.toISOString(),
+          } : null,
+          usage: usageInfo,
+        });
+
+        // ai メッセージがペアになった場合はスキップ
+        if (aiMsg) i++;
+      }
+    }
+
+    // 表示名の解決: displayName ?? name
+    const machineName = session.machine.displayName ?? session.machine.name;
+
+    return reply.send({
+      sessionId,
+      machineName,
+      projectName: session.project.name,
+      aiTool: session.aiTool,
+      startedAt: session.startedAt.toISOString(),
+      conversations,
+      totalUsage: {
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        totalTokens: totalInputTokens + totalOutputTokens,
+        totalDurationMs,
+      },
+    });
+  });
+
+  // ========================================
+  // 会話一覧 API（Conversations ページ用）
+  // ========================================
+
+  /**
+   * 全セッション横断で会話ペア（user→ai）をフラットに一覧取得する
+   * AI メッセージの usageData が存在するもののみ対象（#80 以降のデータ）
+   * N+1 回避: AI メッセージ取得 → sessionId でバッチ → user メッセージをメモリ内マッチング
+   * @route GET /api/conversations?offset=0&limit=50
+   */
+  app.get('/api/conversations', async (request: FastifyRequest<{ Querystring: { offset?: string; limit?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).userId;
+    const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
+    const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '50', 10) || 50));
+
+    // Step 1: AI メッセージ（usageData 付き）を日時降順で取得
+    const aiMessages = await prisma.message.findMany({
+      where: {
+        role: 'ai',
+        usageData: { not: Prisma.DbNull },
+        session: { userId },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: offset,
+      take: limit,
+      select: {
+        id: true,
+        sessionId: true,
+        content: true,
+        usageData: true,
+        createdAt: true,
+        session: {
+          select: {
+            project: { select: { name: true } },
+            machine: { select: { name: true, displayName: true } },
+          },
+        },
+      },
+    });
+
+    // Step 2: 関連する sessionId の user メッセージをバッチ取得（N+1 回避）
+    const sessionIds = [...new Set(aiMessages.map(m => m.sessionId))];
+    const userMessages = sessionIds.length > 0
+      ? await prisma.message.findMany({
+          where: {
+            sessionId: { in: sessionIds },
+            role: 'user',
+          },
+          orderBy: { createdAt: 'asc' },
+          select: { sessionId: true, content: true, createdAt: true },
+        })
+      : [];
+
+    // sessionId → user メッセージ配列のマップを構築
+    const userMsgMap = new Map<string, typeof userMessages>();
+    for (const msg of userMessages) {
+      const arr = userMsgMap.get(msg.sessionId) || [];
+      arr.push(msg);
+      userMsgMap.set(msg.sessionId, arr);
+    }
+
+    // Step 3: AI メッセージごとに直前の user メッセージをマッチング
+    const conversations = aiMessages.map(aiMsg => {
+      const data = aiMsg.usageData as any;
+      const inputTokens = data.usage?.input_tokens ?? 0;
+      const outputTokens = data.usage?.output_tokens ?? 0;
+      const cacheReadTokens = data.usage?.cache_read_input_tokens ?? 0;
+      const cacheCreationTokens = data.usage?.cache_creation_input_tokens ?? 0;
+      const durationMs = data.durationMs ?? 0;
+      const model = data.model ?? null;
+
+      // 同一セッション内で AI メッセージの直前にある user メッセージを探す
+      const sessionUserMsgs = userMsgMap.get(aiMsg.sessionId) || [];
+      let userContent = '';
+      for (let i = sessionUserMsgs.length - 1; i >= 0; i--) {
+        if (sessionUserMsgs[i].createdAt <= aiMsg.createdAt) {
+          userContent = sessionUserMsgs[i].content;
+          break;
+        }
+      }
+
+      const machineName = aiMsg.session.machine.displayName ?? aiMsg.session.machine.name;
+
+      return {
+        messageId: aiMsg.id,
+        sessionId: aiMsg.sessionId,
+        projectName: aiMsg.session.project.name,
+        machineName,
+        userMessage: userContent,
+        aiMessage: aiMsg.content,
+        model,
+        durationMs,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+        createdAt: aiMsg.createdAt.toISOString(),
+      };
+    });
+
+    // Step 4: 総件数を取得（ページネーション用）
+    const total = await prisma.message.count({
+      where: {
+        role: 'ai',
+        usageData: { not: Prisma.DbNull },
+        session: { userId },
+      },
+    });
+
+    return reply.send({ conversations, total, offset, limit });
   });
 }
 

@@ -416,6 +416,7 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     prompt: execPrompt,
     userId,
     files: undefined,
+    execPrompt,  // BuildLog AI 要約のコンテキスト用に exec プロンプトを伝搬
   });
 }
 
@@ -431,8 +432,8 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[] }) {
-  const { sessionId, prompt, userId, files, missedMessages } = payload;
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string }) {
+  const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
     console.log(`📎 Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
@@ -591,7 +592,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.aiTool,
       sessionInfo.claudeSessionId,
       currentConfig,
-      async (output, isComplete) => {
+      async (output, isComplete, usageData) => {
         responseText += output;
 
         if (isComplete) {
@@ -609,6 +610,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               output: responseText,  // Send full accumulated response
               isComplete,
               files: files.length > 0 ? files : undefined,
+              usageData,  // AI 使用量データ（DB 保存用）
+              isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
+              execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
             },
           });
 
@@ -659,7 +663,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         sessionInfo.aiTool,
         sessionInfo.claudeSessionId,
         currentConfig,
-        async (output, isComplete) => {
+        async (output, isComplete, usageData) => {
           responseText += output;
 
           if (isComplete) {
@@ -676,6 +680,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 output: responseText,
                 isComplete,
                 files: files.length > 0 ? files : undefined,
+                usageData,  // AI 使用量データ（DB 保存用）
+                isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
+                execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
               },
             });
 

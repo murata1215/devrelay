@@ -19,6 +19,8 @@ export const SHORTCUTS: Record<string, string> = {
   'agreement': 'agreement',
   's': 'session',    // セッション情報を表示
   'session': 'session',
+  'b': 'build',     // ビルドログ（exec 実行履歴）
+  'build': 'build',
   'q': 'quit',
   'h': 'help',
   'log': 'log',

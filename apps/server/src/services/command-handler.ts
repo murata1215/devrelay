@@ -38,6 +38,9 @@ const userContexts = new Map<string, UserContext>();
 // x コマンドの連続確認用: チャンネルごとに前回のコマンドが clear だったかを記録
 const pendingClear = new Set<string>();
 
+// w コマンド（wrap up）実行済みフラグ: x コマンド時に w 未実行なら警告を表示
+const wrapUpDone = new Set<string>();
+
 export async function getUserContext(userId: string, platform: Platform, chatId: string): Promise<UserContext> {
   // Key by chatId to allow different sessions per channel
   const key = `${platform}:${chatId}`;
@@ -137,8 +140,13 @@ export async function executeCommand(
     case 'clear':
       return handleClear(context);
 
-    case 'exec':
+    case 'exec': {
+      // w コマンド（wrap up）の実行を記録: x コマンド時の警告判定に使用
+      if (command.prompt?.startsWith('CLAUDE.mdとREADME.md')) {
+        wrapUpDone.add(chatKey);
+      }
       return handleExec(context, command.prompt);
+    }
 
     case 'link':
       return handleLink(context);
@@ -148,6 +156,9 @@ export async function executeCommand(
 
     case 'session':
       return handleSession(context);
+
+    case 'build':
+      return handleBuild(context);
 
     case 'log':
       return handleLog(context, command.count);
@@ -486,11 +497,16 @@ async function handleClear(context: UserContext): Promise<string> {
   const chatKey = `${context.platform}:${context.chatId}`;
   if (!pendingClear.has(chatKey)) {
     pendingClear.add(chatKey);
-    return '⚠️ 会話履歴をクリアしますか？ もう一度 `x` を送信してください。';
+    // w コマンド未実行の場合は警告を追加
+    const warnPrefix = !wrapUpDone.has(chatKey)
+      ? '⚠️ `w` コマンド（ドキュメント更新・コミット）を実行していません。\n'
+      : '';
+    return `${warnPrefix}⚠️ 会話履歴をクリアしますか？ もう一度 \`x\` を送信してください。`;
   }
 
   // 2回目: 確認状態をクリアして実行
   pendingClear.delete(chatKey);
+  wrapUpDone.delete(chatKey);
 
   // Get project path from session
   const session = await prisma.session.findUnique({
@@ -813,6 +829,87 @@ async function handleSession(context: UserContext): Promise<string> {
   }
 
   return parts.join('\n');
+}
+
+/**
+ * ビルドログを表示する
+ * ユーザーの全プロジェクトについて、各マシンの最新ビルド番号と
+ * 全体の最新ビルド番号との差分を表示
+ */
+async function handleBuild(context: UserContext): Promise<string> {
+  // ユーザーの DB ID を取得
+  const dbUser = await prisma.platformLink.findFirst({
+    where: { platformUserId: context.userId },
+    select: { userId: true },
+  });
+
+  if (!dbUser) {
+    return '📋 ビルドログがありません。`e` / `exec` で実行するとビルドが記録されます。';
+  }
+
+  // ユーザーのマシン一覧とプロジェクトを取得
+  const machines = await prisma.machine.findMany({
+    where: { userId: dbUser.userId },
+    include: { projects: true },
+  });
+
+  // 全プロジェクト名を重複なしで収集
+  const projectNames = [...new Set(machines.flatMap(m => m.projects.map(p => p.name)))].sort();
+
+  if (projectNames.length === 0) {
+    return '⚠️ プロジェクトがありません。';
+  }
+
+  const lines: string[] = [];
+
+  for (const projectName of projectNames) {
+    // このプロジェクト名の最新ビルド番号（全マシン共通）
+    const latestBuild = await prisma.buildLog.findFirst({
+      where: { projectName },
+      orderBy: { buildNumber: 'desc' },
+      select: { buildNumber: true, createdAt: true },
+    });
+
+    if (!latestBuild) continue;  // ビルドログなし → スキップ
+
+    // 最新ビルドの日付をフォーマット
+    const latestDate = latestBuild.createdAt.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+
+    // 各マシンの最新ビルド番号
+    const machineLines: string[] = [];
+    for (const machine of machines) {
+      const hasProject = machine.projects.some(p => p.name === projectName);
+      if (!hasProject) continue;
+
+      const machineBuild = await prisma.buildLog.findFirst({
+        where: { projectName, machineId: machine.id },
+        orderBy: { buildNumber: 'desc' },
+        select: { buildNumber: true, createdAt: true },
+      });
+
+      const displayName = machine.displayName ?? machine.name;
+      if (machineBuild) {
+        const behind = latestBuild.buildNumber - machineBuild.buildNumber;
+        const buildDate = machineBuild.createdAt.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+        if (behind > 0) {
+          machineLines.push(`  ${displayName}: #${machineBuild.buildNumber} (${buildDate}) -${behind}`);
+        } else {
+          machineLines.push(`  ${displayName}: #${machineBuild.buildNumber} (${buildDate}) ✅`);
+        }
+      } else {
+        machineLines.push(`  ${displayName}: -`);
+      }
+    }
+
+    lines.push(`**${projectName}** (latest: #${latestBuild.buildNumber}, ${latestDate})`);
+    lines.push(...machineLines);
+  }
+
+  if (lines.length === 0) {
+    return '📋 ビルドログがありません。`e` / `exec` で実行するとビルドが記録されます。';
+  }
+
+  return `📋 **ビルドログ**\n\n${lines.join('\n')}`;
 }
 
 function formatDuration(ms: number): string {

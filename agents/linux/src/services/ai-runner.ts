@@ -1,7 +1,7 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import type { AiTool } from '@devrelay/shared';
+import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -18,12 +18,15 @@ export interface AiRunResult {
   extractedSessionId?: string;
   contextUsage?: ContextUsage;
   resumeFailed?: boolean;  // True if --resume failed (exit code 1 + no output)
+  /** Claude Code result メッセージから抽出した使用量データ */
+  usageData?: AiUsageData;
 }
 
 // Active AI sessions: sessionId -> AiSession
 const activeSessions = new Map<string, AiSession>();
 
-type OutputCallback = (output: string, isComplete: boolean) => void;
+/** AI出力コールバック。isComplete=true の場合、usageData に使用量データが含まれる */
+type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData) => void;
 
 export async function startAiSession(
   sessionId: string,
@@ -216,6 +219,11 @@ export async function sendPromptToAi(
               console.error(`Failed to save context usage:`, err);
             });
           }
+          // usageData をそのまま保存（DB 格納用）
+          if (parsed.usageData) {
+            result.usageData = parsed.usageData;
+            console.log(`[${aiTool}] 💾 Usage data captured: duration=${parsed.usageData.durationMs}ms, models=${Object.keys(parsed.usageData.modelUsage || {}).join(', ')}`);
+          }
 
           // Extract text from assistant messages (new format)
           if (json.type === 'assistant' && json.message?.content) {
@@ -276,15 +284,15 @@ export async function sendPromptToAi(
       if (stderrOutput.includes('Prompt is too long') ||
           (stderrOutput.toLowerCase().includes('token') && stderrOutput.toLowerCase().includes('limit'))) {
         console.log(`[${aiTool}] ⚠️ Prompt too long error detected`);
-        onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true);
+        onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData);
         resolve(result);
         return;
       }
 
       if (fullOutput.length === 0) {
-        onOutput('(No response from AI)', true);
+        onOutput('(No response from AI)', true, result.usageData);
       } else {
-        onOutput('', true); // Signal completion
+        onOutput('', true, result.usageData); // Signal completion with usage data
       }
       resolve(result);
     });

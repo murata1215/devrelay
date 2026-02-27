@@ -1,7 +1,20 @@
 import { useEffect, useState } from 'react';
 import { projects, history } from '../lib/api';
-import type { Project } from '../lib/api';
+import type { Project, BuildLogItem } from '../lib/api';
 
+/** 日付を M/D 形式にフォーマット */
+function formatShortDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+/** サマリーを指定文字数で切り詰め */
+function truncateSummary(summary: string, maxLen: number): string {
+  if (summary.length <= maxLen) return summary;
+  return summary.slice(0, maxLen) + '...';
+}
+
+/** 会話履歴エクスポートモーダル */
 interface HistoryModalProps {
   project: Project;
   onClose: () => void;
@@ -75,11 +88,100 @@ function HistoryModal({ project, onClose }: HistoryModalProps) {
   );
 }
 
+/** ビルド履歴モーダル - プロジェクトのビルドログ一覧を表示 */
+interface BuildHistoryModalProps {
+  project: Project;
+  onClose: () => void;
+}
+
+function BuildHistoryModal({ project, onClose }: BuildHistoryModalProps) {
+  const [builds, setBuilds] = useState<BuildLogItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  /** 展開中のビルド番号（クリックで全文表示） */
+  const [expandedBuild, setExpandedBuild] = useState<number | null>(null);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const result = await projects.getBuildLogs(project.id);
+        setBuilds(result.builds);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load build history');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    load();
+  }, [project.id]);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-gray-800 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold text-white">Build History</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-white">
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="text-gray-400 text-sm mb-4">{project.name}</div>
+
+        {loading ? (
+          <div className="text-center py-8 text-gray-400">Loading...</div>
+        ) : error ? (
+          <div className="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded">
+            {error}
+          </div>
+        ) : builds.length === 0 ? (
+          <div className="text-center py-8 text-gray-400">No builds yet</div>
+        ) : (
+          <div className="space-y-2">
+            {builds.map((build) => {
+              const isExpanded = expandedBuild === build.buildNumber;
+              return (
+                <button
+                  key={build.buildNumber}
+                  onClick={() => setExpandedBuild(isExpanded ? null : build.buildNumber)}
+                  className="w-full text-left px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                >
+                  {/* ヘッダー行: ビルド番号、日付、マシン名 */}
+                  <div className="flex items-center gap-3 text-sm">
+                    <span className="text-blue-400 font-mono font-medium">#{build.buildNumber}</span>
+                    <span className="text-gray-400">{new Date(build.createdAt).toLocaleString()}</span>
+                    <span className="text-gray-500">{build.machineName}</span>
+                  </div>
+                  {/* サマリー: 展開時は全文、折りたたみ時は先頭80文字 */}
+                  <div className={`mt-1 text-gray-300 text-sm ${isExpanded ? 'whitespace-pre-wrap' : 'truncate'}`}>
+                    {isExpanded ? build.summary : truncateSummary(build.summary, 80)}
+                  </div>
+                  {/* プロンプト: 展開時のみ表示 */}
+                  {isExpanded && build.prompt && (
+                    <div className="mt-2 text-xs text-gray-500 border-t border-gray-600 pt-2">
+                      <span className="text-gray-500 font-medium">Prompt:</span> {build.prompt}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ProjectsPage() {
   const [data, setData] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  /** 会話履歴エクスポート用の選択プロジェクト */
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  /** ビルド履歴モーダル用の選択プロジェクト */
+  const [buildProject, setBuildProject] = useState<Project | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -125,7 +227,7 @@ export function ProjectsPage() {
         </div>
       ) : (
         <>
-          {/* Desktop table view */}
+          {/* デスクトップ テーブルビュー */}
           <div className="hidden md:block bg-gray-800 rounded-lg overflow-hidden">
             <table className="min-w-full divide-y divide-gray-700">
               <thead className="bg-gray-700/50">
@@ -140,7 +242,7 @@ export function ProjectsPage() {
                     Path
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                    Last Used
+                    Latest Build
                   </th>
                 </tr>
               </thead>
@@ -171,10 +273,21 @@ export function ProjectsPage() {
                     <td className="px-6 py-4">
                       <code className="text-gray-400 text-sm">{project.path}</code>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
-                      {project.lastUsedAt
-                        ? new Date(project.lastUsedAt).toLocaleString()
-                        : '-'}
+                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                      {project.latestBuild ? (
+                        <button
+                          onClick={() => setBuildProject(project)}
+                          className="text-blue-400 hover:text-blue-300 hover:underline text-left"
+                          title="Click to view build history"
+                        >
+                          <span>{formatShortDate(project.latestBuild.createdAt)}</span>
+                          <span className="text-gray-400 ml-2">
+                            {truncateSummary(project.latestBuild.summary, 40)}
+                          </span>
+                        </button>
+                      ) : (
+                        <span className="text-gray-500">-</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -182,7 +295,7 @@ export function ProjectsPage() {
             </table>
           </div>
 
-          {/* Mobile card view */}
+          {/* モバイル カードビュー */}
           <div className="md:hidden space-y-4">
             {data.map((project) => (
               <div key={project.id} className="bg-gray-800 rounded-lg p-4">
@@ -206,10 +319,19 @@ export function ProjectsPage() {
                   )}
                 </div>
                 <code className="text-gray-400 text-xs break-all">{project.path}</code>
-                {project.lastUsedAt && (
-                  <div className="text-gray-500 text-xs mt-2">
-                    Last used: {new Date(project.lastUsedAt).toLocaleString()}
-                  </div>
+                {/* モバイル: 最新ビルド情報 */}
+                {project.latestBuild ? (
+                  <button
+                    onClick={() => setBuildProject(project)}
+                    className="block mt-2 text-left text-sm text-blue-400 hover:text-blue-300 hover:underline"
+                    title="Click to view build history"
+                  >
+                    <span className="text-gray-500">Build:</span>{' '}
+                    <span>{formatShortDate(project.latestBuild.createdAt)}</span>{' '}
+                    <span className="text-gray-400">{truncateSummary(project.latestBuild.summary, 30)}</span>
+                  </button>
+                ) : (
+                  <div className="text-gray-500 text-xs mt-2">No builds</div>
                 )}
               </div>
             ))}
@@ -217,10 +339,19 @@ export function ProjectsPage() {
         </>
       )}
 
+      {/* 会話履歴エクスポートモーダル */}
       {selectedProject && (
         <HistoryModal
           project={selectedProject}
           onClose={() => setSelectedProject(null)}
+        />
+      )}
+
+      {/* ビルド履歴モーダル */}
+      {buildProject && (
+        <BuildHistoryModal
+          project={buildProject}
+          onClose={() => setBuildProject(null)}
         />
       )}
     </div>

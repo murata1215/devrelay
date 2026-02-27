@@ -1,6 +1,73 @@
 import { useEffect, useState } from 'react';
 import { settings, platforms, services, type LinkedPlatform, type ServiceStatus } from '../lib/api';
 
+/** API キーフィールドの定義 */
+interface ApiKeyFieldDef {
+  key: string;
+  label: string;
+  placeholder: string;
+  description: string;
+  linkUrl: string;
+  linkText: string;
+}
+
+/** AI プロバイダー選択の定義 */
+interface ProviderSelectDef {
+  key: string;
+  label: string;
+  description: string;
+}
+
+/** 3社分の API キー定義 */
+const API_KEY_FIELDS: ApiKeyFieldDef[] = [
+  {
+    key: 'openai_api_key',
+    label: 'OpenAI API Key',
+    placeholder: 'sk-...',
+    description: 'GPT-4o-mini for build summary and chat AI.',
+    linkUrl: 'https://platform.openai.com/api-keys',
+    linkText: 'OpenAI Platform',
+  },
+  {
+    key: 'anthropic_api_key',
+    label: 'Anthropic API Key',
+    placeholder: 'sk-ant-...',
+    description: 'Claude Haiku for build summary and chat AI.',
+    linkUrl: 'https://console.anthropic.com/settings/keys',
+    linkText: 'Anthropic Console',
+  },
+  {
+    key: 'gemini_api_key',
+    label: 'Gemini API Key',
+    placeholder: 'AIza...',
+    description: 'Gemini 2.0 Flash for build summary and chat AI.',
+    linkUrl: 'https://aistudio.google.com/apikey',
+    linkText: 'Google AI Studio',
+  },
+];
+
+/** プロバイダー選択ドロップダウンの選択肢 */
+const PROVIDER_OPTIONS = [
+  { value: 'none', label: 'None' },
+  { value: 'openai', label: 'OpenAI (gpt-4o-mini)' },
+  { value: 'anthropic', label: 'Anthropic (Claude Haiku)' },
+  { value: 'gemini', label: 'Gemini (2.0 Flash)' },
+];
+
+/** プロバイダー選択フィールドの定義 */
+const PROVIDER_SELECTS: ProviderSelectDef[] = [
+  {
+    key: 'build_summary_provider',
+    label: 'Build Summary',
+    description: 'exec 完了時のビルドログ要約に使用',
+  },
+  {
+    key: 'chat_ai_provider',
+    label: 'Chat AI',
+    description: '自然言語コマンドパースに使用',
+  },
+];
+
 export function SettingsPage() {
   const [data, setData] = useState<Record<string, string>>({});
   const [linkedPlatforms, setLinkedPlatforms] = useState<LinkedPlatform[]>([]);
@@ -10,8 +77,10 @@ export function SettingsPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  // Form state
-  const [openaiKey, setOpenaiKey] = useState('');
+  // API キー入力用のステート（キー名 → 入力値）
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
+
+  // Bot Token 入力
   const [discordToken, setDiscordToken] = useState('');
   const [telegramToken, setTelegramToken] = useState('');
   const [linkCode, setLinkCode] = useState('');
@@ -51,7 +120,6 @@ export function SettingsPage() {
     try {
       await services.restartServer();
       setSuccess('Server restart initiated. The page will reload shortly...');
-      // Wait a bit and reload the page
       setTimeout(() => {
         window.location.reload();
       }, 3000);
@@ -73,7 +141,6 @@ export function SettingsPage() {
     try {
       await services.restartAgent();
       setSuccess('Agent restart initiated');
-      // Refresh status after a short delay
       setTimeout(async () => {
         try {
           const status = await services.status();
@@ -91,6 +158,7 @@ export function SettingsPage() {
     loadSettings();
   }, []);
 
+  /** API キー / Bot Token を保存 */
   const handleSaveApiKey = async (key: string, value: string, displayName: string) => {
     if (!value.trim()) {
       setError(`${displayName} cannot be empty`);
@@ -104,11 +172,10 @@ export function SettingsPage() {
     try {
       await settings.update(key, value);
       setSuccess(`${displayName} saved successfully`);
-      // Clear the input
-      if (key === 'openai_api_key') setOpenaiKey('');
+      // 入力をクリア
+      setKeyInputs((prev) => ({ ...prev, [key]: '' }));
       if (key === 'discord_bot_token') setDiscordToken('');
       if (key === 'telegram_bot_token') setTelegramToken('');
-      // Reload settings
       const result = await settings.get();
       setData(result);
     } catch (err) {
@@ -118,6 +185,7 @@ export function SettingsPage() {
     }
   };
 
+  /** API キー / Bot Token を削除 */
   const handleDeleteApiKey = async (key: string, displayName: string) => {
     setSaving(key);
     setError('');
@@ -126,13 +194,25 @@ export function SettingsPage() {
     try {
       await settings.delete(key);
       setSuccess(`${displayName} removed`);
-      // Reload settings
       const result = await settings.get();
       setData(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to remove setting');
     } finally {
       setSaving(null);
+    }
+  };
+
+  /** プロバイダー選択を保存（select 変更時に即座保存） */
+  const handleProviderChange = async (key: string, value: string) => {
+    setError('');
+    setSuccess('');
+
+    try {
+      await settings.update(key, value);
+      setData((prev) => ({ ...prev, [key]: value }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save provider setting');
     }
   };
 
@@ -223,63 +303,94 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* API Keys Section */}
+      {/* API Keys Section — 3 社分のキー入力 */}
       <div className="bg-gray-800 rounded-lg p-6">
         <h2 className="text-lg font-semibold text-white mb-4">API Keys</h2>
         <p className="text-gray-400 text-sm mb-6">
-          Configure API keys for additional features like natural language commands.
+          Configure API keys for AI features. Keys are encrypted and stored securely.
         </p>
 
-        {/* OpenAI API Key */}
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              OpenAI API Key
-            </label>
-            <p className="text-gray-500 text-xs mb-2">
-              Used for natural language command parsing. Get your key from{' '}
-              <a
-                href="https://platform.openai.com/api-keys"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-400 hover:text-blue-300"
-              >
-                OpenAI Platform
-              </a>
-            </p>
+        <div className="space-y-6">
+          {API_KEY_FIELDS.map((field) => (
+            <div key={field.key}>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                {field.label}
+              </label>
+              <p className="text-gray-500 text-xs mb-2">
+                {field.description}{' '}
+                <a
+                  href={field.linkUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 hover:text-blue-300"
+                >
+                  {field.linkText}
+                </a>
+              </p>
 
-            {data.openai_api_key ? (
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
-                <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
-                  {data.openai_api_key}
-                </code>
-                <button
-                  onClick={() => handleDeleteApiKey('openai_api_key', 'OpenAI API Key')}
-                  disabled={saving === 'openai_api_key'}
-                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
-                >
-                  {saving === 'openai_api_key' ? 'Removing...' : 'Remove'}
-                </button>
-              </div>
-            ) : (
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
-                <input
-                  type="password"
-                  value={openaiKey}
-                  onChange={(e) => setOpenaiKey(e.target.value)}
-                  placeholder="sk-..."
-                  className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <button
-                  onClick={() => handleSaveApiKey('openai_api_key', openaiKey, 'OpenAI API Key')}
-                  disabled={saving === 'openai_api_key' || !openaiKey}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
-                >
-                  {saving === 'openai_api_key' ? 'Saving...' : 'Save'}
-                </button>
-              </div>
-            )}
-          </div>
+              {data[field.key] ? (
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                  <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
+                    {data[field.key]}
+                  </code>
+                  <button
+                    onClick={() => handleDeleteApiKey(field.key, field.label)}
+                    disabled={saving === field.key}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                  >
+                    {saving === field.key ? 'Removing...' : 'Remove'}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                  <input
+                    type="password"
+                    value={keyInputs[field.key] || ''}
+                    onChange={(e) => setKeyInputs((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                    placeholder={field.placeholder}
+                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <button
+                    onClick={() => handleSaveApiKey(field.key, keyInputs[field.key] || '', field.label)}
+                    disabled={saving === field.key || !keyInputs[field.key]}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                  >
+                    {saving === field.key ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* AI Provider Settings Section — 機能ごとのプロバイダー選択 */}
+      <div className="bg-gray-800 rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-white mb-4">AI Provider Settings</h2>
+        <p className="text-gray-400 text-sm mb-6">
+          Select which AI provider to use for each feature. The corresponding API key must be configured above.
+        </p>
+
+        <div className="space-y-6">
+          {PROVIDER_SELECTS.map((field) => (
+            <div key={field.key}>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                {field.label}
+              </label>
+              <p className="text-gray-500 text-xs mb-2">{field.description}</p>
+              <select
+                value={data[field.key] || 'none'}
+                onChange={(e) => handleProviderChange(field.key, e.target.value)}
+                className="w-full sm:w-64 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {PROVIDER_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
         </div>
       </div>
 

@@ -7,6 +7,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { MachinesPage } from './pages/MachinesPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { ConversationsPage } from './pages/ConversationsPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -68,6 +69,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <DashboardPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/conversations"
+        element={
+          <ProtectedRoute>
+            <ConversationsPage />
           </ProtectedRoute>
         }
       />

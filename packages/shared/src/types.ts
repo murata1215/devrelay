@@ -24,6 +24,9 @@ export interface Project {
 
 export type AiTool = 'claude' | 'gemini' | 'codex' | 'aider';
 
+/** AI API プロバイダー（API キー管理・機能別プロバイダー選択で使用） */
+export type AiProvider = 'openai' | 'anthropic' | 'gemini' | 'none';
+
 // Agreement ステータス
 // 'latest' = 最新版あり, 'outdated' = 旧版あり（更新推奨）, 'none' = なし
 export type AgreementStatus = 'latest' | 'outdated' | 'none';
@@ -154,12 +157,30 @@ export interface FileAttachment {
   size: number;
 }
 
+/** Claude Code 実行時の使用量データ（result メッセージから取得してそのまま保存） */
+export interface AiUsageData {
+  /** per-request トークン情報: { input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens } */
+  usage?: Record<string, number>;
+  /** モデル別セッション累積トークン: { "claude-opus-4-6": { contextWindow, input, output, cacheRead, cacheCreation } } */
+  modelUsage?: Record<string, any>;
+  /** 実行時間（ミリ秒） */
+  durationMs?: number;
+  /** 使用モデル名（modelUsage の最初のキーから取得。例: "claude-opus-4-6"） */
+  model?: string;
+}
+
 export interface AiOutputPayload {
   machineId: string;
   sessionId: string;
   output: string;
   isComplete: boolean;
   files?: FileAttachment[];
+  /** AI 実行の使用量データ（isComplete: true 時のみ） */
+  usageData?: AiUsageData;
+  /** exec モードで実行された場合 true（BuildLog 作成用） */
+  isExec?: boolean;
+  /** exec 実行時のプロンプト（BuildLog AI 要約のコンテキスト用） */
+  execPrompt?: string;
 }
 
 export interface AiStatusPayload {
@@ -332,6 +353,7 @@ export type UserCommand =
   | { type: 'session' }   // 現在のセッション情報を表示
   | { type: 'log'; count?: number }
   | { type: 'summary'; period?: string }
+  | { type: 'build' }     // ビルドログ表示
   | { type: 'quit' }
   | { type: 'help' }
   | { type: 'ai:list' }   // AI ツール一覧

@@ -13,13 +13,16 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Multi-Project**: Manage multiple projects on each agent
 - **Multi-AI**: Support for Claude Code, Gemini CLI, Aider
 - **Multi-Platform**: Operate from Discord, Telegram (LINE coming soon)
-- **Natural Language Commands**: "reconnect to last project" auto-translates to the right command (OpenAI API)
+- **Natural Language Commands**: "reconnect to last project" auto-translates to the right command (OpenAI / Anthropic / Gemini)
 - **Plan / Execute Mode**: AI plans first, you review, then it implements
 - **DevRelay Agreement**: Project settings integrated into CLAUDE.md
 - **Real-time Progress**: Watch AI's progress live on Discord/Telegram
 - **Bidirectional File Transfer**: Send and receive files between chat and dev machines
 - **History Export**: Download conversation history as daily ZIP files
 - **Proxy Support**: Connect through HTTP/HTTPS/SOCKS5 proxies
+- **Build Log**: Auto-track every exec with AI-generated summaries
+- **Conversations Analytics**: View all AI interactions with token usage breakdown
+- **Multi-Provider AI**: Register OpenAI, Anthropic, Gemini API keys with per-feature provider selection
 
 ## 💡 Token Efficiency
 
@@ -294,7 +297,9 @@ apps/server/
 │       ├── agent-manager.ts  # WebSocket connections
 │       ├── session-manager.ts # Active sessions
 │       ├── command-parser.ts # Parse user input
-│       └── command-handler.ts # Execute commands
+│       ├── command-handler.ts # Execute commands
+│       ├── build-summarizer.ts # AI build summary (multi-provider)
+│       └── natural-language-parser.ts # NLP commands (multi-provider)
 └── prisma/
     └── schema.prisma         # Database schema
 
@@ -331,7 +336,7 @@ agents/windows/
 ## 🔐 Security
 
 - Token-based machine authentication
-- API keys encrypted with AES-256-CBC
+- API keys encrypted with AES-256-CBC (OpenAI, Anthropic, Gemini)
 - All communication over TLS
 - Prompts sent via stdin (invisible to `ps aux`)
 
@@ -345,7 +350,7 @@ agents/windows/
 - [x] Conversation Persistence (file-based)
 - [x] Quick Reconnect (`c` command)
 - [x] Real-time Progress Display
-- [x] Natural Language Commands (OpenAI API)
+- [x] Natural Language Commands (OpenAI / Anthropic / Gemini)
 - [x] Plan Mode / Exec Mode
 - [x] Agent Uninstall Command
 - [x] Simplified Setup (token only)
@@ -380,9 +385,12 @@ agents/windows/
 - [x] Pre-install token validation (prevent wrong-machine installs with `--force` override)
 - [x] Stop installation when server is unreachable (proxy misconfiguration detection)
 - [x] Windows uninstall fix (Start-Sleep between process kill and file removal)
+- [x] Message usage data storage (token analytics per AI call)
+- [x] Conversations page (usage analytics dashboard)
+- [x] Build Log (auto-track exec with AI-generated summaries)
+- [x] Multi-provider AI keys (OpenAI, Anthropic, Gemini with per-feature selection)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
-- [ ] AI Summary
 - [ ] Team Features
 - [ ] AI tool switching (Gemini/Aider)
 

@@ -1,11 +1,16 @@
 /**
  * 自然言語コマンドパーサー
  *
- * OpenAI API を使ってユーザーの自然言語入力をコマンドに変換
+ * AI API を使ってユーザーの自然言語入力をコマンドに変換
+ * マルチプロバイダー対応: OpenAI / Anthropic / Gemini
+ * ユーザーの CHAT_AI_PROVIDER 設定に基づいてプロバイダーを選択する
  */
 
 import OpenAI from 'openai';
-import { getUserSetting, SettingKeys } from './user-settings.js';
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import type { AiProvider } from '@devrelay/shared';
+import { getApiKeyForChatAi } from './user-settings.js';
 
 // パース結果の型定義
 export interface ParsedCommand {
@@ -55,7 +60,144 @@ JSON形式で回答してください:
 - 曖昧な場合は confidence を低くして message として処理`;
 
 /**
+ * unknown 結果を返すヘルパー
+ */
+function unknownResult(input: string): ParsedCommand {
+  return { type: 'unknown', originalInput: input, confidence: 0 };
+}
+
+/**
+ * コンテキスト情報の文字列を構築
+ */
+function buildContextInfo(context?: {
+  currentSession?: boolean;
+  availableProjects?: string[];
+  pendingSelection?: boolean;
+}): string {
+  if (!context) return '';
+  let info = '';
+  if (context.currentSession) {
+    info += '\n現在セッション中です（AIに接続済み）。';
+  } else {
+    info += '\n現在セッション外です（まだAIに接続していません）。';
+  }
+  if (context.availableProjects && context.availableProjects.length > 0) {
+    info += `\n利用可能なプロジェクト: ${context.availableProjects.join(', ')}`;
+  }
+  if (context.pendingSelection) {
+    info += '\n選択肢を待っている状態です。数字での選択が期待されています。';
+  }
+  return info;
+}
+
+/**
+ * JSON レスポンスをパースして ParsedCommand に変換
+ */
+function parseJsonResponse(content: string, input: string): ParsedCommand {
+  // JSON ブロックが ```json ... ``` で囲まれている場合に対応
+  let jsonStr = content.trim();
+  const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonMatch) {
+    jsonStr = jsonMatch[1].trim();
+  }
+
+  const parsed = JSON.parse(jsonStr);
+  return {
+    type: parsed.type || 'unknown',
+    message: parsed.message,
+    projectName: parsed.projectName,
+    optionNumber: parsed.optionNumber,
+    originalInput: input,
+    confidence: parsed.confidence || 0.5,
+  };
+}
+
+/**
+ * OpenAI (gpt-4o-mini) でコマンドをパース
+ */
+async function parseWithOpenAI(
+  apiKey: string,
+  input: string,
+  contextInfo: string,
+): Promise<ParsedCommand> {
+  const openai = new OpenAI({ apiKey });
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT + contextInfo },
+      { role: 'user', content: input },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.1,
+    max_tokens: 256,
+  });
+
+  const content = response.choices[0]?.message?.content;
+  if (!content) throw new Error('Empty response from OpenAI');
+  return parseJsonResponse(content, input);
+}
+
+/**
+ * Anthropic (Claude Haiku) でコマンドをパース
+ * Anthropic にはネイティブ JSON モードがないため、システムプロンプトで JSON 出力を指示
+ */
+async function parseWithAnthropic(
+  apiKey: string,
+  input: string,
+  contextInfo: string,
+): Promise<ParsedCommand> {
+  const anthropic = new Anthropic({ apiKey });
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 256,
+    system: SYSTEM_PROMPT + contextInfo + '\n\n必ず JSON のみを返してください。他のテキストは含めないでください。',
+    messages: [{ role: 'user', content: input }],
+  });
+
+  const textBlock = response.content.find((block) => block.type === 'text');
+  const content = textBlock && 'text' in textBlock ? textBlock.text : null;
+  if (!content) throw new Error('Empty response from Anthropic');
+  return parseJsonResponse(content, input);
+}
+
+/**
+ * Gemini (2.0 Flash) でコマンドをパース
+ * responseMimeType: 'application/json' で JSON 出力を強制
+ */
+async function parseWithGemini(
+  apiKey: string,
+  input: string,
+  contextInfo: string,
+): Promise<ParsedCommand> {
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.0-flash',
+    generationConfig: {
+      responseMimeType: 'application/json',
+      maxOutputTokens: 256,
+      temperature: 0.1,
+    },
+  });
+
+  const prompt = `${SYSTEM_PROMPT}${contextInfo}\n\nユーザー入力: ${input}`;
+  const result = await model.generateContent(prompt);
+  const content = result.response.text();
+  if (!content) throw new Error('Empty response from Gemini');
+  return parseJsonResponse(content, input);
+}
+
+/** プロバイダー別のパース関数マッピング */
+const PARSER_MAP: Record<string, (apiKey: string, input: string, contextInfo: string) => Promise<ParsedCommand>> = {
+  openai: parseWithOpenAI,
+  anthropic: parseWithAnthropic,
+  gemini: parseWithGemini,
+};
+
+/**
  * 自然言語入力をコマンドに変換
+ *
+ * ユーザーの CHAT_AI_PROVIDER 設定に基づいてプロバイダーを選択。
+ * 未設定の場合は後方互換のため OpenAI キーがあれば OpenAI を使用。
  */
 export async function parseNaturalLanguage(
   userId: string,
@@ -66,76 +208,30 @@ export async function parseNaturalLanguage(
     pendingSelection?: boolean;   // 選択待ちかどうか
   }
 ): Promise<ParsedCommand> {
-  // OpenAI API キーを取得（ユーザー設定のみ、環境変数へのフォールバックなし）
-  const apiKey = await getUserSetting(userId, SettingKeys.OPENAI_API_KEY);
-
-  if (!apiKey) {
-    // API キーがない場合は unknown を返す（従来のコマンドパーサーにフォールバック）
+  // Chat AI 用のプロバイダーと API キーを取得
+  const config = await getApiKeyForChatAi(userId);
+  if (!config) {
     console.log('🧠 NLP: No API key available, skipping');
-    return {
-      type: 'unknown',
-      originalInput: input,
-      confidence: 0,
-    };
+    return unknownResult(input);
   }
 
-  console.log(`🧠 NLP: Parsing "${input}" with OpenAI`)
+  const { provider, apiKey } = config;
+  const parser = PARSER_MAP[provider];
+  if (!parser) {
+    console.log(`🧠 NLP: Unknown provider "${provider}", skipping`);
+    return unknownResult(input);
+  }
+
+  console.log(`🧠 NLP: Parsing "${input}" with ${provider}`);
 
   try {
-    const openai = new OpenAI({ apiKey });
-
-    // コンテキスト情報を追加
-    let contextInfo = '';
-    if (context) {
-      if (context.currentSession) {
-        contextInfo += '\n現在セッション中です（AIに接続済み）。';
-      } else {
-        contextInfo += '\n現在セッション外です（まだAIに接続していません）。';
-      }
-      if (context.availableProjects && context.availableProjects.length > 0) {
-        contextInfo += `\n利用可能なプロジェクト: ${context.availableProjects.join(', ')}`;
-      }
-      if (context.pendingSelection) {
-        contextInfo += '\n選択肢を待っている状態です。数字での選択が期待されています。';
-      }
-    }
-
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT + contextInfo },
-        { role: 'user', content: input },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.1, // 低い温度で安定した出力
-      max_tokens: 256,
-    });
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error('Empty response from OpenAI');
-    }
-
-    const parsed = JSON.parse(content);
-
-    const result = {
-      type: parsed.type || 'unknown',
-      message: parsed.message,
-      projectName: parsed.projectName,
-      optionNumber: parsed.optionNumber,
-      originalInput: input,
-      confidence: parsed.confidence || 0.5,
-    };
+    const contextInfo = buildContextInfo(context);
+    const result = await parser(apiKey, input, contextInfo);
     console.log(`🧠 NLP: Result: ${JSON.stringify(result)}`);
     return result;
   } catch (error) {
-    console.error('Natural language parsing failed:', error);
-    // エラー時は unknown を返す
-    return {
-      type: 'unknown',
-      originalInput: input,
-      confidence: 0,
-    };
+    console.error(`Natural language parsing failed (${provider}):`, error);
+    return unknownResult(input);
   }
 }
 
@@ -146,7 +242,7 @@ export function isTraditionalCommand(input: string): boolean {
   const trimmed = input.trim().toLowerCase();
 
 // 単一文字コマンド (s=status, r=recent も含む)
-  if (/^[mpqhcxeaosrw]$/i.test(trimmed)) return true;
+  if (/^[mpqhcxeaosrwb]$/i.test(trimmed)) return true;
 
   // m から始まるメッセージ
   if (/^m\s+/i.test(trimmed)) return true;
@@ -158,7 +254,7 @@ export function isTraditionalCommand(input: string): boolean {
   if (/^(?:e|exec)\s*,\s*.+/i.test(trimmed)) return true;
 
   // その他のコマンド: exec, link, agreement, log, sum, storage
-  if (/^(exec|link|agreement|log\d*|sum\d*d?|storage(\s+(list|(get|delete)\s+.+))?)$/i.test(trimmed)) return true;
+  if (/^(exec|link|agreement|build|log\d*|sum\d*d?|storage(\s+(list|(get|delete)\s+.+))?)$/i.test(trimmed)) return true;
 
   return false;
 }

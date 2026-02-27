@@ -26,6 +26,7 @@ model User {
   platformLinks PlatformLink[]
   settings      UserSettings[]
   authSessions  AuthSession[]
+  buildLogs     BuildLog[]
 }
 
 // WebUI 認証セッション
@@ -84,6 +85,7 @@ model Machine {
 
   projects       Project[]
   sessions       Session[]
+  buildLogs      BuildLog[]
 
   @@unique([userId, name])
 }
@@ -100,7 +102,8 @@ model Project {
   createdAt   DateTime  @default(now())
   
   sessions    Session[]
-  
+  buildLogs   BuildLog[]
+
   @@unique([machineId, name])
 }
 
@@ -119,6 +122,7 @@ model Session {
   endedAt       DateTime?
   
   messages      Message[]
+  buildLogs     BuildLog[]
 }
 
 // メッセージ履歴
@@ -129,6 +133,7 @@ model Message {
   role        String    // user, ai, system
   content     String
   platform    String    // どのプラットフォームから送信されたか
+  usageData   Json?     // AI 実行時の使用量データ（usage, modelUsage, durationMs）
   createdAt   DateTime  @default(now())
 }
 
@@ -158,4 +163,28 @@ model ChannelSession {
   updatedAt        DateTime  @updatedAt
 
   @@unique([platform, chatId])
+}
+
+// ビルドログ（exec 実行の記録）
+// プロジェクト名ごとにビルド番号を連番で採番（全マシン共通）
+// Agent が「今どのビルドを使ってるか」「最新とどれだけ離れてるか」を追跡
+model BuildLog {
+  id           String   @id @default(cuid())
+  buildNumber  Int      // プロジェクト名ごとの連番ビルド番号（全マシン共通）
+  projectName  String   // プロジェクト名（マシン横断で比較するため文字列で保持）
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id])
+  machineId    String
+  machine      Machine  @relation(fields: [machineId], references: [id])
+  sessionId    String
+  session      Session  @relation(fields: [sessionId], references: [id])
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  summary      String   // AI 応答先頭部分から自動生成された要約
+  prompt       String?  // exec 時のプロンプト（カスタムプロンプトまたはデフォルト）
+  createdAt    DateTime @default(now())
+
+  @@unique([projectName, buildNumber])  // プロジェクト名+ビルド番号で一意
+  @@index([projectName])                // プロジェクト名での検索用
+  @@index([machineId, projectName])     // マシン+プロジェクト名での検索用
 }
