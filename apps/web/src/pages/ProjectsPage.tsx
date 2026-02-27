@@ -187,6 +187,13 @@ export function ProjectsPage() {
     const load = async () => {
       try {
         const result = await projects.list();
+        // latestBuild.createdAt の降順でソート（ビルドなしは末尾に配置）
+        result.sort((a, b) => {
+          if (!a.latestBuild && !b.latestBuild) return 0;
+          if (!a.latestBuild) return 1;
+          if (!b.latestBuild) return -1;
+          return new Date(b.latestBuild.createdAt).getTime() - new Date(a.latestBuild.createdAt).getTime();
+        });
         setData(result);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load projects');

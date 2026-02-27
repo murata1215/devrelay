@@ -389,6 +389,7 @@ agents/windows/
 - [x] Conversations page (usage analytics dashboard)
 - [x] Build Log (auto-track exec with AI-generated summaries)
 - [x] Multi-provider AI keys (OpenAI, Anthropic, Gemini with per-feature selection)
+- [x] Projects page sorted by latest build date (most recently built first)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features

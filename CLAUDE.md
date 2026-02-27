@@ -1550,6 +1550,16 @@ cd agents/windows && pnpm dist  # release/ にインストーラー生成
   - `apps/server/src/routes/api.ts` - `gemini_api_key` マスク処理
   - `apps/web/src/pages/SettingsPage.tsx` - API キー 3 欄 + プロバイダー選択 2 つ
 
+#### 85. Projects ページ Latest Build 降順ソート (2026-02-27)
+- **目的**: Projects 一覧を最近ビルドしたプロジェクト順に表示
+- **変更前**: `lastUsedAt` の降順（サーバー側ソート）
+- **変更後**: `latestBuild.createdAt` の降順（クライアント側ソート）
+- **ソートルール**:
+  - latestBuild がある → `createdAt` の新しい順
+  - latestBuild がない → 末尾に配置
+- **主要ファイル**:
+  - `apps/web/src/pages/ProjectsPage.tsx` - `projects.list()` の結果を `latestBuild.createdAt` でソート
+
 ## 今後の課題
 
 - [ ] LINE 対応
