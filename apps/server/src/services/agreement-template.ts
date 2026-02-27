@@ -1,0 +1,203 @@
+/**
+ * Agreement テンプレート配信サービス
+ *
+ * Agreement のテンプレート全文を Server 側で管理し、Agent に配信する。
+ * これにより、Server を更新するだけで全 Agent のテンプレートが最新になる。
+ * Agent 側にはフォールバック用のローカルテンプレートが残るが、
+ * Server から送られたテンプレートが常に優先される。
+ */
+
+// Agreement バージョン
+export const AGREEMENT_VERSION = 'v4';
+
+// マーカー定数
+export const AGREEMENT_MARKER = `<!-- DevRelay Agreement ${AGREEMENT_VERSION} -->`;
+export const AGREEMENT_END_MARKER = '<!-- /DevRelay Agreement -->';
+
+// CLAUDE.md 先頭に置く軽量マーカー
+const CLAUDEMD_MARKER = `${AGREEMENT_MARKER}
+See \`rules/devrelay.md\` for DevRelay rules.
+${AGREEMENT_END_MARKER}`;
+
+// rules/devrelay.md に書き込む Agreement 全文テンプレート
+const RULES_TEMPLATE = `<!-- DevRelay Agreement ${AGREEMENT_VERSION} -->
+
+# DevRelay 共通ルール
+
+## ファイル出力
+
+ユーザーに渡すファイルを作成する場合は、必ず \`.devrelay-output/\` ディレクトリに保存してください。
+このディレクトリに置かれたファイルは自動的にユーザーに送信されます。
+
+## プランモード
+
+現在はプランモードです。コードの書き換えや新規ファイルの作成は行わず、以下のみを行ってください：
+- 調査・分析
+- 実装プランの立案
+- 質問や確認
+
+プランが完成したら、最後に必ず以下のように伝えてください：
+「このプランでよければ \\\`e\\\` または \\\`exec\\\` を送信してください。実装を開始します。」
+
+ユーザーが \\\`exec\\\` を送信するまで、コードの変更は行わないでください。
+
+\\\`ExitPlanMode\\\` ツールは使用しないでください。DevRelay のプランモード解除はユーザーが \\\`e\\\` / \\\`exec\\\` を送信することで行います。
+
+## プランの説明
+
+プランを立案したら、必ずテキストで概要を説明してください。
+ファイルに書き込むだけでなく、ユーザーが Discord/Telegram で内容を確認できるようにしてください。
+
+## ユーザーへの質問
+
+AskUserQuestion ツールは使用しないでください（DevRelay 経由では応答を返せないため）。
+ユーザーに質問や確認が必要な場合は、テキストで質問を書いてください。
+ユーザーは Discord/Telegram 経由でテキストで回答します。
+
+## コーディングスタイル
+
+ソースコードを書く際は、詳細な日本語コメントを必ず残してください。
+
+1. **関数・メソッド**: 必ず JSDoc 形式で目的・引数・戻り値を説明
+2. **クラス**: クラスの責務と使用方法を説明
+3. **複雑なロジック**: 処理の流れを段階的に説明
+4. **条件分岐**: なぜその条件が必要かを説明
+5. **重要な変数**: 変数の用途を説明
+6. **TODO・FIXME**: 将来の改善点を明記
+
+コメントがないコードは不完全です。他の開発者が読んで理解できるレベルのコメントを心がけてください。
+
+---
+
+## CLAUDE.md 更新ルール
+
+CLAUDE.md は **毎回のプロンプトでコンテキストに全文載る**。
+肥大化を防ぐため、以下のルールを厳守すること。
+
+### CLAUDE.md に書いてよいもの（2,000 トークン以内を維持）
+
+- プロジェクト概要（1〜2行）
+- ルールファイルへの参照（\\\`rules/devrelay.md\\\`、\\\`rules/project.md\\\`）
+- 技術スタック（テーブル 5〜8行）
+- ビルド & デプロイ手順（5〜10行）
+- 環境変数一覧（テーブル）
+- DB テーブル概要（テーブル名 + 1行説明）
+- 詳細ドキュメントへの参照リンク
+
+### CLAUDE.md に絶対書いてはいけないもの
+
+| 書いてはいけないもの | 代わりに書く場所 |
+|---------------------|--------------------|
+| 完了済みタスクのチェックリスト（✅） | \\\`doc/changelog.md\\\` |
+| 日付付きの実装記録（「2026-XX-XX 実装」） | \\\`doc/changelog.md\\\` |
+| Phase 完了の詳細 | \\\`doc/changelog.md\\\` |
+| 仕様変更の経緯（Before/After） | \\\`doc/changelog.md\\\` |
+| 新規ファイル一覧 | \\\`doc/changelog.md\\\` |
+| API エンドポイント全一覧 | \\\`doc/\\\` またはコードから読む |
+| 設計判断の追加・変更 | \\\`rules/project.md\\\` |
+
+### \\\`w\\\` コマンド（wrap up）実行時の手順
+
+1. **doc/changelog.md** に今回の変更内容を追記（日付 + 概要 + 詳細）
+2. **rules/project.md** に設計判断・ルールの追加/変更があれば追記
+3. **CLAUDE.md** は技術スタック・DB テーブル・環境変数に変更があった場合**のみ**更新
+4. **MEMORY.md** があれば更新（下記ルール参照）
+5. README.md を必要に応じて更新
+6. コミット & プッシュ
+
+### 判断に迷ったら
+
+「このセクションは、次回のプロンプトで Claude が作業するために毎回必要か？」
+
+- **YES** → CLAUDE.md に残す（ただし簡潔に）
+- **NO** → \\\`doc/changelog.md\\\` または \\\`rules/project.md\\\` に移動
+
+---
+
+## MEMORY.md 更新ルール
+
+MEMORY.md（Claude Code の auto memory）は **毎回のプロンプトでシステムプロンプトに全文載る**。
+CLAUDE.md と同じ肥大化問題を抱えるため、以下のルールを守ること。
+
+### MEMORY.md の上限
+
+- **80行以内を維持**（200行で切り詰められるが、余裕を持って80行）
+- 設計判断の詳細は \\\`rules/project.md\\\` に書き、MEMORY.md には書かない
+
+### MEMORY.md に書いてよいもの
+
+- Project Overview（プロジェクト概要: 5行）
+- Critical Rules（絶対守るルール: 5行）
+- Build & Deploy（ビルド手順: 4行）
+- Architecture Patterns（アーキテクチャの癖: 5行）
+- Recent Changes（直近の変更サマリー: 10行）
+- Document Structure（ドキュメント構成の参照先: 6行）
+- Key File Locations（主要ファイルパス: 12行）
+- トラブルシューティング知見（ハマりやすいポイントのみ、各1行）
+
+### MEMORY.md に書いてはいけないもの
+
+| 書いてはいけないもの | 代わりに参照する場所 |
+|---------------------|--------------------|
+| 個別機能の実装詳細 | \\\`rules/project.md\\\` |
+| API エンドポイント・DB フィールド一覧 | \\\`rules/project.md\\\` またはコード |
+| 完了済みタスクの経緯 | \\\`doc/changelog.md\\\` |
+| 1回限りの作業手順 | 不要（削除） |
+
+### \\\`w\\\` コマンド時の MEMORY.md 更新
+
+- **Recent Changes** セクションを最新の変更で更新
+- \\\`rules/project.md\\\` に移行済みの詳細があれば削除
+- 80行を超えていたら圧縮
+
+<!-- /DevRelay Agreement ${AGREEMENT_VERSION} -->
+`;
+
+/**
+ * Agreement 適用プロンプトを生成する
+ * Server 側で生成して Agent に配信するため、テンプレート更新は Server のみで完結する
+ * @returns Claude Code に渡す Agreement 適用プロンプト全文
+ */
+export function buildAgreementApplyPrompt(): string {
+  return `【タスク】DevRelay Agreement ${AGREEMENT_VERSION} を適用する
+
+これは DevRelay システムからの自動タスクです。質問せずに以下を実行してください：
+
+## Step 1: rules/devrelay.md を作成・更新
+
+1. \`rules/\` ディレクトリを作成（存在しない場合）
+2. \`rules/devrelay.md\` に以下の内容を書き込む（既存の場合は上書き）：
+
+${RULES_TEMPLATE}
+
+## Step 2: CLAUDE.md を更新
+
+1. CLAUDE.md を読む（存在しない場合は新規作成）
+2. 旧 Agreement ブロック（\`<!-- DevRelay Agreement v...\` から \`<!-- /DevRelay Agreement -->\` まで、その直後の \`---\` 行も含む）を**全て削除**
+3. ファイルの先頭に以下のマーカーを追加：
+
+${CLAUDEMD_MARKER}
+
+---
+
+## Step 3: 補助ファイルの作成（未存在時のみ）
+
+1. \`doc/\` ディレクトリを作成（存在しない場合）
+2. \`doc/changelog.md\` が存在しなければ、以下の内容で作成：
+\`\`\`
+# Changelog
+\`\`\`
+3. \`rules/project.md\` が存在しなければ、以下の内容で作成：
+\`\`\`
+# プロジェクト固有ルール
+\`\`\`
+
+## Step 4: 結果を報告
+
+以下の形式で結果を報告してください：
+- \`rules/devrelay.md\` を作成/更新した
+- CLAUDE.md を更新した
+- 補助ファイルを作成した場合はその旨
+
+質問は不要です。上記のタスクをそのまま実行してください。`;
+}

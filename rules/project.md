@@ -224,6 +224,14 @@ pm2 save && pm2 startup
 - `AGREEMENT_APPLY_PROMPT` はマルチファイル作成: `rules/devrelay.md` + `doc/changelog.md`（ヘッダー） + `rules/project.md`（ヘッダー）+ CLAUDE.md マーカー更新
 - `w` コマンドは `doc/changelog.md` → `rules/project.md` → CLAUDE.md（最小限のみ）の順で更新
 
+### テンプレート配信方式
+
+- Agreement テンプレートは **Server 側** (`apps/server/src/services/agreement-template.ts`) で管理
+- `ag` コマンド実行時、Server が `buildAgreementApplyPrompt()` でプロンプトを生成 → `payload.agreementPrompt` として Agent に配信
+- Agent は `payload.agreementPrompt` があればそれを使用、なければローカルの `AGREEMENT_APPLY_PROMPT` にフォールバック
+- テンプレート更新は **Server の再起動のみ**で全 Agent に即反映（Agent の再インストール不要）
+- Agent 側の `output-collector.ts` のテンプレートはフォールバック用に残す
+
 ### ドキュメントディレクトリ構成
 
 ```

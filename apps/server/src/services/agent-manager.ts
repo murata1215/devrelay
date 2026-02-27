@@ -14,6 +14,7 @@ import type {
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine } from './session-manager.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
+import { buildAgreementApplyPrompt } from './agreement-template.js';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -803,10 +804,13 @@ export async function saveWorkState(machineId: string, sessionId: string, projec
   });
 }
 
+// Agreement 適用コマンドを Agent に送信
+// Server 側でプロンプトを生成して配信するため、テンプレート更新は Server のみで完結する
 export async function applyAgreement(machineId: string, sessionId: string, projectPath: string, userId: string) {
+  const agreementPrompt = buildAgreementApplyPrompt();
   sendToAgent(machineId, {
     type: 'server:agreement:apply',
-    payload: { sessionId, projectPath, userId }
+    payload: { sessionId, projectPath, userId, agreementPrompt }
   });
 }
 

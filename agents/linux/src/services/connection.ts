@@ -989,8 +989,10 @@ export async function getAgreementStatusType(projectPath: string): Promise<Agree
 }
 
 // Handle agreement apply command - run Claude Code to update CLAUDE.md
+// Server から agreementPrompt が送られてくればそれを優先使用（Server 側でテンプレート管理）
+// 送られてこない場合（旧 Server）はローカルの AGREEMENT_APPLY_PROMPT にフォールバック
 async function handleAgreementApply(payload: AgreementApplyPayload) {
-  const { sessionId, projectPath, userId } = payload;
+  const { sessionId, projectPath, userId, agreementPrompt } = payload;
   console.log(`📝 Applying DevRelay Agreement for session ${sessionId}`);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
@@ -1006,10 +1008,17 @@ async function handleAgreementApply(payload: AgreementApplyPayload) {
     sessionInfoMap.set(sessionId, sessionInfo);
   }
 
-  // Use the agreement apply prompt
+  // Server 配信プロンプトを優先、なければローカルフォールバック
+  const prompt = agreementPrompt || AGREEMENT_APPLY_PROMPT;
+  if (agreementPrompt) {
+    console.log(`📡 Using server-provided agreement prompt`);
+  } else {
+    console.log(`📦 Using local agreement prompt (fallback)`);
+  }
+
   await handleAiPrompt({
     sessionId,
-    prompt: AGREEMENT_APPLY_PROMPT,
+    prompt,
     userId,
     files: undefined,
   });

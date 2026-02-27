@@ -1548,3 +1548,23 @@ MEMORY.md の肥大化防止ルールを Agreement v4 に追加。
   - `doc/devrelay-claudemd-migration.md` - Step 6 追加 + フローチャート更新
   - `agents/linux/src/services/output-collector.ts` - DEVRELAY_RULES_TEMPLATE 同期
   - `agents/windows/src/services/output-collector.ts` - DEVRELAY_RULES_TEMPLATE 同期
+
+#### 88. Agreement テンプレート Server 配信
+
+Agreement テンプレートを Agent ハードコードから Server 配信方式に変更。
+Server を更新するだけで全 Agent のテンプレートが最新になる。
+
+- **Server 側**:
+  - `apps/server/src/services/agreement-template.ts` 新規作成（テンプレート全文 + プロンプト生成関数）
+  - `agent-manager.ts` の `applyAgreement()` で `buildAgreementApplyPrompt()` を呼び、payload に `agreementPrompt` を含める
+- **Agent 側**:
+  - `payload.agreementPrompt` があれば Server 配信プロンプトを使用
+  - なければローカルの `AGREEMENT_APPLY_PROMPT` にフォールバック（旧 Server 互換）
+- **shared/types.ts**: `AgreementApplyPayload` に `agreementPrompt?: string` フィールド追加
+- **後方互換**: 旧 Server → 新 Agent = ローカルフォールバック、新 Server → 旧 Agent = `agreementPrompt` フィールドは無視される
+- **変更ファイル**:
+  - `apps/server/src/services/agreement-template.ts` - 新規
+  - `apps/server/src/services/agent-manager.ts` - import + applyAgreement 更新
+  - `packages/shared/src/types.ts` - AgreementApplyPayload 拡張
+  - `agents/linux/src/services/connection.ts` - handleAgreementApply 更新
+  - `agents/windows/src/services/connection.ts` - handleAgreementApply 更新

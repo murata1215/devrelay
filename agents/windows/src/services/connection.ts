@@ -959,8 +959,10 @@ export async function getAgreementStatusType(projectPath: string): Promise<Agree
 }
 
 // Handle agreement apply command - run Claude Code to update CLAUDE.md
+// Server から agreementPrompt が送られてくればそれを優先使用（Server 側でテンプレート管理）
+// 送られてこない場合（旧 Server）はローカルの AGREEMENT_APPLY_PROMPT にフォールバック
 async function handleAgreementApply(payload: AgreementApplyPayload) {
-  const { sessionId, projectPath, userId } = payload;
+  const { sessionId, projectPath, userId, agreementPrompt } = payload;
   log.info(`📝 Applying DevRelay Agreement for session ${sessionId}`);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
@@ -982,8 +984,16 @@ async function handleAgreementApply(payload: AgreementApplyPayload) {
   await clearConversation(projectPath);
   sessionInfo.history = [];
 
+  // Server 配信プロンプトを優先、なければローカルフォールバック
+  const basePrompt = agreementPrompt || AGREEMENT_APPLY_PROMPT;
+  if (agreementPrompt) {
+    log.info(`📡 Using server-provided agreement prompt`);
+  } else {
+    log.info(`📦 Using local agreement prompt (fallback)`);
+  }
+
   // Use the agreement apply prompt (with instruction to mention the cleared history)
-  const promptWithClearNotice = AGREEMENT_APPLY_PROMPT + '\n\n最後に、会話履歴をクリアしたことも伝えてください：「🗑️ 会話履歴をクリアしました。新しい会話からプランモードが有効になります。」';
+  const promptWithClearNotice = basePrompt + '\n\n最後に、会話履歴をクリアしたことも伝えてください：「🗑️ 会話履歴をクリアしました。新しい会話からプランモードが有効になります。」';
 
   await handleAiPrompt({
     sessionId,

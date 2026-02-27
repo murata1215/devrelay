@@ -257,6 +257,8 @@ export interface AgreementApplyPayload {
   sessionId: string;
   projectPath: string;
   userId: string;
+  /** Server から配信される Agreement 適用プロンプト（Agent のローカルテンプレートより優先） */
+  agreementPrompt?: string;
 }
 
 export interface StorageSavePayload {
