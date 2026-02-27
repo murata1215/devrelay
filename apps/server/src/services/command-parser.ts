@@ -136,7 +136,7 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   if (normalized === 'w') {
     return {
       type: 'exec',
-      prompt: 'CLAUDE.mdとREADME.mdを今回の変更内容で更新してください。セッションをクリアしてもいいようにMEMORY.mdも更新してください。更新後、変更内容を簡潔にまとめたコミットメッセージでコミットしてプッシュしてください。',
+      prompt: 'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。MEMORY.md があれば更新してください。README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。',
     };
   }
 
@@ -213,7 +213,7 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       // w コマンドは parseCommand() の Step 0.5 で処理されるが、念のためフォールバック
       return {
         type: 'exec',
-        prompt: 'CLAUDE.mdとREADME.mdを今回の変更内容で更新してください。セッションをクリアしてもいいようにMEMORY.mdも更新してください。更新後、変更内容を簡潔にまとめたコミットメッセージでコミットしてプッシュしてください。',
+        prompt: 'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。MEMORY.md があれば更新してください。README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。',
       };
     case 'link':
       return { type: 'link' };
@@ -277,7 +277,7 @@ export function getHelpText(): string {
 \`b\` - ビルドログ（exec 実行履歴・各マシンのビルド差分）
 
 **その他**
-\`ag\` - DevRelay Agreement を適用
+\`ag\` - DevRelay Agreement v4 を適用（rules/devrelay.md 作成）
 \`x\` - 会話履歴をクリア（2回連続で実行）
 \`q\` - 切断
 \`h\` - このヘルプ

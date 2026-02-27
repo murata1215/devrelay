@@ -15,7 +15,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Multi-Platform**: Operate from Discord, Telegram (LINE coming soon)
 - **Natural Language Commands**: "reconnect to last project" auto-translates to the right command (OpenAI / Anthropic / Gemini)
 - **Plan / Execute Mode**: AI plans first, you review, then it implements
-- **DevRelay Agreement**: Project settings integrated into CLAUDE.md
+- **DevRelay Agreement v4**: Rules in `rules/devrelay.md`, lightweight CLAUDE.md hub
 - **Real-time Progress**: Watch AI's progress live on Discord/Telegram
 - **Bidirectional File Transfer**: Send and receive files between chat and dev machines
 - **History Export**: Download conversation history as daily ZIP files
@@ -62,6 +62,12 @@ devrelay/
 ├── agents/
 │   ├── linux/            # Cross-platform CLI Agent (Linux + Windows)
 │   └── windows/          # Windows Agent (Electron tray app)
+├── rules/
+│   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
+│   └── project.md        # Project-specific design decisions
+├── doc/
+│   ├── changelog.md      # Implementation history (#1-#86)
+│   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer
     ├── install-agent.ps1   # Windows one-liner installer
@@ -191,7 +197,7 @@ Bot: 🤖 Working on it...
 | `e, <instruction>` | Execute custom instruction directly |
 | `w` | Wrap up: update docs + commit + push |
 | `se` / `session` | Show session info |
-| `ag` / `agreement` | Apply DevRelay Agreement to CLAUDE.md |
+| `ag` / `agreement` | Apply DevRelay Agreement v4 (creates `rules/devrelay.md`) |
 | `link` | Link Discord/Telegram account to WebUI |
 | `1`, `2`, `3`... | Select from list |
 | `x` | Clear conversation history (requires double confirmation) |
@@ -390,6 +396,7 @@ agents/windows/
 - [x] Build Log (auto-track exec with AI-generated summaries)
 - [x] Multi-provider AI keys (OpenAI, Anthropic, Gemini with per-feature selection)
 - [x] Projects page sorted by latest build date (most recently built first)
+- [x] Agreement v4 + CLAUDE.md migration (rules separation, lightweight hub)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features

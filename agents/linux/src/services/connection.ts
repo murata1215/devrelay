@@ -951,12 +951,25 @@ export async function checkAgreementStatus(projectPath: string): Promise<boolean
 }
 
 // Agreement の詳細ステータスを取得
+// v4+: rules/devrelay.md を優先チェック → なければ CLAUDE.md にフォールバック
 export async function getAgreementStatusType(projectPath: string): Promise<AgreementStatusType> {
   try {
+    // v4+: rules/devrelay.md に最新版マーカーがあるか確認
+    const rulesPath = join(projectPath, 'rules', 'devrelay.md');
+    try {
+      const rulesContent = await readFile(rulesPath, 'utf-8');
+      if (rulesContent.includes(DEVRELAY_AGREEMENT_MARKER)) {
+        return 'latest';
+      }
+    } catch {
+      // rules/devrelay.md が存在しない → CLAUDE.md にフォールバック
+    }
+
+    // v3以前: CLAUDE.md のマーカーを確認
     const claudeMdPath = join(projectPath, 'CLAUDE.md');
     const content = await readFile(claudeMdPath, 'utf-8');
 
-    // 最新版のマーカーがあるか確認
+    // CLAUDE.md に最新版マーカーがある場合（v4 マーカーが CLAUDE.md に直接ある場合も対応）
     if (content.includes(DEVRELAY_AGREEMENT_MARKER)) {
       return 'latest';
     }

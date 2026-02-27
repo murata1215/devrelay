@@ -515,7 +515,7 @@ async function handleAiStatus(payload: { machineId: string; sessionId: string; s
     // 新しい詳細ステータス（'latest', 'outdated', 'none'）または後方互換の boolean
     const status = payload.agreementStatus;
     if (status === 'latest') {
-      statusMessage += '\n✅ DevRelay Agreement v2 対応済み';
+      statusMessage += '\n✅ DevRelay Agreement 対応済み';
     } else if (status === 'outdated') {
       statusMessage += '\n⚠️ DevRelay Agreement 旧版 - `ag` で最新版に更新できます';
     } else if (status === 'none' || status === false) {
