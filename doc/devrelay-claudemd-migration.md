@@ -29,7 +29,7 @@ project/
 
 ## 分類判断フローチャート
 
-CLAUDE.md の各セクションを以下のフローで分類する：
+CLAUDE.md / MEMORY.md の各セクションを以下のフローで分類する：
 
 ```
 そのセクションは...
@@ -44,6 +44,8 @@ CLAUDE.md の各セクションを以下のフローで分類する：
 │   → doc/changelog.md
 ├─ API仕様・DB定義（詳細）？
 │   → doc/api-spec.md or doc/architecture.md
+├─ セッション横断で覚えておくべき？（MEMORY.md 用）
+│   → 下記「MEMORY.md の判断基準」参照
 └─ コードから読めるもの？
     → 削除（重複排除）
 ```
@@ -151,7 +153,32 @@ CLAUDE.md から全ての履歴情報を移動。
 - API 仕様: `doc/api-spec.md`（またはコード参照）
 ```
 
-### Step 6: 動作確認
+### Step 6: MEMORY.md を圧縮
+
+MEMORY.md（Claude Code の auto memory）も CLAUDE.md と同じ問題を抱えやすい。
+200行を超えると切り詰められるため、定期的な圧縮が必要。
+
+**MEMORY.md に残すもの（目安: 80行以内）**:
+- Project Overview（プロジェクト概要 5行）
+- Critical Rules（絶対守るルール 5行）
+- Build & Deploy（ビルド手順 4行）
+- Architecture Patterns（アーキテクチャの癖 5行）
+- Recent Changes（直近の変更サマリー 10行）
+- Document Structure（ドキュメント構成の参照先 6行）
+- Key File Locations（主要ファイルパス 12行）
+- トラブルシューティング知見（ハマりやすいポイントのみ）
+
+**MEMORY.md から削除すべきもの**:
+- `rules/project.md` に既に書かれた設計判断の詳細
+- 個別機能の実装詳細（#XX の詳細な説明）
+- API エンドポイント一覧や DB フィールド一覧
+- 1回限りの作業手順
+
+**判断基準**: 「この情報は `rules/project.md` や `doc/changelog.md` を読めばわかるか？」
+- YES → MEMORY.md から削除（参照リンクだけ残す）
+- NO → MEMORY.md に残す
+
+### Step 7: 動作確認
 
 1. プロジェクト接続時に Agreement チェックが通ること
 2. Claude Code が `rules/devrelay.md` を読めること
