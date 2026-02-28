@@ -60,11 +60,46 @@ export async function startAiSession(
   activeSessions.set(sessionId, session);
 }
 
+/** プランモード中に許可する読み取り専用 Bash コマンドのリスト */
+export const PLAN_MODE_ALLOWED_TOOLS = [
+  // PM2 ログ・ステータス確認
+  'Bash(pm2 logs *)',
+  'Bash(pm2 log *)',
+  'Bash(pm2 status *)',
+  'Bash(pm2 list *)',
+  'Bash(pm2 show *)',
+  'Bash(pm2 describe *)',
+  // システム・ログ確認
+  'Bash(journalctl *)',
+  'Bash(systemctl status *)',
+  'Bash(systemctl is-active *)',
+  // Git 読み取り
+  'Bash(git log *)',
+  'Bash(git status *)',
+  'Bash(git diff *)',
+  'Bash(git show *)',
+  'Bash(git branch *)',
+  // システム情報
+  'Bash(ps *)',
+  'Bash(free *)',
+  'Bash(df *)',
+  'Bash(du *)',
+  'Bash(ss *)',
+  'Bash(netstat *)',
+  // Docker（参照のみ）
+  'Bash(docker ps *)',
+  'Bash(docker logs *)',
+  'Bash(docker compose ps *)',
+  'Bash(docker compose logs *)',
+];
+
 export interface SendPromptOptions {
   /** Claude session ID to resume (from previous execution) */
   resumeSessionId?: string;
   /** Use plan mode (--permission-mode plan) instead of skip-permissions */
   usePlanMode?: boolean;
+  /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
+  allowedTools?: string[];
 }
 
 export async function sendPromptToAi(
@@ -102,7 +137,15 @@ export async function sendPromptToAi(
     // Add permission mode based on options
     if (options.usePlanMode) {
       args.push('--permission-mode', 'plan');
-      console.log(`📋 Using plan mode (--permission-mode plan)`);
+      // プランモードで読み取り専用コマンドを許可
+      if (options.allowedTools && options.allowedTools.length > 0) {
+        for (const tool of options.allowedTools) {
+          args.push('--allowedTools', tool);
+        }
+        console.log(`📋 Using plan mode with ${options.allowedTools.length} allowed tools`);
+      } else {
+        console.log(`📋 Using plan mode (--permission-mode plan)`);
+      }
     } else {
       args.push('--dangerously-skip-permissions');
       console.log(`🚀 Using exec mode (--dangerously-skip-permissions)`);

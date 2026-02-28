@@ -15,7 +15,8 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean",
-    "version:update": "node scripts/update-version.js"
+    "version:update": "node scripts/update-version.js",
+    "deploy-agent": "pnpm build && cp -r agents/linux/dist/* ~/.devrelay/agent/agents/linux/dist/ && echo '✅ Agent deployed to ~/.devrelay/agent/'"
   },
   "keywords": [
     "ai",

@@ -1688,3 +1688,26 @@ WebUI の Agent Settings モーダルからタグ UI でパスを追加・削除
   - `apps/web/src/lib/api.ts` - `getProjectsDirs`, `setProjectsDirs`
   - `apps/web/src/pages/MachinesPage.tsx` - Project Search Paths UI
   - `agents/linux/src/services/connection.ts` - `handleProjectsDirsUpdate`, config:ack, デバッグログ
+
+#### 97. プランモード読み取り専用コマンド許可 + deploy-agent スクリプト (2026-02-28)
+
+プランモード中に読み取り専用の Bash コマンド（pm2 logs, git status, journalctl 等）を実行できるようにした。
+Claude Code の `--allowedTools` フラグと `--permission-mode plan` を組み合わせることで、
+セキュリティを維持しつつ調査・ログ確認が可能になった。
+
+- **PLAN_MODE_ALLOWED_TOOLS**: 26個の読み取り専用 Bash コマンドパターンを定義
+  - PM2: `pm2 logs`, `pm2 log`, `pm2 status`, `pm2 list`, `pm2 show`, `pm2 describe`
+  - systemd: `journalctl`, `systemctl status`, `systemctl is-active`
+  - Git: `git log`, `git status`, `git diff`, `git show`, `git branch`
+  - システム: `ps`, `free`, `df`, `du`, `ss`, `netstat`
+  - Docker: `docker ps`, `docker logs`, `docker compose ps`, `docker compose logs`
+- **セキュリティ**: `Bash(pm2 logs *)` パターンで細粒度制御（pm2 logs は許可、pm2 restart はブロック）
+- **PLAN_MODE_INSTRUCTION**: ログ確認コマンドが実行可能であることを AI に通知する文言を追加
+- **deploy-agent スクリプト**: `pnpm deploy-agent` で開発リポからインストール済み Agent にビルド成果物をコピー
+  - `/opt/devrelay/agents/linux/dist/*` → `~/.devrelay/agent/agents/linux/dist/`
+  - `pnpm build` + `cp -r` を一括実行
+- **変更ファイル**:
+  - `agents/linux/src/services/ai-runner.ts` - `PLAN_MODE_ALLOWED_TOOLS` 定数、`allowedTools` オプション、`--allowedTools` 引数構築
+  - `agents/linux/src/services/connection.ts` - `PLAN_MODE_ALLOWED_TOOLS` の import と `sendOptions` への設定
+  - `agents/linux/src/services/output-collector.ts` - `PLAN_MODE_INSTRUCTION` にログ確認の記述追加
+  - `package.json` - `deploy-agent` スクリプト追加

@@ -25,7 +25,7 @@ import { PassThrough } from 'stream';
 import { readdirSync } from 'fs';
 import { DEFAULTS } from '@devrelay/shared';
 import { saveConfig, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, PLAN_MODE_ALLOWED_TOOLS, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
@@ -627,6 +627,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const sendOptions: SendPromptOptions = {
     resumeSessionId: sessionInfo.claudeResumeSessionId,
     usePlanMode,
+    allowedTools: usePlanMode ? PLAN_MODE_ALLOWED_TOOLS : undefined,
   };
 
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）

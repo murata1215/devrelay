@@ -28,6 +28,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Soft Delete**: Machine deletion preserves all conversation history
 - **Kill Command**: Cancel running AI process mid-execution from chat
 - **Remote Config**: Configure agent project search paths from WebUI (auto-sync via WebSocket)
+- **Plan Mode Log Access**: Read-only Bash commands (pm2 logs, git status, journalctl, etc.) available during plan mode via `--allowedTools`
 
 ## 💡 Token Efficiency
 
@@ -71,7 +72,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#96)
+│   ├── changelog.md      # Implementation history (#1-#97)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer
@@ -410,6 +411,8 @@ agents/windows/
 - [x] Machine soft delete (preserve conversation history on agent removal)
 - [x] Kill command (`k` / `kill` to cancel running AI process)
 - [x] Server-managed project search paths (configure agent `projectsDirs` from WebUI)
+- [x] Plan mode read-only commands (`--allowedTools` for pm2 logs, git status, etc.)
+- [x] `deploy-agent` script (copy built agent to installed location)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features
