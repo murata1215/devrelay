@@ -9,7 +9,7 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import type { AiProvider } from '@devrelay/shared';
+import { type AiProvider, SHORTCUTS } from '@devrelay/shared';
 import { getApiKeyForChatAi } from './user-settings.js';
 
 // パース結果の型定義
@@ -237,24 +237,33 @@ export async function parseNaturalLanguage(
 
 /**
  * 従来のコマンド形式かどうかをチェック
+ * SHORTCUTS 定数を単一ソース・オブ・トゥルースとして参照し、
+ * 動的パターン（数字選択、カンマ付きプロンプト等）のみ個別チェック
  */
 export function isTraditionalCommand(input: string): boolean {
   const trimmed = input.trim().toLowerCase();
 
-// 単一文字コマンド (s=status, r=recent も含む)
-  if (/^[mpqhcxeaosrwb]$/i.test(trimmed)) return true;
+  // SHORTCUTS 定数に定義されたコマンド（単一ソース・オブ・トゥルース）
+  if (trimmed in SHORTCUTS) return true;
 
-  // m から始まるメッセージ
+  // m から始まるメッセージ（m <text>）
   if (/^m\s+/i.test(trimmed)) return true;
 
-  // 数字のみ
+  // 数字のみ（リスト選択）
   if (/^\d+$/.test(trimmed)) return true;
 
   // 「e, 〜」「exec, 〜」パターン（カンマ付きプロンプト）
   if (/^(?:e|exec)\s*,\s*.+/i.test(trimmed)) return true;
 
-  // その他のコマンド: exec, link, agreement, log, sum, storage
-  if (/^(exec|link|agreement|build|log\d*|sum\d*d?|storage(\s+(list|(get|delete)\s+.+))?)$/i.test(trimmed)) return true;
+  // ai:claude, ai:gemini 等（AI 切り替え）
+  if (/^ai:(claude|gemini|codex|aider)$/i.test(trimmed)) return true;
+
+  // 'a 1', 'a claude' 等（AI 選択）
+  if (/^a\s+(\d+|claude|gemini|codex|aider)$/i.test(trimmed)) return true;
+
+  // log20, sum7d 等（引数付きコマンド）
+  if (/^log\d+$/i.test(trimmed)) return true;
+  if (/^sum\d+d?$/i.test(trimmed)) return true;
 
   return false;
 }

@@ -1801,3 +1801,15 @@ SSH なしで Agent を最新版に更新可能にした。
   - `apps/server/src/services/command-handler.ts` - `handleUpdate()` + `pendingUpdate` Set
   - `apps/server/src/services/agent-manager.ts` - `checkAgentVersion()`, `updateAgent()` + ハンドラ追加
   - `agents/linux/src/services/connection.ts` - `handleVersionCheck()`, `handleAgentUpdate()` 追加
+
+#### 102. isTraditionalCommand を SHORTCUTS 参照に変更 (2026-03-01)
+
+`isTraditionalCommand()` がハードコードの正規表現を持っていたため、#101 で追加した `u`/`update` や
+#95 の `k`/`kill` がセッション接続中に AI プロンプトとして処理されるバグを修正。
+
+- **根本原因**: コマンド定義が2箇所に分散（`SHORTCUTS` 定数 vs `isTraditionalCommand` の正規表現）
+- **修正方針**: `isTraditionalCommand()` を `SHORTCUTS` 定数（単一ソース・オブ・トゥルース）を参照するように書き換え
+- **SHORTCUTS 参照**: `trimmed in SHORTCUTS` で即判定 → 新コマンド追加時に `isTraditionalCommand` の修正が不要に
+- **動的パターン**: 数字選択、`e, <prompt>`、`ai:*`、`a <arg>`、`log\d+`、`sum\d+d?` は個別チェックを残す
+- **変更ファイル**:
+  - `apps/server/src/services/natural-language-parser.ts` - `SHORTCUTS` import + `isTraditionalCommand()` 書き換え
