@@ -72,15 +72,9 @@ export async function restoreSessionParticipants() {
             console.log(`🔄 Reactivated session: ${cs.currentSessionId}`);
           }
         } else {
-          // Machine is offline, clear ChannelSession
-          await prisma.channelSession.update({
-            where: { id: cs.id },
-            data: {
-              currentSessionId: null,
-              currentMachineId: null
-            }
-          });
-          console.log(`🧹 Cleared offline session: ${cs.platform}:${cs.chatId}`);
+          // マシンがオフライン: クリアせず保持（Agent 再接続時に復元される）
+          // サーバー起動時は全マシンが offline のため、ここでクリアすると全セッションが失われる
+          console.log(`⏳ Machine offline, keeping session for later: ${cs.platform}:${cs.chatId}`);
         }
       } else {
         // Session no longer exists, clear ChannelSession

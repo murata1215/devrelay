@@ -1833,3 +1833,23 @@ SSH なしで Agent を最新版に更新可能にした。
 - **変更ファイル**:
   - `CLAUDE.md` - DevRelay 自身の開発時の注意セクション
   - `rules/project.md` - サービス再起動禁止セクション
+
+#### 105. Agent 更新完了通知メッセージ (2026-03-01)
+
+`u` コマンドで Agent を更新した際、「🔄 Agent を更新中...」の後に更新完了メッセージが出ない問題を修正。
+
+- **問題**: Agent 再起動→再接続後に「更新が完了した」ことがユーザーに通知されなかった
+- **修正**: `handleAgentConnect()` で `pendingUpdateNotify` Map をチェックし、更新後の再接続なら完了メッセージを送信
+- **メッセージ**: `✅ **マシン名** の更新が完了しました`
+- **変更ファイル**:
+  - `apps/server/src/services/agent-manager.ts` - `handleAgentConnect()` 末尾に完了通知を追加、コメント修正
+
+#### 106. サーバー再起動時に currentMachineId が失われるバグ修正 (2026-03-01)
+
+サーバー再起動後に `u` 等のコマンドを送ると「エージェントに接続されていません」と表示され、
+`c` を押して再接続しないと使えない問題を修正。
+
+- **根本原因**: サーバー起動時に全マシンを `offline` に設定した後、`restoreSessionParticipants()` がオフラインマシンの ChannelSession をクリアしていた。全マシンが offline なので全セッション情報が消失
+- **修正**: マシンがオフラインの場合に ChannelSession をクリアせず保持。Agent 再接続時に `restoreSessionParticipantsForMachine()` がセッション参加者を復元
+- **変更ファイル**:
+  - `apps/server/src/services/session-manager.ts` - `restoreSessionParticipants()` のオフライン分岐を修正

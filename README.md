@@ -30,6 +30,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Remote Config**: Configure agent project search paths from WebUI (auto-sync via WebSocket)
 - **Plan Mode Log Access**: Read-only Bash commands (pm2 logs, git status, journalctl, etc.) available during plan mode via `--allowedTools`
 - **Allowed Tools Management**: Edit plan mode allowed tools from WebUI Settings page (Linux/Windows side-by-side, real-time sync to agents)
+- **Remote Agent Update**: Update agents remotely via `u` command with version check and completion notification
 
 ## 💡 Token Efficiency
 

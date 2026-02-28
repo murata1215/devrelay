@@ -61,7 +61,7 @@ const pendingConfigUpdates = new Map<string, PendingConfigUpdate>();
 // バージョン確認リクエスト: machineId -> Promise コールバック
 const pendingVersionCheckRequests = new Map<string, HistoryRequest<AgentVersionInfoPayload>>();
 
-// 更新リクエストの通知先: machineId -> { platform, chatId }（エラー通知用）
+// 更新リクエストの通知先: machineId -> { platform, chatId }（完了/エラー通知用）
 const pendingUpdateNotify = new Map<string, { platform: Platform; chatId: string }>();
 
 // Agent 再接続フラグ: Agent が再接続した machineId を記録
@@ -317,6 +317,15 @@ async function handleAgentConnect(
   // Agent 再接続フラグを設定（次回プロンプト時にセッション再開始が必要）
   // Agent 再起動で sessionInfoMap がクリアされるため、server:session:start の再送が必要
   needsSessionRestart.add(machine.id);
+
+  // Agent 更新後の再接続なら、リクエスト元に完了通知を送信
+  const updateRequestor = pendingUpdateNotify.get(machine.id);
+  if (updateRequestor) {
+    pendingUpdateNotify.delete(machine.id);
+    const displayName = autoDisplayName || updatedName;
+    sendMessage(updateRequestor.platform, updateRequestor.chatId,
+      `✅ **${displayName}** の更新が完了しました`);
+  }
 }
 
 /**
