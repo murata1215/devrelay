@@ -66,7 +66,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#89)
+│   ├── changelog.md      # Implementation history (#1-#90)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer

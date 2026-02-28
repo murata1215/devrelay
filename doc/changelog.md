@@ -1578,3 +1578,11 @@ Server を更新するだけで全 Agent のテンプレートが最新になる
   - カスタムプロンプトあり: `[exec] <prompt>`
   - カスタムプロンプトなし: `[exec]`
 - **変更ファイル**: `apps/server/src/services/command-handler.ts`
+
+#### 90. wrapUpDone 判定条件の修正 (2026-02-28)
+
+`w` 実行後に `x` で会話クリアしようとすると「w コマンドを実行していません」と警告が出る問題を修正。
+#86 で `w` コマンドのプロンプトを変更した際、`wrapUpDone` の `startsWith` 判定条件を更新し忘れていた。
+
+- `command.prompt?.startsWith('CLAUDE.mdとREADME.md')` → `startsWith('doc/changelog.md があれば')` に修正
+- **変更ファイル**: `apps/server/src/services/command-handler.ts`

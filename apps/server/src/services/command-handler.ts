@@ -142,7 +142,7 @@ export async function executeCommand(
 
     case 'exec': {
       // w コマンド（wrap up）の実行を記録: x コマンド時の警告判定に使用
-      if (command.prompt?.startsWith('CLAUDE.mdとREADME.md')) {
+      if (command.prompt?.startsWith('doc/changelog.md があれば')) {
         wrapUpDone.add(chatKey);
       }
       return handleExec(context, command.prompt);
