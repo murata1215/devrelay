@@ -1701,7 +1701,7 @@ Claude Code の `--allowedTools` フラグと `--permission-mode plan` を組み
   - Git: `git log`, `git status`, `git diff`, `git show`, `git branch`
   - システム: `ps`, `free`, `df`, `du`, `ss`, `netstat`
   - Docker: `docker ps`, `docker logs`, `docker compose ps`, `docker compose logs`
-- **セキュリティ**: `Bash(pm2 logs *)` パターンで細粒度制御（pm2 logs は許可、pm2 restart はブロック）
+- **セキュリティ**: `Bash(pm2 logs)` パターンで細粒度制御（pm2 logs は許可、pm2 restart はブロック）
 - **PLAN_MODE_INSTRUCTION**: ログ確認コマンドが実行可能であることを AI に通知する文言を追加
 - **deploy-agent スクリプト**: `pnpm deploy-agent` で開発リポからインストール済み Agent にビルド成果物をコピー
   - `/opt/devrelay/agents/linux/dist/*` → `~/.devrelay/agent/agents/linux/dist/`
@@ -1711,3 +1711,13 @@ Claude Code の `--allowedTools` フラグと `--permission-mode plan` を組み
   - `agents/linux/src/services/connection.ts` - `PLAN_MODE_ALLOWED_TOOLS` の import と `sendOptions` への設定
   - `agents/linux/src/services/output-collector.ts` - `PLAN_MODE_INSTRUCTION` にログ確認の記述追加
   - `package.json` - `deploy-agent` スクリプト追加
+
+#### 98. allowedTools フォーマット修正 (2026-02-28)
+
+`--allowedTools` のフォーマットを実機テストで確認した正しい形式に修正。
+
+- **修正前**: ツールごとに `--allowedTools "Bash(pm2 logs *)"` を26回繰り返し
+- **修正後**: `--allowedTools "Bash(pm2 logs),Bash(pm2 log),..."` とカンマ区切りで1回
+- **ワイルドカード削除**: `Bash(pm2 logs *)` → `Bash(pm2 logs)`（`*` 不要）
+- **変更ファイル**:
+  - `agents/linux/src/services/ai-runner.ts` - `PLAN_MODE_ALLOWED_TOOLS` から `*` 削除、`join(',')` でカンマ区切り結合
