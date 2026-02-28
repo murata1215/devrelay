@@ -48,12 +48,16 @@ export const STATUS_EMOJI = {
 } as const;
 
 // プランモード中に許可する読み取り専用 Bash コマンドのデフォルトリスト（Linux 用）
-// 注意: `*` ワイルドカード必須。`Bash(pm2 logs)` は完全一致のみ、`Bash(pm2 logs *)` で引数付きも許可
+// 注意: `Bash(cmd)` は完全一致（引数なし）、`Bash(cmd *)` はプレフィックスマッチ（引数付き）
+// 引数なしでも使うコマンドには両方必要
 export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
   // PM2 ログ・ステータス確認
+  'Bash(pm2 logs)',
   'Bash(pm2 logs *)',
   'Bash(pm2 log *)',
+  'Bash(pm2 status)',
   'Bash(pm2 status *)',
+  'Bash(pm2 list)',
   'Bash(pm2 list *)',
   'Bash(pm2 show *)',
   'Bash(pm2 describe *)',
@@ -62,21 +66,30 @@ export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
   'Bash(systemctl status *)',
   'Bash(systemctl is-active *)',
   // Git 読み取り
+  'Bash(git log)',
   'Bash(git log *)',
+  'Bash(git status)',
   'Bash(git status *)',
+  'Bash(git diff)',
   'Bash(git diff *)',
   'Bash(git show *)',
+  'Bash(git branch)',
   'Bash(git branch *)',
   // システム情報
   'Bash(ps *)',
+  'Bash(free)',
   'Bash(free *)',
+  'Bash(df)',
   'Bash(df *)',
   'Bash(du *)',
   'Bash(ss *)',
+  'Bash(netstat)',
   'Bash(netstat *)',
   // Docker（参照のみ）
+  'Bash(docker ps)',
   'Bash(docker ps *)',
   'Bash(docker logs *)',
+  'Bash(docker compose ps)',
   'Bash(docker compose ps *)',
   'Bash(docker compose logs *)',
   // ログ・ファイル読み取り
@@ -86,37 +99,50 @@ export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
   // ネットワーク・サーバー状態
   'Bash(curl *)',
   'Bash(lsof *)',
+  'Bash(uptime)',
   'Bash(uptime *)',
   // リバースプロキシ確認
   'Bash(caddy *)',
 ];
 
 // プランモード中に許可する読み取り専用 Bash コマンドのデフォルトリスト（Windows 用）
-// 注意: `*` ワイルドカード必須。`Bash(pm2 logs)` は完全一致のみ、`Bash(pm2 logs *)` で引数付きも許可
+// 注意: `Bash(cmd)` は完全一致（引数なし）、`Bash(cmd *)` はプレフィックスマッチ（引数付き）
+// 引数なしでも使うコマンドには両方必要
 export const DEFAULT_ALLOWED_TOOLS_WINDOWS: string[] = [
   // PM2 ログ・ステータス確認
+  'Bash(pm2 logs)',
   'Bash(pm2 logs *)',
   'Bash(pm2 log *)',
+  'Bash(pm2 status)',
   'Bash(pm2 status *)',
+  'Bash(pm2 list)',
   'Bash(pm2 list *)',
   'Bash(pm2 show *)',
   'Bash(pm2 describe *)',
   // Git 読み取り
+  'Bash(git log)',
   'Bash(git log *)',
+  'Bash(git status)',
   'Bash(git status *)',
+  'Bash(git diff)',
   'Bash(git diff *)',
   'Bash(git show *)',
+  'Bash(git branch)',
   'Bash(git branch *)',
   // システム情報（PowerShell）
   'Bash(Get-Service *)',
   'Bash(Get-Process *)',
   'Bash(Get-EventLog *)',
+  'Bash(tasklist)',
   'Bash(tasklist *)',
   'Bash(sc query *)',
+  'Bash(netstat)',
   'Bash(netstat *)',
   // Docker（参照のみ）
+  'Bash(docker ps)',
   'Bash(docker ps *)',
   'Bash(docker logs *)',
+  'Bash(docker compose ps)',
   'Bash(docker compose ps *)',
   'Bash(docker compose logs *)',
   // ファイル読み取り
