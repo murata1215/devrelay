@@ -6,7 +6,8 @@ import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { getConnectedAgents, requestHistoryDates, requestHistoryExport } from '../services/agent-manager.js';
-import { encrypt, decrypt } from '../services/user-settings.js';
+import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
+import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
 import {
   getLinkedPlatforms,
   validateAndConsumeLinkCode,
@@ -44,7 +45,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const userId = request.user.id;
 
     const machines = await prisma.machine.findMany({
-      where: { userId },
+      where: { userId, deletedAt: null },
       include: {
         projects: {
           orderBy: { lastUsedAt: 'desc' },
@@ -87,7 +88,7 @@ export async function apiRoutes(app: FastifyInstance) {
       machineName = name.trim();
       // 同じユーザーで同じ名前のマシンがあるか確認
       const existing = await prisma.machine.findFirst({
-        where: { userId, name: machineName },
+        where: { userId, name: machineName, deletedAt: null },
       });
       if (existing) {
         return reply.status(409).send({ error: 'Machine with this name already exists' });
@@ -95,7 +96,7 @@ export async function apiRoutes(app: FastifyInstance) {
     } else {
       // 仮名を自動生成: 同一ユーザーの agent-N を検索し、最大 N+1 で採番
       const existingAgents = await prisma.machine.findMany({
-        where: { userId, name: { startsWith: 'agent-' } },
+        where: { userId, name: { startsWith: 'agent-' }, deletedAt: null },
         select: { name: true },
       });
       const maxNum = existingAgents.reduce((max, m) => {
@@ -137,9 +138,9 @@ export async function apiRoutes(app: FastifyInstance) {
     const userId = request.user.id;
     const { id } = request.params as { id: string };
 
-    /** ユーザーが所有するマシンのトークンを取得 */
+    /** ユーザーが所有するアクティブなマシンのトークンを取得 */
     const machine = await prisma.machine.findFirst({
-      where: { id, userId },
+      where: { id, userId, deletedAt: null },
       select: { token: true },
     });
 
@@ -158,38 +159,26 @@ export async function apiRoutes(app: FastifyInstance) {
     const userId = request.user.id;
     const { id } = request.params as { id: string };
 
-    // ユーザーが所有するマシンか確認
+    // ユーザーが所有するアクティブなマシンか確認
     const machine = await prisma.machine.findFirst({
-      where: { id, userId },
+      where: { id, userId, deletedAt: null },
     });
 
     if (!machine) {
       return reply.status(404).send({ error: 'Machine not found' });
     }
 
-    // 関連するプロジェクト、セッション、メッセージも削除される（Cascade）
-    // ただし、Prisma のデフォルトでは Cascade が設定されていないので、手動で削除
-    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      // ビルドログを削除
-      await tx.buildLog.deleteMany({
-        where: { machineId: id },
-      });
-      // セッションに紐づくメッセージを削除
-      await tx.message.deleteMany({
-        where: { session: { machineId: id } },
-      });
-      // セッションを削除
-      await tx.session.deleteMany({
-        where: { machineId: id },
-      });
-      // プロジェクトを削除
-      await tx.project.deleteMany({
-        where: { machineId: id },
-      });
-      // マシンを削除
-      await tx.machine.delete({
-        where: { id },
-      });
+    // ソフトデリート: deletedAt を設定し、name/token をリネームして unique 制約を回避
+    // 関連データ（Session/Message/BuildLog/Project）はそのまま保持
+    const now = new Date();
+    await prisma.machine.update({
+      where: { id },
+      data: {
+        deletedAt: now,
+        status: 'offline',
+        name: `${machine.name}__deleted_${now.getTime()}`,
+        token: `deleted_${now.getTime()}_${machine.token}`,
+      },
     });
 
     return { success: true };
@@ -217,6 +206,7 @@ export async function apiRoutes(app: FastifyInstance) {
       where: {
         userId,
         name: { startsWith: `${hostname.trim()}/` },
+        deletedAt: null,
       },
     });
 
@@ -361,6 +351,8 @@ export async function apiRoutes(app: FastifyInstance) {
 
     const result: Record<string, string> = {};
     for (const s of settings) {
+      // Agreement テンプレートは専用 API で取得するため、汎用設定レスポンスからは除外
+      if (s.key === SettingKeys.AGREEMENT_TEMPLATE) continue;
       // 暗号化された値は復号化
       result[s.key] = s.encrypted ? decrypt(s.value) : s.value;
     }
@@ -423,6 +415,62 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // Agreement テンプレート
+  // ========================================
+
+  /**
+   * Agreement テンプレートを取得
+   * カスタムテンプレートがあればそれを返す。なければデフォルトを返す。
+   */
+  app.get('/api/agreement-template', async (request) => {
+    // @ts-ignore
+    const userId = request.user.id;
+
+    const customTemplate = await getUserSetting(userId, SettingKeys.AGREEMENT_TEMPLATE);
+
+    return {
+      template: customTemplate ?? DEFAULT_RULES_TEMPLATE,
+      isCustom: customTemplate !== null,
+      defaultTemplate: DEFAULT_RULES_TEMPLATE,
+    };
+  });
+
+  /**
+   * Agreement テンプレートを保存（カスタマイズ）
+   */
+  app.put('/api/agreement-template', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { template } = request.body as { template: string };
+
+    if (!template || template.trim().length === 0) {
+      return reply.status(400).send({ error: 'Template cannot be empty' });
+    }
+
+    await prisma.userSettings.upsert({
+      where: { userId_key: { userId, key: SettingKeys.AGREEMENT_TEMPLATE } },
+      update: { value: template, encrypted: false },
+      create: { userId, key: SettingKeys.AGREEMENT_TEMPLATE, value: template, encrypted: false },
+    });
+
+    return { success: true };
+  });
+
+  /**
+   * Agreement テンプレートをデフォルトにリセット（カスタムテンプレートを削除）
+   */
+  app.delete('/api/agreement-template', async (request) => {
+    // @ts-ignore
+    const userId = request.user.id;
+
+    await prisma.userSettings.deleteMany({
+      where: { userId, key: SettingKeys.AGREEMENT_TEMPLATE },
+    });
+
+    return { success: true, template: DEFAULT_RULES_TEMPLATE };
+  });
+
+  // ========================================
   // ダッシュボード統計
   // ========================================
   app.get('/api/dashboard/stats', async (request) => {
@@ -430,7 +478,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const userId = request.user.id;
 
     const [machineCount, projectCount, sessionCount, recentSessions] = await Promise.all([
-      prisma.machine.count({ where: { userId } }),
+      prisma.machine.count({ where: { userId, deletedAt: null } }),
       prisma.project.count({ where: { machine: { userId } } }),
       prisma.session.count({ where: { userId } }),
       prisma.session.findMany({
@@ -448,6 +496,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const onlineMachines = await prisma.machine.count({
       where: {
         userId,
+        deletedAt: null,
         id: { in: Array.from(connectedAgents.keys()) },
       },
     });
@@ -791,6 +840,39 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // ファイル配信 API
+  // ========================================
+
+  /**
+   * MessageFile の内容をバイナリで返す
+   * 画像は img タグで直接表示可能、その他はダウンロード
+   */
+  app.get('/api/files/:id', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user?.id || (request as any).userId;
+    const { id } = request.params as { id: string };
+
+    const file = await prisma.messageFile.findUnique({
+      where: { id },
+      include: {
+        message: {
+          select: { session: { select: { userId: true } } },
+        },
+      },
+    });
+
+    if (!file || file.message.session.userId !== userId) {
+      return reply.status(404).send({ error: 'File not found' });
+    }
+
+    return reply
+      .header('Content-Type', file.mimeType)
+      .header('Content-Disposition', `inline; filename="${file.filename}"`)
+      .header('Cache-Control', 'private, max-age=86400')
+      .send(file.content);
+  });
+
+  // ========================================
   // 会話一覧 API（Conversations ページ用）
   // ========================================
 
@@ -805,7 +887,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '50', 10) || 50));
 
-    // Step 1: AI メッセージ（usageData 付き）を日時降順で取得
+    // Step 1: AI メッセージ（usageData 付き）を日時降順で取得（出力ファイルメタデータ含む）
     const aiMessages = await prisma.message.findMany({
       where: {
         role: 'ai',
@@ -827,10 +909,13 @@ export async function apiRoutes(app: FastifyInstance) {
             machine: { select: { name: true, displayName: true } },
           },
         },
+        files: {
+          select: { id: true, filename: true, mimeType: true, size: true, direction: true },
+        },
       },
     });
 
-    // Step 2: 関連する sessionId の user メッセージをバッチ取得（N+1 回避）
+    // Step 2: 関連する sessionId の user メッセージをバッチ取得（N+1 回避、入力ファイルメタデータ含む）
     const sessionIds = [...new Set(aiMessages.map(m => m.sessionId))];
     const userMessages = sessionIds.length > 0
       ? await prisma.message.findMany({
@@ -839,7 +924,14 @@ export async function apiRoutes(app: FastifyInstance) {
             role: 'user',
           },
           orderBy: { createdAt: 'asc' },
-          select: { sessionId: true, content: true, createdAt: true },
+          select: {
+            sessionId: true,
+            content: true,
+            createdAt: true,
+            files: {
+              select: { id: true, filename: true, mimeType: true, size: true, direction: true },
+            },
+          },
         })
       : [];
 
@@ -864,9 +956,11 @@ export async function apiRoutes(app: FastifyInstance) {
       // 同一セッション内で AI メッセージの直前にある user メッセージを探す
       const sessionUserMsgs = userMsgMap.get(aiMsg.sessionId) || [];
       let userContent = '';
+      let inputFiles: { id: string; filename: string; mimeType: string; size: number; direction: string }[] = [];
       for (let i = sessionUserMsgs.length - 1; i >= 0; i--) {
         if (sessionUserMsgs[i].createdAt <= aiMsg.createdAt) {
           userContent = sessionUserMsgs[i].content;
+          inputFiles = sessionUserMsgs[i].files || [];
           break;
         }
       }
@@ -887,6 +981,8 @@ export async function apiRoutes(app: FastifyInstance) {
         cacheReadTokens,
         cacheCreationTokens,
         createdAt: aiMsg.createdAt.toISOString(),
+        inputFiles,
+        outputFiles: aiMsg.files || [],
       };
     });
 

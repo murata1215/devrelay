@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { settings, platforms, services, type LinkedPlatform, type ServiceStatus } from '../lib/api';
+import { settings, platforms, services, agreementTemplate, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse } from '../lib/api';
 
 /** API キーフィールドの定義 */
 interface ApiKeyFieldDef {
@@ -91,16 +91,27 @@ export function SettingsPage() {
   const [restartingServer, setRestartingServer] = useState(false);
   const [restartingAgent, setRestartingAgent] = useState(false);
 
+  // Agreement テンプレート
+  const [agreementData, setAgreementData] = useState<AgreementTemplateResponse | null>(null);
+  const [agreementDraft, setAgreementDraft] = useState('');
+  const [agreementSaving, setAgreementSaving] = useState(false);
+  const [agreementDirty, setAgreementDirty] = useState(false);
+
   const loadSettings = async () => {
     try {
-      const [settingsResult, platformsResult, serviceStatusResult] = await Promise.all([
+      const [settingsResult, platformsResult, serviceStatusResult, agreementResult] = await Promise.all([
         settings.get(),
         platforms.list(),
         services.status().catch(() => null),
+        agreementTemplate.get().catch(() => null),
       ]);
       setData(settingsResult);
       setLinkedPlatforms(platformsResult);
       setServiceStatus(serviceStatusResult);
+      if (agreementResult) {
+        setAgreementData(agreementResult);
+        setAgreementDraft(agreementResult.template);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings');
     } finally {
@@ -259,6 +270,52 @@ export function SettingsPage() {
     }
   };
 
+  /** Agreement テンプレートを保存 */
+  const handleSaveAgreement = async () => {
+    if (!agreementDraft.trim()) {
+      setError('Agreement template cannot be empty');
+      return;
+    }
+
+    setAgreementSaving(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      await agreementTemplate.update(agreementDraft);
+      setSuccess('Agreement template saved successfully');
+      setAgreementData(prev => prev ? { ...prev, template: agreementDraft, isCustom: true } : prev);
+      setAgreementDirty(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save agreement template');
+    } finally {
+      setAgreementSaving(false);
+    }
+  };
+
+  /** Agreement テンプレートをデフォルトにリセット */
+  const handleResetAgreement = async () => {
+    if (!confirm('Reset the Agreement template to default? Your customizations will be lost.')) {
+      return;
+    }
+
+    setAgreementSaving(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      const result = await agreementTemplate.reset();
+      setAgreementDraft(result.template);
+      setAgreementData(prev => prev ? { ...prev, template: result.template, isCustom: false } : prev);
+      setAgreementDirty(false);
+      setSuccess('Agreement template reset to default');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reset agreement template');
+    } finally {
+      setAgreementSaving(false);
+    }
+  };
+
   const getPlatformDisplayName = (platform: string): string => {
     const names: Record<string, string> = {
       discord: 'Discord',
@@ -391,6 +448,53 @@ export function SettingsPage() {
               </select>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Agreement Template Section */}
+      <div className="bg-gray-800 rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-white mb-2">Agreement Template</h2>
+        <p className="text-gray-400 text-sm mb-2">
+          Customize the DevRelay Agreement rules applied via the <code className="bg-gray-700 px-1 rounded">ag</code> command.
+        </p>
+        {agreementData?.isCustom ? (
+          <p className="text-yellow-400 text-xs mb-4">
+            Using custom template. Click "Reset to Default" to revert.
+          </p>
+        ) : (
+          <p className="text-gray-500 text-xs mb-4">
+            Using default template. Edit below to customize.
+          </p>
+        )}
+
+        <textarea
+          value={agreementDraft}
+          onChange={(e) => {
+            setAgreementDraft(e.target.value);
+            setAgreementDirty(true);
+          }}
+          rows={20}
+          className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-gray-300 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+          placeholder="Agreement template..."
+        />
+
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 mt-4">
+          <button
+            onClick={handleSaveAgreement}
+            disabled={agreementSaving || !agreementDirty}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
+          >
+            {agreementSaving ? 'Saving...' : 'Save Template'}
+          </button>
+          {agreementData?.isCustom && (
+            <button
+              onClick={handleResetAgreement}
+              disabled={agreementSaving}
+              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+            >
+              Reset to Default
+            </button>
+          )}
         </div>
       </div>
 

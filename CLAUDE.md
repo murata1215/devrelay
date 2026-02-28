@@ -51,11 +51,12 @@ pm2 restart devrelay-server devrelay-agent
 | テーブル | 用途 |
 |---------|------|
 | User | ユーザー |
-| Machine | Agent マシン |
+| Machine | Agent マシン（deletedAt でソフトデリート） |
 | Project | プロジェクト |
 | Session | 作業セッション |
 | Message | 会話メッセージ |
 | BuildLog | ビルド履歴 |
+| MessageFile | メッセージ添付ファイル（bytea BLOB） |
 | UserSettings | ユーザー設定（API キー等） |
 | ChannelSession | チャンネルごとのセッション |
 | PlatformLink | プラットフォーム連携 |

@@ -210,7 +210,7 @@ async function handleMachineList(context: UserContext): Promise<string> {
 
   // Get machines for the linked WebUI user
   const machines = await prisma.machine.findMany({
-    where: { userId: platformLink.userId }
+    where: { userId: platformLink.userId, deletedAt: null }
   });
 
   if (machines.length === 0) {
@@ -291,12 +291,12 @@ async function handleSelect(number: number, context: UserContext): Promise<strin
 }
 
 async function handleMachineConnect(machineId: string, context: UserContext): Promise<string> {
-  const machine = await prisma.machine.findUnique({ where: { id: machineId } });
-  
+  const machine = await prisma.machine.findFirst({ where: { id: machineId, deletedAt: null } });
+
   if (!machine) {
     return '❌ エージェントが見つかりません。';
   }
-  
+
   const machineDisplayName = machine.displayName ?? machine.name;
 
   if (machine.status !== 'online') {
@@ -543,8 +543,8 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
 
         if (updatedContext.currentSessionId && updatedContext.currentMachineId) {
           // 再接続成功メッセージを取得（マシン名・プロジェクト名を含む）
-          const machine = await prisma.machine.findUnique({
-            where: { id: updatedContext.currentMachineId }
+          const machine = await prisma.machine.findFirst({
+            where: { id: updatedContext.currentMachineId, deletedAt: null }
           });
           const projectName = updatedContext.currentProjectName || context.lastProjectId.split('/').pop() || context.lastProjectId;
           // 表示名は displayName ?? name
@@ -757,7 +757,7 @@ async function handleSession(context: UserContext): Promise<string> {
 
     // オンラインのマシン一覧を表示（アクティブセッションがないマシン）
     const onlineMachines = await prisma.machine.findMany({
-      where: { status: 'online' }
+      where: { status: 'online', deletedAt: null }
     });
 
     const activeSessionMachineNames = new Set(activeSessions.map(s => s.machineName));
@@ -827,6 +827,7 @@ async function handleSession(context: UserContext): Promise<string> {
   const onlineMachines = await prisma.machine.findMany({
     where: {
       status: 'online',
+      deletedAt: null,
       id: { not: session.machineId }
     }
   });
@@ -860,7 +861,7 @@ async function handleBuild(context: UserContext): Promise<string> {
 
   // ユーザーのマシン一覧とプロジェクトを取得
   const machines = await prisma.machine.findMany({
-    where: { userId: dbUser.userId },
+    where: { userId: dbUser.userId, deletedAt: null },
     include: { projects: true },
   });
 
@@ -1076,8 +1077,8 @@ async function handleAiPrompt(
 
         if (updatedContext.currentSessionId && updatedContext.currentMachineId) {
           // 再接続成功メッセージを取得（マシン名・プロジェクト名を含む）
-          const machine = await prisma.machine.findUnique({
-            where: { id: updatedContext.currentMachineId }
+          const machine = await prisma.machine.findFirst({
+            where: { id: updatedContext.currentMachineId, deletedAt: null }
           });
           const projectName = updatedContext.currentProjectName || context.lastProjectId.split('/').pop() || context.lastProjectId;
           // 表示名は displayName ?? name
@@ -1165,13 +1166,22 @@ async function handleAiPrompt(
     }
   }
 
-  // Save user message
+  // Save user message（添付ファイルがあれば MessageFile も同時作成）
   await prisma.message.create({
     data: {
       sessionId: context.currentSessionId,
       role: 'user',
       content: text,
-      platform: context.platform
+      platform: context.platform,
+      files: files && files.length > 0 ? {
+        create: files.map(f => ({
+          filename: f.filename,
+          mimeType: f.mimeType,
+          size: f.size,
+          content: Buffer.from(f.content, 'base64'),
+          direction: 'input',
+        })),
+      } : undefined,
     }
   });
 

@@ -184,6 +184,30 @@ export const settings = {
   },
 };
 
+// Agreement テンプレート API
+export interface AgreementTemplateResponse {
+  template: string;
+  isCustom: boolean;
+  defaultTemplate: string;
+}
+
+export const agreementTemplate = {
+  /** 現在のテンプレートを取得（カスタムまたはデフォルト） */
+  async get(): Promise<AgreementTemplateResponse> {
+    return request('GET', '/agreement-template');
+  },
+
+  /** カスタムテンプレートを保存 */
+  async update(template: string): Promise<void> {
+    await request('PUT', '/agreement-template', { template });
+  },
+
+  /** デフォルトにリセット */
+  async reset(): Promise<{ success: boolean; template: string }> {
+    return request('DELETE', '/agreement-template');
+  },
+};
+
 // ダッシュボードAPI
 export interface DashboardStats {
   machines: { total: number; online: number };
@@ -256,6 +280,15 @@ export const services = {
 };
 
 // 会話一覧API（Conversations ページ用）
+/** メッセージに紐づくファイルのメタデータ（content は含まない） */
+export interface MessageFileMeta {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  direction: 'input' | 'output';
+}
+
 export interface ConversationItem {
   messageId: string;
   sessionId: string;
@@ -270,6 +303,8 @@ export interface ConversationItem {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   createdAt: string;
+  inputFiles: MessageFileMeta[];
+  outputFiles: MessageFileMeta[];
 }
 
 export interface ConversationsResponse {

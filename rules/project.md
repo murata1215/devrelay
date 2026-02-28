@@ -231,6 +231,24 @@ pm2 save && pm2 startup
 - Agent は `payload.agreementPrompt` があればそれを使用、なければローカルの `AGREEMENT_APPLY_PROMPT` にフォールバック
 - テンプレート更新は **Server の再起動のみ**で全 Agent に即反映（Agent の再インストール不要）
 - Agent 側の `output-collector.ts` のテンプレートはフォールバック用に残す
+- WebUI Settings ページからカスタムテンプレートの編集が可能（UserSettings に保存）
+
+### Machine ソフトデリート
+
+- Machine 削除は **論理削除**（`deletedAt` カラム）で行う。物理削除は禁止。
+- 削除時に `name` を `${name}__deleted_${timestamp}` にリネーム → `@@unique([userId, name])` 制約を回避
+- 削除時に `token` も `deleted_${timestamp}_${token}` にリネーム → 再利用防止
+- 関連データ（Session/Message/BuildLog/Project）は一切削除しない → 過去の会話履歴を保持
+- 全 Machine クエリに `deletedAt: null` フィルタが必要（約20箇所）
+- `findUnique` は `deletedAt` 条件を追加できないため `findFirst` に変更する（Prisma の制約）
+- Conversations ページでは relation 経由で削除済み Machine の名前が引き続き表示される
+
+### メッセージファイル BLOB 保存
+
+- `MessageFile` モデル: PostgreSQL `bytea` 型でファイル本体を保存
+- `direction`: `'input'`（ユーザー添付）/ `'output'`（AI 出力）
+- Server がファイル中継時に MessageFile レコードを同時作成
+- `GET /api/files/:id` でバイナリ配信（認証 + Session オーナーチェック）
 
 ### ドキュメントディレクトリ構成
 

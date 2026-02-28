@@ -1586,3 +1586,64 @@ Server を更新するだけで全 Agent のテンプレートが最新になる
 
 - `command.prompt?.startsWith('CLAUDE.mdとREADME.md')` → `startsWith('doc/changelog.md があれば')` に修正
 - **変更ファイル**: `apps/server/src/services/command-handler.ts`
+
+#### 91. Settings ページに Agreement テンプレート編集機能 (2026-02-28)
+
+WebUI の Settings ページから Agreement テンプレートを閲覧・編集できるようにした。
+カスタムテンプレートは UserSettings（key-value ストア）に保存され、`ag` コマンド実行時に適用される。
+
+- **Server**: `SettingKeys.AGREEMENT_TEMPLATE` 追加、`buildAgreementApplyPrompt(customTemplate?)` にカスタムテンプレート引数追加
+- **API**: Agreement 専用エンドポイント 3 つ（GET/PUT/DELETE `/api/agreement-template`）
+- **WebUI**: Settings ページに textarea + Save + Reset to Default ボタン
+- **変更ファイル**:
+  - `apps/server/src/services/user-settings.ts` - AGREEMENT_TEMPLATE キー追加
+  - `apps/server/src/services/agreement-template.ts` - DEFAULT_RULES_TEMPLATE エクスポート、customTemplate 引数
+  - `apps/server/src/services/agent-manager.ts` - applyAgreement でカスタムテンプレート取得
+  - `apps/server/src/routes/api.ts` - Agreement 専用 API + GET /api/settings から除外
+  - `apps/web/src/lib/api.ts` - agreementTemplate API クライアント
+  - `apps/web/src/pages/SettingsPage.tsx` - Agreement Template セクション
+
+#### 92. メッセージファイル BLOB 保存 + Conversations 表示 (2026-02-28)
+
+Discord/Telegram から送信した添付ファイル（`.devrelay-files`）と AI の出力ファイル（`.devrelay-output-history`）を
+DB に BLOB（PostgreSQL bytea）で保存し、Conversations ページで表示できるようにした。
+
+- **DB**: `MessageFile` モデル追加（Bytes 型で bytea、direction: 'input'|'output'）
+- **Server**: ファイル中継時に MessageFile レコードを同時保存
+- **API**: `GET /api/files/:id` でバイナリ配信（認証 + オーナーチェック付き）
+- **WebUI**: `FileList` コンポーネントで画像プレビュー・ダウンロードリンク表示
+- **変更ファイル**:
+  - `apps/server/prisma/schema.prisma` - MessageFile モデル
+  - `apps/server/src/services/command-handler.ts` - 入力ファイル保存
+  - `apps/server/src/services/agent-manager.ts` - 出力ファイル保存
+  - `apps/server/src/routes/api.ts` - ファイル配信 API + Conversations API にファイルメタデータ
+  - `apps/web/src/lib/api.ts` - MessageFileMeta 型、ConversationItem にファイルフィールド
+  - `apps/web/src/pages/ConversationsPage.tsx` - FileList コンポーネント
+
+#### 93. Machine ソフトデリート (2026-02-28)
+
+Machine 削除時に関連データ（Session/Message/BuildLog/Project）がカスケード物理削除される問題を修正。
+`deletedAt` カラムを追加し、削除は論理削除（ソフトデリート）に変更。
+
+- **スキーマ**: Machine に `deletedAt DateTime?` 追加
+- **DELETE エンドポイント**: 物理削除 → `deletedAt` 設定 + name/token リネーム（unique 制約回避）
+- **全 Machine クエリ**: 約20箇所に `deletedAt: null` フィルタ追加
+- **`findUnique` → `findFirst`**: 6箇所（deletedAt 条件追加のため Prisma の制約で変更必要）
+- **関連データ保持**: Session/Message/BuildLog/Project は削除せず、relation 経由で引き続きアクセス可能
+- **変更ファイル**:
+  - `apps/server/prisma/schema.prisma` - deletedAt カラム
+  - `apps/server/src/index.ts` - startup reset フィルタ
+  - `apps/server/src/routes/api.ts` - soft delete 化 + 全クエリフィルタ
+  - `apps/server/src/routes/public-api.ts` - トークン検証フィルタ
+  - `apps/server/src/services/agent-manager.ts` - token 認証・heartbeat フィルタ
+  - `apps/server/src/services/command-handler.ts` - Machine クエリフィルタ
+  - `apps/server/src/services/platform-link.ts` - マージ時フィルタ
+
+#### 94. Conversations 画像ライトボックス (2026-02-28)
+
+Conversations ページの添付画像をクリックでフルスクリーン表示できるようにした。
+
+- **FileList**: インラインプレビュー廃止 → サムネイル（64x64）+ クリックでライトボックス
+- **ライトボックス**: 黒半透明オーバーレイ + `max-w-[90vw] max-h-[90vh]` の大きな画像
+- **閉じる**: 背景クリック or Escape キー
+- **変更ファイル**: `apps/web/src/pages/ConversationsPage.tsx`

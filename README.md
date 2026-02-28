@@ -23,6 +23,9 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Build Log**: Auto-track every exec with AI-generated summaries
 - **Conversations Analytics**: View all AI interactions with token usage breakdown
 - **Multi-Provider AI**: Register OpenAI, Anthropic, Gemini API keys with per-feature provider selection
+- **Agreement Template Editor**: Customize AI rules from Settings page
+- **Message File Storage**: Attached files stored in DB (PostgreSQL bytea) with image lightbox preview
+- **Soft Delete**: Machine deletion preserves all conversation history
 
 ## 💡 Token Efficiency
 
@@ -66,7 +69,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#90)
+│   ├── changelog.md      # Implementation history (#1-#94)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer
@@ -399,6 +402,9 @@ agents/windows/
 - [x] Agreement v4 + CLAUDE.md migration (rules separation, lightweight hub)
 - [x] Server-side Agreement template delivery (update Server once, all Agents get latest)
 - [x] Exec command user message in Conversations (show `[exec]` instead of `(empty)`)
+- [x] Agreement template editor in Settings page (customize AI rules from WebUI)
+- [x] Message file BLOB storage (attached files in DB with image lightbox preview)
+- [x] Machine soft delete (preserve conversation history on agent removal)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features

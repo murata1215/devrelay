@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { conversations } from '../lib/api';
-import type { ConversationItem, ConversationsResponse } from '../lib/api';
+import { conversations, getToken } from '../lib/api';
+import type { ConversationItem, ConversationsResponse, MessageFileMeta } from '../lib/api';
 
 /** トークン数を K 単位で表示（例: 19963 → "20.0K"） */
 function formatTokens(n: number): string {
@@ -33,6 +33,67 @@ function totalTokens(item: ConversationItem): number {
   return item.inputTokens + item.outputTokens + item.cacheReadTokens + item.cacheCreationTokens;
 }
 
+/** ファイルサイズを人間が読みやすい形式に変換 */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+/** ファイルのダウンロード/表示 URL を生成 */
+function fileUrl(fileId: string): string {
+  const token = getToken();
+  return `/api/files/${fileId}?token=${token}`;
+}
+
+/** ファイル一覧を表示するコンポーネント（画像はサムネイル + クリックで拡大） */
+function FileList({ files, label, onImageClick }: { files: MessageFileMeta[]; label: string; onImageClick?: (url: string) => void }) {
+  if (!files || files.length === 0) return null;
+
+  return (
+    <div>
+      <div className="text-gray-500 text-xs mb-1 font-medium">{label}</div>
+      <div className="flex flex-wrap gap-2">
+        {files.map(f => {
+          const isImage = f.mimeType.startsWith('image/');
+          return (
+            <div key={f.id}>
+              {isImage ? (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onImageClick?.(fileUrl(f.id)); }}
+                  className="flex items-center gap-2 px-2 py-1 bg-gray-900/60 rounded text-xs text-blue-400 hover:text-blue-300 hover:bg-gray-800"
+                >
+                  <img
+                    src={fileUrl(f.id)}
+                    alt={f.filename}
+                    className="w-16 h-16 object-cover rounded border border-gray-600"
+                  />
+                  <div className="text-left">
+                    <div>{f.filename}</div>
+                    <div className="text-gray-500">({formatFileSize(f.size)})</div>
+                  </div>
+                </button>
+              ) : (
+                <a
+                  href={fileUrl(f.id)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="flex items-center gap-1 px-2 py-1 bg-gray-900/60 rounded text-xs text-blue-400 hover:text-blue-300 hover:bg-gray-800"
+                >
+                  <span>📄</span>
+                  <span>{f.filename}</span>
+                  <span className="text-gray-500">({formatFileSize(f.size)})</span>
+                </a>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const PAGE_SIZE = 50;
 
 export function ConversationsPage() {
@@ -41,6 +102,7 @@ export function ConversationsPage() {
   const [error, setError] = useState('');
   const [page, setPage] = useState(0);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const loadConversations = async () => {
     try {
@@ -58,6 +120,16 @@ export function ConversationsPage() {
   useEffect(() => {
     loadConversations();
   }, [page]);
+
+  // Escape キーでライトボックスを閉じる
+  useEffect(() => {
+    if (!lightboxUrl) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightboxUrl(null);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [lightboxUrl]);
 
   const toggleRow = (messageId: string) => {
     setExpandedRow(expandedRow === messageId ? null : messageId);
@@ -146,6 +218,8 @@ export function ConversationsPage() {
                       <tr key={`${item.messageId}-detail`}>
                         <td colSpan={7} className="px-4 py-4 bg-gray-700/20">
                           <div className="space-y-4">
+                            {/* 入力ファイル */}
+                            <FileList files={item.inputFiles} label="Input Files" onImageClick={setLightboxUrl} />
                             {/* ユーザーメッセージ全文 */}
                             <div>
                               <div className="text-gray-500 text-xs mb-1 font-medium">User Message</div>
@@ -153,6 +227,8 @@ export function ConversationsPage() {
                                 {item.userMessage || '(empty)'}
                               </div>
                             </div>
+                            {/* 出力ファイル */}
+                            <FileList files={item.outputFiles} label="Output Files" onImageClick={setLightboxUrl} />
                             {/* AI メッセージ全文 */}
                             <div>
                               <div className="text-gray-500 text-xs mb-1 font-medium">AI Response</div>
@@ -203,12 +279,14 @@ export function ConversationsPage() {
                 {/* モバイル展開 */}
                 {expandedRow === item.messageId && (
                   <div className="mt-4 space-y-3 border-t border-gray-700 pt-3">
+                    <FileList files={item.inputFiles} label="Input Files" onImageClick={setLightboxUrl} />
                     <div>
                       <div className="text-gray-500 text-xs mb-1">User Message</div>
                       <div className="text-white text-sm whitespace-pre-wrap bg-gray-900/60 rounded p-2 max-h-40 overflow-y-auto">
                         {item.userMessage || '(empty)'}
                       </div>
                     </div>
+                    <FileList files={item.outputFiles} label="Output Files" onImageClick={setLightboxUrl} />
                     <div>
                       <div className="text-gray-500 text-xs mb-1">AI Response</div>
                       <div className="text-gray-300 text-sm whitespace-pre-wrap bg-gray-900/60 rounded p-2 max-h-40 overflow-y-auto">
@@ -252,6 +330,21 @@ export function ConversationsPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* 画像ライトボックス（フルスクリーンモーダル） */}
+      {lightboxUrl && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center cursor-pointer"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <img
+            src={lightboxUrl}
+            alt="Preview"
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
       )}
     </div>
   );

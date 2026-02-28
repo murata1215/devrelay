@@ -23,6 +23,8 @@ export const SettingKeys = {
   CHAT_AI_PROVIDER: 'chat_ai_provider',
   LANGUAGE: 'language',
   THEME: 'theme',
+  /** カスタム Agreement テンプレート（ユーザーが編集した場合のみ保存） */
+  AGREEMENT_TEMPLATE: 'agreement_template',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

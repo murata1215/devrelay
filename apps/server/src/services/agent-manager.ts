@@ -15,6 +15,7 @@ import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine } from './session-manager.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
+import { getUserSetting, SettingKeys } from './user-settings.js';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -133,9 +134,9 @@ async function handleAgentConnect(
 ) {
   const { machineId, machineName, token, projects, availableAiTools, managementInfo } = payload;
 
-  // Verify token
-  const machine = await prisma.machine.findUnique({
-    where: { token }
+  // Verify token（ソフトデリート済みの Machine は接続拒否）
+  const machine = await prisma.machine.findFirst({
+    where: { token, deletedAt: null }
   });
 
   if (!machine) {
@@ -162,7 +163,7 @@ async function handleAgentConnect(
     if (isProvisional || isOldFormat) {
       // 同じユーザーに同名の Agent が既にないか確認（重複防止）
       const duplicate = await prisma.machine.findFirst({
-        where: { userId: machine.userId, name: trimmedName, id: { not: machine.id } },
+        where: { userId: machine.userId, name: trimmedName, id: { not: machine.id }, deletedAt: null },
       });
       if (!duplicate) {
         updatedName = trimmedName;
@@ -212,6 +213,7 @@ async function handleAgentConnect(
         name: { startsWith: `${hostname}/` },
         displayName: { not: null },
         id: { not: machine.id },
+        deletedAt: null,
       },
       select: { displayName: true },
     });
@@ -317,7 +319,7 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
   console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}${isExec ? ' [EXEC]' : ''}`);
 
   if (isComplete) {
-    // Save final output to DB（usageData がある場合は JSON として保存）
+    // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
     await prisma.message.create({
       data: {
         sessionId,
@@ -325,6 +327,15 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
         content: output,
         platform: 'system',
         usageData: usageData ?? undefined,
+        files: files && files.length > 0 ? {
+          create: files.map(f => ({
+            filename: f.filename,
+            mimeType: f.mimeType,
+            size: f.size,
+            content: Buffer.from(f.content, 'base64'),
+            direction: 'output',
+          })),
+        } : undefined,
       }
     });
     if (usageData) {
@@ -806,8 +817,10 @@ export async function saveWorkState(machineId: string, sessionId: string, projec
 
 // Agreement 適用コマンドを Agent に送信
 // Server 側でプロンプトを生成して配信するため、テンプレート更新は Server のみで完結する
+// ユーザーがカスタムテンプレートを設定していればそちらを使用する
 export async function applyAgreement(machineId: string, sessionId: string, projectPath: string, userId: string) {
-  const agreementPrompt = buildAgreementApplyPrompt();
+  const customTemplate = await getUserSetting(userId, SettingKeys.AGREEMENT_TEMPLATE);
+  const agreementPrompt = buildAgreementApplyPrompt(customTemplate ?? undefined);
   sendToAgent(machineId, {
     type: 'server:agreement:apply',
     payload: { sessionId, projectPath, userId, agreementPrompt }
@@ -874,6 +887,7 @@ export function startHeartbeatMonitor() {
       const staleMachines = await prisma.machine.findMany({
         where: {
           status: 'online',
+          deletedAt: null,
           OR: [
             { lastSeenAt: { lt: cutoffTime } },
             { lastSeenAt: null }

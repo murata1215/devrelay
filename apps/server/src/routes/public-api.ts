@@ -34,7 +34,7 @@ export async function publicApiRoutes(app: FastifyInstance) {
 
     // DB でトークンを検索
     const machine = await prisma.machine.findFirst({
-      where: { token: token.trim() },
+      where: { token: token.trim(), deletedAt: null },
       select: { name: true },
     });
 

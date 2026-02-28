@@ -80,6 +80,7 @@ model Machine {
   status         String    @default("offline") // online, offline
   lastSeenAt     DateTime?
   managementInfo Json?     // Agent の管理コマンド情報（OS・パス固有）
+  deletedAt      DateTime? // ソフトデリート（null = アクティブ）
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -127,14 +128,30 @@ model Session {
 
 // メッセージ履歴
 model Message {
-  id          String    @id @default(cuid())
+  id          String        @id @default(cuid())
   sessionId   String
-  session     Session   @relation(fields: [sessionId], references: [id])
-  role        String    // user, ai, system
+  session     Session       @relation(fields: [sessionId], references: [id])
+  role        String        // user, ai, system
   content     String
-  platform    String    // どのプラットフォームから送信されたか
-  usageData   Json?     // AI 実行時の使用量データ（usage, modelUsage, durationMs）
-  createdAt   DateTime  @default(now())
+  platform    String        // どのプラットフォームから送信されたか
+  usageData   Json?         // AI 実行時の使用量データ（usage, modelUsage, durationMs）
+  createdAt   DateTime      @default(now())
+  files       MessageFile[] // 添付ファイル（入力 or 出力）
+}
+
+// メッセージに紐づくファイル（BLOB 保存）
+model MessageFile {
+  id        String   @id @default(cuid())
+  messageId String
+  message   Message  @relation(fields: [messageId], references: [id])
+  filename  String
+  mimeType  String
+  size      Int
+  content   Bytes    // ファイル本体（PostgreSQL bytea）
+  direction String   // 'input' | 'output'
+  createdAt DateTime @default(now())
+
+  @@index([messageId])
 }
 
 // ユーザー設定（汎用的なKey-Value形式）

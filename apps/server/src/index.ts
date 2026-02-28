@@ -21,6 +21,7 @@ async function main() {
   // Reset all machines to offline on startup
   // (In case server crashed without proper disconnect handling)
   await prisma.machine.updateMany({
+    where: { deletedAt: null },
     data: { status: 'offline' }
   });
 

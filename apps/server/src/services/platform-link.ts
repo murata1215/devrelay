@@ -145,15 +145,13 @@ export async function validateAndConsumeLinkCode(
 async function mergePlatformUser(fromUserId: string, toUserId: string): Promise<void> {
   // マシンを移行（名前が重複する場合はスキップまたはリネーム）
   const fromMachines = await prisma.machine.findMany({
-    where: { userId: fromUserId },
+    where: { userId: fromUserId, deletedAt: null },
   });
 
   for (const machine of fromMachines) {
     // 既存のマシン名をチェック
-    const existingMachine = await prisma.machine.findUnique({
-      where: {
-        userId_name: { userId: toUserId, name: machine.name },
-      },
+    const existingMachine = await prisma.machine.findFirst({
+      where: { userId: toUserId, name: machine.name, deletedAt: null },
     });
 
     if (existingMachine) {
@@ -161,8 +159,8 @@ async function mergePlatformUser(fromUserId: string, toUserId: string): Promise<
       let newName = `${machine.name} (merged)`;
       let counter = 1;
       while (
-        await prisma.machine.findUnique({
-          where: { userId_name: { userId: toUserId, name: newName } },
+        await prisma.machine.findFirst({
+          where: { userId: toUserId, name: newName, deletedAt: null },
         })
       ) {
         counter++;
