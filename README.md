@@ -66,7 +66,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#86)
+│   ├── changelog.md      # Implementation history (#1-#89)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer
@@ -397,6 +397,8 @@ agents/windows/
 - [x] Multi-provider AI keys (OpenAI, Anthropic, Gemini with per-feature selection)
 - [x] Projects page sorted by latest build date (most recently built first)
 - [x] Agreement v4 + CLAUDE.md migration (rules separation, lightweight hub)
+- [x] Server-side Agreement template delivery (update Server once, all Agents get latest)
+- [x] Exec command user message in Conversations (show `[exec]` instead of `(empty)`)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features
