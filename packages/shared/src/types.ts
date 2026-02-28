@@ -84,7 +84,9 @@ export type AgentMessage =
   | { type: 'agent:history:export'; payload: HistoryExportPayload }
   | { type: 'agent:ai:list'; payload: AiListResponsePayload }
   | { type: 'agent:ai:switched'; payload: AiSwitchedPayload }
-  | { type: 'agent:session:aiTool'; payload: SessionAiToolPayload };
+  | { type: 'agent:session:aiTool'; payload: SessionAiToolPayload }
+  | { type: 'agent:ai:cancelled'; payload: AiCancelledPayload }
+  | { type: 'agent:config:ack'; payload: { machineId: string } };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -148,6 +150,8 @@ export interface AgentConnectPayload {
   availableAiTools: AiTool[];
   /** Agent の管理コマンド情報（環境固有のパスを含む） */
   managementInfo?: ManagementInfo;
+  /** Agent ローカルの検索パス（Server 側で参照用） */
+  projectsDirs?: string[];
 }
 
 export interface FileAttachment {
@@ -209,7 +213,9 @@ export type ServerToAgentMessage =
   | { type: 'server:history:dates'; payload: HistoryDatesRequestPayload }
   | { type: 'server:history:export'; payload: HistoryExportRequestPayload }
   | { type: 'server:ai:list'; payload: AiListPayload }
-  | { type: 'server:ai:switch'; payload: AiSwitchPayload };
+  | { type: 'server:ai:switch'; payload: AiSwitchPayload }
+  | { type: 'server:ai:cancel'; payload: AiCancelPayload }
+  | { type: 'server:config:update'; payload: ServerConfigUpdatePayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -226,6 +232,12 @@ export interface ServerConnectAckPayload {
   success: boolean;
   machineId?: string;  // DB machine ID (only on success)
   error?: string;
+  projectsDirs?: string[] | null;  // Server 管理のプロジェクト検索パス（null = ローカル設定を使用）
+}
+
+/** Server → Agent: 設定更新の配信（リアルタイム） */
+export interface ServerConfigUpdatePayload {
+  projectsDirs?: string[] | null;  // プロジェクト検索パスの更新（null = ローカル設定に戻す）
 }
 
 export interface ServerPongPayload {
@@ -306,6 +318,17 @@ export interface AiSwitchPayload {
   aiTool: AiTool;
 }
 
+/** Server → Agent: AI プロセスのキャンセル要求 */
+export interface AiCancelPayload {
+  sessionId: string;
+}
+
+/** Agent → Server: AI プロセスのキャンセル完了通知 */
+export interface AiCancelledPayload {
+  machineId: string;
+  sessionId: string;
+}
+
 export interface AiSwitchedPayload {
   machineId: string;
   sessionId: string;
@@ -360,7 +383,8 @@ export type UserCommand =
   | { type: 'help' }
   | { type: 'ai:list' }   // AI ツール一覧
   | { type: 'ai:switch'; tool: AiTool }
-  | { type: 'ai:prompt'; text: string };
+  | { type: 'ai:prompt'; text: string }
+  | { type: 'kill' };  // 実行中の AI プロセスを強制停止
 
 // -----------------------------------------------------------------------------
 // User Context (for command parsing)

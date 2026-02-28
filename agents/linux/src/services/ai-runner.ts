@@ -177,6 +177,12 @@ export async function sendPromptToAi(
     proc.stdin?.end();
   }
 
+  // 実行中のプロセスを activeSessions に保存（cancelAiSession で参照するため）
+  const session = activeSessions.get(sessionId);
+  if (session) {
+    session.process = proc;
+  }
+
   let fullOutput = '';
   let lineBuffer = '';
   // stderr を収集してエラー検出に使用
@@ -271,8 +277,21 @@ export async function sendPromptToAi(
       console.error(`[${aiTool}] stderr: ${text}`);
     });
 
-    proc.on('close', (code) => {
-      console.log(`[${aiTool}] Process exited with code ${code}`);
+    proc.on('close', (code, signal) => {
+      console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
+
+      // プロセス参照をクリア（キャンセル済み判定のため exitCode は残る）
+      if (session) {
+        session.process = null as any;
+      }
+
+      // SIGTERM によるキャンセル検出
+      if (signal === 'SIGTERM') {
+        console.log(`[${aiTool}] ⛔ Process was cancelled`);
+        onOutput('', true, result.usageData);
+        resolve(result);
+        return;
+      }
 
       // Detect --resume failure: exit code 1 + no output
       if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
@@ -313,7 +332,26 @@ export async function stopAiSession(sessionId: string): Promise<void> {
   }
 
   console.log(`⏹️ Stopping AI session: ${sessionId}`);
+  // 実行中のプロセスがあれば停止
+  if (session.process && session.process.exitCode === null) {
+    session.process.kill('SIGTERM');
+  }
   activeSessions.delete(sessionId);
+}
+
+/**
+ * 実行中の AI プロセスをキャンセルする（セッションは維持）
+ * @returns キャンセルできた場合 true、プロセスが存在しない場合 false
+ */
+export function cancelAiSession(sessionId: string): boolean {
+  const session = activeSessions.get(sessionId);
+  if (!session || !session.process || session.process.exitCode !== null) {
+    return false;
+  }
+
+  console.log(`⛔ Cancelling AI session: ${sessionId}`);
+  session.process.kill('SIGTERM');
+  return true;
 }
 
 export function getActiveSession(sessionId: string): AiSession | undefined {

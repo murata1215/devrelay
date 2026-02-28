@@ -34,6 +34,13 @@ export function MachinesPage() {
   const [aliasValue, setAliasValue] = useState('');
   const [aliasSaving, setAliasSaving] = useState(false);
 
+  // プロジェクト検索パス
+  const [projectsDirs, setProjectsDirs] = useState<string[]>([]);
+  const [projectsDirsLoading, setProjectsDirsLoading] = useState(false);
+  const [projectsDirsSaving, setProjectsDirsSaving] = useState(false);
+  const [newDirInput, setNewDirInput] = useState('');
+  const [projectsDirsModified, setProjectsDirsModified] = useState(false);
+
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -100,12 +107,18 @@ export function MachinesPage() {
     setAliasValue(currentAlias !== hostname ? currentAlias : '');
 
     try {
-      const result = await machines.getToken(machine.id);
-      setSettingsToken(result.token);
+      const [tokenResult, dirsResult] = await Promise.all([
+        machines.getToken(machine.id),
+        machines.getProjectsDirs(machine.id),
+      ]);
+      setSettingsToken(tokenResult.token);
+      // DB 設定があればそれを使用、なければ Agent ローカル設定をプリセット
+      setProjectsDirs(dirsResult.projectsDirs ?? dirsResult.localProjectsDirs ?? []);
     } catch (err) {
       setSettingsToken('(Failed to load token)');
     } finally {
       setSettingsTokenLoading(false);
+      setProjectsDirsLoading(false);
     }
   };
 
@@ -120,6 +133,11 @@ export function MachinesPage() {
     setMgmtCopiedIndex(null);
     setAliasHostname('');
     setAliasValue('');
+    setProjectsDirs([]);
+    setProjectsDirsLoading(false);
+    setProjectsDirsSaving(false);
+    setNewDirInput('');
+    setProjectsDirsModified(false);
   };
 
   const handleDelete = async () => {
@@ -536,6 +554,106 @@ export function MachinesPage() {
                   ? `Display: ${aliasValue}/${settingsTarget.name.includes('/') ? settingsTarget.name.split('/').slice(1).join('/') : ''}`
                   : 'Leave empty to use original hostname'}
               </div>
+            </div>
+
+            {/* プロジェクト検索パス */}
+            <div className="mb-4">
+              <label className="block text-gray-400 text-sm mb-2">
+                Project Search Paths
+                <span className="text-gray-500 ml-2 text-xs">
+                  (directories to scan for projects with CLAUDE.md)
+                </span>
+              </label>
+              {projectsDirsLoading ? (
+                <div className="bg-gray-900 px-4 py-2 rounded-lg text-gray-500 text-sm">Loading...</div>
+              ) : (
+                <>
+                  {/* 既存パスの一覧（タグ形式） */}
+                  {projectsDirs.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {projectsDirs.map((dir, i) => (
+                        <span key={i} className="inline-flex items-center bg-gray-700 text-gray-300 text-xs px-3 py-1.5 rounded-lg">
+                          <code className="mr-2">{dir}</code>
+                          <button
+                            onClick={() => {
+                              setProjectsDirs(projectsDirs.filter((_, idx) => idx !== i));
+                              setProjectsDirsModified(true);
+                            }}
+                            className="text-gray-500 hover:text-red-400 transition-colors"
+                            title="Remove path"
+                          >
+                            &times;
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {/* 新規パス入力 */}
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="text"
+                      value={newDirInput}
+                      onChange={(e) => setNewDirInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newDirInput.trim()) {
+                          setProjectsDirs([...projectsDirs, newDirInput.trim()]);
+                          setNewDirInput('');
+                          setProjectsDirsModified(true);
+                        }
+                      }}
+                      placeholder="/home/user/projects"
+                      className="flex-1 bg-gray-900 text-white px-4 py-2 rounded-lg text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => {
+                        if (newDirInput.trim()) {
+                          setProjectsDirs([...projectsDirs, newDirInput.trim()]);
+                          setNewDirInput('');
+                          setProjectsDirsModified(true);
+                        }
+                      }}
+                      className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  {/* Save & Apply ボタン（変更がある場合のみ表示） */}
+                  {projectsDirsModified && (
+                    <div className="flex items-center mt-2 space-x-2">
+                      <button
+                        onClick={async () => {
+                          if (!settingsTarget) return;
+                          setProjectsDirsSaving(true);
+                          try {
+                            const dirsToSave = projectsDirs.length > 0 ? projectsDirs : null;
+                            await machines.setProjectsDirs(settingsTarget.id, dirsToSave);
+                            setProjectsDirsModified(false);
+                            loadMachines();
+                          } catch (err) {
+                            alert(err instanceof Error ? err.message : 'Failed to save');
+                          } finally {
+                            setProjectsDirsSaving(false);
+                          }
+                        }}
+                        disabled={projectsDirsSaving}
+                        className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg transition-colors text-sm"
+                      >
+                        {projectsDirsSaving ? 'Saving...' : 'Save & Apply'}
+                      </button>
+                      <span className="text-gray-500 text-xs">
+                        {settingsTarget?.status === 'online'
+                          ? 'Agent will re-scan immediately'
+                          : 'Agent will apply on next connection'}
+                      </span>
+                    </div>
+                  )}
+                  <div className="text-gray-500 text-xs mt-1">
+                    {projectsDirs.length === 0
+                      ? 'Not set. Agent uses local config (~/.devrelay/config.yaml)'
+                      : 'Overrides agent local config when set'}
+                  </div>
+                </>
+              )}
             </div>
 
             {/* トークン表示 */}

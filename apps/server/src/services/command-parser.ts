@@ -228,6 +228,9 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     case 'b':
     case 'build':
       return { type: 'build' };
+    case 'k':
+    case 'kill':
+      return { type: 'kill' };
     case 'q':
       return { type: 'quit' };
     case 'h':
@@ -278,6 +281,7 @@ export function getHelpText(): string {
 
 **その他**
 \`ag\` - DevRelay Agreement v4 を適用（rules/devrelay.md 作成）
+\`k\` - 実行中の AI プロセスを強制停止
 \`x\` - 会話履歴をクリア（2回連続で実行）
 \`q\` - 切断
 \`h\` - このヘルプ

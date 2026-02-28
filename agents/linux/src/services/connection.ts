@@ -17,14 +17,15 @@ import type {
   HistoryDatesRequestPayload,
   HistoryExportRequestPayload,
   AiListPayload,
-  AiSwitchPayload
+  AiSwitchPayload,
+  AiCancelPayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync } from 'fs';
 import { DEFAULTS } from '@devrelay/shared';
-import type { AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, type SendPromptOptions } from './ai-runner.js';
+import { saveConfig, type AgentConfig } from './config.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
@@ -57,6 +58,7 @@ import {
 } from './work-state-store.js';
 import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
 import { generateManagementInfo } from './management-info.js';
+import { autoDiscoverProjects, loadProjects } from './projects.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -146,6 +148,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           projects,
           availableAiTools: getAvailableAiTools(config),
           managementInfo: generateManagementInfo(),
+          projectsDirs: config.projectsDirs,
         },
       });
 
@@ -170,6 +173,10 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     ws.on('message', (data) => {
       try {
         const message: ServerToAgentMessage = JSON.parse(data.toString());
+        // デバッグ: pong 以外の受信メッセージタイプをログ出力
+        if (message.type !== 'server:pong') {
+          console.log(`📩 Received message: ${message.type}`);
+        }
         handleServerMessage(message, config);
       } catch (err) {
         console.error('Error parsing server message:', err);
@@ -200,6 +207,12 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           console.log(`✅ Authentication successful (machineId: ${currentMachineId})`);
         } else {
           console.log('✅ Authentication successful');
+        }
+        // Server 管理のプロジェクト検索パスが設定されていれば再スキャン
+        if (message.payload.projectsDirs) {
+          handleProjectsDirsUpdate(message.payload.projectsDirs, config).catch(err =>
+            console.error('❌ projectsDirs update failed:', err)
+          );
         }
       } else {
         console.error('❌ Authentication failed:', message.payload.error);
@@ -262,6 +275,18 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:ai:switch':
       handleAiSwitch(message.payload, config);
+      break;
+
+    case 'server:ai:cancel':
+      handleAiCancel(message.payload);
+      break;
+
+    case 'server:config:update':
+      if (message.payload.projectsDirs !== undefined) {
+        handleProjectsDirsUpdate(message.payload.projectsDirs, config).catch(err =>
+          console.error('❌ projectsDirs update failed:', err)
+        );
+      }
       break;
   }
 }
@@ -354,6 +379,28 @@ async function handleSessionStart(
 async function handleSessionEnd(sessionId: string) {
   console.log(`⏹️ Ending session: ${sessionId}`);
   await stopAiSession(sessionId);
+}
+
+/** 実行中の AI プロセスをキャンセルし、Server に完了通知を送信 */
+async function handleAiCancel(payload: AiCancelPayload) {
+  const { sessionId } = payload;
+  console.log(`⛔ Cancel requested for session ${sessionId}`);
+
+  const cancelled = cancelAiSession(sessionId);
+
+  if (currentConfig) {
+    sendMessage({
+      type: 'agent:ai:cancelled',
+      payload: {
+        machineId: currentConfig.machineId,
+        sessionId,
+      },
+    });
+  }
+
+  if (!cancelled) {
+    console.log(`⚠️ No running process to cancel for session ${sessionId}`);
+  }
 }
 
 async function handleConversationClear(payload: { sessionId: string; projectPath: string }) {
@@ -1238,6 +1285,53 @@ async function handleAiList(payload: AiListPayload, config: AgentConfig) {
       currentTool,
     },
   });
+}
+
+/**
+ * Server から配信されたプロジェクト検索パスでプロジェクトを再スキャン
+ * 各パスを autoDiscoverProjects でスキャンし、更新後のプロジェクト一覧を Server に送信
+ */
+async function handleProjectsDirsUpdate(dirs: string[] | null, config: AgentConfig) {
+  if (!dirs || dirs.length === 0) {
+    console.log(`📂 projectsDirs is empty/null, skipping`);
+    return;
+  }
+
+  console.log(`📂 Server-managed projectsDirs received: ${JSON.stringify(dirs)}`);
+
+  try {
+    // config.yaml の projectsDirs を Server 設定で上書き・永続化
+    config.projectsDirs = dirs;
+    await saveConfig(config);
+    console.log(`💾 config.yaml updated with server projectsDirs: ${JSON.stringify(dirs)}`);
+  } catch (err) {
+    console.error(`❌ Failed to save config.yaml:`, (err as Error).message);
+  }
+
+  // 各パスをスキャン（新規プロジェクトを検出）
+  let totalAdded = 0;
+  for (const dir of dirs) {
+    try {
+      const added = await autoDiscoverProjects(dir);
+      totalAdded += added;
+    } catch (err) {
+      console.error(`❌ Failed to scan ${dir}:`, (err as Error).message);
+    }
+  }
+
+  // 変更有無に関わらず、現在のプロジェクト一覧を Server に送信（同期目的）
+  const projects = await loadProjects(config);
+  sendProjectsUpdate(projects);
+  console.log(`📤 Projects synced: ${projects.length} projects (${totalAdded} new)`);
+
+  // Server に設定更新の適用完了を通知（pending リトライを停止させる）
+  if (currentMachineId) {
+    sendMessage({
+      type: 'agent:config:ack',
+      payload: { machineId: currentMachineId },
+    });
+    console.log(`📤 Sent config:ack to server`);
+  }
 }
 
 async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {

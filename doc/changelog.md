@@ -1647,3 +1647,44 @@ Conversations ページの添付画像をクリックでフルスクリーン表
 - **ライトボックス**: 黒半透明オーバーレイ + `max-w-[90vw] max-h-[90vh]` の大きな画像
 - **閉じる**: 背景クリック or Escape キー
 - **変更ファイル**: `apps/web/src/pages/ConversationsPage.tsx`
+
+#### 95. Kill コマンド (2026-02-28)
+
+実行中の AI プロセスを途中でキャンセルできる `k` / `kill` コマンドを追加。
+長時間実行中の Claude Code セッションを Discord/Telegram から中断できるようになった。
+
+- **ショートカット**: `k` → `kill` コマンド
+- **Agent**: `cancelAiSession` で子プロセスを SIGTERM で停止
+- **Server**: `server:ai:cancel` → Agent → `agent:ai:cancelled` の往復
+- **Discord/Telegram**: キャンセル完了メッセージを表示
+- **変更ファイル**:
+  - `packages/shared/src/constants.ts` - `k` ショートカット追加
+  - `packages/shared/src/types.ts` - `AiCancelPayload`, `AiCancelledPayload`, メッセージ型追加
+  - `agents/linux/src/services/ai-runner.ts` - `cancelAiSession` 関数
+  - `agents/linux/src/services/connection.ts` - `handleAiCancel` ハンドラ
+  - `apps/server/src/services/agent-manager.ts` - `cancelAiProcess`, `handleAiCancelled`
+  - `apps/server/src/services/command-handler.ts` - `kill` コマンド処理
+  - `apps/server/src/services/command-parser.ts` - `kill` コマンドパーサー
+
+#### 96. Server 管理プロジェクト検索パス (2026-02-28)
+
+Agent のプロジェクト検索パス（`projectsDirs`）を WebUI から設定・同期する機能を追加。
+従来は Agent の `~/.devrelay/config.yaml` を手動編集する必要があったが、
+WebUI の Agent Settings モーダルからタグ UI でパスを追加・削除できるようになった。
+
+- **DB**: Machine テーブルに `projectsDirs Json?` カラム追加
+- **API**: `GET/PUT /api/machines/:id/projects-dirs`（DB 値 + Agent ローカル値の両方を返す）
+- **WebUI**: Agent Settings モーダルにタグ UI（追加・削除・Save & Apply ボタン）
+- **リアルタイム配信**: `pushConfigUpdate` → `server:config:update` メッセージで Agent に即時配信
+- **ping リトライ機構**: WebSocket 送信失敗に備え `pendingConfigUpdates` Map で管理、
+  Agent の `agent:ping` 受信時にリトライ送信（最大5回）。`agent:config:ack` で確認。
+- **Agent 側**: `handleProjectsDirsUpdate` で config.yaml 更新 + プロジェクト再スキャン + ack 送信
+- **接続時同期**: `server:connect:ack` で DB の最新値を配信（Agent 再接続時にも自動反映）
+- **変更ファイル**:
+  - `packages/shared/src/types.ts` - `ServerConfigUpdatePayload`, `agent:config:ack` 型追加
+  - `apps/server/prisma/schema.prisma` - `projectsDirs Json?`
+  - `apps/server/src/services/agent-manager.ts` - `pendingConfigUpdates`, ping リトライ, config:ack
+  - `apps/server/src/routes/api.ts` - projects-dirs API
+  - `apps/web/src/lib/api.ts` - `getProjectsDirs`, `setProjectsDirs`
+  - `apps/web/src/pages/MachinesPage.tsx` - Project Search Paths UI
+  - `agents/linux/src/services/connection.ts` - `handleProjectsDirsUpdate`, config:ack, デバッグログ

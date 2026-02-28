@@ -14,7 +14,8 @@ import {
   getAiToolList,
   switchAiTool,
   isAgentRestarted,
-  clearAgentRestarted
+  clearAgentRestarted,
+  cancelAiProcess
 } from './agent-manager.js';
 import {
   createSession,
@@ -165,6 +166,9 @@ export async function executeCommand(
 
     case 'summary':
       return handleSummary(context, command.period);
+
+    case 'kill':
+      return handleKill(context);
 
     case 'quit':
       return handleQuit(context);
@@ -963,6 +967,18 @@ async function handleLog(context: UserContext, count?: number): Promise<string> 
 async function handleSummary(context: UserContext, period?: string): Promise<string> {
   // TODO: Implement AI summary using Anthropic API
   return '📋 要約機能は準備中です。\n\n`log` でログを確認できます。';
+}
+
+/** 実行中の AI プロセスを強制停止する */
+async function handleKill(context: UserContext): Promise<string> {
+  if (!context.currentSessionId || !context.currentMachineId) {
+    return '⚠️ プロジェクトに接続されていません。';
+  }
+
+  await cancelAiProcess(context.currentMachineId, context.currentSessionId);
+
+  // フィードバックは agent:ai:cancelled 経由で返るため空文字
+  return '';
 }
 
 async function handleQuit(context: UserContext): Promise<string> {

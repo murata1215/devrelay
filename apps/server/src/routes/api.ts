@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, requestHistoryDates, requestHistoryExport } from '../services/agent-manager.js';
+import { getConnectedAgents, requestHistoryDates, requestHistoryExport, pushConfigUpdate, getAgentLocalProjectsDirs } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
 import {
@@ -237,6 +237,61 @@ export async function apiRoutes(app: FastifyInstance) {
       alias: displayAlias,
       updatedCount: machines.length,
     };
+  });
+
+  // ========================================
+  // プロジェクト検索パス（Server 管理）
+  // ========================================
+
+  /** マシンのプロジェクト検索パスを取得 */
+  app.get('/api/machines/:id/projects-dirs', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+      select: { projectsDirs: true },
+    });
+
+    if (!machine) {
+      return reply.status(404).send({ error: 'Machine not found' });
+    }
+
+    return {
+      projectsDirs: (machine.projectsDirs as string[] | null) ?? null,
+      localProjectsDirs: getAgentLocalProjectsDirs(id),
+    };
+  });
+
+  /** マシンのプロジェクト検索パスを更新し、Agent がオンラインならリアルタイム配信 */
+  app.put('/api/machines/:id/projects-dirs', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const { projectsDirs } = request.body as { projectsDirs: string[] | null };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+    });
+
+    if (!machine) {
+      return reply.status(404).send({ error: 'Machine not found' });
+    }
+
+    // DB 更新
+    await prisma.machine.update({
+      where: { id },
+      data: { projectsDirs: projectsDirs ?? Prisma.DbNull },
+    });
+
+    // Agent がオンラインならリアルタイム配信
+    const connectedAgents = getConnectedAgents();
+    if (connectedAgents.has(id)) {
+      pushConfigUpdate(id, { projectsDirs: projectsDirs ?? null });
+    }
+
+    return { success: true, projectsDirs: projectsDirs ?? null };
   });
 
   // ========================================

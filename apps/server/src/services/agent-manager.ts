@@ -9,7 +9,8 @@ import type {
   FileAttachment,
   WorkState,
   AiListResponsePayload,
-  AiSwitchedPayload
+  AiSwitchedPayload,
+  AiCancelledPayload
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine } from './session-manager.js';
@@ -36,8 +37,22 @@ const pendingHistoryExportRequests = new Map<string, HistoryRequest<string>>();
 const pendingAiListRequests = new Map<string, HistoryRequest<AiListResponsePayload>>();
 const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload>>();
 
+// Agent ローカルの projectsDirs: machineId -> string[]（接続時に報告される）
+const agentLocalProjectsDirs = new Map<string, string[]>();
+
 // Heartbeat: メモリ内で lastSeenAt を管理し、60秒ごとにまとめて DB 更新（バッチ化）
 const lastSeenMap = new Map<string, Date>();
+
+// 未配信の設定更新: machineId -> { payload, retries, createdAt }
+// pushConfigUpdate で WebSocket 送信が失敗する場合（接続が半開き状態等）に備え、
+// 次回 agent:ping 受信時にリトライする。Agent から agent:config:ack を受信したら削除。
+// 旧バージョン Agent は ack を返さないため、最大リトライ回数で打ち切る。
+const MAX_CONFIG_RETRIES = 5;
+interface PendingConfigUpdate {
+  config: { projectsDirs?: string[] | null };
+  retries: number;
+}
+const pendingConfigUpdates = new Map<string, PendingConfigUpdate>();
 
 // Agent 再接続フラグ: Agent が再接続した machineId を記録
 // 再接続後の最初のプロンプトでセッション再開始が必要かを判定するために使用
@@ -106,6 +121,15 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
         case 'agent:session:aiTool':
           await handleSessionAiTool(message.payload);
           break;
+
+        case 'agent:ai:cancelled':
+          await handleAiCancelled(message.payload);
+          break;
+
+        case 'agent:config:ack':
+          // Agent が設定更新を受信・適用完了 → pending から削除
+          handleConfigAck(message.payload.machineId);
+          break;
       }
     } catch (err) {
       console.error('Error processing agent message:', err);
@@ -130,9 +154,9 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
 async function handleAgentConnect(
   ws: WebSocket,
-  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any }
+  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[] }
 ) {
-  const { machineId, machineName, token, projects, availableAiTools, managementInfo } = payload;
+  const { machineId, machineName, token, projects, availableAiTools, managementInfo, projectsDirs: localDirs } = payload;
 
   // Verify token（ソフトデリート済みの Machine は接続拒否）
   const machine = await prisma.machine.findFirst({
@@ -231,8 +255,11 @@ async function handleAgentConnect(
     }
   }
 
-  // Store connection
+  // Store connection and agent's local projectsDirs
   connectedAgents.set(machine.id, ws);
+  if (localDirs && localDirs.length > 0) {
+    agentLocalProjectsDirs.set(machine.id, localDirs);
+  }
   machineCache.set(machine.id, {
     id: machine.id,
     name: updatedName,
@@ -242,9 +269,19 @@ async function handleAgentConnect(
     projects
   });
 
+  // Server 管理のプロジェクト検索パスを取得（null ならローカル設定にフォールバック）
+  const serverProjectsDirs = machine.projectsDirs as string[] | null;
+
+  // 再接続時に connect:ack で最新の DB 値を配信するため、pending リトライは不要
+  pendingConfigUpdates.delete(machine.id);
+
   sendToAgent(ws, {
     type: 'server:connect:ack',
-    payload: { success: true, machineId: machine.id }
+    payload: {
+      success: true,
+      machineId: machine.id,
+      projectsDirs: serverProjectsDirs,
+    }
   });
 
   console.log(`✅ Agent connected: ${updatedName} (${machine.id})`);
@@ -275,6 +312,8 @@ async function handleAgentDisconnect(machineId: string, disconnectedWs?: WebSock
 
   connectedAgents.delete(machineId);
   machineCache.delete(machineId);
+  agentLocalProjectsDirs.delete(machineId);
+  pendingConfigUpdates.delete(machineId);
 
   try {
     await prisma.machine.update({
@@ -560,6 +599,23 @@ async function handleAgentPing(ws: WebSocket, payload: { machineId: string; time
     cached.lastSeen = now;
   }
 
+  // 未配信の設定更新があればリトライ（ping を受信した ws に直接送信）
+  const pending = pendingConfigUpdates.get(machineId);
+  if (pending) {
+    pending.retries++;
+    if (pending.retries > MAX_CONFIG_RETRIES) {
+      // リトライ上限到達（旧バージョン Agent は ack を返さないため）
+      console.log(`⚠️ Config update retry limit reached for ${machineId}, giving up`);
+      pendingConfigUpdates.delete(machineId);
+    } else {
+      console.log(`🔄 Retrying config update for ${machineId} (${pending.retries}/${MAX_CONFIG_RETRIES})`);
+      sendToAgent(ws, {
+        type: 'server:config:update',
+        payload: pending.config,
+      });
+    }
+  }
+
   // pong 返信
   sendToAgent(ws, {
     type: 'server:pong',
@@ -685,6 +741,13 @@ async function handleSessionAiTool(payload: { machineId: string; sessionId: stri
   }
 }
 
+/** Agent から AI プロセスキャンセル完了の通知を受信 */
+async function handleAiCancelled(payload: AiCancelledPayload) {
+  const { sessionId } = payload;
+  console.log(`⛔ AI process cancelled for session ${sessionId}`);
+  await broadcastToSession(sessionId, '⛔ AI プロセスをキャンセルしました', false);
+}
+
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
@@ -792,6 +855,42 @@ export async function endSession(machineId: string, sessionId: string) {
     type: 'server:session:end',
     payload: { sessionId }
   });
+}
+
+/** 実行中の AI プロセスをキャンセルするリクエストを Agent に送信 */
+export async function cancelAiProcess(machineId: string, sessionId: string) {
+  sendToAgent(machineId, {
+    type: 'server:ai:cancel',
+    payload: { sessionId }
+  });
+}
+
+/**
+ * Agent に設定更新をリアルタイム配信する
+ * Agent がオフラインの場合は何もしない（次回接続時に server:connect:ack で配信される）
+ * 送信失敗に備え pendingConfigUpdates に登録し、次回 agent:ping 時にリトライする
+ */
+export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null }) {
+  // pending に登録（agent:config:ack 受信 or リトライ上限で削除される）
+  pendingConfigUpdates.set(machineId, { config, retries: 0 });
+
+  sendToAgent(machineId, {
+    type: 'server:config:update',
+    payload: config,
+  });
+  console.log(`📤 Config update pushed to ${machineId} (pending until ack)`);
+}
+
+/** Agent が設定更新の適用完了を通知（pending を削除） */
+function handleConfigAck(machineId: string) {
+  if (pendingConfigUpdates.delete(machineId)) {
+    console.log(`✅ Config ack received from ${machineId}`);
+  }
+}
+
+/** Agent が接続時に報告したローカルの projectsDirs を取得 */
+export function getAgentLocalProjectsDirs(machineId: string): string[] | null {
+  return agentLocalProjectsDirs.get(machineId) ?? null;
 }
 
 export async function clearConversation(machineId: string, sessionId: string, projectPath: string) {
@@ -908,6 +1007,8 @@ export function startHeartbeatMonitor() {
           // Remove from cache and connected agents
           connectedAgents.delete(machine.id);
           machineCache.delete(machine.id);
+          agentLocalProjectsDirs.delete(machine.id);
+          pendingConfigUpdates.delete(machine.id);
 
           console.log(`   - ${machine.name} (${machine.id}) marked offline (last seen: ${machine.lastSeenAt?.toISOString() || 'never'})`);
         }

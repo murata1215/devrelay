@@ -156,6 +156,16 @@ export const machines = {
   async setHostnameAlias(hostname: string, alias: string): Promise<{ success: boolean; updatedCount: number }> {
     return request('PUT', '/machines/hostname-alias', { hostname, alias });
   },
+
+  /** プロジェクト検索パスを取得（localProjectsDirs は Agent ローカル設定の参照値） */
+  async getProjectsDirs(id: string): Promise<{ projectsDirs: string[] | null; localProjectsDirs: string[] | null }> {
+    return request('GET', `/machines/${id}/projects-dirs`);
+  },
+
+  /** プロジェクト検索パスを更新し、Agent にリアルタイム配信 */
+  async setProjectsDirs(id: string, projectsDirs: string[] | null): Promise<{ success: boolean }> {
+    return request('PUT', `/machines/${id}/projects-dirs`, { projectsDirs });
+  },
 };
 
 export const projects = {

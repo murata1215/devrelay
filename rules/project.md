@@ -262,6 +262,26 @@ CLAUDE.md           ← 軽量ハブ（2,000 トークン以内）
 
 ---
 
+## Server → Agent 設定配信（pending リトライ）
+
+WebUI から Agent の設定（`projectsDirs` 等）を変更した場合、Server は `server:config:update` を WebSocket 経由で Agent に送信する。
+ただし WebSocket が半開き状態（TCP は生きているが実際にはメッセージが届かない）になることがあり、
+単発の `ws.send()` だけでは配信が保証されない。
+
+### 解決策: ping リトライ機構
+
+1. `pushConfigUpdate()` で `pendingConfigUpdates` Map に登録（`{ config, retries }` 構造）
+2. Agent の `agent:ping` 受信時に、ping ハンドラの `ws`（確実に生きている）を使ってリトライ送信
+3. Agent は処理完了後に `agent:config:ack` を送信 → Server が pending を削除
+4. 旧バージョン Agent は ack を返さないため、最大5回でリトライ打ち切り
+5. Agent 再接続時は `server:connect:ack` で DB 最新値が届くため、pending は不要（即クリア）
+
+**重要**: `sendToAgent(machineId, ...)` は `connectedAgents` Map 経由で WebSocket を取得するが、
+ping ハンドラでは `ws.on('message')` のコールバックから直接取得した `ws` を使用する。
+後者は Agent からメッセージを受信した実績がある WebSocket なので、送信も成功する可能性が高い。
+
+---
+
 ## 今後の課題
 
 - LINE 対応

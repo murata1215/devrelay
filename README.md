@@ -26,6 +26,8 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Agreement Template Editor**: Customize AI rules from Settings page
 - **Message File Storage**: Attached files stored in DB (PostgreSQL bytea) with image lightbox preview
 - **Soft Delete**: Machine deletion preserves all conversation history
+- **Kill Command**: Cancel running AI process mid-execution from chat
+- **Remote Config**: Configure agent project search paths from WebUI (auto-sync via WebSocket)
 
 ## 💡 Token Efficiency
 
@@ -69,7 +71,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#94)
+│   ├── changelog.md      # Implementation history (#1-#96)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer
@@ -203,6 +205,7 @@ Bot: 🤖 Working on it...
 | `ag` / `agreement` | Apply DevRelay Agreement v4 (creates `rules/devrelay.md`) |
 | `link` | Link Discord/Telegram account to WebUI |
 | `1`, `2`, `3`... | Select from list |
+| `k` / `kill` | Cancel running AI process |
 | `x` | Clear conversation history (requires double confirmation) |
 | `q` | Disconnect |
 | `h` | Help |
@@ -405,6 +408,8 @@ agents/windows/
 - [x] Agreement template editor in Settings page (customize AI rules from WebUI)
 - [x] Message file BLOB storage (attached files in DB with image lightbox preview)
 - [x] Machine soft delete (preserve conversation history on agent removal)
+- [x] Kill command (`k` / `kill` to cancel running AI process)
+- [x] Server-managed project search paths (configure agent `projectsDirs` from WebUI)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features

@@ -21,6 +21,8 @@ export const SHORTCUTS: Record<string, string> = {
   'session': 'session',
   'b': 'build',     // ビルドログ（exec 実行履歴）
   'build': 'build',
+  'k': 'kill',     // AI プロセスを強制停止
+  'kill': 'kill',
   'q': 'quit',
   'h': 'help',
   'log': 'log',
