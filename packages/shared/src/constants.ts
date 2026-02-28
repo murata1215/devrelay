@@ -48,81 +48,83 @@ export const STATUS_EMOJI = {
 } as const;
 
 // プランモード中に許可する読み取り専用 Bash コマンドのデフォルトリスト（Linux 用）
+// 注意: `*` ワイルドカード必須。`Bash(pm2 logs)` は完全一致のみ、`Bash(pm2 logs *)` で引数付きも許可
 export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
   // PM2 ログ・ステータス確認
-  'Bash(pm2 logs)',
-  'Bash(pm2 log)',
-  'Bash(pm2 status)',
-  'Bash(pm2 list)',
-  'Bash(pm2 show)',
-  'Bash(pm2 describe)',
+  'Bash(pm2 logs *)',
+  'Bash(pm2 log *)',
+  'Bash(pm2 status *)',
+  'Bash(pm2 list *)',
+  'Bash(pm2 show *)',
+  'Bash(pm2 describe *)',
   // システム・ログ確認
-  'Bash(journalctl)',
-  'Bash(systemctl status)',
-  'Bash(systemctl is-active)',
+  'Bash(journalctl *)',
+  'Bash(systemctl status *)',
+  'Bash(systemctl is-active *)',
   // Git 読み取り
-  'Bash(git log)',
-  'Bash(git status)',
-  'Bash(git diff)',
-  'Bash(git show)',
-  'Bash(git branch)',
+  'Bash(git log *)',
+  'Bash(git status *)',
+  'Bash(git diff *)',
+  'Bash(git show *)',
+  'Bash(git branch *)',
   // システム情報
-  'Bash(ps)',
-  'Bash(free)',
-  'Bash(df)',
-  'Bash(du)',
-  'Bash(ss)',
-  'Bash(netstat)',
+  'Bash(ps *)',
+  'Bash(free *)',
+  'Bash(df *)',
+  'Bash(du *)',
+  'Bash(ss *)',
+  'Bash(netstat *)',
   // Docker（参照のみ）
-  'Bash(docker ps)',
-  'Bash(docker logs)',
-  'Bash(docker compose ps)',
-  'Bash(docker compose logs)',
+  'Bash(docker ps *)',
+  'Bash(docker logs *)',
+  'Bash(docker compose ps *)',
+  'Bash(docker compose logs *)',
   // ログ・ファイル読み取り
-  'Bash(tail)',
-  'Bash(head)',
-  'Bash(wc)',
+  'Bash(tail *)',
+  'Bash(head *)',
+  'Bash(wc *)',
   // ネットワーク・サーバー状態
-  'Bash(curl)',
-  'Bash(lsof)',
-  'Bash(uptime)',
+  'Bash(curl *)',
+  'Bash(lsof *)',
+  'Bash(uptime *)',
   // リバースプロキシ確認
-  'Bash(caddy)',
+  'Bash(caddy *)',
 ];
 
 // プランモード中に許可する読み取り専用 Bash コマンドのデフォルトリスト（Windows 用）
+// 注意: `*` ワイルドカード必須。`Bash(pm2 logs)` は完全一致のみ、`Bash(pm2 logs *)` で引数付きも許可
 export const DEFAULT_ALLOWED_TOOLS_WINDOWS: string[] = [
   // PM2 ログ・ステータス確認
-  'Bash(pm2 logs)',
-  'Bash(pm2 log)',
-  'Bash(pm2 status)',
-  'Bash(pm2 list)',
-  'Bash(pm2 show)',
-  'Bash(pm2 describe)',
+  'Bash(pm2 logs *)',
+  'Bash(pm2 log *)',
+  'Bash(pm2 status *)',
+  'Bash(pm2 list *)',
+  'Bash(pm2 show *)',
+  'Bash(pm2 describe *)',
   // Git 読み取り
-  'Bash(git log)',
-  'Bash(git status)',
-  'Bash(git diff)',
-  'Bash(git show)',
-  'Bash(git branch)',
+  'Bash(git log *)',
+  'Bash(git status *)',
+  'Bash(git diff *)',
+  'Bash(git show *)',
+  'Bash(git branch *)',
   // システム情報（PowerShell）
-  'Bash(Get-Service)',
-  'Bash(Get-Process)',
-  'Bash(Get-EventLog)',
-  'Bash(tasklist)',
-  'Bash(sc query)',
-  'Bash(netstat)',
+  'Bash(Get-Service *)',
+  'Bash(Get-Process *)',
+  'Bash(Get-EventLog *)',
+  'Bash(tasklist *)',
+  'Bash(sc query *)',
+  'Bash(netstat *)',
   // Docker（参照のみ）
-  'Bash(docker ps)',
-  'Bash(docker logs)',
-  'Bash(docker compose ps)',
-  'Bash(docker compose logs)',
+  'Bash(docker ps *)',
+  'Bash(docker logs *)',
+  'Bash(docker compose ps *)',
+  'Bash(docker compose logs *)',
   // ファイル読み取り
-  'Bash(Get-Content)',
-  'Bash(type)',
+  'Bash(Get-Content *)',
+  'Bash(type *)',
   // ネットワーク・サーバー状態
-  'Bash(curl)',
-  'Bash(Invoke-WebRequest)',
+  'Bash(curl *)',
+  'Bash(Invoke-WebRequest *)',
 ];
 
 // Default config values
