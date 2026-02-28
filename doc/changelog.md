@@ -1568,3 +1568,13 @@ Server を更新するだけで全 Agent のテンプレートが最新になる
   - `packages/shared/src/types.ts` - AgreementApplyPayload 拡張
   - `agents/linux/src/services/connection.ts` - handleAgreementApply 更新
   - `agents/windows/src/services/connection.ts` - handleAgreementApply 更新
+
+#### 89. exec コマンドのユーザーメッセージ保存 (2026-02-28)
+
+`e`/`exec` 実行時に WebUI Conversations ページで User Message が `(empty)` と表示される問題を修正。
+`handleExec()` が Message テーブルに user メッセージを保存していなかったため、AI レスポンスとマッチする user メッセージが存在しなかった。
+
+- `handleExec()` 内で exec 実行前に user メッセージを保存するように変更
+  - カスタムプロンプトあり: `[exec] <prompt>`
+  - カスタムプロンプトなし: `[exec]`
+- **変更ファイル**: `apps/server/src/services/command-handler.ts`

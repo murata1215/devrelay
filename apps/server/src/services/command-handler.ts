@@ -621,6 +621,17 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
     return '❌ セッションが見つかりません。';
   }
 
+  // exec メッセージを保存（Conversations ページで表示するため）
+  const execContent = customPrompt ? `[exec] ${customPrompt}` : '[exec]';
+  await prisma.message.create({
+    data: {
+      sessionId: context.currentSessionId,
+      role: 'user',
+      content: execContent,
+      platform: context.platform
+    }
+  });
+
   // Start progress tracking
   await startProgressTracking(context.currentSessionId);
 
