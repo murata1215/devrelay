@@ -15,7 +15,9 @@ import {
   switchAiTool,
   isAgentRestarted,
   clearAgentRestarted,
-  cancelAiProcess
+  cancelAiProcess,
+  checkAgentVersion,
+  updateAgent
 } from './agent-manager.js';
 import {
   createSession,
@@ -38,6 +40,9 @@ const userContexts = new Map<string, UserContext>();
 
 // x コマンドの連続確認用: チャンネルごとに前回のコマンドが clear だったかを記録
 const pendingClear = new Set<string>();
+
+// u コマンドの連続確認用: チャンネルごとに前回のコマンドが update だったかを記録
+const pendingUpdate = new Set<string>();
 
 // w コマンド（wrap up）実行済みフラグ: x コマンド時に w 未実行なら警告を表示
 const wrapUpDone = new Set<string>();
@@ -113,10 +118,13 @@ export async function executeCommand(
   files?: FileAttachment[],
   missedMessages?: MissedMessage[]
 ): Promise<string> {
-  // clear 以外のコマンドが来たら確認状態をリセット
+  // clear/update 以外のコマンドが来たら確認状態をリセット
   const chatKey = `${context.platform}:${context.chatId}`;
   if (command.type !== 'clear') {
     pendingClear.delete(chatKey);
+  }
+  if (command.type !== 'update') {
+    pendingUpdate.delete(chatKey);
   }
 
   switch (command.type) {
@@ -169,6 +177,9 @@ export async function executeCommand(
 
     case 'kill':
       return handleKill(context);
+
+    case 'update':
+      return handleUpdate(context);
 
     case 'quit':
       return handleQuit(context);
@@ -979,6 +990,50 @@ async function handleKill(context: UserContext): Promise<string> {
 
   // フィードバックは agent:ai:cancelled 経由で返るため空文字
   return '';
+}
+
+/** Agent のバージョン確認・更新（2回連続で更新実行） */
+async function handleUpdate(context: UserContext): Promise<string> {
+  if (!context.currentMachineId) {
+    return '⚠️ エージェントに接続されていません。\n`m` でエージェント一覧を表示して接続してください。';
+  }
+
+  const chatKey = `${context.platform}:${context.chatId}`;
+
+  // 2回目の u: 更新実行
+  if (pendingUpdate.has(chatKey)) {
+    pendingUpdate.delete(chatKey);
+    updateAgent(context.currentMachineId, context.platform, context.chatId);
+    return '🔄 Agent を更新中...\n（接続が一時的に切断されます）';
+  }
+
+  // 1回目の u: バージョン確認
+  try {
+    const info = await checkAgentVersion(context.currentMachineId);
+
+    if (info.error) {
+      return `❌ バージョン確認に失敗しました: ${info.error}`;
+    }
+
+    if (info.isDevRepo) {
+      return '⚠️ 開発リポジトリから実行中のため、リモート更新は不可。\n`pnpm deploy-agent` を使用してください。';
+    }
+
+    if (!info.hasUpdate) {
+      return `✅ Agent は最新です\n  commit: ${info.localCommit.slice(0, 7)} (${info.localDate})`;
+    }
+
+    // 更新あり: pendingUpdate フラグを設定
+    pendingUpdate.add(chatKey);
+    const displayName = context.currentMachineName || 'Agent';
+    return `📦 **${displayName}**\n`
+      + `  ローカル: ${info.localCommit.slice(0, 7)} (${info.localDate})\n`
+      + `  リモート: ${info.remoteCommit.slice(0, 7)} (${info.remoteDate})\n`
+      + `  ⚠️ 更新があります\n\n`
+      + `もう一度 \`u\` を送信すると更新を実行します。`;
+  } catch (err) {
+    return `❌ バージョン確認に失敗しました: ${(err as Error).message}`;
+  }
 }
 
 async function handleQuit(context: UserContext): Promise<string> {

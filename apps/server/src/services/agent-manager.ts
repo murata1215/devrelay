@@ -10,10 +10,13 @@ import type {
   WorkState,
   AiListResponsePayload,
   AiSwitchedPayload,
-  AiCancelledPayload
+  AiCancelledPayload,
+  AgentVersionInfoPayload,
+  AgentUpdateStatusPayload,
+  Platform
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage } from './session-manager.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
@@ -54,6 +57,12 @@ interface PendingConfigUpdate {
   retries: number;
 }
 const pendingConfigUpdates = new Map<string, PendingConfigUpdate>();
+
+// バージョン確認リクエスト: machineId -> Promise コールバック
+const pendingVersionCheckRequests = new Map<string, HistoryRequest<AgentVersionInfoPayload>>();
+
+// 更新リクエストの通知先: machineId -> { platform, chatId }（エラー通知用）
+const pendingUpdateNotify = new Map<string, { platform: Platform; chatId: string }>();
 
 // Agent 再接続フラグ: Agent が再接続した machineId を記録
 // 再接続後の最初のプロンプトでセッション再開始が必要かを判定するために使用
@@ -130,6 +139,14 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
         case 'agent:config:ack':
           // Agent が設定更新を受信・適用完了 → pending から削除
           handleConfigAck(message.payload.machineId);
+          break;
+
+        case 'agent:version:info':
+          handleVersionInfo(message.payload);
+          break;
+
+        case 'agent:update:status':
+          await handleUpdateStatus(message.payload);
           break;
       }
     } catch (err) {
@@ -898,6 +915,38 @@ function handleConfigAck(machineId: string) {
   }
 }
 
+/** Agent からバージョン情報の応答を受信 → pending Promise を解決 */
+function handleVersionInfo(payload: AgentVersionInfoPayload) {
+  const { machineId } = payload;
+  const requestId = `version-${machineId}`;
+  const pending = pendingVersionCheckRequests.get(requestId);
+
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingVersionCheckRequests.delete(requestId);
+    pending.resolve(payload);
+    console.log(`📦 Version info received from ${machineId}: local=${payload.localCommit?.slice(0, 7)}, remote=${payload.remoteCommit?.slice(0, 7)}, hasUpdate=${payload.hasUpdate}`);
+  }
+}
+
+/** Agent から更新処理のステータスを受信 → エラー時はユーザーに通知 */
+async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
+  const { machineId, status, error } = payload;
+
+  if (status === 'started') {
+    console.log(`🔄 Agent update started for ${machineId}`);
+    // started はログのみ（Agent が再起動して再接続する）
+  } else if (status === 'error') {
+    console.error(`❌ Agent update failed for ${machineId}: ${error}`);
+    // エラー時はリクエスト元のユーザーに通知
+    const requestor = pendingUpdateNotify.get(machineId);
+    if (requestor) {
+      await sendMessage(requestor.platform, requestor.chatId, `❌ Agent 更新に失敗しました: ${error}`);
+      pendingUpdateNotify.delete(machineId);
+    }
+  }
+}
+
 /**
  * 指定 OS の全オンライン Agent に allowedTools を配信する
  * Settings ページで allowedTools を変更した際に呼び出す
@@ -926,6 +975,63 @@ export async function pushAllowedToolsToAgents(userId: string, os: 'linux' | 'wi
 /** Agent が接続時に報告したローカルの projectsDirs を取得 */
 export function getAgentLocalProjectsDirs(machineId: string): string[] | null {
   return agentLocalProjectsDirs.get(machineId) ?? null;
+}
+
+// -----------------------------------------------------------------------------
+// Agent Version Check / Update API
+// -----------------------------------------------------------------------------
+
+const VERSION_CHECK_TIMEOUT = 30000; // 30秒（git fetch に時間がかかる場合あり）
+
+/**
+ * Agent にバージョン確認リクエストを送信し、結果を Promise で返す
+ * Agent 側で git fetch → ローカル/リモートのコミット比較を実行
+ */
+export function checkAgentVersion(machineId: string): Promise<AgentVersionInfoPayload> {
+  return new Promise((resolve, reject) => {
+    const ws = connectedAgents.get(machineId);
+    if (!ws || ws.readyState !== ws.OPEN) {
+      reject(new Error('Agent がオフラインです'));
+      return;
+    }
+
+    const requestId = `version-${machineId}`;
+
+    // 既存のリクエストがあればキャンセル
+    const existing = pendingVersionCheckRequests.get(requestId);
+    if (existing) {
+      clearTimeout(existing.timeout);
+      pendingVersionCheckRequests.delete(requestId);
+    }
+
+    const timeout = setTimeout(() => {
+      pendingVersionCheckRequests.delete(requestId);
+      reject(new Error('タイムアウト'));
+    }, VERSION_CHECK_TIMEOUT);
+
+    pendingVersionCheckRequests.set(requestId, { resolve, reject, timeout });
+
+    sendToAgent(ws, {
+      type: 'server:agent:version-check',
+      payload: {}
+    });
+  });
+}
+
+/**
+ * Agent に更新実行コマンドを送信する
+ * Agent は detached プロセスで git pull + ビルド + 再起動を実行
+ *
+ * @param machineId 更新対象の Agent マシンID
+ * @param platform リクエスト元のプラットフォーム（エラー通知用）
+ * @param chatId リクエスト元のチャットID（エラー通知用）
+ */
+export function updateAgent(machineId: string, platform: Platform, chatId: string) {
+  pendingUpdateNotify.set(machineId, { platform, chatId });
+  sendToAgent(machineId, {
+    type: 'server:agent:update',
+    payload: {}
+  });
 }
 
 export async function clearConversation(machineId: string, sessionId: string, projectPath: string) {

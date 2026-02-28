@@ -339,6 +339,28 @@ PM2 は `~/.devrelay/agent/` のコードを実行するため、`/opt/devrelay/
 
 ---
 
+## Agent リモート更新（#101）
+
+Discord/Telegram から `u` / `update` コマンドで Agent のバージョン確認・更新を実行できる。
+
+### フロー
+
+1. 1回目 `u`: Server → Agent に `server:agent:version-check` 送信
+2. Agent が `git fetch` + コミット比較 → `agent:version:info` で結果を返却
+3. 更新がある場合、2回目 `u` で `server:agent:update` を送信
+4. Agent が detached 子プロセスで `git pull + pnpm build + restart` を実行
+
+### 設計判断
+
+- **detached 子プロセス**: Agent 自身が再起動対象のため、親プロセスが終了してもスクリプトは継続する
+- **開発リポジトリ検出**: `~/.devrelay/agent/` 配下でなければ開発リポとみなし更新拒否（`pnpm deploy-agent` を案内）
+- **管理コマンド**: `generateManagementInfo()` で検出した restart コマンドを使用（PM2/systemd/nohup 自動判定）
+- **Promise パターン**: `checkAgentVersion()` は 30 秒タイムアウトの Promise（git fetch に時間がかかる場合あり）
+- **エラー通知**: `pendingUpdateNotify` Map でリクエスト元のチャットに通知（`sendMessage()` 使用）
+- **2回連続確認**: `x`（clear）コマンドと同パターンの `pendingUpdate` Set
+
+---
+
 ## 今後の課題
 
 - LINE 対応

@@ -207,6 +207,7 @@ Bot: 🤖 Working on it...
 | `ag` / `agreement` | Apply DevRelay Agreement v4 (creates `rules/devrelay.md`) |
 | `link` | Link Discord/Telegram account to WebUI |
 | `1`, `2`, `3`... | Select from list |
+| `u` / `update` | Check agent version / remote update (requires double confirmation) |
 | `k` / `kill` | Cancel running AI process |
 | `x` | Clear conversation history (requires double confirmation) |
 | `q` | Disconnect |
@@ -415,6 +416,7 @@ agents/windows/
 - [x] Plan mode read-only commands (`--allowedTools` for pm2 logs, git status, etc.)
 - [x] `deploy-agent` script (copy built agent to installed location)
 - [x] Allowed tools WebUI management (Server DB + Settings page, Linux/Windows split, real-time agent sync)
+- [x] Agent remote update (`u` / `update` command to check version and update agent from Discord/Telegram)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features

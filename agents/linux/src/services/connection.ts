@@ -39,8 +39,12 @@ import {
   DEVRELAY_AGREEMENT_OLD_MARKERS,
   AGREEMENT_APPLY_PROMPT
 } from './output-collector.js';
+import { exec as execCallback, spawn } from 'child_process';
+import { promisify } from 'util';
+import { homedir } from 'os';
 import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
+const execAsync = promisify(execCallback);
 import {
   loadConversation,
   saveConversation,
@@ -307,6 +311,14 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           });
         }
       }
+      break;
+
+    case 'server:agent:version-check':
+      handleVersionCheck();
+      break;
+
+    case 'server:agent:update':
+      handleAgentUpdate();
       break;
   }
 }
@@ -1411,4 +1423,197 @@ async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {
       },
     });
   }
+}
+
+// -----------------------------------------------------------------------------
+// Agent Version Check / Update
+// -----------------------------------------------------------------------------
+
+/**
+ * Agent のルートディレクトリを取得する
+ * process.argv[1] = <root>/agents/linux/dist/index.js → 3階層上がルート
+ */
+function getAgentRootDir(): string {
+  return resolve(dirname(process.argv[1]), '..', '..', '..');
+}
+
+/**
+ * インストール済み Agent かどうかを判定する
+ * ~/.devrelay/agent/ 配下にあればインストール済み、それ以外は開発リポジトリ
+ */
+function isInstalledAgent(agentDir: string): boolean {
+  const installedDir = join(homedir(), '.devrelay', 'agent');
+  return agentDir.startsWith(installedDir);
+}
+
+/**
+ * プロキシ設定を含む環境変数オブジェクトを構築する
+ * Agent の config.yaml にプロキシが設定されている場合、git/pnpm にも適用
+ */
+function getExecEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  if (currentConfig?.proxy?.url) {
+    const proxyUrl = buildProxyUrl(currentConfig.proxy);
+    env.HTTP_PROXY = proxyUrl;
+    env.HTTPS_PROXY = proxyUrl;
+    env.http_proxy = proxyUrl;
+    env.https_proxy = proxyUrl;
+  }
+  return env;
+}
+
+/**
+ * Server からバージョン確認リクエストを受信
+ * ローカル/リモートの git コミットを比較して結果を返す
+ */
+async function handleVersionCheck() {
+  const agentDir = getAgentRootDir();
+  const isDevRepo = !isInstalledAgent(agentDir);
+  const machineId = currentMachineId || currentConfig?.machineId || '';
+
+  console.log(`📦 Version check requested (dir: ${agentDir}, isDevRepo: ${isDevRepo})`);
+
+  try {
+    const execEnv = getExecEnv();
+    const execOpts = { cwd: agentDir, env: execEnv, timeout: 30000 };
+
+    // ローカルコミット情報を取得
+    const { stdout: localRaw } = await execAsync('git log -1 --format="%H %ai"', execOpts);
+    const localParts = localRaw.trim().split(' ');
+    const localCommit = localParts[0];
+    const localDate = localParts.slice(1).join(' ');
+
+    // リモートの最新コミットを取得（fetch してから確認）
+    await execAsync('git fetch origin --quiet', execOpts);
+    const { stdout: remoteRaw } = await execAsync('git log origin/main -1 --format="%H %ai"', execOpts);
+    const remoteParts = remoteRaw.trim().split(' ');
+    const remoteCommit = remoteParts[0];
+    const remoteDate = remoteParts.slice(1).join(' ');
+
+    const hasUpdate = localCommit !== remoteCommit;
+    console.log(`📦 Local: ${localCommit.slice(0, 7)} (${localDate}), Remote: ${remoteCommit.slice(0, 7)} (${remoteDate}), hasUpdate: ${hasUpdate}`);
+
+    sendMessage({
+      type: 'agent:version:info',
+      payload: {
+        machineId,
+        localCommit,
+        localDate,
+        remoteCommit,
+        remoteDate,
+        hasUpdate,
+        isDevRepo,
+      },
+    });
+  } catch (err) {
+    console.error(`❌ Version check failed:`, (err as Error).message);
+    sendMessage({
+      type: 'agent:version:info',
+      payload: {
+        machineId,
+        localCommit: '',
+        localDate: '',
+        remoteCommit: '',
+        remoteDate: '',
+        hasUpdate: false,
+        isDevRepo,
+        error: (err as Error).message,
+      },
+    });
+  }
+}
+
+/**
+ * Server から更新実行リクエストを受信
+ * detached プロセスで git pull + ビルド + 再起動を実行
+ * Agent 自身が再起動対象なので、親プロセスが終了してもスクリプトは継続する
+ */
+async function handleAgentUpdate() {
+  const agentDir = getAgentRootDir();
+  const machineId = currentMachineId || currentConfig?.machineId || '';
+
+  // 開発リポジトリからは更新不可
+  if (!isInstalledAgent(agentDir)) {
+    sendMessage({
+      type: 'agent:update:status',
+      payload: {
+        machineId,
+        status: 'error',
+        error: '開発リポジトリから実行中のため、リモート更新は不可。pnpm deploy-agent を使用してください。',
+      },
+    });
+    return;
+  }
+
+  // 管理コマンドからリスタートコマンドを取得
+  const mgmtInfo = generateManagementInfo();
+  const restartCmd = mgmtInfo.commands.find(c => c.type === 'restart');
+
+  if (!restartCmd) {
+    sendMessage({
+      type: 'agent:update:status',
+      payload: {
+        machineId,
+        status: 'error',
+        error: '再起動コマンドが見つかりません。',
+      },
+    });
+    return;
+  }
+
+  console.log(`🔄 Starting agent update (dir: ${agentDir}, restart: ${restartCmd.command})`);
+
+  // 更新開始を Server に通知
+  sendMessage({
+    type: 'agent:update:status',
+    payload: {
+      machineId,
+      status: 'started',
+    },
+  });
+
+  if (process.platform === 'win32') {
+    // Windows: PowerShell スクリプトで更新
+    const script = [
+      `$ErrorActionPreference = 'Continue'`,
+      `cd "${agentDir}"`,
+      `git fetch origin 2>&1`,
+      `git reset --hard origin/main 2>&1`,
+      `pnpm install --frozen-lockfile --ignore-scripts 2>&1`,
+      `pnpm --filter @devrelay/shared build 2>&1`,
+      `pnpm --filter @devrelay/agent build 2>&1`,
+      `Start-Sleep -Seconds 2`,
+      restartCmd.command,
+    ].join('; ');
+
+    const child = spawn('powershell', ['-Command', script], {
+      detached: true,
+      stdio: 'ignore',
+      env: getExecEnv(),
+    });
+    child.unref();
+  } else {
+    // Linux: bash スクリプトで更新
+    const nodeBinDir = join(homedir(), '.devrelay', 'node', 'bin');
+    const script = [
+      `export PATH="${nodeBinDir}:$PATH"`,
+      `cd "${agentDir}"`,
+      `git fetch origin`,
+      `git reset --hard origin/main`,
+      `pnpm install --frozen-lockfile --ignore-scripts 2>&1 || true`,
+      `pnpm --filter @devrelay/shared build 2>&1`,
+      `pnpm --filter @devrelay/agent build 2>&1`,
+      `sleep 2`,
+      restartCmd.command,
+    ].join(' && ');
+
+    const child = spawn('bash', ['-c', script], {
+      detached: true,
+      stdio: 'ignore',
+      env: getExecEnv(),
+    });
+    child.unref();
+  }
+
+  console.log(`🔄 Update script spawned (detached). Agent will restart shortly.`);
 }

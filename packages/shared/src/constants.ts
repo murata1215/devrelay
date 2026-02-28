@@ -23,6 +23,8 @@ export const SHORTCUTS: Record<string, string> = {
   'build': 'build',
   'k': 'kill',     // AI プロセスを強制停止
   'kill': 'kill',
+  'u': 'update',   // Agent バージョン確認・更新
+  'update': 'update',
   'q': 'quit',
   'h': 'help',
   'log': 'log',

@@ -86,7 +86,9 @@ export type AgentMessage =
   | { type: 'agent:ai:switched'; payload: AiSwitchedPayload }
   | { type: 'agent:session:aiTool'; payload: SessionAiToolPayload }
   | { type: 'agent:ai:cancelled'; payload: AiCancelledPayload }
-  | { type: 'agent:config:ack'; payload: { machineId: string } };
+  | { type: 'agent:config:ack'; payload: { machineId: string } }
+  | { type: 'agent:version:info'; payload: AgentVersionInfoPayload }
+  | { type: 'agent:update:status'; payload: AgentUpdateStatusPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -215,7 +217,9 @@ export type ServerToAgentMessage =
   | { type: 'server:ai:list'; payload: AiListPayload }
   | { type: 'server:ai:switch'; payload: AiSwitchPayload }
   | { type: 'server:ai:cancel'; payload: AiCancelPayload }
-  | { type: 'server:config:update'; payload: ServerConfigUpdatePayload };
+  | { type: 'server:config:update'; payload: ServerConfigUpdatePayload }
+  | { type: 'server:agent:version-check'; payload: {} }
+  | { type: 'server:agent:update'; payload: {} };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -331,6 +335,26 @@ export interface AiCancelledPayload {
   sessionId: string;
 }
 
+/** Agent → Server: バージョン情報の応答 */
+export interface AgentVersionInfoPayload {
+  machineId: string;
+  localCommit: string;
+  localDate: string;
+  remoteCommit: string;
+  remoteDate: string;
+  hasUpdate: boolean;
+  /** 開発リポジトリから実行中の場合 true */
+  isDevRepo?: boolean;
+  error?: string;
+}
+
+/** Agent → Server: 更新処理の進捗・結果 */
+export interface AgentUpdateStatusPayload {
+  machineId: string;
+  status: 'started' | 'error';
+  error?: string;
+}
+
 export interface AiSwitchedPayload {
   machineId: string;
   sessionId: string;
@@ -386,7 +410,8 @@ export type UserCommand =
   | { type: 'ai:list' }   // AI ツール一覧
   | { type: 'ai:switch'; tool: AiTool }
   | { type: 'ai:prompt'; text: string }
-  | { type: 'kill' };  // 実行中の AI プロセスを強制停止
+  | { type: 'kill' }     // 実行中の AI プロセスを強制停止
+  | { type: 'update' };  // Agent バージョン確認・更新
 
 // -----------------------------------------------------------------------------
 // User Context (for command parsing)
