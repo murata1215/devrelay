@@ -715,6 +715,16 @@ async function handleAgreement(context: UserContext): Promise<string> {
     return '❌ セッションが見つかりません。';
   }
 
+  // agreement メッセージを保存（Conversations ページで表示するため）
+  await prisma.message.create({
+    data: {
+      sessionId: context.currentSessionId,
+      role: 'user',
+      content: '[agreement]',
+      platform: context.platform
+    }
+  });
+
   // Start progress tracking
   await startProgressTracking(context.currentSessionId);
 

@@ -1813,3 +1813,12 @@ SSH なしで Agent を最新版に更新可能にした。
 - **動的パターン**: 数字選択、`e, <prompt>`、`ai:*`、`a <arg>`、`log\d+`、`sum\d+d?` は個別チェックを残す
 - **変更ファイル**:
   - `apps/server/src/services/natural-language-parser.ts` - `SHORTCUTS` import + `isTraditionalCommand()` 書き換え
+
+#### 103. agreement コマンドの User Message 保存 (2026-03-01)
+
+`ag` コマンド実行時に Conversations ページで User Message が `(empty)` と表示されるバグを修正。
+
+- **根本原因**: `handleAgreement()` に `prisma.message.create()` がなく、ユーザーメッセージが DB に保存されていなかった
+- **修正**: `handleExec()` と同パターンで `[agreement]` マーカーを保存してから Agent に送信
+- **変更ファイル**:
+  - `apps/server/src/services/command-handler.ts` - `handleAgreement()` にメッセージ保存を追加
