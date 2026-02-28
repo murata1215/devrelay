@@ -194,6 +194,29 @@ export const settings = {
   },
 };
 
+// Allowed Tools API（プランモード許可ツール）
+export interface AllowedToolsOsData {
+  tools: string[] | null;  // null = デフォルト使用
+  defaults: string[];
+}
+
+export interface AllowedToolsResponse {
+  linux: AllowedToolsOsData;
+  windows: AllowedToolsOsData;
+}
+
+export const allowedTools = {
+  /** 両 OS の allowedTools 設定を取得（カスタム値 + デフォルト値） */
+  async get(): Promise<AllowedToolsResponse> {
+    return request('GET', '/settings/allowed-tools');
+  },
+
+  /** 特定 OS の allowedTools を保存（null = デフォルトにリセット） */
+  async update(os: 'linux' | 'windows', tools: string[] | null): Promise<{ success: boolean }> {
+    return request('PUT', '/settings/allowed-tools', { os, tools });
+  },
+};
+
 // Agreement テンプレート API
 export interface AgreementTemplateResponse {
   template: string;

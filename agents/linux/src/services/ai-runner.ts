@@ -1,6 +1,7 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
@@ -60,38 +61,12 @@ export async function startAiSession(
   activeSessions.set(sessionId, session);
 }
 
-/** プランモード中に許可する読み取り専用 Bash コマンドのリスト */
-export const PLAN_MODE_ALLOWED_TOOLS = [
-  // PM2 ログ・ステータス確認
-  'Bash(pm2 logs)',
-  'Bash(pm2 log)',
-  'Bash(pm2 status)',
-  'Bash(pm2 list)',
-  'Bash(pm2 show)',
-  'Bash(pm2 describe)',
-  // システム・ログ確認
-  'Bash(journalctl)',
-  'Bash(systemctl status)',
-  'Bash(systemctl is-active)',
-  // Git 読み取り
-  'Bash(git log)',
-  'Bash(git status)',
-  'Bash(git diff)',
-  'Bash(git show)',
-  'Bash(git branch)',
-  // システム情報
-  'Bash(ps)',
-  'Bash(free)',
-  'Bash(df)',
-  'Bash(du)',
-  'Bash(ss)',
-  'Bash(netstat)',
-  // Docker（参照のみ）
-  'Bash(docker ps)',
-  'Bash(docker logs)',
-  'Bash(docker compose ps)',
-  'Bash(docker compose logs)',
-];
+/**
+ * プランモード中に許可する読み取り専用 Bash コマンドのデフォルトリスト
+ * Server DB（UserSettings）から配信された値がある場合はそちらを優先する
+ * @deprecated connection.ts の serverAllowedTools を使用。これは後方互換用の re-export
+ */
+export const PLAN_MODE_ALLOWED_TOOLS = DEFAULT_ALLOWED_TOOLS_LINUX;
 
 export interface SendPromptOptions {
   /** Claude session ID to resume (from previous execution) */

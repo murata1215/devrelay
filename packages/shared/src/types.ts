@@ -233,11 +233,13 @@ export interface ServerConnectAckPayload {
   machineId?: string;  // DB machine ID (only on success)
   error?: string;
   projectsDirs?: string[] | null;  // Server 管理のプロジェクト検索パス（null = ローカル設定を使用）
+  allowedTools?: string[] | null;  // プランモード許可ツール（null = デフォルト使用）
 }
 
 /** Server → Agent: 設定更新の配信（リアルタイム） */
 export interface ServerConfigUpdatePayload {
   projectsDirs?: string[] | null;  // プロジェクト検索パスの更新（null = ローカル設定に戻す）
+  allowedTools?: string[] | null;  // プランモード許可ツールの更新（null = デフォルトに戻す）
 }
 
 export interface ServerPongPayload {

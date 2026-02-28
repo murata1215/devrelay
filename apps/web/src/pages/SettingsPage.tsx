@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { settings, platforms, services, agreementTemplate, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse } from '../lib/api';
+import { settings, platforms, services, agreementTemplate, allowedTools, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse } from '../lib/api';
 
 /** API キーフィールドの定義 */
 interface ApiKeyFieldDef {
@@ -97,13 +97,22 @@ export function SettingsPage() {
   const [agreementSaving, setAgreementSaving] = useState(false);
   const [agreementDirty, setAgreementDirty] = useState(false);
 
+  // Allowed Tools（プランモード許可ツール）
+  const [atData, setAtData] = useState<AllowedToolsResponse | null>(null);
+  const [atLinuxDraft, setAtLinuxDraft] = useState('');
+  const [atWindowsDraft, setAtWindowsDraft] = useState('');
+  const [atLinuxDirty, setAtLinuxDirty] = useState(false);
+  const [atWindowsDirty, setAtWindowsDirty] = useState(false);
+  const [atSaving, setAtSaving] = useState<'linux' | 'windows' | null>(null);
+
   const loadSettings = async () => {
     try {
-      const [settingsResult, platformsResult, serviceStatusResult, agreementResult] = await Promise.all([
+      const [settingsResult, platformsResult, serviceStatusResult, agreementResult, atResult] = await Promise.all([
         settings.get(),
         platforms.list(),
         services.status().catch(() => null),
         agreementTemplate.get().catch(() => null),
+        allowedTools.get().catch(() => null),
       ]);
       setData(settingsResult);
       setLinkedPlatforms(platformsResult);
@@ -111,6 +120,12 @@ export function SettingsPage() {
       if (agreementResult) {
         setAgreementData(agreementResult);
         setAgreementDraft(agreementResult.template);
+      }
+      if (atResult) {
+        setAtData(atResult);
+        // カスタム値があればそれを、なければデフォルトをテキストエリアに表示
+        setAtLinuxDraft((atResult.linux.tools ?? atResult.linux.defaults).join('\n'));
+        setAtWindowsDraft((atResult.windows.tools ?? atResult.windows.defaults).join('\n'));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings');
@@ -316,6 +331,61 @@ export function SettingsPage() {
     }
   };
 
+  /** Allowed Tools を保存（テキストエリアの内容を1行1コマンドでパースして配列化） */
+  const handleSaveAllowedTools = async (os: 'linux' | 'windows') => {
+    const draft = os === 'linux' ? atLinuxDraft : atWindowsDraft;
+    const tools = draft.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+    setAtSaving(os);
+    setError('');
+    setSuccess('');
+
+    try {
+      await allowedTools.update(os, tools);
+      setSuccess(`Allowed tools (${os}) saved successfully`);
+      if (os === 'linux') {
+        setAtLinuxDirty(false);
+        setAtData(prev => prev ? { ...prev, linux: { ...prev.linux, tools } } : prev);
+      } else {
+        setAtWindowsDirty(false);
+        setAtData(prev => prev ? { ...prev, windows: { ...prev.windows, tools } } : prev);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to save allowed tools (${os})`);
+    } finally {
+      setAtSaving(null);
+    }
+  };
+
+  /** Allowed Tools をデフォルトにリセット */
+  const handleResetAllowedTools = async (os: 'linux' | 'windows') => {
+    if (!confirm(`Reset ${os} allowed tools to default?`)) return;
+
+    setAtSaving(os);
+    setError('');
+    setSuccess('');
+
+    try {
+      await allowedTools.update(os, null);
+      const defaults = os === 'linux' ? atData?.linux.defaults : atData?.windows.defaults;
+      const defaultText = (defaults ?? []).join('\n');
+      if (os === 'linux') {
+        setAtLinuxDraft(defaultText);
+        setAtLinuxDirty(false);
+        setAtData(prev => prev ? { ...prev, linux: { ...prev.linux, tools: null } } : prev);
+      } else {
+        setAtWindowsDraft(defaultText);
+        setAtWindowsDirty(false);
+        setAtData(prev => prev ? { ...prev, windows: { ...prev.windows, tools: null } } : prev);
+      }
+      setSuccess(`Allowed tools (${os}) reset to default`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to reset allowed tools (${os})`);
+    } finally {
+      setAtSaving(null);
+    }
+  };
+
   const getPlatformDisplayName = (platform: string): string => {
     const names: Record<string, string> = {
       discord: 'Discord',
@@ -497,6 +567,97 @@ export function SettingsPage() {
           )}
         </div>
       </div>
+
+      {/* Allowed Tools Section — プランモード許可ツール（Linux / Windows 横並び） */}
+      {atData && (
+        <div className="bg-gray-800 rounded-lg p-6">
+          <h2 className="text-lg font-semibold text-white mb-2">Allowed Tools (Plan Mode)</h2>
+          <p className="text-gray-400 text-sm mb-4">
+            Commands allowed in plan mode. One command per line (e.g. <code className="bg-gray-700 px-1 rounded">Bash(pm2 logs)</code>).
+            Changes are pushed to online agents in real-time.
+          </p>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Linux */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium text-gray-300">Linux</label>
+                {atData.linux.tools !== null ? (
+                  <span className="text-yellow-400 text-xs">Custom</span>
+                ) : (
+                  <span className="text-gray-500 text-xs">Default</span>
+                )}
+              </div>
+              <textarea
+                value={atLinuxDraft}
+                onChange={(e) => {
+                  setAtLinuxDraft(e.target.value);
+                  setAtLinuxDirty(true);
+                }}
+                rows={16}
+                className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-gray-300 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+              />
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  onClick={() => handleSaveAllowedTools('linux')}
+                  disabled={atSaving === 'linux' || !atLinuxDirty}
+                  className="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {atSaving === 'linux' ? 'Saving...' : 'Save'}
+                </button>
+                {atData.linux.tools !== null && (
+                  <button
+                    onClick={() => handleResetAllowedTools('linux')}
+                    disabled={atSaving === 'linux'}
+                    className="px-3 py-1.5 text-sm bg-gray-600 hover:bg-gray-700 text-white rounded disabled:opacity-50"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Windows */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium text-gray-300">Windows</label>
+                {atData.windows.tools !== null ? (
+                  <span className="text-yellow-400 text-xs">Custom</span>
+                ) : (
+                  <span className="text-gray-500 text-xs">Default</span>
+                )}
+              </div>
+              <textarea
+                value={atWindowsDraft}
+                onChange={(e) => {
+                  setAtWindowsDraft(e.target.value);
+                  setAtWindowsDirty(true);
+                }}
+                rows={16}
+                className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-gray-300 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+              />
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  onClick={() => handleSaveAllowedTools('windows')}
+                  disabled={atSaving === 'windows' || !atWindowsDirty}
+                  className="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {atSaving === 'windows' ? 'Saving...' : 'Save'}
+                </button>
+                {atData.windows.tools !== null && (
+                  <button
+                    onClick={() => handleResetAllowedTools('windows')}
+                    disabled={atSaving === 'windows'}
+                    className="px-3 py-1.5 text-sm bg-gray-600 hover:bg-gray-700 text-white rounded disabled:opacity-50"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bot Tokens Section */}
       <div className="bg-gray-800 rounded-lg p-6">

@@ -1721,3 +1721,35 @@ Claude Code の `--allowedTools` フラグと `--permission-mode plan` を組み
 - **ワイルドカード削除**: `Bash(pm2 logs *)` → `Bash(pm2 logs)`（`*` 不要）
 - **変更ファイル**:
   - `agents/linux/src/services/ai-runner.ts` - `PLAN_MODE_ALLOWED_TOOLS` から `*` 削除、`join(',')` でカンマ区切り結合
+
+#### 99. allowedTools を Server DB + WebUI 管理に移行 (2026-02-28)
+
+ハードコードされていた `PLAN_MODE_ALLOWED_TOOLS` 定数を Server の UserSettings DB に移行し、
+WebUI の Settings ページから Linux / Windows 別に編集可能にした。
+ツール追加のたびに Agent 再デプロイが不要になった。
+
+- **デフォルト定数を shared に移動**:
+  - `DEFAULT_ALLOWED_TOOLS_LINUX`: 33 コマンド（pm2, systemd, git, system, docker, tail/head/wc, curl/lsof/uptime, caddy）
+  - `DEFAULT_ALLOWED_TOOLS_WINDOWS`: 27 コマンド（pm2, git, PowerShell, docker, Get-Content/type, curl/Invoke-WebRequest）
+- **UserSettings キー**: `allowedTools:linux`, `allowedTools:windows`（JSON 文字列配列）
+- **専用 API エンドポイント**:
+  - `GET /api/settings/allowed-tools` — 両 OS のカスタム値 + デフォルト値を返す
+  - `PUT /api/settings/allowed-tools` — 保存 + 該当 OS のオンライン Agent にリアルタイム配信
+- **Agent 配信**: `server:connect:ack` の `allowedTools` フィールド + `server:config:update` で動的更新
+  - `managementInfo.os` で Agent の OS を判定し、対応する OS の設定を配信
+  - `pendingConfigUpdates` で `projectsDirs` と `allowedTools` のマージ対応
+- **Agent 側**: メモリ変数 `serverAllowedTools` で保持、`null` の場合は `DEFAULT_ALLOWED_TOOLS_LINUX` にフォールバック
+- **WebUI**: Settings ページに Allowed Tools セクション追加
+  - Linux / Windows を横並び（CSS grid `lg:grid-cols-2`）で表示
+  - 各 OS ごとに独立したテキストエリア（1行1コマンド）+ Save / Reset to Default ボタン
+  - Custom / Default ステータスバッジ表示
+- **変更ファイル**:
+  - `packages/shared/src/constants.ts` - `DEFAULT_ALLOWED_TOOLS_LINUX/WINDOWS` 追加
+  - `packages/shared/src/types.ts` - `ServerConnectAckPayload`, `ServerConfigUpdatePayload` に `allowedTools` 追加
+  - `apps/server/src/services/user-settings.ts` - `ALLOWED_TOOLS_LINUX/WINDOWS` キー追加
+  - `apps/server/src/routes/api.ts` - allowed-tools 専用 GET/PUT エンドポイント
+  - `apps/server/src/services/agent-manager.ts` - connect:ack に allowedTools 含める + OS 別配信 + `pushAllowedToolsToAgents()`
+  - `agents/linux/src/services/ai-runner.ts` - ハードコード定数削除 → shared の re-export
+  - `agents/linux/src/services/connection.ts` - `serverAllowedTools` 受信・保持・適用
+  - `apps/web/src/lib/api.ts` - `allowedTools` API クライアント追加
+  - `apps/web/src/pages/SettingsPage.tsx` - Allowed Tools エディタ UI

@@ -17,6 +17,7 @@ import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSession
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
+import type { ManagementInfo } from '@devrelay/shared';
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -49,7 +50,7 @@ const lastSeenMap = new Map<string, Date>();
 // 旧バージョン Agent は ack を返さないため、最大リトライ回数で打ち切る。
 const MAX_CONFIG_RETRIES = 5;
 interface PendingConfigUpdate {
-  config: { projectsDirs?: string[] | null };
+  config: { projectsDirs?: string[] | null; allowedTools?: string[] | null };
   retries: number;
 }
 const pendingConfigUpdates = new Map<string, PendingConfigUpdate>();
@@ -272,6 +273,12 @@ async function handleAgentConnect(
   // Server 管理のプロジェクト検索パスを取得（null ならローカル設定にフォールバック）
   const serverProjectsDirs = machine.projectsDirs as string[] | null;
 
+  // Agent の OS に応じた allowedTools を UserSettings から取得
+  const agentOs = (managementInfo as ManagementInfo | null)?.os;
+  const allowedToolsKey = agentOs === 'win32' ? SettingKeys.ALLOWED_TOOLS_WINDOWS : SettingKeys.ALLOWED_TOOLS_LINUX;
+  const allowedToolsRaw = await getUserSetting(machine.userId, allowedToolsKey);
+  const allowedTools = allowedToolsRaw ? JSON.parse(allowedToolsRaw) as string[] : null;
+
   // 再接続時に connect:ack で最新の DB 値を配信するため、pending リトライは不要
   pendingConfigUpdates.delete(machine.id);
 
@@ -281,6 +288,7 @@ async function handleAgentConnect(
       success: true,
       machineId: machine.id,
       projectsDirs: serverProjectsDirs,
+      allowedTools,
     }
   });
 
@@ -870,9 +878,11 @@ export async function cancelAiProcess(machineId: string, sessionId: string) {
  * Agent がオフラインの場合は何もしない（次回接続時に server:connect:ack で配信される）
  * 送信失敗に備え pendingConfigUpdates に登録し、次回 agent:ping 時にリトライする
  */
-export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null }) {
-  // pending に登録（agent:config:ack 受信 or リトライ上限で削除される）
-  pendingConfigUpdates.set(machineId, { config, retries: 0 });
+export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null }) {
+  // 既存の pending があればマージ（projectsDirs と allowedTools が同時に pending でも欠落しない）
+  const existing = pendingConfigUpdates.get(machineId);
+  const mergedConfig = existing ? { ...existing.config, ...config } : config;
+  pendingConfigUpdates.set(machineId, { config: mergedConfig, retries: 0 });
 
   sendToAgent(machineId, {
     type: 'server:config:update',
@@ -885,6 +895,31 @@ export function pushConfigUpdate(machineId: string, config: { projectsDirs?: str
 function handleConfigAck(machineId: string) {
   if (pendingConfigUpdates.delete(machineId)) {
     console.log(`✅ Config ack received from ${machineId}`);
+  }
+}
+
+/**
+ * 指定 OS の全オンライン Agent に allowedTools を配信する
+ * Settings ページで allowedTools を変更した際に呼び出す
+ */
+export async function pushAllowedToolsToAgents(userId: string, os: 'linux' | 'windows', tools: string[] | null) {
+  const osValue = os === 'windows' ? 'win32' : 'linux';
+
+  // ユーザーが所有するオンライン Machine を取得
+  const machines = await prisma.machine.findMany({
+    where: { userId, deletedAt: null },
+    select: { id: true, managementInfo: true },
+  });
+
+  for (const machine of machines) {
+    // Agent がオンラインか確認
+    if (!connectedAgents.has(machine.id)) continue;
+
+    // managementInfo.os が一致する Agent のみ配信
+    const info = machine.managementInfo as ManagementInfo | null;
+    if (info?.os !== osValue) continue;
+
+    pushConfigUpdate(machine.id, { allowedTools: tools });
   }
 }
 

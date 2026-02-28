@@ -25,6 +25,10 @@ export const SettingKeys = {
   THEME: 'theme',
   /** カスタム Agreement テンプレート（ユーザーが編集した場合のみ保存） */
   AGREEMENT_TEMPLATE: 'agreement_template',
+  /** プランモード許可ツール（Linux 用、JSON 文字列） */
+  ALLOWED_TOOLS_LINUX: 'allowedTools:linux',
+  /** プランモード許可ツール（Windows 用、JSON 文字列） */
+  ALLOWED_TOOLS_WINDOWS: 'allowedTools:windows',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

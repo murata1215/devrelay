@@ -23,9 +23,9 @@ import type {
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync } from 'fs';
-import { DEFAULTS } from '@devrelay/shared';
+import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, PLAN_MODE_ALLOWED_TOOLS, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
@@ -67,6 +67,8 @@ let appPingTimer: NodeJS.Timeout | null = null; // Application-level ping (agent
 let pongCheckInterval: NodeJS.Timeout | null = null;
 let currentConfig: AgentConfig | null = null;
 let currentMachineId: string | null = null;
+/** Server から配信されたプランモード許可ツール（null = デフォルト使用） */
+let serverAllowedTools: string[] | null = null;
 
 // Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
@@ -214,6 +216,12 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
             console.error('❌ projectsDirs update failed:', err)
           );
         }
+        // Server 管理の allowedTools を受信（null = デフォルト使用）
+        if (message.payload.allowedTools !== undefined) {
+          serverAllowedTools = message.payload.allowedTools;
+          const count = serverAllowedTools ? serverAllowedTools.length : 'default';
+          console.log(`🔧 Allowed tools from server: ${count}`);
+        }
       } else {
         console.error('❌ Authentication failed:', message.payload.error);
         ws?.close();
@@ -286,6 +294,18 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         handleProjectsDirsUpdate(message.payload.projectsDirs, config).catch(err =>
           console.error('❌ projectsDirs update failed:', err)
         );
+      }
+      if (message.payload.allowedTools !== undefined) {
+        serverAllowedTools = message.payload.allowedTools;
+        const count = serverAllowedTools ? serverAllowedTools.length : 'default';
+        console.log(`🔧 Allowed tools updated from server: ${count}`);
+        // ack を送信（pending リトライを停止させる）
+        if (currentMachineId) {
+          sendMessage({
+            type: 'agent:config:ack',
+            payload: { machineId: currentMachineId },
+          });
+        }
       }
       break;
   }
@@ -627,7 +647,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const sendOptions: SendPromptOptions = {
     resumeSessionId: sessionInfo.claudeResumeSessionId,
     usePlanMode,
-    allowedTools: usePlanMode ? PLAN_MODE_ALLOWED_TOOLS : undefined,
+    allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
   };
 
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）

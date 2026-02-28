@@ -5,9 +5,10 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, requestHistoryDates, requestHistoryExport, pushConfigUpdate, getAgentLocalProjectsDirs } from '../services/agent-manager.js';
+import { getConnectedAgents, requestHistoryDates, requestHistoryExport, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS } from '@devrelay/shared';
 import {
   getLinkedPlatforms,
   validateAndConsumeLinkCode,
@@ -523,6 +524,70 @@ export async function apiRoutes(app: FastifyInstance) {
     });
 
     return { success: true, template: DEFAULT_RULES_TEMPLATE };
+  });
+
+  // ========================================
+  // プランモード許可ツール（Allowed Tools）
+  // ========================================
+
+  /**
+   * Linux/Windows 両方の allowedTools 設定を取得
+   * カスタム値と各 OS のデフォルト値を返す
+   */
+  app.get('/api/settings/allowed-tools', async (request) => {
+    // @ts-ignore
+    const userId = request.user.id;
+
+    const [linuxRaw, windowsRaw] = await Promise.all([
+      getUserSetting(userId, SettingKeys.ALLOWED_TOOLS_LINUX),
+      getUserSetting(userId, SettingKeys.ALLOWED_TOOLS_WINDOWS),
+    ]);
+
+    return {
+      linux: {
+        tools: linuxRaw ? JSON.parse(linuxRaw) as string[] : null,
+        defaults: DEFAULT_ALLOWED_TOOLS_LINUX,
+      },
+      windows: {
+        tools: windowsRaw ? JSON.parse(windowsRaw) as string[] : null,
+        defaults: DEFAULT_ALLOWED_TOOLS_WINDOWS,
+      },
+    };
+  });
+
+  /**
+   * 特定 OS の allowedTools を保存し、該当 OS のオンライン Agent にリアルタイム配信
+   * tools が null の場合はカスタム設定を削除（デフォルトに戻す）
+   */
+  app.put('/api/settings/allowed-tools', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { os, tools } = request.body as { os: 'linux' | 'windows'; tools: string[] | null };
+
+    if (!os || !['linux', 'windows'].includes(os)) {
+      return reply.status(400).send({ error: 'os must be "linux" or "windows"' });
+    }
+
+    const settingKey = os === 'linux' ? SettingKeys.ALLOWED_TOOLS_LINUX : SettingKeys.ALLOWED_TOOLS_WINDOWS;
+
+    if (tools === null) {
+      // デフォルトにリセット: UserSettings から削除
+      await prisma.userSettings.deleteMany({
+        where: { userId, key: settingKey },
+      });
+    } else {
+      // カスタム値を保存（JSON 文字列として保存）
+      await prisma.userSettings.upsert({
+        where: { userId_key: { userId, key: settingKey } },
+        update: { value: JSON.stringify(tools), encrypted: false },
+        create: { userId, key: settingKey, value: JSON.stringify(tools), encrypted: false },
+      });
+    }
+
+    // 該当 OS のオンライン Agent に配信
+    await pushAllowedToolsToAgents(userId, os, tools);
+
+    return { success: true };
   });
 
   // ========================================

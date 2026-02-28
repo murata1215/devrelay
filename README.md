@@ -29,6 +29,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Kill Command**: Cancel running AI process mid-execution from chat
 - **Remote Config**: Configure agent project search paths from WebUI (auto-sync via WebSocket)
 - **Plan Mode Log Access**: Read-only Bash commands (pm2 logs, git status, journalctl, etc.) available during plan mode via `--allowedTools`
+- **Allowed Tools Management**: Edit plan mode allowed tools from WebUI Settings page (Linux/Windows side-by-side, real-time sync to agents)
 
 ## 💡 Token Efficiency
 
@@ -72,7 +73,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#98)
+│   ├── changelog.md      # Implementation history (#1-#99)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer
@@ -413,6 +414,7 @@ agents/windows/
 - [x] Server-managed project search paths (configure agent `projectsDirs` from WebUI)
 - [x] Plan mode read-only commands (`--allowedTools` for pm2 logs, git status, etc.)
 - [x] `deploy-agent` script (copy built agent to installed location)
+- [x] Allowed tools WebUI management (Server DB + Settings page, Linux/Windows split, real-time agent sync)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features
