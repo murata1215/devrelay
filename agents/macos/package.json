@@ -1,0 +1,42 @@
+{
+  "name": "@devrelay/agent-macos",
+  "description": "DevRelay Agent for macOS - Remote AI CLI development hub",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "devrelay": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist",
+    "setup": "node dist/cli/index.js setup",
+    "status": "node dist/cli/index.js status",
+    "uninstall": "node dist/cli/index.js uninstall"
+  },
+  "dependencies": {
+    "@devrelay/shared": "workspace:*",
+    "archiver": "^7.0.1",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "https-proxy-agent": "^7.0.6",
+    "nanoid": "^5.0.4",
+    "ora": "^8.0.1",
+    "socks-proxy-agent": "^8.0.5",
+    "uuid": "^13.0.0",
+    "ws": "^8.16.0",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.3",
+    "@types/node": "^20.10.0",
+    "@types/uuid": "^11.0.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}

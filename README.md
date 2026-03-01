@@ -70,15 +70,16 @@ devrelay/
 │   └── shared/           # Shared types & constants
 ├── agents/
 │   ├── linux/            # Cross-platform CLI Agent (Linux + Windows)
+│   ├── macos/            # macOS CLI Agent (launchd management)
 │   └── windows/          # Windows Agent (Electron tray app)
 ├── rules/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#107)
+│   ├── changelog.md      # Implementation history (#1-#108)
 │   └── ...               # Additional docs
 └── scripts/
-    ├── install-agent.sh    # Linux one-liner installer
+    ├── install-agent.sh    # Linux/macOS one-liner installer
     ├── install-agent.ps1   # Windows one-liner installer
     └── update-version.js   # Batch version update script
 ```
@@ -87,13 +88,13 @@ devrelay/
 
 ### 1. Install Agent (on your dev machine)
 
-#### Linux Agent (One-liner)
+#### Linux / macOS Agent (One-liner)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
 ```
 
-Only `git` required. Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, no sudo needed). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname.
+Only `git` required (macOS: Xcode Command Line Tools). Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, no sudo needed). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname. The installer auto-detects OS (Linux/macOS) and configures the appropriate process manager (systemd/launchd).
 
 #### Windows CLI Agent (One-liner)
 
@@ -337,6 +338,17 @@ agents/linux/                    # Cross-platform CLI Agent (Linux + Windows)
 │       ├── ai-runner.ts      # AI CLI execution (cross-platform)
 │       └── session-store.ts  # Session ID persistence
 
+agents/macos/                    # macOS CLI Agent (launchd management)
+├── src/
+│   ├── cli/commands/
+│   │   ├── setup.ts          # LaunchAgent plist registration
+│   │   ├── status.ts         # launchctl-based status
+│   │   └── uninstall.ts      # launchctl unload + cleanup
+│   └── services/
+│       ├── config.ts         # macOS config (home dir only)
+│       ├── connection.ts     # WebSocket to server
+│       └── management-info.ts # launchd/PM2/nohup detection
+
 agents/windows/
 ├── src/
 │   ├── electron/
@@ -421,6 +433,7 @@ agents/windows/
 - [x] Allowed tools WebUI management (Server DB + Settings page, Linux/Windows split, real-time agent sync)
 - [x] Agent remote update (`u` / `update` command to check version and update agent from Discord/Telegram)
 - [x] Dev Reports (AI-generated development reports from conversation history)
+- [x] macOS Agent (launchd management, cross-platform installer, WebUI macOS tab)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features

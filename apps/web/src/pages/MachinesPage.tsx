@@ -16,8 +16,8 @@ export function MachinesPage() {
   const [tokenCopied, setTokenCopied] = useState(false);
   const [installCopied, setInstallCopied] = useState(false);
 
-  // OS タブ切り替え（Linux / Windows）
-  const [installOs, setInstallOs] = useState<'linux' | 'windows'>('linux');
+  // OS タブ切り替え（Linux / macOS / Windows）
+  const [installOs, setInstallOs] = useState<'linux' | 'macos' | 'windows'>('linux');
 
   // Agent 設定モーダル（既存 Agent の詳細表示）
   const [settingsTarget, setSettingsTarget] = useState<Machine | null>(null);
@@ -26,7 +26,7 @@ export function MachinesPage() {
   const [settingsTokenCopied, setSettingsTokenCopied] = useState(false);
   const [settingsInstallCopied, setSettingsInstallCopied] = useState(false);
   const [settingsUninstallCopied, setSettingsUninstallCopied] = useState(false);
-  const [settingsOs, setSettingsOs] = useState<'linux' | 'windows'>('linux');
+  const [settingsOs, setSettingsOs] = useState<'linux' | 'macos' | 'windows'>('linux');
   const [mgmtCopiedIndex, setMgmtCopiedIndex] = useState<number | null>(null);
 
   // ホスト名エイリアス編集
@@ -195,18 +195,22 @@ export function MachinesPage() {
   };
 
   // ワンライナーインストールコマンドを生成（OS 別）
-  const getInstallCommand = (token: string, os: 'linux' | 'windows' = 'linux') => {
+  const getInstallCommand = (token: string, os: 'linux' | 'macos' | 'windows' = 'linux') => {
     if (!token) return '';
     if (os === 'windows') {
       return `$env:DEVRELAY_TOKEN="${token}"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex`;
     }
+    // macOS と Linux は同じインストーラー（install-agent.sh が uname -s で自動判定）
     return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${token}`;
   };
 
   /** アンインストールコマンドを生成（OS 別） */
-  const getUninstallCommand = (os: 'linux' | 'windows' = 'linux') => {
+  const getUninstallCommand = (os: 'linux' | 'macos' | 'windows' = 'linux') => {
     if (os === 'windows') {
       return `Get-CimInstance Win32_Process -Filter "Name='node.exe'" -EA 0 | Where-Object { $_.CommandLine -like '*devrelay*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Start-Sleep -Seconds 2; Remove-Item "$([Environment]::GetFolderPath('Startup'))\\DevRelay Agent.vbs" -EA 0; Remove-Item "$env:APPDATA\\devrelay" -Recurse -Force`;
+    }
+    if (os === 'macos') {
+      return `launchctl unload ~/Library/LaunchAgents/io.devrelay.agent.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/io.devrelay.agent.plist; pkill -f "devrelay.*index.js"; rm -rf ~/.devrelay`;
     }
     return `sudo systemctl stop devrelay-agent 2>/dev/null; sudo systemctl disable devrelay-agent 2>/dev/null; crontab -l 2>/dev/null | grep -v devrelay | crontab -; pkill -f "devrelay.*index.js"; rm -rf ~/.devrelay`;
   };
@@ -240,8 +244,8 @@ export function MachinesPage() {
     currentOs,
     onSwitch,
   }: {
-    currentOs: 'linux' | 'windows';
-    onSwitch: (os: 'linux' | 'windows') => void;
+    currentOs: 'linux' | 'macos' | 'windows';
+    onSwitch: (os: 'linux' | 'macos' | 'windows') => void;
   }) => (
     <div className="flex">
       <button
@@ -253,6 +257,16 @@ export function MachinesPage() {
         }`}
       >
         Linux
+      </button>
+      <button
+        onClick={() => onSwitch('macos')}
+        className={`px-3 py-1 text-xs transition-colors ${
+          currentOs === 'macos'
+            ? 'bg-blue-600 text-white'
+            : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+        }`}
+      >
+        macOS
       </button>
       <button
         onClick={() => onSwitch('windows')}
@@ -491,9 +505,11 @@ export function MachinesPage() {
                 onCopy={copyInstallCommand}
               />
               <div className="text-gray-500 text-xs mt-2">
-                {installOs === 'linux'
-                  ? 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'
-                  : 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'}
+                {installOs === 'windows'
+                  ? 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'
+                  : installOs === 'macos'
+                    ? 'Requires: Node.js 20+, git, Xcode CLT. Proxy support: add --proxy URL'
+                    : 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'}
               </div>
             </div>
             <div className="flex justify-end">
@@ -698,9 +714,11 @@ export function MachinesPage() {
                 }}
               />
               <div className="text-gray-500 text-xs mt-2">
-                {settingsOs === 'linux'
-                  ? 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'
-                  : 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'}
+                {settingsOs === 'windows'
+                  ? 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'
+                  : settingsOs === 'macos'
+                    ? 'Requires: Node.js 20+, git, Xcode CLT. Proxy support: add --proxy URL'
+                    : 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'}
               </div>
             </div>
 
@@ -710,7 +728,7 @@ export function MachinesPage() {
                 <label className="block text-gray-400 text-sm mb-2">
                   Management Commands
                   <span className="text-gray-500 ml-2 text-xs">
-                    ({settingsTarget.managementInfo.os === 'win32' ? 'Windows' : 'Linux'} / {settingsTarget.managementInfo.installType})
+                    ({settingsTarget.managementInfo.os === 'win32' ? 'Windows' : settingsTarget.managementInfo.os === 'darwin' ? 'macOS' : 'Linux'} / {settingsTarget.managementInfo.installType})
                   </span>
                 </label>
                 <div className="space-y-2">
@@ -761,9 +779,11 @@ export function MachinesPage() {
                   }}
                 />
                 <div className="text-gray-500 text-xs mt-2">
-                  {settingsOs === 'linux'
-                    ? 'Stops agent, removes systemd service/crontab, deletes ~/.devrelay'
-                    : 'Stops agent, removes auto-start, deletes %APPDATA%\\devrelay'}
+                  {settingsOs === 'windows'
+                    ? 'Stops agent, removes auto-start, deletes %APPDATA%\\devrelay'
+                    : settingsOs === 'macos'
+                      ? 'Stops agent, removes LaunchAgent, deletes ~/.devrelay'
+                      : 'Stops agent, removes systemd service/crontab, deletes ~/.devrelay'}
                 </div>
               </div>
             </details>

@@ -139,7 +139,7 @@ export interface ManagementInfo {
   /** OS 種別: linux, win32, darwin */
   os: string;
   /** インストール方式 */
-  installType: 'systemd' | 'pm2' | 'nohup' | 'windows-startup' | 'manual';
+  installType: 'systemd' | 'pm2' | 'nohup' | 'launchd' | 'windows-startup' | 'manual';
   /** 管理コマンド一覧 */
   commands: ManagementCommand[];
 }

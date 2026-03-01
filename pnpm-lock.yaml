@@ -66,6 +66,61 @@ importers:
         specifier: ^5.3.0
         version: 5.9.3
 
+  agents/macos:
+    dependencies:
+      '@devrelay/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      archiver:
+        specifier: ^7.0.1
+        version: 7.0.1
+      chalk:
+        specifier: ^5.3.0
+        version: 5.6.2
+      commander:
+        specifier: ^12.0.0
+        version: 12.1.0
+      https-proxy-agent:
+        specifier: ^7.0.6
+        version: 7.0.6
+      nanoid:
+        specifier: ^5.0.4
+        version: 5.1.6
+      ora:
+        specifier: ^8.0.1
+        version: 8.2.0
+      socks-proxy-agent:
+        specifier: ^8.0.5
+        version: 8.0.5
+      uuid:
+        specifier: ^13.0.0
+        version: 13.0.0
+      ws:
+        specifier: ^8.16.0
+        version: 8.19.0
+      yaml:
+        specifier: ^2.3.4
+        version: 2.8.2
+    devDependencies:
+      '@types/archiver':
+        specifier: ^6.0.3
+        version: 6.0.4
+      '@types/node':
+        specifier: ^20.10.0
+        version: 20.19.30
+      '@types/uuid':
+        specifier: ^11.0.0
+        version: 11.0.0
+      '@types/ws':
+        specifier: ^8.5.10
+        version: 8.18.1
+      tsx:
+        specifier: ^4.7.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.3.0
+        version: 5.9.3
+
   agents/windows:
     dependencies:
       '@devrelay/shared':
@@ -4254,7 +4309,7 @@ snapshots:
 
   '@types/node-telegram-bot-api@0.64.13':
     dependencies:
-      '@types/node': 20.19.30
+      '@types/node': 24.10.9
       '@types/request': 2.48.13
 
   '@types/node@18.19.130':
@@ -4290,7 +4345,7 @@ snapshots:
   '@types/request@2.48.13':
     dependencies:
       '@types/caseless': 0.12.5
-      '@types/node': 20.19.30
+      '@types/node': 24.10.9
       '@types/tough-cookie': 4.0.5
       form-data: 2.5.5
 

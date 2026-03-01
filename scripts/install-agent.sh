@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# DevRelay Agent ワンライナーインストーラー
+# DevRelay Agent ワンライナーインストーラー（Linux / macOS 対応）
 # =============================================================================
 #
 # 使い方:
@@ -21,7 +21,7 @@
 #   3. shared + agent をビルド
 #   4. config.yaml を自動生成（machineName = hostname/username）
 #   5. devrelay-claude シンボリックリンク作成（claude があれば）
-#   6. systemd ユーザーサービスを登録・起動・linger 有効化
+#   6. サービス登録・起動（Linux: systemd/nohup, macOS: launchd/nohup）
 # =============================================================================
 
 set -e
@@ -33,12 +33,34 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+# --- OS 検出 ---
+OS_TYPE=$(uname -s)  # Linux or Darwin
+
+# --- OS 別の変数設定 ---
+if [ "$OS_TYPE" = "Darwin" ]; then
+  AGENT_PKG="@devrelay/agent-macos"
+  AGENT_SUBDIR="agents/macos"
+else
+  AGENT_PKG="@devrelay/agent"
+  AGENT_SUBDIR="agents/linux"
+fi
+
 # --- 定数 ---
 REPO_URL="https://github.com/murata1215/devrelay.git"
 AGENT_DIR="$HOME/.devrelay/agent"
 CONFIG_DIR="$HOME/.devrelay"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 SERVICE_NAME="devrelay-agent"
+
+# --- macOS 互換の sed インプレース編集関数 ---
+# GNU sed (Linux) は `sed -i "..."` だが、BSD sed (macOS) は `sed -i '' "..."` が必要
+sed_inplace() {
+  if [ "$OS_TYPE" = "Darwin" ]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
 
 # --- 引数パース ---
 TOKEN=""
@@ -101,7 +123,12 @@ if [[ "$TOKEN" == drl_* ]]; then
   B64_PART="${TOKEN_BODY%_*}"
   if [ -n "$B64_PART" ]; then
     # Base64URL → 標準 Base64 に変換（- → +, _ → /）してデコード
-    DECODED_URL=$(echo "$B64_PART" | tr '_-' '/+' | base64 -d 2>/dev/null || true)
+    # macOS は base64 -D、Linux は base64 -d
+    if [ "$OS_TYPE" = "Darwin" ]; then
+      DECODED_URL=$(echo "$B64_PART" | tr '_-' '/+' | base64 -D 2>/dev/null || true)
+    else
+      DECODED_URL=$(echo "$B64_PART" | tr '_-' '/+' | base64 -d 2>/dev/null || true)
+    fi
     if [ -n "$DECODED_URL" ]; then
       SERVER_URL="$DECODED_URL"
     fi
@@ -111,7 +138,11 @@ fi
 # --- ヘッダー表示 ---
 echo ""
 echo -e "${BLUE}┌─────────────────────────────────────────────────┐${NC}"
-echo -e "${BLUE}│  DevRelay Agent Installer                       │${NC}"
+if [ "$OS_TYPE" = "Darwin" ]; then
+  echo -e "${BLUE}│  DevRelay Agent Installer (macOS)                │${NC}"
+else
+  echo -e "${BLUE}│  DevRelay Agent Installer                       │${NC}"
+fi
 echo -e "${BLUE}└─────────────────────────────────────────────────┘${NC}"
 echo ""
 
@@ -124,7 +155,11 @@ echo -e "[1/6] 依存ツールを確認中..."
 # --- git チェック（唯一の必須前提条件）---
 if ! command -v git &> /dev/null; then
   echo -e "${RED}❌ git が必要です${NC}"
-  echo -e "   インストール: ${YELLOW}sudo apt install git${NC}  または  ${YELLOW}sudo yum install git${NC}"
+  if [ "$OS_TYPE" = "Darwin" ]; then
+    echo -e "   インストール: ${YELLOW}xcode-select --install${NC}  または  ${YELLOW}brew install git${NC}"
+  else
+    echo -e "   インストール: ${YELLOW}sudo apt install git${NC}  または  ${YELLOW}sudo yum install git${NC}"
+  fi
   echo ""
   echo -e "${RED}git をインストールしてから再実行してください。${NC}"
   exit 1
@@ -151,12 +186,12 @@ fi
 if [ "$NEED_NODE_INSTALL" = true ]; then
   echo -e "  📦 Node.js v20 をインストール中..."
 
-  # アーキテクチャ検出
+  # アーキテクチャ検出（macOS Apple Silicon は arm64 を返す）
   ARCH=$(uname -m)
   case "$ARCH" in
-    x86_64)  NODE_ARCH="x64" ;;
-    aarch64) NODE_ARCH="arm64" ;;
-    armv7l)  NODE_ARCH="armv7l" ;;
+    x86_64)       NODE_ARCH="x64" ;;
+    aarch64|arm64) NODE_ARCH="arm64" ;;
+    armv7l)       NODE_ARCH="armv7l" ;;
     *)
       echo -e "${RED}❌ 未対応アーキテクチャ: $ARCH${NC}"
       echo -e "   手動で Node.js 20+ をインストールしてください: ${YELLOW}https://nodejs.org${NC}"
@@ -164,13 +199,20 @@ if [ "$NEED_NODE_INSTALL" = true ]; then
       ;;
   esac
 
+  # OS 別の Node.js ダウンロード URL
+  if [ "$OS_TYPE" = "Darwin" ]; then
+    NODE_OS="darwin"
+  else
+    NODE_OS="linux"
+  fi
+
   # ~/.devrelay/ ディレクトリを事前に作成（CONFIG_DIR は後の Step でも使用）
   mkdir -p "$CONFIG_DIR"
 
   # Node.js 20 LTS バイナリをダウンロード・展開
   NODE_DL_VERSION="v20.20.0"
   NODE_DIR="$CONFIG_DIR/node"
-  NODE_URL="https://nodejs.org/dist/${NODE_DL_VERSION}/node-${NODE_DL_VERSION}-linux-${NODE_ARCH}.tar.xz"
+  NODE_URL="https://nodejs.org/dist/${NODE_DL_VERSION}/node-${NODE_DL_VERSION}-${NODE_OS}-${NODE_ARCH}.tar.xz"
 
   mkdir -p "$NODE_DIR"
   echo -e "     ダウンロード: ${NODE_URL}"
@@ -332,7 +374,7 @@ echo "  shared パッケージをビルド中..."
 pnpm --filter @devrelay/shared build
 
 echo "  Agent をビルド中..."
-pnpm --filter @devrelay/agent build
+pnpm --filter "$AGENT_PKG" build
 
 echo -e "${GREEN}✅ ビルド完了${NC}"
 echo ""
@@ -344,23 +386,30 @@ echo -e "[4/6] 設定ファイルを生成中..."
 
 MACHINE_NAME="$(hostname)/$(whoami)"
 
+# macOS ではデフォルトの projectsDirs に /opt を含めない
+if [ "$OS_TYPE" = "Darwin" ]; then
+  PROJECTS_DIRS_YAML="  - $HOME"
+else
+  PROJECTS_DIRS_YAML="  - $HOME\n  - /opt"
+fi
+
 if [ -f "$CONFIG_FILE" ]; then
   echo -e "${YELLOW}  ⚠️ config.yaml が既に存在します。トークン・サーバーURL・マシン名を更新します${NC}"
-  # 既存ファイルのトークンを更新（sed で置換）
+  # 既存ファイルのトークンを更新（sed_inplace で macOS/Linux 互換）
   if grep -q "^token:" "$CONFIG_FILE"; then
-    sed -i "s|^token:.*|token: \"$TOKEN\"|" "$CONFIG_FILE"
+    sed_inplace "s|^token:.*|token: \"$TOKEN\"|" "$CONFIG_FILE"
   else
     echo "token: \"$TOKEN\"" >> "$CONFIG_FILE"
   fi
   # serverUrl も更新（トークンから抽出した URL、またはデフォルト wss://devrelay.io/ws/agent）
   if grep -q "^serverUrl:" "$CONFIG_FILE"; then
-    sed -i "s|^serverUrl:.*|serverUrl: \"$SERVER_URL\"|" "$CONFIG_FILE"
+    sed_inplace "s|^serverUrl:.*|serverUrl: \"$SERVER_URL\"|" "$CONFIG_FILE"
   else
     echo "serverUrl: \"$SERVER_URL\"" >> "$CONFIG_FILE"
   fi
   # machineName も更新（旧形式 hostname のみ → 新形式 hostname/username への移行対応）
   if grep -q "^machineName:" "$CONFIG_FILE"; then
-    sed -i "s|^machineName:.*|machineName: \"$MACHINE_NAME\"|" "$CONFIG_FILE"
+    sed_inplace "s|^machineName:.*|machineName: \"$MACHINE_NAME\"|" "$CONFIG_FILE"
   else
     echo "machineName: \"$MACHINE_NAME\"" >> "$CONFIG_FILE"
   fi
@@ -369,7 +418,7 @@ if [ -f "$CONFIG_FILE" ]; then
   if [ -n "$PROXY_URL" ]; then
     if grep -q "^proxy:" "$CONFIG_FILE"; then
       # 既存の proxy.url を更新
-      sed -i "/^proxy:/,/^[^ ]/{s|^  url:.*|  url: \"$PROXY_URL\"|}" "$CONFIG_FILE"
+      sed_inplace "/^proxy:/,/^[^ ]/{s|^  url:.*|  url: \"$PROXY_URL\"|}" "$CONFIG_FILE"
     else
       # proxy セクションを末尾に追加
       printf "\nproxy:\n  url: \"%s\"\n" "$PROXY_URL" >> "$CONFIG_FILE"
@@ -386,8 +435,7 @@ machineId: ""
 serverUrl: "$SERVER_URL"
 token: "$TOKEN"
 projectsDirs:
-  - $HOME
-  - /opt
+$(echo -e "$PROJECTS_DIRS_YAML")
 aiTools:
   default: claude
   claude:
@@ -433,32 +481,93 @@ echo ""
 # =============================================================================
 echo -e "[6/6] Agent を起動中..."
 
-# systemd ユーザーサービスが利用可能かチェック
-# D-Bus セッションバスに接続できない環境（一部の SSH セッション、コンテナ等）では
-# systemctl --user が使えないため、事前にテストする
-SYSTEMD_USER_AVAILABLE=false
-if command -v systemctl &> /dev/null; then
-  if systemctl --user list-units &> /dev/null; then
-    SYSTEMD_USER_AVAILABLE=true
-  fi
-fi
+AGENT_ENTRY="$AGENT_DIR/$AGENT_SUBDIR/dist/index.js"
 
-if [ "$SYSTEMD_USER_AVAILABLE" = true ]; then
-  SERVICE_DIR="$HOME/.config/systemd/user"
-  SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
+if [ "$OS_TYPE" = "Darwin" ]; then
+  # =========================================================================
+  # macOS: LaunchAgent で起動
+  # =========================================================================
+  PLIST_LABEL="io.devrelay.agent"
+  PLIST_DIR="$HOME/Library/LaunchAgents"
+  PLIST_FILE="$PLIST_DIR/${PLIST_LABEL}.plist"
   NODE_PATH=$(which node)
-  AGENT_ENTRY="$AGENT_DIR/agents/linux/dist/index.js"
 
-  mkdir -p "$SERVICE_DIR"
+  mkdir -p "$PLIST_DIR"
 
-  cat > "$SERVICE_FILE" << EOF
+  # 既存の LaunchAgent があれば先にアンロード
+  launchctl unload "$PLIST_FILE" 2>/dev/null || true
+
+  cat > "$PLIST_FILE" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${PLIST_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${NODE_PATH}</string>
+    <string>${AGENT_ENTRY}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${AGENT_DIR}/${AGENT_SUBDIR}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${CONFIG_DIR}/logs/agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>${CONFIG_DIR}/logs/agent.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${NODE_PATH%/*}</string>
+  </dict>
+</dict>
+</plist>
+PLIST_EOF
+
+  # LaunchAgent を登録・起動
+  launchctl load -w "$PLIST_FILE"
+
+  LAUNCHD_REGISTERED=true
+  echo -e "  ✅ LaunchAgent 登録・起動完了"
+  echo -e "  ステータス確認: ${YELLOW}launchctl list ${PLIST_LABEL}${NC}"
+  echo -e "  ログ確認: ${YELLOW}tail -f $CONFIG_DIR/logs/agent.log${NC}"
+
+else
+  # =========================================================================
+  # Linux: systemd / nohup で起動
+  # =========================================================================
+
+  # systemd ユーザーサービスが利用可能かチェック
+  # D-Bus セッションバスに接続できない環境（一部の SSH セッション、コンテナ等）では
+  # systemctl --user が使えないため、事前にテストする
+  SYSTEMD_USER_AVAILABLE=false
+  if command -v systemctl &> /dev/null; then
+    if systemctl --user list-units &> /dev/null; then
+      SYSTEMD_USER_AVAILABLE=true
+    fi
+  fi
+
+  if [ "$SYSTEMD_USER_AVAILABLE" = true ]; then
+    SERVICE_DIR="$HOME/.config/systemd/user"
+    SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
+    NODE_PATH=$(which node)
+
+    mkdir -p "$SERVICE_DIR"
+
+    cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=DevRelay Agent ($MACHINE_NAME)
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=$AGENT_DIR/agents/linux
+WorkingDirectory=$AGENT_DIR/$AGENT_SUBDIR
 ExecStart=$NODE_PATH $AGENT_ENTRY
 Restart=always
 RestartSec=10
@@ -468,60 +577,61 @@ Environment=NODE_ENV=production
 WantedBy=default.target
 EOF
 
-  # サービス有効化・起動
-  systemctl --user daemon-reload
-  systemctl --user enable "$SERVICE_NAME" 2>/dev/null
-  systemctl --user restart "$SERVICE_NAME"
+    # サービス有効化・起動
+    systemctl --user daemon-reload
+    systemctl --user enable "$SERVICE_NAME" 2>/dev/null
+    systemctl --user restart "$SERVICE_NAME"
 
-  # linger 有効化（ログアウト後もサービスを維持）
-  loginctl enable-linger "$(whoami)" 2>/dev/null || true
+    # linger 有効化（ログアウト後もサービスを維持）
+    loginctl enable-linger "$(whoami)" 2>/dev/null || true
 
-  SYSTEMD_REGISTERED=true
-  echo -e "  ✅ サービス登録・起動完了"
-  echo -e "  ステータス確認: ${YELLOW}systemctl --user status $SERVICE_NAME${NC}"
-  echo -e "  ログ確認: ${YELLOW}journalctl --user -u $SERVICE_NAME -f${NC}"
-else
-  SYSTEMD_REGISTERED=false
-  NOHUP_STARTED=false
-  echo -e "  ${GREEN}ℹ${NC} nohup + crontab で起動します"
-  echo ""
-
-  # node の絶対パスを取得（nohup・crontab で PATH に依存しないため）
-  NODE_ABS_PATH=$(which node)
-
-  # 既存の Agent プロセスを停止（再インストール対応）
-  EXISTING_PID=$(pgrep -u "$(whoami)" -f "\.devrelay.*index\.js" 2>/dev/null || true)
-  if [ -n "$EXISTING_PID" ]; then
-    kill $EXISTING_PID 2>/dev/null || true
-    echo -e "  ${YELLOW}既存の Agent プロセスを停止しました (PID: $EXISTING_PID)${NC}"
-    sleep 2
-  fi
-
-  echo -e "  Agent をバックグラウンドで起動中..."
-  cd "$AGENT_DIR/agents/linux"
-  nohup "$NODE_ABS_PATH" "$AGENT_DIR/agents/linux/dist/index.js" < /dev/null > "$CONFIG_DIR/logs/agent.log" 2>&1 &
-  AGENT_PID=$!
-  sleep 3
-
-  # プロセス生存確認
-  if kill -0 $AGENT_PID 2>/dev/null; then
-    NOHUP_STARTED=true
-    echo -e "  ${GREEN}✅ Agent 起動成功 (PID: $AGENT_PID)${NC}"
-    echo -e "  ログ: ${YELLOW}tail -f $CONFIG_DIR/logs/agent.log${NC}"
-
-    # crontab @reboot で OS 再起動時の自動起動を設定
-    CRONTAB_CMD="@reboot cd $AGENT_DIR/agents/linux && $NODE_ABS_PATH $AGENT_DIR/agents/linux/dist/index.js > $CONFIG_DIR/logs/agent.log 2>&1"
-    # 既存の devrelay エントリを除去してから新しいエントリを追加（重複防止）
-    ( crontab -l 2>/dev/null | grep -v "devrelay" ; echo "$CRONTAB_CMD" ) | crontab - 2>/dev/null && {
-      CRONTAB_REGISTERED=true
-      echo -e "  ${GREEN}✅ crontab @reboot 登録済み（OS 再起動時に自動起動）${NC}"
-    } || {
-      CRONTAB_REGISTERED=false
-      echo -e "${YELLOW}  ⚠️ crontab の登録に失敗しました${NC}"
-    }
+    SYSTEMD_REGISTERED=true
+    echo -e "  ✅ サービス登録・起動完了"
+    echo -e "  ステータス確認: ${YELLOW}systemctl --user status $SERVICE_NAME${NC}"
+    echo -e "  ログ確認: ${YELLOW}journalctl --user -u $SERVICE_NAME -f${NC}"
   else
-    echo -e "  ${RED}❌ Agent 起動に失敗しました${NC}"
-    echo -e "  ログを確認: ${YELLOW}cat $CONFIG_DIR/logs/agent.log${NC}"
+    SYSTEMD_REGISTERED=false
+    NOHUP_STARTED=false
+    echo -e "  ${GREEN}ℹ${NC} nohup + crontab で起動します"
+    echo ""
+
+    # node の絶対パスを取得（nohup・crontab で PATH に依存しないため）
+    NODE_ABS_PATH=$(which node)
+
+    # 既存の Agent プロセスを停止（再インストール対応）
+    EXISTING_PID=$(pgrep -u "$(whoami)" -f "\.devrelay.*index\.js" 2>/dev/null || true)
+    if [ -n "$EXISTING_PID" ]; then
+      kill $EXISTING_PID 2>/dev/null || true
+      echo -e "  ${YELLOW}既存の Agent プロセスを停止しました (PID: $EXISTING_PID)${NC}"
+      sleep 2
+    fi
+
+    echo -e "  Agent をバックグラウンドで起動中..."
+    cd "$AGENT_DIR/$AGENT_SUBDIR"
+    nohup "$NODE_ABS_PATH" "$AGENT_ENTRY" < /dev/null > "$CONFIG_DIR/logs/agent.log" 2>&1 &
+    AGENT_PID=$!
+    sleep 3
+
+    # プロセス生存確認
+    if kill -0 $AGENT_PID 2>/dev/null; then
+      NOHUP_STARTED=true
+      echo -e "  ${GREEN}✅ Agent 起動成功 (PID: $AGENT_PID)${NC}"
+      echo -e "  ログ: ${YELLOW}tail -f $CONFIG_DIR/logs/agent.log${NC}"
+
+      # crontab @reboot で OS 再起動時の自動起動を設定
+      CRONTAB_CMD="@reboot cd $AGENT_DIR/$AGENT_SUBDIR && $NODE_ABS_PATH $AGENT_ENTRY > $CONFIG_DIR/logs/agent.log 2>&1"
+      # 既存の devrelay エントリを除去してから新しいエントリを追加（重複防止）
+      ( crontab -l 2>/dev/null | grep -v "devrelay" ; echo "$CRONTAB_CMD" ) | crontab - 2>/dev/null && {
+        CRONTAB_REGISTERED=true
+        echo -e "  ${GREEN}✅ crontab @reboot 登録済み（OS 再起動時に自動起動）${NC}"
+      } || {
+        CRONTAB_REGISTERED=false
+        echo -e "${YELLOW}  ⚠️ crontab の登録に失敗しました${NC}"
+      }
+    else
+      echo -e "  ${RED}❌ Agent 起動に失敗しました${NC}"
+      echo -e "  ログを確認: ${YELLOW}cat $CONFIG_DIR/logs/agent.log${NC}"
+    fi
   fi
 fi
 
@@ -542,24 +652,30 @@ if [ -n "$PROXY_URL" ]; then
 fi
 echo ""
 
-if [ "$SYSTEMD_REGISTERED" = true ]; then
+if [ "$OS_TYPE" = "Darwin" ] && [ "${LAUNCHD_REGISTERED:-false}" = true ]; then
+  echo -e "管理コマンド:"
+  echo -e "  ${GREEN}launchctl kickstart -k gui/\$(id -u)/${PLIST_LABEL}${NC}  - 再起動"
+  echo -e "  ${GREEN}launchctl kill SIGTERM gui/\$(id -u)/${PLIST_LABEL}${NC}  - 停止"
+  echo -e "  ${GREEN}tail -f $CONFIG_DIR/logs/agent.log${NC}                 - ログ"
+elif [ "${SYSTEMD_REGISTERED:-false}" = true ]; then
   echo -e "管理コマンド:"
   echo -e "  ${GREEN}systemctl --user restart $SERVICE_NAME${NC}  - 再起動"
   echo -e "  ${GREEN}systemctl --user stop $SERVICE_NAME${NC}     - 停止"
   echo -e "  ${GREEN}journalctl --user -u $SERVICE_NAME -f${NC}   - ログ"
-elif [ "$NOHUP_STARTED" = true ]; then
+elif [ "${NOHUP_STARTED:-false}" = true ]; then
   echo -e "  Agent は nohup で起動済みです (PID: $AGENT_PID)"
-  if [ "$CRONTAB_REGISTERED" = true ]; then
+  if [ "${CRONTAB_REGISTERED:-false}" = true ]; then
     echo -e "  ${GREEN}✅ OS 再起動時も自動起動します（crontab @reboot）${NC}"
   fi
   echo ""
   echo -e "管理コマンド:"
   echo -e "  ログ確認:   ${GREEN}tail -f $CONFIG_DIR/logs/agent.log${NC}"
   echo -e "  停止:       ${GREEN}kill $AGENT_PID${NC}"
-  echo -e "  再起動:     ${GREEN}nohup $NODE_ABS_PATH $AGENT_DIR/agents/linux/dist/index.js < /dev/null > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
+  echo -e "  再起動:     ${GREEN}nohup $NODE_ABS_PATH $AGENT_ENTRY < /dev/null > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
   echo -e "  crontab:    ${GREEN}crontab -l | grep devrelay${NC}"
 else
   echo -e "手動起動:"
-  echo -e "  ${GREEN}nohup $NODE_ABS_PATH $AGENT_DIR/agents/linux/dist/index.js < /dev/null > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
+  NODE_ABS_PATH=${NODE_ABS_PATH:-$(which node)}
+  echo -e "  ${GREEN}nohup $NODE_ABS_PATH $AGENT_ENTRY < /dev/null > $CONFIG_DIR/logs/agent.log 2>&1 &${NC}"
 fi
 echo ""

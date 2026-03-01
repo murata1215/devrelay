@@ -1909,3 +1909,62 @@ Conversations ページに一部のメッセージが表示されない問題を
   ```
 - **変更ファイル**:
   - `agents/linux/src/services/management-info.ts` - nohup restart コマンドに旧プロセス停止を追加
+
+---
+
+### #108: macOS Agent（Phase 1） (2026-03-02)
+
+agents/linux をフォークして macOS 専用の Agent を作成。launchd（LaunchAgent）によるプロセス管理、
+macOS 固有のパス・コマンドに対応。install-agent.sh を Linux/macOS クロスプラットフォーム対応に拡張。
+WebUI の Agent Settings に macOS タブを追加。
+
+#### 変更概要
+
+**新規: agents/macos/**
+- `agents/linux/` をフォークして macOS 専用 Agent として独立
+- パッケージ名: `@devrelay/agent-macos`
+- プロセス管理: launchd（LaunchAgent plist）で自動起動・管理
+- plist パス: `~/Library/LaunchAgents/io.devrelay.agent.plist`
+
+**management-info.ts（完全書き換え）**
+- `generateDarwinInfo()`: launchd / PM2 / nohup を自動検出
+- `os: 'darwin'`, `installType: 'launchd'`
+- launchctl コマンド（start/stop/restart/logs）を生成
+
+**config.ts**
+- `getDefaultProjectsDirs()`: macOS はホームディレクトリのみ（`/opt` なし）
+
+**setup.ts（完全書き換え）**
+- `installLaunchAgent()`: plist XML 生成 + `launchctl load -w`
+- PATH に `/opt/homebrew/bin` を含む（Apple Silicon の Homebrew パス）
+- `KeepAlive`, `RunAtLoad` 有効
+
+**status.ts（完全書き換え）**
+- `launchctl list io.devrelay.agent` でステータス確認
+- 非 launchd 環境は pgrep にフォールバック
+
+**uninstall.ts（完全書き換え）**
+- `launchctl unload` + plist ファイル削除
+- 非 launchd 環境は pgrep でプロセス停止
+
+**connection.ts**
+- ビルドフィルタを `@devrelay/agent-macos` に変更
+
+**packages/shared/src/types.ts**
+- `ManagementInfo.installType` に `'launchd'` を追加
+
+**scripts/install-agent.sh（大幅拡張）**
+- `uname -s` で OS 自動判定（Darwin / Linux）
+- macOS: `base64 -D`, `sed -i ''`, Node.js URL `darwin-arm64`
+- `sed_inplace()` ラッパー関数で macOS/Linux 互換
+- Step 6: macOS は launchd 登録（plist 生成 + `launchctl load -w`）
+- macOS の git エラー: `xcode-select --install` を案内
+- `AGENT_PKG` / `AGENT_SUBDIR` で macOS/Linux のパッケージを切り替え
+
+**apps/web/src/pages/MachinesPage.tsx**
+- OS タブを Linux / macOS / Windows の3タブに拡張
+- `getInstallCommand()`: macOS は Linux と同じ curl コマンド（install-agent.sh が自動判定）
+- `getUninstallCommand()`: macOS 用に launchctl unload コマンドを追加
+- ヘルプテキスト: macOS は「Requires: Node.js 20+, git, Xcode CLT」
+- アンインストールヘルプ: macOS は「Stops agent, removes LaunchAgent」
+- Management Commands ラベル: `darwin` → `macOS` 表示に対応
