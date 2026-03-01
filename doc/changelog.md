@@ -1853,3 +1853,59 @@ SSH なしで Agent を最新版に更新可能にした。
 - **修正**: マシンがオフラインの場合に ChannelSession をクリアせず保持。Agent 再接続時に `restoreSessionParticipantsForMachine()` がセッション参加者を復元
 - **変更ファイル**:
   - `apps/server/src/services/session-manager.ts` - `restoreSessionParticipants()` のオフライン分岐を修正
+
+#### 107. Dev Reports（AI 開発レポート生成）(2026-03-01)
+
+会話履歴から AI で開発レポートを自動生成する機能を追加。
+
+- **概要**: 指定日付範囲の exec 会話を分析し、マークダウン形式のレポートを生成
+- **レポート構成**: タイトル、サマリー、詳細エントリ（各 exec の要約・変更ファイル・影響度）
+- **マルチプロバイダー**: OpenAI / Anthropic / Gemini から選択可能
+- **DB モデル**: `DevReport`（レポート全体）+ `DevReportEntry`（各 exec のエントリ）
+- **WebUI**: Dev Reports ページ（プロジェクト・日付選択 → 生成 → 一覧・詳細・ダウンロード）
+- **API エンドポイント**: `GET /api/dev-reports/projects`, `GET /api/dev-reports`, `GET /api/dev-reports/:id`, `POST /api/dev-reports`, `GET /api/dev-reports/:id/download`, `DELETE /api/dev-reports/:id`
+- **変更ファイル**:
+  - `apps/server/prisma/schema.prisma` - DevReport / DevReportEntry モデル追加
+  - `apps/server/src/services/dev-report-generator.ts` - レポート生成サービス（新規）
+  - `apps/server/src/services/user-settings.ts` - `DEV_REPORT_PROVIDER` キー追加
+  - `apps/server/src/routes/api.ts` - Dev Reports API エンドポイント追加
+  - `apps/web/src/pages/DevReportsPage.tsx` - Dev Reports ページ（新規）
+  - `apps/web/src/pages/SettingsPage.tsx` - Dev Report プロバイダー選択追加
+  - `apps/web/src/components/Layout.tsx` - ナビゲーション追加
+  - `apps/web/src/App.tsx` - ルート追加
+
+#### 107.1. Dev Reports 独立 AI プロバイダー設定 (2026-03-01)
+
+Dev Reports の AI プロバイダーを他機能（ビルド要約・チャット AI）と独立して設定可能に。
+
+- **変更**: `DEV_REPORT_PROVIDER` を SettingKeys に追加、`getApiKeyForDevReport()` で独立取得
+- **WebUI**: Settings ページの PROVIDER_SELECTS に「Dev Report」行を追加
+
+#### 107.2. Conversations ページの表示修正 (2026-03-01)
+
+Conversations ページに一部のメッセージが表示されない問題を修正。
+
+- **バグ1: userId フィルタ不正**: `(request as any).userId` を使っていたが、`request.user.id` が正しい参照。`request.userId` は `undefined` → Prisma が条件を無視 → 全ユーザーのデータが返却される状態だった
+- **バグ2: usageData 必須フィルタ**: `usageData: { not: Prisma.DbNull }` フィルタにより、usageData がないメッセージ（旧 Agent・Agreement 実行等）が除外されていた
+- **修正**:
+  - `(request as any).userId` → `(request as any).user.id` に修正（2箇所）
+  - `usageData: { not: Prisma.DbNull }` フィルタを削除（一覧・件数の両方）
+  - `aiMsg.usageData as any` → `(aiMsg.usageData as any) || {}` でnull安全に
+  - `hasUsageData()` ヘルパー関数で usageData の有無を判定し、ない場合は `-` / `N/A` を表示
+- **変更ファイル**:
+  - `apps/server/src/routes/api.ts` - userId 修正 + usageData フィルタ削除 + null 安全化
+  - `apps/web/src/pages/ConversationsPage.tsx` - `hasUsageData()` 追加 + 表示分岐
+
+#### 107.3. Agent 更新時の旧プロセス残留バグ修正 (2026-03-01)
+
+`u` コマンドで Agent を更新した際、nohup 起動の Agent で旧プロセスが kill されず、
+複数インスタンスが同時稼働するバグを修正。
+
+- **問題**: nohup の restart コマンドが新プロセス起動のみで、旧プロセスの停止ステップがなかった。systemd/PM2 は restart が自動的に旧プロセスを停止するため nohup のみ影響
+- **影響**: 同一 machineId で複数 WebSocket 接続 → 重複メッセージが DB に保存 → Conversations に同じ exec が2行表示
+- **修正**: nohup の restart コマンドに `pgrep | xargs kill` を追加して旧プロセスを停止してから新プロセスを起動
+  ```bash
+  pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | xargs kill 2>/dev/null || true; sleep 1; cd <dir> && nohup <node> <index.js> ...
+  ```
+- **変更ファイル**:
+  - `agents/linux/src/services/management-info.ts` - nohup restart コマンドに旧プロセス停止を追加

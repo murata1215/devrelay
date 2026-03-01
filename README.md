@@ -31,6 +31,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Plan Mode Log Access**: Read-only Bash commands (pm2 logs, git status, journalctl, etc.) available during plan mode via `--allowedTools`
 - **Allowed Tools Management**: Edit plan mode allowed tools from WebUI Settings page (Linux/Windows side-by-side, real-time sync to agents)
 - **Remote Agent Update**: Update agents remotely via `u` command with version check and completion notification
+- **Dev Reports**: AI-generated development reports from conversation history (multi-provider, markdown export)
 
 ## 💡 Token Efficiency
 
@@ -74,7 +75,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#104)
+│   ├── changelog.md      # Implementation history (#1-#107)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux one-liner installer
@@ -315,6 +316,7 @@ apps/server/
 │       ├── command-parser.ts # Parse user input
 │       ├── command-handler.ts # Execute commands
 │       ├── build-summarizer.ts # AI build summary (multi-provider)
+│       ├── dev-report-generator.ts # AI dev reports (multi-provider)
 │       └── natural-language-parser.ts # NLP commands (multi-provider)
 └── prisma/
     └── schema.prisma         # Database schema
@@ -418,6 +420,7 @@ agents/windows/
 - [x] `deploy-agent` script (copy built agent to installed location)
 - [x] Allowed tools WebUI management (Server DB + Settings page, Linux/Windows split, real-time agent sync)
 - [x] Agent remote update (`u` / `update` command to check version and update agent from Discord/Telegram)
+- [x] Dev Reports (AI-generated development reports from conversation history)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features
