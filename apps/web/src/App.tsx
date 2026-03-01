@@ -8,6 +8,7 @@ import { MachinesPage } from './pages/MachinesPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { ConversationsPage } from './pages/ConversationsPage';
+import { DevReportsPage } from './pages/DevReportsPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -77,6 +78,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <ConversationsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/dev-reports"
+        element={
+          <ProtectedRoute>
+            <DevReportsPage />
           </ProtectedRoute>
         }
       />

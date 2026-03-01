@@ -27,6 +27,7 @@ model User {
   settings      UserSettings[]
   authSessions  AuthSession[]
   buildLogs     BuildLog[]
+  devReports    DevReport[]
 }
 
 // WebUI 認証セッション
@@ -205,4 +206,36 @@ model BuildLog {
   @@unique([projectName, buildNumber])  // プロジェクト名+ビルド番号で一意
   @@index([projectName])                // プロジェクト名での検索用
   @@index([machineId, projectName])     // マシン+プロジェクト名での検索用
+}
+
+// 開発レポート（会話履歴を AI で要約・構造化した開発記）
+model DevReport {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  projectName String   // プロジェクト名（マシン横断）
+  title       String   // レポートタイトル（AI 生成）
+  content     Json     // レポート内容（セクション構造 JSON）
+  status      String   @default("generating") // generating, completed, failed
+  error       String?  // エラーメッセージ（失敗時）
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  entries     DevReportEntry[]
+
+  @@index([userId])
+  @@index([projectName])
+}
+
+// レポートに含まれる会話エントリ（処理済み Message の追跡用）
+model DevReportEntry {
+  id        String    @id @default(cuid())
+  reportId  String
+  report    DevReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  messageId String    // AI Message の ID（usageData 付きメッセージ）
+  section   Int       // セクション番号（0-indexed）
+  createdAt DateTime  @default(now())
+
+  @@unique([reportId, messageId])
+  @@index([messageId])
 }

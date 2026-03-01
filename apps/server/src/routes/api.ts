@@ -7,6 +7,8 @@ import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { getConnectedAgents, requestHistoryDates, requestHistoryExport, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
+import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
+import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
 import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS } from '@devrelay/shared';
 import {
@@ -839,7 +841,7 @@ export async function apiRoutes(app: FastifyInstance) {
    */
   app.get('/api/sessions/:sessionId/usage', async (request: FastifyRequest<{ Params: { sessionId: string } }>, reply: FastifyReply) => {
     const { sessionId } = request.params;
-    const userId = (request as any).userId;
+    const userId = (request as any).user.id;
 
     // セッション情報を取得（認可チェック含む）
     const session = await prisma.session.findUnique({
@@ -1003,15 +1005,14 @@ export async function apiRoutes(app: FastifyInstance) {
    * @route GET /api/conversations?offset=0&limit=50
    */
   app.get('/api/conversations', async (request: FastifyRequest<{ Querystring: { offset?: string; limit?: string } }>, reply: FastifyReply) => {
-    const userId = (request as any).userId;
+    const userId = (request as any).user.id;
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '50', 10) || 50));
 
-    // Step 1: AI メッセージ（usageData 付き）を日時降順で取得（出力ファイルメタデータ含む）
+    // Step 1: AI メッセージを日時降順で取得（usageData の有無を問わない）
     const aiMessages = await prisma.message.findMany({
       where: {
         role: 'ai',
-        usageData: { not: Prisma.DbNull },
         session: { userId },
       },
       orderBy: { createdAt: 'desc' },
@@ -1064,8 +1065,9 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     // Step 3: AI メッセージごとに直前の user メッセージをマッチング
+    // usageData がない場合（旧 Agent）は各フィールドを null/0 にフォールバック
     const conversations = aiMessages.map(aiMsg => {
-      const data = aiMsg.usageData as any;
+      const data = (aiMsg.usageData as any) || {};
       const inputTokens = data.usage?.input_tokens ?? 0;
       const outputTokens = data.usage?.output_tokens ?? 0;
       const cacheReadTokens = data.usage?.cache_read_input_tokens ?? 0;
@@ -1110,12 +1112,212 @@ export async function apiRoutes(app: FastifyInstance) {
     const total = await prisma.message.count({
       where: {
         role: 'ai',
-        usageData: { not: Prisma.DbNull },
         session: { userId },
       },
     });
 
     return reply.send({ conversations, total, offset, limit });
+  });
+
+  // ========================================
+  // 開発レポート API（Dev Reports ページ用）
+  // ========================================
+
+  /**
+   * プロジェクト別の未処理会話数を取得
+   * @route GET /api/dev-reports/projects
+   */
+  app.get('/api/dev-reports/projects', async (request, reply) => {
+    const userId = (request as any).user.id;
+    const counts = await getUnprocessedCounts(userId);
+    return reply.send({ projects: counts });
+  });
+
+  /**
+   * レポート一覧を取得
+   * @route GET /api/dev-reports
+   */
+  app.get('/api/dev-reports', async (request, reply) => {
+    const userId = (request as any).user.id;
+
+    const reports = await prisma.devReport.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        projectName: true,
+        title: true,
+        status: true,
+        error: true,
+        createdAt: true,
+        _count: { select: { entries: true } },
+      },
+    });
+
+    const result = reports.map((r) => ({
+      id: r.id,
+      projectName: r.projectName,
+      title: r.title,
+      status: r.status,
+      error: r.error,
+      createdAt: r.createdAt.toISOString(),
+      entryCount: r._count.entries,
+    }));
+
+    return reply.send({ reports: result });
+  });
+
+  /**
+   * レポート詳細を取得
+   * @route GET /api/dev-reports/:id
+   */
+  app.get('/api/dev-reports/:id', async (request, reply) => {
+    const userId = (request as any).user.id;
+    const { id } = request.params as { id: string };
+
+    const report = await prisma.devReport.findUnique({
+      where: { id },
+      include: { _count: { select: { entries: true } } },
+    });
+
+    if (!report || report.userId !== userId) {
+      return reply.status(404).send({ error: 'Report not found' });
+    }
+
+    return reply.send({
+      id: report.id,
+      projectName: report.projectName,
+      title: report.title,
+      content: report.content,
+      status: report.status,
+      error: report.error,
+      createdAt: report.createdAt.toISOString(),
+      entryCount: report._count.entries,
+    });
+  });
+
+  /**
+   * レポート生成を開始（バックグラウンド処理）
+   * @route POST /api/dev-reports
+   */
+  app.post('/api/dev-reports', async (request, reply) => {
+    const userId = (request as any).user.id;
+    const { projectName } = request.body as { projectName?: string };
+
+    if (!projectName) {
+      return reply.status(400).send({ error: 'projectName is required' });
+    }
+
+    // レポートレコードを作成（status: generating）
+    const report = await prisma.devReport.create({
+      data: {
+        userId,
+        projectName,
+        title: `${projectName} - Generating...`,
+        content: {},
+        status: 'generating',
+      },
+    });
+
+    // バックグラウンドで AI 生成を開始
+    setImmediate(() => {
+      generateReport(report.id, userId, projectName).catch((err) => {
+        console.error(`❌ DevReport background error:`, err);
+      });
+    });
+
+    return reply.status(201).send({
+      id: report.id,
+      status: 'generating',
+    });
+  });
+
+  /**
+   * レポートを ZIP でダウンロード（オンデマンド生成）
+   * @route GET /api/dev-reports/:id/download
+   */
+  app.get('/api/dev-reports/:id/download', async (request, reply) => {
+    const userId = (request as any).user.id;
+    const { id } = request.params as { id: string };
+
+    const report = await prisma.devReport.findUnique({ where: { id } });
+    if (!report || report.userId !== userId) {
+      return reply.status(404).send({ error: 'Report not found' });
+    }
+    if (report.status !== 'completed') {
+      return reply.status(400).send({ error: 'Report is not completed yet' });
+    }
+
+    const content = report.content as unknown as ReportContent;
+
+    // レポートに含まれる全画像ファイルの ID を収集
+    const allImageFileIds = content.sections.flatMap((s) =>
+      s.imageRefs.map((img) => img.fileId),
+    );
+
+    // 画像ファイルの content (bytea) を取得
+    const imageFiles = allImageFileIds.length > 0
+      ? await prisma.messageFile.findMany({
+          where: { id: { in: allImageFileIds } },
+          select: { id: true, filename: true, mimeType: true, content: true },
+        })
+      : [];
+    const imageMap = new Map(imageFiles.map((f) => [f.id, f]));
+
+    // HTML レポートを生成
+    const html = generateReportHtml(content);
+
+    // ZIP ストリームを作成
+    const dateStr = report.createdAt.toISOString().split('T')[0];
+    const safeName = content.projectName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const zipFilename = `devreport-${safeName}-${dateStr}.zip`;
+    const folderName = `devreport-${safeName}-${dateStr}`;
+
+    reply.raw.setHeader('Content-Type', 'application/zip');
+    reply.raw.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.pipe(reply.raw);
+
+    // HTML レポート
+    archive.append(html, { name: `${folderName}/report.html` });
+
+    // JSON データ
+    archive.append(JSON.stringify(content, null, 2), { name: `${folderName}/report.json` });
+
+    // 画像ファイル
+    for (const section of content.sections) {
+      for (const imgRef of section.imageRefs) {
+        const file = imageMap.get(imgRef.fileId);
+        if (file) {
+          archive.append(Buffer.from(file.content), {
+            name: `${folderName}/images/${file.filename}`,
+          });
+        }
+      }
+    }
+
+    await archive.finalize();
+    return reply;
+  });
+
+  /**
+   * レポートを削除
+   * @route DELETE /api/dev-reports/:id
+   */
+  app.delete('/api/dev-reports/:id', async (request, reply) => {
+    const userId = (request as any).user.id;
+    const { id } = request.params as { id: string };
+
+    const report = await prisma.devReport.findUnique({ where: { id } });
+    if (!report || report.userId !== userId) {
+      return reply.status(404).send({ error: 'Report not found' });
+    }
+
+    // DevReportEntry は onDelete: Cascade で自動削除
+    await prisma.devReport.delete({ where: { id } });
+
+    return reply.send({ success: true });
   });
 }
 

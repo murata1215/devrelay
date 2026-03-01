@@ -21,6 +21,8 @@
     "@fastify/websocket": "^8.3.1",
     "@google/generative-ai": "^0.24.1",
     "@prisma/client": "^5.8.0",
+    "@types/archiver": "^6.0.4",
+    "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",

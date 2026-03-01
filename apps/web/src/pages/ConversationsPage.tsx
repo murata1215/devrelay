@@ -33,6 +33,11 @@ function totalTokens(item: ConversationItem): number {
   return item.inputTokens + item.outputTokens + item.cacheReadTokens + item.cacheCreationTokens;
 }
 
+/** usageData がないメッセージかどうか判定（旧 Agent からのメッセージ） */
+function hasUsageData(item: ConversationItem): boolean {
+  return item.durationMs > 0 || totalTokens(item) > 0 || item.model !== null;
+}
+
 /** ファイルサイズを人間が読みやすい形式に変換 */
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
@@ -210,7 +215,7 @@ export function ConversationsPage() {
                         {formatDuration(item.durationMs)}
                       </td>
                       <td className="px-4 py-3 text-gray-300 text-sm text-right whitespace-nowrap font-mono">
-                        {formatTokens(totalTokens(item))}
+                        {hasUsageData(item) ? formatTokens(totalTokens(item)) : '-'}
                       </td>
                     </tr>
                     {/* 展開パネル */}
@@ -238,12 +243,18 @@ export function ConversationsPage() {
                             </div>
                             {/* トークン内訳 + メタ情報 */}
                             <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-400 border-t border-gray-700 pt-3">
-                              <span>Input: <span className="text-gray-300">{item.inputTokens.toLocaleString()}</span></span>
-                              <span>Output: <span className="text-gray-300">{item.outputTokens.toLocaleString()}</span></span>
-                              <span>Cache Read: <span className="text-gray-300">{item.cacheReadTokens.toLocaleString()}</span></span>
-                              <span>Cache Creation: <span className="text-gray-300">{item.cacheCreationTokens.toLocaleString()}</span></span>
-                              <span>Duration: <span className="text-gray-300">{formatDuration(item.durationMs)}</span></span>
-                              <span>Model: <span className="text-gray-300">{item.model ?? 'unknown'}</span></span>
+                              {hasUsageData(item) ? (
+                                <>
+                                  <span>Input: <span className="text-gray-300">{item.inputTokens.toLocaleString()}</span></span>
+                                  <span>Output: <span className="text-gray-300">{item.outputTokens.toLocaleString()}</span></span>
+                                  <span>Cache Read: <span className="text-gray-300">{item.cacheReadTokens.toLocaleString()}</span></span>
+                                  <span>Cache Creation: <span className="text-gray-300">{item.cacheCreationTokens.toLocaleString()}</span></span>
+                                  <span>Duration: <span className="text-gray-300">{formatDuration(item.durationMs)}</span></span>
+                                  <span>Model: <span className="text-gray-300">{item.model ?? 'unknown'}</span></span>
+                                </>
+                              ) : (
+                                <span>Usage: <span className="text-gray-500">N/A（Agent 更新で表示されます）</span></span>
+                              )}
                               <span>Agent: <span className="text-gray-300">{item.machineName}</span></span>
                             </div>
                           </div>
@@ -273,7 +284,7 @@ export function ConversationsPage() {
                 <div className="flex gap-3 text-xs text-gray-400">
                   <span>{shortModelName(item.model)}</span>
                   <span>{formatDuration(item.durationMs)}</span>
-                  <span className="font-mono">{formatTokens(totalTokens(item))}</span>
+                  <span className="font-mono">{hasUsageData(item) ? formatTokens(totalTokens(item)) : '-'}</span>
                 </div>
 
                 {/* モバイル展開 */}
@@ -294,9 +305,15 @@ export function ConversationsPage() {
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
-                      <span>In: {item.inputTokens.toLocaleString()}</span>
-                      <span>Out: {item.outputTokens.toLocaleString()}</span>
-                      <span>Cache: {item.cacheReadTokens.toLocaleString()}</span>
+                      {hasUsageData(item) ? (
+                        <>
+                          <span>In: {item.inputTokens.toLocaleString()}</span>
+                          <span>Out: {item.outputTokens.toLocaleString()}</span>
+                          <span>Cache: {item.cacheReadTokens.toLocaleString()}</span>
+                        </>
+                      ) : (
+                        <span className="text-gray-500">Usage: N/A</span>
+                      )}
                       <span>Agent: {item.machineName}</span>
                     </div>
                   </div>

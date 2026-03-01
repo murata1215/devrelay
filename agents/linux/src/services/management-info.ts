@@ -97,7 +97,8 @@ function generateLinuxInfo(): ManagementInfo {
     {
       type: 'restart',
       label: '再起動',
-      command: `cd ${path.dirname(agentIndex)} && nohup ${nodePath} ${agentIndex} < /dev/null > ${logFile} 2>&1 &`,
+      // 旧プロセスを停止してから新プロセスを起動（`u` コマンドでの重複インスタンス防止）
+      command: `pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | xargs kill 2>/dev/null || true; sleep 1; cd ${path.dirname(agentIndex)} && nohup ${nodePath} ${agentIndex} < /dev/null > ${logFile} 2>&1 &`,
     },
     { type: 'crontab', label: 'crontab 確認', command: 'crontab -l | grep devrelay' },
   ];

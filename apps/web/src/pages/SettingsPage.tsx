@@ -66,6 +66,11 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
     label: 'Chat AI',
     description: '自然言語コマンドパースに使用',
   },
+  {
+    key: 'dev_report_provider',
+    label: 'Dev Report',
+    description: '開発レポートのセクション分割・要約に使用',
+  },
 ];
 
 export function SettingsPage() {

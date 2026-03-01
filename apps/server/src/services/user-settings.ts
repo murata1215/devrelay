@@ -21,6 +21,8 @@ export const SettingKeys = {
   BUILD_SUMMARY_PROVIDER: 'build_summary_provider',
   /** 自然言語コマンドパースに使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
   CHAT_AI_PROVIDER: 'chat_ai_provider',
+  /** Dev Report 生成に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
+  DEV_REPORT_PROVIDER: 'dev_report_provider',
   LANGUAGE: 'language',
   THEME: 'theme',
   /** カスタム Agreement テンプレート（ユーザーが編集した場合のみ保存） */
@@ -232,6 +234,22 @@ export async function getApiKeyForProvider(userId: string, provider: AiProvider)
  */
 export async function getApiKeyForBuildSummary(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
   const provider = (await getUserSetting(userId, SettingKeys.BUILD_SUMMARY_PROVIDER) || 'none') as AiProvider;
+  if (provider === 'none') return null;
+
+  const apiKey = await getApiKeyForProvider(userId, provider);
+  if (!apiKey) return null;
+
+  return { provider, apiKey };
+}
+
+/**
+ * Dev Report（開発レポート生成）用の AI プロバイダーと API キーを取得
+ * DEV_REPORT_PROVIDER 設定に基づいてプロバイダーを選択
+ *
+ * @returns { provider, apiKey } のペア。使用不可の場合は null
+ */
+export async function getApiKeyForDevReport(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
+  const provider = (await getUserSetting(userId, SettingKeys.DEV_REPORT_PROVIDER) || 'none') as AiProvider;
   if (provider === 'none') return null;
 
   const apiKey = await getApiKeyForProvider(userId, provider);
