@@ -231,14 +231,16 @@ fi
 
 # --- pnpm チェック・自動インストール ---
 # npm は Node.js に同梱されているため、追加依存なし
+# グローバルインストールは権限不足の場合 sudo でフォールバック
 if ! command -v pnpm &> /dev/null; then
   echo -e "  📦 pnpm をインストール中..."
-  npm install -g pnpm 2>/dev/null
-  if command -v pnpm &> /dev/null; then
+  if npm install -g pnpm 2>/dev/null; then
     echo -e "  ${GREEN}✅ pnpm $(pnpm -v) をインストールしました${NC}"
+  elif sudo npm install -g pnpm 2>/dev/null; then
+    echo -e "  ${GREEN}✅ pnpm $(pnpm -v) をインストールしました (sudo)${NC}"
   else
     echo -e "${RED}❌ pnpm のインストールに失敗しました${NC}"
-    echo -e "   手動でインストールしてください: ${YELLOW}npm install -g pnpm${NC}"
+    echo -e "   手動でインストールしてください: ${YELLOW}sudo npm install -g pnpm${NC}"
     exit 1
   fi
 else

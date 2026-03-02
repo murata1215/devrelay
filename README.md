@@ -76,7 +76,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#108)
+│   ├── changelog.md      # Implementation history (#1-#109)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -94,7 +94,7 @@ devrelay/
 curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
 ```
 
-Only `git` required (macOS: Xcode Command Line Tools). Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, no sudo needed). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname. The installer auto-detects OS (Linux/macOS) and configures the appropriate process manager (systemd/launchd).
+Only `git` required (macOS: Xcode Command Line Tools). Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, sudo fallback for global pnpm install). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname. The installer auto-detects OS (Linux/macOS) and configures the appropriate process manager (systemd/launchd).
 
 #### Windows CLI Agent (One-liner)
 

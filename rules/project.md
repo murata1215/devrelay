@@ -462,6 +462,32 @@ pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | xargs kill 2>/dev/null || true
 
 ---
 
+## マシン名の自動更新と重複解決
+
+Agent 接続時に DB のマシン名を自動更新する条件:
+1. **仮名** (`agent-N`) → 正式名 (`hostname/username`)
+2. **旧形式** (`hostname` のみ) → 新形式 (`hostname/username`)
+
+### 重複マシン名の自動解決
+
+同名の offline マシンが既に存在する場合、旧マシン名に `(old)` を付与してリネームし、新マシンに名前を譲る。
+例: `tisa-MPro-M600/tisa` (offline) → `tisa-MPro-M600/tisa (old)` にリネーム → 新マシンが `tisa-MPro-M600/tisa` を使用。
+
+online のマシンが重複している場合はリネームしない（意図しない上書きを防止）。
+
+---
+
+## AI 応答の完了メッセージ制御
+
+Agent から Server への `agent:ai:output` メッセージで `isComplete=true` が複数回送信されると、DB に重複 Message が作成される。
+
+### 防止策（二重ガード）
+1. **ai-runner.ts**: `completionSent` フラグで `onOutput(true)` の二重呼び出しを防止（`error` + `close` イベント競合対策）
+2. **connection.ts**: コールバック側でも `completionSent` ガードを追加（万が一のフォールスルー対策）
+3. **resumeFailed**: フラグ設定後に `resolve + return` で早期リターン（retry 側のみが完了メッセージを送信）
+
+---
+
 ## 今後の課題
 
 - LINE 対応

@@ -209,6 +209,15 @@ async function handleAgentConnect(
       });
       if (!duplicate) {
         updatedName = trimmedName;
+      } else if (duplicate.status === 'offline') {
+        // 重複マシンが offline の場合、旧マシン名をリネームして新マシンに名前を譲る
+        const oldName = `${duplicate.name} (old)`;
+        await prisma.machine.update({
+          where: { id: duplicate.id },
+          data: { name: oldName },
+        });
+        console.log(`📝 Renamed offline duplicate: ${duplicate.name} → ${oldName} (id: ${duplicate.id})`);
+        updatedName = trimmedName;
       }
     }
   }

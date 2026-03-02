@@ -665,6 +665,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）
   try {
     let responseText = '';
+    // isComplete=true の二重送信防止ガード（error+close 競合、resumeFailed 等の対策）
+    let completionSent = false;
     const aiResult = await sendPromptToAi(
       sessionId,
       fullPrompt,
@@ -676,6 +678,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         responseText += output;
 
         if (isComplete) {
+          // 二重完了送信を防止（DB に重複 Message が作成されるのを防ぐ）
+          if (completionSent) {
+            console.log(`⚠️ Duplicate completion ignored for session ${sessionId}`);
+            return;
+          }
+          completionSent = true;
+
           // Collect files from the output directory
           const files = await collectOutputFiles(sessionInfo.projectPath);
           if (files.length > 0) {
@@ -729,8 +738,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.claudeResumeSessionId = undefined;
       await clearClaudeSessionId(sessionInfo.projectPath);
 
-      // Retry without resume session ID
+      // Retry without resume session ID（completionSent をリセットして retry の完了を受け付ける）
       responseText = '';
+      completionSent = false;
       const retryOptions: SendPromptOptions = {
         resumeSessionId: undefined,  // Don't use --resume
         usePlanMode,
@@ -747,6 +757,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           responseText += output;
 
           if (isComplete) {
+            if (completionSent) {
+              console.log(`⚠️ Duplicate completion ignored for retry session ${sessionId}`);
+              return;
+            }
+            completionSent = true;
+
             const files = await collectOutputFiles(sessionInfo.projectPath);
             if (files.length > 0) {
               console.log(`📎 Sending ${files.length} file(s) from output directory`);

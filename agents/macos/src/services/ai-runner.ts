@@ -203,6 +203,8 @@ export async function sendPromptToAi(
   let lineBuffer = '';
   // stderr を収集してエラー検出に使用
   let stderrOutput = '';
+  // onOutput(true) の二重呼び出し防止（error + close イベント競合対策）
+  let completionSent = false;
 
   return new Promise<AiRunResult>((resolve) => {
     proc.stdout?.on('data', (data) => {
@@ -304,37 +306,51 @@ export async function sendPromptToAi(
       // SIGTERM によるキャンセル検出
       if (signal === 'SIGTERM') {
         console.log(`[${aiTool}] ⛔ Process was cancelled`);
-        onOutput('', true, result.usageData);
+        if (!completionSent) {
+          completionSent = true;
+          onOutput('', true, result.usageData);
+        }
         resolve(result);
         return;
       }
 
-      // Detect --resume failure: exit code 1 + no output
+      // Detect --resume failure: exit code 1 + no output → retry に任せるため onOutput を呼ばない
       if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
         console.log(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
         result.resumeFailed = true;
+        resolve(result);
+        return;
       }
 
       // "Prompt is too long" などのエラーを stderr から検出
       if (stderrOutput.includes('Prompt is too long') ||
           (stderrOutput.toLowerCase().includes('token') && stderrOutput.toLowerCase().includes('limit'))) {
         console.log(`[${aiTool}] ⚠️ Prompt too long error detected`);
-        onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData);
+        if (!completionSent) {
+          completionSent = true;
+          onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData);
+        }
         resolve(result);
         return;
       }
 
-      if (fullOutput.length === 0) {
-        onOutput('(No response from AI)', true, result.usageData);
-      } else {
-        onOutput('', true, result.usageData); // Signal completion with usage data
+      if (!completionSent) {
+        completionSent = true;
+        if (fullOutput.length === 0) {
+          onOutput('(No response from AI)', true, result.usageData);
+        } else {
+          onOutput('', true, result.usageData); // Signal completion with usage data
+        }
       }
       resolve(result);
     });
 
     proc.on('error', (err) => {
       console.error(`[${aiTool}] Process error:`, err);
-      onOutput(`Error: ${err.message}`, true);
+      if (!completionSent) {
+        completionSent = true;
+        onOutput(`Error: ${err.message}`, true);
+      }
       resolve(result);
     });
   });

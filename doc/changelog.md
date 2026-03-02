@@ -1968,3 +1968,36 @@ WebUI の Agent Settings に macOS タブを追加。
 - ヘルプテキスト: macOS は「Requires: Node.js 20+, git, Xcode CLT」
 - アンインストールヘルプ: macOS は「Stops agent, removes LaunchAgent」
 - Management Commands ラベル: `darwin` → `macOS` 表示に対応
+
+---
+
+### #109: Agent 二重完了メッセージ防止 & マシン名重複解決 & インストーラー改善 (2026-03-02)
+
+3つの改善を実施。
+
+#### 1. AI 応答の二重 Message 作成防止
+
+**問題**: Conversations ページで同じ AI 応答が2行に分かれて表示されることがあった（1行目に usageData あり、2行目に usageData なし）
+
+**原因**:
+- `ai-runner.ts` の `close` ハンドラーで `resumeFailed` 設定後に `return` がなく、`onOutput(true)` が呼ばれた後に retry でも `onOutput(true)` が呼ばれて2つの Message が作成された
+- `error` + `close` イベントの競合で `onOutput(true)` が2回呼ばれる可能性があった
+
+**修正**:
+- `agents/linux/src/services/ai-runner.ts`: `completionSent` ガード変数を追加し、`onOutput(true)` の二重呼び出しを防止。`resumeFailed` 設定後に `resolve + return` を追加
+- `agents/linux/src/services/connection.ts`: コールバックに `completionSent` ガードを追加し、`isComplete=true` の二重送信を防止
+- `agents/macos/` にも同じ修正を適用
+
+#### 2. マシン名重複時の自動リネーム
+
+**問題**: 別サーバーに接続していた Agent を再インストールすると、DB に旧マシン名が残っており、仮名（`agent-N`）から正式名への自動更新が重複チェックに引っかかってスキップされた
+
+**修正**:
+- `apps/server/src/services/agent-manager.ts`: 重複マシンが **offline** の場合、旧マシン名に `(old)` を付与してリネームし、新マシンに名前を譲るロジックを追加
+
+#### 3. インストーラーの pnpm 権限エラー対策
+
+**問題**: `npm install -g pnpm` がグローバルインストール権限不足（EACCES）で失敗し、`set -e` によりスクリプトが即終了していた
+
+**修正**:
+- `scripts/install-agent.sh`: `npm install -g pnpm` 失敗時に `sudo npm install -g pnpm` へ自動フォールバック
