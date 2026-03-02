@@ -13,7 +13,7 @@
 # 前提条件:
 #   - git
 #   - curl, tar（ワンライナー実行時点で存在）
-#   ※ Node.js 20+ と pnpm は未インストールなら自動でダウンロード・インストール
+#   ※ Node.js 20+ は未インストールなら自動ダウンロード。pnpm は事前インストールが必要
 #
 # 処理内容:
 #   1. 依存ツールの確認（Node.js 20+, git, pnpm）
@@ -149,7 +149,7 @@ echo ""
 # =============================================================================
 # Step 1: 依存ツール確認・自動インストール
 # =============================================================================
-# git のみハード依存。Node.js と pnpm は未インストールなら自動でインストールする。
+# git と pnpm はハード依存。Node.js は未インストールなら自動でインストールする。
 echo -e "[1/6] 依存ツールを確認中..."
 
 # --- git チェック（唯一の必須前提条件）---
@@ -229,20 +229,13 @@ if [ "$NEED_NODE_INSTALL" = true ]; then
   fi
 fi
 
-# --- pnpm チェック・自動インストール ---
-# npm は Node.js に同梱されているため、追加依存なし
-# グローバルインストールは権限不足の場合 sudo でフォールバック
+# --- pnpm チェック（必須前提条件）---
 if ! command -v pnpm &> /dev/null; then
-  echo -e "  📦 pnpm をインストール中..."
-  if npm install -g pnpm 2>/dev/null; then
-    echo -e "  ${GREEN}✅ pnpm $(pnpm -v) をインストールしました${NC}"
-  elif sudo npm install -g pnpm 2>/dev/null; then
-    echo -e "  ${GREEN}✅ pnpm $(pnpm -v) をインストールしました (sudo)${NC}"
-  else
-    echo -e "${RED}❌ pnpm のインストールに失敗しました${NC}"
-    echo -e "   手動でインストールしてください: ${YELLOW}sudo npm install -g pnpm${NC}"
-    exit 1
-  fi
+  echo -e "${RED}❌ pnpm が必要です${NC}"
+  echo -e "   インストール: ${YELLOW}npm install -g pnpm${NC}"
+  echo -e ""
+  echo -e "${RED}pnpm をインストールしてから再実行してください。${NC}"
+  exit 1
 else
   echo -e "  ✅ pnpm $(pnpm -v)"
 fi
