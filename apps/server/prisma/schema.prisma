@@ -141,17 +141,20 @@ model Message {
   files       MessageFile[] // 添付ファイル（入力 or 出力）
 }
 
-// メッセージに紐づくファイル（BLOB 保存）
+// メッセージに紐づくファイル（BLOB 保存 + ベクトル検索）
 model MessageFile {
-  id        String   @id @default(cuid())
-  messageId String
-  message   Message  @relation(fields: [messageId], references: [id])
-  filename  String
-  mimeType  String
-  size      Int
-  content   Bytes    // ファイル本体（PostgreSQL bytea）
-  direction String   // 'input' | 'output'
-  createdAt DateTime @default(now())
+  id              String   @id @default(cuid())
+  messageId       String
+  message         Message  @relation(fields: [messageId], references: [id])
+  filename        String
+  mimeType        String
+  size            Int
+  content         Bytes    // ファイル本体（PostgreSQL bytea）
+  direction       String   // 'input' | 'output'
+  textContent     String?  // テキスト抽出結果（embedding 生成元）
+  embeddingStatus String   @default("none") // 'none' | 'processing' | 'done' | 'failed' | 'skipped'
+  // embedding vector(1536) は raw SQL で追加（Prisma 非対応型）
+  createdAt       DateTime @default(now())
 
   @@index([messageId])
 }

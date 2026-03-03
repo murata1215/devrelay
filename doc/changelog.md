@@ -2055,3 +2055,53 @@ WebUI の Agent Settings に macOS タブを追加。
 **修正**:
 - `scripts/install-agent.sh`: Step 1 に Claude Code 必須チェックを追加（git と同じ `exit 1` パターン）。`~/.local/bin/claude` がある場合は自動 PATH 追加で救済
 - `scripts/install-agent.ps1`: Step 1 に Claude Code チェックを追加（`$Missing++` パターン）
+
+---
+
+### #113: MessageFile ベクトル検索 + Claude Code スキル (2026-03-04)
+
+既存の `MessageFile` テーブルに pgvector ベクトル埋め込みを追加し、Claude Code のスキル機能で過去のファイルをプロジェクト横断でセマンティック検索できるようにした。
+
+#### 1. pgvector + DB スキーマ変更
+
+- `MessageFile` モデルに `textContent`（テキスト抽出結果）、`embeddingStatus`（none/processing/done/failed/skipped）を追加
+- raw SQL で `embedding vector(1536)` カラム + ivfflat インデックスを追加
+- PostgreSQL の pgvector 拡張を有効化（`CREATE EXTENSION vector`）
+
+#### 2. 埋め込み生成サービス
+
+- **新規**: `apps/server/src/services/embedding-service.ts`
+- テキスト系ファイル（text/*, json, yaml 等）を自動でテキスト抽出 → OpenAI `text-embedding-3-small` で 1536 次元ベクトル生成
+- `command-handler.ts`（input）と `agent-manager.ts`（output）の MessageFile 作成後に fire-and-forget で非同期実行
+- OpenAI API キーがない場合は `embeddingStatus = 'skipped'`（ファイル保存は正常に行われる）
+- バイナリファイル（画像, PDF, ZIP）は自動スキップ
+
+#### 3. 検索 API
+
+- **新規**: `apps/server/src/routes/document-api.ts`
+- `POST /api/agent/documents/search`: ベクトル類似検索（マシントークン認証）
+- `GET /api/agent/documents/:id`: ファイルテキスト内容取得（マシントークン認証）
+- `Authorization: Bearer <machine_token>` でマシン → ユーザー ID を解決、ユーザーの全ファイルを横断検索
+
+#### 4. Claude Code スキル
+
+- **新規**: `agents/linux/src/services/skill-manager.ts`（macOS Agent も同一）
+- Agent 接続成功時に `~/.claude/skills/devrelay-docs/` にスキルファイルを自動配置
+  - `SKILL.md`: スキル定義（description で自動発火、「〜を参照して」系で発動）
+  - `scripts/search.sh`: config.yaml の serverUrl/token を使ってサーバー API を呼び出す検索スクリプト
+- Claude Code が「さっきのマニュアルを参照して」のような発言を検出するとスキルが自動発火し、セマンティック検索で関連ファイルを取得
+
+#### 変更ファイル
+
+| ファイル | 操作 |
+|---------|------|
+| `apps/server/prisma/schema.prisma` | 修正（MessageFile に textContent, embeddingStatus 追加） |
+| `apps/server/src/services/embedding-service.ts` | **新規**（埋め込み生成 + 類似検索） |
+| `apps/server/src/routes/document-api.ts` | **新規**（検索 API） |
+| `apps/server/src/index.ts` | 修正（ルート登録） |
+| `apps/server/src/services/command-handler.ts` | 修正（input ファイル embedding フック） |
+| `apps/server/src/services/agent-manager.ts` | 修正（output ファイル embedding フック） |
+| `agents/linux/src/services/skill-manager.ts` | **新規**（スキル自動配置） |
+| `agents/linux/src/services/connection.ts` | 修正（接続時スキル初期化） |
+| `agents/macos/src/services/skill-manager.ts` | **新規**（スキル自動配置） |
+| `agents/macos/src/services/connection.ts` | 修正（接続時スキル初期化） |

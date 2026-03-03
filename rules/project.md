@@ -508,11 +508,41 @@ Agent から Server への `agent:ai:output` メッセージで `isComplete=true
 
 ---
 
+## MessageFile ベクトル検索
+
+### 設計判断
+
+| 判断 | 選択 | 理由 |
+|------|------|------|
+| 新規モデル vs 既存拡張 | MessageFile に直接 embedding 追加 | ファイルは既に MessageFile に全て保存済み。二重管理を避ける |
+| アップロード方法 | 自動（既存フローにフック） | ユーザーの手間ゼロ。ファイル保存時に fire-and-forget で embedding 生成 |
+| ベクトル DB | pgvector（PostgreSQL 拡張） | 既存 DB を流用、別サービス不要 |
+| embedding モデル | OpenAI text-embedding-3-small (1536次元) | コスト効率と品質のバランス |
+| 検索 API 認証 | マシントークン（Authorization: Bearer） | Agent（Claude Code スキル）からの直接呼び出し用 |
+| Claude Code 連携 | スキル（SKILL.md + search.sh） | Agent 起動時に自動配置。「〜を参照して」で自動発火 |
+| チャンク分割 | なし（全文 embedding、30K文字上限） | シンプルさ優先。大半のファイルは上限内 |
+
+### embedding 処理フロー
+
+```
+MessageFile 作成 → fire-and-forget で processMessageFilesEmbedding()
+  ├→ テキスト系: 抽出 → OpenAI embedding → pgvector に保存 → status = 'done'
+  ├→ バイナリ: status = 'skipped'
+  └→ API キーなし: textContent は保存、status = 'skipped'
+```
+
+### スキル自動配置
+
+Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
+- `SKILL.md`: スキル定義（Claude Code が自動検出）
+- `scripts/search.sh`: config.yaml から認証情報を読み取り、サーバー API を呼び出す
+
 ## 今後の課題
 
 - LINE 対応
 - Gemini CLI / Codex / Aider 対応
-- 共有ドキュメント機能（DevRelay Box）- pgvector + OpenAI Embedding で自動 RAG
+- ベクトル検索のチャンク分割対応（大規模ドキュメント向け）
+- WebUI でのドキュメント横断検索インターフェース
 - 複数ユーザー同時接続
 - 進捗表示のUI改善
 - エラーハンドリング強化

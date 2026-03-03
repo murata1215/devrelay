@@ -39,6 +39,7 @@ import {
   DEVRELAY_AGREEMENT_OLD_MARKERS,
   AGREEMENT_APPLY_PROMPT
 } from './output-collector.js';
+import { ensureSkillFiles } from './skill-manager.js';
 import { exec as execCallback, spawn } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
@@ -226,6 +227,9 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           const count = serverAllowedTools ? serverAllowedTools.length : 'default';
           console.log(`🔧 Allowed tools from server: ${count}`);
         }
+        // Claude Code スキルファイルを作成・更新（ドキュメント検索用）
+        ensureSkillFiles(config).catch(err =>
+          console.error('❌ Skill files update failed:', err.message));
       } else {
         console.error('❌ Authentication failed:', message.payload.error);
         ws?.close();

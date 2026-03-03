@@ -33,6 +33,7 @@ import {
 } from './session-manager.js';
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
+import { processMessageFilesEmbedding } from './embedding-service.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
 // This allows different channels to have different active sessions
@@ -1248,7 +1249,7 @@ async function handleAiPrompt(
   }
 
   // Save user message（添付ファイルがあれば MessageFile も同時作成）
-  await prisma.message.create({
+  const userMessage = await prisma.message.create({
     data: {
       sessionId: context.currentSessionId,
       role: 'user',
@@ -1265,6 +1266,12 @@ async function handleAiPrompt(
       } : undefined,
     }
   });
+
+  // 添付ファイルの埋め込みを非同期生成（fire-and-forget）
+  if (files && files.length > 0) {
+    processMessageFilesEmbedding(userMessage.id).catch(err =>
+      console.error('[Embedding] fire-and-forget error:', err.message));
+  }
 
   console.log(`📤 Sending prompt to agent ${context.currentMachineId}`);
 

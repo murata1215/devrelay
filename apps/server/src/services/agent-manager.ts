@@ -20,6 +20,7 @@ import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSession
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
+import { processMessageFilesEmbedding } from './embedding-service.js';
 import type { ManagementInfo } from '@devrelay/shared';
 
 // Connected agents: machineId -> WebSocket
@@ -402,7 +403,7 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
 
   if (isComplete) {
     // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
-    await prisma.message.create({
+    const aiMessage = await prisma.message.create({
       data: {
         sessionId,
         role: 'ai',
@@ -420,6 +421,13 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
         } : undefined,
       }
     });
+
+    // 出力ファイルの埋め込みを非同期生成（fire-and-forget）
+    if (files && files.length > 0) {
+      processMessageFilesEmbedding(aiMessage.id).catch(err =>
+        console.error('[Embedding] fire-and-forget error:', err.message));
+    }
+
     if (usageData) {
       const models = usageData.modelUsage ? Object.keys(usageData.modelUsage).join(', ') : 'unknown';
       console.log(`💾 Usage data saved: duration=${usageData.durationMs}ms, models=${models}`);

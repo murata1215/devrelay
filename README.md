@@ -436,7 +436,7 @@ agents/windows/
 - [x] macOS Agent (launchd management, cross-platform installer, WebUI macOS tab)
 - [x] Installer proxy early detection + pnpm auto-install restoration + service env vars (systemd/launchd/crontab PATH and proxy)
 - [x] "Prompt is too long" stdout detection fix + Installer Claude Code mandatory check
-- [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
+- [x] Document Vector Search - MessageFile pgvector embeddings + Claude Code skill for cross-project semantic search
 - [ ] LINE Bot
 - [ ] Team Features
 - [ ] AI tool switching (Gemini/Aider)

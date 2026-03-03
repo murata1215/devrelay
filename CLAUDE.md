@@ -57,7 +57,7 @@ pm2 restart devrelay-server devrelay-agent
 | Session | 作業セッション |
 | Message | 会話メッセージ |
 | BuildLog | ビルド履歴 |
-| MessageFile | メッセージ添付ファイル（bytea BLOB） |
+| MessageFile | メッセージ添付ファイル（bytea BLOB + pgvector embedding） |
 | UserSettings | ユーザー設定（API キー等） |
 | ChannelSession | チャンネルごとのセッション |
 | PlatformLink | プラットフォーム連携 |
