@@ -2029,3 +2029,29 @@ WebUI の Agent Settings に macOS タブを追加。
 
 **修正**:
 - `scripts/install-agent.sh`: `npm install -g pnpm` 失敗時に `sudo npm install -g pnpm` へ自動フォールバック
+
+---
+
+### #112: "Prompt is too long" stdout 検出修正 & インストーラー Claude Code 必須チェック (2026-03-03)
+
+#### 1. "Prompt is too long" stdout 検出修正
+
+**問題**: Claude Code が "Prompt is too long" を stderr ではなく stdout の通常アシスタント応答（JSON）として出力するケースがあり、既存の stderr ベースの検出が効かず、英語エラーメッセージがそのまま Discord/Telegram に表示されていた。
+
+**修正（3 Agent 共通）**:
+- `agents/linux/src/services/ai-runner.ts`: stdout パースで "Prompt is too long" を検出・抑制、close ハンドラで統合検出
+- `agents/macos/src/services/ai-runner.ts`: 同上
+- `agents/windows/src/services/ai-runner.ts`: 同上
+
+**動作**:
+- `promptTooLong` フラグで stdout 出力を検出・ストリーミング抑制
+- `--resume` あり → `resumeFailed` で新規セッション retry
+- `--resume` なし → 日本語警告「⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。」を送信
+
+#### 2. インストーラー Claude Code 必須チェック
+
+**変更**: Claude Code をオプションから**必須依存**に変更。未インストール時はインストールを停止してユーザーにインストール方法を案内する。
+
+**修正**:
+- `scripts/install-agent.sh`: Step 1 に Claude Code 必須チェックを追加（git と同じ `exit 1` パターン）。`~/.local/bin/claude` がある場合は自動 PATH 追加で救済
+- `scripts/install-agent.ps1`: Step 1 に Claude Code チェックを追加（`$Missing++` パターン）

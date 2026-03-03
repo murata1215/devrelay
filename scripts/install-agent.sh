@@ -12,11 +12,12 @@
 #
 # 前提条件:
 #   - git
+#   - Claude Code（claude コマンド）
 #   - curl, tar（ワンライナー実行時点で存在）
 #   ※ Node.js 20+ と pnpm は未インストールなら自動でダウンロード・インストール
 #
 # 処理内容:
-#   1. 依存ツールの確認（Node.js 20+, git, pnpm）
+#   1. 依存ツールの確認（Node.js 20+, git, pnpm, Claude Code）
 #   2. リポジトリを ~/.devrelay/agent/ に clone（既存なら git pull）
 #   3. shared + agent をビルド
 #   4. config.yaml を自動生成（machineName = hostname/username）
@@ -268,6 +269,28 @@ if ! command -v pnpm &> /dev/null; then
   fi
 else
   echo -e "  ✅ pnpm $(pnpm -v)"
+fi
+
+# --- Claude Code チェック（必須）---
+# DevRelay Agent は Claude Code を使って AI タスクを実行するため必須
+if ! command -v claude &> /dev/null; then
+  # ~/.local/bin にインストール済みだが PATH に入っていない場合のフォールバック
+  if [ -x "$HOME/.local/bin/claude" ]; then
+    export PATH="$HOME/.local/bin:$PATH"
+    echo -e "  ✅ Claude Code (PATH に追加: ~/.local/bin)"
+  else
+    echo -e "${RED}❌ Claude Code が必要です${NC}"
+    if [ "$OS_TYPE" = "Darwin" ]; then
+      echo -e "   インストール: ${YELLOW}curl -fsSL https://claude.ai/install.sh | bash${NC}"
+    else
+      echo -e "   インストール: ${YELLOW}curl -fsSL https://claude.ai/install.sh | bash${NC}"
+    fi
+    echo ""
+    echo -e "${RED}Claude Code をインストールしてから再実行してください。${NC}"
+    exit 1
+  fi
+else
+  echo -e "  ✅ Claude Code"
 fi
 
 echo -e "${GREEN}✅ 依存ツール OK${NC}"

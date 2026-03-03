@@ -94,7 +94,7 @@ devrelay/
 curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token YOUR_TOKEN
 ```
 
-Only `git` required (macOS: Xcode Command Line Tools). Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, sudo fallback for global pnpm install). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname. The installer auto-detects OS (Linux/macOS) and configures the appropriate process manager (systemd/launchd).
+`git` and `claude` (Claude Code) required (macOS: Xcode Command Line Tools). Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, sudo fallback for global pnpm install). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname. The installer auto-detects OS (Linux/macOS) and configures the appropriate process manager (systemd/launchd).
 
 #### Windows CLI Agent (One-liner)
 
@@ -102,7 +102,7 @@ Only `git` required (macOS: Xcode Command Line Tools). Node.js 20+ and pnpm are 
 $env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex
 ```
 
-Node.js 20+ and git required (pnpm is auto-installed if missing). ExecutionPolicy is set automatically. Installs to `%APPDATA%\devrelay\agent\` with Startup folder auto-start.
+Node.js 20+, git, and Claude Code required (pnpm is auto-installed if missing). ExecutionPolicy is set automatically. Installs to `%APPDATA%\devrelay\agent\` with Startup folder auto-start.
 
 #### Linux Agent (Manual)
 
@@ -435,6 +435,7 @@ agents/windows/
 - [x] Dev Reports (AI-generated development reports from conversation history)
 - [x] macOS Agent (launchd management, cross-platform installer, WebUI macOS tab)
 - [x] Installer proxy early detection + pnpm auto-install restoration + service env vars (systemd/launchd/crontab PATH and proxy)
+- [x] "Prompt is too long" stdout detection fix + Installer Claude Code mandatory check
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features

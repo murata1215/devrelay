@@ -11,6 +11,7 @@
 # 前提条件:
 #   - Node.js 20+
 #   - git
+#   - Claude Code（claude コマンド）
 #   - pnpm（未インストールなら自動インストール）
 #
 # 処理内容:
@@ -175,6 +176,16 @@ if (-not $PnpmCmd) {
 } else {
     $PnpmVersion = pnpm -v
     Write-Host "  OK pnpm $PnpmVersion" -ForegroundColor Green
+}
+
+# Claude Code チェック（必須）
+$ClaudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+if (-not $ClaudeCmd) {
+    Write-Host "  X Claude Code が必要です" -ForegroundColor Red
+    Write-Host "    インストール: irm https://claude.ai/install.ps1 | iex" -ForegroundColor Yellow
+    $Missing++
+} else {
+    Write-Host "  OK Claude Code" -ForegroundColor Green
 }
 
 # 不足ツールがあれば終了

@@ -183,6 +183,20 @@ devrelay/
 
 ---
 
+## インストーラーの依存関係
+
+| ツール | Linux/macOS | Windows | 扱い |
+|-------|------------|---------|------|
+| git | 必須（手動インストール） | 必須（手動） | `exit 1` |
+| Node.js 20+ | 自動インストール | 必須（手動） | Linux: DL、Win: `$Missing++` |
+| pnpm | 自動インストール（npm→sudo） | 自動インストール（npm） | 自動 |
+| Claude Code | 必須（手動インストール） | 必須（手動） | `exit 1` / `$Missing++` |
+
+- Claude Code は #112 で必須依存に変更（以前はオプション）
+- Linux/macOS: `~/.local/bin/claude` がある場合は自動 PATH 追加で救済
+
+---
+
 ## インストーラーのトラブルシューティング知見
 
 - **Linux nohup**: `< /dev/null` 必須（`curl|bash` で stdin が消費される）

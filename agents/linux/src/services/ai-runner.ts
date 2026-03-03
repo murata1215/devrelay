@@ -205,6 +205,8 @@ export async function sendPromptToAi(
   let stderrOutput = '';
   // onOutput(true) の二重呼び出し防止（error + close イベント競合対策）
   let completionSent = false;
+  // "Prompt is too long" が stdout（通常の応答テキスト）で出力された場合の検出フラグ
+  let promptTooLong = false;
 
   return new Promise<AiRunResult>((resolve) => {
     proc.stdout?.on('data', (data) => {
@@ -253,6 +255,13 @@ export async function sendPromptToAi(
           if (json.type === 'assistant' && json.message?.content) {
             for (const block of json.message.content) {
               if (block.type === 'text' && block.text) {
+                // "Prompt is too long" が通常の応答テキストとして出力される場合を検出
+                // ストリーミングせず、close ハンドラで日本語警告に変換する
+                if (block.text.trim() === 'Prompt is too long') {
+                  console.log(`[${aiTool}] ⚠️ "Prompt is too long" detected in stdout, suppressing`);
+                  promptTooLong = true;
+                  continue;
+                }
                 fullOutput += block.text;
                 console.log(`[${aiTool}] +${block.text.length} chars`);
                 onOutput(block.text, false);
@@ -314,22 +323,33 @@ export async function sendPromptToAi(
         return;
       }
 
-      // Detect --resume failure: exit code 1 + no output → retry に任せるため onOutput を呼ばない
-      if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
-        console.log(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
-        result.resumeFailed = true;
-        resolve(result);
-        return;
-      }
+      // "Prompt is too long" エラーを stdout（promptTooLong フラグ）+ stderr 両方から検出
+      const isPromptTooLong = promptTooLong ||
+        stderrOutput.includes('Prompt is too long') ||
+        (stderrOutput.toLowerCase().includes('token') && stderrOutput.toLowerCase().includes('limit'));
 
-      // "Prompt is too long" などのエラーを stderr から検出
-      if (stderrOutput.includes('Prompt is too long') ||
-          (stderrOutput.toLowerCase().includes('token') && stderrOutput.toLowerCase().includes('limit'))) {
-        console.log(`[${aiTool}] ⚠️ Prompt too long error detected`);
+      if (isPromptTooLong) {
+        console.log(`[${aiTool}] ⚠️ Prompt too long error detected (stdout=${promptTooLong}, stderr=${stderrOutput.includes('Prompt is too long')})`);
+        if (options.resumeSessionId) {
+          // --resume でセッションが長すぎる → retry に任せる（新規セッションで再試行）
+          console.log(`[${aiTool}] ⚠️ --resume session too long, flagging for retry without session ID`);
+          result.resumeFailed = true;
+          resolve(result);
+          return;
+        }
+        // --resume なし → 日本語の警告メッセージを送信
         if (!completionSent) {
           completionSent = true;
           onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData);
         }
+        resolve(result);
+        return;
+      }
+
+      // Detect --resume failure: exit code 1 + no output → retry に任せるため onOutput を呼ばない
+      if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
+        console.log(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
+        result.resumeFailed = true;
         resolve(result);
         return;
       }
