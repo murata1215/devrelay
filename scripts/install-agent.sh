@@ -13,7 +13,7 @@
 # 前提条件:
 #   - git
 #   - curl, tar（ワンライナー実行時点で存在）
-#   ※ Node.js 20+ は未インストールなら自動ダウンロード。pnpm は事前インストールが必要
+#   ※ Node.js 20+ と pnpm は未インストールなら自動でダウンロード・インストール
 #
 # 処理内容:
 #   1. 依存ツールの確認（Node.js 20+, git, pnpm）
@@ -146,10 +146,33 @@ fi
 echo -e "${BLUE}└─────────────────────────────────────────────────┘${NC}"
 echo ""
 
+# --- プロキシ設定プロンプト ---
+# --proxy 引数が未指定の場合、対話的にプロキシ使用の有無を確認する
+# curl | bash でも /dev/tty から読み取ることで対話入力が可能
+# ※ 依存ツールチェック（Node.js/pnpm 自動インストール）より前に実行する必要がある
+if [ -z "$PROXY_URL" ]; then
+  echo -n -e "🔌 プロキシを使用しますか？ (y/N): "
+  read USE_PROXY < /dev/tty 2>/dev/null || USE_PROXY="n"
+  if [[ "$USE_PROXY" =~ ^[Yy] ]]; then
+    echo -n -e "   プロキシURL (例: http://proxy:8080): "
+    read PROXY_URL < /dev/tty 2>/dev/null || PROXY_URL=""
+    if [ -n "$PROXY_URL" ]; then
+      echo -e "  ${GREEN}✅ プロキシ: $PROXY_URL${NC}"
+    fi
+  fi
+  echo ""
+fi
+
+# プロキシが設定されている場合、git/pnpm/npm/curl でもプロキシを使うよう環境変数をセット
+if [ -n "$PROXY_URL" ]; then
+  export HTTP_PROXY="$PROXY_URL"
+  export HTTPS_PROXY="$PROXY_URL"
+fi
+
 # =============================================================================
 # Step 1: 依存ツール確認・自動インストール
 # =============================================================================
-# git と pnpm はハード依存。Node.js は未インストールなら自動でインストールする。
+# git のみハード依存。Node.js と pnpm は未インストールなら自動でインストールする。
 echo -e "[1/6] 依存ツールを確認中..."
 
 # --- git チェック（唯一の必須前提条件）---
@@ -229,41 +252,26 @@ if [ "$NEED_NODE_INSTALL" = true ]; then
   fi
 fi
 
-# --- pnpm チェック（必須前提条件）---
+# --- pnpm チェック・自動インストール ---
+# npm は Node.js に同梱されているため、追加依存なし
+# グローバルインストールは権限不足の場合 sudo でフォールバック
 if ! command -v pnpm &> /dev/null; then
-  echo -e "${RED}❌ pnpm が必要です${NC}"
-  echo -e "   インストール: ${YELLOW}npm install -g pnpm${NC}"
-  echo -e ""
-  echo -e "${RED}pnpm をインストールしてから再実行してください。${NC}"
-  exit 1
+  echo -e "  📦 pnpm をインストール中..."
+  if npm install -g pnpm 2>/dev/null; then
+    echo -e "  ${GREEN}✅ pnpm $(pnpm -v) をインストールしました${NC}"
+  elif sudo npm install -g pnpm 2>/dev/null; then
+    echo -e "  ${GREEN}✅ pnpm $(pnpm -v) をインストールしました (sudo)${NC}"
+  else
+    echo -e "${RED}❌ pnpm のインストールに失敗しました${NC}"
+    echo -e "   手動でインストールしてください: ${YELLOW}sudo npm install -g pnpm${NC}"
+    exit 1
+  fi
 else
   echo -e "  ✅ pnpm $(pnpm -v)"
 fi
 
 echo -e "${GREEN}✅ 依存ツール OK${NC}"
 echo ""
-
-# --- プロキシ設定プロンプト ---
-# --proxy 引数が未指定の場合、対話的にプロキシ使用の有無を確認する
-# curl | bash でも /dev/tty から読み取ることで対話入力が可能
-if [ -z "$PROXY_URL" ]; then
-  echo -n -e "🔌 プロキシを使用しますか？ (y/N): "
-  read USE_PROXY < /dev/tty 2>/dev/null || USE_PROXY="n"
-  if [[ "$USE_PROXY" =~ ^[Yy] ]]; then
-    echo -n -e "   プロキシURL (例: http://proxy:8080): "
-    read PROXY_URL < /dev/tty 2>/dev/null || PROXY_URL=""
-    if [ -n "$PROXY_URL" ]; then
-      echo -e "  ${GREEN}✅ プロキシ: $PROXY_URL${NC}"
-    fi
-  fi
-  echo ""
-fi
-
-# プロキシが設定されている場合、git/pnpm/npm でもプロキシを使うよう環境変数をセット
-if [ -n "$PROXY_URL" ]; then
-  export HTTP_PROXY="$PROXY_URL"
-  export HTTPS_PROXY="$PROXY_URL"
-fi
 
 # =============================================================================
 # トークン事前検証
@@ -478,6 +486,30 @@ echo -e "[6/6] Agent を起動中..."
 
 AGENT_ENTRY="$AGENT_DIR/$AGENT_SUBDIR/dist/index.js"
 
+# --- サービス用 PATH を構築 ---
+# systemd / launchd / crontab は .bashrc を読まないため、PATH を明示指定する
+SERVICE_PATH="/usr/local/bin:/usr/bin:/bin"
+# Node.js のディレクトリ
+NODE_BIN_DIR=$(dirname "$(which node)")
+SERVICE_PATH="${NODE_BIN_DIR}:${SERVICE_PATH}"
+# ~/.local/bin（claude CLI の一般的なインストール先）
+if [ -d "$HOME/.local/bin" ]; then
+  SERVICE_PATH="$HOME/.local/bin:${SERVICE_PATH}"
+fi
+# ~/.devrelay/bin（devrelay-claude シンボリックリンク）
+SERVICE_PATH="$CONFIG_DIR/bin:${SERVICE_PATH}"
+
+# --- サービス用プロキシ環境変数行を構築 ---
+# プロキシが設定されている場合のみ、サービスファイルに環境変数行を追加する
+# 大文字・小文字の両方を設定（ツールによって参照する変数名が異なるため）
+SYSTEMD_PROXY_LINES=""
+if [ -n "$PROXY_URL" ]; then
+  SYSTEMD_PROXY_LINES="Environment=HTTP_PROXY=${PROXY_URL}
+Environment=HTTPS_PROXY=${PROXY_URL}
+Environment=http_proxy=${PROXY_URL}
+Environment=https_proxy=${PROXY_URL}"
+fi
+
 if [ "$OS_TYPE" = "Darwin" ]; then
   # =========================================================================
   # macOS: LaunchAgent で起動
@@ -491,6 +523,19 @@ if [ "$OS_TYPE" = "Darwin" ]; then
 
   # 既存の LaunchAgent があれば先にアンロード
   launchctl unload "$PLIST_FILE" 2>/dev/null || true
+
+  # plist 内の EnvironmentVariables に動的にプロキシ項目を追加
+  PLIST_PROXY_ENTRIES=""
+  if [ -n "$PROXY_URL" ]; then
+    PLIST_PROXY_ENTRIES="    <key>HTTP_PROXY</key>
+    <string>${PROXY_URL}</string>
+    <key>HTTPS_PROXY</key>
+    <string>${PROXY_URL}</string>
+    <key>http_proxy</key>
+    <string>${PROXY_URL}</string>
+    <key>https_proxy</key>
+    <string>${PROXY_URL}</string>"
+  fi
 
   cat > "$PLIST_FILE" << PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -519,7 +564,8 @@ if [ "$OS_TYPE" = "Darwin" ]; then
     <key>NODE_ENV</key>
     <string>production</string>
     <key>PATH</key>
-    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${NODE_PATH%/*}</string>
+    <string>${HOME}/.local/bin:${CONFIG_DIR}/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${NODE_PATH%/*}</string>
+${PLIST_PROXY_ENTRIES}
   </dict>
 </dict>
 </plist>
@@ -567,6 +613,8 @@ ExecStart=$NODE_PATH $AGENT_ENTRY
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
+Environment=PATH=${SERVICE_PATH}
+${SYSTEMD_PROXY_LINES}
 
 [Install]
 WantedBy=default.target
@@ -614,7 +662,12 @@ EOF
       echo -e "  ログ: ${YELLOW}tail -f $CONFIG_DIR/logs/agent.log${NC}"
 
       # crontab @reboot で OS 再起動時の自動起動を設定
-      CRONTAB_CMD="@reboot cd $AGENT_DIR/$AGENT_SUBDIR && $NODE_ABS_PATH $AGENT_ENTRY > $CONFIG_DIR/logs/agent.log 2>&1"
+      # crontab は .bashrc を読まないため、PATH とプロキシを環境変数として埋め込む
+      CRONTAB_ENV="PATH=${SERVICE_PATH}"
+      if [ -n "$PROXY_URL" ]; then
+        CRONTAB_ENV="${CRONTAB_ENV} HTTP_PROXY=${PROXY_URL} HTTPS_PROXY=${PROXY_URL} http_proxy=${PROXY_URL} https_proxy=${PROXY_URL}"
+      fi
+      CRONTAB_CMD="@reboot ${CRONTAB_ENV} cd $AGENT_DIR/$AGENT_SUBDIR && $NODE_ABS_PATH $AGENT_ENTRY > $CONFIG_DIR/logs/agent.log 2>&1"
       # 既存の devrelay エントリを除去してから新しいエントリを追加（重複防止）
       ( crontab -l 2>/dev/null | grep -v "devrelay" ; echo "$CRONTAB_CMD" ) | crontab - 2>/dev/null && {
         CRONTAB_REGISTERED=true

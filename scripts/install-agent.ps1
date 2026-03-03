@@ -92,6 +92,27 @@ Write-Host "|  DevRelay Agent Installer (Windows)               |" -ForegroundCo
 Write-Host "+--------------------------------------------------+" -ForegroundColor Blue
 Write-Host ""
 
+# --- プロキシ設定プロンプト ---
+# $env:DEVRELAY_PROXY が未設定の場合、対話的にプロキシ使用の有無を確認する
+# Read-Host はパイプライン（irm | iex）中でもコンソールから読み取れる
+# ※ 依存ツールチェック（pnpm 自動インストール）より前に実行する必要がある
+if (-not $ProxyUrl) {
+    $UseProxy = Read-Host "プロキシを使用しますか？ (y/N)"
+    if ($UseProxy -match "^[Yy]") {
+        $ProxyUrl = Read-Host "プロキシURL (例: http://proxy:8080)"
+        if ($ProxyUrl) {
+            Write-Host "  OK プロキシ: $ProxyUrl" -ForegroundColor Green
+        }
+    }
+    Write-Host ""
+}
+
+# プロキシが設定されている場合、git/pnpm/npm でもプロキシを使うよう環境変数をセット
+if ($ProxyUrl) {
+    $env:HTTP_PROXY = $ProxyUrl
+    $env:HTTPS_PROXY = $ProxyUrl
+}
+
 # =============================================================================
 # Step 1: 依存ツール確認
 # =============================================================================
@@ -165,26 +186,6 @@ if ($Missing -gt 0) {
 
 Write-Host "OK 依存ツール OK" -ForegroundColor Green
 Write-Host ""
-
-# --- プロキシ設定プロンプト ---
-# $env:DEVRELAY_PROXY が未設定の場合、対話的にプロキシ使用の有無を確認する
-# Read-Host はパイプライン（irm | iex）中でもコンソールから読み取れる
-if (-not $ProxyUrl) {
-    $UseProxy = Read-Host "プロキシを使用しますか？ (y/N)"
-    if ($UseProxy -match "^[Yy]") {
-        $ProxyUrl = Read-Host "プロキシURL (例: http://proxy:8080)"
-        if ($ProxyUrl) {
-            Write-Host "  OK プロキシ: $ProxyUrl" -ForegroundColor Green
-        }
-    }
-    Write-Host ""
-}
-
-# プロキシが設定されている場合、git/pnpm/npm でもプロキシを使うよう環境変数をセット
-if ($ProxyUrl) {
-    $env:HTTP_PROXY = $ProxyUrl
-    $env:HTTPS_PROXY = $ProxyUrl
-}
 
 # =============================================================================
 # トークン事前検証

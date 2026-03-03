@@ -1971,6 +1971,29 @@ WebUI の Agent Settings に macOS タブを追加。
 
 ---
 
+### #111: インストーラー プロキシ早期判定 + pnpm 自動インストール復活 + サービス環境変数修正 (2026-03-03)
+
+プロキシ環境（企業ネットワーク等）でのインストーラー実行に関する複数の問題を修正。
+
+#### 1. プロキシ判定の早期化（問題A）
+- `scripts/install-agent.sh`: プロキシ設定プロンプトを依存ツールチェック（Step 1）の**前**に移動
+- `scripts/install-agent.ps1`: 同様にプロキシ設定プロンプトを Step 1 前に移動
+- これにより Node.js ダウンロード・pnpm インストール・トークン検証すべてでプロキシが有効になる
+
+#### 2. pnpm 自動インストール復活（問題A）
+- `scripts/install-agent.sh`: #110 で廃止した pnpm 自動インストールを復活
+- `npm install -g pnpm` → 失敗なら `sudo npm install -g pnpm` にフォールバック
+- プロキシ環境変数が事前にセットされた状態で実行されるため、プロキシ経由での自動インストールが可能
+
+#### 3. systemd / LaunchAgent / crontab のサービス環境変数修正（問題B,C）
+- **PATH 問題**: systemd サービスは `.bashrc` を読まないため `~/.local/bin`（claude CLI）が PATH にない → サービスファイルに PATH を明示指定
+  - `~/.local/bin`（claude CLI の一般的なインストール先）
+  - `~/.devrelay/bin`（devrelay-claude シンボリックリンク）
+  - Node.js のバイナリディレクトリ
+- **プロキシ問題**: systemd サービスにプロキシ環境変数がなく claude CLI が API に接続できない（ECONNRESET） → `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy` を設定
+- macOS LaunchAgent: PATH に `~/.local/bin` と `~/.devrelay/bin` を追加、プロキシ設定を追加
+- nohup + crontab: @reboot エントリに PATH とプロキシ環境変数を埋め込み
+
 ### #110: インストーラー pnpm 自動インストール廃止 (2026-03-02)
 
 - `scripts/install-agent.sh`: pnpm が未インストールの場合、自動インストールを試みず即エラー終了するよう変更

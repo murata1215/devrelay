@@ -272,7 +272,7 @@ pm2 startup
 
 ### Proxy Configuration
 
-The one-liner installers prompt for proxy settings during installation. When a proxy is configured, `HTTP_PROXY`/`HTTPS_PROXY` are automatically set so that `git clone` and `pnpm install` also use the proxy. You can also specify proxy via CLI arguments or environment variables:
+The one-liner installers prompt for proxy settings **before** dependency checks, so that Node.js download and pnpm auto-install also use the proxy. When a proxy is configured, `HTTP_PROXY`/`HTTPS_PROXY` are set for all operations (`git clone`, `pnpm install`, token validation). The proxy settings are also written to the service configuration (systemd `Environment=`, macOS LaunchAgent `EnvironmentVariables`, crontab inline env) so that the claude CLI can reach Anthropic API through the proxy at runtime. You can also specify proxy via CLI arguments or environment variables:
 
 ```bash
 # Linux: interactive prompt during install (answer y/N when asked)
@@ -434,6 +434,7 @@ agents/windows/
 - [x] Agent remote update (`u` / `update` command to check version and update agent from Discord/Telegram)
 - [x] Dev Reports (AI-generated development reports from conversation history)
 - [x] macOS Agent (launchd management, cross-platform installer, WebUI macOS tab)
+- [x] Installer proxy early detection + pnpm auto-install restoration + service env vars (systemd/launchd/crontab PATH and proxy)
 - [ ] Shared Documents (DevRelay Box) - Cross-project RAG with pgvector + OpenAI Embeddings
 - [ ] LINE Bot
 - [ ] Team Features
