@@ -492,19 +492,31 @@ bash プロセスの cmdline に `.devrelay.*index.js` が含まれるため `pg
 **対策**: nohup installType の場合は `restartCmd.command` を使わず、connection.ts 内で
 専用のリスタートコマンドを構築する（`grep -v "^$$\$"` + PATH 上の `node`）。
 
-### Windows Agent の `isInstalledAgent` パス判定
+### Windows Agent のパス判定: `homedir()` vs `getConfigDir()`
 
-`isInstalledAgent()` は Agent のルートディレクトリがインストール先配下かどうかで開発リポ判定する。
-Windows は `%APPDATA%\devrelay\agent\` にインストールされるため、Linux の `~/.devrelay/agent` とパスが異なる。
-`homedir()` ベースではなく `getConfigDir()` を使って OS ごとの正しいパスを参照すること。
+Windows では `homedir()` (`C:\Users\<user>`) と `getConfigDir()` (`%APPDATA%\devrelay`) が異なる。
+`homedir()` ベースのパスは Linux 固定になるため、Windows で以下の問題が発生する：
+
+1. **`isInstalledAgent()`**: `homedir() + '.devrelay/agent'` → Windows で常に devRepo 判定 → `u` 拒否
+2. **`logsDir`**: `homedir() + '.devrelay/logs'` → `update.log` が間違った場所に書き込まれる
+
+**対策**: パス構築には常に `getConfigDir()` を使う。
 
 ```typescript
 // ✅ 正しい（OS 分岐済みの getConfigDir() を使用）
 const installedDir = join(getConfigDir(), 'agent');
+const logsDir = join(getConfigDir(), 'logs');
 
-// ❌ 誤り（Linux パス固定 → Windows で常に false）
+// ❌ 誤り（Linux パス固定 → Windows で不一致）
 const installedDir = join(homedir(), '.devrelay', 'agent');
+const logsDir = join(homedir(), '.devrelay', 'logs');
 ```
+
+### Windows 更新スクリプトの stop + restart
+
+Windows の restart コマンドは `wscript.exe` で新プロセスを起動するだけで旧プロセスを停止しない。
+更新スクリプトでは restart の前に stop コマンド（`Get-CimInstance Win32_Process` で kill）を実行すること。
+Linux nohup では `pgrep | grep -v $$ | xargs kill` で旧プロセスを停止してからリスタートしている。
 
 ---
 
