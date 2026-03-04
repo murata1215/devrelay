@@ -518,6 +518,26 @@ Windows の restart コマンドは `wscript.exe` で新プロセスを起動す
 更新スクリプトでは restart の前に stop コマンド（`Get-CimInstance Win32_Process` で kill）を実行すること。
 Linux nohup では `pgrep | grep -v $$ | xargs kill` で旧プロセスを停止してからリスタートしている。
 
+### Windows PowerShell スクリプト実行: `-File` vs `-Command`
+
+PowerShell スクリプトを `spawn()` で実行する場合、`-Command` ではなく `-File` を使うこと。
+
+```typescript
+// ✅ 正しい（ファイルに書き出して -File で実行）
+const scriptPath = join(logsDir, 'update.ps1');
+writeFileSync(scriptPath, scriptLines.join('\n'), 'utf-8');
+spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath], { ... });
+
+// ❌ 誤り（-Command で長いスクリプトを引数渡し）
+spawn('powershell', ['-Command', scriptLines.join('; ')], { ... });
+```
+
+理由: `-Command` では引数全体が PowerShell のコマンドライン解析を受ける。
+スクリプト内の二重引用符（例: `Get-CimInstance -Filter "Name='node.exe'"` の stop コマンド）が
+引数パースと競合し、PowerShell が構文エラーで即終了する。
+`-File` はファイル内容をそのまま実行するため、クォーティング問題が発生しない。
+`-ExecutionPolicy Bypass` はスクリプトファイル実行に必要。
+
 ---
 
 ## マシン名の自動更新と重複解決
