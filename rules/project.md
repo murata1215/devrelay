@@ -474,13 +474,23 @@ systemd/PM2 の restart は自動的に旧プロセスを停止するが、nohup
 
 ```bash
 # restart コマンド（management-info.ts）
-pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | xargs kill 2>/dev/null || true; sleep 1; cd <dir> && nohup <node> <index.js> < /dev/null > <logfile> 2>&1 &
+NODE_BIN="<nodePath>"; [ ! -x "$NODE_BIN" ] && NODE_BIN=node; pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\$" | xargs kill 2>/dev/null || true; sleep 1; cd <dir> && nohup "$NODE_BIN" <index.js> < /dev/null >> <logfile> 2>&1 &
 ```
 
 - `pgrep -u $(whoami)`: 自分のユーザーの Agent プロセスのみ検索（他ユーザーに影響しない）
+- `grep -v "^$$\$"`: 自身の PID を除外（`bash -c "..."` で実行時、cmdline にパターンが含まれるため自殺防止）
 - `|| true`: プロセスが見つからなくてもエラーにならない
 - `; sleep 1;`: kill の完了を待つ（`&&` ではなく `;` で kill 失敗時も続行）
-- detached bash プロセス（更新スクリプト自体）は `index.js` にマッチしないため kill されない
+- `NODE_BIN` フォールバック: `process.execPath` が存在しない場合は PATH 上の `node` を使用
+
+### `u` コマンド更新スクリプトでの注意
+
+`handleAgentUpdate()` は `spawn('bash', ['-c', script])` で更新スクリプトを起動する。
+nohup の場合、`restartCmd.command`（management-info.ts 由来）をそのまま使うと、
+bash プロセスの cmdline に `.devrelay.*index.js` が含まれるため `pgrep` が自身にマッチし自殺する。
+
+**対策**: nohup installType の場合は `restartCmd.command` を使わず、connection.ts 内で
+専用のリスタートコマンドを構築する（`grep -v "^$$\$"` + PATH 上の `node`）。
 
 ---
 
