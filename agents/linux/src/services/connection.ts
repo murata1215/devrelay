@@ -45,6 +45,7 @@ import { promisify } from 'util';
 import { homedir } from 'os';
 import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 const execAsync = promisify(execCallback);
 import {
   loadConversation,
@@ -1638,7 +1639,7 @@ async function handleAgentUpdate() {
     // スクリプトが自殺する。専用リスタートコマンドを構築して $$ で自 PID を除外する。
     let actualRestartCmd: string;
     if (mgmtInfo.installType === 'nohup') {
-      const agentIndex = resolve(__dirname, '..', 'index.js');
+      const agentIndex = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'index.js');
       const agentLogFile = join(homedir(), '.devrelay', 'logs', 'agent.log');
       actualRestartCmd = [
         'pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\\$" | xargs kill 2>/dev/null || true',
