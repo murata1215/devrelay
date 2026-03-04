@@ -1595,6 +1595,14 @@ async function handleAgentUpdate() {
   }
 
   updateInProgress = true;
+  // 安全装置: 更新スクリプトが失敗/Agent が再起動しなかった場合にフラグをリセット
+  // 正常時は Agent プロセスが kill → restart されるので発火しない
+  setTimeout(() => {
+    if (updateInProgress) {
+      console.warn('⚠️ Update flag reset after timeout (5 min)');
+      updateInProgress = false;
+    }
+  }, 5 * 60 * 1000);
   console.log(`🔄 Starting agent update (dir: ${agentDir}, installType: ${mgmtInfo.installType})`);
 
   // 更新開始を Server に通知
