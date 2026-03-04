@@ -98,7 +98,8 @@ function generateLinuxInfo(): ManagementInfo {
       type: 'restart',
       label: '再起動',
       // 旧プロセスを停止してから新プロセスを起動（`u` コマンドでの重複インスタンス防止）
-      command: `pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | xargs kill 2>/dev/null || true; sleep 1; cd ${path.dirname(agentIndex)} && nohup ${nodePath} ${agentIndex} < /dev/null > ${logFile} 2>&1 &`,
+      // NODE_BIN フォールバック: process.execPath が存在しない場合は PATH 上の node を使用
+      command: `NODE_BIN="${nodePath}"; [ ! -x "$NODE_BIN" ] && NODE_BIN=node; pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | xargs kill 2>/dev/null || true; sleep 1; cd ${path.dirname(agentIndex)} && nohup "$NODE_BIN" ${agentIndex} < /dev/null > ${logFile} 2>&1 &`,
     },
     { type: 'crontab', label: 'crontab 確認', command: 'crontab -l | grep devrelay' },
   ];
