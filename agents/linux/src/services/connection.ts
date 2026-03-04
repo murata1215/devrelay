@@ -24,7 +24,7 @@ import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
-import { saveConfig, type AgentConfig } from './config.js';
+import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
@@ -1466,7 +1466,8 @@ function getAgentRootDir(): string {
  * ~/.devrelay/agent/ 配下にあればインストール済み、それ以外は開発リポジトリ
  */
 function isInstalledAgent(agentDir: string): boolean {
-  const installedDir = join(homedir(), '.devrelay', 'agent');
+  // Windows: %APPDATA%\devrelay\agent, Linux: ~/.devrelay/agent
+  const installedDir = join(getConfigDir(), 'agent');
   return agentDir.startsWith(installedDir);
 }
 
