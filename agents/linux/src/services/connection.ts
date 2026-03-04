@@ -1608,7 +1608,8 @@ async function handleAgentUpdate() {
   });
 
   // ログディレクトリを事前作成（存在しないと bash の >> が失敗する）
-  const logsDir = join(homedir(), '.devrelay', 'logs');
+  // Windows: %APPDATA%\devrelay\logs, Linux: ~/.devrelay/logs
+  const logsDir = join(getConfigDir(), 'logs');
   mkdirSync(logsDir, { recursive: true });
   const updateLogFile = join(logsDir, 'update.log');
 
@@ -1631,6 +1632,8 @@ async function handleAgentUpdate() {
     const psRunAndLog = (label: string, cmd: string) =>
       `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
 
+    // 旧プロセスを停止してから新プロセスを起動するため stop コマンドを取得
+    const stopCmd = mgmtInfo.commands.find(c => c.type === 'stop');
     const script = [
       `$ErrorActionPreference = 'Continue'`,
       psLog('=== Update started ==='),
@@ -1642,6 +1645,8 @@ async function handleAgentUpdate() {
       psRunAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
       psLog('Build done, restarting...'),
       `Start-Sleep -Seconds 2`,
+      // 旧 Agent プロセスを停止（Get-CimInstance で node.exe + devrelay を検出して kill）
+      ...(stopCmd ? [psRunAndLog('stop old agent', stopCmd.command), 'Start-Sleep -Seconds 2'] : []),
       restartCmd.command,
     ].join('; ');
 
