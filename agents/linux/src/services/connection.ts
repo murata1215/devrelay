@@ -1621,16 +1621,25 @@ async function handleAgentUpdate() {
   if (process.platform === 'win32') {
     // Windows: PowerShell スクリプトで更新
     // ビルド失敗でもリスタートは必ず実行（旧 dist/ コードで復帰）
+    // 各ステップの $LASTEXITCODE を個別にログ記録し、障害時の原因特定を容易にする
+    /** タイムスタンプ付きログ出力ヘルパー（PowerShell 用） */
+    const psTs = `Get-Date -Format 'yyyy-MM-dd HH:mm:ss'`;
+    const psLog = (msg: string) =>
+      `"[$(${psTs})] ${msg}" | Out-File -Append "${updateLogFile}"`;
+    /** コマンド実行 + exit code ログ記録ヘルパー（PowerShell 用） */
+    const psRunAndLog = (label: string, cmd: string) =>
+      `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
+
     const script = [
       `$ErrorActionPreference = 'Continue'`,
-      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] === Update started ===" | Out-File -Append "${updateLogFile}"`,
+      psLog('=== Update started ==='),
       `cd "${agentDir}"`,
-      `git fetch origin 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `git reset --hard origin/main 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `pnpm install --frozen-lockfile --ignore-scripts 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `pnpm --filter @devrelay/shared build 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `pnpm --filter @devrelay/agent build 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Build done, restarting..." | Out-File -Append "${updateLogFile}"`,
+      psRunAndLog('git fetch', 'git fetch origin'),
+      psRunAndLog('git reset', 'git reset --hard origin/main'),
+      psRunAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
+      psRunAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
+      psRunAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
+      psLog('Build done, restarting...'),
       `Start-Sleep -Seconds 2`,
       restartCmd.command,
     ].join('; ');
