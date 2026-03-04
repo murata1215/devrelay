@@ -1064,9 +1064,13 @@ export function checkAgentVersion(machineId: string): Promise<AgentVersionInfoPa
   });
 }
 
+/** 更新タイムアウト: 5分以内に Agent が再接続しなければタイムアウト通知 */
+const UPDATE_TIMEOUT = 5 * 60 * 1000;
+
 /**
  * Agent に更新実行コマンドを送信する
  * Agent は detached プロセスで git pull + ビルド + 再起動を実行
+ * 5分以内に再接続しなければタイムアウト通知を送信
  *
  * @param machineId 更新対象の Agent マシンID
  * @param platform リクエスト元のプラットフォーム（エラー通知用）
@@ -1074,6 +1078,18 @@ export function checkAgentVersion(machineId: string): Promise<AgentVersionInfoPa
  */
 export function updateAgent(machineId: string, platform: Platform, chatId: string) {
   pendingUpdateNotify.set(machineId, { platform, chatId });
+
+  // タイムアウトで pendingUpdateNotify をクリーンアップし、ユーザーに通知
+  setTimeout(() => {
+    const entry = pendingUpdateNotify.get(machineId);
+    if (entry && entry.platform === platform && entry.chatId === chatId) {
+      pendingUpdateNotify.delete(machineId);
+      console.log(`⏰ Update timeout for ${machineId}`);
+      sendMessage(platform, chatId,
+        `⚠️ Agent 更新がタイムアウトしました（5分）。\n\`~/.devrelay/logs/update.log\` を確認してください。`);
+    }
+  }, UPDATE_TIMEOUT);
+
   sendToAgent(machineId, {
     type: 'server:agent:update',
     payload: {}

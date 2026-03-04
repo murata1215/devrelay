@@ -22,7 +22,7 @@ import type {
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
-import { readdirSync } from 'fs';
+import { readdirSync, mkdirSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
@@ -78,6 +78,9 @@ let serverAllowedTools: string[] | null = null;
 
 // Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
+
+// 更新中フラグ（二重更新防止）
+let updateInProgress = false;
 
 // Pong timeout detection
 const PONG_TIMEOUT = 45000; // 45 seconds
@@ -1553,6 +1556,15 @@ async function handleAgentUpdate() {
   const agentDir = getAgentRootDir();
   const machineId = currentMachineId || currentConfig?.machineId || '';
 
+  // 二重更新防止
+  if (updateInProgress) {
+    sendMessage({
+      type: 'agent:update:status',
+      payload: { machineId, status: 'error', error: '更新が既に実行中です。' },
+    });
+    return;
+  }
+
   // 開発リポジトリからは更新不可
   if (!isInstalledAgent(agentDir)) {
     sendMessage({
@@ -1582,7 +1594,8 @@ async function handleAgentUpdate() {
     return;
   }
 
-  console.log(`🔄 Starting agent update (dir: ${agentDir}, restart: ${restartCmd.command})`);
+  updateInProgress = true;
+  console.log(`🔄 Starting agent update (dir: ${agentDir}, installType: ${mgmtInfo.installType})`);
 
   // 更新開始を Server に通知
   sendMessage({
@@ -1593,15 +1606,24 @@ async function handleAgentUpdate() {
     },
   });
 
-  // 更新ログファイル（デバッグ用）
-  const updateLogFile = join(homedir(), '.devrelay', 'logs', 'update.log');
+  // ログディレクトリを事前作成（存在しないと bash の >> が失敗する）
+  const logsDir = join(homedir(), '.devrelay', 'logs');
+  mkdirSync(logsDir, { recursive: true });
+  const updateLogFile = join(logsDir, 'update.log');
+
+  /** タイムスタンプ付きログ出力ヘルパー（bash 用） */
+  const ts = `date '+%Y-%m-%d %H:%M:%S'`;
+  const log = (msg: string) => `echo "[\$(${ts})] ${msg}" >> "${updateLogFile}"`;
+  /** コマンド実行 + exit code ログ記録ヘルパー */
+  const runAndLog = (label: string, cmd: string) =>
+    `${log(label)}; ${cmd} >> "${updateLogFile}" 2>&1; ${log(`${label} exit=$?`)}`;
 
   if (process.platform === 'win32') {
     // Windows: PowerShell スクリプトで更新
     // ビルド失敗でもリスタートは必ず実行（旧 dist/ コードで復帰）
     const script = [
       `$ErrorActionPreference = 'Continue'`,
-      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Update started" | Out-File -Append "${updateLogFile}"`,
+      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] === Update started ===" | Out-File -Append "${updateLogFile}"`,
       `cd "${agentDir}"`,
       `git fetch origin 2>&1 | Out-File -Append "${updateLogFile}"`,
       `git reset --hard origin/main 2>&1 | Out-File -Append "${updateLogFile}"`,
@@ -1618,21 +1640,29 @@ async function handleAgentUpdate() {
       stdio: 'ignore',
       env: getExecEnv(),
     });
+    child.on('error', (err) => {
+      console.error(`❌ Update script spawn failed: ${err.message}`);
+      updateInProgress = false;
+      sendMessage({
+        type: 'agent:update:status',
+        payload: { machineId, status: 'error', error: `スクリプト起動失敗: ${err.message}` },
+      });
+    });
     child.unref();
   } else {
-    // Linux: bash スクリプトで更新
-    // ビルド失敗でもリスタートは必ず実行（旧 dist/ コードで復帰）
+    // Linux/macOS: bash スクリプトで更新
+    // 各ステップの exit code を個別にログ記録し、障害時の原因特定を容易にする
     const nodeBinDir = join(homedir(), '.devrelay', 'node', 'bin');
     const buildSteps = [
       `export PATH="${nodeBinDir}:$PATH"`,
       `cd "${agentDir}"`,
-      `echo "[$(date '+%Y-%m-%d %H:%M:%S')] Update started" >> "${updateLogFile}"`,
-      `git fetch origin >> "${updateLogFile}" 2>&1`,
-      `git reset --hard origin/main >> "${updateLogFile}" 2>&1`,
-      `pnpm install --frozen-lockfile --ignore-scripts >> "${updateLogFile}" 2>&1 || true`,
-      `pnpm --filter @devrelay/shared build >> "${updateLogFile}" 2>&1`,
-      `pnpm --filter @devrelay/agent build >> "${updateLogFile}" 2>&1`,
-    ].join(' && ');
+      log('=== Update started ==='),
+      runAndLog('git fetch', 'git fetch origin'),
+      runAndLog('git reset', 'git reset --hard origin/main'),
+      runAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
+      runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
+      runAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
+    ].join('; ');
 
     // nohup の場合: restartCmd.command をそのまま使うと、bash -c の cmdline に
     // .devrelay.*index.js が含まれ、pgrep が自身の bash プロセスもマッチして
@@ -1640,7 +1670,7 @@ async function handleAgentUpdate() {
     let actualRestartCmd: string;
     if (mgmtInfo.installType === 'nohup') {
       const agentIndex = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'index.js');
-      const agentLogFile = join(homedir(), '.devrelay', 'logs', 'agent.log');
+      const agentLogFile = join(logsDir, 'agent.log');
       actualRestartCmd = [
         'pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\\$" | xargs kill 2>/dev/null || true',
         'sleep 1',
@@ -1652,12 +1682,20 @@ async function handleAgentUpdate() {
 
     // ビルド成否に関わらず、必ずリスタートを実行
     // セミコロンで分離し、ビルド失敗でも旧 dist/ コードで Agent を復帰させる
-    const script = `${buildSteps}; echo "[$(date '+%Y-%m-%d %H:%M:%S')] Build exit=$?, restarting..." >> "${updateLogFile}" 2>&1; sleep 2; ${actualRestartCmd}`;
+    const script = `${buildSteps}; ${log('restarting...')}; sleep 2; ${actualRestartCmd}`;
 
     const child = spawn('bash', ['-c', script], {
       detached: true,
       stdio: 'ignore',
       env: getExecEnv(),
+    });
+    child.on('error', (err) => {
+      console.error(`❌ Update script spawn failed: ${err.message}`);
+      updateInProgress = false;
+      sendMessage({
+        type: 'agent:update:status',
+        payload: { machineId, status: 'error', error: `スクリプト起動失敗: ${err.message}` },
+      });
     });
     child.unref();
   }
