@@ -283,6 +283,13 @@ async function handleAgentConnect(
     }
   }
 
+  // 旧接続が残っていれば明示的にクローズ（u コマンド後の stale WS 防止）
+  const existingWs = connectedAgents.get(machine.id);
+  if (existingWs && existingWs !== ws) {
+    console.log(`🔌 Closing stale WebSocket for ${machine.id} before new connection`);
+    try { existingWs.close(); } catch {}
+  }
+
   // Store connection and agent's local projectsDirs
   connectedAgents.set(machine.id, ws);
   if (localDirs && localDirs.length > 0) {
@@ -865,6 +872,19 @@ export function sendToAgent(machineIdOrWs: string | WebSocket, message: ServerTo
     ws.send(JSON.stringify(message));
   } else {
     console.log(`📤 sendToAgent FAILED: type=${message.type}, ws=${!!ws}, readyState=${ws?.readyState}`);
+
+    // stale WebSocket を検出 → connectedAgents からクリーンアップ（自己修復）
+    // Agent 再接続時に connectedAgents が正しい WebSocket で上書きされるまでの間、
+    // CLOSED な参照が残り続けるのを防止する
+    if (typeof machineIdOrWs === 'string' && ws) {
+      console.log(`🧹 Cleaning up stale WebSocket for ${machineIdOrWs}`);
+      connectedAgents.delete(machineIdOrWs);
+      machineCache.delete(machineIdOrWs);
+      prisma.machine.update({
+        where: { id: machineIdOrWs },
+        data: { status: 'offline' },
+      }).catch(() => {});
+    }
   }
 }
 

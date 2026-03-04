@@ -2105,3 +2105,22 @@ WebUI の Agent Settings に macOS タブを追加。
 | `agents/linux/src/services/connection.ts` | 修正（接続時スキル初期化） |
 | `agents/macos/src/services/skill-manager.ts` | **新規**（スキル自動配置） |
 | `agents/macos/src/services/connection.ts` | 修正（接続時スキル初期化） |
+
+### #114: u コマンド後の WebSocket stale 参照修正 (2026-03-04)
+
+`u` コマンドで Agent を更新した後、Server が古い WebSocket 参照（readyState=3 CLOSED）を保持し続け、Agent への全メッセージ送信が失敗する問題を修正。
+
+#### 原因
+
+Agent 再起動時の WebSocket close/reconnect タイミングにより、`connectedAgents` Map に CLOSED 状態の WebSocket が残る場合があった。
+
+#### 修正内容
+
+1. **`sendToAgent` 自己修復**: readyState !== OPEN の WebSocket を検出した場合、stale エントリを `connectedAgents` から自動削除し、マシンを offline にマーク
+2. **`handleAgentConnect` で旧 WS 強制クローズ**: Agent 再接続時に同じ machineId の古い WebSocket が残っていれば明示的に close
+
+#### 変更ファイル
+
+| ファイル | 操作 |
+|---------|------|
+| `apps/server/src/services/agent-manager.ts` | 修正（sendToAgent 自己修復 + handleAgentConnect 旧 WS クローズ） |

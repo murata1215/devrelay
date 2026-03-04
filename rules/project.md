@@ -133,6 +133,8 @@ devrelay/
 - `handleAiPrompt()`/`handleExec()` でフラグ確認 → 新セッション作成 + `server:session:start` 再送
 - `handleProjectConnect()` でフラグクリア（自動再接続時の二重作成防止）
 - `handleAgentDisconnect()` で stale WebSocket 判定（Race Condition 防止）
+- `sendToAgent()` で CLOSED な WebSocket を検出時に自動クリーンアップ（stale 参照の自己修復）
+- `handleAgentConnect()` で旧 WebSocket が残っていれば明示的に close（`u` コマンド後の stale 防止）
 - `context.userId` は Discord プラットフォーム ID。DB の `Session.userId` には `oldSession.userId` を使う
 - **サーバー起動時の ChannelSession 保持**: マシンがオフラインでも `currentMachineId`/`currentSessionId` をクリアしない。サーバー起動時は全マシンが offline のため、クリアすると全セッション情報が消失する。Agent 再接続時に `restoreSessionParticipantsForMachine()` で復元される
 - **Agent 更新完了通知**: `pendingUpdateNotify` Map で更新リクエスト元を記録し、Agent 再接続時に `handleAgentConnect()` で完了メッセージを送信
