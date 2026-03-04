@@ -79,8 +79,8 @@ let serverAllowedTools: string[] | null = null;
 // Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
 
-// 更新中フラグ（二重更新防止）
-let updateInProgress = false;
+/** 最後に更新を開始した時刻（二重更新防止用、60秒で自動解除） */
+let updateStartedAt = 0;
 
 // Pong timeout detection
 const PONG_TIMEOUT = 45000; // 45 seconds
@@ -1492,13 +1492,6 @@ function getExecEnv(): NodeJS.ProcessEnv {
  * ローカル/リモートの git コミットを比較して結果を返す
  */
 async function handleVersionCheck() {
-  // バージョンチェック時に updateInProgress をリセット
-  // ユーザーが u でバージョン確認 = 前回の更新は完了/失敗済み
-  if (updateInProgress) {
-    console.log('🔄 Resetting updateInProgress flag on version check');
-    updateInProgress = false;
-  }
-
   const agentDir = getAgentRootDir();
   const isDevRepo = !isInstalledAgent(agentDir);
   const machineId = currentMachineId || currentConfig?.machineId || '';
@@ -1564,11 +1557,12 @@ async function handleAgentUpdate() {
   const agentDir = getAgentRootDir();
   const machineId = currentMachineId || currentConfig?.machineId || '';
 
-  // 二重更新防止
-  if (updateInProgress) {
+  // 二重更新防止（60秒以内の連打をブロック、それ以降は自動解除）
+  const UPDATE_GUARD_MS = 60 * 1000;
+  if (Date.now() - updateStartedAt < UPDATE_GUARD_MS) {
     sendMessage({
       type: 'agent:update:status',
-      payload: { machineId, status: 'error', error: '更新が既に実行中です。' },
+      payload: { machineId, status: 'error', error: '更新が既に実行中です（60秒以内の再実行は不可）。' },
     });
     return;
   }
@@ -1602,15 +1596,7 @@ async function handleAgentUpdate() {
     return;
   }
 
-  updateInProgress = true;
-  // 安全装置: 更新スクリプトが失敗/Agent が再起動しなかった場合にフラグをリセット
-  // 正常時は Agent プロセスが kill → restart されるので発火しない
-  setTimeout(() => {
-    if (updateInProgress) {
-      console.warn('⚠️ Update flag reset after timeout (5 min)');
-      updateInProgress = false;
-    }
-  }, 5 * 60 * 1000);
+  updateStartedAt = Date.now();
   console.log(`🔄 Starting agent update (dir: ${agentDir}, installType: ${mgmtInfo.installType})`);
 
   // 更新開始を Server に通知
@@ -1672,7 +1658,7 @@ async function handleAgentUpdate() {
     });
     child.on('error', (err) => {
       console.error(`❌ Update script spawn failed: ${err.message}`);
-      updateInProgress = false;
+      updateStartedAt = 0;
       sendMessage({
         type: 'agent:update:status',
         payload: { machineId, status: 'error', error: `スクリプト起動失敗: ${err.message}` },
@@ -1721,7 +1707,7 @@ async function handleAgentUpdate() {
     });
     child.on('error', (err) => {
       console.error(`❌ Update script spawn failed: ${err.message}`);
-      updateInProgress = false;
+      updateStartedAt = 0;
       sendMessage({
         type: 'agent:update:status',
         payload: { machineId, status: 'error', error: `スクリプト起動失敗: ${err.message}` },
