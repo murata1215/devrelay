@@ -1492,6 +1492,13 @@ function getExecEnv(): NodeJS.ProcessEnv {
  * ローカル/リモートの git コミットを比較して結果を返す
  */
 async function handleVersionCheck() {
+  // バージョンチェック時に updateInProgress をリセット
+  // ユーザーが u でバージョン確認 = 前回の更新は完了/失敗済み
+  if (updateInProgress) {
+    console.log('🔄 Resetting updateInProgress flag on version check');
+    updateInProgress = false;
+  }
+
   const agentDir = getAgentRootDir();
   const isDevRepo = !isInstalledAgent(agentDir);
   const machineId = currentMachineId || currentConfig?.machineId || '';
