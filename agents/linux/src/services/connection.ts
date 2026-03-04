@@ -1633,10 +1633,8 @@ async function handleAgentUpdate() {
     const psRunAndLog = (label: string, cmd: string) =>
       `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
 
-    // 旧プロセスを停止してから新プロセスを起動するため stop コマンドを取得
-    // スクリプトをファイルに書き出して -File で実行する方式に変更
-    // 理由: -Command 引数では stop コマンド内の二重引用符（Get-CimInstance -Filter "Name='node.exe'"）が
-    // コマンドライン引数パースと競合し、PowerShell が構文エラーで終了していた（update.log が一切生成されなかった）
+    // スクリプトを .ps1 ファイルに書き出して -File で実行（#116）
+    // -Command では stop コマンド内の二重引用符が引数パースと競合し構文エラーで即終了していた
     const stopCmd = mgmtInfo.commands.find(c => c.type === 'stop');
     const scriptLines = [
       `$ErrorActionPreference = 'Continue'`,
