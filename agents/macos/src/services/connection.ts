@@ -1633,9 +1633,25 @@ async function handleAgentUpdate() {
       `pnpm --filter @devrelay/agent-macos build >> "${updateLogFile}" 2>&1`,
     ].join(' && ');
 
+    // nohup の場合: restartCmd.command をそのまま使うと、bash -c の cmdline に
+    // .devrelay.*index.js が含まれ、pgrep が自身の bash プロセスもマッチして
+    // スクリプトが自殺する。専用リスタートコマンドを構築して $$ で自 PID を除外する。
+    let actualRestartCmd: string;
+    if (mgmtInfo.installType === 'nohup') {
+      const agentIndex = resolve(__dirname, '..', 'index.js');
+      const agentLogFile = join(homedir(), '.devrelay', 'logs', 'agent.log');
+      actualRestartCmd = [
+        'pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\\$" | xargs kill 2>/dev/null || true',
+        'sleep 1',
+        `cd "${dirname(agentIndex)}" && nohup node "${agentIndex}" < /dev/null >> "${agentLogFile}" 2>&1 &`,
+      ].join('; ');
+    } else {
+      actualRestartCmd = restartCmd.command;
+    }
+
     // ビルド成否に関わらず、必ずリスタートを実行
     // セミコロンで分離し、ビルド失敗でも旧 dist/ コードで Agent を復帰させる
-    const script = `${buildSteps}; echo "[$(date '+%Y-%m-%d %H:%M:%S')] Build exit=$?, restarting..." >> "${updateLogFile}" 2>&1; sleep 2; ${restartCmd.command}`;
+    const script = `${buildSteps}; echo "[$(date '+%Y-%m-%d %H:%M:%S')] Build exit=$?, restarting..." >> "${updateLogFile}" 2>&1; sleep 2; ${actualRestartCmd}`;
 
     const child = spawn('bash', ['-c', script], {
       detached: true,
