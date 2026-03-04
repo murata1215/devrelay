@@ -22,7 +22,7 @@ import type {
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
-import { readdirSync, mkdirSync } from 'fs';
+import { readdirSync, mkdirSync, writeFileSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
@@ -1634,8 +1634,11 @@ async function handleAgentUpdate() {
       `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
 
     // 旧プロセスを停止してから新プロセスを起動するため stop コマンドを取得
+    // スクリプトをファイルに書き出して -File で実行する方式に変更
+    // 理由: -Command 引数では stop コマンド内の二重引用符（Get-CimInstance -Filter "Name='node.exe'"）が
+    // コマンドライン引数パースと競合し、PowerShell が構文エラーで終了していた（update.log が一切生成されなかった）
     const stopCmd = mgmtInfo.commands.find(c => c.type === 'stop');
-    const script = [
+    const scriptLines = [
       `$ErrorActionPreference = 'Continue'`,
       psLog('=== Update started ==='),
       `cd "${agentDir}"`,
@@ -1649,9 +1652,13 @@ async function handleAgentUpdate() {
       // 旧 Agent プロセスを停止（Get-CimInstance で node.exe + devrelay を検出して kill）
       ...(stopCmd ? [psRunAndLog('stop old agent', stopCmd.command), 'Start-Sleep -Seconds 2'] : []),
       restartCmd.command,
-    ].join('; ');
+    ];
 
-    const child = spawn('powershell', ['-Command', script], {
+    // スクリプトファイルに書き出し（コマンドライン長制限・エスケープ問題を根本回避）
+    const scriptPath = join(logsDir, 'update.ps1');
+    writeFileSync(scriptPath, scriptLines.join('\n'), 'utf-8');
+
+    const child = spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
       detached: true,
       stdio: 'ignore',
       env: getExecEnv(),
