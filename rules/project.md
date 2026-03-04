@@ -492,6 +492,20 @@ bash プロセスの cmdline に `.devrelay.*index.js` が含まれるため `pg
 **対策**: nohup installType の場合は `restartCmd.command` を使わず、connection.ts 内で
 専用のリスタートコマンドを構築する（`grep -v "^$$\$"` + PATH 上の `node`）。
 
+### Windows Agent の `isInstalledAgent` パス判定
+
+`isInstalledAgent()` は Agent のルートディレクトリがインストール先配下かどうかで開発リポ判定する。
+Windows は `%APPDATA%\devrelay\agent\` にインストールされるため、Linux の `~/.devrelay/agent` とパスが異なる。
+`homedir()` ベースではなく `getConfigDir()` を使って OS ごとの正しいパスを参照すること。
+
+```typescript
+// ✅ 正しい（OS 分岐済みの getConfigDir() を使用）
+const installedDir = join(getConfigDir(), 'agent');
+
+// ❌ 誤り（Linux パス固定 → Windows で常に false）
+const installedDir = join(homedir(), '.devrelay', 'agent');
+```
+
 ---
 
 ## マシン名の自動更新と重複解決

@@ -76,7 +76,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#109)
+│   ├── changelog.md      # Implementation history (#1-#116)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -437,6 +437,7 @@ agents/windows/
 - [x] Installer proxy early detection + pnpm auto-install restoration + service env vars (systemd/launchd/crontab PATH and proxy)
 - [x] "Prompt is too long" stdout detection fix + Installer Claude Code mandatory check
 - [x] Document Vector Search - MessageFile pgvector embeddings + Claude Code skill for cross-project semantic search
+- [x] Agent update hardening - pgrep self-kill prevention, step-by-step exit code logging, spawn error handling, timeout, Windows `isInstalledAgent` path fix
 - [ ] LINE Bot
 - [ ] Team Features
 - [ ] AI tool switching (Gemini/Aider)
