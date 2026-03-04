@@ -2124,3 +2124,25 @@ Agent 再起動時の WebSocket close/reconnect タイミングにより、`conn
 | ファイル | 操作 |
 |---------|------|
 | `apps/server/src/services/agent-manager.ts` | 修正（sendToAgent 自己修復 + handleAgentConnect 旧 WS クローズ） |
+
+### #115: u コマンド更新スクリプト堅牢化 (2026-03-04)
+
+nohup 方式の Agent で `u` コマンド実行後、ビルド失敗時にリスタートが実行されず Agent が停止したままになる問題を修正。
+
+#### 原因
+
+更新スクリプトの全ステップが `&&` で連結されていたため、ビルドが1つでも失敗するとリスタートコマンドが実行されなかった。
+また `stdio: 'ignore'` でスクリプト出力が破棄されており、障害時の原因特定が困難だった。
+
+#### 修正内容
+
+1. **リスタートを `&&` チェーンから分離**: ビルド成否に関わらず必ずリスタートを実行（旧 dist/ コードで復帰）
+2. **更新ログ出力**: `~/.devrelay/logs/update.log` にスクリプトの全出力を記録
+3. Linux Agent + macOS Agent の両方に適用
+
+#### 変更ファイル
+
+| ファイル | 操作 |
+|---------|------|
+| `agents/linux/src/services/connection.ts` | 修正（更新スクリプト堅牢化 + ログ出力） |
+| `agents/macos/src/services/connection.ts` | 修正（同上） |

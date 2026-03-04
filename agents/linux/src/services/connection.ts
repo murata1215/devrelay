@@ -1592,16 +1592,22 @@ async function handleAgentUpdate() {
     },
   });
 
+  // 更新ログファイル（デバッグ用）
+  const updateLogFile = join(homedir(), '.devrelay', 'logs', 'update.log');
+
   if (process.platform === 'win32') {
     // Windows: PowerShell スクリプトで更新
+    // ビルド失敗でもリスタートは必ず実行（旧 dist/ コードで復帰）
     const script = [
       `$ErrorActionPreference = 'Continue'`,
+      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Update started" | Out-File -Append "${updateLogFile}"`,
       `cd "${agentDir}"`,
-      `git fetch origin 2>&1`,
-      `git reset --hard origin/main 2>&1`,
-      `pnpm install --frozen-lockfile --ignore-scripts 2>&1`,
-      `pnpm --filter @devrelay/shared build 2>&1`,
-      `pnpm --filter @devrelay/agent build 2>&1`,
+      `git fetch origin 2>&1 | Out-File -Append "${updateLogFile}"`,
+      `git reset --hard origin/main 2>&1 | Out-File -Append "${updateLogFile}"`,
+      `pnpm install --frozen-lockfile --ignore-scripts 2>&1 | Out-File -Append "${updateLogFile}"`,
+      `pnpm --filter @devrelay/shared build 2>&1 | Out-File -Append "${updateLogFile}"`,
+      `pnpm --filter @devrelay/agent build 2>&1 | Out-File -Append "${updateLogFile}"`,
+      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Build done, restarting..." | Out-File -Append "${updateLogFile}"`,
       `Start-Sleep -Seconds 2`,
       restartCmd.command,
     ].join('; ');
@@ -1614,18 +1620,22 @@ async function handleAgentUpdate() {
     child.unref();
   } else {
     // Linux: bash スクリプトで更新
+    // ビルド失敗でもリスタートは必ず実行（旧 dist/ コードで復帰）
     const nodeBinDir = join(homedir(), '.devrelay', 'node', 'bin');
-    const script = [
+    const buildSteps = [
       `export PATH="${nodeBinDir}:$PATH"`,
       `cd "${agentDir}"`,
-      `git fetch origin`,
-      `git reset --hard origin/main`,
-      `pnpm install --frozen-lockfile --ignore-scripts 2>&1 || true`,
-      `pnpm --filter @devrelay/shared build 2>&1`,
-      `pnpm --filter @devrelay/agent build 2>&1`,
-      `sleep 2`,
-      restartCmd.command,
+      `echo "[$(date '+%Y-%m-%d %H:%M:%S')] Update started" >> "${updateLogFile}"`,
+      `git fetch origin >> "${updateLogFile}" 2>&1`,
+      `git reset --hard origin/main >> "${updateLogFile}" 2>&1`,
+      `pnpm install --frozen-lockfile --ignore-scripts >> "${updateLogFile}" 2>&1 || true`,
+      `pnpm --filter @devrelay/shared build >> "${updateLogFile}" 2>&1`,
+      `pnpm --filter @devrelay/agent build >> "${updateLogFile}" 2>&1`,
     ].join(' && ');
+
+    // ビルド成否に関わらず、必ずリスタートを実行
+    // セミコロンで分離し、ビルド失敗でも旧 dist/ コードで Agent を復帰させる
+    const script = `${buildSteps}; echo "[$(date '+%Y-%m-%d %H:%M:%S')] Build exit=$?, restarting..." >> "${updateLogFile}" 2>&1; sleep 2; ${restartCmd.command}`;
 
     const child = spawn('bash', ['-c', script], {
       detached: true,
