@@ -1680,7 +1680,8 @@ async function handleAgentUpdate() {
       actualRestartCmd = [
         'pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\\$" | xargs kill 2>/dev/null || true',
         'sleep 1',
-        `cd "${dirname(agentIndex)}" && nohup node "${agentIndex}" < /dev/null >> "${agentLogFile}" 2>&1 &`,
+        // disown でバックグラウンドジョブを bash から切り離し、bash -c が即終了するようにする
+        `cd "${dirname(agentIndex)}" && nohup node "${agentIndex}" < /dev/null >> "${agentLogFile}" 2>&1 & disown`,
       ].join('; ');
     } else {
       actualRestartCmd = restartCmd.command;
