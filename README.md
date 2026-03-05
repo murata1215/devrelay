@@ -76,7 +76,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#116)
+│   ├── changelog.md      # Implementation history (#1-#117)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -438,6 +438,8 @@ agents/windows/
 - [x] "Prompt is too long" stdout detection fix + Installer Claude Code mandatory check
 - [x] Document Vector Search - MessageFile pgvector embeddings + Claude Code skill for cross-project semantic search
 - [x] Agent update hardening - pgrep self-kill prevention, step-by-step exit code logging, spawn error handling, timeout, Windows `isInstalledAgent` path fix
+- [x] Windows PowerShell VBS wrapper - `DETACHED_PROCESS` causes PowerShell 5.1 to silently exit; fixed with `wscript.exe` + VBS `.Run` pattern
+- [x] Agent stability fixes - pongCheckInterval leak, machineId empty string bug, nohup `disown` + shell operator precedence fix
 - [ ] LINE Bot
 - [ ] Team Features
 - [ ] AI tool switching (Gemini/Aider)

@@ -550,6 +550,24 @@ spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
 - VBS `.Run` の第2引数 `0` = 非表示、第3引数 `False` = 完了を待たない
 - `-NoProfile` でプロファイル読み込みによる遅延を回避
 
+### bash 更新スクリプトのシェル演算子優先順位
+
+`bash -c` で `nohup node ... & disown` を実行する際、`&&` と `&` の優先順位に注意。
+bash では `&&` が `&` より高い優先順位を持つため:
+
+```bash
+# ❌ 誤り: (cd X && nohup node Y) & disown
+# → cd && nohup node 全体がサブシェルで実行され、node がサブシェル内フォアグラウンドになる
+# → サブシェル（bash）が node 終了まで残り続ける
+cd "/path" && nohup node "/path/index.js" < /dev/null >> "/path/agent.log" 2>&1 & disown
+
+# ✅ 正しい: cd と nohup を `;` で分離
+# → nohup node ... & だけがバックグラウンド実行、disown 後に bash 即終了
+cd "/path" ; nohup node "/path/index.js" < /dev/null >> "/path/agent.log" 2>&1 & disown
+```
+
+`cd` が失敗しても node は絶対パスなので影響なし。
+
 ---
 
 ## マシン名の自動更新と重複解決
