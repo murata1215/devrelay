@@ -139,6 +139,14 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       console.log(`🔌 Connecting to ${config.serverUrl}...`);
     }
 
+    // 旧 WebSocket が残っていればクリーンアップ（close ハンドラの誤発火防止）
+    if (ws) {
+      ws.removeAllListeners();
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.terminate();
+      }
+    }
+
     ws = new WebSocket(config.serverUrl, wsOptions);
 
     ws.on('open', () => {
@@ -194,7 +202,13 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       }
     });
 
-    ws.on('close', () => {
+    // close ハンドラ: この WS が既に置き換えられていたら再接続をスキップ
+    const thisWs = ws;
+    thisWs.on('close', () => {
+      if (ws !== thisWs) {
+        console.log('🔌 Old WebSocket closed (replaced), skipping reconnect');
+        return;
+      }
       console.log('🔌 Disconnected from server');
       stopPing();
       stopAppPing();
@@ -206,7 +220,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       scheduleReconnect(config, projects);
     });
 
-    ws.on('error', (err) => {
+    thisWs.on('error', (err) => {
       console.error('WebSocket error:', err.message);
       reject(err);
     });

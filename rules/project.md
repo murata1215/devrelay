@@ -134,7 +134,9 @@ devrelay/
 - `handleProjectConnect()` でフラグクリア（自動再接続時の二重作成防止）
 - `handleAgentDisconnect()` で stale WebSocket 判定（Race Condition 防止）
 - `sendToAgent()` で CLOSED な WebSocket を検出時に自動クリーンアップ（stale 参照の自己修復）
-- `handleAgentConnect()` で旧 WebSocket が残っていれば明示的に close（`u` コマンド後の stale 防止）
+- `handleAgentConnect()` で旧 WebSocket が残っていれば `terminate()` で即座に破棄（`close()` はハンドシェイク待ちで stuck するため不可）
+- Agent 側の `connectToServer()` で旧 WS を `removeAllListeners()` + `terminate()` でクリーンアップしてから新 WS を作成
+- Agent 側の close ハンドラで `thisWs` 参照をキャプチャし、既に新 WS に置き換えられていたら再接続をスキップ
 - `context.userId` は Discord プラットフォーム ID。DB の `Session.userId` には `oldSession.userId` を使う
 - **サーバー起動時の ChannelSession 保持**: マシンがオフラインでも `currentMachineId`/`currentSessionId` をクリアしない。サーバー起動時は全マシンが offline のため、クリアすると全セッション情報が消失する。Agent 再接続時に `restoreSessionParticipantsForMachine()` で復元される
 - **Agent 更新完了通知**: `pendingUpdateNotify` Map で更新リクエスト元を記録し、Agent 再接続時に `handleAgentConnect()` で完了メッセージを送信

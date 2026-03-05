@@ -284,11 +284,12 @@ async function handleAgentConnect(
     }
   }
 
-  // 旧接続が残っていれば明示的にクローズ（u コマンド後の stale WS 防止）
+  // 旧接続が残っていれば即座に破棄（terminate はハンドシェイク不要で close イベントを即発火）
+  // close() だと相手が既に切断済みの場合ハンドシェイク応答が来ず close イベントが永遠に発火しない
   const existingWs = connectedAgents.get(machine.id);
   if (existingWs && existingWs !== ws) {
     console.log(`🔌 Closing stale WebSocket for ${machine.id} before new connection`);
-    try { existingWs.close(); } catch {}
+    try { existingWs.terminate(); } catch {}
   }
 
   // Store connection and agent's local projectsDirs
