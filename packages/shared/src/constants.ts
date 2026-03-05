@@ -163,11 +163,13 @@ export const DEFAULTS = {
   sessionTimeoutMinutes: 30,
   websocketPingInterval: 30000,
   websocketReconnectDelay: 5000,
-  // Reconnection settings (shorter delays for stable connections)
+  // 再接続設定（baseDelay × 2^attempts でバックオフ、maxDelay で上限）
   reconnect: {
-    baseDelay: 500,       // Initial delay: 0.5 seconds
-    maxDelay: 10000,      // Maximum delay: 10 seconds
-    maxAttempts: 30,      // More attempts since delays are shorter
-    jitterRange: 500,     // 0-0.5 second random jitter
+    baseDelay: 2000,      // 初回遅延: 2秒
+    maxDelay: 30000,      // 最大遅延: 30秒
+    maxAttempts: 30,      // 最大試行回数
+    jitterRange: 1000,    // 0-1秒のランダムジッター（複数 Agent の同時再接続を分散）
   },
+  /** 接続がこの時間以上安定していたら reconnectAttempts をリセット（ミリ秒） */
+  reconnectStableThreshold: 60000,
 } as const;

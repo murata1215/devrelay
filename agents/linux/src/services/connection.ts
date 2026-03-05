@@ -76,8 +76,10 @@ let currentMachineId: string | null = null;
 /** Server から配信されたプランモード許可ツール（null = デフォルト使用） */
 let serverAllowedTools: string[] | null = null;
 
-// Reconnection state (using shared constants for easy adjustment)
+// 再接続状態（バックオフ管理）
 let reconnectAttempts = 0;
+/** 最後に WebSocket 接続が確立した時刻（安定接続判定用） */
+let lastConnectedAt = 0;
 
 /** 最後に更新を開始した時刻（二重更新防止用、60秒で自動解除） */
 let updateStartedAt = 0;
@@ -152,8 +154,8 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     ws.on('open', () => {
       console.log('✅ Connected to server');
 
-      // Reset reconnect attempts on successful connection
-      reconnectAttempts = 0;
+      // 接続時刻を記録（安定接続判定用。リセットは scheduleReconnect で行う）
+      lastConnectedAt = Date.now();
 
       // Note: currentMachineId will be set when server:connect:ack is received
 
@@ -931,6 +933,13 @@ function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
 
   const { baseDelay, maxDelay, maxAttempts, jitterRange } = DEFAULTS.reconnect;
+
+  // 前回接続が安定していた（60秒以上）場合のみバックオフカウンタをリセット
+  // 即切断ループ時はリセットせず、バックオフを効かせる
+  const connectionDuration = Date.now() - lastConnectedAt;
+  if (lastConnectedAt > 0 && connectionDuration > DEFAULTS.reconnectStableThreshold) {
+    reconnectAttempts = 0;
+  }
 
   // Check max attempts
   if (reconnectAttempts >= maxAttempts) {
