@@ -1701,7 +1701,8 @@ async function handleAgentUpdate() {
       const agentIndex = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'index.js');
       const agentLogFile = join(logsDir, 'agent.log');
       actualRestartCmd = [
-        'pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\\$" | xargs kill 2>/dev/null || true',
+        // 絶対パス(.devrelay含む) + 相対パス(node index.js) の両方を検出
+        '{ pgrep -u $(whoami) -f "\\.devrelay.*index\\.js"; pgrep -u $(whoami) -fx "node index\\.js"; } 2>/dev/null | sort -u | grep -v "^$$\\$" | xargs kill 2>/dev/null || true',
         'sleep 1',
         // disown でバックグラウンドジョブを bash から切り離し、bash -c が即終了するようにする
         `cd "${dirname(agentIndex)}" ; nohup node "${agentIndex}" < /dev/null >> "${agentLogFile}" 2>&1 & disown`,

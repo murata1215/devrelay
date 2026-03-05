@@ -93,14 +93,15 @@ function generateLinuxInfo(): ManagementInfo {
 
   const commands: ManagementCommand[] = [
     { type: 'logs', label: 'ログ', command: `tail -f ${logFile}` },
-    { type: 'stop', label: '停止', command: 'pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\\$" | xargs kill' },
+    // pgrep を2パターンで実行: 絶対パス(.devrelay含む) + 相対パス(node index.js) の両方を検出
+    { type: 'stop', label: '停止', command: '{ pgrep -u $(whoami) -f "\\.devrelay.*index\\.js"; pgrep -u $(whoami) -fx "node index\\.js"; } 2>/dev/null | sort -u | grep -v "^$$\\$" | xargs kill' },
     {
       type: 'restart',
       label: '再起動',
       // 旧プロセスを停止してから新プロセスを起動（`u` コマンドでの重複インスタンス防止）
       // NODE_BIN フォールバック: process.execPath が存在しない場合は PATH 上の node を使用
       // grep -v "^$$\$": 自身の PID を除外（bash -c 経由で実行時の自殺防止）
-      command: `NODE_BIN="${nodePath}"; [ ! -x "$NODE_BIN" ] && NODE_BIN=node; pgrep -u $(whoami) -f "\\.devrelay.*index\\.js" | grep -v "^$$\\$" | xargs kill 2>/dev/null || true; sleep 1; cd ${path.dirname(agentIndex)} && nohup "$NODE_BIN" ${agentIndex} < /dev/null >> ${logFile} 2>&1 &`,
+      command: `NODE_BIN="${nodePath}"; [ ! -x "$NODE_BIN" ] && NODE_BIN=node; { pgrep -u $(whoami) -f "\\.devrelay.*index\\.js"; pgrep -u $(whoami) -fx "node index\\.js"; } 2>/dev/null | sort -u | grep -v "^$$\\$" | xargs kill 2>/dev/null || true; sleep 1; cd ${path.dirname(agentIndex)} && nohup "$NODE_BIN" ${agentIndex} < /dev/null >> ${logFile} 2>&1 &`,
     },
     { type: 'crontab', label: 'crontab 確認', command: 'crontab -l | grep devrelay' },
   ];
