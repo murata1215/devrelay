@@ -1656,6 +1656,7 @@ async function handleAgentUpdate() {
     const scriptPath = join(logsDir, 'update.ps1');
     writeFileSync(scriptPath, scriptLines.join('\n'), 'utf-8');
 
+    console.log(`📝 Update script written to: ${scriptPath}`);
     const child = spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
       detached: true,
       stdio: 'ignore',
