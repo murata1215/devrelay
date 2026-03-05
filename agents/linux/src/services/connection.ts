@@ -198,6 +198,11 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       console.log('🔌 Disconnected from server');
       stopPing();
       stopAppPing();
+      // pongCheckInterval をクリア（再接続時に新規作成されるため、古いものが残るとリーク）
+      if (pongCheckInterval) {
+        clearInterval(pongCheckInterval);
+        pongCheckInterval = null;
+      }
       scheduleReconnect(config, projects);
     });
 

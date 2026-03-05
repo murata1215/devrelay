@@ -81,8 +81,9 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
       switch (message.type) {
         case 'agent:connect':
-          await handleAgentConnect(ws, message.payload);
-          machineId = message.payload.machineId;
+          // handleAgentConnect が DB の machine.id を返す（token 無効時は null）
+          // payload.machineId は Agent config 由来で空文字の場合があるため使わない
+          machineId = await handleAgentConnect(ws, message.payload) ?? machineId;
           break;
 
         case 'agent:disconnect':
@@ -174,7 +175,7 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 async function handleAgentConnect(
   ws: WebSocket,
   payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[] }
-) {
+): Promise<string | null> {
   const { machineId, machineName, token, projects, availableAiTools, managementInfo, projectsDirs: localDirs } = payload;
 
   // Verify token（ソフトデリート済みの Machine は接続拒否）
@@ -188,7 +189,7 @@ async function handleAgentConnect(
       payload: { success: false, error: 'Invalid token' }
     });
     ws.close();
-    return;
+    return null;
   }
 
   // Agent から送信された machineName で DB の名前を自動更新する条件:
@@ -343,6 +344,8 @@ async function handleAgentConnect(
     sendMessage(updateRequestor.platform, updateRequestor.chatId,
       `✅ **${displayName}** の更新が完了しました`);
   }
+
+  return machine.id;
 }
 
 /**
