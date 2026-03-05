@@ -1633,10 +1633,9 @@ async function handleAgentUpdate() {
     const psRunAndLog = (label: string, cmd: string) =>
       `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
 
-    // PowerShell スクリプトを .ps1 ファイルに書き出し、VBS ラッパー経由で実行（#116）
-    // spawn('powershell', [...], { detached: true }) は Windows で DETACHED_PROCESS フラグを使い
-    // コンソールなしでプロセスを作成する。PowerShell 5.1 はコンソールなしだとサイレントに即終了するため、
-    // Agent 起動で実績のある wscript.exe + VBS パターンで起動する
+    // PowerShell 更新スクリプトを .ps1 に書き出し、VBS ラッパー経由で実行（#116）
+    // 直接 spawn('powershell') だと DETACHED_PROCESS でサイレント終了するため
+    // start-agent.vbs と同じ wscript.exe + VBS .Run パターンで起動する
     const stopCmd = mgmtInfo.commands.find(c => c.type === 'stop');
     const scriptLines = [
       `$ErrorActionPreference = 'Continue'`,
