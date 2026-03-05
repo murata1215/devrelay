@@ -518,25 +518,37 @@ Windows の restart コマンドは `wscript.exe` で新プロセスを起動す
 更新スクリプトでは restart の前に stop コマンド（`Get-CimInstance Win32_Process` で kill）を実行すること。
 Linux nohup では `pgrep | grep -v $$ | xargs kill` で旧プロセスを停止してからリスタートしている。
 
-### Windows PowerShell スクリプト実行: `-File` vs `-Command`
+### Windows PowerShell スクリプト実行: VBS ラッパー経由
 
-PowerShell スクリプトを `spawn()` で実行する場合、`-Command` ではなく `-File` を使うこと。
+Node.js の `spawn('powershell', [...], { detached: true })` は Windows で `DETACHED_PROCESS` フラグを使い、
+コンソールなしでプロセスを作成する。PowerShell 5.1 はコンソールなしだとサイレントに即終了する。
+
+**対策**: Agent 起動で実績のある `wscript.exe` + VBS パターンで PowerShell を起動する。
 
 ```typescript
-// ✅ 正しい（ファイルに書き出して -File で実行）
+// ✅ 正しい（VBS ラッパー経由で PowerShell を起動）
 const scriptPath = join(logsDir, 'update.ps1');
 writeFileSync(scriptPath, scriptLines.join('\n'), 'utf-8');
-spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath], { ... });
 
-// ❌ 誤り（-Command で長いスクリプトを引数渡し）
-spawn('powershell', ['-Command', scriptLines.join('; ')], { ... });
+const vbsContent = [
+  'Set objShell = CreateObject("Wscript.Shell")',
+  `objShell.Run "powershell -ExecutionPolicy Bypass -NoProfile -File ""${scriptPath}""", 0, False`,
+].join('\r\n');
+const vbsPath = join(logsDir, 'update.vbs');
+writeFileSync(vbsPath, vbsContent, 'utf-8');
+
+spawn('wscript.exe', [vbsPath], { detached: true, stdio: 'ignore' });
+
+// ❌ 誤り（spawn で直接 PowerShell を起動 → DETACHED_PROCESS でサイレント終了）
+spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+  detached: true, stdio: 'ignore',
+});
 ```
 
-理由: `-Command` では引数全体が PowerShell のコマンドライン解析を受ける。
-スクリプト内の二重引用符（例: `Get-CimInstance -Filter "Name='node.exe'"` の stop コマンド）が
-引数パースと競合し、PowerShell が構文エラーで即終了する。
-`-File` はファイル内容をそのまま実行するため、クォーティング問題が発生しない。
-`-ExecutionPolicy Bypass` はスクリプトファイル実行に必要。
+注意:
+- `-Command` ではなく `-File` を使うこと（二重引用符の競合回避）
+- VBS `.Run` の第2引数 `0` = 非表示、第3引数 `False` = 完了を待たない
+- `-NoProfile` でプロファイル読み込みによる遅延を回避
 
 ---
 

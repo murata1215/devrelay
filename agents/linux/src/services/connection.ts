@@ -1633,8 +1633,10 @@ async function handleAgentUpdate() {
     const psRunAndLog = (label: string, cmd: string) =>
       `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
 
-    // スクリプトを .ps1 ファイルに書き出して -File で実行（#116）
-    // -Command では stop コマンド内の二重引用符が引数パースと競合し構文エラーで即終了していた
+    // PowerShell スクリプトを .ps1 ファイルに書き出し、VBS ラッパー経由で実行（#116）
+    // spawn('powershell', [...], { detached: true }) は Windows で DETACHED_PROCESS フラグを使い
+    // コンソールなしでプロセスを作成する。PowerShell 5.1 はコンソールなしだとサイレントに即終了するため、
+    // Agent 起動で実績のある wscript.exe + VBS パターンで起動する
     const stopCmd = mgmtInfo.commands.find(c => c.type === 'stop');
     const scriptLines = [
       `$ErrorActionPreference = 'Continue'`,
@@ -1652,15 +1654,23 @@ async function handleAgentUpdate() {
       restartCmd.command,
     ];
 
-    // スクリプトファイルに書き出し（コマンドライン長制限・エスケープ問題を根本回避）
     const scriptPath = join(logsDir, 'update.ps1');
     writeFileSync(scriptPath, scriptLines.join('\n'), 'utf-8');
 
-    console.log(`📝 Update script written to: ${scriptPath}`);
-    const child = spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+    // VBS ラッパーで PowerShell を起動（DETACHED_PROCESS 問題を回避）
+    // .Run の第2引数 0 = 非表示、第3引数 False = 完了を待たない
+    const vbsContent = [
+      'Set objShell = CreateObject("Wscript.Shell")',
+      `objShell.Run "powershell -ExecutionPolicy Bypass -NoProfile -File ""${scriptPath}""", 0, False`,
+    ].join('\r\n');
+    const vbsPath = join(logsDir, 'update.vbs');
+    writeFileSync(vbsPath, vbsContent, 'utf-8');
+
+    console.log(`📝 Update script: ${scriptPath}`);
+    console.log(`📝 Update VBS wrapper: ${vbsPath}`);
+    const child = spawn('wscript.exe', [vbsPath], {
       detached: true,
       stdio: 'ignore',
-      env: getExecEnv(),
     });
     child.on('error', (err) => {
       console.error(`❌ Update script spawn failed: ${err.message}`);
