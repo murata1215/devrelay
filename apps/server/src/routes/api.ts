@@ -962,6 +962,120 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // セッション履歴 API（Chat タブ復元・メッセージ履歴用）
+  // ========================================
+
+  /**
+   * ユーザーのアクティブセッション一覧を取得（タブ復元用）
+   * プロジェクトごとに最新1件を返す（重複排除）
+   * @route GET /api/sessions/active
+   */
+  app.get('/api/sessions/active', async (request: FastifyRequest<{ Querystring: { limit?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const limit = Math.min(20, Math.max(1, parseInt(request.query.limit || '10', 10) || 10));
+
+    // アクティブセッションをプロジェクトごとに最新1件取得
+    const sessions = await prisma.session.findMany({
+      where: { userId, status: 'active' },
+      orderBy: { startedAt: 'desc' },
+      include: {
+        project: { select: { id: true, name: true } },
+        machine: { select: { id: true, name: true, displayName: true } },
+        _count: { select: { messages: true } },
+      },
+    });
+
+    // プロジェクトごとに最新1件に重複排除
+    const seen = new Set<string>();
+    const unique = sessions.filter(s => {
+      if (seen.has(s.projectId)) return false;
+      seen.add(s.projectId);
+      return true;
+    }).slice(0, limit);
+
+    const connectedAgents = getConnectedAgents();
+
+    return reply.send({
+      sessions: unique.map(s => ({
+        sessionId: s.id,
+        projectId: s.project.id,
+        projectName: s.project.name,
+        machineId: s.machine.id,
+        machineDisplayName: s.machine.displayName ?? s.machine.name,
+        machineOnline: connectedAgents.has(s.machine.id),
+        messageCount: s._count.messages,
+        startedAt: s.startedAt.toISOString(),
+      })),
+    });
+  });
+
+  /**
+   * セッションのメッセージ履歴をカーソルベースページネーションで取得
+   * @route GET /api/sessions/:id/messages?limit=30&before=<messageId>
+   */
+  app.get('/api/sessions/:id/messages', async (request: FastifyRequest<{ Params: { id: string }; Querystring: { limit?: string; before?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { id: sessionId } = request.params;
+    const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '30', 10) || 30));
+    const before = request.query.before || undefined;
+
+    // セッション認可チェック
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { userId: true },
+    });
+
+    if (!session || session.userId !== userId) {
+      return reply.status(404).send({ error: 'Session not found' });
+    }
+
+    // カーソル条件: before が指定されていれば、そのメッセージより古いものを取得
+    const whereClause: any = { sessionId };
+    if (before) {
+      const cursorMsg = await prisma.message.findUnique({
+        where: { id: before },
+        select: { createdAt: true },
+      });
+      if (cursorMsg) {
+        whereClause.createdAt = { lt: cursorMsg.createdAt };
+      }
+    }
+
+    // limit + 1 件取得して hasMore を判定
+    const messages = await prisma.message.findMany({
+      where: whereClause,
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      select: {
+        id: true,
+        role: true,
+        content: true,
+        createdAt: true,
+        files: {
+          select: { id: true, filename: true, mimeType: true, size: true, direction: true },
+        },
+      },
+    });
+
+    const hasMore = messages.length > limit;
+    const result = hasMore ? messages.slice(0, limit) : messages;
+
+    // 時系列順（古い→新しい）に並び替えて返す
+    result.reverse();
+
+    return reply.send({
+      messages: result.map(m => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        createdAt: m.createdAt.toISOString(),
+        files: m.files,
+      })),
+      hasMore,
+    });
+  });
+
+  // ========================================
   // ファイル配信 API
   // ========================================
 

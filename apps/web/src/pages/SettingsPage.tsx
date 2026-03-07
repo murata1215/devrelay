@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { settings, platforms, services, agreementTemplate, allowedTools, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
 
 /** API キーフィールドの定義 */
 interface ApiKeyFieldDef {
@@ -73,7 +74,22 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
   },
 ];
 
+/** チャット表示設定（localStorage 管理） */
+const CHAT_DISPLAY_KEY = 'devrelay-chat-display';
+const DEFAULT_USER_COLOR = '#5865f2';
+const DEFAULT_AI_COLOR = '#57f287';
+
+interface ChatDisplaySettings {
+  userName: string;
+  userColor: string;
+  userAvatar?: string;
+  aiName: string;
+  aiColor: string;
+  aiAvatar?: string;
+}
+
 export function SettingsPage() {
+  const { user } = useAuth();
   const [data, setData] = useState<Record<string, string>>({});
   const [linkedPlatforms, setLinkedPlatforms] = useState<LinkedPlatform[]>([]);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
@@ -91,6 +107,38 @@ export function SettingsPage() {
   const [linkCode, setLinkCode] = useState('');
   const [linking, setLinking] = useState(false);
   const [unlinking, setUnlinking] = useState<string | null>(null);
+
+  // チャット表示設定（localStorage）
+  const fallbackName = user?.name || user?.email || 'User';
+  const [chatDisplay, setChatDisplay] = useState<ChatDisplaySettings>(() => {
+    try {
+      const raw = localStorage.getItem(CHAT_DISPLAY_KEY);
+      if (raw) {
+        const p = JSON.parse(raw);
+        return {
+          userName: p.userName || fallbackName,
+          userColor: p.userColor || DEFAULT_USER_COLOR,
+          userAvatar: p.userAvatar || undefined,
+          aiName: p.aiName || 'DevRelay',
+          aiColor: p.aiColor || DEFAULT_AI_COLOR,
+          aiAvatar: p.aiAvatar || undefined,
+        };
+      }
+    } catch { /* ignore */ }
+    return { userName: fallbackName, userColor: DEFAULT_USER_COLOR, aiName: 'DevRelay', aiColor: DEFAULT_AI_COLOR };
+  });
+
+  /** チャット表示設定を保存 */
+  const saveChatDisplay = (updated: ChatDisplaySettings) => {
+    setChatDisplay(updated);
+    localStorage.setItem(CHAT_DISPLAY_KEY, JSON.stringify(updated));
+  };
+
+  /** チャット表示設定をデフォルトにリセット */
+  const resetChatDisplay = () => {
+    const defaults: ChatDisplaySettings = { userName: fallbackName, userColor: DEFAULT_USER_COLOR, aiName: 'DevRelay', aiColor: DEFAULT_AI_COLOR };
+    saveChatDisplay(defaults);
+  };
 
   // Service restart state
   const [restartingServer, setRestartingServer] = useState(false);
@@ -916,12 +964,224 @@ export function SettingsPage() {
         </p>
       </div>
 
-      {/* Preferences Section */}
+      {/* Chat Display Section */}
       <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Preferences</h2>
-        <p className="text-gray-400 text-sm">
-          More settings coming soon...
-        </p>
+        <h2 className="text-lg font-semibold text-white mb-4">Chat Display</h2>
+
+        {/* ユーザー設定 */}
+        <h3 className="text-sm font-semibold text-gray-300 mb-3">You</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+          {/* ユーザー表示名 */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Display Name</label>
+            <input
+              type="text"
+              value={chatDisplay.userName}
+              onChange={e => saveChatDisplay({ ...chatDisplay, userName: e.target.value })}
+              placeholder={fallbackName}
+              className="w-full bg-gray-700 text-white rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          {/* ユーザーカラー */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Name Color</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="color"
+                value={chatDisplay.userColor}
+                onChange={e => saveChatDisplay({ ...chatDisplay, userColor: e.target.value })}
+                className="w-10 h-10 rounded cursor-pointer border border-gray-600 bg-transparent"
+              />
+              <span className="text-sm font-semibold" style={{ color: chatDisplay.userColor }}>
+                {chatDisplay.userName || fallbackName}
+              </span>
+            </div>
+          </div>
+
+          {/* ユーザーアバター */}
+          <div className="sm:col-span-2">
+            <label className="block text-sm text-gray-400 mb-1">Avatar</label>
+            <div className="flex items-center gap-3">
+              {chatDisplay.userAvatar ? (
+                <img src={chatDisplay.userAvatar} alt="avatar" className="w-10 h-10 rounded-full object-cover" />
+              ) : (
+                <div
+                  className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold text-white"
+                  style={{ backgroundColor: chatDisplay.userColor }}
+                >
+                  {(chatDisplay.userName || fallbackName).charAt(0).toUpperCase()}
+                </div>
+              )}
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                id="user-avatar-input"
+                onChange={e => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    saveChatDisplay({ ...chatDisplay, userAvatar: reader.result as string });
+                  };
+                  reader.readAsDataURL(file);
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => document.getElementById('user-avatar-input')?.click()}
+                className="px-3 py-1.5 text-sm bg-gray-700 text-gray-300 hover:text-white rounded hover:bg-gray-600 transition-colors"
+              >
+                Upload
+              </button>
+              {chatDisplay.userAvatar && (
+                <button
+                  onClick={() => saveChatDisplay({ ...chatDisplay, userAvatar: undefined })}
+                  className="px-3 py-1.5 text-sm text-red-400 hover:text-red-300 border border-red-400/30 hover:border-red-400/50 rounded transition-colors"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* AI 設定 */}
+        <h3 className="text-sm font-semibold text-gray-300 mb-3">AI</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+          {/* AI 表示名 */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Display Name</label>
+            <input
+              type="text"
+              value={chatDisplay.aiName}
+              onChange={e => saveChatDisplay({ ...chatDisplay, aiName: e.target.value })}
+              placeholder="DevRelay"
+              className="w-full bg-gray-700 text-white rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          {/* AI カラー */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Name Color</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="color"
+                value={chatDisplay.aiColor}
+                onChange={e => saveChatDisplay({ ...chatDisplay, aiColor: e.target.value })}
+                className="w-10 h-10 rounded cursor-pointer border border-gray-600 bg-transparent"
+              />
+              <span className="text-sm font-semibold" style={{ color: chatDisplay.aiColor }}>
+                {chatDisplay.aiName || 'DevRelay'}
+              </span>
+            </div>
+          </div>
+
+          {/* AI アバター */}
+          <div className="sm:col-span-2">
+            <label className="block text-sm text-gray-400 mb-1">Avatar</label>
+            <div className="flex items-center gap-3">
+              {chatDisplay.aiAvatar ? (
+                <img src={chatDisplay.aiAvatar} alt="avatar" className="w-10 h-10 rounded-full object-cover" />
+              ) : (
+                <div
+                  className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold text-white"
+                  style={{ backgroundColor: chatDisplay.aiColor }}
+                >
+                  {(chatDisplay.aiName || 'DevRelay').charAt(0).toUpperCase()}
+                </div>
+              )}
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                id="ai-avatar-input"
+                onChange={e => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    saveChatDisplay({ ...chatDisplay, aiAvatar: reader.result as string });
+                  };
+                  reader.readAsDataURL(file);
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => document.getElementById('ai-avatar-input')?.click()}
+                className="px-3 py-1.5 text-sm bg-gray-700 text-gray-300 hover:text-white rounded hover:bg-gray-600 transition-colors"
+              >
+                Upload
+              </button>
+              {chatDisplay.aiAvatar && (
+                <button
+                  onClick={() => saveChatDisplay({ ...chatDisplay, aiAvatar: undefined })}
+                  className="px-3 py-1.5 text-sm text-red-400 hover:text-red-300 border border-red-400/30 hover:border-red-400/50 rounded transition-colors"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* プレビュー */}
+        <div className="mt-4 bg-gray-900 rounded-lg p-3">
+          <p className="text-xs text-gray-500 mb-2">Preview</p>
+          <div className="flex gap-3 py-1">
+            {chatDisplay.userAvatar ? (
+              <img src={chatDisplay.userAvatar} alt="avatar" className="w-8 h-8 rounded-full object-cover shrink-0" />
+            ) : (
+              <div
+                className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold text-white shrink-0"
+                style={{ backgroundColor: chatDisplay.userColor }}
+              >
+                {(chatDisplay.userName || fallbackName).charAt(0).toUpperCase()}
+              </div>
+            )}
+            <div>
+              <div className="flex items-baseline gap-2">
+                <span className="font-semibold text-sm" style={{ color: chatDisplay.userColor }}>
+                  {chatDisplay.userName || fallbackName}
+                </span>
+                <span className="text-xs text-gray-600">14:30</span>
+              </div>
+              <p className="text-sm text-gray-300">Hello!</p>
+            </div>
+          </div>
+          <div className="flex gap-3 py-1">
+            {chatDisplay.aiAvatar ? (
+              <img src={chatDisplay.aiAvatar} alt="avatar" className="w-8 h-8 rounded-full object-cover shrink-0" />
+            ) : (
+              <div
+                className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold text-white shrink-0"
+                style={{ backgroundColor: chatDisplay.aiColor }}
+              >
+                {(chatDisplay.aiName || 'DevRelay').charAt(0).toUpperCase()}
+              </div>
+            )}
+            <div>
+              <div className="flex items-baseline gap-2">
+                <span className="font-semibold text-sm" style={{ color: chatDisplay.aiColor }}>
+                  {chatDisplay.aiName || 'DevRelay'}
+                </span>
+                <span className="text-xs text-gray-600">14:31</span>
+              </div>
+              <p className="text-sm text-gray-300">How can I help you?</p>
+            </div>
+          </div>
+        </div>
+
+        {/* リセットボタン */}
+        <div className="mt-4 flex justify-end">
+          <button
+            onClick={resetChatDisplay}
+            className="px-3 py-1.5 text-sm text-gray-400 hover:text-white border border-gray-600 hover:border-gray-500 rounded transition-colors"
+          >
+            Reset to defaults
+          </button>
+        </div>
       </div>
     </div>
   );

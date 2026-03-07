@@ -14,6 +14,13 @@ import {
   sendTelegramMessageWithId,
   editTelegramMessage
 } from '../platforms/telegram.js';
+import {
+  sendWebMessage,
+  startTypingIndicator as startWebTyping,
+  stopTypingIndicator as stopWebTyping,
+  sendWebMessageWithId,
+  editWebMessage
+} from '../platforms/web.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
@@ -30,11 +37,14 @@ interface ProgressTracker {
   contextInfo: string;  // Context usage info to prepend to final message
   startTime: number;
   updateInterval: NodeJS.Timeout | null;
+  timeoutTimer: NodeJS.Timeout | null;  // タイムアウト自動クリーンアップ用
 }
 const progressTrackers = new Map<string, ProgressTracker>();
 
 const PROGRESS_UPDATE_INTERVAL = 8000; // 8 seconds
 const MAX_OUTPUT_LINES = 15;
+/** エージェント無応答時の自動タイムアウト（5分） */
+const PROGRESS_TIMEOUT = 300_000;
 
 // Restore session participants from ChannelSession on server startup
 export async function restoreSessionParticipants() {
@@ -191,6 +201,8 @@ export async function broadcastToSession(sessionId: string, message: string, isC
         stopDiscordTyping(chatId);
       } else if (platform === 'telegram') {
         stopTelegramTyping(chatId);
+      } else if (platform === 'web') {
+        stopWebTyping(chatId);
       }
     }
     await sendMessage(platform, chatId, message, files);
@@ -205,6 +217,8 @@ export async function startTypingForSession(sessionId: string) {
       await startDiscordTyping(chatId);
     } else if (platform === 'telegram') {
       await startTelegramTyping(chatId);
+    } else if (platform === 'web') {
+      await startWebTyping(chatId);
     }
   }
 }
@@ -222,6 +236,7 @@ export async function startProgressTracking(sessionId: string) {
     contextInfo: '',
     startTime: Date.now(),
     updateInterval: null,
+    timeoutTimer: null,
   };
 
   // Send initial progress message to all participants
@@ -236,6 +251,11 @@ export async function startProgressTracking(sessionId: string) {
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
+    } else if (platform === 'web') {
+      const messageId = await sendWebMessageWithId(chatId, formatProgressMessage('', 0));
+      if (messageId) {
+        tracker.messages.set(chatId, { messageId, platform });
+      }
     }
   }
 
@@ -244,6 +264,12 @@ export async function startProgressTracking(sessionId: string) {
     updateProgressMessages(sessionId);
   }, PROGRESS_UPDATE_INTERVAL);
 
+  // エージェント無応答時の自動タイムアウト
+  tracker.timeoutTimer = setTimeout(() => {
+    console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s)`);
+    finalizeProgress(sessionId, '⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）');
+  }, PROGRESS_TIMEOUT);
+
   progressTrackers.set(sessionId, tracker);
 }
 
@@ -251,6 +277,15 @@ export async function startProgressTracking(sessionId: string) {
 export function appendSessionOutput(sessionId: string, output: string) {
   const tracker = progressTrackers.get(sessionId);
   if (tracker) {
+    // タイムアウトタイマーをリセット（最後の出力から5分に延長）
+    if (tracker.timeoutTimer) {
+      clearTimeout(tracker.timeoutTimer);
+    }
+    tracker.timeoutTimer = setTimeout(() => {
+      console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s since last output)`);
+      finalizeProgress(sessionId, '⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）');
+    }, PROGRESS_TIMEOUT);
+
     // Check if this is context info (starts with 📊)
     if (output.startsWith('📊') && tracker.contextInfo === '') {
       tracker.contextInfo = output;
@@ -277,6 +312,9 @@ async function updateProgressMessages(sessionId: string) {
       await editDiscordMessage(chatId, messageId as string, content);
     } else if (platform === 'telegram') {
       await editTelegramMessage(chatId, messageId as number, content);
+    } else if (platform === 'web') {
+      const elapsed = Math.floor((Date.now() - (progressTrackers.get(sessionId)?.startTime ?? Date.now())) / 1000);
+      await editWebMessage(chatId, messageId as string, content, elapsed);
     }
   }
 }
@@ -305,6 +343,9 @@ export function stopProgressTracking(sessionId: string) {
     if (tracker.updateInterval) {
       clearInterval(tracker.updateInterval);
     }
+    if (tracker.timeoutTimer) {
+      clearTimeout(tracker.timeoutTimer);
+    }
     progressTrackers.delete(sessionId);
   }
 }
@@ -314,9 +355,12 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
   const tracker = progressTrackers.get(sessionId);
   const participants = sessionParticipants.get(sessionId) || [];
 
-  // Stop the update interval
+  // Stop the update interval and timeout timer
   if (tracker?.updateInterval) {
     clearInterval(tracker.updateInterval);
+  }
+  if (tracker?.timeoutTimer) {
+    clearTimeout(tracker.timeoutTimer);
   }
 
   // Prepend context info to final message if available
@@ -357,6 +401,9 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
         }
         await sendTelegramMessage(chatId, messageToSend, files);
       }
+    } else if (platform === 'web') {
+      stopWebTyping(chatId);
+      await sendWebMessage(chatId, messageToSend, files);
     }
   }
 
@@ -370,6 +417,9 @@ export async function sendMessage(platform: Platform, chatId: string, message: s
       break;
     case 'telegram':
       await sendTelegramMessage(chatId, message, files);
+      break;
+    case 'web':
+      await sendWebMessage(chatId, message, files);
       break;
     case 'line':
       // await sendLineMessage(chatId, message, files);

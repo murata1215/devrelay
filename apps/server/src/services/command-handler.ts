@@ -48,6 +48,48 @@ const pendingUpdate = new Set<string>();
 // w コマンド（wrap up）実行済みフラグ: x コマンド時に w 未実行なら警告を表示
 const wrapUpDone = new Set<string>();
 
+/**
+ * context から DB の User.id を解決する
+ * web プラットフォームでは userId が既に DB User.id のためそのまま返す
+ * Discord/Telegram では PlatformLink 経由で解決
+ */
+async function resolveDbUserId(context: UserContext): Promise<string | null> {
+  if (context.platform === 'web') return context.userId;
+  const link = await prisma.platformLink.findFirst({
+    where: { platformUserId: context.userId },
+    select: { userId: true, linkedAt: true }
+  });
+  return link?.linkedAt ? link.userId : null;
+}
+
+/**
+ * context から DB の User を取得または作成する
+ * web プラットフォームでは userId が DB User.id のため直接取得
+ * Discord/Telegram では PlatformLink 経由で取得/作成
+ */
+async function resolveOrCreateUser(context: UserContext) {
+  if (context.platform === 'web') {
+    return prisma.user.findUnique({ where: { id: context.userId } });
+  }
+  let user = await prisma.user.findFirst({
+    where: { platformLinks: { some: { platformUserId: context.userId } } }
+  });
+  if (!user) {
+    user = await prisma.user.create({
+      data: {
+        platformLinks: {
+          create: {
+            platform: context.platform,
+            platformUserId: context.userId,
+            chatId: context.chatId
+          }
+        }
+      }
+    });
+  }
+  return user;
+}
+
 export async function getUserContext(userId: string, platform: Platform, chatId: string): Promise<UserContext> {
   // Key by chatId to allow different sessions per channel
   const key = `${platform}:${chatId}`;
@@ -207,26 +249,17 @@ export async function executeCommand(
 // -----------------------------------------------------------------------------
 
 async function handleMachineList(context: UserContext): Promise<string> {
-  // Check if the user is linked to a WebUI account
-  const platformLink = await prisma.platformLink.findUnique({
-    where: {
-      platform_platformUserId: {
-        platform: context.platform,
-        platformUserId: context.userId
-      }
-    },
-    include: { user: true }
-  });
+  // DB の User.id を解決（web: 直接、Discord/Telegram: PlatformLink 経由）
+  const dbUserId = await resolveDbUserId(context);
 
-  if (!platformLink?.linkedAt) {
-    // Not linked to WebUI account
+  if (!dbUserId) {
     return '⚠️ WebUI アカウントに連携されていません。\n\n'
       + '`link` コマンドでリンクコードを取得し、WebUI の Settings ページで入力してください。';
   }
 
-  // Get machines for the linked WebUI user
+  // Get machines for the user
   const machines = await prisma.machine.findMany({
-    where: { userId: platformLink.userId, deletedAt: null }
+    where: { userId: dbUserId, deletedAt: null }
   });
 
   if (machines.length === 0) {
@@ -329,7 +362,7 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
   return `✅ **${machineDisplayName}** に接続しました`;
 }
 
-async function handleProjectConnect(projectId: string, context: UserContext): Promise<string> {
+export async function handleProjectConnect(projectId: string, context: UserContext): Promise<string> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: { machine: true }
@@ -346,48 +379,53 @@ async function handleProjectConnect(projectId: string, context: UserContext): Pr
   }
 
   // Get or create user
-  let user = await prisma.user.findFirst({
-    where: { platformLinks: { some: { platformUserId: context.userId } } }
-  });
-  
+  const user = await resolveOrCreateUser(context);
   if (!user) {
-    // Auto-create user
-    user = await prisma.user.create({
-      data: {
-        platformLinks: {
-          create: {
-            platform: context.platform,
-            platformUserId: context.userId,
-            chatId: context.chatId
-          }
-        }
-      }
-    });
+    return '❌ ユーザー情報の取得に失敗しました。';
   }
-  
-  // Create session
-  const sessionId = await createSession(
-    user.id,
-    project.machineId,
-    project.id,
-    project.defaultAi
-  );
-  
+
+  // 既存のアクティブセッションを検索（同一ユーザー・同一プロジェクト・同一マシン）
+  let sessionId: string;
+  let isResumed = false;
+
+  const existingSession = await prisma.session.findFirst({
+    where: {
+      userId: user.id,
+      projectId: project.id,
+      machineId: project.machineId,
+      status: 'active',
+    },
+    orderBy: { startedAt: 'desc' },
+  });
+
+  if (existingSession) {
+    sessionId = existingSession.id;
+    isResumed = true;
+  } else {
+    sessionId = await createSession(
+      user.id,
+      project.machineId,
+      project.id,
+      project.defaultAi
+    );
+  }
+
   // Add participant
   addParticipant(sessionId, context.platform, context.chatId);
-  
-  // Start AI on agent
-  await startAgentSession(
-    project.machineId,
-    sessionId,
-    project.name,
-    project.path,
-    project.defaultAi as any
-  );
 
-  // Agent 再起動フラグをクリア（handleProjectConnect で新セッションを作成・開始済みのため、
-  // handleAiPrompt / handleExec での二重セッション作成を防止）
-  clearAgentRestarted(project.machineId);
+  // 新規セッションのみ Agent に通知（再利用時は Agent 側で既に活性化済み）
+  if (!isResumed) {
+    await startAgentSession(
+      project.machineId,
+      sessionId,
+      project.name,
+      project.path,
+      project.defaultAi as any
+    );
+    // Agent 再起動フラグをクリア（handleProjectConnect でセッションを開始済みのため、
+    // handleAiPrompt / handleExec での二重セッション作成を防止）
+    clearAgentRestarted(project.machineId);
+  }
 
   // 表示名は displayName があればそちらを使用
   const projectMachineDisplayName = project.machine.displayName ?? project.machine.name;
@@ -403,6 +441,9 @@ async function handleProjectConnect(projectId: string, context: UserContext): Pr
   });
 
   const aiName = AI_TOOL_NAMES[project.defaultAi] || project.defaultAi;
+  if (isResumed) {
+    return `🔄 **${project.name}** に再接続\n${aiName} セッション復元`;
+  }
   return `🚀 **${project.name}** に接続\n${aiName} 起動完了`;
 }
 
@@ -446,15 +487,12 @@ async function handleStatus(context: UserContext): Promise<string> {
 
 async function handleRecent(context: UserContext): Promise<string> {
   // Get user
-  const user = await prisma.user.findFirst({
-    where: { platformLinks: { some: { platformUserId: context.userId } } }
-  });
-  
-  if (!user) {
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) {
     return '📜 作業履歴がありません。';
   }
-  
-  const sessions = await getRecentSessions(user.id, 5);
+
+  const sessions = await getRecentSessions(dbUserId, 5);
   
   if (sessions.length === 0) {
     return '📜 作業履歴がありません。';
@@ -665,6 +703,11 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
 }
 
 async function handleLink(context: UserContext): Promise<string> {
+  // Web プラットフォームではリンクコード不要（既に認証済み）
+  if (context.platform === 'web') {
+    return '✅ Web インターフェースから直接操作しているため、アカウント連携は不要です。';
+  }
+
   // Get platform username if available (Discord: tag, Telegram: username)
   let platformName: string | undefined;
 
@@ -876,18 +919,15 @@ async function handleSession(context: UserContext): Promise<string> {
  */
 async function handleBuild(context: UserContext): Promise<string> {
   // ユーザーの DB ID を取得
-  const dbUser = await prisma.platformLink.findFirst({
-    where: { platformUserId: context.userId },
-    select: { userId: true },
-  });
+  const dbUserId = await resolveDbUserId(context);
 
-  if (!dbUser) {
+  if (!dbUserId) {
     return '📋 ビルドログがありません。`e` / `exec` で実行するとビルドが記録されます。';
   }
 
   // ユーザーのマシン一覧とプロジェクトを取得
   const machines = await prisma.machine.findMany({
-    where: { userId: dbUser.userId, deletedAt: null },
+    where: { userId: dbUserId, deletedAt: null },
     include: { projects: true },
   });
 
@@ -1279,14 +1319,20 @@ async function handleAiPrompt(
   await startProgressTracking(context.currentSessionId);
 
   // Send to agent with files and missed messages
-  await sendPromptToAgent(
-    context.currentMachineId,
-    context.currentSessionId,
-    text,
-    context.userId,
-    files,
-    missedMessages
-  );
+  // エラー時はトラッカーをクリーンアップして永遠にスタックしないようにする
+  try {
+    await sendPromptToAgent(
+      context.currentMachineId,
+      context.currentSessionId,
+      text,
+      context.userId,
+      files,
+      missedMessages
+    );
+  } catch (error) {
+    stopProgressTracking(context.currentSessionId);
+    throw error;
+  }
 
   // Return empty since progress message is already sent
   return '';

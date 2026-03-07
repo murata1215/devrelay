@@ -1,1 +1,44 @@
 @import "tailwindcss";
+
+/* ========================================
+   DevRelay テーマ — Discord 風カラー
+   デフォルト: ダークモード
+   :root.light でライトモードに切替
+   ======================================== */
+
+:root {
+  --bg-base: #1e1f22;
+  --bg-secondary: #2b2d31;
+  --bg-tertiary: #313338;
+  --bg-hover: #35373c;
+  --bg-selected: #3f4147;
+  --text-primary: #f2f3f5;
+  --text-secondary: #b5bac1;
+  --text-muted: #949ba4;
+  --text-faint: #6d6f78;
+  --border-color: #3f4147;
+  --input-bg: #383a40;
+
+  /* アクセントカラー（テーマ共通） */
+  --accent-blue: #5865f2;
+  --accent-blue-hover: #4752c4;
+  --user-bubble: #5865f2;
+  --ai-bubble: var(--bg-tertiary);
+}
+
+:root.light {
+  --bg-base: #ffffff;
+  --bg-secondary: #f2f3f5;
+  --bg-tertiary: #e3e5e8;
+  --bg-hover: #ebedef;
+  --bg-selected: #d3d6db;
+  --text-primary: #060607;
+  --text-secondary: #4e5058;
+  --text-muted: #80848e;
+  --text-faint: #c4c9ce;
+  --border-color: #e3e5e8;
+  --input-bg: #ebedef;
+
+  --user-bubble: #5865f2;
+  --ai-bubble: var(--bg-secondary);
+}

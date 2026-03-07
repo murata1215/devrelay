@@ -64,10 +64,10 @@ export interface Participant {
   joinedAt: Date;
 }
 
-export type Platform = 'discord' | 'telegram' | 'line' | 'slack';
+export type Platform = 'discord' | 'telegram' | 'line' | 'slack' | 'web';
 
 // -----------------------------------------------------------------------------
-// Messages (WebSocket Protocol)
+// Messages (WebSocket Protocol - Agent)
 // -----------------------------------------------------------------------------
 
 // Agent -> Server
@@ -478,3 +478,20 @@ export interface WorkState {
     filesModified: string[];
   };
 }
+
+// -----------------------------------------------------------------------------
+// Messages (WebSocket Protocol - Web Client)
+// -----------------------------------------------------------------------------
+
+/** ブラウザ → サーバー */
+export type WebClientMessage =
+  | { type: 'web:command'; payload: { text: string; files?: FileAttachment[] } }
+  | { type: 'web:ping' };
+
+/** サーバー → ブラウザ */
+export type ServerToWebMessage =
+  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[] } }
+  | { type: 'web:progress'; payload: { output: string; elapsed: number } }
+  | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
+  | { type: 'web:error'; payload: { error: string } }
+  | { type: 'web:pong' };

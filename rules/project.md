@@ -646,6 +646,26 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 
 ---
 
+## WebUI チャット設計判断
+
+### チャット表示設定は localStorage
+- サーバー API を使わず、`localStorage` で管理（キー: `devrelay-chat-display`）
+- 即座に反映、軽量、サーバー負荷なし
+- `storage` イベントで他タブと同期
+- アバター画像も data URL で localStorage に保存（数十KB、容量問題なし）
+
+### 履歴画像の認証方式
+- `<img>` タグは Bearer ヘッダーを送れないため、`/api/files/:id?token=xxx` クエリパラメータ方式
+- `getToken()` で localStorage からトークン取得
+- 既存の `getDownloadUrl()` と同じパターン
+
+### 添付ファイルの二段階表示
+- **リアルタイム（送信直後）**: `content`（base64）→ blob URL で表示
+- **履歴（API 取得）**: メタデータのみ（`id`, `filename`, `mimeType`）→ `/api/files/:id` で表示
+- `ChatMessage.files` の型で `id?` / `content?` を両方オプショナルにして統一
+
+---
+
 ## 今後の課題
 
 - LINE 対応
@@ -653,5 +673,4 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - ベクトル検索のチャンク分割対応（大規模ドキュメント向け）
 - WebUI でのドキュメント横断検索インターフェース
 - 複数ユーザー同時接続
-- 進捗表示のUI改善
 - エラーハンドリング強化

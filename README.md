@@ -24,7 +24,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Conversations Analytics**: View all AI interactions with token usage breakdown
 - **Multi-Provider AI**: Register OpenAI, Anthropic, Gemini API keys with per-feature provider selection
 - **Agreement Template Editor**: Customize AI rules from Settings page
-- **Message File Storage**: Attached files stored in DB (PostgreSQL bytea) with image lightbox preview
+- **Message File Storage**: Attached files stored in DB (PostgreSQL bytea) with inline image preview and lightbox
 - **Soft Delete**: Machine deletion preserves all conversation history
 - **Kill Command**: Cancel running AI process mid-execution from chat
 - **Remote Config**: Configure agent project search paths from WebUI (auto-sync via WebSocket)
@@ -76,7 +76,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#117)
+│   ├── changelog.md      # Implementation history (#1-#129)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -440,6 +440,10 @@ agents/windows/
 - [x] Agent update hardening - pgrep self-kill prevention, step-by-step exit code logging, spawn error handling, timeout, Windows `isInstalledAgent` path fix
 - [x] Windows PowerShell VBS wrapper - `DETACHED_PROCESS` causes PowerShell 5.1 to silently exit; fixed with `wscript.exe` + VBS `.Run` pattern
 - [x] Agent stability fixes - pongCheckInterval leak, machineId empty string bug, nohup `disown` + shell operator precedence fix
+- [x] WebSocket reconnect backoff fix + service setup guide
+- [x] Chat history persistence - session restoration across page reload, cursor-based pagination, infinite scroll
+- [x] Discord-style chat layout - left-aligned messages, colored usernames, avatar images, chat display settings
+- [x] Image attachment preview - inline preview with lightbox, history image display via `/api/files/:id`
 - [ ] LINE Bot
 - [ ] Team Features
 - [ ] AI tool switching (Gemini/Aider)

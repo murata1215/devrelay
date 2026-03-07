@@ -353,6 +353,43 @@ export const conversations = {
   },
 };
 
+// セッション履歴API（Chat タブ復元・メッセージ履歴用）
+export interface ActiveSession {
+  sessionId: string;
+  projectId: string;
+  projectName: string;
+  machineId: string;
+  machineDisplayName: string;
+  machineOnline: boolean;
+  messageCount: number;
+  startedAt: string;
+}
+
+export interface SessionMessage {
+  id: string;
+  role: 'user' | 'ai' | 'system';
+  content: string;
+  createdAt: string;
+  files: MessageFileMeta[];
+}
+
+export const sessions = {
+  /** アクティブセッション一覧を取得（タブ復元用） */
+  async getActive(limit?: number): Promise<{ sessions: ActiveSession[] }> {
+    const q = limit ? `?limit=${limit}` : '';
+    return request('GET', `/sessions/active${q}`);
+  },
+
+  /** セッションのメッセージ履歴を取得（カーソルベースページネーション） */
+  async getMessages(sessionId: string, opts?: { before?: string; limit?: number }): Promise<{ messages: SessionMessage[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (opts?.before) params.set('before', opts.before);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const q = params.toString() ? `?${params.toString()}` : '';
+    return request('GET', `/sessions/${sessionId}/messages${q}`);
+  },
+};
+
 // 履歴エクスポートAPI
 export const history = {
   async getDates(projectId: string): Promise<{ dates: string[] }> {

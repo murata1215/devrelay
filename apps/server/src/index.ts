@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { setupAgentWebSocket, startHeartbeatMonitor, stopHeartbeatMonitor } from './services/agent-manager.js';
+import { setupWebClientWebSocket } from './platforms/web.js';
 import { restoreSessionParticipants } from './services/session-manager.js';
 import { setupDiscordBot } from './platforms/discord.js';
 import { setupTelegramBot } from './platforms/telegram.js';
@@ -47,6 +48,13 @@ async function main() {
   app.register(async (fastify) => {
     fastify.get('/ws/agent', { websocket: true }, (connection, req) => {
       setupAgentWebSocket(connection, req);
+    });
+  });
+
+  // Web Client WebSocket endpoint（ブラウザチャット用）
+  app.register(async (fastify) => {
+    fastify.get('/ws/web', { websocket: true }, (connection, req) => {
+      setupWebClientWebSocket(connection, req);
     });
   });
 
