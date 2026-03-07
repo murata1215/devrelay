@@ -627,6 +627,25 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - `SKILL.md`: スキル定義（Claude Code が自動検出）
 - `scripts/search.sh`: config.yaml から認証情報を読み取り、サーバー API を呼び出す
 
+## サービス追加の運用パターン
+
+本番サーバーへの新サービス追加は `doc/service-setup-guide.md` の手順に従う。
+
+### 開発ドメイン方式（推奨）
+
+- 開発用の個人ドメイン（例: `murata1215.jp`）でワイルドカード DNS を設定
+- `*.murata1215.jp` → サーバー IP の A レコード1つで全サブドメインが利用可能
+- 新サービス追加時は Caddyfile にエントリ追加 + `sudo systemctl reload caddy` だけ
+- 本番ドメイン取得後は Caddyfile のドメインを差し替えて移行
+
+### サービス = Linux ユーザー
+
+- 1サービス = 1 Linux ユーザー（例: pixshelf, pixdraft, clipped）
+- 各ユーザーが独自の SSH 鍵、DevRelay Agent、Claude Code 認証を持つ
+- コード配置先: `/opt/<サービス名>/`
+
+---
+
 ## 今後の課題
 
 - LINE 対応
