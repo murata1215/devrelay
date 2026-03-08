@@ -14,7 +14,7 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'system' | 'ai';
   content: string;
-  files?: Array<{ id?: string; filename: string; content?: string; mimeType: string }>;
+  files?: Array<{ id?: string; filename: string; content?: string; mimeType: string; size?: number }>;
   timestamp: Date;
 }
 

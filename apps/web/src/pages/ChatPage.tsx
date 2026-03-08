@@ -52,6 +52,31 @@ function formatFileSize(base64: string): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+/** バイト数を人間が読める形式に変換 */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** テキストとしてプレビュー可能なファイルか判定 */
+const TEXT_EXTENSIONS = new Set([
+  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'rb', 'go', 'rs',
+  'java', 'kt', 'swift', 'c', 'cpp', 'h', 'hpp', 'cs', 'md', 'mdx',
+  'yml', 'yaml', 'json', 'toml', 'ini', 'cfg', 'conf', 'sh', 'bash',
+  'zsh', 'sql', 'graphql', 'vue', 'svelte', 'prisma', 'env', 'log',
+  'diff', 'patch', 'txt', 'csv', 'xml', 'html', 'css', 'scss', 'less',
+]);
+
+function isTextPreviewable(mimeType: string, filename: string): boolean {
+  if (mimeType.startsWith('text/')) return true;
+  if (['application/json', 'application/xml', 'application/yaml',
+       'application/x-yaml', 'application/javascript', 'application/typescript',
+       'application/x-sh'].includes(mimeType)) return true;
+  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+  return TEXT_EXTENSIONS.has(ext);
+}
+
 let messageIdCounter = 0;
 function nextMessageId(): string {
   return `msg_${Date.now()}_${++messageIdCounter}`;
@@ -202,6 +227,170 @@ function Avatar({ name, color, image }: { name: string; color: string; image?: s
   );
 }
 
+/** テキストファイルプレビューカード（最大18行 + 展開） */
+function TextPreviewCard({ file, fileUrl }: {
+  file: { id?: string; filename: string; content?: string; mimeType: string; size?: number };
+  fileUrl: string;
+}) {
+  const MAX_PREVIEW_LINES = 18;
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    // リアルタイムメッセージ: base64 デコード
+    if (file.content) {
+      try {
+        const decoded = new TextDecoder().decode(
+          Uint8Array.from(atob(file.content), c => c.charCodeAt(0))
+        );
+        setPreviewText(decoded);
+      } catch {
+        setError(true);
+      }
+      return;
+    }
+    // 履歴メッセージ: API から遅延取得
+    if (file.id) {
+      setLoading(true);
+      fetch(`/api/files/${file.id}?token=${getToken()}`)
+        .then(res => {
+          if (!res.ok) throw new Error('fetch failed');
+          return res.text();
+        })
+        .then(text => { setPreviewText(text); setLoading(false); })
+        .catch(() => { setError(true); setLoading(false); });
+    }
+  }, [file.content, file.id]);
+
+  const lines = previewText?.split('\n') ?? [];
+  const truncated = lines.length > MAX_PREVIEW_LINES;
+  const displayText = (expanded ? lines : lines.slice(0, MAX_PREVIEW_LINES)).join('\n');
+
+  const sizeStr = file.size
+    ? formatBytes(file.size)
+    : file.content ? formatFileSize(file.content) : '';
+
+  return (
+    <div className="max-w-md rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] overflow-hidden">
+      {/* プレビュー本体 */}
+      <div className="relative">
+        {loading && (
+          <div className="p-4 text-xs text-[var(--text-muted)]">読み込み中...</div>
+        )}
+        {error && (
+          <div className="p-4 text-xs text-red-400">プレビューを読み込めませんでした</div>
+        )}
+        {previewText !== null && (
+          <pre className="p-3 text-xs leading-relaxed text-[var(--text-primary)] bg-[var(--bg-base)] overflow-x-auto max-h-80 overflow-y-auto font-mono">
+            <code>{displayText}</code>
+          </pre>
+        )}
+        {/* 切り詰めグラデーション + 展開ボタン */}
+        {truncated && !expanded && previewText !== null && (
+          <div
+            className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-[var(--bg-base)] to-transparent cursor-pointer flex items-end justify-center pb-1"
+            onClick={() => setExpanded(true)}
+          >
+            <span className="text-xs text-[var(--text-link)]">
+              さらに {lines.length - MAX_PREVIEW_LINES} 行を表示
+            </span>
+          </div>
+        )}
+      </div>
+      {/* フッター: ファイル名 + サイズ + ダウンロード */}
+      <div className="flex items-center gap-2 px-3 py-2 border-t border-[var(--border-color)]">
+        <svg className="w-4 h-4 text-[var(--text-muted)] shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+        </svg>
+        <span className="text-sm text-[var(--text-link)] truncate flex-1">{file.filename}</span>
+        {sizeStr && <span className="text-xs text-[var(--text-faint)] shrink-0">{sizeStr}</span>}
+        <a
+          href={fileUrl}
+          download={file.filename}
+          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors shrink-0"
+          title="ダウンロード"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+          </svg>
+        </a>
+      </div>
+    </div>
+  );
+}
+
+/** バイナリファイルダウンロードカード */
+function BinaryFileCard({ file, fileUrl }: {
+  file: { id?: string; filename: string; content?: string; mimeType: string; size?: number };
+  fileUrl: string;
+}) {
+  const sizeStr = file.size
+    ? formatBytes(file.size)
+    : file.content ? formatFileSize(file.content) : '';
+
+  return (
+    <a
+      href={fileUrl}
+      download={file.filename}
+      className="flex items-center gap-3 max-w-md rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 hover:bg-[var(--bg-hover)] transition-colors no-underline"
+    >
+      <svg className="w-8 h-8 text-[var(--text-muted)] shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+      </svg>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm text-[var(--text-link)] truncate">{file.filename}</div>
+        {sizeStr && <div className="text-xs text-[var(--text-faint)]">{sizeStr}</div>}
+      </div>
+      <svg className="w-5 h-5 text-[var(--text-muted)] shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+      </svg>
+    </a>
+  );
+}
+
+/** ファイル種別に応じてプレビューカードを振り分け */
+function FilePreviewCard({ file, onImageClick }: {
+  file: { id?: string; filename: string; content?: string; mimeType: string; size?: number };
+  onImageClick?: (src: string) => void;
+}) {
+  const isImage = file.mimeType.startsWith('image/');
+  const isText = !isImage && isTextPreviewable(file.mimeType, file.filename);
+
+  const fileUrl = file.content
+    ? URL.createObjectURL(
+        new Blob([Uint8Array.from(atob(file.content), c => c.charCodeAt(0))], { type: file.mimeType })
+      )
+    : file.id ? `/api/files/${file.id}?token=${getToken()}` : '';
+
+  if (!fileUrl) return null;
+
+  /* 画像: 既存のサムネ + ライトボックス */
+  if (isImage) {
+    return (
+      <div>
+        <img
+          src={fileUrl}
+          alt={file.filename}
+          className="max-w-xs max-h-60 rounded-lg border border-[var(--border-color)] cursor-pointer hover:opacity-90 transition-opacity"
+          onClick={() => onImageClick?.(fileUrl)}
+        />
+        <span className="block text-xs text-[var(--text-faint)] mt-0.5">{file.filename}</span>
+      </div>
+    );
+  }
+
+  /* テキスト系: プレビューカード */
+  if (isText) {
+    return <TextPreviewCard file={file} fileUrl={fileUrl} />;
+  }
+
+  /* バイナリ/不明: ダウンロードカード */
+  return <BinaryFileCard file={file} fileUrl={fileUrl} />;
+}
+
 /** Discord 風メッセージ行 */
 function MessageRow({
   message,
@@ -244,34 +433,9 @@ function MessageRow({
         </div>
         {message.files && message.files.length > 0 && (
           <div className="mt-2 space-y-2">
-            {message.files.map((f, i) => {
-              const isImage = f.mimeType.startsWith('image/');
-              // content がある場合は blob URL、id のみの場合は /api/files/:id を使用
-              const fileUrl = f.content
-                ? URL.createObjectURL(
-                    new Blob([Uint8Array.from(atob(f.content), c => c.charCodeAt(0))], { type: f.mimeType })
-                  )
-                : f.id ? `/api/files/${f.id}?token=${getToken()}` : '';
-              if (!fileUrl) return null;
-              if (isImage) {
-                return (
-                  <div key={i}>
-                    <img
-                      src={fileUrl}
-                      alt={f.filename}
-                      className="max-w-xs max-h-60 rounded-lg border border-[var(--border-color)] cursor-pointer hover:opacity-90 transition-opacity"
-                      onClick={() => onImageClick?.(fileUrl)}
-                    />
-                    <span className="block text-xs text-[var(--text-faint)] mt-0.5">{f.filename}</span>
-                  </div>
-                );
-              }
-              return (
-                <a key={i} href={fileUrl} download={f.filename} className="block text-[var(--text-link)] hover:opacity-80 underline text-xs">
-                  {f.filename}
-                </a>
-              );
-            })}
+            {message.files.map((f, i) => (
+              <FilePreviewCard key={i} file={f} onImageClick={onImageClick} />
+            ))}
           </div>
         )}
       </div>
