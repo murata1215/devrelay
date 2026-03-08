@@ -1444,17 +1444,35 @@ export function ChatPage() {
     }
   };
 
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) await addFiles(files);
-  };
-
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length > 0) await addFiles(files);
     e.target.value = '';
   };
+
+  /** ドラッグオーバー中フラグ（視覚フィードバック用） */
+  const [dragOver, setDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) setDragOver(false);
+  }, []);
+
+  const handleDragDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) await addFiles(files);
+  }, [addFiles]);
 
   const openTabIds = new Set(tabs.map(t => t.projectId));
 
@@ -1472,8 +1490,14 @@ export function ChatPage() {
         />
       )}
 
-      {/* チャットエリア */}
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* チャットエリア（ドロップゾーン） */}
+      <div
+        className="flex-1 flex flex-col min-w-0 relative"
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={handleDragDrop}
+      >
         {/* ヘッダー */}
         <div className="flex items-center justify-between px-4 py-2 bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
           <div className="flex items-center gap-2">
@@ -1521,8 +1545,6 @@ export function ChatPage() {
         <div
           ref={messagesContainerRef}
           className="flex-1 overflow-y-auto px-4 py-4"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={handleDrop}
           onScroll={handleScroll}
         >
           {/* 履歴読み込み中インジケーター */}
@@ -1630,6 +1652,15 @@ export function ChatPage() {
             </button>
           </div>
         </div>
+
+        {/* ドラッグ中オーバーレイ */}
+        {dragOver && (
+          <div className="absolute inset-0 z-10 bg-[var(--accent-blue)]/10 border-2 border-dashed border-[var(--accent-blue)] rounded-lg flex items-center justify-center pointer-events-none">
+            <div className="bg-[var(--bg-secondary)] rounded-lg px-6 py-4 shadow-lg border border-[var(--border-color)]">
+              <p className="text-sm text-[var(--text-primary)] font-semibold">ファイルをドロップして添付</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* セッション情報パネル（右サイド、大画面のみ、最大化時は非表示） */}
