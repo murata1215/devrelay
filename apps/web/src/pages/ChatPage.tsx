@@ -1145,6 +1145,8 @@ export function ChatPage() {
     const sendText = text || pendingFiles.map(f => f.filename).join(', ');
 
     if (activeTabId) {
+      // 送信時は自動スクロールを再有効化（手動スクロール中でも最下部に戻す）
+      shouldAutoScrollRef.current = true;
       const userMsg: ChatMessage = {
         id: nextMessageId(),
         role: 'user',
