@@ -16,6 +16,8 @@ interface Tab {
   projectId: string;
   projectName: string;
   machineDisplayName: string;
+  /** ユーザーが設定したカスタムタブ名 */
+  customName?: string;
   messages: ChatMessage[];
   progress: ProgressInfo | null;
   sessionId: string | null;
@@ -106,6 +108,30 @@ function getPinnedTabIds(): Set<string> {
 function savePinnedTabIds(tabs: Tab[]) {
   const pinned = tabs.filter(t => t.pinned).map(t => t.projectId);
   localStorage.setItem(PINNED_TABS_KEY, JSON.stringify(pinned));
+}
+
+// ---------------------------------------------------------------------------
+// タブカスタム名の永続化（localStorage 管理）
+// ---------------------------------------------------------------------------
+
+const TAB_NAMES_KEY = 'devrelay-tab-names';
+
+/** カスタムタブ名のマッピングを取得（projectId → customName） */
+function getTabNames(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(TAB_NAMES_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return {};
+}
+
+/** カスタムタブ名を localStorage に保存 */
+function saveTabNames(tabs: Tab[]) {
+  const names: Record<string, string> = {};
+  for (const t of tabs) {
+    if (t.customName) names[t.projectId] = t.customName;
+  }
+  localStorage.setItem(TAB_NAMES_KEY, JSON.stringify(names));
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +418,7 @@ function TabBar({
   onTogglePin,
   onReorder,
   onDoubleClickTab,
+  onRenameTab,
 }: {
   tabs: Tab[];
   activeTabId: string | null;
@@ -400,11 +427,22 @@ function TabBar({
   onTogglePin: (projectId: string) => void;
   onReorder: (fromIndex: number, toIndex: number) => void;
   onDoubleClickTab: () => void;
+  onRenameTab: (projectId: string, newName: string) => void;
 }) {
   /** ドラッグ中のタブ index */
   const dragIndexRef = useRef<number | null>(null);
   /** ドロップ先のタブ index */
   const dragOverIndexRef = useRef<number | null>(null);
+  /** 編集中のタブ projectId */
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+
+  /** 編集確定 */
+  const commitEdit = useCallback((projectId: string) => {
+    const value = editInputRef.current?.value.trim() ?? '';
+    onRenameTab(projectId, value);
+    setEditingTabId(null);
+  }, [onRenameTab]);
 
   if (tabs.length === 0) return null;
 
@@ -418,10 +456,12 @@ function TabBar({
       {orderedTabs.map((tab) => {
         const globalIndex = tabs.indexOf(tab);
         const isActive = tab.projectId === activeTabId;
+        const isEditing = editingTabId === tab.projectId;
+        const displayName = tab.customName || tab.projectName;
         return (
           <div
             key={tab.projectId}
-            draggable
+            draggable={!isEditing}
             onDragStart={() => { dragIndexRef.current = globalIndex; }}
             onDragOver={(e) => { e.preventDefault(); dragOverIndexRef.current = globalIndex; }}
             onDrop={() => {
@@ -464,7 +504,34 @@ function TabBar({
             ) : (
               <span className="text-[var(--text-faint)]">#</span>
             )}
-            <span className={isActive ? 'font-semibold' : ''}>{tab.projectName}</span>
+            {/* タブ名: ダブルクリックでインライン編集 */}
+            {isEditing ? (
+              <input
+                ref={editInputRef}
+                defaultValue={displayName}
+                className="bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-color)] rounded px-1 text-sm w-24 outline-none focus:border-blue-500"
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') commitEdit(tab.projectId);
+                  if (e.key === 'Escape') setEditingTabId(null);
+                }}
+                onBlur={() => commitEdit(tab.projectId)}
+                autoFocus
+              />
+            ) : (
+              <span
+                className={isActive ? 'font-semibold' : ''}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  setEditingTabId(tab.projectId);
+                }}
+                title="ダブルクリックで名前を変更"
+              >
+                {displayName}
+              </span>
+            )}
             {/* 閉じるボタン: ピン止め時は非表示 */}
             {!tab.pinned && (
               <button
@@ -902,10 +969,12 @@ export function ChatPage() {
         );
         if (restorable.length === 0) return;
 
+        const savedNames = getTabNames();
         const newTabs: Tab[] = restorable.map(s => ({
           projectId: s.projectId,
           projectName: s.projectName,
           machineDisplayName: s.machineDisplayName,
+          customName: savedNames[s.projectId],
           messages: [],
           progress: null,
           sessionId: s.sessionId,
@@ -1064,6 +1133,7 @@ export function ChatPage() {
         projectId,
         projectName,
         machineDisplayName,
+        customName: getTabNames()[projectId],
         messages: [],
         progress: null,
         sessionId: null,
@@ -1118,6 +1188,19 @@ export function ChatPage() {
       // サーバーにも保存（fire-and-forget）
       const pinnedIds = updated.filter(t => t.pinned).map(t => t.projectId);
       settingsApi.savePinnedTabs(pinnedIds).catch(() => {});
+      return updated;
+    });
+  }, []);
+
+  /** タブ名の変更（空文字の場合はリセット） */
+  const handleRenameTab = useCallback((projectId: string, newName: string) => {
+    setTabs(prev => {
+      const updated = prev.map(t =>
+        t.projectId === projectId
+          ? { ...t, customName: newName || undefined }
+          : t
+      );
+      saveTabNames(updated);
       return updated;
     });
   }, []);
@@ -1240,7 +1323,7 @@ export function ChatPage() {
             </button>
             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
             <span className="text-sm text-[var(--text-muted)]">
-              {activeTab ? `# ${activeTab.projectName}` : connected ? '接続中' : '切断中...'}
+              {activeTab ? `# ${activeTab.customName || activeTab.projectName}` : connected ? '接続中' : '切断中...'}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -1267,6 +1350,7 @@ export function ChatPage() {
           onTogglePin={handleTogglePin}
           onReorder={handleReorderTabs}
           onDoubleClickTab={() => setMaximized(prev => !prev)}
+          onRenameTab={handleRenameTab}
         />
 
         {/* メッセージエリア */}
@@ -1302,7 +1386,7 @@ export function ChatPage() {
             <div className="flex items-center justify-center h-full">
               <div className="text-center text-[var(--text-faint)]">
                 <p className="text-sm">
-                  <span className="text-[var(--text-muted)] font-semibold"># {activeTab.projectName}</span> に接続中
+                  <span className="text-[var(--text-muted)] font-semibold"># {activeTab.customName || activeTab.projectName}</span> に接続中
                 </p>
                 <p className="text-xs mt-1">
                   メッセージを入力して送信してください
