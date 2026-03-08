@@ -499,9 +499,18 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     log.info(`Received ${missedMessages.length} missed message(s) from Discord`);
   }
 
-  const sessionInfo = sessionInfoMap.get(sessionId);
+  // sessionInfoMap の登録を待機（session:start との race condition 対策）
+  let sessionInfo = sessionInfoMap.get(sessionId);
+  if (!sessionInfo) {
+    log.info(`Waiting for session info registration: ${sessionId}`);
+    for (let i = 0; i < 30; i++) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      sessionInfo = sessionInfoMap.get(sessionId);
+      if (sessionInfo) break;
+    }
+  }
   if (!sessionInfo || !currentConfig) {
-    log.error(`Session info not found for ${sessionId}`);
+    log.error(`Session info not found for ${sessionId} after waiting`);
     return;
   }
 
