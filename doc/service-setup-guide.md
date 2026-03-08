@@ -14,11 +14,16 @@
 | サービス名（= Linux ユーザー名） | __________ | clipped |
 | Git リポジトリ URL（SSH） | __________ | git@github.com:murata1215/clipped.git |
 | 使用ポート番号 | __________ | 3006 |
-| 開発ドメイン | __________ | clipped.murata1215.jp |
+| 開発ドメイン | __________ | clipped.devrelay.io |
 | 本番ドメイン（予定） | __________ | clipped.app |
 | コード配置先 | __________ | /opt/clipped |
 | Git ユーザー名 | __________ | murata1215 |
 | Git メールアドレス | __________ | fwjg2507@gmail.com |
+
+### 開発ドメインについて
+
+`*.devrelay.io` のワイルドカード DNS が設定済みのため、`<サービス名>.devrelay.io` はすぐに使える。
+本番ドメイン取得後に Caddyfile のドメインを差し替えるだけで移行可能。
 
 ### 使用済みポート一覧
 
@@ -28,19 +33,30 @@
 | 3001-3005 | devrelay | server=3005, web=3001-3004 |
 | 3002 | pixblog | pixblog.net（静的サイト、Caddy直配信） |
 | 3004 | pixshelf | shelf.pixblog.net |
+| 3006 | clipped | clipped.devrelay.io |
 
-次に使えるポート: **3006** 以降
+次に使えるポート: **3007** 以降
 
 ---
 
 ## Step 1: Linux ユーザー作成
 
 ```bash
-# devrelay ユーザー等、sudo 権限のあるユーザーで実行
+# sudo 権限のあるユーザー（devrelay 等）で実行
 sudo adduser <サービス名>
 ```
 
 対話プロンプトでパスワードを設定。フルネーム等はエンターでスキップ可。
+
+### sudo 権限の付与
+
+DevRelay Agent 経由で Claude Code を使う場合、サービスユーザーにも sudo 権限が必要。
+
+```bash
+sudo usermod -aG sudo <サービス名>
+```
+
+> **Note**: 反映にはサービスユーザーの再ログインが必要。
 
 ### 確認
 
@@ -50,6 +66,7 @@ ls /home/<サービス名>/
 ```
 
 - [ ] ユーザーが作成され、ホームディレクトリが存在する
+- [ ] sudo グループに所属している（`groups <サービス名>` で確認）
 
 ---
 
@@ -90,11 +107,37 @@ ssh -T git@github.com
 
 ---
 
-## Step 3: リポジトリ clone & ビルド
+## Step 3: Node.js 環境 & リポジトリ clone & ビルド
+
+### 3-1. nvm / Node.js / pnpm / PM2 インストール
+
+サービスユーザーに Node.js 環境がない場合、先にインストールする。
 
 ```bash
-# サービスユーザーのまま実行
-# /opt/<サービス名> に clone（sudo 必要な場合あり）
+# サービスユーザーで実行
+# nvm インストール
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+# nvm を読み込み
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# Node.js LTS インストール
+nvm install --lts
+
+# pnpm & PM2 インストール
+npm install -g pnpm pm2
+
+# 確認
+node --version
+pnpm --version
+pm2 --version
+```
+
+### 3-2. リポジトリ clone
+
+```bash
+# サービスユーザーで実行
 sudo mkdir -p /opt/<サービス名>
 sudo chown <サービス名>:<サービス名> /opt/<サービス名>
 git clone <リポジトリURL> /opt/<サービス名>
@@ -105,23 +148,37 @@ git config user.name "<Git ユーザー名>"
 git config user.email "<Git メールアドレス>"
 ```
 
-### 依存インストール & ビルド
+### 3-3. 依存インストール & ビルド
 
 プロジェクトに応じて実行:
 
 ```bash
 # Node.js プロジェクトの場合
+cd /opt/<サービス名>
 pnpm install   # or npm install
 pnpm build     # or npm run build
 
 # その他のプロジェクトはプロジェクトの README に従う
 ```
 
-> **Note**: Node.js がまだ入っていない場合は Step 4 の Claude Code インストール時に一緒に入る。
-> pnpm が未インストールの場合: `npm install -g pnpm`
+### 3-4. 環境変数・設定ファイル
 
+プロジェクトが `.env` や `.env.local` を必要とする場合はここで作成する。
+`.env.local.example` がある場合はコピーして値を設定。
+
+```bash
+cp .env.local.example .env.local
+# エディタで値を設定
+vi .env.local
+```
+
+> **Note**: `NEXT_PUBLIC_` で始まる環境変数はビルド時に埋め込まれるため、
+> 値を変更した場合は再ビルド（`pnpm build`）が必要。
+
+- [ ] Node.js / pnpm / PM2 がインストールされた
 - [ ] リポジトリが clone できた
 - [ ] Git config が設定された
+- [ ] 環境変数・設定ファイルが作成された
 - [ ] 依存インストールが成功
 - [ ] ビルドが成功
 
@@ -196,50 +253,39 @@ tail -f ~/.devrelay/logs/agent.log
 
 ## Step 6: Caddy リバースプロキシ設定
 
-### パターン A: 開発ドメイン（推奨）
+`*.devrelay.io` のワイルドカード DNS が設定済みのため、Caddyfile にエントリを追加するだけで
+`<サービス名>.devrelay.io` で HTTPS アクセス可能になる。
 
-開発用ドメイン（例: `murata1215.jp`）のワイルドカード DNS を利用する方式。
-初回のみ DNS 設定が必要。2サービス目以降は Caddyfile 追加だけで公開できる。
-
-#### 初回のみ: ワイルドカード DNS 設定
-
-DNS 管理画面で以下の A レコードを追加:
-
-```
-*.murata1215.jp  →  <サーバーの IP アドレス>
-```
-
-これで `clipped.murata1215.jp`、`xxx.murata1215.jp` 等が全てサーバーに向く。
-
-#### Caddyfile にエントリ追加
+### Caddyfile にエントリ追加
 
 ```bash
-sudo vi /etc/caddy/Caddyfile
-```
+# Caddyfile の末尾に追加
+sudo tee -a /etc/caddy/Caddyfile << 'EOF'
 
-以下を末尾に追加:
-
-```caddyfile
-<サービス名>.<開発ドメイン> {
+<サービス名>.devrelay.io {
     reverse_proxy localhost:<ポート>
 }
+EOF
 ```
 
 例:
 
 ```caddyfile
-clipped.murata1215.jp {
+clipped.devrelay.io {
     reverse_proxy localhost:3006
 }
 ```
 
-#### Caddy 再読み込み
+### Caddy 再読み込み
 
 ```bash
 sudo systemctl reload caddy
 ```
 
-### パターン B: 本番ドメイン取得後の移行
+> **Note**: Caddy は自動で Let's Encrypt 証明書を取得・更新する。
+> 初回アクセス時に数秒かかる場合がある。
+
+### 本番ドメイン取得後の移行
 
 独自ドメインを取得した後の移行手順。
 
@@ -248,7 +294,7 @@ sudo systemctl reload caddy
 
 ```caddyfile
 # Before（開発）
-clipped.murata1215.jp {
+clipped.devrelay.io {
     reverse_proxy localhost:3006
 }
 
@@ -261,7 +307,7 @@ clipped.app {
 3. **（任意）旧ドメインからリダイレクト**:
 
 ```caddyfile
-clipped.murata1215.jp {
+clipped.devrelay.io {
     redir https://clipped.app{uri} permanent
 }
 ```
@@ -270,7 +316,7 @@ clipped.murata1215.jp {
 
 - [ ] Caddyfile にエントリを追加した
 - [ ] `sudo systemctl reload caddy` が成功
-- [ ] ブラウザから `https://<ドメイン>` でアクセスできる
+- [ ] ブラウザから `https://<サービス名>.devrelay.io` でアクセスできる
 - [ ] HTTPS 証明書が有効（鍵マークが出る）
 
 ---
@@ -285,15 +331,20 @@ clipped.murata1215.jp {
 # サービスユーザーで実行
 cd /opt/<サービス名>
 
-# PM2 で起動
-pm2 start dist/index.js --name <サービス名>
-# or
-pm2 start npm --name <サービス名> -- start
+# ecosystem.config.js がある場合（推奨）
+pm2 start ecosystem.config.js
 
-# 自動起動設定
+# ecosystem.config.js がない場合
+pm2 start dist/index.js --name <サービス名>
+# or（Next.js の場合: node_modules/.bin/next はシェルスクリプトなので直接指定不可）
+pm2 start node_modules/next/dist/bin/next --name <サービス名> -- start -p <ポート>
+
+# プロセスリストを保存
 pm2 save
+
+# サーバー再起動後の自動起動設定
 pm2 startup
-# → 表示されたコマンドを sudo で実行
+# → 表示されたコマンド（sudo env ...）をコピーして実行
 ```
 
 ### 方式 B: systemd
@@ -366,12 +417,12 @@ git push
 
 全ステップ完了後の最終確認。
 
-- [ ] サービスがブラウザからアクセスできる（`https://<ドメイン>`）
+- [ ] サービスがブラウザからアクセスできる（`https://<サービス名>.devrelay.io`）
 - [ ] HTTPS が有効（証明書エラーなし）
 - [ ] DevRelay Agent が online（WebUI で確認）
-- [ ] Discord からコマンドが実行できる
+- [ ] Discord / Telegram からコマンドが実行できる
 - [ ] Git push/pull が成功する
-- [ ] サーバー再起動後もサービスが自動起動する
+- [ ] サーバー再起動後もサービスが自動起動する（`pm2 startup` 設定済み）
 
 ---
 
@@ -387,6 +438,7 @@ git push
 | pixshelf | pixshelf | 3004 | shelf.pixblog.net | /opt/pixshelf |
 | pixdraft | pixdraft | 3000 | draft.pixblog.net | /opt/pixdraft |
 | pixnews | pixnews | — | — | /opt/pixnews |
+| Clipped | clipped | 3006 | clipped.devrelay.io | /opt/clipped |
 
 ### Caddyfile の場所
 
