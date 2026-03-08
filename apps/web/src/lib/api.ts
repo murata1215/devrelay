@@ -177,6 +177,15 @@ export const projects = {
   async getBuildLogs(projectId: string): Promise<{ builds: BuildLogItem[] }> {
     return request('GET', `/projects/${projectId}/builds`);
   },
+
+  /** プロジェクト横断メッセージ履歴を取得（全セッション横断、カーソルベースページネーション） */
+  async getMessages(projectId: string, opts?: { before?: string; limit?: number }): Promise<{ messages: SessionMessage[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (opts?.before) params.set('before', opts.before);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const q = params.toString() ? `?${params.toString()}` : '';
+    return request('GET', `/projects/${projectId}/messages${q}`);
+  },
 };
 
 // 設定API
@@ -191,6 +200,30 @@ export const settings = {
 
   async delete(key: string): Promise<void> {
     await request('DELETE', `/settings/${key}`);
+  },
+
+  /** サーバーからチャット表示設定を取得（chat_display キー） */
+  async getChatDisplay(): Promise<string | null> {
+    const all = await this.get();
+    return all['chat_display'] ?? null;
+  },
+
+  /** チャット表示設定をサーバーに保存 */
+  async saveChatDisplay(json: string): Promise<void> {
+    await this.update('chat_display', json);
+  },
+
+  /** サーバーからピン止めタブ一覧を取得 */
+  async getPinnedTabs(): Promise<string[]> {
+    const all = await this.get();
+    const raw = all['pinned_tabs'];
+    if (!raw) return [];
+    try { return JSON.parse(raw); } catch { return []; }
+  },
+
+  /** ピン止めタブ一覧をサーバーに保存 */
+  async savePinnedTabs(projectIds: string[]): Promise<void> {
+    await this.update('pinned_tabs', JSON.stringify(projectIds));
   },
 };
 
@@ -388,7 +421,24 @@ export const sessions = {
     const q = params.toString() ? `?${params.toString()}` : '';
     return request('GET', `/sessions/${sessionId}/messages${q}`);
   },
+
+  /** Claude セッション推定情報を取得（5時間ギャップベース） */
+  async getClaudeSession(sessionId: string): Promise<ClaudeSessionInfo> {
+    return request('GET', `/sessions/${sessionId}/claude-session`);
+  },
 };
+
+/** Claude セッション推定情報 */
+export interface ClaudeSessionInfo {
+  sessionStart: string | null;
+  messageCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  elapsedMinutes: number;
+  remainingMinutes: number;
+}
 
 // 履歴エクスポートAPI
 export const history = {

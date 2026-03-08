@@ -394,6 +394,70 @@ export async function apiRoutes(app: FastifyInstance) {
     };
   });
 
+  /**
+   * プロジェクト横断メッセージ履歴（全セッションを横断してカーソルベースページネーション）
+   * @route GET /api/projects/:projectId/messages?limit=30&before=<messageId>
+   */
+  app.get('/api/projects/:projectId/messages', async (request: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string; before?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { projectId } = request.params;
+    const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '30', 10) || 30));
+    const before = request.query.before || undefined;
+
+    // プロジェクト認可チェック
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+    });
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    // カーソル条件: before が指定されていれば、そのメッセージより古いものを取得
+    const whereClause: any = { session: { projectId, userId } };
+    if (before) {
+      const cursorMsg = await prisma.message.findUnique({
+        where: { id: before },
+        select: { createdAt: true },
+      });
+      if (cursorMsg) {
+        whereClause.createdAt = { lt: cursorMsg.createdAt };
+      }
+    }
+
+    // limit + 1 件取得して hasMore を判定（全セッション横断）
+    const messages = await prisma.message.findMany({
+      where: whereClause,
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      select: {
+        id: true,
+        role: true,
+        content: true,
+        createdAt: true,
+        files: {
+          select: { id: true, filename: true, mimeType: true, size: true, direction: true },
+        },
+      },
+    });
+
+    const hasMore = messages.length > limit;
+    const result = hasMore ? messages.slice(0, limit) : messages;
+
+    // 時系列順（古い→新しい）に並び替えて返す
+    result.reverse();
+
+    return reply.send({
+      messages: result.map(m => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        createdAt: m.createdAt.toISOString(),
+        files: m.files,
+      })),
+      hasMore,
+    });
+  });
+
   // ========================================
   // 設定（UserSettings）
   // ========================================
@@ -1072,6 +1136,118 @@ export async function apiRoutes(app: FastifyInstance) {
         files: m.files,
       })),
       hasMore,
+    });
+  });
+
+  // ========================================
+  // Claude セッション推定 API
+  // ========================================
+
+  /**
+   * Claude のセッション開始を推定する
+   * メッセージ間隔が5時間以上空いた箇所をセッション境界とみなす
+   * セッション開始以降のトークン使用量も集計して返す
+   * @route GET /api/sessions/:id/claude-session
+   */
+  app.get('/api/sessions/:id/claude-session', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { id: sessionId } = request.params;
+
+    // セッション認可チェック
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { userId: true },
+    });
+    if (!session || session.userId !== userId) {
+      return reply.status(404).send({ error: 'Session not found' });
+    }
+
+    // 24 時間分のメッセージを昇順で取得（セッション境界検出のため広めに取得）
+    // ユーザー単位で検索（Claude セッションは全マシン・全プロジェクト共通）
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const messages = await prisma.message.findMany({
+      where: {
+        session: {
+          userId,
+        },
+        createdAt: { gte: oneDayAgo },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        createdAt: true,
+        usageData: true,
+        role: true,
+      },
+    });
+
+    const emptyResponse = {
+      sessionStart: null,
+      messageCount: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
+      totalCacheCreationTokens: 0,
+      elapsedMinutes: 0,
+      remainingMinutes: 300,
+    };
+
+    if (messages.length === 0) {
+      return reply.send(emptyResponse);
+    }
+
+    // 5 時間以上のギャップを検出してセッション境界を特定
+    // 最後の 5h ギャップ以降のメッセージが現在のセッション
+    const FIVE_HOURS = 5 * 60 * 60 * 1000;
+    let sessionStartIdx = 0;
+    let hasSessionBoundary = false;
+    for (let i = 1; i < messages.length; i++) {
+      const prev = new Date(messages[i - 1].createdAt).getTime();
+      const curr = new Date(messages[i].createdAt).getTime();
+      if (curr - prev >= FIVE_HOURS) {
+        sessionStartIdx = i;
+        hasSessionBoundary = true;
+      }
+    }
+
+    const sessionMessages = messages.slice(sessionStartIdx);
+
+    // セッション開始時刻（5h ギャップで分割できた場合のみ）
+    const sessionStart = hasSessionBoundary
+      ? new Date(sessionMessages[0].createdAt)
+      : null;
+
+    // トークン集計
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheReadTokens = 0;
+    let totalCacheCreationTokens = 0;
+    for (const msg of sessionMessages) {
+      if (msg.role === 'ai' && msg.usageData) {
+        const data = msg.usageData as any;
+        totalInputTokens += data.usage?.input_tokens ?? 0;
+        totalOutputTokens += data.usage?.output_tokens ?? 0;
+        totalCacheReadTokens += data.usage?.cache_read_input_tokens ?? 0;
+        totalCacheCreationTokens += data.usage?.cache_creation_input_tokens ?? 0;
+      }
+    }
+
+    const now = Date.now();
+    const elapsedMinutes = sessionStart
+      ? Math.floor((now - sessionStart.getTime()) / (60 * 1000))
+      : 0;
+    const remainingMinutes = sessionStart
+      ? Math.max(0, 300 - elapsedMinutes)
+      : 0;
+
+    return reply.send({
+      sessionStart: sessionStart?.toISOString() ?? null,
+      messageCount: sessionMessages.length,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCacheReadTokens,
+      totalCacheCreationTokens,
+      elapsedMinutes,
+      remainingMinutes,
     });
   });
 

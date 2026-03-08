@@ -156,20 +156,17 @@ export function Layout({ children }: LayoutProps) {
         )}
       </nav>
 
-      {/* Main content */}
-      {location.pathname === '/chat' ? (
-        <main>{children}</main>
-      ) : (
-        <>
-          <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-            {children}
-          </main>
-          <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-            <div className="text-center text-[var(--text-faint)] text-xs">
-              DevRelay v{__APP_VERSION__}
-            </div>
-          </footer>
-        </>
+      {/* Main content: ChatPage は常時マウント（display:none で制御）されるため、
+           /chat 時はフル幅、それ以外は max-w-7xl で表示 */}
+      <main className={location.pathname === '/chat' ? '' : 'max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8'}>
+        {children}
+      </main>
+      {location.pathname !== '/chat' && (
+        <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="text-center text-[var(--text-faint)] text-xs">
+            DevRelay v{__APP_VERSION__}
+          </div>
+        </footer>
       )}
     </div>
   );

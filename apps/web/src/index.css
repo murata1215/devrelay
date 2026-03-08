@@ -24,6 +24,13 @@
   --accent-blue-hover: #4752c4;
   --user-bubble: #5865f2;
   --ai-bubble: var(--bg-tertiary);
+
+  /* セマンティックカラー */
+  --text-success: #4ade80;
+  --text-danger: #f87171;
+  --text-link: #60a5fa;
+  --bg-danger: rgba(239, 68, 68, 0.2);
+  --border-danger: #ef4444;
 }
 
 :root.light {
@@ -41,4 +48,15 @@
 
   --user-bubble: #5865f2;
   --ai-bubble: var(--bg-secondary);
+
+  --text-success: #16a34a;
+  --text-danger: #dc2626;
+  --text-link: #2563eb;
+  --bg-danger: rgba(239, 68, 68, 0.1);
+  --border-danger: #dc2626;
+}
+
+/* チャット最大化時: ナビバーを隠す */
+body.chat-maximized nav {
+  display: none !important;
 }

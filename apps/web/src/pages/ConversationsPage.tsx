@@ -57,7 +57,7 @@ function FileList({ files, label, onImageClick }: { files: MessageFileMeta[]; la
 
   return (
     <div>
-      <div className="text-gray-500 text-xs mb-1 font-medium">{label}</div>
+      <div className="text-[var(--text-faint)] text-xs mb-1 font-medium">{label}</div>
       <div className="flex flex-wrap gap-2">
         {files.map(f => {
           const isImage = f.mimeType.startsWith('image/');
@@ -66,16 +66,16 @@ function FileList({ files, label, onImageClick }: { files: MessageFileMeta[]; la
               {isImage ? (
                 <button
                   onClick={(e) => { e.stopPropagation(); onImageClick?.(fileUrl(f.id)); }}
-                  className="flex items-center gap-2 px-2 py-1 bg-gray-900/60 rounded text-xs text-blue-400 hover:text-blue-300 hover:bg-gray-800"
+                  className="flex items-center gap-2 px-2 py-1 bg-[var(--bg-base)]/60 rounded text-xs text-[var(--text-link)] hover:opacity-80 hover:bg-[var(--bg-secondary)]"
                 >
                   <img
                     src={fileUrl(f.id)}
                     alt={f.filename}
-                    className="w-16 h-16 object-cover rounded border border-gray-600"
+                    className="w-16 h-16 object-cover rounded border border-[var(--border-color)]"
                   />
                   <div className="text-left">
                     <div>{f.filename}</div>
-                    <div className="text-gray-500">({formatFileSize(f.size)})</div>
+                    <div className="text-[var(--text-faint)]">({formatFileSize(f.size)})</div>
                   </div>
                 </button>
               ) : (
@@ -84,11 +84,11 @@ function FileList({ files, label, onImageClick }: { files: MessageFileMeta[]; la
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={(e) => e.stopPropagation()}
-                  className="flex items-center gap-1 px-2 py-1 bg-gray-900/60 rounded text-xs text-blue-400 hover:text-blue-300 hover:bg-gray-800"
+                  className="flex items-center gap-1 px-2 py-1 bg-[var(--bg-base)]/60 rounded text-xs text-[var(--text-link)] hover:opacity-80 hover:bg-[var(--bg-secondary)]"
                 >
                   <span>📄</span>
                   <span>{f.filename}</span>
-                  <span className="text-gray-500">({formatFileSize(f.size)})</span>
+                  <span className="text-[var(--text-faint)]">({formatFileSize(f.size)})</span>
                 </a>
               )}
             </div>
@@ -143,8 +143,8 @@ export function ConversationsPage() {
   if (loading && !data) {
     return (
       <div className="p-6">
-        <h1 className="text-2xl font-bold text-white mb-6">Conversations</h1>
-        <div className="text-gray-400">Loading...</div>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Conversations</h1>
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     );
   }
@@ -152,8 +152,8 @@ export function ConversationsPage() {
   if (error && !data) {
     return (
       <div className="p-6">
-        <h1 className="text-2xl font-bold text-white mb-6">Conversations</h1>
-        <div className="text-red-400">{error}</div>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Conversations</h1>
+        <div className="text-[var(--text-danger)]">{error}</div>
       </div>
     );
   }
@@ -164,26 +164,26 @@ export function ConversationsPage() {
 
   return (
     <div className="p-6">
-      <h1 className="text-2xl font-bold text-white mb-6">Conversations</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Conversations</h1>
 
       {items.length === 0 ? (
-        <div className="bg-gray-800 rounded-lg p-8 text-center text-gray-400">
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-8 text-center text-[var(--text-muted)]">
           No conversations yet. Usage data will appear here after sending prompts to AI.
         </div>
       ) : (
         <>
           {/* デスクトップ: テーブル表示 */}
-          <div className="hidden md:block bg-gray-800 rounded-lg overflow-hidden">
+          <div className="hidden md:block bg-[var(--bg-secondary)] rounded-lg overflow-hidden">
             <table className="w-full">
               <thead>
-                <tr className="border-b border-gray-700">
-                  <th className="text-left text-gray-400 text-xs font-medium px-4 py-3 w-40">Date</th>
-                  <th className="text-left text-gray-400 text-xs font-medium px-4 py-3 w-28">Project</th>
-                  <th className="text-left text-gray-400 text-xs font-medium px-4 py-3">User</th>
-                  <th className="text-left text-gray-400 text-xs font-medium px-4 py-3">AI Response</th>
-                  <th className="text-left text-gray-400 text-xs font-medium px-4 py-3 w-28">Model</th>
-                  <th className="text-right text-gray-400 text-xs font-medium px-4 py-3 w-20">Duration</th>
-                  <th className="text-right text-gray-400 text-xs font-medium px-4 py-3 w-20">Tokens</th>
+                <tr className="border-b border-[var(--border-color)]">
+                  <th className="text-left text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-40">Date</th>
+                  <th className="text-left text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-28">Project</th>
+                  <th className="text-left text-[var(--text-muted)] text-xs font-medium px-4 py-3">User</th>
+                  <th className="text-left text-[var(--text-muted)] text-xs font-medium px-4 py-3">AI Response</th>
+                  <th className="text-left text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-28">Model</th>
+                  <th className="text-right text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-20">Duration</th>
+                  <th className="text-right text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-20">Tokens</th>
                 </tr>
               </thead>
               <tbody>
@@ -192,43 +192,43 @@ export function ConversationsPage() {
                     <tr
                       key={item.messageId}
                       onClick={() => toggleRow(item.messageId)}
-                      className={`border-b border-gray-700/50 cursor-pointer transition-colors ${
-                        expandedRow === item.messageId ? 'bg-gray-700/40' : 'hover:bg-gray-700/20'
+                      className={`border-b border-[var(--border-color)]/50 cursor-pointer transition-colors ${
+                        expandedRow === item.messageId ? 'bg-[var(--bg-tertiary)]/40' : 'hover:bg-[var(--bg-tertiary)]/20'
                       }`}
                     >
-                      <td className="px-4 py-3 text-gray-300 text-sm whitespace-nowrap">
+                      <td className="px-4 py-3 text-[var(--text-secondary)] text-sm whitespace-nowrap">
                         {new Date(item.createdAt).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 text-white text-sm font-medium">
+                      <td className="px-4 py-3 text-[var(--text-primary)] text-sm font-medium">
                         {item.projectName}
                       </td>
-                      <td className="px-4 py-3 text-gray-300 text-sm max-w-0">
+                      <td className="px-4 py-3 text-[var(--text-secondary)] text-sm max-w-0">
                         <div className="truncate">{truncate(item.userMessage, 80)}</div>
                       </td>
-                      <td className="px-4 py-3 text-gray-400 text-sm max-w-0">
+                      <td className="px-4 py-3 text-[var(--text-muted)] text-sm max-w-0">
                         <div className="truncate">{truncate(item.aiMessage, 80)}</div>
                       </td>
-                      <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
+                      <td className="px-4 py-3 text-[var(--text-muted)] text-xs whitespace-nowrap">
                         {shortModelName(item.model)}
                       </td>
-                      <td className="px-4 py-3 text-gray-400 text-sm text-right whitespace-nowrap">
+                      <td className="px-4 py-3 text-[var(--text-muted)] text-sm text-right whitespace-nowrap">
                         {formatDuration(item.durationMs)}
                       </td>
-                      <td className="px-4 py-3 text-gray-300 text-sm text-right whitespace-nowrap font-mono">
+                      <td className="px-4 py-3 text-[var(--text-secondary)] text-sm text-right whitespace-nowrap font-mono">
                         {hasUsageData(item) ? formatTokens(totalTokens(item)) : '-'}
                       </td>
                     </tr>
                     {/* 展開パネル */}
                     {expandedRow === item.messageId && (
                       <tr key={`${item.messageId}-detail`}>
-                        <td colSpan={7} className="px-4 py-4 bg-gray-700/20">
+                        <td colSpan={7} className="px-4 py-4 bg-[var(--bg-tertiary)]/20">
                           <div className="space-y-4">
                             {/* 入力ファイル */}
                             <FileList files={item.inputFiles} label="Input Files" onImageClick={setLightboxUrl} />
                             {/* ユーザーメッセージ全文 */}
                             <div>
-                              <div className="text-gray-500 text-xs mb-1 font-medium">User Message</div>
-                              <div className="text-white text-sm whitespace-pre-wrap bg-gray-900/60 rounded p-3 max-h-60 overflow-y-auto">
+                              <div className="text-[var(--text-faint)] text-xs mb-1 font-medium">User Message</div>
+                              <div className="text-[var(--text-primary)] text-sm whitespace-pre-wrap bg-[var(--bg-base)]/60 rounded p-3 max-h-60 overflow-y-auto">
                                 {item.userMessage || '(empty)'}
                               </div>
                             </div>
@@ -236,26 +236,26 @@ export function ConversationsPage() {
                             <FileList files={item.outputFiles} label="Output Files" onImageClick={setLightboxUrl} />
                             {/* AI メッセージ全文 */}
                             <div>
-                              <div className="text-gray-500 text-xs mb-1 font-medium">AI Response</div>
-                              <div className="text-gray-300 text-sm whitespace-pre-wrap bg-gray-900/60 rounded p-3 max-h-60 overflow-y-auto">
+                              <div className="text-[var(--text-faint)] text-xs mb-1 font-medium">AI Response</div>
+                              <div className="text-[var(--text-secondary)] text-sm whitespace-pre-wrap bg-[var(--bg-base)]/60 rounded p-3 max-h-60 overflow-y-auto">
                                 {item.aiMessage || '(empty)'}
                               </div>
                             </div>
                             {/* トークン内訳 + メタ情報 */}
-                            <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-400 border-t border-gray-700 pt-3">
+                            <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-[var(--text-muted)] border-t border-[var(--border-color)] pt-3">
                               {hasUsageData(item) ? (
                                 <>
-                                  <span>Input: <span className="text-gray-300">{item.inputTokens.toLocaleString()}</span></span>
-                                  <span>Output: <span className="text-gray-300">{item.outputTokens.toLocaleString()}</span></span>
-                                  <span>Cache Read: <span className="text-gray-300">{item.cacheReadTokens.toLocaleString()}</span></span>
-                                  <span>Cache Creation: <span className="text-gray-300">{item.cacheCreationTokens.toLocaleString()}</span></span>
-                                  <span>Duration: <span className="text-gray-300">{formatDuration(item.durationMs)}</span></span>
-                                  <span>Model: <span className="text-gray-300">{item.model ?? 'unknown'}</span></span>
+                                  <span>Input: <span className="text-[var(--text-secondary)]">{item.inputTokens.toLocaleString()}</span></span>
+                                  <span>Output: <span className="text-[var(--text-secondary)]">{item.outputTokens.toLocaleString()}</span></span>
+                                  <span>Cache Read: <span className="text-[var(--text-secondary)]">{item.cacheReadTokens.toLocaleString()}</span></span>
+                                  <span>Cache Creation: <span className="text-[var(--text-secondary)]">{item.cacheCreationTokens.toLocaleString()}</span></span>
+                                  <span>Duration: <span className="text-[var(--text-secondary)]">{formatDuration(item.durationMs)}</span></span>
+                                  <span>Model: <span className="text-[var(--text-secondary)]">{item.model ?? 'unknown'}</span></span>
                                 </>
                               ) : (
-                                <span>Usage: <span className="text-gray-500">N/A（Agent 更新で表示されます）</span></span>
+                                <span>Usage: <span className="text-[var(--text-faint)]">N/A（Agent 更新で表示されます）</span></span>
                               )}
-                              <span>Agent: <span className="text-gray-300">{item.machineName}</span></span>
+                              <span>Agent: <span className="text-[var(--text-secondary)]">{item.machineName}</span></span>
                             </div>
                           </div>
                         </td>
@@ -273,15 +273,15 @@ export function ConversationsPage() {
               <div
                 key={item.messageId}
                 onClick={() => toggleRow(item.messageId)}
-                className="bg-gray-800 rounded-lg p-4 cursor-pointer hover:bg-gray-700/60 transition-colors"
+                className="bg-[var(--bg-secondary)] rounded-lg p-4 cursor-pointer hover:bg-[var(--bg-tertiary)]/60 transition-colors"
               >
                 <div className="flex justify-between items-start mb-2">
-                  <span className="text-white text-sm font-medium">{item.projectName}</span>
-                  <span className="text-gray-400 text-xs">{new Date(item.createdAt).toLocaleString()}</span>
+                  <span className="text-[var(--text-primary)] text-sm font-medium">{item.projectName}</span>
+                  <span className="text-[var(--text-muted)] text-xs">{new Date(item.createdAt).toLocaleString()}</span>
                 </div>
-                <div className="text-gray-300 text-sm mb-1 truncate">{truncate(item.userMessage, 60)}</div>
-                <div className="text-gray-500 text-xs mb-2 truncate">{truncate(item.aiMessage, 60)}</div>
-                <div className="flex gap-3 text-xs text-gray-400">
+                <div className="text-[var(--text-secondary)] text-sm mb-1 truncate">{truncate(item.userMessage, 60)}</div>
+                <div className="text-[var(--text-faint)] text-xs mb-2 truncate">{truncate(item.aiMessage, 60)}</div>
+                <div className="flex gap-3 text-xs text-[var(--text-muted)]">
                   <span>{shortModelName(item.model)}</span>
                   <span>{formatDuration(item.durationMs)}</span>
                   <span className="font-mono">{hasUsageData(item) ? formatTokens(totalTokens(item)) : '-'}</span>
@@ -289,22 +289,22 @@ export function ConversationsPage() {
 
                 {/* モバイル展開 */}
                 {expandedRow === item.messageId && (
-                  <div className="mt-4 space-y-3 border-t border-gray-700 pt-3">
+                  <div className="mt-4 space-y-3 border-t border-[var(--border-color)] pt-3">
                     <FileList files={item.inputFiles} label="Input Files" onImageClick={setLightboxUrl} />
                     <div>
-                      <div className="text-gray-500 text-xs mb-1">User Message</div>
-                      <div className="text-white text-sm whitespace-pre-wrap bg-gray-900/60 rounded p-2 max-h-40 overflow-y-auto">
+                      <div className="text-[var(--text-faint)] text-xs mb-1">User Message</div>
+                      <div className="text-[var(--text-primary)] text-sm whitespace-pre-wrap bg-[var(--bg-base)]/60 rounded p-2 max-h-40 overflow-y-auto">
                         {item.userMessage || '(empty)'}
                       </div>
                     </div>
                     <FileList files={item.outputFiles} label="Output Files" onImageClick={setLightboxUrl} />
                     <div>
-                      <div className="text-gray-500 text-xs mb-1">AI Response</div>
-                      <div className="text-gray-300 text-sm whitespace-pre-wrap bg-gray-900/60 rounded p-2 max-h-40 overflow-y-auto">
+                      <div className="text-[var(--text-faint)] text-xs mb-1">AI Response</div>
+                      <div className="text-[var(--text-secondary)] text-sm whitespace-pre-wrap bg-[var(--bg-base)]/60 rounded p-2 max-h-40 overflow-y-auto">
                         {item.aiMessage || '(empty)'}
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--text-muted)]">
                       {hasUsageData(item) ? (
                         <>
                           <span>In: {item.inputTokens.toLocaleString()}</span>
@@ -312,7 +312,7 @@ export function ConversationsPage() {
                           <span>Cache: {item.cacheReadTokens.toLocaleString()}</span>
                         </>
                       ) : (
-                        <span className="text-gray-500">Usage: N/A</span>
+                        <span className="text-[var(--text-faint)]">Usage: N/A</span>
                       )}
                       <span>Agent: {item.machineName}</span>
                     </div>
@@ -325,21 +325,21 @@ export function ConversationsPage() {
           {/* ページネーション */}
           {total > PAGE_SIZE && (
             <div className="flex items-center justify-between mt-4">
-              <div className="text-gray-400 text-sm">
+              <div className="text-[var(--text-muted)] text-sm">
                 {data!.offset + 1} - {Math.min(data!.offset + data!.limit, total)} of {total}
               </div>
               <div className="flex space-x-2">
                 <button
                   onClick={() => setPage(p => p - 1)}
                   disabled={page === 0}
-                  className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-600"
+                  className="px-3 py-1 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[var(--bg-hover)]"
                 >
                   Previous
                 </button>
                 <button
                   onClick={() => setPage(p => p + 1)}
                   disabled={page + 1 >= totalPages}
-                  className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-600"
+                  className="px-3 py-1 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[var(--bg-hover)]"
                 >
                   Next
                 </button>

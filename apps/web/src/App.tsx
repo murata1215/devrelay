@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { Layout } from './components/Layout';
@@ -11,6 +11,36 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ConversationsPage } from './pages/ConversationsPage';
 import { ChatPage } from './pages/ChatPage';
 import { DevReportsPage } from './pages/DevReportsPage';
+
+/**
+ * 認証済みページのコンテンツ
+ * ChatPage は常時マウントし、display:none で表示/非表示を制御する。
+ * これにより画面遷移時にメッセージ state や WebSocket 接続が維持される。
+ */
+function ProtectedContent() {
+  const location = useLocation();
+  const isChatRoute = location.pathname === '/chat';
+
+  return (
+    <Layout>
+      {/* ChatPage: 常時マウント、/chat 以外では非表示 */}
+      <div style={{ display: isChatRoute ? undefined : 'none' }}>
+        <ChatPage />
+      </div>
+      {/* 他のページ: /chat 時は非表示 */}
+      {!isChatRoute && (
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/conversations" element={<ConversationsPage />} />
+          <Route path="/dev-reports" element={<DevReportsPage />} />
+          <Route path="/machines" element={<MachinesPage />} />
+          <Route path="/projects" element={<ProjectsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+        </Routes>
+      )}
+    </Layout>
+  );
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -27,7 +57,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" replace />;
   }
 
-  return <Layout>{children}</Layout>;
+  return <>{children}</>;
 }
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
@@ -67,59 +97,12 @@ function AppRoutes() {
           </PublicRoute>
         }
       />
+      {/* 認証済み: 全 protected routes を ProtectedContent でラップ */}
       <Route
-        path="/"
+        path="/*"
         element={
           <ProtectedRoute>
-            <DashboardPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/chat"
-        element={
-          <ProtectedRoute>
-            <ChatPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/conversations"
-        element={
-          <ProtectedRoute>
-            <ConversationsPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/dev-reports"
-        element={
-          <ProtectedRoute>
-            <DevReportsPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/machines"
-        element={
-          <ProtectedRoute>
-            <MachinesPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/projects"
-        element={
-          <ProtectedRoute>
-            <ProjectsPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/settings"
-        element={
-          <ProtectedRoute>
-            <SettingsPage />
+            <ProtectedContent />
           </ProtectedRoute>
         }
       />

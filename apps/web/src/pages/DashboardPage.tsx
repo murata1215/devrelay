@@ -25,14 +25,14 @@ export function DashboardPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-400">Loading...</div>
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded">
+      <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-4 py-3 rounded">
         {error}
       </div>
     );
@@ -42,56 +42,56 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)]">Dashboard</h1>
 
       {/* Stats cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4 sm:p-6">
-          <div className="text-gray-400 text-xs sm:text-sm">Agents</div>
-          <div className="text-xl sm:text-2xl font-bold text-white">
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-4 sm:p-6">
+          <div className="text-[var(--text-muted)] text-xs sm:text-sm">Agents</div>
+          <div className="text-xl sm:text-2xl font-bold text-[var(--text-primary)]">
             {stats.machines.online}/{stats.machines.total}
           </div>
-          <div className="text-green-400 text-xs sm:text-sm">online</div>
+          <div className="text-[var(--text-success)] text-xs sm:text-sm">online</div>
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-4 sm:p-6">
-          <div className="text-gray-400 text-xs sm:text-sm">Projects</div>
-          <div className="text-xl sm:text-2xl font-bold text-white">{stats.projects}</div>
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-4 sm:p-6">
+          <div className="text-[var(--text-muted)] text-xs sm:text-sm">Projects</div>
+          <div className="text-xl sm:text-2xl font-bold text-[var(--text-primary)]">{stats.projects}</div>
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-4 sm:p-6 col-span-2 sm:col-span-1">
-          <div className="text-gray-400 text-xs sm:text-sm">Sessions</div>
-          <div className="text-xl sm:text-2xl font-bold text-white">{stats.sessions}</div>
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-4 sm:p-6 col-span-2 sm:col-span-1">
+          <div className="text-[var(--text-muted)] text-xs sm:text-sm">Sessions</div>
+          <div className="text-xl sm:text-2xl font-bold text-[var(--text-primary)]">{stats.sessions}</div>
         </div>
       </div>
 
       {/* Recent sessions */}
-      <div className="bg-gray-800 rounded-lg p-4 sm:p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Recent Sessions</h2>
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-4 sm:p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Recent Sessions</h2>
         {stats.recentSessions.length === 0 ? (
-          <p className="text-gray-400">No recent sessions</p>
+          <p className="text-[var(--text-muted)]">No recent sessions</p>
         ) : (
           <div className="space-y-3">
             {stats.recentSessions.map((session) => (
               <div
                 key={session.id}
-                className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2 border-b border-gray-700 last:border-0 gap-1"
+                className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2 border-b border-[var(--border-color)] last:border-0 gap-1"
               >
                 <div>
-                  <div className="text-white font-medium text-sm sm:text-base">{session.projectName}</div>
-                  <div className="text-gray-400 text-xs sm:text-sm">
+                  <div className="text-[var(--text-primary)] font-medium text-sm sm:text-base">{session.projectName}</div>
+                  <div className="text-[var(--text-muted)] text-xs sm:text-sm">
                     {session.machineDisplayName ?? session.machineName} - {session.aiTool}
                   </div>
                 </div>
                 <div className="sm:text-right flex sm:flex-col items-center sm:items-end gap-2 sm:gap-0">
                   <div
                     className={`text-xs sm:text-sm ${
-                      session.status === 'active' ? 'text-green-400' : 'text-gray-400'
+                      session.status === 'active' ? 'text-[var(--text-success)]' : 'text-[var(--text-muted)]'
                     }`}
                   >
                     {session.status}
                   </div>
-                  <div className="text-gray-500 text-xs">
+                  <div className="text-[var(--text-faint)] text-xs">
                     {new Date(session.startedAt).toLocaleString()}
                   </div>
                 </div>

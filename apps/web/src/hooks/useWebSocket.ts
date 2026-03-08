@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getToken } from '../lib/api';
 
-/** サーバー → ブラウザ WebSocket メッセージ型 */
+/** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用） */
 type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }> } }
-  | { type: 'web:progress'; payload: { output: string; elapsed: number } }
+  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
+  | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };
@@ -24,11 +24,11 @@ export interface ProgressInfo {
   elapsed: number;
 }
 
-/** コールバック設定 */
+/** コールバック設定（projectId: 対象タブ特定用、省略時はアクティブタブ） */
 export interface WebSocketCallbacks {
-  onMessage?: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
-  onProgress?: (info: ProgressInfo) => void;
-  onProgressClear?: () => void;
+  onMessage?: (msg: Omit<ChatMessage, 'id' | 'timestamp'>, projectId?: string) => void;
+  onProgress?: (info: ProgressInfo, projectId?: string) => void;
+  onProgressClear?: (projectId?: string) => void;
   onSessionInfo?: (projectId: string, sessionId: string) => void;
 }
 
@@ -79,6 +79,18 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
     const tabId = getTabId();
     const url = buildWsUrl(tabId);
 
+    // 既存の WS があればクリーンアップ（stale close イベント防止）
+    if (wsRef.current) {
+      const oldWs = wsRef.current;
+      oldWs.onclose = null;
+      oldWs.onmessage = null;
+      oldWs.onerror = null;
+      if (oldWs.readyState === WebSocket.OPEN || oldWs.readyState === WebSocket.CONNECTING) {
+        oldWs.close();
+      }
+      wsRef.current = null;
+    }
+
     try {
       const ws = new WebSocket(url);
       wsRef.current = ws;
@@ -103,13 +115,13 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
           const cb = callbacksRef.current;
           switch (msg.type) {
             case 'web:response':
-              cb?.onProgressClear?.();
+              cb?.onProgressClear?.(msg.payload.projectId);
               if (msg.payload.message) {
-                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files });
+                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files }, msg.payload.projectId);
               }
               break;
             case 'web:progress':
-              cb?.onProgress?.({ output: msg.payload.output, elapsed: msg.payload.elapsed });
+              cb?.onProgress?.({ output: msg.payload.output, elapsed: msg.payload.elapsed }, msg.payload.projectId);
               break;
             case 'web:session_info':
               cb?.onSessionInfo?.(msg.payload.projectId, msg.payload.sessionId);
@@ -127,6 +139,8 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
 
       ws.onclose = () => {
         if (!mountedRef.current) return;
+        // 古い WS の close イベントは無視（新しい WS が既に接続済み）
+        if (wsRef.current !== ws) return;
         setConnected(false);
         if (pingTimerRef.current) {
           clearInterval(pingTimerRef.current);

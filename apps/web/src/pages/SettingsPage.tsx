@@ -128,10 +128,13 @@ export function SettingsPage() {
     return { userName: fallbackName, userColor: DEFAULT_USER_COLOR, aiName: 'DevRelay', aiColor: DEFAULT_AI_COLOR };
   });
 
-  /** チャット表示設定を保存 */
+  /** チャット表示設定を保存（localStorage + サーバー） */
   const saveChatDisplay = (updated: ChatDisplaySettings) => {
     setChatDisplay(updated);
-    localStorage.setItem(CHAT_DISPLAY_KEY, JSON.stringify(updated));
+    const json = JSON.stringify(updated);
+    localStorage.setItem(CHAT_DISPLAY_KEY, json);
+    // サーバーにも非同期で保存（fire-and-forget）
+    settings.saveChatDisplay(json).catch(() => { /* ignore */ });
   };
 
   /** チャット表示設定をデフォルトにリセット */
@@ -168,6 +171,22 @@ export function SettingsPage() {
         allowedTools.get().catch(() => null),
       ]);
       setData(settingsResult);
+      // サーバーにチャット表示設定があれば localStorage を上書きして反映
+      if (settingsResult['chat_display']) {
+        try {
+          const serverDisplay = JSON.parse(settingsResult['chat_display']);
+          const merged: ChatDisplaySettings = {
+            userName: serverDisplay.userName || fallbackName,
+            userColor: serverDisplay.userColor || DEFAULT_USER_COLOR,
+            userAvatar: serverDisplay.userAvatar || undefined,
+            aiName: serverDisplay.aiName || 'DevRelay',
+            aiColor: serverDisplay.aiColor || DEFAULT_AI_COLOR,
+            aiAvatar: serverDisplay.aiAvatar || undefined,
+          };
+          setChatDisplay(merged);
+          localStorage.setItem(CHAT_DISPLAY_KEY, JSON.stringify(merged));
+        } catch { /* ignore parse error */ }
+      }
       setLinkedPlatforms(platformsResult);
       setServiceStatus(serviceStatusResult);
       if (agreementResult) {
@@ -229,6 +248,32 @@ export function SettingsPage() {
       }, 2000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to restart agent');
+      setRestartingAgent(false);
+    }
+  };
+
+  /** サーバーとエージェントを両方再起動 */
+  const handleRestartBoth = async () => {
+    if (!confirm('Are you sure you want to restart both server and agent? All connections will be temporarily lost.')) {
+      return;
+    }
+
+    setRestartingServer(true);
+    setRestartingAgent(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      // Agent を先に再起動（サーバー再起動後は API 不通になるため）
+      await services.restartAgent();
+      await services.restartServer();
+      setSuccess('Both services restart initiated. The page will reload shortly...');
+      setTimeout(() => {
+        window.location.reload();
+      }, 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to restart services');
+      setRestartingServer(false);
       setRestartingAgent(false);
     }
   };
@@ -462,47 +507,47 @@ export function SettingsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-400">Loading...</div>
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-white">Settings</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)]">Settings</h1>
 
       {error && (
-        <div className="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded">
+        <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-4 py-3 rounded">
           {error}
         </div>
       )}
 
       {success && (
-        <div className="bg-green-500/20 border border-green-500 text-green-400 px-4 py-3 rounded">
+        <div className="bg-green-500/20 border border-green-500 text-[var(--text-success)] px-4 py-3 rounded">
           {success}
         </div>
       )}
 
       {/* API Keys Section — 3 社分のキー入力 */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">API Keys</h2>
-        <p className="text-gray-400 text-sm mb-6">
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">API Keys</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-6">
           Configure API keys for AI features. Keys are encrypted and stored securely.
         </p>
 
         <div className="space-y-6">
           {API_KEY_FIELDS.map((field) => (
             <div key={field.key}>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
                 {field.label}
               </label>
-              <p className="text-gray-500 text-xs mb-2">
+              <p className="text-[var(--text-faint)] text-xs mb-2">
                 {field.description}{' '}
                 <a
                   href={field.linkUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-blue-400 hover:text-blue-300"
+                  className="text-[var(--text-link)] hover:opacity-80"
                 >
                   {field.linkText}
                 </a>
@@ -510,7 +555,7 @@ export function SettingsPage() {
 
               {data[field.key] ? (
                 <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
-                  <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
+                  <code className="flex-1 bg-[var(--bg-tertiary)] px-3 py-2 rounded text-[var(--text-secondary)] text-sm break-all">
                     {data[field.key]}
                   </code>
                   <button
@@ -528,12 +573,12 @@ export function SettingsPage() {
                     value={keyInputs[field.key] || ''}
                     onChange={(e) => setKeyInputs((prev) => ({ ...prev, [field.key]: e.target.value }))}
                     placeholder={field.placeholder}
-                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="flex-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
                   />
                   <button
                     onClick={() => handleSaveApiKey(field.key, keyInputs[field.key] || '', field.label)}
                     disabled={saving === field.key || !keyInputs[field.key]}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                    className="px-4 py-2 bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 w-full sm:w-auto"
                   >
                     {saving === field.key ? 'Saving...' : 'Save'}
                   </button>
@@ -545,23 +590,23 @@ export function SettingsPage() {
       </div>
 
       {/* AI Provider Settings Section — 機能ごとのプロバイダー選択 */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">AI Provider Settings</h2>
-        <p className="text-gray-400 text-sm mb-6">
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">AI Provider Settings</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-6">
           Select which AI provider to use for each feature. The corresponding API key must be configured above.
         </p>
 
         <div className="space-y-6">
           {PROVIDER_SELECTS.map((field) => (
             <div key={field.key}>
-              <label className="block text-sm font-medium text-gray-300 mb-1">
+              <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
                 {field.label}
               </label>
-              <p className="text-gray-500 text-xs mb-2">{field.description}</p>
+              <p className="text-[var(--text-faint)] text-xs mb-2">{field.description}</p>
               <select
                 value={data[field.key] || 'none'}
                 onChange={(e) => handleProviderChange(field.key, e.target.value)}
-                className="w-full sm:w-64 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full sm:w-64 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
               >
                 {PROVIDER_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
@@ -575,17 +620,17 @@ export function SettingsPage() {
       </div>
 
       {/* Agreement Template Section */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-2">Agreement Template</h2>
-        <p className="text-gray-400 text-sm mb-2">
-          Customize the DevRelay Agreement rules applied via the <code className="bg-gray-700 px-1 rounded">ag</code> command.
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Agreement Template</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-2">
+          Customize the DevRelay Agreement rules applied via the <code className="bg-[var(--bg-tertiary)] px-1 rounded">ag</code> command.
         </p>
         {agreementData?.isCustom ? (
           <p className="text-yellow-400 text-xs mb-4">
             Using custom template. Click "Reset to Default" to revert.
           </p>
         ) : (
-          <p className="text-gray-500 text-xs mb-4">
+          <p className="text-[var(--text-faint)] text-xs mb-4">
             Using default template. Edit below to customize.
           </p>
         )}
@@ -597,7 +642,7 @@ export function SettingsPage() {
             setAgreementDirty(true);
           }}
           rows={20}
-          className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-gray-300 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+          className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border-color)] rounded text-[var(--text-secondary)] text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] resize-y"
           placeholder="Agreement template..."
         />
 
@@ -605,7 +650,7 @@ export function SettingsPage() {
           <button
             onClick={handleSaveAgreement}
             disabled={agreementSaving || !agreementDirty}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
+            className="px-4 py-2 bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
           >
             {agreementSaving ? 'Saving...' : 'Save Template'}
           </button>
@@ -613,7 +658,7 @@ export function SettingsPage() {
             <button
               onClick={handleResetAgreement}
               disabled={agreementSaving}
-              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+              className="px-4 py-2 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] rounded disabled:opacity-50 w-full sm:w-auto"
             >
               Reset to Default
             </button>
@@ -623,10 +668,10 @@ export function SettingsPage() {
 
       {/* Allowed Tools Section — プランモード許可ツール（Linux / Windows 横並び） */}
       {atData && (
-        <div className="bg-gray-800 rounded-lg p-6">
-          <h2 className="text-lg font-semibold text-white mb-2">Allowed Tools (Plan Mode)</h2>
-          <p className="text-gray-400 text-sm mb-4">
-            Commands allowed in plan mode. One command per line (e.g. <code className="bg-gray-700 px-1 rounded">Bash(pm2 logs)</code>).
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+          <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Allowed Tools (Plan Mode)</h2>
+          <p className="text-[var(--text-muted)] text-sm mb-4">
+            Commands allowed in plan mode. One command per line (e.g. <code className="bg-[var(--bg-tertiary)] px-1 rounded">Bash(pm2 logs)</code>).
             Changes are pushed to online agents in real-time.
           </p>
 
@@ -634,11 +679,11 @@ export function SettingsPage() {
             {/* Linux */}
             <div>
               <div className="flex items-center justify-between mb-2">
-                <label className="text-sm font-medium text-gray-300">Linux</label>
+                <label className="text-sm font-medium text-[var(--text-secondary)]">Linux</label>
                 {atData.linux.tools !== null ? (
                   <span className="text-yellow-400 text-xs">Custom</span>
                 ) : (
-                  <span className="text-gray-500 text-xs">Default</span>
+                  <span className="text-[var(--text-faint)] text-xs">Default</span>
                 )}
               </div>
               <textarea
@@ -648,13 +693,13 @@ export function SettingsPage() {
                   setAtLinuxDirty(true);
                 }}
                 rows={16}
-                className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-gray-300 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border-color)] rounded text-[var(--text-secondary)] text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] resize-y"
               />
               <div className="flex items-center gap-2 mt-2">
                 <button
                   onClick={() => handleSaveAllowedTools('linux')}
                   disabled={atSaving === 'linux' || !atLinuxDirty}
-                  className="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-3 py-1.5 text-sm bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {atSaving === 'linux' ? 'Saving...' : 'Save'}
                 </button>
@@ -662,7 +707,7 @@ export function SettingsPage() {
                   <button
                     onClick={() => handleResetAllowedTools('linux')}
                     disabled={atSaving === 'linux'}
-                    className="px-3 py-1.5 text-sm bg-gray-600 hover:bg-gray-700 text-white rounded disabled:opacity-50"
+                    className="px-3 py-1.5 text-sm bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] rounded disabled:opacity-50"
                   >
                     Reset
                   </button>
@@ -673,11 +718,11 @@ export function SettingsPage() {
             {/* Windows */}
             <div>
               <div className="flex items-center justify-between mb-2">
-                <label className="text-sm font-medium text-gray-300">Windows</label>
+                <label className="text-sm font-medium text-[var(--text-secondary)]">Windows</label>
                 {atData.windows.tools !== null ? (
                   <span className="text-yellow-400 text-xs">Custom</span>
                 ) : (
-                  <span className="text-gray-500 text-xs">Default</span>
+                  <span className="text-[var(--text-faint)] text-xs">Default</span>
                 )}
               </div>
               <textarea
@@ -687,13 +732,13 @@ export function SettingsPage() {
                   setAtWindowsDirty(true);
                 }}
                 rows={16}
-                className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-gray-300 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border-color)] rounded text-[var(--text-secondary)] text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] resize-y"
               />
               <div className="flex items-center gap-2 mt-2">
                 <button
                   onClick={() => handleSaveAllowedTools('windows')}
                   disabled={atSaving === 'windows' || !atWindowsDirty}
-                  className="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-3 py-1.5 text-sm bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {atSaving === 'windows' ? 'Saving...' : 'Save'}
                 </button>
@@ -701,7 +746,7 @@ export function SettingsPage() {
                   <button
                     onClick={() => handleResetAllowedTools('windows')}
                     disabled={atSaving === 'windows'}
-                    className="px-3 py-1.5 text-sm bg-gray-600 hover:bg-gray-700 text-white rounded disabled:opacity-50"
+                    className="px-3 py-1.5 text-sm bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] rounded disabled:opacity-50"
                   >
                     Reset
                   </button>
@@ -713,9 +758,9 @@ export function SettingsPage() {
       )}
 
       {/* Bot Tokens Section */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Bot Tokens</h2>
-        <p className="text-gray-400 text-sm mb-6">
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Bot Tokens</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-6">
           Configure bot tokens for Discord and Telegram.
           <span className="text-yellow-400 ml-1">Server restart required after changes.</span>
         </p>
@@ -723,16 +768,16 @@ export function SettingsPage() {
         <div className="space-y-6">
           {/* Discord Bot Token */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
               Discord Bot Token
             </label>
-            <p className="text-gray-500 text-xs mb-2">
+            <p className="text-[var(--text-faint)] text-xs mb-2">
               Get from{' '}
               <a
                 href="https://discord.com/developers/applications"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-blue-400 hover:text-blue-300"
+                className="text-[var(--text-link)] hover:opacity-80"
               >
                 Discord Developer Portal
               </a>
@@ -740,7 +785,7 @@ export function SettingsPage() {
 
             {data.discord_bot_token ? (
               <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
-                <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
+                <code className="flex-1 bg-[var(--bg-tertiary)] px-3 py-2 rounded text-[var(--text-secondary)] text-sm break-all">
                   {data.discord_bot_token}
                 </code>
                 <button
@@ -758,12 +803,12 @@ export function SettingsPage() {
                   value={discordToken}
                   onChange={(e) => setDiscordToken(e.target.value)}
                   placeholder="Bot token..."
-                  className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="flex-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
                 />
                 <button
                   onClick={() => handleSaveApiKey('discord_bot_token', discordToken, 'Discord Bot Token')}
                   disabled={saving === 'discord_bot_token' || !discordToken}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                  className="px-4 py-2 bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 w-full sm:w-auto"
                 >
                   {saving === 'discord_bot_token' ? 'Saving...' : 'Save'}
                 </button>
@@ -773,16 +818,16 @@ export function SettingsPage() {
 
           {/* Telegram Bot Token */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
               Telegram Bot Token
             </label>
-            <p className="text-gray-500 text-xs mb-2">
+            <p className="text-[var(--text-faint)] text-xs mb-2">
               Get from{' '}
               <a
                 href="https://t.me/BotFather"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-blue-400 hover:text-blue-300"
+                className="text-[var(--text-link)] hover:opacity-80"
               >
                 @BotFather
               </a>
@@ -791,7 +836,7 @@ export function SettingsPage() {
 
             {data.telegram_bot_token ? (
               <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
-                <code className="flex-1 bg-gray-700 px-3 py-2 rounded text-gray-300 text-sm break-all">
+                <code className="flex-1 bg-[var(--bg-tertiary)] px-3 py-2 rounded text-[var(--text-secondary)] text-sm break-all">
                   {data.telegram_bot_token}
                 </code>
                 <button
@@ -809,12 +854,12 @@ export function SettingsPage() {
                   value={telegramToken}
                   onChange={(e) => setTelegramToken(e.target.value)}
                   placeholder="123456789:ABC..."
-                  className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="flex-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
                 />
                 <button
                   onClick={() => handleSaveApiKey('telegram_bot_token', telegramToken, 'Telegram Bot Token')}
                   disabled={saving === 'telegram_bot_token' || !telegramToken}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 w-full sm:w-auto"
+                  className="px-4 py-2 bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 w-full sm:w-auto"
                 >
                   {saving === 'telegram_bot_token' ? 'Saving...' : 'Save'}
                 </button>
@@ -825,19 +870,19 @@ export function SettingsPage() {
       </div>
 
       {/* Connected Platforms Section */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Connected Platforms</h2>
-        <p className="text-gray-400 text-sm mb-6">
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Connected Platforms</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-6">
           Link your Discord or Telegram account to control your machines from those platforms.
         </p>
 
         {/* Link Code Input */}
         <div className="mb-6">
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
             Enter Link Code
           </label>
-          <p className="text-gray-500 text-xs mb-2">
-            Send <code className="bg-gray-700 px-1 rounded">link</code> to the DevRelay bot on Discord or Telegram to get a code.
+          <p className="text-[var(--text-faint)] text-xs mb-2">
+            Send <code className="bg-[var(--bg-tertiary)] px-1 rounded">link</code> to the DevRelay bot on Discord or Telegram to get a code.
           </p>
           <form onSubmit={handleLinkPlatform} className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
             <input
@@ -846,12 +891,12 @@ export function SettingsPage() {
               onChange={(e) => setLinkCode(e.target.value.toUpperCase())}
               placeholder="ABC123"
               maxLength={6}
-              className="w-full sm:w-32 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-center text-lg font-mono tracking-widest placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full sm:w-32 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] text-center text-lg font-mono tracking-widest placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
             />
             <button
               type="submit"
               disabled={linking || linkCode.length !== 6}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
+              className="px-4 py-2 bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
             >
               {linking ? 'Linking...' : 'Link'}
             </button>
@@ -861,25 +906,25 @@ export function SettingsPage() {
         {/* Linked Platforms List */}
         {linkedPlatforms.length > 0 && (
           <div>
-            <div className="text-sm font-medium text-gray-300 mb-3">Linked Accounts</div>
+            <div className="text-sm font-medium text-[var(--text-secondary)] mb-3">Linked Accounts</div>
             <div className="space-y-2">
               {linkedPlatforms.map((platform) => (
                 <div
                   key={platform.platform}
-                  className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-gray-700 px-4 py-3 rounded gap-2"
+                  className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-[var(--bg-tertiary)] px-4 py-3 rounded gap-2"
                 >
                   <div className="flex items-center space-x-3">
                     <span className="text-xl">{getPlatformIcon(platform.platform)}</span>
                     <div>
-                      <div className="text-white font-medium">
+                      <div className="text-[var(--text-primary)] font-medium">
                         {getPlatformDisplayName(platform.platform)}
                         {platform.platformName && (
-                          <span className="text-gray-400 font-normal ml-2">
+                          <span className="text-[var(--text-muted)] font-normal ml-2">
                             {platform.platformName}
                           </span>
                         )}
                       </div>
-                      <div className="text-gray-500 text-xs">
+                      <div className="text-[var(--text-faint)] text-xs">
                         Linked {new Date(platform.linkedAt).toLocaleDateString()}
                       </div>
                     </div>
@@ -887,7 +932,7 @@ export function SettingsPage() {
                   <button
                     onClick={() => handleUnlinkPlatform(platform.platform)}
                     disabled={unlinking === platform.platform}
-                    className="px-3 py-1 text-sm bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded disabled:opacity-50 w-full sm:w-auto"
+                    className="px-3 py-1 text-sm bg-red-600/20 hover:bg-red-600/40 text-[var(--text-danger)] rounded disabled:opacity-50 w-full sm:w-auto"
                   >
                     {unlinking === platform.platform ? 'Unlinking...' : 'Unlink'}
                   </button>
@@ -898,29 +943,29 @@ export function SettingsPage() {
         )}
 
         {linkedPlatforms.length === 0 && (
-          <div className="text-gray-500 text-sm border border-dashed border-gray-600 rounded p-4 text-center">
-            No platforms linked yet. Send <code className="bg-gray-700 px-1 rounded">link</code> to the bot to get started.
+          <div className="text-[var(--text-faint)] text-sm border border-dashed border-[var(--border-color)] rounded p-4 text-center">
+            No platforms linked yet. Send <code className="bg-[var(--bg-tertiary)] px-1 rounded">link</code> to the bot to get started.
           </div>
         )}
       </div>
 
       {/* Service Management Section */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Service Management</h2>
-        <p className="text-gray-400 text-sm mb-6">
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Service Management</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-6">
           Restart DevRelay services. Use with caution.
         </p>
 
         <div className="space-y-4">
           {/* Server */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-gray-700 px-4 py-3 rounded gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-[var(--bg-tertiary)] px-4 py-3 rounded gap-2">
             <div className="flex items-center space-x-3">
               <span className="text-xl">🖥️</span>
               <div>
-                <div className="text-white font-medium">DevRelay Server</div>
-                <div className="text-gray-500 text-xs">
+                <div className="text-[var(--text-primary)] font-medium">DevRelay Server</div>
+                <div className="text-[var(--text-faint)] text-xs">
                   Status:{' '}
-                  <span className={serviceStatus?.server === 'active' ? 'text-green-400' : 'text-red-400'}>
+                  <span className={serviceStatus?.server === 'active' ? 'text-[var(--text-success)]' : 'text-[var(--text-danger)]'}>
                     {serviceStatus?.server || 'unknown'}
                   </span>
                 </div>
@@ -936,14 +981,14 @@ export function SettingsPage() {
           </div>
 
           {/* Agent */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-gray-700 px-4 py-3 rounded gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-[var(--bg-tertiary)] px-4 py-3 rounded gap-2">
             <div className="flex items-center space-x-3">
               <span className="text-xl">🤖</span>
               <div>
-                <div className="text-white font-medium">DevRelay Agent (Local)</div>
-                <div className="text-gray-500 text-xs">
+                <div className="text-[var(--text-primary)] font-medium">DevRelay Agent (Local)</div>
+                <div className="text-[var(--text-faint)] text-xs">
                   Status:{' '}
-                  <span className={serviceStatus?.agent === 'active' ? 'text-green-400' : 'text-red-400'}>
+                  <span className={serviceStatus?.agent === 'active' ? 'text-[var(--text-success)]' : 'text-[var(--text-danger)]'}>
                     {serviceStatus?.agent || 'unknown'}
                   </span>
                 </div>
@@ -957,41 +1002,50 @@ export function SettingsPage() {
               {restartingAgent ? 'Restarting...' : 'Restart'}
             </button>
           </div>
+
+          {/* Restart Both */}
+          <button
+            onClick={handleRestartBoth}
+            disabled={restartingServer || restartingAgent}
+            className="w-full px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {restartingServer || restartingAgent ? 'Restarting...' : 'Restart Both'}
+          </button>
         </div>
 
-        <p className="text-gray-500 text-xs mt-4">
+        <p className="text-[var(--text-faint)] text-xs mt-4">
           Note: Restarting the server will temporarily disconnect all agents. They will automatically reconnect.
         </p>
       </div>
 
       {/* Chat Display Section */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Chat Display</h2>
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Chat Display</h2>
 
         {/* ユーザー設定 */}
-        <h3 className="text-sm font-semibold text-gray-300 mb-3">You</h3>
+        <h3 className="text-sm font-semibold text-[var(--text-secondary)] mb-3">You</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
           {/* ユーザー表示名 */}
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Display Name</label>
+            <label className="block text-sm text-[var(--text-muted)] mb-1">Display Name</label>
             <input
               type="text"
               value={chatDisplay.userName}
               onChange={e => saveChatDisplay({ ...chatDisplay, userName: e.target.value })}
               placeholder={fallbackName}
-              className="w-full bg-gray-700 text-white rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full bg-[var(--input-bg)] text-[var(--text-primary)] rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
             />
           </div>
 
           {/* ユーザーカラー */}
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Name Color</label>
+            <label className="block text-sm text-[var(--text-muted)] mb-1">Name Color</label>
             <div className="flex items-center gap-2">
               <input
                 type="color"
                 value={chatDisplay.userColor}
                 onChange={e => saveChatDisplay({ ...chatDisplay, userColor: e.target.value })}
-                className="w-10 h-10 rounded cursor-pointer border border-gray-600 bg-transparent"
+                className="w-10 h-10 rounded cursor-pointer border border-[var(--border-color)] bg-transparent"
               />
               <span className="text-sm font-semibold" style={{ color: chatDisplay.userColor }}>
                 {chatDisplay.userName || fallbackName}
@@ -1001,7 +1055,7 @@ export function SettingsPage() {
 
           {/* ユーザーアバター */}
           <div className="sm:col-span-2">
-            <label className="block text-sm text-gray-400 mb-1">Avatar</label>
+            <label className="block text-sm text-[var(--text-muted)] mb-1">Avatar</label>
             <div className="flex items-center gap-3">
               {chatDisplay.userAvatar ? (
                 <img src={chatDisplay.userAvatar} alt="avatar" className="w-10 h-10 rounded-full object-cover" />
@@ -1031,14 +1085,14 @@ export function SettingsPage() {
               />
               <button
                 onClick={() => document.getElementById('user-avatar-input')?.click()}
-                className="px-3 py-1.5 text-sm bg-gray-700 text-gray-300 hover:text-white rounded hover:bg-gray-600 transition-colors"
+                className="px-3 py-1.5 text-sm bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded hover:bg-[var(--bg-hover)] transition-colors"
               >
                 Upload
               </button>
               {chatDisplay.userAvatar && (
                 <button
                   onClick={() => saveChatDisplay({ ...chatDisplay, userAvatar: undefined })}
-                  className="px-3 py-1.5 text-sm text-red-400 hover:text-red-300 border border-red-400/30 hover:border-red-400/50 rounded transition-colors"
+                  className="px-3 py-1.5 text-sm text-[var(--text-danger)] hover:opacity-80 border border-red-400/30 hover:border-red-400/50 rounded transition-colors"
                 >
                   Remove
                 </button>
@@ -1048,29 +1102,29 @@ export function SettingsPage() {
         </div>
 
         {/* AI 設定 */}
-        <h3 className="text-sm font-semibold text-gray-300 mb-3">AI</h3>
+        <h3 className="text-sm font-semibold text-[var(--text-secondary)] mb-3">AI</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
           {/* AI 表示名 */}
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Display Name</label>
+            <label className="block text-sm text-[var(--text-muted)] mb-1">Display Name</label>
             <input
               type="text"
               value={chatDisplay.aiName}
               onChange={e => saveChatDisplay({ ...chatDisplay, aiName: e.target.value })}
               placeholder="DevRelay"
-              className="w-full bg-gray-700 text-white rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full bg-[var(--input-bg)] text-[var(--text-primary)] rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
             />
           </div>
 
           {/* AI カラー */}
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Name Color</label>
+            <label className="block text-sm text-[var(--text-muted)] mb-1">Name Color</label>
             <div className="flex items-center gap-2">
               <input
                 type="color"
                 value={chatDisplay.aiColor}
                 onChange={e => saveChatDisplay({ ...chatDisplay, aiColor: e.target.value })}
-                className="w-10 h-10 rounded cursor-pointer border border-gray-600 bg-transparent"
+                className="w-10 h-10 rounded cursor-pointer border border-[var(--border-color)] bg-transparent"
               />
               <span className="text-sm font-semibold" style={{ color: chatDisplay.aiColor }}>
                 {chatDisplay.aiName || 'DevRelay'}
@@ -1080,7 +1134,7 @@ export function SettingsPage() {
 
           {/* AI アバター */}
           <div className="sm:col-span-2">
-            <label className="block text-sm text-gray-400 mb-1">Avatar</label>
+            <label className="block text-sm text-[var(--text-muted)] mb-1">Avatar</label>
             <div className="flex items-center gap-3">
               {chatDisplay.aiAvatar ? (
                 <img src={chatDisplay.aiAvatar} alt="avatar" className="w-10 h-10 rounded-full object-cover" />
@@ -1110,14 +1164,14 @@ export function SettingsPage() {
               />
               <button
                 onClick={() => document.getElementById('ai-avatar-input')?.click()}
-                className="px-3 py-1.5 text-sm bg-gray-700 text-gray-300 hover:text-white rounded hover:bg-gray-600 transition-colors"
+                className="px-3 py-1.5 text-sm bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded hover:bg-[var(--bg-hover)] transition-colors"
               >
                 Upload
               </button>
               {chatDisplay.aiAvatar && (
                 <button
                   onClick={() => saveChatDisplay({ ...chatDisplay, aiAvatar: undefined })}
-                  className="px-3 py-1.5 text-sm text-red-400 hover:text-red-300 border border-red-400/30 hover:border-red-400/50 rounded transition-colors"
+                  className="px-3 py-1.5 text-sm text-[var(--text-danger)] hover:opacity-80 border border-red-400/30 hover:border-red-400/50 rounded transition-colors"
                 >
                   Remove
                 </button>
@@ -1127,8 +1181,8 @@ export function SettingsPage() {
         </div>
 
         {/* プレビュー */}
-        <div className="mt-4 bg-gray-900 rounded-lg p-3">
-          <p className="text-xs text-gray-500 mb-2">Preview</p>
+        <div className="mt-4 bg-[var(--bg-base)] rounded-lg p-3">
+          <p className="text-xs text-[var(--text-faint)] mb-2">Preview</p>
           <div className="flex gap-3 py-1">
             {chatDisplay.userAvatar ? (
               <img src={chatDisplay.userAvatar} alt="avatar" className="w-8 h-8 rounded-full object-cover shrink-0" />
@@ -1145,9 +1199,9 @@ export function SettingsPage() {
                 <span className="font-semibold text-sm" style={{ color: chatDisplay.userColor }}>
                   {chatDisplay.userName || fallbackName}
                 </span>
-                <span className="text-xs text-gray-600">14:30</span>
+                <span className="text-xs text-[var(--text-faint)]">14:30</span>
               </div>
-              <p className="text-sm text-gray-300">Hello!</p>
+              <p className="text-sm text-[var(--text-secondary)]">Hello!</p>
             </div>
           </div>
           <div className="flex gap-3 py-1">
@@ -1166,9 +1220,9 @@ export function SettingsPage() {
                 <span className="font-semibold text-sm" style={{ color: chatDisplay.aiColor }}>
                   {chatDisplay.aiName || 'DevRelay'}
                 </span>
-                <span className="text-xs text-gray-600">14:31</span>
+                <span className="text-xs text-[var(--text-faint)]">14:31</span>
               </div>
-              <p className="text-sm text-gray-300">How can I help you?</p>
+              <p className="text-sm text-[var(--text-secondary)]">How can I help you?</p>
             </div>
           </div>
         </div>
@@ -1177,7 +1231,7 @@ export function SettingsPage() {
         <div className="mt-4 flex justify-end">
           <button
             onClick={resetChatDisplay}
-            className="px-3 py-1.5 text-sm text-gray-400 hover:text-white border border-gray-600 hover:border-gray-500 rounded transition-colors"
+            className="px-3 py-1.5 text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] border border-[var(--border-color)] hover:border-[var(--text-faint)] rounded transition-colors"
           >
             Reset to defaults
           </button>

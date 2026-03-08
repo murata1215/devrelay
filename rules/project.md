@@ -664,6 +664,22 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - **履歴（API 取得）**: メタデータのみ（`id`, `filename`, `mimeType`）→ `/api/files/:id` で表示
 - `ChatMessage.files` の型で `id?` / `content?` を両方オプショナルにして統一
 
+### ChatPage 常時マウント
+- 画面遷移時に ChatPage をアンマウントすると WebSocket 接続やメッセージ state が失われる
+- `ProtectedContent` コンポーネントで ChatPage を常時マウントし、`display:none` で表示/非表示を制御
+- `/chat` 以外のページでは ChatPage は DOM に存在するが非表示
+
+### チャット履歴のクロスセッション取得
+- セッション単位（`GET /api/sessions/:id/messages`）だと、サーバー再起動で新セッション作成後に旧メッセージに遡れない
+- プロジェクト単位（`GET /api/projects/:projectId/messages`）で全セッション横断取得に変更
+- `loadHistory()` / `loadOlderMessages()` は `projectId` ベースで API を呼ぶ
+- コンテナが非スクロール（メッセージ少）な場合は `useEffect` で自動追加読み込み
+
+### ピン止めタブのサーバー永続化
+- `UserSettings.PINNED_TABS` キーでサーバーに保存
+- 復元時: サーバー → localStorage フォールバック
+- 異なるデバイスからアクセスしてもタブ状態が同期される
+
 ---
 
 ## 今後の課題

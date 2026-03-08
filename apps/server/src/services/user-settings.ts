@@ -31,6 +31,10 @@ export const SettingKeys = {
   ALLOWED_TOOLS_LINUX: 'allowedTools:linux',
   /** プランモード許可ツール（Windows 用、JSON 文字列） */
   ALLOWED_TOOLS_WINDOWS: 'allowedTools:windows',
+  /** チャット表示設定（アバター・表示名・色、JSON 文字列） */
+  CHAT_DISPLAY: 'chat_display',
+  /** ピン止めタブ（projectId 配列、JSON 文字列） */
+  PINNED_TABS: 'pinned_tabs',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

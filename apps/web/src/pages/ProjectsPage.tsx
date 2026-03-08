@@ -47,36 +47,36 @@ function HistoryModal({ project, onClose }: HistoryModalProps) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6 max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold text-white">History Export</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white">
+          <h2 className="text-xl font-bold text-[var(--text-primary)]">History Export</h2>
+          <button onClick={onClose} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]">
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        <div className="text-gray-400 text-sm mb-4">{project.name}</div>
+        <div className="text-[var(--text-muted)] text-sm mb-4">{project.name}</div>
 
         {loading ? (
-          <div className="text-center py-8 text-gray-400">Loading...</div>
+          <div className="text-center py-8 text-[var(--text-muted)]">Loading...</div>
         ) : error ? (
-          <div className="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded">
+          <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-4 py-3 rounded">
             {error}
           </div>
         ) : dates.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">No history available</div>
+          <div className="text-center py-8 text-[var(--text-muted)]">No history available</div>
         ) : (
           <div className="space-y-2">
             {dates.map((date) => (
               <button
                 key={date}
                 onClick={() => handleDownload(date)}
-                className="w-full flex items-center justify-between px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                className="w-full flex items-center justify-between px-4 py-3 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
               >
-                <span className="text-white">{date}</span>
-                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <span className="text-[var(--text-primary)]">{date}</span>
+                <svg className="w-5 h-5 text-[var(--text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                 </svg>
               </button>
@@ -118,26 +118,26 @@ function BuildHistoryModal({ project, onClose }: BuildHistoryModalProps) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-gray-800 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold text-white">Build History</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white">
+          <h2 className="text-xl font-bold text-[var(--text-primary)]">Build History</h2>
+          <button onClick={onClose} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]">
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        <div className="text-gray-400 text-sm mb-4">{project.name}</div>
+        <div className="text-[var(--text-muted)] text-sm mb-4">{project.name}</div>
 
         {loading ? (
-          <div className="text-center py-8 text-gray-400">Loading...</div>
+          <div className="text-center py-8 text-[var(--text-muted)]">Loading...</div>
         ) : error ? (
-          <div className="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded">
+          <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-4 py-3 rounded">
             {error}
           </div>
         ) : builds.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">No builds yet</div>
+          <div className="text-center py-8 text-[var(--text-muted)]">No builds yet</div>
         ) : (
           <div className="space-y-2">
             {builds.map((build) => {
@@ -146,22 +146,22 @@ function BuildHistoryModal({ project, onClose }: BuildHistoryModalProps) {
                 <button
                   key={build.buildNumber}
                   onClick={() => setExpandedBuild(isExpanded ? null : build.buildNumber)}
-                  className="w-full text-left px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                  className="w-full text-left px-4 py-3 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
                 >
                   {/* ヘッダー行: ビルド番号、日付、マシン名 */}
                   <div className="flex items-center gap-3 text-sm">
-                    <span className="text-blue-400 font-mono font-medium">#{build.buildNumber}</span>
-                    <span className="text-gray-400">{new Date(build.createdAt).toLocaleString()}</span>
-                    <span className="text-gray-500">{build.machineName}</span>
+                    <span className="text-[var(--text-link)] font-mono font-medium">#{build.buildNumber}</span>
+                    <span className="text-[var(--text-muted)]">{new Date(build.createdAt).toLocaleString()}</span>
+                    <span className="text-[var(--text-faint)]">{build.machineName}</span>
                   </div>
                   {/* サマリー: 展開時は全文、折りたたみ時は先頭80文字 */}
-                  <div className={`mt-1 text-gray-300 text-sm ${isExpanded ? 'whitespace-pre-wrap' : 'truncate'}`}>
+                  <div className={`mt-1 text-[var(--text-secondary)] text-sm ${isExpanded ? 'whitespace-pre-wrap' : 'truncate'}`}>
                     {isExpanded ? build.summary : truncateSummary(build.summary, 80)}
                   </div>
                   {/* プロンプト: 展開時のみ表示 */}
                   {isExpanded && build.prompt && (
-                    <div className="mt-2 text-xs text-gray-500 border-t border-gray-600 pt-2">
-                      <span className="text-gray-500 font-medium">Prompt:</span> {build.prompt}
+                    <div className="mt-2 text-xs text-[var(--text-faint)] border-t border-[var(--border-color)] pt-2">
+                      <span className="text-[var(--text-faint)] font-medium">Prompt:</span> {build.prompt}
                     </div>
                   )}
                 </button>
@@ -208,14 +208,14 @@ export function ProjectsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-400">Loading...</div>
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded">
+      <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-4 py-3 rounded">
         {error}
       </div>
     );
@@ -223,43 +223,43 @@ export function ProjectsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-white">Projects</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)]">Projects</h1>
 
       {data.length === 0 ? (
-        <div className="bg-gray-800 rounded-lg p-6 text-center">
-          <p className="text-gray-400">No projects found.</p>
-          <p className="text-gray-500 text-sm mt-2">
-            Projects are automatically detected when they contain a <code className="bg-gray-700 px-2 py-1 rounded">CLAUDE.md</code> file.
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-6 text-center">
+          <p className="text-[var(--text-muted)]">No projects found.</p>
+          <p className="text-[var(--text-faint)] text-sm mt-2">
+            Projects are automatically detected when they contain a <code className="bg-[var(--bg-tertiary)] px-2 py-1 rounded">CLAUDE.md</code> file.
           </p>
         </div>
       ) : (
         <>
           {/* デスクトップ テーブルビュー */}
-          <div className="hidden md:block bg-gray-800 rounded-lg overflow-hidden">
-            <table className="min-w-full divide-y divide-gray-700">
-              <thead className="bg-gray-700/50">
+          <div className="hidden md:block bg-[var(--bg-secondary)] rounded-lg overflow-hidden">
+            <table className="min-w-full divide-y divide-[var(--border-color)]">
+              <thead className="bg-[var(--bg-tertiary)]/50">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Project
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Machine
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Path
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Latest Build
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-700">
+              <tbody className="divide-y divide-[var(--border-color)]">
                 {data.map((project) => (
                   <tr key={project.id}>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <button
                         onClick={() => setSelectedProject(project)}
-                        className="text-blue-400 hover:text-blue-300 font-medium hover:underline"
+                        className="text-[var(--text-link)] hover:opacity-80 font-medium hover:underline"
                         title="Click to export history"
                       >
                         {project.name}
@@ -273,27 +273,27 @@ export function ProjectsPage() {
                               project.machine.online ? 'bg-green-400' : 'bg-gray-400'
                             }`}
                           />
-                          <span className="text-gray-300">{project.machine.displayName ?? project.machine.name}</span>
+                          <span className="text-[var(--text-secondary)]">{project.machine.displayName ?? project.machine.name}</span>
                         </div>
                       )}
                     </td>
                     <td className="px-6 py-4">
-                      <code className="text-gray-400 text-sm">{project.path}</code>
+                      <code className="text-[var(--text-muted)] text-sm">{project.path}</code>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm">
                       {project.latestBuild ? (
                         <button
                           onClick={() => setBuildProject(project)}
-                          className="text-blue-400 hover:text-blue-300 hover:underline text-left"
+                          className="text-[var(--text-link)] hover:opacity-80 hover:underline text-left"
                           title="Click to view build history"
                         >
                           <span>{formatShortDate(project.latestBuild.createdAt)}</span>
-                          <span className="text-gray-400 ml-2">
+                          <span className="text-[var(--text-muted)] ml-2">
                             {truncateSummary(project.latestBuild.summary, 40)}
                           </span>
                         </button>
                       ) : (
-                        <span className="text-gray-500">-</span>
+                        <span className="text-[var(--text-faint)]">-</span>
                       )}
                     </td>
                   </tr>
@@ -305,11 +305,11 @@ export function ProjectsPage() {
           {/* モバイル カードビュー */}
           <div className="md:hidden space-y-4">
             {data.map((project) => (
-              <div key={project.id} className="bg-gray-800 rounded-lg p-4">
+              <div key={project.id} className="bg-[var(--bg-secondary)] rounded-lg p-4">
                 <div className="flex items-center justify-between mb-2">
                   <button
                     onClick={() => setSelectedProject(project)}
-                    className="text-blue-400 hover:text-blue-300 font-medium hover:underline"
+                    className="text-[var(--text-link)] hover:opacity-80 font-medium hover:underline"
                     title="Click to export history"
                   >
                     {project.name}
@@ -321,24 +321,24 @@ export function ProjectsPage() {
                           project.machine.online ? 'bg-green-400' : 'bg-gray-400'
                         }`}
                       />
-                      <span className="text-gray-300 text-sm">{project.machine.displayName ?? project.machine.name}</span>
+                      <span className="text-[var(--text-secondary)] text-sm">{project.machine.displayName ?? project.machine.name}</span>
                     </div>
                   )}
                 </div>
-                <code className="text-gray-400 text-xs break-all">{project.path}</code>
+                <code className="text-[var(--text-muted)] text-xs break-all">{project.path}</code>
                 {/* モバイル: 最新ビルド情報 */}
                 {project.latestBuild ? (
                   <button
                     onClick={() => setBuildProject(project)}
-                    className="block mt-2 text-left text-sm text-blue-400 hover:text-blue-300 hover:underline"
+                    className="block mt-2 text-left text-sm text-[var(--text-link)] hover:opacity-80 hover:underline"
                     title="Click to view build history"
                   >
-                    <span className="text-gray-500">Build:</span>{' '}
+                    <span className="text-[var(--text-faint)]">Build:</span>{' '}
                     <span>{formatShortDate(project.latestBuild.createdAt)}</span>{' '}
-                    <span className="text-gray-400">{truncateSummary(project.latestBuild.summary, 30)}</span>
+                    <span className="text-[var(--text-muted)]">{truncateSummary(project.latestBuild.summary, 30)}</span>
                   </button>
                 ) : (
-                  <div className="text-gray-500 text-xs mt-2">No builds</div>
+                  <div className="text-[var(--text-faint)] text-xs mt-2">No builds</div>
                 )}
               </div>
             ))}

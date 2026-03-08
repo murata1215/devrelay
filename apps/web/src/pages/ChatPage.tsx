@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo } from '../hooks/useWebSocket';
-import { machines as machinesApi, sessions as sessionsApi, getToken, type Machine } from '../lib/api';
+import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, getToken, type Machine } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
 /** 添付ファイル型 */
@@ -22,6 +22,9 @@ interface Tab {
   historyLoaded: boolean;
   hasMoreHistory: boolean;
   loadingHistory: boolean;
+  pinned: boolean;
+  /** Claude の処理が完了した状態 */
+  completed: boolean;
 }
 
 /** File → base64 FileAttachment 変換 */
@@ -82,6 +85,27 @@ function renderContent(content: string) {
       </span>
     );
   });
+}
+
+// ---------------------------------------------------------------------------
+// ピン止めタブの永続化（localStorage 管理）
+// ---------------------------------------------------------------------------
+
+const PINNED_TABS_KEY = 'devrelay-pinned-tabs';
+
+/** ピン止め中のタブ projectId 一覧を取得 */
+function getPinnedTabIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(PINNED_TABS_KEY);
+    if (raw) return new Set(JSON.parse(raw));
+  } catch { /* ignore */ }
+  return new Set();
+}
+
+/** ピン止め状態を localStorage に保存 */
+function savePinnedTabIds(tabs: Tab[]) {
+  const pinned = tabs.filter(t => t.pinned).map(t => t.projectId);
+  localStorage.setItem(PINNED_TABS_KEY, JSON.stringify(pinned));
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +241,7 @@ function MessageRow({
                 );
               }
               return (
-                <a key={i} href={fileUrl} download={f.filename} className="block text-blue-400 hover:text-blue-300 underline text-xs">
+                <a key={i} href={fileUrl} download={f.filename} className="block text-[var(--text-link)] hover:opacity-80 underline text-xs">
                   {f.filename}
                 </a>
               );
@@ -231,6 +255,23 @@ function MessageRow({
 
 /** Discord 風進捗インジケーター */
 function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar }: { output: string; elapsed: number; aiName: string; aiColor: string; aiAvatar?: string }) {
+  /** ローカル経過タイマー（WS 切断中もカウント継続） */
+  const [localElapsed, setLocalElapsed] = useState(elapsed);
+  const startTimeRef = useRef(Date.now() - elapsed * 1000);
+
+  // サーバーから新しい elapsed を受信したら基準時刻を同期
+  useEffect(() => {
+    startTimeRef.current = Date.now() - elapsed * 1000;
+  }, [elapsed]);
+
+  // 1秒間隔でローカルカウントアップ
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLocalElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   return (
     <div className="flex gap-3 px-2 py-1 hover:bg-[var(--bg-hover)] rounded">
       <Avatar name={aiName} color={aiColor} image={aiAvatar} />
@@ -243,9 +284,9 @@ function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar }: { out
             {new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
-        <div className="flex items-center gap-2 text-sm text-blue-400">
+        <div className="flex items-center gap-2 text-sm text-[var(--text-link)]">
           <span className="animate-pulse">●</span>
-          <span>処理中... ({elapsed}秒経過)</span>
+          <span>処理中... ({localElapsed}秒経過)</span>
         </div>
         {output && (
           <pre className="text-xs text-[var(--text-secondary)] bg-[var(--bg-base)] rounded p-2 mt-1 overflow-x-auto max-h-48 overflow-y-auto">
@@ -348,43 +389,94 @@ function TabBar({
   activeTabId,
   onSelectTab,
   onCloseTab,
+  onTogglePin,
+  onReorder,
+  onDoubleClickTab,
 }: {
   tabs: Tab[];
   activeTabId: string | null;
   onSelectTab: (projectId: string) => void;
   onCloseTab: (projectId: string) => void;
+  onTogglePin: (projectId: string) => void;
+  onReorder: (fromIndex: number, toIndex: number) => void;
+  onDoubleClickTab: () => void;
 }) {
+  /** ドラッグ中のタブ index */
+  const dragIndexRef = useRef<number | null>(null);
+  /** ドロップ先のタブ index */
+  const dragOverIndexRef = useRef<number | null>(null);
+
   if (tabs.length === 0) return null;
+
+  /** ピン止めタブを先頭に、通常タブを後ろに表示 */
+  const pinnedTabs = tabs.filter(t => t.pinned);
+  const unpinnedTabs = tabs.filter(t => !t.pinned);
+  const orderedTabs = [...pinnedTabs, ...unpinnedTabs];
+
   return (
     <div className="flex items-center bg-[var(--bg-secondary)] border-b border-[var(--border-color)] overflow-x-auto scrollbar-thin">
-      {tabs.map(tab => {
+      {orderedTabs.map((tab) => {
+        const globalIndex = tabs.indexOf(tab);
         const isActive = tab.projectId === activeTabId;
         return (
           <div
             key={tab.projectId}
+            draggable
+            onDragStart={() => { dragIndexRef.current = globalIndex; }}
+            onDragOver={(e) => { e.preventDefault(); dragOverIndexRef.current = globalIndex; }}
+            onDrop={() => {
+              if (dragIndexRef.current !== null && dragOverIndexRef.current !== null && dragIndexRef.current !== dragOverIndexRef.current) {
+                onReorder(dragIndexRef.current, dragOverIndexRef.current);
+              }
+              dragIndexRef.current = null;
+              dragOverIndexRef.current = null;
+            }}
+            onDragEnd={() => { dragIndexRef.current = null; dragOverIndexRef.current = null; }}
             className={`
-              group flex items-center gap-1.5 px-3 py-1.5 text-sm cursor-pointer border-b-2 shrink-0
+              group flex items-center gap-1.5 px-3 py-1.5 text-sm cursor-pointer border-b-2 shrink-0 select-none
               ${isActive
                 ? 'border-blue-500 text-[var(--text-primary)] bg-[var(--bg-hover)]'
                 : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
               }
             `}
             onClick={() => onSelectTab(tab.projectId)}
+            onDoubleClick={onDoubleClickTab}
           >
-            <span className="text-[var(--text-faint)]">#</span>
-            <span className={isActive ? 'font-semibold' : ''}>{tab.projectName}</span>
-            {tab.progress && !isActive && (
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-            )}
+            {/* ピン止めアイコン（ピン済み時は常時表示、未ピン時はホバーで表示） */}
             <button
-              onClick={(e) => { e.stopPropagation(); onCloseTab(tab.projectId); }}
-              className="ml-1 text-[var(--text-faint)] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-              title="タブを閉じる"
+              onClick={(e) => { e.stopPropagation(); onTogglePin(tab.projectId); }}
+              className={`shrink-0 transition-opacity ${
+                tab.pinned
+                  ? 'text-[var(--text-link)] opacity-100'
+                  : 'text-[var(--text-faint)] opacity-0 group-hover:opacity-60 hover:!opacity-100'
+              }`}
+              title={tab.pinned ? 'ピン止め解除' : 'ピン止め'}
             >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.1 3.1 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.78 2.748L11.06 9.3a3.1 3.1 0 0 0-1.088 2.39l.06 1.9c.04 1.32-1.283 2.24-2.4 1.67L5.4 14.14a3.1 3.1 0 0 0-2.7-.09L1.28 14.75c-1.097.53-2.348-.43-2.27-1.74l.12-1.96a3.1 3.1 0 0 0-.97-2.44L-3.38 7.14c-.98-.87-.42-2.5.93-2.71l2.5-.4a3.1 3.1 0 0 0 2.16-1.56z" transform="translate(3, 1) scale(0.8)" />
               </svg>
             </button>
+            {/* 状態アイコン: 実行中 → スピナー、完了 → チェック、通常 → # */}
+            {tab.progress ? (
+              <span className="w-3 h-3 border-2 border-[var(--accent-blue)] border-t-transparent rounded-full animate-spin inline-block shrink-0" />
+            ) : tab.completed ? (
+              <span className="text-green-500 text-xs shrink-0">✓</span>
+            ) : (
+              <span className="text-[var(--text-faint)]">#</span>
+            )}
+            <span className={isActive ? 'font-semibold' : ''}>{tab.projectName}</span>
+            {/* 閉じるボタン: ピン止め時は非表示 */}
+            {!tab.pinned && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onCloseTab(tab.projectId); }}
+                className="ml-1 text-[var(--text-faint)] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                title="タブを閉じる"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
           </div>
         );
       })}
@@ -453,7 +545,16 @@ function Sidebar({
         `}
       >
         <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--border-color)]">
-          <span className="text-sm font-semibold text-[var(--text-secondary)]">Agents</span>
+          <button
+            onClick={() => {
+              if (expandedMachines.size > 0) {
+                setExpandedMachines(new Set());
+              } else {
+                setExpandedMachines(new Set(sorted.map(m => m.id)));
+              }
+            }}
+            className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+          >Agents</button>
           <button onClick={onToggle} className="md:hidden text-[var(--text-muted)] hover:text-[var(--text-primary)]">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
@@ -537,6 +638,18 @@ function Sidebar({
 }
 
 // ---------------------------------------------------------------------------
+// セッション情報パネル（右サイド）
+// ---------------------------------------------------------------------------
+
+/** セッション情報パネル（右サイドバー） */
+function SessionInfoPanel(_props: { sessionId: string | null; refreshTrigger: number }) {
+  return (
+    <aside className="w-52 shrink-0 hidden lg:block border-l border-[var(--border-color)] bg-[var(--bg-secondary)] p-3">
+    </aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // メインコンポーネント
 // ---------------------------------------------------------------------------
 
@@ -550,6 +663,20 @@ export function ChatPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   /** ライトボックス表示用の画像 URL */
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  /** セッション情報パネル再取得トリガー */
+  const [sessionRefreshCount, setSessionRefreshCount] = useState(0);
+  /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
+  const [maximized, setMaximized] = useState(false);
+
+  // 最大化時に body にクラスを付与してナビバーを CSS で隠す
+  useEffect(() => {
+    if (maximized) {
+      document.body.classList.add('chat-maximized');
+    } else {
+      document.body.classList.remove('chat-maximized');
+    }
+    return () => document.body.classList.remove('chat-maximized');
+  }, [maximized]);
 
   /** チャット表示設定（localStorage 管理、storage イベントで他タブと同期） */
   const fallbackName = user?.name || user?.email || 'User';
@@ -557,6 +684,24 @@ export function ChatPage() {
 
   useEffect(() => {
     setChatDisplay(getChatDisplaySettings(fallbackName));
+    // サーバーからチャット表示設定を取得して localStorage を更新
+    settingsApi.getChatDisplay().then(json => {
+      if (json) {
+        try {
+          const server = JSON.parse(json);
+          const merged: ChatDisplaySettings = {
+            userName: server.userName || fallbackName,
+            userColor: server.userColor || DEFAULT_USER_COLOR,
+            userAvatar: server.userAvatar || undefined,
+            aiName: server.aiName || 'DevRelay',
+            aiColor: server.aiColor || DEFAULT_AI_COLOR,
+            aiAvatar: server.aiAvatar || undefined,
+          };
+          setChatDisplay(merged);
+          localStorage.setItem(CHAT_DISPLAY_KEY, JSON.stringify(merged));
+        } catch { /* ignore */ }
+      }
+    }).catch(() => { /* ignore */ });
     const handleStorage = (e: StorageEvent) => {
       if (e.key === CHAT_DISPLAY_KEY) setChatDisplay(getChatDisplaySettings(fallbackName));
     };
@@ -578,7 +723,7 @@ export function ChatPage() {
   const restoredRef = useRef(false);
 
   /** セッションIDからタブにメッセージ履歴を読み込む */
-  const loadHistory = useCallback(async (projectId: string, sessionId: string) => {
+  const loadHistory = useCallback(async (projectId: string, _sessionId?: string) => {
     // 履歴読み込み中はスクロールを抑制
     shouldAutoScrollRef.current = false;
     // 読み込み中フラグを立てる
@@ -587,7 +732,8 @@ export function ChatPage() {
     ));
 
     try {
-      const { messages, hasMore } = await sessionsApi.getMessages(sessionId, { limit: 30 });
+      // プロジェクト横断で全セッションのメッセージを取得
+      const { messages, hasMore } = await projectsApi.getMessages(projectId, { limit: 30 });
       const chatMessages: ChatMessage[] = messages.map(m => ({
         id: m.id,
         role: m.role === 'ai' ? 'system' as const : m.role,
@@ -609,48 +755,83 @@ export function ChatPage() {
           loadingHistory: false,
         };
       }));
+
+      // 履歴読み込み完了後、アクティブタブなら最下部にスクロール
+      if (activeTabIdRef.current === projectId) {
+        requestAnimationFrame(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+          shouldAutoScrollRef.current = true;
+        });
+      }
     } catch {
       setTabs(prev => prev.map(t =>
         t.projectId === projectId ? { ...t, historyLoaded: true, loadingHistory: false } : t
       ));
+
+      // エラー時もスクロール復元
+      if (activeTabIdRef.current === projectId) {
+        shouldAutoScrollRef.current = true;
+      }
     }
   }, []);
 
-  /** アクティブタブにメッセージを追加 */
-  const addMessageToActiveTab = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'>) => {
-    const tabId = activeTabIdRef.current;
-    if (!tabId) return;
+  /**
+   * メッセージをタブに追加（projectId で対象タブを特定、省略時はアクティブタブ）
+   */
+  const addMessageToTab = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'>, projectId?: string) => {
+    // projectId が指定され、該当タブがある場合はそのタブに追加
+    const targetId = projectId
+      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
+      : activeTabIdRef.current;
+    if (!targetId) return;
 
     // //connect 応答を抑制（タブ切り替え由来）— 再接続メッセージも含む
-    if (suppressConnectRef.current && msg.role === 'system' && (msg.content.includes('に接続') || msg.content.includes('に再接続'))) {
+    if (suppressConnectRef.current) {
       suppressConnectRef.current = false;
-      return;
+      if (msg.role === 'system' && (msg.content.includes('に接続') || msg.content.includes('に再接続'))) {
+        return;
+      }
     }
 
-    // 新メッセージ受信時は smooth スクロールを有効に
-    shouldAutoScrollRef.current = true;
+    // 新メッセージ受信時は smooth スクロールを有効に（アクティブタブの場合のみ）
+    if (targetId === activeTabIdRef.current) {
+      shouldAutoScrollRef.current = true;
+    }
     const newMsg: ChatMessage = { ...msg, id: nextMessageId(), timestamp: new Date() };
     setTabs(prev => prev.map(t =>
-      t.projectId === tabId ? { ...t, messages: [...t.messages, newMsg] } : t
+      t.projectId === targetId ? { ...t, messages: [...t.messages, newMsg] } : t
     ));
   }, []);
 
-  /** アクティブタブの進捗を更新 */
-  const updateProgressOnActiveTab = useCallback((info: ProgressInfo) => {
-    const tabId = activeTabIdRef.current;
-    if (!tabId) return;
+  /**
+   * 進捗を更新（projectId で対象タブを特定、省略時はアクティブタブ）
+   */
+  const updateProgressOnTab = useCallback((info: ProgressInfo, projectId?: string) => {
+    const targetId = projectId
+      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
+      : activeTabIdRef.current;
+    if (!targetId) return;
     setTabs(prev => prev.map(t =>
-      t.projectId === tabId ? { ...t, progress: info } : t
+      t.projectId === targetId ? { ...t, progress: info } : t
     ));
   }, []);
 
-  /** アクティブタブの進捗をクリア */
-  const clearProgressOnActiveTab = useCallback(() => {
-    const tabId = activeTabIdRef.current;
-    if (!tabId) return;
+  /**
+   * 進捗をクリア（projectId で対象タブを特定、省略時はアクティブタブ）
+   * //connect 応答では進捗をクリアしない（suppressConnectRef でガード）
+   */
+  const clearProgressOnTab = useCallback((projectId?: string) => {
+    // //connect レスポンス由来の場合は進捗をクリアしない
+    if (suppressConnectRef.current) return;
+    const targetId = projectId
+      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
+      : activeTabIdRef.current;
+    if (!targetId) return;
     setTabs(prev => prev.map(t =>
-      t.projectId === tabId ? { ...t, progress: null } : t
+      t.projectId === targetId ? { ...t, progress: null, completed: t.progress !== null } : t
     ));
+    // AI 応答完了 → セッション情報パネルを再取得
+    setSessionRefreshCount(c => c + 1);
   }, []);
 
   /** セッション情報受信: sessionId をタブに保存し、履歴未読み込みなら読み込み開始 */
@@ -671,9 +852,9 @@ export function ChatPage() {
   }, [loadHistory]);
 
   const { connected, sendCommand } = useWebSocket({
-    onMessage: addMessageToActiveTab,
-    onProgress: updateProgressOnActiveTab,
-    onProgressClear: clearProgressOnActiveTab,
+    onMessage: addMessageToTab,
+    onProgress: updateProgressOnTab,
+    onProgressClear: clearProgressOnTab,
     onSessionInfo: handleSessionInfo,
   });
 
@@ -701,8 +882,24 @@ export function ChatPage() {
     (async () => {
       try {
         const { sessions: activeSessions } = await sessionsApi.getActive();
-        // メッセージがあり、マシンがオンラインのセッションのみ復元
-        const restorable = activeSessions.filter(s => s.messageCount > 0 && s.machineOnline);
+
+        // 先にピン止め状態を取得（machineOnline フィルタの前に必要）
+        let pinnedIds: Set<string>;
+        try {
+          const serverPinned = await settingsApi.getPinnedTabs();
+          pinnedIds = serverPinned.length > 0 ? new Set(serverPinned) : getPinnedTabIds();
+          if (serverPinned.length > 0) {
+            localStorage.setItem('devrelay-pinned-tabs', JSON.stringify(serverPinned));
+          }
+        } catch {
+          pinnedIds = getPinnedTabIds();
+        }
+
+        // ピン止めタブのみ復元（非ピン止めタブはセッション中に動的追加される）
+        // バツで閉じたタブがリロードで復活するのを防止
+        const restorable = activeSessions.filter(
+          s => s.messageCount > 0 && pinnedIds.has(s.projectId)
+        );
         if (restorable.length === 0) return;
 
         const newTabs: Tab[] = restorable.map(s => ({
@@ -713,12 +910,15 @@ export function ChatPage() {
           progress: null,
           sessionId: s.sessionId,
           historyLoaded: false,
-          hasMoreHistory: false,
+          hasMoreHistory: true,
           loadingHistory: false,
+          pinned: pinnedIds.has(s.projectId),
+          completed: false,
         }));
 
         setTabs(newTabs);
         setActiveTabId(newTabs[0].projectId);
+        activeTabIdRef.current = newTabs[0].projectId;
 
         // 最初のタブの履歴を読み込み + サーバーコンテキスト同期
         sendCommand(`//connect ${newTabs[0].projectId}`);
@@ -748,67 +948,100 @@ export function ChatPage() {
     inputRef.current?.focus();
   }, [activeTabId]);
 
+  /** 古いメッセージを追加読み込み（ページネーション） */
+  const loadOlderMessages = useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const tabId = activeTabIdRef.current;
+    if (!tabId) return;
+    const tab = tabsRef.current.find(t => t.projectId === tabId);
+    if (!tab || !tab.hasMoreHistory || tab.loadingHistory) return;
+
+    const oldestMsg = tab.messages[0];
+    if (!oldestMsg) return;
+
+    const prevScrollHeight = container.scrollHeight;
+    shouldAutoScrollRef.current = false;
+
+    setTabs(prev => prev.map(t =>
+      t.projectId === tabId ? { ...t, loadingHistory: true } : t
+    ));
+
+    // プロジェクト横断で全セッションのメッセージを取得
+    projectsApi.getMessages(tabId, { before: oldestMsg.id, limit: 30 }).then(({ messages, hasMore }) => {
+      const chatMessages: ChatMessage[] = messages.map(m => ({
+        id: m.id,
+        role: m.role === 'ai' ? 'system' as const : m.role,
+        content: m.content,
+        timestamp: new Date(m.createdAt),
+        files: m.files && m.files.length > 0 ? m.files : undefined,
+      }));
+
+      setTabs(prev => prev.map(t => {
+        if (t.projectId !== tabId) return t;
+        const existingIds = new Set(t.messages.map(m => m.id));
+        const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
+        return {
+          ...t,
+          messages: [...newMsgs, ...t.messages],
+          hasMoreHistory: hasMore,
+          loadingHistory: false,
+        };
+      }));
+
+      // スクロール位置を保持（新しいメッセージ分だけスクロール）
+      requestAnimationFrame(() => {
+        if (container) {
+          container.scrollTop = container.scrollHeight - prevScrollHeight;
+        }
+      });
+    }).catch(() => {
+      setTabs(prev => prev.map(t =>
+        t.projectId === tabId ? { ...t, loadingHistory: false } : t
+      ));
+    });
+  }, []);
+
   /** 無限スクロール: 上にスクロールしたら古いメッセージを追加読み込み */
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
+    // ユーザーが下端から離れたら自動スクロールを無効化（Agent 実行中の snap-back 防止）
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    if (!atBottom) {
+      shouldAutoScrollRef.current = false;
+    }
 
     const tabId = activeTabIdRef.current;
     if (!tabId) return;
 
     const tab = tabsRef.current.find(t => t.projectId === tabId);
-    if (!tab || !tab.sessionId || !tab.hasMoreHistory || tab.loadingHistory) return;
+    if (!tab || !tab.sessionId) return;
 
-    // スクロール位置が上端近くにいる場合
+    // 履歴未読み込みかつ読み込み中でない → loadHistory で初期読み込み
+    if (!tab.historyLoaded && !tab.loadingHistory) {
+      loadHistory(tab.projectId, tab.sessionId);
+      return;
+    }
+
+    // スクロール位置が上端近くにいる場合 → ページネーション
     if (container.scrollTop < 100) {
-      const oldestMsg = tab.messages[0];
-      if (!oldestMsg) return;
-
-      // スクロール位置保持のため、読み込み前のスクロール高を記録
-      const prevScrollHeight = container.scrollHeight;
-
-      shouldAutoScrollRef.current = false;
-
-      setTabs(prev => prev.map(t =>
-        t.projectId === tabId ? { ...t, loadingHistory: true } : t
-      ));
-
-      sessionsApi.getMessages(tab.sessionId, { before: oldestMsg.id, limit: 30 }).then(({ messages, hasMore }) => {
-        const chatMessages: ChatMessage[] = messages.map(m => ({
-          id: m.id,
-          role: m.role === 'ai' ? 'system' as const : m.role,
-          content: m.content,
-          timestamp: new Date(m.createdAt),
-          files: m.files && m.files.length > 0 ? m.files : undefined,
-        }));
-
-        setTabs(prev => prev.map(t => {
-          if (t.projectId !== tabId) return t;
-          const existingIds = new Set(t.messages.map(m => m.id));
-          const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
-          return {
-            ...t,
-            messages: [...newMsgs, ...t.messages],
-            hasMoreHistory: hasMore,
-            loadingHistory: false,
-          };
-        }));
-
-        // スクロール位置を保持（新しいメッセージ分だけスクロール）
-        requestAnimationFrame(() => {
-          if (container) {
-            container.scrollTop = container.scrollHeight - prevScrollHeight;
-          }
-          shouldAutoScrollRef.current = true;
-        });
-      }).catch(() => {
-        setTabs(prev => prev.map(t =>
-          t.projectId === tabId ? { ...t, loadingHistory: false } : t
-        ));
-        shouldAutoScrollRef.current = true;
-      });
+      loadOlderMessages();
     }
   }, []);
+
+  // コンテナが非スクロール（メッセージ少）かつ追加履歴ありなら自動で追加読み込み
+  useEffect(() => {
+    if (!activeTab?.historyLoaded || !activeTab?.hasMoreHistory || activeTab?.loadingHistory) return;
+    // DOM 更新後にコンテナサイズをチェック
+    requestAnimationFrame(() => {
+      const container = messagesContainerRef.current;
+      if (!container) return;
+      if (container.scrollHeight <= container.clientHeight) {
+        loadOlderMessages();
+      }
+    });
+  }, [activeTab?.historyLoaded, activeTab?.hasMoreHistory, activeTab?.loadingHistory, loadOlderMessages]);
 
   /** プロジェクト選択（サイドバー or タブクリック） */
   const handleSelectProject = useCallback((projectId: string) => {
@@ -837,6 +1070,8 @@ export function ChatPage() {
         historyLoaded: false,
         hasMoreHistory: false,
         loadingHistory: false,
+        pinned: false,
+        completed: false,
       };
       setTabs(prev => [...prev, newTab]);
     }
@@ -853,9 +1088,11 @@ export function ChatPage() {
     }
   }, [machineList, sendCommand, loadHistory]);
 
-  /** タブを閉じる */
+  /** タブを閉じる（ピン止めタブは閉じない） */
   const handleCloseTab = useCallback((projectId: string) => {
     setTabs(prev => {
+      const tab = prev.find(t => t.projectId === projectId);
+      if (tab?.pinned) return prev;
       const newTabs = prev.filter(t => t.projectId !== projectId);
       if (activeTabIdRef.current === projectId) {
         const closedIdx = prev.findIndex(t => t.projectId === projectId);
@@ -870,6 +1107,30 @@ export function ChatPage() {
       return newTabs;
     });
   }, [sendCommand]);
+
+  /** タブのピン止めを切り替え（サーバーにも永続化） */
+  const handleTogglePin = useCallback((projectId: string) => {
+    setTabs(prev => {
+      const updated = prev.map(t =>
+        t.projectId === projectId ? { ...t, pinned: !t.pinned } : t
+      );
+      savePinnedTabIds(updated);
+      // サーバーにも保存（fire-and-forget）
+      const pinnedIds = updated.filter(t => t.pinned).map(t => t.projectId);
+      settingsApi.savePinnedTabs(pinnedIds).catch(() => {});
+      return updated;
+    });
+  }, []);
+
+  /** タブの並べ替え（ドラッグ&ドロップ） */
+  const handleReorderTabs = useCallback((fromIndex: number, toIndex: number) => {
+    setTabs(prev => {
+      const updated = [...prev];
+      const [moved] = updated.splice(fromIndex, 1);
+      updated.splice(toIndex, 0, moved);
+      return updated;
+    });
+  }, []);
 
   /** ファイルを pendingFiles に追加 */
   const addFiles = async (fileList: File[]) => {
@@ -892,7 +1153,7 @@ export function ChatPage() {
         files: hasFiles ? pendingFiles : undefined,
       };
       setTabs(prev => prev.map(t =>
-        t.projectId === activeTabId ? { ...t, messages: [...t.messages, userMsg] } : t
+        t.projectId === activeTabId ? { ...t, messages: [...t.messages, userMsg], completed: false } : t
       ));
     }
 
@@ -921,6 +1182,16 @@ export function ChatPage() {
     if (files.length > 0) {
       e.preventDefault();
       await addFiles(files);
+      return;
+    }
+
+    // 長文テキストのペースト → ファイル添付に変換（1000文字以上）
+    const text = e.clipboardData?.getData('text/plain');
+    if (text && text.length >= 1000) {
+      e.preventDefault();
+      const blob = new Blob([text], { type: 'text/plain' });
+      const file = new File([blob], 'pasted-text.txt', { type: 'text/plain' });
+      await addFiles([file]);
     }
   };
 
@@ -939,16 +1210,18 @@ export function ChatPage() {
   const openTabIds = new Set(tabs.map(t => t.projectId));
 
   return (
-    <div className="flex h-[calc(100vh-4rem)]">
-      {/* サイドバー */}
-      <Sidebar
-        machineList={machineList}
-        openTabIds={openTabIds}
-        activeTabId={activeTabId}
-        onSelectProject={handleSelectProject}
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(prev => !prev)}
-      />
+    <div className={`flex ${maximized ? 'h-screen' : 'h-[calc(100vh-4rem)]'}`}>
+      {/* サイドバー（最大化時は非表示） */}
+      {!maximized && (
+        <Sidebar
+          machineList={machineList}
+          openTabIds={openTabIds}
+          activeTabId={activeTabId}
+          onSelectProject={handleSelectProject}
+          collapsed={sidebarCollapsed}
+          onToggle={() => setSidebarCollapsed(prev => !prev)}
+        />
+      )}
 
       {/* チャットエリア */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -989,6 +1262,9 @@ export function ChatPage() {
           activeTabId={activeTabId}
           onSelectTab={handleSelectProject}
           onCloseTab={handleCloseTab}
+          onTogglePin={handleTogglePin}
+          onReorder={handleReorderTabs}
+          onDoubleClickTab={() => setMaximized(prev => !prev)}
         />
 
         {/* メッセージエリア */}
@@ -1105,6 +1381,14 @@ export function ChatPage() {
           </div>
         </div>
       </div>
+
+      {/* セッション情報パネル（右サイド、大画面のみ、最大化時は非表示） */}
+      {!maximized && (
+        <SessionInfoPanel
+          sessionId={activeTab?.sessionId ?? null}
+          refreshTrigger={sessionRefreshCount}
+        />
+      )}
 
       {/* 画像ライトボックス */}
       {lightboxImage && (

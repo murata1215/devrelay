@@ -143,37 +143,37 @@ export function DevReportsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-400">Loading...</div>
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     );
   }
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-white mb-6">Dev Reports</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Dev Reports</h1>
 
       {error && (
-        <div className="bg-red-900/50 border border-red-700 rounded-lg p-4 mb-6">
-          <p className="text-red-300 text-sm">{error}</p>
+        <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] rounded-lg p-4 mb-6">
+          <p className="text-[var(--text-danger)] text-sm">{error}</p>
         </div>
       )}
 
       {/* プロジェクトカード */}
       <div className="mb-8">
-        <h2 className="text-lg font-semibold text-gray-300 mb-4">Projects</h2>
+        <h2 className="text-lg font-semibold text-[var(--text-secondary)] mb-4">Projects</h2>
         {projects.length === 0 ? (
-          <p className="text-gray-500 text-sm">No conversations found.</p>
+          <p className="text-[var(--text-faint)] text-sm">No conversations found.</p>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {projects.map((proj) => (
               <div
                 key={proj.projectName}
-                className="bg-gray-800 border border-gray-700 rounded-lg p-4"
+                className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-4"
               >
-                <h3 className="text-white font-medium mb-2 truncate" title={proj.projectName}>
+                <h3 className="text-[var(--text-primary)] font-medium mb-2 truncate" title={proj.projectName}>
                   {proj.projectName}
                 </h3>
-                <p className="text-gray-400 text-sm mb-3">
+                <p className="text-[var(--text-muted)] text-sm mb-3">
                   Unprocessed: <span className="text-yellow-400 font-medium">{proj.count}</span> conversations
                 </p>
                 <button
@@ -181,10 +181,10 @@ export function DevReportsPage() {
                   disabled={proj.count === 0 || generating.has(proj.projectName)}
                   className={`w-full px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                     proj.count === 0
-                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                      ? 'bg-[var(--bg-tertiary)] text-[var(--text-faint)] cursor-not-allowed'
                       : generating.has(proj.projectName)
-                        ? 'bg-blue-800 text-blue-300 cursor-wait'
-                        : 'bg-blue-600 hover:bg-blue-500 text-white'
+                        ? 'bg-[var(--accent-blue-hover)] text-[var(--text-link)] cursor-wait'
+                        : 'bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white'
                   }`}
                 >
                   {generating.has(proj.projectName) ? 'Starting...' : 'Create Report'}
@@ -197,23 +197,23 @@ export function DevReportsPage() {
 
       {/* レポート一覧 */}
       <div>
-        <h2 className="text-lg font-semibold text-gray-300 mb-4">Reports</h2>
+        <h2 className="text-lg font-semibold text-[var(--text-secondary)] mb-4">Reports</h2>
         {reports.length === 0 ? (
-          <p className="text-gray-500 text-sm">No reports yet. Create one from the project cards above.</p>
+          <p className="text-[var(--text-faint)] text-sm">No reports yet. Create one from the project cards above.</p>
         ) : (
           <div className="space-y-3">
             {reports.map((report) => (
               <div
                 key={report.id}
-                className="bg-gray-800 border border-gray-700 rounded-lg p-4"
+                className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-4"
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0 flex-1">
-                    <h3 className="text-white font-medium truncate" title={report.title}>
+                    <h3 className="text-[var(--text-primary)] font-medium truncate" title={report.title}>
                       {report.title}
                     </h3>
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm text-gray-400">
-                      <span className="text-gray-500">{report.projectName}</span>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm text-[var(--text-muted)]">
+                      <span className="text-[var(--text-faint)]">{report.projectName}</span>
                       <span>{formatDate(report.createdAt)}</span>
                       <span>{report.entryCount} conversations</span>
                       {report.status === 'generating' && (
@@ -226,16 +226,16 @@ export function DevReportsPage() {
                         </span>
                       )}
                       {report.status === 'completed' && (
-                        <span className="text-green-400">Completed</span>
+                        <span className="text-[var(--text-success)]">Completed</span>
                       )}
                       {report.status === 'failed' && (
-                        <span className="text-red-400" title={report.error || ''}>
+                        <span className="text-[var(--text-danger)]" title={report.error || ''}>
                           Failed
                         </span>
                       )}
                     </div>
                     {report.status === 'failed' && report.error && (
-                      <p className="text-red-400 text-xs mt-1 truncate" title={report.error}>
+                      <p className="text-[var(--text-danger)] text-xs mt-1 truncate" title={report.error}>
                         {report.error}
                       </p>
                     )}
@@ -252,7 +252,7 @@ export function DevReportsPage() {
                     )}
                     <button
                       onClick={() => handleDelete(report.id)}
-                      className="px-3 py-1.5 bg-gray-700 hover:bg-red-700 text-gray-300 hover:text-white text-sm rounded-md transition-colors"
+                      className="px-3 py-1.5 bg-[var(--bg-tertiary)] hover:bg-red-700 text-[var(--text-secondary)] hover:text-white text-sm rounded-md transition-colors"
                     >
                       Delete
                     </button>

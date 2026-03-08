@@ -488,10 +488,10 @@ export type WebClientMessage =
   | { type: 'web:command'; payload: { text: string; files?: FileAttachment[] } }
   | { type: 'web:ping' };
 
-/** サーバー → ブラウザ */
+/** サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示） */
 export type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[] } }
-  | { type: 'web:progress'; payload: { output: string; elapsed: number } }
+  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string } }
+  | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };

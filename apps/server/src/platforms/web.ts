@@ -3,6 +3,7 @@ import type { WebSocket } from 'ws';
 import type { FileAttachment, WebClientMessage } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
+import { getActiveProgressForChatId } from '../services/session-manager.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -11,6 +12,9 @@ const webClients = new Map<string, WebSocket>();
 
 /** タイピングインジケーター状態 */
 const typingStates = new Map<string, boolean>();
+
+/** WS 不在時の未送信レスポンスキュー: chatId -> メッセージ配列 */
+const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string }>>();
 
 /**
  * Web クライアントの WebSocket 接続をセットアップする
@@ -55,6 +59,33 @@ export async function setupWebClientWebSocket(
   webClients.set(chatId, ws);
   console.log(`🌐 Web client connected: ${chatId}`);
 
+  // サーバー側 keepalive ping（Caddy プロキシ経由の接続維持、15秒間隔）
+  const keepaliveInterval = setInterval(() => {
+    if (ws.readyState === ws.OPEN) {
+      ws.ping();
+    }
+  }, 15000);
+
+  // 未送信キューをフラッシュ（WS 切断中に到着した完了メッセージを再送）
+  const queued = pendingMessages.get(chatId);
+  if (queued && queued.length > 0) {
+    pendingMessages.delete(chatId);
+    for (const msg of queued) {
+      sendJson(ws, { type: 'web:response', payload: msg });
+    }
+    console.log(`📨 Flushed ${queued.length} pending message(s) for ${chatId}`);
+  }
+
+  // アクティブな進捗があれば即座に送信（WS 切断中の進捗ロスト復元）
+  const progress = getActiveProgressForChatId(chatId);
+  if (progress) {
+    sendJson(ws, {
+      type: 'web:progress',
+      payload: { output: progress.output, elapsed: progress.elapsed, projectId: progress.projectId ?? undefined },
+    });
+    console.log(`📊 Restored active progress for ${chatId}`);
+  }
+
   // メッセージハンドラ
   ws.on('message', async (data: Buffer) => {
     try {
@@ -72,7 +103,8 @@ export async function setupWebClientWebSocket(
             const projectId = text.slice('//connect '.length).trim();
             const response = await handleProjectConnect(projectId, context);
             if (response) {
-              sendJson(ws, { type: 'web:response', payload: { message: response } });
+              // projectId を含めて送信（クライアントで正しいタブにルーティング）
+              sendJson(ws, { type: 'web:response', payload: { message: response, projectId } });
             }
             // 接続後にセッションIDをクライアントに通知（タブ復元用）
             const updatedContext = await getUserContext(userId, 'web', chatId);
@@ -107,9 +139,18 @@ export async function setupWebClientWebSocket(
     }
   });
 
-  // 切断ハンドラ
+  // 切断ハンドラ（新しい接続で上書きされた場合は削除しない）
   ws.on('close', () => {
-    webClients.delete(chatId);
+    clearInterval(keepaliveInterval);
+    if (webClients.get(chatId) === ws) {
+      webClients.delete(chatId);
+      // 再接続しなかった場合のみキューをクリア（60秒待機）
+      setTimeout(() => {
+        if (!webClients.has(chatId)) {
+          pendingMessages.delete(chatId);
+        }
+      }, 60000);
+    }
     typingStates.delete(chatId);
     console.log(`🌐 Web client disconnected: ${chatId}`);
   });
@@ -122,43 +163,53 @@ export async function setupWebClientWebSocket(
 /**
  * Web クライアントにメッセージを送信する
  * session-manager.ts の sendMessage() から呼ばれる
+ * @param projectId メッセージのルーティング先タブ特定用（省略時はアクティブタブに表示）
  */
-export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[]) {
+export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[], projectId?: string | null) {
   const ws = webClients.get(chatId);
   if (ws && ws.readyState === ws.OPEN) {
-    sendJson(ws, { type: 'web:response', payload: { message, files } });
+    sendJson(ws, { type: 'web:response', payload: { message, files, projectId: projectId ?? undefined } });
+  } else {
+    // WS 不在 → キューに保存（再接続時にフラッシュ）
+    const queue = pendingMessages.get(chatId) || [];
+    queue.push({ message, files, projectId: projectId ?? undefined });
+    pendingMessages.set(chatId, queue);
+    console.log(`📥 Queued message for offline client ${chatId} (${queue.length} pending)`);
   }
 }
 
 /**
  * Web クライアントに進捗メッセージを送信し、messageId を返す
  * session-manager.ts の startProgressTracking() から呼ばれる
+ * @param projectId ルーティング先タブ特定用
  */
-export async function sendWebMessageWithId(chatId: string, content: string): Promise<string | null> {
+export async function sendWebMessageWithId(chatId: string, content: string, projectId?: string | null): Promise<string | null> {
   const ws = webClients.get(chatId);
   if (!ws || ws.readyState !== ws.OPEN) return null;
 
   const messageId = `webmsg_${crypto.randomUUID()}`;
-  sendJson(ws, { type: 'web:progress', payload: { output: content, elapsed: 0 } });
+  sendJson(ws, { type: 'web:progress', payload: { output: content, elapsed: 0, projectId: projectId ?? undefined } });
   return messageId;
 }
 
 /**
  * Web クライアントの進捗メッセージを更新する
  * session-manager.ts の updateProgressMessages() から呼ばれる
+ * @param projectId ルーティング先タブ特定用
  */
 export async function editWebMessage(
   chatId: string,
   _messageId: string,
   content: string,
-  elapsed?: number
+  elapsed?: number,
+  projectId?: string | null
 ): Promise<boolean> {
   const ws = webClients.get(chatId);
   if (!ws || ws.readyState !== ws.OPEN) return false;
 
   sendJson(ws, {
     type: 'web:progress',
-    payload: { output: content, elapsed: elapsed ?? 0 },
+    payload: { output: content, elapsed: elapsed ?? 0, projectId: projectId ?? undefined },
   });
   return true;
 }

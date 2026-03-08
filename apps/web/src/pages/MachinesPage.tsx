@@ -226,14 +226,14 @@ export function MachinesPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-400">Loading...</div>
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded">
+      <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-4 py-3 rounded">
         {error}
       </div>
     );
@@ -252,8 +252,8 @@ export function MachinesPage() {
         onClick={() => onSwitch('linux')}
         className={`px-3 py-1 text-xs rounded-l transition-colors ${
           currentOs === 'linux'
-            ? 'bg-blue-600 text-white'
-            : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+            ? 'bg-[var(--accent-blue)] text-white'
+            : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'
         }`}
       >
         Linux
@@ -262,8 +262,8 @@ export function MachinesPage() {
         onClick={() => onSwitch('macos')}
         className={`px-3 py-1 text-xs transition-colors ${
           currentOs === 'macos'
-            ? 'bg-blue-600 text-white'
-            : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+            ? 'bg-[var(--accent-blue)] text-white'
+            : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'
         }`}
       >
         macOS
@@ -272,8 +272,8 @@ export function MachinesPage() {
         onClick={() => onSwitch('windows')}
         className={`px-3 py-1 text-xs rounded-r transition-colors ${
           currentOs === 'windows'
-            ? 'bg-blue-600 text-white'
-            : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+            ? 'bg-[var(--accent-blue)] text-white'
+            : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'
         }`}
       >
         Windows
@@ -292,12 +292,12 @@ export function MachinesPage() {
     onCopy: () => void;
   }) => (
     <div className="flex items-start space-x-2">
-      <code className="flex-1 bg-gray-900 text-blue-400 px-4 py-2 rounded-lg text-xs break-all leading-relaxed">
+      <code className="flex-1 bg-[var(--bg-base)] text-[var(--text-link)] px-4 py-2 rounded-lg text-xs break-all leading-relaxed">
         {command}
       </code>
       <button
         onClick={onCopy}
-        className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0"
+        className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-3 py-2 rounded-lg transition-colors shrink-0"
       >
         {copied ? 'Copied!' : 'Copy'}
       </button>
@@ -307,69 +307,69 @@ export function MachinesPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <h1 className="text-2xl font-bold text-white">Agents</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)]">Agents</h1>
         <button
           onClick={handleAddAgent}
           disabled={creating}
-          className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors w-full sm:w-auto"
+          className="bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] disabled:bg-[var(--bg-tertiary)] disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors w-full sm:w-auto"
         >
           {creating ? 'Creating...' : '+ Add Agent'}
         </button>
       </div>
 
       {data.length === 0 ? (
-        <div className="bg-gray-800 rounded-lg p-6 text-center">
-          <p className="text-gray-400">No agents registered yet.</p>
-          <p className="text-gray-500 text-sm mt-2">
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-6 text-center">
+          <p className="text-[var(--text-muted)]">No agents registered yet.</p>
+          <p className="text-[var(--text-faint)] text-sm mt-2">
             Click "Add Agent" to generate a token, then run{' '}
-            <code className="bg-gray-700 px-2 py-1 rounded">devrelay setup</code> on your machine.
+            <code className="bg-[var(--bg-tertiary)] px-2 py-1 rounded">devrelay setup</code> on your machine.
           </p>
         </div>
       ) : (
         <>
           {/* デスクトップ: テーブル形式 */}
-          <div className="hidden md:block bg-gray-800 rounded-lg overflow-hidden">
-            <table className="min-w-full divide-y divide-gray-700">
-              <thead className="bg-gray-700/50">
+          <div className="hidden md:block bg-[var(--bg-secondary)] rounded-lg overflow-hidden">
+            <table className="min-w-full divide-y divide-[var(--border-color)]">
+              <thead className="bg-[var(--bg-tertiary)]/50">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Name
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Status
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Projects
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Last Seen
                   </th>
                   <th className="px-6 py-3 w-10"></th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-700">
+              <tbody className="divide-y divide-[var(--border-color)]">
                 {data.map((machine) => (
-                  <tr key={machine.id} className="group hover:bg-gray-700/30 transition-colors">
+                  <tr key={machine.id} className="group hover:bg-[var(--bg-hover)]/30 transition-colors">
                     <td className="px-6 py-4 whitespace-nowrap">
                       {/* Agent 名クリックで設定モーダルを開く（displayName があればそちらを表示） */}
                       <button
                         onClick={() => handleOpenSettings(machine)}
-                        className="text-white font-medium hover:text-blue-400 transition-colors cursor-pointer"
+                        className="text-[var(--text-primary)] font-medium hover:text-[var(--text-link)] transition-colors cursor-pointer"
                         title="Open agent settings"
                       >
                         {machine.displayName ?? machine.name}
                       </button>
                       {/* displayName が設定されている場合、元の名前を小さく表示 */}
                       {machine.displayName && (
-                        <div className="text-gray-500 text-xs">{machine.name}</div>
+                        <div className="text-[var(--text-faint)] text-xs">{machine.name}</div>
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span
                         className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${
                           machine.status === 'online'
-                            ? 'bg-green-500/20 text-green-400'
-                            : 'bg-gray-500/20 text-gray-400'
+                            ? 'bg-green-500/20 text-[var(--text-success)]'
+                            : 'bg-gray-500/20 text-[var(--text-muted)]'
                         }`}
                       >
                         {/* ステータスインジケーター（丸ドット） */}
@@ -383,17 +383,17 @@ export function MachinesPage() {
                     </td>
                     <td className="px-6 py-4">
                       {/* プロジェクト一覧をカンマ区切りで表示（最大5件、超過分は +N more） */}
-                      <span className="text-gray-300 text-sm">
+                      <span className="text-[var(--text-secondary)] text-sm">
                         {machine.projects.slice(0, 5).map((p) => p.name).join(', ')}
                         {machine.projects.length > 5 && (
-                          <span className="text-gray-500"> +{machine.projects.length - 5} more</span>
+                          <span className="text-[var(--text-faint)]"> +{machine.projects.length - 5} more</span>
                         )}
                         {machine.projects.length === 0 && (
-                          <span className="text-gray-500">-</span>
+                          <span className="text-[var(--text-faint)]">-</span>
                         )}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
+                    <td className="px-6 py-4 whitespace-nowrap text-[var(--text-muted)] text-sm">
                       {machine.lastSeenAt
                         ? new Date(machine.lastSeenAt).toLocaleString()
                         : '-'}
@@ -402,7 +402,7 @@ export function MachinesPage() {
                       {/* 削除ボタン（ホバー時に表示） */}
                       <button
                         onClick={() => setDeleteTarget(machine)}
-                        className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
                         title="Delete agent"
                       >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -419,10 +419,10 @@ export function MachinesPage() {
           {/* モバイル: カード形式 */}
           <div className="md:hidden space-y-4">
             {data.map((machine) => (
-              <div key={machine.id} className="bg-gray-800 rounded-lg p-4 relative group">
+              <div key={machine.id} className="bg-[var(--bg-secondary)] rounded-lg p-4 relative group">
                 <button
                   onClick={() => setDeleteTarget(machine)}
-                  className="absolute top-3 right-3 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="absolute top-3 right-3 text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
                   title="Delete agent"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -434,35 +434,35 @@ export function MachinesPage() {
                   <div>
                     <button
                       onClick={() => handleOpenSettings(machine)}
-                      className="text-white font-medium hover:text-blue-400 transition-colors cursor-pointer"
+                      className="text-[var(--text-primary)] font-medium hover:text-[var(--text-link)] transition-colors cursor-pointer"
                       title="Open agent settings"
                     >
                       {machine.displayName ?? machine.name}
                     </button>
                     {machine.displayName && (
-                      <div className="text-gray-500 text-xs">{machine.name}</div>
+                      <div className="text-[var(--text-faint)] text-xs">{machine.name}</div>
                     )}
                   </div>
                   <span
                     className={`px-2 py-1 rounded text-xs font-medium ${
                       machine.status === 'online'
-                        ? 'bg-green-500/20 text-green-400'
-                        : 'bg-gray-500/20 text-gray-400'
+                        ? 'bg-green-500/20 text-[var(--text-success)]'
+                        : 'bg-gray-500/20 text-[var(--text-muted)]'
                     }`}
                   >
                     {machine.status}
                   </span>
                 </div>
                 {/* プロジェクト一覧 */}
-                <div className="text-gray-400 text-sm">
+                <div className="text-[var(--text-muted)] text-sm">
                   {machine.projects.slice(0, 5).map((p) => p.name).join(', ')}
                   {machine.projects.length > 5 && (
-                    <span className="text-gray-500"> +{machine.projects.length - 5} more</span>
+                    <span className="text-[var(--text-faint)]"> +{machine.projects.length - 5} more</span>
                   )}
                   {machine.projects.length === 0 && '-'}
                 </div>
                 {machine.lastSeenAt && (
-                  <div className="text-gray-500 text-xs mt-2">
+                  <div className="text-[var(--text-faint)] text-xs mt-2">
                     Last seen: {new Date(machine.lastSeenAt).toLocaleString()}
                   </div>
                 )}
@@ -475,20 +475,20 @@ export function MachinesPage() {
       {/* トークン表示モーダル（Agent 作成直後） */}
       {showTokenModal && newMachine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl mx-4">
-            <h2 className="text-xl font-bold text-white mb-4">Agent Created!</h2>
-            <div className="bg-blue-500/20 border border-blue-500 text-blue-400 px-4 py-3 rounded mb-4">
+          <div className="bg-[var(--bg-secondary)] rounded-lg p-6 w-full max-w-2xl mx-4">
+            <h2 className="text-xl font-bold text-[var(--text-primary)] mb-4">Agent Created!</h2>
+            <div className="bg-blue-500/20 border border-blue-500 text-[var(--text-link)] px-4 py-3 rounded mb-4">
               Run the install command below on your machine. The agent name will be set automatically from hostname.
             </div>
             <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">Token</label>
+              <label className="block text-[var(--text-muted)] text-sm mb-2">Token</label>
               <div className="flex items-center space-x-2">
-                <code className="flex-1 bg-gray-900 text-green-400 px-4 py-2 rounded-lg text-sm break-all">
+                <code className="flex-1 bg-[var(--bg-base)] text-[var(--text-success)] px-4 py-2 rounded-lg text-sm break-all">
                   {newMachine.token}
                 </code>
                 <button
                   onClick={copyToken}
-                  className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0"
+                  className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-3 py-2 rounded-lg transition-colors shrink-0"
                 >
                   {tokenCopied ? 'Copied!' : 'Copy'}
                 </button>
@@ -496,7 +496,7 @@ export function MachinesPage() {
             </div>
             <div className="mb-4">
               <div className="flex items-center space-x-2 mb-2">
-                <label className="block text-gray-400 text-sm">Quick Install</label>
+                <label className="block text-[var(--text-muted)] text-sm">Quick Install</label>
                 <OsTabButtons currentOs={installOs} onSwitch={setInstallOs} />
               </div>
               <CommandBlock
@@ -504,7 +504,7 @@ export function MachinesPage() {
                 copied={installCopied}
                 onCopy={copyInstallCommand}
               />
-              <div className="text-gray-500 text-xs mt-2">
+              <div className="text-[var(--text-faint)] text-xs mt-2">
                 {installOs === 'windows'
                   ? 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'
                   : installOs === 'macos'
@@ -521,7 +521,7 @@ export function MachinesPage() {
                   setInstallCopied(false);
                   setInstallOs('linux');
                 }}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                className="bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white px-4 py-2 rounded-lg font-medium transition-colors"
               >
                 Done
               </button>
@@ -533,19 +533,19 @@ export function MachinesPage() {
       {/* Agent 設定モーダル（既存 Agent の詳細表示） */}
       {settingsTarget && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold text-white mb-4">
+          <div className="bg-[var(--bg-secondary)] rounded-lg p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-[var(--text-primary)] mb-4">
               Agent Settings: {settingsTarget.displayName ?? settingsTarget.name}
             </h2>
             {settingsTarget.displayName && (
-              <p className="text-gray-500 text-xs -mt-3 mb-4">({settingsTarget.name})</p>
+              <p className="text-[var(--text-faint)] text-xs -mt-3 mb-4">({settingsTarget.name})</p>
             )}
 
             {/* ホスト名エイリアス編集 */}
             <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">
+              <label className="block text-[var(--text-muted)] text-sm mb-2">
                 Hostname Alias
-                <span className="text-gray-500 ml-2 text-xs">
+                <span className="text-[var(--text-faint)] ml-2 text-xs">
                   (applies to all agents with same hostname)
                 </span>
               </label>
@@ -555,17 +555,17 @@ export function MachinesPage() {
                   value={aliasValue}
                   onChange={(e) => setAliasValue(e.target.value)}
                   placeholder={aliasHostname}
-                  className="flex-1 bg-gray-900 text-white px-4 py-2 rounded-lg text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
+                  className="flex-1 bg-[var(--bg-base)] text-[var(--text-primary)] px-4 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
                 />
                 <button
                   onClick={handleSaveAlias}
                   disabled={aliasSaving}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
+                  className="bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] disabled:bg-[var(--bg-tertiary)] disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
                 >
                   {aliasSaving ? 'Saving...' : 'Save'}
                 </button>
               </div>
-              <div className="text-gray-500 text-xs mt-1">
+              <div className="text-[var(--text-faint)] text-xs mt-1">
                 {aliasValue
                   ? `Display: ${aliasValue}/${settingsTarget.name.includes('/') ? settingsTarget.name.split('/').slice(1).join('/') : ''}`
                   : 'Leave empty to use original hostname'}
@@ -574,28 +574,28 @@ export function MachinesPage() {
 
             {/* プロジェクト検索パス */}
             <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">
+              <label className="block text-[var(--text-muted)] text-sm mb-2">
                 Project Search Paths
-                <span className="text-gray-500 ml-2 text-xs">
+                <span className="text-[var(--text-faint)] ml-2 text-xs">
                   (directories to scan for projects with CLAUDE.md)
                 </span>
               </label>
               {projectsDirsLoading ? (
-                <div className="bg-gray-900 px-4 py-2 rounded-lg text-gray-500 text-sm">Loading...</div>
+                <div className="bg-[var(--bg-base)] px-4 py-2 rounded-lg text-[var(--text-faint)] text-sm">Loading...</div>
               ) : (
                 <>
                   {/* 既存パスの一覧（タグ形式） */}
                   {projectsDirs.length > 0 && (
                     <div className="flex flex-wrap gap-2 mb-2">
                       {projectsDirs.map((dir, i) => (
-                        <span key={i} className="inline-flex items-center bg-gray-700 text-gray-300 text-xs px-3 py-1.5 rounded-lg">
+                        <span key={i} className="inline-flex items-center bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-xs px-3 py-1.5 rounded-lg">
                           <code className="mr-2">{dir}</code>
                           <button
                             onClick={() => {
                               setProjectsDirs(projectsDirs.filter((_, idx) => idx !== i));
                               setProjectsDirsModified(true);
                             }}
-                            className="text-gray-500 hover:text-red-400 transition-colors"
+                            className="text-[var(--text-faint)] hover:text-[var(--text-danger)] transition-colors"
                             title="Remove path"
                           >
                             &times;
@@ -618,7 +618,7 @@ export function MachinesPage() {
                         }
                       }}
                       placeholder="/home/user/projects"
-                      className="flex-1 bg-gray-900 text-white px-4 py-2 rounded-lg text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
+                      className="flex-1 bg-[var(--bg-base)] text-[var(--text-primary)] px-4 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
                     />
                     <button
                       onClick={() => {
@@ -628,7 +628,7 @@ export function MachinesPage() {
                           setProjectsDirsModified(true);
                         }
                       }}
-                      className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
+                      className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
                     >
                       Add
                     </button>
@@ -652,18 +652,18 @@ export function MachinesPage() {
                           }
                         }}
                         disabled={projectsDirsSaving}
-                        className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg transition-colors text-sm"
+                        className="bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] disabled:bg-[var(--bg-tertiary)] disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg transition-colors text-sm"
                       >
                         {projectsDirsSaving ? 'Saving...' : 'Save & Apply'}
                       </button>
-                      <span className="text-gray-500 text-xs">
+                      <span className="text-[var(--text-faint)] text-xs">
                         {settingsTarget?.status === 'online'
                           ? 'Agent will re-scan immediately'
                           : 'Agent will apply on next connection'}
                       </span>
                     </div>
                   )}
-                  <div className="text-gray-500 text-xs mt-1">
+                  <div className="text-[var(--text-faint)] text-xs mt-1">
                     {projectsDirs.length === 0
                       ? 'Not set. Agent uses local config (~/.devrelay/config.yaml)'
                       : 'Overrides agent local config when set'}
@@ -674,12 +674,12 @@ export function MachinesPage() {
 
             {/* トークン表示 */}
             <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">Token</label>
+              <label className="block text-[var(--text-muted)] text-sm mb-2">Token</label>
               {settingsTokenLoading ? (
-                <div className="bg-gray-900 px-4 py-2 rounded-lg text-gray-500 text-sm">Loading...</div>
+                <div className="bg-[var(--bg-base)] px-4 py-2 rounded-lg text-[var(--text-faint)] text-sm">Loading...</div>
               ) : (
                 <div className="flex items-center space-x-2">
-                  <code className="flex-1 bg-gray-900 text-green-400 px-4 py-2 rounded-lg text-sm break-all">
+                  <code className="flex-1 bg-[var(--bg-base)] text-[var(--text-success)] px-4 py-2 rounded-lg text-sm break-all">
                     {settingsToken}
                   </code>
                   <button
@@ -689,7 +689,7 @@ export function MachinesPage() {
                         setTimeout(() => setSettingsTokenCopied(false), 2000);
                       });
                     }}
-                    className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg transition-colors shrink-0"
+                    className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-3 py-2 rounded-lg transition-colors shrink-0"
                   >
                     {settingsTokenCopied ? 'Copied!' : 'Copy'}
                   </button>
@@ -700,7 +700,7 @@ export function MachinesPage() {
             {/* インストールコマンド */}
             <div className="mb-4">
               <div className="flex items-center space-x-2 mb-2">
-                <label className="block text-gray-400 text-sm">Quick Install</label>
+                <label className="block text-[var(--text-muted)] text-sm">Quick Install</label>
                 <OsTabButtons currentOs={settingsOs} onSwitch={setSettingsOs} />
               </div>
               <CommandBlock
@@ -713,7 +713,7 @@ export function MachinesPage() {
                   });
                 }}
               />
-              <div className="text-gray-500 text-xs mt-2">
+              <div className="text-[var(--text-faint)] text-xs mt-2">
                 {settingsOs === 'windows'
                   ? 'Run in PowerShell. Requires: Node.js 20+, git. Proxy: set $env:DEVRELAY_PROXY'
                   : settingsOs === 'macos'
@@ -725,17 +725,17 @@ export function MachinesPage() {
             {/* 管理コマンド（Agent 接続時に環境固有のコマンドを自動取得・保存） */}
             {settingsTarget.managementInfo && settingsTarget.managementInfo.commands.length > 0 ? (
               <div className="mb-4">
-                <label className="block text-gray-400 text-sm mb-2">
+                <label className="block text-[var(--text-muted)] text-sm mb-2">
                   Management Commands
-                  <span className="text-gray-500 ml-2 text-xs">
+                  <span className="text-[var(--text-faint)] ml-2 text-xs">
                     ({settingsTarget.managementInfo.os === 'win32' ? 'Windows' : settingsTarget.managementInfo.os === 'darwin' ? 'macOS' : 'Linux'} / {settingsTarget.managementInfo.installType})
                   </span>
                 </label>
                 <div className="space-y-2">
                   {settingsTarget.managementInfo.commands.map((cmd, i) => (
                     <div key={i} className="flex items-start space-x-2">
-                      <span className="text-gray-400 text-xs w-24 shrink-0 pt-2 text-right">{cmd.label}</span>
-                      <code className="flex-1 bg-gray-900 text-blue-400 px-3 py-2 rounded text-xs break-all leading-relaxed select-all">
+                      <span className="text-[var(--text-muted)] text-xs w-24 shrink-0 pt-2 text-right">{cmd.label}</span>
+                      <code className="flex-1 bg-[var(--bg-base)] text-[var(--text-link)] px-3 py-2 rounded text-xs break-all leading-relaxed select-all">
                         {cmd.command}
                       </code>
                       <button
@@ -745,7 +745,7 @@ export function MachinesPage() {
                             setTimeout(() => setMgmtCopiedIndex(null), 2000);
                           });
                         }}
-                        className="bg-gray-700 hover:bg-gray-600 text-white px-2 py-2 rounded transition-colors shrink-0 text-xs"
+                        className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-2 py-2 rounded transition-colors shrink-0 text-xs"
                       >
                         {mgmtCopiedIndex === i ? 'Copied!' : 'Copy'}
                       </button>
@@ -755,8 +755,8 @@ export function MachinesPage() {
               </div>
             ) : (
               <div className="mb-4">
-                <label className="block text-gray-400 text-sm mb-2">Management Commands</label>
-                <p className="text-gray-500 text-xs">
+                <label className="block text-[var(--text-muted)] text-sm mb-2">Management Commands</label>
+                <p className="text-[var(--text-faint)] text-xs">
                   Agent が接続すると管理コマンドが表示されます。
                 </p>
               </div>
@@ -764,7 +764,7 @@ export function MachinesPage() {
 
             {/* アンインストールコマンド（折りたたみ） */}
             <details className="mb-4">
-              <summary className="text-gray-400 text-sm cursor-pointer hover:text-gray-300 transition-colors">
+              <summary className="text-[var(--text-muted)] text-sm cursor-pointer hover:text-[var(--text-secondary)] transition-colors">
                 Uninstall
               </summary>
               <div className="mt-2">
@@ -778,7 +778,7 @@ export function MachinesPage() {
                     });
                   }}
                 />
-                <div className="text-gray-500 text-xs mt-2">
+                <div className="text-[var(--text-faint)] text-xs mt-2">
                   {settingsOs === 'windows'
                     ? 'Stops agent, removes auto-start, deletes %APPDATA%\\devrelay'
                     : settingsOs === 'macos'
@@ -791,7 +791,7 @@ export function MachinesPage() {
             <div className="flex justify-end">
               <button
                 onClick={closeSettings}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                className="bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white px-4 py-2 rounded-lg font-medium transition-colors"
               >
                 Close
               </button>
@@ -803,23 +803,23 @@ export function MachinesPage() {
       {/* 削除確認モーダル */}
       {deleteTarget && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md mx-4">
-            <h2 className="text-xl font-bold text-white mb-4">Delete Agent?</h2>
-            <p className="text-gray-400 mb-4">
-              Are you sure you want to delete <strong className="text-white">{deleteTarget.displayName ?? deleteTarget.name}</strong>?
+          <div className="bg-[var(--bg-secondary)] rounded-lg p-6 w-full max-w-md mx-4">
+            <h2 className="text-xl font-bold text-[var(--text-primary)] mb-4">Delete Agent?</h2>
+            <p className="text-[var(--text-muted)] mb-4">
+              Are you sure you want to delete <strong className="text-[var(--text-primary)]">{deleteTarget.displayName ?? deleteTarget.name}</strong>?
               This will also delete all associated projects and sessions.
             </p>
             <div className="flex justify-end space-x-3">
               <button
                 onClick={() => setDeleteTarget(null)}
-                className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+                className="px-4 py-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleDelete}
                 disabled={deleting}
-                className="bg-red-600 hover:bg-red-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                className="bg-red-600 hover:bg-red-700 disabled:bg-[var(--bg-tertiary)] disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors"
               >
                 {deleting ? 'Deleting...' : 'Delete'}
               </button>

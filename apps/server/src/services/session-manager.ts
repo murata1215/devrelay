@@ -38,8 +38,12 @@ interface ProgressTracker {
   startTime: number;
   updateInterval: NodeJS.Timeout | null;
   timeoutTimer: NodeJS.Timeout | null;  // タイムアウト自動クリーンアップ用
+  projectId: string | null;  // Web クライアントへのルーティング用
 }
 const progressTrackers = new Map<string, ProgressTracker>();
+
+/** sessionId → projectId のキャッシュ（DB クエリ不要で projectId を取得するため） */
+const sessionProjectMap = new Map<string, string>();
 
 const PROGRESS_UPDATE_INTERVAL = 8000; // 8 seconds
 const MAX_OUTPUT_LINES = 15;
@@ -66,6 +70,8 @@ export async function restoreSessionParticipants() {
       });
 
       if (session) {
+        // sessionId → projectId キャッシュを更新
+        sessionProjectMap.set(session.id, session.projectId);
         // Restore if machine is online (regardless of session status)
         if (session.machine.status === 'online') {
           addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
@@ -126,6 +132,7 @@ export async function restoreSessionParticipantsForMachine(machineId: string) {
       });
 
       if (session) {
+        sessionProjectMap.set(session.id, session.projectId);
         addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
         restoredCount++;
 
@@ -163,6 +170,7 @@ export async function createSession(
   });
   
   sessionParticipants.set(session.id, []);
+  sessionProjectMap.set(session.id, projectId);
   return session.id;
 }
 
@@ -193,6 +201,7 @@ export async function endSession(sessionId: string) {
 
 export async function broadcastToSession(sessionId: string, message: string, isComplete: boolean, files?: FileAttachment[]) {
   const participants = sessionParticipants.get(sessionId) || [];
+  const projectId = sessionProjectMap.get(sessionId);
 
   for (const { platform, chatId } of participants) {
     // Stop typing indicator when response is complete
@@ -205,7 +214,12 @@ export async function broadcastToSession(sessionId: string, message: string, isC
         stopWebTyping(chatId);
       }
     }
-    await sendMessage(platform, chatId, message, files);
+    // Web クライアントには projectId を含めてルーティング可能にする
+    if (platform === 'web') {
+      await sendWebMessage(chatId, message, files, projectId);
+    } else {
+      await sendMessage(platform, chatId, message, files);
+    }
   }
 }
 
@@ -230,6 +244,19 @@ export async function startProgressTracking(sessionId: string) {
   // Clean up any existing tracker
   stopProgressTracking(sessionId);
 
+  // projectId をキャッシュから取得（なければ DB から）
+  let projectId = sessionProjectMap.get(sessionId) ?? null;
+  if (!projectId) {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { projectId: true },
+    });
+    if (session) {
+      projectId = session.projectId;
+      sessionProjectMap.set(sessionId, projectId);
+    }
+  }
+
   const tracker: ProgressTracker = {
     messages: new Map(),
     outputBuffer: '',
@@ -237,6 +264,7 @@ export async function startProgressTracking(sessionId: string) {
     startTime: Date.now(),
     updateInterval: null,
     timeoutTimer: null,
+    projectId,
   };
 
   // Send initial progress message to all participants
@@ -252,7 +280,7 @@ export async function startProgressTracking(sessionId: string) {
         tracker.messages.set(chatId, { messageId, platform });
       }
     } else if (platform === 'web') {
-      const messageId = await sendWebMessageWithId(chatId, formatProgressMessage('', 0));
+      const messageId = await sendWebMessageWithId(chatId, formatProgressMessage('', 0), projectId);
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
@@ -314,7 +342,7 @@ async function updateProgressMessages(sessionId: string) {
       await editTelegramMessage(chatId, messageId as number, content);
     } else if (platform === 'web') {
       const elapsed = Math.floor((Date.now() - (progressTrackers.get(sessionId)?.startTime ?? Date.now())) / 1000);
-      await editWebMessage(chatId, messageId as string, content, elapsed);
+      await editWebMessage(chatId, messageId as string, content, elapsed, tracker.projectId);
     }
   }
 }
@@ -334,6 +362,22 @@ function formatProgressMessage(output: string, elapsedSeconds: number): string {
   }
 
   return content;
+}
+
+/**
+ * 指定 chatId にアクティブな進捗トラッカーがあれば最新状態を返す
+ * WS 再接続時に進捗表示を即座に復元するために使用
+ */
+export function getActiveProgressForChatId(chatId: string): { output: string; elapsed: number; projectId?: string | null } | null {
+  for (const [sessionId, participants] of sessionParticipants.entries()) {
+    if (!participants.some(p => p.chatId === chatId)) continue;
+    const tracker = progressTrackers.get(sessionId);
+    if (!tracker) continue;
+    const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
+    const content = formatProgressMessage(tracker.outputBuffer, elapsed);
+    return { output: content, elapsed, projectId: tracker.projectId };
+  }
+  return null;
 }
 
 // Stop progress tracking and clean up
@@ -403,14 +447,14 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       }
     } else if (platform === 'web') {
       stopWebTyping(chatId);
-      await sendWebMessage(chatId, messageToSend, files);
+      await sendWebMessage(chatId, messageToSend, files, tracker?.projectId);
     }
   }
 
   progressTrackers.delete(sessionId);
 }
 
-export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[]) {
+export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[], projectId?: string | null) {
   switch (platform) {
     case 'discord':
       await sendDiscordMessage(chatId, message, files);
@@ -419,7 +463,7 @@ export async function sendMessage(platform: Platform, chatId: string, message: s
       await sendTelegramMessage(chatId, message, files);
       break;
     case 'web':
-      await sendWebMessage(chatId, message, files);
+      await sendWebMessage(chatId, message, files, projectId);
       break;
     case 'line':
       // await sendLineMessage(chatId, message, files);

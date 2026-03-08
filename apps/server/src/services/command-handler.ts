@@ -372,12 +372,6 @@ export async function handleProjectConnect(projectId: string, context: UserConte
     return '❌ プロジェクトが見つかりません。';
   }
 
-  // Clean up previous session's progress tracker if switching sessions
-  if (context.currentSessionId) {
-    stopProgressTracking(context.currentSessionId);
-    removeParticipant(context.currentSessionId, context.platform, context.chatId);
-  }
-
   // Get or create user
   const user = await resolveOrCreateUser(context);
   if (!user) {
@@ -408,6 +402,16 @@ export async function handleProjectConnect(projectId: string, context: UserConte
       project.id,
       project.defaultAi
     );
+  }
+
+  // 前のセッションのクリーンアップ
+  // Web クライアントは複数タブで複数セッションに同時参加するため、
+  // 旧セッションの進捗トラッカー・参加者を維持する（タブ切り替え時に進捗が消えない）
+  if (context.currentSessionId && context.currentSessionId !== sessionId) {
+    if (context.platform !== 'web') {
+      stopProgressTracking(context.currentSessionId);
+      removeParticipant(context.currentSessionId, context.platform, context.chatId);
+    }
   }
 
   // Add participant
