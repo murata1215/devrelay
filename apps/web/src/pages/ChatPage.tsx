@@ -1114,26 +1114,53 @@ export function ChatPage() {
       try {
         const { sessions: activeSessions } = await sessionsApi.getActive();
 
-        // 先にピン止め状態を取得（machineOnline フィルタの前に必要）
+        // サーバーからタブ状態を一括取得
         let pinnedIds: Set<string>;
+        let tabOrder: string[] = [];
+        let savedNames: Record<string, string> = {};
         try {
-          const serverPinned = await settingsApi.getPinnedTabs();
+          const [serverPinned, serverOrder, serverNames] = await Promise.all([
+            settingsApi.getPinnedTabs(),
+            settingsApi.getTabOrder(),
+            settingsApi.getTabNames(),
+          ]);
           pinnedIds = serverPinned.length > 0 ? new Set(serverPinned) : getPinnedTabIds();
+          tabOrder = serverOrder;
+          savedNames = Object.keys(serverNames).length > 0 ? serverNames : getTabNames();
+          // localStorage を同期
           if (serverPinned.length > 0) {
             localStorage.setItem('devrelay-pinned-tabs', JSON.stringify(serverPinned));
           }
         } catch {
           pinnedIds = getPinnedTabIds();
+          savedNames = getTabNames();
         }
 
-        // ピン止めタブのみ復元（非ピン止めタブはセッション中に動的追加される）
-        // バツで閉じたタブがリロードで復活するのを防止
-        const restorable = activeSessions.filter(
-          s => s.messageCount > 0 && pinnedIds.has(s.projectId)
-        );
+        // セッション検索用マップ
+        const sessionMap = new Map(activeSessions.map(s => [s.projectId, s]));
+
+        // TAB_ORDER がある場合: 保存された順序でタブを復元
+        // TAB_ORDER がない場合: 従来通りピン止めタブのみ復元
+        let restorable: typeof activeSessions;
+        if (tabOrder.length > 0) {
+          // TAB_ORDER の順序でアクティブセッションがあるものを復元
+          restorable = tabOrder
+            .map(id => sessionMap.get(id))
+            .filter((s): s is NonNullable<typeof s> => s != null && s.messageCount > 0);
+          // TAB_ORDER にないがピン止めされているセッションも末尾に追加
+          for (const s of activeSessions) {
+            if (!tabOrder.includes(s.projectId) && pinnedIds.has(s.projectId) && s.messageCount > 0) {
+              restorable.push(s);
+            }
+          }
+        } else {
+          // 従来互換: ピン止めタブのみ
+          restorable = activeSessions.filter(
+            s => s.messageCount > 0 && pinnedIds.has(s.projectId)
+          );
+        }
         if (restorable.length === 0) return;
 
-        const savedNames = getTabNames();
         const newTabs: Tab[] = restorable.map(s => ({
           projectId: s.projectId,
           projectName: s.projectName,
@@ -1307,7 +1334,12 @@ export function ChatPage() {
         pinned: false,
         completed: false,
       };
-      setTabs(prev => [...prev, newTab]);
+      setTabs(prev => {
+        const updated = [...prev, newTab];
+        // サーバーにタブ順序を保存（fire-and-forget）
+        settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
+        return updated;
+      });
     }
 
     setActiveTabId(projectId);
@@ -1338,6 +1370,8 @@ export function ChatPage() {
           sendCommand(`//connect ${nextId}`);
         }
       }
+      // サーバーにタブ順序を保存（fire-and-forget）
+      settingsApi.saveTabOrder(newTabs.map(t => t.projectId)).catch(() => {});
       return newTabs;
     });
   }, [sendCommand]);
@@ -1352,6 +1386,7 @@ export function ChatPage() {
       // サーバーにも保存（fire-and-forget）
       const pinnedIds = updated.filter(t => t.pinned).map(t => t.projectId);
       settingsApi.savePinnedTabs(pinnedIds).catch(() => {});
+      settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
       return updated;
     });
   }, []);
@@ -1365,6 +1400,12 @@ export function ChatPage() {
           : t
       );
       saveTabNames(updated);
+      // サーバーにもカスタム名を保存（fire-and-forget）
+      const names: Record<string, string> = {};
+      for (const t of updated) {
+        if (t.customName) names[t.projectId] = t.customName;
+      }
+      settingsApi.saveTabNames(names).catch(() => {});
       return updated;
     });
   }, []);
@@ -1375,6 +1416,8 @@ export function ChatPage() {
       const updated = [...prev];
       const [moved] = updated.splice(fromIndex, 1);
       updated.splice(toIndex, 0, moved);
+      // サーバーにタブ順序を保存（fire-and-forget）
+      settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
       return updated;
     });
   }, []);

@@ -225,6 +225,32 @@ export const settings = {
   async savePinnedTabs(projectIds: string[]): Promise<void> {
     await this.update('pinned_tabs', JSON.stringify(projectIds));
   },
+
+  /** サーバーからタブ表示順序を取得 */
+  async getTabOrder(): Promise<string[]> {
+    const all = await this.get();
+    const raw = all['tab_order'];
+    if (!raw) return [];
+    try { return JSON.parse(raw); } catch { return []; }
+  },
+
+  /** タブ表示順序をサーバーに保存 */
+  async saveTabOrder(projectIds: string[]): Promise<void> {
+    await this.update('tab_order', JSON.stringify(projectIds));
+  },
+
+  /** サーバーからタブカスタム名を取得 */
+  async getTabNames(): Promise<Record<string, string>> {
+    const all = await this.get();
+    const raw = all['tab_names'];
+    if (!raw) return {};
+    try { return JSON.parse(raw); } catch { return {}; }
+  },
+
+  /** タブカスタム名をサーバーに保存 */
+  async saveTabNames(names: Record<string, string>): Promise<void> {
+    await this.update('tab_names', JSON.stringify(names));
+  },
 };
 
 // Allowed Tools API（プランモード許可ツール）

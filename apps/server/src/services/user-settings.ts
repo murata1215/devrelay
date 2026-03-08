@@ -35,6 +35,10 @@ export const SettingKeys = {
   CHAT_DISPLAY: 'chat_display',
   /** ピン止めタブ（projectId 配列、JSON 文字列） */
   PINNED_TABS: 'pinned_tabs',
+  /** タブ表示順序（projectId 配列、JSON 文字列） */
+  TAB_ORDER: 'tab_order',
+  /** タブカスタム名（projectId → 名前のマッピング、JSON 文字列） */
+  TAB_NAMES: 'tab_names',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];
