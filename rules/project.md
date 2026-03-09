@@ -595,6 +595,18 @@ Agent から Server への `agent:ai:output` メッセージで `isComplete=true
 1. **ai-runner.ts**: `completionSent` フラグで `onOutput(true)` の二重呼び出しを防止（`error` + `close` イベント競合対策）
 2. **connection.ts**: コールバック側でも `completionSent` ガードを追加（万が一のフォールスルー対策）
 3. **resumeFailed**: フラグ設定後に `resolve + return` で早期リターン（retry 側のみが完了メッセージを送信）
+4. **connection.ts に try/catch**: `sendPromptToAi` でエラーが発生してもセッションがハングしないよう、エラーを `agent:ai:output` でユーザーに通知
+
+### クロスプラットフォーム同期の注意
+
+`agents/linux/src/services/connection.ts` と `agents/linux/src/services/ai-runner.ts` に安定性修正を入れた場合、**必ず `agents/windows/` の同名ファイルにも同じ修正を適用すること**。Windows Agent はコードベースが別で、乖離するとバグが再発する（#143 で発覚）。
+
+同期すべき主要ポイント:
+- `completionSent` ガード（ai-runner.ts + connection.ts 両方）
+- `try/catch` for `sendPromptToAi`（connection.ts）
+- `usageData` / `allowedTools` / `isExec` / `execPrompt` の対応
+- `server:ai:cancel` ハンドラ
+- `resumeFailed` 時の早期 return
 
 ---
 
