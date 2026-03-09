@@ -17,15 +17,16 @@ import type {
   HistoryDatesRequestPayload,
   HistoryExportRequestPayload,
   AiListPayload,
-  AiSwitchPayload
+  AiSwitchPayload,
+  AiCancelPayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync } from 'fs';
-import { DEFAULTS } from '@devrelay/shared';
+import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_WINDOWS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import log from './logger.js';
-import { startAiSession, sendPromptToAi, stopAiSession, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
@@ -69,6 +70,8 @@ let appPingTimer: ReturnType<typeof setInterval> | null = null; // Application-l
 let pongCheckInterval: ReturnType<typeof setInterval> | null = null;
 let currentConfig: AgentConfig | null = null;
 let currentMachineId: string | null = null;
+/** Server から配信されたプランモード許可ツール（null = デフォルト使用） */
+let serverAllowedTools: string[] | null = null;
 
 // Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
@@ -239,6 +242,12 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         } else {
           log.info('Authentication successful');
         }
+        // Server 管理の allowedTools を受信（null = デフォルト使用）
+        if (message.payload.allowedTools !== undefined) {
+          serverAllowedTools = message.payload.allowedTools;
+          const count = serverAllowedTools ? serverAllowedTools.length : 'default';
+          log.info(`Allowed tools from server: ${count}`);
+        }
       } else {
         log.error('Authentication failed:', message.payload.error);
         ws?.close();
@@ -304,6 +313,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:ai:switch':
       handleAiSwitch(message.payload, config);
+      break;
+
+    case 'server:ai:cancel':
+      handleAiCancel(message.payload);
       break;
   }
 }
@@ -489,8 +502,8 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[] }) {
-  const { sessionId, prompt, userId, files, missedMessages } = payload;
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string }) {
+  const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   log.info(`Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
     log.info(`Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
@@ -646,88 +659,33 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const sendOptions: SendPromptOptions = {
     resumeSessionId: sessionInfo.claudeResumeSessionId,
     usePlanMode,
+    allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_WINDOWS) : undefined,
   };
 
-  let responseText = '';
-  const aiResult = await sendPromptToAi(
-    sessionId,
-    fullPrompt,
-    sessionInfo.projectPath,
-    sessionInfo.aiTool,
-    sessionInfo.claudeSessionId,
-    currentConfig,
-    async (output, isComplete) => {
-      responseText += output;
-
-      if (isComplete) {
-        // Collect files from the output directory
-        const files = await collectOutputFiles(sessionInfo.projectPath);
-        if (files.length > 0) {
-          log.info(`Sending ${files.length} file(s) from output directory`);
-        }
-
-        sendMessage({
-          type: 'agent:ai:output',
-          payload: {
-            machineId: currentConfig!.machineId,
-            sessionId,
-            output: responseText,  // Send full accumulated response
-            isComplete,
-            files: files.length > 0 ? files : undefined,
-          },
-        });
-
-        // Save response to history and persist to file
-        if (responseText.trim()) {
-          sessionInfo.history.push({
-            role: 'assistant',
-            content: responseText.trim(),
-            timestamp: new Date().toISOString()
-          });
-          await saveConversation(sessionInfo.projectPath, sessionInfo.history);
-          log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
-        }
-      } else {
-        // Stream intermediate output without files
-        log.info(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
-        sendMessage({
-          type: 'agent:ai:output',
-          payload: {
-            machineId: currentConfig!.machineId,
-            sessionId,
-            output,
-            isComplete,
-          },
-        });
-      }
-    },
-    sendOptions
-  );
-
-  // If --resume failed, clear session ID and retry without it
-  if (aiResult.resumeFailed) {
-    log.info(`🔄 Retrying without --resume due to session failure...`);
-    sessionInfo.claudeResumeSessionId = undefined;
-    await clearClaudeSessionId(sessionInfo.projectPath);
-
-    // Retry without resume session ID
-    responseText = '';
-    const retryOptions: SendPromptOptions = {
-      resumeSessionId: undefined,  // Don't use --resume
-      usePlanMode,
-    };
-
-    const retryResult = await sendPromptToAi(
+  // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）
+  try {
+    let responseText = '';
+    // isComplete=true の二重送信防止ガード（error+close 競合、resumeFailed 等の対策）
+    let completionSent = false;
+    const aiResult = await sendPromptToAi(
       sessionId,
       fullPrompt,
       sessionInfo.projectPath,
       sessionInfo.aiTool,
       sessionInfo.claudeSessionId,
       currentConfig,
-      async (output, isComplete) => {
+      async (output, isComplete, usageData) => {
         responseText += output;
 
         if (isComplete) {
+          // 二重完了送信を防止（DB に重複 Message が作成されるのを防ぐ）
+          if (completionSent) {
+            log.info(`Duplicate completion ignored for session ${sessionId}`);
+            return;
+          }
+          completionSent = true;
+
+          // Collect files from the output directory
           const files = await collectOutputFiles(sessionInfo.projectPath);
           if (files.length > 0) {
             log.info(`Sending ${files.length} file(s) from output directory`);
@@ -738,12 +696,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             payload: {
               machineId: currentConfig!.machineId,
               sessionId,
-              output: responseText,
+              output: responseText,  // Send full accumulated response
               isComplete,
               files: files.length > 0 ? files : undefined,
+              usageData,  // AI 使用量データ（DB 保存用）
+              isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
+              execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
             },
           });
 
+          // Save response to history and persist to file
           if (responseText.trim()) {
             sessionInfo.history.push({
               role: 'assistant',
@@ -754,6 +716,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
           }
         } else {
+          // Stream intermediate output without files
           log.info(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
           sendMessage({
             type: 'agent:ai:output',
@@ -766,21 +729,110 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           });
         }
       },
-      retryOptions
+      sendOptions
     );
 
-    // Update session info with new Claude session ID from retry
-    if (retryResult.extractedSessionId) {
-      sessionInfo.claudeResumeSessionId = retryResult.extractedSessionId;
-      log.info(`Updated Claude session ID (after retry): ${retryResult.extractedSessionId.substring(0, 8)}...`);
-    }
-    return;
-  }
+    // If --resume failed, clear session ID and retry without it
+    if (aiResult.resumeFailed) {
+      log.info(`Retrying without --resume due to session failure...`);
+      sessionInfo.claudeResumeSessionId = undefined;
+      await clearClaudeSessionId(sessionInfo.projectPath);
 
-  // Update session info with new Claude session ID if extracted
-  if (aiResult.extractedSessionId) {
-    sessionInfo.claudeResumeSessionId = aiResult.extractedSessionId;
-    log.info(`Updated Claude session ID: ${aiResult.extractedSessionId.substring(0, 8)}...`);
+      // Retry without resume session ID（completionSent をリセットして retry の完了を受け付ける）
+      responseText = '';
+      completionSent = false;
+      const retryOptions: SendPromptOptions = {
+        resumeSessionId: undefined,  // Don't use --resume
+        usePlanMode,
+      };
+
+      const retryResult = await sendPromptToAi(
+        sessionId,
+        fullPrompt,
+        sessionInfo.projectPath,
+        sessionInfo.aiTool,
+        sessionInfo.claudeSessionId,
+        currentConfig,
+        async (output, isComplete, usageData) => {
+          responseText += output;
+
+          if (isComplete) {
+            if (completionSent) {
+              log.info(`Duplicate completion ignored for retry session ${sessionId}`);
+              return;
+            }
+            completionSent = true;
+
+            const files = await collectOutputFiles(sessionInfo.projectPath);
+            if (files.length > 0) {
+              log.info(`Sending ${files.length} file(s) from output directory`);
+            }
+
+            sendMessage({
+              type: 'agent:ai:output',
+              payload: {
+                machineId: currentConfig!.machineId,
+                sessionId,
+                output: responseText,
+                isComplete,
+                files: files.length > 0 ? files : undefined,
+                usageData,  // AI 使用量データ（DB 保存用）
+                isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
+                execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
+              },
+            });
+
+            if (responseText.trim()) {
+              sessionInfo.history.push({
+                role: 'assistant',
+                content: responseText.trim(),
+                timestamp: new Date().toISOString()
+              });
+              await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+              log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
+            }
+          } else {
+            log.info(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
+            sendMessage({
+              type: 'agent:ai:output',
+              payload: {
+                machineId: currentConfig!.machineId,
+                sessionId,
+                output,
+                isComplete,
+              },
+            });
+          }
+        },
+        retryOptions
+      );
+
+      // Update session info with new Claude session ID from retry
+      if (retryResult.extractedSessionId) {
+        sessionInfo.claudeResumeSessionId = retryResult.extractedSessionId;
+        log.info(`Updated Claude session ID (after retry): ${retryResult.extractedSessionId.substring(0, 8)}...`);
+      }
+      return;
+    }
+
+    // Update session info with new Claude session ID if extracted
+    if (aiResult.extractedSessionId) {
+      sessionInfo.claudeResumeSessionId = aiResult.extractedSessionId;
+      log.info(`Updated Claude session ID: ${aiResult.extractedSessionId.substring(0, 8)}...`);
+    }
+  } catch (error) {
+    // AI実行エラー（Claude Code未インストール、パス解決失敗等）をキャッチしてDiscord/Telegramに通知
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    log.error(`AI実行エラー: ${errorMessage}`);
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig!.machineId,
+        sessionId,
+        output: `❌ エラー: ${errorMessage}`,
+        isComplete: true,
+      },
+    });
   }
 }
 
@@ -1351,5 +1403,27 @@ async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {
         error: (err as Error).message,
       },
     });
+  }
+}
+
+/** 実行中の AI プロセスをキャンセルし、Server に完了通知を送信 */
+async function handleAiCancel(payload: AiCancelPayload) {
+  const { sessionId } = payload;
+  log.info(`⛔ Cancel requested for session ${sessionId}`);
+
+  const cancelled = cancelAiSession(sessionId);
+
+  if (currentConfig) {
+    sendMessage({
+      type: 'agent:ai:cancelled',
+      payload: {
+        machineId: currentConfig.machineId,
+        sessionId,
+      },
+    });
+  }
+
+  if (!cancelled) {
+    log.info(`⚠️ No active process to cancel for session ${sessionId}`);
   }
 }

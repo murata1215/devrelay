@@ -1,6 +1,6 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import path from 'path';
-import type { AiTool } from '@devrelay/shared';
+import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage } from './session-store.js';
@@ -17,12 +17,15 @@ export interface AiRunResult {
   extractedSessionId?: string;
   contextUsage?: ContextUsage;
   resumeFailed?: boolean;  // True if --resume failed (exit code 1 + no output)
+  /** Claude Code result メッセージから抽出した使用量データ */
+  usageData?: AiUsageData;
 }
 
 // Active AI sessions: sessionId -> AiSession
 const activeSessions = new Map<string, AiSession>();
 
-type OutputCallback = (output: string, isComplete: boolean) => void;
+/** AI出力コールバック。isComplete=true の場合、usageData に使用量データが含まれる */
+type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData) => void;
 
 /**
  * Find the full path to claude command on Windows
@@ -76,6 +79,8 @@ export interface SendPromptOptions {
   resumeSessionId?: string;
   /** Use plan mode (--permission-mode plan) instead of skip-permissions */
   usePlanMode?: boolean;
+  /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
+  allowedTools?: string[];
 }
 
 export async function sendPromptToAi(
@@ -111,7 +116,13 @@ export async function sendPromptToAi(
     // Add permission mode based on options
     if (options.usePlanMode) {
       args.push('--permission-mode', 'plan');
-      log.info(`Using plan mode (--permission-mode plan)`);
+      // プランモードで読み取り専用コマンドを許可（カンマ区切りで1つの --allowedTools に渡す）
+      if (options.allowedTools && options.allowedTools.length > 0) {
+        args.push('--allowedTools', options.allowedTools.join(','));
+        log.info(`Using plan mode with ${options.allowedTools.length} allowed tools`);
+      } else {
+        log.info(`Using plan mode (--permission-mode plan)`);
+      }
     } else {
       args.push('--dangerously-skip-permissions');
       log.info(`Using exec mode (--dangerously-skip-permissions)`);
@@ -206,10 +217,18 @@ export async function sendPromptToAi(
     proc.stdin?.end();
   }
 
+  // 実行中のプロセスを activeSessions に保存（cancelAiSession で参照するため）
+  const session = activeSessions.get(sessionId);
+  if (session) {
+    session.process = proc;
+  }
+
   let fullOutput = '';
   let lineBuffer = '';
   // stderr を収集してエラー検出に使用
   let stderrOutput = '';
+  // onOutput(true) の二重呼び出し防止（error + close イベント競合対策）
+  let completionSent = false;
   // "Prompt is too long" が stdout（通常の応答テキスト）で出力された場合の検出フラグ
   let promptTooLong = false;
 
@@ -230,6 +249,10 @@ export async function sendPromptToAi(
 
           // Parse for session ID and context usage
           const parsed = parseStreamJsonLine(line);
+          // Debug: log raw usage data from result message
+          if (json.type === 'result' && json.usage) {
+            log.info(`[${aiTool}] Raw usage: input_tokens=${json.usage.input_tokens}, cache_read=${json.usage.cache_read_input_tokens}, cache_creation=${json.usage.cache_creation_input_tokens}`);
+          }
           if (parsed.sessionId) {
             result.extractedSessionId = parsed.sessionId;
             log.info(`[${aiTool}] Session ID: ${parsed.sessionId.substring(0, 8)}...`);
@@ -245,6 +268,11 @@ export async function sendPromptToAi(
             saveContextUsage(projectPath, parsed.contextUsage).catch(err => {
               log.error(`Failed to save context usage:`, err);
             });
+          }
+          // usageData をそのまま保存（DB 格納用）
+          if (parsed.usageData) {
+            result.usageData = parsed.usageData;
+            log.info(`[${aiTool}] Usage data captured: duration=${parsed.usageData.durationMs}ms, models=${Object.keys(parsed.usageData.modelUsage || {}).join(', ')}`);
           }
 
           // Extract text from assistant messages (new format)
@@ -300,8 +328,24 @@ export async function sendPromptToAi(
       log.error(`[${aiTool}] stderr: ${text}`);
     });
 
-    proc.on('close', (code) => {
-      log.info(`[${aiTool}] Process exited with code ${code}`);
+    proc.on('close', (code, signal) => {
+      log.info(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
+
+      // プロセス参照をクリア（キャンセル済み判定のため exitCode は残る）
+      if (session) {
+        session.process = null as any;
+      }
+
+      // SIGTERM によるキャンセル検出
+      if (signal === 'SIGTERM') {
+        log.info(`[${aiTool}] Process was cancelled`);
+        if (!completionSent) {
+          completionSent = true;
+          onOutput('', true, result.usageData);
+        }
+        resolve(result);
+        return;
+      }
 
       // "Prompt is too long" エラーを stdout（promptTooLong フラグ）+ stderr 両方から検出
       const isPromptTooLong = promptTooLong ||
@@ -318,28 +362,39 @@ export async function sendPromptToAi(
           return;
         }
         // --resume なし → 日本語の警告メッセージを送信
-        onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true);
+        if (!completionSent) {
+          completionSent = true;
+          onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData);
+        }
         resolve(result);
         return;
       }
 
-      // Detect --resume failure: exit code 1 + no output
+      // Detect --resume failure: exit code 1 + no output → retry に任せるため onOutput を呼ばない
       if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
         log.info(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
         result.resumeFailed = true;
+        resolve(result);
+        return;
       }
 
-      if (fullOutput.length === 0) {
-        onOutput('(No response from AI)', true);
-      } else {
-        onOutput('', true); // Signal completion
+      if (!completionSent) {
+        completionSent = true;
+        if (fullOutput.length === 0) {
+          onOutput('(No response from AI)', true, result.usageData);
+        } else {
+          onOutput('', true, result.usageData); // Signal completion with usage data
+        }
       }
       resolve(result);
     });
 
     proc.on('error', (err) => {
       log.error(`[${aiTool}] Process error:`, err);
-      onOutput(`Error: ${err.message}`, true);
+      if (!completionSent) {
+        completionSent = true;
+        onOutput(`Error: ${err.message}`, true);
+      }
       resolve(result);
     });
   });
@@ -353,7 +408,26 @@ export async function stopAiSession(sessionId: string): Promise<void> {
   }
 
   log.info(`Stopping AI session: ${sessionId}`);
+  // 実行中のプロセスがあれば停止
+  if (session.process && session.process.exitCode === null) {
+    session.process.kill('SIGTERM');
+  }
   activeSessions.delete(sessionId);
+}
+
+/**
+ * 実行中の AI プロセスをキャンセルする（セッションは維持）
+ * @returns キャンセルできた場合 true、プロセスが存在しない場合 false
+ */
+export function cancelAiSession(sessionId: string): boolean {
+  const session = activeSessions.get(sessionId);
+  if (!session || !session.process || session.process.exitCode !== null) {
+    return false;
+  }
+
+  log.info(`Cancelling AI session: ${sessionId}`);
+  session.process.kill('SIGTERM');
+  return true;
 }
 
 export function getActiveSession(sessionId: string): AiSession | undefined {
