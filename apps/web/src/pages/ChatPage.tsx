@@ -987,12 +987,10 @@ export function ChatPage() {
         };
       }));
 
-      // 履歴読み込み完了後、アクティブタブなら最下部にスクロール
+      // 履歴読み込み完了後、アクティブタブなら自動スクロールを有効化
+      // rAF 内だと React の useEffect より後に実行されるため、同期的にセットする
       if (activeTabIdRef.current === projectId) {
-        requestAnimationFrame(() => {
-          messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
-          shouldAutoScrollRef.current = true;
-        });
+        shouldAutoScrollRef.current = true;
       }
     } catch {
       setTabs(prev => prev.map(t =>
