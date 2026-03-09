@@ -1195,8 +1195,11 @@ export function ChatPage() {
 
   // メッセージ追加時に自動スクロール（上スクロール読み込み中・タブ切替時は抑制）
   const shouldAutoScrollRef = useRef(true);
+  /** プログラムによるスムーズスクロール中のガードタイムスタンプ */
+  const autoScrollingUntilRef = useRef(0);
   useEffect(() => {
     if (shouldAutoScrollRef.current) {
+      autoScrollingUntilRef.current = Date.now() + 500;
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [activeTab?.messages, activeTab?.progress]);
@@ -1266,6 +1269,8 @@ export function ChatPage() {
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
+    // プログラムによるスムーズスクロールアニメーション中は shouldAutoScrollRef を変更しない
+    if (Date.now() < autoScrollingUntilRef.current) return;
     // ユーザーが下端から離れたら自動スクロールを無効化（Agent 実行中の snap-back 防止）
     const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
     if (!atBottom) {
