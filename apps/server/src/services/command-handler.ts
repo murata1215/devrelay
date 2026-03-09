@@ -45,8 +45,8 @@ const pendingClear = new Set<string>();
 // u コマンドの連続確認用: チャンネルごとに前回のコマンドが update だったかを記録
 const pendingUpdate = new Set<string>();
 
-// w コマンド（wrap up）実行済みフラグ: x コマンド時に w 未実行なら警告を表示
-const wrapUpDone = new Set<string>();
+// w コマンド判定用プロンプトプレフィックス（command-parser.ts と一致させる）
+const W_PROMPT_PREFIX = 'doc/changelog.md があれば';
 
 /**
  * context から DB の User.id を解決する
@@ -192,13 +192,8 @@ export async function executeCommand(
     case 'clear':
       return handleClear(context);
 
-    case 'exec': {
-      // w コマンド（wrap up）の実行を記録: x コマンド時の警告判定に使用
-      if (command.prompt?.startsWith('doc/changelog.md があれば')) {
-        wrapUpDone.add(chatKey);
-      }
+    case 'exec':
       return handleExec(context, command.prompt);
-    }
 
     case 'link':
       return handleLink(context);
@@ -555,8 +550,14 @@ async function handleClear(context: UserContext): Promise<string> {
   const chatKey = `${context.platform}:${context.chatId}`;
   if (!pendingClear.has(chatKey)) {
     pendingClear.add(chatKey);
-    // w コマンド未実行の場合は警告を追加
-    const warnPrefix = !wrapUpDone.has(chatKey)
+    // w コマンド未実行の場合は警告を追加（BuildLog から判定: サーバー再起動でも消失しない）
+    const wDone = await prisma.buildLog.findFirst({
+      where: {
+        sessionId: context.currentSessionId,
+        prompt: { startsWith: W_PROMPT_PREFIX },
+      },
+    });
+    const warnPrefix = !wDone
       ? '⚠️ `w` コマンド（ドキュメント更新・コミット）を実行していません。\n'
       : '';
     return `${warnPrefix}⚠️ 会話履歴をクリアしますか？ もう一度 \`x\` を送信してください。`;
@@ -564,7 +565,6 @@ async function handleClear(context: UserContext): Promise<string> {
 
   // 2回目: 確認状態をクリアして実行
   pendingClear.delete(chatKey);
-  wrapUpDone.delete(chatKey);
 
   // Get project path from session
   const session = await prisma.session.findUnique({
