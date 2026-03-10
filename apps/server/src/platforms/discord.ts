@@ -249,7 +249,9 @@ export async function setupDiscordBot(token?: string) {
 
       // Parse and execute command (with NLP if enabled)
       const command = await parseCommandWithNLP(content || '', context);
+      console.log(`📨 Discord: executing command type=${command.type}, input="${(content || '').substring(0, 50)}"`);
       const response = await executeCommand(command, context, files, missedMessages);
+      console.log(`📨 Discord: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 
       // Send response (skip if empty - progress tracking handles it)
       if (response) {

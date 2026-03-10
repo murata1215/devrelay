@@ -34,6 +34,12 @@ import {
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
+import {
+  createTestflightService,
+  listTestflightServices,
+  removeTestflightService,
+  getTestflightServiceInfo,
+} from './testflight-manager.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
 // This allows different channels to have different active sessions
@@ -233,6 +239,9 @@ export async function executeCommand(
 
     case 'ai:prompt':
       return handleAiPrompt(context, command.text, files, missedMessages);
+
+    case 'testflight':
+      return handleTestflight(context, command);
 
     default:
       return '❓ 不明なコマンドです。`h` でヘルプを表示できます。';
@@ -1340,6 +1349,44 @@ async function handleAiPrompt(
 
   // Return empty since progress message is already sent
   return '';
+}
+
+/**
+ * testflight コマンドハンドラ
+ * サービスの一覧・作成・削除・詳細表示を処理
+ */
+async function handleTestflight(
+  context: UserContext,
+  command: Extract<UserCommand, { type: 'testflight' }>
+): Promise<string> {
+  console.log(`🚀 handleTestflight: subcommand=${command.subcommand}, name=${'name' in command ? command.name : '(none)'}, userId=${context.userId}`);
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) {
+    console.log(`🚀 handleTestflight: dbUserId not found for ${context.userId}`);
+    return '⚠️ WebUI アカウントに連携されていません。\n\n'
+      + '`link` コマンドでリンクコードを取得し、WebUI の Settings ページで入力してください。';
+  }
+  console.log(`🚀 handleTestflight: dbUserId=${dbUserId}`);
+
+  let result: string;
+  switch (command.subcommand) {
+    case 'list':
+      result = await listTestflightServices(dbUserId);
+      break;
+    case 'create':
+      result = await createTestflightService(dbUserId, command.name);
+      break;
+    case 'remove':
+      result = await removeTestflightService(dbUserId, command.name);
+      break;
+    case 'info':
+      result = await getTestflightServiceInfo(dbUserId, command.name);
+      break;
+    default:
+      result = '❓ 不明なサブコマンドです。`testflight` で一覧を表示できます。';
+  }
+  console.log(`🚀 handleTestflight: result (${result.length} chars): ${result.substring(0, 100)}...`);
+  return result;
 }
 
 // -----------------------------------------------------------------------------

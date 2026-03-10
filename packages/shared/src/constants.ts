@@ -29,6 +29,7 @@ export const SHORTCUTS: Record<string, string> = {
   'h': 'help',
   'log': 'log',
   'sum': 'summary',
+  'testflight': 'testflight',
 };
 
 // AI tool display names

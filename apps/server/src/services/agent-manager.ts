@@ -59,6 +59,10 @@ interface PendingConfigUpdate {
 }
 const pendingConfigUpdates = new Map<string, PendingConfigUpdate>();
 
+/** 切断猶予タイマー: 短時間の切断（Caddy reload 等）で再接続した場合にオフライン通知をキャンセルする */
+const disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const DISCONNECT_GRACE_PERIOD = 5000; // 5秒
+
 // バージョン確認リクエスト: machineId -> Promise コールバック
 const pendingVersionCheckRequests = new Map<string, HistoryRequest<AgentVersionInfoPayload>>();
 
@@ -190,6 +194,14 @@ async function handleAgentConnect(
     });
     ws.close();
     return null;
+  }
+
+  // 切断猶予タイマーをキャンセル（短時間の再接続ではオフライン通知を抑制）
+  const pendingDisconnectTimer = disconnectTimers.get(machine.id);
+  if (pendingDisconnectTimer) {
+    clearTimeout(pendingDisconnectTimer);
+    disconnectTimers.delete(machine.id);
+    console.log(`🔌 Cancelled disconnect timer for ${machine.id} (reconnected)`);
   }
 
   // Agent から送信された machineName で DB の名前を自動更新する条件:
@@ -380,8 +392,22 @@ async function handleAgentDisconnect(machineId: string, disconnectedWs?: WebSock
     console.log(`⚠️ Could not update machine status for ${machineId}:`, err);
   }
 
-  // Clear any active sessions for this machine
-  await clearSessionsForMachine(machineId);
+  // セッションクリア + 通知を猶予期間後に遅延実行
+  // 短時間の切断（Caddy reload 等）で Agent が再接続した場合はキャンセルされる
+  const existingTimer = disconnectTimers.get(machineId);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  const timer = setTimeout(async () => {
+    disconnectTimers.delete(machineId);
+    // 再接続済みならスキップ
+    if (connectedAgents.has(machineId)) {
+      console.log(`🔌 Machine ${machineId} reconnected within grace period, skipping offline notification`);
+      return;
+    }
+    await clearSessionsForMachine(machineId);
+  }, DISCONNECT_GRACE_PERIOD);
+
+  disconnectTimers.set(machineId, timer);
 }
 
 async function handleProjectsUpdate(machineId: string, projects: Project[]) {

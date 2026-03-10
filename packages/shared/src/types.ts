@@ -411,7 +411,11 @@ export type UserCommand =
   | { type: 'ai:switch'; tool: AiTool }
   | { type: 'ai:prompt'; text: string }
   | { type: 'kill' }     // 実行中の AI プロセスを強制停止
-  | { type: 'update' };  // Agent バージョン確認・更新
+  | { type: 'update' }   // Agent バージョン確認・更新
+  | { type: 'testflight'; subcommand: 'list' }
+  | { type: 'testflight'; subcommand: 'create'; name: string }
+  | { type: 'testflight'; subcommand: 'remove'; name: string }
+  | { type: 'testflight'; subcommand: 'info'; name: string };
 
 // -----------------------------------------------------------------------------
 // User Context (for command parsing)

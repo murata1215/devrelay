@@ -117,7 +117,9 @@ export async function setupTelegramBot(providedToken?: string) {
       // Note: msg.caption is used when photo/document has a caption instead of msg.text
       const content = msg.text || msg.caption || '';
       const command = await parseCommandWithNLP(content, context);
+      console.log(`📨 Telegram: executing command type=${command.type}, input="${content.substring(0, 50)}"`);
       const response = await executeCommand(command, context, files);
+      console.log(`📨 Telegram: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 
       // Send response (skip if empty - progress tracking handles it)
       if (response) {

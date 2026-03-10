@@ -21,13 +21,14 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  machines      Machine[]
-  sessions      Session[]
-  platformLinks PlatformLink[]
-  settings      UserSettings[]
-  authSessions  AuthSession[]
-  buildLogs     BuildLog[]
-  devReports    DevReport[]
+  machines            Machine[]
+  sessions            Session[]
+  platformLinks       PlatformLink[]
+  settings            UserSettings[]
+  authSessions        AuthSession[]
+  buildLogs           BuildLog[]
+  devReports          DevReport[]
+  testflightServices  TestflightService[]
 }
 
 // WebUI 認証セッション
@@ -209,6 +210,24 @@ model BuildLog {
   @@unique([projectName, buildNumber])  // プロジェクト名+ビルド番号で一意
   @@index([projectName])                // プロジェクト名での検索用
   @@index([machineId, projectName])     // マシン+プロジェクト名での検索用
+}
+
+// テストフライトサービス（試験的サービスの管理）
+model TestflightService {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  name        String    @unique  // サービス名（英小文字+数字+ハイフン）
+  port        Int       @unique  // 割り当てポート（9001+）
+  domain      String    @unique  // <name>.devrelay.io
+  directory   String              // /home/devrelay/testflight/<name>
+  status      String    @default("placeholder") // placeholder | active | archived
+  gitRepo     String?             // Git リポジトリ URL（設定済みの場合）
+  description String?             // サービスの説明
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId])
 }
 
 // 開発レポート（会話履歴を AI で要約・構造化した開発記）

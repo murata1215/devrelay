@@ -132,7 +132,17 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     return { type: 'exec', prompt };
   }
 
-  // 0.5. 「w」コマンド: ドキュメント更新＋コミットプッシュのワンショット実行
+  // 0.5. 「testflight」コマンド: テストフライトサービス管理
+  const tfMatch = input.trim().match(/^testflight(?:\s+(.+))?$/i);
+  if (tfMatch) {
+    const arg = tfMatch[1]?.trim();
+    if (!arg) return { type: 'testflight', subcommand: 'list' };
+    if (arg.startsWith('rm ')) return { type: 'testflight', subcommand: 'remove', name: arg.slice(3).trim() };
+    if (arg.startsWith('info ')) return { type: 'testflight', subcommand: 'info', name: arg.slice(5).trim() };
+    return { type: 'testflight', subcommand: 'create', name: arg };
+  }
+
+  // 0.6. 「w」コマンド: ドキュメント更新＋コミットプッシュのワンショット実行
   if (normalized === 'w') {
     return {
       type: 'exec',
@@ -281,6 +291,12 @@ export function getHelpText(): string {
 
 **ビルドログ**
 \`b\` - ビルドログ（exec 実行履歴・各マシンのビルド差分）
+
+**テストフライト**
+\`testflight\` - サービス一覧
+\`testflight <name>\` - 新規サービス作成
+\`testflight rm <name>\` - サービスをアーカイブ
+\`testflight info <name>\` - サービス詳細
 
 **その他**
 \`ag\` - DevRelay Agreement v4 を適用（rules/devrelay.md 作成）

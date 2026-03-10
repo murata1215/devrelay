@@ -118,7 +118,9 @@ export async function setupWebClientWebSocket(
           }
 
           const command = await parseCommandWithNLP(text || '', context);
+          console.log(`📨 Web: executing command type=${command.type}, input="${(text || '').substring(0, 50)}"`);
           const response = await executeCommand(command, context, msg.payload.files);
+          console.log(`📨 Web: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 
           // レスポンスがある場合は送信（進捗トラッキング中は空になる）
           if (response) {

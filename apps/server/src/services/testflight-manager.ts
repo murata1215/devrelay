@@ -1,0 +1,437 @@
+/**
+ * テストフライトサービス管理
+ *
+ * DevRelay コマンドからサービスの作成・一覧・削除を自動化する。
+ * ディレクトリ作成、PostgreSQL DB 作成、Caddy 設定、プレースホルダーページの一括セットアップ。
+ */
+
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { mkdir, writeFile } from 'fs/promises';
+import { join } from 'path';
+import { randomBytes } from 'crypto';
+import { prisma } from '../db/client.js';
+import { AGREEMENT_MARKER, AGREEMENT_END_MARKER, DEFAULT_RULES_TEMPLATE } from './agreement-template.js';
+
+const execAsync = promisify(exec);
+
+/** テストフライトの基本ディレクトリ */
+const TESTFLIGHT_BASE_DIR = '/home/devrelay/testflight';
+/** テストフライト用ポートの開始番号 */
+const TESTFLIGHT_PORT_START = 9001;
+/** Caddy のサイト設定ディレクトリ */
+const CADDY_SITES_DIR = '/etc/caddy/sites.d';
+/** ドメインサフィックス */
+const DOMAIN_SUFFIX = 'devrelay.io';
+
+/**
+ * サービス名のバリデーション
+ * 英小文字で始まり、英小文字・数字・ハイフンで構成、3〜30文字
+ * @returns エラーメッセージ（null ならバリデーション成功）
+ */
+function validateServiceName(name: string): string | null {
+  if (!/^[a-z][a-z0-9-]{2,29}$/.test(name)) {
+    return '⚠️ サービス名は英小文字で始まり、英小文字・数字・ハイフンで構成、3〜30文字にしてください。';
+  }
+  // 予約語チェック
+  const reserved = ['devrelay', 'app', 'api', 'www', 'mail', 'admin', 'test', 'staging', 'prod'];
+  if (reserved.includes(name)) {
+    return `⚠️ \`${name}\` は予約済みのため使用できません。`;
+  }
+  return null;
+}
+
+/**
+ * 次に利用可能なポート番号を取得
+ */
+async function getNextPort(): Promise<number> {
+  const latest = await prisma.testflightService.findFirst({
+    orderBy: { port: 'desc' },
+    select: { port: true },
+  });
+  return latest ? latest.port + 1 : TESTFLIGHT_PORT_START;
+}
+
+/**
+ * ランダムなパスワードを生成（DB ユーザー用）
+ */
+function generatePassword(): string {
+  return randomBytes(16).toString('hex');
+}
+
+/**
+ * プレースホルダー HTML を生成
+ */
+function generatePlaceholderHtml(name: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${name} - Under Construction</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0f0f23;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .container {
+      text-align: center;
+      padding: 2rem;
+    }
+    h1 {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .status {
+      font-size: 1.2rem;
+      color: #888;
+      margin-bottom: 2rem;
+    }
+    .powered-by {
+      font-size: 0.85rem;
+      color: #555;
+    }
+    .powered-by a {
+      color: #667eea;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>${name}</h1>
+    <p class="status">Under Construction</p>
+    <p class="powered-by">Powered by <a href="https://devrelay.io">DevRelay</a> Testflight</p>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Caddy サイト設定を生成（reverse_proxy + file_server フォールバック）
+ * バックエンド未起動時は handle_errors でプレースホルダー HTML を自動表示。
+ * ※ /home/devrelay に chmod o+x が必要（Caddy ユーザーがディレクトリを通過できるように）
+ */
+function generateCaddyConfig(name: string, port: number, directory: string): string {
+  return `${name}.${DOMAIN_SUFFIX} {
+  reverse_proxy localhost:${port}
+  handle_errors {
+    rewrite * /index.html
+    root * ${directory}/placeholder
+    file_server
+  }
+}
+`;
+}
+
+/**
+ * テストフライトサービスを作成
+ */
+export async function createTestflightService(userId: string, name: string): Promise<string> {
+  console.log(`🛫 testflight create: name=${name}, userId=${userId}`);
+
+  // 1. バリデーション
+  const validationError = validateServiceName(name);
+  if (validationError) {
+    console.log(`🛫 testflight [${name}]: validation failed: ${validationError}`);
+    return validationError;
+  }
+
+  // 2. 名前の重複チェック
+  const existing = await prisma.testflightService.findUnique({
+    where: { name },
+  });
+  if (existing) {
+    console.log(`🛫 testflight [${name}]: already exists (status=${existing.status})`);
+    if (existing.status === 'archived') {
+      return `⚠️ \`${name}\` はアーカイブ済みです。別の名前を使用してください。`;
+    }
+    return `⚠️ \`${name}\` は既に存在します。\n🌐 https://${name}.${DOMAIN_SUFFIX}`;
+  }
+
+  // 3. ポート採番
+  const port = await getNextPort();
+  const domain = `${name}.${DOMAIN_SUFFIX}`;
+  const directory = join(TESTFLIGHT_BASE_DIR, name);
+  const dbPassword = generatePassword();
+  console.log(`🛫 testflight [${name}]: port=${port}, domain=${domain}`);
+
+  try {
+    // 4. ディレクトリ作成
+    await mkdir(join(directory, 'placeholder'), { recursive: true });
+    console.log(`🛫 testflight [${name}]: mkdir done`);
+
+    // 5. プレースホルダー HTML 配置
+    await writeFile(
+      join(directory, 'placeholder', 'index.html'),
+      generatePlaceholderHtml(name),
+      'utf-8'
+    );
+
+    // 5.5. Agreement 対応ファイル配置（CLAUDE.md + rules/ + doc/）
+    await mkdir(join(directory, 'rules'), { recursive: true });
+    await mkdir(join(directory, 'doc'), { recursive: true });
+
+    /** CLAUDE.md にサービス構成情報を含めて生成（AI が即座にホスティング構成を把握できるように） */
+    const claudeMdContent = [
+      `${AGREEMENT_MARKER}`,
+      'See `rules/devrelay.md` for DevRelay rules.',
+      `${AGREEMENT_END_MARKER}`,
+      '',
+      '---',
+      '',
+      `# ${name}`,
+      '',
+      '## サービス情報',
+      '',
+      '| 項目 | 値 |',
+      '|------|-----|',
+      `| URL | https://${name}.${DOMAIN_SUFFIX} |`,
+      `| Port | ${port} |`,
+      `| DB | PostgreSQL \`${name}\`（user: \`${name}_user\`） |`,
+      `| ディレクトリ | ${directory} |`,
+      '',
+      '## ホスティング構成',
+      '',
+      `- **リバースプロキシ**: Caddy（\`${name}.${DOMAIN_SUFFIX}\` → \`localhost:${port}\`）`,
+      '- **バックエンド未起動時**: `placeholder/index.html` が自動表示される（Caddy handle_errors フォールバック）',
+      `- **開発方法**: ポート ${port} で dev サーバーを起動すれば自動的にプロキシが通る`,
+      '- **静的サイト**: `placeholder/index.html` を書き換えるだけでサイト表示が変わる（サーバー不要）',
+      '',
+      '## 環境変数',
+      '',
+      '`.env` に設定済み:',
+      '- `DATABASE_URL` — PostgreSQL 接続文字列',
+      '- `PORT` — サービスのポート番号',
+      '',
+    ].join('\n');
+    await writeFile(join(directory, 'CLAUDE.md'), claudeMdContent, 'utf-8');
+
+    await writeFile(join(directory, 'rules', 'devrelay.md'), DEFAULT_RULES_TEMPLATE, 'utf-8');
+    await writeFile(join(directory, 'rules', 'project.md'), '# プロジェクト固有ルール\n', 'utf-8');
+    await writeFile(join(directory, 'doc', 'changelog.md'), '# Changelog\n', 'utf-8');
+    console.log(`🛫 testflight [${name}]: agreement files done`);
+
+    // 6. .env ファイル作成
+    const envContent = [
+      `DATABASE_URL="postgresql://${name}_user:${dbPassword}@localhost:5432/${name}"`,
+      `PORT=${port}`,
+      '',
+    ].join('\n');
+    await writeFile(join(directory, '.env'), envContent, 'utf-8');
+
+    // 7. PostgreSQL ユーザー・DB 作成
+    try {
+      await execAsync(
+        `sudo -u postgres psql -c "CREATE USER ${name}_user WITH PASSWORD '${dbPassword}'"`
+      );
+    } catch (e: any) {
+      // ユーザーが既に存在する場合はスキップ
+      if (!e.stderr?.includes('already exists')) {
+        throw new Error(`PostgreSQL ユーザー作成失敗: ${e.stderr || e.message}`);
+      }
+    }
+
+    try {
+      await execAsync(
+        `sudo -u postgres createdb ${name} -O ${name}_user`
+      );
+    } catch (e: any) {
+      if (!e.stderr?.includes('already exists')) {
+        throw new Error(`PostgreSQL DB 作成失敗: ${e.stderr || e.message}`);
+      }
+    }
+    console.log(`🛫 testflight [${name}]: postgres done`);
+
+    // 8. Caddy 設定ファイル作成（temp file 経由でシェルエスケープ問題を回避）
+    const caddyConfig = generateCaddyConfig(name, port, directory);
+    const tmpFile = join('/tmp', `caddy-testflight-${name}.conf`);
+    await writeFile(tmpFile, caddyConfig, 'utf-8');
+    await execAsync(`cat ${tmpFile} | sudo tee ${CADDY_SITES_DIR}/${name}.${DOMAIN_SUFFIX} > /dev/null`);
+    await execAsync(`rm ${tmpFile}`);
+    console.log(`🛫 testflight [${name}]: caddy config written`);
+
+    // 9. DB にレコード挿入（Caddy reload の前に完了させる）
+    await prisma.testflightService.create({
+      data: {
+        userId,
+        name,
+        port,
+        domain,
+        directory,
+        status: 'placeholder',
+      },
+    });
+    console.log(`🛫 testflight [${name}]: db record created`);
+
+    // 10. Caddy reload を非同期遅延実行
+    // Caddy reload は WS 接続（Agent + WebUI）を一時切断するため、
+    // 成功メッセージがクライアントに到達してから実行する
+    const caddySiteFile = `${CADDY_SITES_DIR}/${name}.${DOMAIN_SUFFIX}`;
+    setTimeout(async () => {
+      try {
+        await execAsync('caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile');
+        await execAsync('sudo systemctl reload caddy');
+        console.log(`🛫 testflight [${name}]: caddy reload done (async)`);
+      } catch (error: any) {
+        console.error(`❌ testflight [${name}]: caddy reload failed (async):`, error.message);
+        // validate/reload 失敗時は設定ファイルを削除してロールバック
+        try {
+          await execAsync(`sudo rm ${caddySiteFile}`);
+          console.log(`🛫 testflight [${name}]: rolled back caddy config`);
+        } catch { /* 削除失敗は無視 */ }
+      }
+    }, 2000);
+
+    // 11. 完了メッセージ（reload を待たずに即座に返す）
+    const msg = [
+      `✅ **${name}** を作成しました`,
+      '',
+      `🌐 https://${domain}`,
+      `📁 ${directory}`,
+      `🔌 Port: ${port}（dev サーバーをこのポートで起動すると自動で繋がります）`,
+      `🗄️ DB: ${name}（PostgreSQL / user: ${name}_user）`,
+      `📄 .env に DATABASE_URL, PORT を設定済み`,
+      `⏳ ドメイン反映まで数秒かかる場合があります`,
+    ].join('\n');
+    console.log(`🛫 testflight [${name}]: returning success message (${msg.length} chars)`);
+    return msg;
+
+  } catch (error: any) {
+    console.error(`❌ testflight create error [${name}]:`, error);
+    return `❌ サービス作成に失敗しました: ${error.message}`;
+  }
+}
+
+/**
+ * テストフライトサービスの一覧を取得
+ */
+export async function listTestflightServices(userId: string): Promise<string> {
+  const services = await prisma.testflightService.findMany({
+    where: { userId, status: { not: 'archived' } },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (services.length === 0) {
+    return [
+      '📋 **Testflight サービス一覧**',
+      '',
+      '登録されたサービスはありません。',
+      '',
+      '`testflight <name>` で新規作成できます。',
+    ].join('\n');
+  }
+
+  const statusEmoji: Record<string, string> = {
+    placeholder: '🚧',
+    active: '🟢',
+    archived: '📦',
+  };
+
+  const lines = services.map((s) => {
+    const emoji = statusEmoji[s.status] || '❓';
+    return `${emoji} **${s.name}** — https://${s.domain} (port ${s.port})`;
+  });
+
+  return [
+    `📋 **Testflight サービス一覧** (${services.length}件)`,
+    '',
+    ...lines,
+    '',
+    '`testflight <name>` で新規作成、`testflight info <name>` で詳細表示',
+  ].join('\n');
+}
+
+/**
+ * テストフライトサービスを削除（アーカイブ）
+ */
+export async function removeTestflightService(userId: string, name: string): Promise<string> {
+  const service = await prisma.testflightService.findFirst({
+    where: { name, userId },
+  });
+
+  if (!service) {
+    return `⚠️ \`${name}\` が見つかりません。\`testflight\` で一覧を確認してください。`;
+  }
+
+  if (service.status === 'archived') {
+    return `⚠️ \`${name}\` は既にアーカイブ済みです。`;
+  }
+
+  try {
+    // Caddy 設定ファイル削除
+    try {
+      await execAsync(`sudo rm ${CADDY_SITES_DIR}/${name}.${DOMAIN_SUFFIX}`);
+      await execAsync('sudo systemctl reload caddy');
+    } catch (e: any) {
+      console.warn(`Caddy config removal warning: ${e.message}`);
+    }
+
+    // PostgreSQL DB・ユーザー削除
+    try {
+      await execAsync(`sudo -u postgres dropdb --if-exists ${name}`);
+      await execAsync(`sudo -u postgres dropuser --if-exists ${name}_user`);
+    } catch (e: any) {
+      console.warn(`PostgreSQL cleanup warning: ${e.message}`);
+    }
+
+    // ステータスを archived に更新
+    await prisma.testflightService.update({
+      where: { id: service.id },
+      data: { status: 'archived' },
+    });
+
+    return [
+      `📦 **${name}** をアーカイブしました`,
+      '',
+      `🌐 https://${service.domain} は無効化されました`,
+      `🗄️ DB \`${name}\` は削除されました`,
+      `📁 ディレクトリ ${service.directory} は残っています（手動で削除可能）`,
+    ].join('\n');
+
+  } catch (error: any) {
+    console.error(`❌ testflight remove error:`, error);
+    return `❌ アーカイブに失敗しました: ${error.message}`;
+  }
+}
+
+/**
+ * テストフライトサービスの詳細を表示
+ */
+export async function getTestflightServiceInfo(userId: string, name: string): Promise<string> {
+  const service = await prisma.testflightService.findFirst({
+    where: { name, userId },
+  });
+
+  if (!service) {
+    return `⚠️ \`${name}\` が見つかりません。\`testflight\` で一覧を確認してください。`;
+  }
+
+  const statusLabel: Record<string, string> = {
+    placeholder: '🚧 プレースホルダー（バックエンド未起動）',
+    active: '🟢 アクティブ',
+    archived: '📦 アーカイブ済み',
+  };
+
+  return [
+    `📋 **${service.name}** の詳細`,
+    '',
+    `🌐 https://${service.domain}`,
+    `📁 ${service.directory}`,
+    `🔌 Port: ${service.port}`,
+    `🗄️ DB: ${service.name}（user: ${service.name}_user）`,
+    `📊 Status: ${statusLabel[service.status] || service.status}`,
+    `📅 作成日: ${service.createdAt.toISOString().slice(0, 10)}`,
+    service.gitRepo ? `🔗 Git: ${service.gitRepo}` : '',
+    service.description ? `📝 ${service.description}` : '',
+  ].filter(Boolean).join('\n');
+}

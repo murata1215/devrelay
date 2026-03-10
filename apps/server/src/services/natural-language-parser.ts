@@ -243,11 +243,14 @@ export async function parseNaturalLanguage(
 export function isTraditionalCommand(input: string): boolean {
   const trimmed = input.trim().toLowerCase();
 
-  // SHORTCUTS 定数に定義されたコマンド（単一ソース・オブ・トゥルース）
+  // SHORTCUTS 定数に定義されたコマンド（完全一致）
   if (trimmed in SHORTCUTS) return true;
 
-  // m から始まるメッセージ（m <text>）
-  if (/^m\s+/i.test(trimmed)) return true;
+  // SHORTCUTS キーに空白続きでマッチ（引数付きコマンド: testflight xxx, log 20, etc.）
+  // 2文字以上のキーのみ（1文字キーは誤検知リスクがあるため個別対応）
+  for (const key of Object.keys(SHORTCUTS)) {
+    if (key.length >= 2 && trimmed.startsWith(key + ' ')) return true;
+  }
 
   // 数字のみ（リスト選択）
   if (/^\d+$/.test(trimmed)) return true;
@@ -258,10 +261,10 @@ export function isTraditionalCommand(input: string): boolean {
   // ai:claude, ai:gemini 等（AI 切り替え）
   if (/^ai:(claude|gemini|codex|aider)$/i.test(trimmed)) return true;
 
-  // 'a 1', 'a claude' 等（AI 選択）
+  // 'a 1', 'a claude' 等（AI 選択）- 1文字キーの特殊パターン
   if (/^a\s+(\d+|claude|gemini|codex|aider)$/i.test(trimmed)) return true;
 
-  // log20, sum7d 等（引数付きコマンド）
+  // log20, sum7d 等（スペースなし引数付きコマンド）
   if (/^log\d+$/i.test(trimmed)) return true;
   if (/^sum\d+d?$/i.test(trimmed)) return true;
 
