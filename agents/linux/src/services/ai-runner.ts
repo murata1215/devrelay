@@ -208,8 +208,26 @@ export async function sendPromptToAi(
   // "Prompt is too long" が stdout（通常の応答テキスト）で出力された場合の検出フラグ
   let promptTooLong = false;
 
+  // --resume 使用時のスタートアップタイムアウト（ハング検出・自動リトライ用）
+  const RESUME_STARTUP_TIMEOUT = 60000; // 60秒
+  let startupTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  if (options.resumeSessionId) {
+    startupTimeoutTimer = setTimeout(() => {
+      if (fullOutput.length === 0 && !completionSent) {
+        console.log(`[${aiTool}] ⚠️ --resume startup timeout (${RESUME_STARTUP_TIMEOUT / 1000}s), killing process for retry`);
+        result.resumeFailed = true;
+        proc.kill('SIGTERM');
+      }
+    }, RESUME_STARTUP_TIMEOUT);
+  }
+
   return new Promise<AiRunResult>((resolve) => {
     proc.stdout?.on('data', (data) => {
+      // 初回データ受信でスタートアップタイムアウトをクリア（正常起動確認）
+      if (startupTimeoutTimer) {
+        clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
       const text = data.toString();
       lineBuffer += text;
 
@@ -307,6 +325,12 @@ export async function sendPromptToAi(
     proc.on('close', (code, signal) => {
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
+      // スタートアップタイムアウトをクリア（正常終了時）
+      if (startupTimeoutTimer) {
+        clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
+
       // プロセス参照をクリア（キャンセル済み判定のため exitCode は残る）
       if (session) {
         session.process = null as any;
@@ -314,7 +338,12 @@ export async function sendPromptToAi(
 
       // SIGTERM によるキャンセル検出
       if (signal === 'SIGTERM') {
-        console.log(`[${aiTool}] ⛔ Process was cancelled`);
+        if (result.resumeFailed) {
+          // スタートアップタイムアウトによる kill → リトライに任せる
+          console.log(`[${aiTool}] ⚠️ Resume startup timeout, will retry without --resume`);
+        } else {
+          console.log(`[${aiTool}] ⛔ Process was cancelled`);
+        }
         if (!completionSent) {
           completionSent = true;
           onOutput('', true, result.usageData);
@@ -366,6 +395,10 @@ export async function sendPromptToAi(
     });
 
     proc.on('error', (err) => {
+      if (startupTimeoutTimer) {
+        clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
       console.error(`[${aiTool}] Process error:`, err);
       if (!completionSent) {
         completionSent = true;

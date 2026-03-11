@@ -477,3 +477,37 @@ export const history = {
     return `${API_BASE}/projects/${projectId}/history/${date}/download?token=${token}`;
   },
 };
+
+// エージェントドキュメント API
+export interface AgentDocMeta {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  embeddingStatus: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const agentDocuments = {
+  /** ドキュメント一覧を取得 */
+  async list(machineId: string): Promise<{ documents: AgentDocMeta[] }> {
+    return request('GET', `/machines/${machineId}/documents`);
+  },
+
+  /** ドキュメントをアップロード */
+  async upload(machineId: string, files: Array<{ filename: string; content: string; mimeType: string; size: number }>): Promise<{ documents: Array<{ id: string; filename: string; size: number }> }> {
+    return request('POST', `/machines/${machineId}/documents`, { files });
+  },
+
+  /** ドキュメントを削除 */
+  async remove(machineId: string, docId: string): Promise<void> {
+    await request('DELETE', `/machines/${machineId}/documents/${docId}`);
+  },
+
+  /** ダウンロード URL を取得 */
+  getDownloadUrl(machineId: string, docId: string): string {
+    const token = getToken();
+    return `${API_BASE}/machines/${machineId}/documents/${docId}/download?token=${token}`;
+  },
+};

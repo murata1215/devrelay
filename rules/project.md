@@ -692,6 +692,23 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - 復元時: サーバー → localStorage フォールバック
 - 異なるデバイスからアクセスしてもタブ状態が同期される
 
+### Doc Folder ファイル同期
+- DocPanel にアップロードしたファイルは DB（AgentDocument）に保存 + Agent ローカル（`~/.devrelay/docs/`）にも同期
+- WebSocket メッセージ `server:doc:sync`（base64 ファイル送信）/ `server:doc:delete` で同期
+- ファイル名にパストラバーサル（`/`, `\`, `..`）が含まれる場合は拒否
+- bodyLimit: Fastify デフォルト 1MB → ドキュメント API は 50MB に引き上げ
+- Embedding: text-embedding-3-small の 8192 トークン制限 → MAX_TEXT_LENGTH 6000（CJK は約 1.5 倍トークン消費）
+
+### --resume スタートアップタイムアウト
+- `--resume` で古い/巨大なセッションを再開すると Claude Code プロセスがハングすることがある
+- 60 秒以内に stdout 出力がなければ `resumeFailed = true` → SIGTERM → `--resume` なしでリトライ
+- 既存の `resumeFailed` メカニズム（exit code 1）と統合
+
+### Git リモートブランチ動的検出
+- `u` コマンドで `origin/main` がハードコードされていると、デフォルトブランチが異なるリポジトリでエラー
+- `detectRemoteBranch()`: `git symbolic-ref refs/remotes/origin/HEAD` → `origin/main` → `origin/master` の順で検出
+- bash/PowerShell 更新スクリプト内でも同様にインラインで動的検出
+
 ---
 
 ## 今後の課題

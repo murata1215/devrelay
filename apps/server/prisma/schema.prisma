@@ -90,6 +90,7 @@ model Machine {
   projects       Project[]
   sessions       Session[]
   buildLogs      BuildLog[]
+  documents      AgentDocument[]
 
   @@unique([userId, name])
 }
@@ -228,6 +229,24 @@ model TestflightService {
   updatedAt   DateTime  @updatedAt
 
   @@index([userId])
+}
+
+// エージェントドキュメント（マシンごとのファイル保存、ベクトル検索対応）
+model AgentDocument {
+  id              String   @id @default(cuid())
+  machineId       String
+  machine         Machine  @relation(fields: [machineId], references: [id])
+  filename        String
+  mimeType        String
+  size            Int
+  content         Bytes    // ファイル本体（PostgreSQL bytea）
+  textContent     String?  // テキスト抽出結果（embedding 生成元）
+  embeddingStatus String   @default("none") // 'none' | 'processing' | 'done' | 'failed' | 'skipped'
+  // embedding vector(1536) は raw SQL で追加（Prisma 非対応型）
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([machineId])
 }
 
 // 開発レポート（会話履歴を AI で要約・構造化した開発記）

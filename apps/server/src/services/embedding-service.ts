@@ -31,8 +31,8 @@ const TEXT_MIME_EXACT = [
   'application/x-sh',
 ];
 
-/** テキスト抽出時の最大文字数（embedding モデルのトークン上限を考慮） */
-const MAX_TEXT_LENGTH = 30000;
+/** テキスト抽出時の最大文字数（text-embedding-3-small のトークン上限 8192 を考慮、CJK 安全マージン込み） */
+const MAX_TEXT_LENGTH = 6000;
 
 /**
  * MIME タイプがテキスト系かどうかを判定
@@ -213,6 +213,70 @@ export async function processMessageFilesEmbedding(messageId: string): Promise<v
 }
 
 /**
+ * 単一の AgentDocument に対して埋め込みを生成・保存する
+ * fire-and-forget で呼び出すため、エラーはログに出力して握りつぶす。
+ *
+ * @param agentDocumentId - 対象 AgentDocument の ID
+ */
+export async function processAgentDocumentEmbedding(agentDocumentId: string): Promise<void> {
+  try {
+    const doc = await prisma.agentDocument.findUnique({
+      where: { id: agentDocumentId },
+      include: { machine: { select: { userId: true } } },
+    });
+    if (!doc) {
+      console.error(`[Embedding] AgentDocument not found: ${agentDocumentId}`);
+      return;
+    }
+
+    if (doc.embeddingStatus !== 'none') return;
+
+    const textContent = extractText(doc.content, doc.mimeType);
+    if (!textContent) {
+      await prisma.agentDocument.update({
+        where: { id: agentDocumentId },
+        data: { embeddingStatus: 'skipped' },
+      });
+      console.log(`[Embedding] AgentDoc skipped (non-text): ${doc.filename}`);
+      return;
+    }
+
+    const apiKey = await getOpenAiApiKey(doc.machine.userId);
+    if (!apiKey) {
+      await prisma.agentDocument.update({
+        where: { id: agentDocumentId },
+        data: { textContent, embeddingStatus: 'skipped' },
+      });
+      console.log(`[Embedding] AgentDoc skipped (no API key): ${doc.filename}`);
+      return;
+    }
+
+    await prisma.agentDocument.update({
+      where: { id: agentDocumentId },
+      data: { textContent, embeddingStatus: 'processing' },
+    });
+
+    const vector = await generateEmbeddingVector(textContent, apiKey);
+    const vectorStr = `[${vector.join(',')}]`;
+    await prisma.$executeRawUnsafe(
+      `UPDATE "AgentDocument" SET embedding = $1::vector, "embeddingStatus" = 'done' WHERE id = $2`,
+      vectorStr,
+      agentDocumentId,
+    );
+
+    console.log(`[Embedding] AgentDoc done: ${doc.filename} (${textContent.length} chars)`);
+  } catch (error: any) {
+    console.error(`[Embedding] AgentDoc failed for ${agentDocumentId}:`, error.message);
+    try {
+      await prisma.agentDocument.update({
+        where: { id: agentDocumentId },
+        data: { embeddingStatus: 'failed' },
+      });
+    } catch { /* 無視 */ }
+  }
+}
+
+/**
  * ベクトル類似検索: クエリテキストに類似する MessageFile を検索
  *
  * @param userId - 検索対象ユーザー ID
@@ -242,7 +306,7 @@ export async function searchSimilarDocuments(
   const queryVector = await generateEmbeddingVector(query, apiKey);
   const vectorStr = `[${queryVector.join(',')}]`;
 
-  // pgvector cosine distance 検索（1 - cosine_distance = similarity）
+  // pgvector cosine distance 検索（MessageFile + AgentDocument を UNION ALL で統合）
   const results = await prisma.$queryRawUnsafe<Array<{
     id: string;
     filename: string;
@@ -255,25 +319,45 @@ export async function searchSimilarDocuments(
     sessionId: string;
     projectName: string;
   }>>(
-    `SELECT
-       mf.id,
-       mf.filename,
-       mf."mimeType",
-       mf.size,
-       mf.direction,
-       mf."textContent",
-       1 - (mf.embedding <=> $1::vector) as similarity,
-       mf."createdAt",
-       s.id as "sessionId",
-       p.name as "projectName"
-     FROM "MessageFile" mf
-     JOIN "Message" m ON m.id = mf."messageId"
-     JOIN "Session" s ON s.id = m."sessionId"
-     JOIN "Project" p ON p.id = s."projectId"
-     WHERE mf."embeddingStatus" = 'done'
-       AND s."userId" = $2
-       AND mf.embedding IS NOT NULL
-     ORDER BY mf.embedding <=> $1::vector
+    `SELECT * FROM (
+       SELECT
+         mf.id,
+         mf.filename,
+         mf."mimeType",
+         mf.size,
+         mf.direction,
+         mf."textContent",
+         1 - (mf.embedding <=> $1::vector) as similarity,
+         mf."createdAt",
+         s.id as "sessionId",
+         p.name as "projectName"
+       FROM "MessageFile" mf
+       JOIN "Message" m ON m.id = mf."messageId"
+       JOIN "Session" s ON s.id = m."sessionId"
+       JOIN "Project" p ON p.id = s."projectId"
+       WHERE mf."embeddingStatus" = 'done'
+         AND s."userId" = $2
+         AND mf.embedding IS NOT NULL
+       UNION ALL
+       SELECT
+         ad.id,
+         ad.filename,
+         ad."mimeType",
+         ad.size,
+         'agent-doc' as direction,
+         ad."textContent",
+         1 - (ad.embedding <=> $1::vector) as similarity,
+         ad."createdAt",
+         '' as "sessionId",
+         mc.name as "projectName"
+       FROM "AgentDocument" ad
+       JOIN "Machine" mc ON mc.id = ad."machineId"
+       WHERE ad."embeddingStatus" = 'done'
+         AND mc."userId" = $2
+         AND mc."deletedAt" IS NULL
+         AND ad.embedding IS NOT NULL
+     ) combined
+     ORDER BY similarity DESC
      LIMIT $3`,
     vectorStr,
     userId,

@@ -219,7 +219,9 @@ export type ServerToAgentMessage =
   | { type: 'server:ai:cancel'; payload: AiCancelPayload }
   | { type: 'server:config:update'; payload: ServerConfigUpdatePayload }
   | { type: 'server:agent:version-check'; payload: {} }
-  | { type: 'server:agent:update'; payload: {} };
+  | { type: 'server:agent:update'; payload: {} }
+  | { type: 'server:doc:sync'; payload: DocSyncPayload }
+  | { type: 'server:doc:delete'; payload: DocDeletePayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -244,6 +246,18 @@ export interface ServerConnectAckPayload {
 export interface ServerConfigUpdatePayload {
   projectsDirs?: string[] | null;  // プロジェクト検索パスの更新（null = ローカル設定に戻す）
   allowedTools?: string[] | null;  // プランモード許可ツールの更新（null = デフォルトに戻す）
+}
+
+/** ドキュメント同期ペイロード（サーバー → Agent、ファイル追加） */
+export interface DocSyncPayload {
+  filename: string;
+  content: string;  // base64 エンコード
+  mimeType: string;
+}
+
+/** ドキュメント削除ペイロード（サーバー → Agent） */
+export interface DocDeletePayload {
+  filename: string;
 }
 
 export interface ServerPongPayload {

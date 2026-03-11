@@ -12,6 +12,7 @@ import { authRoutes } from './routes/auth.js';
 import { apiRoutes } from './routes/api.js';
 import { publicApiRoutes } from './routes/public-api.js';
 import { registerDocumentApiRoutes } from './routes/document-api.js';
+import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
 import { decrypt } from './services/user-settings.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
@@ -43,6 +44,7 @@ async function main() {
   await app.register(authRoutes);
   await app.register(apiRoutes);
   registerDocumentApiRoutes(app);  // Agent 向けドキュメント検索 API（マシントークン認証）
+  registerAgentDocumentApiRoutes(app);  // エージェントドキュメント CRUD API（WebUI 認証）
 
   // Agent WebSocket endpoint
   app.register(async (fastify) => {

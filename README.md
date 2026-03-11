@@ -25,6 +25,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Multi-Provider AI**: Register OpenAI, Anthropic, Gemini API keys with per-feature provider selection
 - **Agreement Template Editor**: Customize AI rules from Settings page
 - **Message File Storage**: Attached files stored in DB (PostgreSQL bytea) with inline image preview and lightbox
+- **Agent Doc Folder**: Upload documents via DocPanel, auto-synced to agent filesystem via WebSocket
 - **Soft Delete**: Machine deletion preserves all conversation history
 - **Kill Command**: Cancel running AI process mid-execution from chat
 - **Remote Config**: Configure agent project search paths from WebUI (auto-sync via WebSocket)
@@ -76,7 +77,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#129)
+│   ├── changelog.md      # Implementation history (#1-#150)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -444,6 +445,10 @@ agents/windows/
 - [x] Chat history persistence - session restoration across page reload, cursor-based pagination, infinite scroll
 - [x] Discord-style chat layout - left-aligned messages, colored usernames, avatar images, chat display settings
 - [x] Image attachment preview - inline preview with lightbox, history image display via `/api/files/:id`
+- [x] Testflight command - automated service creation
+- [x] Agent Doc Folder - file sync from DocPanel to agent local filesystem (`~/.devrelay/docs/`) via WebSocket
+- [x] Resume startup timeout - auto-retry without `--resume` when Claude Code hangs on stale sessions
+- [x] Dynamic remote branch detection - `u` command detects default branch instead of hardcoding `origin/main`
 - [ ] LINE Bot
 - [ ] Team Features
 - [ ] AI tool switching (Gemini/Aider)

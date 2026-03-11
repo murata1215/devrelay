@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo } from '../hooks/useWebSocket';
-import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, getToken, type Machine } from '../lib/api';
+import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
 /** 添付ファイル型 */
@@ -869,13 +869,188 @@ function Sidebar({
 }
 
 // ---------------------------------------------------------------------------
-// セッション情報パネル（右サイド）
+// ドキュメントパネル（右サイド）
 // ---------------------------------------------------------------------------
 
-/** セッション情報パネル（右サイドバー） */
-function SessionInfoPanel(_props: { sessionId: string | null; refreshTrigger: number }) {
+/** ファイルサイズをフォーマット（1024B → 1.0KB） */
+function formatDocSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+/** エージェントドキュメントパネル（右サイドバー） */
+function DocPanel({ machineId, machineDisplayName }: { machineId: string | null; machineDisplayName: string }) {
+  const [documents, setDocuments] = useState<AgentDocMeta[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /** ドキュメント一覧を取得 */
+  const fetchDocuments = useCallback(async () => {
+    if (!machineId) { setDocuments([]); return; }
+    setLoading(true);
+    try {
+      const res = await agentDocuments.list(machineId);
+      setDocuments(res.documents);
+    } catch (err) {
+      console.error('Failed to fetch documents:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [machineId]);
+
+  useEffect(() => { fetchDocuments(); }, [fetchDocuments]);
+
+  /** ファイルをアップロード */
+  const handleUpload = useCallback(async (files: FileList | File[]) => {
+    if (!machineId || files.length === 0) return;
+    setUploading(true);
+    try {
+      const filePayloads = await Promise.all(
+        Array.from(files).map(async (file) => {
+          const buffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(buffer);
+          let binary = '';
+          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+          return {
+            filename: file.name,
+            content: btoa(binary),
+            mimeType: file.type || 'application/octet-stream',
+            size: file.size,
+          };
+        })
+      );
+      await agentDocuments.upload(machineId, filePayloads);
+      await fetchDocuments();
+    } catch (err) {
+      console.error('Failed to upload documents:', err);
+    } finally {
+      setUploading(false);
+    }
+  }, [machineId, fetchDocuments]);
+
+  /** ドキュメントを削除 */
+  const handleDelete = useCallback(async (docId: string) => {
+    if (!machineId) return;
+    try {
+      await agentDocuments.remove(machineId, docId);
+      setDocuments(prev => prev.filter(d => d.id !== docId));
+    } catch (err) {
+      console.error('Failed to delete document:', err);
+    }
+  }, [machineId]);
+
+  // ドラッグ&ドロップハンドラ
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (dragCounterRef.current === 1) setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) setDragOver(false);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = 0;
+    setDragOver(false);
+    if (e.dataTransfer.files.length > 0) {
+      handleUpload(e.dataTransfer.files);
+    }
+  }, [handleUpload]);
+
   return (
-    <aside className="w-52 shrink-0 hidden lg:block border-l border-[var(--border-color)] bg-[var(--bg-secondary)] p-3">
+    <aside
+      className="w-52 shrink-0 hidden lg:flex flex-col border-l border-[var(--border-color)] bg-[var(--bg-secondary)]"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* ヘッダー */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
+        <span className="text-xs font-medium text-[var(--text-secondary)] truncate" title={machineDisplayName}>
+          Docs
+        </span>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!machineId || uploading}
+          className="text-xs px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
+          title="ファイルを追加"
+        >
+          +
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => { if (e.target.files) { handleUpload(e.target.files); e.target.value = ''; } }}
+        />
+      </div>
+
+      {/* ファイルリスト */}
+      <div className="flex-1 overflow-y-auto p-2">
+        {!machineId ? (
+          <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
+        ) : loading ? (
+          <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
+        ) : documents.length === 0 ? (
+          <div className={`flex items-center justify-center h-full text-xs text-center transition-colors rounded ${
+            dragOver ? 'text-[var(--text-primary)] bg-[var(--accent-color)] bg-opacity-10 border border-dashed border-[var(--accent-color)]' : 'text-[var(--text-muted)]'
+          }`}>
+            {uploading ? 'アップロード中...' : 'ドロップで\nファイル追加'}
+          </div>
+        ) : (
+          <>
+            {dragOver && (
+              <div className="text-xs text-center py-2 mb-2 rounded bg-[var(--accent-color)] bg-opacity-10 border border-dashed border-[var(--accent-color)] text-[var(--text-primary)]">
+                ドロップでアップロード
+              </div>
+            )}
+            {uploading && (
+              <div className="text-xs text-center py-1 mb-2 text-[var(--text-muted)]">アップロード中...</div>
+            )}
+            {documents.map(doc => (
+              <div
+                key={doc.id}
+                className="group flex items-center gap-1 px-1.5 py-1 rounded hover:bg-[var(--bg-tertiary)] transition-colors"
+              >
+                <a
+                  href={agentDocuments.getDownloadUrl(machineId, doc.id)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 min-w-0 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] truncate"
+                  title={`${doc.filename} (${formatDocSize(doc.size)})`}
+                >
+                  {doc.filename}
+                </a>
+                <button
+                  onClick={() => handleDelete(doc.id)}
+                  className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 text-xs transition-opacity shrink-0"
+                  title="削除"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
     </aside>
   );
 }
@@ -894,8 +1069,8 @@ export function ChatPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   /** ライトボックス表示用の画像 URL */
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
-  /** セッション情報パネル再取得トリガー */
-  const [sessionRefreshCount, setSessionRefreshCount] = useState(0);
+  /** セッション情報パネル再取得トリガー（将来の拡張用） */
+  const [, setSessionRefreshCount] = useState(0);
   /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
   const [maximized, setMaximized] = useState(false);
 
@@ -1190,6 +1365,15 @@ export function ChatPage() {
 
   // アクティブタブ取得
   const activeTab = tabs.find(t => t.projectId === activeTabId) ?? null;
+
+  // アクティブタブの machineId を machineList から導出（DocPanel 用）
+  const activeMachineId = (() => {
+    if (!activeTab) return null;
+    for (const m of machineList) {
+      if (m.projects.some(p => p.id === activeTab.projectId)) return m.id;
+    }
+    return null;
+  })();
 
   // メッセージ追加時に自動スクロール（上スクロール読み込み中・タブ切替時は抑制）
   const shouldAutoScrollRef = useRef(true);
@@ -1709,11 +1893,11 @@ export function ChatPage() {
         )}
       </div>
 
-      {/* セッション情報パネル（右サイド、大画面のみ、最大化時は非表示） */}
+      {/* ドキュメントパネル（右サイド、大画面のみ、最大化時は非表示） */}
       {!maximized && (
-        <SessionInfoPanel
-          sessionId={activeTab?.sessionId ?? null}
-          refreshTrigger={sessionRefreshCount}
+        <DocPanel
+          machineId={activeMachineId}
+          machineDisplayName={activeTab?.machineDisplayName ?? ''}
         />
       )}
 

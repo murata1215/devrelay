@@ -18,7 +18,9 @@ import type {
   HistoryExportRequestPayload,
   AiListPayload,
   AiSwitchPayload,
-  AiCancelPayload
+  AiCancelPayload,
+  DocSyncPayload,
+  DocDeletePayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -348,6 +350,14 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:agent:update':
       handleAgentUpdate();
+      break;
+
+    case 'server:doc:sync':
+      handleDocSync(message.payload);
+      break;
+
+    case 'server:doc:delete':
+      handleDocDelete(message.payload);
       break;
   }
 }
@@ -1525,6 +1535,27 @@ function getExecEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * リモートのデフォルトブランチを動的検出（origin/main, origin/master 等）
+ * git symbolic-ref → origin/main → origin/master の順で試行
+ */
+async function detectRemoteBranch(execOpts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number }): Promise<string> {
+  // 1. git symbolic-ref で origin/HEAD を確認
+  try {
+    const { stdout } = await execAsync('git symbolic-ref refs/remotes/origin/HEAD', execOpts);
+    const branch = stdout.trim().replace('refs/remotes/', '');
+    if (branch) return branch;
+  } catch {}
+  // 2. フォールバック: origin/main → origin/master の順で確認
+  for (const candidate of ['origin/main', 'origin/master']) {
+    try {
+      await execAsync(`git rev-parse --verify ${candidate}`, execOpts);
+      return candidate;
+    } catch {}
+  }
+  throw new Error('Remote default branch not found (tried origin/HEAD, origin/main, origin/master)');
+}
+
+/**
  * Server からバージョン確認リクエストを受信
  * ローカル/リモートの git コミットを比較して結果を返す
  */
@@ -1547,7 +1578,8 @@ async function handleVersionCheck() {
 
     // リモートの最新コミットを取得（fetch してから確認）
     await execAsync('git fetch origin --quiet', execOpts);
-    const { stdout: remoteRaw } = await execAsync('git log origin/main -1 --format="%H %ai"', execOpts);
+    const remoteBranch = await detectRemoteBranch(execOpts);
+    const { stdout: remoteRaw } = await execAsync(`git log ${remoteBranch} -1 --format="%H %ai"`, execOpts);
     const remoteParts = remoteRaw.trim().split(' ');
     const remoteCommit = remoteParts[0];
     const remoteDate = remoteParts.slice(1).join(' ');
@@ -1679,7 +1711,9 @@ async function handleAgentUpdate() {
       psLog('=== Update started ==='),
       `cd "${agentDir}"`,
       psRunAndLog('git fetch', 'git fetch origin'),
-      psRunAndLog('git reset', 'git reset --hard origin/main'),
+      `$remoteBranch = try { (git symbolic-ref refs/remotes/origin/HEAD 2>$null) -replace 'refs/remotes/', '' } catch { 'origin/main' }`,
+      `if (-not $remoteBranch) { $remoteBranch = 'origin/main' }`,
+      psRunAndLog('git reset', 'git reset --hard $remoteBranch'),
       psRunAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
       psRunAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
       psRunAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
@@ -1726,7 +1760,9 @@ async function handleAgentUpdate() {
       `cd "${agentDir}"`,
       log('=== Update started ==='),
       runAndLog('git fetch', 'git fetch origin'),
-      runAndLog('git reset', 'git reset --hard origin/main'),
+      `REMOTE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' || echo "origin/main")`,
+      `[ -z "$REMOTE_BRANCH" ] && REMOTE_BRANCH="origin/main"`,
+      runAndLog('git reset', 'git reset --hard $REMOTE_BRANCH'),
       runAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
       runAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
@@ -1771,4 +1807,59 @@ async function handleAgentUpdate() {
   }
 
   console.log(`🔄 Update script spawned (detached). Agent will restart shortly.`);
+}
+
+/** ドキュメント保存ディレクトリ（~/.devrelay/docs/） */
+function getDocsDir(): string {
+  return join(getConfigDir(), 'docs');
+}
+
+/**
+ * サーバーから送信されたドキュメントをローカルに保存
+ * ファイル名にパストラバーサルが含まれる場合は拒否
+ */
+async function handleDocSync(payload: DocSyncPayload) {
+  const { filename, content, mimeType } = payload;
+
+  // パストラバーサル防止
+  if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+    console.error(`❌ Doc sync rejected (unsafe filename): ${filename}`);
+    return;
+  }
+
+  const docsDir = getDocsDir();
+  await mkdir(docsDir, { recursive: true });
+  const filePath = join(docsDir, filename);
+
+  try {
+    const buffer = Buffer.from(content, 'base64');
+    await writeFile(filePath, buffer);
+    console.log(`📁 Doc synced: ${filename} (${buffer.length} bytes) → ${filePath}`);
+  } catch (err: any) {
+    console.error(`❌ Doc sync failed for ${filename}:`, err.message);
+  }
+}
+
+/**
+ * サーバーから通知されたドキュメントをローカルから削除
+ */
+async function handleDocDelete(payload: DocDeletePayload) {
+  const { filename } = payload;
+
+  // パストラバーサル防止
+  if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+    console.error(`❌ Doc delete rejected (unsafe filename): ${filename}`);
+    return;
+  }
+
+  const filePath = join(getDocsDir(), filename);
+
+  try {
+    await unlink(filePath);
+    console.log(`📁 Doc deleted: ${filename}`);
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      console.error(`❌ Doc delete failed for ${filename}:`, err.message);
+    }
+  }
 }
