@@ -6,6 +6,103 @@
 
 ## 実装済み機能
 
+### #151: PWA + Web Push 通知 (2026-03-13)
+
+#### 概要
+WebUI を PWA（Progressive Web App）化し、タブを閉じていても AI 応答完了の Push 通知を受信できるようにした。
+
+#### 変更内容
+- `vite-plugin-pwa` + `injectManifest` 方式でサービスワーカーを導入
+- VAPID キーによる Web Push API 対応（サーバー側 `push-notification-service.ts`）
+- マニフェスト + アイコン（192x192, 512x512）追加
+- `finalizeProgress` 完了時にプッシュ通知送信（fire-and-forget）
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/web/src/sw.ts` | Service Worker（push イベントハンドラ） |
+| `apps/web/vite.config.ts` | vite-plugin-pwa 設定 |
+| `apps/web/public/icons/` | PWA アイコン |
+| `apps/server/src/services/push-notification-service.ts` | VAPID + Push 送信 |
+| `apps/server/src/routes/api.ts` | Push subscription CRUD API |
+| `apps/server/src/services/user-settings.ts` | VAPID/subscription 設定管理 |
+| `packages/shared/src/types.ts` | Push 関連型定義 |
+
+### #152: チャットページスクロール修正 (2026-03-13)
+
+#### 問題
+- チャットページを開くとメッセージがページ上部（最古）に表示される
+- タブ切り替え時にスムーズスクロールのアニメーションが視認できる
+
+#### 修正内容
+- `historyJustLoadedRef` フラグ導入: 履歴ロード完了時は `behavior: 'instant'`、通常メッセージ追加時は `behavior: 'smooth'` で区別
+- タブ切り替え時も `behavior: 'instant'` に統一
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/web/src/pages/ChatPage.tsx` | `historyJustLoadedRef` 追加、スクロール動作の使い分け |
+
+### #153: モバイルキーボード修正 (2026-03-13)
+
+#### 問題
+スマホでタブ切り替え時にキーボードがポップアップしてしまう。
+
+#### 修正内容
+- タッチデバイス検出（`'ontouchstart' in window`）を追加し、タッチデバイスでは `inputRef.current?.focus()` をスキップ
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/web/src/pages/ChatPage.tsx` | タブ切り替え時のフォーカス制御 |
+
+### #154: 通知音 (2026-03-13)
+
+#### 概要
+AI 応答完了時・メッセージ送信時に Discord 風の通知音を再生する。
+
+#### 変更内容
+- `new Audio('/sounds/notification.mp3')` による音声再生
+- Settings ページにトグル追加（`devrelay-notification-sound` localStorage キー）
+- トグル ON 時にプレビュー再生
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/web/src/utils/notification-sound.ts` | 通知音ユーティリティ（再生・設定管理） |
+| `apps/web/public/sounds/notification.mp3` | 通知音ファイル |
+| `apps/web/src/pages/ChatPage.tsx` | 応答完了時・送信時に `playNotificationSound()` |
+| `apps/web/src/pages/SettingsPage.tsx` | Completion Sound トグル追加 |
+
+### #155: 複数ブラウザ間チャット同期 (2026-03-14)
+
+#### 概要
+家と会社など異なるマシンのブラウザで同じプロジェクトを開いている場合、片方でのメッセージ送信・AI 応答がもう片方にもリアルタイムで反映される。
+
+#### 実装内容
+- `web:user_message` メッセージタイプ追加（サーバー → Web クライアント）
+- AI プロンプト送信時、同セッションの他 Web 参加者にユーザーメッセージをブロードキャスト
+- `getSessionIdByChatId()` / `getSessionParticipants()` ヘルパー追加
+- AI レスポンスは既存の `finalizeProgress` で全参加者に配信
+
+#### バグ修正: Agent 再起動時の参加者マイグレーション
+- **問題**: Agent がブラウザより遅く再接続すると、`needsSessionRestart` フラグが `clearAgentRestarted` の後にセットされ、`handleAiPrompt` が新セッションを送信者のみで作成 → 他ブラウザに AI レスポンスが届かない
+- **修正**: `handleAiPrompt` の Agent 再起動パスで旧セッションの全参加者を新セッションにマイグレーション
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `packages/shared/src/types.ts` | `web:user_message` 型追加 |
+| `apps/server/src/platforms/web.ts` | ユーザーメッセージブロードキャスト + projectId 付与 |
+| `apps/server/src/services/session-manager.ts` | `getSessionParticipants()`, `getSessionIdByChatId()` 追加 |
+| `apps/server/src/services/command-handler.ts` | Agent 再起動時の参加者マイグレーション |
+| `apps/web/src/hooks/useWebSocket.ts` | `web:user_message` ハンドラ追加 |
+
 ### Phase 1: 基本機能 (2026-01-17)
 
 #### 1. Discord Bot 連携

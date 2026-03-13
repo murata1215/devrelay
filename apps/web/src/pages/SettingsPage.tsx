@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { settings, platforms, services, agreementTemplate, allowedTools, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificationSound } from '../utils/notification-sound';
 
 /** API キーフィールドの定義 */
 interface ApiKeyFieldDef {
@@ -107,6 +108,9 @@ export function SettingsPage() {
   const [linkCode, setLinkCode] = useState('');
   const [linking, setLinking] = useState(false);
   const [unlinking, setUnlinking] = useState<string | null>(null);
+
+  // 通知音設定
+  const [soundEnabled, setSoundEnabled] = useState(() => isNotificationSoundEnabled());
 
   // チャット表示設定（localStorage）
   const fallbackName = user?.name || user?.email || 'User';
@@ -1225,6 +1229,26 @@ export function SettingsPage() {
               <p className="text-sm text-[var(--text-secondary)]">How can I help you?</p>
             </div>
           </div>
+        </div>
+
+        {/* 通知音 */}
+        <h3 className="text-sm font-semibold text-[var(--text-secondary)] mt-6 mb-3">Notification</h3>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm text-[var(--text-primary)]">Completion Sound</p>
+            <p className="text-xs text-[var(--text-muted)]">AI の応答完了時に通知音を鳴らす</p>
+          </div>
+          <button
+            onClick={() => {
+              const next = !soundEnabled;
+              setSoundEnabled(next);
+              setNotificationSoundEnabled(next);
+              if (next) playNotificationSound();
+            }}
+            className={`relative w-11 h-6 rounded-full transition-colors ${soundEnabled ? 'bg-[var(--accent-blue)]' : 'bg-[var(--bg-tertiary)]'}`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${soundEnabled ? 'translate-x-5' : ''}`} />
+          </button>
         </div>
 
         {/* リセットボタン */}

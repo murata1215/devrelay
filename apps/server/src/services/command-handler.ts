@@ -29,7 +29,8 @@ import {
   startProgressTracking,
   stopProgressTracking,
   sendMessage,
-  getActiveSessions
+  getActiveSessions,
+  getSessionParticipants
 } from './session-manager.js';
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
@@ -1242,9 +1243,11 @@ async function handleAiPrompt(
   if (isAgentRestarted(context.currentMachineId)) {
     console.log(`🔄 Agent was restarted, re-establishing session for ${context.currentMachineId}`);
 
+    // 旧セッションの全参加者を取得（新セッションへのマイグレーション用）
+    const oldParticipants = getSessionParticipants(context.currentSessionId);
+
     // 旧セッションの進捗トラッカーをクリーンアップ
     stopProgressTracking(context.currentSessionId);
-    removeParticipant(context.currentSessionId, context.platform, context.chatId);
 
     // DB から旧セッションのプロジェクト情報を取得
     const oldSession = await prisma.session.findUnique({
@@ -1264,6 +1267,13 @@ async function handleAiPrompt(
       oldSession.projectId,
       oldSession.aiTool
     );
+
+    // 旧セッションの全参加者を新セッションにマイグレーション（他ブラウザも含む）
+    for (const p of oldParticipants) {
+      addParticipant(newSessionId, p.platform, p.chatId);
+      removeParticipant(context.currentSessionId, p.platform, p.chatId);
+    }
+    // 送信者が旧セッションに含まれていなかった場合のフォールバック
     addParticipant(newSessionId, context.platform, context.chatId);
 
     // Agent に server:session:start を送信（Agent 側の sessionInfoMap を初期化）

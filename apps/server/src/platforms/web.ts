@@ -3,7 +3,7 @@ import type { WebSocket } from 'ws';
 import type { FileAttachment, WebClientMessage } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
-import { getActiveProgressForChatId } from '../services/session-manager.js';
+import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants } from '../services/session-manager.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -119,6 +119,26 @@ export async function setupWebClientWebSocket(
 
           const command = await parseCommandWithNLP(text || '', context);
           console.log(`📨 Web: executing command type=${command.type}, input="${(text || '').substring(0, 50)}"`);
+
+          // AI プロンプト送信時、同じセッションの他 Web クライアントにユーザーメッセージをブロードキャスト
+          if (command.type === 'ai:prompt') {
+            const sessionId = getSessionIdByChatId(chatId);
+            if (sessionId) {
+              const participants = getSessionParticipants(sessionId);
+              for (const p of participants) {
+                if (p.platform === 'web' && p.chatId !== chatId) {
+                  const otherWs = webClients.get(p.chatId);
+                  if (otherWs && otherWs.readyState === otherWs.OPEN) {
+                    sendJson(otherWs, {
+                      type: 'web:user_message',
+                      payload: { content: text || '', files: msg.payload.files, projectId: context.lastProjectId },
+                    });
+                  }
+                }
+              }
+            }
+          }
+
           const response = await executeCommand(command, context, msg.payload.files);
           console.log(`📨 Web: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 

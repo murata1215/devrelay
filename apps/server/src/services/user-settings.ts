@@ -39,6 +39,8 @@ export const SettingKeys = {
   TAB_ORDER: 'tab_order',
   /** タブカスタム名（projectId → 名前のマッピング、JSON 文字列） */
   TAB_NAMES: 'tab_names',
+  /** プッシュ通知購読情報（JSON 配列） */
+  PUSH_SUBSCRIPTIONS: 'push_subscriptions',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

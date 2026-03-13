@@ -11,6 +11,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ConversationsPage } from './pages/ConversationsPage';
 import { ChatPage } from './pages/ChatPage';
 import { DevReportsPage } from './pages/DevReportsPage';
+import { NotificationBanner } from './components/NotificationBanner';
 
 /**
  * 認証済みページのコンテンツ
@@ -38,6 +39,7 @@ function ProtectedContent() {
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       )}
+      <NotificationBanner />
     </Layout>
   );
 }

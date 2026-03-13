@@ -21,10 +21,24 @@ import {
   sendWebMessageWithId,
   editWebMessage
 } from '../platforms/web.js';
+import { sendPushNotificationForSession } from './push-notification-service.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
 const sessionParticipants = new Map<string, Array<{ platform: Platform; chatId: string }>>();
+
+/** 指定セッションの参加者一覧を取得 */
+export function getSessionParticipants(sessionId: string): Array<{ platform: Platform; chatId: string }> {
+  return sessionParticipants.get(sessionId) || [];
+}
+
+/** chatId が参加しているセッション ID を逆引き */
+export function getSessionIdByChatId(chatId: string): string | null {
+  for (const [sessionId, participants] of sessionParticipants) {
+    if (participants.some(p => p.chatId === chatId)) return sessionId;
+  }
+  return null;
+}
 
 // Progress tracking for streaming output
 interface MessageInfo {
@@ -452,6 +466,9 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
   }
 
   progressTrackers.delete(sessionId);
+
+  // Web プッシュ通知（タブが閉じていても届く）
+  sendPushNotificationForSession(sessionId, messageToSend).catch(() => {});
 }
 
 export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[], projectId?: string | null) {

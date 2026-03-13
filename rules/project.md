@@ -131,7 +131,9 @@ devrelay/
 
 - `needsSessionRestart` Set（machineId ベース）で Agent 再接続を検知
 - `handleAiPrompt()`/`handleExec()` でフラグ確認 → 新セッション作成 + `server:session:start` 再送
+- **参加者マイグレーション**: 新セッション作成時、旧セッションの全参加者を新セッションに引き継ぐ（#155 で追加）。送信者のみ引き継ぐと他ブラウザに AI レスポンスが届かない
 - `handleProjectConnect()` でフラグクリア（自動再接続時の二重作成防止）
+- **レースコンディション注意**: ブラウザが Agent より先に再接続すると `clearAgentRestarted` → `needsSessionRestart.add` の順になり、フラグが残る。参加者マイグレーションでこのケースに対応
 - `handleAgentDisconnect()` で stale WebSocket 判定（Race Condition 防止）
 - `sendToAgent()` で CLOSED な WebSocket を検出時に自動クリーンアップ（stale 参照の自己修復）
 - `handleAgentConnect()` で旧 WebSocket が残っていれば `terminate()` で即座に破棄（`close()` はハンドシェイク待ちで stuck するため不可）

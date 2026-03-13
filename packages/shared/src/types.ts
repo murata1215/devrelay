@@ -511,5 +511,6 @@ export type ServerToWebMessage =
   | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string } }
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
+  | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };

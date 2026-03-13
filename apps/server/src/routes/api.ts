@@ -17,6 +17,11 @@ import {
   unlinkPlatform,
 } from '../services/platform-link.js';
 import { encodeToken } from '@devrelay/shared';
+import {
+  getVapidPublicKey,
+  savePushSubscription,
+  removePushSubscription,
+} from '../services/push-notification-service.js';
 
 const execAsync = promisify(exec);
 
@@ -1607,6 +1612,46 @@ export async function apiRoutes(app: FastifyInstance) {
     // DevReportEntry は onDelete: Cascade で自動削除
     await prisma.devReport.delete({ where: { id } });
 
+    return reply.send({ success: true });
+  });
+
+  // ─── プッシュ通知 API ───
+
+  /** VAPID 公開鍵を返す（クライアントが購読登録に使用） */
+  app.get('/api/push/vapid-key', { preHandler: [authenticate] }, async (_request, reply) => {
+    const key = getVapidPublicKey();
+    if (!key) {
+      return reply.status(503).send({ error: 'Push notifications not configured' });
+    }
+    return reply.send({ publicKey: key });
+  });
+
+  /** プッシュ通知購読を登録 */
+  app.post('/api/push/subscribe', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).userId as string;
+    const { subscription, browser } = request.body as {
+      subscription: { endpoint: string; keys: { p256dh: string; auth: string } };
+      browser?: string;
+    };
+
+    if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+      return reply.status(400).send({ error: 'Invalid subscription' });
+    }
+
+    await savePushSubscription(userId, subscription, browser);
+    return reply.send({ success: true });
+  });
+
+  /** プッシュ通知購読を解除 */
+  app.post('/api/push/unsubscribe', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).userId as string;
+    const { endpoint } = request.body as { endpoint: string };
+
+    if (!endpoint) {
+      return reply.status(400).send({ error: 'Endpoint required' });
+    }
+
+    await removePushSubscription(userId, endpoint);
     return reply.send({ success: true });
   });
 }

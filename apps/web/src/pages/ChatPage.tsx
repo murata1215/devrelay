@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type Clip
 import { useWebSocket, type ChatMessage, type ProgressInfo } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { playNotificationSound } from '../utils/notification-sound';
 
 /** 添付ファイル型 */
 interface FileAttachment {
@@ -1165,6 +1166,7 @@ export function ChatPage() {
       // 履歴読み込み完了後、アクティブタブなら自動スクロールを有効化
       // rAF 内だと React の useEffect より後に実行されるため、同期的にセットする
       if (activeTabIdRef.current === projectId) {
+        historyJustLoadedRef.current = true;
         shouldAutoScrollRef.current = true;
       }
     } catch {
@@ -1174,6 +1176,7 @@ export function ChatPage() {
 
       // エラー時もスクロール復元
       if (activeTabIdRef.current === projectId) {
+        historyJustLoadedRef.current = true;
         shouldAutoScrollRef.current = true;
       }
     }
@@ -1231,9 +1234,12 @@ export function ChatPage() {
       ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
       : activeTabIdRef.current;
     if (!targetId) return;
-    setTabs(prev => prev.map(t =>
-      t.projectId === targetId ? { ...t, progress: null, completed: t.progress !== null } : t
-    ));
+    setTabs(prev => prev.map(t => {
+      if (t.projectId !== targetId) return t;
+      // progress が null でない = AI が動いていた → 通知音を再生
+      if (t.progress !== null) playNotificationSound();
+      return { ...t, progress: null, completed: t.progress !== null };
+    }));
     // AI 応答完了 → セッション情報パネルを再取得
     setSessionRefreshCount(c => c + 1);
   }, []);
@@ -1379,18 +1385,31 @@ export function ChatPage() {
   const shouldAutoScrollRef = useRef(true);
   /** プログラムによるスムーズスクロール中のガードタイムスタンプ */
   const autoScrollingUntilRef = useRef(0);
+  /** 履歴ロード直後フラグ（instant スクロール用） */
+  const historyJustLoadedRef = useRef(false);
   useEffect(() => {
     if (shouldAutoScrollRef.current) {
-      autoScrollingUntilRef.current = Date.now() + 500;
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      const useInstant = historyJustLoadedRef.current;
+      historyJustLoadedRef.current = false;
+      if (useInstant) {
+        // 履歴ロード直後はアニメーションなしで即座に最下部へ
+        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+      } else {
+        // 通常の新メッセージ到着時は smooth スクロール
+        autoScrollingUntilRef.current = Date.now() + 500;
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
     }
   }, [activeTab?.messages, activeTab?.progress]);
 
-  // タブ切替時は instant で最下部に移動（アニメーションなし）+ 入力フォーカス
+  // タブ切替時は instant で最下部に移動（アニメーションなし）
   useEffect(() => {
     shouldAutoScrollRef.current = false;
     messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
-    inputRef.current?.focus();
+    // タッチデバイスでは focus しない（キーボードが開くのを防ぐ）
+    if (!('ontouchstart' in window)) {
+      inputRef.current?.focus();
+    }
   }, [activeTabId]);
 
   /** 古いメッセージを追加読み込み（ページネーション） */
@@ -1636,6 +1655,7 @@ export function ChatPage() {
       ));
     }
 
+    playNotificationSound();
     sendCommand(sendText, hasFiles ? pendingFiles : undefined);
     setInput('');
     setPendingFiles([]);

@@ -14,6 +14,7 @@ import { publicApiRoutes } from './routes/public-api.js';
 import { registerDocumentApiRoutes } from './routes/document-api.js';
 import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
 import { decrypt } from './services/user-settings.js';
+import { initVapid } from './services/push-notification-service.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -31,6 +32,9 @@ async function main() {
   // Restore session participants from ChannelSession
   // (So users can continue conversations after server restart)
   await restoreSessionParticipants();
+
+  // Web Push 通知の VAPID キー初期化
+  initVapid();
 
   // Plugins
   await app.register(cors, { origin: true });

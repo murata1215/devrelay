@@ -6,6 +6,7 @@ type ServerToWebMessage =
   | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
+  | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };
 
@@ -125,6 +126,10 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
               break;
             case 'web:session_info':
               cb?.onSessionInfo?.(msg.payload.projectId, msg.payload.sessionId);
+              break;
+            case 'web:user_message':
+              // 他タブ/ウィンドウからのユーザーメッセージ
+              cb?.onMessage?.({ role: 'user', content: msg.payload.content, files: msg.payload.files }, msg.payload.projectId);
               break;
             case 'web:error':
               cb?.onMessage?.({ role: 'system', content: `❌ ${msg.payload.error}` });

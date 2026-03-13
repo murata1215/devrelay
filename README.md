@@ -33,6 +33,9 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Allowed Tools Management**: Edit plan mode allowed tools from WebUI Settings page (Linux/Windows side-by-side, real-time sync to agents)
 - **Remote Agent Update**: Update agents remotely via `u` command with version check and completion notification
 - **Dev Reports**: AI-generated development reports from conversation history (multi-provider, markdown export)
+- **PWA + Push Notifications**: Install as app, receive push notifications when AI completes (even with tab closed)
+- **Completion Sound**: Discord-like notification sound on AI response completion (customizable mp3)
+- **Multi-Browser Sync**: Chat syncs across browsers in real-time via server-side WebSocket broadcast
 
 ## 💡 Token Efficiency
 
