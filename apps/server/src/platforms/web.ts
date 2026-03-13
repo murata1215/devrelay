@@ -120,8 +120,8 @@ export async function setupWebClientWebSocket(
           const command = await parseCommandWithNLP(text || '', context);
           console.log(`📨 Web: executing command type=${command.type}, input="${(text || '').substring(0, 50)}"`);
 
-          // AI プロンプト送信時、同じセッションの他 Web クライアントにユーザーメッセージをブロードキャスト
-          if (command.type === 'ai:prompt') {
+          // 同じセッションの他 Web クライアントにユーザーメッセージをブロードキャスト（全コマンド対象）
+          {
             const sessionId = getSessionIdByChatId(chatId);
             if (sessionId) {
               const participants = getSessionParticipants(sessionId);
