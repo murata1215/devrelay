@@ -142,9 +142,23 @@ export async function setupWebClientWebSocket(
           const response = await executeCommand(command, context, msg.payload.files);
           console.log(`📨 Web: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 
-          // レスポンスがある場合は送信（進捗トラッキング中は空になる）
+          // レスポンスがある場合は同じセッションの全 Web クライアントにブロードキャスト
           if (response) {
-            sendJson(ws, { type: 'web:response', payload: { message: response } });
+            const sessionId = getSessionIdByChatId(chatId);
+            if (sessionId) {
+              const participants = getSessionParticipants(sessionId);
+              for (const p of participants) {
+                if (p.platform === 'web') {
+                  const targetWs = webClients.get(p.chatId);
+                  if (targetWs && targetWs.readyState === targetWs.OPEN) {
+                    sendJson(targetWs, { type: 'web:response', payload: { message: response } });
+                  }
+                }
+              }
+            } else {
+              // セッション未参加（参加前のコマンド等）は送信元のみに返す
+              sendJson(ws, { type: 'web:response', payload: { message: response } });
+            }
           }
           break;
         }
