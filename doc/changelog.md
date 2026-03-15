@@ -6,6 +6,19 @@
 
 ## 実装済み機能
 
+### #161: macOS エージェントへの allowedTools 設定プッシュ修正 + プランモードスキル指示 (2026-03-16)
+
+#### 概要
+WebUI Settings で allowedTools を更新しても macOS（darwin）エージェントに設定がプッシュされないバグを修正。また、プランモードで Skill ツールがブロックされる問題に対し、Bash 経由でスキルを直接実行する指示を追加。
+
+#### 変更内容
+
+**Server:**
+- `agent-manager.ts`: `pushAllowedToolsToAgents()` の OS フィルタ修正。`osValue === 'linux'` 比較では `darwin`（macOS）がスキップされるため、`isWindowsAgent` 判定に変更。Linux 設定を `linux` + `darwin` 両方に配信
+
+**Agent:**
+- `output-collector.ts`（Linux/macOS）: `PLAN_MODE_INSTRUCTION` にスキルは Bash 経由で実行する指示を追加。Skill ツール → ブロック → Bash フォールバックの無駄なステップを回避
+
 ### #160: Team ページ — チーム管理 + ask コマンド (2026-03-16)
 
 #### 概要

@@ -1084,8 +1084,6 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
  * Settings ページで allowedTools を変更した際に呼び出す
  */
 export async function pushAllowedToolsToAgents(userId: string, os: 'linux' | 'windows', tools: string[] | null) {
-  const osValue = os === 'windows' ? 'win32' : 'linux';
-
   // ユーザーが所有するオンライン Machine を取得
   const machines = await prisma.machine.findMany({
     where: { userId, deletedAt: null },
@@ -1097,8 +1095,11 @@ export async function pushAllowedToolsToAgents(userId: string, os: 'linux' | 'wi
     if (!connectedAgents.has(machine.id)) continue;
 
     // managementInfo.os が一致する Agent のみ配信
+    // Linux 設定は linux + darwin（macOS）に配信（handleAgentConnect と同じロジック）
     const info = machine.managementInfo as ManagementInfo | null;
-    if (info?.os !== osValue) continue;
+    const isWindowsAgent = info?.os === 'win32';
+    if (os === 'windows' && !isWindowsAgent) continue;
+    if (os === 'linux' && isWindowsAgent) continue;
 
     pushConfigUpdate(machine.id, { allowedTools: tools });
   }

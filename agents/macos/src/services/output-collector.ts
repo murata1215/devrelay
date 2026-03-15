@@ -164,6 +164,7 @@ export const PLAN_MODE_INSTRUCTION = `
 - 実装プランの立案
 - 質問や確認
 - ログ確認（pm2 logs, journalctl, git status 等の読み取り専用コマンドは実行可能）
+- スキルは Skill ツールではなく Bash で直接実行（例: \`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --list\`）
 
 プランが完成したら、最後に必ず以下のように伝えてください：
 「このプランでよければ \`e\` または \`exec\` を送信してください。実装を開始します。」
