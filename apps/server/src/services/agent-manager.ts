@@ -46,6 +46,9 @@ const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload
 // ask-member API が一時セッションの完了を待つために使用
 const pendingCrossQueries = new Map<string, HistoryRequest<{ output: string; files?: FileAttachment[] }>>();
 
+// プロジェクトファイル読み取り要求の待機: requestId → { resolve, reject, timeout }
+const pendingFileReadRequests = new Map<string, HistoryRequest<{ content: string | null; error?: string }>>();
+
 // Agent ローカルの projectsDirs: machineId -> string[]（接続時に報告される）
 const agentLocalProjectsDirs = new Map<string, string[]>();
 
@@ -157,6 +160,10 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:update:status':
           await handleUpdateStatus(message.payload);
+          break;
+
+        case 'agent:project:file:content':
+          handleProjectFileContent(message.payload);
           break;
       }
     } catch (err) {
@@ -750,6 +757,21 @@ async function handleHistoryExport(payload: { machineId: string; projectPath: st
     } else {
       pending.resolve(zipContent);
       console.log(`📦 History export received for request ${requestId}`);
+    }
+  }
+}
+
+/** Agent からのプロジェクトファイル読み取り結果を処理 */
+function handleProjectFileContent(payload: { machineId: string; requestId: string; content: string | null; error?: string }) {
+  const { requestId, content, error } = payload;
+  const pending = pendingFileReadRequests.get(requestId);
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingFileReadRequests.delete(requestId);
+    if (error) {
+      pending.reject(new Error(error));
+    } else {
+      pending.resolve({ content, error });
     }
   }
 }
@@ -1386,6 +1408,43 @@ export function requestHistoryExport(machineId: string, projectPath: string, dat
     sendToAgent(ws, {
       type: 'server:history:export',
       payload: { projectPath, requestId, date }
+    });
+  });
+}
+
+// -----------------------------------------------------------------------------
+// Project File Read API
+// -----------------------------------------------------------------------------
+
+const FILE_READ_TIMEOUT = 15000; // 15 seconds
+
+/**
+ * Agent にプロジェクト内ファイルの読み取りを要求
+ */
+export function requestProjectFileRead(
+  machineId: string,
+  projectPath: string,
+  filePath: string,
+): Promise<{ content: string | null; error?: string }> {
+  return new Promise((resolve, reject) => {
+    const ws = connectedAgents.get(machineId);
+    if (!ws || ws.readyState !== ws.OPEN) {
+      reject(new Error('Agent is not connected'));
+      return;
+    }
+
+    const requestId = `file-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+    const timeout = setTimeout(() => {
+      pendingFileReadRequests.delete(requestId);
+      reject(new Error('Request timed out'));
+    }, FILE_READ_TIMEOUT);
+
+    pendingFileReadRequests.set(requestId, { resolve, reject, timeout });
+
+    sendToAgent(ws, {
+      type: 'server:project:file:read',
+      payload: { projectPath, filePath, requestId },
     });
   });
 }

@@ -880,14 +880,140 @@ function formatDocSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+/** マークダウン簡易レンダリング（Issues 表示用） */
+function renderMarkdown(content: string) {
+  const lines = content.split('\n');
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // コードブロック
+    if (line.startsWith('```')) {
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing ```
+      elements.push(
+        <pre key={elements.length} className="bg-[var(--bg-base)] rounded p-2 my-1 overflow-x-auto text-xs">
+          <code>{codeLines.join('\n')}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    // 見出し
+    const headingMatch = line.match(/^(#{1,3})\s+(.+)/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const text = headingMatch[2];
+      const cls = level === 1 ? 'text-sm font-bold mt-3 mb-1' : level === 2 ? 'text-xs font-bold mt-2 mb-1' : 'text-xs font-semibold mt-1.5 mb-0.5';
+      elements.push(<div key={elements.length} className={`${cls} text-[var(--text-primary)]`}>{renderInline(text)}</div>);
+      i++;
+      continue;
+    }
+
+    // チェックボックス行
+    const checkMatch = line.match(/^[-*]\s+\[([ x~])\]\s*(.*)/);
+    if (checkMatch) {
+      const status = checkMatch[1];
+      const text = checkMatch[2];
+      const icon = status === 'x' ? '✅' : status === '~' ? '🔄' : '⬜';
+      const textCls = status === 'x' ? 'line-through text-[var(--text-muted)]' : 'text-[var(--text-secondary)]';
+      elements.push(
+        <div key={elements.length} className="flex gap-1 py-0.5 text-xs">
+          <span className="shrink-0">{icon}</span>
+          <span className={textCls}>{renderInline(text)}</span>
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // 通常のリスト項目
+    const listMatch = line.match(/^[-*]\s+(.*)/);
+    if (listMatch) {
+      elements.push(
+        <div key={elements.length} className="flex gap-1 py-0.5 text-xs text-[var(--text-secondary)]">
+          <span className="shrink-0">•</span>
+          <span>{renderInline(listMatch[1])}</span>
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // 区切り線
+    if (/^---+$/.test(line.trim())) {
+      elements.push(<hr key={elements.length} className="border-[var(--border-color)] my-2" />);
+      i++;
+      continue;
+    }
+
+    // 空行
+    if (line.trim() === '') {
+      elements.push(<div key={elements.length} className="h-1" />);
+      i++;
+      continue;
+    }
+
+    // 通常テキスト
+    elements.push(<div key={elements.length} className="text-xs text-[var(--text-secondary)] py-0.5">{renderInline(line)}</div>);
+    i++;
+  }
+
+  return elements;
+}
+
+/** インラインマークダウン（太字、インラインコード、リンク） */
+function renderInline(text: string): React.ReactNode {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return <code key={i} className="bg-[var(--bg-tertiary)] px-1 rounded text-xs">{part.slice(1, -1)}</code>;
+    }
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (linkMatch) {
+      return <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" className="text-[var(--accent-blue)] hover:underline">{linkMatch[1]}</a>;
+    }
+    return part;
+  });
+}
+
+type DocPanelTab = 'docs' | 'issues';
+
 /** エージェントドキュメントパネル（右サイドバー） */
-function DocPanel({ machineId, machineDisplayName }: { machineId: string | null; machineDisplayName: string }) {
+function DocPanel({ machineId, projectId }: { machineId: string | null; machineDisplayName: string; projectId: string | null }) {
   const [documents, setDocuments] = useState<AgentDocMeta[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // タブ状態
+  const [activePanel, setActivePanel] = useState<DocPanelTab>('docs');
+
+  // Issues 状態
+  const [issuesContent, setIssuesContent] = useState<string | null>(null);
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issuesError, setIssuesError] = useState<string | null>(null);
+
+  // リサイズ状態
+  const [panelWidth, setPanelWidth] = useState(() => {
+    const saved = localStorage.getItem('devrelay-panel-width');
+    return saved ? parseInt(saved, 10) : 208;
+  });
+  const [resizing, setResizing] = useState(false);
+  const panelWidthRef = useRef(panelWidth);
+  panelWidthRef.current = panelWidth;
 
   /** ドキュメント一覧を取得 */
   const fetchDocuments = useCallback(async () => {
@@ -904,6 +1030,30 @@ function DocPanel({ machineId, machineDisplayName }: { machineId: string | null;
   }, [machineId]);
 
   useEffect(() => { fetchDocuments(); }, [fetchDocuments]);
+
+  /** Issues を Agent 経由で取得 */
+  const fetchIssues = useCallback(async () => {
+    if (!projectId) { setIssuesContent(null); return; }
+    setIssuesLoading(true);
+    setIssuesError(null);
+    try {
+      const res = await projectsApi.readFile(projectId, 'doc/issues.md');
+      setIssuesContent(res.content);
+    } catch (err: any) {
+      // 503 = Agent offline, それ以外はエラー表示
+      setIssuesError(err.message || 'Failed to load issues');
+      setIssuesContent(null);
+    } finally {
+      setIssuesLoading(false);
+    }
+  }, [projectId]);
+
+  // Issues タブ選択時または projectId 変更時に取得
+  useEffect(() => {
+    if (activePanel === 'issues') {
+      fetchIssues();
+    }
+  }, [activePanel, fetchIssues]);
 
   /** ファイルをアップロード */
   const handleUpload = useCallback(async (files: FileList | File[]) => {
@@ -974,85 +1124,168 @@ function DocPanel({ machineId, machineDisplayName }: { machineId: string | null;
     }
   }, [handleUpload]);
 
-  return (
-    <aside
-      className="w-52 shrink-0 hidden lg:flex flex-col border-l border-[var(--border-color)] bg-[var(--bg-secondary)]"
-      onDragEnter={handleDragEnter}
-      onDragLeave={handleDragLeave}
-      onDragOver={handleDragOver}
-      onDrop={handleDrop}
-    >
-      {/* Docs ヘッダー（アップロードボタン） */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
-        <span className="text-xs font-medium text-[var(--text-secondary)] truncate" title={machineDisplayName}>
-          Docs
-        </span>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!machineId || uploading}
-          className="text-xs px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
-          title="ファイルを追加"
-        >
-          +
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => { if (e.target.files) { handleUpload(e.target.files); e.target.value = ''; } }}
-        />
-      </div>
+  /** リサイズハンドル */
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setResizing(true);
+    const startX = e.clientX;
+    const startWidth = panelWidthRef.current;
 
-      {/* ファイルリスト */}
-      <div className="flex-1 overflow-y-auto p-2">
-          {!machineId ? (
-            <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
-          ) : loading ? (
-            <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
-          ) : documents.length === 0 ? (
-            <div className={`flex items-center justify-center h-full text-xs text-center transition-colors rounded ${
-              dragOver ? 'text-[var(--text-primary)] bg-[var(--accent-blue)] bg-opacity-10 border border-dashed border-[var(--accent-blue)]' : 'text-[var(--text-muted)]'
-            }`}>
-              {uploading ? 'アップロード中...' : 'ドロップで\nファイル追加'}
-            </div>
-          ) : (
-            <>
-              {dragOver && (
-                <div className="text-xs text-center py-2 mb-2 rounded bg-[var(--accent-blue)] bg-opacity-10 border border-dashed border-[var(--accent-blue)] text-[var(--text-primary)]">
-                  ドロップでアップロード
-                </div>
-              )}
-              {uploading && (
-                <div className="text-xs text-center py-1 mb-2 text-[var(--text-muted)]">アップロード中...</div>
-              )}
-              {documents.map(doc => (
-                <div
-                  key={doc.id}
-                  className="group flex items-center gap-1 px-1.5 py-1 rounded hover:bg-[var(--bg-tertiary)] transition-colors"
-                >
-                  <a
-                    href={agentDocuments.getDownloadUrl(machineId, doc.id)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex-1 min-w-0 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] truncate"
-                    title={`${doc.filename} (${formatDocSize(doc.size)})`}
-                  >
-                    {doc.filename}
-                  </a>
-                  <button
-                    onClick={() => handleDelete(doc.id)}
-                    className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 text-xs transition-opacity shrink-0"
-                    title="削除"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </>
+    const handleMouseMove = (e: MouseEvent) => {
+      // 右端パネルなので左にドラッグ = 幅拡大
+      const delta = startX - e.clientX;
+      const newWidth = Math.max(160, Math.min(600, startWidth + delta));
+      setPanelWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      setResizing(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      localStorage.setItem('devrelay-panel-width', String(panelWidthRef.current));
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, []);
+
+  return (
+    <>
+      {/* リサイズ中のオーバーレイ（テキスト選択防止） */}
+      {resizing && <div className="fixed inset-0 z-50 cursor-col-resize" />}
+
+      <aside
+        style={{ width: panelWidth }}
+        className="shrink-0 hidden lg:flex flex-col border-l border-[var(--border-color)] bg-[var(--bg-secondary)] relative"
+        onDragEnter={activePanel === 'docs' ? handleDragEnter : undefined}
+        onDragLeave={activePanel === 'docs' ? handleDragLeave : undefined}
+        onDragOver={activePanel === 'docs' ? handleDragOver : undefined}
+        onDrop={activePanel === 'docs' ? handleDrop : undefined}
+      >
+        {/* リサイズハンドル */}
+        <div
+          className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[var(--accent-blue)] hover:opacity-50 z-10"
+          onMouseDown={handleResizeStart}
+        />
+
+        {/* タブヘッダー */}
+        <div className="flex items-center border-b border-[var(--border-color)]">
+          <button
+            onClick={() => setActivePanel('docs')}
+            className={`flex-1 text-xs py-2 text-center transition-colors ${
+              activePanel === 'docs'
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+            }`}
+          >
+            Docs
+          </button>
+          <button
+            onClick={() => setActivePanel('issues')}
+            className={`flex-1 text-xs py-2 text-center transition-colors ${
+              activePanel === 'issues'
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+            }`}
+          >
+            Issues
+          </button>
+          {activePanel === 'docs' && (
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!machineId || uploading}
+              className="text-xs px-1.5 py-0.5 mr-1 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
+              title="ファイルを追加"
+            >
+              +
+            </button>
           )}
+          {activePanel === 'issues' && (
+            <button
+              onClick={fetchIssues}
+              disabled={!projectId || issuesLoading}
+              className="text-xs px-1.5 py-0.5 mr-1 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
+              title="更新"
+            >
+              ↻
+            </button>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => { if (e.target.files) { handleUpload(e.target.files); e.target.value = ''; } }}
+          />
         </div>
-    </aside>
+
+        {/* Issues タブ */}
+        {activePanel === 'issues' ? (
+          <div className="flex-1 overflow-y-auto p-2">
+            {!projectId ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
+            ) : issuesLoading ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
+            ) : issuesError ? (
+              <p className="text-xs text-red-400 text-center mt-4">{issuesError}</p>
+            ) : issuesContent === null ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">doc/issues.md が見つかりません</p>
+            ) : (
+              <div className="leading-relaxed">{renderMarkdown(issuesContent)}</div>
+            )}
+          </div>
+        ) : (
+          /* Docs タブ */
+          <div className="flex-1 overflow-y-auto p-2">
+            {!machineId ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
+            ) : loading ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
+            ) : documents.length === 0 ? (
+              <div className={`flex items-center justify-center h-full text-xs text-center transition-colors rounded ${
+                dragOver ? 'text-[var(--text-primary)] bg-[var(--accent-blue)] bg-opacity-10 border border-dashed border-[var(--accent-blue)]' : 'text-[var(--text-muted)]'
+              }`}>
+                {uploading ? 'アップロード中...' : 'ドロップで\nファイル追加'}
+              </div>
+            ) : (
+              <>
+                {dragOver && (
+                  <div className="text-xs text-center py-2 mb-2 rounded bg-[var(--accent-blue)] bg-opacity-10 border border-dashed border-[var(--accent-blue)] text-[var(--text-primary)]">
+                    ドロップでアップロード
+                  </div>
+                )}
+                {uploading && (
+                  <div className="text-xs text-center py-1 mb-2 text-[var(--text-muted)]">アップロード中...</div>
+                )}
+                {documents.map(doc => (
+                  <div
+                    key={doc.id}
+                    className="group flex items-center gap-1 px-1.5 py-1 rounded hover:bg-[var(--bg-tertiary)] transition-colors"
+                  >
+                    <a
+                      href={agentDocuments.getDownloadUrl(machineId, doc.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 min-w-0 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] truncate"
+                      title={`${doc.filename} (${formatDocSize(doc.size)})`}
+                    >
+                      {doc.filename}
+                    </a>
+                    <button
+                      onClick={() => handleDelete(doc.id)}
+                      className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 text-xs transition-opacity shrink-0"
+                      title="削除"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+      </aside>
+    </>
   );
 }
 
@@ -1918,6 +2151,7 @@ export function ChatPage() {
         <DocPanel
           machineId={activeMachineId}
           machineDisplayName={activeTab?.machineDisplayName ?? ''}
+          projectId={activeTab?.projectId ?? null}
         />
       )}
 

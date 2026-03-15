@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### #163: Issues タブ + リサイズ可能パネル (2026-03-16)
+
+#### 概要
+ChatPage の右サイドパネル（DocPanel）に Issues タブを追加。Agent のプロジェクト内 `doc/issues.md` を WebSocket 経由で取得し、マークダウンレンダリングして表示する。パネル左端ドラッグでのリサイズ機能も追加。
+
+#### アーキテクチャ
+WS リクエスト/レスポンスパターン: WebUI → REST API → Server → Agent (WS) → ファイル読み取り → Agent (WS) → Server → WebUI。`pendingFileReadRequests` Map で Promise を管理（`requestHistoryDates` と同パターン）。
+
+#### 変更内容
+
+**Shared:**
+- `types.ts`: `ProjectFileReadPayload` / `ProjectFileContentPayload` + WS メッセージユニオン追加
+
+**Agent (Linux + macOS):**
+- `connection.ts`: `server:project:file:read` ハンドラ追加（パストラバーサル防止付き）
+
+**Server:**
+- `agent-manager.ts`: `pendingFileReadRequests` Map + `requestProjectFileRead()` 関数（15秒タイムアウト）
+- `api.ts`: `GET /api/projects/:projectId/file?filePath=...` エンドポイント追加
+
+**WebUI:**
+- `api.ts`: `projects.readFile()` 関数追加
+- `ChatPage.tsx`: DocPanel 全面リファクタ
+  - Docs / Issues タブ切替（Issues タブで `doc/issues.md` を表示）
+  - マークダウン簡易レンダリング（見出し、チェックボックス `[ ]/[x]/[~]`、リスト、コードブロック、太字、リンク）
+  - パネル左端ドラッグでリサイズ（160px〜600px、localStorage 永続化）
+  - 更新ボタン（↻）
+
 ### #162: macOS Agent — TCC 保護ディレクトリのスキャンスキップ (2026-03-16)
 
 #### 概要

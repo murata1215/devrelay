@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, requestHistoryDates, requestHistoryExport, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
+import { getConnectedAgents, requestHistoryDates, requestHistoryExport, requestProjectFileRead, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import archiver from 'archiver';
@@ -397,6 +397,44 @@ export async function apiRoutes(app: FastifyInstance) {
         machineName: b.machine.displayName ?? b.machine.name,
       })),
     };
+  });
+
+  // ========================================
+  // プロジェクトファイル読み取り（Agent 経由）
+  // ========================================
+  app.get('/api/projects/:projectId/file', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { projectId } = request.params as { projectId: string };
+    const { filePath } = request.query as { filePath?: string };
+
+    if (!filePath) {
+      return reply.status(400).send({ error: 'filePath query parameter is required' });
+    }
+
+    // ファイルパスの基本バリデーション（パストラバーサル防止）
+    if (filePath.includes('..') || filePath.startsWith('/') || filePath.startsWith('\\')) {
+      return reply.status(400).send({ error: 'Invalid file path' });
+    }
+
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+      include: { machine: true },
+    });
+
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    if (!getConnectedAgents().has(project.machineId)) {
+      return reply.status(503).send({ error: 'Agent is offline' });
+    }
+
+    try {
+      const result = await requestProjectFileRead(project.machineId, project.path, filePath);
+      return { content: result.content };
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message || 'Failed to read project file' });
+    }
   });
 
   /**

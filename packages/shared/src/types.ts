@@ -88,7 +88,8 @@ export type AgentMessage =
   | { type: 'agent:ai:cancelled'; payload: AiCancelledPayload }
   | { type: 'agent:config:ack'; payload: { machineId: string } }
   | { type: 'agent:version:info'; payload: AgentVersionInfoPayload }
-  | { type: 'agent:update:status'; payload: AgentUpdateStatusPayload };
+  | { type: 'agent:update:status'; payload: AgentUpdateStatusPayload }
+  | { type: 'agent:project:file:content'; payload: ProjectFileContentPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -221,7 +222,8 @@ export type ServerToAgentMessage =
   | { type: 'server:agent:version-check'; payload: {} }
   | { type: 'server:agent:update'; payload: {} }
   | { type: 'server:doc:sync'; payload: DocSyncPayload }
-  | { type: 'server:doc:delete'; payload: DocDeletePayload };
+  | { type: 'server:doc:delete'; payload: DocDeletePayload }
+  | { type: 'server:project:file:read'; payload: ProjectFileReadPayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -258,6 +260,21 @@ export interface DocSyncPayload {
 /** ドキュメント削除ペイロード（サーバー → Agent） */
 export interface DocDeletePayload {
   filename: string;
+}
+
+/** Server → Agent: プロジェクト内ファイル読み取り要求 */
+export interface ProjectFileReadPayload {
+  projectPath: string;
+  filePath: string;      // 相対パス（例: "doc/issues.md"）
+  requestId: string;
+}
+
+/** Agent → Server: プロジェクト内ファイル読み取り結果 */
+export interface ProjectFileContentPayload {
+  machineId: string;
+  requestId: string;
+  content: string | null;  // ファイル内容（null = 未存在）
+  error?: string;
 }
 
 export interface ServerPongPayload {

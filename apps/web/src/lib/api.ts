@@ -178,6 +178,11 @@ export const projects = {
     return request('GET', `/projects/${projectId}/builds`);
   },
 
+  /** プロジェクト内ファイルを Agent 経由で読み取り */
+  async readFile(projectId: string, filePath: string): Promise<{ content: string | null }> {
+    return request('GET', `/projects/${projectId}/file?filePath=${encodeURIComponent(filePath)}`);
+  },
+
   /** プロジェクト横断メッセージ履歴を取得（全セッション横断、カーソルベースページネーション） */
   async getMessages(projectId: string, opts?: { before?: string; limit?: number }): Promise<{ messages: SessionMessage[]; hasMore: boolean }> {
     const params = new URLSearchParams();

@@ -18,7 +18,8 @@ import type {
   HistoryExportRequestPayload,
   AiListPayload,
   AiSwitchPayload,
-  AiCancelPayload
+  AiCancelPayload,
+  ProjectFileReadPayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -348,6 +349,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:agent:update':
       handleAgentUpdate();
+      break;
+
+    case 'server:project:file:read':
+      handleProjectFileRead(message.payload);
       break;
   }
 }
@@ -1741,4 +1746,47 @@ async function handleAgentUpdate() {
   }
 
   console.log(`🔄 Update script spawned (detached). Agent will restart shortly.`);
+}
+
+/**
+ * サーバーからのプロジェクトファイル読み取り要求を処理
+ * パストラバーサル攻撃を防止し、プロジェクトディレクトリ内のファイルのみ読み取り可能
+ */
+async function handleProjectFileRead(payload: ProjectFileReadPayload) {
+  const { projectPath, filePath, requestId } = payload;
+
+  // パストラバーサル防止: resolve して projectPath 内に収まるか確認
+  const fullPath = resolve(projectPath, filePath);
+  if (!fullPath.startsWith(resolve(projectPath) + '/')) {
+    console.error(`❌ Project file read rejected (path traversal): ${filePath}`);
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:project:file:content',
+        payload: { machineId: currentMachineId, requestId, content: null, error: 'Path traversal rejected' },
+      });
+    }
+    return;
+  }
+
+  try {
+    const content = await readFile(fullPath, 'utf-8');
+    console.log(`📄 Project file read: ${filePath} (${content.length} chars)`);
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:project:file:content',
+        payload: { machineId: currentMachineId, requestId, content },
+      });
+    }
+  } catch (err: any) {
+    const notFound = err.code === 'ENOENT';
+    if (!notFound) {
+      console.error(`❌ Project file read failed for ${filePath}:`, err.message);
+    }
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:project:file:content',
+        payload: { machineId: currentMachineId, requestId, content: null, error: notFound ? undefined : err.message },
+      });
+    }
+  }
 }
