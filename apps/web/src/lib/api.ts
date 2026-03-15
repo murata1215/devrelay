@@ -513,32 +513,52 @@ export const agentDocuments = {
 };
 
 // ========================================
-// プロジェクトメンバー API
+// チーム API
 // ========================================
 
-export interface ProjectMemberInfo {
+export interface TeamMemberInfo {
   id: string;
   projectId: string;
   projectName: string;
   machineName: string;
   machineId: string;
   machineStatus: string;
-  createdAt: string;
 }
 
-export const projectMembers = {
-  /** メンバー一覧取得 */
-  async list(projectId: string): Promise<ProjectMemberInfo[]> {
-    return request('GET', `/projects/${projectId}/members`);
+export interface TeamInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  members: TeamMemberInfo[];
+}
+
+export interface TeamsResponse {
+  teams: TeamInfo[];
+}
+
+export const teams = {
+  /** チーム一覧 */
+  async list(): Promise<TeamsResponse> {
+    return request('GET', '/teams');
+  },
+
+  /** チーム作成 */
+  async create(name: string): Promise<{ id: string; name: string }> {
+    return request('POST', '/teams', { name });
+  },
+
+  /** チーム削除 */
+  async remove(teamId: string): Promise<void> {
+    await request('DELETE', `/teams/${teamId}`);
   },
 
   /** メンバー追加 */
-  async add(projectId: string, memberProjectId: string): Promise<{ id: string }> {
-    return request('POST', `/projects/${projectId}/members`, { memberProjectId });
+  async addMember(teamId: string, projectId: string): Promise<{ id: string }> {
+    return request('POST', `/teams/${teamId}/members`, { projectId });
   },
 
   /** メンバー削除 */
-  async remove(projectId: string, memberId: string): Promise<void> {
-    await request('DELETE', `/projects/${projectId}/members/${memberId}`);
+  async removeMember(teamId: string, memberId: string): Promise<void> {
+    await request('DELETE', `/teams/${teamId}/members/${memberId}`);
   },
 };

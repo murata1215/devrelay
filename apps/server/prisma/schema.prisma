@@ -29,6 +29,7 @@ model User {
   buildLogs           BuildLog[]
   devReports          DevReport[]
   testflightServices  TestflightService[]
+  teams               Team[]
 }
 
 // WebUI 認証セッション
@@ -108,23 +109,34 @@ model Project {
 
   sessions    Session[]
   buildLogs   BuildLog[]
-  members     ProjectMember[] @relation("ProjectMembers")
-  memberOf    ProjectMember[] @relation("MemberOf")
+  teamMembers TeamMember[]
 
   @@unique([machineId, name])
 }
 
-// プロジェクトメンバー（クロスプロジェクトクエリ用）
-// あるプロジェクトが他プロジェクトを「メンバー」として登録し、質問を送信できる
-model ProjectMember {
-  id              String   @id @default(cuid())
-  projectId       String   // メンバーを持つプロジェクト（例: Flutter アプリ）
-  memberProjectId String   // メンバーとして登録されたプロジェクト（例: PixBlog サーバー）
-  project         Project  @relation("ProjectMembers", fields: [projectId], references: [id])
-  memberProject   Project  @relation("MemberOf", fields: [memberProjectId], references: [id])
-  createdAt       DateTime @default(now())
+// チーム（クロスプロジェクトクエリ用）
+// 名前付きのプロジェクトグループ。同じチーム内のプロジェクトは互いに質問可能
+model Team {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id])
+  name      String
+  createdAt DateTime     @default(now())
+  members   TeamMember[]
 
-  @@unique([projectId, memberProjectId])
+  @@unique([userId, name])
+}
+
+// チームメンバー（チームとプロジェクトの関連）
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([teamId, projectId])
 }
 
 // セッション

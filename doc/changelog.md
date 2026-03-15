@@ -6,6 +6,63 @@
 
 ## 実装済み機能
 
+### #160: Team ページ — チーム管理 + ask コマンド (2026-03-16)
+
+#### 概要
+WebUI ヘッダーに「Team」ページを新設。名前付きチームを作成し、プロジェクトをメンバーとして追加することで、エージェント間の質問（`ask` コマンド）が可能になる。#159 の ProjectMember モデルを Team + TeamMember モデルに置き換え、UX を改善。
+
+#### アーキテクチャ
+Team（名前付きグループ）→ TeamMember（プロジェクト参照）の構造。チーム作成 → プロジェクト追加の2ステップ操作で直感的な管理。
+
+#### 変更内容
+
+**DB:**
+- `ProjectMember` テーブル削除 → `Team` + `TeamMember` テーブル追加
+- `Team`: userId + name（ユーザーごとに一意）
+- `TeamMember`: teamId + projectId（チーム内で一意）、onDelete: Cascade
+
+**Server:**
+- `api.ts`: Team CRUD API（GET/POST/DELETE `/api/teams`、POST/DELETE `/api/teams/:teamId/members`）
+- `api.ts`: `(request as any).userId` → `(request as any).user.id` バグ修正（push通知含む7箇所）
+- `document-api.ts`: `GET /api/agent/members` をチームベースに変更（teamName フィールド追加）
+- `command-parser.ts`: `ask <project>: <question>` コマンドパース追加
+- `command-handler.ts`: `handleAskMember()` — プロジェクト名検索 → オンライン確認 → クロスプロジェクトクエリ実行
+
+**Agent:**
+- `skill-manager.ts`（Linux/macOS）: `--list` 出力の `projectName` → `teamName` に変更
+
+**WebUI:**
+- `TeamPage.tsx`: 新規作成。チーム作成（名前入力 + Create）、メンバー追加（マシン別グループ + フィルタ）、削除、エラー表示
+- `Layout.tsx`: ヘッダーに Team ナビ追加
+- `App.tsx`: `/team` ルート追加
+- `ChatPage.tsx`: Members タブ削除（DocPanel → Docs のみ）、CSS変数 `--accent-color` → `--accent-blue` 修正
+- `api.ts`: `teams` API クライアント（list/create/remove/addMember/removeMember）
+
+**バグ修正:**
+- CSS変数 `--accent-color` が未定義 → `--accent-blue` に修正（Create ボタンが見えない問題）
+- `(request as any).userId` が undefined → `(request as any).user.id` に修正（Internal Server Error）
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/server/prisma/schema.prisma` | ProjectMember 削除、Team + TeamMember 追加 |
+| `apps/server/prisma/migrations/20260315180000_...` | マイグレーション SQL |
+| `apps/server/src/routes/api.ts` | Team CRUD + userId バグ修正 |
+| `apps/server/src/routes/document-api.ts` | agent/members をチームベースに |
+| `apps/server/src/services/command-parser.ts` | ask コマンドパース |
+| `apps/server/src/services/command-handler.ts` | handleAskMember |
+| `packages/shared/src/types.ts` | `ask:member` コマンド型追加 |
+| `agents/linux/src/services/skill-manager.ts` | teamName フィールド対応 |
+| `agents/macos/src/services/skill-manager.ts` | 同上 |
+| `apps/web/src/pages/TeamPage.tsx` | 新規: チーム管理ページ |
+| `apps/web/src/components/Layout.tsx` | Team ナビ追加 |
+| `apps/web/src/App.tsx` | /team ルート追加 |
+| `apps/web/src/pages/ChatPage.tsx` | Members タブ削除 + CSS修正 |
+| `apps/web/src/lib/api.ts` | teams API クライアント |
+
+---
+
 ### #159: クロスプロジェクトクエリ — エージェント間質問機能 (2026-03-15)
 
 #### 概要

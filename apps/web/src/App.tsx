@@ -11,6 +11,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ConversationsPage } from './pages/ConversationsPage';
 import { ChatPage } from './pages/ChatPage';
 import { DevReportsPage } from './pages/DevReportsPage';
+import { TeamPage } from './pages/TeamPage';
 import { NotificationBanner } from './components/NotificationBanner';
 
 /**
@@ -35,6 +36,7 @@ function ProtectedContent() {
           <Route path="/conversations" element={<ConversationsPage />} />
           <Route path="/dev-reports" element={<DevReportsPage />} />
           <Route path="/machines" element={<MachinesPage />} />
+          <Route path="/team" element={<TeamPage />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

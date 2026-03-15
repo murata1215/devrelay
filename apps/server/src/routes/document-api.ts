@@ -166,7 +166,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
   /**
    * GET /api/agent/members
-   * 現在のマシンの全プロジェクトに登録されたメンバー一覧を取得
+   * このマシンのプロジェクトと同じチームに属するメンバー一覧を取得
    * スキルから呼び出されて利用可能なメンバーを確認する
    *
    * 認証: Authorization: Bearer <machine_token>
@@ -177,27 +177,32 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: 'Invalid or missing machine token' });
     }
 
-    // このマシンの全プロジェクトに関連するメンバーを取得
-    const members = await prisma.projectMember.findMany({
+    // このマシンのプロジェクトが属するチームのメンバーを取得
+    const teamMembers = await prisma.teamMember.findMany({
       where: {
-        project: { machineId: auth.machineId },
+        team: {
+          members: { some: { project: { machineId: auth.machineId } } },
+        },
       },
       include: {
-        project: { select: { id: true, name: true } },
-        memberProject: {
+        team: { select: { name: true } },
+        project: {
           include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
         },
       },
     });
 
-    return reply.send(members.map(m => ({
-      projectName: m.project.name,
-      projectId: m.project.id,
-      memberProjectName: m.memberProject.name,
-      memberProjectId: m.memberProject.id,
-      memberMachineName: m.memberProject.machine.displayName || m.memberProject.machine.name,
-      memberMachineStatus: m.memberProject.machine.status,
-    })));
+    // 自マシンのプロジェクトは除外して返す
+    return reply.send(teamMembers
+      .filter(m => m.project.machineId !== auth.machineId)
+      .map(m => ({
+        teamName: m.team.name,
+        memberProjectName: m.project.name,
+        memberProjectId: m.project.id,
+        memberMachineName: m.project.machine.displayName || m.project.machine.name,
+        memberMachineStatus: m.project.machine.status,
+      }))
+    );
   });
 
   /**

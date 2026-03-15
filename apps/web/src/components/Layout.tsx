@@ -28,6 +28,7 @@ export function Layout({ children }: LayoutProps) {
     { name: 'Conversations', href: '/conversations' },
     { name: 'Dev Reports', href: '/dev-reports' },
     { name: 'Agents', href: '/machines' },
+    { name: 'Team', href: '/team' },
     { name: 'Projects', href: '/projects' },
     { name: 'Settings', href: '/settings' },
   ];

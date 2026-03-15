@@ -258,7 +258,7 @@ if [ "$1" = "--list" ]; then
     fi
     echo "=== 登録済みメンバー ($MEMBER_COUNT 件) ==="
     echo ""
-    echo "$BODY" | jq -r '.[] | "プロジェクト: \\(.projectName) → メンバー: \\(.memberProjectName) (\\(.memberMachineName)) [\\(.memberMachineStatus)]"'
+    echo "$BODY" | jq -r '.[] | "チーム: \\(.teamName) → メンバー: \\(.memberProjectName) (\\(.memberMachineName)) [\\(.memberMachineStatus)]"'
   else
     echo "$BODY"
   fi

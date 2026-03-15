@@ -713,6 +713,35 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 
 ---
 
+## チーム管理 + クロスプロジェクトクエリ
+
+### データモデル
+- `Team`: ユーザーが作成する名前付きグループ（`@@unique([userId, name])`）
+- `TeamMember`: Team に属するプロジェクト（`@@unique([teamId, projectId])`、`onDelete: Cascade`）
+- 旧 `ProjectMember` モデル（プロジェクト→プロジェクトの1対多）は #160 で廃止
+
+### API 構成
+- **WebUI 向け**: `GET/POST/DELETE /api/teams`、`POST/DELETE /api/teams/:teamId/members`
+- **Agent 向け**: `GET /api/agent/members`（チームメイト一覧）、`POST /api/agent/ask-member`（質問送信）
+- **Discord/Telegram**: `ask <project>: <question>` コマンド
+
+### クロスプロジェクトクエリの流れ
+1. 質問送信 → `executeCrossProjectQuery()` で一時セッション作成
+2. ターゲットプロジェクトの Agent に `server:session:start` + 質問プロンプト送信
+3. Agent が Claude Code を起動してコードを分析・回答
+4. `handleAiOutput(isComplete=true)` → `pendingCrossQueries` Map の Promise を resolve
+5. 回答を HTTP レスポンスとして返却（タイムアウト: 5分）
+
+### Agent スキル
+- `devrelay-ask-member`: エージェント起動時に `~/.claude/skills/` に自動配置
+- 質問する側のみスキルが必要。質問を受ける側はサーバーが直接 Claude Code を起動
+
+### 注意事項
+- `authenticate` ミドルウェアは `request.user` を設定。`request.userId` ではない
+- Team API エンドポイントは `(request as any).user.id` でユーザー ID を取得
+
+---
+
 ## 今後の課題
 
 - LINE 対応

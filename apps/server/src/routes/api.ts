@@ -1628,7 +1628,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
   /** プッシュ通知購読を登録 */
   app.post('/api/push/subscribe', { preHandler: [authenticate] }, async (request, reply) => {
-    const userId = (request as any).userId as string;
+    const userId = (request as any).user.id as string;
     const { subscription, browser } = request.body as {
       subscription: { endpoint: string; keys: { p256dh: string; auth: string } };
       browser?: string;
@@ -1644,7 +1644,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
   /** プッシュ通知購読を解除 */
   app.post('/api/push/unsubscribe', { preHandler: [authenticate] }, async (request, reply) => {
-    const userId = (request as any).userId as string;
+    const userId = (request as any).user.id as string;
     const { endpoint } = request.body as { endpoint: string };
 
     if (!endpoint) {
@@ -1656,82 +1656,90 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
-  // プロジェクトメンバー（クロスプロジェクトクエリ）
+  // チーム（クロスプロジェクトクエリ）
   // ========================================
 
-  /** メンバー一覧取得 */
-  app.get('/api/projects/:projectId/members', async (request, reply) => {
-    const userId = (request as any).userId as string;
-    const { projectId } = request.params as { projectId: string };
+  /** チーム一覧: ユーザーの全チームとメンバーを返す */
+  app.get('/api/teams', async (request, reply) => {
+    const userId = (request as any).user.id as string;
 
-    // プロジェクト所有権チェック
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      include: { machine: { select: { userId: true } } },
-    });
-    if (!project || project.machine.userId !== userId) {
-      return reply.status(404).send({ error: 'Project not found' });
-    }
-
-    const members = await prisma.projectMember.findMany({
-      where: { projectId },
+    const teams = await prisma.team.findMany({
+      where: { userId },
       include: {
-        memberProject: {
-          include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+        members: {
+          include: {
+            project: {
+              include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
         },
       },
       orderBy: { createdAt: 'asc' },
     });
 
-    return reply.send(members.map(m => ({
-      id: m.id,
-      projectId: m.memberProject.id,
-      projectName: m.memberProject.name,
-      machineName: m.memberProject.machine.displayName || m.memberProject.machine.name,
-      machineId: m.memberProject.machine.id,
-      machineStatus: m.memberProject.machine.status,
-      createdAt: m.createdAt,
-    })));
+    return reply.send({
+      teams: teams.map(t => ({
+        id: t.id,
+        name: t.name,
+        createdAt: t.createdAt,
+        members: t.members.map(m => ({
+          id: m.id,
+          projectId: m.project.id,
+          projectName: m.project.name,
+          machineName: m.project.machine.displayName ?? m.project.machine.name,
+          machineId: m.project.machine.id,
+          machineStatus: m.project.machine.status,
+        })),
+      })),
+    });
   });
 
-  /** メンバー追加 */
-  app.post('/api/projects/:projectId/members', async (request, reply) => {
-    const userId = (request as any).userId as string;
-    const { projectId } = request.params as { projectId: string };
-    const { memberProjectId } = request.body as { memberProjectId: string };
+  /** チーム新規作成 */
+  app.post('/api/teams', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { name } = request.body as { name?: string };
 
-    if (!memberProjectId) {
-      return reply.status(400).send({ error: 'memberProjectId is required' });
-    }
-    if (projectId === memberProjectId) {
-      return reply.status(400).send({ error: 'Cannot add self as member' });
+    if (!name || !name.trim()) {
+      return reply.status(400).send({ error: 'Team name is required' });
     }
 
-    // プロジェクト所有権チェック（両方とも自分のプロジェクトであること）
-    const [project, memberProject] = await Promise.all([
-      prisma.project.findUnique({ where: { id: projectId }, include: { machine: { select: { userId: true } } } }),
-      prisma.project.findUnique({ where: { id: memberProjectId }, include: { machine: { select: { userId: true } } } }),
-    ]);
-    if (!project || project.machine.userId !== userId) {
-      return reply.status(404).send({ error: 'Project not found' });
-    }
-    if (!memberProject || memberProject.machine.userId !== userId) {
-      return reply.status(404).send({ error: 'Member project not found' });
-    }
-
-    const member = await prisma.projectMember.upsert({
-      where: { projectId_memberProjectId: { projectId, memberProjectId } },
-      create: { projectId, memberProjectId },
-      update: {},
+    const team = await prisma.team.create({
+      data: { userId, name: name.trim() },
     });
 
-    return reply.send({ id: member.id, projectId, memberProjectId });
+    return reply.send({ id: team.id, name: team.name });
   });
 
-  /** メンバー削除 */
-  app.delete('/api/projects/:projectId/members/:memberId', async (request, reply) => {
-    const userId = (request as any).userId as string;
-    const { projectId, memberId } = request.params as { projectId: string; memberId: string };
+  /** チーム削除 */
+  app.delete('/api/teams/:teamId', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+
+    const team = await prisma.team.findUnique({ where: { id: teamId } });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    await prisma.team.delete({ where: { id: teamId } });
+    return reply.send({ success: true });
+  });
+
+  /** チームにメンバー追加 */
+  app.post('/api/teams/:teamId/members', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    const { projectId } = request.body as { projectId?: string };
+
+    if (!projectId) {
+      return reply.status(400).send({ error: 'projectId is required' });
+    }
+
+    // チーム所有権チェック
+    const team = await prisma.team.findUnique({ where: { id: teamId } });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
 
     // プロジェクト所有権チェック
     const project = await prisma.project.findUnique({
@@ -1742,7 +1750,26 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Project not found' });
     }
 
-    await prisma.projectMember.delete({ where: { id: memberId } }).catch(() => null);
+    const member = await prisma.teamMember.upsert({
+      where: { teamId_projectId: { teamId, projectId } },
+      create: { teamId, projectId },
+      update: {},
+    });
+
+    return reply.send({ id: member.id });
+  });
+
+  /** チームからメンバー削除 */
+  app.delete('/api/teams/:teamId/members/:memberId', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId, memberId } = request.params as { teamId: string; memberId: string };
+
+    const team = await prisma.team.findUnique({ where: { id: teamId } });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    await prisma.teamMember.delete({ where: { id: memberId } }).catch(() => null);
     return reply.send({ success: true });
   });
 }

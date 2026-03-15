@@ -1,4 +1,5 @@
-import type { UserCommand, UserContext, Platform, FileAttachment } from '@devrelay/shared';
+import crypto from 'crypto';
+import type { UserCommand, UserContext, Platform, FileAttachment, AiTool } from '@devrelay/shared';
 import { STATUS_EMOJI, AI_TOOL_NAMES } from '@devrelay/shared';
 import { Machine, Project, Session, Message } from '@prisma/client';
 import { prisma } from '../db/client.js';
@@ -17,7 +18,9 @@ import {
   clearAgentRestarted,
   cancelAiProcess,
   checkAgentVersion,
-  updateAgent
+  updateAgent,
+  executeCrossProjectQuery,
+  isAgentConnected,
 } from './agent-manager.js';
 import {
   createSession,
@@ -243,6 +246,9 @@ export async function executeCommand(
 
     case 'testflight':
       return handleTestflight(context, command);
+
+    case 'ask:member':
+      return handleAskMember(context, command.targetProject, command.question);
 
     default:
       return '❓ 不明なコマンドです。`h` でヘルプを表示できます。';
@@ -1397,6 +1403,82 @@ async function handleTestflight(
   }
   console.log(`🚀 handleTestflight: result (${result.length} chars): ${result.substring(0, 100)}...`);
   return result;
+}
+
+// -----------------------------------------------------------------------------
+// Cross-project query
+// -----------------------------------------------------------------------------
+
+/** 他プロジェクトのエージェントに質問を投げる */
+async function handleAskMember(
+  context: UserContext,
+  targetProjectName: string,
+  question: string,
+): Promise<string> {
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) {
+    return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
+  }
+
+  // プロジェクト名で検索（case-insensitive、同一ユーザー所有）
+  const targetProject = await prisma.project.findFirst({
+    where: {
+      name: { equals: targetProjectName, mode: 'insensitive' },
+      machine: { userId: dbUserId, deletedAt: null },
+    },
+    include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+  });
+
+  if (!targetProject) {
+    return `❌ プロジェクト "${targetProjectName}" が見つかりません。`;
+  }
+
+  if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
+    const machineName = targetProject.machine.displayName ?? targetProject.machine.name;
+    return `⚠️ ${targetProject.name} のエージェント (${machineName}) はオフラインです。`;
+  }
+
+  // フィードバック送信（非同期で先に表示）
+  await sendMessage(context.platform, context.chatId, `🔗 ${targetProject.name} に質問中...`);
+
+  // 一時セッション作成
+  const tempSessionId = `crossquery_${crypto.randomUUID()}`;
+  await prisma.session.create({
+    data: {
+      id: tempSessionId,
+      userId: dbUserId,
+      machineId: targetProject.machine.id,
+      projectId: targetProject.id,
+      aiTool: targetProject.defaultAi,
+      status: 'active',
+    },
+  });
+
+  try {
+    const result = await executeCrossProjectQuery(
+      targetProject.machine.id,
+      tempSessionId,
+      targetProject.name,
+      targetProject.path,
+      targetProject.defaultAi as AiTool,
+      question,
+      dbUserId,
+    );
+
+    await prisma.session.update({
+      where: { id: tempSessionId },
+      data: { status: 'ended', endedAt: new Date() },
+    });
+
+    return `💬 **${targetProject.name}** の回答:\n\n${result.output}`;
+  } catch (error: any) {
+    await prisma.session.update({
+      where: { id: tempSessionId },
+      data: { status: 'ended', endedAt: new Date() },
+    }).catch(() => {});
+
+    return `❌ ${targetProject.name} への質問が失敗しました: ${error.message}`;
+  }
 }
 
 // -----------------------------------------------------------------------------

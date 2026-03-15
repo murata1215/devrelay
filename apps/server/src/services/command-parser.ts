@@ -34,6 +34,12 @@ export async function parseCommandWithNLP(
     return cmd;
   }
 
+  // 1.5. ask コマンド: セッション状態に関わらず検出（AI プロンプトに流さない）
+  const askMatchNlp = trimmed.match(/^ask\s+([^:]+):\s*(.+)$/is);
+  if (askMatchNlp) {
+    return { type: 'ask:member', targetProject: askMatchNlp[1].trim(), question: askMatchNlp[2].trim() };
+  }
+
   // 2. If already connected to a project (has active session), skip NLP and send directly to AI
   //    (NLP is only needed for navigation commands like p, c, x, q, h)
   if (context.currentSessionId) {
@@ -140,6 +146,12 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     if (arg.startsWith('rm ')) return { type: 'testflight', subcommand: 'remove', name: arg.slice(3).trim() };
     if (arg.startsWith('info ')) return { type: 'testflight', subcommand: 'info', name: arg.slice(5).trim() };
     return { type: 'testflight', subcommand: 'create', name: arg };
+  }
+
+  // 0.7. 「ask <project>: <question>」パターン: 他プロジェクトに質問
+  const askMatch = input.trim().match(/^ask\s+([^:]+):\s*(.+)$/is);
+  if (askMatch) {
+    return { type: 'ask:member', targetProject: askMatch[1].trim(), question: askMatch[2].trim() };
   }
 
   // 0.6. 「w」コマンド: ドキュメント更新＋コミットプッシュのワンショット実行
@@ -297,6 +309,9 @@ export function getHelpText(): string {
 \`testflight <name>\` - 新規サービス作成
 \`testflight rm <name>\` - サービスをアーカイブ
 \`testflight info <name>\` - サービス詳細
+
+**チーム**
+\`ask <project>: <質問>\` - 他プロジェクトに質問
 
 **その他**
 \`ag\` - DevRelay Agreement v4 を適用（rules/devrelay.md 作成）

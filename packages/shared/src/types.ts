@@ -429,7 +429,8 @@ export type UserCommand =
   | { type: 'testflight'; subcommand: 'list' }
   | { type: 'testflight'; subcommand: 'create'; name: string }
   | { type: 'testflight'; subcommand: 'remove'; name: string }
-  | { type: 'testflight'; subcommand: 'info'; name: string };
+  | { type: 'testflight'; subcommand: 'info'; name: string }
+  | { type: 'ask:member'; targetProject: string; question: string };
 
 // -----------------------------------------------------------------------------
 // User Context (for command parsing)

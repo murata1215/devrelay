@@ -36,6 +36,8 @@ Turn your phone into a remote terminal for AI-powered development.
 - **PWA + Push Notifications**: Install as app, receive push notifications when AI completes (even with tab closed)
 - **Completion Sound**: Discord-like notification sound on AI response completion (customizable mp3)
 - **Multi-Browser Sync**: Chat syncs across browsers in real-time via server-side WebSocket broadcast
+- **Team Management**: Create named teams, add projects, and enable cross-project AI queries
+- **Cross-Project Query**: Ask questions to other project's agents via `ask <project>: <question>` (Discord/Telegram/Claude Code skill)
 
 ## 💡 Token Efficiency
 
@@ -80,7 +82,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#150)
+│   ├── changelog.md      # Implementation history (#1-#160)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -218,6 +220,7 @@ Bot: 🤖 Working on it...
 | `k` / `kill` | Cancel running AI process |
 | `x` | Clear conversation history (requires double confirmation) |
 | `q` | Disconnect |
+| `ask <project>: <question>` | Ask another project's agent a question |
 | `h` | Help |
 
 Any other message is sent as an instruction to the AI.
@@ -452,8 +455,8 @@ agents/windows/
 - [x] Agent Doc Folder - file sync from DocPanel to agent local filesystem (`~/.devrelay/docs/`) via WebSocket
 - [x] Resume startup timeout - auto-retry without `--resume` when Claude Code hangs on stale sessions
 - [x] Dynamic remote branch detection - `u` command detects default branch instead of hardcoding `origin/main`
+- [x] Team management + cross-project query (`ask <project>: <question>`)
 - [ ] LINE Bot
-- [ ] Team Features
 - [ ] AI tool switching (Gemini/Aider)
 
 ## 📄 License
