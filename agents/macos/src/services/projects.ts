@@ -1,8 +1,15 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { homedir } from 'os';
 import type { Project, AiTool } from '@devrelay/shared';
 import type { AgentConfig, ProjectConfig } from './config.js';
 import { loadProjectsConfig, saveProjectsConfig } from './config.js';
+
+/** macOS TCC 保護ディレクトリ（$HOME 直下でスキャンすると権限ダイアログが表示される） */
+const MACOS_TCC_PROTECTED = new Set([
+  'Documents', 'Desktop', 'Downloads',
+  'Movies', 'Music', 'Pictures', 'Library',
+]);
 
 export async function loadProjects(config: AgentConfig): Promise<Project[]> {
   const projectConfigs = await loadProjectsConfig();
@@ -87,6 +94,8 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1): Promi
         if (!entry.isDirectory()) continue;
         if (entry.name.startsWith('.')) continue;
         if (entry.name === 'node_modules') continue;
+        // $HOME 直下スキャン時は TCC 保護ディレクトリをスキップ（権限ダイアログ防止）
+        if (dir === homedir() && MACOS_TCC_PROTECTED.has(entry.name)) continue;
 
         const fullPath = path.join(dir, entry.name);
 

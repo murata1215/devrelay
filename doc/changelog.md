@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+### #162: macOS Agent — TCC 保護ディレクトリのスキャンスキップ (2026-03-16)
+
+#### 概要
+macOS Agent の `u`（update）コマンド実行時、再起動後のプロジェクトスキャンで macOS の TCC（Transparency, Consent, and Control）プライバシーダイアログが表示され、ユーザーが手動で「許可」を押さないと更新が完了しない問題を修正。
+
+#### 変更内容
+
+**Agent:**
+- `projects.ts`（macOS）: `scanProjects()` で `$HOME` 直下スキャン時に TCC 保護ディレクトリ（Documents, Desktop, Downloads, Movies, Music, Pictures, Library）をスキップ
+- TCC 保護ディレクトリ内にプロジェクトがある場合は `projectsDirs` に個別パスを追加すれば発見される
+
 ### #161: macOS エージェントへの allowedTools 設定プッシュ修正 + プランモードスキル指示 (2026-03-16)
 
 #### 概要
