@@ -1,18 +1,24 @@
 /**
- * ドキュメント検索 API
+ * ドキュメント検索 API + クロスプロジェクトクエリ API
  *
  * Agent（Claude Code スキル）からマシントークン認証で呼び出される。
  * MessageFile のベクトル埋め込みを使ったセマンティック検索を提供。
+ * また、他プロジェクトのエージェントに質問を送信するクロスプロジェクトクエリ機能を提供。
  *
  * エンドポイント:
  * - POST /api/agent/documents/search — ベクトル類似検索
  * - GET  /api/agent/documents/:id    — ファイルテキスト内容取得
+ * - POST /api/agent/ask-member       — クロスプロジェクトクエリ
+ * - GET  /api/agent/members          — 登録済みメンバー一覧取得
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import crypto from 'crypto';
 import { prisma } from '../db/client.js';
 import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
+import { executeCrossProjectQuery, isAgentConnected } from '../services/agent-manager.js';
+import type { AiTool } from '@devrelay/shared';
 
 /**
  * マシントークンから userId を取得する認証ヘルパー
@@ -39,6 +45,24 @@ async function authenticateByMachineToken(request: FastifyRequest): Promise<stri
   });
 
   return machine?.userId ?? null;
+}
+
+/**
+ * マシントークンから userId と machineId を取得する認証ヘルパー
+ */
+async function authenticateByMachineTokenFull(request: FastifyRequest): Promise<{ userId: string; machineId: string } | null> {
+  const authHeader = request.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return null;
+
+  const token = authHeader.replace('Bearer ', '').trim();
+  if (!token) return null;
+
+  const machine = await prisma.machine.findFirst({
+    where: { token, deletedAt: null },
+    select: { id: true, userId: true },
+  });
+
+  return machine ? { userId: machine.userId, machineId: machine.id } : null;
 }
 
 /**
@@ -138,5 +162,121 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     // message リレーションは返さない
     const { message: _message, ...fileData } = file;
     return reply.send(fileData);
+  });
+
+  /**
+   * GET /api/agent/members
+   * 現在のマシンの全プロジェクトに登録されたメンバー一覧を取得
+   * スキルから呼び出されて利用可能なメンバーを確認する
+   *
+   * 認証: Authorization: Bearer <machine_token>
+   */
+  app.get('/api/agent/members', async (request: FastifyRequest, reply: FastifyReply) => {
+    const auth = await authenticateByMachineTokenFull(request);
+    if (!auth) {
+      return reply.status(401).send({ error: 'Invalid or missing machine token' });
+    }
+
+    // このマシンの全プロジェクトに関連するメンバーを取得
+    const members = await prisma.projectMember.findMany({
+      where: {
+        project: { machineId: auth.machineId },
+      },
+      include: {
+        project: { select: { id: true, name: true } },
+        memberProject: {
+          include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+        },
+      },
+    });
+
+    return reply.send(members.map(m => ({
+      projectName: m.project.name,
+      projectId: m.project.id,
+      memberProjectName: m.memberProject.name,
+      memberProjectId: m.memberProject.id,
+      memberMachineName: m.memberProject.machine.displayName || m.memberProject.machine.name,
+      memberMachineStatus: m.memberProject.machine.status,
+    })));
+  });
+
+  /**
+   * POST /api/agent/ask-member
+   * クロスプロジェクトクエリ: 他プロジェクトのエージェントに質問を送信
+   * ターゲットプロジェクトで新しい Claude セッションを起動し、回答を待つ
+   *
+   * Body: { targetProjectId: string, question: string }
+   * 認証: Authorization: Bearer <machine_token>
+   * レスポンス: { answer: string }
+   */
+  app.post('/api/agent/ask-member', async (request: FastifyRequest, reply: FastifyReply) => {
+    const auth = await authenticateByMachineTokenFull(request);
+    if (!auth) {
+      return reply.status(401).send({ error: 'Invalid or missing machine token' });
+    }
+
+    const { targetProjectId, question } = (request.body || {}) as { targetProjectId?: string; question?: string };
+    if (!targetProjectId || !question) {
+      return reply.status(400).send({ error: 'targetProjectId and question are required' });
+    }
+
+    // ターゲットプロジェクトの存在確認と所有権チェック
+    const targetProject = await prisma.project.findUnique({
+      where: { id: targetProjectId },
+      include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true } } },
+    });
+
+    if (!targetProject || targetProject.machine.userId !== auth.userId || targetProject.machine.deletedAt) {
+      return reply.status(404).send({ error: 'Target project not found' });
+    }
+
+    if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
+      return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
+    }
+
+    // 一時セッションを作成
+    const tempSessionId = `crossquery_${crypto.randomUUID()}`;
+    const tempSession = await prisma.session.create({
+      data: {
+        id: tempSessionId,
+        userId: auth.userId,
+        machineId: targetProject.machine.id,
+        projectId: targetProjectId,
+        aiTool: targetProject.defaultAi,
+        status: 'active',
+      },
+    });
+
+    console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} (${targetProject.machine.id})`);
+
+    try {
+      // エージェントにセッション開始 + プロンプト送信し、完了を待つ
+      const result = await executeCrossProjectQuery(
+        targetProject.machine.id,
+        tempSessionId,
+        targetProject.name,
+        targetProject.path,
+        targetProject.defaultAi as AiTool,
+        question,
+        auth.userId,
+      );
+
+      // 一時セッションを終了
+      await prisma.session.update({
+        where: { id: tempSessionId },
+        data: { status: 'ended', endedAt: new Date() },
+      });
+
+      return reply.send({ answer: result.output });
+    } catch (error: any) {
+      // 一時セッションを終了（エラー時も）
+      await prisma.session.update({
+        where: { id: tempSessionId },
+        data: { status: 'ended', endedAt: new Date() },
+      }).catch(() => {});
+
+      console.error(`🔗 Cross-project query failed: ${error.message}`);
+      return reply.status(504).send({ error: `Query timed out or failed: ${error.message}` });
+    }
   });
 }

@@ -6,6 +6,47 @@
 
 ## 実装済み機能
 
+### #159: クロスプロジェクトクエリ — エージェント間質問機能 (2026-03-15)
+
+#### 概要
+複数プロジェクト（pixdraft, pixblog, Flutter アプリ等）を開発中に、あるプロジェクトのエージェントが別プロジェクトのエージェントに質問できる機能。ユーザーが手動で情報を仲介する必要がなくなる。
+
+#### アーキテクチャ
+Agent A（Flutter）のスキルが `POST /api/agent/ask-member` を呼ぶ → サーバーがターゲットプロジェクト（PixBlog）のエージェントに一時セッションを作成 → Claude Code が新規起動してコードを分析 → 回答を HTTP レスポンスとして Agent A に返す。
+
+#### 変更内容
+
+**DB:**
+- `ProjectMember` テーブル追加（プロジェクト間のメンバー関係を管理）
+
+**Server:**
+- `api.ts`: メンバー CRUD API（GET/POST/DELETE `/api/projects/:id/members`）
+- `document-api.ts`: `POST /api/agent/ask-member`（クロスプロジェクトクエリ）、`GET /api/agent/members`（メンバー一覧）
+- `agent-manager.ts`: `pendingCrossQueries` Map + `executeCrossProjectQuery()` — 一時セッションを作成し `handleAiOutput` 完了を Promise で待機
+
+**Agent:**
+- `skill-manager.ts`: `devrelay-ask-member` スキル自動配置（`--list` でメンバー一覧、`--project <名前> --question <質問>` で質問送信）
+
+**WebUI:**
+- `ChatPage.tsx`: DocPanel を Docs/Members タブ切替に拡張。Members タブでメンバーの一覧・追加・削除が可能
+- `api.ts`: `projectMembers` API クライアント追加
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/server/prisma/schema.prisma` | ProjectMember モデル追加 |
+| `apps/server/prisma/migrations/...` | マイグレーション SQL |
+| `apps/server/src/routes/api.ts` | メンバー CRUD エンドポイント |
+| `apps/server/src/routes/document-api.ts` | ask-member + members エンドポイント |
+| `apps/server/src/services/agent-manager.ts` | pendingCrossQueries + executeCrossProjectQuery |
+| `agents/linux/src/services/skill-manager.ts` | devrelay-ask-member スキル生成 |
+| `agents/macos/src/services/skill-manager.ts` | 同上（macOS 版） |
+| `apps/web/src/pages/ChatPage.tsx` | DocPanel に Members タブ追加 |
+| `apps/web/src/lib/api.ts` | projectMembers API クライアント |
+
+---
+
 ### #158: ヘッダーに通知音トグルボタン追加 (2026-03-15)
 
 #### 概要

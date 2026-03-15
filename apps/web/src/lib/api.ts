@@ -511,3 +511,34 @@ export const agentDocuments = {
     return `${API_BASE}/machines/${machineId}/documents/${docId}/download?token=${token}`;
   },
 };
+
+// ========================================
+// プロジェクトメンバー API
+// ========================================
+
+export interface ProjectMemberInfo {
+  id: string;
+  projectId: string;
+  projectName: string;
+  machineName: string;
+  machineId: string;
+  machineStatus: string;
+  createdAt: string;
+}
+
+export const projectMembers = {
+  /** メンバー一覧取得 */
+  async list(projectId: string): Promise<ProjectMemberInfo[]> {
+    return request('GET', `/projects/${projectId}/members`);
+  },
+
+  /** メンバー追加 */
+  async add(projectId: string, memberProjectId: string): Promise<{ id: string }> {
+    return request('POST', `/projects/${projectId}/members`, { memberProjectId });
+  },
+
+  /** メンバー削除 */
+  async remove(projectId: string, memberId: string): Promise<void> {
+    await request('DELETE', `/projects/${projectId}/members/${memberId}`);
+  },
+};

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo } from '../hooks/useWebSocket';
-import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta } from '../lib/api';
+import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, projectMembers, getToken, type Machine, type AgentDocMeta, type ProjectMemberInfo } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
 
@@ -880,8 +880,9 @@ function formatDocSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-/** エージェントドキュメントパネル（右サイドバー） */
-function DocPanel({ machineId, machineDisplayName }: { machineId: string | null; machineDisplayName: string }) {
+/** エージェントドキュメントパネル（右サイドバー、Docs / Members タブ切替） */
+function DocPanel({ machineId, machineDisplayName, projectId, allProjects }: { machineId: string | null; machineDisplayName: string; projectId: string | null; allProjects: Machine[] }) {
+  const [panelTab, setPanelTab] = useState<'docs' | 'members'>('docs');
   const [documents, setDocuments] = useState<AgentDocMeta[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -974,6 +975,57 @@ function DocPanel({ machineId, machineDisplayName }: { machineId: string | null;
     }
   }, [handleUpload]);
 
+  // --- メンバー管理ステート ---
+  const [members, setMembers] = useState<ProjectMemberInfo[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [showAddMember, setShowAddMember] = useState(false);
+
+  /** メンバー一覧取得 */
+  const fetchMembers = useCallback(async () => {
+    if (!projectId) { setMembers([]); return; }
+    setMembersLoading(true);
+    try {
+      const res = await projectMembers.list(projectId);
+      setMembers(res);
+    } catch (err) {
+      console.error('Failed to fetch members:', err);
+    } finally {
+      setMembersLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => { if (panelTab === 'members') fetchMembers(); }, [panelTab, fetchMembers]);
+
+  /** メンバー追加 */
+  const handleAddMember = useCallback(async (memberProjectId: string) => {
+    if (!projectId) return;
+    try {
+      await projectMembers.add(projectId, memberProjectId);
+      setShowAddMember(false);
+      await fetchMembers();
+    } catch (err) {
+      console.error('Failed to add member:', err);
+    }
+  }, [projectId, fetchMembers]);
+
+  /** メンバー削除 */
+  const handleRemoveMember = useCallback(async (memberId: string) => {
+    if (!projectId) return;
+    try {
+      await projectMembers.remove(projectId, memberId);
+      setMembers(prev => prev.filter(m => m.id !== memberId));
+    } catch (err) {
+      console.error('Failed to remove member:', err);
+    }
+  }, [projectId]);
+
+  /** 追加可能なプロジェクト一覧（自分自身と登録済みを除く） */
+  const availableProjects = allProjects.flatMap(m =>
+    m.projects
+      .filter(p => p.id !== projectId && !members.some(mem => mem.projectId === p.id))
+      .map(p => ({ ...p, machineName: m.displayName || m.name, machineStatus: m.status }))
+  );
+
   return (
     <aside
       className="w-52 shrink-0 hidden lg:flex flex-col border-l border-[var(--border-color)] bg-[var(--bg-secondary)]"
@@ -982,76 +1034,185 @@ function DocPanel({ machineId, machineDisplayName }: { machineId: string | null;
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      {/* ヘッダー */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
-        <span className="text-xs font-medium text-[var(--text-secondary)] truncate" title={machineDisplayName}>
-          Docs
-        </span>
+      {/* タブ切替ヘッダー */}
+      <div className="flex items-center border-b border-[var(--border-color)]">
         <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!machineId || uploading}
-          className="text-xs px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
-          title="ファイルを追加"
+          onClick={() => setPanelTab('docs')}
+          className={`flex-1 text-xs py-2 font-medium transition-colors ${
+            panelTab === 'docs'
+              ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-color)]'
+              : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+          }`}
         >
-          +
+          Docs
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => { if (e.target.files) { handleUpload(e.target.files); e.target.value = ''; } }}
-        />
+        <button
+          onClick={() => setPanelTab('members')}
+          className={`flex-1 text-xs py-2 font-medium transition-colors ${
+            panelTab === 'members'
+              ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-color)]'
+              : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+          }`}
+        >
+          Members
+        </button>
       </div>
 
-      {/* ファイルリスト */}
-      <div className="flex-1 overflow-y-auto p-2">
-        {!machineId ? (
-          <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
-        ) : loading ? (
-          <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
-        ) : documents.length === 0 ? (
-          <div className={`flex items-center justify-center h-full text-xs text-center transition-colors rounded ${
-            dragOver ? 'text-[var(--text-primary)] bg-[var(--accent-color)] bg-opacity-10 border border-dashed border-[var(--accent-color)]' : 'text-[var(--text-muted)]'
-          }`}>
-            {uploading ? 'アップロード中...' : 'ドロップで\nファイル追加'}
-          </div>
-        ) : (
-          <>
-            {dragOver && (
-              <div className="text-xs text-center py-2 mb-2 rounded bg-[var(--accent-color)] bg-opacity-10 border border-dashed border-[var(--accent-color)] text-[var(--text-primary)]">
-                ドロップでアップロード
-              </div>
-            )}
-            {uploading && (
-              <div className="text-xs text-center py-1 mb-2 text-[var(--text-muted)]">アップロード中...</div>
-            )}
-            {documents.map(doc => (
-              <div
-                key={doc.id}
-                className="group flex items-center gap-1 px-1.5 py-1 rounded hover:bg-[var(--bg-tertiary)] transition-colors"
-              >
-                <a
-                  href={agentDocuments.getDownloadUrl(machineId, doc.id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 min-w-0 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] truncate"
-                  title={`${doc.filename} (${formatDocSize(doc.size)})`}
+      {/* Docs タブのヘッダー（アップロードボタン） */}
+      {panelTab === 'docs' && (
+        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
+          <span className="text-xs font-medium text-[var(--text-secondary)] truncate" title={machineDisplayName}>
+            Docs
+          </span>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={!machineId || uploading}
+            className="text-xs px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
+            title="ファイルを追加"
+          >
+            +
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => { if (e.target.files) { handleUpload(e.target.files); e.target.value = ''; } }}
+          />
+        </div>
+      )}
+
+      {/* Docs タブ: ファイルリスト */}
+      {panelTab === 'docs' && (
+        <div className="flex-1 overflow-y-auto p-2">
+          {!machineId ? (
+            <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
+          ) : loading ? (
+            <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
+          ) : documents.length === 0 ? (
+            <div className={`flex items-center justify-center h-full text-xs text-center transition-colors rounded ${
+              dragOver ? 'text-[var(--text-primary)] bg-[var(--accent-color)] bg-opacity-10 border border-dashed border-[var(--accent-color)]' : 'text-[var(--text-muted)]'
+            }`}>
+              {uploading ? 'アップロード中...' : 'ドロップで\nファイル追加'}
+            </div>
+          ) : (
+            <>
+              {dragOver && (
+                <div className="text-xs text-center py-2 mb-2 rounded bg-[var(--accent-color)] bg-opacity-10 border border-dashed border-[var(--accent-color)] text-[var(--text-primary)]">
+                  ドロップでアップロード
+                </div>
+              )}
+              {uploading && (
+                <div className="text-xs text-center py-1 mb-2 text-[var(--text-muted)]">アップロード中...</div>
+              )}
+              {documents.map(doc => (
+                <div
+                  key={doc.id}
+                  className="group flex items-center gap-1 px-1.5 py-1 rounded hover:bg-[var(--bg-tertiary)] transition-colors"
                 >
-                  {doc.filename}
-                </a>
+                  <a
+                    href={agentDocuments.getDownloadUrl(machineId, doc.id)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex-1 min-w-0 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] truncate"
+                    title={`${doc.filename} (${formatDocSize(doc.size)})`}
+                  >
+                    {doc.filename}
+                  </a>
+                  <button
+                    onClick={() => handleDelete(doc.id)}
+                    className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 text-xs transition-opacity shrink-0"
+                    title="削除"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Members タブ: メンバー一覧 */}
+      {panelTab === 'members' && (
+        <div className="flex-1 overflow-y-auto p-2">
+          {!projectId ? (
+            <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
+          ) : membersLoading ? (
+            <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
+          ) : (
+            <>
+              {/* メンバー一覧 */}
+              {members.map(m => (
+                <div
+                  key={m.id}
+                  className="group flex items-center gap-1.5 px-1.5 py-1.5 rounded hover:bg-[var(--bg-tertiary)] transition-colors"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${m.machineStatus === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-[var(--text-secondary)] truncate" title={m.projectName}>
+                      {m.projectName}
+                    </div>
+                    <div className="text-[10px] text-[var(--text-muted)] truncate">{m.machineName}</div>
+                  </div>
+                  <button
+                    onClick={() => handleRemoveMember(m.id)}
+                    className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 text-xs transition-opacity shrink-0"
+                    title="削除"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+
+              {/* 追加ボタン */}
+              {!showAddMember ? (
                 <button
-                  onClick={() => handleDelete(doc.id)}
-                  className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 text-xs transition-opacity shrink-0"
-                  title="削除"
+                  onClick={() => setShowAddMember(true)}
+                  className="w-full mt-2 text-xs px-2 py-1.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] transition-colors"
                 >
-                  ×
+                  + メンバー追加
                 </button>
-              </div>
-            ))}
-          </>
-        )}
-      </div>
+              ) : (
+                <div className="mt-2 border border-[var(--border-color)] rounded p-1.5">
+                  <div className="text-[10px] text-[var(--text-muted)] mb-1">プロジェクトを選択:</div>
+                  <div className="max-h-32 overflow-y-auto">
+                    {availableProjects.length === 0 ? (
+                      <p className="text-[10px] text-[var(--text-muted)] text-center py-1">追加可能なプロジェクトがありません</p>
+                    ) : (
+                      availableProjects.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => handleAddMember(p.id)}
+                          className="w-full flex items-center gap-1 px-1.5 py-1 rounded hover:bg-[var(--bg-tertiary)] transition-colors text-left"
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.machineStatus === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs text-[var(--text-secondary)] truncate">{p.name}</div>
+                            <div className="text-[10px] text-[var(--text-muted)] truncate">{p.machineName}</div>
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setShowAddMember(false)}
+                    className="w-full mt-1 text-[10px] text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                  >
+                    キャンセル
+                  </button>
+                </div>
+              )}
+
+              {members.length === 0 && !showAddMember && (
+                <p className="text-[10px] text-[var(--text-muted)] text-center mt-2">
+                  メンバーを追加すると、そのプロジェクトのエージェントに質問できます
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </aside>
   );
 }
@@ -1918,6 +2079,8 @@ export function ChatPage() {
         <DocPanel
           machineId={activeMachineId}
           machineDisplayName={activeTab?.machineDisplayName ?? ''}
+          projectId={activeTab?.projectId ?? null}
+          allProjects={machineList}
         />
       )}
 

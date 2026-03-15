@@ -42,6 +42,10 @@ const pendingHistoryExportRequests = new Map<string, HistoryRequest<string>>();
 const pendingAiListRequests = new Map<string, HistoryRequest<AiListResponsePayload>>();
 const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload>>();
 
+// クロスプロジェクトクエリの待機: sessionId → { resolve, reject, timeout }
+// ask-member API が一時セッションの完了を待つために使用
+const pendingCrossQueries = new Map<string, HistoryRequest<{ output: string; files?: FileAttachment[] }>>();
+
 // Agent ローカルの projectsDirs: machineId -> string[]（接続時に報告される）
 const agentLocalProjectsDirs = new Map<string, string[]>();
 
@@ -439,6 +443,16 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
   console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}${isExec ? ' [EXEC]' : ''}`);
 
   if (isComplete) {
+    // クロスプロジェクトクエリの待機中なら即座に resolve して早期リターン
+    const pendingQuery = pendingCrossQueries.get(sessionId);
+    if (pendingQuery) {
+      pendingCrossQueries.delete(sessionId);
+      clearTimeout(pendingQuery.timeout);
+      pendingQuery.resolve({ output, files });
+      console.log(`🔗 Cross-project query completed for session ${sessionId}`);
+      return;
+    }
+
     // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
     const aiMessage = await prisma.message.create({
       data: {
@@ -955,6 +969,48 @@ export async function endSession(machineId: string, sessionId: string) {
   sendToAgent(machineId, {
     type: 'server:session:end',
     payload: { sessionId }
+  });
+}
+
+/**
+ * クロスプロジェクトクエリを実行する
+ * ターゲットプロジェクトのエージェントに一時セッションを作成し、質問を送信して回答を待つ
+ *
+ * @param machineId ターゲットマシン ID
+ * @param sessionId 一時セッション ID
+ * @param projectName プロジェクト名
+ * @param projectPath プロジェクトパス
+ * @param aiTool AI ツール
+ * @param prompt 質問テキスト
+ * @param userId ユーザー ID
+ * @param timeoutMs タイムアウト（デフォルト 5 分）
+ * @returns AI の回答テキスト
+ */
+export function executeCrossProjectQuery(
+  machineId: string,
+  sessionId: string,
+  projectName: string,
+  projectPath: string,
+  aiTool: AiTool,
+  prompt: string,
+  userId: string,
+  timeoutMs: number = 300000,
+): Promise<{ output: string; files?: FileAttachment[] }> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingCrossQueries.delete(sessionId);
+      reject(new Error('Cross-project query timed out'));
+    }, timeoutMs);
+
+    // 待機登録
+    pendingCrossQueries.set(sessionId, { resolve, reject, timeout });
+
+    // セッション開始 → プロンプト送信
+    startSession(machineId, sessionId, projectName, projectPath, aiTool);
+    // 少し待ってからプロンプト送信（セッション登録のタイミング確保）
+    setTimeout(() => {
+      sendPromptToAgent(machineId, sessionId, prompt, userId);
+    }, 500);
   });
 }
 

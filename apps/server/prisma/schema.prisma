@@ -105,11 +105,26 @@ model Project {
   defaultAi   String    @default("claude")
   lastUsedAt  DateTime?
   createdAt   DateTime  @default(now())
-  
+
   sessions    Session[]
   buildLogs   BuildLog[]
+  members     ProjectMember[] @relation("ProjectMembers")
+  memberOf    ProjectMember[] @relation("MemberOf")
 
   @@unique([machineId, name])
+}
+
+// プロジェクトメンバー（クロスプロジェクトクエリ用）
+// あるプロジェクトが他プロジェクトを「メンバー」として登録し、質問を送信できる
+model ProjectMember {
+  id              String   @id @default(cuid())
+  projectId       String   // メンバーを持つプロジェクト（例: Flutter アプリ）
+  memberProjectId String   // メンバーとして登録されたプロジェクト（例: PixBlog サーバー）
+  project         Project  @relation("ProjectMembers", fields: [projectId], references: [id])
+  memberProject   Project  @relation("MemberOf", fields: [memberProjectId], references: [id])
+  createdAt       DateTime @default(now())
+
+  @@unique([projectId, memberProjectId])
 }
 
 // セッション

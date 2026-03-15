@@ -61,6 +61,7 @@ pm2 restart devrelay-server devrelay-agent
 | UserSettings | ユーザー設定（API キー等） |
 | ChannelSession | チャンネルごとのセッション |
 | PlatformLink | プラットフォーム連携 |
+| ProjectMember | プロジェクト間メンバー関係（クロスプロジェクトクエリ） |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`

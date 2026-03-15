@@ -1654,6 +1654,97 @@ export async function apiRoutes(app: FastifyInstance) {
     await removePushSubscription(userId, endpoint);
     return reply.send({ success: true });
   });
+
+  // ========================================
+  // プロジェクトメンバー（クロスプロジェクトクエリ）
+  // ========================================
+
+  /** メンバー一覧取得 */
+  app.get('/api/projects/:projectId/members', async (request, reply) => {
+    const userId = (request as any).userId as string;
+    const { projectId } = request.params as { projectId: string };
+
+    // プロジェクト所有権チェック
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { machine: { select: { userId: true } } },
+    });
+    if (!project || project.machine.userId !== userId) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    const members = await prisma.projectMember.findMany({
+      where: { projectId },
+      include: {
+        memberProject: {
+          include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return reply.send(members.map(m => ({
+      id: m.id,
+      projectId: m.memberProject.id,
+      projectName: m.memberProject.name,
+      machineName: m.memberProject.machine.displayName || m.memberProject.machine.name,
+      machineId: m.memberProject.machine.id,
+      machineStatus: m.memberProject.machine.status,
+      createdAt: m.createdAt,
+    })));
+  });
+
+  /** メンバー追加 */
+  app.post('/api/projects/:projectId/members', async (request, reply) => {
+    const userId = (request as any).userId as string;
+    const { projectId } = request.params as { projectId: string };
+    const { memberProjectId } = request.body as { memberProjectId: string };
+
+    if (!memberProjectId) {
+      return reply.status(400).send({ error: 'memberProjectId is required' });
+    }
+    if (projectId === memberProjectId) {
+      return reply.status(400).send({ error: 'Cannot add self as member' });
+    }
+
+    // プロジェクト所有権チェック（両方とも自分のプロジェクトであること）
+    const [project, memberProject] = await Promise.all([
+      prisma.project.findUnique({ where: { id: projectId }, include: { machine: { select: { userId: true } } } }),
+      prisma.project.findUnique({ where: { id: memberProjectId }, include: { machine: { select: { userId: true } } } }),
+    ]);
+    if (!project || project.machine.userId !== userId) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+    if (!memberProject || memberProject.machine.userId !== userId) {
+      return reply.status(404).send({ error: 'Member project not found' });
+    }
+
+    const member = await prisma.projectMember.upsert({
+      where: { projectId_memberProjectId: { projectId, memberProjectId } },
+      create: { projectId, memberProjectId },
+      update: {},
+    });
+
+    return reply.send({ id: member.id, projectId, memberProjectId });
+  });
+
+  /** メンバー削除 */
+  app.delete('/api/projects/:projectId/members/:memberId', async (request, reply) => {
+    const userId = (request as any).userId as string;
+    const { projectId, memberId } = request.params as { projectId: string; memberId: string };
+
+    // プロジェクト所有権チェック
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { machine: { select: { userId: true } } },
+    });
+    if (!project || project.machine.userId !== userId) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    await prisma.projectMember.delete({ where: { id: memberId } }).catch(() => null);
+    return reply.send({ success: true });
+  });
 }
 
 // API キーをマスク表示
