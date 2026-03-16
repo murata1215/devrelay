@@ -1078,7 +1078,16 @@ async function handleUpdate(context: UserContext): Promise<string> {
   // 2回目の u: 更新実行
   if (pendingUpdate.has(chatKey)) {
     pendingUpdate.delete(chatKey);
-    updateAgent(context.currentMachineId, context.platform, context.chatId);
+    // セッションから projectId を取得（WebUI でリクエスト元タブに結果を返すため）
+    let projectId: string | undefined;
+    if (context.currentSessionId) {
+      const session = await prisma.session.findUnique({
+        where: { id: context.currentSessionId },
+        select: { projectId: true },
+      });
+      projectId = session?.projectId;
+    }
+    updateAgent(context.currentMachineId, context.platform, context.chatId, projectId);
     return '🔄 Agent を更新中...\n（接続が一時的に切断されます）';
   }
 

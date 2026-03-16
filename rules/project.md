@@ -746,6 +746,8 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - `devrelay-ask-member`: エージェント起動時に `~/.claude/skills/` に自動配置
 - `ask.sh --project X --question "..."` で質問（プランモード）、`ask.sh --exec --project X --question "..."` で実行依頼（exec モード）
 - 質問/依頼する側のみスキルが必要。受ける側はサーバーが直接 Claude Code を起動
+- **JSON 構築には `jq -n --arg` を使用**（shell エスケープは脆弱なため禁止）
+- **SKILL.md に Bash timeout 指示が必須**（cross-query は最大5分かかるが、Claude Code のデフォルト Bash timeout は2分）
 
 ### 注意事項
 - `authenticate` ミドルウェアは `request.user` を設定。`request.userId` ではない

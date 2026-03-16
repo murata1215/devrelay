@@ -73,8 +73,8 @@ const DISCONNECT_GRACE_PERIOD = 5000; // 5秒
 // バージョン確認リクエスト: machineId -> Promise コールバック
 const pendingVersionCheckRequests = new Map<string, HistoryRequest<AgentVersionInfoPayload>>();
 
-// 更新リクエストの通知先: machineId -> { platform, chatId }（完了/エラー通知用）
-const pendingUpdateNotify = new Map<string, { platform: Platform; chatId: string }>();
+// 更新リクエストの通知先: machineId -> { platform, chatId, projectId }（完了/エラー通知用）
+const pendingUpdateNotify = new Map<string, { platform: Platform; chatId: string; projectId?: string }>();
 
 // Agent 再接続フラグ: Agent が再接続した machineId を記録
 // 再接続後の最初のプロンプトでセッション再開始が必要かを判定するために使用
@@ -366,7 +366,7 @@ async function handleAgentConnect(
     pendingUpdateNotify.delete(machine.id);
     const displayName = autoDisplayName || updatedName;
     sendMessage(updateRequestor.platform, updateRequestor.chatId,
-      `✅ **${displayName}** の更新が完了しました`);
+      `✅ **${displayName}** の更新が完了しました`, undefined, updateRequestor.projectId);
   }
 
   return machine.id;
@@ -1138,7 +1138,7 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
     // エラー時はリクエスト元のユーザーに通知
     const requestor = pendingUpdateNotify.get(machineId);
     if (requestor) {
-      await sendMessage(requestor.platform, requestor.chatId, `❌ Agent 更新に失敗しました: ${error}`);
+      await sendMessage(requestor.platform, requestor.chatId, `❌ Agent 更新に失敗しました: ${error}`, undefined, requestor.projectId);
       pendingUpdateNotify.delete(machineId);
     }
   }
@@ -1228,8 +1228,8 @@ const UPDATE_TIMEOUT = 5 * 60 * 1000;
  * @param platform リクエスト元のプラットフォーム（エラー通知用）
  * @param chatId リクエスト元のチャットID（エラー通知用）
  */
-export function updateAgent(machineId: string, platform: Platform, chatId: string) {
-  pendingUpdateNotify.set(machineId, { platform, chatId });
+export function updateAgent(machineId: string, platform: Platform, chatId: string, projectId?: string) {
+  pendingUpdateNotify.set(machineId, { platform, chatId, projectId });
 
   // タイムアウトで pendingUpdateNotify をクリーンアップし、ユーザーに通知
   setTimeout(() => {
@@ -1238,7 +1238,7 @@ export function updateAgent(machineId: string, platform: Platform, chatId: strin
       pendingUpdateNotify.delete(machineId);
       console.log(`⏰ Update timeout for ${machineId}`);
       sendMessage(platform, chatId,
-        `⚠️ Agent 更新がタイムアウトしました（5分）。\n\`~/.devrelay/logs/update.log\` を確認してください。`);
+        `⚠️ Agent 更新がタイムアウトしました（5分）。\n\`~/.devrelay/logs/update.log\` を確認してください。`, undefined, entry.projectId);
     }
   }, UPDATE_TIMEOUT);
 

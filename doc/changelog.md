@@ -6,6 +6,28 @@
 
 ## 実装済み機能
 
+### #172: ask.sh の JSON エスケープ修正 + timeout 指示追加 (2026-03-16)
+
+#### 概要
+pixblog の Claude Code エージェントが `ask.sh --project --question` で他プロジェクトに質問を送れない問題を修正。サーバーログ調査の結果、POST リクエストがサーバーに到達していなかった（ローカルで Bash ツールがブロック）。
+
+#### 変更内容
+
+**Agent (Linux + macOS):**
+- `skill-manager.ts`: ask.sh の JSON 構築を脆弱な shell エスケープ (`sed 's/"/\\"/g'`) から `jq -n --arg` に変更。特殊文字・クォート・日本語を含む質問でも安全に JSON を構築
+- `skill-manager.ts`: SKILL.md の注意事項に「Bash ツールの timeout を 360000（6分）に設定してください」を追記。Claude Code のデフォルト Bash timeout（2分）では cross-query の応答（最大5分）を待てない問題を回避
+
+### #171: 更新完了メッセージをリクエスト元タブに返す (2026-03-16)
+
+#### 概要
+`u` コマンドで Agent を更新した際、完了通知が `projectId` なしで送信されるため、WebUI では「アクティブなタブ」に表示されていた。別プロジェクトのタブを開いていると、そこに更新結果が飛ぶ問題を修正。
+
+#### 変更内容
+
+**Server:**
+- `agent-manager.ts`: `pendingUpdateNotify` の型に `projectId` を追加。`updateAgent()` が `projectId` を受け取り、完了/エラー/タイムアウトの3箇所の `sendMessage()` に渡す
+- `command-handler.ts`: `handleUpdate()` でセッションから `projectId` を取得して `updateAgent()` に渡す
+
 ### #170: 同名ファイル添付時の上書き防止 (2026-03-16)
 
 #### 概要
