@@ -20,6 +20,7 @@ import {
   checkAgentVersion,
   updateAgent,
   executeCrossProjectQuery,
+  executeCrossProjectExec,
   isAgentConnected,
 } from './agent-manager.js';
 import {
@@ -249,6 +250,9 @@ export async function executeCommand(
 
     case 'ask:member':
       return handleAskMember(context, command.targetProject, command.question);
+
+    case 'teamexec:member':
+      return handleTeamExec(context, command.targetProject, command.instruction);
 
     default:
       return '❓ 不明なコマンドです。`h` でヘルプを表示できます。';
@@ -1454,6 +1458,16 @@ async function handleAskMember(
     },
   });
 
+  // ユーザーの質問を DB に保存（Conversations ページで表示するため）
+  await prisma.message.create({
+    data: {
+      sessionId: tempSessionId,
+      role: 'user',
+      content: question,
+      platform: context.platform,
+    },
+  });
+
   try {
     const result = await executeCrossProjectQuery(
       targetProject.machine.id,
@@ -1478,6 +1492,91 @@ async function handleAskMember(
     }).catch(() => {});
 
     return `❌ ${targetProject.name} への質問が失敗しました: ${error.message}`;
+  }
+}
+
+/**
+ * teamexec コマンド: 他プロジェクトに exec モードで実行依頼する
+ * ask と異なり、プランを飛ばして直接実装を実行する
+ */
+async function handleTeamExec(
+  context: UserContext,
+  targetProjectName: string,
+  instruction: string,
+): Promise<string> {
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) {
+    return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
+  }
+
+  // プロジェクト名で検索（case-insensitive、同一ユーザー所有）
+  const targetProject = await prisma.project.findFirst({
+    where: {
+      name: { equals: targetProjectName, mode: 'insensitive' },
+      machine: { userId: dbUserId, deletedAt: null },
+    },
+    include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+  });
+
+  if (!targetProject) {
+    return `❌ プロジェクト "${targetProjectName}" が見つかりません。`;
+  }
+
+  if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
+    const machineName = targetProject.machine.displayName ?? targetProject.machine.name;
+    return `⚠️ ${targetProject.name} のエージェント (${machineName}) はオフラインです。`;
+  }
+
+  // フィードバック送信（非同期で先に表示）
+  await sendMessage(context.platform, context.chatId, `🔧 ${targetProject.name} に実行依頼中...`);
+
+  // 一時セッション作成（teamexec_ プレフィックスで Conversations ページ区別用）
+  const tempSessionId = `teamexec_${crypto.randomUUID()}`;
+  await prisma.session.create({
+    data: {
+      id: tempSessionId,
+      userId: dbUserId,
+      machineId: targetProject.machine.id,
+      projectId: targetProject.id,
+      aiTool: targetProject.defaultAi,
+      status: 'active',
+    },
+  });
+
+  // ユーザーの指示を DB に保存（Conversations ページで表示するため）
+  await prisma.message.create({
+    data: {
+      sessionId: tempSessionId,
+      role: 'user',
+      content: `[teamexec] ${instruction}`,
+      platform: context.platform,
+    },
+  });
+
+  try {
+    const result = await executeCrossProjectExec(
+      targetProject.machine.id,
+      tempSessionId,
+      targetProject.name,
+      targetProject.path,
+      targetProject.defaultAi as AiTool,
+      instruction,
+      dbUserId,
+    );
+
+    await prisma.session.update({
+      where: { id: tempSessionId },
+      data: { status: 'ended', endedAt: new Date() },
+    });
+
+    return `🔧 **${targetProject.name}** の実行結果:\n\n${result.output}`;
+  } catch (error: any) {
+    await prisma.session.update({
+      where: { id: tempSessionId },
+      data: { status: 'ended', endedAt: new Date() },
+    }).catch(() => {});
+
+    return `❌ ${targetProject.name} への実行依頼が失敗しました: ${error.message}`;
   }
 }
 

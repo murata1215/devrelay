@@ -6,6 +6,83 @@
 
 ## 実装済み機能
 
+### #164: Agreement v4 → v5（doc/issues.md Issue 管理ドキュメント化）(2026-03-16)
+
+#### 概要
+Agreement テンプレートを v4 → v5 にバージョンアップ。各プロジェクトの Claude Code に `doc/issues.md` による Issue 管理ルールを周知し、`w` コマンド実行時に Issue ステータス更新のステップを追加。
+
+#### 変更内容
+
+**Server:**
+- `agreement-template.ts`: v4→v5、Issue 管理セクション追加、apply プロンプト Step 3 に `doc/issues.md` 自動作成、`w` コマンドに Step 3（Issue ステータス更新）追加
+
+**Agent (Linux + macOS):**
+- `output-collector.ts`: フォールバック Agreement テンプレートを v5 に同期
+
+**DevRelay 自身:**
+- `CLAUDE.md`: マーカー v4→v5
+- `rules/devrelay.md`: Agreement v5 内容反映
+
+### #165: クロスプロジェクト会話の Conversations ページ表示 + Agent タイミングログ (2026-03-16)
+
+#### 概要
+`ask` コマンドによるクロスプロジェクトクエリの会話を DB に保存し、Conversations ページに 🔗 バッジ付きで表示。Agent 側にクロスクエリ追跡用タイミングログを追加。
+
+#### 変更内容
+
+**Server:**
+- `agent-manager.ts`: `handleAiOutput()` でクロスクエリ完了後に early return を削除し、メッセージ保存フローに進むように変更
+- `command-handler.ts`: `handleAskMember()` でユーザーメッセージを DB に保存してから `executeCrossProjectQuery()` を呼び出し
+- `api.ts`: conversations レスポンスに `isCrossQuery` フィールド追加
+
+**WebUI:**
+- `api.ts`: `ConversationItem` に `isCrossQuery` 追加
+- `ConversationsPage.tsx`: デスクトップ・モバイル両方に 🔗 バッジ表示
+
+**Agent (Linux + macOS):**
+- `connection.ts`: `sessionTimings` Map + 3 ポイント（セッション開始・プロンプト受信・完了）でタイミングログ出力
+
+### #166: teamexec コマンド（クロスプロジェクト実行依頼）(2026-03-16)
+
+#### 概要
+`ask` コマンドの質問版に対し、exec モードで実行依頼を送る `teamexec` / `te` コマンドを追加。ターゲットプロジェクトで `startSession()` → `execConversation()` を呼び出すことで、exec マーカー付きセッションを自動起動。
+
+#### アーキテクチャ
+`execConversation()` は内部で `handleConversationExec()` を呼び、exec マーカーの追加 + `handleAiPrompt()` を自動実行する。そのため `teamexec` 側では別途 `sendPromptToAgent()` を呼ぶ必要がなく、Agent 側の変更も不要。
+
+#### 変更内容
+
+**Shared:**
+- `types.ts`: `teamexec:member` を UserCommand ユニオンに追加
+
+**Server:**
+- `command-parser.ts`: `teamexec` / `te` パターンマッチ追加（NLP パス + 非セッションパス）
+- `agent-manager.ts`: `executeCrossProjectExec()` 関数追加
+- `command-handler.ts`: `handleTeamExec()` 関数 + case 追加
+- `api.ts`: `isCrossQuery` を `teamexec_` プレフィックスにも拡張
+
+**Agent (Linux + macOS):**
+- `connection.ts`: `teamexec_` プレフィックスのクロスクエリ検出 + `[TEAM-EXEC]` ラベル
+
+### #167: Agreement v5 → v6（クロスプロジェクト連携セクション + スキル teamexec 対応）(2026-03-16)
+
+#### 概要
+Agreement テンプレートを v5 → v6 にバージョンアップ。クロスプロジェクト連携セクション（`ask` / `teamexec` / `te` コマンド表）を追加。`devrelay-ask-member` スキルに `--exec` フラグを追加し、REST API エンドポイント `POST /api/agent/teamexec-member` を新設。
+
+#### 変更内容
+
+**Server:**
+- `agreement-template.ts`: v5→v6、クロスプロジェクト連携セクション追加
+- `document-api.ts`: `POST /api/agent/teamexec-member` エンドポイント追加（`executeCrossProjectExec()` を使用）
+
+**Agent (Linux + macOS):**
+- `output-collector.ts`: フォールバック Agreement テンプレートを v6 に同期
+- `skill-manager.ts`: SKILL.md に teamexec 説明追加 + `ask.sh` に `--exec` フラグ対応（エンドポイント・ラベル切替）
+
+**DevRelay 自身:**
+- `CLAUDE.md`: マーカー v5→v6
+- `rules/devrelay.md`: Agreement v6 内容反映
+
 ### #163: Issues タブ + リサイズ可能パネル (2026-03-16)
 
 #### 概要

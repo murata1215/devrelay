@@ -200,6 +200,7 @@ export function ConversationsPage() {
                         {new Date(item.createdAt).toLocaleString()}
                       </td>
                       <td className="px-4 py-3 text-[var(--text-primary)] text-sm font-medium">
+                        {item.isCrossQuery && <span className="text-xs text-[var(--accent-blue)] mr-1" title="Cross-project query">🔗</span>}
                         {item.projectName}
                       </td>
                       <td className="px-4 py-3 text-[var(--text-secondary)] text-sm max-w-0">
@@ -276,7 +277,10 @@ export function ConversationsPage() {
                 className="bg-[var(--bg-secondary)] rounded-lg p-4 cursor-pointer hover:bg-[var(--bg-tertiary)]/60 transition-colors"
               >
                 <div className="flex justify-between items-start mb-2">
-                  <span className="text-[var(--text-primary)] text-sm font-medium">{item.projectName}</span>
+                  <span className="text-[var(--text-primary)] text-sm font-medium">
+                    {item.isCrossQuery && <span className="text-xs text-[var(--accent-blue)] mr-1" title="Cross-project query">🔗</span>}
+                    {item.projectName}
+                  </span>
                   <span className="text-[var(--text-muted)] text-xs">{new Date(item.createdAt).toLocaleString()}</span>
                 </div>
                 <div className="text-[var(--text-secondary)] text-sm mb-1 truncate">{truncate(item.userMessage, 60)}</div>

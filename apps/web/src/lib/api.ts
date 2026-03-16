@@ -402,6 +402,7 @@ export interface ConversationItem {
   createdAt: string;
   inputFiles: MessageFileMeta[];
   outputFiles: MessageFileMeta[];
+  isCrossQuery?: boolean;
 }
 
 export interface ConversationsResponse {

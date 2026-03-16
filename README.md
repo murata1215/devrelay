@@ -15,7 +15,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Multi-Platform**: Operate from Discord, Telegram (LINE coming soon)
 - **Natural Language Commands**: "reconnect to last project" auto-translates to the right command (OpenAI / Anthropic / Gemini)
 - **Plan / Execute Mode**: AI plans first, you review, then it implements
-- **DevRelay Agreement v4**: Rules in `rules/devrelay.md`, lightweight CLAUDE.md hub
+- **DevRelay Agreement v6**: Rules in `rules/devrelay.md`, lightweight CLAUDE.md hub, issue tracking, cross-project collaboration
 - **Real-time Progress**: Watch AI's progress live on Discord/Telegram
 - **Bidirectional File Transfer**: Send and receive files between chat and dev machines
 - **History Export**: Download conversation history as daily ZIP files
@@ -38,6 +38,8 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Multi-Browser Sync**: Chat syncs across browsers in real-time via server-side WebSocket broadcast
 - **Team Management**: Create named teams, add projects, and enable cross-project AI queries
 - **Cross-Project Query**: Ask questions to other project's agents via `ask <project>: <question>` (Discord/Telegram/Claude Code skill)
+- **Cross-Project Exec**: Send execution requests to other project's agents via `teamexec <project>: <instruction>` (Discord/Telegram/Claude Code skill `--exec` flag)
+- **Issue Tracking**: `doc/issues.md` auto-created per project, status updates integrated into `w` command
 
 ## 💡 Token Efficiency
 
@@ -79,10 +81,10 @@ devrelay/
 │   ├── macos/            # macOS CLI Agent (launchd management)
 │   └── windows/          # Windows Agent (Electron tray app)
 ├── rules/
-│   ├── devrelay.md       # DevRelay Agreement v4 (shared rules)
+│   ├── devrelay.md       # DevRelay Agreement v6 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#160)
+│   ├── changelog.md      # Implementation history (#1-#167)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -213,7 +215,7 @@ Bot: 🤖 Working on it...
 | `e, <instruction>` | Execute custom instruction directly |
 | `w` | Wrap up: update docs + commit + push |
 | `se` / `session` | Show session info |
-| `ag` / `agreement` | Apply DevRelay Agreement v4 (creates `rules/devrelay.md`) |
+| `ag` / `agreement` | Apply DevRelay Agreement v6 (creates `rules/devrelay.md`) |
 | `link` | Link Discord/Telegram account to WebUI |
 | `1`, `2`, `3`... | Select from list |
 | `u` / `update` | Check agent version / remote update (requires double confirmation) |
@@ -221,6 +223,8 @@ Bot: 🤖 Working on it...
 | `x` | Clear conversation history (requires double confirmation) |
 | `q` | Disconnect |
 | `ask <project>: <question>` | Ask another project's agent a question |
+| `teamexec <project>: <instruction>` | Send exec request to another project's agent |
+| `te <project>: <instruction>` | Short alias for teamexec |
 | `h` | Help |
 
 Any other message is sent as an instruction to the AI.
@@ -427,7 +431,7 @@ agents/windows/
 - [x] Build Log (auto-track exec with AI-generated summaries)
 - [x] Multi-provider AI keys (OpenAI, Anthropic, Gemini with per-feature selection)
 - [x] Projects page sorted by latest build date (most recently built first)
-- [x] Agreement v4 + CLAUDE.md migration (rules separation, lightweight hub)
+- [x] Agreement v6 + CLAUDE.md migration (rules separation, lightweight hub, issue tracking, cross-project collaboration)
 - [x] Server-side Agreement template delivery (update Server once, all Agents get latest)
 - [x] Exec command user message in Conversations (show `[exec]` instead of `(empty)`)
 - [x] Agreement template editor in Settings page (customize AI rules from WebUI)
@@ -456,6 +460,8 @@ agents/windows/
 - [x] Resume startup timeout - auto-retry without `--resume` when Claude Code hangs on stale sessions
 - [x] Dynamic remote branch detection - `u` command detects default branch instead of hardcoding `origin/main`
 - [x] Team management + cross-project query (`ask <project>: <question>`)
+- [x] Cross-project exec (`teamexec <project>: <instruction>`, Claude Code skill `--exec` flag)
+- [x] Issue tracking (`doc/issues.md` per project, Agreement v6)
 - [ ] LINE Bot
 - [ ] AI tool switching (Gemini/Aider)
 

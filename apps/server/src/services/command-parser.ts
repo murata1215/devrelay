@@ -40,6 +40,12 @@ export async function parseCommandWithNLP(
     return { type: 'ask:member', targetProject: askMatchNlp[1].trim(), question: askMatchNlp[2].trim() };
   }
 
+  // 1.6. teamexec コマンド: 他プロジェクトに実行依頼（exec モード）
+  const teamexecMatchNlp = trimmed.match(/^(?:teamexec|te)\s+([^:]+):\s*(.+)$/is);
+  if (teamexecMatchNlp) {
+    return { type: 'teamexec:member', targetProject: teamexecMatchNlp[1].trim(), instruction: teamexecMatchNlp[2].trim() };
+  }
+
   // 2. If already connected to a project (has active session), skip NLP and send directly to AI
   //    (NLP is only needed for navigation commands like p, c, x, q, h)
   if (context.currentSessionId) {
@@ -152,6 +158,12 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   const askMatch = input.trim().match(/^ask\s+([^:]+):\s*(.+)$/is);
   if (askMatch) {
     return { type: 'ask:member', targetProject: askMatch[1].trim(), question: askMatch[2].trim() };
+  }
+
+  // 0.8. 「teamexec <project>: <instruction>」パターン: 他プロジェクトに実行依頼
+  const teamexecMatch = input.trim().match(/^(?:teamexec|te)\s+([^:]+):\s*(.+)$/is);
+  if (teamexecMatch) {
+    return { type: 'teamexec:member', targetProject: teamexecMatch[1].trim(), instruction: teamexecMatch[2].trim() };
   }
 
   // 0.6. 「w」コマンド: ドキュメント更新＋コミットプッシュのワンショット実行

@@ -105,6 +105,9 @@ interface SessionInfo {
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
+/** クロスプロジェクトクエリの開始時刻（タイミング追跡用） */
+const sessionTimings = new Map<string, number>();
+
 /**
  * Build a proxy URL with optional authentication credentials
  */
@@ -373,9 +376,15 @@ async function handleSessionStart(
 ) {
   const { sessionId, projectName, projectPath, aiTool } = payload;
 
-  console.log(`🚀 Starting session: ${sessionId}`);
+  const isCrossQuery = sessionId.startsWith('crossquery_') || sessionId.startsWith('teamexec_');
+  const crossLabel = sessionId.startsWith('teamexec_') ? 'TEAM-EXEC' : 'CROSS-QUERY';
+  console.log(`🚀 Starting session: ${sessionId}${isCrossQuery ? ` [${crossLabel}]` : ''}`);
   console.log(`   Project: ${projectName} (${projectPath})`);
   console.log(`   AI Tool: ${aiTool}`);
+  if (isCrossQuery) {
+    // クロスプロジェクトクエリのタイミング追跡開始
+    sessionTimings.set(sessionId, Date.now());
+  }
 
   // Load previous conversation history from file
   const history = await loadConversation(projectPath);
@@ -557,7 +566,11 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
 
 async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
+  const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
+  if (crossQueryStart) {
+    console.log(`⏱️ [CROSS-QUERY] Prompt received ${Date.now() - crossQueryStart}ms after session start`);
+  }
   if (files && files.length > 0) {
     console.log(`📎 Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
   }
@@ -737,6 +750,14 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             return;
           }
           completionSent = true;
+
+          // クロスプロジェクトクエリの完了タイミングを記録
+          const crossQueryStartTime = sessionTimings.get(sessionId);
+          if (crossQueryStartTime) {
+            const elapsed = Date.now() - crossQueryStartTime;
+            console.log(`⏱️ [CROSS-QUERY] Completed in ${elapsed}ms (${(elapsed / 1000).toFixed(1)}s)`);
+            sessionTimings.delete(sessionId);
+          }
 
           // Collect files from the output directory
           const files = await collectOutputFiles(sessionInfo.projectPath);

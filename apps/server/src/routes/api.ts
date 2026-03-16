@@ -1438,6 +1438,7 @@ export async function apiRoutes(app: FastifyInstance) {
         createdAt: aiMsg.createdAt.toISOString(),
         inputFiles,
         outputFiles: aiMsg.files || [],
+        isCrossQuery: aiMsg.sessionId.startsWith('crossquery_') || aiMsg.sessionId.startsWith('teamexec_'),
       };
     });
 

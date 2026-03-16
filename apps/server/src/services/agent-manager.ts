@@ -450,14 +450,14 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
   console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}${isExec ? ' [EXEC]' : ''}`);
 
   if (isComplete) {
-    // クロスプロジェクトクエリの待機中なら即座に resolve して早期リターン
+    // クロスプロジェクトクエリの待機中なら resolve（DB 保存は通常フローで行う）
     const pendingQuery = pendingCrossQueries.get(sessionId);
     if (pendingQuery) {
       pendingCrossQueries.delete(sessionId);
       clearTimeout(pendingQuery.timeout);
       pendingQuery.resolve({ output, files });
       console.log(`🔗 Cross-project query completed for session ${sessionId}`);
-      return;
+      // early return せず、通常のメッセージ保存フローに進む
     }
 
     // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
@@ -1032,6 +1032,49 @@ export function executeCrossProjectQuery(
     // 少し待ってからプロンプト送信（セッション登録のタイミング確保）
     setTimeout(() => {
       sendPromptToAgent(machineId, sessionId, prompt, userId);
+    }, 500);
+  });
+}
+
+/**
+ * クロスプロジェクト実行（teamexec）
+ * ask と異なり、exec モード（--dangerously-skip-permissions）で指示を実行する。
+ * execConversation() が Agent 側で exec マーカー追加 + handleAiPrompt() 自動呼出を行う。
+ *
+ * @param machineId ターゲットマシン ID
+ * @param sessionId 一時セッション ID（teamexec_ プレフィックス）
+ * @param projectName プロジェクト名
+ * @param projectPath プロジェクトパス
+ * @param aiTool AI ツール
+ * @param instruction 実行指示テキスト
+ * @param userId ユーザー ID
+ * @param timeoutMs タイムアウト（デフォルト 5 分）
+ * @returns AI の実行結果テキスト
+ */
+export function executeCrossProjectExec(
+  machineId: string,
+  sessionId: string,
+  projectName: string,
+  projectPath: string,
+  aiTool: AiTool,
+  instruction: string,
+  userId: string,
+  timeoutMs: number = 300000,
+): Promise<{ output: string; files?: FileAttachment[] }> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingCrossQueries.delete(sessionId);
+      reject(new Error('Team exec timed out'));
+    }, timeoutMs);
+
+    // 待機登録（pendingCrossQueries を共用）
+    pendingCrossQueries.set(sessionId, { resolve, reject, timeout });
+
+    // セッション開始 → exec 実行（exec マーカー追加 + プロンプト自動送信）
+    startSession(machineId, sessionId, projectName, projectPath, aiTool);
+    // 少し待ってから exec 送信（セッション登録のタイミング確保）
+    setTimeout(() => {
+      execConversation(machineId, sessionId, projectPath, userId, instruction);
     }, 500);
   });
 }

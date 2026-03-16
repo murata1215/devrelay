@@ -275,13 +275,13 @@ pm2 save && pm2 startup
 
 ---
 
-## Agreement v4 アーキテクチャ
+## Agreement v6 アーキテクチャ
 
 - Agreement ルール本体は `rules/devrelay.md` に配置（CLAUDE.md には軽量マーカーのみ）
 - `getAgreementStatusType()` は `rules/devrelay.md` → CLAUDE.md の順でチェック（後方互換）
-- v3 以前のプロジェクトに v4 Agent が接続 → `'outdated'` 表示 → `ag` コマンドで v4 に更新可能
-- `AGREEMENT_APPLY_PROMPT` はマルチファイル作成: `rules/devrelay.md` + `doc/changelog.md`（ヘッダー） + `rules/project.md`（ヘッダー）+ CLAUDE.md マーカー更新
-- `w` コマンドは `doc/changelog.md` → `rules/project.md` → CLAUDE.md（最小限のみ）の順で更新
+- v5 以前のプロジェクトに v6 Agent が接続 → `'outdated'` 表示 → `ag` コマンドで v6 に更新可能
+- `AGREEMENT_APPLY_PROMPT` はマルチファイル作成: `rules/devrelay.md` + `doc/changelog.md`（ヘッダー） + `rules/project.md`（ヘッダー）+ `doc/issues.md`（Issue 管理）+ CLAUDE.md マーカー更新
+- `w` コマンドは `doc/changelog.md` → `rules/project.md` → CLAUDE.md（最小限のみ）→ `doc/issues.md`（Issue ステータス更新）の順で更新
 
 ### テンプレート配信方式
 
@@ -724,19 +724,28 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 
 ### API 構成
 - **WebUI 向け**: `GET/POST/DELETE /api/teams`、`POST/DELETE /api/teams/:teamId/members`
-- **Agent 向け**: `GET /api/agent/members`（チームメイト一覧）、`POST /api/agent/ask-member`（質問送信）
-- **Discord/Telegram**: `ask <project>: <question>` コマンド
+- **Agent 向け**: `GET /api/agent/members`（チームメイト一覧）、`POST /api/agent/ask-member`（質問送信）、`POST /api/agent/teamexec-member`（実行依頼送信）
+- **Discord/Telegram**: `ask <project>: <question>` / `teamexec <project>: <instruction>` / `te <project>: <instruction>` コマンド
 
-### クロスプロジェクトクエリの流れ
-1. 質問送信 → `executeCrossProjectQuery()` で一時セッション作成
+### クロスプロジェクトクエリの流れ（ask）
+1. 質問送信 → `executeCrossProjectQuery()` で一時セッション作成（`crossquery_` プレフィックス）
 2. ターゲットプロジェクトの Agent に `server:session:start` + 質問プロンプト送信
 3. Agent が Claude Code を起動してコードを分析・回答
 4. `handleAiOutput(isComplete=true)` → `pendingCrossQueries` Map の Promise を resolve
 5. 回答を HTTP レスポンスとして返却（タイムアウト: 5分）
 
+### クロスプロジェクト実行依頼の流れ（teamexec）
+1. 実行指示送信 → `executeCrossProjectExec()` で一時セッション作成（`teamexec_` プレフィックス）
+2. `startSession()` → 500ms 遅延 → `execConversation()` で exec マーカー付きセッションを起動
+3. `execConversation()` 内部で `handleConversationExec()` → exec マーカー追加 + `handleAiPrompt()` 自動呼び出し
+4. Agent は `--dangerously-skip-permissions` でコード変更を含む実行を行う
+5. `handleAiOutput(isComplete=true)` → `pendingCrossQueries` Map の Promise を resolve
+6. 回答を HTTP レスポンスとして返却（タイムアウト: 5分）
+
 ### Agent スキル
 - `devrelay-ask-member`: エージェント起動時に `~/.claude/skills/` に自動配置
-- 質問する側のみスキルが必要。質問を受ける側はサーバーが直接 Claude Code を起動
+- `ask.sh --project X --question "..."` で質問（プランモード）、`ask.sh --exec --project X --question "..."` で実行依頼（exec モード）
+- 質問/依頼する側のみスキルが必要。受ける側はサーバーが直接 Claude Code を起動
 
 ### 注意事項
 - `authenticate` ミドルウェアは `request.user` を設定。`request.userId` ではない

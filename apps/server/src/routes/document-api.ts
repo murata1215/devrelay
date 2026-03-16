@@ -6,10 +6,11 @@
  * また、他プロジェクトのエージェントに質問を送信するクロスプロジェクトクエリ機能を提供。
  *
  * エンドポイント:
- * - POST /api/agent/documents/search — ベクトル類似検索
- * - GET  /api/agent/documents/:id    — ファイルテキスト内容取得
- * - POST /api/agent/ask-member       — クロスプロジェクトクエリ
- * - GET  /api/agent/members          — 登録済みメンバー一覧取得
+ * - POST /api/agent/documents/search  — ベクトル類似検索
+ * - GET  /api/agent/documents/:id     — ファイルテキスト内容取得
+ * - POST /api/agent/ask-member        — クロスプロジェクトクエリ（プランモード）
+ * - POST /api/agent/teamexec-member   — クロスプロジェクト実行依頼（exec モード）
+ * - GET  /api/agent/members           — 登録済みメンバー一覧取得
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -17,7 +18,7 @@ import crypto from 'crypto';
 import { prisma } from '../db/client.js';
 import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
-import { executeCrossProjectQuery, isAgentConnected } from '../services/agent-manager.js';
+import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected } from '../services/agent-manager.js';
 import type { AiTool } from '@devrelay/shared';
 
 /**
@@ -282,6 +283,86 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
       console.error(`🔗 Cross-project query failed: ${error.message}`);
       return reply.status(504).send({ error: `Query timed out or failed: ${error.message}` });
+    }
+  });
+
+  /**
+   * POST /api/agent/teamexec-member
+   * クロスプロジェクト実行依頼: 他プロジェクトのエージェントに実行指示を送信
+   * ターゲットプロジェクトで exec モードのセッションを起動し、完了を待つ
+   *
+   * Body: { targetProjectId: string, question: string }
+   * 認証: Authorization: Bearer <machine_token>
+   * レスポンス: { answer: string }
+   */
+  app.post('/api/agent/teamexec-member', async (request: FastifyRequest, reply: FastifyReply) => {
+    const auth = await authenticateByMachineTokenFull(request);
+    if (!auth) {
+      return reply.status(401).send({ error: 'Invalid or missing machine token' });
+    }
+
+    const { targetProjectId, question } = (request.body || {}) as { targetProjectId?: string; question?: string };
+    if (!targetProjectId || !question) {
+      return reply.status(400).send({ error: 'targetProjectId and question are required' });
+    }
+
+    // ターゲットプロジェクトの存在確認と所有権チェック
+    const targetProject = await prisma.project.findUnique({
+      where: { id: targetProjectId },
+      include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true } } },
+    });
+
+    if (!targetProject || targetProject.machine.userId !== auth.userId || targetProject.machine.deletedAt) {
+      return reply.status(404).send({ error: 'Target project not found' });
+    }
+
+    if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
+      return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
+    }
+
+    // teamexec 用セッションを作成
+    const tempSessionId = `teamexec_${crypto.randomUUID()}`;
+    const tempSession = await prisma.session.create({
+      data: {
+        id: tempSessionId,
+        userId: auth.userId,
+        machineId: targetProject.machine.id,
+        projectId: targetProjectId,
+        aiTool: targetProject.defaultAi,
+        status: 'active',
+      },
+    });
+
+    console.log(`🚀 Team exec: ${tempSessionId} → ${targetProject.name} (${targetProject.machine.id})`);
+
+    try {
+      // エージェントに exec モードでセッション開始し、完了を待つ
+      const result = await executeCrossProjectExec(
+        targetProject.machine.id,
+        tempSessionId,
+        targetProject.name,
+        targetProject.path,
+        targetProject.defaultAi as AiTool,
+        question,
+        auth.userId,
+      );
+
+      // セッションを終了
+      await prisma.session.update({
+        where: { id: tempSessionId },
+        data: { status: 'ended', endedAt: new Date() },
+      });
+
+      return reply.send({ answer: result.output });
+    } catch (error: any) {
+      // セッションを終了（エラー時も）
+      await prisma.session.update({
+        where: { id: tempSessionId },
+        data: { status: 'ended', endedAt: new Date() },
+      }).catch(() => {});
+
+      console.error(`🚀 Team exec failed: ${error.message}`);
+      return reply.status(504).send({ error: `Team exec timed out or failed: ${error.message}` });
     }
   });
 }

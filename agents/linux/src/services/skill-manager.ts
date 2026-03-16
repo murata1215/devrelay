@@ -175,37 +175,43 @@ fi
 function generateAskMemberSkillMd(): string {
   return `---
 name: devrelay-ask-member
-description: 他プロジェクトのエージェントに質問します。「pixblogに聞いて」「サーバー側のAPI仕様を確認して」「他プロジェクトの実装を教えて」など、別プロジェクトの情報が必要な場合に使用します。
+description: 他プロジェクトのエージェントに質問や実行依頼を送ります。「pixblogに聞いて」「サーバー側のAPI仕様を確認して」「pixdraftにREADME更新を依頼して」など、別プロジェクトとの連携に使用します。
 allowed-tools: Bash(bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh *)
 ---
 
-## DevRelay クロスプロジェクトクエリ
+## DevRelay クロスプロジェクト連携
 
-他プロジェクトのエージェントに質問を送信し、そのプロジェクトのコードを分析した回答を得ます。
-質問先のプロジェクトで新しい Claude セッションが起動され、コードベースを参照して回答します。
+他プロジェクトのエージェントに質問を送信したり、実行依頼（teamexec）を送ることができます。
 
 ### メンバー一覧を確認
 
-まず質問可能なメンバー（プロジェクト）を確認します:
+まず連携可能なメンバー（プロジェクト）を確認します:
 
 \\\`\\\`\\\`bash
 bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --list
 \\\`\\\`\\\`
 
-### 質問を送信
+### 質問を送信（プランモード）
 
 \\\`\\\`\\\`bash
 bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project <プロジェクト名> --question "質問内容"
 \\\`\\\`\\\`
 
+### 実行依頼を送信（exec モード）
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project <プロジェクト名> --question "実行指示"
+\\\`\\\`\\\`
+
 例:
 - \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project pixblog --question "POST /api/v1/categories の仕様を教えて"\\\`
-- \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project pixdraft --question "AI生成APIのレスポンスにcategoryフィールドはある？"\\\`
+- \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project pixdraft --question "アカウント削除APIを実装して"\\\`
 
 ### 注意事項
-- 質問先のエージェントがオンラインである必要があります
+- 質問/依頼先のエージェントがオンラインである必要があります
 - 回答には数分かかる場合があります（Claude Code がコードを分析するため）
-- 回答はターゲットプロジェクトのコードベースに基づいて生成されます
+- \\\`--exec\\\` を付けると exec モードで実装まで実行します（コード変更あり）
+- \\\`--exec\\\` なしはプランモードで質問のみ（コード変更なし）
 `;
 }
 
@@ -216,7 +222,7 @@ function generateAskScript(serverUrl: string, token: string): string {
   const httpUrl = wsToHttpUrl(serverUrl);
 
   return `#!/bin/bash
-# DevRelay クロスプロジェクトクエリスクリプト
+# DevRelay クロスプロジェクトクエリ / 実行依頼スクリプト
 # Agent が自動生成。手動編集は次回起動時に上書きされます。
 
 set -euo pipefail
@@ -227,8 +233,9 @@ TOKEN="${token}"
 # 引数チェック
 if [ $# -eq 0 ]; then
   echo "使い方:"
-  echo "  メンバー一覧: bash $0 --list"
-  echo "  質問送信:     bash $0 --project <プロジェクト名> --question \\"質問内容\\""
+  echo "  メンバー一覧:  bash $0 --list"
+  echo "  質問送信:      bash $0 --project <プロジェクト名> --question \\"質問内容\\""
+  echo "  実行依頼:      bash $0 --exec --project <プロジェクト名> --question \\"実行指示\\""
   exit 1
 fi
 
@@ -268,10 +275,12 @@ fi
 # 引数パース
 PROJECT=""
 QUESTION=""
+EXEC_MODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
     --question) QUESTION="$2"; shift 2 ;;
+    --exec) EXEC_MODE="1"; shift ;;
     *) echo "不明な引数: $1"; exit 1 ;;
   esac
 done
@@ -310,18 +319,29 @@ if command -v jq &>/dev/null; then
     exit 1
   fi
 
-  echo "📨 $TARGET_NAME に質問を送信中..."
-  echo "質問: $QUESTION"
+  # モードに応じてエンドポイントとラベルを切り替え
+  if [ -n "$EXEC_MODE" ]; then
+    API_ENDPOINT="\${API_URL}/api/agent/teamexec-member"
+    MODE_LABEL="実行依頼"
+    EMOJI="🚀"
+  else
+    API_ENDPOINT="\${API_URL}/api/agent/ask-member"
+    MODE_LABEL="質問"
+    EMOJI="📨"
+  fi
+
+  echo "$EMOJI $TARGET_NAME に\${MODE_LABEL}を送信中..."
+  echo "\${MODE_LABEL}: $QUESTION"
   echo ""
 
-  # 質問送信（タイムアウト 5 分）
+  # 送信（タイムアウト 5 分）
   RESPONSE=$(curl -s -f -w "\\n%{http_code}" --max-time 300 \\
     -X POST \\
     -H "Content-Type: application/json" \\
     -H "Authorization: Bearer $TOKEN" \\
     -d "{\\"targetProjectId\\": \\"$TARGET_ID\\", \\"question\\": \\"$(echo "$QUESTION" | sed 's/"/\\\\\\\\"/g')\\"}" \\
-    "\${API_URL}/api/agent/ask-member" 2>&1) || {
-    echo "エラー: クエリに失敗しました（タイムアウトまたは接続エラー）"
+    "$API_ENDPOINT" 2>&1) || {
+    echo "エラー: \${MODE_LABEL}に失敗しました（タイムアウトまたは接続エラー）"
     echo "$RESPONSE"
     exit 1
   }
