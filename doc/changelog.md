@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### #170: 同名ファイル添付時の上書き防止 (2026-03-16)
+
+#### 概要
+Discord で複数画像を貼り付けると全て `image.png` という同一ファイル名になり、Agent の `file-handler.ts` で上書きされて最後の1枚しか Claude Code に渡らない問題を修正。
+
+#### 変更内容
+
+**Agent (Linux + macOS + Windows):**
+- `file-handler.ts`: `saveReceivedFiles()` で同一バッチ内のファイル名重複を検出し、2つ目以降に連番を付与（例: `image.png`, `image_2.png`, `image_3.png`）
+- `usedNames` Map でファイル名の出現回数を追跡
+
+### #169: WebUI チャットメッセージ上限によるパフォーマンス改善 (2026-03-16)
+
+#### 概要
+WebUI のチャットが長時間使用で重くなる問題を修正。メッセージが React state + DOM に無制限に蓄積していたのを、上限を設けて古いメッセージを自動除去する仕組みに変更。
+
+#### 変更内容
+
+**WebUI:**
+- `ChatPage.tsx`: `MAX_MESSAGES = 50` 定数追加（1タブあたりの最大メッセージ保持数）
+- 初期ロード数を 30 → 10 に削減
+- 新メッセージ追加時: 50件超過で古い方を除去 + `hasMoreHistory: true` でスクロールバック可能
+- スクロールバック読み込み時: ページサイズ 30 → 20 に削減、50件超過で新しい方（末尾）を除去
+- スクロールバックで古い履歴は再読み込み可能
+
+### #168: スキル経由クロスプロジェクトクエリのユーザーメッセージ保存 (2026-03-16)
+
+#### 概要
+Conversations ページでスキル（Claude Code）経由のクロスプロジェクトクエリの User Message が `(empty)` と表示される問題を修正。REST API エンドポイントでユーザーメッセージを DB に保存するように変更。
+
+#### 変更内容
+
+**Server:**
+- `document-api.ts`: `POST /api/agent/ask-member` でセッション作成後に `prisma.message.create()` で質問テキストを保存
+- `document-api.ts`: `POST /api/agent/teamexec-member` でセッション作成後に `[teamexec] ${question}` を保存
+
 ### #164: Agreement v4 → v5（doc/issues.md Issue 管理ドキュメント化）(2026-03-16)
 
 #### 概要

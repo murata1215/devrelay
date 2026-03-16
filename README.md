@@ -84,7 +84,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v6 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#167)
+│   ├── changelog.md      # Implementation history (#1-#170)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer

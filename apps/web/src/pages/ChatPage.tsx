@@ -4,6 +4,9 @@ import { machines as machinesApi, sessions as sessionsApi, projects as projectsA
 import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
 
+/** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
+const MAX_MESSAGES = 50;
+
 /** 添付ファイル型 */
 interface FileAttachment {
   filename: string;
@@ -1373,7 +1376,7 @@ export function ChatPage() {
 
     try {
       // プロジェクト横断で全セッションのメッセージを取得
-      const { messages, hasMore } = await projectsApi.getMessages(projectId, { limit: 30 });
+      const { messages, hasMore } = await projectsApi.getMessages(projectId, { limit: 10 });
       const chatMessages: ChatMessage[] = messages.map(m => ({
         id: m.id,
         role: m.role === 'ai' ? 'system' as const : m.role,
@@ -1438,9 +1441,15 @@ export function ChatPage() {
       shouldAutoScrollRef.current = true;
     }
     const newMsg: ChatMessage = { ...msg, id: nextMessageId(), timestamp: new Date() };
-    setTabs(prev => prev.map(t =>
-      t.projectId === targetId ? { ...t, messages: [...t.messages, newMsg] } : t
-    ));
+    setTabs(prev => prev.map(t => {
+      if (t.projectId !== targetId) return t;
+      const updated = [...t.messages, newMsg];
+      // 上限を超えた古いメッセージを除去（スクロールバックで再読み込み可能）
+      if (updated.length > MAX_MESSAGES) {
+        return { ...t, messages: updated.slice(updated.length - MAX_MESSAGES), hasMoreHistory: true };
+      }
+      return { ...t, messages: updated };
+    }));
   }, []);
 
   /**
@@ -1665,7 +1674,7 @@ export function ChatPage() {
     ));
 
     // プロジェクト横断で全セッションのメッセージを取得
-    projectsApi.getMessages(tabId, { before: oldestMsg.id, limit: 30 }).then(({ messages, hasMore }) => {
+    projectsApi.getMessages(tabId, { before: oldestMsg.id, limit: 20 }).then(({ messages, hasMore }) => {
       const chatMessages: ChatMessage[] = messages.map(m => ({
         id: m.id,
         role: m.role === 'ai' ? 'system' as const : m.role,
@@ -1678,9 +1687,12 @@ export function ChatPage() {
         if (t.projectId !== tabId) return t;
         const existingIds = new Set(t.messages.map(m => m.id));
         const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
+        const merged = [...newMsgs, ...t.messages];
+        // 上限を超えた新しい方（末尾）を除去（ユーザーは上部を見ている）
+        const trimmed = merged.length > MAX_MESSAGES ? merged.slice(0, MAX_MESSAGES) : merged;
         return {
           ...t,
-          messages: [...newMsgs, ...t.messages],
+          messages: trimmed,
           hasMoreHistory: hasMore,
           loadingHistory: false,
         };

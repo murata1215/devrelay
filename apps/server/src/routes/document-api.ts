@@ -253,6 +253,16 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       },
     });
 
+    // ユーザーメッセージを保存（Conversations ページで表示するため）
+    await prisma.message.create({
+      data: {
+        sessionId: tempSessionId,
+        role: 'user',
+        content: question,
+        platform: 'api',
+      },
+    });
+
     console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} (${targetProject.machine.id})`);
 
     try {
@@ -330,6 +340,16 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         projectId: targetProjectId,
         aiTool: targetProject.defaultAi,
         status: 'active',
+      },
+    });
+
+    // ユーザーメッセージを保存（Conversations ページで表示するため）
+    await prisma.message.create({
+      data: {
+        sessionId: tempSessionId,
+        role: 'user',
+        content: `[teamexec] ${question}`,
+        platform: 'api',
       },
     });
 

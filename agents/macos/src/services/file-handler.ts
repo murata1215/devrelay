@@ -40,10 +40,27 @@ export async function saveReceivedFiles(
   // Generate datetime prefix for this batch of files
   const dateTimePrefix = getDateTimePrefix();
 
+  // 同一バッチ内のファイル名重複カウンター
+  const usedNames = new Map<string, number>();
+
   for (const file of files) {
     try {
-      // Add datetime prefix to filename
-      const prefixedFilename = `${dateTimePrefix}${file.filename}`;
+      // 同名ファイルがあれば連番を付与（例: image_2.png, image_3.png）
+      const baseKey = file.filename;
+      const count = usedNames.get(baseKey) || 0;
+      usedNames.set(baseKey, count + 1);
+
+      let uniqueFilename = file.filename;
+      if (count > 0) {
+        const dotIdx = file.filename.lastIndexOf('.');
+        if (dotIdx > 0) {
+          uniqueFilename = `${file.filename.substring(0, dotIdx)}_${count + 1}${file.filename.substring(dotIdx)}`;
+        } else {
+          uniqueFilename = `${file.filename}_${count + 1}`;
+        }
+      }
+
+      const prefixedFilename = `${dateTimePrefix}${uniqueFilename}`;
       const filePath = join(filesDir, prefixedFilename);
       const buffer = Buffer.from(file.content, 'base64');
       await writeFile(filePath, buffer);
