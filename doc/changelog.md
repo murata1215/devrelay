@@ -15,9 +15,11 @@ Agent の `config.yaml` にプロキシ設定がある場合、Claude Code / Gem
 
 ### #175: Windows Agent インストーラーのパス修正 (2026-03-18)
 
-`install-agent.ps1` で Windows 用なのに `agents\linux\dist\index.js` を参照していたバグを修正。
+`install-agent.ps1` のエントリポイントパスを誤って `agents\windows` に変更 → リバート。
+CLI Agent は `agents/linux/`（Linux + Windows 共通の `@devrelay/agent`）であり、
+`agents/windows/` は Electron GUI 版（`@devrelay/agent-windows`）のため、元の `agents\linux\dist\index.js` が正しい。
 
-- `scripts/install-agent.ps1`: `agents\linux` → `agents\windows` に修正
+- `scripts/install-agent.ps1`: パスを `agents\linux\dist\index.js` に維持（誤変更をリバート）
 
 ### #174: サーバー概念導入 + チャット入力タブ別独立化 (2026-03-18)
 
