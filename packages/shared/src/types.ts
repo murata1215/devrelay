@@ -413,6 +413,9 @@ export interface AiPromptPayload {
   userId: string;
   files?: FileAttachment[];
   missedMessages?: MissedMessage[];
+  /** Agent 再起動時の自動セッション初期化用（server:session:start を受け取れなかった場合のフォールバック） */
+  projectPath?: string;
+  aiTool?: AiTool;
 }
 
 // -----------------------------------------------------------------------------

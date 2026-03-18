@@ -1357,6 +1357,12 @@ async function handleAiPrompt(
 
   console.log(`📤 Sending prompt to agent ${context.currentMachineId}`);
 
+  // セッション情報を取得（Agent 再起動時の自動初期化用に projectPath と aiTool を送信）
+  const currentSession = await prisma.session.findUnique({
+    where: { id: context.currentSessionId },
+    include: { project: { select: { path: true } } }
+  });
+
   // Start progress tracking (sends initial message)
   await startProgressTracking(context.currentSessionId);
 
@@ -1369,7 +1375,9 @@ async function handleAiPrompt(
       text,
       context.userId,
       files,
-      missedMessages
+      missedMessages,
+      currentSession?.project.path,
+      currentSession?.aiTool as AiTool | undefined
     );
   } catch (error) {
     stopProgressTracking(context.currentSessionId);

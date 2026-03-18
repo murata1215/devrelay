@@ -979,11 +979,13 @@ export async function sendPromptToAgent(
   prompt: string,
   userId: string,
   files?: FileAttachment[],
-  missedMessages?: MissedMessage[]
+  missedMessages?: MissedMessage[],
+  projectPath?: string,
+  aiTool?: AiTool
 ) {
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages }
+    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool }
   });
 }
 

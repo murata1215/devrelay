@@ -564,7 +564,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -588,6 +588,39 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       if (sessionInfo) break;
     }
   }
+
+  // Agent 再起動で sessionInfoMap が消失した場合、payload の projectPath/aiTool で自動初期化
+  if (!sessionInfo && payload.projectPath && payload.aiTool && currentConfig) {
+    console.log(`🔄 Auto-initializing session ${sessionId} (agent may have restarted)`);
+    const history = await loadConversation(payload.projectPath);
+    const claudeResumeSessionId = await loadClaudeSessionId(payload.projectPath);
+    if (claudeResumeSessionId) {
+      console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
+    }
+    sessionInfo = {
+      projectPath: payload.projectPath,
+      aiTool: payload.aiTool,
+      claudeSessionId: uuidv4(),
+      claudeResumeSessionId: claudeResumeSessionId || undefined,
+      history,
+    };
+    sessionInfoMap.set(sessionId, sessionInfo);
+
+    // AI セッション（activeSessions）も初期化
+    await startAiSession(sessionId, payload.projectPath, payload.aiTool, currentConfig, (output, isComplete) => {
+      sendMessage({
+        type: 'agent:ai:output',
+        payload: {
+          machineId: currentConfig!.machineId,
+          sessionId,
+          output,
+          isComplete,
+        },
+      });
+    });
+    console.log(`✅ Session auto-initialized: ${sessionId}`);
+  }
+
   if (!sessionInfo || !currentConfig) {
     console.error(`Session info not found for ${sessionId} after waiting`);
     // エラーメッセージをサーバーに送信（ユーザーに表示されるようにする）

@@ -6,6 +6,19 @@
 
 ## 実装済み機能
 
+### #177: Agent 再起動時のセッション自動復旧 (2026-03-19)
+
+Agent プロセスが PM2 等で再起動されると、メモリ内の `sessionInfoMap` が消失し、サーバーから送られる `server:ai:prompt` のセッション ID が見つからず「セッションの初期化がタイムアウトしました」エラーが発生する問題を修正。
+
+`server:ai:prompt` ペイロードに `projectPath` と `aiTool` を含めるようにし、Agent 側でセッション情報が見つからない場合は `server:session:start` を待たずに自動初期化する。
+
+- `packages/shared/src/types.ts`: `AiPromptPayload` に `projectPath` / `aiTool` フィールド追加
+- `apps/server/src/services/agent-manager.ts`: `sendPromptToAgent` が `projectPath` / `aiTool` を受け取りペイロードに含める
+- `apps/server/src/services/command-handler.ts`: プロンプト送信前に DB からセッション情報を取得し渡す
+- `agents/linux/src/services/connection.ts`: `handleAiPrompt` でセッション未登録時に payload から自動初期化
+- `agents/macos/src/services/connection.ts`: 同上
+- `agents/windows/src/services/connection.ts`: 同上
+
 ### #176: Windows Agent プロキシ環境変数注入 (2026-03-18)
 
 Agent の `config.yaml` にプロキシ設定がある場合、Claude Code / Gemini CLI 起動時の env に `HTTP_PROXY` / `HTTPS_PROXY` を自動注入。プロキシ環境の Windows Agent で Claude Code が API 接続できない問題を修正。
