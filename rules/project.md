@@ -321,6 +321,27 @@ CLAUDE.md           ← 軽量ハブ（2,000 トークン以内）
 
 ---
 
+## WebUI サーバー概念（タブグルーピング）
+
+- 「サーバー」= ユーザー定義のプロジェクトグループ（「開発系」「本番系」等）
+- データ構造: `ChatServer { id, name, projectIds }` を `UserSettings` の `chat_servers` キーに JSON 保存
+- 左サイドバーが `[Agents] [Servers]` 切り替え（排他表示、上に行を増やさない設計）
+- Agents モードでプロジェクト追加時、アクティブサーバーがあれば `projectIds` に自動登録
+- タブバーは `activeServerId` で `visibleTabs` にフィルタ（null = 「すべて」表示）
+- タブ → サーバーへのドラッグ&ドロップ: `dataTransfer.setData('text/x-devrelay-project', projectId)` で実装
+- サーバー内プロジェクト名は `tabCustomNames` → `projectNameMap` → `pid` の順でフォールバック
+
+---
+
+## Agent プロキシ環境変数注入
+
+- Agent の `config.yaml` に `proxy.url` がある場合、Claude Code / Gemini CLI 起動時の `spawn` env に `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` / `https_proxy` を自動注入
+- Agent 自身の WebSocket 接続は `connection.ts` で `HttpsProxyAgent` / `SocksProxyAgent` を使用（既存）
+- AI プロセスは `process.env` を継承するが、Windows の VBS→CMD→node 起動経路では OS 環境変数がないケースがある
+- Linux/macOS Agent (`agents/linux`, `agents/macos`) の両方で対応
+
+---
+
 ## Server → Agent 設定配信（pending リトライ）
 
 WebUI から Agent の設定（`projectsDirs` 等）を変更した場合、Server は `server:config:update` を WebSocket 経由で Agent に送信する。

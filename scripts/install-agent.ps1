@@ -416,7 +416,7 @@ Write-Host ""
 # =============================================================================
 Write-Host "[6/6] Agent を起動中..."
 
-$AgentEntry = Join-Path $AgentDir "agents\linux\dist\index.js"
+$AgentEntry = Join-Path $AgentDir "agents\windows\dist\index.js"
 $NodePath = (Get-Command node).Source
 $LogFile = Join-Path $LogDir "agent.log"
 

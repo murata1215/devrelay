@@ -98,6 +98,16 @@ export async function sendPromptToAi(
   const result: AiRunResult = {};
   let proc;
 
+  /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
+  const proxyEnv: Record<string, string> = {};
+  if (config.proxy?.url) {
+    const proxyUrl = config.proxy.url;
+    proxyEnv.HTTP_PROXY = proxyUrl;
+    proxyEnv.HTTPS_PROXY = proxyUrl;
+    proxyEnv.http_proxy = proxyUrl;
+    proxyEnv.https_proxy = proxyUrl;
+  }
+
   if (aiTool === 'claude') {
     // devrelay-claude シンボリックリンクを使用してプロセスを識別可能にする
     // シンボリックリンクが存在しない場合（setup 後に claude をインストールした場合など）は
@@ -139,6 +149,7 @@ export async function sendPromptToAi(
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...proxyEnv,
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
@@ -165,6 +176,7 @@ export async function sendPromptToAi(
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...proxyEnv,
         PATH: envPath,  // Add gemini's directory to PATH so node can be found
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
@@ -187,7 +199,7 @@ export async function sendPromptToAi(
       cwd: projectPath,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: { ...process.env, ...proxyEnv },
     });
 
     proc.stdin?.end();
@@ -350,6 +362,20 @@ export async function sendPromptToAi(
       if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
         console.log(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
         result.resumeFailed = true;
+        resolve(result);
+        return;
+      }
+
+      // Detect API error with --resume: exit code 1 + error output (e.g., "API Error: 500 ...")
+      // Flag as resumeFailed so the caller clears the session ID and retries fresh
+      if (code === 1 && options.resumeSessionId && fullOutput.includes('API Error:')) {
+        console.log(`[${aiTool}] ⚠️ API error with --resume, flagging for retry without session ID`);
+        result.resumeFailed = true;
+        // Still send the error output to the user so they know what happened
+        if (!completionSent) {
+          completionSent = true;
+          onOutput('', true, result.usageData);
+        }
         resolve(result);
         return;
       }

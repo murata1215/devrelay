@@ -87,6 +87,13 @@ export interface ManagementInfo {
   commands: ManagementCommand[];
 }
 
+/** チャットサーバー（タブグループ）定義 */
+export interface ChatServer {
+  id: string;
+  name: string;
+  projectIds: string[];
+}
+
 // マシンAPI
 export interface Machine {
   id: string;
@@ -255,6 +262,30 @@ export const settings = {
   /** タブカスタム名をサーバーに保存 */
   async saveTabNames(names: Record<string, string>): Promise<void> {
     await this.update('tab_names', JSON.stringify(names));
+  },
+
+  /** チャットサーバー定義を取得 */
+  async getServers(): Promise<ChatServer[]> {
+    const all = await this.get();
+    const raw = all['chat_servers'];
+    if (!raw) return [];
+    try { return JSON.parse(raw); } catch { return []; }
+  },
+
+  /** チャットサーバー定義を保存 */
+  async saveServers(servers: ChatServer[]): Promise<void> {
+    await this.update('chat_servers', JSON.stringify(servers));
+  },
+
+  /** アクティブサーバー ID を取得 */
+  async getActiveServer(): Promise<string | null> {
+    const all = await this.get();
+    return all['active_server'] || null;
+  },
+
+  /** アクティブサーバー ID を保存 */
+  async saveActiveServer(id: string | null): Promise<void> {
+    await this.update('active_server', id || '');
   },
 };
 

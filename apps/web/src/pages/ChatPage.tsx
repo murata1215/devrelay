@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo } from '../hooks/useWebSocket';
-import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta } from '../lib/api';
+import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
 
@@ -31,6 +31,8 @@ interface Tab {
   pinned: boolean;
   /** Claude の処理が完了した状態 */
   completed: boolean;
+  /** タブごとの入力テキスト（タブ切り替え時に保持） */
+  inputText: string;
 }
 
 /** File → base64 FileAttachment 変換 */
@@ -630,7 +632,10 @@ function TabBar({
           <div
             key={tab.projectId}
             draggable={!isEditing}
-            onDragStart={() => { dragIndexRef.current = globalIndex; }}
+            onDragStart={(e) => {
+              dragIndexRef.current = globalIndex;
+              e.dataTransfer.setData('text/x-devrelay-project', tab.projectId);
+            }}
             onDragOver={(e) => { e.preventDefault(); dragOverIndexRef.current = globalIndex; }}
             onDrop={() => {
               if (dragIndexRef.current !== null && dragOverIndexRef.current !== null && dragIndexRef.current !== dragOverIndexRef.current) {
@@ -730,6 +735,18 @@ function Sidebar({
   onSelectProject,
   collapsed,
   onToggle,
+  mode,
+  onChangeMode,
+  servers,
+  activeServerId,
+  onSelectServer,
+  onCreateServer,
+  onRenameServer,
+  onDeleteServer,
+  onRemoveProject,
+  onAddProjectToServer,
+  tabCustomNames,
+  onReorderServerProjects,
 }: {
   machineList: Machine[];
   openTabIds: Set<string>;
@@ -737,8 +754,34 @@ function Sidebar({
   onSelectProject: (projectId: string) => void;
   collapsed: boolean;
   onToggle: () => void;
+  mode: 'agents' | 'servers';
+  onChangeMode: (mode: 'agents' | 'servers') => void;
+  servers: ChatServer[];
+  activeServerId: string | null;
+  onSelectServer: (id: string | null) => void;
+  onCreateServer: (name: string) => void;
+  onRenameServer: (id: string, name: string) => void;
+  onDeleteServer: (id: string) => void;
+  onRemoveProject: (projectId: string) => void;
+  onAddProjectToServer: (serverId: string, projectId: string) => void;
+  /** タブのカスタム名マップ（projectId → customName） */
+  tabCustomNames: Record<string, string>;
+  onReorderServerProjects: (serverId: string, fromIndex: number, toIndex: number) => void;
 }) {
   const [expandedMachines, setExpandedMachines] = useState<Set<string>>(new Set());
+  /** サーバー内プロジェクトの展開状態 */
+  const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
+  /** サーバー名のインライン編集中 ID */
+  const [editingServerId, setEditingServerId] = useState<string | null>(null);
+  /** 新規サーバー作成入力中 */
+  const [creatingServer, setCreatingServer] = useState(false);
+  /** サーバー内プロジェクト並べ替え用 ref */
+  const projDragIdxRef = useRef<{ serverId: string; index: number } | null>(null);
+  const projDragOverIdxRef = useRef<number | null>(null);
+  /** ドラッグオーバー中のサーバー ID（ハイライト用） */
+  const [dragOverServerId, setDragOverServerId] = useState<string | null>(null);
+  const editServerInputRef = useRef<HTMLInputElement>(null);
+  const newServerInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (machineList.length > 0 && expandedMachines.size === 0) {
@@ -747,8 +790,26 @@ function Sidebar({
     }
   }, [machineList, expandedMachines.size]);
 
+  /** サーバー作成入力にフォーカス */
+  useEffect(() => {
+    if (creatingServer) newServerInputRef.current?.focus();
+  }, [creatingServer]);
+
+  /** サーバー名編集入力にフォーカス */
+  useEffect(() => {
+    if (editingServerId) editServerInputRef.current?.focus();
+  }, [editingServerId]);
+
   const toggleMachine = (id: string) => {
     setExpandedMachines(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleServer = (id: string) => {
+    setExpandedServers(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
@@ -760,6 +821,14 @@ function Sidebar({
     if (a.status !== 'online' && b.status === 'online') return 1;
     return (a.displayName ?? a.name).localeCompare(b.displayName ?? b.name);
   });
+
+  /** projectId → プロジェクト名の逆引きマップ */
+  const projectNameMap = new Map<string, string>();
+  for (const m of machineList) {
+    for (const p of m.projects) {
+      projectNameMap.set(p.id, p.name);
+    }
+  }
 
   return (
     <>
@@ -779,17 +848,26 @@ function Sidebar({
           shrink-0
         `}
       >
-        <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--border-color)]">
-          <button
-            onClick={() => {
-              if (expandedMachines.size > 0) {
-                setExpandedMachines(new Set());
-              } else {
-                setExpandedMachines(new Set(sorted.map(m => m.id)));
-              }
-            }}
-            className="text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-          >Agents</button>
+        {/* ヘッダー: Agents / Servers 切り替え */}
+        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
+          <div className="flex gap-1">
+            <button
+              onClick={() => onChangeMode('agents')}
+              className={`text-xs px-2 py-1 rounded ${
+                mode === 'agents'
+                  ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
+              }`}
+            >Agents</button>
+            <button
+              onClick={() => onChangeMode('servers')}
+              className={`text-xs px-2 py-1 rounded ${
+                mode === 'servers'
+                  ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
+              }`}
+            >Servers</button>
+          </div>
           <button onClick={onToggle} className="md:hidden text-[var(--text-muted)] hover:text-[var(--text-primary)]">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
@@ -798,74 +876,286 @@ function Sidebar({
         </div>
 
         <div className="flex-1 overflow-y-auto py-1">
-          {sorted.length === 0 && (
-            <div className="px-3 py-4 text-xs text-[var(--text-faint)] text-center">
-              エージェントがありません
-            </div>
-          )}
-          {sorted.map(machine => {
-            const displayName = machine.displayName ?? machine.name;
-            const isOnline = machine.status === 'online';
-            const isExpanded = expandedMachines.has(machine.id);
+          {/* ===== Agents モード ===== */}
+          {mode === 'agents' && (
+            <>
+              {sorted.length === 0 && (
+                <div className="px-3 py-4 text-xs text-[var(--text-faint)] text-center">
+                  エージェントがありません
+                </div>
+              )}
+              {sorted.map(machine => {
+                const displayName = machine.displayName ?? machine.name;
+                const isOnline = machine.status === 'online';
+                const isExpanded = expandedMachines.has(machine.id);
 
-            return (
-              <div key={machine.id}>
-                <button
-                  onClick={() => toggleMachine(machine.id)}
-                  className="w-full flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-                >
-                  <svg
-                    className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
-                    fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor"
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-                  </svg>
-                  <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-[var(--bg-selected)]'}`} />
-                  <span className="truncate">{displayName}</span>
-                </button>
+                return (
+                  <div key={machine.id}>
+                    <button
+                      onClick={() => toggleMachine(machine.id)}
+                      className="w-full flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                    >
+                      <svg
+                        className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                        fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+                      </svg>
+                      <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-[var(--bg-selected)]'}`} />
+                      <span className="truncate">{displayName}</span>
+                    </button>
 
-                {isExpanded && (
-                  <div className="ml-2">
-                    {machine.projects.length === 0 ? (
-                      <div className="px-3 py-1 text-xs text-[var(--text-faint)] italic">プロジェクトなし</div>
-                    ) : (
-                      machine.projects.map(project => {
-                        const hasTab = openTabIds.has(project.id);
-                        const isActive = project.id === activeTabId;
-                        return (
-                          <button
-                            key={project.id}
-                            onClick={() => {
-                              onSelectProject(project.id);
-                              if (window.innerWidth < 768) onToggle();
-                            }}
-                            disabled={!isOnline}
-                            className={`
-                              w-full text-left flex items-center gap-1.5 px-3 py-1 rounded-md mx-1 text-sm
-                              ${isActive
-                                ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
-                                : hasTab
-                                  ? 'text-[var(--text-primary)] font-semibold hover:bg-[var(--bg-hover)]'
-                                  : isOnline
-                                    ? 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
-                                    : 'text-[var(--text-faint)] cursor-not-allowed'
-                              }
-                            `}
-                            title={project.path}
-                          >
-                            <span className={hasTab ? 'text-yellow-400' : 'text-[var(--text-faint)]'}>
-                              {hasTab ? '★' : '#'}
-                            </span>
-                            <span className="truncate">{project.name}</span>
-                          </button>
-                        );
-                      })
+                    {isExpanded && (
+                      <div className="ml-2">
+                        {machine.projects.length === 0 ? (
+                          <div className="px-3 py-1 text-xs text-[var(--text-faint)] italic">プロジェクトなし</div>
+                        ) : (
+                          machine.projects.map(project => {
+                            const hasTab = openTabIds.has(project.id);
+                            const isActive = project.id === activeTabId;
+                            return (
+                              <button
+                                key={project.id}
+                                onClick={() => {
+                                  onSelectProject(project.id);
+                                  if (window.innerWidth < 768) onToggle();
+                                }}
+                                disabled={!isOnline}
+                                className={`
+                                  w-full text-left flex items-center gap-1.5 px-3 py-1 rounded-md mx-1 text-sm
+                                  ${isActive
+                                    ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                                    : hasTab
+                                      ? 'text-[var(--text-primary)] font-semibold hover:bg-[var(--bg-hover)]'
+                                      : isOnline
+                                        ? 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                                        : 'text-[var(--text-faint)] cursor-not-allowed'
+                                  }
+                                `}
+                                title={project.path}
+                              >
+                                <span className={hasTab ? 'text-yellow-400' : 'text-[var(--text-faint)]'}>
+                                  {hasTab ? '★' : '#'}
+                                </span>
+                                <span className="truncate">{project.name}</span>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
-              </div>
-            );
-          })}
+                );
+              })}
+            </>
+          )}
+
+          {/* ===== Servers モード ===== */}
+          {mode === 'servers' && (
+            <>
+              {/* 「すべて」ボタン */}
+              <button
+                onClick={() => onSelectServer(null)}
+                className={`
+                  w-full text-left flex items-center gap-1.5 px-3 py-1.5 text-sm
+                  ${!activeServerId
+                    ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                  }
+                `}
+              >
+                <span className="text-[var(--text-faint)]">#</span>
+                <span>すべて</span>
+              </button>
+
+              {/* サーバー一覧 */}
+              {servers.map(server => {
+                const isActive = server.id === activeServerId;
+                const isExpanded = expandedServers.has(server.id);
+                const isEditing = editingServerId === server.id;
+
+                return (
+                  <div key={server.id}>
+                    <div
+                      className={`group flex items-center transition-colors ${
+                        dragOverServerId === server.id ? 'bg-[var(--accent-blue)] bg-opacity-15 rounded' : ''
+                      }`}
+                      onDragOver={(e) => {
+                        if (e.dataTransfer.types.includes('text/x-devrelay-project')) {
+                          e.preventDefault();
+                          setDragOverServerId(server.id);
+                        }
+                      }}
+                      onDragLeave={() => setDragOverServerId(null)}
+                      onDrop={(e) => {
+                        const pid = e.dataTransfer.getData('text/x-devrelay-project');
+                        if (pid) {
+                          e.preventDefault();
+                          onAddProjectToServer(server.id, pid);
+                        }
+                        setDragOverServerId(null);
+                      }}
+                    >
+                      <button
+                        onClick={() => {
+                          onSelectServer(server.id);
+                          if (!isExpanded) toggleServer(server.id);
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setEditingServerId(server.id);
+                        }}
+                        className={`
+                          flex-1 text-left flex items-center gap-1.5 px-3 py-1.5 text-sm
+                          ${isActive
+                            ? 'text-[var(--text-primary)] font-semibold'
+                            : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+                          }
+                        `}
+                      >
+                        <svg
+                          className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? 'rotate-90' : ''}`}
+                          fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+                        </svg>
+                        {isEditing ? (
+                          <input
+                            ref={editServerInputRef}
+                            defaultValue={server.name}
+                            className="bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-1 rounded w-full outline-none"
+                            onBlur={(e) => {
+                              const v = e.target.value.trim();
+                              if (v && v !== server.name) onRenameServer(server.id, v);
+                              setEditingServerId(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                              if (e.key === 'Escape') setEditingServerId(null);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <span className="truncate">{server.name}</span>
+                        )}
+                      </button>
+                      {/* 削除ボタン */}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDeleteServer(server.id); }}
+                        className="opacity-0 group-hover:opacity-100 text-[var(--text-faint)] hover:text-red-400 px-1 mr-1 text-xs"
+                        title="サーバーを削除"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    {/* サーバー内プロジェクト一覧 */}
+                    {isExpanded && (
+                      <div className="ml-2">
+                        {server.projectIds.length === 0 ? (
+                          <div className="px-3 py-1 text-xs text-[var(--text-faint)] italic">
+                            Agents からプロジェクトを追加
+                          </div>
+                        ) : (
+                          server.projectIds.map((pid, pidIdx) => {
+                            const name = tabCustomNames[pid] || projectNameMap.get(pid) || pid;
+                            const isTabActive = pid === activeTabId;
+                            const hasTab = openTabIds.has(pid);
+                            return (
+                              <div
+                                key={pid}
+                                className="group/proj flex items-center"
+                                draggable
+                                onDragStart={(e) => {
+                                  projDragIdxRef.current = { serverId: server.id, index: pidIdx };
+                                  e.dataTransfer.setData('text/x-devrelay-project', pid);
+                                }}
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  projDragOverIdxRef.current = pidIdx;
+                                }}
+                                onDrop={() => {
+                                  if (projDragIdxRef.current && projDragIdxRef.current.serverId === server.id && projDragOverIdxRef.current !== null && projDragIdxRef.current.index !== projDragOverIdxRef.current) {
+                                    onReorderServerProjects(server.id, projDragIdxRef.current.index, projDragOverIdxRef.current);
+                                  }
+                                  projDragIdxRef.current = null;
+                                  projDragOverIdxRef.current = null;
+                                }}
+                                onDragEnd={() => { projDragIdxRef.current = null; projDragOverIdxRef.current = null; }}
+                              >
+                                <button
+                                  onClick={() => {
+                                    onSelectProject(pid);
+                                    if (window.innerWidth < 768) onToggle();
+                                  }}
+                                  className={`
+                                    flex-1 text-left flex items-center gap-1.5 px-3 py-1 rounded-md mx-1 text-sm
+                                    ${isTabActive
+                                      ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                                      : hasTab
+                                        ? 'text-[var(--text-primary)] font-semibold hover:bg-[var(--bg-hover)]'
+                                        : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                                    }
+                                  `}
+                                >
+                                  <span className={hasTab ? 'text-yellow-400' : 'text-[var(--text-faint)]'}>
+                                    {hasTab ? '★' : '#'}
+                                  </span>
+                                  <span className="truncate">{name}</span>
+                                </button>
+                                {/* サーバーからプロジェクトを除去 */}
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); onRemoveProject(pid); }}
+                                  className="opacity-0 group-hover/proj:opacity-100 text-[var(--text-faint)] hover:text-red-400 px-1 mr-1 text-xs"
+                                  title="サーバーから除去"
+                                >
+                                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                                  </svg>
+                                </button>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* + サーバー追加ボタン */}
+              {creatingServer ? (
+                <div className="px-3 py-1.5">
+                  <input
+                    ref={newServerInputRef}
+                    placeholder="サーバー名..."
+                    className="w-full bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-2 py-1 rounded outline-none focus:ring-1 focus:ring-blue-500"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v) onCreateServer(v);
+                      setCreatingServer(false);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                      if (e.key === 'Escape') setCreatingServer(false);
+                    }}
+                  />
+                </div>
+              ) : (
+                <button
+                  onClick={() => setCreatingServer(true)}
+                  className="w-full text-left flex items-center gap-1.5 px-3 py-1.5 text-sm text-[var(--text-faint)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                  </svg>
+                  <span>サーバー追加</span>
+                </button>
+              )}
+            </>
+          )}
         </div>
       </aside>
     </>
@@ -1300,10 +1590,15 @@ export function ChatPage() {
   const { user } = useAuth();
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [input, setInput] = useState('');
   const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([]);
   const [machineList, setMachineList] = useState<Machine[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  /** サーバー（タブグループ）定義 */
+  const [servers, setServers] = useState<ChatServer[]>([]);
+  /** アクティブサーバー ID（null = 「すべて」表示） */
+  const [activeServerId, setActiveServerId] = useState<string | null>(null);
+  /** サイドバーモード切り替え */
+  const [sidebarMode, setSidebarMode] = useState<'agents' | 'servers'>('agents');
   /** ライトボックス表示用の画像 URL */
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   /** セッション情報パネル再取得トリガー（将来の拡張用） */
@@ -1540,10 +1835,12 @@ export function ChatPage() {
         let tabOrder: string[] = [];
         let savedNames: Record<string, string> = {};
         try {
-          const [serverPinned, serverOrder, serverNames] = await Promise.all([
+          const [serverPinned, serverOrder, serverNames, savedServers, savedActiveServer] = await Promise.all([
             settingsApi.getPinnedTabs(),
             settingsApi.getTabOrder(),
             settingsApi.getTabNames(),
+            settingsApi.getServers(),
+            settingsApi.getActiveServer(),
           ]);
           pinnedIds = serverPinned.length > 0 ? new Set(serverPinned) : getPinnedTabIds();
           tabOrder = serverOrder;
@@ -1551,6 +1848,11 @@ export function ChatPage() {
           // localStorage を同期
           if (serverPinned.length > 0) {
             localStorage.setItem('devrelay-pinned-tabs', JSON.stringify(serverPinned));
+          }
+          // サーバー定義を復元
+          if (savedServers.length > 0) {
+            setServers(savedServers);
+            if (savedActiveServer) setActiveServerId(savedActiveServer);
           }
         } catch {
           pinnedIds = getPinnedTabIds();
@@ -1595,6 +1897,7 @@ export function ChatPage() {
           loadingHistory: false,
           pinned: pinnedIds.has(s.projectId),
           completed: false,
+          inputText: '',
         }));
 
         setTabs(newTabs);
@@ -1613,6 +1916,14 @@ export function ChatPage() {
 
   // アクティブタブ取得
   const activeTab = tabs.find(t => t.projectId === activeTabId) ?? null;
+
+  /** タブごとの入力テキスト（グローバル state ではなくタブデータから派生） */
+  const input = activeTab?.inputText ?? '';
+  const setInput = useCallback((text: string) => {
+    setTabs(prev => prev.map(t =>
+      t.projectId === activeTabId ? { ...t, inputText: text } : t
+    ));
+  }, [activeTabId]);
 
   // アクティブタブの machineId を machineList から導出（DocPanel 用）
   const activeMachineId = (() => {
@@ -1784,6 +2095,7 @@ export function ChatPage() {
         loadingHistory: false,
         pinned: false,
         completed: false,
+        inputText: '',
       };
       setTabs(prev => {
         const updated = [...prev, newTab];
@@ -1791,6 +2103,19 @@ export function ChatPage() {
         settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
         return updated;
       });
+
+      // アクティブサーバーがある場合はプロジェクトを自動登録
+      if (activeServerId) {
+        setServers(prev => {
+          const next = prev.map(s =>
+            s.id === activeServerId && !s.projectIds.includes(projectId)
+              ? { ...s, projectIds: [...s.projectIds, projectId] }
+              : s
+          );
+          settingsApi.saveServers(next).catch(() => {});
+          return next;
+        });
+      }
     }
 
     setActiveTabId(projectId);
@@ -1872,6 +2197,84 @@ export function ChatPage() {
       return updated;
     });
   }, []);
+
+  // -----------------------------------------------------------------------
+  // サーバー（タブグループ）管理
+  // -----------------------------------------------------------------------
+
+  /** サーバー定義を保存（state + バックエンド） */
+  const persistServers = useCallback((next: ChatServer[]) => {
+    setServers(next);
+    settingsApi.saveServers(next).catch(() => {});
+  }, []);
+
+  /** アクティブサーバーを切り替え */
+  const handleSelectServer = useCallback((id: string | null) => {
+    setActiveServerId(id);
+    settingsApi.saveActiveServer(id).catch(() => {});
+  }, []);
+
+  /** サーバーを新規作成 */
+  const handleCreateServer = useCallback((name: string) => {
+    const newServer: ChatServer = {
+      id: crypto.randomUUID(),
+      name,
+      projectIds: [],
+    };
+    const next = [...servers, newServer];
+    persistServers(next);
+    handleSelectServer(newServer.id);
+    setSidebarMode('servers');
+  }, [servers, persistServers, handleSelectServer]);
+
+  /** サーバー名を変更 */
+  const handleRenameServer = useCallback((id: string, name: string) => {
+    persistServers(servers.map(s => s.id === id ? { ...s, name } : s));
+  }, [servers, persistServers]);
+
+  /** サーバーを削除（タブ自体は残る） */
+  const handleDeleteServer = useCallback((id: string) => {
+    persistServers(servers.filter(s => s.id !== id));
+    if (activeServerId === id) handleSelectServer(null);
+  }, [servers, activeServerId, persistServers, handleSelectServer]);
+
+  /** プロジェクトをアクティブサーバーから除去 */
+  const handleRemoveProjectFromServer = useCallback((projectId: string) => {
+    if (!activeServerId) return;
+    persistServers(servers.map(s =>
+      s.id === activeServerId
+        ? { ...s, projectIds: s.projectIds.filter(pid => pid !== projectId) }
+        : s
+    ));
+  }, [activeServerId, servers, persistServers]);
+
+  /** 指定サーバーにプロジェクトを追加（D&D 用） */
+  const handleAddProjectToServer = useCallback((serverId: string, projectId: string) => {
+    persistServers(servers.map(s =>
+      s.id === serverId && !s.projectIds.includes(projectId)
+        ? { ...s, projectIds: [...s.projectIds, projectId] }
+        : s
+    ));
+  }, [servers, persistServers]);
+
+  /** サーバー内プロジェクトの並べ替え */
+  const handleReorderServerProjects = useCallback((serverId: string, fromIndex: number, toIndex: number) => {
+    persistServers(servers.map(s => {
+      if (s.id !== serverId) return s;
+      const ids = [...s.projectIds];
+      const [moved] = ids.splice(fromIndex, 1);
+      ids.splice(toIndex, 0, moved);
+      return { ...s, projectIds: ids };
+    }));
+  }, [servers, persistServers]);
+
+  /** アクティブサーバー */
+  const activeServer = servers.find(s => s.id === activeServerId) ?? null;
+
+  /** タブバーに表示するタブ（サーバーでフィルタ） */
+  const visibleTabs = activeServerId && activeServer
+    ? tabs.filter(t => activeServer.projectIds.includes(t.projectId))
+    : tabs;
 
   /** ファイルを pendingFiles に追加 */
   const addFiles = async (fileList: File[]) => {
@@ -1982,6 +2385,18 @@ export function ChatPage() {
           onSelectProject={handleSelectProject}
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed(prev => !prev)}
+          mode={sidebarMode}
+          onChangeMode={setSidebarMode}
+          servers={servers}
+          activeServerId={activeServerId}
+          onSelectServer={handleSelectServer}
+          onCreateServer={handleCreateServer}
+          onRenameServer={handleRenameServer}
+          onDeleteServer={handleDeleteServer}
+          onRemoveProject={handleRemoveProjectFromServer}
+          onAddProjectToServer={handleAddProjectToServer}
+          tabCustomNames={Object.fromEntries(tabs.filter(t => t.customName).map(t => [t.projectId, t.customName!]))}
+          onReorderServerProjects={handleReorderServerProjects}
         />
       )}
 
@@ -2026,7 +2441,7 @@ export function ChatPage() {
 
         {/* タブバー */}
         <TabBar
-          tabs={tabs}
+          tabs={visibleTabs}
           activeTabId={activeTabId}
           onSelectTab={handleSelectProject}
           onCloseTab={handleCloseTab}

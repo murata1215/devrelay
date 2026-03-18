@@ -590,6 +590,18 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   }
   if (!sessionInfo || !currentConfig) {
     console.error(`Session info not found for ${sessionId} after waiting`);
+    // エラーメッセージをサーバーに送信（ユーザーに表示されるようにする）
+    if (currentConfig) {
+      sendMessage({
+        type: 'agent:ai:output',
+        payload: {
+          machineId: currentConfig.machineId,
+          sessionId,
+          output: '⚠️ セッションの初期化がタイムアウトしました。もう一度お試しください。',
+          isComplete: true,
+        },
+      });
+    }
     return;
   }
 

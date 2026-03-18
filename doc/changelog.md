@@ -6,6 +6,58 @@
 
 ## 実装済み機能
 
+### #176: Windows Agent プロキシ環境変数注入 (2026-03-18)
+
+Agent の `config.yaml` にプロキシ設定がある場合、Claude Code / Gemini CLI 起動時の env に `HTTP_PROXY` / `HTTPS_PROXY` を自動注入。プロキシ環境の Windows Agent で Claude Code が API 接続できない問題を修正。
+
+- `agents/linux/src/services/ai-runner.ts`: `config.proxy.url` がある場合に `proxyEnv` を構築し全 `spawn` の env に spread
+- `agents/macos/src/services/ai-runner.ts`: 同上
+
+### #175: Windows Agent インストーラーのパス修正 (2026-03-18)
+
+`install-agent.ps1` で Windows 用なのに `agents\linux\dist\index.js` を参照していたバグを修正。
+
+- `scripts/install-agent.ps1`: `agents\linux` → `agents\windows` に修正
+
+### #174: サーバー概念導入 + チャット入力タブ別独立化 (2026-03-18)
+
+#### サーバー概念（タブグルーピング）
+Discord のサーバー概念を WebUI に導入。ユーザー定義グループ（「開発系」「本番系」等）でタブを整理。
+
+- 左サイドバーに **[Agents] [Servers]** 切り替えボタン追加
+- Servers モード: サーバー一覧（折りたたみ可能）+ サーバー内プロジェクト表示
+- サーバー選択でタブバーをフィルタ（選択中サーバーのタブだけ表示）
+- タブを Servers モードのサーバー名にドラッグ&ドロップでプロジェクト追加
+- サーバー内プロジェクトの上下ドラッグ並べ替え
+- サーバー CRUD: 作成（+ ボタン）、リネーム（ダブルクリック）、削除（× ボタン）
+- サーバー内プロジェクト名はタブの `customName` を優先表示
+- `UserSettings` に `chat_servers` / `active_server` キーで永続化
+
+#### チャット入力テキストのタブ別独立化
+- `Tab` インターフェースに `inputText` フィールド追加
+- グローバル `useState('')` を削除、activeTab の `inputText` から派生
+- タブ切り替え時に入力内容が保持される
+
+### #173: API Error 500 後の会話不能バグ修正 (2026-03-18)
+
+#### 概要
+Anthropic API が 500 エラーを返した後、再接続しても会話できなくなるバグを修正。サーバー・エージェントログ解析で2つの問題を特定。
+
+#### 原因1: `--resume` セッションIDが壊れたまま保持される
+- Claude Code が API 500 で exit code 1 → エラーテキスト出力あり（138文字）
+- 既存のリトライ条件は `exit code 1 + 出力なし` のみ → エラー出力がある場合はスルー
+- 次のプロンプトが壊れたセッションに `--resume` → Claude Code がハングして応答なし
+
+#### 原因2: `session:start` と `ai:prompt` のレースコンディション時に無言終了
+- `q` → `c` で再接続直後にメッセージ送信 → `session:start` がエージェントに届く前に `ai:prompt` が到着
+- `sessionInfoMap` にセッション情報がなく15秒待機後タイムアウト → `return` で無言終了（ユーザーに何も表示されない）
+
+#### 変更内容
+
+**Agent (Linux + macOS):**
+- `ai-runner.ts`: `exit code 1 + --resume + 出力に "API Error:" を含む` 場合も `resumeFailed = true` をセット → 呼び出し元がセッションIDをクリアして新規セッションで自動リトライ
+- `connection.ts`: `handleAiPrompt()` でセッション情報待機タイムアウト時、無言 return ではなく `agent:ai:output` (`isComplete: true`) でエラーメッセージをユーザーに送信
+
 ### #172: ask.sh の JSON エスケープ修正 + timeout 指示追加 (2026-03-16)
 
 #### 概要

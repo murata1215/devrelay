@@ -41,6 +41,10 @@ export const SettingKeys = {
   TAB_NAMES: 'tab_names',
   /** プッシュ通知購読情報（JSON 配列） */
   PUSH_SUBSCRIPTIONS: 'push_subscriptions',
+  /** チャットサーバー定義（ChatServer[] の JSON 文字列） */
+  CHAT_SERVERS: 'chat_servers',
+  /** アクティブサーバー ID（サーバー未選択時は空文字列） */
+  ACTIVE_SERVER: 'active_server',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];
