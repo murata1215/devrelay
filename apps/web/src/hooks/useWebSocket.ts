@@ -18,6 +18,13 @@ export interface ToolApprovalResolved {
   projectId?: string;
 }
 
+/** 自動承認通知情報（approveAllMode 時） */
+export interface ToolApprovalAuto {
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  projectId?: string;
+}
+
 /** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用） */
 type ServerToWebMessage =
   | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
@@ -26,6 +33,7 @@ type ServerToWebMessage =
   | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
   | { type: 'web:tool:approval'; payload: ToolApprovalPrompt }
   | { type: 'web:tool:approval:resolved'; payload: ToolApprovalResolved }
+  | { type: 'web:tool:approval:auto'; payload: ToolApprovalAuto }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };
 
@@ -54,6 +62,8 @@ export interface WebSocketCallbacks {
   onToolApproval?: (prompt: ToolApprovalPrompt) => void;
   /** ツール承認解決（他ブラウザからの応答含む）受信時のコールバック */
   onToolApprovalResolved?: (resolved: ToolApprovalResolved) => void;
+  /** 自動承認通知（approveAllMode 時）受信時のコールバック */
+  onToolApprovalAuto?: (info: ToolApprovalAuto) => void;
 }
 
 /** WebSocket フックの戻り値 */
@@ -161,6 +171,9 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
               break;
             case 'web:tool:approval:resolved':
               cb?.onToolApprovalResolved?.(msg.payload);
+              break;
+            case 'web:tool:approval:auto':
+              cb?.onToolApprovalAuto?.(msg.payload);
               break;
             case 'web:error':
               cb?.onMessage?.({ role: 'system', content: `❌ ${msg.payload.error}` });

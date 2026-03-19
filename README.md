@@ -40,6 +40,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Cross-Project Query**: Ask questions to other project's agents via `ask <project>: <question>` (Discord/Telegram/Claude Code skill)
 - **Cross-Project Exec**: Send execution requests to other project's agents via `teamexec <project>: <instruction>` (Discord/Telegram/Claude Code skill `--exec` flag)
 - **Issue Tracking**: `doc/issues.md` auto-created per project, status updates integrated into `w` command
+- **Tool Approval History**: Real-time tool approval with persistent history (DB + Agent JSONL log), auto-approved tools shown with 🔓 icon, survives browser refresh
 
 ## 💡 Token Efficiency
 

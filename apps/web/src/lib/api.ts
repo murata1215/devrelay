@@ -198,7 +198,27 @@ export const projects = {
     const q = params.toString() ? `?${params.toString()}` : '';
     return request('GET', `/projects/${projectId}/messages${q}`);
   },
+
+  /** プロジェクトのツール承認履歴を取得（カーソルベースページネーション） */
+  async getApprovals(projectId: string, opts?: { before?: string; limit?: number }): Promise<{ approvals: ApprovalRecord[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (opts?.before) params.set('before', opts.before);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const q = params.toString() ? `?${params.toString()}` : '';
+    return request('GET', `/projects/${projectId}/approvals${q}`);
+  },
 };
+
+/** ツール承認履歴レコード（API レスポンス型） */
+export interface ApprovalRecord {
+  id: string;
+  requestId: string | null;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  status: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
 
 // 設定API
 export const settings = {

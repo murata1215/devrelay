@@ -6,6 +6,26 @@
 
 ## 実装済み機能
 
+### #180: ツール承認履歴の永続化 (2026-03-20)
+
+ブラウザ更新で Approvals タブの履歴が消える問題を修正。DB + Agent ファイルの2層で永続化。
+
+- **DB 永続化**: `ToolApproval` テーブル追加。承認リクエスト（pending）、ユーザー応答（allow/deny）、タイムアウト（timeout）、自動承認（auto）の全イベントを記録
+- **API エンドポイント**: `GET /api/projects/:projectId/approvals` （カーソルベースページネーション、デフォルト100件）
+- **WebUI ロード**: アクティブタブ切替時に API から直近100件をロード。リアルタイム WebSocket 通知とマージ。ブラウザ更新しても履歴が消えない
+- **Agent JSONL ログ**: `~/.devrelay/approvals/current.jsonl` に追記。Agent 起動時にローテーション（archive/ に移動、削除なし）
+- Linux / macOS Agent 両方で対応
+
+### #179: 自動承認ツールの Approvals タブ表示 (2026-03-20)
+
+「以降すべて許可」モード（approveAllMode）で自動承認されたツール呼び出しを Approvals タブに 🔓 アイコンで表示する。
+
+- Agent: 自動承認時に `agent:tool:approval:auto` 通知メッセージをサーバーに送信
+- Server: 受信して `web:tool:approval:auto` で WebUI に中継
+- WebUI: Approvals 履歴に `status: 'auto'` / 🔓 紫色アイコンで表示（チャット内ポップアップカードは出さない）
+- Linux / macOS Agent 両方で対応
+- **バグ修正**: `resetApproveAllMode()` が未呼び出しだったため、一度「以降すべて許可」を押すと次の会話でも自動承認が継続していた → `handleSessionStart()` でリセットするよう修正
+
 ### #178: Agent SDK 移行 + リアルタイムツール承認 (2026-03-20)
 
 `--dangerously-skip-permissions` を廃止し、`@anthropic-ai/claude-agent-sdk` の `canUseTool` コールバックによるリアルタイムツール承認を実装。

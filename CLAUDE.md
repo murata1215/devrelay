@@ -63,6 +63,7 @@ pm2 restart devrelay-server devrelay-agent
 | PlatformLink | プラットフォーム連携 |
 | Team | 名前付きチーム（クロスプロジェクトクエリ用グループ） |
 | TeamMember | チーム内プロジェクト（Team → Project 参照） |
+| ToolApproval | ツール承認履歴（exec モードの canUseTool 記録） |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`

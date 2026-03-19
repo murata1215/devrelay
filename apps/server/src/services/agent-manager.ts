@@ -14,6 +14,7 @@ import type {
   AgentVersionInfoPayload,
   AgentUpdateStatusPayload,
   ToolApprovalRequestPayload,
+  ToolApprovalAutoPayload,
   ServerToWebMessage,
   Platform
 } from '@devrelay/shared';
@@ -171,6 +172,10 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:tool:approval:request':
           await handleToolApprovalRequest(message.payload);
+          break;
+
+        case 'agent:tool:approval:auto':
+          await handleToolApprovalAuto(message.payload);
           break;
       }
     } catch (err) {
@@ -1597,6 +1602,12 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
       console.log(`⏰ Tool approval timeout: ${toolName} (${requestId.substring(0, 8)}...)`);
       pendingToolApprovalRequests.delete(requestId);
 
+      // DB の status をタイムアウトに更新
+      prisma.toolApproval.update({
+        where: { requestId },
+        data: { status: 'timeout', resolvedAt: new Date() },
+      }).catch(err => console.error('Failed to update tool approval timeout:', err));
+
       // Agent に deny を送信
       sendToAgent(pending.machineId, {
         type: 'server:tool:approval:response',
@@ -1613,10 +1624,45 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
 
   pendingToolApprovalRequests.set(requestId, { machineId, sessionId, projectId, timeout });
 
+  // DB に pending 状態で記録（永続化）
+  if (projectId) {
+    prisma.toolApproval.create({
+      data: { sessionId, projectId, machineId, requestId, toolName, toolInput: toolInput as any, status: 'pending' },
+    }).catch(err => console.error('Failed to save tool approval request:', err));
+  }
+
   // セッション参加者に承認リクエストを送信
   broadcastToolApprovalToWeb(sessionId, {
     type: 'web:tool:approval',
     payload: { requestId, toolName, toolInput, title, description, projectId },
+  });
+}
+
+/**
+ * Agent からの自動承認通知を処理し、WebUI に転送する（approveAllMode 時）
+ * 応答不要の通知のみ — Approvals タブの履歴表示用
+ */
+async function handleToolApprovalAuto(payload: ToolApprovalAutoPayload) {
+  const { machineId, sessionId, toolName, toolInput } = payload;
+
+  // セッションの projectId を取得（WebUI のタブルーティング用）
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { project: { select: { id: true } } },
+  });
+  const projectId = session?.project?.id;
+
+  // DB に auto 承認を記録（requestId なし）
+  if (projectId) {
+    prisma.toolApproval.create({
+      data: { sessionId, projectId, machineId, toolName, toolInput: toolInput as any, status: 'auto', resolvedAt: new Date() },
+    }).catch(err => console.error('Failed to save auto tool approval:', err));
+  }
+
+  // セッション参加者に自動承認通知を送信
+  broadcastToolApprovalToWeb(sessionId, {
+    type: 'web:tool:approval:auto',
+    payload: { toolName, toolInput, projectId },
   });
 }
 
@@ -1639,6 +1685,12 @@ export function handleToolApprovalUserResponse(
   pendingToolApprovalRequests.delete(requestId);
 
   console.log(`🔐 Tool approval response: ${response.behavior}${response.approveAll ? ' (approve-all)' : ''} (${requestId.substring(0, 8)}...)`);
+
+  // DB の status を更新（pending → allow/deny）
+  prisma.toolApproval.update({
+    where: { requestId },
+    data: { status: response.behavior, resolvedAt: new Date() },
+  }).catch(err => console.error('Failed to update tool approval status:', err));
 
   // Agent に応答を転送（approveAll フラグも含む）
   sendToAgent(pending.machineId, {

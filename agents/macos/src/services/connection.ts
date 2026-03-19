@@ -28,8 +28,9 @@ import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
+import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
@@ -136,6 +137,8 @@ function createProxyAgent(proxyConfig: ProxyConfig): Agent {
 
 export async function connectToServer(config: AgentConfig, projects: Project[]) {
   currentConfig = config;
+  // Agent 起動時に承認ログをローテーション
+  rotateApprovalLog().catch(err => console.error('Approval log rotation failed:', err));
   return new Promise<void>((resolve, reject) => {
     // Build WebSocket options with optional proxy
     const wsOptions: WebSocket.ClientOptions = {};
@@ -380,6 +383,9 @@ async function handleSessionStart(
   config: AgentConfig
 ) {
   const { sessionId, projectName, projectPath, aiTool } = payload;
+
+  // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）
+  resetApproveAllMode();
 
   const isCrossQuery = sessionId.startsWith('crossquery_') || sessionId.startsWith('teamexec_');
   const crossLabel = sessionId.startsWith('teamexec_') ? 'TEAM-EXEC' : 'CROSS-QUERY';
@@ -790,6 +796,21 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           sessionId,
         },
       });
+      // JSONL ファイルログ
+      appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: request.toolName, toolInput: request.toolInput, status: 'pending' });
+    };
+    // 自動承認通知（approveAllMode 時に WebUI の Approvals タブに履歴表示する用）
+    sendOptions.onAutoApproved = (info) => {
+      sendMessage({
+        type: 'agent:tool:approval:auto',
+        payload: {
+          ...info,
+          machineId: currentMachineId || currentConfig!.machineId,
+          sessionId,
+        },
+      });
+      // JSONL ファイルログ
+      appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: info.toolName, toolInput: info.toolInput, status: 'auto' });
     };
   }
 
@@ -884,6 +905,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         resumeSessionId: undefined,  // Don't use --resume
         usePlanMode,
         onToolApprovalRequest: sendOptions.onToolApprovalRequest,
+        onAutoApproved: sendOptions.onAutoApproved,
       };
 
       const retryResult = await sendPromptToAi(

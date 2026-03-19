@@ -154,6 +154,8 @@ export interface SendPromptOptions {
    * 未設定の場合は全ツール自動許可（後方互換）
    */
   onToolApprovalRequest?: (request: ToolApprovalRequest) => void;
+  /** 「以降すべて許可」モードで自動承認した際の通知コールバック */
+  onAutoApproved?: (info: { toolName: string; toolInput: Record<string, unknown> }) => void;
 }
 
 /**
@@ -221,9 +223,10 @@ async function sendPromptToAiSdk(
       // WebSocket 経由のユーザー承認（Phase 2+）
       const onApprovalRequest = options.onToolApprovalRequest;
       sdkOptions.canUseTool = async (toolName, input, opts) => {
-        // 「以降すべて許可」モードなら即座に allow
+        // 「以降すべて許可」モードなら即座に allow + 通知送信
         if (approveAllMode) {
           console.log(`🔓 [SDK] Auto-approved (approve-all mode): ${toolName}`);
+          options.onAutoApproved?.({ toolName, toolInput: input });
           return { behavior: 'allow', updatedInput: input };
         }
 

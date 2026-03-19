@@ -90,7 +90,8 @@ export type AgentMessage =
   | { type: 'agent:version:info'; payload: AgentVersionInfoPayload }
   | { type: 'agent:update:status'; payload: AgentUpdateStatusPayload }
   | { type: 'agent:project:file:content'; payload: ProjectFileContentPayload }
-  | { type: 'agent:tool:approval:request'; payload: ToolApprovalRequestPayload };
+  | { type: 'agent:tool:approval:request'; payload: ToolApprovalRequestPayload }
+  | { type: 'agent:tool:approval:auto'; payload: ToolApprovalAutoPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -537,6 +538,14 @@ export interface ToolApprovalRequestPayload {
   decisionReason?: string;
 }
 
+/** 自動承認通知（Agent → Server、approveAllMode 時の通知のみ） */
+export interface ToolApprovalAutoPayload {
+  machineId: string;
+  sessionId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+}
+
 /** ツール承認レスポンス（Server → Agent） */
 export interface ToolApprovalResponsePayload {
   requestId: string;
@@ -574,5 +583,6 @@ export type ServerToWebMessage =
   | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string } }
   | { type: 'web:tool:approval'; payload: ToolApprovalPromptPayload }
   | { type: 'web:tool:approval:resolved'; payload: { requestId: string; behavior: 'allow' | 'deny'; projectId?: string } }
+  | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };

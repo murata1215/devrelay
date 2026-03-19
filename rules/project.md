@@ -76,6 +76,7 @@ devrelay/
 | `agents/linux/src/services/session-store.ts` | セッション ID・コンテキスト使用量 |
 | `agents/linux/src/services/management-info.ts` | 管理コマンド生成（環境自動検出） |
 | `agents/linux/src/services/config.ts` | 設定管理（OS 別パス分岐） |
+| `agents/linux/src/services/approval-logger.ts` | ツール承認 JSONL ログ（ローテーション付き） |
 
 #### Agent (macOS 専用 CLI)
 | ファイル | 責務 |
@@ -797,3 +798,12 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 4. **承認カード 2秒後自動非表示**: 許可/拒否確定後に 2秒で承認カードをチャットエリアから削除。右パネルの Approval History には永続表示
 5. **参加者フォールバック**: `getSessionParticipants()` で Web 参加者が見つからない場合、全 Web クライアントにフォールバックブロードキャスト（サーバー再起動後の参加者復元不整合を回避）
 6. **machineId**: Agent からの承認リクエストでは `currentMachineId`（Server から受信した DB ID）を優先使用。`currentConfig.machineId` は config.yaml 由来で空文字列の場合があるためフォールバックのみ
+7. **`approveAllMode` リセット**: `handleSessionStart()` で `resetApproveAllMode()` を呼び出し、新セッション開始時に自動的にリセット。これにより「以降すべて許可」は現在のセッション限定で有効
+
+### ツール承認履歴の永続化 (#179-#180)
+
+- **DB**: `ToolApproval` テーブルに全承認イベント（pending/allow/deny/auto/timeout）を記録
+- **API**: `GET /api/projects/:projectId/approvals` （カーソルベースページネーション、デフォルト100件）
+- **WebUI**: タブ切替時に API から履歴ロード。WebSocket リアルタイム通知とマージ。ブラウザ更新でも履歴が消えない
+- **Agent JSONL ログ**: `~/.devrelay/approvals/current.jsonl` に追記。Agent 起動時に `archive/` にローテーション（削除なし）
+- **自動承認通知**: `agent:tool:approval:auto` → `web:tool:approval:auto` で WebUI に中継。🔓 紫色アイコンで表示

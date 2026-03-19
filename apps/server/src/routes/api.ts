@@ -502,6 +502,72 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // ツール承認履歴
+  // ========================================
+
+  /** プロジェクトのツール承認履歴を取得（カーソルベースページネーション） */
+  app.get('/api/projects/:projectId/approvals', async (request: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string; before?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { projectId } = request.params;
+    const limit = Math.min(200, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
+    const before = request.query.before || undefined;
+
+    // プロジェクト認可チェック
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+    });
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    // カーソル条件
+    const whereClause: any = { projectId };
+    if (before) {
+      const cursor = await prisma.toolApproval.findUnique({
+        where: { id: before },
+        select: { createdAt: true },
+      });
+      if (cursor) {
+        whereClause.createdAt = { lt: cursor.createdAt };
+      }
+    }
+
+    const approvals = await prisma.toolApproval.findMany({
+      where: whereClause,
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      select: {
+        id: true,
+        requestId: true,
+        toolName: true,
+        toolInput: true,
+        status: true,
+        createdAt: true,
+        resolvedAt: true,
+      },
+    });
+
+    const hasMore = approvals.length > limit;
+    const result = hasMore ? approvals.slice(0, limit) : approvals;
+
+    // 時系列順（古い→新しい）に並び替えて返す
+    result.reverse();
+
+    return reply.send({
+      approvals: result.map(a => ({
+        id: a.id,
+        requestId: a.requestId,
+        toolName: a.toolName,
+        toolInput: a.toolInput,
+        status: a.status,
+        createdAt: a.createdAt.toISOString(),
+        resolvedAt: a.resolvedAt?.toISOString() ?? null,
+      })),
+      hasMore,
+    });
+  });
+
+  // ========================================
   // 設定（UserSettings）
   // ========================================
 

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
-import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved } from '../hooks/useWebSocket';
+import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved, type ToolApprovalAuto } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
@@ -1373,7 +1373,7 @@ interface ApprovalHistoryEntry {
   requestId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
-  status: 'pending' | 'allow' | 'deny';
+  status: 'pending' | 'allow' | 'deny' | 'auto';
   timestamp: Date;
 }
 
@@ -1625,8 +1625,8 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
             ) : (
               <div className="space-y-1">
                 {[...approvalHistory].reverse().map(entry => {
-                  const statusIcon = entry.status === 'allow' ? '✅' : entry.status === 'deny' ? '❌' : '⏳';
-                  const statusColor = entry.status === 'allow' ? 'text-green-500' : entry.status === 'deny' ? 'text-red-500' : 'text-yellow-500';
+                  const statusIcon = entry.status === 'auto' ? '🔓' : entry.status === 'allow' ? '✅' : entry.status === 'deny' ? '❌' : '⏳';
+                  const statusColor = entry.status === 'auto' ? 'text-purple-500' : entry.status === 'allow' ? 'text-green-500' : entry.status === 'deny' ? 'text-red-500' : 'text-yellow-500';
                   const timeStr = entry.timestamp.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                   // ツール入力の短い表示
                   let detail = '';
@@ -1759,6 +1759,8 @@ export function ChatPage() {
   }>>(new Map());
   /** ツール承認履歴（右パネルの Approvals タブに表示） */
   const [approvalHistory, setApprovalHistory] = useState<ApprovalHistoryEntry[]>([]);
+  /** 承認履歴の DB ロード済みフラグ（二重ロード防止） */
+  const approvalHistoryLoadedRef = useRef<Set<string>>(new Set());
 
   // 最大化時に body にクラスを付与してナビバーを CSS で隠す
   useEffect(() => {
@@ -1813,6 +1815,34 @@ export function ChatPage() {
   activeTabIdRef.current = activeTabId;
   /** 初回タブ復元済みフラグ */
   const restoredRef = useRef(false);
+
+  /** アクティブタブ変更時にツール承認履歴を DB からロード */
+  useEffect(() => {
+    if (!activeTabId) return;
+    // 既にロード済みならスキップ
+    if (approvalHistoryLoadedRef.current.has(activeTabId)) return;
+    approvalHistoryLoadedRef.current.add(activeTabId);
+
+    projectsApi.getApprovals(activeTabId, { limit: 100 }).then(res => {
+      if (res.approvals.length > 0) {
+        const loaded: ApprovalHistoryEntry[] = res.approvals.map(a => ({
+          requestId: a.requestId || `db_${a.id}`,
+          toolName: a.toolName,
+          toolInput: a.toolInput,
+          status: a.status as ApprovalHistoryEntry['status'],
+          timestamp: new Date(a.createdAt),
+        }));
+        setApprovalHistory(prev => {
+          // DB から取得した履歴と既存のリアルタイム履歴をマージ（重複排除）
+          const existingIds = new Set(prev.map(e => e.requestId));
+          const newEntries = loaded.filter(e => !existingIds.has(e.requestId));
+          if (newEntries.length === 0) return prev;
+          // DB 履歴（古い順）を先頭に、リアルタイム履歴を後ろに
+          return [...newEntries, ...prev];
+        });
+      }
+    }).catch(err => console.error('Failed to load approval history:', err));
+  }, [activeTabId]);
 
   /** セッションIDからタブにメッセージ履歴を読み込む */
   const loadHistory = useCallback(async (projectId: string, _sessionId?: string) => {
@@ -1994,6 +2024,17 @@ export function ChatPage() {
     }, 2000);
   }, []);
 
+  /** 自動承認通知受信時のハンドラ（approveAllMode 時、履歴にのみ追加） */
+  const handleToolApprovalAuto = useCallback((info: ToolApprovalAuto) => {
+    setApprovalHistory(prev => [...prev, {
+      requestId: `auto_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      toolName: info.toolName,
+      toolInput: info.toolInput,
+      status: 'auto',
+      timestamp: new Date(),
+    }]);
+  }, []);
+
   const { connected, sendCommand, sendToolApprovalResponse } = useWebSocket({
     onMessage: addMessageToTab,
     onProgress: updateProgressOnTab,
@@ -2001,6 +2042,7 @@ export function ChatPage() {
     onSessionInfo: handleSessionInfo,
     onToolApproval: handleToolApproval,
     onToolApprovalResolved: handleToolApprovalResolved,
+    onToolApprovalAuto: handleToolApprovalAuto,
   });
 
   /** ユーザーがツール承認ボタンをクリックした時のハンドラ */

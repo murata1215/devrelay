@@ -92,6 +92,7 @@ model Machine {
   sessions       Session[]
   buildLogs      BuildLog[]
   documents      AgentDocument[]
+  toolApprovals  ToolApproval[]
 
   @@unique([userId, name])
 }
@@ -107,9 +108,10 @@ model Project {
   lastUsedAt  DateTime?
   createdAt   DateTime  @default(now())
 
-  sessions    Session[]
-  buildLogs   BuildLog[]
-  teamMembers TeamMember[]
+  sessions       Session[]
+  buildLogs      BuildLog[]
+  teamMembers    TeamMember[]
+  toolApprovals  ToolApproval[]
 
   @@unique([machineId, name])
 }
@@ -153,8 +155,9 @@ model Session {
   startedAt     DateTime  @default(now())
   endedAt       DateTime?
   
-  messages      Message[]
-  buildLogs     BuildLog[]
+  messages       Message[]
+  buildLogs      BuildLog[]
+  toolApprovals  ToolApproval[]
 }
 
 // メッセージ履歴
@@ -306,4 +309,24 @@ model DevReportEntry {
 
   @@unique([reportId, messageId])
   @@index([messageId])
+}
+
+// ツール承認履歴（exec モードでの canUseTool の記録）
+model ToolApproval {
+  id         String    @id @default(cuid())
+  sessionId  String
+  session    Session   @relation(fields: [sessionId], references: [id])
+  projectId  String
+  project    Project   @relation(fields: [projectId], references: [id])
+  machineId  String
+  machine    Machine   @relation(fields: [machineId], references: [id])
+  requestId  String?   @unique  // auto 承認の場合は null
+  toolName   String
+  toolInput  Json      // ツール引数
+  status     String    // 'pending' | 'allow' | 'deny' | 'auto' | 'timeout'
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime? // 承認/拒否された時刻（pending 中は null）
+
+  @@index([projectId, createdAt])
+  @@index([sessionId])
 }
