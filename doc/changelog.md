@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### #178: Agent SDK 移行 + リアルタイムツール承認 (2026-03-20)
+
+`--dangerously-skip-permissions` を廃止し、`@anthropic-ai/claude-agent-sdk` の `canUseTool` コールバックによるリアルタイムツール承認を実装。
+
+**Phase 1: SDK 統合**
+- `spawn('claude', ['-p', ...])` → SDK `query()` に置換（Claude のみ、Gemini/Codex/Aider は spawn 維持）
+- Plan モード: `permissionMode: 'plan'` + `allowedTools`
+- Exec モード: `permissionMode: 'default'` + `canUseTool` コールバック
+- セッション resume: `options.resume: sessionId`
+
+**Phase 2: ツール承認プロトコル + WebUI 承認カード**
+- `agent:tool:approval:request` / `server:tool:approval:response` WebSocket メッセージ型追加
+- Server: 承認リクエストルーティング + 5分タイムアウト自動 deny
+- WebUI: `ToolApprovalCard` コンポーネント（✅許可 / ❌拒否 / 🔓以降すべて許可）
+- 承認カード 2秒後自動非表示、右パネル「Approvals」タブに承認履歴表示
+- 「以降すべて許可」: Agent 側 `approveAllMode` フラグで以降のツールを自動承認
+
+**変更ファイル:**
+- `agents/linux/package.json`: `@anthropic-ai/claude-agent-sdk` 追加
+- `agents/linux/src/services/ai-runner.ts`: `sendPromptToAiSdk()` 新規追加、`canUseTool` + `approveAllMode` 実装
+- `agents/linux/src/services/connection.ts`: `server:tool:approval:response` ハンドラ、`onToolApprovalRequest` コールバック
+- `packages/shared/src/types.ts`: `ToolApprovalRequestPayload`, `ToolApprovalResponsePayload`, `ToolApprovalPromptPayload` 型追加
+- `apps/server/src/services/agent-manager.ts`: `handleToolApprovalRequest()`, `handleToolApprovalUserResponse()`, `broadcastToolApprovalToWeb()` 追加
+- `apps/server/src/platforms/web.ts`: `web:tool:approval:response` ハンドラ、`sendWebRawMessage()`, `broadcastWebRawMessage()` 追加
+- `apps/web/src/hooks/useWebSocket.ts`: ツール承認メッセージ送受信
+- `apps/web/src/pages/ChatPage.tsx`: `ToolApprovalCard` コンポーネント、`approvalHistory` 状態管理、右パネル「Approvals」タブ
+- `agents/macos/`: Linux 版と同期
+
 ### #177: Agent 再起動時のセッション自動復旧 (2026-03-19)
 
 Agent プロセスが PM2 等で再起動されると、メモリ内の `sessionInfoMap` が消失し、サーバーから送られる `server:ai:prompt` のセッション ID が見つからず「セッションの初期化がタイムアウトしました」エラーが発生する問題を修正。

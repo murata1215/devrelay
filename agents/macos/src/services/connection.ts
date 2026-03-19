@@ -19,14 +19,16 @@ import type {
   AiListPayload,
   AiSwitchPayload,
   AiCancelPayload,
+  DocSyncPayload,
+  DocDeletePayload,
   ProjectFileReadPayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
-import { readdirSync, mkdirSync } from 'fs';
+import { readdirSync, mkdirSync, writeFileSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
-import { saveConfig, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
+import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
@@ -354,8 +356,21 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
       handleAgentUpdate();
       break;
 
+    case 'server:doc:sync':
+      handleDocSync(message.payload);
+      break;
+
+    case 'server:doc:delete':
+      handleDocDelete(message.payload);
+      break;
+
     case 'server:project:file:read':
       handleProjectFileRead(message.payload);
+      break;
+
+    case 'server:tool:approval:response':
+      // Server からのツール承認レスポンスを ai-runner の pendingToolApprovals に転送
+      resolveToolApproval(message.payload.requestId, message.payload);
       break;
   }
 }
@@ -554,7 +569,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -578,6 +593,39 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       if (sessionInfo) break;
     }
   }
+
+  // Agent 再起動で sessionInfoMap が消失した場合、payload の projectPath/aiTool で自動初期化
+  if (!sessionInfo && payload.projectPath && payload.aiTool && currentConfig) {
+    console.log(`🔄 Auto-initializing session ${sessionId} (agent may have restarted)`);
+    const history = await loadConversation(payload.projectPath);
+    const claudeResumeSessionId = await loadClaudeSessionId(payload.projectPath);
+    if (claudeResumeSessionId) {
+      console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
+    }
+    sessionInfo = {
+      projectPath: payload.projectPath,
+      aiTool: payload.aiTool,
+      claudeSessionId: uuidv4(),
+      claudeResumeSessionId: claudeResumeSessionId || undefined,
+      history,
+    };
+    sessionInfoMap.set(sessionId, sessionInfo);
+
+    // AI セッション（activeSessions）も初期化
+    await startAiSession(sessionId, payload.projectPath, payload.aiTool, currentConfig, (output, isComplete) => {
+      sendMessage({
+        type: 'agent:ai:output',
+        payload: {
+          machineId: currentConfig!.machineId,
+          sessionId,
+          output,
+          isComplete,
+        },
+      });
+    });
+    console.log(`✅ Session auto-initialized: ${sessionId}`);
+  }
+
   if (!sessionInfo || !currentConfig) {
     console.error(`Session info not found for ${sessionId} after waiting`);
     // エラーメッセージをサーバーに送信（ユーザーに表示されるようにする）
@@ -730,6 +778,21 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
   };
 
+  // Exec モード時: canUseTool で WebSocket 経由のユーザー承認を行う
+  if (!usePlanMode) {
+    sendOptions.onToolApprovalRequest = (request) => {
+      console.log(`🔐 Sending tool approval request: ${request.toolName} (${request.requestId.substring(0, 8)}...)`);
+      sendMessage({
+        type: 'agent:tool:approval:request',
+        payload: {
+          ...request,
+          machineId: currentMachineId || currentConfig!.machineId,
+          sessionId,
+        },
+      });
+    };
+  }
+
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）
   try {
     let responseText = '';
@@ -820,6 +883,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       const retryOptions: SendPromptOptions = {
         resumeSessionId: undefined,  // Don't use --resume
         usePlanMode,
+        onToolApprovalRequest: sendOptions.onToolApprovalRequest,
       };
 
       const retryResult = await sendPromptToAi(
@@ -1530,7 +1594,7 @@ async function handleAiSwitch(payload: AiSwitchPayload, config: AgentConfig) {
 
 /**
  * Agent のルートディレクトリを取得する
- * process.argv[1] = <root>/agents/macos/dist/index.js → 3階層上がルート
+ * process.argv[1] = <root>/agents/linux/dist/index.js → 3階層上がルート
  */
 function getAgentRootDir(): string {
   return resolve(dirname(process.argv[1]), '..', '..', '..');
@@ -1541,7 +1605,8 @@ function getAgentRootDir(): string {
  * ~/.devrelay/agent/ 配下にあればインストール済み、それ以外は開発リポジトリ
  */
 function isInstalledAgent(agentDir: string): boolean {
-  const installedDir = join(homedir(), '.devrelay', 'agent');
+  // Windows: %APPDATA%\devrelay\agent, Linux: ~/.devrelay/agent
+  const installedDir = join(getConfigDir(), 'agent');
   return agentDir.startsWith(installedDir);
 }
 
@@ -1559,6 +1624,27 @@ function getExecEnv(): NodeJS.ProcessEnv {
     env.https_proxy = proxyUrl;
   }
   return env;
+}
+
+/**
+ * リモートのデフォルトブランチを動的検出（origin/main, origin/master 等）
+ * git symbolic-ref → origin/main → origin/master の順で試行
+ */
+async function detectRemoteBranch(execOpts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number }): Promise<string> {
+  // 1. git symbolic-ref で origin/HEAD を確認
+  try {
+    const { stdout } = await execAsync('git symbolic-ref refs/remotes/origin/HEAD', execOpts);
+    const branch = stdout.trim().replace('refs/remotes/', '');
+    if (branch) return branch;
+  } catch {}
+  // 2. フォールバック: origin/main → origin/master の順で確認
+  for (const candidate of ['origin/main', 'origin/master']) {
+    try {
+      await execAsync(`git rev-parse --verify ${candidate}`, execOpts);
+      return candidate;
+    } catch {}
+  }
+  throw new Error('Remote default branch not found (tried origin/HEAD, origin/main, origin/master)');
 }
 
 /**
@@ -1584,7 +1670,8 @@ async function handleVersionCheck() {
 
     // リモートの最新コミットを取得（fetch してから確認）
     await execAsync('git fetch origin --quiet', execOpts);
-    const { stdout: remoteRaw } = await execAsync('git log origin/main -1 --format="%H %ai"', execOpts);
+    const remoteBranch = await detectRemoteBranch(execOpts);
+    const { stdout: remoteRaw } = await execAsync(`git log ${remoteBranch} -1 --format="%H %ai"`, execOpts);
     const remoteParts = remoteRaw.trim().split(' ');
     const remoteCommit = remoteParts[0];
     const remoteDate = remoteParts.slice(1).join(' ');
@@ -1683,7 +1770,8 @@ async function handleAgentUpdate() {
   });
 
   // ログディレクトリを事前作成（存在しないと bash の >> が失敗する）
-  const logsDir = join(homedir(), '.devrelay', 'logs');
+  // Windows: %APPDATA%\devrelay\logs, Linux: ~/.devrelay/logs
+  const logsDir = join(getConfigDir(), 'logs');
   mkdirSync(logsDir, { recursive: true });
   const updateLogFile = join(logsDir, 'update.log');
 
@@ -1697,24 +1785,54 @@ async function handleAgentUpdate() {
   if (process.platform === 'win32') {
     // Windows: PowerShell スクリプトで更新
     // ビルド失敗でもリスタートは必ず実行（旧 dist/ コードで復帰）
-    const script = [
-      `$ErrorActionPreference = 'Continue'`,
-      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] === Update started ===" | Out-File -Append "${updateLogFile}"`,
-      `cd "${agentDir}"`,
-      `git fetch origin 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `git reset --hard origin/main 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `pnpm install --frozen-lockfile --ignore-scripts 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `pnpm --filter @devrelay/shared build 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `pnpm --filter @devrelay/agent-macos build 2>&1 | Out-File -Append "${updateLogFile}"`,
-      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Build done, restarting..." | Out-File -Append "${updateLogFile}"`,
-      `Start-Sleep -Seconds 2`,
-      restartCmd.command,
-    ].join('; ');
+    // 各ステップの $LASTEXITCODE を個別にログ記録し、障害時の原因特定を容易にする
+    /** タイムスタンプ付きログ出力ヘルパー（PowerShell 用） */
+    const psTs = `Get-Date -Format 'yyyy-MM-dd HH:mm:ss'`;
+    const psLog = (msg: string) =>
+      `"[$(${psTs})] ${msg}" | Out-File -Append "${updateLogFile}"`;
+    /** コマンド実行 + exit code ログ記録ヘルパー（PowerShell 用） */
+    const psRunAndLog = (label: string, cmd: string) =>
+      `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
 
-    const child = spawn('powershell', ['-Command', script], {
+    // PowerShell 更新スクリプトを .ps1 に書き出し、VBS ラッパー経由で実行（#116）
+    // 直接 spawn('powershell') だと DETACHED_PROCESS でサイレント終了するため
+    // start-agent.vbs と同じ wscript.exe + VBS .Run パターンで起動する
+    const stopCmd = mgmtInfo.commands.find(c => c.type === 'stop');
+    const scriptLines = [
+      `$ErrorActionPreference = 'Continue'`,
+      psLog('=== Update started ==='),
+      `cd "${agentDir}"`,
+      psRunAndLog('git fetch', 'git fetch origin'),
+      `$remoteBranch = try { (git symbolic-ref refs/remotes/origin/HEAD 2>$null) -replace 'refs/remotes/', '' } catch { 'origin/main' }`,
+      `if (-not $remoteBranch) { $remoteBranch = 'origin/main' }`,
+      psRunAndLog('git reset', 'git reset --hard $remoteBranch'),
+      psRunAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
+      psRunAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
+      psRunAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
+      psLog('Build done, restarting...'),
+      `Start-Sleep -Seconds 2`,
+      // 旧 Agent プロセスを停止（Get-CimInstance で node.exe + devrelay を検出して kill）
+      ...(stopCmd ? [psRunAndLog('stop old agent', stopCmd.command), 'Start-Sleep -Seconds 2'] : []),
+      restartCmd.command,
+    ];
+
+    const scriptPath = join(logsDir, 'update.ps1');
+    writeFileSync(scriptPath, scriptLines.join('\n'), 'utf-8');
+
+    // VBS ラッパーで PowerShell を起動（DETACHED_PROCESS 問題を回避）
+    // .Run の第2引数 0 = 非表示、第3引数 False = 完了を待たない
+    const vbsContent = [
+      'Set objShell = CreateObject("Wscript.Shell")',
+      `objShell.Run "powershell -ExecutionPolicy Bypass -NoProfile -File ""${scriptPath}""", 0, False`,
+    ].join('\r\n');
+    const vbsPath = join(logsDir, 'update.vbs');
+    writeFileSync(vbsPath, vbsContent, 'utf-8');
+
+    console.log(`📝 Update script: ${scriptPath}`);
+    console.log(`📝 Update VBS wrapper: ${vbsPath}`);
+    const child = spawn('wscript.exe', [vbsPath], {
       detached: true,
       stdio: 'ignore',
-      env: getExecEnv(),
     });
     child.on('error', (err) => {
       console.error(`❌ Update script spawn failed: ${err.message}`);
@@ -1726,7 +1844,7 @@ async function handleAgentUpdate() {
     });
     child.unref();
   } else {
-    // macOS/Linux: bash スクリプトで更新
+    // Linux/macOS: bash スクリプトで更新
     // 各ステップの exit code を個別にログ記録し、障害時の原因特定を容易にする
     const nodeBinDir = join(homedir(), '.devrelay', 'node', 'bin');
     const buildSteps = [
@@ -1734,10 +1852,12 @@ async function handleAgentUpdate() {
       `cd "${agentDir}"`,
       log('=== Update started ==='),
       runAndLog('git fetch', 'git fetch origin'),
-      runAndLog('git reset', 'git reset --hard origin/main'),
+      `REMOTE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' || echo "origin/main")`,
+      `[ -z "$REMOTE_BRANCH" ] && REMOTE_BRANCH="origin/main"`,
+      runAndLog('git reset', 'git reset --hard $REMOTE_BRANCH'),
       runAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
-      runAndLog('agent build', 'pnpm --filter @devrelay/agent-macos build'),
+      runAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
     ].join('; ');
 
     // nohup の場合: restartCmd.command をそのまま使うと、bash -c の cmdline に
@@ -1779,6 +1899,61 @@ async function handleAgentUpdate() {
   }
 
   console.log(`🔄 Update script spawned (detached). Agent will restart shortly.`);
+}
+
+/** ドキュメント保存ディレクトリ（~/.devrelay/docs/） */
+function getDocsDir(): string {
+  return join(getConfigDir(), 'docs');
+}
+
+/**
+ * サーバーから送信されたドキュメントをローカルに保存
+ * ファイル名にパストラバーサルが含まれる場合は拒否
+ */
+async function handleDocSync(payload: DocSyncPayload) {
+  const { filename, content, mimeType } = payload;
+
+  // パストラバーサル防止
+  if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+    console.error(`❌ Doc sync rejected (unsafe filename): ${filename}`);
+    return;
+  }
+
+  const docsDir = getDocsDir();
+  await mkdir(docsDir, { recursive: true });
+  const filePath = join(docsDir, filename);
+
+  try {
+    const buffer = Buffer.from(content, 'base64');
+    await writeFile(filePath, buffer);
+    console.log(`📁 Doc synced: ${filename} (${buffer.length} bytes) → ${filePath}`);
+  } catch (err: any) {
+    console.error(`❌ Doc sync failed for ${filename}:`, err.message);
+  }
+}
+
+/**
+ * サーバーから通知されたドキュメントをローカルから削除
+ */
+async function handleDocDelete(payload: DocDeletePayload) {
+  const { filename } = payload;
+
+  // パストラバーサル防止
+  if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+    console.error(`❌ Doc delete rejected (unsafe filename): ${filename}`);
+    return;
+  }
+
+  const filePath = join(getDocsDir(), filename);
+
+  try {
+    await unlink(filePath);
+    console.log(`📁 Doc deleted: ${filename}`);
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      console.error(`❌ Doc delete failed for ${filename}:`, err.message);
+    }
+  }
 }
 
 /**

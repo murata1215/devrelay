@@ -1,12 +1,31 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getToken } from '../lib/api';
 
+/** ツール承認プロンプト情報 */
+export interface ToolApprovalPrompt {
+  requestId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  title?: string;
+  description?: string;
+  projectId?: string;
+}
+
+/** ツール承認解決情報 */
+export interface ToolApprovalResolved {
+  requestId: string;
+  behavior: 'allow' | 'deny';
+  projectId?: string;
+}
+
 /** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用） */
 type ServerToWebMessage =
   | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
   | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
+  | { type: 'web:tool:approval'; payload: ToolApprovalPrompt }
+  | { type: 'web:tool:approval:resolved'; payload: ToolApprovalResolved }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };
 
@@ -31,12 +50,18 @@ export interface WebSocketCallbacks {
   onProgress?: (info: ProgressInfo, projectId?: string) => void;
   onProgressClear?: (projectId?: string) => void;
   onSessionInfo?: (projectId: string, sessionId: string) => void;
+  /** ツール承認リクエスト受信時のコールバック */
+  onToolApproval?: (prompt: ToolApprovalPrompt) => void;
+  /** ツール承認解決（他ブラウザからの応答含む）受信時のコールバック */
+  onToolApprovalResolved?: (resolved: ToolApprovalResolved) => void;
 }
 
 /** WebSocket フックの戻り値 */
 interface UseWebSocketReturn {
   connected: boolean;
   sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>) => void;
+  /** ツール承認応答を送信（ユーザーが許可/拒否を選択） */
+  sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => void;
 }
 
 /** tabId を sessionStorage で管理（タブごとに独立） */
@@ -131,6 +156,12 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
               // 他タブ/ウィンドウからのユーザーメッセージ
               cb?.onMessage?.({ role: 'user', content: msg.payload.content, files: msg.payload.files }, msg.payload.projectId);
               break;
+            case 'web:tool:approval':
+              cb?.onToolApproval?.(msg.payload);
+              break;
+            case 'web:tool:approval:resolved':
+              cb?.onToolApprovalResolved?.(msg.payload);
+              break;
             case 'web:error':
               cb?.onMessage?.({ role: 'system', content: `❌ ${msg.payload.error}` });
               break;
@@ -197,5 +228,15 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
     }));
   }, []);
 
-  return { connected, sendCommand };
+  /** ツール承認応答を Server に送信 */
+  const sendToolApprovalResponse = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'web:tool:approval:response',
+      payload: { requestId, behavior, ...(approveAll ? { approveAll: true } : {}) },
+    }));
+  }, []);
+
+  return { connected, sendCommand, sendToolApprovalResponse };
 }

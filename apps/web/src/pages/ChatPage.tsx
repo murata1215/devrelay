@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
-import { useWebSocket, type ChatMessage, type ProgressInfo } from '../hooks/useWebSocket';
+import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
@@ -395,6 +395,92 @@ function FilePreviewCard({ file, onImageClick }: {
 
   /* バイナリ/不明: ダウンロードカード */
   return <BinaryFileCard file={file} fileUrl={fileUrl} />;
+}
+
+/** ツール承認カード（exec モード時にインライン表示） */
+function ToolApprovalCard({
+  approval,
+  onRespond,
+}: {
+  approval: {
+    requestId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    title?: string;
+    description?: string;
+    status: 'pending' | 'allow' | 'deny';
+  };
+  onRespond: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => void;
+}) {
+  /** ツール入力を人が読める形式で表示 */
+  const formatInput = () => {
+    if (approval.toolName === 'Bash' && approval.toolInput.command) {
+      return String(approval.toolInput.command);
+    }
+    if ((approval.toolName === 'Read' || approval.toolName === 'Write' || approval.toolName === 'Edit') && approval.toolInput.file_path) {
+      return String(approval.toolInput.file_path);
+    }
+    if (approval.toolName === 'Glob' && approval.toolInput.pattern) {
+      return String(approval.toolInput.pattern);
+    }
+    if (approval.toolName === 'Grep' && approval.toolInput.pattern) {
+      return `${approval.toolInput.pattern}${approval.toolInput.path ? ` in ${approval.toolInput.path}` : ''}`;
+    }
+    // その他: JSON 表示（短縮）
+    const json = JSON.stringify(approval.toolInput);
+    return json.length > 120 ? json.substring(0, 120) + '...' : json;
+  };
+
+  const statusColors = {
+    pending: 'border-yellow-500/50 bg-yellow-500/5',
+    allow: 'border-green-500/50 bg-green-500/5',
+    deny: 'border-red-500/50 bg-red-500/5',
+  };
+
+  const statusIcons = {
+    pending: '🔧',
+    allow: '✅',
+    deny: '❌',
+  };
+
+  return (
+    <div className={`rounded-lg border-2 p-3 my-2 transition-colors ${statusColors[approval.status]}`}>
+      <div className="flex items-center gap-2 mb-1">
+        <span>{statusIcons[approval.status]}</span>
+        <span className="font-semibold text-sm">{approval.toolName}</span>
+        {approval.status !== 'pending' && (
+          <span className="text-xs opacity-60">
+            {approval.status === 'allow' ? '許可済み' : '拒否済み'}
+          </span>
+        )}
+      </div>
+      <div className="text-xs font-mono opacity-80 bg-black/10 dark:bg-white/5 rounded px-2 py-1 mb-2 break-all whitespace-pre-wrap">
+        {formatInput()}
+      </div>
+      {approval.status === 'pending' && (
+        <div className="flex gap-2">
+          <button
+            onClick={() => onRespond(approval.requestId, 'allow')}
+            className="px-3 py-1 text-xs font-medium rounded bg-green-600 text-white hover:bg-green-700 transition-colors"
+          >
+            ✅ 許可
+          </button>
+          <button
+            onClick={() => onRespond(approval.requestId, 'deny')}
+            className="px-3 py-1 text-xs font-medium rounded bg-red-600 text-white hover:bg-red-700 transition-colors"
+          >
+            ❌ 拒否
+          </button>
+          <button
+            onClick={() => onRespond(approval.requestId, 'allow', true)}
+            className="px-3 py-1 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+          >
+            🔓 以降すべて許可
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Discord 風メッセージ行 */
@@ -1280,10 +1366,19 @@ function renderInline(text: string): React.ReactNode {
   });
 }
 
-type DocPanelTab = 'docs' | 'issues';
+type DocPanelTab = 'approvals' | 'docs' | 'issues';
+
+/** ツール承認履歴の1エントリ */
+interface ApprovalHistoryEntry {
+  requestId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  status: 'pending' | 'allow' | 'deny';
+  timestamp: Date;
+}
 
 /** エージェントドキュメントパネル（右サイドバー） */
-function DocPanel({ machineId, projectId }: { machineId: string | null; machineDisplayName: string; projectId: string | null }) {
+function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string | null; machineDisplayName: string; projectId: string | null; approvalHistory: ApprovalHistoryEntry[] }) {
   const [documents, setDocuments] = useState<AgentDocMeta[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -1292,7 +1387,7 @@ function DocPanel({ machineId, projectId }: { machineId: string | null; machineD
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // タブ状態
-  const [activePanel, setActivePanel] = useState<DocPanelTab>('docs');
+  const [activePanel, setActivePanel] = useState<DocPanelTab>('approvals');
 
   // Issues 状態
   const [issuesContent, setIssuesContent] = useState<string | null>(null);
@@ -1464,6 +1559,16 @@ function DocPanel({ machineId, projectId }: { machineId: string | null; machineD
         {/* タブヘッダー */}
         <div className="flex items-center border-b border-[var(--border-color)]">
           <button
+            onClick={() => setActivePanel('approvals')}
+            className={`flex-1 text-xs py-2 text-center transition-colors ${
+              activePanel === 'approvals'
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+            }`}
+          >
+            Approvals
+          </button>
+          <button
             onClick={() => setActivePanel('docs')}
             className={`flex-1 text-xs py-2 text-center transition-colors ${
               activePanel === 'docs'
@@ -1512,8 +1617,45 @@ function DocPanel({ machineId, projectId }: { machineId: string | null; machineD
           />
         </div>
 
-        {/* Issues タブ */}
-        {activePanel === 'issues' ? (
+        {/* Approvals タブ */}
+        {activePanel === 'approvals' ? (
+          <div className="flex-1 overflow-y-auto p-2">
+            {approvalHistory.length === 0 ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">No approval history yet</p>
+            ) : (
+              <div className="space-y-1">
+                {[...approvalHistory].reverse().map(entry => {
+                  const statusIcon = entry.status === 'allow' ? '✅' : entry.status === 'deny' ? '❌' : '⏳';
+                  const statusColor = entry.status === 'allow' ? 'text-green-500' : entry.status === 'deny' ? 'text-red-500' : 'text-yellow-500';
+                  const timeStr = entry.timestamp.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                  // ツール入力の短い表示
+                  let detail = '';
+                  if (entry.toolName === 'Bash' && entry.toolInput.command) {
+                    detail = String(entry.toolInput.command).substring(0, 60);
+                  } else if (entry.toolInput.file_path) {
+                    detail = String(entry.toolInput.file_path);
+                  } else if (entry.toolInput.pattern) {
+                    detail = String(entry.toolInput.pattern);
+                  }
+                  return (
+                    <div key={entry.requestId} className="flex items-start gap-1.5 px-1 py-0.5 rounded hover:bg-[var(--bg-tertiary)] transition-colors">
+                      <span className={`text-xs ${statusColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs font-medium text-[var(--text-primary)]">{entry.toolName}</span>
+                          <span className="text-[10px] text-[var(--text-muted)]">{timeStr}</span>
+                        </div>
+                        {detail && (
+                          <p className="text-[10px] text-[var(--text-muted)] font-mono truncate">{detail}</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : activePanel === 'issues' ? (
           <div className="flex-1 overflow-y-auto p-2">
             {!projectId ? (
               <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
@@ -1605,6 +1747,18 @@ export function ChatPage() {
   const [, setSessionRefreshCount] = useState(0);
   /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
   const [maximized, setMaximized] = useState(false);
+  /** ツール承認リクエスト: requestId → 承認情報 */
+  const [toolApprovals, setToolApprovals] = useState<Map<string, {
+    requestId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    title?: string;
+    description?: string;
+    projectId?: string;
+    status: 'pending' | 'allow' | 'deny';
+  }>>(new Map());
+  /** ツール承認履歴（右パネルの Approvals タブに表示） */
+  const [approvalHistory, setApprovalHistory] = useState<ApprovalHistoryEntry[]>([]);
 
   // 最大化時に body にクラスを付与してナビバーを CSS で隠す
   useEffect(() => {
@@ -1798,12 +1952,90 @@ export function ChatPage() {
     });
   }, [loadHistory]);
 
-  const { connected, sendCommand } = useWebSocket({
+  /** ツール承認リクエスト受信時のハンドラ */
+  const handleToolApproval = useCallback((prompt: ToolApprovalPrompt) => {
+    setToolApprovals(prev => {
+      const next = new Map(prev);
+      next.set(prompt.requestId, { ...prompt, status: 'pending' });
+      return next;
+    });
+    // 承認履歴に追加（pending 状態で）
+    setApprovalHistory(prev => [...prev, {
+      requestId: prompt.requestId,
+      toolName: prompt.toolName,
+      toolInput: prompt.toolInput,
+      status: 'pending',
+      timestamp: new Date(),
+    }]);
+  }, []);
+
+  /** ツール承認解決（自分 or 他ブラウザからの応答）受信時のハンドラ */
+  /** ツール承認解決（自分 or 他ブラウザからの応答）→ 2秒後に自動非表示 */
+  const handleToolApprovalResolved = useCallback((resolved: ToolApprovalResolved) => {
+    setToolApprovals(prev => {
+      const next = new Map(prev);
+      const existing = next.get(resolved.requestId);
+      if (existing) {
+        next.set(resolved.requestId, { ...existing, status: resolved.behavior });
+      }
+      return next;
+    });
+    // 承認履歴のステータスを更新
+    setApprovalHistory(prev => prev.map(entry =>
+      entry.requestId === resolved.requestId ? { ...entry, status: resolved.behavior } : entry
+    ));
+    // 2秒後にカードを削除（許可済み/拒否済みの表示が邪魔にならないように）
+    setTimeout(() => {
+      setToolApprovals(prev => {
+        const next = new Map(prev);
+        next.delete(resolved.requestId);
+        return next;
+      });
+    }, 2000);
+  }, []);
+
+  const { connected, sendCommand, sendToolApprovalResponse } = useWebSocket({
     onMessage: addMessageToTab,
     onProgress: updateProgressOnTab,
     onProgressClear: clearProgressOnTab,
     onSessionInfo: handleSessionInfo,
+    onToolApproval: handleToolApproval,
+    onToolApprovalResolved: handleToolApprovalResolved,
   });
+
+  /** ユーザーがツール承認ボタンをクリックした時のハンドラ */
+  const handleToolApprovalRespond = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => {
+    sendToolApprovalResponse(requestId, behavior, approveAll);
+    // 即座にローカルの状態を更新（Server からの resolved を待たずに UI 反映）
+    setToolApprovals(prev => {
+      const next = new Map(prev);
+      const existing = next.get(requestId);
+      if (existing) {
+        next.set(requestId, { ...existing, status: behavior });
+      }
+      // 「以降すべて許可」→ 保留中のカードも全て許可済みに
+      if (approveAll) {
+        for (const [id, a] of next) {
+          if (a.status === 'pending') {
+            next.set(id, { ...a, status: 'allow' });
+          }
+        }
+      }
+      return next;
+    });
+    // 承認履歴のステータスを即座に更新
+    setApprovalHistory(prev => prev.map(entry =>
+      entry.requestId === requestId ? { ...entry, status: behavior } : entry
+    ));
+    // 2秒後にカードを削除
+    setTimeout(() => {
+      setToolApprovals(prev => {
+        const next = new Map(prev);
+        next.delete(requestId);
+        return next;
+      });
+    }, 2000);
+  }, [sendToolApprovalResponse]);
 
   // マシン一覧取得 + ポーリング（10秒）
   useEffect(() => {
@@ -2503,6 +2735,16 @@ export function ChatPage() {
               onImageClick={setLightboxImage}
             />
           ))}
+          {/* ツール承認カード（アクティブタブの projectId に一致するもののみ表示） */}
+          {Array.from(toolApprovals.values())
+            .filter(a => !a.projectId || a.projectId === activeTabId)
+            .map(approval => (
+              <ToolApprovalCard
+                key={approval.requestId}
+                approval={approval}
+                onRespond={handleToolApprovalRespond}
+              />
+            ))}
           {activeTab?.progress && (
             <ProgressIndicator
               output={activeTab.progress.output}
@@ -2579,6 +2821,7 @@ export function ChatPage() {
           machineId={activeMachineId}
           machineDisplayName={activeTab?.machineDisplayName ?? ''}
           projectId={activeTab?.projectId ?? null}
+          approvalHistory={approvalHistory}
         />
       )}
 

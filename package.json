@@ -4,8 +4,14 @@
   "private": true,
   "description": "Remote AI CLI development hub - Control Claude Code, Gemini CLI, and more from anywhere",
   "pnpm": {
-    "onlyBuiltDependencies": ["electron", "esbuild", "@prisma/client", "@prisma/engines", "prisma"]
-    ,"overrides": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma"
+    ],
+    "overrides": {
       "readable-stream": "2.3.8"
     }
   },
@@ -31,5 +37,8 @@
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=8.0.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.2.77"
   }
 }

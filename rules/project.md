@@ -784,3 +784,16 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - WebUI でのドキュメント横断検索インターフェース
 - 複数ユーザー同時接続
 - エラーハンドリング強化
+
+---
+
+## Agent SDK 移行 (#178)
+
+### 設計判断
+
+1. **Claude のみ SDK 移行**: `@anthropic-ai/claude-agent-sdk` の `query()` で実行。Gemini/Codex/Aider は従来の `spawn` パスを維持
+2. **`canUseTool` コールバックによるパーミッション制御**: exec モードでは SDK の `canUseTool` が全ツール実行前に呼ばれ、WebSocket 経由でユーザー承認を求める。30分以上の非同期待機にも耐える（実証済み）
+3. **「以降すべて許可」モード**: `approveAllMode` フラグ（Agent 側メモリ）で管理。セッション単位で有効、Agent 再起動でリセット
+4. **承認カード 2秒後自動非表示**: 許可/拒否確定後に 2秒で承認カードをチャットエリアから削除。右パネルの Approval History には永続表示
+5. **参加者フォールバック**: `getSessionParticipants()` で Web 参加者が見つからない場合、全 Web クライアントにフォールバックブロードキャスト（サーバー再起動後の参加者復元不整合を回避）
+6. **machineId**: Agent からの承認リクエストでは `currentMachineId`（Server から受信した DB ID）を優先使用。`currentConfig.machineId` は config.yaml 由来で空文字列の場合があるためフォールバックのみ

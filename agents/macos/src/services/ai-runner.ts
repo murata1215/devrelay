@@ -1,12 +1,15 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage } from './session-store.js';
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 
 interface AiSession {
   sessionId: string;
@@ -68,6 +71,76 @@ export async function startAiSession(
  */
 export const PLAN_MODE_ALLOWED_TOOLS = DEFAULT_ALLOWED_TOOLS_LINUX;
 
+/** ツール承認リクエストのペイロード（Agent → Server 経由でユーザーに送信） */
+export interface ToolApprovalRequest {
+  requestId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  title?: string;
+  description?: string;
+  decisionReason?: string;
+}
+
+/** ツール承認レスポンス（ユーザー → Server 経由で Agent に返却） */
+export interface ToolApprovalResponse {
+  behavior: 'allow' | 'deny';
+  message?: string;
+  /** true の場合、以降の全ツール実行を自動許可する */
+  approveAll?: boolean;
+}
+
+/**
+ * 「以降すべて許可」フラグ（セッション単位）
+ * ユーザーが「以降すべて許可」を選んだ場合に true になり、以降の canUseTool は即座に allow を返す
+ */
+let approveAllMode = false;
+
+/** 「以降すべて許可」モードかどうかを確認する（canUseTool コールバック内で使用） */
+export function isApproveAllMode(): boolean {
+  return approveAllMode;
+}
+
+/** 「以降すべて許可」モードをリセットする（新セッション開始時に呼び出す） */
+export function resetApproveAllMode(): void {
+  approveAllMode = false;
+}
+
+/**
+ * 保留中のツール承認リクエストを管理する Map
+ * requestId → { resolve, reject, input }
+ */
+const pendingToolApprovals = new Map<string, {
+  resolve: (value: PermissionResult) => void;
+  reject: (reason: Error) => void;
+  input: Record<string, unknown>;
+}>();
+
+/**
+ * Server からのツール承認レスポンスを受け取り、保留中の Promise を解決する
+ * connection.ts から呼び出される
+ */
+export function resolveToolApproval(requestId: string, response: ToolApprovalResponse): boolean {
+  const pending = pendingToolApprovals.get(requestId);
+  if (!pending) {
+    console.log(`⚠️ Unknown tool approval requestId: ${requestId}`);
+    return false;
+  }
+  pendingToolApprovals.delete(requestId);
+
+  // 「以降すべて許可」フラグを設定
+  if (response.approveAll) {
+    approveAllMode = true;
+    console.log(`🔓 Approve-all mode activated (all subsequent tools will be auto-approved)`);
+  }
+
+  if (response.behavior === 'allow') {
+    pending.resolve({ behavior: 'allow', updatedInput: pending.input });
+  } else {
+    pending.resolve({ behavior: 'deny', message: response.message || 'ユーザーが拒否しました' });
+  }
+  return true;
+}
+
 export interface SendPromptOptions {
   /** Claude session ID to resume (from previous execution) */
   resumeSessionId?: string;
@@ -75,6 +148,239 @@ export interface SendPromptOptions {
   usePlanMode?: boolean;
   /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
   allowedTools?: string[];
+  /**
+   * ツール承認リクエストのコールバック（Agent SDK 経由の exec モードで使用）
+   * 設定されている場合、canUseTool で WebSocket 経由のユーザー承認を行う
+   * 未設定の場合は全ツール自動許可（後方互換）
+   */
+  onToolApprovalRequest?: (request: ToolApprovalRequest) => void;
+}
+
+/**
+ * Agent SDK を使用して Claude Code にプロンプトを送信する
+ * spawn('claude', ['-p', ...]) の代わりに SDK の query() を使用
+ *
+ * @param sessionId DevRelay セッション ID
+ * @param prompt 送信するプロンプト
+ * @param projectPath プロジェクトディレクトリ
+ * @param claudeSessionId Claude Code セッション ID（resume 用）
+ * @param config Agent 設定
+ * @param onOutput 出力コールバック
+ * @param options 送信オプション
+ * @returns AI 実行結果
+ */
+async function sendPromptToAiSdk(
+  sessionId: string,
+  prompt: string,
+  projectPath: string,
+  claudeSessionId: string,
+  config: AgentConfig,
+  onOutput: OutputCallback,
+  options: SendPromptOptions = {}
+): Promise<AiRunResult> {
+  const result: AiRunResult = {};
+  let fullOutput = '';
+
+  /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
+  const proxyEnv: Record<string, string> = {};
+  if (config.proxy?.url) {
+    const proxyUrl = config.proxy.url;
+    proxyEnv.HTTP_PROXY = proxyUrl;
+    proxyEnv.HTTPS_PROXY = proxyUrl;
+    proxyEnv.http_proxy = proxyUrl;
+    proxyEnv.https_proxy = proxyUrl;
+  }
+
+  /** SDK query のオプション構築 */
+  const sdkOptions: Parameters<typeof query>[0]['options'] = {
+    cwd: projectPath,
+    maxTurns: 200,
+    settingSources: ['user', 'project'],
+    env: {
+      ...process.env,
+      ...proxyEnv,
+      DEVRELAY: '1',
+      DEVRELAY_SESSION_ID: sessionId,
+      DEVRELAY_PROJECT: projectPath,
+    },
+  };
+
+  // パーミッションモード設定
+  if (options.usePlanMode) {
+    sdkOptions.permissionMode = 'plan';
+    if (options.allowedTools && options.allowedTools.length > 0) {
+      sdkOptions.allowedTools = options.allowedTools;
+      console.log(`📋 [SDK] Using plan mode with ${options.allowedTools.length} allowed tools`);
+    } else {
+      console.log(`📋 [SDK] Using plan mode`);
+    }
+  } else {
+    // Exec モード: canUseTool でパーミッション制御
+    sdkOptions.permissionMode = 'default';
+    if (options.onToolApprovalRequest) {
+      // WebSocket 経由のユーザー承認（Phase 2+）
+      const onApprovalRequest = options.onToolApprovalRequest;
+      sdkOptions.canUseTool = async (toolName, input, opts) => {
+        // 「以降すべて許可」モードなら即座に allow
+        if (approveAllMode) {
+          console.log(`🔓 [SDK] Auto-approved (approve-all mode): ${toolName}`);
+          return { behavior: 'allow', updatedInput: input };
+        }
+
+        const requestId = crypto.randomUUID();
+        console.log(`🔐 [SDK] Permission request: ${toolName} (${requestId.substring(0, 8)}...)`);
+
+        // Server にツール承認リクエストを送信
+        onApprovalRequest({
+          requestId,
+          toolName,
+          toolInput: input,
+          title: opts.title,
+          description: opts.description,
+          decisionReason: opts.decisionReason,
+        });
+
+        // ユーザーの応答を待つ Promise を作成
+        return new Promise<PermissionResult>((resolve, reject) => {
+          pendingToolApprovals.set(requestId, { resolve, reject, input });
+
+          // AbortSignal を監視（SDK 側からのキャンセル）
+          if (opts.signal.aborted) {
+            pendingToolApprovals.delete(requestId);
+            resolve({ behavior: 'deny', message: 'Aborted' });
+            return;
+          }
+          opts.signal.addEventListener('abort', () => {
+            if (pendingToolApprovals.has(requestId)) {
+              pendingToolApprovals.delete(requestId);
+              resolve({ behavior: 'deny', message: 'Aborted' });
+            }
+          }, { once: true });
+        });
+      };
+      console.log(`🔐 [SDK] Using exec mode with user approval (canUseTool)`);
+    } else {
+      // 全ツール自動許可（後方互換: --dangerously-skip-permissions 相当）
+      sdkOptions.canUseTool = async (_toolName, input) => ({
+        behavior: 'allow',
+        updatedInput: input,
+      });
+      console.log(`🚀 [SDK] Using exec mode (auto-approve all tools)`);
+    }
+  }
+
+  // セッション resume
+  if (options.resumeSessionId) {
+    sdkOptions.resume = options.resumeSessionId;
+    console.log(`🔄 [SDK] Resuming session: ${options.resumeSessionId.substring(0, 8)}...`);
+  }
+
+  try {
+    for await (const message of query({ prompt, options: sdkOptions })) {
+      const m = message as any;
+
+      // セッション ID 抽出（system/init または result から）
+      if (m.session_id && !result.extractedSessionId) {
+        result.extractedSessionId = m.session_id;
+        console.log(`[claude/sdk] 📋 Session ID: ${m.session_id.substring(0, 8)}...`);
+        saveClaudeSessionId(projectPath, m.session_id).catch(err => {
+          console.error(`Failed to save session ID:`, err);
+        });
+      }
+
+      // assistant メッセージ: テキストとツール使用を出力
+      if (m.type === 'assistant' && m.message?.content) {
+        for (const block of m.message.content) {
+          if (block.type === 'text' && block.text) {
+            // "Prompt is too long" 検出
+            if (block.text.trim() === 'Prompt is too long') {
+              console.log(`[claude/sdk] ⚠️ "Prompt is too long" detected, suppressing`);
+              if (options.resumeSessionId) {
+                result.resumeFailed = true;
+                return result;
+              }
+              onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true);
+              return result;
+            }
+            fullOutput += block.text;
+            console.log(`[claude/sdk] +${block.text.length} chars`);
+            onOutput(block.text, false);
+          } else if (block.type === 'tool_use' && block.name) {
+            console.log(`[claude/sdk] 🔧 Using tool: ${block.name}`);
+            onOutput(`\n🔧 ${block.name}を使用中...\n`, false);
+          }
+        }
+      }
+
+      // result メッセージ: 使用量データ抽出
+      if (m.type === 'result') {
+        console.log(`[claude/sdk] ✅ Complete (${m.duration_ms}ms)`);
+
+        // コンテキスト使用量を計算
+        if (m.usage) {
+          let contextWindow = 200000;
+          if (m.modelUsage) {
+            const modelInfo = Object.values(m.modelUsage)[0] as any;
+            if (modelInfo?.contextWindow) {
+              contextWindow = modelInfo.contextWindow;
+            }
+          }
+          const cacheReadTokens = m.usage.cache_read_input_tokens || 0;
+          result.contextUsage = {
+            used: cacheReadTokens,
+            total: contextWindow,
+            percentage: Math.round((cacheReadTokens / contextWindow) * 100),
+          };
+          console.log(`[claude/sdk] ${formatContextUsage(result.contextUsage)}`);
+          saveContextUsage(projectPath, result.contextUsage).catch(err => {
+            console.error(`Failed to save context usage:`, err);
+          });
+        }
+
+        // 使用量データ（DB 保存用）
+        result.usageData = {
+          usage: m.usage,
+          modelUsage: m.modelUsage,
+          durationMs: m.duration_ms,
+          model: m.modelUsage ? Object.keys(m.modelUsage)[0] : undefined,
+        };
+        console.log(`[claude/sdk] 💾 Usage data captured: duration=${m.duration_ms}ms`);
+
+        // resume 失敗検出
+        if (m.is_error && options.resumeSessionId) {
+          console.log(`[claude/sdk] ⚠️ Result is error with --resume, flagging for retry`);
+          result.resumeFailed = true;
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[claude/sdk] Error:`, err.message);
+
+    // resume 失敗のエラーを検出
+    if (options.resumeSessionId && (
+      err.message?.includes('resume') ||
+      err.message?.includes('session') ||
+      err.message?.includes('Prompt is too long')
+    )) {
+      console.log(`[claude/sdk] ⚠️ SDK error with --resume, flagging for retry`);
+      result.resumeFailed = true;
+      return result;
+    }
+
+    if (fullOutput.length === 0) {
+      onOutput(`Error: ${err.message}`, true);
+    }
+    return result;
+  }
+
+  // 完了シグナル送信
+  if (fullOutput.length === 0) {
+    onOutput('(No response from AI)', true, result.usageData);
+  } else {
+    onOutput('', true, result.usageData);
+  }
+
+  return result;
 }
 
 export async function sendPromptToAi(
@@ -88,6 +394,11 @@ export async function sendPromptToAi(
   options: SendPromptOptions = {}
 ): Promise<AiRunResult> {
   console.log(`📝 Sending prompt to ${aiTool}: ${prompt.substring(0, 50)}...`);
+
+  // Claude は Agent SDK を使用（spawn の代わり）
+  if (aiTool === 'claude') {
+    return sendPromptToAiSdk(sessionId, prompt, projectPath, claudeSessionId, config, onOutput, options);
+  }
 
   const command = getAiCommand(aiTool, config);
   if (!command) {
@@ -108,58 +419,7 @@ export async function sendPromptToAi(
     proxyEnv.https_proxy = proxyUrl;
   }
 
-  if (aiTool === 'claude') {
-    // devrelay-claude シンボリックリンクを使用してプロセスを識別可能にする
-    // シンボリックリンクが存在しない場合（setup 後に claude をインストールした場合など）は
-    // which claude でフォールバックし、シンボリックリンクも自動作成する
-    const devrelayClaude = resolveClaudePath();
-    const args = [
-      '-p',
-      '--output-format', 'stream-json',
-      '--verbose'
-    ];
-
-    // Add permission mode based on options
-    if (options.usePlanMode) {
-      args.push('--permission-mode', 'plan');
-      // プランモードで読み取り専用コマンドを許可（カンマ区切りで1つの --allowedTools に渡す）
-      if (options.allowedTools && options.allowedTools.length > 0) {
-        args.push('--allowedTools', options.allowedTools.join(','));
-        console.log(`📋 Using plan mode with ${options.allowedTools.length} allowed tools`);
-      } else {
-        console.log(`📋 Using plan mode (--permission-mode plan)`);
-      }
-    } else {
-      args.push('--dangerously-skip-permissions');
-      console.log(`🚀 Using exec mode (--dangerously-skip-permissions)`);
-    }
-
-    // Add resume option if we have a previous session ID
-    if (options.resumeSessionId) {
-      args.push('--resume', options.resumeSessionId);
-      console.log(`🔄 Resuming session: ${options.resumeSessionId.substring(0, 8)}...`);
-    }
-
-    console.log(`🔧 Running: devrelay-claude ${args.join(' ')}`);
-
-    // Windows の .cmd ファイル実行には shell: true が必要
-    proc = spawn(devrelayClaude, args, {
-      cwd: projectPath,
-      shell: process.platform === 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ...proxyEnv,
-        DEVRELAY: '1',
-        DEVRELAY_SESSION_ID: sessionId,
-        DEVRELAY_PROJECT: projectPath,
-      },
-    });
-
-    // Write prompt to stdin (secure - not visible in process list)
-    proc.stdin?.write(prompt);
-    proc.stdin?.end();
-  } else if (aiTool === 'gemini') {
+  if (aiTool === 'gemini') {
     // Gemini CLI with auto_edit approval mode
     // Use stdin to pass prompt (same as Claude) to avoid shell interpretation issues
     const args = ['--approval-mode', 'auto_edit'];
@@ -220,8 +480,26 @@ export async function sendPromptToAi(
   // "Prompt is too long" が stdout（通常の応答テキスト）で出力された場合の検出フラグ
   let promptTooLong = false;
 
+  // --resume 使用時のスタートアップタイムアウト（ハング検出・自動リトライ用）
+  const RESUME_STARTUP_TIMEOUT = 60000; // 60秒
+  let startupTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  if (options.resumeSessionId) {
+    startupTimeoutTimer = setTimeout(() => {
+      if (fullOutput.length === 0 && !completionSent) {
+        console.log(`[${aiTool}] ⚠️ --resume startup timeout (${RESUME_STARTUP_TIMEOUT / 1000}s), killing process for retry`);
+        result.resumeFailed = true;
+        proc.kill('SIGTERM');
+      }
+    }, RESUME_STARTUP_TIMEOUT);
+  }
+
   return new Promise<AiRunResult>((resolve) => {
     proc.stdout?.on('data', (data) => {
+      // 初回データ受信でスタートアップタイムアウトをクリア（正常起動確認）
+      if (startupTimeoutTimer) {
+        clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
       const text = data.toString();
       lineBuffer += text;
 
@@ -319,6 +597,12 @@ export async function sendPromptToAi(
     proc.on('close', (code, signal) => {
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
+      // スタートアップタイムアウトをクリア（正常終了時）
+      if (startupTimeoutTimer) {
+        clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
+
       // プロセス参照をクリア（キャンセル済み判定のため exitCode は残る）
       if (session) {
         session.process = null as any;
@@ -326,7 +610,12 @@ export async function sendPromptToAi(
 
       // SIGTERM によるキャンセル検出
       if (signal === 'SIGTERM') {
-        console.log(`[${aiTool}] ⛔ Process was cancelled`);
+        if (result.resumeFailed) {
+          // スタートアップタイムアウトによる kill → リトライに任せる
+          console.log(`[${aiTool}] ⚠️ Resume startup timeout, will retry without --resume`);
+        } else {
+          console.log(`[${aiTool}] ⛔ Process was cancelled`);
+        }
         if (!completionSent) {
           completionSent = true;
           onOutput('', true, result.usageData);
@@ -392,6 +681,10 @@ export async function sendPromptToAi(
     });
 
     proc.on('error', (err) => {
+      if (startupTimeoutTimer) {
+        clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
       console.error(`[${aiTool}] Process error:`, err);
       if (!completionSent) {
         completionSent = true;

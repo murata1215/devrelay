@@ -13,10 +13,13 @@ import type {
   AiCancelledPayload,
   AgentVersionInfoPayload,
   AgentUpdateStatusPayload,
+  ToolApprovalRequestPayload,
+  ServerToWebMessage,
   Platform
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants } from './session-manager.js';
+import { sendWebRawMessage, broadcastWebRawMessage } from '../platforms/web.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
@@ -164,6 +167,10 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:project:file:content':
           handleProjectFileContent(message.payload);
+          break;
+
+        case 'agent:tool:approval:request':
+          await handleToolApprovalRequest(message.payload);
           break;
       }
     } catch (err) {
@@ -1552,4 +1559,119 @@ export function switchAiTool(machineId: string, sessionId: string, aiTool: AiToo
       payload: { sessionId, aiTool }
     });
   });
+}
+
+// -----------------------------------------------------------------------------
+// Tool Approval Protocol
+// -----------------------------------------------------------------------------
+
+/** ツール承認タイムアウト（5分） */
+const TOOL_APPROVAL_TIMEOUT = 5 * 60 * 1000;
+
+/** 保留中のツール承認: requestId → { machineId, sessionId, projectId, timeoutTimer } */
+const pendingToolApprovalRequests = new Map<string, {
+  machineId: string;
+  sessionId: string;
+  projectId?: string;
+  timeout: ReturnType<typeof setTimeout>;
+}>();
+
+/**
+ * Agent からのツール承認リクエストを処理し、セッション参加者に転送する
+ */
+async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
+  const { machineId, sessionId, requestId, toolName, toolInput, title, description, decisionReason } = payload;
+  console.log(`🔐 Tool approval request: ${toolName} (${requestId.substring(0, 8)}...) for session ${sessionId.substring(0, 8)}...`);
+
+  // セッションの projectId を取得（WebUI のタブルーティング用）
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { project: { select: { id: true } } },
+  });
+  const projectId = session?.project?.id;
+
+  // タイムアウト設定（5分でデフォルト deny）
+  const timeout = setTimeout(() => {
+    const pending = pendingToolApprovalRequests.get(requestId);
+    if (pending) {
+      console.log(`⏰ Tool approval timeout: ${toolName} (${requestId.substring(0, 8)}...)`);
+      pendingToolApprovalRequests.delete(requestId);
+
+      // Agent に deny を送信
+      sendToAgent(pending.machineId, {
+        type: 'server:tool:approval:response',
+        payload: { requestId, behavior: 'deny', message: 'タイムアウト: ユーザーが応答しませんでした' },
+      });
+
+      // 全 Web 参加者に resolved を通知
+      broadcastToolApprovalToWeb(sessionId, {
+        type: 'web:tool:approval:resolved',
+        payload: { requestId, behavior: 'deny', projectId },
+      });
+    }
+  }, TOOL_APPROVAL_TIMEOUT);
+
+  pendingToolApprovalRequests.set(requestId, { machineId, sessionId, projectId, timeout });
+
+  // セッション参加者に承認リクエストを送信
+  broadcastToolApprovalToWeb(sessionId, {
+    type: 'web:tool:approval',
+    payload: { requestId, toolName, toolInput, title, description, projectId },
+  });
+}
+
+/**
+ * WebUI/Discord/Telegram からのツール承認応答を処理し、Agent に転送する
+ * @returns 処理成功なら true、requestId が見つからなければ false
+ */
+export function handleToolApprovalUserResponse(
+  requestId: string,
+  response: { behavior: 'allow' | 'deny'; message?: string; approveAll?: boolean }
+): boolean {
+  const pending = pendingToolApprovalRequests.get(requestId);
+  if (!pending) {
+    console.log(`⚠️ Unknown tool approval requestId: ${requestId}`);
+    return false;
+  }
+
+  // タイムアウト解除・Map からも削除
+  clearTimeout(pending.timeout);
+  pendingToolApprovalRequests.delete(requestId);
+
+  console.log(`🔐 Tool approval response: ${response.behavior}${response.approveAll ? ' (approve-all)' : ''} (${requestId.substring(0, 8)}...)`);
+
+  // Agent に応答を転送（approveAll フラグも含む）
+  sendToAgent(pending.machineId, {
+    type: 'server:tool:approval:response',
+    payload: { requestId, behavior: response.behavior, message: response.message, approveAll: response.approveAll },
+  });
+
+  // 全 Web 参加者に resolved を通知（他のブラウザタブの UI も更新）
+  broadcastToolApprovalToWeb(pending.sessionId, {
+    type: 'web:tool:approval:resolved',
+    payload: { requestId, behavior: response.behavior, projectId: pending.projectId },
+  });
+
+  return true;
+}
+
+/**
+ * セッションの全 Web 参加者に ServerToWebMessage を送信するヘルパー
+ * 参加者が見つからない場合は全 Web クライアントにフォールバックブロードキャスト
+ */
+function broadcastToolApprovalToWeb(sessionId: string, message: ServerToWebMessage) {
+  const participants = getSessionParticipants(sessionId);
+  const webParticipants = participants.filter(p => p.platform === 'web');
+
+  if (webParticipants.length > 0) {
+    // セッション参加者が見つかった → 対象の Web クライアントに送信
+    for (const { chatId } of webParticipants) {
+      sendWebRawMessage(chatId, message);
+    }
+    console.log(`🔐 Tool approval broadcast: ${webParticipants.length} web participant(s) for session ${sessionId.substring(0, 8)}...`);
+  } else {
+    // 参加者なし → 全 Web クライアントにフォールバック（参加者管理の不整合を回避）
+    const sent = broadcastWebRawMessage(message);
+    console.log(`⚠️ Tool approval fallback broadcast: ${sent} web client(s) (no participants found for session ${sessionId.substring(0, 8)}...)`);
+  }
 }

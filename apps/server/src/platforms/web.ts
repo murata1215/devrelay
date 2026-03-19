@@ -1,9 +1,10 @@
 import type { FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
-import type { FileAttachment, WebClientMessage } from '@devrelay/shared';
+import type { FileAttachment, WebClientMessage, ServerToWebMessage } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
 import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants } from '../services/session-manager.js';
+import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -162,6 +163,10 @@ export async function setupWebClientWebSocket(
           }
           break;
         }
+        case 'web:tool:approval:response':
+          // WebUI からのツール承認応答を agent-manager に転送
+          handleToolApprovalUserResponse(msg.payload.requestId, msg.payload);
+          break;
         case 'web:ping':
           sendJson(ws, { type: 'web:pong' });
           break;
@@ -212,6 +217,35 @@ export async function sendWebMessage(chatId: string, message: string, files?: Fi
     pendingMessages.set(chatId, queue);
     console.log(`📥 Queued message for offline client ${chatId} (${queue.length} pending)`);
   }
+}
+
+/**
+ * Web クライアントに生の ServerToWebMessage を送信する
+ * ツール承認リクエスト等、専用の型メッセージを直接送信する場合に使用
+ */
+export function sendWebRawMessage(chatId: string, message: ServerToWebMessage): boolean {
+  const ws = webClients.get(chatId);
+  if (ws && ws.readyState === ws.OPEN) {
+    sendJson(ws, message);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 接続中の全 Web クライアントに ServerToWebMessage をブロードキャストする
+ * セッション参加者が見つからない場合のフォールバック用
+ * @returns 送信したクライアント数
+ */
+export function broadcastWebRawMessage(message: ServerToWebMessage): number {
+  let sent = 0;
+  for (const [chatId, ws] of webClients) {
+    if (ws.readyState === ws.OPEN) {
+      sendJson(ws, message);
+      sent++;
+    }
+  }
+  return sent;
 }
 
 /**

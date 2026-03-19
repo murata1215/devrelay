@@ -89,7 +89,8 @@ export type AgentMessage =
   | { type: 'agent:config:ack'; payload: { machineId: string } }
   | { type: 'agent:version:info'; payload: AgentVersionInfoPayload }
   | { type: 'agent:update:status'; payload: AgentUpdateStatusPayload }
-  | { type: 'agent:project:file:content'; payload: ProjectFileContentPayload };
+  | { type: 'agent:project:file:content'; payload: ProjectFileContentPayload }
+  | { type: 'agent:tool:approval:request'; payload: ToolApprovalRequestPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -223,7 +224,8 @@ export type ServerToAgentMessage =
   | { type: 'server:agent:update'; payload: {} }
   | { type: 'server:doc:sync'; payload: DocSyncPayload }
   | { type: 'server:doc:delete'; payload: DocDeletePayload }
-  | { type: 'server:project:file:read'; payload: ProjectFileReadPayload };
+  | { type: 'server:project:file:read'; payload: ProjectFileReadPayload }
+  | { type: 'server:tool:approval:response'; payload: ToolApprovalResponsePayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -520,12 +522,48 @@ export interface WorkState {
 }
 
 // -----------------------------------------------------------------------------
+// Messages (Tool Approval Protocol)
+// -----------------------------------------------------------------------------
+
+/** ツール承認リクエスト（Agent → Server） */
+export interface ToolApprovalRequestPayload {
+  machineId: string;
+  sessionId: string;
+  requestId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  title?: string;
+  description?: string;
+  decisionReason?: string;
+}
+
+/** ツール承認レスポンス（Server → Agent） */
+export interface ToolApprovalResponsePayload {
+  requestId: string;
+  behavior: 'allow' | 'deny';
+  message?: string;
+  /** true の場合、以降の全ツール実行を自動許可する */
+  approveAll?: boolean;
+}
+
+/** ツール承認 UI 表示用（Server → Web/Discord/Telegram） */
+export interface ToolApprovalPromptPayload {
+  requestId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  title?: string;
+  description?: string;
+  projectId?: string;
+}
+
+// -----------------------------------------------------------------------------
 // Messages (WebSocket Protocol - Web Client)
 // -----------------------------------------------------------------------------
 
 /** ブラウザ → サーバー */
 export type WebClientMessage =
   | { type: 'web:command'; payload: { text: string; files?: FileAttachment[] } }
+  | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean } }
   | { type: 'web:ping' };
 
 /** サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示） */
@@ -534,5 +572,7 @@ export type ServerToWebMessage =
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
   | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string } }
+  | { type: 'web:tool:approval'; payload: ToolApprovalPromptPayload }
+  | { type: 'web:tool:approval:resolved'; payload: { requestId: string; behavior: 'allow' | 'deny'; projectId?: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };

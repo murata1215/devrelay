@@ -28,7 +28,7 @@ import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
@@ -366,6 +366,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:project:file:read':
       handleProjectFileRead(message.payload);
+      break;
+
+    case 'server:tool:approval:response':
+      // Server からのツール承認レスポンスを ai-runner の pendingToolApprovals に転送
+      resolveToolApproval(message.payload.requestId, message.payload);
       break;
   }
 }
@@ -773,6 +778,21 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
   };
 
+  // Exec モード時: canUseTool で WebSocket 経由のユーザー承認を行う
+  if (!usePlanMode) {
+    sendOptions.onToolApprovalRequest = (request) => {
+      console.log(`🔐 Sending tool approval request: ${request.toolName} (${request.requestId.substring(0, 8)}...)`);
+      sendMessage({
+        type: 'agent:tool:approval:request',
+        payload: {
+          ...request,
+          machineId: currentMachineId || currentConfig!.machineId,
+          sessionId,
+        },
+      });
+    };
+  }
+
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）
   try {
     let responseText = '';
@@ -863,6 +883,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       const retryOptions: SendPromptOptions = {
         resumeSessionId: undefined,  // Don't use --resume
         usePlanMode,
+        onToolApprovalRequest: sendOptions.onToolApprovalRequest,
       };
 
       const retryResult = await sendPromptToAi(
