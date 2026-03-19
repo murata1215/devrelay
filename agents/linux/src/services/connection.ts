@@ -691,9 +691,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const historyBeforeThisMessage = sessionInfo.history.slice(0, -1);
   const lastEntry = historyBeforeThisMessage[historyBeforeThisMessage.length - 1];
   const isExecTriggered = lastEntry?.role === 'exec';
-  // Use CLI --permission-mode plan for plan mode, --dangerously-skip-permissions for exec mode
+  // Plan モード: permissionMode 'plan' + allowedTools、Exec モード: canUseTool コールバックで承認
   const usePlanMode = !isExecTriggered;
-  console.log(`📋 Mode: ${isExecTriggered ? 'EXEC (--dangerously-skip-permissions)' : 'PLAN (--permission-mode plan)'}`);
+  console.log(`📋 Mode: ${isExecTriggered ? 'EXEC (canUseTool approval)' : 'PLAN (permissionMode plan)'}`);
 
   // Check for pending work state (auto-continue feature)
   let workStatePrompt = '';

@@ -267,7 +267,7 @@ async function sendPromptToAiSdk(
       };
       console.log(`🔐 [SDK] Using exec mode with user approval (canUseTool)`);
     } else {
-      // 全ツール自動許可（後方互換: --dangerously-skip-permissions 相当）
+      // 全ツール自動許可（onToolApprovalRequest 未設定時のフォールバック）
       sdkOptions.canUseTool = async (_toolName, input) => ({
         behavior: 'allow',
         updatedInput: input,

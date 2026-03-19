@@ -6,6 +6,14 @@
 
 ## 実装済み機能
 
+### #184: --dangerously-skip-permissions 参照の完全廃止 (2026-03-20)
+
+コメントとログメッセージから旧フラグ `--dangerously-skip-permissions` の参照を削除し、現行の Agent SDK ベース（`canUseTool` コールバック）の記述に更新。
+
+- `ai-runner.ts`: フォールバックコメントを「onToolApprovalRequest 未設定時のフォールバック」に更新
+- `connection.ts`: ログメッセージを `EXEC (canUseTool approval)` / `PLAN (permissionMode plan)` に更新
+- Linux / macOS Agent 両方で対応
+
 ### #183: approveAllMode の会話単位リセット (2026-03-20)
 
 「以降すべて許可」を選んだ後、別の会話（新しい exec セッション）でも自動承認が継続するバグを修正。
