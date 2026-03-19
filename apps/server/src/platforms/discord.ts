@@ -1,8 +1,10 @@
-import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment, Collection, TextChannel, DMChannel } from 'discord.js';
-import type { FileAttachment } from '@devrelay/shared';
+import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment, Collection, TextChannel, DMChannel, ButtonBuilder, ActionRowBuilder, ButtonStyle, ComponentType } from 'discord.js';
+import type { FileAttachment, ToolApprovalPromptPayload } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
+import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
 import { prisma } from '../db/client.js';
+import { formatToolInputForText } from '../services/tool-format.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
@@ -272,6 +274,9 @@ export async function setupDiscordBot(token?: string) {
     }
   });
 
+  // ツール承認ボタンのインタラクションハンドラを登録
+  setupToolApprovalInteractionHandler();
+
   await client.login(token || process.env.DISCORD_BOT_TOKEN);
 }
 
@@ -421,4 +426,162 @@ export async function editDiscordMessage(channelId: string, messageId: string, c
     console.error('Failed to edit Discord message:', error);
   }
   return false;
+}
+
+// -----------------------------------------------------------------------------
+// Tool Approval: Discord ボタン承認
+// -----------------------------------------------------------------------------
+
+/** requestId → Discord メッセージ情報（ボタン無効化・編集用） */
+const toolApprovalMessages = new Map<string, { channelId: string; messageId: string }>();
+
+/**
+ * Discord チャンネルにツール承認リクエストをボタン付きで送信する
+ */
+export async function sendDiscordToolApproval(channelId: string, payload: ToolApprovalPromptPayload): Promise<void> {
+  if (!client) {
+    console.error('Discord client not initialized');
+    return;
+  }
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased() || !('send' in channel)) return;
+
+    const inputText = formatToolInputForText(payload.toolName, payload.toolInput);
+    const content = `🔧 **ツール承認が必要です**\n\`${payload.toolName}\`${inputText ? `\n\`\`\`\n${inputText}\n\`\`\`` : ''}`;
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`ta_allow_${payload.requestId}`)
+        .setLabel('許可')
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`ta_deny_${payload.requestId}`)
+        .setLabel('拒否')
+        .setEmoji('❌')
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(`ta_approveall_${payload.requestId}`)
+        .setLabel('以降すべて許可')
+        .setEmoji('🔓')
+        .setStyle(ButtonStyle.Secondary),
+    );
+
+    const msg = await (channel as any).send({ content, components: [row] });
+    toolApprovalMessages.set(payload.requestId, { channelId, messageId: msg.id });
+    console.log(`🔐 Discord tool approval sent: ${payload.toolName} (${payload.requestId.substring(0, 8)}...)`);
+  } catch (error) {
+    console.error('Failed to send Discord tool approval:', error);
+  }
+}
+
+/**
+ * 他プラットフォームで承認済みの場合に Discord メッセージのボタンを無効化する
+ */
+export async function resolveDiscordToolApproval(requestId: string, behavior: 'allow' | 'deny'): Promise<void> {
+  const info = toolApprovalMessages.get(requestId);
+  if (!info || !client) return;
+  toolApprovalMessages.delete(requestId);
+
+  try {
+    const channel = await client.channels.fetch(info.channelId);
+    if (!channel || !channel.isTextBased() || !('messages' in channel)) return;
+
+    const msg = await (channel as any).messages.fetch(info.messageId);
+    if (!msg) return;
+
+    const statusText = behavior === 'allow' ? '✅ **許可されました**' : '❌ **拒否されました**';
+    await msg.edit({ content: `${msg.content}\n${statusText}`, components: [] });
+  } catch (error) {
+    console.error('Failed to resolve Discord tool approval message:', error);
+  }
+}
+
+/**
+ * Discord チャンネルに自動承認通知を送信する（ボタンなし）
+ */
+export async function sendDiscordToolApprovalAuto(channelId: string, toolName: string, toolInput: Record<string, unknown>): Promise<void> {
+  if (!client) return;
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased() || !('send' in channel)) return;
+
+    const inputText = formatToolInputForText(toolName, toolInput);
+    const content = `🔓 自動承認: \`${toolName}\`${inputText ? ` — ${inputText.substring(0, 100)}` : ''}`;
+    await (channel as any).send(content);
+  } catch (error) {
+    console.error('Failed to send Discord auto approval:', error);
+  }
+}
+
+/**
+ * Discord の InteractionCreate ハンドラを設定する（ボタン承認用）
+ * setupDiscordBot() から呼ばれる
+ */
+function setupToolApprovalInteractionHandler() {
+  if (!client) return;
+
+  client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isButton()) return;
+
+    const customId = interaction.customId;
+    if (!customId.startsWith('ta_')) return;
+
+    // customId 形式: ta_<action>_<requestId>
+    const parts = customId.split('_');
+    if (parts.length < 3) return;
+    const action = parts[1]; // allow, deny, approveall
+    const requestId = parts.slice(2).join('_'); // requestId に _ が含まれる可能性に対応
+
+    let behavior: 'allow' | 'deny';
+    let approveAll = false;
+
+    if (action === 'allow') {
+      behavior = 'allow';
+    } else if (action === 'deny') {
+      behavior = 'deny';
+    } else if (action === 'approveall') {
+      behavior = 'allow';
+      approveAll = true;
+    } else {
+      return;
+    }
+
+    console.log(`🔐 Discord button: ${behavior}${approveAll ? ' (approve-all)' : ''} (${requestId.substring(0, 8)}...)`);
+
+    // agent-manager に応答を転送
+    const handled = handleToolApprovalUserResponse(requestId, { behavior, approveAll });
+
+    if (handled) {
+      // ボタンを無効化して結果を表示
+      toolApprovalMessages.delete(requestId);
+      const statusText = behavior === 'allow'
+        ? (approveAll ? '🔓 **以降すべて許可しました**' : '✅ **許可しました**')
+        : '❌ **拒否しました**';
+
+      try {
+        await interaction.update({
+          content: `${interaction.message.content}\n${statusText}`,
+          components: [],
+        });
+      } catch (err) {
+        console.error('Failed to update Discord interaction:', err);
+      }
+    } else {
+      // 既に応答済みまたはタイムアウト
+      try {
+        await interaction.update({
+          content: `${interaction.message.content}\n⚠️ **この承認は既に処理済みです**`,
+          components: [],
+        });
+      } catch (err) {
+        console.error('Failed to update Discord interaction:', err);
+      }
+    }
+  });
+
+  console.log('🔐 Discord tool approval interaction handler registered');
 }

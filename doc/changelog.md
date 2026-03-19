@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### #183: approveAllMode の会話単位リセット (2026-03-20)
+
+「以降すべて許可」を選んだ後、別の会話（新しい exec セッション）でも自動承認が継続するバグを修正。
+
+- **原因**: `resetApproveAllMode()` は `handleSessionStart()` でのみ呼ばれるが、同一 Agent で連続 exec する場合はセッションが再利用され呼ばれない
+- **修正**: `handleConversationExec()` 冒頭にも `resetApproveAllMode()` を追加。exec = 新しい会話の開始
+- `startAiSession()`（新セッション作成時）にも追加（二重保険）
+- Linux / macOS Agent 両方で対応
+
+### #182: WebUI リロード時の承認カード復元 (2026-03-20)
+
+ブラウザリロード時に pending 状態のツール承認カード（✅許可/❌拒否ボタン付き）が消え、承認操作ができなくなる問題を修正。
+
+- **Server**: `getPendingToolApprovalsForSession()` 関数追加。メモリ Map + DB から pending 承認を取得
+- **Server**: Web クライアント WS 接続時に `getSessionIdByChatId()` → pending 承認を `web:tool:approval` メッセージとしてプッシュ
+- WebUI 側の変更は不要（既存の `onToolApproval` ハンドラで処理）
+
+### #181: Discord/Telegram ボタン承認 (2026-03-20)
+
+exec モードのツール承認を WebUI だけでなく Discord ボタン / Telegram インラインキーボードからも操作可能に。
+
+- **Discord**: `ButtonBuilder` + `Events.InteractionCreate` ハンドラで ✅許可 / ❌拒否 / 🔓以降すべて許可 の3ボタン
+- **Telegram**: `inline_keyboard` + `callback_query` ハンドラで同等のインラインキーボード
+- **Server**: `broadcastToolApprovalToWeb()` を拡張し、全プラットフォーム（Web + Discord + Telegram）に承認リクエスト・解決・自動承認通知を配信
+- **共通**: `formatToolInputForText()` ユーティリティ（ツール名に応じたテキストフォーマット）
+- クロスプラットフォーム同期: どのプラットフォームで応答しても他のボタン/キーボードが自動無効化
+- タイムアウト時も全プラットフォームで無効化
+
 ### #180: ツール承認履歴の永続化 (2026-03-20)
 
 ブラウザ更新で Approvals タブの履歴が消える問題を修正。DB + Agent ファイルの2層で永続化。

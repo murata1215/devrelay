@@ -39,6 +39,10 @@ export async function startAiSession(
   config: AgentConfig,
   onOutput: OutputCallback
 ): Promise<void> {
+  // 新しい会話（Claude Code インスタンス）開始時に「以降すべて許可」モードをリセット
+  // 前の会話で approveAllMode が有効でも、新会話では改めて承認を要求する
+  resetApproveAllMode();
+
   // Check if session already exists
   if (activeSessions.has(sessionId)) {
     throw new Error(`Session already exists: ${sessionId}`);

@@ -1,7 +1,9 @@
 import TelegramBot, { Message } from 'node-telegram-bot-api';
-import type { FileAttachment } from '@devrelay/shared';
+import type { FileAttachment, ToolApprovalPromptPayload } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
+import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
+import { formatToolInputForText } from '../services/tool-format.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
@@ -130,6 +132,9 @@ export async function setupTelegramBot(providedToken?: string) {
       await sendTelegramMessage(chatId, '❌ エラーが発生しました。しばらくしてからお試しください。');
     }
   });
+
+  // ツール承認インラインキーボードのコールバックハンドラを登録
+  setupToolApprovalCallbackHandler();
 
   bot.on('polling_error', (error) => {
     console.error('Telegram polling error:', error.message);
@@ -281,4 +286,160 @@ export async function editTelegramMessage(chatId: string, messageId: number, con
     }
     return false;
   }
+}
+
+// -----------------------------------------------------------------------------
+// Tool Approval: Telegram インラインキーボード承認
+// -----------------------------------------------------------------------------
+
+/** requestId → Telegram メッセージ情報（キーボード削除・編集用） */
+const toolApprovalMessages = new Map<string, { chatId: string; messageId: number }>();
+
+/**
+ * Telegram チャットにツール承認リクエストをインラインキーボード付きで送信する
+ */
+export async function sendTelegramToolApproval(chatId: string, payload: ToolApprovalPromptPayload): Promise<void> {
+  if (!bot) {
+    console.error('Telegram bot not initialized');
+    return;
+  }
+
+  try {
+    const inputText = formatToolInputForText(payload.toolName, payload.toolInput);
+    const content = `🔧 *ツール承認が必要です*\n\`${payload.toolName}\`${inputText ? `\n\`\`\`\n${inputText}\n\`\`\`` : ''}`;
+
+    const msg = await bot.sendMessage(chatId, content, {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ 許可', callback_data: `ta_a_${payload.requestId}` },
+            { text: '❌ 拒否', callback_data: `ta_d_${payload.requestId}` },
+          ],
+          [
+            { text: '🔓 以降すべて許可', callback_data: `ta_aa_${payload.requestId}` },
+          ],
+        ],
+      },
+    });
+
+    toolApprovalMessages.set(payload.requestId, { chatId, messageId: msg.message_id });
+    console.log(`🔐 Telegram tool approval sent: ${payload.toolName} (${payload.requestId.substring(0, 8)}...)`);
+  } catch (error) {
+    console.error('Failed to send Telegram tool approval:', error);
+  }
+}
+
+/**
+ * 他プラットフォームで承認済みの場合に Telegram メッセージのキーボードを削除する
+ */
+export async function resolveTelegramToolApproval(requestId: string, behavior: 'allow' | 'deny'): Promise<void> {
+  const info = toolApprovalMessages.get(requestId);
+  if (!info || !bot) return;
+  toolApprovalMessages.delete(requestId);
+
+  try {
+    const statusText = behavior === 'allow' ? '✅ 許可されました' : '❌ 拒否されました';
+    // キーボードを削除してステータスを追記
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: info.chatId, message_id: info.messageId }
+    );
+    // テキストにステータスを追記
+    await bot.editMessageText(
+      `🔧 *ツール承認*\n${statusText}`,
+      { chat_id: info.chatId, message_id: info.messageId, parse_mode: 'Markdown' }
+    );
+  } catch (error: any) {
+    if (!error.message?.includes('message is not modified')) {
+      console.error('Failed to resolve Telegram tool approval message:', error);
+    }
+  }
+}
+
+/**
+ * Telegram チャットに自動承認通知を送信する（キーボードなし）
+ */
+export async function sendTelegramToolApprovalAuto(chatId: string, toolName: string, toolInput: Record<string, unknown>): Promise<void> {
+  if (!bot) return;
+
+  try {
+    const inputText = formatToolInputForText(toolName, toolInput);
+    const content = `🔓 自動承認: \`${toolName}\`${inputText ? ` — ${inputText.substring(0, 100)}` : ''}`;
+    await bot.sendMessage(chatId, content, { parse_mode: 'Markdown' });
+  } catch (error) {
+    console.error('Failed to send Telegram auto approval:', error);
+  }
+}
+
+/**
+ * Telegram の callback_query ハンドラを設定する（インラインキーボード承認用）
+ * setupTelegramBot() から呼ばれる
+ */
+function setupToolApprovalCallbackHandler() {
+  if (!bot) return;
+
+  bot.on('callback_query', async (query) => {
+    if (!query.data || !query.data.startsWith('ta_')) return;
+
+    // callback_data 形式: ta_<action>_<requestId>
+    const parts = query.data.split('_');
+    if (parts.length < 3) return;
+    const action = parts[1]; // a(allow), d(deny), aa(approveall)
+    const requestId = parts.slice(2).join('_');
+
+    let behavior: 'allow' | 'deny';
+    let approveAll = false;
+
+    if (action === 'a') {
+      behavior = 'allow';
+    } else if (action === 'd') {
+      behavior = 'deny';
+    } else if (action === 'aa') {
+      behavior = 'allow';
+      approveAll = true;
+    } else {
+      return;
+    }
+
+    console.log(`🔐 Telegram callback: ${behavior}${approveAll ? ' (approve-all)' : ''} (${requestId.substring(0, 8)}...)`);
+
+    // agent-manager に応答を転送
+    const handled = handleToolApprovalUserResponse(requestId, { behavior, approveAll });
+
+    if (handled) {
+      // キーボードを削除して結果を表示
+      toolApprovalMessages.delete(requestId);
+      const statusText = behavior === 'allow'
+        ? (approveAll ? '🔓 以降すべて許可しました' : '✅ 許可しました')
+        : '❌ 拒否しました';
+
+      try {
+        await bot!.answerCallbackQuery(query.id, { text: statusText });
+        if (query.message) {
+          await bot!.editMessageText(
+            `🔧 *ツール承認*\n${statusText}`,
+            { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
+          );
+        }
+      } catch (err) {
+        console.error('Failed to update Telegram callback:', err);
+      }
+    } else {
+      // 既に応答済みまたはタイムアウト
+      try {
+        await bot!.answerCallbackQuery(query.id, { text: '⚠️ この承認は既に処理済みです' });
+        if (query.message) {
+          await bot!.editMessageText(
+            `🔧 *ツール承認*\n⚠️ この承認は既に処理済みです`,
+            { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
+          );
+        }
+      } catch (err) {
+        console.error('Failed to update Telegram callback:', err);
+      }
+    }
+  });
+
+  console.log('🔐 Telegram tool approval callback handler registered');
 }

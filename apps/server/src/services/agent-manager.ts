@@ -15,12 +15,15 @@ import type {
   AgentUpdateStatusPayload,
   ToolApprovalRequestPayload,
   ToolApprovalAutoPayload,
+  ToolApprovalPromptPayload,
   ServerToWebMessage,
   Platform
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants } from './session-manager.js';
 import { sendWebRawMessage, broadcastWebRawMessage } from '../platforms/web.js';
+import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApprovalAuto } from '../platforms/discord.js';
+import { sendTelegramToolApproval, resolveTelegramToolApproval, sendTelegramToolApprovalAuto } from '../platforms/telegram.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
@@ -1614,11 +1617,12 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
         payload: { requestId, behavior: 'deny', message: 'タイムアウト: ユーザーが応答しませんでした' },
       });
 
-      // 全 Web 参加者に resolved を通知
+      // 全参加者に resolved を通知（Web + Discord/Telegram のボタン無効化）
       broadcastToolApprovalToWeb(sessionId, {
         type: 'web:tool:approval:resolved',
         payload: { requestId, behavior: 'deny', projectId },
       });
+      resolveToolApprovalOnPlatforms(sessionId, requestId, 'deny');
     }
   }, TOOL_APPROVAL_TIMEOUT);
 
@@ -1631,11 +1635,13 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
     }).catch(err => console.error('Failed to save tool approval request:', err));
   }
 
-  // セッション参加者に承認リクエストを送信
+  // セッション参加者に承認リクエストを送信（Web + Discord/Telegram）
+  const approvalPayload = { requestId, toolName, toolInput, title, description, projectId };
   broadcastToolApprovalToWeb(sessionId, {
     type: 'web:tool:approval',
-    payload: { requestId, toolName, toolInput, title, description, projectId },
+    payload: approvalPayload,
   });
+  broadcastToolApprovalToPlatforms(sessionId, approvalPayload);
 }
 
 /**
@@ -1659,11 +1665,12 @@ async function handleToolApprovalAuto(payload: ToolApprovalAutoPayload) {
     }).catch(err => console.error('Failed to save auto tool approval:', err));
   }
 
-  // セッション参加者に自動承認通知を送信
+  // セッション参加者に自動承認通知を送信（Web + Discord/Telegram）
   broadcastToolApprovalToWeb(sessionId, {
     type: 'web:tool:approval:auto',
     payload: { toolName, toolInput, projectId },
   });
+  broadcastToolApprovalAutoToPlatforms(sessionId, toolName, toolInput);
 }
 
 /**
@@ -1698,13 +1705,42 @@ export function handleToolApprovalUserResponse(
     payload: { requestId, behavior: response.behavior, message: response.message, approveAll: response.approveAll },
   });
 
-  // 全 Web 参加者に resolved を通知（他のブラウザタブの UI も更新）
+  // 全参加者に resolved を通知（他のブラウザタブ + Discord/Telegram のボタン無効化）
   broadcastToolApprovalToWeb(pending.sessionId, {
     type: 'web:tool:approval:resolved',
     payload: { requestId, behavior: response.behavior, projectId: pending.projectId },
   });
+  resolveToolApprovalOnPlatforms(pending.sessionId, requestId, response.behavior);
 
   return true;
+}
+
+/**
+ * 指定セッションの保留中ツール承認一覧を取得する（WS 再接続時の復元用）
+ * メモリ Map から requestId を抽出し、DB から toolName/toolInput を取得して返す
+ */
+export async function getPendingToolApprovalsForSession(sessionId: string): Promise<ToolApprovalPromptPayload[]> {
+  // メモリ Map から対象セッションの requestId を抽出
+  const pendingRequestIds: string[] = [];
+  for (const [requestId, entry] of pendingToolApprovalRequests) {
+    if (entry.sessionId === sessionId) {
+      pendingRequestIds.push(requestId);
+    }
+  }
+  if (pendingRequestIds.length === 0) return [];
+
+  // DB から toolName, toolInput を取得
+  const approvals = await prisma.toolApproval.findMany({
+    where: { requestId: { in: pendingRequestIds }, status: 'pending' },
+    select: { requestId: true, toolName: true, toolInput: true, projectId: true },
+  });
+
+  return approvals.map(a => ({
+    requestId: a.requestId!,
+    toolName: a.toolName,
+    toolInput: a.toolInput as Record<string, unknown>,
+    projectId: a.projectId,
+  }));
 }
 
 /**
@@ -1725,5 +1761,53 @@ function broadcastToolApprovalToWeb(sessionId: string, message: ServerToWebMessa
     // 参加者なし → 全 Web クライアントにフォールバック（参加者管理の不整合を回避）
     const sent = broadcastWebRawMessage(message);
     console.log(`⚠️ Tool approval fallback broadcast: ${sent} web client(s) (no participants found for session ${sessionId.substring(0, 8)}...)`);
+  }
+}
+
+/**
+ * セッションの Discord/Telegram 参加者にツール承認リクエストを送信する
+ */
+function broadcastToolApprovalToPlatforms(sessionId: string, payload: ToolApprovalPromptPayload) {
+  const participants = getSessionParticipants(sessionId);
+  for (const { platform, chatId } of participants) {
+    if (platform === 'discord') {
+      sendDiscordToolApproval(chatId, payload).catch(err =>
+        console.error('Failed to send Discord tool approval:', err));
+    } else if (platform === 'telegram') {
+      sendTelegramToolApproval(chatId, payload).catch(err =>
+        console.error('Failed to send Telegram tool approval:', err));
+    }
+  }
+}
+
+/**
+ * セッションの Discord/Telegram 参加者にツール承認解決を通知する（ボタン/キーボード無効化）
+ */
+function resolveToolApprovalOnPlatforms(sessionId: string, requestId: string, behavior: 'allow' | 'deny') {
+  const participants = getSessionParticipants(sessionId);
+  for (const { platform } of participants) {
+    if (platform === 'discord') {
+      resolveDiscordToolApproval(requestId, behavior).catch(err =>
+        console.error('Failed to resolve Discord tool approval:', err));
+    } else if (platform === 'telegram') {
+      resolveTelegramToolApproval(requestId, behavior).catch(err =>
+        console.error('Failed to resolve Telegram tool approval:', err));
+    }
+  }
+}
+
+/**
+ * セッションの Discord/Telegram 参加者に自動承認通知を送信する
+ */
+function broadcastToolApprovalAutoToPlatforms(sessionId: string, toolName: string, toolInput: Record<string, unknown>) {
+  const participants = getSessionParticipants(sessionId);
+  for (const { platform, chatId } of participants) {
+    if (platform === 'discord') {
+      sendDiscordToolApprovalAuto(chatId, toolName, toolInput).catch(err =>
+        console.error('Failed to send Discord auto approval:', err));
+    } else if (platform === 'telegram') {
+      sendTelegramToolApprovalAuto(chatId, toolName, toolInput).catch(err =>
+        console.error('Failed to send Telegram auto approval:', err));
+    }
   }
 }

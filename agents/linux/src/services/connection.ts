@@ -528,6 +528,9 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
+  // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット
+  resetApproveAllMode();
+
   let sessionInfo = sessionInfoMap.get(sessionId);
 
   if (sessionInfo) {

@@ -4,7 +4,7 @@ import type { FileAttachment, WebClientMessage, ServerToWebMessage } from '@devr
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
 import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants } from '../services/session-manager.js';
-import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
+import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession } from '../services/agent-manager.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -85,6 +85,19 @@ export async function setupWebClientWebSocket(
       payload: { output: progress.output, elapsed: progress.elapsed, projectId: progress.projectId ?? undefined },
     });
     console.log(`📊 Restored active progress for ${chatId}`);
+  }
+
+  // 保留中のツール承認カードを復元（リロード時に承認操作を継続可能にする）
+  const sessionId = getSessionIdByChatId(chatId);
+  if (sessionId) {
+    getPendingToolApprovalsForSession(sessionId).then(pendingApprovals => {
+      for (const approval of pendingApprovals) {
+        sendJson(ws, { type: 'web:tool:approval', payload: approval });
+      }
+      if (pendingApprovals.length > 0) {
+        console.log(`🔐 Restored ${pendingApprovals.length} pending tool approval(s) for ${chatId}`);
+      }
+    }).catch(err => console.error('Failed to restore pending tool approvals:', err));
   }
 
   // メッセージハンドラ

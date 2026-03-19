@@ -41,6 +41,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Cross-Project Exec**: Send execution requests to other project's agents via `teamexec <project>: <instruction>` (Discord/Telegram/Claude Code skill `--exec` flag)
 - **Issue Tracking**: `doc/issues.md` auto-created per project, status updates integrated into `w` command
 - **Tool Approval History**: Real-time tool approval with persistent history (DB + Agent JSONL log), auto-approved tools shown with 🔓 icon, survives browser refresh
+- **Discord/Telegram Tool Approval**: Approve or deny AI tool executions via Discord buttons or Telegram inline keyboards, with cross-platform sync (approve on Discord → WebUI buttons auto-disabled)
 
 ## 💡 Token Efficiency
 
@@ -85,7 +86,7 @@ devrelay/
 │   ├── devrelay.md       # DevRelay Agreement v6 (shared rules)
 │   └── project.md        # Project-specific design decisions
 ├── doc/
-│   ├── changelog.md      # Implementation history (#1-#170)
+│   ├── changelog.md      # Implementation history (#1-#183)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer
@@ -463,6 +464,8 @@ agents/windows/
 - [x] Team management + cross-project query (`ask <project>: <question>`)
 - [x] Cross-project exec (`teamexec <project>: <instruction>`, Claude Code skill `--exec` flag)
 - [x] Issue tracking (`doc/issues.md` per project, Agreement v6)
+- [x] Discord/Telegram tool approval buttons (approve/deny/approve-all with cross-platform sync)
+- [x] WebUI reload tool approval card restoration (pending approvals pushed on WS reconnect)
 - [ ] LINE Bot
 - [ ] AI tool switching (Gemini/Aider)
 
