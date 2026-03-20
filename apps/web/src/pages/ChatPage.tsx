@@ -525,17 +525,17 @@ function QuestionCard({
   const allAnswered = questions.every(q => selectedAnswers[q.question]);
 
   const statusColors = {
-    pending: 'border-blue-500/30 bg-blue-900/10 dark:bg-blue-500/5',
-    allow: 'border-green-500/30 bg-green-900/10 dark:bg-green-500/5',
-    deny: 'border-slate-500/30 bg-slate-900/10 dark:bg-slate-500/5',
+    pending: 'border-sky-400/40 bg-sky-50 dark:bg-sky-950/40',
+    allow: 'border-emerald-400/40 bg-emerald-50 dark:bg-emerald-950/30',
+    deny: 'border-slate-400/30 bg-slate-50 dark:bg-slate-800/40',
   };
 
   return (
-    <div className={`rounded-lg border p-3 my-2 transition-colors ${statusColors[approval.status]}`}>
+    <div className={`rounded-lg border-2 p-4 my-2 transition-colors ${statusColors[approval.status]}`}>
       {questions.map((q, qi) => (
         <div key={qi} className="mb-3">
-          <div className="flex items-center gap-2 mb-2">
-            <span>❓</span>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-lg">❓</span>
             <span className="font-semibold text-sm text-[var(--text-primary)]">{q.question}</span>
           </div>
           {approval.status === 'pending' ? (
@@ -544,10 +544,10 @@ function QuestionCard({
                 <button
                   key={oi}
                   onClick={() => handleSelect(q.question, opt.label)}
-                  className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                  className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${
                     selectedAnswers[q.question] === opt.label
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-slate-200 dark:bg-slate-700 text-[var(--text-primary)] hover:bg-slate-300 dark:hover:bg-slate-600'
+                      ? 'bg-sky-500 text-white shadow-md ring-2 ring-sky-300 dark:ring-sky-600'
+                      : 'bg-white dark:bg-slate-700/80 text-[var(--text-primary)] border border-slate-300 dark:border-slate-600 hover:bg-sky-50 dark:hover:bg-slate-600 hover:border-sky-300 dark:hover:border-sky-500'
                   }`}
                   title={opt.description}
                 >
@@ -556,33 +556,33 @@ function QuestionCard({
               ))}
             </div>
           ) : (
-            <div className="text-xs text-[var(--text-secondary)]">
-              回答: {selectedAnswers[q.question] || '(スキップ)'}
+            <div className="text-sm text-[var(--text-secondary)]">
+              回答: <span className="font-medium text-[var(--text-primary)]">{selectedAnswers[q.question] || '(スキップ)'}</span>
             </div>
           )}
           {q.options.some(o => o.description) && approval.status === 'pending' && selectedAnswers[q.question] && (
-            <div className="text-xs text-[var(--text-muted)] mt-1">
-              {q.options.find(o => o.label === selectedAnswers[q.question])?.description}
+            <div className="text-xs text-[var(--text-muted)] mt-2 ml-1 italic">
+              💡 {q.options.find(o => o.label === selectedAnswers[q.question])?.description}
             </div>
           )}
         </div>
       ))}
       {approval.status === 'pending' && (
-        <div className="flex gap-2 mt-2">
+        <div className="flex gap-2 mt-3 pt-2 border-t border-slate-200 dark:border-slate-700">
           <button
             onClick={handleSubmit}
             disabled={!allAnswered}
-            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
+            className={`px-4 py-1.5 text-xs font-medium rounded-lg transition-all ${
               allAnswered
-                ? 'bg-blue-600 text-white hover:bg-blue-500'
-                : 'bg-slate-400 text-slate-200 cursor-not-allowed'
+                ? 'bg-sky-500 text-white hover:bg-sky-400 shadow-sm'
+                : 'bg-slate-300 dark:bg-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed'
             }`}
           >
             📩 回答を送信
           </button>
           <button
             onClick={() => onRespond(approval.requestId, 'deny')}
-            className="px-3 py-1 text-xs font-medium rounded bg-slate-600 text-white hover:bg-slate-500 transition-colors"
+            className="px-4 py-1.5 text-xs font-medium rounded-lg bg-slate-200 dark:bg-slate-700 text-[var(--text-secondary)] hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors"
           >
             スキップ
           </button>
