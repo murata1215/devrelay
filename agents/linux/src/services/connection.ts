@@ -34,6 +34,7 @@ import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
+import { setupLogRotation } from './log-rotator.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
@@ -142,7 +143,8 @@ function createProxyAgent(proxyConfig: ProxyConfig): Agent {
 
 export async function connectToServer(config: AgentConfig, projects: Project[]) {
   currentConfig = config;
-  // Agent 起動時に承認ログをローテーション
+  // Agent 起動時にログローテーション（agent.log + 承認ログ）
+  setupLogRotation().catch(err => console.error('Log rotation setup failed:', err));
   rotateApprovalLog().catch(err => console.error('Approval log rotation failed:', err));
   return new Promise<void>((resolve, reject) => {
     // Build WebSocket options with optional proxy
