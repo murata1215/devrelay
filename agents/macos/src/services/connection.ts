@@ -803,22 +803,24 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
   };
 
-  // Exec モード時: canUseTool で WebSocket 経由のユーザー承認を行う
+  // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）
+  sendOptions.onToolApprovalRequest = (request) => {
+    const emoji = request.isQuestion ? '❓' : '🔐';
+    console.log(`${emoji} Sending ${request.isQuestion ? 'question' : 'tool approval'} request: ${request.toolName} (${request.requestId.substring(0, 8)}...)`);
+    sendMessage({
+      type: 'agent:tool:approval:request',
+      payload: {
+        ...request,
+        machineId: currentMachineId || currentConfig!.machineId,
+        sessionId,
+      },
+    });
+    // JSONL ファイルログ
+    appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: request.toolName, toolInput: request.toolInput, status: 'pending' });
+  };
+
+  // 自動承認通知（exec モードのみ。approveAllMode 時に WebUI の Approvals タブに履歴表示する用）
   if (!usePlanMode) {
-    sendOptions.onToolApprovalRequest = (request) => {
-      console.log(`🔐 Sending tool approval request: ${request.toolName} (${request.requestId.substring(0, 8)}...)`);
-      sendMessage({
-        type: 'agent:tool:approval:request',
-        payload: {
-          ...request,
-          machineId: currentMachineId || currentConfig!.machineId,
-          sessionId,
-        },
-      });
-      // JSONL ファイルログ
-      appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: request.toolName, toolInput: request.toolInput, status: 'pending' });
-    };
-    // 自動承認通知（approveAllMode 時に WebUI の Approvals タブに履歴表示する用）
     sendOptions.onAutoApproved = (info) => {
       sendMessage({
         type: 'agent:tool:approval:auto',

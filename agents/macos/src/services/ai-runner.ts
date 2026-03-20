@@ -299,6 +299,45 @@ async function sendPromptToAiSdk(
     } else {
       console.log(`📋 [SDK] Using plan mode`);
     }
+
+    // plan モードでも AskUserQuestion をインターセプト（WebSocket 経由でユーザーに質問）
+    if (options.onToolApprovalRequest) {
+      const onApprovalRequest = options.onToolApprovalRequest;
+      sdkOptions.canUseTool = async (toolName, input, opts) => {
+        if (toolName === 'AskUserQuestion') {
+          const requestId = crypto.randomUUID();
+          console.log(`❓ [SDK] User question (plan mode): ${toolName} (${requestId.substring(0, 8)}...)`);
+
+          onApprovalRequest({
+            requestId,
+            toolName,
+            toolInput: input,
+            title: opts.title,
+            description: opts.description,
+            decisionReason: opts.decisionReason,
+            isQuestion: true,
+          });
+
+          return new Promise<PermissionResult>((resolve, reject) => {
+            pendingToolApprovals.set(requestId, { resolve, reject, input });
+
+            if (opts.signal.aborted) {
+              pendingToolApprovals.delete(requestId);
+              resolve({ behavior: 'deny', message: 'Aborted' });
+              return;
+            }
+            opts.signal.addEventListener('abort', () => {
+              if (pendingToolApprovals.has(requestId)) {
+                pendingToolApprovals.delete(requestId);
+                resolve({ behavior: 'deny', message: 'Aborted' });
+              }
+            }, { once: true });
+          });
+        }
+        // AskUserQuestion 以外は plan モードのデフォルト動作（allowedTools で制御済み）
+        return { behavior: 'allow', updatedInput: input };
+      };
+    }
   } else {
     // Exec モード: canUseTool でパーミッション制御
     sdkOptions.permissionMode = 'default';
