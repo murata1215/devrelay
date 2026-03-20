@@ -510,10 +510,29 @@ function QuestionCard({
   }> || [];
 
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>({});
+  /** 「その他」モードの質問（テキスト入力表示中） */
+  const [otherMode, setOtherMode] = useState<Record<string, boolean>>({});
+  /** 「その他」のテキスト入力値 */
+  const [otherText, setOtherText] = useState<Record<string, string>>({});
 
-  /** 選択肢をトグル（単一選択の場合は上書き） */
+  /** 選択肢をクリック（「その他」モードを解除） */
   const handleSelect = (question: string, label: string) => {
     setSelectedAnswers(prev => ({ ...prev, [question]: label }));
+    setOtherMode(prev => ({ ...prev, [question]: false }));
+  };
+
+  /** 「その他」ボタンをクリック → テキスト入力モードに切替 */
+  const handleOtherClick = (question: string) => {
+    setOtherMode(prev => ({ ...prev, [question]: true }));
+    setSelectedAnswers(prev => { const n = { ...prev }; delete n[question]; return n; });
+  };
+
+  /** 「その他」テキスト確定 */
+  const handleOtherConfirm = (question: string) => {
+    const text = (otherText[question] || '').trim();
+    if (text) {
+      setSelectedAnswers(prev => ({ ...prev, [question]: text }));
+    }
   };
 
   /** 回答を送信 */
@@ -522,7 +541,10 @@ function QuestionCard({
   };
 
   /** 全質問に回答済みかチェック */
-  const allAnswered = questions.every(q => selectedAnswers[q.question]);
+  const allAnswered = questions.every(q => {
+    const answer = selectedAnswers[q.question];
+    return answer && answer.trim().length > 0;
+  });
 
   const statusColors = {
     pending: 'border-sky-300 bg-sky-50',
@@ -539,21 +561,57 @@ function QuestionCard({
             <span className="font-semibold text-sm text-slate-800">{q.question}</span>
           </div>
           {approval.status === 'pending' ? (
-            <div className="flex flex-wrap gap-2">
-              {q.options.map((opt, oi) => (
+            <div>
+              <div className="flex flex-wrap gap-2">
+                {q.options.map((opt, oi) => (
+                  <button
+                    key={oi}
+                    onClick={() => handleSelect(q.question, opt.label)}
+                    className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${
+                      selectedAnswers[q.question] === opt.label && !otherMode[q.question]
+                        ? 'bg-sky-500 text-white shadow-md ring-2 ring-sky-300'
+                        : 'bg-white text-slate-800 border border-slate-300 hover:bg-sky-50 hover:border-sky-400'
+                    }`}
+                    title={opt.description}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
                 <button
-                  key={oi}
-                  onClick={() => handleSelect(q.question, opt.label)}
+                  onClick={() => handleOtherClick(q.question)}
                   className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${
-                    selectedAnswers[q.question] === opt.label
-                      ? 'bg-sky-500 text-white shadow-md ring-2 ring-sky-300'
-                      : 'bg-white text-slate-800 border border-slate-300 hover:bg-sky-50 hover:border-sky-400'
+                    otherMode[q.question]
+                      ? 'bg-amber-500 text-white shadow-md ring-2 ring-amber-300'
+                      : 'bg-white text-slate-500 border border-dashed border-slate-300 hover:bg-amber-50 hover:border-amber-400 hover:text-slate-700'
                   }`}
-                  title={opt.description}
                 >
-                  {opt.label}
+                  その他...
                 </button>
-              ))}
+              </div>
+              {otherMode[q.question] && (
+                <div className="flex gap-2 mt-2">
+                  <input
+                    type="text"
+                    value={otherText[q.question] || ''}
+                    onChange={(e) => setOtherText(prev => ({ ...prev, [q.question]: e.target.value }))}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleOtherConfirm(q.question); }}
+                    placeholder="回答を入力..."
+                    className="flex-1 px-3 py-1.5 text-sm rounded-lg border border-slate-300 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-300 focus:border-sky-400"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => handleOtherConfirm(q.question)}
+                    disabled={!(otherText[q.question] || '').trim()}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all ${
+                      (otherText[q.question] || '').trim()
+                        ? 'bg-sky-500 text-white hover:bg-sky-400'
+                        : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                    }`}
+                  >
+                    OK
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div className="text-sm text-slate-600">
