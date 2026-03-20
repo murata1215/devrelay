@@ -807,3 +807,17 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - **WebUI**: タブ切替時に API から履歴ロード。WebSocket リアルタイム通知とマージ。ブラウザ更新でも履歴が消えない
 - **Agent JSONL ログ**: `~/.devrelay/approvals/current.jsonl` に追記。Agent 起動時に `archive/` にローテーション（削除なし）
 - **自動承認通知**: `agent:tool:approval:auto` → `web:tool:approval:auto` で WebUI に中継。🔓 紫色アイコンで表示
+
+### ツール個別許可 (#185)
+
+Claude Code のパーミッションシステムと同等の機能。承認カードの「📌 常に許可」ボタンで永続ルールを作成。
+
+- **ルール形式**: Plan Mode の `allowedTools` と同じパターン（`Bash(git *)`, `Edit`, `Read` 等）
+- **ルール生成**: `generateToolRule()` — Bash はコマンド先頭語をプレフィックスマッチ、他ツールはツール名のみ
+- **永続化**: UserSettings `execAllowedTools` キー（JSON 文字列配列）
+- **配信**: `server:connect:ack` / `server:config:update` の `execAllowedTools` フィールド
+- **Agent 側**: `canUseTool` の先頭で `isToolExecAllowed()` チェック → マッチ時に自動承認 + `agent:tool:approval:auto` 通知
+- **チェック優先順**: exec allowed rules → approveAllMode → ユーザーに聞く
+- **全プラットフォーム**: WebUI / Discord / Telegram に「📌 常に許可」ボタン追加
+- **Settings ページ**: 「Allowed Tools (Exec Mode)」セクション（チップ/タグ形式、× で個別削除）
+- **API**: `GET/PUT /api/settings/exec-allowed-tools`

@@ -4,6 +4,24 @@
  */
 
 /**
+ * ツール名と入力から、常時許可ルールのパターンを生成する
+ * Plan Mode の allowedTools と同じ形式（Bash(cmd *) など）
+ * @returns 生成されたルールパターン（例: "Bash(git *)", "Edit", "Read"）
+ */
+export function generateToolRule(toolName: string, toolInput: Record<string, unknown>): string {
+  if (toolName === 'Bash' && typeof toolInput.command === 'string') {
+    // コマンドの先頭語を抽出してプレフィックスマッチルールを生成
+    const command = toolInput.command.trim();
+    const firstWord = command.split(/\s+/)[0];
+    if (firstWord) {
+      return `Bash(${firstWord} *)`;
+    }
+  }
+  // Bash 以外のツール（Edit, Read, Write, Glob, Grep 等）はツール名のみ
+  return toolName;
+}
+
+/**
  * ツール名と入力に基づいて、人間が読みやすいテキスト表現を返す
  * @returns フォーマット済みテキスト。表示不要の場合は空文字列
  */

@@ -45,6 +45,8 @@ export const SettingKeys = {
   CHAT_SERVERS: 'chat_servers',
   /** アクティブサーバー ID（サーバー未選択時は空文字列） */
   ACTIVE_SERVER: 'active_server',
+  /** Exec モード常時許可ツール（ルールパターン配列、JSON 文字列） */
+  EXEC_ALLOWED_TOOLS: 'execAllowedTools',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

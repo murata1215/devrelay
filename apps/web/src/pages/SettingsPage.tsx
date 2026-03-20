@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { settings, platforms, services, agreementTemplate, allowedTools, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse } from '../lib/api';
+import { settings, platforms, services, agreementTemplate, allowedTools, execAllowedTools, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificationSound } from '../utils/notification-sound';
 
@@ -159,6 +159,8 @@ export function SettingsPage() {
 
   // Allowed Tools（プランモード許可ツール）
   const [atData, setAtData] = useState<AllowedToolsResponse | null>(null);
+  // Exec Allowed Tools（Exec モード常時許可ツール）
+  const [execTools, setExecTools] = useState<string[]>([]);
   const [atLinuxDraft, setAtLinuxDraft] = useState('');
   const [atWindowsDraft, setAtWindowsDraft] = useState('');
   const [atLinuxDirty, setAtLinuxDirty] = useState(false);
@@ -167,12 +169,13 @@ export function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const [settingsResult, platformsResult, serviceStatusResult, agreementResult, atResult] = await Promise.all([
+      const [settingsResult, platformsResult, serviceStatusResult, agreementResult, atResult, execToolsResult] = await Promise.all([
         settings.get(),
         platforms.list(),
         services.status().catch(() => null),
         agreementTemplate.get().catch(() => null),
         allowedTools.get().catch(() => null),
+        execAllowedTools.get().catch(() => ({ tools: [] })),
       ]);
       setData(settingsResult);
       // サーバーにチャット表示設定があれば localStorage を上書きして反映
@@ -196,6 +199,9 @@ export function SettingsPage() {
       if (agreementResult) {
         setAgreementData(agreementResult);
         setAgreementDraft(agreementResult.template);
+      }
+      if (execToolsResult) {
+        setExecTools(execToolsResult.tools || []);
       }
       if (atResult) {
         setAtData(atResult);
@@ -757,6 +763,39 @@ export function SettingsPage() {
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Exec Allowed Tools Section — Exec モード常時許可ツール */}
+      {execTools.length > 0 && (
+        <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+          <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Allowed Tools (Exec Mode)</h2>
+          <p className="text-[var(--text-muted)] text-sm mb-4">
+            Tools automatically approved in exec mode. Added via the 📌 button on approval cards.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {execTools.map((rule, i) => (
+              <span key={i} className="inline-flex items-center gap-1 px-3 py-1 bg-purple-600/20 text-purple-300 rounded-full text-sm font-mono">
+                {rule}
+                <button
+                  onClick={async () => {
+                    const updated = execTools.filter((_, idx) => idx !== i);
+                    try {
+                      await execAllowedTools.update(updated);
+                      setExecTools(updated);
+                      setSuccess(`Removed rule: ${rule}`);
+                    } catch {
+                      setError('Failed to remove rule');
+                    }
+                  }}
+                  className="ml-1 text-purple-400 hover:text-red-400 transition-colors"
+                  title="Remove rule"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
           </div>
         </div>
       )}

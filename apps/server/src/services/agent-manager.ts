@@ -26,7 +26,8 @@ import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApp
 import { sendTelegramToolApproval, resolveTelegramToolApproval, sendTelegramToolApprovalAuto } from '../platforms/telegram.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
-import { getUserSetting, SettingKeys } from './user-settings.js';
+import { getUserSetting, setUserSetting, SettingKeys } from './user-settings.js';
+import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import type { ManagementInfo } from '@devrelay/shared';
 
@@ -353,6 +354,10 @@ async function handleAgentConnect(
   const allowedToolsRaw = await getUserSetting(machine.userId, allowedToolsKey);
   const allowedTools = allowedToolsRaw ? JSON.parse(allowedToolsRaw) as string[] : null;
 
+  // Exec モード常時許可ツールを取得
+  const execAllowedToolsRaw = await getUserSetting(machine.userId, SettingKeys.EXEC_ALLOWED_TOOLS);
+  const execAllowedTools = execAllowedToolsRaw ? JSON.parse(execAllowedToolsRaw) as string[] : null;
+
   // 再接続時に connect:ack で最新の DB 値を配信するため、pending リトライは不要
   pendingConfigUpdates.delete(machine.id);
 
@@ -363,6 +368,7 @@ async function handleAgentConnect(
       machineId: machine.id,
       projectsDirs: serverProjectsDirs,
       allowedTools,
+      execAllowedTools,
     }
   });
 
@@ -1109,7 +1115,7 @@ export async function cancelAiProcess(machineId: string, sessionId: string) {
  * Agent がオフラインの場合は何もしない（次回接続時に server:connect:ack で配信される）
  * 送信失敗に備え pendingConfigUpdates に登録し、次回 agent:ping 時にリトライする
  */
-export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null }) {
+export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; execAllowedTools?: string[] | null }) {
   // 既存の pending があればマージ（projectsDirs と allowedTools が同時に pending でも欠落しない）
   const existing = pendingConfigUpdates.get(machineId);
   const mergedConfig = existing ? { ...existing.config, ...config } : config;
@@ -1576,11 +1582,14 @@ export function switchAiTool(machineId: string, sessionId: string, aiTool: AiToo
 /** ツール承認タイムアウト（5分） */
 const TOOL_APPROVAL_TIMEOUT = 5 * 60 * 1000;
 
-/** 保留中のツール承認: requestId → { machineId, sessionId, projectId, timeoutTimer } */
+/** 保留中のツール承認: requestId → { machineId, sessionId, projectId, toolName, toolInput, userId, timeoutTimer } */
 const pendingToolApprovalRequests = new Map<string, {
   machineId: string;
   sessionId: string;
   projectId?: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  userId?: string;
   timeout: ReturnType<typeof setTimeout>;
 }>();
 
@@ -1626,7 +1635,14 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
     }
   }, TOOL_APPROVAL_TIMEOUT);
 
-  pendingToolApprovalRequests.set(requestId, { machineId, sessionId, projectId, timeout });
+  // Machine から userId を取得（「常に許可」ルール保存用）
+  const machine = await prisma.machine.findUnique({
+    where: { id: machineId },
+    select: { userId: true },
+  });
+  const userId = machine?.userId;
+
+  pendingToolApprovalRequests.set(requestId, { machineId, sessionId, projectId, toolName, toolInput, userId, timeout });
 
   // DB に pending 状態で記録（永続化）
   if (projectId) {
@@ -1679,7 +1695,7 @@ async function handleToolApprovalAuto(payload: ToolApprovalAutoPayload) {
  */
 export function handleToolApprovalUserResponse(
   requestId: string,
-  response: { behavior: 'allow' | 'deny'; message?: string; approveAll?: boolean }
+  response: { behavior: 'allow' | 'deny'; message?: string; approveAll?: boolean; alwaysAllow?: boolean }
 ): boolean {
   const pending = pendingToolApprovalRequests.get(requestId);
   if (!pending) {
@@ -1691,13 +1707,21 @@ export function handleToolApprovalUserResponse(
   clearTimeout(pending.timeout);
   pendingToolApprovalRequests.delete(requestId);
 
-  console.log(`🔐 Tool approval response: ${response.behavior}${response.approveAll ? ' (approve-all)' : ''} (${requestId.substring(0, 8)}...)`);
+  const logSuffix = response.approveAll ? ' (approve-all)' : response.alwaysAllow ? ' (always-allow)' : '';
+  console.log(`🔐 Tool approval response: ${response.behavior}${logSuffix} (${requestId.substring(0, 8)}...)`);
 
   // DB の status を更新（pending → allow/deny）
   prisma.toolApproval.update({
     where: { requestId },
     data: { status: response.behavior, resolvedAt: new Date() },
   }).catch(err => console.error('Failed to update tool approval status:', err));
+
+  // 「常に許可」: ルールを UserSettings に保存 → 全 Agent にプッシュ
+  if (response.alwaysAllow && response.behavior === 'allow' && pending.userId) {
+    saveExecAllowedToolRule(pending.userId, pending.toolName, pending.toolInput).catch(err =>
+      console.error('Failed to save exec allowed tool rule:', err)
+    );
+  }
 
   // Agent に応答を転送（approveAll フラグも含む）
   sendToAgent(pending.machineId, {
@@ -1713,6 +1737,46 @@ export function handleToolApprovalUserResponse(
   resolveToolApprovalOnPlatforms(pending.sessionId, requestId, response.behavior);
 
   return true;
+}
+
+/**
+ * Exec モード常時許可ツールルールを UserSettings に保存し、全 Agent にプッシュする
+ */
+async function saveExecAllowedToolRule(userId: string, toolName: string, toolInput: Record<string, unknown>) {
+  const rule = generateToolRule(toolName, toolInput);
+  console.log(`📌 Saving exec allowed tool rule: "${rule}" for user ${userId}`);
+
+  // 既存ルールを取得
+  const raw = await getUserSetting(userId, SettingKeys.EXEC_ALLOWED_TOOLS);
+  const existing: string[] = raw ? JSON.parse(raw) : [];
+
+  // 重複チェック
+  if (existing.includes(rule)) {
+    console.log(`📌 Rule "${rule}" already exists, skipping`);
+    return;
+  }
+
+  // ルールを追加して保存
+  const updated = [...existing, rule];
+  await setUserSetting(userId, SettingKeys.EXEC_ALLOWED_TOOLS, JSON.stringify(updated));
+
+  // 全オンライン Agent にプッシュ
+  await pushExecAllowedToolsToAgents(userId, updated);
+}
+
+/**
+ * 指定ユーザーの全オンライン Agent に execAllowedTools を配信する
+ */
+async function pushExecAllowedToolsToAgents(userId: string, tools: string[]) {
+  const machines = await prisma.machine.findMany({
+    where: { userId, deletedAt: null },
+    select: { id: true },
+  });
+
+  for (const machine of machines) {
+    if (!connectedAgents.has(machine.id)) continue;
+    pushConfigUpdate(machine.id, { execAllowedTools: tools });
+  }
 }
 
 /**

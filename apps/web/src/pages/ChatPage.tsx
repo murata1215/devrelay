@@ -410,7 +410,7 @@ function ToolApprovalCard({
     description?: string;
     status: 'pending' | 'allow' | 'deny';
   };
-  onRespond: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => void;
+  onRespond: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => void;
 }) {
   /** ツール入力を人が読める形式で表示 */
   const formatInput = () => {
@@ -476,6 +476,12 @@ function ToolApprovalCard({
             className="px-3 py-1 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors"
           >
             🔓 以降すべて許可
+          </button>
+          <button
+            onClick={() => onRespond(approval.requestId, 'allow', false, true)}
+            className="px-3 py-1 text-xs font-medium rounded bg-purple-600 text-white hover:bg-purple-700 transition-colors"
+          >
+            📌 常に許可
           </button>
         </div>
       )}
@@ -938,14 +944,6 @@ function Sidebar({
         <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
           <div className="flex gap-1">
             <button
-              onClick={() => onChangeMode('agents')}
-              className={`text-xs px-2 py-1 rounded ${
-                mode === 'agents'
-                  ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
-                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
-              }`}
-            >Agents</button>
-            <button
               onClick={() => onChangeMode('servers')}
               className={`text-xs px-2 py-1 rounded ${
                 mode === 'servers'
@@ -953,6 +951,14 @@ function Sidebar({
                   : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
               }`}
             >Servers</button>
+            <button
+              onClick={() => onChangeMode('agents')}
+              className={`text-xs px-2 py-1 rounded ${
+                mode === 'agents'
+                  ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
+              }`}
+            >Agents</button>
           </div>
           <button onClick={onToggle} className="md:hidden text-[var(--text-muted)] hover:text-[var(--text-primary)]">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
@@ -1740,7 +1746,7 @@ export function ChatPage() {
   /** アクティブサーバー ID（null = 「すべて」表示） */
   const [activeServerId, setActiveServerId] = useState<string | null>(null);
   /** サイドバーモード切り替え */
-  const [sidebarMode, setSidebarMode] = useState<'agents' | 'servers'>('agents');
+  const [sidebarMode, setSidebarMode] = useState<'agents' | 'servers'>('servers');
   /** ライトボックス表示用の画像 URL */
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   /** セッション情報パネル再取得トリガー（将来の拡張用） */
@@ -1883,6 +1889,14 @@ export function ChatPage() {
       if (activeTabIdRef.current === projectId) {
         historyJustLoadedRef.current = true;
         shouldAutoScrollRef.current = true;
+        // DOM 更新後に直接スクロール（複数タイミングで試行して確実にスクロール）
+        const scrollToBottom = () => {
+          autoScrollingUntilRef.current = Date.now() + 500;
+          const container = messagesContainerRef.current;
+          if (container) container.scrollTop = container.scrollHeight;
+        };
+        requestAnimationFrame(scrollToBottom);
+        setTimeout(scrollToBottom, 100);
       }
     } catch {
       setTabs(prev => prev.map(t =>
@@ -2046,8 +2060,8 @@ export function ChatPage() {
   });
 
   /** ユーザーがツール承認ボタンをクリックした時のハンドラ */
-  const handleToolApprovalRespond = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => {
-    sendToolApprovalResponse(requestId, behavior, approveAll);
+  const handleToolApprovalRespond = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => {
+    sendToolApprovalResponse(requestId, behavior, approveAll, alwaysAllow);
     // 即座にローカルの状態を更新（Server からの resolved を待たずに UI 反映）
     setToolApprovals(prev => {
       const next = new Map(prev);
@@ -2218,12 +2232,14 @@ export function ChatPage() {
     if (shouldAutoScrollRef.current) {
       const useInstant = historyJustLoadedRef.current;
       historyJustLoadedRef.current = false;
+      // instant/smooth 両方にガードを設定（handleScroll の干渉を防ぐ）
+      autoScrollingUntilRef.current = Date.now() + 500;
       if (useInstant) {
-        // 履歴ロード直後はアニメーションなしで即座に最下部へ
-        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+        // 履歴ロード直後: scrollTop 直接操作（scrollIntoView はモバイルで不安定）
+        const container = messagesContainerRef.current;
+        if (container) container.scrollTop = container.scrollHeight;
       } else {
         // 通常の新メッセージ到着時は smooth スクロール
-        autoScrollingUntilRef.current = Date.now() + 500;
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }
     }
@@ -2232,7 +2248,10 @@ export function ChatPage() {
   // タブ切替時は instant で最下部に移動（アニメーションなし）
   useEffect(() => {
     shouldAutoScrollRef.current = false;
-    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+    // handleScroll の干渉を防ぐガード
+    autoScrollingUntilRef.current = Date.now() + 500;
+    const container = messagesContainerRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
     // タッチデバイスでは focus しない（キーボードが開くのを防ぐ）
     if (!('ontouchstart' in window)) {
       inputRef.current?.focus();

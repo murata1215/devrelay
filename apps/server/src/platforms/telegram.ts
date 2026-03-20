@@ -318,6 +318,7 @@ export async function sendTelegramToolApproval(chatId: string, payload: ToolAppr
           ],
           [
             { text: '🔓 以降すべて許可', callback_data: `ta_aa_${payload.requestId}` },
+            { text: '📌 常に許可', callback_data: `ta_al_${payload.requestId}` },
           ],
         ],
       },
@@ -385,11 +386,12 @@ function setupToolApprovalCallbackHandler() {
     // callback_data 形式: ta_<action>_<requestId>
     const parts = query.data.split('_');
     if (parts.length < 3) return;
-    const action = parts[1]; // a(allow), d(deny), aa(approveall)
+    const action = parts[1]; // a(allow), d(deny), aa(approveall), al(always-allow)
     const requestId = parts.slice(2).join('_');
 
     let behavior: 'allow' | 'deny';
     let approveAll = false;
+    let alwaysAllow = false;
 
     if (action === 'a') {
       behavior = 'allow';
@@ -398,20 +400,24 @@ function setupToolApprovalCallbackHandler() {
     } else if (action === 'aa') {
       behavior = 'allow';
       approveAll = true;
+    } else if (action === 'al') {
+      behavior = 'allow';
+      alwaysAllow = true;
     } else {
       return;
     }
 
-    console.log(`🔐 Telegram callback: ${behavior}${approveAll ? ' (approve-all)' : ''} (${requestId.substring(0, 8)}...)`);
+    const logSuffix = approveAll ? ' (approve-all)' : alwaysAllow ? ' (always-allow)' : '';
+    console.log(`🔐 Telegram callback: ${behavior}${logSuffix} (${requestId.substring(0, 8)}...)`);
 
     // agent-manager に応答を転送
-    const handled = handleToolApprovalUserResponse(requestId, { behavior, approveAll });
+    const handled = handleToolApprovalUserResponse(requestId, { behavior, approveAll, alwaysAllow });
 
     if (handled) {
       // キーボードを削除して結果を表示
       toolApprovalMessages.delete(requestId);
       const statusText = behavior === 'allow'
-        ? (approveAll ? '🔓 以降すべて許可しました' : '✅ 許可しました')
+        ? (approveAll ? '🔓 以降すべて許可しました' : alwaysAllow ? '📌 常に許可しました' : '✅ 許可しました')
         : '❌ 拒否しました';
 
       try {

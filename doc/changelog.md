@@ -6,6 +6,30 @@
 
 ## 実装済み機能
 
+### #185: ツール個別許可 + WebUI スクロール修正 + サイドバー改善 (2026-03-20)
+
+#### ツール個別許可（Exec Mode Permission Rules）
+Claude Code のパーミッションシステムと同等の機能。承認カードに「📌 常に許可」ボタンを追加し、ツール単位の永続ルールを作成可能に。
+
+- **ルール自動生成**: `generateToolRule()` — Bash: コマンド先頭語でプレフィックスマッチ（`Bash(git *)`）、他ツール: ツール名のみ（`Edit`, `Read` 等）
+- **UserSettings 永続化**: `execAllowedTools` キーに JSON 配列として保存
+- **Agent リアルタイムプッシュ**: `server:connect:ack` / `server:config:update` で `execAllowedTools` を配信
+- **Agent 側ルールチェック**: `canUseTool` の先頭（`approveAllMode` の前）で `isToolExecAllowed()` を実行
+- **全プラットフォーム対応**: WebUI（紫色 📌 ボタン）、Discord（ButtonBuilder）、Telegram（inline_keyboard）
+- **Settings ページ**: 「Allowed Tools (Exec Mode)」セクションでルール確認・削除（チップ/タグ形式）
+- **API**: `GET/PUT /api/settings/exec-allowed-tools`
+- Linux / macOS Agent 両方で対応
+
+#### WebUI スクロール修正
+モバイルブラウザでチャットページを開いた際に最新メッセージが表示されない問題を修正。
+
+- `scrollIntoView` → `container.scrollTop = container.scrollHeight` に変更（モバイル Safari/Chrome で確実に動作）
+- `autoScrollingUntilRef` ガードを instant スクロールにも適用（`handleScroll` 干渉防止）
+- `loadHistory` 完了後に `requestAnimationFrame` + `setTimeout(100ms)` の二重保険スクロール
+
+#### サイドバー改善
+- Servers/Agents ボタンの位置入れ替え（Servers をデフォルト表示・左配置に）
+
 ### #184: --dangerously-skip-permissions 参照の完全廃止 (2026-03-20)
 
 コメントとログメッセージから旧フラグ `--dangerously-skip-permissions` の参照を削除し、現行の Agent SDK ベース（`canUseTool` コールバック）の記述に更新。

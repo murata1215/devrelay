@@ -71,7 +71,7 @@ interface UseWebSocketReturn {
   connected: boolean;
   sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>) => void;
   /** ツール承認応答を送信（ユーザーが許可/拒否を選択） */
-  sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => void;
+  sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => void;
 }
 
 /** tabId を sessionStorage で管理（タブごとに独立） */
@@ -242,12 +242,12 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
   }, []);
 
   /** ツール承認応答を Server に送信 */
-  const sendToolApprovalResponse = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean) => {
+  const sendToolApprovalResponse = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
     wsRef.current.send(JSON.stringify({
       type: 'web:tool:approval:response',
-      payload: { requestId, behavior, ...(approveAll ? { approveAll: true } : {}) },
+      payload: { requestId, behavior, ...(approveAll ? { approveAll: true } : {}), ...(alwaysAllow ? { alwaysAllow: true } : {}) },
     }));
   }, []);
 

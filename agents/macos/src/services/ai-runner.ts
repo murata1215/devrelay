@@ -99,6 +99,43 @@ export interface ToolApprovalResponse {
  */
 let approveAllMode = false;
 
+/**
+ * Exec モード常時許可ルールにマッチするかチェックする
+ * Plan Mode の allowedTools と同じパターン形式を使用
+ * @returns マッチした場合 true
+ */
+function isToolExecAllowed(toolName: string, input: Record<string, unknown>, rules: string[] | null | undefined): boolean {
+  if (!rules || rules.length === 0) return false;
+
+  for (const rule of rules) {
+    // "ToolName" 形式: ツール名完全一致（Edit, Read, Write, Glob, Grep 等）
+    if (!rule.includes('(')) {
+      if (toolName === rule) return true;
+      continue;
+    }
+
+    // "Bash(cmd *)" / "Bash(cmd)" 形式: Bash コマンドのパターンマッチ
+    const match = rule.match(/^(\w+)\((.+)\)$/);
+    if (!match) continue;
+    const [, ruleToolName, rulePattern] = match;
+    if (toolName !== ruleToolName) continue;
+
+    // Bash コマンドのマッチング
+    if (toolName === 'Bash' && typeof input.command === 'string') {
+      const command = input.command.trim();
+      if (rulePattern.endsWith(' *')) {
+        // プレフィックスマッチ: "Bash(git *)" → command が "git" で始まるか
+        const prefix = rulePattern.slice(0, -2); // " *" を除去
+        if (command === prefix || command.startsWith(prefix + ' ')) return true;
+      } else {
+        // 完全一致: "Bash(git)" → command が "git" と完全一致
+        if (command === rulePattern) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** 「以降すべて許可」モードかどうかを確認する（canUseTool コールバック内で使用） */
 export function isApproveAllMode(): boolean {
   return approveAllMode;
@@ -152,6 +189,8 @@ export interface SendPromptOptions {
   usePlanMode?: boolean;
   /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
   allowedTools?: string[];
+  /** Exec モード常時許可ツール（パターンマッチで自動承認） */
+  execAllowedTools?: string[] | null;
   /**
    * ツール承認リクエストのコールバック（Agent SDK 経由の exec モードで使用）
    * 設定されている場合、canUseTool で WebSocket 経由のユーザー承認を行う
@@ -227,6 +266,13 @@ async function sendPromptToAiSdk(
       // WebSocket 経由のユーザー承認（Phase 2+）
       const onApprovalRequest = options.onToolApprovalRequest;
       sdkOptions.canUseTool = async (toolName, input, opts) => {
+        // 常時許可ルールにマッチする場合は即座に allow + 通知送信
+        if (isToolExecAllowed(toolName, input, options.execAllowedTools)) {
+          console.log(`📌 [SDK] Auto-approved (exec allowed rule): ${toolName}`);
+          options.onAutoApproved?.({ toolName, toolInput: input });
+          return { behavior: 'allow', updatedInput: input };
+        }
+
         // 「以降すべて許可」モードなら即座に allow + 通知送信
         if (approveAllMode) {
           console.log(`🔓 [SDK] Auto-approved (approve-all mode): ${toolName}`);

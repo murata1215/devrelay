@@ -245,12 +245,14 @@ export interface ServerConnectAckPayload {
   error?: string;
   projectsDirs?: string[] | null;  // Server 管理のプロジェクト検索パス（null = ローカル設定を使用）
   allowedTools?: string[] | null;  // プランモード許可ツール（null = デフォルト使用）
+  execAllowedTools?: string[] | null;  // Exec モード常時許可ツール（null = なし）
 }
 
 /** Server → Agent: 設定更新の配信（リアルタイム） */
 export interface ServerConfigUpdatePayload {
   projectsDirs?: string[] | null;  // プロジェクト検索パスの更新（null = ローカル設定に戻す）
   allowedTools?: string[] | null;  // プランモード許可ツールの更新（null = デフォルトに戻す）
+  execAllowedTools?: string[] | null;  // Exec モード常時許可ツールの更新（null = なし）
 }
 
 /** ドキュメント同期ペイロード（サーバー → Agent、ファイル追加） */
@@ -553,6 +555,8 @@ export interface ToolApprovalResponsePayload {
   message?: string;
   /** true の場合、以降の全ツール実行を自動許可する */
   approveAll?: boolean;
+  /** true の場合、このツールパターンを常時許可リストに追加する */
+  alwaysAllow?: boolean;
 }
 
 /** ツール承認 UI 表示用（Server → Web/Discord/Telegram） */
@@ -572,7 +576,7 @@ export interface ToolApprovalPromptPayload {
 /** ブラウザ → サーバー */
 export type WebClientMessage =
   | { type: 'web:command'; payload: { text: string; files?: FileAttachment[] } }
-  | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean } }
+  | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean; alwaysAllow?: boolean } }
   | { type: 'web:ping' };
 
 /** サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示） */

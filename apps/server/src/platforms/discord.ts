@@ -467,6 +467,11 @@ export async function sendDiscordToolApproval(channelId: string, payload: ToolAp
         .setLabel('以降すべて許可')
         .setEmoji('🔓')
         .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`ta_always_${payload.requestId}`)
+        .setLabel('常に許可')
+        .setEmoji('📌')
+        .setStyle(ButtonStyle.Primary),
     );
 
     const msg = await (channel as any).send({ content, components: [row] });
@@ -533,11 +538,12 @@ function setupToolApprovalInteractionHandler() {
     // customId 形式: ta_<action>_<requestId>
     const parts = customId.split('_');
     if (parts.length < 3) return;
-    const action = parts[1]; // allow, deny, approveall
+    const action = parts[1]; // allow, deny, approveall, always
     const requestId = parts.slice(2).join('_'); // requestId に _ が含まれる可能性に対応
 
     let behavior: 'allow' | 'deny';
     let approveAll = false;
+    let alwaysAllow = false;
 
     if (action === 'allow') {
       behavior = 'allow';
@@ -546,20 +552,24 @@ function setupToolApprovalInteractionHandler() {
     } else if (action === 'approveall') {
       behavior = 'allow';
       approveAll = true;
+    } else if (action === 'always') {
+      behavior = 'allow';
+      alwaysAllow = true;
     } else {
       return;
     }
 
-    console.log(`🔐 Discord button: ${behavior}${approveAll ? ' (approve-all)' : ''} (${requestId.substring(0, 8)}...)`);
+    const logSuffix = approveAll ? ' (approve-all)' : alwaysAllow ? ' (always-allow)' : '';
+    console.log(`🔐 Discord button: ${behavior}${logSuffix} (${requestId.substring(0, 8)}...)`);
 
     // agent-manager に応答を転送
-    const handled = handleToolApprovalUserResponse(requestId, { behavior, approveAll });
+    const handled = handleToolApprovalUserResponse(requestId, { behavior, approveAll, alwaysAllow });
 
     if (handled) {
       // ボタンを無効化して結果を表示
       toolApprovalMessages.delete(requestId);
       const statusText = behavior === 'allow'
-        ? (approveAll ? '🔓 **以降すべて許可しました**' : '✅ **許可しました**')
+        ? (approveAll ? '🔓 **以降すべて許可しました**' : alwaysAllow ? '📌 **常に許可しました**' : '✅ **許可しました**')
         : '❌ **拒否しました**';
 
       try {
