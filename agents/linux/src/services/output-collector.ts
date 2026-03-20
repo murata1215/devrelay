@@ -225,9 +225,9 @@ export const DEVRELAY_RULES_TEMPLATE = `<!-- DevRelay Agreement v6 -->
 
 ## ユーザーへの質問
 
-AskUserQuestion ツールは使用しないでください（DevRelay 経由では応答を返せないため）。
-ユーザーに質問や確認が必要な場合は、テキストで質問を書いてください。
-ユーザーは Discord/Telegram 経由でテキストで回答します。
+exec モードでは AskUserQuestion ツールを使用できます。
+質問は DevRelay 経由で WebUI/Discord/Telegram に表示され、ユーザーが選択肢を選んで回答します。
+plan モードでは AskUserQuestion は使用せず、テキストで質問してください。
 
 ## コーディングスタイル
 
