@@ -69,7 +69,7 @@ export interface WebSocketCallbacks {
 /** WebSocket フックの戻り値 */
 interface UseWebSocketReturn {
   connected: boolean;
-  sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>) => void;
+  sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>, projectId?: string) => void;
   /** ツール承認応答を送信（ユーザーが許可/拒否を選択） */
   sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => void;
 }
@@ -232,12 +232,12 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
     };
   }, [connect]);
 
-  const sendCommand = useCallback((text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>) => {
+  const sendCommand = useCallback((text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>, projectId?: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
     wsRef.current.send(JSON.stringify({
       type: 'web:command',
-      payload: { text, files },
+      payload: { text, files, ...(projectId ? { projectId } : {}) },
     }));
   }, []);
 

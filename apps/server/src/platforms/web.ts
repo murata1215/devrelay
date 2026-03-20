@@ -112,6 +112,13 @@ export async function setupWebClientWebSocket(
 
           const context = await getUserContext(userId, 'web', chatId);
 
+          // projectId ヒント: クライアントが送信した projectId とコンテキストが一致しない場合、自動切り替え
+          // タブ切替直後のレースコンディションを防止（//connect が先に到着しない場合に対応）
+          const hintProjectId = msg.payload.projectId;
+          if (hintProjectId && hintProjectId !== context.lastProjectId) {
+            await handleProjectConnect(hintProjectId, context);
+          }
+
           // サイドバーからの直接接続コマンド: //connect <projectId>
           if (text?.startsWith('//connect ')) {
             const projectId = text.slice('//connect '.length).trim();

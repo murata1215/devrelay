@@ -2604,7 +2604,7 @@ export function ChatPage() {
     }
 
     playNotificationSound();
-    sendCommand(sendText, hasFiles ? pendingFiles : undefined);
+    sendCommand(sendText, hasFiles ? pendingFiles : undefined, activeTabId || undefined);
     setInput('');
     setPendingFiles([]);
   };

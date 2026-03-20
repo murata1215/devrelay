@@ -597,7 +597,7 @@ export interface ToolApprovalPromptPayload {
 
 /** ブラウザ → サーバー */
 export type WebClientMessage =
-  | { type: 'web:command'; payload: { text: string; files?: FileAttachment[] } }
+  | { type: 'web:command'; payload: { text: string; files?: FileAttachment[]; projectId?: string } }
   | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean; alwaysAllow?: boolean } }
   | { type: 'web:ping' };
 
