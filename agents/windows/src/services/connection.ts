@@ -3,6 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { Agent } from 'http';
+import {
+  PROTOCOL_VERSION,
+} from '@devrelay/shared';
 import type {
   AgentMessage,
   ServerToAgentMessage,
@@ -75,6 +78,8 @@ let serverAllowedTools: string[] | null = null;
 
 // Reconnection state (using shared constants for easy adjustment)
 let reconnectAttempts = 0;
+/** サーバーがプロトコルバージョン不足で接続拒否した場合 true（再接続ループを停止） */
+let protocolUpdateRequired = false;
 
 // Pong timeout detection
 const PONG_TIMEOUT = 45000; // 45 seconds
@@ -161,6 +166,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           token: config.token,
           projects,
           availableAiTools: getAvailableAiTools(config),
+          protocolVersion: PROTOCOL_VERSION,
         },
       });
 
@@ -248,8 +254,16 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           const count = serverAllowedTools ? serverAllowedTools.length : 'default';
           log.info(`Allowed tools from server: ${count}`);
         }
+        // プロトコルバージョン不足の警告（接続は成功しているが会話は制限される）
+        if (message.payload.updateRequired) {
+          log.warn('Agent の更新が必要です。会話は制限されます。`u` コマンドで更新してください。');
+        }
       } else {
         log.error('Authentication failed:', message.payload.error);
+        if (message.payload.updateRequired) {
+          log.error('Agent の更新が必要です。`u` コマンドで更新するか、再インストールしてください。');
+          protocolUpdateRequired = true;
+        }
         ws?.close();
       }
       break;
@@ -902,6 +916,12 @@ function stopAppPing() {
 
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
+
+  // プロトコルバージョン不足で拒否された場合は再接続しない
+  if (protocolUpdateRequired) {
+    log.error('Agent の更新が必要です。再接続をスキップします。`u` コマンドで更新するか、再インストールしてください。');
+    return;
+  }
 
   const { baseDelay, maxDelay, maxAttempts, jitterRange } = DEFAULTS.reconnect;
 

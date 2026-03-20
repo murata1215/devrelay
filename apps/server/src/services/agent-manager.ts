@@ -1,23 +1,24 @@
 import type { WebSocket } from 'ws';
 import type { FastifyRequest } from 'fastify';
-import type {
-  AgentMessage,
-  ServerToAgentMessage,
-  Machine,
-  Project,
-  AiTool,
-  FileAttachment,
-  WorkState,
-  AiListResponsePayload,
-  AiSwitchedPayload,
-  AiCancelledPayload,
-  AgentVersionInfoPayload,
-  AgentUpdateStatusPayload,
-  ToolApprovalRequestPayload,
-  ToolApprovalAutoPayload,
-  ToolApprovalPromptPayload,
-  ServerToWebMessage,
-  Platform
+import {
+  PROTOCOL_VERSION,
+  type AgentMessage,
+  type ServerToAgentMessage,
+  type Machine,
+  type Project,
+  type AiTool,
+  type FileAttachment,
+  type WorkState,
+  type AiListResponsePayload,
+  type AiSwitchedPayload,
+  type AiCancelledPayload,
+  type AgentVersionInfoPayload,
+  type AgentUpdateStatusPayload,
+  type ToolApprovalRequestPayload,
+  type ToolApprovalAutoPayload,
+  type ToolApprovalPromptPayload,
+  type ServerToWebMessage,
+  type Platform,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants } from './session-manager.js';
@@ -30,6 +31,12 @@ import { getUserSetting, SettingKeys } from './user-settings.js';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import type { ManagementInfo } from '@devrelay/shared';
+
+/** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
+const MIN_PROTOCOL_VERSION = 1;
+
+/** バージョン不足の Agent を記録（接続は許可するが会話は拒否、u コマンドのみ許可） */
+const outdatedAgents = new Set<string>();
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -205,7 +212,7 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
 async function handleAgentConnect(
   ws: WebSocket,
-  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[] }
+  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[]; protocolVersion?: number }
 ): Promise<string | null> {
   const { machineId, machineName, token, projects, availableAiTools, managementInfo, projectsDirs: localDirs } = payload;
 
@@ -221,6 +228,18 @@ async function handleAgentConnect(
     });
     ws.close();
     return null;
+  }
+
+  // プロトコルバージョンチェック（旧 Agent は protocolVersion 未送信 = 0 として扱う）
+  // ソフトリジェクション: 接続は許可するが会話を制限（u コマンドで更新可能にするため）
+  const agentVersion = payload.protocolVersion ?? 0;
+  const isOutdated = agentVersion < MIN_PROTOCOL_VERSION;
+  if (isOutdated) {
+    console.log(`⚠️ Agent ${machine.name} outdated: protocol v${agentVersion} < v${MIN_PROTOCOL_VERSION} (connection allowed, conversations blocked)`);
+    outdatedAgents.add(machine.id);
+  } else {
+    // 更新後の再接続でクリア
+    outdatedAgents.delete(machine.id);
   }
 
   // 切断猶予タイマーをキャンセル（短時間の再接続ではオフライン通知を抑制）
@@ -364,6 +383,10 @@ async function handleAgentConnect(
       machineId: machine.id,
       projectsDirs: serverProjectsDirs,
       allowedTools,
+      ...(isOutdated && {
+        updateRequired: true,
+        minProtocolVersion: MIN_PROTOCOL_VERSION,
+      }),
     }
   });
 
@@ -408,6 +431,7 @@ async function handleAgentDisconnect(machineId: string, disconnectedWs?: WebSock
   machineCache.delete(machineId);
   agentLocalProjectsDirs.delete(machineId);
   pendingConfigUpdates.delete(machineId);
+  outdatedAgents.delete(machineId);
 
   try {
     await prisma.machine.update({
@@ -999,10 +1023,19 @@ export async function sendPromptToAgent(
   projectPath?: string,
   aiTool?: AiTool
 ) {
+  // バージョン不足の Agent にはプロンプトを送信しない
+  if (outdatedAgents.has(machineId)) {
+    throw new Error('⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。');
+  }
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
     payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool }
   });
+}
+
+/** Agent がプロトコルバージョン不足かどうかを判定する */
+export function isAgentOutdated(machineId: string): boolean {
+  return outdatedAgents.has(machineId);
 }
 
 export async function endSession(machineId: string, sessionId: string) {

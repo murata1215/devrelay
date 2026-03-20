@@ -3,6 +3,24 @@
 // =============================================================================
 
 // -----------------------------------------------------------------------------
+// Protocol Version（Agent/Server 間の互換性管理）
+// -----------------------------------------------------------------------------
+
+/**
+ * プロトコルバージョン（Agent がビルド時に焼き込む整数値）
+ *
+ * バージョン履歴:
+ * - 1: protocolVersion フィールド導入（2026-03-20）
+ *
+ * バージョンを上げるタイミング:
+ * - Agent/Server 間のメッセージフォーマットに後方互換性のない変更を加えた場合
+ * - Agent 側に必須の新機能（ハンドラ等）を追加した場合
+ *
+ * サーバー側の MIN_PROTOCOL_VERSION を上げると、それ未満の Agent は接続拒否される。
+ */
+export const PROTOCOL_VERSION = 1;
+
+// -----------------------------------------------------------------------------
 // Machine & Project
 // -----------------------------------------------------------------------------
 
@@ -157,6 +175,8 @@ export interface AgentConnectPayload {
   managementInfo?: ManagementInfo;
   /** Agent ローカルの検索パス（Server 側で参照用） */
   projectsDirs?: string[];
+  /** プロトコルバージョン（未送信の旧 Agent は 0 として扱う） */
+  protocolVersion?: number;
 }
 
 export interface FileAttachment {
@@ -245,6 +265,10 @@ export interface ServerConnectAckPayload {
   error?: string;
   projectsDirs?: string[] | null;  // Server 管理のプロジェクト検索パス（null = ローカル設定を使用）
   allowedTools?: string[] | null;  // プランモード許可ツール（null = デフォルト使用）
+  /** true の場合、Agent の更新が必要（プロトコルバージョン不足で接続拒否） */
+  updateRequired?: boolean;
+  /** サーバーが要求する最小プロトコルバージョン */
+  minProtocolVersion?: number;
 }
 
 /** Server → Agent: 設定更新の配信（リアルタイム） */

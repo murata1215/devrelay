@@ -3,6 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { Agent } from 'http';
+import {
+  PROTOCOL_VERSION,
+} from '@devrelay/shared';
 import type {
   AgentMessage,
   ServerToAgentMessage,
@@ -84,6 +87,8 @@ let serverAllowedTools: string[] | null = null;
 let reconnectAttempts = 0;
 /** 最後に WebSocket 接続が確立した時刻（安定接続判定用） */
 let lastConnectedAt = 0;
+/** サーバーがプロトコルバージョン不足で接続拒否した場合 true（再接続ループを停止） */
+let protocolUpdateRequired = false;
 
 /** 最後に更新を開始した時刻（二重更新防止用、60秒で自動解除） */
 let updateStartedAt = 0;
@@ -179,6 +184,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           availableAiTools: getAvailableAiTools(config),
           managementInfo: generateManagementInfo(),
           projectsDirs: config.projectsDirs,
+          protocolVersion: PROTOCOL_VERSION,
         },
       });
 
@@ -261,11 +267,19 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           const count = serverAllowedTools ? serverAllowedTools.length : 'default';
           console.log(`🔧 Allowed tools from server: ${count}`);
         }
+        // プロトコルバージョン不足の警告（接続は成功しているが会話は制限される）
+        if (message.payload.updateRequired) {
+          console.warn('⚠️ Agent の更新が必要です。会話は制限されます。`u` コマンドで更新してください。');
+        }
         // Claude Code スキルファイルを作成・更新（ドキュメント検索用）
         ensureSkillFiles(config).catch(err =>
           console.error('❌ Skill files update failed:', err.message));
       } else {
         console.error('❌ Authentication failed:', message.payload.error);
+        if (message.payload.updateRequired) {
+          console.error('🔄 Agent の更新が必要です。`u` コマンドで更新するか、再インストールしてください。');
+          protocolUpdateRequired = true;
+        }
         ws?.close();
       }
       break;
@@ -1067,6 +1081,12 @@ function stopAppPing() {
 
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
+
+  // プロトコルバージョン不足で拒否された場合は再接続しない
+  if (protocolUpdateRequired) {
+    console.log('⛔ Agent の更新が必要です。再接続をスキップします。`u` コマンドで更新するか、再インストールしてください。');
+    return;
+  }
 
   const { baseDelay, maxDelay, maxAttempts, jitterRange } = DEFAULTS.reconnect;
 
