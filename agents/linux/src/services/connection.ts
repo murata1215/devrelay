@@ -79,8 +79,6 @@ let currentConfig: AgentConfig | null = null;
 let currentMachineId: string | null = null;
 /** Server から配信されたプランモード許可ツール（null = デフォルト使用） */
 let serverAllowedTools: string[] | null = null;
-/** Server から配信された Exec モード常時許可ツール（null = なし） */
-let serverExecAllowedTools: string[] | null = null;
 
 // 再接続状態（バックオフ管理）
 let reconnectAttempts = 0;
@@ -263,12 +261,6 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           const count = serverAllowedTools ? serverAllowedTools.length : 'default';
           console.log(`🔧 Allowed tools from server: ${count}`);
         }
-        // Exec モード常時許可ツールを受信
-        if (message.payload.execAllowedTools !== undefined) {
-          serverExecAllowedTools = message.payload.execAllowedTools;
-          const count = serverExecAllowedTools ? serverExecAllowedTools.length : 'none';
-          console.log(`📌 Exec allowed tools from server: ${count}`);
-        }
         // Claude Code スキルファイルを作成・更新（ドキュメント検索用）
         ensureSkillFiles(config).catch(err =>
           console.error('❌ Skill files update failed:', err.message));
@@ -350,13 +342,8 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         const count = serverAllowedTools ? serverAllowedTools.length : 'default';
         console.log(`🔧 Allowed tools updated from server: ${count}`);
       }
-      if (message.payload.execAllowedTools !== undefined) {
-        serverExecAllowedTools = message.payload.execAllowedTools;
-        const count = serverExecAllowedTools ? serverExecAllowedTools.length : 'none';
-        console.log(`📌 Exec allowed tools updated from server: ${count}`);
-      }
       // ack を送信（pending リトライを停止させる）
-      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.execAllowedTools !== undefined || message.payload.projectsDirs !== undefined)) {
+      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.projectsDirs !== undefined)) {
         sendMessage({
           type: 'agent:config:ack',
           payload: { machineId: currentMachineId },
@@ -798,7 +785,6 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     resumeSessionId: sessionInfo.claudeResumeSessionId,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
-    execAllowedTools: !usePlanMode ? serverExecAllowedTools : undefined,
   };
 
   // Exec モード時: canUseTool で WebSocket 経由のユーザー承認を行う

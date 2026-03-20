@@ -332,18 +332,7 @@ export const allowedTools = {
   },
 };
 
-// Exec モード常時許可ツール API
-export const execAllowedTools = {
-  /** 現在のルール一覧を取得 */
-  async get(): Promise<{ tools: string[] }> {
-    return request('GET', '/settings/exec-allowed-tools');
-  },
 
-  /** ルール一覧を更新（空配列でリセット） */
-  async update(tools: string[]): Promise<{ success: boolean }> {
-    return request('PUT', '/settings/exec-allowed-tools', { tools });
-  },
-};
 
 // Agreement テンプレート API
 export interface AgreementTemplateResponse {

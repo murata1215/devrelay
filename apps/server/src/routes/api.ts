@@ -765,53 +765,6 @@ export async function apiRoutes(app: FastifyInstance) {
     return { success: true };
   });
 
-  /**
-   * Exec モード常時許可ツールの取得
-   */
-  app.get('/api/settings/exec-allowed-tools', async (request) => {
-    // @ts-ignore
-    const userId = request.user.id;
-    const raw = await getUserSetting(userId, SettingKeys.EXEC_ALLOWED_TOOLS);
-    return { tools: raw ? JSON.parse(raw) as string[] : [] };
-  });
-
-  /**
-   * Exec モード常時許可ツールの更新（全 Agent にリアルタイム配信）
-   */
-  app.put('/api/settings/exec-allowed-tools', async (request, reply) => {
-    // @ts-ignore
-    const userId = request.user.id;
-    const { tools } = request.body as { tools: string[] };
-
-    if (!Array.isArray(tools)) {
-      return reply.status(400).send({ error: 'tools must be an array of strings' });
-    }
-
-    if (tools.length === 0) {
-      // 空配列 → 設定を削除
-      await prisma.userSettings.deleteMany({
-        where: { userId, key: SettingKeys.EXEC_ALLOWED_TOOLS },
-      });
-    } else {
-      await prisma.userSettings.upsert({
-        where: { userId_key: { userId, key: SettingKeys.EXEC_ALLOWED_TOOLS } },
-        update: { value: JSON.stringify(tools), encrypted: false },
-        create: { userId, key: SettingKeys.EXEC_ALLOWED_TOOLS, value: JSON.stringify(tools), encrypted: false },
-      });
-    }
-
-    // 全オンライン Agent に配信
-    const machines = await prisma.machine.findMany({
-      where: { userId, deletedAt: null },
-      select: { id: true },
-    });
-    for (const machine of machines) {
-      pushConfigUpdate(machine.id, { execAllowedTools: tools.length > 0 ? tools : null });
-    }
-
-    return { success: true };
-  });
-
   // ========================================
   // ダッシュボード統計
   // ========================================

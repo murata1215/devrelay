@@ -26,7 +26,7 @@ import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApp
 import { sendTelegramToolApproval, resolveTelegramToolApproval, sendTelegramToolApprovalAuto } from '../platforms/telegram.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
-import { getUserSetting, setUserSetting, SettingKeys } from './user-settings.js';
+import { getUserSetting, SettingKeys } from './user-settings.js';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import type { ManagementInfo } from '@devrelay/shared';
@@ -354,10 +354,6 @@ async function handleAgentConnect(
   const allowedToolsRaw = await getUserSetting(machine.userId, allowedToolsKey);
   const allowedTools = allowedToolsRaw ? JSON.parse(allowedToolsRaw) as string[] : null;
 
-  // Exec モード常時許可ツールを取得
-  const execAllowedToolsRaw = await getUserSetting(machine.userId, SettingKeys.EXEC_ALLOWED_TOOLS);
-  const execAllowedTools = execAllowedToolsRaw ? JSON.parse(execAllowedToolsRaw) as string[] : null;
-
   // 再接続時に connect:ack で最新の DB 値を配信するため、pending リトライは不要
   pendingConfigUpdates.delete(machine.id);
 
@@ -368,7 +364,6 @@ async function handleAgentConnect(
       machineId: machine.id,
       projectsDirs: serverProjectsDirs,
       allowedTools,
-      execAllowedTools,
     }
   });
 
@@ -1115,7 +1110,7 @@ export async function cancelAiProcess(machineId: string, sessionId: string) {
  * Agent がオフラインの場合は何もしない（次回接続時に server:connect:ack で配信される）
  * 送信失敗に備え pendingConfigUpdates に登録し、次回 agent:ping 時にリトライする
  */
-export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; execAllowedTools?: string[] | null }) {
+export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null }) {
   // 既存の pending があればマージ（projectsDirs と allowedTools が同時に pending でも欠落しない）
   const existing = pendingConfigUpdates.get(machineId);
   const mergedConfig = existing ? { ...existing.config, ...config } : config;
@@ -1716,17 +1711,19 @@ export function handleToolApprovalUserResponse(
     data: { status: response.behavior, resolvedAt: new Date() },
   }).catch(err => console.error('Failed to update tool approval status:', err));
 
-  // 「常に許可」: ルールを UserSettings に保存 → 全 Agent にプッシュ
-  if (response.alwaysAllow && response.behavior === 'allow' && pending.userId) {
-    saveExecAllowedToolRule(pending.userId, pending.toolName, pending.toolInput).catch(err =>
-      console.error('Failed to save exec allowed tool rule:', err)
-    );
+  // 「📌 常に許可」: ツールルールを生成して Agent に送信（セッションスコープ）
+  const alwaysAllowRule = (response.alwaysAllow && response.behavior === 'allow')
+    ? generateToolRule(pending.toolName, pending.toolInput)
+    : undefined;
+
+  if (alwaysAllowRule) {
+    console.log(`📌 Generated session tool rule: "${alwaysAllowRule}"`);
   }
 
-  // Agent に応答を転送（approveAll フラグも含む）
+  // Agent に応答を転送（approveAll フラグ + alwaysAllowRule も含む）
   sendToAgent(pending.machineId, {
     type: 'server:tool:approval:response',
-    payload: { requestId, behavior: response.behavior, message: response.message, approveAll: response.approveAll },
+    payload: { requestId, behavior: response.behavior, message: response.message, approveAll: response.approveAll, alwaysAllowRule },
   });
 
   // 全参加者に resolved を通知（他のブラウザタブ + Discord/Telegram のボタン無効化）
@@ -1737,46 +1734,6 @@ export function handleToolApprovalUserResponse(
   resolveToolApprovalOnPlatforms(pending.sessionId, requestId, response.behavior);
 
   return true;
-}
-
-/**
- * Exec モード常時許可ツールルールを UserSettings に保存し、全 Agent にプッシュする
- */
-async function saveExecAllowedToolRule(userId: string, toolName: string, toolInput: Record<string, unknown>) {
-  const rule = generateToolRule(toolName, toolInput);
-  console.log(`📌 Saving exec allowed tool rule: "${rule}" for user ${userId}`);
-
-  // 既存ルールを取得
-  const raw = await getUserSetting(userId, SettingKeys.EXEC_ALLOWED_TOOLS);
-  const existing: string[] = raw ? JSON.parse(raw) : [];
-
-  // 重複チェック
-  if (existing.includes(rule)) {
-    console.log(`📌 Rule "${rule}" already exists, skipping`);
-    return;
-  }
-
-  // ルールを追加して保存
-  const updated = [...existing, rule];
-  await setUserSetting(userId, SettingKeys.EXEC_ALLOWED_TOOLS, JSON.stringify(updated));
-
-  // 全オンライン Agent にプッシュ
-  await pushExecAllowedToolsToAgents(userId, updated);
-}
-
-/**
- * 指定ユーザーの全オンライン Agent に execAllowedTools を配信する
- */
-async function pushExecAllowedToolsToAgents(userId: string, tools: string[]) {
-  const machines = await prisma.machine.findMany({
-    where: { userId, deletedAt: null },
-    select: { id: true },
-  });
-
-  for (const machine of machines) {
-    if (!connectedAgents.has(machine.id)) continue;
-    pushConfigUpdate(machine.id, { execAllowedTools: tools });
-  }
 }
 
 /**
