@@ -857,12 +857,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           completionSent = true;
 
           // レートリミット情報を contextInfo として先送り（📊行としてサーバーにキャプチャされる）
+          // utilization が null の場合は非表示（SDK が値を返さない環境では誤表示を防ぐ）
           if (usageData?.rateLimits) {
             const parts: string[] = [];
-            if (usageData.rateLimits.fiveHour) {
+            if (usageData.rateLimits.fiveHour?.utilization != null) {
               parts.push(`5h: ${Math.round(usageData.rateLimits.fiveHour.utilization * 100)}%`);
             }
-            if (usageData.rateLimits.sevenDay) {
+            if (usageData.rateLimits.sevenDay?.utilization != null) {
               parts.push(`7d: ${Math.round(usageData.rateLimits.sevenDay.utilization * 100)}%`);
             }
             if (parts.length > 0) {

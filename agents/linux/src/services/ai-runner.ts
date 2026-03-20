@@ -393,20 +393,18 @@ async function sendPromptToAiSdk(
         const info = m.rate_limit_info;
         const pct = info.utilization != null ? Math.round(info.utilization * 100) : null;
         console.log(`[claude/sdk] 📉 Rate limit: type=${info.rateLimitType}, utilization=${pct}%, status=${info.status}`);
+        const entry: RateLimitEntry = {
+          utilization: info.utilization ?? 0,
+          resetsAt: info.resetsAt,
+          status: info.status,
+        };
+        // utilization が null の場合も status は記録する（将来の対応用）
         if (info.rateLimitType === 'five_hour') {
           result.rateLimits = result.rateLimits || {};
-          result.rateLimits.fiveHour = {
-            utilization: info.utilization ?? 0,
-            resetsAt: info.resetsAt,
-            status: info.status,
-          };
+          result.rateLimits.fiveHour = entry;
         } else if (info.rateLimitType?.startsWith('seven_day')) {
           result.rateLimits = result.rateLimits || {};
-          result.rateLimits.sevenDay = {
-            utilization: info.utilization ?? 0,
-            resetsAt: info.resetsAt,
-            status: info.status,
-          };
+          result.rateLimits.sevenDay = entry;
         }
       }
 
