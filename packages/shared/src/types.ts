@@ -565,6 +565,8 @@ export interface ToolApprovalRequestPayload {
   title?: string;
   description?: string;
   decisionReason?: string;
+  /** AskUserQuestion の場合 true（UI を質問カード表示に切り替える） */
+  isQuestion?: boolean;
 }
 
 /** 自動承認通知（Agent → Server、approveAllMode 時の通知のみ） */
@@ -584,6 +586,8 @@ export interface ToolApprovalResponsePayload {
   approveAll?: boolean;
   /** セッション内で常時許可するツールルール（例: "Edit", "Bash(git *)"） */
   alwaysAllowRule?: string;
+  /** AskUserQuestion の回答（question → selected label のマップ） */
+  answers?: Record<string, string>;
 }
 
 /** ツール承認 UI 表示用（Server → Web/Discord/Telegram） */
@@ -594,6 +598,8 @@ export interface ToolApprovalPromptPayload {
   title?: string;
   description?: string;
   projectId?: string;
+  /** AskUserQuestion の場合 true */
+  isQuestion?: boolean;
 }
 
 // -----------------------------------------------------------------------------
@@ -603,7 +609,7 @@ export interface ToolApprovalPromptPayload {
 /** ブラウザ → サーバー */
 export type WebClientMessage =
   | { type: 'web:command'; payload: { text: string; files?: FileAttachment[]; projectId?: string } }
-  | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean; alwaysAllow?: boolean } }
+  | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean; alwaysAllow?: boolean; answers?: Record<string, string> } }
   | { type: 'web:ping' };
 
 /** サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示） */

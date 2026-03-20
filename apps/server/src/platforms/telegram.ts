@@ -305,6 +305,35 @@ export async function sendTelegramToolApproval(chatId: string, payload: ToolAppr
   }
 
   try {
+    // AskUserQuestion の場合: 質問 + 選択肢キーボードを表示
+    if (payload.isQuestion) {
+      const questions = (payload.toolInput as any).questions as Array<{ question: string; options: Array<{ label: string; description?: string }> }> || [];
+      const q = questions[0];
+      if (!q) return;
+
+      const optionsText = q.options.map((o, i) => `${i + 1}. *${o.label}*${o.description ? ` — ${o.description}` : ''}`).join('\n');
+      const content = `❓ *${q.question}*\n\n${optionsText}`;
+
+      // 各選択肢をボタンとして表示（1行に2つまで）
+      const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+      for (let i = 0; i < q.options.length; i += 2) {
+        const row = [{ text: q.options[i].label, callback_data: `tq_${payload.requestId}_${i}` }];
+        if (q.options[i + 1]) {
+          row.push({ text: q.options[i + 1].label, callback_data: `tq_${payload.requestId}_${i + 1}` });
+        }
+        keyboard.push(row);
+      }
+
+      const msg = await bot.sendMessage(chatId, content, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: keyboard },
+      });
+
+      toolApprovalMessages.set(payload.requestId, { chatId, messageId: msg.message_id });
+      console.log(`❓ Telegram question sent: ${q.question} (${payload.requestId.substring(0, 8)}...)`);
+      return;
+    }
+
     const inputText = formatToolInputForText(payload.toolName, payload.toolInput);
     const content = `🔧 *ツール承認が必要です*\n\`${payload.toolName}\`${inputText ? `\n\`\`\`\n${inputText}\n\`\`\`` : ''}`;
 
@@ -381,6 +410,51 @@ function setupToolApprovalCallbackHandler() {
   if (!bot) return;
 
   bot.on('callback_query', async (query) => {
+    // AskUserQuestion の質問回答（tq_ プレフィックス）
+    if (query.data?.startsWith('tq_')) {
+      const parts = query.data.split('_');
+      if (parts.length < 3) return;
+      const requestId = parts[1];
+      const optionIndex = parseInt(parts[2], 10);
+
+      // ボタンのテキストから選択肢を取得
+      const selectedLabel = query.message?.reply_markup?.inline_keyboard
+        ?.flat()
+        ?.find(btn => btn.callback_data === query.data)
+        ?.text || `Option ${optionIndex + 1}`;
+
+      // 質問テキストをメッセージから抽出
+      const questionMatch = query.message?.text?.match(/❓ (.+)/);
+      const questionText = questionMatch?.[1]?.replace(/\*/g, '') || 'Question';
+
+      console.log(`❓ Telegram question answered: "${selectedLabel}" (${requestId.substring(0, 8)}...)`);
+
+      const answers: Record<string, string> = { [questionText]: selectedLabel };
+      const handled = handleToolApprovalUserResponse(requestId, { behavior: 'allow', answers });
+
+      if (handled) {
+        toolApprovalMessages.delete(requestId);
+        try {
+          await bot!.answerCallbackQuery(query.id, { text: `回答: ${selectedLabel}` });
+          if (query.message) {
+            await bot!.editMessageText(
+              `❓ *質問*\n✅ 回答: ${selectedLabel}`,
+              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
+            );
+          }
+        } catch (err) {
+          console.error('Failed to update Telegram question callback:', err);
+        }
+      } else {
+        try {
+          await bot!.answerCallbackQuery(query.id, { text: '⚠️ この質問は既に回答済みです' });
+        } catch (err) {
+          console.error('Failed to update Telegram question callback:', err);
+        }
+      }
+      return;
+    }
+
     if (!query.data || !query.data.startsWith('ta_')) return;
 
     // callback_data 形式: ta_<action>_<requestId>

@@ -448,6 +448,31 @@ export async function sendDiscordToolApproval(channelId: string, payload: ToolAp
     const channel = await client.channels.fetch(channelId);
     if (!channel || !channel.isTextBased() || !('send' in channel)) return;
 
+    // AskUserQuestion の場合: 質問 + 選択肢ボタンを表示
+    if (payload.isQuestion) {
+      const questions = (payload.toolInput as any).questions as Array<{ question: string; options: Array<{ label: string; description?: string }> }> || [];
+      const q = questions[0]; // 最初の質問を表示
+      if (!q) return;
+
+      const optionsText = q.options.map((o, i) => `${i + 1}. **${o.label}**${o.description ? ` — ${o.description}` : ''}`).join('\n');
+      const content = `❓ **${q.question}**\n${optionsText}`;
+
+      const row = new ActionRowBuilder<ButtonBuilder>();
+      q.options.slice(0, 5).forEach((opt, i) => {
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`tq_${payload.requestId}_${i}`)
+            .setLabel(opt.label)
+            .setStyle(ButtonStyle.Primary),
+        );
+      });
+
+      const msg = await (channel as any).send({ content, components: [row] });
+      toolApprovalMessages.set(payload.requestId, { channelId, messageId: msg.id });
+      console.log(`❓ Discord question sent: ${q.question} (${payload.requestId.substring(0, 8)}...)`);
+      return;
+    }
+
     const inputText = formatToolInputForText(payload.toolName, payload.toolInput);
     const content = `🔧 **ツール承認が必要です**\n\`${payload.toolName}\`${inputText ? `\n\`\`\`\n${inputText}\n\`\`\`` : ''}`;
 
@@ -533,6 +558,50 @@ function setupToolApprovalInteractionHandler() {
     if (!interaction.isButton()) return;
 
     const customId = interaction.customId;
+
+    // AskUserQuestion の質問ボタン（tq_ プレフィックス）
+    if (customId.startsWith('tq_')) {
+      // customId 形式: tq_<requestId>_<optionIndex>
+      const parts = customId.split('_');
+      if (parts.length < 3) return;
+      const requestId = parts[1];
+      const optionIndex = parseInt(parts[2], 10);
+
+      // pendingToolApprovalRequests から質問情報を取得して回答を構築
+      // toolInput.questions[0].options[optionIndex].label で回答を取得
+      const info = toolApprovalMessages.get(requestId);
+      const questions = (interaction.message.content.match(/❓ \*\*(.+?)\*\*/)?.[1]) || 'Question';
+      // ボタンの label から回答を取得
+      const selectedLabel = interaction.component && 'label' in interaction.component ? interaction.component.label || '' : '';
+
+      console.log(`❓ Discord question answered: "${selectedLabel}" (${requestId.substring(0, 8)}...)`);
+
+      const answers: Record<string, string> = { [questions]: selectedLabel };
+      const handled = handleToolApprovalUserResponse(requestId, { behavior: 'allow', answers });
+
+      if (handled) {
+        toolApprovalMessages.delete(requestId);
+        try {
+          await interaction.update({
+            content: `${interaction.message.content}\n✅ **回答: ${selectedLabel}**`,
+            components: [],
+          });
+        } catch (err) {
+          console.error('Failed to update Discord question interaction:', err);
+        }
+      } else {
+        try {
+          await interaction.update({
+            content: `${interaction.message.content}\n⚠️ **この質問は既に回答済みです**`,
+            components: [],
+          });
+        } catch (err) {
+          console.error('Failed to update Discord question interaction:', err);
+        }
+      }
+      return;
+    }
+
     if (!customId.startsWith('ta_')) return;
 
     // customId 形式: ta_<action>_<requestId>

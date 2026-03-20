@@ -1625,8 +1625,8 @@ const pendingToolApprovalRequests = new Map<string, {
  * Agent からのツール承認リクエストを処理し、セッション参加者に転送する
  */
 async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
-  const { machineId, sessionId, requestId, toolName, toolInput, title, description, decisionReason } = payload;
-  console.log(`🔐 Tool approval request: ${toolName} (${requestId.substring(0, 8)}...) for session ${sessionId.substring(0, 8)}...`);
+  const { machineId, sessionId, requestId, toolName, toolInput, title, description, decisionReason, isQuestion } = payload;
+  console.log(`${isQuestion ? '❓' : '🔐'} ${isQuestion ? 'User question' : 'Tool approval'} request: ${toolName} (${requestId.substring(0, 8)}...) for session ${sessionId.substring(0, 8)}...`);
 
   // セッションの projectId を取得（WebUI のタブルーティング用）
   const session = await prisma.session.findUnique({
@@ -1680,7 +1680,7 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
   }
 
   // セッション参加者に承認リクエストを送信（Web + Discord/Telegram）
-  const approvalPayload = { requestId, toolName, toolInput, title, description, projectId };
+  const approvalPayload = { requestId, toolName, toolInput, title, description, projectId, isQuestion };
   broadcastToolApprovalToWeb(sessionId, {
     type: 'web:tool:approval',
     payload: approvalPayload,
@@ -1723,7 +1723,7 @@ async function handleToolApprovalAuto(payload: ToolApprovalAutoPayload) {
  */
 export function handleToolApprovalUserResponse(
   requestId: string,
-  response: { behavior: 'allow' | 'deny'; message?: string; approveAll?: boolean; alwaysAllow?: boolean }
+  response: { behavior: 'allow' | 'deny'; message?: string; approveAll?: boolean; alwaysAllow?: boolean; answers?: Record<string, string> }
 ): boolean {
   const pending = pendingToolApprovalRequests.get(requestId);
   if (!pending) {
@@ -1756,7 +1756,7 @@ export function handleToolApprovalUserResponse(
   // Agent に応答を転送（approveAll フラグ + alwaysAllowRule も含む）
   sendToAgent(pending.machineId, {
     type: 'server:tool:approval:response',
-    payload: { requestId, behavior: response.behavior, message: response.message, approveAll: response.approveAll, alwaysAllowRule },
+    payload: { requestId, behavior: response.behavior, message: response.message, approveAll: response.approveAll, alwaysAllowRule, answers: response.answers },
   });
 
   // 全参加者に resolved を通知（他のブラウザタブ + Discord/Telegram のボタン無効化）

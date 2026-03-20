@@ -184,11 +184,12 @@ export async function setupWebClientWebSocket(
           break;
         }
         case 'web:tool:approval:response':
-          // WebUI からのツール承認応答を agent-manager に転送（alwaysAllow も含む）
+          // WebUI からのツール承認応答を agent-manager に転送（alwaysAllow, answers も含む）
           handleToolApprovalUserResponse(msg.payload.requestId, {
             behavior: msg.payload.behavior,
             approveAll: msg.payload.approveAll,
             alwaysAllow: msg.payload.alwaysAllow,
+            answers: msg.payload.answers,
           });
           break;
         case 'web:ping':

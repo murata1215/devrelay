@@ -9,6 +9,8 @@ export interface ToolApprovalPrompt {
   title?: string;
   description?: string;
   projectId?: string;
+  /** AskUserQuestion の場合 true */
+  isQuestion?: boolean;
 }
 
 /** ツール承認解決情報 */
@@ -71,7 +73,7 @@ interface UseWebSocketReturn {
   connected: boolean;
   sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>, projectId?: string) => void;
   /** ツール承認応答を送信（ユーザーが許可/拒否を選択） */
-  sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => void;
+  sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => void;
 }
 
 /** tabId を sessionStorage で管理（タブごとに独立） */
@@ -242,12 +244,12 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
   }, []);
 
   /** ツール承認応答を Server に送信 */
-  const sendToolApprovalResponse = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => {
+  const sendToolApprovalResponse = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
     wsRef.current.send(JSON.stringify({
       type: 'web:tool:approval:response',
-      payload: { requestId, behavior, ...(approveAll ? { approveAll: true } : {}), ...(alwaysAllow ? { alwaysAllow: true } : {}) },
+      payload: { requestId, behavior, ...(approveAll ? { approveAll: true } : {}), ...(alwaysAllow ? { alwaysAllow: true } : {}), ...(answers ? { answers } : {}) },
     }));
   }, []);
 

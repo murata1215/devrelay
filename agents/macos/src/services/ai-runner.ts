@@ -95,6 +95,8 @@ export interface ToolApprovalRequest {
   title?: string;
   description?: string;
   decisionReason?: string;
+  /** AskUserQuestion の場合 true */
+  isQuestion?: boolean;
 }
 
 /** ツール承認レスポンス（ユーザー → Server 経由で Agent に返却） */
@@ -105,6 +107,8 @@ export interface ToolApprovalResponse {
   approveAll?: boolean;
   /** セッション内で常時許可するツールルール（例: "Edit", "Bash(git *)"） */
   alwaysAllowRule?: string;
+  /** AskUserQuestion の回答（question → selected label のマップ） */
+  answers?: Record<string, string>;
 }
 
 /**
@@ -199,6 +203,19 @@ export function resolveToolApproval(requestId: string, response: ToolApprovalRes
     console.log(`📌 Session-approved tool rule added: "${response.alwaysAllowRule}" (total: ${sessionApprovedTools.size})`);
   }
 
+  // AskUserQuestion の回答: deny-with-answer パターンで Claude に回答を返す
+  if (response.answers && Object.keys(response.answers).length > 0) {
+    const answerLines = Object.entries(response.answers)
+      .map(([q, a]) => `Q: ${q}\nA: ${a}`)
+      .join('\n\n');
+    console.log(`❓ User answered question(s): ${Object.values(response.answers).join(', ')}`);
+    pending.resolve({
+      behavior: 'deny',
+      message: `User answered the questions:\n\n${answerLines}`,
+    });
+    return true;
+  }
+
   if (response.behavior === 'allow') {
     pending.resolve({ behavior: 'allow', updatedInput: pending.input });
   } else {
@@ -289,24 +306,29 @@ async function sendPromptToAiSdk(
       // WebSocket 経由のユーザー承認（Phase 2+）
       const onApprovalRequest = options.onToolApprovalRequest;
       sdkOptions.canUseTool = async (toolName, input, opts) => {
-        // セッション内で「📌 常に許可」されたツールルールにマッチする場合は即座に allow
-        if (isToolSessionApproved(toolName, input)) {
-          console.log(`📌 [SDK] Auto-approved (session tool rule): ${toolName}`);
-          options.onAutoApproved?.({ toolName, toolInput: input });
-          return { behavior: 'allow', updatedInput: input };
-        }
+        const isQuestion = toolName === 'AskUserQuestion';
 
-        // 「以降すべて許可」モードなら即座に allow + 通知送信
-        if (approveAllMode) {
-          console.log(`🔓 [SDK] Auto-approved (approve-all mode): ${toolName}`);
-          options.onAutoApproved?.({ toolName, toolInput: input });
-          return { behavior: 'allow', updatedInput: input };
+        // AskUserQuestion は常にユーザーに聞く（approveAllMode や自動承認をスキップ）
+        if (!isQuestion) {
+          // セッション内で「📌 常に許可」されたツールルールにマッチする場合は即座に allow
+          if (isToolSessionApproved(toolName, input)) {
+            console.log(`📌 [SDK] Auto-approved (session tool rule): ${toolName}`);
+            options.onAutoApproved?.({ toolName, toolInput: input });
+            return { behavior: 'allow', updatedInput: input };
+          }
+
+          // 「以降すべて許可」モードなら即座に allow + 通知送信
+          if (approveAllMode) {
+            console.log(`🔓 [SDK] Auto-approved (approve-all mode): ${toolName}`);
+            options.onAutoApproved?.({ toolName, toolInput: input });
+            return { behavior: 'allow', updatedInput: input };
+          }
         }
 
         const requestId = crypto.randomUUID();
-        console.log(`🔐 [SDK] Permission request: ${toolName} (${requestId.substring(0, 8)}...)`);
+        console.log(`${isQuestion ? '❓' : '🔐'} [SDK] ${isQuestion ? 'User question' : 'Permission request'}: ${toolName} (${requestId.substring(0, 8)}...)`);
 
-        // Server にツール承認リクエストを送信
+        // Server にツール承認リクエストを送信（AskUserQuestion は isQuestion フラグ付き）
         onApprovalRequest({
           requestId,
           toolName,
@@ -314,6 +336,7 @@ async function sendPromptToAiSdk(
           title: opts.title,
           description: opts.description,
           decisionReason: opts.decisionReason,
+          isQuestion,
         });
 
         // ユーザーの応答を待つ Promise を作成

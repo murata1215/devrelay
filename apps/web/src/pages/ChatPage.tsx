@@ -489,6 +489,114 @@ function ToolApprovalCard({
   );
 }
 
+/** AskUserQuestion 質問カード */
+function QuestionCard({
+  approval,
+  onRespond,
+}: {
+  approval: {
+    requestId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    status: 'pending' | 'allow' | 'deny';
+  };
+  onRespond: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => void;
+}) {
+  const questions = (approval.toolInput as any).questions as Array<{
+    question: string;
+    header?: string;
+    multiSelect?: boolean;
+    options: Array<{ label: string; description?: string }>;
+  }> || [];
+
+  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>({});
+
+  /** 選択肢をトグル（単一選択の場合は上書き） */
+  const handleSelect = (question: string, label: string) => {
+    setSelectedAnswers(prev => ({ ...prev, [question]: label }));
+  };
+
+  /** 回答を送信 */
+  const handleSubmit = () => {
+    onRespond(approval.requestId, 'allow', false, false, selectedAnswers);
+  };
+
+  /** 全質問に回答済みかチェック */
+  const allAnswered = questions.every(q => selectedAnswers[q.question]);
+
+  const statusColors = {
+    pending: 'border-blue-500/30 bg-blue-900/10 dark:bg-blue-500/5',
+    allow: 'border-green-500/30 bg-green-900/10 dark:bg-green-500/5',
+    deny: 'border-slate-500/30 bg-slate-900/10 dark:bg-slate-500/5',
+  };
+
+  return (
+    <div className={`rounded-lg border p-3 my-2 transition-colors ${statusColors[approval.status]}`}>
+      {questions.map((q, qi) => (
+        <div key={qi} className="mb-3">
+          <div className="flex items-center gap-2 mb-2">
+            <span>❓</span>
+            <span className="font-semibold text-sm text-[var(--text-primary)]">{q.question}</span>
+          </div>
+          {approval.status === 'pending' ? (
+            <div className="flex flex-wrap gap-2">
+              {q.options.map((opt, oi) => (
+                <button
+                  key={oi}
+                  onClick={() => handleSelect(q.question, opt.label)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                    selectedAnswers[q.question] === opt.label
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-700 text-[var(--text-primary)] hover:bg-slate-300 dark:hover:bg-slate-600'
+                  }`}
+                  title={opt.description}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-[var(--text-secondary)]">
+              回答: {selectedAnswers[q.question] || '(スキップ)'}
+            </div>
+          )}
+          {q.options.some(o => o.description) && approval.status === 'pending' && selectedAnswers[q.question] && (
+            <div className="text-xs text-[var(--text-muted)] mt-1">
+              {q.options.find(o => o.label === selectedAnswers[q.question])?.description}
+            </div>
+          )}
+        </div>
+      ))}
+      {approval.status === 'pending' && (
+        <div className="flex gap-2 mt-2">
+          <button
+            onClick={handleSubmit}
+            disabled={!allAnswered}
+            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
+              allAnswered
+                ? 'bg-blue-600 text-white hover:bg-blue-500'
+                : 'bg-slate-400 text-slate-200 cursor-not-allowed'
+            }`}
+          >
+            📩 回答を送信
+          </button>
+          <button
+            onClick={() => onRespond(approval.requestId, 'deny')}
+            className="px-3 py-1 text-xs font-medium rounded bg-slate-600 text-white hover:bg-slate-500 transition-colors"
+          >
+            スキップ
+          </button>
+        </div>
+      )}
+      {approval.status !== 'pending' && (
+        <div className="text-xs text-[var(--text-muted)]">
+          {approval.status === 'allow' ? '✅ 回答済み' : '⏭️ スキップ'}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Discord 風メッセージ行 */
 function MessageRow({
   message,
@@ -1769,6 +1877,7 @@ export function ChatPage() {
     description?: string;
     projectId?: string;
     status: 'pending' | 'allow' | 'deny';
+    isQuestion?: boolean;
   }>>(new Map());
   /** ツール承認履歴（右パネルの Approvals タブに表示） */
   const [approvalHistory, setApprovalHistory] = useState<ApprovalHistoryEntry[]>([]);
@@ -2067,8 +2176,8 @@ export function ChatPage() {
   });
 
   /** ユーザーがツール承認ボタンをクリックした時のハンドラ */
-  const handleToolApprovalRespond = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean) => {
-    sendToolApprovalResponse(requestId, behavior, approveAll, alwaysAllow);
+  const handleToolApprovalRespond = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => {
+    sendToolApprovalResponse(requestId, behavior, approveAll, alwaysAllow, answers);
     // 即座にローカルの状態を更新（Server からの resolved を待たずに UI 反映）
     setToolApprovals(prev => {
       const next = new Map(prev);
@@ -2803,15 +2912,23 @@ export function ChatPage() {
               onImageClick={setLightboxImage}
             />
           ))}
-          {/* ツール承認カード（アクティブタブの projectId に一致するもののみ表示） */}
+          {/* ツール承認カード / 質問カード（アクティブタブの projectId に一致するもののみ表示） */}
           {Array.from(toolApprovals.values())
             .filter(a => !a.projectId || a.projectId === activeTabId)
             .map(approval => (
-              <ToolApprovalCard
-                key={approval.requestId}
-                approval={approval}
-                onRespond={handleToolApprovalRespond}
-              />
+              approval.isQuestion ? (
+                <QuestionCard
+                  key={approval.requestId}
+                  approval={approval}
+                  onRespond={handleToolApprovalRespond}
+                />
+              ) : (
+                <ToolApprovalCard
+                  key={approval.requestId}
+                  approval={approval}
+                  onRespond={handleToolApprovalRespond}
+                />
+              )
             ))}
           {activeTab?.progress && (
             <ProgressIndicator
