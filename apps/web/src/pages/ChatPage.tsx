@@ -432,9 +432,9 @@ function ToolApprovalCard({
   };
 
   const statusColors = {
-    pending: 'border-yellow-500/50 bg-yellow-500/5',
-    allow: 'border-green-500/50 bg-green-500/5',
-    deny: 'border-red-500/50 bg-red-500/5',
+    pending: 'border-amber-500/30 bg-amber-900/10 dark:bg-amber-500/5',
+    allow: 'border-green-500/30 bg-green-900/10 dark:bg-green-500/5',
+    deny: 'border-red-500/30 bg-red-900/10 dark:bg-red-500/5',
   };
 
   const statusIcons = {
@@ -444,42 +444,42 @@ function ToolApprovalCard({
   };
 
   return (
-    <div className={`rounded-lg border-2 p-3 my-2 transition-colors ${statusColors[approval.status]}`}>
+    <div className={`rounded-lg border p-3 my-2 transition-colors ${statusColors[approval.status]}`}>
       <div className="flex items-center gap-2 mb-1">
         <span>{statusIcons[approval.status]}</span>
-        <span className="font-semibold text-sm">{approval.toolName}</span>
+        <span className="font-semibold text-sm text-[var(--text-primary)]">{approval.toolName}</span>
         {approval.status !== 'pending' && (
-          <span className="text-xs opacity-60">
+          <span className="text-xs text-[var(--text-muted)]">
             {approval.status === 'allow' ? '許可済み' : '拒否済み'}
           </span>
         )}
       </div>
-      <div className="text-xs font-mono opacity-80 bg-black/10 dark:bg-white/5 rounded px-2 py-1 mb-2 break-all whitespace-pre-wrap">
+      <div className="text-xs font-mono text-[var(--text-secondary)] bg-black/5 dark:bg-white/10 rounded px-2 py-1 mb-2 break-all whitespace-pre-wrap">
         {formatInput()}
       </div>
       {approval.status === 'pending' && (
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => onRespond(approval.requestId, 'allow')}
-            className="px-3 py-1 text-xs font-medium rounded bg-green-600 text-white hover:bg-green-700 transition-colors"
+            className="px-3 py-1 text-xs font-medium rounded bg-green-600/90 text-white hover:bg-green-600 transition-colors"
           >
             ✅ 許可
           </button>
           <button
             onClick={() => onRespond(approval.requestId, 'deny')}
-            className="px-3 py-1 text-xs font-medium rounded bg-red-600 text-white hover:bg-red-700 transition-colors"
+            className="px-3 py-1 text-xs font-medium rounded bg-red-600/90 text-white hover:bg-red-600 transition-colors"
           >
             ❌ 拒否
           </button>
           <button
             onClick={() => onRespond(approval.requestId, 'allow', true)}
-            className="px-3 py-1 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+            className="px-3 py-1 text-xs font-medium rounded bg-slate-600 text-white hover:bg-slate-500 transition-colors"
           >
             🔓 以降すべて許可
           </button>
           <button
             onClick={() => onRespond(approval.requestId, 'allow', false, true)}
-            className="px-3 py-1 text-xs font-medium rounded bg-purple-600 text-white hover:bg-purple-700 transition-colors"
+            className="px-3 py-1 text-xs font-medium rounded bg-violet-600/90 text-white hover:bg-violet-600 transition-colors"
           >
             📌 常に許可
           </button>
@@ -1394,6 +1394,8 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
 
   // タブ状態
   const [activePanel, setActivePanel] = useState<DocPanelTab>('approvals');
+  /** 承認履歴の展開中エントリ ID（クリックで全文表示） */
+  const [expandedApprovalId, setExpandedApprovalId] = useState<string | null>(null);
 
   // Issues 状態
   const [issuesContent, setIssuesContent] = useState<string | null>(null);
@@ -1634,17 +1636,22 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
                   const statusIcon = entry.status === 'auto' ? '🔓' : entry.status === 'allow' ? '✅' : entry.status === 'deny' ? '❌' : '⏳';
                   const statusColor = entry.status === 'auto' ? 'text-purple-500' : entry.status === 'allow' ? 'text-green-500' : entry.status === 'deny' ? 'text-red-500' : 'text-yellow-500';
                   const timeStr = entry.timestamp.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                  // ツール入力の短い表示
+                  const isExpanded = expandedApprovalId === entry.requestId;
+                  // ツール入力の詳細テキスト（全文保持）
                   let detail = '';
                   if (entry.toolName === 'Bash' && entry.toolInput.command) {
-                    detail = String(entry.toolInput.command).substring(0, 60);
+                    detail = String(entry.toolInput.command);
                   } else if (entry.toolInput.file_path) {
                     detail = String(entry.toolInput.file_path);
                   } else if (entry.toolInput.pattern) {
                     detail = String(entry.toolInput.pattern);
                   }
                   return (
-                    <div key={entry.requestId} className="flex items-start gap-1.5 px-1 py-0.5 rounded hover:bg-[var(--bg-tertiary)] transition-colors">
+                    <div
+                      key={entry.requestId}
+                      className="flex items-start gap-1.5 px-1 py-0.5 rounded hover:bg-[var(--bg-tertiary)] transition-colors cursor-pointer"
+                      onClick={() => setExpandedApprovalId(isExpanded ? null : entry.requestId)}
+                    >
                       <span className={`text-xs ${statusColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1">
@@ -1652,7 +1659,7 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
                           <span className="text-[10px] text-[var(--text-muted)]">{timeStr}</span>
                         </div>
                         {detail && (
-                          <p className="text-[10px] text-[var(--text-muted)] font-mono truncate">{detail}</p>
+                          <p className={`text-[10px] text-[var(--text-muted)] font-mono ${isExpanded ? 'whitespace-pre-wrap break-all' : 'truncate'}`}>{detail}</p>
                         )}
                       </div>
                     </div>
