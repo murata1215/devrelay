@@ -196,6 +196,11 @@ export interface AiUsageData {
   durationMs?: number;
   /** 使用モデル名（modelUsage の最初のキーから取得。例: "claude-opus-4-6"） */
   model?: string;
+  /** レートリミット情報（Agent SDK の rate_limit_event から取得） */
+  rateLimits?: {
+    fiveHour?: { utilization: number; resetsAt?: number; status: string };
+    sevenDay?: { utilization: number; resetsAt?: number; status: string };
+  };
 }
 
 export interface AiOutputPayload {

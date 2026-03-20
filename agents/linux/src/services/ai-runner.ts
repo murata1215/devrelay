@@ -18,12 +18,24 @@ interface AiSession {
   aiTool: AiTool;
 }
 
+/** レートリミット情報（rate_limit_event から取得） */
+interface RateLimitEntry {
+  utilization: number;
+  resetsAt?: number;
+  status: string;
+}
+
 export interface AiRunResult {
   extractedSessionId?: string;
   contextUsage?: ContextUsage;
   resumeFailed?: boolean;  // True if --resume failed (exit code 1 + no output)
   /** Claude Code result メッセージから抽出した使用量データ */
   usageData?: AiUsageData;
+  /** レートリミット情報（SDK の rate_limit_event から取得） */
+  rateLimits?: {
+    fiveHour?: RateLimitEntry;
+    sevenDay?: RateLimitEntry;
+  };
 }
 
 // Active AI sessions: sessionId -> AiSession
@@ -376,6 +388,28 @@ async function sendPromptToAiSdk(
         }
       }
 
+      // rate_limit_event: レートリミット情報をキャプチャ
+      if (m.type === 'rate_limit_event' && m.rate_limit_info) {
+        const info = m.rate_limit_info;
+        const pct = info.utilization != null ? Math.round(info.utilization * 100) : null;
+        console.log(`[claude/sdk] 📉 Rate limit: type=${info.rateLimitType}, utilization=${pct}%, status=${info.status}`);
+        if (info.rateLimitType === 'five_hour') {
+          result.rateLimits = result.rateLimits || {};
+          result.rateLimits.fiveHour = {
+            utilization: info.utilization ?? 0,
+            resetsAt: info.resetsAt,
+            status: info.status,
+          };
+        } else if (info.rateLimitType?.startsWith('seven_day')) {
+          result.rateLimits = result.rateLimits || {};
+          result.rateLimits.sevenDay = {
+            utilization: info.utilization ?? 0,
+            resetsAt: info.resetsAt,
+            status: info.status,
+          };
+        }
+      }
+
       // result メッセージ: 使用量データ抽出
       if (m.type === 'result') {
         console.log(`[claude/sdk] ✅ Complete (${m.duration_ms}ms)`);
@@ -407,6 +441,7 @@ async function sendPromptToAiSdk(
           modelUsage: m.modelUsage,
           durationMs: m.duration_ms,
           model: m.modelUsage ? Object.keys(m.modelUsage)[0] : undefined,
+          rateLimits: result.rateLimits,
         };
         console.log(`[claude/sdk] 💾 Usage data captured: duration=${m.duration_ms}ms`);
 

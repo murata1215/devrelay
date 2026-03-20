@@ -856,6 +856,29 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           }
           completionSent = true;
 
+          // レートリミット情報を contextInfo として先送り（📊行としてサーバーにキャプチャされる）
+          if (usageData?.rateLimits) {
+            const parts: string[] = [];
+            if (usageData.rateLimits.fiveHour) {
+              parts.push(`5h: ${Math.round(usageData.rateLimits.fiveHour.utilization * 100)}%`);
+            }
+            if (usageData.rateLimits.sevenDay) {
+              parts.push(`7d: ${Math.round(usageData.rateLimits.sevenDay.utilization * 100)}%`);
+            }
+            if (parts.length > 0) {
+              const rateLimitText = `📊 Rate Limit: ${parts.join(' | ')}\n`;
+              sendMessage({
+                type: 'agent:ai:output',
+                payload: {
+                  machineId: currentConfig!.machineId,
+                  sessionId,
+                  output: rateLimitText,
+                  isComplete: false,
+                },
+              });
+            }
+          }
+
           // クロスプロジェクトクエリの完了タイミングを記録
           const crossQueryStartTime = sessionTimings.get(sessionId);
           if (crossQueryStartTime) {
