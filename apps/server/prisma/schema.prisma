@@ -84,6 +84,7 @@ model Machine {
   lastSeenAt     DateTime?
   managementInfo Json?     // Agent の管理コマンド情報（OS・パス固有）
   projectsDirs   Json?     // Server 管理のプロジェクト検索パス（string[]）
+  skipPermissions Boolean  @default(false) // 全ツール自動許可（--dangerously-skip-permissions 相当）
   deletedAt      DateTime? // ソフトデリート（null = アクティブ）
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

@@ -41,6 +41,10 @@ export function MachinesPage() {
   const [newDirInput, setNewDirInput] = useState('');
   const [projectsDirsModified, setProjectsDirsModified] = useState(false);
 
+  // 全許可モード
+  const [skipPermissions, setSkipPermissions] = useState(false);
+  const [skipPermissionsLoading, setSkipPermissionsLoading] = useState(false);
+
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -107,13 +111,15 @@ export function MachinesPage() {
     setAliasValue(currentAlias !== hostname ? currentAlias : '');
 
     try {
-      const [tokenResult, dirsResult] = await Promise.all([
+      const [tokenResult, dirsResult, skipResult] = await Promise.all([
         machines.getToken(machine.id),
         machines.getProjectsDirs(machine.id),
+        fetch(`/api/machines/${machine.id}/skip-permissions`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('devrelay-token')}` } }).then(r => r.json()).catch(() => ({ skipPermissions: false })),
       ]);
       setSettingsToken(tokenResult.token);
       // DB 設定があればそれを使用、なければ Agent ローカル設定をプリセット
       setProjectsDirs(dirsResult.projectsDirs ?? dirsResult.localProjectsDirs ?? []);
+      setSkipPermissions(skipResult.skipPermissions ?? false);
     } catch (err) {
       setSettingsToken('(Failed to load token)');
     } finally {
@@ -570,6 +576,44 @@ export function MachinesPage() {
                   ? `Display: ${aliasValue}/${settingsTarget.name.includes('/') ? settingsTarget.name.split('/').slice(1).join('/') : ''}`
                   : 'Leave empty to use original hostname'}
               </div>
+            </div>
+
+            {/* 全許可モード */}
+            <div className="mb-4">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <div className="relative">
+                  <input
+                    type="checkbox"
+                    checked={skipPermissions}
+                    onChange={async (e) => {
+                      const newValue = e.target.checked;
+                      setSkipPermissionsLoading(true);
+                      try {
+                        await fetch(`/api/machines/${settingsTarget!.id}/skip-permissions`, {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('devrelay-token')}` },
+                          body: JSON.stringify({ skipPermissions: newValue }),
+                        });
+                        setSkipPermissions(newValue);
+                      } catch (err) {
+                        console.error('Failed to update skip-permissions:', err);
+                      } finally {
+                        setSkipPermissionsLoading(false);
+                      }
+                    }}
+                    disabled={skipPermissionsLoading}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-slate-300 dark:bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:bg-amber-500 transition-colors"></div>
+                  <div className="absolute left-[2px] top-[2px] bg-white w-5 h-5 rounded-full transition-transform peer-checked:translate-x-5"></div>
+                </div>
+                <div>
+                  <span className="text-sm font-medium text-[var(--text-primary)]">⚡ Skip Permissions</span>
+                  <span className="block text-xs text-[var(--text-muted)]">
+                    Exec モードで全ツールを自動許可（--dangerously-skip-permissions 相当）
+                  </span>
+                </div>
+              </label>
             </div>
 
             {/* プロジェクト検索パス */}

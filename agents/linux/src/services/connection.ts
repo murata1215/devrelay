@@ -83,6 +83,8 @@ let currentConfig: AgentConfig | null = null;
 let currentMachineId: string | null = null;
 /** Server から配信されたプランモード許可ツール（null = デフォルト使用） */
 let serverAllowedTools: string[] | null = null;
+/** Server から配信された全許可モード（true = 全ツール自動承認） */
+let serverSkipPermissions = false;
 
 // 再接続状態（バックオフ管理）
 let reconnectAttempts = 0;
@@ -268,6 +270,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           serverAllowedTools = message.payload.allowedTools;
           const count = serverAllowedTools ? serverAllowedTools.length : 'default';
           console.log(`🔧 Allowed tools from server: ${count}`);
+        }
+        // 全許可モードの受信
+        if (message.payload.skipPermissions !== undefined) {
+          serverSkipPermissions = message.payload.skipPermissions;
+          console.log(`${serverSkipPermissions ? '⚡' : '🔐'} Skip permissions mode: ${serverSkipPermissions}`);
         }
         // プロトコルバージョン不足の警告（接続は成功しているが会話は制限される）
         if (message.payload.updateRequired) {
@@ -801,6 +808,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     resumeSessionId: sessionInfo.claudeResumeSessionId,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
+    skipPermissions: serverSkipPermissions,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）

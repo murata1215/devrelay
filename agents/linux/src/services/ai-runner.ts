@@ -231,6 +231,8 @@ export interface SendPromptOptions {
   usePlanMode?: boolean;
   /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
   allowedTools?: string[];
+  /** 全ツール自動許可モード（true = --dangerously-skip-permissions 相当） */
+  skipPermissions?: boolean;
   /**
    * ツール承認リクエストのコールバック（Agent SDK 経由の exec モードで使用）
    * 設定されている場合、canUseTool で WebSocket 経由のユーザー承認を行う
@@ -346,6 +348,13 @@ async function sendPromptToAiSdk(
       const onApprovalRequest = options.onToolApprovalRequest;
       sdkOptions.canUseTool = async (toolName, input, opts) => {
         const isQuestion = toolName === 'AskUserQuestion';
+
+        // 全許可モード: AskUserQuestion 以外は即座に allow
+        if (!isQuestion && options.skipPermissions) {
+          console.log(`⚡ [SDK] Auto-approved (skip-permissions mode): ${toolName}`);
+          options.onAutoApproved?.({ toolName, toolInput: input });
+          return { behavior: 'allow', updatedInput: input };
+        }
 
         // AskUserQuestion は常にユーザーに聞く（approveAllMode や自動承認をスキップ）
         if (!isQuestion) {

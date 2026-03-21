@@ -383,6 +383,7 @@ async function handleAgentConnect(
       machineId: machine.id,
       projectsDirs: serverProjectsDirs,
       allowedTools,
+      skipPermissions: machine.skipPermissions || undefined,
       ...(isOutdated && {
         updateRequired: true,
         minProtocolVersion: MIN_PROTOCOL_VERSION,
@@ -1143,7 +1144,7 @@ export async function cancelAiProcess(machineId: string, sessionId: string) {
  * Agent がオフラインの場合は何もしない（次回接続時に server:connect:ack で配信される）
  * 送信失敗に備え pendingConfigUpdates に登録し、次回 agent:ping 時にリトライする
  */
-export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null }) {
+export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; skipPermissions?: boolean }) {
   // 既存の pending があればマージ（projectsDirs と allowedTools が同時に pending でも欠落しない）
   const existing = pendingConfigUpdates.get(machineId);
   const mergedConfig = existing ? { ...existing.config, ...config } : config;

@@ -302,6 +302,44 @@ export async function apiRoutes(app: FastifyInstance) {
     return { success: true, projectsDirs: projectsDirs ?? null };
   });
 
+  // skipPermissions（全ツール自動許可モード）の取得・更新
+  app.get('/api/machines/:id/skip-permissions', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+      select: { skipPermissions: true },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+    return { skipPermissions: machine.skipPermissions };
+  });
+
+  app.put('/api/machines/:id/skip-permissions', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const { skipPermissions } = request.body as { skipPermissions: boolean };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+
+    await prisma.machine.update({
+      where: { id },
+      data: { skipPermissions },
+    });
+
+    // Agent がオンラインならリアルタイム配信
+    const connectedAgents = getConnectedAgents();
+    if (connectedAgents.has(id)) {
+      pushConfigUpdate(id, { skipPermissions });
+    }
+
+    return { success: true, skipPermissions };
+  });
+
   // ========================================
   // プロジェクト一覧
   // ========================================

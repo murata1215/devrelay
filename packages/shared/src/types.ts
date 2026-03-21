@@ -274,12 +274,15 @@ export interface ServerConnectAckPayload {
   updateRequired?: boolean;
   /** サーバーが要求する最小プロトコルバージョン */
   minProtocolVersion?: number;
+  /** 全ツール自動許可モード（Agent の exec モードで承認をスキップ） */
+  skipPermissions?: boolean;
 }
 
 /** Server → Agent: 設定更新の配信（リアルタイム） */
 export interface ServerConfigUpdatePayload {
   projectsDirs?: string[] | null;  // プロジェクト検索パスの更新（null = ローカル設定に戻す）
   allowedTools?: string[] | null;  // プランモード許可ツールの更新（null = デフォルトに戻す）
+  skipPermissions?: boolean;  // 全ツール自動許可モードの更新
 }
 
 /** ドキュメント同期ペイロード（サーバー → Agent、ファイル追加） */
