@@ -47,6 +47,9 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Rate Limit Display**: Captures Claude Code's `rate_limit_event` from Agent SDK, displays `📊 Rate Limit: 5h: XX% | 7d: XX%` on completion
 - **Protocol Version Enforcement**: Soft-rejection mechanism — outdated agents stay online (can receive `u` update command) but conversations are blocked until updated
 - **Agent Log Rotation**: Daily copyTruncate rotation with 7-day retention for `agent.log`
+- **Per-Agent Skip Permissions**: Toggle `⚡ Skip Permissions` in Agent Settings to auto-approve all tools (like `--dangerously-skip-permissions`), AskUserQuestion still prompts
+- **Multi-Agent Routing Fix**: DB fallback for projectId resolution prevents messages from appearing in wrong project tabs
+- **Xcode Project Detection**: `.xcodeproj` directories are detected as projects alongside `CLAUDE.md`
 
 ## 💡 Token Efficiency
 

@@ -853,3 +853,18 @@ Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する仕
 - **ローテーション**: 最終更新が昨日以前 → `agent_YYYYMMDD.log` にコピー → truncate
 - **保持期間**: 7日超の `agent_*.log` を自動削除
 - **実装**: `agents/linux/src/services/log-rotator.ts`（macOS も同一）
+
+## Agent ごとの全許可モード (#194)
+
+- **Machine.skipPermissions**: DB カラム（Boolean, default false）
+- **配信**: `server:connect:ack` / `server:config:update` の `skipPermissions` フィールド
+- **Agent 側**: `canUseTool` の先頭（sessionApproved / approveAllMode の前）でチェック
+- **AskUserQuestion 除外**: 質問は常にユーザーに聞く（skipPermissions の対象外）
+- **WebUI**: Agent Settings モーダルにトグルスイッチ、`PUT /api/machines/:id/skip-permissions` API
+- **リアルタイム反映**: WebUI で ON/OFF → `pushConfigUpdate()` → Agent に即時配信
+
+## プロジェクト検出マーカー (#192)
+
+`looksLikeProject()` で以下のマーカーを検出:
+1. `CLAUDE.md` ファイル（従来）
+2. `.xcodeproj` ディレクトリ（iOS/macOS 開発用に追加）

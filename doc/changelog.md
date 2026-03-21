@@ -6,6 +6,28 @@
 
 ## 実装済み機能
 
+### #194: Agent ごとの全許可モード（skipPermissions）(2026-03-21)
+
+Agent 単位で `--dangerously-skip-permissions` 相当の全ツール自動許可モードを追加。
+
+- **Machine.skipPermissions**: DB に Boolean カラム追加（デフォルト false）
+- **WebUI トグルスイッチ**: Agent Settings モーダルに「⚡ Skip Permissions」トグル追加
+- **リアルタイム配信**: `server:connect:ack` / `server:config:update` で Agent に配信
+- **canUseTool チェック**: exec モードの先頭で skipPermissions を確認 → AskUserQuestion 以外は即 allow
+- **API**: `GET/PUT /api/machines/:id/skip-permissions`
+
+### #193: 複数エージェント同時実行時のメッセージルーティング修正 (2026-03-21)
+
+- **原因**: `broadcastToSession()` で `sessionProjectMap` キャッシュミス → projectId undefined → WebUI が activeTab にフォールバック
+- **修正**: キャッシュミス時に DB から projectId を取得するフォールバック追加
+- **finalizeProgress**: tracker の projectId が undefined の場合も sessionProjectMap からフォールバック
+
+### #192: .xcodeproj プロジェクト検出マーカー追加 (2026-03-21)
+
+- `looksLikeProject()` に `.xcodeproj` ディレクトリ検出を追加
+- CLAUDE.md がなくても iOS/macOS 開発プロジェクトを自動検出
+- Linux/macOS/Windows Agent 全対応
+
 ### #191: AskUserQuestion 対応 — Claude Code からの質問を WebUI/Discord/Telegram に中継 (2026-03-21)
 
 Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する機能を追加。
