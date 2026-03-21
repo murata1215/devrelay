@@ -215,7 +215,24 @@ export async function endSession(sessionId: string) {
 
 export async function broadcastToSession(sessionId: string, message: string, isComplete: boolean, files?: FileAttachment[]) {
   const participants = sessionParticipants.get(sessionId) || [];
-  const projectId = sessionProjectMap.get(sessionId);
+  let projectId = sessionProjectMap.get(sessionId);
+
+  // キャッシュにない場合は DB から取得（複数エージェント同時実行時のレースコンディション対策）
+  if (!projectId) {
+    try {
+      const session = await prisma.session.findUnique({
+        where: { id: sessionId },
+        select: { projectId: true },
+      });
+      if (session?.projectId) {
+        projectId = session.projectId;
+        sessionProjectMap.set(sessionId, projectId);
+        console.log(`📍 projectId resolved from DB for session ${sessionId.substring(0, 8)}...: ${projectId.substring(0, 8)}...`);
+      }
+    } catch (err) {
+      console.error(`Failed to resolve projectId for session ${sessionId}:`, err);
+    }
+  }
 
   for (const { platform, chatId } of participants) {
     // Stop typing indicator when response is complete
@@ -461,7 +478,9 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       }
     } else if (platform === 'web') {
       stopWebTyping(chatId);
-      await sendWebMessage(chatId, messageToSend, files, tracker?.projectId);
+      // tracker の projectId がない場合は sessionProjectMap からフォールバック
+      const finalProjectId = tracker?.projectId ?? sessionProjectMap.get(sessionId);
+      await sendWebMessage(chatId, messageToSend, files, finalProjectId);
     }
   }
 
