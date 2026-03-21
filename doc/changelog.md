@@ -6,6 +6,53 @@
 
 ## 実装済み機能
 
+### #191: AskUserQuestion 対応 — Claude Code からの質問を WebUI/Discord/Telegram に中継 (2026-03-21)
+
+Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する機能を追加。
+
+- **deny-with-answer パターン**: `canUseTool` で AskUserQuestion をインターセプト → ユーザーに質問を中継 → 回答を `{ behavior: 'deny', message: 'User answered: ...' }` で Claude に返す
+- **WebUI QuestionCard**: 質問テキスト + 選択肢ボタン + 「その他...」自由テキスト入力
+- **Discord/Telegram**: 選択肢ボタン / inline_keyboard で回答
+- **plan/exec 両モード対応**: plan モードでも `canUseTool` を設定し AskUserQuestion をインターセプト
+- **approveAllMode スキップ**: AskUserQuestion は「以降すべて許可」の対象外（質問は常にユーザーに聞く）
+- **Agreement 更新**: 「AskUserQuestion 使用禁止」→「exec モードでは使用可能」に変更
+
+### #190: Claude Code レートリミット情報表示 (2026-03-20)
+
+Agent SDK の `rate_limit_event` をキャプチャし、AI 完了時にレートリミット情報を表示。
+
+- **SDK ストリームからキャプチャ**: `query()` の `rate_limit_event` メッセージから `five_hour` / `seven_day` を取得
+- **contextInfo テキスト表示**: `📊 Rate Limit: 5h: XX% | 7d: XX%` 形式で WebUI/Discord/Telegram に表示
+- **DB 保存**: `usageData.rateLimits` として Message テーブルに永続化
+- **utilization null 対応**: SDK が値を返さない場合は行自体を非表示
+- **Agent SDK v0.2.80 更新**: Claude Code v2.1.80 の rate_limits 対応
+
+### #189: Agent ログローテーション（日次 + 7日保持）(2026-03-20)
+
+- **copyTruncate 方式**: nohup stdout リダイレクトと互換（fd を壊さない）
+- **日次チェック**: 起動時 + 24時間ごとに `agent.log` をチェック
+- **自動削除**: 7日超の `agent_YYYYMMDD.log` を削除
+- Linux/macOS Agent 両対応
+
+### #188: 停止コマンド xargs エラー修正 (2026-03-20)
+
+- Agent 停止済み時に `xargs kill` が Usage エラーを表示する問題を修正
+- `xargs kill` → `xargs -r kill`（`--no-run-if-empty`）
+
+### #187: WebUI タブ切替コンテキスト同期修正 (2026-03-20)
+
+- **原因**: `sendCommand()` が projectId を送信しておらず、サーバーが stale なキャッシュを使う
+- **修正**: 全コマンドに `projectId`（= activeTabId）を付与、サーバー側でコンテキスト不一致時に `handleProjectConnect()` で自動切替
+
+### #186: プロトコルバージョンによる Agent 強制アップデート機構 (2026-03-20)
+
+サーバー側のプロトコル変更時に古い Agent を検出し、会話を制限する仕組み。
+
+- **PROTOCOL_VERSION 定数**: shared パッケージに定義、Agent がビルド時に焼き込む
+- **ソフトリジェクション**: 接続は許可（オンライン表示）、会話は `sendPromptToAgent` でブロック
+- **`u` コマンド対応**: 接続が維持されるため `u` で更新可能（鶏と卵問題を回避）
+- **再接続ループ防止**: 新 Agent は `protocolUpdateRequired` フラグで再接続を停止
+
 ### #185: ツール個別許可 + WebUI スクロール修正 + サイドバー改善 (2026-03-20)
 
 #### ツール個別許可（Exec Mode Session-Scoped Permission Rules）

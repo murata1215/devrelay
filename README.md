@@ -43,6 +43,10 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Tool Approval History**: Real-time tool approval with persistent history (DB + Agent JSONL log), auto-approved tools shown with 🔓 icon, survives browser refresh
 - **Discord/Telegram Tool Approval**: Approve or deny AI tool executions via Discord buttons or Telegram inline keyboards, with cross-platform sync (approve on Discord → WebUI buttons auto-disabled)
 - **Per-Tool Permission Rules**: "Always allow this tool" button (📌) creates persistent rules (e.g., `Edit`, `Bash(git *)`) — auto-approves matching tools in future sessions without prompting, manageable from Settings page
+- **AskUserQuestion Relay**: Claude Code's questions are relayed to WebUI/Discord/Telegram with selectable option buttons + free-text "Other" input, answers sent back via deny-with-answer pattern
+- **Rate Limit Display**: Captures Claude Code's `rate_limit_event` from Agent SDK, displays `📊 Rate Limit: 5h: XX% | 7d: XX%` on completion
+- **Protocol Version Enforcement**: Soft-rejection mechanism — outdated agents stay online (can receive `u` update command) but conversations are blocked until updated
+- **Agent Log Rotation**: Daily copyTruncate rotation with 7-day retention for `agent.log`
 
 ## 💡 Token Efficiency
 
