@@ -114,7 +114,7 @@ export function MachinesPage() {
       const [tokenResult, dirsResult, skipResult] = await Promise.all([
         machines.getToken(machine.id),
         machines.getProjectsDirs(machine.id),
-        fetch(`/api/machines/${machine.id}/skip-permissions`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('devrelay-token')}` } }).then(r => r.json()).catch(() => ({ skipPermissions: false })),
+        fetch(`/api/machines/${machine.id}/skip-permissions`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ skipPermissions: false })),
       ]);
       setSettingsToken(tokenResult.token);
       // DB 設定があればそれを使用、なければ Agent ローカル設定をプリセット
@@ -591,7 +591,7 @@ export function MachinesPage() {
                       try {
                         await fetch(`/api/machines/${settingsTarget!.id}/skip-permissions`, {
                           method: 'PUT',
-                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('devrelay-token')}` },
+                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
                           body: JSON.stringify({ skipPermissions: newValue }),
                         });
                         setSkipPermissions(newValue);
