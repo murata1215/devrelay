@@ -117,9 +117,15 @@ async function looksLikeProject(dir: string): Promise<boolean> {
   try {
     await fs.access(path.join(dir, 'CLAUDE.md'));
     return true;
-  } catch {
-    return false;
-  }
+  } catch {}
+
+  // Recognize as project if .xcodeproj directory exists (iOS/macOS development)
+  try {
+    const entries = await fs.readdir(dir);
+    if (entries.some(e => e.endsWith('.xcodeproj'))) return true;
+  } catch {}
+
+  return false;
 }
 
 export async function listProjects(): Promise<ProjectConfig[]> {
