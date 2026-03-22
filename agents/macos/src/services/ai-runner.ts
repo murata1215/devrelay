@@ -8,6 +8,7 @@ import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage } from './session-store.js';
+import { getServerSkipPermissions } from './connection.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 
@@ -349,8 +350,8 @@ async function sendPromptToAiSdk(
       sdkOptions.canUseTool = async (toolName, input, opts) => {
         const isQuestion = toolName === 'AskUserQuestion';
 
-        // 全許可モード: AskUserQuestion 以外は即座に allow
-        if (!isQuestion && options.skipPermissions) {
+        // 全許可モード: AskUserQuestion 以外は即座に allow（動的に最新値を参照）
+        if (!isQuestion && getServerSkipPermissions()) {
           console.log(`⚡ [SDK] Auto-approved (skip-permissions mode): ${toolName}`);
           options.onAutoApproved?.({ toolName, toolInput: input });
           return { behavior: 'allow', updatedInput: input };

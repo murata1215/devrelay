@@ -87,6 +87,11 @@ let serverAllowedTools: string[] | null = null;
 /** Server から配信された全許可モード（true = 全ツール自動承認） */
 let serverSkipPermissions = false;
 
+/** serverSkipPermissions の現在値を返すゲッター（セッション中の動的参照用） */
+export function getServerSkipPermissions(): boolean {
+  return serverSkipPermissions;
+}
+
 // 再接続状態（バックオフ管理）
 let reconnectAttempts = 0;
 /** 最後に WebSocket 接続が確立した時刻（安定接続判定用） */
@@ -366,8 +371,13 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         const count = serverAllowedTools ? serverAllowedTools.length : 'default';
         console.log(`🔧 Allowed tools updated from server: ${count}`);
       }
+      // 全許可モードの更新
+      if (message.payload.skipPermissions !== undefined) {
+        serverSkipPermissions = message.payload.skipPermissions;
+        console.log(`${serverSkipPermissions ? '⚡' : '🔐'} Skip permissions mode updated: ${serverSkipPermissions}`);
+      }
       // ack を送信（pending リトライを停止させる）
-      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.projectsDirs !== undefined)) {
+      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.projectsDirs !== undefined || message.payload.skipPermissions !== undefined)) {
         sendMessage({
           type: 'agent:config:ack',
           payload: { machineId: currentMachineId },

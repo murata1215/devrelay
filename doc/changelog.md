@@ -7,6 +7,14 @@
 ## 実装済み機能
 
 
+### #196: skipPermissions リアルタイム更新・動的反映修正 (2026-03-22)
+
+WebUI で Skip Permissions トグルを切り替えても Agent に反映されないバグを修正。
+
+- **config:update ハンドラ修正**: `server:config:update` で `skipPermissions` が処理されていなかった → ハンドリング追加 + ack 条件に含める（Linux/macOS Agent）
+- **動的参照に変更**: `canUseTool` 内の `options.skipPermissions`（セッション開始時のスナップショット）→ `getServerSkipPermissions()` ゲッター関数で動的に最新値を参照
+- **セッション中の切替対応**: Agent 接続中・セッション実行中いずれのタイミングでもトグル切替が即座に反映
+
 ### #195: WebUI 右パネルに Plan タブ追加 (2026-03-22)
 
 Claude Code のプランモードで作成されるプランファイル（`~/.claude/plans/*.md`）を WebUI で閲覧可能に。
