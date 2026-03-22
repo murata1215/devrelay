@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+
+### #195: WebUI 右パネルに Plan タブ追加 (2026-03-22)
+
+Claude Code のプランモードで作成されるプランファイル（`~/.claude/plans/*.md`）を WebUI で閲覧可能に。
+
+- **Plan タブ**: 右パネルに Approvals / Docs / Issues に加えて Plan タブ追加
+- **最新プラン自動表示**: `~/.claude/plans/` 内の更新日時が最も新しい `.md` を自動選択
+- **Agent 経由読み取り**: `server:plan:latest` / `agent:plan:content` メッセージで Agent にファイル読み取りを委譲
+- **API**: `GET /api/projects/:projectId/plan`
+- **Linux/macOS Agent 対応**: 両 Agent に `handlePlanLatest` ハンドラ追加
+
 ### #194: Agent ごとの全許可モード（skipPermissions）(2026-03-21)
 
 Agent 単位で `--dangerously-skip-permissions` 相当の全ツール自動許可モードを追加。

@@ -64,6 +64,9 @@ const pendingCrossQueries = new Map<string, HistoryRequest<{ output: string; fil
 // プロジェクトファイル読み取り要求の待機: requestId → { resolve, reject, timeout }
 const pendingFileReadRequests = new Map<string, HistoryRequest<{ content: string | null; error?: string }>>();
 
+// プランファイル読み取り要求の待機: requestId → { resolve, reject, timeout }
+const pendingPlanRequests = new Map<string, HistoryRequest<{ filename: string | null; content: string | null }>>();
+
 // Agent ローカルの projectsDirs: machineId -> string[]（接続時に報告される）
 const agentLocalProjectsDirs = new Map<string, string[]>();
 
@@ -187,6 +190,10 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:tool:approval:auto':
           await handleToolApprovalAuto(message.payload);
+          break;
+
+        case 'agent:plan:content':
+          handlePlanContent(message.payload);
           break;
       }
     } catch (err) {
@@ -813,6 +820,21 @@ function handleProjectFileContent(payload: { machineId: string; requestId: strin
       pending.reject(new Error(error));
     } else {
       pending.resolve({ content, error });
+    }
+  }
+}
+
+/** Agent からのプランファイル読み取り結果を処理 */
+function handlePlanContent(payload: { machineId: string; requestId: string; filename: string | null; content: string | null; error?: string }) {
+  const { requestId, filename, content, error } = payload;
+  const pending = pendingPlanRequests.get(requestId);
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingPlanRequests.delete(requestId);
+    if (error) {
+      pending.reject(new Error(error));
+    } else {
+      pending.resolve({ filename, content });
     }
   }
 }
@@ -1540,6 +1562,41 @@ export function requestProjectFileRead(
     sendToAgent(ws, {
       type: 'server:project:file:read',
       payload: { projectPath, filePath, requestId },
+    });
+  });
+}
+
+// -----------------------------------------------------------------------------
+// Plan File Read API
+// -----------------------------------------------------------------------------
+
+const PLAN_READ_TIMEOUT = 15000; // 15 seconds
+
+/**
+ * Agent に最新プランファイルの読み取りを要求
+ */
+export function requestLatestPlanFile(
+  machineId: string,
+): Promise<{ filename: string | null; content: string | null }> {
+  return new Promise((resolve, reject) => {
+    const ws = connectedAgents.get(machineId);
+    if (!ws || ws.readyState !== ws.OPEN) {
+      reject(new Error('Agent is not connected'));
+      return;
+    }
+
+    const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+    const timeout = setTimeout(() => {
+      pendingPlanRequests.delete(requestId);
+      reject(new Error('Request timed out'));
+    }, PLAN_READ_TIMEOUT);
+
+    pendingPlanRequests.set(requestId, { resolve, reject, timeout });
+
+    sendToAgent(ws, {
+      type: 'server:plan:latest',
+      payload: { requestId },
     });
   });
 }

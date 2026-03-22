@@ -109,7 +109,8 @@ export type AgentMessage =
   | { type: 'agent:update:status'; payload: AgentUpdateStatusPayload }
   | { type: 'agent:project:file:content'; payload: ProjectFileContentPayload }
   | { type: 'agent:tool:approval:request'; payload: ToolApprovalRequestPayload }
-  | { type: 'agent:tool:approval:auto'; payload: ToolApprovalAutoPayload };
+  | { type: 'agent:tool:approval:auto'; payload: ToolApprovalAutoPayload }
+  | { type: 'agent:plan:content'; payload: PlanContentPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -251,7 +252,8 @@ export type ServerToAgentMessage =
   | { type: 'server:doc:sync'; payload: DocSyncPayload }
   | { type: 'server:doc:delete'; payload: DocDeletePayload }
   | { type: 'server:project:file:read'; payload: ProjectFileReadPayload }
-  | { type: 'server:tool:approval:response'; payload: ToolApprovalResponsePayload };
+  | { type: 'server:tool:approval:response'; payload: ToolApprovalResponsePayload }
+  | { type: 'server:plan:latest'; payload: PlanLatestRequestPayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -309,6 +311,20 @@ export interface ProjectFileContentPayload {
   machineId: string;
   requestId: string;
   content: string | null;  // ファイル内容（null = 未存在）
+  error?: string;
+}
+
+/** Server → Agent: 最新プランファイル読み取り要求 */
+export interface PlanLatestRequestPayload {
+  requestId: string;
+}
+
+/** Agent → Server: プランファイル内容 */
+export interface PlanContentPayload {
+  machineId: string;
+  requestId: string;
+  filename: string | null;   // ファイル名（null = プランなし）
+  content: string | null;    // ファイル内容
   error?: string;
 }
 

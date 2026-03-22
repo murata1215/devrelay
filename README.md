@@ -50,6 +50,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Per-Agent Skip Permissions**: Toggle `⚡ Skip Permissions` in Agent Settings to auto-approve all tools (like `--dangerously-skip-permissions`), AskUserQuestion still prompts
 - **Multi-Agent Routing Fix**: DB fallback for projectId resolution prevents messages from appearing in wrong project tabs
 - **Xcode Project Detection**: `.xcodeproj` directories are detected as projects alongside `CLAUDE.md`
+- **Plan File Viewer**: View Claude Code's plan files (`~/.claude/plans/*.md`) in the WebUI right panel — automatically shows the latest plan with Markdown rendering
 
 ## 💡 Token Efficiency
 

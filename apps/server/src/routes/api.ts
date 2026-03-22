@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, requestHistoryDates, requestHistoryExport, requestProjectFileRead, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
+import { getConnectedAgents, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import archiver from 'archiver';
@@ -472,6 +472,35 @@ export async function apiRoutes(app: FastifyInstance) {
       return { content: result.content };
     } catch (err: any) {
       return reply.status(500).send({ error: err.message || 'Failed to read project file' });
+    }
+  });
+
+  /**
+   * 最新プランファイルを Agent 経由で取得
+   * @route GET /api/projects/:projectId/plan
+   */
+  app.get('/api/projects/:projectId/plan', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { projectId } = request.params as { projectId: string };
+
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+      include: { machine: true },
+    });
+
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    if (!getConnectedAgents().has(project.machineId)) {
+      return reply.status(503).send({ error: 'Agent is offline' });
+    }
+
+    try {
+      const result = await requestLatestPlanFile(project.machineId);
+      return { filename: result.filename, content: result.content };
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message || 'Failed to read plan file' });
     }
   });
 

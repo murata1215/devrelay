@@ -24,7 +24,8 @@ import type {
   AiCancelPayload,
   DocSyncPayload,
   DocDeletePayload,
-  ProjectFileReadPayload
+  ProjectFileReadPayload,
+  PlanLatestRequestPayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -51,7 +52,7 @@ import { ensureSkillFiles } from './skill-manager.js';
 import { exec as execCallback, spawn } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
-import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
+import { readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 const execAsync = promisify(execCallback);
@@ -392,6 +393,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:project:file:read':
       handleProjectFileRead(message.payload);
+      break;
+
+    case 'server:plan:latest':
+      handlePlanLatest(message.payload);
       break;
 
     case 'server:tool:approval:response':
@@ -2033,6 +2038,61 @@ async function handleDocDelete(payload: DocDeletePayload) {
   } catch (err: any) {
     if (err.code !== 'ENOENT') {
       console.error(`❌ Doc delete failed for ${filename}:`, err.message);
+    }
+  }
+}
+
+/**
+ * 最新のプランファイルを読み取って返す
+ * ~/.claude/plans/ 内の .md ファイルから更新日時が最も新しいものを選択
+ */
+async function handlePlanLatest(payload: PlanLatestRequestPayload) {
+  const { requestId } = payload;
+  const plansDir = join(homedir(), '.claude', 'plans');
+
+  try {
+    const entries = await readdir(plansDir);
+    const mdFiles = entries.filter(f => f.endsWith('.md'));
+
+    if (mdFiles.length === 0) {
+      if (currentMachineId) {
+        sendMessage({
+          type: 'agent:plan:content',
+          payload: { machineId: currentMachineId, requestId, filename: null, content: null },
+        });
+      }
+      return;
+    }
+
+    // 更新日時が最も新しいファイルを選択
+    let latestFile = mdFiles[0];
+    let latestMtime = 0;
+    for (const file of mdFiles) {
+      const s = await stat(join(plansDir, file));
+      if (s.mtimeMs > latestMtime) {
+        latestMtime = s.mtimeMs;
+        latestFile = file;
+      }
+    }
+
+    const content = await readFile(join(plansDir, latestFile), 'utf-8');
+    console.log(`📋 Plan file read: ${latestFile} (${content.length} chars)`);
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:plan:content',
+        payload: { machineId: currentMachineId, requestId, filename: latestFile, content },
+      });
+    }
+  } catch (err: any) {
+    const notFound = err.code === 'ENOENT';
+    if (!notFound) {
+      console.error(`❌ Plan file read failed:`, err.message);
+    }
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:plan:content',
+        payload: { machineId: currentMachineId, requestId, filename: null, content: null, error: notFound ? undefined : err.message },
+      });
     }
   }
 }

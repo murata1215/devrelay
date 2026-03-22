@@ -1538,7 +1538,7 @@ function renderInline(text: string): React.ReactNode {
   });
 }
 
-type DocPanelTab = 'approvals' | 'docs' | 'issues';
+type DocPanelTab = 'approvals' | 'docs' | 'issues' | 'plan';
 
 /** ツール承認履歴の1エントリ */
 interface ApprovalHistoryEntry {
@@ -1567,6 +1567,12 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
   const [issuesContent, setIssuesContent] = useState<string | null>(null);
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issuesError, setIssuesError] = useState<string | null>(null);
+
+  // Plan 状態
+  const [planContent, setPlanContent] = useState<string | null>(null);
+  const [planFilename, setPlanFilename] = useState<string | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
 
   // リサイズ状態
   const [panelWidth, setPanelWidth] = useState(() => {
@@ -1616,6 +1622,31 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
       fetchIssues();
     }
   }, [activePanel, fetchIssues]);
+
+  /** 最新プランファイルを取得 */
+  const fetchPlan = useCallback(async () => {
+    if (!projectId) { setPlanContent(null); setPlanFilename(null); return; }
+    setPlanLoading(true);
+    setPlanError(null);
+    try {
+      const res = await projectsApi.getLatestPlan(projectId);
+      setPlanFilename(res.filename);
+      setPlanContent(res.content);
+    } catch (err: any) {
+      setPlanError(err.message || 'Failed to load plan');
+      setPlanContent(null);
+      setPlanFilename(null);
+    } finally {
+      setPlanLoading(false);
+    }
+  }, [projectId]);
+
+  // Plan タブ選択時または projectId 変更時に取得
+  useEffect(() => {
+    if (activePanel === 'plan') {
+      fetchPlan();
+    }
+  }, [activePanel, fetchPlan]);
 
   /** ファイルをアップロード */
   const handleUpload = useCallback(async (files: FileList | File[]) => {
@@ -1762,6 +1793,16 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
           >
             Issues
           </button>
+          <button
+            onClick={() => setActivePanel('plan')}
+            className={`flex-1 text-xs py-2 text-center transition-colors ${
+              activePanel === 'plan'
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+            }`}
+          >
+            Plan
+          </button>
           {activePanel === 'docs' && (
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -1776,6 +1817,16 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
             <button
               onClick={fetchIssues}
               disabled={!projectId || issuesLoading}
+              className="text-xs px-1.5 py-0.5 mr-1 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
+              title="更新"
+            >
+              ↻
+            </button>
+          )}
+          {activePanel === 'plan' && (
+            <button
+              onClick={fetchPlan}
+              disabled={!projectId || planLoading}
               className="text-xs px-1.5 py-0.5 mr-1 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-color)] disabled:opacity-50 transition-colors"
               title="更新"
             >
@@ -1846,6 +1897,25 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
               <p className="text-xs text-[var(--text-muted)] text-center mt-4">doc/issues.md が見つかりません</p>
             ) : (
               <div className="leading-relaxed">{renderMarkdown(issuesContent)}</div>
+            )}
+          </div>
+        ) : activePanel === 'plan' ? (
+          <div className="flex-1 overflow-y-auto p-2">
+            {!projectId ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">タブを選択してください</p>
+            ) : planLoading ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">読み込み中...</p>
+            ) : planError ? (
+              <p className="text-xs text-red-400 text-center mt-4">{planError}</p>
+            ) : planContent === null ? (
+              <p className="text-xs text-[var(--text-muted)] text-center mt-4">プランファイルがありません</p>
+            ) : (
+              <>
+                {planFilename && (
+                  <p className="text-[10px] text-[var(--text-muted)] mb-2 font-mono truncate" title={planFilename}>📋 {planFilename}</p>
+                )}
+                <div className="leading-relaxed">{renderMarkdown(planContent)}</div>
+              </>
             )}
           </div>
         ) : (

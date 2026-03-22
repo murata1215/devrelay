@@ -190,6 +190,11 @@ export const projects = {
     return request('GET', `/projects/${projectId}/file?filePath=${encodeURIComponent(filePath)}`);
   },
 
+  /** 最新プランファイルを Agent 経由で取得 */
+  async getLatestPlan(projectId: string): Promise<{ filename: string | null; content: string | null }> {
+    return request('GET', `/projects/${projectId}/plan`);
+  },
+
   /** プロジェクト横断メッセージ履歴を取得（全セッション横断、カーソルベースページネーション） */
   async getMessages(projectId: string, opts?: { before?: string; limit?: number }): Promise<{ messages: SessionMessage[]; hasMore: boolean }> {
     const params = new URLSearchParams();
