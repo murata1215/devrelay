@@ -771,6 +771,17 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - **JSON 構築には `jq -n --arg` を使用**（shell エスケープは脆弱なため禁止）
 - **SKILL.md に Bash timeout 指示が必須**（cross-query は最大5分かかるが、Claude Code のデフォルト Bash timeout は2分）
 
+### 送信元プロジェクト表示（#199）
+- `Message.sourceProjectName` カラムでクロスクエリの送信元を記録
+- REST API 経由: `auth.machineId` から DB でプロジェクト名を特定（1マシン1プロジェクトならプロジェクト名、複数ならマシン displayName）
+- Discord/Telegram 経由: `context.currentProjectName` を使用
+- WebUI チャット: ユーザー名横にバッジ、Conversations: 🔗 バッジに送信元名追加
+
+### Google ID Token 検証（#199）
+- `POST /api/auth/google/token`: Flutter `google_sign_in` の `idToken` を検証してセッション発行
+- Google `tokeninfo` エンドポイント + `aud` チェック（外部ライブラリ不要）
+- Flutter 側 `serverClientId` に Web 用 `GOOGLE_CLIENT_ID` を指定すれば追加対応不要
+
 ### 注意事項
 - `authenticate` ミドルウェアは `request.user` を設定。`request.userId` ではない
 - Team API エンドポイントは `(request as any).user.id` でユーザー ID を取得

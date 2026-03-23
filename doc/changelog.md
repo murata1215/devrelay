@@ -7,6 +7,20 @@
 ## 実装済み機能
 
 
+### #199: クロスプロジェクトクエリの送信元表示 + Google ID Token エンドポイント (2026-03-24)
+
+クロスプロジェクトクエリ（ask/teamexec）でどのプロジェクトから来たかを WebUI に表示。Flutter ネイティブ認証用の ID Token 検証エンドポイントを追加。
+
+- **DB**: `Message.sourceProjectName` カラム追加（nullable、クロスクエリの送信元プロジェクト名）
+- **サーバー（REST API）**: `POST /api/agent/ask-member`, `POST /api/agent/teamexec-member` で `auth.machineId` → DB から送信元プロジェクト名を特定して保存
+- **サーバー（Discord/Telegram）**: `handleAskMember`, `handleTeamExec` で `context.currentProjectName` を送信元として保存
+- **Conversations API**: レスポンスに `sourceProjectName` 追加
+- **チャット履歴 API**: `GET /api/projects/:id/messages` レスポンスに `sourceProjectName` 追加
+- **WebUI チャット**: ユーザー名横に `🔗 devrelay-flutter` バッジ表示（送信元プロジェクト名付き）
+- **WebUI Conversations**: 🔗 バッジに `devrelay-flutter →` 送信元名追加
+- **Google ID Token**: `POST /api/auth/google/token` エンドポイント追加（Flutter `google_sign_in` の `idToken` を検証してセッション発行）
+- **ルール追加**: DB スキーマ変更時の必須手順を `CLAUDE.md` と `rules/devrelay.md` に追加（カラム存在の SQL 検証を必須化）
+
 ### #198: Google OAuth 認証 (2026-03-23)
 
 Google アカウントでワンクリックログイン/サインアップできるようにした。

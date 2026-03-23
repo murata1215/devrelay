@@ -466,6 +466,7 @@ export interface ConversationItem {
   inputFiles: MessageFileMeta[];
   outputFiles: MessageFileMeta[];
   isCrossQuery?: boolean;
+  sourceProjectName?: string;
 }
 
 export interface ConversationsResponse {
@@ -499,6 +500,7 @@ export interface SessionMessage {
   content: string;
   createdAt: string;
   files: MessageFileMeta[];
+  sourceProjectName?: string;  // クロスプロジェクトクエリの送信元プロジェクト名
 }
 
 export const sessions = {

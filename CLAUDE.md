@@ -38,6 +38,14 @@ pm2 restart devrelay-server devrelay-agent
 - **ソースコード（.ts ファイル等）を変更して `pnpm build` を実際に実行した場合のみ**「ビルド完了。以下のコマンドで再起動してください」と案内する
 - ドキュメント（.md）のみの変更ではビルド・再起動案内は不要
 
+## DB スキーマ変更時の必須手順
+1. `schema.prisma` を変更
+2. `cd apps/server && npx prisma migrate dev` を試行 → 失敗時は `npx prisma db execute --stdin` で直接 SQL 適用
+3. **カラム存在を SQL で検証**: `npx prisma db execute --stdin <<< "SELECT column_name FROM information_schema.columns WHERE table_name='テーブル名' AND column_name='カラム名';"`
+4. `npx prisma generate` で Prisma Client 再生成
+5. `pnpm build` でビルド
+6. 再起動案内時に「DB マイグレーション適用済み」を明記する
+
 ## 環境変数（apps/server/.env）
 
 | 変数 | 説明 |

@@ -54,6 +54,8 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Skip Permissions Realtime Sync**: Toggle now takes effect immediately even mid-session — dynamic getter replaces static snapshot
 - **Per-Agent Remote Restart**: Restart individual agents from WebUI (table row icon + Settings modal button) via WebSocket `server:agent:restart` → `process.exit(0)` auto-restart
 - **Google OAuth**: Sign in with Google on Login/Register pages — automatic account linking by email, no external library (pure fetch)
+- **Google ID Token Auth**: `POST /api/auth/google/token` endpoint for Flutter/mobile native `google_sign_in` — verifies ID token server-side, returns session token
+- **Cross-Project Source Display**: Cross-project queries (ask/teamexec) now show the source project name in WebUI chat (`🔗 devrelay-flutter`) and Conversations page (`🔗 devrelay-flutter → devrelay`)
 
 ## 💡 Token Efficiency
 

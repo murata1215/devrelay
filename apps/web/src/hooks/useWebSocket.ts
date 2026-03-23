@@ -46,6 +46,7 @@ export interface ChatMessage {
   content: string;
   files?: Array<{ id?: string; filename: string; content?: string; mimeType: string; size?: number }>;
   timestamp: Date;
+  sourceProjectName?: string;  // クロスプロジェクトクエリの送信元プロジェクト名
 }
 
 /** 進捗情報 */

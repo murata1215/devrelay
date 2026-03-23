@@ -200,7 +200,11 @@ export function ConversationsPage() {
                         {new Date(item.createdAt).toLocaleString()}
                       </td>
                       <td className="px-4 py-3 text-[var(--text-primary)] text-sm font-medium">
-                        {item.isCrossQuery && <span className="text-xs text-[var(--accent-blue)] mr-1" title="Cross-project query">🔗</span>}
+                        {item.isCrossQuery && (
+                          <span className="text-xs text-[var(--accent-blue)] mr-1" title={item.sourceProjectName ? `from ${item.sourceProjectName}` : 'Cross-project query'}>
+                            🔗{item.sourceProjectName ? ` ${item.sourceProjectName} →` : ''}
+                          </span>
+                        )}
                         {item.projectName}
                       </td>
                       <td className="px-4 py-3 text-[var(--text-secondary)] text-sm max-w-0">
@@ -278,7 +282,11 @@ export function ConversationsPage() {
               >
                 <div className="flex justify-between items-start mb-2">
                   <span className="text-[var(--text-primary)] text-sm font-medium">
-                    {item.isCrossQuery && <span className="text-xs text-[var(--accent-blue)] mr-1" title="Cross-project query">🔗</span>}
+                    {item.isCrossQuery && (
+                      <span className="text-xs text-[var(--accent-blue)] mr-1" title={item.sourceProjectName ? `from ${item.sourceProjectName}` : 'Cross-project query'}>
+                        🔗{item.sourceProjectName ? ` ${item.sourceProjectName} →` : ''}
+                      </span>
+                    )}
                     {item.projectName}
                   </span>
                   <span className="text-[var(--text-muted)] text-xs">{new Date(item.createdAt).toLocaleString()}</span>

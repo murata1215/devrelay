@@ -566,6 +566,7 @@ export async function apiRoutes(app: FastifyInstance) {
         role: true,
         content: true,
         createdAt: true,
+        sourceProjectName: true,
         files: {
           select: { id: true, filename: true, mimeType: true, size: true, direction: true },
         },
@@ -585,6 +586,7 @@ export async function apiRoutes(app: FastifyInstance) {
         content: m.content,
         createdAt: m.createdAt.toISOString(),
         files: m.files,
+        sourceProjectName: m.sourceProjectName ?? undefined,
       })),
       hasMore,
     });
@@ -1537,6 +1539,7 @@ export async function apiRoutes(app: FastifyInstance) {
             sessionId: true,
             content: true,
             createdAt: true,
+            sourceProjectName: true,
             files: {
               select: { id: true, filename: true, mimeType: true, size: true, direction: true },
             },
@@ -1567,15 +1570,18 @@ export async function apiRoutes(app: FastifyInstance) {
       const sessionUserMsgs = userMsgMap.get(aiMsg.sessionId) || [];
       let userContent = '';
       let inputFiles: { id: string; filename: string; mimeType: string; size: number; direction: string }[] = [];
+      let sourceProjectName: string | null = null;
       for (let i = sessionUserMsgs.length - 1; i >= 0; i--) {
         if (sessionUserMsgs[i].createdAt <= aiMsg.createdAt) {
           userContent = sessionUserMsgs[i].content;
           inputFiles = sessionUserMsgs[i].files || [];
+          sourceProjectName = sessionUserMsgs[i].sourceProjectName ?? null;
           break;
         }
       }
 
       const machineName = aiMsg.session.machine.displayName ?? aiMsg.session.machine.name;
+      const isCrossQuery = aiMsg.sessionId.startsWith('crossquery_') || aiMsg.sessionId.startsWith('teamexec_');
 
       return {
         messageId: aiMsg.id,
@@ -1593,7 +1599,8 @@ export async function apiRoutes(app: FastifyInstance) {
         createdAt: aiMsg.createdAt.toISOString(),
         inputFiles,
         outputFiles: aiMsg.files || [],
-        isCrossQuery: aiMsg.sessionId.startsWith('crossquery_') || aiMsg.sessionId.startsWith('teamexec_'),
+        isCrossQuery,
+        sourceProjectName: isCrossQuery ? sourceProjectName : undefined,
       };
     });
 

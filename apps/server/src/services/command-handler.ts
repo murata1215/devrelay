@@ -1397,6 +1397,12 @@ async function handleTestflight(
   command: Extract<UserCommand, { type: 'testflight' }>
 ): Promise<string> {
   console.log(`🚀 handleTestflight: subcommand=${command.subcommand}, name=${'name' in command ? command.name : '(none)'}, userId=${context.userId}`);
+
+  // help は DB アクセス不要なので early return
+  if (command.subcommand === 'help') {
+    return getTestflightHelpText();
+  }
+
   const dbUserId = await resolveDbUserId(context);
   if (!dbUserId) {
     console.log(`🚀 handleTestflight: dbUserId not found for ${context.userId}`);
@@ -1411,7 +1417,7 @@ async function handleTestflight(
       result = await listTestflightServices(dbUserId);
       break;
     case 'create':
-      result = await createTestflightService(dbUserId, command.name);
+      result = await createTestflightService(dbUserId, command.name, command.template);
       break;
     case 'remove':
       result = await removeTestflightService(dbUserId, command.name);
@@ -1420,10 +1426,48 @@ async function handleTestflight(
       result = await getTestflightServiceInfo(dbUserId, command.name);
       break;
     default:
-      result = '❓ 不明なサブコマンドです。`testflight` で一覧を表示できます。';
+      result = '❓ 不明なサブコマンドです。`testflight help` で詳細ヘルプを表示できます。';
   }
   console.log(`🚀 handleTestflight: result (${result.length} chars): ${result.substring(0, 100)}...`);
   return result;
+}
+
+/**
+ * テストフライト専用の詳細ヘルプテキストを生成
+ */
+function getTestflightHelpText(): string {
+  return `
+🛫 **TestFlight ヘルプ**
+
+サブドメイン付きサービスを自動作成・管理するコマンドです。
+作成したサービスは \`<name>.devrelay.io\` で即アクセスできます。
+
+**基本コマンド**
+\`testflight\` - サービス一覧を表示
+\`testflight <name>\` - 新規サービス作成（プレースホルダー）
+\`testflight rm <name>\` - サービスをアーカイブ（削除）
+\`testflight info <name>\` - サービスの詳細情報を表示
+\`testflight help\` - このヘルプを表示
+
+**テンプレートオプション**
+\`testflight <name> --phaser\` - Phaser 3 ゲームプロジェクトを作成
+
+**--phaser テンプレート詳細**
+Vite + Phaser 3 + TypeScript のゲーム開発環境を自動構築します。
+- サンプル: 2048 パズルゲーム（本家準拠の配色・操作）
+- HMR 対応の dev サーバーが PM2 で常駐起動（プロセス名: \`tf-<name>\`）
+- Discord/Telegram から AI にゲーム改造指示が可能
+- 画面サイズ: 480x720（モバイルファースト、Scale.FIT）
+
+**サービス名ルール**
+- 英小文字で始まる、英小文字・数字・ハイフンの組み合わせ
+- 3〜30文字
+- 予約語不可: devrelay, app, api, www, admin, test, staging, prod
+
+**例**
+\`testflight mygame --phaser\` → https://mygame.devrelay.io に 2048 ゲーム
+\`testflight mysite\` → https://mysite.devrelay.io にプレースホルダー
+`.trim();
 }
 
 // -----------------------------------------------------------------------------
@@ -1476,12 +1520,14 @@ async function handleAskMember(
   });
 
   // ユーザーの質問を DB に保存（Conversations ページで表示するため）
+  // 送信元プロジェクト名を保存（クロスクエリの送信元表示用）
   await prisma.message.create({
     data: {
       sessionId: tempSessionId,
       role: 'user',
       content: question,
       platform: context.platform,
+      sourceProjectName: context.currentProjectName ?? undefined,
     },
   });
 
@@ -1561,12 +1607,14 @@ async function handleTeamExec(
   });
 
   // ユーザーの指示を DB に保存（Conversations ページで表示するため）
+  // 送信元プロジェクト名を保存（クロスクエリの送信元表示用）
   await prisma.message.create({
     data: {
       sessionId: tempSessionId,
       role: 'user',
       content: `[teamexec] ${instruction}`,
       platform: context.platform,
+      sourceProjectName: context.currentProjectName ?? undefined,
     },
   });
 

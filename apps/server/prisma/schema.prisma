@@ -169,9 +169,10 @@ model Message {
   role        String        // user, ai, system
   content     String
   platform    String        // どのプラットフォームから送信されたか
-  usageData   Json?         // AI 実行時の使用量データ（usage, modelUsage, durationMs）
-  createdAt   DateTime      @default(now())
-  files       MessageFile[] // 添付ファイル（入力 or 出力）
+  usageData          Json?         // AI 実行時の使用量データ（usage, modelUsage, durationMs）
+  sourceProjectName  String?       // クロスプロジェクトクエリの送信元プロジェクト名
+  createdAt          DateTime      @default(now())
+  files              MessageFile[] // 添付ファイル（入力 or 出力）
 }
 
 // メッセージに紐づくファイル（BLOB 保存 + ベクトル検索）
@@ -254,6 +255,7 @@ model TestflightService {
   domain      String    @unique  // <name>.devrelay.io
   directory   String              // /home/devrelay/testflight/<name>
   status      String    @default("placeholder") // placeholder | active | archived
+  template    String?             // null=通常, "phaser"=ゲーム, 将来: "react", "nextjs" 等
   gitRepo     String?             // Git リポジトリ URL（設定済みの場合）
   description String?             // サービスの説明
   createdAt   DateTime  @default(now())

@@ -688,6 +688,11 @@ function MessageRow({
           <span className="font-semibold text-sm" style={{ color: displayColor }}>
             {displayName}
           </span>
+          {message.sourceProjectName && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400" title={`from ${message.sourceProjectName}`}>
+              🔗 {message.sourceProjectName}
+            </span>
+          )}
           <span className="text-xs text-[var(--text-faint)]">
             {message.timestamp.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
           </span>
@@ -2112,6 +2117,7 @@ export function ChatPage() {
         content: m.content,
         timestamp: new Date(m.createdAt),
         files: m.files && m.files.length > 0 ? m.files : undefined,
+        sourceProjectName: m.sourceProjectName,
       }));
 
       setTabs(prev => prev.map(t => {
@@ -2529,6 +2535,7 @@ export function ChatPage() {
         content: m.content,
         timestamp: new Date(m.createdAt),
         files: m.files && m.files.length > 0 ? m.files : undefined,
+        sourceProjectName: m.sourceProjectName,
       }));
 
       setTabs(prev => prev.map(t => {

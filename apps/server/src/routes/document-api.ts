@@ -240,6 +240,16 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
     }
 
+    // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
+    const sourceProjects = await prisma.project.findMany({
+      where: { machineId: auth.machineId },
+      select: { name: true },
+    });
+    const sourceProjectName = sourceProjects.length === 1
+      ? sourceProjects[0].name
+      : (await prisma.machine.findUnique({ where: { id: auth.machineId }, select: { displayName: true, name: true } }))
+        ?.displayName ?? sourceProjects[0]?.name ?? 'unknown';
+
     // 一時セッションを作成
     const tempSessionId = `crossquery_${crypto.randomUUID()}`;
     const tempSession = await prisma.session.create({
@@ -260,10 +270,11 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         role: 'user',
         content: question,
         platform: 'api',
+        sourceProjectName,
       },
     });
 
-    console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} (${targetProject.machine.id})`);
+    console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
 
     try {
       // エージェントにセッション開始 + プロンプト送信し、完了を待つ
@@ -330,6 +341,16 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
     }
 
+    // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
+    const sourceProjects = await prisma.project.findMany({
+      where: { machineId: auth.machineId },
+      select: { name: true },
+    });
+    const sourceProjectName = sourceProjects.length === 1
+      ? sourceProjects[0].name
+      : (await prisma.machine.findUnique({ where: { id: auth.machineId }, select: { displayName: true, name: true } }))
+        ?.displayName ?? sourceProjects[0]?.name ?? 'unknown';
+
     // teamexec 用セッションを作成
     const tempSessionId = `teamexec_${crypto.randomUUID()}`;
     const tempSession = await prisma.session.create({
@@ -350,10 +371,11 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         role: 'user',
         content: `[teamexec] ${question}`,
         platform: 'api',
+        sourceProjectName,
       },
     });
 
-    console.log(`🚀 Team exec: ${tempSessionId} → ${targetProject.name} (${targetProject.machine.id})`);
+    console.log(`🚀 Team exec: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
 
     try {
       // エージェントに exec モードでセッション開始し、完了を待つ

@@ -302,4 +302,102 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.redirect('/login?error=google_error');
     }
   });
+
+  /**
+   * Flutter ネイティブ認証用: Google ID Token を検証してセッション発行
+   * google_sign_in パッケージで取得した ID Token をサーバーで検証し、
+   * DevRelay セッショントークンを発行する
+   */
+  app.post('/api/auth/google/token', async (request, reply) => {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+      return reply.status(501).send({
+        error: 'Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env',
+      });
+    }
+
+    const { idToken } = request.body as { idToken?: string };
+    if (!idToken) {
+      return reply.status(400).send({ error: 'idToken is required' });
+    }
+
+    try {
+      // 1. Google の tokeninfo エンドポイントで ID Token を検証
+      const verifyRes = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
+      );
+
+      if (!verifyRes.ok) {
+        console.error('Google ID token verification failed:', await verifyRes.text());
+        return reply.status(401).send({ error: 'Invalid Google ID token' });
+      }
+
+      const payload = await verifyRes.json() as {
+        sub: string;      // Google ユーザー ID
+        email?: string;
+        name?: string;
+        aud: string;       // audience（Client ID）
+      };
+
+      // 2. aud（audience）が自分の Client ID であることを検証
+      if (payload.aud !== GOOGLE_CLIENT_ID) {
+        console.error(`Google ID token aud mismatch: expected ${GOOGLE_CLIENT_ID}, got ${payload.aud}`);
+        return reply.status(401).send({ error: 'Invalid Google ID token audience' });
+      }
+
+      const googleId = payload.sub;
+      const email = payload.email;
+      const name = payload.name || (email ? email.split('@')[0] : 'User');
+
+      // 3. ユーザー検索/作成（既存コールバックと同じロジック）
+      // 3a. googleId で検索
+      let user = await prisma.user.findUnique({ where: { googleId } });
+
+      if (!user && email) {
+        // 3b. email で検索 → googleId を紐付け
+        user = await prisma.user.findUnique({ where: { email } });
+        if (user) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: { googleId },
+          });
+          console.log(`🔗 Google account linked to existing user via ID token: ${email}`);
+        }
+      }
+
+      if (!user) {
+        // 3c. 新規ユーザー作成
+        user = await prisma.user.create({
+          data: {
+            email,
+            googleId,
+            name,
+            // passwordHash は null（Google 認証のみ）
+          },
+        });
+        console.log(`✅ New user created via Google ID token: ${email}`);
+      }
+
+      // 4. セッション作成
+      const token = generateToken();
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + SESSION_EXPIRES_DAYS);
+
+      await prisma.authSession.create({
+        data: {
+          userId: user.id,
+          token,
+          expiresAt,
+        },
+      });
+
+      // 5. login/register と同じ形式でレスポンス
+      return {
+        user: formatUser(user),
+        token,
+      };
+    } catch (err) {
+      console.error('Google ID token auth error:', err);
+      return reply.status(500).send({ error: 'Internal server error' });
+    }
+  });
 }
