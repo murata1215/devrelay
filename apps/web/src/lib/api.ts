@@ -173,6 +173,11 @@ export const machines = {
   async setProjectsDirs(id: string, projectsDirs: string[] | null): Promise<{ success: boolean }> {
     return request('PUT', `/machines/${id}/projects-dirs`, { projectsDirs });
   },
+
+  /** Agent を再起動（WebSocket 経由でリスタート指示を送信） */
+  async restart(id: string): Promise<{ success: boolean; message: string }> {
+    return request('POST', `/machines/${id}/restart`);
+  },
 };
 
 export const projects = {

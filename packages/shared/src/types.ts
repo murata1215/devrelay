@@ -253,7 +253,8 @@ export type ServerToAgentMessage =
   | { type: 'server:doc:delete'; payload: DocDeletePayload }
   | { type: 'server:project:file:read'; payload: ProjectFileReadPayload }
   | { type: 'server:tool:approval:response'; payload: ToolApprovalResponsePayload }
-  | { type: 'server:plan:latest'; payload: PlanLatestRequestPayload };
+  | { type: 'server:plan:latest'; payload: PlanLatestRequestPayload }
+  | { type: 'server:agent:restart'; payload: {} };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;

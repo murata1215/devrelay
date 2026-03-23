@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
+import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import archiver from 'archiver';
@@ -338,6 +338,28 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     return { success: true, skipPermissions };
+  });
+
+  // 個別 Agent 再起動（WebSocket 経由で Agent にリスタート指示を送信）
+  app.post('/api/machines/:id/restart', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+
+    const connectedAgents = getConnectedAgents();
+    if (!connectedAgents.has(id)) {
+      return reply.status(503).send({ error: 'Agent is offline' });
+    }
+
+    sendToAgent(id, { type: 'server:agent:restart', payload: {} });
+    console.log(`🔄 Restart command sent to agent: ${machine.name} (${id})`);
+
+    return { success: true, message: 'Restart command sent' };
   });
 
   // ========================================

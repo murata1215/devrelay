@@ -393,6 +393,12 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
       handleAgentUpdate();
       break;
 
+    case 'server:agent:restart':
+      console.log('🔄 Restart command received from server. Restarting...');
+      // PM2/systemd/launchd が自動再起動するため、process.exit(0) で終了
+      setTimeout(() => process.exit(0), 500);
+      break;
+
     case 'server:doc:sync':
       handleDocSync(message.payload);
       break;

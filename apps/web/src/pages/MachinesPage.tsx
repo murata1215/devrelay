@@ -766,6 +766,32 @@ export function MachinesPage() {
               </div>
             </div>
 
+            {/* Agent 再起動ボタン */}
+            <div className="mb-4">
+              <button
+                onClick={async () => {
+                  if (!settingsTarget) return;
+                  if (!confirm(`${settingsTarget.displayName || settingsTarget.name} を再起動しますか？`)) return;
+                  try {
+                    await machines.restart(settingsTarget.id);
+                  } catch (err) {
+                    alert(err instanceof Error ? err.message : 'Failed to restart agent');
+                  }
+                }}
+                disabled={settingsTarget?.status !== 'online'}
+                className={`w-full px-4 py-2 rounded text-sm font-medium transition-colors ${
+                  settingsTarget?.status === 'online'
+                    ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-faint)] cursor-not-allowed'
+                }`}
+              >
+                🔄 Restart Agent
+              </button>
+              {settingsTarget?.status !== 'online' && (
+                <p className="text-[var(--text-faint)] text-xs mt-1">Agent がオフラインのため再起動できません</p>
+              )}
+            </div>
+
             {/* 管理コマンド（Agent 接続時に環境固有のコマンドを自動取得・保存） */}
             {settingsTarget.managementInfo && settingsTarget.managementInfo.commands.length > 0 ? (
               <div className="mb-4">
