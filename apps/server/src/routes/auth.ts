@@ -161,14 +161,145 @@ export async function authRoutes(app: FastifyInstance) {
     return { user: formatUser(user) };
   });
 
-  // Google OAuth (プレースホルダー - 後で実装)
+  // ========================================
+  // Google OAuth
+  // ========================================
+
+  const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+  const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+
+  /**
+   * リダイレクト URI を動的に構築（リクエストの Host ヘッダーから）
+   * Caddy プロキシ経由の場合は X-Forwarded-Proto/Host を考慮
+   */
+  function getGoogleCallbackUrl(request: FastifyRequest): string {
+    const host = request.headers['x-forwarded-host'] || request.headers.host || 'localhost:3005';
+    const proto = request.headers['x-forwarded-proto'] === 'https' || String(host).includes('devrelay.io') ? 'https' : 'http';
+    return `${proto}://${host}/api/auth/google/callback`;
+  }
+
+  /** Google 認可 URL にリダイレクト */
   app.get('/api/auth/google', async (request, reply) => {
-    // TODO: Google OAuth 実装
-    return reply.status(501).send({ error: 'Google OAuth not implemented yet' });
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+      return reply.status(501).send({ error: 'Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env' });
+    }
+
+    const callbackUrl = getGoogleCallbackUrl(request);
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', GOOGLE_CLIENT_ID);
+    authUrl.searchParams.set('redirect_uri', callbackUrl);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', 'openid email profile');
+    authUrl.searchParams.set('access_type', 'offline');
+    authUrl.searchParams.set('prompt', 'select_account');
+
+    return reply.redirect(authUrl.toString());
   });
 
+  /** Google OAuth コールバック: code → token 交換 → userinfo → ユーザー作成/検索 → セッション発行 */
   app.get('/api/auth/google/callback', async (request, reply) => {
-    // TODO: Google OAuth コールバック実装
-    return reply.status(501).send({ error: 'Google OAuth not implemented yet' });
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+      return reply.status(501).send({ error: 'Google OAuth is not configured' });
+    }
+
+    const { code, error: oauthError } = request.query as { code?: string; error?: string };
+
+    // ユーザーが承認を拒否した場合
+    if (oauthError) {
+      return reply.redirect('/login?error=google_denied');
+    }
+
+    if (!code) {
+      return reply.redirect('/login?error=google_no_code');
+    }
+
+    try {
+      const callbackUrl = getGoogleCallbackUrl(request);
+
+      // 1. code → access_token 交換
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: GOOGLE_CLIENT_ID,
+          client_secret: GOOGLE_CLIENT_SECRET,
+          redirect_uri: callbackUrl,
+          grant_type: 'authorization_code',
+        }),
+      });
+
+      if (!tokenRes.ok) {
+        console.error('Google token exchange failed:', await tokenRes.text());
+        return reply.redirect('/login?error=google_token_failed');
+      }
+
+      const tokenData = await tokenRes.json() as { access_token: string };
+
+      // 2. access_token → userinfo 取得
+      const userinfoRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      });
+
+      if (!userinfoRes.ok) {
+        console.error('Google userinfo failed:', await userinfoRes.text());
+        return reply.redirect('/login?error=google_userinfo_failed');
+      }
+
+      const userinfo = await userinfoRes.json() as {
+        id: string;       // Google のユーザー ID
+        email: string;
+        name?: string;
+        picture?: string;
+      };
+
+      // 3. ユーザー検索/作成
+      // 3a. googleId で検索
+      let user = await prisma.user.findUnique({ where: { googleId: userinfo.id } });
+
+      if (!user && userinfo.email) {
+        // 3b. email で検索 → googleId を紐付け
+        user = await prisma.user.findUnique({ where: { email: userinfo.email } });
+        if (user) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: { googleId: userinfo.id },
+          });
+          console.log(`🔗 Google account linked to existing user: ${userinfo.email}`);
+        }
+      }
+
+      if (!user) {
+        // 3c. 新規ユーザー作成
+        user = await prisma.user.create({
+          data: {
+            email: userinfo.email,
+            googleId: userinfo.id,
+            name: userinfo.name || userinfo.email.split('@')[0],
+            // passwordHash は null（Google 認証のみ）
+          },
+        });
+        console.log(`✅ New user created via Google OAuth: ${userinfo.email}`);
+      }
+
+      // 4. セッション作成
+      const token = generateToken();
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + SESSION_EXPIRES_DAYS);
+
+      await prisma.authSession.create({
+        data: {
+          userId: user.id,
+          token,
+          expiresAt,
+        },
+      });
+
+      // 5. WebUI にリダイレクト（token をクエリパラメータで渡す）
+      return reply.redirect(`/auth/callback?token=${token}`);
+    } catch (err) {
+      console.error('Google OAuth error:', err);
+      return reply.redirect('/login?error=google_error');
+    }
   });
 }

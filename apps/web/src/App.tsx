@@ -12,6 +12,7 @@ import { ConversationsPage } from './pages/ConversationsPage';
 import { ChatPage } from './pages/ChatPage';
 import { DevReportsPage } from './pages/DevReportsPage';
 import { TeamPage } from './pages/TeamPage';
+import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { NotificationBanner } from './components/NotificationBanner';
 
 /**
@@ -101,6 +102,8 @@ function AppRoutes() {
           </PublicRoute>
         }
       />
+      {/* Google OAuth コールバック（認証状態に関係なくアクセス可能） */}
+      <Route path="/auth/callback" element={<AuthCallbackPage />} />
       {/* 認証済み: 全 protected routes を ProtectedContent でラップ */}
       <Route
         path="/*"
