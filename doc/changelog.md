@@ -7,6 +7,26 @@
 ## 実装済み機能
 
 
+### #198: Google OAuth 認証 (2026-03-23)
+
+Google アカウントでワンクリックログイン/サインアップできるようにした。
+
+- **サーバー**: `GET /api/auth/google` → Google 認可 URL にリダイレクト、`GET /api/auth/google/callback` → code 交換 → userinfo → ユーザー検索/作成 → セッション発行
+- **ユーザー検索ロジック**: googleId マッチ → email マッチ（既存アカウントにリンク）→ 新規作成
+- **WebUI**: ログイン/登録ページに「Sign in with Google」ボタン + Google ロゴ SVG + 「or」区切り線
+- **AuthCallbackPage**: `/auth/callback?token=xxx` で token を localStorage に保存
+- **外部ライブラリ不要**: fetch で Google OAuth 2.0 API を直接呼び出し
+- **環境変数**: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` が必要
+
+### #197: 個別 Agent 再起動ボタン (2026-03-23)
+
+Agents 一覧から各 Agent を個別にリモート再起動できるようにした。
+
+- **WebSocket**: `server:agent:restart` メッセージ型追加
+- **API**: `POST /api/machines/:id/restart`（WebSocket 経由で Agent にリスタート指示）
+- **Agent**: メッセージ受信 → `process.exit(0)`（PM2/systemd が自動再起動）
+- **WebUI**: テーブル行にリスタートアイコン（ホバー表示）+ Settings モーダルの Management Commands 横にコンパクトボタン
+
 ### #196: skipPermissions リアルタイム更新・動的反映修正 (2026-03-22)
 
 WebUI で Skip Permissions トグルを切り替えても Agent に反映されないバグを修正。
