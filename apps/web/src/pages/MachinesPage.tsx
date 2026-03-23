@@ -405,16 +405,37 @@ export function MachinesPage() {
                         : '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {/* 削除ボタン（ホバー時に表示） */}
-                      <button
-                        onClick={() => setDeleteTarget(machine)}
-                        className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Delete agent"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
+                      <div className="flex items-center space-x-2">
+                        {/* 再起動ボタン（online 時のみ、ホバーで表示） */}
+                        {machine.status === 'online' && (
+                          <button
+                            onClick={async () => {
+                              if (!confirm(`${machine.displayName || machine.name} を再起動しますか？`)) return;
+                              try {
+                                await machines.restart(machine.id);
+                              } catch (err) {
+                                alert(err instanceof Error ? err.message : 'Failed to restart agent');
+                              }
+                            }}
+                            className="text-[var(--text-faint)] hover:text-amber-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Restart agent"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                          </button>
+                        )}
+                        {/* 削除ボタン（ホバー時に表示） */}
+                        <button
+                          onClick={() => setDeleteTarget(machine)}
+                          className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Delete agent"
+                        >
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -426,15 +447,31 @@ export function MachinesPage() {
           <div className="md:hidden space-y-4">
             {data.map((machine) => (
               <div key={machine.id} className="bg-[var(--bg-secondary)] rounded-lg p-4 relative group">
-                <button
-                  onClick={() => setDeleteTarget(machine)}
-                  className="absolute top-3 right-3 text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
-                  title="Delete agent"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div className="absolute top-3 right-3 flex items-center space-x-2">
+                  {machine.status === 'online' && (
+                    <button
+                      onClick={async () => {
+                        if (!confirm(`${machine.displayName || machine.name} を再起動しますか？`)) return;
+                        try { await machines.restart(machine.id); } catch (err) { alert(err instanceof Error ? err.message : 'Failed'); }
+                      }}
+                      className="text-[var(--text-faint)] hover:text-amber-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Restart agent"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setDeleteTarget(machine)}
+                    className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
+                    title="Delete agent"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                   </svg>
                 </button>
+                </div>
                 <div className="flex items-center justify-between mb-2">
                   {/* モバイルでも Agent 名クリックで設定モーダルを開く（displayName 対応） */}
                   <div>
@@ -766,41 +803,32 @@ export function MachinesPage() {
               </div>
             </div>
 
-            {/* Agent 再起動ボタン */}
-            <div className="mb-4">
-              <button
-                onClick={async () => {
-                  if (!settingsTarget) return;
-                  if (!confirm(`${settingsTarget.displayName || settingsTarget.name} を再起動しますか？`)) return;
-                  try {
-                    await machines.restart(settingsTarget.id);
-                  } catch (err) {
-                    alert(err instanceof Error ? err.message : 'Failed to restart agent');
-                  }
-                }}
-                disabled={settingsTarget?.status !== 'online'}
-                className={`w-full px-4 py-2 rounded text-sm font-medium transition-colors ${
-                  settingsTarget?.status === 'online'
-                    ? 'bg-amber-600 hover:bg-amber-700 text-white'
-                    : 'bg-[var(--bg-tertiary)] text-[var(--text-faint)] cursor-not-allowed'
-                }`}
-              >
-                🔄 Restart Agent
-              </button>
-              {settingsTarget?.status !== 'online' && (
-                <p className="text-[var(--text-faint)] text-xs mt-1">Agent がオフラインのため再起動できません</p>
-              )}
-            </div>
-
             {/* 管理コマンド（Agent 接続時に環境固有のコマンドを自動取得・保存） */}
             {settingsTarget.managementInfo && settingsTarget.managementInfo.commands.length > 0 ? (
               <div className="mb-4">
-                <label className="block text-[var(--text-muted)] text-sm mb-2">
-                  Management Commands
-                  <span className="text-[var(--text-faint)] ml-2 text-xs">
-                    ({settingsTarget.managementInfo.os === 'win32' ? 'Windows' : settingsTarget.managementInfo.os === 'darwin' ? 'macOS' : 'Linux'} / {settingsTarget.managementInfo.installType})
-                  </span>
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-[var(--text-muted)] text-sm">
+                    Management Commands
+                    <span className="text-[var(--text-faint)] ml-2 text-xs">
+                      ({settingsTarget.managementInfo.os === 'win32' ? 'Windows' : settingsTarget.managementInfo.os === 'darwin' ? 'macOS' : 'Linux'} / {settingsTarget.managementInfo.installType})
+                    </span>
+                  </label>
+                  {settingsTarget.status === 'online' && (
+                    <button
+                      onClick={async () => {
+                        if (!confirm(`${settingsTarget.displayName || settingsTarget.name} を再起動しますか？`)) return;
+                        try {
+                          await machines.restart(settingsTarget.id);
+                        } catch (err) {
+                          alert(err instanceof Error ? err.message : 'Failed to restart agent');
+                        }
+                      }}
+                      className="text-xs px-3 py-1 rounded bg-amber-600/20 text-amber-400 hover:bg-amber-600/40 transition-colors"
+                    >
+                      🔄 Restart
+                    </button>
+                  )}
+                </div>
                 <div className="space-y-2">
                   {settingsTarget.managementInfo.commands.map((cmd, i) => (
                     <div key={i} className="flex items-start space-x-2">
