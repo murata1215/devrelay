@@ -176,7 +176,7 @@ export const machines = {
 
   /** Agent を再起動（WebSocket 経由でリスタート指示を送信） */
   async restart(id: string): Promise<{ success: boolean; message: string }> {
-    return request('POST', `/machines/${id}/restart`);
+    return request('POST', `/machines/${id}/restart`, {});
   },
 };
 
