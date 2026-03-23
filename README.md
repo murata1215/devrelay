@@ -51,6 +51,9 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Multi-Agent Routing Fix**: DB fallback for projectId resolution prevents messages from appearing in wrong project tabs
 - **Xcode Project Detection**: `.xcodeproj` directories are detected as projects alongside `CLAUDE.md`
 - **Plan File Viewer**: View Claude Code's plan files (`~/.claude/plans/*.md`) in the WebUI right panel — automatically shows the latest plan with Markdown rendering
+- **Skip Permissions Realtime Sync**: Toggle now takes effect immediately even mid-session — dynamic getter replaces static snapshot
+- **Per-Agent Remote Restart**: Restart individual agents from WebUI (table row icon + Settings modal button) via WebSocket `server:agent:restart` → `process.exit(0)` auto-restart
+- **Google OAuth**: Sign in with Google on Login/Register pages — automatic account linking by email, no external library (pure fetch)
 
 ## 💡 Token Efficiency
 
