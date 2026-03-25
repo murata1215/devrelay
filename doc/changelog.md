@@ -7,6 +7,21 @@
 ## 実装済み機能
 
 
+### #200: コマンド応答のクロスプロジェクト漏洩修正 + Phaser テンプレート オーディオ対応 (2026-03-26)
+
+複数プロジェクト同時利用時に別プロジェクトのメッセージがアクティブタブに表示されるバグを修正。Phaser テンプレートをオーディオ対応版に更新。
+
+- **バグ修正**: `web.ts` のコマンド応答ブロードキャストに `projectId` が含まれていなかった → `context.lastProjectId` を追加
+  - WebUI の `addMessageToTab` は `projectId` が undefined だとアクティブタブに追加するため、別プロジェクトのメッセージが漏洩していた
+- **Phaser テンプレート**: `testflight create --phaser` のテンプレートを tetris.devrelay.io の実装で更新
+  - `SoundManager.ts` 新規追加（Tone.js BGM + jsfxr SFX シングルトン）
+  - `jsfxr.d.ts` 新規追加（TypeScript 型定義）
+  - `GameScene.ts` に SoundManager 統合（BGM 初回タッチ開始、効果音4種）
+  - `UIScene.ts` に BGM/SFX ミュートボタン、ゲームオーバー多重表示防止、リスタート改善
+  - `index.html` にモバイル最適化（viewport-fit=cover, 100dvh, safe-area）
+  - SKILL.md にセクション13（オーディオ）追加（jsfxr + Tone.js ベストプラクティス）
+  - DB スキーマ変更時の必須手順を CLAUDE.md と rules/devrelay.md に追加
+
 ### #199: クロスプロジェクトクエリの送信元表示 + Google ID Token エンドポイント (2026-03-24)
 
 クロスプロジェクトクエリ（ask/teamexec）でどのプロジェクトから来たかを WebUI に表示。Flutter ネイティブ認証用の ID Token 検証エンドポイントを追加。

@@ -56,6 +56,8 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Google OAuth**: Sign in with Google on Login/Register pages — automatic account linking by email, no external library (pure fetch)
 - **Google ID Token Auth**: `POST /api/auth/google/token` endpoint for Flutter/mobile native `google_sign_in` — verifies ID token server-side, returns session token
 - **Cross-Project Source Display**: Cross-project queries (ask/teamexec) now show the source project name in WebUI chat (`🔗 devrelay-flutter`) and Conversations page (`🔗 devrelay-flutter → devrelay`)
+- **Cross-Tab Message Routing Fix**: Command responses now include `projectId` to prevent messages from other projects leaking into the active tab
+- **Phaser Audio Template**: `testflight create --phaser` now generates 2048 game with BGM (Tone.js chiptune) + SFX (jsfxr procedural), mobile-optimized (viewport-fit, dvh, safe-area), BGM/SFX mute buttons
 
 ## 💡 Token Efficiency
 

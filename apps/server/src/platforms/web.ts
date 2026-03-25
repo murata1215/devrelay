@@ -172,7 +172,7 @@ export async function setupWebClientWebSocket(
                 if (p.platform === 'web') {
                   const targetWs = webClients.get(p.chatId);
                   if (targetWs && targetWs.readyState === targetWs.OPEN) {
-                    sendJson(targetWs, { type: 'web:response', payload: { message: response } });
+                    sendJson(targetWs, { type: 'web:response', payload: { message: response, projectId: context.lastProjectId } });
                   }
                 }
               }
