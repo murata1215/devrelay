@@ -47,6 +47,14 @@ export default defineConfig({
     outDir: 'dist',
     sourcemap: true,
   },
+  // Safari が ?.map リクエストを送った際に esbuild がクラッシュしないようにする
+  optimizeDeps: {
+    esbuildOptions: {
+      loader: {
+        '.map': 'json',
+      },
+    },
+  },
 });
 `;
 

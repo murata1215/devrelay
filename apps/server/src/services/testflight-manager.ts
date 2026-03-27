@@ -12,6 +12,11 @@ import { join } from 'path';
 import { randomBytes } from 'crypto';
 import { prisma } from '../db/client.js';
 import { AGREEMENT_MARKER, AGREEMENT_END_MARKER, DEFAULT_RULES_TEMPLATE } from './agreement-template.js';
+import {
+  PHASER_TEMPLATE_FILES,
+  PHASER_CLAUDE_MD,
+  PHASER_PROJECT_RULES,
+} from '../templates/phaser-templates.js';
 
 const execAsync = promisify(exec);
 
@@ -134,10 +139,71 @@ function generateCaddyConfig(name: string, port: number, directory: string): str
 }
 
 /**
- * テストフライトサービスを作成
+ * テンプレートファイル内のプレースホルダーを置換
  */
-export async function createTestflightService(userId: string, name: string): Promise<string> {
-  console.log(`🛫 testflight create: name=${name}, userId=${userId}`);
+function replacePlaceholders(content: string, name: string, port: number): string {
+  return content.replace(/\{\{NAME\}\}/g, name).replace(/\{\{PORT\}\}/g, String(port));
+}
+
+/**
+ * Phaser テンプレートを展開（ファイル生成 + pnpm install + build + PM2 起動）
+ */
+async function deployPhaserTemplate(name: string, directory: string, port: number): Promise<void> {
+  console.log(`🎮 testflight [${name}]: deploying phaser template...`);
+
+  // テンプレートファイルを展開
+  for (const [relativePath, templateContent] of Object.entries(PHASER_TEMPLATE_FILES)) {
+    const filePath = join(directory, relativePath);
+    const dirPath = join(directory, relativePath.split('/').slice(0, -1).join('/'));
+    if (dirPath !== directory) {
+      await mkdir(dirPath, { recursive: true });
+    }
+    await writeFile(filePath, replacePlaceholders(templateContent, name, port), 'utf-8');
+  }
+  // public/assets ディレクトリを作成（空）
+  await mkdir(join(directory, 'public', 'assets'), { recursive: true });
+  console.log(`🎮 testflight [${name}]: template files written`);
+
+  // CLAUDE.md を Phaser 版に上書き
+  await writeFile(
+    join(directory, 'CLAUDE.md'),
+    replacePlaceholders(PHASER_CLAUDE_MD, name, port),
+    'utf-8'
+  );
+
+  // rules/project.md を Phaser 版に上書き
+  await writeFile(
+    join(directory, 'rules', 'project.md'),
+    PHASER_PROJECT_RULES,
+    'utf-8'
+  );
+
+  // pnpm install
+  console.log(`🎮 testflight [${name}]: running pnpm install...`);
+  await execAsync('pnpm install', { cwd: directory, timeout: 120000 });
+  console.log(`🎮 testflight [${name}]: pnpm install done`);
+
+  // pnpm build（初回ビルド確認）
+  console.log(`🎮 testflight [${name}]: running pnpm build...`);
+  await execAsync('pnpm build', { cwd: directory, timeout: 120000 });
+  console.log(`🎮 testflight [${name}]: pnpm build done`);
+
+  // PM2 で dev サーバーを起動
+  console.log(`🎮 testflight [${name}]: starting PM2 process tf-${name}...`);
+  await execAsync(
+    `pm2 start "pnpm dev --port ${port} --host 0.0.0.0" --name "tf-${name}" --cwd "${directory}"`,
+    { timeout: 30000 }
+  );
+  await execAsync('pm2 save', { timeout: 10000 });
+  console.log(`🎮 testflight [${name}]: PM2 process started`);
+}
+
+/**
+ * テストフライトサービスを作成
+ * @param template テンプレート種別（"phaser" 等、省略時は通常のプレースホルダー）
+ */
+export async function createTestflightService(userId: string, name: string, template?: string): Promise<string> {
+  console.log(`🛫 testflight create: name=${name}, userId=${userId}, template=${template || 'none'}`);
 
   // 1. バリデーション
   const validationError = validateServiceName(name);
@@ -268,10 +334,26 @@ export async function createTestflightService(userId: string, name: string): Pro
         port,
         domain,
         directory,
-        status: 'placeholder',
+        status: template ? 'active' : 'placeholder',
+        template: template || null,
       },
     });
     console.log(`🛫 testflight [${name}]: db record created`);
+
+    // 9.5. テンプレート展開（Phaser 等）
+    if (template === 'phaser') {
+      try {
+        await deployPhaserTemplate(name, directory, port);
+      } catch (tmplError: any) {
+        console.error(`❌ testflight [${name}]: phaser template deploy failed:`, tmplError.message);
+        // テンプレート展開失敗してもサービス自体は作成済み。プレースホルダーにフォールバック
+        await prisma.testflightService.update({
+          where: { name },
+          data: { status: 'placeholder', template: null },
+        });
+        // Caddy reload は続行させる（プレースホルダーページは表示可能）
+      }
+    }
 
     // 10. Caddy reload を非同期遅延実行
     // Caddy reload は WS 接続（Agent + WebUI）を一時切断するため、
@@ -293,7 +375,7 @@ export async function createTestflightService(userId: string, name: string): Pro
     }, 2000);
 
     // 11. 完了メッセージ（reload を待たずに即座に返す）
-    const msg = [
+    const msgLines = [
       `✅ **${name}** を作成しました`,
       '',
       `🌐 https://${domain}`,
@@ -301,8 +383,15 @@ export async function createTestflightService(userId: string, name: string): Pro
       `🔌 Port: ${port}（dev サーバーをこのポートで起動すると自動で繋がります）`,
       `🗄️ DB: ${name}（PostgreSQL / user: ${name}_user）`,
       `📄 .env に DATABASE_URL, PORT を設定済み`,
-      `⏳ ドメイン反映まで数秒かかる場合があります`,
-    ].join('\n');
+    ];
+    if (template === 'phaser') {
+      msgLines.push('');
+      msgLines.push('🎮 Phaser 3 ゲームテンプレートを展開しました');
+      msgLines.push('🎯 サンプル: 2048 パズルゲーム');
+      msgLines.push(`⚡ PM2 プロセス: tf-${name}（HMR 対応 dev サーバー常駐）`);
+    }
+    msgLines.push(`⏳ ドメイン反映まで数秒かかる場合があります`);
+    const msg = msgLines.join('\n');
     console.log(`🛫 testflight [${name}]: returning success message (${msg.length} chars)`);
     return msg;
 
@@ -339,7 +428,8 @@ export async function listTestflightServices(userId: string): Promise<string> {
 
   const lines = services.map((s) => {
     const emoji = statusEmoji[s.status] || '❓';
-    return `${emoji} **${s.name}** — https://${s.domain} (port ${s.port})`;
+    const tmpl = s.template ? ` [${s.template}]` : '';
+    return `${emoji} **${s.name}**${tmpl} — https://${s.domain} (port ${s.port})`;
   });
 
   return [
@@ -368,6 +458,17 @@ export async function removeTestflightService(userId: string, name: string): Pro
   }
 
   try {
+    // PM2 プロセス停止・削除（テンプレートサービスの場合）
+    if (service.template) {
+      try {
+        await execAsync(`pm2 delete tf-${name}`);
+        await execAsync('pm2 save');
+        console.log(`🛫 testflight [${name}]: PM2 process tf-${name} deleted`);
+      } catch (e: any) {
+        console.warn(`PM2 cleanup warning: ${e.message}`);
+      }
+    }
+
     // Caddy 設定ファイル削除
     try {
       await execAsync(`sudo rm ${CADDY_SITES_DIR}/${name}.${DOMAIN_SUFFIX}`);
@@ -401,6 +502,195 @@ export async function removeTestflightService(userId: string, name: string): Pro
   } catch (error: any) {
     console.error(`❌ testflight remove error:`, error);
     return `❌ アーカイブに失敗しました: ${error.message}`;
+  }
+}
+
+/**
+ * テストフライトサービスを複製
+ * ディレクトリ・PostgreSQL DB・Caddy 設定・PM2 プロセスを丸ごとコピーする。
+ */
+export async function copyTestflightService(userId: string, srcName: string, destName: string): Promise<string> {
+  console.log(`📋 testflight cp: ${srcName} → ${destName}, userId=${userId}`);
+
+  // 1. 新名前のバリデーション
+  const validationError = validateServiceName(destName);
+  if (validationError) {
+    return validationError;
+  }
+
+  // 2. コピー元の存在確認
+  const srcService = await prisma.testflightService.findFirst({
+    where: { name: srcName, userId },
+  });
+  if (!srcService) {
+    return `⚠️ \`${srcName}\` が見つかりません。\`testflight\` で一覧を確認してください。`;
+  }
+  if (srcService.status === 'archived') {
+    return `⚠️ \`${srcName}\` はアーカイブ済みのためコピーできません。`;
+  }
+
+  // 3. コピー先の重複チェック
+  const existing = await prisma.testflightService.findUnique({
+    where: { name: destName },
+  });
+  if (existing) {
+    if (existing.status === 'archived') {
+      return `⚠️ \`${destName}\` はアーカイブ済みです。別の名前を使用してください。`;
+    }
+    return `⚠️ \`${destName}\` は既に存在します。\n🌐 https://${destName}.${DOMAIN_SUFFIX}`;
+  }
+
+  // 4. ポート採番
+  const port = await getNextPort();
+  const domain = `${destName}.${DOMAIN_SUFFIX}`;
+  const destDir = join(TESTFLIGHT_BASE_DIR, destName);
+  const dbPassword = generatePassword();
+  console.log(`📋 testflight cp [${destName}]: port=${port}, domain=${domain}`);
+
+  try {
+    // 5. ディレクトリ複製
+    await execAsync(`cp -a ${join(TESTFLIGHT_BASE_DIR, srcName)} ${destDir}`);
+    console.log(`📋 testflight cp [${destName}]: directory copied`);
+
+    // 6. ファイル内容書き換え
+    // 6a. .env を新しい接続情報で上書き
+    const envContent = [
+      `DATABASE_URL="postgresql://${destName}_user:${dbPassword}@localhost:5432/${destName}"`,
+      `PORT=${port}`,
+      '',
+    ].join('\n');
+    await writeFile(join(destDir, '.env'), envContent, 'utf-8');
+
+    // 6b. プレースホルダー HTML を再生成
+    await writeFile(
+      join(destDir, 'placeholder', 'index.html'),
+      generatePlaceholderHtml(destName),
+      'utf-8'
+    );
+
+    // 6c. CLAUDE.md のサービス情報を書き換え（src 名を dest 名に、ポートも更新）
+    try {
+      const { readFile } = await import('fs/promises');
+      let claudeMd = await readFile(join(destDir, 'CLAUDE.md'), 'utf-8');
+      claudeMd = claudeMd
+        .replace(new RegExp(srcName, 'g'), destName)
+        .replace(new RegExp(String(srcService.port), 'g'), String(port));
+      await writeFile(join(destDir, 'CLAUDE.md'), claudeMd, 'utf-8');
+    } catch (e: any) {
+      console.warn(`📋 testflight cp [${destName}]: CLAUDE.md rewrite skipped: ${e.message}`);
+    }
+
+    // 7. PostgreSQL 複製
+    // 7a. 新ユーザー作成
+    try {
+      await execAsync(
+        `sudo -u postgres psql -c "CREATE USER ${destName}_user WITH PASSWORD '${dbPassword}'"`
+      );
+    } catch (e: any) {
+      if (!e.stderr?.includes('already exists')) {
+        throw new Error(`PostgreSQL ユーザー作成失敗: ${e.stderr || e.message}`);
+      }
+    }
+
+    // 7b. 新 DB 作成
+    try {
+      await execAsync(`sudo -u postgres createdb ${destName} -O ${destName}_user`);
+    } catch (e: any) {
+      if (!e.stderr?.includes('already exists')) {
+        throw new Error(`PostgreSQL DB 作成失敗: ${e.stderr || e.message}`);
+      }
+    }
+
+    // 7c. データフルコピー（pg_dump | psql）
+    try {
+      await execAsync(
+        `sudo -u postgres pg_dump ${srcName} | sudo -u postgres psql ${destName}`,
+        { timeout: 120000 }
+      );
+      console.log(`📋 testflight cp [${destName}]: pg_dump → psql done`);
+    } catch (e: any) {
+      console.warn(`📋 testflight cp [${destName}]: pg_dump warning: ${e.message}`);
+    }
+
+    // 7d. 新ユーザーに権限付与
+    try {
+      await execAsync(
+        `sudo -u postgres psql -d ${destName} -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${destName}_user; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${destName}_user;"`
+      );
+    } catch (e: any) {
+      console.warn(`📋 testflight cp [${destName}]: grant warning: ${e.message}`);
+    }
+    console.log(`📋 testflight cp [${destName}]: postgres done`);
+
+    // 8. Caddy 設定作成
+    const caddyConfig = generateCaddyConfig(destName, port, destDir);
+    const tmpFile = join('/tmp', `caddy-testflight-${destName}.conf`);
+    await writeFile(tmpFile, caddyConfig, 'utf-8');
+    await execAsync(`cat ${tmpFile} | sudo tee ${CADDY_SITES_DIR}/${destName}.${DOMAIN_SUFFIX} > /dev/null`);
+    await execAsync(`rm ${tmpFile}`);
+    console.log(`📋 testflight cp [${destName}]: caddy config written`);
+
+    // 9. DB レコード作成（src の template/status を引き継ぎ）
+    await prisma.testflightService.create({
+      data: {
+        userId,
+        name: destName,
+        port,
+        domain,
+        directory: destDir,
+        status: srcService.status,
+        template: srcService.template,
+      },
+    });
+    console.log(`📋 testflight cp [${destName}]: db record created`);
+
+    // 10. PM2 起動（テンプレートサービスの場合）
+    if (srcService.template) {
+      try {
+        await execAsync(
+          `pm2 start "pnpm dev --port ${port} --host 0.0.0.0" --name "tf-${destName}" --cwd "${destDir}"`,
+          { timeout: 30000 }
+        );
+        await execAsync('pm2 save', { timeout: 10000 });
+        console.log(`📋 testflight cp [${destName}]: PM2 process tf-${destName} started`);
+      } catch (e: any) {
+        console.warn(`📋 testflight cp [${destName}]: PM2 start warning: ${e.message}`);
+      }
+    }
+
+    // 11. Caddy reload（2秒遅延で非同期実行）
+    const caddySiteFile = `${CADDY_SITES_DIR}/${destName}.${DOMAIN_SUFFIX}`;
+    setTimeout(async () => {
+      try {
+        await execAsync('caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile');
+        await execAsync('sudo systemctl reload caddy');
+        console.log(`📋 testflight cp [${destName}]: caddy reload done (async)`);
+      } catch (error: any) {
+        console.error(`❌ testflight cp [${destName}]: caddy reload failed (async):`, error.message);
+        try {
+          await execAsync(`sudo rm ${caddySiteFile}`);
+        } catch { /* 削除失敗は無視 */ }
+      }
+    }, 2000);
+
+    // 12. 完了メッセージ
+    const msgLines = [
+      `✅ **${srcName}** → **${destName}** に複製しました`,
+      '',
+      `🌐 https://${domain}`,
+      `📁 ${destDir}`,
+      `🔌 Port: ${port}`,
+      `🗄️ DB: ${destName}（user: ${destName}_user / データコピー済み）`,
+    ];
+    if (srcService.template) {
+      msgLines.push(`⚡ PM2 プロセス: tf-${destName}`);
+    }
+    msgLines.push(`⏳ ドメイン反映まで数秒かかる場合があります`);
+    return msgLines.join('\n');
+
+  } catch (error: any) {
+    console.error(`❌ testflight cp error [${destName}]:`, error);
+    return `❌ 複製に失敗しました: ${error.message}`;
   }
 }
 

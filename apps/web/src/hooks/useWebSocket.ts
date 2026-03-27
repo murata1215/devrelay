@@ -67,6 +67,8 @@ export interface WebSocketCallbacks {
   onToolApprovalResolved?: (resolved: ToolApprovalResolved) => void;
   /** 自動承認通知（approveAllMode 時）受信時のコールバック */
   onToolApprovalAuto?: (info: ToolApprovalAuto) => void;
+  /** WebSocket 再接続時のコールバック（セッション再登録・履歴リフレッシュ用） */
+  onReconnect?: () => void;
 }
 
 /** WebSocket フックの戻り値 */
@@ -136,6 +138,7 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
 
       ws.onopen = () => {
         if (!mountedRef.current) return;
+        const isReconnect = reconnectAttemptsRef.current > 0;
         setConnected(true);
         reconnectAttemptsRef.current = 0;
 
@@ -145,6 +148,11 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
             ws.send(JSON.stringify({ type: 'web:ping' }));
           }
         }, 30000);
+
+        // 再接続時: セッション再登録・履歴リフレッシュをトリガー
+        if (isReconnect) {
+          callbacksRef.current?.onReconnect?.();
+        }
       };
 
       ws.onmessage = (event) => {

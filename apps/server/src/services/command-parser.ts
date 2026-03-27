@@ -149,9 +149,22 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   if (tfMatch) {
     const arg = tfMatch[1]?.trim();
     if (!arg) return { type: 'testflight', subcommand: 'list' };
+    if (arg === 'help') return { type: 'testflight', subcommand: 'help' };
     if (arg.startsWith('rm ')) return { type: 'testflight', subcommand: 'remove', name: arg.slice(3).trim() };
+    // cp / copy: サービス複製（testflight cp <src> <dest>）
+    if (arg.startsWith('cp ') || arg.startsWith('copy ')) {
+      const copyArgs = arg.replace(/^(?:cp|copy)\s+/, '').trim().split(/\s+/);
+      if (copyArgs.length === 2) {
+        return { type: 'testflight', subcommand: 'copy', srcName: copyArgs[0], destName: copyArgs[1] };
+      }
+    }
     if (arg.startsWith('info ')) return { type: 'testflight', subcommand: 'info', name: arg.slice(5).trim() };
-    return { type: 'testflight', subcommand: 'create', name: arg };
+    // フラグ解析: "mygame --phaser" → name="mygame", template="phaser"
+    const parts = arg.split(/\s+/);
+    const flags = parts.filter(p => p.startsWith('--'));
+    const nameArg = parts.filter(p => !p.startsWith('--'))[0] || arg;
+    const template = flags.includes('--phaser') ? 'phaser' : undefined;
+    return { type: 'testflight', subcommand: 'create', name: nameArg, template };
   }
 
   // 0.7. 「ask <project>: <question>」パターン: 他プロジェクトに質問
@@ -319,8 +332,10 @@ export function getHelpText(): string {
 **テストフライト**
 \`testflight\` - サービス一覧
 \`testflight <name>\` - 新規サービス作成
+\`testflight <name> --phaser\` - Phaser ゲームプロジェクト作成
 \`testflight rm <name>\` - サービスをアーカイブ
 \`testflight info <name>\` - サービス詳細
+\`testflight help\` - 詳細ヘルプ
 
 **チーム**
 \`ask <project>: <質問>\` - 他プロジェクトに質問

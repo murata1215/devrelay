@@ -499,9 +499,11 @@ export type UserCommand =
   | { type: 'kill' }     // 実行中の AI プロセスを強制停止
   | { type: 'update' }   // Agent バージョン確認・更新
   | { type: 'testflight'; subcommand: 'list' }
-  | { type: 'testflight'; subcommand: 'create'; name: string }
+  | { type: 'testflight'; subcommand: 'create'; name: string; template?: string }
   | { type: 'testflight'; subcommand: 'remove'; name: string }
   | { type: 'testflight'; subcommand: 'info'; name: string }
+  | { type: 'testflight'; subcommand: 'copy'; srcName: string; destName: string }
+  | { type: 'testflight'; subcommand: 'help' }
   | { type: 'ask:member'; targetProject: string; question: string }
   | { type: 'teamexec:member'; targetProject: string; instruction: string };
 

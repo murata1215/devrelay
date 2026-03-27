@@ -7,6 +7,24 @@
 ## 実装済み機能
 
 
+### #201: testflight cp + Safari SourceMap 修正 + WebUI チャット 3 件修正 (2026-03-27)
+
+TestFlight サービス複製コマンド、Safari SourceMap エラー修正、WebUI チャットの進捗表示分裂・ステール表示・iOS Safari 対応を実装。
+
+- **testflight cp**: `testflight cp <旧名> <新名>` でサービスをまるごと複製（ディレクトリ cp -a + DB pg_dump + Caddy + PM2）
+  - `copy` サブコマンド型追加（shared types）
+  - `cp`/`copy` パターン解析追加（command-parser）
+  - `copyTestflightService()` 関数追加（testflight-manager）
+  - ヘルプテキスト更新（command-handler）
+- **Safari SourceMap 修正**: Phaser テンプレートの `vite.config.ts` に `optimizeDeps.esbuildOptions.loader: { '.map': 'json' }` 追加
+  - iOS Safari が `?.map` リクエストを送り esbuild がクラッシュする問題を解消
+- **Bug fix: メッセージBOX分裂**: `clearProgressOnTab` から `suppressConnectRef` チェックを削除
+  - タブ切り替え直後に AI レスポンス到着 → 進捗クリアされず → 2 つのボックスが表示される問題を修正
+- **Bug fix: WS 再接続時ステール表示**: `useWebSocket.ts` に `onReconnect` コールバック追加
+  - WS 再接続時に `//connect` 再送 + `loadHistory(refresh=true)` で最新メッセージを取得
+- **Bug fix: iOS Safari ステール表示**: `visibilitychange` ハンドラ追加
+  - iOS Safari でバックグラウンド→復帰時に自動で最新メッセージをリフレッシュ
+
 ### #200: コマンド応答のクロスプロジェクト漏洩修正 + Phaser テンプレート オーディオ対応 (2026-03-26)
 
 複数プロジェクト同時利用時に別プロジェクトのメッセージがアクティブタブに表示されるバグを修正。Phaser テンプレートをオーディオ対応版に更新。

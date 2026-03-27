@@ -58,6 +58,11 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Cross-Project Source Display**: Cross-project queries (ask/teamexec) now show the source project name in WebUI chat (`🔗 devrelay-flutter`) and Conversations page (`🔗 devrelay-flutter → devrelay`)
 - **Cross-Tab Message Routing Fix**: Command responses now include `projectId` to prevent messages from other projects leaking into the active tab
 - **Phaser Audio Template**: `testflight create --phaser` now generates 2048 game with BGM (Tone.js chiptune) + SFX (jsfxr procedural), mobile-optimized (viewport-fit, dvh, safe-area), BGM/SFX mute buttons
+- **TestFlight Copy**: `testflight cp <old> <new>` clones a service entirely (directory, PostgreSQL DB via pg_dump, Caddy config, PM2 process) — use with `testflight rm` for rename workflow
+- **Safari SourceMap Fix**: Phaser template `vite.config.ts` includes `optimizeDeps.esbuildOptions.loader: { '.map': 'json' }` to prevent iOS Safari esbuild crash
+- **Progress Box Split Fix**: Removed `suppressConnectRef` guard from `clearProgressOnTab` — fixes duplicate message boxes when AI completes during tab switch
+- **WebSocket Reconnect Refresh**: `onReconnect` callback re-sends `//connect` and refreshes history on WS reconnection — fixes stale messages after network interruption
+- **iOS Safari Visibility Refresh**: `visibilitychange` handler auto-refreshes chat history when returning from background tab — fixes stale display on iOS Safari
 
 ## 💡 Token Efficiency
 

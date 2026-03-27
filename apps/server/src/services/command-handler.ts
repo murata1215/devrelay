@@ -43,6 +43,7 @@ import {
   createTestflightService,
   listTestflightServices,
   removeTestflightService,
+  copyTestflightService,
   getTestflightServiceInfo,
 } from './testflight-manager.js';
 
@@ -1422,6 +1423,9 @@ async function handleTestflight(
     case 'remove':
       result = await removeTestflightService(dbUserId, command.name);
       break;
+    case 'copy':
+      result = await copyTestflightService(dbUserId, command.srcName, command.destName);
+      break;
     case 'info':
       result = await getTestflightServiceInfo(dbUserId, command.name);
       break;
@@ -1445,6 +1449,7 @@ function getTestflightHelpText(): string {
 **基本コマンド**
 \`testflight\` - サービス一覧を表示
 \`testflight <name>\` - 新規サービス作成（プレースホルダー）
+\`testflight cp <src> <dest>\` - サービスを複製（DB データ含む）
 \`testflight rm <name>\` - サービスをアーカイブ（削除）
 \`testflight info <name>\` - サービスの詳細情報を表示
 \`testflight help\` - このヘルプを表示
@@ -1467,6 +1472,7 @@ Vite + Phaser 3 + TypeScript のゲーム開発環境を自動構築します。
 **例**
 \`testflight mygame --phaser\` → https://mygame.devrelay.io に 2048 ゲーム
 \`testflight mysite\` → https://mysite.devrelay.io にプレースホルダー
+\`testflight cp mygame newgame\` → mygame を newgame に複製（リネーム代わり）
 `.trim();
 }
 

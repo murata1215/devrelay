@@ -2099,8 +2099,11 @@ export function ChatPage() {
     }).catch(err => console.error('Failed to load approval history:', err));
   }, [activeTabId]);
 
-  /** セッションIDからタブにメッセージ履歴を読み込む */
-  const loadHistory = useCallback(async (projectId: string, _sessionId?: string) => {
+  /**
+   * セッションIDからタブにメッセージ履歴を読み込む
+   * @param refresh true の場合は最新メッセージで既存メッセージと時系列マージ（WS 再接続時用）
+   */
+  const loadHistory = useCallback(async (projectId: string, _sessionId?: string, refresh = false) => {
     // 履歴読み込み中はスクロールを抑制
     shouldAutoScrollRef.current = false;
     // 読み込み中フラグを立てる
@@ -2122,7 +2125,22 @@ export function ChatPage() {
 
       setTabs(prev => prev.map(t => {
         if (t.projectId !== projectId) return t;
-        // 既存のリアルタイムメッセージと重複しないよう、既存メッセージIDをセットに
+        if (refresh) {
+          // リフレッシュモード: API メッセージ + WS のみのメッセージを時系列マージ
+          const apiIds = new Set(chatMessages.map(m => m.id));
+          const wsOnlyMsgs = t.messages.filter(m => !apiIds.has(m.id));
+          const merged = [...chatMessages, ...wsOnlyMsgs].sort(
+            (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
+          );
+          return {
+            ...t,
+            messages: merged,
+            historyLoaded: true,
+            hasMoreHistory: hasMore,
+            loadingHistory: false,
+          };
+        }
+        // 通常モード（スクロールバック）: 既存メッセージの前に prepend
         const existingIds = new Set(t.messages.map(m => m.id));
         const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
         return {
@@ -2210,11 +2228,9 @@ export function ChatPage() {
 
   /**
    * 進捗をクリア（projectId で対象タブを特定、省略時はアクティブタブ）
-   * //connect 応答では進捗をクリアしない（suppressConnectRef でガード）
+   * //connect レスポンスは projectId 付きで新タブを対象にするため、旧タブの進捗に影響しない
    */
   const clearProgressOnTab = useCallback((projectId?: string) => {
-    // //connect レスポンス由来の場合は進捗をクリアしない
-    if (suppressConnectRef.current) return;
     const targetId = projectId
       ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
       : activeTabIdRef.current;
@@ -2299,6 +2315,22 @@ export function ChatPage() {
     }]);
   }, []);
 
+  /** sendCommand の最新値を保持する ref（再接続ハンドラから参照するため） */
+  const sendCommandRef = useRef<(text: string) => void>(() => {});
+
+  /** WS 再接続時: セッション参加者を再登録し、最新メッセージをリフレッシュ */
+  const handleReconnect = useCallback(() => {
+    const activeId = activeTabIdRef.current;
+    if (!activeId) return;
+
+    // アクティブタブの //connect を再送（セッション参加者として再登録）
+    suppressConnectRef.current = true;
+    sendCommandRef.current(`//connect ${activeId}`);
+
+    // 最新メッセージでリフレッシュ（DB から再取得してマージ）
+    loadHistory(activeId, undefined, true);
+  }, [loadHistory]);
+
   const { connected, sendCommand, sendToolApprovalResponse } = useWebSocket({
     onMessage: addMessageToTab,
     onProgress: updateProgressOnTab,
@@ -2307,7 +2339,25 @@ export function ChatPage() {
     onToolApproval: handleToolApproval,
     onToolApprovalResolved: handleToolApprovalResolved,
     onToolApprovalAuto: handleToolApprovalAuto,
+    onReconnect: handleReconnect,
   });
+
+  // sendCommand が確定したら ref を更新（handleReconnect から参照可能にする）
+  sendCommandRef.current = sendCommand;
+
+  // ページ復帰時にメッセージ履歴をリフレッシュ（iOS Safari 等でタブがバックグラウンドから戻った際に対応）
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const activeId = activeTabIdRef.current;
+        if (activeId) {
+          loadHistory(activeId, undefined, true);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [loadHistory]);
 
   /** ユーザーがツール承認ボタンをクリックした時のハンドラ */
   const handleToolApprovalRespond = useCallback((requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => {
