@@ -178,10 +178,15 @@ async function deployPhaserTemplate(name: string, directory: string, port: numbe
     'utf-8'
   );
 
-  // pnpm install
+  // pnpm install（postinstall で prisma generate も実行される）
   console.log(`🎮 testflight [${name}]: running pnpm install...`);
   await execAsync('pnpm install', { cwd: directory, timeout: 120000 });
   console.log(`🎮 testflight [${name}]: pnpm install done`);
+
+  // Prisma DB push（スキーマを DB に反映）
+  console.log(`🎮 testflight [${name}]: running prisma db push...`);
+  await execAsync('npx prisma db push --skip-generate', { cwd: directory, timeout: 60000 });
+  console.log(`🎮 testflight [${name}]: prisma db push done`);
 
   // pnpm build（初回ビルド確認）
   console.log(`🎮 testflight [${name}]: running pnpm build...`);

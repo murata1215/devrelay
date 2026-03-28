@@ -2524,6 +2524,8 @@ export function ChatPage() {
 
   // メッセージ追加時に自動スクロール（上スクロール読み込み中・タブ切替時は抑制）
   const shouldAutoScrollRef = useRef(true);
+  /** handleSend の二重送信防止フラグ */
+  const sendingRef = useRef(false);
   /** プログラムによるスムーズスクロール中のガードタイムスタンプ */
   const autoScrollingUntilRef = useRef(0);
   /** 履歴ロード直後フラグ（instant スクロール用） */
@@ -2877,9 +2879,12 @@ export function ChatPage() {
   };
 
   const handleSend = () => {
+    // 二重送信防止（React の state 更新バッチにより input がクリアされる前に再呼び出しされるのを防止）
+    if (sendingRef.current) return;
     const text = input.trim();
     const hasFiles = pendingFiles.length > 0;
     if ((!text && !hasFiles) || !connected) return;
+    sendingRef.current = true;
     const sendText = text || pendingFiles.map(f => f.filename).join(', ');
 
     if (activeTabId) {
@@ -2901,6 +2906,8 @@ export function ChatPage() {
     sendCommand(sendText, hasFiles ? pendingFiles : undefined, activeTabId || undefined);
     setInput('');
     setPendingFiles([]);
+    // 次フレームで送信ガードを解除
+    requestAnimationFrame(() => { sendingRef.current = false; });
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {

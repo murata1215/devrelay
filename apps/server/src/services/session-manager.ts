@@ -204,6 +204,19 @@ export function removeParticipant(sessionId: string, platform: Platform, chatId:
   sessionParticipants.set(sessionId, filtered);
 }
 
+/**
+ * 指定した Web chatId を全セッションの参加者リストから除去する
+ * WS 切断時に呼び出し、stale 参加者の蓄積を防止する
+ */
+export function removeWebParticipantFromAllSessions(chatId: string): void {
+  for (const [sessionId, participants] of sessionParticipants) {
+    const filtered = participants.filter(p => !(p.platform === 'web' && p.chatId === chatId));
+    if (filtered.length !== participants.length) {
+      sessionParticipants.set(sessionId, filtered);
+    }
+  }
+}
+
 export async function endSession(sessionId: string) {
   await prisma.session.update({
     where: { id: sessionId },

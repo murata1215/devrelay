@@ -7,6 +7,28 @@
 ## 実装済み機能
 
 
+### #202: Phaser 対戦基盤テンプレート + WebUI メッセージ重複修正 (2026-03-28)
+
+Phaser テンプレートに WebSocket ベースの対戦基盤を追加。WebUI のメッセージ重複表示バグを修正。
+
+- **Phaser 対戦基盤**: `testflight --phaser` テンプレートにターン制対戦インフラを内蔵
+  - `server/` ディレクトリ: Vite プラグイン方式の WS サーバー（`vite-ws-plugin.ts`）
+  - `GameAdapter` パターン: ゲーム固有ロジックをアダプタとして抽象化（`server/game-adapter.ts`）
+  - マッチメイキング: 10秒 FIFO キュー → CPU フォールバック（`server/matchmaker.ts`）
+  - ゲームルーム: ターン管理・勝敗判定・リマッチ（`server/room.ts`）
+  - CPU プレイヤー: 500-1500ms 遅延実行（`server/cpu-player.ts`）
+  - サンプルゲーム: 棒消し（Nim）アダプタ同梱（`server/adapters/nim-adapter.ts`）
+  - DB: Prisma スキーマ（Player + Match モデル、連勝追跡）
+  - クライアント: LobbyScene, ResultScene, GameClient WS singleton, protocol 型定義
+  - 既存テンプレート更新: GameScene を棒消し対戦に、背景ダーク化、package.json に ws/prisma 追加
+  - デプロイフロー更新: `prisma db push` ステップ追加（`testflight-manager.ts`）
+  - SKILL.md に対戦基盤セクション（§14）追加
+- **Bug fix: WebUI メッセージ重複表示**: WS 切断時に stale 参加者をクリーンアップ
+  - 根本原因: Web クライアントが切断しても `sessionParticipants` から除去されず、20+ の古い chatId が蓄積
+  - `removeWebParticipantFromAllSessions()` ヘルパー追加（`session-manager.ts`）
+  - WS `close` ハンドラで全セッションから即座に除去 + `pendingMessages` クリア（`web.ts`）
+  - `handleSend` に `sendingRef` 二重送信防止ガード追加（`ChatPage.tsx`）
+
 ### #201: testflight cp + Safari SourceMap 修正 + WebUI チャット 3 件修正 (2026-03-27)
 
 TestFlight サービス複製コマンド、Safari SourceMap エラー修正、WebUI チャットの進捗表示分裂・ステール表示・iOS Safari 対応を実装。

@@ -3,7 +3,7 @@ import type { WebSocket } from 'ws';
 import type { FileAttachment, WebClientMessage, ServerToWebMessage } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
-import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants } from '../services/session-manager.js';
+import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants, removeWebParticipantFromAllSessions } from '../services/session-manager.js';
 import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession } from '../services/agent-manager.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
@@ -210,12 +210,11 @@ export async function setupWebClientWebSocket(
     clearInterval(keepaliveInterval);
     if (webClients.get(chatId) === ws) {
       webClients.delete(chatId);
-      // 再接続しなかった場合のみキューをクリア（60秒待機）
-      setTimeout(() => {
-        if (!webClients.has(chatId)) {
-          pendingMessages.delete(chatId);
-        }
-      }, 60000);
+      // 切断した chatId を全セッションの参加者から除去（stale 参加者の蓄積を防止）
+      // 再接続時に //connect で再登録されるため、一時的な離脱は問題ない
+      removeWebParticipantFromAllSessions(chatId);
+      // pendingMessages もクリア（古い chatId 宛のキューが再接続時にフラッシュされるのを防止）
+      pendingMessages.delete(chatId);
     }
     typingStates.delete(chatId);
     console.log(`🌐 Web client disconnected: ${chatId}`);

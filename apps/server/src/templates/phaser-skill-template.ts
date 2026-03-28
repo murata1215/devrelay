@@ -1099,4 +1099,49 @@ muteBtn.on('pointerdown', () => {
 - **BGM はループ** — \`Tone.Sequence\` の \`loop = true\`（デフォルト）
 - **効果音は短く** — 200ms 以下が目安、BGM と干渉しないよう音量バランス調整
 - **レベル連動** — 落ちもの系はレベルに応じてテンポ加速
+
+---
+
+## 14. 対戦基盤（Multiplayer Infrastructure）
+
+### 14.1 アーキテクチャ概要
+
+テンプレートには WebSocket ベースの対戦基盤が内蔵されている。
+
+- **サーバー権威型**: ゲーム状態はサーバー（\`server/room.ts\`）が管理
+- **Vite プラグイン**: dev サーバーと同一ポートで WS を提供
+- **GameAdapter パターン**: ゲーム固有ロジックをアダプタとして抽象化
+
+### 14.2 ゲームを変更する手順
+
+1. \`server/adapters/\` に新しいアダプタクラスを作成
+2. \`GameAdapter\` インターフェースを実装（\`server/game-adapter.ts\` 参照）
+3. \`server/adapters/index.ts\` の export を新アダプタに差し替え
+4. \`src/scenes/GameScene.ts\` の描画・入力を新ゲームに合わせて変更
+5. \`src/scenes/LobbyScene.ts\` のゲーム名・ルール説明を更新
+
+### 14.3 GameAdapter インターフェース
+
+\`\`\`typescript
+interface GameAdapter {
+  name: string;                    // ゲーム名
+  createInitialState(): GameState; // 初期状態
+  applyMove(state, player, action): MoveResult; // 手の適用
+  getCpuMove(state, cpuPlayer): any;            // CPU の手
+  getPlayerView(state, player): GameState;      // 表示用状態
+}
+\`\`\`
+
+### 14.4 マッチメイキング
+
+- \`server/matchmaker.ts\` が FIFO キュー管理
+- 10秒以内にマッチすれば PvP、タイムアウトで CPU 戦
+- \`MATCH_TIMEOUT_MS\` 定数で待ち時間を調整可能
+
+### 14.5 対戦の注意事項
+
+- ゲーム状態の変更は必ずサーバー側（Room + GameAdapter）で行う
+- クライアントは \`move\` メッセージで行動を送信し、\`state\` メッセージで結果を受け取る
+- 不完全情報ゲーム（手札など）は \`getPlayerView()\` で各プレイヤーの見える情報を制限
+- CPU の手は 500〜1500ms の遅延で実行（自然な感覚に）
 `;

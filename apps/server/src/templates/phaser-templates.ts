@@ -13,7 +13,7 @@ import { PHASER_SKILL_MD } from './phaser-skill-template.js';
 /** PHASER_SKILL_MD を re-export（testflight-manager から使えるように） */
 export { PHASER_SKILL_MD };
 
-/** package.json テンプレート（jsfxr + tone 込み） */
+/** package.json テンプレート（jsfxr + tone + ws + prisma 込み） */
 export const PHASER_PACKAGE_JSON = `{
   "name": "{{NAME}}",
   "version": "0.1.0",
@@ -21,28 +21,36 @@ export const PHASER_PACKAGE_JSON = `{
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "prisma generate",
+    "db:push": "prisma db push"
   },
   "dependencies": {
     "phaser": "^3.87.0",
     "jsfxr": "^1.2.2",
-    "tone": "^15.0.0"
+    "tone": "^15.0.0",
+    "@prisma/client": "^6.0.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "prisma": "^6.0.0",
+    "@types/ws": "^8.5.0"
   }
 }
 `;
 
-/** vite.config.ts テンプレート */
+/** vite.config.ts テンプレート（WS プラグイン統合） */
 export const PHASER_VITE_CONFIG = `import { defineConfig } from 'vite';
+import { gameWsPlugin } from './server/vite-ws-plugin';
 
 export default defineConfig({
   server: {
     host: '0.0.0.0',
     allowedHosts: ['{{NAME}}.devrelay.io'],
   },
+  plugins: [gameWsPlugin()],
   build: {
     outDir: 'dist',
     sourcemap: true,
@@ -71,7 +79,7 @@ export const PHASER_TSCONFIG = `{
     "sourceMap": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
-  "include": ["src"]
+  "include": ["src", "server"]
 }
 `;
 
@@ -84,7 +92,7 @@ export const PHASER_INDEX_HTML = `<!DOCTYPE html>
   <title>{{NAME}} - DevRelay Game</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #faf8ef; overflow: hidden; }
+    body { background: #1a1a2e; overflow: hidden; }
     #game-container {
       width: 100%;
       height: 100vh;
@@ -100,29 +108,31 @@ export const PHASER_INDEX_HTML = `<!DOCTYPE html>
 </html>
 `;
 
-/** src/main.ts テンプレート */
+/** src/main.ts テンプレート（対戦シーン追加） */
 export const PHASER_MAIN_TS = `import Phaser from 'phaser';
 import { BootScene } from './scenes/BootScene';
+import { LobbyScene } from './scenes/LobbyScene';
 import { GameScene } from './scenes/GameScene';
 import { UIScene } from './scenes/UIScene';
+import { ResultScene } from './scenes/ResultScene';
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
   parent: 'game-container',
   width: 480,
   height: 720,
-  backgroundColor: '#faf8ef',
+  backgroundColor: '#1a1a2e',
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
-  scene: [BootScene, GameScene, UIScene],
+  scene: [BootScene, LobbyScene, GameScene, UIScene, ResultScene],
 };
 
 new Phaser.Game(config);
 `;
 
-/** src/scenes/BootScene.ts テンプレート */
+/** src/scenes/BootScene.ts テンプレート（ロビーに遷移） */
 export const PHASER_BOOT_SCENE = `import Phaser from 'phaser';
 
 export class BootScene extends Phaser.Scene {
@@ -131,7 +141,7 @@ export class BootScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.scene.start('GameScene');
+    this.scene.start('LobbyScene');
   }
 }
 `;
@@ -353,257 +363,271 @@ export const PHASER_JSFXR_DTS = `declare module 'jsfxr' {
 }
 `;
 
-/** src/scenes/GameScene.ts テンプレート（2048 + SoundManager 統合） */
+/** src/scenes/GameScene.ts テンプレート（棒消し対戦 + SoundManager 統合） */
 export const PHASER_GAME_SCENE = `import Phaser from 'phaser';
 import { SoundManager } from '../utils/SoundManager';
+import { GameClient } from '../net/GameClient';
 
-/** グリッドサイズ */
-const SIZE = 4;
-/** タイルの大きさ (px) */
-const TILE_SIZE = 100;
-/** タイル間の隙間 (px) */
-const GAP = 12;
-/** グリッド全体の幅 */
-const GRID_PX = SIZE * TILE_SIZE + (SIZE + 1) * GAP;
-/** グリッドの左上 X */
-const OFFSET_X = (480 - GRID_PX) / 2;
-/** グリッドの左上 Y */
-const OFFSET_Y = 160;
-
-/** 数値ごとのタイル背景色 */
-const TILE_BG: Record<number, number> = {
-  2:    0xeee4da,
-  4:    0xede0c8,
-  8:    0xf2b179,
-  16:   0xf59563,
-  32:   0xf67c5f,
-  64:   0xf65e3b,
-  128:  0xedcf72,
-  256:  0xedcc61,
-  512:  0xedc850,
-  1024: 0xedc53f,
-  2048: 0xedc22e,
-};
-
-/** 数値ごとの文字色 */
-const TILE_FG: Record<number, string> = {
-  2:   '#776e65',
-  4:   '#776e65',
-};
-const LIGHT_TEXT = '#f9f6f2';
-
-/** スワイプ判定の最小距離 */
-const SWIPE_THRESHOLD = 40;
+/** 棒の描画設定 */
+const STICK_WIDTH = 12;
+const STICK_HEIGHT = 120;
+const STICK_GAP = 18;
+const STICK_Y = 300;
 
 export class GameScene extends Phaser.Scene {
-  /** 論理グリッド（0 = 空） */
-  private grid: number[][] = [];
-  private score = 0;
-  private gameOver = false;
-  private startPointer: { x: number; y: number } | null = null;
-  private sound_manager!: SoundManager;
+  private client!: GameClient;
+  private soundManager!: SoundManager;
   private bgmStarted = false;
+
+  private sticks = 21;
+  private myTurn = false;
+  private selectedCount = 0;
+  private opponentNickname = '';
+  private isCpu = false;
+  private roomId = '';
+
+  /** 棒のグラフィックス配列 */
+  private stickGraphics: Phaser.GameObjects.Graphics[] = [];
+  /** UI テキスト群 */
+  private turnText!: Phaser.GameObjects.Text;
+  private infoText!: Phaser.GameObjects.Text;
+  private stickCountText!: Phaser.GameObjects.Text;
+  private selectText!: Phaser.GameObjects.Text;
 
   constructor() {
     super({ key: 'GameScene' });
   }
 
-  create(): void {
-    this.score = 0;
-    this.gameOver = false;
+  create(data: {
+    roomId: string;
+    opponent: { nickname: string; isCpu: boolean };
+    yourTurn: boolean;
+    gameState: { sticks: number };
+    gameName: string;
+  }): void {
+    this.client = GameClient.getInstance();
+    this.soundManager = SoundManager.getInstance();
     this.bgmStarted = false;
-    this.grid = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
-    this.sound_manager = SoundManager.getInstance();
+
+    this.roomId = data.roomId;
+    this.opponentNickname = data.opponent.nickname;
+    this.isCpu = data.opponent.isCpu;
+    this.sticks = data.gameState.sticks;
+    this.myTurn = data.yourTurn;
+    this.selectedCount = 0;
+
+    // UIScene を起動
     this.scene.launch('UIScene');
 
-    // 初期タイル 2 枚
-    this.spawnTile();
-    this.spawnTile();
-    this.drawBoard();
+    // 対戦相手表示
+    const vsLabel = this.isCpu ? 'vs CPU 🤖' : \`vs \${this.opponentNickname}\`;
+    this.add.text(240, 30, vsLabel, {
+      fontSize: '22px',
+      color: '#aaaacc',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
 
-    // スワイプ入力
-    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
-      this.startPointer = { x: p.x, y: p.y };
-      // 初回タッチで BGM 開始（iOS AudioContext 対応）
-      this.tryStartBGM();
+    // ターン表示
+    this.turnText = this.add.text(240, 70, '', {
+      fontSize: '24px',
+      color: '#ffcc00',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+
+    // 残り棒数
+    this.stickCountText = this.add.text(240, 220, '', {
+      fontSize: '28px',
+      color: '#e0e0ff',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+
+    // 選択数表示
+    this.selectText = this.add.text(240, 460, '', {
+      fontSize: '20px',
+      color: '#aaaacc',
+      fontFamily: 'Arial, sans-serif',
+    }).setOrigin(0.5);
+
+    // 操作説明
+    this.infoText = this.add.text(240, 500, '', {
+      fontSize: '16px',
+      color: '#6666aa',
+      fontFamily: 'Arial, sans-serif',
+      align: 'center',
+    }).setOrigin(0.5);
+
+    // 取るボタン（1, 2, 3）
+    [1, 2, 3].forEach((n, i) => {
+      this.createTakeButton(120 + i * 120, 560, n);
     });
-    this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
-      if (!this.startPointer || this.gameOver) return;
-      const dx = p.x - this.startPointer.x;
-      const dy = p.y - this.startPointer.y;
-      this.startPointer = null;
-      if (Math.abs(dx) < SWIPE_THRESHOLD && Math.abs(dy) < SWIPE_THRESHOLD) return;
-      if (Math.abs(dx) > Math.abs(dy)) {
-        dx > 0 ? this.move('right') : this.move('left');
+
+    // 降参ボタン
+    this.createSmallButton(240, 640, '🏳️ 降参', '#664444', () => {
+      this.client.send({ type: 'forfeit' });
+    });
+
+    // WS イベント
+    this.client.on('state', (msg: any) => {
+      this.sticks = msg.gameState.sticks;
+      this.myTurn = msg.yourTurn;
+      this.selectedCount = 0;
+      this.drawSticks();
+      this.updateUI();
+      this.soundManager.playMove();
+    });
+
+    this.client.on('result', (msg: any) => {
+      this.soundManager.stopBGM();
+      if (msg.winner === 'you') {
+        this.soundManager.playMerge(2048);
       } else {
-        dy > 0 ? this.move('down') : this.move('up');
+        this.soundManager.playGameOver();
       }
+      this.scene.stop('UIScene');
+      this.scene.start('ResultScene', {
+        winner: msg.winner,
+        stats: msg.stats,
+        opponentNickname: this.opponentNickname,
+        isCpu: this.isCpu,
+      });
     });
 
-    // キーボード入力
+    this.client.on('opponent_left', () => {
+      this.scene.stop('UIScene');
+      this.scene.start('ResultScene', {
+        winner: 'you',
+        stats: null,
+        opponentNickname: this.opponentNickname,
+        isCpu: this.isCpu,
+      });
+    });
+
+    // キーボード入力（1, 2, 3 キー）
     if (this.input.keyboard) {
       this.input.keyboard.on('keydown', (e: KeyboardEvent) => {
         this.tryStartBGM();
-        if (this.gameOver) return;
-        switch (e.key) {
-          case 'ArrowLeft':  this.move('left');  break;
-          case 'ArrowRight': this.move('right'); break;
-          case 'ArrowUp':    this.move('up');    break;
-          case 'ArrowDown':  this.move('down');  break;
-        }
+        const n = parseInt(e.key);
+        if (n >= 1 && n <= 3) this.takeTurn(n);
       });
     }
+
+    this.drawSticks();
+    this.updateUI();
   }
 
   /** 初回操作で BGM を開始 */
   private tryStartBGM(): void {
     if (this.bgmStarted) return;
     this.bgmStarted = true;
-    this.sound_manager.startBGM();
+    this.soundManager.startBGM();
   }
 
-  /** 空きマスにランダムで 2 か 4 を配置 */
-  private spawnTile(): void {
-    const empty: { r: number; c: number }[] = [];
-    for (let r = 0; r < SIZE; r++) {
-      for (let c = 0; c < SIZE; c++) {
-        if (this.grid[r][c] === 0) empty.push({ r, c });
-      }
-    }
-    if (empty.length === 0) return;
-    const { r, c } = Phaser.Utils.Array.GetRandom(empty);
-    this.grid[r][c] = Math.random() < 0.9 ? 2 : 4;
-  }
-
-  /** 指定方向にスライド＋マージ */
-  private move(dir: 'left' | 'right' | 'up' | 'down'): void {
-    const prev = this.grid.map(row => [...row]);
-    let moved = false;
-    let merged = false;
-    let maxMergeValue = 0;
-
-    const slide = (line: number[]): number[] => {
-      let arr = line.filter(v => v !== 0);
-      for (let i = 0; i < arr.length - 1; i++) {
-        if (arr[i] === arr[i + 1]) {
-          arr[i] *= 2;
-          this.score += arr[i];
-          if (arr[i] > maxMergeValue) maxMergeValue = arr[i];
-          merged = true;
-          arr[i + 1] = 0;
-          i++;
-        }
-      }
-      arr = arr.filter(v => v !== 0);
-      while (arr.length < SIZE) arr.push(0);
-      return arr;
-    };
-
-    if (dir === 'left' || dir === 'right') {
-      for (let r = 0; r < SIZE; r++) {
-        let line = this.grid[r];
-        if (dir === 'right') line = [...line].reverse();
-        line = slide(line);
-        if (dir === 'right') line = line.reverse();
-        this.grid[r] = line;
-      }
-    } else {
-      for (let c = 0; c < SIZE; c++) {
-        let line = this.grid.map(row => row[c]);
-        if (dir === 'down') line = [...line].reverse();
-        line = slide(line);
-        if (dir === 'down') line = line.reverse();
-        for (let r = 0; r < SIZE; r++) this.grid[r][c] = line[r];
-      }
-    }
-
-    for (let r = 0; r < SIZE; r++) {
-      for (let c = 0; c < SIZE; c++) {
-        if (this.grid[r][c] !== prev[r][c]) moved = true;
-      }
-    }
-
-    if (moved) {
-      // 効果音: マージ > ムーブの優先度
-      if (merged) {
-        this.sound_manager.playMerge(maxMergeValue);
-      } else {
-        this.sound_manager.playMove();
-      }
-
-      this.spawnTile();
-      this.sound_manager.playSpawn();
-      this.events.emit('scoreUpdate', this.score);
-      this.drawBoard();
-      if (this.isGameOver()) {
-        this.gameOver = true;
-        this.sound_manager.playGameOver();
-        this.sound_manager.stopBGM();
-        this.events.emit('gameOver', this.score);
-      }
-    }
-  }
-
-  /** ゲームオーバー判定 */
-  private isGameOver(): boolean {
-    for (let r = 0; r < SIZE; r++) {
-      for (let c = 0; c < SIZE; c++) {
-        if (this.grid[r][c] === 0) return false;
-        if (c < SIZE - 1 && this.grid[r][c] === this.grid[r][c + 1]) return false;
-        if (r < SIZE - 1 && this.grid[r][c] === this.grid[r + 1][c]) return false;
-      }
-    }
-    return true;
-  }
-
-  /** 盤面を描画 */
-  private drawBoard(): void {
-    this.children.removeAll();
-
+  /** 「n本取る」ボタンを作成 */
+  private createTakeButton(x: number, y: number, count: number): void {
     const bg = this.add.graphics();
-    bg.fillStyle(0xbbada0, 1);
-    bg.fillRoundedRect(OFFSET_X, OFFSET_Y, GRID_PX, GRID_PX, 8);
+    bg.fillStyle(0x4444aa, 1);
+    bg.fillRoundedRect(x - 45, y - 25, 90, 50, 8);
+    bg.setInteractive(
+      new Phaser.Geom.Rectangle(x - 45, y - 25, 90, 50),
+      Phaser.Geom.Rectangle.Contains
+    );
+    bg.on('pointerdown', () => {
+      this.tryStartBGM();
+      this.takeTurn(count);
+    });
 
-    for (let r = 0; r < SIZE; r++) {
-      for (let c = 0; c < SIZE; c++) {
-        const x = OFFSET_X + GAP + c * (TILE_SIZE + GAP);
-        const y = OFFSET_Y + GAP + r * (TILE_SIZE + GAP);
-        const val = this.grid[r][c];
+    this.add.text(x, y, \`\${count}本取る\`, {
+      fontSize: '18px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+  }
 
-        const cellBg = this.add.graphics();
-        cellBg.fillStyle(0xcdc1b4, 1);
-        cellBg.fillRoundedRect(x, y, TILE_SIZE, TILE_SIZE, 6);
+  /** 小さいボタンを作成 */
+  private createSmallButton(x: number, y: number, label: string, color: string, onClick: () => void): void {
+    const bg = this.add.graphics();
+    bg.fillStyle(parseInt(color.replace('#', ''), 16), 1);
+    bg.fillRoundedRect(x - 60, y - 18, 120, 36, 6);
+    bg.setInteractive(
+      new Phaser.Geom.Rectangle(x - 60, y - 18, 120, 36),
+      Phaser.Geom.Rectangle.Contains
+    );
+    bg.on('pointerdown', onClick);
 
-        if (val === 0) continue;
+    this.add.text(x, y, label, {
+      fontSize: '14px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif',
+    }).setOrigin(0.5);
+  }
 
-        const tileBg = TILE_BG[val] ?? 0x3c3a32;
-        const tile = this.add.graphics();
-        tile.fillStyle(tileBg, 1);
-        tile.fillRoundedRect(x, y, TILE_SIZE, TILE_SIZE, 6);
+  /** ターンを実行 */
+  private takeTurn(count: number): void {
+    if (!this.myTurn) return;
+    if (count < 1 || count > 3 || count > this.sticks) return;
+    this.client.send({ type: 'move', action: { take: count } });
+    this.myTurn = false;
+    this.updateUI();
+  }
 
-        const textColor = TILE_FG[val] ?? LIGHT_TEXT;
-        const fontSize = val >= 1024 ? '28px' : val >= 128 ? '32px' : '40px';
-        this.add.text(x + TILE_SIZE / 2, y + TILE_SIZE / 2, String(val), {
-          fontSize,
-          color: textColor,
-          fontFamily: 'Arial, Helvetica, sans-serif',
-          fontStyle: 'bold',
-        }).setOrigin(0.5);
-      }
+  /** 棒を描画 */
+  private drawSticks(): void {
+    // 既存の棒グラフィックスを削除
+    this.stickGraphics.forEach(g => g.destroy());
+    this.stickGraphics = [];
+
+    const totalWidth = this.sticks * STICK_WIDTH + (this.sticks - 1) * STICK_GAP;
+    const startX = (480 - totalWidth) / 2;
+
+    for (let i = 0; i < this.sticks; i++) {
+      const x = startX + i * (STICK_WIDTH + STICK_GAP);
+      const g = this.add.graphics();
+      // 棒の色: グラデーション風に交互
+      const color = i % 2 === 0 ? 0xccaa44 : 0xddbb55;
+      g.fillStyle(color, 1);
+      g.fillRoundedRect(x, STICK_Y, STICK_WIDTH, STICK_HEIGHT, 3);
+      this.stickGraphics.push(g);
     }
+
+    this.stickCountText.setText(\`残り \${this.sticks} 本\`);
+  }
+
+  /** UI 更新 */
+  private updateUI(): void {
+    if (this.myTurn) {
+      this.turnText.setText('🎯 あなたの番');
+      this.turnText.setColor('#44ff44');
+      this.infoText.setText('1〜3本取ってください（最後を取ったら負け）');
+    } else {
+      this.turnText.setText('⏳ 相手の番...');
+      this.turnText.setColor('#ffcc00');
+      this.infoText.setText('相手が考えています...');
+    }
+  }
+
+  shutdown(): void {
+    this.client.off('state', () => {});
+    this.client.off('result', () => {});
+    this.client.off('opponent_left', () => {});
   }
 }
 `;
 
-/** src/scenes/UIScene.ts テンプレート（BGM/SFX ミュートボタン + ゲームオーバー多重表示防止） */
+/** src/scenes/UIScene.ts テンプレート（BGM/SFX ミュートボタン） */
 export const PHASER_UI_SCENE = `import Phaser from 'phaser';
 import { SoundManager } from '../utils/SoundManager';
 
+/**
+ * UI オーバーレイシーン: BGM/SFX ミュートボタン
+ * GameScene の上にパラレル起動される
+ */
 export class UIScene extends Phaser.Scene {
-  private scoreText!: Phaser.GameObjects.Text;
   private bgmBtn!: Phaser.GameObjects.Text;
   private sfxBtn!: Phaser.GameObjects.Text;
-  private gameOverGroup: Phaser.GameObjects.GameObject[] = [];
 
   constructor() {
     super({ key: 'UIScene' });
@@ -612,32 +636,16 @@ export class UIScene extends Phaser.Scene {
   create(): void {
     const sm = SoundManager.getInstance();
 
-    // タイトル
-    this.add.text(240, 40, '2048', {
-      fontSize: '52px',
-      color: '#776e65',
-      fontFamily: 'Arial, Helvetica, sans-serif',
-      fontStyle: 'bold',
-    }).setOrigin(0.5);
-
-    // スコア
-    this.scoreText = this.add.text(240, 90, 'Score: 0', {
-      fontSize: '22px',
-      color: '#bbada0',
-      fontFamily: 'Arial, sans-serif',
-      fontStyle: 'bold',
-    }).setOrigin(0.5);
-
-    // BGM ミュートボタン（右上）
     const btnStyle = {
       fontSize: '14px',
-      color: '#f9f6f2',
+      color: '#e0e0ff',
       fontFamily: 'Arial, sans-serif',
       fontStyle: 'bold',
-      backgroundColor: '#8f7a66',
+      backgroundColor: '#333355',
       padding: { x: 6, y: 4 },
     };
 
+    // BGM ミュートボタン（右上）
     this.bgmBtn = this.add.text(420, 16, sm.isBGMMuted() ? 'BGM OFF' : 'BGM ON', btnStyle)
       .setOrigin(0.5).setInteractive({ useHandCursor: true });
     this.bgmBtn.on('pointerdown', () => {
@@ -652,164 +660,102 @@ export class UIScene extends Phaser.Scene {
       const muted = sm.toggleSFX();
       this.sfxBtn.setText(muted ? 'SFX OFF' : 'SFX ON');
     });
-
-    // 操作説明
-    this.add.text(240, 680, 'スワイプまたは矢印キーでタイルを移動', {
-      fontSize: '14px',
-      color: '#bbada0',
-      fontFamily: 'Arial, sans-serif',
-    }).setOrigin(0.5);
-
-    this.add.text(240, 700, '同じ数字がぶつかると合体！ 2048 を目指そう', {
-      fontSize: '14px',
-      color: '#bbada0',
-      fontFamily: 'Arial, sans-serif',
-    }).setOrigin(0.5);
-
-    // スコア更新イベント
-    const gameScene = this.scene.get('GameScene');
-    gameScene.events.on('scoreUpdate', (score: number) => {
-      this.scoreText.setText(\`Score: \${score}\`);
-    });
-
-    // ゲームオーバーイベント
-    gameScene.events.on('gameOver', (score: number) => {
-      this.showGameOver(score);
-    });
-  }
-
-  /** ゲームオーバー表示 + リトライボタン */
-  private showGameOver(score: number): void {
-    // 既存のゲームオーバー表示をクリア（多重表示防止）
-    for (const obj of this.gameOverGroup) obj.destroy();
-    this.gameOverGroup = [];
-
-    // 半透明オーバーレイ
-    const overlay = this.add.graphics();
-    overlay.fillStyle(0xfaf8ef, 0.7);
-    const { width, height } = this.scale;
-    overlay.fillRect(0, 0, width, height);
-    this.gameOverGroup.push(overlay);
-
-    const goText = this.add.text(240, 300, 'Game Over!', {
-      fontSize: '42px',
-      color: '#776e65',
-      fontFamily: 'Arial, Helvetica, sans-serif',
-      fontStyle: 'bold',
-    }).setOrigin(0.5);
-    this.gameOverGroup.push(goText);
-
-    const scoreText = this.add.text(240, 360, \`Score: \${score}\`, {
-      fontSize: '28px',
-      color: '#776e65',
-      fontFamily: 'Arial, sans-serif',
-    }).setOrigin(0.5);
-    this.gameOverGroup.push(scoreText);
-
-    // リトライボタン
-    const btnBg = this.add.graphics();
-    btnBg.fillStyle(0x8f7a66, 1);
-    btnBg.fillRoundedRect(170, 400, 140, 50, 6);
-    btnBg.setInteractive(
-      new Phaser.Geom.Rectangle(170, 400, 140, 50),
-      Phaser.Geom.Rectangle.Contains
-    );
-    btnBg.on('pointerdown', () => this.restartGame());
-    this.gameOverGroup.push(btnBg);
-
-    const btnText = this.add.text(240, 425, 'Retry', {
-      fontSize: '22px',
-      color: '#f9f6f2',
-      fontFamily: 'Arial, sans-serif',
-      fontStyle: 'bold',
-    }).setOrigin(0.5);
-    this.gameOverGroup.push(btnText);
-  }
-
-  /** ゲームをリスタート */
-  private restartGame(): void {
-    // BGM 再開
-    SoundManager.getInstance().startBGM();
-    // GameScene を restart し、UIScene も restart してイベントリスナーを再登録
-    this.scene.get('GameScene').scene.restart();
-    this.scene.restart();
   }
 }
 `;
 
-/** src/types/index.ts テンプレート（2048 用） */
-export const PHASER_TYPES_INDEX = `/** 2048 で使う型定義 */
-export type Direction = 'left' | 'right' | 'up' | 'down';
+/** src/types/index.ts テンプレート */
+export const PHASER_TYPES_INDEX = `/** ゲーム共通型定義 */
+
+/** サーバーメッセージの基本型 */
+export interface ServerMsg {
+  type: string;
+  [key: string]: any;
+}
 `;
 
-/** CLAUDE.md テンプレート（Phaser プロジェクト用） */
+/** CLAUDE.md テンプレート（Phaser プロジェクト用 + 対戦基盤） */
 export const PHASER_CLAUDE_MD = `# {{NAME}} - Phaser Game Project
 
-DevRelay TestFlight で作成されたゲームプロジェクト。
+DevRelay TestFlight で作成されたゲームプロジェクト（対戦基盤付き）。
 
 ## 技術スタック
 
 - **Phaser 3** - HTML5 ゲームフレームワーク
 - **TypeScript** - 型安全な開発
-- **Vite** - HMR 対応ビルドツール
+- **Vite** - HMR 対応ビルドツール + WebSocket サーバー（同一ポート）
 - **jsfxr** - プロシージャル効果音（音声ファイル不要）
 - **Tone.js** - プロシージャル BGM（音声ファイル不要）
+- **Prisma** - PostgreSQL ORM（対戦履歴保存）
+- **ws** - WebSocket サーバー（対戦通信）
 
 ## ディレクトリ構成
 
 - \`src/main.ts\` - Phaser.Game 初期化・設定
-- \`src/scenes/\` - ゲームシーン（BootScene, GameScene, UIScene）
+- \`src/scenes/\` - ゲームシーン（Boot, Lobby, Game, UI, Result）
+- \`src/net/GameClient.ts\` - WebSocket クライアント（シングルトン）
+- \`src/net/protocol.ts\` - メッセージプロトコル型定義
 - \`src/utils/SoundManager.ts\` - BGM + SFX 管理（シングルトン）
-- \`src/types/\` - 型定義
+- \`server/\` - 対戦サーバー（Vite プラグインとして動作）
+  - \`vite-ws-plugin.ts\` - Vite に WS を接続
+  - \`ws-server.ts\` - 接続管理・メッセージルーティング
+  - \`matchmaker.ts\` - マッチメイキング（10秒待機 → CPU フォールバック）
+  - \`room.ts\` - ゲームルーム（ターン管理・勝敗判定）
+  - \`cpu-player.ts\` - CPU の手を遅延実行
+  - \`game-adapter.ts\` - GameAdapter インターフェース
+  - \`adapters/\` - ゲーム固有ロジック（差し替え可能）
+- \`prisma/schema.prisma\` - DB スキーマ（Player, Match）
 - \`public/assets/\` - 画像アセット（音声は不要）
 
 ## 開発サーバー
 
-- \`pnpm dev\` で起動（HMR 対応、コード変更が即反映）
+- \`pnpm dev\` で起動（HMR + WebSocket 対応）
 - URL: \`https://{{NAME}}.devrelay.io\`
 - PM2 プロセス名: \`tf-{{NAME}}\`
 
-## ゲーム開発ガイド
+## 対戦アーキテクチャ
 
-### シーン追加
+### GameAdapter パターン
 
-1. \`src/scenes/\` に新しいシーンクラスを作成（\`Phaser.Scene\` 継承）
-2. \`src/main.ts\` の \`scene\` 配列に追加
+ゲーム固有ロジックは \`server/adapters/\` に実装し、\`server/adapters/index.ts\` で切り替える。
+インターフェース（\`server/game-adapter.ts\`）:
+- \`createInitialState()\` — 初期盤面を生成
+- \`applyMove(state, player, action)\` — 手を適用、勝敗判定
+- \`getCpuMove(state, cpuPlayer)\` — CPU の手を決定
+- \`getPlayerView(state, player)\` — プレイヤーに見せる状態（不完全情報対応）
 
-### アセット追加
+### マッチメイキング
+1. LobbyScene でニックネーム入力 → \`join\` 送信
+2. 10秒以内にもう1人来ればPvP、来なければCPU戦
+3. ターン制で交互にプレイ
+4. 勝敗を DB に記録（連勝も追跡）
 
-1. ファイルを \`public/assets/\` に配置
-2. \`BootScene.ts\` の \`preload()\` でロード
-
-### ゲーム設定
-
-- 画面サイズ: 480 x 720（モバイルファースト）
-- スケールモード: \`Phaser.Scale.FIT\`（画面に合わせて拡縮）
-- 背景色: \`#faf8ef\`（暖色系ベージュ）
+### ゲームを変更する手順
+1. \`server/adapters/\` に新しいアダプタを作成（GameAdapter を実装）
+2. \`server/adapters/index.ts\` の export を差し替え
+3. \`src/scenes/GameScene.ts\` の描画・入力を新ゲームに合わせて変更
+4. \`src/scenes/LobbyScene.ts\` のルール説明テキストを更新
 
 ### 現在のサンプル
 
-2048 パズルゲーム:
-- 4x4 グリッド、本家 2048 準拠の配色
-- スワイプ（モバイル）+ 矢印キー（PC）で操作
-- タイル合体 + スコア計算 + ゲームオーバー判定
-- Retry ボタンでリスタート
-- BGM（Tone.js チルなコード進行）+ SFX（jsfxr レトロ効果音）
-- BGM/SFX 個別ミュートボタン
+棒消し（Nim）対戦ゲーム:
+- 21本の棒から交互に1〜3本取る
+- 最後の1本を取ったら負け
+- 10秒マッチメイキング → CPU フォールバック
+- 勝敗履歴 + 連勝追跡
 
 ### よく使う改造パターン
 
-- 「グリッドサイズ変えて」→ SIZE 定数を変更（5x5, 6x6 等）
-- 「落ちものパズルにして」→ GameScene を自動落下型に変更
-- 「マッチ3にして」→ タイル交換 + 3連マッチ判定に変更
-- 「スネークゲームにして」→ タイマーベースの移動ロジックに変更
-- 「ブロック崩しにして」→ パドル + ボール + ブロック衝突判定に変更
+- 「じゃんけんにして」→ RPS アダプタ作成 + GameScene を変更
+- 「オセロにして」→ ボード型アダプタ + グリッド描画に変更
+- 「マッチメイキング時間変えて」→ matchmaker.ts の MATCH_TIMEOUT_MS を変更
+- 「CPU を強くして」→ アダプタの getCpuMove() を改善
 - 「BGM のムード変えて」→ SoundManager のコード進行を変更
 
 See \`rules/devrelay.md\` for DevRelay rules.
 `;
 
-/** rules/project.md テンプレート（Phaser プロジェクト用） */
+/** rules/project.md テンプレート（Phaser プロジェクト用 + 対戦基盤） */
 export const PHASER_PROJECT_RULES = `# Phaser Game Project Rules
 
 ## コーディング規約
@@ -820,6 +766,14 @@ export const PHASER_PROJECT_RULES = `# Phaser Game Project Rules
 - 型定義は \`src/types/\` に集約
 - マジックナンバーは定数化する
 
+## 対戦基盤
+
+- ゲーム固有ロジックは GameAdapter インターフェースで抽象化する
+- GameAdapter 実装は \`server/adapters/\` に配置
+- 対戦の状態管理はサーバー側（server/room.ts）が権威を持つ
+- クライアントは描画と入力の送信のみ担当（サーバー権威型）
+- CPU の手は 500〜1500ms の遅延で実行（人間らしさ）
+
 ## オーディオ
 
 - 音声ファイルは使わない（jsfxr + Tone.js でプロシージャル生成）
@@ -829,7 +783,7 @@ export const PHASER_PROJECT_RULES = `# Phaser Game Project Rules
 
 ## モバイル対応
 
-- タッチ入力（スワイプ）を最優先で実装
+- タッチ入力を最優先で実装
 - キーボード入力はフォールバックとして対応
 - 画面サイズは 480x720 基準、Scale.FIT で自動調整
 - ボタンやタイルは指で押しやすいサイズ（最低44px）
@@ -839,6 +793,1253 @@ export const PHASER_PROJECT_RULES = `# Phaser Game Project Rules
 - スプライトは可能な限り再利用（destroy/create を最小限に）
 - 重い処理はフレーム分散を検討
 - アセットは BootScene で一括プリロード
+`;
+
+/* ==============================================================
+ *  対戦基盤（Multiplayer Infrastructure）テンプレート
+ * ============================================================== */
+
+/** prisma/schema.prisma テンプレート（Player + Match モデル） */
+export const PHASER_PRISMA_SCHEMA = `datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+/// プレイヤー（ニックネームで識別、簡易認証なし）
+model Player {
+  id         String   @id @default(uuid())
+  nickname   String   @unique
+  wins       Int      @default(0)
+  losses     Int      @default(0)
+  draws      Int      @default(0)
+  streak     Int      @default(0)
+  bestStreak Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  matchesAsP1 Match[] @relation("player1")
+  matchesAsP2 Match[] @relation("player2")
+}
+
+/// 対戦履歴
+model Match {
+  id         String   @id @default(uuid())
+  player1Id  String
+  player2Id  String?
+  winnerId   String?
+  isCpuMatch Boolean  @default(false)
+  turns      Int      @default(0)
+  duration   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  player1 Player  @relation("player1", fields: [player1Id], references: [id])
+  player2 Player? @relation("player2", fields: [player2Id], references: [id])
+}
+`;
+
+/** server/game-adapter.ts — ゲームアダプタインターフェース */
+export const PHASER_GAME_ADAPTER = `/**
+ * ゲームアダプタインターフェース
+ *
+ * 対戦基盤はゲーム固有ロジックをこのインターフェース経由で呼び出す。
+ * 新しいゲームを作る場合は adapters/ に実装して index.ts で切り替える。
+ */
+
+/** ゲーム状態（ゲーム固有の形状） */
+export interface GameState {
+  [key: string]: any;
+}
+
+/** 手の適用結果 */
+export interface MoveResult {
+  /** 有効な手だったか */
+  valid: boolean;
+  /** 適用後の新しい状態 */
+  newState: GameState;
+  /** ゲーム終了か */
+  gameOver: boolean;
+  /** 勝者（gameOver 時のみ） */
+  winner?: 'player1' | 'player2' | 'draw';
+}
+
+/** ゲームアダプタ: ゲーム固有ロジックの抽象化 */
+export interface GameAdapter {
+  /** ゲーム名（ログ・表示用） */
+  name: string;
+
+  /** 初期状態を生成 */
+  createInitialState(): GameState;
+
+  /** 手の有効性を検証し、新しい状態を返す */
+  applyMove(state: GameState, player: 'player1' | 'player2', action: any): MoveResult;
+
+  /** CPU の手を決定 */
+  getCpuMove(state: GameState, cpuPlayer: 'player1' | 'player2'): any;
+
+  /** プレイヤーに見せる状態を生成（不完全情報ゲーム用） */
+  getPlayerView(state: GameState, player: 'player1' | 'player2'): GameState;
+}
+`;
+
+/** server/adapters/nim-adapter.ts — 棒消し（Nim）ゲームのサンプルアダプタ */
+export const PHASER_NIM_ADAPTER = `import type { GameAdapter, GameState, MoveResult } from '../game-adapter';
+
+/**
+ * 棒消し（Nim）ゲームアダプタ
+ *
+ * ルール:
+ * - 21 本の棒がある
+ * - 交互に 1〜3 本取る
+ * - 最後の 1 本を取った方が負け
+ */
+export class NimAdapter implements GameAdapter {
+  name = 'nim';
+
+  createInitialState(): GameState {
+    return { sticks: 21 };
+  }
+
+  applyMove(state: GameState, player: 'player1' | 'player2', action: any): MoveResult {
+    const take = Number(action?.take);
+    // バリデーション: 1〜3 本、かつ残り本数以下
+    if (!Number.isInteger(take) || take < 1 || take > 3 || take > state.sticks) {
+      return { valid: false, newState: state, gameOver: false };
+    }
+
+    const remaining = state.sticks - take;
+    const newState = { sticks: remaining };
+
+    // 最後の 1 本を取ったら負け
+    if (remaining === 0) {
+      const winner = player === 'player1' ? 'player2' : 'player1';
+      return { valid: true, newState, gameOver: true, winner };
+    }
+
+    return { valid: true, newState, gameOver: false };
+  }
+
+  getCpuMove(state: GameState, _cpuPlayer: 'player1' | 'player2'): any {
+    // 最適戦略: (残り - 1) % 4 === 0 の状態に持ち込む
+    const optimal = (state.sticks - 1) % 4;
+    if (optimal >= 1 && optimal <= 3) {
+      return { take: optimal };
+    }
+    // 最適手がない場合はランダム（1〜min(3, 残り)）
+    const max = Math.min(3, state.sticks);
+    return { take: Math.floor(Math.random() * max) + 1 };
+  }
+
+  getPlayerView(state: GameState, _player: 'player1' | 'player2'): GameState {
+    // 完全情報ゲームなのでそのまま返す
+    return { ...state };
+  }
+}
+`;
+
+/** server/adapters/index.ts — アクティブなアダプタを export */
+export const PHASER_ADAPTER_INDEX = `/**
+ * アクティブなゲームアダプタ
+ *
+ * ゲームを変更する場合はここの import/export を差し替える。
+ */
+import { NimAdapter } from './nim-adapter';
+
+export const gameAdapter = new NimAdapter();
+`;
+
+/** server/db.ts — Prisma クライアントの初期化 */
+export const PHASER_DB = `import { PrismaClient } from '@prisma/client';
+
+/**
+ * Prisma クライアント（シングルトン）
+ * Vite の dev サーバープロセス内で使用
+ */
+export const prisma = new PrismaClient();
+`;
+
+/** server/ws-server.ts — WebSocket 接続管理とメッセージルーティング */
+export const PHASER_WS_SERVER = `import type { WebSocket } from 'ws';
+import { matchmaker } from './matchmaker';
+
+/** 接続中のクライアント情報 */
+interface Client {
+  ws: WebSocket;
+  nickname: string;
+  roomId: string | null;
+}
+
+/** 全接続クライアント */
+const clients = new Map<WebSocket, Client>();
+
+/**
+ * 新しい WebSocket 接続を処理
+ */
+export function handleConnection(ws: WebSocket): void {
+  const client: Client = { ws, nickname: '', roomId: null };
+  clients.set(ws, client);
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(String(raw));
+      handleMessage(client, msg);
+    } catch {
+      send(ws, { type: 'error', message: '不正なメッセージ形式' });
+    }
+  });
+
+  ws.on('close', () => {
+    // マッチメイキングキューから除去
+    matchmaker.leave(client);
+    // ルーム内なら相手に通知
+    if (client.roomId) {
+      matchmaker.handleDisconnect(client);
+    }
+    clients.delete(ws);
+  });
+}
+
+/** メッセージハンドラ */
+function handleMessage(client: Client, msg: any): void {
+  switch (msg.type) {
+    case 'join':
+      client.nickname = String(msg.nickname || 'Guest').slice(0, 20);
+      matchmaker.join(client);
+      break;
+    case 'move':
+      if (client.roomId) {
+        matchmaker.handleMove(client, msg.action);
+      }
+      break;
+    case 'forfeit':
+      if (client.roomId) {
+        matchmaker.handleForfeit(client);
+      }
+      break;
+    case 'rematch':
+      if (client.roomId) {
+        matchmaker.handleRematch(client);
+      }
+      break;
+    case 'leave':
+      matchmaker.leave(client);
+      break;
+    default:
+      send(client.ws, { type: 'error', message: '不明なメッセージタイプ' });
+  }
+}
+
+/** JSON メッセージを送信 */
+export function send(ws: WebSocket, data: any): void {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
+}
+`;
+
+/** server/matchmaker.ts — ロビーキュー + マッチング + ルーム管理 */
+export const PHASER_MATCHMAKER = `import { send } from './ws-server';
+import { Room } from './room';
+
+/** クライアント型（ws-server から） */
+interface Client {
+  ws: import('ws').WebSocket;
+  nickname: string;
+  roomId: string | null;
+}
+
+/** マッチメイキング待ちのキュー */
+const queue: Client[] = [];
+/** アクティブなルーム */
+const rooms = new Map<string, Room>();
+/** CPU マッチング用タイマー */
+const timers = new Map<Client, ReturnType<typeof setTimeout>>();
+
+/** マッチメイキングのタイムアウト（ミリ秒） */
+const MATCH_TIMEOUT_MS = 10_000;
+
+/**
+ * マッチメイカー: ロビー管理とルーム生成
+ */
+export const matchmaker = {
+  /** ロビーに参加 */
+  join(client: Client): void {
+    // 既にキューにいたら除去
+    this.removeFromQueue(client);
+
+    // キューに他のプレイヤーがいれば即マッチ
+    if (queue.length > 0) {
+      const opponent = queue.shift()!;
+      // タイマーをクリア
+      const timer = timers.get(opponent);
+      if (timer) {
+        clearTimeout(timer);
+        timers.delete(opponent);
+      }
+      this.createRoom(opponent, client);
+      return;
+    }
+
+    // キューに追加して待機
+    queue.push(client);
+    send(client.ws, { type: 'waiting', position: 1 });
+
+    // 10秒後に CPU 戦開始
+    const timer = setTimeout(() => {
+      timers.delete(client);
+      this.removeFromQueue(client);
+      this.createRoom(client, null); // null = CPU
+    }, MATCH_TIMEOUT_MS);
+    timers.set(client, timer);
+  },
+
+  /** キューから除去 */
+  removeFromQueue(client: Client): void {
+    const idx = queue.indexOf(client);
+    if (idx !== -1) queue.splice(idx, 1);
+    const timer = timers.get(client);
+    if (timer) {
+      clearTimeout(timer);
+      timers.delete(client);
+    }
+  },
+
+  /** ロビー・ルームから離脱 */
+  leave(client: Client): void {
+    this.removeFromQueue(client);
+    if (client.roomId) {
+      const room = rooms.get(client.roomId);
+      if (room) {
+        room.handleForfeit(client);
+        rooms.delete(client.roomId);
+      }
+      client.roomId = null;
+    }
+  },
+
+  /** ルームを作成してゲーム開始 */
+  createRoom(player1: Client, player2: Client | null): void {
+    const roomId = \`room_\${Date.now()}_\${Math.random().toString(36).slice(2, 8)}\`;
+    const room = new Room(roomId, player1, player2);
+    rooms.set(roomId, room);
+    player1.roomId = roomId;
+    if (player2) player2.roomId = roomId;
+    room.start();
+  },
+
+  /** プレイヤーの手を処理 */
+  handleMove(client: Client, action: any): void {
+    const room = client.roomId ? rooms.get(client.roomId) : null;
+    if (room) room.handleMove(client, action);
+  },
+
+  /** 降参を処理 */
+  handleForfeit(client: Client): void {
+    const room = client.roomId ? rooms.get(client.roomId) : null;
+    if (room) {
+      room.handleForfeit(client);
+      rooms.delete(client.roomId!);
+      client.roomId = null;
+    }
+  },
+
+  /** 切断を処理 */
+  handleDisconnect(client: Client): void {
+    const room = client.roomId ? rooms.get(client.roomId) : null;
+    if (room) {
+      room.handleDisconnect(client);
+      rooms.delete(client.roomId!);
+    }
+    client.roomId = null;
+  },
+
+  /** リマッチ要求を処理 */
+  handleRematch(client: Client): void {
+    const room = client.roomId ? rooms.get(client.roomId) : null;
+    if (room) {
+      const shouldRestart = room.handleRematch(client);
+      if (shouldRestart) {
+        room.start();
+      }
+    }
+  },
+};
+`;
+
+/** server/room.ts — ゲームルーム（2プレイヤー、ターン管理） */
+export const PHASER_ROOM = `import { send } from './ws-server';
+import { gameAdapter } from './adapters/index';
+import { scheduleCpuMove } from './cpu-player';
+import { prisma } from './db';
+import type { GameState } from './game-adapter';
+
+/** クライアント型 */
+interface Client {
+  ws: import('ws').WebSocket;
+  nickname: string;
+  roomId: string | null;
+}
+
+/**
+ * ゲームルーム: 2プレイヤー間のターン制対戦を管理
+ */
+export class Room {
+  private state: GameState = {};
+  private currentTurn: 'player1' | 'player2' = 'player1';
+  private turnCount = 0;
+  private startTime = Date.now();
+  private gameOver = false;
+  private player1RematchReady = false;
+  private player2RematchReady = false;
+  private cpuTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    public readonly roomId: string,
+    private player1: Client,
+    private player2: Client | null, // null = CPU
+  ) {}
+
+  /** CPU 対戦かどうか */
+  get isCpu(): boolean {
+    return this.player2 === null;
+  }
+
+  /** ゲーム開始 */
+  start(): void {
+    this.state = gameAdapter.createInitialState();
+    this.currentTurn = Math.random() < 0.5 ? 'player1' : 'player2';
+    this.turnCount = 0;
+    this.startTime = Date.now();
+    this.gameOver = false;
+    this.player1RematchReady = false;
+    this.player2RematchReady = false;
+
+    const baseMsg = {
+      type: 'matched' as const,
+      roomId: this.roomId,
+      gameName: gameAdapter.name,
+    };
+
+    // Player1 に通知
+    send(this.player1.ws, {
+      ...baseMsg,
+      opponent: {
+        nickname: this.isCpu ? 'CPU' : this.player2!.nickname,
+        isCpu: this.isCpu,
+      },
+      yourTurn: this.currentTurn === 'player1',
+      gameState: gameAdapter.getPlayerView(this.state, 'player1'),
+    });
+
+    // Player2 に通知（人間の場合）
+    if (this.player2) {
+      send(this.player2.ws, {
+        ...baseMsg,
+        opponent: {
+          nickname: this.player1.nickname,
+          isCpu: false,
+        },
+        yourTurn: this.currentTurn === 'player2',
+        gameState: gameAdapter.getPlayerView(this.state, 'player2'),
+      });
+    }
+
+    // CPU の番なら自動で手を打つ
+    if (this.isCpu && this.currentTurn === 'player2') {
+      this.scheduleCpuTurn();
+    }
+  }
+
+  /** プレイヤーの手を処理 */
+  handleMove(client: Client, action: any): void {
+    if (this.gameOver) return;
+
+    const player = client === this.player1 ? 'player1' : 'player2';
+    if (player !== this.currentTurn) {
+      send(client.ws, { type: 'error', message: 'あなたの番ではありません' });
+      return;
+    }
+
+    const result = gameAdapter.applyMove(this.state, player, action);
+    if (!result.valid) {
+      send(client.ws, { type: 'error', message: '無効な手です' });
+      return;
+    }
+
+    this.state = result.newState;
+    this.turnCount++;
+
+    if (result.gameOver) {
+      this.endGame(result.winner || 'draw');
+      return;
+    }
+
+    // ターン切り替え
+    this.currentTurn = this.currentTurn === 'player1' ? 'player2' : 'player1';
+    this.broadcastState();
+
+    // CPU の番なら自動で手を打つ
+    if (this.isCpu && this.currentTurn === 'player2') {
+      this.scheduleCpuTurn();
+    }
+  }
+
+  /** CPU のターンをスケジュール */
+  private scheduleCpuTurn(): void {
+    this.cpuTimer = scheduleCpuMove(this.state, 'player2', (action) => {
+      if (this.gameOver) return;
+      const result = gameAdapter.applyMove(this.state, 'player2', action);
+      if (result.valid) {
+        this.state = result.newState;
+        this.turnCount++;
+        if (result.gameOver) {
+          this.endGame(result.winner || 'draw');
+        } else {
+          this.currentTurn = 'player1';
+          this.broadcastState();
+        }
+      }
+    });
+  }
+
+  /** 状態を両プレイヤーにブロードキャスト */
+  private broadcastState(): void {
+    send(this.player1.ws, {
+      type: 'state',
+      gameState: gameAdapter.getPlayerView(this.state, 'player1'),
+      yourTurn: this.currentTurn === 'player1',
+    });
+    if (this.player2) {
+      send(this.player2.ws, {
+        type: 'state',
+        gameState: gameAdapter.getPlayerView(this.state, 'player2'),
+        yourTurn: this.currentTurn === 'player2',
+      });
+    }
+  }
+
+  /** ゲーム終了処理 */
+  private async endGame(winner: 'player1' | 'player2' | 'draw'): Promise<void> {
+    this.gameOver = true;
+    if (this.cpuTimer) clearTimeout(this.cpuTimer);
+
+    const duration = Math.floor((Date.now() - this.startTime) / 1000);
+
+    // DB にプレイヤーと結果を保存
+    try {
+      const p1 = await prisma.player.upsert({
+        where: { nickname: this.player1.nickname },
+        create: { nickname: this.player1.nickname },
+        update: {},
+      });
+
+      let p2Id: string | null = null;
+      if (this.player2) {
+        const p2 = await prisma.player.upsert({
+          where: { nickname: this.player2.nickname },
+          create: { nickname: this.player2.nickname },
+          update: {},
+        });
+        p2Id = p2.id;
+      }
+
+      // 勝者 ID を決定
+      let winnerId: string | null = null;
+      if (winner === 'player1') winnerId = p1.id;
+      else if (winner === 'player2' && p2Id) winnerId = p2Id;
+
+      // Match レコード作成
+      await prisma.match.create({
+        data: {
+          player1Id: p1.id,
+          player2Id: p2Id,
+          winnerId,
+          isCpuMatch: this.isCpu,
+          turns: this.turnCount,
+          duration,
+        },
+      });
+
+      // プレイヤー統計を更新
+      if (winner === 'player1') {
+        const newStreak = p1.streak + 1;
+        await prisma.player.update({
+          where: { id: p1.id },
+          data: {
+            wins: { increment: 1 },
+            streak: newStreak,
+            bestStreak: Math.max(newStreak, p1.bestStreak),
+          },
+        });
+        if (p2Id) {
+          await prisma.player.update({
+            where: { id: p2Id },
+            data: { losses: { increment: 1 }, streak: 0 },
+          });
+        }
+      } else if (winner === 'player2') {
+        await prisma.player.update({
+          where: { id: p1.id },
+          data: { losses: { increment: 1 }, streak: 0 },
+        });
+        if (p2Id) {
+          const p2Data = await prisma.player.findUnique({ where: { id: p2Id } });
+          if (p2Data) {
+            const newStreak = p2Data.streak + 1;
+            await prisma.player.update({
+              where: { id: p2Id },
+              data: {
+                wins: { increment: 1 },
+                streak: newStreak,
+                bestStreak: Math.max(newStreak, p2Data.bestStreak),
+              },
+            });
+          }
+        }
+      } else {
+        // draw
+        await prisma.player.update({
+          where: { id: p1.id },
+          data: { draws: { increment: 1 }, streak: 0 },
+        });
+        if (p2Id) {
+          await prisma.player.update({
+            where: { id: p2Id },
+            data: { draws: { increment: 1 }, streak: 0 },
+          });
+        }
+      }
+
+      // 最新統計を取得して結果を送信
+      const p1Stats = await prisma.player.findUnique({ where: { id: p1.id } });
+      this.sendResult(this.player1, winner === 'player1' ? 'you' : winner === 'player2' ? 'opponent' : 'draw', p1Stats);
+
+      if (this.player2 && p2Id) {
+        const p2Stats = await prisma.player.findUnique({ where: { id: p2Id } });
+        this.sendResult(this.player2, winner === 'player2' ? 'you' : winner === 'player1' ? 'opponent' : 'draw', p2Stats);
+      }
+    } catch (err) {
+      console.error('対戦結果の保存に失敗:', err);
+      // DB エラーでもゲーム結果は通知
+      this.sendResult(this.player1, winner === 'player1' ? 'you' : winner === 'player2' ? 'opponent' : 'draw', null);
+      if (this.player2) {
+        this.sendResult(this.player2, winner === 'player2' ? 'you' : winner === 'player1' ? 'opponent' : 'draw', null);
+      }
+    }
+  }
+
+  /** 結果メッセージを送信 */
+  private sendResult(client: Client, result: 'you' | 'opponent' | 'draw', stats: any): void {
+    send(client.ws, {
+      type: 'result',
+      winner: result,
+      stats: stats ? {
+        wins: stats.wins,
+        losses: stats.losses,
+        draws: stats.draws,
+        streak: stats.streak,
+        bestStreak: stats.bestStreak,
+      } : null,
+    });
+  }
+
+  /** 降参処理 */
+  handleForfeit(client: Client): void {
+    if (this.gameOver) return;
+    const winner = client === this.player1 ? 'player2' : 'player1';
+    this.endGame(winner);
+  }
+
+  /** 切断処理 */
+  handleDisconnect(client: Client): void {
+    if (this.cpuTimer) clearTimeout(this.cpuTimer);
+    if (this.gameOver) return;
+    // 残っているプレイヤーに通知
+    const other = client === this.player1 ? this.player2 : this.player1;
+    if (other) {
+      send(other.ws, { type: 'opponent_left' });
+      other.roomId = null;
+    }
+    // 切断側の負けとして記録
+    const winner = client === this.player1 ? 'player2' : 'player1';
+    this.endGame(winner);
+  }
+
+  /** リマッチ要求を処理（両者 ready ならリスタート） */
+  handleRematch(client: Client): boolean {
+    if (client === this.player1) this.player1RematchReady = true;
+    else this.player2RematchReady = true;
+
+    // CPU 対戦は即リマッチ
+    if (this.isCpu && this.player1RematchReady) return true;
+
+    // 両者 ready でリスタート
+    if (this.player1RematchReady && this.player2RematchReady) return true;
+
+    // 相手にリマッチ要求を通知
+    const other = client === this.player1 ? this.player2 : this.player1;
+    if (other) {
+      send(other.ws, { type: 'rematch_request', from: client.nickname });
+    }
+    return false;
+  }
+}
+`;
+
+/** server/cpu-player.ts — CPU プレイヤーの手をスケジュール */
+export const PHASER_CPU_PLAYER = `import { gameAdapter } from './adapters/index';
+import type { GameState } from './game-adapter';
+
+/** CPU 思考の最小・最大遅延（ms） */
+const CPU_DELAY_MIN = 500;
+const CPU_DELAY_MAX = 1500;
+
+/**
+ * CPU の手を遅延実行でスケジュール
+ * @returns タイマー ID（キャンセル用）
+ */
+export function scheduleCpuMove(
+  state: GameState,
+  cpuPlayer: 'player1' | 'player2',
+  callback: (action: any) => void,
+): ReturnType<typeof setTimeout> {
+  const delay = CPU_DELAY_MIN + Math.random() * (CPU_DELAY_MAX - CPU_DELAY_MIN);
+  return setTimeout(() => {
+    const action = gameAdapter.getCpuMove(state, cpuPlayer);
+    callback(action);
+  }, delay);
+}
+`;
+
+/** server/vite-ws-plugin.ts — Vite プラグイン: dev サーバーに WS をアタッチ */
+export const PHASER_WS_PLUGIN = `import type { Plugin } from 'vite';
+import { WebSocketServer } from 'ws';
+import { handleConnection } from './ws-server';
+
+/**
+ * Vite プラグイン: dev サーバーの httpServer に WebSocket サーバーを追加
+ * パス /ws でゲーム用 WS を提供
+ */
+export function gameWsPlugin(): Plugin {
+  return {
+    name: 'game-ws',
+    configureServer(server) {
+      if (!server.httpServer) return;
+      const wss = new WebSocketServer({
+        server: server.httpServer,
+        path: '/ws',
+      });
+      wss.on('connection', handleConnection);
+      console.log('🎮 Game WebSocket server attached to /ws');
+    },
+  };
+}
+`;
+
+/** src/net/protocol.ts — メッセージプロトコル型定義（クライアント・サーバー共有） */
+export const PHASER_PROTOCOL = `/**
+ * 対戦メッセージプロトコル
+ *
+ * Client → Server, Server → Client の両方向メッセージ型を定義。
+ * server/ と src/ の両方から import される。
+ */
+
+/* ---- Client → Server ---- */
+
+export interface JoinMessage {
+  type: 'join';
+  nickname: string;
+}
+
+export interface MoveMessage {
+  type: 'move';
+  action: any;
+}
+
+export interface ForfeitMessage {
+  type: 'forfeit';
+}
+
+export interface RematchMessage {
+  type: 'rematch';
+}
+
+export interface LeaveMessage {
+  type: 'leave';
+}
+
+export type ClientMessage = JoinMessage | MoveMessage | ForfeitMessage | RematchMessage | LeaveMessage;
+
+/* ---- Server → Client ---- */
+
+export interface WaitingMessage {
+  type: 'waiting';
+  position: number;
+}
+
+export interface MatchedMessage {
+  type: 'matched';
+  roomId: string;
+  gameName: string;
+  opponent: { nickname: string; isCpu: boolean };
+  yourTurn: boolean;
+  gameState: any;
+}
+
+export interface StateMessage {
+  type: 'state';
+  gameState: any;
+  yourTurn: boolean;
+}
+
+export interface ResultMessage {
+  type: 'result';
+  winner: 'you' | 'opponent' | 'draw';
+  stats: {
+    wins: number;
+    losses: number;
+    draws: number;
+    streak: number;
+    bestStreak: number;
+  } | null;
+}
+
+export interface OpponentLeftMessage {
+  type: 'opponent_left';
+}
+
+export interface ErrorMessage {
+  type: 'error';
+  message: string;
+}
+
+export interface RematchRequestMessage {
+  type: 'rematch_request';
+  from: string;
+}
+
+export type ServerMessage =
+  | WaitingMessage
+  | MatchedMessage
+  | StateMessage
+  | ResultMessage
+  | OpponentLeftMessage
+  | ErrorMessage
+  | RematchRequestMessage;
+`;
+
+/** src/net/GameClient.ts — WebSocket クライアント（Phaser から使用） */
+export const PHASER_GAME_CLIENT = `import type { ServerMessage } from './protocol';
+
+/**
+ * ゲーム WebSocket クライアント（シングルトン）
+ *
+ * Phaser シーンからサーバーへの通信を管理。
+ * 自動再接続付き。
+ */
+export class GameClient {
+  private static instance: GameClient;
+  private ws: WebSocket | null = null;
+  private listeners = new Map<string, Set<(data: any) => void>>();
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private constructor() {}
+
+  static getInstance(): GameClient {
+    if (!GameClient.instance) {
+      GameClient.instance = new GameClient();
+    }
+    return GameClient.instance;
+  }
+
+  /** WebSocket に接続 */
+  connect(): void {
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = \`\${proto}//\${location.host}/ws\`;
+    this.ws = new WebSocket(url);
+
+    this.ws.onopen = () => {
+      console.log('🎮 WS connected');
+      this.emit('connected', {});
+    };
+
+    this.ws.onmessage = (e) => {
+      try {
+        const msg: ServerMessage = JSON.parse(e.data);
+        this.emit(msg.type, msg);
+      } catch {
+        console.error('WS parse error');
+      }
+    };
+
+    this.ws.onclose = () => {
+      console.log('🎮 WS disconnected');
+      this.emit('disconnected', {});
+      // 3秒後に再接続
+      this.reconnectTimer = setTimeout(() => this.connect(), 3000);
+    };
+  }
+
+  /** メッセージ送信 */
+  send(data: any): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(data));
+    }
+  }
+
+  /** イベントリスナー登録 */
+  on(type: string, callback: (data: any) => void): void {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set());
+    }
+    this.listeners.get(type)!.add(callback);
+  }
+
+  /** イベントリスナー解除 */
+  off(type: string, callback: (data: any) => void): void {
+    this.listeners.get(type)?.delete(callback);
+  }
+
+  /** イベント発火 */
+  private emit(type: string, data: any): void {
+    this.listeners.get(type)?.forEach((cb) => cb(data));
+  }
+
+  /** 切断 */
+  disconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.ws?.close();
+    this.ws = null;
+  }
+}
+`;
+
+/** src/scenes/LobbyScene.ts — ニックネーム入力 + マッチメイキング待機画面 */
+export const PHASER_LOBBY_SCENE = `import Phaser from 'phaser';
+import { GameClient } from '../net/GameClient';
+
+/**
+ * ロビーシーン: ニックネーム入力 → マッチメイキング待機
+ */
+export class LobbyScene extends Phaser.Scene {
+  private client!: GameClient;
+  private statusText!: Phaser.GameObjects.Text;
+  private nicknameInput!: HTMLInputElement;
+  private joinBtn!: HTMLButtonElement;
+  private countdownText!: Phaser.GameObjects.Text;
+  private waitTimer: ReturnType<typeof setInterval> | null = null;
+  private waitStartTime = 0;
+  private isWaiting = false;
+
+  constructor() {
+    super({ key: 'LobbyScene' });
+  }
+
+  create(): void {
+    this.client = GameClient.getInstance();
+    this.client.connect();
+
+    // タイトル
+    this.add.text(240, 80, '⚔️ 対戦ロビー', {
+      fontSize: '36px',
+      color: '#e0e0ff',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+
+    // ゲーム名
+    this.add.text(240, 130, '棒消しゲーム (Nim)', {
+      fontSize: '20px',
+      color: '#8888aa',
+      fontFamily: 'Arial, sans-serif',
+    }).setOrigin(0.5);
+
+    // ニックネーム入力（HTML）
+    this.createInputElements();
+
+    // ステータステキスト
+    this.statusText = this.add.text(240, 360, '', {
+      fontSize: '18px',
+      color: '#aaaacc',
+      fontFamily: 'Arial, sans-serif',
+      align: 'center',
+    }).setOrigin(0.5);
+
+    // カウントダウン
+    this.countdownText = this.add.text(240, 400, '', {
+      fontSize: '48px',
+      color: '#ffcc00',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+
+    // ルール説明
+    this.add.text(240, 520, '📖 ルール', {
+      fontSize: '22px',
+      color: '#e0e0ff',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+
+    const rules = [
+      '21本の棒がある',
+      '交互に 1〜3 本取る',
+      '最後の1本を取ったら負け！',
+    ];
+    rules.forEach((text, i) => {
+      this.add.text(240, 560 + i * 28, text, {
+        fontSize: '16px',
+        color: '#8888aa',
+        fontFamily: 'Arial, sans-serif',
+      }).setOrigin(0.5);
+    });
+
+    // WS イベント
+    this.client.on('waiting', () => {
+      this.isWaiting = true;
+      this.waitStartTime = Date.now();
+      this.statusText.setText('対戦相手を探しています...');
+      this.startCountdown();
+    });
+
+    this.client.on('matched', (msg: any) => {
+      this.isWaiting = false;
+      this.stopCountdown();
+      this.removeInputElements();
+      this.scene.start('GameScene', {
+        roomId: msg.roomId,
+        opponent: msg.opponent,
+        yourTurn: msg.yourTurn,
+        gameState: msg.gameState,
+        gameName: msg.gameName,
+      });
+    });
+  }
+
+  /** HTML 入力要素を作成 */
+  private createInputElements(): void {
+    // ニックネーム
+    const saved = localStorage.getItem('devrelay-nickname') || '';
+    this.nicknameInput = document.createElement('input');
+    this.nicknameInput.type = 'text';
+    this.nicknameInput.placeholder = 'ニックネーム';
+    this.nicknameInput.value = saved;
+    this.nicknameInput.maxLength = 20;
+    Object.assign(this.nicknameInput.style, {
+      position: 'absolute',
+      left: '50%',
+      top: '38%',
+      transform: 'translateX(-50%)',
+      width: '200px',
+      padding: '12px 16px',
+      fontSize: '18px',
+      border: '2px solid #4444aa',
+      borderRadius: '8px',
+      background: '#2a2a4a',
+      color: '#e0e0ff',
+      textAlign: 'center',
+      outline: 'none',
+      zIndex: '100',
+    });
+
+    // 参加ボタン
+    this.joinBtn = document.createElement('button');
+    this.joinBtn.textContent = '🎮 対戦する';
+    Object.assign(this.joinBtn.style, {
+      position: 'absolute',
+      left: '50%',
+      top: '47%',
+      transform: 'translateX(-50%)',
+      padding: '12px 32px',
+      fontSize: '20px',
+      fontWeight: 'bold',
+      border: 'none',
+      borderRadius: '8px',
+      background: '#5555cc',
+      color: '#ffffff',
+      cursor: 'pointer',
+      zIndex: '100',
+    });
+
+    this.joinBtn.addEventListener('click', () => this.joinLobby());
+    this.nicknameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.joinLobby();
+    });
+
+    document.body.appendChild(this.nicknameInput);
+    document.body.appendChild(this.joinBtn);
+  }
+
+  /** ロビーに参加 */
+  private joinLobby(): void {
+    const nickname = this.nicknameInput.value.trim() || 'Guest';
+    localStorage.setItem('devrelay-nickname', nickname);
+    this.nicknameInput.style.display = 'none';
+    this.joinBtn.style.display = 'none';
+    this.client.send({ type: 'join', nickname });
+  }
+
+  /** カウントダウン開始 */
+  private startCountdown(): void {
+    this.stopCountdown();
+    this.waitTimer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - this.waitStartTime) / 1000);
+      const remaining = Math.max(0, 10 - elapsed);
+      this.countdownText.setText(String(remaining));
+      if (remaining <= 0) {
+        this.countdownText.setText('CPU と対戦！');
+        this.stopCountdown();
+      }
+    }, 200);
+  }
+
+  /** カウントダウン停止 */
+  private stopCountdown(): void {
+    if (this.waitTimer) {
+      clearInterval(this.waitTimer);
+      this.waitTimer = null;
+    }
+    this.countdownText.setText('');
+  }
+
+  /** HTML 要素を削除 */
+  private removeInputElements(): void {
+    this.nicknameInput?.remove();
+    this.joinBtn?.remove();
+  }
+
+  shutdown(): void {
+    this.stopCountdown();
+    this.removeInputElements();
+  }
+}
+`;
+
+/** src/scenes/ResultScene.ts — 勝敗表示 + 連勝カウンター + リマッチボタン */
+export const PHASER_RESULT_SCENE = `import Phaser from 'phaser';
+import { GameClient } from '../net/GameClient';
+
+/**
+ * 結果シーン: 勝敗表示 + 統計 + リマッチ/ロビーに戻るボタン
+ */
+export class ResultScene extends Phaser.Scene {
+  private client!: GameClient;
+
+  constructor() {
+    super({ key: 'ResultScene' });
+  }
+
+  create(data: {
+    winner: 'you' | 'opponent' | 'draw';
+    stats: { wins: number; losses: number; draws: number; streak: number; bestStreak: number } | null;
+    opponentNickname: string;
+    isCpu: boolean;
+  }): void {
+    this.client = GameClient.getInstance();
+
+    // 結果タイトル
+    const resultText = data.winner === 'you' ? '🎉 勝利！' : data.winner === 'opponent' ? '😢 敗北...' : '🤝 引き分け';
+    const resultColor = data.winner === 'you' ? '#44ff44' : data.winner === 'opponent' ? '#ff4444' : '#ffcc00';
+
+    this.add.text(240, 100, resultText, {
+      fontSize: '48px',
+      color: resultColor,
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+
+    // 対戦相手
+    const vsText = data.isCpu ? 'vs CPU' : \`vs \${data.opponentNickname}\`;
+    this.add.text(240, 160, vsText, {
+      fontSize: '20px',
+      color: '#8888aa',
+      fontFamily: 'Arial, sans-serif',
+    }).setOrigin(0.5);
+
+    // 統計
+    if (data.stats) {
+      const { wins, losses, draws, streak, bestStreak } = data.stats;
+
+      this.add.text(240, 240, '📊 戦績', {
+        fontSize: '24px',
+        color: '#e0e0ff',
+        fontFamily: 'Arial, sans-serif',
+        fontStyle: 'bold',
+      }).setOrigin(0.5);
+
+      this.add.text(240, 280, \`\${wins}勝 \${losses}敗 \${draws}分\`, {
+        fontSize: '22px',
+        color: '#ccccee',
+        fontFamily: 'Arial, sans-serif',
+      }).setOrigin(0.5);
+
+      if (streak > 0) {
+        const streakColor = streak >= 5 ? '#ff4444' : streak >= 3 ? '#ffcc00' : '#44ff44';
+        this.add.text(240, 320, \`🔥 \${streak}連勝中！\`, {
+          fontSize: '28px',
+          color: streakColor,
+          fontFamily: 'Arial, sans-serif',
+          fontStyle: 'bold',
+        }).setOrigin(0.5);
+      }
+
+      if (bestStreak > 1) {
+        this.add.text(240, 360, \`最高記録: \${bestStreak}連勝\`, {
+          fontSize: '16px',
+          color: '#6666aa',
+          fontFamily: 'Arial, sans-serif',
+        }).setOrigin(0.5);
+      }
+    }
+
+    // リマッチボタン
+    this.createButton(240, 460, '🔄 リマッチ', '#5555cc', () => {
+      this.client.send({ type: 'rematch' });
+      // matched イベントでリスタート
+      this.client.on('matched', (msg: any) => {
+        this.scene.start('GameScene', {
+          roomId: msg.roomId,
+          opponent: msg.opponent,
+          yourTurn: msg.yourTurn,
+          gameState: msg.gameState,
+          gameName: msg.gameName,
+        });
+      });
+    });
+
+    // ロビーに戻るボタン
+    this.createButton(240, 530, '🏠 ロビーに戻る', '#666688', () => {
+      this.client.send({ type: 'leave' });
+      this.scene.start('LobbyScene');
+    });
+  }
+
+  /** ボタン作成ヘルパー */
+  private createButton(x: number, y: number, label: string, color: string, onClick: () => void): void {
+    const bg = this.add.graphics();
+    const w = 220;
+    const h = 50;
+    bg.fillStyle(parseInt(color.replace('#', ''), 16), 1);
+    bg.fillRoundedRect(x - w / 2, y - h / 2, w, h, 8);
+    bg.setInteractive(
+      new Phaser.Geom.Rectangle(x - w / 2, y - h / 2, w, h),
+      Phaser.Geom.Rectangle.Contains
+    );
+    bg.on('pointerdown', onClick);
+
+    this.add.text(x, y, label, {
+      fontSize: '20px',
+      color: '#ffffff',
+      fontFamily: 'Arial, sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+  }
+}
 `;
 
 /**
@@ -854,8 +2055,22 @@ export const PHASER_TEMPLATE_FILES: Record<string, string> = {
   'src/scenes/BootScene.ts': PHASER_BOOT_SCENE,
   'src/scenes/GameScene.ts': PHASER_GAME_SCENE,
   'src/scenes/UIScene.ts': PHASER_UI_SCENE,
+  'src/scenes/LobbyScene.ts': PHASER_LOBBY_SCENE,
+  'src/scenes/ResultScene.ts': PHASER_RESULT_SCENE,
+  'src/net/protocol.ts': PHASER_PROTOCOL,
+  'src/net/GameClient.ts': PHASER_GAME_CLIENT,
   'src/utils/SoundManager.ts': PHASER_SOUND_MANAGER,
   'src/types/index.ts': PHASER_TYPES_INDEX,
   'src/types/jsfxr.d.ts': PHASER_JSFXR_DTS,
+  'prisma/schema.prisma': PHASER_PRISMA_SCHEMA,
+  'server/game-adapter.ts': PHASER_GAME_ADAPTER,
+  'server/adapters/index.ts': PHASER_ADAPTER_INDEX,
+  'server/adapters/nim-adapter.ts': PHASER_NIM_ADAPTER,
+  'server/db.ts': PHASER_DB,
+  'server/ws-server.ts': PHASER_WS_SERVER,
+  'server/matchmaker.ts': PHASER_MATCHMAKER,
+  'server/room.ts': PHASER_ROOM,
+  'server/cpu-player.ts': PHASER_CPU_PLAYER,
+  'server/vite-ws-plugin.ts': PHASER_WS_PLUGIN,
   '.claude/skills/phaser-gamedev/SKILL.md': PHASER_SKILL_MD,
 };

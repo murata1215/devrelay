@@ -143,6 +143,19 @@ devrelay/
 - `context.userId` は Discord プラットフォーム ID。DB の `Session.userId` には `oldSession.userId` を使う
 - **サーバー起動時の ChannelSession 保持**: マシンがオフラインでも `currentMachineId`/`currentSessionId` をクリアしない。サーバー起動時は全マシンが offline のため、クリアすると全セッション情報が消失する。Agent 再接続時に `restoreSessionParticipantsForMachine()` で復元される
 - **Agent 更新完了通知**: `pendingUpdateNotify` Map で更新リクエスト元を記録し、Agent 再接続時に `handleAgentConnect()` で完了メッセージを送信
+- **Web 参加者の stale 防止**: WS 切断時に `removeWebParticipantFromAllSessions()` で全セッションから即座に除去。再接続時は `//connect` で再登録される。旧実装では Web クライアントは `handleProjectConnect()` で旧セッションから除去されず、stale 参加者が蓄積してメッセージ重複の原因となっていた（#202 で修正）
+- **pendingMessages の即座クリア**: WS 切断時に `pendingMessages.delete(chatId)` で即座にクリア。旧実装の 60 秒待機は stale キューのフラッシュによるメッセージ重複を引き起こしていた
+
+---
+
+## Phaser テンプレート対戦基盤
+
+- `testflight --phaser` で生成されるテンプレートにターン制対戦インフラが内蔵
+- **GameAdapter パターン**: ゲーム固有ロジック（初期状態、手の適用、CPU AI、表示用状態）をアダプタとして抽象化
+- **Vite プラグイン方式**: `configureServer` フックで dev サーバーと同一ポートに WS をアタッチ（追加プロセス不要）
+- **マッチメイキング**: FIFO キュー、10秒タイムアウト → CPU フォールバック
+- **DB**: Prisma で Player（連勝追跡）+ Match モデル、`prisma db push` でデプロイ時に自動適用
+- **デプロイフロー**: `testflight-manager.ts` の `deployPhaserTemplate()` に `prisma db push` ステップ追加
 
 ---
 
