@@ -185,7 +185,7 @@ async function deployPhaserTemplate(name: string, directory: string, port: numbe
 
   // Prisma DB push（スキーマを DB に反映）
   console.log(`🎮 testflight [${name}]: running prisma db push...`);
-  await execAsync('npx prisma db push --skip-generate', { cwd: directory, timeout: 60000 });
+  await execAsync('npx prisma db push --skip-generate --accept-data-loss', { cwd: directory, timeout: 60000 });
   console.log(`🎮 testflight [${name}]: prisma db push done`);
 
   // pnpm build（初回ビルド確認）
@@ -392,7 +392,7 @@ export async function createTestflightService(userId: string, name: string, temp
     if (template === 'phaser') {
       msgLines.push('');
       msgLines.push('🎮 Phaser 3 ゲームテンプレートを展開しました');
-      msgLines.push('🎯 サンプル: 2048 パズルゲーム');
+      msgLines.push('🎯 サンプル: 棒消し（Nim）対戦ゲーム + 管理画面（/stats）');
       msgLines.push(`⚡ PM2 プロセス: tf-${name}（HMR 対応 dev サーバー常駐）`);
     }
     msgLines.push(`⏳ ドメイン反映まで数秒かかる場合があります`);
@@ -583,6 +583,20 @@ export async function copyTestflightService(userId: string, srcName: string, des
       await writeFile(join(destDir, 'CLAUDE.md'), claudeMd, 'utf-8');
     } catch (e: any) {
       console.warn(`📋 testflight cp [${destName}]: CLAUDE.md rewrite skipped: ${e.message}`);
+    }
+
+    // 6d. vite.config.ts のホスト名を書き換え（allowedHosts 対応）
+    try {
+      const { readFile } = await import('fs/promises');
+      const viteConfigPath = join(destDir, 'vite.config.ts');
+      let viteConfig = await readFile(viteConfigPath, 'utf-8');
+      viteConfig = viteConfig.replace(
+        new RegExp(`${srcName}\\.devrelay\\.io`, 'g'),
+        `${destName}.devrelay.io`
+      );
+      await writeFile(viteConfigPath, viteConfig, 'utf-8');
+    } catch (e: any) {
+      console.warn(`📋 testflight cp [${destName}]: vite.config.ts rewrite skipped: ${e.message}`);
     }
 
     // 7. PostgreSQL 複製

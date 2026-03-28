@@ -152,7 +152,9 @@ devrelay/
 
 - `testflight --phaser` で生成されるテンプレートにターン制対戦インフラが内蔵
 - **GameAdapter パターン**: ゲーム固有ロジック（初期状態、手の適用、CPU AI、表示用状態）をアダプタとして抽象化
-- **Vite プラグイン方式**: `configureServer` フックで dev サーバーと同一ポートに WS をアタッチ（追加プロセス不要）
+- **Vite プラグイン方式**: `configureServer` フックで dev サーバーに WS + 管理画面を追加（追加プロセス不要）
+- **WS は noServer モード必須**: `WebSocketServer({ server: httpServer })` は Vite HMR と `upgrade` イベントが衝突する。`noServer: true` + 手動 `handleUpgrade` でパス `/ws` のみゲーム WS に振り分け（#203 で修正）
+- **管理画面**: `/stats` でダッシュボード HTML、`/api/stats` で JSON API。Vite の `server.middlewares` で追加
 - **マッチメイキング**: FIFO キュー、10秒タイムアウト → CPU フォールバック
 - **DB**: Prisma で Player（連勝追跡）+ Match モデル、`prisma db push` でデプロイ時に自動適用
 - **デプロイフロー**: `testflight-manager.ts` の `deployPhaserTemplate()` に `prisma db push` ステップ追加

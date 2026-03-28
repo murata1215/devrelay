@@ -4,8 +4,8 @@
  * testflight create --phaser で展開されるファイル群。
  * プレースホルダー: {{NAME}} → サービス名, {{PORT}} → ポート番号
  *
- * 2048 パズルゲーム + BGM/SFX オーディオ対応のサンプル付き。
- * tetris.devrelay.io の実装をベースにテンプレート化。
+ * 棒消し（Nim）対戦ゲーム + BGM/SFX オーディオ対応。
+ * マッチメイキング・CPU対戦・勝敗履歴の対戦基盤内蔵。
  */
 
 import { PHASER_SKILL_MD } from './phaser-skill-template.js';
@@ -286,7 +286,7 @@ export class SoundManager {
     this.playSFX(this.sfxMoveDef, 0.3);
   }
 
-  playMerge(_value: number): void {
+  playVictory(): void {
     this.playSFX(this.sfxMergeDef, 0.5);
   }
 
@@ -482,7 +482,7 @@ export class GameScene extends Phaser.Scene {
     this.client.on('result', (msg: any) => {
       this.soundManager.stopBGM();
       if (msg.winner === 'you') {
-        this.soundManager.playMerge(2048);
+        this.soundManager.playVictory();
       } else {
         this.soundManager.playGameOver();
       }
@@ -1166,6 +1166,18 @@ export const matchmaker = {
       }
     }
   },
+
+  /** リアルタイム統計を取得（管理画面用） */
+  getStats(): { online: number; inQueue: number; inGame: number; activeRooms: number } {
+    const inQueue = queue.length;
+    const activeRooms = rooms.size;
+    // ルームごとに2人（CPU含む）、キューにいる人数を加算
+    let inGame = 0;
+    for (const room of rooms.values()) {
+      inGame += 2; // player1 + player2(or CPU)
+    }
+    return { online: inQueue + inGame, inQueue, inGame, activeRooms };
+  },
 };
 `;
 
@@ -1518,24 +1530,207 @@ export function scheduleCpuMove(
 export const PHASER_WS_PLUGIN = `import type { Plugin } from 'vite';
 import { WebSocketServer } from 'ws';
 import { handleConnection } from './ws-server';
+import { getStats, getStatsHtml } from './stats-api';
 
 /**
- * Vite プラグイン: dev サーバーの httpServer に WebSocket サーバーを追加
- * パス /ws でゲーム用 WS を提供
+ * Vite プラグイン: dev サーバーに WebSocket + 管理画面 API を追加
+ * - /ws — ゲーム用 WebSocket
+ * - /api/stats — 統計 JSON API
+ * - /stats — 管理画面 HTML
  */
 export function gameWsPlugin(): Plugin {
   return {
     name: 'game-ws',
     configureServer(server) {
       if (!server.httpServer) return;
-      const wss = new WebSocketServer({
-        server: server.httpServer,
-        path: '/ws',
+
+      // 管理画面 API（/api/stats）
+      server.middlewares.use('/api/stats', async (_req, res) => {
+        try {
+          const stats = await getStats();
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(stats));
+        } catch (err) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: 'Failed to fetch stats' }));
+        }
       });
+
+      // 管理画面 HTML（/stats）
+      server.middlewares.use('/stats', (_req, res) => {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(getStatsHtml());
+      });
+
+      // WebSocket サーバー（noServer モード: Vite HMR の WS と衝突しないよう手動ルーティング）
+      const wss = new WebSocketServer({ noServer: true });
       wss.on('connection', handleConnection);
-      console.log('🎮 Game WebSocket server attached to /ws');
+      server.httpServer.on('upgrade', (req, socket, head) => {
+        const pathname = new URL(req.url || '', 'http://localhost').pathname;
+        if (pathname === '/ws') {
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req);
+          });
+        }
+        // /ws 以外（Vite HMR 等）はデフォルト処理に任せる
+      });
+      console.log('🎮 Game server attached: WS(/ws) + Stats(/stats)');
     },
   };
+}
+`;
+
+/** server/stats-api.ts — 統計データ取得（管理画面用） */
+export const PHASER_STATS_API = `import { prisma } from './db';
+import { matchmaker } from './matchmaker';
+
+/**
+ * 統計データを集計して返す（/api/stats エンドポイント用）
+ */
+export async function getStats() {
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  // リアルタイム統計
+  const realtime = matchmaker.getStats();
+
+  // 対戦統計（並列クエリ）
+  const [total, today, week, month, todayCpu, todayPvp] = await Promise.all([
+    prisma.match.count(),
+    prisma.match.count({ where: { createdAt: { gte: todayStart } } }),
+    prisma.match.count({ where: { createdAt: { gte: weekAgo } } }),
+    prisma.match.count({ where: { createdAt: { gte: monthAgo } } }),
+    prisma.match.count({ where: { createdAt: { gte: todayStart }, isCpuMatch: true } }),
+    prisma.match.count({ where: { createdAt: { gte: todayStart }, isCpuMatch: false } }),
+  ]);
+
+  // プレイヤー統計
+  const [totalPlayers, active24h] = await Promise.all([
+    prisma.player.count(),
+    prisma.player.count({ where: { updatedAt: { gte: dayAgo } } }),
+  ]);
+
+  // ランキング TOP10（勝利数順）
+  const leaderboard = await prisma.player.findMany({
+    orderBy: { wins: 'desc' },
+    take: 10,
+    select: { nickname: true, wins: true, losses: true, draws: true, streak: true, bestStreak: true },
+  });
+
+  return {
+    realtime,
+    matches: { today, week, month, total, todayCpu, todayPvp },
+    players: { total: totalPlayers, active24h },
+    leaderboard,
+  };
+}
+
+/** 管理画面 HTML（ダークテーマ、自動更新） */
+export function getStatsHtml(): string {
+  return \`<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stats Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0f0f23; color: #e0e0ff; font-family: 'Segoe UI', sans-serif; padding: 20px; }
+  h1 { text-align: center; font-size: 24px; margin-bottom: 24px; color: #7777ff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; max-width: 960px; margin: 0 auto; }
+  .card { background: #1a1a3e; border-radius: 12px; padding: 20px; border: 1px solid #2a2a5e; }
+  .card h2 { font-size: 14px; color: #8888cc; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #2a2a4e; }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-label { color: #aaaacc; }
+  .stat-value { font-weight: bold; font-size: 18px; }
+  .stat-value.green { color: #44ff88; }
+  .stat-value.yellow { color: #ffcc44; }
+  .stat-value.blue { color: #44aaff; }
+  .stat-value.purple { color: #aa77ff; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: #8888cc; font-size: 12px; padding: 8px 4px; border-bottom: 1px solid #2a2a5e; }
+  td { padding: 8px 4px; border-bottom: 1px solid #1a1a3e; }
+  .rank { color: #ffcc44; font-weight: bold; }
+  .streak { color: #ff6644; }
+  .footer { text-align: center; margin-top: 24px; color: #555577; font-size: 12px; }
+  #status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #44ff88; margin-right: 6px; }
+</style>
+</head>
+<body>
+<h1>📊 Game Stats Dashboard</h1>
+<div class="grid">
+  <div class="card">
+    <h2>🟢 リアルタイム</h2>
+    <div class="stat-row"><span class="stat-label">オンライン</span><span class="stat-value green" id="online">-</span></div>
+    <div class="stat-row"><span class="stat-label">待機中</span><span class="stat-value yellow" id="inQueue">-</span></div>
+    <div class="stat-row"><span class="stat-label">対戦中</span><span class="stat-value blue" id="inGame">-</span></div>
+    <div class="stat-row"><span class="stat-label">ルーム数</span><span class="stat-value" id="activeRooms">-</span></div>
+  </div>
+  <div class="card">
+    <h2>⚔️ 対戦統計</h2>
+    <div class="stat-row"><span class="stat-label">今日</span><span class="stat-value green" id="today">-</span></div>
+    <div class="stat-row"><span class="stat-label">今週</span><span class="stat-value blue" id="week">-</span></div>
+    <div class="stat-row"><span class="stat-label">今月</span><span class="stat-value purple" id="month">-</span></div>
+    <div class="stat-row"><span class="stat-label">累計</span><span class="stat-value" id="total">-</span></div>
+    <div class="stat-row"><span class="stat-label">今日 CPU</span><span class="stat-value yellow" id="todayCpu">-</span></div>
+    <div class="stat-row"><span class="stat-label">今日 PvP</span><span class="stat-value green" id="todayPvp">-</span></div>
+  </div>
+  <div class="card">
+    <h2>👥 プレイヤー</h2>
+    <div class="stat-row"><span class="stat-label">総数</span><span class="stat-value blue" id="totalPlayers">-</span></div>
+    <div class="stat-row"><span class="stat-label">24時間アクティブ</span><span class="stat-value green" id="active24h">-</span></div>
+  </div>
+  <div class="card" style="grid-column: 1 / -1;">
+    <h2>🏆 ランキング TOP10</h2>
+    <table>
+      <thead><tr><th>#</th><th>ニックネーム</th><th>勝</th><th>敗</th><th>分</th><th>🔥連勝</th><th>最高</th></tr></thead>
+      <tbody id="leaderboard"><tr><td colspan="7" style="text-align:center;color:#555">読み込み中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+<div class="footer"><span id="status"></span>30秒ごとに自動更新 | <span id="lastUpdate">-</span></div>
+<script>
+async function refresh() {
+  try {
+    const res = await fetch('/api/stats');
+    const d = await res.json();
+    document.getElementById('online').textContent = d.realtime.online;
+    document.getElementById('inQueue').textContent = d.realtime.inQueue;
+    document.getElementById('inGame').textContent = d.realtime.inGame;
+    document.getElementById('activeRooms').textContent = d.realtime.activeRooms;
+    document.getElementById('today').textContent = d.matches.today;
+    document.getElementById('week').textContent = d.matches.week;
+    document.getElementById('month').textContent = d.matches.month;
+    document.getElementById('total').textContent = d.matches.total;
+    document.getElementById('todayCpu').textContent = d.matches.todayCpu;
+    document.getElementById('todayPvp').textContent = d.matches.todayPvp;
+    document.getElementById('totalPlayers').textContent = d.players.total;
+    document.getElementById('active24h').textContent = d.players.active24h;
+    const tbody = document.getElementById('leaderboard');
+    if (d.leaderboard.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#555">まだデータがありません</td></tr>';
+    } else {
+      tbody.innerHTML = d.leaderboard.map((p, i) =>
+        '<tr><td class="rank">' + (i+1) + '</td><td>' + p.nickname + '</td><td>' + p.wins +
+        '</td><td>' + p.losses + '</td><td>' + p.draws + '</td><td class="streak">' +
+        (p.streak > 0 ? p.streak : '-') + '</td><td>' + p.bestStreak + '</td></tr>'
+      ).join('');
+    }
+    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('ja-JP');
+    document.getElementById('status').style.background = '#44ff88';
+  } catch (e) {
+    document.getElementById('status').style.background = '#ff4444';
+  }
+}
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>\`;
 }
 `;
 
@@ -2071,6 +2266,7 @@ export const PHASER_TEMPLATE_FILES: Record<string, string> = {
   'server/matchmaker.ts': PHASER_MATCHMAKER,
   'server/room.ts': PHASER_ROOM,
   'server/cpu-player.ts': PHASER_CPU_PLAYER,
+  'server/stats-api.ts': PHASER_STATS_API,
   'server/vite-ws-plugin.ts': PHASER_WS_PLUGIN,
   '.claude/skills/phaser-gamedev/SKILL.md': PHASER_SKILL_MD,
 };

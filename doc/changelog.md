@@ -7,6 +7,20 @@
 ## 実装済み機能
 
 
+### #203: Phaser テンプレート安定化 + 管理画面 + デプロイ修正 (2026-03-28)
+
+Phaser テンプレートの Vite HMR 衝突修正、管理画面（/stats）追加、デプロイフロー修正。
+
+- **Bug fix: Vite HMR 無限リロード**: `WebSocketServer({ server: httpServer })` が Vite の HMR WS と `upgrade` イベントで衝突 → `noServer: true` モードに変更し `/ws` パスのみ手動ルーティング
+- **管理画面（/stats）**: ノーログインでアクセス可能な統計ダッシュボード
+  - `server/stats-api.ts` 新規追加: Prisma 集計クエリ（今日/週/月/累計、CPU/PvP 内訳）+ ランキング TOP10
+  - `server/matchmaker.ts` に `getStats()` getter 追加（リアルタイム接続数）
+  - `server/vite-ws-plugin.ts` に `/api/stats`（JSON）と `/stats`（HTML）ミドルウェア追加
+  - ダークテーマ HTML、30秒自動更新、モバイル対応
+- **Bug fix: testflight --phaser デプロイ失敗**: `prisma db push --skip-generate` → `--accept-data-loss` フラグ追加
+- **Bug fix: testflight cp allowedHosts**: コピー時に `vite.config.ts` のホスト名を書き換え（`srcName.devrelay.io` → `destName.devrelay.io`）
+- **テンプレート修正**: ファイルヘッダー「2048」→「棒消し（Nim）」、`playMerge(2048)` → `playVictory()`、完了メッセージ更新
+
 ### #202: Phaser 対戦基盤テンプレート + WebUI メッセージ重複修正 (2026-03-28)
 
 Phaser テンプレートに WebSocket ベースの対戦基盤を追加。WebUI のメッセージ重複表示バグを修正。
