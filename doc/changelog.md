@@ -7,6 +7,58 @@
 ## 実装済み機能
 
 
+### #206: Stale セッションクリーンアップ + 自動タイムアウト (2026-03-29)
+
+サーバー起動時に stale セッションと古い pending ツール承認を自動クリーンアップ。
+
+- **サーバー起動時自動クリーンアップ**（`apps/server/src/index.ts`）:
+  - 24時間以上活動がない active セッション → `ended` に更新 + ChannelSession 削除
+  - 30分以上経過した pending ツール承認 → `timeout` に更新
+  - `restoreSessionParticipants()` より前に実行（stale 参加者の復元を防止）
+- **DB 直接クリーンアップ（実行済み）**:
+  - 51 stale active セッション → ended（80→29 に削減）
+  - 1 pending ツール承認 → timeout（pixnews teamexec, 5日前）
+  - 12 stale ChannelSession を削除
+
+#### 設計判断
+- **stale セッション自動クリーンアップ**: pm2 restart のたびに実行。24時間を閾値とし、メッセージの最終 createdAt で判定
+- **pending 承認タイムアウト**: 30分を閾値。Agent 側の Claude Code プロセスは既に終了している前提
+
+### #205: Skip Permissions チャット画面トグル + 古いメッセージ表示修正 + メッセージ重複防止 (2026-03-28)
+
+チャットヘッダーに ⚡ Skip Permissions トグル追加。WebUI 初回ロード時の古いメッセージ表示バグを修正。メッセージ重複防止を強化。
+
+- **チャットヘッダーに ⚡ Skip Permissions トグル**:
+  - `activeMachineId` から `GET/PUT /api/machines/:id/skip-permissions` で取得・トグル
+  - ON 時 amber、OFF 時グレーの ⚡ アイコン、ホバーで ON/OFF 表示
+- **exec 時 skipPermissions 再送**（config:update 配信失敗のフォールバック）:
+  - `execConversation()` で DB から最新 skipPermissions を取得して `server:conversation:exec` payload に含める
+  - Agent 側で `handleConversationExec()` 受信時に `serverSkipPermissions` を同期
+  - `ConversationExecPayload` に `skipPermissions?: boolean` 追加
+  - `PendingConfigUpdate` interface に `skipPermissions` 型追加
+- **メッセージ重複防止**:
+  - `addMessageToTab`: 全ロール（user+system）× 最新5件 × 30秒窓で重複チェック
+- **古いメッセージ表示の根本原因修正**:
+  - **根本原因**: `loadHistory` → React 描画 → `scrollTop=0` → `handleScroll` → `loadOlderMessages` が連鎖発火し、数日前のメッセージまで自動ロード
+  - **修正**: `initialLoadCompleteRef` フラグで初回 loadHistory + auto-scroll 完了（2秒後）まで `loadOlderMessages` をブロック
+  - refresh マージで API 最古メッセージより古い wsOnly メッセージを除外
+  - auto-scroll を rAF + 100ms + 500ms + 1000ms の4段階で確実に実行
+- **API Cache-Control**: メッセージ API に `Cache-Control: no-store` 追加
+- **SW skipWaiting**: `sw.ts` に `SKIP_WAITING` メッセージハンドラ追加（新ビルド即時反映）
+- **診断ログ追加**: `[mount]`, `[loadHistory]`, `[addMessageToTab]`, `[loadOlderMessages]`, `[handleReconnect]`, `[visibilitychange]`
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/web/src/pages/ChatPage.tsx` | ⚡ トグル + メッセージ重複防止 + loadOlderMessages ガード + auto-scroll + 診断ログ |
+| `apps/web/src/sw.ts` | SKIP_WAITING ハンドラ追加 |
+| `apps/server/src/services/agent-manager.ts` | exec 時 skipPermissions 再送 + PendingConfigUpdate 型修正 |
+| `apps/server/src/routes/api.ts` | Cache-Control: no-store 追加 |
+| `agents/linux/src/services/connection.ts` | exec 時 skipPermissions 同期 |
+| `agents/macos/src/services/connection.ts` | 同上 |
+| `packages/shared/src/types.ts` | ConversationExecPayload に skipPermissions 追加 |
+
 ### #204: DB クリーンアップ + testflight ハイフン名修正 + WebUI タブ切替✅表示修正 (2026-03-28)
 
 DB の stale データ一掃、testflight のハイフン含みプロジェクト名対応、WebUI タブ切替時の誤表示修正。
