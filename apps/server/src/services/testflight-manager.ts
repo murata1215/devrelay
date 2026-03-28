@@ -224,9 +224,15 @@ export async function createTestflightService(userId: string, name: string, temp
   if (existing) {
     console.log(`🛫 testflight [${name}]: already exists (status=${existing.status})`);
     if (existing.status === 'archived') {
-      return `⚠️ \`${name}\` はアーカイブ済みです。別の名前を使用してください。`;
+      // archived レコードを削除して同名での再作成を許可
+      await prisma.testflightService.delete({ where: { id: existing.id } });
+      try {
+        await execAsync(`rm -rf ${join(TESTFLIGHT_BASE_DIR, name)}`);
+      } catch { /* ディレクトリが既にない場合は無視 */ }
+      console.log(`🛫 testflight [${name}]: archived record deleted, allowing re-creation`);
+    } else {
+      return `⚠️ \`${name}\` は既に存在します。\n🌐 https://${name}.${DOMAIN_SUFFIX}`;
     }
-    return `⚠️ \`${name}\` は既に存在します。\n🌐 https://${name}.${DOMAIN_SUFFIX}`;
   }
 
   // 3. ポート採番
@@ -303,7 +309,7 @@ export async function createTestflightService(userId: string, name: string, temp
     // 7. PostgreSQL ユーザー・DB 作成
     try {
       await execAsync(
-        `sudo -u postgres psql -c "CREATE USER ${name}_user WITH PASSWORD '${dbPassword}'"`
+        `sudo -u postgres psql -c 'CREATE USER "${name}_user" WITH PASSWORD $$${dbPassword}$$'`
       );
     } catch (e: any) {
       // ユーザーが既に存在する場合はスキップ
@@ -314,7 +320,7 @@ export async function createTestflightService(userId: string, name: string, temp
 
     try {
       await execAsync(
-        `sudo -u postgres createdb ${name} -O ${name}_user`
+        `sudo -u postgres createdb "${name}" -O "${name}_user"`
       );
     } catch (e: any) {
       if (!e.stderr?.includes('already exists')) {
@@ -474,18 +480,26 @@ export async function removeTestflightService(userId: string, name: string): Pro
       }
     }
 
-    // Caddy 設定ファイル削除
+    // Caddy 設定ファイル削除（設定は即削除、reload は遅延実行）
     try {
       await execAsync(`sudo rm ${CADDY_SITES_DIR}/${name}.${DOMAIN_SUFFIX}`);
-      await execAsync('sudo systemctl reload caddy');
     } catch (e: any) {
       console.warn(`Caddy config removal warning: ${e.message}`);
     }
+    // Caddy reload を遅延実行（応答がクライアントに届いてから実行。同期だと WS 切断で応答欠落する）
+    setTimeout(async () => {
+      try {
+        await execAsync('sudo systemctl reload caddy');
+        console.log(`🛫 testflight [${name}]: caddy reload done (async)`);
+      } catch (e: any) {
+        console.warn(`🛫 testflight [${name}]: caddy reload warning: ${e.message}`);
+      }
+    }, 2000);
 
     // PostgreSQL DB・ユーザー削除
     try {
-      await execAsync(`sudo -u postgres dropdb --if-exists ${name}`);
-      await execAsync(`sudo -u postgres dropuser --if-exists ${name}_user`);
+      await execAsync(`sudo -u postgres dropdb --if-exists "${name}"`);
+      await execAsync(`sudo -u postgres dropuser --if-exists "${name}_user"`);
     } catch (e: any) {
       console.warn(`PostgreSQL cleanup warning: ${e.message}`);
     }
@@ -603,7 +617,7 @@ export async function copyTestflightService(userId: string, srcName: string, des
     // 7a. 新ユーザー作成
     try {
       await execAsync(
-        `sudo -u postgres psql -c "CREATE USER ${destName}_user WITH PASSWORD '${dbPassword}'"`
+        `sudo -u postgres psql -c 'CREATE USER "${destName}_user" WITH PASSWORD $$${dbPassword}$$'`
       );
     } catch (e: any) {
       if (!e.stderr?.includes('already exists')) {
@@ -613,7 +627,7 @@ export async function copyTestflightService(userId: string, srcName: string, des
 
     // 7b. 新 DB 作成
     try {
-      await execAsync(`sudo -u postgres createdb ${destName} -O ${destName}_user`);
+      await execAsync(`sudo -u postgres createdb "${destName}" -O "${destName}_user"`);
     } catch (e: any) {
       if (!e.stderr?.includes('already exists')) {
         throw new Error(`PostgreSQL DB 作成失敗: ${e.stderr || e.message}`);
@@ -623,7 +637,7 @@ export async function copyTestflightService(userId: string, srcName: string, des
     // 7c. データフルコピー（pg_dump | psql）
     try {
       await execAsync(
-        `sudo -u postgres pg_dump ${srcName} | sudo -u postgres psql ${destName}`,
+        `sudo -u postgres pg_dump "${srcName}" | sudo -u postgres psql "${destName}"`,
         { timeout: 120000 }
       );
       console.log(`📋 testflight cp [${destName}]: pg_dump → psql done`);
@@ -634,7 +648,7 @@ export async function copyTestflightService(userId: string, srcName: string, des
     // 7d. 新ユーザーに権限付与
     try {
       await execAsync(
-        `sudo -u postgres psql -d ${destName} -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${destName}_user; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${destName}_user;"`
+        `sudo -u postgres psql -d "${destName}" -c 'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "${destName}_user"; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "${destName}_user";'`
       );
     } catch (e: any) {
       console.warn(`📋 testflight cp [${destName}]: grant warning: ${e.message}`);

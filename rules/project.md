@@ -15,6 +15,21 @@ DevRelay 自身のサーバーやエージェントを修正した場合：
 
 理由：自分自身を再起動すると WebSocket 接続が切れ、応答が途中で消失するため。
 
+### ChannelSession の stale レコード防止
+
+Web クライアントが WS 切断した際は、`ChannelSession` テーブルからもレコードを削除すること。
+DB に残った stale レコードはサーバー再起動時に復元され、メッセージが大量の無効 chatId にブロードキャストされる原因となる。
+
+### testflight PostgreSQL 識別子のクォート
+
+`testflight-manager.ts` で PostgreSQL のユーザー名・DB 名を使う場合は必ずダブルクォートで囲むこと。
+ハイフン含みの名前（例: `tf-2048`）がクォートなしだと SQL 構文エラーになる。
+
+### WebUI `//connect` 応答と clearProgressOnTab
+
+`//connect` の応答（`web:response`）は AI の完了ではないため、`clearProgressOnTab` で `completed = true` にしてはならない。
+`suppressConnectRef.current` が `true` の場合は早期 return すること。
+
 再起動案内の条件：
 - `.ts` ファイルを変更した → `pnpm build` を実行 → 成功 → 案内を出す
 - `.md` ファイルのみ変更 → ビルド不要 → 案内も不要

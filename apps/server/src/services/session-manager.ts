@@ -207,13 +207,23 @@ export function removeParticipant(sessionId: string, platform: Platform, chatId:
 /**
  * 指定した Web chatId を全セッションの参加者リストから除去する
  * WS 切断時に呼び出し、stale 参加者の蓄積を防止する
+ * インメモリ + DB（ChannelSession）の両方をクリーンアップ
  */
-export function removeWebParticipantFromAllSessions(chatId: string): void {
+export async function removeWebParticipantFromAllSessions(chatId: string): Promise<void> {
+  // インメモリから除去
   for (const [sessionId, participants] of sessionParticipants) {
     const filtered = participants.filter(p => !(p.platform === 'web' && p.chatId === chatId));
     if (filtered.length !== participants.length) {
       sessionParticipants.set(sessionId, filtered);
     }
+  }
+  // DB（ChannelSession）からも除去（サーバー再起動時の復元を防止）
+  try {
+    await prisma.channelSession.deleteMany({
+      where: { platform: 'web', chatId },
+    });
+  } catch (e: any) {
+    console.warn(`ChannelSession cleanup warning for ${chatId}:`, e.message);
   }
 }
 

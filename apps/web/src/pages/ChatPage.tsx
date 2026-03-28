@@ -2235,6 +2235,12 @@ export function ChatPage() {
       ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
       : activeTabIdRef.current;
     if (!targetId) return;
+
+    // //connect 応答による clearProgress では progress/completed を変更しない
+    // （タブ切り替え時に処理中スピナーが一瞬 ✅ に変わるのを防止）
+    const isConnectResponse = suppressConnectRef.current;
+    if (isConnectResponse) return;
+
     setTabs(prev => prev.map(t => {
       if (t.projectId !== targetId) return t;
       // progress が null でない = AI が動いていた → 通知音を再生

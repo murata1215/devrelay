@@ -63,6 +63,9 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Progress Box Split Fix**: Removed `suppressConnectRef` guard from `clearProgressOnTab` — fixes duplicate message boxes when AI completes during tab switch
 - **WebSocket Reconnect Refresh**: `onReconnect` callback re-sends `//connect` and refreshes history on WS reconnection — fixes stale messages after network interruption
 - **iOS Safari Visibility Refresh**: `visibilitychange` handler auto-refreshes chat history when returning from background tab — fixes stale display on iOS Safari
+- **DB Cleanup**: Bulk cleanup of 384 stale active sessions → ended, 165 stale ChannelSession records, 6 expired AuthSessions + WS disconnect now removes DB records
+- **TestFlight Hyphen Name Fix**: PostgreSQL user/DB names now double-quoted in `CREATE USER`, `createdb`, `dropuser`, `dropdb`, `GRANT`, `pg_dump` — fixes SQL syntax errors for names like `tf-2048`
+- **Tab Switch Progress Fix**: `clearProgressOnTab` now skips when `suppressConnectRef` is active (i.e., `//connect` response) — fixes momentary ✅ checkmark flash when switching to a tab with active AI processing
 
 ## 💡 Token Efficiency
 

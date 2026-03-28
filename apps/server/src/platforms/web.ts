@@ -211,8 +211,10 @@ export async function setupWebClientWebSocket(
     if (webClients.get(chatId) === ws) {
       webClients.delete(chatId);
       // 切断した chatId を全セッションの参加者から除去（stale 参加者の蓄積を防止）
+      // インメモリ + DB（ChannelSession）の両方をクリーンアップ
       // 再接続時に //connect で再登録されるため、一時的な離脱は問題ない
-      removeWebParticipantFromAllSessions(chatId);
+      removeWebParticipantFromAllSessions(chatId).catch(e =>
+        console.warn('removeWebParticipant error:', e.message));
       // pendingMessages もクリア（古い chatId 宛のキューが再接続時にフラッシュされるのを防止）
       pendingMessages.delete(chatId);
     }

@@ -7,6 +7,22 @@
 ## 実装済み機能
 
 
+### #204: DB クリーンアップ + testflight ハイフン名修正 + WebUI タブ切替✅表示修正 (2026-03-28)
+
+DB の stale データ一掃、testflight のハイフン含みプロジェクト名対応、WebUI タブ切替時の誤表示修正。
+
+- **DB クリーンアップ（実行済み）**:
+  - stale active セッション 384件 → ended に一括更新（441→58件に削減）
+  - 期限切れ AuthSession 6件を削除
+  - ChannelSession の stale Web 参加者 165件を削除 + WS 切断時に DB からもレコード削除
+- **testflight-manager.ts: PostgreSQL ハイフン名対応**:
+  - `CREATE USER`, `createdb`, `dropuser`, `dropdb`, `GRANT`, `pg_dump` でユーザー名・DB 名をダブルクォートで囲むように修正
+  - `tf-2048` のようなハイフン含みの名前で SQL 構文エラーが発生する問題を解消
+- **Bug fix: WebUI タブ切替時の✅一瞬表示**:
+  - 根本原因: タブ切替で `//connect` の応答が `clearProgressOnTab` を呼び、`completed = true` にしていた
+  - 修正: `suppressConnectRef.current` が `true`（`//connect` 由来）の場合は `clearProgressOnTab` を即 return
+  - 処理中スピナーが維持され、✅が一瞬表示される問題が解消
+
 ### #203: Phaser テンプレート安定化 + 管理画面 + デプロイ修正 (2026-03-28)
 
 Phaser テンプレートの Vite HMR 衝突修正、管理画面（/stats）追加、デプロイフロー修正。
