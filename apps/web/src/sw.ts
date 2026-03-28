@@ -8,6 +8,17 @@ cleanupOutdatedCaches();
 precacheAndRoute(self.__WB_MANIFEST);
 
 /**
+ * 新バージョンの即時有効化
+ * vite-plugin-pwa の registerType: 'autoUpdate' が SKIP_WAITING メッセージを送信し、
+ * このハンドラで skipWaiting() を呼ぶことで、全タブを閉じなくても新しいコードが即座に反映される
+ */
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
+/**
  * プッシュ通知受信ハンドラ
  * サーバーから送信された通知を表示
  */

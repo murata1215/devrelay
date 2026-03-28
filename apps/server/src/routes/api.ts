@@ -579,6 +579,7 @@ export async function apiRoutes(app: FastifyInstance) {
     // 時系列順（古い→新しい）に並び替えて返す
     result.reverse();
 
+    reply.header('Cache-Control', 'no-store');
     return reply.send({
       messages: result.map(m => ({
         id: m.id,

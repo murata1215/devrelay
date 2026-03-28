@@ -568,12 +568,18 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
   // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット
   resetApproveAllMode();
+
+  // exec 開始時に skipPermissions を同期（server:config:update 配信失敗のフォールバック）
+  if (payload.skipPermissions !== undefined) {
+    serverSkipPermissions = payload.skipPermissions;
+    console.log(`⚡ Skip permissions synced on exec: ${serverSkipPermissions}`);
+  }
 
   let sessionInfo = sessionInfoMap.get(sessionId);
 

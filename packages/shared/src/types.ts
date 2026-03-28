@@ -339,6 +339,8 @@ export interface ConversationExecPayload {
   userId: string;
   /** exec コマンドに付加されたカスタムプロンプト（例: "exec, コミットして"） */
   prompt?: string;
+  /** exec 開始時に最新の skipPermissions を同期（config:update 配信失敗のフォールバック） */
+  skipPermissions?: boolean;
 }
 
 export interface SessionRestoredPayload {

@@ -1997,6 +1997,8 @@ export function ChatPage() {
   const [sidebarMode, setSidebarMode] = useState<'agents' | 'servers'>('servers');
   /** ライトボックス表示用の画像 URL */
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  /** Machine ごとの skipPermissions キャッシュ（machineId → boolean） */
+  const [skipPermissionsMap, setSkipPermissionsMap] = useState<Record<string, boolean>>({});
   /** セッション情報パネル再取得トリガー（将来の拡張用） */
   const [, setSessionRefreshCount] = useState(0);
   /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
@@ -2122,16 +2124,28 @@ export function ChatPage() {
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
       }));
+      console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, refresh=${refresh}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
+
+      // 自動スクロールガードを setTabs より前に同期セット
+      // React の DOM 更新で handleScroll が発火 → loadOlderMessages の連鎖発火を防止
+      if (activeTabIdRef.current === projectId) {
+        autoScrollingUntilRef.current = Date.now() + 1000;
+      }
 
       setTabs(prev => prev.map(t => {
         if (t.projectId !== projectId) return t;
+        // 診断ログ: setTabs 時点での既存メッセージ状態（古いメッセージ混入経路の特定用）
+        console.log(`[loadHistory:setTabs] tab=${t.projectId.substring(0, 8)}, existing=${t.messages.length}, historyLoaded=${t.historyLoaded}, refresh=${refresh}${t.messages.length > 0 ? `, oldest=${t.messages[0].content.substring(0, 40).replace(/\n/g, ' ')}` : ''}`);
         if (refresh) {
-          // リフレッシュモード: API メッセージ + WS のみのメッセージを時系列マージ
+          // リフレッシュモード: API メッセージ + API 最古以降の WS メッセージのみ保持
+          // API 最古より古い stale メッセージを除外（再接続時の古いメッセージ蓄積防止）
           const apiIds = new Set(chatMessages.map(m => m.id));
-          const wsOnlyMsgs = t.messages.filter(m => !apiIds.has(m.id));
+          const oldestApiTime = chatMessages.length > 0 ? chatMessages[0].timestamp.getTime() : Date.now();
+          const wsOnlyMsgs = t.messages.filter(m => !apiIds.has(m.id) && m.timestamp.getTime() >= oldestApiTime);
           const merged = [...chatMessages, ...wsOnlyMsgs].sort(
             (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
           );
+          console.log(`[loadHistory] refresh: api=${chatMessages.length}, tab=${t.messages.length}, wsOnly=${wsOnlyMsgs.length}, merged=${merged.length}, oldest=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'}`);
           return {
             ...t,
             messages: merged,
@@ -2141,6 +2155,9 @@ export function ChatPage() {
           };
         }
         // 通常モード（スクロールバック）: 既存メッセージの前に prepend
+        if (t.messages.length > 0) {
+          console.warn(`[loadHistory:prepend] tab=${t.projectId.substring(0, 8)} has ${t.messages.length} existing msgs BEFORE prepend! historyLoaded=${t.historyLoaded}`, t.messages.map(m => `${m.role}:${m.content.substring(0, 40)}`));
+        }
         const existingIds = new Set(t.messages.map(m => m.id));
         const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
         return {
@@ -2165,6 +2182,13 @@ export function ChatPage() {
         };
         requestAnimationFrame(scrollToBottom);
         setTimeout(scrollToBottom, 100);
+        setTimeout(scrollToBottom, 500);
+        setTimeout(scrollToBottom, 1000);
+        // auto-scroll が確実に完了してから loadOlderMessages を許可
+        setTimeout(() => {
+          initialLoadCompleteRef.current = true;
+          console.log('[loadHistory] initialLoadComplete set to true');
+        }, 2000);
       }
     } catch {
       setTabs(prev => prev.map(t =>
@@ -2189,11 +2213,31 @@ export function ChatPage() {
       : activeTabIdRef.current;
     if (!targetId) return;
 
+    // 診断ログ: 全メッセージ追加を記録（古いメッセージ混入の原因特定用）
+    console.log(`[addMessageToTab] role=${msg.role}, projectId=${projectId?.substring(0, 8) ?? 'none'}, target=${targetId.substring(0, 8)}, content=${msg.content.substring(0, 60).replace(/\n/g, ' ')}`);
+
     // //connect 応答を抑制（タブ切り替え由来）— 再接続メッセージも含む
     if (suppressConnectRef.current) {
       suppressConnectRef.current = false;
       if (msg.role === 'system' && (msg.content.includes('に接続') || msg.content.includes('に再接続'))) {
         return;
+      }
+    }
+
+    // メッセージ重複防止（loadHistory の API メッセージ + WS リアルタイム配信の重複スキップ）
+    // 新しいタブを開くと //connect → loadHistory → WS 配信で同じメッセージが届くため
+    {
+      const tab = tabsRef.current.find(t => t.projectId === targetId);
+      if (tab && tab.messages.length > 0) {
+        const recentMsgs = tab.messages.slice(-5);
+        const isDuplicate = recentMsgs.some(m =>
+          m.role === msg.role && m.content === msg.content &&
+          Math.abs(Date.now() - m.timestamp.getTime()) < 30000
+        );
+        if (isDuplicate) {
+          console.log(`[addMessageToTab] dedup: skipped ${msg.role} message (${msg.content.substring(0, 40)}...)`);
+          return;
+        }
       }
     }
 
@@ -2326,6 +2370,7 @@ export function ChatPage() {
 
   /** WS 再接続時: セッション参加者を再登録し、最新メッセージをリフレッシュ */
   const handleReconnect = useCallback(() => {
+    console.log(`[handleReconnect] triggered! activeTab=${activeTabIdRef.current?.substring(0, 8) ?? 'null'}`);
     const activeId = activeTabIdRef.current;
     if (!activeId) return;
 
@@ -2357,6 +2402,7 @@ export function ChatPage() {
       if (document.visibilityState === 'visible') {
         const activeId = activeTabIdRef.current;
         if (activeId) {
+          console.log(`[visibilitychange] page visible, refreshing history for ${activeId.substring(0, 8)}`);
           loadHistory(activeId, undefined, true);
         }
       }
@@ -2477,6 +2523,7 @@ export function ChatPage() {
           );
         }
         if (restorable.length === 0) return;
+        console.log(`[mount] restoring ${restorable.length} tabs:`, restorable.map(s => `${s.projectName}(${s.messageCount}msgs,${s.projectId.substring(0, 8)})`));
 
         const newTabs: Tab[] = restorable.map(s => ({
           projectId: s.projectId,
@@ -2528,12 +2575,41 @@ export function ChatPage() {
     return null;
   })();
 
+  // activeMachineId 変更時に skipPermissions を取得（キャッシュがなければ）
+  useEffect(() => {
+    if (!activeMachineId || skipPermissionsMap[activeMachineId] !== undefined) return;
+    fetch(`/api/machines/${activeMachineId}/skip-permissions`, {
+      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+    }).then(r => r.json()).then(data => {
+      setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: data.skipPermissions }));
+    }).catch(() => {});
+  }, [activeMachineId]);
+
+  /** Skip Permissions トグル（チャットヘッダーの ⚡ ボタン用） */
+  const handleToggleSkipPermissions = async () => {
+    if (!activeMachineId) return;
+    const newValue = !skipPermissionsMap[activeMachineId];
+    setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: newValue }));
+    try {
+      await fetch(`/api/machines/${activeMachineId}/skip-permissions`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+        body: JSON.stringify({ skipPermissions: newValue }),
+      });
+    } catch {
+      // 失敗時はロールバック
+      setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: !newValue }));
+    }
+  };
+
   // メッセージ追加時に自動スクロール（上スクロール読み込み中・タブ切替時は抑制）
   const shouldAutoScrollRef = useRef(true);
   /** handleSend の二重送信防止フラグ */
   const sendingRef = useRef(false);
   /** プログラムによるスムーズスクロール中のガードタイムスタンプ */
   const autoScrollingUntilRef = useRef(0);
+  /** 初回 loadHistory + auto-scroll 完了フラグ（loadOlderMessages の連鎖発火防止） */
+  const initialLoadCompleteRef = useRef(false);
   /** 履歴ロード直後フラグ（instant スクロール用） */
   const historyJustLoadedRef = useRef(false);
   useEffect(() => {
@@ -2568,6 +2644,14 @@ export function ChatPage() {
 
   /** 古いメッセージを追加読み込み（ページネーション） */
   const loadOlderMessages = useCallback(() => {
+    // 初回 loadHistory + auto-scroll 完了まではブロック（loadOlderMessages 連鎖発火防止）
+    if (!initialLoadCompleteRef.current) {
+      console.log('[loadOlderMessages] blocked: initial load not complete');
+      return;
+    }
+    // 自動スクロール中もブロック
+    if (Date.now() < autoScrollingUntilRef.current) return;
+    console.log(`[loadOlderMessages] triggered!`);
     const container = messagesContainerRef.current;
     if (!container) return;
     const tabId = activeTabIdRef.current;
@@ -2577,6 +2661,9 @@ export function ChatPage() {
 
     const oldestMsg = tab.messages[0];
     if (!oldestMsg) return;
+
+    // 診断ログ: loadOlderMessages 発火（スクロールバックで古いメッセージ読み込み）
+    console.log(`[loadOlderMessages] triggered! tabId=${tabId.substring(0, 8)}, msgs=${tab.messages.length}, oldest=${oldestMsg.content.substring(0, 40).replace(/\n/g, ' ')}`);
 
     const prevScrollHeight = container.scrollHeight;
     shouldAutoScrollRef.current = false;
@@ -3030,6 +3117,16 @@ export function ChatPage() {
             <span className="text-sm text-[var(--text-muted)]">
               {activeTab ? `# ${activeTab.customName || activeTab.projectName}` : connected ? '接続中' : '切断中...'}
             </span>
+            {/* Skip Permissions トグル（Agent 単位） */}
+            {activeMachineId && skipPermissionsMap[activeMachineId] !== undefined && (
+              <button
+                onClick={handleToggleSkipPermissions}
+                title={`Skip Permissions: ${skipPermissionsMap[activeMachineId] ? 'ON' : 'OFF'}`}
+                className={`text-sm px-1 rounded transition-colors ${skipPermissionsMap[activeMachineId] ? 'text-amber-400 hover:text-amber-300' : 'text-[var(--text-faint)] hover:text-amber-400'}`}
+              >
+                ⚡
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-[var(--text-faint)] hidden sm:inline">h: ヘルプ</span>

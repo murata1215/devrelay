@@ -79,7 +79,7 @@ const lastSeenMap = new Map<string, Date>();
 // 旧バージョン Agent は ack を返さないため、最大リトライ回数で打ち切る。
 const MAX_CONFIG_RETRIES = 5;
 interface PendingConfigUpdate {
-  config: { projectsDirs?: string[] | null; allowedTools?: string[] | null };
+  config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; skipPermissions?: boolean };
   retries: number;
 }
 const pendingConfigUpdates = new Map<string, PendingConfigUpdate>();
@@ -1330,9 +1330,11 @@ export async function clearConversation(machineId: string, sessionId: string, pr
 }
 
 export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string) {
+  // exec 開始時に最新の skipPermissions を DB から取得して再送（config:update 配信失敗のフォールバック）
+  const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true } });
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
-    payload: { sessionId, projectPath, userId, prompt }
+    payload: { sessionId, projectPath, userId, prompt, skipPermissions: machine?.skipPermissions ?? false }
   });
 }
 
