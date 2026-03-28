@@ -29,6 +29,31 @@ async function main() {
     data: { status: 'offline' }
   });
 
+  // Stale セッションクリーンアップ（24時間以上活動がない active セッション → ended）
+  {
+    const staleThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const staleSessions = await prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT s.id FROM "Session" s
+      WHERE s.status = 'active'
+      AND COALESCE((SELECT MAX(m."createdAt") FROM "Message" m WHERE m."sessionId" = s.id), s."startedAt") < ${staleThreshold}
+    `;
+    if (staleSessions.length > 0) {
+      const staleIds = staleSessions.map(s => s.id);
+      await prisma.session.updateMany({ where: { id: { in: staleIds } }, data: { status: 'ended' } });
+      // stale セッションの ChannelSession も削除
+      await prisma.channelSession.deleteMany({ where: { currentSessionId: { in: staleIds } } });
+      console.log(`🧹 Cleaned up ${staleSessions.length} stale active sessions (24h+ inactive)`);
+    }
+    // 30分以上経過した pending ツール承認を timeout に
+    const approvalResult = await prisma.toolApproval.updateMany({
+      where: { status: 'pending', createdAt: { lt: new Date(Date.now() - 30 * 60 * 1000) } },
+      data: { status: 'timeout' },
+    });
+    if (approvalResult.count > 0) {
+      console.log(`🧹 Timed out ${approvalResult.count} pending tool approval(s)`);
+    }
+  }
+
   // Restore session participants from ChannelSession
   // (So users can continue conversations after server restart)
   await restoreSessionParticipants();
