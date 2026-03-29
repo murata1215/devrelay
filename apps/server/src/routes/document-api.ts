@@ -19,6 +19,7 @@ import { prisma } from '../db/client.js';
 import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
 import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected } from '../services/agent-manager.js';
+import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
 import type { AiTool } from '@devrelay/shared';
 
 /**
@@ -193,9 +194,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       },
     });
 
-    // 自マシンのプロジェクトは除外して返す
+    // 同一マシン上の別プロジェクトも表示するためフィルタなし
     return reply.send(teamMembers
-      .filter(m => m.project.machineId !== auth.machineId)
       .map(m => ({
         teamName: m.team.name,
         memberProjectName: m.project.name,
@@ -273,6 +273,18 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         sourceProjectName,
       },
     });
+
+    // 発信元マシンのアクティブセッションの参加者をコピー（承認通知の中継用）
+    const originSessionAsk = await prisma.session.findFirst({
+      where: { machineId: auth.machineId, status: 'active', id: { not: { startsWith: 'crossquery_' } } },
+      orderBy: { startedAt: 'desc' },
+    });
+    if (originSessionAsk) {
+      const originParticipants = getSessionParticipants(originSessionAsk.id);
+      for (const p of originParticipants) {
+        addParticipant(tempSessionId, p.platform, p.chatId);
+      }
+    }
 
     console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
 
@@ -374,6 +386,22 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         sourceProjectName,
       },
     });
+
+    // 発信元マシンのアクティブセッションの参加者を teamexec セッションにコピー
+    // → 承認通知が発信元の WebUI/Discord/Telegram にも表示される
+    const originSession = await prisma.session.findFirst({
+      where: { machineId: auth.machineId, status: 'active', id: { not: { startsWith: 'teamexec_' } } },
+      orderBy: { startedAt: 'desc' },
+    });
+    if (originSession) {
+      const originParticipants = getSessionParticipants(originSession.id);
+      for (const p of originParticipants) {
+        addParticipant(tempSessionId, p.platform, p.chatId);
+      }
+      if (originParticipants.length > 0) {
+        console.log(`🔗 Team exec: copied ${originParticipants.length} participant(s) from origin session ${originSession.id}`);
+      }
+    }
 
     console.log(`🚀 Team exec: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
 

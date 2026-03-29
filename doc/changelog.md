@@ -7,6 +7,31 @@
 ## 実装済み機能
 
 
+### #210: クロスプロジェクト連携改善 + crontab PATH 修正 (2026-03-30)
+
+クロスプロジェクト連携（ask/teamexec）の複数の改善と、OS 再起動後のエージェント起動失敗の修正。
+
+#### タイムアウト延長
+- `executeCrossProjectQuery()` / `executeCrossProjectExec()`: 300秒(5分) → 43200秒(12時間)
+- `ask.sh` の curl `--max-time`: 300 → 43200
+- SKILL.md の Bash timeout 案内を更新
+
+#### メンバーリスト自マシンフィルタ削除
+- `GET /api/agent/members`: `machineId !== auth.machineId` フィルタを削除
+- 同一マシン上の別プロジェクト（例: devrelay と nim）がリストに表示されるように
+
+#### 承認カードの発信元タブ表示
+- teamexec/crossquery セッション作成時に、発信元マシンのアクティブセッション参加者を一時セッションにコピー
+- `handleToolApprovalRequest()`: `teamexec_`/`crossquery_` セッションで `originProjectId` を取得しペイロードに追加
+- WebUI: 承認カードのフィルタに `originProjectId === activeTabId` を追加（発信元タブにも表示）
+
+#### crontab PATH 修正
+- **問題**: `@reboot PATH=... cd ...` で PATH が cd コマンドにのみ適用され、Node.js の `process.env.PATH` に継承されない
+  - Claude Agent SDK が `spawn('node', ['cli.js'])` で ENOENT エラー
+- **install-agent.sh**: `@reboot PATH=... cd` → `@reboot export PATH=...; cd`
+- **Agent update**: `handleAgentUpdate()` に `fix crontab` ステップ追加（sed で既存 crontab を自動修正）
+  - `u` コマンドで既存エージェントの crontab も修正される
+
 ### #209: 承認/質問カードのリロード・新タブ復元修正 (2026-03-29)
 
 ブラウザリロードや新タブで開いた際に、保留中のツール承認カード・AskUserQuestion の質問カードが消失する問題を修正。

@@ -1988,6 +1988,8 @@ async function handleAgentUpdate() {
       runAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
       runAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
+      // crontab の PATH= → export PATH= 修正（reboot 後に環境変数が子プロセスに継承されない問題）
+      runAndLog('fix crontab', `crontab -l 2>/dev/null | sed 's/^@reboot PATH=/@reboot export PATH=/' | sed 's/export PATH=\\([^ ]*\\) cd/export PATH=\\1; cd/' | crontab -`),
     ].join('; ');
 
     // nohup の場合: restartCmd.command をそのまま使うと、bash -c の cmdline に

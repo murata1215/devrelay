@@ -2015,6 +2015,7 @@ export function ChatPage() {
     projectId?: string;
     status: 'pending' | 'allow' | 'deny';
     isQuestion?: boolean;
+    originProjectId?: string;
   }>>(new Map());
   /** ツール承認履歴（右パネルの Approvals タブに表示） */
   const [approvalHistory, setApprovalHistory] = useState<ApprovalHistoryEntry[]>([]);
@@ -3247,7 +3248,7 @@ export function ChatPage() {
           ))}
           {/* ツール承認カード / 質問カード（アクティブタブの projectId に一致するもののみ表示） */}
           {Array.from(toolApprovals.values())
-            .filter(a => !a.projectId || a.projectId === activeTabId)
+            .filter(a => !a.projectId || a.projectId === activeTabId || a.originProjectId === activeTabId)
             .map(approval => (
               approval.isQuestion ? (
                 <QuestionCard

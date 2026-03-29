@@ -11,6 +11,8 @@ export interface ToolApprovalPrompt {
   projectId?: string;
   /** AskUserQuestion の場合 true */
   isQuestion?: boolean;
+  /** teamexec/crossquery 時の発信元プロジェクトID（発信元タブにも承認カードを表示） */
+  originProjectId?: string;
 }
 
 /** ツール承認解決情報 */

@@ -938,6 +938,24 @@ Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する仕
 - **WebUI**: Agent Settings モーダルにトグルスイッチ、`PUT /api/machines/:id/skip-permissions` API
 - **リアルタイム反映**: WebUI で ON/OFF → `pushConfigUpdate()` → Agent に即時配信
 
+## クロスプロジェクト承認中継 (#210)
+
+teamexec/crossquery で発信元タブにも承認カードを表示する仕組み。
+
+- **参加者コピー**: `document-api.ts` の teamexec/ask-member エンドポイントで、発信元マシンのアクティブセッション参加者を一時セッションに `addParticipant()` でコピー
+- **originProjectId**: `handleToolApprovalRequest()` で `teamexec_`/`crossquery_` セッション検出 → 発信元プロジェクト ID を取得 → ペイロードに追加
+- **WebUI フィルタ**: `.filter(a => ... || a.originProjectId === activeTabId)` で発信元タブにも承認カード表示
+- **設計判断**: ターゲット側にも引き続き表示（Web 全クライアントフォールバック）。どちら側からでも承認/拒否可能
+
+## crontab PATH 修正 (#210)
+
+crontab `@reboot` エントリで環境変数が子プロセスに継承されない問題の修正。
+
+- **原因**: `PATH=... cd ...` だと PATH が cd にしか適用されず、`node` の `process.env.PATH` に含まれない
+- **修正**: `export PATH=...; cd ...`（export + セミコロン追加）
+- **install-agent.sh**: 新規デプロイ時に正しい形式で登録
+- **Agent update**: `handleAgentUpdate()` の buildSteps に sed 修正ステップ追加。`u` コマンドで既存 crontab も自動修正
+
 ## プロジェクト検出マーカー (#192)
 
 `looksLikeProject()` で以下のマーカーを検出:

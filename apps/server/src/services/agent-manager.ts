@@ -33,7 +33,7 @@ import { processMessageFilesEmbedding } from './embedding-service.js';
 import type { ManagementInfo } from '@devrelay/shared';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
-const MIN_PROTOCOL_VERSION = 1;
+const MIN_PROTOCOL_VERSION = 0; // TODO: revert to 1 after agent update
 
 /** バージョン不足の Agent を記録（接続は許可するが会話は拒否、u コマンドのみ許可） */
 const outdatedAgents = new Set<string>();
@@ -1091,7 +1091,7 @@ export function executeCrossProjectQuery(
   aiTool: AiTool,
   prompt: string,
   userId: string,
-  timeoutMs: number = 300000,
+  timeoutMs: number = 43200000,
 ): Promise<{ output: string; files?: FileAttachment[] }> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1134,7 +1134,7 @@ export function executeCrossProjectExec(
   aiTool: AiTool,
   instruction: string,
   userId: string,
-  timeoutMs: number = 300000,
+  timeoutMs: number = 43200000,
 ): Promise<{ output: string; files?: FileAttachment[] }> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1741,8 +1741,37 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
     }).catch(err => console.error('Failed to save tool approval request:', err));
   }
 
+  // teamexec/crossquery セッションの場合、発信元プロジェクトの projectId を取得
+  // → 発信元タブにも承認カードを表示するため
+  let originProjectId: string | undefined;
+  if (sessionId.startsWith('teamexec_') || sessionId.startsWith('crossquery_')) {
+    const originSession = await prisma.session.findFirst({
+      where: {
+        machineId: { not: machineId },
+        userId: userId ?? undefined,
+        status: 'active',
+        id: { not: { startsWith: 'teamexec_' } },
+      },
+      orderBy: { startedAt: 'desc' },
+      select: { projectId: true },
+    });
+    originProjectId = originSession?.projectId;
+    if (!originProjectId) {
+      // 同一マシンの場合: sessionParticipants から発信元を推定
+      const participants = getSessionParticipants(sessionId);
+      if (participants.length > 0) {
+        // 発信元マシンのプロジェクトを検索（ターゲットと異なるプロジェクト）
+        const originProject = await prisma.project.findFirst({
+          where: { machine: { userId: userId ?? undefined }, id: { not: projectId ?? '' } },
+          select: { id: true },
+        });
+        originProjectId = originProject?.id;
+      }
+    }
+  }
+
   // セッション参加者に承認リクエストを送信（Web + Discord/Telegram）
-  const approvalPayload = { requestId, toolName, toolInput, title, description, projectId, isQuestion };
+  const approvalPayload = { requestId, toolName, toolInput, title, description, projectId, isQuestion, originProjectId };
   broadcastToolApprovalToWeb(sessionId, {
     type: 'web:tool:approval',
     payload: approvalPayload,

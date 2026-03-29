@@ -68,6 +68,10 @@ Turn your phone into a remote terminal for AI-powered development.
 - **DB Cleanup**: Bulk cleanup of 384 stale active sessions → ended, 165 stale ChannelSession records, 6 expired AuthSessions + WS disconnect now removes DB records
 - **TestFlight Hyphen Name Fix**: PostgreSQL user/DB names now double-quoted in `CREATE USER`, `createdb`, `dropuser`, `dropdb`, `GRANT`, `pg_dump` — fixes SQL syntax errors for names like `tf-2048`
 - **Tab Switch Progress Fix**: `clearProgressOnTab` now skips when `suppressConnectRef` is active (i.e., `//connect` response) — fixes momentary ✅ checkmark flash when switching to a tab with active AI processing
+- **Cross-Project Timeout Extension**: ask/teamexec timeout extended from 5 minutes to 12 hours — allows long-running cross-project executions with tool approval waits
+- **Same-Machine Project Visibility**: Removed machine-level filter from `/api/agent/members` — projects on the same machine (e.g., devrelay and nim) now appear in team member list
+- **Cross-Project Approval Relay**: Tool approval cards from teamexec/ask sessions now appear in both the target project tab AND the originator's tab — approve from either side
+- **Crontab PATH Fix**: `@reboot` entries now use `export PATH=...; cd` instead of `PATH=... cd` — fixes Node.js `spawn('node')` ENOENT after OS reboot. Agent `u` command auto-fixes existing crontab entries
 
 ## 💡 Token Efficiency
 

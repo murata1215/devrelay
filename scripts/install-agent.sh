@@ -690,7 +690,7 @@ EOF
       if [ -n "$PROXY_URL" ]; then
         CRONTAB_ENV="${CRONTAB_ENV} HTTP_PROXY=${PROXY_URL} HTTPS_PROXY=${PROXY_URL} http_proxy=${PROXY_URL} https_proxy=${PROXY_URL}"
       fi
-      CRONTAB_CMD="@reboot ${CRONTAB_ENV} cd $AGENT_DIR/$AGENT_SUBDIR && $NODE_ABS_PATH $AGENT_ENTRY > $CONFIG_DIR/logs/agent.log 2>&1"
+      CRONTAB_CMD="@reboot export ${CRONTAB_ENV}; cd $AGENT_DIR/$AGENT_SUBDIR && $NODE_ABS_PATH $AGENT_ENTRY > $CONFIG_DIR/logs/agent.log 2>&1"
       # 既存の devrelay エントリを除去してから新しいエントリを追加（重複防止）
       ( crontab -l 2>/dev/null | grep -v "devrelay" ; echo "$CRONTAB_CMD" ) | crontab - 2>/dev/null && {
         CRONTAB_REGISTERED=true
