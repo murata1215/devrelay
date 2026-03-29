@@ -327,6 +327,7 @@ model ToolApproval {
   requestId  String?   @unique  // auto 承認の場合は null
   toolName   String
   toolInput  Json      // ツール引数
+  isQuestion Boolean   @default(false) // AskUserQuestion の場合 true（リロード時の復元に使用）
   status     String    // 'pending' | 'allow' | 'deny' | 'auto' | 'timeout'
   createdAt  DateTime  @default(now())
   resolvedAt DateTime? // 承認/拒否された時刻（pending 中は null）

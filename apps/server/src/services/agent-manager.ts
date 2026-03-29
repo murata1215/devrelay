@@ -1678,6 +1678,7 @@ const pendingToolApprovalRequests = new Map<string, {
   projectId?: string;
   toolName: string;
   toolInput: Record<string, unknown>;
+  isQuestion?: boolean;
   userId?: string;
   timeout: ReturnType<typeof setTimeout>;
 }>();
@@ -1731,12 +1732,12 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
   });
   const userId = machine?.userId;
 
-  pendingToolApprovalRequests.set(requestId, { machineId, sessionId, projectId, toolName, toolInput, userId, timeout });
+  pendingToolApprovalRequests.set(requestId, { machineId, sessionId, projectId, toolName, toolInput, isQuestion, userId, timeout });
 
   // DB に pending 状態で記録（永続化）
   if (projectId) {
     prisma.toolApproval.create({
-      data: { sessionId, projectId, machineId, requestId, toolName, toolInput: toolInput as any, status: 'pending' },
+      data: { sessionId, projectId, machineId, requestId, toolName, toolInput: toolInput as any, isQuestion: !!isQuestion, status: 'pending' },
     }).catch(err => console.error('Failed to save tool approval request:', err));
   }
 
@@ -1831,31 +1832,23 @@ export function handleToolApprovalUserResponse(
 }
 
 /**
- * 指定セッションの保留中ツール承認一覧を取得する（WS 再接続時の復元用）
- * メモリ Map から requestId を抽出し、DB から toolName/toolInput を取得して返す
+ * 指定セッションの保留中ツール承認一覧を取得する（WS 再接続時・//connect 時の復元用）
+ * メモリ Map から直接ペイロードを構築（DB round-trip 不要、DB 保存失敗時でも復元可能）
  */
-export async function getPendingToolApprovalsForSession(sessionId: string): Promise<ToolApprovalPromptPayload[]> {
-  // メモリ Map から対象セッションの requestId を抽出
-  const pendingRequestIds: string[] = [];
+export function getPendingToolApprovalsForSession(sessionId: string): ToolApprovalPromptPayload[] {
+  const results: ToolApprovalPromptPayload[] = [];
   for (const [requestId, entry] of pendingToolApprovalRequests) {
     if (entry.sessionId === sessionId) {
-      pendingRequestIds.push(requestId);
+      results.push({
+        requestId,
+        toolName: entry.toolName,
+        toolInput: entry.toolInput,
+        projectId: entry.projectId,
+        isQuestion: entry.isQuestion || undefined,
+      });
     }
   }
-  if (pendingRequestIds.length === 0) return [];
-
-  // DB から toolName, toolInput を取得
-  const approvals = await prisma.toolApproval.findMany({
-    where: { requestId: { in: pendingRequestIds }, status: 'pending' },
-    select: { requestId: true, toolName: true, toolInput: true, projectId: true },
-  });
-
-  return approvals.map(a => ({
-    requestId: a.requestId!,
-    toolName: a.toolName,
-    toolInput: a.toolInput as Record<string, unknown>,
-    projectId: a.projectId,
-  }));
+  return results;
 }
 
 /**

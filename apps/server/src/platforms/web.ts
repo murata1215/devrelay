@@ -87,17 +87,16 @@ export async function setupWebClientWebSocket(
     console.log(`📊 Restored active progress for ${chatId}`);
   }
 
-  // 保留中のツール承認カードを復元（リロード時に承認操作を継続可能にする）
+  // 保留中のツール承認/質問カードを復元（リロード時に承認操作を継続可能にする）
   const sessionId = getSessionIdByChatId(chatId);
   if (sessionId) {
-    getPendingToolApprovalsForSession(sessionId).then(pendingApprovals => {
-      for (const approval of pendingApprovals) {
-        sendJson(ws, { type: 'web:tool:approval', payload: approval });
-      }
-      if (pendingApprovals.length > 0) {
-        console.log(`🔐 Restored ${pendingApprovals.length} pending tool approval(s) for ${chatId}`);
-      }
-    }).catch(err => console.error('Failed to restore pending tool approvals:', err));
+    const pendingApprovals = getPendingToolApprovalsForSession(sessionId);
+    for (const approval of pendingApprovals) {
+      sendJson(ws, { type: 'web:tool:approval', payload: approval });
+    }
+    if (pendingApprovals.length > 0) {
+      console.log(`🔐 Restored ${pendingApprovals.length} pending tool approval(s) for ${chatId}`);
+    }
   }
 
   // メッセージハンドラ
@@ -134,6 +133,15 @@ export async function setupWebClientWebSocket(
                 type: 'web:session_info',
                 payload: { projectId, sessionId: updatedContext.currentSessionId },
               });
+
+              // //connect 後に保留中の承認/質問カードを復元（新タブ対応）
+              const pendingApprovals = getPendingToolApprovalsForSession(updatedContext.currentSessionId);
+              for (const approval of pendingApprovals) {
+                sendJson(ws, { type: 'web:tool:approval', payload: approval });
+              }
+              if (pendingApprovals.length > 0) {
+                console.log(`🔐 Restored ${pendingApprovals.length} pending tool approval(s) after //connect for ${chatId}`);
+              }
             }
             break;
           }
