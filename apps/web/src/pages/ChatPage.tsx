@@ -3117,15 +3117,15 @@ export function ChatPage() {
             <span className="text-sm text-[var(--text-muted)]">
               {activeTab ? `# ${activeTab.customName || activeTab.projectName}` : connected ? '接続中' : '切断中...'}
             </span>
-            {/* Skip Permissions トグル（Agent 単位） */}
+            {/* Skip Permissions トグルスイッチ（Agent 単位） */}
             {activeMachineId && skipPermissionsMap[activeMachineId] !== undefined && (
-              <button
-                onClick={handleToggleSkipPermissions}
-                title={`Skip Permissions: ${skipPermissionsMap[activeMachineId] ? 'ON' : 'OFF'}`}
-                className={`text-sm px-1 rounded transition-colors ${skipPermissionsMap[activeMachineId] ? 'text-amber-400 hover:text-amber-300' : 'text-[var(--text-faint)] hover:text-amber-400'}`}
-              >
-                ⚡
-              </button>
+              <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Skip Permissions: ${skipPermissionsMap[activeMachineId] ? 'ON' : 'OFF'}`}>
+                <span className={`text-xs ${skipPermissionsMap[activeMachineId] ? 'text-amber-400' : 'text-[var(--text-faint)]'}`}>自動承認</span>
+                <div className="relative" onClick={handleToggleSkipPermissions}>
+                  <div className={`w-8 h-4 rounded-full transition-colors ${skipPermissionsMap[activeMachineId] ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
+                  <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${skipPermissionsMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
+                </div>
+              </label>
             )}
           </div>
           <div className="flex items-center gap-2">
