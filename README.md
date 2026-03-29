@@ -49,6 +49,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Agent Log Rotation**: Daily copyTruncate rotation with 7-day retention for `agent.log`
 - **Per-Agent Skip Permissions**: Toggle "自動承認" switch in chat header or Agent Settings to auto-approve all tools (like `--dangerously-skip-permissions`), AskUserQuestion still prompts
 - **Disable AskUserQuestion**: Toggle "Ask無効" switch per agent — uses SDK `disallowedTools` to remove the tool from Claude's context entirely (no wasted turns), for autonomous execution without questions
+- **Tool Approval/Question Card Recovery**: Pending approval cards and AskUserQuestion cards reliably survive browser reload and appear in new tabs — memory-based recovery (no DB dependency), `//connect`-triggered restoration, 12-hour timeout (forgetting ≠ rejecting)
 - **Multi-Agent Routing Fix**: DB fallback for projectId resolution prevents messages from appearing in wrong project tabs
 - **Xcode Project Detection**: `.xcodeproj` directories are detected as projects alongside `CLAUDE.md`
 - **Plan File Viewer**: View Claude Code's plan files (`~/.claude/plans/*.md`) in the WebUI right panel — automatically shows the latest plan with Markdown rendering

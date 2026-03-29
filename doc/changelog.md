@@ -7,6 +7,34 @@
 ## 実装済み機能
 
 
+### #209: 承認/質問カードのリロード・新タブ復元修正 (2026-03-29)
+
+ブラウザリロードや新タブで開いた際に、保留中のツール承認カード・AskUserQuestion の質問カードが消失する問題を修正。
+
+- **DB**: `ToolApproval.isQuestion` Boolean カラム追加（QuestionCard vs ToolApprovalCard の判別用）
+- **メモリ Map**: `pendingToolApprovalRequests` に `isQuestion` フラグを保存
+- **復元関数**: `getPendingToolApprovalsForSession()` を async DB 依存 → sync メモリ Map ベースに変更
+  - DB 保存失敗時でも復元可能に（Prisma エラー耐性向上）
+- **新タブ対応**: `//connect` ハンドラ実行後に pending 承認/質問カードを送信
+  - 新タブは chatId が異なるため WS 接続直後の復元では取得できない → `//connect` でセッション参加者登録後に復元
+- **タイムアウト延長**: 5分 → 12時間（720分）
+  - 承認忘れ ≠ 拒否。ユーザー離席時にも承認機会を失わないように
+
+#### 根本原因（3つ）
+1. `isQuestion` フラグが DB/メモリ Map に保存されず、復元時に QuestionCard → ToolApprovalCard として誤表示
+2. `getPendingToolApprovalsForSession()` が DB round-trip に依存し、DB 保存失敗時に復元不可
+3. 新タブの chatId（`web:userId:tabId`）が未登録のため `getSessionIdByChatId()` が null を返す
+
+#### 設計判断
+- **メモリ Map ベースの復元**: DB round-trip を廃止。メモリ Map に全データ（toolName, toolInput, isQuestion 等）があるため DB 不要。async → sync 化でコードも簡潔に
+- **`//connect` トリガー**: WS 接続直後ではなく、セッション参加者登録完了後に復元を実行
+- **12時間タイムアウト**: 30分以上の待機実績あり（#178）。半日あればほぼカバー可能
+
+#### 変更ファイル
+- `apps/server/prisma/schema.prisma` — `ToolApproval.isQuestion` カラム追加
+- `apps/server/src/services/agent-manager.ts` — メモリ Map に isQuestion 保存、復元関数を sync/メモリベースに変更、タイムアウト 5分→12時間
+- `apps/server/src/platforms/web.ts` — //connect 後に pending カード送信、復元を sync 呼び出しに変更
+
 ### #208: AskUserQuestion 無効化トグル (2026-03-29)
 
 WebUI から AskUserQuestion（Claude の質問機能）を Agent 単位で無効化できるトグルを追加。
