@@ -1668,8 +1668,8 @@ export function switchAiTool(machineId: string, sessionId: string, aiTool: AiToo
 // Tool Approval Protocol
 // -----------------------------------------------------------------------------
 
-/** ツール承認タイムアウト（5分） */
-const TOOL_APPROVAL_TIMEOUT = 5 * 60 * 1000;
+/** ツール承認タイムアウト（12時間 = 720分。承認忘れ ≠ 拒否なので長めに設定） */
+const TOOL_APPROVAL_TIMEOUT = 12 * 60 * 60 * 1000;
 
 /** 保留中のツール承認: requestId → { machineId, sessionId, projectId, toolName, toolInput, userId, timeoutTimer } */
 const pendingToolApprovalRequests = new Map<string, {
