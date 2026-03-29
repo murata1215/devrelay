@@ -86,10 +86,17 @@ let currentMachineId: string | null = null;
 let serverAllowedTools: string[] | null = null;
 /** Server から配信された全許可モード（true = 全ツール自動承認） */
 let serverSkipPermissions = false;
+/** Server から配信された AskUserQuestion 無効化フラグ */
+let serverDisableAsk = false;
 
 /** serverSkipPermissions の現在値を返すゲッター（セッション中の動的参照用） */
 export function getServerSkipPermissions(): boolean {
   return serverSkipPermissions;
+}
+
+/** serverDisableAsk の現在値を返すゲッター（SDK disallowedTools 用） */
+export function getServerDisableAsk(): boolean {
+  return serverDisableAsk;
 }
 
 // 再接続状態（バックオフ管理）
@@ -282,6 +289,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           serverSkipPermissions = message.payload.skipPermissions;
           console.log(`${serverSkipPermissions ? '⚡' : '🔐'} Skip permissions mode: ${serverSkipPermissions}`);
         }
+        // AskUserQuestion 無効化の受信
+        if (message.payload.disableAsk !== undefined) {
+          serverDisableAsk = message.payload.disableAsk;
+          console.log(`${serverDisableAsk ? '🚫' : '❓'} Disable AskUserQuestion: ${serverDisableAsk}`);
+        }
         // プロトコルバージョン不足の警告（接続は成功しているが会話は制限される）
         if (message.payload.updateRequired) {
           console.warn('⚠️ Agent の更新が必要です。会話は制限されます。`u` コマンドで更新してください。');
@@ -376,8 +388,13 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         serverSkipPermissions = message.payload.skipPermissions;
         console.log(`${serverSkipPermissions ? '⚡' : '🔐'} Skip permissions mode updated: ${serverSkipPermissions}`);
       }
+      // AskUserQuestion 無効化の更新
+      if (message.payload.disableAsk !== undefined) {
+        serverDisableAsk = message.payload.disableAsk;
+        console.log(`${serverDisableAsk ? '🚫' : '❓'} Disable AskUserQuestion updated: ${serverDisableAsk}`);
+      }
       // ack を送信（pending リトライを停止させる）
-      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.projectsDirs !== undefined || message.payload.skipPermissions !== undefined)) {
+      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.projectsDirs !== undefined || message.payload.skipPermissions !== undefined || message.payload.disableAsk !== undefined)) {
         sendMessage({
           type: 'agent:config:ack',
           payload: { machineId: currentMachineId },
@@ -568,17 +585,21 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
   // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット
   resetApproveAllMode();
 
-  // exec 開始時に skipPermissions を同期（server:config:update 配信失敗のフォールバック）
+  // exec 開始時に skipPermissions / disableAsk を同期（server:config:update 配信失敗のフォールバック）
   if (payload.skipPermissions !== undefined) {
     serverSkipPermissions = payload.skipPermissions;
     console.log(`⚡ Skip permissions synced on exec: ${serverSkipPermissions}`);
+  }
+  if (payload.disableAsk !== undefined) {
+    serverDisableAsk = payload.disableAsk;
+    console.log(`🚫 Disable AskUserQuestion synced on exec: ${serverDisableAsk}`);
   }
 
   let sessionInfo = sessionInfoMap.get(sessionId);
@@ -836,6 +857,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
     skipPermissions: serverSkipPermissions,
+    disableAsk: serverDisableAsk,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）

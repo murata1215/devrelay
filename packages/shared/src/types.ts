@@ -279,6 +279,8 @@ export interface ServerConnectAckPayload {
   minProtocolVersion?: number;
   /** 全ツール自動許可モード（Agent の exec モードで承認をスキップ） */
   skipPermissions?: boolean;
+  /** AskUserQuestion 無効化（SDK disallowedTools で除去） */
+  disableAsk?: boolean;
 }
 
 /** Server → Agent: 設定更新の配信（リアルタイム） */
@@ -286,6 +288,7 @@ export interface ServerConfigUpdatePayload {
   projectsDirs?: string[] | null;  // プロジェクト検索パスの更新（null = ローカル設定に戻す）
   allowedTools?: string[] | null;  // プランモード許可ツールの更新（null = デフォルトに戻す）
   skipPermissions?: boolean;  // 全ツール自動許可モードの更新
+  disableAsk?: boolean;  // AskUserQuestion 無効化の更新
 }
 
 /** ドキュメント同期ペイロード（サーバー → Agent、ファイル追加） */
@@ -341,6 +344,8 @@ export interface ConversationExecPayload {
   prompt?: string;
   /** exec 開始時に最新の skipPermissions を同期（config:update 配信失敗のフォールバック） */
   skipPermissions?: boolean;
+  /** exec 開始時に最新の disableAsk を同期（config:update 配信失敗のフォールバック） */
+  disableAsk?: boolean;
 }
 
 export interface SessionRestoredPayload {

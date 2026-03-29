@@ -7,6 +7,34 @@
 ## 実装済み機能
 
 
+### #208: AskUserQuestion 無効化トグル (2026-03-29)
+
+WebUI から AskUserQuestion（Claude の質問機能）を Agent 単位で無効化できるトグルを追加。
+
+- **DB**: `Machine.disableAsk` Boolean カラム追加
+- **API**: `GET/PUT /api/machines/:id/disable-ask` エンドポイント
+- **Agent**: SDK `disallowedTools: ['AskUserQuestion']` パラメータで根本的にツール除去
+  - `canUseTool` での deny ではなく、Claude のコンテキストからツール自体が消える
+  - 質問しようとすること自体がなくなるため、無駄なターンが発生しない
+- **WebUI**: チャットヘッダーに「Ask無効」トグル（赤スイッチ）追加
+- **リアルタイム**: `server:config:update` / `server:connect:ack` で Agent にプッシュ
+- **exec フォールバック**: `server:conversation:exec` payload にも `disableAsk` 同期
+
+#### 設計判断
+- **SDK `disallowedTools` 方式**: `canUseTool` で deny するよりも根本的。ツールがモデルのコンテキストから除去されるため、Claude は最初からテキストで質問する
+- **skipPermissions と同じパターン**: DB カラム + API + WS リアルタイムプッシュ + WebUI トグル
+
+#### 変更ファイル
+- `apps/server/prisma/schema.prisma` — `Machine.disableAsk` カラム追加
+- `packages/shared/src/types.ts` — `ServerConnectAckPayload`, `ServerConfigUpdatePayload`, `ConversationExecPayload` に `disableAsk` 追加
+- `apps/server/src/routes/api.ts` — disable-ask API エンドポイント
+- `apps/server/src/services/agent-manager.ts` — pushConfigUpdate / connect:ack / execConversation
+- `agents/linux/src/services/connection.ts` — `serverDisableAsk` 変数 + 受信ハンドラ
+- `agents/linux/src/services/ai-runner.ts` — `disallowedTools` SDK パラメータ
+- `agents/macos/src/services/connection.ts` — Linux と同じ変更
+- `agents/macos/src/services/ai-runner.ts` — Linux と同じ変更
+- `apps/web/src/pages/ChatPage.tsx` — `disableAskMap` + トグル UI
+
 ### #207: Skip Permissions トグル UI 改善 (2026-03-29)
 
 チャットヘッダーの ⚡ アイコンボタンを、状態が一目でわかるスライドスイッチに変更。

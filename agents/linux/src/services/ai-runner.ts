@@ -234,6 +234,8 @@ export interface SendPromptOptions {
   allowedTools?: string[];
   /** 全ツール自動許可モード（true = --dangerously-skip-permissions 相当） */
   skipPermissions?: boolean;
+  /** AskUserQuestion 無効化（true = SDK disallowedTools で除去） */
+  disableAsk?: boolean;
   /**
    * ツール承認リクエストのコールバック（Agent SDK 経由の exec モードで使用）
    * 設定されている場合、canUseTool で WebSocket 経由のユーザー承認を行う
@@ -292,6 +294,12 @@ async function sendPromptToAiSdk(
       DEVRELAY_PROJECT: projectPath,
     },
   };
+
+  // AskUserQuestion 無効化（SDK レベルでツール除去）
+  if (options.disableAsk) {
+    sdkOptions.disallowedTools = ['AskUserQuestion'];
+    console.log('🚫 [SDK] AskUserQuestion disabled (disallowedTools)');
+  }
 
   // パーミッションモード設定
   if (options.usePlanMode) {

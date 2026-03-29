@@ -340,6 +340,44 @@ export async function apiRoutes(app: FastifyInstance) {
     return { success: true, skipPermissions };
   });
 
+  // disableAsk（AskUserQuestion 無効化）の取得・更新
+  app.get('/api/machines/:id/disable-ask', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+      select: { disableAsk: true },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+    return { disableAsk: machine.disableAsk };
+  });
+
+  app.put('/api/machines/:id/disable-ask', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const { disableAsk } = request.body as { disableAsk: boolean };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+
+    await prisma.machine.update({
+      where: { id },
+      data: { disableAsk },
+    });
+
+    // Agent がオンラインならリアルタイム配信
+    const connectedAgents = getConnectedAgents();
+    if (connectedAgents.has(id)) {
+      pushConfigUpdate(id, { disableAsk });
+    }
+
+    return { success: true, disableAsk };
+  });
+
   // 個別 Agent 再起動（WebSocket 経由で Agent にリスタート指示を送信）
   app.post('/api/machines/:id/restart', async (request, reply) => {
     // @ts-ignore

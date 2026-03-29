@@ -391,6 +391,7 @@ async function handleAgentConnect(
       projectsDirs: serverProjectsDirs,
       allowedTools,
       skipPermissions: machine.skipPermissions || undefined,
+      disableAsk: machine.disableAsk || undefined,
       ...(isOutdated && {
         updateRequired: true,
         minProtocolVersion: MIN_PROTOCOL_VERSION,
@@ -1166,7 +1167,7 @@ export async function cancelAiProcess(machineId: string, sessionId: string) {
  * Agent がオフラインの場合は何もしない（次回接続時に server:connect:ack で配信される）
  * 送信失敗に備え pendingConfigUpdates に登録し、次回 agent:ping 時にリトライする
  */
-export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; skipPermissions?: boolean }) {
+export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; skipPermissions?: boolean; disableAsk?: boolean }) {
   // 既存の pending があればマージ（projectsDirs と allowedTools が同時に pending でも欠落しない）
   const existing = pendingConfigUpdates.get(machineId);
   const mergedConfig = existing ? { ...existing.config, ...config } : config;
@@ -1330,11 +1331,11 @@ export async function clearConversation(machineId: string, sessionId: string, pr
 }
 
 export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string) {
-  // exec 開始時に最新の skipPermissions を DB から取得して再送（config:update 配信失敗のフォールバック）
-  const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true } });
+  // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
+  const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
-    payload: { sessionId, projectPath, userId, prompt, skipPermissions: machine?.skipPermissions ?? false }
+    payload: { sessionId, projectPath, userId, prompt, skipPermissions: machine?.skipPermissions ?? false, disableAsk: machine?.disableAsk ?? false }
   });
 }
 

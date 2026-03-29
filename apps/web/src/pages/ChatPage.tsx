@@ -1999,6 +1999,8 @@ export function ChatPage() {
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   /** Machine ごとの skipPermissions キャッシュ（machineId → boolean） */
   const [skipPermissionsMap, setSkipPermissionsMap] = useState<Record<string, boolean>>({});
+  /** Machine ごとの disableAsk キャッシュ（machineId → boolean） */
+  const [disableAskMap, setDisableAskMap] = useState<Record<string, boolean>>({});
   /** セッション情報パネル再取得トリガー（将来の拡張用） */
   const [, setSessionRefreshCount] = useState(0);
   /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
@@ -2575,14 +2577,23 @@ export function ChatPage() {
     return null;
   })();
 
-  // activeMachineId 変更時に skipPermissions を取得（キャッシュがなければ）
+  // activeMachineId 変更時に skipPermissions / disableAsk を取得（キャッシュがなければ）
   useEffect(() => {
-    if (!activeMachineId || skipPermissionsMap[activeMachineId] !== undefined) return;
-    fetch(`/api/machines/${activeMachineId}/skip-permissions`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-    }).then(r => r.json()).then(data => {
-      setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: data.skipPermissions }));
-    }).catch(() => {});
+    if (!activeMachineId) return;
+    if (skipPermissionsMap[activeMachineId] === undefined) {
+      fetch(`/api/machines/${activeMachineId}/skip-permissions`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      }).then(r => r.json()).then(data => {
+        setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: data.skipPermissions }));
+      }).catch(() => {});
+    }
+    if (disableAskMap[activeMachineId] === undefined) {
+      fetch(`/api/machines/${activeMachineId}/disable-ask`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      }).then(r => r.json()).then(data => {
+        setDisableAskMap(prev => ({ ...prev, [activeMachineId]: data.disableAsk }));
+      }).catch(() => {});
+    }
   }, [activeMachineId]);
 
   /** Skip Permissions トグル（チャットヘッダーの ⚡ ボタン用） */
@@ -2599,6 +2610,23 @@ export function ChatPage() {
     } catch {
       // 失敗時はロールバック
       setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: !newValue }));
+    }
+  };
+
+  /** Disable AskUserQuestion トグル */
+  const handleToggleDisableAsk = async () => {
+    if (!activeMachineId) return;
+    const newValue = !disableAskMap[activeMachineId];
+    setDisableAskMap(prev => ({ ...prev, [activeMachineId]: newValue }));
+    try {
+      await fetch(`/api/machines/${activeMachineId}/disable-ask`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+        body: JSON.stringify({ disableAsk: newValue }),
+      });
+    } catch {
+      // 失敗時はロールバック
+      setDisableAskMap(prev => ({ ...prev, [activeMachineId]: !newValue }));
     }
   };
 
@@ -3124,6 +3152,16 @@ export function ChatPage() {
                 <div className="relative" onClick={handleToggleSkipPermissions}>
                   <div className={`w-8 h-4 rounded-full transition-colors ${skipPermissionsMap[activeMachineId] ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
                   <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${skipPermissionsMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
+                </div>
+              </label>
+            )}
+            {/* Disable AskUserQuestion トグルスイッチ（Agent 単位） */}
+            {activeMachineId && disableAskMap[activeMachineId] !== undefined && (
+              <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Disable Ask: ${disableAskMap[activeMachineId] ? 'ON' : 'OFF'}`}>
+                <span className={`text-xs ${disableAskMap[activeMachineId] ? 'text-red-400' : 'text-[var(--text-faint)]'}`}>Ask無効</span>
+                <div className="relative" onClick={handleToggleDisableAsk}>
+                  <div className={`w-8 h-4 rounded-full transition-colors ${disableAskMap[activeMachineId] ? 'bg-red-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
+                  <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${disableAskMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
                 </div>
               </label>
             )}
