@@ -938,6 +938,24 @@ Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する仕
 - **WebUI**: Agent Settings モーダルにトグルスイッチ、`PUT /api/machines/:id/skip-permissions` API
 - **リアルタイム反映**: WebUI で ON/OFF → `pushConfigUpdate()` → Agent に即時配信
 
+## プロジェクト概要 Ask (#211)
+
+チーム管理ページからエージェントにプロジェクト概要を問い合わせる機能。
+
+- **DB**: `Project.description String?` カラム（概要テキスト保存用）
+- **API**: `POST /api/projects/:projectId/ask-description` → `executeCrossProjectQuery()` で「概要を教えて」→ 回答を `Project.description` に保存
+- **WebUI**: チーム名横「Ask 📋」ボタン → 全オンラインメンバーに並列リクエスト → メンバー行下に表示
+- **設計判断**: 概要は DB に永続化。次回表示時は API から取得、Ask ボタンで再取得可能。60秒タイムアウト
+
+## クロスプロジェクトループ防止 (#211)
+
+同一マシンから同一ターゲットへの自己送信ループを防止。
+
+- **検出**: `ask-member`/`teamexec-member` で同一マシン → 同一ターゲットの直近5分以内のセッション数をカウント
+- **閾値**: 3回以上で HTTP 429 拒否
+- **表示**: `/api/agent/members` に `isSameMachine` フラグ、ask.sh で `[自マシン]` マーク
+- **設計判断**: 送信自体はブロックしない（nim → devrelay のような正当な同一マシン間通信を許可）。閾値で異常検知
+
 ## クロスプロジェクト承認中継 (#210)
 
 teamexec/crossquery で発信元タブにも承認カードを表示する仕組み。

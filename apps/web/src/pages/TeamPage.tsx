@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { teams, machines } from '../lib/api';
+import { teams, machines, projects as projectsApi } from '../lib/api';
 import type { TeamInfo, TeamsResponse, Machine } from '../lib/api';
 
 export function TeamPage() {
@@ -15,6 +15,10 @@ export function TeamPage() {
   const [addingTo, setAddingTo] = useState<string | null>(null);
   /** メンバー追加フィルタ */
   const [addFilter, setAddFilter] = useState('');
+  /** Ask 中のチーム ID */
+  const [askingTeamId, setAskingTeamId] = useState<string | null>(null);
+  /** Ask 中のプロジェクト ID セット */
+  const [askingProjectIds, setAskingProjectIds] = useState<Set<string>>(new Set());
 
   /** チーム一覧を取得 */
   const fetchTeams = useCallback(async () => {
@@ -106,6 +110,42 @@ export function TeamPage() {
     }
   };
 
+  /** チーム全メンバーの概要を一括取得 */
+  const handleAskDescriptions = async (team: TeamInfo) => {
+    const onlineMembers = team.members.filter(m => m.machineStatus === 'online');
+    if (onlineMembers.length === 0) return;
+
+    setAskingTeamId(team.id);
+    const asking = new Set(onlineMembers.map(m => m.projectId));
+    setAskingProjectIds(asking);
+
+    // 並列で全オンラインメンバーに ask
+    await Promise.allSettled(
+      onlineMembers.map(async (member) => {
+        try {
+          const { description } = await projectsApi.askDescription(member.projectId);
+          // data を直接更新
+          setData(prev => prev.map(t => ({
+            ...t,
+            members: t.members.map(m =>
+              m.projectId === member.projectId ? { ...m, description } : m
+            ),
+          })));
+        } catch {
+          // 個別エラーは無視（offline 等）
+        } finally {
+          setAskingProjectIds(prev => {
+            const next = new Set(prev);
+            next.delete(member.projectId);
+            return next;
+          });
+        }
+      })
+    );
+
+    setAskingTeamId(null);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -162,6 +202,14 @@ export function TeamPage() {
               <div className="px-4 py-3 border-b border-[var(--border-color)] flex items-center justify-between">
                 <span className="font-medium text-[var(--text-primary)]">{t.name}</span>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleAskDescriptions(t)}
+                    disabled={askingTeamId === t.id}
+                    className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors disabled:opacity-50"
+                    title="全メンバーにプロジェクト概要を聞く"
+                  >
+                    {askingTeamId === t.id ? '取得中...' : 'Ask 📋'}
+                  </button>
                   <button
                     onClick={() => { setAddingTo(addingTo === t.id ? null : t.id); setAddFilter(''); }}
                     className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
@@ -228,22 +276,32 @@ export function TeamPage() {
                   {t.members.map(member => (
                     <div
                       key={member.id}
-                      className="px-4 py-2 flex items-center justify-between group hover:bg-[var(--bg-tertiary)]/30 transition-colors"
+                      className="px-4 py-2 group hover:bg-[var(--bg-tertiary)]/30 transition-colors"
                     >
-                      <div className="flex items-center gap-2">
-                        <span className={`w-1.5 h-1.5 rounded-full ${member.machineStatus === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
-                        <span className="text-[var(--text-secondary)] text-sm">{member.projectName}</span>
-                        <span className="text-[var(--text-faint)] text-xs">({member.machineName})</span>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-1.5 h-1.5 rounded-full ${member.machineStatus === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
+                          <span className="text-[var(--text-secondary)] text-sm">{member.projectName}</span>
+                          <span className="text-[var(--text-faint)] text-xs">({member.machineName})</span>
+                          {askingProjectIds.has(member.projectId) && (
+                            <span className="text-[var(--text-faint)] text-xs animate-pulse">取得中...</span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => handleRemoveMember(t.id, member.id)}
+                          className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Remove member"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
                       </div>
-                      <button
-                        onClick={() => handleRemoveMember(t.id, member.id)}
-                        className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Remove member"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
+                      {member.description && (
+                        <div className="ml-4 mt-1 text-[var(--text-faint)] text-xs leading-relaxed">
+                          {member.description}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

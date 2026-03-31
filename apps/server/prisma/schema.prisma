@@ -107,6 +107,7 @@ model Project {
   name        String
   path        String
   defaultAi   String    @default("claude")
+  description String?
   lastUsedAt  DateTime?
   createdAt   DateTime  @default(now())
 

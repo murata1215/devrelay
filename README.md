@@ -72,6 +72,10 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Same-Machine Project Visibility**: Removed machine-level filter from `/api/agent/members` — projects on the same machine (e.g., devrelay and nim) now appear in team member list
 - **Cross-Project Approval Relay**: Tool approval cards from teamexec/ask sessions now appear in both the target project tab AND the originator's tab — approve from either side
 - **Crontab PATH Fix**: `@reboot` entries now use `export PATH=...; cd` instead of `PATH=... cd` — fixes Node.js `spawn('node')` ENOENT after OS reboot. Agent `u` command auto-fixes existing crontab entries
+- **Project Description Ask**: "Ask 📋" button on Team page fetches project descriptions from all online agents in parallel — stored in `Project.description`, displayed under each member row
+- **Cross-Project Loop Prevention**: Same-machine → same-target queries are rate-limited (3 per 5 minutes) to prevent infinite self-referencing loops. Member list shows `[自マシン]` marker
+- **Tab Restore on Server Restart**: Tabs in TAB_ORDER are now restored even when sessions are cleaned up by server restart — uses `machinesApi.list()` fallback for project info
+- **Chat Header Cleanup**: Removed "h: help" and "clear" labels, toggle switches use subtle slate colors instead of amber/red
 
 ## 💡 Token Efficiency
 

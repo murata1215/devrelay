@@ -194,7 +194,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       },
     });
 
-    // 同一マシン上の別プロジェクトも表示するためフィルタなし
+    // 同一マシン上の別プロジェクトも表示（isSameMachine マーク付き）
     return reply.send(teamMembers
       .map(m => ({
         teamName: m.team.name,
@@ -202,6 +202,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         memberProjectId: m.project.id,
         memberMachineName: m.project.machine.displayName || m.project.machine.name,
         memberMachineStatus: m.project.machine.status,
+        isSameMachine: m.project.machineId === auth.machineId,
       }))
     );
   });
@@ -238,6 +239,21 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
       return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
+    }
+
+    // ループ検出: 同一マシンから同一ターゲットへの直近5分以内の crossquery セッションが3回以上あれば拒否
+    if (targetProject.machine.id === auth.machineId) {
+      const recentCount = await prisma.session.count({
+        where: {
+          projectId: targetProjectId,
+          id: { startsWith: 'crossquery_' },
+          startedAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+        },
+      });
+      if (recentCount >= 3) {
+        console.log(`🔁 Cross-query loop detected: ${auth.machineId} → ${targetProject.name} (${recentCount} times in 5min)`);
+        return reply.status(429).send({ error: `ループ検出: 同一マシンから ${targetProject.name} への問い合わせが5分以内に${recentCount}回発生しています。自分自身に問い合わせている可能性があります。` });
+      }
     }
 
     // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
@@ -351,6 +367,21 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
       return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
+    }
+
+    // ループ検出: 同一マシンから同一ターゲットへの直近5分以内の teamexec セッションが3回以上あれば拒否
+    if (targetProject.machine.id === auth.machineId) {
+      const recentCount = await prisma.session.count({
+        where: {
+          projectId: targetProjectId,
+          id: { startsWith: 'teamexec_' },
+          startedAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+        },
+      });
+      if (recentCount >= 3) {
+        console.log(`🔁 Team exec loop detected: ${auth.machineId} → ${targetProject.name} (${recentCount} times in 5min)`);
+        return reply.status(429).send({ error: `ループ検出: 同一マシンから ${targetProject.name} への実行依頼が5分以内に${recentCount}回発生しています。自分自身に送信している可能性があります。` });
+      }
     }
 
     // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）

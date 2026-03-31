@@ -2505,14 +2505,33 @@ export function ChatPage() {
         // セッション検索用マップ
         const sessionMap = new Map(activeSessions.map(s => [s.projectId, s]));
 
-        // TAB_ORDER がある場合: 保存された順序でタブを復元
+        // プロジェクト名解決用: machinesApi からプロジェクト一覧を取得
+        // TAB_ORDER にあるがセッションがないプロジェクト（サーバー再起動でセッション ended 化）も復元するため
+        let projectInfoMap = new Map<string, { name: string; machineDisplayName: string }>();
+        try {
+          const machines = await machinesApi.list();
+          for (const m of machines) {
+            for (const p of m.projects) {
+              projectInfoMap.set(p.id, { name: p.name, machineDisplayName: m.displayName ?? m.name });
+            }
+          }
+        } catch { /* ignore */ }
+
+        // TAB_ORDER がある場合: 保存された順序でタブを復元（セッションがなくてもプロジェクトが存在すれば復元）
         // TAB_ORDER がない場合: 従来通りピン止めタブのみ復元
-        let restorable: typeof activeSessions;
+        type RestorableEntry = { projectId: string; projectName: string; machineDisplayName: string; sessionId?: string; messageCount: number };
+        let restorable: RestorableEntry[];
         if (tabOrder.length > 0) {
-          // TAB_ORDER の順序でアクティブセッションがあるものを復元
           restorable = tabOrder
-            .map(id => sessionMap.get(id))
-            .filter((s): s is NonNullable<typeof s> => s != null && s.messageCount > 0);
+            .map(id => {
+              const session = sessionMap.get(id);
+              if (session && session.messageCount > 0) return session;
+              // セッションがなくてもプロジェクトが存在すれば空タブとして復元
+              const info = projectInfoMap.get(id);
+              if (info) return { projectId: id, projectName: info.name, machineDisplayName: info.machineDisplayName, messageCount: 0 };
+              return null;
+            })
+            .filter((s): s is NonNullable<typeof s> => s != null);
           // TAB_ORDER にないがピン止めされているセッションも末尾に追加
           for (const s of activeSessions) {
             if (!tabOrder.includes(s.projectId) && pinnedIds.has(s.projectId) && s.messageCount > 0) {
@@ -2526,7 +2545,7 @@ export function ChatPage() {
           );
         }
         if (restorable.length === 0) return;
-        console.log(`[mount] restoring ${restorable.length} tabs:`, restorable.map(s => `${s.projectName}(${s.messageCount}msgs,${s.projectId.substring(0, 8)})`));
+        console.log(`[mount] restoring ${restorable.length} tabs:`, restorable.map(s => `${s.projectName}(${s.messageCount}msgs,${('projectId' in s ? s.projectId : '').substring(0, 8)})`));
 
         const newTabs: Tab[] = restorable.map(s => ({
           projectId: s.projectId,
@@ -2535,7 +2554,7 @@ export function ChatPage() {
           customName: savedNames[s.projectId],
           messages: [],
           progress: null,
-          sessionId: s.sessionId,
+          sessionId: 'sessionId' in s ? (s as any).sessionId : undefined,
           historyLoaded: false,
           hasMoreHistory: true,
           loadingHistory: false,
@@ -2551,7 +2570,7 @@ export function ChatPage() {
         // 最初のタブの履歴を読み込み + サーバーコンテキスト同期
         sendCommand(`//connect ${newTabs[0].projectId}`);
         suppressConnectRef.current = true;
-        loadHistory(newTabs[0].projectId, newTabs[0].sessionId!);
+        loadHistory(newTabs[0].projectId, newTabs[0].sessionId ?? undefined);
       } catch {
         // 復元失敗は無視
       }
@@ -3149,9 +3168,9 @@ export function ChatPage() {
             {/* Skip Permissions トグルスイッチ（Agent 単位） */}
             {activeMachineId && skipPermissionsMap[activeMachineId] !== undefined && (
               <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Skip Permissions: ${skipPermissionsMap[activeMachineId] ? 'ON' : 'OFF'}`}>
-                <span className={`text-xs ${skipPermissionsMap[activeMachineId] ? 'text-amber-400' : 'text-[var(--text-faint)]'}`}>自動承認</span>
+                <span className={`text-xs ${skipPermissionsMap[activeMachineId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>自動承認</span>
                 <div className="relative" onClick={handleToggleSkipPermissions}>
-                  <div className={`w-8 h-4 rounded-full transition-colors ${skipPermissionsMap[activeMachineId] ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
+                  <div className={`w-8 h-4 rounded-full transition-colors ${skipPermissionsMap[activeMachineId] ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
                   <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${skipPermissionsMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
                 </div>
               </label>
@@ -3159,26 +3178,15 @@ export function ChatPage() {
             {/* Disable AskUserQuestion トグルスイッチ（Agent 単位） */}
             {activeMachineId && disableAskMap[activeMachineId] !== undefined && (
               <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Disable Ask: ${disableAskMap[activeMachineId] ? 'ON' : 'OFF'}`}>
-                <span className={`text-xs ${disableAskMap[activeMachineId] ? 'text-red-400' : 'text-[var(--text-faint)]'}`}>Ask無効</span>
+                <span className={`text-xs ${disableAskMap[activeMachineId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>Ask無効</span>
                 <div className="relative" onClick={handleToggleDisableAsk}>
-                  <div className={`w-8 h-4 rounded-full transition-colors ${disableAskMap[activeMachineId] ? 'bg-red-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
+                  <div className={`w-8 h-4 rounded-full transition-colors ${disableAskMap[activeMachineId] ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
                   <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${disableAskMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
                 </div>
               </label>
             )}
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-[var(--text-faint)] hidden sm:inline">h: ヘルプ</span>
-            {activeTab && activeTab.messages.length > 0 && (
-              <button
-                onClick={() => setTabs(prev => prev.map(t =>
-                  t.projectId === activeTabId ? { ...t, messages: [], progress: null } : t
-                ))}
-                className="text-xs text-[var(--text-faint)] hover:text-[var(--text-secondary)] px-2 py-1 rounded hover:bg-[var(--bg-tertiary)]"
-              >
-                クリア
-              </button>
-            )}
           </div>
         </div>
 

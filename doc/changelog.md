@@ -7,6 +7,29 @@
 ## 実装済み機能
 
 
+### #211: プロジェクト概要 Ask + クロスプロジェクトループ防止 + タブ復元改善 + UI 調整 (2026-04-01)
+
+チーム管理ページからワンクリックで各エージェントにプロジェクト概要を聞く機能と、複数の改善。
+
+#### プロジェクト概要 Ask 機能
+- **DB**: `Project.description` カラム追加（TEXT, nullable）
+- **API**: `POST /api/projects/:projectId/ask-description` — エージェントに概要を聞き、`Project.description` に保存
+- **WebUI**: チーム名横に「Ask 📋」ボタン → チーム内オンラインメンバー全員に並列で概要取得
+- **表示**: 各メンバー行の下に概要テキストを薄い文字で表示、`GET /api/teams` に `description` フィールド追加
+
+#### クロスプロジェクトループ防止
+- `/api/agent/ask-member` / `/api/agent/teamexec-member`: 同一マシンから同一ターゲットへの5分以内3回以上の問い合わせを HTTP 429 で拒否
+- `/api/agent/members`: `isSameMachine` フラグ追加、ask.sh の `--list` で `[自マシン]` マーク表示
+
+#### タブ復元改善
+- TAB_ORDER にあるプロジェクトはアクティブセッションがなくても `machinesApi.list()` からプロジェクト情報を取得してタブ復元
+- サーバー再起動のセッションクリーンアップでタブが消える問題を修正
+
+#### UI 調整
+- チャットヘッダー「h: ヘルプ」「クリア」を削除
+- 自動承認/Ask無効トグル: amber/red → slate（シックな配色に統一）
+- メッセージ重複防止の dedup チェックからタイムスタンプ条件を削除（role + content 一致のみ）
+
 ### #210: クロスプロジェクト連携改善 + crontab PATH 修正 (2026-03-30)
 
 クロスプロジェクト連携（ask/teamexec）の複数の改善と、OS 再起動後のエージェント起動失敗の修正。

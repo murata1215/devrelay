@@ -5,12 +5,12 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents } from '../services/agent-manager.js';
+import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS, type AiTool } from '@devrelay/shared';
 import {
   getLinkedPlatforms,
   validateAndConsumeLinkCode,
@@ -1927,12 +1927,82 @@ export async function apiRoutes(app: FastifyInstance) {
           id: m.id,
           projectId: m.project.id,
           projectName: m.project.name,
+          description: m.project.description ?? undefined,
           machineName: m.project.machine.displayName ?? m.project.machine.name,
           machineId: m.project.machine.id,
           machineStatus: m.project.machine.status,
         })),
       })),
     });
+  });
+
+  /**
+   * POST /api/projects/:projectId/ask-description
+   * エージェントにプロジェクト概要を聞き、回答を Project.description に保存して返す
+   */
+  app.post('/api/projects/:projectId/ask-description', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { projectId } = request.params as { projectId: string };
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true } } },
+    });
+
+    if (!project || project.machine.userId !== userId || project.machine.deletedAt) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    if (project.machine.status !== 'online' || !isAgentConnected(project.machine.id)) {
+      return reply.status(503).send({ error: `Agent for ${project.name} is offline` });
+    }
+
+    // クロスプロジェクトクエリでプロジェクト概要を取得
+    const tempSessionId = `askdesc_${randomBytes(16).toString('hex')}`;
+    await prisma.session.create({
+      data: {
+        id: tempSessionId,
+        userId,
+        machineId: project.machine.id,
+        projectId,
+        aiTool: project.defaultAi,
+        status: 'active',
+      },
+    });
+
+    try {
+      const result = await executeCrossProjectQuery(
+        project.machine.id,
+        tempSessionId,
+        project.name,
+        project.path,
+        project.defaultAi as AiTool,
+        'プロジェクトの概要を1〜2文で簡潔に教えてください。技術スタックと主な目的を含めてください。日本語で回答してください。',
+        userId,
+        60000, // 60秒タイムアウト
+      );
+
+      // 回答を Project.description に保存
+      const description = result.output.trim().substring(0, 500);
+      await prisma.project.update({
+        where: { id: projectId },
+        data: { description },
+      });
+
+      await prisma.session.update({
+        where: { id: tempSessionId },
+        data: { status: 'ended', endedAt: new Date() },
+      }).catch(() => {});
+
+      return reply.send({ description });
+    } catch (error: any) {
+      await prisma.session.update({
+        where: { id: tempSessionId },
+        data: { status: 'ended', endedAt: new Date() },
+      }).catch(() => {});
+
+      return reply.status(504).send({ error: `Failed to get description: ${error.message}` });
+    }
   });
 
   /** チーム新規作成 */

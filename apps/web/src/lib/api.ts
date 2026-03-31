@@ -217,6 +217,11 @@ export const projects = {
     const q = params.toString() ? `?${params.toString()}` : '';
     return request('GET', `/projects/${projectId}/approvals${q}`);
   },
+
+  /** エージェントにプロジェクト概要を聞いて保存 */
+  async askDescription(projectId: string): Promise<{ description: string }> {
+    return request('POST', `/projects/${projectId}/ask-description`, {});
+  },
 };
 
 /** ツール承認履歴レコード（API レスポンス型） */
@@ -591,6 +596,7 @@ export interface TeamMemberInfo {
   id: string;
   projectId: string;
   projectName: string;
+  description?: string;
   machineName: string;
   machineId: string;
   machineStatus: string;
