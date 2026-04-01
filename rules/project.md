@@ -826,14 +826,32 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 3. `execConversation()` 内部で `handleConversationExec()` → exec マーカー追加 + `handleAiPrompt()` 自動呼び出し
 4. Agent は `--dangerously-skip-permissions` でコード変更を含む実行を行う
 5. `handleAiOutput(isComplete=true)` → `pendingCrossQueries` Map の Promise を resolve
-6. 回答を HTTP レスポンスとして返却（タイムアウト: 5分）
+6. 回答を HTTP レスポンスとして返却
+7. HTTP 切断検知: `request.raw.on('close')` → `cancelPendingCrossQuery()` でセッションクリーンアップ
+
+### タイムアウト階層（#214）
+
+| レイヤー | ask (質問) | teamexec (実行依頼) | 備考 |
+|---------|-----------|-------------------|------|
+| curl `--max-time` | 600秒（10分） | 3600秒（60分） | ask.sh 内 |
+| SKILL.md Bash timeout | 720000（12分） | 3660000（61分） | curl より長く設定必須 |
+| サーバー Promise | 43200000ms（12時間） | 43200000ms（12時間） | 最終防衛線 |
+
+**重要**: curl が先にタイムアウトするとサーバーの Promise だけが残り、セッションが active のまま stuck する。
+そのため `request.raw.on('close')` で HTTP 切断を検知し、`cancelPendingCrossQuery()` でクリーンアップする。
+
+### Project displayName（#212）
+
+`Project.displayName` カラムで表示名をユーザーが変更可能（null なら `name` = ディレクトリ名を使用）。
+Machine.displayName と同じパターン。内部は全て projectId で動作するため表示層のみの変更。
+ask.sh のメンバー検索は `displayName` と元の `name` の両方で部分一致検索する。
 
 ### Agent スキル
 - `devrelay-ask-member`: エージェント起動時に `~/.claude/skills/` に自動配置
 - `ask.sh --project X --question "..."` で質問（プランモード）、`ask.sh --exec --project X --question "..."` で実行依頼（exec モード）
 - 質問/依頼する側のみスキルが必要。受ける側はサーバーが直接 Claude Code を起動
 - **JSON 構築には `jq -n --arg` を使用**（shell エスケープは脆弱なため禁止）
-- **SKILL.md に Bash timeout 指示が必須**（cross-query は最大5分かかるが、Claude Code のデフォルト Bash timeout は2分）
+- **SKILL.md に Bash timeout 指示が必須**（ask: 720000ms、teamexec: 3660000ms — curl timeout より長く設定）
 
 ### 送信元プロジェクト表示（#199）
 - `Message.sourceProjectName` カラムでクロスクエリの送信元を記録

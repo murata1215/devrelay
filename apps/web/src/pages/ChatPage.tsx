@@ -1085,11 +1085,11 @@ function Sidebar({
     return (a.displayName ?? a.name).localeCompare(b.displayName ?? b.name);
   });
 
-  /** projectId → プロジェクト名の逆引きマップ */
+  /** projectId → プロジェクト表示名の逆引きマップ（displayName 優先） */
   const projectNameMap = new Map<string, string>();
   for (const m of machineList) {
     for (const p of m.projects) {
-      projectNameMap.set(p.id, p.name);
+      projectNameMap.set(p.id, p.displayName ?? p.name);
     }
   }
 
@@ -1200,7 +1200,7 @@ function Sidebar({
                                 <span className={hasTab ? 'text-yellow-400' : 'text-[var(--text-faint)]'}>
                                   {hasTab ? '★' : '#'}
                                 </span>
-                                <span className="truncate">{project.name}</span>
+                                <span className="truncate">{project.displayName ?? project.name}</span>
                               </button>
                             );
                           })
@@ -2512,7 +2512,7 @@ export function ChatPage() {
           const machines = await machinesApi.list();
           for (const m of machines) {
             for (const p of m.projects) {
-              projectInfoMap.set(p.id, { name: p.name, machineDisplayName: m.displayName ?? m.name });
+              projectInfoMap.set(p.id, { name: p.displayName ?? p.name, machineDisplayName: m.displayName ?? m.name });
             }
           }
         } catch { /* ignore */ }
@@ -2813,7 +2813,7 @@ export function ChatPage() {
       for (const m of machineList) {
         const p = m.projects.find(p => p.id === projectId);
         if (p) {
-          projectName = p.name;
+          projectName = p.displayName ?? p.name;
           machineDisplayName = m.displayName ?? m.name;
           break;
         }

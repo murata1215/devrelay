@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { teams, machines, projects as projectsApi } from '../lib/api';
 import type { TeamInfo, TeamsResponse, Machine } from '../lib/api';
 
@@ -19,6 +19,12 @@ export function TeamPage() {
   const [askingTeamId, setAskingTeamId] = useState<string | null>(null);
   /** Ask 中のプロジェクト ID セット */
   const [askingProjectIds, setAskingProjectIds] = useState<Set<string>>(new Set());
+  /** リネーム中のプロジェクト ID */
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  /** リネーム入力値 */
+  const [renameValue, setRenameValue] = useState('');
+  /** リネーム入力の ref */
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   /** チーム一覧を取得 */
   const fetchTeams = useCallback(async () => {
@@ -47,8 +53,8 @@ export function TeamPage() {
       const mName = m.displayName ?? m.name;
       const available = m.projects
         .filter(p => !memberIds.has(p.id))
-        .filter(p => !filter || p.name.toLowerCase().includes(filter))
-        .map(p => ({ id: p.id, name: p.name, machineName: mName, machineStatus: m.status }));
+        .filter(p => !filter || (p.displayName ?? p.name).toLowerCase().includes(filter) || p.name.toLowerCase().includes(filter))
+        .map(p => ({ id: p.id, name: p.displayName ?? p.name, machineName: mName, machineStatus: m.status }));
       if (available.length > 0) {
         grouped[mName] = available;
       }
@@ -107,6 +113,26 @@ export function TeamPage() {
       ));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to remove member');
+    }
+  };
+
+  /** メンバー名をリネーム開始 */
+  const handleStartRename = (projectId: string, currentName: string) => {
+    setRenamingProjectId(projectId);
+    setRenameValue(currentName);
+    setTimeout(() => renameInputRef.current?.focus(), 50);
+  };
+
+  /** リネーム確定 */
+  const handleConfirmRename = async (projectId: string) => {
+    const trimmed = renameValue.trim();
+    setRenamingProjectId(null);
+    try {
+      // 空文字列の場合はリセット（元のディレクトリ名に戻す）
+      await projectsApi.updateDisplayName(projectId, trimmed || null);
+      await fetchTeams();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rename');
     }
   };
 
@@ -281,7 +307,28 @@ export function TeamPage() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span className={`w-1.5 h-1.5 rounded-full ${member.machineStatus === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
-                          <span className="text-[var(--text-secondary)] text-sm">{member.projectName}</span>
+                          {renamingProjectId === member.projectId ? (
+                            <input
+                              ref={renameInputRef}
+                              className="text-[var(--text-secondary)] text-sm bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded px-1 py-0.5 w-40 outline-none focus:border-blue-400"
+                              value={renameValue}
+                              onChange={e => setRenameValue(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') handleConfirmRename(member.projectId);
+                                if (e.key === 'Escape') setRenamingProjectId(null);
+                              }}
+                              onBlur={() => handleConfirmRename(member.projectId)}
+                              placeholder="表示名（空で元の名前に戻す）"
+                            />
+                          ) : (
+                            <span
+                              className="text-[var(--text-secondary)] text-sm cursor-pointer hover:text-blue-400 transition-colors"
+                              onClick={() => handleStartRename(member.projectId, member.projectName)}
+                              title="クリックでリネーム"
+                            >
+                              {member.projectName}
+                            </span>
+                          )}
                           <span className="text-[var(--text-faint)] text-xs">({member.machineName})</span>
                           {askingProjectIds.has(member.projectId) && (
                             <span className="text-[var(--text-faint)] text-xs animate-pulse">取得中...</span>

@@ -18,7 +18,7 @@ import crypto from 'crypto';
 import { prisma } from '../db/client.js';
 import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
-import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected } from '../services/agent-manager.js';
+import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery } from '../services/agent-manager.js';
 import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
 import type { AiTool } from '@devrelay/shared';
 
@@ -198,7 +198,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     return reply.send(teamMembers
       .map(m => ({
         teamName: m.team.name,
-        memberProjectName: m.project.name,
+        memberProjectName: m.project.displayName ?? m.project.name,
+        memberProjectOriginalName: m.project.name,
         memberProjectId: m.project.id,
         memberMachineName: m.project.machine.displayName || m.project.machine.name,
         memberMachineStatus: m.project.machine.status,
@@ -304,6 +305,22 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
 
+    // HTTP 切断検知: curl タイムアウト等でクライアントが切断した場合にセッションをクリーンアップ
+    let clientDisconnected = false;
+    request.raw.on('close', () => {
+      if (!reply.sent) {
+        clientDisconnected = true;
+        console.log(`🔌 Cross-project query client disconnected: ${tempSessionId}`);
+        // pendingCrossQueries から削除して Promise を reject（サーバー側の待機を解放）
+        cancelPendingCrossQuery(tempSessionId);
+        // セッションを ended に更新
+        prisma.session.update({
+          where: { id: tempSessionId },
+          data: { status: 'ended', endedAt: new Date() },
+        }).catch(() => {});
+      }
+    });
+
     try {
       // エージェントにセッション開始 + プロンプト送信し、完了を待つ
       const result = await executeCrossProjectQuery(
@@ -315,6 +332,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         question,
         auth.userId,
       );
+
+      if (clientDisconnected) return;
 
       // 一時セッションを終了
       await prisma.session.update({
@@ -330,6 +349,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         data: { status: 'ended', endedAt: new Date() },
       }).catch(() => {});
 
+      if (clientDisconnected) return;
       console.error(`🔗 Cross-project query failed: ${error.message}`);
       return reply.status(504).send({ error: `Query timed out or failed: ${error.message}` });
     }
@@ -436,6 +456,20 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     console.log(`🚀 Team exec: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
 
+    // HTTP 切断検知: curl タイムアウト等でクライアントが切断した場合にセッションをクリーンアップ
+    let clientDisconnected = false;
+    request.raw.on('close', () => {
+      if (!reply.sent) {
+        clientDisconnected = true;
+        console.log(`🔌 Team exec client disconnected: ${tempSessionId}`);
+        cancelPendingCrossQuery(tempSessionId);
+        prisma.session.update({
+          where: { id: tempSessionId },
+          data: { status: 'ended', endedAt: new Date() },
+        }).catch(() => {});
+      }
+    });
+
     try {
       // エージェントに exec モードでセッション開始し、完了を待つ
       const result = await executeCrossProjectExec(
@@ -447,6 +481,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         question,
         auth.userId,
       );
+
+      if (clientDisconnected) return;
 
       // セッションを終了
       await prisma.session.update({
@@ -462,6 +498,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         data: { status: 'ended', endedAt: new Date() },
       }).catch(() => {});
 
+      if (clientDisconnected) return;
       console.error(`🚀 Team exec failed: ${error.message}`);
       return reply.status(504).send({ error: `Team exec timed out or failed: ${error.message}` });
     }

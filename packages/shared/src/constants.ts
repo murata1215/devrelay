@@ -95,10 +95,16 @@ export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
   'Bash(docker compose ps)',
   'Bash(docker compose ps *)',
   'Bash(docker compose logs *)',
+  // ファイル検索（読み取り専用）
+  'Bash(find *)',
+  'Bash(locate *)',
+  'Bash(which *)',
   // ログ・ファイル読み取り
   'Bash(tail *)',
   'Bash(head *)',
   'Bash(wc *)',
+  'Bash(ls)',
+  'Bash(ls *)',
   // ネットワーク・サーバー状態
   'Bash(curl *)',
   'Bash(lsof *)',
@@ -148,9 +154,13 @@ export const DEFAULT_ALLOWED_TOOLS_WINDOWS: string[] = [
   'Bash(docker compose ps)',
   'Bash(docker compose ps *)',
   'Bash(docker compose logs *)',
-  // ファイル読み取り
+  // ファイル検索・読み取り
   'Bash(Get-Content *)',
   'Bash(type *)',
+  'Bash(dir *)',
+  'Bash(where *)',
+  'Bash(find *)',
+  'Bash(Get-ChildItem *)',
   // ネットワーク・サーバー状態
   'Bash(curl *)',
   'Bash(Invoke-WebRequest *)',

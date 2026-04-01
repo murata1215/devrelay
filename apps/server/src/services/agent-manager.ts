@@ -61,6 +61,20 @@ const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload
 // ask-member API が一時セッションの完了を待つために使用
 const pendingCrossQueries = new Map<string, HistoryRequest<{ output: string; files?: FileAttachment[] }>>();
 
+/**
+ * クロスプロジェクトクエリの待機をキャンセルする（HTTP 切断時のクリーンアップ用）
+ * curl タイムアウト等でクライアントが切断した場合に呼び出し、Promise を reject してリソース解放する
+ */
+export function cancelPendingCrossQuery(sessionId: string) {
+  const pending = pendingCrossQueries.get(sessionId);
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingCrossQueries.delete(sessionId);
+    pending.reject(new Error('Client disconnected'));
+    console.log(`🔌 Pending cross query cancelled: ${sessionId}`);
+  }
+}
+
 // プロジェクトファイル読み取り要求の待機: requestId → { resolve, reject, timeout }
 const pendingFileReadRequests = new Map<string, HistoryRequest<{ content: string | null; error?: string }>>();
 

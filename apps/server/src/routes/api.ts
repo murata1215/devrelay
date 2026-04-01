@@ -439,6 +439,7 @@ export async function apiRoutes(app: FastifyInstance) {
       return {
         id: p.id,
         name: p.name,
+        displayName: p.displayName ?? null,
         path: p.path,
         defaultAi: p.defaultAi,
         lastUsedAt: p.lastUsedAt,
@@ -455,6 +456,33 @@ export async function apiRoutes(app: FastifyInstance) {
         } : null,
       };
     });
+  });
+
+  // ========================================
+  // プロジェクト表示名の更新
+  // ========================================
+  app.put('/api/projects/:projectId/display-name', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId } = request.params as { projectId: string };
+    const { displayName } = (request.body || {}) as { displayName?: string | null };
+
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+    });
+    if (!project) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    // null または空文字列の場合はリセット（name に戻す）
+    const newDisplayName = displayName?.trim() || null;
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { displayName: newDisplayName },
+    });
+
+    return { success: true, displayName: newDisplayName };
   });
 
   // ========================================
@@ -1926,7 +1954,8 @@ export async function apiRoutes(app: FastifyInstance) {
         members: t.members.map(m => ({
           id: m.id,
           projectId: m.project.id,
-          projectName: m.project.name,
+          projectName: m.project.displayName ?? m.project.name,
+          projectOriginalName: m.project.name,
           description: m.project.description ?? undefined,
           machineName: m.project.machine.displayName ?? m.project.machine.name,
           machineId: m.project.machine.id,

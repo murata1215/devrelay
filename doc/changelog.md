@@ -7,6 +7,30 @@
 ## 実装済み機能
 
 
+### #214: ask/teamexec タイムアウト統一 + HTTP 切断検知 (2026-04-01)
+- ask.sh の curl タイムアウトを mode 別に設定: ask=10分、teamexec=60分（旧: 共通5分）
+- SKILL.MD の Bash timeout 指示を更新: ask=12分、teamexec=61分（curl より長く）
+- サーバー: `request.raw.on('close')` で HTTP 切断を検知し、`pendingCrossQueries` をキャンセル + セッション ended 化
+- `cancelPendingCrossQuery()` エクスポート追加（agent-manager.ts）
+- stuck セッション `teamexec_b9a5b373` を手動クリーンアップ
+- **根本原因**: curl --max-time 300（5分）が teamexec には短すぎ、curl 切断後もサーバー Promise（12時間）が待ち続けてセッションが active のまま残っていた
+
+### #213: skipPermissions が Plan モードで効かないバグ修正 (2026-04-01)
+- Plan モードの `canUseTool` に `getServerSkipPermissions()` チェックを追加（Linux/macOS Agent）
+- `exec` 送信後の2メッセージ目以降（Plan モード自動復帰）で skipPermissions が無視されていた問題を修正
+- `DEFAULT_ALLOWED_TOOLS_LINUX` に `find`, `locate`, `which`, `ls` を追加（読み取り専用コマンド）
+- `DEFAULT_ALLOWED_TOOLS_WINDOWS` に `dir`, `where`, `find`, `Get-ChildItem` を追加
+- **根本原因**: Exec モードの canUseTool のみ skipPermissions をチェックし、Plan モードの canUseTool にはチェックがなかった。allowedTools に含まれないツール（`find` 等）は SDK がパーミッション要求を発行し、承認カードが表示されていた
+
+### #212: プロジェクト表示名（displayName）リネーム機能 (2026-04-01)
+- `Project.displayName` DB カラム追加（null なら name = ディレクトリ名をそのまま使用）
+- `PUT /api/projects/:id/display-name` API エンドポイント追加
+- チーム管理画面: メンバー名クリックでインライン編集（Enter/Blur で確定、Escape でキャンセル、空文字でリセット）
+- WebUI 全体: プロジェクト名表示を `displayName ?? name` に統一（サイドバー、タブ、タブ復元）
+- Agent ask.sh: メンバー検索時に displayName と originalName の両方で部分一致検索
+- チーム API: `projectName` に displayName 優先表示 + `projectOriginalName` を追加
+- **設計判断**: Machine.displayName と同じパターン。内部は projectId で動作するため表示層のみの変更。ask.sh は displayName でも元の name でもヒットする
+
 ### #211: プロジェクト概要 Ask + クロスプロジェクトループ防止 + タブ復元改善 + UI 調整 (2026-04-01)
 
 チーム管理ページからワンクリックで各エージェントにプロジェクト概要を聞く機能と、複数の改善。

@@ -61,7 +61,7 @@ pm2 restart devrelay-server devrelay-agent
 |---------|------|
 | User | ユーザー |
 | Machine | Agent マシン（deletedAt でソフトデリート） |
-| Project | プロジェクト |
+| Project | プロジェクト（displayName でリネーム可能） |
 | Session | 作業セッション |
 | Message | 会話メッセージ |
 | BuildLog | ビルド履歴 |

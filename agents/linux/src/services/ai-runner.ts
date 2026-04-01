@@ -311,11 +311,21 @@ async function sendPromptToAiSdk(
       console.log(`📋 [SDK] Using plan mode`);
     }
 
-    // plan モードでも AskUserQuestion をインターセプト（WebSocket 経由でユーザーに質問）
+    // plan モードでも skipPermissions と AskUserQuestion をインターセプト
     if (options.onToolApprovalRequest) {
       const onApprovalRequest = options.onToolApprovalRequest;
       sdkOptions.canUseTool = async (toolName, input, opts) => {
-        if (toolName === 'AskUserQuestion') {
+        const isQuestion = toolName === 'AskUserQuestion';
+
+        // 全許可モード: AskUserQuestion 以外は即座に allow（動的に最新値を参照）
+        // Plan モードでも allowedTools 外のツール（find 等）が SDK からパーミッション要求される場合があるため必須
+        if (!isQuestion && getServerSkipPermissions()) {
+          console.log(`⚡ [SDK] Auto-approved (skip-permissions, plan mode): ${toolName}`);
+          options.onAutoApproved?.({ toolName, toolInput: input });
+          return { behavior: 'allow', updatedInput: input };
+        }
+
+        if (isQuestion) {
           const requestId = crypto.randomUUID();
           console.log(`❓ [SDK] User question (plan mode): ${toolName} (${requestId.substring(0, 8)}...)`);
 
@@ -345,6 +355,7 @@ async function sendPromptToAiSdk(
             }, { once: true });
           });
         }
+
         // AskUserQuestion 以外は plan モードのデフォルト動作（allowedTools で制御済み）
         return { behavior: 'allow', updatedInput: input };
       };

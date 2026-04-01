@@ -109,6 +109,7 @@ export interface Machine {
 export interface Project {
   id: string;
   name: string;
+  displayName?: string | null;  // ユーザーが設定する表示名（null なら name を使用）
   path: string;
   lastUsedAt: string | null;
   machine?: {
@@ -221,6 +222,11 @@ export const projects = {
   /** エージェントにプロジェクト概要を聞いて保存 */
   async askDescription(projectId: string): Promise<{ description: string }> {
     return request('POST', `/projects/${projectId}/ask-description`, {});
+  },
+
+  /** プロジェクト表示名を更新（null でリセット） */
+  async updateDisplayName(projectId: string, displayName: string | null): Promise<{ success: boolean; displayName: string | null }> {
+    return request('PUT', `/projects/${projectId}/display-name`, { displayName });
   },
 };
 

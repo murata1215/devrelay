@@ -76,6 +76,9 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Cross-Project Loop Prevention**: Same-machine → same-target queries are rate-limited (3 per 5 minutes) to prevent infinite self-referencing loops. Member list shows `[自マシン]` marker
 - **Tab Restore on Server Restart**: Tabs in TAB_ORDER are now restored even when sessions are cleaned up by server restart — uses `machinesApi.list()` fallback for project info
 - **Chat Header Cleanup**: Removed "h: help" and "clear" labels, toggle switches use subtle slate colors instead of amber/red
+- **Project Display Name**: Rename projects via Team page inline edit — `Project.displayName` column, `PUT /api/projects/:id/display-name`, ask.sh searches both displayName and original name
+- **Skip Permissions Plan Mode Fix**: Auto-approve toggle now works in plan mode (2nd+ messages after exec) — plan mode `canUseTool` now checks `getServerSkipPermissions()`, added `find`/`ls`/`locate` to plan mode allowed tools
+- **Cross-Project Timeout Unification**: ask.sh curl timeout split by mode — ask: 10min, teamexec: 60min (was 5min for both). Server detects HTTP disconnect (`request.raw.on('close')`) and cleans up stuck sessions
 
 ## 💡 Token Efficiency
 
