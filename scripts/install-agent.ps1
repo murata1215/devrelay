@@ -462,9 +462,11 @@ try {
 
 # --- 既存の Agent プロセスを停止（再インストール対応）---
 # WMI (Get-CimInstance) は企業環境でハングすることがあるため、
-# tasklist + findstr で devrelay の node プロセスを検索する（タイムアウトなし・高速）
+# tasklist で devrelay の node プロセスを検索する（/V フラグなし・高速）
+Write-Host "  DEBUG: 既存プロセス検索開始（tasklist）..." -ForegroundColor DarkGray
 try {
-    $TaskOutput = tasklist /FI "IMAGENAME eq node.exe" /FO CSV /V 2>$null | Out-String
+    $TaskOutput = tasklist /FI "IMAGENAME eq node.exe" /FO CSV 2>$null | Out-String
+    Write-Host "  DEBUG: tasklist 完了" -ForegroundColor DarkGray
     if ($TaskOutput -and $TaskOutput -notmatch "INFO: No tasks") {
         # devrelay を含む node プロセスの PID を抽出して停止
         $TaskOutput -split "`n" | ForEach-Object {
@@ -476,18 +478,23 @@ try {
         }
     }
 } catch {
+    Write-Host "  DEBUG: tasklist エラー: $_" -ForegroundColor DarkGray
     # tasklist も失敗する場合は無視（初回インストール時は既存プロセスなし）
 }
 
 # --- Agent をバックグラウンドで即時起動 ---
 $AgentStarted = $false
 try {
+    Write-Host "  DEBUG: wscript.exe で Agent 起動中..." -ForegroundColor DarkGray
     # wscript.exe で VBS を実行（ウィンドウなしで node が起動する）
     Start-Process -FilePath "wscript.exe" -ArgumentList "`"$VbsPath`""
+    Write-Host "  DEBUG: wscript.exe 起動完了、3秒待機..." -ForegroundColor DarkGray
     Start-Sleep -Seconds 3
 
     # プロセス確認
+    Write-Host "  DEBUG: Get-Process でプロセス確認中..." -ForegroundColor DarkGray
     $NodeProcesses = Get-Process -Name "node" -ErrorAction SilentlyContinue
+    Write-Host "  DEBUG: Get-Process 完了" -ForegroundColor DarkGray
     if ($NodeProcesses) {
         $AgentStarted = $true
         Write-Host "  OK Agent をバックグラウンドで起動しました" -ForegroundColor Green
@@ -496,6 +503,7 @@ try {
     }
     Write-Host "  ログ: $LogFile" -ForegroundColor Yellow
 } catch {
+    Write-Host "  DEBUG: Agent 起動エラー: $_" -ForegroundColor DarkGray
     Write-Host "  X Agent の起動に失敗しました" -ForegroundColor Red
     Write-Host "  手動起動: wscript.exe `"$VbsPath`"" -ForegroundColor Yellow
 }
@@ -519,7 +527,7 @@ Write-Host ""
 
 Write-Host "管理コマンド:" -ForegroundColor Cyan
 Write-Host "  ログ確認:        Get-Content `"$LogFile`" -Tail 50" -ForegroundColor Green
-Write-Host "  停止:            Get-CimInstance Win32_Process -Filter `"Name='node.exe'`" | Where-Object { `$_.CommandLine -like '*devrelay*' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force }" -ForegroundColor Green
+Write-Host "  停止:            tasklist /FI `"IMAGENAME eq node.exe`" /FO CSV 2>`$null | Select-String 'devrelay' | ForEach-Object { if (`$_ -match '`"node\.exe`",`"(\d+)`"') { Stop-Process -Id `$Matches[1] -Force } }" -ForegroundColor Green
 Write-Host "  手動起動:        wscript.exe `"$VbsPath`"" -ForegroundColor Green
 if ($AutoStartRegistered) {
     $StartupVbsPath = Join-Path ([Environment]::GetFolderPath("Startup")) "DevRelay Agent.vbs"

@@ -7,6 +7,12 @@
 ## 実装済み機能
 
 
+### #216: Windows インストーラー Step 6/6 ハング調査（デバッグ出力追加） (2026-04-04)
+- Step 6/6 の各処理ステップに DEBUG 出力を追加（DarkGray 色で表示）
+- `tasklist /FI` の `/V`（verbose）フラグを削除（詳細取得は不要で遅くなる可能性）
+- 完了メッセージの停止コマンドが `Get-CimInstance` のまま残っていたのを `tasklist` ベースに修正
+- **目的**: #215 の修正後もハングが再現するため、tasklist / wscript / Get-Process のどこで止まるか特定する
+
 ### #215: Windows インストーラー Step 6/6 ハング修正 (2026-04-04)
 - `Get-CimInstance Win32_Process`（WMI クエリ）→ `tasklist /FI` に置き換え
 - 企業プロキシ環境で WMI がハングし、既存プロセス検索で無限待機していた問題を修正
