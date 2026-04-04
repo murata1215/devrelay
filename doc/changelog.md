@@ -7,6 +7,11 @@
 ## 実装済み機能
 
 
+### #215: Windows インストーラー Step 6/6 ハング修正 (2026-04-04)
+- `Get-CimInstance Win32_Process`（WMI クエリ）→ `tasklist /FI` に置き換え
+- 企業プロキシ環境で WMI がハングし、既存プロセス検索で無限待機していた問題を修正
+- **根本原因**: WMI は WinRM やセキュリティポリシーの制約でハングすることがあり、tasklist は WMI を経由しないため安全
+
 ### #214: ask/teamexec タイムアウト統一 + HTTP 切断検知 (2026-04-01)
 - ask.sh の curl タイムアウトを mode 別に設定: ask=10分、teamexec=60分（旧: 共通5分）
 - SKILL.MD の Bash timeout 指示を更新: ask=12分、teamexec=61分（curl より長く）
