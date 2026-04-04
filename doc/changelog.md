@@ -7,11 +7,18 @@
 ## 実装済み機能
 
 
+### #217: Windows インストーラー 旧プロセス停止修正 + PID ファイル (2026-04-04)
+- **根本原因**: `tasklist /FO CSV` の出力にはコマンドライン情報がなく、`-match 'devrelay'` が常に失敗 → 旧 Agent プロセスが殺されない → 旧トークンで接続し続ける
+- PID ファイル方式を導入: Agent 起動時に `agent.pid` を書き込み、インストーラーから PID 指定で確実に停止
+- フォールバック: `Get-CimInstance` を `Start-Job` + 5秒タイムアウトで安全実行（ハング回避）
+- Agent に PID ファイル書き込み・削除処理を追加（`agents/linux/src/index.ts`）
+- DEBUG 出力を削除（#216 で原因特定済み）
+- **設計判断**: PID ファイル（高速・確実）を優先し、WMI はタイムアウト付きフォールバックとして残す
+
 ### #216: Windows インストーラー Step 6/6 ハング調査（デバッグ出力追加） (2026-04-04)
-- Step 6/6 の各処理ステップに DEBUG 出力を追加（DarkGray 色で表示）
-- `tasklist /FI` の `/V`（verbose）フラグを削除（詳細取得は不要で遅くなる可能性）
-- 完了メッセージの停止コマンドが `Get-CimInstance` のまま残っていたのを `tasklist` ベースに修正
-- **目的**: #215 の修正後もハングが再現するため、tasklist / wscript / Get-Process のどこで止まるか特定する
+- Step 6/6 の各処理ステップに DEBUG 出力を追加 → `/V` フラグが原因と特定
+- `tasklist /FI` の `/V`（verbose）フラグを削除で解決
+- 完了メッセージの停止コマンドを `Get-CimInstance` → `tasklist` ベースに修正
 
 ### #215: Windows インストーラー Step 6/6 ハング修正 (2026-04-04)
 - `Get-CimInstance Win32_Process`（WMI クエリ）→ `tasklist /FI` に置き換え

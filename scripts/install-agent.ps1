@@ -461,40 +461,60 @@ try {
 }
 
 # --- 既存の Agent プロセスを停止（再インストール対応）---
-# WMI (Get-CimInstance) は企業環境でハングすることがあるため、
-# tasklist で devrelay の node プロセスを検索する（/V フラグなし・高速）
-Write-Host "  DEBUG: 既存プロセス検索開始（tasklist）..." -ForegroundColor DarkGray
-try {
-    $TaskOutput = tasklist /FI "IMAGENAME eq node.exe" /FO CSV 2>$null | Out-String
-    Write-Host "  DEBUG: tasklist 完了" -ForegroundColor DarkGray
-    if ($TaskOutput -and $TaskOutput -notmatch "INFO: No tasks") {
-        # devrelay を含む node プロセスの PID を抽出して停止
-        $TaskOutput -split "`n" | ForEach-Object {
-            if ($_ -match '"node\.exe","(\d+)"' -and $_ -match 'devrelay') {
-                $pid = [int]$Matches[1]
-                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-                Write-Host "  既存の Agent プロセスを停止しました (PID: $pid)" -ForegroundColor Yellow
-            }
+# 方式1: PID ファイルから停止（Agent が起動時に書き込む agent.pid を参照）
+# 方式2: フォールバック — Get-CimInstance をバックグラウンドジョブ + 5秒タイムアウトで実行
+$PidFile = Join-Path $AppDataDir "agent.pid"
+$KilledByPid = $false
+if (Test-Path $PidFile) {
+    try {
+        $OldPid = [int](Get-Content $PidFile -ErrorAction Stop)
+        $OldProc = Get-Process -Id $OldPid -ErrorAction SilentlyContinue
+        if ($OldProc -and $OldProc.Name -eq "node") {
+            Stop-Process -Id $OldPid -Force -ErrorAction SilentlyContinue
+            $KilledByPid = $true
+            Write-Host "  既存の Agent を停止しました (PID: $OldPid, PID ファイル)" -ForegroundColor Yellow
         }
+    } catch {}
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+# PID ファイルで停止できなかった場合、WMI で検索（5秒タイムアウト付き）
+if (-not $KilledByPid) {
+    try {
+        $AgentScript = Join-Path $AgentDir "agents\linux\dist\index.js"
+        $job = Start-Job -ScriptBlock {
+            param($scriptPath)
+            Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -like "*$scriptPath*" -or $_.CommandLine -like "*devrelay*" } |
+                ForEach-Object {
+                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                    $_.ProcessId
+                }
+        } -ArgumentList $AgentScript
+        $completed = Wait-Job $job -Timeout 5
+        if ($completed) {
+            $killedPids = Receive-Job $job
+            if ($killedPids) {
+                $killedPids | ForEach-Object { Write-Host "  既存の Agent を停止しました (PID: $_, WMI)" -ForegroundColor Yellow }
+            }
+        } else {
+            Write-Host "  既存プロセス検索がタイムアウトしました（5秒）— スキップ" -ForegroundColor DarkGray
+        }
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+    } catch {
+        # 初回インストール時は既存プロセスなし — 無視
     }
-} catch {
-    Write-Host "  DEBUG: tasklist エラー: $_" -ForegroundColor DarkGray
-    # tasklist も失敗する場合は無視（初回インストール時は既存プロセスなし）
 }
 
 # --- Agent をバックグラウンドで即時起動 ---
 $AgentStarted = $false
 try {
-    Write-Host "  DEBUG: wscript.exe で Agent 起動中..." -ForegroundColor DarkGray
     # wscript.exe で VBS を実行（ウィンドウなしで node が起動する）
     Start-Process -FilePath "wscript.exe" -ArgumentList "`"$VbsPath`""
-    Write-Host "  DEBUG: wscript.exe 起動完了、3秒待機..." -ForegroundColor DarkGray
     Start-Sleep -Seconds 3
 
     # プロセス確認
-    Write-Host "  DEBUG: Get-Process でプロセス確認中..." -ForegroundColor DarkGray
     $NodeProcesses = Get-Process -Name "node" -ErrorAction SilentlyContinue
-    Write-Host "  DEBUG: Get-Process 完了" -ForegroundColor DarkGray
     if ($NodeProcesses) {
         $AgentStarted = $true
         Write-Host "  OK Agent をバックグラウンドで起動しました" -ForegroundColor Green
@@ -503,7 +523,6 @@ try {
     }
     Write-Host "  ログ: $LogFile" -ForegroundColor Yellow
 } catch {
-    Write-Host "  DEBUG: Agent 起動エラー: $_" -ForegroundColor DarkGray
     Write-Host "  X Agent の起動に失敗しました" -ForegroundColor Red
     Write-Host "  手動起動: wscript.exe `"$VbsPath`"" -ForegroundColor Yellow
 }

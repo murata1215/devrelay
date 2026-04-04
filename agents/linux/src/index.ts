@@ -5,6 +5,7 @@ import { loadProjects, autoDiscoverProjects } from './services/projects.js';
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import os from 'os';
 
 /**
  * devrelay-claude ラッパーを作成する（クロスプラットフォーム対応）
@@ -49,12 +50,47 @@ function ensureDevrelaySymlinks() {
   }
 }
 
+/**
+ * PID ファイルを書き込む（インストーラーからの既存プロセス停止用）
+ * Windows: %APPDATA%\devrelay\agent.pid
+ * Linux/Mac: ~/.devrelay/agent.pid
+ */
+function writePidFile() {
+  const configDir = process.platform === 'win32'
+    ? join(process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming'), 'devrelay')
+    : join(os.homedir(), '.devrelay');
+  const pidFile = join(configDir, 'agent.pid');
+  try {
+    writeFileSync(pidFile, String(process.pid));
+  } catch {
+    // PID ファイル書き込み失敗は致命的ではない
+  }
+}
+
+/**
+ * PID ファイルを削除する（シャットダウン時）
+ */
+function removePidFile() {
+  const configDir = process.platform === 'win32'
+    ? join(process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming'), 'devrelay')
+    : join(os.homedir(), '.devrelay');
+  const pidFile = join(configDir, 'agent.pid');
+  try {
+    unlinkSync(pidFile);
+  } catch {
+    // 既に削除済みの場合は無視
+  }
+}
+
 async function main() {
   console.log(`
 ┌─────────────────────────────────────────────────┐
 │  DevRelay Agent                                │
 └─────────────────────────────────────────────────┘
   `);
+
+  // PID ファイル書き込み（インストーラーからの停止用）
+  writePidFile();
 
   // Load config
   const config = await loadConfig();
@@ -86,6 +122,12 @@ async function main() {
 // Handle shutdown
 process.on('SIGINT', () => {
   console.log('\n👋 Shutting down...');
+  removePidFile();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  removePidFile();
   process.exit(0);
 });
 
