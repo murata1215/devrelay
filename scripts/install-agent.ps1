@@ -461,14 +461,22 @@ try {
 }
 
 # --- 既存の Agent プロセスを停止（再インストール対応）---
-# Get-Process では VBS→CMD→node 経由の間接起動時に CommandLine が空になるため、
-# WMI (Get-CimInstance) を使用してフルコマンドラインを取得する
-$ExistingAgents = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*devrelay*' }
-if ($ExistingAgents) {
-    $ExistingAgents | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-    Write-Host "  既存の Agent プロセスを停止しました" -ForegroundColor Yellow
-    Start-Sleep -Seconds 2
+# WMI (Get-CimInstance) は企業環境でハングすることがあるため、
+# tasklist + findstr で devrelay の node プロセスを検索する（タイムアウトなし・高速）
+try {
+    $TaskOutput = tasklist /FI "IMAGENAME eq node.exe" /FO CSV /V 2>$null | Out-String
+    if ($TaskOutput -and $TaskOutput -notmatch "INFO: No tasks") {
+        # devrelay を含む node プロセスの PID を抽出して停止
+        $TaskOutput -split "`n" | ForEach-Object {
+            if ($_ -match '"node\.exe","(\d+)"' -and $_ -match 'devrelay') {
+                $pid = [int]$Matches[1]
+                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                Write-Host "  既存の Agent プロセスを停止しました (PID: $pid)" -ForegroundColor Yellow
+            }
+        }
+    }
+} catch {
+    # tasklist も失敗する場合は無視（初回インストール時は既存プロセスなし）
 }
 
 # --- Agent をバックグラウンドで即時起動 ---
