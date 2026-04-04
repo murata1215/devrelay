@@ -463,7 +463,7 @@ try {
 # --- 既存の Agent プロセスを停止（再インストール対応）---
 # 方式1: PID ファイルから停止（Agent が起動時に書き込む agent.pid を参照）
 # 方式2: フォールバック — Get-CimInstance をバックグラウンドジョブ + 5秒タイムアウトで実行
-$PidFile = Join-Path $AppDataDir "agent.pid"
+$PidFile = Join-Path $ConfigDir "agent.pid"
 $KilledByPid = $false
 if (Test-Path $PidFile) {
     try {
