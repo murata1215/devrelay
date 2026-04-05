@@ -7,6 +7,19 @@
 ## 実装済み機能
 
 
+### #220: Windows Agent の ask/teamexec が 400 エラーになるバグ修正 (2026-04-05)
+- **根本原因**: Windows (Git Bash) + 企業プロキシ環境で `curl -d "$JSON_BODY"` が Content-Length 不一致を起こす
+- `jq` 出力の CRLF を `tr -d '\r'` で除去（Windows 改行コード対策）
+- `curl -d "$JSON_BODY"` → `printf '%s' "$JSON_BODY" | curl -d @-` に変更（パイプ渡しで Content-Length を確実に一致）
+- Linux/macOS Agent の ask.sh テンプレート（skill-manager.ts）両方を修正
+
+### #219: メッセージ重複表示修正 — DB messageId による ID ベース重複排除 (2026-04-05)
+- **根本原因**: WS メッセージにクライアント生成 ID (msg_123)、API に DB ID (cuid) → マージで重複検出不可。また DB に本文のみ保存、WS は contextInfo（📊 Rate Limit）付きで配信 → コンテンツ不一致
+- `web:response` / `web:user_message` に DB の `messageId` を付与（サーバー → クライアント）
+- クライアントが `messageId` をメッセージ ID として使用（API 取得時の ID と一致）
+- DB に contextInfo + output を保存（WS 配信内容と一致）
+- **設計判断**: ID ベース重複排除が最も確実。コンテンツ比較は 30 秒窓フォールバックとして残す
+
 ### #218: macOS Agent の `u` コマンドが自分自身をビルドしていないバグ修正 (2026-04-05)
 - **根本原因**: macOS Agent の更新スクリプト（buildSteps）が `pnpm --filter @devrelay/agent build` を実行 → Linux Agent（`@devrelay/agent`）のみビルドし、macOS Agent（`@devrelay/agent-macos`）がビルドされない
 - `pnpm --filter @devrelay/agent build` → `pnpm --filter @devrelay/agent-macos build` に修正

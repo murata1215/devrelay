@@ -83,6 +83,8 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Windows Installer Debug Logging**: Added DEBUG output to step 6/6 to identify remaining hang points — removed `/V` flag from tasklist, fixed stale `Get-CimInstance` in completion message
 - **Windows Installer PID-based Process Kill**: Fixed old agent process never being killed on reinstall — `tasklist /FO CSV` output doesn't contain command line, so `-match 'devrelay'` always failed. Now uses PID file (`agent.pid`) with WMI timeout fallback
 - **macOS Agent Update Build Fix**: Fixed `u` command building Linux agent (`@devrelay/agent`) instead of macOS agent (`@devrelay/agent-macos`) — caused all post-#196 features (skipPermissions, disableAsk) to not work on macOS
+- **Message Dedup with DB IDs**: Fixed message duplication on tab switch — server now sends DB messageId in WS payloads, client uses it for exact dedup. DB also stores contextInfo (📊 Rate Limit) with output
+- **Windows Ask/TeamExec Fix**: Fixed 400 Content-Length mismatch on Windows Git Bash + proxy — strips CRLF from jq output, uses pipe-based curl body delivery
 
 ## 💡 Token Efficiency
 
