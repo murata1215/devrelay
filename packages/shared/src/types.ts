@@ -643,10 +643,10 @@ export type WebClientMessage =
 
 /** サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示） */
 export type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string } }
+  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string; messageId?: string } }
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
-  | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string } }
+  | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string; messageId?: string } }
   | { type: 'web:tool:approval'; payload: ToolApprovalPromptPayload }
   | { type: 'web:tool:approval:resolved'; payload: { requestId: string; behavior: 'allow' | 'deny'; projectId?: string } }
   | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string } }

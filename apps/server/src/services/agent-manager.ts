@@ -21,7 +21,7 @@ import {
   type Platform,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo } from './session-manager.js';
 import { sendWebRawMessage, broadcastWebRawMessage } from '../platforms/web.js';
 import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApprovalAuto } from '../platforms/discord.js';
 import { sendTelegramToolApproval, resolveTelegramToolApproval, sendTelegramToolApprovalAuto } from '../platforms/telegram.js';
@@ -524,11 +524,14 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
     }
 
     // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
+    // contextInfo（📊 Rate Limit 等）を含めて保存（WS 配信内容と DB 内容を一致させる）
+    const contextPrefix = getSessionContextInfo(sessionId);
+    const contentWithContext = contextPrefix + output;
     const aiMessage = await prisma.message.create({
       data: {
         sessionId,
         role: 'ai',
-        content: output,
+        content: contentWithContext,
         platform: 'system',
         usageData: usageData ?? undefined,
         files: files && files.length > 0 ? {
@@ -597,8 +600,8 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
       console.log(`📎 Received ${files.length} file(s) from agent for session ${sessionId}`);
     }
 
-    // Finalize progress with final message
-    await finalizeProgress(sessionId, output, files);
+    // Finalize progress with final message（DB メッセージ ID を付与して WS 配信）
+    await finalizeProgress(sessionId, output, files, aiMessage.id);
   } else {
     // Append partial output to progress buffer
     appendSessionOutput(sessionId, output);

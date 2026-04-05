@@ -31,10 +31,10 @@ export interface ToolApprovalAuto {
 
 /** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用） */
 type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
+  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; messageId?: string } }
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
-  | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string } }
+  | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; messageId?: string } }
   | { type: 'web:tool:approval'; payload: ToolApprovalPrompt }
   | { type: 'web:tool:approval:resolved'; payload: ToolApprovalResolved }
   | { type: 'web:tool:approval:auto'; payload: ToolApprovalAuto }
@@ -59,7 +59,7 @@ export interface ProgressInfo {
 
 /** コールバック設定（projectId: 対象タブ特定用、省略時はアクティブタブ） */
 export interface WebSocketCallbacks {
-  onMessage?: (msg: Omit<ChatMessage, 'id' | 'timestamp'>, projectId?: string) => void;
+  onMessage?: (msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string) => void;
   onProgress?: (info: ProgressInfo, projectId?: string) => void;
   onProgressClear?: (projectId?: string) => void;
   onSessionInfo?: (projectId: string, sessionId: string) => void;
@@ -166,7 +166,7 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
             case 'web:response':
               cb?.onProgressClear?.(msg.payload.projectId);
               if (msg.payload.message) {
-                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files }, msg.payload.projectId);
+                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files, messageId: msg.payload.messageId }, msg.payload.projectId);
               }
               break;
             case 'web:progress':
@@ -177,7 +177,7 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
               break;
             case 'web:user_message':
               // 他タブ/ウィンドウからのユーザーメッセージ
-              cb?.onMessage?.({ role: 'user', content: msg.payload.content, files: msg.payload.files }, msg.payload.projectId);
+              cb?.onMessage?.({ role: 'user', content: msg.payload.content, files: msg.payload.files, messageId: msg.payload.messageId }, msg.payload.projectId);
               break;
             case 'web:tool:approval':
               cb?.onToolApproval?.(msg.payload);

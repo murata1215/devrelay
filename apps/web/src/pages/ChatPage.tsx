@@ -2219,7 +2219,7 @@ export function ChatPage() {
   /**
    * メッセージをタブに追加（projectId で対象タブを特定、省略時はアクティブタブ）
    */
-  const addMessageToTab = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'>, projectId?: string) => {
+  const addMessageToTab = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string) => {
     // projectId が指定され、該当タブがある場合はそのタブに追加
     const targetId = projectId
       ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
@@ -2237,11 +2237,16 @@ export function ChatPage() {
       }
     }
 
-    // メッセージ重複防止（loadHistory の API メッセージ + WS リアルタイム配信の重複スキップ）
-    // 新しいタブを開くと //connect → loadHistory → WS 配信で同じメッセージが届くため
+    // メッセージ重複防止
     {
       const tab = tabsRef.current.find(t => t.projectId === targetId);
       if (tab && tab.messages.length > 0) {
+        // ID ベース重複排除: サーバーから DB messageId が送られてきた場合、既存メッセージと完全一致チェック
+        if (msg.messageId && tab.messages.some(m => m.id === msg.messageId)) {
+          console.log(`[addMessageToTab] dedup: skipped by messageId (${msg.messageId.substring(0, 12)}...)`);
+          return;
+        }
+        // フォールバック: コンテンツベース重複排除（messageId がない場合）
         const recentMsgs = tab.messages.slice(-5);
         const isDuplicate = recentMsgs.some(m =>
           m.role === msg.role && m.content === msg.content &&
@@ -2258,7 +2263,7 @@ export function ChatPage() {
     if (targetId === activeTabIdRef.current) {
       shouldAutoScrollRef.current = true;
     }
-    const newMsg: ChatMessage = { ...msg, id: nextMessageId(), timestamp: new Date() };
+    const newMsg: ChatMessage = { ...msg, id: msg.messageId || nextMessageId(), timestamp: new Date() };
     setTabs(prev => prev.map(t => {
       if (t.projectId !== targetId) return t;
       const updated = [...t.messages, newMsg];

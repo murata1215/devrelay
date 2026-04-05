@@ -15,7 +15,7 @@ const webClients = new Map<string, WebSocket>();
 const typingStates = new Map<string, boolean>();
 
 /** WS 不在時の未送信レスポンスキュー: chatId -> メッセージ配列 */
-const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string }>>();
+const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string; messageId?: string }>>();
 
 /**
  * Web クライアントの WebSocket 接続をセットアップする
@@ -240,14 +240,14 @@ export async function setupWebClientWebSocket(
  * session-manager.ts の sendMessage() から呼ばれる
  * @param projectId メッセージのルーティング先タブ特定用（省略時はアクティブタブに表示）
  */
-export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[], projectId?: string | null) {
+export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[], projectId?: string | null, messageId?: string) {
   const ws = webClients.get(chatId);
   if (ws && ws.readyState === ws.OPEN) {
-    sendJson(ws, { type: 'web:response', payload: { message, files, projectId: projectId ?? undefined } });
+    sendJson(ws, { type: 'web:response', payload: { message, files, projectId: projectId ?? undefined, messageId } });
   } else {
     // WS 不在 → キューに保存（再接続時にフラッシュ）
     const queue = pendingMessages.get(chatId) || [];
-    queue.push({ message, files, projectId: projectId ?? undefined });
+    queue.push({ message, files, projectId: projectId ?? undefined, messageId });
     pendingMessages.set(chatId, queue);
     console.log(`📥 Queued message for offline client ${chatId} (${queue.length} pending)`);
   }

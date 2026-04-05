@@ -448,8 +448,13 @@ export function stopProgressTracking(sessionId: string) {
   }
 }
 
+/** セッションの contextInfo（📊 Rate Limit 等）を取得する */
+export function getSessionContextInfo(sessionId: string): string {
+  return progressTrackers.get(sessionId)?.contextInfo || '';
+}
+
 // Finalize progress with final message
-export async function finalizeProgress(sessionId: string, finalMessage: string, files?: FileAttachment[]) {
+export async function finalizeProgress(sessionId: string, finalMessage: string, files?: FileAttachment[], messageId?: string) {
   const tracker = progressTrackers.get(sessionId);
   const participants = sessionParticipants.get(sessionId) || [];
 
@@ -503,7 +508,7 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       stopWebTyping(chatId);
       // tracker の projectId がない場合は sessionProjectMap からフォールバック
       const finalProjectId = tracker?.projectId ?? sessionProjectMap.get(sessionId);
-      await sendWebMessage(chatId, messageToSend, files, finalProjectId);
+      await sendWebMessage(chatId, messageToSend, files, finalProjectId, messageId);
     }
   }
 
