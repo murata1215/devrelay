@@ -2144,7 +2144,17 @@ export function ChatPage() {
           // API 最古より古い stale メッセージを除外（再接続時の古いメッセージ蓄積防止）
           const apiIds = new Set(chatMessages.map(m => m.id));
           const oldestApiTime = chatMessages.length > 0 ? chatMessages[0].timestamp.getTime() : Date.now();
-          const wsOnlyMsgs = t.messages.filter(m => !apiIds.has(m.id) && m.timestamp.getTime() >= oldestApiTime);
+          const wsOnlyMsgs = t.messages.filter(m => {
+            if (apiIds.has(m.id)) return false;  // ID 一致 → API にある
+            if (m.timestamp.getTime() < oldestApiTime) return false;  // 古すぎる → stale
+            // コンテンツ重複排除: クライアント生成 ID と DB ID が異なる場合でも、
+            // 同じ role+content のメッセージが API にあればスキップ（タブ切替時の重複防止）
+            const isContentDup = chatMessages.some(api =>
+              api.role === m.role && api.content === m.content &&
+              Math.abs(api.timestamp.getTime() - m.timestamp.getTime()) < 60000
+            );
+            return !isContentDup;
+          });
           const merged = [...chatMessages, ...wsOnlyMsgs].sort(
             (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
           );
