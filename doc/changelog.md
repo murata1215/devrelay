@@ -7,6 +7,11 @@
 ## 実装済み機能
 
 
+### #218: macOS Agent の `u` コマンドが自分自身をビルドしていないバグ修正 (2026-04-05)
+- **根本原因**: macOS Agent の更新スクリプト（buildSteps）が `pnpm --filter @devrelay/agent build` を実行 → Linux Agent（`@devrelay/agent`）のみビルドし、macOS Agent（`@devrelay/agent-macos`）がビルドされない
+- `pnpm --filter @devrelay/agent build` → `pnpm --filter @devrelay/agent-macos build` に修正
+- これにより skipPermissions 等の新機能が macOS Agent の dist に反映されず、WebUI のトグルが効かなかった問題が解決
+
 ### #217: Windows インストーラー 旧プロセス停止修正 + PID ファイル (2026-04-04)
 - **根本原因**: `tasklist /FO CSV` の出力にはコマンドライン情報がなく、`-match 'devrelay'` が常に失敗 → 旧 Agent プロセスが殺されない → 旧トークンで接続し続ける
 - PID ファイル方式を導入: Agent 起動時に `agent.pid` を書き込み、インストーラーから PID 指定で確実に停止

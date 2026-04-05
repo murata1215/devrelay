@@ -1987,7 +1987,7 @@ async function handleAgentUpdate() {
       runAndLog('git reset', 'git reset --hard $REMOTE_BRANCH'),
       runAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
-      runAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
+      runAndLog('agent build', 'pnpm --filter @devrelay/agent-macos build'),
     ].join('; ');
 
     // nohup の場合: restartCmd.command をそのまま使うと、bash -c の cmdline に

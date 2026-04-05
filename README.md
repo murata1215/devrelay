@@ -82,6 +82,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Windows Installer WMI Fix**: Replaced `Get-CimInstance Win32_Process` with `tasklist /FI` in `install-agent.ps1` — fixes infinite hang at step 6/6 in corporate proxy environments where WMI queries are blocked
 - **Windows Installer Debug Logging**: Added DEBUG output to step 6/6 to identify remaining hang points — removed `/V` flag from tasklist, fixed stale `Get-CimInstance` in completion message
 - **Windows Installer PID-based Process Kill**: Fixed old agent process never being killed on reinstall — `tasklist /FO CSV` output doesn't contain command line, so `-match 'devrelay'` always failed. Now uses PID file (`agent.pid`) with WMI timeout fallback
+- **macOS Agent Update Build Fix**: Fixed `u` command building Linux agent (`@devrelay/agent`) instead of macOS agent (`@devrelay/agent-macos`) — caused all post-#196 features (skipPermissions, disableAsk) to not work on macOS
 
 ## 💡 Token Efficiency
 
