@@ -340,14 +340,16 @@ if command -v jq &>/dev/null; then
   echo ""
 
   # jq で安全に JSON を構築（shell エスケープの問題を回避）
-  JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}')
+  # tr -d '\\r' で Windows CRLF を除去（Git Bash + プロキシ環境での Content-Length 不一致防止）
+  JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}' | tr -d '\\r')
 
   # 送信（ask: 10分、teamexec: 60分）
-  RESPONSE=$(curl -s -f -w "\\n%{http_code}" --max-time $CURL_TIMEOUT \\
+  # printf + curl -d @- でパイプ渡し（Content-Length を確実に一致させる）
+  RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -f -w "\\n%{http_code}" --max-time $CURL_TIMEOUT \\
     -X POST \\
     -H "Content-Type: application/json" \\
     -H "Authorization: Bearer $TOKEN" \\
-    -d "$JSON_BODY" \\
+    -d @- \\
     "$API_ENDPOINT" 2>&1) || {
     echo "エラー: \${MODE_LABEL}に失敗しました（タイムアウトまたは接続エラー）"
     echo "$RESPONSE"
