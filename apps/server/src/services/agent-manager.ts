@@ -413,7 +413,7 @@ async function handleAgentConnect(
     }
   });
 
-  console.log(`✅ Agent connected: ${updatedName} (${machine.id})`);
+  console.log(`✅ Agent connected: ${updatedName} (${machine.id}) skipPermissions=${machine.skipPermissions} disableAsk=${machine.disableAsk}`);
 
   // Agent再接続時にセッション参加者を復元（切断前のセッションを継続可能にする）
   await restoreSessionParticipantsForMachine(machine.id);
@@ -1347,6 +1347,7 @@ export async function clearConversation(machineId: string, sessionId: string, pr
 export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string) {
   // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
   const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
+  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}`);
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
     payload: { sessionId, projectPath, userId, prompt, skipPermissions: machine?.skipPermissions ?? false, disableAsk: machine?.disableAsk ?? false }
