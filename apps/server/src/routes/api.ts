@@ -22,6 +22,10 @@ import {
   savePushSubscription,
   removePushSubscription,
 } from '../services/push-notification-service.js';
+import {
+  saveFcmToken,
+  removeFcmToken,
+} from '../services/fcm-service.js';
 
 const execAsync = promisify(exec);
 
@@ -1920,6 +1924,32 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     await removePushSubscription(userId, endpoint);
+    return reply.send({ success: true });
+  });
+
+  /** FCM トークンを登録（モバイルアプリ用） */
+  app.post('/api/push/fcm/subscribe', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { fcmToken, platform } = request.body as { fcmToken: string; platform: 'ios' | 'android' };
+
+    if (!fcmToken || !platform) {
+      return reply.status(400).send({ error: 'fcmToken and platform required' });
+    }
+
+    await saveFcmToken(userId, fcmToken, platform);
+    return reply.send({ success: true });
+  });
+
+  /** FCM トークンを削除（モバイルアプリ用） */
+  app.post('/api/push/fcm/unsubscribe', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { fcmToken } = request.body as { fcmToken: string };
+
+    if (!fcmToken) {
+      return reply.status(400).send({ error: 'fcmToken required' });
+    }
+
+    await removeFcmToken(userId, fcmToken);
     return reply.send({ success: true });
   });
 

@@ -22,6 +22,7 @@ import {
   editWebMessage
 } from '../platforms/web.js';
 import { sendPushNotificationForSession } from './push-notification-service.js';
+import { sendFcmNotificationForSession } from './fcm-service.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
@@ -514,8 +515,10 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
 
   progressTrackers.delete(sessionId);
 
-  // Web プッシュ通知（タブが閉じていても届く）
+  // プッシュ通知（タブが閉じていても届く）
   sendPushNotificationForSession(sessionId, messageToSend).catch(() => {});
+  // FCM プッシュ通知（モバイルアプリ用）
+  sendFcmNotificationForSession(sessionId, messageToSend).catch(() => {});
 }
 
 export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[], projectId?: string | null) {

@@ -15,6 +15,7 @@ import { registerDocumentApiRoutes } from './routes/document-api.js';
 import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
 import { decrypt } from './services/user-settings.js';
 import { initVapid } from './services/push-notification-service.js';
+import { initFcm } from './services/fcm-service.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -60,6 +61,9 @@ async function main() {
 
   // Web Push 通知の VAPID キー初期化
   initVapid();
+
+  // FCM（Firebase Cloud Messaging）初期化
+  await initFcm();
 
   // Plugins
   await app.register(cors, { origin: true });

@@ -26,6 +26,7 @@ import { sendWebRawMessage, broadcastWebRawMessage } from '../platforms/web.js';
 import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApprovalAuto } from '../platforms/discord.js';
 import { sendTelegramToolApproval, resolveTelegramToolApproval, sendTelegramToolApprovalAuto } from '../platforms/telegram.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
+import { sendFcmNotificationForToolApproval } from './fcm-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
 import { generateToolRule } from './tool-format.js';
@@ -1795,6 +1796,12 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
     payload: approvalPayload,
   });
   broadcastToolApprovalToPlatforms(sessionId, approvalPayload);
+
+  // FCM プッシュ通知（モバイルアプリ用、AskUserQuestion 含むツール承認待ち）
+  if (userId && projectId) {
+    const projectName = getMachineDisplayName(machineId) || 'Unknown';
+    sendFcmNotificationForToolApproval(userId, toolName, projectName, sessionId, projectId).catch(() => {});
+  }
 }
 
 /**

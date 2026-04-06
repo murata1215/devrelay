@@ -41,6 +41,8 @@ export const SettingKeys = {
   TAB_NAMES: 'tab_names',
   /** プッシュ通知購読情報（JSON 配列） */
   PUSH_SUBSCRIPTIONS: 'push_subscriptions',
+  /** FCM トークン情報（JSON 配列） */
+  FCM_TOKENS: 'fcm_tokens',
   /** チャットサーバー定義（ChatServer[] の JSON 文字列） */
   CHAT_SERVERS: 'chat_servers',
   /** アクティブサーバー ID（サーバー未選択時は空文字列） */
