@@ -23,6 +23,7 @@ import {
 } from '../platforms/web.js';
 import { sendPushNotificationForSession } from './push-notification-service.js';
 import { sendFcmNotificationForSession } from './fcm-service.js';
+import { createNotification } from './notification-service.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
@@ -519,6 +520,17 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
   sendPushNotificationForSession(sessionId, messageToSend).catch(() => {});
   // FCM プッシュ通知（モバイルアプリ用）
   sendFcmNotificationForSession(sessionId, messageToSend).catch(() => {});
+
+  // 通知レコード作成（モバイルアプリの通知一覧用）
+  prisma.session.findUnique({ where: { id: sessionId }, include: { project: true } })
+    .then(session => {
+      if (session) {
+        const projectName = session.project?.displayName || session.project?.name || 'Unknown';
+        const body = messageToSend.length > 200 ? messageToSend.slice(0, 200) + '...' : messageToSend;
+        createNotification(session.userId, 'response', session.projectId, projectName, `✅ ${projectName}`, body).catch(() => {});
+      }
+    })
+    .catch(() => {});
 }
 
 export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[], projectId?: string | null) {

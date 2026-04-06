@@ -26,6 +26,11 @@ import {
   saveFcmToken,
   removeFcmToken,
 } from '../services/fcm-service.js';
+import {
+  getNotifications,
+  markAllAsRead,
+  getUnreadCount,
+} from '../services/notification-service.js';
 
 const execAsync = promisify(exec);
 
@@ -1951,6 +1956,30 @@ export async function apiRoutes(app: FastifyInstance) {
 
     await removeFcmToken(userId, fcmToken);
     return reply.send({ success: true });
+  });
+
+  // ─── 通知 API（モバイルアプリの通知一覧・バッジ管理）───
+
+  /** 通知一覧取得（カーソルベースページネーション、新しい順） */
+  app.get('/api/notifications', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { limit, before } = request.query as { limit?: string; before?: string };
+    const result = await getNotifications(userId, limit ? parseInt(limit) : 50, before);
+    return reply.send(result);
+  });
+
+  /** 全未読通知を既読にする */
+  app.post('/api/notifications/read-all', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const readCount = await markAllAsRead(userId);
+    return reply.send({ readCount });
+  });
+
+  /** 未読通知数を取得 */
+  app.get('/api/notifications/unread-count', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const count = await getUnreadCount(userId);
+    return reply.send({ count });
   });
 
   // ========================================

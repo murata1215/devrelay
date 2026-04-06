@@ -27,6 +27,7 @@ import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApp
 import { sendTelegramToolApproval, resolveTelegramToolApproval, sendTelegramToolApprovalAuto } from '../platforms/telegram.js';
 import { summarizeBuildOutput } from './build-summarizer.js';
 import { sendFcmNotificationForToolApproval } from './fcm-service.js';
+import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
 import { generateToolRule } from './tool-format.js';
@@ -1797,10 +1798,13 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
   });
   broadcastToolApprovalToPlatforms(sessionId, approvalPayload);
 
-  // FCM プッシュ通知（モバイルアプリ用、AskUserQuestion 含むツール承認待ち）
+  // FCM プッシュ通知 + 通知レコード作成（モバイルアプリ用）
   if (userId && projectId) {
     const projectName = getMachineDisplayName(machineId) || 'Unknown';
     sendFcmNotificationForToolApproval(userId, toolName, projectName, sessionId, projectId).catch(() => {});
+    // 通知レコード作成（通知一覧用）
+    const toolDesc = isQuestion ? `質問: ${(toolInput as any)?.question || toolName}` : `${toolName}`;
+    createNotification(userId, 'approval', projectId, projectName, '🔐 承認待ち', toolDesc).catch(() => {});
   }
 }
 

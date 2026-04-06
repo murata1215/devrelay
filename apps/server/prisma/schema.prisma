@@ -30,6 +30,7 @@ model User {
   devReports          DevReport[]
   testflightServices  TestflightService[]
   teams               Team[]
+  notifications       Notification[]
 }
 
 // WebUI 認証セッション
@@ -116,6 +117,7 @@ model Project {
   buildLogs      BuildLog[]
   teamMembers    TeamMember[]
   toolApprovals  ToolApproval[]
+  notifications  Notification[]
 
   @@unique([machineId, name])
 }
@@ -336,4 +338,22 @@ model ToolApproval {
 
   @@index([projectId, createdAt])
   @@index([sessionId])
+}
+
+// プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理用）
+model Notification {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  type        String   // 'response' | 'approval' | 'error'
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id])
+  projectName String   // 非正規化（表示用、JOIN 不要にするため）
+  title       String
+  body        String   @default("")
+  isRead      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, isRead])
 }
