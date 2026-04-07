@@ -1968,8 +1968,18 @@ export async function apiRoutes(app: FastifyInstance) {
     return reply.send(result);
   });
 
-  /** 全未読通知を既読にする */
-  app.post('/api/notifications/read-all', { preHandler: [authenticate] }, async (request, reply) => {
+  /** 全未読通知を既読にする（空ボディ許容: Flutter が Content-Type: application/json でボディなしで送信するため） */
+  app.post('/api/notifications/read-all', {
+    preHandler: [authenticate],
+    // 空ボディ時に Fastify の JSON パーサーが 400 を返すのを防止
+    onRequest: async (request) => {
+      const contentLength = request.headers['content-length'];
+      if (!contentLength || contentLength === '0') {
+        // Content-Type を除去して JSON パーサーをスキップ
+        delete (request.headers as any)['content-type'];
+      }
+    },
+  }, async (request, reply) => {
     const userId = (request as any).user.id as string;
     const readCount = await markAllAsRead(userId);
     return reply.send({ readCount });
