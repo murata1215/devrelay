@@ -7,6 +7,21 @@
 ## 実装済み機能
 
 
+### #222: 通知 API + FCM プッシュ通知 (2026-04-07)
+- `Notification` DB テーブル追加（userId, type, projectId, projectName, title, body, isRead, createdAt）
+- 通知サービス（`notification-service.ts`）: 作成、一覧取得（カーソルページネーション）、全既読化、未読数取得
+- API エンドポイント: `GET /api/notifications`, `POST /api/notifications/read-all`, `GET /api/notifications/unread-count`
+- 通知レコード生成: AI 処理完了時（type=response）、ツール承認待ち時（type=approval）
+- `POST /api/notifications/read-all` の空ボディ 400 エラー修正（Flutter の Content-Type: application/json + 空ボディ対応）
+
+### #221: FCM（Firebase Cloud Messaging）モバイルプッシュ通知 (2026-04-05)
+- `firebase-admin` パッケージ追加、`fcm-service.ts` 新規作成
+- API エンドポイント: `POST /api/push/fcm/subscribe`, `POST /api/push/fcm/unsubscribe`
+- 通知トリガー: AI 処理完了（✅ projectName）、ツール承認待ち（🔐 ツール名）
+- iOS/Android 固有設定（APNs sound/badge、Android channel）
+- `FIREBASE_SERVICE_ACCOUNT_PATH` 未設定時は無効化（グレースフルデグラデーション）
+- 無効トークン自動削除（`messaging/registration-token-not-registered`）
+
 ### #220: Windows Agent の ask/teamexec が 400 エラーになるバグ修正 (2026-04-05)
 - **根本原因**: Windows (Git Bash) + 企業プロキシ環境で `curl -d "$JSON_BODY"` が Content-Length 不一致を起こす
 - `jq` 出力の CRLF を `tr -d '\r'` で除去（Windows 改行コード対策）

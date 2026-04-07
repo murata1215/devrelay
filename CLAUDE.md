@@ -54,6 +54,7 @@ pm2 restart devrelay-server devrelay-agent
 | DISCORD_BOT_TOKEN | Discord Bot |
 | TELEGRAM_BOT_TOKEN | Telegram Bot |
 | ENCRYPTION_KEY | API キー暗号化 |
+| FIREBASE_SERVICE_ACCOUNT_PATH | FCM プッシュ通知用サービスアカウント JSON |
 
 ## DB テーブル（概要）
 
@@ -72,6 +73,7 @@ pm2 restart devrelay-server devrelay-agent
 | Team | 名前付きチーム（クロスプロジェクトクエリ用グループ） |
 | TeamMember | チーム内プロジェクト（Team → Project 参照） |
 | ToolApproval | ツール承認履歴（exec モードの canUseTool 記録） |
+| Notification | プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理） |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`
