@@ -148,7 +148,12 @@ function replacePlaceholders(content: string, name: string, port: number): strin
 /**
  * Phaser テンプレートを展開（ファイル生成 + pnpm install + build + PM2 起動）
  */
-async function deployPhaserTemplate(name: string, directory: string, port: number): Promise<void> {
+async function deployPhaserTemplate(
+  name: string,
+  directory: string,
+  port: number,
+  databaseUrl: string
+): Promise<void> {
   console.log(`🎮 testflight [${name}]: deploying phaser template...`);
 
   // テンプレートファイルを展開
@@ -184,8 +189,14 @@ async function deployPhaserTemplate(name: string, directory: string, port: numbe
   console.log(`🎮 testflight [${name}]: pnpm install done`);
 
   // Prisma DB push（スキーマを DB に反映）
+  // 親プロセス（devrelay-server）の DATABASE_URL は本体 devrelay DB を指すので、
+  // 必ず testflight 個別の DATABASE_URL を明示注入する（過去に本体 DB を wipe した事故あり）
   console.log(`🎮 testflight [${name}]: running prisma db push...`);
-  await execAsync('npx prisma db push --skip-generate --accept-data-loss', { cwd: directory, timeout: 60000 });
+  await execAsync('npx prisma db push --skip-generate --accept-data-loss', {
+    cwd: directory,
+    timeout: 60000,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+  });
   console.log(`🎮 testflight [${name}]: prisma db push done`);
 
   // pnpm build（初回ビルド確認）
@@ -354,7 +365,8 @@ export async function createTestflightService(userId: string, name: string, temp
     // 9.5. テンプレート展開（Phaser 等）
     if (template === 'phaser') {
       try {
-        await deployPhaserTemplate(name, directory, port);
+        const databaseUrl = `postgresql://${name}_user:${dbPassword}@localhost:5432/${name}`;
+        await deployPhaserTemplate(name, directory, port, databaseUrl);
       } catch (tmplError: any) {
         console.error(`❌ testflight [${name}]: phaser template deploy failed:`, tmplError.message);
         // テンプレート展開失敗してもサービス自体は作成済み。プレースホルダーにフォールバック

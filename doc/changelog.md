@@ -7,6 +7,15 @@
 ## 実装済み機能
 
 
+### #224: testflight アクションゲーム (knightmare) + バグ修正 (2026-05-05)
+- **testflight knightmare**: 魔城伝説風の1人プレイ縦スクロールアクションゲームを作成
+  - Phaser 3 Arcade Physics、プログラム生成グラフィクス（外部画像不要）
+  - スマホ仮想パッド（左: ジョイスティック移動 / 右: 攻撃ボタン）
+  - 敵3種 + ボス戦 + パワーアップ4種（Speed/Weapon/Shield/1UP）
+  - URL: https://knightmare.devrelay.io
+- **セッション重複開始の修正**: `startAiSession()` で既存セッション検知時に throw → ログ出力 + return（race condition 対策）
+- **testflight DATABASE_URL 注入**: `deployPhaserTemplate()` の `prisma db push` に個別 DATABASE_URL を明示注入（本体 DB wipe 事故の再発防止）
+
 ### #222: 通知 API + FCM プッシュ通知 (2026-04-07)
 - `Notification` DB テーブル追加（userId, type, projectId, projectName, title, body, isRead, createdAt）
 - 通知サービス（`notification-service.ts`）: 作成、一覧取得（カーソルページネーション）、全既読化、未読数取得

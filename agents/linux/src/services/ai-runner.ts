@@ -56,9 +56,10 @@ export async function startAiSession(
   // 前の会話で approveAllMode が有効でも、新会話では改めて承認を要求する
   resetApproveAllMode();
 
-  // Check if session already exists
+  // Check if session already exists (race condition between session:start and ai:prompt)
   if (activeSessions.has(sessionId)) {
-    throw new Error(`Session already exists: ${sessionId}`);
+    console.log(`⚠️ Session already exists, skipping duplicate start: ${sessionId}`);
+    return;
   }
 
   // Get AI tool command
