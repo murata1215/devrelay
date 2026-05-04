@@ -87,7 +87,7 @@ export async function statusCommand() {
   console.log('AI Tools:');
   console.log(`   Default: ${config.aiTools.default}`);
 
-  const tools = ['claude', 'gemini', 'codex', 'aider'] as const;
+  const tools = ['claude', 'gemini', 'codex', 'aider', 'devin'] as const;
   for (const tool of tools) {
     const toolConfig = config.aiTools[tool];
     if (toolConfig) {

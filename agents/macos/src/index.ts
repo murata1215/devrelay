@@ -1,4 +1,4 @@
-import { loadConfig } from './services/config.js';
+import { loadConfig, detectAndUpdateAiTools } from './services/config.js';
 import { getBinDir } from './services/config.js';
 import { connectToServer } from './services/connection.js';
 import { loadProjects, autoDiscoverProjects } from './services/projects.js';
@@ -66,6 +66,9 @@ async function main() {
 
   console.log(`📡 Machine: ${config.machineName}`);
   console.log(`🔗 Server: ${config.serverUrl}`);
+
+  // AI ツール自動検出（PATH 上の CLI を検出して config.yaml に追加）
+  await detectAndUpdateAiTools(config);
 
   // Ensure devrelay-claude wrapper exists
   ensureDevrelaySymlinks();

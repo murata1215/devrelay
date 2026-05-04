@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import yaml from 'yaml';
+import { execSync } from 'child_process';
 import type { AiTool, ProxyConfig } from '@devrelay/shared';
 
 export interface AgentConfig {
@@ -109,6 +110,49 @@ export async function loadConfig(): Promise<AgentConfig> {
       proxy: undefined,
     };
   }
+}
+
+/** 自動検出対象の AI ツール一覧（コマンド名とキー名の対応） */
+const KNOWN_AI_TOOLS: { name: AiTool; command: string }[] = [
+  { name: 'claude', command: 'claude' },
+  { name: 'gemini', command: 'gemini' },
+  { name: 'codex', command: 'codex' },
+  { name: 'aider', command: 'aider' },
+  { name: 'devin', command: 'devin' },
+];
+
+/**
+ * PATH 上の AI ツールを自動検出し、config.aiTools に存在しないものを追加する。
+ *
+ * - 既存の設定（カスタムコマンドパス等）は上書きしない
+ * - 検出なしのツールでも既存設定があれば削除しない（オフライン環境対応）
+ * - 変更があった場合のみ config.yaml に保存
+ *
+ * @returns 新しいツールが検出されたかどうか
+ */
+export async function detectAndUpdateAiTools(config: AgentConfig): Promise<boolean> {
+  const findCmd = process.platform === 'win32' ? 'where' : 'which';
+  let updated = false;
+
+  for (const { name, command } of KNOWN_AI_TOOLS) {
+    // 既に config にあるツールはスキップ（ユーザー設定を尊重）
+    if (config.aiTools[name]) continue;
+
+    try {
+      execSync(`${findCmd} ${command}`, { stdio: 'pipe', timeout: 5000 });
+      // コマンドが見つかった → config に追加
+      config.aiTools[name] = { command };
+      console.log(`🔍 Detected ${name} CLI → added to config`);
+      updated = true;
+    } catch {
+      // コマンドなし → 何もしない
+    }
+  }
+
+  if (updated) {
+    await saveConfig(config);
+  }
+  return updated;
 }
 
 export async function saveConfig(config: AgentConfig) {

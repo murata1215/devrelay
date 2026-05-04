@@ -82,7 +82,7 @@ export async function statusCommand() {
   const findCmd = isWindows ? 'where' : 'which';
   const nullDev = isWindows ? '2>nul' : '2>/dev/null';
 
-  const tools = ['claude', 'gemini', 'codex', 'aider'] as const;
+  const tools = ['claude', 'gemini', 'codex', 'aider', 'devin'] as const;
   for (const tool of tools) {
     const toolConfig = config.aiTools[tool];
     if (toolConfig) {

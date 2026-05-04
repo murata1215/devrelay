@@ -68,7 +68,7 @@ export async function statusCommand() {
   console.log(`   Default: ${config.aiTools.default}`);
 
   // AI ツールの存在確認（macOS: which）
-  const tools = ['claude', 'gemini', 'codex', 'aider'] as const;
+  const tools = ['claude', 'gemini', 'codex', 'aider', 'devin'] as const;
   for (const tool of tools) {
     const toolConfig = config.aiTools[tool];
     if (toolConfig) {

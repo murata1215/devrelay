@@ -7,6 +7,13 @@
 ## 実装済み機能
 
 
+### #226: AI ツール自動検出 + config.yaml 自動追加 (2026-05-05)
+- Agent 起動時に `which`/`where` で全既知 AI ツール（claude/gemini/codex/aider/devin）を自動検出
+- config.yaml に無いツールを自動追加（`detectAndUpdateAiTools()`）
+- 全 Agent（Linux/macOS/Windows）の `config.ts`、`index.ts`、`status.ts` に実装
+- `devrelay status` のツールリストに `devin` を追加（#225 で漏れていた）
+- **設計判断**: 追加のみ・削除しない（オフライン環境で設定が消えない）。既存のカスタムパス設定を上書きしない
+
 ### #225: Devin CLI 統合 (2026-05-05)
 - `AiTool` 型に `'devin'` を追加（`packages/shared/src/types.ts`）
 - `AI_TOOL_NAMES` に `'Devin CLI'` 表示名を追加（`packages/shared/src/constants.ts`）
