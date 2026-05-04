@@ -40,7 +40,7 @@ export interface Project {
   lastUsed?: Date;
 }
 
-export type AiTool = 'claude' | 'gemini' | 'codex' | 'aider';
+export type AiTool = 'claude' | 'gemini' | 'codex' | 'aider' | 'devin';
 
 /** AI API プロバイダー（API キー管理・機能別プロバイダー選択で使用） */
 export type AiProvider = 'openai' | 'anthropic' | 'gemini' | 'none';

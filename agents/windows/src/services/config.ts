@@ -16,6 +16,7 @@ export interface AgentConfig {
     gemini?: { command: string };
     codex?: { command: string };
     aider?: { command: string };
+    devin?: { command: string };
   };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   proxy?: ProxyConfig;  // Proxy configuration (optional)

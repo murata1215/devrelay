@@ -38,6 +38,7 @@ export const AI_TOOL_NAMES: Record<string, string> = {
   'gemini': 'Gemini CLI',
   'codex': 'Codex CLI',
   'aider': 'Aider',
+  'devin': 'Devin CLI',
 };
 
 // Status emojis

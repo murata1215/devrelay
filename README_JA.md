@@ -4,14 +4,14 @@
 
 > どのメッセージアプリからでも、どのAI CLIにでも繋がる、リモート開発ハブ
 
-LINE、Discord、TelegramからClaude Code、Gemini CLI等を操作できるSaaS。
+LINE、Discord、TelegramからClaude Code、Gemini CLI、Devin CLI等を操作できるSaaS。
 外出先からスマホで自宅PCの開発環境を制御できます。
 
 ## ✨ Features
 
 - **マルチマシン**: ubuntu01, ubuntu02, windows01... 複数マシンを登録・切り替え
 - **マルチプロジェクト**: 各マシン内の複数プロジェクトを管理
-- **マルチAI**: Claude Code, Gemini CLI, Aider に対応
+- **マルチAI**: Claude Code, Gemini CLI, Devin CLI, Aider に対応
 - **マルチプラットフォーム**: Discord, Telegram から操作（LINE 対応予定）
 - **自然言語コマンド**: 「前の接続を復元して」→ 自動で `c` コマンド実行（OpenAI API 使用）
 - **プランモード / 実行モード**: プラン立案→承認→実行のワークフロー

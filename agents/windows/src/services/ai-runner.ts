@@ -199,6 +199,41 @@ export async function sendPromptToAi(
     // Write prompt to stdin (secure - not visible in process list)
     proc.stdin?.write(prompt);
     proc.stdin?.end();
+  } else if (aiTool === 'devin') {
+    // Devin CLI: -p（非対話モード）+ --permission-mode dangerous（全ツール自動承認）
+    const args = ['-p', '--permission-mode', 'dangerous'];
+    log.info(`Running: ${command} -p --permission-mode dangerous (prompt via stdin)`);
+
+    // Devin コマンドのディレクトリを PATH に追加
+    const devinDir = path.dirname(command);
+    const devinEnvPath = process.env.PATH ? `${devinDir};${process.env.PATH}` : devinDir;
+
+    // プロキシ環境変数を追加（Devin 用）
+    const devinProxyEnv: Record<string, string> = {};
+    if (config.proxy?.url) {
+      devinProxyEnv.HTTP_PROXY = config.proxy.url;
+      devinProxyEnv.HTTPS_PROXY = config.proxy.url;
+      devinProxyEnv.http_proxy = config.proxy.url;
+      devinProxyEnv.https_proxy = config.proxy.url;
+    }
+
+    proc = spawn(command, args, {
+      cwd: projectPath,
+      shell: true,  // Windows needs shell: true for .cmd files
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...devinProxyEnv,
+        PATH: devinEnvPath,
+        DEVRELAY: '1',
+        DEVRELAY_SESSION_ID: sessionId,
+        DEVRELAY_PROJECT: projectPath,
+      },
+    });
+
+    // stdin でプロンプトを渡す（プロセスリストに表示されない）
+    proc.stdin?.write(prompt);
+    proc.stdin?.end();
   } else {
     // For other AI tools (aider, codex), use shell
     // On Windows, need to handle shell differently
@@ -448,6 +483,8 @@ function getAiCommand(aiTool: AiTool, config: AgentConfig): string | undefined {
       return config.aiTools.codex?.command || 'codex';
     case 'aider':
       return config.aiTools.aider?.command || 'aider';
+    case 'devin':
+      return config.aiTools.devin?.command || 'devin';
     default:
       return undefined;
   }

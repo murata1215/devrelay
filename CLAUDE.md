@@ -6,7 +6,7 @@ See `rules/devrelay.md` for DevRelay rules.
 
 # DevRelay
 
-Discord/Telegram/LINE から Claude Code/Gemini CLI をリモート操作するハブシステム。
+Discord/Telegram/LINE から Claude Code/Gemini CLI/Devin CLI をリモート操作するハブシステム。
 
 ## ルール参照
 - `rules/devrelay.md` - DevRelay 共通ルール（Agreement）

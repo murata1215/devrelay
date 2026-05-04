@@ -7,6 +7,17 @@
 ## 実装済み機能
 
 
+### #225: Devin CLI 統合 (2026-05-05)
+- `AiTool` 型に `'devin'` を追加（`packages/shared/src/types.ts`）
+- `AI_TOOL_NAMES` に `'Devin CLI'` 表示名を追加（`packages/shared/src/constants.ts`）
+- 全 Agent（Linux/macOS/Windows）に Devin CLI spawn 実装:
+  - `getAiCommand()` に `case 'devin'` 追加
+  - `sendPromptToAi()` に Devin 分岐追加（`-p --permission-mode dangerous`、stdin プロンプト渡し）
+  - `getAvailableAiTools()` に devin 追加
+  - `AgentConfig.aiTools` に `devin?: { command: string }` 追加
+- Server / WebUI / DB は変更不要（`Session.aiTool` は String 型、UI は `AI_TOOL_NAMES` から動的生成）
+- **設計判断**: Gemini/Codex/Aider と同じ spawn パターンを踏襲。Devin for Terminal の CLAUDE.md 互換・`-p` 非対話モードを活用。Cloud API (v3 REST) は将来対応
+
 ### #224: testflight アクションゲーム (knightmare) + バグ修正 (2026-05-05)
 - **testflight knightmare**: 魔城伝説風の1人プレイ縦スクロールアクションゲームを作成
   - Phaser 3 Arcade Physics、プログラム生成グラフィクス（外部画像不要）

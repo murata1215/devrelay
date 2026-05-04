@@ -1112,6 +1112,7 @@ function getAvailableAiTools(config: AgentConfig): AiTool[] {
   if (config.aiTools.gemini) tools.push('gemini');
   if (config.aiTools.codex) tools.push('codex');
   if (config.aiTools.aider) tools.push('aider');
+  if (config.aiTools.devin) tools.push('devin');
   return tools;
 }
 

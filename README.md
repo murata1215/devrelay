@@ -4,14 +4,14 @@
 
 > A remote development hub that connects any messaging app to any AI CLI tool
 
-Control Claude Code, Gemini CLI, and more from Discord, Telegram, or LINE.
+Control Claude Code, Gemini CLI, Devin CLI, and more from Discord, Telegram, or LINE.
 Turn your phone into a remote terminal for AI-powered development.
 
 ## ✨ Features
 
 - **Multi-Agent**: Register and switch between ubuntu-dev/user1, ubuntu-prod/user2, windows01/dev...
 - **Multi-Project**: Manage multiple projects on each agent
-- **Multi-AI**: Support for Claude Code, Gemini CLI, Aider
+- **Multi-AI**: Support for Claude Code, Gemini CLI, Devin CLI, Aider
 - **Multi-Platform**: Operate from Discord, Telegram (LINE coming soon)
 - **Natural Language Commands**: "reconnect to last project" auto-translates to the right command (OpenAI / Anthropic / Gemini)
 - **Plan / Execute Mode**: AI plans first, you review, then it implements

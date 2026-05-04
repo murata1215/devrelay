@@ -634,6 +634,33 @@ export async function sendPromptToAi(
     // Write prompt to stdin (secure - not visible in process list)
     proc.stdin?.write(prompt);
     proc.stdin?.end();
+  } else if (aiTool === 'devin') {
+    // Devin CLI: -p（非対話モード）+ --permission-mode dangerous（全ツール自動承認）
+    const args = ['-p', '--permission-mode', 'dangerous'];
+    console.log(`🔧 Running: ${command} -p --permission-mode dangerous (prompt via stdin)`);
+
+    // Devin コマンドのディレクトリを PATH に追加
+    const devinDir = path.dirname(command);
+    const devinPathSep = process.platform === 'win32' ? ';' : ':';
+    const devinEnvPath = process.env.PATH ? `${devinDir}${devinPathSep}${process.env.PATH}` : devinDir;
+
+    proc = spawn(command, args, {
+      cwd: projectPath,
+      shell: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...proxyEnv,
+        PATH: devinEnvPath,
+        DEVRELAY: '1',
+        DEVRELAY_SESSION_ID: sessionId,
+        DEVRELAY_PROJECT: projectPath,
+      },
+    });
+
+    // stdin でプロンプトを渡す（プロセスリストに表示されない）
+    proc.stdin?.write(prompt);
+    proc.stdin?.end();
   } else {
     // For other AI tools (aider, codex), use shell (legacy behavior)
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
@@ -930,6 +957,8 @@ function getAiCommand(aiTool: AiTool, config: AgentConfig): string | undefined {
       return config.aiTools.codex?.command || 'codex';
     case 'aider':
       return config.aiTools.aider?.command || 'aider';
+    case 'devin':
+      return config.aiTools.devin?.command || 'devin';
     default:
       return undefined;
   }
