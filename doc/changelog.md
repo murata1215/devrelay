@@ -7,6 +7,14 @@
 ## 実装済み機能
 
 
+### #227: Devin CLI 修正 — stdin クラッシュ・パーミッション・出力・セッション継続 (2026-05-05)
+- **stdin パイプでクラッシュ修正**: Devin CLI は stdin パイプで panic → `--prompt-file` 一時ファイル経由に変更
+- **パーミッションモード分岐**: Devin は `plan` モード非対応 → plan=`auto` / exec=`dangerous` にマッピング
+- **プレーンテキスト出力対応**: JSON パース失敗時にテキストとして蓄積・送信（Gemini/Aider/Codex にも効果）
+- **セッション継続**: `-c` (continue) フラグ常時付与で同一 cwd の最新セッションを自動引き継ぎ
+- 全 Agent（Linux/macOS/Windows）の `ai-runner.ts` に実装
+- **設計判断**: Devin 固有の制約（stdin panic, plan 未対応）を spawn 分岐内で吸収。一時ファイルは close ハンドラで確実に削除
+
 ### #226: AI ツール自動検出 + config.yaml 自動追加 (2026-05-05)
 - Agent 起動時に `which`/`where` で全既知 AI ツール（claude/gemini/codex/aider/devin）を自動検出
 - config.yaml に無いツールを自動追加（`detectAndUpdateAiTools()`）
