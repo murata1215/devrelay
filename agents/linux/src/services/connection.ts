@@ -794,11 +794,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   let historyContextSize = 0;
 
   // Include conversation history if:
-  // 1. We don't have a Claude session to resume, OR
-  // 2. We have missed messages (they're not in Claude's internal history)
+  // 1. Claude: resumeSessionId がない場合（SDK の --resume でセッション引き継ぎするため通常は不要）
+  // 2. Claude: missed messages がある場合（SDK 内部履歴にない新規メッセージ）
+  // 3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かないためプロンプトが唯一のコンテキスト）
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
-  if (sessionInfo.history.length > 1 && (!sessionInfo.claudeResumeSessionId || hasMissedMessages)) {
-    // Include conversation history when no resume session OR when there are missed messages
+  const isClaudeSdk = sessionInfo.aiTool === 'claude';
+  const needsHistoryInPrompt = !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages;
+  if (sessionInfo.history.length > 1 && needsHistoryInPrompt) {
     const historyForContext = sessionInfo.history.slice(0, -1); // exclude current message
     let execIndex = -1;
     for (let i = historyForContext.length - 1; i >= 0; i--) {

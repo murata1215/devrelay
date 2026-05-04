@@ -638,24 +638,17 @@ export async function sendPromptToAi(
     proc.stdin?.write(prompt);
     proc.stdin?.end();
   } else if (aiTool === 'devin') {
-    // Devin CLI: -p（非対話モード）
+    // Devin CLI: -p（非対話モード）+ -c（セッション継続で会話コンテキスト維持）
     // plan モード → auto（読み取り専用のみ）、exec モード → dangerous（全承認）
     const permMode = options.usePlanMode ? 'auto' : 'dangerous';
-    const args = ['-p', '--permission-mode', permMode];
-
-    // plan モードでのみ -c（セッション継続）を使用
-    // exec モードでは新規セッション → dangerous が確実に適用される
-    // （-c で resume すると前セッションの permission-mode が保持されてしまうため）
-    if (options.usePlanMode) {
-      args.push('-c');
-    }
+    const args = ['-p', '-c', '--permission-mode', permMode];
 
     // Devin は stdin パイプ非対応（panic at repl_mode.rs）→ --prompt-file で一時ファイル経由
     const promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
     fs.writeFileSync(promptFilePath, prompt, 'utf-8');
     args.push('--prompt-file', promptFilePath);
 
-    console.log(`🔧 Running: ${command} -p ${options.usePlanMode ? '-c ' : ''}--permission-mode ${permMode} --prompt-file ...`);
+    console.log(`🔧 Running: ${command} -p -c --permission-mode ${permMode} --prompt-file ...`);
 
     // Devin コマンドのディレクトリを PATH に追加
     const devinDir = path.dirname(command);
@@ -670,6 +663,7 @@ export async function sendPromptToAi(
         ...process.env,
         ...proxyEnv,
         PATH: devinEnvPath,
+        DEVIN_PERMISSION_MODE: permMode,  // -c で前セッション設定が残っても env で上書き
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
