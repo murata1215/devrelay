@@ -1,5 +1,7 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -200,9 +202,17 @@ export async function sendPromptToAi(
     proc.stdin?.write(prompt);
     proc.stdin?.end();
   } else if (aiTool === 'devin') {
-    // Devin CLI: -p（非対話モード）+ --permission-mode dangerous（全ツール自動承認）
-    const args = ['-p', '--permission-mode', 'dangerous'];
-    log.info(`Running: ${command} -p --permission-mode dangerous (prompt via stdin)`);
+    // Devin CLI: -p（非対話モード）+ -c（セッション継続）
+    // plan モード → auto（読み取り専用のみ）、exec モード → dangerous（全承認）
+    const permMode = options.usePlanMode ? 'auto' : 'dangerous';
+    const args = ['-p', '-c', '--permission-mode', permMode];
+
+    // Devin は stdin パイプ非対応（panic at repl_mode.rs）→ --prompt-file で一時ファイル経由
+    const promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
+    fs.writeFileSync(promptFilePath, prompt, 'utf-8');
+    args.push('--prompt-file', promptFilePath);
+
+    log.info(`Running: ${command} -p -c --permission-mode ${permMode} --prompt-file ...`);
 
     // Devin コマンドのディレクトリを PATH に追加
     const devinDir = path.dirname(command);
@@ -231,8 +241,7 @@ export async function sendPromptToAi(
       },
     });
 
-    // stdin でプロンプトを渡す（プロセスリストに表示されない）
-    proc.stdin?.write(prompt);
+    // stdin は使わない（--prompt-file で渡す）
     proc.stdin?.end();
   } else {
     // For other AI tools (aider, codex), use shell
@@ -352,7 +361,12 @@ export async function sendPromptToAi(
             log.info(`[${aiTool}] ✅ Complete (${json.duration_ms}ms)`);
           }
         } catch {
-          // Not JSON or parse error - ignore
+          // JSON パース失敗 → プレーンテキスト出力（Devin/Gemini/Aider/Codex）
+          const trimmed = line.trim();
+          if (trimmed) {
+            fullOutput += trimmed + '\n';
+            onOutput(trimmed + '\n', false);
+          }
         }
       }
     });
@@ -365,6 +379,11 @@ export async function sendPromptToAi(
 
     proc.on('close', (code, signal) => {
       log.info(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
+
+      // Devin の一時プロンプトファイルを削除
+      if (aiTool === 'devin') {
+        try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`)); } catch {}
+      }
 
       // プロセス参照をクリア（キャンセル済み判定のため exitCode は残る）
       if (session) {
