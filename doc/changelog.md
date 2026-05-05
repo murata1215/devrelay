@@ -11,10 +11,10 @@
 - **stdin パイプでクラッシュ修正**: Devin CLI は stdin パイプで panic → `--prompt-file` 一時ファイル経由に変更
 - **パーミッションモード分岐**: Devin は `plan` モード非対応 → plan=`auto` / exec=`dangerous` にマッピング
 - **プレーンテキスト出力対応**: JSON パース失敗時にテキストとして蓄積・送信（Gemini/Aider/Codex にも効果）
-- **セッション継続**: `-c` (continue) フラグ常時付与 + `DEVIN_PERMISSION_MODE` 環境変数で permission を確実に上書き
+- **セッション管理**: `-c` → `-r <session-id>` に改善。`devin list --format json` で実行後にセッション ID を取得・保存。`x` コマンドでクリア
 - **非 Claude の会話履歴注入**: Devin/Gemini 等では常にプロンプトに会話履歴を含める（Claude は SDK --resume で不要）
-- 全 Agent（Linux/macOS/Windows）の `ai-runner.ts` + `connection.ts` に実装
-- **設計判断**: `-c` は常時付与（会話コンテキスト維持のため必須）。permission-mode は CLI フラグ + env 変数の二重指定で確実に適用。一時ファイルは close ハンドラで確実に削除
+- 全 Agent（Linux/macOS/Windows）の `ai-runner.ts` + `connection.ts` + `session-store.ts` に実装
+- **設計判断**: `-r` は明示的セッション ID 指定のため permission-mode 変更が確実に効く（`-c` の「前セッション設定保持」問題を解消）。一時ファイルは close ハンドラで確実に削除
 
 ### #226: AI ツール自動検出 + config.yaml 自動追加 (2026-05-05)
 - Agent 起動時に `which`/`where` で全既知 AI ツール（claude/gemini/codex/aider/devin）を自動検出

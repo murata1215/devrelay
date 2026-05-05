@@ -8,7 +8,7 @@ import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
@@ -636,17 +636,25 @@ export async function sendPromptToAi(
     proc.stdin?.write(prompt);
     proc.stdin?.end();
   } else if (aiTool === 'devin') {
-    // Devin CLI: -p（非対話モード）+ -c（セッション継続で会話コンテキスト維持）
-    // plan モード → auto（読み取り専用のみ）、exec モード → dangerous（全承認）
+    // Devin CLI: plan → auto（読み取り専用のみ）、exec → dangerous（全承認）
     const permMode = options.usePlanMode ? 'auto' : 'dangerous';
-    const args = ['-p', '-c', '--permission-mode', permMode];
+    const args: string[] = [];
+
+    // 保存済み Devin セッション ID があれば -r で resume（permission-mode 変更も効く）
+    const devinSessionId = await loadDevinSessionId(projectPath);
+    if (devinSessionId) {
+      args.push('-r', devinSessionId);
+      console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
+    }
+
+    args.push('-p', '--permission-mode', permMode);
 
     // Devin は stdin パイプ非対応（panic at repl_mode.rs）→ --prompt-file で一時ファイル経由
     const promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
     fs.writeFileSync(promptFilePath, prompt, 'utf-8');
     args.push('--prompt-file', promptFilePath);
 
-    console.log(`🔧 Running: ${command} -p -c --permission-mode ${permMode} --prompt-file ...`);
+    console.log(`🔧 Running: ${command} ${args.join(' ').replace(promptFilePath, '...')}`);
 
     // Devin コマンドのディレクトリを PATH に追加
     const devinDir = path.dirname(command);
@@ -661,7 +669,6 @@ export async function sendPromptToAi(
         ...process.env,
         ...proxyEnv,
         PATH: devinEnvPath,
-        DEVIN_PERMISSION_MODE: permMode,  // -c で前セッション設定が残っても env で上書き
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
@@ -825,9 +832,24 @@ export async function sendPromptToAi(
     proc.on('close', (code, signal) => {
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
-      // Devin の一時プロンプトファイルを削除
+      // Devin: 一時ファイル削除 + セッション ID 取得・保存
       if (aiTool === 'devin') {
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`)); } catch {}
+        try {
+          const listOutput = execSync(`${command} list --format json`, {
+            cwd: projectPath, encoding: 'utf-8', timeout: 10000,
+          });
+          const sessions = JSON.parse(listOutput);
+          const normalizedPath = projectPath.replace(/\\/g, '/').toLowerCase();
+          const latest = sessions
+            .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
+            .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
+          if (latest?.id) {
+            saveDevinSessionId(projectPath, latest.id).catch(() => {});
+          }
+        } catch (err) {
+          console.warn(`[devin] Could not retrieve session ID:`, (err as Error).message);
+        }
       }
 
       // スタートアップタイムアウトをクリア（正常終了時）

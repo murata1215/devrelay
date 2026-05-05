@@ -30,7 +30,7 @@ import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_WINDOWS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import log from './logger.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
-import { loadClaudeSessionId, clearClaudeSessionId } from './session-store.js';
+import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId } from './session-store.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
@@ -454,8 +454,9 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   // 2. 会話履歴ファイルをクリア
   await clearConversation(projectPath);
 
-  // 3. Claude セッション ID をクリア（次回プロンプトで新規セッション開始）
+  // 3. Claude / Devin セッション ID をクリア（次回プロンプトで新規セッション開始）
   await clearClaudeSessionId(projectPath);
+  await clearDevinSessionId(projectPath);
 
   // 4. メモリ内の履歴とセッション ID もクリア
   const sessionInfo = sessionInfoMap.get(sessionId);

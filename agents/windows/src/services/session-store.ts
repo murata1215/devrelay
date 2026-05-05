@@ -4,6 +4,7 @@ import { join } from 'path';
 
 const SESSION_DIR = '.devrelay';
 const SESSION_FILE = 'claude-session-id';
+const DEVIN_SESSION_FILE = 'devin-session-id';
 const CONTEXT_USAGE_FILE = 'context-usage.json';
 
 export interface StoredContextUsage {
@@ -80,6 +81,46 @@ export async function clearClaudeSessionId(projectPath: string): Promise<void> {
   } catch (err) {
     console.warn(`Could not clear Claude session ID:`, (err as Error).message);
   }
+}
+
+// -----------------------------------------------------------------------------
+// Devin セッション ID 管理
+// -----------------------------------------------------------------------------
+
+function getDevinSessionPath(projectPath: string): string {
+  return join(projectPath, SESSION_DIR, DEVIN_SESSION_FILE);
+}
+
+/** Devin セッション ID を読み込む */
+export async function loadDevinSessionId(projectPath: string): Promise<string | null> {
+  const filePath = getDevinSessionPath(projectPath);
+  try {
+    if (!existsSync(filePath)) return null;
+    const content = await readFile(filePath, 'utf-8');
+    const sessionId = content.trim();
+    if (sessionId) {
+      console.log(`📋 Loaded Devin session ID: ${sessionId}`);
+      return sessionId;
+    }
+    return null;
+  } catch { return null; }
+}
+
+/** Devin セッション ID を保存 */
+export async function saveDevinSessionId(projectPath: string, sessionId: string): Promise<void> {
+  const dirPath = join(projectPath, SESSION_DIR);
+  const filePath = getDevinSessionPath(projectPath);
+  try {
+    if (!existsSync(dirPath)) await mkdir(dirPath, { recursive: true });
+    await writeFile(filePath, sessionId, 'utf-8');
+    console.log(`💾 Saved Devin session ID: ${sessionId}`);
+  } catch (err) { console.error(`❌ Could not save Devin session ID:`, (err as Error).message); }
+}
+
+/** Devin セッション ID をクリア */
+export async function clearDevinSessionId(projectPath: string): Promise<void> {
+  const filePath = getDevinSessionPath(projectPath);
+  try { if (existsSync(filePath)) { await unlink(filePath); console.log(`🗑️ Cleared Devin session ID`); } } catch {}
 }
 
 /**
