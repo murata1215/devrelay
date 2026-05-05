@@ -87,7 +87,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Windows Ask/TeamExec Fix**: Fixed 400 Content-Length mismatch on Windows Git Bash + proxy — strips CRLF from jq output, uses pipe-based curl body delivery
 - **FCM Push Notifications**: Firebase Cloud Messaging for iOS/Android mobile push — `POST /api/push/fcm/subscribe`, session completion + tool approval triggers, auto-cleanup of invalid tokens
 - **Notification API**: Server-side notification records for mobile app badge + notification list — `GET /api/notifications`, `POST /api/notifications/read-all`, `GET /api/notifications/unread-count`
-- **Devin CLI Integration**: Devin for Terminal support via `--prompt-file` + `-c` session continue + auto/dangerous permission mapping, CLAUDE.md compatible — same architecture as Gemini/Codex/Aider
+- **Devin CLI Integration**: Devin for Terminal support via `--prompt-file` + `-r <session-id>` explicit session resume + auto/dangerous permission mapping, CLAUDE.md compatible — same architecture as Gemini/Codex/Aider. Session IDs auto-saved to `.devrelay/devin-session-id`, cleared by `x` command
 - **AI Tool Auto-Detection**: Agent startup auto-detects installed AI CLIs (`which`/`where`) and adds them to `config.yaml` — no manual config needed. Preserves custom paths, never removes existing entries
 
 ## 💡 Token Efficiency
