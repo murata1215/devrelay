@@ -1459,7 +1459,7 @@ function getTestflightHelpText(): string {
 
 **--phaser テンプレート詳細**
 Vite + Phaser 3 + TypeScript のゲーム開発環境を自動構築します。
-- サンプル: 2048 パズルゲーム（本家準拠の配色・操作）
+- サンプル: 棒消し（Nim）対戦ゲーム + マッチメイキング + CPU 対戦 + 管理画面（/stats）
 - HMR 対応の dev サーバーが PM2 で常駐起動（プロセス名: \`tf-<name>\`）
 - Discord/Telegram から AI にゲーム改造指示が可能
 - 画面サイズ: 480x720（モバイルファースト、Scale.FIT）
@@ -1470,7 +1470,7 @@ Vite + Phaser 3 + TypeScript のゲーム開発環境を自動構築します。
 - 予約語不可: devrelay, app, api, www, admin, test, staging, prod
 
 **例**
-\`testflight mygame --phaser\` → https://mygame.devrelay.io に 2048 ゲーム
+\`testflight mygame --phaser\` → https://mygame.devrelay.io に Nim 対戦ゲーム
 \`testflight mysite\` → https://mysite.devrelay.io にプレースホルダー
 \`testflight cp mygame newgame\` → mygame を newgame に複製（リネーム代わり）
 `.trim();
