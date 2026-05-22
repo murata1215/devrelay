@@ -653,12 +653,18 @@ async function sendPromptToTerminalClaude(
     return result;
   }
 
-  // 起動メッセージ（仕様書 §2.2.2）
-  onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand} --continue\n`, false);
-
   // approveAllMode: server-side skipPermissions または「以降すべて許可」が立っていれば真
   // セッション内で動的に変化するため、起動時の値をスナップショットとして使う
   const approveAllMode = !!(options.skipPermissions || isApproveAllMode());
+
+  // 診断ログ: WebUI トグルとの食い違いを調査するため、判定根拠を出力する
+  console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}`);
+
+  // 起動メッセージ（仕様書 §2.2.2）
+  // 実際に渡される args を表示することで、approveAllMode の有無が WebUI から確認できる
+  const previewArgs = ['--continue'];
+  if (approveAllMode) previewArgs.push('--dangerously-skip-permissions');
+  onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand} ${previewArgs.join(' ')}\n`, false);
 
   try {
     const runResult = await runTerminalClaude({
