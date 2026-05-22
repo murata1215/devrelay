@@ -9,7 +9,8 @@
       "esbuild",
       "@prisma/client",
       "@prisma/engines",
-      "prisma"
+      "prisma",
+      "node-pty"
     ],
     "overrides": {
       "readable-stream": "2.3.8"

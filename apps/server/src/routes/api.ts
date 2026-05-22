@@ -495,6 +495,45 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // 端末インタフェースモード（terminalMode）の取得・更新
+  // Project 単位の設定。次回メッセージ送信時から反映される（即時 push はしない）
+  // ========================================
+  app.get('/api/projects/:projectId/terminal-mode', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId } = request.params as { projectId: string };
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+      select: { terminalMode: true },
+    });
+    if (!project) return reply.status(404).send({ error: 'Project not found' });
+    return { terminalMode: project.terminalMode };
+  });
+
+  app.put('/api/projects/:projectId/terminal-mode', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId } = request.params as { projectId: string };
+    const { terminalMode } = (request.body || {}) as { terminalMode?: boolean };
+
+    if (typeof terminalMode !== 'boolean') {
+      return reply.status(400).send({ error: 'terminalMode must be a boolean' });
+    }
+
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+    });
+    if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { terminalMode },
+    });
+
+    return { success: true, terminalMode };
+  });
+
+  // ========================================
   // プロジェクトのビルドログ一覧
   // ========================================
   app.get('/api/projects/:projectId/builds', async (request, reply) => {

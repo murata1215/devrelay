@@ -102,16 +102,17 @@ model Machine {
 
 // プロジェクト
 model Project {
-  id          String    @id @default(cuid())
-  machineId   String
-  machine     Machine   @relation(fields: [machineId], references: [id])
-  name        String
-  displayName String?   // ユーザーが設定する表示名（null なら name を使用）
-  path        String
-  defaultAi   String    @default("claude")
-  description String?
-  lastUsedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  id           String    @id @default(cuid())
+  machineId    String
+  machine      Machine   @relation(fields: [machineId], references: [id])
+  name         String
+  displayName  String?   // ユーザーが設定する表示名（null なら name を使用）
+  path         String
+  defaultAi    String    @default("claude")
+  description  String?
+  lastUsedAt   DateTime?
+  terminalMode Boolean   @default(false)  // 端末インタフェースモード（PTY 経由で claude --continue 起動）
+  createdAt    DateTime  @default(now())
 
   sessions       Session[]
   buildLogs      BuildLog[]

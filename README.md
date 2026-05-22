@@ -89,6 +89,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Notification API**: Server-side notification records for mobile app badge + notification list — `GET /api/notifications`, `POST /api/notifications/read-all`, `GET /api/notifications/unread-count`
 - **Devin CLI Integration**: Devin for Terminal support via `--prompt-file` + `-r <session-id>` explicit session resume + auto/dangerous permission mapping, CLAUDE.md compatible — same architecture as Gemini/Codex/Aider. Session IDs auto-saved to `.devrelay/devin-session-id`, cleared by `x` command
 - **AI Tool Auto-Detection**: Agent startup auto-detects installed AI CLIs (`which`/`where`) and adds them to `config.yaml` — no manual config needed. Preserves custom paths, never removes existing entries
+- **Terminal Interface Mode**: Per-project "端末" toggle launches `claude --continue` via PTY (node-pty + @xterm/headless) instead of Agent SDK — naturally continues interactive sessions from the user's terminal, on-demand start/stop with no memory residency. `Project.terminalMode` column, `GET/PUT /api/projects/:id/terminal-mode`, idle timeout (10 min of silence) as primary completion detection. Linux Agent only in Phase 1; tool approval card relay deferred to Phase 3
 
 ## 💡 Token Efficiency
 

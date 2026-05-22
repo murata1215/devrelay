@@ -7,6 +7,28 @@
 ## 実装済み機能
 
 
+### #228: 端末インタフェースモード（Terminal Mode） — PTY 経由で claude --continue を都度起動 (2026-05-23)
+- **背景**: 2026/6/15 以降 Anthropic は Agent SDK の `query()`（`-p` 相当）をサブスク枠から分離。本機能の主目的は課金回避ではなく、(1) `claude --continue` の対話セッションを WebUI から自然継続する、(2) 多プロジェクト・低頻度・オンデマンドの利用実態に合わせて都度起動・都度終了で軽量化、の 2 点
+- **AI Runner 第 6 の実行モード**: `aiTool === 'claude' && terminalMode` の場合のみ、Agent SDK ではなく PTY 経由で `claude --continue` を起動する分岐を `sendPromptToAi()` 冒頭に追加。`terminalMode = false`（デフォルト）なら既存実行パスに完全 no-op
+- **新規ファイル**:
+  - `agents/linux/src/services/terminal-runner.ts`: PTY 起動・対話・アイドルタイムアウト・キャンセル制御（`node-pty` + `@xterm/headless`）
+  - `agents/linux/src/services/terminal-parser.ts`: プロンプト復帰・tool 承認・質問プロンプト検出（ANSI 除去後の末尾走査）
+- **新規依存**: `node-pty@^1.0.0`（PTY 起動）、`@xterm/headless@^5.5.0`（仮想ターミナルで最終バッファ抽出）、`strip-ansi@^7.1.0`（出力整形）
+- **完了検出**: アイドル 10 分無音をメイン基準、プロンプト復帰（`> ` / `│ > ` 末尾）を補助検出。`onData` 発火ごとにアイドルタイマーをリセット → 長時間思考中・長文出力中はタイムアウトしない
+- **DB スキーマ**: `Project.terminalMode BOOLEAN DEFAULT false` を追加（マイグレーション `20260523_add_project_terminal_mode`）。**Project 単位の設定**（既存 `Machine.skipPermissions` / `Machine.disableAsk` の Machine 単位とはスコープが異なる）
+- **API**: `GET/PUT /api/projects/:projectId/terminal-mode`（display-name パターン踏襲）
+- **配信**: サーバーは `server:ai:prompt` / `server:conversation:exec` 送信時に DB から `Project.terminalMode` を取得して payload に含める。Agent は `SessionInfo.terminalMode` にキャッシュし、`sendOptions.terminalMode` 経由で AI Runner に渡す
+- **WebUI**: チャットヘッダーに「端末」トグル追加（「自動承認」「Ask 無効」と並列）。状態キャッシュは `terminalModeMap: Record<projectId, boolean>` で **projectId をキー**（既存 2 つの machineId ベースと異なる点に注意）
+- **キャンセル**: `cancelAiSession()` が PTY プロセスも対象に。SIGTERM → 5 秒猶予 → SIGKILL
+- **ログ**: `~/.devrelay/logs/terminal-<sessionId>.log` に PTY 全出力（ANSI 込み）を append
+- **Phase 1 の制限**: tool 承認の WS カード連動は未実装（Phase 3 で対応予定）。自動承認 OFF 時に CLI が承認プロンプトを出した場合は `2\r`（いいえ）を自動送信
+- **OS スコープ**: Phase 1 は Linux Agent のみ。macOS / Windows は Phase 2 で展開予定
+- **設計判断**:
+  - Project 単位設定: プロジェクトごとに性質が違う（実験用 / 本番用）ため。Machine 単位の既存パターンには合わせない
+  - サーバー側で毎回 DB 参照: WebSocket 配信のステートレス化を維持。`pushConfigUpdate` 経由のリアルタイム配信は採用しない（Project 数だけ送信先が増えるため）
+  - tool 承認は Phase 3 へ分離: 画面パース実装は誤検出リスクが高い。最小実装で動作確認してから拡張
+  - 「人間が WebUI から手動で 1 要求を投げる」運用前提（スケジュール起動・無人自動実行はスコープ外）
+
 ### #227: Devin CLI 修正 — stdin クラッシュ・パーミッション・出力・セッション継続 (2026-05-05)
 - **stdin パイプでクラッシュ修正**: Devin CLI は stdin パイプで panic → `--prompt-file` 一時ファイル経由に変更
 - **パーミッションモード分岐**: Devin は `plan` モード非対応 → plan=`auto` / exec=`dangerous` にマッピング

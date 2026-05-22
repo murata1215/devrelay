@@ -20,13 +20,16 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.80",
     "@devrelay/shared": "workspace:*",
+    "@xterm/headless": "^5.5.0",
     "archiver": "^7.0.1",
     "chalk": "^5.3.0",
     "commander": "^12.0.0",
     "https-proxy-agent": "^7.0.6",
     "nanoid": "^5.0.4",
+    "node-pty": "^1.0.0",
     "ora": "^8.0.1",
     "socks-proxy-agent": "^8.0.5",
+    "strip-ansi": "^7.1.0",
     "uuid": "^13.0.0",
     "ws": "^8.16.0",
     "yaml": "^2.3.4"

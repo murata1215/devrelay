@@ -2001,6 +2001,8 @@ export function ChatPage() {
   const [skipPermissionsMap, setSkipPermissionsMap] = useState<Record<string, boolean>>({});
   /** Machine ごとの disableAsk キャッシュ（machineId → boolean） */
   const [disableAskMap, setDisableAskMap] = useState<Record<string, boolean>>({});
+  /** Project ごとの terminalMode キャッシュ（projectId → boolean） */
+  const [terminalModeMap, setTerminalModeMap] = useState<Record<string, boolean>>({});
   /** セッション情報パネル再取得トリガー（将来の拡張用） */
   const [, setSessionRefreshCount] = useState(0);
   /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
@@ -2631,6 +2633,18 @@ export function ChatPage() {
     }
   }, [activeMachineId]);
 
+  // activeTabId（=projectId）変更時に terminalMode を取得（Project 単位、キャッシュがなければ）
+  useEffect(() => {
+    if (!activeTabId) return;
+    if (terminalModeMap[activeTabId] === undefined) {
+      fetch(`/api/projects/${activeTabId}/terminal-mode`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      }).then(r => r.json()).then(data => {
+        setTerminalModeMap(prev => ({ ...prev, [activeTabId]: data.terminalMode }));
+      }).catch(() => {});
+    }
+  }, [activeTabId]);
+
   /** Skip Permissions トグル（チャットヘッダーの ⚡ ボタン用） */
   const handleToggleSkipPermissions = async () => {
     if (!activeMachineId) return;
@@ -2662,6 +2676,24 @@ export function ChatPage() {
     } catch {
       // 失敗時はロールバック
       setDisableAskMap(prev => ({ ...prev, [activeMachineId]: !newValue }));
+    }
+  };
+
+  /** 端末インタフェースモードトグル（Project 単位） */
+  const handleToggleTerminalMode = async () => {
+    if (!activeTabId) return;
+    const projectId = activeTabId;
+    const newValue = !terminalModeMap[projectId];
+    setTerminalModeMap(prev => ({ ...prev, [projectId]: newValue }));
+    try {
+      await fetch(`/api/projects/${projectId}/terminal-mode`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+        body: JSON.stringify({ terminalMode: newValue }),
+      });
+    } catch {
+      // 失敗時はロールバック
+      setTerminalModeMap(prev => ({ ...prev, [projectId]: !newValue }));
     }
   };
 
@@ -3197,6 +3229,16 @@ export function ChatPage() {
                 <div className="relative" onClick={handleToggleDisableAsk}>
                   <div className={`w-8 h-4 rounded-full transition-colors ${disableAskMap[activeMachineId] ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
                   <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${disableAskMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
+                </div>
+              </label>
+            )}
+            {/* 端末インタフェースモードトグルスイッチ（Project 単位） */}
+            {activeTabId && terminalModeMap[activeTabId] !== undefined && (
+              <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Terminal Mode: ${terminalModeMap[activeTabId] ? 'ON' : 'OFF'} (PTY経由で claude --continue を起動)`}>
+                <span className={`text-xs ${terminalModeMap[activeTabId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>端末</span>
+                <div className="relative" onClick={handleToggleTerminalMode}>
+                  <div className={`w-8 h-4 rounded-full transition-colors ${terminalModeMap[activeTabId] ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
+                  <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${terminalModeMap[activeTabId] ? 'translate-x-4' : ''}`}></div>
                 </div>
               </label>
             )}

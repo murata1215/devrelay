@@ -1070,9 +1070,23 @@ export async function sendPromptToAgent(
   if (outdatedAgents.has(machineId)) {
     throw new Error('⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。');
   }
+
+  // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
+  // 端末インタフェースモードが ON なら Agent 側で PTY 経由 claude --continue が起動する
+  let terminalMode = false;
+  try {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { project: { select: { terminalMode: true } } },
+    });
+    terminalMode = !!session?.project?.terminalMode;
+  } catch {
+    // DB 失敗時は false 扱い（既存挙動を維持）
+  }
+
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool }
+    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode }
   });
 }
 
@@ -1352,10 +1366,24 @@ export async function clearConversation(machineId: string, sessionId: string, pr
 export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string) {
   // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
   const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
-  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}`);
+  // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { project: { select: { terminalMode: true } } },
+  });
+  const terminalMode = !!session?.project?.terminalMode;
+  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}`);
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
-    payload: { sessionId, projectPath, userId, prompt, skipPermissions: machine?.skipPermissions ?? false, disableAsk: machine?.disableAsk ?? false }
+    payload: {
+      sessionId,
+      projectPath,
+      userId,
+      prompt,
+      skipPermissions: machine?.skipPermissions ?? false,
+      disableAsk: machine?.disableAsk ?? false,
+      terminalMode,
+    }
   });
 }
 

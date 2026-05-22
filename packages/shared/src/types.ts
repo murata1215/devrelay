@@ -346,6 +346,8 @@ export interface ConversationExecPayload {
   skipPermissions?: boolean;
   /** exec 開始時に最新の disableAsk を同期（config:update 配信失敗のフォールバック） */
   disableAsk?: boolean;
+  /** 端末インタフェースモード（PTY 経由で claude --continue 起動、Project 単位） */
+  terminalMode?: boolean;
 }
 
 export interface SessionRestoredPayload {
@@ -475,6 +477,8 @@ export interface AiPromptPayload {
   /** Agent 再起動時の自動セッション初期化用（server:session:start を受け取れなかった場合のフォールバック） */
   projectPath?: string;
   aiTool?: AiTool;
+  /** 端末インタフェースモード（Project.terminalMode をサーバーが転送、Project 単位の設定） */
+  terminalMode?: boolean;
 }
 
 // -----------------------------------------------------------------------------

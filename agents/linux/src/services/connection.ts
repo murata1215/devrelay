@@ -124,6 +124,8 @@ interface SessionInfo {
   claudeResumeSessionId?: string; // Session ID from Claude Code for --resume
   history: ConversationEntry[]; // Conversation history (persisted to file)
   pendingWorkState?: WorkState; // Work state to include in next prompt
+  /** 端末インタフェースモード（Project 単位、ai:prompt / exec payload から最新値を反映） */
+  terminalMode?: boolean;
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -586,7 +588,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; terminalMode?: boolean }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -626,6 +628,14 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
+  // exec 時に terminalMode を sessionInfo に反映（Project 単位設定の最新値）
+  if (sessionInfo && payload.terminalMode !== undefined) {
+    sessionInfo.terminalMode = payload.terminalMode;
+    if (payload.terminalMode) {
+      console.log(`🖥️ Terminal mode enabled on exec for session ${sessionId}`);
+    }
+  }
+
   // カスタムプロンプトがあればそれを使用、なければデフォルトのプラン実行プロンプト
   const execPrompt = customPrompt || 'プランに従って実装を開始してください。';
   console.log(`🚀 Auto-starting with prompt: ${execPrompt}`);
@@ -635,6 +645,7 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     userId,
     files: undefined,
     execPrompt,  // BuildLog AI 要約のコンテキスト用に exec プロンプトを伝搬
+    terminalMode: payload.terminalMode,  // 端末モード継承
   });
 }
 
@@ -650,7 +661,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -705,6 +716,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       });
     });
     console.log(`✅ Session auto-initialized: ${sessionId}`);
+  }
+
+  // payload で terminalMode が指定されていれば sessionInfo に反映
+  // （Project 単位の設定がメッセージごとにサーバーから配信される）
+  if (sessionInfo && payload.terminalMode !== undefined) {
+    sessionInfo.terminalMode = payload.terminalMode;
+    if (payload.terminalMode) {
+      console.log(`🖥️ Terminal mode enabled for session ${sessionId}`);
+    }
   }
 
   if (!sessionInfo || !currentConfig) {
@@ -861,6 +881,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
     skipPermissions: serverSkipPermissions,
     disableAsk: serverDisableAsk,
+    terminalMode: sessionInfo.terminalMode,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）

@@ -10,6 +10,7 @@ import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
+import { cancelTerminalProcess, runTerminalClaude } from './terminal-runner.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 
@@ -238,6 +239,11 @@ export interface SendPromptOptions {
   skipPermissions?: boolean;
   /** AskUserQuestion 無効化（true = SDK disallowedTools で除去） */
   disableAsk?: boolean;
+  /**
+   * 端末インタフェースモード（PTY 経由で claude --continue を起動）
+   * true かつ aiTool === 'claude' の場合、Agent SDK ではなく PTY ランナーを使う
+   */
+  terminalMode?: boolean;
   /**
    * ツール承認リクエストのコールバック（Agent SDK 経由の exec モードで使用）
    * 設定されている場合、canUseTool で WebSocket 経由のユーザー承認を行う
@@ -573,6 +579,73 @@ async function sendPromptToAiSdk(
   return result;
 }
 
+/**
+ * 端末インタフェースモード経由で Claude を実行する
+ * Agent SDK の代わりに PTY で `claude --continue` を都度起動する
+ *
+ * Phase 1 では tool 承認は CLI の --dangerously-skip-permissions に委ねる。
+ * 自動承認 OFF の場合は CLI が承認プロンプトを出すが、端末モードでは
+ * 即座に "いいえ" を送信する（Phase 3 で WS 承認カード連動に拡張予定）
+ */
+async function sendPromptToTerminalClaude(
+  sessionId: string,
+  prompt: string,
+  projectPath: string,
+  onOutput: OutputCallback,
+  options: SendPromptOptions
+): Promise<AiRunResult> {
+  const result: AiRunResult = {};
+
+  let claudeCommand: string;
+  try {
+    claudeCommand = resolveClaudePath();
+  } catch (err) {
+    const msg = (err as Error).message;
+    console.error(`❌ [terminal-mode] claude path resolution failed: ${msg}`);
+    onOutput(`Error: ${msg}`, true);
+    return result;
+  }
+
+  // 起動メッセージ（仕様書 §2.2.2）
+  onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand} --continue\n`, false);
+
+  // approveAllMode: server-side skipPermissions または「以降すべて許可」が立っていれば真
+  // セッション内で動的に変化するため、起動時の値をスナップショットとして使う
+  const approveAllMode = !!(options.skipPermissions || isApproveAllMode());
+
+  try {
+    const runResult = await runTerminalClaude({
+      projectPath,
+      prompt,
+      approveAllMode,
+      disableAsk: !!options.disableAsk,
+      claudeCommand,
+      sessionId,
+      onOutput: (chunk) => onOutput(chunk, false),
+    });
+
+    if (runResult.cancelledByAskDisable) {
+      onOutput(
+        `\n⚠️ AskUserQuestion が出たため、Ask 無効設定により中断しました。\n（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`,
+        true,
+      );
+      return result;
+    }
+
+    const suffix = runResult.timedOut
+      ? `\n⚠️ アイドルタイムアウト（10 分無音）により終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`
+      : `\n✅ 完了。セッションを終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`;
+
+    onOutput(suffix, true);
+  } catch (err) {
+    const msg = (err as Error).message;
+    console.error(`❌ [terminal-mode] runTerminalClaude failed: ${msg}`);
+    onOutput(`\nError: ${msg}`, true);
+  }
+
+  return result;
+}
+
 export async function sendPromptToAi(
   sessionId: string,
   prompt: string,
@@ -584,6 +657,12 @@ export async function sendPromptToAi(
   options: SendPromptOptions = {}
 ): Promise<AiRunResult> {
   console.log(`📝 Sending prompt to ${aiTool}: ${prompt.substring(0, 50)}...`);
+
+  // 端末インタフェースモード（PTY 経由で claude --continue 起動）
+  // aiTool が claude かつ terminalMode フラグが立っている場合のみ分岐
+  if (aiTool === 'claude' && options.terminalMode) {
+    return sendPromptToTerminalClaude(sessionId, prompt, projectPath, onOutput, options);
+  }
 
   // Claude は Agent SDK を使用（spawn の代わり）
   if (aiTool === 'claude') {
@@ -974,6 +1053,11 @@ export async function stopAiSession(sessionId: string): Promise<void> {
  * @returns キャンセルできた場合 true、プロセスが存在しない場合 false
  */
 export function cancelAiSession(sessionId: string): boolean {
+  // 端末インタフェースモードの PTY プロセスがあれば停止
+  if (cancelTerminalProcess(sessionId)) {
+    return true;
+  }
+
   const session = activeSessions.get(sessionId);
   if (!session || !session.process || session.process.exitCode !== null) {
     return false;
@@ -1026,7 +1110,7 @@ function getAiCommand(aiTool: AiTool, config: AgentConfig): string | undefined {
  * @returns Claude Code の実行パス
  * @throws claude コマンドが見つからない場合
  */
-function resolveClaudePath(): string {
+export function resolveClaudePath(): string {
   const isWindows = process.platform === 'win32';
   const devrelayBinDir = getBinDir();
   // Windows: .cmd バッチファイル、Linux: シンボリックリンク
