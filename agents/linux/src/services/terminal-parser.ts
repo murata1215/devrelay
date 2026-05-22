@@ -125,3 +125,59 @@ export function extractFinalOutput(term: Terminal): string {
   }
   return lines.join('\n');
 }
+
+/**
+ * Claude CLI のレンダリング済み画面から「baseline 後に追加された Claude のメッセージ」を抽出する
+ *
+ * Claude CLI は各メッセージを `●` で始まる行で表示する:
+ *   ● こんにちは！PixBlog の作業、何かありますか？
+ *
+ * baseline 時点の `●` 行数（baselineBulletCount）を保存しておき、
+ * それ以降に出現したバレットブロックだけを返す。入力ボックスの枠線
+ * （────, ╭, ╰, ⏵⏵）に到達したら抽出終了
+ *
+ * @param rendered 仮想ターミナルでレンダリング済みのテキスト
+ * @param baselineBulletCount baseline 時点の `●` 行数
+ * @returns 新規メッセージの本文（trim 済み）。新規がなければ空文字列
+ */
+export function extractClaudeResponse(rendered: string, baselineBulletCount: number): string {
+  const lines = rendered.split('\n');
+  // バレット行（`●` で始まる行）のインデックスを全て収集
+  const bulletIndices: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*[●●]\s/.test(lines[i])) {
+      bulletIndices.push(i);
+    }
+  }
+  // baseline 数を超えなければ新規メッセージなし
+  if (bulletIndices.length <= baselineBulletCount) return '';
+
+  const startLine = bulletIndices[baselineBulletCount];
+  const result: string[] = [];
+  for (let i = startLine; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    // 入力ボックス・セパレータに到達したら抽出終了
+    if (i > startLine && (
+      /^[─━]{3,}$/.test(trimmed) ||
+      /^[╭╰][─━]/.test(trimmed) ||
+      /^⏵⏵/.test(trimmed)
+    )) {
+      break;
+    }
+    result.push(lines[i]);
+  }
+  return result.join('\n').trim();
+}
+
+/**
+ * テキスト中の Claude メッセージ（`●` 行）の数を返す
+ * baseline 確定時に呼び出して保存する
+ */
+export function countClaudeBullets(rendered: string): number {
+  const lines = rendered.split('\n');
+  let count = 0;
+  for (const line of lines) {
+    if (/^\s*[●●]\s/.test(line)) count++;
+  }
+  return count;
+}

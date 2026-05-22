@@ -26,6 +26,8 @@ import {
   detectAskQuestionPrompt,
   detectTrustPrompt,
   extractFinalOutput,
+  extractClaudeResponse,
+  countClaudeBullets,
 } from './terminal-parser.js';
 
 /** PTY サイズ */
@@ -41,8 +43,11 @@ const IDLE_TIMEOUT_MS = 10 * 60_000;
 /** /exit 送信後にプロセスが終了するまでの猶予 */
 const EXIT_GRACE_MS = 5_000;
 
-/** 仮想ターミナルからのスナップショット送信間隔（ストリーミング表示用） */
-const SNAPSHOT_INTERVAL_MS = 250;
+/** 画面変化監視・完了判定チェック間隔 */
+const CHECK_INTERVAL_MS = 500;
+
+/** 完了判定: プロンプト復帰 + 画面アイドル時間（onData の頻度に依存しない判定基準） */
+const IDLE_FOR_COMPLETION_MS = 1500;
 
 export interface TerminalRunOptions {
   /** プロジェクトのワーキングディレクトリ */
@@ -135,48 +140,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let cancelledByAskDisable = false;
   let trustConfirmed = false;
   let execStartedAt = 0;
+  /** 画面が最後に変化した時刻（完了判定の「画面アイドル」基準） */
+  let lastScreenChangeAt = Date.now();
+  /** 画面変化追跡用の前回レンダリング結果 */
+  let lastRenderedForChangeTracking = '';
+  /** baseline 時点の Claude メッセージ（`●` 行）数。これより多ければ新規応答あり */
+  let baselineBulletCount = 0;
   let idleTimer: NodeJS.Timeout | null = null;
   let startupTimer: NodeJS.Timeout | null = null;
-  let snapshotTimer: NodeJS.Timeout | null = null;
-  /** プロンプト復帰後、安定期間（追加データなし）を待つタイマー。発火で完了確定 */
-  let stableReturnTimer: NodeJS.Timeout | null = null;
-  /** 直前にユーザーへ送信したスナップショット（差分計算用） */
-  let lastSnapshot = '';
-
-  /**
-   * 仮想ターミナル（@xterm/headless）の現在の画面状態を抽出し、
-   * 前回送信分との差分を上位にストリーミングする。
-   *
-   * 生 PTY チャンクに `strip-ansi` するだけだとカーソル移動 ANSI で位置調整された
-   * テキストが密着してしまう（"Accessing workspace" → "Accessingworkspace"）。
-   * 仮想画面でレンダリングしてから抽出することで人間が読める形に整形される。
-   *
-   * `promptSent` が false の間（= ユーザープロンプト送信前）は履歴の再描画なので
-   * 上位に送らず、`lastSnapshot` を更新するだけにする（履歴を ベースライン化）。
-   * 送信後はベースラインからの差分のみが流れるため、ユーザーには Claude の応答だけが見える
-   */
-  const sendSnapshot = (terminal: typeof term, push: (s: string) => void) => {
-    const current = extractFinalOutput(terminal);
-    if (current === lastSnapshot) return;
-
-    if (!promptSent) {
-      // 起動・履歴再描画中はベースラインを更新するだけ（出力抑制）
-      lastSnapshot = current;
-      return;
-    }
-
-    let delta: string;
-    if (current.startsWith(lastSnapshot)) {
-      delta = current.slice(lastSnapshot.length);
-    } else {
-      // 画面が再描画でリセットされた場合は新しい全体を送信
-      delta = '\n' + current;
-    }
-    if (delta.length > 0) {
-      push(delta);
-    }
-    lastSnapshot = current;
-  };
+  let completionCheckInterval: NodeJS.Timeout | null = null;
 
   return new Promise<TerminalRunResult>((resolve, reject) => {
     const finish = (reason: string) => {
@@ -184,18 +156,25 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       finished = true;
       if (idleTimer) clearTimeout(idleTimer);
       if (startupTimer) clearTimeout(startupTimer);
-      if (snapshotTimer) {
-        clearTimeout(snapshotTimer);
-        snapshotTimer = null;
-      }
-      if (stableReturnTimer) {
-        clearTimeout(stableReturnTimer);
-        stableReturnTimer = null;
+      if (completionCheckInterval) {
+        clearInterval(completionCheckInterval);
+        completionCheckInterval = null;
       }
       console.log(`🖥️ [terminal-mode] finishing (${reason})`);
 
-      // 最後のスナップショットを確実に送信
-      sendSnapshot(term, opts.onOutput);
+      // Claude の応答を抽出して送信（promptSent 後のみ意味のある応答が得られる）
+      if (promptSent) {
+        const finalRendered = extractFinalOutput(term);
+        const response = extractClaudeResponse(finalRendered, baselineBulletCount);
+        if (response) {
+          opts.onOutput(response);
+        } else {
+          // 応答抽出失敗時のフォールバック: 画面末尾を簡易表示（デバッグ用）
+          console.warn(`⚠️ [terminal-mode] could not extract Claude response from rendered screen`);
+          const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
+          opts.onOutput(`\n（Claude の応答抽出に失敗しました。画面末尾:\n${tail}\n）`);
+        }
+      }
 
       // /exit 送信して正規終了を試みる
       try {
@@ -236,15 +215,6 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       }, IDLE_TIMEOUT_MS);
     };
 
-    /** スナップショット送信をスロットルで予約 */
-    const scheduleSnapshot = () => {
-      if (snapshotTimer) return;
-      snapshotTimer = setTimeout(() => {
-        snapshotTimer = null;
-        if (!finished) sendSnapshot(term, opts.onOutput);
-      }, SNAPSHOT_INTERVAL_MS);
-    };
-
     // 起動タイムアウト
     startupTimer = setTimeout(() => {
       if (!promptReady) {
@@ -252,8 +222,6 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         const rendered = extractFinalOutput(term);
         const tail = rendered.length > 500 ? rendered.slice(-500) : rendered;
         console.error(`❌ [terminal-mode] startup timeout (${STARTUP_TIMEOUT_MS}ms). Last 500 chars of rendered screen:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
-        // 最後のスナップショットを送信して状況を可視化
-        sendSnapshot(term, opts.onOutput);
         try {
           ptyProcess.kill();
         } catch {
@@ -274,13 +242,18 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       logStream?.write(data);
 
       resetIdleTimer();
-      scheduleSnapshot();
 
       // 検出は仮想画面でレンダリング済みのテキストに対して行う。
       // raw PTY バッファに strip-ansi するだけだとカーソル位置指定で配置された
       // 単語が密着してしまう（"trust this folder" → "trustthisfolder"）ため、
       // 仮想画面でのレンダリング結果を使うことで視認できる空白で正しく判定できる
       const rendered = extractFinalOutput(term);
+
+      // 画面変化を記録（完了判定の「画面アイドル」基準）
+      if (rendered !== lastRenderedForChangeTracking) {
+        lastScreenChangeAt = Date.now();
+        lastRenderedForChangeTracking = rendered;
+      }
 
       // フォルダ信頼確認プロンプト: --dangerously-skip-permissions を付けても
       // 初回ワークスペースでは出るため、自動で Enter を送って承認する。
@@ -305,21 +278,25 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
             startupTimer = null;
           }
           console.log(`✅ [terminal-mode] prompt ready, sending user prompt (${opts.prompt.length} chars)`);
-          // 履歴再描画分はベースラインとして固定。以降はこれからの差分のみが流れる
-          lastSnapshot = rendered;
-          // ユーザー向けヒント（履歴大量再描画後に何も流れない時間があるため目印を出す）
-          opts.onOutput('\n📨 メッセージを送信しました。Claude の応答を待っています...\n\n');
+          // baseline 時点の `●` メッセージ数を記録。これより後のメッセージが Claude の応答
+          baselineBulletCount = countClaudeBullets(rendered);
+          console.log(`📊 [terminal-mode] baseline bullet count: ${baselineBulletCount}`);
+          // ユーザー向けヒント（実行中はストリーミング停止するため目印を出す）
+          opts.onOutput('\n📨 メッセージを送信しました。Claude の応答を待っています...\n');
           // プロンプト本文を送信（CRLF 終端で送信完了させる）
           ptyProcess.write(opts.prompt + '\r');
           promptSent = true;
           execStarted = true;
           execStartedAt = Date.now();
+          // 完了監視を開始（500ms ごとに「画面アイドル + プロンプト復帰」を確認）
+          startCompletionCheck();
           return;
         }
         return;
       }
 
-      // 実行開始後: tool 承認・質問・完了プロンプトを判定
+      // 実行開始後: tool 承認・質問プロンプトの自動応答
+      // 完了判定は startCompletionCheck の setInterval で独立して行う
       if (execStarted && !finished) {
         // Ask 無効化: 質問プロンプトを検出したら中断
         if (opts.disableAsk && detectAskQuestionPrompt(rendered)) {
@@ -346,31 +323,32 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           }
           return;
         }
-
-        // 完了プロンプト（次のユーザー入力待ち）に戻ったら正規完了
-        // ただし以下を満たす必要がある:
-        //  1. exec 送信から 2 秒以上経過（送信直後の echo 由来の偽復帰防止）
-        //  2. プロンプト復帰検出後、1.5 秒間追加データが来ない（応答ストリーミング中の一時的復帰防止）
-        if (detectPromptReady(rendered) && Date.now() - execStartedAt > 2000) {
-          // 既に予約があれば cancel して再予約（onData ごとにアイドル時間を 0 に戻す）
-          if (stableReturnTimer) clearTimeout(stableReturnTimer);
-          stableReturnTimer = setTimeout(() => {
-            stableReturnTimer = null;
-            if (finished) return;
-            // 1.5 秒間追加データなしで再評価。まだプロンプト復帰中なら真の完了
-            const stillReady = detectPromptReady(extractFinalOutput(term));
-            if (stillReady) {
-              console.log(`✅ [terminal-mode] prompt returned (stable for 1.5s), completing`);
-              finish('prompt-ready');
-            }
-          }, 1500);
-        } else if (stableReturnTimer) {
-          // プロンプト復帰でないデータが来た → 安定タイマーをキャンセル
-          clearTimeout(stableReturnTimer);
-          stableReturnTimer = null;
-        }
       }
     });
+
+    /**
+     * 完了監視ループ。500ms ごとに「画面アイドル時間 + プロンプト復帰」を確認する。
+     *
+     * onData ハンドラ内で完了判定すると、Claude が応答テキストを書き出している間も
+     * 入力ボックスの `❯` プロンプトは画面下部に常駐しているため検出器が常に true を返し、
+     * onData ごとにタイマーがリセットされて完了が永遠に確定しない問題があった。
+     * 独立した setInterval にすることで、onData の頻度に依存せず確実に完了を検出できる
+     */
+    const startCompletionCheck = () => {
+      if (completionCheckInterval) return;
+      completionCheckInterval = setInterval(() => {
+        if (finished || !execStarted) return;
+        const elapsedSinceExec = Date.now() - execStartedAt;
+        const elapsedSinceChange = Date.now() - lastScreenChangeAt;
+        // 送信後 2 秒は echo を真の応答と誤認しないようスキップ
+        if (elapsedSinceExec < 2000) return;
+        // 画面が 1.5 秒間変化なし + プロンプト復帰中 → 完了
+        if (elapsedSinceChange >= IDLE_FOR_COMPLETION_MS && detectPromptReady(lastRenderedForChangeTracking)) {
+          console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready, completing`);
+          finish('idle-and-prompt-ready');
+        }
+      }, CHECK_INTERVAL_MS);
+    };
 
     ptyProcess.onExit(({ exitCode, signal }) => {
       if (finished) return;
