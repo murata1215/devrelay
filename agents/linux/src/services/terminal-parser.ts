@@ -21,9 +21,9 @@ import type { Terminal } from '@xterm/headless';
  * Claude CLI の入力プロンプトに復帰したかを判定する
  *
  * Claude CLI のプロンプト形態:
- *  - 標準: `> ` で終わる
- *  - 枠付き: `│ > │` で終わる
- *  - プレースホルダ付き: `│ > Try ...` の形式
+ *  - 標準: `> ` または `❯ ` で終わる（カーソルマーカー U+276F）
+ *  - 枠付き: `│ > │` / `│ ❯ │` で終わる
+ *  - プレースホルダ付き: `│ ❯ Try "..."` の形式（実機で確認された形式）
  *
  * 末尾 5 行の中に該当パターンがあれば true
  */
@@ -34,12 +34,14 @@ export function detectPromptReady(text: string): boolean {
   const lines = trimmed.split('\n').slice(-5).map(l => l.trimEnd());
 
   for (const line of lines) {
-    // "> " のみの行（標準プロンプト）
-    if (/^>\s*$/.test(line)) return true;
-    // "│ > │" 形式（枠付きプロンプト、空入力）
-    if (/^[│|]\s*>\s*[│|]?\s*$/.test(line)) return true;
-    // "│ > プレースホルダ │" 形式（枠付きプロンプト、Try ... 等のヒント付き）
-    if (/^[│|]\s*>\s/.test(line)) return true;
+    // "> " または "❯ " のみの行（標準プロンプト・空入力、先頭空白も許容）
+    if (/^\s*[>❯]\s*$/.test(line)) return true;
+    // "│ > │" / "│ ❯ │" 形式（枠付きプロンプト、空入力）
+    if (/^[│|]\s*[>❯]\s*[│|]?\s*$/.test(line)) return true;
+    // "│ > プレースホルダ │" / "│ ❯ プレースホルダ" 形式（Try ... 等のヒント付き）
+    if (/^[│|]\s*[>❯]\s/.test(line)) return true;
+    // "❯ Try ..." 形式（枠なしの新プロンプト、実機で確認、先頭空白許容）
+    if (/^\s*[>❯]\s+\S/.test(line)) return true;
   }
   return false;
 }
