@@ -181,3 +181,55 @@ export function countClaudeBullets(rendered: string): number {
   }
   return count;
 }
+
+/**
+ * 番号付き選択肢プロンプトから質問本文と選択肢リストを抽出する
+ *
+ * Claude CLI の承認プロンプト典型例:
+ *   [Bash] git status を実行してよろしいですか?
+ *   1. はい
+ *   2. いいえ (理由を入力)
+ *   ❯
+ *
+ * @returns { question, options } または null（選択肢が抽出できない場合）
+ */
+export function extractChoicePrompt(text: string): { question: string; options: string[] } | null {
+  const lines = text.split('\n');
+  // 連続する番号付き選択肢行を収集
+  const optionLines: { index: number; text: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*(\d+)\.\s+(.+?)\s*$/);
+    if (m) {
+      optionLines.push({ index: i, text: m[2] });
+    } else if (optionLines.length > 0) {
+      // 選択肢ブロックの後に空行・別の行 → 抽出終了
+      break;
+    }
+  }
+  if (optionLines.length < 2) return null;
+
+  // 質問本文: 最初の選択肢の直前の連続テキスト行（空行・セパレータで境界）。
+  // 質問とその上のメッセージは通常空行で区切られているため、最初の空行で停止する
+  const firstOptIdx = optionLines[0].index;
+  const questionLines: string[] = [];
+  for (let i = firstOptIdx - 1; i >= 0; i--) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    // 空行に到達したら抽出終了（前のメッセージとの境界）
+    if (trimmed === '') {
+      if (questionLines.length > 0) break;
+      continue;  // 選択肢直上の空行はスキップ
+    }
+    // セパレータに到達したら抽出終了
+    if (/^[─━]{3,}/.test(trimmed) || /^[╭╰][─━]/.test(trimmed) || /^⏵⏵/.test(trimmed)) break;
+    // 履歴メッセージ（`●`）に到達したら抽出終了
+    if (/^[●●]\s/.test(trimmed)) break;
+    questionLines.unshift(trimmed);
+    if (questionLines.length > 15) break;  // safety cap
+  }
+
+  return {
+    question: questionLines.join('\n').trim() || '(質問テキストを抽出できませんでした)',
+    options: optionLines.map(o => o.text),
+  };
+}

@@ -193,10 +193,28 @@ const pendingToolApprovals = new Map<string, {
 }>();
 
 /**
+ * 端末モードの承認応答 resolver。
+ * SDK の pendingToolApprovals と並列で存在し、端末モードは PTY に書き戻すための
+ * シンプルな関数（optionIndex → PTY に "N\r" 書き込み）を登録する。
+ */
+const terminalApprovalResolvers = new Map<string, (optionIndex: number) => void>();
+
+/**
  * Server からのツール承認レスポンスを受け取り、保留中の Promise を解決する
  * connection.ts から呼び出される
  */
 export function resolveToolApproval(requestId: string, response: ToolApprovalResponse): boolean {
+  // 端末モードの resolver があれば優先（PTY に番号を書き戻す）
+  const terminalResolver = terminalApprovalResolvers.get(requestId);
+  if (terminalResolver) {
+    terminalApprovalResolvers.delete(requestId);
+    // 既存承認カードは Allow/Deny の 2 択 → 端末モードでも option 1 / 2 にマッピング
+    const optionIndex = response.behavior === 'allow' ? 0 : 1;
+    console.log(`📥 [terminal-mode] resolving approval ${requestId.slice(0, 8)} → ${response.behavior} (option ${optionIndex + 1})`);
+    terminalResolver(optionIndex);
+    return true;
+  }
+
   const pending = pendingToolApprovals.get(requestId);
   if (!pending) {
     console.log(`⚠️ Unknown tool approval requestId: ${requestId}`);
@@ -651,6 +669,24 @@ async function sendPromptToTerminalClaude(
       claudeCommand,
       sessionId,
       onOutput: (chunk) => onOutput(chunk, false),
+      // Claude CLI の番号付き選択肢プロンプトを既存承認カード経路 (canUseTool 互換) に橋渡し
+      // onToolApprovalRequest が設定されていなければ未配線扱いとなり runner 内部で自動拒否
+      onChoiceRequest: options.onToolApprovalRequest ? (req) => {
+        // resolver を登録（resolveToolApproval から後で呼ばれる）
+        terminalApprovalResolvers.set(req.requestId, req.respond);
+        // 既存承認カード形式で WS 送信
+        options.onToolApprovalRequest!({
+          requestId: req.requestId,
+          // 端末モードはツール名を CLI 画面から復元できないため固定文字列
+          toolName: 'Claude CLI Prompt',
+          toolInput: {
+            question: req.question,
+            options: req.options,
+          },
+          title: req.question.slice(0, 100),
+          description: req.options.map((o, i) => `${i + 1}. ${o}`).join('\n'),
+        });
+      } : undefined,
     });
 
     if (runResult.cancelledByAskDisable) {

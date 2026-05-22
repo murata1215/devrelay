@@ -27,8 +27,10 @@ import {
   detectTrustPrompt,
   extractFinalOutput,
   extractClaudeResponse,
+  extractChoicePrompt,
   countClaudeBullets,
 } from './terminal-parser.js';
+import crypto from 'crypto';
 
 /** PTY サイズ */
 const TERM_COLS = 120;
@@ -61,6 +63,18 @@ const PROMPT_CHUNK_DELAY_MS = 30;
 /** プロンプト末尾投入から submit (\r) 送信までの待機時間 */
 const PROMPT_SUBMIT_DELAY_MS = 400;
 
+/** 承認/質問プロンプトをユーザーに転送するためのリクエスト */
+export interface ChoiceRequest {
+  /** ユニークなリクエスト ID（WS approval 経路で使う） */
+  requestId: string;
+  /** 質問本文（Claude CLI 画面から抽出） */
+  question: string;
+  /** 選択肢リスト（"1. xxx" の xxx 部分） */
+  options: string[];
+  /** ユーザーが選択肢を選んだら呼び出すレスポンダ（0-indexed） */
+  respond: (optionIndex: number) => void;
+}
+
 export interface TerminalRunOptions {
   /** プロジェクトのワーキングディレクトリ */
   projectPath: string;
@@ -76,6 +90,12 @@ export interface TerminalRunOptions {
   onOutput: (chunk: string) => void;
   /** セッション識別子（ログファイル名・トラブルシュート用） */
   sessionId: string;
+  /**
+   * 承認/質問プロンプト発生時のコールバック。
+   * 設定されている場合、Claude CLI の番号付き選択肢プロンプトを検出すると呼ばれる。
+   * 未設定の場合は自動的に "2"（拒否）を送信する後方互換挙動になる
+   */
+  onChoiceRequest?: (req: ChoiceRequest) => void;
 }
 
 export interface TerminalRunResult {
@@ -158,6 +178,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let lastRenderedForChangeTracking = '';
   /** baseline 時点の Claude メッセージ（`●` 行）数。これより多ければ新規応答あり */
   let baselineBulletCount = 0;
+  /** 既に応答済みのプロンプト hash（同じ承認プロンプトの重複転送防止） */
+  const handledPromptHashes = new Set<string>();
+  /** 承認応答待ち中のリクエスト数。>0 の間は「画面アイドル + プロンプト復帰」を完了と判定しない */
+  let pendingApprovalCount = 0;
   let idleTimer: NodeJS.Timeout | null = null;
   let startupTimer: NodeJS.Timeout | null = null;
   let completionCheckInterval: NodeJS.Timeout | null = null;
@@ -320,34 +344,68 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         return;
       }
 
-      // 実行開始後: tool 承認・質問プロンプトの自動応答
+      // 実行開始後: 番号付き選択肢プロンプト（tool 承認 / AskUserQuestion 等）の処理
       // 完了判定は startCompletionCheck の setInterval で独立して行う
-      if (execStarted && !finished) {
-        // Ask 無効化: 質問プロンプトを検出したら中断
-        if (opts.disableAsk && detectAskQuestionPrompt(rendered)) {
-          cancelledByAskDisable = true;
-          console.log(`🚫 [terminal-mode] AskUserQuestion detected with disableAsk → cancelling`);
-          try {
-            ptyProcess.write('\x03'); // Ctrl+C
-          } catch {
-            // ignore
-          }
-          finish('ask-disabled');
-          return;
-        }
+      if (execStarted && !finished && !opts.approveAllMode && detectToolApprovalPrompt(rendered)) {
+        const meta = extractChoicePrompt(rendered);
+        if (meta) {
+          // 同一プロンプトの重複転送を防ぐため、内容で hash を作って既処理を記録
+          const hash = crypto.createHash('sha1')
+            .update(meta.question + '|' + meta.options.join('|'))
+            .digest('hex').slice(0, 16);
 
-        // tool 承認プロンプト検出（approveAllMode なら CLI 側で出ない想定だが念のため）
-        if (!opts.approveAllMode && detectToolApprovalPrompt(rendered)) {
-          // Phase 1 では承認カード連動を見送り、ユーザーに「自動承認 ON にしてください」と促す
-          // Phase 3 で WebUI 承認カードへの転送に置き換える
-          console.log(`🔐 [terminal-mode] tool approval prompt detected → declining (Phase 1 limitation)`);
-          try {
-            ptyProcess.write('2\r'); // いいえを選択
-          } catch {
-            // ignore
+          if (!handledPromptHashes.has(hash)) {
+            handledPromptHashes.add(hash);
+
+            // Ask 無効化 + AskUserQuestion パターン → 中断（既存挙動）
+            if (opts.disableAsk && detectAskQuestionPrompt(rendered)) {
+              cancelledByAskDisable = true;
+              console.log(`🚫 [terminal-mode] AskUserQuestion detected with disableAsk → cancelling`);
+              try {
+                ptyProcess.write('\x03'); // Ctrl+C
+              } catch {
+                // ignore
+              }
+              finish('ask-disabled');
+              return;
+            }
+
+            // onChoiceRequest 未設定 → 旧挙動（自動拒否=2）
+            if (!opts.onChoiceRequest) {
+              console.log(`🔐 [terminal-mode] approval prompt → declining (no callback configured)`);
+              try {
+                ptyProcess.write('2\r');
+              } catch {
+                // ignore
+              }
+              return;
+            }
+
+            // WS 承認カード経路にフォワード
+            pendingApprovalCount++;
+            const requestId = crypto.randomUUID();
+            console.log(`🔐 [terminal-mode] approval prompt → requesting user choice (${meta.options.length} options, requestId=${requestId.slice(0, 8)}): "${meta.question.slice(0, 80)}"`);
+            opts.onChoiceRequest({
+              requestId,
+              question: meta.question,
+              options: meta.options,
+              respond: (optionIndex: number) => {
+                if (finished) return;
+                pendingApprovalCount = Math.max(0, pendingApprovalCount - 1);
+                const choice = Math.max(0, Math.min(meta.options.length - 1, optionIndex)) + 1;  // 1-indexed, clamp
+                console.log(`✅ [terminal-mode] user chose option ${choice}: "${meta.options[choice - 1]?.slice(0, 60)}" (requestId=${requestId.slice(0, 8)})`);
+                try {
+                  ptyProcess.write(`${choice}\r`);
+                } catch {
+                  // ignore
+                }
+                // 承認後の画面更新を期待してアイドルタイマーをリセット
+                resetIdleTimer();
+              },
+            });
           }
-          return;
         }
+        return;
       }
     });
 
@@ -393,12 +451,19 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       if (completionCheckInterval) return;
       completionCheckInterval = setInterval(() => {
         if (finished || !execStarted) return;
+        // 承認応答待ち中は完了しない（ユーザーの応答前に終わらせると Claude の続きの応答を取り逃がす）
+        if (pendingApprovalCount > 0) return;
         const elapsedSinceExec = Date.now() - execStartedAt;
         const elapsedSinceChange = Date.now() - lastScreenChangeAt;
         // プロンプト送信完了までは echo を真の応答と誤認しないようスキップ
         if (elapsedSinceExec < EXEC_COOLDOWN_MS) return;
         // 画面が 1.5 秒間変化なし + プロンプト復帰中 → 完了
-        if (elapsedSinceChange >= IDLE_FOR_COMPLETION_MS && detectPromptReady(lastRenderedForChangeTracking)) {
+        // ただし「画面に承認プロンプトが映っている」場合は完了ではなく承認待ち中（pendingApprovalCount でも捕捉しているが二重防御）
+        if (
+          elapsedSinceChange >= IDLE_FOR_COMPLETION_MS &&
+          detectPromptReady(lastRenderedForChangeTracking) &&
+          !detectToolApprovalPrompt(lastRenderedForChangeTracking)
+        ) {
           console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready, completing`);
           finish('idle-and-prompt-ready');
         }
