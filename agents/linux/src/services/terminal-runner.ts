@@ -9,8 +9,11 @@
  * プロンプト復帰検出は補助的に使う（仕様書 §4.1）。
  */
 import * as pty from 'node-pty';
-import { Terminal } from '@xterm/headless';
+// @xterm/headless は webpack バンドル済みの CommonJS のため named import が ESM で失敗する
+// Node の ESM ローダーは CJS から named export を取り出せないため、default import で取得する
+import xtermHeadless from '@xterm/headless';
 import type { IPty } from 'node-pty';
+const { Terminal } = xtermHeadless;
 import path from 'path';
 import fs from 'fs';
 import stripAnsi from 'strip-ansi';
