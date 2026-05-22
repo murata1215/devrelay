@@ -1941,6 +1941,8 @@ async function handleAgentUpdate() {
       `if (-not $remoteBranch) { $remoteBranch = 'origin/main' }`,
       psRunAndLog('git reset', 'git reset --hard $remoteBranch'),
       psRunAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
+      // node-pty native binary をビルド（端末モード用、失敗しても継続）
+      psRunAndLog('rebuild node-pty', 'pnpm rebuild node-pty'),
       psRunAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
       psRunAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
       psLog('Build done, restarting...'),
@@ -1990,6 +1992,8 @@ async function handleAgentUpdate() {
       `[ -z "$REMOTE_BRANCH" ] && REMOTE_BRANCH="origin/main"`,
       runAndLog('git reset', 'git reset --hard $REMOTE_BRANCH'),
       runAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
+      // node-pty native binary をビルド（端末モード用、macOS はプリビルドあるが冪等のため実行）
+      runAndLog('rebuild node-pty', 'pnpm rebuild node-pty || true'),
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
       runAndLog('agent build', 'pnpm --filter @devrelay/agent-macos build'),
     ].join('; ');

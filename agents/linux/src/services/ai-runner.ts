@@ -10,7 +10,16 @@ import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
-import { cancelTerminalProcess, runTerminalClaude } from './terminal-runner.js';
+// terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
+// 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
+type TerminalRunnerModule = typeof import('./terminal-runner.js');
+let terminalRunnerModule: TerminalRunnerModule | null = null;
+async function loadTerminalRunner(): Promise<TerminalRunnerModule> {
+  if (!terminalRunnerModule) {
+    terminalRunnerModule = await import('./terminal-runner.js');
+  }
+  return terminalRunnerModule;
+}
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 
@@ -606,6 +615,26 @@ async function sendPromptToTerminalClaude(
     return result;
   }
 
+  // 端末モード本体（node-pty / @xterm/headless）を遅延ロード。
+  // node-pty のネイティブビルド欠落時はここで明確なエラーを返す
+  let runTerminalClaude: TerminalRunnerModule['runTerminalClaude'];
+  try {
+    const mod = await loadTerminalRunner();
+    runTerminalClaude = mod.runTerminalClaude;
+  } catch (err) {
+    const msg = (err as Error).message;
+    console.error(`❌ [terminal-mode] terminal-runner load failed: ${msg}`);
+    onOutput(
+      `Error: 端末インタフェースモードの起動に失敗しました。\n` +
+      `node-pty のネイティブモジュールが見つからない可能性があります。\n` +
+      `Agent ホストで以下を実行してください:\n` +
+      `  cd ~/.devrelay/agent && pnpm rebuild node-pty\n` +
+      `詳細: ${msg}`,
+      true,
+    );
+    return result;
+  }
+
   // 起動メッセージ（仕様書 §2.2.2）
   onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand} --continue\n`, false);
 
@@ -1054,7 +1083,8 @@ export async function stopAiSession(sessionId: string): Promise<void> {
  */
 export function cancelAiSession(sessionId: string): boolean {
   // 端末インタフェースモードの PTY プロセスがあれば停止
-  if (cancelTerminalProcess(sessionId)) {
+  // terminal-runner がロード済みでない場合 = PTY 実行中ではない（ロードされた時点で必ずキャッシュされる）
+  if (terminalRunnerModule && terminalRunnerModule.cancelTerminalProcess(sessionId)) {
     return true;
   }
 

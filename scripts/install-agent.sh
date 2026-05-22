@@ -396,6 +396,12 @@ echo "  依存関係をインストール中..."
 # 企業ネットワークで Electron バイナリ取得が ECONNRESET で失敗する問題を回避
 pnpm install --frozen-lockfile --ignore-scripts 2>/dev/null || pnpm install --ignore-scripts
 
+# 端末インタフェースモード用に node-pty のネイティブバイナリをビルド
+# Linux はプリビルドが同梱されていないため必須。macOS/Windows はプリビルドあり（冪等）
+# 失敗しても fatal にしない（端末モードのみ無効化、他機能は動作継続）
+echo "  node-pty native binary をビルド中..."
+pnpm rebuild node-pty 2>/dev/null || echo -e "${YELLOW}  ⚠️ node-pty build skipped (端末モードは無効になります。手動で 'pnpm rebuild node-pty' を実行してください)${NC}"
+
 echo "  shared パッケージをビルド中..."
 pnpm --filter @devrelay/shared build
 
