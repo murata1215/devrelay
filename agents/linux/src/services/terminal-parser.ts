@@ -1,50 +1,45 @@
 /**
  * 端末インタフェースモード（Terminal Mode）用パーサ
  *
- * PTY 経由で起動された `claude --continue` の出力ストリームを解析し、
+ * PTY 経由で起動された `claude --continue` の画面状態を解析し、
  * 以下を判定する:
  *  - 初期プロンプト復帰（起動完了）
  *  - tool 承認プロンプト出現
  *  - AskUserQuestion プロンプト出現
+ *  - フォルダ信頼確認プロンプト出現
  *  - 最終出力テキストの抽出
  *
- * Claude CLI の UI は ANSI 制御コードを多用するため、検出は ANSI 除去後の
- * テキストに対して行う。誤検出を最小化するためバッファ末尾のみを参照する。
+ * 各 detect 関数は **`@xterm/headless` 仮想画面でレンダリング済みのテキスト**
+ * を受け取る。raw PTY バッファに `strip-ansi` するだけだとカーソル位置指定で
+ * 配置された単語が密着してしまう（"Yes, I trust this folder" → "Yes,Itrustthisfolder"）。
+ * 仮想画面でレンダリングしたテキストはカーソル位置を解釈してセルに配置されるため、
+ * 視認できるとおりの空白で単語が並ぶ。
  */
-import stripAnsi from 'strip-ansi';
 import type { Terminal } from '@xterm/headless';
-
-/** 直近何文字を見るか（バッファ末尾の判定用） */
-const TAIL_WINDOW = 4000;
-
-/** バッファ末尾を ANSI 除去後の文字列で返す */
-function tailPlain(buffer: string): string {
-  const tail = buffer.length > TAIL_WINDOW ? buffer.slice(-TAIL_WINDOW) : buffer;
-  return stripAnsi(tail);
-}
 
 /**
  * Claude CLI の入力プロンプトに復帰したかを判定する
  *
  * Claude CLI のプロンプト形態:
  *  - 標準: `> ` で終わる
- *  - 枠付き: `│ > ` で終わる
- *  - 空入力カーソル: `╭─ ... ─╮\n│ > │\n╰─ ... ─╯` の末尾
+ *  - 枠付き: `│ > │` で終わる
+ *  - プレースホルダ付き: `│ > Try ...` の形式
  *
- * 末尾の空白・改行は無視する
+ * 末尾 5 行の中に該当パターンがあれば true
  */
-export function detectPromptReady(buffer: string): boolean {
-  const tail = tailPlain(buffer).trimEnd();
-  if (tail.length === 0) return false;
+export function detectPromptReady(text: string): boolean {
+  const trimmed = text.trimEnd();
+  if (trimmed.length === 0) return false;
 
-  // 末尾 4 行を見る
-  const lines = tail.split('\n').slice(-4).map(l => l.trimEnd());
+  const lines = trimmed.split('\n').slice(-5).map(l => l.trimEnd());
 
   for (const line of lines) {
-    // "> " または "│ > " で終わる行
+    // "> " のみの行（標準プロンプト）
     if (/^>\s*$/.test(line)) return true;
-    if (/^>\s*\|?\s*$/.test(line)) return true;
-    if (/[│|]\s*>\s*[│|]?\s*$/.test(line)) return true;
+    // "│ > │" 形式（枠付きプロンプト、空入力）
+    if (/^[│|]\s*>\s*[│|]?\s*$/.test(line)) return true;
+    // "│ > プレースホルダ │" 形式（枠付きプロンプト、Try ... 等のヒント付き）
+    if (/^[│|]\s*>\s/.test(line)) return true;
   }
   return false;
 }
@@ -59,13 +54,13 @@ export function detectPromptReady(buffer: string): boolean {
  *   ❯
  *
  * 多言語対応のため、番号付き選択肢（"1. ... 2. ..."）と
- * 末尾のカーソルマーク `❯` の同時出現で判定する
+ * 末尾のカーソルマーク `❯` の同時出現で判定する。空白の有無は問わない
+ * （仮想画面レンダリング後でも稀に密着する可能性に備えて緩く）
  */
-export function detectToolApprovalPrompt(buffer: string): boolean {
-  const tail = tailPlain(buffer);
-  // "1. " "2. " のような選択肢が含まれ、末尾近くに ❯（U+276F）がある
-  const hasChoices = /(?:^|\n)\s*1\.\s.+\n\s*2\.\s/.test(tail);
-  const hasCursor = /❯\s*$/.test(tail.trimEnd());
+export function detectToolApprovalPrompt(text: string): boolean {
+  // "1." と "2." が近接して出現し、末尾近くに ❯（U+276F）がある
+  const hasChoices = /1\.\s*\S.{0,200}2\.\s*\S/s.test(text);
+  const hasCursor = /❯\s*$/.test(text.trimEnd());
   return hasChoices && hasCursor;
 }
 
@@ -76,10 +71,9 @@ export function detectToolApprovalPrompt(buffer: string): boolean {
  * 質問形式が出る。選択肢にツール名 `AskUserQuestion` を含む場合や
  * 「Q:」「質問:」キーワードを含む場合に検出する
  */
-export function detectAskQuestionPrompt(buffer: string): boolean {
-  const tail = tailPlain(buffer);
-  if (!/❯\s*$/.test(tail.trimEnd())) return false;
-  return /AskUserQuestion|質問:|Q:\s/i.test(tail);
+export function detectAskQuestionPrompt(text: string): boolean {
+  if (!/❯\s*$/.test(text.trimEnd())) return false;
+  return /AskUserQuestion|質問:|Q:\s/i.test(text);
 }
 
 /**
@@ -95,12 +89,14 @@ export function detectAskQuestionPrompt(buffer: string): boolean {
  * `--dangerously-skip-permissions` を付けても表示されるため、端末モードでは
  * 自動承認して通常プロンプトまで進める必要がある。
  *
- * 「trust this folder」「No, exit」両方の文言が末尾近くに出ていれば trust prompt と判定
+ * "trust this folder" と "No, exit" が共に画面内にあれば trust prompt と判定。
+ * 仮想画面でレンダリング済みでも稀に密着する可能性があるため、空白は \s* で許容する
  */
-export function detectTrustPrompt(buffer: string): boolean {
-  const tail = tailPlain(buffer);
-  const hasTrust = /trust\s+this\s+folder|フォルダ.{0,4}信頼/i.test(tail);
-  const hasExit = /No,?\s*exit|いいえ.{0,4}終了/i.test(tail);
+export function detectTrustPrompt(text: string): boolean {
+  // "trust" と "folder" の間に this（あるいは何もなし）を許容
+  const hasTrust = /trust\s*this\s*folder|trustfolder|フォルダ.{0,4}信頼/i.test(text);
+  // "No, exit" は カンマ・空白を任意に
+  const hasExit = /No\s*,?\s*exit|いいえ.{0,4}終了/i.test(text);
   return hasTrust && hasExit;
 }
 

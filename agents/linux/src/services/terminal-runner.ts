@@ -127,13 +127,13 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
     console.warn(`⚠️ [terminal-mode] log stream open failed: ${(err as Error).message}`);
   }
 
-  let buffer = '';
   let promptReady = false;
   let execStarted = false;
   let finished = false;
   let timedOut = false;
   let cancelledByAskDisable = false;
   let trustConfirmed = false;
+  let execStartedAt = 0;
   let idleTimer: NodeJS.Timeout | null = null;
   let startupTimer: NodeJS.Timeout | null = null;
   let snapshotTimer: NodeJS.Timeout | null = null;
@@ -230,7 +230,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
     // 起動タイムアウト
     startupTimer = setTimeout(() => {
       if (!promptReady) {
-        console.error(`❌ [terminal-mode] startup timeout (${STARTUP_TIMEOUT_MS}ms)`);
+        // 起動失敗時に画面の最後 500 文字をログに残す（検出ロジック改善のための調査材料）
+        const rendered = extractFinalOutput(term);
+        const tail = rendered.length > 500 ? rendered.slice(-500) : rendered;
+        console.error(`❌ [terminal-mode] startup timeout (${STARTUP_TIMEOUT_MS}ms). Last 500 chars of rendered screen:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
         // 最後のスナップショットを送信して状況を可視化
         sendSnapshot(term, opts.onOutput);
         try {
@@ -250,16 +253,21 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
 
     ptyProcess.onData((data) => {
       term.write(data);
-      buffer += data;
       logStream?.write(data);
 
       resetIdleTimer();
       scheduleSnapshot();
 
+      // 検出は仮想画面でレンダリング済みのテキストに対して行う。
+      // raw PTY バッファに strip-ansi するだけだとカーソル位置指定で配置された
+      // 単語が密着してしまう（"trust this folder" → "trustthisfolder"）ため、
+      // 仮想画面でのレンダリング結果を使うことで視認できる空白で正しく判定できる
+      const rendered = extractFinalOutput(term);
+
       // フォルダ信頼確認プロンプト: --dangerously-skip-permissions を付けても
       // 初回ワークスペースでは出るため、自動で Enter を送って承認する。
       // ユーザーが端末モードを ON にしたという明示的選択がトリガなので、無人自動承認ではない。
-      if (!trustConfirmed && detectTrustPrompt(buffer)) {
+      if (!trustConfirmed && detectTrustPrompt(rendered)) {
         trustConfirmed = true;
         console.log(`🔐 [terminal-mode] trust folder prompt → auto-confirming`);
         try {
@@ -267,14 +275,12 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         } catch {
           // ignore
         }
-        // 再検出防止のためバッファをクリア
-        buffer = '';
         return;
       }
 
       // 起動完了検出
       if (!promptReady) {
-        if (detectPromptReady(buffer)) {
+        if (detectPromptReady(rendered)) {
           promptReady = true;
           if (startupTimer) {
             clearTimeout(startupTimer);
@@ -284,8 +290,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           // プロンプト本文を送信（CRLF 終端で送信完了させる）
           ptyProcess.write(opts.prompt + '\r');
           execStarted = true;
-          // 送信直後のプロンプト復帰はスキップしたいので buffer をクリア
-          buffer = '';
+          execStartedAt = Date.now();
           return;
         }
         return;
@@ -294,7 +299,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // 実行開始後: tool 承認・質問・完了プロンプトを判定
       if (execStarted && !finished) {
         // Ask 無効化: 質問プロンプトを検出したら中断
-        if (opts.disableAsk && detectAskQuestionPrompt(buffer)) {
+        if (opts.disableAsk && detectAskQuestionPrompt(rendered)) {
           cancelledByAskDisable = true;
           console.log(`🚫 [terminal-mode] AskUserQuestion detected with disableAsk → cancelling`);
           try {
@@ -307,7 +312,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         }
 
         // tool 承認プロンプト検出（approveAllMode なら CLI 側で出ない想定だが念のため）
-        if (!opts.approveAllMode && detectToolApprovalPrompt(buffer)) {
+        if (!opts.approveAllMode && detectToolApprovalPrompt(rendered)) {
           // Phase 1 では承認カード連動を見送り、ユーザーに「自動承認 ON にしてください」と促す
           // Phase 3 で WebUI 承認カードへの転送に置き換える
           console.log(`🔐 [terminal-mode] tool approval prompt detected → declining (Phase 1 limitation)`);
@@ -320,10 +325,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         }
 
         // 完了プロンプト（次のユーザー入力待ち）に戻ったら正規完了
-        // ただし送信直後の echo を完了と誤検知しないよう、最低 2 秒のクールダウンを置く
-        if (detectPromptReady(buffer)) {
-          const elapsedSinceStart = Date.now() - start;
-          if (elapsedSinceStart > 2000) {
+        // exec 送信直後のプロンプト復帰を完了と誤検知しないよう、execStarted から 2 秒のクールダウンを置く
+        if (detectPromptReady(rendered)) {
+          const elapsedSinceExec = Date.now() - execStartedAt;
+          if (elapsedSinceExec > 2000) {
             console.log(`✅ [terminal-mode] prompt returned, completing`);
             finish('prompt-ready');
           }
