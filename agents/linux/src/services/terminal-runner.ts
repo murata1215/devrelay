@@ -49,6 +49,18 @@ const CHECK_INTERVAL_MS = 500;
 /** 完了判定: プロンプト復帰 + 画面アイドル時間（onData の頻度に依存しない判定基準） */
 const IDLE_FOR_COMPLETION_MS = 1500;
 
+/** プロンプト送信開始からこの時間が経つまでは「画面アイドル」を完了と判定しない（プロンプト書き込み中の偽 idle 防止） */
+const EXEC_COOLDOWN_MS = 3500;
+
+/** プロンプトをチャンクに分割するサイズ（PTY/CLI バッファのオーバーフローや誤解釈を防ぐ） */
+const PROMPT_CHUNK_SIZE = 200;
+
+/** チャンク間の待機時間 */
+const PROMPT_CHUNK_DELAY_MS = 30;
+
+/** プロンプト末尾投入から submit (\r) 送信までの待機時間 */
+const PROMPT_SUBMIT_DELAY_MS = 400;
+
 export interface TerminalRunOptions {
   /** プロジェクトのワーキングディレクトリ */
   projectPath: string;
@@ -165,14 +177,22 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // Claude の応答を抽出して送信（promptSent 後のみ意味のある応答が得られる）
       if (promptSent) {
         const finalRendered = extractFinalOutput(term);
+        const currentBullets = countClaudeBullets(finalRendered);
+        const newBullets = currentBullets - baselineBulletCount;
+        console.log(`📊 [terminal-mode] completion bullets: baseline=${baselineBulletCount}, current=${currentBullets}, new=${newBullets}`);
         const response = extractClaudeResponse(finalRendered, baselineBulletCount);
         if (response) {
           opts.onOutput(response);
         } else {
-          // 応答抽出失敗時のフォールバック: 画面末尾を簡易表示（デバッグ用）
-          console.warn(`⚠️ [terminal-mode] could not extract Claude response from rendered screen`);
-          const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
-          opts.onOutput(`\n（Claude の応答抽出に失敗しました。画面末尾:\n${tail}\n）`);
+          // 応答抽出失敗時のフォールバック: 原因と画面末尾を表示
+          if (newBullets <= 0) {
+            console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected. Prompt may not have been submitted to Claude CLI.`);
+            opts.onOutput(`\n⚠️ Claude が応答しませんでした。プロンプトの送信に失敗した可能性があります。\n（ヒント: 「自動承認」「Ask 無効」設定や、Claude CLI の状態をご確認ください）`);
+          } else {
+            console.warn(`⚠️ [terminal-mode] could not extract response despite ${newBullets} new bullet(s)`);
+            const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
+            opts.onOutput(`\n（Claude の応答抽出に失敗しました。画面末尾:\n${tail}\n）`);
+          }
         }
       }
 
@@ -283,11 +303,16 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           console.log(`📊 [terminal-mode] baseline bullet count: ${baselineBulletCount}`);
           // ユーザー向けヒント（実行中はストリーミング停止するため目印を出す）
           opts.onOutput('\n📨 メッセージを送信しました。Claude の応答を待っています...\n');
-          // プロンプト本文を送信（CRLF 終端で送信完了させる）
-          ptyProcess.write(opts.prompt + '\r');
           promptSent = true;
           execStarted = true;
           execStartedAt = Date.now();
+          // プロンプトを Claude CLI に投入（fire-and-forget で onData を継続）
+          // - 末尾の \r/\n を除去（残っていると \r が「もう一つの改行」と誤認される）
+          // - チャンク分割 + 遅延で PTY/CLI 取りこぼし防止
+          // - 投入完了後に明示的に \r を送って submit
+          sendPromptToClaudeCLI(opts.prompt).catch(err => {
+            console.error(`❌ [terminal-mode] prompt send failed: ${err.message}`);
+          });
           // 完了監視を開始（500ms ごとに「画面アイドル + プロンプト復帰」を確認）
           startCompletionCheck();
           return;
@@ -327,6 +352,36 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
     });
 
     /**
+     * Claude CLI にユーザープロンプトを投入する。
+     *
+     * 単純な `write(prompt + '\r')` だと以下の問題が発生した:
+     *   1. プロンプトが内部 `\n` を持つマルチライン構造のとき、末尾の `\n\r` が CRLF と
+     *      誤認されて submit に至らない
+     *   2. 一度に大量バイト書き込むと PTY/CLI バッファ取りこぼしで一部脱落
+     *
+     * 対策:
+     *   - 末尾の改行を除去してから投入
+     *   - チャンクに分割して 30ms ずつ delay
+     *   - 全投入後に 400ms 待ってから単独の `\r` を送って明示的に submit
+     */
+    const sendPromptToClaudeCLI = async (prompt: string) => {
+      const clean = prompt.replace(/[\r\n]+$/, '');
+      console.log(`📝 [terminal-mode] sending prompt to PTY (${clean.length} chars, in ${Math.ceil(clean.length / PROMPT_CHUNK_SIZE)} chunks)`);
+      for (let i = 0; i < clean.length; i += PROMPT_CHUNK_SIZE) {
+        if (finished) return;
+        ptyProcess.write(clean.slice(i, i + PROMPT_CHUNK_SIZE));
+        if (i + PROMPT_CHUNK_SIZE < clean.length) {
+          await new Promise(r => setTimeout(r, PROMPT_CHUNK_DELAY_MS));
+        }
+      }
+      // 投入完了 → 画面が落ち着くまで待つ → 単独 \r で submit
+      await new Promise(r => setTimeout(r, PROMPT_SUBMIT_DELAY_MS));
+      if (finished) return;
+      console.log(`📨 [terminal-mode] sending submit \\r (Enter)`);
+      ptyProcess.write('\r');
+    };
+
+    /**
      * 完了監視ループ。500ms ごとに「画面アイドル時間 + プロンプト復帰」を確認する。
      *
      * onData ハンドラ内で完了判定すると、Claude が応答テキストを書き出している間も
@@ -340,8 +395,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         if (finished || !execStarted) return;
         const elapsedSinceExec = Date.now() - execStartedAt;
         const elapsedSinceChange = Date.now() - lastScreenChangeAt;
-        // 送信後 2 秒は echo を真の応答と誤認しないようスキップ
-        if (elapsedSinceExec < 2000) return;
+        // プロンプト送信完了までは echo を真の応答と誤認しないようスキップ
+        if (elapsedSinceExec < EXEC_COOLDOWN_MS) return;
         // 画面が 1.5 秒間変化なし + プロンプト復帰中 → 完了
         if (elapsedSinceChange >= IDLE_FOR_COMPLETION_MS && detectPromptReady(lastRenderedForChangeTracking)) {
           console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready, completing`);
