@@ -83,6 +83,28 @@ export function detectAskQuestionPrompt(buffer: string): boolean {
 }
 
 /**
+ * 「このフォルダを信頼しますか」プロンプト（trust folder prompt）を判定する
+ *
+ * Claude CLI は初回ワークスペース利用時に以下のプロンプトを表示する:
+ *   Quick safety check: Is this a project you created or one you trust?
+ *   Claude Code'll be able to read, edit, and execute files here.
+ *   > 1. Yes, I trust this folder
+ *     2. No, exit
+ *   Enter to confirm · Esc to cancel
+ *
+ * `--dangerously-skip-permissions` を付けても表示されるため、端末モードでは
+ * 自動承認して通常プロンプトまで進める必要がある。
+ *
+ * 「trust this folder」「No, exit」両方の文言が末尾近くに出ていれば trust prompt と判定
+ */
+export function detectTrustPrompt(buffer: string): boolean {
+  const tail = tailPlain(buffer);
+  const hasTrust = /trust\s+this\s+folder|フォルダ.{0,4}信頼/i.test(tail);
+  const hasExit = /No,?\s*exit|いいえ.{0,4}終了/i.test(tail);
+  return hasTrust && hasExit;
+}
+
+/**
  * @xterm/headless の仮想ターミナルから最終的な表示テキストを抽出する
  *
  * PTY 出力には ANSI 制御コードが大量に含まれており、

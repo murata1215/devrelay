@@ -19,12 +19,12 @@ import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 const { Terminal } = xtermHeadless;
 import path from 'path';
 import fs from 'fs';
-import stripAnsi from 'strip-ansi';
 import { getConfigDir } from './config.js';
 import {
   detectPromptReady,
   detectToolApprovalPrompt,
   detectAskQuestionPrompt,
+  detectTrustPrompt,
   extractFinalOutput,
 } from './terminal-parser.js';
 
@@ -40,6 +40,9 @@ const IDLE_TIMEOUT_MS = 10 * 60_000;
 
 /** /exit 送信後にプロセスが終了するまでの猶予 */
 const EXIT_GRACE_MS = 5_000;
+
+/** 仮想ターミナルからのスナップショット送信間隔（ストリーミング表示用） */
+const SNAPSHOT_INTERVAL_MS = 250;
 
 export interface TerminalRunOptions {
   /** プロジェクトのワーキングディレクトリ */
@@ -130,8 +133,36 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let finished = false;
   let timedOut = false;
   let cancelledByAskDisable = false;
+  let trustConfirmed = false;
   let idleTimer: NodeJS.Timeout | null = null;
   let startupTimer: NodeJS.Timeout | null = null;
+  let snapshotTimer: NodeJS.Timeout | null = null;
+  /** 直前にユーザーへ送信したスナップショット（差分計算用） */
+  let lastSnapshot = '';
+
+  /**
+   * 仮想ターミナル（@xterm/headless）の現在の画面状態を抽出し、
+   * 前回送信分との差分を上位にストリーミングする。
+   *
+   * 生 PTY チャンクに `strip-ansi` するだけだとカーソル移動 ANSI で位置調整された
+   * テキストが密着してしまう（"Accessing workspace" → "Accessingworkspace"）。
+   * 仮想画面でレンダリングしてから抽出することで人間が読める形に整形される。
+   */
+  const sendSnapshot = (terminal: typeof term, push: (s: string) => void) => {
+    const current = extractFinalOutput(terminal);
+    if (current === lastSnapshot) return;
+    let delta: string;
+    if (current.startsWith(lastSnapshot)) {
+      delta = current.slice(lastSnapshot.length);
+    } else {
+      // 画面が再描画でリセットされた場合は新しい全体を送信
+      delta = '\n' + current;
+    }
+    if (delta.length > 0) {
+      push(delta);
+    }
+    lastSnapshot = current;
+  };
 
   return new Promise<TerminalRunResult>((resolve, reject) => {
     const finish = (reason: string) => {
@@ -139,7 +170,14 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       finished = true;
       if (idleTimer) clearTimeout(idleTimer);
       if (startupTimer) clearTimeout(startupTimer);
+      if (snapshotTimer) {
+        clearTimeout(snapshotTimer);
+        snapshotTimer = null;
+      }
       console.log(`🖥️ [terminal-mode] finishing (${reason})`);
+
+      // 最後のスナップショットを確実に送信
+      sendSnapshot(term, opts.onOutput);
 
       // /exit 送信して正規終了を試みる
       try {
@@ -180,10 +218,21 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       }, IDLE_TIMEOUT_MS);
     };
 
+    /** スナップショット送信をスロットルで予約 */
+    const scheduleSnapshot = () => {
+      if (snapshotTimer) return;
+      snapshotTimer = setTimeout(() => {
+        snapshotTimer = null;
+        if (!finished) sendSnapshot(term, opts.onOutput);
+      }, SNAPSHOT_INTERVAL_MS);
+    };
+
     // 起動タイムアウト
     startupTimer = setTimeout(() => {
       if (!promptReady) {
         console.error(`❌ [terminal-mode] startup timeout (${STARTUP_TIMEOUT_MS}ms)`);
+        // 最後のスナップショットを送信して状況を可視化
+        sendSnapshot(term, opts.onOutput);
         try {
           ptyProcess.kill();
         } catch {
@@ -191,7 +240,11 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         }
         runningProcesses.delete(opts.sessionId);
         logStream?.end();
-        reject(new Error('端末モードの起動がタイムアウトしました（15 秒）'));
+        reject(new Error(
+          '端末モードの起動がタイムアウトしました（15 秒）\n' +
+          'ヒント: Claude CLI 側に未処理のプロンプト（フォルダ信頼確認・モデル選択等）が残っている可能性があります。\n' +
+          '一度 Agent ホストで `claude --continue` を手動実行して初期セットアップを完了させてください。'
+        ));
       }
     }, STARTUP_TIMEOUT_MS);
 
@@ -200,13 +253,24 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       buffer += data;
       logStream?.write(data);
 
-      // ANSI 除去した断片を上位にストリーミング
-      const cleaned = stripAnsi(data);
-      if (cleaned.length > 0) {
-        opts.onOutput(cleaned);
-      }
-
       resetIdleTimer();
+      scheduleSnapshot();
+
+      // フォルダ信頼確認プロンプト: --dangerously-skip-permissions を付けても
+      // 初回ワークスペースでは出るため、自動で Enter を送って承認する。
+      // ユーザーが端末モードを ON にしたという明示的選択がトリガなので、無人自動承認ではない。
+      if (!trustConfirmed && detectTrustPrompt(buffer)) {
+        trustConfirmed = true;
+        console.log(`🔐 [terminal-mode] trust folder prompt → auto-confirming`);
+        try {
+          ptyProcess.write('\r');  // デフォルト選択 "1. Yes, I trust this folder" を Enter で確定
+        } catch {
+          // ignore
+        }
+        // 再検出防止のためバッファをクリア
+        buffer = '';
+        return;
+      }
 
       // 起動完了検出
       if (!promptReady) {
