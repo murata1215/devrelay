@@ -8,11 +8,14 @@
  * 完了検出は「最終出力から 10 分無音」をメイン基準とし、
  * プロンプト復帰検出は補助的に使う（仕様書 §4.1）。
  */
-import * as pty from 'node-pty';
+// @homebridge/node-pty-prebuilt-multiarch: Linux/macOS/Windows のプリビルドを同梱したフォーク。
+// upstream の microsoft/node-pty は Linux x64 プリビルドを同梱しないためビルドツールが必須だが、
+// このフォークなら build-essential / python3 不要でインストールできる（API は完全互換）
+import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 // @xterm/headless は webpack バンドル済みの CommonJS のため named import が ESM で失敗する
 // Node の ESM ローダーは CJS から named export を取り出せないため、default import で取得する
 import xtermHeadless from '@xterm/headless';
-import type { IPty } from 'node-pty';
+import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 const { Terminal } = xtermHeadless;
 import path from 'path';
 import fs from 'fs';

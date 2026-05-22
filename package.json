@@ -10,7 +10,7 @@
       "@prisma/client",
       "@prisma/engines",
       "prisma",
-      "node-pty"
+      "@homebridge/node-pty-prebuilt-multiarch"
     ],
     "overrides": {
       "readable-stream": "2.3.8"

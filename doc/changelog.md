@@ -13,7 +13,8 @@
 - **新規ファイル**:
   - `agents/linux/src/services/terminal-runner.ts`: PTY 起動・対話・アイドルタイムアウト・キャンセル制御（`node-pty` + `@xterm/headless`）
   - `agents/linux/src/services/terminal-parser.ts`: プロンプト復帰・tool 承認・質問プロンプト検出（ANSI 除去後の末尾走査）
-- **新規依存**: `node-pty@^1.0.0`（PTY 起動）、`@xterm/headless@^5.5.0`（仮想ターミナルで最終バッファ抽出）、`strip-ansi@^7.1.0`（出力整形）
+- **新規依存**: `@homebridge/node-pty-prebuilt-multiarch@^0.13.1`（PTY 起動、Linux/macOS/Windows のプリビルド同梱でビルドツール不要）、`@xterm/headless@^5.5.0`（仮想ターミナルで最終バッファ抽出）、`strip-ansi@^7.1.0`（出力整形）
+- **node-pty フォークを採用**: 当初 `node-pty@1.x` を採用したが Linux x64 プリビルドが同梱されておらず、Agent ホストに `build-essential` / `python3` が必須で install スクリプトでビルド失敗が頻発。`@homebridge/node-pty-prebuilt-multiarch` は API 完全互換のまま Linux/macOS/Windows のプリビルド（node ABI 102/108/111/115/120/127/131/137 × x64/arm64/ia32/arm + musl variant）を GitHub Releases から自動 download するためビルドツール不要
 - **完了検出**: アイドル 10 分無音をメイン基準、プロンプト復帰（`> ` / `│ > ` 末尾）を補助検出。`onData` 発火ごとにアイドルタイマーをリセット → 長時間思考中・長文出力中はタイムアウトしない
 - **DB スキーマ**: `Project.terminalMode BOOLEAN DEFAULT false` を追加（マイグレーション `20260523_add_project_terminal_mode`）。**Project 単位の設定**（既存 `Machine.skipPermissions` / `Machine.disableAsk` の Machine 単位とはスコープが異なる）
 - **API**: `GET/PUT /api/projects/:projectId/terminal-mode`（display-name パターン踏襲）

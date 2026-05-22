@@ -396,11 +396,13 @@ echo "  依存関係をインストール中..."
 # 企業ネットワークで Electron バイナリ取得が ECONNRESET で失敗する問題を回避
 pnpm install --frozen-lockfile --ignore-scripts 2>/dev/null || pnpm install --ignore-scripts
 
-# 端末インタフェースモード用に node-pty のネイティブバイナリをビルド
-# Linux はプリビルドが同梱されていないため必須。macOS/Windows はプリビルドあり（冪等）
+# 端末インタフェースモード用に PTY のプリビルドバイナリをダウンロード
+# @homebridge/node-pty-prebuilt-multiarch は Linux/macOS/Windows のプリビルドを同梱しており、
+# prebuild-install が GitHub Releases から該当 ABI のバイナリを取得する（ビルドツール不要）
 # 失敗しても fatal にしない（端末モードのみ無効化、他機能は動作継続）
-echo "  node-pty native binary をビルド中..."
-pnpm rebuild node-pty 2>/dev/null || echo -e "${YELLOW}  ⚠️ node-pty build skipped (端末モードは無効になります。手動で 'pnpm rebuild node-pty' を実行してください)${NC}"
+echo "  PTY prebuilt binary を取得中..."
+pnpm rebuild @homebridge/node-pty-prebuilt-multiarch 2>/dev/null || \
+  echo -e "${YELLOW}  ⚠️ prebuild ダウンロード失敗（端末モードは無効になります。ネットワーク確認後 'pnpm rebuild @homebridge/node-pty-prebuilt-multiarch' を実行）${NC}"
 
 echo "  shared パッケージをビルド中..."
 pnpm --filter @devrelay/shared build
