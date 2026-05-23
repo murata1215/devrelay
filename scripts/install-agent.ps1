@@ -306,6 +306,45 @@ try {
     pnpm install --ignore-scripts
 }
 
+# 端末インタフェースモード用に PTY プリビルドを取得
+# @homebridge/node-pty-prebuilt-multiarch は Windows/macOS/Linux のプリビルドを同梱
+# 失敗しても fatal にしない（端末モードのみ無効化、他機能は動作継続）
+Write-Host "  PTY prebuilt binary を取得中..."
+try {
+    pnpm rebuild @homebridge/node-pty-prebuilt-multiarch 2>$null
+} catch {
+    Write-Host "  ⚠️ pnpm rebuild failed (continuing)" -ForegroundColor Yellow
+}
+
+# pnpm rebuild が Windows で conpty.node を配置しない既知問題のフォールバック
+# build/Release/conpty.node が無ければ GitHub Releases から ABI 別 tarball を手動展開
+$ptyDirs = Get-ChildItem -Path "$AgentDir\node_modules\.pnpm" -Filter "@homebridge+node-pty-prebuilt-multiarch@*" -Directory -ErrorAction SilentlyContinue
+foreach ($d in $ptyDirs) {
+    $verMatch = [regex]::Match($d.Name, '@([0-9.]+)$')
+    if (-not $verMatch.Success) { continue }
+    $version = $verMatch.Groups[1].Value
+    $ptyPkg = Join-Path $d.FullName "node_modules\@homebridge\node-pty-prebuilt-multiarch"
+    if (-not (Test-Path "$ptyPkg\build\Release\conpty.node")) {
+        $abi = & node -e "process.stdout.write(process.versions.modules)"
+        $url = "https://github.com/homebridge/node-pty-prebuilt-multiarch/releases/download/v$version/node-pty-prebuilt-multiarch-v$version-node-v$abi-win32-x64.tar.gz"
+        $tmp = "$env:TEMP\node-pty-prebuild-$abi.tar.gz"
+        Write-Host "  conpty.node が見つかりません。手動 download: $url"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+            # Windows 10+ 内蔵の tar コマンドで展開
+            & tar -xzf $tmp -C $ptyPkg
+            Remove-Item $tmp -Force
+            if (Test-Path "$ptyPkg\build\Release\conpty.node") {
+                Write-Host "  ✅ conpty.node 取得成功" -ForegroundColor Green
+            } else {
+                Write-Host "  ⚠️ conpty.node が展開後も見つかりません（端末モードは動作しません）" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  ⚠️ 手動 download 失敗: $($_.Exception.Message)（端末モードは動作しません）" -ForegroundColor Yellow
+        }
+    }
+}
+
 Write-Host "  shared パッケージをビルド中..."
 pnpm --filter @devrelay/shared build
 
