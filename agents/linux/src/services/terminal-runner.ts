@@ -130,7 +130,12 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   const start = Date.now();
   const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS, allowProposedApi: true });
 
-  const args: string[] = ['--continue'];
+  // `--continue` は cwd ごとに保存された Claude CLI セッションを resume するが、
+  // 端末モードを初めて使うフォルダではセッションが存在せず "No conversation found to continue" で
+  // 即 exit code=1 で死ぬ。DevRelay の `.devrelay/claude-session-id` は Agent SDK 用の別系統で
+  // CLI からは参照できない。1 要求 1 セッションの設計と合致するので `--continue` は付けない。
+  // 文脈継続が必要なケースは exec モード（Agent SDK with --resume）に切り替えてもらう
+  const args: string[] = [];
   if (opts.approveAllMode) {
     args.push('--dangerously-skip-permissions');
   }

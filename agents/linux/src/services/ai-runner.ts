@@ -662,9 +662,11 @@ async function sendPromptToTerminalClaude(
 
   // 起動メッセージ（仕様書 §2.2.2）
   // 実際に渡される args を表示することで、approveAllMode の有無が WebUI から確認できる
-  const previewArgs = ['--continue'];
+  // terminal-runner.ts の args 構築ロジックと一致させること（`--continue` は使わない）
+  const previewArgs: string[] = [];
   if (approveAllMode) previewArgs.push('--dangerously-skip-permissions');
-  onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand} ${previewArgs.join(' ')}\n`, false);
+  const argsDisplay = previewArgs.length > 0 ? ` ${previewArgs.join(' ')}` : '';
+  onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${argsDisplay}\n`, false);
 
   try {
     const runResult = await runTerminalClaude({
