@@ -8,7 +8,7 @@ import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
 // 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
@@ -657,14 +657,19 @@ async function sendPromptToTerminalClaude(
   // セッション内で動的に変化するため、起動時の値をスナップショットとして使う
   const approveAllMode = !!(options.skipPermissions || isApproveAllMode());
 
+  // SDK が保存した Claude セッション ID を読み込んで CLI の `--resume` で復元する
+  // SDK と CLI は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているので互換
+  const resumeSessionId = await loadClaudeSessionId(projectPath);
+
   // 診断ログ: WebUI トグルとの食い違いを調査するため、判定根拠を出力する
-  console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}`);
+  console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}, resumeSessionId=${resumeSessionId ? resumeSessionId.slice(0, 8) + '...' : '(none)'}`);
 
   // 起動メッセージ（仕様書 §2.2.2）
-  // 実際に渡される args を表示することで、approveAllMode の有無が WebUI から確認できる
-  // terminal-runner.ts の args 構築ロジックと一致させること（`--continue` は使わない）
+  // 実際に渡される args を表示することで、approveAllMode / resumeSessionId の有無が WebUI から確認できる
+  // terminal-runner.ts の args 構築ロジックと一致させること
   const previewArgs: string[] = [];
   if (approveAllMode) previewArgs.push('--dangerously-skip-permissions');
+  if (resumeSessionId) previewArgs.push('--resume', resumeSessionId.slice(0, 8) + '...');
   const argsDisplay = previewArgs.length > 0 ? ` ${previewArgs.join(' ')}` : '';
   onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${argsDisplay}\n`, false);
 
@@ -676,6 +681,7 @@ async function sendPromptToTerminalClaude(
       disableAsk: !!options.disableAsk,
       claudeCommand,
       sessionId,
+      resumeSessionId: resumeSessionId || undefined,
       onOutput: (chunk) => onOutput(chunk, false),
       // Claude CLI の番号付き選択肢プロンプトを既存承認カード経路 (canUseTool 互換) に橋渡し
       // onToolApprovalRequest が設定されていなければ未配線扱いとなり runner 内部で自動拒否

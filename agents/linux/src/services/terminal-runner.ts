@@ -91,6 +91,13 @@ export interface TerminalRunOptions {
   /** セッション識別子（ログファイル名・トラブルシュート用） */
   sessionId: string;
   /**
+   * Claude CLI セッションを resume する場合の session ID（UUID 形式）。
+   * SDK と CLI は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているため、
+   * SDK が `.devrelay/claude-session-id` に保存した ID を `claude --resume <id>` で復元できる。
+   * 未指定の場合は新規セッションとして起動（CLI が新しい ID を採番）
+   */
+  resumeSessionId?: string;
+  /**
    * 承認/質問プロンプト発生時のコールバック。
    * 設定されている場合、Claude CLI の番号付き選択肢プロンプトを検出すると呼ばれる。
    * 未設定の場合は自動的に "2"（拒否）を送信する後方互換挙動になる
@@ -132,12 +139,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
 
   // `--continue` は cwd ごとに保存された Claude CLI セッションを resume するが、
   // 端末モードを初めて使うフォルダではセッションが存在せず "No conversation found to continue" で
-  // 即 exit code=1 で死ぬ。DevRelay の `.devrelay/claude-session-id` は Agent SDK 用の別系統で
-  // CLI からは参照できない。1 要求 1 セッションの設計と合致するので `--continue` は付けない。
-  // 文脈継続が必要なケースは exec モード（Agent SDK with --resume）に切り替えてもらう
+  // 即 exit code=1 で死ぬ。代わりに `--resume <id>` を使う。
+  // SDK と CLI は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているため、
+  // SDK が `.devrelay/claude-session-id` に保存した ID を渡せば過去の会話を継続できる
   const args: string[] = [];
   if (opts.approveAllMode) {
     args.push('--dangerously-skip-permissions');
+  }
+  if (opts.resumeSessionId) {
+    args.push('--resume', opts.resumeSessionId);
   }
 
   console.log(`🖥️ [terminal-mode] spawning: ${opts.claudeCommand} ${args.join(' ')} (cwd=${opts.projectPath})`);
