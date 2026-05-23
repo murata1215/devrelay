@@ -30,6 +30,34 @@
   - tool 承認は Phase 3 へ分離: 画面パース実装は誤検出リスクが高い。最小実装で動作確認してから拡張
   - 「人間が WebUI から手動で 1 要求を投げる」運用前提（スケジュール起動・無人自動実行はスコープ外）
 
+#### #228 同日中の hardening (2026-05-23、初回実装後の 13 連続 fix)
+
+初回実装 `a975560` 直後から実機テスト（Linux pixblog / Windows mviewer）で次々と問題が噴出し、同日中に Linux + Windows 両方で完全動作するまで bug fix が連鎖した。残された設計判断と実装ノートを以下に集約する。
+
+1. **`@xterm/headless` の CJS import エラー** (`8c5574f`): `import { Terminal }` で `SyntaxError: Named export 'Terminal' not found`。webpack バンドル済み CJS なので `import xtermHeadless from '@xterm/headless'; const { Terminal } = xtermHeadless;` のパターンに変更
+2. **node-pty native ビルド欠落 → Agent クラッシュ** (`897795b`): `pnpm install --ignore-scripts` で `pty.node` 未ビルド → 起動時 require で死亡。terminal-runner を動的 import 化（端末モード未使用なら node-pty 自体をロードしない）し、Agent 全体は生存。install-agent.sh と `u` コマンドの buildSteps に `pnpm rebuild` を追加
+3. **`node-pty@1.x` 自体を別フォークに置換** (`6ecc7d2`): Linux x64 プリビルド非同梱で `build-essential` 必須は運用上厳しい。`@homebridge/node-pty-prebuilt-multiarch@0.13.1` は Linux/macOS/Windows のプリビルドを GitHub Releases から自動 download、ビルドツール不要、API 完全互換
+4. **信頼プロンプト検出 + xterm-headless スナップショット方式に切替** (`e516e10`, `bc755c3`): raw PTY バッファに strip-ansi すると `\x1b[5;3HAccessing\x1b[5;13Hworkspace:` が `Accessingworkspace:` に密着して regex マッチしない。`@xterm/headless` 仮想画面でレンダリングしたテキストを検出対象にする。`detectTrustPrompt` 追加 + 起動直後の信頼プロンプトを Enter で自動承認
+5. **`❯` プロンプト認識 + 履歴再描画の suppress** (`180130c`): Claude CLI の入力カーソルは ASCII `>` ではなく U+276F `❯`。`detectPromptReady` の全パターンに `❯` を追加。`claude --continue` 起動時の prior session 大量再描画（4700 行越え）が WebUI に流れないよう、prompt-ready 検出までの snapshot 出力を抑制
+6. **idle-based 完了検出 + 応答抽出**（`3b69949`）: Claude が応答中も入力ボックスの `❯` が画面に残るため、onData 駆動の "prompt-ready" 判定がタイマーをリセットし続けて完了しない。500ms の独立 setInterval で「画面が 1.5 秒変化なし + プロンプト復帰」を判定。実行中ストリームは廃止、完了時に `●` バレットブロックを抽出して 1 回送信
+7. **プロンプト投入のチャンク化 + 明示 submit** (`e06922b`): 559 char の UTF-8 プロンプトを一括 write すると末尾の `\n\r` が CRLF 1 つに丸められて submit に至らず、Claude が入力待ちのまま 18 秒タイムアウト。末尾改行を除去し 200 char × 30ms ずつ書いて 400ms 待って単独 `\r` を送る
+8. **承認プロンプトを既存 WS カード経路に bridge** (`f2c2707`): `extractChoicePrompt` で番号付き選択肢を抽出 → 既存 `ToolApprovalRequest` 形式で WebUI へ → 応答を `1\r`/`2\r` で PTY に書き戻し。WebUI / Discord / Telegram の承認カード UI は変更ゼロで端末モードに対応
+9. **Windows で conpty.node が download されない fallback** (`7d24e8b`): Node 24 (ABI 137) + pnpm 10 + Windows の組み合わせで `pnpm rebuild` の prebuild-install が `build/Release/conpty.node` を配置しない既知問題（npm パッケージに Linux prebuild が同梱されていて check-prebuild が誤判定）。`install-agent.ps1` と Windows 向け update buildSteps に「`conpty.node` 存在確認 → なければ ABI 別 tarball を Invoke-WebRequest + tar.exe (Windows 10+ 標準同梱) で手動展開」を追加
+10. **無音中の検出を polling 化** (`086ad8d`): ユーザーの直感的指摘「`claude` 起動はすぐなのでこの待ちがタイムアウトしてるのでは？」が正解。Claude CLI が信頼プロンプトを表示後すぐ入力待ちで無音化 → onData 発火しない → 検出されず 15s タイムアウト。`runStartupDetection()` を 250ms setInterval で polling、onData は fast path として併用。`pnpm rebuild "@homebridge/..."` も PowerShell の splat 誤解釈防止のため引用符化
+11. **`detectPromptReady` が信頼プロンプトの `❯ 1.` 行を誤マッチ** (`861e7c6`): `^\s*[>❯]\s+\S` が `❯ 1. Yes, I trust this folder` にもマッチ → 信頼承認直後に即「prompt ready」発火 → trust の Enter 処理前にユーザープロンプト送信 → Claude が混乱して exit code 1。`(?!\d+\.)` の negative lookahead を追加し番号付き選択肢を除外。Linux pixblog は既に信頼承認済みのワークスペースだったため発火しておらず、Windows の fresh ワークスペースで初めて露呈
+12. **`claude --continue` を drop**（`d587613`）: fresh フォルダでは `No conversation found to continue` で exit code=1 即死。1 要求 1 セッションの仕様にも合わない。args から `--continue` を外し、毎回 fresh セッション or `--resume` で復元する設計に変更
+13. **`claude --resume <SDK session id>` で継続性を復元** (`a58c901`): ユーザーの手動検証で SDK の session ID（`.devrelay/claude-session-id`）が CLI の `--resume` で完全に resume できることが確認できた。両者は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているため互換。`loadClaudeSessionId(projectPath)` で読んで args に `--resume <id>` を注入、CLI が同じセッションファイルに追記、SDK は次回その続きを読む = 自然な往復継続を実現
+
+完成形の動作（Windows mviewer 検証ログ）:
+```
+🖥️ spawning: ...devrelay-claude.cmd --dangerously-skip-permissions --resume f6551e3a...
+🔐 trust folder prompt → auto-confirming (XXXms after spawn)
+✅ prompt ready (XXXms after spawn)
+📨 メッセージを送信しました...
+● [Claude の応答（前回のプランを記憶した状態）]
+✅ 完了 X.X 秒
+```
+
 ### #227: Devin CLI 修正 — stdin クラッシュ・パーミッション・出力・セッション継続 (2026-05-05)
 - **stdin パイプでクラッシュ修正**: Devin CLI は stdin パイプで panic → `--prompt-file` 一時ファイル経由に変更
 - **パーミッションモード分岐**: Devin は `plan` モード非対応 → plan=`auto` / exec=`dangerous` にマッピング
