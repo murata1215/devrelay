@@ -41,7 +41,8 @@ export function detectPromptReady(text: string): boolean {
     // "│ > プレースホルダ │" / "│ ❯ プレースホルダ" 形式（Try ... 等のヒント付き）
     if (/^[│|]\s*[>❯]\s/.test(line)) return true;
     // "❯ Try ..." 形式（枠なしの新プロンプト、実機で確認、先頭空白許容）
-    if (/^\s*[>❯]\s+\S/.test(line)) return true;
+    // ただし "❯ 1. ..." のような番号付き選択肢行は除外（trust prompt / tool 承認カードの誤検知防止）
+    if (/^\s*[>❯]\s+(?!\d+\.)\S/.test(line)) return true;
   }
   return false;
 }
