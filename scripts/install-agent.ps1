@@ -310,8 +310,9 @@ try {
 # @homebridge/node-pty-prebuilt-multiarch は Windows/macOS/Linux のプリビルドを同梱
 # 失敗しても fatal にしない（端末モードのみ無効化、他機能は動作継続）
 Write-Host "  PTY prebuilt binary を取得中..."
+# 引数は引用符で囲む: PowerShell の `@homebridge` を splat operator として誤解釈されないように
 try {
-    pnpm rebuild @homebridge/node-pty-prebuilt-multiarch 2>$null
+    pnpm rebuild "@homebridge/node-pty-prebuilt-multiarch" 2>$null
 } catch {
     Write-Host "  ⚠️ pnpm rebuild failed (continuing)" -ForegroundColor Yellow
 }

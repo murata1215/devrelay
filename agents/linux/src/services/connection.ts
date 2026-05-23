@@ -1963,7 +1963,8 @@ async function handleAgentUpdate() {
       psRunAndLog('git reset', 'git reset --hard $remoteBranch'),
       psRunAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
       // 端末モード用に PTY プリビルドをダウンロード（失敗しても継続）
-      psRunAndLog('rebuild PTY', 'pnpm rebuild @homebridge/node-pty-prebuilt-multiarch'),
+      // 引数は引用符で囲む: PowerShell の `@homebridge` を splat operator として誤解釈されないように
+      psRunAndLog('rebuild PTY', 'pnpm rebuild "@homebridge/node-pty-prebuilt-multiarch"'),
       // pnpm rebuild が Windows で conpty.node を配置しない既知問題のフォールバック
       // build/Release/conpty.node が無ければ GitHub Releases から ABI 別 tarball を手動展開
       // インデント付き複数行 PowerShell スクリプト（バッククォートで改行継続せず素直に書く）

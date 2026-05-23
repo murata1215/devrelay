@@ -185,6 +185,13 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let idleTimer: NodeJS.Timeout | null = null;
   let startupTimer: NodeJS.Timeout | null = null;
   let completionCheckInterval: NodeJS.Timeout | null = null;
+  /**
+   * 起動中の検出ポーリング。Claude CLI がプロンプトを表示して入力待ちになると
+   * PTY からの onData 発火が止まるため、onData ベースの検出だけでは検知できない
+   * （特に Windows ConPTY ではこの挙動が顕著）。
+   * 別タイマーで定期的に検出を回すことで「無音中に立っているプロンプト」を捕捉する
+   */
+  let startupPollInterval: NodeJS.Timeout | null = null;
 
   return new Promise<TerminalRunResult>((resolve, reject) => {
     const finish = (reason: string) => {
@@ -195,6 +202,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       if (completionCheckInterval) {
         clearInterval(completionCheckInterval);
         completionCheckInterval = null;
+      }
+      if (startupPollInterval) {
+        clearInterval(startupPollInterval);
+        startupPollInterval = null;
       }
       console.log(`🖥️ [terminal-mode] finishing (${reason})`);
 
@@ -266,6 +277,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         const rendered = extractFinalOutput(term);
         const tail = rendered.length > 500 ? rendered.slice(-500) : rendered;
         console.error(`❌ [terminal-mode] startup timeout (${STARTUP_TIMEOUT_MS}ms). Last 500 chars of rendered screen:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
+        if (startupPollInterval) {
+          clearInterval(startupPollInterval);
+          startupPollInterval = null;
+        }
         try {
           ptyProcess.kill();
         } catch {
@@ -281,16 +296,18 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       }
     }, STARTUP_TIMEOUT_MS);
 
-    ptyProcess.onData((data) => {
-      term.write(data);
-      logStream?.write(data);
-
-      resetIdleTimer();
-
-      // 検出は仮想画面でレンダリング済みのテキストに対して行う。
-      // raw PTY バッファに strip-ansi するだけだとカーソル位置指定で配置された
-      // 単語が密着してしまう（"trust this folder" → "trustthisfolder"）ため、
-      // 仮想画面でのレンダリング結果を使うことで視認できる空白で正しく判定できる
+    /**
+     * 起動フェーズの検出を 1 回だけ実行する。
+     * onData ハンドラ内とポーリング interval の両方から呼ばれる。
+     *
+     * - 信頼プロンプト → 検出したら Enter を送って auto-confirm
+     * - 入力プロンプト復帰 → 検出したらユーザープロンプト送信フェーズに遷移
+     *
+     * Claude が入力待ちで PTY 無音になると onData が発火しなくなる。
+     * ポーリングによってその「無音中の状態」を捕捉できる
+     */
+    const runStartupDetection = () => {
+      if (finished || promptReady) return;
       const rendered = extractFinalOutput(term);
 
       // 画面変化を記録（完了判定の「画面アイドル」基準）
@@ -304,7 +321,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // ユーザーが端末モードを ON にしたという明示的選択がトリガなので、無人自動承認ではない。
       if (!trustConfirmed && detectTrustPrompt(rendered)) {
         trustConfirmed = true;
-        console.log(`🔐 [terminal-mode] trust folder prompt → auto-confirming`);
+        const elapsed = Date.now() - start;
+        console.log(`🔐 [terminal-mode] trust folder prompt → auto-confirming (${elapsed}ms after spawn)`);
         try {
           ptyProcess.write('\r');  // デフォルト選択 "1. Yes, I trust this folder" を Enter で確定
         } catch {
@@ -314,34 +332,60 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       }
 
       // 起動完了検出
-      if (!promptReady) {
-        if (detectPromptReady(rendered)) {
-          promptReady = true;
-          if (startupTimer) {
-            clearTimeout(startupTimer);
-            startupTimer = null;
-          }
-          console.log(`✅ [terminal-mode] prompt ready, sending user prompt (${opts.prompt.length} chars)`);
-          // baseline 時点の `●` メッセージ数を記録。これより後のメッセージが Claude の応答
-          baselineBulletCount = countClaudeBullets(rendered);
-          console.log(`📊 [terminal-mode] baseline bullet count: ${baselineBulletCount}`);
-          // ユーザー向けヒント（実行中はストリーミング停止するため目印を出す）
-          opts.onOutput('\n📨 メッセージを送信しました。Claude の応答を待っています...\n');
-          promptSent = true;
-          execStarted = true;
-          execStartedAt = Date.now();
-          // プロンプトを Claude CLI に投入（fire-and-forget で onData を継続）
-          // - 末尾の \r/\n を除去（残っていると \r が「もう一つの改行」と誤認される）
-          // - チャンク分割 + 遅延で PTY/CLI 取りこぼし防止
-          // - 投入完了後に明示的に \r を送って submit
-          sendPromptToClaudeCLI(opts.prompt).catch(err => {
-            console.error(`❌ [terminal-mode] prompt send failed: ${err.message}`);
-          });
-          // 完了監視を開始（500ms ごとに「画面アイドル + プロンプト復帰」を確認）
-          startCompletionCheck();
-          return;
+      if (detectPromptReady(rendered)) {
+        promptReady = true;
+        if (startupTimer) {
+          clearTimeout(startupTimer);
+          startupTimer = null;
         }
+        if (startupPollInterval) {
+          clearInterval(startupPollInterval);
+          startupPollInterval = null;
+        }
+        const elapsed = Date.now() - start;
+        console.log(`✅ [terminal-mode] prompt ready (${elapsed}ms after spawn), sending user prompt (${opts.prompt.length} chars)`);
+        // baseline 時点の `●` メッセージ数を記録。これより後のメッセージが Claude の応答
+        baselineBulletCount = countClaudeBullets(rendered);
+        console.log(`📊 [terminal-mode] baseline bullet count: ${baselineBulletCount}`);
+        // ユーザー向けヒント（実行中はストリーミング停止するため目印を出す）
+        opts.onOutput('\n📨 メッセージを送信しました。Claude の応答を待っています...\n');
+        promptSent = true;
+        execStarted = true;
+        execStartedAt = Date.now();
+        // プロンプトを Claude CLI に投入（fire-and-forget で onData を継続）
+        sendPromptToClaudeCLI(opts.prompt).catch(err => {
+          console.error(`❌ [terminal-mode] prompt send failed: ${err.message}`);
+        });
+        // 完了監視を開始（500ms ごとに「画面アイドル + プロンプト復帰」を確認）
+        startCompletionCheck();
+      }
+    };
+
+    // ポーリング: Claude が入力待ちで PTY 無音中も検出が回るようにする
+    startupPollInterval = setInterval(runStartupDetection, 250);
+
+    ptyProcess.onData((data) => {
+      term.write(data);
+      logStream?.write(data);
+
+      resetIdleTimer();
+
+      // 起動フェーズの検出（onData 駆動の fast path、ポーリングと冪等に共存）
+      if (!promptReady) {
+        runStartupDetection();
         return;
+      }
+
+      // 検出は仮想画面でレンダリング済みのテキストに対して行う。
+      // raw PTY バッファに strip-ansi するだけだとカーソル位置指定で配置された
+      // 単語が密着してしまう（"trust this folder" → "trustthisfolder"）ため、
+      // 仮想画面でのレンダリング結果を使うことで視認できる空白で正しく判定できる
+      const rendered = extractFinalOutput(term);
+
+      // 画面変化を記録（完了判定の「画面アイドル」基準）
+      if (rendered !== lastRenderedForChangeTracking) {
+        lastScreenChangeAt = Date.now();
+        lastRenderedForChangeTracking = rendered;
       }
 
       // 実行開始後: 番号付き選択肢プロンプト（tool 承認 / AskUserQuestion 等）の処理
