@@ -57,8 +57,12 @@ const IDLE_FOR_COMPLETION_MS = 1500;
 /** プロンプト送信開始からこの時間が経つまでは「画面アイドル」を完了と判定しない（プロンプト書き込み中の偽 idle 防止） */
 const EXEC_COOLDOWN_MS = 3500;
 
-/** First-bullet safety timeout: submit 後この時間が経っても `●` バレットが 1 つも出なければ強制完了（無限ハング防止） */
-const FIRST_BULLET_TIMEOUT_MS = 5 * 60_000;
+/** First-bullet safety timeout: submit 後この時間が経っても `●` バレットが 1 つも出なければ強制完了（無限ハング防止）。
+ *  画像複数枚 + 長セッションだと 5 分超は普通に発生するので 10 分に緩和 */
+const FIRST_BULLET_TIMEOUT_MS = 10 * 60_000;
+
+/** 診断ログ: fresh rendered の末尾を 60s ごとに 1 回 dump（将来同様の症状調査用） */
+const SCREEN_DUMP_INTERVAL_MS = 60_000;
 
 /** completion check スキップ理由ログの throttle 間隔（毎 500ms 出すと spam になるため） */
 const SKIP_LOG_THROTTLE_MS = 5_000;
@@ -608,16 +612,18 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       //   sentBulletCounts: そのテキストを WebUI に何回送ったか（同じテキストの再描画を重複送信しないため）
       //   lastBulletStreamAt: 最後にバレットを流した時刻（ハートビート抑制判断用）
       //   lastHeartbeatAt: 最後にハートビートを流した時刻
+      //   lastScreenDumpAt: 最後に画面末尾を診断ログに dump した時刻
       const sentBulletCounts = new Map<string, number>();
       let lastBulletStreamAt = Date.now();
       let lastHeartbeatAt = 0;
+      let lastScreenDumpAt = 0;
 
       /**
        * 新規バレットを WebUI にストリーミング配信する。
        * baseline + これまでに送った回数を超える出現分だけを送る
        */
-      const streamNewBullets = () => {
-        const currentLines = getBulletLines(lastRenderedForChangeTracking);
+      const streamNewBullets = (rendered: string) => {
+        const currentLines = getBulletLines(rendered);
         const currentMap = bulletCountMap(currentLines);
         for (const [text, count] of currentMap) {
           const baseCount = baselineBulletMap.get(text) ?? 0;
@@ -642,12 +648,12 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
        * バレットが最近送られていない時のみ・30 秒に 1 回 max。
        * Claude CLI の思考インジケータ（Cogitating for Xs · Y tokens 等）を抽出して表示
        */
-      const sendHeartbeat = () => {
+      const sendHeartbeat = (rendered: string) => {
         const now = Date.now();
         if (now - lastBulletStreamAt < HEARTBEAT_QUIET_AFTER_BULLET_MS) return;
         if (now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
         lastHeartbeatAt = now;
-        const indicator = extractThinkingIndicator(lastRenderedForChangeTracking);
+        const indicator = extractThinkingIndicator(rendered);
         const elapsedSec = Math.round((now - execStartedAt) / 1000);
         if (indicator) {
           opts.onOutput(`\n⏳ [${elapsedSec}s 経過] ${indicator}\n`);
@@ -659,8 +665,25 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       completionCheckInterval = setInterval(() => {
         if (finished || !execStarted) return;
 
+        // 毎チェックで fresh render を取得する（lastRenderedForChangeTracking は onData が
+        // 止まっている時にフリーズしてしまうことが実機で確認された 2026-05-24 mviewer ハング）。
+        // この tick でトラッカーも更新するので、idle 判定も最新の画面状態に基づく
+        const freshRendered = extractFinalOutput(term);
+        if (freshRendered !== lastRenderedForChangeTracking) {
+          lastScreenChangeAt = Date.now();
+          lastRenderedForChangeTracking = freshRendered;
+        }
+
         // ストリーミング: 完了条件と無関係に、新規バレットがあれば毎チェックで流す
-        streamNewBullets();
+        streamNewBullets(freshRendered);
+
+        // 60s に 1 回、画面末尾を診断ログに dump（将来同様の症状の調査用）
+        const nowForDump = Date.now();
+        if (nowForDump - lastScreenDumpAt > SCREEN_DUMP_INTERVAL_MS) {
+          lastScreenDumpAt = nowForDump;
+          const tail = freshRendered.length > 200 ? freshRendered.slice(-200) : freshRendered;
+          console.log(`📷 [terminal-mode] screen tail (${freshRendered.length} chars total, elapsedSinceExec=${Date.now() - execStartedAt}ms):\n${tail.replace(/\n/g, '⏎')}`);
+        }
 
         // 承認応答待ち中は完了しない（ユーザーの応答前に終わらせると Claude の続きの応答を取り逃がす）
         if (pendingApprovalCount > 0) {
@@ -678,30 +701,30 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // この間に「画面アイドル + プロンプト復帰」だけで完了判定すると、プロンプト submit 直後の round-trip 待ちを
         // 「処理完了」と誤認してしまう（実機 PTY ログで確定）。
         // 応答 1 個目の `●` バレット（baseline の count を超える新規描画）が出るまでは完了とみなさない
-        const currentBulletLines = getBulletLines(lastRenderedForChangeTracking);
+        const currentBulletLines = getBulletLines(freshRendered);
         const newBullets = countNewBullets(baselineBulletMap, currentBulletLines);
         if (newBullets === 0) {
-          // First-bullet safety timeout: 5 分以上待っても `●` が出ない = 詰まっている可能性大。
-          // 10 分 IDLE_TIMEOUT を待つより早く諦めて /exit で正規終了させる
+          // First-bullet safety timeout: 10 分以上待っても `●` が出ない = 詰まっている可能性大。
+          // IDLE_TIMEOUT より早く諦めて /exit で正規終了させる
           if (elapsedSinceExec > FIRST_BULLET_TIMEOUT_MS) {
             console.warn(`⏰ [terminal-mode] first-bullet timeout (${elapsedSinceExec}ms > ${FIRST_BULLET_TIMEOUT_MS}ms) — Claude did not produce a ● bullet, forcing completion`);
             finish('first-bullet-timeout');
             return;
           }
           // バレット未到来時はハートビート送信（思考中であることをユーザーに伝える）
-          sendHeartbeat();
-          logSkip('no-new-bullet', `current=${currentBulletLines.length} baseline=${baselineBulletMap.size}unique renderedLen=${lastRenderedForChangeTracking.length} elapsedSinceExec=${elapsedSinceExec}ms`);
+          sendHeartbeat(freshRendered);
+          logSkip('no-new-bullet', `current=${currentBulletLines.length} baseline=${baselineBulletMap.size}unique renderedLen=${freshRendered.length} elapsedSinceExec=${elapsedSinceExec}ms`);
           return;
         }
         if (elapsedSinceChange < IDLE_FOR_COMPLETION_MS) {
           logSkip('not-idle', `${elapsedSinceChange}/${IDLE_FOR_COMPLETION_MS}ms new=${newBullets}`);
           return;
         }
-        if (!detectPromptReady(lastRenderedForChangeTracking)) {
+        if (!detectPromptReady(freshRendered)) {
           logSkip('prompt-not-ready', `idle=${elapsedSinceChange}ms new=${newBullets}`);
           return;
         }
-        if (detectToolApprovalPrompt(lastRenderedForChangeTracking)) {
+        if (detectToolApprovalPrompt(freshRendered)) {
           logSkip('tool-approval-visible', `idle=${elapsedSinceChange}ms new=${newBullets}`);
           return;
         }
