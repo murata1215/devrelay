@@ -54,6 +54,12 @@ const IDLE_FOR_COMPLETION_MS = 1500;
 /** プロンプト送信開始からこの時間が経つまでは「画面アイドル」を完了と判定しない（プロンプト書き込み中の偽 idle 防止） */
 const EXEC_COOLDOWN_MS = 3500;
 
+/** First-bullet safety timeout: submit 後この時間が経っても `●` バレットが 1 つも出なければ強制完了（無限ハング防止） */
+const FIRST_BULLET_TIMEOUT_MS = 5 * 60_000;
+
+/** completion check スキップ理由ログの throttle 間隔（毎 500ms 出すと spam になるため） */
+const SKIP_LOG_THROTTLE_MS = 5_000;
+
 /** プロンプトをチャンクに分割するサイズ（PTY/CLI バッファのオーバーフローや誤解釈を防ぐ） */
 const PROMPT_CHUNK_SIZE = 200;
 
@@ -508,31 +514,62 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
      */
     const startCompletionCheck = () => {
       if (completionCheckInterval) return;
+      // スキップ理由ごとに最後にログを出した時刻を記録（同じ理由を 5 秒に 1 回だけ出す）
+      const lastSkipLogAt = new Map<string, number>();
+      const logSkip = (reason: string, extra: string) => {
+        const now = Date.now();
+        const last = lastSkipLogAt.get(reason) ?? 0;
+        if (now - last < SKIP_LOG_THROTTLE_MS) return;
+        lastSkipLogAt.set(reason, now);
+        console.log(`⏸️ [terminal-mode] completion skip: ${reason} (${extra})`);
+      };
+
       completionCheckInterval = setInterval(() => {
         if (finished || !execStarted) return;
         // 承認応答待ち中は完了しない（ユーザーの応答前に終わらせると Claude の続きの応答を取り逃がす）
-        if (pendingApprovalCount > 0) return;
+        if (pendingApprovalCount > 0) {
+          logSkip('approval-pending', `count=${pendingApprovalCount}`);
+          return;
+        }
         const elapsedSinceExec = Date.now() - execStartedAt;
         const elapsedSinceChange = Date.now() - lastScreenChangeAt;
         // プロンプト送信完了までは echo を真の応答と誤認しないようスキップ
-        if (elapsedSinceExec < EXEC_COOLDOWN_MS) return;
+        if (elapsedSinceExec < EXEC_COOLDOWN_MS) {
+          logSkip('cooldown', `${elapsedSinceExec}/${EXEC_COOLDOWN_MS}ms`);
+          return;
+        }
         // Claude の「思考フェーズ」初期は PTY が無音になる（API リクエスト送信 → first token までの latency）。
         // この間に「画面アイドル + プロンプト復帰」だけで完了判定すると、プロンプト submit 直後の round-trip 待ちを
         // 「処理完了」と誤認してしまう（実機 PTY ログで確定）。
         // 応答 1 個目の `●` バレットが出るまでは完了とみなさない
         const currentBullets = countClaudeBullets(lastRenderedForChangeTracking);
         const newBullets = currentBullets - baselineBulletCount;
-        if (newBullets <= 0) return;
-        // 画面が 1.5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
-        // ただし「画面に承認プロンプトが映っている」場合は完了ではなく承認待ち中（pendingApprovalCount でも捕捉しているが二重防御）
-        if (
-          elapsedSinceChange >= IDLE_FOR_COMPLETION_MS &&
-          detectPromptReady(lastRenderedForChangeTracking) &&
-          !detectToolApprovalPrompt(lastRenderedForChangeTracking)
-        ) {
-          console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBullets} new bullet(s), completing`);
-          finish('idle-and-prompt-ready');
+        if (newBullets <= 0) {
+          // First-bullet safety timeout: 5 分以上待っても `●` が出ない = 詰まっている可能性大。
+          // 10 分 IDLE_TIMEOUT を待つより早く諦めて /exit で正規終了させる
+          if (elapsedSinceExec > FIRST_BULLET_TIMEOUT_MS) {
+            console.warn(`⏰ [terminal-mode] first-bullet timeout (${elapsedSinceExec}ms > ${FIRST_BULLET_TIMEOUT_MS}ms) — Claude did not produce a ● bullet, forcing completion`);
+            finish('first-bullet-timeout');
+            return;
+          }
+          logSkip('no-new-bullet', `current=${currentBullets} baseline=${baselineBulletCount} renderedLen=${lastRenderedForChangeTracking.length} elapsedSinceExec=${elapsedSinceExec}ms`);
+          return;
         }
+        if (elapsedSinceChange < IDLE_FOR_COMPLETION_MS) {
+          logSkip('not-idle', `${elapsedSinceChange}/${IDLE_FOR_COMPLETION_MS}ms new=${newBullets}`);
+          return;
+        }
+        if (!detectPromptReady(lastRenderedForChangeTracking)) {
+          logSkip('prompt-not-ready', `idle=${elapsedSinceChange}ms new=${newBullets}`);
+          return;
+        }
+        if (detectToolApprovalPrompt(lastRenderedForChangeTracking)) {
+          logSkip('tool-approval-visible', `idle=${elapsedSinceChange}ms new=${newBullets}`);
+          return;
+        }
+        // 画面が 1.5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
+        console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBullets} new bullet(s), completing`);
+        finish('idle-and-prompt-ready');
       }, CHECK_INTERVAL_MS);
     };
 
