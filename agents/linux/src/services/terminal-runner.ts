@@ -24,7 +24,7 @@ import {
   detectPromptReady,
   detectToolApprovalPrompt,
   detectAskQuestionPrompt,
-  detectTrustPrompt,
+  detectStartupChoicePrompt,
   extractFinalOutput,
   extractClaudeResponse,
   extractChoicePrompt,
@@ -195,7 +195,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let finished = false;
   let timedOut = false;
   let cancelledByAskDisable = false;
-  let trustConfirmed = false;
+  /** 起動時の選択肢プロンプト（trust folder / resume summary / 等）のユーザー応答待ち中フラグ */
+  let pendingStartupChoice = false;
+  /** 起動時の選択肢プロンプトの重複転送防止用ハッシュ集合 */
+  const handledStartupChoiceHashes = new Set<string>();
   let execStartedAt = 0;
   /** 画面が最後に変化した時刻（完了判定の「画面アイドル」基準） */
   let lastScreenChangeAt = Date.now();
@@ -305,37 +308,45 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       }, IDLE_TIMEOUT_MS);
     };
 
-    // 起動タイムアウト
-    startupTimer = setTimeout(() => {
-      if (!promptReady) {
-        // 起動失敗時に画面の最後 500 文字をログに残す（検出ロジック改善のための調査材料）
-        const rendered = extractFinalOutput(term);
-        const tail = rendered.length > 500 ? rendered.slice(-500) : rendered;
-        console.error(`❌ [terminal-mode] startup timeout (${STARTUP_TIMEOUT_MS}ms). Last 500 chars of rendered screen:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
-        if (startupPollInterval) {
-          clearInterval(startupPollInterval);
-          startupPollInterval = null;
+    /**
+     * 起動タイマーをセット/再セットする。
+     * 起動時の選択肢プロンプトでユーザー応答を待つ間に一時停止 → 応答後に再起動するためにヘルパー化
+     */
+    const installStartupTimer = () => {
+      if (startupTimer) clearTimeout(startupTimer);
+      startupTimer = setTimeout(() => {
+        if (!promptReady) {
+          // 起動失敗時に画面の最後 500 文字をログに残す（検出ロジック改善のための調査材料）
+          const rendered = extractFinalOutput(term);
+          const tail = rendered.length > 500 ? rendered.slice(-500) : rendered;
+          console.error(`❌ [terminal-mode] startup timeout (${STARTUP_TIMEOUT_MS}ms). Last 500 chars of rendered screen:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
+          if (startupPollInterval) {
+            clearInterval(startupPollInterval);
+            startupPollInterval = null;
+          }
+          try {
+            ptyProcess.kill();
+          } catch {
+            // ignore
+          }
+          runningProcesses.delete(opts.sessionId);
+          logStream?.end();
+          reject(new Error(
+            '端末モードの起動がタイムアウトしました（15 秒）\n' +
+            'ヒント: Claude CLI 側に未処理のプロンプト（フォルダ信頼確認・モデル選択等）が残っている可能性があります。\n' +
+            '一度 Agent ホストで `claude --continue` を手動実行して初期セットアップを完了させてください。'
+          ));
         }
-        try {
-          ptyProcess.kill();
-        } catch {
-          // ignore
-        }
-        runningProcesses.delete(opts.sessionId);
-        logStream?.end();
-        reject(new Error(
-          '端末モードの起動がタイムアウトしました（15 秒）\n' +
-          'ヒント: Claude CLI 側に未処理のプロンプト（フォルダ信頼確認・モデル選択等）が残っている可能性があります。\n' +
-          '一度 Agent ホストで `claude --continue` を手動実行して初期セットアップを完了させてください。'
-        ));
-      }
-    }, STARTUP_TIMEOUT_MS);
+      }, STARTUP_TIMEOUT_MS);
+    };
+    installStartupTimer();
 
     /**
      * 起動フェーズの検出を 1 回だけ実行する。
      * onData ハンドラ内とポーリング interval の両方から呼ばれる。
      *
-     * - 信頼プロンプト → 検出したら Enter を送って auto-confirm
+     * - 起動時の選択肢プロンプト（trust folder / resume summary / その他将来追加されるシステムプロンプト）
+     *   → 既存 WS 承認カード経路で WebUI/Discord/Telegram に転送、ユーザー応答を PTY に書き戻す
      * - 入力プロンプト復帰 → 検出したらユーザープロンプト送信フェーズに遷移
      *
      * Claude が入力待ちで PTY 無音になると onData が発火しなくなる。
@@ -351,19 +362,63 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         lastRenderedForChangeTracking = rendered;
       }
 
-      // フォルダ信頼確認プロンプト: --dangerously-skip-permissions を付けても
-      // 初回ワークスペースでは出るため、自動で Enter を送って承認する。
-      // ユーザーが端末モードを ON にしたという明示的選択がトリガなので、無人自動承認ではない。
-      if (!trustConfirmed && detectTrustPrompt(rendered)) {
-        trustConfirmed = true;
-        const elapsed = Date.now() - start;
-        console.log(`🔐 [terminal-mode] trust folder prompt → auto-confirming (${elapsed}ms after spawn)`);
-        try {
-          ptyProcess.write('\r');  // デフォルト選択 "1. Yes, I trust this folder" を Enter で確定
-        } catch {
-          // ignore
+      // 起動時の選択肢プロンプト（trust folder / resume summary / 等）
+      // 「ターミナルモードは Claude CLI の薄い UI ラッパ」という設計思想に基づき、agent が
+      // 自動判断せずユーザーに選ばせる（既存 tool 承認と同じ承認カード経路に bridge）。
+      // onChoiceRequest 未配線の自動実行環境では option 1 自動選択で後方互換を保つ
+      if (!pendingStartupChoice && detectStartupChoicePrompt(rendered)) {
+        const meta = extractChoicePrompt(rendered);
+        if (meta && meta.options.length >= 2) {
+          const hash = crypto.createHash('sha1')
+            .update(meta.question + '|' + meta.options.join('|'))
+            .digest('hex').slice(0, 16);
+
+          if (!handledStartupChoiceHashes.has(hash)) {
+            handledStartupChoiceHashes.add(hash);
+            pendingStartupChoice = true;
+            const elapsed = Date.now() - start;
+
+            // ユーザー応答待ち中は startup timer を停止（応答に何分かかるかわからない）
+            if (startupTimer) {
+              clearTimeout(startupTimer);
+              startupTimer = null;
+            }
+
+            if (opts.onChoiceRequest) {
+              const requestId = crypto.randomUUID();
+              console.log(`📜 [terminal-mode] startup choice prompt → forwarding to user (${meta.options.length} options, requestId=${requestId.slice(0, 8)}, ${elapsed}ms after spawn): "${meta.question.slice(0, 80)}"`);
+              opts.onChoiceRequest({
+                requestId,
+                question: meta.question,
+                options: meta.options,
+                respond: (optionIndex: number) => {
+                  if (finished) return;
+                  const choice = Math.max(0, Math.min(meta.options.length - 1, optionIndex)) + 1;  // 1-indexed, clamp
+                  console.log(`✅ [terminal-mode] user chose option ${choice} for startup choice (requestId=${requestId.slice(0, 8)})`);
+                  try {
+                    ptyProcess.write(`${choice}\r`);
+                  } catch {
+                    // ignore
+                  }
+                  pendingStartupChoice = false;
+                  // 応答後のレンダリング待ちで startup timer を再起動（summary 生成は 30-60s かかる）
+                  installStartupTimer();
+                },
+              });
+            } else {
+              // フォールバック: onChoiceRequest 未配線 → option 1 自動選択（後方互換）
+              console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting option 1 (${elapsed}ms after spawn): "${meta.question.slice(0, 80)}"`);
+              try {
+                ptyProcess.write('1\r');
+              } catch {
+                // ignore
+              }
+              pendingStartupChoice = false;
+              installStartupTimer();
+            }
+          }
+          return;
         }
-        return;
       }
 
       // 起動完了検出

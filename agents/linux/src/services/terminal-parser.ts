@@ -104,6 +104,24 @@ export function detectTrustPrompt(text: string): boolean {
 }
 
 /**
+ * 起動フェーズで Claude CLI が表示する選択肢プロンプトを汎用検出する。
+ * trust folder / resume summary / その他将来追加されるシステムプロンプトに共通の
+ * 「Enter to confirm · Esc to cancel」+ 番号付き選択肢パターン。
+ *
+ * tool 承認プロンプト (`detectToolApprovalPrompt`) との構造差:
+ *  - 起動: カーソル `❯` が option 1 行に乗る (`❯ 1. ...`)、専用入力行なし
+ *  - 会話中: 番号付き選択肢の下に独立した `❯` 入力行
+ *
+ * いずれも `extractChoicePrompt` で {question, options} を抽出 → 既存 WS 承認カード経路で
+ * WebUI/Discord/Telegram に転送 → ユーザー応答を `<choice>\r` で PTY に書き戻す
+ */
+export function detectStartupChoicePrompt(text: string): boolean {
+  const hasConfirmInstruction = /Enter\s+to\s+confirm.*Esc\s+to\s+cancel/i.test(text);
+  const hasNumberedOptions = /^\s*[❯>]?\s*1\.\s+\S/m.test(text);
+  return hasConfirmInstruction && hasNumberedOptions;
+}
+
+/**
  * @xterm/headless の仮想ターミナルから最終的な表示テキストを抽出する
  *
  * PTY 出力には ANSI 制御コードが大量に含まれており、
@@ -226,20 +244,28 @@ export function countNewBullets(baselineMap: Map<string, number>, currentLines: 
 /**
  * 番号付き選択肢プロンプトから質問本文と選択肢リストを抽出する
  *
- * Claude CLI の承認プロンプト典型例:
+ * Claude CLI の承認プロンプト典型例（会話中の tool 承認）:
  *   [Bash] git status を実行してよろしいですか?
  *   1. はい
  *   2. いいえ (理由を入力)
  *   ❯
  *
+ * 起動時の選択肢プロンプト典型例（trust folder / resume summary）:
+ *   Quick safety check: Is this a project you created or one you trust?
+ *   ❯ 1. Yes, I trust this folder
+ *     2. No, exit
+ *
+ * 起動時はカーソル `❯` が option 1 行頭に乗るパターンがあるため、
+ * 番号の前に `❯` / `>` を許容する正規表現を使う
+ *
  * @returns { question, options } または null（選択肢が抽出できない場合）
  */
 export function extractChoicePrompt(text: string): { question: string; options: string[] } | null {
   const lines = text.split('\n');
-  // 連続する番号付き選択肢行を収集
+  // 連続する番号付き選択肢行を収集（先頭の `❯`/`>` カーソルマーカーは許容）
   const optionLines: { index: number; text: string }[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^\s*(\d+)\.\s+(.+?)\s*$/);
+    const m = lines[i].match(/^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/);
     if (m) {
       optionLines.push({ index: i, text: m[2] });
     } else if (optionLines.length > 0) {
