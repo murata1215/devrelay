@@ -28,6 +28,7 @@ import {
   extractFinalOutput,
   extractClaudeResponse,
   extractChoicePrompt,
+  extractThinkingIndicator,
   getBulletLines,
   bulletCountMap,
   countNewBullets,
@@ -61,6 +62,15 @@ const FIRST_BULLET_TIMEOUT_MS = 5 * 60_000;
 
 /** completion check スキップ理由ログの throttle 間隔（毎 500ms 出すと spam になるため） */
 const SKIP_LOG_THROTTLE_MS = 5_000;
+
+/** Heartbeat 表示の最小間隔（思考フェーズで「死んでない」が伝わるように WebUI に流す）*/
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
+/** バレット送信直後はハートビートを抑制する期間（連射時に混じらないように） */
+const HEARTBEAT_QUIET_AFTER_BULLET_MS = 20_000;
+
+/** ストリーミング送信するバレットテキストの最大文字数（長い応答は切詰めて 1 行化） */
+const STREAM_BULLET_MAX_CHARS = 200;
 
 /** プロンプトをチャンクに分割するサイズ（PTY/CLI バッファのオーバーフローや誤解釈を防ぐ） */
 const PROMPT_CHUNK_SIZE = 200;
@@ -594,8 +604,64 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         console.log(`⏸️ [terminal-mode] completion skip: ${reason} (${extra})`);
       };
 
+      // ストリーミング配信状態:
+      //   sentBulletCounts: そのテキストを WebUI に何回送ったか（同じテキストの再描画を重複送信しないため）
+      //   lastBulletStreamAt: 最後にバレットを流した時刻（ハートビート抑制判断用）
+      //   lastHeartbeatAt: 最後にハートビートを流した時刻
+      const sentBulletCounts = new Map<string, number>();
+      let lastBulletStreamAt = Date.now();
+      let lastHeartbeatAt = 0;
+
+      /**
+       * 新規バレットを WebUI にストリーミング配信する。
+       * baseline + これまでに送った回数を超える出現分だけを送る
+       */
+      const streamNewBullets = () => {
+        const currentLines = getBulletLines(lastRenderedForChangeTracking);
+        const currentMap = bulletCountMap(currentLines);
+        for (const [text, count] of currentMap) {
+          const baseCount = baselineBulletMap.get(text) ?? 0;
+          const newInstances = Math.max(0, count - baseCount);
+          const alreadySent = sentBulletCounts.get(text) ?? 0;
+          const toSend = newInstances - alreadySent;
+          if (toSend > 0) {
+            const display = text.length > STREAM_BULLET_MAX_CHARS
+              ? text.slice(0, STREAM_BULLET_MAX_CHARS) + '…'
+              : text;
+            for (let k = 0; k < toSend; k++) {
+              opts.onOutput(display + '\n');
+            }
+            sentBulletCounts.set(text, alreadySent + toSend);
+            lastBulletStreamAt = Date.now();
+          }
+        }
+      };
+
+      /**
+       * 思考フェーズの「死んでない」ハートビートを送る。
+       * バレットが最近送られていない時のみ・30 秒に 1 回 max。
+       * Claude CLI の思考インジケータ（Cogitating for Xs · Y tokens 等）を抽出して表示
+       */
+      const sendHeartbeat = () => {
+        const now = Date.now();
+        if (now - lastBulletStreamAt < HEARTBEAT_QUIET_AFTER_BULLET_MS) return;
+        if (now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
+        lastHeartbeatAt = now;
+        const indicator = extractThinkingIndicator(lastRenderedForChangeTracking);
+        const elapsedSec = Math.round((now - execStartedAt) / 1000);
+        if (indicator) {
+          opts.onOutput(`\n⏳ [${elapsedSec}s 経過] ${indicator}\n`);
+        } else {
+          opts.onOutput(`\n⏳ [${elapsedSec}s 経過] 応答待機中...\n`);
+        }
+      };
+
       completionCheckInterval = setInterval(() => {
         if (finished || !execStarted) return;
+
+        // ストリーミング: 完了条件と無関係に、新規バレットがあれば毎チェックで流す
+        streamNewBullets();
+
         // 承認応答待ち中は完了しない（ユーザーの応答前に終わらせると Claude の続きの応答を取り逃がす）
         if (pendingApprovalCount > 0) {
           logSkip('approval-pending', `count=${pendingApprovalCount}`);
@@ -622,6 +688,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
             finish('first-bullet-timeout');
             return;
           }
+          // バレット未到来時はハートビート送信（思考中であることをユーザーに伝える）
+          sendHeartbeat();
           logSkip('no-new-bullet', `current=${currentBulletLines.length} baseline=${baselineBulletMap.size}unique renderedLen=${lastRenderedForChangeTracking.length} elapsedSinceExec=${elapsedSinceExec}ms`);
           return;
         }

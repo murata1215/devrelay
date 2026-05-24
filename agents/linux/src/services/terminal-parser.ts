@@ -224,6 +224,33 @@ export function bulletCountMap(lines: string[]): Map<string, number> {
 }
 
 /**
+ * Claude CLI の「思考中インジケータ」（Cogitating for 28s · 64 tokens 等）を画面から抽出する。
+ *
+ * Claude CLI は思考中に画面下部に料理関連の動詞 + 経過秒数 + トークン数 を animate して表示する:
+ *   * Cogitating (28s · 64 tokens)
+ *   ✻ Stewing for 6s · 36 tokens
+ *   * Crafting (5s · 100 tokens)
+ *   Sauteed for 6s   ← 過去形 = 完了直後
+ *
+ * heartbeat 表示用に整形した 1 行を返す。検出できなければ null
+ */
+export function extractThinkingIndicator(rendered: string): string | null {
+  const lines = rendered.split('\n');
+  // 末尾 10 行のみ走査（インジケータは入力枠の上に常駐）
+  const tail = lines.slice(-10);
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const line = tail[i].trim();
+    if (line.length === 0 || line.length > 200) continue;
+    // 強い特徴: 「N tokens」または「for Ns」
+    if (/\b\d+\s*tokens?\b/i.test(line) || /\bfor\s+\d+[sm](?:\s+\d+[sm])?\b/.test(line)) {
+      // アニメ用装飾を削って整形
+      return line.replace(/[*·✻✶✽✢⠐⠂✣⠂]/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    }
+  }
+  return null;
+}
+
+/**
  * baseline から見た新規バレット出現数を返す。
  *
  * 各テキストの「current count - baseline count」の正値を合計する:
