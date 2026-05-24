@@ -71,6 +71,49 @@
 
 **確定までの経緯**: 初回は推測ベースで `detectPromptReady` 誤検知を疑ったプランを書いたが、ユーザーから「推定はやめよう」の指摘 → PTY ログ (`%APPDATA%\devrelay\logs\terminal-<sessionId>.log`) + スクリーンショットで「Claude は実際に応答していた」事実を確認し、原因を完了判定の暴発に修正。**PTY 全出力ログは Phase 1 から既に記録されており、こうした症状の事実確認に決定的に役立つ**
 
+#### #228 続編 2: バレット検出を Map<text,count> 化 + 起動選択肢の WebUI ブリッジ + ストリーミング UX + fresh polling (2026-05-24)
+
+`newBullets > 0` ガード追加後も、実機 Windows mviewer での連続テストで複数の段階的問題が露呈し、同日 6 連続 fix で本格安定化に至った。最終的に「ターミナルモードは Claude CLI の薄い UI ラッパ」という設計思想に整理された。
+
+1. **診断ログ + first-bullet safety timeout** (`05a3f33`): 完了 check の早期 return ポイント全部に「なぜスキップしたか + 主要変数」のスロットル付きログ（5 秒 throttle）を追加。`approval-pending` / `cooldown` / `no-new-bullet` / `not-idle` / `prompt-not-ready` / `tool-approval-visible` を識別。加えて submit 後 N 分以内に `●` バレットが 1 つも出ない場合の強制完了（first-bullet timeout）を導入。最初 5 分、後に 10 分に緩和
+
+2. **count-based → Set<text>-based 切替** (`42c076f`): 診断ログで `current=37 baseline=38 newBullets=-1` を観測。xterm-headless の scrollback default 1000 行が 40+ メッセージ復元で満杯になり、古い `●` 行が押し出されて `current < baseline` の負数になっていた。バレット行テキストの Set 差分で新規検知に変更し、scrollback を `10000` に拡張
+
+3. **Set<text> → Map<text,count> 化** (`47613ca`): Set 切替後、`current=57 baseline=48unique` でも `newBulletLines.length === 0` で再びハング。原因は **同じ質問の re-ask で前回応答がすでに JSONL 履歴に保存されており baseline Set に同一テキストが含まれていた** こと。Set 比較では Claude が同じ応答を生成しても新規判定できない。`Map<text, count>` で per-text の出現回数を保持し `Math.max(0, current - base)` を合計するロジックに変更。これで「全く新しいテキスト」「同じテキストの再描画（re-ask）」「scrollback で trim された場合」すべてに対応
+
+4. **起動時の選択肢プロンプトを WebUI に bridge** (`d208083`): Claude CLI が長セッション復元時に新規 3 択プロンプト（`Resume from summary (recommended) / Resume full session / Don't ask me again`）を表示するようになり、既存の `detectTrustPrompt` / `detectPromptReady` のどちらにもマッチせず startup timeout で失敗。「個別プロンプトごとに detect + auto-confirm を書き足すのは持続不可能」というユーザー指摘「ターミナルの考え方から変えないといかん気がする」を受け、設計思想を転換:
+   - 旧: trust folder → agent 自動 Enter / 他のシステムプロンプトは未対応
+   - 新: **任意の選択肢プロンプト → 既存の WS 承認カード経路で WebUI/Discord/Telegram に転送 → ユーザー応答を `<choice>\r` で PTY に書き戻す**
+   - `detectStartupChoicePrompt`（`Enter to confirm · Esc to cancel` + 番号付き選択肢の共通パターン）を追加。`extractChoicePrompt` の regex を拡張して先頭 `❯`/`>` カーソルマーカー（起動時の `❯ 1. Yes` 形式）を許容。trust folder 専用の auto-confirm は削除して汎用経路に統合。`onChoiceRequest` 未配線の自動実行環境では option 1 自動選択でフォールバック
+   - 将来 Claude CLI が新規プロンプトを追加してもコード変更不要、ユーザーに重要な選択権が戻る（summary vs full session 等）
+
+5. **バレット逐次ストリーミング + 思考ハートビート** (`089aaba`): ユーザー指摘「いま動いてる画面の動きが全然でないから状況がわからん。画面キャプチャを定期的に投げるってのはどう？？」を受け、これまで「メッセージ送信 → ✅完了」の間が完全にブラックボックスだった端末モードに進行可視化を追加:
+   - **バレット逐次配信**: 完了 check 内（500ms 間隔）で baseline 超え + 未送信のバレット行を発見次第 `opts.onOutput` で WebUI に配信。`sentBulletCounts: Map<text, number>` で per-text 送信数管理、200 char で truncate
+   - **思考ハートビート**: バレット未到来 + 直近 20s バレット送信なし + 30s 間隔 max で `extractThinkingIndicator(rendered)` から「Cogitating for 28s · 64 tokens」「Doing (4s · 24 tokens)」等を抽出して `⏳ [60s 経過] Doing (109 tokens)` 形式で配信
+   - 最終 `extractClaudeResponse` 配信（plan 本文の整形済みブロック）は維持。バレットヘッダはストリーミング分と最終分で 1 回ずつ表示される軽い重複あり、本文の supporting text は最終応答にしか含まれないため情報量自体は重複ではない
+   - `extractThinkingIndicator` は末尾 10 行から `\b\d+\s*tokens?\b` または `\bfor\s+\d+[sm]\b` パターンを検出し動詞インジケータを抽出
+
+6. **fresh xterm buffer polling + 10 min timeout** (`a997e8c`): heartbeat 追加後の実機テストで「画像 6 枚 + 113k トークン履歴」プロンプトが 5 分ハング → first-bullet timeout で失敗。診断ログから `lastRenderedForChangeTracking` が 113s 時点で `renderedLen=71351` に **フリーズ** していることが判明（PTY 側では "Doing (4s · 24 tokens)" 等が流れ続けていた）。`lastRenderedForChangeTracking` は onData ハンドラ内でのみ更新されるため、xterm 内部状態（sync update mode 等）の影響で `rendered === lastRenderedForChangeTracking` が常時成立する状況になるとトラッカーが固まる
+   - 修正: completion check setInterval の冒頭で必ず `extractFinalOutput(term)` を呼んで fresh rendered を取得し tracker も同時に更新。以降の `streamNewBullets` / `sendHeartbeat` / `countNewBullets` / `detectPromptReady` 全部 fresh ベース
+   - `FIRST_BULLET_TIMEOUT_MS` を 5 → 10 分に緩和（画像複数 + 長セッションだと 5 分超は普通）
+   - 60s ごとに fresh rendered の末尾 200 字を `📷 screen tail` 形式で agent.log に dump（将来同様症状の診断用）
+
+完成形の動作（期待値）:
+```
+🖥️ spawning: ...devrelay-claude.cmd --dangerously-skip-permissions --resume f6551e3a...
+📜 startup choice prompt → forwarding to user (3 options, ...): "Resuming the full session will consume..."
+✅ user chose option 1 for startup choice
+✅ prompt ready (XXXXms after spawn)
+📨 メッセージを送信しました...
+⏳ [30s 経過] Doing (3s · 50 tokens)
+⏳ [60s 経過] Doing (8s · 120 tokens)
+● Bash(grep wheel renderer.js)
+● Read(renderer.js)
+● showPages の末尾に wheel ハンドラを追加します。
+[最終 plan 本文]
+✅ 完了 X.X 秒
+```
+
 ### #227: Devin CLI 修正 — stdin クラッシュ・パーミッション・出力・セッション継続 (2026-05-05)
 - **stdin パイプでクラッシュ修正**: Devin CLI は stdin パイプで panic → `--prompt-file` 一時ファイル経由に変更
 - **パーミッションモード分岐**: Devin は `plan` モード非対応 → plan=`auto` / exec=`dangerous` にマッピング
