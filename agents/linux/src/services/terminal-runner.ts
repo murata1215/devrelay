@@ -236,8 +236,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         } else {
           // 応答抽出失敗時のフォールバック: 原因と画面末尾を表示
           if (newBullets <= 0) {
-            console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected. Prompt may not have been submitted to Claude CLI.`);
-            opts.onOutput(`\n⚠️ Claude が応答しませんでした。プロンプトの送信に失敗した可能性があります。\n（ヒント: 「自動承認」「Ask 無効」設定や、Claude CLI の状態をご確認ください）`);
+            console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected at finish time (likely idle timeout or early CLI exit).`);
+            opts.onOutput(`\n⚠️ Claude が応答テキストを出さずにセッションが終わりました。\n（タイムアウト・Claude CLI の早期終了・無応答エラーの可能性。logs/terminal-${opts.sessionId}.log を確認してください）`);
           } else {
             console.warn(`⚠️ [terminal-mode] could not extract response despite ${newBullets} new bullet(s)`);
             const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
@@ -516,14 +516,21 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         const elapsedSinceChange = Date.now() - lastScreenChangeAt;
         // プロンプト送信完了までは echo を真の応答と誤認しないようスキップ
         if (elapsedSinceExec < EXEC_COOLDOWN_MS) return;
-        // 画面が 1.5 秒間変化なし + プロンプト復帰中 → 完了
+        // Claude の「思考フェーズ」初期は PTY が無音になる（API リクエスト送信 → first token までの latency）。
+        // この間に「画面アイドル + プロンプト復帰」だけで完了判定すると、プロンプト submit 直後の round-trip 待ちを
+        // 「処理完了」と誤認してしまう（実機 PTY ログで確定）。
+        // 応答 1 個目の `●` バレットが出るまでは完了とみなさない
+        const currentBullets = countClaudeBullets(lastRenderedForChangeTracking);
+        const newBullets = currentBullets - baselineBulletCount;
+        if (newBullets <= 0) return;
+        // 画面が 1.5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
         // ただし「画面に承認プロンプトが映っている」場合は完了ではなく承認待ち中（pendingApprovalCount でも捕捉しているが二重防御）
         if (
           elapsedSinceChange >= IDLE_FOR_COMPLETION_MS &&
           detectPromptReady(lastRenderedForChangeTracking) &&
           !detectToolApprovalPrompt(lastRenderedForChangeTracking)
         ) {
-          console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready, completing`);
+          console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBullets} new bullet(s), completing`);
           finish('idle-and-prompt-ready');
         }
       }, CHECK_INTERVAL_MS);

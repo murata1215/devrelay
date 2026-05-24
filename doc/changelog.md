@@ -58,6 +58,19 @@
 ✅ 完了 X.X 秒
 ```
 
+#### #228 続編: 思考フェーズ中の完了暴発修正 (2026-05-24)
+
+`--resume` で復元したセッションへユーザープロンプトを submit した直後、応答が画面に rendering されているにもかかわらず agent が「Claude が応答しませんでした」エラーを出して `/exit` を送る症状が Windows mviewer で再発。実機 PTY ログ + スクリーンショットで原因を確定:
+
+**根本原因**: Claude の「思考フェーズ」初期は PTY が無音になる（API リクエスト送信 → first token までの latency）。この間に `lastScreenChangeAt` が更新されず、`startCompletionCheck` の「画面アイドル 1500ms + プロンプト復帰中」だけで完了判定 → `finish('idle-and-prompt-ready')` 発火。**Claude が応答 `●` バレットを 1 つも出していないタイミング**で `/exit` を queue。Claude は思考完了後に応答を rendering してから queue された `/exit` を処理して終了するため、ユーザーには応答が届かない。
+
+**修正** (`terminal-runner.ts`):
+- `startCompletionCheck()` の完了条件に `newBullets > 0` を追加。応答 1 個目の `●` バレットが出るまで完了とみなさない。応答が始まれば lastScreenChangeAt がストリーミングで更新されるため誤発火しない
+- 完全無応答ケースは既存の `IDLE_TIMEOUT_MS = 10 分` で safety net がかかる（`onData` ベース）
+- `finish()` 内の "no new Claude bullet" 警告メッセージを「プロンプトの送信に失敗した可能性があります」（誤情報）から「Claude が応答テキストを出さずにセッションが終わりました（タイムアウト・早期終了・無応答エラーの可能性。logs/terminal-... を確認）」に修正
+
+**確定までの経緯**: 初回は推測ベースで `detectPromptReady` 誤検知を疑ったプランを書いたが、ユーザーから「推定はやめよう」の指摘 → PTY ログ (`%APPDATA%\devrelay\logs\terminal-<sessionId>.log`) + スクリーンショットで「Claude は実際に応答していた」事実を確認し、原因を完了判定の暴発に修正。**PTY 全出力ログは Phase 1 から既に記録されており、こうした症状の事実確認に決定的に役立つ**
+
 ### #227: Devin CLI 修正 — stdin クラッシュ・パーミッション・出力・セッション継続 (2026-05-05)
 - **stdin パイプでクラッシュ修正**: Devin CLI は stdin パイプで panic → `--prompt-file` 一時ファイル経由に変更
 - **パーミッションモード分岐**: Devin は `plan` モード非対応 → plan=`auto` / exec=`dangerous` にマッピング
