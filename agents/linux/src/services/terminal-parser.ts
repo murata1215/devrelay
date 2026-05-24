@@ -133,27 +133,29 @@ export function extractFinalOutput(term: Terminal): string {
  * Claude CLI は各メッセージを `●` で始まる行で表示する:
  *   ● こんにちは！PixBlog の作業、何かありますか？
  *
- * baseline 時点の `●` 行数（baselineBulletCount）を保存しておき、
- * それ以降に出現したバレットブロックだけを返す。入力ボックスの枠線
- * （────, ╭, ╰, ⏵⏵）に到達したら抽出終了
+ * baseline 時点のバレット行テキストを Set で保存しておき、Set に含まれない
+ * 最初のバレット行から抽出開始する。入力ボックスの枠線（────, ╭, ╰, ⏵⏵）に到達したら抽出終了
+ *
+ * **Set 比較を使う理由**: xterm のスクロールバックが満杯になると古い `●` 行が押し出されて
+ * 単純な「count > baseline」では新規判定が破綻する（current < baseline の負数になる）。
+ * バレット行のテキスト自体を保存・比較すれば、buffer trim に依存せず新規バレットを検出できる
  *
  * @param rendered 仮想ターミナルでレンダリング済みのテキスト
- * @param baselineBulletCount baseline 時点の `●` 行数
+ * @param baselineBulletTexts baseline 時点のバレット行テキスト集合（trim 済み）
  * @returns 新規メッセージの本文（trim 済み）。新規がなければ空文字列
  */
-export function extractClaudeResponse(rendered: string, baselineBulletCount: number): string {
+export function extractClaudeResponse(rendered: string, baselineBulletTexts: Set<string>): string {
   const lines = rendered.split('\n');
-  // バレット行（`●` で始まる行）のインデックスを全て収集
-  const bulletIndices: number[] = [];
+  // baseline に含まれない最初のバレット行を探す
+  let startLine = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*[●●]\s/.test(lines[i])) {
-      bulletIndices.push(i);
+    if (/^\s*[●●]\s/.test(lines[i]) && !baselineBulletTexts.has(lines[i].trim())) {
+      startLine = i;
+      break;
     }
   }
-  // baseline 数を超えなければ新規メッセージなし
-  if (bulletIndices.length <= baselineBulletCount) return '';
+  if (startLine === -1) return '';
 
-  const startLine = bulletIndices[baselineBulletCount];
   const result: string[] = [];
   for (let i = startLine; i < lines.length; i++) {
     const trimmed = lines[i].trim();
@@ -171,16 +173,16 @@ export function extractClaudeResponse(rendered: string, baselineBulletCount: num
 }
 
 /**
- * テキスト中の Claude メッセージ（`●` 行）の数を返す
- * baseline 確定時に呼び出して保存する
+ * 仮想画面の rendered text から `●` で始まる行のテキスト（trim 済み）配列を返す。
+ * baseline / 完了判定で「新規バレット」検出のため Set 化して使う
  */
-export function countClaudeBullets(rendered: string): number {
+export function getBulletLines(rendered: string): string[] {
   const lines = rendered.split('\n');
-  let count = 0;
+  const result: string[] = [];
   for (const line of lines) {
-    if (/^\s*[●●]\s/.test(line)) count++;
+    if (/^\s*[●●]\s/.test(line)) result.push(line.trim());
   }
-  return count;
+  return result;
 }
 
 /**

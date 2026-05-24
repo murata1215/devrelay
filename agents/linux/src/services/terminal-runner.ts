@@ -28,7 +28,7 @@ import {
   extractFinalOutput,
   extractClaudeResponse,
   extractChoicePrompt,
-  countClaudeBullets,
+  getBulletLines,
 } from './terminal-parser.js';
 import crypto from 'crypto';
 
@@ -141,7 +141,9 @@ export function getRunningTerminalProcess(sessionId: string): IPty | undefined {
  */
 export async function runTerminalClaude(opts: TerminalRunOptions): Promise<TerminalRunResult> {
   const start = Date.now();
-  const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS, allowProposedApi: true });
+  // scrollback: default 1000 だと長い `claude --resume` 履歴（40+ メッセージ）で
+  // 古いバレット行が押し出されて baseline 比較が破綻する。10000 行に拡張して安全マージン確保
+  const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS, allowProposedApi: true, scrollback: 10000 });
 
   // `--continue` は cwd ごとに保存された Claude CLI セッションを resume するが、
   // 端末モードを初めて使うフォルダではセッションが存在せず "No conversation found to continue" で
@@ -197,8 +199,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let lastScreenChangeAt = Date.now();
   /** 画面変化追跡用の前回レンダリング結果 */
   let lastRenderedForChangeTracking = '';
-  /** baseline 時点の Claude メッセージ（`●` 行）数。これより多ければ新規応答あり */
-  let baselineBulletCount = 0;
+  /**
+   * baseline 時点の Claude メッセージ（`●` 行）テキスト集合。
+   * これに含まれない `●` 行が画面に現れたら新規応答ありと判定。
+   *
+   * Set 比較を使う理由: xterm の scrollback 上限で古いバレット行が押し出されると
+   * `count > baseline` 方式は current < baseline で破綻する。テキスト集合での
+   * 差分検出なら、buffer の trim や redraw に左右されず確実に新規バレットを検知できる
+   */
+  let baselineBulletTexts = new Set<string>();
   /** 既に応答済みのプロンプト hash（同じ承認プロンプトの重複転送防止） */
   const handledPromptHashes = new Set<string>();
   /** 承認応答待ち中のリクエスト数。>0 の間は「画面アイドル + プロンプト復帰」を完了と判定しない */
@@ -233,19 +242,19 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // Claude の応答を抽出して送信（promptSent 後のみ意味のある応答が得られる）
       if (promptSent) {
         const finalRendered = extractFinalOutput(term);
-        const currentBullets = countClaudeBullets(finalRendered);
-        const newBullets = currentBullets - baselineBulletCount;
-        console.log(`📊 [terminal-mode] completion bullets: baseline=${baselineBulletCount}, current=${currentBullets}, new=${newBullets}`);
-        const response = extractClaudeResponse(finalRendered, baselineBulletCount);
+        const currentBulletLines = getBulletLines(finalRendered);
+        const newBulletLines = currentBulletLines.filter(t => !baselineBulletTexts.has(t));
+        console.log(`📊 [terminal-mode] completion bullets: baseline=${baselineBulletTexts.size}, current=${currentBulletLines.length}, new=${newBulletLines.length}`);
+        const response = extractClaudeResponse(finalRendered, baselineBulletTexts);
         if (response) {
           opts.onOutput(response);
         } else {
           // 応答抽出失敗時のフォールバック: 原因と画面末尾を表示
-          if (newBullets <= 0) {
+          if (newBulletLines.length === 0) {
             console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected at finish time (likely idle timeout or early CLI exit).`);
             opts.onOutput(`\n⚠️ Claude が応答テキストを出さずにセッションが終わりました。\n（タイムアウト・Claude CLI の早期終了・無応答エラーの可能性。logs/terminal-${opts.sessionId}.log を確認してください）`);
           } else {
-            console.warn(`⚠️ [terminal-mode] could not extract response despite ${newBullets} new bullet(s)`);
+            console.warn(`⚠️ [terminal-mode] could not extract response despite ${newBulletLines.length} new bullet(s)`);
             const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
             opts.onOutput(`\n（Claude の応答抽出に失敗しました。画面末尾:\n${tail}\n）`);
           }
@@ -365,9 +374,9 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         }
         const elapsed = Date.now() - start;
         console.log(`✅ [terminal-mode] prompt ready (${elapsed}ms after spawn), sending user prompt (${opts.prompt.length} chars)`);
-        // baseline 時点の `●` メッセージ数を記録。これより後のメッセージが Claude の応答
-        baselineBulletCount = countClaudeBullets(rendered);
-        console.log(`📊 [terminal-mode] baseline bullet count: ${baselineBulletCount}`);
+        // baseline 時点のバレット行テキスト集合を記録。これに含まれないバレットが現れたら Claude の応答
+        baselineBulletTexts = new Set(getBulletLines(rendered));
+        console.log(`📊 [terminal-mode] baseline bullets: ${baselineBulletTexts.size} unique`);
         // ユーザー向けヒント（実行中はストリーミング停止するため目印を出す）
         opts.onOutput('\n📨 メッセージを送信しました。Claude の応答を待っています...\n');
         promptSent = true;
@@ -541,10 +550,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // Claude の「思考フェーズ」初期は PTY が無音になる（API リクエスト送信 → first token までの latency）。
         // この間に「画面アイドル + プロンプト復帰」だけで完了判定すると、プロンプト submit 直後の round-trip 待ちを
         // 「処理完了」と誤認してしまう（実機 PTY ログで確定）。
-        // 応答 1 個目の `●` バレットが出るまでは完了とみなさない
-        const currentBullets = countClaudeBullets(lastRenderedForChangeTracking);
-        const newBullets = currentBullets - baselineBulletCount;
-        if (newBullets <= 0) {
+        // 応答 1 個目の `●` バレット（baseline に含まれない新規テキスト）が出るまでは完了とみなさない
+        const currentBulletLines = getBulletLines(lastRenderedForChangeTracking);
+        const newBulletLines = currentBulletLines.filter(t => !baselineBulletTexts.has(t));
+        if (newBulletLines.length === 0) {
           // First-bullet safety timeout: 5 分以上待っても `●` が出ない = 詰まっている可能性大。
           // 10 分 IDLE_TIMEOUT を待つより早く諦めて /exit で正規終了させる
           if (elapsedSinceExec > FIRST_BULLET_TIMEOUT_MS) {
@@ -552,23 +561,23 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
             finish('first-bullet-timeout');
             return;
           }
-          logSkip('no-new-bullet', `current=${currentBullets} baseline=${baselineBulletCount} renderedLen=${lastRenderedForChangeTracking.length} elapsedSinceExec=${elapsedSinceExec}ms`);
+          logSkip('no-new-bullet', `current=${currentBulletLines.length} baseline=${baselineBulletTexts.size} renderedLen=${lastRenderedForChangeTracking.length} elapsedSinceExec=${elapsedSinceExec}ms`);
           return;
         }
         if (elapsedSinceChange < IDLE_FOR_COMPLETION_MS) {
-          logSkip('not-idle', `${elapsedSinceChange}/${IDLE_FOR_COMPLETION_MS}ms new=${newBullets}`);
+          logSkip('not-idle', `${elapsedSinceChange}/${IDLE_FOR_COMPLETION_MS}ms new=${newBulletLines.length}`);
           return;
         }
         if (!detectPromptReady(lastRenderedForChangeTracking)) {
-          logSkip('prompt-not-ready', `idle=${elapsedSinceChange}ms new=${newBullets}`);
+          logSkip('prompt-not-ready', `idle=${elapsedSinceChange}ms new=${newBulletLines.length}`);
           return;
         }
         if (detectToolApprovalPrompt(lastRenderedForChangeTracking)) {
-          logSkip('tool-approval-visible', `idle=${elapsedSinceChange}ms new=${newBullets}`);
+          logSkip('tool-approval-visible', `idle=${elapsedSinceChange}ms new=${newBulletLines.length}`);
           return;
         }
         // 画面が 1.5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
-        console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBullets} new bullet(s), completing`);
+        console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBulletLines.length} new bullet(s), completing`);
         finish('idle-and-prompt-ready');
       }, CHECK_INTERVAL_MS);
     };
