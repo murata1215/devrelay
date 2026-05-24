@@ -133,23 +133,33 @@ export function extractFinalOutput(term: Terminal): string {
  * Claude CLI は各メッセージを `●` で始まる行で表示する:
  *   ● こんにちは！PixBlog の作業、何かありますか？
  *
- * baseline 時点のバレット行テキストを Set で保存しておき、Set に含まれない
- * 最初のバレット行から抽出開始する。入力ボックスの枠線（────, ╭, ╰, ⏵⏵）に到達したら抽出終了
+ * baseline 時点のバレット行テキストを Map<text, count> で保存しておき、
+ * 走査中に「baseline の count を超える出現」の最初のインスタンスから抽出開始する。
+ * 入力ボックスの枠線（────, ╭, ╰, ⏵⏵）に到達したら抽出終了。
  *
- * **Set 比較を使う理由**: xterm のスクロールバックが満杯になると古い `●` 行が押し出されて
- * 単純な「count > baseline」では新規判定が破綻する（current < baseline の負数になる）。
- * バレット行のテキスト自体を保存・比較すれば、buffer trim に依存せず新規バレットを検出できる
+ * **Map<text, count> を使う理由**: Set ベース比較は「re-ask で前回と同じ応答テキストが
+ * 履歴に既にあるケース」で baseline Set がヒットして新規判定が漏れる。count ベースなら
+ * 「同じテキストが baseline より多く現れた」= 新規描画 として確実に検知できる。
+ * 単純な int count ベースは buffer trim で current < baseline の負数で破綻するが、
+ * Map なら text 単位で `Math.max(0, current - base)` を合計する形で trim 耐性も持つ
  *
  * @param rendered 仮想ターミナルでレンダリング済みのテキスト
- * @param baselineBulletTexts baseline 時点のバレット行テキスト集合（trim 済み）
+ * @param baselineBulletMap baseline 時点のバレット行テキスト → 出現回数の Map
  * @returns 新規メッセージの本文（trim 済み）。新規がなければ空文字列
  */
-export function extractClaudeResponse(rendered: string, baselineBulletTexts: Set<string>): string {
+export function extractClaudeResponse(rendered: string, baselineBulletMap: Map<string, number>): string {
   const lines = rendered.split('\n');
-  // baseline に含まれない最初のバレット行を探す
+  // 各テキストの「これまでに見た出現回数」を追跡し、baseline count を超えた最初の occurrence が新規
+  const seen = new Map<string, number>();
   let startLine = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*[●●]\s/.test(lines[i]) && !baselineBulletTexts.has(lines[i].trim())) {
+    if (!/^\s*[●●]\s/.test(lines[i])) continue;
+    const text = lines[i].trim();
+    const currentSeen = (seen.get(text) ?? 0) + 1;
+    seen.set(text, currentSeen);
+    const baseCount = baselineBulletMap.get(text) ?? 0;
+    if (currentSeen > baseCount) {
+      // baseline の count を超えた = 新規描画されたバレット
       startLine = i;
       break;
     }
@@ -174,7 +184,7 @@ export function extractClaudeResponse(rendered: string, baselineBulletTexts: Set
 
 /**
  * 仮想画面の rendered text から `●` で始まる行のテキスト（trim 済み）配列を返す。
- * baseline / 完了判定で「新規バレット」検出のため Set 化して使う
+ * 同一テキストが複数行に現れる場合は全て返す（baseline / 完了判定で count を取るため）
  */
 export function getBulletLines(rendered: string): string[] {
   const lines = rendered.split('\n');
@@ -183,6 +193,34 @@ export function getBulletLines(rendered: string): string[] {
     if (/^\s*[●●]\s/.test(line)) result.push(line.trim());
   }
   return result;
+}
+
+/**
+ * バレット行配列を Map<text, count> に変換する。
+ * baseline 確定時に呼び出して保存する
+ */
+export function bulletCountMap(lines: string[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const l of lines) m.set(l, (m.get(l) ?? 0) + 1);
+  return m;
+}
+
+/**
+ * baseline から見た新規バレット出現数を返す。
+ *
+ * 各テキストの「current count - baseline count」の正値を合計する:
+ *  - 同じテキストが baseline より多く出現 → 新規描画とみなす
+ *  - current で消えた（buffer trim）テキストは無視（負数を足さない）
+ *  - baseline に無いテキストが出現 → 新規（base count=0 として扱う）
+ */
+export function countNewBullets(baselineMap: Map<string, number>, currentLines: string[]): number {
+  const currentMap = bulletCountMap(currentLines);
+  let newCount = 0;
+  for (const [text, count] of currentMap) {
+    const baseCount = baselineMap.get(text) ?? 0;
+    newCount += Math.max(0, count - baseCount);
+  }
+  return newCount;
 }
 
 /**
