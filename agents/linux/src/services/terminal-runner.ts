@@ -76,6 +76,10 @@ const HEARTBEAT_QUIET_AFTER_BULLET_MS = 20_000;
 /** ストリーミング送信するバレットテキストの最大文字数（長い応答は切詰めて 1 行化） */
 const STREAM_BULLET_MAX_CHARS = 200;
 
+/** バレットが安定したと判定するまでの連続観測 tick 数（CHECK_INTERVAL_MS × N = 待機時間）。
+ *  Claude CLI のストリーミング rendering 中の部分文字列を流さないためのデバウンス */
+const STREAM_DEBOUNCE_TICKS = 3;
+
 /** プロンプトをチャンクに分割するサイズ（PTY/CLI バッファのオーバーフローや誤解釈を防ぐ） */
 const PROMPT_CHUNK_SIZE = 200;
 
@@ -610,17 +614,24 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
 
       // ストリーミング配信状態:
       //   sentBulletTexts: WebUI に既に送ったバレットテキスト集合（一度送ったら二度と送らない）
+      //   pendingBullets: 候補となったバレットの「最初に観測した tick」を記録（debounce 用）
+      //   tickCount: completion check の累積 tick 数（debounce 比較基準）
       //   lastBulletStreamAt: 最後にバレットを流した時刻（ハートビート抑制判断用）
       //   lastHeartbeatAt: 最後にハートビートを流した時刻
       //   lastScreenDumpAt: 最後に画面末尾を診断ログに dump した時刻
       //
-      // **Set ベースを使う理由（完了判定の Map<text,count> とは設計を分けている）**:
-      // Claude CLI は同じバレットを画面再描画するため scrollback に重複コピーが蓄積する。
-      // Map<text,count> の delta 合計で配信すると、同じテキストを 30+ 回流す事故が起きる
-      // （実機 2026-05-26 で確認）。ストリーミングは「ユーザーに見せる新規発言」が単位なので
-      // Set<text> で一度きり配信が正しい。一方で完了判定は「Claude が進捗したか」が単位で、
-      // 同じ質問の re-ask で同じ応答が再生成された場合も検知が必要なので Map<text,count> 差分
+      // **Set ベース + prefix フィルタ + debounce を使う理由**:
+      // - 完了判定 (`countNewBullets`) は Map<text,count> 差分で「Claude の進捗」を測る
+      // - ストリーミングは「ユーザーに見せる新規発言」が単位
+      //   1. Set<text> で同じテキストの scrollback 重複コピーをブロック
+      //   2. **Prefix フィルタ**: 別の候補がこのテキストを prefix として持つ → 部分文字列スキップ
+      //      （Claude のストリーミング rendering 途中で「ビルド設定を確認し」が出て、後で
+      //       「ビルド設定を確認しました。…」が出る現象を吸収）
+      //   3. **Debounce (3 tick = 1.5s)**: バレットが連続 3 tick 同じテキストで安定したら送信。
+      //      その間に長文に置き換われば pending から削除されるので部分文字列は流れない
       const sentBulletTexts = new Set<string>();
+      const pendingBullets = new Map<string, number>();
+      let tickCount = 0;
       let lastBulletStreamAt = Date.now();
       let lastHeartbeatAt = 0;
       let lastScreenDumpAt = 0;
@@ -629,25 +640,55 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
        * 新規バレットを WebUI にストリーミング配信する。
        * - baseline に含まれるテキスト（履歴の bullet）→ スキップ
        * - 既に送ったテキスト → スキップ
-       * - 同一 tick 内の重複 → Set で dedup
+       * - 別の候補テキストがこのテキストを prefix として含む → 部分文字列スキップ
+       * - 連続 STREAM_DEBOUNCE_TICKS (1.5s) 同じテキストで安定したら送信
        *
-       * これで Claude CLI の画面再描画による scrollback 重複を完全に吸収できる
+       * これで Claude CLI のストリーミング rendering 中の部分文字列を吸収できる
        */
       const streamNewBullets = (rendered: string) => {
+        tickCount++;
         const currentLines = getBulletLines(rendered);
-        const toStreamThisTick = new Set<string>();
+
+        // 候補集合: baseline / 既送信を除外
+        const candidates = new Set<string>();
         for (const text of currentLines) {
           if (sentBulletTexts.has(text)) continue;
           if (baselineBulletMap.has(text)) continue;
-          toStreamThisTick.add(text);
+          candidates.add(text);
         }
-        for (const text of toStreamThisTick) {
-          const display = text.length > STREAM_BULLET_MAX_CHARS
-            ? text.slice(0, STREAM_BULLET_MAX_CHARS) + '…'
-            : text;
-          opts.onOutput(display + '\n');
-          sentBulletTexts.add(text);
-          lastBulletStreamAt = Date.now();
+
+        // cleanup: pending にあったが候補から消えたテキスト（長文に置き換わった/scroll-out）
+        for (const text of Array.from(pendingBullets.keys())) {
+          if (!candidates.has(text)) pendingBullets.delete(text);
+        }
+
+        for (const text of candidates) {
+          // Prefix フィルタ: 別の候補がこのテキストを prefix として持つ → 部分文字列
+          let isPartialOfAnother = false;
+          for (const other of candidates) {
+            if (other !== text && other.startsWith(text)) {
+              isPartialOfAnother = true;
+              break;
+            }
+          }
+          if (isPartialOfAnother) {
+            pendingBullets.delete(text);
+            continue;
+          }
+
+          // Debounce: 連続 N tick 安定したら送信
+          const firstSeenTick = pendingBullets.get(text);
+          if (firstSeenTick === undefined) {
+            pendingBullets.set(text, tickCount);
+          } else if (tickCount - firstSeenTick >= STREAM_DEBOUNCE_TICKS) {
+            const display = text.length > STREAM_BULLET_MAX_CHARS
+              ? text.slice(0, STREAM_BULLET_MAX_CHARS) + '…'
+              : text;
+            opts.onOutput(display + '\n');
+            sentBulletTexts.add(text);
+            pendingBullets.delete(text);
+            lastBulletStreamAt = Date.now();
+          }
         }
       };
 
