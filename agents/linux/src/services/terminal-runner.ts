@@ -609,37 +609,45 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       };
 
       // ストリーミング配信状態:
-      //   sentBulletCounts: そのテキストを WebUI に何回送ったか（同じテキストの再描画を重複送信しないため）
+      //   sentBulletTexts: WebUI に既に送ったバレットテキスト集合（一度送ったら二度と送らない）
       //   lastBulletStreamAt: 最後にバレットを流した時刻（ハートビート抑制判断用）
       //   lastHeartbeatAt: 最後にハートビートを流した時刻
       //   lastScreenDumpAt: 最後に画面末尾を診断ログに dump した時刻
-      const sentBulletCounts = new Map<string, number>();
+      //
+      // **Set ベースを使う理由（完了判定の Map<text,count> とは設計を分けている）**:
+      // Claude CLI は同じバレットを画面再描画するため scrollback に重複コピーが蓄積する。
+      // Map<text,count> の delta 合計で配信すると、同じテキストを 30+ 回流す事故が起きる
+      // （実機 2026-05-26 で確認）。ストリーミングは「ユーザーに見せる新規発言」が単位なので
+      // Set<text> で一度きり配信が正しい。一方で完了判定は「Claude が進捗したか」が単位で、
+      // 同じ質問の re-ask で同じ応答が再生成された場合も検知が必要なので Map<text,count> 差分
+      const sentBulletTexts = new Set<string>();
       let lastBulletStreamAt = Date.now();
       let lastHeartbeatAt = 0;
       let lastScreenDumpAt = 0;
 
       /**
        * 新規バレットを WebUI にストリーミング配信する。
-       * baseline + これまでに送った回数を超える出現分だけを送る
+       * - baseline に含まれるテキスト（履歴の bullet）→ スキップ
+       * - 既に送ったテキスト → スキップ
+       * - 同一 tick 内の重複 → Set で dedup
+       *
+       * これで Claude CLI の画面再描画による scrollback 重複を完全に吸収できる
        */
       const streamNewBullets = (rendered: string) => {
         const currentLines = getBulletLines(rendered);
-        const currentMap = bulletCountMap(currentLines);
-        for (const [text, count] of currentMap) {
-          const baseCount = baselineBulletMap.get(text) ?? 0;
-          const newInstances = Math.max(0, count - baseCount);
-          const alreadySent = sentBulletCounts.get(text) ?? 0;
-          const toSend = newInstances - alreadySent;
-          if (toSend > 0) {
-            const display = text.length > STREAM_BULLET_MAX_CHARS
-              ? text.slice(0, STREAM_BULLET_MAX_CHARS) + '…'
-              : text;
-            for (let k = 0; k < toSend; k++) {
-              opts.onOutput(display + '\n');
-            }
-            sentBulletCounts.set(text, alreadySent + toSend);
-            lastBulletStreamAt = Date.now();
-          }
+        const toStreamThisTick = new Set<string>();
+        for (const text of currentLines) {
+          if (sentBulletTexts.has(text)) continue;
+          if (baselineBulletMap.has(text)) continue;
+          toStreamThisTick.add(text);
+        }
+        for (const text of toStreamThisTick) {
+          const display = text.length > STREAM_BULLET_MAX_CHARS
+            ? text.slice(0, STREAM_BULLET_MAX_CHARS) + '…'
+            : text;
+          opts.onOutput(display + '\n');
+          sentBulletTexts.add(text);
+          lastBulletStreamAt = Date.now();
         }
       };
 
