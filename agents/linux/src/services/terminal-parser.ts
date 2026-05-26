@@ -150,58 +150,74 @@ export function extractFinalOutput(term: Terminal): string {
 }
 
 /**
- * Claude CLI のレンダリング済み画面から「baseline 後に追加された Claude のメッセージ」を抽出する
+ * Claude CLI のレンダリング済み画面から「最新の応答ブロック」を抽出する。
  *
- * Claude CLI は各メッセージを `●` で始まる行で表示する:
- *   ● こんにちは！PixBlog の作業、何かありますか？
+ * 旧実装は「baseline に含まれない最初のバレット行から最初の separator まで」だったが、
+ * 以下の問題で巨大ダンプ（7000+ chars）になる事故が発生したため再設計（#228 続編 3）:
+ *  - baseline=0（履歴未ロード/spawn 直後）だと全 bullet が「新規」扱いになる
+ *  - prompt に `Previous conversation:` 形式の会話履歴を含めると、Claude がそれを画面に
+ *    echo・処理し、過去ターン bullet が大量に scrollback に積まれる
+ *  - xterm セル上書きで破損した bullet テキストも混入する
  *
- * baseline 時点のバレット行テキストを Map<text, count> で保存しておき、
- * 走査中に「baseline の count を超える出現」の最初のインスタンスから抽出開始する。
- * 入力ボックスの枠線（────, ╭, ╰, ⏵⏵）に到達したら抽出終了。
- *
- * **Map<text, count> を使う理由**: Set ベース比較は「re-ask で前回と同じ応答テキストが
- * 履歴に既にあるケース」で baseline Set がヒットして新規判定が漏れる。count ベースなら
- * 「同じテキストが baseline より多く現れた」= 新規描画 として確実に検知できる。
- * 単純な int count ベースは buffer trim で current < baseline の負数で破綻するが、
- * Map なら text 単位で `Math.max(0, current - base)` を合計する形で trim 耐性も持つ
+ * 新ロジック: **入力枠を下から anchor して、最新の応答ブロックのみ取り出す**
+ *  (1) 画面下部の入力枠境界（╭─ / ╰─ / 連続 ─ / ⏵⏵）を見つける
+ *  (2) その上で最も近い `●` バレット = Claude の最新応答の末尾
+ *  (3) そこから上方走査して応答ブロックの開始を探す。以下で停止:
+ *      - 2 行以上の連続空行（ターン境界）
+ *      - 強い separator（連続 ─, ╭─, ╰─）
+ *      - `Previous conversation:` / `User:` / `Assistant:` / `【プランモード】` 等の
+ *        prompt 内マーカー（過去会話との境界）
+ *  (4) その範囲を join して返す
  *
  * @param rendered 仮想ターミナルでレンダリング済みのテキスト
- * @param baselineBulletMap baseline 時点のバレット行テキスト → 出現回数の Map
- * @returns 新規メッセージの本文（trim 済み）。新規がなければ空文字列
+ * @param _baselineBulletMap （互換のため残す、現実装では未使用）
+ * @returns 最新応答ブロックの本文（trim 済み）。見つからなければ空文字列
  */
-export function extractClaudeResponse(rendered: string, baselineBulletMap: Map<string, number>): string {
+export function extractClaudeResponse(rendered: string, _baselineBulletMap: Map<string, number>): string {
   const lines = rendered.split('\n');
-  // 各テキストの「これまでに見た出現回数」を追跡し、baseline count を超えた最初の occurrence が新規
-  const seen = new Map<string, number>();
-  let startLine = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (!/^\s*[●●]\s/.test(lines[i])) continue;
-    const text = lines[i].trim();
-    const currentSeen = (seen.get(text) ?? 0) + 1;
-    seen.set(text, currentSeen);
-    const baseCount = baselineBulletMap.get(text) ?? 0;
-    if (currentSeen > baseCount) {
-      // baseline の count を超えた = 新規描画されたバレット
-      startLine = i;
-      break;
-    }
-  }
-  if (startLine === -1) return '';
 
-  const result: string[] = [];
-  for (let i = startLine; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    // 入力ボックス・セパレータに到達したら抽出終了
-    if (i > startLine && (
-      /^[─━]{3,}$/.test(trimmed) ||
-      /^[╭╰][─━]/.test(trimmed) ||
-      /^⏵⏵/.test(trimmed)
-    )) {
+  // (1) 画面下部の入力枠境界（バッファ末尾から走査）
+  let inputBoxIdx = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (/^[╭╰][─━]/.test(t) || /^⏵⏵/.test(t) || /^[─━]{20,}$/.test(t)) {
+      inputBoxIdx = i;
       break;
     }
-    result.push(lines[i]);
   }
-  return result.join('\n').trim();
+
+  // (2) 入力枠の上で最後の `●` バレットを探す
+  let lastBulletIdx = -1;
+  for (let i = inputBoxIdx - 1; i >= 0; i--) {
+    if (/^\s*[●●]\s/.test(lines[i])) {
+      lastBulletIdx = i;
+      break;
+    }
+  }
+  if (lastBulletIdx === -1) return '';
+
+  // (3) 上方走査して応答ブロックの開始を見つける
+  let startIdx = lastBulletIdx;
+  let emptyLineRun = 0;
+  for (let i = lastBulletIdx - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (t === '') {
+      emptyLineRun++;
+      if (emptyLineRun >= 2) break;  // 2 行以上の空行 = ターン境界
+      continue;
+    }
+    emptyLineRun = 0;
+    // 強い separator
+    if (/^[─━]{20,}/.test(t)) break;
+    if (/^[╭╰][─━]/.test(t)) break;
+    // prompt 内マーカー（過去会話との境界）
+    if (/^(?:Previous conversation:|User:|Assistant:|【プランモード】|【実行モード】|【重要】)/.test(t)) break;
+    // それ以外は応答ブロックの一部
+    startIdx = i;
+  }
+
+  // (4) 抽出
+  return lines.slice(startIdx, inputBoxIdx).join('\n').trim();
 }
 
 /**
