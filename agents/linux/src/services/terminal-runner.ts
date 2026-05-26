@@ -497,6 +497,59 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         lastRenderedForChangeTracking = rendered;
       }
 
+      // 実行開始後: select 型選択肢プロンプト（AskUserQuestion / その他「Enter to select」型）の処理。
+      // `detectToolApprovalPrompt` は末尾独立 `❯` 入力行型専用なので、
+      // 「❯ 1. ...」の navigation 型はここで別経路として検出する。
+      // approveAllMode でも AskUserQuestion はユーザーに聞くべきなのでガードしない
+      if (execStarted && !finished && !pendingStartupChoice && detectStartupChoicePrompt(rendered)) {
+        const meta = extractChoicePrompt(rendered);
+        if (meta && meta.options.length >= 2) {
+          const hash = crypto.createHash('sha1')
+            .update(meta.question + '|' + meta.options.join('|'))
+            .digest('hex').slice(0, 16);
+
+          if (!handledStartupChoiceHashes.has(hash)) {
+            handledStartupChoiceHashes.add(hash);
+            pendingStartupChoice = true;
+            pendingApprovalCount++;  // completion check の暴発を防ぐ
+
+            if (opts.onChoiceRequest) {
+              const requestId = crypto.randomUUID();
+              console.log(`📜 [terminal-mode] mid-session choice prompt → forwarding to user (${meta.options.length} options, requestId=${requestId.slice(0, 8)}): "${meta.question.slice(0, 80)}"`);
+              opts.onChoiceRequest({
+                requestId,
+                question: meta.question,
+                options: meta.options,
+                respond: (optionIndex: number) => {
+                  if (finished) return;
+                  const choice = Math.max(0, Math.min(meta.options.length - 1, optionIndex)) + 1;
+                  console.log(`✅ [terminal-mode] user chose option ${choice} for mid-session choice (requestId=${requestId.slice(0, 8)})`);
+                  try {
+                    ptyProcess.write(`${choice}\r`);
+                  } catch {
+                    // ignore
+                  }
+                  pendingStartupChoice = false;
+                  pendingApprovalCount = Math.max(0, pendingApprovalCount - 1);
+                  resetIdleTimer();
+                },
+              });
+            } else {
+              // フォールバック: onChoiceRequest 未配線 → option 1 自動選択（後方互換）
+              console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting option 1: "${meta.question.slice(0, 80)}"`);
+              try {
+                ptyProcess.write('1\r');
+              } catch {
+                // ignore
+              }
+              pendingStartupChoice = false;
+              pendingApprovalCount = Math.max(0, pendingApprovalCount - 1);
+            }
+          }
+          return;  // tool approval block にフォールスルーしない
+        }
+      }
+
       // 実行開始後: 番号付き選択肢プロンプト（tool 承認 / AskUserQuestion 等）の処理
       // 完了判定は startCompletionCheck の setInterval で独立して行う
       if (execStarted && !finished && !opts.approveAllMode && detectToolApprovalPrompt(rendered)) {

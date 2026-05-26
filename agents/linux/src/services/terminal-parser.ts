@@ -104,21 +104,25 @@ export function detectTrustPrompt(text: string): boolean {
 }
 
 /**
- * 起動フェーズで Claude CLI が表示する選択肢プロンプトを汎用検出する。
- * trust folder / resume summary / その他将来追加されるシステムプロンプトに共通の
- * 「Enter to confirm · Esc to cancel」+ 番号付き選択肢パターン。
+ * Claude CLI が表示する選択肢プロンプトを汎用検出する（起動時 + 会話中の AskUserQuestion 等）。
+ *
+ * 対応する 2 系統:
+ *  - **confirm 型** (即決): trust folder / resume from summary / 将来追加されるシステムプロンプト
+ *    → 「Enter to confirm · Esc to cancel」
+ *  - **select 型** (↑/↓ navigation): 会話中の AskUserQuestion など
+ *    → 「Enter to select · ↑/↓ to navigate · Esc to cancel」
  *
  * tool 承認プロンプト (`detectToolApprovalPrompt`) との構造差:
- *  - 起動: カーソル `❯` が option 1 行に乗る (`❯ 1. ...`)、専用入力行なし
- *  - 会話中: 番号付き選択肢の下に独立した `❯` 入力行
+ *  - select/confirm 型: カーソル `❯` が option 1 行頭に乗る (`❯ 1. ...`)、専用入力行なし
+ *  - tool 承認型: 番号付き選択肢の下に独立した `❯` 入力行
  *
  * いずれも `extractChoicePrompt` で {question, options} を抽出 → 既存 WS 承認カード経路で
  * WebUI/Discord/Telegram に転送 → ユーザー応答を `<choice>\r` で PTY に書き戻す
  */
 export function detectStartupChoicePrompt(text: string): boolean {
-  const hasConfirmInstruction = /Enter\s+to\s+confirm.*Esc\s+to\s+cancel/i.test(text);
+  const hasInstruction = /Enter\s+to\s+(?:confirm|select).*Esc\s+to\s+cancel/i.test(text);
   const hasNumberedOptions = /^\s*[❯>]?\s*1\.\s+\S/m.test(text);
-  return hasConfirmInstruction && hasNumberedOptions;
+  return hasInstruction && hasNumberedOptions;
 }
 
 /**
