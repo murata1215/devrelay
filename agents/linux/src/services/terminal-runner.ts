@@ -32,6 +32,7 @@ import {
   getBulletLines,
   bulletCountMap,
   countNewBullets,
+  isToolCallBullet,
 } from './terminal-parser.js';
 import crypto from 'crypto';
 
@@ -702,11 +703,14 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         tickCount++;
         const currentLines = getBulletLines(rendered);
 
-        // 候補集合: baseline / 既送信を除外
+        // 候補集合: baseline / 既送信 / ツール呼び出しバレット を除外
+        // ツール呼び出しバレット (Bash/PowerShell/Read 等) は WebUI ノイズなので非表示にし、
+        // Claude のテキストバレット（説明文・分析・結論）のみストリーミングする
         const candidates = new Set<string>();
         for (const text of currentLines) {
           if (sentBulletTexts.has(text)) continue;
           if (baselineBulletMap.has(text)) continue;
+          if (isToolCallBullet(text)) continue;
           candidates.add(text);
         }
 

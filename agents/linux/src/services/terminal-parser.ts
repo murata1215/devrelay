@@ -212,12 +212,53 @@ export function extractClaudeResponse(rendered: string, _baselineBulletMap: Map<
     if (/^[╭╰][─━]/.test(t)) break;
     // prompt 内マーカー（過去会話との境界）
     if (/^(?:Previous conversation:|User:|Assistant:|【プランモード】|【実行モード】|【重要】)/.test(t)) break;
+    // Claude CLI banner（再 spawn / resume 時に画面に出る）
+    if (/^[▐▝]|^▘▘\s+▝▝/.test(lines[i])) break;
     // それ以外は応答ブロックの一部
     startIdx = i;
   }
 
-  // (4) 抽出
-  return lines.slice(startIdx, inputBoxIdx).join('\n').trim();
+  // (4) 下方走査して endIdx を見つける（lastBulletIdx 以降に banner / 完了マーカー /
+  // User: 等が来たらそこで止める。入力枠より前に止まることが多い）
+  let endIdx = inputBoxIdx;
+  for (let i = lastBulletIdx + 1; i < inputBoxIdx; i++) {
+    const t = lines[i].trim();
+    if (/^[▐▝]|^▘▘\s+▝▝/.test(lines[i])) { endIdx = i; break; }
+    if (/^(?:✅ 完了|⚠️ |User:|Assistant:|Previous conversation:|【プランモード】|【実行モード】|【重要】)/.test(t)) { endIdx = i; break; }
+    if (/^[─━]{20,}/.test(t)) { endIdx = i; break; }
+  }
+
+  // (5) 抽出 + ツール呼び出しバレット / tool 出力サマリ行をフィルタしてノイズ削減
+  const responseLines = lines.slice(startIdx, endIdx);
+  const filtered = responseLines.filter(line => {
+    // ツール呼び出しバレット (Bash/PowerShell/Read/Write/...) → 除外
+    if (/^\s*[●●]\s/.test(line) && isToolCallBullet(line.trim())) return false;
+    // tool 出力サマリの ⎿ 行 → 除外
+    if (/^\s*⎿/.test(line)) return false;
+    return true;
+  });
+  return filtered.join('\n').trim();
+}
+
+/**
+ * バレットがツール呼び出し（Bash/PowerShell/Read/Write/Update 等）かどうかを判定する。
+ *
+ * 形式例:
+ *  ● Bash(git status && echo "---FILES---" && ls)
+ *  ● PowerShell(Get-ChildItem dist | Select-Object Name)
+ *  ● Read(file.css)
+ *  ● Reading 1 file… (ctrl+o to expand)
+ *  ● Write(rules\devrelay.md)
+ *  ● Searching for 1 pattern…
+ *  ● I used the wrong shell. Let me use PowerShell.
+ *
+ * ツール呼び出し系のバレットは WebUI 出力では本質的にノイズなので
+ * streaming / 最終応答の両方で除外する。Claude の説明文・分析・結論
+ * （`● ビルド設定を確認しました...` 等のテキストバレット）のみ残す
+ */
+export function isToolCallBullet(text: string): boolean {
+  const stripped = text.replace(/^\s*[●●]\s*/, '').trim();
+  return /^(?:Bash|PowerShell|Read|Reading|Write|Update|Edit|MultiEdit|Searching|Glob|Grep|TodoWrite|WebFetch|WebSearch|NotebookEdit|Task|Background|I used the wrong shell)[\s(]/i.test(stripped);
 }
 
 /**
