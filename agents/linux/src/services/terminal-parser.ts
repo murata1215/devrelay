@@ -228,11 +228,16 @@ export function extractClaudeResponse(rendered: string, _baselineBulletMap: Map<
     if (/^[─━]{20,}/.test(t)) { endIdx = i; break; }
   }
 
-  // (5) 抽出 + ツール呼び出しバレット / tool 出力サマリ行をフィルタしてノイズ削減
+  // (5) 抽出 + ツール呼び出し / partial / tool 出力サマリ をフィルタしてノイズ削減
   const responseLines = lines.slice(startIdx, endIdx);
   const filtered = responseLines.filter(line => {
-    // ツール呼び出しバレット (Bash/PowerShell/Read/Write/...) → 除外
-    if (/^\s*[●●]\s/.test(line) && isToolCallBullet(line.trim())) return false;
+    if (/^\s*[●●]\s/.test(line)) {
+      const trimmed = line.trim();
+      // ツール呼び出しバレット (Bash/PowerShell/Read/Write/...) → 除外
+      if (isToolCallBullet(trimmed)) return false;
+      // 途中切れの partial バレット → 除外
+      if (isLikelyPartialBullet(trimmed)) return false;
+    }
     // tool 出力サマリの ⎿ 行 → 除外
     if (/^\s*⎿/.test(line)) return false;
     return true;
@@ -258,7 +263,28 @@ export function extractClaudeResponse(rendered: string, _baselineBulletMap: Map<
  */
 export function isToolCallBullet(text: string): boolean {
   const stripped = text.replace(/^\s*[●●]\s*/, '').trim();
-  return /^(?:Bash|PowerShell|Read|Reading|Write|Update|Edit|MultiEdit|Searching|Glob|Grep|TodoWrite|WebFetch|WebSearch|NotebookEdit|Task|Background|I used the wrong shell)[\s(]/i.test(stripped);
+  // 末尾文字は `[\s(.]` で whitespace / `(` / `.` のいずれか
+  // （"I used the wrong shell. Let me use PowerShell." のような period 直後パターンに対応）
+  return /^(?:Bash|PowerShell|Read|Reading|Write|Update|Edit|MultiEdit|Searching|Glob|Grep|TodoWrite|WebFetch|WebSearch|NotebookEdit|Task|Background|I used the wrong shell)[\s(.]/i.test(stripped);
+}
+
+/**
+ * バレットが「途中切れの partial 文字列」かどうかを判定する。
+ *
+ * Claude CLI のストリーミング rendering で行が scroll-up された時、その時点の
+ * 「途中まで書かれた状態」が scrollback に確定する。例:
+ *   ● ビルドはパ            (本来は「...パッケージング段階まで...」)
+ *   ● I used the wron        (本来は「...the wrong shell.」)
+ *   ● Rea                    (本来は「Reading 1 file…」)
+ *
+ * これら partial を WebUI に流すと意味のない文字列で画面が埋まるため filter する。
+ * ヒューリスティック: バレット本文が 8 文字未満 + 末尾が完全な区切り文字でない
+ */
+export function isLikelyPartialBullet(text: string): boolean {
+  const body = text.replace(/^\s*[●●]\s*/, '').trim();
+  if (body.length >= 8) return false;
+  // 完全な区切り文字（句読点・閉じ括弧・三点リーダ等）で終わっていれば partial ではない
+  return !/[。.!?:;)\]\}」』］】…]$/.test(body);
 }
 
 /**

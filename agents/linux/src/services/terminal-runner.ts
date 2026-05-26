@@ -33,6 +33,7 @@ import {
   bulletCountMap,
   countNewBullets,
   isToolCallBullet,
+  isLikelyPartialBullet,
 } from './terminal-parser.js';
 import crypto from 'crypto';
 
@@ -80,6 +81,11 @@ const STREAM_BULLET_MAX_CHARS = 200;
 /** バレットが安定したと判定するまでの連続観測 tick 数（CHECK_INTERVAL_MS × N = 待機時間）。
  *  Claude CLI のストリーミング rendering 中の部分文字列を流さないためのデバウンス */
 const STREAM_DEBOUNCE_TICKS = 3;
+
+/** 延長アイドル完了の閾値: detectPromptReady が false でも、これだけ画面変化が無ければ完了発火。
+ *  Claude が npm build 等のバックグラウンドタスク実行中は `❯` カーソルが隠れて
+ *  detectPromptReady が永遠に false を返すため、long idle で完了させる safety net */
+const EXTENDED_IDLE_FOR_COMPLETION_MS = 30_000;
 
 /** プロンプトをチャンクに分割するサイズ（PTY/CLI バッファのオーバーフローや誤解釈を防ぐ） */
 const PROMPT_CHUNK_SIZE = 200;
@@ -703,14 +709,13 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         tickCount++;
         const currentLines = getBulletLines(rendered);
 
-        // 候補集合: baseline / 既送信 / ツール呼び出しバレット を除外
-        // ツール呼び出しバレット (Bash/PowerShell/Read 等) は WebUI ノイズなので非表示にし、
-        // Claude のテキストバレット（説明文・分析・結論）のみストリーミングする
+        // 候補集合: baseline / 既送信 / ツール呼び出しバレット / 途中切れ partial を除外
         const candidates = new Set<string>();
         for (const text of currentLines) {
           if (sentBulletTexts.has(text)) continue;
           if (baselineBulletMap.has(text)) continue;
           if (isToolCallBullet(text)) continue;
+          if (isLikelyPartialBullet(text)) continue;
           candidates.add(text);
         }
 
@@ -826,17 +831,24 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           logSkip('not-idle', `${elapsedSinceChange}/${IDLE_FOR_COMPLETION_MS}ms new=${newBullets}`);
           return;
         }
-        if (!detectPromptReady(freshRendered)) {
-          logSkip('prompt-not-ready', `idle=${elapsedSinceChange}ms new=${newBullets}`);
-          return;
-        }
         if (detectToolApprovalPrompt(freshRendered)) {
           logSkip('tool-approval-visible', `idle=${elapsedSinceChange}ms new=${newBullets}`);
           return;
         }
-        // 画面が 1.5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
-        console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBullets} new bullet(s), completing`);
-        finish('idle-and-prompt-ready');
+        if (detectPromptReady(freshRendered)) {
+          // 画面が 1.5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
+          console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBullets} new bullet(s), completing`);
+          finish('idle-and-prompt-ready');
+          return;
+        }
+        // 延長アイドル完了パス: ❯ カーソルが隠れていても（npm build 等のバックグラウンドタスク
+        // 実行中に発生）、30 秒以上画面変化が無ければ Claude は実質応答完了とみなして finish
+        if (elapsedSinceChange >= EXTENDED_IDLE_FOR_COMPLETION_MS) {
+          console.log(`✅ [terminal-mode] extended idle ${elapsedSinceChange}ms + ${newBullets} new bullet(s), completing (❯ cursor hidden)`);
+          finish('extended-idle-complete');
+          return;
+        }
+        logSkip('prompt-not-ready', `idle=${elapsedSinceChange}ms new=${newBullets}`);
       }, CHECK_INTERVAL_MS);
     };
 
