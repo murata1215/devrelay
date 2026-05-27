@@ -311,6 +311,24 @@ export function bulletCountMap(lines: string[]): Map<string, number> {
 }
 
 /**
+ * Claude CLI の exit 時に出力される「Resume this session with: claude --resume <UUID>」から
+ * UUID を抽出する。同セッション中に複数表示される（過去 session のメッセージなど）場合は
+ * 最後のもの（最新）を採用。
+ *
+ * これを `.devrelay/claude-session-id` に保存すれば、次回 terminal mode 起動時に
+ * `--resume <id>` で会話を完全継続できる
+ */
+export function extractClaudeSessionIdFromBuffer(rendered: string): string | null {
+  const re = /claude\s+--resume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+  let lastMatch: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(rendered)) !== null) {
+    lastMatch = m[1];
+  }
+  return lastMatch;
+}
+
+/**
  * Claude CLI の「思考中インジケータ」（Cogitating for 28s · 64 tokens 等）を画面から抽出する。
  *
  * Claude CLI は思考中に画面下部に料理関連の動詞 + 経過秒数 + トークン数 を animate して表示する:

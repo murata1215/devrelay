@@ -20,6 +20,7 @@ const { Terminal } = xtermHeadless;
 import path from 'path';
 import fs from 'fs';
 import { getConfigDir } from './config.js';
+import { saveClaudeSessionId } from './session-store.js';
 import {
   detectPromptReady,
   detectToolApprovalPrompt,
@@ -29,6 +30,7 @@ import {
   extractClaudeResponse,
   extractChoicePrompt,
   extractThinkingIndicator,
+  extractClaudeSessionIdFromBuffer,
   getBulletLines,
   bulletCountMap,
   countNewBullets,
@@ -315,6 +317,16 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         runningProcesses.delete(opts.sessionId);
         logStream?.end();
         const finalOutput = extractFinalOutput(term);
+        // Claude CLI exit 時に出る「Resume this session with: claude --resume <UUID>」から
+        // session id を抽出して `.devrelay/claude-session-id` に保存。次回 terminal mode
+        // 起動時に --resume で会話継続できるようにする（SDK Claude と同じファイルを共有）
+        const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
+        if (claudeSessionId) {
+          saveClaudeSessionId(opts.projectPath, claudeSessionId).catch(err => {
+            console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
+          });
+          console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}...`);
+        }
         resolve({
           finalOutput,
           durationMs: Date.now() - start,
@@ -861,6 +873,14 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       logStream?.end();
       console.log(`🖥️ [terminal-mode] pty exited (code=${exitCode}, signal=${signal})`);
       const finalOutput = extractFinalOutput(term);
+      // 予期せぬ exit (PTY crash 等) でも、画面に Claude session id があれば保存して継続性を維持
+      const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
+      if (claudeSessionId) {
+        saveClaudeSessionId(opts.projectPath, claudeSessionId).catch(err => {
+          console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
+        });
+        console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}...`);
+      }
       resolve({
         finalOutput,
         durationMs: Date.now() - start,
