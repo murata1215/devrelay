@@ -369,24 +369,60 @@ export function countNewBullets(baselineMap: Map<string, number>, currentLines: 
  *   ❯ 1. Yes, I trust this folder
  *     2. No, exit
  *
+ * AskUserQuestion 典型例（インデント説明文 + 末尾 separator + Chat about this）:
+ *   依頼の意図を確認させてください
+ *   ❯ 1. 再ビルドしてexe生成
+ *        既存のelectron-builder設定で...    ← インデント説明文
+ *     2. ビルドの仕組みを整備
+ *        ビルド手順書・npmスクリプト...
+ *     ...
+ *     5. Type something.
+ *   ─────────────────
+ *     6. Chat about this
+ *
  * 起動時はカーソル `❯` が option 1 行頭に乗るパターンがあるため、
- * 番号の前に `❯` / `>` を許容する正規表現を使う
+ * 番号の前に `❯` / `>` を許容する正規表現を使う。
+ * 旧実装は「連続する番号行」前提だったため AskUserQuestion 形式（説明文や separator が間に挟まる）
+ * で破綻していた → 「1, 2, 3, ... の最長連続シーケンス」検出方式に変更（#228 続編 3）。
+ * 偶然 1 や 2 が会話履歴中に出現しても、シーケンシャルな番号付けが続かない限り採用されない
  *
  * @returns { question, options } または null（選択肢が抽出できない場合）
  */
 export function extractChoicePrompt(text: string): { question: string; options: string[] } | null {
   const lines = text.split('\n');
-  // 連続する番号付き選択肢行を収集（先頭の `❯`/`>` カーソルマーカーは許容）
-  const optionLines: { index: number; text: string }[] = [];
+
+  // (1) 全ての「番号付き選択肢行」候補を収集（先頭 `❯`/`>` カーソルマーカー許容）
+  type OptCandidate = { index: number; num: number; text: string };
+  const candidates: OptCandidate[] = [];
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/);
     if (m) {
-      optionLines.push({ index: i, text: m[2] });
-    } else if (optionLines.length > 0) {
-      // 選択肢ブロックの後に空行・別の行 → 抽出終了
-      break;
+      candidates.push({ index: i, num: Number(m[1]), text: m[2] });
     }
   }
+
+  // (2) 1, 2, 3, ... の最長連続シーケンスを探す（インデント説明文や `─────` separator が
+  // 間に挟まっても、連続番号が見つかればそれをプロンプト本体とみなす）
+  let bestSeq: OptCandidate[] = [];
+  let curSeq: OptCandidate[] = [];
+  let nextExpected = 1;
+  for (const c of candidates) {
+    if (c.num === nextExpected) {
+      curSeq.push(c);
+      nextExpected++;
+    } else if (c.num === 1) {
+      if (curSeq.length > bestSeq.length) bestSeq = curSeq;
+      curSeq = [c];
+      nextExpected = 2;
+    } else {
+      if (curSeq.length > bestSeq.length) bestSeq = curSeq;
+      curSeq = [];
+      nextExpected = 1;
+    }
+  }
+  if (curSeq.length > bestSeq.length) bestSeq = curSeq;
+
+  const optionLines = bestSeq;
   if (optionLines.length < 2) return null;
 
   // 質問本文: 最初の選択肢の直前の連続テキスト行（空行・セパレータで境界）。
