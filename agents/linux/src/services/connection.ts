@@ -815,12 +815,19 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   let historyContextSize = 0;
 
   // Include conversation history if:
-  // 1. Claude: resumeSessionId がない場合（SDK の --resume でセッション引き継ぎするため通常は不要）
-  // 2. Claude: missed messages がある場合（SDK 内部履歴にない新規メッセージ）
+  // 1. Claude SDK: resumeSessionId がない場合（SDK の --resume でセッション引き継ぎするため通常は不要）
+  // 2. Claude SDK: missed messages がある場合（SDK 内部履歴にない新規メッセージ）
   // 3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かないためプロンプトが唯一のコンテキスト）
+  //
+  // Claude terminal mode は除外: Claude CLI 自身が JSONL でセッション管理するため
+  // prompt への history 注入は不要。注入すると Claude が過去文脈に強く引きずられて
+  // 新規質問を無視して過去の作業継続を選ぶ症状が発生（2026-05-27 実機 mviewer で確認）
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
-  const isClaudeSdk = sessionInfo.aiTool === 'claude';
-  const needsHistoryInPrompt = !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages;
+  const isClaudeTerminalMode = sessionInfo.aiTool === 'claude' && !!sessionInfo.terminalMode;
+  const isClaudeSdk = sessionInfo.aiTool === 'claude' && !sessionInfo.terminalMode;
+  const needsHistoryInPrompt = !isClaudeTerminalMode && (
+    !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages
+  );
   if (sessionInfo.history.length > 1 && needsHistoryInPrompt) {
     const historyForContext = sessionInfo.history.slice(0, -1); // exclude current message
     let execIndex = -1;
