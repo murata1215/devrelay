@@ -346,6 +346,7 @@ devrelay/
 - **set -e + pgrep/grep**: `|| true` を必ず付ける
 - **再インストール時の config.yaml**: token・serverUrl・machineName の3つ全てを更新
 - **プロキシ設定順序**: プロキシプロンプトは依存ツールチェック（Step 1）より前に配置（Node.js DL / pnpm 自動インストールで必要）
+- **npm/pnpm の proxy config 自動投入**（#229）: `HTTP_PROXY`/`HTTPS_PROXY` 環境変数だけでは `pnpm install` がプロキシを拾わない環境向けに、プロキシ指定時のみ `npm config set proxy/https-proxy`（Node.js セットアップ完了後・pnpm 自動インストール前）と `pnpm config set proxy/https-proxy`（pnpm 検出/インストール完了直後）を実行する。`~/.npmrc` / `~/.config/pnpm/rc` に永続化されるが意図的（次回ビルドでも有効）。削除手順を完了サマリーに明示
 - **pnpm 自動インストール**: `npm install -g pnpm` → 権限不足なら `sudo npm install -g pnpm` にフォールバック
 - **systemd サービス PATH**: `.bashrc` を読み込まないため `~/.local/bin`（claude CLI）、`~/.devrelay/bin`（devrelay-claude）、Node.js ディレクトリを `Environment=PATH=...` で明示指定
 - **systemd プロキシ**: プロキシ環境では `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy` を `Environment=` で設定（大文字・小文字両方必要）

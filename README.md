@@ -333,7 +333,7 @@ pm2 startup
 
 ### Proxy Configuration
 
-The one-liner installers prompt for proxy settings **before** dependency checks, so that Node.js download and pnpm auto-install also use the proxy. When a proxy is configured, `HTTP_PROXY`/`HTTPS_PROXY` are set for all operations (`git clone`, `pnpm install`, token validation). The proxy settings are also written to the service configuration (systemd `Environment=`, macOS LaunchAgent `EnvironmentVariables`, crontab inline env) so that the claude CLI can reach Anthropic API through the proxy at runtime. You can also specify proxy via CLI arguments or environment variables:
+The one-liner installers prompt for proxy settings **before** dependency checks, so that Node.js download and pnpm auto-install also use the proxy. When a proxy is configured, `HTTP_PROXY`/`HTTPS_PROXY` are set for all operations (`git clone`, `pnpm install`, token validation), **and `npm config set proxy/https-proxy` + `pnpm config set proxy/https-proxy` are also invoked automatically** so that `npm install -g pnpm` and `pnpm install` work reliably in environments where the env vars alone don't propagate (e.g. some corporate proxies). The proxy settings are also written to the service configuration (systemd `Environment=`, macOS LaunchAgent `EnvironmentVariables`, crontab inline env) so that the claude CLI can reach Anthropic API through the proxy at runtime. You can also specify proxy via CLI arguments or environment variables:
 
 ```bash
 # Linux: interactive prompt during install (answer y/N when asked)
@@ -353,6 +353,13 @@ proxy:
   url: http://proxy.example.com:8080  # or socks5://proxy:1080
   username: user  # optional
   password: pass  # optional
+```
+
+To remove the npm/pnpm proxy config installed by the installer:
+
+```bash
+pnpm config delete proxy && pnpm config delete https-proxy
+npm  config delete proxy && npm  config delete https-proxy
 ```
 
 ### Version Management

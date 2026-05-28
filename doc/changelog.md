@@ -7,6 +7,22 @@
 ## 実装済み機能
 
 
+### #229: インストーラーで npm/pnpm の proxy config も自動投入 (2026-05-28)
+- **背景**: プロキシ環境でインストーラーを実行した際、`HTTP_PROXY`/`HTTPS_PROXY` 環境変数だけでは `pnpm install` がプロキシを拾わない環境があり、ユーザーが事前に `pnpm config set proxy <URL>` / `pnpm config set https-proxy <URL>` を手動投入しないとビルドが失敗するケースが報告された（Windows + 企業プロキシ環境）
+- **修正**: `--proxy <URL>` / `$env:DEVRELAY_PROXY` / 対話プロンプトでプロキシが指定された場合、環境変数セットに加えて以下を実行：
+  - **`npm config set proxy/https-proxy`**: Node.js セットアップ完了直後、pnpm 自動インストール (`npm install -g pnpm`) 前に投入
+  - **`pnpm config set proxy/https-proxy`**: pnpm 検出/インストール完了直後、`pnpm install` 前に投入
+- **対象ファイル**: `scripts/install-agent.sh`（Linux + macOS, +18 行）、`scripts/install-agent.ps1`（Windows, +25 行）
+- **動作**:
+  - プロキシ未指定時は何もしない（既存ユーザー設定を壊さない）
+  - 設定失敗時は warning 表示して続行（古い pnpm の挙動差吸収）
+  - 完了サマリーに削除コマンド `プロキシ削除: pnpm config delete proxy && pnpm config delete https-proxy` を 1 行追加
+- **設計判断**:
+  - **2 段階で投入**: npm 設定は pnpm 自動インストール前に必要、pnpm 設定は `pnpm install` 前に必要。両者は独立で、`command -v` (sh) / `Get-Command` (PS1) で利用可能性をチェック
+  - **永続化を許容**: 環境変数（プロセススコープ）ではなく `~/.npmrc` / `~/.config/pnpm/rc` に書き込まれ永続化されるが、これは意図的（次回 `pnpm install` / `pnpm build` でもプロキシが効くようにするため）。削除コマンドをサマリーに明示
+  - **既存値を上書き**: DevRelay インストール = プロキシを使う意思表示として、既存の proxy/https-proxy 設定は上書きする
+- **追加ドキュメント**: README の Proxy Configuration セクションに「npm/pnpm の proxy config も自動投入される」旨を追記、`rules/project.md` のインストーラーセクションに同様の設計判断を追記
+
 ### #228: 端末インタフェースモード（Terminal Mode） — PTY 経由で claude --continue を都度起動 (2026-05-23)
 - **背景**: 2026/6/15 以降 Anthropic は Agent SDK の `query()`（`-p` 相当）をサブスク枠から分離。本機能の主目的は課金回避ではなく、(1) `claude --continue` の対話セッションを WebUI から自然継続する、(2) 多プロジェクト・低頻度・オンデマンドの利用実態に合わせて都度起動・都度終了で軽量化、の 2 点
 - **AI Runner 第 6 の実行モード**: `aiTool === 'claude' && terminalMode` の場合のみ、Agent SDK ではなく PTY 経由で `claude --continue` を起動する分岐を `sendPromptToAi()` 冒頭に追加。`terminalMode = false`（デフォルト）なら既存実行パスに完全 no-op

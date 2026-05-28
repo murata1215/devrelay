@@ -151,6 +151,18 @@ if (-not $GitCmd) {
     Write-Host "  OK git $GitVersion" -ForegroundColor Green
 }
 
+# プロキシ指定時、npm にも proxy 設定を投入（HTTP_PROXY/HTTPS_PROXY 環境変数だけでは
+# `npm install -g pnpm` が通らない環境向け）。npm が無いタイミングでは skip。
+if ($ProxyUrl -and (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Host "  npm に proxy 設定を投入..." -ForegroundColor Yellow
+    try {
+        cmd /c "npm config set proxy `"$ProxyUrl`"" 2>$null
+        cmd /c "npm config set https-proxy `"$ProxyUrl`"" 2>$null
+    } catch {
+        Write-Host "  WARNING: npm proxy 設定に失敗（続行）" -ForegroundColor Yellow
+    }
+}
+
 # pnpm チェック（未インストールなら自動インストール）
 $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
 if (-not $PnpmCmd) {
@@ -176,6 +188,18 @@ if (-not $PnpmCmd) {
 } else {
     $PnpmVersion = pnpm -v
     Write-Host "  OK pnpm $PnpmVersion" -ForegroundColor Green
+}
+
+# プロキシ指定時、pnpm にも proxy 設定を投入（環境変数だけでは `pnpm install` が拾わない
+# 環境への対策。pnpm 検出/インストール完了直後に実行する）。
+if ($ProxyUrl -and $PnpmCmd) {
+    Write-Host "  pnpm に proxy 設定を投入..." -ForegroundColor Yellow
+    try {
+        cmd /c "pnpm config set proxy `"$ProxyUrl`"" 2>$null
+        cmd /c "pnpm config set https-proxy `"$ProxyUrl`"" 2>$null
+    } catch {
+        Write-Host "  WARNING: pnpm proxy 設定に失敗（続行）" -ForegroundColor Yellow
+    }
 }
 
 # Claude Code チェック（必須）
@@ -581,6 +605,7 @@ Write-Host "  設定ファイル:    $ConfigFile" -ForegroundColor Green
 Write-Host "  サーバーURL:     $ServerUrl" -ForegroundColor Green
 if ($ProxyUrl) {
     Write-Host "  プロキシ:        $ProxyUrl" -ForegroundColor Green
+    Write-Host "  プロキシ削除:    pnpm config delete proxy && pnpm config delete https-proxy" -ForegroundColor Green
 }
 Write-Host ""
 

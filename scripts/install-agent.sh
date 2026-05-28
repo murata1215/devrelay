@@ -253,6 +253,15 @@ if [ "$NEED_NODE_INSTALL" = true ]; then
   fi
 fi
 
+# プロキシ指定時、npm にも proxy 設定を投入（HTTP_PROXY/HTTPS_PROXY 環境変数だけでは
+# `npm install -g pnpm` が通らない環境向け）。Node.js セットアップ完了後、pnpm 自動
+# インストール前のここで実行する。
+if [ -n "$PROXY_URL" ] && command -v npm &> /dev/null; then
+  echo -e "  🔧 npm に proxy 設定を投入..."
+  npm config set proxy "$PROXY_URL" 2>/dev/null || echo -e "  ${YELLOW}⚠️  npm proxy 設定に失敗（続行）${NC}"
+  npm config set https-proxy "$PROXY_URL" 2>/dev/null || true
+fi
+
 # --- pnpm チェック・自動インストール ---
 # npm は Node.js に同梱されているため、追加依存なし
 # グローバルインストールは権限不足の場合 sudo でフォールバック
@@ -269,6 +278,14 @@ if ! command -v pnpm &> /dev/null; then
   fi
 else
   echo -e "  ✅ pnpm $(pnpm -v)"
+fi
+
+# プロキシ指定時、pnpm にも proxy 設定を投入（環境変数だけでは `pnpm install` が拾わない
+# 環境への対策。pnpm 検出/インストール完了直後に実行する）。
+if [ -n "$PROXY_URL" ] && command -v pnpm &> /dev/null; then
+  echo -e "  🔧 pnpm に proxy 設定を投入..."
+  pnpm config set proxy "$PROXY_URL" 2>/dev/null || echo -e "  ${YELLOW}⚠️  pnpm proxy 設定に失敗（続行）${NC}"
+  pnpm config set https-proxy "$PROXY_URL" 2>/dev/null || true
 fi
 
 # --- Claude Code チェック（必須）---
@@ -728,6 +745,7 @@ echo -e "  設定ファイル:    ${GREEN}$CONFIG_FILE${NC}"
 echo -e "  サーバーURL:     ${GREEN}$SERVER_URL${NC}"
 if [ -n "$PROXY_URL" ]; then
   echo -e "  プロキシ:        ${GREEN}$PROXY_URL${NC}"
+  echo -e "  プロキシ削除:    ${GREEN}pnpm config delete proxy && pnpm config delete https-proxy${NC}"
 fi
 echo ""
 
