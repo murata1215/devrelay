@@ -114,6 +114,43 @@
 ✅ 完了 X.X 秒
 ```
 
+#### #228 続編 3: UX 連発修正 + AskUserQuestion 対応 + 会話継続性復元 (2026-05-26 〜 2026-05-28)
+
+#228 続編 2 で機能完成後、実機 Windows mviewer で連続テストを行ったところ、**ストリーミング配信 / 最終応答 / 完了判定 / 会話継続** の各レイヤーで複数の症状が出て連続 9 commit で安定化に至った。最終的に「ターミナルモードは Claude CLI の薄い UI ラッパで、SDK と同じファイルでセッション継続する」という設計思想が完成。
+
+1. **バレットを Set で 1 度きり配信** (`bf93885`): 同じバレットが 30+ 回 WebUI に流れる事故。Map<text,count> の delta 合計を streaming にも流用していたが、Claude UI の画面再描画で scrollback に重複コピーが蓄積し「同テキストの再描画 = 新規描画」と誤判定。streaming は Set<text> で一度きり配信 + 完了判定は Map<text,count> 差分、と用途別に分離
+
+2. **prefix フィルタ + 1.5s debounce** (`c1e2b37`): Set 化後も「`● ビルドはパ` (途中) と `● ビルド設定を確認しました。既存の dist...` (完全)」の partial 文字列が両方流れる症状。Claude のストリーミング rendering 中に scroll-up された行の途中状態が scrollback に確定するため。`STREAM_DEBOUNCE_TICKS = 3 ticks (1.5s)` 安定待ち + 別候補が prefix として持つ場合スキップ で吸収
+
+3. **会話中の AskUserQuestion「Enter to select」型を bridge** (`6ca8c09`): `detectStartupChoicePrompt` の regex が「Enter to **confirm**」専用で AskUserQuestion の「Enter to **select** · ↑/↓ to navigate · Esc to cancel」を取りこぼし、加えて post-promptReady の onData ハンドラに `detectStartupChoicePrompt` 自体が未配線だった。regex を `(?:confirm|select)` 両対応に拡張 + onData ハンドラに mid-session choice 検出ブロックを追加（`detectToolApprovalPrompt` の前に置く）
+
+4. **最終応答を最新ブロックのみに絞る** (`1f6e1d6`): `baseline=0unique current=339 new=339` の状態で `extractClaudeResponse` が全 scrollback を dump して 7708 chars の巨大ゴミ応答になる症状。旧実装「baseline に無い最初のバレットから次の separator まで」は baseline=0 で破綻。新ロジックは入力枠を anchor として下から走査 → 最後の `●` バレット = 最新応答の末尾 → そこから上方走査して `Previous conversation:` / `User:` / 連続空行 / banner で停止 → そのブロックのみ返す
+
+5. **ツール呼び出しバレットを stream + 最終応答で除外** (`19e27cf`): `● Bash(...)` / `● PowerShell(...)` / `● Read(...)` / `● Reading 1 file…` / `● Write(...)` / `● I used the wrong shell.` 等がコンソールを埋める症状。`isToolCallBullet(text)` を追加して既知ツール名 (Bash/PowerShell/Read/Reading/Write/Update/Edit/MultiEdit/Searching/Glob/Grep/TodoWrite/WebFetch/WebSearch/NotebookEdit/Task/Background/I used the wrong shell) で始まるバレットを除外。`⎿` で始まる tool 出力サマリ行も除外。SDK モードと同じ「ツール実行は user に直接見せず説明文だけ送る」流儀に揃える
+
+6. **延長アイドル完了パス + partial バレット filter** (`1851fa5`): Claude が `npm run build` 等のバックグラウンドタスク実行中は `❯` カーソルが隠れて `detectPromptReady` 永遠 false → 10 分 IDLE_TIMEOUT で異常終了する症状。`EXTENDED_IDLE_FOR_COMPLETION_MS = 30_000` を導入し、`detectPromptReady=false` でも 30 秒以上画面変化なし + 新規バレットあり → `extended-idle-complete` で正常終了。並行して `isLikelyPartialBullet`（本文 8 文字未満 + 完全な区切り文字無し）を追加して `● ビルドはパ` / `● I used the wron` / `● Rea` 等の途中文字列を弾く。`isToolCallBullet` の regex も `[\s(.]` に拡張して `I used the wrong shell.` の period 直後パターンに対応
+
+7. **terminal mode は prompt への history 注入を skip** (`62fcb8b`): ユーザーが「マウスのまんなかくるくるでページ送れるけど Leeyes より遅い気がする」と新規質問しても Claude が build / color / folder の過去トピックばかり返答する症状。`connection.ts` で `--resume` 無しの Claude は `Previous conversation:` 形式の会話履歴を prompt に注入していたため、Claude が過去文脈に強く引きずられて新規質問を無視していた。**SDK Claude と違って terminal mode は Claude CLI 自身が JSONL でセッション管理する**ため history 注入は不要。`isClaudeTerminalMode` 判定を追加して terminal mode は `needsHistoryInPrompt = false` 強制
+
+8. **AskUserQuestion の選択肢抽出を「最長連続シーケンス」化** (`457d654`): Claude が AskUserQuestion で 6 択を表示するのに `extractChoicePrompt` が null を返して WS カードが届かない症状。旧実装は「連続する番号付き行」前提だったが、AskUserQuestion は option 行の間にインデント説明文を挟むため cluster が即切断されていた。「全 numbered option を収集 → 1, 2, 3, ... の最長連続シーケンスを採用」方式に変更。インデント説明文 / `─────` separator / `6. Chat about this` 等が間にあっても正しく検出
+
+9. **terminal mode 終了時に Claude CLI session id を保存** (`6a145d5`): 7 番の修正で history 注入を切ったため会話の文脈が完全に失われ、ユーザーが「もう一回聞いて」と送っても Claude が「文脈不明」と返す症状。`.devrelay/claude-session-id` ファイルは SDK Claude 経路でしか書き込まれず、terminal mode しか使わない project では不在 → `--resume` 引数が付かない → 毎回 fresh session。Claude CLI 終了時に PTY に出る `Resume this session with: claude --resume <UUID>` から UUID を抽出して `saveClaudeSessionId` でファイル保存。次回 spawn で `--resume <id>` が効いて Claude CLI が JSONL から会話を完全復元。SDK と同じファイルを使うため SDK ↔ terminal mode の双方向継続も自然に成立
+
+完成形（2026-05-28 時点）の動作フロー:
+```
+[1 回目]
+spawn: claude --dangerously-skip-permissions
+→ ● Claude の応答（ツール呼び出しは隠す、テキストバレットのみ stream）
+→ AskUserQuestion なら WS 承認カード送信 → user 選択 → Claude 応答続行
+→ /exit (agent finish)
+→ 💾 captured Claude session id: f6551e3a...
+
+[2 回目]
+spawn: claude --dangerously-skip-permissions --resume f6551e3a...
+→ Claude CLI が JSONL から会話を復元
+→ user 質問 → Claude が過去文脈を踏まえて回答
+```
+
 ### #227: Devin CLI 修正 — stdin クラッシュ・パーミッション・出力・セッション継続 (2026-05-05)
 - **stdin パイプでクラッシュ修正**: Devin CLI は stdin パイプで panic → `--prompt-file` 一時ファイル経由に変更
 - **パーミッションモード分岐**: Devin は `plan` モード非対応 → plan=`auto` / exec=`dangerous` にマッピング
