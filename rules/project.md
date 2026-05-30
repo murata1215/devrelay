@@ -245,6 +245,16 @@ devrelay/
 
 ---
 
+## Agent 再起動メカニズム（OS 別）
+
+- **Linux**: systemd ユーザーサービス（`Restart=always`）または PM2 が `process.exit(0)` 後に自動再起動
+- **macOS**: launchd の `KeepAlive` が `process.exit(0)` 後に自動再起動
+- **Windows**: **サービスマネージャが存在しない**ため、`server:agent:restart` ハンドラが自身で `wscript.exe "<binDir>/start-agent.vbs"` を `detached: true, stdio: 'ignore'` で spawn してから `process.exit(0)` する（#230）
+  - `start-agent.vbs` は `WshShell.Run` を 1 度実行するだけのワンショット
+  - Startup フォルダ / Task Scheduler ONLOGON は OS 再起動・ログオン時のみ発火
+  - したがって process exit のたびに自身で再起動を仕掛ける必要がある
+  - `handleAgentUpdate()` の Windows 分岐も同じパターン（PowerShell スクリプト末尾で `restartCmd.command` 実行）
+
 ## Agent 再起動セッション復元
 
 - `needsSessionRestart` Set（machineId ベース）で Agent 再接続を検知

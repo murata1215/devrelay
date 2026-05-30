@@ -7,6 +7,33 @@
 ## 実装済み機能
 
 
+### #230: Windows Agent の Restart ボタンが効かないバグ修正 (2026-05-31)
+- **症状**: WebUI の「Restart」ボタン押下 → Windows Agent がプロセス終了するが、自動で再起動してこない
+- **根本原因**: `agents/linux/src/services/connection.ts:415-419` の `server:agent:restart` ハンドラは **PM2 / systemd / launchd による自動再起動を前提**として `process.exit(0)` するだけ。Linux/macOS では問題ないが **Windows にはサービスマネージャが存在しない**ため死んだまま
+- **Windows のインストール構造**:
+  - `start-agent.vbs` は `WshShell.Run` を 1 度だけ実行（ループなし）
+  - `start-agent.cmd` は node を 1 度だけ起動（node 終了 = cmd 終了）
+  - Startup フォルダ / Task Scheduler は OS 再起動・ログオン時のみ発火
+  - **process exit 後の自動復活機構が一切無い**
+- **修正**: restart ハンドラに Windows 専用分岐を追加。`process.exit(0)` する前に `wscript.exe "<binDir>/start-agent.vbs"` を `detached: true, stdio: 'ignore'` で spawn して新プロセスを独立起動（`handleAgentUpdate()` の Windows 末尾と同じパターン）。旧プロセスは 500ms 後に終了
+- **対象ファイル**: `agents/linux/src/services/connection.ts`（Windows ユーザーも `agents/linux/dist/index.js` を実行するため、`install-agent.ps1:483` 参照）
+  - import 追加: `existsSync` (fs)、`getBinDir` (./config)
+  - restart ハンドラに `process.platform === 'win32'` 分岐 (+20 行)
+- **動作**:
+  - Linux/macOS: 既存動作のまま（分岐に入らない）
+  - Windows: VBS を detached spawn → 新 node プロセス独立起動 → 500ms 後に旧プロセス exit
+- **検証ログ**:
+  ```
+  🔄 Restart command received from server. Restarting...
+  ✅ Relaunched via VBS: C:\Users\fwjg2\AppData\Roaming\devrelay\bin\start-agent.vbs
+  ```
+  数秒後に新しい DevRelay Agent バナー + `Connected to server` + `Authentication successful`
+- **設計判断**:
+  - **既存の handleAgentUpdate Windows 分岐と同じパターンを再利用**: update は Windows でも正常動作する（PowerShell スクリプト末尾で `restartCmd.command` 実行）。restart も同じ仕組みで成立するはず — という整合性確保
+  - **macOS は修正不要**: launchd の `KeepAlive` で自動復活するため
+  - **Linux も修正不要**: systemd の `Restart=always` または PM2 で自動復活するため
+  - #197 で「`process.exit(0)`（PM2/systemd が自動再起動）」と書いていた前提が Windows では崩れていた
+
 ### #229: インストーラーで npm/pnpm の proxy config も自動投入 (2026-05-28)
 - **背景**: プロキシ環境でインストーラーを実行した際、`HTTP_PROXY`/`HTTPS_PROXY` 環境変数だけでは `pnpm install` がプロキシを拾わない環境があり、ユーザーが事前に `pnpm config set proxy <URL>` / `pnpm config set https-proxy <URL>` を手動投入しないとビルドが失敗するケースが報告された（Windows + 企業プロキシ環境）
 - **修正**: `--proxy <URL>` / `$env:DEVRELAY_PROXY` / 対話プロンプトでプロキシが指定された場合、環境変数セットに加えて以下を実行：

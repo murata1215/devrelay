@@ -29,9 +29,9 @@ import type {
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
-import { readdirSync, mkdirSync, writeFileSync } from 'fs';
+import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
-import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
+import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId } from './session-store.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
@@ -414,7 +414,27 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:agent:restart':
       console.log('🔄 Restart command received from server. Restarting...');
-      // PM2/systemd/launchd が自動再起動するため、process.exit(0) で終了
+      if (process.platform === 'win32') {
+        // Windows には PM2/systemd/launchd が無いため、process.exit する前に
+        // 自身で start-agent.vbs を detached で spawn して新プロセスを立ち上げる
+        // 必要がある（handleAgentUpdate と同じパターン）
+        try {
+          const vbsPath = join(getBinDir(), 'start-agent.vbs');
+          if (existsSync(vbsPath)) {
+            const child = spawn('wscript.exe', [vbsPath], {
+              detached: true,
+              stdio: 'ignore',
+            });
+            child.unref();
+            console.log(`✅ Relaunched via VBS: ${vbsPath}`);
+          } else {
+            console.error(`❌ start-agent.vbs not found at ${vbsPath} — agent will stop without restart`);
+          }
+        } catch (err) {
+          console.error(`❌ Failed to relaunch Windows agent: ${err}`);
+        }
+      }
+      // Linux/macOS は PM2/systemd/launchd、Windows は上記 spawn で新プロセスが起動する
       setTimeout(() => process.exit(0), 500);
       break;
 

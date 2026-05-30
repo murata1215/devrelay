@@ -54,7 +54,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Xcode Project Detection**: `.xcodeproj` directories are detected as projects alongside `CLAUDE.md`
 - **Plan File Viewer**: View Claude Code's plan files (`~/.claude/plans/*.md`) in the WebUI right panel — automatically shows the latest plan with Markdown rendering
 - **Skip Permissions Realtime Sync**: Toggle now takes effect immediately even mid-session — dynamic getter replaces static snapshot
-- **Per-Agent Remote Restart**: Restart individual agents from WebUI (table row icon + Settings modal button) via WebSocket `server:agent:restart` → `process.exit(0)` auto-restart
+- **Per-Agent Remote Restart**: Restart individual agents from WebUI (table row icon + Settings modal button) via WebSocket `server:agent:restart` → Linux/macOS rely on systemd/launchd auto-restart, Windows self-relaunches via `wscript.exe start-agent.vbs` (detached spawn) before `process.exit(0)`
 - **Google OAuth**: Sign in with Google on Login/Register pages — automatic account linking by email, no external library (pure fetch)
 - **Google ID Token Auth**: `POST /api/auth/google/token` endpoint for Flutter/mobile native `google_sign_in` — verifies ID token server-side, returns session token
 - **Cross-Project Source Display**: Cross-project queries (ask/teamexec) now show the source project name in WebUI chat (`🔗 devrelay-flutter`) and Conversations page (`🔗 devrelay-flutter → devrelay`)
