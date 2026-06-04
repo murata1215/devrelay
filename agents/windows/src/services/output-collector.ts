@@ -153,7 +153,9 @@ export async function collectOutputFiles(projectPath: string): Promise<FileAttac
 // Instruction to append to prompts
 export const OUTPUT_DIR_INSTRUCTION = `
 
-[Important] If you create files to give to the user, save them in the \`${OUTPUT_DIR_NAME}/\` directory. Files placed in this directory will be automatically sent to the user.`;
+[File Output]
+For deliverable files (HTML/PDF/images/scripts/etc.), save them in the \`${OUTPUT_DIR_NAME}/\` directory unless the user specifies a different path explicitly. Files placed there are automatically sent to the user.
+If the user explicitly specifies a save location (e.g. "in the root folder", "to ~/foo", "in the current directory"), follow that instruction instead.`;
 
 // Instruction for plan mode (when user hasn't sent 'exec' yet)
 export const PLAN_MODE_INSTRUCTION = `

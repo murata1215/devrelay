@@ -7,6 +7,27 @@
 ## 実装済み機能
 
 
+### #231: Devin CLI の exec モード書き込み権限修正 + ユーザー指定パス尊重 (2026-06-04)
+- **症状 1**: Devin CLI 利用時、plan 後に `e`（exec）を送ってもファイル作成が「パーミッションエラー」で拒否される（Devin 自身が「`--permission-mode dangerous` を使うか `request_scope` で権限リクエストしますか？」と回答）
+- **症状 2**: ユーザーが「ルートフォルダにおいてね」のように保存先を明示しても、AI が `.devrelay-output/` に置いてしまう
+- **根本原因 1（症状 1）**: `ai-runner.ts` の Devin 分岐は `loadDevinSessionId()` → `-r <session-id>` で resume しつつ `--permission-mode dangerous` を渡していたが、**Devin は resume したセッションの元 permission-mode（auto）を保持して CLI フラグを上書きしない**。`.devrelay/devin-session-id` を削除して再試行すると書き込み成功することで確定（#227 の前提「`-r` なら permission-mode 変更が効く」が崩れていた）
+- **根本原因 2（症状 2）**: `output-collector.ts` の `OUTPUT_DIR_INSTRUCTION` がプロンプト末尾に常時注入される強い指示（「**必ず** `.devrelay-output/` に保存」）になっており、ユーザーのプレーンテキストでの保存先指定より優先されていた
+- **修正 1**: Devin の `-r` resume を **plan モード時のみ** に限定。exec モードでは新規セッションを起動して `--permission-mode dangerous` を確実に効かせる。非 Claude は `connection.ts` の `needsHistoryInPrompt` ロジックでプロンプトに会話履歴を常時注入しているため、`-r` 無しでもコンテキストは保たれる
+- **修正 2**: `OUTPUT_DIR_INSTRUCTION` を「**特にパス指定がなければ** `.devrelay-output/` に保存」+「**ユーザーが明示的に保存先を指定した場合はその指示を優先**」に弱める。Linux/macOS は日本語、Windows は英語のまま、それぞれ同等の文言に
+- **対象ファイル**:
+  - `agents/linux/src/services/ai-runner.ts:803-808` — Devin `-r` を `options.usePlanMode` でガード
+  - `agents/macos/src/services/ai-runner.ts:643-648` — 同上
+  - `agents/windows/src/services/ai-runner.ts:209-214` — 同上
+  - `agents/linux/src/services/output-collector.ts:154-156` — `OUTPUT_DIR_INSTRUCTION` 文言調整（日本語）
+  - `agents/macos/src/services/output-collector.ts:154-156` — 同上
+  - `agents/windows/src/services/output-collector.ts:154-156` — 同上（英語）
+- **設計判断**: Devin の resume 仕様回避策として「mode が切り替わるタイミングは resume を無効化」が最も堅牢。session continuity は plan 中のみ保たれるが、plan→exec の境界は元々文脈リセットポイントなので問題ない。Claude / Gemini / Aider / Codex には Devin 分岐の変更は無関係（影響なし）
+- **検証手順**:
+  1. Devin CLI モードに切り替え、`.devrelay/devin-session-id` を削除
+  2. plan モードで「ルートフォルダに HTML 作って」依頼 → プラン提示
+  3. `e` → プロジェクトルート（cwd）に実際にファイル作成されることを確認
+  4. パス指定無しで別ファイル依頼 → `.devrelay-output/` に作成され自動送信されることを確認
+
 ### #230: Windows Agent の Restart ボタンが効かないバグ修正 (2026-05-31)
 - **症状**: WebUI の「Restart」ボタン押下 → Windows Agent がプロセス終了するが、自動で再起動してこない
 - **根本原因**: `agents/linux/src/services/connection.ts:415-419` の `server:agent:restart` ハンドラは **PM2 / systemd / launchd による自動再起動を前提**として `process.exit(0)` するだけ。Linux/macOS では問題ないが **Windows にはサービスマネージャが存在しない**ため死んだまま

@@ -206,8 +206,13 @@ export async function sendPromptToAi(
     const permMode = options.usePlanMode ? 'auto' : 'dangerous';
     const args: string[] = [];
 
-    // 保存済み Devin セッション ID があれば -r で resume（permission-mode 変更も効く）
-    const devinSessionId = await loadDevinSessionId(projectPath);
+    // 保存済み Devin セッション ID があれば -r で resume
+    // ただし exec モードでは新規セッションを開始する（--permission-mode dangerous を
+    // CLI で指定しても、resume したセッションは元の auto モードを保持して
+    // 書き込みが拒否されるため）
+    const devinSessionId = options.usePlanMode
+      ? await loadDevinSessionId(projectPath)
+      : null;
     if (devinSessionId) {
       args.push('-r', devinSessionId);
       log.info(`Resuming Devin session: ${devinSessionId}`);

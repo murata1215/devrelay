@@ -153,7 +153,9 @@ export async function collectOutputFiles(projectPath: string): Promise<FileAttac
 // Instruction to append to prompts
 export const OUTPUT_DIR_INSTRUCTION = `
 
-【重要】ユーザーに渡すファイルを作成する場合は、必ず \`${OUTPUT_DIR_NAME}/\` ディレクトリに保存してください。このディレクトリに置かれたファイルは自動的にユーザーに送信されます。`;
+【ファイル出力】
+ユーザー向けの成果物ファイル（HTML/PDF/画像/スクリプト等）は、特にパス指定がなければ \`${OUTPUT_DIR_NAME}/\` ディレクトリに保存してください。このディレクトリに置かれたファイルは自動的にユーザーに送信されます。
+ただしユーザーが明示的に保存先を指定した場合（例：「ルートフォルダに」「~/foo に」「カレントディレクトリに」等）は、その指示を優先してください。`;
 
 // Instruction for plan mode (when user hasn't sent 'exec' yet)
 export const PLAN_MODE_INSTRUCTION = `
