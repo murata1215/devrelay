@@ -7,6 +7,18 @@
 ## 実装済み機能
 
 
+### #232: Terminal Mode の choice prompt 抽出が過去履歴を拾うバグ修正 (2026-06-09)
+- **症状**: pixblog（履歴 140 件・残コンテキスト 0%）に exec で「docs 更新してコミット」を送信したが、Claude のタスクが 1 行も実行されず `● こんにちは！何かありますか？` だけ返って完了
+- **ログ解析**: Claude CLI が `--resume` 直後に「Resume from summary」承認プロンプト（3 オプション）を出したが、Agent は WebUI に **「PixBlogのプラン制限について教えてください。以下4点を確認したいです：」（4 オプション）** という**過去会話の文字列**を forwarding。ユーザーは option 1 を選択 → 実際は `1\r` が Claude の Resume プロンプトに送られて compact 実行 → 元の exec prompt のコンテキストが失われタスク消失
+- **根本原因**: `agents/linux/src/services/terminal-parser.ts:409-470` の `extractChoicePrompt` は「**1,2,3,... の最長連続シーケンス**」を採用するヒューリスティック。スクロールバックに残った過去の番号付きリスト（4 オプション）が現プロンプトの 3 オプションより長くなり、過去側が優先採用されていた。`#228 続編 3` の「シーケンシャルな番号付けが続かない限り採用されない」前提は、たまたま連続した過去履歴には無防備
+- **修正**: 「**最も下（最新）の有効シーケンス**」優先方式に変更。`num===1` 候補を画面下から遡って試し、forward に 2,3,... が続けば現プロンプトと判定。Claude CLI の choice プロンプトは常に画面最下部に表示されるため、最下部の `1.` を起点にすれば確実に現プロンプトに一致する
+- **対象ファイル**: `agents/linux/src/services/terminal-parser.ts:409-475` の `extractChoicePrompt` 内 (2) ブロック
+- **macOS / Windows**: Terminal Mode は Linux/Windows 限定（macOS 未対応）。Windows ユーザーも `agents/linux/dist/index.js` を実行するため Linux 側 1 ファイル修正で両 OS 反映
+- **AskUserQuestion 互換性**: 説明文を間に挟む形式（option 1 の下にインデント説明 + option 2 ...）は candidates 収集段階で説明行を除外しているため従来通り正しく抽出される。飛び番（`5. Type something` + separator + `6. Chat about this`）も `nextExpected===6` で拾える
+- **設計判断**: 「位置で決める（最下部優先）」を「長さで決める（最長優先）」より優先する。Claude CLI が画面最下部にしか current prompt を表示しない UI 規約に依存した堅牢な解決策
+- **副作用**: なし。trust folder / Resume from summary / 会話中の tool 承認 / AskUserQuestion すべて画面最下部に表示される
+- **検証**: pixblog のような長い履歴セッションで Terminal Mode = ON で exec → Resume プロンプトが正しく forwarding されることを確認。AskUserQuestion 形式の 6 オプションも従来通り抽出可
+
 ### #231: Devin CLI の exec モード書き込み権限修正 + ユーザー指定パス尊重 (2026-06-04)
 - **症状 1**: Devin CLI 利用時、plan 後に `e`（exec）を送ってもファイル作成が「パーミッションエラー」で拒否される（Devin 自身が「`--permission-mode dangerous` を使うか `request_scope` で権限リクエストしますか？」と回答）
 - **症状 2**: ユーザーが「ルートフォルダにおいてね」のように保存先を明示しても、AI が `.devrelay-output/` に置いてしまう

@@ -400,9 +400,15 @@ export function countNewBullets(baselineMap: Map<string, number>, currentLines: 
  *
  * 起動時はカーソル `❯` が option 1 行頭に乗るパターンがあるため、
  * 番号の前に `❯` / `>` を許容する正規表現を使う。
- * 旧実装は「連続する番号行」前提だったため AskUserQuestion 形式（説明文や separator が間に挟まる）
- * で破綻していた → 「1, 2, 3, ... の最長連続シーケンス」検出方式に変更（#228 続編 3）。
- * 偶然 1 や 2 が会話履歴中に出現しても、シーケンシャルな番号付けが続かない限り採用されない
+ * 実装履歴:
+ *  - 旧実装は「連続する番号行」前提だったため AskUserQuestion 形式（説明文や separator が
+ *    間に挟まる）で破綻 → 「最長連続シーケンス」方式に変更（#228 続編 3）
+ *  - しかし「最長」では **スクロールバックに残った過去の番号付きリスト**（例: 古い 4 オプション）
+ *    が現在の Claude プロンプト（例: Resume from summary の 3 オプション）より長いと過去側を
+ *    誤検出する事故が発生（#232 で pixblog にて確認）→ 「**最も下（最新）の有効シーケンス**」を
+ *    採用する方式に変更
+ *  - Claude CLI の choice プロンプトは常に画面最下部に表示されるため、最下部の `1.` から
+ *    forward に集めれば常に現プロンプトに一致する
  *
  * @returns { question, options } または null（選択肢が抽出できない場合）
  */
@@ -419,26 +425,33 @@ export function extractChoicePrompt(text: string): { question: string; options: 
     }
   }
 
-  // (2) 1, 2, 3, ... の最長連続シーケンスを探す（インデント説明文や `─────` separator が
-  // 間に挟まっても、連続番号が見つかればそれをプロンプト本体とみなす）
+  // (2) 「最も下（最新）の有効シーケンス」を採用する。
+  // 画面下部から num===1 候補を遡って試し、forward に 2,3,... が続けば現プロンプトと判定。
+  // 古い番号付きリスト（PixBlog 履歴の 4 オプション等）がスクロールバックに残っていても、
+  // 最下部の `1.` を起点にすれば常に現在の Claude プロンプトに一致する。
   let bestSeq: OptCandidate[] = [];
-  let curSeq: OptCandidate[] = [];
-  let nextExpected = 1;
-  for (const c of candidates) {
-    if (c.num === nextExpected) {
-      curSeq.push(c);
-      nextExpected++;
-    } else if (c.num === 1) {
-      if (curSeq.length > bestSeq.length) bestSeq = curSeq;
-      curSeq = [c];
-      nextExpected = 2;
-    } else {
-      if (curSeq.length > bestSeq.length) bestSeq = curSeq;
-      curSeq = [];
-      nextExpected = 1;
+  const oneIdxs: number[] = [];
+  for (let i = 0; i < candidates.length; i++) {
+    if (candidates[i].num === 1) oneIdxs.push(i);
+  }
+  for (let oi = oneIdxs.length - 1; oi >= 0; oi--) {
+    const startIdx = oneIdxs[oi];
+    const seq: OptCandidate[] = [candidates[startIdx]];
+    let nextExpected = 2;
+    for (let j = startIdx + 1; j < candidates.length; j++) {
+      // 別プロンプトの先頭（次の `1.`）に到達したら停止
+      if (candidates[j].num === 1) break;
+      if (candidates[j].num === nextExpected) {
+        seq.push(candidates[j]);
+        nextExpected++;
+      }
+      // 飛び番（過去の不規則な番号など）は skip して walk continue
+    }
+    if (seq.length >= 2) {
+      bestSeq = seq;
+      break;  // 最も下の有効シーケンスを採用
     }
   }
-  if (curSeq.length > bestSeq.length) bestSeq = curSeq;
 
   const optionLines = bestSeq;
   if (optionLines.length < 2) return null;
