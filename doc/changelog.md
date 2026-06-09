@@ -7,6 +7,14 @@
 ## 実装済み機能
 
 
+### #233: Terminal Mode の exec セッション早期完了バグ修正 (2026-06-09)
+- **症状**: pixblog に exec で「コミットプラン実行」を送信。Claude が `Bash(npm install && npm run build)` を呼んだ直後 **14 秒で完了扱い**。git commit は 0 件、続く「次は b かな？」も 21 秒で同様に早期終了
+- **根本原因**: `IDLE_FOR_COMPLETION_MS = 1500`（1.5 秒）が短すぎた。Claude CLI はツール（Bash 等）完了後、次の API トークンが届くまで `❯` プロンプトを一瞬表示する。この隙間が 1.5 秒を超えると Agent が「応答完了 → `/exit` 送信」と誤判定していた。ツール呼び出しが多い exec セッション（build → git add → commit × N）ほど誤完了の確率が高い
+- **修正**: `IDLE_FOR_COMPLETION_MS` を **1500 → 5000**（5 秒）に引き上げ。API レスポンス遅延（通常 1〜3 秒）を十分カバーしつつ、真の完了時の追加待機は +3.5 秒のみ（100 秒のセッションで約 3%）
+- **対象ファイル**: `agents/linux/src/services/terminal-runner.ts:59`（1 行 + コメント更新）
+- **影響**: terminal-mode 全セッションの完了検出が +3.5 秒遅くなるのみ。`EXTENDED_IDLE_FOR_COMPLETION_MS`（30 秒）との差は 25 秒あり extended-idle パスとの競合なし
+- **設計判断**: ツール間 `❯` 隙間（1〜3 秒）< 閾値（5 秒）< extended-idle（30 秒）の 3 段階構成。最小限の変更で最大効果
+
 ### #232: Terminal Mode の choice prompt 抽出が過去履歴を拾うバグ修正 (2026-06-09)
 - **症状**: pixblog（履歴 140 件・残コンテキスト 0%）に exec で「docs 更新してコミット」を送信したが、Claude のタスクが 1 行も実行されず `● こんにちは！何かありますか？` だけ返って完了
 - **ログ解析**: Claude CLI が `--resume` 直後に「Resume from summary」承認プロンプト（3 オプション）を出したが、Agent は WebUI に **「PixBlogのプラン制限について教えてください。以下4点を確認したいです：」（4 オプション）** という**過去会話の文字列**を forwarding。ユーザーは option 1 を選択 → 実際は `1\r` が Claude の Resume プロンプトに送られて compact 実行 → 元の exec prompt のコンテキストが失われタスク消失

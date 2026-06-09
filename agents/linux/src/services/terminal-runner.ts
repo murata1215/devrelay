@@ -55,8 +55,12 @@ const EXIT_GRACE_MS = 5_000;
 /** 画面変化監視・完了判定チェック間隔 */
 const CHECK_INTERVAL_MS = 500;
 
-/** 完了判定: プロンプト復帰 + 画面アイドル時間（onData の頻度に依存しない判定基準） */
-const IDLE_FOR_COMPLETION_MS = 1500;
+/** 完了判定: プロンプト復帰 + 画面アイドル時間（onData の頻度に依存しない判定基準）。
+ *  Claude CLI はツール（Bash 等）完了後、次の API トークンが届くまで `❯` プロンプトを
+ *  一瞬表示する。この隙間が閾値を超えると「応答完了」と誤認して /exit を送る事故が
+ *  発生した（#233 pixblog exec が 14 秒で kill された件）。
+ *  API レスポンス遅延を考慮して 5 秒に設定。真の完了時の追加待機は +3.5 秒のみ。 */
+const IDLE_FOR_COMPLETION_MS = 5000;
 
 /** プロンプト送信開始からこの時間が経つまでは「画面アイドル」を完了と判定しない（プロンプト書き込み中の偽 idle 防止） */
 const EXEC_COOLDOWN_MS = 3500;
