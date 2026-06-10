@@ -407,11 +407,16 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // 「ターミナルモードは Claude CLI の薄い UI ラッパ」という設計思想に基づき、agent が
       // 自動判断せずユーザーに選ばせる（既存 tool 承認と同じ承認カード経路に bridge）。
       // onChoiceRequest 未配線の自動実行環境では option 1 自動選択で後方互換を保つ
-      if (!pendingStartupChoice && detectStartupChoicePrompt(rendered)) {
-        const meta = extractChoicePrompt(rendered);
+      //
+      // 検出は画面末尾 30 行のみ対象: scrollback 上部に確認済み prompt が残っていると
+      // 二重検出されて同じ trust prompt が再 forwarding される事故が発生（#235 pixdraft）
+      const tailForChoice = rendered.split('\n').slice(-30).join('\n');
+      if (!pendingStartupChoice && detectStartupChoicePrompt(tailForChoice)) {
+        const meta = extractChoicePrompt(tailForChoice);
         if (meta && meta.options.length >= 2) {
+          // hash は options のみ: question は画面上部の内容に依存して不安定なため
           const hash = crypto.createHash('sha1')
-            .update(meta.question + '|' + meta.options.join('|'))
+            .update(meta.options.join('|'))
             .digest('hex').slice(0, 16);
 
           if (!handledStartupChoiceHashes.has(hash)) {
@@ -535,11 +540,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // `detectToolApprovalPrompt` は末尾独立 `❯` 入力行型専用なので、
       // 「❯ 1. ...」の navigation 型はここで別経路として検出する。
       // approveAllMode でも AskUserQuestion はユーザーに聞くべきなのでガードしない
-      if (execStarted && !finished && !pendingStartupChoice && detectStartupChoicePrompt(rendered)) {
-        const meta = extractChoicePrompt(rendered);
+      //
+      // 検出は画面末尾 30 行のみ: scrollback 残骸の二重検出を防止（#235）
+      const midTailForChoice = rendered.split('\n').slice(-30).join('\n');
+      if (execStarted && !finished && !pendingStartupChoice && detectStartupChoicePrompt(midTailForChoice)) {
+        const meta = extractChoicePrompt(midTailForChoice);
         if (meta && meta.options.length >= 2) {
+          // hash は options のみ（question は画面上部に依存して不安定）
           const hash = crypto.createHash('sha1')
-            .update(meta.question + '|' + meta.options.join('|'))
+            .update(meta.options.join('|'))
             .digest('hex').slice(0, 16);
 
           if (!handledStartupChoiceHashes.has(hash)) {

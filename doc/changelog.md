@@ -7,6 +7,13 @@
 ## 実装済み機能
 
 
+### #235: Terminal Mode の選択肢プロンプト二重検出バグ修正 (2026-06-10)
+- **症状**: pixdraft を 4 月→6 月版に更新後初回 terminal mode 実行。trust prompt に option 1 を選択したが 5 秒後に同じ trust prompt が再 forwarding。Claude CLI が exit(1) で死亡、10.6 秒で完了、応答なし
+- **根本原因**: `detectStartupChoicePrompt` が `extractFinalOutput(term)`（scrollback 10000 行全体）をチェックしていた。`\r` で trust 確認 → Claude が画面を切り替えた後もスクロールバック上部に旧 trust prompt テキストが残存 → 再検出。hash に question テキスト（画面上部に依存して不安定）が含まれていたため dedup もすり抜け
+- **修正**: (1) choice prompt 検出の対象を**画面末尾 30 行に限定**（scrollback 上部の残骸を無視）。(2) hash を **options のみ**に変更（question を除外して安定化）
+- **対象ファイル**: `agents/linux/src/services/terminal-runner.ts` — `runStartupDetection()` + mid-session onData の 2 箇所
+- **設計判断**: Claude CLI の choice プロンプトは常に画面最下部に表示される UI 規約に依存（#232 の `extractChoicePrompt` 最下部優先と同じ方針）
+
 ### #234: Terminal Mode のカーソル選択型プロンプト（trust folder 等）で応答が効かないバグ修正 (2026-06-10)
 - **症状**: clipped で初めて terminal mode を使用 → Claude CLI の「Quick safety check: Is this a project you trust?」フォルダ信頼確認プロンプトが表示 → WebUI の承認カードで option 1 を選択 → Claude CLI が応答せず 15 秒でスタートアップタイムアウト
 - **根本原因**: Agent はすべての選択肢プロンプトに `${choice}\r`（番号タイプ + Enter）を送っていたが、Claude CLI の trust folder / Resume from summary プロンプトは**カーソル選択型 UI**（`❯` ↑↓キー + Enter）であり、番号タイプは受け付けない。今まで問題にならなかったのは既存プロジェクトが全て trust 済みで trust プロンプトが表示されなかったため
