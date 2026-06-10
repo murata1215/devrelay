@@ -436,8 +436,19 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                   if (finished) return;
                   const choice = Math.max(0, Math.min(meta.options.length - 1, optionIndex)) + 1;  // 1-indexed, clamp
                   console.log(`✅ [terminal-mode] user chose option ${choice} for startup choice (requestId=${requestId.slice(0, 8)})`);
+                  // startup prompt はカーソル選択型 UI（❯ ↑↓ + Enter）なので
+                  // 番号タイプではなく矢印キー移動 + Enter で選択する。
+                  // 番号入力（`1\r`）は Claude CLI の SelectInput を混乱させて
+                  // Enter が効かなくなる事象が確認された（#234 clipped trust prompt）
                   try {
-                    ptyProcess.write(`${choice}\r`);
+                    if (choice > 1) {
+                      // option 1 がデフォルト選択。N > 1 は ↓ を (N-1) 回押してから Enter
+                      ptyProcess.write('\x1B[B'.repeat(choice - 1));
+                      setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 100);
+                    } else {
+                      // option 1 はデフォルト → Enter のみ
+                      ptyProcess.write('\r');
+                    }
                   } catch {
                     // ignore
                   }
@@ -450,7 +461,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
               // フォールバック: onChoiceRequest 未配線 → option 1 自動選択（後方互換）
               console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting option 1 (${elapsed}ms after spawn): "${meta.question.slice(0, 80)}"`);
               try {
-                ptyProcess.write('1\r');
+                ptyProcess.write('\r');  // option 1 はデフォルト → Enter のみ
               } catch {
                 // ignore
               }
@@ -547,8 +558,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                   if (finished) return;
                   const choice = Math.max(0, Math.min(meta.options.length - 1, optionIndex)) + 1;
                   console.log(`✅ [terminal-mode] user chose option ${choice} for mid-session choice (requestId=${requestId.slice(0, 8)})`);
+                  // mid-session choice もカーソル選択型 UI（Enter to confirm パターン）なので
+                  // 矢印キー + Enter で選択する（startup choice と同じ理由）
                   try {
-                    ptyProcess.write(`${choice}\r`);
+                    if (choice > 1) {
+                      ptyProcess.write('\x1B[B'.repeat(choice - 1));
+                      setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 100);
+                    } else {
+                      ptyProcess.write('\r');
+                    }
                   } catch {
                     // ignore
                   }
@@ -561,7 +579,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
               // フォールバック: onChoiceRequest 未配線 → option 1 自動選択（後方互換）
               console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting option 1: "${meta.question.slice(0, 80)}"`);
               try {
-                ptyProcess.write('1\r');
+                ptyProcess.write('\r');  // option 1 はデフォルト → Enter のみ
               } catch {
                 // ignore
               }

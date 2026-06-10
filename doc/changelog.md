@@ -7,6 +7,13 @@
 ## 実装済み機能
 
 
+### #234: Terminal Mode のカーソル選択型プロンプト（trust folder 等）で応答が効かないバグ修正 (2026-06-10)
+- **症状**: clipped で初めて terminal mode を使用 → Claude CLI の「Quick safety check: Is this a project you trust?」フォルダ信頼確認プロンプトが表示 → WebUI の承認カードで option 1 を選択 → Claude CLI が応答せず 15 秒でスタートアップタイムアウト
+- **根本原因**: Agent はすべての選択肢プロンプトに `${choice}\r`（番号タイプ + Enter）を送っていたが、Claude CLI の trust folder / Resume from summary プロンプトは**カーソル選択型 UI**（`❯` ↑↓キー + Enter）であり、番号タイプは受け付けない。今まで問題にならなかったのは既存プロジェクトが全て trust 済みで trust プロンプトが表示されなかったため
+- **修正**: カーソル選択型（`detectStartupChoicePrompt` で検出、`Enter to confirm` パターン）の応答を **矢印キー移動 + Enter** に変更。option 1 は `\r`（Enter のみ）、option N は `\x1B[B` × (N-1) + 100ms 後に `\r`。テキスト入力型（ツール承認の bare `❯` 行）は従来通り番号入力のまま
+- **対象ファイル**: `agents/linux/src/services/terminal-runner.ts` の 4 箇所（startup choice respond/fallback + mid-session choice respond/fallback）
+- **設計判断**: カーソル選択型 vs テキスト入力型を検出関数で区別。`detectStartupChoicePrompt`（Enter to confirm パターン）→ 矢印 + Enter、`detectToolApprovalPrompt`（bare `❯` パターン）→ 番号 + Enter
+
 ### #233: Terminal Mode の exec セッション早期完了バグ修正 (2026-06-09)
 - **症状**: pixblog に exec で「コミットプラン実行」を送信。Claude が `Bash(npm install && npm run build)` を呼んだ直後 **14 秒で完了扱い**。git commit は 0 件、続く「次は b かな？」も 21 秒で同様に早期終了
 - **根本原因**: `IDLE_FOR_COMPLETION_MS = 1500`（1.5 秒）が短すぎた。Claude CLI はツール（Bash 等）完了後、次の API トークンが届くまで `❯` プロンプトを一瞬表示する。この隙間が 1.5 秒を超えると Agent が「応答完了 → `/exit` 送信」と誤判定していた。ツール呼び出しが多い exec セッション（build → git add → commit × N）ほど誤完了の確率が高い
