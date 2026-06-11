@@ -430,6 +430,29 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
             pendingStartupChoice = true;
             const elapsed = Date.now() - start;
 
+            // --dangerously-skip-permissions の bypass permissions 確認プロンプトを自動承認:
+            // 「1. No, exit / 2. Yes, I accept」形式。trust prompt（1. Yes / 2. No）とは逆順。
+            // approveAllMode=true なら --dangerously-skip-permissions を明示指定済みなので
+            // ユーザーに聞く意味がなく、"Yes, I accept" を自動選択する（#237）
+            const acceptOptionIdx = meta.options.findIndex(o => /yes.*accept/i.test(o));
+            if (opts.approveAllMode && acceptOptionIdx >= 0) {
+              const choice = acceptOptionIdx + 1; // 1-indexed
+              console.log(`🔐 [terminal-mode] bypass permissions prompt auto-accepted (option ${choice}, ${elapsed}ms after spawn)`);
+              try {
+                if (choice > 1) {
+                  ptyProcess.write('\x1B[B'.repeat(choice - 1));
+                  setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 200);
+                } else {
+                  setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 200);
+                }
+              } catch {
+                // ignore
+              }
+              pendingStartupChoice = false;
+              installStartupTimer();
+              return;
+            }
+
             // ユーザー応答待ち中は startup timer を停止（応答に何分かかるかわからない）
             if (startupTimer) {
               clearTimeout(startupTimer);
@@ -910,6 +933,11 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       logStream?.end();
       console.log(`🖥️ [terminal-mode] pty exited (code=${exitCode}, signal=${signal})`);
       const finalOutput = extractFinalOutput(term);
+      // 異常 exit かつプロンプト未送信の場合、画面内容をログに残す（エラー原因の診断用）
+      if (exitCode !== 0 && !promptSent) {
+        const tail = finalOutput.length > 500 ? finalOutput.slice(-500) : finalOutput;
+        console.error(`❌ [terminal-mode] PTY exited with code=${exitCode} before prompt sent. Last 500 chars:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
+      }
       // 予期せぬ exit (PTY crash 等) でも、画面に Claude session id があれば保存して継続性を維持
       const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
       if (claudeSessionId) {

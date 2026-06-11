@@ -744,6 +744,8 @@ async function sendPromptToTerminalClaude(
 
     const suffix = runResult.timedOut
       ? `\n⚠️ アイドルタイムアウト（10 分無音）により終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`
+      : !runResult.promptSent
+      ? `\n❌ Claude CLI が起動できませんでした。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）\nこのフォルダで claude コマンドを直接実行して動作を確認してください。\nログ: logs/terminal-${sessionId}.log`
       : `\n✅ 完了。セッションを終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`;
 
     onOutput(suffix, true, runResult.usageData);  // JSONL から集計した usageData を伝搬
