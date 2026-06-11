@@ -8,7 +8,7 @@ import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
 // 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
@@ -673,8 +673,26 @@ async function sendPromptToTerminalClaude(
   const argsDisplay = previewArgs.length > 0 ? ` ${previewArgs.join(' ')}` : '';
   onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${argsDisplay}\n`, false);
 
+  // onChoiceRequest ファクトリ: リトライ時にも同じコールバックを使い回す
+  const makeChoiceHandler = options.onToolApprovalRequest ? (req: { requestId: string; question: string; options: string[]; respond: (optionIndex: number) => void }) => {
+    // resolver を登録（resolveToolApproval から後で呼ばれる）
+    terminalApprovalResolvers.set(req.requestId, req.respond);
+    // 既存承認カード形式で WS 送信
+    options.onToolApprovalRequest!({
+      requestId: req.requestId,
+      // 端末モードはツール名を CLI 画面から復元できないため固定文字列
+      toolName: 'Claude CLI Prompt',
+      toolInput: {
+        question: req.question,
+        options: req.options,
+      },
+      title: req.question.slice(0, 100),
+      description: req.options.map((o, i) => `${i + 1}. ${o}`).join('\n'),
+    });
+  } : undefined;
+
   try {
-    const runResult = await runTerminalClaude({
+    let runResult = await runTerminalClaude({
       projectPath,
       prompt,
       approveAllMode,
@@ -683,30 +701,38 @@ async function sendPromptToTerminalClaude(
       sessionId,
       resumeSessionId: resumeSessionId || undefined,
       onOutput: (chunk) => onOutput(chunk, false),
-      // Claude CLI の番号付き選択肢プロンプトを既存承認カード経路 (canUseTool 互換) に橋渡し
-      // onToolApprovalRequest が設定されていなければ未配線扱いとなり runner 内部で自動拒否
-      onChoiceRequest: options.onToolApprovalRequest ? (req) => {
-        // resolver を登録（resolveToolApproval から後で呼ばれる）
-        terminalApprovalResolvers.set(req.requestId, req.respond);
-        // 既存承認カード形式で WS 送信
-        options.onToolApprovalRequest!({
-          requestId: req.requestId,
-          // 端末モードはツール名を CLI 画面から復元できないため固定文字列
-          toolName: 'Claude CLI Prompt',
-          toolInput: {
-            question: req.question,
-            options: req.options,
-          },
-          title: req.question.slice(0, 100),
-          description: req.options.map((o, i) => `${i + 1}. ${o}`).join('\n'),
-        });
-      } : undefined,
+      onChoiceRequest: makeChoiceHandler,
     });
+
+    // --resume 付きで早期 exit（exit code !== 0）した場合のフォールバック:
+    // セッション ID が壊れている/互換性がない可能性が高いので、
+    // セッション ID を消して --resume なしでリトライする（1 回のみ）
+    const earlyExitMs = 30_000; // 30 秒以内に終了 = 早期 exit と判定
+    if (resumeSessionId && !runResult.timedOut && !runResult.cancelledByAskDisable
+        && runResult.durationMs < earlyExitMs && !runResult.finalOutput?.trim()) {
+      console.warn(`⚠️ [terminal-mode] early exit with --resume (${runResult.durationMs}ms, no output) → clearing session ID and retrying without --resume`);
+      await clearClaudeSessionId(projectPath);
+      onOutput(`\n⚠️ セッション復元に失敗しました。新規セッションでリトライします...\n`, false);
+      onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${approveAllMode ? ' --dangerously-skip-permissions' : ''}\n`, false);
+
+      runResult = await runTerminalClaude({
+        projectPath,
+        prompt,
+        approveAllMode,
+        disableAsk: !!options.disableAsk,
+        claudeCommand,
+        sessionId,
+        resumeSessionId: undefined, // --resume なし
+        onOutput: (chunk) => onOutput(chunk, false),
+        onChoiceRequest: makeChoiceHandler,
+      });
+    }
 
     if (runResult.cancelledByAskDisable) {
       onOutput(
         `\n⚠️ AskUserQuestion が出たため、Ask 無効設定により中断しました。\n（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`,
         true,
+        runResult.usageData,  // JSONL から集計した usageData を伝搬
       );
       return result;
     }
@@ -715,7 +741,7 @@ async function sendPromptToTerminalClaude(
       ? `\n⚠️ アイドルタイムアウト（10 分無音）により終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`
       : `\n✅ 完了。セッションを終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`;
 
-    onOutput(suffix, true);
+    onOutput(suffix, true, runResult.usageData);  // JSONL から集計した usageData を伝搬
   } catch (err) {
     const msg = (err as Error).message;
     console.error(`❌ [terminal-mode] runTerminalClaude failed: ${msg}`);

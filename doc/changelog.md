@@ -7,6 +7,31 @@
 ## 実装済み機能
 
 
+### #236: Terminal Mode の usageData 取得 + --resume 失敗時フォールバック (2026-06-12)
+
+#### usageData 取得（JSONL 直読み方式）
+- **問題**: 端末モード（Terminal Mode）のセッションは Conversations テーブルの Model / Duration / Tokens がすべて `-` 表示だった。SDK モードでは `result` イベントから取得するが、端末モードには相当する機構がなかった
+- **方式**: セッション完了後に Claude CLI の JSONL セッションファイル（`~/.claude/projects/<hash>/<sessionId>.jsonl`）を直接読んで集計する。PTY に `/status` コマンドを送ってパースする方式は対話型 UI（タブ切替式）の処理が複雑で断念
+- **実装**:
+  - `terminal-parser.ts` に `parseSessionJsonlUsage(projectPath, sessionId)` 追加。JSONL の `type: "assistant"` 行から `message.model` と `message.usage`（input_tokens, output_tokens, cache_read/creation）を集計し `AiUsageData` 形式で返す
+  - `projectPathToHash()`: プロジェクトパスから Claude CLI のディレクトリ名を生成（`/opt/devrelay` → `-opt-devrelay`、`d:\Programs\foo` → `-d-Programs-foo`）
+  - `findSessionJsonlPath()`: 完全一致 → 末尾部分一致 → 全走査のフォールバック付き検索（日本語フォルダ名のエンコーディング差異に対応）
+  - `terminal-runner.ts` の `TerminalRunResult` に `usageData?: AiUsageData` 追加。`onExit` で抽出したセッション ID（または `--resume` で渡した ID）を使って JSONL を読み、`durationMs` には PTY 実行時間をセット
+  - `ai-runner.ts` の完了時 `onOutput(suffix, true, runResult.usageData)` で第3引数に usageData を伝搬
+- **対象ファイル**: `agents/linux/src/services/terminal-parser.ts`、`terminal-runner.ts`、`ai-runner.ts`（計 3 ファイル）
+- **設計判断**: JSONL 直読みは PTY パースより確実・シンプル。Claude CLI のセッション JSONL フォーマット（SDK と共通）に依存するが、構造が変わる可能性は低い
+
+#### --resume 失敗時の自動リトライ
+- **問題**: Windows マシンで端末モード起動 → `--resume b4872aff...` 付きで trust prompt 応答後に即 exit(1) → 18.5 秒で完了、何も実行されない
+- **根本原因**: 古い/壊れたセッション ID で `--resume` すると Claude CLI が復元に失敗して exit(1) で死ぬ
+- **修正**: `ai-runner.ts` の `sendPromptToTerminalClaude` に自動リトライを追加。以下の全条件を満たす場合にフォールバック:
+  1. `resumeSessionId` が指定されていた（`--resume` 付き）
+  2. 30 秒以内に終了（早期 exit）
+  3. 出力が空（Claude が何も返さなかった）
+  4. タイムアウト/Ask 中断ではない
+  - リトライ時: `.devrelay/claude-session-id` を削除 → `--resume` なしで再起動（1 回のみ）
+  - WebUI に「セッション復元に失敗しました。新規セッションでリトライします...」を表示
+
 ### #235: Terminal Mode の選択肢プロンプト二重検出バグ修正 (2026-06-10)
 - **症状**: pixdraft を 4 月→6 月版に更新後初回 terminal mode 実行。trust prompt に option 1 を選択したが 5 秒後に同じ trust prompt が再 forwarding。Claude CLI が exit(1) で死亡、10.6 秒で完了、応答なし
 - **根本原因**: `detectStartupChoicePrompt` が `extractFinalOutput(term)`（scrollback 10000 行全体）をチェックしていた。`\r` で trust 確認 → Claude が画面を切り替えた後もスクロールバック上部に旧 trust prompt テキストが残存 → 再検出。hash に question テキスト（画面上部に依存して不安定）が含まれていたため dedup もすり抜け

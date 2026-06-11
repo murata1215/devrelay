@@ -481,3 +481,179 @@ export function extractChoicePrompt(text: string): { question: string; options: 
     options: optionLines.map(o => o.text),
   };
 }
+
+// ---------------------------------------------------------------------------
+// JSONL セッションファイルから usageData を集計する
+// ---------------------------------------------------------------------------
+
+import type { AiUsageData } from '@devrelay/shared';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+
+/**
+ * プロジェクトパスから Claude CLI の JSONL ディレクトリハッシュ名を生成する。
+ * Claude CLI は `projectPath` の区切り文字を `-` に置換してディレクトリ名とする。
+ *   Linux/macOS: `/opt/devrelay` → `-opt-devrelay`
+ *   Windows:     `d:\Programs\foo` → `d-Programs-foo`
+ */
+function projectPathToHash(projectPath: string): string {
+  // Windows: ドライブ文字のコロンを除去し、バックスラッシュをハイフンに
+  let normalized = projectPath.replace(/:/g, '').replace(/[\\/]/g, '-');
+  // 先頭がハイフンでなければ付与（Linux パスは / 始まりなので自然に - 始まりになる）
+  if (!normalized.startsWith('-')) {
+    normalized = '-' + normalized;
+  }
+  // 末尾のハイフンを除去
+  return normalized.replace(/-+$/, '');
+}
+
+/**
+ * Claude CLI のプロジェクトディレクトリを検索して JSONL パスを解決する。
+ * 完全一致 → 末尾部分一致 → null の順で探す。
+ */
+function findSessionJsonlPath(projectPath: string, sessionId: string): string | null {
+  const claudeDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(claudeDir)) return null;
+
+  const hash = projectPathToHash(projectPath);
+  const jsonlFile = `${sessionId}.jsonl`;
+
+  // 1. 完全一致
+  const exactPath = path.join(claudeDir, hash, jsonlFile);
+  if (fs.existsSync(exactPath)) return exactPath;
+
+  // 2. ディレクトリ一覧から末尾部分一致（日本語フォルダ名のエンコーディング差異対策）
+  try {
+    const dirs = fs.readdirSync(claudeDir, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+
+    // プロジェクト名（最後のパスコンポーネント）で検索
+    const projectName = path.basename(projectPath);
+    for (const dir of dirs) {
+      if (dir.endsWith(projectName) || dir.endsWith(projectPathToHash(projectPath))) {
+        const candidate = path.join(claudeDir, dir, jsonlFile);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+
+    // 3. 全ディレクトリを走査してセッション ID で検索（最終手段）
+    for (const dir of dirs) {
+      const candidate = path.join(claudeDir, dir, jsonlFile);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch {
+    // readdir 失敗は無視
+  }
+
+  return null;
+}
+
+/**
+ * Claude CLI の JSONL セッションファイルから usageData を集計する。
+ *
+ * JSONL の `type: "assistant"` 行に含まれる `message.model` と `message.usage` から
+ * モデル名・トークン数を集計して `AiUsageData` 形式で返す。
+ *
+ * @param projectPath プロジェクトディレクトリの絶対パス
+ * @param sessionId Claude CLI セッション ID（UUID）
+ * @returns 集計結果。JSONL が見つからない場合は null
+ */
+export function parseSessionJsonlUsage(projectPath: string, sessionId: string): AiUsageData | null {
+  const jsonlPath = findSessionJsonlPath(projectPath, sessionId);
+  if (!jsonlPath) {
+    console.log(`📊 [terminal-mode] JSONL not found for session ${sessionId.slice(0, 8)}... (project: ${projectPath})`);
+    return null;
+  }
+
+  console.log(`📊 [terminal-mode] parsing JSONL: ${jsonlPath}`);
+
+  try {
+    const content = fs.readFileSync(jsonlPath, 'utf-8');
+    const lines = content.split('\n').filter(l => l.trim());
+
+    let lastModel: string | undefined;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheReadTokens = 0;
+    let totalCacheCreationTokens = 0;
+    /** モデル別累計（modelUsage 形式に整形） */
+    const modelTotals = new Map<string, { input: number; output: number; cacheRead: number; cacheCreation: number }>();
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== 'assistant' || !entry.message) continue;
+
+        const msg = entry.message;
+        // モデル名を取得（assistant 行ごとに記録、最後のものを採用）
+        if (msg.model) {
+          lastModel = msg.model;
+        }
+
+        // トークン数を合算
+        if (msg.usage) {
+          const u = msg.usage;
+          const input = u.input_tokens ?? 0;
+          const output = u.output_tokens ?? 0;
+          const cacheRead = u.cache_read_input_tokens ?? 0;
+          const cacheCreation = u.cache_creation_input_tokens ?? 0;
+
+          totalInputTokens += input;
+          totalOutputTokens += output;
+          totalCacheReadTokens += cacheRead;
+          totalCacheCreationTokens += cacheCreation;
+
+          // モデル別に集計
+          if (msg.model) {
+            const existing = modelTotals.get(msg.model) ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+            existing.input += input;
+            existing.output += output;
+            existing.cacheRead += cacheRead;
+            existing.cacheCreation += cacheCreation;
+            modelTotals.set(msg.model, existing);
+          }
+        }
+      } catch {
+        // 個別行のパース失敗は無視
+      }
+    }
+
+    // 1 行も assistant がなければ null
+    if (!lastModel && totalInputTokens === 0 && totalOutputTokens === 0) {
+      console.log(`📊 [terminal-mode] JSONL has no assistant entries`);
+      return null;
+    }
+
+    // modelUsage 形式に変換（SDK モードの output-parser.ts と同じ構造）
+    const modelUsage: Record<string, any> = {};
+    for (const [model, totals] of modelTotals) {
+      modelUsage[model] = {
+        input: totals.input,
+        output: totals.output,
+        cacheRead: totals.cacheRead,
+        cacheCreation: totals.cacheCreation,
+      };
+    }
+
+    const result: AiUsageData = {
+      usage: {
+        input_tokens: totalInputTokens,
+        output_tokens: totalOutputTokens,
+        cache_read_input_tokens: totalCacheReadTokens,
+        cache_creation_input_tokens: totalCacheCreationTokens,
+      },
+      modelUsage: Object.keys(modelUsage).length > 0 ? modelUsage : undefined,
+      model: lastModel,
+    };
+
+    const totalTokens = totalInputTokens + totalOutputTokens + totalCacheReadTokens + totalCacheCreationTokens;
+    console.log(`📊 [terminal-mode] usage: model=${lastModel}, tokens=${totalTokens} (in=${totalInputTokens} out=${totalOutputTokens} cacheR=${totalCacheReadTokens} cacheW=${totalCacheCreationTokens})`);
+
+    return result;
+  } catch (err) {
+    console.warn(`⚠️ [terminal-mode] failed to parse JSONL: ${(err as Error).message}`);
+    return null;
+  }
+}

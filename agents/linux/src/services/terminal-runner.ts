@@ -36,6 +36,7 @@ import {
   countNewBullets,
   isToolCallBullet,
   isLikelyPartialBullet,
+  parseSessionJsonlUsage,
 } from './terminal-parser.js';
 import crypto from 'crypto';
 
@@ -153,6 +154,8 @@ export interface TerminalRunResult {
   timedOut: boolean;
   /** Ask 無効により中断したか */
   cancelledByAskDisable: boolean;
+  /** JSONL セッションファイルから集計した使用量データ（Conversations 表示用） */
+  usageData?: import('@devrelay/shared').AiUsageData;
 }
 
 /** ランニング中の PTY プロセス（キャンセル用） */
@@ -912,11 +915,26 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         });
         console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}...`);
       }
+
+      // JSONL セッションファイルから usageData を集計（Conversations の Model/Tokens 表示用）
+      // セッション ID は「今回抽出したもの」または「--resume で渡されたもの」を使う
+      const effectiveSessionId = claudeSessionId || opts.resumeSessionId;
+      let usageData: import('@devrelay/shared').AiUsageData | undefined;
+      if (effectiveSessionId) {
+        const parsed = parseSessionJsonlUsage(opts.projectPath, effectiveSessionId);
+        if (parsed) {
+          // durationMs は JSONL に含まれないため、PTY 実行時間を使う
+          parsed.durationMs = Date.now() - start;
+          usageData = parsed;
+        }
+      }
+
       resolve({
         finalOutput,
         durationMs: Date.now() - start,
         timedOut,
         cancelledByAskDisable,
+        usageData,
       });
     });
 
