@@ -7,12 +7,25 @@
 ## 実装済み機能
 
 
-### #237: Terminal Mode — プロンプト未送信の早期 exit で自動リトライ (2026-06-12)
-- **症状**: Windows の新規プロジェクト（`im_logicdesigner-data forDEVIN...`）で terminal mode 起動 → trust prompt に option 1 回答 → Claude CLI が即座に exit(1) → プロンプト未送信のまま「✅ 完了（5.4 秒）」と表示
-- **根本原因**: `ai-runner.ts` の早期 exit リトライ条件が `resumeSessionId` 存在時のみ発動する設計だった。新規セッション（`--resume` なし）で trust prompt 回答後に CLI が crash/exit しても、リトライされずそのまま完了扱いになっていた
+### #237: Terminal Mode — bypass permissions 自動承認 + 早期 exit リトライ (2026-06-12)
+
+#### bypass permissions 確認プロンプトで「No, exit」を選んでいたバグ修正
+- **症状**: Windows の `--dangerously-skip-permissions` 付き terminal mode で、起動直後に exit(1) → リトライしても同じ → 毎回「✅ 完了（5〜10 秒）」で何も実行されない
+- **根本原因**: `--dangerously-skip-permissions` は trust prompt とは別に **Bypass Permissions 確認プロンプト** を表示する: `1. No, exit` / `2. Yes, I accept`。trust prompt（`1. Yes, proceed` / `2. No, exit`）とは **選択肢の順序が逆**。Agent は startup choice prompt → WebUI 承認カード → ユーザー Allow → option 1（Enter）→ 「No, exit」が選ばれて exit(1)
+- **修正**: `approveAllMode=true` 時、options に `"Yes, I accept"` パターンを含む bypass permissions 確認を検出したら **自動的にそのオプションを選択**（↓キー + Enter）。ユーザーに転送しない
+  - `--dangerously-skip-permissions` を指定した = 明示的に受け入れ済みなので確認不要
+  - `approveAllMode=false` の場合は従来通りユーザーに転送
+
+#### プロンプト未送信の早期 exit で自動リトライ
+- **症状**: 上記修正前は trust prompt 回答後の exit(1) でプロンプト未送信のまま「✅ 完了」と表示されていた
+- **根本原因**: `ai-runner.ts` の早期 exit リトライ条件が `resumeSessionId` 存在時のみ発動する設計だった
 - **修正**: `TerminalRunResult` に `promptSent: boolean` フラグを追加し、リトライ条件を「`promptSent === false` + 30 秒以内の早期 exit」に拡張。`--resume` 専用フォールバックを統合し、新規セッションの起動失敗もカバー
   - リトライ時、trust は保存済みなので正常起動する
   - `--resume` 付きの場合はセッション ID もクリアして再試行（従来挙動を維持）
+
+#### 診断改善
+- PTY exit(code≠0, promptSent=false) 時に画面末尾 500 文字を agent.log にダンプ（エラー原因の診断用）
+- リトライ後も `promptSent=false` の場合「❌ Claude CLI が起動できませんでした」エラー表示（「✅ 完了」の誤表示を防止）
 - **対象ファイル**: `agents/linux/src/services/terminal-runner.ts`（`TerminalRunResult` + resolve 2 箇所）、`ai-runner.ts`（リトライ条件拡張）
 - **設計判断**: `promptSent` フラグにより「プロンプトが実際に送られたか」を正確に判定。`finalOutput` の内容チェック（旧条件）は trust prompt テキストが残るため不適切
 
