@@ -704,15 +704,20 @@ async function sendPromptToTerminalClaude(
       onChoiceRequest: makeChoiceHandler,
     });
 
-    // --resume 付きで早期 exit（exit code !== 0）した場合のフォールバック:
-    // セッション ID が壊れている/互換性がない可能性が高いので、
-    // セッション ID を消して --resume なしでリトライする（1 回のみ）
+    // プロンプト未送信のまま早期 exit した場合のフォールバック（1 回のみリトライ）:
+    // - trust prompt 回答後に Claude CLI が exit(1) するケース（#237: 新規プロジェクトで頻発）
+    // - --resume のセッション ID が壊れていて起動失敗するケース（#236）
+    // リトライ時は trust 保存済み / --resume なしで起動するため正常起動する
     const earlyExitMs = 30_000; // 30 秒以内に終了 = 早期 exit と判定
-    if (resumeSessionId && !runResult.timedOut && !runResult.cancelledByAskDisable
-        && runResult.durationMs < earlyExitMs && !runResult.finalOutput?.trim()) {
-      console.warn(`⚠️ [terminal-mode] early exit with --resume (${runResult.durationMs}ms, no output) → clearing session ID and retrying without --resume`);
-      await clearClaudeSessionId(projectPath);
-      onOutput(`\n⚠️ セッション復元に失敗しました。新規セッションでリトライします...\n`, false);
+    if (!runResult.promptSent && !runResult.timedOut && !runResult.cancelledByAskDisable
+        && runResult.durationMs < earlyExitMs) {
+      const reason = resumeSessionId ? 'early exit with --resume' : 'early exit during startup';
+      console.warn(`⚠️ [terminal-mode] ${reason} (${runResult.durationMs}ms, promptSent=false) → retrying without --resume`);
+      // --resume のセッション ID があればクリア（壊れている可能性）
+      if (resumeSessionId) {
+        await clearClaudeSessionId(projectPath);
+      }
+      onOutput(`\n⚠️ Claude CLI が起動中に終了しました。リトライします...\n`, false);
       onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${approveAllMode ? ' --dangerously-skip-permissions' : ''}\n`, false);
 
       runResult = await runTerminalClaude({
@@ -722,7 +727,7 @@ async function sendPromptToTerminalClaude(
         disableAsk: !!options.disableAsk,
         claudeCommand,
         sessionId,
-        resumeSessionId: undefined, // --resume なし
+        resumeSessionId: undefined, // リトライは常に --resume なし
         onOutput: (chunk) => onOutput(chunk, false),
         onChoiceRequest: makeChoiceHandler,
       });

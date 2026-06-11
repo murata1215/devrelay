@@ -7,6 +7,15 @@
 ## 実装済み機能
 
 
+### #237: Terminal Mode — プロンプト未送信の早期 exit で自動リトライ (2026-06-12)
+- **症状**: Windows の新規プロジェクト（`im_logicdesigner-data forDEVIN...`）で terminal mode 起動 → trust prompt に option 1 回答 → Claude CLI が即座に exit(1) → プロンプト未送信のまま「✅ 完了（5.4 秒）」と表示
+- **根本原因**: `ai-runner.ts` の早期 exit リトライ条件が `resumeSessionId` 存在時のみ発動する設計だった。新規セッション（`--resume` なし）で trust prompt 回答後に CLI が crash/exit しても、リトライされずそのまま完了扱いになっていた
+- **修正**: `TerminalRunResult` に `promptSent: boolean` フラグを追加し、リトライ条件を「`promptSent === false` + 30 秒以内の早期 exit」に拡張。`--resume` 専用フォールバックを統合し、新規セッションの起動失敗もカバー
+  - リトライ時、trust は保存済みなので正常起動する
+  - `--resume` 付きの場合はセッション ID もクリアして再試行（従来挙動を維持）
+- **対象ファイル**: `agents/linux/src/services/terminal-runner.ts`（`TerminalRunResult` + resolve 2 箇所）、`ai-runner.ts`（リトライ条件拡張）
+- **設計判断**: `promptSent` フラグにより「プロンプトが実際に送られたか」を正確に判定。`finalOutput` の内容チェック（旧条件）は trust prompt テキストが残るため不適切
+
 ### #236: Terminal Mode の usageData 取得 + --resume 失敗時フォールバック (2026-06-12)
 
 #### usageData 取得（JSONL 直読み方式）

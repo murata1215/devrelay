@@ -154,6 +154,8 @@ export interface TerminalRunResult {
   timedOut: boolean;
   /** Ask 無効により中断したか */
   cancelledByAskDisable: boolean;
+  /** ユーザープロンプトが実際に Claude CLI に送信されたか（false = 起動段階で exit した） */
+  promptSent: boolean;
   /** JSONL セッションファイルから集計した使用量データ（Conversations 表示用） */
   usageData?: import('@devrelay/shared').AiUsageData;
 }
@@ -339,6 +341,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           durationMs: Date.now() - start,
           timedOut,
           cancelledByAskDisable,
+          promptSent,
         });
       });
     };
@@ -934,6 +937,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         durationMs: Date.now() - start,
         timedOut,
         cancelledByAskDisable,
+        promptSent,
         usageData,
       });
     });
