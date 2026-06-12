@@ -246,6 +246,9 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   /** startup choice に応答した時刻（クールダウン判定用） */
   let lastChoiceAnsweredAt = 0;
   let execStartedAt = 0;
+  /** セッション中に一度でも新規バレット（`●`）が観測されたかフラグ。
+   *  ツール実行中に `●` が画面から消えても first-bullet-timeout を適用しないために使う（#237） */
+  let bulletEverObserved = false;
   /** 画面が最後に変化した時刻（完了判定の「画面アイドル」基準） */
   let lastScreenChangeAt = Date.now();
   /** 画面変化追跡用の前回レンダリング結果 */
@@ -921,18 +924,26 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // 応答 1 個目の `●` バレット（baseline の count を超える新規描画）が出るまでは完了とみなさない
         const currentBulletLines = getBulletLines(freshRendered);
         const newBullets = countNewBullets(baselineBulletMap, currentBulletLines);
+        if (newBullets > 0) {
+          bulletEverObserved = true;
+        }
         if (newBullets === 0) {
-          // First-bullet safety timeout: 10 分以上待っても `●` が出ない = 詰まっている可能性大。
-          // IDLE_TIMEOUT より早く諦めて /exit で正規終了させる
-          if (elapsedSinceExec > FIRST_BULLET_TIMEOUT_MS) {
-            console.warn(`⏰ [terminal-mode] first-bullet timeout (${elapsedSinceExec}ms > ${FIRST_BULLET_TIMEOUT_MS}ms) — Claude did not produce a ● bullet, forcing completion`);
-            finish('first-bullet-timeout');
+          if (!bulletEverObserved) {
+            // 初期フェーズ: バレットが一度も出ていない → first-bullet-timeout 適用
+            if (elapsedSinceExec > FIRST_BULLET_TIMEOUT_MS) {
+              console.warn(`⏰ [terminal-mode] first-bullet timeout (${elapsedSinceExec}ms > ${FIRST_BULLET_TIMEOUT_MS}ms) — Claude did not produce a ● bullet, forcing completion`);
+              finish('first-bullet-timeout');
+              return;
+            }
+            sendHeartbeat(freshRendered);
+            logSkip('no-new-bullet', `current=${currentBulletLines.length} baseline=${baselineBulletMap.size}unique renderedLen=${freshRendered.length} elapsedSinceExec=${elapsedSinceExec}ms`);
             return;
           }
-          // バレット未到来時はハートビート送信（思考中であることをユーザーに伝える）
+          // バレットは過去に出たが現在画面から消えている（ツール実行中等）
+          // first-bullet-timeout は適用せず、extended-idle / prompt-ready にフォールスルーする（#237）
           sendHeartbeat(freshRendered);
-          logSkip('no-new-bullet', `current=${currentBulletLines.length} baseline=${baselineBulletMap.size}unique renderedLen=${freshRendered.length} elapsedSinceExec=${elapsedSinceExec}ms`);
-          return;
+          logSkip('bullets-hidden', `current=${currentBulletLines.length} baseline=${baselineBulletMap.size}unique renderedLen=${freshRendered.length} elapsedSinceExec=${elapsedSinceExec}ms bulletEverObserved=true`);
+          // ↓ フォールスルー: idle check / prompt-ready / extended-idle をチェック
         }
         if (elapsedSinceChange < IDLE_FOR_COMPLETION_MS) {
           logSkip('not-idle', `${elapsedSinceChange}/${IDLE_FOR_COMPLETION_MS}ms new=${newBullets}`);
