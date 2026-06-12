@@ -106,8 +106,10 @@ const PROMPT_CHUNK_SIZE = 200;
 /** チャンク間の待機時間 */
 const PROMPT_CHUNK_DELAY_MS = 30;
 
-/** プロンプト末尾投入から submit (\r) 送信までの待機時間 */
-const PROMPT_SUBMIT_DELAY_MS = 400;
+/** プロンプト末尾投入から submit (\r) 送信までの待機時間。
+ *  Windows ConPTY では Ink TextInput の入力バッファ処理に時間がかかるため
+ *  1000ms に設定（#237: 400ms では \r が受理されない事象） */
+const PROMPT_SUBMIT_DELAY_MS = 1000;
 
 /** 承認/質問プロンプトをユーザーに転送するためのリクエスト */
 export interface ChoiceRequest {
@@ -337,8 +339,9 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // Claude CLI exit 時に出る「Resume this session with: claude --resume <UUID>」から
         // session id を抽出して `.devrelay/claude-session-id` に保存。次回 terminal mode
         // 起動時に --resume で会話継続できるようにする（SDK Claude と同じファイルを共有）
+        // promptSent=false の場合は保存しない（壊れたセッション ID の残留防止, #237）
         const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
-        if (claudeSessionId) {
+        if (claudeSessionId && promptSent) {
           saveClaudeSessionId(opts.projectPath, claudeSessionId).catch(err => {
             console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
           });
@@ -739,6 +742,21 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       if (finished) return;
       console.log(`📨 [terminal-mode] sending submit \\r (Enter)`);
       ptyProcess.write('\r');
+
+      // submit 後の画面変化を確認。Windows ConPTY + Ink TextInput で \r が受理されない
+      // ケースがあるため、画面が変化するまで \r をリトライする（#237）
+      const screenLenBefore = extractFinalOutput(term).length;
+      for (let retry = 0; retry < 3; retry++) {
+        await new Promise(r => setTimeout(r, 1000));
+        if (finished) return;
+        const screenLenAfter = extractFinalOutput(term).length;
+        if (screenLenAfter !== screenLenBefore) {
+          console.log(`📨 [terminal-mode] screen changed after submit (${screenLenBefore} → ${screenLenAfter})`);
+          break;
+        }
+        console.warn(`⚠️ [terminal-mode] screen unchanged ${retry + 1}s after submit, retrying \\r (attempt ${retry + 2})`);
+        ptyProcess.write('\r');
+      }
     };
 
     /**
@@ -955,13 +973,17 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         const tail = finalOutput.length > 500 ? finalOutput.slice(-500) : finalOutput;
         console.error(`❌ [terminal-mode] PTY exited with code=${exitCode} before prompt sent. Last 500 chars:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
       }
-      // 予期せぬ exit (PTY crash 等) でも、画面に Claude session id があれば保存して継続性を維持
+      // 画面に Claude session id があれば保存して次回 --resume で継続可能にする。
+      // ただし promptSent=false（起動失敗等）の場合は保存しない — 壊れた/空のセッション ID で
+      // 次回 --resume すると不安定な挙動になる（#237: bypass "No, exit" の session ID が残留した事故）
       const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
-      if (claudeSessionId) {
+      if (claudeSessionId && promptSent) {
         saveClaudeSessionId(opts.projectPath, claudeSessionId).catch(err => {
           console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
         });
         console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}...`);
+      } else if (claudeSessionId && !promptSent) {
+        console.log(`⏭️ [terminal-mode] skipping session id save (promptSent=false): ${claudeSessionId.slice(0, 8)}...`);
       }
 
       // JSONL セッションファイルから usageData を集計（Conversations の Model/Tokens 表示用）
