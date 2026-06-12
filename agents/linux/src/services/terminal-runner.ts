@@ -570,6 +570,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
 
       resetIdleTimer();
 
+      // raw PTY ストリーム中の `●` マーカーを検出して bulletEverObserved をセット。
+      // Ink UI が `[2J]` (clear screen) で画面を頻繁にクリア・再描画するため、
+      // xterm 仮想画面上では `●` が一瞬で消える。500ms 間隔の完了チェックでは
+      // 捉えられないバレットを、raw ストリームで先に検出しておく（#237）
+      if (execStarted && !bulletEverObserved && data.includes('●')) {
+        bulletEverObserved = true;
+        console.log(`📊 [terminal-mode] bullet observed in raw PTY data (bulletEverObserved=true)`);
+      }
+
       // 起動フェーズの検出（onData 駆動の fast path、ポーリングと冪等に共存）
       if (!promptReady) {
         runStartupDetection();
