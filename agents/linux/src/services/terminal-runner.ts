@@ -94,6 +94,12 @@ const STREAM_DEBOUNCE_TICKS = 3;
  *  detectPromptReady が永遠に false を返すため、long idle で完了させる safety net */
 const EXTENDED_IDLE_FOR_COMPLETION_MS = 30_000;
 
+/** startup choice 応答から promptReady 検出までのクールダウン。
+ *  Claude CLI が bypass/trust 画面→メイン UI 遷移 + プロジェクトスキャン + 入力ハンドラ初期化
+ *  を完了するまでの猶予。3 秒に設定（大規模プロジェクトの初回スキャンを考慮）
+ *  #237: bypass 承認直後に promptReady を検出してプロンプト送信→テキスト消失した事故の対策 */
+const STARTUP_CHOICE_COOLDOWN_MS = 3000;
+
 /** プロンプトをチャンクに分割するサイズ（PTY/CLI バッファのオーバーフローや誤解釈を防ぐ） */
 const PROMPT_CHUNK_SIZE = 200;
 
@@ -235,6 +241,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let pendingStartupChoice = false;
   /** 起動時の選択肢プロンプトの重複転送防止用ハッシュ集合 */
   const handledStartupChoiceHashes = new Set<string>();
+  /** startup choice に応答した時刻（クールダウン判定用） */
+  let lastChoiceAnsweredAt = 0;
   let execStartedAt = 0;
   /** 画面が最後に変化した時刻（完了判定の「画面アイドル」基準） */
   let lastScreenChangeAt = Date.now();
@@ -449,6 +457,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                 // ignore
               }
               pendingStartupChoice = false;
+              lastChoiceAnsweredAt = Date.now();
               installStartupTimer();
               return;
             }
@@ -487,6 +496,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                     // ignore
                   }
                   pendingStartupChoice = false;
+                  lastChoiceAnsweredAt = Date.now();
                   // 応答後のレンダリング待ちで startup timer を再起動（summary 生成は 30-60s かかる）
                   installStartupTimer();
                 },
@@ -500,11 +510,18 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                 // ignore
               }
               pendingStartupChoice = false;
+              lastChoiceAnsweredAt = Date.now();
               installStartupTimer();
             }
           }
           return;
         }
+      }
+
+      // startup choice 応答後のクールダウン: Claude CLI が画面遷移・入力ハンドラ初期化を
+      // 完了するまで promptReady を検出しない（#237: bypass 承認後にプロンプトが消失した事故）
+      if (lastChoiceAnsweredAt > 0 && (Date.now() - lastChoiceAnsweredAt < STARTUP_CHOICE_COOLDOWN_MS)) {
+        return;
       }
 
       // 起動完了検出
