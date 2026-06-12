@@ -23,11 +23,19 @@
   - リトライ時、trust は保存済みなので正常起動する
   - `--resume` 付きの場合はセッション ID もクリアして再試行（従来挙動を維持）
 
+#### startup choice 応答後のクールダウン + submit リトライ
+- **症状**: bypass 承認後、Claude CLI の入力ハンドラ初期化完了前に `detectPromptReady` が `> Try "refactor..."` プレースホルダを検出 → プロンプトテキスト書き込み → テキスト消失 → 600 秒 first-bullet-timeout
+- **修正 1**: startup choice 応答後に **3 秒のクールダウン**（`STARTUP_CHOICE_COOLDOWN_MS`）を設け、Claude CLI の画面遷移 + 入力ハンドラ初期化を待ってから `promptReady` を検出
+- **症状**: 壊れた session ID（前回 bypass "No, exit" で exit(1) した際に保存されたもの）で `--resume` → 不安定な状態で起動 → プロンプト submit 後も応答なし
+- **修正 2**: `promptSent=false` 時に Claude session ID を**保存しない**（`onExit` + `finish()` の 2 箇所）
+- **症状**: プロンプトテキストは PTY に書かれた（renderedLen 増加）が、`\r` 送信後も Claude CLI が応答を開始しない（Windows ConPTY + Ink TextInput でのタイミング問題）
+- **修正 3**: submit `\r` 後に画面変化を 1 秒ごとに監視、変化なければ `\r` をリトライ（最大 3 回）。submit 前待機も 400ms → 1000ms に増加
+
 #### 診断改善
 - PTY exit(code≠0, promptSent=false) 時に画面末尾 500 文字を agent.log にダンプ（エラー原因の診断用）
 - リトライ後も `promptSent=false` の場合「❌ Claude CLI が起動できませんでした」エラー表示（「✅ 完了」の誤表示を防止）
-- **対象ファイル**: `agents/linux/src/services/terminal-runner.ts`（`TerminalRunResult` + resolve 2 箇所）、`ai-runner.ts`（リトライ条件拡張）
-- **設計判断**: `promptSent` フラグにより「プロンプトが実際に送られたか」を正確に判定。`finalOutput` の内容チェック（旧条件）は trust prompt テキストが残るため不適切
+- **対象ファイル**: `agents/linux/src/services/terminal-runner.ts`（`TerminalRunResult` + resolve 2 箇所 + submit リトライ + クールダウン + session ID 保存ガード）、`ai-runner.ts`（リトライ条件拡張 + エラーメッセージ）
+- **設計判断**: `promptSent` フラグにより「プロンプトが実際に送られたか」を正確に判定。session ID 保存・`\r` submit・startup cooldown の 3 層で Windows ConPTY の不安定な挙動に対応
 
 ### #236: Terminal Mode の usageData 取得 + --resume 失敗時フォールバック (2026-06-12)
 
