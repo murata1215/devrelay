@@ -742,11 +742,14 @@ async function sendPromptToTerminalClaude(
       return result;
     }
 
+    const durationStr = (runResult.durationMs / 1000).toFixed(1);
     const suffix = runResult.timedOut
-      ? `\n⚠️ アイドルタイムアウト（10 分無音）により終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`
+      ? `\n⚠️ アイドルタイムアウト（10 分無音）により終了しました。（実行時間: ${durationStr} 秒）`
       : !runResult.promptSent
-      ? `\n❌ Claude CLI が起動できませんでした。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）\nこのフォルダで claude コマンドを直接実行して動作を確認してください。\nログ: logs/terminal-${sessionId}.log`
-      : `\n✅ 完了。セッションを終了しました。（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`;
+      ? `\n❌ Claude CLI が起動できませんでした。（実行時間: ${durationStr} 秒）\nこのフォルダで claude コマンドを直接実行して動作を確認してください。\nログ: logs/terminal-${sessionId}.log`
+      : (runResult.exitCode != null && runResult.exitCode !== 0)
+      ? `\n⚠️ Claude CLI がクラッシュしました (exit code ${runResult.exitCode})。（実行時間: ${durationStr} 秒）\nログ: logs/terminal-${sessionId}.log`
+      : `\n✅ 完了。セッションを終了しました。（実行時間: ${durationStr} 秒）`;
 
     onOutput(suffix, true, runResult.usageData);  // JSONL から集計した usageData を伝搬
   } catch (err) {

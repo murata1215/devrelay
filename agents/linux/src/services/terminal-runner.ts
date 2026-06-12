@@ -160,6 +160,8 @@ export interface TerminalRunResult {
   durationMs: number;
   /** タイムアウトによる強制終了か */
   timedOut: boolean;
+  /** PTY プロセスの終了コード（正常完了=0, crash=1 等。finish() 経由の場合は undefined） */
+  exitCode?: number;
   /** Ask 無効により中断したか */
   cancelledByAskDisable: boolean;
   /** ユーザープロンプトが実際に Claude CLI に送信されたか（false = 起動段階で exit した） */
@@ -988,10 +990,11 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       logStream?.end();
       console.log(`🖥️ [terminal-mode] pty exited (code=${exitCode}, signal=${signal})`);
       const finalOutput = extractFinalOutput(term);
-      // 異常 exit かつプロンプト未送信の場合、画面内容をログに残す（エラー原因の診断用）
-      if (exitCode !== 0 && !promptSent) {
+      // 異常 exit の場合、画面内容をログに残す（エラー原因の診断用）
+      if (exitCode !== 0) {
         const tail = finalOutput.length > 500 ? finalOutput.slice(-500) : finalOutput;
-        console.error(`❌ [terminal-mode] PTY exited with code=${exitCode} before prompt sent. Last 500 chars:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
+        const phase = promptSent ? 'after prompt sent' : 'before prompt sent';
+        console.error(`❌ [terminal-mode] PTY exited with code=${exitCode} ${phase}. Last 500 chars:\n--- BEGIN SCREEN ---\n${tail}\n--- END SCREEN ---`);
       }
       // 画面に Claude session id があれば保存して次回 --resume で継続可能にする。
       // ただし promptSent=false（起動失敗等）の場合は保存しない — 壊れた/空のセッション ID で
@@ -1025,6 +1028,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         timedOut,
         cancelledByAskDisable,
         promptSent,
+        exitCode: exitCode ?? undefined,
         usageData,
       });
     });
