@@ -177,7 +177,11 @@ export const PLAN_MODE_INSTRUCTION = `
 export const EXEC_MODE_INSTRUCTION = `
 
 【実行モード】
-ユーザーが実装開始を承認しました。プランに従ってコードの変更を実行してください。`;
+ユーザーが実装開始を承認しました。プランに従ってコードの変更を実行してください。
+
+プランに従って実装を開始してください。
+
+【重要】シェルコマンド（ビルド・テスト・インストール等）はバックグラウンドではなく**フォアグラウンドで実行**し、完了を待ってから結果を報告してください。バックグラウンド実行するとセッション終了時にプロセスが停止します。`;
 
 // DevRelay Agreement v4: ルールを rules/devrelay.md に分離
 // CLAUDE.md には軽量マーカーのみ配置し、Agreement 本体は rules/devrelay.md に置く

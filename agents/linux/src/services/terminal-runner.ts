@@ -964,8 +964,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           logSkip('tool-approval-visible', `idle=${elapsedSinceChange}ms new=${newBullets}`);
           return;
         }
+        // Claude CLI が「N shell(s) still running」と表示中はバックグラウンドプロセスが動いている。
+        // この状態で完了すると /exit でプロセスが kill されるため、完了を抑制する（#237）
+        const hasRunningShells = /still running/i.test(freshRendered);
+        if (hasRunningShells) {
+          logSkip('shells-running', `idle=${elapsedSinceChange}ms new=${newBullets}`);
+          return;
+        }
         if (detectPromptReady(freshRendered)) {
-          // 画面が 1.5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
+          // 画面が 5 秒間変化なし + プロンプト復帰中 + 新規バレットあり → 完了
           console.log(`✅ [terminal-mode] screen idle ${elapsedSinceChange}ms + prompt ready + ${newBullets} new bullet(s), completing`);
           finish('idle-and-prompt-ready');
           return;
