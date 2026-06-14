@@ -7,7 +7,17 @@
 ## 実装済み機能
 
 
-### #237: Terminal Mode — bypass permissions 自動承認 + 早期 exit リトライ (2026-06-12)
+### #237: Terminal Mode — bypass permissions 自動承認 + 早期 exit リトライ + shell running 完了抑制 (2026-06-12)
+
+#### バックグラウンドシェル実行中の早期完了防止（2 層防御）
+- **症状**: mviewer で Claude が `npx electron-builder --win portable` をバックグラウンドで実行 → Claude がプロンプトに戻る → 5 秒アイドル + prompt ready → 完了判定 → `/exit` 送信 → ビルドプロセスも kill される
+- **根本原因**: Claude CLI は Bash ツールをバックグラウンドで実行する場合があり、`✻ Cooked for 11s · 1 shell still running` インジケータを表示する。この状態でもプロンプト (`❯`) は復帰するため、既存の完了判定（idle + prompt ready + new bullets）が発動してしまう
+- **修正（案 A — shell running 検出）**: 完了判定の `idle-and-prompt-ready` チェックに `hasRunningShells()` ガードを追加。画面に `still running` が含まれている間は完了判定を抑制する。`terminal-runner.ts` の `hasRunningShells(rendered)` 関数が `/still running/i` で検出
+- **修正（案 B — exec プロンプト指示）**: 全 Agent（Linux/macOS/Windows）の exec モードプロンプト指示に「シェルコマンドはバックグラウンドではなくフォアグラウンドで同期実行すること」を追加。Claude が最初からフォアグラウンド実行を選ぶようになる
+- **対象ファイル**: `agents/linux/src/services/terminal-runner.ts`（`hasRunningShells` 関数 + 完了判定ガード）、`agents/{linux,macos,windows}/src/services/output-collector.ts`（exec プロンプト指示追加）
+- **設計判断**: 2 層防御（belt-and-suspenders）。案 A は Claude CLI のインジケータ表示に依存するが、案 B のプロンプト指示で Claude がフォアグラウンド実行を選ぶことで案 A の発動自体を減らす。両方合わせて確実にバックグラウンドビルドの途中 kill を防止
+
+#### bypass permissions 確認プロンプトで「No, exit」を選んでいたバグ修正
 
 #### bypass permissions 確認プロンプトで「No, exit」を選んでいたバグ修正
 - **症状**: Windows の `--dangerously-skip-permissions` 付き terminal mode で、起動直後に exit(1) → リトライしても同じ → 毎回「✅ 完了（5〜10 秒）」で何も実行されない
