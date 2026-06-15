@@ -7,6 +7,20 @@
 ## 実装済み機能
 
 
+### #238: Terminal Mode — --resume セッション暴走バグ修正 + usageData フォールバック (2026-06-15)
+
+#### 問題 A: plan モードで --resume した際に前回 exec の実装作業を丸ごと再実行
+- **症状**: pixmanual で Agent 更新後に「このプロジェクトの概要を教えて」（plan モード）を送信 → Claude が前回 exec セッションの実装作業（page.tsx 編集、ManualEditor 修正、ビルド・再起動）を丸ごと再実行
+- **根本原因**: `sendPromptToTerminalClaude()` が mode（plan/exec）に関係なく常に `loadClaudeSessionId()` で前回セッション ID を読み込み、`--resume` で Claude CLI を起動。resume すると前回 exec の「プランに従って実装を開始してください」コンテキストが復元され、新しいプロンプトを無視して前回の作業を続行
+- **修正**: plan モードでは `--resume` を使わない（`options.usePlanMode ? undefined : await loadClaudeSessionId()`）。exec モードのみ前回セッションを `--resume` で継続
+- 対象: `agents/linux/src/services/ai-runner.ts`
+
+#### 問題 B: Conversations 画面の Model/Duration/Tokens が全端末モードプロジェクトで空欄
+- **症状**: pixmanual, pixblog 等の端末モードプロジェクトで Conversations の Model/Duration/Tokens が全て `-`
+- **根本原因**: `parseSessionJsonlUsage()` は `~/.claude/projects/<hash>/<sessionId>.jsonl` を読むが、Claude CLI のインタラクティブモード（PTY 起動）は JSONL をこのパスに書き出さない。結果として usageData が常に null → DB に null で保存
+- **修正**: JSONL 取得失敗時に durationMs だけを含む usageData フォールバックを追加。catch ブロックでも durationMs を伝搬
+- 対象: `agents/linux/src/services/terminal-runner.ts`, `agents/linux/src/services/ai-runner.ts`
+
 ### #237: Terminal Mode — bypass permissions 自動承認 + 早期 exit リトライ + shell running 完了抑制 (2026-06-12)
 
 #### バックグラウンドシェル実行中の早期完了防止（2 層防御）
