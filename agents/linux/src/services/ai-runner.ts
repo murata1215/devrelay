@@ -622,6 +622,7 @@ async function sendPromptToTerminalClaude(
   options: SendPromptOptions
 ): Promise<AiRunResult> {
   const result: AiRunResult = {};
+  const startTs = Date.now();
 
   let claudeCommand: string;
   try {
@@ -659,7 +660,11 @@ async function sendPromptToTerminalClaude(
 
   // SDK が保存した Claude セッション ID を読み込んで CLI の `--resume` で復元する
   // SDK と CLI は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているので互換
-  const resumeSessionId = await loadClaudeSessionId(projectPath);
+  // plan モードでは --resume しない: 前回 exec のコンテキスト復元により
+  // Claude が前回の実装作業を丸ごと再実行する暴走を防止する（#238）
+  const resumeSessionId = options.usePlanMode
+    ? undefined
+    : await loadClaudeSessionId(projectPath);
 
   // 診断ログ: WebUI トグルとの食い違いを調査するため、判定根拠を出力する
   console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}, resumeSessionId=${resumeSessionId ? resumeSessionId.slice(0, 8) + '...' : '(none)'}`);
@@ -755,7 +760,7 @@ async function sendPromptToTerminalClaude(
   } catch (err) {
     const msg = (err as Error).message;
     console.error(`❌ [terminal-mode] runTerminalClaude failed: ${msg}`);
-    onOutput(`\nError: ${msg}`, true);
+    onOutput(`\nError: ${msg}`, true, { durationMs: Date.now() - startTs });
   }
 
   return result;

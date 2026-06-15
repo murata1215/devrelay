@@ -1028,6 +1028,14 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           usageData = parsed;
         }
       }
+      // JSONL からの取得に失敗した場合でも durationMs だけは記録（#238）
+      // Claude CLI インタラクティブモードは JSONL を書き出さないため、
+      // Duration 列だけでも Conversations 画面に表示する
+      if (!usageData) {
+        usageData = {
+          durationMs: Date.now() - start,
+        };
+      }
 
       resolve({
         finalOutput,
