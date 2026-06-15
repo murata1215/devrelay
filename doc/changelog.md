@@ -7,6 +7,14 @@
 ## 実装済み機能
 
 
+### #239: Terminal Mode — finish() 経由の正常完了で usageData が欠落するバグ修正 (2026-06-16)
+
+- **症状**: pixmanual 等の端末モードプロジェクトで Conversations 画面の Model / Duration / Tokens が全て `-` 表示
+- **根本原因**: `terminal-runner.ts` に `ptyProcess.onExit()` コールバックが **2 箇所** 登録されていた。正常完了（idle-and-prompt-ready, extended-idle-complete 等）は全て `finish()` 関数を経由するが、`finish()` 内の `onExit`（339 行目）は **usageData なし** で `resolve()` していた。トップレベルの `onExit`（991 行目）に usageData 抽出ロジックがあるが、Promise は既に解決済みのため到達しても無視される
+- **修正**: `finish()` 内の `onExit` コールバックに usageData 抽出ロジック（JSONL 解析 + durationMs フォールバック）を追加。1 ファイル 1 箇所の変更
+- **#238 との関係**: #238 で追加した durationMs フォールバック自体は正しかったが、`finish()` 内の onExit が先に resolve するため到達しなかった。今回の修正で #238 のフォールバックも `finish()` パスで正しく動作する
+- 対象: `agents/linux/src/services/terminal-runner.ts`
+
 ### #238: Terminal Mode — --resume セッション暴走バグ修正 + usageData フォールバック (2026-06-15)
 
 #### 問題 A: plan モードで --resume した際に前回 exec の実装作業を丸ごと再実行

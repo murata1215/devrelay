@@ -352,12 +352,30 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           });
           console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}...`);
         }
+        // JSONL セッションファイルから usageData を集計（Conversations の Model/Tokens 表示用）
+        // finish() 経由の正常完了でも usageData を取得する（#239: 以前は finish() 内の
+        // onExit が usageData なしで resolve していたため Conversations に表示されなかった）
+        const effectiveSessionId = claudeSessionId || opts.resumeSessionId;
+        let usageData: import('@devrelay/shared').AiUsageData | undefined;
+        if (effectiveSessionId) {
+          const parsed = parseSessionJsonlUsage(opts.projectPath, effectiveSessionId);
+          if (parsed) {
+            parsed.durationMs = Date.now() - start;
+            usageData = parsed;
+          }
+        }
+        // JSONL 取得失敗時でも durationMs だけは記録（Duration 列表示用）
+        if (!usageData) {
+          usageData = { durationMs: Date.now() - start };
+        }
+
         resolve({
           finalOutput,
           durationMs: Date.now() - start,
           timedOut,
           cancelledByAskDisable,
           promptSent,
+          usageData,
         });
       });
     };
