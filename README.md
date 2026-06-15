@@ -21,7 +21,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **History Export**: Download conversation history as daily ZIP files
 - **Proxy Support**: Connect through HTTP/HTTPS/SOCKS5 proxies
 - **Build Log**: Auto-track every exec with AI-generated summaries
-- **Conversations Analytics**: View all AI interactions with token usage breakdown (Terminal Mode sessions included via JSONL session file parsing)
+- **Conversations Analytics**: View all AI interactions with token usage breakdown (Terminal Mode sessions show duration; SDK sessions include full token details)
 - **Multi-Provider AI**: Register OpenAI, Anthropic, Gemini API keys with per-feature provider selection
 - **Agreement Template Editor**: Customize AI rules from Settings page
 - **Message File Storage**: Attached files stored in DB (PostgreSQL bytea) with inline image preview and lightbox
@@ -93,10 +93,10 @@ Turn your phone into a remote terminal for AI-powered development.
 
 ## 💡 Token Efficiency
 
-DevRelay uses Claude Code's `--resume` option to continue sessions, achieving **the same token efficiency as direct CLI usage**.
+DevRelay uses Claude Code's `--resume` option to continue sessions, achieving **the same token efficiency as direct CLI usage**. In Terminal Mode, `--resume` is used **only for exec mode** — plan mode starts a fresh session to prevent context bleed from previous exec work (#238).
 
 - **Overhead**: ~200 tokens/prompt for plan/exec mode instructions
-- **Session Continuity**: `--resume` keeps conversation context in Claude Code, no history re-sending
+- **Session Continuity**: `--resume` keeps conversation context in Claude Code, no history re-sending (exec mode only in Terminal Mode)
 - **Context Display**: Monitor usage on Discord/Telegram (`📊 Context: 131K / 200K tokens (66%)`)
 
 ## 🏗 Architecture
