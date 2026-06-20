@@ -321,11 +321,23 @@ if command -v jq &>/dev/null; then
   TARGET_ID=$(echo "$MEMBERS_BODY" | jq -r --arg name "$PROJECT" '[.[] | select((.memberProjectName | ascii_downcase | contains($name | ascii_downcase)) or ((.memberProjectOriginalName // "") | ascii_downcase | contains($name | ascii_downcase)))] | first | .memberProjectId // empty')
   TARGET_NAME=$(echo "$MEMBERS_BODY" | jq -r --arg name "$PROJECT" '[.[] | select((.memberProjectName | ascii_downcase | contains($name | ascii_downcase)) or ((.memberProjectOriginalName // "") | ascii_downcase | contains($name | ascii_downcase)))] | first | .memberProjectName // empty')
 
+  # メンバー一覧に見つからない場合、inventory API にフォールバック（Team 未登録でも問い合わせ可能にする）
   if [ -z "$TARGET_ID" ]; then
-    echo "エラー: '$PROJECT' に一致するメンバーが見つかりません"
-    echo ""
-    echo "登録済みメンバー:"
-    echo "$MEMBERS_BODY" | jq -r '.[] | "  - \\(.memberProjectName) (\\(.memberMachineName))"'
+    INV_RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+      -H "Authorization: Bearer $TOKEN" \\
+      "\${API_URL}/api/agent/inventory" 2>&1) || true
+
+    INV_HTTP=$(echo "$INV_RESPONSE" | tail -1)
+    INV_BODY=$(echo "$INV_RESPONSE" | sed '$d')
+
+    if [ "$INV_HTTP" = "200" ]; then
+      TARGET_ID=$(echo "$INV_BODY" | jq -r --arg name "$PROJECT" '[.[].projects[] | select((.name | ascii_downcase | contains($name | ascii_downcase)) or ((.originalName // "") | ascii_downcase | contains($name | ascii_downcase)))] | first | .id // empty')
+      TARGET_NAME=$(echo "$INV_BODY" | jq -r --arg name "$PROJECT" '[.[].projects[] | select((.name | ascii_downcase | contains($name | ascii_downcase)) or ((.originalName // "") | ascii_downcase | contains($name | ascii_downcase)))] | first | .name // empty')
+    fi
+  fi
+
+  if [ -z "$TARGET_ID" ]; then
+    echo "エラー: '$PROJECT' に一致するプロジェクトが見つかりません"
     exit 1
   fi
 
