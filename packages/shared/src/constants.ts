@@ -26,6 +26,8 @@ export const SHORTCUTS: Record<string, string> = {
   'u': 'update',   // Agent バージョン確認・更新
   'update': 'update',
   'q': 'quit',
+  'd': 'disconnect',  // 接続プロジェクト解除（Manager 用）
+  'disconnect': 'disconnect',
   'h': 'help',
   'log': 'log',
   'sum': 'summary',

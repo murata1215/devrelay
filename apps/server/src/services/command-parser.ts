@@ -283,6 +283,9 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       return { type: 'update' };
     case 'q':
       return { type: 'quit' };
+    case 'd':
+    case 'disconnect':
+      return { type: 'disconnect' };
     case 'h':
       return { type: 'help' };
     case 'log':

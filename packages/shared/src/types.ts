@@ -518,7 +518,8 @@ export type UserCommand =
   | { type: 'testflight'; subcommand: 'copy'; srcName: string; destName: string }
   | { type: 'testflight'; subcommand: 'help' }
   | { type: 'ask:member'; targetProject: string; question: string }
-  | { type: 'teamexec:member'; targetProject: string; instruction: string };
+  | { type: 'teamexec:member'; targetProject: string; instruction: string }
+  | { type: 'disconnect' };  // 接続プロジェクト解除（Manager 用）
 
 // -----------------------------------------------------------------------------
 // User Context (for command parsing)
@@ -535,6 +536,8 @@ export interface UserContext {
   currentSessionId?: string;
   currentProjectName?: string;
   lastProjectId?: string;  // 前回接続したプロジェクトID（再接続用）
+  lastRemoteProjectId?: string;  // 直近の teamexec 先プロジェクトID（接続プロジェクト方式）
+  lastRemoteProjectName?: string;  // 直近の teamexec 先プロジェクト表示名
 }
 
 // -----------------------------------------------------------------------------

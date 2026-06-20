@@ -255,6 +255,9 @@ export async function executeCommand(
     case 'teamexec:member':
       return handleTeamExec(context, command.targetProject, command.instruction);
 
+    case 'disconnect':
+      return handleDisconnectRemote(context);
+
     default:
       return '❓ 不明なコマンドです。`h` でヘルプを表示できます。';
   }
@@ -608,6 +611,19 @@ async function handleClear(context: UserContext): Promise<string> {
 }
 
 async function handleExec(context: UserContext, customPrompt?: string): Promise<string> {
+  // 接続プロジェクト（teamexec 先）がある場合、そちらに転送する
+  if (context.lastRemoteProjectId) {
+    const remoteName = context.lastRemoteProjectName || context.lastRemoteProjectId;
+    console.log(`🔗 [exec] Forwarding to connected project: ${remoteName}`);
+    await sendMessage(context.platform, context.chatId, `🔗 ${remoteName} に転送中...`);
+
+    // customPrompt がなければデフォルトの exec プロンプト
+    const instruction = customPrompt || 'exec（プランに従って実装を開始してください）';
+
+    // 既存の handleTeamExec を呼び出す（接続プロジェクト名で検索）
+    return handleTeamExec(context, remoteName, instruction);
+  }
+
   // プロジェクト未接続の場合、自動再接続を試みる
   if (!context.currentSessionId || !context.currentMachineId) {
     // 前回の接続先がある場合は自動再接続を試みる
@@ -1640,7 +1656,11 @@ async function handleTeamExec(
       data: { status: 'ended', endedAt: new Date() },
     });
 
-    return `🔧 **${targetProject.name}** の実行結果:\n\n${result.output}`;
+    // teamexec 成功 → 接続プロジェクトとして記憶（以降の exec/w がこのプロジェクトに転送される）
+    context.lastRemoteProjectId = targetProject.id;
+    context.lastRemoteProjectName = targetProject.displayName ?? targetProject.name;
+
+    return `🔧 **${targetProject.name}** の実行結果:\n\n${result.output}\n\n🔗 ${targetProject.name} に接続中（\`e\` / \`w\` はこのプロジェクトに転送されます。\`d\` で解除）`;
   } catch (error: any) {
     await prisma.session.update({
       where: { id: tempSessionId },
@@ -1649,6 +1669,22 @@ async function handleTeamExec(
 
     return `❌ ${targetProject.name} への実行依頼が失敗しました: ${error.message}`;
   }
+}
+
+/**
+ * 接続プロジェクト（teamexec 先）を解除する
+ * 解除後、exec/w コマンドは自身のプロジェクトに戻る
+ */
+async function handleDisconnectRemote(context: UserContext): Promise<string> {
+  if (!context.lastRemoteProjectId) {
+    return '接続中のリモートプロジェクトはありません。';
+  }
+
+  const remoteName = context.lastRemoteProjectName || context.lastRemoteProjectId;
+  context.lastRemoteProjectId = undefined;
+  context.lastRemoteProjectName = undefined;
+
+  return `🔌 ${remoteName} との接続を解除しました。\`e\` / \`w\` は自身のプロジェクトに戻ります。`;
 }
 
 // -----------------------------------------------------------------------------
