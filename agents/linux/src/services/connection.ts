@@ -25,7 +25,8 @@ import type {
   DocSyncPayload,
   DocDeletePayload,
   ProjectFileReadPayload,
-  PlanLatestRequestPayload
+  PlanLatestRequestPayload,
+  ScaffoldCreatePayload,
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -52,7 +53,7 @@ import { ensureSkillFiles } from './skill-manager.js';
 import { exec as execCallback, spawn } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
-import { readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises';
+import { readFile, writeFile, unlink, mkdir, readdir, stat, access } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 const execAsync = promisify(execCallback);
@@ -457,6 +458,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:tool:approval:response':
       // Server からのツール承認レスポンスを ai-runner の pendingToolApprovals に転送
       resolveToolApproval(message.payload.requestId, message.payload);
+      break;
+
+    case 'server:scaffold:create':
+      handleScaffoldCreate(message.payload, config);
       break;
   }
 }
@@ -2272,5 +2277,131 @@ async function handleProjectFileRead(payload: ProjectFileReadPayload) {
         payload: { machineId: currentMachineId, requestId, content: null, error: notFound ? undefined : err.message },
       });
     }
+  }
+}
+
+/**
+ * Server からのプロジェクト雛形作成指示を処理する
+ * テンプレートファイルを展開し、CLAUDE.md を配置し、npm install を実行する
+ */
+async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: AgentConfig) {
+  const { name, template, scaffoldDir } = payload;
+  const baseDir = scaffoldDir || config.projectsDirs[0] || homedir();
+  const projectDir = join(baseDir, name);
+
+  console.log(`📦 Scaffold: creating ${name} (${template}) in ${baseDir}`);
+
+  try {
+    // ディレクトリが既に存在するかチェック
+    try {
+      await access(projectDir);
+      throw new Error(`ディレクトリ '${projectDir}' は既に存在します`);
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') throw err;
+      // ENOENT は期待どおり（存在しない）
+    }
+
+    // テンプレートファイル群を取得
+    const templateFiles = await getTemplateFiles(template);
+    if (!templateFiles) {
+      throw new Error(`テンプレート '${template}' は Agent 側で定義されていません`);
+    }
+
+    // ディレクトリ作成
+    await mkdir(projectDir, { recursive: true });
+
+    // テンプレートファイルを展開（{{NAME}} を置換）
+    for (const [relPath, content] of Object.entries(templateFiles)) {
+      const fullPath = join(projectDir, relPath);
+      const dir = dirname(fullPath);
+      await mkdir(dir, { recursive: true });
+      await writeFile(fullPath, content.replace(/\{\{NAME\}\}/g, name), 'utf-8');
+    }
+    console.log(`📦 Scaffold: template files written (${Object.keys(templateFiles).length} files)`);
+
+    // CLAUDE.md 配置
+    const claudeMd = await getScaffoldClaudeMd(template, name);
+    await writeFile(join(projectDir, 'CLAUDE.md'), claudeMd, 'utf-8');
+
+    // rules/devrelay.md 配置（Agreement テンプレートがあれば）
+    const rulesDir = join(projectDir, 'rules');
+    await mkdir(rulesDir, { recursive: true });
+    // 簡易 Agreement placeholder（Agent 起動後に agreement:apply で上書きされる）
+    await writeFile(
+      join(rulesDir, 'devrelay.md'),
+      '<!-- DevRelay Agreement -->\nSee DevRelay WebUI for agreement management.\n<!-- /DevRelay Agreement -->\n',
+      'utf-8',
+    );
+
+    // npm install（package.json がある場合）
+    const pkgJsonPath = join(projectDir, 'package.json');
+    try {
+      await access(pkgJsonPath);
+      console.log(`📦 Scaffold: running npm install in ${projectDir}...`);
+      await execAsync('npm install', { cwd: projectDir, timeout: 120000 });
+      console.log(`📦 Scaffold: npm install completed`);
+    } catch (installErr: any) {
+      if (installErr.code !== 'ENOENT') {
+        console.warn(`⚠️ Scaffold: npm install failed (non-critical): ${installErr.message}`);
+      }
+    }
+
+    // プロジェクト再スキャン → Server に通知
+    await autoDiscoverProjects(baseDir);
+    const projects = await loadProjects(config);
+    sendProjectsUpdate(projects);
+    console.log(`📦 Scaffold: project list synced (${projects.length} projects)`);
+
+    // 完了通知
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:scaffold:created',
+        payload: { machineId: currentMachineId, name, path: projectDir, ok: true },
+      });
+    }
+    console.log(`✅ Scaffold completed: ${name} → ${projectDir}`);
+  } catch (err: any) {
+    console.error(`❌ Scaffold failed: ${err.message}`);
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:scaffold:created',
+        payload: { machineId: currentMachineId, name, path: '', ok: false, error: err.message },
+      });
+    }
+  }
+}
+
+/**
+ * テンプレート名からファイル群を取得する
+ * Agent 側にテンプレート定義を内蔵（Server から配信ではなく Agent ビルドに含まれる）
+ */
+async function getTemplateFiles(template: string): Promise<Record<string, string> | null> {
+  switch (template) {
+    case 'vite-react-web': {
+      // web-templates は動的 import（Agent ビルドに含まれる）
+      const { WEB_TEMPLATE_FILES } = await import('./scaffold-templates.js');
+      return WEB_TEMPLATE_FILES;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * scaffold 後に配置する CLAUDE.md を生成する（同期版: テンプレート定義から取得）
+ */
+async function getScaffoldClaudeMd(template: string, name: string): Promise<string> {
+  const defaultMd = `# ${name}\n\n新しいプロジェクトです。\n`;
+  try {
+    switch (template) {
+      case 'vite-react-web': {
+        const { WEB_CLAUDE_MD } = await import('./scaffold-templates.js');
+        return WEB_CLAUDE_MD.replace(/\{\{NAME\}\}/g, name);
+      }
+      default:
+        return defaultMd;
+    }
+  } catch {
+    return defaultMd;
   }
 }

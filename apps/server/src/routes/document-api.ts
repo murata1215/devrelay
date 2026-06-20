@@ -18,7 +18,7 @@ import crypto from 'crypto';
 import { prisma } from '../db/client.js';
 import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
-import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery } from '../services/agent-manager.js';
+import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery, executeScaffold, getConnectedAgents } from '../services/agent-manager.js';
 import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
 import type { AiTool } from '@devrelay/shared';
 
@@ -166,10 +166,53 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     return reply.send(fileData);
   });
 
+  // ---------------------------------------------------------------------------
+  // GET /api/agent/inventory
+  // ユーザーの全マシン・全プロジェクト一覧（Team に依存しない）
+  // Manager のインベントリ確認用。devrelay-list-inventory スキルから呼び出される。
+  //
+  // 認証: Authorization: Bearer <machine_token>
+  // ---------------------------------------------------------------------------
+  app.get('/api/agent/inventory', async (request: FastifyRequest, reply: FastifyReply) => {
+    const auth = await authenticateByMachineTokenFull(request);
+    if (!auth) {
+      return reply.status(401).send({ error: 'Invalid or missing machine token' });
+    }
+
+    // ユーザーの全マシン・全プロジェクトを取得（Team 登録不要）
+    const machines = await prisma.machine.findMany({
+      where: { userId: auth.userId, deletedAt: null },
+      include: {
+        projects: {
+          orderBy: { lastUsedAt: 'desc' },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    // connectedAgents Map でオンライン判定（api.ts の /api/machines と同パターン）
+    const connectedAgentIds = getConnectedAgents();
+
+    return reply.send(machines.map(m => ({
+      machine: m.displayName || m.name,
+      machineName: m.name,
+      machineId: m.id,
+      online: connectedAgentIds.has(m.id),
+      projects: m.projects.map(p => ({
+        name: p.displayName ?? p.name,
+        originalName: p.name,
+        id: p.id,
+        path: p.path,
+        description: (p as any).description ?? null,
+        defaultAi: p.defaultAi,
+      })),
+    })));
+  });
+
   /**
    * GET /api/agent/members
    * このマシンのプロジェクトと同じチームに属するメンバー一覧を取得
-   * スキルから呼び出されて利用可能なメンバーを確認する
+   * スキルから呼び出されて利用可能なメンバーを確認する（ask-member / teamexec 用）
    *
    * 認証: Authorization: Bearer <machine_token>
    */
@@ -501,6 +544,97 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       if (clientDisconnected) return;
       console.error(`🚀 Team exec failed: ${error.message}`);
       return reply.status(504).send({ error: `Team exec timed out or failed: ${error.message}` });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/agent/scaffold
+  // プロジェクト雛形作成: Manager スキルから呼び出される
+  // 対象マシンにテンプレート展開を指示し、完了を待って応答する
+  //
+  // Body: { machineName: string, name: string, template: string }
+  // 認証: Authorization: Bearer <machine_token>
+  // ---------------------------------------------------------------------------
+  app.post('/api/agent/scaffold', async (request: FastifyRequest, reply: FastifyReply) => {
+    const auth = await authenticateByMachineTokenFull(request);
+    if (!auth) {
+      return reply.status(401).send({ error: 'Invalid or missing machine token' });
+    }
+
+    const { machineName, name, template } = (request.body || {}) as {
+      machineName?: string;
+      name?: string;
+      template?: string;
+    };
+
+    if (!machineName || !name || !template) {
+      return reply.status(400).send({ error: 'machineName, name, and template are required' });
+    }
+
+    // プロジェクト名バリデーション（testflight-manager と同じルール）
+    if (!/^[a-z][a-z0-9-]{2,29}$/.test(name)) {
+      return reply.status(400).send({
+        error: 'プロジェクト名は英小文字で始まり、英小文字・数字・ハイフンで構成、3〜30文字にしてください。',
+      });
+    }
+
+    // 予約語チェック
+    const reserved = ['devrelay', 'app', 'api', 'www', 'mail', 'admin', 'test', 'staging', 'prod'];
+    if (reserved.includes(name)) {
+      return reply.status(400).send({ error: `'${name}' は予約済みのため使用できません。` });
+    }
+
+    // テンプレート名チェック
+    const validTemplates = ['vite-react-web'];
+    if (!validTemplates.includes(template)) {
+      return reply.status(400).send({ error: `テンプレート '${template}' は存在しません。利用可能: ${validTemplates.join(', ')}` });
+    }
+
+    // 対象マシンの検索（同一ユーザーのマシンを machineName で部分一致）
+    const machine = await prisma.machine.findFirst({
+      where: {
+        userId: auth.userId,
+        deletedAt: null,
+        OR: [
+          { name: { contains: machineName } },
+          { displayName: { contains: machineName } },
+        ],
+      },
+    });
+
+    if (!machine) {
+      return reply.status(404).send({ error: `マシン '${machineName}' が見つかりません` });
+    }
+
+    if (machine.status !== 'online' || !isAgentConnected(machine.id)) {
+      return reply.status(503).send({ error: `マシン '${machineName}' はオフラインです` });
+    }
+
+    // 同名プロジェクトの既存チェック
+    const existing = await prisma.project.findFirst({
+      where: { machineId: machine.id, name },
+    });
+    if (existing) {
+      return reply.status(409).send({ error: `プロジェクト '${name}' は既に存在します` });
+    }
+
+    try {
+      console.log(`📦 Scaffold requested: ${name} (${template}) → ${machine.name}`);
+      const result = await executeScaffold(machine.id, name, template);
+
+      if (!result.ok) {
+        return reply.status(500).send({ error: result.error || 'Scaffold failed' });
+      }
+
+      return reply.send({
+        ok: true,
+        name: result.name,
+        path: result.path,
+        machine: machine.displayName || machine.name,
+      });
+    } catch (error: any) {
+      console.error(`📦 Scaffold failed: ${error.message}`);
+      return reply.status(504).send({ error: `Scaffold failed: ${error.message}` });
     }
   });
 }

@@ -6,6 +6,38 @@
 
 ## 実装済み機能
 
+### #240: Manager（オーケストレーター）機能 v1 (2026-06-20)
+
+**案B（オーケストレーター Agent + スキル）** で Manager 機能を実装。Manager は通常プロジェクト上の Claude Code として動作し、既存の ask/teamexec/Plan-Exec を再利用してユーザーの全 Agent を統括する。
+
+#### 新規 API
+- **`GET /api/agent/inventory`**: ユーザーの全マシン・全プロジェクト一覧（Team 登録に依存しない）。Manager のインベントリ確認用。`prisma.machine.findMany` + `getConnectedAgents()` でオンライン判定
+- **`POST /api/agent/scaffold`**: 対象マシンにプロジェクト雛形を作成。バリデーション（`^[a-z][a-z0-9-]{2,29}$` + 予約語）→ WS `server:scaffold:create` 送出 → Agent 応答待ち（5 分 timeout）
+
+#### 新規 WS メッセージ型
+- `server:scaffold:create` (Server → Agent): `{ name, template, scaffoldDir? }`
+- `agent:scaffold:created` (Agent → Server): `{ machineId, name, path, ok, error? }`
+
+#### Agent 側変更
+- **scaffold ハンドラ** (`connection.ts`): テンプレート展開 → CLAUDE.md/rules 配置 → `npm install` → プロジェクト再スキャン → `agent:projects` 通知 → `agent:scaffold:created` 応答
+- **scaffold テンプレート** (`scaffold-templates.ts`): `vite-react-web` テンプレート（Vite + React 19 + TypeScript + Tailwind CSS v4）
+- **スキル自動生成拡張** (`skill-manager.ts`): Agent 起動時に以下 2 つのスキルを `~/.claude/skills/` に自動生成
+  - `devrelay-list-inventory`: `GET /api/agent/inventory` を呼び出してインベントリ一覧表示
+  - `devrelay-create-project`: `POST /api/agent/scaffold` を呼び出してプロジェクト雛形作成
+
+#### Server 側変更
+- **テンプレート定義** (`apps/server/src/templates/web-templates.ts`): `vite-react-web` 1 種
+- **agent-manager.ts**: `pendingScaffolds` Map + `handleScaffoldCreated()` + `executeScaffold()` 追加
+- **document-api.ts**: inventory API 新設 + scaffold API 新設
+
+#### Manager プロジェクト
+- `.devrelay-output/manager-claude-md.md` として Manager 用 CLAUDE.md テンプレートを出力
+- オーケストレーター行動規範: 聞き取り → 調査 → ブリーフ生成 → scaffold + ビルド委譲
+
+#### 設計判断
+- **`/api/agent/inventory` は Team に依存しない**: `/api/agent/members` は Team ベースのメンバー一覧（ask-member 用）、inventory は userId ベースの全プロジェクト一覧（Manager 用）。初期実装では members の `?detail=true` パラメータで統合しようとしたが、Team 未登録プロジェクトが見えない問題で分離
+- **UserSettings.manager_project は v1 スキップ**: ルーティング未実装のため。Manager は通常プロジェクトとして接続するだけ
+- **scaffoldDir は config.yaml に追加しない（v1）**: `projectsDirs[0]` をデフォルト使用
 
 ### #239: Terminal Mode — finish() 経由の正常完了で usageData が欠落するバグ修正 (2026-06-16)
 

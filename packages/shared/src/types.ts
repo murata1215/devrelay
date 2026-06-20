@@ -110,7 +110,8 @@ export type AgentMessage =
   | { type: 'agent:project:file:content'; payload: ProjectFileContentPayload }
   | { type: 'agent:tool:approval:request'; payload: ToolApprovalRequestPayload }
   | { type: 'agent:tool:approval:auto'; payload: ToolApprovalAutoPayload }
-  | { type: 'agent:plan:content'; payload: PlanContentPayload };
+  | { type: 'agent:plan:content'; payload: PlanContentPayload }
+  | { type: 'agent:scaffold:created'; payload: ScaffoldCreatedPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -254,7 +255,8 @@ export type ServerToAgentMessage =
   | { type: 'server:project:file:read'; payload: ProjectFileReadPayload }
   | { type: 'server:tool:approval:response'; payload: ToolApprovalResponsePayload }
   | { type: 'server:plan:latest'; payload: PlanLatestRequestPayload }
-  | { type: 'server:agent:restart'; payload: {} };
+  | { type: 'server:agent:restart'; payload: {} }
+  | { type: 'server:scaffold:create'; payload: ScaffoldCreatePayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -656,3 +658,33 @@ export type ServerToWebMessage =
   | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:pong' };
+
+// -----------------------------------------------------------------------------
+// Scaffold（Manager → Agent プロジェクト雛形展開）
+// -----------------------------------------------------------------------------
+
+/** Server → Agent: プロジェクト雛形作成指示 */
+export interface ScaffoldCreatePayload {
+  /** プロジェクト名（英小文字・数字・ハイフン） */
+  name: string;
+  /** テンプレート名（例: 'vite-react-web'） */
+  template: string;
+  /** 雛形展開先ディレクトリ（未指定なら projectsDirs[0]） */
+  scaffoldDir?: string;
+}
+
+/** Agent → Server: プロジェクト雛形作成結果 */
+export interface ScaffoldCreatedPayload {
+  machineId: string;
+  /** プロジェクト名 */
+  name: string;
+  /** 作成されたプロジェクトのフルパス */
+  path: string;
+  /** 成功/失敗 */
+  ok: boolean;
+  /** 失敗時のエラーメッセージ */
+  error?: string;
+}
+
+/** 利用可能なテンプレート名 */
+export type ScaffoldTemplate = 'vite-react-web';

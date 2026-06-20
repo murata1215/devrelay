@@ -19,6 +19,7 @@ import {
   type ToolApprovalPromptPayload,
   type ServerToWebMessage,
   type Platform,
+  type ScaffoldCreatedPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo } from './session-manager.js';
@@ -62,6 +63,9 @@ const pendingAiSwitchRequests = new Map<string, HistoryRequest<AiSwitchedPayload
 // クロスプロジェクトクエリの待機: sessionId → { resolve, reject, timeout }
 // ask-member API が一時セッションの完了を待つために使用
 const pendingCrossQueries = new Map<string, HistoryRequest<{ output: string; files?: FileAttachment[] }>>();
+
+// Scaffold 要求の待機: requestId → { resolve, reject, timeout }
+const pendingScaffolds = new Map<string, HistoryRequest<{ name: string; path: string; ok: boolean; error?: string }>>();
 
 /**
  * クロスプロジェクトクエリの待機をキャンセルする（HTTP 切断時のクリーンアップ用）
@@ -210,6 +214,9 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:plan:content':
           handlePlanContent(message.payload);
+          break;
+        case 'agent:scaffold:created':
+          handleScaffoldCreated(message.payload);
           break;
       }
     } catch (err) {
@@ -1988,6 +1995,55 @@ function resolveToolApprovalOnPlatforms(sessionId: string, requestId: string, be
         console.error('Failed to resolve Telegram tool approval:', err));
     }
   }
+}
+
+/**
+ * Agent からの scaffold 完了応答を処理する
+ * pendingScaffolds の Promise を resolve して API レスポンスに返す
+ */
+function handleScaffoldCreated(payload: ScaffoldCreatedPayload) {
+  // requestId は `scaffold_<machineId>_<name>` 形式
+  const requestId = `scaffold_${payload.machineId}_${payload.name}`;
+  const pending = pendingScaffolds.get(requestId);
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingScaffolds.delete(requestId);
+    pending.resolve({ name: payload.name, path: payload.path, ok: payload.ok, error: payload.error });
+    console.log(`📦 Scaffold completed: ${payload.name} → ${payload.ok ? payload.path : payload.error}`);
+  }
+}
+
+/**
+ * Agent にプロジェクト雛形作成を指示し、完了を待つ
+ * @param machineId 対象マシン ID
+ * @param name プロジェクト名
+ * @param template テンプレート名
+ * @param scaffoldDir 雛形展開先ディレクトリ（任意）
+ * @returns 作成結果
+ */
+export async function executeScaffold(
+  machineId: string,
+  name: string,
+  template: string,
+  scaffoldDir?: string
+): Promise<{ name: string; path: string; ok: boolean; error?: string }> {
+  const requestId = `scaffold_${machineId}_${name}`;
+
+  return new Promise((resolve, reject) => {
+    // タイムアウト: 5 分
+    const timeout = setTimeout(() => {
+      pendingScaffolds.delete(requestId);
+      reject(new Error('Scaffold request timed out (5 minutes)'));
+    }, 5 * 60 * 1000);
+
+    pendingScaffolds.set(requestId, { resolve, reject, timeout });
+
+    // Agent に scaffold 指示を送出
+    sendToAgent(machineId, {
+      type: 'server:scaffold:create',
+      payload: { name, template, scaffoldDir },
+    });
+  });
 }
 
 /**

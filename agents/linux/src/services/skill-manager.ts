@@ -26,6 +26,14 @@ const SCRIPTS_DIR = path.join(SKILL_DIR, 'scripts');
 const ASK_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-ask-member');
 const ASK_SCRIPTS_DIR = path.join(ASK_SKILL_DIR, 'scripts');
 
+/** devrelay-list-inventory スキルディレクトリ */
+const INVENTORY_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-list-inventory');
+const INVENTORY_SCRIPTS_DIR = path.join(INVENTORY_SKILL_DIR, 'scripts');
+
+/** devrelay-create-project スキルディレクトリ */
+const CREATE_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-create-project');
+const CREATE_SCRIPTS_DIR = path.join(CREATE_SKILL_DIR, 'scripts');
+
 /**
  * WebSocket URL を HTTP URL に変換
  * ws:// → http://, wss:// → https://, /ws/agent パスを除去
@@ -375,7 +383,210 @@ fi
 }
 
 /**
- * devrelay-docs + devrelay-ask-member スキルファイルを作成・更新する
+ * list-inventory SKILL.md の内容を生成
+ */
+function generateInventorySkillMd(): string {
+  return `---
+name: devrelay-list-inventory
+description: ユーザーの全マシン・プロジェクト・オンライン状態を一覧表示します。「どのサーバーがあるか」「プロジェクト一覧を見せて」「何が動いてる？」など、インベントリ確認に使用します。
+allowed-tools: Bash(bash ~/.claude/skills/devrelay-list-inventory/scripts/list.sh *)
+---
+
+## DevRelay インベントリ一覧
+
+ユーザーの全マシン・プロジェクト・オンライン状態を取得します。
+
+### 一覧表示
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-list-inventory/scripts/list.sh
+\\\`\\\`\\\`
+
+結果にはマシンごとにプロジェクト名、パス、AI ツール、オンライン状態が含まれます。
+`;
+}
+
+/**
+ * list.sh スクリプトの内容を生成
+ */
+function generateInventoryScript(serverUrl: string, token: string): string {
+  const httpUrl = wsToHttpUrl(serverUrl);
+
+  return `#!/bin/bash
+# DevRelay インベントリ一覧スクリプト
+# Agent が自動生成。手動編集は次回起動時に上書きされます。
+
+set -euo pipefail
+
+API_URL="${httpUrl}"
+TOKEN="${token}"
+
+RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  "\${API_URL}/api/agent/inventory" 2>&1) || {
+  echo "エラー: API リクエストに失敗しました"
+  echo "$RESPONSE"
+  exit 1
+}
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "エラー (HTTP $HTTP_CODE): $BODY"
+  exit 1
+fi
+
+if command -v jq &>/dev/null; then
+  MACHINE_COUNT=$(echo "$BODY" | jq 'length')
+  if [ "$MACHINE_COUNT" = "0" ]; then
+    echo "登録済みマシンはありません。"
+    exit 0
+  fi
+
+  echo "=== インベントリ ($MACHINE_COUNT マシン) ==="
+  echo ""
+  echo "$BODY" | jq -r '.[] | "\\(if .online then "🟢" else "⚪" end) \\(.machine) (\\(.machineName))\\(.projects | map("  - \\(.name) [\\(.defaultAi)] \\(.path)") | "\\n" + join("\\n"))"'
+else
+  echo "$BODY"
+fi
+`;
+}
+
+/**
+ * create-project SKILL.md の内容を生成
+ */
+function generateCreateProjectSkillMd(): string {
+  return `---
+name: devrelay-create-project
+description: 対象マシンに新しいプロジェクトの雛形を作成します。「新しいプロジェクトを作って」「yyyyにWebアプリを作成して」など、新規プロジェクトの scaffold に使用します。
+allowed-tools: Bash(bash ~/.claude/skills/devrelay-create-project/scripts/create.sh *)
+---
+
+## DevRelay プロジェクト作成（Scaffold）
+
+対象マシンに新しいプロジェクトの雛形を作成します。
+
+### プロジェクト作成
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-create-project/scripts/create.sh --machine <マシン名> --name <プロジェクト名> --template <テンプレート名>
+\\\`\\\`\\\`
+
+### 利用可能なテンプレート
+
+| テンプレート | 説明 |
+|-------------|------|
+| \\\`vite-react-web\\\` | Vite + React 19 + TypeScript + Tailwind CSS v4 |
+
+### パラメータ
+
+- \\\`--machine\\\`: 対象マシン名（部分一致で検索）
+- \\\`--name\\\`: プロジェクト名（英小文字で始まり、英小文字・数字・ハイフンで構成、3〜30文字）
+- \\\`--template\\\`: テンプレート名（上記参照）
+
+### 例
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-create-project/scripts/create.sh --machine yyyy --name mviewer-web --template vite-react-web
+\\\`\\\`\\\`
+
+### 注意事項
+- 対象マシンのエージェントがオンラインである必要があります
+- プロジェクト名は一意である必要があります
+- 作成後、プロジェクトは自動的にインベントリに登録されます
+- **Bash ツールの timeout を 360000（6分）に設定してください**（npm install に時間がかかる場合があります）
+`;
+}
+
+/**
+ * create.sh スクリプトの内容を生成
+ */
+function generateCreateScript(serverUrl: string, token: string): string {
+  const httpUrl = wsToHttpUrl(serverUrl);
+
+  return `#!/bin/bash
+# DevRelay プロジェクト作成（Scaffold）スクリプト
+# Agent が自動生成。手動編集は次回起動時に上書きされます。
+
+set -euo pipefail
+
+API_URL="${httpUrl}"
+TOKEN="${token}"
+
+# 引数チェック
+if [ $# -eq 0 ]; then
+  echo "使い方:"
+  echo "  bash $0 --machine <マシン名> --name <プロジェクト名> --template <テンプレート名>"
+  echo ""
+  echo "テンプレート:"
+  echo "  vite-react-web  Vite + React 19 + TypeScript + Tailwind CSS v4"
+  exit 1
+fi
+
+# 引数パース
+MACHINE=""
+NAME=""
+TEMPLATE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --machine) MACHINE="$2"; shift 2 ;;
+    --name) NAME="$2"; shift 2 ;;
+    --template) TEMPLATE="$2"; shift 2 ;;
+    *) echo "不明な引数: $1"; exit 1 ;;
+  esac
+done
+
+if [ -z "$MACHINE" ] || [ -z "$NAME" ] || [ -z "$TEMPLATE" ]; then
+  echo "エラー: --machine, --name, --template の全てが必要です"
+  exit 1
+fi
+
+echo "📦 プロジェクト作成中..."
+echo "  マシン: $MACHINE"
+echo "  名前: $NAME"
+echo "  テンプレート: $TEMPLATE"
+echo ""
+
+# jq で安全に JSON を構築
+JSON_BODY=$(jq -n --arg m "$MACHINE" --arg n "$NAME" --arg t "$TEMPLATE" '{machineName: $m, name: $n, template: $t}' | tr -d '\\r')
+
+RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -f -w "\\n%{http_code}" --max-time 300 \\
+  -X POST \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -d @- \\
+  "\${API_URL}/api/agent/scaffold" 2>&1) || {
+  echo "エラー: プロジェクト作成に失敗しました（タイムアウトまたは接続エラー）"
+  echo "$RESPONSE"
+  exit 1
+}
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "エラー (HTTP $HTTP_CODE):"
+  if command -v jq &>/dev/null; then
+    echo "$BODY" | jq -r '.error // .'
+  else
+    echo "$BODY"
+  fi
+  exit 1
+fi
+
+echo "✅ プロジェクト作成完了！"
+if command -v jq &>/dev/null; then
+  echo "  名前: $(echo "$BODY" | jq -r '.name')"
+  echo "  パス: $(echo "$BODY" | jq -r '.path')"
+  echo "  マシン: $(echo "$BODY" | jq -r '.machine')"
+fi
+`;
+}
+
+/**
+ * devrelay-docs + devrelay-ask-member + devrelay-list-inventory + devrelay-create-project
+ * スキルファイルを作成・更新する
  * Agent 接続成功時に呼び出される
  *
  * @param config - Agent 設定（serverUrl, token を使用）
@@ -406,7 +617,31 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
       mode: 0o755,
     });
 
-    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-docs/ + devrelay-ask-member/');
+    // devrelay-list-inventory スキル
+    await fs.mkdir(INVENTORY_SCRIPTS_DIR, { recursive: true });
+
+    const inventorySkillMdPath = path.join(INVENTORY_SKILL_DIR, 'SKILL.md');
+    await fs.writeFile(inventorySkillMdPath, generateInventorySkillMd(), 'utf-8');
+
+    const listShPath = path.join(INVENTORY_SCRIPTS_DIR, 'list.sh');
+    await fs.writeFile(listShPath, generateInventoryScript(config.serverUrl, config.token), {
+      encoding: 'utf-8',
+      mode: 0o755,
+    });
+
+    // devrelay-create-project スキル
+    await fs.mkdir(CREATE_SCRIPTS_DIR, { recursive: true });
+
+    const createSkillMdPath = path.join(CREATE_SKILL_DIR, 'SKILL.md');
+    await fs.writeFile(createSkillMdPath, generateCreateProjectSkillMd(), 'utf-8');
+
+    const createShPath = path.join(CREATE_SCRIPTS_DIR, 'create.sh');
+    await fs.writeFile(createShPath, generateCreateScript(config.serverUrl, config.token), {
+      encoding: 'utf-8',
+      mode: 0o755,
+    });
+
+    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,list-inventory,create-project}/');
   } catch (error: any) {
     console.error('Failed to create skill files:', error.message);
   }
