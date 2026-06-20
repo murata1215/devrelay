@@ -111,7 +111,7 @@ model Project {
   defaultAi    String    @default("claude")
   description  String?
   lastUsedAt   DateTime?
-  terminalMode Boolean   @default(false)  // 端末インタフェースモード（PTY 経由で claude --continue 起動）
+  terminalMode Boolean   @default(true)   // 端末インタフェースモード（PTY 経由で claude 起動）。新規プロジェクトはデフォルト有効
   createdAt    DateTime  @default(now())
 
   sessions       Session[]
