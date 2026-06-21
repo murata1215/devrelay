@@ -108,6 +108,16 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1): Promi
     }
   }
 
+  // baseDir 自体も CLAUDE.md チェック（ホームディレクトリ直下に CLAUDE.md がある場合に対応）
+  const baseIsProject = await looksLikeProject(baseDir);
+  if (baseIsProject && !existingPaths.has(baseDir)) {
+    found.push({
+      name: path.basename(baseDir) || baseDir,
+      path: baseDir,
+      defaultAi: 'claude',
+    });
+  }
+
   await scan(baseDir, 0);
   return found;
 }

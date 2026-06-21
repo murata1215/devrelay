@@ -6,6 +6,13 @@
 
 ## 実装済み機能
 
+### #241: scanProjects が baseDir 自体の CLAUDE.md を認識しないバグ修正 (2026-06-21)
+
+- **症状**: ホームディレクトリ直下に `CLAUDE.md` を置いても Agent がプロジェクトとして認識しない
+- **根本原因**: `scanProjects()` の `scan()` 関数は `baseDir` のサブディレクトリのみ走査し、`baseDir` 自体に `CLAUDE.md` があるかチェックしていなかった
+- **修正**: `scan()` 呼び出し前に `baseDir` 自体を `looksLikeProject()` でチェック。該当すれば `path.basename(baseDir)` 名でプロジェクト登録
+- 対象: `agents/linux/src/services/projects.ts` — `scanProjects()` 関数（1 ファイル 8 行追加）
+
 ### #240: Manager（オーケストレーター）機能 v1 (2026-06-20)
 
 **案B（オーケストレーター Agent + スキル）** で Manager 機能を実装。Manager は通常プロジェクト上の Claude Code として動作し、既存の ask/teamexec/Plan-Exec を再利用してユーザーの全 Agent を統括する。
