@@ -38,6 +38,7 @@
 - **`/api/agent/inventory` は Team に依存しない**: `/api/agent/members` は Team ベースのメンバー一覧（ask-member 用）、inventory は userId ベースの全プロジェクト一覧（Manager 用）。初期実装では members の `?detail=true` パラメータで統合しようとしたが、Team 未登録プロジェクトが見えない問題で分離
 - **ask-member の inventory フォールバック**: `ask.sh` で `/api/agent/members` に一致がない場合、`/api/agent/inventory` で再検索。これにより Team 未登録プロジェクトにも ask / teamexec が可能。サーバー側の `ask-member` / `teamexec-member` API は `targetProjectId` + `userId` で所有権チェックするため Team 登録不要
 - **接続プロジェクト方式**: teamexec 成功後にターゲットを「接続プロジェクト」として記憶。以降の `e` / `w` コマンドはそのプロジェクトに自動転送される。`d` / `disconnect` で解除。`UserContext.lastRemoteProjectId` / `lastRemoteProjectName` で追跡
+- **terminalMode デフォルト true**: 新規プロジェクト（Agent スキャンで発見 or scaffold）は端末モード（PTY）がデフォルトに。既存プロジェクトは変更なし（DB に `false` で保存済み）
 - **UserSettings.manager_project は v1 スキップ**: ルーティング未実装のため。Manager は通常プロジェクトとして接続するだけ
 - **scaffoldDir は config.yaml に追加しない（v1）**: `projectsDirs[0]` をデフォルト使用
 
