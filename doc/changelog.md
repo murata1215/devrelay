@@ -13,8 +13,9 @@
 - **修正 1**: `connectedAgents` 登録をトークン検証直後（DB 操作前）に早期化。旧 ws の terminate も同タイミング。これにより以降の await 中に old ws close が発火しても `handleAgentDisconnect` のレースチェック（`currentWs !== disconnectedWs`）が正しく機能して disconnect をスキップ
 - **修正 2**: project upsert ループを個別 try/catch で保護。1 プロジェクトの失敗が ack 送信を妨げない
 - **修正 3**: Agent 側の `startAppPing()` 内の即時 `sendAppPing()` 呼び出しを削除。接続直後は `currentMachineId` が常に null なので無意味、紛らわしい `⏳ App ping skipped (machineId: null)` ログを除去
+- **修正 4**: Windows restart ハンドラの VBS 起動を遅延方式に変更。`start-agent.cmd` が `>> agent.log` でファイルを排他ロック保持するため、旧プロセスと新プロセスが同時に起動すると新 CMD がログファイルをオープンできずサイレントに失敗していた。`cmd.exe /c "ping -n 3 127.0.0.1 >nul & wscript.exe start-agent.vbs"` で約 2 秒遅延し、旧プロセス exit 後にロック解放されてから起動。旧プロセスは即座に exit（100ms）
 - 対象: `apps/server/src/services/agent-manager.ts`, `agents/linux/src/services/connection.ts`
-- **設計判断**: `connectedAgents` への早期登録は、トークン検証さえ通れば正当な接続。以降の DB 操作が失敗しても ws は有効なので、disconnect handler のレースセーフティが最優先
+- **設計判断**: `connectedAgents` への早期登録は、トークン検証さえ通れば正当な接続。以降の DB 操作が失敗しても ws は有効なので、disconnect handler のレースセーフティが最優先。Windows の遅延リスタートは Update ハンドラ（PowerShell が旧プロセスを kill してから起動）と異なり、restart は軽量に即 exit → 遅延起動で対処
 
 ### #241: scanProjects が baseDir 自体の CLAUDE.md を認識しないバグ修正 (2026-06-21)
 
