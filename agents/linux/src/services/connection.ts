@@ -416,27 +416,35 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:agent:restart':
       console.log('🔄 Restart command received from server. Restarting...');
       if (process.platform === 'win32') {
-        // Windows: 遅延リスタートでログファイルロックを回避
+        // Windows: 遅延リスタート VBS でログファイルロックを回避
         // start-agent.cmd が >> agent.log で排他ロックを保持するため、
-        // 旧プロセスが exit してロック解放された後に VBS を起動する必要がある。
-        // ping -n 3 で約 2 秒待機（timeout /t は非インタラクティブ CMD で不安定）
+        // 旧プロセスが exit してロック解放された後に新プロセスを起動する必要がある。
+        // WScript.Sleep 2000 で 2 秒待機してから start-agent.cmd を起動する。
+        // cmd.exe /c "ping ... & wscript" 方式は spawn の引数クォーティングで壊れるため、
+        // VBS ファイルに Sleep を組み込む（update ハンドラと同じ VBS 実績パターン）
         try {
-          const vbsPath = join(getBinDir(), 'start-agent.vbs');
-          if (existsSync(vbsPath)) {
-            const delayCmd = `ping -n 3 127.0.0.1 >nul & wscript.exe "${vbsPath}"`;
-            const child = spawn('cmd.exe', ['/c', delayCmd], {
+          const cmdPath = join(getBinDir(), 'start-agent.cmd');
+          if (existsSync(cmdPath)) {
+            const restartVbsPath = join(getConfigDir(), 'logs', 'restart-agent.vbs');
+            writeFileSync(restartVbsPath,
+              `WScript.Sleep 2000\r\n` +
+              `Set WshShell = CreateObject("WScript.Shell")\r\n` +
+              `WshShell.Run """${cmdPath}""", 0, False\r\n`,
+              'utf-8'
+            );
+            const child = spawn('wscript.exe', [restartVbsPath], {
               detached: true,
               stdio: 'ignore',
             });
             child.unref();
-            console.log(`✅ Scheduled delayed restart via: ${vbsPath}`);
+            console.log(`✅ Scheduled delayed restart via VBS: ${restartVbsPath}`);
           } else {
-            console.error(`❌ start-agent.vbs not found at ${vbsPath} — agent will stop without restart`);
+            console.error(`❌ start-agent.cmd not found at ${cmdPath} — agent will stop without restart`);
           }
         } catch (err) {
           console.error(`❌ Failed to relaunch Windows agent: ${err}`);
         }
-        // 即座に exit（遅延 CMD が約 2 秒後に新プロセスを起動する）
+        // 即座に exit（VBS が 2 秒後に新プロセスを起動する）
         setTimeout(() => process.exit(0), 100);
       } else {
         // Linux/macOS は PM2/systemd/launchd が自動再起動する
