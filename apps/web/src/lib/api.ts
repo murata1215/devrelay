@@ -37,6 +37,12 @@ async function request<T>(
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    // セッション期限切れ → 自動ログアウト＆ログイン画面にリダイレクト
+    if (response.status === 401 && error.error === 'Session expired') {
+      clearToken();
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
     throw new Error(error.error || `HTTP ${response.status}`);
   }
 

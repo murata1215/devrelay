@@ -2800,8 +2800,9 @@ export function ChatPage() {
         }
       });
     }).catch(() => {
+      // エラー時は hasMoreHistory も false にしてリトライループを防止（401 無限ループ対策）
       setTabs(prev => prev.map(t =>
-        t.projectId === tabId ? { ...t, loadingHistory: false } : t
+        t.projectId === tabId ? { ...t, loadingHistory: false, hasMoreHistory: false } : t
       ));
     });
   }, []);

@@ -310,8 +310,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         } else {
           // 応答抽出失敗時のフォールバック: 原因と画面末尾を表示
           if (newBullets === 0) {
-            console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected at finish time (likely idle timeout or early CLI exit).`);
-            opts.onOutput(`\n⚠️ Claude が応答テキストを出さずにセッションが終わりました。\n（タイムアウト・Claude CLI の早期終了・無応答エラーの可能性。logs/terminal-${opts.sessionId}.log を確認してください）`);
+            // 画面末尾をログ + ユーザーに表示（原因特定用。従来はログファイル参照のみだった）
+            const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
+            console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected at finish time. screen tail:\n${tail}`);
+            opts.onOutput(`\n⚠️ Claude が応答テキストを出さずにセッションが終わりました。\n（タイムアウト・Claude CLI の早期終了・無応答エラーの可能性）\n\n画面末尾:\n\`\`\`\n${tail}\n\`\`\``);
           } else {
             console.warn(`⚠️ [terminal-mode] could not extract response despite ${newBullets} new bullet(s)`);
             const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;

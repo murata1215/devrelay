@@ -6,6 +6,16 @@
 
 ## 実装済み機能
 
+### #243: Session expired 401 無限ループ + Terminal Mode 無応答診断改善 (2026-06-24)
+
+- **症状 1**: 認証セッション期限切れ時、ChatPage の `loadOlderMessages` が ~30ms 間隔で 401 リクエストを無限発行。Agents ページにも "Session expired" 表示
+- **根本原因 1**: `loadOlderMessages` の catch が `hasMoreHistory: false` を設定しないため、useEffect が即座に再トリガー → 無限ループ。また `api.ts` の `request()` に 401 セッション切れのグローバルハンドラがなく、ログイン画面にリダイレクトされない
+- **修正 1a**: `api.ts` の `request()` に 401 + "Session expired" 検出 → `clearToken()` + `/login` リダイレクト追加
+- **修正 1b**: `ChatPage.tsx` の `loadOlderMessages` catch に `hasMoreHistory: false` 追加でリトライループ破壊
+- **症状 2**: Windows Terminal Mode で Claude CLI が起動・プロンプト受理するも API 未呼出で無応答。30 秒 extended-idle で完了するが画面内容が不明で原因特定困難
+- **修正 2**: `terminal-runner.ts` の `newBullets === 0` パスに画面末尾 500 文字のダンプを追加（agent.log + ユーザーへの表示）。次回同事象時に原因特定可能に
+- 対象: `apps/web/src/lib/api.ts`, `apps/web/src/pages/ChatPage.tsx`, `agents/linux/src/services/terminal-runner.ts`
+
 ### #242: Windows Agent restart 後の接続停止バグ修正 (2026-06-24)
 
 - **症状**: サーバーから `server:agent:restart` を送信して Windows Agent を再起動すると、新しいエージェントが接続後 `machineId: null` のまま停止。`server:connect:ack` が受信されない
