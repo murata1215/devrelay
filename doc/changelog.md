@@ -6,6 +6,16 @@
 
 ## 実装済み機能
 
+### #242: Windows Agent restart 後の接続停止バグ修正 (2026-06-24)
+
+- **症状**: サーバーから `server:agent:restart` を送信して Windows Agent を再起動すると、新しいエージェントが接続後 `machineId: null` のまま停止。`server:connect:ack` が受信されない
+- **根本原因**: `handleAgentConnect()` は多数の `await`（25 プロジェクト × upsert 等）を含む長い async 関数。`connectedAgents.set(machine.id, ws)` が関数末尾近くにあるため、途中で旧エージェントの ws close イベントが発火すると `handleAgentDisconnect` のレースチェックが通過し、machine を offline 化 + connectedAgents から削除してしまう。さらに project upsert で例外が発生すると ack 自体が送信されずエージェントは永久停止
+- **修正 1**: `connectedAgents` 登録をトークン検証直後（DB 操作前）に早期化。旧 ws の terminate も同タイミング。これにより以降の await 中に old ws close が発火しても `handleAgentDisconnect` のレースチェック（`currentWs !== disconnectedWs`）が正しく機能して disconnect をスキップ
+- **修正 2**: project upsert ループを個別 try/catch で保護。1 プロジェクトの失敗が ack 送信を妨げない
+- **修正 3**: Agent 側の `startAppPing()` 内の即時 `sendAppPing()` 呼び出しを削除。接続直後は `currentMachineId` が常に null なので無意味、紛らわしい `⏳ App ping skipped (machineId: null)` ログを除去
+- 対象: `apps/server/src/services/agent-manager.ts`, `agents/linux/src/services/connection.ts`
+- **設計判断**: `connectedAgents` への早期登録は、トークン検証さえ通れば正当な接続。以降の DB 操作が失敗しても ws は有効なので、disconnect handler のレースセーフティが最優先
+
 ### #241: scanProjects が baseDir 自体の CLAUDE.md を認識しないバグ修正 (2026-06-21)
 
 - **症状**: ホームディレクトリ直下に `CLAUDE.md` を置いても Agent がプロジェクトとして認識しない

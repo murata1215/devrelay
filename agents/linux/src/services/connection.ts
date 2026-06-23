@@ -1188,10 +1188,9 @@ function stopPing() {
 }
 
 // Application-level ping for server-side lastSeenAt tracking
+// 初回は server:connect:ack 受信後に machineId が設定されてから送信される
+// （接続直後は machineId が null のため即時送信しても常にスキップされる）
 function startAppPing() {
-  // Send immediately on connection
-  sendAppPing();
-
   appPingTimer = setInterval(() => {
     sendAppPing();
   }, APP_PING_INTERVAL);

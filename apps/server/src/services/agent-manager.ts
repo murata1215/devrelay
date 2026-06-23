@@ -280,6 +280,16 @@ async function handleAgentConnect(
     console.log(`🔌 Cancelled disconnect timer for ${machine.id} (reconnected)`);
   }
 
+  // 旧接続を即座に差し替え（以降の await 中に oldWs close が発火しても race safe）
+  // connectedAgents に新 ws を先に登録することで、handleAgentDisconnect のレースチェック
+  // （currentWs !== disconnectedWs）が正しく機能し、disconnect をスキップする
+  const existingWs = connectedAgents.get(machine.id);
+  if (existingWs && existingWs !== ws) {
+    console.log(`🔌 Closing stale WebSocket for ${machine.id} before new connection`);
+    try { existingWs.terminate(); } catch {}
+  }
+  connectedAgents.set(machine.id, ws);
+
   // Agent から送信された machineName で DB の名前を自動更新する条件:
   // 1. 仮名（agent-N）→ 正式名への更新（初回接続時）
   // 2. 旧形式（hostname のみ）→ 新形式（hostname/username）への自動マイグレーション
@@ -323,20 +333,24 @@ async function handleAgentConnect(
     }
   });
 
-  // Update projects
+  // Update projects（個別の失敗が ack 送信を妨げないよう try/catch で保護）
   for (const project of projects) {
-    await prisma.project.upsert({
-      where: {
-        machineId_name: { machineId: machine.id, name: project.name }
-      },
-      update: { path: project.path, defaultAi: project.defaultAi },
-      create: {
-        machineId: machine.id,
-        name: project.name,
-        path: project.path,
-        defaultAi: project.defaultAi
-      }
-    });
+    try {
+      await prisma.project.upsert({
+        where: {
+          machineId_name: { machineId: machine.id, name: project.name }
+        },
+        update: { path: project.path, defaultAi: project.defaultAi },
+        create: {
+          machineId: machine.id,
+          name: project.name,
+          path: project.path,
+          defaultAi: project.defaultAi
+        }
+      });
+    } catch (err) {
+      console.error(`⚠️ Failed to upsert project ${project.name} for ${machine.id}:`, err);
+    }
   }
 
   // 同じホスト名を持つ兄弟マシンから displayName を自動計算
@@ -372,16 +386,7 @@ async function handleAgentConnect(
     }
   }
 
-  // 旧接続が残っていれば即座に破棄（terminate はハンドシェイク不要で close イベントを即発火）
-  // close() だと相手が既に切断済みの場合ハンドシェイク応答が来ず close イベントが永遠に発火しない
-  const existingWs = connectedAgents.get(machine.id);
-  if (existingWs && existingWs !== ws) {
-    console.log(`🔌 Closing stale WebSocket for ${machine.id} before new connection`);
-    try { existingWs.terminate(); } catch {}
-  }
-
-  // Store connection and agent's local projectsDirs
-  connectedAgents.set(machine.id, ws);
+  // connectedAgents への登録は関数冒頭（トークン検証直後）で完了済み
   if (localDirs && localDirs.length > 0) {
     agentLocalProjectsDirs.set(machine.id, localDirs);
   }
