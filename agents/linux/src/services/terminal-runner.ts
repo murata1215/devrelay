@@ -259,8 +259,9 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   /** セッション中に一度でも新規バレット（`●`）が観測されたかフラグ。
    *  ツール実行中に `●` が画面から消えても first-bullet-timeout を適用しないために使う（#237） */
   let bulletEverObserved = false;
-  /** extended-idle で AI 画面解析を1回実行済みかフラグ（無限ループ防止） */
-  let extendedIdleAiChecked = false;
+  /** extended-idle で AI 画面解析を実行した回数（最大 MAX_EXTENDED_IDLE_AI_CHECKS で打ち止め） */
+  let extendedIdleAiCheckCount = 0;
+  const MAX_EXTENDED_IDLE_AI_CHECKS = 3;
   /** 画面が最後に変化した時刻（完了判定の「画面アイドル」基準） */
   let lastScreenChangeAt = Date.now();
   /** 画面変化追跡用の前回レンダリング結果 */
@@ -802,41 +803,58 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         ptyProcess.write('\r');
       }
 
-      // === AI 画面解析フォールバック: submit が本当に成功したか検証 ===
+      // === Submit 検証: Enter が本当に submit されたか確認 ===
       // 画面サイズの変化は「入力欄内の改行」でも発生するため偽陽性がある (#243)。
-      // 3秒待って新規バレットもプロンプト復帰もなければ AI に画面を見せて判断を仰ぐ
-      if (opts.onScreenAnalyze) {
+      // 3秒待って新規バレットもプロンプト復帰もなければ submit 失敗の可能性。
+      // AI フォールバックがあれば画面を見せて判断を仰ぐ。なければ \r リトライ。
+      {
         await new Promise(r => setTimeout(r, 3000));
         if (finished) return;
         const verifyRendered = extractFinalOutput(term);
         const verifyBullets = countNewBullets(baselineBulletMap, getBulletLines(verifyRendered));
         const verifyPromptReady = detectPromptReady(verifyRendered);
         if (verifyBullets === 0 && !verifyPromptReady) {
-          // Claude は処理を開始していない → AI に画面を見せる
-          console.log(`🧠 [terminal-mode] submit verification: no processing detected, requesting AI screen analysis...`);
-          const screenTail = verifyRendered.length > 2000 ? verifyRendered.slice(-2000) : verifyRendered;
-          const analysis = await opts.onScreenAnalyze(
-            screenTail,
-            'After sending Enter to submit the user prompt, 3 seconds have passed but Claude CLI shows no processing indicators (no new bullets, no prompt ready). The prompt text may still be sitting in the input area unsubmitted.',
-          );
-          if (analysis && !finished) {
-            console.log(`🧠 [terminal-mode] AI analysis: state=${analysis.state} action=${analysis.action} reason="${analysis.reason}"`);
-            if (analysis.action === 'send_enter') {
-              console.log(`🧠 [terminal-mode] AI recommends send_enter → sending \\r`);
-              ptyProcess.write('\r');
-              // AI のリトライ後にもう一度確認
-              await new Promise(r => setTimeout(r, 2000));
-              if (!finished) {
-                const retryRendered = extractFinalOutput(term);
-                const retryBullets = countNewBullets(baselineBulletMap, getBulletLines(retryRendered));
-                if (retryBullets === 0 && !detectPromptReady(retryRendered)) {
-                  console.warn(`⚠️ [terminal-mode] AI retry also failed, sending one more \\r`);
-                  ptyProcess.write('\r');
+          // Claude は処理を開始していない → submit 失敗の可能性
+          if (opts.onScreenAnalyze) {
+            // AI に画面を見せて判断を仰ぐ
+            console.log(`🧠 [terminal-mode] submit verification: no processing detected, requesting AI screen analysis...`);
+            const screenTail = verifyRendered.length > 2000 ? verifyRendered.slice(-2000) : verifyRendered;
+            const analysis = await opts.onScreenAnalyze(
+              screenTail,
+              'After sending Enter to submit the user prompt, 3 seconds have passed but Claude CLI shows no processing indicators (no new bullets, no prompt ready). The prompt text may still be sitting in the input area unsubmitted.',
+            );
+            if (analysis && !finished) {
+              console.log(`🧠 [terminal-mode] AI analysis: state=${analysis.state} action=${analysis.action} reason="${analysis.reason}"`);
+              if (analysis.action === 'send_enter') {
+                console.log(`🧠 [terminal-mode] AI recommends send_enter → sending \\r`);
+                ptyProcess.write('\r');
+                // AI のリトライ後にもう一度確認
+                await new Promise(r => setTimeout(r, 2000));
+                if (!finished) {
+                  const retryRendered = extractFinalOutput(term);
+                  const retryBullets = countNewBullets(baselineBulletMap, getBulletLines(retryRendered));
+                  if (retryBullets === 0 && !detectPromptReady(retryRendered)) {
+                    console.warn(`⚠️ [terminal-mode] AI retry also failed, sending one more \\r`);
+                    ptyProcess.write('\r');
+                  }
                 }
               }
+              // action === 'wait' → そのまま完了監視に任せる
+              // action === 'abort' → finish() で強制終了してもよいが、完了監視の timeout に任せる
             }
-            // action === 'wait' → そのまま完了監視に任せる
-            // action === 'abort' → finish() で強制終了してもよいが、完了監視の timeout に任せる
+          } else {
+            // AI なし → ヒューリスティックのみで \r リトライ（API キー未設定環境向け）
+            console.warn(`⚠️ [terminal-mode] submit verification failed (0 new bullets, prompt not ready 3s after Enter) → retrying \\r`);
+            ptyProcess.write('\r');
+            await new Promise(r => setTimeout(r, 2000));
+            if (!finished) {
+              const retryRendered = extractFinalOutput(term);
+              const retryBullets = countNewBullets(baselineBulletMap, getBulletLines(retryRendered));
+              if (retryBullets === 0 && !detectPromptReady(retryRendered)) {
+                console.warn(`⚠️ [terminal-mode] second submit retry → \\r`);
+                ptyProcess.write('\r');
+              }
+            }
           }
         } else {
           console.log(`✅ [terminal-mode] submit verified: ${verifyBullets} new bullets, promptReady=${verifyPromptReady}`);
@@ -1052,13 +1070,16 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // 実行中に発生）、30 秒以上画面変化が無ければ Claude は実質応答完了とみなして finish
         if (elapsedSinceChange >= EXTENDED_IDLE_FOR_COMPLETION_MS) {
           // === AI 画面解析フォールバック: 完了扱い前に AI に確認 ===
-          if (opts.onScreenAnalyze && !extendedIdleAiChecked) {
-            extendedIdleAiChecked = true;  // 1回だけ
-            console.log(`🧠 [terminal-mode] extended idle ${elapsedSinceChange}ms, requesting AI screen analysis before completing...`);
+          // 最大 MAX_EXTENDED_IDLE_AI_CHECKS 回まで AI に確認。wait が返った場合は
+          // カウントをインクリメントしつつアイドルタイマーをリセットして再度 30秒待つ。
+          // 上限到達後は AI スキップして即 extended-idle-complete。
+          if (opts.onScreenAnalyze && extendedIdleAiCheckCount < MAX_EXTENDED_IDLE_AI_CHECKS) {
+            extendedIdleAiCheckCount++;
+            console.log(`🧠 [terminal-mode] extended idle ${elapsedSinceChange}ms, AI check ${extendedIdleAiCheckCount}/${MAX_EXTENDED_IDLE_AI_CHECKS}...`);
             const screenTail = freshRendered.length > 2000 ? freshRendered.slice(-2000) : freshRendered;
             opts.onScreenAnalyze(
               screenTail,
-              `Extended idle: screen has not changed for ${Math.round(elapsedSinceChange / 1000)}s. ${newBullets} new bullets. Prompt ready: false. About to finalize as completed.`,
+              `Extended idle: screen has not changed for ${Math.round(elapsedSinceChange / 1000)}s. ${newBullets} new bullets. Prompt ready: false. About to finalize as completed. (AI check ${extendedIdleAiCheckCount}/${MAX_EXTENDED_IDLE_AI_CHECKS})`,
             ).then(analysis => {
               if (finished || !analysis) return;
               console.log(`🧠 [terminal-mode] AI analysis (extended-idle): state=${analysis.state} action=${analysis.action} reason="${analysis.reason}"`);
@@ -1066,7 +1087,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                 ptyProcess.write('\r');
                 resetIdleTimer();
               } else if (analysis.action === 'wait') {
-                // AI が「まだ処理中」と言ったらアイドルタイマーをリセットして待つ
+                // AI が「まだ処理中」と判断 → アイドルタイマーをリセットして再度 30秒待つ
                 resetIdleTimer();
               } else if (analysis.action === 'select_option' && analysis.optionIndex !== undefined) {
                 const choice = analysis.optionIndex + 1; // 1-indexed
