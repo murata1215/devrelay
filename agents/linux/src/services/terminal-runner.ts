@@ -261,6 +261,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   let bulletEverObserved = false;
   /** extended-idle で AI 画面解析を実行した回数（最大 MAX_EXTENDED_IDLE_AI_CHECKS で打ち止め） */
   let extendedIdleAiCheckCount = 0;
+  /** AI 画面解析リクエストが pending 中（応答待ち）かどうか。再入防止用 */
+  let extendedIdleAiPending = false;
   const MAX_EXTENDED_IDLE_AI_CHECKS = 3;
   /** 画面が最後に変化した時刻（完了判定の「画面アイドル」基準） */
   let lastScreenChangeAt = Date.now();
@@ -1073,14 +1075,16 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           // 最大 MAX_EXTENDED_IDLE_AI_CHECKS 回まで AI に確認。wait が返った場合は
           // カウントをインクリメントしつつアイドルタイマーをリセットして再度 30秒待つ。
           // 上限到達後は AI スキップして即 extended-idle-complete。
-          if (opts.onScreenAnalyze && extendedIdleAiCheckCount < MAX_EXTENDED_IDLE_AI_CHECKS) {
+          if (opts.onScreenAnalyze && extendedIdleAiCheckCount < MAX_EXTENDED_IDLE_AI_CHECKS && !extendedIdleAiPending) {
             extendedIdleAiCheckCount++;
+            extendedIdleAiPending = true;  // 応答が返るまで再入をブロック
             console.log(`🧠 [terminal-mode] extended idle ${elapsedSinceChange}ms, AI check ${extendedIdleAiCheckCount}/${MAX_EXTENDED_IDLE_AI_CHECKS}...`);
             const screenTail = freshRendered.length > 2000 ? freshRendered.slice(-2000) : freshRendered;
             opts.onScreenAnalyze(
               screenTail,
               `Extended idle: screen has not changed for ${Math.round(elapsedSinceChange / 1000)}s. ${newBullets} new bullets. Prompt ready: false. About to finalize as completed. (AI check ${extendedIdleAiCheckCount}/${MAX_EXTENDED_IDLE_AI_CHECKS})`,
             ).then(analysis => {
+              extendedIdleAiPending = false;
               if (finished || !analysis) return;
               console.log(`🧠 [terminal-mode] AI analysis (extended-idle): state=${analysis.state} action=${analysis.action} reason="${analysis.reason}"`);
               if (analysis.action === 'send_enter') {
@@ -1096,9 +1100,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
               }
               // abort or other → そのまま次の tick で extended-idle-complete に入る
             }).catch(err => {
+              extendedIdleAiPending = false;
               console.warn(`⚠️ [terminal-mode] AI analysis error:`, (err as Error).message);
             });
             return;  // AI の応答を待つ（次の tick で再チェック）
+          }
+          // AI が pending 中なら完了せず待機を継続
+          if (extendedIdleAiPending) {
+            logSkip('ai-pending', `idle=${elapsedSinceChange}ms aiCheck=${extendedIdleAiCheckCount}`);
+            return;
           }
           console.log(`✅ [terminal-mode] extended idle ${elapsedSinceChange}ms + ${newBullets} new bullet(s), completing (❯ cursor hidden)`);
           finish('extended-idle-complete');
