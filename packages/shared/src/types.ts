@@ -111,7 +111,8 @@ export type AgentMessage =
   | { type: 'agent:tool:approval:request'; payload: ToolApprovalRequestPayload }
   | { type: 'agent:tool:approval:auto'; payload: ToolApprovalAutoPayload }
   | { type: 'agent:plan:content'; payload: PlanContentPayload }
-  | { type: 'agent:scaffold:created'; payload: ScaffoldCreatedPayload };
+  | { type: 'agent:scaffold:created'; payload: ScaffoldCreatedPayload }
+  | { type: 'agent:screen:analyze'; payload: ScreenAnalyzeRequestPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -256,7 +257,8 @@ export type ServerToAgentMessage =
   | { type: 'server:tool:approval:response'; payload: ToolApprovalResponsePayload }
   | { type: 'server:plan:latest'; payload: PlanLatestRequestPayload }
   | { type: 'server:agent:restart'; payload: {} }
-  | { type: 'server:scaffold:create'; payload: ScaffoldCreatePayload };
+  | { type: 'server:scaffold:create'; payload: ScaffoldCreatePayload }
+  | { type: 'server:screen:analyzed'; payload: ScreenAnalyzeResponsePayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -691,3 +693,45 @@ export interface ScaffoldCreatedPayload {
 
 /** 利用可能なテンプレート名 */
 export type ScaffoldTemplate = 'vite-react-web';
+
+// === AI Screen Analysis（Terminal Mode フォールバック） ===
+
+/** 画面解析の状態 */
+export type ScreenState = 'input_waiting' | 'processing' | 'completed' | 'error' | 'choice_prompt';
+
+/** 画面解析の推奨アクション */
+export type ScreenAction = 'send_enter' | 'wait' | 'select_option' | 'retry' | 'abort';
+
+/** Agent → Server: 画面解析リクエスト */
+export interface ScreenAnalyzeRequestPayload {
+  /** リクエスト識別子（レスポンスとの紐付け） */
+  requestId: string;
+  /** Agent のマシンID */
+  machineId: string;
+  /** 現在のセッションID */
+  sessionId: string;
+  /** PTY 仮想画面のテキスト（末尾 2000 文字程度） */
+  screenText: string;
+  /** 解析コンテキスト（どの段階で失敗したか） */
+  context: string;
+}
+
+/** Server → Agent: 画面解析レスポンス */
+export interface ScreenAnalyzeResponsePayload {
+  /** リクエスト識別子 */
+  requestId: string;
+  /** 解析結果 */
+  analysis: ScreenAnalysis;
+}
+
+/** AI による画面解析結果 */
+export interface ScreenAnalysis {
+  /** 画面の状態 */
+  state: ScreenState;
+  /** 推奨アクション */
+  action: ScreenAction;
+  /** select_option 時のオプション番号（0-indexed） */
+  optionIndex?: number;
+  /** 判断理由（ログ用） */
+  reason: string;
+}

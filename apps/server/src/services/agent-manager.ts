@@ -20,6 +20,8 @@ import {
   type ServerToWebMessage,
   type Platform,
   type ScaffoldCreatedPayload,
+  type ScreenAnalyzeRequestPayload,
+  type ScreenAnalysis,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo } from './session-manager.js';
@@ -30,7 +32,8 @@ import { summarizeBuildOutput } from './build-summarizer.js';
 import { sendFcmNotificationForToolApproval } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
-import { getUserSetting, SettingKeys } from './user-settings.js';
+import Anthropic from '@anthropic-ai/sdk';
+import { getUserSetting, getApiKeyForProvider, SettingKeys } from './user-settings.js';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import type { ManagementInfo } from '@devrelay/shared';
@@ -217,6 +220,9 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           break;
         case 'agent:scaffold:created':
           handleScaffoldCreated(message.payload);
+          break;
+        case 'agent:screen:analyze':
+          handleScreenAnalyze(ws, message.payload);
           break;
       }
     } catch (err) {
@@ -2065,4 +2071,110 @@ function broadcastToolApprovalAutoToPlatforms(sessionId: string, toolName: strin
         console.error('Failed to send Telegram auto approval:', err));
     }
   }
+}
+
+// ============================================================
+// AI Screen Analysis（Terminal Mode フォールバック）
+// ============================================================
+
+/** Claude Haiku に送るシステムプロンプト */
+const SCREEN_ANALYSIS_SYSTEM = `You are analyzing a Claude CLI terminal screen to determine its current state.
+You will receive the terminal screen text and a context description of what happened.
+
+Respond with JSON only (no markdown, no extra text):
+{
+  "state": "input_waiting" | "processing" | "completed" | "error" | "choice_prompt",
+  "action": "send_enter" | "wait" | "select_option" | "retry" | "abort",
+  "optionIndex": <number, only if action is "select_option", 0-indexed>,
+  "reason": "<brief explanation>"
+}
+
+State descriptions:
+- "input_waiting": The prompt input area is visible, waiting for user input (text may be sitting unsubmitted in the input box)
+- "processing": Claude is actively generating a response (thinking dots, tool calls, streaming text)
+- "completed": Claude has finished responding (prompt ready for next input, response bullets visible)
+- "error": An error message is displayed
+- "choice_prompt": A numbered choice prompt is shown (trust folder, tool approval, etc.)
+
+Action descriptions:
+- "send_enter": Press Enter to submit (use when text is stuck in input area)
+- "wait": Do nothing, Claude is still working
+- "select_option": Select a specific option (set optionIndex)
+- "retry": Something went wrong, retry the operation
+- "abort": Unrecoverable error, stop`;
+
+/**
+ * Agent からの画面解析リクエストを処理する
+ *
+ * Agent がヒューリスティックで画面状態を判定できなかった場合に呼ばれる。
+ * ユーザーの Anthropic API キーで Claude Haiku を呼び出し、画面内容を解釈して
+ * 構造化レスポンスを返す。
+ */
+async function handleScreenAnalyze(ws: WebSocket, payload: ScreenAnalyzeRequestPayload) {
+  const { requestId, machineId, screenText, context } = payload;
+
+  try {
+    // machineId から userId を取得
+    const machine = await prisma.machine.findUnique({
+      where: { id: machineId },
+      select: { userId: true },
+    });
+    if (!machine) {
+      console.warn(`⚠️ [screen-analyze] machine not found: ${machineId}`);
+      sendAnalyzeError(ws, requestId, 'Machine not found');
+      return;
+    }
+
+    // Anthropic API キーを取得（UserSettings → 環境変数の順）
+    const apiKey = await getApiKeyForProvider(machine.userId, 'anthropic');
+    if (!apiKey) {
+      console.warn(`⚠️ [screen-analyze] no Anthropic API key for user`);
+      sendAnalyzeError(ws, requestId, 'No API key');
+      return;
+    }
+
+    // Claude Haiku で画面を解析
+    const anthropic = new Anthropic({ apiKey });
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 256,
+      system: SCREEN_ANALYSIS_SYSTEM,
+      messages: [{
+        role: 'user',
+        content: `Context: ${context}\n\nTerminal screen content (last portion):\n---\n${screenText}\n---`,
+      }],
+    });
+
+    const textBlock = response.content.find(b => b.type === 'text');
+    const text = textBlock && 'text' in textBlock ? textBlock.text : null;
+    if (!text) {
+      sendAnalyzeError(ws, requestId, 'Empty AI response');
+      return;
+    }
+
+    // JSON パース（コードブロック wrapper 対応）
+    const jsonStr = text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '').trim();
+    const analysis: ScreenAnalysis = JSON.parse(jsonStr);
+
+    console.log(`🧠 [screen-analyze] ${analysis.state}/${analysis.action}: ${analysis.reason}`);
+
+    sendToAgent(ws, {
+      type: 'server:screen:analyzed',
+      payload: { requestId, analysis },
+    });
+  } catch (err) {
+    console.error(`❌ [screen-analyze] error:`, err);
+    sendAnalyzeError(ws, requestId, (err as Error).message);
+  }
+}
+
+/** エラー時のデフォルトレスポンス（wait = 何もしない = 現行動作を維持） */
+function sendAnalyzeError(ws: WebSocket, requestId: string, reason: string) {
+  sendToAgent(ws, {
+    type: 'server:screen:analyzed',
+    payload: {
+      requestId,
+      analysis: { state: 'processing', action: 'wait', reason: `fallback: ${reason}` },
+    },
+  });
 }

@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
 import { DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
-import type { AiTool, AiUsageData } from '@devrelay/shared';
+import type { AiTool, AiUsageData, ScreenAnalysis } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -200,6 +200,41 @@ const pendingToolApprovals = new Map<string, {
 const terminalApprovalResolvers = new Map<string, (optionIndex: number) => void>();
 
 /**
+ * AI 画面解析の pending resolver Map。
+ * terminal-runner が requestId を登録し、connection.ts 経由で Server からの
+ * レスポンスが到着したら resolve する。
+ */
+const pendingScreenAnalyses = new Map<string, (analysis: import('@devrelay/shared').ScreenAnalysis) => void>();
+
+/**
+ * AI 画面解析の resolver を登録する（connection.ts から呼ばれる）
+ */
+export function registerScreenAnalysisResolver(requestId: string, resolve: (analysis: import('@devrelay/shared').ScreenAnalysis) => void) {
+  pendingScreenAnalyses.set(requestId, resolve);
+}
+
+/**
+ * AI 画面解析の resolver を削除する（タイムアウト時に呼ばれる）
+ */
+export function unregisterScreenAnalysisResolver(requestId: string) {
+  pendingScreenAnalyses.delete(requestId);
+}
+
+/**
+ * Server からの画面解析レスポンスを受け取り、pending resolver を解決する
+ * connection.ts から呼び出される
+ */
+export function resolveScreenAnalysis(requestId: string, analysis: import('@devrelay/shared').ScreenAnalysis) {
+  const resolver = pendingScreenAnalyses.get(requestId);
+  if (resolver) {
+    pendingScreenAnalyses.delete(requestId);
+    resolver(analysis);
+  } else {
+    console.warn(`⚠️ [screen-analyze] no pending resolver for requestId: ${requestId.slice(0, 8)}`);
+  }
+}
+
+/**
  * Server からのツール承認レスポンスを受け取り、保留中の Promise を解決する
  * connection.ts から呼び出される
  */
@@ -279,6 +314,12 @@ export interface SendPromptOptions {
   onToolApprovalRequest?: (request: ToolApprovalRequest) => void;
   /** 「以降すべて許可」モードで自動承認した際の通知コールバック */
   onAutoApproved?: (info: { toolName: string; toolInput: Record<string, unknown> }) => void;
+  /**
+   * AI 画面解析リクエスト送信コールバック（Terminal Mode 用）。
+   * ヒューリスティックで画面状態を判定できなかった場合に Server 経由で Claude Haiku を呼ぶ。
+   * connection.ts で sendMessage を使って配線される。未設定の場合は AI フォールバックなし。
+   */
+  onScreenAnalyzeRequest?: (screenText: string, context: string, sessionId: string) => Promise<import('@devrelay/shared').ScreenAnalysis | null>;
 }
 
 /**
@@ -696,6 +737,13 @@ async function sendPromptToTerminalClaude(
     });
   } : undefined;
 
+  // AI 画面解析コールバック: Server 経由で Claude Haiku を呼ぶ
+  const makeScreenAnalyzer = options.onScreenAnalyzeRequest
+    ? async (screenText: string, context: string): Promise<ScreenAnalysis | null> => {
+        return options.onScreenAnalyzeRequest!(screenText, context, sessionId);
+      }
+    : undefined;
+
   try {
     let runResult = await runTerminalClaude({
       projectPath,
@@ -707,6 +755,7 @@ async function sendPromptToTerminalClaude(
       resumeSessionId: resumeSessionId || undefined,
       onOutput: (chunk) => onOutput(chunk, false),
       onChoiceRequest: makeChoiceHandler,
+      onScreenAnalyze: makeScreenAnalyzer,
     });
 
     // プロンプト未送信のまま早期 exit した場合のフォールバック（1 回のみリトライ）:
@@ -735,6 +784,7 @@ async function sendPromptToTerminalClaude(
         resumeSessionId: undefined, // リトライは常に --resume なし
         onOutput: (chunk) => onOutput(chunk, false),
         onChoiceRequest: makeChoiceHandler,
+        onScreenAnalyze: makeScreenAnalyzer,
       });
     }
 

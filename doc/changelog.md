@@ -6,15 +6,22 @@
 
 ## 実装済み機能
 
-### #243: Session expired 401 無限ループ + Terminal Mode 無応答診断改善 (2026-06-24)
+### #243: Session expired 401 無限ループ + Terminal Mode AI Screen Analysis (2026-06-24)
 
 - **症状 1**: 認証セッション期限切れ時、ChatPage の `loadOlderMessages` が ~30ms 間隔で 401 リクエストを無限発行。Agents ページにも "Session expired" 表示
 - **根本原因 1**: `loadOlderMessages` の catch が `hasMoreHistory: false` を設定しないため、useEffect が即座に再トリガー → 無限ループ。また `api.ts` の `request()` に 401 セッション切れのグローバルハンドラがなく、ログイン画面にリダイレクトされない
 - **修正 1a**: `api.ts` の `request()` に 401 + "Session expired" 検出 → `clearToken()` + `/login` リダイレクト追加
 - **修正 1b**: `ChatPage.tsx` の `loadOlderMessages` catch に `hasMoreHistory: false` 追加でリトライループ破壊
 - **症状 2**: Windows Terminal Mode で Claude CLI が起動・プロンプト受理するも API 未呼出で無応答。30 秒 extended-idle で完了するが画面内容が不明で原因特定困難
-- **修正 2**: `terminal-runner.ts` の `newBullets === 0` パスに画面末尾 500 文字のダンプを追加（agent.log + ユーザーへの表示）。次回同事象時に原因特定可能に
-- 対象: `apps/web/src/lib/api.ts`, `apps/web/src/pages/ChatPage.tsx`, `agents/linux/src/services/terminal-runner.ts`
+- **修正 2**: `terminal-runner.ts` の `newBullets === 0` パスに画面末尾 500 文字のダンプを追加（agent.log + ユーザーへの表示）
+- **修正 3**: Terminal Mode AI Screen Analysis — PTY スクレイピングのヒューリスティックが失敗した場合に Claude Haiku で画面を解釈するフォールバック機構
+  - **設計思想**: 通常パス（regex/ヒューリスティック, 95%+）はそのまま。異常時のみ AI 呼出で「モグラ叩き」を根本解消
+  - **発火ポイント**: (1) Submit 検証（Enter 後 3秒無反応）→ AI が「入力欄に残ってる」と判断すれば自動 Enter 再送  (2) Extended idle（30秒無変化で完了扱い前）→ AI に確認
+  - **通信フロー**: Agent → WS `agent:screen:analyze` → Server → Claude Haiku API (UserSettings の Anthropic キー) → WS `server:screen:analyzed` → Agent がアクション実行
+  - **コスト**: Haiku ~$0.0006/回、発火率 1-5%
+  - **安全性**: API キー未設定時はスキップ（現行動作維持）。タイムアウト 15秒。正常パスでは発火しない
+  - **新規型**: `ScreenAnalysis`, `ScreenAnalyzeRequestPayload`, `ScreenAnalyzeResponsePayload`
+- 対象: `packages/shared/src/types.ts`, `apps/server/src/services/agent-manager.ts`, `agents/linux/src/services/terminal-runner.ts`, `agents/linux/src/services/ai-runner.ts`, `agents/linux/src/services/connection.ts`, `apps/web/src/lib/api.ts`, `apps/web/src/pages/ChatPage.tsx`
 
 ### #242: Windows Agent restart 後の接続停止バグ修正 (2026-06-24)
 

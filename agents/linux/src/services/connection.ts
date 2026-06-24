@@ -33,7 +33,7 @@ import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId } from './session-store.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
@@ -475,6 +475,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:scaffold:create':
       handleScaffoldCreate(message.payload, config);
+      break;
+
+    case 'server:screen:analyzed':
+      // Server からの画面解析レスポンスを terminal-runner の pending resolver に転送
+      resolveScreenAnalysis(message.payload.requestId, message.payload.analysis);
       break;
   }
 }
@@ -960,6 +965,36 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: info.toolName, toolInput: info.toolInput, status: 'auto' });
     };
   }
+
+  // AI 画面解析リクエストコールバック（Terminal Mode 用）
+  // Server 経由で Claude Haiku を呼び出し、画面状態を解釈させる
+  sendOptions.onScreenAnalyzeRequest = (screenText: string, context: string, sid: string) => {
+    return new Promise((resolve) => {
+      const requestId = `screen_${sid}_${Date.now()}`;
+      // タイムアウト（15秒）: AI が応答しなければ null を返して現行動作を維持
+      const timeout = setTimeout(() => {
+        unregisterScreenAnalysisResolver(requestId);
+        console.warn(`⏱️ [screen-analyze] timeout for ${requestId.slice(0, 16)}`);
+        resolve(null);
+      }, 15_000);
+
+      registerScreenAnalysisResolver(requestId, (analysis) => {
+        clearTimeout(timeout);
+        resolve(analysis);
+      });
+
+      sendMessage({
+        type: 'agent:screen:analyze',
+        payload: {
+          requestId,
+          machineId: currentMachineId || currentConfig!.machineId,
+          sessionId: sid,
+          screenText,
+          context,
+        },
+      });
+    });
+  };
 
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）
   try {
