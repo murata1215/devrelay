@@ -21,6 +21,7 @@
   - **コスト**: Haiku ~$0.0006/回、発火率 1-5%
   - **安全性**: API キー未設定時はスキップ（現行動作維持）。タイムアウト 15秒。正常パスでは発火しない
   - **新規型**: `ScreenAnalysis`, `ScreenAnalyzeRequestPayload`, `ScreenAnalyzeResponsePayload`
+  - **レビュー修正**: Extended idle AI チェックを boolean → カウンター（最大3回）に変更（AI `wait` 応答で無限ループ防止）。Submit 検証を API キー未設定環境でもヒューリスティックのみで実行
 - 対象: `packages/shared/src/types.ts`, `apps/server/src/services/agent-manager.ts`, `agents/linux/src/services/terminal-runner.ts`, `agents/linux/src/services/ai-runner.ts`, `agents/linux/src/services/connection.ts`, `apps/web/src/lib/api.ts`, `apps/web/src/pages/ChatPage.tsx`
 
 ### #242: Windows Agent restart 後の接続停止バグ修正 (2026-06-24)
