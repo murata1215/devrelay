@@ -323,10 +323,16 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         } else {
           // 応答抽出失敗時のフォールバック: 原因と画面末尾を表示
           if (newBullets === 0) {
-            // 画面末尾をログ + ユーザーに表示（原因特定用。従来はログファイル参照のみだった）
-            const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
-            console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected at finish time. screen tail:\n${tail}`);
-            opts.onOutput(`\n⚠️ Claude が応答テキストを出さずにセッションが終わりました。\n（タイムアウト・Claude CLI の早期終了・無応答エラーの可能性）\n\n画面末尾:\n\`\`\`\n${tail}\n\`\`\``);
+            if (bulletEverObserved) {
+              // バレットはストリーミング中に配信済みだが、完了時に画面からスクロールオフ。
+              // ユーザーには既にストリーミングで応答が届いているのでエラー表示は不要
+              console.log(`✅ [terminal-mode] bullets were streamed but scrolled off screen at finish time (bulletEverObserved=true)`);
+            } else {
+              // 本当にバレットが一度も出なかった → 画面末尾をログ + ユーザーに表示
+              const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
+              console.warn(`⚠️ [terminal-mode] no new Claude bullet (●) detected at finish time. screen tail:\n${tail}`);
+              opts.onOutput(`\n⚠️ Claude が応答テキストを出さずにセッションが終わりました。\n（タイムアウト・Claude CLI の早期終了・無応答エラーの可能性）\n\n画面末尾:\n\`\`\`\n${tail}\n\`\`\``);
+            }
           } else {
             console.warn(`⚠️ [terminal-mode] could not extract response despite ${newBullets} new bullet(s)`);
             const tail = finalRendered.length > 500 ? finalRendered.slice(-500) : finalRendered;
