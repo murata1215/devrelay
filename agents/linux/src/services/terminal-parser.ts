@@ -120,7 +120,9 @@ export function detectTrustPrompt(text: string): boolean {
  * WebUI/Discord/Telegram に転送 → ユーザー応答を `<choice>\r` で PTY に書き戻す
  */
 export function detectStartupChoicePrompt(text: string): boolean {
-  const hasInstruction = /Enter\s+to\s+(?:confirm|select).*Esc\s+to\s+cancel/i.test(text);
+  // Claude CLI の選択プロンプト指示行を検出。Esc の後のテキストはプロンプトごとに異なる
+  // ("Esc to cancel", "Esc to keep browser tools off" 等) ため、Enter 部分のみで判定する
+  const hasInstruction = /Enter\s+to\s+(?:confirm|select)/i.test(text);
   const hasNumberedOptions = /^\s*[❯>]?\s*1\.\s+\S/m.test(text);
   return hasInstruction && hasNumberedOptions;
 }
