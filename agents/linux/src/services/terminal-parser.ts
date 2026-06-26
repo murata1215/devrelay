@@ -659,3 +659,52 @@ export function parseSessionJsonlUsage(projectPath: string, sessionId: string): 
     return null;
   }
 }
+
+/**
+ * JSONL セッションファイルから最終 assistant メッセージのテキストを抽出する。
+ *
+ * Terminal Mode の完了時に、xterm 画面からの応答抽出が失敗した場合の
+ * フォールバックとして使用。JSONL には Claude の全応答が記録されているため、
+ * 画面からスクロールオフした応答も復元できる。
+ *
+ * @param projectPath プロジェクトディレクトリの絶対パス
+ * @param sessionId Claude CLI セッション ID（UUID）
+ * @returns 最終 assistant メッセージのテキスト。見つからなければ null
+ */
+export function extractLastAssistantText(projectPath: string, sessionId: string): string | null {
+  const jsonlPath = findSessionJsonlPath(projectPath, sessionId);
+  if (!jsonlPath) return null;
+
+  try {
+    const content = fs.readFileSync(jsonlPath, 'utf-8');
+    const lines = content.split('\n').filter(l => l.trim());
+
+    let lastAssistantText: string | null = null;
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== 'assistant' || !entry.message) continue;
+
+        const msgContent = entry.message.content;
+        if (!Array.isArray(msgContent)) continue;
+
+        // text ブロックのみ抽出（thinking, tool_use は除外）
+        const textParts = msgContent
+          .filter((b: { type: string; text?: string }) => b.type === 'text' && b.text && b.text.length > 0)
+          .map((b: { text: string }) => b.text);
+
+        if (textParts.length > 0) {
+          lastAssistantText = textParts.join('\n');
+        }
+      } catch {
+        // 個別行のパース失敗は無視
+      }
+    }
+
+    return lastAssistantText;
+  } catch (err) {
+    console.warn(`⚠️ [terminal-mode] failed to read JSONL for text extraction: ${(err as Error).message}`);
+    return null;
+  }
+}

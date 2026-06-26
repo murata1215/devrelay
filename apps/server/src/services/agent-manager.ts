@@ -22,6 +22,7 @@ import {
   type ScaffoldCreatedPayload,
   type ScreenAnalyzeRequestPayload,
   type ScreenAnalysis,
+  type ResponseSummarizeRequestPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo } from './session-manager.js';
@@ -223,6 +224,9 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           break;
         case 'agent:screen:analyze':
           handleScreenAnalyze(ws, message.payload);
+          break;
+        case 'agent:response:summarize':
+          handleResponseSummarize(ws, message.payload);
           break;
       }
     } catch (err) {
@@ -2177,4 +2181,72 @@ function sendAnalyzeError(ws: WebSocket, requestId: string, reason: string) {
       analysis: { state: 'processing', action: 'wait', reason: `fallback: ${reason}` },
     },
   });
+}
+
+// ============================================================
+// Response Summarization（Terminal Mode 完了時の応答要約）
+// ============================================================
+
+/** 要約用のシステムプロンプト */
+const RESPONSE_SUMMARY_SYSTEM = `You are summarizing an AI assistant's response for a developer.
+The response may contain code changes, analysis, plans, or build output.
+Provide a concise Japanese summary (200-500 characters) that captures:
+- What was done or analyzed
+- Key findings or changes made
+- Any action items or next steps
+Keep the summary clear and actionable. Use bullet points (●) for multiple items.
+Do NOT wrap in markdown code blocks. Return plain text only.`;
+
+/**
+ * Agent からの応答要約リクエストを処理する
+ *
+ * Terminal Mode 完了時に JSONL から抽出した最終 assistant テキストを
+ * Claude Haiku で要約して返す。
+ */
+async function handleResponseSummarize(ws: WebSocket, payload: ResponseSummarizeRequestPayload) {
+  const { requestId, machineId, assistantText } = payload;
+
+  try {
+    const machine = await prisma.machine.findUnique({
+      where: { id: machineId },
+      select: { userId: true },
+    });
+    if (!machine) {
+      sendToAgent(ws, { type: 'server:response:summarized', payload: { requestId, summary: '' } });
+      return;
+    }
+
+    const apiKey = await getApiKeyForProvider(machine.userId, 'anthropic');
+    if (!apiKey) {
+      sendToAgent(ws, { type: 'server:response:summarized', payload: { requestId, summary: '' } });
+      return;
+    }
+
+    // テキストが長すぎる場合は先頭 + 末尾を抽出（Haiku のコンテキスト節約）
+    let textForSummary = assistantText;
+    if (textForSummary.length > 8000) {
+      textForSummary = textForSummary.slice(0, 4000) + '\n\n...(中略)...\n\n' + textForSummary.slice(-4000);
+    }
+
+    const anthropic = new Anthropic({ apiKey });
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 512,
+      system: RESPONSE_SUMMARY_SYSTEM,
+      messages: [{ role: 'user', content: textForSummary }],
+    });
+
+    const textBlock = response.content.find(b => b.type === 'text');
+    const summary = textBlock && 'text' in textBlock ? textBlock.text.trim() : '';
+
+    console.log(`📝 [response-summarize] summary: ${summary.slice(0, 80)}...`);
+
+    sendToAgent(ws, {
+      type: 'server:response:summarized',
+      payload: { requestId, summary },
+    });
+  } catch (err) {
+    console.error(`❌ [response-summarize] error:`, err);
+    sendToAgent(ws, { type: 'server:response:summarized', payload: { requestId, summary: '' } });
+  }
 }

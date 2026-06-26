@@ -33,7 +33,7 @@ import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId } from './session-store.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
@@ -480,6 +480,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:screen:analyzed':
       // Server からの画面解析レスポンスを terminal-runner の pending resolver に転送
       resolveScreenAnalysis(message.payload.requestId, message.payload.analysis);
+      break;
+
+    case 'server:response:summarized':
+      // Server からの応答要約レスポンスを terminal-runner の pending resolver に転送
+      resolveResponseSummary(message.payload.requestId, message.payload.summary);
       break;
   }
 }
@@ -991,6 +996,31 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           sessionId: sid,
           screenText,
           context,
+        },
+      });
+    });
+  };
+
+  // 応答要約リクエストコールバック（Terminal Mode 用）
+  sendOptions.onResponseSummarizeRequest = (assistantText: string, sid: string) => {
+    return new Promise((resolve) => {
+      const requestId = `summary_${sid}_${Date.now()}`;
+      const timeout = setTimeout(() => {
+        unregisterResponseSummaryResolver(requestId);
+        resolve('');
+      }, 30_000);  // 要約は少し長めに30秒
+
+      registerResponseSummaryResolver(requestId, (summary) => {
+        clearTimeout(timeout);
+        resolve(summary);
+      });
+
+      sendMessage({
+        type: 'agent:response:summarize',
+        payload: {
+          requestId,
+          machineId: currentMachineId || currentConfig!.machineId,
+          assistantText,
         },
       });
     });

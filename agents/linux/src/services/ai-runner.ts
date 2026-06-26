@@ -221,6 +221,31 @@ export function unregisterScreenAnalysisResolver(requestId: string) {
 }
 
 /**
+ * 応答要約の pending resolver Map。
+ * terminal-runner が requestId を登録し、Server からのレスポンスが到着したら resolve する。
+ */
+const pendingResponseSummaries = new Map<string, (summary: string) => void>();
+
+/** 応答要約の resolver を登録する */
+export function registerResponseSummaryResolver(requestId: string, resolve: (summary: string) => void) {
+  pendingResponseSummaries.set(requestId, resolve);
+}
+
+/** 応答要約の resolver を削除する（タイムアウト時） */
+export function unregisterResponseSummaryResolver(requestId: string) {
+  pendingResponseSummaries.delete(requestId);
+}
+
+/** Server からの応答要約レスポンスを解決する */
+export function resolveResponseSummary(requestId: string, summary: string) {
+  const resolver = pendingResponseSummaries.get(requestId);
+  if (resolver) {
+    pendingResponseSummaries.delete(requestId);
+    resolver(summary);
+  }
+}
+
+/**
  * Server からの画面解析レスポンスを受け取り、pending resolver を解決する
  * connection.ts から呼び出される
  */
@@ -320,6 +345,11 @@ export interface SendPromptOptions {
    * connection.ts で sendMessage を使って配線される。未設定の場合は AI フォールバックなし。
    */
   onScreenAnalyzeRequest?: (screenText: string, context: string, sessionId: string) => Promise<import('@devrelay/shared').ScreenAnalysis | null>;
+  /**
+   * 応答要約リクエスト送信コールバック（Terminal Mode 用）。
+   * 完了時に JSONL テキストを Server 経由で Haiku に要約させる。
+   */
+  onResponseSummarizeRequest?: (assistantText: string, sessionId: string) => Promise<string>;
 }
 
 /**
@@ -744,6 +774,13 @@ async function sendPromptToTerminalClaude(
       }
     : undefined;
 
+  // 応答要約コールバック: Server 経由で Haiku に要約させる
+  const makeResponseSummarizer = options.onResponseSummarizeRequest
+    ? async (assistantText: string): Promise<string> => {
+        return options.onResponseSummarizeRequest!(assistantText, sessionId);
+      }
+    : undefined;
+
   try {
     let runResult = await runTerminalClaude({
       projectPath,
@@ -756,6 +793,7 @@ async function sendPromptToTerminalClaude(
       onOutput: (chunk) => onOutput(chunk, false),
       onChoiceRequest: makeChoiceHandler,
       onScreenAnalyze: makeScreenAnalyzer,
+      onResponseSummarize: makeResponseSummarizer,
     });
 
     // プロンプト未送信のまま早期 exit した場合のフォールバック（1 回のみリトライ）:
@@ -785,6 +823,7 @@ async function sendPromptToTerminalClaude(
         onOutput: (chunk) => onOutput(chunk, false),
         onChoiceRequest: makeChoiceHandler,
         onScreenAnalyze: makeScreenAnalyzer,
+        onResponseSummarize: makeResponseSummarizer,
       });
     }
 

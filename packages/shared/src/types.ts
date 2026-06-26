@@ -112,7 +112,8 @@ export type AgentMessage =
   | { type: 'agent:tool:approval:auto'; payload: ToolApprovalAutoPayload }
   | { type: 'agent:plan:content'; payload: PlanContentPayload }
   | { type: 'agent:scaffold:created'; payload: ScaffoldCreatedPayload }
-  | { type: 'agent:screen:analyze'; payload: ScreenAnalyzeRequestPayload };
+  | { type: 'agent:screen:analyze'; payload: ScreenAnalyzeRequestPayload }
+  | { type: 'agent:response:summarize'; payload: ResponseSummarizeRequestPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -258,7 +259,8 @@ export type ServerToAgentMessage =
   | { type: 'server:plan:latest'; payload: PlanLatestRequestPayload }
   | { type: 'server:agent:restart'; payload: {} }
   | { type: 'server:scaffold:create'; payload: ScaffoldCreatePayload }
-  | { type: 'server:screen:analyzed'; payload: ScreenAnalyzeResponsePayload };
+  | { type: 'server:screen:analyzed'; payload: ScreenAnalyzeResponsePayload }
+  | { type: 'server:response:summarized'; payload: ResponseSummarizeResponsePayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -734,4 +736,24 @@ export interface ScreenAnalysis {
   optionIndex?: number;
   /** 判断理由（ログ用） */
   reason: string;
+}
+
+// === Response Summarization（Terminal Mode 完了時の応答要約） ===
+
+/** Agent → Server: 応答要約リクエスト */
+export interface ResponseSummarizeRequestPayload {
+  /** リクエスト識別子 */
+  requestId: string;
+  /** Agent のマシンID */
+  machineId: string;
+  /** JSONL から抽出した最終 assistant テキスト */
+  assistantText: string;
+}
+
+/** Server → Agent: 応答要約レスポンス */
+export interface ResponseSummarizeResponsePayload {
+  /** リクエスト識別子 */
+  requestId: string;
+  /** 要約テキスト */
+  summary: string;
 }
