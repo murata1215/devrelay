@@ -212,8 +212,8 @@ export function extractClaudeResponse(rendered: string, _baselineBulletMap: Map<
     // 強い separator
     if (/^[─━]{20,}/.test(t)) break;
     if (/^[╭╰][─━]/.test(t)) break;
-    // prompt 内マーカー（過去会話との境界）
-    if (/^(?:Previous conversation:|User:|Assistant:|【プランモード】|【実行モード】|【重要】)/.test(t)) break;
+    // prompt 内マーカー（過去会話との境界）。【...】は DevRelay の指示ブロックヘッダ全般に対応
+    if (/^(?:Previous conversation:|User:|Assistant:|【[^】]+】)/.test(t)) break;
     // Claude CLI banner（再 spawn / resume 時に画面に出る）
     if (/^[▐▝]|^▘▘\s+▝▝/.test(lines[i])) break;
     // それ以外は応答ブロックの一部
@@ -226,7 +226,7 @@ export function extractClaudeResponse(rendered: string, _baselineBulletMap: Map<
   for (let i = lastBulletIdx + 1; i < inputBoxIdx; i++) {
     const t = lines[i].trim();
     if (/^[▐▝]|^▘▘\s+▝▝/.test(lines[i])) { endIdx = i; break; }
-    if (/^(?:✅ 完了|⚠️ |User:|Assistant:|Previous conversation:|【プランモード】|【実行モード】|【重要】)/.test(t)) { endIdx = i; break; }
+    if (/^(?:✅ 完了|⚠️ |User:|Assistant:|Previous conversation:|【[^】]+】)/.test(t)) { endIdx = i; break; }
     if (/^[─━]{20,}/.test(t)) { endIdx = i; break; }
   }
 
