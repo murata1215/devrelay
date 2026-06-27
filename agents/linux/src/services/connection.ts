@@ -34,7 +34,8 @@ import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
-import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId } from './session-store.js';
+import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, loadSessionMeta } from './session-store.js';
+import { extractLastAssistantText } from './terminal-parser.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
@@ -856,9 +857,34 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 
   // Add plan/exec mode instruction to prompt
   const modeInstruction = usePlanMode ? PLAN_MODE_INSTRUCTION : EXEC_MODE_INSTRUCTION;
+  const isClaudeTerminalMode = sessionInfo.aiTool === 'claude' && !!sessionInfo.terminalMode;
+
+  // === exec→plan 切替時の前回作業内容注入（Terminal Mode 用） ===
+  // Terminal mode では history 注入をスキップするため、exec→plan 切替時に
+  // 前回 exec の JSONL テキストを要約してプロンプトに含める。
+  // これにより新規セッションでも「前回何をやったか」を Claude が把握できる。
+  let prevExecSummary = '';
+  if (isClaudeTerminalMode && usePlanMode) {
+    try {
+      const meta = await loadSessionMeta(sessionInfo.projectPath);
+      if (meta && meta.mode === 'exec') {
+        console.log(`📝 [exec→plan] previous exec session: ${meta.sessionId.slice(0, 8)}...`);
+        const prevText = extractLastAssistantText(sessionInfo.projectPath, meta.sessionId);
+        if (prevText) {
+          // 要約は Haiku に任せるのが理想だが、ここでは同期的に処理するため
+          // テキストを切り詰めてプロンプトに注入（Haiku は非同期 WS 経路が必要で複雑化するため）
+          const truncated = prevText.length > 500 ? prevText.slice(0, 500) + '\n...(以下省略)' : prevText;
+          prevExecSummary = `\n【前回の実行内容】\n${truncated}\n`;
+          console.log(`📝 [exec→plan] injecting previous exec summary (${truncated.length} chars)`);
+        }
+      }
+    } catch (err) {
+      console.warn(`⚠️ [exec→plan] failed to load previous exec:`, (err as Error).message);
+    }
+  }
 
   // Build prompt with mode instruction and file output instruction
-  let fullPrompt = modeInstruction + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+  let fullPrompt = modeInstruction + prevExecSummary + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
   // 会話履歴のサイズを記録（ログ出力用）
   let historyContextSize = 0;
 
@@ -871,7 +897,6 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // prompt への history 注入は不要。注入すると Claude が過去文脈に強く引きずられて
   // 新規質問を無視して過去の作業継続を選ぶ症状が発生（2026-05-27 実機 mviewer で確認）
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
-  const isClaudeTerminalMode = sessionInfo.aiTool === 'claude' && !!sessionInfo.terminalMode;
   const isClaudeSdk = sessionInfo.aiTool === 'claude' && !sessionInfo.terminalMode;
   const needsHistoryInPrompt = !isClaudeTerminalMode && (
     !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages
