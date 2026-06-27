@@ -23,6 +23,8 @@ export const SettingKeys = {
   CHAT_AI_PROVIDER: 'chat_ai_provider',
   /** Dev Report 生成に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
   DEV_REPORT_PROVIDER: 'dev_report_provider',
+  /** Terminal Mode の画面解析・応答要約に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
+  TERMINAL_AI_PROVIDER: 'terminal_ai_provider',
   LANGUAGE: 'language',
   THEME: 'theme',
   /** カスタム Agreement テンプレート（ユーザーが編集した場合のみ保存） */
@@ -295,6 +297,34 @@ export async function getApiKeyForChatAi(userId: string): Promise<{ provider: Ai
 
   // 後方互換: CHAT_AI_PROVIDER 未設定 → 従来通り OpenAI キーがあれば使用
   if (!provider) {
+    const openaiKey = await getApiKeyForProvider(userId, 'openai');
+    if (openaiKey) return { provider: 'openai', apiKey: openaiKey };
+  }
+
+  return null;
+}
+
+/**
+ * Terminal AI（端末モードの画面解析・応答要約）用の AI プロバイダーと API キーを取得
+ * TERMINAL_AI_PROVIDER 設定に基づいてプロバイダーを選択
+ * 未設定の場合は Anthropic → OpenAI の順でフォールバック
+ *
+ * @returns { provider, apiKey } のペア。使用不可の場合は null
+ */
+export async function getApiKeyForTerminalAi(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
+  const provider = await getUserSetting(userId, SettingKeys.TERMINAL_AI_PROVIDER) as AiProvider | null;
+
+  // TERMINAL_AI_PROVIDER が明示設定されている場合
+  if (provider && provider !== 'none') {
+    const apiKey = await getApiKeyForProvider(userId, provider);
+    if (apiKey) return { provider, apiKey };
+    return null;
+  }
+
+  // 後方互換: 未設定 → Anthropic キーがあれば使用、なければ OpenAI
+  if (!provider) {
+    const anthropicKey = await getApiKeyForProvider(userId, 'anthropic');
+    if (anthropicKey) return { provider: 'anthropic', apiKey: anthropicKey };
     const openaiKey = await getApiKeyForProvider(userId, 'openai');
     if (openaiKey) return { provider: 'openai', apiKey: openaiKey };
   }

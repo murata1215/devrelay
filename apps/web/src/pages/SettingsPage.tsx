@@ -73,6 +73,11 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
     label: 'Dev Report',
     description: '開発レポートのセクション分割・要約に使用',
   },
+  {
+    key: 'terminal_ai_provider',
+    label: 'Terminal AI',
+    description: '端末モードの画面解析・応答要約に使用',
+  },
 ];
 
 /** チャット表示設定（localStorage 管理） */

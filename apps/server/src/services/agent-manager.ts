@@ -34,7 +34,8 @@ import { sendFcmNotificationForToolApproval } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { getUserSetting, getApiKeyForProvider, SettingKeys } from './user-settings.js';
+import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys } from './user-settings.js';
+import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import type { ManagementInfo } from '@devrelay/shared';
@@ -2129,28 +2130,46 @@ async function handleScreenAnalyze(ws: WebSocket, payload: ScreenAnalyzeRequestP
       return;
     }
 
-    // Anthropic API キーを取得（UserSettings → 環境変数の順）
-    const apiKey = await getApiKeyForProvider(machine.userId, 'anthropic');
-    if (!apiKey) {
-      console.warn(`⚠️ [screen-analyze] no Anthropic API key for user`);
+    // Terminal AI プロバイダーを取得（ユーザー設定 → Anthropic → OpenAI の順でフォールバック）
+    const providerInfo = await getApiKeyForTerminalAi(machine.userId);
+    if (!providerInfo) {
+      console.warn(`⚠️ [screen-analyze] no Terminal AI API key for user`);
       sendAnalyzeError(ws, requestId, 'No API key');
       return;
     }
 
-    // Claude Haiku で画面を解析
-    const anthropic = new Anthropic({ apiKey });
-    const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 256,
-      system: SCREEN_ANALYSIS_SYSTEM,
-      messages: [{
-        role: 'user',
-        content: `Context: ${context}\n\nTerminal screen content (last portion):\n---\n${screenText}\n---`,
-      }],
-    });
+    const userContent = `Context: ${context}\n\nTerminal screen content (last portion):\n---\n${screenText}\n---`;
+    let text: string | null = null;
 
-    const textBlock = response.content.find(b => b.type === 'text');
-    const text = textBlock && 'text' in textBlock ? textBlock.text : null;
+    if (providerInfo.provider === 'anthropic') {
+      const anthropic = new Anthropic({ apiKey: providerInfo.apiKey });
+      const response = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 256,
+        system: SCREEN_ANALYSIS_SYSTEM,
+        messages: [{ role: 'user', content: userContent }],
+      });
+      const textBlock = response.content.find(b => b.type === 'text');
+      text = textBlock && 'text' in textBlock ? textBlock.text : null;
+    } else if (providerInfo.provider === 'openai') {
+      const openai = new OpenAI({ apiKey: providerInfo.apiKey });
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: SCREEN_ANALYSIS_SYSTEM },
+          { role: 'user', content: userContent },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 256,
+        temperature: 0.1,
+      });
+      text = response.choices[0]?.message?.content ?? null;
+    } else if (providerInfo.provider === 'gemini') {
+      // Gemini は将来対応（現時点では非対応として扱う）
+      sendAnalyzeError(ws, requestId, 'Gemini not yet supported for screen analysis');
+      return;
+    }
+
     if (!text) {
       sendAnalyzeError(ws, requestId, 'Empty AI response');
       return;
@@ -2160,7 +2179,7 @@ async function handleScreenAnalyze(ws: WebSocket, payload: ScreenAnalyzeRequestP
     const jsonStr = text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '').trim();
     const analysis: ScreenAnalysis = JSON.parse(jsonStr);
 
-    console.log(`🧠 [screen-analyze] ${analysis.state}/${analysis.action}: ${analysis.reason}`);
+    console.log(`🧠 [screen-analyze] (${providerInfo.provider}) ${analysis.state}/${analysis.action}: ${analysis.reason}`);
 
     sendToAgent(ws, {
       type: 'server:screen:analyzed',
@@ -2216,30 +2235,45 @@ async function handleResponseSummarize(ws: WebSocket, payload: ResponseSummarize
       return;
     }
 
-    const apiKey = await getApiKeyForProvider(machine.userId, 'anthropic');
-    if (!apiKey) {
+    const providerInfo = await getApiKeyForTerminalAi(machine.userId);
+    if (!providerInfo) {
       sendToAgent(ws, { type: 'server:response:summarized', payload: { requestId, summary: '' } });
       return;
     }
 
-    // テキストが長すぎる場合は先頭 + 末尾を抽出（Haiku のコンテキスト節約）
+    // テキストが長すぎる場合は先頭 + 末尾を抽出（コンテキスト節約）
     let textForSummary = assistantText;
     if (textForSummary.length > 8000) {
       textForSummary = textForSummary.slice(0, 4000) + '\n\n...(中略)...\n\n' + textForSummary.slice(-4000);
     }
 
-    const anthropic = new Anthropic({ apiKey });
-    const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 512,
-      system: RESPONSE_SUMMARY_SYSTEM,
-      messages: [{ role: 'user', content: textForSummary }],
-    });
+    let summary = '';
 
-    const textBlock = response.content.find(b => b.type === 'text');
-    const summary = textBlock && 'text' in textBlock ? textBlock.text.trim() : '';
+    if (providerInfo.provider === 'anthropic') {
+      const anthropic = new Anthropic({ apiKey: providerInfo.apiKey });
+      const response = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 512,
+        system: RESPONSE_SUMMARY_SYSTEM,
+        messages: [{ role: 'user', content: textForSummary }],
+      });
+      const textBlock = response.content.find(b => b.type === 'text');
+      summary = textBlock && 'text' in textBlock ? textBlock.text.trim() : '';
+    } else if (providerInfo.provider === 'openai') {
+      const openai = new OpenAI({ apiKey: providerInfo.apiKey });
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: RESPONSE_SUMMARY_SYSTEM },
+          { role: 'user', content: textForSummary },
+        ],
+        max_tokens: 512,
+        temperature: 0.3,
+      });
+      summary = response.choices[0]?.message?.content?.trim() ?? '';
+    }
 
-    console.log(`📝 [response-summarize] summary: ${summary.slice(0, 80)}...`);
+    console.log(`📝 [response-summarize] (${providerInfo.provider}) summary: ${summary.slice(0, 80)}...`);
 
     sendToAgent(ws, {
       type: 'server:response:summarized',
