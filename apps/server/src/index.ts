@@ -16,6 +16,7 @@ import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
 import { decrypt } from './services/user-settings.js';
 import { initVapid } from './services/push-notification-service.js';
 import { initFcm } from './services/fcm-service.js';
+import { mcpRoutes } from './mcp/server.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -76,6 +77,7 @@ async function main() {
   await app.register(publicApiRoutes);  // 認証不要のパブリック API（インストーラー用トークン検証など）
   await app.register(authRoutes);
   await app.register(apiRoutes);
+  await app.register(mcpRoutes);  // MCP エンドポイント（/mcp）— 認証は MCP 内部で処理
   registerDocumentApiRoutes(app);  // Agent 向けドキュメント検索 API（マシントークン認証）
   registerAgentDocumentApiRoutes(app);  // エージェントドキュメント CRUD API（WebUI 認証）
 
