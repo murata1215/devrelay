@@ -44,6 +44,21 @@ const oauthAccessTokens = new Map<string, { userId: string; expiresAt: number }>
  */
 export async function oauthRoutes(app: FastifyInstance) {
 
+  // OAuth のトークンエンドポイントは application/x-www-form-urlencoded で送信される（RFC 6749）
+  // Fastify はデフォルトで application/json のみ受け付けるため、カスタムパーサーを追加
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
+    try {
+      const params = new URLSearchParams(body as string);
+      const result: Record<string, string> = {};
+      for (const [key, value] of params.entries()) {
+        result[key] = value;
+      }
+      done(null, result);
+    } catch (err) {
+      done(err as Error);
+    }
+  });
+
   // ============================================================
   // Well-Known メタデータ
   // ============================================================
