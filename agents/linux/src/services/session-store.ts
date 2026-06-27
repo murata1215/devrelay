@@ -4,8 +4,17 @@ import { join, dirname } from 'path';
 
 const SESSION_DIR = '.devrelay';
 const SESSION_FILE = 'claude-session-id';
+/** セッション ID + モード情報を JSON で保存するファイル */
+const SESSION_META_FILE = 'claude-session-meta.json';
 const DEVIN_SESSION_FILE = 'devin-session-id';
 const CONTEXT_USAGE_FILE = 'context-usage.json';
+
+/** セッションメタ情報（session ID + 前回のモード） */
+export interface SessionMeta {
+  sessionId: string;
+  /** 前回のセッションがどのモードで実行されたか */
+  mode: 'plan' | 'exec';
+}
 
 export interface StoredContextUsage {
   used: number;
@@ -49,8 +58,9 @@ export async function loadClaudeSessionId(projectPath: string): Promise<string |
 
 /**
  * Save Claude session ID to project directory
+ * @param mode 省略時はメタファイルを更新しない（後方互換）
  */
-export async function saveClaudeSessionId(projectPath: string, sessionId: string): Promise<void> {
+export async function saveClaudeSessionId(projectPath: string, sessionId: string, mode?: 'plan' | 'exec'): Promise<void> {
   const dirPath = join(projectPath, SESSION_DIR);
   const filePath = getSessionPath(projectPath);
 
@@ -61,9 +71,32 @@ export async function saveClaudeSessionId(projectPath: string, sessionId: string
     }
 
     await writeFile(filePath, sessionId, 'utf-8');
-    console.log(`💾 Saved Claude session ID: ${sessionId.substring(0, 8)}...`);
+
+    // モード情報付きメタファイルも保存（Plan→Plan resume 判定用）
+    if (mode) {
+      const metaPath = join(dirPath, SESSION_META_FILE);
+      const meta: SessionMeta = { sessionId, mode };
+      await writeFile(metaPath, JSON.stringify(meta), 'utf-8');
+    }
+
+    console.log(`💾 Saved Claude session ID: ${sessionId.substring(0, 8)}... (mode=${mode || 'unknown'})`);
   } catch (err) {
     console.error(`❌ Could not save Claude session ID:`, (err as Error).message);
+  }
+}
+
+/**
+ * セッションメタ情報（session ID + モード）を読み込む。
+ * Plan モードで前回も Plan だった場合に resume するかの判定に使用。
+ */
+export async function loadSessionMeta(projectPath: string): Promise<SessionMeta | null> {
+  const metaPath = join(projectPath, SESSION_DIR, SESSION_META_FILE);
+  try {
+    if (!existsSync(metaPath)) return null;
+    const content = await readFile(metaPath, 'utf-8');
+    return JSON.parse(content) as SessionMeta;
+  } catch {
+    return null;
   }
 }
 

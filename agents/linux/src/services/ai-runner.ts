@@ -8,7 +8,7 @@ import type { AiTool, AiUsageData, ScreenAnalysis } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, loadSessionMeta } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
 // 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
@@ -731,11 +731,22 @@ async function sendPromptToTerminalClaude(
 
   // SDK が保存した Claude セッション ID を読み込んで CLI の `--resume` で復元する
   // SDK と CLI は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているので互換
-  // plan モードでは --resume しない: 前回 exec のコンテキスト復元により
-  // Claude が前回の実装作業を丸ごと再実行する暴走を防止する（#238）
-  const resumeSessionId = options.usePlanMode
-    ? undefined
-    : await loadClaudeSessionId(projectPath);
+  // resume 判定:
+  //   exec モード → 常に resume（前回の plan/exec を継続）
+  //   plan モード → 前回も plan なら resume（会話継続）、前回が exec なら新規（#238 暴走防止）
+  let resumeSessionId: string | undefined;
+  if (options.usePlanMode) {
+    const meta = await loadSessionMeta(projectPath);
+    if (meta && meta.mode === 'plan') {
+      resumeSessionId = meta.sessionId;
+      console.log(`🔄 [terminal-mode] plan→plan resume: ${resumeSessionId.slice(0, 8)}...`);
+    } else {
+      resumeSessionId = undefined;
+      console.log(`🆕 [terminal-mode] ${meta ? 'exec→plan' : 'no previous session'}: starting fresh`);
+    }
+  } else {
+    resumeSessionId = await loadClaudeSessionId(projectPath) || undefined;
+  }
 
   // 診断ログ: WebUI トグルとの食い違いを調査するため、判定根拠を出力する
   console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}, resumeSessionId=${resumeSessionId ? resumeSessionId.slice(0, 8) + '...' : '(none)'}`);
@@ -794,6 +805,7 @@ async function sendPromptToTerminalClaude(
       onChoiceRequest: makeChoiceHandler,
       onScreenAnalyze: makeScreenAnalyzer,
       onResponseSummarize: makeResponseSummarizer,
+      sessionMode: options.usePlanMode ? 'plan' : 'exec',
     });
 
     // プロンプト未送信のまま早期 exit した場合のフォールバック（1 回のみリトライ）:
@@ -824,6 +836,7 @@ async function sendPromptToTerminalClaude(
         onChoiceRequest: makeChoiceHandler,
         onScreenAnalyze: makeScreenAnalyzer,
         onResponseSummarize: makeResponseSummarizer,
+        sessionMode: options.usePlanMode ? 'plan' : 'exec',
       });
     }
 

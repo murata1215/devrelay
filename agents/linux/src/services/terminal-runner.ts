@@ -166,6 +166,8 @@ export interface TerminalRunOptions {
    * 未設定の場合は JSONL テキストをそのまま（切り詰めて）表示。
    */
   onResponseSummarize?: (assistantText: string) => Promise<string>;
+  /** セッションのモード（session ID 保存時にメタ情報として記録し、次回 resume 判定に使用） */
+  sessionMode?: 'plan' | 'exec';
 }
 
 export interface TerminalRunResult {
@@ -372,10 +374,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // promptSent=false の場合は保存しない（壊れたセッション ID の残留防止, #237）
         const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
         if (claudeSessionId && promptSent) {
-          saveClaudeSessionId(opts.projectPath, claudeSessionId).catch(err => {
+          saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode).catch(err => {
             console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
           });
-          console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}...`);
+          console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}... (mode=${opts.sessionMode})`);
         }
         // JSONL セッションファイルから usageData を集計（Conversations の Model/Tokens 表示用）
         // finish() 経由の正常完了でも usageData を取得する（#239: 以前は finish() 内の
@@ -1191,10 +1193,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // 次回 --resume すると不安定な挙動になる（#237: bypass "No, exit" の session ID が残留した事故）
       const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
       if (claudeSessionId && promptSent) {
-        saveClaudeSessionId(opts.projectPath, claudeSessionId).catch(err => {
+        saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode).catch(err => {
           console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
         });
-        console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}...`);
+        console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}... (mode=${opts.sessionMode})`);
       } else if (claudeSessionId && !promptSent) {
         console.log(`⏭️ [terminal-mode] skipping session id save (promptSent=false): ${claudeSessionId.slice(0, 8)}...`);
       }
