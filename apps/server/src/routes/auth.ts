@@ -184,6 +184,7 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(501).send({ error: 'Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env' });
     }
 
+    const query = request.query as Record<string, string>;
     const callbackUrl = getGoogleCallbackUrl(request);
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', GOOGLE_CLIENT_ID);
@@ -192,6 +193,12 @@ export async function authRoutes(app: FastifyInstance) {
     authUrl.searchParams.set('scope', 'openid email profile');
     authUrl.searchParams.set('access_type', 'offline');
     authUrl.searchParams.set('prompt', 'select_account');
+
+    // MCP 認可フローから来た場合: mcp_redirect を state に埋め込む
+    // Google OAuth コールバック後に MCP 認可画面に戻すため
+    if (query.mcp_redirect) {
+      authUrl.searchParams.set('state', `mcp:${query.mcp_redirect}`);
+    }
 
     return reply.redirect(authUrl.toString());
   });
@@ -202,7 +209,7 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(501).send({ error: 'Google OAuth is not configured' });
     }
 
-    const { code, error: oauthError } = request.query as { code?: string; error?: string };
+    const { code, error: oauthError, state } = request.query as { code?: string; error?: string; state?: string };
 
     // ユーザーが承認を拒否した場合
     if (oauthError) {
@@ -295,7 +302,16 @@ export async function authRoutes(app: FastifyInstance) {
         },
       });
 
-      // 5. WebUI にリダイレクト（token をクエリパラメータで渡す）
+      // 5. MCP 認可フロー経由の場合は MCP 認可画面に auth_token 付きで戻す
+      if (state && state.startsWith('mcp:')) {
+        const mcpRedirect = state.slice(4);  // "mcp:" プレフィクスを除去
+        // mcp_redirect は /oauth/authorize?client_id=...&... の形式
+        const separator = mcpRedirect.includes('?') ? '&' : '?';
+        console.log(`🔐 [OAuth] Google login → MCP redirect: ${mcpRedirect.slice(0, 50)}...`);
+        return reply.redirect(`${mcpRedirect}${separator}auth_token=${token}`);
+      }
+
+      // 通常の WebUI にリダイレクト（token をクエリパラメータで渡す）
       return reply.redirect(`/auth/callback?token=${token}`);
     } catch (err) {
       console.error('Google OAuth error:', err);
