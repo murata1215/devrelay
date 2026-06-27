@@ -5,6 +5,7 @@ import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
 import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants, removeWebParticipantFromAllSessions } from '../services/session-manager.js';
 import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession } from '../services/agent-manager.js';
+import { handleVoiceAssist } from '../services/voice-assist.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -200,6 +201,17 @@ export async function setupWebClientWebSocket(
             answers: msg.payload.answers,
           });
           break;
+        case 'web:assist': {
+          // Voice Assist: 音声発話を AI で処理して構造化レスポンスを返す
+          try {
+            const response = await handleVoiceAssist(userId, msg.payload);
+            sendJson(ws, { type: 'web:assist:response', payload: response });
+          } catch (err) {
+            console.error(`❌ [voice-assist] error:`, err);
+            sendJson(ws, { type: 'web:error', payload: { error: (err as Error).message } });
+          }
+          break;
+        }
         case 'web:ping':
           sendJson(ws, { type: 'web:pong' });
           break;

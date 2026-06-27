@@ -78,6 +78,11 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
     label: 'Terminal AI',
     description: '端末モードの画面解析・応答要約に使用',
   },
+  {
+    key: 'voice_assist_provider',
+    label: '会話モード (Voice Assist)',
+    description: '音声指示の組み立て会話に使用',
+  },
 ];
 
 /** チャット表示設定（localStorage 管理） */

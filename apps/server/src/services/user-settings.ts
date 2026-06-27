@@ -25,6 +25,8 @@ export const SettingKeys = {
   DEV_REPORT_PROVIDER: 'dev_report_provider',
   /** Terminal Mode の画面解析・応答要約に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
   TERMINAL_AI_PROVIDER: 'terminal_ai_provider',
+  /** 会話モード（Voice Assist）に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'） */
+  VOICE_ASSIST_PROVIDER: 'voice_assist_provider',
   LANGUAGE: 'language',
   THEME: 'theme',
   /** カスタム Agreement テンプレート（ユーザーが編集した場合のみ保存） */
@@ -327,6 +329,30 @@ export async function getApiKeyForTerminalAi(userId: string): Promise<{ provider
     if (anthropicKey) return { provider: 'anthropic', apiKey: anthropicKey };
     const openaiKey = await getApiKeyForProvider(userId, 'openai');
     if (openaiKey) return { provider: 'openai', apiKey: openaiKey };
+  }
+
+  return null;
+}
+
+/**
+ * Voice Assist（音声会話モード）用の AI プロバイダーと API キーを取得
+ * VOICE_ASSIST_PROVIDER 設定に基づいてプロバイダーを選択
+ * 未設定の場合は OpenAI → Anthropic の順でフォールバック
+ */
+export async function getApiKeyForVoiceAssist(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
+  const provider = await getUserSetting(userId, SettingKeys.VOICE_ASSIST_PROVIDER) as AiProvider | null;
+
+  if (provider && provider !== 'none') {
+    const apiKey = await getApiKeyForProvider(userId, provider);
+    if (apiKey) return { provider, apiKey };
+    return null;
+  }
+
+  if (!provider) {
+    const openaiKey = await getApiKeyForProvider(userId, 'openai');
+    if (openaiKey) return { provider: 'openai', apiKey: openaiKey };
+    const anthropicKey = await getApiKeyForProvider(userId, 'anthropic');
+    if (anthropicKey) return { provider: 'anthropic', apiKey: anthropicKey };
   }
 
   return null;

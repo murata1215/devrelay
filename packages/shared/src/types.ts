@@ -652,6 +652,7 @@ export interface ToolApprovalPromptPayload {
 export type WebClientMessage =
   | { type: 'web:command'; payload: { text: string; files?: FileAttachment[]; projectId?: string } }
   | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean; alwaysAllow?: boolean; answers?: Record<string, string> } }
+  | { type: 'web:assist'; payload: VoiceAssistRequestPayload }
   | { type: 'web:ping' };
 
 /** サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示） */
@@ -664,6 +665,7 @@ export type ServerToWebMessage =
   | { type: 'web:tool:approval:resolved'; payload: { requestId: string; behavior: 'allow' | 'deny'; projectId?: string } }
   | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string } }
   | { type: 'web:error'; payload: { error: string } }
+  | { type: 'web:assist:response'; payload: VoiceAssistResponsePayload }
   | { type: 'web:pong' };
 
 // -----------------------------------------------------------------------------
@@ -756,4 +758,38 @@ export interface ResponseSummarizeResponsePayload {
   requestId: string;
   /** 要約テキスト */
   summary: string;
+}
+
+// === Voice Assist（音声会話モード） ===
+
+/** ブラウザ → サーバー: 音声アシストリクエスト */
+export interface VoiceAssistRequestPayload {
+  /** 会話セッション ID（"voice-<uuid>"） */
+  sessionId: string;
+  /** 対象プロジェクト ID（推定済みの場合） */
+  targetProjectId?: string;
+  /** 前ターンまでの下書き全文 */
+  draft: string;
+  /** 会話履歴 */
+  history: { role: 'user' | 'assistant'; content: string }[];
+  /** 今回のユーザー発話 */
+  utterance: string;
+}
+
+/** サーバー → ブラウザ: 音声アシストレスポンス */
+export interface VoiceAssistResponsePayload {
+  /** 会話セッション ID */
+  sessionId: string;
+  /** TTS 用の短い応答（1-2文） */
+  spoken: string;
+  /** 更新後の下書き全文（Markdown） */
+  draft: string;
+  /** 確認質問（0-1個） */
+  questions: string[];
+  /** 会話の意図 */
+  intent: 'refining' | 'question' | 'ready_to_submit';
+  /** 推定されたプロジェクト名（null = 未確定） */
+  targetProject: string | null;
+  /** Web 検索結果（2ホップ時のみ） */
+  lookups?: { query: string; summary: string }[];
 }
