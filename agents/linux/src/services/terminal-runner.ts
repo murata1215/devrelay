@@ -395,16 +395,28 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         }
 
         // === JSONL Recovery: finish() で画面抽出が失敗した場合に JSONL から応答を復元 ===
-        // onExit 時点では Claude session ID が確定しているため JSONL を確実に読める
+        // onExit 時点では Claude session ID が確定しているため JSONL を確実に読める。
+        // Haiku 要約は非同期だが、resolve() 前に完了を待つ（session 完了前に output を届ける）
+        const doResolve = () => {
+          resolve({
+            finalOutput,
+            durationMs: Date.now() - start,
+            timedOut,
+            cancelledByAskDisable,
+            promptSent,
+            usageData,
+          });
+        };
+
         if (needsJsonlRecovery && effectiveSessionId) {
           const jsonlText = extractLastAssistantText(opts.projectPath, effectiveSessionId);
           if (jsonlText) {
             console.log(`📝 [terminal-mode] JSONL text recovered in onExit: ${jsonlText.length} chars`);
             if (jsonlText.length <= 1000) {
-              // 短い応答 → そのまま表示
               opts.onOutput(jsonlText);
+              doResolve();
             } else if (opts.onResponseSummarize) {
-              // 長い応答 + Haiku 利用可 → 要約して表示（非同期だが resolve 前に完了を待つ）
+              // 長い応答 + Haiku 利用可 → 要約を待ってから resolve
               console.log(`🧠 [terminal-mode] requesting Haiku summary for ${jsonlText.length} chars...`);
               opts.onResponseSummarize(jsonlText).then(summary => {
                 if (summary) {
@@ -414,28 +426,25 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                 }
               }).catch(() => {
                 opts.onOutput(jsonlText.slice(0, 1000) + '\n...(以下省略)');
+              }).finally(() => {
+                doResolve();
               });
+              return;  // doResolve は finally で呼ばれる
             } else {
-              // 長い応答 + Haiku 不可 → 切り詰め表示
               opts.onOutput(jsonlText.slice(0, 1000) + '\n...(以下省略)');
+              doResolve();
             }
           } else if (!bulletEverObserved && screenTailForError) {
-            // JSONL からも取得できず、バレットも出なかった → エラー表示
             console.warn(`⚠️ [terminal-mode] no response found (screen + JSONL both empty)`);
             opts.onOutput(`\n⚠️ Claude が応答テキストを出さずにセッションが終わりました。\n（タイムアウト・Claude CLI の早期終了・無応答エラーの可能性）\n\n画面末尾:\n\`\`\`\n${screenTailForError}\n\`\`\``);
+            doResolve();
           } else {
             console.log(`✅ [terminal-mode] bullets were streamed, JSONL recovery returned empty`);
+            doResolve();
           }
+        } else {
+          doResolve();
         }
-
-        resolve({
-          finalOutput,
-          durationMs: Date.now() - start,
-          timedOut,
-          cancelledByAskDisable,
-          promptSent,
-          usageData,
-        });
       });
     };
 
