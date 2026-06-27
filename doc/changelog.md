@@ -6,6 +6,39 @@
 
 ## 実装済み機能
 
+### #246: Remote MCP Server v1 (2026-06-28)
+
+- `/mcp` エンドポイント（Streamable HTTP）で DevRelay の Plan/Exec/BuildLog 機能を MCP ツールとして公開
+- **6ツール**: `list_projects`, `search_project_context`, `get_plan`, `get_build_status`, `submit_instruction`, `approve_implementation`
+- **OAuth 2.1**: Dynamic Client Registration + PKCE 認可フロー + Google ログイン対応
+  - `/.well-known/oauth-protected-resource` / `/.well-known/oauth-authorization-server` メタデータ
+  - `POST /oauth/register` (DCR), `GET /oauth/authorize` (認可画面), `POST /oauth/token` (トークン交換)
+  - Google OAuth 経由のパスワードレスアカウント対応（`mcp_redirect` パラメータで認可フローに復帰）
+  - `application/x-www-form-urlencoded` カスタムパーサー追加（RFC 6749 準拠）
+- 既存 API への薄いファサード設計（新規コアロジックなし）
+- Claude モバイル（音声）から「devrelayのプロジェクト一覧見せて」→ ツール呼出成功を実機確認
+- 依存追加: `@modelcontextprotocol/sdk`, `zod`
+- 対象: `apps/server/src/mcp/`(新規ディレクトリ: server.ts, tools.ts, auth.ts, oauth.ts), `apps/server/src/index.ts`, `apps/server/src/routes/auth.ts`
+
+### #245: Voice Assist サーバー側対応 (2026-06-27)
+
+- **ChatProvider**: マルチプロバイダー（OpenAI/Anthropic/Gemini）のマルチターン chat インターフェース。JSON 構造化出力対応
+- **voice-assist.ts**: `web:assist` → AI 処理 → `web:assist:response` のハンドラ。1ホップ + needLookup 2ホップ（v1 スタブ）
+- **Settings UI**: `voice_assist_provider` カテゴリ追加（会話モード用 AI プロバイダー選択）
+- 対象: `packages/shared/src/types.ts`, `apps/server/src/services/chat-provider.ts`(新), `apps/server/src/services/voice-assist.ts`(新), `apps/server/src/services/user-settings.ts`, `apps/server/src/platforms/web.ts`, `apps/web/src/pages/SettingsPage.tsx`
+
+### #244: Terminal Mode JSONL Recovery + Haiku 要約 + Plan→Plan resume + exec→plan 記憶引き継ぎ + Terminal AI プロバイダー選択 (2026-06-27)
+
+- **JSONL Recovery**: 完了時に画面から応答抽出できない場合、JSONL セッションファイルから最終 assistant テキストを復元
+- **Haiku 要約**: 長い応答は Haiku/GPT-4o-mini で要約して表示（`agent:response:summarize` / `server:response:summarized` WS メッセージ）
+- **Plan→Plan resume**: 前回も Plan なら `--resume` で会話継続（exec→plan は新規セッション、#238 暴走防止維持）
+- **exec→plan 記憶引き継ぎ**: exec 完了時に MEMORY.md 更新指示 + exec→plan 切替時に前回 JSONL テキストをプロンプトに注入
+- **Terminal AI プロバイダー選択**: OpenAI/Anthropic をユーザーごとに選択可能（Settings UI 追加）
+- **Chrome extension prompt 対応**: `detectStartupChoicePrompt` の Esc パターンを緩和
+- **バレットスクロールオフ対応**: `bulletEverObserved` フラグで誤エラー表示を抑制
+- **extractClaudeResponse 汎用マーカー**: `【[^】]+】` パターンで全 DevRelay 指示ブロックを停止マーカー化
+- 対象: 多数ファイル（terminal-runner.ts, terminal-parser.ts, ai-runner.ts, connection.ts, session-store.ts, output-collector.ts, agent-manager.ts, user-settings.ts, SettingsPage.tsx, types.ts）
+
 ### #243: Session expired 401 無限ループ + Terminal Mode AI Screen Analysis (2026-06-24)
 
 - **症状 1**: 認証セッション期限切れ時、ChatPage の `loadOlderMessages` が ~30ms 間隔で 401 リクエストを無限発行。Agents ページにも "Session expired" 表示
