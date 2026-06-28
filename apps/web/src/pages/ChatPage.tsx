@@ -2220,13 +2220,21 @@ export function ChatPage() {
 
   /**
    * メッセージをタブに追加（projectId で対象タブを特定、省略時はアクティブタブ）
+   * projectId が指定されているのに該当タブがない場合は破棄する
+   * （異なるプロジェクトの出力がアクティブタブに漏れるのを防止 — #247）
    */
   const addMessageToTab = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string) => {
-    // projectId が指定され、該当タブがある場合はそのタブに追加
+    // projectId 指定あり → 該当タブが存在する場合のみルーティング（フォールバックしない）
+    // projectId 省略 → アクティブタブに追加（従来動作）
     const targetId = projectId
-      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
+      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : null)
       : activeTabIdRef.current;
-    if (!targetId) return;
+    if (!targetId) {
+      if (projectId) {
+        console.log(`[addMessageToTab] dropped: no tab for projectId=${projectId.substring(0, 8)}, content=${msg.content.substring(0, 60).replace(/\n/g, ' ')}`);
+      }
+      return;
+    }
 
     // 診断ログ: 全メッセージ追加を記録（古いメッセージ混入の原因特定用）
     console.log(`[addMessageToTab] role=${msg.role}, projectId=${projectId?.substring(0, 8) ?? 'none'}, target=${targetId.substring(0, 8)}, content=${msg.content.substring(0, 60).replace(/\n/g, ' ')}`);
@@ -2279,10 +2287,11 @@ export function ChatPage() {
 
   /**
    * 進捗を更新（projectId で対象タブを特定、省略時はアクティブタブ）
+   * projectId が指定されているのに該当タブがない場合は破棄する（#247）
    */
   const updateProgressOnTab = useCallback((info: ProgressInfo, projectId?: string) => {
     const targetId = projectId
-      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
+      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : null)
       : activeTabIdRef.current;
     if (!targetId) return;
     setTabs(prev => prev.map(t =>
@@ -2296,7 +2305,7 @@ export function ChatPage() {
    */
   const clearProgressOnTab = useCallback((projectId?: string) => {
     const targetId = projectId
-      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : activeTabIdRef.current)
+      ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : null)
       : activeTabIdRef.current;
     if (!targetId) return;
 
