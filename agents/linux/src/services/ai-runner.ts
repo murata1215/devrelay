@@ -350,6 +350,8 @@ export interface SendPromptOptions {
    * 完了時に JSONL テキストを Server 経由で Haiku に要約させる。
    */
   onResponseSummarizeRequest?: (assistantText: string, sessionId: string) => Promise<string>;
+  /** MCP 経由の新規 submit: 前回セッションの resume をスキップ */
+  forceNewSession?: boolean;
 }
 
 /**
@@ -732,10 +734,14 @@ async function sendPromptToTerminalClaude(
   // SDK が保存した Claude セッション ID を読み込んで CLI の `--resume` で復元する
   // SDK と CLI は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているので互換
   // resume 判定:
+  //   forceNewSession (MCP) → 常に新規（前回文脈の汚染防止）
   //   exec モード → 常に resume（前回の plan/exec を継続）
   //   plan モード → 前回も plan なら resume（会話継続）、前回が exec なら新規（#238 暴走防止）
   let resumeSessionId: string | undefined;
-  if (options.usePlanMode) {
+  if (options.forceNewSession) {
+    resumeSessionId = undefined;
+    console.log(`🆕 [terminal-mode] forceNewSession: starting fresh (MCP submit)`);
+  } else if (options.usePlanMode) {
     const meta = await loadSessionMeta(projectPath);
     if (meta && meta.mode === 'plan') {
       resumeSessionId = meta.sessionId;

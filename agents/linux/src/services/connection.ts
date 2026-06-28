@@ -710,7 +710,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -862,9 +862,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // === exec→plan 切替時の前回作業内容注入（Terminal Mode 用） ===
   // Terminal mode では history 注入をスキップするため、exec→plan 切替時に
   // 前回 exec の JSONL テキストを要約してプロンプトに含める。
-  // これにより新規セッションでも「前回何をやったか」を Claude が把握できる。
+  // forceNewSession（MCP 経由）の場合はスキップ（前回文脈の汚染防止）
   let prevExecSummary = '';
-  if (isClaudeTerminalMode && usePlanMode) {
+  if (isClaudeTerminalMode && usePlanMode && !payload.forceNewSession) {
     try {
       const meta = await loadSessionMeta(sessionInfo.projectPath);
       if (meta && meta.mode === 'exec') {
@@ -959,9 +959,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     resumeSessionId: sessionInfo.claudeResumeSessionId,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
-    skipPermissions: serverSkipPermissions,
+    // MCP forceNewSession: 前回文脈汚染防止のため skipPermissions を強制 ON
+    skipPermissions: payload.forceNewSession ? true : serverSkipPermissions,
     disableAsk: serverDisableAsk,
     terminalMode: sessionInfo.terminalMode,
+    forceNewSession: payload.forceNewSession,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）

@@ -1087,7 +1087,9 @@ export async function sendPromptToAgent(
   files?: FileAttachment[],
   missedMessages?: MissedMessage[],
   projectPath?: string,
-  aiTool?: AiTool
+  aiTool?: AiTool,
+  /** MCP 経由の新規 submit: 前回セッションの JSONL 注入・resume をスキップ */
+  forceNewSession?: boolean,
 ) {
   // バージョン不足の Agent にはプロンプトを送信しない
   if (outdatedAgents.has(machineId)) {
@@ -1109,7 +1111,7 @@ export async function sendPromptToAgent(
 
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode }
+    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession }
   });
 }
 

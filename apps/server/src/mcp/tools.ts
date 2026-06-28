@@ -205,23 +205,29 @@ export function registerMcpTools(server: McpServer, userId: string) {
       // MCP 用の chatId で進捗を検索
       const mcpChatId = `mcp:${userId}:${submissionId}`;
       const progress = getActiveProgressForChatId(mcpChatId);
+
+      // DB から最新 AI メッセージも取得（progress tracker が古い履歴を返す問題の対策）
+      const latestMsg = await prisma.message.findFirst({
+        where: { sessionId: submissionId, role: 'ai' },
+        orderBy: { createdAt: 'desc' },
+      });
+
       if (progress) {
+        // 進行中: DB の最新メッセージがあればそちらを優先（progress tracker より正確）
+        const summary = latestMsg
+          ? latestMsg.content.slice(0, 500)
+          : progress.output.slice(0, 500);
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'exec',
-            progressSummary: progress.output.slice(0, 500),
+            progressSummary: summary,
             elapsedSeconds: progress.elapsed,
             done: false,
           }) }],
         };
       }
 
-      // 最新メッセージから状態を推定
-      const latestMsg = await prisma.message.findFirst({
-        where: { sessionId: submissionId, role: 'ai' },
-        orderBy: { createdAt: 'desc' },
-      });
-
+      // 進行中トラッカーがない場合
       if (latestMsg) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
@@ -301,7 +307,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
         },
       });
 
-      // Agent にプロンプト送信
+      // Agent にプロンプト送信（forceNewSession: 前回セッションの JSONL 注入・resume をスキップ）
       await sendPromptToAgent(
         project.machineId,
         sessionId,
@@ -311,6 +317,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
         undefined,
         project.path,
         aiTool as any,
+        true,  // forceNewSession: MCP submit は常に新規セッション
       );
 
       // 監査ログ

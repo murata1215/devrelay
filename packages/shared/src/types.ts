@@ -485,6 +485,8 @@ export interface AiPromptPayload {
   aiTool?: AiTool;
   /** 端末インタフェースモード（Project.terminalMode をサーバーが転送、Project 単位の設定） */
   terminalMode?: boolean;
+  /** MCP 経由の新規 submit: 前回セッションの JSONL 注入・resume をスキップ */
+  forceNewSession?: boolean;
 }
 
 // -----------------------------------------------------------------------------
