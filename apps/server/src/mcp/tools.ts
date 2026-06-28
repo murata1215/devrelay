@@ -170,9 +170,20 @@ export function registerMcpTools(server: McpServer, userId: string) {
     'Check the progress and result of an approved implementation. Call this after approve_implementation to monitor the build. Poll periodically until done is true.',
     { submissionId: z.string().describe('The submission ID') },
     async ({ submissionId }) => {
-      // submissionId = sessionId として最新の BuildLog を検索
+      // exec メッセージの最新タイムスタンプを取得（approve_implementation が保存する）
+      // exec 以前の BuildLog / AI メッセージ（plan フェーズ）を除外するための基準点
+      const execMessage = await prisma.message.findFirst({
+        where: { sessionId: submissionId, role: 'user', content: 'exec' },
+        orderBy: { createdAt: 'desc' },
+      });
+      const execTimestamp = execMessage?.createdAt;
+
+      // submissionId = sessionId として BuildLog を検索（exec 以降に限定）
       const buildLog = await prisma.buildLog.findFirst({
-        where: { sessionId: submissionId },
+        where: {
+          sessionId: submissionId,
+          ...(execTimestamp ? { createdAt: { gt: execTimestamp } } : {}),
+        },
         orderBy: { createdAt: 'desc' },
       });
 
@@ -192,9 +203,13 @@ export function registerMcpTools(server: McpServer, userId: string) {
       const mcpChatId = `mcp:${userId}:${submissionId}`;
       const progress = getActiveProgressForChatId(mcpChatId);
 
-      // DB から最新 AI メッセージも取得（progress tracker が古い履歴を返す問題の対策）
+      // DB から最新 AI メッセージも取得（exec 以降に限定）
       const latestMsg = await prisma.message.findFirst({
-        where: { sessionId: submissionId, role: 'ai' },
+        where: {
+          sessionId: submissionId,
+          role: 'ai',
+          ...(execTimestamp ? { createdAt: { gt: execTimestamp } } : {}),
+        },
         orderBy: { createdAt: 'desc' },
       });
 
@@ -213,13 +228,24 @@ export function registerMcpTools(server: McpServer, userId: string) {
         };
       }
 
-      // 進行中トラッカーがない場合
+      // 進行中トラッカーがない + exec 後の AI メッセージがある → exec 完了
       if (latestMsg) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'done',
             summary: latestMsg.content.slice(0, 500),
             done: true,
+          }) }],
+        };
+      }
+
+      // exec メッセージがあるのに結果がない → exec 進行中（queued）
+      if (execTimestamp) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            phase: 'exec',
+            message: 'Execution is in progress. Please wait and try again.',
+            done: false,
           }) }],
         };
       }
