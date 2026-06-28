@@ -36,8 +36,8 @@ const registeredClients = new Map<string, {
   clientName: string;
 }>();
 
-/** アクセストークン → userId のマッピング（OAuth 経由で発行したトークン） */
-const oauthAccessTokens = new Map<string, { userId: string; expiresAt: number }>();
+// OAuth トークンは AuthSession テーブルに永続化（サーバー再起動後も有効）
+// メモリ Map は使わない — 再起動でトークンが消失する問題を解消
 
 /**
  * OAuth 2.1 ルートを Fastify に登録する
@@ -295,22 +295,22 @@ export async function oauthRoutes(app: FastifyInstance) {
       // 認可コードを消費
       authorizationCodes.delete(code);
 
-      // アクセストークンを生成
+      // アクセストークンを AuthSession に永続化（サーバー再起動後も有効）
       const accessToken = crypto.randomBytes(32).toString('hex');
       const expiresIn = 3600; // 1時間
-      oauthAccessTokens.set(accessToken, {
-        userId: authCode.userId,
-        expiresAt: Date.now() + expiresIn * 1000,
+      const accessExpiresAt = new Date(Date.now() + expiresIn * 1000);
+      await prisma.authSession.create({
+        data: { userId: authCode.userId, token: accessToken, expiresAt: accessExpiresAt },
       });
 
-      // リフレッシュトークンも生成（長命）
+      // リフレッシュトークンも AuthSession に永続化（30日）
       const refreshToken = crypto.randomBytes(32).toString('hex');
-      oauthAccessTokens.set(`refresh_${refreshToken}`, {
-        userId: authCode.userId,
-        expiresAt: Date.now() + 30 * 24 * 3600 * 1000, // 30日
+      const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+      await prisma.authSession.create({
+        data: { userId: authCode.userId, token: `refresh_${refreshToken}`, expiresAt: refreshExpiresAt },
       });
 
-      console.log(`🔐 [OAuth] Access token issued for user ${authCode.userId.slice(0, 8)}...`);
+      console.log(`🔐 [OAuth] Access token issued (DB) for user ${authCode.userId.slice(0, 8)}...`);
 
       return reply.send({
         access_token: accessToken,
@@ -327,20 +327,24 @@ export async function oauthRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'invalid_request' });
       }
 
-      const refreshData = oauthAccessTokens.get(`refresh_${refreshToken}`);
-      if (!refreshData || refreshData.expiresAt < Date.now()) {
+      // リフレッシュトークンを DB で検証
+      const refreshSession = await prisma.authSession.findUnique({
+        where: { token: `refresh_${refreshToken}` },
+        include: { user: true },
+      });
+      if (!refreshSession || refreshSession.expiresAt < new Date()) {
         return reply.status(400).send({ error: 'invalid_grant', error_description: 'Refresh token expired' });
       }
 
-      // 新しいアクセストークンを発行
+      // 新しいアクセストークンを AuthSession に永続化
       const newAccessToken = crypto.randomBytes(32).toString('hex');
       const expiresIn = 3600;
-      oauthAccessTokens.set(newAccessToken, {
-        userId: refreshData.userId,
-        expiresAt: Date.now() + expiresIn * 1000,
+      const newExpiresAt = new Date(Date.now() + expiresIn * 1000);
+      await prisma.authSession.create({
+        data: { userId: refreshSession.userId, token: newAccessToken, expiresAt: newExpiresAt },
       });
 
-      console.log(`🔐 [OAuth] Token refreshed for user ${refreshData.userId.slice(0, 8)}...`);
+      console.log(`🔐 [OAuth] Token refreshed (DB) for user ${refreshSession.userId.slice(0, 8)}...`);
 
       return reply.send({
         access_token: newAccessToken,
@@ -355,14 +359,6 @@ export async function oauthRoutes(app: FastifyInstance) {
   });
 }
 
-/**
- * OAuth アクセストークンを検証して userId を返す。
- * 既存の AuthSession (Bearer) も引き続きサポート。
- */
-export function verifyOAuthToken(token: string): string | null {
-  const tokenData = oauthAccessTokens.get(token);
-  if (tokenData && tokenData.expiresAt > Date.now()) {
-    return tokenData.userId;
-  }
-  return null;
-}
+// verifyOAuthToken は不要になった。
+// OAuth トークンも AuthSession テーブルに保存されるため、
+// auth.ts の既存 AuthSession 検証がそのまま機能する。
