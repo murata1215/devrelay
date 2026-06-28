@@ -196,8 +196,9 @@ const pendingToolApprovals = new Map<string, {
  * 端末モードの承認応答 resolver。
  * SDK の pendingToolApprovals と並列で存在し、端末モードは PTY に書き戻すための
  * シンプルな関数（optionIndex → PTY に "N\r" 書き込み）を登録する。
+ * options を保存して QuestionCard からの応答（ラベルテキスト）→ index 逆引きに使う。
  */
-const terminalApprovalResolvers = new Map<string, (optionIndex: number) => void>();
+const terminalApprovalResolvers = new Map<string, { respond: (optionIndex: number) => void; options: string[] }>();
 
 /**
  * AI 画面解析の pending resolver Map。
@@ -265,13 +266,24 @@ export function resolveScreenAnalysis(requestId: string, analysis: import('@devr
  */
 export function resolveToolApproval(requestId: string, response: ToolApprovalResponse): boolean {
   // 端末モードの resolver があれば優先（PTY に番号を書き戻す）
-  const terminalResolver = terminalApprovalResolvers.get(requestId);
-  if (terminalResolver) {
+  const entry = terminalApprovalResolvers.get(requestId);
+  if (entry) {
     terminalApprovalResolvers.delete(requestId);
-    // 既存承認カードは Allow/Deny の 2 択 → 端末モードでも option 1 / 2 にマッピング
-    const optionIndex = response.behavior === 'allow' ? 0 : 1;
-    console.log(`📥 [terminal-mode] resolving approval ${requestId.slice(0, 8)} → ${response.behavior} (option ${optionIndex + 1})`);
-    terminalResolver(optionIndex);
+    let optionIndex = 0;
+    if (response.answers) {
+      // QuestionCard からの回答: 選択されたラベルから options index を逆引き
+      const selectedLabel = Object.values(response.answers)[0];
+      if (selectedLabel) {
+        const idx = entry.options.indexOf(selectedLabel);
+        optionIndex = idx >= 0 ? idx : 0;
+      }
+      console.log(`📥 [terminal-mode] resolving question ${requestId.slice(0, 8)} → "${selectedLabel}" (option ${optionIndex + 1})`);
+    } else {
+      // 従来の Allow/Deny マッピング（フォールバック）
+      optionIndex = response.behavior === 'allow' ? 0 : 1;
+      console.log(`📥 [terminal-mode] resolving approval ${requestId.slice(0, 8)} → ${response.behavior} (option ${optionIndex + 1})`);
+    }
+    entry.respond(optionIndex);
     return true;
   }
 
@@ -767,20 +779,24 @@ async function sendPromptToTerminalClaude(
   onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${argsDisplay}\n`, false);
 
   // onChoiceRequest ファクトリ: リトライ時にも同じコールバックを使い回す
+  // 端末モードの choice prompt は全て QuestionCard で表示する（AskUserQuestion・trust folder・resume 等）
   const makeChoiceHandler = options.onToolApprovalRequest ? (req: { requestId: string; question: string; options: string[]; respond: (optionIndex: number) => void }) => {
-    // resolver を登録（resolveToolApproval から後で呼ばれる）
-    terminalApprovalResolvers.set(req.requestId, req.respond);
-    // 既存承認カード形式で WS 送信
+    // resolver と options を登録（resolveToolApproval で選択ラベル→index 逆引きに使う）
+    terminalApprovalResolvers.set(req.requestId, { respond: req.respond, options: req.options });
+    // QuestionCard 互換フォーマットで WS 送信（isQuestion: true で QuestionCard を使う）
     options.onToolApprovalRequest!({
       requestId: req.requestId,
-      // 端末モードはツール名を CLI 画面から復元できないため固定文字列
       toolName: 'Claude CLI Prompt',
       toolInput: {
-        question: req.question,
-        options: req.options,
+        // QuestionCard は questions 配列を期待する（SDK の AskUserQuestion と同じ形式）
+        questions: [{
+          question: req.question,
+          options: req.options.map(o => ({ label: o })),
+        }],
       },
       title: req.question.slice(0, 100),
       description: req.options.map((o, i) => `${i + 1}. ${o}`).join('\n'),
+      isQuestion: true,
     });
   } : undefined;
 
