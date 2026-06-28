@@ -19,6 +19,13 @@
 - Claude モバイル（音声）から「devrelayのプロジェクト一覧見せて」→ ツール呼出成功を実機確認
 - 依存追加: `@modelcontextprotocol/sdk`, `zod`
 - 対象: `apps/server/src/mcp/`(新規ディレクトリ: server.ts, tools.ts, auth.ts, oauth.ts), `apps/server/src/index.ts`, `apps/server/src/routes/auth.ts`
+- **実機テスト後の修正**:
+  - OAuth トークンを DB (AuthSession) に永続化 — サーバー再起動後もトークン有効
+  - `forceNewSession` フラグ — MCP submit で前回セッションの JSONL 注入・resume をスキップ（指示汚染防止）
+  - MCP submit 時の `skipPermissions: true` — ツール承認を自動化
+  - `get_plan` をゴーストプラン修正 — `requestLatestPlanFile(machineId)` を廃止、submissionId スコープの DB クエリに変更
+  - `get_build_status` の DB フォールバック — progress tracker が古い場合に最新 AI メッセージから取得
+  - Claude モバイルで submit→get_plan→approve→get_build_status の一連フローが完走を実機確認
 
 ### #245: Voice Assist サーバー側対応 (2026-06-27)
 
