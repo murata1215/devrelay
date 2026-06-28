@@ -12,7 +12,6 @@ import {
   getConnectedAgents,
   sendPromptToAgent,
   execConversation,
-  requestLatestPlanFile,
   isAgentOutdated,
   startSession as startAgentSession,
 } from '../services/agent-manager.js';
@@ -121,58 +120,45 @@ export function registerMcpTools(server: McpServer, userId: string) {
 
   /**
    * get_plan — 投入済み指示のプランを取得
+   *
+   * submissionId (= sessionId) に紐づく DB の Message からプランを取得。
+   * requestLatestPlanFile（machineId スコープ）は使わない — 別プロジェクトの
+   * ゴーストプランを返す致命的なスコープバグがあった (#246 実機テストで発見)。
    */
   server.tool(
     'get_plan',
     'Get the plan for a submitted instruction. Call this after submit_instruction to retrieve the AI-generated implementation plan. If status is "planning", wait a moment and call again.',
-    { projectId: z.string().describe('The project ID'), submissionId: z.string().describe('The submission ID returned by submit_instruction') },
-    async ({ projectId, submissionId }) => {
-      // プロジェクトの machineId を取得
-      const project = await prisma.project.findFirst({
-        where: { id: projectId, machine: { userId } },
-        include: { machine: true },
+    { submissionId: z.string().describe('The submission ID returned by submit_instruction') },
+    async ({ submissionId }) => {
+      // submissionId の存在チェック
+      const session = await prisma.session.findUnique({
+        where: { id: submissionId },
+        select: { id: true, userId: true },
       });
 
-      if (!project) {
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ status: 'failed', error: 'Project not found' }) }] };
+      if (!session || session.userId !== userId) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ status: 'not_found', error: 'Submission not found' }) }] };
       }
 
-      if (!getConnectedAgents().has(project.machineId)) {
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ status: 'failed', error: 'Agent is offline' }) }] };
-      }
+      // submissionId に紐づく最新の AI メッセージを取得
+      const latestMessage = await prisma.message.findFirst({
+        where: { sessionId: submissionId, role: 'ai' },
+        orderBy: { createdAt: 'desc' },
+      });
 
-      try {
-        const planResult = await requestLatestPlanFile(project.machineId);
-        const planContent = planResult.content || '';
+      if (latestMessage) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             status: 'ready',
-            summary: planContent.slice(0, 500),
-            planMarkdown: planContent,
+            summary: latestMessage.content.slice(0, 500),
+            planMarkdown: latestMessage.content,
             executable: true,
           }) }],
         };
-      } catch {
-        // Plan ファイルがまだ生成されていない場合
-        // セッションの最新メッセージからプラン内容を取得
-        const latestMessage = await prisma.message.findFirst({
-          where: { sessionId: submissionId, role: 'ai' },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (latestMessage) {
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({
-              status: 'ready',
-              summary: latestMessage.content.slice(0, 500),
-              planMarkdown: latestMessage.content,
-              executable: true,
-            }) }],
-          };
-        }
-
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ status: 'planning', message: 'Plan is being generated. Please wait and try again.' }) }] };
       }
+
+      // AI メッセージがまだない → プラン生成中
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ status: 'planning', message: 'Plan is being generated. Please wait and try again.' }) }] };
     }
   );
 
