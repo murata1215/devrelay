@@ -780,9 +780,12 @@ async function sendPromptToTerminalClaude(
 
   // onChoiceRequest ファクトリ: リトライ時にも同じコールバックを使い回す
   // 端末モードの choice prompt は全て QuestionCard で表示する（AskUserQuestion・trust folder・resume 等）
+  const choiceRequestTimes = new Map<string, number>(); // requestId → timestamp（応答時間計測用）
   const makeChoiceHandler = options.onToolApprovalRequest ? (req: { requestId: string; question: string; options: string[]; respond: (optionIndex: number) => void }) => {
     // resolver と options を登録（resolveToolApproval で選択ラベル→index 逆引きに使う）
     terminalApprovalResolvers.set(req.requestId, { respond: req.respond, options: req.options });
+    choiceRequestTimes.set(req.requestId, Date.now());
+    console.log(`⏱️ [APPROVAL] choice detected at ${new Date().toISOString()}: "${req.question.substring(0, 60)}" (${req.options.length} options, requestId=${req.requestId.substring(0, 8)})`);
     // QuestionCard 互換フォーマットで WS 送信（isQuestion: true で QuestionCard を使う）
     options.onToolApprovalRequest!({
       requestId: req.requestId,

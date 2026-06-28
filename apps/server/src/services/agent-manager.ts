@@ -1761,7 +1761,9 @@ const pendingToolApprovalRequests = new Map<string, {
  */
 async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
   const { machineId, sessionId, requestId, toolName, toolInput, title, description, decisionReason, isQuestion } = payload;
+  const approvalStartMs = Date.now();
   console.log(`${isQuestion ? '❓' : '🔐'} ${isQuestion ? 'User question' : 'Tool approval'} request: ${toolName} (${requestId.substring(0, 8)}...) for session ${sessionId.substring(0, 8)}...`);
+  console.log(`⏱️ [APPROVAL] request received at ${new Date().toISOString()}, requestId=${requestId.substring(0, 8)}, isQuestion=${!!isQuestion}`);
 
   // セッションの projectId を取得（WebUI のタブルーティング用）
   const session = await prisma.session.findUnique({
@@ -1909,7 +1911,9 @@ export function handleToolApprovalUserResponse(
   pendingToolApprovalRequests.delete(requestId);
 
   const logSuffix = response.approveAll ? ' (approve-all)' : response.alwaysAllow ? ' (always-allow)' : '';
-  console.log(`🔐 Tool approval response: ${response.behavior}${logSuffix} (${requestId.substring(0, 8)}...)`);
+  const answersInfo = response.answers ? ` answers=${JSON.stringify(response.answers).substring(0, 100)}` : '';
+  console.log(`🔐 Tool approval response: ${response.behavior}${logSuffix} (${requestId.substring(0, 8)}...)${answersInfo}`);
+  console.log(`⏱️ [APPROVAL] user responded at ${new Date().toISOString()}, requestId=${requestId.substring(0, 8)}, behavior=${response.behavior}`);
 
   // DB の status を更新（pending → allow/deny）
   prisma.toolApproval.update({
@@ -1927,6 +1931,7 @@ export function handleToolApprovalUserResponse(
   }
 
   // Agent に応答を転送（approveAll フラグ + alwaysAllowRule も含む）
+  console.log(`⏱️ [APPROVAL] forwarding to agent: requestId=${requestId.substring(0, 8)}, machineId=${pending.machineId.substring(0, 8)}`);
   sendToAgent(pending.machineId, {
     type: 'server:tool:approval:response',
     payload: { requestId, behavior: response.behavior, message: response.message, approveAll: response.approveAll, alwaysAllowRule, answers: response.answers },
@@ -1973,7 +1978,8 @@ function broadcastToolApprovalToWeb(sessionId: string, message: ServerToWebMessa
   if (webParticipants.length > 0) {
     // セッション参加者が見つかった → 対象の Web クライアントに送信
     for (const { chatId } of webParticipants) {
-      sendWebRawMessage(chatId, message);
+      const sent = sendWebRawMessage(chatId, message);
+      console.log(`⏱️ [APPROVAL] broadcast to chatId=${chatId.substring(0, 20)}... sent=${sent}`);
     }
     console.log(`🔐 Tool approval broadcast: ${webParticipants.length} web participant(s) for session ${sessionId.substring(0, 8)}...`);
   } else {

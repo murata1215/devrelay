@@ -274,8 +274,11 @@ export function registerMcpTools(server: McpServer, userId: string) {
       const sessionId = await createSession(userId, project.machineId, project.id, aiTool);
 
       // MCP 用の chatId で参加者登録（進捗トラッキング用）
+      // 注意: mcp: prefix の chatId は実際の WebSocket を持たないため、
+      // ツール承認リクエストは sendWebRawMessage で送れず fallback broadcast になる
       const mcpChatId = `mcp:${userId}:${sessionId}`;
       addParticipant(sessionId, 'web', mcpChatId);
+      console.log(`⏱️ [MCP] session created: sessionId=${sessionId.substring(0, 12)}, participant chatId=${mcpChatId.substring(0, 25)}`);
 
       // Agent にセッション開始を通知
       await startAgentSession(project.machineId, sessionId, project.name, project.path, aiTool as any);
