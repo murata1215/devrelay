@@ -1124,6 +1124,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             await saveConversation(sessionInfo.projectPath, sessionInfo.history);
             console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
           }
+
+          // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）
+          // 生の `flutter create` 等で作られた新規プロジェクトを即座に DevRelay へ反映する
+          if (isExecTriggered) {
+            await rescanProjectsAndSync(currentConfig!);
+          }
         } else {
           // Stream intermediate output without files
           console.log(`📤 Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
@@ -1201,6 +1207,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               });
               await saveConversation(sessionInfo.projectPath, sessionInfo.history);
               console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
+            }
+
+            // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）
+            if (isExecTriggered) {
+              await rescanProjectsAndSync(currentConfig!);
             }
           } else {
             console.log(`📤 Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);
@@ -1458,6 +1469,27 @@ export function sendProjectsUpdate(projects: Project[]) {
     },
   });
   console.log(`📤 Sent projects update: ${projects.length} projects`);
+}
+
+/**
+ * projectsDirs を再スキャンして最新のプロジェクト一覧を Server に同期する（#255）。
+ * exec 完了時に呼び出し、生の `flutter create` 等で作られた新規プロジェクトを
+ * Agent 再起動を待たずに DevRelay の一覧へ反映する。失敗は warn ログのみ（非致命的）。
+ */
+export async function rescanProjectsAndSync(config: AgentConfig): Promise<void> {
+  try {
+    for (const dir of config.projectsDirs) {
+      try {
+        await autoDiscoverProjects(dir);
+      } catch (err) {
+        console.warn(`⚠️ rescan: failed to scan ${dir}: ${(err as Error).message}`);
+      }
+    }
+    const projects = await loadProjects(config);
+    sendProjectsUpdate(projects);
+  } catch (err) {
+    console.warn(`⚠️ rescanProjectsAndSync failed: ${(err as Error).message}`);
+  }
 }
 
 // Agreement のステータスを表す型

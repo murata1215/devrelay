@@ -122,20 +122,88 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1): Promi
   return found;
 }
 
-async function looksLikeProject(dir: string): Promise<boolean> {
-  // CLAUDE.md が存在すればプロジェクトとして認識
+/** プロジェクト検出マーカーの種別 */
+type ProjectMarker = 'claude' | 'flutter' | 'android' | 'xcode';
+
+/**
+ * ディレクトリがプロジェクトかどうかを検出し、マーカー種別を返す。
+ * 検出できなければ null を返す。
+ *
+ * 生の `flutter create` / `gradle init` で作られた（CLAUDE.md 無しの）プロジェクトも
+ * 認識できるよう、pubspec.yaml / settings.gradle(.kts) をマーカーに含める（#255）。
+ */
+async function detectProjectMarker(dir: string): Promise<ProjectMarker | null> {
+  // CLAUDE.md が存在すればプロジェクトとして認識（最優先）
   try {
     await fs.access(path.join(dir, 'CLAUDE.md'));
-    return true;
+    return 'claude';
   } catch {}
 
-  // .xcodeproj ディレクトリが存在すればプロジェクトとして認識（iOS/macOS 開発）
+  // ディレクトリエントリを 1 回だけ読んで各マーカーを判定
+  let entries: string[];
   try {
-    const entries = await fs.readdir(dir);
-    if (entries.some(e => e.endsWith('.xcodeproj'))) return true;
+    entries = await fs.readdir(dir);
+  } catch {
+    return null;
+  }
+
+  // .xcodeproj ディレクトリ（iOS/macOS 開発）
+  if (entries.some(e => e.endsWith('.xcodeproj'))) return 'xcode';
+  // pubspec.yaml（Flutter/Dart）
+  if (entries.includes('pubspec.yaml')) return 'flutter';
+  // settings.gradle / settings.gradle.kts（Android/Gradle）
+  if (entries.includes('settings.gradle') || entries.includes('settings.gradle.kts')) return 'android';
+
+  return null;
+}
+
+async function looksLikeProject(dir: string): Promise<boolean> {
+  return (await detectProjectMarker(dir)) !== null;
+}
+
+/**
+ * マーカー種別ごとの最小限 CLAUDE.md を生成する。
+ */
+function generateAutoClaudeMd(name: string, marker: ProjectMarker): string {
+  const kindLabel: Record<ProjectMarker, string> = {
+    claude: '一般',
+    flutter: 'Flutter/Dart',
+    android: 'Android (Gradle)',
+    xcode: 'iOS/macOS (Xcode)',
+  };
+  return `# ${name}
+
+> ${kindLabel[marker]} プロジェクト（DevRelay が自動生成した CLAUDE.md）
+
+このファイルは DevRelay がプロジェクトを認識するために自動作成されました。
+プロジェクトの概要・技術スタック・開発ルールをここに追記してください。
+
+## ルール参照
+- \`rules/devrelay.md\` - DevRelay 共通ルール（\`ag\` / \`agreement\` コマンドで生成）
+`;
+}
+
+/**
+ * マーカー検出（pubspec.yaml 等）で新規登録されたプロジェクトに CLAUDE.md が無い場合、
+ * 最小限の CLAUDE.md を書き込む。DevRelay の「プロジェクトには CLAUDE.md 必須」ポリシーを維持する。
+ * 書き込み失敗（権限等）は warn ログのみで登録は継続する（非致命的）。
+ */
+async function ensureAutoClaudeMd(dir: string, name: string): Promise<void> {
+  const claudeMdPath = path.join(dir, 'CLAUDE.md');
+  try {
+    await fs.access(claudeMdPath);
+    return; // 既に存在するなら何もしない（既存プロジェクトを上書きしない）
   } catch {}
 
-  return false;
+  const marker = await detectProjectMarker(dir);
+  // ここに来る時点で CLAUDE.md は無いため marker は flutter/android/xcode のいずれか（保険で claude 扱い）
+  const effectiveMarker: ProjectMarker = marker && marker !== 'claude' ? marker : 'claude';
+  try {
+    await fs.writeFile(claudeMdPath, generateAutoClaudeMd(name, effectiveMarker), 'utf-8');
+    console.log(`   📝 Auto-created CLAUDE.md for ${name} (${effectiveMarker})`);
+  } catch (err) {
+    console.warn(`   ⚠️ Failed to auto-create CLAUDE.md for ${name}: ${(err as Error).message}`);
+  }
 }
 
 export async function listProjects(): Promise<ProjectConfig[]> {
@@ -167,6 +235,10 @@ export async function autoDiscoverProjects(baseDir: string, maxDepth: number = 5
       existing.push(project);
       console.log(`   ✅ Added: ${project.name} (${project.path})`);
       added++;
+
+      // CLAUDE.md 自動配置: マーカー検出（pubspec.yaml 等）で登録されたが
+      // CLAUDE.md が無いプロジェクトに最小限の CLAUDE.md を書き込む（#255・非致命的）
+      await ensureAutoClaudeMd(project.path, project.name);
     }
   }
 

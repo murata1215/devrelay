@@ -6,6 +6,15 @@
 
 ## 実装済み機能
 
+### #255: プロジェクト検出マーカー拡張 + CLAUDE.md 自動配置 + exec 完了時再スキャン (2026-07-04)
+
+- **背景**: #254 で scaffold + スキルを整備したが、対象マシン上の Claude はスキルを使わず素の `Bash: flutter create` を実行することがある（既にそのマシンにいるため API 経由スキルより直接実行が自然）。素の `flutter create` は CLAUDE.md を置かず、`looksLikeProject()`（CLAUDE.md / .xcodeproj のみ検出）が認識できないため DevRelay の一覧に現れなかった（Mac 実機で termapp が未認識）
+- **検出マーカー拡張**: `looksLikeProject()` を `detectProjectMarker()` に再構成し、`pubspec.yaml`（Flutter）+ `settings.gradle` / `settings.gradle.kts`（Android）を検出マーカーに追加。副次効果として top-level 検出により `termapp/ios/Runner.xcodeproj` 等サブフォルダの誤登録も防止
+- **CLAUDE.md 自動配置**: マーカー検出で**新規登録された**プロジェクトに CLAUDE.md が無ければ最小限のもの（検出タイプ付き）を自動生成（`ensureAutoClaudeMd()`）。「作成したプロジェクトには CLAUDE.md 必須」ポリシーを維持。既存プロジェクトは上書きしない・書き込み失敗は warn のみ（非致命的）
+- **exec 完了時の自動再スキャン**: `rescanProjectsAndSync()` を追加し、exec モードの AI 実行完了時（通常 + --resume リトライの 2 経路）に projectsDirs を再スキャンして一覧を Server に同期。Agent 再起動を待たず新規プロジェクトが即座に一覧へ出現。plan モードでは走らない
+- 対象: `agents/{linux,macos}/src/services/projects.ts`（マーカー拡張 + 自動 CLAUDE.md）, `agents/{linux,macos}/src/services/connection.ts`（rescanProjectsAndSync + exec 完了 2 経路配線）（計 4 ファイル）
+- DB 変更なし・Server 変更なし（既存 `agent:projects` 同期を利用）
+
 ### #254: モバイル/マルチプラットフォーム scaffold テンプレート追加 (2026-07-04)
 
 - **追加テンプレート**: 既存の `vite-react-web`（#240）に加えて 4 種を追加
