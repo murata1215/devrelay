@@ -53,6 +53,10 @@ export const SettingKeys = {
   ACTIVE_SERVER: 'active_server',
   /** Exec モード常時許可ツール（ルールパターン配列、JSON 文字列） */
   EXEC_ALLOWED_TOOLS: 'execAllowedTools',
+  /** Claude SDK モデル — Plan モード用（例: 'sonnet', 'opus', 'haiku'） */
+  CLAUDE_MODEL_PLAN: 'claude_model_plan',
+  /** Claude SDK モデル — Exec モード用（例: 'sonnet', 'opus', 'haiku'） */
+  CLAUDE_MODEL_EXEC: 'claude_model_exec',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

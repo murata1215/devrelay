@@ -364,6 +364,8 @@ export interface SendPromptOptions {
   onResponseSummarizeRequest?: (assistantText: string, sessionId: string) => Promise<string>;
   /** MCP 経由の新規 submit: 前回セッションの resume をスキップ */
   forceNewSession?: boolean;
+  /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'）。省略時は SDK デフォルト */
+  model?: string;
 }
 
 /**
@@ -413,7 +415,12 @@ async function sendPromptToAiSdk(
       DEVRELAY_SESSION_ID: sessionId,
       DEVRELAY_PROJECT: projectPath,
     },
+    // Claude SDK モデル指定（ユーザー設定 `l` コマンドで変更可能）
+    model: options.model,
   };
+  if (options.model) {
+    console.log(`🧠 [SDK] Using model: ${options.model}`);
+  }
 
   // AskUserQuestion 無効化（SDK レベルでツール除去）
   if (options.disableAsk) {

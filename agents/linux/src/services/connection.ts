@@ -637,7 +637,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; terminalMode?: boolean }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; terminalMode?: boolean; model?: string }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -695,6 +695,7 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     files: undefined,
     execPrompt,  // BuildLog AI 要約のコンテキスト用に exec プロンプトを伝搬
     terminalMode: payload.terminalMode,  // 端末モード継承
+    model: payload.model,  // Claude SDK モデル継承
   });
 }
 
@@ -710,7 +711,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -964,6 +965,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     disableAsk: serverDisableAsk,
     terminalMode: sessionInfo.terminalMode,
     forceNewSession: payload.forceNewSession,
+    model: payload.model,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）

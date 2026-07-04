@@ -218,6 +218,21 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     }
   }
   
+  // 3.6. 「l」コマンド: Claude モデル選択
+  // l → モデル一覧、l sonnet → 両方設定、l plan:haiku → plan のみ、l exec:opus → exec のみ
+  if (normalized === 'l') {
+    return { type: 'model:list' };
+  }
+  const lMatch = normalized.match(/^l\s+(.+)$/);
+  if (lMatch) {
+    const arg = lMatch[1].trim();
+    const colonMatch = arg.match(/^(plan|exec):(.+)$/);
+    if (colonMatch) {
+      return { type: 'model:set', target: colonMatch[1] as 'plan' | 'exec', model: colonMatch[2] };
+    }
+    return { type: 'model:set', target: 'both', model: arg };
+  }
+
   // 4. Check log with count
   if (normalized.startsWith('log')) {
     const match = normalized.match(/^log\s*(\d+)?$/);
@@ -325,6 +340,10 @@ export function getHelpText(): string {
 **AI切り替え**
 \`a\` - AI ツール一覧・切り替え
 \`a 1\`, \`a 2\` - 一覧から番号で選択
+\`l\` - Claude モデル一覧（現在の設定を表示）
+\`l sonnet\` - Plan/Exec 両方のモデルを変更
+\`l plan:haiku\` - Plan のみ変更
+\`l exec:opus\` - Exec のみ変更
 
 **アカウント連携**
 \`link\` - WebUI アカウントとリンク

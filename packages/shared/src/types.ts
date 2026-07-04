@@ -354,6 +354,8 @@ export interface ConversationExecPayload {
   disableAsk?: boolean;
   /** 端末インタフェースモード（PTY 経由で claude --continue 起動、Project 単位） */
   terminalMode?: boolean;
+  /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'） */
+  model?: string;
 }
 
 export interface SessionRestoredPayload {
@@ -487,6 +489,8 @@ export interface AiPromptPayload {
   terminalMode?: boolean;
   /** MCP 経由の新規 submit: 前回セッションの JSONL 注入・resume をスキップ */
   forceNewSession?: boolean;
+  /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'）。省略時は SDK デフォルト */
+  model?: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -514,6 +518,8 @@ export type UserCommand =
   | { type: 'help' }
   | { type: 'ai:list' }   // AI ツール一覧
   | { type: 'ai:switch'; tool: AiTool }
+  | { type: 'model:list' }  // Claude モデル一覧
+  | { type: 'model:set'; target: 'both' | 'plan' | 'exec'; model: string }  // モデル設定
   | { type: 'ai:prompt'; text: string }
   | { type: 'kill' }     // 実行中の AI プロセスを強制停止
   | { type: 'update' }   // Agent バージョン確認・更新

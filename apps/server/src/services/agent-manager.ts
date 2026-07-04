@@ -1090,6 +1090,8 @@ export async function sendPromptToAgent(
   aiTool?: AiTool,
   /** MCP 経由の新規 submit: 前回セッションの JSONL 注入・resume をスキップ */
   forceNewSession?: boolean,
+  /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'） */
+  model?: string,
 ) {
   // バージョン不足の Agent にはプロンプトを送信しない
   if (outdatedAgents.has(machineId)) {
@@ -1111,7 +1113,7 @@ export async function sendPromptToAgent(
 
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession }
+    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model }
   });
 }
 
@@ -1388,7 +1390,7 @@ export async function clearConversation(machineId: string, sessionId: string, pr
   });
 }
 
-export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string) {
+export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string, model?: string) {
   // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
   const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
   // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
@@ -1408,6 +1410,7 @@ export async function execConversation(machineId: string, sessionId: string, pro
       skipPermissions: machine?.skipPermissions ?? false,
       disableAsk: machine?.disableAsk ?? false,
       terminalMode,
+      model,
     }
   });
 }

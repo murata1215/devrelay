@@ -39,6 +39,7 @@ import {
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
+import { getUserSetting, setUserSetting, SettingKeys } from './user-settings.js';
 import {
   createTestflightService,
   listTestflightServices,
@@ -242,6 +243,12 @@ export async function executeCommand(
 
     case 'ai:switch':
       return handleAiSwitch(context, command.tool);
+
+    case 'model:list':
+      return handleModelList(context);
+
+    case 'model:set':
+      return handleModelSet(context, command.target, command.model);
 
     case 'ai:prompt':
       return handleAiPrompt(context, command.text, files, missedMessages);
@@ -730,13 +737,17 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
   // Start progress tracking
   await startProgressTracking(context.currentSessionId);
 
+  // Claude SDK モデル設定を取得（exec モデルを適用）
+  const execModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_EXEC) || undefined;
+
   // Send exec command to agent (marks the conversation reset point and auto-starts AI)
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
     session.project.path,
     context.userId,
-    customPrompt
+    customPrompt,
+    execModel,
   );
 
   // Return empty since progress message is already sent
@@ -1162,6 +1173,51 @@ async function handleQuit(context: UserContext): Promise<string> {
   return '👋 切断しました';
 }
 
+/** 利用可能な Claude SDK モデル一覧 */
+const AVAILABLE_MODELS = [
+  { id: 'opus', name: 'Claude Opus 4', description: '最高性能' },
+  { id: 'sonnet', name: 'Claude Sonnet 4', description: 'バランス型' },
+  { id: 'haiku', name: 'Claude Haiku 3.5', description: '高速・低コスト' },
+];
+
+/** Claude モデル一覧 + 現在の設定を表示 */
+async function handleModelList(context: UserContext): Promise<string> {
+  const planModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_PLAN) || '(default)';
+  const execModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_EXEC) || '(default)';
+
+  const lines = ['🧠 **Claude モデル設定**\n'];
+  lines.push(`Plan: **${planModel}**`);
+  lines.push(`Exec: **${execModel}**\n`);
+  lines.push('**利用可能モデル:**');
+  for (const m of AVAILABLE_MODELS) {
+    lines.push(`  \`${m.id}\` — ${m.name}（${m.description}）`);
+  }
+  lines.push('\n**設定方法:**');
+  lines.push('`l sonnet` — Plan/Exec 両方を変更');
+  lines.push('`l plan:haiku` — Plan のみ変更');
+  lines.push('`l exec:opus` — Exec のみ変更');
+  return lines.join('\n');
+}
+
+/** Claude モデルを設定する */
+async function handleModelSet(context: UserContext, target: 'both' | 'plan' | 'exec', model: string): Promise<string> {
+  // モデル名を正規化（部分一致を許容）
+  const matched = AVAILABLE_MODELS.find(m => m.id === model.toLowerCase());
+  if (!matched) {
+    return `❌ 不明なモデル: \`${model}\`\n\n利用可能: ${AVAILABLE_MODELS.map(m => `\`${m.id}\``).join(', ')}`;
+  }
+
+  if (target === 'both' || target === 'plan') {
+    await setUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_PLAN, matched.id);
+  }
+  if (target === 'both' || target === 'exec') {
+    await setUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_EXEC, matched.id);
+  }
+
+  const targetLabel = target === 'both' ? 'Plan/Exec' : target === 'plan' ? 'Plan' : 'Exec';
+  return `✅ ${targetLabel} モデルを **${matched.name}** (\`${matched.id}\`) に変更しました`;
+}
+
 async function handleAiList(context: UserContext): Promise<string> {
   if (!context.currentSessionId || !context.currentMachineId) {
     return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
@@ -1383,6 +1439,9 @@ async function handleAiPrompt(
   // Start progress tracking (sends initial message)
   await startProgressTracking(context.currentSessionId);
 
+  // Claude SDK モデル設定を取得（plan モデルを初回プロンプトに適用）
+  const claudeModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_PLAN) || undefined;
+
   // Send to agent with files and missed messages
   // エラー時はトラッカーをクリーンアップして永遠にスタックしないようにする
   try {
@@ -1394,7 +1453,9 @@ async function handleAiPrompt(
       files,
       missedMessages,
       currentSession?.project.path,
-      currentSession?.aiTool as AiTool | undefined
+      currentSession?.aiTool as AiTool | undefined,
+      false,  // forceNewSession
+      claudeModel,
     );
   } catch (error) {
     stopProgressTracking(context.currentSessionId);
