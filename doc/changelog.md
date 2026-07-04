@@ -6,6 +6,43 @@
 
 ## 実装済み機能
 
+### #251: Claude SDK モデル選択 `l` コマンド (2026-06-29)
+
+- `l` コマンドで Claude SDK モードのモデルを Plan/Exec 独立に選択可能
+  - `l` — モデル一覧 + 現在の設定表示
+  - `l sonnet` — Plan/Exec 両方を変更
+  - `l plan:haiku` — Plan のみ変更、`l exec:opus` — Exec のみ変更
+- UserSettings に `CLAUDE_MODEL_PLAN` / `CLAUDE_MODEL_EXEC` を追加
+- WS payload に `model` フィールド追加、Agent SDK の `sdkOptions.model` に適用
+- 端末モードは対象外（Claude CLI 自体がモデル制御）
+- 対象: 7ファイル（types, user-settings, command-parser, command-handler, agent-manager, connection, ai-runner）
+
+### #250: MCP get_build_status の早漏 done:true 修正 (2026-06-29)
+
+- **症状**: `approve_implementation` 直後に `get_build_status` を呼ぶと、exec 未完了なのに `done: true` + plan フェーズの古い summary を返す（再現率 100%）
+- **根本原因**: BuildLog / AI メッセージの検索が plan フェーズと exec フェーズを区別していない
+- **修正**: `exec` メッセージのタイムスタンプを基準点にして、exec 以降の BuildLog / AI メッセージのみ対象にする。exec 後に結果なしなら `phase: 'exec', done: false` を返す
+- 対象: `apps/server/src/mcp/tools.ts`
+
+### #249: MCP 承認フロー診断ログ追加 (2026-06-29)
+
+- `⏱️ [APPROVAL]` / `⏱️ [MCP]` タイミングログを承認フロー全経路に追加
+- Agent choice 検出 → Server request 受信 → broadcast → User 応答 → Agent 転送の全ステップを計測可能に
+- 対象: `agent-manager.ts`, `mcp/tools.ts`, `ai-runner.ts`
+
+### #248: Terminal mode AskUserQuestion の QuestionCard 表示修正 (2026-06-29)
+
+- **症状**: terminal mode で Claude が AskUserQuestion を実行すると、WebUI に生 JSON + ツール承認ボタン（許可/拒否）が表示される
+- **修正**: (1) `isQuestion: true` 追加 (2) `toolInput` を QuestionCard 互換 `questions` 配列に変換 (3) `terminalApprovalResolvers` に options 保存 (4) `resolveToolApproval` で `response.answers` のラベル→index 逆引き
+- 対象: `agents/linux/src/services/ai-runner.ts`
+
+### #247: WebUI cross-project output leakage fix (2026-06-29)
+
+- **症状**: vixbtc の exec 完了出力が devrelay のチャットタブに表示された（同一マシン上の別プロジェクト）
+- **根本原因**: `ChatPage.tsx` の `addMessageToTab`/`updateProgressOnTab`/`clearProgressOnTab` が、WS メッセージの `projectId` に該当するタブが存在しない場合にアクティブタブにフォールバック表示していた
+- **修正**: projectId 指定ありで該当タブなし → メッセージを破棄（フォールバックしない）
+- 対象: `apps/web/src/pages/ChatPage.tsx`
+
 ### #246: Remote MCP Server v1 (2026-06-28)
 
 - `/mcp` エンドポイント（Streamable HTTP）で DevRelay の Plan/Exec/BuildLog 機能を MCP ツールとして公開
