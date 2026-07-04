@@ -1173,9 +1173,11 @@ async function handleQuit(context: UserContext): Promise<string> {
   return '👋 切断しました';
 }
 
-/** 利用可能な Claude SDK モデル一覧 */
+/** 利用可能な Claude SDK モデル一覧（フル ID はCLIバージョン非依存で動作確認済み） */
 const AVAILABLE_MODELS = [
-  { id: 'opus', name: 'Claude Opus 4', description: '最高性能' },
+  { id: 'claude-fable-5', name: 'Claude Fable 5', description: '最高性能（Mythos クラス）' },
+  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', description: '高性能（最新）' },
+  { id: 'opus', name: 'Claude Opus 4（CLI版）', description: 'CLI デフォルト解決' },
   { id: 'sonnet', name: 'Claude Sonnet 4', description: 'バランス型' },
   { id: 'haiku', name: 'Claude Haiku 3.5', description: '高速・低コスト' },
 ];

@@ -85,6 +85,22 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
   },
 ];
 
+/** Claude モデル選択肢（server の AVAILABLE_MODELS と同期。フル ID は CLI バージョン非依存で動作） */
+const CLAUDE_MODEL_OPTIONS = [
+  { value: '', label: '(default) — CLI 標準' },
+  { value: 'claude-fable-5', label: 'Claude Fable 5（最高性能）' },
+  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8（高性能・最新）' },
+  { value: 'opus', label: 'Claude Opus 4（CLI版）' },
+  { value: 'sonnet', label: 'Claude Sonnet 4（バランス型）' },
+  { value: 'haiku', label: 'Claude Haiku 3.5（高速・低コスト）' },
+];
+
+/** Claude モデル設定フィールド（plan/exec 別）。`l` コマンドと同じ UserSettings キーを共有 */
+const CLAUDE_MODEL_FIELDS = [
+  { key: 'claude_model_plan', label: 'Plan モード', description: 'プランモードで使用するモデル' },
+  { key: 'claude_model_exec', label: 'Exec モード', description: '実行モードで使用するモデル' },
+];
+
 /** チャット表示設定（localStorage 管理） */
 const CHAT_DISPLAY_KEY = 'devrelay-chat-display';
 const DEFAULT_USER_COLOR = '#5865f2';
@@ -351,6 +367,33 @@ export function SettingsPage() {
       setData((prev) => ({ ...prev, [key]: value }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save provider setting');
+    }
+  };
+
+  /**
+   * Claude モデル設定を保存（select 変更時に即座保存）
+   * 空文字（default）選択時はキーを削除して CLI 標準に戻す。
+   * `l` コマンドと同じ UserSettings キーを共有するため last-write-wins で整合する。
+   */
+  const handleModelChange = async (key: string, value: string) => {
+    setError('');
+    setSuccess('');
+
+    try {
+      if (value === '') {
+        // (default) 選択 → キー削除で CLI 標準に戻す
+        await settings.delete(key);
+        setData((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      } else {
+        await settings.update(key, value);
+        setData((prev) => ({ ...prev, [key]: value }));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save model setting');
     }
   };
 
@@ -623,6 +666,37 @@ export function SettingsPage() {
                 className="w-full sm:w-64 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
               >
                 {PROVIDER_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Claude Model Settings Section — plan/exec 別のデフォルトモデル選択 */}
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Claude Model Settings</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-6">
+          Plan / Exec モードで使用する Claude モデルのデフォルトを設定します。
+          チャットの <code className="px-1 rounded bg-[var(--input-bg)]">l</code> コマンドでも変更でき、同じ設定を共有します（後から変更した方が優先）。
+        </p>
+
+        <div className="space-y-6">
+          {CLAUDE_MODEL_FIELDS.map((field) => (
+            <div key={field.key}>
+              <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
+                {field.label}
+              </label>
+              <p className="text-[var(--text-faint)] text-xs mb-2">{field.description}</p>
+              <select
+                value={data[field.key] || ''}
+                onChange={(e) => handleModelChange(field.key, e.target.value)}
+                className="w-full sm:w-64 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+              >
+                {CLAUDE_MODEL_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>

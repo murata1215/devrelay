@@ -12,6 +12,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Multi-Agent**: Register and switch between ubuntu-dev/user1, ubuntu-prod/user2, windows01/dev...
 - **Multi-Project**: Manage multiple projects on each agent
 - **Multi-AI**: Support for Claude Code, Gemini CLI, Devin CLI, Aider
+- **Claude Model Selection**: Choose the Claude SDK model per Plan/Exec mode via the `l` command (`l sonnet`, `l plan:haiku`, `l exec:opus`) or the Settings page — both share the same `claude_model_plan` / `claude_model_exec` settings (last-write-wins). Full model IDs (`claude-opus-4-8`, `claude-fable-5`) bypass CLI alias resolution and hit the API directly, so newer models work without upgrading the CLI/Node.js
 - **Multi-Platform**: Operate from Discord, Telegram (LINE coming soon)
 - **Natural Language Commands**: "reconnect to last project" auto-translates to the right command (OpenAI / Anthropic / Gemini)
 - **Plan / Execute Mode**: AI plans first, you review, then it implements

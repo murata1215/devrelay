@@ -283,6 +283,16 @@ devrelay/
 - `handleAgentDisconnect()` で stale WebSocket 判定（Race Condition 防止）
 - `sendToAgent()` で CLOSED な WebSocket を検出時に自動クリーンアップ（stale 参照の自己修復）
 - `handleAgentConnect()` で旧 WebSocket が残っていれば `terminate()` で即座に破棄（`close()` はハンドシェイク待ちで stuck するため不可）
+
+## Claude モデル選択（`l` コマンド + Settings 共有）(#251-#253)
+
+Claude SDK モードで使うモデルを Plan/Exec 別に選択する仕組み。
+
+- **UserSettings キー**: `claude_model_plan` / `claude_model_exec`。プロンプト送信のたびに読み込み → WS payload `model` → Agent SDK `sdkOptions.model`
+- **`l` コマンド**: `l`（一覧）、`l sonnet`（両方）、`l plan:haiku` / `l exec:opus`（個別）。端末モードは対象外（Claude CLI 自体がモデル制御）
+- **設計判断（Settings と `l` の共有）**: WebUI Settings ページとチャット `l` コマンドは**同じ UserSettings キーを共有**する。専用の優先順位ロジックや新キーは作らず、last-write-wins で「後から変更した方が優先」を実現 → サーバー変更ゼロで両者が整合。Settings 画面には `l` での変更値もそのまま反映される
+- **設計判断（フル ID でエイリアス解決をバイパス）**: `AVAILABLE_MODELS` / `CLAUDE_MODEL_OPTIONS` にフルモデル ID（`claude-opus-4-8`, `claude-fable-5`）を持たせる。SDK/CLI のエイリアス（`opus` → `opus-4-6`）解決は CLI バージョンに依存するため、古い CLI では新モデルに解決されない。フル ID は API に直接渡るため CLI・Node.js を更新せず最新モデルが使える（CLI 2.1.197 + Node 20.20.0 で `claude-opus-4-8` / `claude-fable-5` 動作確認済み）
+- **`l` のコマンド判定バグ (#252)**: `isTraditionalCommand()` に `'l'` 判定を追加。未追加だとセッション接続中に `parseCommandWithNLP` が `l` を AI プロンプトとして流してしまう（`'a'` コマンドと同様の 1 文字キー特殊対応が必要）
 - Agent 側の `connectToServer()` で旧 WS を `removeAllListeners()` + `terminate()` でクリーンアップしてから新 WS を作成
 - Agent 側の close ハンドラで `thisWs` 参照をキャプチャし、既に新 WS に置き換えられていたら再接続をスキップ
 - `context.userId` は Discord プラットフォーム ID。DB の `Session.userId` には `oldSession.userId` を使う

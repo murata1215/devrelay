@@ -6,6 +6,25 @@
 
 ## 実装済み機能
 
+### #253: Settings ページに Claude モデルのデフォルト設定 UI 追加 (2026-07-04)
+
+- WebUI の Settings ページから Claude モデルの Plan/Exec デフォルトを設定可能に
+- **設計判断**: Settings と `l` コマンドは同じ UserSettings キー（`claude_model_plan` / `claude_model_exec`）を共有 → last-write-wins で「後から変更した方が優先」を実現。サーバー変更ゼロ
+- **追加**: SettingsPage に「Claude Model Settings」セクション（Plan/Exec 別ドロップダウン、変更時即保存）
+  - `(default)` 選択時は DELETE API でキー削除して CLI 標準に戻す
+  - `CLAUDE_MODEL_OPTIONS` は server の `AVAILABLE_MODELS` と同期（fable5 / opus-4-8 / opus / sonnet / haiku）
+- 対象: `apps/web/src/pages/SettingsPage.tsx`（1ファイル）
+
+### #252: `l` コマンドがセッション接続中に効かないバグ修正 + Fable 5 追加 (2026-07-04)
+
+- **症状**: プロジェクト接続中（セッション有り）に `l` を送ると、モデル一覧が出ずに AI プロンプトとして処理される
+- **根本原因**: `isTraditionalCommand()` に `'l'` の判定がなく、セッション接続中は `parseCommandWithNLP` が `{ type: 'ai:prompt' }` として AI に流していた
+- **修正**: `natural-language-parser.ts` に `trimmed === 'l' || /^l\s+.+$/i` パターン追加（`'a'` コマンドと同じ 1 文字キー特殊対応）
+- **追加**: `AVAILABLE_MODELS` に Claude Fable 5（id: `claude-fable-5`）+ Opus 4.8（id: `claude-opus-4-8`）を追加
+  - フル ID 指定は CLI バージョン非依存で動作確認済み（CLI 2.1.197 + Node 20.20.0 で opus-4-6 / opus-4-8 / fable-5 の3パターンとも成功）
+  - フル ID は SDK/CLI のエイリアス解決をバイパスして直接 API に渡るため、CLI・Node.js の更新不要
+- 対象: `natural-language-parser.ts`, `command-handler.ts`（2ファイル）
+
 ### #251: Claude SDK モデル選択 `l` コマンド (2026-06-29)
 
 - `l` コマンドで Claude SDK モードのモデルを Plan/Exec 独立に選択可能
