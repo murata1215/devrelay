@@ -6,6 +6,23 @@
 
 ## 実装済み機能
 
+### #254: モバイル/マルチプラットフォーム scaffold テンプレート追加 (2026-07-04)
+
+- **追加テンプレート**: 既存の `vite-react-web`（#240）に加えて 4 種を追加
+  - `flutter-app` — `flutter create`（全 OS、要 `flutter`）
+  - `android-kotlin` — 静的 Gradle Kotlin DSL テンプレート展開（全 OS、要ツールなし）
+  - `xcode-swiftui` — `project.yml` + `xcodegen generate` で SwiftUI 最小 iOS アプリ（**macOS 専用**、要 `xcodegen`）
+  - `empty` — CLAUDE.md + .gitignore のみの空プロジェクト（全 OS、用途未定向け）
+- **生成方式**: CLI ジェネレータ方式（`flutter` / `xcodegen` はマシンにインストール済み前提、未検出時は `brew install` 等の案内エラーを返す）。Android は静的テンプレート
+- **scaffold-templates.ts を構造化**: `SCAFFOLD_TEMPLATES` レジストリ（`kind: 'files' | 'command'`, `requiredTool`, `buildCommand`, `postCommand`, `postInstall`）。従来の npm install ハードコードを廃し per-template 化
+- **handleScaffoldCreate 汎用化**: `commandExists()`（which/where）でツール検出 → `kind` 分岐。**全テンプレートで CLAUDE.md を必須配置**（`looksLikeProject()` が CLAUDE.md 検出ベースのため、これで作成直後に自動認識されて DevRelay に現れる）
+- **OS 制限**: shared `SCAFFOLD_TEMPLATE_DEFS`（id / os / requiredTool の単一ソース）。サーバー `document-api.ts` が `Machine.managementInfo.os` を見て非対応テンプレート（例: Linux で `xcode-swiftui`）を 400 で拒否
+- **macOS Agent に scaffold 機能を新規移植**: connection.ts（`server:scaffold:create` ハンドラ + handleScaffoldCreate + commandExists）、scaffold-templates.ts（linux からコピー、内容同一）、skill-manager.ts（`devrelay-create-project` スキル: SKILL.md + create.sh を移植）
+- **スキル動的化**: SKILL.md のテンプレート表と create.sh の一覧を `SCAFFOLD_TEMPLATE_DEFS` から生成（対応 OS・要ツールも表示）
+- 呼び出し: 既存 `POST /api/agent/scaffold` + `devrelay-create-project` スキルのみ（WebUI 追加なし）。Manager 経由「〇〇に Flutter プロジェクト作って」が可能
+- 対象: `packages/shared/src/{types,constants}.ts`, `apps/server/src/routes/document-api.ts`, `agents/linux/src/services/{scaffold-templates,connection,skill-manager}.ts`, `agents/macos/src/services/{scaffold-templates(新),connection,skill-manager}.ts`（計 8 ファイル）
+- DB 変更なし
+
 ### #253: Settings ページに Claude モデルのデフォルト設定 UI 追加 (2026-07-04)
 
 - WebUI の Settings ページから Claude モデルの Plan/Exec デフォルトを設定可能に

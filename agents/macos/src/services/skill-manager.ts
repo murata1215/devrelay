@@ -14,6 +14,28 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import type { AgentConfig } from './config.js';
+import { SCAFFOLD_TEMPLATE_DEFS, type ScaffoldTemplateOs } from '@devrelay/shared';
+
+/** OS コードを表示ラベルに変換 */
+function scaffoldOsLabel(osCode: ScaffoldTemplateOs): string {
+  return ({ linux: 'Linux', darwin: 'macOS', win32: 'Windows' } as Record<string, string>)[osCode] || osCode;
+}
+
+/** SCAFFOLD_TEMPLATE_DEFS から SKILL.md 用のテンプレート表の行を生成 */
+function scaffoldTemplateTableRows(): string {
+  return SCAFFOLD_TEMPLATE_DEFS.map((t) => {
+    const osLabels = t.os.map(scaffoldOsLabel).join(' / ');
+    const toolNote = t.requiredTool ? `（要 \\\`${t.requiredTool}\\\`）` : '';
+    return `| \\\`${t.id}\\\` | ${t.description}${toolNote} | ${osLabels} |`;
+  }).join('\n');
+}
+
+/** SCAFFOLD_TEMPLATE_DEFS から create.sh の使い方表示用 echo 行を生成 */
+function scaffoldTemplateEchoLines(): string {
+  return SCAFFOLD_TEMPLATE_DEFS.map(
+    (t) => `  echo "  ${t.id.padEnd(16)}${t.description}"`,
+  ).join('\n');
+}
 
 /** スキルのベースディレクトリ */
 const SKILLS_BASE = path.join(os.homedir(), '.claude', 'skills');
@@ -25,6 +47,10 @@ const SCRIPTS_DIR = path.join(SKILL_DIR, 'scripts');
 /** devrelay-ask-member スキルディレクトリ */
 const ASK_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-ask-member');
 const ASK_SCRIPTS_DIR = path.join(ASK_SKILL_DIR, 'scripts');
+
+/** devrelay-create-project スキルディレクトリ */
+const CREATE_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-create-project');
+const CREATE_SCRIPTS_DIR = path.join(CREATE_SKILL_DIR, 'scripts');
 
 /**
  * WebSocket URL を HTTP URL に変換
@@ -375,7 +401,141 @@ fi
 }
 
 /**
- * devrelay-docs + devrelay-ask-member スキルファイルを作成・更新する
+ * create-project SKILL.md の内容を生成
+ */
+function generateCreateProjectSkillMd(): string {
+  return `---
+name: devrelay-create-project
+description: 対象マシンに新しいプロジェクトの雛形を作成します。「新しいプロジェクトを作って」「yyyyにWebアプリを作成して」など、新規プロジェクトの scaffold に使用します。
+allowed-tools: Bash(bash ~/.claude/skills/devrelay-create-project/scripts/create.sh *)
+---
+
+## DevRelay プロジェクト作成（Scaffold）
+
+対象マシンに新しいプロジェクトの雛形を作成します。
+
+### プロジェクト作成
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-create-project/scripts/create.sh --machine <マシン名> --name <プロジェクト名> --template <テンプレート名>
+\\\`\\\`\\\`
+
+### 利用可能なテンプレート
+
+| テンプレート | 説明 | 対応OS |
+|-------------|------|--------|
+${scaffoldTemplateTableRows()}
+
+**注意**: テンプレートには対応 OS 制限があります（例: \\\`xcode-swiftui\\\` は macOS マシンのみ）。対象マシンの OS に合わないテンプレートを指定するとサーバーがエラーを返します。一部テンプレートは対象マシンに CLI ツール（flutter / xcodegen 等）のインストールが必要です。
+
+### パラメータ
+
+- \\\`--machine\\\`: 対象マシン名（部分一致で検索）
+- \\\`--name\\\`: プロジェクト名（英小文字で始まり、英小文字・数字・ハイフンで構成、3〜30文字）
+- \\\`--template\\\`: テンプレート名（上記参照）
+
+### 例
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-create-project/scripts/create.sh --machine yyyy --name mviewer-web --template vite-react-web
+bash ~/.claude/skills/devrelay-create-project/scripts/create.sh --machine mac-mini --name my-app --template flutter-app
+\\\`\\\`\\\`
+
+### 注意事項
+- 対象マシンのエージェントがオンラインである必要があります
+- プロジェクト名は一意である必要があります
+- 作成後、プロジェクトは自動的にインベントリに登録されます
+- **Bash ツールの timeout を 360000（6分）に設定してください**（依存インストールやジェネレータに時間がかかる場合があります）
+`;
+}
+
+/**
+ * create.sh スクリプトの内容を生成
+ */
+function generateCreateScript(serverUrl: string, token: string): string {
+  const httpUrl = wsToHttpUrl(serverUrl);
+
+  return `#!/bin/bash
+# DevRelay プロジェクト作成（Scaffold）スクリプト
+# Agent が自動生成。手動編集は次回起動時に上書きされます。
+
+set -euo pipefail
+
+API_URL="${httpUrl}"
+TOKEN="${token}"
+
+# 引数チェック
+if [ $# -eq 0 ]; then
+  echo "使い方:"
+  echo "  bash $0 --machine <マシン名> --name <プロジェクト名> --template <テンプレート名>"
+  echo ""
+  echo "テンプレート:"
+${scaffoldTemplateEchoLines()}
+  exit 1
+fi
+
+# 引数パース
+MACHINE=""
+NAME=""
+TEMPLATE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --machine) MACHINE="$2"; shift 2 ;;
+    --name) NAME="$2"; shift 2 ;;
+    --template) TEMPLATE="$2"; shift 2 ;;
+    *) echo "不明な引数: $1"; exit 1 ;;
+  esac
+done
+
+if [ -z "$MACHINE" ] || [ -z "$NAME" ] || [ -z "$TEMPLATE" ]; then
+  echo "エラー: --machine, --name, --template の全てが必要です"
+  exit 1
+fi
+
+echo "📦 プロジェクト作成中..."
+echo "  マシン: $MACHINE"
+echo "  名前: $NAME"
+echo "  テンプレート: $TEMPLATE"
+echo ""
+
+# jq で安全に JSON を構築
+JSON_BODY=$(jq -n --arg m "$MACHINE" --arg n "$NAME" --arg t "$TEMPLATE" '{machineName: $m, name: $n, template: $t}' | tr -d '\\r')
+
+RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -f -w "\\n%{http_code}" --max-time 300 \\
+  -X POST \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -d @- \\
+  "\${API_URL}/api/agent/scaffold" 2>&1) || {
+  echo "エラー: プロジェクト作成に失敗しました（タイムアウトまたは接続エラー）"
+  echo "$RESPONSE"
+  exit 1
+}
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "エラー (HTTP $HTTP_CODE):"
+  if command -v jq &>/dev/null; then
+    echo "$BODY" | jq -r '.error // .'
+  else
+    echo "$BODY"
+  fi
+  exit 1
+fi
+
+echo "✅ プロジェクト作成完了！"
+if command -v jq &>/dev/null; then
+  echo "  名前: $(echo "$BODY" | jq -r '.name')"
+  echo "  パス: $(echo "$BODY" | jq -r '.path')"
+  echo "  マシン: $(echo "$BODY" | jq -r '.machine')"
+fi
+`;
+}
+
+/**
+ * devrelay-docs + devrelay-ask-member + devrelay-create-project スキルファイルを作成・更新する
  * Agent 接続成功時に呼び出される
  *
  * @param config - Agent 設定（serverUrl, token を使用）
@@ -406,7 +566,19 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
       mode: 0o755,
     });
 
-    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-docs/ + devrelay-ask-member/');
+    // devrelay-create-project スキル
+    await fs.mkdir(CREATE_SCRIPTS_DIR, { recursive: true });
+
+    const createSkillMdPath = path.join(CREATE_SKILL_DIR, 'SKILL.md');
+    await fs.writeFile(createSkillMdPath, generateCreateProjectSkillMd(), 'utf-8');
+
+    const createShPath = path.join(CREATE_SCRIPTS_DIR, 'create.sh');
+    await fs.writeFile(createShPath, generateCreateScript(config.serverUrl, config.token), {
+      encoding: 'utf-8',
+      mode: 0o755,
+    });
+
+    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,create-project}/');
   } catch (error: any) {
     console.error('Failed to create skill files:', error.message);
   }

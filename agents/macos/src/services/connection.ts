@@ -25,7 +25,8 @@ import type {
   DocSyncPayload,
   DocDeletePayload,
   ProjectFileReadPayload,
-  PlanLatestRequestPayload
+  PlanLatestRequestPayload,
+  ScaffoldCreatePayload
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -52,7 +53,7 @@ import { ensureSkillFiles } from './skill-manager.js';
 import { exec as execCallback, spawn } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
-import { readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises';
+import { readFile, writeFile, unlink, mkdir, readdir, stat, access } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 const execAsync = promisify(execCallback);
@@ -436,6 +437,149 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
       // Server からのツール承認レスポンスを ai-runner の pendingToolApprovals に転送
       resolveToolApproval(message.payload.requestId, message.payload);
       break;
+
+    case 'server:scaffold:create':
+      handleScaffoldCreate(message.payload, config);
+      break;
+  }
+}
+
+/**
+ * CLI ツールが利用可能かを検出する（which / where）
+ * @param cmd - 検出するコマンド名
+ * @returns 検出できれば true
+ */
+async function commandExists(cmd: string): Promise<boolean> {
+  const probe = process.platform === 'win32' ? `where ${cmd}` : `which ${cmd}`;
+  try {
+    await execAsync(probe, { timeout: 5000, env: getExecEnv() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Server からのプロジェクト雛形作成指示を処理する（macOS）
+ *
+ * テンプレートの kind に応じて処理を分岐:
+ * - 'files':   静的ファイル群を {{NAME}} 置換して展開
+ * - 'command': CLI ジェネレータ（flutter create 等）を実行
+ * 共通で CLAUDE.md（必須）と rules/devrelay.md を配置し、プロジェクトを再スキャンして Server に通知する。
+ */
+async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: AgentConfig) {
+  const { name, template, scaffoldDir } = payload;
+  const baseDir = scaffoldDir || config.projectsDirs[0] || homedir();
+  const projectDir = join(baseDir, name);
+
+  console.log(`📦 Scaffold: creating ${name} (${template}) in ${baseDir}`);
+
+  try {
+    // テンプレート実体定義を取得（Agent ビルドに内蔵、動的 import）
+    const { SCAFFOLD_TEMPLATES } = await import('./scaffold-templates.js');
+    const tmpl = SCAFFOLD_TEMPLATES[template];
+    if (!tmpl) {
+      throw new Error(`テンプレート '${template}' は Agent 側で定義されていません`);
+    }
+
+    // ディレクトリが既に存在するかチェック
+    try {
+      await access(projectDir);
+      throw new Error(`ディレクトリ '${projectDir}' は既に存在します`);
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') throw err;
+      // ENOENT は期待どおり（存在しない）
+    }
+
+    // 必須 CLI ツールの事前検出（未検出なら致命的エラー）
+    if (tmpl.requiredTool) {
+      const ok = await commandExists(tmpl.requiredTool);
+      if (!ok) {
+        throw new Error(tmpl.missingToolHint || `必須ツール '${tmpl.requiredTool}' が見つかりません`);
+      }
+    }
+
+    // ディレクトリ作成
+    await mkdir(projectDir, { recursive: true });
+
+    if (tmpl.kind === 'command') {
+      // CLI ジェネレータ実行（cwd = projectDir）
+      const cmd = tmpl.buildCommand ? tmpl.buildCommand(name) : '';
+      if (!cmd) throw new Error(`テンプレート '${template}' に生成コマンドが定義されていません`);
+      console.log(`📦 Scaffold: running generator: ${cmd}`);
+      await execAsync(cmd, { cwd: projectDir, timeout: tmpl.commandTimeout || 300000, env: getExecEnv() });
+      console.log(`📦 Scaffold: generator completed`);
+    } else {
+      // 静的ファイル展開（{{NAME}} を置換）
+      const files = tmpl.files || {};
+      for (const [relPath, content] of Object.entries(files)) {
+        const fullPath = join(projectDir, relPath);
+        const dir = dirname(fullPath);
+        await mkdir(dir, { recursive: true });
+        await writeFile(fullPath, content.replace(/\{\{NAME\}\}/g, name), 'utf-8');
+      }
+      console.log(`📦 Scaffold: template files written (${Object.keys(files).length} files)`);
+    }
+
+    // 生成後の追加コマンド（致命的。例: xcodegen generate）
+    if (tmpl.postCommand) {
+      const postCmd = tmpl.postCommand(name);
+      console.log(`📦 Scaffold: running post-command: ${postCmd}`);
+      await execAsync(postCmd, { cwd: projectDir, timeout: tmpl.postCommandTimeout || 60000, env: getExecEnv() });
+      console.log(`📦 Scaffold: post-command completed`);
+    }
+
+    // CLAUDE.md 配置（全テンプレート必須。これが無いと Agent がプロジェクトとして認識しない）
+    const claudeMd = (tmpl.claudeMd || `# ${name}\n\n新しいプロジェクトです。\n`).replace(/\{\{NAME\}\}/g, name);
+    await writeFile(join(projectDir, 'CLAUDE.md'), claudeMd, 'utf-8');
+
+    // rules/devrelay.md 配置（Agent 起動後に agreement:apply で上書きされる placeholder）
+    const rulesDir = join(projectDir, 'rules');
+    await mkdir(rulesDir, { recursive: true });
+    await writeFile(
+      join(rulesDir, 'devrelay.md'),
+      '<!-- DevRelay Agreement -->\nSee DevRelay WebUI for agreement management.\n<!-- /DevRelay Agreement -->\n',
+      'utf-8',
+    );
+
+    // 生成後の非致命的な依存インストール（npm install / gradle wrapper 等）
+    if (tmpl.postInstall) {
+      const { tool, command, timeout } = tmpl.postInstall;
+      if (await commandExists(tool)) {
+        try {
+          console.log(`📦 Scaffold: running post-install: ${command}`);
+          await execAsync(command, { cwd: projectDir, timeout, env: getExecEnv() });
+          console.log(`📦 Scaffold: post-install completed`);
+        } catch (installErr: any) {
+          console.warn(`⚠️ Scaffold: post-install failed (non-critical): ${installErr.message}`);
+        }
+      } else {
+        console.log(`📦 Scaffold: post-install skipped ('${tool}' not found)`);
+      }
+    }
+
+    // プロジェクト再スキャン → Server に通知
+    await autoDiscoverProjects(baseDir);
+    const projects = await loadProjects(config);
+    sendProjectsUpdate(projects);
+    console.log(`📦 Scaffold: project list synced (${projects.length} projects)`);
+
+    // 完了通知
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:scaffold:created',
+        payload: { machineId: currentMachineId, name, path: projectDir, ok: true },
+      });
+    }
+    console.log(`✅ Scaffold completed: ${name} → ${projectDir}`);
+  } catch (err: any) {
+    console.error(`❌ Scaffold failed: ${err.message}`);
+    if (currentMachineId) {
+      sendMessage({
+        type: 'agent:scaffold:created',
+        payload: { machineId: currentMachineId, name, path: '', ok: false, error: err.message },
+      });
+    }
   }
 }
 

@@ -20,7 +20,8 @@ import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
 import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery, executeScaffold, getConnectedAgents } from '../services/agent-manager.js';
 import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
-import type { AiTool } from '@devrelay/shared';
+import type { AiTool, ManagementInfo } from '@devrelay/shared';
+import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef } from '@devrelay/shared';
 
 /**
  * マシントークンから userId を取得する認証ヘルパー
@@ -584,9 +585,10 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: `'${name}' は予約済みのため使用できません。` });
     }
 
-    // テンプレート名チェック
-    const validTemplates = ['vite-react-web'];
-    if (!validTemplates.includes(template)) {
+    // テンプレート名チェック（SCAFFOLD_TEMPLATE_DEFS を単一ソースとして参照）
+    const templateDef = getScaffoldTemplateDef(template);
+    if (!templateDef) {
+      const validTemplates = SCAFFOLD_TEMPLATE_DEFS.map((t) => t.id);
       return reply.status(400).send({ error: `テンプレート '${template}' は存在しません。利用可能: ${validTemplates.join(', ')}` });
     }
 
@@ -608,6 +610,17 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     if (machine.status !== 'online' || !isAgentConnected(machine.id)) {
       return reply.status(503).send({ error: `マシン '${machineName}' はオフラインです` });
+    }
+
+    // OS 制限チェック（テンプレートが対象マシンの OS に対応しているか）
+    const machineOs = (machine.managementInfo as ManagementInfo | null)?.os;
+    if (machineOs && !templateDef.os.includes(machineOs as any)) {
+      const osLabels: Record<string, string> = { darwin: 'macOS', linux: 'Linux', win32: 'Windows' };
+      const allowed = templateDef.os.map((o) => osLabels[o] || o).join(' / ');
+      const current = osLabels[machineOs] || machineOs;
+      return reply.status(400).send({
+        error: `テンプレート '${template}' は ${allowed} でのみ使用できます（マシン '${machineName}' は ${current}）`,
+      });
     }
 
     // 同名プロジェクトの既存チェック

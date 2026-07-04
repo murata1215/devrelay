@@ -169,6 +169,73 @@ export const DEFAULT_ALLOWED_TOOLS_WINDOWS: string[] = [
   'Bash(Invoke-WebRequest *)',
 ];
 
+// =============================================================================
+// Scaffold テンプレート定義（プロジェクト雛形作成）
+// =============================================================================
+
+/** scaffold テンプレートが対応する OS 種別（Machine.managementInfo.os と一致） */
+export type ScaffoldTemplateOs = 'linux' | 'darwin' | 'win32';
+
+/**
+ * scaffold テンプレートのメタデータ定義
+ * サーバーのテンプレート検証・OS 制限・スキル SKILL.md 生成の単一ソース。
+ * テンプレートの実体（ファイル内容・生成コマンド）は各 Agent 側の
+ * scaffold-templates.ts に定義される（このリストは ID とメタ情報のみ）。
+ */
+export interface ScaffoldTemplateDef {
+  /** テンプレート ID（API の template パラメータ値） */
+  id: string;
+  /** 表示ラベル */
+  label: string;
+  /** 説明文 */
+  description: string;
+  /** 対応 OS（この配列に含まれない OS のマシンでは使用不可） */
+  os: ScaffoldTemplateOs[];
+  /** 生成に必要な外部 CLI ツール名（未指定なら不要）。Agent 側が which/where で検出 */
+  requiredTool?: string;
+}
+
+/** 利用可能な scaffold テンプレート一覧 */
+export const SCAFFOLD_TEMPLATE_DEFS: ScaffoldTemplateDef[] = [
+  {
+    id: 'vite-react-web',
+    label: 'Vite + React Web',
+    description: 'Vite + React 19 + TypeScript + Tailwind CSS v4',
+    os: ['linux', 'darwin', 'win32'],
+  },
+  {
+    id: 'flutter-app',
+    label: 'Flutter アプリ',
+    description: 'flutter create による Flutter プロジェクト（iOS/Android/Web 対応）',
+    os: ['linux', 'darwin', 'win32'],
+    requiredTool: 'flutter',
+  },
+  {
+    id: 'android-kotlin',
+    label: 'Android (Kotlin)',
+    description: 'Gradle Kotlin DSL の最小 Android アプリ',
+    os: ['linux', 'darwin', 'win32'],
+  },
+  {
+    id: 'xcode-swiftui',
+    label: 'Xcode (SwiftUI)',
+    description: 'XcodeGen による SwiftUI 最小 iOS アプリ（macOS 専用）',
+    os: ['darwin'],
+    requiredTool: 'xcodegen',
+  },
+  {
+    id: 'empty',
+    label: '空プロジェクト',
+    description: 'CLAUDE.md のみの空プロジェクト（用途未定・自由記述向け）',
+    os: ['linux', 'darwin', 'win32'],
+  },
+];
+
+/** テンプレート ID から定義を取得（未定義なら undefined） */
+export function getScaffoldTemplateDef(id: string): ScaffoldTemplateDef | undefined {
+  return SCAFFOLD_TEMPLATE_DEFS.find((t) => t.id === id);
+}
+
 // Default config values
 export const DEFAULTS = {
   logCount: 10,

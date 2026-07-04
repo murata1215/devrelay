@@ -2387,8 +2387,27 @@ async function handleProjectFileRead(payload: ProjectFileReadPayload) {
 }
 
 /**
+ * CLI ツールが利用可能かを検出する（which / where）
+ * @param cmd - 検出するコマンド名
+ * @returns 検出できれば true
+ */
+async function commandExists(cmd: string): Promise<boolean> {
+  const probe = process.platform === 'win32' ? `where ${cmd}` : `which ${cmd}`;
+  try {
+    await execAsync(probe, { timeout: 5000, env: getExecEnv() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Server からのプロジェクト雛形作成指示を処理する
- * テンプレートファイルを展開し、CLAUDE.md を配置し、npm install を実行する
+ *
+ * テンプレートの kind に応じて処理を分岐:
+ * - 'files':   静的ファイル群を {{NAME}} 置換して展開
+ * - 'command': CLI ジェネレータ（flutter create 等）を実行
+ * 共通で CLAUDE.md（必須）と rules/devrelay.md を配置し、プロジェクトを再スキャンして Server に通知する。
  */
 async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: AgentConfig) {
   const { name, template, scaffoldDir } = payload;
@@ -2398,6 +2417,13 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
   console.log(`📦 Scaffold: creating ${name} (${template}) in ${baseDir}`);
 
   try {
+    // テンプレート実体定義を取得（Agent ビルドに内蔵、動的 import）
+    const { SCAFFOLD_TEMPLATES } = await import('./scaffold-templates.js');
+    const tmpl = SCAFFOLD_TEMPLATES[template];
+    if (!tmpl) {
+      throw new Error(`テンプレート '${template}' は Agent 側で定義されていません`);
+    }
+
     // ディレクトリが既に存在するかチェック
     try {
       await access(projectDir);
@@ -2407,48 +2433,70 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
       // ENOENT は期待どおり（存在しない）
     }
 
-    // テンプレートファイル群を取得
-    const templateFiles = await getTemplateFiles(template);
-    if (!templateFiles) {
-      throw new Error(`テンプレート '${template}' は Agent 側で定義されていません`);
+    // 必須 CLI ツールの事前検出（未検出なら致命的エラー）
+    if (tmpl.requiredTool) {
+      const ok = await commandExists(tmpl.requiredTool);
+      if (!ok) {
+        throw new Error(tmpl.missingToolHint || `必須ツール '${tmpl.requiredTool}' が見つかりません`);
+      }
     }
 
     // ディレクトリ作成
     await mkdir(projectDir, { recursive: true });
 
-    // テンプレートファイルを展開（{{NAME}} を置換）
-    for (const [relPath, content] of Object.entries(templateFiles)) {
-      const fullPath = join(projectDir, relPath);
-      const dir = dirname(fullPath);
-      await mkdir(dir, { recursive: true });
-      await writeFile(fullPath, content.replace(/\{\{NAME\}\}/g, name), 'utf-8');
+    if (tmpl.kind === 'command') {
+      // CLI ジェネレータ実行（cwd = projectDir）
+      const cmd = tmpl.buildCommand ? tmpl.buildCommand(name) : '';
+      if (!cmd) throw new Error(`テンプレート '${template}' に生成コマンドが定義されていません`);
+      console.log(`📦 Scaffold: running generator: ${cmd}`);
+      await execAsync(cmd, { cwd: projectDir, timeout: tmpl.commandTimeout || 300000, env: getExecEnv() });
+      console.log(`📦 Scaffold: generator completed`);
+    } else {
+      // 静的ファイル展開（{{NAME}} を置換）
+      const files = tmpl.files || {};
+      for (const [relPath, content] of Object.entries(files)) {
+        const fullPath = join(projectDir, relPath);
+        const dir = dirname(fullPath);
+        await mkdir(dir, { recursive: true });
+        await writeFile(fullPath, content.replace(/\{\{NAME\}\}/g, name), 'utf-8');
+      }
+      console.log(`📦 Scaffold: template files written (${Object.keys(files).length} files)`);
     }
-    console.log(`📦 Scaffold: template files written (${Object.keys(templateFiles).length} files)`);
 
-    // CLAUDE.md 配置
-    const claudeMd = await getScaffoldClaudeMd(template, name);
+    // 生成後の追加コマンド（致命的。例: xcodegen generate）
+    if (tmpl.postCommand) {
+      const postCmd = tmpl.postCommand(name);
+      console.log(`📦 Scaffold: running post-command: ${postCmd}`);
+      await execAsync(postCmd, { cwd: projectDir, timeout: tmpl.postCommandTimeout || 60000, env: getExecEnv() });
+      console.log(`📦 Scaffold: post-command completed`);
+    }
+
+    // CLAUDE.md 配置（全テンプレート必須。これが無いと Agent がプロジェクトとして認識しない）
+    const claudeMd = (tmpl.claudeMd || `# ${name}\n\n新しいプロジェクトです。\n`).replace(/\{\{NAME\}\}/g, name);
     await writeFile(join(projectDir, 'CLAUDE.md'), claudeMd, 'utf-8');
 
-    // rules/devrelay.md 配置（Agreement テンプレートがあれば）
+    // rules/devrelay.md 配置（Agent 起動後に agreement:apply で上書きされる placeholder）
     const rulesDir = join(projectDir, 'rules');
     await mkdir(rulesDir, { recursive: true });
-    // 簡易 Agreement placeholder（Agent 起動後に agreement:apply で上書きされる）
     await writeFile(
       join(rulesDir, 'devrelay.md'),
       '<!-- DevRelay Agreement -->\nSee DevRelay WebUI for agreement management.\n<!-- /DevRelay Agreement -->\n',
       'utf-8',
     );
 
-    // npm install（package.json がある場合）
-    const pkgJsonPath = join(projectDir, 'package.json');
-    try {
-      await access(pkgJsonPath);
-      console.log(`📦 Scaffold: running npm install in ${projectDir}...`);
-      await execAsync('npm install', { cwd: projectDir, timeout: 120000 });
-      console.log(`📦 Scaffold: npm install completed`);
-    } catch (installErr: any) {
-      if (installErr.code !== 'ENOENT') {
-        console.warn(`⚠️ Scaffold: npm install failed (non-critical): ${installErr.message}`);
+    // 生成後の非致命的な依存インストール（npm install / gradle wrapper 等）
+    if (tmpl.postInstall) {
+      const { tool, command, timeout } = tmpl.postInstall;
+      if (await commandExists(tool)) {
+        try {
+          console.log(`📦 Scaffold: running post-install: ${command}`);
+          await execAsync(command, { cwd: projectDir, timeout, env: getExecEnv() });
+          console.log(`📦 Scaffold: post-install completed`);
+        } catch (installErr: any) {
+          console.warn(`⚠️ Scaffold: post-install failed (non-critical): ${installErr.message}`);
+        }
+      } else {
+        console.log(`📦 Scaffold: post-install skipped ('${tool}' not found)`);
       }
     }
 
@@ -2474,40 +2522,5 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
         payload: { machineId: currentMachineId, name, path: '', ok: false, error: err.message },
       });
     }
-  }
-}
-
-/**
- * テンプレート名からファイル群を取得する
- * Agent 側にテンプレート定義を内蔵（Server から配信ではなく Agent ビルドに含まれる）
- */
-async function getTemplateFiles(template: string): Promise<Record<string, string> | null> {
-  switch (template) {
-    case 'vite-react-web': {
-      // web-templates は動的 import（Agent ビルドに含まれる）
-      const { WEB_TEMPLATE_FILES } = await import('./scaffold-templates.js');
-      return WEB_TEMPLATE_FILES;
-    }
-    default:
-      return null;
-  }
-}
-
-/**
- * scaffold 後に配置する CLAUDE.md を生成する（同期版: テンプレート定義から取得）
- */
-async function getScaffoldClaudeMd(template: string, name: string): Promise<string> {
-  const defaultMd = `# ${name}\n\n新しいプロジェクトです。\n`;
-  try {
-    switch (template) {
-      case 'vite-react-web': {
-        const { WEB_CLAUDE_MD } = await import('./scaffold-templates.js');
-        return WEB_CLAUDE_MD.replace(/\{\{NAME\}\}/g, name);
-      }
-      default:
-        return defaultMd;
-    }
-  } catch {
-    return defaultMd;
   }
 }

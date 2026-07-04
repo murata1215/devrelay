@@ -41,5 +41,9 @@
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.2.77"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
   }
 }

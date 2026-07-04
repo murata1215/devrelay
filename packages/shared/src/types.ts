@@ -704,7 +704,12 @@ export interface ScaffoldCreatedPayload {
 }
 
 /** 利用可能なテンプレート名 */
-export type ScaffoldTemplate = 'vite-react-web';
+export type ScaffoldTemplate =
+  | 'vite-react-web'
+  | 'flutter-app'
+  | 'android-kotlin'
+  | 'xcode-swiftui'
+  | 'empty';
 
 // === AI Screen Analysis（Terminal Mode フォールバック） ===
 
