@@ -6,6 +6,19 @@
 
 ## 実装済み機能
 
+### #256: Mac Agent の stale dist デッドロック解消 + `u` バージョン確認に実行中コード鮮度表示 (2026-07-05)
+
+- **背景**: #254 / #255 を実装・コミット・プッシュしても Mac 実機で freeterm/termapp が認識されなかった。ask-member 診断で判明した真の根本原因は **stale dist デッドロック**
+  - `u` → `u`（リモート更新）は git reset（ソース更新）・shared build まで exit=0 で成功していたが、update.log の agent build 行が `> @devrelay/agent@0.1.0 build .../agents/linux`（**linux をビルド**）となっていた
+  - Mac が実際に実行するのは `agents/macos/dist`。3月21日版の古い update ハンドラは「`@devrelay/agent`（linux）をビルドする」旧バグ入りで、`agents/macos/dist` を一切再ビルドしない
+  - → 実行中の dist が 3月21日のまま固定 → ソースに入っている修正（macos をビルドする正しいハンドラ）が永遠に反映されない鶏卵状態。#254/#255 は Mac 上で一度も動いていなかった。再起動は毎回成功していたが「再起動 ≠ 再ビルド」で古い dist を読み直すだけだった
+- **即時修復（コード変更なし）**: teamexec で Mac 上に `pnpm --filter @devrelay/agent-macos build` を一度手動実行してデッドロックを外部から破壊。`detectProjectMarker`（projects.js）= 3件 / `rescanProjectsAndSync`（connection.js）= 4件を確認、dist mtime が Jul 5 に更新されたことを確認。その後ユーザーが Agent を再起動（Mac 再起動 / Restart ボタン / `u`→`u` いずれも可）して新 dist を読み込ませる
+- **再発防止（`u` バージョン確認への実行中コード鮮度表示）**: git commit ベースの表示では stale dist を検知できず約3ヶ月潜伏したため、実行中コードの物理的な鮮度を可視化
+  - Agent `handleVersionCheck()`: 実行中エントリファイル（`process.argv[1]`）の mtime を取得し、ローカルコミット日時（`git log %ai`）より古ければ `runningCodeStale: true` と判定。`AgentVersionInfoPayload` に `runningCodeMtime` / `runningCodeStale` を追加
+  - Server `command-handler.ts`: `u` 1回目のバージョン確認応答（最新時・更新あり時の両方）に `実行中コード: <mtime> UTC` 行を追加。stale の場合は `⚠️ 実行中コードが古い可能性（再ビルド漏れ？ Agent を再ビルドしてください）` を表示
+- 対象: `packages/shared/src/types.ts`（型2フィールド追加）, `agents/{linux,macos}/src/services/connection.ts`（handleVersionCheck に mtime 判定）, `apps/server/src/services/command-handler.ts`（formatRunningCodeLines ヘルパー + 2分岐に配線）（計 4 ファイル）
+- DB 変更なし
+
 ### #255: プロジェクト検出マーカー拡張 + CLAUDE.md 自動配置 + exec 完了時再スキャン (2026-07-04)
 
 - **背景**: #254 で scaffold + スキルを整備したが、対象マシン上の Claude はスキルを使わず素の `Bash: flutter create` を実行することがある（既にそのマシンにいるため API 経由スキルより直接実行が自然）。素の `flutter create` は CLAUDE.md を置かず、`looksLikeProject()`（CLAUDE.md / .xcodeproj のみ検出）が認識できないため DevRelay の一覧に現れなかった（Mac 実機で termapp が未認識）

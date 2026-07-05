@@ -2004,6 +2004,27 @@ async function handleVersionCheck() {
     const hasUpdate = localCommit !== remoteCommit;
     console.log(`📦 Local: ${localCommit.slice(0, 7)} (${localDate}), Remote: ${remoteCommit.slice(0, 7)} (${remoteDate}), hasUpdate: ${hasUpdate}`);
 
+    // 実行中エントリファイル（process.argv[1]）の mtime を取得してビルド鮮度を判定（#256）
+    // git reset は成功したのに dist が再ビルドされない「stale dist デッドロック」を検出するため、
+    // 実行中コードがローカルコミット日時より古ければ「再ビルド漏れ」の可能性として警告する
+    let runningCodeMtime: string | undefined;
+    let runningCodeStale = false;
+    try {
+      const entryPath = process.argv[1];
+      if (entryPath) {
+        const entryStat = await stat(entryPath);
+        runningCodeMtime = entryStat.mtime.toISOString();
+        const commitMs = Date.parse(localDate);
+        if (!Number.isNaN(commitMs) && entryStat.mtime.getTime() < commitMs) {
+          runningCodeStale = true;
+        }
+        console.log(`📦 Running code: ${runningCodeMtime} (entry: ${entryPath}, stale: ${runningCodeStale})`);
+      }
+    } catch (mtimeErr) {
+      // mtime 取得失敗は非致命的（バージョン確認自体は成功させる）
+      console.warn(`⚠️ Running code mtime check failed: ${(mtimeErr as Error).message}`);
+    }
+
     sendMessage({
       type: 'agent:version:info',
       payload: {
@@ -2014,6 +2035,8 @@ async function handleVersionCheck() {
         remoteDate,
         hasUpdate,
         isDevRepo,
+        runningCodeMtime,
+        runningCodeStale,
       },
     });
   } catch (err) {

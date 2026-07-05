@@ -445,6 +445,10 @@ export interface AgentVersionInfoPayload {
   hasUpdate: boolean;
   /** 開発リポジトリから実行中の場合 true */
   isDevRepo?: boolean;
+  /** 実行中エントリファイル（process.argv[1]）の最終更新時刻（ISO文字列）。ビルド鮮度判定用（#256） */
+  runningCodeMtime?: string;
+  /** 実行中コードがローカルコミットより古い（再ビルド漏れの可能性）(#256) */
+  runningCodeStale?: boolean;
   error?: string;
 }
 

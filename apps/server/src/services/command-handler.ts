@@ -1095,6 +1095,23 @@ async function handleKill(context: UserContext): Promise<string> {
   return '';
 }
 
+/**
+ * バージョン確認結果から「実行中コードの鮮度」表示行を生成（#256）
+ * git reset は成功したのに dist が再ビルドされず古いまま実行され続ける
+ * 「stale dist デッドロック」を検知するため、実行中エントリファイルの mtime を表示し、
+ * ローカルコミットより古い場合は再ビルド漏れの警告を出す
+ */
+function formatRunningCodeLines(info: { runningCodeMtime?: string; runningCodeStale?: boolean }): string {
+  if (!info.runningCodeMtime) return '';
+  // ISO を読みやすい形式（UTC）に整形
+  const mtimeDisp = new Date(info.runningCodeMtime).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+  let lines = `\n  実行中コード: ${mtimeDisp}`;
+  if (info.runningCodeStale) {
+    lines += `\n  ⚠️ 実行中コードが古い可能性（再ビルド漏れ？ Agent を再ビルドしてください）`;
+  }
+  return lines;
+}
+
 /** Agent のバージョン確認・更新（2回連続で更新実行） */
 async function handleUpdate(context: UserContext): Promise<string> {
   if (!context.currentMachineId) {
@@ -1132,7 +1149,7 @@ async function handleUpdate(context: UserContext): Promise<string> {
     }
 
     if (!info.hasUpdate) {
-      return `✅ Agent は最新です\n  commit: ${info.localCommit.slice(0, 7)} (${info.localDate})`;
+      return `✅ Agent は最新です\n  commit: ${info.localCommit.slice(0, 7)} (${info.localDate})${formatRunningCodeLines(info)}`;
     }
 
     // 更新あり: pendingUpdate フラグを設定
@@ -1141,7 +1158,7 @@ async function handleUpdate(context: UserContext): Promise<string> {
     return `📦 **${displayName}**\n`
       + `  ローカル: ${info.localCommit.slice(0, 7)} (${info.localDate})\n`
       + `  リモート: ${info.remoteCommit.slice(0, 7)} (${info.remoteDate})\n`
-      + `  ⚠️ 更新があります\n\n`
+      + `  ⚠️ 更新があります${formatRunningCodeLines(info)}\n\n`
       + `もう一度 \`u\` を送信すると更新を実行します。`;
   } catch (err) {
     return `❌ バージョン確認に失敗しました: ${(err as Error).message}`;
