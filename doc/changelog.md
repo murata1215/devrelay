@@ -6,6 +6,21 @@
 
 ## 実装済み機能
 
+### #257: プロジェクト過剰検出の修正（scanProjects の登録済み再帰 + SDK/vendor 除外）(2026-07-05)
+
+- **背景**: #255/#256 成功後、Mac で freeterm/termapp が認識された一方、副作用として約100件の過剰検出が発生
+  - Flutter SDK チェックアウト（`development/flutter`）配下の examples/benchmarks/integration_tests/packages 等 ~90件（pubspec.yaml マーカー）
+  - `devrelay_flutter/android`（settings.gradle）・`ios`・`macos`（.xcodeproj）・`ios/Pods` 等のネイティブ層サブフォルダ
+  - `flutter/bin/cache/pkg/flutter_gpu`・`sky_engine`（キャッシュ内 pubspec.yaml）
+  - さらに `ensureAutoClaudeMd` がこれらに CLAUDE.md を書き込み Flutter SDK 作業ツリーを汚染
+- **根本原因**: `scanProjects()` が「**登録済み**プロジェクトの内部へ再帰する」ロジック。従来はマーカーが CLAUDE.md/.xcodeproj のみで実害が小さかったが、#255 の pubspec.yaml/settings.gradle 追加で登録済み `flutter`（SDK）/`devrelay_flutter` 内部が大量ヒットするようになった
+- **修正**:
+  - **プロジェクト検出時は登録済みでも内部へ再帰しない**（プロジェクト境界で探索を止める）。SDK・サブモジュール・ネイティブ層の過剰検出を防止
+  - **vendor ディレクトリのブロックリスト**（`VENDOR_DIRS`）追加: `node_modules` + `Pods` / `build` / `DerivedData`
+  - **Flutter SDK チェックアウト検出**（`isFlutterSdkCheckout()`）: `bin/flutter` + `packages/flutter` の両方があれば SDK とみなし登録も再帰もしない
+- 対象: `agents/{linux,macos}/src/services/projects.ts`（計2ファイル）。DB/Server 変更なし。`pnpm build` 全ワークスペース成功
+- **運用**: コード反映後、Mac の設定ファイル/DB に残る誤登録エントリと自動生成 CLAUDE.md は一回限りのクリーンアップで除去（teamexec + SQL）
+
 ### #256: Mac Agent の stale dist デッドロック解消 + `u` バージョン確認に実行中コード鮮度表示 (2026-07-05)
 
 - **背景**: #254 / #255 を実装・コミット・プッシュしても Mac 実機で freeterm/termapp が認識されなかった。ask-member 診断で判明した真の根本原因は **stale dist デッドロック**

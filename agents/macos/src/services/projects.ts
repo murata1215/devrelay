@@ -11,6 +11,31 @@ const MACOS_TCC_PROTECTED = new Set([
   'Movies', 'Music', 'Pictures', 'Library',
 ]);
 
+/**
+ * スキャン時にスキップする vendor / ビルド生成物ディレクトリ（#257）。
+ * これらの配下には pubspec.yaml 等のマーカーが含まれることがあり、過剰検出の原因になる。
+ * （`.` 始まり = .dart_tool / .gradle 等は別途スキップ済み）
+ */
+const VENDOR_DIRS = new Set([
+  'node_modules', 'Pods', 'build', 'DerivedData',
+]);
+
+/**
+ * Flutter SDK のチェックアウト（`flutter` リポジトリ本体）かどうかを判定する（#257）。
+ * SDK は examples/ benchmarks/ packages/ 配下に大量の pubspec.yaml を含むため、
+ * プロジェクトとして登録も再帰探索もしない。`bin/flutter` と `packages/flutter` の
+ * 両方が存在するディレクトリを SDK とみなす。
+ */
+async function isFlutterSdkCheckout(dir: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(dir, 'bin', 'flutter'));
+    await fs.access(path.join(dir, 'packages', 'flutter'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function loadProjects(config: AgentConfig): Promise<Project[]> {
   const projectConfigs = await loadProjectsConfig();
   
@@ -93,21 +118,31 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1): Promi
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         if (entry.name.startsWith('.')) continue;
-        if (entry.name === 'node_modules') continue;
+        // vendor / ビルド生成物ディレクトリはスキップ（node_modules / Pods / build / DerivedData 等、#257）
+        if (VENDOR_DIRS.has(entry.name)) continue;
         // $HOME 直下スキャン時は TCC 保護ディレクトリをスキップ（権限ダイアログ防止）
         if (dir === homedir() && MACOS_TCC_PROTECTED.has(entry.name)) continue;
 
         const fullPath = path.join(dir, entry.name);
 
+        // Flutter SDK チェックアウトは examples/benchmarks 配下に大量の pubspec.yaml を含むため、
+        // 登録も再帰もせず丸ごとスキップする（過剰検出防止、#257）
+        if (await isFlutterSdkCheckout(fullPath)) continue;
+
         // Check if this looks like a project
         const isProject = await looksLikeProject(fullPath);
 
-        if (isProject && !existingPaths.has(fullPath)) {
-          found.push({
-            name: entry.name,
-            path: fullPath,
-            defaultAi: 'claude',
-          });
+        if (isProject) {
+          // プロジェクト検出: 未登録なら追加。いずれの場合も内部へは再帰しない（#257）
+          // 登録済みプロジェクトの内部へ再帰すると SDK / サブモジュール / ネイティブ層（android・ios・macos）を
+          // 過剰検出してしまうため、プロジェクト境界で探索を止める
+          if (!existingPaths.has(fullPath)) {
+            found.push({
+              name: entry.name,
+              path: fullPath,
+              defaultAi: 'claude',
+            });
+          }
         } else if (depth < maxDepth) {
           await scan(fullPath, depth + 1);
         }
