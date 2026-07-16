@@ -237,6 +237,8 @@ export interface SendPromptOptions {
   skipPermissions?: boolean;
   /** AskUserQuestion 無効化（true = SDK disallowedTools で除去） */
   disableAsk?: boolean;
+  /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'claude-fable-5'）。#251 の `l` コマンド／Settings で設定される。未指定なら CLI デフォルト */
+  model?: string;
   /**
    * ツール承認リクエストのコールバック（Agent SDK 経由の exec モードで使用）
    * 設定されている場合、canUseTool で WebSocket 経由のユーザー承認を行う
@@ -294,7 +296,12 @@ async function sendPromptToAiSdk(
       DEVRELAY_SESSION_ID: sessionId,
       DEVRELAY_PROJECT: projectPath,
     },
+    // Claude SDK モデル指定（ユーザー設定 `l` コマンド／Settings で変更可能、#251）
+    model: options.model,
   };
+  if (options.model) {
+    console.log(`🧠 [SDK] Using model: ${options.model}`);
+  }
 
   // AskUserQuestion 無効化（SDK レベルでツール除去）
   if (options.disableAsk) {

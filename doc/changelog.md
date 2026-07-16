@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### #259: Claude SDK モデル選択（#251）を macOS Agent へ移植（Fable 5 等が Mac で効かないバグ修正）(2026-07-16)
+
+- **症状**: Settings で Plan=Claude Fable 5 / Exec=Claude Opus 4.8 を設定しても、Conversations の Model 列が Agent（マシン）によって異なる。Linux（x220）のプロジェクトは `fable-5` / `opus-4-8` と設定どおりだが、**Mac のプロジェクト（pixblog-flutter / term-flutter 等）はすべて `opus-4-6[1m]`（Claude CLI デフォルト）** になる
+- **ユーザーの仮説「Mac の Claude Code が古いせい？」は誤り**。Agent 本体も最新（dad4e9c、実行中コードも新しい）
+- **根本原因**: #251（Claude SDK モデル選択 `l` コマンド／Settings、2026-06-29）が `agents/linux` にのみ実装され、**`agents/macos` に移植されていなかった**。#256 で判明した「macOS ワークスペースは別実装で乖離しやすい」問題と同類。サーバー（`agent-manager.ts`、共通）は全 Agent へ `model` を payload 送信していたが、macOS Agent が黙って無視 → CLI デフォルト（opus-4-6[1m]）で実行されていた
+- **修正**（linux 実装のミラー、macOS のみ）:
+  - `agents/macos/src/services/ai-runner.ts`: `SendPromptOptions` に `model?: string` 追加、`sendPromptToAiSdk` の `sdkOptions` に `model: options.model` + `🧠 [SDK] Using model` ログ
+  - `agents/macos/src/services/connection.ts`: `handleAiPrompt` / `handleConversationExec` の payload 型に `model?: string` 追加、exec→prompt 転送・本実行 `sendOptions`・resume 失敗リトライ `retryOptions` の 3 経路に `model: payload.model` を伝搬
+- **仕様どおりの挙動（修正対象外）**: **端末モードのプロジェクトはモデル設定の対象外**（#251 の設計で SDK のみ適用）。x220/ribbon の pixblog（terminalMode=t）が opus-4-6[1m] なのはこの仕様
+- **対象**: `agents/macos/src/services/{ai-runner,connection}.ts`（2ファイル）。サーバー・shared・linux Agent は変更なし。DB 変更なし。`pnpm build` 全ワークスペース成功
+- **反映**: サーバー変更なしのため `pm2 restart` 不要。**Mac で `u`→`u`** で Agent 更新（macOS update ハンドラは #256 修正済みで `@devrelay/agent-macos` を正しくビルドする）
+
+### #258: testflight が無関係サイトの巻き添えでロールバックされ ERR_SSL_PROTOCOL_ERROR になるバグ修正 (2026-07-08)
+
+- **症状**: `testflight pixterm` が「✅ 作成しました」と成功を返すのに、ブラウザで `https://pixterm.devrelay.io` を開くと **ERR_SSL_PROTOCOL_ERROR**（TLS 証明書が未発行 = Caddy がこのドメインの設定を一切持っていない状態）
+- **根本原因**: `testflight-manager.ts` の Caddy reload は `setTimeout(2000)` の非同期で、成功メッセージを返した後に `caddy validate` → `sudo systemctl reload caddy` を実行し、失敗すると catch で新サービスの設定ファイルを `sudo rm` してロールバックする設計
+  - `caddy validate` は devrelay-server プロセスの実行ユーザー（**`devrelay`**）権限で走る
+  - validate は設定内の `log` ディレクティブのログ出力ファイルを実際に**書き込みオープンしようとする**
+  - 無関係な既存サイト `/etc/caddy/sites.d/ribbon-re.jp` が `log { output file /home/ribbon/sites/ribbon-re.jp/logs/access.log }` を持ち、その `access.log` は **`caddy:caddy` 所有・mode 0644**
+  - `devrelay` はこのファイルに書き込めず `permission denied` → **validate 全体が失敗** → pixterm 自体は無関係なのに巻き添えで catch → `sudo rm` により設定が削除される → 証明書が発行されない
+  - 一方、**実際の `sudo systemctl reload caddy` は成功する**（caddy サービスは `caddy` ユーザーで動作し access.log を所有・書き込める）。現に ribbon-re.jp / vixbtc とも HTTP 200 で配信中。つまり validate 前チェックだけが false negative を出していた
+- **修正**: `createTestflightService`（新規作成）と clone 系の **2 箇所**から、壊れやすい `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` 前チェックを削除
+  - `sudo systemctl reload caddy` 単体に依存する。これは caddy ユーザーで実行され、caddy が内部で新設定を検証 → **不正なら旧設定を保持したまま非ゼロ終了するフェイルセーフ**動作。genuine な失敗時のみ catch → ロールバックが働き自己修復する
+  - reload 失敗時に `sudo rm` するロールバックロジック自体はそのまま維持
+- **pixterm 即時復旧（運用）**: `/etc/caddy/sites.d/pixterm.devrelay.io`（`reverse_proxy localhost:9020` + `handle_errors` で placeholder フォールバック）を再作成 → `sudo systemctl reload caddy` → 証明書発行・placeholder 配信を確認。ポート 9020 に dev サーバー未起動のため HTTP ステータスは 502 だが placeholder body（Under Construction）はレンダリングされる（= 新規サービスの正常な初期状態）
+- **対象**: `apps/server/src/services/testflight-manager.ts`（1ファイル、2箇所）。DB 変更なし。`pnpm build` 全ワークスペース成功
+- **残る UX ギャップ（今回未対応）**: 成功メッセージを reload 完了前に返す設計上、reload が genuine 失敗した場合ユーザーへ通知が飛ばない。最小修正（validate 削除）に留めた
+
 ### #257: プロジェクト過剰検出の修正（scanProjects の登録済み再帰 + SDK/vendor 除外）(2026-07-05)
 
 - **背景**: #255/#256 成功後、Mac で freeterm/termapp が認識された一方、副作用として約100件の過剰検出が発生
