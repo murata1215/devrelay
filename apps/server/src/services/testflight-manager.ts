@@ -384,12 +384,19 @@ export async function createTestflightService(userId: string, name: string, temp
     const caddySiteFile = `${CADDY_SITES_DIR}/${name}.${DOMAIN_SUFFIX}`;
     setTimeout(async () => {
       try {
-        await execAsync('caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile');
+        // 注意: ここで `caddy validate` を前チェックとして走らせてはいけない。
+        // validate は devrelay ユーザー権限で実行され、無関係な既存サイトの
+        // log 出力ファイル（例: ribbon-re.jp の caddy:caddy 所有 access.log）を
+        // 書き込みオープンできず `permission denied` で失敗する false negative があり、
+        // 巻き添えで本サービスの設定がロールバック削除されてしまう（#258）。
+        // `sudo systemctl reload caddy` は caddy ユーザーで実行され、caddy が
+        // 内部で新設定を検証する。不正なら旧設定を保持したまま非ゼロ終了する
+        // フェイルセーフ動作のため、この reload 単体に依存すれば十分。
         await execAsync('sudo systemctl reload caddy');
         console.log(`🛫 testflight [${name}]: caddy reload done (async)`);
       } catch (error: any) {
         console.error(`❌ testflight [${name}]: caddy reload failed (async):`, error.message);
-        // validate/reload 失敗時は設定ファイルを削除してロールバック
+        // reload 失敗（genuine な不正設定）時のみ設定ファイルを削除してロールバック
         try {
           await execAsync(`sudo rm ${caddySiteFile}`);
           console.log(`🛫 testflight [${name}]: rolled back caddy config`);
@@ -707,7 +714,9 @@ export async function copyTestflightService(userId: string, srcName: string, des
     const caddySiteFile = `${CADDY_SITES_DIR}/${destName}.${DOMAIN_SUFFIX}`;
     setTimeout(async () => {
       try {
-        await execAsync('caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile');
+        // `caddy validate` 前チェックは行わない（#258 参照）。無関係サイトの
+        // log ファイル権限で false negative を起こし巻き添えロールバックの原因になる。
+        // reload はフェイルセーフ（不正設定は旧設定を保持して非ゼロ終了）。
         await execAsync('sudo systemctl reload caddy');
         console.log(`📋 testflight cp [${destName}]: caddy reload done (async)`);
       } catch (error: any) {
