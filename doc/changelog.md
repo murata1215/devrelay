@@ -6,6 +6,13 @@
 
 ## 実装済み機能
 
+### #260: Devin プランモードの読み取り専用強制 (2026-07-18)
+
+- **背景**: Devin plan 実行は `--permission-mode auto` だったが、`auto` は「安全と判断したツールを自動承認」するだけで厳密な読み取り専用ではなかった
+- **修正**: plan 時に `--agent-config` フラグで一時 JSON ファイルを渡し、`Read(**)` のみ allow / `Write(**)` + `Exec(**)` を deny する方式に変更。exec 時は従来通り `--permission-mode dangerous`
+- **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル）。サーバー・shared・DB 変更なし
+- **一時ファイル**: plan 用 agent-config JSON はプロセス終了時に自動削除（既存のプロンプト一時ファイルと同じクリーンアップ経路）
+
 ### 新規プロジェクトの端末モードデフォルトを true→false に戻した (2026-07-17)
 
 - **依頼**: 新規プロジェクトのデフォルト端末モード（Terminal Mode）をオンから元のオフに戻す

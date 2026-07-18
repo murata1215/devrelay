@@ -643,8 +643,7 @@ export async function sendPromptToAi(
     proc.stdin?.write(prompt);
     proc.stdin?.end();
   } else if (aiTool === 'devin') {
-    // Devin CLI: plan → auto（読み取り専用のみ）、exec → dangerous（全承認）
-    const permMode = options.usePlanMode ? 'auto' : 'dangerous';
+    // Devin CLI: plan → agent-config で Read のみ許可（Write/Exec deny）、exec → dangerous（全承認）
     const args: string[] = [];
 
     // 保存済み Devin セッション ID があれば -r で resume
@@ -659,7 +658,24 @@ export async function sendPromptToAi(
       console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
     }
 
-    args.push('-p', '--permission-mode', permMode);
+    if (options.usePlanMode) {
+      // plan モード: --agent-config で Read のみ許可、Write/Exec を明示的に deny
+      // --permission-mode auto は「安全と判断したツールを自動承認」するだけで
+      // 厳密な読み取り専用ではないため、agent-config で強制する
+      const agentConfig = {
+        permissions: {
+          allow: ['Read(**)'],
+          deny: ['Write(**)', 'Exec(**)'],
+        },
+      };
+      const agentConfigPath = path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`);
+      fs.writeFileSync(agentConfigPath, JSON.stringify(agentConfig), 'utf-8');
+      args.push('-p', '--agent-config', agentConfigPath);
+      console.log(`📋 Devin plan mode: using agent-config (Read only, Write/Exec denied)`);
+    } else {
+      // exec モード: 全ツール自動承認
+      args.push('-p', '--permission-mode', 'dangerous');
+    }
 
     // Devin は stdin パイプ非対応（panic at repl_mode.rs）→ --prompt-file で一時ファイル経由
     const promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
@@ -844,9 +860,10 @@ export async function sendPromptToAi(
     proc.on('close', (code, signal) => {
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
-      // Devin: 一時ファイル削除 + セッション ID 取得・保存
+      // Devin: 一時ファイル（プロンプト + agent-config）削除 + セッション ID 取得・保存
       if (aiTool === 'devin') {
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`)); } catch {}
+        try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`)); } catch {}
         try {
           const listOutput = execSync(`${command} list --format json`, {
             cwd: projectPath, encoding: 'utf-8', timeout: 10000,
