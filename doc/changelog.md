@@ -6,6 +6,18 @@
 
 ## 実装済み機能
 
+### 新規プロジェクトの端末モードデフォルトを true→false に戻した (2026-07-17)
+
+- **依頼**: 新規プロジェクトのデフォルト端末モード（Terminal Mode）をオンから元のオフに戻す
+- **背景**: `0b32c83`（2026-06-21「feat: default terminalMode to true for new projects」）で `schema.prisma` の `Project.terminalMode` が `@default(false)` → `@default(true)` に変更されていた。コード側（`agent-manager.ts` 等）は DB のデフォルト値を参照するだけなので、変更対象はスキーマ 1 行 + DB カラムデフォルトのみ
+- **修正**:
+  - `apps/server/prisma/schema.prisma:114`: `terminalMode Boolean @default(true)` → `@default(false)`（コメントも「新規プロジェクトはデフォルト無効」に更新）
+  - DB マイグレーション: `ALTER TABLE "Project" ALTER COLUMN "terminalMode" SET DEFAULT false`（psql で `column_default = false` を検証済み）
+  - `npx prisma generate` で Prisma Client 再生成 → `pnpm build` 全ワークスペース成功
+- **付随**: 直前に `@default(true)` で作成された `mimamori-flutter` も `terminalMode = false` に UPDATE。他の既存プロジェクトは変更なし（個別設定は WebUI/API で切替可能）
+- **対象**: `apps/server/prisma/schema.prisma`（1ファイル・1行）+ DB カラムデフォルト。Agent・shared 変更なし
+- **反映**: schema 変更 + build 済みのため `pm2 restart devrelay-server`（DB マイグレーション適用済み）。Agent 変更なし
+
 ### #259: Claude SDK モデル選択（#251）を macOS Agent へ移植（Fable 5 等が Mac で効かないバグ修正）(2026-07-16)
 
 - **症状**: Settings で Plan=Claude Fable 5 / Exec=Claude Opus 4.8 を設定しても、Conversations の Model 列が Agent（マシン）によって異なる。Linux（x220）のプロジェクトは `fable-5` / `opus-4-8` と設定どおりだが、**Mac のプロジェクト（pixblog-flutter / term-flutter 等）はすべて `opus-4-6[1m]`（Claude CLI デフォルト）** になる
