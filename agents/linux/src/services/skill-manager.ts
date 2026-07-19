@@ -56,6 +56,10 @@ const INVENTORY_SCRIPTS_DIR = path.join(INVENTORY_SKILL_DIR, 'scripts');
 const CREATE_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-create-project');
 const CREATE_SCRIPTS_DIR = path.join(CREATE_SKILL_DIR, 'scripts');
 
+/** devrelay-flutter-deploy スキルディレクトリ */
+const FLUTTER_DEPLOY_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-flutter-deploy');
+const FLUTTER_DEPLOY_SCRIPTS_DIR = path.join(FLUTTER_DEPLOY_SKILL_DIR, 'scripts');
+
 /**
  * WebSocket URL を HTTP URL に変換
  * ws:// → http://, wss:// → https://, /ws/agent パスを除去
@@ -622,6 +626,231 @@ fi
 }
 
 /**
+ * flutter-deploy SKILL.md の内容を生成
+ */
+function generateFlutterDeploySkillMd(): string {
+  return `---
+name: devrelay-flutter-deploy
+description: Flutterアプリを USB 接続された実機（iPhone/Android）にビルド＆インストールします。「SE3に入れて」「実機にデプロイして」「Androidに入れて」などデバイスへのアプリ配備依頼に使用します。
+allowed-tools: Bash(bash ~/.claude/skills/devrelay-flutter-deploy/scripts/deploy.sh *)
+---
+
+## DevRelay Flutter 実機デプロイ
+
+Flutter アプリを USB 接続された実機（iPhone / Android）にビルドしてインストールします。
+flutter run（対話型）は使わず、build → install を非対話で実行します。
+
+### デプロイ
+
+\`\`\`bash
+bash ~/.claude/skills/devrelay-flutter-deploy/scripts/deploy.sh --device <名前の一部> [--project <path>] [--debug] [--flavor X] [--dart-define K=V]
+\`\`\`
+
+- \`--device\`: デバイス名の一部（部分一致・大文字小文字無視。例: se3 → iPhoneSE3、pixel → Pixel 7）
+- \`--project\`: Flutter プロジェクトのパス（省略時はカレントディレクトリ）
+- \`--debug\`: debug ビルドでデプロイ（iOS 16 実機で release 起動不可の既知問題対応）
+- \`--flavor\`: Flutter の flavor をパススルー
+- \`--dart-define\`: dart-define をパススルー（複数指定可）
+
+### 接続中の実機を一覧表示
+
+\`\`\`bash
+bash ~/.claude/skills/devrelay-flutter-deploy/scripts/deploy.sh --list
+\`\`\`
+
+### 例
+
+\`\`\`bash
+bash ~/.claude/skills/devrelay-flutter-deploy/scripts/deploy.sh --device se3 --project ~/development/mimamori
+bash ~/.claude/skills/devrelay-flutter-deploy/scripts/deploy.sh --device pixel --debug
+\`\`\`
+
+### 対応 OS × ターゲット
+- macOS: iPhone 実機（USB）/ Android 実機
+- Windows / Linux: Android 実機（iOS 指定はエラー）
+
+### 注意事項
+- **USB 接続前提**です。デバイスをロック解除し、iOS は Developer Mode ON、Android は USB デバッグ許可が必要です。
+- iOS ビルドは macOS でのみ可能です（Windows / Linux で iOS 実機を指定するとエラーになります）。
+- ビルドは数分かかります。**Bash ツールの timeout を 900000（15分）に設定してください。**
+- 失敗した場合はスクリプトが出力するビルドログ末尾をそのままユーザーに報告してください（署名エラー / pod install 失敗 / Gradle エラー等）。
+`;
+}
+
+/**
+ * deploy.sh スクリプトの内容を生成
+ * flutter コマンドをローカル実行するだけのため serverUrl / token は不要
+ */
+function generateFlutterDeployScript(): string {
+  return `#!/bin/bash
+# DevRelay Flutter 実機デプロイスクリプト
+# Agent が自動生成。手動編集は次回起動時に上書きされます。
+
+set -euo pipefail
+
+# --- flutter コマンド解決（PATH はマシンにより異なる） ---
+FLUTTER=""
+if command -v flutter &>/dev/null; then
+  FLUTTER="$(command -v flutter)"
+else
+  for cand in "$HOME/development/flutter/bin/flutter" "$HOME/flutter/bin/flutter" "$HOME/fvm/default/bin/flutter" "/opt/flutter/bin/flutter"; do
+    if [ -x "$cand" ]; then FLUTTER="$cand"; break; fi
+  done
+fi
+if [ -z "$FLUTTER" ]; then
+  echo "エラー: flutter コマンドが見つかりません。PATH または ~/development/flutter/bin を確認してください。"
+  exit 1
+fi
+
+if ! command -v jq &>/dev/null; then
+  echo "エラー: jq が必要です。"
+  exit 1
+fi
+
+# --- 引数パース ---
+DEVICE=""
+PROJECT="."
+MODE="release"
+LIST_ONLY=""
+FLAVOR=""
+BUILD_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --device) DEVICE="$2"; shift 2 ;;
+    --project) PROJECT="$2"; shift 2 ;;
+    --debug) MODE="debug"; shift ;;
+    --list) LIST_ONLY="1"; shift ;;
+    --flavor) FLAVOR="$2"; BUILD_ARGS+=("--flavor" "$2"); shift 2 ;;
+    --dart-define) BUILD_ARGS+=("--dart-define" "$2"); shift 2 ;;
+    *) echo "不明な引数: $1"; exit 1 ;;
+  esac
+done
+
+# --- デバイス列挙（実機のみ。エミュレータ・デスクトップ・Web を除外） ---
+DEVICES_JSON=$("$FLUTTER" devices --machine 2>/dev/null || echo "[]")
+REAL_DEVICES=$(echo "$DEVICES_JSON" | jq '[.[] | select(.emulator == false) | select((.targetPlatform // "") | test("^(ios|android)"))]')
+
+if [ -n "$LIST_ONLY" ]; then
+  COUNT=$(echo "$REAL_DEVICES" | jq 'length')
+  if [ "$COUNT" = "0" ]; then
+    echo "接続中の実機が見つかりません。"
+    echo "USB ケーブル接続とロック解除（iOS は Developer Mode ON / Android は USB デバッグ許可）を確認してください。"
+    exit 0
+  fi
+  echo "=== 接続中の実機 ($COUNT 台) ==="
+  echo "$REAL_DEVICES" | jq -r '.[] | "  \\(.name) [\\(.targetPlatform)] id=\\(.id)"'
+  exit 0
+fi
+
+# --- プロジェクト検証 ---
+if [ ! -f "$PROJECT/pubspec.yaml" ]; then
+  echo "エラー: '$PROJECT' は Flutter プロジェクトではありません（pubspec.yaml が見つかりません）。"
+  exit 1
+fi
+
+if [ -z "$DEVICE" ]; then
+  echo "エラー: --device <名前の一部> を指定してください。"
+  echo "接続中の実機:"
+  echo "$REAL_DEVICES" | jq -r '.[] | "  \\(.name) [\\(.targetPlatform)]"'
+  exit 1
+fi
+
+# --- 部分一致でデバイス解決 ---
+MATCHED=$(echo "$REAL_DEVICES" | jq --arg q "$DEVICE" '[.[] | select((.name | ascii_downcase | contains($q | ascii_downcase)) or (.id | ascii_downcase | contains($q | ascii_downcase)))]')
+MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
+
+if [ "$MATCH_COUNT" = "0" ]; then
+  echo "エラー: '$DEVICE' に一致する実機が見つかりません。"
+  echo "USB ケーブル接続とロック解除（iOS は Developer Mode ON / Android は USB デバッグ許可）を確認してください。"
+  ALL_COUNT=$(echo "$REAL_DEVICES" | jq 'length')
+  if [ "$ALL_COUNT" != "0" ]; then
+    echo "検出済みの実機:"
+    echo "$REAL_DEVICES" | jq -r '.[] | "  \\(.name) [\\(.targetPlatform)]"'
+  fi
+  exit 1
+fi
+
+if [ "$MATCH_COUNT" -gt 1 ]; then
+  echo "エラー: '$DEVICE' に複数の実機が一致しました。より具体的に指定してください:"
+  echo "$MATCHED" | jq -r '.[] | "  \\(.name) [\\(.targetPlatform)] id=\\(.id)"'
+  exit 1
+fi
+
+DEVICE_ID=$(echo "$MATCHED" | jq -r '.[0].id')
+DEVICE_NAME=$(echo "$MATCHED" | jq -r '.[0].name')
+TARGET=$(echo "$MATCHED" | jq -r '.[0].targetPlatform')
+CONN=$(echo "$MATCHED" | jq -r '.[0].connectionInterface // ""')
+
+# ワイヤレス警告（USB 接続を推奨）
+if [ "$CONN" = "wireless" ]; then
+  echo "⚠️ 警告: '$DEVICE_NAME' はワイヤレス接続です。検出・インストールが不安定な場合があります。USB 接続を推奨します。"
+fi
+
+# --- OS × ターゲット検証（iOS は macOS のみ） ---
+OS_NAME="$(uname)"
+IS_IOS=""
+case "$TARGET" in
+  ios) IS_IOS="1" ;;
+esac
+
+if [ -n "$IS_IOS" ] && [ "$OS_NAME" != "Darwin" ]; then
+  echo "エラー: iOS ビルドは macOS でのみ実行できます（現在の OS: $OS_NAME）。Android 実機を指定してください。"
+  exit 1
+fi
+
+# --- ビルド ---
+cd "$PROJECT"
+SECONDS=0
+echo "🔨 ビルド中... (デバイス: $DEVICE_NAME [$TARGET], モード: $MODE)"
+
+if [ -n "$IS_IOS" ]; then
+  BUILD_TYPE="ios"
+else
+  BUILD_TYPE="apk"
+fi
+
+BUILD_LOG=$(mktemp)
+if ! "$FLUTTER" build "$BUILD_TYPE" "--$MODE" \${BUILD_ARGS[@]+"\${BUILD_ARGS[@]}"} 2>&1 | tee "$BUILD_LOG"; then
+  echo ""
+  echo "❌ ビルド失敗。ログ末尾:"
+  tail -n 80 "$BUILD_LOG"
+  rm -f "$BUILD_LOG"
+  exit 1
+fi
+
+# --- インストール ---
+echo ""
+echo "📲 インストール中... ($DEVICE_NAME)"
+INSTALL_ARGS=()
+if [ -n "$FLAVOR" ]; then INSTALL_ARGS+=("--flavor" "$FLAVOR"); fi
+if ! "$FLUTTER" install "--$MODE" -d "$DEVICE_ID" \${INSTALL_ARGS[@]+"\${INSTALL_ARGS[@]}"} 2>&1 | tee -a "$BUILD_LOG"; then
+  echo ""
+  echo "❌ インストール失敗。ログ末尾:"
+  tail -n 80 "$BUILD_LOG"
+  rm -f "$BUILD_LOG"
+  exit 1
+fi
+
+ELAPSED=$SECONDS
+rm -f "$BUILD_LOG"
+
+# --- 結果報告 ---
+echo ""
+echo "✅ デプロイ完了！"
+echo "  デバイス: $DEVICE_NAME [$TARGET]"
+echo "  モード: $MODE"
+echo "  所要時間: $((ELAPSED / 60))分$((ELAPSED % 60))秒"
+if [ -n "$IS_IOS" ]; then
+  APP_PATH="build/ios/iphoneos/Runner.app"
+  if [ -d "$APP_PATH" ]; then echo "  生成物: $(du -sh "$APP_PATH" | cut -f1) ($APP_PATH)"; fi
+else
+  APK=$(ls -1t build/app/outputs/flutter-apk/*.apk 2>/dev/null | head -1 || true)
+  if [ -n "$APK" ]; then echo "  生成物: $(ls -lh "$APK" | awk '{print $5}') ($APK)"; fi
+fi
+`;
+}
+
+/**
  * devrelay-docs + devrelay-ask-member + devrelay-list-inventory + devrelay-create-project
  * スキルファイルを作成・更新する
  * Agent 接続成功時に呼び出される
@@ -678,7 +907,19 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
       mode: 0o755,
     });
 
-    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,list-inventory,create-project}/');
+    // devrelay-flutter-deploy スキル（flutter コマンドをローカル実行、サーバー API 不要）
+    await fs.mkdir(FLUTTER_DEPLOY_SCRIPTS_DIR, { recursive: true });
+
+    const flutterDeploySkillMdPath = path.join(FLUTTER_DEPLOY_SKILL_DIR, 'SKILL.md');
+    await fs.writeFile(flutterDeploySkillMdPath, generateFlutterDeploySkillMd(), 'utf-8');
+
+    const deployShPath = path.join(FLUTTER_DEPLOY_SCRIPTS_DIR, 'deploy.sh');
+    await fs.writeFile(deployShPath, generateFlutterDeployScript(), {
+      encoding: 'utf-8',
+      mode: 0o755,
+    });
+
+    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,list-inventory,create-project,flutter-deploy}/');
   } catch (error: any) {
     console.error('Failed to create skill files:', error.message);
   }

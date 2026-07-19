@@ -6,6 +6,26 @@
 
 ## 実装済み機能
 
+### #266: Flutter 実機デプロイスキル `devrelay-flutter-deploy` (2026-07-20)
+
+- **依頼**: Flutter アプリ（mimamori 等）を実機に入れる際、NoMachine で対象マシンに入り `flutter run --release` を手打ちしていた。DevRelay チャットで「みまもりを SE3 に入れて」「Android に入れて」と頼むだけで実機にビルド＆インストールできるようにする。GUI 案（flutter-manager）は中止し、DevRelay 標準スキルとして整備。SPEC: `.devrelay-files/20260720_075538_flutter-device-deploy-spec.md`
+- **実装形態**: 既存スキル生成パターン（`skill-manager.ts` の `ensureSkillFiles()`、Agent 接続時に `~/.claude/skills/<name>/SKILL.md` + `scripts/*.sh` を mode 0o755 で配置）を踏襲。**サーバー・DB・shared 変更なし** — `deploy.sh` は `flutter` をローカル実行するだけで DevRelay サーバー API を叩かないため、docs/ask-member/create-project と異なり serverUrl/token の埋め込みが不要（generator は引数なし）。スキルは `~/.claude/skills/` のマシン共通配置なので、同一マシン上の全 Flutter プロジェクトのセッションから利用可能
+- **deploy.sh の挙動**:
+  1. flutter PATH 解決（`command -v flutter` → 無ければ `~/development/flutter/bin`, `~/flutter/bin`, `~/fvm/default/bin`, `/opt/flutter/bin` を順に探索。SPEC 6: PATH はマシンにより異なる）
+  2. `flutter devices --machine` の JSON を jq でパースし実機のみ抽出（`emulator == false` かつ `targetPlatform` が `^(ios|android)`。desktop/web/emulator は除外）
+  3. `--device` を name/id に対し大文字小文字無視の**部分一致**で解決（se3 → iPhoneSE3、pixel → Pixel 7）。0件 → USB 接続・ロック解除（iOS Developer Mode / Android USB デバッグ）を案内 + 検出済み実機一覧、複数一致 → 候補列挙して終了
+  4. `connectionInterface == wireless` は「USB 推奨」の警告を出して続行
+  5. iOS × 非 Darwin → 「iOS ビルドは macOS のみ」でエラー終了（SPEC 3）
+  6. `flutter run`（対話型）は使わず `flutter build ios|apk --$MODE` → `flutter install --$MODE -d <id>`（release 既定、`--debug` で debug）。`--flavor`/`--dart-define` は build にパススルー、install は flavor のみ
+  7. 成功 → デバイス名 / 所要時間 / 生成物サイズ（iOS: `Runner.app` を `du -sh`、Android: 最新 apk を `ls -lh`）、失敗 → ビルドログ末尾 80 行をそのまま出力して非ゼロ終了（SPEC 2.3）
+- **Android は全 OS 対応**（Windows/macOS/Linux で `build apk` → `install`）。iOS は macOS のみ。SKILL.md で Bash ツール timeout 900000（15分）を指示、`--list` サブコマンドあり
+- **Windows 対応**: Windows CLI 機は `agents/linux` を実行しているため linux 版 skill-manager に入れれば自動配布（Git Bash で .sh 実行 = 既存スキルと同方式）。Electron GUI 版 `agents/windows` は skill-manager 自体が無いため対象外（現状どおり）
+- **bash 3.2（macOS 標準）対応**: 空配列 + `set -u` で `${arr[@]}` が unbound になる問題を `${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}` 空安全イディオムで回避（TS テンプレートリテラル内は `\${` エスケープ）
+- **対象**: `agents/{linux,macos}/src/services/skill-manager.ts`（2ファイル。定数 + `generateFlutterDeploySkillMd()` + `generateFlutterDeployScript()` + `ensureSkillFiles()` への mkdir/writeFile 追加）
+- **検証**: `pnpm build` 全ワークスペース成功。dist から抽出した deploy.sh を `bash -n` 構文チェック + 擬似 flutter で `--list`／部分一致（pixel→Pixel 7）／iOS×Linux 拒否／未接続ガイダンス／bash 3.2 空配列展開を検証。linux/macos の deploy.sh は byte 完全一致
+- **反映**: Agent のみの変更。**サーバー再起動不要**。Mac/Windows で `u`→`u` で Agent 更新（再接続時に `ensureSkillFiles` がスキルを配置）。実機テストはユーザー実施
+- **教訓**: サーバー API を叩かないローカル実行スキルは serverUrl/token 不要で generator を引数なしにできる。bash 3.2 の空配列展開は必ず `+` 代替形イディオム（`${arr[@]+"${arr[@]}"}`）で守る
+
 ### #263: Devin プランモードの 2 通目が「(No response from AI)」になる不具合を修正 (2026-07-19)
 
 - **症状**: Devin 専用マシンで #262 の対処後、1 通目は devin が正常応答するが、2 通目が「(No response from AI)」になる

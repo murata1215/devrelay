@@ -47,6 +47,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **AskUserQuestion Relay**: Claude Code's questions are relayed to WebUI/Discord/Telegram with selectable option buttons + free-text "Other" input, answers sent back via deny-with-answer pattern
 - **Rate Limit Display**: Captures Claude Code's `rate_limit_event` from Agent SDK, displays `📊 Rate Limit: 5h: XX% | 7d: XX%` on completion
 - **Protocol Version Enforcement**: Soft-rejection mechanism — outdated agents stay online (can receive `u` update command) but conversations are blocked until updated
+- **Flutter Device Deploy**: Build & install a Flutter app to a USB-connected physical device straight from chat via the `devrelay-flutter-deploy` skill (e.g. "deploy mimamori to SE3", "install to the Android device"). No more typing `flutter run` over NoMachine. The agent runs `flutter devices --machine`, resolves the target by case-insensitive **partial name match** (se3 → iPhoneSE3, pixel → Pixel 7), then `flutter build ios|apk --release` → `flutter install -d <id>` (non-interactive). **iOS = macOS only; Android on all OSes** (Windows/macOS/Linux). `--debug` / `--flavor` / `--dart-define` pass through; `--list` enumerates connected real devices; emulators/desktop/web are excluded; wireless devices warn (USB recommended). Local-only skill (no server API), auto-distributed to Linux/macOS/Windows-CLI agents. USB connection + unlock (iOS Developer Mode / Android USB debugging) required
 - **Agent Log Rotation**: Daily copyTruncate rotation with 7-day retention for `agent.log`
 - **Per-Agent Skip Permissions**: Toggle "自動承認" switch in chat header or Agent Settings to auto-approve all tools (like `--dangerously-skip-permissions`), AskUserQuestion still prompts
 - **Disable AskUserQuestion**: Toggle "Ask無効" switch per agent — uses SDK `disallowedTools` to remove the tool from Claude's context entirely (no wasted turns), for autonomous execution without questions
@@ -528,6 +529,7 @@ agents/windows/
 - [x] Discord/Telegram tool approval buttons (approve/deny/approve-all with cross-platform sync)
 - [x] WebUI reload tool approval card restoration (pending approvals pushed on WS reconnect)
 - [x] Multi-platform project scaffold (Flutter / Android / Xcode-SwiftUI / empty templates with OS auto-restriction)
+- [x] Flutter device deploy skill (`devrelay-flutter-deploy` — build & install to USB device via chat, iOS/Android, partial-match device resolution)
 - [ ] LINE Bot
 - [ ] AI tool switching (Gemini/Aider)
 
