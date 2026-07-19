@@ -6,6 +6,18 @@
 
 ## 実装済み機能
 
+### #263: Devin プランモードの 2 通目が「(No response from AI)」になる不具合を修正 (2026-07-19)
+
+- **症状**: Devin 専用マシンで #262 の対処後、1 通目は devin が正常応答するが、2 通目が「(No response from AI)」になる
+- **根本原因**: 1 通目完了時に保存した Devin セッション ID を、2 通目で `-r <id>` として resume すると、CLI がエラーも出力も出さず **exit code 0 のまま空振り**する（`-r` + `-p`/`--agent-config` の組み合わせ問題）。既存の resume 失敗検出（3 Agent の ai-runner.ts）はすべて claude 用の `options.resumeSessionId` + `exit code 1` を前提にしており、devin は branch 内部で `loadDevinSessionId(projectPath)` を自前ロードするうえ今回は exit 0 のため、どの検出にも引っかからず空出力のまま通常完了扱いになっていた。さらに connection.ts の汎用リトライは claude セッションしかクリアしないため、単純にリトライしても再び同じ ID で resume して空振りする
+- **修正**（`agents/{linux,macos,windows}/src/services/ai-runner.ts` の devin branch）:
+  - `-r` で resume したセッション ID を関数スコープ変数（`devinResumedSessionId`）に記録
+  - close ハンドラで「resume 使用 + 出力ゼロ」を **exit code 不問**で検出（`devinResumeEmpty`）→ 壊れた ID の再保存をスキップ → `clearDevinSessionId(projectPath)` で破棄 → `result.resumeFailed = true` を立てて既存の汎用リトライに委譲（`onOutput` は呼ばずリトライに完了通知を任せる）
+  - リトライ時は devin branch が `loadDevinSessionId` → クリア済みで null → `-r` なしの新規セッションで実行（1 通目と同一フラグ構成で動作実証済み）。会話文脈は DevRelay がプロンプトに History context として毎回埋め込むため継続性は維持
+- **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル、`clearDevinSessionId` を session-store から import 追加）。サーバー・shared・connection.ts・DB 変更なし
+- **反映**: Agent のみの変更。サーバー再起動不要。対象マシンで `u`→`u` 更新
+- **検証**: `pnpm build` 全ワークスペース成功
+
 ### #262: Devin 専用マシンで自動検出プロジェクトが claude 固定になる不具合を修正 (2026-07-19)
 
 - **症状**: Devin 専用マシン（claude 未ログイン）で DevRelay 経由の送信が「Not logged in · Please run /login」で失敗。devin CLI 自体は端末で正常動作（`-p --prompt-file`・`--agent-config` とも成功）

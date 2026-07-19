@@ -8,7 +8,7 @@ import type { AiTool, AiUsageData, ScreenAnalysis } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, loadSessionMeta } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadSessionMeta } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
 // 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
@@ -942,6 +942,8 @@ export async function sendPromptToAi(
 
   const result: AiRunResult = {};
   let proc;
+  // Devin: -r で resume したセッション ID を関数スコープで記録（close ハンドラから参照して空振り検出に使う）
+  let devinResumedSessionId: string | null = null;
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -994,6 +996,7 @@ export async function sendPromptToAi(
       : null;
     if (devinSessionId) {
       args.push('-r', devinSessionId);
+      devinResumedSessionId = devinSessionId;
       console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
     }
 
@@ -1200,11 +1203,14 @@ export async function sendPromptToAi(
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
       // Devin: 一時ファイル（プロンプト + agent-config）削除 + セッション ID 取得・保存
+      // ただし resume（-r）が出力ゼロで終わった場合はセッション ID を再保存しない（壊れた ID の温存防止）
+      const devinResumeEmpty = aiTool === 'devin' && !!devinResumedSessionId && fullOutput.trim().length === 0;
       if (aiTool === 'devin') {
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`)); } catch {}
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`)); } catch {}
-        // devin list --format json で最新セッション ID を取得して保存
+        // devin list --format json で最新セッション ID を取得して保存（resume 空振り時はスキップ）
         try {
+          if (!devinResumeEmpty) {
           const listOutput = execSync(`${command} list --format json`, {
             cwd: projectPath, encoding: 'utf-8', timeout: 10000,
           });
@@ -1216,6 +1222,7 @@ export async function sendPromptToAi(
             .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
           if (latest?.id) {
             saveDevinSessionId(projectPath, latest.id).catch(() => {});
+          }
           }
         } catch (err) {
           console.warn(`[devin] Could not retrieve session ID:`, (err as Error).message);
@@ -1246,6 +1253,16 @@ export async function sendPromptToAi(
           onOutput('', true, result.usageData);
         }
         resolve(result);
+        return;
+      }
+
+      // Devin: resume（-r）が出力ゼロで終了（exit code 不問）→ セッション ID を破棄して新規セッションでリトライ
+      // -r + -p/--agent-config の組み合わせで CLI がエラーも出力も出さず正常終了扱いで空振りするケースの対処
+      if (devinResumeEmpty) {
+        console.log(`[devin] ⚠️ Resumed session produced no output (code ${code}), clearing session ID and retrying fresh`);
+        result.resumeFailed = true;
+        // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
+        clearDevinSessionId(projectPath).finally(() => resolve(result));
         return;
       }
 
