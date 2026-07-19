@@ -202,12 +202,28 @@ if ($ProxyUrl -and $PnpmCmd) {
     }
 }
 
-# Claude Code チェック（必須）
+# AI CLI チェック（任意）
+# Claude Code は必須ではなく、claude / gemini / codex / aider / devin のいずれか
+# 1 つあれば動作する（どれも無くても Agent 自体は起動でき、後からインストールすれば
+# 起動時の自動検出が config に追加する）。
 $ClaudeCmd = Get-Command claude -ErrorAction SilentlyContinue
 if (-not $ClaudeCmd) {
-    Write-Host "  X Claude Code が必要です" -ForegroundColor Red
-    Write-Host "    インストール: irm https://claude.ai/install.ps1 | iex" -ForegroundColor Yellow
-    $Missing++
+    # Claude Code が無くても他の AI CLI があれば続行する
+    $OtherAiTools = @()
+    foreach ($tool in @('gemini', 'codex', 'aider', 'devin')) {
+        if (Get-Command $tool -ErrorAction SilentlyContinue) {
+            $OtherAiTools += $tool
+        }
+    }
+    if ($OtherAiTools.Count -gt 0) {
+        Write-Host "  ! Claude Code 未検出（検出された AI ツール: $($OtherAiTools -join ', ')）" -ForegroundColor Yellow
+        Write-Host "    Claude Code が必要な場合は後から: irm https://claude.ai/install.ps1 | iex" -ForegroundColor Yellow
+    } else {
+        Write-Host "  ! AI CLI が見つかりません（claude / gemini / codex / aider / devin）" -ForegroundColor Yellow
+        Write-Host "    Agent はインストールしますが、AI ツールを後からインストールしてください。" -ForegroundColor Yellow
+        Write-Host "    例: irm https://claude.ai/install.ps1 | iex" -ForegroundColor Yellow
+        Write-Host "    ※ Agent 起動時の自動検出が、後からインストールした AI CLI を config に追加します。" -ForegroundColor Yellow
+    }
 } else {
     Write-Host "  OK Claude Code" -ForegroundColor Green
 }
@@ -426,6 +442,24 @@ if (Test-Path $ConfigFile) {
     }
 } else {
     # 新規作成: 基本設定
+    # --- 検出された AI CLI から aiTools セクションを動的生成 ---
+    # 優先順（claude > devin > gemini > codex > aider）で最初に検出されたものを default にする。
+    # 1 つも無ければ従来どおり claude を default（後からインストールされたら起動時自動検出が拾う）。
+    $AiDefault = ""
+    $AiToolLines = @()
+    foreach ($tool in @('claude', 'devin', 'gemini', 'codex', 'aider')) {
+        if (Get-Command $tool -ErrorAction SilentlyContinue) {
+            if (-not $AiDefault) { $AiDefault = $tool }
+            $AiToolLines += "  ${tool}:"
+            $AiToolLines += "    command: ${tool}"
+        }
+    }
+    if (-not $AiDefault) {
+        $AiDefault = "claude"
+        $AiToolLines = @("  claude:", "    command: claude")
+    }
+    $AiToolsYaml = $AiToolLines -join "`n"
+
     $ConfigContent = @"
 # DevRelay Agent 設定ファイル
 # 詳細: https://github.com/murata1215/devrelay
@@ -437,11 +471,8 @@ token: "$Token"
 projectsDirs:
   - $($env:USERPROFILE)
 aiTools:
-  default: claude
-  claude:
-    command: claude
-  gemini:
-    command: gemini
+  default: $AiDefault
+$AiToolsYaml
 logLevel: info
 "@
 

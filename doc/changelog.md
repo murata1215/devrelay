@@ -6,6 +6,16 @@
 
 ## 実装済み機能
 
+### #261: Agent インストーラーの Claude Code 必須要件を撤廃（Devin 専用マシン対応）(2026-07-19)
+
+- **背景**: Devin しか使わない端末に Agent を入れたいが、インストーラーが Claude Code を必須チェックして `exit 1` で弾いていた。Agent 本体は claude なしでも動作する（claude の spawn はセッション実行時のみ、devin 等は各自 spawn、起動時 `detectAndUpdateAiTools()` は見つかったツールだけ登録）ため、ブロックしていたのはインストーラーの事前チェックだけだった
+- **修正**:
+  - `scripts/install-agent.sh`: Claude Code チェックを必須 → 任意化。claude 未検出でも他 AI CLI（gemini/codex/aider/devin）があれば警告のみで続行、1 つも無くても続行（起動時自動検出が後から拾う）。config.yaml 生成を動的化（検出ツールのみ出力、`default` は claude > devin > gemini > codex > aider の優先順で最初に検出したもの、無ければ claude）
+  - `scripts/install-agent.ps1`: 同様に `$Missing++` を廃し警告のみ・続行に変更。config.yaml 生成を動的化
+- **対象**: `scripts/install-agent.sh`, `scripts/install-agent.ps1`（2ファイル）。Agent 本体・サーバー・shared・DB 変更なし
+- **検証**: `bash -n` 構文チェック + config 生成ロジックのシミュレート（devin+gemini 検出時に `default: devin` を確認）。ps1 は目視レビュー（pwsh 不在）
+- **反映**: スクリプトのみの変更。ビルド・再起動不要（新規インストール時に有効）
+
 ### #260: Devin プランモードの読み取り専用強制 (2026-07-18)
 
 - **背景**: Devin plan 実行は `--permission-mode auto` だったが、`auto` は「安全と判断したツールを自動承認」するだけで厳密な読み取り専用ではなかった

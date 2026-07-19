@@ -12,12 +12,13 @@
 #
 # 前提条件:
 #   - git
-#   - Claude Code（claude コマンド）
+#   - AI CLI（claude / gemini / codex / aider / devin のいずれか。任意・後からでも可）
 #   - curl, tar（ワンライナー実行時点で存在）
 #   ※ Node.js 20+ と pnpm は未インストールなら自動でダウンロード・インストール
+#   ※ AI CLI が 1 つも無くても Agent はインストール・起動できる（起動時の自動検出が拾う）
 #
 # 処理内容:
-#   1. 依存ツールの確認（Node.js 20+, git, pnpm, Claude Code）
+#   1. 依存ツールの確認（Node.js 20+, git, pnpm。AI CLI は任意）
 #   2. リポジトリを ~/.devrelay/agent/ に clone（既存なら git pull）
 #   3. shared + agent をビルド
 #   4. config.yaml を自動生成（machineName = hostname/username）
@@ -288,23 +289,33 @@ if [ -n "$PROXY_URL" ] && command -v pnpm &> /dev/null; then
   pnpm config set https-proxy "$PROXY_URL" 2>/dev/null || true
 fi
 
-# --- Claude Code チェック（必須）---
-# DevRelay Agent は Claude Code を使って AI タスクを実行するため必須
+# --- AI CLI チェック（任意）---
+# DevRelay Agent は Claude Code / Gemini / Codex / Aider / Devin のいずれかで
+# AI タスクを実行する。Claude Code は必須ではなく、いずれか 1 つあれば動作する
+# （どれも無くても Agent 自体は起動でき、後からインストールすれば起動時の
+#  自動検出が config に追加する）。
 if ! command -v claude &> /dev/null; then
   # ~/.local/bin にインストール済みだが PATH に入っていない場合のフォールバック
   if [ -x "$HOME/.local/bin/claude" ]; then
     export PATH="$HOME/.local/bin:$PATH"
     echo -e "  ✅ Claude Code (PATH に追加: ~/.local/bin)"
   else
-    echo -e "${RED}❌ Claude Code が必要です${NC}"
-    if [ "$OS_TYPE" = "Darwin" ]; then
-      echo -e "   インストール: ${YELLOW}curl -fsSL https://claude.ai/install.sh | bash${NC}"
+    # Claude Code が無くても他の AI CLI があれば続行する
+    OTHER_AI_TOOLS=""
+    for tool in gemini codex aider devin; do
+      if command -v "$tool" &> /dev/null; then
+        OTHER_AI_TOOLS="$OTHER_AI_TOOLS $tool"
+      fi
+    done
+    if [ -n "$OTHER_AI_TOOLS" ]; then
+      echo -e "  ${YELLOW}⚠️ Claude Code 未検出（検出された AI ツール:${OTHER_AI_TOOLS} ）${NC}"
+      echo -e "     Claude Code が必要な場合は後から: ${YELLOW}curl -fsSL https://claude.ai/install.sh | bash${NC}"
     else
-      echo -e "   インストール: ${YELLOW}curl -fsSL https://claude.ai/install.sh | bash${NC}"
+      echo -e "  ${YELLOW}⚠️ AI CLI が見つかりません（claude / gemini / codex / aider / devin）${NC}"
+      echo -e "     Agent はインストールしますが、AI ツールを後からインストールしてください。"
+      echo -e "     例: ${YELLOW}curl -fsSL https://claude.ai/install.sh | bash${NC}"
+      echo -e "     ※ Agent 起動時の自動検出が、後からインストールした AI CLI を config に追加します。"
     fi
-    echo ""
-    echo -e "${RED}Claude Code をインストールしてから再実行してください。${NC}"
-    exit 1
   fi
 else
   echo -e "  ✅ Claude Code"
@@ -477,6 +488,25 @@ if [ -f "$CONFIG_FILE" ]; then
     echo -e "  プロキシ設定を更新しました"
   fi
 else
+  # --- 検出された AI CLI から aiTools セクションを動的生成 ---
+  # 優先順（claude > devin > gemini > codex > aider）で最初に検出されたものを default にする。
+  # 1 つも無ければ従来どおり claude を default（後からインストールされたら起動時自動検出が拾う）。
+  AI_DEFAULT=""
+  AI_TOOLS_YAML=""
+  for tool in claude devin gemini codex aider; do
+    if command -v "$tool" &> /dev/null || { [ "$tool" = "claude" ] && [ -x "$HOME/.local/bin/claude" ]; }; then
+      if [ -z "$AI_DEFAULT" ]; then
+        AI_DEFAULT="$tool"
+      fi
+      AI_TOOLS_YAML="${AI_TOOLS_YAML}  ${tool}:\n    command: ${tool}\n"
+    fi
+  done
+  # AI CLI が 1 つも無い場合は claude を既定エントリとして書いておく（従来互換）
+  if [ -z "$AI_DEFAULT" ]; then
+    AI_DEFAULT="claude"
+    AI_TOOLS_YAML="  claude:\n    command: claude\n"
+  fi
+
   cat > "$CONFIG_FILE" << EOF
 # DevRelay Agent 設定ファイル
 # 詳細: https://github.com/murata1215/devrelay
@@ -488,11 +518,8 @@ token: "$TOKEN"
 projectsDirs:
 $(echo -e "$PROJECTS_DIRS_YAML")
 aiTools:
-  default: claude
-  claude:
-    command: claude
-  gemini:
-    command: gemini
+  default: $AI_DEFAULT
+$(echo -e "$AI_TOOLS_YAML")
 logLevel: info
 EOF
 
