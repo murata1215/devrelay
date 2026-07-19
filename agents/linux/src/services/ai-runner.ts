@@ -596,6 +596,17 @@ async function sendPromptToAiSdk(
               onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true);
               return result;
             }
+            // Claude Code 未ログイン検出（resume リトライしても直らないので即座に案内して打ち切る）
+            // Devin 専用マシン等で claude 未ログインのまま claude が呼ばれた場合にここに来る
+            if (/^not logged in.*please run \/login/i.test(block.text.trim())) {
+              console.log(`[claude/sdk] 🔑 Claude Code is not logged in`);
+              onOutput(
+                '⚠️ Claude Code が未ログインです。\n' +
+                '対象マシンで `claude` を起動してログインするか、`a` コマンドで別の AI ツール（devin 等）に切り替えてください。',
+                true
+              );
+              return result;
+            }
             fullOutput += block.text;
             console.log(`[claude/sdk] +${block.text.length} chars`);
             onOutput(block.text, false);

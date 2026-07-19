@@ -559,7 +559,7 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
     }
 
     // プロジェクト再スキャン → Server に通知
-    await autoDiscoverProjects(baseDir);
+    await autoDiscoverProjects(baseDir, 5, config.aiTools?.default || 'claude');
     const projects = await loadProjects(config);
     sendProjectsUpdate(projects);
     console.log(`📦 Scaffold: project list synced (${projects.length} projects)`);
@@ -1483,7 +1483,7 @@ export async function rescanProjectsAndSync(config: AgentConfig): Promise<void> 
   try {
     for (const dir of config.projectsDirs) {
       try {
-        await autoDiscoverProjects(dir);
+        await autoDiscoverProjects(dir, 5, config.aiTools?.default || 'claude');
       } catch (err) {
         console.warn(`⚠️ rescan: failed to scan ${dir}: ${(err as Error).message}`);
       }
@@ -1821,7 +1821,7 @@ async function handleProjectsDirsUpdate(dirs: string[] | null, config: AgentConf
   let totalAdded = 0;
   for (const dir of dirs) {
     try {
-      const added = await autoDiscoverProjects(dir);
+      const added = await autoDiscoverProjects(dir, 5, config.aiTools?.default || 'claude');
       totalAdded += added;
     } catch (err) {
       console.error(`❌ Failed to scan ${dir}:`, (err as Error).message);

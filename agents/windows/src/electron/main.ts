@@ -206,8 +206,9 @@ async function startAgent() {
 
   try {
     // Auto-discover projects
+    // config.yaml の aiTools.default を新規プロジェクトの既定 AI として使う
     for (const dir of currentConfig.projectsDirs) {
-      await autoDiscoverProjects(dir);
+      await autoDiscoverProjects(dir, 5, currentConfig.aiTools?.default || 'claude');
     }
 
     const projects = await loadProjects(currentConfig);
@@ -347,7 +348,7 @@ ipcMain.handle('scan-projects', async () => {
   const config = await loadConfig();
   let total = 0;
   for (const dir of config.projectsDirs) {
-    total += await autoDiscoverProjects(dir);
+    total += await autoDiscoverProjects(dir, 5, config.aiTools?.default || 'claude');
   }
 
   // サーバーに最新のプロジェクト一覧を通知
@@ -371,7 +372,7 @@ ipcMain.handle('add-projects-dir', async () => {
       config.projectsDirs.push(newDir);
       await saveConfig(config);
       // 新しいディレクトリを即座にスキャン
-      await autoDiscoverProjects(newDir);
+      await autoDiscoverProjects(newDir, 5, config.aiTools?.default || 'claude');
 
       // サーバーに最新のプロジェクト一覧を通知
       const allProjects = await loadProjects(config);

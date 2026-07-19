@@ -104,7 +104,7 @@ export async function removeProject(nameOrPath: string): Promise<void> {
   await saveProjectsConfig(projects);
 }
 
-export async function scanProjects(baseDir: string, maxDepth: number = 1): Promise<ProjectConfig[]> {
+export async function scanProjects(baseDir: string, maxDepth: number = 1, defaultAi: AiTool = 'claude'): Promise<ProjectConfig[]> {
   const found: ProjectConfig[] = [];
   const existing = await loadProjectsConfig();
   const existingPaths = new Set(existing.map((p) => p.path));
@@ -140,7 +140,7 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1): Promi
             found.push({
               name: entry.name,
               path: fullPath,
-              defaultAi: 'claude',
+              defaultAi,
             });
           }
         } else if (depth < maxDepth) {
@@ -246,11 +246,15 @@ export async function listProjects(): Promise<ProjectConfig[]> {
 
 /**
  * 指定ディレクトリをスキャンして CLAUDE.md があるプロジェクトを自動登録
+ *
+ * @param defaultAi 新規登録するプロジェクトの既定 AI ツール。config.yaml の
+ *   `aiTools.default`（Devin 専用マシンなら 'devin' 等）を渡すことで、claude 未ログインの
+ *   マシンでも自動検出プロジェクトが正しい AI で起動する。省略時は従来通り 'claude'。
  */
-export async function autoDiscoverProjects(baseDir: string, maxDepth: number = 5): Promise<number> {
-  console.log(`🔍 Scanning for projects with CLAUDE.md in ${baseDir}...`);
+export async function autoDiscoverProjects(baseDir: string, maxDepth: number = 5, defaultAi: AiTool = 'claude'): Promise<number> {
+  console.log(`🔍 Scanning for projects with CLAUDE.md in ${baseDir}... (defaultAi=${defaultAi})`);
 
-  const discovered = await scanProjects(baseDir, maxDepth);
+  const discovered = await scanProjects(baseDir, maxDepth, defaultAi);
 
   if (discovered.length === 0) {
     console.log('   No new projects found');

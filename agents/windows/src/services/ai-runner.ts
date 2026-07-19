@@ -359,6 +359,16 @@ export async function sendPromptToAi(
                   promptTooLong = true;
                   continue;
                 }
+                // Claude Code 未ログイン検出（Devin 専用マシン等で claude 未ログインのまま呼ばれた場合）
+                if (/^not logged in.*please run \/login/i.test(block.text.trim())) {
+                  log.info(`[${aiTool}] 🔑 Claude Code is not logged in`);
+                  onOutput(
+                    '⚠️ Claude Code が未ログインです。\n' +
+                    '対象マシンで `claude` を起動してログインするか、`a` コマンドで別の AI ツール（devin 等）に切り替えてください。',
+                    false
+                  );
+                  continue;
+                }
                 fullOutput += block.text;
                 log.info(`[${aiTool}] +${block.text.length} chars`);
                 onOutput(block.text, false);

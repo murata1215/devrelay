@@ -21,8 +21,9 @@ export async function startCommand() {
   console.log(`Server:  ${config.serverUrl}`);
 
   // Auto-discover projects with CLAUDE.md
+  // config.yaml の aiTools.default を新規プロジェクトの既定 AI として使う
   for (const dir of config.projectsDirs) {
-    await autoDiscoverProjects(dir);
+    await autoDiscoverProjects(dir, 5, config.aiTools?.default || 'claude');
   }
 
   // Load projects

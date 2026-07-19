@@ -6,6 +6,20 @@
 
 ## 実装済み機能
 
+### #262: Devin 専用マシンで自動検出プロジェクトが claude 固定になる不具合を修正 (2026-07-19)
+
+- **症状**: Devin 専用マシン（claude 未ログイン）で DevRelay 経由の送信が「Not logged in · Please run /login」で失敗。devin CLI 自体は端末で正常動作（`-p --prompt-file`・`--agent-config` とも成功）
+- **真因**: agent.log で判明。Agent は devin ではなく **claude を SDK 経由で起動**していた（「Not logged in」は Claude Code の未ログインエラー）。#260 の `--agent-config` は無関係（そもそも devin に到達していない）
+- **根本原因**: セッションの AI ツールは `Project.defaultAi`（DB）で決まるが、プロジェクト自動検出（`scanProjects`）が `defaultAi: 'claude'` を**ハードコード**していた（linux/macos/windows の 3 Agent）。#261 で config.yaml の `aiTools.default: devin` は正しく生成されるようになったが、この値はプロジェクト登録時の defaultAi に反映されていなかった。結果、Devin 専用マシンでも全プロジェクトが claude 扱い
+- **修正**:
+  - `scanProjects` / `autoDiscoverProjects` に `defaultAi: AiTool = 'claude'` 引数を追加し、ハードコードを置換（3 Agent）
+  - 全呼び出し元（index.ts 起動時スキャン、connection.ts の rescan / projectsDirs 更新 / scaffold、windows electron の各 IPC）から `config.aiTools?.default || 'claude'` を渡す
+  - 既存 projects.yaml エントリは変更しない（新規登録時のみ適用。#257 と同方針）
+  - **UX 改善**: claude SDK / CLI 出力に「Not logged in · Please run /login」を検出したら、生エラーを出さず「⚠️ Claude Code が未ログインです。ログインするか `a` コマンドで別 AI（devin 等）に切り替えてください」と即座に案内（3 Agent）
+- **対象**: `agents/{linux,macos,windows}/src/services/{projects,connection,ai-runner}.ts` + `index.ts`（linux/macos）/ `cli/commands/start.ts`・`electron/main.ts`（windows）。サーバー・shared・DB 変更なし
+- **反映**: Agent のみの変更。サーバー再起動不要。対象マシンで `u`→`u` 更新
+- **即時復旧**: コード反映を待たずに、セッションで `a` → `a devin` で AI を切替可能。または projects.yaml の `defaultAi: devin` 手動修正 + Agent 再起動で DB にも反映
+
 ### #261: Agent インストーラーの Claude Code 必須要件を撤廃（Devin 専用マシン対応）(2026-07-19)
 
 - **背景**: Devin しか使わない端末に Agent を入れたいが、インストーラーが Claude Code を必須チェックして `exit 1` で弾いていた。Agent 本体は claude なしでも動作する（claude の spawn はセッション実行時のみ、devin 等は各自 spawn、起動時 `detectAndUpdateAiTools()` は見つかったツールだけ登録）ため、ブロックしていたのはインストーラーの事前チェックだけだった
