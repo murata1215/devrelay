@@ -2,7 +2,7 @@
   "name": "@devrelay/shared",
   "version": "0.1.0",
   "private": true,
-  "license": "MIT",
+  "license": "Apache-2.0",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {

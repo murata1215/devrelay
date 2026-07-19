@@ -535,4 +535,9 @@ agents/windows/
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Licensed under the [Apache License, Version 2.0](LICENSE) (the "License");
+you may not use this project except in compliance with the License.
+
+Copyright 2026 Keisuke Murata. See the [LICENSE](LICENSE) and [NOTICE](NOTICE) files for details.
+
+Apache-2.0 is chosen for its explicit patent grant (Section 3) and clear contribution terms (Section 5), making DevRelay easy for organizations to adopt and contribute to. Contributions submitted for inclusion in the Work are licensed under the same terms without any additional conditions.

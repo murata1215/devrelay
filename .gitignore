@@ -7,6 +7,22 @@ dist/
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
+
+# Secrets / credentials (NEVER commit)
+*firebase*service*account*.json
+*firebase-adminsdk*.json
+*service-account*.json
+*serviceAccount*.json
+*-serviceaccount.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.p8
+id_rsa
+id_rsa.pub
 
 # Database
 *.db
@@ -29,4 +45,9 @@ Thumbs.db
 # DevRelay runtime files (per-project session data)
 .devrelay/
 .devrelay-output/
+.devrelay-output-history/
 .devrelay-files/
+
+# Local backups / scratch
+backup/
+test-ask-user.mjs

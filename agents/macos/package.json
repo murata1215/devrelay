@@ -3,7 +3,7 @@
   "description": "DevRelay Agent for macOS - Remote AI CLI development hub",
   "version": "0.1.0",
   "private": true,
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
