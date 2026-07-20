@@ -51,3 +51,6 @@ Thumbs.db
 # Local backups / scratch
 backup/
 test-ask-user.mjs
+
+# Internal incident reports (contain secrets: DB passwords, internal IPs)
+doc/testflight_error_20260425.md
