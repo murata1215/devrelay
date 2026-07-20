@@ -31,6 +31,34 @@ model User {
   testflightServices  TestflightService[]
   teams               Team[]
   notifications       Notification[]
+  organizationMember  OrganizationMember? // 所属組織（エンタープライズモード、1ユーザー1組織）
+}
+
+// 組織（エンタープライズモード）
+model Organization {
+  id               String   @id @default(cuid())
+  orgCode          String   @unique   // 組織ID（システム自動発行、例: ORG-7K3M9Q）
+  name             String              // 会社名
+  joinPasswordHash String              // 参加パスワード（bcrypt ハッシュ）
+  logo             Bytes?              // 会社ロゴ（PostgreSQL bytea）
+  logoMimeType     String?             // ロゴの MIME タイプ（image/png 等）
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  members          OrganizationMember[]
+}
+
+// 組織メンバー（userId unique = 1ユーザー1組織）
+model OrganizationMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String       @unique
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           String       @default("member") // 'admin' | 'member'
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
 }
 
 // WebUI 認証セッション

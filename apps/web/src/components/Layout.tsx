@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useOrganization } from '../contexts/OrganizationContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { org as orgApi } from '../lib/api';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled } from '../utils/notification-sound';
 
 interface LayoutProps {
@@ -10,6 +12,7 @@ interface LayoutProps {
 
 export function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth();
+  const { organization } = useOrganization();
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -41,7 +44,16 @@ export function Layout({ children }: LayoutProps) {
   return (
     <div className="min-h-screen bg-[var(--bg-base)]">
       {/* Header */}
-      <nav className="bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
+      <nav className="relative bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
+        {/* エンタープライズ組織ロゴ（登録済みなら画面左端にベタ付けで大きく表示） */}
+        {organization?.hasLogo && (
+          <img
+            src={orgApi.getLogoUrl()}
+            alt={organization.name}
+            title={organization.name}
+            className="absolute left-2 top-1/2 -translate-y-1/2 h-10 max-w-[120px] md:h-14 md:max-w-[280px] w-auto object-contain rounded z-10"
+          />
+        )}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             {/* Logo and desktop nav */}

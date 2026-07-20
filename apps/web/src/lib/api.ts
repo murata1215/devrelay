@@ -651,3 +651,100 @@ export const teams = {
     await request('DELETE', `/teams/${teamId}/members/${memberId}`);
   },
 };
+
+// ========================================
+// 組織（エンタープライズモード）API
+// ========================================
+
+/** 自分の所属組織情報。member には orgCode が含まれない */
+export interface OrgInfo {
+  name: string;
+  role: 'admin' | 'member';
+  hasLogo: boolean;
+  orgCode?: string; // admin のみ
+}
+
+/** 組織メンバー情報（admin 閲覧用） */
+export interface OrgMember {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  role: 'admin' | 'member';
+  createdAt: string;
+  isSelf: boolean;
+}
+
+/** メンバーアクティビティ（監視用） */
+export interface OrgActivity {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  role: 'admin' | 'member';
+  sessionCount: number;
+  buildCount: number;
+  onlineMachines: number;
+  lastActiveAt: string | null;
+}
+
+export const org = {
+  /** 自分の所属組織を取得（未所属なら organization: null） */
+  async me(): Promise<{ organization: OrgInfo | null }> {
+    return request('GET', '/org/me');
+  },
+
+  /** 組織作成（作成者が admin になる） */
+  async create(name: string, joinPassword: string): Promise<{ organization: OrgInfo }> {
+    return request('POST', '/org', { name, joinPassword, makeMeAdmin: true });
+  },
+
+  /** 組織に参加（組織ID + 参加パスワード） */
+  async join(orgCode: string, joinPassword: string): Promise<{ organization: OrgInfo }> {
+    return request('POST', '/org/join', { orgCode, joinPassword });
+  },
+
+  /** 組織から脱退 */
+  async leave(): Promise<void> {
+    await request('POST', '/org/leave');
+  },
+
+  /** 参加パスワード変更（admin） */
+  async changePassword(joinPassword: string): Promise<void> {
+    await request('PATCH', '/org/password', { joinPassword });
+  },
+
+  /** ロゴ画像 URL（token 付き。左上表示用） */
+  getLogoUrl(): string {
+    const token = getToken();
+    return `${API_BASE}/org/logo${token ? `?token=${token}` : ''}`;
+  },
+
+  /** ロゴ登録（admin。dataUrl は base64 data URL） */
+  async uploadLogo(dataUrl: string): Promise<{ ok: boolean; hasLogo: boolean }> {
+    return request('PUT', '/org/logo', { dataUrl });
+  },
+
+  /** ロゴ削除（admin） */
+  async removeLogo(): Promise<{ ok: boolean; hasLogo: boolean }> {
+    return request('DELETE', '/org/logo');
+  },
+
+  /** メンバー一覧（admin） */
+  async listMembers(): Promise<{ members: OrgMember[] }> {
+    return request('GET', '/org/members');
+  },
+
+  /** メンバー削除（admin） */
+  async removeMember(userId: string): Promise<void> {
+    await request('DELETE', `/org/members/${userId}`);
+  },
+
+  /** メンバー role 変更（admin） */
+  async updateRole(userId: string, role: 'admin' | 'member'): Promise<void> {
+    await request('PATCH', `/org/members/${userId}`, { role });
+  },
+
+  /** メンバーアクティビティ監視（admin） */
+  async activity(): Promise<{ activity: OrgActivity[] }> {
+    return request('GET', '/org/activity');
+  },
+};

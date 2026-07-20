@@ -10,6 +10,7 @@ import { setupTelegramBot } from './platforms/telegram.js';
 import { prisma } from './db/client.js';
 import { authRoutes } from './routes/auth.js';
 import { apiRoutes } from './routes/api.js';
+import { organizationRoutes } from './routes/organization.js';
 import { publicApiRoutes } from './routes/public-api.js';
 import { registerDocumentApiRoutes } from './routes/document-api.js';
 import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
@@ -77,6 +78,7 @@ async function main() {
   await app.register(publicApiRoutes);  // 認証不要のパブリック API（インストーラー用トークン検証など）
   await app.register(authRoutes);
   await app.register(apiRoutes);
+  await app.register(organizationRoutes);  // エンタープライズモード（組織）API
   await app.register(mcpRoutes);  // MCP エンドポイント（/mcp）— 認証は MCP 内部で処理
   registerDocumentApiRoutes(app);  // Agent 向けドキュメント検索 API（マシントークン認証）
   registerAgentDocumentApiRoutes(app);  // エージェントドキュメント CRUD API（WebUI 認証）

@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { OrganizationProvider } from './contexts/OrganizationContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { Layout } from './components/Layout';
 import { LoginPage } from './pages/LoginPage';
@@ -25,6 +26,7 @@ function ProtectedContent() {
   const isChatRoute = location.pathname === '/chat';
 
   return (
+    <OrganizationProvider>
     <Layout>
       {/* ChatPage: 常時マウント、/chat 以外では非表示 */}
       <div style={{ display: isChatRoute ? undefined : 'none' }}>
@@ -44,6 +46,7 @@ function ProtectedContent() {
       )}
       <NotificationBanner />
     </Layout>
+    </OrganizationProvider>
   );
 }
 
