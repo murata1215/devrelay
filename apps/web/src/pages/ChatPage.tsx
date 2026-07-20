@@ -3,6 +3,7 @@ import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPro
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
+import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT, type DocPanelSettings } from '../utils/doc-panel-settings';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -1555,7 +1556,9 @@ interface ApprovalHistoryEntry {
 }
 
 /** エージェントドキュメントパネル（右サイドバー） */
-function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string | null; machineDisplayName: string; projectId: string | null; approvalHistory: ApprovalHistoryEntry[] }) {
+function DocPanel({ machineId, projectId, approvalHistory, tabSettings }: { machineId: string | null; machineDisplayName: string; projectId: string | null; approvalHistory: ApprovalHistoryEntry[]; tabSettings: DocPanelSettings }) {
+  // 有効なタブのみを表示順で列挙する
+  const enabledTabs = (['approvals', 'docs', 'issues', 'plan'] as DocPanelTab[]).filter((t) => tabSettings[t]);
   const [documents, setDocuments] = useState<AgentDocMeta[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -1563,8 +1566,14 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
   const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // タブ状態
-  const [activePanel, setActivePanel] = useState<DocPanelTab>('approvals');
+  // タブ状態（初期値は最初の有効タブ）
+  const [activePanel, setActivePanel] = useState<DocPanelTab>(enabledTabs[0] ?? 'approvals');
+  // 現在のタブが無効化されたら最初の有効タブへフォールバック
+  useEffect(() => {
+    if (enabledTabs.length > 0 && !enabledTabs.includes(activePanel)) {
+      setActivePanel(enabledTabs[0]);
+    }
+  }, [enabledTabs, activePanel]);
   /** 承認履歴の展開中エントリ ID（クリックで全文表示） */
   const [expandedApprovalId, setExpandedApprovalId] = useState<string | null>(null);
 
@@ -1766,48 +1775,56 @@ function DocPanel({ machineId, projectId, approvalHistory }: { machineId: string
           onMouseDown={handleResizeStart}
         />
 
-        {/* タブヘッダー */}
+        {/* タブヘッダー（有効なタブのみ表示） */}
         <div className="flex items-center border-b border-[var(--border-color)]">
-          <button
-            onClick={() => setActivePanel('approvals')}
-            className={`flex-1 text-xs py-2 text-center transition-colors ${
-              activePanel === 'approvals'
-                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
-            }`}
-          >
-            Approvals
-          </button>
-          <button
-            onClick={() => setActivePanel('docs')}
-            className={`flex-1 text-xs py-2 text-center transition-colors ${
-              activePanel === 'docs'
-                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
-            }`}
-          >
-            Docs
-          </button>
-          <button
-            onClick={() => setActivePanel('issues')}
-            className={`flex-1 text-xs py-2 text-center transition-colors ${
-              activePanel === 'issues'
-                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
-            }`}
-          >
-            Issues
-          </button>
-          <button
-            onClick={() => setActivePanel('plan')}
-            className={`flex-1 text-xs py-2 text-center transition-colors ${
-              activePanel === 'plan'
-                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
-            }`}
-          >
-            Plan
-          </button>
+          {tabSettings.approvals && (
+            <button
+              onClick={() => setActivePanel('approvals')}
+              className={`flex-1 text-xs py-2 text-center transition-colors ${
+                activePanel === 'approvals'
+                  ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+              }`}
+            >
+              Approvals
+            </button>
+          )}
+          {tabSettings.docs && (
+            <button
+              onClick={() => setActivePanel('docs')}
+              className={`flex-1 text-xs py-2 text-center transition-colors ${
+                activePanel === 'docs'
+                  ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+              }`}
+            >
+              Docs
+            </button>
+          )}
+          {tabSettings.issues && (
+            <button
+              onClick={() => setActivePanel('issues')}
+              className={`flex-1 text-xs py-2 text-center transition-colors ${
+                activePanel === 'issues'
+                  ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+              }`}
+            >
+              Issues
+            </button>
+          )}
+          {tabSettings.plan && (
+            <button
+              onClick={() => setActivePanel('plan')}
+              className={`flex-1 text-xs py-2 text-center transition-colors ${
+                activePanel === 'plan'
+                  ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent-blue)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+              }`}
+            >
+              Plan
+            </button>
+          )}
           {activePanel === 'docs' && (
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -2007,6 +2024,13 @@ export function ChatPage() {
   const [, setSessionRefreshCount] = useState(0);
   /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
   const [maximized, setMaximized] = useState(false);
+  /** 右パネル（DocPanel）のタブ表示設定。Settings から変更されたらイベントで即時反映 */
+  const [docPanelSettings, setDocPanelSettings] = useState<DocPanelSettings>(getDocPanelSettings);
+  useEffect(() => {
+    const handler = () => setDocPanelSettings(getDocPanelSettings());
+    window.addEventListener(DOC_PANEL_SETTINGS_EVENT, handler);
+    return () => window.removeEventListener(DOC_PANEL_SETTINGS_EVENT, handler);
+  }, []);
   /** ツール承認リクエスト: requestId → 承認情報 */
   const [toolApprovals, setToolApprovals] = useState<Map<string, {
     requestId: string;
@@ -3409,13 +3433,15 @@ export function ChatPage() {
         )}
       </div>
 
-      {/* ドキュメントパネル（右サイド、大画面のみ、最大化時は非表示） */}
-      {!maximized && (
+      {/* ドキュメントパネル（右サイド、大画面のみ、最大化時は非表示）
+          有効タブが1つも無い場合はパネルごと非表示 */}
+      {!maximized && isAnyDocPanelTabEnabled(docPanelSettings) && (
         <DocPanel
           machineId={activeMachineId}
           machineDisplayName={activeTab?.machineDisplayName ?? ''}
           projectId={activeTab?.projectId ?? null}
           approvalHistory={approvalHistory}
+          tabSettings={docPanelSettings}
         />
       )}
 
