@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { settings, platforms, services, agreementTemplate, allowedTools, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse } from '../lib/api';
+import { settings, platforms, services, agreementTemplate, allowedTools, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { useOrganization } from '../contexts/OrganizationContext';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificationSound } from '../utils/notification-sound';
+import { getDocPanelSettings, setDocPanelSettings, type DocPanelSettings } from '../utils/doc-panel-settings';
 
 /** API キーフィールドの定義 */
 interface ApiKeyFieldDef {
@@ -115,6 +117,337 @@ interface ChatDisplaySettings {
   aiAvatar?: string;
 }
 
+/**
+ * エンタープライズモード（組織）セクション。
+ * - 未所属: 「組織を作成」/「組織に参加」タブ
+ * - admin: 組織ID表示・パスワード変更・ロゴ管理・メンバー管理・アクティビティ監視
+ * - member: 組織名表示 + 脱退
+ */
+function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
+  const { organization, refresh } = useOrganization();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [ok, setOk] = useState('');
+
+  // 未所属時のタブ・入力
+  const [tab, setTab] = useState<'create' | 'join'>('create');
+  const [createName, setCreateName] = useState('');
+  const [createPw, setCreatePw] = useState('');
+  const [createPw2, setCreatePw2] = useState('');
+  const [joinCode, setJoinCode] = useState('');
+  const [joinPw, setJoinPw] = useState('');
+  // 作成直後に発行された組織IDを大きく表示するための一時状態
+  const [issuedCode, setIssuedCode] = useState('');
+
+  // admin: パスワード変更
+  const [newPw, setNewPw] = useState('');
+  // admin: メンバー / アクティビティ
+  const [members, setMembers] = useState<OrgMember[]>([]);
+  const [activity, setActivity] = useState<OrgActivity[]>([]);
+  // ロゴプレビュー用のキャッシュバスター
+  const [logoBust, setLogoBust] = useState(Date.now());
+
+  const isAdmin = organization?.role === 'admin';
+
+  // admin のときメンバー・アクティビティを読み込む
+  useEffect(() => {
+    if (!isAdmin) return;
+    orgApi.listMembers().then((r) => setMembers(r.members)).catch(() => { /* ignore */ });
+    orgApi.activity().then((r) => setActivity(r.activity)).catch(() => { /* ignore */ });
+  }, [isAdmin, organization?.orgCode]);
+
+  const flash = (message: string, isError = false) => {
+    if (isError) { setErr(message); setOk(''); } else { setOk(message); setErr(''); }
+    setTimeout(() => { setErr(''); setOk(''); }, 4000);
+  };
+
+  /** 組織を作成する */
+  const handleCreate = async () => {
+    if (!createName.trim()) return flash('会社名を入力してください', true);
+    if (createPw.length < 4) return flash('参加パスワードは4文字以上で設定してください', true);
+    if (createPw !== createPw2) return flash('参加パスワードが一致しません', true);
+    setBusy(true);
+    try {
+      const { organization: created } = await orgApi.create(createName.trim(), createPw);
+      setIssuedCode(created.orgCode || '');
+      setCreateName(''); setCreatePw(''); setCreatePw2('');
+      await refresh();
+      flash('組織を作成しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '作成に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** 組織に参加する */
+  const handleJoin = async () => {
+    if (!joinCode.trim() || !joinPw) return flash('組織IDと参加パスワードを入力してください', true);
+    setBusy(true);
+    try {
+      await orgApi.join(joinCode.trim(), joinPw);
+      setJoinCode(''); setJoinPw('');
+      await refresh();
+      flash('組織に参加しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '参加に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** 組織から脱退する */
+  const handleLeave = async () => {
+    if (!confirm('この組織から脱退しますか？')) return;
+    setBusy(true);
+    try {
+      await orgApi.leave();
+      await refresh();
+      flash('組織から脱退しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '脱退に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** 参加パスワードを変更する */
+  const handleChangePw = async () => {
+    if (newPw.length < 4) return flash('参加パスワードは4文字以上で設定してください', true);
+    setBusy(true);
+    try {
+      await orgApi.changePassword(newPw);
+      setNewPw('');
+      flash('参加パスワードを変更しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '変更に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** ロゴ画像をアップロードする（FileReader で base64 data URL 化） */
+  const handleLogoUpload = (file: File) => {
+    if (file.size > 512 * 1024) return flash('ロゴ画像は512KB以下にしてください', true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result as string;
+      setBusy(true);
+      try {
+        await orgApi.uploadLogo(dataUrl);
+        await refresh();
+        setLogoBust(Date.now());
+        flash('ロゴを登録しました');
+      } catch (e) {
+        flash(e instanceof Error ? e.message : 'ロゴ登録に失敗しました', true);
+      } finally { setBusy(false); }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  /** ロゴを削除する */
+  const handleLogoRemove = async () => {
+    setBusy(true);
+    try {
+      await orgApi.removeLogo();
+      await refresh();
+      setLogoBust(Date.now());
+      flash('ロゴを削除しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : 'ロゴ削除に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** メンバーを削除する */
+  const handleRemoveMember = async (m: OrgMember) => {
+    if (!confirm(`${m.email || m.name || m.userId} を組織から削除しますか？`)) return;
+    setBusy(true);
+    try {
+      await orgApi.removeMember(m.userId);
+      const r = await orgApi.listMembers();
+      setMembers(r.members);
+      flash('メンバーを削除しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '削除に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** メンバーの role を変更する */
+  const handleToggleRole = async (m: OrgMember) => {
+    const next = m.role === 'admin' ? 'member' : 'admin';
+    setBusy(true);
+    try {
+      await orgApi.updateRole(m.userId, next);
+      const r = await orgApi.listMembers();
+      setMembers(r.members);
+      flash('権限を変更しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '変更に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  const inputCls = 'w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border-color)] rounded text-[var(--text-primary)] text-sm';
+  const btnPrimary = 'px-4 py-2 bg-[var(--accent-blue)] text-white rounded text-sm font-medium disabled:opacity-50';
+
+  return (
+    <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Enterprise（組織）</h2>
+
+      {err && <div className="mb-4 bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-3 py-2 rounded text-sm">{err}</div>}
+      {ok && <div className="mb-4 bg-green-500/20 border border-green-500 text-[var(--text-success)] px-3 py-2 rounded text-sm">{ok}</div>}
+
+      {/* 未所属 */}
+      {!organization && (
+        <div>
+          {issuedCode ? (
+            <div className="mb-4 p-4 rounded border border-[var(--accent-blue)] bg-[var(--bg-base)]">
+              <p className="text-sm text-[var(--text-secondary)] mb-2">組織を作成しました。以下の<strong>組織ID</strong>と参加パスワードをメンバーに伝えてください。</p>
+              <div className="flex items-center gap-2">
+                <code className="text-xl font-bold text-[var(--text-primary)]">{issuedCode}</code>
+                <button onClick={() => navigator.clipboard?.writeText(issuedCode)} className="px-2 py-1 text-xs border border-[var(--border-color)] rounded text-[var(--text-secondary)]">コピー</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex gap-2 mb-4">
+                <button onClick={() => setTab('create')} className={`px-3 py-1.5 rounded text-sm ${tab === 'create' ? 'bg-[var(--accent-blue)] text-white' : 'bg-[var(--bg-base)] text-[var(--text-secondary)]'}`}>組織を作成</button>
+                <button onClick={() => setTab('join')} className={`px-3 py-1.5 rounded text-sm ${tab === 'join' ? 'bg-[var(--accent-blue)] text-white' : 'bg-[var(--bg-base)] text-[var(--text-secondary)]'}`}>組織に参加</button>
+              </div>
+
+              {tab === 'create' ? (
+                <div className="space-y-3">
+                  <input className={inputCls} placeholder="会社名" value={createName} onChange={(e) => setCreateName(e.target.value)} />
+                  <input className={inputCls} type="password" placeholder="参加パスワード（4文字以上）" value={createPw} onChange={(e) => setCreatePw(e.target.value)} />
+                  <input className={inputCls} type="password" placeholder="参加パスワード（確認）" value={createPw2} onChange={(e) => setCreatePw2(e.target.value)} />
+                  <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+                    <input type="checkbox" checked readOnly /> 現在のアカウント（{userEmail || 'あなた'}）を管理者にする
+                  </label>
+                  <button onClick={handleCreate} disabled={busy} className={btnPrimary}>組織を作成</button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-xs text-[var(--text-faint)]">管理者から共有された組織IDと参加パスワードを入力してください。</p>
+                  <input className={inputCls} placeholder="組織ID（例: ORG-XXXXXX）" value={joinCode} onChange={(e) => setJoinCode(e.target.value)} />
+                  <input className={inputCls} type="password" placeholder="参加パスワード" value={joinPw} onChange={(e) => setJoinPw(e.target.value)} />
+                  <button onClick={handleJoin} disabled={busy} className={btnPrimary}>参加</button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* member */}
+      {organization && !isAdmin && (
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--text-secondary)]">
+            所属組織: <strong className="text-[var(--text-primary)]">{organization.name}</strong>
+          </p>
+          <p className="text-xs text-[var(--text-faint)]">この組織の統制下にあります。</p>
+          <button onClick={handleLeave} disabled={busy} className="px-4 py-2 border border-[var(--border-danger)] text-[var(--text-danger)] rounded text-sm">脱退する</button>
+        </div>
+      )}
+
+      {/* admin */}
+      {organization && isAdmin && (
+        <div className="space-y-6">
+          {/* 組織ID */}
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">組織ID（メンバーに共有）</label>
+            <div className="flex items-center gap-2">
+              <code className="text-lg font-bold text-[var(--text-primary)]">{organization.orgCode}</code>
+              <button onClick={() => organization.orgCode && navigator.clipboard?.writeText(organization.orgCode)} className="px-2 py-1 text-xs border border-[var(--border-color)] rounded text-[var(--text-secondary)]">コピー</button>
+            </div>
+          </div>
+
+          {/* 参加パスワード変更 */}
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">参加パスワードの変更</label>
+            <div className="flex gap-2">
+              <input className={inputCls} type="password" placeholder="新しい参加パスワード" value={newPw} onChange={(e) => setNewPw(e.target.value)} />
+              <button onClick={handleChangePw} disabled={busy} className={btnPrimary}>変更</button>
+            </div>
+          </div>
+
+          {/* ロゴ */}
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">会社ロゴ（左上に表示）</label>
+            <div className="flex items-center gap-4">
+              {organization.hasLogo && (
+                <img src={`${orgApi.getLogoUrl()}&_=${logoBust}`} alt="logo" className="h-10 w-auto max-w-[160px] object-contain rounded border border-[var(--border-color)]" />
+              )}
+              <label className="px-3 py-2 bg-[var(--bg-base)] border border-[var(--border-color)] rounded text-sm text-[var(--text-secondary)] cursor-pointer">
+                画像を選択
+                <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleLogoUpload(f); e.target.value = ''; }} />
+              </label>
+              {organization.hasLogo && (
+                <button onClick={handleLogoRemove} disabled={busy} className="text-sm text-[var(--text-danger)]">削除</button>
+              )}
+            </div>
+            <p className="text-xs text-[var(--text-faint)] mt-1">PNG/JPG、512KB以下</p>
+          </div>
+
+          {/* メンバー管理 */}
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">メンバー（{members.length}名）</label>
+            <p className="text-xs text-[var(--text-faint)] mb-2">メンバーは組織ID + 参加パスワードで自己参加します。</p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-[var(--text-faint)] border-b border-[var(--border-color)]">
+                    <th className="py-2 pr-4">メンバー</th>
+                    <th className="py-2 pr-4">権限</th>
+                    <th className="py-2 pr-4">参加日</th>
+                    <th className="py-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {members.map((m) => (
+                    <tr key={m.userId} className="border-b border-[var(--border-color)]">
+                      <td className="py-2 pr-4 text-[var(--text-primary)]">{m.email || m.name || m.userId}{m.isSelf && <span className="text-[var(--text-faint)]">（あなた）</span>}</td>
+                      <td className="py-2 pr-4 text-[var(--text-secondary)]">{m.role}</td>
+                      <td className="py-2 pr-4 text-[var(--text-faint)]">{new Date(m.createdAt).toLocaleDateString()}</td>
+                      <td className="py-2 text-right whitespace-nowrap">
+                        {!m.isSelf && (
+                          <>
+                            <button onClick={() => handleToggleRole(m)} disabled={busy} className="text-xs text-[var(--text-link)] mr-3">{m.role === 'admin' ? 'member にする' : 'admin にする'}</button>
+                            <button onClick={() => handleRemoveMember(m)} disabled={busy} className="text-xs text-[var(--text-danger)]">削除</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* アクティビティ監視 */}
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">Member Activity（監視）</label>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-[var(--text-faint)] border-b border-[var(--border-color)]">
+                    <th className="py-2 pr-4">メンバー</th>
+                    <th className="py-2 pr-4">最終利用</th>
+                    <th className="py-2 pr-4">セッション</th>
+                    <th className="py-2 pr-4">ビルド</th>
+                    <th className="py-2">オンライン</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activity.map((a) => (
+                    <tr key={a.userId} className="border-b border-[var(--border-color)]">
+                      <td className="py-2 pr-4 text-[var(--text-primary)]">{a.email || a.name || a.userId}</td>
+                      <td className="py-2 pr-4 text-[var(--text-faint)]">{a.lastActiveAt ? new Date(a.lastActiveAt).toLocaleString() : '—'}</td>
+                      <td className="py-2 pr-4 text-[var(--text-secondary)]">{a.sessionCount}</td>
+                      <td className="py-2 pr-4 text-[var(--text-secondary)]">{a.buildCount}</td>
+                      <td className="py-2 text-[var(--text-secondary)]">{a.onlineMachines > 0 ? `🟢 ${a.onlineMachines}` : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { user } = useAuth();
   const [data, setData] = useState<Record<string, string>>({});
@@ -137,6 +470,15 @@ export function SettingsPage() {
 
   // 通知音設定
   const [soundEnabled, setSoundEnabled] = useState(() => isNotificationSoundEnabled());
+
+  // チャット右パネル（DocPanel）のタブ表示設定
+  const [docPanel, setDocPanel] = useState<DocPanelSettings>(getDocPanelSettings);
+  /** DocPanel の指定タブの ON/OFF を切り替えて即保存 */
+  const toggleDocPanel = (key: keyof DocPanelSettings) => {
+    const next = { ...docPanel, [key]: !docPanel[key] };
+    setDocPanel(next);
+    setDocPanelSettings(next); // localStorage 保存 + ChatPage へイベント通知
+  };
 
   // チャット表示設定（localStorage）
   const fallbackName = user?.name || user?.email || 'User';
@@ -584,6 +926,9 @@ export function SettingsPage() {
           {success}
         </div>
       )}
+
+      {/* Enterprise（組織）Section */}
+      <EnterpriseSection userEmail={user?.email ?? null} />
 
       {/* API Keys Section — 3 社分のキー入力 */}
       <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
@@ -1334,6 +1679,31 @@ export function SettingsPage() {
             <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${soundEnabled ? 'translate-x-5' : ''}`} />
           </button>
         </div>
+
+        {/* チャット右パネル（DocPanel）の表示設定 */}
+        <h3 className="text-sm font-semibold text-[var(--text-secondary)] mt-6 mb-3">Chat Side Panel</h3>
+        <p className="text-xs text-[var(--text-muted)] mb-3">
+          ON にしたタブだけチャット画面右側のパネルに表示します。すべて OFF にするとパネル自体を非表示にします。
+        </p>
+        {([
+          { key: 'approvals', label: 'Approvals', desc: 'ツール承認履歴' },
+          { key: 'docs', label: 'Docs', desc: 'エージェントドキュメント' },
+          { key: 'issues', label: 'Issues', desc: 'doc/issues.md' },
+          { key: 'plan', label: 'Plan', desc: '最新プランファイル' },
+        ] as { key: keyof DocPanelSettings; label: string; desc: string }[]).map((item) => (
+          <div key={item.key} className="flex items-center justify-between py-1.5">
+            <div>
+              <p className="text-sm text-[var(--text-primary)]">{item.label}</p>
+              <p className="text-xs text-[var(--text-muted)]">{item.desc}</p>
+            </div>
+            <button
+              onClick={() => toggleDocPanel(item.key)}
+              className={`relative w-11 h-6 rounded-full transition-colors ${docPanel[item.key] ? 'bg-[var(--accent-blue)]' : 'bg-[var(--bg-tertiary)]'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${docPanel[item.key] ? 'translate-x-5' : ''}`} />
+            </button>
+          </div>
+        ))}
 
         {/* リセットボタン */}
         <div className="mt-4 flex justify-end">
