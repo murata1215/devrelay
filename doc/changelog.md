@@ -6,6 +6,64 @@
 
 ## 実装済み機能
 
+### #274: Devin プランモードのツール拒否による「(No response from AI)」を修正 (2026-07-21)
+
+- **症状**: Devin 専用マシン（新規インストール）でプランモードのプロンプトが「(No response from AI)」で無応答。#260〜#263 の修正はコミット済み・動作中で、今回は #260 が引き起こした別の障害
+- **真因**: #260 の plan モード `--agent-config`（`Read(**)` 許可・`Write/Exec` deny）を渡すと、Devin が計画立案でシェル探索（Exec）等を使おうとした際に非対話 `-p` モードで「A tool was rejected by the user」→ 実行全体が中断・出力ゼロで終わる（ファイルの少ない新規プロジェクトで頻発）。失敗セッション ID が保存され、次回 resume で chisel が panic（exit 101）するループも発生
+- **修正1（フォールバック）**: plan で「tool rejected + 出力ゼロ」を検出したら、agent-config を外して `--permission-mode auto`（安全ツールのみ自動承認）で内部リトライ（resume なし・新規セッション）。`devinAutoPermFallback` フラグで無限ループ防止
+- **修正2（失敗セッション温存防止）**: 出力ゼロで終わった実行（resume に限らず新規も含む）は `devin list` のセッション ID を保存しない → panic ループを断つ
+- **修正3（エラーメッセージ改善）**: フォールバックもツール拒否で失敗した場合は「(No response from AI)」でなく、stderr 末尾付きの「Devin がツール承認拒否で終了しました」案内を送信
+- **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル、devin ブランチのみ）。サーバー・shared・connection.ts・DB 変更なし
+- **反映**: Agent のみ。サーバー再起動不要。対象マシンで `u`→`u`
+
+### #273: MCP から会話添付ファイルを取得可能に (2026-07-21)
+
+- **`get_conversation_history` 拡張**: 各メッセージに `attachments` 配列（id/filename/mimeType/size/direction）を追加。bytea 本体は含めず軽量
+- **新ツール `get_attachment`**: attachmentId で添付ファイルを取得。画像は MCP ネイティブの ImageContent（base64）で返却、テキストは文字列、その他は base64 JSON。5MB 超はメタ情報のみ
+- **`search_project_context` 拡充**: conversation 検索結果に `hasAttachments` フラグ追加
+- MCP ツール数: 7 → 8
+
+### #272: MCP に会話履歴アクセスを追加 (2026-07-21)
+
+- **新ツール `get_conversation_history`**: プロジェクトの会話メッセージを時系列で取得。`projectId` + `before`/`after`（ISO日時）+ `limit`（最大200）+ `order`（asc/desc）。1メッセージ 2000 文字で切詰め（truncated フラグ付き）、ページネーション対応（hasMore）
+- **`search_project_context` 拡充**: user メッセージも検索対象に追加（従来 AI のみ）、結果に `role`/`sessionId` フィールド追加。ビルド検索は無変更（後方互換）
+- **DB**: Message テーブルに `(sessionId, createdAt)` 複合 index 追加（12K 件の会話履歴クエリ性能確保）
+- MCP ツール数: 6 → 7
+
+### #271: Personal Access Token (PAT) — MCP 用の長期トークン (2026-07-20)
+
+- **概要**: GitHub の Personal Access Token に相当する手動発行・コピー用の長期トークン。ヘッドレスなスクリプト・CI/CD・自動化エージェントから MCP エンドポイントを利用可能にする
+- **DB**: 新テーブル `PersonalAccessToken`（userId/name/tokenHash SHA-256/lastUsedAt/revokedAt/createdAt）。トークン平文は保存せずハッシュのみ
+- **トークン仕様**: `devrelay_pat_` プレフィクス + 32 バイト hex（計 77 文字）。有効期限なし、手動 revoke で失効。MCP エンドポイント専用（WebUI セッションとしては使用不可）
+- **MCP 認証**: `authenticateMcp()` で Bearer トークンが `devrelay_pat_` で始まる場合、SHA-256 ハッシュで `PersonalAccessToken` テーブルを検証。既存の OAuth フローは一切変更なし。lastUsedAt は 5 分間隔で更新（fire-and-forget）
+- **管理 API**: `POST /api/auth/tokens`（発行、平文は 1 回のみ返却）/ `GET /api/auth/tokens`（一覧、本体なし）/ `DELETE /api/auth/tokens/:id`（ソフトリボーク）
+- **WebUI**: Settings に「API Tokens」セクション追加（発行→平文 1 回表示+コピー→一覧→失効）
+
+### #268: エンタープライズ統制 v2 — manager ロール + 担当割当 + コマンド発行ゲート (2026-07-20)
+
+- **依頼**: #264（Organization v1）の上に統制を追加。admin はユーザー一覧から admin/manager/member の3権限を付与でき、manager をユーザーに「付ける」（担当割当）。**一般ユーザー（member）は担当マネージャーが1人以上いないとコマンド発行不可**。manager は担当ユーザーの会話履歴を確認できる（会話履歴 UI は既存の Conversations を流用）
+- **DB**:
+  - `OrganizationMember.role` を `'admin' | 'manager' | 'member'` に（String カラムのため DDL 不要、コメント更新のみ）
+  - 新テーブル `ManagerAssignment`（manager⇔member の多対多担当割当）: `id`/`organizationId`/`managerUserId`/`memberUserId`/`createdAt`、`@@unique([managerUserId, memberUserId])` + `memberUserId`（ゲート判定）/`managerUserId`（担当一覧）/`organizationId` の index
+  - shadow DB 破損（既存 TestflightService マイグレーション）で `prisma migrate dev` 不可 → **psql で直接 CREATE TABLE + FK 3本 + index 4本**を適用、`information_schema` でカラム5件検証、`prisma generate` 後に node で `count()`/`groupBy` の実行を確認（`prisma db execute` は heredoc の DDL が silent に反映されないケースがあり psql 直実行が確実だった）
+- **コマンド発行ゲート（新規 `apps/server/src/services/org-control.ts`）**: `checkCommandPermission(userId)` — 組織未所属＝許可 / admin・manager＝許可 / member＝`ManagerAssignment.count({ memberUserId })≥1` で許可、0 なら deny + 理由「🔒 組織の統制設定により、あなたにマネージャーが割り当てられるまでコマンドを実行できません。組織の管理者にお問い合わせください。」。**admin は暗黙的に全 member を監督するがゲート判定には数えない**（明示的な manager 割当を強制）
+  - 適用箇所: (1) `command-handler.ts` の `executeCommand()` 冒頭（全プラットフォーム共通のチョークポイント。`resolveDbUserId` で User.id 解決、Discord/Telegram の未リンクユーザーは User 特定不可のため従来どおり素通し）(2) `mcp/tools.ts` の `submit_instruction` / `approve_implementation` 冒頭
+- **サーバー API（`routes/organization.ts`）**:
+  - `PATCH /org/members/:userId` の role validation に `manager` 追加 + admin 降格ガードを拡張、role 変更時に無効化された `ManagerAssignment` を deleteMany で掃除
+  - `GET|PUT /org/members/:userId/managers`（admin のみ、PUT は全置換・候補が同組織の manager/admin か検証・`$transaction` で削除→作成）
+  - `GET /org/my-members`（admin=組織全 member / manager=担当のみ）
+  - `GET /org/members` レスポンスに `managerCount`（member のみ、0＝コマンド発行不可の可視化用）
+  - `GET /org/activity` を admin のみ → admin+manager に拡張（manager は担当ユーザーのみ）
+  - `requireOrgManagerOrAdmin` ヘルパー追加
+- **会話履歴の manager 閲覧（`routes/api.ts`）**: `GET /api/conversations` に `?userId=` 追加。権限＝本人 / 同組織 admin / 対象を担当する manager のみ許可、それ以外 403。findMany と count の両方を対象ユーザーでスコープ
+- **WebUI**:
+  - `lib/api.ts`: `OrgRole` 型、`OrgMember.managerCount`、`OrgSupervisedMember`、`getManagers`/`setManagers`/`myMembers`、`conversations.list` に targetUserId パラメータ
+  - `SettingsPage.tsx`: メンバー表の role を3択ドロップダウン化、「担当マネージャー」列（チェックボックスで manager/admin から割当編集）、未割当 member に ⚠️ バッジ
+  - `ConversationsPage.tsx`: admin/manager のとき「閲覧対象」ユーザー切替ドロップダウンを表示（`useOrganization` + `myMembers`）
+- **対象ファイル**: server=`schema.prisma` / `services/org-control.ts`(新) / `services/command-handler.ts` / `mcp/tools.ts` / `routes/organization.ts` / `routes/api.ts`、web=`lib/api.ts` / `pages/SettingsPage.tsx` / `pages/ConversationsPage.tsx`（計9ファイル）。Agent/shared/Discord/Telegram 変更なし。`pnpm build` 全ワークスペース成功
+- **反映**: schema + `.ts` 変更のため **DB マイグレーション適用済み + `pm2 restart devrelay-server` 要**（Agent 再起動不要）
+- **v2 対象外**: ツール承認の manager 代行、コマンド内容の事前承認フロー、監査ログ export、manager 階層
+
 ### #266: Flutter 実機デプロイスキル `devrelay-flutter-deploy` (2026-07-20)
 
 - **依頼**: Flutter アプリ（mimamori 等）を実機に入れる際、NoMachine で対象マシンに入り `flutter run --release` を手打ちしていた。DevRelay チャットで「みまもりを SE3 に入れて」「Android に入れて」と頼むだけで実機にビルド＆インストールできるようにする。GUI 案（flutter-manager）は中止し、DevRelay 標準スキルとして整備。SPEC: `.devrelay-files/20260720_075538_flutter-device-deploy-spec.md`

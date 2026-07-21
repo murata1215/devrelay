@@ -83,6 +83,14 @@ export interface SendPromptOptions {
   usePlanMode?: boolean;
   /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
   allowedTools?: string[];
+  /**
+   * Devin プランモード内部フォールバックフラグ（#274）。
+   * true の場合、plan の agent-config（Read only, Write/Exec deny）ではなく
+   * `--permission-mode auto`（安全ツールのみ自動承認）で実行する。
+   * agent-config の deny で Devin が「A tool was rejected」→ 出力ゼロになる問題の回避用。
+   * 内部リトライでのみ設定され、無限ループを防ぐガードも兼ねる。
+   */
+  devinAutoPermFallback?: boolean;
 }
 
 export async function sendPromptToAi(
@@ -211,7 +219,8 @@ export async function sendPromptToAi(
     // ただし exec モードでは新規セッションを開始する（--permission-mode dangerous を
     // CLI で指定しても、resume したセッションは元の auto モードを保持して
     // 書き込みが拒否されるため）
-    const devinSessionId = options.usePlanMode
+    // フォールバック時（#274）は resume しない（壊れたセッション回避）
+    const devinSessionId = options.usePlanMode && !options.devinAutoPermFallback
       ? await loadDevinSessionId(projectPath)
       : null;
     if (devinSessionId) {
@@ -220,7 +229,7 @@ export async function sendPromptToAi(
       log.info(`Resuming Devin session: ${devinSessionId}`);
     }
 
-    if (options.usePlanMode) {
+    if (options.usePlanMode && !options.devinAutoPermFallback) {
       // plan モード: --agent-config で Read のみ許可、Write/Exec を明示的に deny
       // --permission-mode auto は「安全と判断したツールを自動承認」するだけで
       // 厳密な読み取り専用ではないため、agent-config で強制する
@@ -234,6 +243,12 @@ export async function sendPromptToAi(
       fs.writeFileSync(agentConfigPath, JSON.stringify(agentConfig), 'utf-8');
       args.push('-p', '--agent-config', agentConfigPath);
       log.info(`Devin plan mode: using agent-config (Read only, Write/Exec denied)`);
+    } else if (options.usePlanMode && options.devinAutoPermFallback) {
+      // plan フォールバック（#274）: agent-config の deny で Devin がツール拒否→出力ゼロになる問題の回避。
+      // agent-config を渡さず --permission-mode auto（安全ツールのみ自動承認）で実行する。
+      // 厳密読み取り専用は緩むが「プラン不能」よりまし。書き換え抑止はプロンプト側の指示に委ねる。
+      args.push('-p', '--permission-mode', 'auto');
+      log.info(`Devin plan mode fallback: using --permission-mode auto (agent-config skipped)`);
     } else {
       // exec モード: 全ツール自動承認
       args.push('-p', '--permission-mode', 'dangerous');
@@ -425,11 +440,14 @@ export async function sendPromptToAi(
       // Devin: 一時ファイル（プロンプト + agent-config）削除 + セッション ID 取得・保存
       // ただし resume（-r）が出力ゼロで終わった場合はセッション ID を再保存しない（壊れた ID の温存防止）
       const devinResumeEmpty = aiTool === 'devin' && !!devinResumedSessionId && fullOutput.trim().length === 0;
+      // #274: 出力ゼロで終わった実行（resume に限らず新規も含む）はセッション ID を保存しない。
+      // 失敗セッション（ツール拒否→panic 等）を保存すると次回 resume で毎回 panic するループを断つ。
+      const devinOutputEmpty = aiTool === 'devin' && fullOutput.trim().length === 0;
       if (aiTool === 'devin') {
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`)); } catch {}
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`)); } catch {}
         try {
-          if (!devinResumeEmpty) {
+          if (!devinOutputEmpty) {
           const listOutput = execSync(`${command} list --format json`, {
             cwd: projectPath, encoding: 'utf-8', timeout: 10000,
           });
@@ -460,6 +478,40 @@ export async function sendPromptToAi(
           onOutput('', true, result.usageData);
         }
         resolve(result);
+        return;
+      }
+
+      // #274: Devin プランモードで agent-config の deny によりツールが拒否され出力ゼロになったケースを検出。
+      // agent-config（Read only, Write/Exec deny）を渡すと Devin が計画立案で Exec 等を使おうとして
+      // 「A tool was rejected by the user」→ 実行全体が中断・出力ゼロで終わる（新規プロジェクトで頻発）。
+      // agent-config を外して --permission-mode auto で内部リトライする（resume なし・新規セッション）。
+      // devinAutoPermFallback ガードで無限ループを防止。
+      const devinPlanToolRejected =
+        aiTool === 'devin' &&
+        options.usePlanMode === true &&
+        !options.devinAutoPermFallback &&
+        fullOutput.trim().length === 0 &&
+        /tool was rejected/i.test(stderrOutput);
+      if (devinPlanToolRejected) {
+        log.info(`[devin] ⚠️ Devin plan agent-config rejected a tool (code ${code}), falling back to --permission-mode auto`);
+        completionSent = true; // この呼び出しの後続 onOutput を抑止（フォールバック側が完了通知を送る）
+        // 壊れた可能性のあるセッション ID をクリアしてからフォールバック（新規セッション）
+        clearDevinSessionId(projectPath).finally(() => {
+          const fallbackOptions: SendPromptOptions = {
+            ...options,
+            devinAutoPermFallback: true,
+            resumeSessionId: undefined,
+          };
+          sendPromptToAi(sessionId, prompt, projectPath, aiTool, claudeSessionId, config, onOutput, fallbackOptions)
+            .then((fallbackResult) => resolve(fallbackResult))
+            .catch((err) => {
+              log.error(`[devin] fallback retry failed: ${(err as Error).message}`);
+              if (fullOutput.length === 0) {
+                onOutput('(No response from AI)', true, result.usageData);
+              }
+              resolve(result);
+            });
+        });
         return;
       }
 
@@ -500,6 +552,26 @@ export async function sendPromptToAi(
       if (code === 1 && fullOutput.length === 0 && options.resumeSessionId) {
         log.info(`[${aiTool}] ⚠️ --resume failed, flagging for retry without session ID`);
         result.resumeFailed = true;
+        resolve(result);
+        return;
+      }
+
+      // #274: Devin プランモードのフォールバック（--permission-mode auto）でもツール拒否で出力ゼロだった場合は
+      // 「(No response from AI)」でなく具体的な案内を出す（devin CLI 単体確認を促す）
+      const devinFallbackToolRejected =
+        aiTool === 'devin' &&
+        options.usePlanMode === true &&
+        options.devinAutoPermFallback === true &&
+        fullOutput.trim().length === 0 &&
+        /tool was rejected/i.test(stderrOutput);
+      if (devinFallbackToolRejected && !completionSent) {
+        completionSent = true;
+        const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
+        onOutput(
+          `⚠️ Devin がツール承認拒否で終了しました。\n端末で \`devin\` を単体実行して動作を確認してください。\n\n[stderr]\n${stderrTail}`,
+          true,
+          result.usageData
+        );
         resolve(result);
         return;
       }
