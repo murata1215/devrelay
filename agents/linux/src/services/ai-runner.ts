@@ -1217,6 +1217,23 @@ export async function sendPromptToAi(
     proc.on('close', (code, signal) => {
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
+      // #275: 改行なしで終わった最終出力の取りこぼし防止（lineBuffer フラッシュ）。
+      // stdout ハンドラは改行区切りで処理し「最後の不完全な行」を lineBuffer に残すが、
+      // close 時にこれをフラッシュしていなかったため、末尾改行なしの短い応答が丸ごと破棄され
+      // exit 0 でも fullOutput 空 →「(No response from AI)」になっていた（Devin の1行応答等）。
+      // JSON パース可能な残骸（stream-json メタデータ）は従来どおり捨てる。
+      if (lineBuffer.trim()) {
+        const leftover = lineBuffer.trim();
+        lineBuffer = '';
+        let isJsonMeta = false;
+        try { JSON.parse(leftover); isJsonMeta = true; } catch {}
+        if (!isJsonMeta) {
+          console.log(`[${aiTool}] 📦 Flushing ${leftover.length} chars from line buffer at close`);
+          fullOutput += leftover + '\n';
+          onOutput(leftover + '\n', false);
+        }
+      }
+
       // Devin: 一時ファイル（プロンプト + agent-config）削除 + セッション ID 取得・保存
       // ただし resume（-r）が出力ゼロで終わった場合はセッション ID を再保存しない（壊れた ID の温存防止）
       const devinResumeEmpty = aiTool === 'devin' && !!devinResumedSessionId && fullOutput.trim().length === 0;
@@ -1376,6 +1393,20 @@ export async function sendPromptToAi(
         const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
         onOutput(
           `⚠️ Devin がツール承認拒否で終了しました。\n端末で \`devin\` を単体実行して動作を確認してください。\n\n[stderr]\n${stderrTail}`,
+          true,
+          result.usageData
+        );
+        resolve(result);
+        return;
+      }
+
+      // #275: フラッシュ後もなお Devin が出力ゼロ + exit 0 で終わった場合は「(No response from AI)」でなく
+      // 具体的な案内を出す（処理自体は実行された可能性を伝える。exec 自動リトライは二重実行の危険があるため行わない）
+      if (aiTool === 'devin' && fullOutput.trim().length === 0 && code === 0 && !completionSent) {
+        completionSent = true;
+        const stderrTail = stderrOutput.trim() ? `\n\n[stderr]\n${stderrOutput.trim().split('\n').slice(-5).join('\n')}` : '';
+        onOutput(
+          `⚠️ Devin が出力なしで終了しました（exit 0）。処理自体は実行された可能性があります。\nプロジェクトの変更状況を確認してください。${stderrTail}`,
           true,
           result.usageData
         );

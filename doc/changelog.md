@@ -6,6 +6,15 @@
 
 ## 実装済み機能
 
+### #275: Devin exec の「(No response from AI)」（exit 0・出力ゼロ）を修正 — lineBuffer フラッシュ漏れ (2026-07-21)
+
+- **症状**: #274 適用済み Agent（最新 0e6770c）でも、別マシンの exec（`devin -p --permission-mode dangerous`）が exit 0・stderr なし・ストリーミング 0 行で「(No response from AI)」
+- **真因**: spawn 系 stdout ハンドラは改行区切りで処理し「最後の不完全な行」を `lineBuffer` に残すが、**close ハンドラでこの lineBuffer をフラッシュしていなかった**。Devin が応答を**末尾改行なしで出力**すると（短い1行応答で頻発）全文が破棄され fullOutput 空 →「(No response from AI)」。devin/gemini/aider/codex の spawn パス共通の潜在バグ（claude は SDK 経由で無関係）
+- **修正1（本命）**: close ハンドラ冒頭で lineBuffer をフラッシュ。JSON パース可能な残骸（stream-json メタ）は従来どおり破棄、プレーンテキストは fullOutput + onOutput に反映（後続の空判定・セッション保存スキップ判定も正しくなる）
+- **修正2（保険）**: フラッシュ後もなお Devin が出力ゼロ + exit 0 なら「(No response from AI)」でなく「⚠️ Devin が出力なしで終了しました（exit 0）。処理自体は実行された可能性があります」を案内（exec 自動リトライは二重実行の危険があるため行わない）
+- **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル）+ changelog.md。サーバー・shared・connection.ts・DB 変更なし
+- **反映**: Agent のみ。サーバー再起動不要。対象マシンで `u`→`u`
+
 ### #274: Devin プランモードのツール拒否による「(No response from AI)」を修正 (2026-07-21)
 
 - **症状**: Devin 専用マシン（新規インストール）でプランモードのプロンプトが「(No response from AI)」で無応答。#260〜#263 の修正はコミット済み・動作中で、今回は #260 が引き起こした別の障害
