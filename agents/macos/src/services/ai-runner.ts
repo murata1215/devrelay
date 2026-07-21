@@ -20,6 +20,48 @@ interface AiSession {
   aiTool: AiTool;
 }
 
+// #276: Devin の `--export`（ATIF 形式で各ステップをファイル書き出し）対応可否キャッシュ。
+// v2026.5.26-0 で追加されたバージョン依存フラグのため、初回に `devin --help` でプローブして判定する。
+// null=未判定 / true=対応 / false=非対応
+let devinSupportsExport: boolean | null = null;
+
+/**
+ * Devin CLI が `--export` フラグに対応しているか `--help` の出力で判定する（結果はキャッシュ）。
+ * 途中経過表示（ATIF テイル）のベストエフォート機能であり、失敗時は false（機能を使わない）に倒す。
+ * @param command devin コマンドのフルパス
+ * @returns 対応していれば true
+ */
+function probeDevinExportSupport(command: string): boolean {
+  if (devinSupportsExport !== null) return devinSupportsExport;
+  try {
+    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
+    devinSupportsExport = /--export\b/.test(help);
+    console.log(`[devin] 🔎 --export support: ${devinSupportsExport}`);
+  } catch (err) {
+    devinSupportsExport = false;
+    console.warn(`[devin] --help probe failed, disabling --export:`, (err as Error).message);
+  }
+  return devinSupportsExport;
+}
+
+/**
+ * ATIF（Devin の --export）1行を人間可読な短い進捗要約に変換する。
+ * ATIF スキーマは非公開のためベストエフォート。認識できるフィールドがなければ null を返す（進捗を出さない）。
+ * @param entry JSON.parse 済みの ATIF 1エントリ
+ * @returns 「⏳ ...」形式で表示する要約（先頭の ⏳ は呼び出し側で付与）／認識不能なら null
+ */
+function summarizeAtifEntry(entry: any): string | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const toolName = entry.tool_name || entry.tool || entry.name;
+  if (toolName) {
+    const title = entry.title || entry.command || entry.action;
+    return title ? `${toolName}: ${String(title).slice(0, 80)}` : `${toolName} を実行中`;
+  }
+  if (entry.title) return String(entry.title).slice(0, 100);
+  if (entry.type && typeof entry.type === 'string') return `[${entry.type}]`;
+  return null;
+}
+
 /** レートリミット情報（rate_limit_event から取得） */
 interface RateLimitEntry {
   utilization: number;
@@ -624,6 +666,19 @@ export async function sendPromptToAi(
   let proc;
   // Devin: -r で resume したセッション ID を関数スコープで記録（close ハンドラから参照して空振り検出に使う）
   let devinResumedSessionId: string | null = null;
+  // #276: Devin の途中経過表示用。--export の ATIF ファイルパス（対応版のみ設定）と進捗タイマー群を
+  // 関数スコープに置き、close/error ハンドラから停止・後始末できるようにする。
+  let devinExportPath: string | null = null;
+  let devinHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let devinExportPollTimer: ReturnType<typeof setInterval> | null = null;
+  let devinExportReadPos = 0; // ATIF ファイルの読み取り済みバイト位置
+  // #277: Devin 課金暴走抑止（実行時間 / ステップ数の上限で SIGTERM 停止）
+  let devinLimitTimer: ReturnType<typeof setTimeout> | null = null;
+  let devinRuntimeLimitHit = false; // 実行時間上限で kill したか
+  let devinStepLimitHit = false;    // ステップ数上限で kill したか
+  let devinStepCount = 0;           // ATIF ステップ数カウンタ
+  const devinMaxRuntimeMin = config.aiTools.devin?.maxRuntimeMinutes ?? 15; // 0=無制限
+  const devinMaxSteps = config.aiTools.devin?.maxSteps ?? 0;                 // 0=無効
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -706,6 +761,14 @@ export async function sendPromptToAi(
       args.push('-p', '--permission-mode', 'dangerous');
     }
 
+    // #276: 途中経過表示。対応版なら --export で ATIF をファイル書き出しさせ、後段でポーリングして進捗を出す。
+    // stdout ではなく別ファイルへ出るため、最終保存メッセージ（responseText）を汚染しない。
+    if (probeDevinExportSupport(command)) {
+      devinExportPath = path.join(os.tmpdir(), `devrelay-devin-export-${sessionId}.jsonl`);
+      args.push('--export', devinExportPath);
+      console.log(`📤 Devin --export enabled: ${devinExportPath}`);
+    }
+
     // Devin は stdin パイプ非対応（panic at repl_mode.rs）→ --prompt-file で一時ファイル経由
     const promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
     fs.writeFileSync(promptFilePath, prompt, 'utf-8');
@@ -756,6 +819,70 @@ export async function sendPromptToAi(
   const session = activeSessions.get(sessionId);
   if (session) {
     session.process = proc;
+  }
+
+  // #276: Devin は `-p` 実行中に stdout を出さないため、進捗ハートビートを送る。
+  // これによりサーバー側の進捗ボックス（🤖 処理中... ⏱️ N秒経過）に生存が表示され、
+  // かつサーバーの 5 分無出力タイムアウト（PROGRESS_TIMEOUT）による誤った打ち切りを防ぐ。
+  // 進捗チャンクは ⏳ 始まりにして、connection.ts で最終保存メッセージから除外する。
+  if (aiTool === 'devin') {
+    const devinStartTime = Date.now();
+    devinHeartbeatTimer = setInterval(() => {
+      const min = Math.floor((Date.now() - devinStartTime) / 60000);
+      // #277: 上限有効時は「/ 上限M分」を併記して残り時間を可視化
+      const limitSuffix = devinMaxRuntimeMin > 0 ? ` / 上限${devinMaxRuntimeMin}分` : '';
+      onOutput(`⏳ Devin 実行中... (${min}分経過${limitSuffix})\n`, false);
+    }, 60_000);
+
+    // #277: 実行時間上限（本命）。超過で SIGTERM 停止し、close ハンドラで課金抑止メッセージを送る。
+    if (devinMaxRuntimeMin > 0) {
+      devinLimitTimer = setTimeout(() => {
+        console.log(`[devin] ⏸️ Runtime limit ${devinMaxRuntimeMin}min reached, killing process (cost guard)`);
+        devinRuntimeLimitHit = true;
+        proc.kill('SIGTERM');
+      }, devinMaxRuntimeMin * 60_000);
+    }
+
+    // --export 対応版なら ATIF ファイルをポーリングしてステップ要約を進捗として出す（ベストエフォート）
+    if (devinExportPath) {
+      const exportPath = devinExportPath;
+      devinExportPollTimer = setInterval(() => {
+        try {
+          if (!fs.existsSync(exportPath)) return;
+          const stat = fs.statSync(exportPath);
+          if (stat.size <= devinExportReadPos) return;
+          const fd = fs.openSync(exportPath, 'r');
+          try {
+            const buf = Buffer.alloc(stat.size - devinExportReadPos);
+            fs.readSync(fd, buf, 0, buf.length, devinExportReadPos);
+            devinExportReadPos = stat.size;
+            const chunk = buf.toString('utf-8');
+            for (const line of chunk.split('\n')) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+              try {
+                const entry = JSON.parse(trimmed);
+                const summary = summarizeAtifEntry(entry);
+                if (summary) onOutput(`⏳ ${summary}\n`, false);
+                // #277: ステップ数上限（--export 対応版のみ）。超過で SIGTERM 停止。
+                devinStepCount++;
+                if (devinMaxSteps > 0 && devinStepCount > devinMaxSteps && !devinStepLimitHit) {
+                  console.log(`[devin] ⏸️ Step limit ${devinMaxSteps} exceeded, killing process (cost guard)`);
+                  devinStepLimitHit = true;
+                  proc.kill('SIGTERM');
+                }
+              } catch {
+                // ATIF が JSONL でない／不完全行 → 無視（ハートビートが生存を担保）
+              }
+            }
+          } finally {
+            fs.closeSync(fd);
+          }
+        } catch (err) {
+          console.warn(`[devin] export poll error:`, (err as Error).message);
+        }
+      }, 3_000);
+    }
   }
 
   let fullOutput = '';
@@ -889,6 +1016,13 @@ export async function sendPromptToAi(
     proc.on('close', (code, signal) => {
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
+      // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
+      if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
+      if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
+      if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
+      // #277: 実行時間上限タイマー停止
+      if (devinLimitTimer) { clearTimeout(devinLimitTimer); devinLimitTimer = null; }
+
       // #275: 改行なしで終わった最終出力の取りこぼし防止（lineBuffer フラッシュ）。
       // stdout ハンドラは改行区切りで処理し「最後の不完全な行」を lineBuffer に残すが、
       // close 時にこれをフラッシュしていなかったため、末尾改行なしの短い応答が丸ごと破棄され
@@ -943,6 +1077,29 @@ export async function sendPromptToAi(
       // プロセス参照をクリア（キャンセル済み判定のため exitCode は残る）
       if (session) {
         session.process = null as any;
+      }
+
+      // #277: 実行時間 / ステップ数の上限で停止したケース（課金暴走の抑止）。
+      // SIGTERM キャンセル判定より前に置く（Windows は kill 後 signal が null になる場合があるためフラグで判定）。
+      if (devinRuntimeLimitHit || devinStepLimitHit) {
+        const reason = devinRuntimeLimitHit
+          ? `実行時間上限 ${devinMaxRuntimeMin} 分`
+          : `ステップ数上限 ${devinMaxSteps} 回`;
+        console.log(`[devin] ⏸️ Stopped by ${reason}`);
+        if (!completionSent) {
+          completionSent = true;
+          const partial = fullOutput.trim() ? `\n\n[途中までの出力]\n${fullOutput.trim()}` : '';
+          onOutput(
+            `⏸️ Devin を${reason}で停止しました（課金暴走の抑止）。\n` +
+            `Devin は完了時にしか結果を出力しないため途中結果は表示できませんが、` +
+            `ファイル変更等はすでに行われている可能性があります。続行する場合は続きを指示してください。\n` +
+            `（上限変更: config.yaml の aiTools.devin.maxRuntimeMinutes / maxSteps、0 で無制限・無効）${partial}`,
+            true,
+            result.usageData
+          );
+        }
+        resolve(result);
+        return;
       }
 
       // SIGTERM によるキャンセル検出
@@ -1100,6 +1257,12 @@ export async function sendPromptToAi(
         clearTimeout(startupTimeoutTimer);
         startupTimeoutTimer = null;
       }
+      // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
+      if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
+      if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
+      if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
+      // #277: 実行時間上限タイマー停止
+      if (devinLimitTimer) { clearTimeout(devinLimitTimer); devinLimitTimer = null; }
       console.error(`[${aiTool}] Process error:`, err);
       if (!completionSent) {
         completionSent = true;

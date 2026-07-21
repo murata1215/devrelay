@@ -6,6 +6,29 @@
 
 ## 実装済み機能
 
+### #277: Devin の暴走・課金抑止（実行時間/ステップ数の上限で一旦停止） (2026-07-21)
+
+- **依頼**: 一会話で $10 超の課金が発生。変なプロンプトを投げた場合に膨大な金額になるのを、ある程度で一旦停止して抑止したい
+- **調査**: 公式 Devin CLI（chisel）にネイティブの上限フラグは無い（`--max-acu` はクラウド API 用、`/usage` は対話モード専用、ローカルから金額取得不能）→ **Agent 側でプロセスを制御**。実行時間（+ 対応版はステップ数）を課金の代理指標として上限を設ける
+- **修正1（本命・実行時間上限）**: config.yaml `aiTools.devin.maxRuntimeMinutes`（**デフォルト 15 分**、0=無制限）。超過で `setTimeout` → `proc.kill('SIGTERM')`（既存 cancelAiSession と同じ kill 機構）。close ハンドラで「⏸️ Devin を実行時間上限 N 分で停止しました（課金暴走の抑止）。…続行する場合は続きを指示してください」を送信
+- **修正2（ステップ数上限・--export 対応版のみ）**: config.yaml `aiTools.devin.maxSteps`（デフォルト 0=無効）。#276 の ATIF ポーラーでパース成功エントリを `devinStepCount++` し、超過で SIGTERM 停止
+- **修正3（ハートビート併記）**: `⏳ Devin 実行中... (N分経過 / 上限M分)` で残り時間を可視化
+- **後始末/判定**: close/error ハンドラで `devinLimitTimer` を clearTimeout。上限停止判定は `devinRuntimeLimitHit`/`devinStepLimitHit` フラグで行い、SIGTERM キャンセル判定より前に配置（Windows は kill 後 signal が null になる場合があるため）。kill 時の出力ゼロは #274 の `devinOutputEmpty` ガードでセッション ID 保存が自動スキップされ resume panic を防ぐ
+- **注意**: `devin -p` は完了時にしか結果を stdout に出さないため、途中停止時はチャットに途中結果を出せない（Devin が既に行ったファイル変更は残る）。「一旦停止→続きは再指示」の形（会話文脈は History context で継続）
+- **対象**: `agents/{linux,macos,windows}/src/services/{config,ai-runner}.ts`（6ファイル）+ changelog.md。サーバー・shared・connection.ts・DB 変更なし。claude/gemini/aider/codex は対象外
+- **反映**: Agent のみ。サーバー再起動不要。Devin 利用マシンで `u`→`u`
+
+### #276: Devin 実行の途中経過表示（進捗ハートビート + --export ATIF テイル） (2026-07-21)
+
+- **依頼**: `devin -p` は最終結果しか stdout に出さないため、実行中はサーバーの進捗ボックスが空のまま。途中経過を出せるようにする
+- **手段の評価**: `--output-format stream-json`（公式 changelog に記載なし・形式不明のため見送り）/ `CHISEL_LOG_STDERR`（stderr がテレメトリで汚染され #274 のツール拒否検出や token limit ヒューリスティックが誤発火するため見送り）/ `--export`（公式 stable changelog v2026.5.26-0 で追加・バージョン依存のため要プローブ・採用）/ ハートビート（バージョン非依存・基盤採用）
+- **修正1（本命・進捗ハートビート）**: devin spawn 後に 1 分ごと `⏳ Devin 実行中... (N分経過)` をストリーミング送信。サーバー進捗ボックスに生存を表示 + **5 分無出力タイムアウト（PROGRESS_TIMEOUT）による誤った打ち切りを防止**
+- **修正2（--export ATIF テイル・対応版のみ）**: 初回に `devin --help` で `--export` 対応をプローブ（結果キャッシュ）。対応時は一時ファイルへ ATIF を書き出させ、3 秒ポーリングで新規行を JSONL パース → tool 名/title 等から 1 行要約を `⏳ ...` として進捗表示。ATIF スキーマ非公開のためベストエフォート（パース不能なら黙る）。stdout ではなく別ファイルへ出るため最終回答を汚染しない
+- **修正3（進捗マーカー除外）**: connection.ts のストリーミング/リトライ両ハンドラで `⏳` 始まりのチャンクは `responseText`（最終保存メッセージ）に含めない。サーバーへの `agent:ai:output`（isComplete=false）転送は従来どおり全チャンク行う
+- **後始末**: close/error ハンドラでハートビート・ポーリングタイマーを停止し ATIF 一時ファイルを削除
+- **対象**: `agents/{linux,macos,windows}/src/services/{ai-runner,connection}.ts`（6ファイル）+ changelog.md。サーバー・shared・DB 変更なし。claude（SDK でストリーミング済み）・gemini/aider/codex は対象外
+- **反映**: Agent のみ。サーバー再起動不要。Devin 利用マシンで `u`→`u`
+
 ### #275: Devin exec の「(No response from AI)」（exit 0・出力ゼロ）を修正 — lineBuffer フラッシュ漏れ (2026-07-21)
 
 - **症状**: #274 適用済み Agent（最新 0e6770c）でも、別マシンの exec（`devin -p --permission-mode dangerous`）が exit 0・stderr なし・ストリーミング 0 行で「(No response from AI)」

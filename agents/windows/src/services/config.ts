@@ -17,7 +17,13 @@ export interface AgentConfig {
     gemini?: { command: string };
     codex?: { command: string };
     aider?: { command: string };
-    devin?: { command: string };
+    devin?: {
+      command: string;
+      /** #277: Devin の実行時間上限（分）。未設定=15、0=無制限。課金暴走の抑止用 */
+      maxRuntimeMinutes?: number;
+      /** #277: ATIF ステップ数上限。未設定/0=無効（--export 対応版のみ機能） */
+      maxSteps?: number;
+    };
   };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   proxy?: ProxyConfig;  // Proxy configuration (optional)

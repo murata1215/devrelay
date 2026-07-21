@@ -1054,7 +1054,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.claudeSessionId,
       currentConfig,
       async (output, isComplete, usageData) => {
-        responseText += output;
+        // #276: ⏳ 始まりは進捗専用チャンク。サーバーへは流す（進捗ボックス表示 + タイムアウトリセット）が、
+        // 最終保存メッセージ responseText には含めない（最終回答の汚染防止）。
+        if (!output.startsWith('⏳')) {
+          responseText += output;
+        }
 
         if (isComplete) {
           // 二重完了送信を防止（DB に重複 Message が作成されるのを防ぐ）
@@ -1174,7 +1178,10 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         sessionInfo.claudeSessionId,
         currentConfig,
         async (output, isComplete, usageData) => {
-          responseText += output;
+          // #276: ⏳ 始まりは進捗専用チャンク（最終保存メッセージには含めない）。
+          if (!output.startsWith('⏳')) {
+            responseText += output;
+          }
 
           if (isComplete) {
             if (completionSent) {
