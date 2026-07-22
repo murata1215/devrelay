@@ -1156,11 +1156,13 @@ export async function sendPromptToAi(
   if (aiTool === 'devin') {
     const devinStartTime = Date.now();
     devinHeartbeatTimer = setInterval(() => {
-      const min = Math.floor((Date.now() - devinStartTime) / 60000);
+      const elapsedSec = Math.floor((Date.now() - devinStartTime) / 1000);
       // #277: 上限有効時は「/ 上限M分」を併記して残り時間を可視化
       const limitSuffix = devinMaxRuntimeMin > 0 ? ` / 上限${devinMaxRuntimeMin}分` : '';
-      onOutput(`⏳ Devin 実行中... (${min}分経過${limitSuffix})\n`, false);
-    }, 60_000);
+      // #278: 30秒間隔で発火し、1分未満は秒表示（短時間タスクでも最低1回は進捗が出るように）
+      const elapsedLabel = elapsedSec < 60 ? `${elapsedSec}秒経過` : `${Math.floor(elapsedSec / 60)}分経過`;
+      onOutput(`⏳ Devin 実行中... (${elapsedLabel}${limitSuffix})\n`, false);
+    }, 30_000);
 
     // #277: 実行時間上限（本命）。超過で SIGTERM 停止し、close ハンドラで課金抑止メッセージを送る。
     if (devinMaxRuntimeMin > 0) {
