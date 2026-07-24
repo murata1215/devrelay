@@ -72,6 +72,80 @@ function summarizeAtifEntry(entry: any): string | null {
   return null;
 }
 
+/**
+ * #281: ATIF エクスポートファイル全体を読み、実行ステップの要約文字列を作る。
+ * devin は turn 終了時に ATIF を一括書き出しする（「Exports after each turn」）ため、
+ * 実行中の live tail はゼロ件になる。そこで完了時にまとめて読み、最終回答の末尾へ
+ * 「🧭 実行ステップ (N件): ...」として添付し、「何をやったか」を可視化する。
+ * JSONL（1行1エントリ）を基本とし、単一 JSON（配列/オブジェクト）もフォールバックでパースする。
+ * @param exportPath ATIF ファイルパス
+ * @returns 「\n\n🧭 実行ステップ ...」形式。ステップ0件なら空文字列
+ */
+function buildDevinStepSummary(exportPath: string): string {
+  let content: string;
+  try {
+    content = fs.readFileSync(exportPath, 'utf-8');
+  } catch {
+    return '';
+  }
+  const steps: string[] = [];
+  // まず JSONL（1行1エントリ）として行ごとにパース
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const s = summarizeAtifEntry(JSON.parse(trimmed));
+      if (s) steps.push(s);
+    } catch {
+      // 行パース失敗は無視（後段の単一 JSON フォールバックに委ねる）
+    }
+  }
+  // JSONL で1件も取れなければ、全体を単一 JSON（配列 / {messages:[]} / 単一オブジェクト）としてパース
+  if (steps.length === 0) {
+    try {
+      const parsed = JSON.parse(content);
+      const entries = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.messages)
+          ? parsed.messages
+          : [parsed];
+      for (const e of entries) {
+        const s = summarizeAtifEntry(e);
+        if (s) steps.push(s);
+      }
+    } catch {
+      // 単一 JSON でもない
+    }
+  }
+  if (steps.length === 0) {
+    // スキーマ不一致の可能性 → 先頭を記録（原因 (c) の切り分け・v2 パーサ修正用）
+    console.log(`[devin] ATIF parsed 0 steps; head sample: ${content.slice(0, 500)}`);
+    return '';
+  }
+  const shown = steps.slice(0, 10);
+  const more = steps.length > shown.length ? `（他${steps.length - shown.length}件）` : '';
+  return `\n\n🧭 実行ステップ (${steps.length}件): ${shown.join(' → ')}${more}\n`;
+}
+
+/**
+ * #282: devin の toolbox ログ（CHISEL_LOG_STDERR=1 で stderr に流れる内部ログ）を
+ * 日本語の進捗表示に変換する。既知パターンは日本語、未知パターンは原文（英語）のまま返す。
+ * devin バイナリのログ文字列は英語ハードコードのためプロンプトでは変えられず、Agent 側で変換する。
+ */
+function formatDevinToolLog(toolName: string, message: string): string {
+  // write: "Writing to file: <path>"（実機サンプルで書式確認済み）
+  let m = message.match(/^Writing to file:\s*(.+)$/i);
+  if (m) return `📝 ${m[1]} に書き込み中...`;
+  // read 系: "Reading file: <path>" 等（実ログ未確認のため広めにマッチ）
+  m = message.match(/^Reading(?: file)?:?\s*(.+)$/i);
+  if (m) return `📖 ${m[1]} を読み込み中...`;
+  // exec 系: "Executing command: <cmd>" / "Running: <cmd>" 等
+  m = message.match(/^(?:Executing(?: command)?|Running):?\s*(.+)$/i);
+  if (m) return `💻 コマンド実行中: ${m[1]}`;
+  // 未知パターン: 原文のまま（英語）。実ログを見て変換表を拡充する（v3）
+  return `🔧 [${toolName}] ${message}`;
+}
+
 /** レートリミット情報（rate_limit_event から取得） */
 interface RateLimitEntry {
   utilization: number;
@@ -1007,6 +1081,17 @@ export async function sendPromptToAi(
   let devinStepCount = 0;           // ATIF ステップ数カウンタ
   const devinMaxRuntimeMin = config.aiTools.devin?.maxRuntimeMinutes ?? 15; // 0=無制限
   const devinMaxSteps = config.aiTools.devin?.maxSteps ?? 0;                 // 0=無効
+  // #281: Devin の作業中ファイル変更ウォッチ（「内部で何をしているか」のライブ表示）。
+  // ATIF は turn 終了時にしか書かれずライブ tail 不可のため、ファイル操作を監視して補完する。
+  let devinFsWatcher: fs.FSWatcher | null = null;
+  const devinReportedFiles = new Map<string, number>(); // ファイル名 → 最終通知時刻（スロットル用）
+  // #281: 完了時に ATIF から作る「実行ステップまとめ」。最終回答の末尾に添付する。
+  let devinStepSummary = '';
+  // #282: CHISEL_LOG_STDERR=1 で stderr に流れる devin 内部ログの分類用
+  let devinToolRejectedInLog = false;   // ログ形式で検出したツール拒否（#274 検出の置き換え）
+  let devinStderrLineBuffer = '';       // stderr の行バッファ（改行区切り処理の残り）
+  let devinLastLogLevel = '';           // 継続行（"Caused by:" 等）の帰属判定用
+  const devinLogReported = new Map<string, number>(); // 同一メッセージ10秒スロットル
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -1120,6 +1205,8 @@ export async function sendPromptToAi(
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
+        // #282: devin 内部ログを stderr にリアルタイム出力させ、ツール実行をライブ表示する
+        CHISEL_LOG_STDERR: '1',
       },
     });
 
@@ -1171,6 +1258,27 @@ export async function sendPromptToAi(
         devinRuntimeLimitHit = true;
         proc.kill('SIGTERM');
       }, devinMaxRuntimeMin * 60_000);
+    }
+
+    // #281: プロジェクトディレクトリのファイル変更を監視して「内部で何をしているか」を進捗表示する。
+    // devin は -p 実行中 stdout 無出力 + ATIF は turn 終了時一括書き出しのため、
+    // ファイル操作の監視がライブで内部動作を見せる唯一の手段。⏳ prefix で最終回答からは除外される。
+    try {
+      devinFsWatcher = fs.watch(projectPath, { recursive: true }, (_event, filename) => {
+        if (!filename) return;
+        const f = filename.toString().replace(/\\/g, '/');
+        // 除外: VCS・依存・生成物・一時ファイル（devin 自身の作業に無関係なノイズを弾く）
+        if (/(^|\/)(\.git|node_modules|\.devrelay|\.devrelay-output|dist|build|__pycache__|\.next|target|vendor)(\/|$)/.test(f)) return;
+        if (/~$|\.swp$|\.tmp$|\.log$|\.lock$/.test(f)) return;
+        const now = Date.now();
+        // 同一ファイルは10秒に1回まで（保存の連打でスパムにならないように）
+        if (now - (devinReportedFiles.get(f) ?? 0) < 10_000) return;
+        devinReportedFiles.set(f, now);
+        onOutput(`⏳ 📝 ${f} を更新中...\n`, false);
+      });
+    } catch (err) {
+      // recursive fs.watch 非対応環境（古い Node 等）は黙ってスキップ（ライブ表示なしでも動作は継続）
+      console.warn(`[devin] fs.watch unavailable, file activity display disabled:`, (err as Error).message);
     }
 
     // --export 対応版なら ATIF ファイルをポーリングしてステップ要約を進捗として出す（ベストエフォート）
@@ -1337,10 +1445,56 @@ export async function sendPromptToAi(
       }
     });
 
+    // #282: devin 専用 stderr 分類（CHISEL_LOG_STDERR=1 の内部ログをライブ進捗 / エラー検出に振り分け）。
+    // 例: "2026-07-24T07:34:22.891238Z  INFO toolbox::tools::write: Writing to file: X"
+    const DEVIN_LOG_RE = /^\d{4}-\d{2}-\d{2}T\S+Z\s+(INFO|WARN|ERROR|DEBUG|TRACE)\s+([\w:]+):\s?(.*)$/;
+    const classifyDevinStderrLine = (line: string) => {
+      const m = line.match(DEVIN_LOG_RE);
+      if (!m) {
+        // タイムスタンプなし行: ログ外のプレーン stderr と ERROR の継続行のみ stderrOutput に残す
+        // （WARN/INFO の継続行 = "Caused by:" 等のノイズは捨てる）
+        if (devinLastLogLevel === '' && line.trim()) {
+          stderrOutput += line + '\n';
+          console.error(`[devin] stderr: ${line}`);
+        } else if (devinLastLogLevel === 'ERROR' && line.trim()) {
+          stderrOutput += line + '\n';
+        }
+        return;
+      }
+      const [, level, moduleName, message] = m;
+      devinLastLogLevel = level;
+      // ツール拒否の検出（#274 の平文 "A tool was rejected" はログモードでは出ないため置き換え）
+      if (/rejecting tool \w+ that requires confirmation/.test(message)) {
+        devinToolRejectedInLog = true;
+        console.log(`[devin] 🔒 tool rejection detected in log: ${message}`);
+        return;
+      }
+      // ERROR はエラー情報として stderrOutput にも残す（stderrTail 表示・token+limit 検出用）
+      if (level === 'ERROR') stderrOutput += `${moduleName}: ${message}\n`;
+      // ツール実行ログ → ライブ進捗表示（⏳ prefix で最終メッセージから除外）
+      if (moduleName.startsWith('toolbox::')) {
+        const key = message.slice(0, 120);
+        const now = Date.now();
+        if (now - (devinLogReported.get(key) ?? 0) < 10_000) return;
+        devinLogReported.set(key, now);
+        const toolName = moduleName.split('::').pop() ?? 'tool';
+        onOutput(`⏳ ${formatDevinToolLog(toolName, message)}\n`, false);
+      }
+      // それ以外（session_manager/telemetry 等のノイズ）は捨てる（量が多いため agent.log にも出さない）
+    };
+
     proc.stderr?.on('data', (data) => {
       const text = data.toString();
-      stderrOutput += text;
-      console.error(`[${aiTool}] stderr: ${text}`);
+      if (aiTool !== 'devin') {
+        stderrOutput += text;
+        console.error(`[${aiTool}] stderr: ${text}`);
+        return;
+      }
+      // #282: devin は CHISEL_LOG_STDERR=1 で内部ログが stderr に流れる → 行単位で分類
+      devinStderrLineBuffer += text;
+      const lines = devinStderrLineBuffer.split('\n');
+      devinStderrLineBuffer = lines.pop() ?? '';
+      for (const line of lines) classifyDevinStderrLine(line);
     });
 
     proc.on('close', (code, signal) => {
@@ -1349,9 +1503,21 @@ export async function sendPromptToAi(
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
       if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
       if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
+      // #281: ファイル変更ウォッチャ停止
+      if (devinFsWatcher) { try { devinFsWatcher.close(); } catch {} devinFsWatcher = null; }
+      // #281: ATIF は turn 終了時に一括書き出しされるため、削除する前に読んで実行ステップまとめを作る
+      if (devinExportPath && fs.existsSync(devinExportPath)) {
+        try { devinStepSummary = buildDevinStepSummary(devinExportPath); } catch {}
+      }
       if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
       // #277: 実行時間上限タイマー停止
       if (devinLimitTimer) { clearTimeout(devinLimitTimer); devinLimitTimer = null; }
+
+      // #282: devin stderr 行バッファの残りをフラッシュ（末尾改行なしの拒否ログ等の取りこぼし防止）
+      if (aiTool === 'devin' && devinStderrLineBuffer.trim()) {
+        classifyDevinStderrLine(devinStderrLineBuffer);
+        devinStderrLineBuffer = '';
+      }
 
       // #275: 改行なしで終わった最終出力の取りこぼし防止（lineBuffer フラッシュ）。
       // stdout ハンドラは改行区切りで処理し「最後の不完全な行」を lineBuffer に残すが、
@@ -1460,7 +1626,8 @@ export async function sendPromptToAi(
         options.usePlanMode === true &&
         !options.devinAutoPermFallback &&
         fullOutput.trim().length === 0 &&
-        /tool was rejected/i.test(stderrOutput);
+        // #282: CHISEL_LOG_STDERR=1 では平文 "A tool was rejected" が出ずログ形式になるため両方で検出
+        (/tool was rejected/i.test(stderrOutput) || devinToolRejectedInLog);
       if (devinPlanToolRejected) {
         console.log(`[devin] ⚠️ Devin plan agent-config rejected a tool (code ${code}), falling back to --permission-mode auto`);
         completionSent = true; // この呼び出しの後続 onOutput を抑止（フォールバック側が完了通知を送る）
@@ -1546,7 +1713,8 @@ export async function sendPromptToAi(
         options.usePlanMode === true &&
         options.devinAutoPermFallback === true &&
         fullOutput.trim().length === 0 &&
-        /tool was rejected/i.test(stderrOutput);
+        // #282: ログ形式のツール拒否検出も含める（後方互換で平文検出も残す）
+        (/tool was rejected/i.test(stderrOutput) || devinToolRejectedInLog);
       if (devinFallbackToolRejected && !completionSent) {
         completionSent = true;
         const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
@@ -1578,6 +1746,8 @@ export async function sendPromptToAi(
         if (fullOutput.length === 0) {
           onOutput('(No response from AI)', true, result.usageData);
         } else {
+          // #281: Devin の実行ステップまとめを最終回答へ添付してから完了通知（⏳ でない=最終メッセージに残る）
+          if (devinStepSummary) onOutput(devinStepSummary, false);
           onOutput('', true, result.usageData); // Signal completion with usage data
         }
       }
@@ -1592,6 +1762,8 @@ export async function sendPromptToAi(
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
       if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
       if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
+      // #281: ファイル変更ウォッチャ停止
+      if (devinFsWatcher) { try { devinFsWatcher.close(); } catch {} devinFsWatcher = null; }
       if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
       // #277: 実行時間上限タイマー停止
       if (devinLimitTimer) { clearTimeout(devinLimitTimer); devinLimitTimer = null; }

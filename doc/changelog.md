@@ -6,6 +6,30 @@
 
 ## 実装済み機能
 
+### #282: Devin の内部ログをライブ表示 — CHISEL_LOG_STDERR で stderr の実行ログを進捗化 (2026-07-24)
+
+- **依頼**: #281（fs.watch）を受けて「devin のログじゃなくてファイル更新が出るだけ？ 本物の内部ログをライブで見たい」。実機で `CHISEL_LOG_STDERR=1` を試したいとのことで、PowerShell テスト手順を案内 → ユーザーが TISA 02 で実行
+- **実機テスト結果（TISA 02, devin 3000.1.27）**: `$env:CHISEL_LOG_STDERR="1"` で stderr に内部ログがリアルタイムで流れることを確認。`2026-...Z  INFO toolbox::tools::write: Writing to file: X` のようにツール実行が `toolbox::tools::<名前>` モジュールで出る。**重要な副作用**: ログモードでは従来の平文 `A tool was rejected by the user` が stderr に出なくなり `Print mode: rejecting tool write that requires confirmation` の INFO ログ行に変わる → そのままでは #274 のツール拒否検出（plan フォールバック）が壊れる
+- **修正1（env）**: devin spawn の env に `CHISEL_LOG_STDERR: '1'` を追加
+- **修正2（devin 専用 stderr 分類）**: stderr を行バッファで受け、`DEVIN_LOG_RE`（`日時Z <LEVEL> <module>: <msg>`）で分類。`toolbox::` 行 → `formatDevinToolLog()` で日本語化してライブ進捗 `⏳ 📝 <パス> に書き込み中...`（write は実機書式確認、read/exec は推定パターン、未知は `⏳ 🔧 [名前] <英語原文>`）。同一メッセージ 10 秒スロットル。`rejecting tool X that requires confirmation` → 拒否フラグ `devinToolRejectedInLog`。ノイズ（session_manager/telemetry 等）は破棄し **stderrOutput を汚染しない**（#275 の token+limit ヒューリスティック誤発火防止）。ERROR 行・ログ形式外の行は従来どおり stderrOutput へ。継続行（"Caused by:"）は直前ログレベルで帰属判定
+- **修正3（#274 検出の置き換え）**: プランツール拒否検出 2 箇所を `/tool was rejected/i.test(stderrOutput) || devinToolRejectedInLog` の OR に（旧バージョン devin で env var が無効な場合の後方互換で平文検出も残す）
+- **修正4（close フラッシュ）**: close ハンドラで devin stderr 行バッファの残りを `classifyDevinStderrLine` でフラッシュ（末尾改行なしの拒否ログ取りこぼし防止、#275 の教訓）
+- **既存機能との関係**: #281 の fs.watch・🧭 完了時まとめ・ハートビート（#276/#278）・上限タイマー（#277）は無変更で共存。connection.ts の `⏳` 除外もそのまま機能
+- **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル、devin ブランチのみ）+ changelog.md。windows は `log.info`/`log.error` 系。サーバー・shared・connection.ts・DB 変更なし。`pnpm build` 全 WS 成功、3 dist に `CHISEL_LOG_STDERR`×6 / `classifyDevinStderrLine`×3 / `formatDevinToolLog`×2 / `devinToolRejectedInLog`×4 / `に書き込み中`×1 確認
+- **反映**: **Agent のみ、サーバー再起動不要**。TISA 02 / 03 TISA で `u`→`u`。検証: exec 中に `⏳ 📝 ... に書き込み中...` がライブ表示 + plan モードのツール拒否で #274 フォールバック（agent.log の `🔒 tool rejection detected in log`）が発火 + 最終回答にログノイズが混ざらないこと
+- **教訓**: devin の内部ログ文字列は Rust バイナリに英語ハードコードでプロンプトでは変えられない → Agent 側で変換。`CHISEL_LOG_STDERR` を有効化すると平文エラーがログ形式に変わるため、既存の平文検出（#274）を OR で拡張しないと plan が全滅する。ログ行は stderrOutput に混ぜず別処理（token limit 誤検出防止）
+- **v3 スコープ外**: read/exec 等 write 以外のツールログ書式の日本語化（実運用ログを見て変換表を拡充）、思考中など toolbox 外の有用ログの表示
+
+### #281: Devin の「内部で何をやっているか」を可視化 — ファイル変更ウォッチ + 実行ステップまとめ (2026-07-24)
+
+- **依頼**: 「やっぱり devin の経過がでない。1分経過・2分経過はでるんだけど、内部でなにかやってるっていうのを表示したい」。#276/#278 のハートビートは動くが、`--export`（ATIF）のステップ要約が出ない
+- **実機確認（TISA 02, devin 3000.1.27）**: `devin --help` に `--export [<PATH>]` あり＝対応版。ただし「**Exports after each turn**（各ターン終了後に書き出し）」と明記 → `-p` 単発実行では**完了時にしか ATIF が書かれない**ため、3 秒ポーリングの live tail はゼロ件（#276 のステップ要約が出ない真因＝**終了時一括書き出し**で確定）
+- **修正1（ライブ表示の本命・devin バージョン非依存）**: devin spawn 後に `fs.watch(projectPath, {recursive:true})` でファイル変更を監視し `⏳ 📝 <ファイル> を更新中...` を進捗表示。除外パターン（`.git`/`node_modules`/`dist`/`build`/`.next`/`target`/`vendor`/`__pycache__` + `~$`/`.swp`/`.tmp`/`.log`/`.lock`）+ 同一ファイル 10 秒スロットル。`⏳` prefix 規約で最終回答からは除外（connection.ts 変更なし）。recursive 非対応環境は try/catch でスキップ
+- **修正2（完了時の実行ステップまとめ）**: ATIF は終了時に確実に書かれているので、close ハンドラで削除前に全体をパースし最終回答末尾へ `🧭 実行ステップ (N件): Read → Exec → Write → …（他N件）` を添付。新ヘルパー `buildDevinStepSummary()`（JSONL 行パース→0 件時は単一 JSON=配列/`{messages:[]}`/オブジェクトをフォールバック→#276 の `summarizeAtifEntry()` 再利用、最大10件、0 件時のみスキーマ確認用に先頭 500 文字を agent.log へ）。空応答検出（#274/#275）を壊さないよう `fullOutput` へは正常完了パスでのみ添付
+- **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル、devin ブランチのみ）+ changelog.md。windows は `log.info`/`log.warn` 系。既存の 3 秒ポーラー・ハートビート・上限タイマーは無変更（将来 devin が逐次書き出しに変われば自動でライブ復活）。サーバー・shared・connection.ts・DB 変更なし。`pnpm build` 全 WS 成功
+- **反映**: **Agent のみ、サーバー再起動不要**。TISA 02 / 03 TISA で `u`→`u`
+- **制約**: devin が**ファイルを触らない工程**（調査・思考中）はウォッチでは見えず、その間はハートビートのみ。ATIF の**ライブ**表示は devin の仕様（turn 終了時一括書き出し）により不可能
+
 ### #278: Devin 進捗ハートビートが短時間タスクで出ない不具合を修正（間隔 60→30 秒） (2026-07-22)
 
 - **症状**: 「devin UPDATE したけど進捗でないね」。Agent は最新（`u`→`u` 済み）だが exec 中の進捗ボックスに `⏳ Devin 実行中...` が出ない
