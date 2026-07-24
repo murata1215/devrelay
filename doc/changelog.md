@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+### #284: プロジェクト自動登録の同名衝突を解消 — 自動リネーム + スキップ理由の可視化 + CLI --name (2026-07-24)
+
+- **依頼**: 「`d:\iap\lafit` / `d:\iap_trunk\lafit` を DevRelay に登録できるか？ やったら出てこなかった」。trunk/branch 構成で同名フォルダを両方登録したいケース
+- **調査**: DESKTOP-1E6SDOQ には `Lafit`（`d:\iap\eBuilder8\workspace\Lafit`）が既に登録済み。ユーザーのテスト `D:\temp\Lafit`（CLAUDE.md あり）はスキャンで発見されたが `autoDiscoverProjects` の重複チェック `p.name === project.name` により**同名 "Lafit" でサイレントにスキップ**（ログは `Found 0 new project(s)` のみで理由が出ない）。手動 `devrelay projects add` も `addProject` の同名チェックで「Project already exists」エラーだが、CLI に名前指定オプションがなかった
+- **修正1（自動リネーム登録）**: `autoDiscoverProjects`（3 OS 共通）で path 重複はスキップ、name のみ重複時は**サイレントスキップせず自動リネームして登録**。新ヘルパー `makeUniqueProjectName()` がまず親フォルダ名を付与（`lafit (iap_trunk)`）、それでも衝突すれば連番（`lafit-2`）。同一バッチ内の衝突も `existing` に push しながら判定するので自動カバー。リネーム時は `Added: ... [renamed: name conflict with "..."]` をログ出力
+- **修正2（CLI --name）**: `cli/index.ts` の projects コマンドに `--name <name>` オプション追加 + `cli/commands/projects.ts` の `ProjectsOptions` に `name?` 追加し `addProject(path, name, ai)` へ渡す（`addProject` は第2引数 name を既にサポート済み＝本体無変更）。使用例 `devrelay projects add d:\iap_trunk\lafit --name lafit-trunk`
+- **対象**: `agents/{linux,macos,windows}/src/services/projects.ts`（autoDiscoverProjects + makeUniqueProjectName）+ `cli/index.ts` + `cli/commands/projects.ts`（計9ファイル）+ changelog.md。windows Electron GUI も同じ `autoDiscoverProjects` を使うため修正1がそのまま効く。サーバー・shared・DB 変更なし。`pnpm build` 全 WS 成功、3 dist に `makeUniqueProjectName`×2 / `name conflict`×1 / `--name`×1 確認
+- **反映**: **Agent のみ、サーバー再起動不要**。対象マシンで `u`→`u`
+- **検証**: WebUI で projectsDirs に `d:\iap_trunk` を追加 → 再スキャンで `lafit (iap_trunk)` が自動登録されること。既存 `Lafit`（d:\iap\eBuilder8\workspace\Lafit）は無変更
+- **教訓**: 自動検出の重複判定を name 一致でスキップすると trunk/branch の同名フォルダが登録不能になり、しかも理由がログに出ずユーザーが気づけない。path 一致のみスキップ + name 衝突は自動リネームが正解。CLI の name 指定は既存 `addProject` の未使用引数を配線するだけで実現
+
 ### #282: Devin の内部ログをライブ表示 — CHISEL_LOG_STDERR で stderr の実行ログを進捗化 (2026-07-24)
 
 - **依頼**: #281（fs.watch）を受けて「devin のログじゃなくてファイル更新が出るだけ？ 本物の内部ログをライブで見たい」。実機で `CHISEL_LOG_STDERR=1` を試したいとのことで、PowerShell テスト手順を案内 → ユーザーが TISA 02 で実行

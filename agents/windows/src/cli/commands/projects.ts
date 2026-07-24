@@ -9,6 +9,7 @@ import {
 
 interface ProjectsOptions {
   ai?: string;
+  name?: string;  // #284: 明示的なプロジェクト名（同名フォルダの登録に使用）
 }
 
 export async function projectsCommand(
@@ -29,7 +30,7 @@ export async function projectsCommand(
         console.error('Path required. Usage: devrelay projects add <path>');
         process.exit(1);
       }
-      await addProjectAction(path, options?.ai as AiTool);
+      await addProjectAction(path, options?.ai as AiTool, options?.name);
       break;
 
     case 'remove':
@@ -78,9 +79,9 @@ async function listProjectsAction() {
   });
 }
 
-async function addProjectAction(projectPath: string, ai?: AiTool) {
+async function addProjectAction(projectPath: string, ai?: AiTool, name?: string) {
   try {
-    const project = await addProject(projectPath, undefined, ai || 'claude');
+    const project = await addProject(projectPath, name, ai || 'claude');
     console.log(`Added project: ${project.name}`);
     console.log(`   Path: ${project.path}`);
     console.log(`   AI:   ${project.defaultAi}`);

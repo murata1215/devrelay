@@ -246,6 +246,25 @@ export async function listProjects(): Promise<ProjectConfig[]> {
 }
 
 /**
+ * 既存プロジェクトと名前が衝突しないユニークなプロジェクト名を生成する（#284）。
+ * trunk/branch 構成など同名フォルダ（例: d:\iap\lafit と d:\iap_trunk\lafit）を
+ * 両方登録できるようにするため、まず親フォルダ名を付与（"lafit (iap_trunk)"）し、
+ * それでも衝突する場合は連番（"lafit-2", "lafit-3"...）を付ける。
+ */
+function makeUniqueProjectName(desiredName: string, projectPath: string, existing: ProjectConfig[]): string {
+  const taken = new Set(existing.map(p => p.name));
+  if (!taken.has(desiredName)) return desiredName;
+  // 親フォルダ名を付与して区別
+  const parent = path.basename(path.dirname(projectPath));
+  const withParent = `${desiredName} (${parent})`;
+  if (parent && !taken.has(withParent)) return withParent;
+  // それでも衝突するなら連番
+  let n = 2;
+  while (taken.has(`${desiredName}-${n}`)) n++;
+  return `${desiredName}-${n}`;
+}
+
+/**
  * 指定ディレクトリをスキャンして CLAUDE.md があるプロジェクトを自動登録
  *
  * @param defaultAi 新規登録するプロジェクトの既定 AI ツール。config.yaml の
@@ -268,17 +287,19 @@ export async function autoDiscoverProjects(baseDir: string, maxDepth: number = 5
   // 新規プロジェクトを追加
   let added = 0;
   for (const project of discovered) {
-    // 重複チェック
-    const isDuplicate = existing.some(p => p.path === project.path || p.name === project.name);
-    if (!isDuplicate) {
-      existing.push(project);
-      console.log(`   ✅ Added: ${project.name} (${project.path})`);
-      added++;
+    // path 重複は同一プロジェクトの二重登録なのでスキップ
+    if (existing.some(p => p.path === project.path)) continue;
+    // name のみ重複する場合は自動リネームして登録（#284: 同名フォルダ対策）
+    const uniqueName = makeUniqueProjectName(project.name, project.path, existing);
+    const entry: ProjectConfig = { ...project, name: uniqueName };
+    existing.push(entry);
+    const renamedNote = uniqueName !== project.name ? ` [renamed: name conflict with "${project.name}"]` : '';
+    console.log(`   ✅ Added: ${entry.name} (${entry.path})${renamedNote}`);
+    added++;
 
-      // CLAUDE.md 自動配置: マーカー検出（pubspec.yaml 等）で登録されたが
-      // CLAUDE.md が無いプロジェクトに最小限の CLAUDE.md を書き込む（#255・非致命的）
-      await ensureAutoClaudeMd(project.path, project.name);
-    }
+    // CLAUDE.md 自動配置: マーカー検出（pubspec.yaml 等）で登録されたが
+    // CLAUDE.md が無いプロジェクトに最小限の CLAUDE.md を書き込む（#255・非致命的）
+    await ensureAutoClaudeMd(entry.path, entry.name);
   }
 
   if (added > 0) {

@@ -64,6 +64,7 @@ program
   .argument('[action]', 'Action: list, add, remove, scan')
   .argument('[path]', 'Project path (for add/remove)')
   .option('--ai <tool>', 'Default AI tool', 'claude')
+  .option('--name <name>', 'Project name (default: directory name). Use for same-named folders.')
   .action(projectsCommand);
 
 program
