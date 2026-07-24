@@ -118,16 +118,26 @@ function buildDevinStepSummary(exportPath: string): string {
  * devin バイナリのログ文字列は英語ハードコードのためプロンプトでは変えられず、Agent 側で変換する。
  */
 function formatDevinToolLog(toolName: string, message: string): string {
+  // #283: session_manager はコマンド実行行だけ拾い、それ以外（ロック取得/PTY 準備等）はノイズとして非表示
+  if (toolName === 'session_manager') {
+    // Rust Debug 表記の shell=... { ... command: "..." ... } から command を抽出
+    const c = message.match(/command:\s*"((?:[^"\\]|\\.)*)"/);
+    if (c) return `💻 コマンド実行中: ${c[1].replace(/\\\\/g, '\\')}`;
+    return ''; // 空文字 = 呼び出し側で表示スキップ
+  }
+  // #283: glob: "Searching for files matching pattern: <pat> in <dir>"（実機ログで書式確認済み）
+  let m = message.match(/^Searching for files matching pattern:\s*(.+?)\s+in\s+(.+)$/i);
+  if (m) return `🔍 ${m[2]} で ${m[1]} を検索中...`;
   // write: "Writing to file: <path>"（実機サンプルで書式確認済み）
-  let m = message.match(/^Writing to file:\s*(.+)$/i);
+  m = message.match(/^Writing to file:\s*(.+)$/i);
   if (m) return `📝 ${m[1]} に書き込み中...`;
-  // read 系: "Reading file: <path>" 等（実ログ未確認のため広めにマッチ）
+  // read 系: "Reading file: <path>" 等（実機ログで書式確認済み）
   m = message.match(/^Reading(?: file)?:?\s*(.+)$/i);
   if (m) return `📖 ${m[1]} を読み込み中...`;
   // exec 系: "Executing command: <cmd>" / "Running: <cmd>" 等
   m = message.match(/^(?:Executing(?: command)?|Running):?\s*(.+)$/i);
   if (m) return `💻 コマンド実行中: ${m[1]}`;
-  // 未知パターン: 原文のまま（英語）。実ログを見て変換表を拡充する（v3）
+  // 未知パターン: 原文のまま（英語）。実ログを見て変換表を拡充する
   return `🔧 [${toolName}] ${message}`;
 }
 
@@ -698,7 +708,9 @@ export async function sendPromptToAi(
         if (now - (devinLogReported.get(key) ?? 0) < 10_000) return;
         devinLogReported.set(key, now);
         const toolName = moduleName.split('::').pop() ?? 'tool';
-        onOutput(`⏳ ${formatDevinToolLog(toolName, message)}\n`, false);
+        // #283: session_manager のノイズは空文字が返るので表示スキップ
+        const formatted = formatDevinToolLog(toolName, message);
+        if (formatted) onOutput(`⏳ ${formatted}\n`, false);
       }
       // それ以外（session_manager/telemetry 等のノイズ）は捨てる（量が多いため agent.log にも出さない）
     };

@@ -22,8 +22,34 @@ import { mcpRoutes } from './mcp/server.js';
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
 
+/**
+ * 期限切れ AuthSession を定期削除するクリーンアップを開始する。
+ * 起動直後に1回実行し、以降24時間間隔で expiresAt < now のセッションを deleteMany で除去する。
+ * 失敗しても致命的でないため握りつぶす。
+ */
+function startExpiredSessionCleanup() {
+  const runCleanup = async () => {
+    try {
+      const result = await prisma.authSession.deleteMany({
+        where: { expiresAt: { lt: new Date() } },
+      });
+      if (result.count > 0) {
+        console.log(`🧹 Cleaned up ${result.count} expired auth sessions`);
+      }
+    } catch (err) {
+      console.error('⚠️  Expired auth session cleanup failed:', err);
+    }
+  };
+  // 起動時に1回実行（await しない fire-and-forget）
+  void runCleanup();
+  // 以降24時間間隔で実行。unref でプロセス終了を妨げない
+  const timer = setInterval(() => void runCleanup(), 24 * 60 * 60 * 1000);
+  timer.unref();
+}
+
 async function main() {
-  const app = Fastify({ logger: true });
+  // trustProxy: Caddy 経由の X-Forwarded-For を信頼し request.ip を実クライアント IP にする（#285 IP 制限用）
+  const app = Fastify({ logger: true, trustProxy: true });
 
   // Reset all machines to offline on startup
   // (In case server crashed without proper disconnect handling)
@@ -151,6 +177,9 @@ async function main() {
 
   // Start heartbeat monitor for agent connection health
   startHeartbeatMonitor();
+
+  // 期限切れ AuthSession の定期クリーンアップ（起動時 + 24時間間隔）
+  startExpiredSessionCleanup();
 
   // Start server
   try {

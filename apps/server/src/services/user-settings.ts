@@ -57,6 +57,8 @@ export const SettingKeys = {
   CLAUDE_MODEL_PLAN: 'claude_model_plan',
   /** Claude SDK モデル — Exec モード用（例: 'sonnet', 'opus', 'haiku'） */
   CLAUDE_MODEL_EXEC: 'claude_model_exec',
+  /** 組織活動の会話要約に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'）。統制 v3 #270 */
+  ORG_SUMMARY_PROVIDER: 'org_summary_provider',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];
@@ -266,6 +268,26 @@ export async function getApiKeyForBuildSummary(userId: string): Promise<{ provid
   if (!apiKey) return null;
 
   return { provider, apiKey };
+}
+
+/**
+ * 組織活動の会話要約（統制 v3 #270）用の AI プロバイダーと API キーを取得
+ *
+ * ORG_SUMMARY_PROVIDER 設定を優先し、未設定（none 含む）の場合は
+ * BUILD_SUMMARY_PROVIDER にフォールバックする（BuildLog 要約利用者は追加設定なしで使える）。
+ *
+ * @returns { provider, apiKey } のペア。使用不可の場合は null
+ */
+export async function getApiKeyForOrgSummary(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
+  // まず ORG_SUMMARY_PROVIDER を確認
+  const orgProvider = (await getUserSetting(userId, SettingKeys.ORG_SUMMARY_PROVIDER) || 'none') as AiProvider;
+  if (orgProvider !== 'none') {
+    const apiKey = await getApiKeyForProvider(userId, orgProvider);
+    if (apiKey) return { provider: orgProvider, apiKey };
+    return null;
+  }
+  // フォールバック: BuildLog 要約の設定を流用
+  return getApiKeyForBuildSummary(userId);
 }
 
 /**

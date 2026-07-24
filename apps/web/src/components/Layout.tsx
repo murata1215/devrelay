@@ -25,10 +25,15 @@ export function Layout({ children }: LayoutProps) {
     setNotificationSoundEnabled(next);
   };
 
+  // admin/manager は配下メンバーの活動を閲覧できる（統制 v3 #270）
+  const canSupervise = organization?.role === 'admin' || organization?.role === 'manager';
+
   const navigation = [
     { name: 'Chat', href: '/chat' },
     { name: 'Dashboard', href: '/' },
     { name: 'Conversations', href: '/conversations' },
+    // Activity は監督者（admin/manager）のみ表示
+    ...(canSupervise ? [{ name: 'Activity', href: '/activity' }] : []),
     { name: 'Dev Reports', href: '/dev-reports' },
     { name: 'Agents', href: '/machines' },
     { name: 'Team', href: '/team' },
@@ -45,16 +50,18 @@ export function Layout({ children }: LayoutProps) {
     <div className="min-h-screen bg-[var(--bg-base)]">
       {/* Header */}
       <nav className="relative bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
-        {/* エンタープライズ組織ロゴ（登録済みなら画面左端にベタ付けで大きく表示） */}
-        {organization?.hasLogo && (
-          <img
-            src={orgApi.getLogoUrl()}
-            alt={organization.name}
-            title={organization.name}
-            className="absolute left-2 top-1/2 -translate-y-1/2 h-10 max-w-[120px] md:h-14 md:max-w-[280px] w-auto object-contain rounded z-10"
-          />
-        )}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        {/* #279: ロゴ + ナビ本体を flex フローで横並びにする（absolute オーバーレイだと狭いウィンドウ幅でロゴがナビ項目=DevRelay/Chat を覆い隠すため） */}
+        <div className="flex items-center">
+          {/* エンタープライズ組織ロゴ（左端ベタ付け・flex フロー内なのでナビと重ならない） */}
+          {organization?.hasLogo && (
+            <img
+              src={orgApi.getLogoUrl()}
+              alt={organization.name}
+              title={organization.name}
+              className="flex-shrink-0 ml-2 h-7 max-w-[84px] md:h-10 md:max-w-[196px] w-auto object-contain rounded"
+            />
+          )}
+          <div className="flex-1 min-w-0 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             {/* Logo and desktop nav */}
             <div className="flex items-center">
@@ -168,6 +175,7 @@ export function Layout({ children }: LayoutProps) {
                 )}
               </button>
             </div>
+          </div>
           </div>
         </div>
 

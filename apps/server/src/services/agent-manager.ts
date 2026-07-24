@@ -38,6 +38,7 @@ import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKe
 import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
+import { checkIpAllowed } from './org-control.js';
 import type { ManagementInfo } from '@devrelay/shared';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
@@ -137,7 +138,8 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
         case 'agent:connect':
           // handleAgentConnect が DB の machine.id を返す（token 無効時は null）
           // payload.machineId は Agent config 由来で空文字の場合があるため使わない
-          machineId = await handleAgentConnect(ws, message.payload) ?? machineId;
+          // req.ip は組織 IP アクセス制限（#285）のチェックに使用
+          machineId = await handleAgentConnect(ws, message.payload, req.ip) ?? machineId;
           break;
 
         case 'agent:disconnect':
@@ -253,7 +255,8 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
 async function handleAgentConnect(
   ws: WebSocket,
-  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[]; protocolVersion?: number }
+  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[]; protocolVersion?: number },
+  clientIp?: string
 ): Promise<string | null> {
   const { machineId, machineName, token, projects, availableAiTools, managementInfo, projectsDirs: localDirs } = payload;
 
@@ -266,6 +269,19 @@ async function handleAgentConnect(
     sendToAgent(ws, {
       type: 'server:connect:ack',
       payload: { success: false, error: 'Invalid token' }
+    });
+    ws.close();
+    return null;
+  }
+
+  // 組織 IP アクセス制限（#285）: 許可レンジ外のマシンからの接続は拒否
+  // Agent は社内マシン前提のため、組織で IP 制限が有効なら許可レンジ内からのみ接続を許す
+  const ipCheck = await checkIpAllowed(machine.userId, clientIp ?? '');
+  if (!ipCheck.allowed) {
+    console.log(`🔒 Agent ${machine.name} rejected by IP restriction (ip=${clientIp})`);
+    sendToAgent(ws, {
+      type: 'server:connect:ack',
+      payload: { success: false, error: ipCheck.reason ?? 'IP not allowed' }
     });
     ws.close();
     return null;

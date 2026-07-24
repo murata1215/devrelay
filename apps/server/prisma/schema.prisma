@@ -32,6 +32,9 @@ model User {
   teams               Team[]
   notifications       Notification[]
   organizationMember  OrganizationMember? // 所属組織（エンタープライズモード、1ユーザー1組織）
+  managerAssignments      ManagerAssignment[] @relation("ManagerToMembers") // 自分が manager として担当するユーザー
+  managedBy               ManagerAssignment[] @relation("MemberToManagers") // 自分を担当する manager
+  personalAccessTokens    PersonalAccessToken[] // MCP 用 Personal Access Token
 }
 
 // 組織（エンタープライズモード）
@@ -42,10 +45,12 @@ model Organization {
   joinPasswordHash String              // 参加パスワード（bcrypt ハッシュ）
   logo             Bytes?              // 会社ロゴ（PostgreSQL bytea）
   logoMimeType     String?             // ロゴの MIME タイプ（image/png 等）
+  allowedIpRanges  String?             // IP アクセス制限（#285）: 許可 CIDR の JSON 配列文字列。null/空配列=制限なし
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
   members          OrganizationMember[]
+  managerAssignments ManagerAssignment[]
 }
 
 // 組織メンバー（userId unique = 1ユーザー1組織）
@@ -55,9 +60,27 @@ model OrganizationMember {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   userId         String       @unique
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role           String       @default("member") // 'admin' | 'member'
+  role           String       @default("member") // 'admin' | 'manager' | 'member'
   createdAt      DateTime     @default(now())
 
+  @@index([organizationId])
+}
+
+// マネージャー担当割当（manager ⇔ user の多対多、統制 v2 #268）
+// member は自分を担当する manager が1人以上いないとコマンド発行不可
+model ManagerAssignment {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  managerUserId  String       // 監督する側（role: manager または admin）
+  manager        User         @relation("ManagerToMembers", fields: [managerUserId], references: [id], onDelete: Cascade)
+  memberUserId   String       // 監督される側（role: member）
+  member         User         @relation("MemberToManagers", fields: [memberUserId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+
+  @@unique([managerUserId, memberUserId])
+  @@index([memberUserId])
+  @@index([managerUserId])
   @@index([organizationId])
 }
 
@@ -69,6 +92,20 @@ model AuthSession {
   token     String   @unique
   expiresAt DateTime
   createdAt DateTime @default(now())
+}
+
+// Personal Access Token（MCP 用の長期トークン、#271）
+model PersonalAccessToken {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String    // ユーザーが付けるトークン名（例: "CI/CD", "自動化スクリプト"）
+  tokenHash  String    @unique // SHA-256 ハッシュ（平文は保存しない）
+  lastUsedAt DateTime? // 最終使用日時
+  revokedAt  DateTime? // 失効日時（null=有効）
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
 }
 
 // プラットフォーム連携
@@ -189,10 +226,28 @@ model Session {
   status        String    @default("active") // active, ended
   startedAt     DateTime  @default(now())
   endedAt       DateTime?
-  
+  summary       String?   // AI 活動要約（統制 v3 #270、閲覧者のキーで生成しキャッシュ）
+  summarizedAt  DateTime? // 要約生成日時
+
   messages       Message[]
   buildLogs      BuildLog[]
   toolApprovals  ToolApproval[]
+}
+
+// 監視監査ログ（統制 v3 #270）
+// admin/manager が member の会話履歴を閲覧・要約した操作を記録する。
+// ユーザー削除後も監査証跡として残すため FK は張らない。
+model SupervisionAuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  viewerUserId   String   // 閲覧した admin/manager
+  targetUserId   String   // 閲覧された member
+  action         String   // 'view_sessions' | 'view_messages' | 'summarize'
+  detail         String?  // sessionId や検索クエリ等の補足（JSON 文字列）
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([targetUserId])
 }
 
 // メッセージ履歴
@@ -207,6 +262,8 @@ model Message {
   sourceProjectName  String?       // クロスプロジェクトクエリの送信元プロジェクト名
   createdAt          DateTime      @default(now())
   files              MessageFile[] // 添付ファイル（入力 or 出力）
+
+  @@index([sessionId, createdAt]) // MCP get_conversation_history 用（#272）
 }
 
 // メッセージに紐づくファイル（BLOB 保存 + ベクトル検索）

@@ -80,6 +80,32 @@ export const auth = {
   },
 };
 
+// Personal Access Token（#271）
+export interface PersonalAccessTokenInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export const tokens = {
+  /** PAT 一覧（トークン本体は含まない） */
+  async list(): Promise<{ tokens: PersonalAccessTokenInfo[] }> {
+    return request('GET', '/auth/tokens');
+  },
+
+  /** PAT 発行（平文トークンは発行時の1回のみ返却される） */
+  async create(name: string): Promise<{ id: string; name: string; token: string; createdAt: string }> {
+    return request('POST', '/auth/tokens', { name });
+  },
+
+  /** PAT 失効（ソフトリボーク） */
+  async revoke(id: string): Promise<void> {
+    await request('DELETE', `/auth/tokens/${id}`);
+  },
+};
+
 // 管理コマンド型
 export interface ManagementCommand {
   type: string;
@@ -494,8 +520,10 @@ export interface ConversationsResponse {
 }
 
 export const conversations = {
-  async list(offset = 0, limit = 50): Promise<ConversationsResponse> {
-    return request('GET', `/conversations?offset=${offset}&limit=${limit}`);
+  // targetUserId 指定時は該当ユーザーの会話履歴を取得（admin/担当 manager のみ許可）
+  async list(offset = 0, limit = 50, targetUserId?: string): Promise<ConversationsResponse> {
+    const userParam = targetUserId ? `&userId=${encodeURIComponent(targetUserId)}` : '';
+    return request('GET', `/conversations?offset=${offset}&limit=${limit}${userParam}`);
   },
 };
 
@@ -656,10 +684,13 @@ export const teams = {
 // 組織（エンタープライズモード）API
 // ========================================
 
+/** 組織内ロール（統制 v2 で manager を追加） */
+export type OrgRole = 'admin' | 'manager' | 'member';
+
 /** 自分の所属組織情報。member には orgCode が含まれない */
 export interface OrgInfo {
   name: string;
-  role: 'admin' | 'member';
+  role: OrgRole;
   hasLogo: boolean;
   orgCode?: string; // admin のみ
 }
@@ -669,9 +700,11 @@ export interface OrgMember {
   userId: string;
   email: string | null;
   name: string | null;
-  role: 'admin' | 'member';
+  role: OrgRole;
   createdAt: string;
   isSelf: boolean;
+  /** 割り当てられた manager 数（member のみ、それ以外 null）。0 ならコマンド発行不可 */
+  managerCount: number | null;
 }
 
 /** メンバーアクティビティ（監視用） */
@@ -679,11 +712,65 @@ export interface OrgActivity {
   userId: string;
   email: string | null;
   name: string | null;
-  role: 'admin' | 'member';
+  role: OrgRole;
   sessionCount: number;
   buildCount: number;
   onlineMachines: number;
   lastActiveAt: string | null;
+}
+
+/** 監督対象ユーザー（my-members 用の簡易情報） */
+export interface OrgSupervisedMember {
+  userId: string;
+  email: string | null;
+  name: string | null;
+}
+
+/** メンバーの活動セッション（統制 v3 #270、要約付き） */
+export interface OrgMemberSession {
+  id: string;
+  aiTool: string;
+  status: string;
+  startedAt: string;
+  endedAt: string | null;
+  summary: string | null;
+  summarizedAt: string | null;
+  projectName: string;
+  machineName: string;
+  messageCount: number;
+  preview: string;
+}
+
+/** セッションの会話メッセージ（全文表示用） */
+export interface OrgSessionMessage {
+  id: string;
+  role: string;
+  content: string;
+  platform: string;
+  createdAt: string;
+}
+
+/** 会話全文レスポンス */
+export interface OrgSessionMessagesResponse {
+  session: {
+    id: string;
+    startedAt: string;
+    endedAt: string | null;
+    summary: string | null;
+    projectName: string;
+    machineName: string;
+  };
+  messages: OrgSessionMessage[];
+}
+
+/** 監視監査ログの1件（統制 v3 #270） */
+export interface OrgAuditLogEntry {
+  id: string;
+  action: string;
+  detail: string | null;
+  createdAt: string;
+  viewer: { email: string | null; name: string | null };
+  target: { email: string | null; name: string | null };
 }
 
 export const org = {
@@ -739,12 +826,78 @@ export const org = {
   },
 
   /** メンバー role 変更（admin） */
-  async updateRole(userId: string, role: 'admin' | 'member'): Promise<void> {
+  async updateRole(userId: string, role: OrgRole): Promise<void> {
     await request('PATCH', `/org/members/${userId}`, { role });
   },
 
-  /** メンバーアクティビティ監視（admin） */
+  /** メンバーアクティビティ監視（admin=全員 / manager=担当のみ） */
   async activity(): Promise<{ activity: OrgActivity[] }> {
     return request('GET', '/org/activity');
+  },
+
+  /** 指定 member の担当 manager 一覧（admin） */
+  async getManagers(userId: string): Promise<{ managerUserIds: string[] }> {
+    return request('GET', `/org/members/${userId}/managers`);
+  },
+
+  /** 指定 member の担当 manager を全置換（admin） */
+  async setManagers(userId: string, managerUserIds: string[]): Promise<{ ok: boolean; managerUserIds: string[] }> {
+    return request('PUT', `/org/members/${userId}/managers`, { managerUserIds });
+  },
+
+  /** 自分が監督するユーザー一覧（admin=組織全 member / manager=担当のみ） */
+  async myMembers(): Promise<{ members: OrgSupervisedMember[] }> {
+    return request('GET', '/org/my-members');
+  },
+
+  /** 対象メンバーのセッション一覧（統制 v3 #270、要約付き・検索/期間絞り込み対応） */
+  async memberSessions(
+    userId: string,
+    opts: { offset?: number; limit?: number; q?: string; from?: string; to?: string } = {},
+  ): Promise<{ total: number; sessions: OrgMemberSession[] }> {
+    const params = new URLSearchParams();
+    if (opts.offset) params.set('offset', String(opts.offset));
+    if (opts.limit) params.set('limit', String(opts.limit));
+    if (opts.q) params.set('q', opts.q);
+    if (opts.from) params.set('from', opts.from);
+    if (opts.to) params.set('to', opts.to);
+    const qs = params.toString();
+    return request('GET', `/org/members/${userId}/sessions${qs ? `?${qs}` : ''}`);
+  },
+
+  /** 未要約セッションを閲覧者のキーで一括 AI 要約（最大10件/回） */
+  async summarizeSessions(
+    userId: string,
+    sessionIds: string[],
+  ): Promise<{ results: { sessionId: string; summary: string | null }[] }> {
+    return request('POST', `/org/members/${userId}/sessions/summarize`, { sessionIds });
+  },
+
+  /** セッションの会話全文を取得 */
+  async sessionMessages(sessionId: string): Promise<OrgSessionMessagesResponse> {
+    return request('GET', `/org/sessions/${sessionId}/messages`);
+  },
+
+  /** 監視監査ログ一覧（admin のみ） */
+  async auditLog(offset = 0, limit = 50): Promise<{ total: number; logs: OrgAuditLogEntry[] }> {
+    return request('GET', `/org/audit-log?offset=${offset}&limit=${limit}`);
+  },
+
+  /** 許可 IP レンジ取得（admin、#285）。現在の接続元 IP も返る */
+  async getIpRanges(): Promise<{ allowedIpRanges: string[]; currentIp: string }> {
+    return request('GET', '/org/ip-ranges');
+  },
+
+  /**
+   * 許可 IP レンジ設定（admin、#285）。
+   * force=true で「現在 IP がレンジ外」の締め出し警告を無視して強制保存。
+   * 締め出し警告時はサーバーが 400 { error:'lockout_warning', message, currentIp } を返すため
+   * 呼び出し側で捕捉して確認ダイアログを出すこと。
+   */
+  async setIpRanges(
+    allowedIpRanges: string[],
+    force = false,
+  ): Promise<{ ok: boolean; allowedIpRanges: string[]; currentIp: string }> {
+    return request('PUT', '/org/ip-ranges', { allowedIpRanges, force });
   },
 };

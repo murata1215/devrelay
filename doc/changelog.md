@@ -6,6 +6,31 @@
 
 ## 実装済み機能
 
+### #286: Claude Opus 5 / Sonnet 5 / Haiku 4.5 をモデル選択肢に追加 (2026-07-25)
+
+- **依頼**: 「opus5 が出たそうです。ここって定数で書いてあったっけ？」（Settings のモデルドロップダウンのスクショ）→ その後「推定じゃなくて WEB とか調べれない？」
+- **回答**: モデル一覧はハードコード定数で、手動同期の 2 箇所に定義。`command-handler.ts` の `AVAILABLE_MODELS`（`l` コマンド一覧 + `handleModelSet` のバリデーション）と `SettingsPage.tsx` の `CLAUDE_MODEL_OPTIONS`（WebUI ドロップダウン）
+- **Web 調査で ID 確定（公式ドキュメント）**: platform.claude.com の Models overview + Claude Code model configuration で確認。Opus 5 の Claude API ID / alias / CLI 指定はいずれも **`claude-opus-5`**（4.6 世代以降は日付なしの pinned snapshot 形式が正式）。あわせて現行ラインナップに **Sonnet 5=`claude-sonnet-5`** / **Haiku 4.5=`claude-haiku-4-5`** があることも判明（旧定数は Sonnet 4 / Haiku 3.5 表記で古かった）
+- **修正1（server）**: `AVAILABLE_MODELS` に `claude-opus-5`（高性能・最新）を Fable 5 の次に追加、既存 Opus 4.8 から「最新」表記を除去。さらに `claude-sonnet-5`（バランス型・最新）/ `claude-haiku-4-5`（高速・低コスト・最新）を追加。既存の短縮エイリアス `opus`/`sonnet`/`haiku` は「CLI 版（CLI デフォルト解決）」表記に整理（バージョン数字を除去）
+- **修正2（web）**: `CLAUDE_MODEL_OPTIONS` に上記 3 モデルのラベルを追加、`opus`/`sonnet`/`haiku` を「（CLI版）」表記に統一
+- **設計**: モデル ID はすべて公式のフル ID（`claude-opus-5`/`claude-sonnet-5`/`claude-haiku-4-5`）。設定値は UserSettings（`claude_model_plan`/`claude_model_exec`）に文字列保存され、そのまま claude CLI の model 指定に渡る＝Agent/shared/DB 変更不要
+- **対象**: `apps/server/src/services/command-handler.ts` / `apps/web/src/pages/SettingsPage.tsx` / changelog.md（計3ファイル）
+- **反映**: `.ts` 変更のため **`pm2 restart devrelay-server` 要**（Agent 再起動不要）。WebUI はリロード。各マシンの claude CLI が対象モデル対応バージョンである必要あり（未対応なら CLI がエラー→`u` で更新）
+
+### #285: 組織 IP アクセス制限 — 社内 IP（許可 CIDR）からのみ接続可能に (2026-07-24)
+
+- **依頼**: 「組織接続の場合、社内 IP からしか接続不可みたいな対応ってできる？」。エンタープライズ統制の強化として、組織 admin が許可 IP レンジ（CIDR）を設定し、その組織のメンバーは社内ネットワークからのみ DevRelay に接続できるようにする
+- **DB**: `Organization` に `allowedIpRanges String?` 追加（許可 CIDR の JSON 配列文字列、null/空配列=制限なし）。psql 直 DDL（`ADD COLUMN IF NOT EXISTS`）→ information_schema で `allowedIpRanges`(text) を検証 → `prisma generate`
+- **IP 照合ユーティリティ（`services/org-control.ts`、依存追加なしの自前実装）**: `isIpInRange`（IPv4 CIDR/単一 IP、IPv6 簡易前方一致、`::ffff:` IPv4-mapped と `::1` を正規化）/ `isIpAllowed`（空=制限なし）/ `isValidCidr`（形式検証）/ `parseIpRanges`（JSON→string[]）/ `checkIpAllowed(userId, ip)`（**60 秒メモリキャッシュ**付きで組織レンジを引き判定）/ `hasIpRestriction(userId)`（IP 判定不能な経路のブロック判定用）/ `clearIpRangeCache`（設定更新時に呼ぶ）
+- **trustProxy**: `index.ts` の Fastify を `{ logger: true, trustProxy: true }` に。Caddy 経由の `X-Forwarded-For` を信頼し `request.ip` を実クライアント IP にする
+- **チェック適用（4 経路）**: (1) `routes/auth.ts` `authenticate()` — セッション検証成功後に `checkIpAllowed` → 拒否時 403 (2) `mcp/auth.ts` `authenticateMcp()` — userId 確定後に同チェック → 拒否時 null（認証失敗扱い） (3) `services/agent-manager.ts` `handleAgentConnect()` — `machine.userId` + `req.ip`（`setupAgentWebSocket` から配線）で同チェック → connect:ack failure + ws.close (4) `services/command-handler.ts` `executeCommand()` — **Discord/Telegram は IP を判定できないため**、IP 制限が有効な組織のユーザーは `hasIpRestriction` でブロック（web 経路は authenticate 済みのため対象外、抜け穴防止）
+- **管理 API（`routes/organization.ts`、admin のみ）**: `GET /api/org/ip-ranges`（`{ allowedIpRanges, currentIp }`、現在の接続元 IP も返す）/ `PUT /api/org/ip-ranges`（body `{ allowedIpRanges: string[], force?: boolean }`。トリム/重複排除 + CIDR 形式検証。**ロックアウト防止**: 保存後レンジに現在の接続元 IP が含まれず force なしなら 400 `{ error:'lockout_warning', message, currentIp }`。保存時に `clearIpRangeCache()`）
+- **WebUI**: `lib/api.ts` に `org.getIpRanges()` / `org.setIpRanges(ranges, force)`。`SettingsPage.tsx` の Enterprise セクション（admin のみ）に「IP アクセス制限」= 現在の接続元 IP 表示 + CIDR リスト（追加/削除、空=制限なし注記）+ 締め出し警告時の確認ダイアログ（force 再送）+ Discord/Telegram がブロックされる旨の注記
+- **対象**: server=`prisma/schema.prisma` / `src/index.ts` / `src/routes/auth.ts` / `src/mcp/auth.ts` / `src/services/org-control.ts` / `src/services/agent-manager.ts` / `src/services/command-handler.ts` / `src/routes/organization.ts`、web=`src/lib/api.ts` / `src/pages/SettingsPage.tsx`（計10ファイル）+ changelog.md。Agent/shared 変更なし。`pnpm build` 全 WS 成功
+- **反映**: DB マイグレーション適用済み + `.ts` 変更のため **`pm2 restart devrelay-server` 要**（Agent 再起動不要）。WebUI はリロード
+- **v1 スコープ外**: 拒否ログの UI 表示（サーバーログのみ）/ OAuth ログイン画面自体の IP 制限（Caddy レイヤーで別途可能）/ ロール別除外（admin だけ社外許可 等）
+- **教訓**: 経路ごとに IP 取得可否が異なる。web/MCP/Agent は `request.ip`（trustProxy で実 IP）で判定できるが、Discord/Telegram は接続元が各プラットフォームのサーバーのため IP 判定不能 → 「制限有効組織のユーザーはブロック」で抜け穴を塞ぐ。DB 負荷を抑えるため userId ごとに 60 秒キャッシュ
+
 ### #284: プロジェクト自動登録の同名衝突を解消 — 自動リネーム + スキップ理由の可視化 + CLI --name (2026-07-24)
 
 - **依頼**: 「`d:\iap\lafit` / `d:\iap_trunk\lafit` を DevRelay に登録できるか？ やったら出てこなかった」。trunk/branch 構成で同名フォルダを両方登録したいケース
@@ -16,6 +41,17 @@
 - **反映**: **Agent のみ、サーバー再起動不要**。対象マシンで `u`→`u`
 - **検証**: WebUI で projectsDirs に `d:\iap_trunk` を追加 → 再スキャンで `lafit (iap_trunk)` が自動登録されること。既存 `Lafit`（d:\iap\eBuilder8\workspace\Lafit）は無変更
 - **教訓**: 自動検出の重複判定を name 一致でスキップすると trunk/branch の同名フォルダが登録不能になり、しかも理由がログに出ずユーザーが気づけない。path 一致のみスキップ + name 衝突は自動リネームが正解。CLI の name 指定は既存 `addProject` の未使用引数を配線するだけで実現
+
+### #283: Devin 内部ログ表示の改善 v3 — session_manager ノイズ除去 + コマンド実行/glob の日本語化 (2026-07-24)
+
+- **依頼**: #282 の実機初運用（03 TISA）のログを確認 → glob のライブ表示・read の日本語化は的中で動作良好だが、`⏳ 🔧 [session_manager] session_id=... [create_session] acquiring additional_env lock` 等の内部ノイズが 9 行漏れていた
+- **原因**: #282 のテスト時サンプルは `chisel::session_manager`（除外できていた）だったが、exec 実行では **`toolbox::` 配下にも session_manager 系モジュールがある**と判明し、`toolbox::` フィルタをすり抜けた。ただしノイズ内に 1 行だけ実行コマンド本体を含む `shell=NonInteractive { ... command: "Get-ChildItem ..." ... }` があった
+- **修正1（session_manager ノイズ除去 + コマンド抽出）**: `formatDevinToolLog` で `toolName === 'session_manager'` の場合、Rust Debug 表記から `command:\s*"((?:[^"\\]|\\.)*)"` を抽出し、あれば `💻 コマンド実行中: <cmd>`（`\\`→`\` アンエスケープ込み）に変換。それ以外（ロック取得/PTY 準備行）は**空文字**を返して非表示
+- **修正2（呼び出し側で空文字スキップ）**: `const formatted = formatDevinToolLog(...); if (formatted) onOutput(\`⏳ ${formatted}\n\`, false);`。空文字は進捗表示しない
+- **修正3（glob の日本語化）**: 実機ログで書式確認済みの `Searching for files matching pattern: <pat> in <dir>` を `🔍 <dir> で <pat> を検索中...` に変換（read も #282 の推定→実機確認済みへコメント更新）
+- **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル、`formatDevinToolLog` と呼び出し側のみ）+ changelog.md。DEVIN_LOG_RE・拒否検出・行バッファ・close フラッシュ等の #282 基盤は無変更。サーバー・shared・connection.ts・DB 変更なし。`pnpm build` 全 WS 成功、3 dist に `を検索中`×1 / `session_manager`×4 / `if (formatted)`×1 確認
+- **反映**: **Agent のみ、サーバー再起動不要**。TISA 02 / 03 TISA で `u`→`u`
+- **教訓**: devin の `toolbox::` 名前空間はツール実行（write/read/glob）だけでなく session_manager 系の内部運用ログも含む → モジュール名でのフィルタだけでは不十分でツール名単位の除外が必要。ノイズでも実行コマンド本体が含まれる行は宝なので抽出して活用
 
 ### #282: Devin の内部ログをライブ表示 — CHISEL_LOG_STDERR で stderr の実行ログを進捗化 (2026-07-24)
 
@@ -40,6 +76,21 @@
 - **対象**: `agents/{linux,macos,windows}/src/services/ai-runner.ts`（3ファイル、devin ブランチのみ）+ changelog.md。windows は `log.info`/`log.warn` 系。既存の 3 秒ポーラー・ハートビート・上限タイマーは無変更（将来 devin が逐次書き出しに変われば自動でライブ復活）。サーバー・shared・connection.ts・DB 変更なし。`pnpm build` 全 WS 成功
 - **反映**: **Agent のみ、サーバー再起動不要**。TISA 02 / 03 TISA で `u`→`u`
 - **制約**: devin が**ファイルを触らない工程**（調査・思考中）はウォッチでは見えず、その間はハートビートのみ。ATIF の**ライブ**表示は devin の仕様（turn 終了時一括書き出し）により不可能
+
+### #280: 組織ロゴを 7 割サイズに縮小 (2026-07-22)
+
+- **依頼**: 「ロゴ、7 割ぐらいに小さくして」。#279 で flex フローに移した組織ロゴが大きめだったため縮小
+- **修正**: `apps/web/src/components/Layout.tsx` のロゴ `<img>` className のサイズ指定を ≒70% に（`h-10`→`h-7`(40→28px) / `max-w-[120px]`→`max-w-[84px]` / `md:h-14`→`md:h-10`(56→40px) / `md:max-w-[280px]`→`md:max-w-[196px]`）。flex 構造・#279 の非重複対策は変更なし
+- **対象**: `apps/web/src/components/Layout.tsx`（1 ファイル、className 1 行のみ）。サーバー・Agent・DB 変更なし。`pnpm --filter web build` 成功
+- **反映**: **サーバー再起動不要**、ブラウザリロードで反映
+
+### #279: 組織ロゴがナビ項目（DevRelay/Chat）を覆い隠す問題を修正 (2026-07-22)
+
+- **症状**: 「chat がロゴで消えちゃった」。エンタープライズ組織ロゴ（TISA）表示時、ナビ左端の「DevRelay」ブランドと先頭の「Chat」リンクが見えない
+- **原因**: #264 フォローアップで組織ロゴを `absolute left-2 ... md:max-w-[280px] z-10` のオーバーレイ配置にした。ナビ本体は `max-w-7xl mx-auto` の中央寄せで、ウィンドウ幅が広い（≈1300px 以上）と重ならないが、狭い幅（スクショは ≈1050px）ではコンテナが左端から始まり 280px 幅のロゴがナビ先頭項目を覆う
+- **修正**: ロゴを absolute オーバーレイから **flex フロー内の要素**に変更（`flex-shrink-0 ml-2`、サイズ指定 h-10/md:h-14/max-w はそのまま）。ナビコンテナを `flex items-center` でロゴと横並びにし、コンテナ側に `flex-1 min-w-0` を付与 → ロゴ右側の残り幅で中央寄せされ、どのウィンドウ幅でも重ならない。「左端ベタ付け + 最大化」の見た目は維持。ロゴ未設定時は従来と完全同一レイアウト
+- **対象**: `apps/web/src/components/Layout.tsx`（1 ファイル、`<nav>` 構造のみ）。サーバー・Agent・DB 変更なし。`pnpm --filter web build` 成功
+- **反映**: **サーバー再起動不要**、ブラウザリロードで反映
 
 ### #278: Devin 進捗ハートビートが短時間タスクで出ない不具合を修正（間隔 60→30 秒） (2026-07-22)
 

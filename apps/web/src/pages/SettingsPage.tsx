@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { settings, platforms, services, agreementTemplate, allowedTools, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity } from '../lib/api';
+import { settings, platforms, services, agreementTemplate, allowedTools, tokens as tokensApi, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity, type OrgRole, type OrgAuditLogEntry, type PersonalAccessTokenInfo } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificationSound } from '../utils/notification-sound';
@@ -85,16 +85,24 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
     label: '会話モード (Voice Assist)',
     description: '音声指示の組み立て会話に使用',
   },
+  {
+    key: 'org_summary_provider',
+    label: 'Org Summary（統制）',
+    description: '配下メンバーの活動要約に使用（未設定時は Build Summary の設定を流用）',
+  },
 ];
 
 /** Claude モデル選択肢（server の AVAILABLE_MODELS と同期。フル ID は CLI バージョン非依存で動作） */
 const CLAUDE_MODEL_OPTIONS = [
   { value: '', label: '(default) — CLI 標準' },
   { value: 'claude-fable-5', label: 'Claude Fable 5（最高性能）' },
-  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8（高性能・最新）' },
-  { value: 'opus', label: 'Claude Opus 4（CLI版）' },
-  { value: 'sonnet', label: 'Claude Sonnet 4（バランス型）' },
-  { value: 'haiku', label: 'Claude Haiku 3.5（高速・低コスト）' },
+  { value: 'claude-opus-5', label: 'Claude Opus 5（高性能・最新）' },
+  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8（高性能）' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5（バランス型・最新）' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5（高速・低コスト・最新）' },
+  { value: 'opus', label: 'Claude Opus（CLI版）' },
+  { value: 'sonnet', label: 'Claude Sonnet（CLI版）' },
+  { value: 'haiku', label: 'Claude Haiku（CLI版）' },
 ];
 
 /** Claude モデル設定フィールド（plan/exec 別）。`l` コマンドと同じ UserSettings キーを共有 */
@@ -144,6 +152,16 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
   // admin: メンバー / アクティビティ
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [activity, setActivity] = useState<OrgActivity[]>([]);
+  // admin: 監査ログ（統制 v3 #270）
+  const [auditLogs, setAuditLogs] = useState<OrgAuditLogEntry[]>([]);
+  const [auditOpen, setAuditOpen] = useState(false);
+  // admin: 担当マネージャー割当編集（対象 member の userId / 選択中の managerUserId 群）
+  const [editingManagersFor, setEditingManagersFor] = useState<string | null>(null);
+  const [editingManagerIds, setEditingManagerIds] = useState<string[]>([]);
+  // admin: IP アクセス制限（#285）
+  const [ipRanges, setIpRanges] = useState<string[]>([]);
+  const [currentIp, setCurrentIp] = useState('');
+  const [newIpRange, setNewIpRange] = useState('');
   // ロゴプレビュー用のキャッシュバスター
   const [logoBust, setLogoBust] = useState(Date.now());
 
@@ -154,6 +172,8 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
     if (!isAdmin) return;
     orgApi.listMembers().then((r) => setMembers(r.members)).catch(() => { /* ignore */ });
     orgApi.activity().then((r) => setActivity(r.activity)).catch(() => { /* ignore */ });
+    orgApi.auditLog().then((r) => setAuditLogs(r.logs)).catch(() => { /* ignore */ });
+    orgApi.getIpRanges().then((r) => { setIpRanges(r.allowedIpRanges); setCurrentIp(r.currentIp); }).catch(() => { /* ignore */ });
   }, [isAdmin, organization?.orgCode]);
 
   const flash = (message: string, isError = false) => {
@@ -264,18 +284,94 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
     } finally { setBusy(false); }
   };
 
-  /** メンバーの role を変更する */
-  const handleToggleRole = async (m: OrgMember) => {
-    const next = m.role === 'admin' ? 'member' : 'admin';
+  /** メンバーの role を変更する（admin / manager / member） */
+  const handleChangeRole = async (m: OrgMember, next: OrgRole) => {
+    if (next === m.role) return;
     setBusy(true);
     try {
       await orgApi.updateRole(m.userId, next);
-      const r = await orgApi.listMembers();
-      setMembers(r.members);
+      const [mr, ar] = await Promise.all([orgApi.listMembers(), orgApi.activity().catch(() => ({ activity }))]);
+      setMembers(mr.members);
+      setActivity(ar.activity);
       flash('権限を変更しました');
     } catch (e) {
       flash(e instanceof Error ? e.message : '変更に失敗しました', true);
     } finally { setBusy(false); }
+  };
+
+  /** 担当マネージャー割当の編集を開始する（現在の割当を読み込む） */
+  const handleEditManagers = async (m: OrgMember) => {
+    setBusy(true);
+    try {
+      const { managerUserIds } = await orgApi.getManagers(m.userId);
+      setEditingManagerIds(managerUserIds);
+      setEditingManagersFor(m.userId);
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '担当マネージャーの取得に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** 割当編集のチェックボックス切り替え */
+  const toggleManagerId = (managerUserId: string) => {
+    setEditingManagerIds((prev) =>
+      prev.includes(managerUserId) ? prev.filter((id) => id !== managerUserId) : [...prev, managerUserId]
+    );
+  };
+
+  /** 担当マネージャー割当を保存する */
+  const handleSaveManagers = async (memberUserId: string) => {
+    setBusy(true);
+    try {
+      await orgApi.setManagers(memberUserId, editingManagerIds);
+      const r = await orgApi.listMembers();
+      setMembers(r.members);
+      setEditingManagersFor(null);
+      setEditingManagerIds([]);
+      flash('担当マネージャーを更新しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '割当の保存に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** 許可 IP レンジを保存する（#285）。締め出し警告時は確認して強制保存 */
+  const persistIpRanges = async (ranges: string[]) => {
+    setBusy(true);
+    try {
+      const r = await orgApi.setIpRanges(ranges, false);
+      setIpRanges(r.allowedIpRanges);
+      setCurrentIp(r.currentIp);
+      flash('IP アクセス制限を更新しました');
+    } catch (e) {
+      // サーバーは締め出し警告時に error='lockout_warning' を返す
+      if (e instanceof Error && e.message === 'lockout_warning') {
+        if (confirm(`現在の接続元 IP (${currentIp}) が許可レンジに含まれていません。\nこのまま保存するとあなた自身がアクセスできなくなる可能性があります。\n本当に保存しますか？`)) {
+          try {
+            const r2 = await orgApi.setIpRanges(ranges, true);
+            setIpRanges(r2.allowedIpRanges);
+            setCurrentIp(r2.currentIp);
+            flash('IP アクセス制限を更新しました（締め出し警告を無視）');
+          } catch (e2) {
+            flash(e2 instanceof Error ? e2.message : '保存に失敗しました', true);
+          }
+        }
+      } else {
+        flash(e instanceof Error ? e.message : '保存に失敗しました', true);
+      }
+    } finally { setBusy(false); }
+  };
+
+  /** IP レンジを追加する */
+  const handleAddIpRange = () => {
+    const v = newIpRange.trim();
+    if (!v) return;
+    if (ipRanges.includes(v)) { setNewIpRange(''); return; }
+    persistIpRanges([...ipRanges, v]);
+    setNewIpRange('');
+  };
+
+  /** IP レンジを削除する */
+  const handleRemoveIpRange = (range: string) => {
+    persistIpRanges(ipRanges.filter((r) => r !== range));
   };
 
   const inputCls = 'w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border-color)] rounded text-[var(--text-primary)] text-sm';
@@ -319,6 +415,10 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
               ) : (
                 <div className="space-y-3">
                   <p className="text-xs text-[var(--text-faint)]">管理者から共有された組織IDと参加パスワードを入力してください。</p>
+                  <div className="text-xs text-[var(--text-secondary)] bg-[var(--bg-base)] border border-[var(--border-color)] rounded p-3">
+                    ⚠️ 組織に参加すると、組織の<strong>管理者・担当マネージャー</strong>があなたの会話履歴を閲覧・要約できるようになります。
+                    これは業務利用状況の統制のための機能です。同意のうえ参加してください。
+                  </div>
                   <input className={inputCls} placeholder="組織ID（例: ORG-XXXXXX）" value={joinCode} onChange={(e) => setJoinCode(e.target.value)} />
                   <input className={inputCls} type="password" placeholder="参加パスワード" value={joinPw} onChange={(e) => setJoinPw(e.target.value)} />
                   <button onClick={handleJoin} disabled={busy} className={btnPrimary}>参加</button>
@@ -336,6 +436,11 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
             所属組織: <strong className="text-[var(--text-primary)]">{organization.name}</strong>
           </p>
           <p className="text-xs text-[var(--text-faint)]">この組織の統制下にあります。</p>
+          {/* 透明性表示（統制 v3 #270）: 被監視者への明示 */}
+          <div className="text-xs text-[var(--text-secondary)] bg-[var(--bg-base)] border border-[var(--border-color)] rounded p-3">
+            🔎 この組織では、<strong>管理者・担当マネージャー</strong>があなたの会話履歴を閲覧できます。
+            また、会話は業務状況の把握のため AI により要約されることがあります。
+          </div>
           <button onClick={handleLeave} disabled={busy} className="px-4 py-2 border border-[var(--border-danger)] text-[var(--text-danger)] rounded text-sm">脱退する</button>
         </div>
       )}
@@ -361,6 +466,42 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
             </div>
           </div>
 
+          {/* IP アクセス制限（#285） */}
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">IP アクセス制限</label>
+            <p className="text-xs text-[var(--text-faint)] mb-2">
+              許可する IP レンジ（CIDR 表記、例 <code>203.0.113.0/24</code> や単一 IP <code>198.51.100.5</code>）を登録すると、
+              この組織のメンバーは登録レンジ内からのみ接続できます。<br />
+              リストが空の場合は制限なし（どこからでも接続可）。<br />
+              対象経路: WebUI / モバイルアプリ / MCP / Agent 接続。<br />
+              <span className="text-[var(--text-danger)]">Discord / Telegram は IP を判定できないため、IP 制限が有効な間はコマンド発行がブロックされます。</span>
+            </p>
+            <p className="text-xs text-[var(--text-faint)] mb-2">現在のあなたの接続元 IP: <code className="text-[var(--text-secondary)]">{currentIp || '取得中...'}</code></p>
+            {ipRanges.length === 0 ? (
+              <p className="text-xs text-[var(--text-faint)] mb-2">（現在 制限なし）</p>
+            ) : (
+              <ul className="mb-2 space-y-1">
+                {ipRanges.map((r) => (
+                  <li key={r} className="flex items-center justify-between bg-[var(--bg-base)] border border-[var(--border-color)] rounded px-3 py-1.5">
+                    <code className="text-sm text-[var(--text-primary)]">{r}</code>
+                    <button onClick={() => handleRemoveIpRange(r)} disabled={busy} className="text-xs text-[var(--text-danger)]">削除</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="flex gap-2">
+              <input
+                className={inputCls}
+                type="text"
+                placeholder="例: 203.0.113.0/24"
+                value={newIpRange}
+                onChange={(e) => setNewIpRange(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddIpRange(); } }}
+              />
+              <button onClick={handleAddIpRange} disabled={busy || !newIpRange.trim()} className={btnPrimary}>追加</button>
+            </div>
+          </div>
+
           {/* ロゴ */}
           <div>
             <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">会社ロゴ（左上に表示）</label>
@@ -382,33 +523,86 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
           {/* メンバー管理 */}
           <div>
             <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">メンバー（{members.length}名）</label>
-            <p className="text-xs text-[var(--text-faint)] mb-2">メンバーは組織ID + 参加パスワードで自己参加します。</p>
+            <p className="text-xs text-[var(--text-faint)] mb-2">メンバーは組織ID + 参加パスワードで自己参加します。<br />一般ユーザー（member）は担当マネージャーが1人以上いないとコマンドを発行できません。</p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[var(--text-faint)] border-b border-[var(--border-color)]">
                     <th className="py-2 pr-4">メンバー</th>
                     <th className="py-2 pr-4">権限</th>
+                    <th className="py-2 pr-4">担当マネージャー</th>
                     <th className="py-2 pr-4">参加日</th>
                     <th className="py-2"></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {members.map((m) => (
-                    <tr key={m.userId} className="border-b border-[var(--border-color)]">
+                  {members.map((m) => {
+                    // 割当候補: 自分以外の manager / admin
+                    const managerCandidates = members.filter((c) => c.userId !== m.userId && (c.role === 'manager' || c.role === 'admin'));
+                    const isEditing = editingManagersFor === m.userId;
+                    return (
+                    <tr key={m.userId} className="border-b border-[var(--border-color)] align-top">
                       <td className="py-2 pr-4 text-[var(--text-primary)]">{m.email || m.name || m.userId}{m.isSelf && <span className="text-[var(--text-faint)]">（あなた）</span>}</td>
-                      <td className="py-2 pr-4 text-[var(--text-secondary)]">{m.role}</td>
+                      <td className="py-2 pr-4 text-[var(--text-secondary)]">
+                        {m.isSelf ? (
+                          <span>{m.role}</span>
+                        ) : (
+                          <select
+                            value={m.role}
+                            disabled={busy}
+                            onChange={(e) => handleChangeRole(m, e.target.value as OrgRole)}
+                            className="px-2 py-1 bg-[var(--bg-base)] border border-[var(--border-color)] rounded text-[var(--text-primary)] text-xs"
+                          >
+                            <option value="admin">admin</option>
+                            <option value="manager">manager</option>
+                            <option value="member">member</option>
+                          </select>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-[var(--text-secondary)]">
+                        {m.role !== 'member' ? (
+                          <span className="text-[var(--text-faint)]">—</span>
+                        ) : isEditing ? (
+                          <div className="min-w-[180px]">
+                            {managerCandidates.length === 0 ? (
+                              <p className="text-xs text-[var(--text-faint)]">先に manager/admin を作成してください</p>
+                            ) : (
+                              managerCandidates.map((c) => (
+                                <label key={c.userId} className="flex items-center gap-2 text-xs py-0.5 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={editingManagerIds.includes(c.userId)}
+                                    onChange={() => toggleManagerId(c.userId)}
+                                  />
+                                  <span>{c.email || c.name || c.userId}<span className="text-[var(--text-faint)]"> ({c.role})</span></span>
+                                </label>
+                              ))
+                            )}
+                            <div className="mt-1 whitespace-nowrap">
+                              <button onClick={() => handleSaveManagers(m.userId)} disabled={busy} className="text-xs text-[var(--text-link)] mr-3">保存</button>
+                              <button onClick={() => { setEditingManagersFor(null); setEditingManagerIds([]); }} disabled={busy} className="text-xs text-[var(--text-faint)]">キャンセル</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="whitespace-nowrap">
+                            {(m.managerCount ?? 0) === 0 ? (
+                              <span className="text-[var(--text-danger)]" title="担当マネージャーが未割当のためコマンド発行不可">⚠️ 未割当</span>
+                            ) : (
+                              <span>{m.managerCount}人</span>
+                            )}
+                            <button onClick={() => handleEditManagers(m)} disabled={busy} className="text-xs text-[var(--text-link)] ml-2">編集</button>
+                          </span>
+                        )}
+                      </td>
                       <td className="py-2 pr-4 text-[var(--text-faint)]">{new Date(m.createdAt).toLocaleDateString()}</td>
                       <td className="py-2 text-right whitespace-nowrap">
                         {!m.isSelf && (
-                          <>
-                            <button onClick={() => handleToggleRole(m)} disabled={busy} className="text-xs text-[var(--text-link)] mr-3">{m.role === 'admin' ? 'member にする' : 'admin にする'}</button>
-                            <button onClick={() => handleRemoveMember(m)} disabled={busy} className="text-xs text-[var(--text-danger)]">削除</button>
-                          </>
+                          <button onClick={() => handleRemoveMember(m)} disabled={busy} className="text-xs text-[var(--text-danger)]">削除</button>
                         )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -442,6 +636,52 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
               </table>
             </div>
           </div>
+
+          {/* 監査ログ（統制 v3 #270、誰がいつ誰の会話を閲覧・要約したか） */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setAuditOpen((v) => !v)}
+              className="flex items-center gap-2 text-sm font-medium text-[var(--text-secondary)] mb-2"
+            >
+              <span>{auditOpen ? '▼' : '▶'}</span>
+              <span>Supervision Audit Log（閲覧監査ログ）</span>
+              <span className="text-xs text-[var(--text-faint)]">{auditLogs.length}件</span>
+            </button>
+            {auditOpen && (
+              <div className="overflow-x-auto">
+                {auditLogs.length === 0 ? (
+                  <p className="text-xs text-[var(--text-faint)]">まだ閲覧記録はありません。</p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[var(--text-faint)] border-b border-[var(--border-color)]">
+                        <th className="py-2 pr-4">日時</th>
+                        <th className="py-2 pr-4">閲覧者</th>
+                        <th className="py-2 pr-4">対象</th>
+                        <th className="py-2">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditLogs.map((log) => (
+                        <tr key={log.id} className="border-b border-[var(--border-color)]">
+                          <td className="py-2 pr-4 text-[var(--text-faint)] whitespace-nowrap">{new Date(log.createdAt).toLocaleString()}</td>
+                          <td className="py-2 pr-4 text-[var(--text-primary)]">{log.viewer.email || log.viewer.name || log.viewer.email || '—'}</td>
+                          <td className="py-2 pr-4 text-[var(--text-secondary)]">{log.target.email || log.target.name || '—'}</td>
+                          <td className="py-2 text-[var(--text-secondary)]">
+                            {log.action === 'view_sessions' ? '会話一覧を閲覧'
+                              : log.action === 'view_messages' ? '会話全文を閲覧'
+                              : log.action === 'summarize' ? 'AI 要約を生成'
+                              : log.action}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -467,6 +707,15 @@ export function SettingsPage() {
   const [linkCode, setLinkCode] = useState('');
   const [linking, setLinking] = useState(false);
   const [unlinking, setUnlinking] = useState<string | null>(null);
+
+  // Personal Access Token（#271）
+  const [patList, setPatList] = useState<PersonalAccessTokenInfo[]>([]);
+  const [patName, setPatName] = useState('');
+  const [patCreating, setPatCreating] = useState(false);
+  const [patRevoking, setPatRevoking] = useState<string | null>(null);
+  /** 発行直後の平文トークン（1回のみ表示、画面離脱で消失） */
+  const [patNewToken, setPatNewToken] = useState<string | null>(null);
+  const [patCopied, setPatCopied] = useState(false);
 
   // 通知音設定
   const [soundEnabled, setSoundEnabled] = useState(() => isNotificationSoundEnabled());
@@ -535,12 +784,13 @@ export function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const [settingsResult, platformsResult, serviceStatusResult, agreementResult, atResult] = await Promise.all([
+      const [settingsResult, platformsResult, serviceStatusResult, agreementResult, atResult, patResult] = await Promise.all([
         settings.get(),
         platforms.list(),
         services.status().catch(() => null),
         agreementTemplate.get().catch(() => null),
         allowedTools.get().catch(() => null),
+        tokensApi.list().catch(() => ({ tokens: [] })),
       ]);
       setData(settingsResult);
       // サーバーにチャット表示設定があれば localStorage を上書きして反映
@@ -571,6 +821,7 @@ export function SettingsPage() {
         setAtLinuxDraft((atResult.linux.tools ?? atResult.linux.defaults).join('\n'));
         setAtWindowsDraft((atResult.windows.tools ?? atResult.windows.defaults).join('\n'));
       }
+      setPatList(patResult.tokens);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings');
     } finally {
@@ -989,6 +1240,130 @@ export function SettingsPage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* API Tokens Section — Personal Access Token (#271) */}
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">API Tokens</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-4">
+          Personal Access Tokens for MCP endpoints. Use these for scripts, CI/CD, or automation.
+        </p>
+
+        {/* 発行直後の平文トークン表示（1回のみ） */}
+        {patNewToken && (
+          <div className="mb-4 p-4 bg-[var(--bg-tertiary)] border border-[var(--accent-blue)] rounded">
+            <p className="text-sm font-medium text-[var(--text-primary)] mb-2">
+              Token created successfully
+            </p>
+            <code className="block bg-[var(--bg-base)] px-3 py-2 rounded text-sm text-[var(--text-primary)] break-all mb-2 select-all">
+              {patNewToken}
+            </code>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => { navigator.clipboard.writeText(patNewToken); setPatCopied(true); setTimeout(() => setPatCopied(false), 2000); }}
+                className="px-3 py-1 bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded text-sm"
+              >
+                {patCopied ? 'Copied!' : 'Copy'}
+              </button>
+              <button
+                onClick={() => { setPatNewToken(null); setPatCopied(false); }}
+                className="px-3 py-1 text-[var(--text-faint)] hover:text-[var(--text-secondary)] text-sm"
+              >
+                Dismiss
+              </button>
+            </div>
+            <p className="text-xs text-[var(--text-danger)] mt-2">
+              This token will not be shown again. Copy it now.
+            </p>
+          </div>
+        )}
+
+        {/* 発行フォーム */}
+        <div className="flex flex-col sm:flex-row sm:items-end gap-2 sm:gap-4 mb-4">
+          <div className="flex-1">
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Token name</label>
+            <input
+              type="text"
+              value={patName}
+              onChange={(e) => setPatName(e.target.value)}
+              placeholder="e.g. CI/CD, automation script"
+              className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+            />
+          </div>
+          <button
+            onClick={async () => {
+              if (!patName.trim()) return;
+              setPatCreating(true);
+              try {
+                const result = await tokensApi.create(patName.trim());
+                setPatNewToken(result.token);
+                setPatName('');
+                const updated = await tokensApi.list();
+                setPatList(updated.tokens);
+              } catch (e) {
+                setError(e instanceof Error ? e.message : 'Failed to create token');
+              } finally {
+                setPatCreating(false);
+              }
+            }}
+            disabled={patCreating || !patName.trim()}
+            className="px-4 py-2 bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] text-white rounded disabled:opacity-50 w-full sm:w-auto"
+          >
+            {patCreating ? 'Creating...' : 'Create Token'}
+          </button>
+        </div>
+
+        {/* トークン一覧 */}
+        {patList.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[var(--text-faint)] border-b border-[var(--border-color)]">
+                  <th className="py-2 pr-4">Name</th>
+                  <th className="py-2 pr-4">Created</th>
+                  <th className="py-2 pr-4">Last Used</th>
+                  <th className="py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {patList.map((pat) => (
+                  <tr key={pat.id} className={`border-b border-[var(--border-color)] ${pat.revokedAt ? 'opacity-50' : ''}`}>
+                    <td className="py-2 pr-4 text-[var(--text-primary)]">{pat.name}</td>
+                    <td className="py-2 pr-4 text-[var(--text-faint)] whitespace-nowrap">{new Date(pat.createdAt).toLocaleDateString()}</td>
+                    <td className="py-2 pr-4 text-[var(--text-faint)] whitespace-nowrap">
+                      {pat.lastUsedAt ? new Date(pat.lastUsedAt).toLocaleString() : '—'}
+                    </td>
+                    <td className="py-2 text-right whitespace-nowrap">
+                      {pat.revokedAt ? (
+                        <span className="text-xs text-[var(--text-faint)]">Revoked</span>
+                      ) : (
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Revoke token "${pat.name}"? This cannot be undone.`)) return;
+                            setPatRevoking(pat.id);
+                            try {
+                              await tokensApi.revoke(pat.id);
+                              const updated = await tokensApi.list();
+                              setPatList(updated.tokens);
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : 'Failed to revoke token');
+                            } finally {
+                              setPatRevoking(null);
+                            }
+                          }}
+                          disabled={patRevoking === pat.id}
+                          className="text-xs text-[var(--text-danger)] hover:opacity-80 disabled:opacity-50"
+                        >
+                          {patRevoking === pat.id ? 'Revoking...' : 'Revoke'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* AI Provider Settings Section — 機能ごとのプロバイダー選択 */}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { conversations, getToken } from '../lib/api';
-import type { ConversationItem, ConversationsResponse, MessageFileMeta } from '../lib/api';
+import { conversations, org as orgApi, getToken } from '../lib/api';
+import type { ConversationItem, ConversationsResponse, MessageFileMeta, OrgSupervisedMember } from '../lib/api';
+import { useOrganization } from '../contexts/OrganizationContext';
 
 /** トークン数を K 単位で表示（例: 19963 → "20.0K"） */
 function formatTokens(n: number): string {
@@ -109,10 +110,23 @@ export function ConversationsPage() {
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
+  // 統制 v2（#268）: admin/manager は監督対象ユーザーの会話履歴を切り替えて閲覧できる
+  const { organization } = useOrganization();
+  const canSupervise = organization?.role === 'admin' || organization?.role === 'manager';
+  const [supervised, setSupervised] = useState<OrgSupervisedMember[]>([]);
+  // 選択中の対象ユーザー（空文字 = 自分の履歴）
+  const [selectedUserId, setSelectedUserId] = useState('');
+
+  // 監督者なら担当ユーザー一覧を取得
+  useEffect(() => {
+    if (!canSupervise) { setSupervised([]); return; }
+    orgApi.myMembers().then((r) => setSupervised(r.members)).catch(() => setSupervised([]));
+  }, [canSupervise]);
+
   const loadConversations = async () => {
     try {
       setLoading(true);
-      const result = await conversations.list(page * PAGE_SIZE, PAGE_SIZE);
+      const result = await conversations.list(page * PAGE_SIZE, PAGE_SIZE, selectedUserId || undefined);
       setData(result);
       if (error) setError('');
     } catch (err) {
@@ -124,7 +138,13 @@ export function ConversationsPage() {
 
   useEffect(() => {
     loadConversations();
-  }, [page]);
+  }, [page, selectedUserId]);
+
+  // 対象ユーザー切替時はページを先頭に戻す
+  const handleSelectUser = (userId: string) => {
+    setSelectedUserId(userId);
+    setPage(0);
+  };
 
   // Escape キーでライトボックスを閉じる
   useEffect(() => {
@@ -164,7 +184,24 @@ export function ConversationsPage() {
 
   return (
     <div className="p-6">
-      <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Conversations</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <h1 className="text-2xl font-bold text-[var(--text-primary)]">Conversations</h1>
+        {canSupervise && supervised.length > 0 && (
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-[var(--text-muted)]">閲覧対象:</label>
+            <select
+              value={selectedUserId}
+              onChange={(e) => handleSelectUser(e.target.value)}
+              className="px-3 py-1.5 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded text-[var(--text-primary)] text-sm"
+            >
+              <option value="">自分の履歴</option>
+              {supervised.map((m) => (
+                <option key={m.userId} value={m.userId}>{m.email || m.name || m.userId}</option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
 
       {items.length === 0 ? (
         <div className="bg-[var(--bg-secondary)] rounded-lg p-8 text-center text-[var(--text-muted)]">

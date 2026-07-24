@@ -1213,3 +1213,19 @@ Flutter アプリを USB 接続された実機（iPhone/Android）にチャッ�
 - **bash 3.2（macOS 標準）互換**: 空配列 + `set -u` で `${arr[@]}` が unbound エラーになる問題を空安全イディオム `${arr[@]+"${arr[@]}"}` で回避。TS テンプレートリテラル内は `\${` エスケープが必要
 - **Windows は linux 版で自動カバー**: Windows CLI 機は `agents/linux` を実行しているため linux 版 skill-manager に入れれば自動配布される（Git Bash で .sh 実行）。Electron GUI 版 `agents/windows` は skill-manager が存在せず対象外
 - **対象ファイル**: `agents/{linux,macos}/src/services/skill-manager.ts` の 2 ファイルのみ（定数 + `generateFlutterDeploySkillMd()` + `generateFlutterDeployScript()` + `ensureSkillFiles()` への writeFile 追加）
+
+## エンタープライズ統制 v2 — manager ロール + コマンド発行ゲート（#268）
+
+#264（Organization v1: admin/member 2ロール）の上に統制を追加。admin/manager/member の3ロールと「担当マネージャー未割当の member はコマンド発行不可」という deny-by-default の統制を実装。
+
+### 設計判断
+- **単一チョークポイントでゲート**: 全プラットフォーム（Discord/Telegram/WebUI）のコマンドは `command-handler.ts` の `executeCommand()` を必ず通るため、その冒頭に `checkCommandPermission(userId)` を1箇所置くだけで統制が効く。MCP のみ別経路なので `mcp/tools.ts` の書き込み系ツール（`submit_instruction`/`approve_implementation`）にも同じゲートを追加
+- **ゲートロジック（`services/org-control.ts`）**: 組織未所属＝許可 / admin・manager＝許可 / member＝`ManagerAssignment.count({memberUserId})≥1` で許可、0 なら理由付き deny。**admin は暗黙的に全 member を監督するがゲート判定には数えない** — 「必ず明示的に manager を割り当てる」統制を厳密に守るため。緩めたい場合はここで admin も許可条件に含める
+- **未リンクユーザーは統制対象外**: Discord/Telegram で PlatformLink 未リンクのユーザーは User.id を特定できないため従来どおり素通し。統制は WebUI ログインユーザー（User.id 解決可能）基準
+- **担当割当は admin のみ編集**: manager の自己割当は不可（統制の実効性維持）。`PUT /org/members/:userId/managers` は全置換で、候補が同組織の manager/admin であることを検証
+- **role 変更時の割当掃除**: manager→他ロールでその人の担当割当を削除、member→他ロールでその人が担当される側だった割当を削除（無効な割当を残さない）
+- **会話履歴は既存流用**: `GET /api/conversations` に `?userId=` を追加し、本人/同組織admin/担当manager のみ許可（他は 403）。manager は ConversationsPage のドロップダウンで担当ユーザーを切替
+- **可視化**: admin のメンバー表で未割当 member に ⚠️ バッジ（＝コマンド発行不可状態）を表示し、監督者の付け忘れに気づけるようにする
+- **DB DDL の適用**: shadow DB 破損で `prisma migrate dev` 不可 → psql 直実行で `ManagerAssignment` を CREATE + FK + index、information_schema で検証（`prisma db execute` は heredoc の DDL が反映されないケースがあり psql が確実）
+- **対象ファイル**: server=`schema.prisma`/`services/org-control.ts`(新)/`services/command-handler.ts`/`mcp/tools.ts`/`routes/organization.ts`/`routes/api.ts`、web=`lib/api.ts`/`pages/SettingsPage.tsx`/`pages/ConversationsPage.tsx`（計9ファイル）。Agent/shared/Discord/Telegram 変更なし
+- **v2 対象外**: ツール承認の manager 代行、コマンド事前承認フロー、監査ログ export、manager 階層（manager の manager）

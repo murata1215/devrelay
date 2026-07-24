@@ -21,6 +21,7 @@ import {
   addParticipant,
   getActiveProgressForChatId,
 } from '../services/session-manager.js';
+import { checkCommandPermission } from '../services/org-control.js';
 
 /**
  * MCP サーバーにツールを登録する
@@ -72,7 +73,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
    */
   server.tool(
     'search_project_context',
-    'Search a project\'s recent build summaries and conversation history. Use this when the user asks about the current state of a project, what was recently implemented, or to look up context before submitting an instruction.',
+    'Search a project\'s recent build summaries and conversation history. Use this when the user asks about the current state of a project, what was recently implemented, or to look up context before submitting an instruction. Use get_conversation_history for full conversation browsing.',
     { projectId: z.string().describe('The project ID to search'), query: z.string().describe('Search query (keyword or description of what to find)') },
     async ({ projectId, query }) => {
       // ビルドログ検索（最新10件の summary を返す）
@@ -85,35 +86,196 @@ export function registerMcpTools(server: McpServer, userId: string) {
         take: 10,
       });
 
-      // メッセージ検索（AI 応答から query にマッチするものを検索）
+      // メッセージ検索（user + ai メッセージから query にマッチするものを検索）
       const messages = await prisma.message.findMany({
         where: {
           session: { projectId, userId },
-          role: 'ai',
+          role: { in: ['user', 'ai'] },
           content: { contains: query, mode: 'insensitive' },
         },
-        select: { id: true, content: true, createdAt: true },
+        select: {
+          id: true, role: true, content: true, sessionId: true, createdAt: true,
+          files: { select: { id: true } },
+        },
         orderBy: { createdAt: 'desc' },
-        take: 5,
+        take: 10,
       });
 
       const results = [
         ...builds.map(b => ({
-          source: 'build',
+          source: 'build' as const,
           ref: b.id,
           summary: b.summary.slice(0, 200),
           date: b.createdAt.toISOString(),
         })),
         ...messages.map(m => ({
-          source: 'conversation',
+          source: 'conversation' as const,
           ref: m.id,
+          role: m.role,
+          sessionId: m.sessionId,
           summary: m.content.slice(0, 200),
           date: m.createdAt.toISOString(),
+          hasAttachments: m.files.length > 0,
         })),
       ];
 
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({ results }, null, 2) }],
+      };
+    }
+  );
+
+  /**
+   * get_conversation_history — プロジェクトの会話履歴を時系列で取得（#272）
+   */
+  server.tool(
+    'get_conversation_history',
+    'Get conversation messages for a project in chronological order. Use this to browse full conversation history, or to dive deeper into results from search_project_context. Supports pagination via before/after timestamps.',
+    {
+      projectId: z.string().describe('The project ID'),
+      limit: z.number().optional().describe('Number of messages to return (default 50, max 200)'),
+      before: z.string().optional().describe('Return messages before this ISO timestamp (for backward pagination)'),
+      after: z.string().optional().describe('Return messages after this ISO timestamp (for forward pagination)'),
+      order: z.enum(['asc', 'desc']).optional().describe('Sort order by timestamp (default "asc")'),
+    },
+    async ({ projectId, limit: rawLimit, before, after, order: rawOrder }) => {
+      const limit = Math.min(Math.max(rawLimit ?? 50, 1), 200);
+      const order = rawOrder ?? 'asc';
+
+      // createdAt フィルタ構築
+      const createdAtFilter: Record<string, Date> = {};
+      if (before) createdAtFilter.lt = new Date(before);
+      if (after) createdAtFilter.gt = new Date(after);
+
+      const messages = await prisma.message.findMany({
+        where: {
+          session: { projectId, userId },
+          ...(Object.keys(createdAtFilter).length > 0 ? { createdAt: createdAtFilter } : {}),
+        },
+        select: {
+          id: true,
+          role: true,
+          content: true,
+          createdAt: true,
+          sessionId: true,
+          files: {
+            select: { id: true, filename: true, mimeType: true, size: true, direction: true },
+          },
+        },
+        orderBy: { createdAt: order },
+        take: limit,
+      });
+
+      /** 1 メッセージあたりの最大本文長（超過分は切り詰め） */
+      const MAX_CONTENT_LENGTH = 2000;
+
+      const result = {
+        messages: messages.map(m => {
+          const truncated = m.content.length > MAX_CONTENT_LENGTH;
+          return {
+            id: m.id,
+            role: m.role,
+            content: truncated ? m.content.slice(0, MAX_CONTENT_LENGTH) : m.content,
+            truncated,
+            timestamp: m.createdAt.toISOString(),
+            sessionId: m.sessionId,
+            attachments: m.files.map(f => ({
+              id: f.id,
+              filename: f.filename,
+              mimeType: f.mimeType,
+              size: f.size,
+              direction: f.direction,
+            })),
+          };
+        }),
+        count: messages.length,
+        hasMore: messages.length === limit,
+      };
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  /**
+   * get_attachment — 添付ファイル（画像等）を取得（#273）
+   * 画像は MCP ImageContent（base64）で返却、テキストは TextContent で返却
+   */
+  server.tool(
+    'get_attachment',
+    'Get an attachment file (image, text, etc.) by its ID. Use the attachment IDs from get_conversation_history results. Images are returned as base64-encoded image content blocks.',
+    {
+      attachmentId: z.string().describe('The attachment ID from get_conversation_history attachments'),
+    },
+    async ({ attachmentId }) => {
+      const file = await prisma.messageFile.findUnique({
+        where: { id: attachmentId },
+        include: {
+          message: {
+            select: { session: { select: { userId: true } } },
+          },
+        },
+      });
+
+      if (!file || file.message.session.userId !== userId) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Attachment not found' }) }],
+          isError: true,
+        };
+      }
+
+      /** 取得可能な最大ファイルサイズ（5MB） */
+      const MAX_FILE_SIZE = 5 * 1024 * 1024;
+
+      const meta = {
+        id: file.id,
+        filename: file.filename,
+        mimeType: file.mimeType,
+        size: file.size,
+        direction: file.direction,
+      };
+
+      // サイズ上限チェック
+      if (file.size > MAX_FILE_SIZE) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            ...meta,
+            error: `File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is ${MAX_FILE_SIZE / 1024 / 1024}MB.`,
+          }) }],
+        };
+      }
+
+      // 画像: MCP ImageContent で返却
+      if (file.mimeType.startsWith('image/')) {
+        return {
+          content: [
+            { type: 'text' as const, text: JSON.stringify(meta) },
+            { type: 'image' as const, data: Buffer.from(file.content).toString('base64'), mimeType: file.mimeType },
+          ],
+        };
+      }
+
+      // テキスト: 文字列として返却
+      if (file.mimeType.startsWith('text/')) {
+        const textContent = Buffer.from(file.content).toString('utf-8');
+        return {
+          content: [
+            { type: 'text' as const, text: JSON.stringify(meta) },
+            { type: 'text' as const, text: textContent },
+          ],
+        };
+      }
+
+      // その他: base64 を JSON テキストとして返却
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify({
+            ...meta,
+            data: Buffer.from(file.content).toString('base64'),
+            encoding: 'base64',
+          }) },
+        ],
       };
     }
   );
@@ -275,6 +437,12 @@ export function registerMcpTools(server: McpServer, userId: string) {
       instruction: z.string().describe('The coding instruction in Markdown format'),
     },
     async ({ projectId, instruction }) => {
+      // エンタープライズ統制ゲート（#268）: マネージャー未割当の member はコマンド発行不可
+      const permission = await checkCommandPermission(userId);
+      if (!permission.allowed) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: permission.reason }) }], isError: true };
+      }
+
       // プロジェクト + マシン検索
       const project = await prisma.project.findFirst({
         where: { id: projectId, machine: { userId, deletedAt: null } },
@@ -360,6 +528,12 @@ export function registerMcpTools(server: McpServer, userId: string) {
       submissionId: z.string().describe('The submission ID from submit_instruction'),
     },
     async ({ projectId, submissionId }) => {
+      // エンタープライズ統制ゲート（#268）: マネージャー未割当の member はコマンド発行不可
+      const permission = await checkCommandPermission(userId);
+      if (!permission.allowed) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: permission.reason }) }], isError: true };
+      }
+
       // プロジェクト検索
       const project = await prisma.project.findFirst({
         where: { id: projectId, machine: { userId, deletedAt: null } },

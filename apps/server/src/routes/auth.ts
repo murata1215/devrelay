@@ -2,6 +2,10 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { prisma } from '../db/client.js';
+import { checkIpAllowed } from '../services/org-control.js';
+
+/** PAT プレフィクス */
+const PAT_PREFIX = 'devrelay_pat_';
 
 // トークン生成
 function generateToken(): string {
@@ -10,6 +14,34 @@ function generateToken(): string {
 
 // セッション有効期限（30日）
 const SESSION_EXPIRES_DAYS = 30;
+
+// セッションのスライド延長閾値（残り期限がこの日数未満なら再延長する）
+// 毎リクエストで UPDATE を走らせないための閾値。利用し続ける限りログアウトされない
+const SESSION_RENEW_THRESHOLD_DAYS = 15;
+
+/**
+ * セッションのスライド延長。
+ * 残り有効期限が閾値未満のとき expiresAt を now+30日 に延長する。
+ * fire-and-forget（await しない）でレイテンシに影響を与えず、失敗しても認証は継続する。
+ * @param sessionId 対象セッションの ID
+ * @param currentExpiresAt 現在の有効期限
+ */
+function maybeExtendSession(sessionId: string, currentExpiresAt: Date): void {
+  const now = Date.now();
+  const renewThresholdMs = SESSION_RENEW_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+  // 残り期限が閾値以上あれば何もしない
+  if (currentExpiresAt.getTime() - now >= renewThresholdMs) {
+    return;
+  }
+  const newExpiresAt = new Date();
+  newExpiresAt.setDate(newExpiresAt.getDate() + SESSION_EXPIRES_DAYS);
+  // fire-and-forget: UPDATE 完了を待たずに認証を続行。失敗は握りつぶす
+  prisma.authSession
+    .update({ where: { id: sessionId }, data: { expiresAt: newExpiresAt } })
+    .catch(() => {
+      /* 延長失敗は致命的でない（既存 expiresAt までは有効） */
+    });
+}
 
 // 認証ミドルウェア
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {
@@ -37,6 +69,15 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
 
   if (!session || session.expiresAt < new Date()) {
     return reply.status(401).send({ error: 'Session expired' });
+  }
+
+  // 利用中のセッションはスライド延長する（残り15日未満なら+30日）
+  maybeExtendSession(session.id, session.expiresAt);
+
+  // 組織 IP アクセス制限（#285）: 許可レンジ外からの接続は 403 で拒否
+  const ipCheck = await checkIpAllowed(session.user.id, request.ip);
+  if (!ipCheck.allowed) {
+    return reply.status(403).send({ error: ipCheck.reason });
   }
 
   // @ts-ignore - Fastify リクエストにユーザー情報を追加
@@ -415,5 +456,79 @@ export async function authRoutes(app: FastifyInstance) {
       console.error('Google ID token auth error:', err);
       return reply.status(500).send({ error: 'Internal server error' });
     }
+  });
+
+  // ── Personal Access Token 管理 API（#271）──────────────────────────
+
+  /** PAT 発行（平文トークンは発行時の1回のみ返す） */
+  app.post('/api/auth/tokens', { preHandler: authenticate }, async (request, reply) => {
+    const user = (request as any).user;
+    const { name } = request.body as { name?: string };
+
+    if (!name || !name.trim()) {
+      return reply.status(400).send({ error: 'トークン名を入力してください' });
+    }
+
+    // トークン生成: プレフィクス + ランダム 32 バイト hex
+    const rawToken = PAT_PREFIX + crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    const pat = await prisma.personalAccessToken.create({
+      data: {
+        userId: user.id,
+        name: name.trim(),
+        tokenHash,
+      },
+    });
+
+    console.log(`🔑 [PAT] Token created: ${pat.name} for user ${user.email || user.id}`);
+
+    return {
+      id: pat.id,
+      name: pat.name,
+      token: rawToken, // 平文はこのレスポンスのみ
+      createdAt: pat.createdAt,
+    };
+  });
+
+  /** PAT 一覧（トークン本体は返さない） */
+  app.get('/api/auth/tokens', { preHandler: authenticate }, async (request) => {
+    const user = (request as any).user;
+
+    const tokens = await prisma.personalAccessToken.findMany({
+      where: { userId: user.id },
+      select: { id: true, name: true, createdAt: true, lastUsedAt: true, revokedAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return { tokens };
+  });
+
+  /** PAT 失効（ソフトリボーク: revokedAt を設定） */
+  app.delete('/api/auth/tokens/:id', { preHandler: authenticate }, async (request, reply) => {
+    const user = (request as any).user;
+    const { id } = request.params as { id: string };
+
+    const pat = await prisma.personalAccessToken.findUnique({
+      where: { id },
+      select: { userId: true, name: true, revokedAt: true },
+    });
+
+    if (!pat || pat.userId !== user.id) {
+      return reply.status(404).send({ error: 'トークンが見つかりません' });
+    }
+
+    if (pat.revokedAt) {
+      return reply.status(400).send({ error: 'このトークンは既に失効済みです' });
+    }
+
+    await prisma.personalAccessToken.update({
+      where: { id },
+      data: { revokedAt: new Date() },
+    });
+
+    console.log(`🔑 [PAT] Token revoked: ${pat.name} for user ${user.id}`);
+
+    return { success: true };
   });
 }

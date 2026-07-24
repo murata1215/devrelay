@@ -8,6 +8,7 @@ import { authenticate } from './auth.js';
 import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
+import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
 import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS, type AiTool } from '@devrelay/shared';
@@ -1609,16 +1610,30 @@ export async function apiRoutes(app: FastifyInstance) {
    * N+1 回避: AI メッセージ取得 → sessionId でバッチ → user メッセージをメモリ内マッチング
    * @route GET /api/conversations?offset=0&limit=50
    */
-  app.get('/api/conversations', async (request: FastifyRequest<{ Querystring: { offset?: string; limit?: string } }>, reply: FastifyReply) => {
+  app.get('/api/conversations', async (request: FastifyRequest<{ Querystring: { offset?: string; limit?: string; userId?: string } }>, reply: FastifyReply) => {
     const userId = (request as any).user.id;
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '50', 10) || 50));
+
+    // 統制 v2/v3（#268/#270）: ?userId=<対象> 指定時は、他ユーザーの会話履歴を閲覧する権限を検証する。
+    // 許可されるのは 本人 / 同組織の admin / その member を担当する manager のみ（org-control の共通ヘルパー）。
+    let targetUserId = userId;
+    const requestedUserId = request.query.userId;
+    if (requestedUserId && requestedUserId !== userId) {
+      const allowed = await canViewMemberHistory(userId, requestedUserId);
+      if (!allowed) {
+        return reply.status(403).send({ error: 'このユーザーの会話履歴を閲覧する権限がありません' });
+      }
+      targetUserId = requestedUserId;
+      // 監査ログ記録（統制 v3 #270、fire-and-forget）
+      recordSupervisionAudit(userId, requestedUserId, 'view_messages', JSON.stringify({ via: 'conversations' }));
+    }
 
     // Step 1: AI メッセージを日時降順で取得（usageData の有無を問わない）
     const aiMessages = await prisma.message.findMany({
       where: {
         role: 'ai',
-        session: { userId },
+        session: { userId: targetUserId },
       },
       orderBy: { createdAt: 'desc' },
       skip: offset,
@@ -1723,7 +1738,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const total = await prisma.message.count({
       where: {
         role: 'ai',
-        session: { userId },
+        session: { userId: targetUserId },
       },
     });
 

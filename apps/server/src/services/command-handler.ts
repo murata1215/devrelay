@@ -40,6 +40,7 @@ import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys } from './user-settings.js';
+import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import {
   createTestflightService,
   listTestflightServices,
@@ -174,6 +175,22 @@ export async function executeCommand(
   files?: FileAttachment[],
   missedMessages?: MissedMessage[]
 ): Promise<string> {
+  // エンタープライズ統制ゲート（#268）: 組織の member はマネージャーが1人以上割り当てられるまでコマンド発行不可。
+  // 組織未所属・admin・manager は素通し。Discord/Telegram の未リンクユーザーは User 特定不可のため従来どおり素通し。
+  const dbUserId = await resolveDbUserId(context);
+  if (dbUserId) {
+    const permission = await checkCommandPermission(dbUserId);
+    if (!permission.allowed) {
+      return permission.reason ?? '🔒 コマンドを実行する権限がありません。';
+    }
+    // 組織 IP アクセス制限（#285）: Discord/Telegram など IP 判定不能な経路は、
+    // IP 制限が有効な組織のユーザーをブロックする（抜け穴防止）。
+    // web 経路は authenticate() で request.ip をチェック済みのためここでは対象外。
+    if (context.platform !== 'web' && (await hasIpRestriction(dbUserId))) {
+      return '🔒 組織のIPアクセス制限が有効なため、Discord/Telegram からのコマンド発行はできません。社内ネットワークから WebUI をご利用ください。';
+    }
+  }
+
   // clear/update 以外のコマンドが来たら確認状態をリセット
   const chatKey = `${context.platform}:${context.chatId}`;
   if (command.type !== 'clear') {
@@ -1193,10 +1210,13 @@ async function handleQuit(context: UserContext): Promise<string> {
 /** 利用可能な Claude SDK モデル一覧（フル ID はCLIバージョン非依存で動作確認済み） */
 const AVAILABLE_MODELS = [
   { id: 'claude-fable-5', name: 'Claude Fable 5', description: '最高性能（Mythos クラス）' },
-  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', description: '高性能（最新）' },
-  { id: 'opus', name: 'Claude Opus 4（CLI版）', description: 'CLI デフォルト解決' },
-  { id: 'sonnet', name: 'Claude Sonnet 4', description: 'バランス型' },
-  { id: 'haiku', name: 'Claude Haiku 3.5', description: '高速・低コスト' },
+  { id: 'claude-opus-5', name: 'Claude Opus 5', description: '高性能（最新）' },
+  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', description: '高性能' },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', description: 'バランス型（最新）' },
+  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: '高速・低コスト（最新）' },
+  { id: 'opus', name: 'Claude Opus（CLI版）', description: 'CLI デフォルト解決' },
+  { id: 'sonnet', name: 'Claude Sonnet（CLI版）', description: 'CLI デフォルト解決' },
+  { id: 'haiku', name: 'Claude Haiku（CLI版）', description: 'CLI デフォルト解決' },
 ];
 
 /** Claude モデル一覧 + 現在の設定を表示 */

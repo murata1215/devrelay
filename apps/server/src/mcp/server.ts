@@ -24,7 +24,7 @@ const SERVER_INSTRUCTIONS = `DevRelay はAIコーディングの投入・承認�
 4) get_plan でプランを取得し、要約して読み上げ、実装の可否を聞く。
 5) ユーザーが「実装して」と言ったら approve_implementation。
 6) get_build_status で進捗・完了を確認。
-調べ物は search_project_context を使う。submit/approve は破壊的操作なので必ず確認を取る。`;
+調べ物は search_project_context を使う。会話履歴の閲覧は get_conversation_history で期間指定して取得できる。添付ファイル（画像等）は get_conversation_history で attachments を確認し、get_attachment で取得できる。submit/approve は破壊的操作なので必ず確認を取る。`;
 
 /**
  * Fastify に MCP エンドポイントを登録する
