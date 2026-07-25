@@ -1,4 +1,5 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
+import { createRequire } from 'module';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -34,6 +35,96 @@ interface AiSession {
 // v2026.5.26-0 で追加されたバージョン依存フラグのため、初回に `devin --help` でプローブして判定する。
 // null=未判定 / true=対応 / false=非対応
 let devinSupportsExport: boolean | null = null;
+
+// #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
+let claudeFallbackLogged = false;
+
+/**
+ * システムにインストールされた claude CLI の実行パスを解決する。
+ * PATH（`command -v claude`）を最優先し、見つからなければ既知の標準パスを順に探す。
+ * @returns 実在する claude のフルパス、無ければ null
+ */
+function resolveSystemClaude(): string | null {
+  try {
+    const p = execSync('command -v claude', { encoding: 'utf-8' }).trim();
+    if (p && fs.existsSync(p)) return p;
+  } catch {
+    // PATH に無い場合は既知パスへフォールバック
+  }
+  for (const candidate of [
+    path.join(os.homedir(), '.local/bin/claude'),
+    path.join(os.homedir(), '.claude/local/claude'),
+    '/usr/local/bin/claude',
+    '/usr/bin/claude',
+  ]) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+/**
+ * Claude Agent SDK が spawn する実行ファイルを解決する（#287）。
+ *
+ * SDK は `pathToClaudeCodeExecutable` 未指定時、自前バンドルの `<SDK dir>/cli.js` を使う。
+ * このファイルが不完全インストール等で欠落していると全 AI コマンドが
+ * 「Claude Code executable not found」で失敗する（pixdata 機で発生）。
+ * その場合はシステムにインストールされた claude へフォールバックさせる。
+ *
+ * @returns フォールバック先の claude パス。内蔵 cli.js が健全なら null（＝内蔵版を使う）
+ */
+function getClaudeExecutableFallback(): string | null {
+  try {
+    const _require = createRequire(import.meta.url);
+    // SDK のエントリ（sdk.mjs）を解決 → その隣の cli.js が内蔵実行ファイル
+    const sdkEntry = _require.resolve('@anthropic-ai/claude-agent-sdk');
+    const bundledCli = path.join(path.dirname(sdkEntry), 'cli.js');
+    if (fs.existsSync(bundledCli)) {
+      return null; // 内蔵版が健全 → 従来どおり SDK 既定に委ねる
+    }
+    // 内蔵 cli.js 欠落 → システム claude へフォールバック
+    const sys = resolveSystemClaude();
+    if (!claudeFallbackLogged) {
+      if (sys) {
+        console.warn(`⚠️ [SDK] bundled cli.js missing at ${bundledCli} → falling back to system claude: ${sys}`);
+      } else {
+        console.error(`❌ [SDK] bundled cli.js missing at ${bundledCli} and no system claude found. Run a clean reinstall in ~/.devrelay/agent (rm -rf node_modules/@anthropic-ai/claude-agent-sdk && pnpm install)`);
+      }
+      claudeFallbackLogged = true;
+    }
+    return sys;
+  } catch {
+    // 解決に失敗した場合は内蔵版に委ねる（従来動作を壊さない）
+    return null;
+  }
+}
+
+/**
+ * 起動時セルフチェック（#287・B-2）。SDK 内蔵 cli.js の状態を agent.log に 1 度だけ明示する。
+ * 欠落時は毎コマンドの暗号的エラーを待たず、起動直後に状況とフォールバック先を通知する。
+ */
+export function logClaudeExecutableStatus(): void {
+  try {
+    const _require = createRequire(import.meta.url);
+    const sdkEntry = _require.resolve('@anthropic-ai/claude-agent-sdk');
+    const bundledCli = path.join(path.dirname(sdkEntry), 'cli.js');
+    if (fs.existsSync(bundledCli)) {
+      console.log('🩺 [SDK] bundled Claude Code cli.js: OK');
+      return;
+    }
+    const sys = resolveSystemClaude();
+    if (sys) {
+      console.warn(`🩺 [SDK] bundled cli.js MISSING → will use system claude: ${sys}`);
+    } else {
+      console.error('🩺 [SDK] bundled cli.js MISSING and no system claude found — AI commands will fail. Reinstall the agent SDK.');
+    }
+  } catch {
+    // 解決失敗時は無視（従来どおり実行時に SDK 既定で判定される）
+  }
+}
 
 /**
  * Devin CLI が `--export` フラグに対応しているか `--help` の出力で判定する（結果はキャッシュ）。
@@ -554,6 +645,14 @@ async function sendPromptToAiSdk(
   };
   if (options.model) {
     console.log(`🧠 [SDK] Using model: ${options.model}`);
+  }
+
+  // #287: SDK 内蔵 cli.js が欠落している場合はシステム claude へフォールバック。
+  // 内蔵版が健全なら null → pathToClaudeCodeExecutable を設定せず従来どおり内蔵版を使う。
+  const claudeFallback = getClaudeExecutableFallback();
+  if (claudeFallback) {
+    sdkOptions.pathToClaudeCodeExecutable = claudeFallback;
+    console.log(`🩹 [SDK] Using fallback Claude executable: ${claudeFallback}`);
   }
 
   // AskUserQuestion 無効化（SDK レベルでツール除去）

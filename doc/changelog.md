@@ -6,6 +6,18 @@
 
 ## 実装済み機能
 
+### #287: SDK 内蔵 cli.js 欠落時にシステム claude へフォールバック (2026-07-25)
+
+- **症状**: pixdata 機（Linux, x220）で DevRelay 経由の全 AI コマンドが失敗。`Error: Claude Code executable not found at .../claude-agent-sdk@0.2.80/.../cli.js. Is options.pathToClaudeCodeExecutable set?`。ファイル配置依頼も挨拶も同じエラー = AI プロセスが 1 つも起動できない
+- **診断**: システムの `claude`（v2.1.220, `~/.local/bin/claude`）は正常だが、それは別物。DevRelay agent は Claude **Agent SDK**（`@anthropic-ai/claude-agent-sdk`）の `query()` を使い、SDK が自前バンドルの `cli.js`（約 12MB）を spawn する。`pathToClaudeCodeExecutable` 未指定のため内蔵 cli.js に完全依存。pixdata 機ではこの内蔵 cli.js が欠落（SDK パッケージの不完全インストール。X220 のディスク容量不足 or `pnpm install` 中断が最有力）。`u`（`pnpm install --frozen-lockfile`）では壊れた store を再リンクするだけで復活しない場合あり
+- **SDK 実体確認**: sdk.mjs で `X = options.pathToClaudeCodeExecutable ?? join(dirname(sdk.mjs), 'cli.js')`。→ `pathToClaudeCodeExecutable` を渡せば内蔵 cli.js 欠落を回避できる
+- **修正1（B-1・本命）**: `agents/{linux,macos}/src/services/ai-runner.ts` の sdkOptions 構築部に `getClaudeExecutableFallback()` を追加。`createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk')` で内蔵 cli.js のパスを解決し、**欠落時のみ** `resolveSystemClaude()`（`command -v claude` → `~/.local/bin/claude`・`~/.claude/local/claude`・Homebrew/usr の既知パス順）で解決したシステム claude を `pathToClaudeCodeExecutable` に設定。内蔵版が健全なら null で従来どおり内蔵版を使う（副作用なし・バージョン整合維持）
+- **修正2（B-2・補助）**: `logClaudeExecutableStatus()` を export し、`index.ts` 起動時（`ensureDevrelaySymlinks()` 直後）に呼び出し。内蔵 cli.js の OK/欠落を agent.log に 1 度明示（毎コマンドの暗号的エラーを待たずに状況通知）
+- **互換性**: SDK は spawn 時に stream-json 制御プロトコル + `CLAUDE_CODE_ENTRYPOINT=sdk-ts` を渡すだけ。システム claude v2.1.220 は SDK モード対応（同系バイナリ・後方互換）で実用上問題なし
+- **対象**: `agents/{linux,macos}/src/services/ai-runner.ts` + `agents/{linux,macos}/src/index.ts`（計 4 ファイル）+ changelog.md。サーバー / shared / DB / windows 変更なし。`pnpm --filter @devrelay/agent build` + `--filter @devrelay/agent-macos build` 成功、両 dist にマーカー確認。`createRequire` 解決ロジックはサーバー SDK でランタイム検証（解決パスが pixdata のエラーパスと一致）
+- **反映**: **Agent のみ、サーバー再起動不要**。pixdata 機で `u` を送信 → agent が `git reset --hard` + build + 再起動（`u` は SDK 非依存の detached シェルなので壊れた状態でも実行可能）→ 内蔵 cli.js 欠落を検出 → `/home/pixdata/.local/bin/claude` へフォールバックして **pnpm を触らず復旧**
+- **教訓**: Agent SDK の `query()` は既定で SDK 同梱の cli.js を spawn する（システム claude とは別物）。この 12MB ファイルが不完全インストールで欠落すると全コマンドが暗号的に全滅。`pathToClaudeCodeExecutable` へシステム claude を渡すフォールバックで、pnpm 再インストール不要の自己回復が可能
+
 ### #286: Claude Opus 5 / Sonnet 5 / Haiku 4.5 をモデル選択肢に追加 (2026-07-25)
 
 - **依頼**: 「opus5 が出たそうです。ここって定数で書いてあったっけ？」（Settings のモデルドロップダウンのスクショ）→ その後「推定じゃなくて WEB とか調べれない？」

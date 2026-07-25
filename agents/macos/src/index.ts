@@ -2,6 +2,7 @@ import { loadConfig, detectAndUpdateAiTools } from './services/config.js';
 import { getBinDir } from './services/config.js';
 import { connectToServer } from './services/connection.js';
 import { loadProjects, autoDiscoverProjects } from './services/projects.js';
+import { logClaudeExecutableStatus } from './services/ai-runner.js';
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -72,6 +73,9 @@ async function main() {
 
   // Ensure devrelay-claude wrapper exists
   ensureDevrelaySymlinks();
+
+  // #287: SDK 内蔵 cli.js の状態を起動時にログ出力（欠落時はシステム claude フォールバックを通知）
+  logClaudeExecutableStatus();
 
   // Auto-discover projects with CLAUDE.md
   // config.yaml の aiTools.default を新規プロジェクトの既定 AI として使う
