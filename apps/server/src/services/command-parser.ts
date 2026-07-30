@@ -11,6 +11,19 @@ import { isNaturalLanguageEnabled } from './user-settings.js';
 import { prisma } from '../db/client.js';
 
 /**
+ * 「w」コマンドのワンショット exec プロンプト
+ * 実装後のドキュメント更新＋コミット/プッシュ専用。
+ * 冒頭のガード文で「変更が無ければ存在しないプランを推測せず、
+ * 『コミット対象なし』とだけ報告して終了」させ、
+ * クリーンな作業ツリーで w を送った際の「プランをください」ループを防ぐ。
+ */
+const W_COMMAND_PROMPT =
+  'まず git status / git diff で未コミットの変更があるか確認してください。' +
+  'コミット対象の変更が無い場合は、存在しないプランを推測せず「コミット対象の変更はありません」とだけ報告して終了してください（追加の実装・調査は不要）。' +
+  '変更がある場合のみ以下を行ってください: ' +
+  'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。MEMORY.md があれば更新してください。README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。';
+
+/**
  * Parse user input into a command (with natural language support)
  *
  * Flow:
@@ -183,7 +196,7 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   if (normalized === 'w') {
     return {
       type: 'exec',
-      prompt: 'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。MEMORY.md があれば更新してください。README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。',
+      prompt: W_COMMAND_PROMPT,
     };
   }
 
@@ -272,10 +285,10 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     case 'exec':
       return { type: 'exec' };
     case 'w':
-      // w コマンドは parseCommand() の Step 0.5 で処理されるが、念のためフォールバック
+      // w コマンドは parseCommand() の Step 0.6 で処理されるが、念のためフォールバック
       return {
         type: 'exec',
-        prompt: 'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。MEMORY.md があれば更新してください。README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。',
+        prompt: W_COMMAND_PROMPT,
       };
     case 'link':
       return { type: 'link' };

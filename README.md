@@ -277,7 +277,7 @@ Bot: 🤖 Working on it...
 | `c` | Reconnect to last project |
 | `e` / `exec` | Switch to execute mode (approve plan) |
 | `e, <instruction>` | Execute custom instruction directly |
-| `w` | Wrap up: update docs + commit + push |
+| `w` | Wrap up: update docs + commit + push (post-implementation only; reports "nothing to commit" if the tree is clean) |
 | `se` / `session` | Show session info |
 | `ag` / `agreement` | Apply DevRelay Agreement v6 (creates `rules/devrelay.md`) |
 | `link` | Link Discord/Telegram account to WebUI |
