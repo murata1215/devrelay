@@ -339,7 +339,12 @@ async function handleSessionStart(
   payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool },
   config: AgentConfig
 ) {
-  const { sessionId, projectName, projectPath, aiTool } = payload;
+  const { sessionId, projectName, projectPath, aiTool: requestedAiTool } = payload;
+  // Devin 専用端末等でサーバー指定の AI が未インストールなら、実際に使えるツールへ差し替える
+  const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
+  if (aiTool !== requestedAiTool) {
+    log.info(`⚠️ AI ${requestedAiTool} not installed on this machine → using ${aiTool} instead`);
+  }
 
   log.info(`Starting session: ${sessionId}`);
   log.info(`   Project: ${projectName} (${projectPath})`);
@@ -616,6 +621,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // 1. Claude: resumeSessionId がない場合（SDK の --resume でセッション引き継ぎするため通常は不要）
   // 2. Claude: missed messages がある場合（SDK 内部履歴にない新規メッセージ）
   // 3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かないためプロンプトが唯一のコンテキスト）
+  // Devin 専用端末等でサーバー指定の AI が未インストールなら、実行直前に使えるツールへ差し替える
+  // （新規セッションの defaultAi 継承や古い active セッションの再利用で claude が渡されるケースを救済）
+  if (currentConfig) {
+    const resolvedAiTool = await resolveEffectiveAiTool(sessionInfo.aiTool, currentConfig);
+    if (resolvedAiTool !== sessionInfo.aiTool) {
+      log.info(`⚠️ AI ${sessionInfo.aiTool} not installed on this machine → using ${resolvedAiTool} instead`);
+      sessionInfo.aiTool = resolvedAiTool;
+    }
+  }
+
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
   const isClaudeSdk = sessionInfo.aiTool === 'claude';
   const needsHistoryInPrompt = !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages;
@@ -874,6 +889,23 @@ function getAvailableAiTools(config: AgentConfig): AiTool[] {
   if (config.aiTools.aider) tools.push('aider');
   if (config.aiTools.devin) tools.push('devin');
   return tools;
+}
+
+/**
+ * サーバー指定の AI ツールが実際にはこの端末に入っていない場合に、
+ * 利用可能なツールへ差し替える（Devin 専用端末で claude が要求されて
+ * 「Claude Code 未ログイン」で止まる問題の救済）。
+ * - 指定ツールがインストール済み → そのまま尊重（claude ログイン切れ等はここでは触らない）
+ * - 未インストール → 最後に手動選択したツール → config 既定 → 先頭の利用可能ツール の順で採用
+ */
+async function resolveEffectiveAiTool(requested: AiTool, config: AgentConfig): Promise<AiTool> {
+  const available = getAvailableAiTools(config);
+  if (available.length === 0) return requested;        // 何も入っていない → 従来どおり（エラー表示）
+  if (available.includes(requested)) return requested; // 指定ツールは実在 → 尊重
+  const last = await loadLastAiTool();
+  if (last && available.includes(last)) return last;
+  if (config.aiTools.default && available.includes(config.aiTools.default)) return config.aiTools.default;
+  return available[0];
 }
 
 function startPing() {

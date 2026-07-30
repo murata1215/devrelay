@@ -6,6 +6,15 @@
 
 ## 実装済み機能
 
+### #289: 未インストールの AI ツールが要求されたら実際に使えるツールへ自動フォールバック (2026-07-30)
+
+- **症状**: Devin しか入っていない Windows 端末（sa-makino 機）で、DevRelay 経由の実行が何かのタイミングで claude を呼びに行き「⚠️ Claude Code が未ログインです」で停止。ユーザーは毎回 `a` → `a 1` で Devin を選び直す羽目になっていた
+- **原因（コード確認で確定）**: 実行時に使う AI ツールは**サーバーが送る `Session.aiTool`**（schema 既定 `"claude"`、新規セッションは `Project.defaultAi` を継承）で、Agent はそれを**そのまま spawn** する。Agent には「最後に選んだ AI」を保存する `saveLastAiTool()`/`loadLastAiTool()` があるが、これは `a` 一覧表示（`handleAiList`）の**表示専用**で実行時のツール選択には使われていなかった。そのため `Session.aiTool` が古い active セッションの再利用や defaultAi 継承で `claude` のままになると、claude 未インストール端末で claude を起動 →「not logged in」。**Agent 側にインストール済みツールへのフォールバックが無い**のが欠陥
+- **修正**: `connection.ts` に `resolveEffectiveAiTool(requested, config)` を追加。`getAvailableAiTools(config)` で実インストール状況を確認し、**要求ツールが未インストールのときだけ**「最後に手動選択したツール → config 既定 → 先頭の利用可能ツール」の順で差し替える。要求ツールが実在すれば一切変更しない（＝claude が入っているがログイン切れの端末は従来どおり未ログイン案内、意図的）。適用は実行の要所2箇所（`handleSessionStart` の格納前 + `handleAiPrompt` の実行直前、terminal-mode 判定より前）で、差し替え時は agent.log に `AI xxx not installed on this machine → using yyy instead` を記録
+- **対象**: `agents/{windows,linux,macos}/src/services/connection.ts`（3ファイル）+ changelog.md + README.md。**サーバー / shared / DB / WebUI 変更なし**。`loadLastAiTool` は各 connection.ts で import 済み。`pnpm build` 全 WS 成功、3 dist に `resolveEffectiveAiTool` ×3・`not installed on this machine` ×2 を確認
+- **反映**: **Agent のみ、サーバー再起動不要・DB マイグレーション不要**。Devin を使う端末（sa-makino 機など）で `u`→`u`。以降、`a 1` を打たなくても claude 要求が自動で Devin に差し替わり「Claude Code 未ログイン」が出なくなる
+- **教訓**: Agent は「最後に選んだ AI」を永続化していたが表示専用で、実行時はサーバー指定を無条件に信じていた。Agent はインストール済みツールの ground truth を持つので、未インストールツール要求時は実行前に差し替えるのが確実（サーバー側の Session/Project 状態に依存しない）。差し替えは「未インストール時のみ」に限定すると、claude 実在端末の挙動を一切壊さずピンポイントに救済できる
+
 ### #288: `w` コマンドが変更ゼロの作業ツリーで「プランをください」ループに陥る問題を修正 (2026-07-30)
 
 - **症状**: `w`（ドキュメント更新＋コミット/プッシュのワンショット）を送っても「全然きかなかった」。実際には agent が「実装すべきプランの内容が含まれていません／プランを共有してください」を繰り返すだけで、何度 `w` を送っても同じ応答になる

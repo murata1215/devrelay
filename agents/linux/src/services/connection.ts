@@ -494,7 +494,12 @@ async function handleSessionStart(
   payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool },
   config: AgentConfig
 ) {
-  const { sessionId, projectName, projectPath, aiTool } = payload;
+  const { sessionId, projectName, projectPath, aiTool: requestedAiTool } = payload;
+  // Devin 専用端末等でサーバー指定の AI が未インストールなら、実際に使えるツールへ差し替える
+  const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
+  if (aiTool !== requestedAiTool) {
+    console.log(`⚠️ AI ${requestedAiTool} not installed on this machine → using ${aiTool} instead`);
+  }
 
   // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）
   resetApproveAllMode();
@@ -854,6 +859,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   if (storageContext) {
     console.log(`📂 Including storage context in prompt (${storageContext.length} chars)`);
     storageContextPrompt = '\n\n--- Storage Context ---\n' + storageContext + '\n--- End Storage Context ---';
+  }
+
+  // Devin 専用端末等でサーバー指定の AI が未インストールなら、実行直前に使えるツールへ差し替える
+  // （新規セッションの defaultAi 継承や古い active セッションの再利用で claude が渡されるケースを救済）
+  if (currentConfig) {
+    const resolvedAiTool = await resolveEffectiveAiTool(sessionInfo.aiTool, currentConfig);
+    if (resolvedAiTool !== sessionInfo.aiTool) {
+      console.log(`⚠️ AI ${sessionInfo.aiTool} not installed on this machine → using ${resolvedAiTool} instead`);
+      sessionInfo.aiTool = resolvedAiTool;
+    }
   }
 
   // Add plan/exec mode instruction to prompt
@@ -1295,6 +1310,23 @@ function getAvailableAiTools(config: AgentConfig): AiTool[] {
   if (config.aiTools.aider) tools.push('aider');
   if (config.aiTools.devin) tools.push('devin');
   return tools;
+}
+
+/**
+ * サーバー指定の AI ツールが実際にはこの端末に入っていない場合に、
+ * 利用可能なツールへ差し替える（Devin 専用端末で claude が要求されて
+ * 「Claude Code 未ログイン」で止まる問題の救済）。
+ * - 指定ツールがインストール済み → そのまま尊重（claude ログイン切れ等はここでは触らない）
+ * - 未インストール → 最後に手動選択したツール → config 既定 → 先頭の利用可能ツール の順で採用
+ */
+async function resolveEffectiveAiTool(requested: AiTool, config: AgentConfig): Promise<AiTool> {
+  const available = getAvailableAiTools(config);
+  if (available.length === 0) return requested;        // 何も入っていない → 従来どおり（エラー表示）
+  if (available.includes(requested)) return requested; // 指定ツールは実在 → 尊重
+  const last = await loadLastAiTool();
+  if (last && available.includes(last)) return last;
+  if (config.aiTools.default && available.includes(config.aiTools.default)) return config.aiTools.default;
+  return available[0];
 }
 
 function startPing() {
