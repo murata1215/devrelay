@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+### #291: exec セッション破棄でプランを失う問題の対策（プラン再注入 + コンテキスト予兆警告） (2026-08-01)
+
+- **症状**: MURATA_K 機の Windows Agent で大規模 exec（tomcat-compat: 約34ファイル生成）実行中、18:16 に `exec` 送信後、18:21 に「プランの内容が見当たりません／どのプランに従って実装すればよいか教えてください」で停止し、そのまま1時間以上ユーザー入力待ちで放置された
+- **原因（agent.log で確定）**: (1) exec 中にコンテキストが `Context: 1154K / 1000K tokens (115%)` と **1M 上限を突破** → Claude API が `400 "Output blocked by content filtering policy"` を返した（上限付近で会話が劣化し、プラン提示メッセージが「e または exec をお待ちしています」を3回反復していたのが兆候）。(2) DevRelay の「セッション失敗時は `--resume` を捨てて新規再試行」リカバリが発火（`resumeFailed=true` → `Cleared Claude session ID` → `Retrying without --resume`）。(3) **決定的原因**: exec 時は Claude SDK + 有効な `claudeResumeSessionId` があるため `connection.ts` の `needsHistoryInPrompt=false` になり、**プランは fullPrompt に入らず `--resume` の中だけ**にあった。retry は resume を捨てつつ**同じプラン無しの fullPrompt を再送**したため、新セッションはプランを失って停止した（クラッシュではなくブロック）
+- **修正A（プラン再注入・本命）**: fullPrompt 構築を各 connection.ts 内のローカルヘルパー `composeFullPrompt(includeHistory: boolean)` に切り出し。通常実行は従来どおり `composeFullPrompt(needsHistoryInPrompt)`（挙動不変）だが、`if (aiResult.resumeFailed)` の retry ブロックで **`composeFullPrompt(true)` を使い、exec マーカー直前のプランを含む会話履歴（既存 `getConversationContext` + `includePlanBeforeExec`）を再注入**してから `sendPromptToAi` に渡す。これで resume 破棄後の新セッションでもプランを保持。retry プロンプトサイズを agent.log に出力（`Retry prompt size: N chars`）
+- **修正B（コンテキスト予兆警告）**: 各 connection.ts に定数 `CONTEXT_WARN_THRESHOLD = 85` / `CONTEXT_HARD_THRESHOLD = 95` を追加し、既存だが未配線だった `isContextWarning` を配線。`aiResult`（および retry 後の `retryResult`）の `contextUsage` を評価し、85% 超で「⚠️ コンテキスト XX%。作業状況を CLAUDE.md に記録し、`x` で履歴クリアを推奨」を、95% 超で「⚠️ コンテキスト XX%（上限間近）。今すぐ `x`」を `agent:ai:output`（isComplete:false）でユーザーへ送信。`SessionInfo.contextWarned` フラグで閾値超えは1回だけ送信（スパム防止）、閾値未満に戻ると解除して再警告可能に
+- **設計判断**: Claude Agent SDK に履歴圧縮 API は無い（`maxTurns` は打ち切りのみ）ため、中途の自動履歴クリアは作業文脈を壊す。B は「警告＋`x` 誘導」を実体とし、SDK ネイティブ auto-compact は採用しない。content-filter 400 の専用分岐（C）は今回スコープ外（B の早期警告で 115% 到達前に `x` できるため実害はほぼ回避）
+- **対象**: `agents/{windows,linux,macos}/src/services/connection.ts`（3ファイル）+ changelog.md + README.md。各 OS の `output-parser.ts` の `isContextWarning`/`ContextUsage` を import して使用（**関数は既存、変更なし**）。**サーバー / shared / DB / schema.prisma / WebUI 変更なし。DB マイグレーション・サーバー再起動不要**。`pnpm --filter @devrelay/agent build` + `@devrelay/agent-windows` + `@devrelay/agent-macos` 全成功、3 dist に `composeFullPrompt` ×4・`Retry prompt size` ×1・`Context warning sent` ×1 を確認
+- **反映**: **Agent のみ、サーバー再起動不要・DB マイグレーション不要**。対象マシン（MURATA_K 機など）で `u`→`u`。事故を起こしたセッションは既にプラン文脈を失っており復旧不可＝新規に plan からやり直しが必要（本対策は次回以降の再発防止）
+- **教訓**: `--resume` 依存の初回 exec ではプランが Claude セッション内にしか無く、retry で resume を捨てるとプランごと失う。retry は「resume 前提の履歴なし fullPrompt を使い回す」のをやめ、履歴（プラン）を含めて組み立て直すのが正解。1M コンテキスト上限突破は content-filter 400 → セッション破棄の連鎖を招くため、閾値超えで `x` を促す予兆警告が有効
+
 ### #290: macOS Agent インストーラの sed エラー修正（BSD sed 非互換） (2026-08-01)
 
 - **症状**: tisa の Mac で `scripts/install-agent.sh` 実行中、`[4/6] 設定ファイルを生成中...` の段階で `sed: 1: "/^proxy:/,/^[^ ]/{s|^   ...": bad flag in substitute command: '}'` エラー。既存 config.yaml のプロキシ設定（`proxy.url`）を更新する行でのみ発生。token/serverUrl/machineName の更新は成功していた

@@ -75,6 +75,8 @@ import {
 } from './work-state-store.js';
 import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
 import { generateManagementInfo } from './management-info.js';
+// #291-B: コンテキスト使用率の予兆警告に使用（関数は既存・connection.ts からは未配線だった）
+import { isContextWarning, type ContextUsage } from './output-parser.js';
 import { autoDiscoverProjects, loadProjects } from './projects.js';
 
 let ws: WebSocket | null = null;
@@ -118,6 +120,10 @@ let lastPongReceived = Date.now();
 // Application-level heartbeat interval (30 seconds)
 const APP_PING_INTERVAL = 30000;
 
+// #291-B: コンテキスト使用率の警告閾値（%）。超過で `x` による履歴クリアを促し、1M 上限突破を予防する。
+const CONTEXT_WARN_THRESHOLD = 85;
+const CONTEXT_HARD_THRESHOLD = 95;
+
 // Store session info for prompt handling
 interface SessionInfo {
   projectPath: string;
@@ -128,6 +134,7 @@ interface SessionInfo {
   pendingWorkState?: WorkState; // Work state to include in next prompt
   /** 端末インタフェースモード（Project 単位、ai:prompt / exec payload から最新値を反映） */
   terminalMode?: boolean;
+  contextWarned?: boolean; // #291-B: コンテキスト警告を既に送信済みか（スパム防止。閾値未満に戻ると解除）
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -899,25 +906,25 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     }
   }
 
-  // Build prompt with mode instruction and file output instruction
-  let fullPrompt = modeInstruction + prevExecSummary + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
   // 会話履歴のサイズを記録（ログ出力用）
   let historyContextSize = 0;
 
-  // Include conversation history if:
-  // 1. Claude SDK: resumeSessionId がない場合（SDK の --resume でセッション引き継ぎするため通常は不要）
-  // 2. Claude SDK: missed messages がある場合（SDK 内部履歴にない新規メッセージ）
-  // 3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かないためプロンプトが唯一のコンテキスト）
-  //
-  // Claude terminal mode は除外: Claude CLI 自身が JSONL でセッション管理するため
-  // prompt への history 注入は不要。注入すると Claude が過去文脈に強く引きずられて
-  // 新規質問を無視して過去の作業継続を選ぶ症状が発生（2026-05-27 実機 mviewer で確認）
-  const hasMissedMessages = missedMessages && missedMessages.length > 0;
-  const isClaudeSdk = sessionInfo.aiTool === 'claude' && !sessionInfo.terminalMode;
-  const needsHistoryInPrompt = !isClaudeTerminalMode && (
-    !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages
-  );
-  if (sessionInfo.history.length > 1 && needsHistoryInPrompt) {
+  // #291-A: fullPrompt 構築を関数化。retry-without-resume 時に履歴（＝プラン）を再注入するため
+  // includeHistory を切り替えられるようにする。
+  // - includeHistory=false: プラン無し（Claude SDK の --resume 依存の通常経路。挙動不変）
+  // - includeHistory=true : exec マーカー直前のプランを含む会話履歴を注入
+  // 履歴注入の判定条件（元コードと同一）:
+  //   1. Claude SDK: resumeSessionId がない（SDK の --resume でセッション引き継ぎするため通常は不要）
+  //   2. Claude SDK: missed messages がある（SDK 内部履歴にない新規メッセージ）
+  //   3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かずプロンプトが唯一のコンテキスト）
+  //   Claude terminal mode は除外: Claude CLI 自身が JSONL でセッション管理するため注入不要
+  //   （注入すると過去文脈に引きずられ新規質問を無視する症状。2026-05-27 実機 mviewer で確認）
+  const composeFullPrompt = (includeHistory: boolean): string => {
+    const basePrompt = modeInstruction + prevExecSummary + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+    if (!(sessionInfo.history.length > 1 && includeHistory)) {
+      historyContextSize = 0;
+      return basePrompt;
+    }
     const historyForContext = sessionInfo.history.slice(0, -1); // exclude current message
     let execIndex = -1;
     for (let i = historyForContext.length - 1; i >= 0; i--) {
@@ -936,8 +943,42 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
     historyContextSize = historyContext.length;
-    fullPrompt = `${modeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
-  }
+    return `${modeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
+  };
+
+  const hasMissedMessages = missedMessages && missedMessages.length > 0;
+  const isClaudeSdk = sessionInfo.aiTool === 'claude' && !sessionInfo.terminalMode;
+  const needsHistoryInPrompt = !isClaudeTerminalMode && (
+    !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages
+  );
+  // 通常実行は従来どおり（needsHistoryInPrompt に従う）。挙動は不変。
+  let fullPrompt = composeFullPrompt(!!needsHistoryInPrompt);
+
+  // #291-B: コンテキスト使用率が閾値超過なら1回だけ警告（x で履歴クリア誘導）。
+  // 使用率が閾値未満に戻ったら（x 後など）フラグをリセットして再警告を許可する。
+  const maybeWarnContext = (usage?: ContextUsage): void => {
+    if (!usage) return;
+    if (isContextWarning(usage, CONTEXT_WARN_THRESHOLD)) {
+      if (sessionInfo.contextWarned) return; // 既に警告済みならスパム防止
+      sessionInfo.contextWarned = true;
+      const isHard = usage.percentage >= CONTEXT_HARD_THRESHOLD;
+      const warnBody = isHard
+        ? `⚠️ コンテキスト ${usage.percentage}%（上限間近）。次の指示で上限超過・応答劣化の恐れがあります。今すぐ \`x\` で履歴をクリアしてください（作業状況は CLAUDE.md に記録済みか確認）。`
+        : `⚠️ コンテキスト ${usage.percentage}%。作業状況を CLAUDE.md に記録し、\`x\` で履歴クリアを推奨します。`;
+      sendMessage({
+        type: 'agent:ai:output',
+        payload: {
+          machineId: currentConfig!.machineId,
+          sessionId,
+          output: warnBody,
+          isComplete: false,
+        },
+      });
+      console.warn(`⚠️ Context warning sent (${usage.percentage}%, hard=${isHard})`);
+    } else if (usage.percentage < CONTEXT_WARN_THRESHOLD && sessionInfo.contextWarned) {
+      sessionInfo.contextWarned = false;
+    }
+  };
 
   // プロンプトサイズの詳細ログ（原因特定用）
   console.log(`📊 Prompt size breakdown:`);
@@ -1198,9 +1239,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         onAutoApproved: sendOptions.onAutoApproved,
       };
 
+      // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。
+      // 通常経路で needsHistoryInPrompt=false（resume 依存）だとプランが resume 内にしか無く、
+      // resume 破棄で失われる（=「プランの内容が見当たりません」で停止）。ここで
+      // composeFullPrompt(true) により exec マーカー直前のプランを再注入し、新セッションでも保持する。
+      const retryPrompt = composeFullPrompt(true);
+      console.log(`📏 Retry prompt size: ${retryPrompt.length} chars (history context: ${historyContextSize} chars)`);
+
       const retryResult = await sendPromptToAi(
         sessionId,
-        fullPrompt,
+        retryPrompt,
         sessionInfo.projectPath,
         sessionInfo.aiTool,
         sessionInfo.claudeSessionId,
@@ -1272,6 +1320,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         sessionInfo.claudeResumeSessionId = retryResult.extractedSessionId;
         console.log(`📋 Updated Claude session ID (after retry): ${retryResult.extractedSessionId.substring(0, 8)}...`);
       }
+      // #291-B: retry 後のコンテキスト使用率を評価して警告
+      maybeWarnContext(retryResult.contextUsage);
       return;
     }
 
@@ -1280,6 +1330,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.claudeResumeSessionId = aiResult.extractedSessionId;
       console.log(`📋 Updated Claude session ID: ${aiResult.extractedSessionId.substring(0, 8)}...`);
     }
+    // #291-B: 通常実行後のコンテキスト使用率を評価して警告
+    maybeWarnContext(aiResult.contextUsage);
   } catch (error) {
     // AI実行エラー（Claude Code未インストール、パス解決失敗等）をキャッチしてDiscord/Telegramに通知
     const errorMessage = error instanceof Error ? error.message : String(error);
