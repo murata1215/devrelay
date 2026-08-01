@@ -479,8 +479,8 @@ if [ -f "$CONFIG_FILE" ]; then
   # プロキシが指定されている場合、既存設定に追加/更新
   if [ -n "$PROXY_URL" ]; then
     if grep -q "^proxy:" "$CONFIG_FILE"; then
-      # 既存の proxy.url を更新
-      sed_inplace "/^proxy:/,/^[^ ]/{s|^  url:.*|  url: \"$PROXY_URL\"|}" "$CONFIG_FILE"
+      # 既存の proxy.url を更新（BSD/GNU 両対応: アドレス範囲 + s、{} ブロックは BSD sed 非対応）
+      sed_inplace "/^proxy:/,/^[^ ]/s|^  url:.*|  url: \"$PROXY_URL\"|" "$CONFIG_FILE"
     else
       # proxy セクションを末尾に追加
       printf "\nproxy:\n  url: \"%s\"\n" "$PROXY_URL" >> "$CONFIG_FILE"

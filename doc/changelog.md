@@ -6,6 +6,15 @@
 
 ## 実装済み機能
 
+### #290: macOS Agent インストーラの sed エラー修正（BSD sed 非互換） (2026-08-01)
+
+- **症状**: tisa の Mac で `scripts/install-agent.sh` 実行中、`[4/6] 設定ファイルを生成中...` の段階で `sed: 1: "/^proxy:/,/^[^ ]/{s|^   ...": bad flag in substitute command: '}'` エラー。既存 config.yaml のプロキシ設定（`proxy.url`）を更新する行でのみ発生。token/serverUrl/machineName の更新は成功していた
+- **原因（確定）**: `install-agent.sh:483` の `sed_inplace "/^proxy:/,/^[^ ]/{s|^  url:.*|  url: \"$PROXY_URL\"|}"`。アドレス範囲 + `{ }` ブロック構文が BSD sed（macOS 標準）で非対応。BSD sed は末尾の `}` を s コマンドのフラグと誤認して `bad flag ... '}'` を出す。`sed_inplace`（59-65行、Darwin なら `sed -i ''`、それ以外は `sed -i`）はコマンド式自体が共通なので macOS だけ失敗し、Linux(GNU sed)では通っていた
+- **修正**: ブロック内のコマンドは s 1 個だけなので `{` `}` を削除し、アドレス範囲に直接 s を適用（POSIX 準拠で GNU/BSD 両対応）。`sed_inplace "/^proxy:/,/^[^ ]/s|^  url:.*|  url: \"$PROXY_URL\"|"`。同種のブロック付き sed は本スクリプト内でこの1箇所のみ（grep 済み）
+- **対象**: `scripts/install-agent.sh`（483 行の1行のみ）。`.sh` のみの変更＝ビルド・サーバー再起動・DB マイグレーション不要。`bash -n` 構文チェック OK、GNU sed で proxy ブロック内の `url:` だけが置換され `serverUrl:`/`machineName:` は不変であることを検証済み
+- **反映**: macOS 側で install-agent.sh を再実行（`u` 更新）→ `sed: bad flag` が出ず「プロキシ設定を更新しました」が表示され、config.yaml の `proxy.url` が更新されることを確認
+- **教訓**: sed の `/re1/,/re2/{cmd}` ブロック構文は GNU sed 専用。単一コマンドなら braces を外して `/re1/,/re2/cmd` にすれば BSD/GNU 両対応になる。macOS 対応スクリプトでは range+block sed を避ける
+
 ### #289: 未インストールの AI ツールが要求されたら実際に使えるツールへ自動フォールバック (2026-07-30)
 
 - **症状**: Devin しか入っていない Windows 端末（sa-makino 機）で、DevRelay 経由の実行が何かのタイミングで claude を呼びに行き「⚠️ Claude Code が未ログインです」で停止。ユーザーは毎回 `a` → `a 1` で Devin を選び直す羽目になっていた
