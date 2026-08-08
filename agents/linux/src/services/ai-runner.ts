@@ -617,6 +617,8 @@ async function sendPromptToAiSdk(
 ): Promise<AiRunResult> {
   const result: AiRunResult = {};
   let fullOutput = '';
+  // 完了シグナルを二重送信しないためのフラグ（result ハンドラで送信済みならループ後の送信をスキップ）
+  let completionSent = false;
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -910,6 +912,23 @@ async function sendPromptToAiSdk(
           console.log(`[claude/sdk] ⚠️ Result is error with --resume, flagging for retry`);
           result.resumeFailed = true;
         }
+
+        // result は stream-json の終端メッセージ。ここで完了シグナルを送って return する。
+        // これにより、result 送出後に SDK ジェネレータが終了せず for await が返ってこない
+        // （高コンテキスト時などに発生）場合でも、応答がサーバーへ確実に届く。
+        if (result.resumeFailed) {
+          // resume 失敗時は完了を送らず retry 経路（connection.ts の composeFullPrompt(true) 再送）に委ねる
+          console.log(`[claude/sdk] 🔁 Result flagged resumeFailed → deferring to retry (no completion sent)`);
+          return result;
+        }
+        if (fullOutput.length === 0) {
+          onOutput('(No response from AI)', true, result.usageData);
+        } else {
+          onOutput('', true, result.usageData);
+        }
+        completionSent = true;
+        console.log(`[claude/sdk] 📨 Completion sent from result handler (fullOutput=${fullOutput.length} chars)`);
+        return result;
       }
     }
   } catch (err: any) {
@@ -932,11 +951,15 @@ async function sendPromptToAiSdk(
     return result;
   }
 
-  // 完了シグナル送信
-  if (fullOutput.length === 0) {
-    onOutput('(No response from AI)', true, result.usageData);
-  } else {
-    onOutput('', true, result.usageData);
+  // 完了シグナル送信（フォールバック）
+  // 通常は result ハンドラ内で送信済み（completionSent=true）。
+  // ここに来るのは稀に result メッセージが来ずループが自然終了したケースのみ。
+  if (!completionSent) {
+    if (fullOutput.length === 0) {
+      onOutput('(No response from AI)', true, result.usageData);
+    } else {
+      onOutput('', true, result.usageData);
+    }
   }
 
   return result;

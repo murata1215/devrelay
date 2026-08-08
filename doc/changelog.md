@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+### #292: Claude SDK 実行で「ごくまれに応答が帰ってこない」問題の修正（result 直後に完了シグナル送信） (2026-08-08)
+
+- **症状**: MURATA_K 機（`agents/linux` ビルドを Windows で実行＝`[claude/sdk]` ログ構成）で、ごくまれに「実行は終わっているのに応答が返ってこない」。Discord/WebUI は `⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）` を表示するが、agent.log には成功ログが残る。ユーザー報告「最近、ごくまれに帰ってこないことがある。ログ見ると終わってそうじゃない？」
+- **原因（agent.log とコードで確定）**: agent.log に `[claude/sdk] ✅ Complete (138190ms)` → `Context: 2812K / 1000K tokens (281%)` → `💾 Usage data captured` の**直後にログが完全停止**（「Process exited」も完了シグナルログも無し）。`sendPromptToAiSdk`（`agents/{linux,macos}/src/services/ai-runner.ts`）は Claude Agent SDK の `query()` を `for await` で回すが、`m.type === 'result'`（stream-json の**終端メッセージ**）ハンドラは `✅ Complete` ログと usage/context 抽出のみで、**完了シグナル `onOutput('', true)` を送っていなかった**。完了シグナルは**ループが自然終了した後**にしか送られない設計。ところが 281% という異常なコンテキスト超過時などに、**`result` 送出後に SDK ジェネレータ（cli.js 子プロセス）が終了せず `for await` が返ってこない**ことがあり、完了シグナルがループ後まで到達せず → connection.ts が `isComplete=true` を受け取れず → サーバーへ最終メッセージが届かず → 5 分後に `session-manager.ts` の `PROGRESS_TIMEOUT` がタイムアウト表示。「ログでは終わってそうなのに帰ってこない」と完全一致
+- **修正（本命）**: `result` は終端メッセージなので、**ループ後まで待たず `m.type === 'result'` ハンドラの中で完了シグナルを送って `return` する**。これによりジェネレータがその後ハングしても応答が確実にサーバーへ届く。resume 失敗時（`result.resumeFailed === true`）は完了を送らず `return`（#291 の retry 経路＝`composeFullPrompt(true)` 再送に委ねる）。それ以外は `fullOutput.length === 0` で `(No response from AI)`、それ以外は空文字を `onOutput(..., true, usageData)` で送信し `return`
+- **二重送信防止**: 関数スコープに `let completionSent = false` を追加。result ハンドラで送信したら `completionSent = true`、ループ後の既存の完了送信ブロックを `if (!completionSent)` でガード（稀に result が来ずループが自然終了するケースのフォールバックとして温存＝挙動不変）
+- **設計判断**: `for await` 内の `return` は `iterator.return()`（ジェネレータ後始末）を await するが、完了シグナル `onOutput('', true)` は return より前に実行済みなので、後始末がハングしても応答配信はブロックされない。AbortController による cli.js 強制 teardown は「配信保証」を優先し今回スコープ外（必要なら次段）。サーバー側 `PROGRESS_TIMEOUT` 延長は対症療法のため不採用
+- **対象**: `agents/{linux,macos}/src/services/ai-runner.ts`（2ファイル）+ changelog.md + README.md。**windows は Electron GUI 専用で SDK 経路を持たず spawn のみ＝対象外**（今回の障害機は windows パッケージではなく linux ビルドを Windows で動かしている点に注意）。**サーバー / shared / DB / schema.prisma / WebUI 変更なし。DB マイグレーション・サーバー再起動不要**。`pnpm --filter @devrelay/agent build` + `@devrelay/agent-macos build` 成功、両 dist に `completionSent` ×23・`Completion sent from result handler` ×1 を確認
+- **反映**: **Agent のみ、サーバー再起動不要・DB マイグレーション不要**。MURATA_K 機など `agents/linux`/`agents/macos` 対象マシンで `u`→`u`。既にタイムアウト表示済みのセッションは復旧不可＝新規に投げ直しが必要（本対策は次回以降の再発防止）
+- **教訓**: stream-json の `result` は終端メッセージ。完了シグナルを「ループ後」でなく「result 受信時」に送れば、ジェネレータがその後ハングしても応答が届く。`✅ Complete` ログ後に「Process exited」も完了ログも無いのは「result 送出後にジェネレータが return しない」サイン。異常な高コンテキスト（>100%）は cli.js のハングを誘発しうる
+
 ### #291: exec セッション破棄でプランを失う問題の対策（プラン再注入 + コンテキスト予兆警告） (2026-08-01)
 
 - **症状**: MURATA_K 機の Windows Agent で大規模 exec（tomcat-compat: 約34ファイル生成）実行中、18:16 に `exec` 送信後、18:21 に「プランの内容が見当たりません／どのプランに従って実装すればよいか教えてください」で停止し、そのまま1時間以上ユーザー入力待ちで放置された
