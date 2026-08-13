@@ -450,6 +450,14 @@ export function stopProgressTracking(sessionId: string) {
   }
 }
 
+/**
+ * セッションで AI 応答が進行中か判定する（#296 自動更新のアイドル判定用）
+ * progressTracker が存在する = 応答待ちの実行が走っている
+ */
+export function isSessionRunning(sessionId: string): boolean {
+  return progressTrackers.has(sessionId);
+}
+
 /** セッションの contextInfo（📊 Rate Limit 等）を取得する */
 export function getSessionContextInfo(sessionId: string): string {
   return progressTrackers.get(sessionId)?.contextInfo || '';

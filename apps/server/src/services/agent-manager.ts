@@ -472,6 +472,11 @@ async function handleAgentConnect(
       `✅ **${displayName}** の更新が完了しました`, undefined, updateRequestor.projectId);
   }
 
+  // #296: 接続時の自動更新チェック（遅延実行）。循環 import を避けるため動的 import で読み込む
+  void import('./auto-updater.js')
+    .then(({ scheduleAutoUpdateOnConnect }) => scheduleAutoUpdateOnConnect(machine.id))
+    .catch(err => console.error('❌ auto-update schedule failed:', (err as Error).message));
+
   return machine.id;
 }
 
@@ -1291,6 +1296,10 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
     if (requestor) {
       await sendMessage(requestor.platform, requestor.chatId, `❌ Agent 更新に失敗しました: ${error}`, undefined, requestor.projectId);
       pendingUpdateNotify.delete(machineId);
+    } else {
+      // #296: リクエスト元が無い＝自動更新起点。結果を Machine に記録する（チャットには流さない）
+      const { recordAutoUpdateError } = await import('./auto-updater.js');
+      await recordAutoUpdateError(machineId, error ?? 'unknown').catch(() => {});
     }
   }
 }
@@ -1396,6 +1405,20 @@ export function updateAgent(machineId: string, platform: Platform, chatId: strin
   sendToAgent(machineId, {
     type: 'server:agent:update',
     payload: {}
+  });
+}
+
+/**
+ * #296: 自動更新用に `server:agent:update` を送る（通知先を登録しない版）
+ *
+ * 手動 `u` の `updateAgent()` は pendingUpdateNotify にチャットを登録してタイムアウト通知を出すが、
+ * 自動更新にはリクエスト元のチャットが無いため、結果は Machine.lastAutoUpdate* と
+ * サーバーログにだけ残す（夜間にチャット通知が飛ぶのを避ける）。
+ */
+export function updateAgentAuto(machineId: string) {
+  sendToAgent(machineId, {
+    type: 'server:agent:update',
+    payload: {},
   });
 }
 

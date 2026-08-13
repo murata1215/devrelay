@@ -350,6 +350,48 @@ export async function apiRoutes(app: FastifyInstance) {
     return { success: true, skipPermissions };
   });
 
+  // #296: autoUpdate（Agent 自動更新）の取得・更新
+  // 自動更新はサーバー主導のため Agent への配信は不要（DB 値をサーバーが直接参照する）
+  app.get('/api/machines/:id/auto-update', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+      select: {
+        autoUpdate: true,
+        lastAutoUpdateAt: true,
+        lastAutoUpdateCommit: true,
+        lastAutoUpdateStatus: true,
+        autoUpdateAttempts: true,
+      },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+    return machine;
+  });
+
+  app.put('/api/machines/:id/auto-update', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const { autoUpdate } = request.body as { autoUpdate: boolean };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+
+    // 再有効化時は失敗カウンタもリセットする（stale-dist で自動停止した後の復帰用）
+    await prisma.machine.update({
+      where: { id },
+      data: autoUpdate
+        ? { autoUpdate: true, autoUpdateAttempts: 0, lastAutoUpdateStatus: null }
+        : { autoUpdate: false },
+    });
+
+    return { success: true, autoUpdate };
+  });
+
   // disableAsk（AskUserQuestion 無効化）の取得・更新
   app.get('/api/machines/:id/disable-ask', async (request, reply) => {
     // @ts-ignore

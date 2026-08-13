@@ -247,6 +247,7 @@ bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project pixblo
 \\\`\\\`\\\`
 
 ### 注意事項
+- **宛先は WebUI の Team ページで登録されたプロジェクトだけです**（\\\`--list\\\` に出るものが全て）。一覧に無いプロジェクトへは送れません（サーバーが 403 を返します）。**勝手に別のプロジェクトへ送り直さず**、ユーザーに登録を依頼してください
 - 質問/依頼先のエージェントがオンラインである必要があります
 - **Bash ツールの timeout を十分に設定してください:**
   - \\\`--exec\\\` なし（質問）: timeout 720000（12分）
@@ -303,12 +304,22 @@ if [ "$1" = "--list" ]; then
   if command -v jq &>/dev/null; then
     MEMBER_COUNT=$(echo "$BODY" | jq 'length')
     if [ "$MEMBER_COUNT" = "0" ]; then
-      echo "登録済みメンバーはありません。WebUI でメンバーを追加してください。"
+      echo "登録済みメンバーはありません。WebUI の Team ページで宛先プロジェクトを登録してください。"
       exit 0
     fi
-    echo "=== 登録済みメンバー ($MEMBER_COUNT 件) ==="
+    # #295: チームごとにグルーピングし、同名メンバーには --machine 必須の警告を付ける
+    echo "=== 登録済みメンバー ($MEMBER_COUNT 件） ==="
+    echo "（ask / teamexec で送れるのはこの一覧の宛先だけです）"
     echo ""
-    echo "$BODY" | jq -r '.[] | "チーム: \\(.teamName) → メンバー: \\(.memberProjectName) (\\(.memberMachineName)) [\\(.memberMachineStatus)]"'
+    echo "$BODY" | jq -r '
+      ( group_by(.memberProjectName) | map(select(length > 1) | .[0].memberProjectName) ) as $dups
+      | group_by(.teamName)[]
+      | "[\\(.[0].teamName)]",
+        ( .[] | "  - \\(.memberProjectName) (\\(.memberMachineName)) [\\(.memberMachineStatus)]"
+          + (if .isSameMachine then " [自マシン]" else "" end)
+          + (if (.memberProjectName | IN($dups[])) then " ⚠️ 同名あり: --machine 指定が必要" else "" end) ),
+        ""
+    '
   else
     echo "$BODY"
   fi
@@ -382,11 +393,15 @@ if command -v jq &>/dev/null; then
   MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
   MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
 
+  # #295: 宛先は Team に登録済みのものだけ（サーバー側も未登録宛先を 403 で拒否する）
   if [ "$MATCH_COUNT" = "0" ]; then
-    echo "エラー: '$PROJECT' に一致するメンバーが見つかりません"
+    echo "エラー: '$PROJECT' は宛先として登録されていません"
     echo ""
-    echo "登録済みメンバー:"
+    echo "送信できる宛先:"
     echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo ""
+    echo "この一覧に無いプロジェクトへは送れません。WebUI の Team ページで登録するようユーザーに依頼してください。"
+    echo "別のプロジェクトに送り直したり、同じ依頼を文面を変えて再送したりしないでください。"
     exit 1
   fi
 

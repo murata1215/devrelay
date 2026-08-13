@@ -152,6 +152,12 @@ model Machine {
   projectsDirs   Json?     // Server 管理のプロジェクト検索パス（string[]）
   skipPermissions Boolean  @default(false) // 全ツール自動許可（--dangerously-skip-permissions 相当）
   disableAsk      Boolean  @default(false) // AskUserQuestion 無効化（SDK disallowedTools で除去）
+  // #296: 自動更新（サーバー主導）。既定 ON。失敗が続いたマシンは自動で false に落とす
+  autoUpdate           Boolean   @default(true)  // 自動更新の有効/無効（マシン単位）
+  lastAutoUpdateAt     DateTime?                 // 直近に自動更新を試みた日時
+  lastAutoUpdateCommit String?                   // 直近に狙ったリモートコミット
+  lastAutoUpdateStatus String?                   // success / failed:stale-dist / error:<msg>
+  autoUpdateAttempts   Int       @default(0)     // 同一コミットへの試行回数（成功でリセット）
   deletedAt      DateTime? // ソフトデリート（null = アクティブ）
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

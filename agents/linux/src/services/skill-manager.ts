@@ -251,6 +251,7 @@ bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project pixblo
 \\\`\\\`\\\`
 
 ### 注意事項
+- **宛先は WebUI の Team ページで登録されたプロジェクトだけです**（\\\`--list\\\` に出るものが全て）。一覧に無いプロジェクトへは送れません（サーバーが 403 を返します）。**勝手に別のプロジェクトへ送り直さず**、ユーザーに登録を依頼してください
 - 質問/依頼先のエージェントがオンラインである必要があります
 - **Bash ツールの timeout を十分に設定してください:**
   - \\\`--exec\\\` なし（質問）: timeout 720000（12分）
@@ -307,12 +308,22 @@ if [ "$1" = "--list" ]; then
   if command -v jq &>/dev/null; then
     MEMBER_COUNT=$(echo "$BODY" | jq 'length')
     if [ "$MEMBER_COUNT" = "0" ]; then
-      echo "登録済みメンバーはありません。WebUI でメンバーを追加してください。"
+      echo "登録済みメンバーはありません。WebUI の Team ページで宛先プロジェクトを登録してください。"
       exit 0
     fi
-    echo "=== 登録済みメンバー ($MEMBER_COUNT 件) ==="
+    # #295: チームごとにグルーピングし、同名メンバーには --machine 必須の警告を付ける
+    echo "=== 登録済みメンバー ($MEMBER_COUNT 件） ==="
+    echo "（ask / teamexec で送れるのはこの一覧の宛先だけです）"
     echo ""
-    echo "$BODY" | jq -r '.[] | "チーム: \\(.teamName) → メンバー: \\(.memberProjectName) (\\(.memberMachineName)) [\\(.memberMachineStatus)]"'
+    echo "$BODY" | jq -r '
+      ( group_by(.memberProjectName) | map(select(length > 1) | .[0].memberProjectName) ) as $dups
+      | group_by(.teamName)[]
+      | "[\\(.[0].teamName)]",
+        ( .[] | "  - \\(.memberProjectName) (\\(.memberMachineName)) [\\(.memberMachineStatus)]"
+          + (if .isSameMachine then " [自マシン]" else "" end)
+          + (if (.memberProjectName | IN($dups[])) then " ⚠️ 同名あり: --machine 指定が必要" else "" end) ),
+        ""
+    '
   else
     echo "$BODY"
   fi
@@ -384,37 +395,19 @@ if command -v jq &>/dev/null; then
     same: (.isSameMachine // false)
   } ]')
   MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
-
-  # メンバー一覧に見つからない場合、inventory API にフォールバック（Team 未登録でも問い合わせ可能にする）
-  if [ "$(echo "$MATCHED" | jq 'length')" = "0" ]; then
-    INV_RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
-      -H "Authorization: Bearer $TOKEN" \\
-      "\${API_URL}/api/agent/inventory" 2>&1) || true
-
-    INV_HTTP=$(echo "$INV_RESPONSE" | tail -1)
-    INV_BODY=$(echo "$INV_RESPONSE" | sed '$d')
-
-    if [ "$INV_HTTP" = "200" ]; then
-      # inventory はマシン単位の構造なので、online / machine をプロジェクトへ畳み込んでから絞り込む
-      CANDIDATES=$(echo "$INV_BODY" | jq '[ .[] | . as $m | .projects[] | {
-        id: .id,
-        name: .name,
-        orig: (.originalName // .name),
-        machine: $m.machine,
-        online: $m.online,
-        same: false
-      } ]')
-      MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
-    fi
-  fi
-
   MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
 
+  # #295: 宛先は Team に登録済みのものだけ。以前は inventory API（ユーザーの全プロジェクト）へ
+  # フォールバックしていたが、当てずっぽうに別マシンの同名プロジェクトを選んで暴走の起点になったため廃止。
+  # サーバー側も未登録宛先を 403 で拒否する
   if [ "$MATCH_COUNT" = "0" ]; then
-    echo "エラー: '$PROJECT' に一致するプロジェクトが見つかりません"
+    echo "エラー: '$PROJECT' は宛先として登録されていません"
     echo ""
-    echo "候補:"
+    echo "送信できる宛先:"
     echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo ""
+    echo "この一覧に無いプロジェクトへは送れません。WebUI の Team ページで登録するようユーザーに依頼してください。"
+    echo "別のプロジェクトに送り直したり、同じ依頼を文面を変えて再送したりしないでください。"
     exit 1
   fi
 

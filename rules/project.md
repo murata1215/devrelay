@@ -1110,6 +1110,19 @@ Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する仕
 - **表示**: `/api/agent/members` に `isSameMachine` フラグ、ask.sh で `[自マシン]` マーク
 - **設計判断**: 送信自体はブロックしない（nim → devrelay のような正当な同一マシン間通信を許可）。閾値で異常検知
 
+### 宛先の事前登録を強制 (#295)
+
+宛先は **Team に登録されたプロジェクトだけ**。許可集合＝ `/api/agent/members` が返すもの（発信元マシンと同じ Team のメンバー）。
+
+- **サーバーが最終防衛線**: `document-api.ts` の `checkCrossTargetAllowed()` を ask/teamexec 両エンドポイントで実行し、未登録は 403。
+  判定クエリは members エンドポイントの絞り込みと**同形**にすること（一覧と許可判定がズレると「見えるのに送れない／見えないのに送れる」が起きる）
+- **フォールバックを作らない**: 旧 `ask.sh` は未ヒット時に `/api/agent/inventory`（ユーザーの全プロジェクト）へフォールバックしていた。
+  こういう経路は許可リストを無効化するので置かない
+- **チャット側も同じ許可集合**: `command-handler.ts` の `resolveCrossTargetByName()`。発信元マシンが曖昧なため
+  「ユーザー所有 Team のメンバー全体」を許可集合とし、複数一致は候補提示で中止
+- **移行措置**: Team を 1 つも作っていないユーザーのみ従来どおり全許可（`legacy: true` でログに警告）。1 つ作れば厳格モード
+- **同一マシン上の別プロジェクトも登録必須**: 31 プロジェクト載っているマシンがあり、無条件許可ではノイズが戻るため
+
 ### マシン跨ぎのピンポン対策 (#294)
 
 #211 の同一マシン限定ガードでは **A→B→A のマシン跨ぎ往復**を止められず、2026-08-13 に teamexec が
@@ -1259,3 +1272,22 @@ Flutter アプリを USB 接続された実機（iPhone/Android）にチャッ�
 - **空振りガード (#288)**: 変更ゼロの作業ツリーでは「存在しないプランを推測せず『コミット対象の変更はありません』とだけ報告して終了」させる。これが無いと「プランをください」ループに陥る
 - **非 git 対応 (#293)**: 冒頭で `git rev-parse --is-inside-work-tree` を判定して 2 分岐。非 git ではコミット/プッシュを行わず、会話履歴とディレクトリ内容から作業内容を把握して README.md / MEMORY.md を更新（無ければ新規作成）。他の .md は既存時のみ更新
 - **設計判断**: 新規作成は README.md と MEMORY.md のみ（changelog.md・CLAUDE.md まで自動生成すると試用ディレクトリにノイズが増える）。git 側の文面は変更せず挙動不変。**どちらの分岐にも「対象が無ければ推測せず終了」のガードを置く**
+
+## Agent 自動更新（サーバー主導）(#296)
+
+Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:version-check` → `server:agent:update`）で
+サーバーが自動的に叩く。実体は `apps/server/src/services/auto-updater.ts`。
+
+- **Agent 側は変更しない**。これが設計の要。Agent 内にスケジューラを置くと「その仕組みを配るために全台へ手動 `u`」が必要になり、
+  自動更新を入れる目的と矛盾する。既存プロトコルで足りる限り**サーバー側だけで完結させる**
+- **トリガー**: Agent 接続時（30〜120 秒のランダム遅延）＋ 6 時間ごとのスイープ。オフライン機は次の接続時に拾われる
+- **ゲート**（`evaluateAutoUpdateGates()` は I/O なしの純粋関数。単体検証できるよう分離してある）:
+  グローバル kill switch → マシン単位 `autoUpdate` → 開発リポ除外 → 更新の有無 → 試行上限 → クールダウン 30 分 →
+  bake time 120 分 → 作業中 → 同時実行 3 台。**skip 時は必ず理由をログに出す**
+- **`isDevRepo` が未定義の古い Agent は「開発リポ扱い」に倒す**（誤って開発機を更新するより手動 `u` に委ねる方が安全）
+- **失敗したら自分で止まる**: 同一コミットで 2 回失敗したら `autoUpdate=false` + `lastAutoUpdateStatus='failed:stale-dist'`。
+  #256 の stale dist（git reset は成功するが dist が古いまま）で無限に再起動し続けるのを防ぐ。
+  WebUI から再有効化すると試行カウンタもリセットされる
+- **bake time の意図**: 壊れたコミットを push しても、2 時間以内に直せば艦隊には配られない
+- **運用スイッチ（env）**: `DEVRELAY_AUTO_UPDATE_DRY_RUN=1` / `DEVRELAY_AUTO_UPDATE_ONLY=<machineId>` /
+  `DEVRELAY_AUTO_UPDATE_DISABLED=1` / `DEVRELAY_AUTO_UPDATE_BAKE_MIN` / `DEVRELAY_AUTO_UPDATE_SWEEP_MIN`

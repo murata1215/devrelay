@@ -34,6 +34,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Plan Mode Log Access**: Read-only Bash commands (pm2 logs, git status, journalctl, etc.) available during plan mode via `--allowedTools`
 - **Allowed Tools Management**: Edit plan mode allowed tools from WebUI Settings page (Linux/Windows side-by-side, real-time sync to agents)
 - **Remote Agent Update**: Update agents remotely via `u` command with version check and completion notification
+- **Agent Auto Update**: Server-driven — idle agents pull the latest commit automatically (2h bake time, max 3 concurrent, dev repos excluded). Self-disables after 2 failed attempts on the same commit. Per-machine toggle on the Agents page, global kill switch in Settings
 - **Dev Reports**: AI-generated development reports from conversation history (multi-provider, markdown export)
 - **PWA + Push Notifications**: Install as app, receive push notifications when AI completes (even with tab closed)
 - **Completion Sound**: Discord-like notification sound on AI response completion (customizable mp3)
@@ -41,6 +42,7 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Team Management**: Create named teams, add projects, and enable cross-project AI queries
 - **Cross-Project Query**: Ask questions to other project's agents via `ask <project>: <question>` (Discord/Telegram/Claude Code skill)
 - **Cross-Project Exec**: Send execution requests to other project's agents via `teamexec <project>: <instruction>` (Discord/Telegram/Claude Code skill `--exec` flag)
+- **Cross-Project Allowlist**: `ask` / `teamexec` can only target projects registered in a Team (WebUI Team page). Unregistered targets are rejected with 403 and a list of valid destinations — no more picking a same-named project on the wrong machine
 - **Cross-Project Loop Guards**: Forwarding hops are blocked (a project executing a teamexec cannot re-forward it), plus per-target / per-user rate limits across machines. The `ask.sh` skill refuses to guess when a project name matches several machines — it lists candidates and expects `--machine <name>`
 - **Issue Tracking**: `doc/issues.md` auto-created per project, status updates integrated into `w` command
 - **Tool Approval History**: Real-time tool approval with persistent history (DB + Agent JSONL log), auto-approved tools shown with 🔓 icon, survives browser refresh

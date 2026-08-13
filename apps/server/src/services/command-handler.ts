@@ -1596,6 +1596,72 @@ Vite + Phaser 3 + TypeScript のゲーム開発環境を自動構築します。
 // Cross-project query
 // -----------------------------------------------------------------------------
 
+/** #295: ask / teamexec の宛先候補（マシン情報付きプロジェクト） */
+type CrossTargetProject = Project & {
+  machine: { id: string; name: string; displayName: string | null; status: string };
+};
+
+/**
+ * #295: ask / teamexec の宛先を「Team に登録済みのプロジェクト」から解決する
+ *
+ * 従来は全プロジェクト（実運用で 330 件）から `findFirst` で先頭 1 件を取っており、
+ * 同名プロジェクトがあると宛先を取り違えた（#294 の暴走の一因）。
+ * チャットは発信元マシンが曖昧なため、許可集合は「ユーザーが所有する Team のメンバー全体」とする。
+ *
+ * @param dbUserId ユーザー ID
+ * @param targetProjectName 指定されたプロジェクト名
+ * @returns 解決できたプロジェクト、または呼び出し元がそのまま返すエラーメッセージ
+ */
+async function resolveCrossTargetByName(
+  dbUserId: string,
+  targetProjectName: string
+): Promise<{ ok: false; error: string } | { ok: true; project: CrossTargetProject; legacy: boolean }> {
+  const includeMachine = { machine: { select: { id: true, name: true, displayName: true, status: true } } } as const;
+
+  // 移行措置: Team を 1 つも作っていないユーザーは従来どおり全プロジェクトを対象にする
+  const teamCount = await prisma.team.count({ where: { userId: dbUserId } });
+  const candidates = await prisma.project.findMany({
+    where: {
+      machine: { userId: dbUserId, deletedAt: null },
+      ...(teamCount > 0 ? { teamMembers: { some: { team: { userId: dbUserId } } } } : {}),
+    },
+    include: includeMachine,
+  });
+
+  const needle = targetProjectName.trim().toLowerCase();
+  const label = (p: typeof candidates[number]) => p.displayName ?? p.name;
+  const matches = (() => {
+    const exact = candidates.filter(p => label(p).toLowerCase() === needle || p.name.toLowerCase() === needle);
+    if (exact.length > 0) return exact;
+    return candidates.filter(p => label(p).toLowerCase().includes(needle) || p.name.toLowerCase().includes(needle));
+  })();
+
+  const format = (list: typeof candidates) => list
+    .map(p => `  - ${label(p)} (${p.machine.displayName ?? p.machine.name})${p.machine.status === 'online' ? '' : ' ⏸ offline'}`)
+    .join('\n');
+
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      error: `❌ "${targetProjectName}" は宛先として登録されていません。\n\n`
+        + (candidates.length > 0 ? `送信できる宛先:\n${format(candidates)}\n\n` : '')
+        + 'WebUI の Team ページで宛先プロジェクトを登録してください。',
+    };
+  }
+
+  // #294 と同じ思想: 複数一致は勝手に選ばず候補を提示して中止する
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      error: `❌ "${targetProjectName}" に一致する宛先が ${matches.length} 件あります。宛先を特定できません。\n\n`
+        + `候補:\n${format(matches)}\n\n`
+        + 'プロジェクトの表示名を変えて一意にするか、WebUI の Team ページで登録を整理してください。',
+    };
+  }
+
+  return { ok: true, project: matches[0], legacy: teamCount === 0 };
+}
+
 /** 他プロジェクトのエージェントに質問を投げる */
 async function handleAskMember(
   context: UserContext,
@@ -1607,18 +1673,10 @@ async function handleAskMember(
     return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
   }
 
-  // プロジェクト名で検索（case-insensitive、同一ユーザー所有）
-  const targetProject = await prisma.project.findFirst({
-    where: {
-      name: { equals: targetProjectName, mode: 'insensitive' },
-      machine: { userId: dbUserId, deletedAt: null },
-    },
-    include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
-  });
-
-  if (!targetProject) {
-    return `❌ プロジェクト "${targetProjectName}" が見つかりません。`;
-  }
+  // #295: Team に登録済みの宛先から解決（同名が複数あれば候補を提示して中止）
+  const resolved = await resolveCrossTargetByName(dbUserId, targetProjectName);
+  if (!resolved.ok) return resolved.error;
+  const targetProject = resolved.project;
 
   if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
     const machineName = targetProject.machine.displayName ?? targetProject.machine.name;
@@ -1694,18 +1752,10 @@ async function handleTeamExec(
     return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
   }
 
-  // プロジェクト名で検索（case-insensitive、同一ユーザー所有）
-  const targetProject = await prisma.project.findFirst({
-    where: {
-      name: { equals: targetProjectName, mode: 'insensitive' },
-      machine: { userId: dbUserId, deletedAt: null },
-    },
-    include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
-  });
-
-  if (!targetProject) {
-    return `❌ プロジェクト "${targetProjectName}" が見つかりません。`;
-  }
+  // #295: Team に登録済みの宛先から解決（同名が複数あれば候補を提示して中止）
+  const resolved = await resolveCrossTargetByName(dbUserId, targetProjectName);
+  if (!resolved.ok) return resolved.error;
+  const targetProject = resolved.project;
 
   if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
     const machineName = targetProject.machine.displayName ?? targetProject.machine.name;

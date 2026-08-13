@@ -45,6 +45,15 @@ export function MachinesPage() {
   const [skipPermissions, setSkipPermissions] = useState(false);
   const [skipPermissionsLoading, setSkipPermissionsLoading] = useState(false);
 
+  // #296: 自動更新（サーバー主導）
+  const [autoUpdate, setAutoUpdate] = useState(true);
+  const [autoUpdateLoading, setAutoUpdateLoading] = useState(false);
+  const [autoUpdateInfo, setAutoUpdateInfo] = useState<{
+    lastAutoUpdateAt?: string | null;
+    lastAutoUpdateCommit?: string | null;
+    lastAutoUpdateStatus?: string | null;
+  }>({});
+
   // 削除確認モーダル
   const [deleteTarget, setDeleteTarget] = useState<Machine | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -111,15 +120,22 @@ export function MachinesPage() {
     setAliasValue(currentAlias !== hostname ? currentAlias : '');
 
     try {
-      const [tokenResult, dirsResult, skipResult] = await Promise.all([
+      const [tokenResult, dirsResult, skipResult, autoUpdateResult] = await Promise.all([
         machines.getToken(machine.id),
         machines.getProjectsDirs(machine.id),
         fetch(`/api/machines/${machine.id}/skip-permissions`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ skipPermissions: false })),
+        fetch(`/api/machines/${machine.id}/auto-update`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ autoUpdate: true })),
       ]);
       setSettingsToken(tokenResult.token);
       // DB 設定があればそれを使用、なければ Agent ローカル設定をプリセット
       setProjectsDirs(dirsResult.projectsDirs ?? dirsResult.localProjectsDirs ?? []);
       setSkipPermissions(skipResult.skipPermissions ?? false);
+      setAutoUpdate(autoUpdateResult.autoUpdate ?? true);
+      setAutoUpdateInfo({
+        lastAutoUpdateAt: autoUpdateResult.lastAutoUpdateAt,
+        lastAutoUpdateCommit: autoUpdateResult.lastAutoUpdateCommit,
+        lastAutoUpdateStatus: autoUpdateResult.lastAutoUpdateStatus,
+      });
     } catch (err) {
       setSettingsToken('(Failed to load token)');
     } finally {
@@ -649,6 +665,58 @@ export function MachinesPage() {
                   <span className="block text-xs text-[var(--text-muted)]">
                     Exec モードで全ツールを自動許可（--dangerously-skip-permissions 相当）
                   </span>
+                </div>
+              </label>
+            </div>
+
+            {/* #296: 自動更新 */}
+            <div className="mb-4">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <div className="relative">
+                  <input
+                    type="checkbox"
+                    checked={autoUpdate}
+                    onChange={async (e) => {
+                      const newValue = e.target.checked;
+                      setAutoUpdateLoading(true);
+                      try {
+                        await fetch(`/api/machines/${settingsTarget!.id}/auto-update`, {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+                          body: JSON.stringify({ autoUpdate: newValue }),
+                        });
+                        setAutoUpdate(newValue);
+                        // 再有効化時はサーバー側で失敗ステータスがクリアされる
+                        if (newValue) setAutoUpdateInfo(prev => ({ ...prev, lastAutoUpdateStatus: null }));
+                      } catch (err) {
+                        console.error('Failed to update auto-update:', err);
+                      } finally {
+                        setAutoUpdateLoading(false);
+                      }
+                    }}
+                    disabled={autoUpdateLoading}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-slate-300 dark:bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 transition-colors"></div>
+                  <div className="absolute left-[2px] top-[2px] bg-white w-5 h-5 rounded-full transition-transform peer-checked:translate-x-5"></div>
+                </div>
+                <div>
+                  <span className="text-sm font-medium text-[var(--text-primary)]">🔄 Auto Update</span>
+                  <span className="block text-xs text-[var(--text-muted)]">
+                    アイドル時に自動で最新版へ更新（新しいコミットは 2 時間経過後に配布）
+                  </span>
+                  {autoUpdateInfo.lastAutoUpdateAt && (
+                    <span className="block text-xs text-[var(--text-faint)] mt-1">
+                      最終自動更新: {new Date(autoUpdateInfo.lastAutoUpdateAt).toLocaleString()}
+                      {autoUpdateInfo.lastAutoUpdateCommit && ` / ${autoUpdateInfo.lastAutoUpdateCommit.slice(0, 7)}`}
+                      {autoUpdateInfo.lastAutoUpdateStatus && ` / ${autoUpdateInfo.lastAutoUpdateStatus}`}
+                    </span>
+                  )}
+                  {autoUpdateInfo.lastAutoUpdateStatus?.startsWith('failed') && (
+                    <span className="block text-xs text-[var(--text-danger)] mt-1">
+                      ⚠️ 更新が反映されなかったため自動停止しました。`u` で手動更新するかビルドを確認してください
+                    </span>
+                  )}
                 </div>
               </label>
             </div>

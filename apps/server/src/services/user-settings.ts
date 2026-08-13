@@ -59,6 +59,8 @@ export const SettingKeys = {
   CLAUDE_MODEL_EXEC: 'claude_model_exec',
   /** 組織活動の会話要約に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'）。統制 v3 #270 */
   ORG_SUMMARY_PROVIDER: 'org_summary_provider',
+  /** Agent 自動更新のグローバル kill switch（#296）。'false' のときだけ無効（未設定＝有効） */
+  AUTO_UPDATE_ENABLED: 'auto_update_enabled',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

@@ -17,6 +17,7 @@ import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
 import { decrypt } from './services/user-settings.js';
 import { initVapid } from './services/push-notification-service.js';
 import { initFcm } from './services/fcm-service.js';
+import { startAutoUpdateSweep } from './services/auto-updater.js';
 import { mcpRoutes } from './mcp/server.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
@@ -106,6 +107,9 @@ async function main() {
 
   // FCM（Firebase Cloud Messaging）初期化
   await initFcm();
+
+  // #296: Agent 自動更新の定期スイープを開始（接続時トリガーは agent-manager 側）
+  startAutoUpdateSweep();
 
   // Plugins
   await app.register(cors, { origin: true });

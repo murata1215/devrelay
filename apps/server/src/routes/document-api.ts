@@ -94,6 +94,62 @@ async function countRecentCrossSessions(
 }
 
 /**
+ * #295: ask / teamexec の宛先は「Team に事前登録されたプロジェクト」だけに限定する
+ *
+ * 従来は所有者チェックのみで、ユーザーの全プロジェクト（実運用で 330 件）が宛先になり得た。
+ * 一覧が見づらいうえ、名前解決の誤爆が #294 の暴走の起点になったため、
+ * 許可集合を `/api/agent/members` が返すもの（＝発信元マシンと同じ Team のメンバー）と一致させる。
+ *
+ * @param machineId 発信元マシン ID
+ * @param userId 発信元ユーザー ID
+ * @param targetProjectId 宛先プロジェクト ID
+ * @returns allowed=許可するか / legacy=Team 未作成ユーザーの移行措置で通したか
+ */
+async function checkCrossTargetAllowed(
+  machineId: string,
+  userId: string,
+  targetProjectId: string
+): Promise<{ allowed: boolean; legacy: boolean }> {
+  // 発信元マシンのプロジェクトが属する Team に、宛先プロジェクトも属しているか
+  // （/api/agent/members の絞り込み条件と同形。一覧に出るものだけが送れる状態を保証する）
+  const registered = await prisma.teamMember.count({
+    where: {
+      projectId: targetProjectId,
+      team: { members: { some: { project: { machineId } } } },
+    },
+  });
+  if (registered > 0) return { allowed: true, legacy: false };
+
+  // 移行措置: Team を 1 つも作っていないユーザーは従来どおり通す
+  // （Team を 1 つでも作った時点で厳格モードに切り替わる）
+  const teamCount = await prisma.team.count({ where: { userId } });
+  if (teamCount === 0) return { allowed: true, legacy: true };
+
+  return { allowed: false, legacy: false };
+}
+
+/**
+ * #295: 未登録の宛先を拒否する際の案内文を組み立てる
+ * 登録済みの宛先一覧を添えて、AI が別プロジェクトへ当てずっぽうに送り直さないようにする
+ */
+async function buildUnregisteredTargetMessage(machineId: string, targetName: string): Promise<string> {
+  const allowed = await prisma.teamMember.findMany({
+    where: { team: { members: { some: { project: { machineId } } } } },
+    include: {
+      team: { select: { name: true } },
+      project: { include: { machine: { select: { name: true, displayName: true } } } },
+    },
+  });
+  const list = allowed
+    .map(m => `  - ${m.project.displayName ?? m.project.name} (${m.project.machine.displayName || m.project.machine.name}) [${m.team.name}]`)
+    .join('\n');
+  return `未登録の宛先です: ${targetName}\n`
+    + 'ask / teamexec で送れるのは Team に登録されたプロジェクトだけです。\n'
+    + (list ? `登録済みの宛先:\n${list}\n` : 'このマシンには登録済みの宛先がありません。\n')
+    + `WebUI の Team ページで宛先プロジェクトを登録してください。${NO_RETRY_NOTE}`;
+}
+
+/**
  * マシントークンから userId を取得する認証ヘルパー
  * Authorization: Bearer <machine_token> ヘッダーを使用
  *
@@ -352,6 +408,16 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Target project not found' });
     }
 
+    // #295: 宛先は Team に登録済みのものだけ（Team 未作成ユーザーは移行措置で従来どおり）
+    const askAllowed = await checkCrossTargetAllowed(auth.machineId, auth.userId, targetProjectId);
+    if (!askAllowed.allowed) {
+      console.log(`🚫 Cross-query target not registered: ${auth.machineId} → ${targetProject.name}`);
+      return reply.status(403).send({ error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name) });
+    }
+    if (askAllowed.legacy) {
+      console.log(`⚠️ Cross-query allowed without team registration (no teams yet): → ${targetProject.name}`);
+    }
+
     if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
       return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
     }
@@ -514,6 +580,16 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     if (!targetProject || targetProject.machine.userId !== auth.userId || targetProject.machine.deletedAt) {
       return reply.status(404).send({ error: 'Target project not found' });
+    }
+
+    // #295: 宛先は Team に登録済みのものだけ（Team 未作成ユーザーは移行措置で従来どおり）
+    const execAllowed = await checkCrossTargetAllowed(auth.machineId, auth.userId, targetProjectId);
+    if (!execAllowed.allowed) {
+      console.log(`🚫 Team exec target not registered: ${auth.machineId} → ${targetProject.name}`);
+      return reply.status(403).send({ error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name) });
+    }
+    if (execAllowed.legacy) {
+      console.log(`⚠️ Team exec allowed without team registration (no teams yet): → ${targetProject.name}`);
     }
 
     if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {

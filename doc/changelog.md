@@ -6,6 +6,40 @@
 
 ## 実装済み機能
 
+### #296: Agent 自動更新（サーバー主導・既定 ON・Agent 側の変更ゼロ） (2026-08-13)
+
+- **背景**: Agent 更新は `u` → `u` の手動 2 段階のみで、32 台（online 12 / offline 20）を人手で回していた。更新漏れは実害を出しており、#256 の stale dist は Mac で約 3 ヶ月潜伏した。ユーザー要望「エージェントの自動更新は作れないか」「最初から ON にしたい」
+- **方針転換（重要）**: 当初は Agent 内にスケジューラを置く設計だったが、**それだと自動更新を効かせるために全 32 台へ手動 `u` が必要**（ブートストラップ問題）で本末転倒だった。調査の結果、必要な部品は**すべてサーバー側にあり、今動いている Agent がそのまま応答できる**ことが判明: `checkAgentVersion()`（`agent-manager.ts:1339`）で `hasUpdate`/`isDevRepo`/`runningCodeStale` が取れ、`server:agent:update` を送れば Agent が git pull + build + restart する。**サーバーだけ直せば成立し、Agent 側の変更・一斉 `u` は不要**
+- **実装（新規 `apps/server/src/services/auto-updater.ts`）**:
+  - **トリガー 2 系統**: Agent 接続時（30〜120 秒のランダム遅延。オフラインだったマシンも次に繋がった時点で最新化）＋ 6 時間ごとのスイープ
+  - **ゲート**（`evaluateAutoUpdateGates()` は I/O を持たない純粋関数として分離）: グローバル kill switch → マシン単位 `autoUpdate` → 開発リポ除外（`isDevRepo`。**省略する古い Agent は「開発リポ扱い＝更新しない」に倒す**）→ 更新の有無 → 同一コミット 2 回失敗で `disable` → 30 分クールダウン → **bake time 2 時間**（壊れたコミットを push しても直せば艦隊に配られない）→ 作業中（active セッションで AI 応答中、または直近 10 分にメッセージ）→ 同時実行 3 台。skip 時は必ず理由をログに出す
+  - **更新後の照合（#256 対策）**: 更新を送る際に `lastAutoUpdateStatus='pending'` + 狙ったコミットを記録。再起動 → 再接続時のチェックで「`localCommit === 狙ったコミット` かつ `runningCodeStale === false`」なら success + 試行回数リセット。到達していなければ試行回数が積み上がり、2 回で **そのマシンの `autoUpdate` を false に落として `failed:stale-dist`** を記録（「更新できないのに 6 時間ごとに再起動し続ける」#294 型の暴走を防ぐ）
+  - **通知**: チャットには流さず、サーバーログ + `Machine.lastAutoUpdate*` に記録して WebUI に表示（夜間通知を避ける）
+- **DB**: `Machine` に `autoUpdate Boolean @default(true)` / `lastAutoUpdateAt` / `lastAutoUpdateCommit` / `lastAutoUpdateStatus` / `autoUpdateAttempts Int @default(0)` を追加。**既定 ON なので既存 32 台も自動で対象**
+- **その他の変更**: `agent-manager.ts` に `updateAgentAuto()`（通知先を登録しない更新送信）と接続時トリガー（循環 import 回避のため動的 import）、自動起点の更新失敗を `Machine` に記録。`session-manager.ts` に `isSessionRunning()`（`progressTrackers` の有無）。`index.ts` で `startAutoUpdateSweep()`。`api.ts` に `GET/PUT /api/machines/:id/auto-update`（再有効化時は失敗カウンタもリセット）。WebUI は Agents ページにマシン別トグル＋「最終自動更新」表示、Settings ページに全台の kill switch（`auto_update_enabled`）
+- **運用スイッチ（env）**: `DEVRELAY_AUTO_UPDATE_DRY_RUN=1`（判定だけしてログ出力）/ `DEVRELAY_AUTO_UPDATE_ONLY=<machineId>`（1 台に限定）/ `DEVRELAY_AUTO_UPDATE_DISABLED=1`（完全停止）/ `DEVRELAY_AUTO_UPDATE_BAKE_MIN` / `DEVRELAY_AUTO_UPDATE_SWEEP_MIN`
+- **対象**: server 6 ファイル（`auto-updater.ts` 新規・`agent-manager.ts`・`session-manager.ts`・`user-settings.ts`・`index.ts`・`routes/api.ts`）+ web 2 ファイル + `schema.prisma`。**Agent（linux/macos/windows）変更なし**
+- **DB マイグレーション**: shadow DB 破損で `prisma migrate dev` 不可 → psql で `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` を直接適用 → `information_schema` で 5 カラムの存在・デフォルト値を検証 → `prisma generate` → ビルド（rules/project.md の既知手順どおり）
+- **検証**: server / web ビルド成功。**ゲートを 11 ケースで単体検証**（全通過 / グローバル OFF / マシン OFF / 開発リポ / 更新なし / 同一コミット 2 回失敗→disable / 1 回目→update / クールダウン / bake time 未満 / 作業中 / 同時実行上限）→ 11/11 pass。DB で全 32 台が `autoUpdate=true` になっていることを確認
+- **反映**: `pm2 restart devrelay-server`（**DB マイグレーション適用済み**）。**Agent 側の `u` は不要**。ubuntu-prod/devrelay（このリポジトリ＝開発リポ）は `isDevRepo` ゲートで対象外
+- **教訓**: 自己更新の仕組みを Agent 側に足すと「その仕組みを配るための手動更新」が必要になる。**既存プロトコルで足りるならサーバー側だけで完結させる**のが正解。自動化には必ず「失敗したら自分で止まる」機構（試行上限 → 自動 OFF）を組み込む
+
+### #295: ask / teamexec の宛先を「Team に事前登録したプロジェクト」だけに限定 (2026-08-13)
+
+- **背景**: 宛先が実質「そのユーザーの全プロジェクト」になっており、一覧が見づらく誤爆の温床だった。実データはプロジェクト **330 件 / マシン 42 台**に対し Team 登録は 3 チーム 17 件。ユーザー要望「ask の list に出てくるのが登録エージェント配下のプロジェクト全部なのも問題。事前に登録しておけば事故もかなり減る」
+- **原因（許可リストの仕組み＝ Team は既にあったのに、どこも強制していなかった）**:
+  1. Agent スキル `ask.sh` は名前が members に無いと `/api/agent/inventory`（全 330 件）へフォールバックして解決していた（#294 で誤爆した経路そのもの）
+  2. チャットの `ask`/`teamexec`（`command-handler.ts`）は `prisma.project.findFirst({ name, machine: { userId } })` で**全プロジェクトから先頭 1 件**。Team 判定も同名時の曖昧回避も無し
+  3. サーバー API（`/api/agent/ask-member`・`/api/agent/teamexec-member`）は**所有者チェックのみ**で Team 登録を見ておらず、スキルを直しても素通しだった
+- **修正A（サーバー・最終防衛線／`document-api.ts`）**: `checkCrossTargetAllowed()` を追加し両エンドポイントで強制。判定は `teamMember.count({ projectId: target, team: { members: { some: { project: { machineId } } } } })` で、**`/api/agent/members` の絞り込みと同形**＝「一覧に出るものだけが送れる」ことを保証。未登録なら **403** ＋ `buildUnregisteredTargetMessage()` が登録済み宛先一覧と「WebUI の Team ページで登録してください」を返す（#294 の `NO_RETRY_NOTE` も併記）
+- **修正B（チャット側／`command-handler.ts`）**: `resolveCrossTargetByName()` を新設し `handleAskMember`/`handleTeamExec` の `findFirst` を置換。候補は「ユーザー所有 Team のメンバー」に限定し、**完全一致 > 部分一致**、複数一致なら候補一覧（プロジェクト名 + マシン名 + online）を返して中止（#294 で ask.sh に入れた挙動をチャットにも統一）
+- **修正C（Agent／`skill-manager.ts` linux + macos）**: `ask.sh` の **inventory フォールバックを削除**（当てずっぽうに別マシンの同名プロジェクトを選ぶ経路を廃止）。未登録名なら送信できる宛先一覧＋登録依頼を出して exit 1。`--list` を**チーム別にグルーピング**し `プロジェクト名 (マシン名) [online/offline]`、自マシンは `[自マシン]`、**同名メンバーには `⚠️ 同名あり: --machine 指定が必要`** を表示。SKILL.md に「宛先は Team 登録されたものだけ。勝手に別プロジェクトへ送り直さずユーザーに登録を依頼する」を追記
+- **設計判断**: 新しいフラグやテーブルは追加せず**既存の Team/TeamMember と WebUI（`TeamPage.tsx` + `/api/teams`）をそのまま許可リストとして使う**。同一マシン上の別プロジェクトも登録必須（31 プロジェクト載ったマシンがあり無条件許可ではノイズが戻る）。**移行措置**として Team を 1 つも作っていないユーザーのみ従来どおり全許可＋ログ警告（Team を 1 つ作った時点で厳格モードに切替）
+- **対象**: `apps/server/src/routes/document-api.ts`・`apps/server/src/services/command-handler.ts`・`agents/{linux,macos}/src/services/skill-manager.ts`（4 ファイル）+ changelog.md + README.md + rules/project.md。**shared / DB / schema.prisma / WebUI 変更なし。DB マイグレーション不要**（既存 Team/TeamMember を参照するだけ）
+- **検証**: server / agent(linux) / agent-macos の 3 ビルド成功。**許可判定を実データで検証**（uso8m 発 → PixBlog Team の 10 件、x220/devrelay 発 → DevRelay Team + mimamori の 7 件に一致。330 件から激減）。`checkCrossTargetAllowed` の 3 分岐を実 DB で確認（登録済み=allowed / 未登録=denied / Team 未作成ユーザー=legacy 通過）。**スキルは dist から `ask.sh` を抽出し curl をスタブして実機検証**: `--list` のチーム別表示・同名 ⚠️・`[自マシン]`、未登録名は **inventory を呼ばず**（叩いたのは `/api/agent/members` のみ）案内して exit 1、同名は `--machine` 必須、登録済み一意名は従来どおり送信（linux/macos 両方）
+- **反映**: **`pm2 restart devrelay-server` 要**（修正 A・B）＋ 各マシンで `u`→`u`（修正 C）
+- **教訓**: 「許可リストの仕組みがある」ことと「許可リストが強制されている」ことは別。**一覧 API と許可判定を同じクエリ形にする**と「見えているものだけが送れる」が保証でき、フォールバック経路（inventory）は許可リストを無効化するので残してはいけない
+
 ### #294: teamexec の無限ピンポン（暴走）を止める — ホップ制限・マシン横断レート制限・宛先解決の厳格化 (2026-08-13)
 
 - **症状**: 2026-08-13 08:48（JST）、dangou-card で `e`(exec) 送信後にプロジェクト間の実行依頼（teamexec）が無限ループ。5 分後に「⏱️ タイムアウト: エージェントから応答がありませんでした」表示。uso8m 上に `claude` プロセスが最大 13 個（各 ~220MB、計 ~2.8GB）＋ `ask.sh` 36 個が滞留。ユーザー報告「dangou-card で投げた指示が暴走しているっぽい」

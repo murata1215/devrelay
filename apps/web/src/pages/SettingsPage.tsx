@@ -111,6 +111,9 @@ const CLAUDE_MODEL_FIELDS = [
   { key: 'claude_model_exec', label: 'Exec モード', description: '実行モードで使用するモデル' },
 ];
 
+/** #296: Agent 自動更新のグローバル kill switch（UserSettings キー。'false' のときだけ無効） */
+const SETTING_AUTO_UPDATE = 'auto_update_enabled';
+
 /** チャット表示設定（localStorage 管理） */
 const CHAT_DISPLAY_KEY = 'devrelay-chat-display';
 const DEFAULT_USER_COLOR = '#5865f2';
@@ -1425,6 +1428,43 @@ export function SettingsPage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* #296: Agent 自動更新のグローバル kill switch */}
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Agent Auto Update</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-4">
+          アイドル状態の Agent を自動で最新版に更新します（新しいコミットは 2 時間経過後に配布）。
+          ここを OFF にすると<strong>全マシンの自動更新が止まります</strong>。マシンごとの ON/OFF は Agents ページの設定から行えます。
+        </p>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <div className="relative">
+            <input
+              type="checkbox"
+              checked={data[SETTING_AUTO_UPDATE] !== 'false'}
+              onChange={async (e) => {
+                const newValue = e.target.checked ? 'true' : 'false';
+                setSaving(SETTING_AUTO_UPDATE);
+                try {
+                  await settings.update(SETTING_AUTO_UPDATE, newValue);
+                  setData((prev) => ({ ...prev, [SETTING_AUTO_UPDATE]: newValue }));
+                  setSuccess(`Agent auto update ${newValue === 'true' ? 'enabled' : 'disabled'}`);
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : 'Failed to save setting');
+                } finally {
+                  setSaving(null);
+                }
+              }}
+              disabled={saving === SETTING_AUTO_UPDATE}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-slate-300 dark:bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 transition-colors"></div>
+            <div className="absolute left-[2px] top-[2px] bg-white w-5 h-5 rounded-full transition-transform peer-checked:translate-x-5"></div>
+          </div>
+          <span className="text-sm font-medium text-[var(--text-primary)]">
+            {data[SETTING_AUTO_UPDATE] !== 'false' ? '🔄 有効（全マシン）' : '⏸ 停止中（全マシン）'}
+          </span>
+        </label>
       </div>
 
       {/* Agreement Template Section */}
