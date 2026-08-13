@@ -237,6 +237,15 @@ bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project <プ�
 - \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project pixblog --question "POST /api/v1/categories の仕様を教えて"\\\`
 - \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project pixdraft --question "アカウント削除APIを実装して"\\\`
 
+### 宛先が複数ある場合
+
+同じ名前のプロジェクトが複数のマシンに存在する場合、スクリプトは**勝手に選ばず候補一覧を出してエラー終了**します。
+その場合は \\\`--machine <マシン名>\\\` でマシンを指定してください:
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project pixblog --machine x220-158-18-103/pixblog --question "..."
+\\\`\\\`\\\`
+
 ### 注意事項
 - 質問/依頼先のエージェントがオンラインである必要があります
 - **Bash ツールの timeout を十分に設定してください:**
@@ -244,6 +253,8 @@ bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project <プ�
   - \\\`--exec\\\` あり（実行依頼）: timeout 3660000（61分）
 - \\\`--exec\\\` を付けると exec モードで実装まで実行します（コード変更あり）
 - \\\`--exec\\\` なしはプランモードで質問のみ（コード変更なし）
+- **失敗しても同じ依頼を文面を変えて再送しないでください。**2 回失敗したらユーザーに状況を報告して止まってください（過去に再送ループで大量のセッションが起動した事故があります）
+- **teamexec（実行依頼）で受け取った作業を、さらに別プロジェクトへ転送しないでください。** 自分で実行できない場合は、その理由を依頼元への回答として返してください（サーバー側でも 429 で拒否されます）
 `;
 }
 
@@ -308,10 +319,12 @@ fi
 PROJECT=""
 QUESTION=""
 EXEC_MODE=""
+MACHINE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
     --question) QUESTION="$2"; shift 2 ;;
+    --machine) MACHINE="$2"; shift 2 ;;
     --exec) EXEC_MODE="1"; shift ;;
     *) echo "不明な引数: $1"; exit 1 ;;
   esac
@@ -338,18 +351,60 @@ if [ "$MEMBERS_HTTP" != "200" ]; then
   exit 1
 fi
 
-# プロジェクト名でメンバーを検索（displayName と originalName の両方で部分一致）
+# プロジェクト名でメンバーを検索
+# #294: 「最初の部分一致を黙って採用」をやめ、完全一致 > オンライン > 同一マシン の優先順で絞り込み、
+# それでも複数残る場合は自動選択せずエラーにする（同名プロジェクトが複数マシンにあるため、
+# 誤った宛先へ実行依頼が飛んで無限ピンポンを起こした事故への対策）
 if command -v jq &>/dev/null; then
-  TARGET_ID=$(echo "$MEMBERS_BODY" | jq -r --arg name "$PROJECT" '[.[] | select((.memberProjectName | ascii_downcase | contains($name | ascii_downcase)) or ((.memberProjectOriginalName // "") | ascii_downcase | contains($name | ascii_downcase)))] | first | .memberProjectId // empty')
-  TARGET_NAME=$(echo "$MEMBERS_BODY" | jq -r --arg name "$PROJECT" '[.[] | select((.memberProjectName | ascii_downcase | contains($name | ascii_downcase)) or ((.memberProjectOriginalName // "") | ascii_downcase | contains($name | ascii_downcase)))] | first | .memberProjectName // empty')
+  # 候補の絞り込みフィルタ
+  # 入力: [{id, name, orig, machine, online, same}]
+  FILTER_JQ='
+    ( if ($machine | length) > 0
+      then map(select(.machine | ascii_downcase | contains($machine | ascii_downcase)))
+      else . end ) as $scoped
+    | ( $scoped | map(select((.name | ascii_downcase) == ($name | ascii_downcase) or (.orig | ascii_downcase) == ($name | ascii_downcase))) ) as $exact
+    | ( if ($exact | length) > 0 then $exact
+        else ($scoped | map(select((.name | ascii_downcase | contains($name | ascii_downcase)) or (.orig | ascii_downcase | contains($name | ascii_downcase))))) end ) as $named
+    | ( $named | map(select(.online)) ) as $online
+    | ( if ($online | length) > 0 then $online else $named end ) as $avail
+    | ( $avail | map(select(.same)) ) as $same
+    | ( if ($same | length) == 1 then $same else $avail end )
+  '
 
-  if [ -z "$TARGET_ID" ]; then
+  CANDIDATES=$(echo "$MEMBERS_BODY" | jq '[ .[] | {
+    id: .memberProjectId,
+    name: .memberProjectName,
+    orig: (.memberProjectOriginalName // .memberProjectName),
+    machine: .memberMachineName,
+    online: (.memberMachineStatus == "online"),
+    same: (.isSameMachine // false)
+  } ]')
+  MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
+  MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
+
+  if [ "$MATCH_COUNT" = "0" ]; then
     echo "エラー: '$PROJECT' に一致するメンバーが見つかりません"
     echo ""
     echo "登録済みメンバー:"
-    echo "$MEMBERS_BODY" | jq -r '.[] | "  - \\(.memberProjectName) (\\(.memberMachineName))"'
+    echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
     exit 1
   fi
+
+  if [ "$MATCH_COUNT" != "1" ]; then
+    # #294: 同名プロジェクトが複数マシンにある場合、勝手に選ばない（誤爆すると依頼が跳ね返り続ける）
+    echo "エラー: '$PROJECT' に一致するプロジェクトが $MATCH_COUNT 件あります。宛先を特定できません。"
+    echo ""
+    echo "候補:"
+    echo "$MATCHED" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo ""
+    echo "--machine <マシン名> でマシンを指定して実行し直すか、どのマシンのプロジェクトかユーザーに確認してください。"
+    echo "同じ依頼を文面を変えて再送しないでください。"
+    exit 1
+  fi
+
+  TARGET_ID=$(echo "$MATCHED" | jq -r '.[0].id')
+  TARGET_NAME=$(echo "$MATCHED" | jq -r '.[0].name')
+  TARGET_MACHINE=$(echo "$MATCHED" | jq -r '.[0].machine')
 
   # モードに応じてエンドポイント・ラベル・タイムアウトを切り替え
   if [ -n "$EXEC_MODE" ]; then
@@ -364,7 +419,7 @@ if command -v jq &>/dev/null; then
     CURL_TIMEOUT=600   # ask: 10分（質問は比較的短時間）
   fi
 
-  echo "$EMOJI $TARGET_NAME に\${MODE_LABEL}を送信中..."
+  echo "$EMOJI $TARGET_NAME ($TARGET_MACHINE) に\${MODE_LABEL}を送信中..."
   echo "\${MODE_LABEL}: $QUESTION"
   echo "(タイムアウト: \${CURL_TIMEOUT}秒)"
   echo ""

@@ -6,6 +6,33 @@
 
 ## 実装済み機能
 
+### #294: teamexec の無限ピンポン（暴走）を止める — ホップ制限・マシン横断レート制限・宛先解決の厳格化 (2026-08-13)
+
+- **症状**: 2026-08-13 08:48（JST）、dangou-card で `e`(exec) 送信後にプロジェクト間の実行依頼（teamexec）が無限ループ。5 分後に「⏱️ タイムアウト: エージェントから応答がありませんでした」表示。uso8m 上に `claude` プロセスが最大 13 個（各 ~220MB、計 ~2.8GB）＋ `ask.sh` 36 個が滞留。ユーザー報告「dangou-card で投げた指示が暴走しているっぽい」
+- **実態（DB の `Message.sourceProjectName` でホップ追跡して確定）**: dangou-card（ubuntu-prod/uso8m）→ **pixblog @ DESKTOP-Q43QT7L/fwjg2**（Windows PC）に「本番 DB で `UPDATE posts ... WHERE id=213`」を依頼 → Windows には `sudo -u postgres psql` が無く実行不能 → **同じ依頼を dangou-card へ送り返す** → dangou-card は文面を変えて再送。08:58〜09:06 の 8 分で 30 ホップ超（`BuildLog` が pixblog/dangou-card 交互に発番）、その後 wprewriter-agent へ飛び火
+- **根本原因 1（ループ検出が同一マシン限定）**: `apps/server/src/routes/document-api.ts` の既存ガードは `targetProject.machine.id === auth.machineId` の時だけ動作。今回は uso8m ⇄ Windows の**マシンをまたぐ往復**のため一度も発火しなかった
+- **根本原因 2（ホップ数の制限が無い）**: teamexec で起動されたセッション（`teamexec_*`）の中からさらに teamexec を発行できた。受け手が「自分にはできない」と判断して**転送し返す**と A→B→A の無限ピンポンになる
+- **根本原因 3（宛先解決が「最初の部分一致」）**: `agents/{linux,macos}/src/services/skill-manager.ts` の `ask.sh` 生成部の jq が `[...] | first | .memberProjectId` で**先頭 1 件を黙って採用**。`pixblog` という名前のプロジェクトは 16 台に存在し、本番 DB のある `x220-158-18-103/pixblog` ではなく Windows PC の pixblog が選ばれた。フォールバック先 `/api/agent/inventory` はマシン単位にしか `online` を持たず、jq のフラット化で機械情報が落ちていた
+- **修正A（サーバー・本命／`document-api.ts`）**: (1) **ホップ制限** — `findInflightTeamExec()` で発信元マシンに実行中（65 分窓）の `teamexec_*` セッションがあれば 429 で拒否＝転送ホップを構造的に禁止。(2) **マシン横断のレート制限** — 同一ターゲットへ 5 分で 5 件以上、ユーザー全体で 5 分に 12 件以上なら 429（既存の同一マシン 3 回ガードは温存）。ask（読み取り専用）にも緩い閾値（ターゲット 8／ユーザー 20）を追加、ただし**ask の転送ホップはブロックしない**（B が C に事実確認する正当な用途があるため）。(3) 全ての 429 文面に共通注記 `NO_RETRY_NOTE`「同じ依頼を文面を変えて再送しないでください」を付与（今回 AI が再送でガードを回避したため）
+- **修正B（サーバー・後始末／`index.ts`）**: 起動時に `teamexec_`/`crossquery_` かつ `status='active'` のセッションを `ended` に一括更新。これらは HTTP リクエストの生存期間しか意味を持たず、取り残されると (1) のホップ判定が誤検知する（事故後に 13 件が active のまま残っていた）
+- **修正C（Agent／`skill-manager.ts` linux + macos）**: `ask.sh` の宛先解決を**完全一致 > 部分一致 → online > offline → 同一マシン**の優先順に変更し、**絞り込んでも複数残る場合は自動選択せず候補一覧を出して exit 1**。`--machine <マシン名>` オプションを追加。inventory フォールバックはマシンの `online`/`machine` をプロジェクトへ畳み込んでから絞り込む（linux のみ・macos は元々 members のみ）。SKILL.md に「失敗しても再送しない／teamexec で受けた作業を転送しない」「`--machine` の使い方」を追記
+- **対象**: `apps/server/src/routes/document-api.ts`・`apps/server/src/index.ts`・`agents/{linux,macos}/src/services/skill-manager.ts`（4 ファイル）+ changelog.md + README.md。**shared / DB / schema.prisma / WebUI 変更なし。DB マイグレーション不要**（既存カラム `Session.userId`/`projectId`/`startedAt` の count のみ）。`agents/windows` に `generateAskScript` は存在せず対象外
+- **検証**: server / agent(linux) / agent-macos の 3 ビルド成功。dist に `Team exec hop blocked` ×1・`Team exec rate limit (target/user)` ×各1・`Cross-query rate limit` ・`stale cross-project session` ×1 を確認。**生成される ask.sh を dist から抽出して実機検証**: `bash -n` 構文 OK（linux/macos 両方）、jq 絞り込みを 5 ケース（曖昧／`--machine` 指定／一意名／完全一致優先／該当なし）で確認、さらに curl をスタブして**事故シナリオを再現** → 「'pixblog' に一致するプロジェクトが 2 件あります」と候補一覧を出して送信せず終了、`--machine x220-158-18-103/pixblog` 指定時のみ正常送信することを確認
+- **反映**: **`pm2 restart devrelay-server` 要**（修正 A・B が有効化。再起動は進行中の teamexec HTTP を切断するためサーキットブレーカーとしても働く）。修正 C は各マシンで `u`→`u`（Agent 更新）が必要
+- **教訓**: エージェント間の依頼転送は「同一マシン内ループ」だけ塞いでも不十分で、**A→B→A のマシン跨ぎ往復**が残る。ホップそのものを禁止する（深さ 1 に固定する）のが最も確実。加えて、AI は 429 やエラーを**文面を変えた再送**で回避しようとするため、エラー文面に「再送するな・ユーザーに報告せよ」を明記する必要がある。同名プロジェクトが複数マシンにある環境では「先頭一致を黙って採用」は誤爆時に暴走の起点になる
+
+### #293: `w` コマンドを非 git ディレクトリでも実行可能に（コミットはスキップしドキュメント更新のみ） (2026-08-12)
+
+- **症状**: Devin CLI しか入っていない端末でお試し利用中、会話が 100 件を超えたので `w`（ラップアップ）を送信したところ、「git リポジトリではないからコミットできません」で終了し、**MEMORY.md / README.md の更新も行われなかった**。ユーザーの要望「git リポジトリではない場合は MEMORY.md・README.md を更新する感じにできる？ ほかの md も更新（無ければ作成）できれば」
+- **原因（コードで確定）**: `apps/server/src/services/command-parser.ts` の `W_COMMAND_PROMPT` が「まず `git status` / `git diff` で未コミットの変更を確認 → 変更があればドキュメント更新 → コミット＆プッシュ」という **git リポジトリ前提の一本道**だった。非 git ディレクトリでは冒頭の git 確認で詰まり、後段のドキュメント更新まで到達しない。#288 で追加した「変更ゼロなら空振り報告して終了」のガードも git 前提のため、非 git 側には受け皿が無かった
+- **修正**: `W_COMMAND_PROMPT` を冒頭の `git rev-parse --is-inside-work-tree` 判定による 2 分岐に書き換え
+  - **【git リポジトリの場合】**: 現行文面をそのまま維持＝**挙動不変**（`git status`/`git diff` 確認 → コミット対象ゼロなら「コミット対象の変更はありません」で終了（#288 のガード）→ 変更があれば doc/changelog.md・rules/project.md・CLAUDE.md・MEMORY.md・README.md を更新してコミット＆プッシュ）
+  - **【git リポジトリでない場合（git コマンド自体が失敗する場合を含む）】**: コミット・プッシュは一切行わず、git のエラーは無視。`git diff` が使えないため**今回の会話履歴と現在のディレクトリ内容**から作業内容を把握し、README.md（無ければ新規作成：概要・使い方・構成）と MEMORY.md（無ければ新規作成：日付つき作業メモ・決定事項・引き継ぎ）を更新。doc/changelog.md・CLAUDE.md・rules/project.md 等の他の .md は**既に存在する場合のみ**更新。記録すべき作業が無ければ「記録する変更はありません」で終了（非 git 側にも空振りガードを用意）。最後に「git リポジトリではないためコミット・プッシュはスキップしました」＋更新ファイル一覧を報告
+- **設計判断**: 新規作成は **README.md と MEMORY.md のみ**に限定（doc/changelog.md や CLAUDE.md まで無条件生成すると、試用中のディレクトリに規約ファイルが増えてノイズになるため。既存なら更新する）。git 側の文面は 1 文字も変えず、既存プロジェクトの `w` 挙動と #288 の空振りガードを壊さない。Agent 側（connection.ts / ai-runner.ts）には手を入れず**サーバーのプロンプト文字列だけで完結**させ、お試し端末に `u` を打たせずに済むようにした
+- **対象**: `apps/server/src/services/command-parser.ts`（1ファイル）+ changelog.md + README.md（Commands 表の `w` 行）。`W_COMMAND_PROMPT` は #288 で定数化済みのため、`parseCommand()` Step 0.6 と `parseShortcut()` の `case 'w'` の**両経路に定数 1 箇所の修正で反映**。**Agent / shared / DB / schema.prisma / WebUI 変更なし。DB マイグレーション不要**。`pnpm --filter @devrelay/server build` 成功、dist に `git rev-parse --is-inside-work-tree` ×1・`コミット・プッシュはスキップしました` ×1・`記録する変更はありません` ×1・`コミット対象の変更はありません` ×1 を確認
+- **反映**: **`pm2 restart devrelay-server` 要**（Agent 再起動不要＝お試し端末側の `u` は不要）
+- **教訓**: `w` のようなワンショット exec プロンプトは、前提（git 管理下であること）が崩れた環境で「前提チェックで止まって本来やりたかった作業まで到達しない」形で失敗する。前提を冒頭で判定させて分岐を用意し、**どちらの分岐にも「対象が無ければ推測せず終了」のガードを置く**のが正解
+
 ### #292: Claude SDK 実行で「ごくまれに応答が帰ってこない」問題の修正（result 直後に完了シグナル送信） (2026-08-08)
 
 - **症状**: MURATA_K 機（`agents/linux` ビルドを Windows で実行＝`[claude/sdk]` ログ構成）で、ごくまれに「実行は終わっているのに応答が返ってこない」。Discord/WebUI は `⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）` を表示するが、agent.log には成功ログが残る。ユーザー報告「最近、ごくまれに帰ってこないことがある。ログ見ると終わってそうじゃない？」

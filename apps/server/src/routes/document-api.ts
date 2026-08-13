@@ -24,6 +24,76 @@ import type { AiTool, ManagementInfo } from '@devrelay/shared';
 import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef } from '@devrelay/shared';
 
 /**
+ * #294: クロスプロジェクト連携のループ防止パラメータ
+ *
+ * 2026-08-13 の暴走事故（dangou-card ⇄ Windows 側 pixblog の teamexec 無限ピンポン、
+ * 8 分で 30 ホップ超）を受けて追加。既存のループ検出は「同一マシン内」限定だったため、
+ * マシンをまたぐ往復では一度も発火しなかった。
+ */
+/** ホップ判定・レート集計の時間窓（5 分） */
+const CROSS_RATE_WINDOW_MS = 5 * 60 * 1000;
+/** 転送ホップ判定で「実行中」とみなす teamexec セッションの最大経過時間（65 分＝ask.sh の curl 60 分 + 余裕） */
+const CROSS_INFLIGHT_WINDOW_MS = 65 * 60 * 1000;
+/** 同一ターゲットへの teamexec 上限（5 分あたり） */
+const TEAMEXEC_TARGET_LIMIT = 5;
+/** ユーザー全体の teamexec 上限（5 分あたり・宛先を変えて回り続けるケースの backstop） */
+const TEAMEXEC_USER_LIMIT = 12;
+/** 同一ターゲットへの ask 上限（5 分あたり・読み取り専用なので緩め） */
+const ASK_TARGET_LIMIT = 8;
+/** ユーザー全体の ask 上限（5 分あたり） */
+const ASK_USER_LIMIT = 20;
+
+/**
+ * 429 応答に必ず添える共通の注意文
+ * AI が「文面を変えて再送」でガードを回避するのを防ぐ（今回の事故で実際に 15 回再送された）
+ */
+const NO_RETRY_NOTE = '同じ依頼を文面を変えて再送しないでください。ユーザーに状況を報告して停止してください。';
+
+/**
+ * #294: 発信元マシンが teamexec を実行中か（＝この依頼が「転送ホップ」か）を判定する
+ *
+ * teamexec で起動されたセッションの中からさらに teamexec を発行すると A→B→A のピンポンになるため、
+ * 転送ホップは禁止する。取り残された active セッションで永久ブロックしないよう時間窓で絞る。
+ *
+ * @param machineId 発信元マシン ID
+ * @returns 実行中の teamexec セッション ID。無ければ null
+ */
+async function findInflightTeamExec(machineId: string): Promise<string | null> {
+  const inflight = await prisma.session.findFirst({
+    where: {
+      machineId,
+      id: { startsWith: 'teamexec_' },
+      status: 'active',
+      startedAt: { gte: new Date(Date.now() - CROSS_INFLIGHT_WINDOW_MS) },
+    },
+    select: { id: true },
+  });
+  return inflight?.id ?? null;
+}
+
+/**
+ * #294: 直近 5 分のクロスプロジェクトセッション数を数える（マシン横断の backstop）
+ *
+ * @param prefix セッション ID プレフィックス（'teamexec_' / 'crossquery_'）
+ * @param userId 集計対象ユーザー
+ * @param targetProjectId 指定時はそのプロジェクト宛のみ集計
+ */
+async function countRecentCrossSessions(
+  prefix: string,
+  userId: string,
+  targetProjectId?: string
+): Promise<number> {
+  return prisma.session.count({
+    where: {
+      userId,
+      id: { startsWith: prefix },
+      startedAt: { gte: new Date(Date.now() - CROSS_RATE_WINDOW_MS) },
+      ...(targetProjectId ? { projectId: targetProjectId } : {}),
+    },
+  });
+}
+
+/**
  * マシントークンから userId を取得する認証ヘルパー
  * Authorization: Bearer <machine_token> ヘッダーを使用
  *
@@ -292,13 +362,30 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         where: {
           projectId: targetProjectId,
           id: { startsWith: 'crossquery_' },
-          startedAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+          startedAt: { gte: new Date(Date.now() - CROSS_RATE_WINDOW_MS) },
         },
       });
       if (recentCount >= 3) {
         console.log(`🔁 Cross-query loop detected: ${auth.machineId} → ${targetProject.name} (${recentCount} times in 5min)`);
-        return reply.status(429).send({ error: `ループ検出: 同一マシンから ${targetProject.name} への問い合わせが5分以内に${recentCount}回発生しています。自分自身に問い合わせている可能性があります。` });
+        return reply.status(429).send({ error: `ループ検出: 同一マシンから ${targetProject.name} への問い合わせが5分以内に${recentCount}回発生しています。自分自身に問い合わせている可能性があります。${NO_RETRY_NOTE}` });
       }
+    }
+
+    // #294 レート制限（マシン横断の backstop）: 質問は読み取り専用のため teamexec より緩い閾値。
+    // 転送ホップ自体は禁止しない（B が C に事実確認する正当な用途があるため）
+    const askTargetRecent = await countRecentCrossSessions('crossquery_', auth.userId, targetProjectId);
+    if (askTargetRecent >= ASK_TARGET_LIMIT) {
+      console.log(`🔁 Cross-query rate limit (target): → ${targetProject.name} (${askTargetRecent} times in 5min)`);
+      return reply.status(429).send({
+        error: `レート制限: ${targetProject.name} への問い合わせが5分以内に${askTargetRecent}回発生しています（上限${ASK_TARGET_LIMIT}回）。問い合わせがループしている可能性があります。${NO_RETRY_NOTE}`,
+      });
+    }
+    const askUserRecent = await countRecentCrossSessions('crossquery_', auth.userId);
+    if (askUserRecent >= ASK_USER_LIMIT) {
+      console.log(`🔁 Cross-query rate limit (user): ${auth.userId} (${askUserRecent} times in 5min)`);
+      return reply.status(429).send({
+        error: `レート制限: 問い合わせが5分以内に${askUserRecent}回発生しています（全プロジェクト合計の上限${ASK_USER_LIMIT}回）。問い合わせがプロジェクト間でループしている可能性があります。${NO_RETRY_NOTE}`,
+      });
     }
 
     // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
@@ -433,19 +520,44 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
     }
 
+    // #294 ホップ制限: teamexec 実行中のマシンからの再依頼＝転送ホップ。A→B→A のピンポンを構造的に禁止する
+    const inflightTeamExec = await findInflightTeamExec(auth.machineId);
+    if (inflightTeamExec) {
+      console.log(`🔁 Team exec hop blocked: ${auth.machineId} → ${targetProject.name} (inflight ${inflightTeamExec})`);
+      return reply.status(429).send({
+        error: `ホップ制限: teamexec で実行中のプロジェクトから、さらに他プロジェクト（${targetProject.name}）へ実行依頼を転送することはできません（ループ防止）。依頼を転送せず、自分で実行できない理由を依頼元への回答として返してください。${NO_RETRY_NOTE}`,
+      });
+    }
+
     // ループ検出: 同一マシンから同一ターゲットへの直近5分以内の teamexec セッションが3回以上あれば拒否
     if (targetProject.machine.id === auth.machineId) {
       const recentCount = await prisma.session.count({
         where: {
           projectId: targetProjectId,
           id: { startsWith: 'teamexec_' },
-          startedAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+          startedAt: { gte: new Date(Date.now() - CROSS_RATE_WINDOW_MS) },
         },
       });
       if (recentCount >= 3) {
         console.log(`🔁 Team exec loop detected: ${auth.machineId} → ${targetProject.name} (${recentCount} times in 5min)`);
-        return reply.status(429).send({ error: `ループ検出: 同一マシンから ${targetProject.name} への実行依頼が5分以内に${recentCount}回発生しています。自分自身に送信している可能性があります。` });
+        return reply.status(429).send({ error: `ループ検出: 同一マシンから ${targetProject.name} への実行依頼が5分以内に${recentCount}回発生しています。自分自身に送信している可能性があります。${NO_RETRY_NOTE}` });
       }
+    }
+
+    // #294 レート制限（マシン横断の backstop）: 文面を変えた再送・宛先を変えた飛び火を止める
+    const targetRecent = await countRecentCrossSessions('teamexec_', auth.userId, targetProjectId);
+    if (targetRecent >= TEAMEXEC_TARGET_LIMIT) {
+      console.log(`🔁 Team exec rate limit (target): → ${targetProject.name} (${targetRecent} times in 5min)`);
+      return reply.status(429).send({
+        error: `レート制限: ${targetProject.name} への実行依頼が5分以内に${targetRecent}回発生しています（上限${TEAMEXEC_TARGET_LIMIT}回）。依頼がループしている可能性があります。${NO_RETRY_NOTE}`,
+      });
+    }
+    const userRecent = await countRecentCrossSessions('teamexec_', auth.userId);
+    if (userRecent >= TEAMEXEC_USER_LIMIT) {
+      console.log(`🔁 Team exec rate limit (user): ${auth.userId} (${userRecent} times in 5min)`);
+      return reply.status(429).send({
+        error: `レート制限: 実行依頼が5分以内に${userRecent}回発生しています（全プロジェクト合計の上限${TEAMEXEC_USER_LIMIT}回）。依頼がプロジェクト間でループしている可能性があります。${NO_RETRY_NOTE}`,
+      });
     }
 
     // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）

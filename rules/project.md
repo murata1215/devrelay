@@ -1101,7 +1101,7 @@ Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する仕
 - **WebUI**: チーム名横「Ask 📋」ボタン → 全オンラインメンバーに並列リクエスト → メンバー行下に表示
 - **設計判断**: 概要は DB に永続化。次回表示時は API から取得、Ask ボタンで再取得可能。60秒タイムアウト
 
-## クロスプロジェクトループ防止 (#211)
+## クロスプロジェクトループ防止 (#211, #294)
 
 同一マシンから同一ターゲットへの自己送信ループを防止。
 
@@ -1109,6 +1109,26 @@ Claude Code の `AskUserQuestion` ツールを DevRelay 経由で中継する仕
 - **閾値**: 3回以上で HTTP 429 拒否
 - **表示**: `/api/agent/members` に `isSameMachine` フラグ、ask.sh で `[自マシン]` マーク
 - **設計判断**: 送信自体はブロックしない（nim → devrelay のような正当な同一マシン間通信を許可）。閾値で異常検知
+
+### マシン跨ぎのピンポン対策 (#294)
+
+#211 の同一マシン限定ガードでは **A→B→A のマシン跨ぎ往復**を止められず、2026-08-13 に teamexec が
+8 分で 30 ホップ超える暴走を起こした（同名の `pixblog` が 16 台に存在し、本番 DB を持たない Windows 機へ
+実行依頼が飛び、実行不能なので送り返される、を繰り返した）。以下を多層で追加（`document-api.ts`）。
+
+- **ホップ制限（本命）**: `findInflightTeamExec()` で発信元マシンに実行中（65分窓）の `teamexec_*` セッションがあれば 429。
+  teamexec の転送を禁止＝**ホップ深さを 1 に固定**する。ask（読み取り専用）は転送を許可（B が C に事実確認する正当用途があるため）
+- **マシン横断レート制限**: teamexec は同一ターゲット 5 回/5分・ユーザー全体 12 回/5分、ask は 8 回・20 回で 429。
+  ユーザー全体の閾値は「同一ターゲットで弾かれた AI が宛先を変えて回り続ける」逃げ道を塞ぐためのもの（実際に wprewriter-agent へ飛び火した）
+- **429 文面に `NO_RETRY_NOTE` を必ず付ける**: AI はエラーを**文面を変えた再送**で回避しようとするため、
+  「同じ依頼を文面を変えて再送しないでください。ユーザーに報告して停止してください」を明記する
+- **起動時スイープ**（`index.ts`）: `teamexec_`/`crossquery_` の `status='active'` を `ended` に。
+  これらは HTTP リクエストの生存期間しか意味を持たず、取り残されるとホップ判定が誤検知する
+- **宛先解決の厳格化**（`skill-manager.ts` linux/macos）: ask.sh は 完全一致 > online > 同一マシン の順に絞り、
+  **複数残ったら自動選択せず候補一覧を出して exit 1**（`--machine <マシン名>` で指定）。
+  「先頭一致を黙って採用」は同名プロジェクトが複数マシンにある環境で暴走の起点になる
+- **調査の勘所**: `Message.sourceProjectName` で送信元→宛先のホップを追跡できる。
+  `BuildLog #N created for X` がプロジェクト交互に出ていたらピンポンを疑う
 
 ## クロスプロジェクト承認中継 (#210)
 
@@ -1229,3 +1249,13 @@ Flutter アプリを USB 接続された実機（iPhone/Android）にチャッ�
 - **DB DDL の適用**: shadow DB 破損で `prisma migrate dev` 不可 → psql 直実行で `ManagerAssignment` を CREATE + FK + index、information_schema で検証（`prisma db execute` は heredoc の DDL が反映されないケースがあり psql が確実）
 - **対象ファイル**: server=`schema.prisma`/`services/org-control.ts`(新)/`services/command-handler.ts`/`mcp/tools.ts`/`routes/organization.ts`/`routes/api.ts`、web=`lib/api.ts`/`pages/SettingsPage.tsx`/`pages/ConversationsPage.tsx`（計9ファイル）。Agent/shared/Discord/Telegram 変更なし
 - **v2 対象外**: ツール承認の manager 代行、コマンド事前承認フロー、監査ログ export、manager 階層（manager の manager）
+
+## `w` コマンド（ラップアップ）の設計 (#288, #293)
+
+`w` は「ドキュメント更新＋コミット/プッシュ」のワンショット exec。プロンプト実体は
+`apps/server/src/services/command-parser.ts` の `W_COMMAND_PROMPT` 定数 1 箇所で、
+`parseCommand()` Step 0.6 と `parseShortcut()` の `case 'w'` の両経路が参照する。
+
+- **空振りガード (#288)**: 変更ゼロの作業ツリーでは「存在しないプランを推測せず『コミット対象の変更はありません』とだけ報告して終了」させる。これが無いと「プランをください」ループに陥る
+- **非 git 対応 (#293)**: 冒頭で `git rev-parse --is-inside-work-tree` を判定して 2 分岐。非 git ではコミット/プッシュを行わず、会話履歴とディレクトリ内容から作業内容を把握して README.md / MEMORY.md を更新（無ければ新規作成）。他の .md は既存時のみ更新
+- **設計判断**: 新規作成は README.md と MEMORY.md のみ（changelog.md・CLAUDE.md まで自動生成すると試用ディレクトリにノイズが増える）。git 側の文面は変更せず挙動不変。**どちらの分岐にも「対象が無ければ推測せず終了」のガードを置く**

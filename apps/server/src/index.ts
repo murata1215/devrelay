@@ -73,6 +73,20 @@ async function main() {
       await prisma.channelSession.deleteMany({ where: { currentSessionId: { in: staleIds } } });
       console.log(`🧹 Cleaned up ${staleSessions.length} stale active sessions (24h+ inactive)`);
     }
+    // #294: 取り残されたクロスプロジェクトセッション（teamexec_ / crossquery_）を ended に
+    // これらは HTTP リクエストの生存期間しか意味を持たず、サーバー再起動をまたいで active のままだと
+    // document-api.ts の転送ホップ判定（findInflightTeamExec）が誤検知するため確実に閉じる
+    const crossResult = await prisma.session.updateMany({
+      where: {
+        status: 'active',
+        OR: [{ id: { startsWith: 'teamexec_' } }, { id: { startsWith: 'crossquery_' } }],
+      },
+      data: { status: 'ended' },
+    });
+    if (crossResult.count > 0) {
+      console.log(`🧹 Closed ${crossResult.count} stale cross-project session(s) (teamexec/crossquery)`);
+    }
+
     // 30分以上経過した pending ツール承認を timeout に
     const approvalResult = await prisma.toolApproval.updateMany({
       where: { status: 'pending', createdAt: { lt: new Date(Date.now() - 30 * 60 * 1000) } },
