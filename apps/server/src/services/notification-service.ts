@@ -5,6 +5,7 @@
  * FCM プッシュ通知と同タイミングで DB に通知レコードを作成
  */
 
+import { truncateSafe, stripLoneSurrogates } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 
 /** 通知タイプ */
@@ -29,15 +30,16 @@ export async function createNotification(
   body: string
 ): Promise<void> {
   try {
-    const trimmedBody = body.length > 200 ? body.slice(0, 200) + '...' : body;
+    // 絵文字（サロゲートペア）を途中で切ると不正な UTF-16 になり Prisma が JSON を拒否する
+    // （#297: `unexpected end of hex escape` で通知が作れていなかった）
     await prisma.notification.create({
       data: {
         userId,
         type,
         projectId,
         projectName,
-        title,
-        body: trimmedBody,
+        title: stripLoneSurrogates(title),
+        body: truncateSafe(body, 200),
       },
     });
   } catch (err: any) {

@@ -134,6 +134,13 @@ export interface Machine {
   status: 'online' | 'offline';
   lastSeenAt: string | null;
   managementInfo?: ManagementInfo | null;
+  // #299: バージョン更新状態（Agents ページの色分け表示用）
+  localCommit?: string | null;
+  localCommitDate?: string | null;
+  remoteCommit?: string | null;
+  remoteCommitDate?: string | null;
+  versionCheckedAt?: string | null;
+  upToDate?: boolean | null;  // true=最新 / false=古い / null=不明（未チェック）
   projectCount: number;
   projects: Project[];
 }

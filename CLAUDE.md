@@ -61,7 +61,7 @@ pm2 restart devrelay-server devrelay-agent
 | テーブル | 用途 |
 |---------|------|
 | User | ユーザー |
-| Machine | Agent マシン（deletedAt でソフトデリート） |
+| Machine | Agent マシン（deletedAt でソフトデリート、autoUpdate で自動更新、localCommit 等でバージョン表示） |
 | Project | プロジェクト（displayName でリネーム可能、terminalMode で PTY 経由 claude 起動） |
 | Session | 作業セッション |
 | Message | 会話メッセージ |

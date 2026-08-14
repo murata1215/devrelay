@@ -364,6 +364,9 @@ export function MachinesPage() {
                     Projects
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
+                    Version
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Last Seen
                   </th>
                   <th className="px-6 py-3 w-10"></th>
@@ -414,6 +417,30 @@ export function MachinesPage() {
                           <span className="text-[var(--text-faint)]">-</span>
                         )}
                       </span>
+                    </td>
+                    {/* #299: バージョン更新状態。最新=緑でリモート日時 / 古い=グレーで自分の日時 */}
+                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                      {machine.upToDate === true ? (
+                        <span
+                          className="text-[var(--text-success)]"
+                          title={`最新\nローカル: ${machine.localCommit?.slice(0, 7)}\nリモート: ${machine.remoteCommit?.slice(0, 7)}`}
+                        >
+                          {machine.remoteCommitDate
+                            ? new Date(machine.remoteCommitDate).toLocaleString()
+                            : '-'}
+                        </span>
+                      ) : machine.upToDate === false ? (
+                        <span
+                          className="text-[var(--text-muted)]"
+                          title={`更新あり\nローカル: ${machine.localCommit?.slice(0, 7)} (${machine.localCommitDate ? new Date(machine.localCommitDate).toLocaleString() : '-'})\nリモート: ${machine.remoteCommit?.slice(0, 7)} (${machine.remoteCommitDate ? new Date(machine.remoteCommitDate).toLocaleString() : '-'})`}
+                        >
+                          {machine.localCommitDate
+                            ? new Date(machine.localCommitDate).toLocaleString()
+                            : '-'}
+                        </span>
+                      ) : (
+                        <span className="text-[var(--text-faint)]">—</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-[var(--text-muted)] text-sm">
                       {machine.lastSeenAt

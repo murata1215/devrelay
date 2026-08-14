@@ -158,6 +158,12 @@ model Machine {
   lastAutoUpdateCommit String?                   // 直近に狙ったリモートコミット
   lastAutoUpdateStatus String?                   // success / failed:stale-dist / error:<msg>
   autoUpdateAttempts   Int       @default(0)     // 同一コミットへの試行回数（成功でリセット）
+  // #299: バージョン更新状態の表示用（version-check 応答を永続化。u コマンドの日時と同じ）
+  localCommit      String?   // 現在の Agent 側 HEAD コミット
+  localCommitDate  DateTime? // そのコミット日時（u の「ローカル」日時）
+  remoteCommit     String?   // origin の最新コミット
+  remoteCommitDate DateTime? // そのコミット日時（u の「リモート」日時）
+  versionCheckedAt DateTime? // 最後に version-check 応答を受けた時刻
   deletedAt      DateTime? // ソフトデリート（null = アクティブ）
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

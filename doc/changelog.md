@@ -6,6 +6,44 @@
 
 ## 実装済み機能
 
+### #299: Agents ページに Agent のバージョン更新状態を表示 (2026-08-14)
+
+- **背景**: Agents ページ（`MachinesPage`）に Name / Status / Projects / Last Seen しか無く、各 Agent が最新コード（git と同じ）かどうかを一覧で把握できなかった。#296 の自動更新導入後、「どの Agent がまだ古いか」を一目で見たいというユーザー要望
+- **表示仕様**（`u` コマンドで出る git コミット日時を使用）:
+  - **最新（local == remote）**: リモート（最新）のコミット日時を**緑**（`text-success`）で表示
+  - **古い（local != remote）**: その Agent 自身（local）のコミット日時を**グレー**（`text-muted`）で表示
+  - **未チェック / データ無し**: `—`（faint）
+  - hover(title) で `ローカル <hash> (日時) / リモート <hash> (日時)` を表示（`u` と同じ情報）
+- **実装の要**: version-check の結果 `AgentVersionInfoPayload`（`localCommit/localDate/remoteCommit/remoteDate/hasUpdate`）は、**接続時トリガー・sweep・手動 `u` の全経路が `handleVersionInfo()`（`agent-manager.ts`）に集約**される。ここは従来 promise を resolve するだけで DB 保存していなかったので、**1 箇所に永続化を足すだけで全経路をカバー**できた
+- **変更**:
+  - **DB**: `Machine` に `localCommit / localCommitDate / remoteCommit / remoteCommitDate / versionCheckedAt`（全 nullable）を追加
+  - **server**: `handleVersionInfo` に `persistVersionInfo()`（fire-and-forget、resolve 挙動は不変。git `%ai` 形式をパースし不正なら null）。`/api/machines` の返却に上記 5 フィールド + 派生値 `upToDate`（`local && remote ? local === remote : null`）を追加
+  - **web**: `Machine` 型にフィールド追加、`MachinesPage` の Projects と Last Seen の間に **Version 列**を追加して色分け表示。ページは既存の 5 秒ポーリングで自動反映
+- **既知の制約**: `autoUpdate=false` の Agent は定期 version-check が走らない（auto-updater が早期 skip）ため、表示が「最後に手動 `u` した時点」で古くなりうる。開発リポ機（server 自身の `devrelay` 等）は local(dev)≠origin/main でグレー表示になるが、自動更新対象外なので実態として正しい
+- **検証**: `pnpm build`（server + web）成功。実 DB で git `%ai` パース（`+0900` → UTC 保存、ブラウザ側 `toLocaleString` で JST 復元）・`upToDate` 派生・5 カラムの round-trip 書き込みを確認（トランザクションをロールバックし本番データは不変）
+- **DB マイグレーション**: `ALTER TABLE "Machine" ADD COLUMN IF NOT EXISTS ...` を psql で直接適用 → `information_schema` で 5 カラム検証 → `prisma generate` → build
+- **反映**: `pm2 restart devrelay-server`（**DB マイグレーション適用済み**）。既存 Agent のバージョン表示は、再起動後に各機が次に version-check される（接続時 / sweep / 手動 `u`）まで `—` のまま
+
+### #297: 自動更新ロールアウトの停滞を解消 + 通知作成の破損文字列を修正 (2026-08-14)
+
+- **背景**: #296 を 08:20 JST に反映して 5 時間経っても、32 台中 **2 台しか更新されていなかった**（success 1 / pending 4 / 未試行 27、うちオンライン 10 台）
+- **原因 1（本丸：bake time とスイープ間隔の噛み合わせ）**: ログ上 `[auto-update:sweep] checking` が **0 件**＝スイープが一度も走っていなかった
+  - `startAutoUpdateSweep()` は `setInterval(360min)` を登録するだけで**起動直後の初回実行がなかった** → 再起動 08:20 に対し初スイープは 14:20
+  - 一方、再起動で全 Agent が 08:20〜08:22 に再接続し connect トリガーは全台発火したが、対象コミット 13c7446 のコミット時刻は 08:06。bake time 120 分の判定で**全台が `⏭ skip: bake time (94min < 120min)`**
+  - bake が明ける 10:06 以降、接続を維持している Agent には connect も sweep も来ない → **デプロイのたびにロールアウトがスイープ間隔ぶん（最大 6 時間）丸ごと止まる構造**だった。実際に更新できた 2 台は、たまたま再接続を繰り返していたマシンのみ
+- **修正 1**:
+  - `startAutoUpdateSweep()` に**初回スイープ**を追加（既定 5 分後 / `DEVRELAY_AUTO_UPDATE_INITIAL_SWEEP_MIN`）
+  - `DEFAULT_SWEEP_MIN` を **360 → 30 分**。bake（120 分）より十分短くすることで「bake 明けから最大 30 分で配布開始」になる。負荷は既存の同時実行 3 台・クールダウン 30 分で抑制済み
+  - スイープ終了時に **`update=n, disable=n, skip=n (理由=件数, ...)` のサマリ 1 行**を出力（個別 skip 行がノイズに埋もれて切り分けできなかったため）
+- **原因 2（pending の滞留）**: 更新送信後は `pending` のまま、次回 version-check まで誰も畳まない。3 台が 07:57 JST から `pending` で固まり、WebUI 上は「更新中」に見え続けていた
+- **修正 2**: `reconcileLastAttempt()` で、2 時間以上 `pending` のままなら `timeout:<detail>` に落として可視化する。**試行回数は変えない**（`MAX_ATTEMPTS_PER_COMMIT` による暴走抑止＝ #256 対策はそのまま）
+- **原因 3（通知が 60 回作成失敗）**: `Invalid prisma.notification.create()` / `unexpected end of hex escape` が 60 件。`session-manager.ts` と `notification-service.ts` の**二重の `slice(0, 200)`** が絵文字（サロゲートペア）を途中で切り、不正な UTF-16 を Prisma に渡していた。モバイルの通知一覧に 60 件が記録されないまま欠落していた
+- **修正 3**: `packages/shared/src/text.ts` を新規追加（`truncateSafe()` / `stripLoneSurrogates()`。Node 固有 API 不使用）。`notification-service.ts` を `truncateSafe(body, 200)` + `stripLoneSurrogates(title)` に置換し、`session-manager.ts` 側の先行 `slice` は削除して切り詰め箇所を 1 つに統一
+- **変更ファイル**: `apps/server/src/services/auto-updater.ts` / `notification-service.ts` / `session-manager.ts`、`packages/shared/src/text.ts`（新規）・`index.ts`。**DB スキーマ変更なし**（`lastAutoUpdateStatus` は既存 String カラムに `timeout:` を入れるだけ）
+- **検証**: `pnpm build` 成功。**実 DB で原因 3 を再現確認**——旧 `slice(0,200)` は同一エラー（`unexpected end of hex escape`）で失敗、`truncateSafe` は INSERT 成功（トランザクションをロールバックして本番データは残さず、残存 0 件を確認）。`truncateSafe` は UTF-8 エンコードで置換文字（U+FFFD）を出さないことも確認。`evaluateAutoUpdateGates()` を 9 ケースで再検証し**判定は従来どおり**（update / bake / cooldown / disable / busy / 同時実行上限 / dev repo / 更新なし）
+- **反映**: `pm2 restart devrelay-server`。DB マイグレーション不要、**Agent 側の `u` も不要**
+- **教訓**: **安全ゲート（bake time）とリトライ間隔（sweep）は必ずセットで設計する**。「待たせるゲート」より「再挑戦の間隔」が長いと、待っている間にトリガーが尽きて仕組みごと沈黙する。加えて、DB へ書く文字列の切り詰めは**必ず 1 箇所に集約**する（`slice` の二重掛けはサロゲート分断の温床）
+
 ### #296: Agent 自動更新（サーバー主導・既定 ON・Agent 側の変更ゼロ） (2026-08-13)
 
 - **背景**: Agent 更新は `u` → `u` の手動 2 段階のみで、32 台（online 12 / offline 20）を人手で回していた。更新漏れは実害を出しており、#256 の stale dist は Mac で約 3 ヶ月潜伏した。ユーザー要望「エージェントの自動更新は作れないか」「最初から ON にしたい」

@@ -82,6 +82,14 @@ export async function apiRoutes(app: FastifyInstance) {
       status: connectedAgents.has(m.id) ? 'online' : 'offline',
       lastSeenAt: m.lastSeenAt,
       managementInfo: m.managementInfo ?? null,
+      // #299: バージョン更新状態（Agents ページの色分け表示用）
+      localCommit: m.localCommit ?? null,
+      localCommitDate: m.localCommitDate ?? null,
+      remoteCommit: m.remoteCommit ?? null,
+      remoteCommitDate: m.remoteCommitDate ?? null,
+      versionCheckedAt: m.versionCheckedAt ?? null,
+      // local == remote なら最新。どちらか欠ければ判定不能（null）
+      upToDate: m.localCommit && m.remoteCommit ? m.localCommit === m.remoteCommit : null,
       projectCount: m.projects.length,
       projects: m.projects.map((p: Project) => ({
         id: p.id,

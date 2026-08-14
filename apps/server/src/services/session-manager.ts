@@ -534,8 +534,8 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
     .then(session => {
       if (session) {
         const projectName = session.project?.displayName || session.project?.name || 'Unknown';
-        const body = messageToSend.length > 200 ? messageToSend.slice(0, 200) + '...' : messageToSend;
-        createNotification(session.userId, 'response', session.projectId, projectName, `✅ ${projectName}`, body).catch(() => {});
+        // 切り詰めは createNotification 側（truncateSafe）に任せる。ここで slice すると絵文字を分断する
+        createNotification(session.userId, 'response', session.projectId, projectName, `✅ ${projectName}`, messageToSend).catch(() => {});
       }
     })
     .catch(() => {});

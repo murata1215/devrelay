@@ -28,10 +28,20 @@ const COOLDOWN_MS = 30 * 60 * 1000;
 const MAX_CONCURRENT_UPDATES = 3;
 /** リモートコミットがこの時間以上前でなければ配らない（bake time。壊れたコミットを配る前に直せる猶予） */
 const DEFAULT_BAKE_MIN = 120;
-/** スイープ間隔 */
-const DEFAULT_SWEEP_MIN = 360;
+/**
+ * スイープ間隔
+ *
+ * #297: 以前は 360 分だったが、bake time（120分）より長いと
+ * 「デプロイ直後の再接続バーストは bake で全部 skip → bake 明けにはトリガーが無い」
+ * という穴が空き、ロールアウトが最大 6 時間止まっていた。bake より十分短くする。
+ */
+const DEFAULT_SWEEP_MIN = 30;
+/** サーバー起動から初回スイープまでの遅延（起動直後はセッション復元などで混むため少し待つ） */
+const DEFAULT_INITIAL_SWEEP_MIN = 5;
 /** 直近このミリ秒以内にメッセージがあるセッションを持つマシンは「作業中」とみなす */
 const RECENT_ACTIVITY_MS = 10 * 60 * 1000;
+/** pending のままこの時間を超えたら timeout として記録する（WebUI から滞留を見えるようにするため） */
+const PENDING_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 /** 更新送信中のマシン（同時実行数の制御用） */
 const inProgress = new Set<string>();
@@ -139,11 +149,14 @@ async function isMachineBusy(machineId: string): Promise<boolean> {
 /**
  * 更新後の結果を照合する（#256 の stale dist 検出）
  * 直前に狙ったコミットに到達していれば success、到達していなければ試行回数を維持したまま次サイクルへ
+ *
+ * @param lastAttemptAt 直近の試行日時（pending の滞留判定に使う）
  */
 async function reconcileLastAttempt(
   machineId: string,
   localCommit: string,
   lastAttemptCommit: string | null,
+  lastAttemptAt: Date | null,
   status: string | null,
   runningCodeStale: boolean | undefined
 ): Promise<void> {
@@ -155,9 +168,20 @@ async function reconcileLastAttempt(
       data: { lastAutoUpdateStatus: 'success', autoUpdateAttempts: 0 },
     });
     console.log(`✅ Auto-update verified for ${machineId}: now at ${localCommit.slice(0, 7)}`);
-  } else {
-    const detail = runningCodeStale ? 'running code is stale (rebuild did not take effect)' : 'commit unchanged';
-    console.log(`⚠️ Auto-update did not take effect for ${machineId}: ${detail}`);
+    return;
+  }
+
+  const detail = runningCodeStale ? 'running code is stale (rebuild did not take effect)' : 'commit unchanged';
+  console.log(`⚠️ Auto-update did not take effect for ${machineId}: ${detail}`);
+
+  // #297: 長時間 pending のままだと WebUI 上は「更新中」に見えたまま滞留する。timeout として可視化する
+  // （試行回数は変えない。MAX_ATTEMPTS_PER_COMMIT による暴走抑止はそのまま効かせる）
+  if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() > PENDING_TIMEOUT_MS) {
+    await prisma.machine.update({
+      where: { id: machineId },
+      data: { lastAutoUpdateStatus: `timeout:${detail}`.slice(0, 200) },
+    });
+    console.warn(`⏱️ Auto-update pending timed out for ${machineId} (${detail})`);
   }
 }
 
@@ -212,7 +236,8 @@ export async function maybeAutoUpdate(machineId: string, trigger: 'connect' | 's
 
   // 前回の試行結果を照合（成功していれば success として確定させる）
   await reconcileLastAttempt(
-    machineId, version.localCommit, machine.lastAutoUpdateCommit, machine.lastAutoUpdateStatus, version.runningCodeStale
+    machineId, version.localCommit, machine.lastAutoUpdateCommit, machine.lastAutoUpdateAt,
+    machine.lastAutoUpdateStatus, version.runningCodeStale
   );
 
   const busy = version.hasUpdate ? await isMachineBusy(machineId) : false;
@@ -290,24 +315,50 @@ export function scheduleAutoUpdateOnConnect(machineId: string): void {
 /**
  * 定期スイープを開始する（サーバー起動時に 1 回呼ぶ）
  * オンラインのマシンを順に評価する。同時実行数はゲート側で制限される
+ *
+ * #297: 起動直後にも 1 回走らせる。以前は setInterval の登録だけだったため、
+ * 「再起動 → 全 Agent 再接続（bake 内なので全 skip）→ 次のスイープまで無反応」で
+ * ロールアウトがスイープ間隔ぶん丸ごと止まっていた。
  */
 export function startAutoUpdateSweep(): void {
   const sweepMin = envInt('DEVRELAY_AUTO_UPDATE_SWEEP_MIN', DEFAULT_SWEEP_MIN);
+  const initialMin = envInt('DEVRELAY_AUTO_UPDATE_INITIAL_SWEEP_MIN', DEFAULT_INITIAL_SWEEP_MIN);
+
   const run = async () => {
     const machineIds = Array.from(getConnectedAgents().keys());
     if (machineIds.length === 0) return;
     console.log(`🔁 [auto-update:sweep] checking ${machineIds.length} online agent(s)`);
+
+    // skip 理由ごとの内訳を集計する（個別行はノイズに埋もれるため、1 行のサマリで追えるようにする）
+    const skipReasons = new Map<string, number>();
+    let updated = 0;
+    let disabled = 0;
+
     for (const machineId of machineIds) {
       try {
-        await maybeAutoUpdate(machineId, 'sweep');
+        const decision = await maybeAutoUpdate(machineId, 'sweep');
+        if (decision.action === 'update') updated++;
+        else if (decision.action === 'disable') disabled++;
+        else skipReasons.set(decision.reason, (skipReasons.get(decision.reason) ?? 0) + 1);
       } catch (err) {
         console.error(`❌ [auto-update:sweep] ${machineId}:`, (err as Error).message);
+        skipReasons.set('exception', (skipReasons.get('exception') ?? 0) + 1);
       }
     }
+
+    const breakdown = Array.from(skipReasons.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(', ');
+    console.log(
+      `🔁 [auto-update:sweep] done: update=${updated}, disable=${disabled}, skip=${machineIds.length - updated - disabled}` +
+      (breakdown ? ` (${breakdown})` : '')
+    );
   };
 
+  setTimeout(() => { void run(); }, initialMin * 60 * 1000);
   setInterval(() => { void run(); }, sweepMin * 60 * 1000);
-  console.log(`🔁 Auto-update sweep started (every ${sweepMin}min, bake ${envInt('DEVRELAY_AUTO_UPDATE_BAKE_MIN', DEFAULT_BAKE_MIN)}min${isDryRun() ? ', DRY RUN' : ''})`);
+  console.log(`🔁 Auto-update sweep started (first in ${initialMin}min, then every ${sweepMin}min, bake ${envInt('DEVRELAY_AUTO_UPDATE_BAKE_MIN', DEFAULT_BAKE_MIN)}min${isDryRun() ? ', DRY RUN' : ''})`);
 }
 
 /** Agent から更新失敗の通知を受けた際に記録する（自動更新起点のときのみ） */

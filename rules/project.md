@@ -1290,4 +1290,24 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   WebUI から再有効化すると試行カウンタもリセットされる
 - **bake time の意図**: 壊れたコミットを push しても、2 時間以内に直せば艦隊には配られない
 - **運用スイッチ（env）**: `DEVRELAY_AUTO_UPDATE_DRY_RUN=1` / `DEVRELAY_AUTO_UPDATE_ONLY=<machineId>` /
-  `DEVRELAY_AUTO_UPDATE_DISABLED=1` / `DEVRELAY_AUTO_UPDATE_BAKE_MIN` / `DEVRELAY_AUTO_UPDATE_SWEEP_MIN`
+  `DEVRELAY_AUTO_UPDATE_DISABLED=1` / `DEVRELAY_AUTO_UPDATE_BAKE_MIN` / `DEVRELAY_AUTO_UPDATE_SWEEP_MIN` /
+  `DEVRELAY_AUTO_UPDATE_INITIAL_SWEEP_MIN`
+
+### ロールアウト停滞の教訓 (#297)
+
+- **安全ゲート（bake time）とリトライ間隔（sweep）は必ずセットで設計する**。bake 120 分に対して
+  sweep が 360 分だと、デプロイ直後の Agent 再接続バースト（connect トリガー）は bake 内で全 skip され、
+  bake が明けた頃には接続済み Agent への再トリガーが無く、次の sweep（最大 6 時間後）まで沈黙する。
+  → **初回 sweep をサーバー起動 5 分後に実行**（`startAutoUpdateSweep` の `setTimeout`）＋ **sweep を 30 分間隔**に短縮
+  （bake より十分短くする）。sweep 終了時は `update/disable/skip` の内訳サマリを 1 行で出す
+- **pending の滞留を可視化**: `reconcileLastAttempt` で 2 時間以上 pending のままなら `timeout:<detail>` に落とす
+  （試行回数は変えない = #256 の暴走抑止はそのまま）
+
+### バージョン更新状態の表示 (#299)
+
+- version-check の結果（`localCommit/localDate/remoteCommit/remoteDate`）は、接続時・sweep・手動 `u` の
+  **全経路が `handleVersionInfo()` に集約**される。ここは従来 promise を resolve するだけだったので、
+  **`persistVersionInfo()` を 1 箇所足すだけで全経路の結果を `Machine` に永続化**できる（`Machine.localCommit`
+  ほか 5 カラム）。`/api/machines` が派生値 `upToDate`（`local === remote`）を返し、Agents ページが色分け表示する
+- **切り詰めと同じ発想**: DB へ書く前の変換（git `%ai` → DateTime のパース、通知本文のサロゲート除去）は
+  **1 つの関数に集約**して二重処理・分断事故を防ぐ。通知は `packages/shared` の `truncateSafe()` を使う（#297）

@@ -1280,6 +1280,38 @@ function handleVersionInfo(payload: AgentVersionInfoPayload) {
     pending.resolve(payload);
     console.log(`📦 Version info received from ${machineId}: local=${payload.localCommit?.slice(0, 7)}, remote=${payload.remoteCommit?.slice(0, 7)}, hasUpdate=${payload.hasUpdate}`);
   }
+
+  // #299: バージョン更新状態の表示用に永続化（接続時 / sweep / 手動 `u` の全経路がここに集約される）
+  // fire-and-forget。resolve 挙動には影響させない
+  persistVersionInfo(payload).catch(err =>
+    console.warn(`⚠️ Failed to persist version info for ${machineId}:`, (err as Error).message)
+  );
+}
+
+/**
+ * version-check 応答を Machine に保存する（#299）
+ * エラー応答や空コミットは無視する。git の `%ai` 形式はパースできなければ null にする
+ */
+async function persistVersionInfo(payload: AgentVersionInfoPayload): Promise<void> {
+  if (payload.error || !payload.localCommit) return;
+
+  // git `%ai` 形式（例: "2026-08-14 08:06:26 +0900"）→ Date。不正なら null
+  const toDate = (s: string | undefined): Date | null => {
+    if (!s) return null;
+    const ms = Date.parse(s);
+    return Number.isNaN(ms) ? null : new Date(ms);
+  };
+
+  await prisma.machine.update({
+    where: { id: payload.machineId },
+    data: {
+      localCommit: payload.localCommit || null,
+      localCommitDate: toDate(payload.localDate),
+      remoteCommit: payload.remoteCommit || null,
+      remoteCommitDate: toDate(payload.remoteDate),
+      versionCheckedAt: new Date(),
+    },
+  });
 }
 
 /** Agent から更新処理のステータスを受信 → エラー時はユーザーに通知 */
