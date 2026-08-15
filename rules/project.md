@@ -138,6 +138,31 @@ Agent 起動時に `which`/`where` で全既知 AI ツールを検出し、confi
 
 skipPermissions と同じパターン: DB カラム + API + WS リアルタイムプッシュ + WebUI トグル + exec フォールバック同期。
 
+### ExitPlanMode のハード封じ（#303）
+
+プランモード（`permissionMode: 'plan'` / `--permission-mode plan`）は編集自体は正常に抑止するが、
+`ExitPlanMode` は SDK/CLI が用意する**正規の脱出ハッチ**であり、モデルが自発的に呼べる。
+対話版 CLI ではモデルが `ExitPlanMode` を呼ぶと人間に確認を求め、承認して初めて解除される。
+DevRelay（SDK 版）はその人間確認を `canUseTool` に置き換えているため、`ExitPlanMode` を他の
+非質問ツールと同様に `allow` してしまうと、**ユーザーの `exec` を待たずにプランモードが自己解除**される
+（mimamori-server 2026-08-15 の事故: モデルが `ExitPlanMode` を呼び自動承認 → 以後の Edit/Write/Bash
+も同じ寛容な `canUseTool` で自動承認 → 無人で実装・本番 DB 操作・pm2 restart まで完走した）。
+
+対策は `disableAsk` と同じ `disallowedTools` 方式（`canUseTool` の deny より根本的、ツール自体を
+モデルの手札から除去）。plan モード中は `disallowedTools` に `ExitPlanMode` を必ず含める:
+
+- **linux/macos**（SDK `query()` 版）: `disableAsk`/`usePlanMode` を合流させて `disallowedTools` を構築。
+  念のため plan モード `canUseTool` の先頭（skipPermissions 分岐より前）にも `ExitPlanMode` の
+  早期 deny を残し二重防御にしている
+- **windows**（Electron GUI・CLI subprocess版。`canUseTool`/`disallowedTools` の SDK フックを持たない
+  別実装）: `--permission-mode plan` 指定時に CLI フラグ `--disallowedTools ExitPlanMode` を追加
+- 解除経路は従来どおりユーザーの `e`/`exec`（`usePlanMode=false` への遷移）のみに一本化。
+  プロンプトレベルの警告（`PLAN_MODE_INSTRUCTION` 等）はソフトガードとして併用（三重防御）
+
+**注意**: `skipPermissions`（自動承認 ON）は plan モードでも `ExitPlanMode` を含む全ツールを
+即 allow する分岐を持つため、`disallowedTools` によるツール除去がこの分岐より優先されることを確認済み
+（`disallowedTools` はモデルのツール一覧自体から除去するため、`skipPermissions` の値に関係なく効く）。
+
 ### loadOlderMessages の連鎖発火防止
 
 `loadHistory` 完了後、React の DOM 更新で `scrollTop=0` → `handleScroll` → `loadOlderMessages` が連鎖発火する問題がある。

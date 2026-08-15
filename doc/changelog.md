@@ -6,6 +6,18 @@
 
 ## 実装済み機能
 
+### #303: ExitPlanMode 自己解除のハード封じ (2026-08-16)
+
+- **背景**: mimamori-server（別プロジェクト）で、ユーザーが `exec` を送信していないにもかかわらず、Claude が実装・本番 DB への DELETE・pm2 restart まで実行してしまう事故が発生。ログ解析の結果、モデル自身が `ExitPlanMode` ツールを呼び、それが即座に承認されてプランモードが自己解除されていたことが判明
+- **真因**: Agent SDK の `permissionMode: 'plan'`（＝ `claude --permission-mode plan` の SDK 版）自体は正常に機能しており、編集の抑止はできていた（ログでも Edit/Write は ExitPlanMode 呼び出し後にしか始まっていない）。問題は `ExitPlanMode` がプランモードの「正規の脱出ハッチ」であること。対話版 CLI ではモデルが `ExitPlanMode` を呼ぶと「この計画で進めますか？」と**人間に確認**し、承認して初めて解除されるが、DevRelay（SDK 版）はその人間確認の代わりに `canUseTool` を使っており、`ExitPlanMode` を他の非質問ツールと同様に無条件 `allow` していた（`skipPermissions`＝自動承認 ON の場合はさらに上流の分岐でも allow）。これによりユーザーの確認をすっ飛ばしてプランモードが解除され、以後の Edit/Write/Bash も同じ寛容な `canUseTool` で自動承認されていた
+- **修正方針**: 既存の `disableAsk`（`AskUserQuestion` を `disallowedTools` で SDK レベルからツール除去する方式、canUseTool の deny より根本的）と同じパターンを採用。plan モード中は `ExitPlanMode` を `disallowedTools` に加えてモデルの手札から除去し、`skipPermissions` の分岐より上流で貫通不能にした。念のため plan モード `canUseTool` の先頭にも `ExitPlanMode` の早期 deny を残し、二重防御にしている
+- **変更ファイル**:
+  - `agents/linux/src/services/ai-runner.ts` / `agents/macos/src/services/ai-runner.ts`（SDK `query()` 版）— `disallowedTools` 構築を `disableAsk`・`usePlanMode` 合流方式に変更 + plan モード `canUseTool` に `ExitPlanMode` 早期 deny
+  - `agents/windows/src/services/ai-runner.ts`（Electron GUI・CLI subprocess版。SDK の `canUseTool`/`disallowedTools` を持たない別実装）— `--permission-mode plan` 指定時に CLI フラグ `--disallowedTools ExitPlanMode` を追加し同じ方針を実現
+- プランモード解除の経路は従来どおりユーザーの `e`/`exec`（`usePlanMode=false`）のみに一本化。プロンプトレベルの警告（`PLAN_MODE_INSTRUCTION` 等）はソフトガードとしてそのまま残し、三重防御構成にした
+- **検証**: `pnpm build` で 3 エージェント + `apps/server` すべて型エラーなし（green）
+- **スコープ外**: 本番 DB の DELETE が実際に発生した直接原因は「実装」ではなく、mimamori-server 側の統合テストが本番 `DATABASE_URL` を継承して実 DELETE を流した副作用（`feedback_execasync_env_isolation.md` の 2026-04-25 本体 DB wipe と同型）。テストの DB 隔離は mimamori-server 側の問題であり、本リポジトリでは対処不可
+
 ### #302: stale dist / 旧 Agent の可視化と自動更新の誤判定修正 (2026-08-14)
 
 - **背景**: `doc/agent_noresponse_20260814.md`（無応答障害レポート）で、この機体の Agent が **2026-03-19 ビルドのまま5ヶ月間動き続けた**にもかかわらずサーバーが検知できなかったことが判明。無応答の直接原因（pm2 二重登録・自動更新スクリプトの kill 失敗）は外部対処で復旧済み・恒久修正コードも `3d6a6ee`(#297) 既存。本 #302 はレポート「未対処の課題」のうちコードで直すべき2点に対応

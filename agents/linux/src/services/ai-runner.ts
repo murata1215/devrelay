@@ -657,10 +657,18 @@ async function sendPromptToAiSdk(
     console.log(`🩹 [SDK] Using fallback Claude executable: ${claudeFallback}`);
   }
 
-  // AskUserQuestion 無効化（SDK レベルでツール除去）
-  if (options.disableAsk) {
-    sdkOptions.disallowedTools = ['AskUserQuestion'];
-    console.log('🚫 [SDK] AskUserQuestion disabled (disallowedTools)');
+  // ツール除去（SDK レベル）: AskUserQuestion（disableAsk）/ ExitPlanMode（plan モード時）
+  // #303: ExitPlanMode はプランモードの「正規の脱出ハッチ」。対話版 CLI では人間が確認して初めて
+  // 解除されるが、DevRelay の canUseTool がその確認を代行して無条件 allow していたため、
+  // モデルが自発的に ExitPlanMode を呼ぶだけでプランモードが自己解除される事故があった
+  // （mimamori-server 2026-08-15）。disallowedTools でツール自体を除去し、解除経路をユーザーの
+  // e/exec（usePlanMode=false）だけに限定する。
+  const disallowedTools: string[] = [];
+  if (options.disableAsk) disallowedTools.push('AskUserQuestion');
+  if (options.usePlanMode) disallowedTools.push('ExitPlanMode');
+  if (disallowedTools.length > 0) {
+    sdkOptions.disallowedTools = disallowedTools;
+    console.log(`🚫 [SDK] disallowedTools: ${disallowedTools.join(', ')}`);
   }
 
   // パーミッションモード設定
@@ -677,6 +685,16 @@ async function sendPromptToAiSdk(
     if (options.onToolApprovalRequest) {
       const onApprovalRequest = options.onToolApprovalRequest;
       sdkOptions.canUseTool = async (toolName, input, opts) => {
+        // #303: disallowedTools を素通りするケースへの保険。ExitPlanMode は skip-permissions
+        // モードでも絶対に許可しない（自動承認＝編集の許可であって、プラン解除の許可ではない）
+        if (toolName === 'ExitPlanMode') {
+          console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
+          return {
+            behavior: 'deny',
+            message: 'プランモードは ExitPlanMode では解除できません。ユーザーが e / exec を送信するまで実装を開始せず、プランの提示のみ行ってください。',
+          };
+        }
+
         const isQuestion = toolName === 'AskUserQuestion';
 
         // 全許可モード: AskUserQuestion 以外は即座に allow（動的に最新値を参照）

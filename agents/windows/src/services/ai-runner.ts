@@ -278,6 +278,10 @@ export async function sendPromptToAi(
     // Add permission mode based on options
     if (options.usePlanMode) {
       args.push('--permission-mode', 'plan');
+      // #303: ExitPlanMode はプランモードの正規の脱出ハッチ。対話版 CLI なら人間が確認するが、
+      // -p（非対話）でモデルが自発的に呼ぶと確認なしで通ってしまうケースがあるため、
+      // ツール自体を CLI レベルで除去する（mimamori-server 2026-08-15 の事故対策、SDK 版と同一方針）。
+      args.push('--disallowedTools', 'ExitPlanMode');
       // プランモードで読み取り専用コマンドを許可（カンマ区切りで1つの --allowedTools に渡す）
       if (options.allowedTools && options.allowedTools.length > 0) {
         args.push('--allowedTools', options.allowedTools.join(','));
