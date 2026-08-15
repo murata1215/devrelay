@@ -1293,15 +1293,16 @@ Flutter アプリを USB 接続された実機（iPhone/Android）にチャッ�
 - **対象ファイル**: server=`schema.prisma`/`services/org-control.ts`(新)/`services/command-handler.ts`/`mcp/tools.ts`/`routes/organization.ts`/`routes/api.ts`、web=`lib/api.ts`/`pages/SettingsPage.tsx`/`pages/ConversationsPage.tsx`（計9ファイル）。Agent/shared/Discord/Telegram 変更なし
 - **v2 対象外**: ツール承認の manager 代行、コマンド事前承認フロー、監査ログ export、manager 階層（manager の manager）
 
-## `w` コマンド（ラップアップ）の設計 (#288, #293)
+## `w` コマンド（ラップアップ）の設計 (#288, #293, #304)
 
 `w` は「ドキュメント更新＋コミット/プッシュ」のワンショット exec。プロンプト実体は
-`apps/server/src/services/command-parser.ts` の `W_COMMAND_PROMPT` 定数 1 箇所で、
+`apps/server/src/services/command-parser.ts` の `export const W_COMMAND_PROMPT` 定数 1 箇所で、
 `parseCommand()` Step 0.6 と `parseShortcut()` の `case 'w'` の両経路が参照する。
 
 - **空振りガード (#288)**: 変更ゼロの作業ツリーでは「存在しないプランを推測せず『コミット対象の変更はありません』とだけ報告して終了」させる。これが無いと「プランをください」ループに陥る
 - **非 git 対応 (#293)**: 冒頭で `git rev-parse --is-inside-work-tree` を判定して 2 分岐。非 git ではコミット/プッシュを行わず、会話履歴とディレクトリ内容から作業内容を把握して README.md / MEMORY.md を更新（無ければ新規作成）。他の .md は既存時のみ更新
 - **設計判断**: 新規作成は README.md と MEMORY.md のみ（changelog.md・CLAUDE.md まで自動生成すると試用ディレクトリにノイズが増える）。git 側の文面は変更せず挙動不変。**どちらの分岐にも「対象が無ければ推測せず終了」のガードを置く**
+- **`x` の実行済み判定は W_COMMAND_PROMPT から派生させる (#304)**: `command-handler.ts` の `handleClear()` は BuildLog.prompt の前方一致で「セッション内で `w` を実行したか」を判定し、未実行なら `x` 時に警告を出す。この判定プレフィックスを独自にハードコードすると `W_COMMAND_PROMPT` の書き換え時に追従し忘れて誤警告になる事故が **2 度**発生した（#86→#90、#293→#304）。そのため `command-handler.ts` は `command-parser.ts` から `W_COMMAND_PROMPT` を import し、`W_PROMPT_PREFIX = W_COMMAND_PROMPT.slice(0, 30)` の**派生**で判定する。`W_COMMAND_PROMPT` の冒頭を変える場合、この判定は自動追従するため個別修正は不要
 
 ## Agent 自動更新（サーバー主導）(#296)
 

@@ -23,7 +23,7 @@ import { prisma } from '../db/client.js';
  *   「git リポジトリではないためコミットできません」だけで終わり、
  *   MEMORY.md / README.md の更新まで到達しなかった問題への対応。
  */
-const W_COMMAND_PROMPT =
+export const W_COMMAND_PROMPT =
   'まず `git rev-parse --is-inside-work-tree` を実行して、このディレクトリが git リポジトリかどうかを判定してください。' +
   '【git リポジトリの場合】' +
   'git status / git diff で未コミットの変更があるか確認してください。' +

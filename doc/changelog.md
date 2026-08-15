@@ -6,6 +6,16 @@
 
 ## 実装済み機能
 
+### #304: `w` 後に `x` すると「w コマンドを実行していません」と誤警告 (2026-08-16)
+
+- **問題**: `w` を実行して完了させた直後に `x`（会話クリア）を送ると「⚠️ `w` コマンド（ドキュメント更新・コミット）を実行していません。」と誤警告が出る
+- **原因**: `x` の警告判定（`handleClear()`、`command-handler.ts`）は BuildLog.prompt の前方一致で「そのセッションで `w` を実行したか」を見ているが、判定用ハードコード定数 `W_PROMPT_PREFIX = 'doc/changelog.md があれば'` が、#293（`w` 非 git 対応）で書き換えられた実際のプロンプト冒頭（`まず \`git rev-parse --is-inside-work-tree\` を実行して…`）と食い違っていた。`doc/changelog.md があれば` は今やプロンプトの中盤にしか現れないため `startsWith` が常に false になり、`w` を実行済みでも「未実行」と誤判定されていた。**#86→#90（2026-02-28）で一度直したのと同じクラスの同期漏れバグの再発**（`W_COMMAND_PROMPT` 変更時に判定側定数の追従を忘れる）
+- **修正方針**: マジック文字列の二重管理をやめ単一情報源化。`command-parser.ts` の `W_COMMAND_PROMPT` を `export` し、`command-handler.ts` 側の `W_PROMPT_PREFIX` はそこから `.slice(0, 30)` で派生させる。以後 `w` プロンプトの冒頭を変えても判定側が自動追従し、3 度目の同期漏れを構造的に防止
+- **変更ファイル**:
+  - `apps/server/src/services/command-parser.ts` — `W_COMMAND_PROMPT` を `export const` に変更
+  - `apps/server/src/services/command-handler.ts` — `W_COMMAND_PROMPT` を import し、`W_PROMPT_PREFIX` をハードコードから派生方式に変更
+- **対象**: server のみ（Agent/shared/WebUI/DB 変更なし）。`pnpm build` green
+
 ### #303: ExitPlanMode 自己解除のハード封じ (2026-08-16)
 
 - **背景**: mimamori-server（別プロジェクト）で、ユーザーが `exec` を送信していないにもかかわらず、Claude が実装・本番 DB への DELETE・pm2 restart まで実行してしまう事故が発生。ログ解析の結果、モデル自身が `ExitPlanMode` ツールを呼び、それが即座に承認されてプランモードが自己解除されていたことが判明

@@ -36,7 +36,7 @@ import {
   getActiveSessions,
   getSessionParticipants
 } from './session-manager.js';
-import { getHelpText } from './command-parser.js';
+import { getHelpText, W_COMMAND_PROMPT } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys } from './user-settings.js';
@@ -59,8 +59,10 @@ const pendingClear = new Set<string>();
 // u コマンドの連続確認用: チャンネルごとに前回のコマンドが update だったかを記録
 const pendingUpdate = new Set<string>();
 
-// w コマンド判定用プロンプトプレフィックス（command-parser.ts と一致させる）
-const W_PROMPT_PREFIX = 'doc/changelog.md があれば';
+// w コマンド判定用プロンプトプレフィックス
+// command-parser.ts の W_COMMAND_PROMPT から派生させることで、
+// プロンプト文面を変更しても判定側が自動追従し、同期漏れ（#90, 2026-08-16 再発）を防ぐ
+const W_PROMPT_PREFIX = W_COMMAND_PROMPT.slice(0, 30);
 
 /**
  * context から DB の User.id を解決する
