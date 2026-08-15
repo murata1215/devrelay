@@ -25,7 +25,8 @@ import {
   type ResponseSummarizeRequestPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, appendSessionContextInfo } from './session-manager.js';
+import { maybeTokenBloatWarning } from './token-usage-warning.js';
 import { sendWebRawMessage, broadcastWebRawMessage } from '../platforms/web.js';
 import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApprovalAuto } from '../platforms/discord.js';
 import { sendTelegramToolApproval, resolveTelegramToolApproval, sendTelegramToolApprovalAuto } from '../platforms/telegram.js';
@@ -568,6 +569,11 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
       console.log(`🔗 Cross-project query completed for session ${sessionId}`);
       // early return せず、通常のメッセージ保存フローに進む
     }
+
+    // #300: トークン高止まりなら警告を contextInfo に足す（📊 Rate Limit 行の直後に並び、
+    // 下の getSessionContextInfo で DB にも、finalizeProgress で配信にも一貫して前置される）
+    const tokenWarning = await maybeTokenBloatWarning(sessionId, usageData);
+    if (tokenWarning) appendSessionContextInfo(sessionId, tokenWarning);
 
     // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
     // contextInfo（📊 Rate Limit 等）を含めて保存（WS 配信内容と DB 内容を一致させる）
@@ -1310,6 +1316,9 @@ async function persistVersionInfo(payload: AgentVersionInfoPayload): Promise<voi
       remoteCommit: payload.remoteCommit || null,
       remoteCommitDate: toDate(payload.remoteDate),
       versionCheckedAt: new Date(),
+      // #302: 実行中コードの鮮度。旧 Agent（#256 以前）は送ってこないため undefined → null（判定不能として保存）
+      runningCodeMtime: toDate(payload.runningCodeMtime),
+      runningCodeStale: payload.runningCodeStale ?? null,
     },
   });
 }

@@ -141,6 +141,9 @@ export interface Machine {
   remoteCommitDate?: string | null;
   versionCheckedAt?: string | null;
   upToDate?: boolean | null;  // true=最新 / false=古い / null=不明（未チェック）
+  // #302: 実行中コードの鮮度（stale dist 可視化用）。旧 Agent は null（判定不能）
+  runningCodeMtime?: string | null;
+  runningCodeStale?: boolean | null;
   projectCount: number;
   projects: Project[];
 }

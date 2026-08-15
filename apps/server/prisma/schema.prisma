@@ -164,6 +164,9 @@ model Machine {
   remoteCommit     String?   // origin の最新コミット
   remoteCommitDate DateTime? // そのコミット日時（u の「リモート」日時）
   versionCheckedAt DateTime? // 最後に version-check 応答を受けた時刻
+  // #302: 実行中コードの鮮度（stale dist 検知・可視化用。旧 Agent は送ってこないため null=判定不能）
+  runningCodeMtime DateTime? // 実行中エントリファイル(process.argv[1])の mtime
+  runningCodeStale Boolean?  // 実行中コードが localCommit より古い＝再ビルド漏れ。null=旧 Agent で判定不能
   deletedAt      DateTime? // ソフトデリート（null = アクティブ）
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

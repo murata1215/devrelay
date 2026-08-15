@@ -6,6 +6,35 @@
 
 ## 実装済み機能
 
+### #302: stale dist / 旧 Agent の可視化と自動更新の誤判定修正 (2026-08-14)
+
+- **背景**: `doc/agent_noresponse_20260814.md`（無応答障害レポート）で、この機体の Agent が **2026-03-19 ビルドのまま5ヶ月間動き続けた**にもかかわらずサーバーが検知できなかったことが判明。無応答の直接原因（pm2 二重登録・自動更新スクリプトの kill 失敗）は外部対処で復旧済み・恒久修正コードも `3d6a6ee`(#297) 既存。本 #302 はレポート「未対処の課題」のうちコードで直すべき2点に対応
+- **実データ確認**（psql）: 全32台が `localCommit=13c7446` のまま（`3d6a6ee` 到達0台）、3台（pixwriter/devrelay/tisa-mac）が `pending` 滞留中だった
+- **課題1（誤判定の修正・核心）**: `auto-updater.ts:reconcileLastAttempt` の `if (localCommit === lastAttemptCommit && !runningCodeStale)` は、旧 Agent（#256以前）が送ってこない `runningCodeStale=undefined` を `!undefined=true` で「stale でない」＝成功と誤判定していた（5ヶ月見逃しの直接原因）。三値に分岐:
+  - `false`（新Agentでビルド鮮度OK）→ 従来通り `success`
+  - `true` → 成功にせず pending 継続（2hで `timeout:...`）
+  - `undefined`（旧Agent・commitは一致）→ `lastAutoUpdateStatus='success:unverified'` で記録（確定させず可視化）
+- **課題2（可視化）**: Agent は version-check で `runningCodeMtime`/`runningCodeStale` を送っていたが `persistVersionInfo` が DB に保存していなかった。`Machine` に `runningCodeMtime`(DateTime?) / `runningCodeStale`(Boolean?) の2カラムを追加し永続化 → `/api/machines` で返却 → Agents ページ Version 列に鮮度バッジ追加（赤「⚠ 再ビルド漏れ」= stale=true、グレー「ⓘ ビルド状態不明（旧Agent）」= mtime無し）
+- **課題3（update.log）・課題4（pending滞留の確認）**: いずれも `3d6a6ee`(#297) で既に解決済み、または実データ確認で足りると判断し、コード対処なし
+- **変更ファイル**: `schema.prisma`(+2カラム, `prisma db execute` で直接適用) / `agent-manager.ts`(persistVersionInfo) / `auto-updater.ts`(reconcileLastAttempt 三値化) / `api.ts`(/api/machines) / `web/lib/api.ts`(Machine interface) / `MachinesPage.tsx`(鮮度バッジ)
+- Agent 側の変更なし（旧Agent は自分で `runningCodeMtime` を送れないため「自己更新のバグは自己更新では直せない」構造は残る。本対応は「旧Agentを旧Agentと可視化して人間の対処を促す」範囲）
+
+### #300: トークン高止まり警告（プロジェクト横断トレンド → `w`/`x` を促す） (2026-08-14)
+
+- **背景**: あるプロジェクト（dangou-card）が 1 ターン $4〜11・cache_read 4〜14M トークンを消費していた。ユーザーが昼過ぎに「ワークアップ」してから落ち着いた。今後はトークンが高止まりしたら自動で警告してほしい、という要望
+- **調査で確定した重要事実**:
+  - トークンは `Message.usageData`(jsonb)。1 会話の合計 = `input+output+cache_read+cache_creation`（Conversations の "Tokens" 列と同義）。大半は `cache_read_input_tokens`＝毎ターン読み直す累積コンテキスト
+  - 既存 #291 の警告は**別物**（Agent 側 `connection.ts:maybeWarnContext`、1 セッションのコンテキスト使用率 85/95% で `x` を推奨・1 回のみ）。今回はプロジェクト横断の**トレンド**を見るため新規追加
+  - **`w` は実際にはコンテキストをリセットしない**。`handleConversationExec` は exec マーカーを打つだけで Claude SDK の `claudeResumeSessionId` をクリアしない → resume 経路では cache_read は下がらない。実際に消すのは **`x`（clear）**。よって警告文は「`w` で記録・コミット → `x` で履歴クリア」の両方を促す
+- **実装（server のみ・DB スキーマ変更なし・Agent 変更なし）**:
+  - 新規 `apps/server/src/services/token-usage-warning.ts`: `extractTotalTokens()`（Conversations と同じ合算）、純関数 `evaluateTokenBloat()`（単体検証用に I/O 分離）、`maybeTokenBloatWarning(sessionId, currentUsage)`
+  - **発火条件**（env で上書き可）: 直近 **3 会話がすべて 3000k(=300 万)以上**（連続）**または** 直近 **10 会話の平均が 2000k(=200 万)以上**（平均）。今回分はまだ未保存のため、DB から直近 `AVG_COUNT-1` 件を取り先頭に現在の usageData を足して判定
+  - **クールダウン**: プロジェクト単位のインメモリ `Map<projectId, lastWarnedAt>` で 60 分（`DEVRELAY_TOKEN_WARN_COOLDOWN_MIN`）。プロセス再起動で消えてよい
+  - **注入**: `agent-manager.ts:handleAiOutput`（isComplete 時。usageData も DB も揃う唯一の地点）で判定し、`session-manager` の新 `appendSessionContextInfo()` で `tracker.contextInfo` に追記 → 📊 Rate Limit 行と同じく DB 保存・各プラットフォーム配信の両方に一貫して前置される
+  - env スイッチ: `DEVRELAY_TOKEN_WARN_DISABLED=1` / `_CONSEC_COUNT` / `_CONSEC_TOKENS` / `_AVG_COUNT` / `_AVG_TOKENS` / `_COOLDOWN_MIN`
+- **検証**: `pnpm build` 成功。純関数 `evaluateTokenBloat` を 8 ケースで単体検証（連続発火 / 1 つ低い→非発火 / 平均境界 2000k 発火・1999k 非発火 / 件数不足→非発火 ほか）。**実 DB でドライラン**: dangou-card の肥大時間帯（cache_read 4〜14M）で WARN 発火、ワークアップ後の直近では非発火することを確認（読み取りのみ）
+- **反映**: `pm2 restart devrelay-server`（DB 変更なし）
+
 ### #299: Agents ページに Agent のバージョン更新状態を表示 (2026-08-14)
 
 - **背景**: Agents ページ（`MachinesPage`）に Name / Status / Projects / Last Seen しか無く、各 Agent が最新コード（git と同じ）かどうかを一覧で把握できなかった。#296 の自動更新導入後、「どの Agent がまだ古いか」を一目で見たいというユーザー要望

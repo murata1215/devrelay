@@ -162,13 +162,29 @@ async function reconcileLastAttempt(
 ): Promise<void> {
   if (!lastAttemptCommit || status !== 'pending') return;
 
-  if (localCommit === lastAttemptCommit && !runningCodeStale) {
-    await prisma.machine.update({
-      where: { id: machineId },
-      data: { lastAutoUpdateStatus: 'success', autoUpdateAttempts: 0 },
-    });
-    console.log(`✅ Auto-update verified for ${machineId}: now at ${localCommit.slice(0, 7)}`);
-    return;
+  // #302: runningCodeStale は Agent 任意フィールド。旧 Agent（#256 以前）は送ってこず undefined になる。
+  // 以前は `!runningCodeStale` で undefined を「stale でない」と誤解釈し、ビルドが古くても
+  // success 確定させていた（5 ヶ月間 stale dist を見逃した直接原因）。三値で明示的に分岐する。
+  if (localCommit === lastAttemptCommit) {
+    if (runningCodeStale === false) {
+      await prisma.machine.update({
+        where: { id: machineId },
+        data: { lastAutoUpdateStatus: 'success', autoUpdateAttempts: 0 },
+      });
+      console.log(`✅ Auto-update verified for ${machineId}: now at ${localCommit.slice(0, 7)}`);
+      return;
+    }
+    if (runningCodeStale === undefined) {
+      // 旧 Agent: commit は進んだがビルド鮮度を自己申告できない。「成功」と確定はさせず、
+      // unverified として記録する（WebUI で旧 Agent と分かるよう可視化。#302）
+      await prisma.machine.update({
+        where: { id: machineId },
+        data: { lastAutoUpdateStatus: 'success:unverified', autoUpdateAttempts: 0 },
+      });
+      console.log(`✅ Auto-update commit advanced for ${machineId} but unverified (old agent: build freshness unknown): now at ${localCommit.slice(0, 7)}`);
+      return;
+    }
+    // runningCodeStale === true はここを通らず下の pending/timeout 経路へ
   }
 
   const detail = runningCodeStale ? 'running code is stale (rebuild did not take effect)' : 'commit unchanged';

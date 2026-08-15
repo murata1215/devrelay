@@ -29,8 +29,18 @@ Discord/Telegram/LINE から Claude Code/Gemini CLI/Devin CLI をリモート操
 ```bash
 pnpm build
 # 再起動はユーザーが実行:
-pm2 restart devrelay-server devrelay-agent
+pm2 restart devrelay-server
 ```
+
+> **Agent を pm2 に登録しないこと。** この機体の Agent は crontab `@reboot` による nohup 起動が正
+> （`~/.devrelay/agent/agents/linux/dist/index.js`）。pm2 に `devrelay-agent` を登録すると同一 machineId で
+> 二重起動し、サーバーが新接続のたびに旧 WebSocket を切断するため無限再接続ループになり、
+> **AI の応答がユーザーに届かなくなる**。詳細は `doc/agent_noresponse_20260814.md`。
+>
+> 二重起動の確認（node プロセスが 2 つ以上なら重複）:
+> ```bash
+> pgrep -u $(whoami) -af "\.devrelay.*index\.js" | grep -v "bash -c"
+> ```
 
 ## DevRelay 自身の開発時の注意
 - ビルド（pnpm build）は実行OK

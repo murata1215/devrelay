@@ -441,6 +441,22 @@ export function MachinesPage() {
                       ) : (
                         <span className="text-[var(--text-faint)]">—</span>
                       )}
+                      {/* #302: 実行中コードの鮮度バッジ。stale=再ビルド漏れ（赤） / mtime無し=旧Agent判定不能（グレー） */}
+                      {machine.runningCodeStale === true ? (
+                        <span
+                          className="ml-2 text-xs text-[var(--text-danger)]"
+                          title={`⚠ 再ビルド漏れの可能性\n実行中コード: ${machine.runningCodeMtime ? new Date(machine.runningCodeMtime).toLocaleString() : '-'}\nローカルコミット日時: ${machine.localCommitDate ? new Date(machine.localCommitDate).toLocaleString() : '-'}`}
+                        >
+                          ⚠ 再ビルド漏れ
+                        </span>
+                      ) : machine.versionCheckedAt && !machine.runningCodeMtime ? (
+                        <span
+                          className="ml-2 text-xs text-[var(--text-faint)]"
+                          title="この Agent はビルド鮮度（実行中コードの mtime）を報告していません。#256 以前の旧ビルドの可能性があります。Agent の再ビルド・再起動を推奨します。"
+                        >
+                          ⓘ ビルド状態不明（旧Agent）
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-[var(--text-muted)] text-sm">
                       {machine.lastSeenAt

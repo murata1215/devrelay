@@ -463,6 +463,16 @@ export function getSessionContextInfo(sessionId: string): string {
   return progressTrackers.get(sessionId)?.contextInfo || '';
 }
 
+/**
+ * セッションの contextInfo に文字列を追記する（#300 トークン警告など）
+ * finalizeProgress が contextInfo を最終メッセージの先頭に前置するため、
+ * ここで足した内容は DB 保存・各プラットフォーム配信の両方に一貫して乗る。tracker 無しは no-op。
+ */
+export function appendSessionContextInfo(sessionId: string, text: string): void {
+  const tracker = progressTrackers.get(sessionId);
+  if (tracker) tracker.contextInfo += text;
+}
+
 // Finalize progress with final message
 export async function finalizeProgress(sessionId: string, finalMessage: string, files?: FileAttachment[], messageId?: string) {
   const tracker = progressTrackers.get(sessionId);

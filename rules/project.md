@@ -720,6 +720,11 @@ bash プロセスの cmdline に `.devrelay.*index.js` が含まれるため `pg
 **対策**: nohup installType の場合は `restartCmd.command` を使わず、connection.ts 内で
 専用のリスタートコマンドを構築する（`grep -v "^$$\$"` + PATH 上の `node`）。
 
+> **注意**: このスクリプトを生成するのは Agent 自身なので、**修正は対象機の Agent が新しい dist で
+> 再起動するまで効かない**。ビルドが失敗し続けている機体では旧スクリプトが使われ続け、
+> 更新のたびにプロセスが 1 つずつ増える。2026-08-14 に実際に発生した
+> （`doc/agent_noresponse_20260814.md`）。
+
 ### Windows Agent のパス判定: `homedir()` vs `getConfigDir()`
 
 Windows では `homedir()` (`C:\Users\<user>`) と `getConfigDir()` (`%APPDATA%\devrelay`) が異なる。
@@ -1303,6 +1308,20 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
 - **pending の滞留を可視化**: `reconcileLastAttempt` で 2 時間以上 pending のままなら `timeout:<detail>` に落とす
   （試行回数は変えない = #256 の暴走抑止はそのまま）
 
+### トークン高止まり警告 (#300)
+
+- **`w` と `x` の役割は別物**（実装の核心）: `w`（wrap up）は exec マーカー＋ドキュメント更新・commit/push のみで、
+  Claude SDK の resume セッション（`claudeResumeSessionId`）は**継続する** = cache_read（累積コンテキスト）は下がらない。
+  実際にコンテキストを消して token を下げるのは **`x`（clear）**（`clearClaudeSessionId` で次回新規セッション化）。
+  よってトークン警告は「`w` で記録・コミット → `x` で履歴クリア」の**両方**を促す
+- **既存 #291（Agent 側・per-session のコンテキスト% 85/95%）とは別レイヤー**。#300 は Server 側で
+  **プロジェクト横断の直近 N 会話のトレンド**を見る（`token-usage-warning.ts`。判定は純関数 `evaluateTokenBloat`）
+- **注入は `handleAiOutput`（isComplete 時。usageData と DB が揃う唯一の地点）**で行い、`appendSessionContextInfo()`
+  経由で `tracker.contextInfo` に足す。📊 Rate Limit と同じ相乗り方式で DB 保存・配信の両方に一貫して乗る
+- **クールダウンはインメモリ Map**（プロジェクト単位・60 分）。DB 永続化が要るなら後日 `Project.lastTokenWarnAt` を足す
+- 1 会話の合計トークンは Conversations の "Tokens" と同義（`input+output+cache_read+cache_creation`）。
+  しきい値・件数・クールダウンは `DEVRELAY_TOKEN_WARN_*` env で上書き可（`_DISABLED=1` で無効化）
+
 ### バージョン更新状態の表示 (#299)
 
 - version-check の結果（`localCommit/localDate/remoteCommit/remoteDate`）は、接続時・sweep・手動 `u` の
@@ -1311,3 +1330,33 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   ほか 5 カラム）。`/api/machines` が派生値 `upToDate`（`local === remote`）を返し、Agents ページが色分け表示する
 - **切り詰めと同じ発想**: DB へ書く前の変換（git `%ai` → DateTime のパース、通知本文のサロゲート除去）は
   **1 つの関数に集約**して二重処理・分断事故を防ぐ。通知は `packages/shared` の `truncateSafe()` を使う（#297）
+
+### 二重起動と stale dist の実地教訓 (2026-08-14)
+
+障害レポート: `doc/agent_noresponse_20260814.md`
+
+- **自己更新機構のバグは、自己更新では直せない**。更新スクリプトを生成するのは Agent 自身なので、
+  スクリプトの欠陥（kill 漏れ）を直しても、その Agent が**新しい dist で再起動するまで永久に旧スクリプトが使われる**。
+  今回はビルドが 5 ヶ月失敗し続けていたため、`3d6a6ee`（#297）の修正が一度も適用されなかった。
+  → **更新機構に触る修正は、対象機で dist が実際に更新されたかまで確認して初めて「入った」と見なす**
+- **kill は `&&` の後ろに置かない**。`build && kill; sleep 1; nohup 起動 &` の形だと、
+  ビルド失敗時に `&&` の短絡で **kill だけがスキップされ、起動は必ず走る** = 更新のたびに Agent が 1 つ増える。
+  kill と起動は同じ区切り（`;`）で並べる
+- **二重起動の症状は「重複メッセージ」ではなく「無応答」として出る**。サーバーは新接続時に旧 WebSocket を切断する
+  （`agent-manager.ts:316`）ため、同一 machineId の 2 プロセスは約 1Hz で相互キックし続ける。
+  この状態ではトラッカーを持つ接続と現在の接続がずれ、`sendToAgent FAILED (readyState=3)` と
+  `No tracker found for session` で **AI 出力が黙って捨てられる**。
+  ログにこの 2 つが並んで出ていたら真っ先に二重起動を疑う
+- **`runningCodeStale` は「送られてこない」ケースを考慮する**。`auto-updater.ts` の
+  `localCommit === lastAttemptCommit && !runningCodeStale` は、古い Agent が当該フィールドを送らないと
+  `undefined` → `!undefined` が真になり **stale dist を「成功」と誤判定する**。
+  任意フィールドで安全側に倒すなら `undefined` は `unknown` として別扱いにする（`isDevRepo` と同じ発想）
+  → **#302 で対処済み**。`reconcileLastAttempt` を三値化（`false`=success / `true`=pending継続 / `undefined`=
+  `success:unverified` で確定させず記録）。旧 Agent は commit が進んでも「未検証」のまま可視化される
+- **git rev だけでは「動いているコード」を表せない**。version-check は `runningCodeMtime` も送っているので、
+  `localCommit` と実行中コードのビルド時刻の乖離を可視化しないと、
+  「サーバー上は最新なのに 5 ヶ月前のコードが動いている」状態を検知できない
+  → **#302 で対処済み**。`Machine.runningCodeMtime`/`runningCodeStale` を新設し `persistVersionInfo()` で永続化、
+  `/api/machines` で返却、Agents ページ Version 列に赤「⚠ 再ビルド漏れ」/ グレー「ⓘ ビルド状態不明（旧Agent）」バッジ表示
+- **Agent の起動方式は機体ごとに 1 つに固定する**。この機体は crontab `@reboot` の nohup 起動が正で、
+  pm2 に登録してよいのは `devrelay-server` のみ（`CLAUDE.md` に明記済み）

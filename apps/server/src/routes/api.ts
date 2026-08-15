@@ -90,6 +90,9 @@ export async function apiRoutes(app: FastifyInstance) {
       versionCheckedAt: m.versionCheckedAt ?? null,
       // local == remote なら最新。どちらか欠ければ判定不能（null）
       upToDate: m.localCommit && m.remoteCommit ? m.localCommit === m.remoteCommit : null,
+      // #302: 実行中コードの鮮度（stale dist 可視化用）。旧 Agent は null（判定不能）
+      runningCodeMtime: m.runningCodeMtime ?? null,
+      runningCodeStale: m.runningCodeStale ?? null,
       projectCount: m.projects.length,
       projects: m.projects.map((p: Project) => ({
         id: p.id,
