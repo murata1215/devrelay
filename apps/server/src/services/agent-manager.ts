@@ -1138,9 +1138,23 @@ export async function sendPromptToAgent(
     // DB 失敗時は false 扱い（既存挙動を維持）
   }
 
+  // model 未指定時は UserSettings の plan モデルで補完する（#306）
+  // ask / teamexec / MCP 経由の呼び出しは model を渡さないため、
+  // ここで補完しないと Claude SDK が自前のデフォルト（opus-4-6[1m] 等）を使ってしまい
+  // ユーザーが設定した claude_model_plan が無視される
+  let resolvedModel = model;
+  if (resolvedModel === undefined) {
+    try {
+      resolvedModel = await getUserSetting(userId, SettingKeys.CLAUDE_MODEL_PLAN) || undefined;
+    } catch {
+      // 設定取得に失敗しても送信は継続（従来どおり undefined = SDK デフォルト）
+    }
+  }
+  console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(SDK default)'} (explicit=${model ?? 'none'})`);
+
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model }
+    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model: resolvedModel }
   });
 }
 
@@ -1479,7 +1493,20 @@ export async function execConversation(machineId: string, sessionId: string, pro
     select: { project: { select: { terminalMode: true } } },
   });
   const terminalMode = !!session?.project?.terminalMode;
-  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}`);
+
+  // model 未指定時は UserSettings の exec モデルで補完する（#306）
+  // ask / teamexec / MCP 経由の呼び出しは model を渡さないため、
+  // ここで補完しないと Claude SDK が自前のデフォルト（opus-4-6[1m] 等）を使ってしまい
+  // ユーザーが設定した claude_model_exec が無視される
+  let resolvedModel = model;
+  if (resolvedModel === undefined) {
+    try {
+      resolvedModel = await getUserSetting(userId, SettingKeys.CLAUDE_MODEL_EXEC) || undefined;
+    } catch {
+      // 取得失敗時は従来どおり undefined = SDK デフォルト
+    }
+  }
+  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}, model resolved=${resolvedModel ?? '(SDK default)'} (explicit=${model ?? 'none'})`);
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
     payload: {
@@ -1490,7 +1517,7 @@ export async function execConversation(machineId: string, sessionId: string, pro
       skipPermissions: machine?.skipPermissions ?? false,
       disableAsk: machine?.disableAsk ?? false,
       terminalMode,
-      model,
+      model: resolvedModel,
     }
   });
 }

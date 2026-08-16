@@ -6,6 +6,22 @@
 
 ## 実装済み機能
 
+### #306: ask/teamexec/MCP 経由でモデル指定が無視され `opus-4-6[1m]` に落ちるバグを修正 (2026-08-16)
+
+- **背景**: `dangou-card` プロジェクトが `opus-4-8`/`sonnet-5` を設定しているのに `opus-4-6[1m]`（1M コンテキストβ、モデル表記が古い snapshot に化ける）を使っていると報告あり
+- **誤診の経緯**: 当初「1ターンのライブコンテキストが 200K を超えると 1Mβへ自動昇格する」という claude ランタイム側の仕様と誤推測した（#305 として記録）。しかし決定的な反証が出た：クロスプロジェクト実行（`🔗 devrelay → dangou-card`）が **111.7K トークンしかないのに `opus-4-6[1m]`** だった。ピーク単発コンテキスト説では説明できない
+- **真因**: 直接メッセージ・`x`(exec) は `command-handler.ts` が UserSettings（`claude_model_plan`/`claude_model_exec`）から `model` を解決して渡しているが、以下 4 経路は `model` 引数を渡していなかった：
+  - `ask`（クロスプロジェクト質問）→ `agent-manager.ts:executeCrossProjectQuery()` → `sendPromptToAgent()`（4引数のみ、`model` なし）
+  - `teamexec`（クロスプロジェクト実行）→ `agent-manager.ts:executeCrossProjectExec()` → `execConversation()`（5引数のみ、`model` なし）
+  - MCP `submit_instruction()` → `mcp/tools.ts` → `sendPromptToAgent()`（`model` なし）
+  - MCP `approve_implementation()` → `mcp/tools.ts` → `execConversation()`（`model` なし）
+  - Agent 側 `ai-runner.ts` は `model: options.model` を無条件代入するため、`undefined` のまま SDK に渡ると Claude SDK が UserSettings を無視して自前のデフォルトモデルを選択する（1M コンテキストβ対応アカウントでは `opus-4-6[1m]`）
+- **修正方針**: 呼び出し元 4 箇所に個別に `model` 引数を追加するのではなく、送信関数自身（`sendPromptToAgent`/`execConversation`）が `model===undefined` の場合のみ `getUserSetting()` で補完する単一情報源方式に変更。明示的に `model` が渡された場合（直接メッセージ・`x`）は従来どおりそちらを優先。将来増える新しい送信経路でも自動的に UserSettings が適用される
+- **変更ファイル**: `apps/server/src/services/agent-manager.ts` のみ（`sendPromptToAgent`/`execConversation` の2関数）
+- **対象**: server のみ（Agent/shared/WebUI/DB 変更なし）。`pnpm build` green
+- **検証**: 修正前後で同じクロスプロジェクト経路（devrelay → dangou-card）を比較 — 修正前は `opus-4-6[1m]`(contextWindow=1,000,000)、修正後は設定どおり `opus-5`(contextWindow=200,000) を確認（DB `Message.usageData->modelUsage` 実測）
+- **教訓**: モデル不一致の切り分けは「累積トークン量」ではなく「どの送信経路か」を先に疑うべきだった。#86→#90、#293→#304 と同型の「判定/送信ロジックの分散による同期漏れ」の再発
+
 ### #304: `w` 後に `x` すると「w コマンドを実行していません」と誤警告 (2026-08-16)
 
 - **問題**: `w` を実行して完了させた直後に `x`（会話クリア）を送ると「⚠️ `w` コマンド（ドキュメント更新・コミット）を実行していません。」と誤警告が出る
