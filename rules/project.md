@@ -116,6 +116,23 @@ Devin for Terminal は Gemini/Codex/Aider と同じ spawn パターンで統合�
 - Server / WebUI / DB は変更不要（`Session.aiTool` は String 型、`AI_TOOL_NAMES` で動的表示）
 - Cloud API (v3 REST) は将来対応（ローカル CLI 優先）
 
+### Codex CLI 統合（非対話 exec パターン）（#308）
+
+Codex CLI（`codex`）は `codex exec`（非対話サブコマンド）を使う。以前は他ツールと同じ汎用 shell フォールバック（`codex '<prompt>'`）で扱われ、対話 TUI が起動してハングしていた。
+- 実行（plan）: `codex exec --json --skip-git-repo-check -c sandbox_mode="read-only" [resume <thread_id>] -`
+- 実行（exec）: `codex exec --json --skip-git-repo-check -c sandbox_mode="workspace-write" -c approval_policy="never" [resume <thread_id>] -`
+- プロンプト: 必ず stdin 経由（`-` を最後の引数に）。argv に埋め込まない — Windows `cmd.exe` のコマンドライン長上限（約8191文字）で確実に壊れるため（gemini/devin と同じ理由）
+- **権限は CLI/サンドボックスレベルで強制**: plan = `sandbox_mode="read-only"`（ファイル書き込み・シェル実行を OS レベルでブロック、プロンプト指示だけに頼らない）。exec = `sandbox_mode="workspace-write"` + `approval_policy="never"`（全承認）
+- **`-s/--sandbox` ではなく `-c sandbox_mode=` を使う**: `codex exec resume` サブコマンドには `-s`/`-C` フラグが存在しない（実機確認済み）。`-c` に統一することで新規／resume 両方でフラグ列を完全共通化できる。値は TOML パースされるため文字列は内側にダブルクォートが必要（`sandbox_mode="read-only"`）
+- セッション継続: `codex exec resume <thread_id>`（`.devrelay/codex-session-id` に保存、`x` でクリア）。thread_id は `--json` の `thread.started` イベントから取得
+- **`resume` は capability プローブで対応可否を確認**: `codex exec --help` の出力をキャッシュ付きでプローブ（`--json`/`resume` 両方チェック）。旧バージョンでは `--json` を付けずプレーンテキストとして扱う
+- JSONL イベント: `thread.started`（セッション ID）、`item.completed`（`agent_message`=本文、`reasoning`=非表示、その他=10秒スロットルで進捗表示）、`turn.completed`（`usage` を claude 互換キーにマップ）、`turn.failed`（理由付きで完了通知）
+- resume 空振り対策: resume した thread が出力ゼロで終了 → セッション ID を破棄し `resumeFailed` を立てて汎用リトライ（新規スレッド）に委譲（Devin と同一設計）
+- 30秒ハートビート（`⏳ Codex 実行中...`）: Devin と同じ理由（サーバー側 5 分無出力タイムアウトの誤爆防止）
+- PATH: コマンドのディレクトリを自動追加。Windows は `codex.cmd` シム実行のため `shell: true` が必須（agents/linux は `process.platform === 'win32'` で条件分岐、agents/windows は Electron GUI で常に Windows なので無条件）
+- **Linux 実行環境の前提**: `codex exec` の非対話サンドボックスは bubblewrap（`bwrap`）に依存する。Ubuntu 24.04+ で `kernel.apparmor_restrict_unprivileged_userns=1` の場合、`bubblewrap` パッケージ導入だけでは不十分で `/etc/apparmor.d/bwrap` に `userns,` を許可するプロファイルを追加し `apparmor_parser -r` で反映する必要がある（Ubuntu の bubblewrap パッケージは AppArmor プロファイルを同梱しない）
+- Server / WebUI / DB は変更不要（`Session.aiTool` は String 型、`AI_TOOL_NAMES` で動的表示）— ただし `apps/server/src/services/command-parser.ts` の `ai:`/`a` コマンド許可リストに `devin` が漏れていた別バグを同時修正
+
 ### ファイル出力指示（OUTPUT_DIR_INSTRUCTION）
 
 ユーザー向けの成果物ファイルは、原則 `.devrelay-output/` に保存すると自動送信される（`output-collector.ts` の `collectOutputFiles()` がディレクトリを走査）。

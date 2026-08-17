@@ -229,13 +229,13 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   // 3. Check AI switch command
   if (normalized.startsWith('ai:')) {
     const tool = normalized.slice(3) as AiTool;
-    if (['claude', 'gemini', 'codex', 'aider'].includes(tool)) {
+    if (['claude', 'gemini', 'codex', 'aider', 'devin'].includes(tool)) {
       return { type: 'ai:switch', tool };
     }
   }
 
   // 3.5. Check 'a <number>' or 'a <tool>' command
-  const aMatch = normalized.match(/^a\s+(\d+|claude|gemini|codex|aider)$/);
+  const aMatch = normalized.match(/^a\s+(\d+|claude|gemini|codex|aider|devin)$/);
   if (aMatch) {
     const arg = aMatch[1];
     if (/^\d+$/.test(arg)) {

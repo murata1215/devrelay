@@ -9,7 +9,7 @@ import type { AiTool, AiUsageData } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
@@ -25,6 +25,9 @@ interface AiSession {
 // v2026.5.26-0 で追加されたバージョン依存フラグのため、初回に `devin --help` でプローブして判定する。
 // null=未判定 / true=対応 / false=非対応
 let devinSupportsExport: boolean | null = null;
+
+// #308: Codex CLI（`codex exec`）のフラグ対応可否キャッシュ。
+let codexCapabilitiesCache: { json: boolean; resume: boolean } | null = null;
 
 // #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
 let claudeFallbackLogged = false;
@@ -114,6 +117,50 @@ export function logClaudeExecutableStatus(): void {
     }
   } catch {
     // 解決失敗時は無視（従来どおり実行時に SDK 既定で判定される）
+  }
+}
+
+/**
+ * Codex CLI（`codex exec`）が `--json` と `resume` サブコマンドに対応しているか
+ * `codex exec --help` の出力で判定する（結果はキャッシュ）。失敗時は両方 false に倒す。
+ * @param command codex コマンドのフルパス
+ * @returns `{ json, resume }` 対応可否
+ */
+function probeCodexCapabilities(command: string): { json: boolean; resume: boolean } {
+  if (codexCapabilitiesCache !== null) return codexCapabilitiesCache;
+  try {
+    const help = execSync(`${command} exec --help`, { encoding: 'utf-8', timeout: 10000 });
+    const json = /--json\b/.test(help);
+    const resume = /\bresume\b/.test(help);
+    codexCapabilitiesCache = { json, resume };
+    console.log(`[codex] 🔎 capabilities: --json=${json}, resume=${resume}`);
+  } catch (err) {
+    codexCapabilitiesCache = { json: false, resume: false };
+    console.warn(`[codex] exec --help probe failed, using minimal flags:`, (err as Error).message);
+  }
+  return codexCapabilitiesCache;
+}
+
+/**
+ * Codex CLI（`--json`）の `item.completed` イベント（`agent_message`/`reasoning` 以外）を
+ * 人間可読な短い進捗要約に変換する。
+ * @param item `item.completed` イベントの `item` オブジェクト
+ * @returns 「⏳ 」なしの要約文字列。認識不能なら null
+ */
+function summarizeCodexItem(item: any): string | null {
+  const type = item?.type;
+  if (!type) return null;
+  switch (type) {
+    case 'command_execution':
+      return `💻 コマンド実行中: ${item.command || item.cmd || ''}`.trim();
+    case 'file_change':
+      return `📝 ${item.path || item.file || ''} を更新中...`;
+    case 'web_search':
+      return `🔍 検索中: ${item.query || ''}`;
+    case 'mcp_tool_call':
+      return `🔧 ${item.tool_name || item.tool || 'MCP ツール'}を使用中...`;
+    default:
+      return `[${type}]`;
   }
 }
 
@@ -916,6 +963,14 @@ export async function sendPromptToAi(
   let devinLastLogLevel = '';           // 継続行（"Caused by:" 等）の帰属判定用
   const devinLogReported = new Map<string, number>(); // 同一メッセージ10秒スロットル
 
+  // #308: Codex CLI 用の状態
+  let codexResumedThreadId: string | null = null;
+  let codexThreadId: string | null = null;
+  let codexHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  const codexProgressReported = new Map<string, number>(); // 同一進捗メッセージ10秒スロットル
+  let codexTurnFailed = false;
+  let codexTurnFailedMessage = '';
+
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
   if (config.proxy?.url) {
@@ -1035,8 +1090,53 @@ export async function sendPromptToAi(
 
     // stdin は使わない（--prompt-file で渡す）
     proc.stdin?.end();
+  } else if (aiTool === 'codex') {
+    // #308: Codex CLI（`codex exec`）。非対話実行のみで、プロンプトは stdin 経由（`-` 明示）。
+    const caps = probeCodexCapabilities(command);
+    const args: string[] = ['exec'];
+    if (caps.json) args.push('--json');
+    args.push('--skip-git-repo-check');
+
+    // 権限: plan = read-only、exec = workspace-write + 自動承認。
+    // `-s/--sandbox` ではなく `-c sandbox_mode=` を使う（resume サブコマンドに `-s` が存在しないため）。
+    if (options.usePlanMode) {
+      args.push('-c', 'sandbox_mode="read-only"');
+    } else {
+      args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
+    }
+
+    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath) : null;
+    if (codexThreadIdToResume) {
+      args.push('resume', codexThreadIdToResume);
+      codexResumedThreadId = codexThreadIdToResume;
+      console.log(`🔄 Resuming Codex thread: ${codexThreadIdToResume}`);
+    }
+    args.push('-'); // プロンプトは stdin から読む（必ず最後の引数）
+
+    console.log(`🔧 Running: ${command} ${args.join(' ')}`);
+
+    const codexDir = path.dirname(command);
+    const codexEnvPath = process.env.PATH ? `${codexDir}:${process.env.PATH}` : codexDir;
+
+    proc = spawn(command, args, {
+      cwd: projectPath,
+      // `-c` の値にダブルクォートを含むため shell を経由しない（エスケープ事故防止）
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...proxyEnv,
+        PATH: codexEnvPath,
+        DEVRELAY: '1',
+        DEVRELAY_SESSION_ID: sessionId,
+        DEVRELAY_PROJECT: projectPath,
+      },
+    });
+
+    proc.stdin?.write(prompt);
+    proc.stdin?.end();
   } else {
-    // For other AI tools (aider, codex), use shell (legacy behavior)
+    // For other AI tools (aider), use shell (legacy behavior)
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     const fullCommand = `${command} '${escapedPrompt}'`;
 
@@ -1146,6 +1246,16 @@ export async function sendPromptToAi(
     }
   }
 
+  // #308: Codex は長考中に JSONL イベントが途切れることがあるため、devin と同じ 30 秒ハートビートを送る
+  if (aiTool === 'codex') {
+    const codexStartTime = Date.now();
+    codexHeartbeatTimer = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - codexStartTime) / 1000);
+      const elapsedLabel = elapsedSec < 60 ? `${elapsedSec}秒経過` : `${Math.floor(elapsedSec / 60)}分経過`;
+      onOutput(`⏳ Codex 実行中... (${elapsedLabel})\n`, false);
+    }, 30_000);
+  }
+
   let fullOutput = '';
   let lineBuffer = '';
   // stderr を収集してエラー検出に使用
@@ -1184,6 +1294,90 @@ export async function sendPromptToAi(
 
       for (const line of lines) {
         if (!line.trim()) continue;
+
+        // #308: Codex CLI（`codex exec --json`）は claude 形式と異なる JSONL スキーマのため、
+        // claude 形式の判定に入る前に専用処理して次の行へ進む。
+        if (aiTool === 'codex') {
+          let codexJson: any;
+          try {
+            codexJson = JSON.parse(line);
+          } catch {
+            // --json 非対応の旧バージョン等 → プレーンテキストとして扱う
+            const trimmed = line.trim();
+            if (trimmed) {
+              fullOutput += trimmed + '\n';
+              onOutput(trimmed + '\n', false);
+            }
+            continue;
+          }
+
+          switch (codexJson.type) {
+            case 'thread.started': {
+              const threadId = codexJson.thread_id;
+              if (threadId) {
+                codexThreadId = threadId;
+                result.extractedSessionId = threadId;
+                console.log(`[codex] 📋 Thread ID: ${threadId}`);
+                saveCodexSessionId(projectPath, threadId).catch(err => {
+                  console.error(`Failed to save Codex session ID:`, err);
+                });
+              }
+              break;
+            }
+            case 'item.completed': {
+              const item = codexJson.item;
+              if (!item) break;
+              if (item.type === 'agent_message' && item.text) {
+                fullOutput += item.text;
+                console.log(`[codex] +${item.text.length} chars`);
+                onOutput(item.text, false);
+              } else if (item.type === 'reasoning') {
+                // ノイズ・トークン浪費のため表示しない
+              } else {
+                // command_execution / file_change / web_search / mcp_tool_call 等 → 進捗表示（10秒スロットル）
+                const summary = summarizeCodexItem(item);
+                if (summary) {
+                  const now = Date.now();
+                  if (now - (codexProgressReported.get(summary) ?? 0) >= 10_000) {
+                    codexProgressReported.set(summary, now);
+                    onOutput(`⏳ ${summary}\n`, false);
+                  }
+                }
+              }
+              break;
+            }
+            case 'turn.completed': {
+              const usage = codexJson.usage;
+              if (usage) {
+                // claude 互換キーへマップ（reasoning_output_tokens は output_tokens に内包されるため加算しない）
+                const mappedUsage: Record<string, number> = {
+                  input_tokens: usage.input_tokens ?? 0,
+                  output_tokens: usage.output_tokens ?? 0,
+                  cache_read_input_tokens: usage.cached_input_tokens ?? 0,
+                  cache_creation_input_tokens: usage.cache_write_input_tokens ?? 0,
+                };
+                const modelName = 'codex'; // #308 v1: モデル名は codex 固定（将来 codex_model_plan/exec 拡張時に置き換え）
+                result.usageData = {
+                  usage: mappedUsage,
+                  modelUsage: { [modelName]: { contextWindow: 200000, ...mappedUsage } },
+                  model: modelName,
+                };
+                console.log(`[codex] 💾 Usage captured: input=${mappedUsage.input_tokens}, output=${mappedUsage.output_tokens}, cached=${mappedUsage.cache_read_input_tokens}`);
+              }
+              break;
+            }
+            case 'turn.failed': {
+              codexTurnFailed = true;
+              codexTurnFailedMessage = codexJson.error?.message || 'unknown error';
+              console.error(`[codex] ❌ turn.failed: ${codexTurnFailedMessage}`);
+              break;
+            }
+            default:
+              // thread.started 以外の管理イベント（turn.started 等）は無視
+              break;
+          }
+          continue;
+        }
 
         try {
           const json = JSON.parse(line);
@@ -1328,6 +1522,8 @@ export async function sendPromptToAi(
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
       if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
       if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
+      // #308: Codex ハートビート停止
+      if (codexHeartbeatTimer) { clearInterval(codexHeartbeatTimer); codexHeartbeatTimer = null; }
       // #281: ファイル変更ウォッチャ停止
       if (devinFsWatcher) { try { devinFsWatcher.close(); } catch {} devinFsWatcher = null; }
       // #281: ATIF は turn 終了時に一括書き出しされるため、削除する前に読んで実行ステップまとめを作る
@@ -1349,7 +1545,7 @@ export async function sendPromptToAi(
       // close 時にこれをフラッシュしていなかったため、末尾改行なしの短い応答が丸ごと破棄され
       // exit 0 でも fullOutput 空 →「(No response from AI)」になっていた（Devin の1行応答等）。
       // JSON パース可能な残骸（stream-json メタデータ）は従来どおり捨てる。
-      if (lineBuffer.trim()) {
+      if (aiTool !== 'codex' && lineBuffer.trim()) {
         const leftover = lineBuffer.trim();
         lineBuffer = '';
         let isJsonMeta = false;
@@ -1484,6 +1680,24 @@ export async function sendPromptToAi(
         return;
       }
 
+      // #308: Codex: resume した thread が出力ゼロで終了 → セッションファイルが古くなっている（Session not found 等）
+      // 可能性があるため、thread_id を破棄して新規スレッドでリトライする（devin と同じ設計、resumeFailed 汎用機構に乗せる）
+      const codexResumeEmpty = aiTool === 'codex' && !!codexResumedThreadId && fullOutput.trim().length === 0;
+      if (codexResumeEmpty) {
+        console.log(`[codex] ⚠️ Resumed thread produced no output (code ${code}), clearing session ID and retrying fresh`);
+        result.resumeFailed = true;
+        clearCodexSessionId(projectPath).finally(() => resolve(result));
+        return;
+      }
+
+      // #308: Codex: turn.failed イベントを受信した場合は理由を明示して完了通知
+      if (aiTool === 'codex' && codexTurnFailed && !completionSent) {
+        completionSent = true;
+        onOutput(`⚠️ Codex の実行が失敗しました: ${codexTurnFailedMessage}`, true, result.usageData);
+        resolve(result);
+        return;
+      }
+
       // "Prompt is too long" エラーを stdout（promptTooLong フラグ）+ stderr 両方から検出
       const isPromptTooLong = promptTooLong ||
         stderrOutput.includes('Prompt is too long') ||
@@ -1585,6 +1799,8 @@ export async function sendPromptToAi(
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
       if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
       if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
+      // #308: Codex ハートビート停止
+      if (codexHeartbeatTimer) { clearInterval(codexHeartbeatTimer); codexHeartbeatTimer = null; }
       // #281: ファイル変更ウォッチャ停止
       if (devinFsWatcher) { try { devinFsWatcher.close(); } catch {} devinFsWatcher = null; }
       if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }

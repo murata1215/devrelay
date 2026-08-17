@@ -6,6 +6,56 @@
 
 ## 実装済み機能
 
+### #308: Codex CLI を Devin と同等の実運用レベルまで正式サポート (2026-08-17)
+
+#### 背景
+それまで `codex` は他ツール（aider 等）と同じ汎用フォールバック（`codex '<prompt>'` をシェル起動）で扱われており、Codex CLI が非対話モードを持つことを考慮していなかった。実際に実行すると対話 TUI が起動してハングし、事実上使用不能だった。
+
+#### Phase 0: 前提環境の調査・修正（このサーバー機）
+- `codex exec --json` 等の非対話実行には bubblewrap（`bwrap`）ベースのサンドボックスが必要
+- Ubuntu 24.04 の `kernel.apparmor_restrict_unprivileged_userns=1` により、`bubblewrap` パッケージ導入後も `bwrap --unshare-user` が Permission denied で失敗（Ubuntu の bubblewrap パッケージは AppArmor プロファイルを同梱しないため）
+- `/etc/apparmor.d/bwrap` に `userns,` を許可する最小プロファイルを作成し `apparmor_parser -r` で反映して解消（ユーザーに sudo 実行を依頼）
+- 実機で `codex exec --json -c sandbox_mode="read-only" -` を実行し、JSONL イベント（`thread.started`/`item.completed`/`turn.completed`）とサンドボックス内実行成功を確認
+- **フラグ挙動の実測確認**: `codex exec resume <thread_id>` には `-s/--sandbox` や `-C` が存在しないため、新規実行・resume 両方で `-c sandbox_mode="..."` に統一することでフラグ列を完全共通化できることを確認（設計判断の根拠）
+
+#### 実装内容（`agents/linux` / `agents/macos` / `agents/windows` 共通、Devin と同一アーキテクチャ）
+- **非対話実行**: `codex exec --json --skip-git-repo-check -c sandbox_mode="..." [-c approval_policy="never"] [resume <thread_id>] -`。プロンプトは常に stdin 経由（`-` を最後の引数に）。Windows の `cmd.exe` コマンドライン長上限（約8191文字）を回避するため、gemini/devin と同じ stdin 方式を採用し、argv には絶対に埋め込まない
+- **権限マッピング**: plan モード = `-c sandbox_mode="read-only"`（CLI/サンドボックスレベルで書き込み不可を強制、プロンプト指示だけに頼らない）。exec モード = `-c sandbox_mode="workspace-write" -c approval_policy="never"`（全承認）
+- **`-c` 統一の理由**: `-s/--sandbox` ではなく `-c sandbox_mode=` を新規／resume 両方で使うことで、`codex exec resume` に `-s` が無い制約を回避しつつフラグ列を共通化（Phase 0 で実測確認済み）。値は TOML パースされるため `sandbox_mode="read-only"` のように内側にダブルクォートが必要
+- **JSONL イベントパース**: `thread.started`（セッション ID 取得・保存）、`item.completed`（`agent_message`/`reasoning` は本文表示、`command_execution`/`file_change`/`web_search`/`mcp_tool_call` は 10 秒スロットルで進捗表示）、`turn.completed`（`usage` を claude 互換キー（`input_tokens`/`output_tokens`/`cache_read_input_tokens`/`cache_creation_input_tokens`）にマップして DB 格納）、`turn.failed`（理由付きで完了通知）
+- **セッション継続**: `codex exec resume <thread_id>` で継続。`.devrelay/codex-session-id` に保存、`x` コマンドでクリア（`session-store.ts` に `loadCodexSessionId`/`saveCodexSessionId`/`clearCodexSessionId` を追加、`connection.ts` の会話クリア処理から呼び出し）
+- **resume 空振り対策**: resume した thread が出力ゼロで終了した場合、Devin と同じ設計でセッション ID を破棄し `resumeFailed` を立てて汎用リトライ（新規スレッド）に委譲
+- **30秒ハートビート**: `⏳ Codex 実行中... (N秒/分経過)` を Devin と同じ 30 秒間隔で送信し、サーバー側 5 分無出力タイムアウトの誤爆を防止
+- **capability プローブ**: `codex exec --help` の出力をキャッシュ付きでプローブし、`--json`/`resume` 未対応の旧バージョンでも安全に動作（`--json` 無効時は生テキストとして扱う）
+- **Windows `.cmd` シム対応**: `config.aiTools.codex.command` はベアコマンド名（`'codex'`）で保存されるため、Windows では npm グローバルインストールが作る `codex.cmd` シムを実行する必要がある。agents/linux は `process.platform === 'win32'` で `shell` を条件分岐、agents/windows（Electron GUI、常に Windows 実行）は他ツールと同様に無条件 `shell: true`
+- **ついでの1行バグ修正**: `apps/server/src/services/command-parser.ts` の AI ツール切替コマンド（`ai:<tool>` / `a <tool>`）の許可リストに `devin` が漏れていたため追加（`['claude','gemini','codex','aider']` → `+'devin'`）
+
+#### 検証
+- 3 エージェント（linux/macos/windows）+ server の `pnpm build` すべて green
+- コンパイル済み `agents/linux/dist/services/ai-runner.js` を直接 import するスタンドアロンスモークテストで実機検証（このサーバー上でチャット経由の `u`/`a` 操作は本セッションから実行不能なため代替）：
+  - plan モード: サンドボックス read-only を確認（プロジェクトディレクトリに `.devrelay/codex-session-id` 以外の書き込みなし）、応答正常受信、usage 正しくマップ
+  - resume 継続性: 2ターン目で「先ほどの数字+1」を正しく回答（同一 `thread_id` を再利用）
+  - exec モード: `hello.txt` の新規作成・書き込みが成功（workspace-write + 自動承認が機能）
+  - `x` 相当（`clearCodexSessionId`）: セッションファイル削除を確認
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `agents/linux/src/services/ai-runner.ts` | codex 実行ブランチ・JSONL パース・ハートビート・resume 空振り対策・capability プローブ追加 |
+| `agents/linux/src/services/session-store.ts` | Codex セッション ID 管理関数追加 |
+| `agents/linux/src/services/connection.ts` | `x` コマンドで `clearCodexSessionId` 呼び出し追加 |
+| `agents/macos/src/services/ai-runner.ts` | 同上（linux と同一実装） |
+| `agents/macos/src/services/session-store.ts` | 同上 |
+| `agents/macos/src/services/connection.ts` | 同上 |
+| `agents/windows/src/services/ai-runner.ts` | 同上（`log.*` ロガー使用、Windows 固有スタイルに合わせて移植） |
+| `agents/windows/src/services/session-store.ts` | 同上 |
+| `agents/windows/src/services/connection.ts` | 同上 |
+| `apps/server/src/services/command-parser.ts` | `ai:`/`a` コマンドの許可リストに `devin` 追加 |
+
+#### 対象
+Agent 3OS + server。DB マイグレーション不要。`pnpm build` green（server 再起動 + 各マシンで `u` が必要）。Linux で Codex を使う場合、ホスト側に bubblewrap サンドボックスが機能する環境（AppArmor 制限時は `/etc/apparmor.d/bwrap` プロファイル追加）が必要。
+
 ### #307: Agent 切断→再接続で `a` の AI ツール選択が claude に巻き戻るバグを修正 (2026-08-17)
 
 - **症状**: lmis プロジェクトで `a 3`（Devin CLI）に切替 → Devin でプラン作成 → `e`/`exec` を送ったら Claude Code で実行された。その後 `a` を叩くと `1. Claude Code ✓ (default)` に戻っていた

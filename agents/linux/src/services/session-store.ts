@@ -7,6 +7,7 @@ const SESSION_FILE = 'claude-session-id';
 /** セッション ID + モード情報を JSON で保存するファイル */
 const SESSION_META_FILE = 'claude-session-meta.json';
 const DEVIN_SESSION_FILE = 'devin-session-id';
+const CODEX_SESSION_FILE = 'codex-session-id';
 const CONTEXT_USAGE_FILE = 'context-usage.json';
 
 /** セッションメタ情報（session ID + 前回のモード） */
@@ -172,6 +173,68 @@ export async function clearDevinSessionId(projectPath: string): Promise<void> {
     if (existsSync(filePath)) {
       await unlink(filePath);
       console.log(`🗑️ Cleared Devin session ID`);
+    }
+  } catch {
+    // 無視
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Codex CLI セッション（thread_id）管理（#308）
+// -----------------------------------------------------------------------------
+
+/**
+ * Codex セッション ID（thread_id）ファイルのパスを取得
+ */
+function getCodexSessionPath(projectPath: string): string {
+  return join(projectPath, SESSION_DIR, CODEX_SESSION_FILE);
+}
+
+/**
+ * Codex セッション ID（thread_id）を読み込む（`codex exec resume <ID>` で継続に使用）
+ */
+export async function loadCodexSessionId(projectPath: string): Promise<string | null> {
+  const filePath = getCodexSessionPath(projectPath);
+  try {
+    if (!existsSync(filePath)) return null;
+    const content = await readFile(filePath, 'utf-8');
+    const sessionId = content.trim();
+    if (sessionId) {
+      console.log(`📋 Loaded Codex session ID: ${sessionId}`);
+      return sessionId;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Codex セッション ID（thread_id）を保存
+ */
+export async function saveCodexSessionId(projectPath: string, sessionId: string): Promise<void> {
+  const dirPath = join(projectPath, SESSION_DIR);
+  const filePath = getCodexSessionPath(projectPath);
+  try {
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
+    await writeFile(filePath, sessionId, 'utf-8');
+    console.log(`💾 Saved Codex session ID: ${sessionId}`);
+  } catch (err) {
+    console.error(`❌ Could not save Codex session ID:`, (err as Error).message);
+  }
+}
+
+/**
+ * Codex セッション ID をクリア（`x` コマンドで使用）
+ */
+export async function clearCodexSessionId(projectPath: string): Promise<void> {
+  const filePath = getCodexSessionPath(projectPath);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+      console.log(`🗑️ Cleared Codex session ID`);
     }
   } catch {
     // 無視
