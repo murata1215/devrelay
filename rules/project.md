@@ -408,11 +408,14 @@ Claude SDK モードで使うモデルを Plan/Exec 別に選択する仕組み�
 
 ## AI ツールの解決順序（セッションがどの AI で動くか）
 
-- **セッションの AI ツールは `Project.defaultAi`（DB）で決まる**。セッション作成時に `targetProject.defaultAi` を payload に載せ、Agent がそれを spawn する（`command-handler.ts` / `agent-manager.ts`）
+- **新規セッションの AI ツールは `Project.defaultAi`（DB）を初期値とする**。セッション作成時に `targetProject.defaultAi` を payload に載せ、Agent がそれを spawn する（`command-handler.ts` / `agent-manager.ts`）
 - `config.aiTools.default` は **payload に aiTool が無いときのフォールバック**（Agent 側 `config.aiTools.default || 'claude'`）でのみ使われる
 - **プロジェクト自動検出時の defaultAi**（#262）: `scanProjects` / `autoDiscoverProjects` は新規登録するプロジェクトの `defaultAi` に `config.aiTools.default` を採用する（引数で伝搬）。これにより Devin 専用マシン（claude 未ログイン）でも自動検出プロジェクトが devin で起動する
   - 以前は `defaultAi: 'claude'` ハードコードで、Devin 専用マシンでも全プロジェクトが claude 扱いになり「Not logged in」で失敗していた（#262 で修正）
-  - Agent→Server の projects sync（upsert）は毎回 `defaultAi` を上書きするため、DB だけ直しても Agent 再同期で戻る。Agent 側（config 由来）を正とする
+  - **Agent→Server の projects sync（upsert）は既存プロジェクトの `defaultAi` を上書きしない**（#307 で変更。以前は毎回上書きしていたため `a` で切り替えた選択がプロジェクト同期のたびに config 由来の値へ巻き戻る潜在バグがあった）。`defaultAi` は `create` 時の初期値としてのみ config 由来の値を使い、以後は DB（サーバー側）を正とする
+- **`a`（`handleAiSwitch`）は `Session.aiTool` に加えて `Project.defaultAi` にも永続化する**（#307）。これにより ask/teamexec/MCP などセッションを跨ぐ経路でも選択した AI ツールが引き継がれる
+- **セッション切断→再接続時の AI ツール継承**（#307）: `handleProjectConnect()` は active セッションが無い場合、同一 user+project+machine の直近セッション（status 問わず）の `aiTool` を継承して新規セッションを作る。無ければ `Project.defaultAi` にフォールバック。Agent の一時切断（スリープ/NW断）でセッションが `ended` になっても `a` で選んだ AI ツールが claude に巻き戻らないようにするための対策（バグ調査: `doc/changelog.md` #307）
+- **`execConversation()`（exec 実行）は DB の `Session.aiTool` を `server:conversation:exec` payload に含めて Agent に伝搬する**（#307）。Agent 側 `handleConversationExec()` はこれを `resolveEffectiveAiTool()`（#289 の未インストール時フォールバックを内包）経由で解決する。以前は Agent 再起動で `sessionInfoMap` が消えていると無条件 `'claude'` にフォールバックする潜在バグがあった（#306 の model 渡し漏れと同型）
 - **未ログインガイダンス**（#262）: claude 出力に「Not logged in · Please run /login」を検出したら、生エラーではなく「ログインするか `a` で別 AI に切替」を案内する（3 Agent の ai-runner.ts）
 - **Devin plan モードの resume フォールバック**（#263）: devin は plan モードで前回セッション ID を `-r` で resume するが、`-r` + `-p`/`--agent-config` の組み合わせで CLI が**エラーも出力も出さず exit 0 で空振り**することがある。close ハンドラで「resume 使用 + 出力ゼロ」を exit code 不問で検出 → `clearDevinSessionId` で ID 破棄 → `resumeFailed` を立てて汎用リトライへ委譲 → `-r` なしの新規セッションで再実行する（3 Agent の ai-runner.ts）。会話文脈はプロンプトの History context で毎回渡すため resume が切れても継続性は保たれる。exec モードは元々 resume しない（resume したセッションは元の権限モードを保持するため）
 

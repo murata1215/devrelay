@@ -356,6 +356,12 @@ export interface ConversationExecPayload {
   terminalMode?: boolean;
   /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'） */
   model?: string;
+  /**
+   * #307: DB の Session.aiTool を Agent に伝搬する。
+   * Agent 再起動等で sessionInfoMap が消えている場合、この値が無いと
+   * Agent はハードコードされたデフォルト（'claude'）にフォールバックしてしまう。
+   */
+  aiTool?: AiTool;
 }
 
 export interface SessionRestoredPayload {

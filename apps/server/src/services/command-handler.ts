@@ -437,15 +437,32 @@ export async function handleProjectConnect(projectId: string, context: UserConte
     orderBy: { startedAt: 'desc' },
   });
 
+  // #307: このプロジェクトで直近使っていた AI ツールを引き継ぐための単一情報源。
+  // active セッションがあればその aiTool、無ければ status を問わず直近セッションの aiTool、
+  // それも無ければ project.defaultAi にフォールバックする。
+  // これをやらないと Agent 切断→再接続のたびに `a` で選んだツールが project.defaultAi に巻き戻る。
+  let effectiveAi: string;
+
   if (existingSession) {
     sessionId = existingSession.id;
     isResumed = true;
+    effectiveAi = existingSession.aiTool;
   } else {
+    const lastSession = await prisma.session.findFirst({
+      where: {
+        userId: user.id,
+        projectId: project.id,
+        machineId: project.machineId,
+      },
+      orderBy: { startedAt: 'desc' },
+    });
+    effectiveAi = lastSession?.aiTool || project.defaultAi;
+
     sessionId = await createSession(
       user.id,
       project.machineId,
       project.id,
-      project.defaultAi
+      effectiveAi
     );
   }
 
@@ -469,7 +486,7 @@ export async function handleProjectConnect(projectId: string, context: UserConte
       sessionId,
       project.name,
       project.path,
-      project.defaultAi as any
+      effectiveAi as any
     );
     // Agent 再起動フラグをクリア（handleProjectConnect でセッションを開始済みのため、
     // handleAiPrompt / handleExec での二重セッション作成を防止）
@@ -489,7 +506,7 @@ export async function handleProjectConnect(projectId: string, context: UserConte
     lastListItems: undefined
   });
 
-  const aiName = AI_TOOL_NAMES[project.defaultAi] || project.defaultAi;
+  const aiName = AI_TOOL_NAMES[effectiveAi] || effectiveAi;
   if (isResumed) {
     return `🔄 **${project.name}** に再接続\n${aiName} セッション復元`;
   }
@@ -1301,9 +1318,21 @@ async function handleAiSwitch(context: UserContext, tool: string): Promise<strin
 
     if (result.success) {
       // Update session's aiTool in DB
-      await prisma.session.update({
+      const updatedSession = await prisma.session.update({
         where: { id: context.currentSessionId },
-        data: { aiTool: tool }
+        data: { aiTool: tool },
+        select: { projectId: true }
+      });
+
+      // #307: プロジェクトの既定 AI ツールも更新する。
+      // これをしないと、次回このプロジェクトに新規セッションで接続した際
+      // （Agent 切断→再接続等）に `a` で選んだツールが失われ project.defaultAi に戻ってしまう。
+      // ask/teamexec/MCP 経由の実行も project.defaultAi を参照するため、ここで揃えておく。
+      await prisma.project.update({
+        where: { id: updatedSession.projectId },
+        data: { defaultAi: tool }
+      }).catch((err) => {
+        console.error('Failed to update project.defaultAi:', err);
       });
 
       const name = AI_TOOL_NAMES[tool] || tool;

@@ -479,13 +479,22 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; aiTool?: AiTool }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   log.info(`Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
 
   if (sessionInfo) {
+    // #307: Server から aiTool が送られてきていて既存の sessionInfo と異なる場合は
+    // DB (Session.aiTool) を正として上書きする（`a` での切り替え直後の exec 等）。
+    if (payload.aiTool && payload.aiTool !== sessionInfo.aiTool && currentConfig) {
+      const resolved = await resolveEffectiveAiTool(payload.aiTool, currentConfig);
+      if (resolved !== sessionInfo.aiTool) {
+        log.info(`[exec] aiTool synced from server: ${sessionInfo.aiTool} -> ${resolved}`);
+        sessionInfo.aiTool = resolved;
+      }
+    }
     // Mark exec point in history (this becomes the reset point)
     sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
     log.info(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
@@ -494,12 +503,18 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     log.info(`Session not found in memory, initializing from file...`);
     const history = await loadConversation(projectPath);
     const claudeSessionId = uuidv4();
-    const aiTool: AiTool = currentConfig?.aiTools?.default || 'claude';
+    // #307: Server から渡された aiTool（DB の Session.aiTool）を優先する。
+    // ここでハードコードの config 既定値にフォールバックすると、`a` で選択した AI ツール
+    // （例: Devin CLI）が Agent 再起動後の exec で無視され claude に戻ってしまう。
+    const requestedAiTool: AiTool = payload.aiTool || currentConfig?.aiTools?.default || 'claude';
+    const aiTool: AiTool = currentConfig
+      ? await resolveEffectiveAiTool(requestedAiTool, currentConfig)
+      : requestedAiTool;
 
     // Create session info and add to map
     sessionInfo = { projectPath, aiTool, claudeSessionId, history };
     sessionInfoMap.set(sessionId, sessionInfo);
-    log.info(`Session ${sessionId} initialized with ${history.length} history entries`);
+    log.info(`Session ${sessionId} initialized with ${history.length} history entries (aiTool=${aiTool})`);
 
     // Mark exec point in history
     sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);

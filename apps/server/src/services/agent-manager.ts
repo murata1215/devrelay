@@ -362,13 +362,17 @@ async function handleAgentConnect(
   });
 
   // Update projects（個別の失敗が ack 送信を妨げないよう try/catch で保護）
+  // #307: 既存プロジェクトの defaultAi は Agent 側の値で上書きしない。
+  // defaultAi はユーザーが `a` コマンドで選択・永続化する値（サーバー側が所有）であり、
+  // Agent 再接続のたびにここで上書きすると選択したツールが毎回巻き戻ってしまう。
+  // path のみ Agent 側の値を反映し、defaultAi は新規作成時の初期値としてのみ使う。
   for (const project of projects) {
     try {
       await prisma.project.upsert({
         where: {
           machineId_name: { machineId: machine.id, name: project.name }
         },
-        update: { path: project.path, defaultAi: project.defaultAi },
+        update: { path: project.path },
         create: {
           machineId: machine.id,
           name: project.name,
@@ -538,12 +542,14 @@ async function handleProjectsUpdate(machineId: string, projects: Project[]) {
   }
 
   // Update DB
+  // #307: 上の upsert 同様、既存プロジェクトの defaultAi は Agent 側の値で上書きしない
+  // （ユーザーが `a` で選択した値をサーバー側で保持するため）。
   for (const project of projects) {
     await prisma.project.upsert({
       where: {
         machineId_name: { machineId, name: project.name }
       },
-      update: { path: project.path, defaultAi: project.defaultAi },
+      update: { path: project.path },
       create: {
         machineId,
         name: project.name,
@@ -1488,9 +1494,12 @@ export async function execConversation(machineId: string, sessionId: string, pro
   // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
   const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
   // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
+  // #307: aiTool も同時に取得し Agent に伝搬する。Agent 再起動で sessionInfoMap が消えている場合、
+  // これが無いとハードコードされたデフォルト（'claude'）にフォールバックし、
+  // `a` で選択した AI ツール（例: Devin CLI）が無視されてしまう。
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
-    select: { project: { select: { terminalMode: true } } },
+    select: { aiTool: true, project: { select: { terminalMode: true } } },
   });
   const terminalMode = !!session?.project?.terminalMode;
 
@@ -1518,6 +1527,7 @@ export async function execConversation(machineId: string, sessionId: string, pro
       disableAsk: machine?.disableAsk ?? false,
       terminalMode,
       model: resolvedModel,
+      aiTool: session?.aiTool as AiTool | undefined,
     }
   });
 }

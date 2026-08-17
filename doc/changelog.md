@@ -6,6 +6,25 @@
 
 ## 実装済み機能
 
+### #307: Agent 切断→再接続で `a` の AI ツール選択が claude に巻き戻るバグを修正 (2026-08-17)
+
+- **症状**: lmis プロジェクトで `a 3`（Devin CLI）に切替 → Devin でプラン作成 → `e`/`exec` を送ったら Claude Code で実行された。その後 `a` を叩くと `1. Claude Code ✓ (default)` に戻っていた
+- **誤仮説として最初に疑ったが違った点**: 「exec が AI ツールを取り違えた」のではない。サーバーログ（`sendToAgent: type=server:session:start` のタイムスタンプ）と DB（`Session.startedAt`）を突き合わせた結果、`e` を送る **21 分前**の時点ですでに新しい claude セッションが作られていたことが判明
+- **真因（実測で確定）**: `a 3` 後に Windows Agent が一時切断（スリープ/NW断） → サーバーがオフライン検知でセッションを `ended` に → 再接続後、WebUI の `//connect` が `handleProjectConnect()` を呼ぶが、この関数は active セッションが無いと常に **`project.defaultAi`（=claude）で新規セッションを作成**していた（直前に `a` で選んだ値を見ない）。`a`（`handleAiSwitch`）は `Session.aiTool` のみ更新し `Project.defaultAi` を更新しないため、セッションが切れた時点で選択が失われる構造だった
+- **潜在的な同型バグも合わせて発見・修正**（今回はまだ発現していないが #306 と同じ「渡し漏れ」パターン）:
+  - `execConversation()` が Agent に `aiTool` を送っておらず、Agent 再起動で `sessionInfoMap` が消えていると `connection.ts` の `currentConfig?.aiTools?.default || 'claude'` に無条件フォールバックする
+  - Agent からのプロジェクト同期（`agent-manager.ts` の `project.upsert`）が既存プロジェクトの `defaultAi` を Agent 側の値で毎回上書きしていたため、サーバー側で `defaultAi` を保存しても次の同期で巻き戻る
+- **修正内容**（すべて #306 と同じ「単一情報源に補完ロジックを持たせる」方針）:
+  1. `handleProjectConnect()`: active セッションが無い場合、同一 user+project+machine の直近セッション（status 問わず）の `aiTool` を継承。無ければ `project.defaultAi`。createSession/startAgentSession/表示名の 3 箇所を単一変数 `effectiveAi` に統一
+  2. `handleAiSwitch()`: 成功時に `Session.aiTool` に加え `Project.defaultAi` も更新（ask/teamexec/MCP も選択に追従するように）
+  3. `agent-manager.ts` のプロジェクト同期 upsert（2箇所）: `update` から `defaultAi` を除外（`create` の初期値としてのみ使用）
+  4. `execConversation()`: 既存の `session.findUnique` の `select` に `aiTool` を追加し、`server:conversation:exec` payload に含めて Agent に伝搬（`ConversationExecPayload.aiTool` を shared types に追加）
+  5. Agent 3 OS（linux/macos/windows）の `handleConversationExec()`: payload の `aiTool` を受け取り、`resolveEffectiveAiTool()`（#289 の未インストール時フォールバックを内包）経由で決定。sessionInfoMap に既存セッションがあっても、サーバーから届いた aiTool と食い違えば同期
+- **変更ファイル**: `apps/server/src/services/command-handler.ts`, `apps/server/src/services/agent-manager.ts`, `packages/shared/src/types.ts`, `agents/linux/src/services/connection.ts`, `agents/macos/src/services/connection.ts`, `agents/windows/src/services/connection.ts`
+- **DB マイグレーション**: 不要（スキーマ変更なし）
+- **対象**: server + shared + Agent 3OS。`pnpm build` green（server 再起動 + 各マシンで `u` が必要）
+- **教訓**: 「`a` で切り替えた」という操作ログだけでなく、切替後にセッションが一度でも切れた形跡（Agent disconnected）が無いかを先に確認すべきだった。実行結果の食い違いは実行経路そのものよりも「その前段でセッションが再生成されていないか」を疑う
+
 ### #306: ask/teamexec/MCP 経由でモデル指定が無視され `opus-4-6[1m]` に落ちるバグを修正 (2026-08-16)
 
 - **背景**: `dangou-card` プロジェクトが `opus-4-8`/`sonnet-5` を設定しているのに `opus-4-6[1m]`（1M コンテキストβ、モデル表記が古い snapshot に化ける）を使っていると報告あり
