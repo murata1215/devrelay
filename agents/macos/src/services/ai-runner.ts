@@ -1184,16 +1184,14 @@ export async function sendPromptToAi(
     if (caps.json) args.push('--json');
     args.push('--skip-git-repo-check');
 
-    // 権限: plan = read-only、exec = workspace-write + 自動承認。
+    // 権限: plan = read-only、exec = danger-full-access + 自動承認。
     // `-s/--sandbox` ではなく `-c sandbox_mode=` を使う（resume サブコマンドに `-s` が存在しないため）。
-    // #312: w コマンドのみ danger-full-access。workspace-write は .git をハードコードで read-only にし
-    // git commit が失敗するため（サーバー制御の固定プロンプトのみが対象）。
+    // 実行モードはすべて danger-full-access。プランモードだけは CLI レベルで
+    // read-only を強制する。これにより通常の exec でも git 操作とネットワークアクセスを行える。
     if (options.usePlanMode) {
       args.push('-c', 'sandbox_mode="read-only"');
-    } else if (options.isWCommand) {
-      args.push('-c', 'sandbox_mode="danger-full-access"', '-c', 'approval_policy="never"');
     } else {
-      args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
+      args.push('-c', 'sandbox_mode="danger-full-access"', '-c', 'approval_policy="never"');
     }
 
     // #309: plan/exec モデル分離。`resume` に `-m` が無いため `-c model="..."` を使い新規/resume で共通化する。

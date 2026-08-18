@@ -614,18 +614,16 @@ export async function sendPromptToAi(
     if (caps.json) args.push('--json');
     args.push('--skip-git-repo-check');
 
-    // 権限: plan = read-only（CLI レベルで書き込み不可を強制）、exec = workspace-write + 自動承認
+    // 権限: plan = read-only（CLI レベルで書き込み不可を強制）、exec = danger-full-access + 自動承認
     // `-s/--sandbox` ではなく `-c sandbox_mode=` を使う: `codex exec resume` には `-s` が存在しないため、
     // `-c` に統一することで新規／resume でフラグ列を完全に共通化できる（実測で確認済み）。
     // 値は TOML としてパースされるため文字列は内側にダブルクォートが必要（例: sandbox_mode="read-only"）。
-    // #312: w コマンドのみ danger-full-access。workspace-write は .git をハードコードで read-only にし
-    // git commit が失敗するため（サーバー制御の固定プロンプトのみが対象）。
+    // 実行モードはすべて danger-full-access。プランモードだけは CLI レベルで
+    // read-only を強制する。これにより通常の exec でも git 操作とネットワークアクセスを行える。
     if (options.usePlanMode) {
       args.push('-c', 'sandbox_mode="read-only"');
-    } else if (options.isWCommand) {
-      args.push('-c', 'sandbox_mode="danger-full-access"', '-c', 'approval_policy="never"');
     } else {
-      args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
+      args.push('-c', 'sandbox_mode="danger-full-access"', '-c', 'approval_policy="never"');
     }
 
     // #309: plan/exec モデル分離。`resume` に `-m` が無いため `-c model="..."` を使い新規/resume で共通化する。

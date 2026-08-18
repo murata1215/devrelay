@@ -6,6 +6,22 @@
 
 ## 実装済み機能
 
+### #315: Codex exec を全面 `danger-full-access` に統一 (2026-08-19)
+
+#### 背景
+- #314 では `w` コマンドのみ `danger-full-access` にしていたが、通常の exec でも git 操作やネットワークアクセスが必要なケースがあり、`workspace-write` の制約が実運用で障壁になっていた
+- ユーザー判断で「exec 時はすべて `danger-full-access`」に統一（プランモードは従来どおり `read-only` を維持）
+
+#### 実装内容
+- Agent（Linux/macOS/Windows 3OS 共通）: `ai-runner.ts` の Codex サンドボックス分岐を簡素化。従来の `usePlanMode(read-only) → isWCommand(danger-full-access) → 通常(workspace-write)` の3分岐を `usePlanMode(read-only) → それ以外(danger-full-access)` の2分岐に変更
+- `isWCommand` 分岐は不要になったが、サーバー側・共有型の `isWCommand` フィールドは残置（将来の用途や後方互換のため削除しない）
+- Claude/Gemini/Devin には影響なし
+
+#### 検証
+- `pnpm build` green（shared / server / Linux・macOS・Windows Agent / web）
+
+---
+
 ### #314: Codex CLI の `w` コマンドのみ `sandbox_mode="danger-full-access"` に切替 (2026-08-19)
 
 #### 背景
