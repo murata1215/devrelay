@@ -49,7 +49,7 @@ export const AI_TOOL_NAMES: Record<string, string> = {
 
 /** モデル選択肢の 1 件（id は各 CLI にそのまま渡す値） */
 export interface ModelOption {
-  /** CLI にそのまま渡すモデル ID（例: 'sonnet', 'gpt-5.3-codex'） */
+  /** CLI にそのまま渡すモデル ID（例: 'sonnet', 'gpt-5.6-terra'） */
   id: string;
   /** UI 表示名 */
   name: string;
@@ -80,13 +80,18 @@ export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
     { id: 'sonnet', name: 'Claude Sonnet（CLI版）', description: 'CLI デフォルト解決' },
     { id: 'haiku', name: 'Claude Haiku（CLI版）', description: 'CLI デフォルト解決' },
   ],
+  // #310 追記: 2026-08-18 に実機の `~/.codex/models_cache.json`（codex-cli 0.147.0）で
+  // visibility==='list' なモデルを priority 昇順で確認して置き換え。
+  // 旧カタログの gpt-5.3-codex/gpt-5.2-codex/gpt-5.1-codex-max/gpt-5.1-codex は
+  // このバージョンには存在しない（#309 実装時に実機確認せず記載した誤り）。
+  // 実際の CLI 既定モデルは gpt-5.5 ではなく gpt-5.6-sol（過去セッションログで実測確認済み）。
   codex: [
-    { id: 'gpt-5.5', name: 'GPT-5.5', description: 'Codex CLI 既定モデル' },
-    { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', description: '高速・低コスト' },
-    { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', description: 'コーディング特化' },
-    { id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex', description: '高度なエージェント型コーディング' },
-    { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max', description: '複数コンテキストウィンドウ対応' },
-    { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex', description: '旧世代コーディング特化' },
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', description: '最上位・難バグ/設計（CLI 既定）' },
+    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: 'バランス型・普段使いの本命' },
+    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: '軽量・高速・低コスト' },
+    { id: 'gpt-5.5', name: 'GPT-5.5', description: '旧世代上位' },
+    { id: 'gpt-5.4', name: 'GPT-5.4', description: '旧世代・日常コーディング' },
+    { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', description: '旧世代・小型高速' },
   ],
   gemini: [
     { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', description: '最新フラッグシップ' },

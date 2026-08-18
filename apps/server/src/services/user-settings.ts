@@ -57,7 +57,7 @@ export const SettingKeys = {
   CLAUDE_MODEL_PLAN: 'claude_model_plan',
   /** Claude SDK モデル — Exec モード用（例: 'sonnet', 'opus', 'haiku'） */
   CLAUDE_MODEL_EXEC: 'claude_model_exec',
-  /** Codex CLI モデル — Plan モード用（例: 'gpt-5.3-codex'）。#309 */
+  /** Codex CLI モデル — Plan モード用（例: 'gpt-5.6-terra'）。#309 */
   CODEX_MODEL_PLAN: 'codex_model_plan',
   /** Codex CLI モデル — Exec モード用。#309 */
   CODEX_MODEL_EXEC: 'codex_model_exec',

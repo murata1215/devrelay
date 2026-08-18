@@ -1264,7 +1264,7 @@ async function handleModelList(context: UserContext, tool?: ModelSelectableAiToo
   lines.push(`\`l sonnet\` — 現在のツール（${toolLabel}）の Plan/Exec 両方を変更`);
   lines.push('`l plan:haiku` / `l exec:opus` — 現在のツールの片方のみ変更');
   lines.push('`l codex` — Codex CLI の設定を表示');
-  lines.push('`l codex:plan:gpt-5.3-codex` — ツールを明示して変更');
+  lines.push('`l codex:plan:gpt-5.6-terra` — ツールを明示して変更');
   return lines.join('\n');
 }
 

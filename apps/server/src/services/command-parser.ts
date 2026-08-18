@@ -249,7 +249,7 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   
   // 3.6. 「l」コマンド: AI モデル選択（#309: claude 専用から codex/gemini/devin にも拡張）
   // l → 現在セッションのツールのモデル一覧、l sonnet → 両方設定、l plan:haiku → plan のみ、l exec:opus → exec のみ
-  // l codex → codex の一覧、l codex:gpt-5.5 → codex の両方設定、l codex:plan:gpt-5.3-codex → codex の plan のみ
+  // l codex → codex の一覧、l codex:gpt-5.6-terra → codex の両方設定、l codex:plan:gpt-5.6-terra → codex の plan のみ
   const MODEL_TOOL_NAMES = ['claude', 'codex', 'gemini', 'devin'] as const;
   if (normalized === 'l') {
     return { type: 'model:list' };
@@ -263,13 +263,13 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
       return { type: 'model:list', tool: arg as ModelSelectableAiTool };
     }
 
-    // `l codex:plan:gpt-5.3-codex` `l codex:exec:gpt-5.5`: ツール明示 + plan/exec 指定
+    // `l codex:plan:gpt-5.6-terra` `l codex:exec:gpt-5.6-sol`: ツール明示 + plan/exec 指定
     const toolModeMatch = arg.match(/^(claude|codex|gemini|devin):(plan|exec):(.+)$/);
     if (toolModeMatch) {
       return { type: 'model:set', target: toolModeMatch[2] as 'plan' | 'exec', model: toolModeMatch[3], tool: toolModeMatch[1] as ModelSelectableAiTool };
     }
 
-    // `l codex:gpt-5.5`: ツール明示、plan/exec 両方
+    // `l codex:gpt-5.6-terra`: ツール明示、plan/exec 両方
     const toolBothMatch = arg.match(/^(claude|codex|gemini|devin):(.+)$/);
     if (toolBothMatch) {
       return { type: 'model:set', target: 'both', model: toolBothMatch[2], tool: toolBothMatch[1] as ModelSelectableAiTool };
@@ -397,7 +397,7 @@ export function getHelpText(): string {
 \`l plan:haiku\` - Plan のみ変更（現在のツール）
 \`l exec:opus\` - Exec のみ変更（現在のツール）
 \`l codex\` - Codex CLI のモデル設定を表示
-\`l codex:plan:gpt-5.3-codex\` - Codex の Plan のみ変更
+\`l codex:plan:gpt-5.6-terra\` - Codex の Plan のみ変更
 
 **アカウント連携**
 \`link\` - WebUI アカウントとリンク

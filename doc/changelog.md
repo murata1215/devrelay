@@ -6,6 +6,33 @@
 
 ## 実装済み機能
 
+### #311: Codex モデルカタログを実機の正しい一覧に更新（GPT-5.6 追加 + 存在しない ID を削除） (2026-08-18)
+
+#### 背景
+ユーザーから「Codex に GPT-5.6 を記載できないか」という要望を受けて調査したところ、単に GPT-5.6 が欠けているだけでなく、#309 で実機確認せずに記載したカタログ自体が実際の Codex CLI（0.147.0）と食い違っていたことが判明した。
+
+#### 真因
+本機の Codex CLI が `~/.codex/models_cache.json` にモデル一覧をキャッシュしており、これが権威ある情報源（`slug`＝`-c model="..."` に渡す実 ID、`visibility`、`priority`＝表示順を保持）。実測の結果:
+- 旧カタログの `gpt-5.3-codex`/`gpt-5.2-codex`/`gpt-5.1-codex-max`/`gpt-5.1-codex` の **4 モデルは実在しない**（0.147.0 のモデル一覧に存在しない）
+- `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`（GPT-5.6 系）と `gpt-5.4` が**欠落**していた
+- CLI の実際の既定モデルは `gpt-5.5` ではなく `gpt-5.6-sol`（過去 codex セッションの rollout JSONL に `"model":"gpt-5.6-sol"` と記録されているのを実測確認）
+
+#### 修正内容
+- `packages/shared/src/constants.ts` の `AI_MODEL_CATALOG.codex` を `models_cache.json` の `visibility==='list'` なモデルに `priority` 昇順で差し替え（`codex-auto-review` は内部用のため除外）。#309 の設計により、この 1 箇所の修正が server（`l` コマンド）・WebUI（Settings ページ）の両方に反映される
+- ユーザー可視のヘルプ文言・コメント中の例示 ID（`gpt-5.3-codex`）を実在する `gpt-5.6-terra` に置換（`command-handler.ts`, `command-parser.ts`, `user-settings.ts`, `README.md`）
+- Devin カタログの `gpt-5.5`（fuzzy 名マッチで動作する）は本機に Devin CLI が未インストールで実機検証できないため変更せず
+
+#### 検証
+- `pnpm build` green
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` が **0**（#310 の再発防止チェックを継続実施）
+- 新バンドルに `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna` が含まれ、`gpt-5.3-codex`/`gpt-5.2-codex`/`gpt-5.1-codex` が完全に消えたことをバンドル・リポジトリ全体（コメント除く）の両方で確認
+- 実機の Codex/WebUI での目視確認・実際の応答確認はユーザー側の `pm2 restart devrelay-server` 後に実施予定
+
+#### 今後の課題
+手書きカタログは CLI のモデル更新のたびに陳腐化する。Agent が `models_cache.json` を読んでサーバーに報告し動的にカタログを構築する案が理想だが、Agent→server の新しい capability 報告経路が必要で規模が大きいため今回は対象外とした。また GPT-5.6 系は `low`/`medium`/`high`/`xhigh`/`max`/`ultra` の reasoning effort を選択できる（`-c model_reasoning_effort="..."`）ため、モデル選択とは別軸の設定として別途検討の余地がある。
+
+---
+
 ### #310: 【#309 が引き起こした本番障害を修正】`app.devrelay.io` 全画面白画面バグ修正 (2026-08-18)
 
 #### 背景
