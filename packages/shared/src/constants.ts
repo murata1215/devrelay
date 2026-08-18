@@ -43,6 +43,77 @@ export const AI_TOOL_NAMES: Record<string, string> = {
   'devin': 'Devin CLI',
 };
 
+// =============================================================================
+// AI モデルカタログ（Plan/Exec モデル分離設定の選択肢定義）
+// =============================================================================
+
+/** モデル選択肢の 1 件（id は各 CLI にそのまま渡す値） */
+export interface ModelOption {
+  /** CLI にそのまま渡すモデル ID（例: 'sonnet', 'gpt-5.3-codex'） */
+  id: string;
+  /** UI 表示名 */
+  name: string;
+  /** 補足説明 */
+  description: string;
+}
+
+/**
+ * plan/exec モデル分離設定 (`l` コマンド・WebUI 設定ページ) が対象とする AI ツール。
+ * aider は generic シェル起動のみでモデル指定 CLI 引数を持たないため対象外。
+ */
+export type ModelSelectableAiTool = 'claude' | 'codex' | 'gemini' | 'devin';
+
+/**
+ * ツールごとのモデル選択肢カタログ。
+ * server（command-handler.ts）・web（SettingsPage.tsx）の両方がここだけを参照する単一情報源。
+ * ここに無い ID もチャット/WebUI から自由入力で指定可能（新モデル追従のため、カタログは随時更新する運用）。
+ * 2026-08 時点のスナップショット。
+ */
+export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
+  claude: [
+    { id: 'claude-fable-5', name: 'Claude Fable 5', description: '最高性能（Mythos クラス）' },
+    { id: 'claude-opus-5', name: 'Claude Opus 5', description: '高性能（最新）' },
+    { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', description: '高性能' },
+    { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', description: 'バランス型（最新）' },
+    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: '高速・低コスト（最新）' },
+    { id: 'opus', name: 'Claude Opus（CLI版）', description: 'CLI デフォルト解決' },
+    { id: 'sonnet', name: 'Claude Sonnet（CLI版）', description: 'CLI デフォルト解決' },
+    { id: 'haiku', name: 'Claude Haiku（CLI版）', description: 'CLI デフォルト解決' },
+  ],
+  codex: [
+    { id: 'gpt-5.5', name: 'GPT-5.5', description: 'Codex CLI 既定モデル' },
+    { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', description: '高速・低コスト' },
+    { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', description: 'コーディング特化' },
+    { id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex', description: '高度なエージェント型コーディング' },
+    { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max', description: '複数コンテキストウィンドウ対応' },
+    { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex', description: '旧世代コーディング特化' },
+  ],
+  gemini: [
+    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', description: '最新フラッグシップ' },
+    { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', description: '高速（最新）' },
+    { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', description: '高速' },
+    { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite', description: '軽量・低コスト' },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: '旧世代・実績重視' },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: '旧世代・高速' },
+  ],
+  devin: [
+    { id: 'opus', name: 'Claude Opus', description: 'fuzzy 名（family/alias）で指定' },
+    { id: 'sonnet', name: 'Claude Sonnet', description: 'fuzzy 名（family/alias）で指定' },
+    { id: 'gpt-5.5', name: 'GPT-5.5', description: 'fuzzy 名（family/alias）で指定' },
+    { id: 'gemini', name: 'Gemini', description: 'fuzzy 名（family/alias）で指定' },
+  ],
+};
+
+/** モデル ID として許可しない危険文字を含むかチェック（CLI 引数・TOML インジェクション防止） */
+export function isUnsafeModelId(value: string): boolean {
+  return /["'`;$\n\r]/.test(value) || /\s/.test(value);
+}
+
+/** ツール名が plan/exec モデル分離設定の対象かどうか判定 */
+export function isModelSelectableAiTool(aiTool: string): aiTool is ModelSelectableAiTool {
+  return aiTool === 'claude' || aiTool === 'codex' || aiTool === 'gemini' || aiTool === 'devin';
+}
+
 // Status emojis
 export const STATUS_EMOJI = {
   online: '🟢',

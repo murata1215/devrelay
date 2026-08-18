@@ -281,6 +281,9 @@ devrelay/
 - Node.js 固有 API を使わない（`Buffer` 不可）
 - `btoa`/`atob` は `declare` で型宣言して使用
 - tsconfig: `"lib": ["ES2022"]`（DOM なし）
+- `packages/shared` は **CJS のみのビルド**（`package.json` は `main: ./dist/index.js` のみ、`exports`/`module` フィールドなし）
+- **`apps/web`（Vite）から利用する場合は `resolve.alias` で TS ソースを直接参照すること**（#309→#310 で確定）: pnpm workspace のシンボリックリンクは realpath が `node_modules` の**外**（`/opt/devrelay/packages/shared/dist`）になるため、Rollup/Vite の `commonjsOptions.include`（既定 `[/node_modules/]`）に掛からず CJS が変換されずバンドルに混入し、ブラウザで `require is not defined` が発生して画面が真っ白になる（namespace import に変えても `pnpm build` の静的解析エラーが消えるだけで実行時には直らない）。`apps/web/vite.config.ts` に `resolve.alias: { '@devrelay/shared': '<abs>/packages/shared/src/index.ts' }` を設定し、CJS interop 自体を発生させないこと。`packages/shared/src` は相対 import のみで外部依存ゼロなのでこの方式で安全
+- **教訓**: shared 等の外部パッケージ import を追加した後は `pnpm build` の green だけで安全と判断せず、`grep -c 'require(' apps/web/dist/assets/index-*.js` が 0 であることを確認すること
 
 ---
 
@@ -329,9 +332,9 @@ devrelay/
 - `sendToAgent()` で CLOSED な WebSocket を検出時に自動クリーンアップ（stale 参照の自己修復）
 - `handleAgentConnect()` で旧 WebSocket が残っていれば `terminate()` で即座に破棄（`close()` はハンドシェイク待ちで stuck するため不可）
 
-## Claude モデル選択（`l` コマンド + Settings 共有）(#251-#253)
+## AI モデル選択（`l` コマンド + Settings 共有）(#251-#253, #309 で codex/gemini/devin にも拡張)
 
-Claude SDK モードで使うモデルを Plan/Exec 別に選択する仕組み。
+AI SDK/CLI モードで使うモデルを Plan/Exec 別に選択する仕組み。当初は Claude 専用だったが #309 で claude/codex/gemini/devin の 4 ツール共通の仕組みに拡張した。
 
 - **UserSettings キー**: `claude_model_plan` / `claude_model_exec`。プロンプト送信のたびに読み込み → WS payload `model` → Agent SDK `sdkOptions.model`
 - **`l` コマンド**: `l`（一覧）、`l sonnet`（両方）、`l plan:haiku` / `l exec:opus`（個別）。端末モードは対象外（Claude CLI 自体がモデル制御）
@@ -340,6 +343,8 @@ Claude SDK モードで使うモデルを Plan/Exec 別に選択する仕組み�
 - **`l` のコマンド判定バグ (#252)**: `isTraditionalCommand()` に `'l'` 判定を追加。未追加だとセッション接続中に `parseCommandWithNLP` が `l` を AI プロンプトとして流してしまう（`'a'` コマンドと同様の 1 文字キー特殊対応が必要）
 - **macOS Agent への移植漏れ (#259)**: #251 の `model` 適用は当初 `agents/linux` にしか実装されておらず、`agents/macos` が payload の `model` を無視して CLI デフォルト（`opus-4-6[1m]`）で実行していた（Mac のプロジェクトだけモデル設定が効かない）。サーバーは全 Agent に `model` を送っているため、Agent 側が受け取って `sdkOptions.model` に適用しないと機能しない。**原則（#256 の教訓と同じ）: Agent 機能追加時は `agents/linux` と `agents/macos` の両方に実装すること**。macOS の伝搬経路は本実行 `sendOptions` / exec 転送 / resume 失敗リトライ `retryOptions` の 3 箇所
 - **ask/teamexec/MCP 経由の model 欠落 (#306)**: 直接メッセージ・`x`(exec) は `command-handler.ts` が UserSettings から `model` を解決して渡すが、クロスプロジェクト経路（`ask`/`teamexec` → `agent-manager.ts` の `executeCrossProjectQuery`/`executeCrossProjectExec`）と MCP 経由（`mcp/tools.ts` の `submit_instruction`/`approve_implementation`）は呼び出し時に `model` 引数を渡していなかった。Agent 側 `ai-runner.ts` は `model: options.model` を無条件代入するため、`undefined` のまま送られると Claude SDK が UserSettings を無視して自前のデフォルトモデル（1M コンテキストβ対応アカウントでは `opus-4-6[1m]`）を選択していた。**設計判断（呼び出し元4箇所を直さず送信関数1点に既定値解決を集約）**: `sendPromptToAgent`/`execConversation` 自身が `model===undefined` の時だけ `getUserSetting(userId, CLAUDE_MODEL_PLAN/EXEC)` で補完する方式にした。呼び出し元ごとに引数を追加する方式だと将来の新経路（4例目以降）でまた同じ穴が空く（#86→#90, #293→#304 と同型の分散同期漏れ）。切り分けの教訓: モデル不一致は「累積トークン量」ではなく「送信経路（直接 or ask/teamexec/MCP）」で先に疑うべきだった — 累積トークンが少ない（111.7K）クロスプロジェクト実行でも `[1m]` になっていたことが決め手になった
+- **codex/gemini/devin への拡張 (#309)**: `AVAILABLE_MODELS`/`CLAUDE_MODEL_OPTIONS` を `packages/shared/src/constants.ts` の `AI_MODEL_CATALOG`（4 ツール × モデル候補）に統合し、server/web の重複定義を削除。UserSettings キーは `<tool>_model_<mode>` 規則（`codex_model_plan` 等）で `modelSettingKey`/`resolveModelForTool` ヘルパに集約。`sendPromptToAgent`/`execConversation` の #306 修正が claude 決め打ちだった潜在バグ（aiTool を見ず常に claude キーを読む）も同時修正。Agent 側フラグは各 CLI の実運用に合わせて分岐: **codex は `-c model="..."`**（`sandbox_mode` と同じ理由で `codex exec resume` に `-m` が無いため新規/resume 両方で `-c` に統一）、**gemini は `-m`**、**devin は `--model`**（fuzzy 名可）。`isUnsafeModelId`/`safeModelArg()` で危険文字（`"`/空白/`;`/`$`/バッククォート/改行）を二重サニタイズ。**Windows Electron GUI agent (`agents/windows`) は claude ですら `model` が配線されておらず**（macos/linux は #251 で対応済みだったが windows だけ漏れていた）、`SendPromptOptions`/`connection.ts` に `model` を新規追加して解消
+- **#309 が誘発した本番障害 (#310)**: web が `@devrelay/shared` に初めて依存した際、Vite の CJS 変換が pnpm workspace のシンボリックリンクに対応しておらず `app.devrelay.io` が全画面白画面になった。詳細は「shared パッケージ制約」節を参照
 - Agent 側の `connectToServer()` で旧 WS を `removeAllListeners()` + `terminate()` でクリーンアップしてから新 WS を作成
 - Agent 側の close ハンドラで `thisWs` 参照をキャプチャし、既に新 WS に置き換えられていたら再接続をスキップ
 - `context.userId` は Discord プラットフォーム ID。DB の `Session.userId` には `oldSession.userId` を使う

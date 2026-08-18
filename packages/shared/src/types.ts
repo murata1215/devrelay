@@ -2,6 +2,8 @@
 // DevRelay Shared Types
 // =============================================================================
 
+import type { ModelSelectableAiTool } from './constants.js';
+
 // -----------------------------------------------------------------------------
 // Protocol Version（Agent/Server 間の互換性管理）
 // -----------------------------------------------------------------------------
@@ -528,8 +530,8 @@ export type UserCommand =
   | { type: 'help' }
   | { type: 'ai:list' }   // AI ツール一覧
   | { type: 'ai:switch'; tool: AiTool }
-  | { type: 'model:list' }  // Claude モデル一覧
-  | { type: 'model:set'; target: 'both' | 'plan' | 'exec'; model: string }  // モデル設定
+  | { type: 'model:list'; tool?: ModelSelectableAiTool }  // AI モデル一覧（#309: tool 省略時は現在セッションのツール）
+  | { type: 'model:set'; target: 'both' | 'plan' | 'exec'; model: string; tool?: ModelSelectableAiTool }  // モデル設定（#309）
   | { type: 'ai:prompt'; text: string }
   | { type: 'kill' }     // 実行中の AI プロセスを強制停止
   | { type: 'update' }   // Agent バージョン確認・更新

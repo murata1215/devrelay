@@ -1,4 +1,4 @@
-import type { UserCommand, UserContext, AiTool } from '@devrelay/shared';
+import type { UserCommand, UserContext, AiTool, ModelSelectableAiTool } from '@devrelay/shared';
 import { SHORTCUTS } from '@devrelay/shared';
 import { Project } from '@prisma/client';
 import {
@@ -247,18 +247,41 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     }
   }
   
-  // 3.6. 「l」コマンド: Claude モデル選択
-  // l → モデル一覧、l sonnet → 両方設定、l plan:haiku → plan のみ、l exec:opus → exec のみ
+  // 3.6. 「l」コマンド: AI モデル選択（#309: claude 専用から codex/gemini/devin にも拡張）
+  // l → 現在セッションのツールのモデル一覧、l sonnet → 両方設定、l plan:haiku → plan のみ、l exec:opus → exec のみ
+  // l codex → codex の一覧、l codex:gpt-5.5 → codex の両方設定、l codex:plan:gpt-5.3-codex → codex の plan のみ
+  const MODEL_TOOL_NAMES = ['claude', 'codex', 'gemini', 'devin'] as const;
   if (normalized === 'l') {
     return { type: 'model:list' };
   }
   const lMatch = normalized.match(/^l\s+(.+)$/);
   if (lMatch) {
     const arg = lMatch[1].trim();
+
+    // `l codex` `l gemini` 等: ツール名単体 → そのツールの一覧表示
+    if ((MODEL_TOOL_NAMES as readonly string[]).includes(arg)) {
+      return { type: 'model:list', tool: arg as ModelSelectableAiTool };
+    }
+
+    // `l codex:plan:gpt-5.3-codex` `l codex:exec:gpt-5.5`: ツール明示 + plan/exec 指定
+    const toolModeMatch = arg.match(/^(claude|codex|gemini|devin):(plan|exec):(.+)$/);
+    if (toolModeMatch) {
+      return { type: 'model:set', target: toolModeMatch[2] as 'plan' | 'exec', model: toolModeMatch[3], tool: toolModeMatch[1] as ModelSelectableAiTool };
+    }
+
+    // `l codex:gpt-5.5`: ツール明示、plan/exec 両方
+    const toolBothMatch = arg.match(/^(claude|codex|gemini|devin):(.+)$/);
+    if (toolBothMatch) {
+      return { type: 'model:set', target: 'both', model: toolBothMatch[2], tool: toolBothMatch[1] as ModelSelectableAiTool };
+    }
+
+    // `l plan:haiku` `l exec:opus`: ツール省略（現在セッションのツール）+ plan/exec 指定
     const colonMatch = arg.match(/^(plan|exec):(.+)$/);
     if (colonMatch) {
       return { type: 'model:set', target: colonMatch[1] as 'plan' | 'exec', model: colonMatch[2] };
     }
+
+    // `l sonnet`: ツール省略、plan/exec 両方
     return { type: 'model:set', target: 'both', model: arg };
   }
 
@@ -369,10 +392,12 @@ export function getHelpText(): string {
 **AI切り替え**
 \`a\` - AI ツール一覧・切り替え
 \`a 1\`, \`a 2\` - 一覧から番号で選択
-\`l\` - Claude モデル一覧（現在の設定を表示）
-\`l sonnet\` - Plan/Exec 両方のモデルを変更
-\`l plan:haiku\` - Plan のみ変更
-\`l exec:opus\` - Exec のみ変更
+\`l\` - AI モデル一覧（現在セッションのツールの設定を表示）
+\`l sonnet\` - Plan/Exec 両方のモデルを変更（現在のツール）
+\`l plan:haiku\` - Plan のみ変更（現在のツール）
+\`l exec:opus\` - Exec のみ変更（現在のツール）
+\`l codex\` - Codex CLI のモデル設定を表示
+\`l codex:plan:gpt-5.3-codex\` - Codex の Plan のみ変更
 
 **アカウント連携**
 \`link\` - WebUI アカウントとリンク

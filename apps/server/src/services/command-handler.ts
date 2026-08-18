@@ -1,6 +1,6 @@
 import crypto from 'crypto';
-import type { UserCommand, UserContext, Platform, FileAttachment, AiTool } from '@devrelay/shared';
-import { STATUS_EMOJI, AI_TOOL_NAMES } from '@devrelay/shared';
+import type { UserCommand, UserContext, Platform, FileAttachment, AiTool, ModelSelectableAiTool } from '@devrelay/shared';
+import { STATUS_EMOJI, AI_TOOL_NAMES, AI_MODEL_CATALOG, isModelSelectableAiTool, isUnsafeModelId } from '@devrelay/shared';
 import { Machine, Project, Session, Message } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import {
@@ -39,7 +39,7 @@ import {
 import { getHelpText, W_COMMAND_PROMPT } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
-import { getUserSetting, setUserSetting, SettingKeys } from './user-settings.js';
+import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import {
   createTestflightService,
@@ -264,10 +264,10 @@ export async function executeCommand(
       return handleAiSwitch(context, command.tool);
 
     case 'model:list':
-      return handleModelList(context);
+      return handleModelList(context, command.tool);
 
     case 'model:set':
-      return handleModelSet(context, command.target, command.model);
+      return handleModelSet(context, command.target, command.model, command.tool);
 
     case 'ai:prompt':
       return handleAiPrompt(context, command.text, files, missedMessages);
@@ -773,17 +773,14 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
   // Start progress tracking
   await startProgressTracking(context.currentSessionId);
 
-  // Claude SDK モデル設定を取得（exec モデルを適用）
-  const execModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_EXEC) || undefined;
-
-  // Send exec command to agent (marks the conversation reset point and auto-starts AI)
+  // #309: model は渡さず execConversation 側（agent-manager.ts）で aiTool に応じたモデル設定を解決する
+  // （command-handler で claude 固定キーを直読みすると codex 等の他ツールに対応できないため。単一情報源化）
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
     session.project.path,
     context.userId,
     customPrompt,
-    execModel,
   );
 
   // Return empty since progress message is already sent
@@ -1226,54 +1223,77 @@ async function handleQuit(context: UserContext): Promise<string> {
   return '👋 切断しました';
 }
 
-/** 利用可能な Claude SDK モデル一覧（フル ID はCLIバージョン非依存で動作確認済み） */
-const AVAILABLE_MODELS = [
-  { id: 'claude-fable-5', name: 'Claude Fable 5', description: '最高性能（Mythos クラス）' },
-  { id: 'claude-opus-5', name: 'Claude Opus 5', description: '高性能（最新）' },
-  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', description: '高性能' },
-  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', description: 'バランス型（最新）' },
-  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: '高速・低コスト（最新）' },
-  { id: 'opus', name: 'Claude Opus（CLI版）', description: 'CLI デフォルト解決' },
-  { id: 'sonnet', name: 'Claude Sonnet（CLI版）', description: 'CLI デフォルト解決' },
-  { id: 'haiku', name: 'Claude Haiku（CLI版）', description: 'CLI デフォルト解決' },
-];
+/**
+ * `l` コマンドでツールが明示されなかった場合に使う「現在セッションの AI ツール」を解決する（#309）。
+ * セッション未接続・DB 取得失敗時は 'claude'（従来の唯一対応ツール）にフォールバックする。
+ */
+async function resolveContextModelTool(context: UserContext): Promise<ModelSelectableAiTool> {
+  if (context.currentSessionId) {
+    try {
+      const session = await prisma.session.findUnique({
+        where: { id: context.currentSessionId },
+        select: { aiTool: true },
+      });
+      if (session?.aiTool && isModelSelectableAiTool(session.aiTool)) {
+        return session.aiTool;
+      }
+    } catch {
+      // DB 失敗時は claude にフォールバック（下の return で処理）
+    }
+  }
+  return 'claude';
+}
 
-/** Claude モデル一覧 + 現在の設定を表示 */
-async function handleModelList(context: UserContext): Promise<string> {
-  const planModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_PLAN) || '(default)';
-  const execModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_EXEC) || '(default)';
+/** AI モデル一覧 + 現在の設定を表示（#309: tool 省略時は現在セッションのツール） */
+async function handleModelList(context: UserContext, tool?: ModelSelectableAiTool): Promise<string> {
+  const targetTool = tool ?? await resolveContextModelTool(context);
+  const toolLabel = AI_TOOL_NAMES[targetTool] || targetTool;
+  const catalog = AI_MODEL_CATALOG[targetTool];
 
-  const lines = ['🧠 **Claude モデル設定**\n'];
+  const planModel = await getUserSetting(context.userId, modelSettingKey(targetTool, 'plan')) || '(default)';
+  const execModel = await getUserSetting(context.userId, modelSettingKey(targetTool, 'exec')) || '(default)';
+
+  const lines = [`🧠 **${toolLabel} モデル設定**\n`];
   lines.push(`Plan: **${planModel}**`);
   lines.push(`Exec: **${execModel}**\n`);
-  lines.push('**利用可能モデル:**');
-  for (const m of AVAILABLE_MODELS) {
+  lines.push('**候補モデル**（カタログ外の ID も指定可能）:');
+  for (const m of catalog) {
     lines.push(`  \`${m.id}\` — ${m.name}（${m.description}）`);
   }
   lines.push('\n**設定方法:**');
-  lines.push('`l sonnet` — Plan/Exec 両方を変更');
-  lines.push('`l plan:haiku` — Plan のみ変更');
-  lines.push('`l exec:opus` — Exec のみ変更');
+  lines.push(`\`l sonnet\` — 現在のツール（${toolLabel}）の Plan/Exec 両方を変更`);
+  lines.push('`l plan:haiku` / `l exec:opus` — 現在のツールの片方のみ変更');
+  lines.push('`l codex` — Codex CLI の設定を表示');
+  lines.push('`l codex:plan:gpt-5.3-codex` — ツールを明示して変更');
   return lines.join('\n');
 }
 
-/** Claude モデルを設定する */
-async function handleModelSet(context: UserContext, target: 'both' | 'plan' | 'exec', model: string): Promise<string> {
-  // モデル名を正規化（部分一致を許容）
-  const matched = AVAILABLE_MODELS.find(m => m.id === model.toLowerCase());
-  if (!matched) {
-    return `❌ 不明なモデル: \`${model}\`\n\n利用可能: ${AVAILABLE_MODELS.map(m => `\`${m.id}\``).join(', ')}`;
+/** AI モデルを設定する（#309: tool 省略時は現在セッションのツール） */
+async function handleModelSet(context: UserContext, target: 'both' | 'plan' | 'exec', model: string, tool?: ModelSelectableAiTool): Promise<string> {
+  const targetTool = tool ?? await resolveContextModelTool(context);
+  const toolLabel = AI_TOOL_NAMES[targetTool] || targetTool;
+  const catalog = AI_MODEL_CATALOG[targetTool];
+
+  // 危険文字（引数・TOML インジェクション対策）は無条件で拒否
+  if (isUnsafeModelId(model)) {
+    return `❌ モデル ID に使用できない文字が含まれています: \`${model}\``;
   }
 
+  // カタログ一致を優先（大文字小文字を無視）、無ければカタログ外 ID として警告付きで許可
+  const matched = catalog.find(m => m.id.toLowerCase() === model.toLowerCase());
+  const modelId = matched?.id ?? model;
+  const warning = matched ? '' : `\n⚠️ カタログ外の ID です（新モデル等で意図的な場合は無視してください）`;
+
   if (target === 'both' || target === 'plan') {
-    await setUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_PLAN, matched.id);
+    await setUserSetting(context.userId, modelSettingKey(targetTool, 'plan'), modelId);
   }
   if (target === 'both' || target === 'exec') {
-    await setUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_EXEC, matched.id);
+    await setUserSetting(context.userId, modelSettingKey(targetTool, 'exec'), modelId);
   }
 
   const targetLabel = target === 'both' ? 'Plan/Exec' : target === 'plan' ? 'Plan' : 'Exec';
-  return `✅ ${targetLabel} モデルを **${matched.name}** (\`${matched.id}\`) に変更しました`;
+  const displayName = matched?.name ?? modelId;
+  return `✅ ${toolLabel} の ${targetLabel} モデルを **${displayName}** (\`${modelId}\`) に変更しました${warning}`;
 }
 
 async function handleAiList(context: UserContext): Promise<string> {
@@ -1509,8 +1529,8 @@ async function handleAiPrompt(
   // Start progress tracking (sends initial message)
   await startProgressTracking(context.currentSessionId);
 
-  // Claude SDK モデル設定を取得（plan モデルを初回プロンプトに適用）
-  const claudeModel = await getUserSetting(context.userId, SettingKeys.CLAUDE_MODEL_PLAN) || undefined;
+  // #309: model は渡さず sendPromptToAgent 側（agent-manager.ts）で aiTool に応じたモデル設定を解決する
+  // （command-handler で claude 固定キーを直読みすると codex 等の他ツールに対応できないため。単一情報源化）
 
   // Send to agent with files and missed messages
   // エラー時はトラッカーをクリーンアップして永遠にスタックしないようにする
@@ -1525,7 +1545,6 @@ async function handleAiPrompt(
       currentSession?.project.path,
       currentSession?.aiTool as AiTool | undefined,
       false,  // forceNewSession
-      claudeModel,
     );
   } catch (error) {
     stopProgressTracking(context.currentSessionId);

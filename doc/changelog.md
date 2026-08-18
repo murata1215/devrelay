@@ -6,6 +6,58 @@
 
 ## 実装済み機能
 
+### #310: 【#309 が引き起こした本番障害を修正】`app.devrelay.io` 全画面白画面バグ修正 (2026-08-18)
+
+#### 背景
+#309 で `apps/web/src/pages/SettingsPage.tsx` が初めて `@devrelay/shared`（CJS のみのビルド）に依存した際、シークレットウインドウ含め `app.devrelay.io`（Open Dashboard）が全画面真っ白になる本番障害が発生した。`devrelay.io`（LP）は無傷、`app.devrelay.io` のみ症状が出ていた。
+
+#### 真因
+`packages/shared/package.json` は `main: ./dist/index.js` のみで `exports`/`module` フィールドを持たない CJS 専用ビルド。pnpm workspace のシンボリックリンクは realpath 解決で `/opt/devrelay/packages/shared/dist` という **`node_modules` の外**のパスになるため、Rollup/Vite の `@rollup/plugin-commonjs` の `commonjsOptions.include`（既定 `[/node_modules/]`）に一致せず、**CJS が一切変換されないままバンドルに混入**した。結果、配信されたエントリチャンクのトップレベルに生の `require("./types.js")` 等が残り、ブラウザで `ReferenceError: require is not defined` が発生 → React が一切マウントされず画面全体が白くなった。
+
+#309 実装当初は named import で `"AI_TOOL_NAMES" is not exported by ".../dist/index.js"` というビルドエラーが出ており、これを namespace import（`import * as devrelayShared from '@devrelay/shared'`）に変更して回避した。しかしこれは Rollup の**静的解析エラーを黙らせただけ**で、CJS が変換されていないという根本問題は解消しておらず、`pnpm build` が green になったことを「動作確認済み」と誤判定してしまっていた。
+
+#### 修正内容
+- `apps/web/vite.config.ts` に `resolve.alias: { '@devrelay/shared': '<abs path>/packages/shared/src/index.ts' }` を追加し、**TS ソースを直接 alias** することで CJS interop 自体の発生を回避（`packages/shared/src` は相対 import のみで外部依存ゼロのためブラウザ安全、型チェックは従来どおり `.d.ts` 経由で無影響、`apps/server`/`agents/*` は Node の CJS `require` のため無関係）
+- `apps/web/src/pages/SettingsPage.tsx` の namespace import 回避策を通常の named import に戻した
+- `packages/shared/src/index.ts` の説明コメントを実際の真因に沿って訂正（`export *` → named re-export の変更自体は将来 dist(CJS) を直接バンドルする経路への保険として維持）
+
+#### 検証
+- `pnpm build` green（モノレポ全体、変更範囲は `apps/web` + `packages/shared/src/index.ts` のコメントのみで `apps/server`/`agents/*` は無影響）
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` が **0** であることを確認（新バンドル `index-C2Z0I9aV.js`、旧・壊れたバンドル `index-7svDkYHO.js` から更新）
+- `__esModule`/`__exportStar` マーカーも 0、`AI_MODEL_CATALOG` のモデル ID 文字列（`gpt-5.3-codex`）がバンドルに正しくインライン化されていることを確認
+- Node の ESM `import()` によるスモーク評価で `require is not defined` が出ないことを確認（DOM 非依存の `document is not defined` のみ、想定内）
+- `curl https://app.devrelay.io/` で Caddy が新バンドルハッシュを実際に配信していることを実測確認、`devrelay.io`（LP）が無傷であることも確認
+
+`apps/web/dist` は gitignore 対象のため、障害発生前の正常なバンドルを git から復旧する手段は無く、前進修正 + 再ビルドのみが選択肢だった。
+
+**教訓**: 「`pnpm build` が green」は「ブラウザで実際に動く」ことの証明にならない。ワークスペース内の CJS 専用パッケージへの依存を追加した後は、必ず生成物に `require(` 等の未変換コードが残っていないかを直接確認すること。
+
+---
+
+### #309: Plan/Exec モデル分離を codex/gemini/devin にも拡張 + WebUI 設定 (2026-08-18)
+
+#### 背景
+`claude_model_plan`/`claude_model_exec` によるプラン用・実行用モデルの分離機能は Claude 専用で、codex/gemini/devin では対応していなかった。加えて `agent-manager.ts` の model 補完ロジックが aiTool を見ず常に claude 用の設定キーを読んでいる潜在バグ（#306 と同型）があった。
+
+#### 実装内容
+- `packages/shared/src/constants.ts` に `AI_MODEL_CATALOG`（4 ツール × モデル候補）、`ModelOption`/`ModelSelectableAiTool` 型、`isUnsafeModelId`（危険文字チェック）、`isModelSelectableAiTool` を新設し、server（`command-handler.ts` の旧 `AVAILABLE_MODELS`）・web（`SettingsPage.tsx` の旧 `CLAUDE_MODEL_OPTIONS`）の重複定義を集約
+- `apps/server/src/services/user-settings.ts` に `CODEX/GEMINI/DEVIN_MODEL_PLAN/EXEC` の `SettingKeys`（`<tool>_model_<mode>` 規則、DB マイグレーション不要）+ `modelSettingKey`/`resolveModelForTool` ヘルパを追加
+- `apps/server/src/services/agent-manager.ts` の `sendPromptToAgent`/`execConversation` を aiTool 対応に修正（潜在バグ修正）
+- `l` コマンドを拡張: `l codex`（ツール別一覧）/ `l codex:plan:gpt-5.3-codex`（ツール明示設定）、カタログ外 ID は警告付きで許可
+- Agent 側（linux/macos/windows 3OS の `ai-runner.ts`）: codex は `-c model="..."`（`sandbox_mode` と同じ理由で `codex exec resume` に `-m` が無いため）、gemini は `-m`、devin は `--model`。`probeGeminiCapabilities()`/`probeDevinCapabilities()` を追加し `--help` プローブでキャッシュ、旧 CLI では引数を付けず劣化動作。`safeModelArg()` で危険文字を二重サニタイズ
+- WebUI: `apps/web` に `@devrelay/shared` への workspace 依存を追加、`SettingsPage.tsx` を 4 ツール × plan/exec のセレクト（カタログ + カスタム入力）に拡張
+
+#### 副次発見・修正
+- Windows Electron GUI agent（`agents/windows`）は claude ですら `model` オプションが `SendPromptOptions`/`connection.ts` の payload 型に存在せず、plan/exec モデル分離が全く配線されていなかった（macos/linux は #251 で対応済みだったが windows だけ漏れていた）。`--model` 引数・`connection.ts` の `handleAiPrompt`/`handleConversationExec`/retry 経路まで追加し、claude 含む 4 ツール全てで windows でも動くようにした
+- `apps/server/src/services/command-parser.ts` の AI ツール切替コマンド許可リストに `devin` が漏れていた 1 行バグを追加修正（#308 の修正漏れ）
+
+#### 検証
+- `pnpm build` green（`packages/shared` + `apps/server` + `apps/web` + Agent 3OS）
+- codex は本機にインストール済みのため `l codex:plan:...` 等の動作確認が可能、gemini/devin は本機未インストールのため実機確認は未実施（コードレビューベース）
+- **副作用として #310 の本番障害を誘発**（詳細は上記 #310 参照）。原因は本実装自体ではなく、web が shared に初依存した際の Vite ビルド設定の未整備
+
+---
+
 ### #308: Codex CLI を Devin と同等の実運用レベルまで正式サポート (2026-08-17)
 
 #### 背景

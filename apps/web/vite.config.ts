@@ -1,3 +1,4 @@
+import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -7,6 +8,20 @@ import pkg from './package.json'
 // https://vite.dev/config/
 export default defineConfig({
   base: '/',
+  // #310: @devrelay/shared は CJS ビルド（dist/index.js）のみを持つ。
+  // pnpm workspace のシンボリックリンクは realpath が node_modules の外
+  // （/opt/devrelay/packages/shared/dist）になるため、Vite の
+  // commonjsOptions.include（既定 [/node_modules/]）に掛からず CJS 変換されず、
+  // 生の require() がバンドルに混入 → ブラウザで ReferenceError:
+  // require is not defined → React が一切マウントされず全画面が真っ白になった
+  // （#309 で web が初めて @devrelay/shared に依存した際の副作用、本番障害）。
+  // TS ソースを直接 alias して ESM としてコンパイルさせることで
+  // CJS interop 自体を発生させない。dev サーバーとビルドで同じ経路になる。
+  resolve: {
+    alias: {
+      '@devrelay/shared': fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)),
+    },
+  },
   plugins: [
     react(),
     tailwindcss(),

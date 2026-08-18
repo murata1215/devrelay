@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, isUnsafeModelId } from '@devrelay/shared';
 import type { AiTool, AiUsageData, ScreenAnalysis } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
@@ -39,6 +39,11 @@ let devinSupportsExport: boolean | null = null;
 // #308: Codex CLI（`codex exec`）のフラグ対応可否キャッシュ。バージョンによって
 // `--json`（構造化出力）や `resume` サブコマンドの有無が変わるため、初回に `--help` でプローブする。
 let codexCapabilitiesCache: { json: boolean; resume: boolean } | null = null;
+
+// #309: Gemini CLI / Devin CLI の `--model` フラグ対応可否キャッシュ（plan/exec モデル分離用）。
+// 旧バージョンで未対応の場合、引数を付けずに CLI デフォルトへ劣化させる。
+let geminiCapabilitiesCache: { model: boolean } | null = null;
+let devinCapabilitiesCache: { model: boolean } | null = null;
 
 // #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
 let claudeFallbackLogged = false;
@@ -170,6 +175,63 @@ function probeCodexCapabilities(command: string): { json: boolean; resume: boole
     console.warn(`[codex] exec --help probe failed, using minimal flags:`, (err as Error).message);
   }
   return codexCapabilitiesCache;
+}
+
+/**
+ * Gemini CLI が `-m/--model` フラグに対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
+ * 失敗時は false に倒し、モデル引数を付けずに CLI デフォルトへ劣化させる。
+ * @param command gemini コマンドのフルパス
+ * @returns `{ model }` 対応可否
+ */
+function probeGeminiCapabilities(command: string): { model: boolean } {
+  if (geminiCapabilitiesCache !== null) return geminiCapabilitiesCache;
+  try {
+    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
+    const model = /-m,?\s*--model\b|--model\b/.test(help);
+    geminiCapabilitiesCache = { model };
+    console.log(`[gemini] 🔎 capabilities: --model=${model}`);
+  } catch (err) {
+    geminiCapabilitiesCache = { model: false };
+    console.warn(`[gemini] --help probe failed, disabling --model:`, (err as Error).message);
+  }
+  return geminiCapabilitiesCache;
+}
+
+/**
+ * Devin CLI が `--model` フラグに対応しているか `devin --help` の出力で判定する（結果はキャッシュ）。
+ * 失敗時は false に倒し、モデル引数を付けずに CLI デフォルトへ劣化させる。
+ * @param command devin コマンドのフルパス
+ * @returns `{ model }` 対応可否
+ */
+function probeDevinCapabilities(command: string): { model: boolean } {
+  if (devinCapabilitiesCache !== null) return devinCapabilitiesCache;
+  try {
+    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
+    const model = /--model\b/.test(help);
+    devinCapabilitiesCache = { model };
+    console.log(`[devin] 🔎 capabilities: --model=${model}`);
+  } catch (err) {
+    devinCapabilitiesCache = { model: false };
+    console.warn(`[devin] --help probe failed, disabling --model:`, (err as Error).message);
+  }
+  return devinCapabilitiesCache;
+}
+
+/**
+ * #309: モデル ID の二重サニタイズ（server 側で既に検証済みだが、MCP 等 server を経由しない
+ * 将来の呼び出し経路への保険として Agent 側でも検証する）。
+ * 引用符・空白・セミコロン・ドルサイン・バッククォート・改行を含む値は危険とみなし、
+ * CLI インジェクション（TOML/シェル）を避けるため無視して undefined を返す。
+ * @param model 未検証のモデル ID（未指定なら undefined）
+ * @returns 安全なモデル ID、または undefined（未指定 or 危険な値）
+ */
+function safeModelArg(model: string | undefined): string | undefined {
+  if (!model) return undefined;
+  if (isUnsafeModelId(model)) {
+    console.warn(`⚠️ 危険な文字を含むモデル ID を無視: ${JSON.stringify(model)}`);
+    return undefined;
+  }
+  return model;
 }
 
 /**
@@ -631,7 +693,14 @@ export interface SendPromptOptions {
   onResponseSummarizeRequest?: (assistantText: string, sessionId: string) => Promise<string>;
   /** MCP 経由の新規 submit: 前回セッションの resume をスキップ */
   forceNewSession?: boolean;
-  /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'）。省略時は SDK デフォルト */
+  /**
+   * AI モデル指定（#309: claude/codex/gemini/devin 共通）。
+   * claude: 'sonnet', 'opus', 'haiku' 等（Claude SDK にそのまま渡す）
+   * codex: `-c model="..."` で渡す（例: 'gpt-5.5'）
+   * gemini: `-m` で渡す（例: 'gemini-3.1-pro'）
+   * devin: `--model` で渡す（fuzzy 名可、例: 'opus'）
+   * 省略時は各 CLI のデフォルト
+   */
   model?: string;
   /**
    * Devin プランモード内部フォールバックフラグ（#274）。
@@ -1315,7 +1384,13 @@ export async function sendPromptToAi(
     // Gemini CLI with auto_edit approval mode
     // Use stdin to pass prompt (same as Claude) to avoid shell interpretation issues
     const args = ['--approval-mode', 'auto_edit'];
-    console.log(`🔧 Running: ${command} --approval-mode auto_edit (prompt via stdin)`);
+    // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
+    const geminiCaps = probeGeminiCapabilities(command);
+    const geminiModel = safeModelArg(options.model);
+    if (geminiModel && geminiCaps.model) {
+      args.push('-m', geminiModel);
+    }
+    console.log(`🔧 Running: ${command} ${args.join(' ')} (prompt via stdin)`);
 
     // Gemini コマンドのディレクトリを PATH に追加（systemd 実行時に node が見つからない問題を回避）
     const geminiDir = path.dirname(command);
@@ -1390,6 +1465,14 @@ export async function sendPromptToAi(
       console.log(`📤 Devin --export enabled: ${devinExportPath}`);
     }
 
+    // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
+    // Devin は fuzzy 名（例: 'opus', 'sonnet', 'gpt-5.5'）を受け付ける。
+    const devinCaps = probeDevinCapabilities(command);
+    const devinModel = safeModelArg(options.model);
+    if (devinModel && devinCaps.model) {
+      args.push('--model', devinModel);
+    }
+
     // Devin は stdin パイプ非対応（panic at repl_mode.rs）→ --prompt-file で一時ファイル経由
     const promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
     fs.writeFileSync(promptFilePath, prompt, 'utf-8');
@@ -1437,6 +1520,14 @@ export async function sendPromptToAi(
       args.push('-c', 'sandbox_mode="read-only"');
     } else {
       args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
+    }
+
+    // #309: plan/exec モデル分離。`-m/--model` は新規セッションのみ対応（`codex exec resume` に存在しない）
+    // ため、`sandbox_mode` と同じく `-c model="..."` を使い新規/resume でフラグ列を共通化する。
+    // 値は TOML 文字列としてパースされるためダブルクォート必須（server 側で危険文字は事前に拒否済みだが二重に防御）。
+    const codexModel = safeModelArg(options.model);
+    if (codexModel) {
+      args.push('-c', `model="${codexModel}"`);
     }
 
     // 保存済み thread_id があれば resume で継続（フラグを全部書いた"後"に置く必要がある）
@@ -1698,7 +1789,7 @@ export async function sendPromptToAi(
                   cache_read_input_tokens: usage.cached_input_tokens ?? 0,
                   cache_creation_input_tokens: usage.cache_write_input_tokens ?? 0,
                 };
-                const modelName = 'codex'; // #308 v1: モデル名は codex 固定（将来 codex_model_plan/exec 拡張時に置き換え）
+                const modelName = safeModelArg(options.model) || 'codex'; // #309: 指定モデルがあれば実 ID、未指定時は 'codex'
                 result.usageData = {
                   usage: mappedUsage,
                   modelUsage: { [modelName]: { contextWindow: 200000, ...mappedUsage } },

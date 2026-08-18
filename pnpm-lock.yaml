@@ -313,6 +313,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@devrelay/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       react:
         specifier: ^19.2.0
         version: 19.2.3

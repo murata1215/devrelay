@@ -35,7 +35,8 @@ import { sendFcmNotificationForToolApproval } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys } from './user-settings.js';
+import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool } from './user-settings.js';
+import { isModelSelectableAiTool } from '@devrelay/shared';
 import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
@@ -1131,32 +1132,37 @@ export async function sendPromptToAgent(
     throw new Error('⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。');
   }
 
-  // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
+  // セッションに紐づくプロジェクトの terminalMode / aiTool を取得（Project/Session 単位の設定）
   // 端末インタフェースモードが ON なら Agent 側で PTY 経由 claude --continue が起動する
+  // #309: aiTool 引数が未指定（ask/teamexec/MCP 経由）の場合、DB の Session.aiTool にフォールバックする。
+  // これが無いと model 解決がツール判定できず常に claude 用キーを読んでしまう（#306 時点の潜在バグ）。
   let terminalMode = false;
+  let resolvedAiTool: AiTool = aiTool ?? 'claude';
   try {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { project: { select: { terminalMode: true } } },
+      select: { aiTool: true, project: { select: { terminalMode: true } } },
     });
     terminalMode = !!session?.project?.terminalMode;
+    if (!aiTool && session?.aiTool) {
+      resolvedAiTool = session.aiTool as AiTool;
+    }
   } catch {
-    // DB 失敗時は false 扱い（既存挙動を維持）
+    // DB 失敗時は false / デフォルト aiTool のまま（既存挙動を維持）
   }
 
-  // model 未指定時は UserSettings の plan モデルで補完する（#306）
+  // model 未指定時は UserSettings の該当ツールの plan モデルで補完する（#306 → #309 で aiTool 対応）
   // ask / teamexec / MCP 経由の呼び出しは model を渡さないため、
-  // ここで補完しないと Claude SDK が自前のデフォルト（opus-4-6[1m] 等）を使ってしまい
-  // ユーザーが設定した claude_model_plan が無視される
+  // ここで補完しないと SDK/CLI が自前のデフォルトを使ってしまい、ユーザーが設定したモデルが無視される
   let resolvedModel = model;
-  if (resolvedModel === undefined) {
+  if (resolvedModel === undefined && isModelSelectableAiTool(resolvedAiTool)) {
     try {
-      resolvedModel = await getUserSetting(userId, SettingKeys.CLAUDE_MODEL_PLAN) || undefined;
+      resolvedModel = await resolveModelForTool(userId, resolvedAiTool, 'plan');
     } catch {
-      // 設定取得に失敗しても送信は継続（従来どおり undefined = SDK デフォルト）
+      // 設定取得に失敗しても送信は継続（従来どおり undefined = SDK/CLI デフォルト）
     }
   }
-  console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(SDK default)'} (explicit=${model ?? 'none'})`);
+  console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
 
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
@@ -1502,20 +1508,21 @@ export async function execConversation(machineId: string, sessionId: string, pro
     select: { aiTool: true, project: { select: { terminalMode: true } } },
   });
   const terminalMode = !!session?.project?.terminalMode;
+  // #309: aiTool 対応の model 解決に使う（未取得時は 'claude' フォールバック、Agent 側の既定と一致させる）
+  const resolvedAiTool = (session?.aiTool as AiTool | undefined) ?? 'claude';
 
-  // model 未指定時は UserSettings の exec モデルで補完する（#306）
+  // model 未指定時は UserSettings の該当ツールの exec モデルで補完する（#306 → #309 で aiTool 対応）
   // ask / teamexec / MCP 経由の呼び出しは model を渡さないため、
-  // ここで補完しないと Claude SDK が自前のデフォルト（opus-4-6[1m] 等）を使ってしまい
-  // ユーザーが設定した claude_model_exec が無視される
+  // ここで補完しないと SDK/CLI が自前のデフォルトを使ってしまい、ユーザーが設定したモデルが無視される
   let resolvedModel = model;
-  if (resolvedModel === undefined) {
+  if (resolvedModel === undefined && isModelSelectableAiTool(resolvedAiTool)) {
     try {
-      resolvedModel = await getUserSetting(userId, SettingKeys.CLAUDE_MODEL_EXEC) || undefined;
+      resolvedModel = await resolveModelForTool(userId, resolvedAiTool, 'exec');
     } catch {
-      // 取得失敗時は従来どおり undefined = SDK デフォルト
+      // 取得失敗時は従来どおり undefined = SDK/CLI デフォルト
     }
   }
-  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}, model resolved=${resolvedModel ?? '(SDK default)'} (explicit=${model ?? 'none'})`);
+  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}, model resolved=${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
     payload: {

@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
 import { settings, platforms, services, agreementTemplate, allowedTools, tokens as tokensApi, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity, type OrgRole, type OrgAuditLogEntry, type PersonalAccessTokenInfo } from '../lib/api';
+// #310: vite.config.ts の resolve.alias で @devrelay/shared を
+// packages/shared/src/index.ts（TS ソース）に直接向けているため、
+// 通常の named import で問題ない（CJS interop が発生しないため）。
+import { AI_MODEL_CATALOG, AI_TOOL_NAMES, type ModelSelectableAiTool } from '@devrelay/shared';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificationSound } from '../utils/notification-sound';
@@ -92,24 +96,17 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
   },
 ];
 
-/** Claude モデル選択肢（server の AVAILABLE_MODELS と同期。フル ID は CLI バージョン非依存で動作） */
-const CLAUDE_MODEL_OPTIONS = [
-  { value: '', label: '(default) — CLI 標準' },
-  { value: 'claude-fable-5', label: 'Claude Fable 5（最高性能）' },
-  { value: 'claude-opus-5', label: 'Claude Opus 5（高性能・最新）' },
-  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8（高性能）' },
-  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5（バランス型・最新）' },
-  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5（高速・低コスト・最新）' },
-  { value: 'opus', label: 'Claude Opus（CLI版）' },
-  { value: 'sonnet', label: 'Claude Sonnet（CLI版）' },
-  { value: 'haiku', label: 'Claude Haiku（CLI版）' },
-];
+/**
+ * AI モデル選択の対象ツール一覧（#309: claude 専用から拡張）。
+ * aider は generic シェル起動のみでモデル指定 CLI 引数を持たないため対象外（server 側と同じ扱い）。
+ */
+const MODEL_SELECTABLE_AI_TOOLS: ModelSelectableAiTool[] = ['claude', 'codex', 'gemini', 'devin'];
 
-/** Claude モデル設定フィールド（plan/exec 別）。`l` コマンドと同じ UserSettings キーを共有 */
-const CLAUDE_MODEL_FIELDS = [
-  { key: 'claude_model_plan', label: 'Plan モード', description: 'プランモードで使用するモデル' },
-  { key: 'claude_model_exec', label: 'Exec モード', description: '実行モードで使用するモデル' },
-];
+/** ツール + モード（plan/exec）から UserSettings キーを生成（server の modelSettingKey と同じ規則） */
+const modelSettingKey = (tool: ModelSelectableAiTool, mode: 'plan' | 'exec'): string => `${tool}_model_${mode}`;
+
+/** カタログ由来の select 用「カスタム値を入力」を表す特殊値 */
+const CUSTOM_MODEL_VALUE = '__custom__';
 
 /** #296: Agent 自動更新のグローバル kill switch（UserSettings キー。'false' のときだけ無効） */
 const SETTING_AUTO_UPDATE = 'auto_update_enabled';
@@ -704,6 +701,10 @@ export function SettingsPage() {
   // API キー入力用のステート（キー名 → 入力値）
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
 
+  // AI モデル設定のカスタム入力ドラフト（キー名 → 未保存の入力値）。#309
+  // select で「カスタム…」を選んだ、またはカタログ外の値が既に保存されている場合にテキスト入力を表示する
+  const [modelCustomDrafts, setModelCustomDrafts] = useState<Record<string, string>>({});
+
   // Bot Token 入力
   const [discordToken, setDiscordToken] = useState('');
   const [telegramToken, setTelegramToken] = useState('');
@@ -967,7 +968,7 @@ export function SettingsPage() {
   };
 
   /**
-   * Claude モデル設定を保存（select 変更時に即座保存）
+   * AI モデル設定を保存（select 変更時に即座保存）。#309: claude 専用から codex/gemini/devin にも拡張。
    * 空文字（default）選択時はキーを削除して CLI 標準に戻す。
    * `l` コマンドと同じ UserSettings キーを共有するため last-write-wins で整合する。
    */
@@ -991,6 +992,33 @@ export function SettingsPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save model setting');
     }
+  };
+
+  /** select で「カスタム…」を選んだ時の処理: 保存はせず、テキスト入力欄を表示するだけ */
+  const handleModelSelectChange = (key: string, value: string) => {
+    if (value === CUSTOM_MODEL_VALUE) {
+      setModelCustomDrafts((prev) => ({ ...prev, [key]: data[key] || '' }));
+      return;
+    }
+    setModelCustomDrafts((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    handleModelChange(key, value);
+  };
+
+  /** カスタム入力欄の値を確定保存する */
+  const handleModelCustomSave = async (key: string) => {
+    const value = (modelCustomDrafts[key] || '').trim();
+    if (!value) return;
+    await handleModelChange(key, value);
+    setModelCustomDrafts((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
   const handleLinkPlatform = async (e: React.FormEvent) => {
@@ -1399,32 +1427,72 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {/* Claude Model Settings Section — plan/exec 別のデフォルトモデル選択 */}
+      {/* AI Model Settings Section — ツール別・plan/exec 別のデフォルトモデル選択（#309） */}
       <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Claude Model Settings</h2>
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">AI Model Settings</h2>
         <p className="text-[var(--text-muted)] text-sm mb-6">
-          Plan / Exec モードで使用する Claude モデルのデフォルトを設定します。
+          Plan / Exec モードで使用する AI モデルのデフォルトを AI ツールごとに設定します。
           チャットの <code className="px-1 rounded bg-[var(--input-bg)]">l</code> コマンドでも変更でき、同じ設定を共有します（後から変更した方が優先）。
+          候補にないモデル ID は「カスタム…」から自由入力できます。
         </p>
 
-        <div className="space-y-6">
-          {CLAUDE_MODEL_FIELDS.map((field) => (
-            <div key={field.key}>
-              <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
-                {field.label}
-              </label>
-              <p className="text-[var(--text-faint)] text-xs mb-2">{field.description}</p>
-              <select
-                value={data[field.key] || ''}
-                onChange={(e) => handleModelChange(field.key, e.target.value)}
-                className="w-full sm:w-64 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
-              >
-                {CLAUDE_MODEL_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+        <div className="space-y-8">
+          {MODEL_SELECTABLE_AI_TOOLS.map((tool) => (
+            <div key={tool}>
+              <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{AI_TOOL_NAMES[tool] || tool}</h3>
+              <div className="space-y-4 sm:pl-2">
+                {(['plan', 'exec'] as const).map((mode) => {
+                  const key = modelSettingKey(tool, mode);
+                  const catalog = AI_MODEL_CATALOG[tool];
+                  const currentValue = data[key] || '';
+                  const isCustomDraftOpen = key in modelCustomDrafts;
+                  const isCatalogValue = currentValue === '' || catalog.some((m) => m.id === currentValue);
+                  const selectValue = isCustomDraftOpen ? CUSTOM_MODEL_VALUE : (isCatalogValue ? currentValue : CUSTOM_MODEL_VALUE);
+
+                  return (
+                    <div key={key}>
+                      <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
+                        {mode === 'plan' ? 'Plan モード' : 'Exec モード'}
+                      </label>
+                      <p className="text-[var(--text-faint)] text-xs mb-2">
+                        {mode === 'plan' ? 'プランモードで使用するモデル' : '実行モードで使用するモデル'}
+                      </p>
+                      <select
+                        value={selectValue}
+                        onChange={(e) => handleModelSelectChange(key, e.target.value)}
+                        className="w-full sm:w-72 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+                      >
+                        <option value="">(default) — CLI 標準</option>
+                        {catalog.map((opt) => (
+                          <option key={opt.id} value={opt.id}>
+                            {opt.name}（{opt.description}）
+                          </option>
+                        ))}
+                        <option value={CUSTOM_MODEL_VALUE}>カスタム…</option>
+                      </select>
+                      {selectValue === CUSTOM_MODEL_VALUE && (
+                        <div className="flex gap-2 mt-2 w-full sm:w-72">
+                          <input
+                            type="text"
+                            value={modelCustomDrafts[key] ?? (isCatalogValue ? '' : currentValue)}
+                            onChange={(e) => setModelCustomDrafts((prev) => ({ ...prev, [key]: e.target.value }))}
+                            onKeyDown={(e) => { if (e.key === 'Enter') handleModelCustomSave(key); }}
+                            placeholder="モデル ID を入力"
+                            className="flex-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleModelCustomSave(key)}
+                            className="px-3 py-2 bg-[var(--accent-blue)] text-white rounded text-sm hover:opacity-90"
+                          >
+                            適用
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ))}
         </div>

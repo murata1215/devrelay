@@ -7,7 +7,7 @@
 
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
-import type { AiProvider } from '@devrelay/shared';
+import type { AiProvider, ModelSelectableAiTool } from '@devrelay/shared';
 
 // 設定キーの定義
 export const SettingKeys = {
@@ -57,6 +57,18 @@ export const SettingKeys = {
   CLAUDE_MODEL_PLAN: 'claude_model_plan',
   /** Claude SDK モデル — Exec モード用（例: 'sonnet', 'opus', 'haiku'） */
   CLAUDE_MODEL_EXEC: 'claude_model_exec',
+  /** Codex CLI モデル — Plan モード用（例: 'gpt-5.3-codex'）。#309 */
+  CODEX_MODEL_PLAN: 'codex_model_plan',
+  /** Codex CLI モデル — Exec モード用。#309 */
+  CODEX_MODEL_EXEC: 'codex_model_exec',
+  /** Gemini CLI モデル — Plan モード用（例: 'gemini-3.1-pro'）。#309 */
+  GEMINI_MODEL_PLAN: 'gemini_model_plan',
+  /** Gemini CLI モデル — Exec モード用。#309 */
+  GEMINI_MODEL_EXEC: 'gemini_model_exec',
+  /** Devin CLI モデル — Plan モード用（fuzzy 名可、例: 'opus'）。#309 */
+  DEVIN_MODEL_PLAN: 'devin_model_plan',
+  /** Devin CLI モデル — Exec モード用。#309 */
+  DEVIN_MODEL_EXEC: 'devin_model_exec',
   /** 組織活動の会話要約に使用する AI プロバイダー（'openai' | 'anthropic' | 'gemini' | 'none'）。統制 v3 #270 */
   ORG_SUMMARY_PROVIDER: 'org_summary_provider',
   /** Agent 自動更新のグローバル kill switch（#296）。'false' のときだけ無効（未設定＝有効） */
@@ -161,6 +173,35 @@ export async function deleteUserSetting(userId: string, key: SettingKey): Promis
   await prisma.userSettings.deleteMany({
     where: { userId, key },
   });
+}
+
+/** aiTool + mode(plan/exec) → SettingKey の単一情報源マッピング（#309） */
+const MODEL_SETTING_KEY_MAP: Record<ModelSelectableAiTool, { plan: SettingKey; exec: SettingKey }> = {
+  claude: { plan: SettingKeys.CLAUDE_MODEL_PLAN, exec: SettingKeys.CLAUDE_MODEL_EXEC },
+  codex: { plan: SettingKeys.CODEX_MODEL_PLAN, exec: SettingKeys.CODEX_MODEL_EXEC },
+  gemini: { plan: SettingKeys.GEMINI_MODEL_PLAN, exec: SettingKeys.GEMINI_MODEL_EXEC },
+  devin: { plan: SettingKeys.DEVIN_MODEL_PLAN, exec: SettingKeys.DEVIN_MODEL_EXEC },
+};
+
+/**
+ * AI ツール + モード（plan/exec）からモデル設定用の SettingKey を取得
+ * `l` コマンド・agent-manager の model 解決が共通で使う単一情報源（#304/#306 と同種の分散防止）
+ */
+export function modelSettingKey(aiTool: ModelSelectableAiTool, mode: 'plan' | 'exec'): SettingKey {
+  return MODEL_SETTING_KEY_MAP[aiTool][mode];
+}
+
+/**
+ * AI ツール + モード（plan/exec）に対応するモデル設定値を解決する
+ * 未設定の場合は undefined（呼び出し側で CLI/SDK のデフォルトに委ねる）
+ */
+export async function resolveModelForTool(
+  userId: string,
+  aiTool: ModelSelectableAiTool,
+  mode: 'plan' | 'exec',
+): Promise<string | undefined> {
+  const value = await getUserSetting(userId, modelSettingKey(aiTool, mode));
+  return value || undefined;
 }
 
 /**
