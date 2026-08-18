@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { getToken } from '../lib/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 /** 通知バナーの非表示フラグ（ユーザーが「あとで」を押した場合） */
 const DISMISS_KEY = 'devrelay-push-dismissed';
@@ -13,6 +14,7 @@ const DISMISS_KEY = 'devrelay-push-dismissed';
 const SUBSCRIBED_KEY = 'devrelay-push-subscribed';
 
 export function NotificationBanner() {
+  const { t } = useLanguage();
   const [visible, setVisible] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -95,21 +97,21 @@ export function NotificationBanner() {
   return (
     <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-4 shadow-lg">
       <p className="text-sm text-[var(--color-text)] mb-3">
-        AI の処理完了時に通知を受け取れます。ブラウザを閉じていても届きます。
+        {t('notification.message')}
       </p>
       <div className="flex gap-2 justify-end">
         <button
           onClick={dismiss}
           className="px-3 py-1.5 text-xs rounded text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
         >
-          あとで
+          {t('notification.later')}
         </button>
         <button
           onClick={enableNotifications}
           disabled={loading}
           className="px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
         >
-          {loading ? '設定中...' : '通知を有効にする'}
+          {loading ? t('notification.enabling') : t('notification.enable')}
         </button>
       </div>
     </div>

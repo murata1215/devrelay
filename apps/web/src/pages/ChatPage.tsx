@@ -4,6 +4,7 @@ import { machines as machinesApi, sessions as sessionsApi, projects as projectsA
 import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
 import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT, type DocPanelSettings } from '../utils/doc-panel-settings';
+import { useLanguage } from '../contexts/LanguageContext';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -676,6 +677,7 @@ function MessageRow({
   aiAvatar?: string;
   onImageClick?: (src: string) => void;
 }) {
+  const { locale } = useLanguage();
   const isUser = message.role === 'user';
   const displayName = isUser ? userName : aiName;
   const displayColor = isUser ? userColor : aiColor;
@@ -695,7 +697,7 @@ function MessageRow({
             </span>
           )}
           <span className="text-xs text-[var(--text-faint)]">
-            {message.timestamp.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+            {message.timestamp.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
         <div className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words">
@@ -715,6 +717,7 @@ function MessageRow({
 
 /** Discord 風進捗インジケーター */
 function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar }: { output: string; elapsed: number; aiName: string; aiColor: string; aiAvatar?: string }) {
+  const { locale, t } = useLanguage();
   /** ローカル経過タイマー（WS 切断中もカウント継続） */
   const [localElapsed, setLocalElapsed] = useState(elapsed);
   const startTimeRef = useRef(Date.now() - elapsed * 1000);
@@ -741,12 +744,12 @@ function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar }: { out
             {aiName}
           </span>
           <span className="text-xs text-[var(--text-faint)]">
-            {new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+            {new Date().toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
         <div className="flex items-center gap-2 text-sm text-[var(--text-link)]">
           <span className="animate-pulse">●</span>
-          <span>処理中... ({localElapsed}秒経過)</span>
+          <span>{t('chat.processing')} ({localElapsed}s)</span>
         </div>
         {output && (
           <pre className="text-xs text-[var(--text-secondary)] bg-[var(--bg-base)] rounded p-2 mt-1 overflow-x-auto max-h-48 overflow-y-auto">
@@ -2000,6 +2003,7 @@ function DocPanel({ machineId, projectId, approvalHistory, tabSettings }: { mach
 // ---------------------------------------------------------------------------
 
 export function ChatPage() {
+  const { t } = useLanguage();
   const { user } = useAuth();
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -3244,12 +3248,12 @@ export function ChatPage() {
             </button>
             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
             <span className="text-sm text-[var(--text-muted)]">
-              {activeTab ? `# ${activeTab.customName || activeTab.projectName}` : connected ? '接続中' : '切断中...'}
+              {activeTab ? `# ${activeTab.customName || activeTab.projectName}` : connected ? t('chat.connected') : t('chat.disconnected')}
             </span>
             {/* Skip Permissions トグルスイッチ（Agent 単位） */}
             {activeMachineId && skipPermissionsMap[activeMachineId] !== undefined && (
               <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Skip Permissions: ${skipPermissionsMap[activeMachineId] ? 'ON' : 'OFF'}`}>
-                <span className={`text-xs ${skipPermissionsMap[activeMachineId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>自動承認</span>
+                <span className={`text-xs ${skipPermissionsMap[activeMachineId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>{t('chat.autoApprove')}</span>
                 <div className="relative" onClick={handleToggleSkipPermissions}>
                   <div className={`w-8 h-4 rounded-full transition-colors ${skipPermissionsMap[activeMachineId] ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
                   <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${skipPermissionsMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
@@ -3259,7 +3263,7 @@ export function ChatPage() {
             {/* Disable AskUserQuestion トグルスイッチ（Agent 単位） */}
             {activeMachineId && disableAskMap[activeMachineId] !== undefined && (
               <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Disable Ask: ${disableAskMap[activeMachineId] ? 'ON' : 'OFF'}`}>
-                <span className={`text-xs ${disableAskMap[activeMachineId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>Ask無効</span>
+                <span className={`text-xs ${disableAskMap[activeMachineId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>{t('chat.disableAsk')}</span>
                 <div className="relative" onClick={handleToggleDisableAsk}>
                   <div className={`w-8 h-4 rounded-full transition-colors ${disableAskMap[activeMachineId] ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
                   <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${disableAskMap[activeMachineId] ? 'translate-x-4' : ''}`}></div>
@@ -3269,7 +3273,7 @@ export function ChatPage() {
             {/* 端末インタフェースモードトグルスイッチ（Project 単位） */}
             {activeTabId && terminalModeMap[activeTabId] !== undefined && (
               <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Terminal Mode: ${terminalModeMap[activeTabId] ? 'ON' : 'OFF'} (PTY経由で claude --continue を起動)`}>
-                <span className={`text-xs ${terminalModeMap[activeTabId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>端末</span>
+                <span className={`text-xs ${terminalModeMap[activeTabId] ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>{t('chat.terminal')}</span>
                 <div className="relative" onClick={handleToggleTerminalMode}>
                   <div className={`w-8 h-4 rounded-full transition-colors ${terminalModeMap[activeTabId] ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
                   <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${terminalModeMap[activeTabId] ? 'translate-x-4' : ''}`}></div>
@@ -3302,7 +3306,7 @@ export function ChatPage() {
           {/* 履歴読み込み中インジケーター */}
           {activeTab?.loadingHistory && (
             <div className="flex justify-center py-2 mb-2">
-              <span className="text-xs text-[var(--text-faint)] animate-pulse">履歴を読み込み中...</span>
+              <span className="text-xs text-[var(--text-faint)] animate-pulse">{t('chat.historyLoading')}</span>
             </div>
           )}
           {!activeTab && (
@@ -3311,11 +3315,11 @@ export function ChatPage() {
                 <p className="text-lg mb-2 text-[var(--text-muted)]">DevRelay Chat</p>
                 <p className="text-sm">
                   {machineList.length > 0
-                    ? '左のサイドバーからプロジェクトを選んで開始'
-                    : '`m` でエージェント一覧を表示して開始できます'}
+                    ? t('chat.chooseProject')
+                    : t('chat.showAgents')}
                 </p>
                 <p className="text-xs mt-1">
-                  Shift+Enter で改行、Enter で送信、Ctrl+V で画像貼り付け
+                  {t('chat.keyboardHint')}
                 </p>
               </div>
             </div>
@@ -3327,7 +3331,7 @@ export function ChatPage() {
                   <span className="text-[var(--text-muted)] font-semibold"># {activeTab.customName || activeTab.projectName}</span> に接続中
                 </p>
                 <p className="text-xs mt-1">
-                  メッセージを入力して送信してください
+                  {t('chat.sendMessage')}
                 </p>
               </div>
             </div>
@@ -3390,7 +3394,7 @@ export function ChatPage() {
               onClick={() => fileInputRef.current?.click()}
               disabled={!connected || !activeTab}
               className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors"
-              title="ファイルを添付"
+              title={t('chat.attachFile')}
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
@@ -3402,7 +3406,7 @@ export function ChatPage() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={!activeTab ? 'プロジェクトを選択してください' : connected ? 'コマンドまたはメッセージを入力...' : '接続中...'}
+              placeholder={!activeTab ? t('chat.selectProject') : connected ? t('chat.enterMessage') : t('chat.connecting')}
               disabled={!connected || !activeTab}
               rows={1}
               className="flex-1 bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg px-4 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 placeholder-[var(--text-faint)]"
@@ -3418,7 +3422,7 @@ export function ChatPage() {
               disabled={!connected || !activeTab || (!input.trim() && pendingFiles.length === 0)}
               className="px-4 py-2 bg-[var(--accent-blue)] text-white rounded-lg hover:bg-[var(--accent-blue-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              送信
+              {t('chat.send')}
             </button>
           </div>
         </div>

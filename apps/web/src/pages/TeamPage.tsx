@@ -1,8 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { teams, machines, projects as projectsApi } from '../lib/api';
 import type { TeamInfo, TeamsResponse, Machine } from '../lib/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 export function TeamPage() {
+  const { t } = useLanguage();
   const [data, setData] = useState<TeamInfo[]>([]);
   const [allMachines, setAllMachines] = useState<Machine[]>([]);
   const [loading, setLoading] = useState(true);
@@ -175,7 +177,7 @@ export function TeamPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
@@ -183,7 +185,7 @@ export function TeamPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--text-primary)]">Team</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('team.title')}</h1>
         <p className="text-[var(--text-muted)] text-sm mt-1">
           Discord/Telegram: <code className="bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded text-xs">ask &lt;project&gt;: &lt;question&gt;</code>
         </p>

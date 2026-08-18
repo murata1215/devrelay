@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { machines } from '../lib/api';
 import type { Machine, MachineCreateResponse } from '../lib/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 export function MachinesPage() {
+  const { t } = useLanguage();
   const [data, setData] = useState<Machine[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -248,7 +250,7 @@ export function MachinesPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
@@ -329,7 +331,7 @@ export function MachinesPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)]">Agents</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('machines.title')}</h1>
         <button
           onClick={handleAddAgent}
           disabled={creating}

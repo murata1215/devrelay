@@ -5,6 +5,7 @@ import { useOrganization } from '../contexts/OrganizationContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { org as orgApi } from '../lib/api';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled } from '../utils/notification-sound';
+import { useLanguage } from '../contexts/LanguageContext';
 
 interface LayoutProps {
   children: ReactNode;
@@ -14,6 +15,7 @@ export function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth();
   const { organization } = useOrganization();
   const { theme, toggleTheme } = useTheme();
+  const { t } = useLanguage();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(() => isNotificationSoundEnabled());
@@ -29,16 +31,16 @@ export function Layout({ children }: LayoutProps) {
   const canSupervise = organization?.role === 'admin' || organization?.role === 'manager';
 
   const navigation = [
-    { name: 'Chat', href: '/chat' },
-    { name: 'Dashboard', href: '/' },
-    { name: 'Conversations', href: '/conversations' },
+    { name: t('nav.chat'), href: '/chat' },
+    { name: t('nav.dashboard'), href: '/' },
+    { name: t('nav.conversations'), href: '/conversations' },
     // Activity は監督者（admin/manager）のみ表示
-    ...(canSupervise ? [{ name: 'Activity', href: '/activity' }] : []),
-    { name: 'Dev Reports', href: '/dev-reports' },
-    { name: 'Agents', href: '/machines' },
-    { name: 'Team', href: '/team' },
-    { name: 'Projects', href: '/projects' },
-    { name: 'Settings', href: '/settings' },
+    ...(canSupervise ? [{ name: t('nav.activity'), href: '/activity' }] : []),
+    { name: t('nav.devReports'), href: '/dev-reports' },
+    { name: t('nav.agents'), href: '/machines' },
+    { name: t('nav.team'), href: '/team' },
+    { name: t('nav.projects'), href: '/projects' },
+    { name: t('nav.settings'), href: '/settings' },
   ];
 
   const isActive = (href: string) => {
@@ -91,7 +93,7 @@ export function Layout({ children }: LayoutProps) {
               <button
                 onClick={toggleTheme}
                 className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors"
-                title={theme === 'dark' ? 'ライトモード' : 'ダークモード'}
+                title={theme === 'dark' ? t('nav.lightMode') : t('nav.darkMode')}
               >
                 {theme === 'dark' ? (
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
@@ -106,7 +108,7 @@ export function Layout({ children }: LayoutProps) {
               <button
                 onClick={toggleSound}
                 className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors"
-                title={soundEnabled ? '通知音オフ' : '通知音オン'}
+                title={soundEnabled ? t('nav.soundOff') : t('nav.soundOn')}
               >
                 {soundEnabled ? (
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
@@ -123,7 +125,7 @@ export function Layout({ children }: LayoutProps) {
                 onClick={logout}
                 className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-sm"
               >
-                Logout
+                {t('nav.logout')}
               </button>
             </div>
 
@@ -146,7 +148,7 @@ export function Layout({ children }: LayoutProps) {
               <button
                 onClick={toggleSound}
                 className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                title={soundEnabled ? '通知音オフ' : '通知音オン'}
+                title={soundEnabled ? t('nav.soundOff') : t('nav.soundOn')}
               >
                 {soundEnabled ? (
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
@@ -163,7 +165,7 @@ export function Layout({ children }: LayoutProps) {
                 className="inline-flex items-center justify-center p-2 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white"
                 aria-expanded={mobileMenuOpen}
               >
-                <span className="sr-only">Open main menu</span>
+                <span className="sr-only">{t('nav.openMenu')}</span>
                 {mobileMenuOpen ? (
                   <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -208,7 +210,7 @@ export function Layout({ children }: LayoutProps) {
                   }}
                   className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-sm"
                 >
-                  Logout
+                  {t('nav.logout')}
                 </button>
               </div>
             </div>

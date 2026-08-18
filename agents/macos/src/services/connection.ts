@@ -743,7 +743,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; model?: string; aiTool?: AiTool }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -808,6 +808,7 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     files: undefined,
     execPrompt,  // BuildLog AI 要約のコンテキスト用に exec プロンプトを伝搬
     model: payload.model,  // Claude SDK モデル継承（#251）
+    isWCommand: payload.isWCommand,  // #312: Codex w コマンドのサンドボックス切替判定に使用
   });
 }
 
@@ -823,7 +824,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; model?: string }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -1081,6 +1082,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     skipPermissions: serverSkipPermissions,
     disableAsk: serverDisableAsk,
     model: payload.model,  // Claude SDK モデル指定（#251）
+    isWCommand: payload.isWCommand,  // #312: Codex の w コマンドのみ danger-full-access に切り替える
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）

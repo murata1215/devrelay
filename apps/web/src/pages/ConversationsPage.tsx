@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { conversations, org as orgApi, getToken } from '../lib/api';
 import type { ConversationItem, ConversationsResponse, MessageFileMeta, OrgSupervisedMember } from '../lib/api';
 import { useOrganization } from '../contexts/OrganizationContext';
+import { useLanguage } from '../contexts/LanguageContext';
 
 /** トークン数を K 単位で表示（例: 19963 → "20.0K"） */
 function formatTokens(n: number): string {
@@ -103,6 +104,7 @@ function FileList({ files, label, onImageClick }: { files: MessageFileMeta[]; la
 const PAGE_SIZE = 50;
 
 export function ConversationsPage() {
+  const { t } = useLanguage();
   const [data, setData] = useState<ConversationsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -163,8 +165,8 @@ export function ConversationsPage() {
   if (loading && !data) {
     return (
       <div className="p-6">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Conversations</h1>
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">{t('conversations.title')}</h1>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
@@ -172,7 +174,7 @@ export function ConversationsPage() {
   if (error && !data) {
     return (
       <div className="p-6">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Conversations</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">{t('conversations.title')}</h1>
         <div className="text-[var(--text-danger)]">{error}</div>
       </div>
     );
@@ -185,7 +187,7 @@ export function ConversationsPage() {
   return (
     <div className="p-6">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)]">Conversations</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('conversations.title')}</h1>
         {canSupervise && supervised.length > 0 && (
           <div className="flex items-center gap-2">
             <label className="text-sm text-[var(--text-muted)]">閲覧対象:</label>

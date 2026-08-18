@@ -364,6 +364,12 @@ export interface ConversationExecPayload {
    * Agent はハードコードされたデフォルト（'claude'）にフォールバックしてしまう。
    */
   aiTool?: AiTool;
+  /**
+   * w コマンド（ドキュメント更新 + git commit/push）フラグ（#312）。
+   * Codex の workspace-write サンドボックスは .git を read-only にし commit が失敗するため、
+   * true の場合 Agent 側で Codex の sandbox_mode を danger-full-access に切り替える。
+   */
+  isWCommand?: boolean;
 }
 
 export interface SessionRestoredPayload {

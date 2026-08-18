@@ -1319,7 +1319,14 @@ Flutter アプリを USB 接続された実機（iPhone/Android）にチャッ�
 - **対象ファイル**: server=`schema.prisma`/`services/org-control.ts`(新)/`services/command-handler.ts`/`mcp/tools.ts`/`routes/organization.ts`/`routes/api.ts`、web=`lib/api.ts`/`pages/SettingsPage.tsx`/`pages/ConversationsPage.tsx`（計9ファイル）。Agent/shared/Discord/Telegram 変更なし
 - **v2 対象外**: ツール承認の manager 代行、コマンド事前承認フロー、監査ログ export、manager 階層（manager の manager）
 
-## `w` コマンド（ラップアップ）の設計 (#288, #293, #304)
+## WebUI ローカライズと Settings ナビゲーション (#312, #313)
+
+- **言語設定**: WebUI は `LanguageContext` を唯一の表示言語ソースとし、`en`（既定）/`ja` のみを受け付ける。`localStorage` の `devrelay-language` は初期表示のちらつき防止キャッシュ、`UserSettings.language` はサインイン済みアカウント間で同期する正本。未設定・不正値は必ず `en` にフォールバックする
+- **文言と日時**: UI固定文言は `apps/web/src/i18n/messages.ts` に置き、表示側は `useLanguage().t()` を使用する。プロジェクト名・会話本文・API/Agentが返す生データは翻訳しない。日時・数値は選択言語のロケールを明示して整形する
+- **Settingsタブ**: `general` / `ai` / `agent` / `integrations` / `organization` / `system` の6分類を `SettingsPage` の固定タブ定義に集約する。選択値は `?tab=` に反映し、`general` は既定としてクエリを省略する。不正値はGeneralとして扱う
+- **状態保持**: Settingsのカテゴリ切替は条件レンダリングでアンマウントせず、`hidden` による表示切替にする。これによりAgreement、Allowed Tools、APIトークン発行直後の一時表示などをタブ移動で失わない。タブUIは `tablist` / `tab` / `tabpanel` と左右矢印・Home・End操作を維持する
+
+## `w` コマンド（ラップアップ）の設計 (#288, #293, #304, #314)
 
 `w` は「ドキュメント更新＋コミット/プッシュ」のワンショット exec。プロンプト実体は
 `apps/server/src/services/command-parser.ts` の `export const W_COMMAND_PROMPT` 定数 1 箇所で、
@@ -1329,6 +1336,7 @@ Flutter アプリを USB 接続された実機（iPhone/Android）にチャッ�
 - **非 git 対応 (#293)**: 冒頭で `git rev-parse --is-inside-work-tree` を判定して 2 分岐。非 git ではコミット/プッシュを行わず、会話履歴とディレクトリ内容から作業内容を把握して README.md / MEMORY.md を更新（無ければ新規作成）。他の .md は既存時のみ更新
 - **設計判断**: 新規作成は README.md と MEMORY.md のみ（changelog.md・CLAUDE.md まで自動生成すると試用ディレクトリにノイズが増える）。git 側の文面は変更せず挙動不変。**どちらの分岐にも「対象が無ければ推測せず終了」のガードを置く**
 - **`x` の実行済み判定は W_COMMAND_PROMPT から派生させる (#304)**: `command-handler.ts` の `handleClear()` は BuildLog.prompt の前方一致で「セッション内で `w` を実行したか」を判定し、未実行なら `x` 時に警告を出す。この判定プレフィックスを独自にハードコードすると `W_COMMAND_PROMPT` の書き換え時に追従し忘れて誤警告になる事故が **2 度**発生した（#86→#90、#293→#304）。そのため `command-handler.ts` は `command-parser.ts` から `W_COMMAND_PROMPT` を import し、`W_PROMPT_PREFIX = W_COMMAND_PROMPT.slice(0, 30)` の**派生**で判定する。`W_COMMAND_PROMPT` の冒頭を変える場合、この判定は自動追従するため個別修正は不要
+- **Codex のみ danger-full-access (#314)**: Codex CLI の `workspace-write` サンドボックスは `.git/` をハードコードで read-only にするため、`w` の `git commit`/`git push` が `Unable to create '.git/index.lock': Read-only file system` で失敗する。`--add-dir` は `codex exec`（新規セッション）にのみ存在し `codex exec resume` には無いため resume 経由の `w` では使えない。対策として、サーバーが `customPrompt` を `W_PROMPT_PREFIX` 前方一致（同じ派生元）で判定し `isWCommand` フラグを `execConversation()` → Agent へ伝搬、Agent 側の Codex exec 分岐のみ `sandbox_mode="danger-full-access"` に切り替える（`w` 以外の通常 Codex exec は従来どおり `workspace-write`）。`w` のプロンプトはサーバー制御の固定文面（ユーザー入力ではない）であることを根拠に許容。SSH push のネットワークサンドボックス問題も `danger-full-access` で併せて解消される
 
 ## Agent 自動更新（サーバー主導）(#296)
 

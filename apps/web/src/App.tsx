@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { OrganizationProvider } from './contexts/OrganizationContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { Layout } from './components/Layout';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
@@ -54,11 +55,12 @@ function ProtectedContent() {
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const { t } = useLanguage();
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[var(--bg-base)]">
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
@@ -72,11 +74,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const { t } = useLanguage();
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[var(--bg-base)]">
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
@@ -127,7 +130,9 @@ export default function App() {
     <ThemeProvider>
       <BrowserRouter basename="/">
         <AuthProvider>
-          <AppRoutes />
+          <LanguageProvider>
+            <AppRoutes />
+          </LanguageProvider>
         </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>

@@ -6,6 +6,7 @@ import type {
   OrgSessionMessagesResponse,
 } from '../lib/api';
 import { useOrganization } from '../contexts/OrganizationContext';
+import { useLanguage } from '../contexts/LanguageContext';
 
 /** ISO 文字列を「YYYY/MM/DD」に変換（日付グループ用） */
 function dateKey(iso: string): string {
@@ -27,6 +28,7 @@ const PAGE_LIMIT = 30;
  * ユーザー一覧 → セッション要約タイムライン → クリックで会話全文表示。過去検索・期間絞り込み対応。
  */
 export function MemberActivityPage() {
+  const { t } = useLanguage();
   const { organization } = useOrganization();
   const canSupervise = organization?.role === 'admin' || organization?.role === 'manager';
 
@@ -183,7 +185,7 @@ export function MemberActivityPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)]">Member Activity</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('activity.title')}</h1>
         {/* ユーザー選択 */}
         <select
           value={selectedUserId}

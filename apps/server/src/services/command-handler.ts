@@ -775,12 +775,18 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
 
   // #309: model は渡さず execConversation 側（agent-manager.ts）で aiTool に応じたモデル設定を解決する
   // （command-handler で claude 固定キーを直読みすると codex 等の他ツールに対応できないため。単一情報源化）
+  // #312: w コマンド（W_COMMAND_PROMPT）かどうかを判定して Agent に伝搬する。
+  // Codex の workspace-write サンドボックスは .git を read-only にし commit が失敗するため、
+  // w 実行時のみ Agent 側で danger-full-access に切り替える。
+  const isWCommand = customPrompt?.startsWith(W_PROMPT_PREFIX) ?? false;
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
     session.project.path,
     context.userId,
     customPrompt,
+    undefined,
+    isWCommand,
   );
 
   // Return empty since progress message is already sent

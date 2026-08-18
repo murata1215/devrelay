@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { projects, history } from '../lib/api';
 import type { Project, BuildLogItem } from '../lib/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 /** 日付を M/D 形式にフォーマット */
 function formatShortDate(dateStr: string): string {
@@ -175,6 +176,7 @@ function BuildHistoryModal({ project, onClose }: BuildHistoryModalProps) {
 }
 
 export function ProjectsPage() {
+  const { t } = useLanguage();
   const [data, setData] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -208,7 +210,7 @@ export function ProjectsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
@@ -223,7 +225,7 @@ export function ProjectsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-[var(--text-primary)]">Projects</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('projects.title')}</h1>
 
       {data.length === 0 ? (
         <div className="bg-[var(--bg-secondary)] rounded-lg p-6 text-center">

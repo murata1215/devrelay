@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { settings, platforms, services, agreementTemplate, allowedTools, tokens as tokensApi, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity, type OrgRole, type OrgAuditLogEntry, type PersonalAccessTokenInfo } from '../lib/api';
 // #310: vite.config.ts の resolve.alias で @devrelay/shared を
 // packages/shared/src/index.ts（TS ソース）に直接向けているため、
@@ -8,6 +9,22 @@ import { useAuth } from '../contexts/AuthContext';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificationSound } from '../utils/notification-sound';
 import { getDocPanelSettings, setDocPanelSettings, type DocPanelSettings } from '../utils/doc-panel-settings';
+import { useLanguage } from '../contexts/LanguageContext';
+
+type SettingsTab = 'general' | 'ai' | 'agent' | 'integrations' | 'organization' | 'system';
+
+const SETTINGS_TABS: { id: SettingsTab; labelKey: 'settings.tabs.general' | 'settings.tabs.ai' | 'settings.tabs.agent' | 'settings.tabs.integrations' | 'settings.tabs.organization' | 'settings.tabs.system'; icon: string }[] = [
+  { id: 'general', labelKey: 'settings.tabs.general', icon: '⚙️' },
+  { id: 'ai', labelKey: 'settings.tabs.ai', icon: '✨' },
+  { id: 'agent', labelKey: 'settings.tabs.agent', icon: '🤖' },
+  { id: 'integrations', labelKey: 'settings.tabs.integrations', icon: '🔗' },
+  { id: 'organization', labelKey: 'settings.tabs.organization', icon: '🏢' },
+  { id: 'system', labelKey: 'settings.tabs.system', icon: '🖥️' },
+];
+
+function isSettingsTab(value: string | null): value is SettingsTab {
+  return SETTINGS_TABS.some((tab) => tab.id === value);
+}
 
 /** API キーフィールドの定義 */
 interface ApiKeyFieldDef {
@@ -690,6 +707,31 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
 
 export function SettingsPage() {
   const { user } = useAuth();
+  const { language, setLanguage, t } = useLanguage();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement>>>({});
+  const requestedTab = searchParams.get('tab');
+  const activeTab: SettingsTab = isSettingsTab(requestedTab) ? requestedTab : 'general';
+
+  const selectTab = (tab: SettingsTab) => {
+    const next = new URLSearchParams(searchParams);
+    if (tab === 'general') next.delete('tab');
+    else next.set('tab', tab);
+    setSearchParams(next, { replace: true });
+  };
+
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % SETTINGS_TABS.length;
+    if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = SETTINGS_TABS.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextTab = SETTINGS_TABS[nextIndex].id;
+    selectTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  };
   const [data, setData] = useState<Record<string, string>>({});
   const [linkedPlatforms, setLinkedPlatforms] = useState<LinkedPlatform[]>([]);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
@@ -697,6 +739,19 @@ export function SettingsPage() {
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [savingLanguage, setSavingLanguage] = useState(false);
+
+  const handleLanguageChange = async (value: 'en' | 'ja') => {
+    setSavingLanguage(true);
+    setError('');
+    try {
+      await setLanguage(value);
+    } catch {
+      setError(t('settings.language.saveFailed'));
+    } finally {
+      setSavingLanguage(false);
+    }
+  };
 
   // API キー入力用のステート（キー名 → 入力値）
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
@@ -1195,7 +1250,7 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-[var(--text-primary)]">Settings</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('settings.title')}</h1>
 
       {error && (
         <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] text-[var(--text-danger)] px-4 py-3 rounded">
@@ -1209,11 +1264,62 @@ export function SettingsPage() {
         </div>
       )}
 
+      <div
+        role="tablist"
+        aria-label={t('settings.title')}
+        className="flex gap-1 overflow-x-auto rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-1"
+      >
+        {SETTINGS_TABS.map((tab, index) => {
+          const selected = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              ref={(node) => { tabRefs.current[tab.id] = node ?? undefined; }}
+              id={`settings-tab-${tab.id}`}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={`settings-panel-${tab.id}`}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => selectTab(tab.id)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
+              className={`shrink-0 rounded-md px-3 py-2 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] ${
+                selected
+                  ? 'bg-[var(--bg-base)] text-[var(--text-primary)] shadow-sm'
+                  : 'text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
+              }`}
+            >
+              <span aria-hidden="true" className="mr-1.5">{tab.icon}</span>
+              {t(tab.labelKey)}
+            </button>
+          );
+        })}
+      </div>
+
+      <div id="settings-panel-general" role="tabpanel" aria-labelledby="settings-tab-general" hidden={activeTab !== 'general'} className="space-y-6">
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">{t('settings.language.title')}</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-4">{t('settings.language.description')}</p>
+        <select
+          aria-label={t('settings.language.title')}
+          value={language}
+          disabled={savingLanguage}
+          onChange={(event) => handleLanguageChange(event.target.value as 'en' | 'ja')}
+          className="w-full max-w-xs bg-[var(--input-bg)] text-[var(--text-primary)] rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] disabled:opacity-50"
+        >
+          <option value="en">{t('settings.language.english')}</option>
+          <option value="ja">{t('settings.language.japanese')}</option>
+        </select>
+      </div>
+      </div>
+
       {/* Enterprise（組織）Section */}
-      <EnterpriseSection userEmail={user?.email ?? null} />
+      <div id="settings-panel-organization" role="tabpanel" aria-labelledby="settings-tab-organization" hidden={activeTab !== 'organization'}>
+        <EnterpriseSection userEmail={user?.email ?? null} />
+      </div>
 
       {/* API Keys Section — 3 社分のキー入力 */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div id="settings-panel-ai" role="tabpanel" aria-labelledby="settings-tab-ai" hidden={activeTab !== 'ai'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">API Keys</h2>
         <p className="text-[var(--text-muted)] text-sm mb-6">
           Configure API keys for AI features. Keys are encrypted and stored securely.
@@ -1274,7 +1380,7 @@ export function SettingsPage() {
       </div>
 
       {/* API Tokens Section — Personal Access Token (#271) */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div id="settings-panel-integrations" role="tabpanel" aria-labelledby="settings-tab-integrations" hidden={activeTab !== 'integrations'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">API Tokens</h2>
         <p className="text-[var(--text-muted)] text-sm mb-4">
           Personal Access Tokens for MCP endpoints. Use these for scripts, CI/CD, or automation.
@@ -1398,7 +1504,7 @@ export function SettingsPage() {
       </div>
 
       {/* AI Provider Settings Section — 機能ごとのプロバイダー選択 */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div hidden={activeTab !== 'ai'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">AI Provider Settings</h2>
         <p className="text-[var(--text-muted)] text-sm mb-6">
           Select which AI provider to use for each feature. The corresponding API key must be configured above.
@@ -1428,7 +1534,7 @@ export function SettingsPage() {
       </div>
 
       {/* AI Model Settings Section — ツール別・plan/exec 別のデフォルトモデル選択（#309） */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div hidden={activeTab !== 'ai'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">AI Model Settings</h2>
         <p className="text-[var(--text-muted)] text-sm mb-6">
           Plan / Exec モードで使用する AI モデルのデフォルトを AI ツールごとに設定します。
@@ -1499,7 +1605,7 @@ export function SettingsPage() {
       </div>
 
       {/* #296: Agent 自動更新のグローバル kill switch */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div id="settings-panel-agent" role="tabpanel" aria-labelledby="settings-tab-agent" hidden={activeTab !== 'agent'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Agent Auto Update</h2>
         <p className="text-[var(--text-muted)] text-sm mb-4">
           アイドル状態の Agent を自動で最新版に更新します（新しいコミットは 2 時間経過後に配布）。
@@ -1536,7 +1642,7 @@ export function SettingsPage() {
       </div>
 
       {/* Agreement Template Section */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div hidden={activeTab !== 'agent'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Agreement Template</h2>
         <p className="text-[var(--text-muted)] text-sm mb-2">
           Customize the DevRelay Agreement rules applied via the <code className="bg-[var(--bg-tertiary)] px-1 rounded">ag</code> command.
@@ -1584,7 +1690,7 @@ export function SettingsPage() {
 
       {/* Allowed Tools Section — プランモード許可ツール（Linux / Windows 横並び） */}
       {atData && (
-        <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <div hidden={activeTab !== 'agent'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
           <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Allowed Tools (Plan Mode)</h2>
           <p className="text-[var(--text-muted)] text-sm mb-4">
             Commands allowed in plan mode. One command per line (e.g. <code className="bg-[var(--bg-tertiary)] px-1 rounded">Bash(pm2 logs)</code>).
@@ -1674,7 +1780,7 @@ export function SettingsPage() {
       )}
 
       {/* Bot Tokens Section */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div hidden={activeTab !== 'integrations'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Bot Tokens</h2>
         <p className="text-[var(--text-muted)] text-sm mb-6">
           Configure bot tokens for Discord and Telegram.
@@ -1786,7 +1892,7 @@ export function SettingsPage() {
       </div>
 
       {/* Connected Platforms Section */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div hidden={activeTab !== 'integrations'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Connected Platforms</h2>
         <p className="text-[var(--text-muted)] text-sm mb-6">
           Link your Discord or Telegram account to control your machines from those platforms.
@@ -1866,7 +1972,7 @@ export function SettingsPage() {
       </div>
 
       {/* Service Management Section */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div id="settings-panel-system" role="tabpanel" aria-labelledby="settings-tab-system" hidden={activeTab !== 'system'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Service Management</h2>
         <p className="text-[var(--text-muted)] text-sm mb-6">
           Restart DevRelay services. Use with caution.
@@ -1935,7 +2041,7 @@ export function SettingsPage() {
       </div>
 
       {/* Chat Display Section */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+      <div hidden={activeTab !== 'general'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Chat Display</h2>
 
         {/* ユーザー設定 */}

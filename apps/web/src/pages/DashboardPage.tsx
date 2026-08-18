@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { dashboard } from '../lib/api';
 import type { DashboardStats } from '../lib/api';
+import { useLanguage } from '../contexts/LanguageContext';
 
 export function DashboardPage() {
+  const { t } = useLanguage();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -25,7 +27,7 @@ export function DashboardPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
@@ -42,7 +44,7 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-[var(--text-primary)]">Dashboard</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('dashboard.title')}</h1>
 
       {/* Stats cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">

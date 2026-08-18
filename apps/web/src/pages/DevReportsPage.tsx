@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useLanguage } from '../contexts/LanguageContext';
 
 /** プロジェクト別の未処理会話数 */
 interface ProjectCount {
@@ -27,6 +28,7 @@ function getAuthHeaders(): HeadersInit {
 }
 
 export function DevReportsPage() {
+  const { locale, t } = useLanguage();
   const [projects, setProjects] = useState<ProjectCount[]>([]);
   const [reports, setReports] = useState<ReportItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,12 +52,12 @@ export function DevReportsPage() {
         const repData = await repRes.json();
         setReports(repData.reports);
       }
-    } catch (err) {
-      setError('データの取得に失敗しました');
+    } catch {
+      setError(t('reports.failedToLoad'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     fetchData();
@@ -87,14 +89,14 @@ export function DevReportsPage() {
 
       if (!res.ok) {
         const data = await res.json();
-        setError(data.error || 'レポート生成の開始に失敗しました');
+        setError(data.error || t('reports.failedToStart'));
         return;
       }
 
       // データを再取得してリストに反映
       await fetchData();
     } catch {
-      setError('レポート生成の開始に失敗しました');
+      setError(t('reports.failedToStart'));
     } finally {
       setGenerating((prev) => {
         const next = new Set(prev);
@@ -106,7 +108,7 @@ export function DevReportsPage() {
 
   /** レポートを削除 */
   const handleDelete = async (reportId: string) => {
-    if (!confirm('このレポートを削除しますか？')) return;
+    if (!confirm(t('reports.confirmDelete'))) return;
 
     try {
       const res = await fetch(`/api/dev-reports/${reportId}`, {
@@ -118,7 +120,7 @@ export function DevReportsPage() {
         await fetchData();
       }
     } catch {
-      setError('削除に失敗しました');
+      setError(t('reports.failedToDelete'));
     }
   };
 
@@ -131,7 +133,7 @@ export function DevReportsPage() {
   /** 日時フォーマット */
   const formatDate = (iso: string) => {
     const d = new Date(iso);
-    return d.toLocaleDateString('ja-JP', {
+    return d.toLocaleDateString(locale, {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -143,14 +145,14 @@ export function DevReportsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-[var(--text-muted)]">Loading...</div>
+        <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
       </div>
     );
   }
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Dev Reports</h1>
+      <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">{t('reports.title')}</h1>
 
       {error && (
         <div className="bg-[var(--bg-danger)] border border-[var(--border-danger)] rounded-lg p-4 mb-6">
@@ -162,7 +164,7 @@ export function DevReportsPage() {
       <div className="mb-8">
         <h2 className="text-lg font-semibold text-[var(--text-secondary)] mb-4">Projects</h2>
         {projects.length === 0 ? (
-          <p className="text-[var(--text-faint)] text-sm">No conversations found.</p>
+          <p className="text-[var(--text-faint)] text-sm">{t('reports.noConversations')}</p>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {projects.map((proj) => (

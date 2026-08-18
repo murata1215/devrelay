@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
@@ -8,6 +9,7 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
+  const { t } = useLanguage();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -19,7 +21,7 @@ export function LoginPage() {
       await login(email, password);
       navigate('/');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setError(err instanceof Error ? err.message : t('auth.loginFailed'));
     } finally {
       setLoading(false);
     }
@@ -31,7 +33,7 @@ export function LoginPage() {
         <div>
           <h2 className="text-center text-3xl font-bold text-[var(--text-primary)]">DevRelay</h2>
           <p className="mt-2 text-center text-sm text-[var(--text-muted)]">
-            Sign in to your account
+            {t('auth.signInToAccount')}
           </p>
         </div>
 
@@ -48,7 +50,7 @@ export function LoginPage() {
               <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
             </svg>
-            Sign in with Google
+            {t('auth.googleSignIn')}
           </button>
         </div>
 
@@ -58,7 +60,7 @@ export function LoginPage() {
             <div className="w-full border-t border-[var(--border-color)]" />
           </div>
           <div className="relative flex justify-center text-sm">
-            <span className="px-2 bg-[var(--bg-secondary)] text-[var(--text-faint)]">or</span>
+            <span className="px-2 bg-[var(--bg-secondary)] text-[var(--text-faint)]">{t('auth.or')}</span>
           </div>
         </div>
 
@@ -72,7 +74,7 @@ export function LoginPage() {
           <div className="space-y-4">
             <div>
               <label htmlFor="email" className="block text-sm font-medium text-[var(--text-secondary)]">
-                Email address
+                {t('auth.email')}
               </label>
               <input
                 id="email"
@@ -89,7 +91,7 @@ export function LoginPage() {
 
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-[var(--text-secondary)]">
-                Password
+                {t('auth.password')}
               </label>
               <input
                 id="password"
@@ -110,13 +112,13 @@ export function LoginPage() {
             disabled={loading}
             className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[var(--accent-blue)] disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? 'Signing in...' : 'Sign in'}
+            {loading ? t('auth.signingIn') : t('auth.signIn')}
           </button>
 
           <p className="text-center text-sm text-[var(--text-muted)]">
-            Don't have an account?{' '}
+            {t('auth.noAccount')}{' '}
             <Link to="/register" className="text-[var(--text-link)] hover:opacity-80">
-              Sign up
+              {t('auth.signUp')}
             </Link>
           </p>
         </form>

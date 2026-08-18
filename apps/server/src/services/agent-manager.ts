@@ -1496,7 +1496,7 @@ export async function clearConversation(machineId: string, sessionId: string, pr
   });
 }
 
-export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string, model?: string) {
+export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string, model?: string, isWCommand?: boolean) {
   // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
   const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
   // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
@@ -1535,6 +1535,9 @@ export async function execConversation(machineId: string, sessionId: string, pro
       terminalMode,
       model: resolvedModel,
       aiTool: session?.aiTool as AiTool | undefined,
+      // #312: w コマンド（ドキュメント更新+commit/push）は Codex の workspace-write サンドボックスだと
+      // .git が read-only で commit が失敗するため、Agent 側で sandbox_mode を danger-full-access に切り替える
+      isWCommand,
     }
   });
 }

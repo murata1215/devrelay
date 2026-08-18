@@ -335,6 +335,13 @@ export interface SendPromptOptions {
    * 未指定なら各 CLI のデフォルト
    */
   model?: string;
+  /**
+   * w コマンド（ドキュメント更新 + git commit/push）実行フラグ（#312）。
+   * Codex の workspace-write サンドボックスは .git を read-only にするため commit が
+   * `Unable to create '.git/index.lock': Read-only file system` で失敗する。
+   * true の場合、Codex の sandbox_mode を danger-full-access に切り替える。
+   */
+  isWCommand?: boolean;
 }
 
 export async function sendPromptToAi(
@@ -611,8 +618,12 @@ export async function sendPromptToAi(
     // `-s/--sandbox` ではなく `-c sandbox_mode=` を使う: `codex exec resume` には `-s` が存在しないため、
     // `-c` に統一することで新規／resume でフラグ列を完全に共通化できる（実測で確認済み）。
     // 値は TOML としてパースされるため文字列は内側にダブルクォートが必要（例: sandbox_mode="read-only"）。
+    // #312: w コマンドのみ danger-full-access。workspace-write は .git をハードコードで read-only にし
+    // git commit が失敗するため（サーバー制御の固定プロンプトのみが対象）。
     if (options.usePlanMode) {
       args.push('-c', 'sandbox_mode="read-only"');
+    } else if (options.isWCommand) {
+      args.push('-c', 'sandbox_mode="danger-full-access"', '-c', 'approval_policy="never"');
     } else {
       args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
     }

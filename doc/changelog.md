@@ -6,6 +6,50 @@
 
 ## 実装済み機能
 
+### #314: Codex CLI の `w` コマンドのみ `sandbox_mode="danger-full-access"` に切替 (2026-08-19)
+
+#### 背景
+- dangou-card（別プロジェクト）で Codex の `w` が `fatal: Unable to create '.git/index.lock': Read-only file system` で失敗する事例をユーザーが持ち込み調査
+- 真因は Codex の `workspace-write` サンドボックスが `.git/` をハードコードで read-only にすること。`--add-dir` は `codex exec`（新規セッション）にのみ存在し `codex exec resume` には無いため、resume 経由で送られる `w` では使えない。SSH 経由の `git push` もネットワークサンドボックスで別途失敗しうる
+- ユーザー判断で「`w` 実行時だけ `danger-full-access`」を採用（`--add-dir` への切替や Agent 側での git 分離実行などの代替案は不採用）
+
+#### 実装内容
+- サーバー: `apps/server/src/services/agent-manager.ts` の `execConversation()` に `isWCommand` 引数を追加。`apps/server/src/services/command-handler.ts` の `handleExec()` が `customPrompt` を `W_COMMAND_PROMPT` の前方一致（`W_PROMPT_PREFIX`）で判定し、`w` コマンド実行時のみ `isWCommand: true` を伝搬する
+- 共有型: `packages/shared/src/types.ts` の `ConversationExecPayload` に `isWCommand?: boolean` を追加
+- Agent（Linux/macOS/Windows 3OS 共通）: `connection.ts` の `handleConversationExec()`/`handleAiPrompt()` の型と伝搬経路に `isWCommand` を追加。`ai-runner.ts` の `SendPromptOptions` に `isWCommand?: boolean` を追加し、Codex exec のサンドボックス分岐を `usePlanMode(read-only) → isWCommand(danger-full-access) → 通常(workspace-write)` の3分岐に変更
+- 通常の Codex exec（`w` 以外）は従来どおり `workspace-write` のまま。Claude/Gemini/Devin には影響なし
+
+#### 検証
+- `pnpm build` green（shared / server / Linux・macOS・Windows Agent / web）
+- `apps/web/dist` の `require(` 混入チェック（#310 再発防止）も 0 を再確認
+- 実チャットでの Codex `w` 実機確認は未実施（本機に Codex CLI はインストール済みだが、テスト用 git repo を汚さないため実行は見送り。コードレビューベースでの実装完了）
+
+---
+
+### #313: Settings を目的別の6タブUIへ再編 (2026-08-19)
+
+- Settings の縦一列レイアウトを General / AI / Agent / Integrations / Organization / System の6カテゴリに分割
+- 選択タブを `/settings?tab=<id>` に保持し、共有・再読み込みで同じカテゴリを開ける。General は既定のためクエリを省略
+- 横スクロール対応のアクセシブルなタブバー（`tablist` / `tab` / `tabpanel`、左右矢印・Home・End操作）を追加
+- 各カテゴリの内容はアンマウントせず `hidden` で切替。Agreement、Allowed Tools、APIトークン発行直後の表示など、未保存または一時的な画面状態をタブ移動で失わない
+
+---
+
+### #312: WebUI の英語／日本語ローカライズ基盤とアカウント別言語設定 (2026-08-19)
+
+#### 実装内容
+- `apps/web/src/contexts/LanguageContext.tsx` と型安全なメッセージカタログを追加。外部i18nライブラリは導入せず、英語（既定）・日本語を即時切替できるようにした
+- Settings ページ先頭に Language プルダウン（English / 日本語）を追加。選択は `localStorage` にキャッシュし、既存の `UserSettings.language` にアカウント設定として保存するため、サインイン済みの別ブラウザでも復元される
+- `document.documentElement.lang`、主要ナビゲーション、認証画面、通知バナー、Settings、主要ページ見出し、チャットの接続・入力・進捗表示を翻訳キーへ移行。日時表示も選択ロケールに追従する
+- API の汎用設定更新エンドポイントで `language` の値を `en` / `ja` に検証。不正な既存値・未設定値は英語へ安全にフォールバックする。DBマイグレーションは不要
+
+#### 検証
+- `pnpm --filter web build` green
+- `pnpm build` green（shared / server / Linux・macOS・Windows Agent / web）
+- `pnpm --filter web lint` は既存の React Hooks / Fast Refresh ルール違反を含め失敗。今回追加した `LanguageContext` の Fast Refresh 指摘は局所的に抑制し、既存違反は変更していない
+
+---
+
 ### #311: Codex モデルカタログを実機の正しい一覧に更新（GPT-5.6 追加 + 存在しない ID を削除） (2026-08-18)
 
 #### 背景
