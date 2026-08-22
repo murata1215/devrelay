@@ -52,6 +52,10 @@ const ASK_SCRIPTS_DIR = path.join(ASK_SKILL_DIR, 'scripts');
 const INVENTORY_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-list-inventory');
 const INVENTORY_SCRIPTS_DIR = path.join(INVENTORY_SKILL_DIR, 'scripts');
 
+/** devrelay-read-messages スキルディレクトリ（他プロジェクトの会話履歴読み取り、#324） */
+const READ_MSG_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-read-messages');
+const READ_MSG_SCRIPTS_DIR = path.join(READ_MSG_SKILL_DIR, 'scripts');
+
 /** devrelay-create-project スキルディレクトリ */
 const CREATE_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-create-project');
 const CREATE_SCRIPTS_DIR = path.join(CREATE_SKILL_DIR, 'scripts');
@@ -473,6 +477,245 @@ if command -v jq &>/dev/null; then
   echo "=== $TARGET_NAME からの回答 ==="
   echo ""
   echo "$BODY" | jq -r '.answer'
+else
+  echo "エラー: jq が必要です"
+  exit 1
+fi
+`;
+}
+
+/**
+ * read-messages SKILL.md の内容を生成（他プロジェクトの会話履歴読み取り、#324）
+ */
+function generateReadMessagesSkillMd(): string {
+  return `---
+name: devrelay-read-messages
+description: 他プロジェクトの直近の会話履歴を読み取ります。「pixblogで何を話したか見せて」「あちらの直近のAI回答を確認して」など、別プロジェクトの履歴参照に使用します。
+allowed-tools: Bash(bash ~/.claude/skills/devrelay-read-messages/scripts/read.sh *)
+---
+
+## DevRelay 会話履歴読み取り（クロスプロジェクト）
+
+他プロジェクトの直近の会話履歴（Message）を読み取ります。**読み取り専用**で相手の AI セッションは起動しません
+（\\\`devrelay-ask-member\\\` とは別物。課金なし・待ち時間なし）。
+
+### メンバー一覧を確認
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-read-messages/scripts/read.sh --list
+\\\`\\\`\\\`
+
+### 直近の会話履歴を取得
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-read-messages/scripts/read.sh --project <プロジェクト名> --limit 10
+\\\`\\\`\\\`
+
+例:
+- \\\`bash ~/.claude/skills/devrelay-read-messages/scripts/read.sh --project pixblog --limit 10\\\`
+- \\\`bash ~/.claude/skills/devrelay-read-messages/scripts/read.sh --project pixblog --role assistant --limit 5\\\`（AI の回答だけ）
+
+### オプション
+- \\\`--limit <N>\\\`: 直近何件取得するか（既定 20、上限 50）
+- \\\`--role user|assistant\\\`: 片方だけに絞り込み（省略時は両方、system は含まれません）
+
+### 宛先が複数ある場合
+
+同じ名前のプロジェクトが複数のマシンに存在する場合、スクリプトは**勝手に選ばず候補一覧を出してエラー終了**します。
+\\\`--machine <マシン名>\\\` でマシンを指定してください。
+
+### 注意事項
+- **対象は WebUI の Team ページで登録されたプロジェクトだけです**（\\\`--list\\\` に出るものが全て）。一覧に無いプロジェクトへは送れません（サーバーが 403 を返します）
+- 応答が長い場合があります。必要な件数だけ \\\`--limit\\\` で絞ってください
+`;
+}
+
+/**
+ * read.sh スクリプトの内容を生成（他プロジェクトの会話履歴読み取り、#324）
+ * 名前→ID解決は ask.sh の FILTER_JQ ブロックと同じロジックを流用する
+ * （#294 の同名曖昧性対策をここでも踏襲し、サーバ側に2本目の名前解決を作らない）
+ */
+function generateReadMessagesScript(serverUrl: string, token: string): string {
+  const httpUrl = wsToHttpUrl(serverUrl);
+
+  return `#!/bin/bash
+# DevRelay クロスプロジェクト会話履歴読み取りスクリプト
+# Agent が自動生成。手動編集は次回起動時に上書きされます。
+
+set -euo pipefail
+
+API_URL="${httpUrl}"
+TOKEN="${token}"
+
+# 引数チェック
+if [ $# -eq 0 ]; then
+  echo "使い方:"
+  echo "  メンバー一覧:  bash $0 --list"
+  echo "  履歴取得:      bash $0 --project <プロジェクト名> [--limit <N>] [--role user|assistant] [--machine <マシン名>]"
+  exit 1
+fi
+
+# --list モード: メンバー一覧取得
+if [ "$1" = "--list" ]; then
+  RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+    -H "Authorization: Bearer $TOKEN" \\
+    "\${API_URL}/api/agent/members" 2>&1) || {
+    echo "エラー: API リクエストに失敗しました"
+    echo "$RESPONSE"
+    exit 1
+  }
+
+  HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+  BODY=$(echo "$RESPONSE" | sed '$d')
+
+  if [ "$HTTP_CODE" != "200" ]; then
+    echo "エラー (HTTP $HTTP_CODE): $BODY"
+    exit 1
+  fi
+
+  if command -v jq &>/dev/null; then
+    MEMBER_COUNT=$(echo "$BODY" | jq 'length')
+    if [ "$MEMBER_COUNT" = "0" ]; then
+      echo "登録済みメンバーはありません。WebUI の Team ページで対象プロジェクトを登録してください。"
+      exit 0
+    fi
+    echo "=== 登録済みメンバー ($MEMBER_COUNT 件） ==="
+    echo "（読み取れるのはこの一覧の宛先だけです）"
+    echo ""
+    echo "$BODY" | jq -r '
+      ( group_by(.memberProjectName) | map(select(length > 1) | .[0].memberProjectName) ) as $dups
+      | group_by(.teamName)[]
+      | "[\\(.[0].teamName)]",
+        ( .[] | "  - \\(.memberProjectName) (\\(.memberMachineName)) [\\(.memberMachineStatus)]"
+          + (if .isSameMachine then " [自マシン]" else "" end)
+          + (if (.memberProjectName | IN($dups[])) then " ⚠️ 同名あり: --machine 指定が必要" else "" end) ),
+        ""
+    '
+  else
+    echo "$BODY"
+  fi
+  exit 0
+fi
+
+# 引数パース
+PROJECT=""
+LIMIT="20"
+ROLE=""
+MACHINE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --project) PROJECT="$2"; shift 2 ;;
+    --limit) LIMIT="$2"; shift 2 ;;
+    --role) ROLE="$2"; shift 2 ;;
+    --machine) MACHINE="$2"; shift 2 ;;
+    *) echo "不明な引数: $1"; exit 1 ;;
+  esac
+done
+
+if [ -z "$PROJECT" ]; then
+  echo "エラー: --project が必要です"
+  exit 1
+fi
+
+# まずメンバー一覧からプロジェクト ID を取得
+MEMBERS_RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  "\${API_URL}/api/agent/members" 2>&1) || {
+  echo "エラー: メンバー一覧の取得に失敗しました"
+  exit 1
+}
+
+MEMBERS_HTTP=$(echo "$MEMBERS_RESPONSE" | tail -1)
+MEMBERS_BODY=$(echo "$MEMBERS_RESPONSE" | sed '$d')
+
+if [ "$MEMBERS_HTTP" != "200" ]; then
+  echo "エラー (HTTP $MEMBERS_HTTP): $MEMBERS_BODY"
+  exit 1
+fi
+
+# プロジェクト名でメンバーを検索
+# ask.sh と同じ絞り込み: 完全一致 > オンライン > 同一マシン の優先順、複数残れば自動選択せずエラー（#294 の踏襲）
+if command -v jq &>/dev/null; then
+  FILTER_JQ='
+    ( if ($machine | length) > 0
+      then map(select(.machine | ascii_downcase | contains($machine | ascii_downcase)))
+      else . end ) as $scoped
+    | ( $scoped | map(select((.name | ascii_downcase) == ($name | ascii_downcase) or (.orig | ascii_downcase) == ($name | ascii_downcase))) ) as $exact
+    | ( if ($exact | length) > 0 then $exact
+        else ($scoped | map(select((.name | ascii_downcase | contains($name | ascii_downcase)) or (.orig | ascii_downcase | contains($name | ascii_downcase))))) end ) as $named
+    | ( $named | map(select(.online)) ) as $online
+    | ( if ($online | length) > 0 then $online else $named end ) as $avail
+    | ( $avail | map(select(.same)) ) as $same
+    | ( if ($same | length) == 1 then $same else $avail end )
+  '
+
+  CANDIDATES=$(echo "$MEMBERS_BODY" | jq '[ .[] | {
+    id: .memberProjectId,
+    name: .memberProjectName,
+    orig: (.memberProjectOriginalName // .memberProjectName),
+    machine: .memberMachineName,
+    online: (.memberMachineStatus == "online"),
+    same: (.isSameMachine // false)
+  } ]')
+  MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
+  MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
+
+  if [ "$MATCH_COUNT" = "0" ]; then
+    echo "エラー: '$PROJECT' は対象として登録されていません"
+    echo ""
+    echo "読み取れる宛先:"
+    echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo ""
+    echo "この一覧に無いプロジェクトは読み取れません。WebUI の Team ページで登録するようユーザーに依頼してください。"
+    exit 1
+  fi
+
+  if [ "$MATCH_COUNT" != "1" ]; then
+    echo "エラー: '$PROJECT' に一致するプロジェクトが $MATCH_COUNT 件あります。対象を特定できません。"
+    echo ""
+    echo "候補:"
+    echo "$MATCHED" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo ""
+    echo "--machine <マシン名> でマシンを指定して実行し直してください。"
+    exit 1
+  fi
+
+  TARGET_ID=$(echo "$MATCHED" | jq -r '.[0].id')
+  TARGET_NAME=$(echo "$MATCHED" | jq -r '.[0].name')
+  TARGET_MACHINE=$(echo "$MATCHED" | jq -r '.[0].machine')
+
+  echo "📜 $TARGET_NAME ($TARGET_MACHINE) の直近 $LIMIT 件を取得中..."
+  echo ""
+
+  # GET リクエスト（--get --data-urlencode でクエリパラメータを安全に構築）
+  ROLE_ARG=()
+  if [ -n "$ROLE" ]; then
+    ROLE_ARG=(--data-urlencode "role=$ROLE")
+  fi
+
+  RESPONSE=$(curl -s -f -w "\\n%{http_code}" --max-time 60 \\
+    -H "Authorization: Bearer $TOKEN" \\
+    --get \\
+    --data-urlencode "projectId=$TARGET_ID" \\
+    --data-urlencode "limit=$LIMIT" \\
+    "\${ROLE_ARG[@]}" \\
+    "\${API_URL}/api/agent/messages" 2>&1) || {
+    echo "エラー: 履歴取得に失敗しました（タイムアウトまたは接続エラー）"
+    echo "$RESPONSE"
+    exit 1
+  }
+
+  HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+  BODY=$(echo "$RESPONSE" | sed '$d')
+
+  if [ "$HTTP_CODE" != "200" ]; then
+    echo "エラー (HTTP $HTTP_CODE): $BODY"
+    exit 1
+  fi
+
+  echo "=== $TARGET_NAME の直近の会話履歴 ==="
+  echo ""
+  echo "$BODY" | jq -r '.messages[] | "[\\(.role)\\(if .model then " / " + .model else "" end)] \\(.createdAt)\\n\\(.content)\\n"'
 else
   echo "エラー: jq が必要です"
   exit 1
@@ -943,6 +1186,18 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
       mode: 0o755,
     });
 
+    // devrelay-read-messages スキル（他プロジェクトの会話履歴読み取り、#324）
+    await fs.mkdir(READ_MSG_SCRIPTS_DIR, { recursive: true });
+
+    const readMsgSkillMdPath = path.join(READ_MSG_SKILL_DIR, 'SKILL.md');
+    await fs.writeFile(readMsgSkillMdPath, generateReadMessagesSkillMd(), 'utf-8');
+
+    const readMsgShPath = path.join(READ_MSG_SCRIPTS_DIR, 'read.sh');
+    await fs.writeFile(readMsgShPath, generateReadMessagesScript(config.serverUrl, config.token), {
+      encoding: 'utf-8',
+      mode: 0o755,
+    });
+
     // devrelay-list-inventory スキル
     await fs.mkdir(INVENTORY_SCRIPTS_DIR, { recursive: true });
 
@@ -979,7 +1234,7 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
       mode: 0o755,
     });
 
-    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,list-inventory,create-project,flutter-deploy}/');
+    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,read-messages,list-inventory,create-project,flutter-deploy}/');
   } catch (error: any) {
     console.error('Failed to create skill files:', error.message);
   }

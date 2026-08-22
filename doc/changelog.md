@@ -6,6 +6,38 @@
 
 ## 実装済み機能
 
+### #324: agent 専用 REST に「他プロジェクトの直近 Message 読み取り」エンドポイントを追加 (2026-08-23)
+
+#### 背景
+- 複数 AI 協議機能の土台として、あるプロジェクトの Agent が「他プロジェクトの直近の会話履歴」を読めるようにしたい
+- AI の応答は既に `Message` テーブルにあるが、Agent 専用 REST（`document-api.ts`）には ask-member / teamexec-member / inventory / documents-search はあっても Message 読み取りの口が無かった
+- 今回は協議オーケストレーション等は含めず、「読む口」を 1 本追加するのみ
+
+#### 設計判断（既存 ask-member 実装を根拠に自己判断）
+- **`project` は ID（`projectId`）で受ける**: サーバ側の ask-member（`targetProjectId`）と同じく ID のみを受け付け、名前解決はスキル側（`/api/agent/members` + jq の `FILTER_JQ`、#294 の同名曖昧性対策を流用）に集約。サーバに2本目の名前解決ロジックを作らない
+- **#295 の Team ゲート（`checkCrossTargetAllowed`）を読み取りにも適用**: ask-member と同じ権限モデルに揃え、最小権限を維持（未登録宛先は 403）
+- **role マッピング**: DB の `role` 保存値は `'user' | 'ai' | 'system'`。API では `ai` → `assistant` に変換し、`system` は既定で除外
+- **「直近 N 件」の取得方式**: `orderBy: desc + take` で新しい順に取ってから `.reverse()` で昇順に戻す（既存の MCP `get_conversation_history` は `asc + take` で最古 N 件を返す設計のため、意図的に別実装とした）
+- content は切り詰めない（`limit` 上限 50 で暴発を防止）。レート制限は付けない（DB read のみで課金が発生しないため）
+
+#### 実装
+- `apps/server/src/routes/document-api.ts`: `GET /api/agent/messages` を追加。認証は既存 `authenticateByMachineTokenFull` を再利用、所有者チェック（404）と `checkCrossTargetAllowed`/`buildUnregisteredTargetMessage`（403）は ask-member と同じ関数をそのまま再利用。レスポンスは `{ project, projectId, count, messages: [{ role, content, model?, createdAt }] }`（時系列昇順）。model は `Message` に専用カラムが無いため `usageData.modelUsage` のキーから抽出（`agent-manager.ts` の使用量ログと同方式）
+- `agents/linux/src/services/skill-manager.ts`: `devrelay-read-messages` スキル（`SKILL.md` + `scripts/read.sh`）を新設。`read.sh` の名前→ID解決部分は `ask.sh` の `FILTER_JQ` ブロックをそのまま流用（コピー）。`--project` / `--limit`(既定20/上限50) / `--role user|assistant` / `--machine` / `--list` に対応。GET なので `curl --get --data-urlencode` でクエリパラメータを構築
+- macOS/Windows Agent は今回対象外（macOS は動作確認後に同様の差分を移植予定。Windows Electron GUI には skill-manager.ts 自体が存在しないため対象外のまま）
+- DB マイグレーション不要（`Message` は既存テーブル、スキーマ変更なし）。新認証機構・新テーブル・WS新メッセージ型は追加なし
+
+#### 検証
+- `pnpm build` green（server + agents/linux + モノレポ全体）
+- `require(` 混入チェック 0（apps/web は無変更）
+- `ensureSkillFiles()` を一時 `HOME` で実行し、生成された `read.sh` を `bash -n` で構文チェック（OK）。`ask.sh` も同様に構文チェックし、今回の追記でリグレッションが無いことを確認
+- 実チャットでの実機確認（200/401/404/403/role フィルタ/limit clamp、Agent `u` 後の `read.sh` 実行）は未実施
+
+#### 変更ファイル
+- `apps/server/src/routes/document-api.ts`
+- `agents/linux/src/services/skill-manager.ts`
+
+---
+
 ### #323: ソフトデリートしたプロジェクトが WebUI/インベントリに出続けるバグを修正（#322 の見落とし箇所） (2026-08-23)
 
 #### 背景

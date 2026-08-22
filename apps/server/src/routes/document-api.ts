@@ -11,6 +11,7 @@
  * - POST /api/agent/ask-member        — クロスプロジェクトクエリ（プランモード）
  * - POST /api/agent/teamexec-member   — クロスプロジェクト実行依頼（exec モード）
  * - GET  /api/agent/members           — 登録済みメンバー一覧取得
+ * - GET  /api/agent/messages          — 他プロジェクトの直近会話履歴取得（複数 AI 協議の土台、#324）
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -377,6 +378,95 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         isSameMachine: m.project.machineId === auth.machineId,
       }))
     );
+  });
+
+  /**
+   * GET /api/agent/messages
+   * 他プロジェクトの直近の会話履歴（Message）を取得する（複数 AI 協議の土台、#324）。
+   * ask-member とは異なり相手の AI セッションは起動しない（純粋な DB read、課金なし）。
+   *
+   * クエリパラメータ:
+   *   - projectId (必須): 対象プロジェクトの ID（名前解決はスキル側の /api/agent/members + jq で行う。
+   *     ask-member と同じ設計 — サーバ側に2本目の名前解決ロジックを作らない）
+   *   - limit (任意): 直近何件（既定 20 / 上限 50）
+   *   - role (任意): 'user' | 'assistant'（省略時は両方。'system' は既定で含めない）
+   *
+   * 認証: Authorization: Bearer <machine_token>
+   * 権限: ask-member と同じ所有者チェック(404) + #295 Team 登録チェック(403) を両方適用
+   * レスポンス: { project, projectId, count, messages: [{ role, content, model?, createdAt }] }（時系列昇順）
+   */
+  app.get('/api/agent/messages', async (request: FastifyRequest, reply: FastifyReply) => {
+    const auth = await authenticateByMachineTokenFull(request);
+    if (!auth) {
+      return reply.status(401).send({ error: 'Invalid or missing machine token' });
+    }
+
+    const { projectId, limit: rawLimit, role: rawRole } =
+      (request.query || {}) as { projectId?: string; limit?: string; role?: string };
+
+    if (!projectId) {
+      return reply.status(400).send({ error: 'projectId is required' });
+    }
+
+    // limit: 既定20 / 上限50（mcp/tools.ts の get_conversation_history と同じ clamp 方式）
+    const parsedLimit = rawLimit ? parseInt(rawLimit, 10) : 20;
+    const limit = Math.min(Math.max(Number.isNaN(parsedLimit) ? 20 : parsedLimit, 1), 50);
+
+    // role: API 表記 → DB 表記（DB は 'user' | 'ai' | 'system'。'system' は既定で除外）
+    let roleFilter: { in: string[] };
+    if (rawRole === undefined) {
+      roleFilter = { in: ['user', 'ai'] };
+    } else if (rawRole === 'user') {
+      roleFilter = { in: ['user'] };
+    } else if (rawRole === 'assistant') {
+      roleFilter = { in: ['ai'] };
+    } else {
+      return reply.status(400).send({ error: "role must be 'user' or 'assistant'" });
+    }
+
+    // 所有者チェック（ask-member と同形。404 に統一）
+    const targetProject = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { machine: { select: { id: true, userId: true, deletedAt: true } } },
+    });
+    if (!targetProject || targetProject.machine.userId !== auth.userId || targetProject.machine.deletedAt) {
+      return reply.status(404).send({ error: 'Target project not found' });
+    }
+
+    // #295: Team 登録済みの宛先だけ（ask-member と同じゲート。読み取りにも最小権限として適用）
+    const gate = await checkCrossTargetAllowed(auth.machineId, auth.userId, projectId);
+    if (!gate.allowed) {
+      return reply.status(403).send({
+        error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name),
+      });
+    }
+
+    // 直近 limit 件を新しい順に取得し、時系列昇順に戻す（get_conversation_history の asc+take とは異なり「直近 N 件」を狙う）
+    const rows = await prisma.message.findMany({
+      where: { session: { projectId, userId: auth.userId }, role: roleFilter },
+      select: { role: true, content: true, usageData: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+
+    const messages = rows.reverse().map((m) => {
+      // Message に model カラムは無いため usageData.modelUsage のキーから抽出（agent-manager.ts と同方式）
+      const usage = m.usageData as { modelUsage?: Record<string, unknown> } | null;
+      const model = usage?.modelUsage ? Object.keys(usage.modelUsage).join(', ') : undefined;
+      return {
+        role: m.role === 'ai' ? 'assistant' : m.role,
+        content: m.content,
+        ...(model ? { model } : {}),
+        createdAt: m.createdAt.toISOString(),
+      };
+    });
+
+    return reply.send({
+      project: targetProject.displayName ?? targetProject.name,
+      projectId: targetProject.id,
+      count: messages.length,
+      messages,
+    });
   });
 
   /**
