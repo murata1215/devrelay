@@ -6,6 +6,36 @@
 
 ## 実装済み機能
 
+### #320: `u`（Agent 更新）フローの非同期通知が英語化されていなかった問題を修正 (2026-08-22)
+
+#### 背景
+- ユーザーがスクリーンショットで「`✅ ubuntu-prod/uso8m の更新が完了しました` がまだ日本語」と再報告
+- pm2 起動時刻（17:37:43）> ビルド時刻（17:13:25）で確認した結果、**今回は #297/#318/#319 と同じ stale プロセス問題ではなく、コード自体が未翻訳**（同じスクショの `🔄 Updating agent...` が英語なのが#319が正しくロードされている証拠）
+
+#### 原因
+- `u` の**同期応答**（`handleUpdate()` @ `command-handler.ts`）は #318 で `tChat()` 化済みだったが、`u` の**非同期通知**（Agent 再起動→再接続後に飛ぶ完了/失敗/タイムアウト通知）は `agent-manager.ts` 側にあり、`UserContext` も `sessionId` も持たないため #319 の `resolveSessionLanguage()` スイープの対象外だった
+- `agent-manager.ts` の `u` フロー関連で計6箇所が未翻訳（`✅ **{name}** の更新が完了しました` / `❌ Agent 更新に失敗しました` / `⚠️ Agent 更新がタイムアウトしました（5分）` / `Agent がオフラインです` / `タイムアウト` / `⚠️ この Agent は更新が必要です`）。後者2つは `checkAgentVersion()` の `reject(new Error(...))` で、`handleUpdate()` の英語の外枠（`❌ Version check failed: {error}`）に**日本語のまま埋め込まれる**という発見しづらい形だった
+
+#### 対応
+- 新しい単一情報源ヘルパーは作らず、既存パターンを使い分け:
+  - **更新完了/失敗/タイムアウト通知**: `pendingUpdateNotify` Map に `language?: Language` を追加（`projectId` と同じ扱い）。`updateAgent(machineId, platform, chatId, projectId?, language?)` にシグネチャ追加。呼び出し元 `handleUpdate()` は既に持っている `lang` をそのまま渡すだけ
+  - **バージョン確認のエラー文言**: `checkAgentVersion(machineId, lang = DEFAULT_CHAT_LANGUAGE)` にオプション引数追加。`auto-updater.ts` からの自動更新呼び出し（サーバーログ用途のみ）は引数省略で無変更
+  - **旧 Agent へのプロンプト拒否**: `sendPromptToAgent()` 内に既にあった言語解決ブロック（UserSettings.language 補完、#316由来）を `outdatedAgents` チェックより前に移動しただけ。ロジックの重複は増やしていない
+- `packages/shared/src/i18n.ts` に `update.completed`/`update.failed`/`update.timedOut`/`update.agentOffline`/`update.versionCheckTimeout`/`update.required` の6キー追加
+- ビルド時に `AgentUpdateStatusPayload.error` が `string | undefined` で `tChat()` の `params` 型（`string | number`）と合わず型エラー→ `error ?? 'unknown'` で解消
+
+#### スコープ外（意図的に見送り）
+- ツール承認タイムアウトの deny 理由（`タイムアウト: ユーザーが応答しませんでした`、setTimeout 同期コールバック内で async 化が必要）
+- FCM プッシュ通知文言（`fcm-service.ts` の `ツール承認待ち: {tool}` 等、モバイル通知ドメインとしてまとめて別対応が妥当）
+- `testflight-manager.ts`、`command-handler.ts` の `handleModelList`/`handleTestflight`/`handleAskMember`/`handleTeamExec`（#316/#318/#319 から継続）
+
+#### 変更ファイル
+- `packages/shared/src/i18n.ts`（新規キー6個）
+- `apps/server/src/services/agent-manager.ts`（`pendingUpdateNotify` 型変更、`updateAgent()`/`checkAgentVersion()`/`sendPromptToAgent()`/`handleUpdateStatus()` の計6箇所）
+- `apps/server/src/services/command-handler.ts`（`handleUpdate()` の呼び出し2箇所に `lang` を渡す）
+
+Agent（linux/macos/windows）のコード変更なし → 各マシンの `u` は不要。DB マイグレーション不要。`pnpm build` green、`grep -c 'require(' apps/web/dist/assets/index-*.js` が 0、`apps/server/dist/services/agent-manager.js` に対象の日本語リテラルが残っていないことを確認。**server 再起動が必要**（`pm2 restart devrelay-server`）。実チャットでの `u` 実機確認は未実施
+
 ### #319: 残りの日本語ハードコード文字列を一掃（agent-manager.ts / session-manager.ts / command-handler.ts / Agent 3OS ai-runner.ts） (2026-08-22)
 
 #### 背景

@@ -119,8 +119,9 @@ const DISCONNECT_GRACE_PERIOD = 5000; // 5秒
 // バージョン確認リクエスト: machineId -> Promise コールバック
 const pendingVersionCheckRequests = new Map<string, HistoryRequest<AgentVersionInfoPayload>>();
 
-// 更新リクエストの通知先: machineId -> { platform, chatId, projectId }（完了/エラー通知用）
-const pendingUpdateNotify = new Map<string, { platform: Platform; chatId: string; projectId?: string }>();
+// 更新リクエストの通知先: machineId -> { platform, chatId, projectId, language }（完了/エラー通知用）
+// #320: language は完了/エラー/タイムアウト通知の表示言語（未指定時は DEFAULT_CHAT_LANGUAGE にフォールバック）
+const pendingUpdateNotify = new Map<string, { platform: Platform; chatId: string; projectId?: string; language?: Language }>();
 
 // Agent 再接続フラグ: Agent が再接続した machineId を記録
 // 再接続後の最初のプロンプトでセッション再開始が必要かを判定するために使用
@@ -474,8 +475,10 @@ async function handleAgentConnect(
   if (updateRequestor) {
     pendingUpdateNotify.delete(machine.id);
     const displayName = autoDisplayName || updatedName;
+    // #320: リクエスト元の言語で通知（未指定時は DEFAULT_CHAT_LANGUAGE）
+    const notifyLang = updateRequestor.language ?? DEFAULT_CHAT_LANGUAGE;
     sendMessage(updateRequestor.platform, updateRequestor.chatId,
-      `✅ **${displayName}** の更新が完了しました`, undefined, updateRequestor.projectId);
+      tChat(notifyLang, 'update.completed', { machine: displayName }), undefined, updateRequestor.projectId);
   }
 
   // #296: 接続時の自動更新チェック（遅延実行）。循環 import を避けるため動的 import で読み込む
@@ -1134,9 +1137,21 @@ export async function sendPromptToAgent(
   /** #316: チャット表示言語。未指定時は UserSettings.language で補完する（#306 と同じ単一情報源方式） */
   language?: Language,
 ) {
+  // #316/#320: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
+  // outdatedAgents チェックのエラーメッセージでも使うため、先に解決しておく
+  let resolvedLanguage = language;
+  if (resolvedLanguage === undefined) {
+    try {
+      const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
+      resolvedLanguage = isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+    } catch {
+      resolvedLanguage = DEFAULT_CHAT_LANGUAGE;
+    }
+  }
+
   // バージョン不足の Agent にはプロンプトを送信しない
   if (outdatedAgents.has(machineId)) {
-    throw new Error('⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。');
+    throw new Error(tChat(resolvedLanguage, 'update.required'));
   }
 
   // セッションに紐づくプロジェクトの terminalMode / aiTool を取得（Project/Session 単位の設定）
@@ -1170,17 +1185,6 @@ export async function sendPromptToAgent(
     }
   }
   console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
-
-  // #316: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
-  let resolvedLanguage = language;
-  if (resolvedLanguage === undefined) {
-    try {
-      const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
-      resolvedLanguage = isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
-    } catch {
-      resolvedLanguage = DEFAULT_CHAT_LANGUAGE;
-    }
-  }
 
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
@@ -1379,7 +1383,9 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
     // エラー時はリクエスト元のユーザーに通知
     const requestor = pendingUpdateNotify.get(machineId);
     if (requestor) {
-      await sendMessage(requestor.platform, requestor.chatId, `❌ Agent 更新に失敗しました: ${error}`, undefined, requestor.projectId);
+      // #320: リクエスト元の言語で通知
+      const notifyLang = requestor.language ?? DEFAULT_CHAT_LANGUAGE;
+      await sendMessage(requestor.platform, requestor.chatId, tChat(notifyLang, 'update.failed', { error: error ?? 'unknown' }), undefined, requestor.projectId);
       pendingUpdateNotify.delete(machineId);
     } else {
       // #296: リクエスト元が無い＝自動更新起点。結果を Machine に記録する（チャットには流さない）
@@ -1430,11 +1436,11 @@ const VERSION_CHECK_TIMEOUT = 30000; // 30秒（git fetch に時間がかかる�
  * Agent にバージョン確認リクエストを送信し、結果を Promise で返す
  * Agent 側で git fetch → ローカル/リモートのコミット比較を実行
  */
-export function checkAgentVersion(machineId: string): Promise<AgentVersionInfoPayload> {
+export function checkAgentVersion(machineId: string, lang: Language = DEFAULT_CHAT_LANGUAGE): Promise<AgentVersionInfoPayload> {
   return new Promise((resolve, reject) => {
     const ws = connectedAgents.get(machineId);
     if (!ws || ws.readyState !== ws.OPEN) {
-      reject(new Error('Agent がオフラインです'));
+      reject(new Error(tChat(lang, 'update.agentOffline')));
       return;
     }
 
@@ -1449,7 +1455,7 @@ export function checkAgentVersion(machineId: string): Promise<AgentVersionInfoPa
 
     const timeout = setTimeout(() => {
       pendingVersionCheckRequests.delete(requestId);
-      reject(new Error('タイムアウト'));
+      reject(new Error(tChat(lang, 'update.versionCheckTimeout')));
     }, VERSION_CHECK_TIMEOUT);
 
     pendingVersionCheckRequests.set(requestId, { resolve, reject, timeout });
@@ -1472,9 +1478,11 @@ const UPDATE_TIMEOUT = 5 * 60 * 1000;
  * @param machineId 更新対象の Agent マシンID
  * @param platform リクエスト元のプラットフォーム（エラー通知用）
  * @param chatId リクエスト元のチャットID（エラー通知用）
+ * @param projectId リクエスト元のプロジェクトID（WebUI タブルーティング用）
+ * @param language #320: 完了/エラー/タイムアウト通知の表示言語（未指定時は DEFAULT_CHAT_LANGUAGE）
  */
-export function updateAgent(machineId: string, platform: Platform, chatId: string, projectId?: string) {
-  pendingUpdateNotify.set(machineId, { platform, chatId, projectId });
+export function updateAgent(machineId: string, platform: Platform, chatId: string, projectId?: string, language?: Language) {
+  pendingUpdateNotify.set(machineId, { platform, chatId, projectId, language });
 
   // タイムアウトで pendingUpdateNotify をクリーンアップし、ユーザーに通知
   setTimeout(() => {
@@ -1482,8 +1490,9 @@ export function updateAgent(machineId: string, platform: Platform, chatId: strin
     if (entry && entry.platform === platform && entry.chatId === chatId) {
       pendingUpdateNotify.delete(machineId);
       console.log(`⏰ Update timeout for ${machineId}`);
+      const notifyLang = entry.language ?? DEFAULT_CHAT_LANGUAGE;
       sendMessage(platform, chatId,
-        `⚠️ Agent 更新がタイムアウトしました（5分）。\n\`~/.devrelay/logs/update.log\` を確認してください。`, undefined, entry.projectId);
+        tChat(notifyLang, 'update.timedOut'), undefined, entry.projectId);
     }
   }, UPDATE_TIMEOUT);
 

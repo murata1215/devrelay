@@ -111,6 +111,16 @@ export const chatMessages = {
     en: '📦 **{machine}**\n  local: {localCommit} ({localDate})\n  remote: {remoteCommit} ({remoteDate})\n  ⚠️ Update available{runningCodeLines}\n\nSend `u` again to update.',
     ja: '📦 **{machine}**\n  ローカル: {localCommit} ({localDate})\n  リモート: {remoteCommit} ({remoteDate})\n  ⚠️ 更新があります{runningCodeLines}\n\nもう一度 `u` を送信すると更新を実行します。',
   },
+  // #320: u の非同期通知（agent-manager.ts、sessionId/UserContext を持たないためここに専用キー）
+  'update.completed': { en: '✅ **{machine}** update completed', ja: '✅ **{machine}** の更新が完了しました' },
+  'update.failed': { en: '❌ Agent update failed: {error}', ja: '❌ Agent 更新に失敗しました: {error}' },
+  'update.timedOut': {
+    en: '⚠️ Agent update timed out (5 min).\nCheck `~/.devrelay/logs/update.log`.',
+    ja: '⚠️ Agent 更新がタイムアウトしました（5分）。\n`~/.devrelay/logs/update.log` を確認してください。',
+  },
+  'update.agentOffline': { en: 'Agent is offline', ja: 'Agent がオフラインです' },
+  'update.versionCheckTimeout': { en: 'Timed out', ja: 'タイムアウト' },
+  'update.required': { en: '⚠️ This agent needs an update. Send `u` to update.', ja: '⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。' },
 
   // --- link ---
   'link.webNotNeeded': {

@@ -1204,13 +1204,14 @@ async function handleUpdate(context: UserContext): Promise<string> {
       });
       projectId = session?.projectId;
     }
-    updateAgent(context.currentMachineId, context.platform, context.chatId, projectId);
+    // #320: 更新完了/失敗/タイムアウト通知の表示言語を伝搬
+    updateAgent(context.currentMachineId, context.platform, context.chatId, projectId, lang);
     return tChat(lang, 'update.updating');
   }
 
   // 1回目の u: バージョン確認
   try {
-    const info = await checkAgentVersion(context.currentMachineId);
+    const info = await checkAgentVersion(context.currentMachineId, lang);
 
     if (info.error) {
       return tChat(lang, 'update.checkFailed', { error: info.error });
