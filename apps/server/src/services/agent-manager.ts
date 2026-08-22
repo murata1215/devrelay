@@ -256,6 +256,56 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 // Handlers
 // -----------------------------------------------------------------------------
 
+/**
+ * Agent から送られてきたプロジェクト一覧を DB に反映する（#307 の upsert 方式 + #322 の照合スイープ）。
+ * `handleAgentConnect`（接続時）と `handleProjectsUpdate`（再スキャン時）の両方から呼ばれる単一情報源。
+ *
+ * - upsert: 既存プロジェクトの defaultAi は Agent 側の値で上書きしない（#307、ユーザーが `a` で選択した値を保持）。
+ *   path のみ Agent 側の値を反映。再出現時は deletedAt を null に戻す（自動復活）。
+ * - 照合スイープ: Agent が送ってこなくなった名前（Linux の所有者フィルタ #322 で除外された、
+ *   またはディレクトリ自体が消えた等）を deletedAt でソフトデリートする。物理削除はしない
+ *   （Session/BuildLog 等が FK でぶら下がっており会話履歴が失われるため）。
+ *   projects が空配列の場合はスイープしない（projects.yaml 破損等で全プロジェクトが
+ *   一斉に非表示化される事故を防ぐガード）。
+ */
+async function reconcileProjects(machineId: string, projects: Project[]): Promise<void> {
+  for (const project of projects) {
+    try {
+      await prisma.project.upsert({
+        where: {
+          machineId_name: { machineId, name: project.name }
+        },
+        update: { path: project.path, deletedAt: null },
+        create: {
+          machineId,
+          name: project.name,
+          path: project.path,
+          defaultAi: project.defaultAi
+        }
+      });
+    } catch (err) {
+      console.error(`⚠️ Failed to upsert project ${project.name} for ${machineId}:`, err);
+    }
+  }
+
+  if (projects.length === 0) {
+    return; // 空配列スイープ防止ガード（#322）
+  }
+
+  try {
+    const names = projects.map(p => p.name);
+    const { count } = await prisma.project.updateMany({
+      where: { machineId, name: { notIn: names }, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+    if (count > 0) {
+      console.log(`🧹 Soft-deleted ${count} stale project(s) for machine ${machineId} (not in latest Agent list)`);
+    }
+  } catch (err) {
+    console.error(`⚠️ Failed to sweep stale projects for ${machineId}:`, err);
+  }
+}
+
 async function handleAgentConnect(
   ws: WebSocket,
   payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[]; protocolVersion?: number },
@@ -363,29 +413,8 @@ async function handleAgentConnect(
     }
   });
 
-  // Update projects（個別の失敗が ack 送信を妨げないよう try/catch で保護）
-  // #307: 既存プロジェクトの defaultAi は Agent 側の値で上書きしない。
-  // defaultAi はユーザーが `a` コマンドで選択・永続化する値（サーバー側が所有）であり、
-  // Agent 再接続のたびにここで上書きすると選択したツールが毎回巻き戻ってしまう。
-  // path のみ Agent 側の値を反映し、defaultAi は新規作成時の初期値としてのみ使う。
-  for (const project of projects) {
-    try {
-      await prisma.project.upsert({
-        where: {
-          machineId_name: { machineId: machine.id, name: project.name }
-        },
-        update: { path: project.path },
-        create: {
-          machineId: machine.id,
-          name: project.name,
-          path: project.path,
-          defaultAi: project.defaultAi
-        }
-      });
-    } catch (err) {
-      console.error(`⚠️ Failed to upsert project ${project.name} for ${machine.id}:`, err);
-    }
-  }
+  // Update projects（upsert + 照合スイープ。#307/#322、reconcileProjects() に集約）
+  await reconcileProjects(machine.id, projects);
 
   // 同じホスト名を持つ兄弟マシンから displayName を自動計算
   // 例: 兄弟マシン "x220/user1" に displayName "vps-prod/user1" がある場合、
@@ -545,23 +574,8 @@ async function handleProjectsUpdate(machineId: string, projects: Project[]) {
     cached.projects = projects;
   }
 
-  // Update DB
-  // #307: 上の upsert 同様、既存プロジェクトの defaultAi は Agent 側の値で上書きしない
-  // （ユーザーが `a` で選択した値をサーバー側で保持するため）。
-  for (const project of projects) {
-    await prisma.project.upsert({
-      where: {
-        machineId_name: { machineId, name: project.name }
-      },
-      update: { path: project.path },
-      create: {
-        machineId,
-        name: project.name,
-        path: project.path,
-        defaultAi: project.defaultAi
-      }
-    });
-  }
+  // Update DB（upsert + 照合スイープ。#307/#322、reconcileProjects() に集約）
+  await reconcileProjects(machineId, projects);
 }
 
 async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[]; usageData?: any; isExec?: boolean; execPrompt?: string }) {

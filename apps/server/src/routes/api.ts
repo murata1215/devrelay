@@ -471,7 +471,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const userId = request.user.id;
 
     const projects = await prisma.project.findMany({
-      where: { machine: { userId } },
+      where: { deletedAt: null, machine: { userId } },
       include: {
         machine: {
           select: { id: true, name: true, displayName: true },
@@ -1041,7 +1041,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
     const [machineCount, projectCount, sessionCount, recentSessions] = await Promise.all([
       prisma.machine.count({ where: { userId, deletedAt: null } }),
-      prisma.project.count({ where: { machine: { userId } } }),
+      prisma.project.count({ where: { deletedAt: null, machine: { userId } } }),
       prisma.session.count({ where: { userId } }),
       prisma.session.findMany({
         where: { userId },

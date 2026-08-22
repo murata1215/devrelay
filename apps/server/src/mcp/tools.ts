@@ -44,7 +44,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
     {},
     async () => {
       const projects = await prisma.project.findMany({
-        where: { machine: { userId, deletedAt: null } },
+        where: { deletedAt: null, machine: { userId, deletedAt: null } },
         include: {
           machine: { select: { id: true, name: true, displayName: true, lastSeenAt: true } },
         },

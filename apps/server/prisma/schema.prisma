@@ -193,6 +193,7 @@ model Project {
   lastUsedAt   DateTime?
   terminalMode Boolean   @default(false)  // 端末インタフェースモード（PTY 経由で claude 起動）。新規プロジェクトはデフォルト無効
   createdAt    DateTime  @default(now())
+  deletedAt    DateTime? // ソフトデリート（#322）。Agent が projects.yaml で送ってこなくなったプロジェクトを非表示化。再出現で自動復活（null に戻る）
 
   sessions       Session[]
   buildLogs      BuildLog[]

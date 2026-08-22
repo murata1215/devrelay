@@ -456,7 +456,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
     const sourceProjects = await prisma.project.findMany({
-      where: { machineId: auth.machineId },
+      where: { machineId: auth.machineId, deletedAt: null },
       select: { name: true },
     });
     const sourceProjectName = sourceProjects.length === 1
@@ -638,7 +638,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
     const sourceProjects = await prisma.project.findMany({
-      where: { machineId: auth.machineId },
+      where: { machineId: auth.machineId, deletedAt: null },
       select: { name: true },
     });
     const sourceProjectName = sourceProjects.length === 1

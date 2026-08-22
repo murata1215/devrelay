@@ -27,6 +27,13 @@ export interface AgentConfig {
   };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   proxy?: ProxyConfig;  // プロキシ設定（オプション）
+  /**
+   * プロジェクト自動検出の所有者フィルタ（#322）。既定 true。
+   * true の場合、CLAUDE.md 等のマーカーファイルが Agent 実行ユーザーの所有でない
+   * プロジェクトを検出・一覧送信の対象から除外する（`/opt` 等の複数ユーザー共有環境向け）。
+   * false にすると従来どおり全ユーザーのプロジェクトを検出する。
+   */
+  projectOwnerFilter?: boolean;
 }
 
 export interface ProjectConfig {
@@ -99,6 +106,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       },
       logLevel: config.logLevel || 'info',
       proxy: config.proxy,  // プロキシ設定を読み込み
+      projectOwnerFilter: config.projectOwnerFilter,  // 未設定なら undefined（呼び出し側で !== false 判定 → 既定 true）
     };
   } catch (err) {
     // Return default config
@@ -114,6 +122,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       },
       logLevel: 'info',
       proxy: undefined,
+      projectOwnerFilter: undefined,
     };
   }
 }

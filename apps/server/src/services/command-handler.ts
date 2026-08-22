@@ -353,7 +353,7 @@ async function handleProjectList(context: UserContext): Promise<string> {
   }
 
   const projects = await prisma.project.findMany({
-    where: { machineId: context.currentMachineId }
+    where: { machineId: context.currentMachineId, deletedAt: null }
   });
 
   if (projects.length === 0) {
@@ -1723,6 +1723,7 @@ async function resolveCrossTargetByName(
   const teamCount = await prisma.team.count({ where: { userId: dbUserId } });
   const candidates = await prisma.project.findMany({
     where: {
+      deletedAt: null,
       machine: { userId: dbUserId, deletedAt: null },
       ...(teamCount > 0 ? { teamMembers: { some: { team: { userId: dbUserId } } } } : {}),
     },

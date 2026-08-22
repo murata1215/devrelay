@@ -73,7 +73,7 @@ export async function parseCommandWithNLP(
     let availableProjects: string[] = [];
     if (context.currentMachineId) {
       const projects = await prisma.project.findMany({
-        where: { machineId: context.currentMachineId },
+        where: { machineId: context.currentMachineId, deletedAt: null },
         select: { name: true },
       });
       availableProjects = projects.map((p: { name: string }) => p.name);

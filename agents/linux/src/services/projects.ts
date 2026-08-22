@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import type { Project, AiTool } from '@devrelay/shared';
 import type { AgentConfig, ProjectConfig } from './config.js';
-import { loadProjectsConfig, saveProjectsConfig } from './config.js';
+import { loadProjectsConfig, saveProjectsConfig, loadConfig } from './config.js';
 
 /**
  * スキャン時にスキップする vendor / ビルド生成物ディレクトリ（#257）。
@@ -29,10 +29,34 @@ async function isFlutterSdkCheckout(dir: string): Promise<boolean> {
   }
 }
 
+/**
+ * Server へ送信するプロジェクト一覧を組み立てる。
+ * `projectOwnerFilter`（既定 true）が有効な場合、CLAUDE.md 等のマーカーファイルが
+ * Agent 実行ユーザーの所有でないプロジェクトを一覧から除外する（#322）。
+ * `projects.yaml` 自体は書き換えないため、設定を戻せば即座に復活する。
+ */
 export async function loadProjects(config: AgentConfig): Promise<Project[]> {
   const projectConfigs = await loadProjectsConfig();
-  
-  const projects: Project[] = projectConfigs.map((p) => ({
+  const ownerFilterEnabled = config.projectOwnerFilter !== false;
+
+  const filtered: ProjectConfig[] = [];
+  let excluded = 0;
+  for (const p of projectConfigs) {
+    if (ownerFilterEnabled) {
+      const marker = await detectProjectMarker(p.path);
+      if (marker && !(await isOwnedBySelf(marker.file))) {
+        excluded++;
+        continue;
+      }
+    }
+    filtered.push(p);
+  }
+
+  if (excluded > 0) {
+    console.log(`🔒 Owner filter: excluded ${excluded} project(s) not owned by ${await selfUserLabel()}`);
+  }
+
+  const projects: Project[] = filtered.map((p) => ({
     name: p.name,
     path: p.path,
     defaultAi: p.defaultAi,
@@ -102,6 +126,11 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1, defaul
   const existing = await loadProjectsConfig();
   const existingPaths = new Set(existing.map((p) => p.path));
 
+  // 所有者フィルタ設定を読み込む（既定 true、#322）。無効化していれば従来どおり全ユーザー分を検出する。
+  const agentConfig = await loadConfig();
+  const ownerFilterEnabled = agentConfig.projectOwnerFilter !== false;
+  let excludedByOwner = 0;
+
   async function scan(dir: string, depth: number) {
     if (depth > maxDepth) return;
 
@@ -121,9 +150,15 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1, defaul
         if (await isFlutterSdkCheckout(fullPath)) continue;
 
         // Check if this looks like a project
-        const isProject = await looksLikeProject(fullPath);
+        const detected = await detectProjectMarker(fullPath);
 
-        if (isProject) {
+        if (detected) {
+          // 所有者フィルタ: マーカーファイルが自分の所有でなければ登録も再帰もしない（#322）。
+          // Flutter SDK チェックアウトと同様、プロジェクト境界とみなして探索を打ち切る。
+          if (ownerFilterEnabled && !(await isOwnedBySelf(detected.file))) {
+            excludedByOwner++;
+            continue;
+          }
           // プロジェクト検出: 未登録なら追加。いずれの場合も内部へは再帰しない（#257）
           // 登録済みプロジェクトの内部へ再帰すると SDK / サブモジュール / ネイティブ層（android・ios・macos）を
           // 過剰検出してしまうため、プロジェクト境界で探索を止める
@@ -144,34 +179,52 @@ export async function scanProjects(baseDir: string, maxDepth: number = 1, defaul
   }
 
   // baseDir 自体も CLAUDE.md チェック（ホームディレクトリ直下に CLAUDE.md がある場合に対応）
-  const baseIsProject = await looksLikeProject(baseDir);
-  if (baseIsProject && !existingPaths.has(baseDir)) {
-    found.push({
-      name: path.basename(baseDir) || baseDir,
-      path: baseDir,
-      defaultAi,
-    });
+  const baseDetected = await detectProjectMarker(baseDir);
+  if (baseDetected) {
+    if (!ownerFilterEnabled || (await isOwnedBySelf(baseDetected.file))) {
+      if (!existingPaths.has(baseDir)) {
+        found.push({
+          name: path.basename(baseDir) || baseDir,
+          path: baseDir,
+          defaultAi,
+        });
+      }
+    } else {
+      excludedByOwner++;
+    }
   }
 
   await scan(baseDir, 0);
+
+  if (excludedByOwner > 0) {
+    console.log(`🔒 Owner filter: excluded ${excludedByOwner} project(s) not owned by ${await selfUserLabel()} while scanning ${baseDir}`);
+  }
+
   return found;
 }
 
 /** プロジェクト検出マーカーの種別 */
 type ProjectMarker = 'claude' | 'flutter' | 'android' | 'xcode';
 
+/** 検出結果: マーカー種別 + 実際に見つかったマーカーファイル/ディレクトリの絶対パス（所有者判定用、#322） */
+interface DetectedMarker {
+  marker: ProjectMarker;
+  file: string;
+}
+
 /**
- * ディレクトリがプロジェクトかどうかを検出し、マーカー種別を返す。
+ * ディレクトリがプロジェクトかどうかを検出し、マーカー種別とマーカーファイルのパスを返す。
  * 検出できなければ null を返す。
  *
  * 生の `flutter create` / `gradle init` で作られた（CLAUDE.md 無しの）プロジェクトも
  * 認識できるよう、pubspec.yaml / settings.gradle(.kts) をマーカーに含める（#255）。
  */
-async function detectProjectMarker(dir: string): Promise<ProjectMarker | null> {
+async function detectProjectMarker(dir: string): Promise<DetectedMarker | null> {
   // CLAUDE.md が存在すればプロジェクトとして認識（最優先）
+  const claudeMdPath = path.join(dir, 'CLAUDE.md');
   try {
-    await fs.access(path.join(dir, 'CLAUDE.md'));
-    return 'claude';
+    await fs.access(claudeMdPath);
+    return { marker: 'claude', file: claudeMdPath };
   } catch {}
 
   // ディレクトリエントリを 1 回だけ読んで各マーカーを判定
@@ -183,17 +236,50 @@ async function detectProjectMarker(dir: string): Promise<ProjectMarker | null> {
   }
 
   // .xcodeproj ディレクトリ（iOS/macOS 開発）
-  if (entries.some(e => e.endsWith('.xcodeproj'))) return 'xcode';
+  const xcodeproj = entries.find(e => e.endsWith('.xcodeproj'));
+  if (xcodeproj) return { marker: 'xcode', file: path.join(dir, xcodeproj) };
   // pubspec.yaml（Flutter/Dart）
-  if (entries.includes('pubspec.yaml')) return 'flutter';
+  if (entries.includes('pubspec.yaml')) return { marker: 'flutter', file: path.join(dir, 'pubspec.yaml') };
   // settings.gradle / settings.gradle.kts（Android/Gradle）
-  if (entries.includes('settings.gradle') || entries.includes('settings.gradle.kts')) return 'android';
+  if (entries.includes('settings.gradle')) return { marker: 'android', file: path.join(dir, 'settings.gradle') };
+  if (entries.includes('settings.gradle.kts')) return { marker: 'android', file: path.join(dir, 'settings.gradle.kts') };
 
   return null;
 }
 
-async function looksLikeProject(dir: string): Promise<boolean> {
-  return (await detectProjectMarker(dir)) !== null;
+/**
+ * マーカーファイル/ディレクトリの所有者が Agent 実行ユーザー自身かどうかを判定する（#322）。
+ * `/opt` 等に複数ユーザーのプロジェクトが同居する環境で、他ユーザー所有のプロジェクトを
+ * 誤って検出・登録しないためのフィルタ（可視性のためのフィルタであり、OS のアクセス制御の代替ではない）。
+ *
+ * - Windows（`process.getuid` が存在しない）: 常に true（従来動作を維持、判定対象外）
+ * - root（uid=0）で実行中の Agent: 常に true（全ユーザーのプロジェクトを面倒見る運用を壊さない）
+ * - stat 失敗（権限不足等で判定不能）: 常に true（安全側＝除外しない）
+ */
+async function isOwnedBySelf(markerFile: string): Promise<boolean> {
+  const getuid = (process as any).getuid;
+  if (typeof getuid !== 'function') return true; // Windows 等
+  const selfUid = getuid.call(process);
+  if (selfUid === 0) return true; // root 実行は常に許可
+
+  try {
+    const stat = await fs.stat(markerFile);
+    return stat.uid === selfUid;
+  } catch {
+    return true; // 判定不能なら除外しない
+  }
+}
+
+/** ログ表示用の「自ユーザー」ラベル（例: devrelay(uid=1001)）。Windows 等では 'self' を返す */
+async function selfUserLabel(): Promise<string> {
+  const getuid = (process as any).getuid;
+  if (typeof getuid !== 'function') return 'self';
+  try {
+    const os = await import('os');
+    return `${os.userInfo().username}(uid=${getuid.call(process)})`;
+  } catch {
+    return `uid=${getuid.call(process)}`;
+  }
 }
 
 /**
@@ -230,9 +316,9 @@ async function ensureAutoClaudeMd(dir: string, name: string): Promise<void> {
     return; // 既に存在するなら何もしない（既存プロジェクトを上書きしない）
   } catch {}
 
-  const marker = await detectProjectMarker(dir);
+  const detected = await detectProjectMarker(dir);
   // ここに来る時点で CLAUDE.md は無いため marker は flutter/android/xcode のいずれか（保険で claude 扱い）
-  const effectiveMarker: ProjectMarker = marker && marker !== 'claude' ? marker : 'claude';
+  const effectiveMarker: ProjectMarker = detected && detected.marker !== 'claude' ? detected.marker : 'claude';
   try {
     await fs.writeFile(claudeMdPath, generateAutoClaudeMd(name, effectiveMarker), 'utf-8');
     console.log(`   📝 Auto-created CLAUDE.md for ${name} (${effectiveMarker})`);
