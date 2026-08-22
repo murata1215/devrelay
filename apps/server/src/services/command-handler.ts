@@ -822,9 +822,10 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
 }
 
 async function handleLink(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   // Web プラットフォームではリンクコード不要（既に認証済み）
   if (context.platform === 'web') {
-    return '✅ Web インターフェースから直接操作しているため、アカウント連携は不要です。';
+    return tChat(lang, 'link.webNotNeeded');
   }
 
   // Get platform username if available (Discord: tag, Telegram: username)
@@ -843,9 +844,10 @@ async function handleLink(context: UserContext): Promise<string> {
 
   if (existingLink?.linkedAt) {
     // Already linked to a WebUI account
-    return `✅ このアカウントは既に WebUI にリンクされています。\n\n`
-      + `リンク先: ${existingLink.user.email || existingLink.user.name || 'WebUI User'}\n`
-      + `リンク日: ${existingLink.linkedAt.toLocaleDateString('ja-JP')}`;
+    return tChat(lang, 'link.alreadyLinked', {
+      target: existingLink.user.email || existingLink.user.name || 'WebUI User',
+      date: existingLink.linkedAt.toLocaleDateString(lang === 'en' ? 'en-US' : 'ja-JP'),
+    });
   }
 
   // Generate a link code
@@ -856,16 +858,13 @@ async function handleLink(context: UserContext): Promise<string> {
     context.chatId
   );
 
-  return `🔗 **アカウント連携コード**\n\n`
-    + `\`${code}\`\n\n`
-    + `このコードを DevRelay WebUI の Settings ページで入力してください。\n`
-    + `⏰ 有効期限: 5分\n\n`
-    + `WebUI: https://devrelay.io/settings`;
+  return tChat(lang, 'link.code', { code });
 }
 
 async function handleAgreement(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentSessionId || !context.currentMachineId) {
-    return '⚠️ プロジェクトに接続されていません。';
+    return tChat(lang, 'common.notConnected');
   }
 
   // Get project path from session
@@ -875,7 +874,7 @@ async function handleAgreement(context: UserContext): Promise<string> {
   });
 
   if (!session) {
-    return '❌ セッションが見つかりません。';
+    return tChat(lang, 'common.sessionNotFound');
   }
 
   // agreement メッセージを保存（Conversations ページで表示するため）
@@ -1126,34 +1125,37 @@ function formatDuration(ms: number): string {
 }
 
 async function handleLog(context: UserContext, count?: number): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentSessionId) {
-    return '⚠️ セッションが開始されていません。';
+    return tChat(lang, 'log.notStarted');
   }
-  
+
   const messages = await getSessionMessages(context.currentSessionId, count || 10);
-  
+
   if (messages.length === 0) {
-    return '📝 メッセージがありません。';
+    return tChat(lang, 'log.empty');
   }
-  
+
   const log = messages.reverse().map((m: Message) => {
     const prefix = m.role === 'user' ? '👤' : '🤖';
     const content = m.content.length > 100 ? m.content.slice(0, 100) + '...' : m.content;
     return `${prefix} ${content}`;
   }).join('\n\n');
-  
-  return `📝 **会話ログ** (${messages.length}件)\n\n${log}`;
+
+  return tChat(lang, 'log.header', { count: messages.length, log });
 }
 
 async function handleSummary(context: UserContext, period?: string): Promise<string> {
   // TODO: Implement AI summary using Anthropic API
-  return '📋 要約機能は準備中です。\n\n`log` でログを確認できます。';
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  return tChat(lang, 'summary.comingSoon');
 }
 
 /** 実行中の AI プロセスを強制停止する */
 async function handleKill(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentSessionId || !context.currentMachineId) {
-    return '⚠️ プロジェクトに接続されていません。';
+    return tChat(lang, 'common.notConnected');
   }
 
   await cancelAiProcess(context.currentMachineId, context.currentSessionId);
@@ -1181,8 +1183,9 @@ function formatRunningCodeLines(info: { runningCodeMtime?: string; runningCodeSt
 
 /** Agent のバージョン確認・更新（2回連続で更新実行） */
 async function handleUpdate(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentMachineId) {
-    return '⚠️ エージェントに接続されていません。\n`m` でエージェント一覧を表示して接続してください。';
+    return tChat(lang, 'common.agentNotConnected');
   }
 
   const chatKey = `${context.platform}:${context.chatId}`;
@@ -1200,7 +1203,7 @@ async function handleUpdate(context: UserContext): Promise<string> {
       projectId = session?.projectId;
     }
     updateAgent(context.currentMachineId, context.platform, context.chatId, projectId);
-    return '🔄 Agent を更新中...\n（接続が一時的に切断されます）';
+    return tChat(lang, 'update.updating');
   }
 
   // 1回目の u: バージョン確認
@@ -1208,31 +1211,39 @@ async function handleUpdate(context: UserContext): Promise<string> {
     const info = await checkAgentVersion(context.currentMachineId);
 
     if (info.error) {
-      return `❌ バージョン確認に失敗しました: ${info.error}`;
+      return tChat(lang, 'update.checkFailed', { error: info.error });
     }
 
     if (info.isDevRepo) {
-      return '⚠️ 開発リポジトリから実行中のため、リモート更新は不可。\n`pnpm deploy-agent` を使用してください。';
+      return tChat(lang, 'update.devRepoWarning');
     }
 
     if (!info.hasUpdate) {
-      return `✅ Agent は最新です\n  commit: ${info.localCommit.slice(0, 7)} (${info.localDate})${formatRunningCodeLines(info)}`;
+      return tChat(lang, 'update.upToDate', {
+        commit: info.localCommit.slice(0, 7),
+        date: info.localDate,
+        runningCodeLines: formatRunningCodeLines(info),
+      });
     }
 
     // 更新あり: pendingUpdate フラグを設定
     pendingUpdate.add(chatKey);
     const displayName = context.currentMachineName || 'Agent';
-    return `📦 **${displayName}**\n`
-      + `  ローカル: ${info.localCommit.slice(0, 7)} (${info.localDate})\n`
-      + `  リモート: ${info.remoteCommit.slice(0, 7)} (${info.remoteDate})\n`
-      + `  ⚠️ 更新があります${formatRunningCodeLines(info)}\n\n`
-      + `もう一度 \`u\` を送信すると更新を実行します。`;
+    return tChat(lang, 'update.available', {
+      machine: displayName,
+      localCommit: info.localCommit.slice(0, 7),
+      localDate: info.localDate,
+      remoteCommit: info.remoteCommit.slice(0, 7),
+      remoteDate: info.remoteDate,
+      runningCodeLines: formatRunningCodeLines(info),
+    });
   } catch (err) {
-    return `❌ バージョン確認に失敗しました: ${(err as Error).message}`;
+    return tChat(lang, 'update.checkFailed', { error: (err as Error).message });
   }
 }
 
 async function handleQuit(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (context.currentSessionId) {
     // Clean up progress tracker before ending session
     stopProgressTracking(context.currentSessionId);
@@ -1254,7 +1265,7 @@ async function handleQuit(context: UserContext): Promise<string> {
     lastListItems: undefined
   });
   
-  return '👋 切断しました';
+  return tChat(lang, 'quit.done');
 }
 
 /**
@@ -1913,15 +1924,16 @@ async function handleTeamExec(
  * 解除後、exec/w コマンドは自身のプロジェクトに戻る
  */
 async function handleDisconnectRemote(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.lastRemoteProjectId) {
-    return '接続中のリモートプロジェクトはありません。';
+    return tChat(lang, 'disconnect.notConnected');
   }
 
   const remoteName = context.lastRemoteProjectName || context.lastRemoteProjectId;
   context.lastRemoteProjectId = undefined;
   context.lastRemoteProjectName = undefined;
 
-  return `🔌 ${remoteName} との接続を解除しました。\`e\` / \`w\` は自身のプロジェクトに戻ります。`;
+  return tChat(lang, 'disconnect.done', { name: remoteName });
 }
 
 // -----------------------------------------------------------------------------

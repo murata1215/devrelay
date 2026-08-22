@@ -108,9 +108,38 @@ export const chatMessages = {
   },
   'update.upToDate': { en: '✅ Agent is up to date\n  commit: {commit} ({date}){runningCodeLines}', ja: '✅ Agent は最新です\n  commit: {commit} ({date}){runningCodeLines}' },
   'update.available': {
-    en: '⚠️ Update available for **{machine}**\n  local: {localCommit} ({localDate})\n  remote: {remoteCommit} ({remoteDate}){runningCodeLines}\n\nSend `u` again to update.',
-    ja: 'ℹ️ **{machine}** に更新があります\n  ローカル: {localCommit} ({localDate})\n  リモート: {remoteCommit} ({remoteDate})\n  ⚠️ 更新があります{runningCodeLines}\n\nもう一度 `u` を送信すると更新を実行します。',
+    en: '📦 **{machine}**\n  local: {localCommit} ({localDate})\n  remote: {remoteCommit} ({remoteDate})\n  ⚠️ Update available{runningCodeLines}\n\nSend `u` again to update.',
+    ja: '📦 **{machine}**\n  ローカル: {localCommit} ({localDate})\n  リモート: {remoteCommit} ({remoteDate})\n  ⚠️ 更新があります{runningCodeLines}\n\nもう一度 `u` を送信すると更新を実行します。',
   },
+
+  // --- link ---
+  'link.webNotNeeded': {
+    en: '✅ You are operating directly from the Web interface, so account linking is not needed.',
+    ja: '✅ Web インターフェースから直接操作しているため、アカウント連携は不要です。',
+  },
+  'link.alreadyLinked': {
+    en: '✅ This account is already linked to a WebUI account.\n\nLinked to: {target}\nLinked on: {date}',
+    ja: '✅ このアカウントは既に WebUI にリンクされています。\n\nリンク先: {target}\nリンク日: {date}',
+  },
+  'link.code': {
+    en: '🔗 **Account Link Code**\n\n`{code}`\n\nEnter this code on the DevRelay WebUI Settings page.\n⏰ Expires in: 5 minutes\n\nWebUI: https://devrelay.io/settings',
+    ja: '🔗 **アカウント連携コード**\n\n`{code}`\n\nこのコードを DevRelay WebUI の Settings ページで入力してください。\n⏰ 有効期限: 5分\n\nWebUI: https://devrelay.io/settings',
+  },
+
+  // --- agreement ---
+  'agreement.sessionUnavailable': { en: '⚠️ Could not retrieve session info.', ja: '⚠️ セッション情報を取得できませんでした' },
+
+  // --- log ---
+  'log.notStarted': { en: '⚠️ No session has been started.', ja: '⚠️ セッションが開始されていません。' },
+  'log.empty': { en: '📝 No messages.', ja: '📝 メッセージがありません。' },
+  'log.header': { en: '📝 **Conversation Log** ({count} messages)\n\n{log}', ja: '📝 **会話ログ** ({count}件)\n\n{log}' },
+
+  // --- summary ---
+  'summary.comingSoon': { en: '📋 Summary feature coming soon.\n\nUse `log` to check the log.', ja: '📋 要約機能は準備中です。\n\n`log` でログを確認できます。' },
+
+  // --- disconnect (remote) ---
+  'disconnect.notConnected': { en: 'No remote project is currently connected.', ja: '接続中のリモートプロジェクトはありません。' },
+  'disconnect.done': { en: '🔌 Disconnected from {name}. `e` / `w` will return to your own project.', ja: '🔌 {name} との接続を解除しました。`e` / `w` は自身のプロジェクトに戻ります。' },
 
   // --- exec (e) ---
   'exec.forwarding': { en: '🔗 Forwarding to {name}...', ja: '🔗 {name} に転送中...' },
@@ -126,6 +155,20 @@ export const chatMessages = {
 
   // --- quit (q) ---
   'quit.done': { en: '👋 Disconnected', ja: '👋 切断しました' },
+
+  // --- progress（サーバー進捗ボックス + Agent ツール使用表示、#318） ---
+  // #318: elapsedSec/elapsedMin はアイコン無しの「経過時間ラベル」。
+  // session-manager.ts では自前で ⏱️ を前置し、ai-runner.ts の Devin/Codex ハートビートでは
+  // 「(45s elapsed)」のように括弧内へそのまま埋め込むため、あえてアイコンを含めない。
+  'progress.processing': { en: '🤖 **Processing...**', ja: '🤖 **処理中...**' },
+  'progress.elapsedSec': { en: '{n}s elapsed', ja: '{n}秒経過' },
+  'progress.elapsedMin': { en: '{n}m elapsed', ja: '{n}分経過' },
+  'progress.usingTool': { en: '🔧 Using {tool}...', ja: '🔧 {tool}を使用中...' },
+  'progress.mcpTool': { en: 'MCP tool', ja: 'MCP ツール' },
+  'progress.devinRunning': { en: '⏳ Devin running... ({label}{limit})', ja: '⏳ Devin 実行中... ({label}{limit})' },
+  'progress.codexRunning': { en: '⏳ Codex running... ({label})', ja: '⏳ Codex 実行中... ({label})' },
+  'progress.runtimeLimitSuffix': { en: ' / limit {min}m', ja: ' / 上限{min}分' },
+  'progress.timeout': { en: '⏱️ Timeout: no response from agent (5 minutes elapsed)', ja: '⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）' },
 
   // --- 権限/セキュリティ ---
   'security.permissionDenied': { en: '🔒 You do not have permission to run commands.', ja: '🔒 コマンドを実行する権限がありません。' },

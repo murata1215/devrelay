@@ -6,6 +6,46 @@
 
 ## 実装済み機能
 
+### #318: 言語設定を英語にしてもチャットが日本語のまま問題（進捗表示 i18n + command-handler.ts 残り分） (2026-08-22)
+
+#### 背景
+- ユーザーが Settings → Language を English にしたのに、進捗表示（`🤖 処理中... / ⏱️ N秒経過 / 🔧 Bashを使用中...`）が日本語のままという報告（スクリーンショット添付）
+- ユーザーの仮説は「`w` の会話が日本語だから？」だったが、これは誤り
+
+#### 根本原因（2つ）
+1. **サーバーが #316 のビルド以降一度も再起動されていなかった**: `devrelay-server` の pm2 起動が 2026-08-19 07:30、#316 のビルド成果物が 2026-08-20 20:21 で、稼働中のプロセスが #316 の i18n コードを一度もロードしていなかった。DB を実測し `UserSettings.language='en'` が正しく保存されていることを確認、WebUI 側の保存は問題なし。`pm2 restart devrelay-server` だけで `a`/`h`/`m`/`p`/`s`/`c`/`x`/`w` 等の大部分は解消する
+2. **#316 が意図的にスコープ外とした箇所が実在した**: サーバーの進捗ボックス（`session-manager.ts`）と Agent のツール使用表示（`ai-runner.ts` 3OS）はサーバー再起動とは無関係に、コード自体が未翻訳のまま日本語ハードコードだった。ユーザーが実際に見ていた文言はまさにこの部分
+
+#### 実装内容（コードレベルの対処）
+
+**Phase 1（最優先・ユーザー報告の直接原因）**
+- `packages/shared/src/i18n.ts` に `progress.*` キーを追加（`processing`/`elapsedSec`/`elapsedMin`/`usingTool`/`mcpTool`/`devinRunning`/`codexRunning`/`runtimeLimitSuffix`/`timeout`）
+- `apps/server/src/services/session-manager.ts`: `ProgressTracker` に `language: Language` を追加。`startProgressTracking()` で `Session.userId` から `getUserSetting(userId, SettingKeys.LANGUAGE)` を1回だけ解決してトラッカーにキャッシュ（8秒ごとの更新では再クエリしない）。`formatProgressMessage(output, elapsedSeconds, language)` に引数追加し `tChat()` 化、`updateProgressMessages()`/`getActiveProgressForChatId()` の2箇所を更新。タイムアウトメッセージ（`⏱️ タイムアウト...`）も同様に `tChat()` 化
+- `agents/{linux,macos,windows}/src/services/ai-runner.ts`: `sendPromptToAi()`/`sendPromptToAiSdk()`（linux/macos のみ、windows は SDK 不使用のため単一関数）内の「🔧 {tool}を使用中...」（Claude SDK ツール呼び出し表示、stream_event 形式含む）、Devin/Codex の30秒ハートビート（`⏳ Devin/Codex 実行中... (N秒経過/分経過 / 上限M分)`）、`summarizeCodexItem()` の MCP tool call 要約を `tChat(options.language ?? 'ja', ...)` に置換。#316 で配線済みの `options.language` をそのまま利用（再配線不要）
+
+**Phase 2（残りのコマンド応答、`command-handler.ts`）**
+- スコープを絞り「シンプルな静的テンプレートの関数」のみ対応: `handleLink`/`handleAgreement`/`handleLog`/`handleSummary`/`handleKill`/`handleUpdate`/`handleQuit`/`handleDisconnectRemote`
+- `handleUpdate()` は #316 で追加済みだが未配線だった `update.*` キー群を実際に接続（配線中に `update.available` の絵文字が実装（`📦`）とカタログ（`ℹ️`）で不一致になっていたのを発見し `📦` に統一）
+- **今回も見送り（未対応）**: `handleSession`/`handleBuild`（ループで動的組み立てされる複雑な文字列）、`handleModelList`/`handleModelSet`（モデルカタログ列挙ロジック）、`handleTestflight`+`getTestflightHelpText`、`handleAskMember`、`handleTeamExec` — いずれも複雑度・リスクの割に頻度が低いため、#316 Phase 3 と同じ判断基準で対象外とし、既知の制限として明記する
+
+#### 検証
+- `pnpm build` green（shared / server / Linux・macOS・Windows Agent / web すべて）
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` が `0`（#310 の再発防止チェック）
+- 実チャットでの動作確認は未実施（server 再起動 + 各マシン `u` が必要なため）
+
+#### デプロイ手順
+1. `pm2 restart devrelay-server`（Phase 1-a のサーバー側進捗ボックス反映 + #316 の未反映分すべて解消）
+2. 各マシンでチャットの `u`（Phase 1-b の Agent 側ツール使用表示反映）
+3. commit + push 必要（Agent は `u` で `~/.devrelay/agent` を `git reset --hard origin/main` するため、push しないと届かない）
+
+#### 既知の制限（引き続き未対応）
+- `command-handler.ts` の `handleSession`/`handleBuild`/`handleModelList`/`handleModelSet`/`handleTestflight`/`handleAskMember`/`handleTeamExec` は日本語ハードコードのまま
+- `agent-manager.ts` のエラーメッセージ、`testflight-manager.ts`、`natural-language-parser.ts` は #316 Phase 3 から引き続き未対応
+
+DB マイグレーション不要。
+
+---
+
 ### #316: 言語設定をチャット全体に適用する（サーバー／Agent の i18n 化, Phase 1〜3 一部） (2026-08-20)
 
 #### 背景

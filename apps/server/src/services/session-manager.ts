@@ -1,5 +1,7 @@
-import type { Platform, UserContext, Session, FileAttachment } from '@devrelay/shared';
+import type { Platform, UserContext, Session, FileAttachment, Language } from '@devrelay/shared';
+import { tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
+import { getUserSetting, SettingKeys } from './user-settings.js';
 import {
   sendDiscordMessage,
   startTypingIndicator as startDiscordTyping,
@@ -55,6 +57,7 @@ interface ProgressTracker {
   updateInterval: NodeJS.Timeout | null;
   timeoutTimer: NodeJS.Timeout | null;  // タイムアウト自動クリーンアップ用
   projectId: string | null;  // Web クライアントへのルーティング用
+  language: Language;  // #318: 進捗表示メッセージの言語（開始時に1回だけ解決してキャッシュ）
 }
 const progressTrackers = new Map<string, ProgressTracker>();
 
@@ -300,16 +303,33 @@ export async function startProgressTracking(sessionId: string) {
   // Clean up any existing tracker
   stopProgressTracking(sessionId);
 
-  // projectId をキャッシュから取得（なければ DB から）
+  // projectId・userId をキャッシュから取得（なければ DB から。#318: userId は言語解決に使うだけで別途キャッシュしない）
   let projectId = sessionProjectMap.get(sessionId) ?? null;
+  let userId: string | null = null;
   if (!projectId) {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { projectId: true },
+      select: { projectId: true, userId: true },
     });
     if (session) {
       projectId = session.projectId;
+      userId = session.userId;
       sessionProjectMap.set(sessionId, projectId);
+    }
+  } else {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { userId: true },
+    });
+    userId = session?.userId ?? null;
+  }
+
+  // #318: 進捗表示の言語は開始時に1回だけ解決してトラッカーにキャッシュ（毎更新の DB アクセスを避ける）
+  let language: Language = DEFAULT_CHAT_LANGUAGE;
+  if (userId) {
+    const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
+    if (stored === 'en' || stored === 'ja') {
+      language = stored;
     }
   }
 
@@ -321,22 +341,23 @@ export async function startProgressTracking(sessionId: string) {
     updateInterval: null,
     timeoutTimer: null,
     projectId,
+    language,
   };
 
   // Send initial progress message to all participants
   for (const { platform, chatId } of participants) {
     if (platform === 'discord') {
-      const messageId = await sendDiscordMessageWithId(chatId, formatProgressMessage('', 0));
+      const messageId = await sendDiscordMessageWithId(chatId, formatProgressMessage('', 0, language));
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
     } else if (platform === 'telegram') {
-      const messageId = await sendTelegramMessageWithId(chatId, formatProgressMessage('', 0));
+      const messageId = await sendTelegramMessageWithId(chatId, formatProgressMessage('', 0, language));
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
     } else if (platform === 'web') {
-      const messageId = await sendWebMessageWithId(chatId, formatProgressMessage('', 0), projectId);
+      const messageId = await sendWebMessageWithId(chatId, formatProgressMessage('', 0, language), projectId);
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
@@ -351,7 +372,7 @@ export async function startProgressTracking(sessionId: string) {
   // エージェント無応答時の自動タイムアウト
   tracker.timeoutTimer = setTimeout(() => {
     console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s)`);
-    finalizeProgress(sessionId, '⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）');
+    finalizeProgress(sessionId, tChat(language, 'progress.timeout'));
   }, PROGRESS_TIMEOUT);
 
   progressTrackers.set(sessionId, tracker);
@@ -367,7 +388,7 @@ export function appendSessionOutput(sessionId: string, output: string) {
     }
     tracker.timeoutTimer = setTimeout(() => {
       console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s since last output)`);
-      finalizeProgress(sessionId, '⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）');
+      finalizeProgress(sessionId, tChat(tracker.language, 'progress.timeout'));
     }, PROGRESS_TIMEOUT);
 
     // Check if this is context info (starts with 📊)
@@ -389,7 +410,7 @@ async function updateProgressMessages(sessionId: string) {
   if (!tracker) return;
 
   const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
-  const content = formatProgressMessage(tracker.outputBuffer, elapsed);
+  const content = formatProgressMessage(tracker.outputBuffer, elapsed, tracker.language);
 
   for (const [chatId, { messageId, platform }] of tracker.messages) {
     if (platform === 'discord') {
@@ -404,12 +425,16 @@ async function updateProgressMessages(sessionId: string) {
 }
 
 // Format the progress message
-function formatProgressMessage(output: string, elapsedSeconds: number): string {
+function formatProgressMessage(output: string, elapsedSeconds: number, language: Language = DEFAULT_CHAT_LANGUAGE): string {
   const lines = output.split('\n').filter(line => line.trim());
   const lastLines = lines.slice(-MAX_OUTPUT_LINES);
 
-  let content = `🤖 **処理中...**\n`;
-  content += `⏱️ ${elapsedSeconds}秒経過\n`;
+  const elapsedLabel = elapsedSeconds < 60
+    ? tChat(language, 'progress.elapsedSec', { n: elapsedSeconds })
+    : tChat(language, 'progress.elapsedMin', { n: Math.floor(elapsedSeconds / 60) });
+
+  let content = `${tChat(language, 'progress.processing')}\n`;
+  content += `⏱️ ${elapsedLabel}\n`;
 
   if (lastLines.length > 0) {
     content += `\`\`\`\n`;
@@ -430,7 +455,7 @@ export function getActiveProgressForChatId(chatId: string): { output: string; el
     const tracker = progressTrackers.get(sessionId);
     if (!tracker) continue;
     const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
-    const content = formatProgressMessage(tracker.outputBuffer, elapsed);
+    const content = formatProgressMessage(tracker.outputBuffer, elapsed, tracker.language);
     return { output: content, elapsed, projectId: tracker.projectId };
   }
   return null;

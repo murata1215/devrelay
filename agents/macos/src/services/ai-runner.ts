@@ -4,8 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, isUnsafeModelId } from '@devrelay/shared';
-import type { AiTool, AiUsageData } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -207,7 +207,7 @@ function safeModelArg(model: string | undefined): string | undefined {
  * @param item `item.completed` イベントの `item` オブジェクト
  * @returns 「⏳ 」なしの要約文字列。認識不能なら null
  */
-function summarizeCodexItem(item: any): string | null {
+function summarizeCodexItem(item: any, lang: Language = DEFAULT_CHAT_LANGUAGE): string | null {
   const type = item?.type;
   if (!type) return null;
   switch (type) {
@@ -218,7 +218,7 @@ function summarizeCodexItem(item: any): string | null {
     case 'web_search':
       return `🔍 検索中: ${item.query || ''}`;
     case 'mcp_tool_call':
-      return `🔧 ${item.tool_name || item.tool || 'MCP ツール'}を使用中...`;
+      return tChat(lang, 'progress.usingTool', { tool: item.tool_name || item.tool || tChat(lang, 'progress.mcpTool') });
     default:
       return `[${type}]`;
   }
@@ -874,7 +874,7 @@ async function sendPromptToAiSdk(
             onOutput(block.text, false);
           } else if (block.type === 'tool_use' && block.name) {
             console.log(`[claude/sdk] 🔧 Using tool: ${block.name}`);
-            onOutput(`\n🔧 ${block.name}を使用中...\n`, false);
+            onOutput(`\n${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.usingTool', { tool: block.name })}\n`, false);
           }
         }
       }
@@ -1273,13 +1273,16 @@ export async function sendPromptToAi(
   // 進捗チャンクは ⏳ 始まりにして、connection.ts で最終保存メッセージから除外する。
   if (aiTool === 'devin') {
     const devinStartTime = Date.now();
+    const lang: Language = options.language ?? DEFAULT_CHAT_LANGUAGE;
     devinHeartbeatTimer = setInterval(() => {
       const elapsedSec = Math.floor((Date.now() - devinStartTime) / 1000);
       // #277: 上限有効時は「/ 上限M分」を併記して残り時間を可視化
-      const limitSuffix = devinMaxRuntimeMin > 0 ? ` / 上限${devinMaxRuntimeMin}分` : '';
+      const limitSuffix = devinMaxRuntimeMin > 0 ? tChat(lang, 'progress.runtimeLimitSuffix', { min: devinMaxRuntimeMin }) : '';
       // #278: 30秒間隔で発火し、1分未満は秒表示（短時間タスクでも最低1回は進捗が出るように）
-      const elapsedLabel = elapsedSec < 60 ? `${elapsedSec}秒経過` : `${Math.floor(elapsedSec / 60)}分経過`;
-      onOutput(`⏳ Devin 実行中... (${elapsedLabel}${limitSuffix})\n`, false);
+      const elapsedLabel = elapsedSec < 60
+        ? tChat(lang, 'progress.elapsedSec', { n: elapsedSec })
+        : tChat(lang, 'progress.elapsedMin', { n: Math.floor(elapsedSec / 60) });
+      onOutput(`${tChat(lang, 'progress.devinRunning', { label: elapsedLabel, limit: limitSuffix })}\n`, false);
     }, 30_000);
 
     // #277: 実行時間上限（本命）。超過で SIGTERM 停止し、close ハンドラで課金抑止メッセージを送る。
@@ -1357,10 +1360,13 @@ export async function sendPromptToAi(
   // #308: Codex は長考中に JSONL イベントが途切れることがあるため、devin と同じ 30 秒ハートビートを送る
   if (aiTool === 'codex') {
     const codexStartTime = Date.now();
+    const lang: Language = options.language ?? DEFAULT_CHAT_LANGUAGE;
     codexHeartbeatTimer = setInterval(() => {
       const elapsedSec = Math.floor((Date.now() - codexStartTime) / 1000);
-      const elapsedLabel = elapsedSec < 60 ? `${elapsedSec}秒経過` : `${Math.floor(elapsedSec / 60)}分経過`;
-      onOutput(`⏳ Codex 実行中... (${elapsedLabel})\n`, false);
+      const elapsedLabel = elapsedSec < 60
+        ? tChat(lang, 'progress.elapsedSec', { n: elapsedSec })
+        : tChat(lang, 'progress.elapsedMin', { n: Math.floor(elapsedSec / 60) });
+      onOutput(`${tChat(lang, 'progress.codexRunning', { label: elapsedLabel })}\n`, false);
     }, 30_000);
   }
 
@@ -1443,7 +1449,7 @@ export async function sendPromptToAi(
                 // ノイズ・トークン浪費のため表示しない
               } else {
                 // command_execution / file_change / web_search / mcp_tool_call 等 → 進捗表示（10秒スロットル）
-                const summary = summarizeCodexItem(item);
+                const summary = summarizeCodexItem(item, options.language ?? DEFAULT_CHAT_LANGUAGE);
                 if (summary) {
                   const now = Date.now();
                   if (now - (codexProgressReported.get(summary) ?? 0) >= 10_000) {
@@ -1534,7 +1540,7 @@ export async function sendPromptToAi(
                 onOutput(block.text, false);
               } else if (block.type === 'tool_use' && block.name) {
                 console.log(`[${aiTool}] 🔧 Using tool: ${block.name}`);
-                onOutput(`\n🔧 ${block.name}を使用中...\n`, false);
+                onOutput(`\n${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.usingTool', { tool: block.name })}\n`, false);
               }
             }
           }
@@ -1553,7 +1559,7 @@ export async function sendPromptToAi(
                    json.event?.content_block?.type === 'tool_use') {
             const toolName = json.event.content_block.name;
             console.log(`[${aiTool}] 🔧 Using tool: ${toolName}`);
-            onOutput(`\n🔧 ${toolName}を使用中...\n`, false);
+            onOutput(`\n${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.usingTool', { tool: toolName })}\n`, false);
           }
           // Capture result for final output
           else if (json.type === 'result') {
