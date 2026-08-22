@@ -1,7 +1,7 @@
 import type { Platform, UserContext, Session, FileAttachment, Language } from '@devrelay/shared';
 import { tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { getUserSetting, SettingKeys } from './user-settings.js';
+import { resolveSessionLanguage } from './user-settings.js';
 import {
   sendDiscordMessage,
   startTypingIndicator as startDiscordTyping,
@@ -303,35 +303,22 @@ export async function startProgressTracking(sessionId: string) {
   // Clean up any existing tracker
   stopProgressTracking(sessionId);
 
-  // projectId・userId をキャッシュから取得（なければ DB から。#318: userId は言語解決に使うだけで別途キャッシュしない）
+  // projectId をキャッシュから取得（なければ DB から）
   let projectId = sessionProjectMap.get(sessionId) ?? null;
-  let userId: string | null = null;
   if (!projectId) {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { projectId: true, userId: true },
+      select: { projectId: true },
     });
     if (session) {
       projectId = session.projectId;
-      userId = session.userId;
       sessionProjectMap.set(sessionId, projectId);
     }
-  } else {
-    const session = await prisma.session.findUnique({
-      where: { id: sessionId },
-      select: { userId: true },
-    });
-    userId = session?.userId ?? null;
   }
 
-  // #318: 進捗表示の言語は開始時に1回だけ解決してトラッカーにキャッシュ（毎更新の DB アクセスを避ける）
-  let language: Language = DEFAULT_CHAT_LANGUAGE;
-  if (userId) {
-    const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
-    if (stored === 'en' || stored === 'ja') {
-      language = stored;
-    }
-  }
+  // #318/#319: 進捗表示の言語は開始時に1回だけ解決してトラッカーにキャッシュ（毎更新の DB アクセスを避ける）
+  // 解決ロジックは resolveSessionLanguage() に単一情報源化（agent-manager.ts と共用、#304/#306/#309 と同種の再発防止）
+  const language: Language = await resolveSessionLanguage(sessionId);
 
   const tracker: ProgressTracker = {
     messages: new Map(),
@@ -531,7 +518,7 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       } else {
         // Delete progress message and send new one with files
         if (msgInfo) {
-          await editDiscordMessage(chatId, msgInfo.messageId as string, '✅ 完了');
+          await editDiscordMessage(chatId, msgInfo.messageId as string, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
         }
         await sendDiscordMessage(chatId, messageToSend, files);
       }
@@ -545,7 +532,7 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       } else {
         // Delete progress message and send new one with files
         if (msgInfo) {
-          await editTelegramMessage(chatId, msgInfo.messageId as number, '✅ 完了');
+          await editTelegramMessage(chatId, msgInfo.messageId as number, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
         }
         await sendTelegramMessage(chatId, messageToSend, files);
       }
@@ -634,8 +621,10 @@ export async function clearSessionsForMachine(machineId: string) {
       sessionsToClear.push(sessionId);
 
       // Notify participants that the session ended
+      const lang = await resolveSessionLanguage(sessionId);
+      const offlineMessage = tChat(lang, 'session.machineOffline');
       for (const { platform, chatId } of participants) {
-        await sendMessage(platform, chatId, '⚠️ マシンがオフラインになったため、セッションが終了しました。`c` で再接続できます。');
+        await sendMessage(platform, chatId, offlineMessage);
       }
     }
   }

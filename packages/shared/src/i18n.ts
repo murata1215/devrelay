@@ -169,6 +169,38 @@ export const chatMessages = {
   'progress.codexRunning': { en: '⏳ Codex running... ({label})', ja: '⏳ Codex 実行中... ({label})' },
   'progress.runtimeLimitSuffix': { en: ' / limit {min}m', ja: ' / 上限{min}分' },
   'progress.timeout': { en: '⏱️ Timeout: no response from agent (5 minutes elapsed)', ja: '⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）' },
+  'progress.complete': { en: '✅ Done', ja: '✅ 完了' },
+
+  // --- agent-manager.ts（sessionId のみ保持するハンドラ、#319） ---
+  'aiStatus.error': { en: '❌ Error: {error}', ja: '❌ Error: {error}' },
+  'aiStatus.running': { en: '🤖 AI Status: {status}', ja: '🤖 AI Status: {status}' },
+  'agreement.upToDate': { en: '✅ DevRelay Agreement up to date', ja: '✅ DevRelay Agreement 対応済み' },
+  'agreement.outdated': { en: '⚠️ DevRelay Agreement outdated - update to the latest with `ag`', ja: '⚠️ DevRelay Agreement 旧版 - `ag` で最新版に更新できます' },
+  'agreement.none': { en: '⚠️ DevRelay Agreement not applied - apply it with `ag`', ja: '⚠️ DevRelay Agreement 未対応 - `ag` で対応できます' },
+  'storage.saved': { en: '💾 Storage context saved ({n} chars)', ja: '💾 ストレージコンテキストを保存しました（{n}文字）' },
+  'cancel.done': { en: '⛔ AI process cancelled', ja: '⛔ AI プロセスをキャンセルしました' },
+
+  // --- session-manager.ts 残り（#319） ---
+  'session.machineOffline': { en: '⚠️ Session ended because the machine went offline. Send `c` to reconnect.', ja: '⚠️ マシンがオフラインになったため、セッションが終了しました。`c` で再接続できます。' },
+
+  // --- command-handler.ts の formatDuration/formatRunningCodeLines/handleSession/handleBuild（#319） ---
+  'duration.hoursMinutes': { en: '{h}h {m}m', ja: '{h}時間{m}分' },
+  'duration.minutesSeconds': { en: '{m}m {s}s', ja: '{m}分{s}秒' },
+  'duration.seconds': { en: '{s}s', ja: '{s}秒' },
+  'runningCode.line': { en: '\n  Running code: {mtime}', ja: '\n  実行中コード: {mtime}' },
+  'runningCode.staleWarning': { en: '\n  ⚠️ Running code may be stale (missed rebuild? Please rebuild the Agent)', ja: '\n  ⚠️ 実行中コードが古い可能性（再ビルド漏れ？ Agent を再ビルドしてください）' },
+  'session.notConnected': { en: '📍 Not connected', ja: '📍 未接続' },
+  'session.lastConnection': { en: '   Last: {machine} / {project} (send `c` to reconnect)', ja: '   前回: {machine} / {project} (c で再接続)' },
+  'session.fetchFailed': { en: '⚠️ Failed to retrieve session information', ja: '⚠️ セッション情報を取得できませんでした' },
+  'build.noLogsYet': { en: '📋 No build logs yet. Build logs are recorded when you run `e` / `exec`.', ja: '📋 ビルドログがありません。`e` / `exec` で実行するとビルドが記録されます。' },
+  'build.noProjects': { en: '⚠️ No projects found.', ja: '⚠️ プロジェクトがありません。' },
+  'build.header': { en: '📋 **Build Log**', ja: '📋 **ビルドログ**' },
+
+  // --- Agent 3OS ai-runner.ts の Codex/Devin 進捗表示 残り（#318 で mcp_tool_call のみ対応済み、#319） ---
+  'progress.codexCommand': { en: '💻 Running command: {cmd}', ja: '💻 コマンド実行中: {cmd}' },
+  'progress.codexFile': { en: '📝 Updating {path}...', ja: '📝 {path} を更新中...' },
+  'progress.codexSearch': { en: '🔍 Searching: {query}', ja: '🔍 検索中: {query}' },
+  'progress.devinStep': { en: '{tool} running', ja: '{tool} を実行中' },
 
   // --- 権限/セキュリティ ---
   'security.permissionDenied': { en: '🔒 You do not have permission to run commands.', ja: '🔒 コマンドを実行する権限がありません。' },

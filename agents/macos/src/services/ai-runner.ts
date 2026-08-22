@@ -212,11 +212,11 @@ function summarizeCodexItem(item: any, lang: Language = DEFAULT_CHAT_LANGUAGE): 
   if (!type) return null;
   switch (type) {
     case 'command_execution':
-      return `💻 コマンド実行中: ${item.command || item.cmd || ''}`.trim();
+      return tChat(lang, 'progress.codexCommand', { cmd: item.command || item.cmd || '' }).trim();
     case 'file_change':
-      return `📝 ${item.path || item.file || ''} を更新中...`;
+      return tChat(lang, 'progress.codexFile', { path: item.path || item.file || '' });
     case 'web_search':
-      return `🔍 検索中: ${item.query || ''}`;
+      return tChat(lang, 'progress.codexSearch', { query: item.query || '' });
     case 'mcp_tool_call':
       return tChat(lang, 'progress.usingTool', { tool: item.tool_name || item.tool || tChat(lang, 'progress.mcpTool') });
     default:
@@ -249,12 +249,12 @@ function probeDevinExportSupport(command: string): boolean {
  * @param entry JSON.parse 済みの ATIF 1エントリ
  * @returns 「⏳ ...」形式で表示する要約（先頭の ⏳ は呼び出し側で付与）／認識不能なら null
  */
-function summarizeAtifEntry(entry: any): string | null {
+function summarizeAtifEntry(entry: any, lang: Language = DEFAULT_CHAT_LANGUAGE): string | null {
   if (!entry || typeof entry !== 'object') return null;
   const toolName = entry.tool_name || entry.tool || entry.name;
   if (toolName) {
     const title = entry.title || entry.command || entry.action;
-    return title ? `${toolName}: ${String(title).slice(0, 80)}` : `${toolName} を実行中`;
+    return title ? `${toolName}: ${String(title).slice(0, 80)}` : tChat(lang, 'progress.devinStep', { tool: toolName });
   }
   if (entry.title) return String(entry.title).slice(0, 100);
   if (entry.type && typeof entry.type === 'string') return `[${entry.type}]`;
@@ -270,7 +270,7 @@ function summarizeAtifEntry(entry: any): string | null {
  * @param exportPath ATIF ファイルパス
  * @returns 「\n\n🧭 実行ステップ ...」形式。ステップ0件なら空文字列
  */
-function buildDevinStepSummary(exportPath: string): string {
+function buildDevinStepSummary(exportPath: string, lang: Language = DEFAULT_CHAT_LANGUAGE): string {
   let content: string;
   try {
     content = fs.readFileSync(exportPath, 'utf-8');
@@ -283,7 +283,7 @@ function buildDevinStepSummary(exportPath: string): string {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const s = summarizeAtifEntry(JSON.parse(trimmed));
+      const s = summarizeAtifEntry(JSON.parse(trimmed), lang);
       if (s) steps.push(s);
     } catch {
       // 行パース失敗は無視（後段の単一 JSON フォールバックに委ねる）
@@ -299,7 +299,7 @@ function buildDevinStepSummary(exportPath: string): string {
           ? parsed.messages
           : [parsed];
       for (const e of entries) {
-        const s = summarizeAtifEntry(e);
+        const s = summarizeAtifEntry(e, lang);
         if (s) steps.push(s);
       }
     } catch {
@@ -1334,7 +1334,7 @@ export async function sendPromptToAi(
               if (!trimmed) continue;
               try {
                 const entry = JSON.parse(trimmed);
-                const summary = summarizeAtifEntry(entry);
+                const summary = summarizeAtifEntry(entry, options.language ?? DEFAULT_CHAT_LANGUAGE);
                 if (summary) onOutput(`⏳ ${summary}\n`, false);
                 // #277: ステップ数上限（--export 対応版のみ）。超過で SIGTERM 停止。
                 devinStepCount++;
@@ -1642,7 +1642,7 @@ export async function sendPromptToAi(
       if (devinFsWatcher) { try { devinFsWatcher.close(); } catch {} devinFsWatcher = null; }
       // #281: ATIF は turn 終了時に一括書き出しされるため、削除する前に読んで実行ステップまとめを作る
       if (devinExportPath && fs.existsSync(devinExportPath)) {
-        try { devinStepSummary = buildDevinStepSummary(devinExportPath); } catch {}
+        try { devinStepSummary = buildDevinStepSummary(devinExportPath, options.language ?? DEFAULT_CHAT_LANGUAGE); } catch {}
       }
       if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
       // #277: 実行時間上限タイマー停止

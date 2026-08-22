@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { fileURLToPath } from 'url';
+import { statSync } from 'fs';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
@@ -214,6 +216,15 @@ async function main() {
 │                                                 │
 └─────────────────────────────────────────────────┘
     `);
+    // #319: 稼働中プロセスが最新ビルドをロードしているか一目で判断できるよう、
+    // 自身の dist ファイルの mtime を1行ログ出力する（pm2 logs で stale 判定用）
+    try {
+      const selfPath = fileURLToPath(import.meta.url);
+      const buildTime = statSync(selfPath).mtime.toISOString();
+      console.log(`🏗️  build: ${buildTime} (${selfPath})`);
+    } catch (err) {
+      console.warn('⚠️  build timestamp log failed:', err);
+    }
   } catch (err) {
     app.log.error(err);
     process.exit(1);

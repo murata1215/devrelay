@@ -7,7 +7,8 @@
 
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
-import type { AiProvider, ModelSelectableAiTool } from '@devrelay/shared';
+import type { AiProvider, ModelSelectableAiTool, Language } from '@devrelay/shared';
+import { isLanguage, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 
 // 設定キーの定義
 export const SettingKeys = {
@@ -401,6 +402,30 @@ export async function getApiKeyForTerminalAi(userId: string): Promise<{ provider
   }
 
   return null;
+}
+
+/**
+ * sessionId のみから表示言語を解決する（#319）
+ *
+ * agent-manager.ts の一部ハンドラは payload に sessionId しか持たないため、
+ * Session → userId → UserSettings.language の解決ロジックを単一情報源として集約する。
+ * #304/#306/#309 と同種の「分散した同期漏れバグ」の再発防止。
+ * 解決に失敗した場合（Session/userId/設定なし）は DEFAULT_CHAT_LANGUAGE にフォールバックする。
+ */
+export async function resolveSessionLanguage(sessionId: string): Promise<Language> {
+  try {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { userId: true },
+    });
+    if (!session) return DEFAULT_CHAT_LANGUAGE;
+
+    const stored = await getUserSetting(session.userId, SettingKeys.LANGUAGE);
+    return isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+  } catch (err) {
+    console.error(`⚠️ resolveSessionLanguage failed for session ${sessionId}:`, err);
+    return DEFAULT_CHAT_LANGUAGE;
+  }
 }
 
 /**

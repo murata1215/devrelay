@@ -903,6 +903,7 @@ async function handleAgreement(context: UserContext): Promise<string> {
 }
 
 async function handleSession(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   // メモリ内のアクティブセッション（参加者がいるセッション）を取得
   const activeSessions = await getActiveSessions();
 
@@ -910,7 +911,7 @@ async function handleSession(context: UserContext): Promise<string> {
   if (!context.currentSessionId) {
     // 未接続の場合
     const parts: string[] = [];
-    parts.push('📍 未接続');
+    parts.push(tChat(lang, 'session.notConnected'));
 
     // 前回の接続先情報があれば表示
     if (context.lastProjectId) {
@@ -920,7 +921,7 @@ async function handleSession(context: UserContext): Promise<string> {
       });
       if (lastProject) {
         const lastDisplay = lastProject.machine.displayName ?? lastProject.machine.name;
-        parts.push(`   前回: ${lastDisplay} / ${lastProject.name} (c で再接続)`);
+        parts.push(tChat(lang, 'session.lastConnection', { machine: lastDisplay, project: lastProject.name }));
       }
     }
 
@@ -937,7 +938,7 @@ async function handleSession(context: UserContext): Promise<string> {
       }
       for (const sess of uniqueSessions.values()) {
         const durationMs = Date.now() - new Date(sess.startedAt).getTime();
-        const durationStr = formatDuration(durationMs);
+        const durationStr = formatDuration(durationMs, lang);
         parts.push(`• ${sess.machineDisplayName} / ${sess.projectName} (${durationStr})`);
       }
     }
@@ -977,13 +978,13 @@ async function handleSession(context: UserContext): Promise<string> {
   });
 
   if (!session) {
-    return '⚠️ セッション情報を取得できませんでした';
+    return tChat(lang, 'session.fetchFailed');
   }
 
   const now = new Date();
   const startedAt = new Date(session.startedAt);
   const durationMs = now.getTime() - startedAt.getTime();
-  const durationStr = formatDuration(durationMs);
+  const durationStr = formatDuration(durationMs, lang);
 
   const parts: string[] = [];
 
@@ -1006,7 +1007,7 @@ async function handleSession(context: UserContext): Promise<string> {
   }
   for (const sess of uniqueOtherSessions.values()) {
     const sessDurationMs = Date.now() - new Date(sess.startedAt).getTime();
-    const sessDurationStr = formatDuration(sessDurationMs);
+    const sessDurationStr = formatDuration(sessDurationMs, lang);
     parts.push(`• ${sess.machineDisplayName} / ${sess.projectName} (${sessDurationStr})`);
   }
 
@@ -1036,11 +1037,12 @@ async function handleSession(context: UserContext): Promise<string> {
  * 全体の最新ビルド番号との差分を表示
  */
 async function handleBuild(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   // ユーザーの DB ID を取得
   const dbUserId = await resolveDbUserId(context);
 
   if (!dbUserId) {
-    return '📋 ビルドログがありません。`e` / `exec` で実行するとビルドが記録されます。';
+    return tChat(lang, 'build.noLogsYet');
   }
 
   // ユーザーのマシン一覧とプロジェクトを取得
@@ -1053,7 +1055,7 @@ async function handleBuild(context: UserContext): Promise<string> {
   const projectNames = [...new Set(machines.flatMap(m => m.projects.map(p => p.name)))].sort();
 
   if (projectNames.length === 0) {
-    return '⚠️ プロジェクトがありません。';
+    return tChat(lang, 'build.noProjects');
   }
 
   const lines: string[] = [];
@@ -1102,25 +1104,25 @@ async function handleBuild(context: UserContext): Promise<string> {
   }
 
   if (lines.length === 0) {
-    return '📋 ビルドログがありません。`e` / `exec` で実行するとビルドが記録されます。';
+    return tChat(lang, 'build.noLogsYet');
   }
 
-  return `📋 **ビルドログ**\n\n${lines.join('\n')}`;
+  return `${tChat(lang, 'build.header')}\n\n${lines.join('\n')}`;
 }
 
-function formatDuration(ms: number): string {
+function formatDuration(ms: number, lang: Language = DEFAULT_CHAT_LANGUAGE): string {
   const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
 
   if (hours > 0) {
     const remainingMinutes = minutes % 60;
-    return `${hours}時間${remainingMinutes}分`;
+    return tChat(lang, 'duration.hoursMinutes', { h: hours, m: remainingMinutes });
   } else if (minutes > 0) {
     const remainingSeconds = seconds % 60;
-    return `${minutes}分${remainingSeconds}秒`;
+    return tChat(lang, 'duration.minutesSeconds', { m: minutes, s: remainingSeconds });
   } else {
-    return `${seconds}秒`;
+    return tChat(lang, 'duration.seconds', { s: seconds });
   }
 }
 
@@ -1170,13 +1172,13 @@ async function handleKill(context: UserContext): Promise<string> {
  * 「stale dist デッドロック」を検知するため、実行中エントリファイルの mtime を表示し、
  * ローカルコミットより古い場合は再ビルド漏れの警告を出す
  */
-function formatRunningCodeLines(info: { runningCodeMtime?: string; runningCodeStale?: boolean }): string {
+function formatRunningCodeLines(info: { runningCodeMtime?: string; runningCodeStale?: boolean }, lang: Language = DEFAULT_CHAT_LANGUAGE): string {
   if (!info.runningCodeMtime) return '';
   // ISO を読みやすい形式（UTC）に整形
   const mtimeDisp = new Date(info.runningCodeMtime).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
-  let lines = `\n  実行中コード: ${mtimeDisp}`;
+  let lines = tChat(lang, 'runningCode.line', { mtime: mtimeDisp });
   if (info.runningCodeStale) {
-    lines += `\n  ⚠️ 実行中コードが古い可能性（再ビルド漏れ？ Agent を再ビルドしてください）`;
+    lines += tChat(lang, 'runningCode.staleWarning');
   }
   return lines;
 }
@@ -1222,7 +1224,7 @@ async function handleUpdate(context: UserContext): Promise<string> {
       return tChat(lang, 'update.upToDate', {
         commit: info.localCommit.slice(0, 7),
         date: info.localDate,
-        runningCodeLines: formatRunningCodeLines(info),
+        runningCodeLines: formatRunningCodeLines(info, lang),
       });
     }
 
@@ -1235,7 +1237,7 @@ async function handleUpdate(context: UserContext): Promise<string> {
       localDate: info.localDate,
       remoteCommit: info.remoteCommit.slice(0, 7),
       remoteDate: info.remoteDate,
-      runningCodeLines: formatRunningCodeLines(info),
+      runningCodeLines: formatRunningCodeLines(info, lang),
     });
   } catch (err) {
     return tChat(lang, 'update.checkFailed', { error: (err as Error).message });

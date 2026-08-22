@@ -35,8 +35,8 @@ import { sendFcmNotificationForToolApproval } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool } from './user-settings.js';
-import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, type Language } from '@devrelay/shared';
+import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
+import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language } from '@devrelay/shared';
 import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
@@ -790,24 +790,27 @@ async function createBuildLog(params: {
 }
 
 async function handleAiStatus(payload: { machineId: string; sessionId: string; status: string; error?: string; agreementStatus?: string | boolean }) {
+  // #319: sessionId しか持たないため resolveSessionLanguage() で単一情報源から言語解決
+  const lang = await resolveSessionLanguage(payload.sessionId);
+
   // Build status message
   let statusMessage = payload.error
-    ? `❌ Error: ${payload.error}`
-    : `🤖 AI Status: ${payload.status}`;
+    ? tChat(lang, 'aiStatus.error', { error: payload.error })
+    : tChat(lang, 'aiStatus.running', { status: payload.status });
 
   // Add agreement status if provided
   if (payload.agreementStatus !== undefined && payload.status === 'running') {
     // 新しい詳細ステータス（'latest', 'outdated', 'none'）または後方互換の boolean
     const status = payload.agreementStatus;
     if (status === 'latest') {
-      statusMessage += '\n✅ DevRelay Agreement 対応済み';
+      statusMessage += '\n' + tChat(lang, 'agreement.upToDate');
     } else if (status === 'outdated') {
-      statusMessage += '\n⚠️ DevRelay Agreement 旧版 - `ag` で最新版に更新できます';
+      statusMessage += '\n' + tChat(lang, 'agreement.outdated');
     } else if (status === 'none' || status === false) {
-      statusMessage += '\n⚠️ DevRelay Agreement 未対応 - `ag` で対応できます';
+      statusMessage += '\n' + tChat(lang, 'agreement.none');
     } else if (status === true) {
       // 後方互換: true の場合は対応済みとみなす
-      statusMessage += '\n✅ DevRelay Agreement 対応済み';
+      statusMessage += '\n' + tChat(lang, 'agreement.upToDate');
     }
   }
 
@@ -816,7 +819,8 @@ async function handleAiStatus(payload: { machineId: string; sessionId: string; s
 
 async function handleStorageSaved(payload: { machineId: string; sessionId: string; projectPath: string; contentLength: number }) {
   const { sessionId, contentLength } = payload;
-  const message = `💾 ストレージコンテキストを保存しました（${contentLength}文字）`;
+  const lang = await resolveSessionLanguage(sessionId);
+  const message = tChat(lang, 'storage.saved', { n: contentLength });
   await broadcastToSession(sessionId, message, false);
 }
 
@@ -1009,7 +1013,8 @@ async function handleSessionAiTool(payload: { machineId: string; sessionId: stri
 async function handleAiCancelled(payload: AiCancelledPayload) {
   const { sessionId } = payload;
   console.log(`⛔ AI process cancelled for session ${sessionId}`);
-  await broadcastToSession(sessionId, '⛔ AI プロセスをキャンセルしました', false);
+  const lang = await resolveSessionLanguage(sessionId);
+  await broadcastToSession(sessionId, tChat(lang, 'cancel.done'), false);
 }
 
 // -----------------------------------------------------------------------------

@@ -6,6 +6,47 @@
 
 ## 実装済み機能
 
+### #319: 残りの日本語ハードコード文字列を一掃（agent-manager.ts / session-manager.ts / command-handler.ts / Agent 3OS ai-runner.ts） (2026-08-22)
+
+#### 背景
+- ユーザーがスクリーンショット付きで「細かいところがまだ日本語だねー」と再報告。具体例は `処理中`/`8秒経過`（進捗ボックス）と `対応済み`（Agreement ステータス）の2つ
+- 調査の結果、**この2つは原因がまったく違う**ことが判明
+
+#### 原因A（`処理中`/`8秒経過`）: コード修正は不要、サーバー再起動だけ
+- `session-manager.ts` の `formatProgressMessage()` は #318 で既に `tChat()` 化済みだったが、稼働中の `devrelay-server` プロセス（pm2 起動 2026-08-22 09:27:35）が #318 のビルド（`session-manager.js` 09:42:24 / `i18n.js` 09:42:02）より **15分前** に起動しており、新コードを一度もロードしていなかった
+- **これで通算3回目**の「ビルドしたのに直らない」再発（`pnpm build` は稼働中プロセスに影響しないため、サーバー再起動をユーザーが忘れると起きる構造的な罠）
+- スクリーンショット中の `🔧 Using Bash...` / `📝 History: 30 messages` / `It's a git repository...` は英語化できており、#318 の Agent 側（`u` 済み）は正しく動作していることも確認できた
+
+#### 原因B（`対応済み`）: 本当に未翻訳
+- `agent-manager.ts` の `handleAiStatus()` が `broadcastToSession()` で直接ユーザーに送るメッセージで、#316/#318 が明示的に「未対応」と記録していた `agent-manager.ts` のメッセージ群そのものだった
+
+#### 実装（Explore エージェントで棚卸しした約30〜35個のうち、chat に出るものを一括対応）
+- **Phase 0（再発防止）**: `apps/server/src/index.ts` の起動ログに自身の dist ファイルの mtime を1行出力（`🏗️  build: ...`）。次回「まだ直ってない」と言われたら `pm2 logs devrelay-server` の1行で stale プロセスかどうか即判定できるようにした
+- **Phase 1（`agent-manager.ts`、ユーザーの指摘そのもの）**:
+  - `user-settings.ts` に `resolveSessionLanguage(sessionId): Promise<Language>` を新設（`prisma.session.findUnique` → `getUserSetting` → `isLanguage()` 検証 → 失敗時 `DEFAULT_CHAT_LANGUAGE`）。sessionId しか持たないハンドラ向けの単一情報源（#304/#306/#309 と同種の分散同期漏れ再発防止）
+  - `handleAiStatus`（`agreement.upToDate`/`outdated`/`none` + `aiStatus.error`/`running`）、`handleStorageSaved`、`handleAiCancelled` を `tChat()` 化
+- **Phase 2（既に `lang` を持っている箇所の低コスト対応）**:
+  - `session-manager.ts`: `finalizeProgress()` の `'✅ 完了'`（`tracker.language` を使用）、`clearSessionsForMachine()` のオフライン通知（新設の `resolveSessionLanguage()` を使用）。さらに `startProgressTracking()` に #318 で直書きした言語解決ロジックを `resolveSessionLanguage()` に置き換えて単一情報源化
+  - Agent 3OS（linux/macos/windows）`ai-runner.ts`: `summarizeCodexItem()` の残り3分岐（`command_execution`/`file_change`/`web_search`）を `tChat()` 化。`summarizeAtifEntry()`/`buildDevinStepSummary()` に `lang` 引数を追加し `{tool} を実行中` を `tChat()` 化（呼び出し元は同一関数内の `options.language ?? DEFAULT_CHAT_LANGUAGE` を伝搬）
+- **Phase 3（`command-handler.ts` の高頻度パス、#316/#318 で2回見送っていたが `formatDuration` を直すなら結局触るため今回まとめて対応）**:
+  - `formatDuration(ms, lang)` / `formatRunningCodeLines(info, lang)` にシグネチャ変更
+  - `handleSession()`（未接続時のヘッダ・前回接続先・セッション取得失敗）、`handleBuild()`（ビルドログなし・プロジェクトなし・ヘッダ）を `tChat()` 化
+- **今回スコープ外として明示的に見送ったもの**（透明性のため記録）:
+  - `testflight-manager.ts`（19個以上）。低頻度機能な上、`CLAUDE.md`/rules のような**ディスクに書かれる AI 向け足場ファイル**の日本語テンプレートが混在しており、翻訳するとプロジェクト雛形の挙動自体が変わるため別途判断が必要。ユーザーとの相談の上 #320 として分離するか検討
+  - Agent `ai-runner.ts` の `formatDevinToolLog()`（Devin バイナリの内部ログを日本語に変換する別機能）と、ファイル変更のライブ監視表示（`⏳ 📝 {f} を更新中...`）。いずれも #319 の対象（`summarizeCodexItem`/`summarizeAtifEntry`）とは別のコードパスで、今回の計画に含めていなかった
+
+#### 変更ファイル
+`packages/shared/src/i18n.ts`（新規キー30個弱）、`apps/server/src/services/user-settings.ts`（`resolveSessionLanguage` 新設）、`apps/server/src/services/agent-manager.ts`、`apps/server/src/services/session-manager.ts`、`apps/server/src/services/command-handler.ts`、`apps/server/src/index.ts`（Phase 0）、Agent 3OS（linux/macos/windows）の `ai-runner.ts`
+
+#### 検証
+- `pnpm build` green（shared/server/Agent 3OS/web 全て）
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` が 0（#310 再発防止チェック）
+- 新設の `resolveSessionLanguage` / Phase 0 のビルド時刻ログ / 新規 i18n キーがすべて `dist/` にコンパイルされていることを確認
+- DB マイグレーション不要
+- **server 再起動 + 各マシン `u`（Agent 側 Phase 2 反映） + commit/push が必須**。実チャットでの最終確認（`e`/`u`/`s`/`b` 等）は未実施
+
+---
+
 ### #318: 言語設定を英語にしてもチャットが日本語のまま問題（進捗表示 i18n + command-handler.ts 残り分） (2026-08-22)
 
 #### 背景
