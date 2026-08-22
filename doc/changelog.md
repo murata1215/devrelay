@@ -6,6 +6,30 @@
 
 ## 実装済み機能
 
+### #321: 「DevRelay の返事が遅い」の原因調査 + トークン高止まり警告に「遅さ」軸を追加 (2026-08-23)
+
+#### 背景
+- ユーザーから「なんか今日、devrelay の返事がめちゃくちゃ遅い気がする。原因しらべられる？」と報告
+- 調査で 8/22 (JST) の user→ai 応答レイテンシ p50 が平常時（82〜116秒）の約3倍（310秒）であることを実測で確認
+
+#### 調査結果（DevRelay 本体のバグではなかった）
+- サーバー側の疑わしい要因（負荷・イベントループ詰まり・エラー多発・Agent 二重起動・HTTP 遅延・レート制限・1M コンテキスト自動昇格）は全て実測でシロ
+- 真因は AI ターン自体の肥大化: `Message.usageData` の `durationMs`/出力トークンが 8/22 は平常時比 2〜6 倍（avg 出力 32,360 tok、avg durationMs 553秒）
+- その 88%（324分/369分）が `dangou-card` プロジェクトに集中。同プロジェクトの平均出力トークンは以前から単調増加していた（08-12: 12,215 → 08-17: 29,498 → 08-22: 36,161）。MEMORY.md #305 (2026-08-16) と同種のコンテキスト肥大の再発
+- 既存の `token-usage-warning.ts`（#300）は「合計トークン（cache_read 支配）」のみを見ており、今回のような「出力トークン量 × 所要時間」の肥大は文言上検知できていなかった
+
+#### 対応（検知の改善のみ。dangou-card 側の運用対応は別プロジェクトのため対象外）
+- `token-usage-warning.ts`: `evaluateTokenBloat()` の入力を `totals: number[]` から `samples: { total, output, durationMs }[]` に変更し、新しい判定軸 `reason: 'slow'` を追加（直近 `DEVRELAY_TOKEN_WARN_SLOW_COUNT`=3 会話が全て出力 ≥ `DEVRELAY_TOKEN_WARN_SLOW_OUTPUT`=25,000 tok かつ所要時間 ≥ `DEVRELAY_TOKEN_WARN_SLOW_DURATION_MS`=300,000ms）。`extractOutputTokens()`/`extractDurationMs()` を `extractTotalTokens()` と同じパターンで追加。DB クエリは `select: { usageData: true }` のまま追加クエリなし
+- `packages/shared/src/i18n.ts` に `tokenWarn.bloat`/`tokenWarn.slow` の2キーを追加し、ハードコード日本語だった警告文を `tChat()` 化（#316〜#320 の i18n スイープの積み残し回収）。言語解決は sessionId しか渡っていないため既存の `resolveSessionLanguage(sessionId)`（#319）をそのまま使用、新ヘルパーは作らず
+- `agent-manager.ts`: `sendToAgent()` のログ出力から `server:pong`（ハートビート応答、pm2 ログの実測 44% を占有）を除外。送信自体・性能には影響なし、調査効率のみの改善
+
+#### 変更ファイル
+- `apps/server/src/services/token-usage-warning.ts`（サンプル型変更・`slow` 判定追加・`tChat()` 化）
+- `packages/shared/src/i18n.ts`（`tokenWarn.bloat`/`tokenWarn.slow` の2キー追加）
+- `apps/server/src/services/agent-manager.ts`（`server:pong` ログ抑制）
+
+Agent（linux/macos/windows）のコード変更なし → 各マシンの `u` は不要。DB マイグレーション不要。`pnpm build` green、`grep -c 'require(' apps/web/dist/assets/index-*.js` が 0、`packages/shared/dist/i18n.js` に `tokenWarn.slow` がコンパイルされていること、`apps/server/dist/services/token-usage-warning.js` に日本語リテラルが残っていない（i18n カタログ側にのみ存在）ことを確認。**server 再起動が必要**（`pm2 restart devrelay-server`）。実チャットでの `slow` 警告の実機発火確認は未実施（次に同種の長時間セッションが発生した際に確認）
+
 ### #320: `u`（Agent 更新）フローの非同期通知が英語化されていなかった問題を修正 (2026-08-22)
 
 #### 背景

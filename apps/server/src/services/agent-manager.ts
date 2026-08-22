@@ -1082,7 +1082,11 @@ export function sendToAgent(machineIdOrWs: string | WebSocket, message: ServerTo
     : machineIdOrWs;
 
   if (ws && ws.readyState === ws.OPEN) {
-    console.log(`📤 sendToAgent: type=${message.type}`);
+    // #321: server:pong はハートビート応答で高頻度に送信され、pm2 ログの大半（実測 44%）を
+    // 占めて障害調査を妨げていたため抑制する（送信自体・性能には影響なし、ログ出力のみ省略）
+    if (message.type !== 'server:pong') {
+      console.log(`📤 sendToAgent: type=${message.type}`);
+    }
     ws.send(JSON.stringify(message));
   } else {
     console.log(`📤 sendToAgent FAILED: type=${message.type}, ws=${!!ws}, readyState=${ws?.readyState}`);

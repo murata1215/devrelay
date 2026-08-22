@@ -212,6 +212,16 @@ export const chatMessages = {
   'progress.codexSearch': { en: '🔍 Searching: {query}', ja: '🔍 検索中: {query}' },
   'progress.devinStep': { en: '{tool} running', ja: '{tool} を実行中' },
 
+  // --- token-usage-warning.ts（#321: 高止まり警告の i18n 化 + 「遅さ」軸追加） ---
+  'tokenWarn.bloat': {
+    en: '⚠️ Token usage is staying high ({project}: last {count} turns avg {avgK}k). Run `w` to record & commit, then `x` to clear history — this improves cost and response time.\n',
+    ja: '⚠️ トークンが高止まりしています（{project}: 直近{count}会話 平均{avgK}k）。`w` で作業を記録・コミットしてから `x` で履歴をクリアするとコスト・応答速度が改善します。\n',
+  },
+  'tokenWarn.slow': {
+    en: '🐢 Responses are slowing down ({project}: last {count} turns avg {sec}s, {outK}k output tokens). Run `w` then `x` to clear history.\n',
+    ja: '🐢 応答が遅くなっています（{project}: 直近{count}会話 平均{sec}秒 / 出力{outK}kトークン）。`w` のあと `x` で履歴をクリアしてください。\n',
+  },
+
   // --- 権限/セキュリティ ---
   'security.permissionDenied': { en: '🔒 You do not have permission to run commands.', ja: '🔒 コマンドを実行する権限がありません。' },
   'security.ipRestricted': {

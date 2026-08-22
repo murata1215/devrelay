@@ -1420,3 +1420,21 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   `/api/machines` で返却、Agents ページ Version 列に赤「⚠ 再ビルド漏れ」/ グレー「ⓘ ビルド状態不明（旧Agent）」バッジ表示
 - **Agent の起動方式は機体ごとに 1 つに固定する**。この機体は crontab `@reboot` の nohup 起動が正で、
   pm2 に登録してよいのは `devrelay-server` のみ（`CLAUDE.md` に明記済み）
+
+### トークン高止まり警告への「遅さ」軸の追加 (#321)
+
+- 「応答が遅い」という体感の原因切り分けは、まず **DevRelay 側の指標（サーバー負荷・イベントループ・エラーログ・
+  Agent 二重起動・レート制限）を先に全部シロにしてから**、AI ターン自体の指標（`Message.usageData` の
+  `durationMs`/`usage.output_tokens`）を見る順序が有効。今回はサーバー側は完全に健全で、
+  出力トークン量が 2〜6 倍に膨らんだこと自体が原因だった（#305 と同種の `dangou-card` コンテキスト肥大の再発）
+- #300 の `evaluateTokenBloat()` は「合計トークン（≒ cache_read 支配）」しか見ておらず、
+  今回のような「1 ターンの出力量 × 所要時間」の肥大は検知できなかった。
+  → 入力を `totals: number[]` から `samples: { total, output, durationMs }[]` に拡張し、
+  第3の判定軸 `reason: 'slow'`（直近 N 会話が連続で 出力 ≥ しきい値 かつ 所要時間 ≥ しきい値）を追加。
+  DB クエリは変わらず（`usageData` に既に `durationMs`/`usage.output_tokens` が入っている）
+- 警告文の翻訳は sessionId しか持たない呼び出し元なので `resolveSessionLanguage(sessionId)`（#319）を
+  そのまま流用。「sessionId しか無いから新ヘルパーが要る」わけではなく、**既存ヘルパーが sessionId 引数を
+  受けるなら常にそれを優先し、新設は本当に情報源が異なる場合（#320 の `pendingUpdateNotify` 等）に限る**
+- ログのノイズ削減（`server:pong` の抑制）は実装コストがほぼゼロな割に、次の障害調査を大きく楽にする。
+  「44% がハートビート応答」のような比率は `pm2 logs` を grep -c で数えるだけで分かるので、
+  調査の一環として毎回チェックする価値がある
