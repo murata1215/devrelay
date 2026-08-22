@@ -1,6 +1,6 @@
 import crypto from 'crypto';
-import type { UserCommand, UserContext, Platform, FileAttachment, AiTool, ModelSelectableAiTool } from '@devrelay/shared';
-import { STATUS_EMOJI, AI_TOOL_NAMES, AI_MODEL_CATALOG, isModelSelectableAiTool, isUnsafeModelId } from '@devrelay/shared';
+import type { UserCommand, UserContext, Platform, FileAttachment, AiTool, ModelSelectableAiTool, Language } from '@devrelay/shared';
+import { STATUS_EMOJI, AI_TOOL_NAMES, AI_MODEL_CATALOG, isModelSelectableAiTool, isUnsafeModelId, DEFAULT_CHAT_LANGUAGE, isLanguage, tChat, W_COMMAND_PROMPT_PREFIXES } from '@devrelay/shared';
 import { Machine, Project, Session, Message } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import {
@@ -36,7 +36,7 @@ import {
   getActiveSessions,
   getSessionParticipants
 } from './session-manager.js';
-import { getHelpText, W_COMMAND_PROMPT } from './command-parser.js';
+import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
@@ -59,10 +59,11 @@ const pendingClear = new Set<string>();
 // u コマンドの連続確認用: チャンネルごとに前回のコマンドが update だったかを記録
 const pendingUpdate = new Set<string>();
 
-// w コマンド判定用プロンプトプレフィックス
-// command-parser.ts の W_COMMAND_PROMPT から派生させることで、
-// プロンプト文面を変更しても判定側が自動追従し、同期漏れ（#90, 2026-08-16 再発）を防ぐ
-const W_PROMPT_PREFIX = W_COMMAND_PROMPT.slice(0, 30);
+// w コマンド判定用プロンプトプレフィックス（JA/EN の2要素）
+// packages/shared/src/i18n.ts の W_COMMAND_PROMPT_PREFIXES から取得することで、
+// プロンプト文面を変更しても判定側が自動追従し、同期漏れ（#90, #304 の再発）を防ぐ。
+// #316: 言語対応により JA/EN どちらの言語で実行された `w` も判定できるよう2要素になった。
+const [W_PROMPT_PREFIX_JA, W_PROMPT_PREFIX_EN] = W_COMMAND_PROMPT_PREFIXES;
 
 /**
  * context から DB の User.id を解決する
@@ -106,6 +107,19 @@ async function resolveOrCreateUser(context: UserContext) {
   return user;
 }
 
+/**
+ * #316: チャット表示言語を UserSettings.language から解決する。
+ * 未リンク（Discord/Telegram の PlatformLink 未解決）・未設定時は DEFAULT_CHAT_LANGUAGE（'ja'）。
+ * WebUI の既定 'en' とは非対称: 設定を一度も触っていない既存ユーザーのチャットが
+ * 突然英語化するのを防ぐため。
+ */
+async function resolveChatLanguage(context: UserContext): Promise<Language> {
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) return DEFAULT_CHAT_LANGUAGE;
+  const stored = await getUserSetting(dbUserId, SettingKeys.LANGUAGE);
+  return isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+}
+
 export async function getUserContext(userId: string, platform: Platform, chatId: string): Promise<UserContext> {
   // Key by chatId to allow different sessions per channel
   const key = `${platform}:${chatId}`;
@@ -128,6 +142,9 @@ export async function getUserContext(userId: string, platform: Platform, chatId:
     };
     userContexts.set(key, context);
   }
+
+  // #316: 言語設定は毎回軽量に再解決する（WebUI で切り替えた直後のメッセージから反映させるため）
+  context.language = await resolveChatLanguage(context);
 
   return context;
 }
@@ -177,19 +194,22 @@ export async function executeCommand(
   files?: FileAttachment[],
   missedMessages?: MissedMessage[]
 ): Promise<string> {
+  // #316: チャット表示言語（getUserContext で毎回再解決済み。念のためデフォルトへフォールバック）
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+
   // エンタープライズ統制ゲート（#268）: 組織の member はマネージャーが1人以上割り当てられるまでコマンド発行不可。
   // 組織未所属・admin・manager は素通し。Discord/Telegram の未リンクユーザーは User 特定不可のため従来どおり素通し。
   const dbUserId = await resolveDbUserId(context);
   if (dbUserId) {
     const permission = await checkCommandPermission(dbUserId);
     if (!permission.allowed) {
-      return permission.reason ?? '🔒 コマンドを実行する権限がありません。';
+      return permission.reason ?? tChat(lang, 'security.permissionDenied');
     }
     // 組織 IP アクセス制限（#285）: Discord/Telegram など IP 判定不能な経路は、
     // IP 制限が有効な組織のユーザーをブロックする（抜け穴防止）。
     // web 経路は authenticate() で request.ip をチェック済みのためここでは対象外。
     if (context.platform !== 'web' && (await hasIpRestriction(dbUserId))) {
-      return '🔒 組織のIPアクセス制限が有効なため、Discord/Telegram からのコマンド発行はできません。社内ネットワークから WebUI をご利用ください。';
+      return tChat(lang, 'security.ipRestricted');
     }
   }
 
@@ -255,7 +275,7 @@ export async function executeCommand(
       return handleQuit(context);
 
     case 'help':
-      return getHelpText();
+      return getHelpText(lang);
 
     case 'ai:list':
       return handleAiList(context);
@@ -285,7 +305,7 @@ export async function executeCommand(
       return handleDisconnectRemote(context);
 
     default:
-      return '❓ 不明なコマンドです。`h` でヘルプを表示できます。';
+      return tChat(lang, 'common.unknownCommand');
   }
 }
 
@@ -294,12 +314,12 @@ export async function executeCommand(
 // -----------------------------------------------------------------------------
 
 async function handleMachineList(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   // DB の User.id を解決（web: 直接、Discord/Telegram: PlatformLink 経由）
   const dbUserId = await resolveDbUserId(context);
 
   if (!dbUserId) {
-    return '⚠️ WebUI アカウントに連携されていません。\n\n'
-      + '`link` コマンドでリンクコードを取得し、WebUI の Settings ページで入力してください。';
+    return tChat(lang, 'machine.notLinked');
   }
 
   // Get machines for the user
@@ -308,11 +328,7 @@ async function handleMachineList(context: UserContext): Promise<string> {
   });
 
   if (machines.length === 0) {
-    return '📡 登録されているエージェントがありません。\n\n'
-      + 'エージェントを追加するには:\n'
-      + '1. WebUI の Agents ページで「Add Agent」をクリック\n'
-      + '2. 生成されたトークンをコピー\n'
-      + '3. 対象マシンで `devrelay setup` を実行してトークンを入力';
+    return tChat(lang, 'machine.empty');
   }
 
   const list = machines.map((m: Machine & { status: string; displayName: string | null }, i: number) => {
@@ -327,22 +343,23 @@ async function handleMachineList(context: UserContext): Promise<string> {
     lastListItems: machines.map((m: Machine) => m.id)
   });
 
-  return `📡 **エージェント一覧**\n\n${list}`;
+  return tChat(lang, 'machine.listHeader', { list });
 }
 
 async function handleProjectList(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentMachineId) {
-    return '⚠️ エージェントに接続されていません。\n`m` でエージェント一覧を表示して接続してください。';
+    return tChat(lang, 'common.agentNotConnected');
   }
-  
+
   const projects = await prisma.project.findMany({
     where: { machineId: context.currentMachineId }
   });
-  
+
   if (projects.length === 0) {
-    return '📁 プロジェクトが登録されていません。\n\nエージェント側で `devrelay projects add <path>` を実行してください。';
+    return tChat(lang, 'project.empty');
   }
-  
+
   const list = projects.map((p: Project, i: number) => {
     return `${i + 1}. ${p.name}`;
   }).join('\n');
@@ -351,26 +368,27 @@ async function handleProjectList(context: UserContext): Promise<string> {
     lastListType: 'project',
     lastListItems: projects.map((p: Project) => p.id)
   });
-  
+
   // currentMachineName は既に displayName ?? name が設定されている
-  return `📁 **プロジェクト** (${context.currentMachineName})\n\n${list}`;
+  return tChat(lang, 'project.listHeader', { machine: context.currentMachineName ?? '', list });
 }
 
 async function handleSelect(number: number, context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   const items = context.lastListItems;
   const listType = context.lastListType;
-  
+
   if (!items || !listType) {
-    return '⚠️ 選択できる一覧がありません。\n`m` または `p` で一覧を表示してください。';
+    return tChat(lang, 'select.noList');
   }
-  
+
   const index = number - 1;
   if (index < 0 || index >= items.length) {
-    return `⚠️ ${number} は範囲外です。1〜${items.length} の数字を入力してください。`;
+    return tChat(lang, 'select.outOfRange', { number, max: items.length });
   }
-  
+
   const selectedId = items[index];
-  
+
   if (listType === 'machine') {
     return handleMachineConnect(selectedId, context);
   } else if (listType === 'project') {
@@ -381,20 +399,21 @@ async function handleSelect(number: number, context: UserContext): Promise<strin
     return handleAiSwitch(context, selectedId);
   }
 
-  return '⚠️ 不明な選択です。';
+  return tChat(lang, 'select.unknown');
 }
 
 async function handleMachineConnect(machineId: string, context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   const machine = await prisma.machine.findFirst({ where: { id: machineId, deletedAt: null } });
 
   if (!machine) {
-    return '❌ エージェントが見つかりません。';
+    return tChat(lang, 'machine.notFound');
   }
 
   const machineDisplayName = machine.displayName ?? machine.name;
 
   if (machine.status !== 'online') {
-    return `⚠️ ${machineDisplayName} はオフラインです。`;
+    return tChat(lang, 'machine.offline', { name: machineDisplayName });
   }
 
   await updateUserContext(context.userId, context.platform, context.chatId, {
@@ -404,23 +423,24 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
     lastListItems: undefined
   });
 
-  return `✅ **${machineDisplayName}** に接続しました`;
+  return tChat(lang, 'machine.connected', { name: machineDisplayName });
 }
 
 export async function handleProjectConnect(projectId: string, context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: { machine: true }
   });
 
   if (!project) {
-    return '❌ プロジェクトが見つかりません。';
+    return tChat(lang, 'project.notFound');
   }
 
   // Get or create user
   const user = await resolveOrCreateUser(context);
   if (!user) {
-    return '❌ ユーザー情報の取得に失敗しました。';
+    return tChat(lang, 'project.userInfoFailed');
   }
 
   // 既存のアクティブセッションを検索（同一ユーザー・同一プロジェクト・同一マシン）
@@ -508,21 +528,22 @@ export async function handleProjectConnect(projectId: string, context: UserConte
 
   const aiName = AI_TOOL_NAMES[effectiveAi] || effectiveAi;
   if (isResumed) {
-    return `🔄 **${project.name}** に再接続\n${aiName} セッション復元`;
+    return tChat(lang, 'continue.reconnected', { project: project.name, ai: aiName });
   }
-  return `🚀 **${project.name}** に接続\n${aiName} 起動完了`;
+  return tChat(lang, 'continue.connected', { project: project.name, ai: aiName });
 }
 
 async function handleRecentConnect(sessionId: string, context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
     include: { machine: true, project: true }
   });
-  
+
   if (!session) {
-    return '❌ セッションが見つかりません。';
+    return tChat(lang, 'common.sessionNotFound');
   }
-  
+
   // Connect to the same machine/project（displayName があればそちらを使用）
   const recentMachineDisplayName = session.machine.displayName ?? session.machine.name;
   await updateUserContext(context.userId, context.platform, context.chatId, {
@@ -534,42 +555,44 @@ async function handleRecentConnect(sessionId: string, context: UserContext): Pro
 }
 
 async function handleStatus(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentMachineId) {
-    return '📊 未接続\n\n`m` でエージェント一覧を表示';
+    return tChat(lang, 'status.notConnected');
   }
-  
-  const parts = [`📊 **ステータス**`];
+
+  const parts = [`📊 **${lang === 'en' ? 'Status' : 'ステータス'}**`];
   parts.push(`├── Agent: ${context.currentMachineName}`);
-  
+
   if (context.currentProjectName) {
     parts.push(`├── Project: ${context.currentProjectName}`);
     parts.push(`└── Ready: ✅`);
   } else {
-    parts.push(`└── Project: 未選択 (\`p\` で一覧表示)`);
+    parts.push(lang === 'en' ? '└── Project: (none, run `p` to list)' : '└── Project: 未選択 (`p` で一覧表示)');
   }
-  
+
   return parts.join('\n');
 }
 
 async function handleRecent(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   // Get user
   const dbUserId = await resolveDbUserId(context);
   if (!dbUserId) {
-    return '📜 作業履歴がありません。';
+    return tChat(lang, 'recent.empty');
   }
 
   const sessions = await getRecentSessions(dbUserId, 5);
-  
+
   if (sessions.length === 0) {
-    return '📜 作業履歴がありません。';
+    return tChat(lang, 'recent.empty');
   }
-  
+
   type SessionWithRelations = Session & {
     machine: { name: string; displayName: string | null };
     project: { name: string };
   };
   const list = sessions.map((s: SessionWithRelations, i: number) => {
-    const date = formatRelativeDate(s.startedAt);
+    const date = formatRelativeDate(s.startedAt, lang);
     const machineDisplay = s.machine.displayName ?? s.machine.name;
     return `${i + 1}. ${machineDisplay}/${s.project.name} (${date})`;
   }).join('\n');
@@ -578,14 +601,15 @@ async function handleRecent(context: UserContext): Promise<string> {
     lastListType: 'recent',
     lastListItems: sessions.map((s: Session) => s.id)
   });
-  
-  return `📜 **直近の作業**\n\n${list}`;
+
+  return tChat(lang, 'recent.header', { list });
 }
 
 async function handleContinue(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   // Check if we have a last project ID
   if (!context.lastProjectId) {
-    return '⚠️ 前回の接続先がありません。\n\n`m` でエージェント一覧を表示して接続してください。';
+    return tChat(lang, 'continue.noPrevious');
   }
 
   // Verify the project still exists and machine is online
@@ -595,13 +619,12 @@ async function handleContinue(context: UserContext): Promise<string> {
   });
 
   if (!project) {
-    return '❌ 前回のプロジェクトが見つかりません。\n\n`m` でエージェント一覧を表示して接続してください。';
+    return tChat(lang, 'continue.projectNotFound');
   }
 
   const continueDisplayName = project.machine.displayName ?? project.machine.name;
   if (project.machine.status !== 'online') {
-    return `⚠️ **${continueDisplayName}** はオフラインです。\n\n`
-      + `前回: ${continueDisplayName}/${project.name}`;
+    return tChat(lang, 'continue.offline', { name: continueDisplayName, prev: `${continueDisplayName}/${project.name}` });
   }
 
   // Connect to the project
@@ -609,8 +632,9 @@ async function handleContinue(context: UserContext): Promise<string> {
 }
 
 async function handleClear(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentSessionId || !context.currentMachineId) {
-    return '⚠️ プロジェクトに接続されていません。';
+    return tChat(lang, 'common.notConnected');
   }
 
   // 2回連続確認: 1回目は確認メッセージ、2回目で実行
@@ -618,16 +642,18 @@ async function handleClear(context: UserContext): Promise<string> {
   if (!pendingClear.has(chatKey)) {
     pendingClear.add(chatKey);
     // w コマンド未実行の場合は警告を追加（BuildLog から判定: サーバー再起動でも消失しない）
+    // #316: w コマンドは JA/EN どちらの言語でも実行され得るため、両方のプレフィックスで判定する
     const wDone = await prisma.buildLog.findFirst({
       where: {
         sessionId: context.currentSessionId,
-        prompt: { startsWith: W_PROMPT_PREFIX },
+        OR: [
+          { prompt: { startsWith: W_PROMPT_PREFIX_JA } },
+          { prompt: { startsWith: W_PROMPT_PREFIX_EN } },
+        ],
       },
     });
-    const warnPrefix = !wDone
-      ? '⚠️ `w` コマンド（ドキュメント更新・コミット）を実行していません。\n'
-      : '';
-    return `${warnPrefix}⚠️ 会話履歴をクリアしますか？ もう一度 \`x\` を送信してください。`;
+    const warnPrefix = !wDone ? tChat(lang, 'clear.wWarning') : '';
+    return tChat(lang, 'clear.confirm', { warnPrefix });
   }
 
   // 2回目: 確認状態をクリアして実行
@@ -640,7 +666,7 @@ async function handleClear(context: UserContext): Promise<string> {
   });
 
   if (!session) {
-    return '❌ セッションが見つかりません。';
+    return tChat(lang, 'common.sessionNotFound');
   }
 
   // Send clear command to agent
@@ -650,18 +676,19 @@ async function handleClear(context: UserContext): Promise<string> {
     session.project.path
   );
 
-  return '🗑️ 会話履歴をクリアしました';
+  return tChat(lang, 'clear.done');
 }
 
 async function handleExec(context: UserContext, customPrompt?: string): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   // 接続プロジェクト（teamexec 先）がある場合、そちらに転送する
   if (context.lastRemoteProjectId) {
     const remoteName = context.lastRemoteProjectName || context.lastRemoteProjectId;
     console.log(`🔗 [exec] Forwarding to connected project: ${remoteName}`);
-    await sendMessage(context.platform, context.chatId, `🔗 ${remoteName} に転送中...`);
+    await sendMessage(context.platform, context.chatId, tChat(lang, 'exec.forwarding', { name: remoteName }));
 
     // customPrompt がなければデフォルトの exec プロンプト
-    const instruction = customPrompt || 'exec（プランに従って実装を開始してください）';
+    const instruction = customPrompt || tChat(lang, 'exec.defaultInstruction');
 
     // 既存の handleTeamExec を呼び出す（接続プロジェクト名で検索）
     return handleTeamExec(context, remoteName, instruction);
@@ -691,7 +718,7 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
           console.log(`✅ [exec] Auto-reconnect successful: ${machineName}/${projectName}`);
 
           // 再接続メッセージを先に送信（Discord/Telegram に直接送信）
-          const reconnectMessage = `🔄 前回の接続先（${machineName} / ${projectName}）に再接続しました`;
+          const reconnectMessage = tChat(lang, 'exec.reconnected', { machine: machineName, project: projectName });
           await sendMessage(updatedContext.platform, updatedContext.chatId, reconnectMessage);
 
           // exec を再帰呼び出し（カスタムプロンプトも引き継ぐ）
@@ -703,7 +730,7 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
     }
 
     // 前回の接続先がない場合
-    return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
+    return tChat(lang, 'common.notConnectedGuide');
   }
 
   // Agent 再起動後の場合、セッションを再開始
@@ -720,7 +747,7 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
 
     if (!oldSession) {
       clearAgentRestarted(context.currentMachineId);
-      return '❌ セッション情報が見つかりません。`c` で再接続してください。';
+      return tChat(lang, 'exec.sessionInfoNotFound');
     }
 
     // oldSession.userId を使用（context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
@@ -756,7 +783,7 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
   });
 
   if (!session) {
-    return '❌ セッションが見つかりません。';
+    return tChat(lang, 'common.sessionNotFound');
   }
 
   // exec メッセージを保存（Conversations ページで表示するため）
@@ -778,7 +805,8 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
   // #312: w コマンド（W_COMMAND_PROMPT）かどうかを判定して Agent に伝搬する。
   // Codex の workspace-write サンドボックスは .git を read-only にし commit が失敗するため、
   // w 実行時のみ Agent 側で danger-full-access に切り替える。
-  const isWCommand = customPrompt?.startsWith(W_PROMPT_PREFIX) ?? false;
+  const isWCommand =
+    (customPrompt?.startsWith(W_PROMPT_PREFIX_JA) || customPrompt?.startsWith(W_PROMPT_PREFIX_EN)) ?? false;
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
@@ -1303,15 +1331,16 @@ async function handleModelSet(context: UserContext, target: 'both' | 'plan' | 'e
 }
 
 async function handleAiList(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentSessionId || !context.currentMachineId) {
-    return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
+    return tChat(lang, 'common.notConnectedGuide');
   }
 
   try {
     const result = await getAiToolList(context.currentMachineId, context.currentSessionId);
 
     if (!result || result.available.length === 0) {
-      return '⚠️ AI ツールが設定されていません。';
+      return tChat(lang, 'ai.noTools');
     }
 
     const list = result.available.map((tool, i) => {
@@ -1327,16 +1356,17 @@ async function handleAiList(context: UserContext): Promise<string> {
       lastListItems: result.available
     });
 
-    return `🤖 **AI ツール**\n\n${list}\n\n\`a 1\` または \`a claude\` で切り替え`;
+    return tChat(lang, 'ai.listHeader', { list });
   } catch (err) {
     console.error('Failed to get AI tool list:', err);
-    return '❌ AI ツール一覧の取得に失敗しました。';
+    return tChat(lang, 'ai.listFailed');
   }
 }
 
 async function handleAiSwitch(context: UserContext, tool: string): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentSessionId || !context.currentMachineId) {
-    return '⚠️ プロジェクトに接続されていません。';
+    return tChat(lang, 'common.notConnected');
   }
 
   try {
@@ -1362,13 +1392,13 @@ async function handleAiSwitch(context: UserContext, tool: string): Promise<strin
       });
 
       const name = AI_TOOL_NAMES[tool] || tool;
-      return `🔄 AI を **${name}** に切り替えました`;
+      return tChat(lang, 'ai.switched', { name });
     } else {
-      return `❌ AI 切り替えに失敗しました: ${result.error || '不明なエラー'}`;
+      return tChat(lang, 'ai.switchFailed', { error: result.error || tChat(lang, 'ai.unknownError') });
     }
   } catch (err) {
     console.error('Failed to switch AI tool:', err);
-    return '❌ AI 切り替えに失敗しました。';
+    return tChat(lang, 'ai.switchFailedGeneric');
   }
 }
 
@@ -1378,6 +1408,7 @@ async function handleAiPrompt(
   files?: FileAttachment[],
   missedMessages?: MissedMessage[]
 ): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   console.log(`📝 handleAiPrompt called with text: ${text.substring(0, 50)}...`);
   console.log(`   Session: ${context.currentSessionId}, Machine: ${context.currentMachineId}`);
   if (files && files.length > 0) {
@@ -1411,7 +1442,7 @@ async function handleAiPrompt(
           console.log(`✅ Auto-reconnect successful: ${machineName}/${projectName}`);
 
           // 再接続メッセージを先に送信（Discord/Telegram に直接送信）
-          const reconnectMessage = `🔄 前回の接続先（${machineName} / ${projectName}）に再接続しました`;
+          const reconnectMessage = tChat(lang, 'exec.reconnected', { machine: machineName, project: projectName });
           await sendMessage(updatedContext.platform, updatedContext.chatId, reconnectMessage);
 
           // AI にプロンプト送信（再帰呼び出し）- 結果をそのまま返す
@@ -1423,7 +1454,7 @@ async function handleAiPrompt(
     }
 
     // 前回の接続先がない場合
-    return '⚠️ プロジェクトに接続されていません。\n\n`m` → エージェント選択 → `p` → プロジェクト選択 の順で接続してください。';
+    return tChat(lang, 'common.notConnectedGuide');
   }
 
   // Agent 再起動後の場合、Agent 側の sessionInfoMap がクリアされているため
@@ -1445,7 +1476,7 @@ async function handleAiPrompt(
 
     if (!oldSession) {
       clearAgentRestarted(context.currentMachineId);
-      return '❌ セッション情報が見つかりません。`c` で再接続してください。';
+      return tChat(lang, 'exec.sessionInfoNotFound');
     }
 
     // 新しいセッションを作成（oldSession.userId を使用。context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
@@ -1897,11 +1928,19 @@ async function handleDisconnectRemote(context: UserContext): Promise<string> {
 // Helpers
 // -----------------------------------------------------------------------------
 
-function formatRelativeDate(date: Date): string {
+function formatRelativeDate(date: Date, lang: Language = DEFAULT_CHAT_LANGUAGE): string {
   const now = new Date();
   const diff = now.getTime() - date.getTime();
   const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  
+
+  if (lang === 'en') {
+    if (days === 0) return 'today';
+    if (days === 1) return 'yesterday';
+    if (days < 7) return `${days}d ago`;
+    if (days < 30) return `${Math.floor(days / 7)}w ago`;
+    return `${Math.floor(days / 30)}mo ago`;
+  }
+
   if (days === 0) return '今日';
   if (days === 1) return '昨日';
   if (days < 7) return `${days}日前`;

@@ -6,6 +6,37 @@
 
 ## 実装済み機能
 
+### #316: 言語設定をチャット全体に適用する（サーバー／Agent の i18n 化, Phase 1〜3 一部） (2026-08-20)
+
+#### 背景
+- #312/#313 で WebUI をローカライズしたが、適用範囲は React 層の 93 キーのみだった
+- ユーザーから「`w` コマンド、進捗表示、`a` の AI 選択は言語が変わるのか？」と指摘を受け調査した結果、サーバーのチャット応答・Agent の進捗表示・AI へ渡すプロンプトはすべて日本語ハードコードのままだったことが判明
+
+#### 実装内容
+- `packages/shared/src/i18n.ts`（新規）: `Language`型(`'en'|'ja'`)、`DEFAULT_CHAT_LANGUAGE = 'ja'`（**WebUI の既定 `'en'` とは非対称**。`UserSettings.language` 未設定時のみ `'ja'` にフォールバックすることで、既存ユーザーのチャットが突然英語化する破壊的変更を回避）、`isLanguage()`、`chatMessages` カタログ（`{param}` プレースホルダ対応の `tChat(lang, key, params)`）、`W_COMMAND_PROMPT_JA`/`W_COMMAND_PROMPT_EN` + `getWCommandPrompt(lang)`、`W_COMMAND_PROMPT_PREFIXES`（JA/EN 判定用プレフィックスのペア）を追加。`index.ts` へ明示的 named re-export（#309/#310 の教訓により `export *` は使わない）
+- **Phase 1（サーバーのチャット応答）**: `command-handler.ts` の `getUserContext()` が毎回 `UserSettings.language`（`resolveChatLanguage()`）を解決して `context.language` にセット。`a`（`handleAiList`/`handleAiSwitch`）、`h`（`getHelpText(lang)`）、`m`/`p`/`s`/`c`/`x`/`w`/エラー応答等を `tChat()` 経由に置換
+- `command-parser.ts`: `W_COMMAND_PROMPT` を `getWCommandPrompt(context.language)` 経由の `resolveWCommandPrompt()` に変更、`getHelpText(lang)` を en/ja 両対応に書き換え
+- **#304 型の同期漏れ再発防止**: `w` 実行済み判定（`handleClear()` の BuildLog 検索、`handleExec()` の `isWCommand` 判定）は JA/EN どちらの言語で実行された `w` も検出できるよう `W_COMMAND_PROMPT_PREFIXES`（2要素）の `OR` 判定に拡張
+- **Phase 2（Agent 進捗表示への配線・単一情報源方式）**: `packages/shared/src/types.ts` の `AiPromptPayload`/`ConversationExecPayload` に `language?: Language` を追加。`agent-manager.ts` の `sendPromptToAgent()`/`execConversation()` は #306 と同じ設計で、`language` 未指定時に内部で `getUserSetting(userId, SettingKeys.LANGUAGE)` を引いて補完（呼び出し元の渡し漏れ事故を防止）。Agent 3OS（linux/macos/windows）の `connection.ts` に `language` の型・伝搬（`handleAiPrompt`/`handleConversationExec`/retry 経路）を追加
+- **Phase 3（AI 応答言語・簡略版）**: `ai-runner.ts` の `SendPromptOptions.language` が `'en'` のとき、`sendPromptToAi()` の冒頭でプロンプト末尾に "Respond to the user in English from now on" という短い指示を追加する方式を採用。当初プランの `output-collector.ts` の指示テンプレート（`DEVRELAY_RULES_TEMPLATE` 等、約170行×3OS）を丸ごと bilingual 化する案は**見送り**、デフォルトの `'ja'` 経路を1バイトも変更せずに済む低リスクな代替案とした
+
+#### 未対応（既知の制限・今回のスコープ外）
+- Agent 進捗表示（`⏳ 💻 コマンド実行中`、Devin/Codex の実行中表示、コンテキスト警告等）の文言自体は未翻訳のまま（`language` は配線済みだが `tChat()` 化は未実施）
+- `command-handler.ts` の一部コマンド（`handleLink`/`handleAgreement`/`handleSession`/`handleBuild`/`handleLog`/`handleSummary`/`handleKill`/`handleUpdate`(`u`)/`handleQuit`/`handleModelList`/`handleModelSet`/`handleTestflight`+`getTestflightHelpText`/`handleAskMember`/`handleTeamExec`/`handleDisconnectRemote`）は日本語ハードコードのまま
+- `agent-manager.ts` のその他のエラーメッセージ、`testflight-manager.ts`、`natural-language-parser.ts` は未対応
+
+#### 検証
+- `pnpm build` green（shared / server / Linux・macOS・Windows Agent / web）
+- `apps/web/dist` の `require(` 混入チェック（#310 再発防止）で 0 を確認
+- 実チャットでの動作確認は未実施（server 再起動 + 各マシン `u` が必要なため）
+
+#### 反映手順
+- Phase 1（サーバーのみ）: `pnpm build` → `pm2 restart devrelay-server`
+- Phase 2/3（Agent 側）は上記に加えて commit + push + 各マシンで `u` が必要
+- DB マイグレーション不要（`UserSettings` の汎用 KV を使うため）
+
+---
+
 ### #315: Codex exec を全面 `danger-full-access` に統一 (2026-08-19)
 
 #### 背景

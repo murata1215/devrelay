@@ -342,6 +342,12 @@ export interface SendPromptOptions {
    * true の場合、Codex の sandbox_mode を danger-full-access に切り替える。
    */
   isWCommand?: boolean;
+  /**
+   * #316: チャット表示言語。'en' の場合、AI への指示文の末尾に「英語で応答して」という
+   * 追加指示を付与し、AI 自身の返答言語をユーザーの選択言語に追従させる。
+   * 未指定・'ja' の場合は従来どおり何も付与しない（既存挙動を変えないため）。
+   */
+  language?: import('@devrelay/shared').Language;
 }
 
 export async function sendPromptToAi(
@@ -355,6 +361,13 @@ export async function sendPromptToAi(
   options: SendPromptOptions = {}
 ): Promise<AiRunResult> {
   log.info(`Sending prompt to ${aiTool}: ${prompt.substring(0, 50)}...`);
+
+  // #316: チャット表示言語が 'en' の場合のみ、AI への指示文言語（日本語のまま）はそのままに
+  // 「ユーザーへの返答は英語で」という指示を末尾に追加する。
+  // 'ja'（既定）の場合は何も付与せず、既存挙動を完全に維持する（回帰リスクを避けるため）。
+  if (options.language === 'en') {
+    prompt = `${prompt}\n\n---\nIMPORTANT: Respond to the user in English from now on, regardless of the language used in any instructions above.`;
+  }
 
   const command = getAiCommand(aiTool, config);
   if (!command) {

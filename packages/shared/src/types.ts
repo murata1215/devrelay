@@ -3,6 +3,7 @@
 // =============================================================================
 
 import type { ModelSelectableAiTool } from './constants.js';
+import type { Language } from './i18n.js';
 
 // -----------------------------------------------------------------------------
 // Protocol Version（Agent/Server 間の互換性管理）
@@ -370,6 +371,8 @@ export interface ConversationExecPayload {
    * true の場合 Agent 側で Codex の sandbox_mode を danger-full-access に切り替える。
    */
   isWCommand?: boolean;
+  /** #316: チャット表示言語。Agent 側の進捗表示・AI へ渡すプロンプトの言語選択に使う */
+  language?: Language;
 }
 
 export interface SessionRestoredPayload {
@@ -509,6 +512,8 @@ export interface AiPromptPayload {
   forceNewSession?: boolean;
   /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'）。省略時は SDK デフォルト */
   model?: string;
+  /** #316: チャット表示言語。Agent 側の進捗表示・AI へ渡すプロンプトの言語選択に使う */
+  language?: Language;
 }
 
 // -----------------------------------------------------------------------------
@@ -568,6 +573,8 @@ export interface UserContext {
   lastProjectId?: string;  // 前回接続したプロジェクトID（再接続用）
   lastRemoteProjectId?: string;  // 直近の teamexec 先プロジェクトID（接続プロジェクト方式）
   lastRemoteProjectName?: string;  // 直近の teamexec 先プロジェクト表示名
+  /** #316: チャット表示言語（UserSettings.language から解決、未設定時は DEFAULT_CHAT_LANGUAGE） */
+  language?: Language;
 }
 
 // -----------------------------------------------------------------------------

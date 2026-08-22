@@ -66,7 +66,7 @@ import {
   enableSleepPrevention,
   disableSleepPrevention
 } from './sleep-preventer.js';
-import type { WorkState, WorkStateSavePayload } from '@devrelay/shared';
+import type { WorkState, WorkStateSavePayload, Language } from '@devrelay/shared';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -480,7 +480,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean; language?: Language }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   log.info(`Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -533,6 +533,7 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     execPrompt,  // BuildLog AI 要約のコンテキスト用に exec プロンプトを伝搬
     model: payload.model,  // #309: AI モデル指定を継承（claude/codex/gemini/devin 共通）
     isWCommand: payload.isWCommand,  // #312: Codex w コマンドのサンドボックス切替判定に使用
+    language: payload.language,  // #316: チャット表示言語を継承
   });
 }
 
@@ -548,7 +549,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; model?: string; isWCommand?: boolean }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; model?: string; isWCommand?: boolean; language?: Language }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   log.info(`Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
@@ -756,6 +757,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_WINDOWS) : undefined,
     model: payload.model,  // #309: AI モデル指定（claude/codex/gemini/devin 共通、l コマンド／Settings で設定）
     isWCommand: payload.isWCommand,  // #312: Codex の w コマンドのみ danger-full-access に切り替える
+    language: payload.language,  // #316: チャット表示言語（'en' の場合のみ AI への英語応答指示が付与される）
   };
 
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）
@@ -845,6 +847,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         resumeSessionId: undefined,  // Don't use --resume
         usePlanMode,
         model: payload.model,  // #309: AI モデル指定を retry でも維持
+        language: payload.language,  // #316: チャット表示言語を retry でも維持
       };
 
       // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。

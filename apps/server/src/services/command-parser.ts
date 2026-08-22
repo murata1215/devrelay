@@ -1,5 +1,5 @@
-import type { UserCommand, UserContext, AiTool, ModelSelectableAiTool } from '@devrelay/shared';
-import { SHORTCUTS } from '@devrelay/shared';
+import type { UserCommand, UserContext, AiTool, ModelSelectableAiTool, Language } from '@devrelay/shared';
+import { SHORTCUTS, DEFAULT_CHAT_LANGUAGE, getWCommandPrompt } from '@devrelay/shared';
 import { Project } from '@prisma/client';
 import {
   parseNaturalLanguage,
@@ -11,33 +11,14 @@ import { isNaturalLanguageEnabled } from './user-settings.js';
 import { prisma } from '../db/client.js';
 
 /**
- * 「w」コマンドのワンショット exec プロンプト
- * 実装後のドキュメント更新＋コミット/プッシュ専用。
- *
- * 冒頭で git リポジトリかどうかを判定させ、2 分岐させる:
- * - git リポジトリ: 従来どおりドキュメント更新＋コミット/プッシュ。
- *   変更が無ければ「存在しないプランを推測せず『コミット対象なし』とだけ報告して終了」させ、
- *   クリーンな作業ツリーで w を送った際の「プランをください」ループを防ぐ。
- * - 非 git リポジトリ（#293）: コミット/プッシュは行わず、ドキュメント更新のみ実施。
- *   git 未導入・git 管理外のディレクトリ（お試し利用中の端末など）で
- *   「git リポジトリではないためコミットできません」だけで終わり、
- *   MEMORY.md / README.md の更新まで到達しなかった問題への対応。
+ * 「w」コマンドのワンショット exec プロンプト。
+ * #316: 本文は packages/shared/src/i18n.ts の getWCommandPrompt() に集約した
+ * （server / Agent の両方から参照するため。#309 のモデルカタログ集約と同方針）。
+ * ここでは呼び出し元の `context.language` で解決するラッパーとして残す。
  */
-export const W_COMMAND_PROMPT =
-  'まず `git rev-parse --is-inside-work-tree` を実行して、このディレクトリが git リポジトリかどうかを判定してください。' +
-  '【git リポジトリの場合】' +
-  'git status / git diff で未コミットの変更があるか確認してください。' +
-  'コミット対象の変更が無い場合は、存在しないプランを推測せず「コミット対象の変更はありません」とだけ報告して終了してください（追加の実装・調査は不要）。' +
-  '変更がある場合のみ以下を行ってください: ' +
-  'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。MEMORY.md があれば更新してください。README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。' +
-  '【git リポジトリでない場合（git コマンドが失敗する場合も含む）】' +
-  'コミット・プッシュは一切行わないでください。git のエラーは無視して構いません。' +
-  'git diff が使えないため、今回の会話でどんな作業を行ったか（作成・変更したファイル、決定事項）を会話履歴と現在のディレクトリの内容から把握し、以下のドキュメント更新のみを行ってください: ' +
-  'README.md を今回の内容で更新してください（無ければ新規作成し、プロジェクトの概要・使い方・ディレクトリ構成を記載）。' +
-  'MEMORY.md を更新してください（無ければ新規作成し、日付つきで作業メモ・決定事項・次回への引き継ぎを追記）。' +
-  'doc/changelog.md・CLAUDE.md・rules/project.md など他の .md は、既に存在する場合のみ併せて更新してください（新規作成は README.md と MEMORY.md のみ）。' +
-  '記録すべき作業内容が無い場合は、存在しないプランを推測せず「記録する変更はありません」とだけ報告して終了してください。' +
-  '最後に「git リポジトリではないためコミット・プッシュはスキップしました」と、更新したファイルの一覧を報告してください。';
+function resolveWCommandPrompt(context: UserContext): string {
+  return getWCommandPrompt(context.language ?? DEFAULT_CHAT_LANGUAGE);
+}
 
 /**
  * Parse user input into a command (with natural language support)
@@ -212,7 +193,7 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   if (normalized === 'w') {
     return {
       type: 'exec',
-      prompt: W_COMMAND_PROMPT,
+      prompt: resolveWCommandPrompt(context),
     };
   }
 
@@ -327,7 +308,7 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       // w コマンドは parseCommand() の Step 0.6 で処理されるが、念のためフォールバック
       return {
         type: 'exec',
-        prompt: W_COMMAND_PROMPT,
+        prompt: resolveWCommandPrompt(context),
       };
     case 'link':
       return { type: 'link' };
@@ -366,8 +347,70 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
 
 /**
  * Generate help text
+ * #316: チャット表示言語（context.language）に応じて en/ja を切り替える。
  */
-export function getHelpText(): string {
+export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
+  if (lang === 'en') {
+    return `
+📖 **DevRelay Command List**
+
+**Basics**
+\`m\` - List agents
+\`p\` - List projects
+\`c\` - Reconnect to the last project
+\`s\` - Session info
+\`1\`, \`2\`, \`3\`... - Select from a list
+
+**Plan execution**
+\`e\` or \`exec\` - Start executing the plan
+\`e, <instruction>\` - Skip the plan and execute directly (e.g. \`e, commit it\`)
+\`w\` - Update docs + commit + push (wrap up)
+
+**History**
+\`r\` - Recent work
+\`log\` - Conversation log (last 10)
+\`log20\` - Conversation log (20)
+\`sum\` - Summary of the last session
+
+**AI switching**
+\`a\` - List/switch AI tools
+\`a 1\`, \`a 2\` - Select from the list by number
+\`l\` - Model list (shows settings for the current session's tool)
+\`l sonnet\` - Change both Plan/Exec models (current tool)
+\`l plan:haiku\` - Change Plan only (current tool)
+\`l exec:opus\` - Change Exec only (current tool)
+\`l codex\` - Show Codex CLI model settings
+\`l codex:plan:gpt-5.6-terra\` - Change Codex's Plan only
+
+**Account linking**
+\`link\` - Link with your WebUI account
+
+**Build log**
+\`b\` - Build log (exec history, per-machine build diffs)
+
+**TestFlight**
+\`testflight\` - List services
+\`testflight <name>\` - Create a new service
+\`testflight <name> --phaser\` - Create a Phaser game project
+\`testflight rm <name>\` - Archive a service
+\`testflight info <name>\` - Service details
+\`testflight help\` - Detailed help
+
+**Team**
+\`ask <project>: <question>\` - Ask another project
+
+**Other**
+\`ag\` - Apply DevRelay Agreement v4 (creates rules/devrelay.md)
+\`u\` - Check/update the agent version (send twice in a row to update)
+\`k\` - Force-stop the running AI process
+\`x\` - Clear conversation history (send twice in a row)
+\`q\` - Disconnect
+\`h\` - This help
+
+**Work instructions**
+Any other message is treated as an instruction to the AI
+`.trim();
+  }
   return `
 📖 **DevRelay コマンド一覧**
 

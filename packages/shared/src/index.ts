@@ -28,3 +28,14 @@ export {
 } from './constants.js';
 export * from './token.js';
 export * from './text.js';
+// #316: i18n.ts も #309/#310 と同じ理由で明示的 named export にする（export * の CJS 変換問題を回避）
+export {
+  type Language,
+  DEFAULT_CHAT_LANGUAGE,
+  isLanguage,
+  chatMessages,
+  type ChatMessageKey,
+  tChat,
+  getWCommandPrompt,
+  W_COMMAND_PROMPT_PREFIXES,
+} from './i18n.js';

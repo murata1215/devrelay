@@ -36,7 +36,7 @@ import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool } from './user-settings.js';
-import { isModelSelectableAiTool } from '@devrelay/shared';
+import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, type Language } from '@devrelay/shared';
 import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
@@ -1126,6 +1126,8 @@ export async function sendPromptToAgent(
   forceNewSession?: boolean,
   /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'） */
   model?: string,
+  /** #316: チャット表示言語。未指定時は UserSettings.language で補完する（#306 と同じ単一情報源方式） */
+  language?: Language,
 ) {
   // バージョン不足の Agent にはプロンプトを送信しない
   if (outdatedAgents.has(machineId)) {
@@ -1164,9 +1166,20 @@ export async function sendPromptToAgent(
   }
   console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
 
+  // #316: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
+  let resolvedLanguage = language;
+  if (resolvedLanguage === undefined) {
+    try {
+      const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
+      resolvedLanguage = isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+    } catch {
+      resolvedLanguage = DEFAULT_CHAT_LANGUAGE;
+    }
+  }
+
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model: resolvedModel }
+    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model: resolvedModel, language: resolvedLanguage }
   });
 }
 
@@ -1496,7 +1509,7 @@ export async function clearConversation(machineId: string, sessionId: string, pr
   });
 }
 
-export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string, model?: string, isWCommand?: boolean) {
+export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string, model?: string, isWCommand?: boolean, language?: Language) {
   // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
   const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
   // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
@@ -1522,6 +1535,17 @@ export async function execConversation(machineId: string, sessionId: string, pro
       // 取得失敗時は従来どおり undefined = SDK/CLI デフォルト
     }
   }
+  // #316: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
+  let resolvedLanguage = language;
+  if (resolvedLanguage === undefined) {
+    try {
+      const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
+      resolvedLanguage = isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+    } catch {
+      resolvedLanguage = DEFAULT_CHAT_LANGUAGE;
+    }
+  }
+
   console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}, model resolved=${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
@@ -1538,6 +1562,8 @@ export async function execConversation(machineId: string, sessionId: string, pro
       // #312: w コマンド（ドキュメント更新+commit/push）は Codex の workspace-write サンドボックスだと
       // .git が read-only で commit が失敗するため、Agent 側で sandbox_mode を danger-full-access に切り替える
       isWCommand,
+      // #316: チャット表示言語。Agent 側の進捗表示・AI へ渡すプロンプトの言語選択に使う
+      language: resolvedLanguage,
     }
   });
 }
