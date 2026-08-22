@@ -163,6 +163,7 @@ devrelay/
 │   └── project.md        # Project-specific design decisions
 ├── doc/
 │   ├── changelog.md      # Implementation history (#1-#183)
+│   ├── devlog/           # Per-cycle dev logs (1 file per cycle + INDEX.md)
 │   └── ...               # Additional docs
 └── scripts/
     ├── install-agent.sh    # Linux/macOS one-liner installer

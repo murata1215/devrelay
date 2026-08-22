@@ -87,5 +87,6 @@ pm2 restart devrelay-server
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`
+- サイクル別 devlog: `doc/devlog/`（1 サイクル = 1 ファイル + `INDEX.md` 索引）
 - 設計・アーキテクチャ: `rules/project.md`
 - マイグレーションガイド: `doc/devrelay-claudemd-migration.md`
