@@ -1048,7 +1048,7 @@ async function handleBuild(context: UserContext): Promise<string> {
   // ユーザーのマシン一覧とプロジェクトを取得
   const machines = await prisma.machine.findMany({
     where: { userId: dbUserId, deletedAt: null },
-    include: { projects: true },
+    include: { projects: { where: { deletedAt: null } } }, // ソフトデリート済みプロジェクトを除外（#323）
   });
 
   // 全プロジェクト名を重複なしで収集

@@ -6,6 +6,31 @@
 
 ## 実装済み機能
 
+### #323: ソフトデリートしたプロジェクトが WebUI/インベントリに出続けるバグを修正（#322 の見落とし箇所） (2026-08-23)
+
+#### 背景
+- #322 で Linux Agent の所有者フィルタ + サーバ側ソフトデリート（`Project.deletedAt`）を実装したが、ユーザーから「devrelay は再起動したけど pixblog はまだプロジェクトいっぱい出てる」と再報告
+- 調査の結果、#322 の実装（Agent の所有者フィルタ・DB のソフトデリート・照合スイープ）自体は全て正常に動作していることを実測で確認（サーバー新ビルド稼働・pixblog Agent が `7dfe61e` で `runningCodeStale=false`・DB上で該当7プロジェクトに正しく `deletedAt` が入っている）
+
+#### 真因
+- #322 で `deletedAt: null` を追加したのは**フラットな `prisma.project.findMany`** のみで、`Machine` に対する**ネストした `include: { projects: ... }`** を見落としていた
+- `/api/machines`（WebUI の Agents ページ・Chat サイドバー双方が消費）・`/api/agent/inventory`（`devrelay-list-inventory` スキル）・`b` コマンドの候補プロジェクト一覧の3箇所が該当し、ソフトデリート済みプロジェクトを引き続き返していた
+
+#### 対応
+- `apps/server/src/routes/api.ts`（`/api/machines`）・`apps/server/src/routes/document-api.ts`（`/api/agent/inventory`）: ネストした `projects` include に `where: { deletedAt: null }` を追加
+- `apps/server/src/services/command-handler.ts`（`b` コマンドの候補一覧）: `include: { projects: true }` → `include: { projects: { where: { deletedAt: null } } }`
+- DB マイグレーション不要（#322 で適用済み）、Agent コード変更なし（3 OS とも無変更、各マシンの `u` は不要）
+
+#### 教訓
+- ソフトデリート用の `deletedAt` フィルタを追加する際は、フラットな `findMany` だけでなく **`include`/`select` 内のネストしたリレーションクエリも全数 grep** する必要がある（`projects:\s*(true|\{)` のようなパターンで横断確認すべきだった）
+
+#### 変更ファイル
+- `apps/server/src/routes/api.ts`
+- `apps/server/src/routes/document-api.ts`
+- `apps/server/src/services/command-handler.ts`
+
+---
+
 ### #321: 「DevRelay の返事が遅い」の原因調査 + トークン高止まり警告に「遅さ」軸を追加 (2026-08-23)
 
 #### 背景

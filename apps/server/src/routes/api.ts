@@ -66,6 +66,7 @@ export async function apiRoutes(app: FastifyInstance) {
       where: { userId, deletedAt: null },
       include: {
         projects: {
+          where: { deletedAt: null }, // ソフトデリート済みプロジェクトを除外（#323）
           orderBy: { lastUsedAt: 'desc' },
         },
       },

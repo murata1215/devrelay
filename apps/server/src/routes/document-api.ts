@@ -311,6 +311,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       where: { userId: auth.userId, deletedAt: null },
       include: {
         projects: {
+          where: { deletedAt: null }, // ソフトデリート済みプロジェクトを除外（#323）
           orderBy: { lastUsedAt: 'desc' },
         },
       },
