@@ -19,10 +19,10 @@ import crypto from 'crypto';
 import { prisma } from '../db/client.js';
 import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
-import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery, executeScaffold, getConnectedAgents } from '../services/agent-manager.js';
+import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery, executeScaffold, getConnectedAgents, getAiToolList } from '../services/agent-manager.js';
 import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
 import type { AiTool, ManagementInfo } from '@devrelay/shared';
-import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef } from '@devrelay/shared';
+import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef, AI_TOOL_NAMES } from '@devrelay/shared';
 
 /**
  * #294: クロスプロジェクト連携のループ防止パラメータ
@@ -474,7 +474,10 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
    * クロスプロジェクトクエリ: 他プロジェクトのエージェントに質問を送信
    * ターゲットプロジェクトで新しい Claude セッションを起動し、回答を待つ
    *
-   * Body: { targetProjectId: string, question: string }
+   * Body: { targetProjectId: string, question: string, ai?: AiTool }
+   *   - ai (任意, #325): 対象プロジェクトの defaultAi を無視し、この ask セッションだけ使用 AI を上書きする。
+   *     指定 AI が対象マシンで利用不可の場合は 400 で明示エラー（defaultAi への静かなフォールバックはしない）。
+   *     省略時は従来どおり defaultAi を使用（Council v1 の土台。teamexec-member には影響しない）。
    * 認証: Authorization: Bearer <machine_token>
    * レスポンス: { answer: string }
    */
@@ -484,7 +487,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: 'Invalid or missing machine token' });
     }
 
-    const { targetProjectId, question } = (request.body || {}) as { targetProjectId?: string; question?: string };
+    const { targetProjectId, question, ai } = (request.body || {}) as { targetProjectId?: string; question?: string; ai?: string };
     if (!targetProjectId || !question) {
       return reply.status(400).send({ error: 'targetProjectId and question are required' });
     }
@@ -492,7 +495,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     // ターゲットプロジェクトの存在確認と所有権チェック
     const targetProject = await prisma.project.findUnique({
       where: { id: targetProjectId },
-      include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true } } },
+      include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true, name: true, displayName: true } } },
     });
 
     if (!targetProject || targetProject.machine.userId !== auth.userId || targetProject.machine.deletedAt) {
@@ -511,6 +514,34 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
       return reply.status(503).send({ error: `Agent for ${targetProject.name} is offline` });
+    }
+
+    // #325: `--ai` が明示指定された場合のみ検証する。省略時はこのブロックを一切通らない
+    // （＝既存挙動を1バイトも変えない。Council v1 の土台として ask 1回だけ AI を上書きできるようにする）
+    let effectiveAi: AiTool = targetProject.defaultAi as AiTool;
+    if (ai !== undefined) {
+      if (!Object.prototype.hasOwnProperty.call(AI_TOOL_NAMES, ai)) {
+        return reply.status(400).send({
+          error: `Unknown AI: '${ai}'. Valid: ${Object.keys(AI_TOOL_NAMES).join(', ')}`,
+        });
+      }
+      const machineLabel = targetProject.machine.displayName || targetProject.machine.name;
+      let available: AiTool[];
+      try {
+        // getAiToolList は sessionId をエコーバックにしか使わないため、未作成の一時 ID を渡しても安全
+        const listResult = await getAiToolList(targetProject.machine.id, `aicheck_${crypto.randomUUID()}`);
+        available = listResult.available;
+      } catch (err: any) {
+        console.error(`🚫 Failed to query available AI tools on ${machineLabel}:`, err?.message);
+        return reply.status(503).send({ error: `Failed to query available AI tools on ${machineLabel}: ${err?.message}` });
+      }
+      if (!available.includes(ai as AiTool)) {
+        // 明示指定された AI が対象マシンに無い場合は静かなフォールバックをせず、明示エラーで停止する
+        return reply.status(400).send({
+          error: `AI '${ai}' is not available on machine '${machineLabel}'. Available: ${available.join(', ') || '(none)'}`,
+        });
+      }
+      effectiveAi = ai as AiTool;
     }
 
     // ループ検出: 同一マシンから同一ターゲットへの直近5分以内の crossquery セッションが3回以上あれば拒否
@@ -563,7 +594,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         userId: auth.userId,
         machineId: targetProject.machine.id,
         projectId: targetProjectId,
-        aiTool: targetProject.defaultAi,
+        aiTool: effectiveAi,
         status: 'active',
       },
     });
@@ -591,7 +622,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       }
     }
 
-    console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
+    console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName} (ai=${effectiveAi}, explicit=${ai ?? 'none'})`);
 
     // HTTP 切断検知: curl タイムアウト等でクライアントが切断した場合にセッションをクリーンアップ
     let clientDisconnected = false;
@@ -616,7 +647,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         tempSessionId,
         targetProject.name,
         targetProject.path,
-        targetProject.defaultAi as AiTool,
+        effectiveAi,
         question,
         auth.userId,
       );

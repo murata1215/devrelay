@@ -241,9 +241,23 @@ bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project <プロジェ
 bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project <プロジェクト名> --question "実行指示"
 \\\`\\\`\\\`
 
+### 使用 AI を指定して質問（--ai）
+
+質問（\\\`--exec\\\` なし）に限り、対象プロジェクトの既定 AI と無関係に使用する AI を1回だけ指定できます:
+
+\\\`\\\`\\\`bash
+bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project <プロジェクト名> --ai claude --question "質問内容"
+bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project <プロジェクト名> --ai codex --question "質問内容"
+\\\`\\\`\\\`
+
+- 指定した AI が対象マシンに**未インストールの場合はエラーで停止**します（黙って別の AI にフォールバックしません）。エラーメッセージにそのマシンで利用可能な AI 一覧が表示されます
+- \\\`--ai\\\` は \\\`--exec\\\`（実行依頼）とは併用できません
+- \\\`--ai\\\` を省略した場合は従来どおり対象プロジェクトの既定 AI が使われます
+
 例:
 - \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project pixblog --question "POST /api/v1/categories の仕様を教えて"\\\`
 - \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project pixdraft --question "アカウント削除APIを実装して"\\\`
+- \\\`bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --project pixblog --ai codex --question "この仕様どう思う？"\\\`
 
 ### 宛先が複数ある場合
 
@@ -288,6 +302,7 @@ if [ $# -eq 0 ]; then
   echo "  メンバー一覧:  bash $0 --list"
   echo "  質問送信:      bash $0 --project <プロジェクト名> --question \\"質問内容\\""
   echo "  実行依頼:      bash $0 --exec --project <プロジェクト名> --question \\"実行指示\\""
+  echo "  AI 指定質問:   bash $0 --project <プロジェクト名> --ai <claude|codex|...> --question \\"質問内容\\"（--exec とは併用不可）"
   exit 1
 fi
 
@@ -339,18 +354,26 @@ PROJECT=""
 QUESTION=""
 EXEC_MODE=""
 MACHINE=""
+AI=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
     --question) QUESTION="$2"; shift 2 ;;
     --machine) MACHINE="$2"; shift 2 ;;
     --exec) EXEC_MODE="1"; shift ;;
+    --ai) AI="$2"; shift 2 ;;
     *) echo "不明な引数: $1"; exit 1 ;;
   esac
 done
 
 if [ -z "$PROJECT" ] || [ -z "$QUESTION" ]; then
   echo "エラー: --project と --question の両方が必要です"
+  exit 1
+fi
+
+# #325: --ai は質問（--exec なし）専用。teamexec 側の既存挙動には一切影響させない
+if [ -n "$AI" ] && [ -n "$EXEC_MODE" ]; then
+  echo "エラー: --ai は質問（--exec なし）専用です。--exec と同時には使えません"
   exit 1
 fi
 
@@ -446,12 +469,20 @@ if command -v jq &>/dev/null; then
 
   echo "$EMOJI $TARGET_NAME ($TARGET_MACHINE) に\${MODE_LABEL}を送信中..."
   echo "\${MODE_LABEL}: $QUESTION"
+  if [ -n "$AI" ]; then
+    echo "使用 AI: $AI（未インストールの場合はフォールバックせずエラーで停止します）"
+  fi
   echo "(タイムアウト: \${CURL_TIMEOUT}秒)"
   echo ""
 
   # jq で安全に JSON を構築（shell エスケープの問題を回避）
   # tr -d '\\r' で Windows CRLF を除去（Git Bash + プロキシ環境での Content-Length 不一致防止）
-  JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}' | tr -d '\\r')
+  # #325: --ai 省略時は従来と1バイト同一の body にする（後方互換の要）
+  if [ -n "$AI" ]; then
+    JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" --arg ai "$AI" '{targetProjectId: $id, question: $q, ai: $ai}' | tr -d '\\r')
+  else
+    JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}' | tr -d '\\r')
+  fi
 
   # 送信（ask: 10分、teamexec: 60分）
   # printf + curl -d @- でパイプ渡し（Content-Length を確実に一致させる）

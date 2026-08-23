@@ -6,6 +6,35 @@
 
 ## 実装済み機能
 
+### #325: `ask` フローに `--ai` オプションを追加（Council v1 の土台） (2026-08-23)
+
+#### 背景
+- 協議オーケストレーション（Council）v1 の第一歩。`ask`（プランモードのクロス AI 問い合わせ）で、対象プロジェクトの `defaultAi` と無関係に使用 AI を1回だけ指定できるようにする。将来 `council-run.sh` が `ask --ai claude` / `ask --ai codex` を交互に叩いて協議を回すための土台
+- `--ai` 省略時は現行の挙動（対象プロジェクトの `defaultAi` を使用）を完全維持。`ask`/`teamexec` は cross-project 委譲でも使われているため後方互換の破壊は不可
+
+#### 設計判断
+- **可用性チェックはサーバー側で、既存の `a` コマンドが使う `getAiToolList()` を再利用**（新 WS メッセージ型・新 DB カラム・新ヘルパーは作らない）。`Machine` に「利用可能な AI」を保持するカラムは無く、Agent 接続時の `availableAiTools` もサーバー側で捨てられていた（未使用と判明）ため、ライブ問い合わせ方式を採用
+- **`--ai` が指定されたときだけ検証ブロックを通る**構造にし、省略時は既存コードパスを1バイトも変えないことで後方互換を構造的に保証
+- **指定 AI が対象マシンで利用不可の場合は明示エラー（400）で停止**。Agent 側の `resolveEffectiveAiTool()`（#289 の Devin 専用端末救済ロジック）は未インストール時に黙って別 AI へフォールバックするため、サーバー側で事前検証しないと要件を満たせない。検証を通れば要求どおり尊重されるため Agent 側は無変更
+- **`--ai` + `--exec` は `ask.sh` 側でエラー終了**とし、`teamexec-member` ルートには一切手を入れない（波及ゼロ）
+- 型は `AiTool`（claude/gemini/codex/aider/devin）を受理し、実際の可否は可用性チェックに委ねる（許可リストの二重管理を避ける）
+
+#### 実装
+- `apps/server/src/routes/document-api.ts`: `POST /api/agent/ask-member` に任意の `ai` パラメータを追加。`ai` 指定時のみ `AI_TOOL_NAMES` で型チェック（400）→ `getAiToolList(machineId, sessionId)` で対象マシンの利用可能 AI を問い合わせ（失敗時 503、未対応 AI は 400 + 利用可能一覧を提示）。`effectiveAi` を `Session.aiTool` と `executeCrossProjectQuery()` の両方に反映。`teamexec-member` ルートは無変更
+- `agents/linux/src/services/skill-manager.ts`: `generateAskScript()`（`ask.sh` 生成）に `--ai` の引数パース、`--exec` との併用ガード、JSON body 分岐（`--ai` 省略時は従来と1バイト同一の body）を追加。`generateAskMemberSkillMd()` に使用例・注意事項を追記
+- macOS/Windows Agent は今回対象外（#324 と同じ方針）
+
+#### 検証
+- `pnpm build` green（モノレポ全体）、`require(` 混入チェック 0
+- `ensureSkillFiles()` を一時 HOME で実行し、生成された `ask.sh`／`read.sh` を `bash -n` で構文チェック（OK）。`--ai` 省略時の JSON body が従来と同一であることを目視確認
+- 実チャットでの実機確認（codex 指定成功、`--ai` 省略の後方互換、未インストール AI 指定時に明示エラーで停止しセッションが作られないこと、`teamexec` 既存挙動不変、`--ai`+`--exec` 併用エラー、不正 AI 名の 400）は未実施
+
+#### 変更ファイル
+- `apps/server/src/routes/document-api.ts`
+- `agents/linux/src/services/skill-manager.ts`
+
+---
+
 ### devlog 運用開始: `doc/devlog/` ディレクトリ新設 + #324 サイクルの記録 (2026-08-23)
 
 - #305 の教訓（`doc/devlog.md` への全文追記運用がコンテキスト肥大を招いた）を受けた「1 サイクル = 1 ファイル（`doc/devlog/YYYY-MM-DD_HHMMSS.md`）+ `INDEX.md` 索引」運用を開始

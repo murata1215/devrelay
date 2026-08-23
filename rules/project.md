@@ -1012,6 +1012,12 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 4. `handleAiOutput(isComplete=true)` → `pendingCrossQueries` Map の Promise を resolve
 5. 回答を HTTP レスポンスとして返却（タイムアウト: 5分）
 
+### ask への `--ai` 上書きオプション（#325, 2026-08-23。Council v1 の土台）
+- `POST /api/agent/ask-member` の body に任意の `ai` を追加すると、対象プロジェクトの `Project.defaultAi` を無視してその ask 1 回だけ使用 AI を上書きできる（`ask.sh --ai codex` 等）。省略時は完全に従来どおり
+- **「対象マシンで利用可能な AI」の判定は DB ではなくライブ問い合わせ**: `Machine` に利用可能 AI を保持するカラムは無く、Agent 接続時に送られてくる `AgentConnectPayload.availableAiTools` もサーバー側で destructure されるだけで未使用（実測確認）。新カラム・新 WS メッセージ型は作らず、`a` コマンドが使う既存の `getAiToolList(machineId, sessionId)`（`server:ai:list` 往復）をそのまま再利用した。`sessionId` は Agent 側でエコーバックにしか使われないため、未作成の一時 ID（`aicheck_<uuid>`）を渡しても安全
+- **静かなフォールバック禁止の実現方法**: Agent 側 `resolveEffectiveAiTool()`（#289 の Devin 専用端末救済）は未インストール AI を要求されると黙って別 AI に差し替えるため、そのままでは「明示エラーで停止」を満たせない。**サーバー側で送信前に可用性チェックを行い、通らなければ 400 で止める**ことで対応（Agent 側は無変更、#289 の既存救済ロジックも無傷）
+- `--ai` は ask 専用。`teamexec-member` ルート・`ask.sh` の teamexec 分岐には一切変更を加えていない（`--ai`+`--exec` はスクリプト側でエラー終了）
+
 ### クロスプロジェクト実行依頼の流れ（teamexec）
 1. 実行指示送信 → `executeCrossProjectExec()` で一時セッション作成（`teamexec_` プレフィックス）
 2. `startSession()` → 500ms 遅延 → `execConversation()` で exec マーカー付きセッションを起動
