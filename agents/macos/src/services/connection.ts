@@ -30,7 +30,7 @@ import type {
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
-import { readdirSync, mkdirSync, writeFileSync } from 'fs';
+import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
@@ -454,16 +454,44 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 /**
  * CLI ツールが利用可能かを検出する（which / where）
  * @param cmd - 検出するコマンド名
+ * @param env - 検出に使う環境変数（省略時は getExecEnv()）
  * @returns 検出できれば true
  */
-async function commandExists(cmd: string): Promise<boolean> {
+async function commandExists(cmd: string, env: NodeJS.ProcessEnv = getExecEnv()): Promise<boolean> {
   const probe = process.platform === 'win32' ? `where ${cmd}` : `which ${cmd}`;
   try {
-    await execAsync(probe, { timeout: 5000, env: getExecEnv() });
+    await execAsync(probe, { timeout: 5000, env });
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * scaffold 実行専用の環境変数を構築する。
+ *
+ * getExecEnv() の PATH 末尾に、実在する既知ツールディレクトリ（candidates）を追加する。
+ * 末尾に追加するため、既存 PATH 上にあるツールは常にそちらが優先される（意図しないバージョン
+ * 違いのツールを誤って掴む事故を防ぐ）。launchd/systemd 起動で PATH が最小構成になり、
+ * ユーザーが手動配置した SDK（Flutter 等）を検出できない問題への対策（scaffold 専用。
+ * getExecEnv() 自体は他の用途（`u` の再起動スクリプト等）でも使われるため変更しない）。
+ * @param candidates - ツール名 → 候補ディレクトリ一覧（scaffold-templates.ts の TOOL_PATH_CANDIDATES）
+ */
+function getScaffoldEnv(candidates: Record<string, string[]>): NodeJS.ProcessEnv {
+  const env = getExecEnv();
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const extra: string[] = [];
+  for (const dirs of Object.values(candidates)) {
+    for (const d of dirs) {
+      const abs = d.startsWith('~/') ? join(homedir(), d.slice(2)) : d;
+      if (!extra.includes(abs) && existsSync(abs)) extra.push(abs);
+    }
+  }
+  if (extra.length > 0) {
+    env.PATH = env.PATH ? `${env.PATH}${sep}${extra.join(sep)}` : extra.join(sep);
+    console.log(`📦 Scaffold: PATH augmented with ${extra.join(', ')}`);
+  }
+  return env;
 }
 
 /**
@@ -483,11 +511,14 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
 
   try {
     // テンプレート実体定義を取得（Agent ビルドに内蔵、動的 import）
-    const { SCAFFOLD_TEMPLATES } = await import('./scaffold-templates.js');
+    const { SCAFFOLD_TEMPLATES, TOOL_PATH_CANDIDATES } = await import('./scaffold-templates.js');
     const tmpl = SCAFFOLD_TEMPLATES[template];
     if (!tmpl) {
       throw new Error(`テンプレート '${template}' は Agent 側で定義されていません`);
     }
+
+    // scaffold 実行専用の環境（PATH に既知ツールディレクトリを補完済み）
+    const scaffoldEnv = getScaffoldEnv(TOOL_PATH_CANDIDATES);
 
     // ディレクトリが既に存在するかチェック
     try {
@@ -500,9 +531,13 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
 
     // 必須 CLI ツールの事前検出（未検出なら致命的エラー）
     if (tmpl.requiredTool) {
-      const ok = await commandExists(tmpl.requiredTool);
+      const ok = await commandExists(tmpl.requiredTool, scaffoldEnv);
       if (!ok) {
-        throw new Error(tmpl.missingToolHint || `必須ツール '${tmpl.requiredTool}' が見つかりません`);
+        const searched = (TOOL_PATH_CANDIDATES[tmpl.requiredTool] || []).join(', ');
+        throw new Error(
+          (tmpl.missingToolHint || `必須ツール '${tmpl.requiredTool}' が見つかりません`) +
+          (searched ? `\n（PATH に加えて次も探索しました: ${searched}）` : ''),
+        );
       }
     }
 
@@ -514,7 +549,7 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
       const cmd = tmpl.buildCommand ? tmpl.buildCommand(name) : '';
       if (!cmd) throw new Error(`テンプレート '${template}' に生成コマンドが定義されていません`);
       console.log(`📦 Scaffold: running generator: ${cmd}`);
-      await execAsync(cmd, { cwd: projectDir, timeout: tmpl.commandTimeout || 300000, env: getExecEnv() });
+      await execAsync(cmd, { cwd: projectDir, timeout: tmpl.commandTimeout || 300000, env: scaffoldEnv });
       console.log(`📦 Scaffold: generator completed`);
     } else {
       // 静的ファイル展開（{{NAME}} を置換）
@@ -532,7 +567,7 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
     if (tmpl.postCommand) {
       const postCmd = tmpl.postCommand(name);
       console.log(`📦 Scaffold: running post-command: ${postCmd}`);
-      await execAsync(postCmd, { cwd: projectDir, timeout: tmpl.postCommandTimeout || 60000, env: getExecEnv() });
+      await execAsync(postCmd, { cwd: projectDir, timeout: tmpl.postCommandTimeout || 60000, env: scaffoldEnv });
       console.log(`📦 Scaffold: post-command completed`);
     }
 
@@ -552,10 +587,10 @@ async function handleScaffoldCreate(payload: ScaffoldCreatePayload, config: Agen
     // 生成後の非致命的な依存インストール（npm install / gradle wrapper 等）
     if (tmpl.postInstall) {
       const { tool, command, timeout } = tmpl.postInstall;
-      if (await commandExists(tool)) {
+      if (await commandExists(tool, scaffoldEnv)) {
         try {
           console.log(`📦 Scaffold: running post-install: ${command}`);
-          await execAsync(command, { cwd: projectDir, timeout, env: getExecEnv() });
+          await execAsync(command, { cwd: projectDir, timeout, env: scaffoldEnv });
           console.log(`📦 Scaffold: post-install completed`);
         } catch (installErr: any) {
           console.warn(`⚠️ Scaffold: post-install failed (non-critical): ${installErr.message}`);

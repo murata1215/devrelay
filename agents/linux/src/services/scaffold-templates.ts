@@ -516,3 +516,29 @@ export const SCAFFOLD_TEMPLATES: Record<string, ScaffoldTemplateImpl> = {
     claudeMd: EMPTY_CLAUDE_MD,
   },
 };
+
+// -----------------------------------------------------------------------------
+// ツール検出の PATH フォールバック候補
+// -----------------------------------------------------------------------------
+
+/**
+ * PATH に無い場合に探索する、ツールごとの既知インストール先ディレクトリ（`~` はホームに展開）。
+ *
+ * launchd / systemd / crontab は .bashrc / .zshrc を読まないため、Agent 起動時の PATH が
+ * 最小構成になり、ユーザーが手動配置した SDK（Flutter 等）を `which`/`where` で検出できない
+ * 問題への対策。`devrelay-flutter-deploy` の deploy.sh が持つフォールバックと同じ候補を採用し、
+ * scaffold 側にも同等の解決能力を持たせる（connection.ts の getScaffoldEnv() が使用）。
+ *
+ * Note: このファイルは macOS 用と同一内容を保持する（Windows CLI Agent は agents/linux を
+ * 使うが、この候補表は Unix 系パス想定。Windows では existsSync が false になり無害にスキップされる）。
+ */
+export const TOOL_PATH_CANDIDATES: Record<string, string[]> = {
+  flutter: [
+    '~/development/flutter/bin',
+    '~/flutter/bin',
+    '~/fvm/default/bin',
+    '/opt/flutter/bin',
+    '/usr/local/flutter/bin',
+  ],
+  xcodegen: ['/opt/homebrew/bin', '/usr/local/bin'],
+};
