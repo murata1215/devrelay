@@ -34,6 +34,13 @@ export interface AgentConfig {
    * false にすると従来どおり全ユーザーのプロジェクトを検出する。
    */
   projectOwnerFilter?: boolean;
+  /**
+   * プロジェクト一覧の実在チェック（幽霊エントリ除外）。既定 true。
+   * true の場合、`projects.yaml` に登録されているがディスク上から削除された
+   * （かつ親ディレクトリは存在する＝未マウントではないと判断できる）プロジェクトを
+   * 一覧送信の対象から除外する。false にすると従来どおり yaml の内容をそのまま送信する。
+   */
+  projectExistenceFilter?: boolean;
 }
 
 export interface ProjectConfig {
@@ -107,6 +114,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       logLevel: config.logLevel || 'info',
       proxy: config.proxy,  // プロキシ設定を読み込み
       projectOwnerFilter: config.projectOwnerFilter,  // 未設定なら undefined（呼び出し側で !== false 判定 → 既定 true）
+      projectExistenceFilter: config.projectExistenceFilter,  // 未設定なら undefined（呼び出し側で !== false 判定 → 既定 true）
     };
   } catch (err) {
     // Return default config
@@ -123,6 +131,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       logLevel: 'info',
       proxy: undefined,
       projectOwnerFilter: undefined,
+      projectExistenceFilter: undefined,
     };
   }
 }

@@ -30,30 +30,66 @@ async function isFlutterSdkCheckout(dir: string): Promise<boolean> {
 }
 
 /**
+ * プロジェクトディレクトリがディスク上から削除されたかを判定する（幽霊エントリ対策）。
+ * `rm -rf` 等で消えたプロジェクトが `projects.yaml` に残り続け、DB 側の #322 照合スイープ
+ * （Agent が送ってこなくなった名前をソフトデリート）が永久に発動しない問題への対処。
+ * 外付け/ネットワークドライブの一時的な未マウントで大量ソフトデリートが起きないよう、
+ * 「親ディレクトリは存在するのに対象ディレクトリだけ無い」場合のみ「削除された」と判定する
+ * （親も無い＝未マウントの疑いがあるため、安全側に倒して一覧に残す）。
+ */
+async function isDeletedFromDisk(projectPath: string): Promise<boolean> {
+  try {
+    await fs.stat(projectPath);
+    return false; // 存在する
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      return false; // EACCES 等の不明なエラーは安全側に倒して残す
+    }
+  }
+  try {
+    await fs.stat(path.dirname(projectPath));
+    return true; // 親は存在するのに対象だけ無い → 削除されたと判断
+  } catch {
+    return false; // 親も無い → 未マウントの疑い、残す
+  }
+}
+
+/**
  * Server へ送信するプロジェクト一覧を組み立てる。
  * `projectOwnerFilter`（既定 true）が有効な場合、CLAUDE.md 等のマーカーファイルが
  * Agent 実行ユーザーの所有でないプロジェクトを一覧から除外する（#322）。
- * `projects.yaml` 自体は書き換えないため、設定を戻せば即座に復活する。
+ * `projectExistenceFilter`（既定 true）が有効な場合、ディスク上から削除されたプロジェクトを
+ * 一覧から除外する（幽霊エントリ対策）。
+ * `projects.yaml` 自体は書き換えないため、設定を戻す/ディレクトリを復元すれば即座に復活する。
  */
 export async function loadProjects(config: AgentConfig): Promise<Project[]> {
   const projectConfigs = await loadProjectsConfig();
   const ownerFilterEnabled = config.projectOwnerFilter !== false;
+  const existenceFilterEnabled = config.projectExistenceFilter !== false;
 
   const filtered: ProjectConfig[] = [];
-  let excluded = 0;
+  let excludedByOwner = 0;
+  let excludedByExistence = 0;
   for (const p of projectConfigs) {
+    if (existenceFilterEnabled && (await isDeletedFromDisk(p.path))) {
+      excludedByExistence++;
+      continue;
+    }
     if (ownerFilterEnabled) {
       const marker = await detectProjectMarker(p.path);
       if (marker && !(await isOwnedBySelf(marker.file))) {
-        excluded++;
+        excludedByOwner++;
         continue;
       }
     }
     filtered.push(p);
   }
 
-  if (excluded > 0) {
-    console.log(`🔒 Owner filter: excluded ${excluded} project(s) not owned by ${await selfUserLabel()}`);
+  if (excludedByOwner > 0) {
+    console.log(`🔒 Owner filter: excluded ${excludedByOwner} project(s) not owned by ${await selfUserLabel()}`);
+  }
+  if (excludedByExistence > 0) {
+    console.log(`🧹 Existence filter: excluded ${excludedByExistence} project(s) whose directory no longer exists`);
   }
 
   const projects: Project[] = filtered.map((p) => ({
