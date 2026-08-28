@@ -28,15 +28,11 @@ let devinSupportsExport: boolean | null = null;
  * @returns 対応していれば true
  */
 function probeDevinExportSupport(command: string): boolean {
+  // #329: 実体は probeDevinCapabilities() に統合済み（--help 呼び出しを1回に集約）。
+  // 既存の呼び出し側とログ行を変えないための薄いラッパー。
   if (devinSupportsExport !== null) return devinSupportsExport;
-  try {
-    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
-    devinSupportsExport = /--export\b/.test(help);
-    log.info(`[devin] --export support: ${devinSupportsExport}`);
-  } catch (err) {
-    devinSupportsExport = false;
-    log.warn(`[devin] --help probe failed, disabling --export: ${(err as Error).message}`);
-  }
+  devinSupportsExport = probeDevinCapabilities(command).export;
+  log.info(`[devin] --export support: ${devinSupportsExport}`);
   return devinSupportsExport;
 }
 
@@ -67,7 +63,7 @@ function probeCodexCapabilities(command: string): { json: boolean; resume: boole
 
 // #309: Gemini CLI / Devin CLI の `--model` フラグ対応可否キャッシュ（plan/exec モデル分離用）。
 let geminiCapabilitiesCache: { model: boolean } | null = null;
-let devinCapabilitiesCache: { model: boolean } | null = null;
+let devinCapabilitiesCache: { model: boolean; agentConfig: boolean; permissionMode: boolean; promptFile: boolean; export: boolean } | null = null;
 
 /**
  * Gemini CLI が `-m/--model` フラグに対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
@@ -90,21 +86,34 @@ function probeGeminiCapabilities(command: string): { model: boolean } {
 }
 
 /**
- * Devin CLI が `--model` フラグに対応しているか `devin --help` の出力で判定する（結果はキャッシュ）。
- * 失敗時は false に倒し、モデル引数を付けずに CLI デフォルトへ劣化させる。
+ * Devin CLI のフラグ対応可否を `devin --help` の出力で一括判定する（結果はキャッシュ、#329）。
+ * バージョンによって `--agent-config`/`--permission-mode`/`--prompt-file` の有無が異なり、
+ * 非対応フラグを渡すと clap が exit code 2 で即死し fullOutput 空 → 汎用「(No response from AI)」に
+ * 落ちて実際のエラーが届かない問題があったため、--model/--export と同じ probe 方式に統一する。
+ * 失敗時は全て false（＝最小フラグ `-p` のみで動かす安全側）に倒す。
  * @param command devin コマンドのフルパス
- * @returns `{ model }` 対応可否
+ * @returns 各フラグの対応可否
  */
-function probeDevinCapabilities(command: string): { model: boolean } {
+function probeDevinCapabilities(command: string): {
+  model: boolean;
+  agentConfig: boolean;
+  permissionMode: boolean;
+  promptFile: boolean;
+  export: boolean;
+} {
   if (devinCapabilitiesCache !== null) return devinCapabilitiesCache;
   try {
     const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
     const model = /--model\b/.test(help);
-    devinCapabilitiesCache = { model };
-    log.info(`[devin] capabilities: --model=${model}`);
+    const agentConfig = /--agent-config\b/.test(help);
+    const permissionMode = /--permission-mode\b/.test(help);
+    const promptFile = /--prompt-file\b/.test(help);
+    const exportFlag = /--export\b/.test(help);
+    devinCapabilitiesCache = { model, agentConfig, permissionMode, promptFile, export: exportFlag };
+    log.info(`[devin] capabilities: --model=${model} --agent-config=${agentConfig} --permission-mode=${permissionMode} --prompt-file=${promptFile} --export=${exportFlag}`);
   } catch (err) {
-    devinCapabilitiesCache = { model: false };
-    log.warn(`[devin] --help probe failed, disabling --model: ${(err as Error).message}`);
+    devinCapabilitiesCache = { model: false, agentConfig: false, permissionMode: false, promptFile: false, export: false };
+    log.warn(`[devin] --help probe failed, using minimal flags (-p only): ${(err as Error).message}`);
   }
   return devinCapabilitiesCache;
 }
@@ -327,6 +336,11 @@ export interface SendPromptOptions {
    */
   devinAutoPermFallback?: boolean;
   /**
+   * #329: 「unexpected argument」で拒否された Devin CLI フラグ名のリスト。
+   * close ハンドラの自動リトライでのみ設定され、無限ループを防ぐガード（上限2個）も兼ねる。
+   */
+  devinDroppedFlags?: string[];
+  /**
    * AI モデル指定（#309: claude/codex/gemini/devin 共通）。`l` コマンド／Settings で設定される。
    * claude: `--model` で渡す（例: 'sonnet', 'opus'）
    * codex: `-c model="..."` で渡す（例: 'gpt-5.5'）
@@ -524,7 +538,17 @@ export async function sendPromptToAi(
     proc.stdin?.end();
   } else if (aiTool === 'devin') {
     // Devin CLI: plan → agent-config で Read のみ許可（Write/Exec deny）、exec → dangerous（全承認）
+    // #329: --agent-config/--permission-mode/--prompt-file はバージョンによって対応可否が異なり、
+    // 非対応フラグを渡すと clap が exit 2 で即死し出力ゼロ→汎用「(No response from AI)」に落ちて
+    // 実際のエラーが届かない問題があったため、--model/--export と同じ probe 方式で駆動する。
     const args: string[] = [];
+    const devinCaps = probeDevinCapabilities(command);
+    const devinDropped = new Set(options.devinDroppedFlags ?? []);
+    const devinHasAgentConfig = devinCaps.agentConfig && !devinDropped.has('--agent-config');
+    const devinHasPermissionMode = devinCaps.permissionMode && !devinDropped.has('--permission-mode');
+    const devinHasPromptFile = devinCaps.promptFile && !devinDropped.has('--prompt-file');
+    // #329: 読み取り専用強制がプロンプト指示のみに劣化した場合、静かなフォールバック禁止の方針に従い1行警告する
+    let devinReadonlyDegraded = false;
 
     // 保存済み Devin セッション ID があれば -r で resume
     // ただし exec モードでは新規セッションを開始する（--permission-mode dangerous を
@@ -540,7 +564,7 @@ export async function sendPromptToAi(
       log.info(`Resuming Devin session: ${devinSessionId}`);
     }
 
-    if (options.usePlanMode && !options.devinAutoPermFallback) {
+    if (options.usePlanMode && !options.devinAutoPermFallback && devinHasAgentConfig) {
       // plan モード: --agent-config で Read のみ許可、Write/Exec を明示的に deny
       // --permission-mode auto は「安全と判断したツールを自動承認」するだけで
       // 厳密な読み取り専用ではないため、agent-config で強制する
@@ -554,15 +578,37 @@ export async function sendPromptToAi(
       fs.writeFileSync(agentConfigPath, JSON.stringify(agentConfig), 'utf-8');
       args.push('-p', '--agent-config', agentConfigPath);
       log.info(`Devin plan mode: using agent-config (Read only, Write/Exec denied)`);
+    } else if (options.usePlanMode && !options.devinAutoPermFallback && devinHasPermissionMode) {
+      // #329: --agent-config 非対応の CLI → --permission-mode auto に劣化（読み取り専用強制はプロンプト指示のみ）
+      args.push('-p', '--permission-mode', 'auto');
+      devinReadonlyDegraded = true;
+      log.info(`Devin plan mode: --agent-config unsupported, degraded to --permission-mode auto (readonly not enforced)`);
+    } else if (options.usePlanMode && !options.devinAutoPermFallback) {
+      // #329: --agent-config も --permission-mode も非対応 → -p のみ（最小フラグ、読み取り専用強制はプロンプト指示のみ）
+      args.push('-p');
+      devinReadonlyDegraded = true;
+      log.info(`Devin plan mode: --agent-config/--permission-mode both unsupported, running with -p only (readonly not enforced)`);
     } else if (options.usePlanMode && options.devinAutoPermFallback) {
       // plan フォールバック（#274）: agent-config の deny で Devin がツール拒否→出力ゼロになる問題の回避。
       // agent-config を渡さず --permission-mode auto（安全ツールのみ自動承認）で実行する。
       // 厳密読み取り専用は緩むが「プラン不能」よりまし。書き換え抑止はプロンプト側の指示に委ねる。
-      args.push('-p', '--permission-mode', 'auto');
-      log.info(`Devin plan mode fallback: using --permission-mode auto (agent-config skipped)`);
+      if (devinHasPermissionMode) {
+        args.push('-p', '--permission-mode', 'auto');
+        log.info(`Devin plan mode fallback: using --permission-mode auto (agent-config skipped)`);
+      } else {
+        args.push('-p');
+        log.info(`Devin plan mode fallback: --permission-mode unsupported, running with -p only`);
+      }
     } else {
       // exec モード: 全ツール自動承認
-      args.push('-p', '--permission-mode', 'dangerous');
+      if (devinHasPermissionMode) {
+        args.push('-p', '--permission-mode', 'dangerous');
+      } else {
+        // #329: --permission-mode 非対応の旧 CLI → -p のみ（劣化通知）
+        args.push('-p');
+        devinReadonlyDegraded = true;
+        log.info(`Devin exec mode: --permission-mode unsupported, running with -p only`);
+      }
     }
 
     // #276: 途中経過表示。対応版なら --export で ATIF をファイル書き出しさせ、後段でポーリングして進捗を出す。
@@ -574,18 +620,32 @@ export async function sendPromptToAi(
     }
 
     // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
-    const devinCaps = probeDevinCapabilities(command);
     const devinModel = safeModelArg(options.model);
     if (devinModel && devinCaps.model) {
       args.push('--model', devinModel);
     }
 
-    // Devin は stdin パイプ非対応（panic at repl_mode.rs）→ --prompt-file で一時ファイル経由
-    const promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-    fs.writeFileSync(promptFilePath, prompt, 'utf-8');
-    args.push('--prompt-file', promptFilePath);
+    // #329: --prompt-file 非対応の場合は位置引数（`-- <prompt>`）へフォールバック。
+    // Devin は stdin パイプ非対応（panic at repl_mode.rs）のため通常は --prompt-file 一択だが、
+    // Windows cmd.exe の 8191 文字制限があるため 6000 文字超は黙って切り詰めず中止する（#308 と同じ理由）。
+    let promptFilePath: string | null = null;
+    if (devinHasPromptFile) {
+      promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
+      fs.writeFileSync(promptFilePath, prompt, 'utf-8');
+      args.push('--prompt-file', promptFilePath);
+    } else if (prompt.length > 6000) {
+      log.warn(`[devin] --prompt-file unsupported and prompt too long for argv (${prompt.length} chars > 6000)`);
+      onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.promptTooLongForArgv', { len: prompt.length }), true);
+      return {};
+    } else {
+      args.push('--', prompt);
+    }
 
-    log.info(`Running: ${command} ${args.join(' ').replace(promptFilePath, '...')}`);
+    if (devinReadonlyDegraded) {
+      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.readonlyUnsupported')}\n`, false);
+    }
+
+    log.info(`Running: ${command} ${promptFilePath ? args.join(' ').replace(promptFilePath, '...') : args.slice(0, -1).join(' ') + ' ...'}`);
 
     // Devin コマンドのディレクトリを PATH に追加
     const devinDir = path.dirname(command);
@@ -1168,6 +1228,45 @@ export async function sendPromptToAi(
         if (!completionSent) {
           completionSent = true;
           onOutput('', true, result.usageData);
+        }
+        resolve(result);
+        return;
+      }
+
+      // #329: devin CLI が非対応フラグを渡された場合（バージョン差異で --agent-config 等が存在しない）、
+      // clap が exit code 2 で即死し stdout 空 → 既存のどの分岐にも該当せず汎用「(No response from AI)」に
+      // 落ちて実際のエラーが握りつぶされていた。明示検出して自動リトライ（フラグを1つ外して最大2回）する。
+      const devinUnknownFlagMatch = aiTool === 'devin' && fullOutput.trim().length === 0
+        ? stderrOutput.match(/unexpected argument '(--[a-z-]+)'/i)
+        : null;
+      if (devinUnknownFlagMatch) {
+        const droppedFlag = devinUnknownFlagMatch[1];
+        const alreadyDropped = options.devinDroppedFlags ?? [];
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        if (!alreadyDropped.includes(droppedFlag) && alreadyDropped.length < 2) {
+          log.info(`[devin] Unknown flag '${droppedFlag}' rejected by CLI (code ${code}), retrying without it`);
+          completionSent = true;
+          onOutput(`${tChat(lang, 'devin.unknownFlagRetry', { flag: droppedFlag })}\n`, false);
+          const fallbackOptions: SendPromptOptions = {
+            ...options,
+            devinDroppedFlags: [...alreadyDropped, droppedFlag],
+          };
+          sendPromptToAi(sessionId, prompt, projectPath, aiTool, claudeSessionId, config, onOutput, fallbackOptions)
+            .then((fallbackResult) => resolve(fallbackResult))
+            .catch((err) => {
+              log.error(`[devin] unknown-flag retry failed: ${(err as Error).message}`);
+              if (fullOutput.length === 0) {
+                onOutput('(No response from AI)', true, result.usageData);
+              }
+              resolve(result);
+            });
+          return;
+        }
+        // リトライ済みでも解消しない → 「(No response from AI)」ではなく実際の stderr を明示して停止
+        if (!completionSent) {
+          completionSent = true;
+          const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
+          onOutput(tChat(lang, 'devin.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData);
         }
         resolve(result);
         return;

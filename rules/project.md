@@ -103,12 +103,13 @@ DB に残った stale レコードはサーバー再起動時に復元され、�
 ### Devin CLI 統合（spawn パターン）
 
 Devin for Terminal は Gemini/Codex/Aider と同じ spawn パターンで統合する。
-- 実行（plan）: `devin [-r <session-id>] -p --agent-config <tmpConfig> --prompt-file <tmp>`
-- 実行（exec）: `devin -p --permission-mode dangerous --prompt-file <tmp>`
-- プロンプト: `--prompt-file` 一時ファイル経由（stdin パイプは panic するため使用不可）
+- 実行（plan、フル対応 CLI）: `devin [-r <session-id>] -p --agent-config <tmpConfig> --prompt-file <tmp>`
+- 実行（exec、フル対応 CLI）: `devin -p --permission-mode dangerous --prompt-file <tmp>`
+- プロンプト: `--prompt-file` 一時ファイル経由（stdin パイプは panic するため使用不可）。**`--prompt-file` 非対応 CLI では位置引数（`-p -- <prompt>`）にフォールバックするが、6000 文字超は Windows cmd.exe の argv 上限（8191文字）を考慮し黙って切り詰めず明示エラーで中止する**（#329, #308 の Codex stdin と同じ理由）
 - セッション継続: `-r <session-id>` で明示的に resume（`devin list --format json` で取得・`.devrelay/devin-session-id` に保存）
 - パーミッション（plan）: `--agent-config` で `Read(**)` のみ allow、`Write(**)` + `Exec(**)` を deny。`--permission-mode auto` は「安全と判断したツールを自動承認」するだけで厳密な読み取り専用ではないため、agent-config で明示的に強制する（#260）
 - パーミッション（exec）: `--permission-mode dangerous`（全ツール自動承認）
+- **フラグはケーパビリティ駆動（#329）**: `--agent-config`/`--permission-mode`/`--prompt-file`/`--model`/`--export` の対応可否は `devin --help` の単一 probe（キャッシュ付き、`probeDevinCapabilities()`）で判定する。旧バージョンの CLI に非対応フラグを渡すと clap が exit 2 で即死し出力ゼロ→汎用 `(No response from AI)` に落ちて実際のエラーが届かない問題があったため。plan モードで `--agent-config` 非対応の場合は `--permission-mode auto`（#274 の劣化パスと同レベル）→ さらに非対応なら `-p` のみへ段階的に劣化し、**読み取り専用強制が効かなくなる旨を必ずチャットに警告する**（#325「静かなフォールバック禁止」）。`close` ハンドラでも `unexpected argument '--flag'` を検知したら該当フラグを落として自動リトライ（最大2フラグ、無限ループガード付き）し、それでも失敗する場合は実際の stderr 末尾5行を明示エラーとして返す（`(No response from AI)` に丸め込まない）
 - **`-r` resume は plan モード時のみ**: Devin の resume は元セッションの permission-mode を保持して CLI の `--permission-mode dangerous` を上書きしない仕様。exec モードでは新規セッションを起動して dangerous を確実に効かせる（#231 で判明）。session continuity は plan 中のみ。plan→exec は元々文脈リセット点なので問題なし
 - 会話履歴: 非 Claude ツールでは常にプロンプトに会話履歴を含める（`isClaudeSdk` 判定で Claude は従来通り SDK --resume）。Devin が exec で `-r` を使わなくても、この履歴注入で文脈は維持される
 - PATH: コマンドのディレクトリを自動追加（サービス実行時の PATH 不足を回避）

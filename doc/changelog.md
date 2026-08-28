@@ -6,6 +6,55 @@
 
 ## 実装済み機能
 
+### #329: Devin CLI の非対応フラグでプランモードが必ず失敗する問題を修正 (2026-08-28)
+
+#### 問題
+#328 の手動復旧で `DESKTOP-1JR1NLL/c-shiraki`（Windows CLI Agent）は ONLINE 化に成功したが、最初のプロンプトで別のエラーが発生しチャットには `(No response from AI)` しか出ない。Agent ログの実測:
+```
+🔧 Running: devin -p --agent-config C:\...\devrelay-devin-agent-config-<sid>.json --export ... --prompt-file ...
+[devin] stderr: error: unexpected argument '--agent-config' found
+[devin] Process exited with code 2, signal null
+```
+
+#### 原因
+Devin 分岐は `--export`/`--model` は `devin --help` でケーパビリティ判定しているが、プランモードの `--agent-config` だけは無条件で渡していた。この端末の devin CLI には `--agent-config` が無く、clap が exit 2 で即死する。さらに exit 2 + stdout 空は既存のどの分岐にも当たらず、汎用 `(No response from AI)` に落ちるため実際の CLI エラーがユーザーに一切届かない。当該機体は 2 プロジェクトとも `defaultAi=devin` で devin 以外の AI CLI が入っておらず、`a` で別 AI に逃がす回避策も使えなかった。
+
+#### 修正内容（Part A: 3 OS 共通、`ai-runner.ts`）
+- `probeDevinCapabilities()` を `{ model, agentConfig, permissionMode, promptFile, export }` に拡張（既存の `--help` 1 回・キャッシュ付き probe をそのまま踏襲、追加の子プロセス起動なし）。`probeDevinExportSupport()` は削除せず、新 caps を返す薄いラッパーに変更（呼び出し側・既存ログ行を変更しないため）
+- Devin の引数組み立てを caps 依存の分岐に全面書き換え:
+  - plan + `agentConfig` 対応 → 従来どおり `-p --agent-config <json>`（Read only, Write/Exec deny）
+  - plan + `agentConfig` 非対応・`permissionMode` 対応 → `-p --permission-mode auto` に劣化（#274 で既に採用済みの劣化パスと同じ安全レベル）
+  - plan + 両方非対応 → `-p` のみ
+  - exec + `permissionMode` 非対応 → `-p` のみ
+  - いずれの劣化パスでも「静かなフォールバック禁止」(#325) に従い、読み取り専用強制が効かなくなる旨をチャットに 1 行警告
+  - `--prompt-file` 非対応時はプロンプトを位置引数（`devin -p -- <prompt>`）へ切替。ただし Windows cmd.exe の 8191 文字制限を考慮し、6000 文字超は黙って切り詰めず明示エラーで中止（#308 の Codex stdin 採用と同じ理由）
+- `close` ハンドラに `devinPlanToolRejected` 判定の直前で新分岐を追加: stderr が `unexpected argument '(--flag)'` にマッチしたら、そのフラグを `options.devinDroppedFlags`（新設）に積んで 1 回だけ自動リトライ（上限 2 フラグ、無限ループガード）。それでも失敗する場合は `(No response from AI)` ではなく実際の stderr 末尾 5 行を含む明示エラーを返す
+- `packages/shared/src/i18n.ts` に `devin.readonlyUnsupported`/`devin.unknownFlagRetry`/`devin.unknownFlagFailed`/`devin.promptTooLongForArgv` の 4 キー（ja/en）を追加
+
+#### 修正内容（Part B: `u` 自己更新の安全化、`connection.ts`）
+調査中に、#328 と同じクラスのバグが `u`（Agent 自動更新）フロー側にも残っていることを発見。`pnpm install`/build の終了コードをログに出すだけで判定しておらず、無条件に旧 Agent を kill して新プロセスを起動していたため、社内の不安定な Windows 機で install/build が失敗すると動いている Agent を殺して `MODULE_NOT_FOUND` の状態に戻す構造だった。
+- `pnpm install --frozen-lockfile --ignore-scripts` が失敗したら `pnpm install --ignore-scripts` で 1 回だけ再試行（#328 の tier2 と同じ）
+- build 後・kill 前に成果物ゲートを追加: `agents/{linux,macos}/dist/index.js` が存在しなければ `!! build failed, keeping current agent` をログに残し、restart せずスクリプトを終了（Agent は旧コードのまま online 維持、サーバー側の `pendingUpdateNotify` タイムアウトでユーザーに気づく形になる）
+- `agents/linux/src/services/connection.ts`（Windows 分岐 + Linux/macOS 分岐）と `agents/macos/src/services/connection.ts`（Linux/macOS 分岐のみ）に同一方針で適用
+
+#### 検証
+- `pnpm build` green（`packages/shared` → 3 Agent OS 単体 → モノレポ全体の5段階）
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` = 0
+- 新 caps ログ行・新 i18n キー・成果物ゲートのログ文言が該当 dist（shared/i18n.js、3 Agent の ai-runner.js、linux/macos の connection.js）にコンパイルされていることを確認
+- `--agent-config` を渡す経路が `devinHasAgentConfig`（`caps.agentConfig` 由来）が true のときだけであることを grep で確認
+- 3 OS の `ai-runner.ts` の Devin 分岐が同一内容であること（ログ出力の `console.*` vs `log.*`、windows 側の絵文字省略という既存スタイル差異のみ）を diff で確認
+
+#### 変更ファイル
+- `agents/linux/src/services/ai-runner.ts`
+- `agents/macos/src/services/ai-runner.ts`
+- `agents/windows/src/services/ai-runner.ts`
+- `packages/shared/src/i18n.ts`
+- `agents/linux/src/services/connection.ts`
+- `agents/macos/src/services/connection.ts`
+
+#### 注記
+DB マイグレーション不要・server 再起動不要（server 側変更なし）。各マシンの `u` が必要（commit/push 前提）。**対象 Windows 機（`DESKTOP-1JR1NLL/c-shiraki`）は `u` ではなく、インストーラーのワンライナー再実行を推奨** — Part B のガードは「次回以降の `u`」からしか効かない（更新スクリプトを生成するのは今動いている古い Agent のため）。実機確認（`devin --help` の実出力、プランモードで応答が返ること、exec モードでの書き込み、読み取り専用強制が外れる場合の警告表示、Part B のわざと壊した状態での生存確認）は未実施。
+
 ### #328: Windows インストーラーがビルド失敗を握りつぶす問題を修正 (2026-08-28)
 
 #### 問題

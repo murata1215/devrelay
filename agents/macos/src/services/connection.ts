@@ -2318,6 +2318,11 @@ async function handleAgentUpdate() {
   /** コマンド実行 + exit code ログ記録ヘルパー */
   const runAndLog = (label: string, cmd: string) =>
     `${log(label)}; ${cmd} >> "${updateLogFile}" 2>&1; ${log(`${label} exit=$?`)}`;
+  /**
+   * #329 Part B: 終了コードを $RC に保存する版（分岐判定に使う）。
+   */
+  const runAndLogChecked = (label: string, cmd: string) =>
+    `${log(label)}; ${cmd} >> "${updateLogFile}" 2>&1; RC=$?; ${log(`${label} exit=$RC`)}`;
 
   if (process.platform === 'win32') {
     // Windows: PowerShell スクリプトで更新
@@ -2394,7 +2399,10 @@ async function handleAgentUpdate() {
       `REMOTE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' || echo "origin/main")`,
       `[ -z "$REMOTE_BRANCH" ] && REMOTE_BRANCH="origin/main"`,
       runAndLog('git reset', 'git reset --hard $REMOTE_BRANCH'),
-      runAndLog('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
+      // #329 Part B: --frozen-lockfile が失敗したら --frozen-lockfile 無しで1回だけ再試行
+      // （#328 の tier2 と同じ方針）
+      runAndLogChecked('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
+      `if [ "$RC" != "0" ]; then ${log('pnpm install (frozen-lockfile) failed, retrying without --frozen-lockfile')}; ${runAndLogChecked('pnpm install (retry)', 'pnpm install --ignore-scripts')}; fi`,
       // 端末モード用に PTY プリビルドをダウンロード（ビルドツール不要、失敗しても継続）
       runAndLog('rebuild PTY', 'pnpm rebuild @homebridge/node-pty-prebuilt-multiarch || true'),
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
@@ -2419,9 +2427,10 @@ async function handleAgentUpdate() {
       actualRestartCmd = restartCmd.command;
     }
 
-    // ビルド成否に関わらず、必ずリスタートを実行
-    // セミコロンで分離し、ビルド失敗でも旧 dist/ コードで Agent を復帰させる
-    const script = `${buildSteps}; ${log('restarting...')}; sleep 2; ${actualRestartCmd}`;
+    // #329 Part B: build 後・kill 前に成果物ゲート。dist/index.js が無ければ
+    // 旧 Agent を kill せずスクリプトを終了する（壊れたビルドで動いている Agent を殺さない）
+    const distIndexPath = join(agentDir, 'agents', 'macos', 'dist', 'index.js');
+    const script = `${buildSteps}; if [ -f "${distIndexPath}" ]; then ${log('restarting...')}; sleep 2; ${actualRestartCmd}; else ${log('!! build failed, keeping current agent (dist/index.js missing)')}; fi`;
 
     const child = spawn('bash', ['-c', script], {
       detached: true,

@@ -239,6 +239,24 @@ export const chatMessages = {
     en: '🔒 Organization IP access restriction is active; commands cannot be issued from Discord/Telegram. Please use the WebUI from your corporate network.',
     ja: '🔒 組織のIPアクセス制限が有効なため、Discord/Telegram からのコマンド発行はできません。社内ネットワークから WebUI をご利用ください。',
   },
+
+  // --- Devin CLI 非対応フラグ対応（#329: caps 駆動化 + 静かなフォールバック禁止） ---
+  'devin.readonlyUnsupported': {
+    en: '⚠️ This machine\'s Devin CLI does not support `--agent-config`, so plan-mode read-only enforcement is prompt-instruction only (file writes cannot be fully blocked).',
+    ja: '⚠️ この端末の Devin CLI は `--agent-config` に対応していないため、プランモードの読み取り専用強制はプロンプト指示のみになります（ファイル書き込みを完全にはブロックできません）。',
+  },
+  'devin.unknownFlagRetry': {
+    en: '⚠️ Devin CLI rejected the `{flag}` flag as unknown. Retrying without it...',
+    ja: '⚠️ Devin CLI が `{flag}` フラグを認識しませんでした。外して再試行します...',
+  },
+  'devin.unknownFlagFailed': {
+    en: '❌ Devin CLI still failed after removing `{flag}`. Please check the devin CLI version on this machine (`devin --help` / `devin update`).\n\n[stderr]\n{stderr}',
+    ja: '❌ `{flag}` を外しても Devin CLI が失敗しました。この端末の devin CLI バージョンを確認してください（`devin --help` / `devin update`）。\n\n[stderr]\n{stderr}',
+  },
+  'devin.promptTooLongForArgv': {
+    en: '⚠️ This machine\'s Devin CLI does not support `--prompt-file`, and the prompt ({len} chars) exceeds the 6000-char limit for passing it as a command-line argument (Windows cmd.exe has an 8191-char limit). Run `x` to clear history and try a shorter prompt.',
+    ja: '⚠️ この端末の Devin CLI は `--prompt-file` に対応しておらず、プロンプト（{len}文字）がコマンドライン引数として渡せる上限（6000文字、Windows cmd.exe の8191文字制限を考慮）を超えています。`x` で会話履歴をクリアし、短いプロンプトで再試行してください。',
+  },
 } as const;
 
 export type ChatMessageKey = keyof typeof chatMessages;
