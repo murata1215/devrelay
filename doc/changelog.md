@@ -6,6 +6,84 @@
 
 ## 実装済み機能
 
+### #327: Windows インストーラーが node 無し端末で PowerShell ごと落ちる問題を修正 (2026-08-28)
+
+#### 問題
+ユーザー報告: 「node 未インストール・devin インストール済み端末で Windows Agent をインストールすると PowerShell ごと落ちる」
+
+#### 原因
+配布経路が `$env:DEVRELAY_TOKEN="..."; irm https://raw.githubusercontent.com/.../install-agent.ps1 | iex` のワンライナーのため、`Invoke-Expression` はスクリプト文字列を**呼び出し元のスコープ**で実行する。この状態でスクリプト内のトップレベル `exit` を実行すると、スクリプトだけでなく**呼び出し元の PowerShell ホストそのものが終了**する（ウィンドウが閉じる）。
+
+node 未インストール端末では依存ツールゲート（旧 `install-agent.ps1:231-236`）が必ず発火していた:
+1. Node.js 未検出 → `$Missing++`
+2. pnpm 自動インストールが `if ($NodeCmd)` ガードでスキップされ再度 `$Missing++`
+
+結果、`$Missing -gt 0` で `exit 1` が実行され、`X Node.js 20 以上が必要です` の案内文をユーザーが読む前にウィンドウが閉じていた。devin の有無はこの問題と無関係（AI CLI チェックは任意項目で `$Missing` を増やさない）。
+
+副次的に、Linux/macOS の `install-agent.sh` は node 未検出時に公式バイナリを自動インストールするのに対し、Windows 版には同等の処理が無く、3 OS 間でインストーラー体験が非対称だった。
+
+#### 修正内容
+- **Fix1**: `exit 1` 全 5 箇所（トークン未設定・依存ツール不足・無効トークン・別マシン割当済み・サーバー接続失敗）を `return` に置換。`iex` 実行時も `.ps1` 直接実行時も安全にスクリプトだけを終了できる（`try`/`catch` 内でも動作）。`$ErrorActionPreference = "Stop"` が `iex` 実行時に呼び出し元の対話セッションへ残留する副作用も、`$PrevEAP` に退避し全終了経路（各 `return` 直前・正常終了時）で復元することで解消
+- **Fix2**: `install-agent.sh` の Node.js 自動インストール設計（`v20.20.0`・ダウンロード先ディレクトリ規約）を移植した `Install-PortableNode` 関数を追加。node 未検出/v20 未満の場合、`node-v20.20.0-win-<x64|arm64>.zip` を `%APPDATA%\devrelay\node` にダウンロード・展開し PATH 先頭に追加。失敗時のみ従来どおり `$Missing++` にフォールバック
+  - 罠1: pnpm 自動インストール直後の `$env:Path` 丸ごとリフレッシュ（レジストリの Machine/User 値で上書き）がポータブル Node の PATH 先頭付与を消してしまうため、リフレッシュ後に `$PortableNodeDir` と `%APPDATA%\npm` を再度先頭付与
+  - 罠2: Windows 版 Node zip は `bin/` を持たず `node.exe` がアーカイブ直下にあるため、`tar --strip-components=1` 相当の処理を `Expand-Archive` 後に手動実装
+  - `start-agent.cmd` に焼き込まれる `$NodePath = (Get-Command node).Source` は PATH 先頭化により自動的にポータブル Node を指すため変更不要
+- **Fix3**: Agent 自動更新（`u`）の Windows 分岐（`agents/linux/src/services/connection.ts`）は Linux 分岐（`export PATH="${nodeBinDir}:$PATH"`）と異なり PATH 補完が無く、Fix2 でポータブル Node 端末が生まれると次回 `u` が無音失敗する。`scriptLines` 先頭に `$env:Path = "$env:APPDATA\devrelay\node;$env:APPDATA\npm;$env:Path"` を1行追加して対処
+
+#### 検証
+- `pnpm build` green（packages/shared → agents/linux 単体 → モノレポ全体の3段階）
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` = 0
+- `exit 1` 残存 0 件、波括弧バランス一致（Python で検証、`pwsh` が本機に無いため構文パーサでの検証は未実施）
+- Fix2/Fix1 が `install-agent.ps1` に、Fix3 が `agents/linux/dist/services/connection.js` にそれぞれコンパイル・反映されていることを確認
+- 実機確認（node 無し Windows 端末でのワンライナー実行・ウィンドウ非クラッシュ・ポータブル Node 自動導入・devin 検出・自動起動・`u` 完走、node 既存端末でのリグレッション）は未実施
+
+#### 変更ファイル
+- `scripts/install-agent.ps1`
+- `agents/linux/src/services/connection.ts`
+
+#### 注記
+`install-agent.ps1` は `raw.githubusercontent.com/.../main/` から配信されるため commit + push しない限り実機に反映されない。`connection.ts` の変更は各マシンの `u` が必要（Fix3 の効果は次回以降の `u` から）。server 再起動は不要（`apps/server` は無変更）。
+
+---
+
+### #326: Claude ログイン切れのリモート検知（Phase1） (2026-08-28)
+
+#### 背景
+Claude の OAuth セッション切れが頻発し、リモート操作という DevRelay の前提が「対象マシンの前に座らないと復旧できない」状態で崩れていた。まず検知のみの Phase1 を実装し、SDK control protocol によるリモート再ログイン中継（Phase2）は別サイクルへ分離した。
+
+#### 設計判断
+- 当初 PTY で `/login` をスクリーンスクレイプする案を検討したが、`@anthropic-ai/claude-agent-sdk`（v0.2.77）に `Query.request({subtype:'claude_authenticate'})` という control protocol が実在すると確認（`manualUrl`/`automaticUrl` を返す、`sdk.d.ts` 未公開）。これは Phase2 で使う設計とし、Phase1 自体はより軽量な `claude auth status --json` の子プロセス1発実行を採用（PTY もライブ SDK セッションも使わず AI 実行フローに影響を与えない）
+- 判定不能時は `'unknown'` を返し誤通知を防止
+- 状態変化時（`ok:true→false`）のみチャット通知し、初回確認時は通知しない
+
+#### 実装
+- 新規 `agents/{linux,macos}/src/services/claude-auth.ts`（`checkClaudeAuth()`）
+- 両 `connection.ts` に15分間隔の定期チェック + `server:connect:ack` 受信直後の即時チェックを配線
+- `Machine` に `claudeAuthOk`/`claudeAuthCheckedAt`/`claudeAuthAccount` の3列追加（DB マイグレーション適用済み）
+- `agent-manager.ts` に `agent:claude:auth:status` ハンドラを新設し `Machine` に永続化、遷移時のみ通知
+- 通知経路は新設 `session-manager.ts` の `notifySessionsForMachine(machineId, buildMessage)`（`clearSessionsForMachine` と同じ絞り込み方式を踏襲した汎用ヘルパー）
+- `/api/machines` に3列追加、`apps/web/src/pages/MachinesPage.tsx` に赤バッジ表示
+- 実行時検知も併用: `ai-runner.ts`（linux/macos）に `formatAiErrorMessage()` を新設し、`OAuth access token has expired`/`Please run /login` を検知したら `tChat(lang,'claudeAuth.runtimeExpiredHint')` を返す
+- `packages/shared` に `ClaudeAuthStatusPayload` 型 + `claudeAuth.*` の3 i18n キー追加
+
+#### 検証
+- `pnpm build` green（packages/shared→agents/linux→agents/macos→apps/server→モノレポ全体の5段階）
+- `require(` 混入チェック0、新規コードが5つの dist（shared/i18n.js, 両 connection.js, agent-manager.js, web bundle）全てにコンパイルされていることを確認
+- 実チャットでの実機確認（ログイン切れ発生時の実際の通知・バッジ表示）は未実施
+
+#### 変更ファイル
+- `agents/{linux,macos}/src/services/claude-auth.ts`（新規）
+- `agents/{linux,macos}/src/services/connection.ts`, `ai-runner.ts`
+- `apps/server/src/services/{agent-manager,session-manager}.ts`, `apps/server/src/routes/api.ts`
+- `apps/server/prisma/schema.prisma`
+- `apps/web/src/lib/api.ts`, `apps/web/src/pages/MachinesPage.tsx`
+- `packages/shared/src/{types,i18n}.ts`
+
+#### 注記
+server 再起動 + 各マシン `u`（Agent 更新）が必要。Phase2（SDK control protocol によるリモート再ログイン中継本体）は未着手。
+
+---
+
 ### #325: `ask` フローに `--ai` オプションを追加（Council v1 の土台） (2026-08-23)
 
 #### 背景

@@ -53,7 +53,7 @@ let claudeFallbackLogged = false;
  * PATH（`command -v claude`）を最優先し、見つからなければ既知の標準パスを順に探す。
  * @returns 実在する claude のフルパス、無ければ null
  */
-function resolveSystemClaude(): string | null {
+export function resolveSystemClaude(): string | null {
   try {
     const p = execSync('command -v claude', { encoding: 'utf-8' }).trim();
     if (p && fs.existsSync(p)) return p;
@@ -656,6 +656,19 @@ export function resolveToolApproval(requestId: string, response: ToolApprovalRes
   return true;
 }
 
+/**
+ * AI 実行時エラーメッセージを整形する（Claude ログイン切れ検知の実行時併用、リモート再ログイン中継 Phase1）。
+ * SDK/CLI が投げる生のエラーに `OAuth access token has expired` / `Please run /login` が含まれる場合、
+ * ユーザーには生エラーではなく「login で復旧できます」という実行可能なヒントを返す。
+ * それ以外のエラーは従来どおり `Error: {message}` のまま返す（挙動を変えない）。
+ */
+function formatAiErrorMessage(message: string, lang: Language = DEFAULT_CHAT_LANGUAGE): string {
+  if (/OAuth access token has expired|Please run \/login/i.test(message)) {
+    return tChat(lang, 'claudeAuth.runtimeExpiredHint');
+  }
+  return `Error: ${message}`;
+}
+
 export interface SendPromptOptions {
   /** Claude session ID to resume (from previous execution) */
   resumeSessionId?: string;
@@ -1096,7 +1109,7 @@ async function sendPromptToAiSdk(
     }
 
     if (fullOutput.length === 0) {
-      onOutput(`Error: ${err.message}`, true);
+      onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true);
     }
     return result;
   }
@@ -2274,7 +2287,7 @@ export async function sendPromptToAi(
       console.error(`[${aiTool}] Process error:`, err);
       if (!completionSent) {
         completionSent = true;
-        onOutput(`Error: ${err.message}`, true);
+        onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true);
       }
       resolve(result);
     });

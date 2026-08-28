@@ -647,6 +647,31 @@ export async function clearSessionsForMachine(machineId: string) {
   }
 }
 
+/**
+ * 指定マシンのアクティブセッション参加者全員に通知を送る（セッションは終了させない）。
+ * `clearSessionsForMachine` と同じ「sessionParticipants を machineId で絞り込む」方式を踏襲するが、
+ * こちらはセッション自体を終了させない（Claude ログイン切れ検知など、マシン単位のイベントを
+ * チャットへ流すための汎用ヘルパー。Phase1 #claude-auth で新設）。
+ * 参加者ごとに `resolveSessionLanguage()` で言語を解決してから buildMessage を呼ぶため、
+ * 同じマシンでも言語設定が異なる参加者には別々の文言が届く。
+ */
+export async function notifySessionsForMachine(machineId: string, buildMessage: (lang: Language) => string): Promise<void> {
+  for (const [sessionId, participants] of sessionParticipants.entries()) {
+    if (participants.length === 0) continue;
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { machineId: true },
+    });
+    if (session && session.machineId === machineId) {
+      const lang = await resolveSessionLanguage(sessionId);
+      const message = buildMessage(lang);
+      for (const { platform, chatId } of participants) {
+        await sendMessage(platform, chatId, message);
+      }
+    }
+  }
+}
+
 // Get all active sessions (in-memory sessions with participants)
 /**
  * メモリ内のアクティブセッション（参加者がいるセッション）を取得

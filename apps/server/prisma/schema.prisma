@@ -167,6 +167,10 @@ model Machine {
   // #302: 実行中コードの鮮度（stale dist 検知・可視化用。旧 Agent は送ってこないため null=判定不能）
   runningCodeMtime DateTime? // 実行中エントリファイル(process.argv[1])の mtime
   runningCodeStale Boolean?  // 実行中コードが localCommit より古い＝再ビルド漏れ。null=旧 Agent で判定不能
+  // Claude ログイン切れ検知（リモート再ログイン中継 Phase1）。旧 Agent は送ってこないため null=判定不能
+  claudeAuthOk        Boolean?  // true=ログイン済み / false=切れている / null=未確認
+  claudeAuthCheckedAt DateTime? // 直近のチェック時刻
+  claudeAuthAccount   String?   // ログイン中アカウントのメールアドレス（判明時のみ）
   deletedAt      DateTime? // ソフトデリート（null = アクティブ）
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

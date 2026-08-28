@@ -23,9 +23,10 @@ import {
   type ScreenAnalyzeRequestPayload,
   type ScreenAnalysis,
   type ResponseSummarizeRequestPayload,
+  type ClaudeAuthStatusPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, appendSessionContextInfo } from './session-manager.js';
+import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, appendSessionContextInfo, notifySessionsForMachine } from './session-manager.js';
 import { maybeTokenBloatWarning } from './token-usage-warning.js';
 import { sendWebRawMessage, broadcastWebRawMessage } from '../platforms/web.js';
 import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApprovalAuto } from '../platforms/discord.js';
@@ -233,6 +234,9 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           break;
         case 'agent:response:summarize':
           handleResponseSummarize(ws, message.payload);
+          break;
+        case 'agent:claude:auth:status':
+          await handleClaudeAuthStatus(message.payload);
           break;
       }
     } catch (err) {
@@ -1410,6 +1414,49 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
       const { recordAutoUpdateError } = await import('./auto-updater.js');
       await recordAutoUpdateError(machineId, error ?? 'unknown').catch(() => {});
     }
+  }
+}
+
+/**
+ * Claude ログイン切れ検知（リモート再ログイン中継 Phase1）。
+ * Agent が定期実行する `claude auth status --json` の結果を Machine に永続化し、
+ * ok → expired の遷移時のみアクティブセッション参加者へ通知する（毎回通知するとノイズになるため）。
+ * `state:'unknown'` は判定不能（誤検知防止のため Agent 側で通知しない設計）なので、
+ * ここでは常に `ok: boolean` のみを受け取る（unknown の場合は Agent が送ってこない）。
+ */
+async function handleClaudeAuthStatus(payload: ClaudeAuthStatusPayload) {
+  const { machineId, ok, account } = payload;
+
+  let previousOk: boolean | null | undefined;
+  try {
+    const machine = await prisma.machine.findUnique({
+      where: { id: machineId },
+      select: { claudeAuthOk: true },
+    });
+    previousOk = machine?.claudeAuthOk;
+
+    await prisma.machine.update({
+      where: { id: machineId },
+      data: {
+        claudeAuthOk: ok,
+        claudeAuthCheckedAt: new Date(),
+        claudeAuthAccount: account ?? null,
+      },
+    });
+  } catch (err) {
+    console.error(`⚠️ Failed to persist claude auth status for ${machineId}:`, err);
+    return;
+  }
+
+  // 状態が変化したときだけ通知（previousOk が null/undefined＝初回確認時は通知しない）
+  if (previousOk === true && ok === false) {
+    const machineName = (await prisma.machine.findUnique({ where: { id: machineId }, select: { displayName: true, name: true } }).catch(() => null));
+    const label = machineName?.displayName || machineName?.name || machineId;
+    await notifySessionsForMachine(machineId, (lang) => tChat(lang, 'claudeAuth.expired', { machine: label }));
+  } else if (previousOk === false && ok === true) {
+    const machineName = (await prisma.machine.findUnique({ where: { id: machineId }, select: { displayName: true, name: true } }).catch(() => null));
+    const label = machineName?.displayName || machineName?.name || machineId;
+    await notifySessionsForMachine(machineId, (lang) => tChat(lang, 'claudeAuth.recovered', { machine: label }));
   }
 }
 

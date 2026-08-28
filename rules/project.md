@@ -416,10 +416,12 @@ AI SDK/CLI モードで使うモデルを Plan/Exec 別に選択する仕組み�
 
 | ツール | Linux/macOS | Windows | 扱い |
 |-------|------------|---------|------|
-| git | 必須（手動インストール） | 必須（手動） | `exit 1` |
-| Node.js 20+ | 自動インストール | 必須（手動） | Linux: DL、Win: `$Missing++` |
+| git | 必須（手動インストール） | 必須（手動） | 不足時は中断 |
+| Node.js 20+ | 自動インストール（`~/.devrelay/node`） | 自動インストール（`%APPDATA%\devrelay\node`、#327） | 自動インストール失敗時のみ `$Missing++` |
 | pnpm | 自動インストール（npm→sudo） | 自動インストール（npm） | 自動 |
 | AI CLI（claude/gemini/codex/aider/devin） | 任意（いずれか1つ推奨） | 任意 | 警告のみ・続行 |
+
+- **Windows も #327 (2026-08-28) で Node.js 20 未検出時に公式 zip（`node-v20.20.0-win-<x64|arm64>.zip`）を自動インストールするようになった**（Linux/macOS の `install-agent.sh` と同じ設計）。Windows zip は `bin/` を持たず `node.exe` がアーカイブ直下にある点、`npm install -g pnpm` 直後の `$env:Path` 丸ごとリフレッシュがポータブル Node の PATH 先頭付与を消す点の2つが罠
 
 - **AI CLI は任意**（#261 で Claude Code の必須要件を撤廃）。claude / gemini / codex / aider / devin のいずれか 1 つあれば動作し、1 つも無くても Agent はインストール・起動できる（起動時の `detectAndUpdateAiTools()` が後からインストールされた CLI を config に追加する）。Devin 専用マシンのオンボーディングが可能
   - 経緯: Claude Code は #112 で一度必須依存に変更されたが、Agent 本体は claude なしでも動作する（claude の spawn はセッション実行時のみ、他ツールは各自 spawn）ため #261 で任意に戻した
@@ -459,6 +461,7 @@ AI SDK/CLI モードで使うモデルを Plan/Exec 別に選択する仕組み�
 - **systemd プロキシ**: プロキシ環境では `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy` を `Environment=` で設定（大文字・小文字両方必要）
 - **macOS LaunchAgent**: plist の `EnvironmentVariables` で PATH に `~/.local/bin` を含め、プロキシも設定
 - **crontab 環境変数**: `@reboot PATH=... HTTP_PROXY=... cd ... && node ...` 形式でインライン指定
+- **`irm | iex` 配布時の `exit` 罠（#327, 2026-08-28）**: Windows インストーラーは `irm https://.../install-agent.ps1 | iex` のワンライナーで配布される。`Invoke-Expression` はスクリプト文字列を**呼び出し元のスコープ**で実行するため、スクリプト内のトップレベル `exit` は「スクリプト終了」ではなく「呼び出し元の PowerShell ホストそのものの終了（ウィンドウが閉じる）」になる。エラーメッセージを表示した直後に `exit 1` すると、ユーザーが文言を読む前にウィンドウが消える。対策は `exit` の代わりに `return` を使うこと（`iex` 経由でも `.ps1` 直接実行でも安全にスクリプトブロックだけを抜けられる。`try`/`catch` 内でも同様に動作）。あわせて `$ErrorActionPreference = "Stop"` のような対話セッション設定を変更する場合は、実行前に元の値を退避し、全終了経路（各 `return` 直前・正常終了時）で明示的に復元すること（`iex` 実行時はスクリプトのグローバル変更が呼び出し元セッションに残留してしまうため）
 
 ---
 

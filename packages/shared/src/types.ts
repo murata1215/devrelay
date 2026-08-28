@@ -116,7 +116,8 @@ export type AgentMessage =
   | { type: 'agent:plan:content'; payload: PlanContentPayload }
   | { type: 'agent:scaffold:created'; payload: ScaffoldCreatedPayload }
   | { type: 'agent:screen:analyze'; payload: ScreenAnalyzeRequestPayload }
-  | { type: 'agent:response:summarize'; payload: ResponseSummarizeRequestPayload };
+  | { type: 'agent:response:summarize'; payload: ResponseSummarizeRequestPayload }
+  | { type: 'agent:claude:auth:status'; payload: ClaudeAuthStatusPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -474,6 +475,18 @@ export interface AgentUpdateStatusPayload {
   machineId: string;
   status: 'started' | 'error';
   error?: string;
+}
+
+/**
+ * Claude ログイン切れ検知の通知（リモート再ログイン中継 Phase1）。
+ * `claude auth status` 相当のヘルスチェック結果を Agent が定期送信する。
+ * 状態が変化したときだけ送る想定（毎回送るとノイズになるため）。
+ */
+export interface ClaudeAuthStatusPayload {
+  machineId: string;
+  /** true=ログイン済み / false=切れている / undefined=判定不能（誤検知防止のため通知しない用途） */
+  ok: boolean;
+  account?: string;
 }
 
 export interface AiSwitchedPayload {

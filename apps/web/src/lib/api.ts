@@ -144,6 +144,10 @@ export interface Machine {
   // #302: 実行中コードの鮮度（stale dist 可視化用）。旧 Agent は null（判定不能）
   runningCodeMtime?: string | null;
   runningCodeStale?: boolean | null;
+  // Claude ログイン切れ検知（リモート再ログイン中継 Phase1）。旧 Agent は null（判定不能）
+  claudeAuthOk?: boolean | null;
+  claudeAuthCheckedAt?: string | null;
+  claudeAuthAccount?: string | null;
   projectCount: number;
   projects: Project[];
 }

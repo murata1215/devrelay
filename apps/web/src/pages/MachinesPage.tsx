@@ -459,6 +459,15 @@ export function MachinesPage() {
                           ⓘ ビルド状態不明（旧Agent）
                         </span>
                       ) : null}
+                      {/* Claude ログイン切れ検知バッジ（Phase1）。ok=false のときのみ赤で表示、判定不能時は非表示 */}
+                      {machine.claudeAuthOk === false ? (
+                        <span
+                          className="ml-2 text-xs text-[var(--text-danger)]"
+                          title={`🔒 Claude のログインが切れています${machine.claudeAuthAccount ? `\nアカウント: ${machine.claudeAuthAccount}` : ''}\n確認時刻: ${machine.claudeAuthCheckedAt ? new Date(machine.claudeAuthCheckedAt).toLocaleString() : '-'}`}
+                        >
+                          🔒 Claude ログイン切れ
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-[var(--text-muted)] text-sm">
                       {machine.lastSeenAt

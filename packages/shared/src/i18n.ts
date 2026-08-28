@@ -122,6 +122,17 @@ export const chatMessages = {
   'update.versionCheckTimeout': { en: 'Timed out', ja: 'タイムアウト' },
   'update.required': { en: '⚠️ This agent needs an update. Send `u` to update.', ja: '⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。' },
 
+  // --- claude auth（Claude ログイン切れ検知、リモート再ログイン中継 Phase1） ---
+  'claudeAuth.expired': {
+    en: '🔒 **{machine}**: Claude login has expired. Log in again on that machine, or send `login` (once implemented) to reconnect remotely.',
+    ja: '🔒 **{machine}**: Claude のログインが切れました。そのマシンで再ログインするか、`login` コマンド（実装後）でリモート再ログインしてください。',
+  },
+  'claudeAuth.recovered': { en: '✅ **{machine}**: Claude login recovered', ja: '✅ **{machine}**: Claude のログインが復旧しました' },
+  'claudeAuth.runtimeExpiredHint': {
+    en: '🔒 Claude login has expired on this machine. Log in again there to continue.',
+    ja: '🔒 このマシンで Claude のログインが切れています。再ログインしてから続けてください。',
+  },
+
   // --- link ---
   'link.webNotNeeded': {
     en: '✅ You are operating directly from the Web interface, so account linking is not needed.',

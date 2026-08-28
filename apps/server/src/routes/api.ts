@@ -94,6 +94,10 @@ export async function apiRoutes(app: FastifyInstance) {
       // #302: 実行中コードの鮮度（stale dist 可視化用）。旧 Agent は null（判定不能）
       runningCodeMtime: m.runningCodeMtime ?? null,
       runningCodeStale: m.runningCodeStale ?? null,
+      // Claude ログイン切れ検知（リモート再ログイン中継 Phase1）。旧 Agent は null（判定不能）
+      claudeAuthOk: m.claudeAuthOk ?? null,
+      claudeAuthCheckedAt: m.claudeAuthCheckedAt ?? null,
+      claudeAuthAccount: m.claudeAuthAccount ?? null,
       projectCount: m.projects.length,
       projects: m.projects.map((p: Project) => ({
         id: p.id,

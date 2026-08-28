@@ -24,6 +24,9 @@
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
+# `irm | iex` 実行時、この値の変更は呼び出し元の対話セッションにも残留してしまうため、
+# 元の値を退避しておき、スクリプト終了時（正常/異常問わず）に復元する。
+$PrevEAP = $ErrorActionPreference
 
 # --- ExecutionPolicy 自動設定 ---
 # Windows デフォルトの Restricted ポリシーでは npm.ps1/pnpm.ps1 等の
@@ -62,7 +65,12 @@ if (-not $Token) {
     Write-Host '  $env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex'
     Write-Host ""
     Write-Host "トークンは WebUI のエージェント作成画面で取得できます。"
-    exit 1
+    Write-Host ""
+    Write-Host "インストールを中断しました。" -ForegroundColor Red
+    # `irm | iex` 実行時、`exit` は呼び出し元の PowerShell ホストごと終了させてしまうため
+    # `return` を使う（このスクリプトブロックだけを抜ける）。$ErrorActionPreference も復元。
+    $ErrorActionPreference = $PrevEAP
+    return
 }
 
 # --- 新形式トークン（drl_）からサーバーURL自動抽出 ---
@@ -121,23 +129,77 @@ Write-Host "[1/6] 依存ツールを確認中..."
 
 $Missing = 0
 
-# Node.js チェック
+# Node.js チェック（未検出/バージョン不足なら公式バイナリを自動インストールする。
+# Linux/macOS の install-agent.sh と同じ設計。node 無し端末で「案内文を読む前に
+# ウィンドウが閉じる」問題への対処として、なるべく自動で解決を試みる）
+function Install-PortableNode {
+    $NodeDlVersion = "v20.20.0"
+    $NodeArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+    $NodeDir = Join-Path $ConfigDir "node"
+    $NodeZipUrl = "https://nodejs.org/dist/$NodeDlVersion/node-$NodeDlVersion-win-$NodeArch.zip"
+
+    if (-not (Test-Path (Join-Path $NodeDir "node.exe"))) {
+        try {
+            New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
+            $tmpZip = Join-Path $env:TEMP "devrelay-node-$NodeDlVersion-$NodeArch.zip"
+            $tmpExtract = Join-Path $env:TEMP "devrelay-node-extract-$NodeDlVersion-$NodeArch"
+            Write-Host "     ダウンロード: $NodeZipUrl"
+            Invoke-WebRequest -Uri $NodeZipUrl -OutFile $tmpZip -UseBasicParsing -ErrorAction Stop
+            if (Test-Path $tmpExtract) { Remove-Item $tmpExtract -Recurse -Force }
+            Expand-Archive -Path $tmpZip -DestinationPath $tmpExtract -Force
+            # Windows 版 zip は node-v20.20.0-win-x64\ という単一フォルダ直下に node.exe があり、
+            # tar --strip-components=1 相当の処理が必要（bin/ は存在しない）
+            $extractedRoot = Get-ChildItem -Path $tmpExtract -Directory | Select-Object -First 1
+            if ($extractedRoot) {
+                if (Test-Path $NodeDir) { Remove-Item $NodeDir -Recurse -Force }
+                Move-Item -Path $extractedRoot.FullName -Destination $NodeDir -Force
+            }
+            Remove-Item $tmpZip -Force -ErrorAction SilentlyContinue
+            Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "  X Node.js の自動インストールに失敗しました: $($_.Exception.Message)" -ForegroundColor Red
+            return $null
+        }
+    }
+
+    if (Test-Path (Join-Path $NodeDir "node.exe")) {
+        return $NodeDir
+    }
+    return $null
+}
+
+$PortableNodeDir = $null
 $NodeCmd = Get-Command node -ErrorAction SilentlyContinue
-if (-not $NodeCmd) {
-    Write-Host "  X Node.js 20 以上が必要です" -ForegroundColor Red
-    Write-Host "    インストール: winget install OpenJS.NodeJS.LTS" -ForegroundColor Yellow
-    Write-Host "    または: https://nodejs.org" -ForegroundColor Yellow
-    $Missing++
-} else {
+$NodeMajor = 0
+if ($NodeCmd) {
     $NodeVersion = (node -v) -replace '^v', ''
     $NodeMajor = [int]($NodeVersion.Split('.')[0])
-    if ($NodeMajor -lt 20) {
-        Write-Host "  X Node.js 20 以上が必要です（現在: v$NodeVersion）" -ForegroundColor Red
-        Write-Host "    アップグレード: winget install OpenJS.NodeJS.LTS" -ForegroundColor Yellow
-        $Missing++
+}
+
+if (-not $NodeCmd -or $NodeMajor -lt 20) {
+    if ($NodeCmd) {
+        Write-Host "  ! Node.js v$NodeVersion は古いバージョンです（20+ が必要）。自動インストールを試みます..." -ForegroundColor Yellow
     } else {
-        Write-Host "  OK Node.js v$NodeVersion" -ForegroundColor Green
+        Write-Host "  ! Node.js が見つかりません。自動インストールを試みます..." -ForegroundColor Yellow
     }
+    $PortableNodeDir = Install-PortableNode
+    if ($PortableNodeDir) {
+        # PATH 先頭に追加（この後の pnpm 自動インストール・ビルドでも使われる）
+        $env:Path = "$PortableNodeDir;$env:Path"
+        $NodeCmd = Get-Command node -ErrorAction SilentlyContinue
+        if ($NodeCmd) {
+            $NodeVersion = (node -v) -replace '^v', ''
+            Write-Host "  OK Node.js v$NodeVersion をインストールしました ($PortableNodeDir)" -ForegroundColor Green
+        }
+    }
+    if (-not $NodeCmd) {
+        Write-Host "  X Node.js 20 以上が必要です" -ForegroundColor Red
+        Write-Host "    インストール: winget install OpenJS.NodeJS.LTS" -ForegroundColor Yellow
+        Write-Host "    または: https://nodejs.org" -ForegroundColor Yellow
+        $Missing++
+    }
+} else {
+    Write-Host "  OK Node.js v$NodeVersion" -ForegroundColor Green
 }
 
 # git チェック
@@ -174,6 +236,13 @@ if (-not $PnpmCmd) {
             cmd /c "npm install -g pnpm" 2>$null
             # npm install -g 後は PATH が更新されているので、PowerShell 側も環境変数をリフレッシュ
             $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+            # 上記のリフレッシュはレジストリの Machine/User PATH で $env:Path を丸ごと
+            # 置き換えるため、ポータブル Node（$PortableNodeDir）を先頭に足した分が消えてしまう。
+            # 再度先頭に追加し直す（ポータブル node の npm グローバルインストール先は
+            # $PortableNodeDir 直下、または %APPDATA%\npm のケースがあるため両方追加）。
+            if ($PortableNodeDir) {
+                $env:Path = "$PortableNodeDir;$(Join-Path $env:APPDATA 'npm');$env:Path"
+            }
             $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
         } catch {}
     }
@@ -232,7 +301,9 @@ if (-not $ClaudeCmd) {
 if ($Missing -gt 0) {
     Write-Host ""
     Write-Host "上記 $Missing 件のツールをインストールしてから再実行してください。" -ForegroundColor Red
-    exit 1
+    Write-Host "インストールを中断しました。" -ForegroundColor Red
+    $ErrorActionPreference = $PrevEAP
+    return
 }
 
 Write-Host "OK 依存ツール OK" -ForegroundColor Green
@@ -261,7 +332,9 @@ if (-not $Force) {
             Write-Host ""
             Write-Host "X エラー: 無効なトークンです" -ForegroundColor Red
             Write-Host "  WebUI で正しいトークンを確認してください。"
-            exit 1
+            Write-Host "インストールを中断しました。" -ForegroundColor Red
+            $ErrorActionPreference = $PrevEAP
+            return
         }
 
         if ($ValidateResponse.valid -and -not $ValidateResponse.provisional) {
@@ -278,7 +351,10 @@ if (-not $Force) {
                 Write-Host '  強制インストールする場合は $env:DEVRELAY_FORCE="true" を設定してください。'
                 Write-Host ""
                 Write-Host '  例: $env:DEVRELAY_TOKEN="..."; $env:DEVRELAY_FORCE="true"; irm ... | iex' -ForegroundColor Green
-                exit 1
+                Write-Host ""
+                Write-Host "インストールを中断しました。" -ForegroundColor Red
+                $ErrorActionPreference = $PrevEAP
+                return
             }
         }
 
@@ -296,7 +372,10 @@ if (-not $Force) {
         }
         Write-Host ""
         Write-Host '  強制インストールする場合は $env:DEVRELAY_FORCE="true" を設定してください。'
-        exit 1
+        Write-Host ""
+        Write-Host "インストールを中断しました。" -ForegroundColor Red
+        $ErrorActionPreference = $PrevEAP
+        return
     }
 }
 Write-Host ""
@@ -656,3 +735,6 @@ $env:DEVRELAY_PROXY = $null
 $env:DEVRELAY_FORCE = $null
 $env:HTTP_PROXY = $null
 $env:HTTPS_PROXY = $null
+
+# `irm | iex` 実行時、$ErrorActionPreference の変更が対話セッションに残留しないよう復元
+$ErrorActionPreference = $PrevEAP

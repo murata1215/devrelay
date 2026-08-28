@@ -77,11 +77,16 @@ import { generateManagementInfo } from './management-info.js';
 // #291-B: コンテキスト使用率の予兆警告に使用（関数は既存・connection.ts からは未配線だった）
 import { isContextWarning, type ContextUsage } from './output-parser.js';
 import { autoDiscoverProjects, loadProjects } from './projects.js';
+// Claude ログイン切れ検知（リモート再ログイン中継 Phase1）
+import { checkClaudeAuth } from './claude-auth.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let pingTimer: NodeJS.Timeout | null = null;
 let appPingTimer: NodeJS.Timeout | null = null; // Application-level ping (agent:ping)
+let claudeAuthCheckTimer: NodeJS.Timeout | null = null;
+/** 直前に送信した Claude ログイン状態（'unknown' は未送信扱い。状態が変化したときだけ通知するため） */
+let lastReportedClaudeAuthOk: boolean | null = null;
 let pongCheckInterval: NodeJS.Timeout | null = null;
 let currentConfig: AgentConfig | null = null;
 let currentMachineId: string | null = null;
@@ -115,6 +120,9 @@ let updateStartedAt = 0;
 // Pong timeout detection
 const PONG_TIMEOUT = 45000; // 45 seconds
 let lastPongReceived = Date.now();
+
+/** Claude ログイン状態チェックの間隔（15分）。頻繁すぎると子プロセス起動コストが無視できないため長めに設定 */
+const CLAUDE_AUTH_CHECK_INTERVAL = 15 * 60 * 1000;
 
 // Application-level heartbeat interval (30 seconds)
 const APP_PING_INTERVAL = 30000;
@@ -216,6 +224,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       // Start ping (both WebSocket-level and application-level) and pong timeout check
       startPing();
       startAppPing();
+      startClaudeAuthCheck();
       lastPongReceived = Date.now();
       pongCheckInterval = setInterval(() => {
         const timeSinceLastPong = Date.now() - lastPongReceived;
@@ -254,6 +263,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       console.log('🔌 Disconnected from server');
       stopPing();
       stopAppPing();
+      stopClaudeAuthCheck();
       // pongCheckInterval をクリア（再接続時に新規作成されるため、古いものが残るとリーク）
       if (pongCheckInterval) {
         clearInterval(pongCheckInterval);
@@ -277,6 +287,8 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         if (message.payload.machineId) {
           currentMachineId = message.payload.machineId;
           console.log(`✅ Authentication successful (machineId: ${currentMachineId})`);
+          // machineId が確定した時点で初回チェックを実行（appPing と違い、ここまで待たないと常にスキップされるため）
+          checkAndReportClaudeAuth().catch((err) => console.error('[claude-auth] check failed:', err));
         } else {
           console.log('✅ Authentication successful');
         }
@@ -1475,6 +1487,45 @@ function stopAppPing() {
   }
 }
 
+/**
+ * Claude ログイン状態を確認し、状態が変化したときだけサーバーへ通知する。
+ * 'unknown'（判定不能）は誤検知防止のため送信しない。
+ */
+async function checkAndReportClaudeAuth() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !currentMachineId) return;
+  const result = await checkClaudeAuth();
+  if (result.state === 'unknown') return; // 判定不能 → 何もしない（現状維持）
+  const ok = result.state === 'ok';
+  if (lastReportedClaudeAuthOk === ok) return; // 状態が変化していない → 送信しない
+  lastReportedClaudeAuthOk = ok;
+  console.log(`🔑 Claude auth status changed: ${ok ? 'ok' : 'expired'}`);
+  sendMessage({
+    type: 'agent:claude:auth:status',
+    payload: {
+      machineId: currentMachineId,
+      ok,
+      account: result.account,
+    },
+  });
+}
+
+function startClaudeAuthCheck() {
+  // 初回チェックは server:connect:ack で machineId が確定した時点で実行される（上記参照）。
+  // ここでは以降の定期チェックのみ設定する。
+  claudeAuthCheckTimer = setInterval(() => {
+    checkAndReportClaudeAuth().catch((err) => console.error('[claude-auth] check failed:', err));
+  }, CLAUDE_AUTH_CHECK_INTERVAL);
+}
+
+function stopClaudeAuthCheck() {
+  if (claudeAuthCheckTimer) {
+    clearInterval(claudeAuthCheckTimer);
+    claudeAuthCheckTimer = null;
+  }
+  // 再接続時に前回状態を引きずらないようリセット（切断中に手動でログインし直した可能性があるため）
+  lastReportedClaudeAuthOk = null;
+}
+
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
 
@@ -1590,6 +1641,7 @@ async function handleStorageClear(payload: StorageClearPayload) {
 export function disconnect() {
   stopPing();
   stopAppPing();
+  stopClaudeAuthCheck();
   if (pongCheckInterval) {
     clearInterval(pongCheckInterval);
     pongCheckInterval = null;

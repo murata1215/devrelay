@@ -190,7 +190,7 @@ curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/in
 $env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex
 ```
 
-Node.js 20+ and git required (pnpm is auto-installed if missing). An AI CLI (Claude Code / Gemini / Codex / Aider / Devin) is **optional** — any one works and the installer no longer aborts if none is present. ExecutionPolicy is set automatically. Installs to `%APPDATA%\devrelay\agent\` with Startup folder auto-start.
+`git` required. Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `%APPDATA%\devrelay\node\`, #327). An AI CLI (Claude Code / Gemini / Codex / Aider / Devin) is **optional** — any one works and the installer no longer aborts if none is present. ExecutionPolicy is set automatically. Installs to `%APPDATA%\devrelay\agent\` with Startup folder auto-start. Since the script is delivered via `irm | iex`, all failure paths use `return` instead of `exit` — a top-level `exit` inside an `iex`-executed script would close the caller's PowerShell window before the error message could be read (#327).
 
 #### Linux Agent (Manual)
 
@@ -502,6 +502,7 @@ agents/windows/
 - [x] Agent settings modal (token re-display, install/uninstall commands)
 - [x] Installer proxy support (interactive prompt + `--proxy` / `$env:DEVRELAY_PROXY`)
 - [x] Linux installer auto-install Node.js + pnpm (direct binary download, no sudo/unzip needed)
+- [x] Windows installer auto-install Node.js (portable zip to `%APPDATA%\devrelay\node`) + replace `exit` with `return` so `irm | iex` failures no longer close the caller's PowerShell window (#327)
 - [x] `--ignore-scripts` for `pnpm install` (skip Electron postinstall in corporate networks)
 - [x] Auto-restart agent on re-install (stop existing process before starting new one)
 - [x] AI error handling improvement (catch errors, notify Discord/Telegram instead of crashing)
