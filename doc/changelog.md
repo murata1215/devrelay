@@ -6,6 +6,62 @@
 
 ## 実装済み機能
 
+### #328: Windows インストーラーがビルド失敗を握りつぶす問題を修正 (2026-08-28)
+
+#### 問題
+ユーザー報告: 「#327 修正後の同じ端末（`C-SHIRAKI.TISANET`、社内ドメイン機）で再インストールしたが、インストーラーは『インストール完了！』を表示して終わったのに Agent が online にならない」。添付の `agent.log`:
+```
+Error: Cannot find module 'C:\Users\c-shiraki.TISANET\AppData\Roaming\devrelay\agent\agents\linux\dist\index.js'
+code: 'MODULE_NOT_FOUND'
+Node.js v20.20.0
+```
+`Node.js v20.20.0` = #327 のポータブル Node 自動導入は成功している（Fix2 は無関係）。clone 先ディレクトリ・ランチャー・自動起動登録も作られている（エラーが2回 = インストール直後起動 + ログオン時起動）。しかし `agents/linux/dist/index.js` が存在せず、**Step 3（`pnpm install` + `tsc` ビルド）が黙って失敗していた**。
+
+#### 原因
+PowerShell では**ネイティブコマンド（pnpm/git/npm）が非ゼロ終了しても例外を投げない**。`$ErrorActionPreference = "Stop"` でも `try`/`catch` では捕まらない。旧 `install-agent.ps1` の Step 3 は `$LASTEXITCODE` を一切確認しておらず、成果物（`dist/index.js`）の存在確認も無かったため、**install/build がどう失敗しても「OK ビルド完了」→「インストール完了！」と表示し、壊れた Agent を自動起動に登録して起動していた**。
+
+副次の地雷: `$ErrorActionPreference="Stop"` のままネイティブコマンドの stderr をリダイレクト（`2>$null`/`2>&1`）すると、PowerShell 5.1 / 7.0-7.1 では stderr 1 行ごとに `NativeCommandError` が**終了エラー**として送出される。pnpm は進捗を stderr に出すため、旧コードの `pnpm install --frozen-lockfile --ignore-scripts 2>$null` は**成功していても catch に飛んでいた**。つまり現状うまくいっている端末は、たいてい catch 側の `pnpm install --ignore-scripts`（リダイレクト無し = 例外化しない = **失敗も完全に無音**）で入っていた。
+
+Linux/macOS 版（`install-agent.sh`）は `set -e` があるため同じ穴が無い。**Windows だけの非対称**だった。
+
+#### 修正内容
+`scripts/install-agent.ps1` のみ変更（`Invoke-LoggedCommand` ヘルパー新設 + Step 3 全面刷新）:
+- パス定数（`$AgentEntry`/`$SharedEntry`/`$BuildLog`）を先頭に集約（従来 Step 6 で初めて定義していたものを Step 3 の検証でも使うため hoist）
+- `Invoke-LoggedCommand` 関数を新設: 実行中だけ `$ErrorActionPreference="Continue"`（`finally` で復元、PS 5.1 で `2>&1` を安全に使う唯一の方法）、実行前に `$global:LASTEXITCODE = 0`（コマンド未検出時に前回値が残る穴を塞ぐ）、`$LASTEXITCODE` をパイプライン直後に取得、`New-Object System.IO.StreamWriter` でビルドログ（`%APPDATA%\devrelay\logs\install-build.log`）にリアルタイム記録（`Tee-Object -Append` は PS 6.0+ のため不使用）、ANSI 除去は `[char]27`（`` `e `` は PS 7.0+ のため不使用）
+- `git pull`/`git clone` を検査付きに（pull 失敗は非 fatal で警告のみ、clone 失敗 or `package.json` 不在は中断）
+- `pnpm install` を 3 段フォールバック + 検査付きに: tier1 `--frozen-lockfile --ignore-scripts` → tier2 `--ignore-scripts`（lockfile ズレ対策）→ tier3 `--ignore-scripts --filter "@devrelay/agent..."`（Electron/Prisma/Vite を丸ごと外し社内ネットワークでの失敗率を下げる、`@devrelay/agent` の workspace 依存は `@devrelay/shared` のみと事前確認済み）。3段すべて失敗で中断（ログ末尾30行 + プロキシ案内 + 手動切り分けコマンドを表示）
+- `pnpm rebuild`（PTY prebuilt）も検査付きに（非 fatal のまま、失敗理由をログに残すのみ）
+- ビルド2本（shared/agent）を検査 + **成果物ゲート**を追加（★本丸）: 終了コード**と** `Test-Path` の両方を確認し、どちらか失敗したら Step 4〜6（config.yaml 生成・ラッパー作成・自動起動登録・Agent 起動）に進まず中断。**これにより「壊れた Agent を Startup に登録して起動する」挙動が構造的に不可能になる**
+- 重複定義の解消（`$AgentEntry` の二重定義を削除、単一情報源化）
+
+#### 検証
+- Python での波括弧・丸括弧バランス確認（0 diff）
+- `grep -nE '^\s*exit( |$)'` = 0 件（#327 の不変条件を維持）
+- `$PrevEAP` 復元箇所 = 8 箇所（既存5 + 新規3）、全終了経路で復元されることを確認
+- `Push-Location`/`Pop-Location` = 2/3（Edit 5 の install 失敗中断経路が排他的に1つ増える設計どおり）
+- PS7 専用構文（`||`/`&&`/`??`/`` `e ``/`Tee-Object -Append`/`::new(`）の混入チェック = 新規混入 0 件（既存の説明コメントと表示用文字列内の1件は事前から存在し実行コードではない）
+- `pwsh` が本機に無いため PowerShell パーサでの構文チェックは未実施（grep + 目視 + 波括弧カウントで代替）
+- 実機確認（PS 5.1 構文パース、正常系リグレッション、強制失敗時の3段フォールバック+赤字停止+ウィンドウ非クラッシュ、成果物ゲート単体、`C-SHIRAKI.TISANET` での実際の復旧）は未実施
+
+#### 変更ファイル
+- `scripts/install-agent.ps1`
+
+#### 注記
+`install-agent.ps1` は `raw.githubusercontent.com/.../main/` から配信されるため commit + push しない限り実機に反映されない。`pnpm build` 不要・server 再起動不要・各マシンの `u` 不要（Agent 実行時コードではないため）。
+
+**当該端末の即時復旧手順（コード変更と独立、ユーザー手動実行可）**:
+```powershell
+$env:Path = "$env:APPDATA\devrelay\node;$env:APPDATA\npm;$env:Path"
+cd "$env:APPDATA\devrelay\agent"
+pnpm install --ignore-scripts
+pnpm --filter "@devrelay/shared" build
+pnpm --filter "@devrelay/agent" build
+Test-Path "$env:APPDATA\devrelay\agent\agents\linux\dist\index.js"
+wscript.exe "$env:APPDATA\devrelay\bin\start-agent.vbs"
+```
+
+---
+
 ### #327: Windows インストーラーが node 無し端末で PowerShell ごと落ちる問題を修正 (2026-08-28)
 
 #### 問題

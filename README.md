@@ -503,6 +503,7 @@ agents/windows/
 - [x] Installer proxy support (interactive prompt + `--proxy` / `$env:DEVRELAY_PROXY`)
 - [x] Linux installer auto-install Node.js + pnpm (direct binary download, no sudo/unzip needed)
 - [x] Windows installer auto-install Node.js (portable zip to `%APPDATA%\devrelay\node`) + replace `exit` with `return` so `irm | iex` failures no longer close the caller's PowerShell window (#327)
+- [x] Windows installer build-failure gate: PowerShell native commands (pnpm/git) don't throw on non-zero exit, so the installer used to silently register autostart for an Agent whose build had actually failed (`MODULE_NOT_FOUND`). Now every install/build step checks `$LASTEXITCODE` via a logged wrapper (`%APPDATA%\devrelay\logs\install-build.log`), `pnpm install` falls back through 3 tiers (frozen lockfile → unfrozen → filtered to `@devrelay/agent...` only, dropping Electron/Prisma/Vite), and a final artifact gate (`Test-Path` on `dist/index.js`) blocks autostart registration entirely on any failure (#328)
 - [x] `--ignore-scripts` for `pnpm install` (skip Electron postinstall in corporate networks)
 - [x] Auto-restart agent on re-install (stop existing process before starting new one)
 - [x] AI error handling improvement (catch errors, notify Discord/Telegram instead of crashing)

@@ -50,6 +50,12 @@ $ConfigFile = Join-Path $ConfigDir "config.yaml"
 $LogDir = Join-Path $ConfigDir "logs"
 $BinDir = Join-Path $ConfigDir "bin"
 $TaskName = "DevRelay Agent"
+# ビルド成果物のパス。Step 3 の成果物検証（#328）と Step 6 のランチャー生成の両方で使うため
+# 先頭で定義する（従来は Step 6 で初めて定義していた）。
+$AgentEntry = Join-Path $AgentDir "agents\linux\dist\index.js"
+$SharedEntry = Join-Path $AgentDir "packages\shared\dist\index.js"
+# インストール時のビルドログ（#328: install/build が失敗しても握りつぶさず、後から原因を追えるようにする）
+$BuildLog = Join-Path $LogDir "install-build.log"
 
 # --- トークン・プロキシ取得 ---
 $Token = $env:DEVRELAY_TOKEN
@@ -381,6 +387,75 @@ if (-not $Force) {
 Write-Host ""
 
 # =============================================================================
+# ネイティブコマンド実行ヘルパー（#328）
+# =============================================================================
+# PowerShell 固有の落とし穴 2 つに同時に対処する:
+#  (1) ネイティブコマンド（pnpm/git/npm）は非ゼロ終了しても例外を投げない。
+#      $ErrorActionPreference="Stop" でも try/catch では絶対に捕まらないため、
+#      $LASTEXITCODE を戻り値として返し、呼び出し側で必ず判定する。
+#  (2) $ErrorActionPreference="Stop" のままネイティブコマンドの stderr を
+#      リダイレクト（2>&1 / 2>$null）すると、stderr 1 行ごとに NativeCommandError が
+#      「終了エラー」として送出される（Windows PowerShell 5.1 / PowerShell 7.0-7.1）。
+#      pnpm は進捗を stderr に出すため、成功していても catch に飛んでしまう。
+#      実行中だけ Continue に落とし、finally で必ず元に戻す。
+function Invoke-LoggedCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][scriptblock]$Command,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    # `e は PowerShell 7 専用のエスケープなので 5.1 互換のため [char]27 を使う
+    $esc = [char]27
+    $prevEap = $ErrorActionPreference
+    $writer = $null
+    $code = 0
+
+    try {
+        # 1 コマンドにつきハンドル 1 本。AutoFlush でハング時も途中まで残る
+        $writer = New-Object System.IO.StreamWriter($LogFile, $true)
+        $writer.AutoFlush = $true
+        $writer.WriteLine("")
+        $writer.WriteLine("===== [$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Label =====")
+    } catch {
+        # ログが開けなくてもインストール自体は続行する
+        $writer = $null
+    }
+
+    $ErrorActionPreference = "Continue"
+    # コマンドが見つからない場合 $LASTEXITCODE は更新されず前回値が残るためリセット
+    $global:LASTEXITCODE = 0
+    try {
+        & $Command 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $line = $_.ToString()
+            } else {
+                $line = [string]$_
+            }
+            $line = $line -replace "$esc\[[0-9;?]*[A-Za-z]", ""
+            Write-Host "    $line"
+            if ($writer) { $writer.WriteLine($line) }
+        }
+        # $LASTEXITCODE はパイプラインを通しても cmdlet に上書きされない
+        $code = $LASTEXITCODE
+    } catch {
+        $line = "EXCEPTION: $($_.Exception.Message)"
+        Write-Host "    $line" -ForegroundColor Yellow
+        if ($writer) { $writer.WriteLine($line) }
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+
+    if ($null -eq $code) { $code = 0 }
+    if ($writer) {
+        $writer.WriteLine("----- exit code: $code -----")
+        $writer.Close()
+    }
+    return $code
+}
+
+# =============================================================================
 # Step 2: リポジトリ取得
 # =============================================================================
 Write-Host "[2/6] リポジトリを取得中..."
@@ -390,20 +465,46 @@ New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
+# ビルドログを毎回作り直す（前回実行のログと混ざらないように、#328）
+$BuildLogHeader = @(
+    "DevRelay Agent install build log",
+    "date      : $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))",
+    "machine   : $env:COMPUTERNAME/$env:USERNAME",
+    "agentDir  : $AgentDir",
+    "node      : $(if ($NodeCmd) { (node -v) } else { 'n/a' })",
+    "pnpm      : $PnpmVersion",
+    "proxy     : $(if ($ProxyUrl) { $ProxyUrl } else { '(none)' })",
+    "psVersion : $($PSVersionTable.PSVersion)"
+)
+Set-Content -LiteralPath $BuildLog -Value $BuildLogHeader -Encoding UTF8
+
 if (Test-Path (Join-Path $AgentDir ".git")) {
-    # 既存なら最新に更新
+    # 既存なら最新に更新（失敗しても致命的ではないので警告のみ）
     Write-Host "  既存のリポジトリを更新中..."
     Push-Location $AgentDir
-    try {
-        git pull --quiet 2>$null
-    } catch {
-        Write-Host "  WARNING: git pull に失敗。既存のコードで続行します" -ForegroundColor Yellow
-    }
+    $PullCode = Invoke-LoggedCommand -Label "git pull" -Command { git pull --quiet } -LogFile $BuildLog
     Pop-Location
+    if ($PullCode -ne 0) {
+        Write-Host "  WARNING: git pull に失敗しました (exit $PullCode)。既存のコードで続行します" -ForegroundColor Yellow
+    }
 } else {
     # 新規 clone
     Write-Host "  クローン中... (初回は時間がかかります)"
-    git clone --quiet --depth 1 $RepoUrl $AgentDir
+    $CloneCode = Invoke-LoggedCommand -Label "git clone" -Command { git clone --quiet --depth 1 $RepoUrl $AgentDir } -LogFile $BuildLog
+    if (($CloneCode -ne 0) -or (-not (Test-Path (Join-Path $AgentDir "package.json")))) {
+        Write-Host ""
+        Write-Host "X エラー: リポジトリの取得に失敗しました (git clone exit $CloneCode)" -ForegroundColor Red
+        Write-Host "  URL:      $RepoUrl" -ForegroundColor Yellow
+        Write-Host "  ログ:     $BuildLog" -ForegroundColor Yellow
+        if ($ProxyUrl) {
+            Write-Host "  プロキシ: $ProxyUrl （URL が正しいか確認してください）" -ForegroundColor Yellow
+        } else {
+            Write-Host '  プロキシ環境の場合は $env:DEVRELAY_PROXY="http://proxy:8080" を指定して再実行してください。' -ForegroundColor Yellow
+        }
+        Write-Host "インストールを中断しました。" -ForegroundColor Red
+        $ErrorActionPreference = $PrevEAP
+        return
+    }
 }
 
 Write-Host "OK リポジトリ取得完了" -ForegroundColor Green
@@ -414,15 +515,57 @@ Write-Host ""
 # =============================================================================
 Write-Host "[3/6] ビルド中..."
 
+Write-Host "  ビルドログ: $BuildLog" -ForegroundColor DarkGray
 Push-Location $AgentDir
 
 Write-Host "  依存関係をインストール中..."
 # --ignore-scripts: Electron 等の postinstall をスキップ（CLI Agent には不要）
 # 企業ネットワークで Electron バイナリ取得が ECONNRESET で失敗する問題を回避
-try {
-    pnpm install --frozen-lockfile --ignore-scripts 2>$null
-} catch {
-    pnpm install --ignore-scripts
+# 3 段階フォールバック（#328、前段が非ゼロ終了したときだけ次に進む）:
+#   1. lockfile 固定 + モノレポ全体（従来の第一候補・成功すればここで終わる）
+#   2. lockfile 固定なし + モノレポ全体（lockfile ズレ対策。従来 catch で走っていた方）
+#   3. Agent に必要なワークスペースだけに絞る（Electron/Prisma/Vite を丸ごと外し、
+#      企業ネットワークでのパッケージ取得失敗の母数を減らす最後の砦）
+$InstallOk = $false
+$InstallTiers = @(
+    @{ Label = "pnpm install --frozen-lockfile --ignore-scripts";
+       Command = { pnpm install --frozen-lockfile --ignore-scripts } },
+    @{ Label = "pnpm install --ignore-scripts";
+       Command = { pnpm install --ignore-scripts } },
+    @{ Label = "pnpm install --ignore-scripts --filter @devrelay/agent...";
+       Command = { pnpm install --ignore-scripts --filter "@devrelay/agent..." } }
+)
+foreach ($tier in $InstallTiers) {
+    Write-Host "  > $($tier.Label)" -ForegroundColor DarkGray
+    $InstallCode = Invoke-LoggedCommand -Label $tier.Label -Command $tier.Command -LogFile $BuildLog
+    if ($InstallCode -eq 0) { $InstallOk = $true; break }
+    Write-Host "  ! 失敗 (exit $InstallCode) — 次の方法を試します" -ForegroundColor Yellow
+}
+
+if (-not $InstallOk) {
+    Pop-Location
+    Write-Host ""
+    Write-Host "X エラー: 依存関係のインストールに失敗しました" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  ログ末尾 (最新 30 行):" -ForegroundColor Yellow
+    Get-Content -LiteralPath $BuildLog -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    Write-Host ""
+    Write-Host "  全文ログ: $BuildLog" -ForegroundColor Yellow
+    if ($ProxyUrl) {
+        Write-Host "  プロキシ: $ProxyUrl （URL が正しいか確認してください）" -ForegroundColor Yellow
+    } else {
+        Write-Host '  プロキシ環境の場合は $env:DEVRELAY_PROXY="http://proxy:8080" を指定して再実行してください。' -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "  手動で切り分ける場合:" -ForegroundColor Yellow
+    Write-Host "    cd `"$AgentDir`"" -ForegroundColor Green
+    Write-Host "    pnpm install --ignore-scripts" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  ※ 自動起動の登録と Agent の起動は行っていません。" -ForegroundColor Yellow
+    Write-Host "     解消後にワンライナーをもう一度実行してください。" -ForegroundColor Yellow
+    Write-Host "インストールを中断しました。" -ForegroundColor Red
+    $ErrorActionPreference = $PrevEAP
+    return
 }
 
 # 端末インタフェースモード用に PTY プリビルドを取得
@@ -430,10 +573,10 @@ try {
 # 失敗しても fatal にしない（端末モードのみ無効化、他機能は動作継続）
 Write-Host "  PTY prebuilt binary を取得中..."
 # 引数は引用符で囲む: PowerShell の `@homebridge` を splat operator として誤解釈されないように
-try {
-    pnpm rebuild "@homebridge/node-pty-prebuilt-multiarch" 2>$null
-} catch {
-    Write-Host "  ⚠️ pnpm rebuild failed (continuing)" -ForegroundColor Yellow
+$RebuildCode = Invoke-LoggedCommand -Label "pnpm rebuild @homebridge/node-pty-prebuilt-multiarch" `
+    -Command { pnpm rebuild "@homebridge/node-pty-prebuilt-multiarch" } -LogFile $BuildLog
+if ($RebuildCode -ne 0) {
+    Write-Host "  WARNING: pnpm rebuild に失敗しました (exit $RebuildCode) — 端末モードのみ無効、続行します" -ForegroundColor Yellow
 }
 
 # pnpm rebuild が Windows で conpty.node を配置しない既知問題のフォールバック
@@ -466,12 +609,47 @@ foreach ($d in $ptyDirs) {
 }
 
 Write-Host "  shared パッケージをビルド中..."
-pnpm --filter @devrelay/shared build
+$SharedBuildCode = Invoke-LoggedCommand -Label "pnpm --filter @devrelay/shared build" `
+    -Command { pnpm --filter "@devrelay/shared" build } -LogFile $BuildLog
 
 Write-Host "  Agent をビルド中..."
-pnpm --filter @devrelay/agent build
+$AgentBuildCode = Invoke-LoggedCommand -Label "pnpm --filter @devrelay/agent build" `
+    -Command { pnpm --filter "@devrelay/agent" build } -LogFile $BuildLog
 
 Pop-Location
+
+# --- ビルド成果物の検証（#328）---
+# 終了コードだけでは拾えないケース（tsc が 0 を返したのに出力が無い、途中で
+# プロセスが強制終了された等）に備えて実ファイルの存在を必ず確認する。
+# ここを通過して初めて config.yaml 生成・自動起動登録・Agent 起動へ進む。
+$SharedExists = Test-Path $SharedEntry
+$AgentExists = Test-Path $AgentEntry
+if (($SharedBuildCode -ne 0) -or ($AgentBuildCode -ne 0) -or (-not $SharedExists) -or (-not $AgentExists)) {
+    Write-Host ""
+    Write-Host "X エラー: ビルドに失敗しました（Agent の実行ファイルが生成されていません）" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  shared build 終了コード: $SharedBuildCode  (dist 存在: $SharedExists)" -ForegroundColor Yellow
+    Write-Host "  agent  build 終了コード: $AgentBuildCode  (dist 存在: $AgentExists)" -ForegroundColor Yellow
+    Write-Host "  期待するファイル: $AgentEntry" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  ログ末尾 (最新 30 行):" -ForegroundColor Yellow
+    Get-Content -LiteralPath $BuildLog -Tail 30 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    Write-Host ""
+    Write-Host "  全文ログ: $BuildLog" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  手動で切り分ける場合:" -ForegroundColor Yellow
+    Write-Host "    cd `"$AgentDir`"" -ForegroundColor Green
+    Write-Host "    pnpm install --ignore-scripts" -ForegroundColor Green
+    Write-Host "    pnpm --filter @devrelay/shared build" -ForegroundColor Green
+    Write-Host "    pnpm --filter @devrelay/agent build" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  ※ 自動起動の登録と Agent の起動は行っていません（起動しても即座に" -ForegroundColor Yellow
+    Write-Host "     MODULE_NOT_FOUND で落ちるだけのため）。" -ForegroundColor Yellow
+    Write-Host "     解消後にワンライナーをもう一度実行してください。" -ForegroundColor Yellow
+    Write-Host "インストールを中断しました。" -ForegroundColor Red
+    $ErrorActionPreference = $PrevEAP
+    return
+}
 
 Write-Host "OK ビルド完了" -ForegroundColor Green
 Write-Host ""
@@ -590,7 +768,7 @@ Write-Host ""
 # =============================================================================
 Write-Host "[6/6] Agent を起動中..."
 
-$AgentEntry = Join-Path $AgentDir "agents\linux\dist\index.js"
+# $AgentEntry はファイル先頭の定数ブロックで定義済み（Step 3 の成果物検証と共用、#328）
 $NodePath = (Get-Command node).Source
 $LogFile = Join-Path $LogDir "agent.log"
 
@@ -655,7 +833,7 @@ if (Test-Path $PidFile) {
 # PID ファイルで停止できなかった場合、WMI で検索（5秒タイムアウト付き）
 if (-not $KilledByPid) {
     try {
-        $AgentScript = Join-Path $AgentDir "agents\linux\dist\index.js"
+        $AgentScript = $AgentEntry
         $job = Start-Job -ScriptBlock {
             param($scriptPath)
             Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction Stop |
