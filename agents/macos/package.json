@@ -16,7 +16,8 @@
     "clean": "rm -rf dist",
     "setup": "node dist/cli/index.js setup",
     "status": "node dist/cli/index.js status",
-    "uninstall": "node dist/cli/index.js uninstall"
+    "uninstall": "node dist/cli/index.js uninstall",
+    "test": "node --test tests/"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.80",

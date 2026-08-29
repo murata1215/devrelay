@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import type { AiTool, AiUsageData, ScreenAnalysis, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
@@ -888,21 +888,29 @@ async function sendPromptToAiSdk(
 
         // #332: strictReadonly の場合、PLAN_READONLY_TOOLS または allowedTools（Bash パターン）に
         // マッチしないツールは聞かずに deny する（allowlist 外は allow ではなく deny 側に倒す設計）。
-        // 判定ロジックは plan-permission.ts の decidePlanPermission に集約（node --test で検証済み）
+        // 判定ロジックは plan-permission.ts の decidePlanPermission に集約（node --test で検証済み）。
+        // #333: defaultAllowedTools（対象 OS の DEFAULT_ALLOWED_TOOLS_LINUX）を渡し、ユーザーカスタム
+        // allowedTools との和集合で判定する（カスタム保存があると default 追加が効かない問題への対策。
+        // 人間承認時の追記で明示された方針。strictReadonly のこの判定にのみ適用し、options.allowedTools
+        // 自体は書き換えないため interactive/exec の allowedTools 解決には影響しない）。
         const decision = decidePlanPermission({
           toolName,
           input,
           strictReadonly: !!options.strictReadonly,
           allowedTools: options.allowedTools,
+          defaultAllowedTools: DEFAULT_ALLOWED_TOOLS_LINUX,
           readonlyTools: PLAN_READONLY_TOOLS,
+          readonlyBashCommands: PLAN_READONLY_BASH_COMMANDS,
+          writeBashCommands: PLAN_WRITE_BASH_COMMANDS,
+          writeTools: PLAN_WRITE_TOOLS,
           skipPermissions: !!getServerSkipPermissions(),
         });
         if (decision.behavior === 'deny') {
-          console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode): ${toolName}`);
+          console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode): ${toolName} [${decision.reason}]`);
           options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
           return {
             behavior: 'deny',
-            message: 'プランモードでは使用できません。必要な操作は承認後のexecで行ってください。',
+            message: `プランモードでは使用できません（理由: ${decision.detail ?? decision.reason}）。必要な操作は承認後のexecで行ってください。`,
           };
         }
 

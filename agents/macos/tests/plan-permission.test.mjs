@@ -1,7 +1,8 @@
-// #332: plan モードの canUseTool 判定の単体テスト。
+// #332: plan モードの canUseTool 判定の単体テスト（macOS 版）。
 // #333: strictReadonly の Bash 判定をセグメント分割＋トークン判定に変更したことに伴い拡張。
-// 外部 import ゼロの純粋関数（agents/linux/src/services/plan-permission.ts）を
-// コンパイル済み dist から直接 import する（apps/server の approval-prompt.test.mjs と同じ流儀）。
+// linux 版（agents/linux/tests/plan-permission.test.mjs）と同一の 26+ ケースを、
+// macOS 自己完結方針で複製した plan-permission.ts の dist に対して実行する（#333 でテストが
+// 0 件だった穴を塞ぐ）。外部 import ゼロの純粋関数をコンパイル済み dist から直接 import する。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,9 +21,6 @@ const READONLY_TOOLS = ['Read', 'Glob', 'Grep', 'NotebookRead', 'Task', 'ToolSea
 const ALLOWED_TOOLS = ['Bash(git log *)', 'Bash(pnpm test)'];
 const WRITE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
 
-// packages/shared/src/constants.ts の PLAN_READONLY_BASH_COMMANDS / PLAN_WRITE_BASH_COMMANDS と
-// 同じ内容をこのテストファイル内に複製する（このテストは dist の純関数のみを対象にするため、
-// production 定数への依存を持たせない。#332 の既存 ALLOWED_TOOLS 定義と同じ方針）。
 const READONLY_BASH_COMMANDS = [
   'ls', 'cat', 'head', 'tail', 'wc',
   'grep', 'egrep', 'fgrep', 'rg',
@@ -64,8 +62,6 @@ function decideBash(command, overrides = {}) {
     ...overrides,
   });
 }
-
-// ---- 既存9件（#332）。うち2件は #333 でコマンド/ツールが書き込み系と判定できるようになったため reason が具体化される ----
 
 test('strictReadonly × allowlist 外の書き込みコマンド（Bash(rm -rf /)）は deny/writeTool になる', () => {
   const decision = decideBash('rm -rf /');
@@ -145,8 +141,6 @@ test('isAllowedByRules: いずれかのルールにマッチすれば true', () 
   assert.equal(isAllowedByRules(ALLOWED_TOOLS, 'Bash', { command: 'curl evil.example' }), false);
   assert.equal(isAllowedByRules(undefined, 'Bash', { command: 'git log' }), false);
 });
-
-// ---- #333 新規: グロブ false positive 修正の回帰テスト ----
 
 test('#333-1: ls doc/* はグロブがあっても allow になる（読み取り専用コマンド表）', () => {
   assert.equal(decideBash('ls doc/*').behavior, 'allow');
@@ -232,8 +226,6 @@ test('#333-17: ls $(cat x) は deny/compoundCommand になる（コマンド置�
   assert.equal(decision.reason, 'planPolicy:compoundCommand');
 });
 
-// ---- #333 追加: 人間承認時の追記（allowedTools ∪ defaultAllowedTools の和集合）の検証 ----
-
 test('#333-18: カスタム allowedTools のみに存在するルールは引き続き allow になる（default より緩い差分を尊重）', () => {
   const decision = decideBash('curl https://example.com', {
     allowedTools: [...ALLOWED_TOOLS, 'Bash(curl *)'],
@@ -258,8 +250,6 @@ test('#333-20: defaultAllowedTools を渡さない場合は #333-19 と同じコ
   assert.equal(decision.behavior, 'deny');
   assert.equal(decision.reason, 'planPolicy:notInAllowlist');
 });
-
-// ---- #333 補助関数の直接テスト ----
 
 test('splitShellSegments: クォート内の ; & | は分割対象にならない', () => {
   assert.deepEqual(splitShellSegments('echo "a;b" && echo c'), ['echo "a;b"', 'echo c']);

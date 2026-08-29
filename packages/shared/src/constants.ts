@@ -224,6 +224,58 @@ export const PLAN_READONLY_TOOLS: string[] = [
   'WebSearch',
 ];
 
+/**
+ * #333: strictReadonly の Bash 判定で「先頭コマンド名が単体で読み取り専用と確定できる」もの。
+ * ここに載っていれば引数にグロブ（* ? []）や複数パスが含まれていても deny 理由にしない
+ * （#333 の根本原因: 従来はコマンド文字列全体の前方一致だったため `ls doc/*` のような
+ * グロブ付き読み取りコマンドが allowedTools のプレフィックスと一致せず deny されていた）。
+ * サブコマンドで書き込みになり得るもの（git/pm2/docker/npm 等）はここに含めず、
+ * 個別の allowedTools ルール（Bash(git log *) 等）側で判定する。
+ * `env` は `env rm file` のように別コマンドの前段として書き込みを隠せるため意図的に含めない。
+ * `sed`/`awk`/`xargs`/`echo`/`printf` も書き込み手段になり得るため含めない。
+ */
+export const PLAN_READONLY_BASH_COMMANDS: string[] = [
+  'ls', 'cat', 'head', 'tail', 'wc',
+  'grep', 'egrep', 'fgrep', 'rg',
+  'find', 'locate', 'which', 'file', 'stat',
+  'sort', 'uniq', 'cut', 'tr', 'nl', 'column', 'diff', 'jq',
+  'basename', 'dirname', 'realpath', 'readlink', 'pwd', 'cd',
+  'date', 'whoami', 'id', 'hostname', 'uname', 'printenv',
+  'df', 'du', 'free', 'uptime', 'ps', 'pgrep', 'lsof', 'ss', 'netstat',
+  // Windows CLI Agent（agents/linux で実行）向け
+  'dir', 'type', 'where',
+];
+
+/**
+ * #333: strictReadonly の Bash 判定で単体・先頭一致した時点で常に write（書き込み系）とみなすコマンド。
+ * 単語 1 語のもの（例: 'rm'）は argv0 一致、"cmd sub" 形式（例: 'git commit'）は
+ * git のグローバルフラグ（-C 等）を読み飛ばした先頭 2 トークン一致で判定する
+ * （decideBashCommand/isWriteBashCommand を参照）。
+ */
+export const PLAN_WRITE_BASH_COMMANDS: string[] = [
+  'rm', 'mv', 'cp', 'touch', 'mkdir', 'rmdir', 'chmod', 'chown', 'chgrp',
+  'ln', 'dd', 'truncate', 'tee', 'install', 'kill', 'pkill',
+  'git add', 'git commit', 'git push', 'git checkout', 'git reset',
+  'git rm', 'git mv', 'git clean', 'git merge', 'git rebase',
+  'git cherry-pick', 'git stash',
+  'pm2 restart', 'pm2 stop', 'pm2 delete', 'pm2 kill',
+  'systemctl start', 'systemctl stop', 'systemctl restart',
+  'systemctl enable', 'systemctl disable', 'systemctl mask',
+  'docker run', 'docker rm', 'docker exec', 'docker stop', 'docker kill',
+  'docker rmi', 'docker build',
+  'npm install', 'npm i', 'npm build', 'npm add', 'npm uninstall',
+  'npm remove', 'npm ci', 'npm update', 'npm publish',
+  'pnpm install', 'pnpm add', 'pnpm build', 'pnpm remove',
+  'pnpm update', 'pnpm publish',
+  'yarn install', 'yarn add', 'yarn build', 'yarn remove', 'yarn upgrade',
+];
+
+/**
+ * #333: strictReadonly で Bash 以外に常に deny（writeTool 理由）とみなすツール名。
+ * PLAN_READONLY_TOOLS には含まれないファイル書き込み系ツール一覧。
+ */
+export const PLAN_WRITE_TOOLS: string[] = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
+
 // プランモード中に許可する読み取り専用 Bash コマンドのデフォルトリスト（Windows 用）
 // 注意: `Bash(cmd)` は完全一致（引数なし）、`Bash(cmd *)` はプレフィックスマッチ（引数付き）
 // 引数なしでも使うコマンドには両方必要
