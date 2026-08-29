@@ -1437,3 +1437,40 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   （`token-usage-warning.ts`・純関数 `evaluateTokenBloat`）と `DEVRELAY_TOKEN_WARN_*` env は削除済み。
   再導入する場合は git 履歴から `token-usage-warning.ts` を復元し、`agent-manager.ts` の
   `handleAiOutput`（isComplete 時）に呼び出しを 2 行戻すだけで元に戻せる
+
+### MCP plan の skipPermissions 強制ON解消 (#332)
+
+- **`forceNewSession` は resume 抑止のみを意味する**。権限（ツール自動承認の可否）は別フィールド
+  `permissionPolicy`（`'interactive'` | `'strictReadonly'` | `'skip'`、enum不使用・String + JSDoc）で決める。
+  #246 で「MCP submit はチャット参加者がいないので聞くな」という意図が「何でも許可しろ」に癒着し、
+  `forceNewSession=true` → `skipPermissions=true` の連鎖ができていたのが根本原因（1 つのフラグに
+  複数の意味を持たせると、後から見て意図が分からなくなり、想定外の副作用が生まれる典型例）
+- **plan モードの実効的な抑止は `canUseTool` で行う。SDK の `permissionMode:'plan'` は write を止めない**。
+  `sdk.d.ts` 上は "Planning mode, no execution of tools" と書かれるが、`allowedTools` は
+  「auto-allowed without prompting」という許可ルールに過ぎず制限ではない（"To restrict which tools are
+  available, use the `tools` option instead" と明記）。cli.js を機械的に走査しても `mode==="plan"` が
+  `behavior:"deny"`/`"ask"` と同一分岐に現れる箇所は 0 件で、write 系の権限判定は plan 用の特別分岐を
+  持たず通常どおり `canUseTool` の `"ask"` に落ちる。つまり **plan モードの実際の抑止は、SDK が生成する
+  「書き込みしないでください」というプロンプト文への"お願い"のみ**であり、`canUseTool` 側で明示的に
+  deny しない限りモデルは書き込みツールを呼べてしまう。`#303`（ExitPlanMode 自己解除）と同種の、
+  「プロンプトで抑止しているつもりが実は callback 側の穴だった」パターン
+- **strictReadonly の判定は allowlist 方式（deny-by-default）**: `PLAN_READONLY_TOOLS`（非 Bash の読み取り系、
+  `packages/shared/src/constants.ts`）または `allowedTools`（Bash パターン、`Bash(cmd)`/`Bash(cmd *)`）に
+  一致しないツールは、`skipPermissions` の値に関係なく聞かずに deny する。読み取り専用か判断に迷うツール
+  （`Task`/`ToolSearch`/`TaskOutput`/`TaskStop`/`TodoWrite`/`WebFetch`/`WebSearch` 等）は deny ではなく
+  **allow 側に倒す**方針（人間の承認判断）。判定の純関数（`matchesToolRule`/`isAllowedByRules`/
+  `decidePlanPermission`）は `agents/linux/src/services/plan-permission.ts` に集約し、`ai-runner.ts` の
+  重複実装を排除。**macOS は同一ロジックを別ファイルにローカルコピーで維持**（Agent の OS 別自己完結
+  方針により、linux から import しない）
+- **exec モードの権限挙動は一切変更しない**（人間が承認済みでフル権限が仕様）。修正時は
+  `git diff` で exec モード `canUseTool` ブロックの diff が 0 行であることを毎回確認すること
+- **サーバー側の permissionPolicy 組み立ては 1 箇所に集約**: `apps/server/src/services/permission-policy.ts`
+  の `resolvePermissionPolicy(source)`（`'mcp'|'chat'|'exec'`）を `mcp/tools.ts`・`command-handler.ts`・
+  `agent-manager.ts` の3箇所が呼ぶ。リテラル文字列を各呼び出し箇所に直書きすると将来の食い違いの元になる
+  （#86→#90, #293→#304, #305→#306 と同種の分散同期漏れパターンの再発防止）
+- **旧 Agent との互換性は fail-open**: `permissionPolicy` 未対応の旧 Agent は無視して従来どおり
+  （`forceNewSession` ベースの skipPermissions 強制ON）動作する。fail-closed にするとサーバー更新直後に
+  MCP plan が全滅するため、互換優先とした。**全マシンの `u` が完了するまでは MCP plan の実効的な
+  読み取り専用強制は機体ごとにバラつく**ことを運用上認識しておくこと
+- **Windows（Electron GUI）Agent は対象外**: CLI 引数方式で SDK の `canUseTool` を使わないため、
+  そもそも本問題の影響を受けない（`u` も不要）

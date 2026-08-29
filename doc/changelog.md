@@ -6,6 +6,71 @@
 
 ## 実装済み機能
 
+### #332: MCP 経由 plan モードの skipPermissions 強制ON解消 — forceNewSession と権限ポリシーの分離 (2026-08-29)
+
+#### 背景
+前サイクルの read-only 調査で、MCP 経由の instruction が plan モードでも全ツール自動承認になる連鎖を確認：
+`apps/server/src/mcp/tools.ts` の `submit_instruction` が常に `forceNewSession=true` を送り、Agent 側
+`connection.ts` がこれを見て `skipPermissions: true` を強制していた（#246 導入、「聞くな」の意図が
+「何でも許可しろ」に癒着していた）。加えて調査で、SDK の `permissionMode:'plan'` 自体は Write/Edit を
+独立に止めず、実際の抑止は Agent 側 `canUseTool` のプロンプト依存フォールスルー任せだったことも判明
+（`#303` のexec未送信事故はこの構造の顕在化と説明できる）。
+
+#### 設計
+`forceNewSession` は「resume しない」の意味だけに戻し、権限は新フィールド `permissionPolicy`
+（`'interactive'` | `'strictReadonly'` | `'skip'`、enum不使用・String + JSDoc）で決定する。
+- `'interactive'`: `Machine.skipPermissions` に従う（従来挙動、チャット/exec 経路）
+- `'strictReadonly'`: plan モードで allowlist 外のツールを聞かずに deny（MCP `submit_instruction` 経路）
+- `'skip'`: 全許可（将来用、今回どこからも送らない）
+
+#### 修正内容
+- `packages/shared/src/types.ts`: `AiPromptPayload`/`ConversationExecPayload` に `permissionPolicy?: string`、
+  `ToolApprovalAutoPayload` と `web:tool:approval:auto` に `status?`/`reason?` を追加
+- `packages/shared/src/constants.ts`: `PLAN_READONLY_TOOLS`（strictReadonly 時に常時許可する非 Bash ツール、
+  `Read`/`Glob`/`Grep`/`NotebookRead`/`Task`/`ToolSearch`/`TaskOutput`/`TaskStop`/`TodoWrite`/`WebFetch`/`WebSearch`。
+  `Write`/`Edit`/`MultiEdit`/`NotebookEdit`/`ExitPlanMode` は意図的に含めない）を新設。
+  `DEFAULT_ALLOWED_TOOLS_LINUX`/`_WINDOWS` に検証用コマンド5パターン（`pnpm test`, `pnpm test *`, `pnpm lint`
+  [`*` なし、`--fix` 書き込み対策], `npx tsc --noEmit`, `npx tsc --noEmit *`）を追加
+- `apps/server/src/services/permission-policy.ts`（新規）: `resolvePermissionPolicy(source)` — MCP/chat/exec の
+  送信経路から permissionPolicy 文字列を組み立てる外部import ゼロの純関数。`mcp/tools.ts`（submit_instruction）・
+  `command-handler.ts`（通常メッセージ）・`agent-manager.ts`（execConversation）の3箇所がこれを呼ぶ
+  （リテラル直書きによる食い違いを防止）
+- `apps/server/src/services/agent-manager.ts`: `sendPromptToAgent()` に `permissionPolicy?` 引数追加
+  （未指定時は `'interactive'` を明示送信、静かなフォールバック禁止）。`handleToolApprovalAuto()` を
+  `payload.status ?? 'auto'` / `payload.reason` を `ToolApproval` に保存するよう拡張、`status==='deny'` の
+  場合は Discord/Telegram への「自動承認」通知を送らない（DB + WebUI 記録のみ）
+- `agents/linux/src/services/plan-permission.ts`（新規）: `matchesToolRule`/`isAllowedByRules`/
+  `decidePlanPermission` の純関数群（外部importゼロ、`node --test` で dist を直接検証）。
+  `ai-runner.ts` の重複ロジックをここに集約
+- `agents/linux`・`agents/macos` の `ai-runner.ts`: plan モード `canUseTool` の
+  (1) skipPermissions 自動 allow 分岐に `!options.strictReadonly` 条件を追加、
+  (2) 末尾のフォールスルー（従来は無条件 allow）を `decidePlanPermission()`（linux）/
+  同等のインライン判定（macos）に置き換え、strictReadonly 時は `PLAN_READONLY_TOOLS` または
+  `allowedTools`（Bash パターン）にマッチしないツールを `{behavior:'deny'}` で明示拒否。
+  **exec モードの `canUseTool` は無変更**（diff 0 行を確認）
+- `agents/linux`・`agents/macos` の `connection.ts`: `permissionPolicy` payload 受け取り追加、
+  `skipPermissions` の導出式から `forceNewSession` を排除し `permissionPolicy` ベースに変更、
+  `onAutoApproved`/新設 `onPolicyDenied` を plan モードでも配線（strictReadonly の deny を
+  `ToolApproval` に記録する監査穴を修正）。resume 失敗時の retry 経路にも同じオプションを伝搬
+- `apps/server/prisma/schema.prisma`: `ToolApproval.reason String?` 追加（`doc/migrations/332_tool_approval_reason.md`
+  に DDL 記載、人間が `psql` で適用）
+
+#### 影響範囲
+Windows（Electron GUI）Agent は `canUseTool` を使わない CLI 引数方式のため対象外（無変更）。
+Devin/Codex/Gemini runner はスコープ外（Codex は #315 で `sandbox_mode` により plan=read-only 済み）。
+旧 Agent は `permissionPolicy` を無視するため fail-open（MCP plan が従来どおり全 allow のまま）。
+**DB DDL 適用（psql、必須・最初）+ server 再起動 + 全マシン（Linux/macOS）の `u` が必要**
+（Windows は対象コードが無いため `u` 不要）。
+
+#### 検証
+`pnpm build` を6 workspaceすべてフォアグラウンドで実行し green。`cd apps/server && pnpm test` 8件green
+（既存4 + 新規4）、`cd agents/linux && pnpm test` 9件green（新規、うち6件がプラン記載の必須ケース）。
+`grep -c 'require(' apps/web/dist/assets/index-*.js` = 0。静的確認: `forceNewSession` が
+`skipPermissions` の導出式に一切現れないこと（linux/macos 両方）、exec モード `canUseTool` の
+git diff が 0 行であること、`permissionPolicy` が両 `connection.js`（dist）にコンパイルされていることを
+それぞれ確認。**実機 E2E（MCP plan から書き込み指示 → deny + `ToolApproval` 記録）は人間の restart + `u`
+後に別サイクルで実施**（このサイクル中は `pm2 restart`/Agent 再起動/プロセス kill/DDL 実行を一切行っていない）。
+
 ### #330: トークン高止まり警告（#300 / #321）を廃止 (2026-08-29)
 
 #### 理由
