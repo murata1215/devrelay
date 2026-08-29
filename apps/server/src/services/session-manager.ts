@@ -476,7 +476,7 @@ export function getSessionContextInfo(sessionId: string): string {
 }
 
 /**
- * セッションの contextInfo に文字列を追記する（#300 トークン警告など）
+ * セッションの contextInfo に文字列を追記する（📊 Rate Limit 等の前置情報）
  * finalizeProgress が contextInfo を最終メッセージの先頭に前置するため、
  * ここで足した内容は DB 保存・各プラットフォーム配信の両方に一貫して乗る。tracker 無しは no-op。
  */

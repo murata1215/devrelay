@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### #330: トークン高止まり警告（#300 / #321）を廃止 (2026-08-29)
+
+#### 理由
+ユーザー判断: 「この表示出すのやめよう / あんまり効果なさそう」。AI応答完了時に前置されていた
+`⚠️ トークンが高止まりしています（{project}: 直近{count}会話 平均{avgK}k）。...` (#300) と
+`🐢 応答が遅くなっています ...` (#321) の警告は、どちらも「`w` → `x` を促す」同じ行動喚起で、
+効果が確認できなかった。既存の `DEVRELAY_TOKEN_WARN_DISABLED=1` env で黙らせることも可能だったが、
+「効果がなさそうだから廃止」という判断のため設定で隠すのではなく機能ごとコード削除を選択。
+
+#### 修正内容
+- `apps/server/src/services/token-usage-warning.ts` を**ファイルごと削除**（純関数 `evaluateTokenBloat` 含む210行、
+  外部利用は `maybeTokenBloatWarning()` のみで他に参照なし）
+- `apps/server/src/services/agent-manager.ts`: `token-usage-warning.js` の import と、`handleAiOutput`
+  （isComplete 時）内の警告注入 4 行（`maybeTokenBloatWarning()` 呼び出し + `appendSessionContextInfo()`）を削除。
+  `session-manager.js` からの import リストのうち `appendSessionContextInfo`（この呼び出しのみで使用）も除去
+- `apps/server/src/services/session-manager.ts`: `appendSessionContextInfo()` 本体は汎用ヘルパーとして残置
+  （📊 Rate Limit 表示の土台でもあるため）、JSDoc の例示コメントのみ「#300 トークン警告など」→
+  「📊 Rate Limit 等の前置情報」に更新
+- `packages/shared/src/i18n.ts`: `tokenWarn.bloat` / `tokenWarn.slow` の2キーを削除
+- `README.md` / `rules/project.md`: 該当する機能説明を削除・整理（`rules/project.md` は #300/#321 の
+  節を1つに統合し、まだ有効な運用知識（`w`/`x` の役割の違い、遅さの切り分け手順）のみ残置）
+
+#### 影響範囲
+Agent（linux/macos/windows の3OS）は無変更 → **各マシンの `u` は不要**。DB カラムも持っていなかった
+（クールダウンはプロセス内メモリ Map のみ）ため**マイグレーション不要**。server のみの変更。
+
+#### 検証
+`pnpm build` green、`tokenWarn|maybeTokenBloatWarning|evaluateTokenBloat|TOKEN_WARN` の残骸が
+ソース・dist の両方で 0 件であることを確認、`grep -c 'require(' apps/web/dist/assets/index-*.js` = 0
+（#310 の再発防止チェック）。**server 再起動が必要**。実チャットでの確認（応答冒頭に ⚠️/🐢 が出ないこと、
+📊 Rate Limit 行は従来どおり出ること）は未実施。
+
+#### 復旧メモ
+再導入する場合は git 履歴から `token-usage-warning.ts` を復元し、`agent-manager.ts` の
+`handleAiOutput`（isComplete 時）に呼び出しを2行戻すだけで元に戻せる。
+
 ### #329: Devin CLI の非対応フラグでプランモードが必ず失敗する問題を修正 (2026-08-28)
 
 #### 問題

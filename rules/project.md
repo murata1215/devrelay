@@ -1379,20 +1379,6 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
 - **pending の滞留を可視化**: `reconcileLastAttempt` で 2 時間以上 pending のままなら `timeout:<detail>` に落とす
   （試行回数は変えない = #256 の暴走抑止はそのまま）
 
-### トークン高止まり警告 (#300)
-
-- **`w` と `x` の役割は別物**（実装の核心）: `w`（wrap up）は exec マーカー＋ドキュメント更新・commit/push のみで、
-  Claude SDK の resume セッション（`claudeResumeSessionId`）は**継続する** = cache_read（累積コンテキスト）は下がらない。
-  実際にコンテキストを消して token を下げるのは **`x`（clear）**（`clearClaudeSessionId` で次回新規セッション化）。
-  よってトークン警告は「`w` で記録・コミット → `x` で履歴クリア」の**両方**を促す
-- **既存 #291（Agent 側・per-session のコンテキスト% 85/95%）とは別レイヤー**。#300 は Server 側で
-  **プロジェクト横断の直近 N 会話のトレンド**を見る（`token-usage-warning.ts`。判定は純関数 `evaluateTokenBloat`）
-- **注入は `handleAiOutput`（isComplete 時。usageData と DB が揃う唯一の地点）**で行い、`appendSessionContextInfo()`
-  経由で `tracker.contextInfo` に足す。📊 Rate Limit と同じ相乗り方式で DB 保存・配信の両方に一貫して乗る
-- **クールダウンはインメモリ Map**（プロジェクト単位・60 分）。DB 永続化が要るなら後日 `Project.lastTokenWarnAt` を足す
-- 1 会話の合計トークンは Conversations の "Tokens" と同義（`input+output+cache_read+cache_creation`）。
-  しきい値・件数・クールダウンは `DEVRELAY_TOKEN_WARN_*` env で上書き可（`_DISABLED=1` で無効化）
-
 ### バージョン更新状態の表示 (#299)
 
 - version-check の結果（`localCommit/localDate/remoteCommit/remoteDate`）は、接続時・sweep・手動 `u` の
@@ -1432,20 +1418,22 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
 - **Agent の起動方式は機体ごとに 1 つに固定する**。この機体は crontab `@reboot` の nohup 起動が正で、
   pm2 に登録してよいのは `devrelay-server` のみ（`CLAUDE.md` に明記済み）
 
-### トークン高止まり警告への「遅さ」軸の追加 (#321)
+### トークン高止まり警告 (#300 / #321、#330 で廃止)
 
+- **`w` と `x` の役割は別物**（今後も有効な運用知識）: `w`（wrap up）は exec マーカー＋ドキュメント更新・commit/push のみで、
+  Claude SDK の resume セッション（`claudeResumeSessionId`）は**継続する** = cache_read（累積コンテキスト）は下がらない。
+  実際にコンテキストを消して token を下げるのは **`x`（clear）**（`clearClaudeSessionId` で次回新規セッション化）
 - 「応答が遅い」という体感の原因切り分けは、まず **DevRelay 側の指標（サーバー負荷・イベントループ・エラーログ・
   Agent 二重起動・レート制限）を先に全部シロにしてから**、AI ターン自体の指標（`Message.usageData` の
-  `durationMs`/`usage.output_tokens`）を見る順序が有効。今回はサーバー側は完全に健全で、
-  出力トークン量が 2〜6 倍に膨らんだこと自体が原因だった（#305 と同種の `dangou-card` コンテキスト肥大の再発）
-- #300 の `evaluateTokenBloat()` は「合計トークン（≒ cache_read 支配）」しか見ておらず、
-  今回のような「1 ターンの出力量 × 所要時間」の肥大は検知できなかった。
-  → 入力を `totals: number[]` から `samples: { total, output, durationMs }[]` に拡張し、
-  第3の判定軸 `reason: 'slow'`（直近 N 会話が連続で 出力 ≥ しきい値 かつ 所要時間 ≥ しきい値）を追加。
-  DB クエリは変わらず（`usageData` に既に `durationMs`/`usage.output_tokens` が入っている）
-- 警告文の翻訳は sessionId しか持たない呼び出し元なので `resolveSessionLanguage(sessionId)`（#319）を
-  そのまま流用。「sessionId しか無いから新ヘルパーが要る」わけではなく、**既存ヘルパーが sessionId 引数を
-  受けるなら常にそれを優先し、新設は本当に情報源が異なる場合（#320 の `pendingUpdateNotify` 等）に限る**
+  `durationMs`/`usage.output_tokens`）を見る順序が有効（#321 の調査手順）
+- 警告文のような sessionId しか持たない呼び出し元での言語解決は、既存の `resolveSessionLanguage(sessionId)`
+  （#319）をそのまま流用する。「sessionId しか無いから新ヘルパーが要る」わけではなく、**既存ヘルパーが
+  sessionId 引数を受けるなら常にそれを優先し、新設は本当に情報源が異なる場合
+  （#320 の `pendingUpdateNotify` 等）に限る**
 - ログのノイズ削減（`server:pong` の抑制）は実装コストがほぼゼロな割に、次の障害調査を大きく楽にする。
   「44% がハートビート応答」のような比率は `pm2 logs` を grep -c で数えるだけで分かるので、
   調査の一環として毎回チェックする価値がある
+- **#330 で警告表示自体は廃止**（ユーザーが「効果が確認できない」と判断）。判定ロジック
+  （`token-usage-warning.ts`・純関数 `evaluateTokenBloat`）と `DEVRELAY_TOKEN_WARN_*` env は削除済み。
+  再導入する場合は git 履歴から `token-usage-warning.ts` を復元し、`agent-manager.ts` の
+  `handleAiOutput`（isComplete 時）に呼び出しを 2 行戻すだけで元に戻せる
