@@ -6,6 +6,86 @@
 
 ## 実装済み機能
 
+### #333: plan モード strictReadonly のグロブ false positive 修正 ＋ deny メッセージへの理由付与 (2026-08-30)
+
+#### 背景
+#332 で MCP 経由 plan を strictReadonly（allowlist 外は聞かずに deny）にした直後の E2E（test010）で、
+読み取り専用のはずの `ls PLAN_PROBE_*` / `ls doc/*` が deny され、`ls -la` / `ls doc` は allow されるという
+一貫性のない結果が出た。調査の結果、原因は二段構えだった。**第1段**: Claude Code ハーネスは読み取り専用と
+判定できた Bash コマンドを `canUseTool` を呼ばずに自動承認するが、クォートされていないシェルメタ文字
+（`*` 等）を含むコマンドはこの自動承認の対象外になり `canUseTool` に落ちてくる。**第2段**: `canUseTool` に
+落ちた後の判定（`matchesToolRule`）は「コマンド文字列全体の前方一致」で、`allowedTools` に `ls` 系ルールが
+無い（この機体は #213/`1bdee10` より前に WebUI で保存されたカスタム `allowedTools` を使っており、
+`ls`/`find`/`locate`/`which` が抜けていた）ため deny になっていた。副次発見として、同じ前方一致の設計により
+`git log --oneline > /tmp/x` が `Bash(git log *)` に一致し、リダイレクトで書き込みができてしまう
+strictReadonly の抜け穴も見つかった。
+
+#### 設計
+判定軸を「コマンド文字列全体の前方一致」から「セグメント分割（`;`/`&&`/`||`/`|`/改行、クォート考慮）＋
+セグメントごとの先頭実行ファイル名（argv0、`git`/`pm2`/`docker`/`npm`/`pnpm`/`yarn`/`systemctl` はサブコマンド
+まで、`git` はグローバルフラグ `-C`/`-c`/`--git-dir` 等を読み飛ばす）」に変更した。グロブ（`*`/`?`/`[]`）は
+判定に一切影響させない。判定順は各セグメントごとに (1) 書き込みリダイレクト（`>`/`>>`/`<>`、`2>&1` のような
+fd 複製は除外）→ (2) 書き込み系コマンド表（新設 `PLAN_WRITE_BASH_COMMANDS`）→ (3) 読み取り専用コマンド表
+（新設 `PLAN_READONLY_BASH_COMMANDS`）→ (4) `allowedTools` のトークン一致 → (5) `notInAllowlist`。複合コマンドは
+全セグメントが allow でなければ deny（reason は `planPolicy:compoundCommand` に丸める）。`$(...)`/バッククォート/
+`<(...)` のコマンド置換は中身を検査できないため常に compoundCommand 扱いで deny。`ls doc/* | head` のように
+パイプ先が読み取り専用なら allow（`| tee out.txt` は `tee` が書き込み系表にあるため deny）。deny 理由は
+`planPolicy:notInAllowlist` / `planPolicy:writeTool` / `planPolicy:compoundCommand` の3種に分類し、
+`ToolApproval.reason` とチャットへの deny メッセージ両方に具体的な判定根拠（`detail`）を載せるようにした。
+
+**人間承認時の追記（このサイクルの必須要件）**: strictReadonly の allow 判定は「ユーザーカスタム
+`allowedTools` ∪ `DEFAULT_ALLOWED_TOOLS`（対象 OS）の読み取り系ルール」の**和集合**で行う。カスタムリストが
+default より緩い方向の差分（default に無いルール）はそのまま尊重してよいが、default にあってカスタムに無い
+読み取り系ルールを欠落扱いにしない。この和集合計算は `decidePlanPermission` 内部で毎回動的に行い、
+渡された `options.allowedTools` 自体は書き換えない。この方針は **strictReadonly（plan）専用の判定にのみ**
+適用し、interactive / exec の `allowedTools` 解決は一切変更しない。なお「`UserSettings.allowed_tools_*` に
+カスタム保存があると `DEFAULT_ALLOWED_TOOLS_*` への追加が一切効かない」という問題の**一般解**（カスタム
+保存自体を diff ベースで更新する等）はこのサイクルのスコープ外とし、別サイクルで扱う。
+
+#### 修正内容
+- `packages/shared/src/constants.ts`: `PLAN_READONLY_BASH_COMMANDS`（`ls`/`cat`/`grep`/`find` 等、単体で
+  読み取り専用と確定できるコマンド群）、`PLAN_WRITE_BASH_COMMANDS`（`rm`/`touch`/`git commit`/`pm2 restart`
+  等）、`PLAN_WRITE_TOOLS`（`Write`/`Edit`/`MultiEdit`/`NotebookEdit`）を新設。
+- `packages/shared/src/index.ts`: 上記3定数を明示的 named re-export に追加（#309/#310 の教訓により
+  `export *` は使わない）。
+- `agents/linux/src/services/plan-permission.ts`: `splitShellSegments`/`hasCommandSubstitution`/
+  `hasWriteRedirect`/`tokenizeSegment`/`matchesBashRuleByTokens`/`decideBashCommand` を純関数として追加し、
+  `decidePlanPermission` を拡張（`defaultAllowedTools`/`readonlyBashCommands`/`writeBashCommands`/
+  `writeTools` 引数、戻り値に `detail?: string` を追加）。既存の `matchesToolRule`/`isAllowedByRules` は
+  exec モードの `isToolSessionApproved` からも使われているため無変更のまま残置。
+- `agents/linux/src/services/ai-runner.ts`: strictReadonly の `decidePlanPermission` 呼び出しに新定数を
+  注入し、deny ログとチャットメッセージに `decision.reason`/`decision.detail` を反映。exec モードの
+  `canUseTool` は無変更（`git diff` で該当ブロックの差分が無いことを確認済み）。
+- `agents/macos/src/services/plan-permission.ts`: OS 別自己完結方針に従い linux 版と同一ロジックを新規
+  ファイルとして複製作成。
+- `agents/macos/src/services/ai-runner.ts`: インライン strictReadonly 判定を新設 `plan-permission.js` の
+  `decidePlanPermission` 呼び出しに置き換え。exec 用の `matchesToolRule`/`isAllowedByRules`（`ai-runner.ts`
+  内のインライン実装、`isToolSessionApproved` が使用）は無変更のまま残置。
+- `agents/linux/tests/plan-permission.test.mjs` / `agents/macos/tests/plan-permission.test.mjs`
+  （macOS は新規作成）: それぞれ 34 件（既存9件のうち2件は reason 文字列を `planPolicy:writeTool` に
+  更新、新規 20件がグロブ allow・fd複製 allow・git グローバルフラグ allow・パイプ allow・書き込み deny・
+  複合コマンド deny・コマンド置換 deny・和集合ポリシーの3件を検証、残り5件はヘルパー関数の直接テスト）。
+- `agents/macos/package.json`: `"test": "node --test tests/"` を追加（新パッケージなし）。
+
+#### 検証
+`pnpm build` を6 workspace（`packages/shared`→`agents/linux`→`agents/macos`→`apps/server`→`apps/web`→
+モノレポ全体）でフォアグラウンド実行しすべて green。`agents/linux`/`agents/macos` の `node --test` が
+それぞれ **34/34 green**、`apps/server` は既存 **8/8 green**（無変更・非退行）。
+`grep -c 'require(' apps/web/dist/assets/index-*.js` = **0**（#310 再発防止チェック）。静的確認として、
+両 `ai-runner.ts` の `git diff` が import 行と strictReadonly ブロックの2箇所のみであること（exec モードの
+`canUseTool` ブロックは0行差分）、macOS の exec 用 `matchesToolRule`/`isAllowedByRules` インライン実装が
+無変更であること、`PLAN_READONLY_BASH_COMMANDS` が `packages/shared/dist/constants.js` と両 Agent の
+`dist/services/plan-permission.js` にコンパイルされていること、`planPolicy:` を含む reason 文字列が
+`plan-permission.js` に存在することをそれぞれ確認した。
+
+#### 未実施（人間の反映後に別サイクル）
+DB DDL は不要（`ToolApproval.reason` 列は #332 で適用済み）。`apps/server` は無変更のため server 再起動は
+不要。**全マシン（Linux/macOS）の `u` が必須**（`u` していないマシンは従来どおりグロブで deny される。
+Windows は `canUseTool` を使わないため `u` 不要）。実機 E2E（MCP plan から `ls doc/*` が allow、`touch` が
+deny、`ToolApproval.reason` に具体的な理由が入ることの確認）と、副次発見1（`UserSettings.allowed_tools_*`
+カスタム保存時に `DEFAULT_ALLOWED_TOOLS_*` 追加が効かない問題）の一般解は、いずれも人間の反映後に別サイクルで
+行う。
+
 ### #332: MCP 経由 plan モードの skipPermissions 強制ON解消 — forceNewSession と権限ポリシーの分離 (2026-08-29)
 
 #### 背景

@@ -1474,3 +1474,33 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   読み取り専用強制は機体ごとにバラつく**ことを運用上認識しておくこと
 - **Windows（Electron GUI）Agent は対象外**: CLI 引数方式で SDK の `canUseTool` を使わないため、
   そもそも本問題の影響を受けない（`u` も不要）
+
+### plan strictReadonly のグロブ false positive 修正 (#333)
+
+- **グロブはコマンド文字列の判定に一切使わない**。deny の原因は「グロブ文字そのもの」ではなく、
+  (1) Claude Code ハーネスが未クォートのシェルメタ文字（`*` 等）を含むコマンドを自動承認せず
+  `canUseTool` に落とすこと、(2) 落ちてきた後の旧判定（`matchesToolRule`）が「コマンド文字列全体の
+  前方一致」であり、引数にパスやグロブが混じると `allowedTools` のプレフィックスと一致しなくなること、
+  の2段階だった。修正は判定軸を「セグメント分割（`;`/`&&`/`||`/`|`/改行、クォート考慮）＋セグメントごとの
+  先頭実行ファイル名（argv0）判定」に変更し、グロブそのものは deny 理由に一切しない
+- **strictReadonly の allow 判定は「ユーザーカスタム `allowedTools` ∪ `DEFAULT_ALLOWED_TOOLS`（対象OS）の
+  読み取り系ルール」の和集合で行う**（人間承認時の必須要件）。カスタムリストが default より緩い方向の
+  差分はそのまま尊重するが、default にあってカスタムに無い読み取り系ルールを欠落扱いにしない。和集合は
+  `decidePlanPermission` 内部で毎回動的に計算し、渡された `options.allowedTools` 自体は書き換えない。
+  この方針は **strictReadonly（plan）専用**であり、interactive / exec の `allowedTools` 解決には適用しない
+- **複合コマンド（`;`/`&&`/`||`/`|`）は全セグメントが allow の場合のみ allow**。1つでも deny なセグメントが
+  あれば reason を `planPolicy:compoundCommand` に丸める。`$(...)`/バッククォート/`<(...)` のコマンド置換は
+  中身を検査できないため常に deny（`planPolicy:compoundCommand`）
+- **書き込みリダイレクト検出は fd 複製（`2>&1`）を誤検知しないこと**。`>` の直後が `&` なら書き込みとは
+  みなさない。この区別を忘れると `ls -la doc 2>&1` のような無害な読み取りコマンドまで deny してしまう
+- **旧実装の抜け穴（前方一致による書き込み許可）を回帰テストで固定**: `git log --oneline > /tmp/x` は旧
+  `matchesToolRule`（`Bash(git log *)` の前方一致）では allow されてしまっていた。新判定ではリダイレクト
+  検出が argv0 判定より先に走るため deny になる。`agents/linux/tests/plan-permission.test.mjs` に
+  この具体的な旧脆弱性の回帰テストとして残してある
+- **`ToolApproval.reason`・deny メッセージには具体的な判定根拠を必ず載せる**（`planPolicy:notInAllowlist` /
+  `planPolicy:writeTool` / `planPolicy:compoundCommand` の3分類 + 日本語 `detail`）。`'planPolicy'` の一語
+  だけでは deny 原因の切り分けに実機ログ調査が必要になり運用コストが高い（本サイクルの発端そのもの）
+- **副次発見1（`UserSettings.allowed_tools_*` にカスタム保存があると `DEFAULT_ALLOWED_TOOLS_*` への追加が
+  一切効かない問題）の一般解は未実装**。本サイクルは strictReadonly 判定側で和集合を取ることで症状を
+  回避したが、カスタム保存自体（WebUI Settings 経由の `allowed_tools_linux`/`allowed_tools_windows`）を
+  diff ベースで更新する等の恒久対応は別サイクルで検討する
