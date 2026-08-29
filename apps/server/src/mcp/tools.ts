@@ -22,6 +22,7 @@ import {
   getActiveProgressForChatId,
 } from '../services/session-manager.js';
 import { checkCommandPermission } from '../services/org-control.js';
+import { buildApprovalExecPrompt } from './approval-prompt.js';
 
 /**
  * MCP サーバーにツールを登録する
@@ -435,8 +436,9 @@ export function registerMcpTools(server: McpServer, userId: string) {
     {
       projectId: z.string().describe('The target project ID'),
       instruction: z.string().describe('The coding instruction in Markdown format'),
+      council: z.boolean().optional().describe('Opt-in to council mode (default false). NOTE: the council engine is not implemented yet; the flag is recorded only and has no effect on execution.'),
     },
-    async ({ projectId, instruction }) => {
+    async ({ projectId, instruction, council }) => {
       // エンタープライズ統制ゲート（#268）: マネージャー未割当の member はコマンド発行不可
       const permission = await checkCommandPermission(userId);
       if (!permission.allowed) {
@@ -466,6 +468,12 @@ export function registerMcpTools(server: McpServer, userId: string) {
 
       // セッション作成
       const sessionId = await createSession(userId, project.machineId, project.id, aiTool);
+
+      // #331: council opt-in の記録のみ（council 実行エンジンは未実装。既定は false のため
+      // 未指定時はこの更新自体を行わず、DB の @default(false) のまま = 従来と完全同形）
+      if (council === true) {
+        await prisma.session.update({ where: { id: sessionId }, data: { councilMode: true } });
+      }
 
       // MCP 用の chatId で参加者登録（進捗トラッキング用）
       // 注意: mcp: prefix の chatId は実際の WebSocket を持たないため、
@@ -504,7 +512,13 @@ export function registerMcpTools(server: McpServer, userId: string) {
       );
 
       // 監査ログ
-      console.log(`📋 [MCP] AUDIT submit: userId=${userId}, projectId=${projectId}, instruction=${instruction.slice(0, 100)}...`);
+      console.log(`📋 [MCP] AUDIT submit: userId=${userId}, projectId=${projectId}, council=${council === true}, instruction=${instruction.slice(0, 100)}...`);
+
+      // #331: council 未指定時はキー自体を返さない（従来と完全同形）。
+      // 指定時は「静かなフォールバック禁止」(#325) に従い、エンジン未実装であることを明示する。
+      const councilInfo = council === true
+        ? { requested: true, status: 'accepted_not_implemented' as const, message: 'Council engine is not implemented yet; running in normal single-AI mode.' }
+        : undefined;
 
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({
@@ -512,6 +526,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
           projectId,
           status: 'planning',
           message: 'Instruction submitted. Use get_plan to check the plan status.',
+          ...(councilInfo ? { council: councilInfo } : {}),
         }) }],
       };
     }
@@ -526,8 +541,9 @@ export function registerMcpTools(server: McpServer, userId: string) {
     {
       projectId: z.string().describe('The project ID'),
       submissionId: z.string().describe('The submission ID from submit_instruction'),
+      note: z.string().optional().describe('Optional note from the human at approval time (e.g. "go with plan B"). Appended to the exec prompt sent to the AI, and recorded for audit.'),
     },
-    async ({ projectId, submissionId }) => {
+    async ({ projectId, submissionId, note }) => {
       // エンタープライズ統制ゲート（#268）: マネージャー未割当の member はコマンド発行不可
       const permission = await checkCommandPermission(userId);
       if (!permission.allowed) {
@@ -548,7 +564,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Agent is offline' }) }], isError: true };
       }
 
-      // exec メッセージを保存
+      // exec メッセージを保存（content は 'exec' の完全一致固定。get_build_status がこの値を
+      // exec 開始時刻のアンカーとして使うため、note を混ぜてはいけない（#331 調査で判明した既存の罠）
       await prisma.message.create({
         data: {
           sessionId: submissionId,
@@ -558,22 +575,29 @@ export function registerMcpTools(server: McpServer, userId: string) {
         },
       });
 
-      // Plan → Exec 遷移
+      // #331: note があれば Session に記録（監査用。BuildLog が作られない失敗時にも残る）
+      const trimmedNote = note?.trim();
+      if (trimmedNote) {
+        await prisma.session.update({ where: { id: submissionId }, data: { approvalNote: trimmedNote } });
+      }
+
+      // Plan → Exec 遷移（note は exec プロンプト自体に追記して Agent/AI に届ける）
       await execConversation(
         project.machineId,
         submissionId,
         project.path,
         userId,
-        'プランに従って実装を開始してください。',
+        buildApprovalExecPrompt(note),
       );
 
       // 監査ログ
-      console.log(`📋 [MCP] AUDIT approve: userId=${userId}, projectId=${projectId}, submissionId=${submissionId}`);
+      console.log(`📋 [MCP] AUDIT approve: userId=${userId}, projectId=${projectId}, submissionId=${submissionId}, note=${trimmedNote ? trimmedNote.slice(0, 100) : '(none)'}`);
 
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({
           phase: 'queued',
           message: 'Implementation approved and started. Use get_build_status to monitor progress.',
+          noteApplied: !!trimmedNote,
         }) }],
       };
     }

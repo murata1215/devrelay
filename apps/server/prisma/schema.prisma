@@ -248,6 +248,8 @@ model Session {
   endedAt       DateTime?
   summary       String?   // AI 活動要約（統制 v3 #270、閲覧者のキーで生成しキャッシュ）
   summarizedAt  DateTime? // 要約生成日時
+  councilMode   Boolean   @default(false) // council mode opt-in（#331。エンジンは未実装、受理の記録のみ）
+  approvalNote  String?   // approve_implementation の note（#331。監査用）
 
   messages       Message[]
   buildLogs      BuildLog[]
