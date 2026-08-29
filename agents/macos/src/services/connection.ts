@@ -790,7 +790,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean; language?: Language }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean; language?: Language; permissionPolicy?: string }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -857,6 +857,7 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     model: payload.model,  // Claude SDK モデル継承（#251）
     isWCommand: payload.isWCommand,  // #312: Codex w コマンドのサンドボックス切替判定に使用
     language: payload.language,  // #316: チャット表示言語を継承
+    permissionPolicy: payload.permissionPolicy,  // #332: 権限ポリシーを継承（exec は常に 'interactive'）
   });
 }
 
@@ -872,7 +873,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean; language?: Language }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
@@ -1122,12 +1123,21 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     console.log(`🔄 Using --resume with session: ${sessionInfo.claudeResumeSessionId.substring(0, 8)}...`);
   }
 
+  // #332: 権限ポリシー。permissionPolicy 未指定（旧サーバー/未配線経路）の場合は 'interactive'（従来どおり serverSkipPermissions に従う）
+  const permissionPolicy = payload.permissionPolicy ?? 'interactive';
+  // strictReadonly は plan モードでのみ意味を持つ（exec には一切影響しない）
+  const strictReadonly = permissionPolicy === 'strictReadonly' && usePlanMode;
+
   // Prepare send options
   const sendOptions: SendPromptOptions = {
     resumeSessionId: sessionInfo.claudeResumeSessionId,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
-    skipPermissions: serverSkipPermissions,
+    // #332: skipPermissions は permissionPolicy から導出する。
+    // 'skip' なら常に true、strictReadonly なら false（allowlist で厳格に判定するため）、
+    // それ以外（'interactive' 等）は従来どおり serverSkipPermissions に従う
+    skipPermissions: permissionPolicy === 'skip' ? true : (strictReadonly ? false : serverSkipPermissions),
+    strictReadonly,
     disableAsk: serverDisableAsk,
     model: payload.model,  // Claude SDK モデル指定（#251）
     isWCommand: payload.isWCommand,  // #312: Codex の w コマンドのみ danger-full-access に切り替える
@@ -1150,8 +1160,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: request.toolName, toolInput: request.toolInput, status: 'pending' });
   };
 
-  // 自動承認通知（exec モードのみ。approveAllMode 時に WebUI の Approvals タブに履歴表示する用）
-  if (!usePlanMode) {
+  // 自動承認通知（exec モードの approveAllMode、または #332 の plan strictReadonly で
+  // WebUI の Approvals タブに履歴表示する用。plan モードでも記録するよう #332 で拡張）
+  if (!usePlanMode || strictReadonly) {
     sendOptions.onAutoApproved = (info) => {
       sendMessage({
         type: 'agent:tool:approval:auto',
@@ -1163,6 +1174,25 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       });
       // JSONL ファイルログ
       appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: info.toolName, toolInput: info.toolInput, status: 'auto' });
+    };
+  }
+
+  // #332: strictReadonly で allowlist 外のツールが deny された際の監査通知
+  if (strictReadonly) {
+    sendOptions.onPolicyDenied = (info) => {
+      sendMessage({
+        type: 'agent:tool:approval:auto',
+        payload: {
+          toolName: info.toolName,
+          toolInput: info.toolInput,
+          status: 'deny',
+          reason: info.reason,
+          machineId: currentMachineId || currentConfig!.machineId,
+          sessionId,
+        },
+      });
+      // JSONL ファイルログ
+      appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: info.toolName, toolInput: info.toolInput, status: 'deny' });
     };
   }
 
@@ -1290,8 +1320,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       const retryOptions: SendPromptOptions = {
         resumeSessionId: undefined,  // Don't use --resume
         usePlanMode,
+        allowedTools: sendOptions.allowedTools,
+        skipPermissions: sendOptions.skipPermissions,
+        // #332: strictReadonly は retry でも引き継ぐ（引き継がないと resume 失敗時に全許可へ後退してしまう）
+        strictReadonly: sendOptions.strictReadonly,
         onToolApprovalRequest: sendOptions.onToolApprovalRequest,
         onAutoApproved: sendOptions.onAutoApproved,
+        onPolicyDenied: sendOptions.onPolicyDenied,
         model: payload.model,  // Claude SDK モデル指定を retry でも維持（#251）
         language: payload.language,  // #316: チャット表示言語を retry でも維持
       };

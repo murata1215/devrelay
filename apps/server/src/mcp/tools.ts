@@ -23,6 +23,7 @@ import {
 } from '../services/session-manager.js';
 import { checkCommandPermission } from '../services/org-control.js';
 import { buildApprovalExecPrompt } from './approval-prompt.js';
+import { resolvePermissionPolicy } from '../services/permission-policy.js';
 
 /**
  * MCP サーバーにツールを登録する
@@ -509,6 +510,9 @@ export function registerMcpTools(server: McpServer, userId: string) {
         project.path,
         aiTool as any,
         true,  // forceNewSession: MCP submit は常に新規セッション
+        undefined, // model: 未指定（UserSettings から補完）
+        undefined, // language: 未指定（UserSettings から補完）
+        resolvePermissionPolicy('mcp'),  // #332: MCP plan は allowlist 外のツールを聞かずに deny する
       );
 
       // 監査ログ

@@ -41,6 +41,7 @@ import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { checkIpAllowed } from './org-control.js';
+import { resolvePermissionPolicy } from './permission-policy.js';
 import type { ManagementInfo } from '@devrelay/shared';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
@@ -1152,6 +1153,12 @@ export async function sendPromptToAgent(
   model?: string,
   /** #316: チャット表示言語。未指定時は UserSettings.language で補完する（#306 と同じ単一情報源方式） */
   language?: Language,
+  /**
+   * #332: plan モードの権限ポリシー。'interactive' | 'strictReadonly' | 'skip'。
+   * 未指定時は 'interactive'（従来どおり Machine.skipPermissions に従う）に解決する
+   * （静かなフォールバック禁止のため、送信 payload には常に明示値を載せる）。
+   */
+  permissionPolicy?: string,
 ) {
   // #316/#320: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
   // outdatedAgents チェックのエラーメッセージでも使うため、先に解決しておく
@@ -1202,9 +1209,12 @@ export async function sendPromptToAgent(
   }
   console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
 
+  // #332: permissionPolicy 未指定時は 'interactive' に解決して常に明示値を送る
+  const resolvedPermissionPolicy = permissionPolicy ?? 'interactive';
+
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model: resolvedModel, language: resolvedLanguage }
+    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model: resolvedModel, language: resolvedLanguage, permissionPolicy: resolvedPermissionPolicy }
   });
 }
 
@@ -1637,6 +1647,8 @@ export async function execConversation(machineId: string, sessionId: string, pro
       isWCommand,
       // #316: チャット表示言語。Agent 側の進捗表示・AI へ渡すプロンプトの言語選択に使う
       language: resolvedLanguage,
+      // #332: exec は人間承認済みでフル権限が仕様のため常に 'interactive'（Machine.skipPermissions に従う、従来挙動）
+      permissionPolicy: resolvePermissionPolicy('exec'),
     }
   });
 }
@@ -2098,6 +2110,9 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
  */
 async function handleToolApprovalAuto(payload: ToolApprovalAutoPayload) {
   const { machineId, sessionId, toolName, toolInput } = payload;
+  // #332: status 省略時は従来どおり 'auto'（後方互換）。plan strictReadonly の deny 時は 'deny' + reason が入る
+  const status = payload.status ?? 'auto';
+  const reason = payload.reason;
 
   // セッションの projectId を取得（WebUI のタブルーティング用）
   const session = await prisma.session.findUnique({
@@ -2106,19 +2121,23 @@ async function handleToolApprovalAuto(payload: ToolApprovalAutoPayload) {
   });
   const projectId = session?.project?.id;
 
-  // DB に auto 承認を記録（requestId なし）
+  // DB に auto/deny を記録（requestId なし）
   if (projectId) {
     prisma.toolApproval.create({
-      data: { sessionId, projectId, machineId, toolName, toolInput: toolInput as any, status: 'auto', resolvedAt: new Date() },
+      data: { sessionId, projectId, machineId, toolName, toolInput: toolInput as any, status, reason, resolvedAt: new Date() },
     }).catch(err => console.error('Failed to save auto tool approval:', err));
   }
 
-  // セッション参加者に自動承認通知を送信（Web + Discord/Telegram）
+  // セッション参加者に自動承認/拒否通知を送信（Web + Discord/Telegram）
   broadcastToolApprovalToWeb(sessionId, {
     type: 'web:tool:approval:auto',
-    payload: { toolName, toolInput, projectId },
+    payload: { toolName, toolInput, projectId, status, reason },
   });
-  broadcastToolApprovalAutoToPlatforms(sessionId, toolName, toolInput);
+  // #332: Discord/Telegram への通知は従来どおり「自動承認」のみ（deny 用の文言は用意していないため、
+  // deny は DB 記録 + WebUI 通知のみで足りるとして対象外。プラットフォーム関数のシグネチャは変更しない）
+  if (status === 'auto') {
+    broadcastToolApprovalAutoToPlatforms(sessionId, toolName, toolInput);
+  }
 }
 
 /**

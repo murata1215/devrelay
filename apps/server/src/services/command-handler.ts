@@ -41,6 +41,7 @@ import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
+import { resolvePermissionPolicy } from './permission-policy.js';
 import {
   createTestflightService,
   listTestflightServices,
@@ -1596,6 +1597,9 @@ async function handleAiPrompt(
       currentSession?.project.path,
       currentSession?.aiTool as AiTool | undefined,
       false,  // forceNewSession
+      undefined, // model: 未指定（UserSettings から補完）
+      undefined, // language: 未指定（UserSettings から補完）
+      resolvePermissionPolicy('chat'),  // #332: チャット経由は従来どおり Machine.skipPermissions に従う
     );
   } catch (error) {
     stopProgressTracking(context.currentSessionId);

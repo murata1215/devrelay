@@ -374,6 +374,14 @@ export interface ConversationExecPayload {
   isWCommand?: boolean;
   /** #316: チャット表示言語。Agent 側の進捗表示・AI へ渡すプロンプトの言語選択に使う */
   language?: Language;
+  /**
+   * #332: plan モードの権限ポリシー。forceNewSession（resume 抑止）とは独立の概念。
+   * - 'interactive'（既定・未指定時）: Machine.skipPermissions に従う（従来挙動）
+   * - 'strictReadonly': plan モードで allowedTools 外のツールを聞かずに deny する
+   * - 'skip': 全許可（将来用。現状どこからも送信しない）
+   * enum ではなく string（Agent 側の後方互換のため、未知の値は 'interactive' 相当にフォールバック）
+   */
+  permissionPolicy?: string;
 }
 
 export interface SessionRestoredPayload {
@@ -527,6 +535,11 @@ export interface AiPromptPayload {
   model?: string;
   /** #316: チャット表示言語。Agent 側の進捗表示・AI へ渡すプロンプトの言語選択に使う */
   language?: Language;
+  /**
+   * #332: plan モードの権限ポリシー。詳細は ConversationExecPayload.permissionPolicy の JSDoc を参照。
+   * MCP submit_instruction は 'strictReadonly' を送る。チャット/exec 経路は 'interactive' を明示送信する。
+   */
+  permissionPolicy?: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -657,12 +670,19 @@ export interface ToolApprovalRequestPayload {
   isQuestion?: boolean;
 }
 
-/** 自動承認通知（Agent → Server、approveAllMode 時の通知のみ） */
+/**
+ * 自動承認/自動拒否通知（Agent → Server、approveAllMode 時 or #332 plan strictReadonly 時の通知）
+ * status 省略時は従来どおり 'auto'（後方互換）。
+ */
 export interface ToolApprovalAutoPayload {
   machineId: string;
   sessionId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
+  /** 'auto'（既定・省略時） | 'deny'（#332: plan strictReadonly で allowlist 外を拒否した場合） */
+  status?: string;
+  /** deny の理由（例: 'planPolicy'）。status='auto' の場合は未使用 */
+  reason?: string;
 }
 
 /** ツール承認レスポンス（Server → Agent） */
@@ -709,7 +729,7 @@ export type ServerToWebMessage =
   | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string; messageId?: string } }
   | { type: 'web:tool:approval'; payload: ToolApprovalPromptPayload }
   | { type: 'web:tool:approval:resolved'; payload: { requestId: string; behavior: 'allow' | 'deny'; projectId?: string } }
-  | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string } }
+  | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string; status?: string; reason?: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:assist:response'; payload: VoiceAssistResponsePayload }
   | { type: 'web:pong' };

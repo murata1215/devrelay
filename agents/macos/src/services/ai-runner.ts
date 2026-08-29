@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
@@ -464,32 +464,52 @@ const sessionApprovedTools = new Set<string>();
  * セッション内の常時許可ルールにマッチするかチェックする
  * @returns マッチした場合 true
  */
+/**
+ * #332: 単一のルール文字列がツール呼び出しにマッチするかを判定する（isToolSessionApproved と
+ * isAllowedByRules の両方から再利用する共通ロジック。重複を作らないため抽出）。
+ * @returns マッチした場合 true
+ */
+function matchesToolRule(rule: string, toolName: string, input: Record<string, unknown>): boolean {
+  // "ToolName" 形式: ツール名完全一致（Edit, Read, Write, Glob, Grep 等）
+  if (!rule.includes('(')) {
+    return toolName === rule;
+  }
+
+  // "Bash(cmd *)" / "Bash(cmd)" 形式: Bash コマンドのパターンマッチ
+  const match = rule.match(/^(\w+)\((.+)\)$/);
+  if (!match) return false;
+  const [, ruleToolName, rulePattern] = match;
+  if (toolName !== ruleToolName) return false;
+
+  // Bash コマンドのマッチング
+  if (toolName === 'Bash' && typeof input.command === 'string') {
+    const command = input.command.trim();
+    if (rulePattern.endsWith(' *')) {
+      const prefix = rulePattern.slice(0, -2);
+      return command === prefix || command.startsWith(prefix + ' ');
+    }
+    return command === rulePattern;
+  }
+  return false;
+}
+
 function isToolSessionApproved(toolName: string, input: Record<string, unknown>): boolean {
   if (sessionApprovedTools.size === 0) return false;
-
   for (const rule of sessionApprovedTools) {
-    // "ToolName" 形式: ツール名完全一致（Edit, Read, Write, Glob, Grep 等）
-    if (!rule.includes('(')) {
-      if (toolName === rule) return true;
-      continue;
-    }
+    if (matchesToolRule(rule, toolName, input)) return true;
+  }
+  return false;
+}
 
-    // "Bash(cmd *)" / "Bash(cmd)" 形式: Bash コマンドのパターンマッチ
-    const match = rule.match(/^(\w+)\((.+)\)$/);
-    if (!match) continue;
-    const [, ruleToolName, rulePattern] = match;
-    if (toolName !== ruleToolName) continue;
-
-    // Bash コマンドのマッチング
-    if (toolName === 'Bash' && typeof input.command === 'string') {
-      const command = input.command.trim();
-      if (rulePattern.endsWith(' *')) {
-        const prefix = rulePattern.slice(0, -2);
-        if (command === prefix || command.startsWith(prefix + ' ')) return true;
-      } else {
-        if (command === rulePattern) return true;
-      }
-    }
+/**
+ * #332: 任意のルール配列（plan モードの allowedTools 等）に対してツール呼び出しがマッチするかを判定する。
+ * strictReadonly の allowlist 判定に使用。
+ * @returns マッチした場合 true
+ */
+function isAllowedByRules(rules: string[] | undefined, toolName: string, input: Record<string, unknown>): boolean {
+  if (!rules || rules.length === 0) return false;
+  for (const rule of rules) {
+    if (matchesToolRule(rule, toolName, input)) return true;
   }
   return false;
 }
@@ -627,6 +647,17 @@ export interface SendPromptOptions {
    * 未指定・'ja' の場合は従来どおり何も付与しない（既存挙動を変えないため）。
    */
   language?: import('@devrelay/shared').Language;
+  /**
+   * #332: plan モードの strictReadonly ポリシー（MCP submit_instruction 経由）。
+   * true の場合、plan モードの canUseTool で allowlist（allowedTools の Bash パターン + PLAN_READONLY_TOOLS）
+   * 外のツールを skipPermissions の値に関係なく聞かずに deny する。exec モードには一切影響しない。
+   */
+  strictReadonly?: boolean;
+  /**
+   * #332: strictReadonly により plan モードでツールが deny された際の通知コールバック。
+   * ToolApproval への監査記録・WebUI/Discord/Telegram への通知に使う。
+   */
+  onPolicyDenied?: (info: { toolName: string; toolInput: Record<string, unknown>; reason: string }) => void;
 }
 
 /**
@@ -733,9 +764,9 @@ async function sendPromptToAiSdk(
 
         const isQuestion = toolName === 'AskUserQuestion';
 
-        // 全許可モード: AskUserQuestion 以外は即座に allow（動的に最新値を参照）
-        // Plan モードでも allowedTools 外のツール（find 等）が SDK からパーミッション要求される場合があるため必須
-        if (!isQuestion && getServerSkipPermissions()) {
+        // #332: strictReadonly（MCP submit_instruction 経由）の場合、skipPermissions による
+        // 無条件 allow を行わない。allowlist 判定は下の isQuestion 分岐の後に一本化する
+        if (!isQuestion && !options.strictReadonly && getServerSkipPermissions()) {
           console.log(`⚡ [SDK] Auto-approved (skip-permissions, plan mode): ${toolName}`);
           options.onAutoApproved?.({ toolName, toolInput: input });
           return { behavior: 'allow', updatedInput: input };
@@ -770,6 +801,21 @@ async function sendPromptToAiSdk(
               }
             }, { once: true });
           });
+        }
+
+        // #332: strictReadonly の場合、PLAN_READONLY_TOOLS または allowedTools（Bash パターン）に
+        // マッチしないツールは聞かずに deny する（allowlist 外は allow ではなく deny 側に倒す設計）
+        if (options.strictReadonly) {
+          const allowed = PLAN_READONLY_TOOLS.includes(toolName) || isAllowedByRules(options.allowedTools, toolName, input);
+          if (allowed) {
+            return { behavior: 'allow', updatedInput: input };
+          }
+          console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode): ${toolName}`);
+          options.onPolicyDenied?.({ toolName, toolInput: input, reason: 'planPolicy' });
+          return {
+            behavior: 'deny',
+            message: 'プランモードでは使用できません。必要な操作は承認後のexecで行ってください。',
+          };
         }
 
         // AskUserQuestion 以外は plan モードのデフォルト動作（allowedTools で制御済み）

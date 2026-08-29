@@ -4,11 +4,12 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import type { AiTool, AiUsageData, ScreenAnalysis, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
+import { matchesToolRule, isAllowedByRules, decidePlanPermission } from './plan-permission.js';
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
@@ -477,34 +478,13 @@ const sessionApprovedTools = new Set<string>();
 
 /**
  * セッション内の常時許可ルールにマッチするかチェックする
+ * （matchesToolRule は #332 で ./plan-permission.js に抽出済み。ロジック重複を作らないため import して使う）
  * @returns マッチした場合 true
  */
 function isToolSessionApproved(toolName: string, input: Record<string, unknown>): boolean {
   if (sessionApprovedTools.size === 0) return false;
-
   for (const rule of sessionApprovedTools) {
-    // "ToolName" 形式: ツール名完全一致（Edit, Read, Write, Glob, Grep 等）
-    if (!rule.includes('(')) {
-      if (toolName === rule) return true;
-      continue;
-    }
-
-    // "Bash(cmd *)" / "Bash(cmd)" 形式: Bash コマンドのパターンマッチ
-    const match = rule.match(/^(\w+)\((.+)\)$/);
-    if (!match) continue;
-    const [, ruleToolName, rulePattern] = match;
-    if (toolName !== ruleToolName) continue;
-
-    // Bash コマンドのマッチング
-    if (toolName === 'Bash' && typeof input.command === 'string') {
-      const command = input.command.trim();
-      if (rulePattern.endsWith(' *')) {
-        const prefix = rulePattern.slice(0, -2);
-        if (command === prefix || command.startsWith(prefix + ' ')) return true;
-      } else {
-        if (command === rulePattern) return true;
-      }
-    }
+    if (matchesToolRule(rule, toolName, input)) return true;
   }
   return false;
 }
@@ -750,6 +730,17 @@ export interface SendPromptOptions {
    * 未指定・'ja' の場合は従来どおり何も付与しない（既存挙動を変えないため）。
    */
   language?: import('@devrelay/shared').Language;
+  /**
+   * #332: plan モードの strictReadonly ポリシー（MCP submit_instruction 経由）。
+   * true の場合、plan モードの canUseTool で allowlist（allowedTools の Bash パターン + PLAN_READONLY_TOOLS）
+   * 外のツールを skipPermissions の値に関係なく聞かずに deny する。exec モードには一切影響しない。
+   */
+  strictReadonly?: boolean;
+  /**
+   * #332: strictReadonly により plan モードでツールが deny された際の通知コールバック。
+   * ToolApproval への監査記録・WebUI/Discord/Telegram への通知に使う。
+   */
+  onPolicyDenied?: (info: { toolName: string; toolInput: Record<string, unknown>; reason: string }) => void;
 }
 
 /**
@@ -856,9 +847,9 @@ async function sendPromptToAiSdk(
 
         const isQuestion = toolName === 'AskUserQuestion';
 
-        // 全許可モード: AskUserQuestion 以外は即座に allow（動的に最新値を参照）
-        // Plan モードでも allowedTools 外のツール（find 等）が SDK からパーミッション要求される場合があるため必須
-        if (!isQuestion && getServerSkipPermissions()) {
+        // #332: strictReadonly（MCP submit_instruction 経由）の場合、skipPermissions による
+        // 無条件 allow を行わない。allowlist 判定は下の isQuestion 分岐の後に一本化する
+        if (!isQuestion && !options.strictReadonly && getServerSkipPermissions()) {
           console.log(`⚡ [SDK] Auto-approved (skip-permissions, plan mode): ${toolName}`);
           options.onAutoApproved?.({ toolName, toolInput: input });
           return { behavior: 'allow', updatedInput: input };
@@ -893,6 +884,26 @@ async function sendPromptToAiSdk(
               }
             }, { once: true });
           });
+        }
+
+        // #332: strictReadonly の場合、PLAN_READONLY_TOOLS または allowedTools（Bash パターン）に
+        // マッチしないツールは聞かずに deny する（allowlist 外は allow ではなく deny 側に倒す設計）。
+        // 判定ロジックは plan-permission.ts の decidePlanPermission に集約（node --test で検証済み）
+        const decision = decidePlanPermission({
+          toolName,
+          input,
+          strictReadonly: !!options.strictReadonly,
+          allowedTools: options.allowedTools,
+          readonlyTools: PLAN_READONLY_TOOLS,
+          skipPermissions: !!getServerSkipPermissions(),
+        });
+        if (decision.behavior === 'deny') {
+          console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode): ${toolName}`);
+          options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+          return {
+            behavior: 'deny',
+            message: 'プランモードでは使用できません。必要な操作は承認後のexecで行ってください。',
+          };
         }
 
         // AskUserQuestion 以外は plan モードのデフォルト動作（allowedTools で制御済み）

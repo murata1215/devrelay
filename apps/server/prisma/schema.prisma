@@ -441,6 +441,7 @@ model ToolApproval {
   toolInput  Json      // ツール引数
   isQuestion Boolean   @default(false) // AskUserQuestion の場合 true（リロード時の復元に使用）
   status     String    // 'pending' | 'allow' | 'deny' | 'auto' | 'timeout'
+  reason     String?   // deny/auto の理由（#332。'planPolicy' 等。既存行は null）
   createdAt  DateTime  @default(now())
   resolvedAt DateTime? // 承認/拒否された時刻（pending 中は null）
 

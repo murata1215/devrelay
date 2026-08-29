@@ -191,6 +191,37 @@ export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
   'Bash(uptime *)',
   // リバースプロキシ確認
   'Bash(caddy *)',
+  // #332: 検証コマンド（テスト・型チェックのみ。ファイルを書く pnpm build 等は含めない）
+  'Bash(pnpm test)',
+  'Bash(pnpm test *)',
+  'Bash(pnpm lint)', // --fix で書き込み得るため引数付き(*)は追加しない
+  'Bash(npx tsc --noEmit)',
+  'Bash(npx tsc --noEmit *)',
+];
+
+/**
+ * #332: plan モードの strictReadonly ポリシー時に Bash 以外で常時許可するツール名。
+ * 判断基準: 「読み取り専用か判断に迷うものは deny ではなく allow 側に倒す」（人間承認時の追記）。
+ * - Read/Glob/Grep/NotebookRead: ファイル読み取り専用
+ * - Task: サブエージェント起動（内部ツール呼び出しは親の canUseTool を経由する前提。実機 E2E で要確認）
+ * - ToolSearch/TaskOutput/TaskStop: 前サイクルの調査ログで実使用を確認済みの読み取り/制御系ツール
+ *   （TaskStop は実行中タスクの停止で書き込みではないため allow 側）
+ * - TodoWrite: ファイル書き込みではなくセッション内タスクリストの更新のみのため allow 側
+ * - WebFetch/WebSearch: 外部読み取りのみでリポジトリを変更しない
+ * Write/Edit/MultiEdit/NotebookEdit/ExitPlanMode は意図的に含めない。
+ */
+export const PLAN_READONLY_TOOLS: string[] = [
+  'Read',
+  'Glob',
+  'Grep',
+  'NotebookRead',
+  'Task',
+  'ToolSearch',
+  'TaskOutput',
+  'TaskStop',
+  'TodoWrite',
+  'WebFetch',
+  'WebSearch',
 ];
 
 // プランモード中に許可する読み取り専用 Bash コマンドのデフォルトリスト（Windows 用）
@@ -243,6 +274,12 @@ export const DEFAULT_ALLOWED_TOOLS_WINDOWS: string[] = [
   // ネットワーク・サーバー状態
   'Bash(curl *)',
   'Bash(Invoke-WebRequest *)',
+  // #332: 検証コマンド（テスト・型チェックのみ。ファイルを書く pnpm build 等は含めない）
+  'Bash(pnpm test)',
+  'Bash(pnpm test *)',
+  'Bash(pnpm lint)', // --fix で書き込み得るため引数付き(*)は追加しない
+  'Bash(npx tsc --noEmit)',
+  'Bash(npx tsc --noEmit *)',
 ];
 
 // =============================================================================
