@@ -6,6 +6,79 @@
 
 ## 実装済み機能
 
+### #338: Claude OAuth トークン期限切れがそのまま生 JSON エラーで表示される問題を修正（Phase1 検知の穴埋め）(2026-08-31)
+
+#### 背景
+ユーザーからスクリーンショット付きで「pixblog で `Failed to authenticate. API Error: 401
+{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has
+expired. Re-authenticate to continue."},"request_id":null}` という生の JSON エラーがそのまま
+チャットに出た」と報告。以前依頼した #326（2026-08-28、Claude ログイン切れのリモート検知 Phase1）が
+どこまで実装済みか確認してほしいとのことだったため、まず現状を棚卸しした。
+
+#### 調査結果（#326 Phase1 の実装状況）
+- Phase1（`claude auth status --json` による15分ポーリング検知、DB永続化、WebUI赤バッジ、
+  ok:true→false 遷移時のチャット通知、`formatAiErrorMessage()` による実行時エラーの言い換え）は
+  **commit `03c2c4c` で実装・commit・push 済み**（`git log`/`git status` で確認、作業ツリーはクリーン）。
+- Phase2（`@anthropic-ai/claude-agent-sdk` の control protocol
+  `Query.request({subtype:'claude_authenticate'})` を使ったリモート再ログイン中継本体）は
+  **未着手**（コード全文検索で `claude_authenticate`/`manualUrl`/`automaticUrl` 等のヒットは
+  ドキュメントと `node_modules` の SDK 本体のみで、DevRelay 側の実装コードは0件）。
+- pixblog の Machine 行（`x220-158-18-103/pixblog`）は `claudeAuthOk=true` のまま
+  ユーザー報告時刻の約8.5時間前（前回のサーバー再起動に伴う全 Agent 再接続時）から更新が
+  止まっていた。
+
+#### 根本原因（2点、Phase1 の実装漏れ）
+1. **検知漏れ**: `checkClaudeAuth()`（15分ポーリング）が実行する `claude auth status --json` は
+   ローカルの資格情報ファイルの有無（`loggedIn`）しか見ておらず、資格情報自体は存在するが
+   トークンがサーバー側で期限切れになっているケース（今回実際に発生したケース）を検知できない。
+2. **表示漏れ**: 実行時に実際の 401 応答を受け取った場合の言い換え処理 `formatAiErrorMessage()`
+   は `sendPromptToAiSdk()` の **catch ブロック（JS 例外）にしか配線されていなかった**。しかし
+   Claude Agent SDK はこの種の認証エラーを例外としてではなく、**通常の assistant テキスト
+   ブロックとして** `query()` のメッセージストリームに流す（`m.type === 'assistant'` →
+   `block.type === 'text'`）。この経路には「Prompt is too long」と「not logged in」の2パターンしか
+   検出ロジックが無く、OAuth 期限切れパターンは素通りして生の JSON エラーがそのまま
+   `onOutput(block.text, false)` でチャットに出ていた。
+
+#### 修正内容
+- `agents/{linux,macos}/src/services/ai-runner.ts`: OAuth 期限切れ判定の正規表現を
+  `isClaudeAuthExpiredMessage()` として切り出し、既存の `formatAiErrorMessage()`（catch ブロック用）
+  と新設の assistant テキストブロック用チェックの両方から参照する単一情報源にした（重複防止）。
+  assistant テキストブロックのハンドラに「Prompt is too long」「not logged in」と同列で OAuth 期限
+  切れの分岐を追加し、検出時は生テキストではなく `tChat(lang, 'claudeAuth.runtimeExpiredHint')`
+  （既存 i18n キー、#326 で追加済み・未使用のまま残っていたものを実際に使う経路に接続）を出力。
+- `agents/{linux,macos}/src/services/connection.ts`: 新規 `reportClaudeAuthExpiredFromRuntime()`
+  を export。実行時に実際の 401 を検知した瞬間、15分ポーリングを待たずに即座に
+  `agent:claude:auth:status`（`ok:false`）をサーバーへ送信する。`checkAndReportClaudeAuth()` と
+  同じ「状態が変化したときだけ送信する」ガード（`lastReportedClaudeAuthOk`）を単一情報源として共有
+  するため、ポーリング側との二重送信は起きない。`ai-runner.ts` は既に `getServerSkipPermissions()`
+  を `connection.ts` から import する前例があり、同じ向きの import として追加（循環 import の
+  新規パターンではない）。
+- サーバー側（`agent-manager.ts` の `handleClaudeAuthStatus()`、DB スキーマ、WebUI バッジ、
+  `notifySessionsForMachine()`）は #326 で実装済みのロジックをそのまま利用でき、**無変更**。
+  15分ポーリング自体（`checkClaudeAuth()`）もローカル資格情報チェックとして意味があるため
+  変更していない（別の失敗モード＝完全ログアウトの検知には引き続き有効）。
+
+#### スコープ外（意図的に見送り）
+- Windows（Electron GUI）は #326 時点で `claude-auth.ts` 自体が存在せず対象外のまま
+  （今回も追加していない）。
+- `terminalMode`（PTY 経由の claude 起動）は raw ターミナルストリームのため同様の正規表現検知は
+  困難で対象外（pixblog の該当プロジェクトは `terminalMode=false` のため今回の実害には無関係、
+  DB で確認）。
+- Phase2（リモート再ログイン中継本体）は依然未着手のまま。今回は Phase1 の検知漏れの穴埋めのみ。
+- `checkClaudeAuth()` 自体（`claude auth status --json`）をより正確な生存確認に置き換える改修は
+  行っていない（CLI にトークンの実効性を検証するオプションが無いため、実行時検知で補う設計を採用）。
+
+#### 実装・検証
+`agents/linux/src/services/{ai-runner.ts,connection.ts}` + `agents/macos/src/services/{ai-runner.ts,connection.ts}`
+のみ変更（4ファイル、96行追加）。`apps/server`/`apps/web`/`packages/shared` は無変更
+（`git diff --stat` で確認）。`pnpm build` 6 workspace green、`grep -c 'require('` on web bundle = 0
+（無変更だが慣例どおり再確認）、dist（linux/macos 両方）に `reportClaudeAuthExpiredFromRuntime`/
+`isClaudeAuthExpiredMessage` のコンパイル反映を確認。DB マイグレーション不要（新規列なし）。
+**サーバー再起動は不要**（Agent のみの変更）。**各マシン（Linux/macOS）の `u` が必要**
+（commit/push 前提、Windows は対象外）。実チャットでの実機確認（次回 OAuth 期限切れ発生時に
+友好的なヒントメッセージが出ること・WebUI バッジが即座に赤くなること）は `u` 反映後に確認が必要
+（本サイクルでは未実施、次に本当にトークンが切れるタイミングでのみ検証可能なため）。
+
 ### #337: 実行中でも出る「5分無応答タイムアウト」誤検知の解消 (2026-08-31)
 
 #### 背景
