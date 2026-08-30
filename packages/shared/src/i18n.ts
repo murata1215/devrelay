@@ -189,7 +189,7 @@ export const chatMessages = {
   'progress.devinRunning': { en: '⏳ Devin running... ({label}{limit})', ja: '⏳ Devin 実行中... ({label}{limit})' },
   'progress.codexRunning': { en: '⏳ Codex running... ({label})', ja: '⏳ Codex 実行中... ({label})' },
   'progress.runtimeLimitSuffix': { en: ' / limit {min}m', ja: ' / 上限{min}分' },
-  'progress.timeout': { en: '⏱️ Timeout: no response from agent (5 minutes elapsed)', ja: '⏱️ タイムアウト: エージェントから応答がありませんでした（5分経過）' },
+  'progress.timeout': { en: '⏱️ Timeout: no response from agent ({min} minutes elapsed)', ja: '⏱️ タイムアウト: エージェントから応答がありませんでした（{min}分経過）' },
   'progress.complete': { en: '✅ Done', ja: '✅ 完了' },
 
   // --- agent-manager.ts（sessionId のみ保持するハンドラ、#319） ---

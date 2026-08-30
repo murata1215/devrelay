@@ -26,6 +26,7 @@ import {
 import { sendPushNotificationForSession } from './push-notification-service.js';
 import { sendFcmNotificationForSession } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
+import { decideProgressTimeoutAction } from './progress-timeout.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
@@ -58,16 +59,26 @@ interface ProgressTracker {
   timeoutTimer: NodeJS.Timeout | null;  // タイムアウト自動クリーンアップ用
   projectId: string | null;  // Web クライアントへのルーティング用
   language: Language;  // #318: 進捗表示メッセージの言語（開始時に1回だけ解決してキャッシュ）
+  machineId: string | null;  // #337: ソフトタイムアウト満了時にマシン生存確認するため
 }
 const progressTrackers = new Map<string, ProgressTracker>();
 
 /** sessionId → projectId のキャッシュ（DB クエリ不要で projectId を取得するため） */
 const sessionProjectMap = new Map<string, string>();
 
+/** sessionId → machineId のキャッシュ（#337、sessionProjectMap と同じ流儀） */
+const sessionMachineMap = new Map<string, string>();
+
 const PROGRESS_UPDATE_INTERVAL = 8000; // 8 seconds
 const MAX_OUTPUT_LINES = 15;
-/** エージェント無応答時の自動タイムアウト（5分） */
-const PROGRESS_TIMEOUT = 300_000;
+/**
+ * エージェント無応答時のソフトタイムアウト（既定5分）。
+ * #337: このタイマー満了時、マシンが online なら誤検知として再武装するだけでチャットには出さない
+ * （decideProgressTimeoutAction() 参照）。env で調整可能（#321 の DEVRELAY_TOKEN_WARN_SLOW_* の流儀）。
+ */
+const PROGRESS_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_TIMEOUT_MS) || 300_000;
+/** #337: ハードタイムアウト（既定60分）。マシンが online でも無条件でタイムアウト確定する安全網。 */
+const PROGRESS_HARD_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_HARD_TIMEOUT_MS) || 3_600_000;
 
 // Restore session participants from ChannelSession on server startup
 export async function restoreSessionParticipants() {
@@ -89,8 +100,9 @@ export async function restoreSessionParticipants() {
       });
 
       if (session) {
-        // sessionId → projectId キャッシュを更新
+        // sessionId → projectId / machineId キャッシュを更新
         sessionProjectMap.set(session.id, session.projectId);
+        sessionMachineMap.set(session.id, session.machineId);
         // Restore if machine is online (regardless of session status)
         if (session.machine.status === 'online') {
           addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
@@ -152,6 +164,7 @@ export async function restoreSessionParticipantsForMachine(machineId: string) {
 
       if (session) {
         sessionProjectMap.set(session.id, session.projectId);
+        sessionMachineMap.set(session.id, session.machineId);
         addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
         restoredCount++;
 
@@ -190,6 +203,7 @@ export async function createSession(
   
   sessionParticipants.set(session.id, []);
   sessionProjectMap.set(session.id, projectId);
+  sessionMachineMap.set(session.id, machineId);
   return session.id;
 }
 
@@ -303,16 +317,19 @@ export async function startProgressTracking(sessionId: string) {
   // Clean up any existing tracker
   stopProgressTracking(sessionId);
 
-  // projectId をキャッシュから取得（なければ DB から）
+  // projectId / machineId をキャッシュから取得（どちらか欠けていれば DB から同時に解決、#337）
   let projectId = sessionProjectMap.get(sessionId) ?? null;
-  if (!projectId) {
+  let machineId = sessionMachineMap.get(sessionId) ?? null;
+  if (!projectId || !machineId) {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { projectId: true },
+      select: { projectId: true, machineId: true },
     });
     if (session) {
       projectId = session.projectId;
+      machineId = session.machineId;
       sessionProjectMap.set(sessionId, projectId);
+      sessionMachineMap.set(sessionId, machineId);
     }
   }
 
@@ -329,6 +346,7 @@ export async function startProgressTracking(sessionId: string) {
     timeoutTimer: null,
     projectId,
     language,
+    machineId,
   };
 
   // Send initial progress message to all participants
@@ -356,27 +374,72 @@ export async function startProgressTracking(sessionId: string) {
     updateProgressMessages(sessionId);
   }, PROGRESS_UPDATE_INTERVAL);
 
-  // エージェント無応答時の自動タイムアウト
-  tracker.timeoutTimer = setTimeout(() => {
-    console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s)`);
-    finalizeProgress(sessionId, tChat(language, 'progress.timeout'));
-  }, PROGRESS_TIMEOUT);
-
+  // tracker を登録してからタイマーを武装する（armProgressTimeout は progressTrackers から引くため）
   progressTrackers.set(sessionId, tracker);
+  armProgressTimeout(sessionId);
+}
+
+/**
+ * #337: 進捗タイムアウトタイマーを（再）武装する。
+ * 従来は startProgressTracking() と appendSessionOutput() に同じ setTimeout がコピーされていた
+ * （#304/#319 と同種の同期漏れ予備軍）ため、ここに一本化した。
+ */
+function armProgressTimeout(sessionId: string): void {
+  const tracker = progressTrackers.get(sessionId);
+  if (!tracker) return;
+  if (tracker.timeoutTimer) {
+    clearTimeout(tracker.timeoutTimer);
+  }
+  tracker.timeoutTimer = setTimeout(() => {
+    onProgressTimeout(sessionId);
+  }, PROGRESS_TIMEOUT);
+}
+
+/**
+ * #337: ソフトタイムアウト（無出力 PROGRESS_TIMEOUT）満了時のハンドラ。
+ * マシンが online なら「エージェントが生きている」とみなしチャットには何も出さずタイマーを再武装する。
+ * offline / 不明、またはセッション開始からのハードタイムアウト超過時は従来どおり finalize する。
+ */
+async function onProgressTimeout(sessionId: string): Promise<void> {
+  const tracker = progressTrackers.get(sessionId);
+  if (!tracker) return;
+
+  let machineStatus: string | null = null;
+  try {
+    if (tracker.machineId) {
+      const machine = await prisma.machine.findUnique({
+        where: { id: tracker.machineId },
+        select: { status: true },
+      });
+      machineStatus = machine?.status ?? null;
+    }
+  } catch (err) {
+    console.error(`Failed to resolve machine status for session ${sessionId}:`, err);
+  }
+
+  const decision = decideProgressTimeoutAction({
+    elapsedSinceStartMs: Date.now() - tracker.startTime,
+    hardTimeoutMs: PROGRESS_HARD_TIMEOUT,
+    machineStatus,
+  });
+
+  if (decision.action === 'extend') {
+    console.log(`⏳ Progress soft-timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s since last output), agent online, extending`);
+    armProgressTimeout(sessionId);
+    return;
+  }
+
+  console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s since last output, reason=${decision.reason})`);
+  const minElapsed = Math.round(PROGRESS_TIMEOUT / 60000);
+  finalizeProgress(sessionId, tChat(tracker.language, 'progress.timeout', { min: minElapsed }));
 }
 
 // Add output to the buffer
 export function appendSessionOutput(sessionId: string, output: string) {
   const tracker = progressTrackers.get(sessionId);
   if (tracker) {
-    // タイムアウトタイマーをリセット（最後の出力から5分に延長）
-    if (tracker.timeoutTimer) {
-      clearTimeout(tracker.timeoutTimer);
-    }
-    tracker.timeoutTimer = setTimeout(() => {
-      console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s since last output)`);
-      finalizeProgress(sessionId, tChat(tracker.language, 'progress.timeout'));
-    }, PROGRESS_TIMEOUT);
+    // タイムアウトタイマーをリセット（最後の出力から PROGRESS_TIMEOUT に延長、#337 で一本化）
+    armProgressTimeout(sessionId);
 
     // Check if this is context info (starts with 📊)
     if (output.startsWith('📊') && tracker.contextInfo === '') {
