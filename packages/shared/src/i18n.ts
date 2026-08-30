@@ -253,6 +253,12 @@ export const chatMessages = {
     en: '❌ Instruction is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',
     ja: '❌ 指示が長すぎます（{rawLength}文字、上限{limit}文字）。短くして再送してください（自動での切り詰めは行いません）。',
   },
+
+  // --- #335: 人間入力テキストの長さ上限（ゲート⑤: ask <project>: <question>） ---
+  'humanText.questionTooLong': {
+    en: '❌ Question is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',
+    ja: '❌ 質問が長すぎます（{rawLength}文字、上限{limit}文字）。短くして再送してください（自動での切り詰めは行いません）。',
+  },
 } as const;
 
 export type ChatMessageKey = keyof typeof chatMessages;

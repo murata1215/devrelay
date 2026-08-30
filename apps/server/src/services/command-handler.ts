@@ -42,7 +42,7 @@ import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
-import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag } from './human-text-fence.js';
+import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag, fenceIfHuman, buildHumanTextMeta } from './human-text-fence.js';
 import {
   createTestflightService,
   listTestflightServices,
@@ -72,6 +72,18 @@ const [W_PROMPT_PREFIX_JA, W_PROMPT_PREFIX_EN] = W_COMMAND_PROMPT_PREFIXES;
  * 超過時は切り詰めず明示エラーで拒否する（静かなフォールバック禁止、#325）。
  */
 const EXEC_INSTRUCTION_MAX_LENGTH = 4000;
+
+/**
+ * #335: ゲート⑤ ask <project>: <question> の長さ上限（string.length = UTF-16 コードユニット数基準）。
+ * ② と同じ 4,000（チャット由来の自由テキストのため）。超過時は切り詰めず明示エラーで拒否する。
+ */
+const ASK_QUESTION_MAX_LENGTH = 4000;
+
+/**
+ * #335: ゲート⑥ teamexec <project>: <instruction> の長さ上限（string.length 基準）。
+ * ② と同じ 4,000。`e,<指示>` の teamexec 転送（F3）にもこの上限が適用される。
+ */
+const TEAMEXEC_INSTRUCTION_MAX_LENGTH = 4000;
 
 /**
  * context から DB の User.id を解決する
@@ -718,8 +730,17 @@ async function handleExec(
     // customPrompt がなければデフォルトの exec プロンプト
     const instruction = customPrompt || tChat(lang, 'exec.defaultInstruction');
 
+    // #335（F3）: customPrompt が指定されていれば呼び出し元の promptOrigin をそのまま引き継ぐ
+    // （未指定＝'human' 扱いが安全側。command-parser.ts が 'human'/'system' 以外を付与することはない）。
+    // customPrompt 省略時（素の e/exec）は exec.defaultInstruction という DevRelay 自身の固定文のため
+    // 'system' として扱い fence しない。
+    // 二重 fence が起きない構造的根拠: この return は本関数末尾の fenceHumanText() 呼び出し（#334 ゲート②）
+    // より前にあるため、この転送経路では handleExec 側の fence は一度も実行されない。
+    // fence は handleTeamExec 側の1箇所（fenceIfHuman）だけで行われる。
+    const forwardOrigin = customPrompt !== undefined ? (promptOrigin ?? 'human') : 'system';
+
     // 既存の handleTeamExec を呼び出す（接続プロジェクト名で検索）
-    return handleTeamExec(context, remoteName, instruction);
+    return handleTeamExec(context, remoteName, instruction, forwardOrigin);
   }
 
   // プロジェクト未接続の場合、自動再接続を試みる
@@ -1827,6 +1848,18 @@ async function handleAskMember(
   targetProjectName: string,
   question: string,
 ): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+
+  // #335（ゲート⑤）: 長さ検証は関数の先頭、いかなる状態変更（sendMessage/session.create/
+  // message.create/AIへの送信）よりも前に行う。切り詰めず明示エラーで拒否する（#325）。
+  const askLengthCheck = validateHumanTextLength(question, ASK_QUESTION_MAX_LENGTH);
+  if (!askLengthCheck.ok) {
+    return tChat(lang, 'humanText.questionTooLong', {
+      rawLength: String(askLengthCheck.rawLength),
+      limit: String(askLengthCheck.limit)
+    });
+  }
+
   const dbUserId = await resolveDbUserId(context);
   if (!dbUserId) {
     return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
@@ -1860,6 +1893,16 @@ async function handleAskMember(
 
   // ユーザーの質問を DB に保存（Conversations ページで表示するため）
   // 送信元プロジェクト名を保存（クロスクエリの送信元表示用）
+  // #335: content は raw text を無切り詰めで保存し、humanTextMeta で監査メタのみ記録する
+  // （rawRef='message.content' で本行が raw の所在であることを示す。①②③ と同じ設計）
+  const { count: askNeutralizedCount } = neutralizeHumanInputTag(question);
+  const askHumanTextMeta = buildHumanTextMeta({
+    kind: 'ask',
+    rawLength: askLengthCheck.rawLength,
+    limit: ASK_QUESTION_MAX_LENGTH,
+    neutralized: askNeutralizedCount,
+    rawRef: 'message.content',
+  });
   await prisma.message.create({
     data: {
       sessionId: tempSessionId,
@@ -1867,17 +1910,21 @@ async function handleAskMember(
       content: question,
       platform: context.platform,
       sourceProjectName: context.currentProjectName ?? undefined,
+      humanTextMeta: askHumanTextMeta,
     },
   });
 
   try {
+    // #335: AI に渡すのは provenance fence（human-input タグ）で囲んだ文字列。
+    // fence はセキュリティ境界ではなく「人間由来のデータである」ことを示す目印
+    // （権限制御は #332/#333 の permissionPolicy / decidePlanPermission() が担う、#334 と同方針）。
     const result = await executeCrossProjectQuery(
       targetProject.machine.id,
       tempSessionId,
       targetProject.name,
       targetProject.path,
       targetProject.defaultAi as AiTool,
-      question,
+      fenceIfHuman('ask', question, 'human'),
       dbUserId,
     );
 
@@ -1905,7 +1952,24 @@ async function handleTeamExec(
   context: UserContext,
   targetProjectName: string,
   instruction: string,
+  instructionOrigin: string = 'human',
 ): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+
+  // #335（ゲート⑥ + F3）: 長さ検証は関数の先頭、いかなる状態変更よりも前に行う。
+  // instructionOrigin==='human' のときのみ検証する（直接呼び出し(command-parser.ts経由)の既定は
+  // 'human'。handleExec からの F3 転送では 'system'（w 等の DevRelay 自身が生成した固定文）の
+  // 場合があり、その場合は #334 ゲート②と同じく検証対象外）。
+  if (instructionOrigin === 'human') {
+    const teamexecLengthCheck = validateHumanTextLength(instruction, TEAMEXEC_INSTRUCTION_MAX_LENGTH);
+    if (!teamexecLengthCheck.ok) {
+      return tChat(lang, 'humanText.tooLong', {
+        rawLength: String(teamexecLengthCheck.rawLength),
+        limit: String(teamexecLengthCheck.limit)
+      });
+    }
+  }
+
   const dbUserId = await resolveDbUserId(context);
   if (!dbUserId) {
     return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
@@ -1939,6 +2003,19 @@ async function handleTeamExec(
 
   // ユーザーの指示を DB に保存（Conversations ページで表示するため）
   // 送信元プロジェクト名を保存（クロスクエリの送信元表示用）
+  // #335: content は raw text（[teamexec] プレフィックス付き、②の [exec] と同じ扱い）を無切り詰めで
+  // 保存し、instructionOrigin==='human' のときのみ humanTextMeta で監査メタを記録する
+  // （rawRef='message.content' で本行が raw の所在であることを示す）。
+  const teamexecHumanTextMeta =
+    instructionOrigin === 'human'
+      ? buildHumanTextMeta({
+          kind: 'teamexec',
+          rawLength: instruction.length,
+          limit: TEAMEXEC_INSTRUCTION_MAX_LENGTH,
+          neutralized: neutralizeHumanInputTag(instruction).count,
+          rawRef: 'message.content',
+        })
+      : undefined;
   await prisma.message.create({
     data: {
       sessionId: tempSessionId,
@@ -1946,17 +2023,20 @@ async function handleTeamExec(
       content: `[teamexec] ${instruction}`,
       platform: context.platform,
       sourceProjectName: context.currentProjectName ?? undefined,
+      ...(teamexecHumanTextMeta ? { humanTextMeta: teamexecHumanTextMeta } : {}),
     },
   });
 
   try {
+    // #335: instructionOrigin==='human' のときのみ provenance fence で囲む。
+    // 'system'（F3 経由の w 等）はそのまま無変更で渡す（#314/#315 の判定に影響させない）。
     const result = await executeCrossProjectExec(
       targetProject.machine.id,
       tempSessionId,
       targetProject.name,
       targetProject.path,
       targetProject.defaultAi as AiTool,
-      instruction,
+      fenceIfHuman('teamexec', instruction, instructionOrigin),
       dbUserId,
     );
 

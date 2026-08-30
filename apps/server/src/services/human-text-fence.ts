@@ -90,3 +90,61 @@ export function validateHumanTextLength(text: string, limit: number): LengthVali
   }
   return { ok: true, rawLength };
 }
+
+/**
+ * #335: ゲート⑤(ask)/⑥(teamexec) 用。origin==='human' のときだけ fenceHumanText() を適用する。
+ *
+ * origin が 'human' 以外（'system' や undefined）の場合はテキストを一切変更せず返す
+ * （`w` コマンド等 DevRelay 自身が生成した固定プロンプトを誤って囲わないため、
+ * #334 ゲート②の isWCommand 判定と同じ「system は fence しない」方針を踏襲）。
+ *
+ * @param kind fenceHumanText() に渡す種別（'ask' | 'teamexec'）
+ * @param text 対象テキスト
+ * @param origin 'human' | 'system' | undefined（'human' のときのみ fence する）
+ */
+export function fenceIfHuman(kind: string, text: string, origin: string | undefined): string {
+  if (origin !== 'human') {
+    return text;
+  }
+  return fenceHumanText(kind, text);
+}
+
+/** #335: 監査メタ JSON 組み立ての入力 */
+export interface HumanTextMetaInput {
+  /** テキストの種別（'ask' | 'teamexec' 等） */
+  kind: string;
+  /** 検証済みの元テキストの長さ（string.length 基準） */
+  rawLength: number;
+  /** 適用した上限文字数 */
+  limit: number;
+  /** neutralizeHumanInputTag() が無害化した偽造タグの件数 */
+  neutralized: number;
+  /** raw text（無切り詰め全文）の実際の所在を指す参照文字列（例: 'message.content'） */
+  rawRef: string;
+}
+
+/**
+ * #335: ゲート⑤(ask)/⑥(teamexec) 用の監査メタ JSON を組み立てる。
+ *
+ * キー集合・出力順序はゲート①②③（command-handler.ts の handleExec、mcp/tools.ts の
+ * submit_instruction/approve_implementation）の JSON.stringify() 呼び出しと完全に一致させる:
+ * kind → origin → rawLength → limit → fenced → neutralized → rawRef。
+ * origin は常に 'human'（fenceIfHuman が 'human' 以外を fence しないのと対になり、
+ * このメタは「fence された human 由来テキスト」にのみ付与する前提のため固定値とする）。
+ * fenced は常に true（このメタが付く時点で fence 済みであるため固定値とする）。
+ *
+ * ①②③ とは別の呼び出し箇所（DRY より「既存の不変条件を壊さない」を優先、#331 と同じ判断）だが、
+ * キー集合・順序が一致することは apps/server/tests/human-text-fence.test.mjs で担保する。
+ * ①②③ 側との統合（共通関数への寄せ）は行っていない（別サイクルの残件、doc/changelog.md 参照）。
+ */
+export function buildHumanTextMeta(input: HumanTextMetaInput): string {
+  return JSON.stringify({
+    kind: input.kind,
+    origin: 'human',
+    rawLength: input.rawLength,
+    limit: input.limit,
+    fenced: true,
+    neutralized: input.neutralized,
+    rawRef: input.rawRef,
+  });
+}

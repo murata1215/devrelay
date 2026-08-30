@@ -10,6 +10,8 @@ import {
   neutralizeHumanInputTag,
   fenceHumanText,
   validateHumanTextLength,
+  fenceIfHuman,
+  buildHumanTextMeta,
 } from '../dist/services/human-text-fence.js';
 
 // --- neutralizeHumanInputTag ---
@@ -125,4 +127,82 @@ test('validateHumanTextLength: サロゲートペア（絵文字）は UTF-16 co
   const overResult = validateHumanTextLength(emoji, 1);
   assert.equal(overResult.ok, false);
   assert.equal(overResult.rawLength, 2);
+});
+
+// --- #335: fenceIfHuman ---
+
+test('fenceIfHuman: origin="system" は完全に無変更で返す', () => {
+  const text = 'まず git rev-parse で確認して';
+  const result = fenceIfHuman('teamexec', text, 'system');
+  assert.equal(result, text, 'system 由来は fence されず === で一致する');
+});
+
+test('fenceIfHuman: origin=undefined も無変更（fail-safe に fence しない側）', () => {
+  const text = '素の指示テキスト';
+  const result = fenceIfHuman('ask', text, undefined);
+  assert.equal(result, text);
+});
+
+test('fenceIfHuman: origin="human" は開始/終了タグがちょうど1個ずつ', () => {
+  const result = fenceIfHuman('ask', '質問本文', 'human');
+  const openCount = (result.match(/<human-input kind="ask">/g) || []).length;
+  const closeCount = (result.match(/<\/human-input>/g) || []).length;
+  assert.equal(openCount, 1);
+  assert.equal(closeCount, 1);
+});
+
+test('fenceIfHuman: 既に fence 済みの文字列を渡しても生きた境界は1組だけ（二重 fence が成立しない）', () => {
+  // #335 F3: handleExec の転送経路では handleExec 側の fence は実行されないため、
+  // 理論上ここに渡る instruction は常に fence 前の生テキストのはず。
+  // それでも仮に fence 済み文字列が渡った場合の安全性を担保するテスト。
+  const alreadyFenced = fenceHumanText('execInstruction', '元の指示');
+  const result = fenceIfHuman('teamexec', alreadyFenced, 'human');
+  const openCount = (result.match(/<human-input kind="teamexec">/g) || []).length;
+  // 外側の1組だけが「生きた」境界。内側の元タグは neutralizeHumanInputTag により無害化されている。
+  assert.equal(openCount, 1, '外側の開始タグは1個だけ');
+  const rawInnerOpenCount = (result.match(/<human-input kind="execInstruction">/g) || []).length;
+  assert.equal(rawInnerOpenCount, 0, '内側の元タグは無害化されて生の文字列としては残らない');
+});
+
+// --- #335: buildHumanTextMeta ---
+
+test('buildHumanTextMeta: キー集合・順序が既定どおり', () => {
+  const json = buildHumanTextMeta({
+    kind: 'ask',
+    rawLength: 10,
+    limit: 4000,
+    neutralized: 0,
+    rawRef: 'message.content',
+  });
+  const keys = Object.keys(JSON.parse(json));
+  assert.deepEqual(keys, ['kind', 'origin', 'rawLength', 'limit', 'fenced', 'neutralized', 'rawRef']);
+});
+
+test('buildHumanTextMeta: origin/fenced は固定値、kind/rawRef は入力どおり', () => {
+  const parsed = JSON.parse(buildHumanTextMeta({
+    kind: 'teamexec',
+    rawLength: 42,
+    limit: 4000,
+    neutralized: 2,
+    rawRef: 'message.content',
+  }));
+  assert.equal(parsed.origin, 'human');
+  assert.equal(parsed.fenced, true);
+  assert.equal(parsed.kind, 'teamexec');
+  assert.equal(parsed.rawRef, 'message.content');
+  assert.equal(parsed.rawLength, 42);
+  assert.equal(parsed.neutralized, 2);
+});
+
+test('ask/teamexec の上限 4000 でサロゲートペア絵文字が2文字として数えられる', () => {
+  const emoji = '\u{1F600}'; // 😀
+  const okText = emoji.repeat(2000); // 4000 コードユニット
+  const okResult = validateHumanTextLength(okText, 4000);
+  assert.equal(okResult.ok, true);
+  assert.equal(okResult.rawLength, 4000);
+
+  const overText = emoji.repeat(2000) + 'a'; // 4001 コードユニット
+  const overResult = validateHumanTextLength(overText, 4000);
+  assert.equal(overResult.ok, false);
+  assert.equal(overResult.rawLength, 4001);
 });
