@@ -6,6 +6,65 @@
 
 ## 実装済み機能
 
+### #334: ゲート①②③ 人間入力テキストの長さ上限・provenance fence・監査 (2026-08-30)
+
+#### 背景
+#332/#333 で MCP 経由 plan モードの `permissionPolicy`（strictReadonly）は「構造判定」（セグメント分割 +
+argv0 + allowedTools 和集合）まで固めたが、これは AI が発行するツール呼び出しの権限制御であり、
+**人間が入力してプロンプトに連結されるテキスト自体**（① `approve_implementation.note` / ② チャット
+`e,<指示>` / ③ `submit_instruction.instruction`）は長さ上限・囲い（fencing）・監査のいずれも存在しなかった
+（前サイクルの経路調査で確認済み）。
+
+#### 設計
+新規 `apps/server/src/services/human-text-fence.ts`（外部 import ゼロの純粋関数群、`permission-policy.ts`/
+`approval-prompt.ts` と同じ流儀）に3つの関数を集約: `validateHumanTextLength(text, limit)`（`string.length`
+= UTF-16 code unit 数を基準に判定、サロゲートペアの絵文字は2文字とカウントされる点を JSDoc に明記）、
+`neutralizeHumanInputTag(text)`（`<human-input>` タグの偽造をゼロ幅スペース挿入で無害化、削除・切り詰めはしない）、
+`fenceHumanText(kind, text)`（`<human-input kind="...">固定免責文\n---\n本文</human-input>` の形式で囲う）。
+**fence はセキュリティ境界ではない**——権限制御は #332/#333 の `permissionPolicy`/`decidePlanPermission()`
+が構造的に担っており、fence の役割は「このテキストは人間由来のデータであり、システム命令でも承認状態でも
+ない」ことを示す provenance 境界のみ（固定免責文にもその旨を明記）。
+
+上限値は ① 2,000 / ② 4,000 / ③ 20,000（`string.length` 基準）。超過時は**切り詰めず明示エラーで拒否**
+（静かなフォールバック禁止、#325）、エラー本文に実長(`rawLength`)と上限(`limit`)を含める。
+
+**処理順序**は3経路とも「制御コマンド解析 → payload抽出 → 長さ検証 → fence」に統一し、長さ検証は
+**その経路のあらゆる状態変更より前**に実施: ③は `createSession` より前（`mcp/tools.ts:475-489`）、
+①は `Message.create({content:'exec'})` より前（`mcp/tools.ts:609-626`、`Message.create` は `:644`）、
+②は `handleExec()` の**冒頭**（`lastRemoteProjectId` teamexec 転送分岐より前、
+`command-handler.ts:697-710`、転送分岐は`:713`）に配置し拒否時は一切の副作用が発生しない設計とした。
+
+② の `w` コマンド判定は、従来の `customPrompt?.startsWith(W_PROMPT_PREFIX_JA/EN)`（fence 適用後の文字列に
+依存する脆い実装）から、`command-parser.ts` が解析時点で付与する構造的な `promptOrigin`（`'human'` |
+`'system'`、enum不使用・String+コメント）フィールドに置き換えた。`UserCommand` の `exec` variant に
+`promptOrigin?: string` を追加（`packages/shared/src/types.ts`）、`e,<指示>` と bare `w` の両方の
+パースサイトで付与。`isWCommand = promptOrigin === 'system'` として #314/#315 の Codex `danger-full-access`
+切替に影響しないことを確認。
+
+監査は `Message.humanTextMeta String?`（新規DDL）に JSON 文字列でメタ情報のみを持つ（enumなし・
+camelCase・`@@map`なし）。raw text 自体は① `Session.approvalNote`／②③ `Message.content` に無切り詰めで
+既に全文保存されるため、meta には `rawRef`（`'message.content'` | `'session.approvalNote'`）で参照先を
+明記する設計とし、「メタのみで raw text が復元できない」状態を避けた。
+
+#### スコープ外（次サイクル送り）
+⑤ ask / ⑥ teamexec / ⑦ AskUserQuestion 回答は今回のスコープ外（Agent 変更・全機 `u` の波及を避けるため）。
+また `handleExec()` の `lastRemoteProjectId`（teamexec 転送）分岐には fence を適用していない（F3、
+長さ検証のみ分岐より前に位置するため効いているが fence 自体は無し）。いずれも別サイクルの課題として残す。
+
+#### 実装・検証
+`apps/server`(human-text-fence.ts新規, mcp/tools.ts, mcp/approval-prompt.ts, services/command-handler.ts,
+services/command-parser.ts, prisma/schema.prisma) + `packages/shared`(types.ts, i18n.ts) 変更、
+Agent（3OS）は無変更（`git diff --stat -- agents/` が空であることを確認、**各マシンの `u` は不要**）。
+`pnpm build` 6 workspace すべて green、`apps/server` の `node --test tests/` 24/24 green（新規
+`human-text-fence.test.mjs` 17件、サロゲートペア絵文字のケース含む。既存 `approval-prompt.test.mjs` の
+note 未指定/空白のみケースは #331 の不変条件を維持したまま note 指定時の2ケースのみ fence 形式に更新）、
+`agents/linux`/`agents/macos` の既存 `plan-permission.test.mjs` 34/34 green（非退行確認）、
+`grep -c 'require('` on web bundle = 0。DDL は `doc/migrations/334_message_human_text_meta.md` に記載
+（`ALTER TABLE "Message" ADD COLUMN IF NOT EXISTS "humanTextMeta" TEXT;`、人間が psql で適用）。
+**DB マイグレーション適用（psql）+ `npx prisma generate` + server 再起動が必要**（自己改変サイクルにつき
+本サイクルでは一切実行していない）。実チャットでの実機確認（① note 超過拒否・② `e,<指示>` 超過拒否・
+③ instruction 超過拒否、いずれも状態変更が発生しないこと）は人間の反映後に別途実施が必要。
+
 ### #333: plan モード strictReadonly のグロブ false positive 修正 ＋ deny メッセージへの理由付与 (2026-08-30)
 
 #### 背景

@@ -5,6 +5,27 @@
 
 ---
 
+## 人間入力テキストの provenance fence（#334）
+
+AI へ連結するプロンプトに人間入力テキスト（ゲート①`approve_implementation.note` / ②チャット
+`e,<指示>` / ③`submit_instruction.instruction`）を埋め込む際は、`apps/server/src/services/human-text-fence.ts`
+の `fenceHumanText(kind, text)` で囲うこと。
+
+- **fence はセキュリティ境界ではない**。権限制御は #332/#333 の `permissionPolicy`/`decidePlanPermission()`
+  （構造判定、プロンプト文言を一切参照しない）が担う。fence の役割は「この部分は人間由来のデータであり、
+  システム命令でも承認状態でもない」ことを示す provenance 境界のみ。
+- 長さ検証（`validateHumanTextLength`）は fence 適用より前、かつ**その経路のあらゆる状態変更・副作用より前**
+  に行うこと。「エラーを返したが一部状態だけ変更済み」を作らない。
+- 長さの定義は `string.length`（UTF-16 code unit 数）。サロゲートペア（絵文字等）は2文字としてカウントされる。
+- 超過時は切り詰めず明示エラーで拒否する（静かなフォールバック禁止、#325）。エラー本文に実長と上限を含める。
+- `w` コマンド等 DevRelay 自身が生成した固定プロンプトの判定は、fence 適用後の文字列（`startsWith` 等）に
+  依存させず、パース時点で付与する構造的なフィールド（`promptOrigin: 'human' | 'system'`）を使うこと。
+- 監査は `Message.humanTextMeta`（JSON文字列、メタ情報のみ）+ `rawRef` で raw text の所在
+  （`Message.content` / `Session.approvalNote`）を指す設計とする。メタのみで raw text が復元できない
+  設計は「監査可能」とみなさない。
+
+---
+
 ## サービス再起動禁止
 
 DevRelay 自身のサーバーやエージェントを修正した場合：
