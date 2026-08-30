@@ -42,7 +42,7 @@ import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
-import { fenceHumanText, validateHumanTextLength } from './human-text-fence.js';
+import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag } from './human-text-fence.js';
 import {
   createTestflightService,
   listTestflightServices,
@@ -826,6 +826,7 @@ async function handleExec(
           rawLength: customPrompt.length,
           limit: EXEC_INSTRUCTION_MAX_LENGTH,
           fenced: true,
+          neutralized: neutralizeHumanInputTag(customPrompt).count,
           rawRef: 'message.content'
         })
       : undefined;
