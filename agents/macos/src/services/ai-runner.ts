@@ -11,7 +11,7 @@ import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { decidePlanPermission } from './plan-permission.js';
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
-import { getServerSkipPermissions } from './connection.js';
+import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime } from './connection.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 
@@ -582,13 +582,24 @@ export function resolveToolApproval(requestId: string, response: ToolApprovalRes
 }
 
 /**
+ * OAuth トークン期限切れ（`OAuth access token has expired`）または再ログイン要求
+ * （`Please run /login`）のメッセージかどうかを判定する（Claude ログイン切れ検知、Phase1）。
+ * `formatAiErrorMessage`（catch ブロックの例外パス）と assistant テキストブロックの
+ * 両方から参照する単一情報源（#338: `claude auth status --json` はローカルの資格情報の
+ * 有無しか見ておらずこのケースを検知できないため、実行時のメッセージ検知が唯一確実な経路）。
+ */
+function isClaudeAuthExpiredMessage(message: string): boolean {
+  return /OAuth access token has expired|Please run \/login/i.test(message);
+}
+
+/**
  * AI 実行時エラーメッセージを整形する（Claude ログイン切れ検知の実行時併用、リモート再ログイン中継 Phase1）。
  * SDK/CLI が投げる生のエラーに `OAuth access token has expired` / `Please run /login` が含まれる場合、
  * ユーザーには生エラーではなく「login で復旧できます」という実行可能なヒントを返す。
  * それ以外のエラーは従来どおり `Error: {message}` のまま返す（挙動を変えない）。
  */
 function formatAiErrorMessage(message: string, lang: Language = DEFAULT_CHAT_LANGUAGE): string {
-  if (/OAuth access token has expired|Please run \/login/i.test(message)) {
+  if (isClaudeAuthExpiredMessage(message)) {
     return tChat(lang, 'claudeAuth.runtimeExpiredHint');
   }
   return `Error: ${message}`;
@@ -957,6 +968,17 @@ async function sendPromptToAiSdk(
                 '対象マシンで `claude` を起動してログインするか、`a` コマンドで別の AI ツール（devin 等）に切り替えてください。',
                 true
               );
+              return result;
+            }
+            // #338: OAuth トークン期限切れ検出。SDK はこの失敗を JS 例外としてではなく通常の
+            // assistant テキストブロックとして返すため、従来はここを素通りして生の JSON エラー
+            // （`Failed to authenticate. API Error: 401 {...}`）がそのままチャットに出ていた。
+            // 15分ポーリング（`claude auth status --json`）はローカル資格情報の有無しか見ておらず
+            // このケースを検知できないため、ここで検知した瞬間に即座にサーバーへ報告する。
+            if (isClaudeAuthExpiredMessage(block.text)) {
+              console.log(`[claude/sdk] 🔒 OAuth token expired detected in assistant text`);
+              reportClaudeAuthExpiredFromRuntime();
+              onOutput(formatAiErrorMessage(block.text, options.language ?? DEFAULT_CHAT_LANGUAGE), true);
               return result;
             }
             fullOutput += block.text;

@@ -1544,6 +1544,30 @@ async function checkAndReportClaudeAuth() {
   });
 }
 
+/**
+ * 実行時に実際の 401 OAuth 期限切れ応答を検知したときに、15分ポーリングを待たず即座にサーバーへ報告する。
+ *
+ * `checkAndReportClaudeAuth()` が使う `claude auth status --json` はローカルの資格情報ファイルの
+ * 有無しか見ておらず、トークン自体がサーバー側で期限切れになっているケース（本件で実際に発生）を
+ * 検出できない。そのため実際の API 呼び出しで 401 を受け取った瞬間（ai-runner.ts の
+ * `sendPromptToAiSdk` から呼ばれる）が、このケースを検知できる唯一確実な経路になる。
+ * `checkAndReportClaudeAuth` と同じ「状態が変化したときだけ送信する」ガードを共有する
+ * （`lastReportedClaudeAuthOk` を単一情報源として使う）。
+ */
+export function reportClaudeAuthExpiredFromRuntime() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !currentMachineId) return;
+  if (lastReportedClaudeAuthOk === false) return; // 既に報告済み → 重複送信しない
+  lastReportedClaudeAuthOk = false;
+  console.log(`🔑 Claude auth status changed: expired (detected via runtime API error)`);
+  sendMessage({
+    type: 'agent:claude:auth:status',
+    payload: {
+      machineId: currentMachineId,
+      ok: false,
+    },
+  });
+}
+
 function startClaudeAuthCheck() {
   // 初回チェックは server:connect:ack で machineId が確定した時点で実行される（上記参照）。
   // ここでは以降の定期チェックのみ設定する。
