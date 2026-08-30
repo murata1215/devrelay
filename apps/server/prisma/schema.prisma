@@ -282,6 +282,11 @@ model Message {
   platform    String        // どのプラットフォームから送信されたか
   usageData          Json?         // AI 実行時の使用量データ（usage, modelUsage, durationMs）
   sourceProjectName  String?       // クロスプロジェクトクエリの送信元プロジェクト名
+  // #334: 人間入力テキスト（ゲート①②③）の監査メタ情報（JSON文字列）。
+  // 例: {"kind":"execInstruction","origin":"human","rawLength":1234,"limit":4000,"fenced":true,"rawRef":"message.content"}
+  // raw text 自体は本行の content（① approve_implementation の場合は Session.approvalNote）に
+  // 無切り詰めで保存されるため、本列は「どこにraw textがあるか」を辿るための監査メタのみを持つ。
+  humanTextMeta      String?
   createdAt          DateTime      @default(now())
   files              MessageFile[] // 添付ファイル（入力 or 出力）
 

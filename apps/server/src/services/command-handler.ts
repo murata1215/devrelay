@@ -42,6 +42,7 @@ import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
+import { fenceHumanText, validateHumanTextLength } from './human-text-fence.js';
 import {
   createTestflightService,
   listTestflightServices,
@@ -65,6 +66,12 @@ const pendingUpdate = new Set<string>();
 // プロンプト文面を変更しても判定側が自動追従し、同期漏れ（#90, #304 の再発）を防ぐ。
 // #316: 言語対応により JA/EN どちらの言語で実行された `w` も判定できるよう2要素になった。
 const [W_PROMPT_PREFIX_JA, W_PROMPT_PREFIX_EN] = W_COMMAND_PROMPT_PREFIXES;
+
+/**
+ * #334: チャット `e,<指示>`（ゲート②）の長さ上限（string.length = UTF-16 コードユニット数基準）。
+ * 超過時は切り詰めず明示エラーで拒否する（静かなフォールバック禁止、#325）。
+ */
+const EXEC_INSTRUCTION_MAX_LENGTH = 4000;
 
 /**
  * context から DB の User.id を解決する
@@ -246,7 +253,7 @@ export async function executeCommand(
       return handleClear(context);
 
     case 'exec':
-      return handleExec(context, command.prompt);
+      return handleExec(context, command.prompt, command.promptOrigin);
 
     case 'link':
       return handleLink(context);
@@ -680,8 +687,28 @@ async function handleClear(context: UserContext): Promise<string> {
   return tChat(lang, 'clear.done');
 }
 
-async function handleExec(context: UserContext, customPrompt?: string): Promise<string> {
+async function handleExec(
+  context: UserContext,
+  customPrompt?: string,
+  promptOrigin?: string
+): Promise<string> {
   const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+
+  // #334（ゲート②）: 長さ検証は制御コマンド解析→payload抽出の直後、
+  // enqueue / WebSocket送信 / Message作成 / exec・teamexec転送のいずれよりも前に行う。
+  // 切り詰めず明示エラーで拒否する（静かなフォールバック禁止、#325）。
+  // promptOrigin==='human' は `e,<指示>` 等の人間入力（command-parser.ts で付与）、
+  // 'system' は `w` コマンド等 DevRelay 自身が生成した固定プロンプトのため検証対象外。
+  if (promptOrigin === 'human' && customPrompt !== undefined) {
+    const validation = validateHumanTextLength(customPrompt, EXEC_INSTRUCTION_MAX_LENGTH);
+    if (!validation.ok) {
+      return tChat(lang, 'humanText.tooLong', {
+        rawLength: String(validation.rawLength),
+        limit: String(validation.limit)
+      });
+    }
+  }
+
   // 接続プロジェクト（teamexec 先）がある場合、そちらに転送する
   if (context.lastRemoteProjectId) {
     const remoteName = context.lastRemoteProjectName || context.lastRemoteProjectId;
@@ -722,8 +749,8 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
           const reconnectMessage = tChat(lang, 'exec.reconnected', { machine: machineName, project: projectName });
           await sendMessage(updatedContext.platform, updatedContext.chatId, reconnectMessage);
 
-          // exec を再帰呼び出し（カスタムプロンプトも引き継ぐ）
-          return handleExec(updatedContext, customPrompt);
+          // exec を再帰呼び出し（カスタムプロンプトと promptOrigin も引き継ぐ）
+          return handleExec(updatedContext, customPrompt, promptOrigin);
         }
       }
       // 再接続失敗（オフラインなど）→ エラーメッセージを返す
@@ -788,13 +815,27 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
   }
 
   // exec メッセージを保存（Conversations ページで表示するため）
+  // #334: raw text はここ（Message.content）に無切り詰めで全文保存される。
+  // humanTextMeta は監査用メタ情報のみを持ち、rawRef で本行を指す（このレコード自身が raw の所在）。
   const execContent = customPrompt ? `[exec] ${customPrompt}` : '[exec]';
+  const execHumanTextMeta =
+    promptOrigin === 'human' && customPrompt !== undefined
+      ? JSON.stringify({
+          kind: 'execInstruction',
+          origin: 'human',
+          rawLength: customPrompt.length,
+          limit: EXEC_INSTRUCTION_MAX_LENGTH,
+          fenced: true,
+          rawRef: 'message.content'
+        })
+      : undefined;
   await prisma.message.create({
     data: {
       sessionId: context.currentSessionId,
       role: 'user',
       content: execContent,
-      platform: context.platform
+      platform: context.platform,
+      ...(execHumanTextMeta ? { humanTextMeta: execHumanTextMeta } : {})
     }
   });
 
@@ -806,14 +847,25 @@ async function handleExec(context: UserContext, customPrompt?: string): Promise<
   // #312: w コマンド（W_COMMAND_PROMPT）かどうかを判定して Agent に伝搬する。
   // Codex の workspace-write サンドボックスは .git を read-only にし commit が失敗するため、
   // w 実行時のみ Agent 側で danger-full-access に切り替える。
-  const isWCommand =
-    (customPrompt?.startsWith(W_PROMPT_PREFIX_JA) || customPrompt?.startsWith(W_PROMPT_PREFIX_EN)) ?? false;
+  // #334: 従来の startsWith(W_PROMPT_PREFIX_*) 判定は fence 適用後の文字列に依存する脆い実装だったため、
+  // command-parser.ts が解析時点で付与する構造的な promptOrigin（'system'）に置き換える。
+  const isWCommand = promptOrigin === 'system';
+
+  // #334（ゲート②）: 人間入力（promptOrigin==='human'）のみ provenance fence で囲って Agent へ渡す。
+  // fence はセキュリティ境界ではなく「人間由来のデータである」ことを示す目印であり、
+  // 権限制御は #332/#333 の permissionPolicy / decidePlanPermission() が担う。
+  // 'system'（w コマンド等）はそのまま無変更で渡す（#314/#315 の danger-full-access 切替に影響させない）。
+  const promptForAgent =
+    promptOrigin === 'human' && customPrompt !== undefined
+      ? fenceHumanText('execInstruction', customPrompt)
+      : customPrompt;
+
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
     session.project.path,
     context.userId,
-    customPrompt,
+    promptForAgent,
     undefined,
     isWCommand,
   );

@@ -247,6 +247,12 @@ export const chatMessages = {
     en: '⚠️ This machine\'s Devin CLI does not support `--prompt-file`, and the prompt ({len} chars) exceeds the 6000-char limit for passing it as a command-line argument (Windows cmd.exe has an 8191-char limit). Run `x` to clear history and try a shorter prompt.',
     ja: '⚠️ この端末の Devin CLI は `--prompt-file` に対応しておらず、プロンプト（{len}文字）がコマンドライン引数として渡せる上限（6000文字、Windows cmd.exe の8191文字制限を考慮）を超えています。`x` で会話履歴をクリアし、短いプロンプトで再試行してください。',
   },
+
+  // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---
+  'humanText.tooLong': {
+    en: '❌ Instruction is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',
+    ja: '❌ 指示が長すぎます（{rawLength}文字、上限{limit}文字）。短くして再送してください（自動での切り詰めは行いません）。',
+  },
 } as const;
 
 export type ChatMessageKey = keyof typeof chatMessages;

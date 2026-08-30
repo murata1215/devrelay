@@ -556,7 +556,11 @@ export type UserCommand =
   | { type: 'recent' }
   | { type: 'continue' }  // 前回の接続先に再接続
   | { type: 'clear' }     // 会話履歴をクリア
-  | { type: 'exec'; prompt?: string }  // プラン実行（会話履歴リセットポイント）。prompt 付きで直接指示も可
+  // プラン実行（会話履歴リセットポイント）。prompt 付きで直接指示も可
+  // #334: promptOrigin は prompt の由来。'human' = チャット `e,<指示>` 等の人間入力（長さ検証・fence 対象）、
+  // 'system' = `w` コマンド等 DevRelay 自身が生成した固定プロンプト（検証・fence の対象外）。
+  // prompt が未指定（素の e/exec）の場合は promptOrigin も未指定でよい。
+  | { type: 'exec'; prompt?: string; promptOrigin?: string }
   | { type: 'link' }      // プラットフォームリンクコード生成
   | { type: 'agreement' } // DevRelay Agreement を CLAUDE.md に追加
   | { type: 'session' }   // 現在のセッション情報を表示

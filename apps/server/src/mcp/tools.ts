@@ -24,6 +24,14 @@ import {
 import { checkCommandPermission } from '../services/org-control.js';
 import { buildApprovalExecPrompt } from './approval-prompt.js';
 import { resolvePermissionPolicy } from '../services/permission-policy.js';
+import { fenceHumanText, neutralizeHumanInputTag, validateHumanTextLength } from '../services/human-text-fence.js';
+
+/**
+ * #334: 人間入力テキストの長さ上限（string.length = UTF-16 コードユニット数基準）。
+ * 超過時は切り詰めず明示エラーで拒否する（静かなフォールバック禁止、#325）。
+ */
+const SUBMIT_INSTRUCTION_MAX_LENGTH = 20000;
+const APPROVAL_NOTE_MAX_LENGTH = 2000;
 
 /**
  * MCP サーバーにツールを登録する
@@ -436,7 +444,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
     'Submit a coding instruction to a project. This starts the Plan phase where the AI analyzes the instruction and creates an implementation plan. IMPORTANT: Always confirm with the user before calling this tool. Returns a submissionId to use with get_plan and approve_implementation.',
     {
       projectId: z.string().describe('The target project ID'),
-      instruction: z.string().describe('The coding instruction in Markdown format'),
+      instruction: z.string().describe(`The coding instruction in Markdown format (max ${SUBMIT_INSTRUCTION_MAX_LENGTH} characters)`),
       council: z.boolean().optional().describe('Opt-in to council mode (default false). NOTE: the council engine is not implemented yet; the flag is recorded only and has no effect on execution.'),
     },
     async ({ projectId, instruction, council }) => {
@@ -464,6 +472,22 @@ export function registerMcpTools(server: McpServer, userId: string) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Agent needs update. Send "u" command first.' }) }], isError: true };
       }
 
+      // #334: 長さ検証は createSession（セッション作成という状態変更）より前に行う。
+      // ここで拒否すれば「セッションだけ作られてMessageが無い」等の中途半端な状態は一切発生しない。
+      const trimmedInstruction = instruction.trim();
+      const lengthCheck = validateHumanTextLength(trimmedInstruction, SUBMIT_INSTRUCTION_MAX_LENGTH);
+      if (!lengthCheck.ok) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            error: 'instruction is too long',
+            kind: 'submitInstruction',
+            rawLength: lengthCheck.rawLength,
+            limit: lengthCheck.limit,
+          }) }],
+          isError: true,
+        };
+      }
+
       // aiTool はプロジェクトの defaultAi を使用
       const aiTool = project.defaultAi || 'claude';
 
@@ -489,21 +513,35 @@ export function registerMcpTools(server: McpServer, userId: string) {
       // 進捗トラッキング開始
       await startProgressTracking(sessionId);
 
-      // メッセージを DB に保存
+      // #334: 監査メタ情報（raw text 自体は content にそのまま保存されるため、meta には含めない）
+      const { count: submitNeutralizedCount } = neutralizeHumanInputTag(trimmedInstruction);
+      const submitHumanTextMeta = JSON.stringify({
+        kind: 'submitInstruction',
+        origin: 'human',
+        rawLength: lengthCheck.rawLength,
+        limit: SUBMIT_INSTRUCTION_MAX_LENGTH,
+        fenced: true,
+        neutralized: submitNeutralizedCount,
+        rawRef: 'message.content',
+      });
+
+      // メッセージを DB に保存（content は fence 前の raw text を無切り詰めで保存する）
       await prisma.message.create({
         data: {
           sessionId,
           role: 'user',
-          content: instruction,
+          content: trimmedInstruction,
           platform: 'web',
+          humanTextMeta: submitHumanTextMeta,
         },
       });
 
       // Agent にプロンプト送信（forceNewSession: 前回セッションの JSONL 注入・resume をスキップ）
+      // #334: プロンプトへの連結は human-text fence（provenance 境界）で囲んだ文字列を使う
       await sendPromptToAgent(
         project.machineId,
         sessionId,
-        instruction,
+        fenceHumanText('submitInstruction', trimmedInstruction),
         userId,
         undefined,
         undefined,
@@ -516,7 +554,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
       );
 
       // 監査ログ
-      console.log(`📋 [MCP] AUDIT submit: userId=${userId}, projectId=${projectId}, council=${council === true}, instruction=${instruction.slice(0, 100)}...`);
+      console.log(`📋 [MCP] AUDIT submit: userId=${userId}, projectId=${projectId}, council=${council === true}, rawLength=${lengthCheck.rawLength}, instruction=${trimmedInstruction.slice(0, 100)}...`);
 
       // #331: council 未指定時はキー自体を返さない（従来と完全同形）。
       // 指定時は「静かなフォールバック禁止」(#325) に従い、エンジン未実装であることを明示する。
@@ -545,7 +583,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
     {
       projectId: z.string().describe('The project ID'),
       submissionId: z.string().describe('The submission ID from submit_instruction'),
-      note: z.string().optional().describe('Optional note from the human at approval time (e.g. "go with plan B"). Appended to the exec prompt sent to the AI, and recorded for audit.'),
+      note: z.string().optional().describe(`Optional note from the human at approval time (e.g. "go with plan B", max ${APPROVAL_NOTE_MAX_LENGTH} characters). Appended to the exec prompt sent to the AI, and recorded for audit.`),
     },
     async ({ projectId, submissionId, note }) => {
       // エンタープライズ統制ゲート（#268）: マネージャー未割当の member はコマンド発行不可
@@ -568,6 +606,39 @@ export function registerMcpTools(server: McpServer, userId: string) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Agent is offline' }) }], isError: true };
       }
 
+      // #334: 長さ検証は Message 作成・Session.approvalNote 保存・execConversation（build開始）の
+      // いずれよりも前に行う。ここで拒否すれば「exec メッセージだけ作られて approvalNote が無い」等の
+      // 中途半端な状態は一切発生しない。
+      const trimmedNote = note?.trim();
+      if (trimmedNote) {
+        const lengthCheck = validateHumanTextLength(trimmedNote, APPROVAL_NOTE_MAX_LENGTH);
+        if (!lengthCheck.ok) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              error: 'note is too long',
+              kind: 'approvalNote',
+              rawLength: lengthCheck.rawLength,
+              limit: lengthCheck.limit,
+            }) }],
+            isError: true,
+          };
+        }
+      }
+
+      // #334: 監査メタ情報。raw text 自体は Session.approvalNote に無切り詰めで保存されるため
+      // meta には含めない（rawRef で参照先を明記する）
+      const approvalHumanTextMeta = trimmedNote
+        ? JSON.stringify({
+            kind: 'approvalNote',
+            origin: 'human',
+            rawLength: trimmedNote.length,
+            limit: APPROVAL_NOTE_MAX_LENGTH,
+            fenced: true,
+            neutralized: neutralizeHumanInputTag(trimmedNote).count,
+            rawRef: 'session.approvalNote',
+          })
+        : undefined;
+
       // exec メッセージを保存（content は 'exec' の完全一致固定。get_build_status がこの値を
       // exec 開始時刻のアンカーとして使うため、note を混ぜてはいけない（#331 調査で判明した既存の罠）
       await prisma.message.create({
@@ -576,16 +647,17 @@ export function registerMcpTools(server: McpServer, userId: string) {
           role: 'user',
           content: 'exec',
           platform: 'web',
+          ...(approvalHumanTextMeta ? { humanTextMeta: approvalHumanTextMeta } : {}),
         },
       });
 
       // #331: note があれば Session に記録（監査用。BuildLog が作られない失敗時にも残る）
-      const trimmedNote = note?.trim();
       if (trimmedNote) {
         await prisma.session.update({ where: { id: submissionId }, data: { approvalNote: trimmedNote } });
       }
 
-      // Plan → Exec 遷移（note は exec プロンプト自体に追記して Agent/AI に届ける）
+      // Plan → Exec 遷移（note は exec プロンプト自体に追記して Agent/AI に届ける。
+      // #334: buildApprovalExecPrompt 内部で human-text fence により囲まれる）
       await execConversation(
         project.machineId,
         submissionId,
@@ -595,7 +667,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
       );
 
       // 監査ログ
-      console.log(`📋 [MCP] AUDIT approve: userId=${userId}, projectId=${projectId}, submissionId=${submissionId}, note=${trimmedNote ? trimmedNote.slice(0, 100) : '(none)'}`);
+      console.log(`📋 [MCP] AUDIT approve: userId=${userId}, projectId=${projectId}, submissionId=${submissionId}, rawLength=${trimmedNote?.length ?? 0}, note=${trimmedNote ? trimmedNote.slice(0, 100) : '(none)'}`);
 
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({

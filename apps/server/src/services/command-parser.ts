@@ -148,10 +148,11 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   const normalized = input.trim().toLowerCase();
 
   // 0. 「e, 〜」「exec, 〜」パターン: カンマの後の指示を実行モードで直接実行
+  // #334: promptOrigin='human' — 人間が入力した指示。長さ検証・fence の対象
   const execWithPromptMatch = input.trim().match(/^(?:e|exec)\s*,\s*(.+)$/is);
   if (execWithPromptMatch) {
     const prompt = execWithPromptMatch[1].trim();
-    return { type: 'exec', prompt };
+    return { type: 'exec', prompt, promptOrigin: 'human' };
   }
 
   // 0.5. 「testflight」コマンド: テストフライトサービス管理
@@ -190,10 +191,12 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
   }
 
   // 0.6. 「w」コマンド: ドキュメント更新＋コミットプッシュのワンショット実行
+  // #334: promptOrigin='system' — DevRelay 自身が生成した固定プロンプト。長さ検証・fence の対象外
   if (normalized === 'w') {
     return {
       type: 'exec',
       prompt: resolveWCommandPrompt(context),
+      promptOrigin: 'system',
     };
   }
 
@@ -306,9 +309,11 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       return { type: 'exec' };
     case 'w':
       // w コマンドは parseCommand() の Step 0.6 で処理されるが、念のためフォールバック
+      // #334: promptOrigin='system'（Step 0.6 と同じ扱い）
       return {
         type: 'exec',
         prompt: resolveWCommandPrompt(context),
+        promptOrigin: 'system',
       };
     case 'link':
       return { type: 'link' };
