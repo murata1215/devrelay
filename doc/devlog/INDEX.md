@@ -7,3 +7,4 @@
 - 2026-08-30_092942 | 人間入力テキストの長さ上限・provenance fence・監査(#334) | ゲート①②③（note/e,指示/instruction）に長さ検証（副作用より前）+fenceHumanText+Message.humanTextMeta監査を追加、promptOriginでw判定を構造化、Agent無変更
 - 2026-08-30_104506 | #334 follow-up: 検証で見つかった軽微3点の修正 | ②のhumanTextMetaにneutralized追加（①③とキー一致）、changelog残件に上限値未調整を追記、テスト件数17→16件に訂正（前サイクルdevlogの誤記は改変せず本ファイルに記録）
 - 2026-08-30_203205 | ゲート⑤(ask)/⑥(teamexec)人間入力テキスト検証+F3解消(#335) | fenceIfHuman/buildHumanTextMetaを既存human-text-fence.tsに追加、⑤⑥に長さ検証(4000)+fence+humanTextMeta監査、F3転送のorigin伝播で二重fence不成立を構造的に保証、Agent無変更・DDL不要
+- 2026-08-31_065255 | 実行中でも出る「5分無応答タイムアウト」誤検知の解消(#337) | 判定軸を「出力有無」から「Machine.statusでの生存確認」に変更、progress-timeout.tsに純関数切り出し+armProgressTimeoutで二重setTimeout一本化、ソフト5分/ハード60分の二段構え、Agent無変更・DDL不要

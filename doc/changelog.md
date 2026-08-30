@@ -6,6 +6,58 @@
 
 ## 実装済み機能
 
+### #337: 実行中でも出る「5分無応答タイムアウト」誤検知の解消 (2026-08-31)
+
+#### 背景
+ユーザー報告: 実装/調査が正常に走っている最中でも `⏱️ タイムアウト: エージェントから応答が
+ありませんでした（5分経過）` が出る。しばらく待つと本当の結果が届くため実害は「誤報が混ざる」こと
+だが毎回ノイズになる。ログで真因を実証: `session-manager.ts` の進捗タイマーは「無出力5分で打ち切り」
+だが、これを延長できるのは `appendSessionOutput()`（Agent からの出力イベント）だけ。Claude SDK 経路
+（`sendPromptToAiSdk`）はアシスタントのテキストと `tool_use` 開始時にしか出力を出さないため、1個の
+ツール呼び出しが長時間かかる間は出力が完全にゼロになる。Devin/Codex/PTY 端末モードには同じ理由で
+既に30秒ハートビートがあるが、Claude SDK 経路にだけ無かった（実装の穴）。実ログ
+（`~/.pm2/logs/devrelay-server-out.log`）で `ask-member` が 7.9 分（`responseTime: 473368ms`）かかり、
+その間呼び出し元セッションは `ask.sh` を実行する1個の Bash ツール内で出力ゼロのまま待っていたため
+`Progress timeout ... since last output` が発火したことを確認（直近7日で17件、全件「無出力側」）。
+副作用として、タイムアウト時に `progressTrackers` が削除されるため以降の途中出力は
+`⚠️ No tracker found` として捨てられ、最終結果だけが別メッセージとして後から届く（ユーザーの体感と一致）。
+
+#### 設計
+判定軸を「出力が来たか」から「エージェントが生きているか」へ変更。サーバーが既に持つ
+`agent:ping`（30秒ごと）由来の `Machine.status` を再利用し、二段構えにする: ①無出力5分（ソフト）で
+マシンが `online` なら**チャットに何も出さず**タイマーを再武装（ログのみ）、②`offline`/不明なら
+従来どおり finalize（fail-safe）、③開始から60分（ハード）は無条件で finalize（暴走・無限ハングの
+安全網）。新規 `apps/server/src/services/progress-timeout.ts`（外部 import ゼロの純粋関数
+`decideProgressTimeoutAction()`、`human-text-fence.ts` 等と同じ流儀）に判定だけを切り出し、
+`session-manager.ts` はこれを呼ぶだけにした。従来 `startProgressTracking()` と
+`appendSessionOutput()` にコピーされていた同一の `setTimeout` ブロック（#304/#319 と同種の同期漏れ
+予備軍）を `armProgressTimeout(sessionId)` に一本化。マシン生存確認のため `ProgressTracker` に
+`machineId` を追加（`sessionMachineMap` を `sessionProjectMap` と同じ流儀で新設、`createSession()`/
+`restoreSessionParticipants()`/`restoreSessionParticipantsForMachine()`/`startProgressTracking()` の
+4箇所で解決・キャッシュ、DB クエリは増やさない）。`session-manager.ts` は `agent-manager.ts` を
+import していないため、この方式で循環 import を作らずに済む。進捗ボックスは従来どおり8秒ごとに
+経過秒を更新し続けるため「生きている」ことは可視化済みで、新たなチャット出力は増やしていない
+（ノイズを増やさないため）。`PROGRESS_TIMEOUT`/`PROGRESS_HARD_TIMEOUT` は
+`DEVRELAY_PROGRESS_TIMEOUT_MS`/`DEVRELAY_PROGRESS_HARD_TIMEOUT_MS`（#321 の
+`DEVRELAY_TOKEN_WARN_SLOW_*` と同じ命名流儀）で調整可能（既定 5分/60分）。`i18n.ts` の
+`progress.timeout` を「（5分経過）」固定から `{min}` 埋め込みに変更（利用箇所はサーバー2箇所のみ、
+Agent 未使用）。
+
+#### 実装・検証
+`apps/server`（session-manager.ts, progress-timeout.ts 新規）+ `packages/shared`（i18n.ts）のみ変更。
+**Agent（`agents/` 配下3OS）・`apps/web` は一切触っていない**（`git diff --stat -- agents/ apps/web/`
+が空を確認、**各マシンの `u` は不要**）。DB スキーマ変更なし（`Machine.status` は既存列）。
+`pnpm build` 6 workspace green。`apps/server` テスト **37/37**（既存31 + 新規6:
+online→extend/offline→finalize/不明→finalize/ハード超過はonlineでもfinalize/境界値ちょうど/
+境界値未満）、`agents/linux`/`agents/macos` とも既存34/34 green（非退行、個別実行）。
+`grep -c 'require('` on web bundle = 0。dist に `decideProgressTimeoutAction`/`armProgressTimeout`/
+`onProgressTimeout` のコンパイル反映を確認。**pm2 restart は実行していない**（自己改変サイクル、
+`.ts` 変更のため反映には人間による `pm2 restart devrelay-server` が必要）。実チャットでの実機確認
+（5分超の `ask-member` で誤タイムアウトが出ないこと、`⏳ Progress soft-timeout ... extending` ログ、
+Agent を落とした状態での従来どおりのタイムアウト発火）は人間の反映後に別サイクル。
+
+---
+
 ### #335: ゲート⑤(ask)/⑥(teamexec) 人間入力テキストの長さ上限・provenance fence・監査 + F3 解消 (2026-08-30)
 
 #### 背景
