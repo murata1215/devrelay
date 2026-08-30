@@ -5,3 +5,4 @@
 - 2026-08-29_201458 | MCP plan skipPermissions強制ON解消(#332) | forceNewSessionと権限ポリシーを分離、permissionPolicyでMCP planをstrictReadonly化、exec/チャットは従来どおり
 - 2026-08-30_064135 | strictReadonlyグロブfalse positive修正(#333) | セグメント分割+argv0判定に変更、allowedTools∪DEFAULT_ALLOWED_TOOLSの和集合でallow判定、deny reasonを3分類+detail化
 - 2026-08-30_092942 | 人間入力テキストの長さ上限・provenance fence・監査(#334) | ゲート①②③（note/e,指示/instruction）に長さ検証（副作用より前）+fenceHumanText+Message.humanTextMeta監査を追加、promptOriginでw判定を構造化、Agent無変更
+- 2026-08-30_104506 | #334 follow-up: 検証で見つかった軽微3点の修正 | ②のhumanTextMetaにneutralized追加（①③とキー一致）、changelog残件に上限値未調整を追記、テスト件数17→16件に訂正（前サイクルdevlogの誤記は改変せず本ファイルに記録）

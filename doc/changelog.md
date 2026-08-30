@@ -50,13 +50,15 @@ camelCase・`@@map`なし）。raw text 自体は① `Session.approvalNote`／�
 ⑤ ask / ⑥ teamexec / ⑦ AskUserQuestion 回答は今回のスコープ外（Agent 変更・全機 `u` の波及を避けるため）。
 また `handleExec()` の `lastRemoteProjectId`（teamexec 転送）分岐には fence を適用していない（F3、
 長さ検証のみ分岐より前に位置するため効いているが fence 自体は無し）。いずれも別サイクルの課題として残す。
+また上限値（① 2,000 / ② 4,000 / ③ 20,000）は実測分布による調整を行っていない。運用後に
+`Message.content` 長の分布を取り、別サイクルで見直す。
 
 #### 実装・検証
 `apps/server`(human-text-fence.ts新規, mcp/tools.ts, mcp/approval-prompt.ts, services/command-handler.ts,
 services/command-parser.ts, prisma/schema.prisma) + `packages/shared`(types.ts, i18n.ts) 変更、
 Agent（3OS）は無変更（`git diff --stat -- agents/` が空であることを確認、**各マシンの `u` は不要**）。
 `pnpm build` 6 workspace すべて green、`apps/server` の `node --test tests/` 24/24 green（新規
-`human-text-fence.test.mjs` 17件、サロゲートペア絵文字のケース含む。既存 `approval-prompt.test.mjs` の
+`human-text-fence.test.mjs` 16件、サロゲートペア絵文字のケース含む。既存 `approval-prompt.test.mjs` の
 note 未指定/空白のみケースは #331 の不変条件を維持したまま note 指定時の2ケースのみ fence 形式に更新）、
 `agents/linux`/`agents/macos` の既存 `plan-permission.test.mjs` 34/34 green（非退行確認）、
 `grep -c 'require('` on web bundle = 0。DDL は `doc/migrations/334_message_human_text_meta.md` に記載
