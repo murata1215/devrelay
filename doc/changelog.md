@@ -6,6 +6,71 @@
 
 ## 実装済み機能
 
+### #335: ゲート⑤(ask)/⑥(teamexec) 人間入力テキストの長さ上限・provenance fence・監査 + F3 解消 (2026-08-30)
+
+#### 背景
+#334 でゲート①②③には長さ上限・provenance fence・監査を入れたが、⑤ `ask <project>: <question>` /
+⑥ `teamexec <project>: <instruction>` は素通りのまま質問/指示が相手プロジェクトの AI プロンプトに
+直接連結されていた（`agent-manager.ts` の `sendPromptToAgent()`/`execConversation()` は加工なしで
+渡す設計のため、`handleAskMember()`/`handleTeamExec()` 側で1回 fence すれば確実に効く）。併せて
+#334 が残件として明記した F3（`e,<指示>` が `lastRemoteProjectId` 経由で teamexec に転送される経路で
+fence が掛からない。長さ検証のみ効いていた）を解消した。
+
+#### 設計
+新規モジュールは作らず、既存 `apps/server/src/services/human-text-fence.ts` に純粋関数を2つ追加:
+`fenceIfHuman(kind, text, origin)`（`origin==='human'` のときだけ既存 `fenceHumanText()` を適用、
+それ以外は無変更で返す）と `buildHumanTextMeta(input)`（監査メタ JSON を固定キー順で組み立てる）。
+①②③ のインライン実装（`command-handler.ts` の `handleExec()`、`mcp/tools.ts` の
+`submit_instruction`/`approve_implementation`）は **byte-for-byte 無変更**のまま残した
+（DRY より「既存の不変条件を壊さない」を優先、#331 と同じ判断）。
+
+- 上限は ⑤ ask 4,000 / ⑥ teamexec 4,000（② exec と同値、チャット由来の自由テキストのため）。
+  超過時は切り詰めず明示エラーで拒否、処理順序は #334 と同一に固定
+  （制御コマンド解析→payload抽出→長さ検証→fence、`sendMessage`/`session.create`/`message.create`の
+  いずれよりも前に検証して拒否時は一切の状態変更が発生しない設計）。
+- `handleTeamExec()` に `instructionOrigin: string = 'human'`（enum 不使用）を追加。既定値により
+  直接呼び出し（`command-parser.ts` 経由）は無変更のまま human 扱い、F3 転送経路
+  （`handleExec():712-734`）だけが `promptOrigin`（'human'|'system'）をそのまま引き継いで渡す。
+  `customPrompt` 未指定時（`exec.defaultInstruction`）は DevRelay 自身の固定文のため 'system' 固定
+  とし、fence・長さ検証の対象外（#334 ゲート②の `isWCommand` 判定と同じ方針）。
+- **F3 の二重 fence 不成立の構造的根拠**: `handleExec()` の転送 `return`（`:734`）は本関数末尾の
+  `fenceHumanText()` 呼び出し（#334 ゲート②）より前にあるため、転送経路では `handleExec` 側の fence
+  は一度も実行されない。fence は `handleTeamExec` 側の `fenceIfHuman` 呼び出し1箇所のみ。加えて
+  「既に fence 済みの文字列を渡しても内側は `neutralizeHumanInputTag` で無害化され、生きた境界は
+  外側の1組だけになる」ことをテストで担保した（構造的に不可能な経路の保険）。
+- 監査は `Message.humanTextMeta`（#334 で追加済み、**新規 DDL なし**）に ①②③ と同一のキー集合・
+  順序（`kind → origin → rawLength → limit → fenced → neutralized → rawRef`）で記録。ただし
+  **この一致は共通コードではなくテストで担保している**点に注意——`buildHumanTextMeta()` は
+  ①②③ のインライン `JSON.stringify()` 呼び出しとは別の実装（③ で1点目の理由により統合を見送った
+  ため）であり、`apps/server/tests/human-text-fence.test.mjs` のキー順アサーションが崩れない限りで
+  5経路の一致が保たれる。**①②③ を `buildHumanTextMeta()` に寄せて実装を1本化する統合は別サイクルの
+  残件**とする（今回は「既存の不変条件を壊さない」を優先し見送った）。
+
+#### スコープ外（次サイクル送り）
+- ⑦ AskUserQuestion 回答は今回のスコープ外（Agent 変更を伴うため）。
+- 上限値（⑤⑥とも 4,000）の実測分布による調整は行っていない（① ② ③ と同じ残件、#334 参照）。
+- **REST `/api/agent/ask-member`（`document-api.ts:484`）は今回スコープ外**。`handleAskMember()` を
+  経由せず `executeCrossProjectQuery()` を直接呼ぶ AI 起点（他プロジェクトのスキルから叩かれる）の
+  経路であり、`origin==='human'` に該当しないため #334/#335 のスコープ定義（人間が入力しプロンプトに
+  連結されるテキスト）に当たらないと判断した。**将来この REST に人間が直接操作できる入力口が追加
+  された場合は、本サイクルの判断が無効化されるため改めて検証が必要**。
+- ①②③ の実装を `buildHumanTextMeta()`/`fenceIfHuman()` 共通関数に寄せる統合（上記「設計」参照）。
+
+#### 実装・検証
+`apps/server`(human-text-fence.ts, services/command-handler.ts) + `packages/shared`(i18n.ts) のみ変更、
+`agents/` と `apps/web/` は無変更（`git diff --stat -- agents/ apps/web/` が空であることを確認、
+**各マシンの `u` は不要**）。`pnpm build` 6 workspace すべて green、`apps/server` の
+`node --test tests/` 31/31 green（既存24 + 新規7: `fenceIfHuman` の system/undefined 無変更・
+human時1組のみ・二重fence不成立、`buildHumanTextMeta` のキー順・固定値、⑤⑥上限のサロゲートペア
+ケース）、`agents/linux`/`agents/macos` の既存 `plan-permission.test.mjs` 34/34 green（非退行確認）、
+`grep -c 'require('` on web bundle = 0。①②③ の `humanTextMeta` インライン実装が編集前後で
+byte-for-byte 不変であることを `git diff -- apps/server/src/mcp/tools.ts` が空であることと
+`command-handler.ts` の該当ブロック grep で確認。**DB マイグレーション不要**（#334 で追加済みの
+`Message.humanTextMeta` をそのまま使用）。**pm2 restart は自己改変サイクルの厳守事項により本サイクル
+では一切実行していない**（`.ts` 変更のため反映には人間による `pm2 restart devrelay-server` が必要）。
+実チャットでの実機確認（⑤⑥超過拒否・F3経路でのfence1組確認・`w`がfenceされないこと・
+`Message.humanTextMeta` への `kind:'ask'`/`kind:'teamexec'` 記録）は人間の反映後に別サイクルで実施。
+
 ### #334: ゲート①②③ 人間入力テキストの長さ上限・provenance fence・監査 (2026-08-30)
 
 #### 背景
