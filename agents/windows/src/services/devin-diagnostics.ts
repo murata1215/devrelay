@@ -41,3 +41,28 @@ export function formatDevinFlagList(flags: string[]): string {
   if (!flags || flags.length === 0) return '(none)';
   return flags.join(' ');
 }
+
+/**
+ * #347: Devin CLI の初回起動バナー行か判定する。
+ * Phase 0 実測（`--config` に `shell.setup_complete` の無いファイルを渡した回）: devin は
+ * `--config` に指定したファイルを「セットアップ状態の保存先」とみなし、そのキーが無いと
+ * 毎回下記 3 行を stdout に出す。
+ *   Welcome to Devin CLI!
+ *   Logged in as <account>
+ *   You're all set. Run devin to get started.
+ * これを AI の回答として扱うと fullOutput に積まれ、「出力ゼロ」を条件にした安全網
+ * （#274 devinPlanToolRejected / #329 未知フラグ自動リトライ / classifyCliFailure）が
+ * 軒並み無効化されるため、プレーンテキスト出力パスで明示的に除外する。
+ * 判定は行全体の完全一致に近い保守的な形にする（AI の回答文が偶然巻き込まれないように、
+ * 部分一致は使わない）。
+ * @param line trim 済みの 1 行
+ * @returns バナー行なら true
+ */
+export function isDevinBannerLine(line: string): boolean {
+  const trimmed = (line ?? '').trim();
+  if (!trimmed) return false;
+  if (trimmed === 'Welcome to Devin CLI!') return true;
+  if (trimmed === "You're all set. Run devin to get started.") return true;
+  if (/^Logged in as \S+/.test(trimmed)) return true;
+  return false;
+}

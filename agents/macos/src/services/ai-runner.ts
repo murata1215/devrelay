@@ -11,7 +11,7 @@ import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { decidePlanPermission } from './plan-permission.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
-import { buildDevinCapabilityDetail, formatDevinFlagList } from './devin-diagnostics.js';
+import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine } from './devin-diagnostics.js';
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
@@ -41,6 +41,7 @@ let geminiCapabilitiesCache: { model: boolean } | null = null;
 let devinCapabilitiesCache: {
   model: boolean;
   agentConfig: boolean;
+  config: boolean;
   permissionMode: boolean;
   promptFile: boolean;
   export: boolean;
@@ -220,6 +221,7 @@ function probeGeminiCapabilities(command: string): { model: boolean } {
 function probeDevinCapabilities(command: string): {
   model: boolean;
   agentConfig: boolean;
+  config: boolean;
   permissionMode: boolean;
   promptFile: boolean;
   export: boolean;
@@ -241,6 +243,8 @@ function probeDevinCapabilities(command: string): {
     const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
     const model = /--model\b/.test(help);
     const agentConfig = /--agent-config\b/.test(help);
+    // #347: --agent-config は廃止済み（#346）で、後継が --config（グローバル引数、Phase 0 実測で確認済み）。
+    const configFlag = /--config\b/.test(help);
     const permissionMode = /--permission-mode\b/.test(help);
     const promptFile = /--prompt-file\b/.test(help);
     const exportFlag = /--export\b/.test(help);
@@ -255,17 +259,17 @@ function probeDevinCapabilities(command: string): {
     const helpBytes = help.length;
     // #346: フラグ一覧を先に計算してキャッシュに含める（チャットへの「使えるフラグ」通知に使う）
     const detectedFlags = Array.from(new Set(help.match(/--[a-z][a-z-]*/gi) ?? [])).sort();
-    devinCapabilitiesCache = { model, agentConfig, permissionMode, promptFile, export: exportFlag, respectWorkspaceTrust, version, helpBytes, flags: detectedFlags, ok: true };
+    devinCapabilitiesCache = { model, agentConfig, config: configFlag, permissionMode, promptFile, export: exportFlag, respectWorkspaceTrust, version, helpBytes, flags: detectedFlags, ok: true };
     devinCapabilitiesFailedAt = null;
-    console.log(`[devin] 🔎 capabilities: --model=${model} --agent-config=${agentConfig} --permission-mode=${permissionMode} --prompt-file=${promptFile} --export=${exportFlag} --respect-workspace-trust=${respectWorkspaceTrust} version=${version} helpBytes=${helpBytes}`);
+    console.log(`[devin] 🔎 capabilities: --model=${model} --agent-config=${agentConfig} --config=${configFlag} --permission-mode=${permissionMode} --prompt-file=${promptFile} --export=${exportFlag} --respect-workspace-trust=${respectWorkspaceTrust} version=${version} helpBytes=${helpBytes}`);
     console.log(`[devin] 🔎 detected flags: ${detectedFlags.join(' ')}`);
-    if (!agentConfig && !devinAgentConfigHelpDumped) {
-      // #345: --agent-config が「非対応」と判定された場合のみ、H-A/H-B 切り分けのため help 全文を 1 回だけ dump
+    if (!agentConfig && !configFlag && !devinAgentConfigHelpDumped) {
+      // #345: --agent-config/--config どちらも「非対応」と判定された場合のみ、H-A/H-B 切り分けのため help 全文を 1 回だけ dump
       devinAgentConfigHelpDumped = true;
-      console.log(`[devin] 🔎 --agent-config not detected, full --help dump:\n${help}`);
+      console.log(`[devin] 🔎 --agent-config/--config not detected, full --help dump:\n${help}`);
     }
   } catch (err) {
-    devinCapabilitiesCache = { model: true, agentConfig: true, permissionMode: true, promptFile: true, export: true, respectWorkspaceTrust: true, version: 'unknown', helpBytes: 0, flags: [], ok: false, reason: (err as Error).message };
+    devinCapabilitiesCache = { model: true, agentConfig: true, config: true, permissionMode: true, promptFile: true, export: true, respectWorkspaceTrust: true, version: 'unknown', helpBytes: 0, flags: [], ok: false, reason: (err as Error).message };
     devinCapabilitiesFailedAt = Date.now();
     console.warn(`[devin] --help probe failed, assuming all flags supported (optimistic, TTL applies):`, (err as Error).message);
   }
@@ -1216,6 +1220,8 @@ export async function sendPromptToAi(
   let proc;
   // Devin: -r で resume したセッション ID を関数スコープで記録（close ハンドラから参照して空振り検出に使う）
   let devinResumedSessionId: string | null = null;
+  // #347: plan モードで --config/--agent-config を実際に積んだか（close ハンドラの無音 deny 検出に使う）
+  let devinPlanConfigApplied = false;
   // #276: Devin の途中経過表示用。--export の ATIF ファイルパス（対応版のみ設定）と進捗タイマー群を
   // 関数スコープに置き、close/error ハンドラから停止・後始末できるようにする。
   let devinExportPath: string | null = null;
@@ -1305,6 +1311,9 @@ export async function sendPromptToAi(
     const args: string[] = [];
     const devinCaps = probeDevinCapabilities(command);
     const devinDropped = new Set(options.devinDroppedFlags ?? []);
+    // #347: --agent-config は廃止済み（#346）。後継の --config を優先し、
+    // 古い CLI のために --agent-config へのフォールバックも残す。
+    const devinHasConfig = devinCaps.config && !devinDropped.has('--config');
     const devinHasAgentConfig = devinCaps.agentConfig && !devinDropped.has('--agent-config');
     const devinHasPermissionMode = devinCaps.permissionMode && !devinDropped.has('--permission-mode');
     const devinHasPromptFile = devinCaps.promptFile && !devinDropped.has('--prompt-file');
@@ -1335,30 +1344,42 @@ export async function sendPromptToAi(
       console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
     }
 
-    if (options.usePlanMode && !options.devinAutoPermFallback && devinHasAgentConfig) {
-      // plan モード: --agent-config で Read のみ許可、Write/Exec を明示的に deny
-      // --permission-mode auto は「安全と判断したツールを自動承認」するだけで
-      // 厳密な読み取り専用ではないため、agent-config で強制する
-      const agentConfig = {
+    if (options.usePlanMode && !options.devinAutoPermFallback && (devinHasConfig || devinHasAgentConfig)) {
+      // #347: プランモードの読み取り専用は Devin の config ファイルで強制する。
+      // --agent-config は新しい Devin CLI で廃止されたため（#346 で確定）、
+      // 現行の --config <PATH> に置き換える。deny は allow より常に優先されるため
+      // （docs.devin.ai/cli/reference/permissions）、Write/Exec は確実にブロックされる。
+      // 一時ファイルは os.tmpdir() に置く（プロジェクトディレクトリを汚さない）。
+      // #347 Phase 0 実測: devin は --config のファイルを「セットアップ状態の保存先」とみなし、
+      // shell.setup_complete が無いと毎回 Welcome バナーを stdout に出す（fullOutput を汚染し
+      // #274/#329 の「出力ゼロ」安全網を無効化する）。既定値を先に書いておいてバナー自体を抑止する
+      // （推論なので isDevinBannerLine() によるフィルタとセットで運用する。下記プレーンテキスト出力箇所）。
+      // #347 Phase 0 実測: devin はこのファイルを書き換える（実測では merge/replace 双方を観測）。
+      // DevRelay は毎ターンここで作り直し、close ハンドラで削除するため、書き換えられても持ち越さない。
+      const planConfig = {
+        version: 1,
+        shell: { setup_complete: true },
         permissions: {
           allow: ['Read(**)'],
           deny: ['Write(**)', 'Exec(**)'],
         },
       };
-      const agentConfigPath = path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`);
-      fs.writeFileSync(agentConfigPath, JSON.stringify(agentConfig), 'utf-8');
-      args.push('-p', '--agent-config', agentConfigPath);
-      console.log(`📋 Devin plan mode: using agent-config (Read only, Write/Exec denied)`);
+      const planConfigPath = path.join(os.tmpdir(), `devrelay-devin-plan-config-${sessionId}.json`);
+      fs.writeFileSync(planConfigPath, JSON.stringify(planConfig), 'utf-8');
+      const configFlagName = devinHasConfig ? '--config' : '--agent-config';
+      args.push('-p', configFlagName, planConfigPath);
+      devinPlanConfigApplied = true;
+      console.log(`📋 Devin plan mode: using ${configFlagName} (Read only, Write/Exec denied)`);
     } else if (options.usePlanMode && !options.devinAutoPermFallback && devinHasPermissionMode) {
-      // #329: --agent-config 非対応の CLI → --permission-mode auto に劣化（読み取り専用強制はプロンプト指示のみ）
+      // #329: --config/--agent-config 非対応の CLI → --permission-mode auto に劣化（読み取り専用強制はプロンプト指示のみ）
       args.push('-p', '--permission-mode', 'auto');
       devinDegradedReason = 'planReadonly';
-      console.log(`📋 Devin plan mode: --agent-config unsupported, degraded to --permission-mode auto (readonly not enforced)`);
+      console.log(`📋 Devin plan mode: --config/--agent-config unsupported, degraded to --permission-mode auto (readonly not enforced)`);
     } else if (options.usePlanMode && !options.devinAutoPermFallback) {
-      // #329: --agent-config も --permission-mode も非対応 → -p のみ（最小フラグ、読み取り専用強制はプロンプト指示のみ）
+      // #329: --config/--agent-config も --permission-mode も非対応 → -p のみ（最小フラグ、読み取り専用強制はプロンプト指示のみ）
       args.push('-p');
       devinDegradedReason = 'planReadonly';
-      console.log(`📋 Devin plan mode: --agent-config/--permission-mode both unsupported, running with -p only (readonly not enforced)`);
+      console.log(`📋 Devin plan mode: --config/--agent-config/--permission-mode all unsupported, running with -p only (readonly not enforced)`);
     } else if (options.usePlanMode && options.devinAutoPermFallback) {
       // plan フォールバック（#274）: agent-config の deny で Devin がツール拒否→出力ゼロになる問題の回避。
       // agent-config を渡さず --permission-mode auto（安全ツールのみ自動承認）で実行する。
@@ -1844,7 +1865,9 @@ export async function sendPromptToAi(
         } catch {
           // JSON パース失敗 → プレーンテキスト出力（Devin/Gemini/Aider/Codex）
           const trimmed = line.trim();
-          if (trimmed) {
+          // #347: devin の初回起動バナー（--config に shell.setup_complete が無いと出る）は
+          // AI の回答ではないため fullOutput に積まない（#274/#329の「出力ゼロ」安全網を守るため）
+          if (trimmed && !(aiTool === 'devin' && isDevinBannerLine(trimmed))) {
             fullOutput += trimmed + '\n';
             onOutput(trimmed + '\n', false);
           }
@@ -1955,6 +1978,8 @@ export async function sendPromptToAi(
       const devinOutputEmpty = aiTool === 'devin' && fullOutput.trim().length === 0;
       if (aiTool === 'devin') {
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`)); } catch {}
+        try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-plan-config-${sessionId}.json`)); } catch {}
+        // #347: 旧名（--agent-config 時代）の残骸も掃除する。次サイクル以降に削除してよい。
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`)); } catch {}
         try {
           if (!devinOutputEmpty) {
@@ -2064,20 +2089,27 @@ export async function sendPromptToAi(
         return;
       }
 
-      // #274: Devin プランモードで agent-config の deny によりツールが拒否され出力ゼロになったケースを検出。
-      // agent-config（Read only, Write/Exec deny）を渡すと Devin が計画立案で Exec 等を使おうとして
+      // #274: Devin プランモードで config の deny によりツールが拒否され出力ゼロになったケースを検出。
+      // config（Read only, Write/Exec deny）を渡すと Devin が計画立案で Exec 等を使おうとして
       // 「A tool was rejected by the user」→ 実行全体が中断・出力ゼロで終わる（新規プロジェクトで頻発）。
-      // agent-config を外して --permission-mode auto で内部リトライする（resume なし・新規セッション）。
+      // config を外して --permission-mode auto で内部リトライする（resume なし・新規セッション）。
       // devinAutoPermFallback ガードで無限ループを防止。
       const devinPlanToolRejected =
         aiTool === 'devin' &&
         options.usePlanMode === true &&
         !options.devinAutoPermFallback &&
         fullOutput.trim().length === 0 &&
-        // #282: CHISEL_LOG_STDERR=1 では平文 "A tool was rejected" が出ずログ形式になるため両方で検出
-        (/tool was rejected/i.test(stderrOutput) || devinToolRejectedInLog);
+        (
+          // #282: CHISEL_LOG_STDERR=1 では平文 "A tool was rejected" が出ずログ形式になるため両方で検出
+          /tool was rejected/i.test(stderrOutput) ||
+          devinToolRejectedInLog ||
+          // #347 Phase 0 実測: 非対話 deny は説明テキストを一切出さない（バナーはフィルタ済みなので
+          // fullOutput は既に空）。config を実際に適用したターンで exit 0・出力ゼロなら deny とみなす。
+          // config を積んでいないターンでは発火しない（devinPlanConfigApplied ガード）。
+          (devinPlanConfigApplied && code === 0)
+        );
       if (devinPlanToolRejected) {
-        console.log(`[devin] ⚠️ Devin plan agent-config rejected a tool (code ${code}), falling back to --permission-mode auto`);
+        console.log(`[devin] ⚠️ Devin plan config rejected a tool (code ${code}), falling back to --permission-mode auto`);
         completionSent = true; // この呼び出しの後続 onOutput を抑止（フォールバック側が完了通知を送る）
         // 壊れた可能性のあるセッション ID をクリアしてからフォールバック（新規セッション）
         clearDevinSessionId(projectPath).finally(() => {

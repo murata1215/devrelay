@@ -6,6 +6,61 @@
 
 ## 実装済み機能
 
+### #347: Devin CLI の `--config` でプランモード読み取り専用を再強制（Phase0実測 → Phase1実装） (2026-09-01)
+
+#### 背景
+#346 で `--agent-config` 廃止が確定した直後、ユーザーから「devin の config でプラン強制って実装
+難しそう？」と質問を受け調査。Devin 公式ドキュメント（`cli/reference/commands`）で `--config <PATH>`
+の現存、`cli/reference/permissions` で `permissions.{allow,deny,ask}` スキーマと「deny 常に優先」評価順を
+確認できたが、①`--config` の merge/replace セマンティクスが未文書化、②自アカウントに Devin 搭載機が
+存在せず自動検証経路が無い、という2点から「証拠なしに直すと外す」教訓（#345）に従い、実装前に実機での
+Phase0（実測）を挟む2段構えを採用した。
+
+#### Phase0（実測）
+`.devrelay-output/devin-config-verification.md` を作成しユーザーが Devin 搭載 Windows 端末
+（`Lafit`/`MURATA_K`、devin 3000.6.7）に投げて実行、結果 md を回収。判明した事実:
+`--config` は実在・受理され、渡したファイルの `permissions.deny` が実効性を持つ、merge ではなく
+**replace**（渡したファイルの内容だけが有効になる）、devin 自身がファイルを書き換える、
+`shell.setup_complete` が無いファイルを渡すと `Welcome to Devin CLI!` 等の初回起動バナーが stdout に
+出る（DevRelay は毎ターン新規一時ファイルを書くため毎ターン発生）、非対話モードでの deny は拒否テキストを
+一切出さず exit 0 で完全に無音のまま終わる。
+
+#### Phase1（実装、3 OS `agents/{linux,macos,windows}` + `packages/shared`）
+`probeDevinCapabilities()` に `config: boolean`（`/--config\b/` 判定）を追加し7本目のケーパビリティに。
+プラン分岐の先頭を `--config` 優先（`devinHasConfig || devinHasAgentConfig`）に変更、生成 JSON に
+`permissions`（内容は無変更）に加えて `version:1, shell:{setup_complete:true}` を追加してバナー自体の
+発生を抑止。一時ファイル名を `devrelay-devin-plan-config-<sessionId>.json` に改名しつつ旧名
+（`devrelay-devin-agent-config-`）の掃除行は1バージョン残置。`devinPlanToolRejected`（#274）に3つ目の
+OR条件 `devinPlanConfigApplied && code===0` を追加し、無音 deny でも `--permission-mode auto`
+フォールバックが発火するようにした。新規 `devin-diagnostics.ts` に `isDevinBannerLine(line)`
+（trim 後の完全一致/正規表現一致のみで判定する保守的な純関数）を追加し、`aiTool==='devin'` の
+プレーンテキスト出力からバナー行のみをフィルタ。`packages/shared/src/i18n.ts` の
+`devin.readonlyUnsupported` 本文を「`--config` も `--agent-config` も無い端末だけに出る」形に更新
+（キー名・`{detail}` プレースホルダは不変）。
+
+#### 実装中に発見・修正した独立バグ
+3 OS 全ての `ai-runner.ts` で、`probeDevinCapabilities()` の戻り値型に `config: boolean` を追加した際、
+モジュールレベルのキャッシュ変数 `devinCapabilitiesCache` の型注釈への追従を忘れておりビルド不能に
+なっていた（windows→macos→linux の順に同一パターンで発覚、事前に「完了」とされていた linux も実は
+同じ欠落を持っていた＝完了報告は再ビルドで裏取りしないと信用できない教訓）。3 OS とも型宣言に
+`config: boolean;` を追加して解消。
+
+#### 検証
+`pnpm build` 6 workspace green、`node --test` 個別実行で `packages/shared` 9/9・`apps/server` 54/54
+（いずれも非退行）・**`agents/linux` 71/71**（65→71、新規6件）・**`agents/macos` 71/71**（65→71、
+新規6件）すべて green。`diff` で `devin-diagnostics.ts`/テストファイルの3 OS間 byte-for-byte 同一を確認、
+`cli-failure.ts`（`classifyCliFailure()` 本体）が3 OSとも `git diff --stat` で空であることを確認、
+生成 JSON 中の `permissions` ブロックが文字列として無変更（追加は `version`/`shell` フィールドのみ）
+であることを確認、旧名一時ファイル掃除行が3 OSとも残存することを確認。
+
+#### 変更ファイル
+既存 `agents/{linux,macos,windows}/src/services/ai-runner.ts`・`devin-diagnostics.ts`、
+`agents/{linux,macos}/tests/devin-diagnostics.test.mjs`、`packages/shared/src/i18n.ts`。新規ファイルなし。
+DB マイグレーション不要、`apps/server`/`apps/web` 無変更のため server 再起動不要。
+**各マシン（Linux/macOS/Windows CLI Agent）の `u` が必須**（Agent 側の修正が本体）。実チャットでの
+E2E 確認（バナー非表示・読み取り専用の実効テスト・resume 非退行・exec モードでの書き込み許可）は
+`u` 反映後に別サイクルで実施。
+
 ### #346: `devin devin` 表記重複の解消 + 検出フラグ一覧のチャット可視化 + `readonlyUnsupported` 文言訂正 (2026-08-31)
 
 #### 背景
