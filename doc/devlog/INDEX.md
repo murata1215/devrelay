@@ -9,3 +9,4 @@
 - 2026-08-30_203205 | ゲート⑤(ask)/⑥(teamexec)人間入力テキスト検証+F3解消(#335) | fenceIfHuman/buildHumanTextMetaを既存human-text-fence.tsに追加、⑤⑥に長さ検証(4000)+fence+humanTextMeta監査、F3転送のorigin伝播で二重fence不成立を構造的に保証、Agent無変更・DDL不要
 - 2026-08-31_065255 | 実行中でも出る「5分無応答タイムアウト」誤検知の解消(#337) | 判定軸を「出力有無」から「Machine.statusでの生存確認」に変更、progress-timeout.tsに純関数切り出し+armProgressTimeoutで二重setTimeout一本化、ソフト5分/ハード60分の二段構え、Agent無変更・DDL不要
 - 2026-08-31_073500 | Claude OAuth期限切れの生JSON表示バグ修正(#338、#326 Phase1の穴埋め) | assistantテキストブロック経路にOAuth期限切れ検出が無く生エラーが素通りしていた問題を修正、reportClaudeAuthExpiredFromRuntime()で15分ポーリングを待たず即時報告、Windows/PTY terminalModeは対象外、Agent(linux/macos)のみ変更・server再起動不要・各マシンuが必要
+- 2026-08-31_092956 | `login`コマンド実装(#326 Phase2、#339) | SDK Query.request()のstreaming singleton経由でOAuthリモート再ログイン中継本体を実装、web限定+redact+事前検証+BUG A(source優先度)修正を同梱、実装直後の自己レビューでhandleLoginCode/Cancelのplatform=='web'チェック漏れ（乗っ取り穴）を発見・修正、DDL不要・server再起動+各マシンuが必要

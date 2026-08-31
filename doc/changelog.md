@@ -6,6 +6,100 @@
 
 ## 実装済み機能
 
+### #339: `login` コマンド — Claude リモート再ログイン本体（#326 Phase2）(2026-08-31)
+
+#### 背景
+#338（2026-08-31）で通知は本番稼働まで実証されたが、ユーザーには「そのマシンに SSH して
+`claude auth login` する」以外の復旧手段が無かった。通知メッセージ自身が「login コマンド
+（実装後）」と案内しており、#326 から2サイクル繰り越されてきた Phase2（SDK control protocol
+によるリモート再ログイン中継本体）を実装した。プランは
+`vivid-waddling-boole.md`（`/home/devrelay/.claude/plans/`）。
+
+#### 設計の核
+- **`Query.request()` は SDK 型定義に存在しない実行時専用 API**（`sdk.d.ts` に無い、SDK
+  `0.2.77` / システム `claude` `2.1.240` の逆アセンブルで実在確認済み）。`claude_authenticate`→
+  `manualUrl`/`automaticUrl`、`claude_oauth_callback`→`account` の2 subtype をパススルーで叩く。
+  型が無い理由と確認済みバージョンを JSDoc に明記し、起動時 `typeof q.request !== 'function'` を
+  チェックして無ければ `claudeLogin.unsupportedAgent` を返す（将来の SDK 更新で消えても静かに
+  失敗しない）。
+- OAuth フローは **cli.js 側がプロセスグローバル singleton** のため、Agent 側も
+  `prompt` に永久に yield しない `AsyncGenerator` を渡してストリーミング入力モードで
+  `query()` を起動し、背景の `for await` で drain し続けることで同一サブプロセスを 10 分間
+  生かし続ける設計（`activeFlow` モジュール singleton、二重起動は前フローを abort）。
+- **`platform === 'web'` 限定**（開始・コード投入・cancel の全操作）。グループチャンネルで
+  実行されると閲覧者が URL を先に開いて自分のアカウントでログインし、コードだけ先に貼って
+  マシンを乗っ取れるため。`automaticUrl`（リモート機の localhost を指す）は Agent 側で
+  受け取った時点で捨て、`manualUrl` のみ中継する。
+- ログ redaction（`packages/shared/src/redact.ts` の `redactChatInput()`）を Discord/Telegram/Web
+  受信層に適用し、`login` が web 限定でも「Telegram で打ってしまった」平文コードがログに残らない
+  ようにした。
+- 認可コード投入は一発勝負（失敗するとフロー自体が死ぬ）のため、Agent に送る前にサーバー側で
+  `validateOAuthCode()`（`#` 1個・両側非空・`[A-Za-z0-9._~#-]{20,512}`）による事前検証を行う。
+- **BUG A（#338 で判明）の最小修正を同梱**: `ClaudeAuthStatusPayload` に `source?: 'runtime' |
+  'poll' | 'login'` を追加し、`decideClaudeAuthUpdate()`（純関数）で `poll` の弱い `ok:true` が
+  `runtime`/`login` が確立した `ok:false` を上書きできないようにした（`source` 未指定＝旧 Agent は
+  従来どおり fail-open）。Agent 側に対称の `reportClaudeAuthOkFromRuntime()` も新設。
+
+#### 実装したファイル
+- **新規**: `agents/{linux,macos}/src/services/claude-login.ts`（`startClaudeLogin`/
+  `submitClaudeLoginCode`/`cancelClaudeLogin`、両 OS 完全同一内容）、
+  `apps/server/src/services/claude-login-code.ts`（`validateOAuthCode`、外部 import ゼロ純関数）、
+  `apps/server/src/services/claude-auth-precedence.ts`（`decideClaudeAuthUpdate`、同上）、
+  `packages/shared/src/redact.ts`（`redactChatInput`、同上）。
+- **既存修正**: `packages/shared/src/types.ts`（`UserCommand` に `login`/`login:code`/
+  `login:cancel`、`ClaudeAuthStatusPayload.source?`、5つの新規ペイロード型 + WS メッセージ型）、
+  `packages/shared/src/i18n.ts`（`claudeLogin.*` 10キー ja/en）、
+  `apps/server/src/services/command-parser.ts`（`login`系のパース、SHORTCUTS/`l`より前に配置し
+  衝突なしを確認）、`apps/server/src/services/natural-language-parser.ts`（`login`系を
+  traditional command として先に確定させ AI プロンプト誤判定を防止）、
+  `apps/server/src/services/command-handler.ts`（`handleLogin`/`handleLoginCode`/
+  `handleLoginCancel`、いずれも `platform!=='web'` を最初にチェック）、
+  `apps/server/src/services/agent-manager.ts`（`pendingClaudeLogin` Map、
+  `agent:claude:login:url`/`agent:claude:login:result` ハンドラ、10分タイムアウト、
+  `handleClaudeAuthStatus()` を `decideClaudeAuthUpdate()` 経由に変更）、
+  `agents/{linux,macos}/src/services/connection.ts`（`server:claude:login:{start,code,cancel}`
+  の3分岐、`reportClaudeAuthOkFromRuntime()` 新設、既存送信箇所に `source:'poll'`/`source:'runtime'`
+  付与）、`agents/{linux,macos}/src/services/ai-runner.ts`（`getClaudeExecutableFallback()` を
+  `export` 化して `claude-login.ts` から再利用、`result` ハンドラで
+  `resumeFailed` チェックの**後**に `reportClaudeAuthOkFromRuntime()` 呼び出しを追加）。
+
+#### 実装中に自己発見・修正したセキュリティギャップ
+プラン §3.1 は「開始も投入も両方危険」と明記していたが、実装直後のレビューで
+`handleLoginCode()`/`handleLoginCancel()` に `platform!=='web'` チェックが**抜けていた**ことを
+発見した。`pendingClaudeLogin` は `machineId` のみをキーにしており platform/chatId を条件に
+含まないため、「進行中フローが存在する＝web 経由」という前提は投入者自身の platform を保証せず、
+同じマシンに接続した Discord/Telegram ユーザーが web 発のフローへ横から自分の認可コードを
+投入して乗っ取れる穴になっていた。両ハンドラに `platform!=='web'` チェックを追加して修正し、
+`apps/server` を再ビルド・再テスト（54/54 green、影響なし）して解消済み。
+
+#### テスト・検証
+- 新規: `apps/server/tests/claude-login-code.test.mjs`（8件）、
+  `apps/server/tests/claude-auth-precedence.test.mjs`（9件、BUG A の回帰含む）、
+  `packages/shared/tests/redact.test.mjs`（5件）。
+- `pnpm build` 6 workspace green。`node --test` 個別実行で
+  `packages/shared` 5/5・`apps/server` 54/54・`agents/linux` 34/34・`agents/macos` 34/34
+  すべて green（非退行）。
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` = 0（#310 再発防止チェック、
+  今回 web は無変更のため確認のみ）。
+- `automaticUrl` は Agent 側 JSDoc コメント内にのみ存在し、実データフロー（payload 構築・
+  WS 送信）には一切現れないことを確認（サーバー側 dist には文字列自体が存在しない）。
+- `git diff --stat -- agents/windows/ apps/web/` が空（Windows は SDK `query()` を使わず
+  control protocol に到達できないため #326 から一貫して対象外、Web バンドルは無変更）。
+- linux/macos の `claude-login.ts` は byte-for-byte 同一、`connection.ts` の新規ハンクは
+  周辺コードの行オフセット差以外は内容同一であることを diff で確認。
+
+#### スコープ外（プランに明記済み）
+Windows（Electron GUI、`claude-auth.ts` 自体が存在せず対象外）、Telegram/Discord の DM 対応
+（`UserContext.isDirect` の追加が必要、別サイクル）、`terminalMode`（PTY 経由、別経路）、
+`credentialsRotated` 検出・60分ごとの定期送信（前サイクルの残り、別サイクル）。
+
+#### 反映に必要な操作
+DB マイグレーション不要（`claudeAuthOk`/`CheckedAt`/`Account` は #326 で適用済み、`source` は
+wire のみで optional）。`pnpm build` 実施済み。**`pm2 restart devrelay-server` が必要**（人間が
+実行）。**Linux/macOS 各マシンの `u` が必要**（Windows は対象外）。`apps/web` はビルドのみで
+再起動不要（無変更のため今回は対象なし）。実チャットでの E2E 確認（プラン §7、pixblog が
+現在まさに期限切れのため理想的な被験体）は人間の反映後に別途実施。
+
 ### #338: Claude OAuth トークン期限切れがそのまま生 JSON エラーで表示される問題を修正（Phase1 検知の穴埋め）(2026-08-31)
 
 #### 背景
