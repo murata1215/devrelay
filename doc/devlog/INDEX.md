@@ -1,5 +1,6 @@
 # Devlog INDEX
 
+- 2026-08-31_204745 | Devin CLIが`(No response from AI)`で沈黙する問題の解消+argv経路のコマンド注入穴削除(#344) | probeDevinCapabilities()失敗時の判定を悲観(全false)→楽観(全true+TTL付き失敗キャッシュ)に反転しunknownFlag自動リトライを安全網として活用、危険な`args.push('--',prompt)`argvフォールバック（shell:trueで引数無クォートのためコマンド注入経路だった）を削除し常に--prompt-file使用、classifyCliFailure()新設でcatch-allをcommandNotFound/emptyNonZero別の実エラー表示に置換（既存分岐は無変更）、devinDegradedReason enum化で誤警告解消、devin/geminiのPATH汚染ガード追加、3OS cli-failure.ts byte-for-byte同一・linux/macos 55/55・windows tests無しdiff担保
 - 2026-08-31_194243 | `login`が`unsupportedAgent`で即失敗するバグ修正(#343) | Query.request()が返すcontrol_responseの封筒を剥がさず直接responseとして読んでいたため常にmanualUrl=undefinedでunsupportedAgentに落ちていた真因を確定（sdk.mjs/cli.jsを直接grepして裏取り）、unwrapControlResponse()を新規ファイルに切り出しclaude-login.tsの2箇所に適用、agent-manager.tsに観測性ログ1行追加、テスト6件追加でlinux/macosとも34→40
 - 2026-08-31_121500 | `login`無言レスポンス穴+Agent無限待ちを解消(#341) | 診断でlogin自体は既に動作済み(pm2ログ0ヒット=未送信)と確定、handleLogin/handleLoginCodeの`return ''`によるweb.tsの無反応ガード穴とclaude-login.tsのq.request()無タイムアウトを発見・解消、claudeLogin.starting/codeAcceptedの即時ack追加+withTimeout(60s/120s)、失敗表示は既存claudeLogin.failedに集約し新規キー増やさず
 - 2026-08-23_062023 | agent専用Message読み取りREST追加(#324) | 他プロジェクトの直近Messageを読むGET /api/agent/messagesを既存資産再利用で追加、実地検証済み

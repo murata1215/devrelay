@@ -284,9 +284,27 @@ export const chatMessages = {
     en: '❌ Devin CLI still failed after removing `{flag}`. Please check the devin CLI version on this machine (`devin --help` / `devin update`).\n\n[stderr]\n{stderr}',
     ja: '❌ `{flag}` を外しても Devin CLI が失敗しました。この端末の devin CLI バージョンを確認してください（`devin --help` / `devin update`）。\n\n[stderr]\n{stderr}',
   },
-  'devin.promptTooLongForArgv': {
-    en: '⚠️ This machine\'s Devin CLI does not support `--prompt-file`, and the prompt ({len} chars) exceeds the 6000-char limit for passing it as a command-line argument (Windows cmd.exe has an 8191-char limit). Run `x` to clear history and try a shorter prompt.',
-    ja: '⚠️ この端末の Devin CLI は `--prompt-file` に対応しておらず、プロンプト（{len}文字）がコマンドライン引数として渡せる上限（6000文字、Windows cmd.exe の8191文字制限を考慮）を超えています。`x` で会話履歴をクリアし、短いプロンプトで再試行してください。',
+
+  // --- #344: probe 失敗時の楽観化 + argv フォールバック廃止 + (No response from AI) の置き換え ---
+  'ai.cliNotFound': {
+    en: '❌ {tool} CLI (`{command}`) was not found by the Agent. If you installed or updated it, restart the Agent with `u` so it can be detected again.',
+    ja: '❌ {tool} CLI（`{command}`）が Agent から見つかりませんでした。インストール・更新した直後の場合は `u` で Agent を再起動すると再検出されます。',
+  },
+  'ai.cliFailed': {
+    en: '❌ {tool} CLI exited with code {code} without producing any output.\n\n[stderr]\n{stderr}',
+    ja: '❌ {tool} CLI が出力なしで終了しました（exit {code}）。\n\n[stderr]\n{stderr}',
+  },
+  'devin.probeFailed': {
+    en: '⚠️ Failed to probe this machine\'s Devin CLI (`devin --help`). Proceeding assuming all flags are supported; if an unsupported flag is rejected, DevRelay will automatically retry without it.',
+    ja: '⚠️ この端末の Devin CLI のプローブ（`devin --help`）に失敗しました。全フラグ対応ありと仮定して続行します。非対応フラグが拒否された場合は自動的に外して再試行します。',
+  },
+  'devin.promptFileUnsupported': {
+    en: '❌ This machine\'s Devin CLI does not support `--prompt-file`, so DevRelay cannot safely deliver the prompt (passing it as a raw command-line argument is unsafe and was removed in #344). Please update the devin CLI on this machine.',
+    ja: '❌ この端末の Devin CLI は `--prompt-file` に対応していないため、プロンプトを安全に渡せません（コマンドライン引数への直接展開は #344 で廃止しました）。この端末の devin CLI を更新してください。',
+  },
+  'devin.execPermissionUnsupported': {
+    en: '⚠️ This machine\'s Devin CLI does not support `--permission-mode`, so tool auto-approval in exec mode is not enforced by a flag (Devin\'s own default behavior applies).',
+    ja: '⚠️ この端末の Devin CLI は `--permission-mode` に対応していないため、exec モードのツール自動承認はフラグでは強制されません（Devin 自身の既定動作に従います）。',
   },
 
   // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---

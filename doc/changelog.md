@@ -6,6 +6,60 @@
 
 ## 実装済み機能
 
+### #344: Devin CLI が `(No response from AI)` で沈黙する問題を解消 + argv 経路のコマンド注入穴を削除 (2026-08-31)
+
+#### 背景
+ユーザー報告（実機 `devin --help` 出力添付）: 「新しいバージョンにしたらエラーになっちゃった。
+(No response from AI)はやだなー」。貼られた `--help` では `--prompt-file`/`--permission-mode`/
+`--model`/`--export`/`--agent-config` の5フラグ全てが実在するのに、DevRelay 側は5つ全てを
+「非対応」と誤判定していた。個別の正規表現ミスではあり得ない一致率のため、
+`probeDevinCapabilities()` の catch ブロック（全部 false にする経路）に落ちていると特定。
+
+#### 真因（連鎖）
+probe 失敗 → 全フラグ非対応と誤判定 → 誤警告 → `--prompt-file` も非対応と誤判定され
+`args.push('--', prompt)` の argv フォールバック（#329 由来）へ落ちる → Node の
+`spawn(..., {shell:true})` は引数をクォートしないため、DevRelay が毎回前置する ~170 行の
+Agreement/プランモード指示（`\n\n` やバッククォートを含む）がシェルに解釈され devin が即死
+→ どの既存分岐にも該当せず汎用 `(No response from AI)` に落ちる。この argv フォールバックは
+実証済みの**任意コマンド実行経路**であり、「壊れているから直す」ではなく「危険だから消す」
+対象と判断した。
+
+#### 変更内容（3 OS: `agents/{linux,macos,windows}`）
+1. 新規 `cli-failure.ts`（外部 import ゼロの純関数 `classifyCliFailure()`、3 OS で
+   byte-for-byte 同一）。出力ゼロ終了を `none`/`commandNotFound`/`unknownFlag`/
+   `emptyExitZero`/`emptyNonZero` に分類し `stderrTail`（末尾5行）を返す。
+2. `probeDevinCapabilities()` を「失敗したら楽観（全 true 仮定）」に反転。失敗キャッシュのみ
+   `DEVRELAY_DEVIN_PROBE_TTL_MS`（既定60000ms）で期限切れ、成功キャッシュはプロセス寿命いっぱい
+   保持。実際に非対応だった場合は既存の自動リトライ（`unexpected argument` 検出、上限を2→3に
+   引き上げ）が安全網として受け止める設計。
+3. `devinReadonlyDegraded: boolean` を `devinDegradedReason: 'planReadonly' | 'execPermission' |
+   null` の理由 enum に置き換え、誤警告（実際は対応しているのに「非対応」と表示）を解消。
+   probe 自体が失敗した場合は `devin.probeFailed` を1回だけ通知。
+4. ★argv フォールバックを削除★。常に `--prompt-file` を使用し、probe 成功のうえで本当に
+   非対応と判明した場合のみ `devin.promptFileUnsupported` で明示的に中止。
+5. catch-all を `classifyCliFailure()` 経由の分類に置換（既存分岐は1つも変更せず）。
+   `commandNotFound`→`ai.cliNotFound`（`u` での再検出を案内）、`emptyNonZero`→`ai.cliFailed`
+   （exit code + stderr 末尾5行を必ず表示）。
+6. `devin`/`gemini` の PATH 汚染ガード（`command` がベース名のみのとき `path.dirname` が `'.'`
+   になりプロジェクト cwd が PATH 先頭に積まれる問題）を追加。
+
+#### 検証
+`pnpm build` 6 workspace green、`node --test` 個別実行で shared 5/5・server 54/54（非退行）・
+**linux 55/55**（既存40+新規15）・**macos 55/55**（既存40+新規15）、`diff` で `cli-failure.ts`/
+`cli-failure.test.mjs` の3 OS 間 byte-for-byte 同一、`grep -rn "'--', prompt" agents/*/dist/` = 0、
+`grep -c 'require('`（apps/web）= 0、`git diff --stat -- apps/` が空。
+
+`grep -rn "No response from AI" agents/*/dist/` は 0 件にならない（linux/macos 各5件、windows 3件）
+が、内訳を全て特定済み：`sendPromptToAiSdk()`（Claude SDK 直呼び出しの別関数、exit code/stderr の
+概念自体を持たずスコープ外）2件、devin の既存 `.catch()` リトライ失敗ハンドラ2件（プランが明示的に
+「触るな」とした既存分岐）、新設 catch-all 自身の `none`（シグナル kill 等）分岐1件（プラン記載の
+想定どおりの挙動）。実質的な目的（危険な argv フォールバックが握りつぶしていた実エラーの可視化）は
+達成しており、残存はいずれもスコープ外/設計どおりと判断。詳細は devlog 参照。
+
+#### 反映
+DB マイグレーション不要、`apps/server`/`apps/web` 無変更のため **server 再起動不要**。
+Agent 側の修正が本体のため **各マシン（Linux/macOS/Windows CLI Agent）の `u` が必要**。
+
 ### #343: `login` が `unsupportedAgent` で即失敗するバグを修正（control_response の階層取り違え）(2026-08-31)
 
 #### 背景
