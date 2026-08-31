@@ -296,6 +296,12 @@ set -euo pipefail
 API_URL="${httpUrl}"
 TOKEN="${token}"
 
+# #348: 自分の素性を拾う（DEVRELAY_PROJECT / DEVRELAY_SESSION_ID は全 AI 起動経路で注入済みの環境変数。
+# set -euo pipefail のため \${VAR:-} 形式が必須。自己宛のガードはサーバー側が最終防衛だが、
+# ここでも候補から自分自身を除外し、そもそも誤送信の選択肢を見せない）
+SELF_PATH="\${DEVRELAY_PROJECT:-}"
+SELF_SESSION="\${DEVRELAY_SESSION_ID:-}"
+
 # 引数チェック
 if [ $# -eq 0 ]; then
   echo "使い方:"
@@ -399,27 +405,32 @@ fi
 # 誤った宛先へ実行依頼が飛んで無限ピンポンを起こした事故への対策）
 if command -v jq &>/dev/null; then
   # 候補の絞り込みフィルタ（members / inventory の両方で共用）
-  # 入力: [{id, name, orig, machine, online, same}]
+  # 入力: [{id, name, orig, machine, online, same, path, self}]
+  # #348: 自動選択（$same が1件なら無条件採用）は輻輳事故の直接原因だったため廃止。
+  # 代わりに候補一覧そのものから自分自身（.self）を除外する
   FILTER_JQ='
-    ( if ($machine | length) > 0
-      then map(select(.machine | ascii_downcase | contains($machine | ascii_downcase)))
-      else . end ) as $scoped
+    ( map(select(.self | not)) ) as $noself
+    | ( if ($machine | length) > 0
+      then ($noself | map(select(.machine | ascii_downcase | contains($machine | ascii_downcase))))
+      else $noself end ) as $scoped
     | ( $scoped | map(select((.name | ascii_downcase) == ($name | ascii_downcase) or (.orig | ascii_downcase) == ($name | ascii_downcase))) ) as $exact
     | ( if ($exact | length) > 0 then $exact
         else ($scoped | map(select((.name | ascii_downcase | contains($name | ascii_downcase)) or (.orig | ascii_downcase | contains($name | ascii_downcase))))) end ) as $named
     | ( $named | map(select(.online)) ) as $online
     | ( if ($online | length) > 0 then $online else $named end ) as $avail
-    | ( $avail | map(select(.same)) ) as $same
-    | ( if ($same | length) == 1 then $same else $avail end )
+    | $avail
   '
 
-  CANDIDATES=$(echo "$MEMBERS_BODY" | jq '[ .[] | {
+  # #348: self は path 完全一致による best-effort 判定（正規化はサーバー側 decideCrossTarget が最終防衛）
+  CANDIDATES=$(echo "$MEMBERS_BODY" | jq --arg self_path "$SELF_PATH" '[ .[] | {
     id: .memberProjectId,
     name: .memberProjectName,
     orig: (.memberProjectOriginalName // .memberProjectName),
     machine: .memberMachineName,
     online: (.memberMachineStatus == "online"),
-    same: (.isSameMachine // false)
+    same: (.isSameMachine // false),
+    path: (.memberProjectPath // ""),
+    self: (($self_path | length) > 0 and ((.memberProjectPath // "") == $self_path))
   } ]')
   MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
   MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
@@ -431,7 +442,7 @@ if command -v jq &>/dev/null; then
     echo "エラー: '$PROJECT' は宛先として登録されていません"
     echo ""
     echo "送信できる宛先:"
-    echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]" + (if .self then " ⚠️ 自分自身（送信不可）" else "" end)'
     echo ""
     echo "この一覧に無いプロジェクトへは送れません。WebUI の Team ページで登録するようユーザーに依頼してください。"
     echo "別のプロジェクトに送り直したり、同じ依頼を文面を変えて再送したりしないでください。"
@@ -443,7 +454,7 @@ if command -v jq &>/dev/null; then
     echo "エラー: '$PROJECT' に一致するプロジェクトが $MATCH_COUNT 件あります。宛先を特定できません。"
     echo ""
     echo "候補:"
-    echo "$MATCHED" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo "$MATCHED" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]" + (if .self then " ⚠️ 自分自身（送信不可）" else "" end)'
     echo ""
     echo "--machine <マシン名> でマシンを指定して実行し直すか、どのマシンのプロジェクトかユーザーに確認してください。"
     echo "同じ依頼を文面を変えて再送しないでください。"
@@ -479,9 +490,15 @@ if command -v jq &>/dev/null; then
   # tr -d '\\r' で Windows CRLF を除去（Git Bash + プロキシ環境での Content-Length 不一致防止）
   # #325: --ai 省略時は従来と1バイト同一の body にする（後方互換の要）
   if [ -n "$AI" ]; then
-    JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" --arg ai "$AI" '{targetProjectId: $id, question: $q, ai: $ai}' | tr -d '\\r')
+    BASE_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" --arg ai "$AI" '{targetProjectId: $id, question: $q, ai: $ai}')
   else
-    JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}' | tr -d '\\r')
+    BASE_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}')
+  fi
+  # #348: SELF_PATH（DEVRELAY_PROJECT）が空の場合は従来と1バイト同一の body にする（後方互換の要、旧 Agent はこの変数を持たない）
+  if [ -n "$SELF_PATH" ]; then
+    JSON_BODY=$(echo "$BASE_BODY" | jq --arg cp "$SELF_PATH" '. + {callerProjectPath: $cp}' | tr -d '\\r')
+  else
+    JSON_BODY=$(echo "$BASE_BODY" | tr -d '\\r')
   fi
 
   # 送信（ask: 10分、teamexec: 60分）
@@ -578,6 +595,11 @@ set -euo pipefail
 API_URL="${httpUrl}"
 TOKEN="${token}"
 
+# #348: 自分の素性を拾う（DEVRELAY_PROJECT / DEVRELAY_SESSION_ID は全 AI 起動経路で注入済みの環境変数。
+# set -euo pipefail のため \${VAR:-} 形式が必須）
+SELF_PATH="\${DEVRELAY_PROJECT:-}"
+SELF_SESSION="\${DEVRELAY_SESSION_ID:-}"
+
 # 引数チェック
 if [ $# -eq 0 ]; then
   echo "使い方:"
@@ -667,26 +689,31 @@ fi
 # プロジェクト名でメンバーを検索
 # ask.sh と同じ絞り込み: 完全一致 > オンライン > 同一マシン の優先順、複数残れば自動選択せずエラー（#294 の踏襲）
 if command -v jq &>/dev/null; then
+  # #348: 自動選択（$same が1件なら無条件採用）は輻輳事故の直接原因だったため廃止。
+  # 代わりに候補一覧そのものから自分自身（.self）を除外する
   FILTER_JQ='
-    ( if ($machine | length) > 0
-      then map(select(.machine | ascii_downcase | contains($machine | ascii_downcase)))
-      else . end ) as $scoped
+    ( map(select(.self | not)) ) as $noself
+    | ( if ($machine | length) > 0
+      then ($noself | map(select(.machine | ascii_downcase | contains($machine | ascii_downcase))))
+      else $noself end ) as $scoped
     | ( $scoped | map(select((.name | ascii_downcase) == ($name | ascii_downcase) or (.orig | ascii_downcase) == ($name | ascii_downcase))) ) as $exact
     | ( if ($exact | length) > 0 then $exact
         else ($scoped | map(select((.name | ascii_downcase | contains($name | ascii_downcase)) or (.orig | ascii_downcase | contains($name | ascii_downcase))))) end ) as $named
     | ( $named | map(select(.online)) ) as $online
     | ( if ($online | length) > 0 then $online else $named end ) as $avail
-    | ( $avail | map(select(.same)) ) as $same
-    | ( if ($same | length) == 1 then $same else $avail end )
+    | $avail
   '
 
-  CANDIDATES=$(echo "$MEMBERS_BODY" | jq '[ .[] | {
+  # #348: self は path 完全一致による best-effort 判定（正規化はサーバー側 decideCrossTarget が最終防衛）
+  CANDIDATES=$(echo "$MEMBERS_BODY" | jq --arg self_path "$SELF_PATH" '[ .[] | {
     id: .memberProjectId,
     name: .memberProjectName,
     orig: (.memberProjectOriginalName // .memberProjectName),
     machine: .memberMachineName,
     online: (.memberMachineStatus == "online"),
-    same: (.isSameMachine // false)
+    same: (.isSameMachine // false),
+    path: (.memberProjectPath // ""),
+    self: (($self_path | length) > 0 and ((.memberProjectPath // "") == $self_path))
   } ]')
   MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
   MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
@@ -695,7 +722,7 @@ if command -v jq &>/dev/null; then
     echo "エラー: '$PROJECT' は対象として登録されていません"
     echo ""
     echo "読み取れる宛先:"
-    echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo "$CANDIDATES" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]" + (if .self then " ⚠️ 自分自身（読み取り不可）" else "" end)'
     echo ""
     echo "この一覧に無いプロジェクトは読み取れません。WebUI の Team ページで登録するようユーザーに依頼してください。"
     exit 1
@@ -705,7 +732,7 @@ if command -v jq &>/dev/null; then
     echo "エラー: '$PROJECT' に一致するプロジェクトが $MATCH_COUNT 件あります。対象を特定できません。"
     echo ""
     echo "候補:"
-    echo "$MATCHED" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]"'
+    echo "$MATCHED" | jq -r '.[] | "  - \\(.name) (\\(.machine)) [\\(if .online then "online" else "offline" end)]" + (if .self then " ⚠️ 自分自身（読み取り不可）" else "" end)'
     echo ""
     echo "--machine <マシン名> でマシンを指定して実行し直してください。"
     exit 1

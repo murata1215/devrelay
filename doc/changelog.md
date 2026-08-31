@@ -6,6 +6,111 @@
 
 ## 実装済み機能
 
+### #348: 「なんか今すごい輻輳している気がする」の解消（自己宛 ask + 同一 projectPath 状態の共有）(2026-09-01)
+
+#### 背景
+ユーザーが実チャットログ2本を添付し輻輳を報告。実測: 同一プロジェクト（pixblog）に対して
+`crossquery_`セッションが同時3本+対話セッション1本の計4本が走り、**全部が同じ `--resume` セッション
+ID を共有**、会話履歴保存件数が `83→82→81` と減少（lost update）、コンテキスト使用率が最大442%、
+1ターン所要時間6〜9分。チャット本文には同じ3点質問が3回送られほぼ同一の回答が3回返り、AI自身が
+「`--project pixblog` が自マシンの pixblog（＝自分自身）にマッチしていた」と書いていた＝**AIは自分
+自身に質問していた**。
+
+#### 原因
+①`ask` の宛先自動選択（`skill-manager.ts` の `FILTER_JQ`）が同一マシン上の候補1件を無条件選択し
+自己を除外していない。②サーバー側ループガード（`recentCount >= 3`）は過去5分の**履歴件数**であり
+**同時実行数**を見ていないため最初の2本は必ず通る。③`connection.ts` の `isCrossQuery` 変数は計算
+されるだけで一度も分岐に使われておらず、一時セッション（`crossquery_`/`teamexec_`）が対話セッション
+と同じ `.devrelay/claude-session-id`（resume先）・`.devrelay/conversation.json`（会話履歴）を共有し
+`rm -rf` する `clearOutputDir()` まで共有していた。④`conversation-store.ts` の保存は素の `writeFile`
+でロック・アトミック書き込みなし。
+
+#### 方針: 2層防御
+**層A（サーバー側「入口の防御」、`pm2 restart` で即時効く）**: 自己宛 ask/teamexec を400で拒否、
+実行中の宛先への2本目を429で拒否。**層B（Agent側「直交化」、各マシン `u` 後に効く、根治）**: 一時
+セッションはそもそも projectPath 上の状態を読み書きしない設計にする（ロックは対話セッション同士の
+保険として第2の防御に留める）。キューイング（同時実行を待たせる）案は不採用（実際のタイムアウトが
+JSDoc記載の5分ではなく12時間のため、静かに待たせると12時間ハングしうる。#325「静かなフォールバック
+禁止」に反する）。
+
+#### 実装（層A: サーバー）
+新規 `apps/server/src/services/cross-query-guard.ts`（外部importゼロの純関数、`packages/shared`では
+なく`apps/server`専用として配置——#310の教訓）: `normalizeProjectPath()`/`pickInflightCrossSession()`/
+`decideCrossTarget()`（判定順: ①自己宛→400〔`callerProjectPath`未送信の旧Agentは`unverified`でfail-open
+通過〕②実行中の宛先→429〔ask=15分窓、teamexec=既存65分窓を再利用〕③それ以外allow）/
+`buildCrossTargetRejectionMessage()`（`noRetryNote`を必ず含める——#294の教訓、理由だけ返すとAIが
+即リトライする）。`document-api.ts` の `ask-member`/`teamexec-member` 両エンドポイントに404の所有者
+チェック後・#295のTeamゲート後に配線、`members` レスポンスに `memberProjectPath` を追加（`ask.sh`
+側の自己判定用）。既存の `recentCount >= 3` レート制限・`findInflightTeamExec()`・
+`executeCrossProjectQuery()` 本体は無変更のまま維持。
+
+#### 実装（層A: `ask.sh`/`read.sh`、`agents/linux` のみ）
+`DEVRELAY_PROJECT`/`DEVRELAY_SESSION_ID`（全AI起動経路に既に注入済みだが今まで未使用だった環境変数）
+を `SELF_PATH`/`SELF_SESSION` として拾い、`FILTER_JQ` の自動選択2行を削除、`select(.self | not)` で
+候補から自分を除外、`CANDIDATES` 出力に `path`/`self` を追加。`JSON_BODY` は `SELF_PATH` が空なら
+従来と1バイト同一になるようjqオブジェクトマージ（`callerProjectPath` は非空時のみ追加）。`agents/macos`
+は既存の乖離（#325の`--ai`等が未移植）を踏まえ今回もスコープ外。
+
+#### 実装（層B: Agent、`agents/{linux,macos}` 3新規モジュール byte-for-byte同一 + 2既存ファイル改修）
+新規 `session-scope.ts`（`classifySessionScope()`/`isEphemeralSession()`/`sessionScopeLabel()`、
+`crossquery_`/`teamexec_`/`askdesc_`〔WebUIのプロジェクト説明生成〕を一時扱い）、`path-mutex.ts`
+（`withPathLock()`、Promiseチェーンによる同一キー直列化、`fn`がthrowしても解放される）、
+`atomic-write.ts`（`writeFileAtomic()`、tempへ書いて`rename`、失敗時`unlink`→再試行→リトライ
+20/60/150ms→最終フォールバックは`console.warn`必須。Windowsの`fs.rename`上書き挙動は対象機のAIが
+検証をスコープ外と判断し実測不可だったため、プランのStep 0が列挙した3パターン全てを安全に扱う防御的
+実装を採用）。`connection.ts`（両OS）: 死んでいた`isCrossQuery`を`isEphemeralSession(sessionId)`に
+置き換えて実際に分岐させ、一時セッションは`loadConversation()`/`loadClaudeSessionId()`（resume）を
+呼ばず、`conversation.json`への保存も`clearOutputDir()`（対話セッションの成果物`rm -rf`）も呼ばない。
+`handleSessionEnd`で一時セッションなら`sessionInfoMap.delete(sessionId)`（メモリリーク解消）。
+`markExecPointInMemory()`新設（`markExecPoint`のメモリ内専用版、一時セッションのexecマーカーは
+ディスクに書かない）。`ai-runner.ts`（両OS）: `SendPromptOptions`に`persistProjectState?: boolean`
+（既定true）を追加し、`saveClaudeSessionId()`/`saveContextUsage()`の計4箇所の呼び出し（SDK関数×2+
+`sendPromptToAi()`×2）をこれでガード。`connection.ts`側で`persistProjectState: !isEphemeral`を
+`sendOptions`/`retryOptions`双方に配線、resume失敗時の`clearClaudeSessionId()`も一時セッションでは
+呼ばないようガード。`conversation-store.ts`（両OS）: 既存関数シグネチャは無変更のまま新規
+`mutateConversation()`を追加（`withPathLock()`で排他した上で「再読み込み→変換→アトミック書き込み」、
+`appendToConversation()`/`markExecPoint()`の内部実装をこれ経由に差し替え）。`packages/shared/src/i18n.ts`
+に`concurrency.sameProjectRunning`キー追加（ja/en、`{count}`/`{project}`プレースホルダ）。
+
+#### テスト
+新規 `apps/server/tests/cross-query-guard.test.mjs`（23件）、`agents/{linux,macos}/tests/`に
+`session-scope.test.mjs`（8件）/`path-mutex.test.mjs`（10件、`mutateConversation`の10並行fs統合
+テストを含み実際に件数が減らないことを実測——`withPathLock`のクリーンアップ確認テストで、
+`getActiveLockCount()`が`await`直後にはまだ0にならない場合がある〔`chainEntry.finally`がさらに
+後段のマイクロタスクにぶら下がっているため〕とテスト実行で判明し`setTimeout(0)`を1回挟んで解消）/
+`atomic-write.test.mjs`（6件）を追加、linux/macos間でbyte-for-byte同一を`diff`で確認。
+
+#### 検証
+`pnpm build` 6 workspace green。`node --test`個別実行（#333の教訓、複合コマンドにしない）で
+`packages/shared` 9/9・`apps/server` 77/77（新規23件含む、非退行）・`agents/linux` 95/95（新規24件
+含む、非退行）・`agents/macos` 95/95（新規24件含む、非退行）すべてgreen。プラン§6の静的検証9項目
+全て確認済み: ①〜②ビルド・テストgreen、③`grep -n 'if ($same | length) == 1' skill-manager.ts`=0
+（自動選択の除去確認）、④`session-scope.ts`/`path-mutex.ts`/`atomic-write.ts`本体+対応テストの
+linux/macos byte-for-byte同一を`diff`で確認、⑤`grep -c 'require(' apps/web/dist/assets/index-*.js`=0
+（#310再発防止）、⑥`git diff`で`findInflightTeamExec()`/`checkCrossTargetAllowed()`/
+`executeCrossProjectQuery()`本体（`agent-manager.ts`自体が無変更）/`recentCount >= 3`のレート制限
+ブロックがいずれも無変更であることを確認、⑦`git diff --stat -- apps/web/ agents/windows/`が空、
+⑧一時HOMEで`ensureSkillFiles()`を実行し生成された`ask.sh`/`read.sh`を`bash -n`で構文チェックOK、
+`DEVRELAY_PROJECT`未設定時の`JSON_BODY`が`BASE_BODY`と1バイト同一になることをソース確認、
+⑨`apps/server/dist/services/cross-query-guard.js`・両OSの`dist/services/{session-scope,path-mutex,
+atomic-write}.js`の存在を確認。
+
+#### 変更ファイル
+新規: `apps/server/src/services/cross-query-guard.ts`+`tests/cross-query-guard.test.mjs`、
+`agents/{linux,macos}/src/services/{session-scope,path-mutex,atomic-write}.ts`+
+`agents/{linux,macos}/tests/{session-scope,path-mutex,atomic-write}.test.mjs`。既存:
+`apps/server/src/routes/document-api.ts`、`agents/linux/src/services/skill-manager.ts`、
+`agents/{linux,macos}/src/services/{connection,ai-runner,conversation-store}.ts`、
+`packages/shared/src/i18n.ts`。DBマイグレーション不要、WSメッセージ型変更なし、`apps/web`/
+`agents/windows`無変更。**`pm2 restart devrelay-server`が必須**（層Aが即効）、**commit+push必須**、
+**各マシン（Linux/macOS）の`u`が必須**（層Bの本体、Windows CLI Agentは`agents/linux`ソースを使用する
+ため対象。`agents/windows`〔Electron GUI〕はcross-query経路自体を持たないため対象外）。実チャットでの
+E2E確認（プラン§7: 自己宛askの400即時拒否・`ask --list`から自分が消えること・別プロジェクトへの通常
+askの非退行・`u`後に`--resume`/`Conversation saved`/`.devrelay-output`削除が出ないこと・同一プロジェクト
+への2本目ask が429で拒否されること・対話セッションのresume/`e`/`u`/`w`の非退行）は人間の反映後に別
+サイクルで実施。スコープ外（プラン§8明記）: `agents/macos`の`skill-manager.ts`同期、`agents/windows`、
+キューイング、`agent-manager.ts`のJSDoc誤記是正、`recentCount >= 3`の閾値見直し。
+
 ### #347: Devin CLI の `--config` でプランモード読み取り専用を再強制（Phase0実測 → Phase1実装） (2026-09-01)
 
 #### 背景

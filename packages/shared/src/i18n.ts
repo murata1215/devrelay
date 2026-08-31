@@ -332,6 +332,12 @@ export const chatMessages = {
     en: '❌ Question is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',
     ja: '❌ 質問が長すぎます（{rawLength}文字、上限{limit}文字）。短くして再送してください（自動での切り詰めは行いません）。',
   },
+
+  // --- #348: 同一プロジェクトへの並行実行検知（輻輳の可視化） ---
+  'concurrency.sameProjectRunning': {
+    en: 'ℹ️ Note: {count} other session(s) are currently running for this project ({project}).',
+    ja: 'ℹ️ 参考: 現在このプロジェクト（{project}）に対して他に{count}件のセッションが実行中です。',
+  },
 } as const;
 
 export type ChatMessageKey = keyof typeof chatMessages;

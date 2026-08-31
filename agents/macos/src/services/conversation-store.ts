@@ -1,6 +1,8 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { withPathLock, normalizeLockKey } from './path-mutex.js';
+import { writeFileAtomic } from './atomic-write.js';
 
 const CONVERSATION_DIR = '.devrelay';
 const CONVERSATION_FILE = 'conversation.json';
@@ -75,7 +77,61 @@ export async function saveConversation(
 }
 
 /**
+ * `saveConversation` のアトミック書き込み版（#348: 層 B 第 2 の防御）。
+ * temp へ書いて rename する `writeFileAtomic` を使うため、書き込み途中のファイルを
+ * 他プロセス/他セッションが読んでしまう事故を防ぐ。`saveConversation` 自体は
+ * 既存呼び出し元（`connection.ts` の直接呼び出し等）との後方互換のため無変更で残す。
+ */
+async function saveConversationAtomic(
+  projectPath: string,
+  history: ConversationEntry[]
+): Promise<void> {
+  const dirPath = join(projectPath, CONVERSATION_DIR);
+  const filePath = getConversationPath(projectPath);
+
+  try {
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
+
+    const data: ConversationData = {
+      projectPath,
+      lastUpdated: new Date().toISOString(),
+      history
+    };
+
+    await writeFileAtomic(filePath, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error(`❌ Could not save conversation history (atomic):`, (err as Error).message);
+  }
+}
+
+/**
+ * 会話履歴を排他的に読み替えて保存する（#348）。
+ * ロックを取ってから「再読み込み → 変換 → アトミック書き込み」を行うため、
+ * 同一プロジェクトに複数セッションが同時に書いても lost update が起きない。
+ * （#348: 実測で 83 → 82 → 81 と件数が減る lost update を確認したための対策）
+ *
+ * @param projectPath プロジェクトのパス
+ * @param mutator 現在の履歴を受け取り、新しい履歴を返す純関数
+ */
+export async function mutateConversation(
+  projectPath: string,
+  mutator: (current: ConversationEntry[]) => ConversationEntry[]
+): Promise<ConversationEntry[]> {
+  const lockKey = normalizeLockKey(getConversationPath(projectPath));
+
+  return withPathLock(lockKey, async () => {
+    const current = await loadConversation(projectPath);
+    const updated = mutator(current);
+    await saveConversationAtomic(projectPath, updated);
+    return updated;
+  });
+}
+
+/**
  * Append a message to conversation and save
+ * （#348: 内部実装を `mutateConversation` 経由に差し替え。引数・戻り値の型は無変更）
  */
 export async function appendToConversation(
   projectPath: string,
@@ -89,10 +145,7 @@ export async function appendToConversation(
     timestamp: new Date().toISOString()
   };
 
-  const updatedHistory = [...history, entry];
-  await saveConversation(projectPath, updatedHistory);
-
-  return updatedHistory;
+  return mutateConversation(projectPath, (current) => [...current, entry]);
 }
 
 /**
@@ -174,6 +227,7 @@ export async function archiveConversation(
 /**
  * Mark exec point in conversation history
  * This creates a reset point for context - only messages after exec are sent to Claude
+ * （#348: 内部実装を `mutateConversation` 経由に差し替え。引数・戻り値の型は無変更）
  */
 export async function markExecPoint(
   projectPath: string,
@@ -185,8 +239,7 @@ export async function markExecPoint(
     timestamp: new Date().toISOString()
   };
 
-  const updatedHistory = [...history, entry];
-  await saveConversation(projectPath, updatedHistory);
+  const updatedHistory = await mutateConversation(projectPath, (current) => [...current, entry]);
   console.log(`🚀 Exec point marked at position ${updatedHistory.length}`);
 
   return updatedHistory;

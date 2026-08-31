@@ -81,6 +81,10 @@ import { autoDiscoverProjects, loadProjects } from './projects.js';
 import { checkClaudeAuth } from './claude-auth.js';
 // #326 Phase2: Claude OAuth リモート再ログイン本体
 import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './claude-login.js';
+// #348: 一時セッション（ask-member/teamexec-member/WebUI プロジェクト説明生成）が
+// projectPath 上の永続状態（conversation.json / claude-session-id / .devrelay-output）を
+// 読み書きしないようにするための判定（層 B: Agent 側の直交化）
+import { isEphemeralSession } from './session-scope.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -706,18 +710,22 @@ async function handleSessionStart(
   // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）
   resetApproveAllMode();
 
-  const isCrossQuery = sessionId.startsWith('crossquery_') || sessionId.startsWith('teamexec_');
-  const crossLabel = sessionId.startsWith('teamexec_') ? 'TEAM-EXEC' : 'CROSS-QUERY';
-  console.log(`🚀 Starting session: ${sessionId}${isCrossQuery ? ` [${crossLabel}]` : ''}`);
+  // #348: crossquery_/teamexec_/askdesc_ は一時セッション（projectPath 上の状態を読み書きしない）。
+  // 旧 isCrossQuery（crossquery_/teamexec_ のみ）は askdesc_ を含んでいなかったが、
+  // WebUI のプロジェクト説明生成も同じ理由で一時扱いにすべきため isEphemeralSession に統一する。
+  const isEphemeral = isEphemeralSession(sessionId);
+  const crossLabel = sessionId.startsWith('teamexec_') ? 'TEAM-EXEC' : sessionId.startsWith('askdesc_') ? 'ASK-DESC' : 'CROSS-QUERY';
+  console.log(`🚀 Starting session: ${sessionId}${isEphemeral ? ` [${crossLabel}]` : ''}`);
   console.log(`   Project: ${projectName} (${projectPath})`);
   console.log(`   AI Tool: ${aiTool}`);
-  if (isCrossQuery) {
+  if (isEphemeral) {
     // クロスプロジェクトクエリのタイミング追跡開始
     sessionTimings.set(sessionId, Date.now());
   }
 
   // Load previous conversation history from file
-  const history = await loadConversation(projectPath);
+  // #348: 一時セッションは conversation.json を読まない（全セッション共有の resume/履歴汚染を防ぐ）
+  const history = isEphemeral ? [] : await loadConversation(projectPath);
 
   // Check for pending work state (auto-continue feature)
   const pendingWorkState = await loadWorkState(projectPath);
@@ -737,7 +745,8 @@ async function handleSessionStart(
   }
 
   // Load existing Claude session ID for --resume
-  const claudeResumeSessionId = await loadClaudeSessionId(projectPath);
+  // #348: 一時セッションは resume しない（対話セッションと同じ --resume を共有すると輻輳の原因になる）
+  const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath);
   if (claudeResumeSessionId) {
     console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
   }
@@ -794,6 +803,12 @@ async function handleSessionStart(
 async function handleSessionEnd(sessionId: string) {
   console.log(`⏹️ Ending session: ${sessionId}`);
   await stopAiSession(sessionId);
+  // #348: 一時セッション（ask-member/teamexec-member/askDesc）は二度と再利用されないため、
+  // sessionInfoMap に残したままだとメモリリークになる（対話セッションは同じ sessionId を
+  // 再利用し続けるため削除しない）
+  if (isEphemeralSession(sessionId)) {
+    sessionInfoMap.delete(sessionId);
+  }
 }
 
 /** 実行中の AI プロセスをキャンセルし、Server に完了通知を送信 */
@@ -845,8 +860,24 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
+/**
+ * `markExecPoint`（conversation-store.ts）のメモリ内専用版（#348）。
+ * 一時セッション（ask-member/teamexec-member）は projectPath 上の conversation.json を
+ * 読み書きしないため、exec マーカーもディスクに書かずメモリ内の history にのみ追加する。
+ */
+function markExecPointInMemory(history: ConversationEntry[]): ConversationEntry[] {
+  return [...history, {
+    role: 'exec',
+    content: '--- EXEC: Implementation Started ---',
+    timestamp: new Date().toISOString()
+  }];
+}
+
 async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean; language?: Language; permissionPolicy?: string }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
+  // #348: 一時セッションは exec マーカーも projectPath 上のファイルに書かない
+  // （対話セッションと conversation.json を共有しているため、書くと相互汚染する）
+  const isEphemeral = isEphemeralSession(sessionId);
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
   // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット
@@ -875,12 +906,14 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
       }
     }
     // Mark exec point in history (this becomes the reset point)
-    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
+    sessionInfo.history = isEphemeral
+      ? markExecPointInMemory(sessionInfo.history)
+      : await markExecPoint(projectPath, sessionInfo.history);
     console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   } else {
     // Session not in memory (e.g., after server restart), initialize from file
     console.log(`📋 Session not found in memory, initializing from file...`);
-    const history = await loadConversation(projectPath);
+    const history = isEphemeral ? [] : await loadConversation(projectPath);
     const claudeSessionId = uuidv4();
     // #307: Server から渡された aiTool（DB の Session.aiTool）を優先する。
     // ここでハードコードの config 既定値にフォールバックすると、`a` で選択した AI ツール
@@ -896,7 +929,9 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     console.log(`📋 Session ${sessionId} initialized with ${history.length} history entries (aiTool=${aiTool})`);
 
     // Mark exec point in history
-    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
+    sessionInfo.history = isEphemeral
+      ? markExecPointInMemory(sessionInfo.history)
+      : await markExecPoint(projectPath, sessionInfo.history);
     console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
@@ -930,6 +965,8 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
 
 async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
+  // #348: 一時セッションは projectPath 上の状態（conversation.json / .devrelay-output）を読み書きしない
+  const isEphemeral = isEphemeralSession(sessionId);
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (crossQueryStart) {
@@ -956,8 +993,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Agent 再起動で sessionInfoMap が消失した場合、payload の projectPath/aiTool で自動初期化
   if (!sessionInfo && payload.projectPath && payload.aiTool && currentConfig) {
     console.log(`🔄 Auto-initializing session ${sessionId} (agent may have restarted)`);
-    const history = await loadConversation(payload.projectPath);
-    const claudeResumeSessionId = await loadClaudeSessionId(payload.projectPath);
+    const history = isEphemeral ? [] : await loadConversation(payload.projectPath);
+    const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(payload.projectPath);
     if (claudeResumeSessionId) {
       console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
     }
@@ -1030,10 +1067,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     content: prompt,
     timestamp: new Date().toISOString()
   });
-  await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+  // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
+  if (!isEphemeral) {
+    await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+  }
 
   // Clear output directory before running
-  await clearOutputDir(sessionInfo.projectPath);
+  // #348: 一時セッションは呼ばない（対話セッションが書きかけの .devrelay-output/ 成果物を
+  // cross-query 開始のたびに rm -rf されてしまう事故を防ぐ）
+  if (!isEphemeral) {
+    await clearOutputDir(sessionInfo.projectPath);
+  }
 
   // Check if the last entry (before current user message) is an exec marker
   // This means exec was just sent, so this prompt should run in exec mode
@@ -1197,6 +1241,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     model: payload.model,  // Claude SDK モデル指定（#251）
     isWCommand: payload.isWCommand,  // #312: Codex の w コマンドのみ danger-full-access に切り替える
     language: payload.language,  // #316: チャット表示言語（'en' の場合のみ AI への英語応答指示が付与される）
+    // #348: 一時セッションは claude-session-id / context-usage を projectPath 上に書かない
+    persistProjectState: !isEphemeral,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）
@@ -1331,14 +1377,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           });
 
           // Save response to history and persist to file
+          // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
           if (responseText.trim()) {
             sessionInfo.history.push({
               role: 'assistant',
               content: responseText.trim(),
               timestamp: new Date().toISOString()
             });
-            await saveConversation(sessionInfo.projectPath, sessionInfo.history);
-            console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
+            if (!isEphemeral) {
+              await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+              console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
+            }
           }
 
           // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）
@@ -1367,7 +1416,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     if (aiResult.resumeFailed) {
       console.log(`🔄 Retrying without --resume due to session failure...`);
       sessionInfo.claudeResumeSessionId = undefined;
-      await clearClaudeSessionId(sessionInfo.projectPath);
+      // #348: 一時セッションは projectPath 上の claude-session-id ファイルを消さない
+      // （そもそも読んでいないため = undefined のはずだが、念のため書き込み経路も揃えておく）
+      if (!isEphemeral) {
+        await clearClaudeSessionId(sessionInfo.projectPath);
+      }
 
       // Retry without resume session ID（completionSent をリセットして retry の完了を受け付ける）
       responseText = '';
@@ -1384,6 +1437,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         onPolicyDenied: sendOptions.onPolicyDenied,
         model: payload.model,  // Claude SDK モデル指定を retry でも維持（#251）
         language: payload.language,  // #316: チャット表示言語を retry でも維持
+        // #348: persistProjectState も retry で引き継ぐ
+        persistProjectState: sendOptions.persistProjectState,
       };
 
       // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。
@@ -1432,14 +1487,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               },
             });
 
+            // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
             if (responseText.trim()) {
               sessionInfo.history.push({
                 role: 'assistant',
                 content: responseText.trim(),
                 timestamp: new Date().toISOString()
               });
-              await saveConversation(sessionInfo.projectPath, sessionInfo.history);
-              console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
+              if (!isEphemeral) {
+                await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+                console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
+              }
             }
 
             // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）

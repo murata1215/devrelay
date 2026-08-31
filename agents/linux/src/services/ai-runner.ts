@@ -828,6 +828,12 @@ export interface SendPromptOptions {
    * ToolApproval への監査記録・WebUI/Discord/Telegram への通知に使う。
    */
   onPolicyDenied?: (info: { toolName: string; toolInput: Record<string, unknown>; reason: string }) => void;
+  /**
+   * #348: projectPath 上の永続状態（claude-session-id / context-usage）を書き込むかどうか。
+   * 既定 true（従来どおり）。一時セッション（ask-member/teamexec-member/askDesc）は
+   * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
+   */
+  persistProjectState?: boolean;
 }
 
 /**
@@ -1095,9 +1101,12 @@ async function sendPromptToAiSdk(
       if (m.session_id && !result.extractedSessionId) {
         result.extractedSessionId = m.session_id;
         console.log(`[claude/sdk] 📋 Session ID: ${m.session_id.substring(0, 8)}...`);
-        saveClaudeSessionId(projectPath, m.session_id).catch(err => {
-          console.error(`Failed to save session ID:`, err);
-        });
+        // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
+        if (options.persistProjectState !== false) {
+          saveClaudeSessionId(projectPath, m.session_id).catch(err => {
+            console.error(`Failed to save session ID:`, err);
+          });
+        }
       }
 
       // assistant メッセージ: テキストとツール使用を出力
@@ -1186,9 +1195,12 @@ async function sendPromptToAiSdk(
             percentage: Math.round((cacheReadTokens / contextWindow) * 100),
           };
           console.log(`[claude/sdk] ${formatContextUsage(result.contextUsage)}`);
-          saveContextUsage(projectPath, result.contextUsage).catch(err => {
-            console.error(`Failed to save context usage:`, err);
-          });
+          // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
+          if (options.persistProjectState !== false) {
+            saveContextUsage(projectPath, result.contextUsage).catch(err => {
+              console.error(`Failed to save context usage:`, err);
+            });
+          }
         }
 
         // 使用量データ（DB 保存用）
@@ -2103,17 +2115,23 @@ export async function sendPromptToAi(
             result.extractedSessionId = parsed.sessionId;
             console.log(`[${aiTool}] 📋 Session ID: ${parsed.sessionId.substring(0, 8)}...`);
             // Save session ID for future resumption
-            saveClaudeSessionId(projectPath, parsed.sessionId).catch(err => {
-              console.error(`Failed to save session ID:`, err);
-            });
+            // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
+            if (options.persistProjectState !== false) {
+              saveClaudeSessionId(projectPath, parsed.sessionId).catch(err => {
+                console.error(`Failed to save session ID:`, err);
+              });
+            }
           }
           if (parsed.contextUsage) {
             result.contextUsage = parsed.contextUsage;
             console.log(`[${aiTool}] ${formatContextUsage(parsed.contextUsage)}`);
             // Save context usage for display at start of next prompt
-            saveContextUsage(projectPath, parsed.contextUsage).catch(err => {
-              console.error(`Failed to save context usage:`, err);
-            });
+            // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
+            if (options.persistProjectState !== false) {
+              saveContextUsage(projectPath, parsed.contextUsage).catch(err => {
+                console.error(`Failed to save context usage:`, err);
+              });
+            }
           }
           // usageData をそのまま保存（DB 格納用）
           if (parsed.usageData) {

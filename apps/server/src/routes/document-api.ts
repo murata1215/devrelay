@@ -23,6 +23,7 @@ import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, ca
 import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
 import type { AiTool, ManagementInfo } from '@devrelay/shared';
 import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef, AI_TOOL_NAMES } from '@devrelay/shared';
+import { decideCrossTarget, pickInflightCrossSession, buildCrossTargetRejectionMessage, ASK_INFLIGHT_WINDOW_MS } from '../services/cross-query-guard.js';
 
 /**
  * #294: クロスプロジェクト連携のループ防止パラメータ
@@ -373,6 +374,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         memberProjectName: m.project.displayName ?? m.project.name,
         memberProjectOriginalName: m.project.name,
         memberProjectId: m.project.id,
+        // #348: 自己宛判定（ask.sh 側の自己除外）に使う。projectPath そのもの
+        memberProjectPath: m.project.path,
         memberMachineName: m.project.machine.displayName || m.project.machine.name,
         memberMachineStatus: m.project.machine.status,
         isSameMachine: m.project.machineId === auth.machineId,
@@ -487,7 +490,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: 'Invalid or missing machine token' });
     }
 
-    const { targetProjectId, question, ai } = (request.body || {}) as { targetProjectId?: string; question?: string; ai?: string };
+    const { targetProjectId, question, ai, callerProjectPath } = (request.body || {}) as { targetProjectId?: string; question?: string; ai?: string; callerProjectPath?: string };
     if (!targetProjectId || !question) {
       return reply.status(400).send({ error: 'targetProjectId and question are required' });
     }
@@ -510,6 +513,30 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     }
     if (askAllowed.legacy) {
       console.log(`⚠️ Cross-query allowed without team registration (no teams yet): → ${targetProject.name}`);
+    }
+
+    // #348: 入口の防御（自己宛 → 400 / 実行中の宛先 → 429）。旧 Agent（callerProjectPath 未送信）は
+    // fail-open で通す（decideCrossTarget 内部の unverified 判定）
+    {
+      const inflightRows = await prisma.session.findMany({
+        where: { projectId: targetProjectId, id: { startsWith: 'crossquery_' }, status: 'active' },
+        select: { id: true, startedAt: true },
+      });
+      const inflight = pickInflightCrossSession(inflightRows, Date.now(), ASK_INFLIGHT_WINDOW_MS);
+      const decision = decideCrossTarget({
+        mode: 'ask',
+        callerMachineId: auth.machineId,
+        targetMachineId: targetProject.machine.id,
+        callerProjectPath: callerProjectPath ?? null,
+        targetProjectPath: targetProject.path,
+        inflightSessionId: inflight?.id ?? null,
+      });
+      if (!decision.allowed) {
+        console.log(`🚫 Cross-query guard (${decision.reason}): ${auth.machineId} → ${targetProject.name}`);
+        return reply.status(decision.status).send({
+          error: buildCrossTargetRejectionMessage(decision, { mode: 'ask', targetProjectName: targetProject.name, noRetryNote: NO_RETRY_NOTE }),
+        });
+      }
     }
 
     if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
@@ -689,7 +716,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: 'Invalid or missing machine token' });
     }
 
-    const { targetProjectId, question } = (request.body || {}) as { targetProjectId?: string; question?: string };
+    const { targetProjectId, question, callerProjectPath } = (request.body || {}) as { targetProjectId?: string; question?: string; callerProjectPath?: string };
     if (!targetProjectId || !question) {
       return reply.status(400).send({ error: 'targetProjectId and question are required' });
     }
@@ -697,7 +724,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     // ターゲットプロジェクトの存在確認と所有権チェック
     const targetProject = await prisma.project.findUnique({
       where: { id: targetProjectId },
-      include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true } } },
+      include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true, name: true } } },
     });
 
     if (!targetProject || targetProject.machine.userId !== auth.userId || targetProject.machine.deletedAt) {
@@ -712,6 +739,29 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     }
     if (execAllowed.legacy) {
       console.log(`⚠️ Team exec allowed without team registration (no teams yet): → ${targetProject.name}`);
+    }
+
+    // #348: 入口の防御（自己宛 → 400 / 実行中の宛先 → 429）。窓は teamexec の既存 65 分（CROSS_INFLIGHT_WINDOW_MS）を再利用
+    {
+      const inflightRows = await prisma.session.findMany({
+        where: { projectId: targetProjectId, id: { startsWith: 'teamexec_' }, status: 'active' },
+        select: { id: true, startedAt: true },
+      });
+      const inflight = pickInflightCrossSession(inflightRows, Date.now(), CROSS_INFLIGHT_WINDOW_MS);
+      const decision = decideCrossTarget({
+        mode: 'teamexec',
+        callerMachineId: auth.machineId,
+        targetMachineId: targetProject.machine.id,
+        callerProjectPath: callerProjectPath ?? null,
+        targetProjectPath: targetProject.path,
+        inflightSessionId: inflight?.id ?? null,
+      });
+      if (!decision.allowed) {
+        console.log(`🚫 Team exec guard (${decision.reason}): ${auth.machineId} → ${targetProject.name}`);
+        return reply.status(decision.status).send({
+          error: buildCrossTargetRejectionMessage(decision, { mode: 'teamexec', targetProjectName: targetProject.name, noRetryNote: NO_RETRY_NOTE }),
+        });
+      }
     }
 
     if (targetProject.machine.status !== 'online' || !isAgentConnected(targetProject.machine.id)) {
