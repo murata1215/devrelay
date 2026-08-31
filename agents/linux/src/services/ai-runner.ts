@@ -11,6 +11,7 @@ import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { matchesToolRule, isAllowedByRules, decidePlanPermission } from './plan-permission.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
+import { buildDevinCapabilityDetail, formatDevinFlagList } from './devin-diagnostics.js';
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
@@ -57,6 +58,9 @@ let devinCapabilitiesCache: {
   respectWorkspaceTrust: boolean;
   version: string;
   helpBytes: number;
+  // #346: help から抽出した `--xxx` 一覧。チャットへの「このマシンで使えるフラグ」通知
+  // （devinFlagListNotified/devin.flagList）用。probe 失敗時は空配列。
+  flags: string[];
   ok: boolean;
   reason?: string;
 } | null = null;
@@ -66,6 +70,9 @@ let devinProbeFailedWarned = false;
 // #345: `--agent-config` が「非対応」と判定されたときの `--help` 全文ダンプは
 // H-A（別バイナリ解決）/H-B（config差）切り分けの証拠採取用。プロセス寿命中 1 回だけ出す。
 let devinAgentConfigHelpDumped = false;
+// #346: `--agent-config` 非対応時、チャットへの「このマシンで使えるフラグ一覧」通知は
+// プロセス寿命中 1 回だけ出す（devinAgentConfigHelpDumped と同じ流儀）。
+let devinFlagListNotified = false;
 
 // #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
 let claudeFallbackLogged = false;
@@ -235,7 +242,7 @@ function probeGeminiCapabilities(command: string): { model: boolean } {
  * `devin --version` と `helpBytes`（help 文字数）も 1 回だけ計測して診断ログ・診断メッセージに使う
  * （version/helpBytes 自体は probe の成否や各フラグ判定に一切影響しない）。
  * @param command devin コマンドのフルパス
- * @returns 各フラグの対応可否 + 診断情報（version/helpBytes）+ `ok`（probe 自体が成功したか）+ 失敗時の `reason`
+ * @returns 各フラグの対応可否 + 診断情報（version/helpBytes/flags）+ `ok`（probe 自体が成功したか）+ 失敗時の `reason`
  */
 function probeDevinCapabilities(command: string): {
   model: boolean;
@@ -246,6 +253,7 @@ function probeDevinCapabilities(command: string): {
   respectWorkspaceTrust: boolean;
   version: string;
   helpBytes: number;
+  flags: string[];
   ok: boolean;
   reason?: string;
 } {
@@ -272,9 +280,10 @@ function probeDevinCapabilities(command: string): {
       // バージョン取得は診断用のため失敗は無視（version は 'unknown' のまま）
     }
     const helpBytes = help.length;
-    devinCapabilitiesCache = { model, agentConfig, permissionMode, promptFile, export: exportFlag, respectWorkspaceTrust, version, helpBytes, ok: true };
-    devinCapabilitiesFailedAt = null;
+    // #346: フラグ一覧を先に計算してキャッシュに含める（チャットへの「使えるフラグ」通知に使う）
     const detectedFlags = Array.from(new Set(help.match(/--[a-z][a-z-]*/gi) ?? [])).sort();
+    devinCapabilitiesCache = { model, agentConfig, permissionMode, promptFile, export: exportFlag, respectWorkspaceTrust, version, helpBytes, flags: detectedFlags, ok: true };
+    devinCapabilitiesFailedAt = null;
     console.log(`[devin] 🔎 capabilities: --model=${model} --agent-config=${agentConfig} --permission-mode=${permissionMode} --prompt-file=${promptFile} --export=${exportFlag} --respect-workspace-trust=${respectWorkspaceTrust} version=${version} helpBytes=${helpBytes}`);
     console.log(`[devin] 🔎 detected flags: ${detectedFlags.join(' ')}`);
     if (!agentConfig && !devinAgentConfigHelpDumped) {
@@ -283,21 +292,11 @@ function probeDevinCapabilities(command: string): {
       console.log(`[devin] 🔎 --agent-config not detected, full --help dump:\n${help}`);
     }
   } catch (err) {
-    devinCapabilitiesCache = { model: true, agentConfig: true, permissionMode: true, promptFile: true, export: true, respectWorkspaceTrust: true, version: 'unknown', helpBytes: 0, ok: false, reason: (err as Error).message };
+    devinCapabilitiesCache = { model: true, agentConfig: true, permissionMode: true, promptFile: true, export: true, respectWorkspaceTrust: true, version: 'unknown', helpBytes: 0, flags: [], ok: false, reason: (err as Error).message };
     devinCapabilitiesFailedAt = Date.now();
     console.warn(`[devin] --help probe failed, assuming all flags supported (optimistic, TTL applies):`, (err as Error).message);
   }
   return devinCapabilitiesCache;
-}
-
-/**
- * #345: `devin.readonlyUnsupported`/`devin.execPermissionUnsupported`/`devin.probeFailed` の
- * `{detail}` プレースホルダに埋める短い診断行を組み立てる（H-A/H-B 切り分け用）。
- * @param caps probeDevinCapabilities() の戻り値
- * @returns 例: "devin 3000.1.27 / help 4128 chars / probe=ok"
- */
-function buildDevinCapabilityDetail(caps: { version: string; helpBytes: number; ok: boolean }): string {
-  return `devin ${caps.version} / help ${caps.helpBytes} chars / probe=${caps.ok ? 'ok' : 'failed'}`;
 }
 
 /**
@@ -1715,6 +1714,12 @@ export async function sendPromptToAi(
 
     if (devinDegradedReason === 'planReadonly') {
       onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.readonlyUnsupported', { detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
+      // #346: --agent-config 非対応時は「このマシンで何が使えるか」をプロセス寿命中 1 回だけ追送する
+      // （agent.log にしか出ていなかった detected flags をチャットへ可視化）。
+      if (!devinFlagListNotified) {
+        devinFlagListNotified = true;
+        onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.flagList', { flags: formatDevinFlagList(devinCaps.flags) })}\n`, false);
+      }
     } else if (devinDegradedReason === 'execPermission') {
       onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.execPermissionUnsupported', { detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
     }

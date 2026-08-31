@@ -275,8 +275,13 @@ export const chatMessages = {
   // #345: {detail} は「本当に非対応と判定したのか、環境差の疑いがあるのか」を切り分けるための
   // 診断サフィックス（例: "devin 3000.1.27 / help 4128 chars / probe=ok"）。全 OS の呼び出し側で必ず渡す。
   'devin.readonlyUnsupported': {
-    en: '⚠️ This machine\'s Devin CLI does not support `--agent-config`, so plan-mode read-only enforcement is prompt-instruction only (file writes cannot be fully blocked).\n({detail})',
-    ja: '⚠️ この端末の Devin CLI は `--agent-config` に対応していないため、プランモードの読み取り専用強制はプロンプト指示のみになります（ファイル書き込みを完全にはブロックできません）。\n({detail})',
+    en: '⚠️ This version of Devin CLI does not have `--agent-config` (it was removed in a newer release, so updating will not bring it back). Plan-mode read-only enforcement is prompt-instruction only (file writes cannot be fully blocked). For a permanent fix, add a `permissions.deny` rule to this machine\'s Devin CLI config file (e.g. `~/.config/devin/config.json` or `%APPDATA%\\devin\\config.json`), such as `"permissions": { "deny": ["Write(**)", "Exec(**)"] }`.\n({detail})',
+    ja: '⚠️ このバージョンの Devin CLI には `--agent-config` がありません（新しいバージョンで廃止されたため、更新しても復活しません）。プランモードの読み取り専用強制はプロンプト指示のみになります（ファイル書き込みを完全にはブロックできません）。恒久的な対策としては、この端末の Devin CLI の config ファイル（例: `~/.config/devin/config.json` や `%APPDATA%\\devin\\config.json`）に `"permissions": { "deny": ["Write(**)", "Exec(**)"] }` のような `permissions.deny` ルールを追加してください。\n({detail})',
+  },
+  // --- #346: --agent-config 非対応時に「このマシンで何が使えるか」を1回だけ可視化する（診断強化） ---
+  'devin.flagList': {
+    en: '🔎 Flags exposed by this machine\'s Devin CLI: {flags}',
+    ja: '🔎 この端末の Devin CLI が公開しているフラグ: {flags}',
   },
   'devin.unknownFlagRetry': {
     en: '⚠️ Devin CLI rejected the `{flag}` flag as unknown. Retrying without it...',

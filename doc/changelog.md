@@ -6,6 +6,50 @@
 
 ## 実装済み機能
 
+### #346: `devin devin` 表記重複の解消 + 検出フラグ一覧のチャット可視化 + `readonlyUnsupported` 文言訂正 (2026-08-31)
+
+#### 背景
+#345（`fd0313a`）適用後の実機 E2E で `devin 3000.6.7` が正常応答するところまで確認できたが、
+診断行が `devin devin 3000.6.7 (260a97c8) / help 3652 chars / probe=ok` と表記重複しているとユーザーが
+報告。同時に Devin 公式ドキュメント（`cli/reference/commands`）を確認したところ `--agent-config` は
+現行バージョンに一切記載がなく**新しいバージョンで廃止済み**と判明した。#345 の H-A（「Agent が古い実体を
+解決している」という仮説）は誤りで、むしろ逆に新しい実体で廃止されたフラグだったため、誤警告ではなく
+真陽性（正しく非対応と判定できていた）と確定した。
+
+#### 変更内容（3 OS: `agents/{linux,macos,windows}` + `packages/shared`）
+1. **表記重複の解消**: 新規 `agents/{linux,macos,windows}/src/services/devin-diagnostics.ts`
+   （外部 import ゼロの純関数3本、3 OS byte-for-byte 同一）を新設し、`formatDevinVersion()`
+   （`devin ` の二重前置を防止）・`buildDevinCapabilityDetail()`（`ai-runner.ts` 内にあった同名の
+   ローカル関数をここに集約、3 OS コピーの同期漏れ再発防止）・`formatDevinFlagList()`（`--xxx` 一覧の
+   表示整形）を提供。`ai-runner.ts` 3 OS のローカル `buildDevinCapabilityDetail()` 定義を削除して
+   import に置換。
+2. **検出フラグ一覧のチャット可視化**: `probeDevinCapabilities()` の戻り値に `flags: string[]` を追加
+   （既に `detectedFlags` としてログ専用に計算されていたものを戻り値にも含めるだけ、計算順序を先出しに
+   変更のみでフラグ判定式6本・引数組み立て分岐は無変更）。新設ガード `devinFlagListNotified` により、
+   `--agent-config` 非対応時（`devinDegradedReason==='planReadonly'`）に新規 i18n キー `devin.flagList`
+   （`🔎 この端末の Devin CLI が公開しているフラグ: {flags}`）をプロセス寿命中1回だけ追送する。
+3. **`devin.readonlyUnsupported` 文言訂正**: 「対応していない」→「このバージョンには無い（新しい
+   バージョンで廃止済み、更新しても直らない）」に訂正し、恒久対策として `~/.config/devin/config.json`
+   等への `permissions.deny` ルール追加を案内する文言に変更。**キー名・`{detail}` プレースホルダは
+   無変更**のため呼び出し側3箇所は無修正で済み、同期漏れリスクなし。
+
+#### 検証
+`pnpm build` 6 workspace green、`node --test` 個別実行で `packages/shared` 9/9（非退行）・
+`apps/server` 54/54（非退行）・**`agents/linux` 65/65**（既存59+新規6）・
+**`agents/macos` 65/65**（既存59+新規6）。`diff` で `devin-diagnostics.ts`/`devin-diagnostics.test.mjs`
+の3 OS間 byte-for-byte 同一を確認。`grep -rn 'devin \${caps.version}' agents/*/src/` = 0（重複表記の
+残骸ゼロ）。`git diff` でプローブの6正規表現判定・devin 引数組み立て分岐が3 OSとも無変更（純粋な追加の
+み）であることを確認。`grep -c 'require('`（apps/web）= 0、`git diff --stat -- apps/` が空。dist 反映
+確認（`packages/shared/dist/i18n.js` に `devin.flagList` + 新本文、3 OSの `dist/services/devin-diagnostics.js`
+存在・`formatDevinVersion` 含有）。
+
+#### 変更ファイル
+新規 `agents/{linux,macos,windows}/src/services/devin-diagnostics.ts` +
+`agents/{linux,macos}/tests/devin-diagnostics.test.mjs`、既存
+`agents/{linux,macos,windows}/src/services/ai-runner.ts`、`packages/shared/src/i18n.ts`。
+DB マイグレーション不要、`apps/server`/`apps/web` 無変更のため server 再起動不要。
+**各マシン（Linux/macOS/Windows CLI Agent）の `u` が必須**（Agent 側の修正が本体）。
+
 ### #345: Devin CLI が workspace trust で拒否される問題を解消 + `{tool}` 未置換 + `--agent-config` 誤判定の診断強化 (2026-08-31)
 
 #### 背景
