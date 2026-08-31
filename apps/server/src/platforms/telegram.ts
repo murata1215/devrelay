@@ -1,5 +1,6 @@
 import TelegramBot, { Message } from 'node-telegram-bot-api';
 import type { FileAttachment, ToolApprovalPromptPayload } from '@devrelay/shared';
+import { redactChatInput } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
 import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
@@ -80,7 +81,7 @@ export async function setupTelegramBot(providedToken?: string) {
     const userId = msg.from?.id.toString() || chatId;
     const username = msg.from?.username || msg.from?.first_name || 'User';
 
-    console.log(`📨 Message received: "${msg.text || '[file]'}" from @${username} (ID: ${userId})`);
+    console.log(`📨 Message received: "${redactChatInput(msg.text || '[file]')}" from @${username} (ID: ${userId})`);
 
     // Ignore messages without content
     if (!msg.text && !msg.document && !msg.photo) return;
@@ -119,7 +120,7 @@ export async function setupTelegramBot(providedToken?: string) {
       // Note: msg.caption is used when photo/document has a caption instead of msg.text
       const content = msg.text || msg.caption || '';
       const command = await parseCommandWithNLP(content, context);
-      console.log(`📨 Telegram: executing command type=${command.type}, input="${content.substring(0, 50)}"`);
+      console.log(`📨 Telegram: executing command type=${command.type}, input="${redactChatInput(content).substring(0, 50)}"`);
       const response = await executeCommand(command, context, files);
       console.log(`📨 Telegram: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 

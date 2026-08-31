@@ -24,6 +24,8 @@ import {
   type ScreenAnalysis,
   type ResponseSummarizeRequestPayload,
   type ClaudeAuthStatusPayload,
+  type ClaudeLoginUrlPayload,
+  type ClaudeLoginResultPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, notifySessionsForMachine } from './session-manager.js';
@@ -43,6 +45,8 @@ import { processMessageFilesEmbedding } from './embedding-service.js';
 import { checkIpAllowed } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
 import type { ManagementInfo } from '@devrelay/shared';
+import { decideClaudeAuthUpdate } from './claude-auth-precedence.js';
+import { validateOAuthCode } from './claude-login-code.js';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
 const MIN_PROTOCOL_VERSION = 0; // TODO: revert to 1 after agent update
@@ -123,6 +127,23 @@ const pendingVersionCheckRequests = new Map<string, HistoryRequest<AgentVersionI
 // 更新リクエストの通知先: machineId -> { platform, chatId, projectId, language }（完了/エラー通知用）
 // #320: language は完了/エラー/タイムアウト通知の表示言語（未指定時は DEFAULT_CHAT_LANGUAGE にフォールバック）
 const pendingUpdateNotify = new Map<string, { platform: Platform; chatId: string; projectId?: string; language?: Language }>();
+
+/**
+ * `login` フローの通知先・requestId: machineId -> { requestId, platform, chatId, projectId, language, timer }
+ * （#326 Phase2）。cli.js 側の OAuth フローが singleton のため Agent 側は machine あたり1本のみ、
+ * サーバー側もこの Map で machine あたり1件に限定する（同時に2つの `login` を許可しない）。
+ */
+interface PendingClaudeLogin {
+  requestId: string;
+  platform: Platform;
+  chatId: string;
+  projectId?: string;
+  language: Language;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingClaudeLogin = new Map<string, PendingClaudeLogin>();
+/** `login` フローのタイムアウト: 10分以内に完了しなければ中断してユーザーに通知 */
+const CLAUDE_LOGIN_TIMEOUT = 10 * 60 * 1000;
 
 // Agent 再接続フラグ: Agent が再接続した machineId を記録
 // 再接続後の最初のプロンプトでセッション再開始が必要かを判定するために使用
@@ -237,6 +258,12 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           break;
         case 'agent:claude:auth:status':
           await handleClaudeAuthStatus(message.payload);
+          break;
+        case 'agent:claude:login:url':
+          handleClaudeLoginUrl(message.payload);
+          break;
+        case 'agent:claude:login:result':
+          await handleClaudeLoginResult(message.payload);
           break;
       }
     } catch (err) {
@@ -1422,27 +1449,28 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
 }
 
 /**
- * Claude ログイン切れ検知（リモート再ログイン中継 Phase1）。
- * Agent が定期実行する `claude auth status --json` の結果を Machine に永続化し、
- * ok → expired の遷移時のみアクティブセッション参加者へ通知する（毎回通知するとノイズになるため）。
- * `state:'unknown'` は判定不能（誤検知防止のため Agent 側で通知しない設計）なので、
- * ここでは常に `ok: boolean` のみを受け取る（unknown の場合は Agent が送ってこない）。
+ * Claude ログイン切れ検知（リモート再ログイン中継 Phase1/Phase2 共通）。
+ * Agent からの ok 報告（`poll`=15分ポーリング / `runtime`=実行時401検知 / `login`=再ログイン成功、
+ * 旧 Agent は `source: undefined`）を `decideClaudeAuthUpdate()`（#338 BUG A 最小修正）の優先度判定に
+ * 通してから Machine に永続化する。`claudeAuthCheckedAt` は判定結果に関わらず常に更新する
+ * （「いつ最後に確認したか」は source を問わず有用な情報のため）。
  */
 async function handleClaudeAuthStatus(payload: ClaudeAuthStatusPayload) {
-  const { machineId, ok, account } = payload;
+  const { machineId, ok, account, source } = payload;
 
-  let previousOk: boolean | null | undefined;
+  let decision: { nextOk: boolean; notifyExpired: boolean; notifyRecovered: boolean };
   try {
     const machine = await prisma.machine.findUnique({
       where: { id: machineId },
       select: { claudeAuthOk: true },
     });
-    previousOk = machine?.claudeAuthOk;
+    const previousOk = machine?.claudeAuthOk ?? null;
+    decision = decideClaudeAuthUpdate({ previousOk, reportedOk: ok, source });
 
     await prisma.machine.update({
       where: { id: machineId },
       data: {
-        claudeAuthOk: ok,
+        claudeAuthOk: decision.nextOk,
         claudeAuthCheckedAt: new Date(),
         claudeAuthAccount: account ?? null,
       },
@@ -1452,16 +1480,146 @@ async function handleClaudeAuthStatus(payload: ClaudeAuthStatusPayload) {
     return;
   }
 
-  // 状態が変化したときだけ通知（previousOk が null/undefined＝初回確認時は通知しない）
-  if (previousOk === true && ok === false) {
+  // 状態が変化したときだけ通知（初回確認時・抑制されたときは decideClaudeAuthUpdate 側で既に false）
+  if (decision.notifyExpired) {
     const machineName = (await prisma.machine.findUnique({ where: { id: machineId }, select: { displayName: true, name: true } }).catch(() => null));
     const label = machineName?.displayName || machineName?.name || machineId;
     await notifySessionsForMachine(machineId, (lang) => tChat(lang, 'claudeAuth.expired', { machine: label }));
-  } else if (previousOk === false && ok === true) {
+  } else if (decision.notifyRecovered) {
     const machineName = (await prisma.machine.findUnique({ where: { id: machineId }, select: { displayName: true, name: true } }).catch(() => null));
     const label = machineName?.displayName || machineName?.name || machineId;
     await notifySessionsForMachine(machineId, (lang) => tChat(lang, 'claudeAuth.recovered', { machine: label }));
   }
+}
+
+/**
+ * `login` フローで Agent が返した OAuth 認可 URL をチャットへ中継する（#326 Phase2）。
+ * `manualUrl` のみを受け取り `automaticUrl` は ClaudeLoginUrlPayload の型に存在しないため
+ * 構造的に中継しようがない（§3.3・リスク7、リモート機の localhost を指すため漏洩させない）。
+ */
+function handleClaudeLoginUrl(payload: ClaudeLoginUrlPayload) {
+  const { machineId, requestId, manualUrl } = payload;
+  const pending = pendingClaudeLogin.get(machineId);
+  if (!pending || pending.requestId !== requestId) {
+    console.log(`⚠️ claude:login:url: no matching pending login for ${machineId} (requestId=${requestId})`);
+    return;
+  }
+
+  void (async () => {
+    const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { displayName: true, name: true } }).catch(() => null);
+    const label = machine?.displayName || machine?.name || machineId;
+    await sendMessage(pending.platform, pending.chatId, tChat(pending.language, 'claudeLogin.started', { machine: label, url: manualUrl }), undefined, pending.projectId);
+  })();
+}
+
+/**
+ * `login` フローの最終結果（成功/失敗）を受信 → チャットへ中継し pendingClaudeLogin を掃除する（#326 Phase2）。
+ * 成功時は `decideClaudeAuthUpdate()` に `source:'login'` を通して Machine.claudeAuthOk を即時反映する
+ * （これが無いと最大15分ポーリングを待つことになり「login が効いたか」を即座に確認できない、§3.6）。
+ */
+async function handleClaudeLoginResult(payload: ClaudeLoginResultPayload) {
+  const { machineId, requestId, ok, account, error } = payload;
+  const pending = pendingClaudeLogin.get(machineId);
+  if (!pending || pending.requestId !== requestId) {
+    console.log(`⚠️ claude:login:result: no matching pending login for ${machineId} (requestId=${requestId})`);
+    return;
+  }
+  clearTimeout(pending.timer);
+  pendingClaudeLogin.delete(machineId);
+
+  const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { displayName: true, name: true } }).catch(() => null);
+  const label = machine?.displayName || machine?.name || machineId;
+
+  if (ok) {
+    await handleClaudeAuthStatus({ machineId, ok: true, account, source: 'login' });
+    // claudeLogin.success の {account} は末尾サフィックス（例: " (you@example.com / Max)"）として埋め込む
+    const accountSuffix = account ? ` (${account})` : '';
+    await sendMessage(pending.platform, pending.chatId, tChat(pending.language, 'claudeLogin.success', { machine: label, account: accountSuffix }), undefined, pending.projectId);
+  } else if (error === 'unsupportedAgent') {
+    // Agent 側で query() 自体が起動できなかった（リスク1）。SSH での直接ログインを案内する専用メッセージ。
+    await sendMessage(pending.platform, pending.chatId, tChat(pending.language, 'claudeLogin.unsupportedAgent'), undefined, pending.projectId);
+  } else {
+    await sendMessage(pending.platform, pending.chatId, tChat(pending.language, 'claudeLogin.failed', { machine: label, error: error ?? 'unknown' }), undefined, pending.projectId);
+  }
+}
+
+/**
+ * `login` フローを開始する（#326 Phase2）。WebUI 限定であることの検証は呼び出し元
+ * （command-handler.ts の handleLogin）が行う。cli.js 側の OAuth フローが singleton のため、
+ * 同一 machine に対する多重起動は許可しない（`pendingClaudeLogin` は machine あたり1件のみ）。
+ */
+export function startClaudeLogin(
+  machineId: string,
+  platform: Platform,
+  chatId: string,
+  projectId: string | undefined,
+  language: Language,
+): { ok: true } | { ok: false; reason: 'offline' } {
+  const ws = connectedAgents.get(machineId);
+  if (!ws || ws.readyState !== ws.OPEN) {
+    return { ok: false, reason: 'offline' };
+  }
+
+  // 既存の pending があればタイマーを止めて上書き（cli.js 側 singleton のため多重起動は無意味）
+  const existing = pendingClaudeLogin.get(machineId);
+  if (existing) {
+    clearTimeout(existing.timer);
+  }
+
+  const requestId = `login-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const timer = setTimeout(() => {
+    const entry = pendingClaudeLogin.get(machineId);
+    if (entry && entry.requestId === requestId) {
+      pendingClaudeLogin.delete(machineId);
+      sendToAgent(machineId, { type: 'server:claude:login:cancel', payload: { requestId } });
+      void sendMessage(entry.platform, entry.chatId, tChat(entry.language, 'claudeLogin.timeout'), undefined, entry.projectId);
+    }
+  }, CLAUDE_LOGIN_TIMEOUT);
+
+  pendingClaudeLogin.set(machineId, { requestId, platform, chatId, projectId, language, timer });
+  sendToAgent(ws, { type: 'server:claude:login:start', payload: { requestId } });
+  return { ok: true };
+}
+
+/**
+ * `login <code#state>` で投入された認可コードを検証し、Agent へ中継する（#326 Phase2）。
+ * `validateOAuthCode()` の形式検証を通ってから送る（cli.js 側は一発勝負で失敗するとフローが壊れるため、
+ * 明らかに壊れている入力はフローに一切触れずに拒否する、§3.5）。
+ */
+export function submitClaudeLoginCode(
+  machineId: string,
+  rawCode: string,
+): { ok: true } | { ok: false; reason: 'noFlow' | 'invalidCode' } {
+  const pending = pendingClaudeLogin.get(machineId);
+  if (!pending) {
+    return { ok: false, reason: 'noFlow' };
+  }
+
+  const validated = validateOAuthCode(rawCode);
+  if (!validated.ok) {
+    return { ok: false, reason: 'invalidCode' };
+  }
+
+  sendToAgent(machineId, {
+    type: 'server:claude:login:code',
+    payload: { requestId: pending.requestId, authorizationCode: validated.authorizationCode, state: validated.state },
+  });
+  return { ok: true };
+}
+
+/**
+ * `login cancel` によるフロー中断（#326 Phase2）。Map の掃除とタイマー解除はここで行い、
+ * Agent 側には `server:claude:login:cancel` を送るのみ（Agent 側の破棄は connection.ts が行う）。
+ */
+export function cancelClaudeLogin(machineId: string): { ok: true } | { ok: false; reason: 'noFlow' } {
+  const pending = pendingClaudeLogin.get(machineId);
+  if (!pending) {
+    return { ok: false, reason: 'noFlow' };
+  }
+  clearTimeout(pending.timer);
+  pendingClaudeLogin.delete(machineId);
+  sendToAgent(machineId, { type: 'server:claude:login:cancel', payload: { requestId: pending.requestId } });
+  return { ok: true };
 }
 
 /**

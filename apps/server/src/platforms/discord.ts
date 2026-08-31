@@ -1,5 +1,6 @@
 import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment, Collection, TextChannel, DMChannel, ButtonBuilder, ActionRowBuilder, ButtonStyle, ComponentType } from 'discord.js';
 import type { FileAttachment, ToolApprovalPromptPayload } from '@devrelay/shared';
+import { redactChatInput } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
 import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
@@ -194,7 +195,7 @@ export async function setupDiscordBot(token?: string) {
   });
 
   client.on(Events.MessageCreate, async (message: Message) => {
-    console.log(`📨 Message received: "${message.content}" from ${message.author.tag} (ID: ${message.author.id})`);
+    console.log(`📨 Message received: "${redactChatInput(message.content)}" from ${message.author.tag} (ID: ${message.author.id})`);
 
     // Ignore bot messages
     if (message.author.bot) return;
@@ -251,7 +252,7 @@ export async function setupDiscordBot(token?: string) {
 
       // Parse and execute command (with NLP if enabled)
       const command = await parseCommandWithNLP(content || '', context);
-      console.log(`📨 Discord: executing command type=${command.type}, input="${(content || '').substring(0, 50)}"`);
+      console.log(`📨 Discord: executing command type=${command.type}, input="${redactChatInput(content || '').substring(0, 50)}"`);
       const response = await executeCommand(command, context, files, missedMessages);
       console.log(`📨 Discord: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 

@@ -79,6 +79,8 @@ import { isContextWarning, type ContextUsage } from './output-parser.js';
 import { autoDiscoverProjects, loadProjects } from './projects.js';
 // Claude ログイン切れ検知（リモート再ログイン中継 Phase1）
 import { checkClaudeAuth } from './claude-auth.js';
+// #326 Phase2: Claude OAuth リモート再ログイン本体
+import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './claude-login.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -460,6 +462,59 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:scaffold:create':
       handleScaffoldCreate(message.payload, config);
       break;
+
+    case 'server:claude:login:start':
+      handleClaudeLoginStart(message.payload.requestId);
+      break;
+
+    case 'server:claude:login:code':
+      handleClaudeLoginCode(message.payload.requestId, message.payload.authorizationCode, message.payload.state);
+      break;
+
+    case 'server:claude:login:cancel':
+      cancelClaudeLogin(message.payload.requestId, 'cancelled by server');
+      break;
+  }
+}
+
+/**
+ * #326 Phase2: `login` フロー開始要求を受けて `claude-login.ts` の `startClaudeLogin()` を呼び出し、
+ * 結果（`manualUrl` または失敗理由）を `agent:claude:login:url` / `agent:claude:login:result` で
+ * サーバーへ返す。
+ */
+async function handleClaudeLoginStart(requestId: string) {
+  if (!currentMachineId) return;
+  const result = await startClaudeLogin(requestId);
+  if (result.ok) {
+    sendMessage({
+      type: 'agent:claude:login:url',
+      payload: { machineId: currentMachineId, requestId, manualUrl: result.manualUrl },
+    });
+  } else {
+    sendMessage({
+      type: 'agent:claude:login:result',
+      payload: { machineId: currentMachineId, requestId, ok: false, error: result.error },
+    });
+  }
+}
+
+/**
+ * #326 Phase2: `login <code#state>` で投入された認可コードを `claude-login.ts` の
+ * `submitClaudeLoginCode()` に渡し、結果を `agent:claude:login:result` でサーバーへ返す。
+ */
+async function handleClaudeLoginCode(requestId: string, authorizationCode: string, state: string) {
+  if (!currentMachineId) return;
+  const result = await submitClaudeLoginCode(requestId, authorizationCode, state);
+  if (result.ok) {
+    sendMessage({
+      type: 'agent:claude:login:result',
+      payload: { machineId: currentMachineId, requestId, ok: true, account: result.account },
+    });
+  } else {
+    sendMessage({
+      type: 'agent:claude:login:result',
+      payload: { machineId: currentMachineId, requestId, ok: false, error: result.error },
+    });
   }
 }
 
@@ -1540,6 +1595,8 @@ async function checkAndReportClaudeAuth() {
       machineId: currentMachineId,
       ok,
       account: result.account,
+      // #338 続き（BUG A 最小修正）: poll の ok:true はサーバー側で previousOk===false を解除しない弱い証拠として扱われる
+      source: 'poll',
     },
   });
 }
@@ -1564,6 +1621,28 @@ export function reportClaudeAuthExpiredFromRuntime() {
     payload: {
       machineId: currentMachineId,
       ok: false,
+      source: 'runtime',
+    },
+  });
+}
+
+/**
+ * 実際のターンが成功した（=ログイン済みである直接の証拠が得られた）瞬間にサーバーへ即座に報告する。
+ * `reportClaudeAuthExpiredFromRuntime()` の対称形（#326 Phase2 BUG A 最小修正）。
+ * これが無いと `poll`（弱い証拠）だけでは `ok:false` を解除できず、SSH で手動再ログインした
+ * マシンの赤バッジが Agent 再起動まで永久に残ってしまう。
+ */
+export function reportClaudeAuthOkFromRuntime() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !currentMachineId) return;
+  if (lastReportedClaudeAuthOk === true) return; // 既に報告済み → 重複送信しない
+  lastReportedClaudeAuthOk = true;
+  console.log(`🔑 Claude auth status changed: ok (detected via successful runtime turn)`);
+  sendMessage({
+    type: 'agent:claude:auth:status',
+    payload: {
+      machineId: currentMachineId,
+      ok: true,
+      source: 'runtime',
     },
   });
 }

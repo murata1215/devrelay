@@ -133,6 +133,39 @@ export const chatMessages = {
     ja: '🔒 このマシンで Claude のログインが切れています。再ログインしてから続けてください。',
   },
 
+  // --- claude login（`login` コマンド、リモート再ログイン中継 Phase2） ---
+  'claudeLogin.started': {
+    en: '🔐 Started Claude re-login for **{machine}**.\nOpen the URL below in your browser, log in, then send the code shown as `login <code>` (within 10 minutes).\n{url}',
+    ja: '🔐 **{machine}** の Claude 再ログインを開始しました。\n下の URL をブラウザで開いてログインし、表示されたコードを `login <コード>` の形式で送ってください（10分以内）。\n{url}',
+  },
+  'claudeLogin.success': {
+    en: '✅ **{machine}** re-logged in to Claude{account}',
+    ja: '✅ **{machine}** の Claude に再ログインしました{account}',
+  },
+  'claudeLogin.failed': { en: '❌ Claude re-login failed: {error}', ja: '❌ Claude 再ログインに失敗しました: {error}' },
+  'claudeLogin.noFlow': {
+    en: '⚠️ No re-login is in progress. Send `login` first.',
+    ja: '⚠️ 進行中の再ログインがありません。先に `login` を送ってください。',
+  },
+  'claudeLogin.timeout': {
+    en: '⚠️ Claude re-login timed out (10 min). Send `login` again.',
+    ja: '⚠️ Claude 再ログインがタイムアウトしました（10分）。もう一度 `login` を送ってください。',
+  },
+  'claudeLogin.cancelled': { en: '⛔ Claude re-login cancelled', ja: '⛔ Claude 再ログインを中止しました' },
+  'claudeLogin.invalidCode': {
+    en: '⚠️ Invalid code format. Please paste only the code shown after logging in.',
+    ja: '⚠️ コードの形式が正しくありません。ログイン後に表示されたコードだけを貼り付けてください。',
+  },
+  'claudeLogin.webOnly': {
+    en: '🔒 `login` is only available from the WebUI (to prevent account hijacking via shared channels).',
+    ja: '🔒 `login` は WebUI からのみ実行できます（共有チャンネル経由のアカウント乗っ取りを防ぐため）。',
+  },
+  'claudeLogin.offline': { en: '⚠️ No machine is connected, or it is offline.', ja: '⚠️ 接続中のマシンがない、またはオフラインです。' },
+  'claudeLogin.unsupportedAgent': {
+    en: '⚠️ This Agent does not support remote re-login (old Agent, or Claude could not be started at all). Please log in directly on that machine (`claude auth login`).',
+    ja: '⚠️ この Agent はリモート再ログインに対応していません（旧 Agent、または Claude が全く起動できない状態）。そのマシンで直接ログインしてください（`claude auth login`）。',
+  },
+
   // --- link ---
   'link.webNotNeeded': {
     en: '✅ You are operating directly from the Web interface, so account linking is not needed.',

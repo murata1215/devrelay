@@ -117,7 +117,9 @@ export type AgentMessage =
   | { type: 'agent:scaffold:created'; payload: ScaffoldCreatedPayload }
   | { type: 'agent:screen:analyze'; payload: ScreenAnalyzeRequestPayload }
   | { type: 'agent:response:summarize'; payload: ResponseSummarizeRequestPayload }
-  | { type: 'agent:claude:auth:status'; payload: ClaudeAuthStatusPayload };
+  | { type: 'agent:claude:auth:status'; payload: ClaudeAuthStatusPayload }
+  | { type: 'agent:claude:login:url'; payload: ClaudeLoginUrlPayload }
+  | { type: 'agent:claude:login:result'; payload: ClaudeLoginResultPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -264,7 +266,10 @@ export type ServerToAgentMessage =
   | { type: 'server:agent:restart'; payload: {} }
   | { type: 'server:scaffold:create'; payload: ScaffoldCreatePayload }
   | { type: 'server:screen:analyzed'; payload: ScreenAnalyzeResponsePayload }
-  | { type: 'server:response:summarized'; payload: ResponseSummarizeResponsePayload };
+  | { type: 'server:response:summarized'; payload: ResponseSummarizeResponsePayload }
+  | { type: 'server:claude:login:start'; payload: ClaudeLoginStartPayload }
+  | { type: 'server:claude:login:code'; payload: ClaudeLoginCodePayload }
+  | { type: 'server:claude:login:cancel'; payload: ClaudeLoginCancelPayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -495,6 +500,53 @@ export interface ClaudeAuthStatusPayload {
   /** true=ログイン済み / false=切れている / undefined=判定不能（誤検知防止のため通知しない用途） */
   ok: boolean;
   account?: string;
+  /**
+   * #338 続き（`login` コマンド、BUG A 対策）: この報告がどの経路から来たかを示す。
+   * サーバー側 claude-auth-precedence.ts の優先度判定に使う。省略時（旧 Agent）は
+   * 'undefined' として扱い、従来どおり ok の値をそのまま採用する（fail-open、非退行）。
+   * - 'runtime': ai-runner.ts が実際の AI ターンの成否から検知（最も信頼できる）
+   * - 'poll': 15分間隔の `claude auth status --json` ポーリング（資格情報の有無しか見ていない弱い根拠）
+   * - 'login': `login` コマンドによる再ログインフローの結果（成功時のみ送信）
+   */
+  source?: 'runtime' | 'poll' | 'login';
+}
+
+/**
+ * Agent → Server: `login` フロー開始時に取得した OAuth 認証 URL の中継。
+ * `manualUrl` のみを保持する（`automaticUrl` はリモート機の localhost を指すため
+ * Agent 側で意図的に破棄し、このペイロードにも含めない。§3.3 参照）。
+ */
+export interface ClaudeLoginUrlPayload {
+  machineId: string;
+  requestId: string;
+  manualUrl: string;
+}
+
+/** Agent → Server: `login` フローの最終結果（成功/失敗） */
+export interface ClaudeLoginResultPayload {
+  machineId: string;
+  requestId: string;
+  ok: boolean;
+  /** 成功時のアカウント表示用文字列（例: "you@example.com / Max"） */
+  account?: string;
+  error?: string;
+}
+
+/** Server → Agent: `login` フロー開始要求 */
+export interface ClaudeLoginStartPayload {
+  requestId: string;
+}
+
+/** Server → Agent: `login <code#state>` で投入された認可コードの中継 */
+export interface ClaudeLoginCodePayload {
+  requestId: string;
+  authorizationCode: string;
+  state: string;
+}
+
+/** Server → Agent: `login cancel` によるフロー中断要求 */
+export interface ClaudeLoginCancelPayload {
+  requestId: string;
 }
 
 export interface AiSwitchedPayload {
@@ -584,7 +636,11 @@ export type UserCommand =
   | { type: 'testflight'; subcommand: 'help' }
   | { type: 'ask:member'; targetProject: string; question: string }
   | { type: 'teamexec:member'; targetProject: string; instruction: string }
-  | { type: 'disconnect' };  // 接続プロジェクト解除（Manager 用）
+  | { type: 'disconnect' }  // 接続プロジェクト解除（Manager 用）
+  // Claude リモート再ログイン（#326 Phase2）。platform === 'web' 以外は command-handler.ts で即拒否する
+  | { type: 'login' }               // 再ログインフロー開始
+  | { type: 'login:code'; code: string }  // 認可コード投入（"code#state" 形式、生のまま渡し検証は claude-login-code.ts で行う）
+  | { type: 'login:cancel' };       // 再ログインフロー中断
 
 // -----------------------------------------------------------------------------
 // User Context (for command parsing)

@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "node --test tests/"
   },
   "devDependencies": {
     "typescript": "^5.3.0"

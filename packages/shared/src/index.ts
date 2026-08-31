@@ -32,6 +32,7 @@ export {
 } from './constants.js';
 export * from './token.js';
 export * from './text.js';
+export { redactChatInput } from './redact.js';
 // #316: i18n.ts も #309/#310 と同じ理由で明示的 named export にする（export * の CJS 変換問題を回避）
 export {
   type Language,

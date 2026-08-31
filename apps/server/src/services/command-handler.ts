@@ -22,6 +22,9 @@ import {
   executeCrossProjectQuery,
   executeCrossProjectExec,
   isAgentConnected,
+  startClaudeLogin,
+  submitClaudeLoginCode,
+  cancelClaudeLogin,
 } from './agent-manager.js';
 import {
   createSession,
@@ -323,6 +326,15 @@ export async function executeCommand(
 
     case 'disconnect':
       return handleDisconnectRemote(context);
+
+    case 'login':
+      return handleLogin(context);
+
+    case 'login:code':
+      return handleLoginCode(context, command.code);
+
+    case 'login:cancel':
+      return handleLoginCancel(context);
 
     default:
       return tChat(lang, 'common.unknownCommand');
@@ -2075,6 +2087,87 @@ async function handleDisconnectRemote(context: UserContext): Promise<string> {
   context.lastRemoteProjectName = undefined;
 
   return tChat(lang, 'disconnect.done', { name: remoteName });
+}
+
+/**
+ * `login`: Claude リモート再ログインフローを開始する（#326 Phase2）。
+ * WebUI 限定（§3.1）: グループチャンネルで実行されると閲覧者が URL を先に開いて自分のアカウントで
+ * ログインしマシンを乗っ取れるため、Agent へ一切送らずここで即 return する。
+ * 開始自体は破壊的でない（URL を出すだけ）ため handleUpdate 型の2段階確認は不要。
+ */
+async function handleLogin(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  if (context.platform !== 'web') {
+    return tChat(lang, 'claudeLogin.webOnly');
+  }
+  if (!context.currentMachineId) {
+    return tChat(lang, 'claudeLogin.offline');
+  }
+
+  // WebUI のリクエスト元タブに結果を返すため projectId を解決（handleUpdate と同じ手法）
+  let projectId: string | undefined;
+  if (context.currentSessionId) {
+    const session = await prisma.session.findUnique({
+      where: { id: context.currentSessionId },
+      select: { projectId: true },
+    });
+    projectId = session?.projectId;
+  }
+
+  const result = startClaudeLogin(context.currentMachineId, context.platform, context.chatId, projectId, lang);
+  if (!result.ok) {
+    return tChat(lang, 'claudeLogin.offline');
+  }
+  // 実際の URL は Agent からの agent:claude:login:url 受信後に非同期でチャットへ中継される（agent-manager.ts）
+  return '';
+}
+
+/**
+ * `login <code#state>`: 認可コードの投入（#326 Phase2）。
+ * 形式検証（validateOAuthCode）は agent-manager.ts の submitClaudeLoginCode 内で行う。
+ *
+ * §3.1 の再確認: platform チェックは「開始」だけでなく「投入」にも必須。`pendingClaudeLogin` は
+ * machineId のみをキーにしており platform/chatId を条件に含まないため、同じマシンに接続した
+ * 別プラットフォームのユーザーが web 発のフローへ横から自分のコードを投入して乗っ取れてしまう
+ * （URL を勝手に開いて自分のアカウントでログインし、コードだけ先に貼るケース）。
+ * 「進行中フローが存在する＝web 経由」という前提は投入者自身の platform を保証しないため誤り。
+ */
+async function handleLoginCode(context: UserContext, code: string): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  if (context.platform !== 'web') {
+    return tChat(lang, 'claudeLogin.webOnly');
+  }
+  if (!context.currentMachineId) {
+    return tChat(lang, 'claudeLogin.offline');
+  }
+
+  const result = submitClaudeLoginCode(context.currentMachineId, code);
+  if (!result.ok) {
+    return tChat(lang, result.reason === 'noFlow' ? 'claudeLogin.noFlow' : 'claudeLogin.invalidCode');
+  }
+  // 成功/失敗は Agent からの agent:claude:login:result 受信後に非同期でチャットへ中継される
+  return '';
+}
+
+/**
+ * `login cancel`: 進行中の再ログインフローを中断する（#326 Phase2）。
+ * 乗っ取りには使えない操作だが、web 限定フローへ他プラットフォームから干渉できないよう
+ * start/code と同じ境界を一貫して適用する。
+ */
+async function handleLoginCancel(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  if (context.platform !== 'web') {
+    return tChat(lang, 'claudeLogin.webOnly');
+  }
+  if (!context.currentMachineId) {
+    return tChat(lang, 'claudeLogin.offline');
+  }
+
+  const result = cancelClaudeLogin(context.currentMachineId);
+  if (!result.ok) {
+    return tChat(lang, 'claudeLogin.noFlow');
+  }
+  return tChat(lang, 'claudeLogin.cancelled');
 }
 
 // -----------------------------------------------------------------------------

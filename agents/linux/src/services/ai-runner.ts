@@ -11,7 +11,7 @@ import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { matchesToolRule, isAllowedByRules, decidePlanPermission } from './plan-permission.js';
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
-import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime } from './connection.js';
+import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
 // 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
 type TerminalRunnerModule = typeof import('./terminal-runner.js');
@@ -86,7 +86,7 @@ export function resolveSystemClaude(): string | null {
  *
  * @returns フォールバック先の claude パス。内蔵 cli.js が健全なら null（＝内蔵版を使う）
  */
-function getClaudeExecutableFallback(): string | null {
+export function getClaudeExecutableFallback(): string | null {
   try {
     const _require = createRequire(import.meta.url);
     // SDK のエントリ（sdk.mjs）を解決 → その隣の cli.js が内蔵実行ファイル
@@ -1138,6 +1138,12 @@ async function sendPromptToAiSdk(
           // resume 失敗時は完了を送らず retry 経路（connection.ts の composeFullPrompt(true) 再送）に委ねる
           console.log(`[claude/sdk] 🔁 Result flagged resumeFailed → deferring to retry (no completion sent)`);
           return result;
+        }
+        // #326 Phase2（BUG A 最小修正）: 実際にターンが成功した（出力があり、エラーでもない）瞬間を
+        // 「ログイン済み」の直接証拠として即時報告する。resumeFailed を先に弾いているため
+        // resume 失敗を健康の証拠にしてしまうことはない。
+        if (fullOutput.length > 0 && !m.is_error) {
+          reportClaudeAuthOkFromRuntime();
         }
         if (fullOutput.length === 0) {
           onOutput('(No response from AI)', true, result.usageData);

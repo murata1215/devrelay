@@ -1,6 +1,7 @@
 import type { FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { FileAttachment, WebClientMessage, ServerToWebMessage } from '@devrelay/shared';
+import { redactChatInput } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
 import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants, removeWebParticipantFromAllSessions } from '../services/session-manager.js';
@@ -148,9 +149,10 @@ export async function setupWebClientWebSocket(
           }
 
           const command = await parseCommandWithNLP(text || '', context);
-          console.log(`📨 Web: executing command type=${command.type}, input="${(text || '').substring(0, 50)}"`);
+          console.log(`📨 Web: executing command type=${command.type}, input="${redactChatInput(text || '').substring(0, 50)}"`);
 
           // 同じセッションの他 Web クライアントにユーザーメッセージをブロードキャスト（全コマンド対象）
+          // #326 Phase2: login の認可コードが他タブに生表示されないよう redactChatInput を適用
           {
             const sessionId = getSessionIdByChatId(chatId);
             if (sessionId) {
@@ -161,7 +163,7 @@ export async function setupWebClientWebSocket(
                   if (otherWs && otherWs.readyState === otherWs.OPEN) {
                     sendJson(otherWs, {
                       type: 'web:user_message',
-                      payload: { content: text || '', files: msg.payload.files, projectId: context.lastProjectId },
+                      payload: { content: redactChatInput(text || ''), files: msg.payload.files, projectId: context.lastProjectId },
                     });
                   }
                 }

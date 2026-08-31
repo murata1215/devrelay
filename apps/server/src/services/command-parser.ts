@@ -190,6 +190,17 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     return { type: 'teamexec:member', targetProject: teamexecMatch[1].trim(), instruction: teamexecMatch[2].trim() };
   }
 
+  // 0.9. 「login」コマンド: Claude リモート再ログイン（#326 Phase2）
+  // 認可コード（code#state）は大文字小文字を区別するため normalized ではなく input.trim() でマッチする。
+  // web 限定にする判定（platform !== 'web' を拒否）は command-handler.ts 側で行う（ここではパースのみ）。
+  const loginMatch = input.trim().match(/^login(?:\s+(.+))?$/i);
+  if (loginMatch) {
+    const arg = loginMatch[1]?.trim();
+    if (!arg) return { type: 'login' };
+    if (/^cancel$/i.test(arg)) return { type: 'login:cancel' };
+    return { type: 'login:code', code: arg };
+  }
+
   // 0.6. 「w」コマンド: ドキュメント更新＋コミットプッシュのワンショット実行
   // #334: promptOrigin='system' — DevRelay 自身が生成した固定プロンプト。長さ検証・fence の対象外
   if (normalized === 'w') {

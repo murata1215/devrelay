@@ -267,6 +267,11 @@ export function isTraditionalCommand(input: string): boolean {
   // 'l' (モデル一覧), 'l sonnet', 'l plan:haiku', 'l exec:opus' 等（モデル選択）
   if (trimmed === 'l' || /^l\s+.+$/i.test(trimmed)) return true;
 
+  // 'login', 'login cancel', 'login <code#state>'（#326 Phase2: Claude リモート再ログイン）
+  // ここでの判定は「トークン一致するか」のみ（大文字小文字を区別しない trimmed を使用）。
+  // 実際のコード抽出（大文字小文字区別あり）は command-parser.ts 側で元の input から行う。
+  if (/^login(\s+.+)?$/i.test(trimmed)) return true;
+
   // log20, sum7d 等（スペースなし引数付きコマンド）
   if (/^log\d+$/i.test(trimmed)) return true;
   if (/^sum\d+d?$/i.test(trimmed)) return true;
