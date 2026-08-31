@@ -134,9 +134,17 @@ export const chatMessages = {
   },
 
   // --- claude login（`login` コマンド、リモート再ログイン中継 Phase2） ---
+  'claudeLogin.starting': {
+    en: '🔐 Starting Claude re-login for **{machine}**… (fetching the login URL can take up to a minute)',
+    ja: '🔐 **{machine}** の Claude 再ログインを開始しています…（URL の取得に数十秒かかることがあります）',
+  },
   'claudeLogin.started': {
     en: '🔐 Started Claude re-login for **{machine}**.\nOpen the URL below in your browser, log in, then send the code shown as `login <code>` (within 10 minutes).\n{url}',
     ja: '🔐 **{machine}** の Claude 再ログインを開始しました。\n下の URL をブラウザで開いてログインし、表示されたコードを `login <コード>` の形式で送ってください（10分以内）。\n{url}',
+  },
+  'claudeLogin.codeAccepted': {
+    en: '🔐 Authorization code submitted. Waiting for the result…',
+    ja: '🔐 認可コードを送信しました。結果をお待ちください…',
   },
   'claudeLogin.success': {
     en: '✅ **{machine}** re-logged in to Claude{account}',

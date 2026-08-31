@@ -2,6 +2,7 @@ import os from 'os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { getClaudeExecutableFallback } from './ai-runner.js';
+import { unwrapControlResponse } from './control-response.js';
 
 /**
  * #326 Phase2: Claude OAuth リモート再ログイン（vivid-waddling-boole.md プラン）。
@@ -9,10 +10,17 @@ import { getClaudeExecutableFallback } from './ai-runner.js';
  * `claude_authenticate` / `claude_oauth_callback` は `Query.request()` の生パススルーで
  * 実行する control request の subtype。SDK の型定義（`sdk.d.ts`）には `request()` 自体が
  * 存在しない（型定義漏れ、実行時には存在）ため `as unknown as QueryWithRequest` でキャストする。
- * 実行時に存在することは SDK `@anthropic-ai/claude-agent-sdk@0.2.77` のバンドル `cli.js`
- * （`I6.startOAuthFlow` / `R6.service.handleManualAuthCodeInput`）およびシステム
- * `claude` v2.1.240 の逆アセンブルで確認済み。将来の SDK 更新で消える可能性があるため、
- * 起動直後に `typeof q.request === 'function'` を確認し、無ければ `unsupportedAgent` として扱う。
+ * 実行時に存在することは SDK `@anthropic-ai/claude-agent-sdk@0.2.77`/`0.2.80`（両方で実測確認、
+ * `request()` の封筒構造・subtype とも同一）のバンドル `cli.js`（`I6.startOAuthFlow` /
+ * `R6.service.handleManualAuthCodeInput`）およびシステム `claude` v2.1.240 の逆アセンブルで
+ * 確認済み。将来の SDK 更新で消える可能性があるため、起動直後に `typeof q.request === 'function'`
+ * を確認し、無ければ `unsupportedAgent` として扱う。
+ *
+ * **重要**: `q.request()` が resolve するのは `{ subtype, request_id, response }` という
+ * control_response の「封筒」であり、`manualUrl`/`account` 等の中身は1段下の `response` の下にある
+ * （SDK 自身も内部で `(await this.request(x)).response` と1段剥がしている、`sdk.mjs` 実測）。
+ * これを見落として封筒をそのまま読むと常に `undefined` になり `unsupportedAgent` に落ちる
+ * バグが #341 直後の実チャットで発覚した（#343）。`unwrapControlResponse()` で必ず1段剥がすこと。
  */
 type QueryWithRequest = Query & {
   request(req: unknown): Promise<Record<string, unknown>>;
@@ -35,6 +43,38 @@ let activeFlow: ActiveFlow | null = null;
 
 /** OAuth フローの最大生存時間（10 分）。cli.js 側の認可コード有効期限に合わせる。 */
 const FLOW_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * `claude_authenticate` control request のタイムアウト（60 秒）。
+ * #341: 元々タイムアウトが無く、control チャネルがハングすると FLOW_TIMEOUT_MS（10 分）まで
+ * 無音になっていた（ユーザー報告「リモートでログインできない」の原因の一つ）。
+ */
+const AUTHENTICATE_TIMEOUT_MS = 60_000;
+
+/** `claude_oauth_callback` control request のタイムアウト（2 分）。認可コード検証はネットワーク往復を伴うため authenticate より長めに取る。 */
+const OAUTH_CALLBACK_TIMEOUT_MS = 120_000;
+
+/**
+ * Promise にタイムアウトを付ける（外部 import ゼロの純関数、#337 progress-timeout.ts / #339
+ * claude-login-code.ts と同じ流儀）。タイムアウト時は Error(`${label} timed out (${ms}ms)`) で reject する。
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out (${Math.round(ms / 1000)}s)`));
+    }, ms);
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
 
 /**
  * 何も yield しない永久 AsyncGenerator。
@@ -137,11 +177,17 @@ export async function startClaudeLogin(
   activeFlow = { requestId, q, abort, timer };
 
   try {
-    const response = await q.request({ subtype: 'claude_authenticate', loginWithClaudeAi: true });
-    const manualUrl = typeof response?.manualUrl === 'string' ? response.manualUrl : undefined;
+    const rawResponse = await withTimeout(
+      q.request({ subtype: 'claude_authenticate', loginWithClaudeAi: true }),
+      AUTHENTICATE_TIMEOUT_MS,
+      'claude_authenticate request'
+    );
+    const response = unwrapControlResponse(rawResponse);
+    const manualUrl = typeof response.manualUrl === 'string' ? response.manualUrl : undefined;
     // automaticUrl はリモート機の localhost を指すため参照すらしない（受け取った時点で捨てる）
     if (!manualUrl) {
-      console.error(`❌ [claude-login] claude_authenticate response missing manualUrl`);
+      // #343: manualUrl/automaticUrl の値自体はログに出さない（リスク7、機外に漏らさない方針をログにも適用）
+      console.error(`❌ [claude-login] claude_authenticate response missing manualUrl (keys: ${Object.keys(response).join(', ') || '(none)'})`);
       teardownActiveFlow('no manualUrl in response');
       return { ok: false, error: 'unsupportedAgent' };
     }
@@ -168,9 +214,14 @@ export async function submitClaudeLoginCode(
   }
   const flow = activeFlow;
   try {
-    const response = await flow.q.request({ subtype: 'claude_oauth_callback', authorizationCode, state });
+    const rawResponse = await withTimeout(
+      flow.q.request({ subtype: 'claude_oauth_callback', authorizationCode, state }),
+      OAUTH_CALLBACK_TIMEOUT_MS,
+      'claude_oauth_callback request'
+    );
+    const response = unwrapControlResponse(rawResponse);
     teardownActiveFlow('claude_oauth_callback completed');
-    const account = formatAccountLabel(response?.account);
+    const account = formatAccountLabel(response.account);
     return { ok: true, account };
   } catch (err) {
     console.error(`❌ [claude-login] claude_oauth_callback failed:`, err);

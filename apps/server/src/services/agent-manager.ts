@@ -1519,6 +1519,9 @@ function handleClaudeLoginUrl(payload: ClaudeLoginUrlPayload) {
  */
 async function handleClaudeLoginResult(payload: ClaudeLoginResultPayload) {
   const { machineId, requestId, ok, account, error } = payload;
+  // #343: Agent 側 agent.log が他ユーザー所有で読めないケースがあり切り分けに時間がかかったため、
+  // pm2 ログだけで結果を確定できるよう1行残す。account（メールアドレス）はログに出さない。
+  console.log(`🔐 claude:login:result: machineId=${machineId} requestId=${requestId} ok=${ok} error=${error ?? ''}`);
   const pending = pendingClaudeLogin.get(machineId);
   if (!pending || pending.requestId !== requestId) {
     console.log(`⚠️ claude:login:result: no matching pending login for ${machineId} (requestId=${requestId})`);

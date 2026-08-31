@@ -6,6 +6,137 @@
 
 ## 実装済み機能
 
+### #343: `login` が `unsupportedAgent` で即失敗するバグを修正（control_response の階層取り違え）(2026-08-31)
+
+#### 背景
+#341（未 commit のまま）適用後、実チャットでユーザーが `login` を送信したところ、#341 の即時 ack
+（「🔐 … の Claude 再ログインを開始しています…」）は正しく表示されたが、直後に
+`claudeLogin.unsupportedAgent`（「この Agent はリモート再ログインに対応していません」）で即失敗した。
+pm2 ログでは `📨 Web: executing command type=login` と `📤 sendToAgent: type=server:claude:login:start`
+の2行のみでサーバー側の処理は完全に正常、つまり #339〜#342 の一連の実装（コマンド解析・web
+限定ゲート・pending Map・即時 ack・文言）はすべて正常で、Agent 側の `claude-login.ts` 内部に
+原因があると判明した。
+
+#### 真因（`sdk.mjs`/`cli.js` を直接 grep して実測、推測ゼロ）
+`Query.request()` が resolve するのは `{ subtype, request_id, response }` という control_response
+の**封筒**であり、`manualUrl`/`account` 等の中身は1段下の `response` の下にある
+（SDK 自身も内部で `return (await this.request(x)).response` と1段剥がして使っている、
+`sdk.mjs` 実測。`cli.js` の成功応答も `a(P6,{manualUrl:U6,automaticUrl:k6})` という
+封筒生成ヘルパー経由）。`claude-login.ts` はこれを見落として封筒をそのまま
+`response.manualUrl` として読んでいたため**常に undefined** となり、`!manualUrl` 分岐で
+`unsupportedAgent` に落ちていた。`login` は #339 の実装当初から一度も成功しえなかった。
+コード投入側の `formatAccountLabel(response?.account)` も同じ取り違えがあり、こちらは
+`ok:true` は返るがアカウント名が永久に表示されない静かな劣化だった。
+副次発見として `agents/{linux,macos}/package.json` は SDK `^0.2.80` を指定しているが
+`claude-login.ts` の JSDoc は「`0.2.77` で確認済み」のままだった（実害はなし、`request()` の
+封筒構造・subtype・`manualUrl` の有無は両バージョンで同一と grep で確認済み）。
+
+#### 変更内容
+1. 新規 `agents/{linux,macos}/src/services/control-response.ts`（外部 import ゼロの純関数
+   `unwrapControlResponse(raw)`、封筒形・中身直返し形の両方を受け付け、例外を投げない。
+   #337 `progress-timeout.ts` / #339 `claude-login-code.ts` / #341 `withTimeout` と同じ流儀）。
+2. `agents/{linux,macos}/src/services/claude-login.ts`（byte-for-byte 同一を維持）の
+   `claude_authenticate`/`claude_oauth_callback` の2箇所を `unwrapControlResponse()` 経由に変更。
+   `!manualUrl` 時のログに `Object.keys(response)` のみ追加（`manualUrl`/`automaticUrl` の
+   **値自体はログに出さない**、リスク7の機外非公開方針をログにも適用）。JSDoc に
+   「`request()` は封筒を返す、中身は `.response` の下」を明記し再発を防止。
+3. `apps/server/src/services/agent-manager.ts` の `handleClaudeLoginResult()` 冒頭に
+   `console.log` 1行を追加（`machineId`/`requestId`/`ok`/`error` のみ、`account` は出さない）。
+   Agent の `agent.log` が他ユーザー所有で読めないケースがあり切り分けに時間がかかったため、
+   pm2 ログだけで結果を確定できるようにする観測性改善。
+4. 新規テスト `agents/{linux,macos}/tests/control-response.test.mjs`（6ケース: 封筒形/中身直返し形/
+   `response:null`/`response`が非オブジェクト/`response`キー無し/`null`・`undefined`・文字列・
+   数値で例外を投げない）。
+
+#### 検証
+`pnpm build` 6 workspace green、`node --test` を workspace ごと個別実行し shared 5 / server 54 /
+**linux 40**（既存34+新規6）/ **macos 40**（既存34+新規6）すべて green（非退行）。
+`diff` で linux/macos の `claude-login.ts`・`control-response.ts` が byte-for-byte 同一であることを
+確認。`grep -c 'require('` (apps/web) = 0、`git diff --stat -- agents/windows/ apps/web/` が空。
+dist 反映: 両OSの `dist/services/control-response.js` の存在、`dist/services/claude-login.js` への
+`unwrapControlResponse` のコンパイル反映、`apps/server/dist/services/agent-manager.js` への
+`claude:login:result` ログのコンパイル反映を確認。真因の静的裏取りを再実行し、`sdk.mjs` に
+`await this.request(` が4箇所、`cli.js` に `a(P6,{manualUrl:` が1箇所存在することを再確認。
+
+#### 反映に必要な操作
+**commit + push が必須**（#341 が未 commit のままだったため #343 とまとめて確定させる）。
+本修正は Agent 側コード（`claude-login.ts`/`control-response.ts`）が本体のため、
+**pixblog を含む各 Linux/macOS マシンでの `u` が必須**。`pm2 restart devrelay-server` は
+§B の観測性ログ1行のためだけで任意（無くても `login` 自体は Agent 側の修正だけで直る）。
+DB マイグレーション不要。Windows / `apps/web` / `packages/shared` は無変更。
+実チャットでの E2E（`login` → 認可 URL 受信 → コード投入 → 成功メッセージにアカウント名が
+出ること）は反映後に別サイクルで実施。
+
+### #341: `login` の無言レスポンス穴 + Agent control request 無限待ちを解消 (2026-08-31)
+
+#### 背景
+#340（文言修正のみ）の直後、ユーザーから「メッセージは変わったけどこれではリモートで
+ログインできんね」と再報告。read-only で全経路を実測した結果、`login` は現行の稼働サーバーで
+**既に正常動作しており、ユーザーは一度も `login` を送信していなかった**（pm2 ログの
+`claude:login` ヒット数 0、pixblog Agent は `localCommit=c51c8b9` で #339 の `claude-login.ts`
+を保持、`platform==='web'` のゲートも正常に通過することを確認）。原因は #340 の文言修正
+（commit `b7abd0e`）がまだ `pm2 restart` されておらず、通知が今も「（実装後）」と言い続けて
+いたため。ただし調査の過程で、実際に `login` を送っても体感として気づきにくい実コードの穴を
+2つ発見したため、本サイクルで解消する。
+1. `command-handler.ts` の `handleLogin()`/`handleLoginCode()` が `return '';` で終わり、
+   `platforms/web.ts` の `if (response)` ガードにより空文字は一切ブロードキャストされない
+   → URL 取得までの数十秒間、チャットが完全に無反応に見える。
+2. `agents/{linux,macos}/src/services/claude-login.ts` の `q.request()`（`claude_authenticate`/
+   `claude_oauth_callback`）にタイムアウトが無く、SDK の control チャネルがハングすると
+   `FLOW_TIMEOUT_MS`（10分）まで無音になる。1 と重なると最悪10分間何も起きない。
+
+#### 変更内容
+1. `packages/shared/src/i18n.ts` に `claudeLogin.starting`（開始直後の即時 ack、
+   「URL の取得に数十秒かかることがあります」）と `claudeLogin.codeAccepted`
+   （コード投入直後の即時 ack）の2キーを追加（ja/en）。
+2. `apps/server/src/services/command-handler.ts` の `handleLogin()` を、
+   `agent-manager.ts:1509-1510` と同一のマシン名解決パターン
+   （`prisma.machine.findUnique({select:{displayName,name}})` →
+   `displayName || name || machineId`）で `label` を解決し
+   `tChat(lang,'claudeLogin.starting',{machine:label})` を返すよう変更。
+   `handleLoginCode()` も `tChat(lang,'claudeLogin.codeAccepted')` を返すよう変更。
+   実際の URL/成功結果は従来どおり Agent からの非同期メッセージで届く（二重通知ではなく
+   「受け付けました」の即時 ack として機能）。
+3. `agents/linux/src/services/claude-login.ts` と `agents/macos/...`（byte-for-byte 同一を維持）に
+   外部 import ゼロの `withTimeout<T>(p, ms, label)`（#337 `progress-timeout.ts` / #339
+   `claude-login-code.ts` と同じ「純関数を1つ足すだけ」の流儀）を追加し、
+   `claude_authenticate` を60秒、`claude_oauth_callback` を120秒でタイムアウトさせる。
+   タイムアウト時は `teardownActiveFlow()` してから既存の `claudeLogin.failed` として
+   チャットへ表示される（**新規失敗用 i18n キーは追加していない**）。成功パスは無変更。
+
+#### 設計判断
+- 即時 ack はあくまで「受け付けました」の合図であり、`claudeLogin.started`（URL到着）や
+  `claudeLogin.success`/`claudeLogin.failed`（結果）を置き換えるものではない
+  （非同期の最終結果は従来の経路のまま）。
+- タイムアウト失敗は既存の `claudeLogin.failed` に集約し、新しい表示パターンを増やさない
+  （60秒での失敗は「§17 B が設計どおり働いた証拠」として切り分けに使える）。
+- WebUI Machines ページの再ログインボタン、Discord/Telegram の DM 対応、Windows、
+  `terminalMode` はスコープ外（#339 から継続の判断を踏襲）。
+
+#### 変更ファイル
+`packages/shared/src/i18n.ts`、`apps/server/src/services/command-handler.ts`、
+`agents/linux/src/services/claude-login.ts`、`agents/macos/src/services/claude-login.ts`。
+DB マイグレーション不要、WS メッセージ型の変更なし、`apps/web`/Windows は無変更。
+
+#### 検証
+`pnpm build` 6 workspace green。`node --test` を workspace ごと個別実行し
+shared 5/5・server 54/54・linux 34/34・macos 34/34 すべて非退行で green（テスト追加なし、
+既存不変条件の再確認のみ）。`grep -c 'require('`（apps/web）=0。
+`diff` で linux/macos の `claude-login.ts` が byte-for-byte 同一であることを確認。
+`git diff --stat -- agents/windows/ apps/web/src` が空であることを確認。
+`packages/shared/dist/i18n.js` に2新キー、`apps/server/dist/services/command-handler.js` に
+`claudeLogin.starting`/`claudeLogin.codeAccepted`、両 OS の `dist/services/claude-login.js` に
+`AUTHENTICATE_TIMEOUT_MS` のコンパイル反映を確認。
+
+#### 反映に必要な操作
+- `command-handler.ts` の変更 → **server 再起動が必要**（#340 の `claudeAuth.expired`/`h` と
+  合わせて1回の `pm2 restart devrelay-server` で両方反映される）。
+- `claude-login.ts` の変更 → **各マシン（Linux/macOS）の `u` が必要**（Windows対象外）。
+- 実チャットでの E2E 確認（`login` 送信直後に即時 ack が出ること、コード投入直後に即時 ack が
+  出ること、意図的な失敗時に60秒で `authenticate request timed out (60s)` になること）は
+  人間の反映後に別サイクルで実施。pixblog（online / `claudeAuthOk=f` / `c51c8b9`）が
+  理想的な被験体。
+
 ### #340: `login` 通知文言・ヘルプの追従修正（#339 のデプロイ検証で発見）(2026-08-31)
 
 #### 背景

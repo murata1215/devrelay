@@ -1,5 +1,7 @@
 # Devlog INDEX
 
+- 2026-08-31_194243 | `login`が`unsupportedAgent`で即失敗するバグ修正(#343) | Query.request()が返すcontrol_responseの封筒を剥がさず直接responseとして読んでいたため常にmanualUrl=undefinedでunsupportedAgentに落ちていた真因を確定（sdk.mjs/cli.jsを直接grepして裏取り）、unwrapControlResponse()を新規ファイルに切り出しclaude-login.tsの2箇所に適用、agent-manager.tsに観測性ログ1行追加、テスト6件追加でlinux/macosとも34→40
+- 2026-08-31_121500 | `login`無言レスポンス穴+Agent無限待ちを解消(#341) | 診断でlogin自体は既に動作済み(pm2ログ0ヒット=未送信)と確定、handleLogin/handleLoginCodeの`return ''`によるweb.tsの無反応ガード穴とclaude-login.tsのq.request()無タイムアウトを発見・解消、claudeLogin.starting/codeAcceptedの即時ack追加+withTimeout(60s/120s)、失敗表示は既存claudeLogin.failedに集約し新規キー増やさず
 - 2026-08-23_062023 | agent専用Message読み取りREST追加(#324) | 他プロジェクトの直近Messageを読むGET /api/agent/messagesを既存資産再利用で追加、実地検証済み
 - 2026-08-29_130620 | MCP note?/council?受け口追加(#331) | approve_implementationのnote実効化とsubmit_instructionのcouncil受理・永続化、councilエンジン自体は未実装で別サイクル
 - 2026-08-29_201458 | MCP plan skipPermissions強制ON解消(#332) | forceNewSessionと権限ポリシーを分離、permissionPolicyでMCP planをstrictReadonly化、exec/チャットは従来どおり

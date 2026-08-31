@@ -2118,8 +2118,14 @@ async function handleLogin(context: UserContext): Promise<string> {
   if (!result.ok) {
     return tChat(lang, 'claudeLogin.offline');
   }
-  // 実際の URL は Agent からの agent:claude:login:url 受信後に非同期でチャットへ中継される（agent-manager.ts）
-  return '';
+  // 実際の URL は Agent からの agent:claude:login:url 受信後に非同期でチャットへ中継される（agent-manager.ts）。
+  // URL 取得まで数十秒かかりうるため、ここで即時 ack を返し「無反応に見える」問題を解消する（#341）。
+  const machine = await prisma.machine.findUnique({
+    where: { id: context.currentMachineId },
+    select: { displayName: true, name: true },
+  }).catch(() => null);
+  const label = machine?.displayName || machine?.name || context.currentMachineId;
+  return tChat(lang, 'claudeLogin.starting', { machine: label });
 }
 
 /**
@@ -2145,8 +2151,9 @@ async function handleLoginCode(context: UserContext, code: string): Promise<stri
   if (!result.ok) {
     return tChat(lang, result.reason === 'noFlow' ? 'claudeLogin.noFlow' : 'claudeLogin.invalidCode');
   }
-  // 成功/失敗は Agent からの agent:claude:login:result 受信後に非同期でチャットへ中継される
-  return '';
+  // 成功/失敗は Agent からの agent:claude:login:result 受信後に非同期でチャットへ中継される。
+  // ここで即時 ack を返し「無反応に見える」問題を解消する（#341）。
+  return tChat(lang, 'claudeLogin.codeAccepted');
 }
 
 /**
