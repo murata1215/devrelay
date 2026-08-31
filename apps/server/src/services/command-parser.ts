@@ -415,6 +415,10 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
 **Team**
 \`ask <project>: <question>\` - Ask another project
 
+**Claude re-login (WebUI only)**
+\`login\` - Start remote re-login when Claude login has expired
+\`login <code>\` - Submit the authorization code shown after logging in
+
 **Other**
 \`ag\` - Apply DevRelay Agreement v4 (creates rules/devrelay.md)
 \`u\` - Check/update the agent version (send twice in a row to update)
@@ -474,6 +478,10 @@ Any other message is treated as an instruction to the AI
 
 **チーム**
 \`ask <project>: <質問>\` - 他プロジェクトに質問
+
+**Claude 再ログイン（WebUI のみ）**
+\`login\` - Claude のログインが切れたときにリモート再ログインを開始
+\`login <コード>\` - ログイン後に表示された認可コードを送信
 
 **その他**
 \`ag\` - DevRelay Agreement v4 を適用（rules/devrelay.md 作成）

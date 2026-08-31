@@ -6,6 +6,45 @@
 
 ## 実装済み機能
 
+### #340: `login` 通知文言・ヘルプの追従修正（#339 のデプロイ検証で発見）(2026-08-31)
+
+#### 背景
+#339 実装後、ユーザーが pixblog（ubuntu-prod）で `u` を実行し Claude ログイン切れの通知を
+受け取ったが、サーバー本体が #339 のビルドより前に起動していた stale プロセスのままで
+「login URL が出てこない」と報告。調査の結果コード自体に問題はなく（`pm2 restart` 後、
+`🏗️  build:` ログの時刻が dist mtime と一致することで新コードのロードを確認）、ユーザーの
+`pm2 restart devrelay-server` により解消した。ただし調査の過程で **#339 実装時からの純粋な
+文言の追従漏れ**を2件発見: ①`claudeAuth.expired`/`claudeAuth.runtimeExpiredHint` が `login`
+実装後も「`login` コマンド（実装後）」のまま据え置かれていた、②`h`（ヘルプ）に `login`
+コマンド自体の記載が一切なく、機能を知っていないと発見できない状態だった。
+
+#### 変更内容（テキストのみ、ロジック変更ゼロ）
+1. `packages/shared/src/i18n.ts` の `claudeAuth.expired`（マシン切断通知）と
+   `claudeAuth.runtimeExpiredHint`（実行時401検知ヒント、毎ターン表示）から
+   「（実装後）」「(once implemented)」を削除し、WebUI チャットから `login` で
+   リモート再ログインできる旨を案内する文言に更新（ja/en 両方）。
+2. `apps/server/src/services/command-parser.ts` の `getHelpText()`（`h` コマンド）に
+   「Claude 再ログイン（WebUI のみ）」セクション（`login`/`login <code>` の2行）を
+   ja/en 双方に追加。
+
+#### 設計判断
+- `login` は `platform==='web'` 限定機能（#339 のセキュリティ境界どおり）のため、
+  ヘルプ・通知文言双方に「WebUI のみ」であることを明記し、Discord/Telegram
+  ユーザーが試して失敗する事故を防止。
+- ロジック・型・DB・WS メッセージ形式は一切変更していない（文言差し替えのみ）。
+
+#### 反映に必要な操作
+- `claudeAuth.expired` / `getHelpText()` はサーバー側でのみ参照 → **server 再起動のみ**。
+- `claudeAuth.runtimeExpiredHint` は Agent 側 `ai-runner.ts`（linux/macos）が
+  `tChat()` 経由で参照 → **各マシン（Linux/macOS）の `u` が必要**（Windows対象外、
+  #339 と同じスコープ）。
+
+#### 検証
+`pnpm build` 6 workspace green、`grep -c 'require('`（apps/web）=0（web 側は無変更のため
+確認のみ）、`packages/shared/dist/i18n.js`/`apps/server/dist/services/command-parser.js`
+への新文言のコンパイル反映を確認。実チャットでの表示確認（`h` に新セクションが出ること、
+通知文言の更新）は人間の反映後に別サイクル。
+
 ### #339: `login` コマンド — Claude リモート再ログイン本体（#326 Phase2）(2026-08-31)
 
 #### 背景

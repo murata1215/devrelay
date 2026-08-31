@@ -124,13 +124,13 @@ export const chatMessages = {
 
   // --- claude auth（Claude ログイン切れ検知、リモート再ログイン中継 Phase1） ---
   'claudeAuth.expired': {
-    en: '🔒 **{machine}**: Claude login has expired. Log in again on that machine, or send `login` (once implemented) to reconnect remotely.',
-    ja: '🔒 **{machine}**: Claude のログインが切れました。そのマシンで再ログインするか、`login` コマンド（実装後）でリモート再ログインしてください。',
+    en: '🔒 **{machine}**: Claude login has expired. Log in again on that machine, or send `login` from the WebUI chat for that machine to reconnect remotely.',
+    ja: '🔒 **{machine}**: Claude のログインが切れました。そのマシンで再ログインするか、そのマシンの WebUI チャットから `login` を送信してリモート再ログインしてください。',
   },
   'claudeAuth.recovered': { en: '✅ **{machine}**: Claude login recovered', ja: '✅ **{machine}**: Claude のログインが復旧しました' },
   'claudeAuth.runtimeExpiredHint': {
-    en: '🔒 Claude login has expired on this machine. Log in again there to continue.',
-    ja: '🔒 このマシンで Claude のログインが切れています。再ログインしてから続けてください。',
+    en: '🔒 Claude login has expired on this machine. Log in again there, or send `login` from the WebUI chat for that machine to continue.',
+    ja: '🔒 このマシンで Claude のログインが切れています。再ログインするか、WebUI チャットから `login` を送信してから続けてください。',
   },
 
   // --- claude login（`login` コマンド、リモート再ログイン中継 Phase2） ---
