@@ -272,9 +272,11 @@ export const chatMessages = {
   },
 
   // --- Devin CLI 非対応フラグ対応（#329: caps 駆動化 + 静かなフォールバック禁止） ---
+  // #345: {detail} は「本当に非対応と判定したのか、環境差の疑いがあるのか」を切り分けるための
+  // 診断サフィックス（例: "devin 3000.1.27 / help 4128 chars / probe=ok"）。全 OS の呼び出し側で必ず渡す。
   'devin.readonlyUnsupported': {
-    en: '⚠️ This machine\'s Devin CLI does not support `--agent-config`, so plan-mode read-only enforcement is prompt-instruction only (file writes cannot be fully blocked).',
-    ja: '⚠️ この端末の Devin CLI は `--agent-config` に対応していないため、プランモードの読み取り専用強制はプロンプト指示のみになります（ファイル書き込みを完全にはブロックできません）。',
+    en: '⚠️ This machine\'s Devin CLI does not support `--agent-config`, so plan-mode read-only enforcement is prompt-instruction only (file writes cannot be fully blocked).\n({detail})',
+    ja: '⚠️ この端末の Devin CLI は `--agent-config` に対応していないため、プランモードの読み取り専用強制はプロンプト指示のみになります（ファイル書き込みを完全にはブロックできません）。\n({detail})',
   },
   'devin.unknownFlagRetry': {
     en: '⚠️ Devin CLI rejected the `{flag}` flag as unknown. Retrying without it...',
@@ -295,16 +297,21 @@ export const chatMessages = {
     ja: '❌ {tool} CLI が出力なしで終了しました（exit {code}）。\n\n[stderr]\n{stderr}',
   },
   'devin.probeFailed': {
-    en: '⚠️ Failed to probe this machine\'s Devin CLI (`devin --help`). Proceeding assuming all flags are supported; if an unsupported flag is rejected, DevRelay will automatically retry without it.',
-    ja: '⚠️ この端末の Devin CLI のプローブ（`devin --help`）に失敗しました。全フラグ対応ありと仮定して続行します。非対応フラグが拒否された場合は自動的に外して再試行します。',
+    en: '⚠️ Failed to probe this machine\'s Devin CLI (`devin --help`). Proceeding assuming all flags are supported; if an unsupported flag is rejected, DevRelay will automatically retry without it.\n({detail})',
+    ja: '⚠️ この端末の Devin CLI のプローブ（`devin --help`）に失敗しました。全フラグ対応ありと仮定して続行します。非対応フラグが拒否された場合は自動的に外して再試行します。\n({detail})',
   },
   'devin.promptFileUnsupported': {
     en: '❌ This machine\'s Devin CLI does not support `--prompt-file`, so DevRelay cannot safely deliver the prompt (passing it as a raw command-line argument is unsafe and was removed in #344). Please update the devin CLI on this machine.',
     ja: '❌ この端末の Devin CLI は `--prompt-file` に対応していないため、プロンプトを安全に渡せません（コマンドライン引数への直接展開は #344 で廃止しました）。この端末の devin CLI を更新してください。',
   },
   'devin.execPermissionUnsupported': {
-    en: '⚠️ This machine\'s Devin CLI does not support `--permission-mode`, so tool auto-approval in exec mode is not enforced by a flag (Devin\'s own default behavior applies).',
-    ja: '⚠️ この端末の Devin CLI は `--permission-mode` に対応していないため、exec モードのツール自動承認はフラグでは強制されません（Devin 自身の既定動作に従います）。',
+    en: '⚠️ This machine\'s Devin CLI does not support `--permission-mode`, so tool auto-approval in exec mode is not enforced by a flag (Devin\'s own default behavior applies).\n({detail})',
+    ja: '⚠️ この端末の Devin CLI は `--permission-mode` に対応していないため、exec モードのツール自動承認はフラグでは強制されません（Devin 自身の既定動作に従います）。\n({detail})',
+  },
+  // --- #345: workspace trust 拒否（devin --respect-workspace-trust）への対処案内 ---
+  'devin.workspaceUntrusted': {
+    en: '❌ Devin CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `--respect-workspace-trust false` automatically (restores Devin\'s own documented default for non-interactive/print mode).\n② If it still happens, run `devin` interactively once in that directory on that machine to trust it.\n③ Or set `respect_workspace_trust: false` in the Devin CLI config on that machine.',
+    ja: '❌ Devin CLI がこのワークスペース（{path}）を信頼していないため実行を拒否しました。\n\n① Agent が未更新の場合は `u` を実行してください — DevRelay は `--respect-workspace-trust false` を自動的に付与するようになりました（Devin 自身が文書化している非対話/print モードの既定値に戻すだけです）。\n② それでも発生する場合は、そのマシンでそのディレクトリで一度 `devin` を対話起動して trust してください。\n③ または、そのマシンの Devin CLI の config で `respect_workspace_trust: false` を設定してください。',
   },
 
   // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---
@@ -334,11 +341,31 @@ export function tChat(
   params?: Record<string, string | number>
 ): string {
   const template = chatMessages[key][lang];
-  if (!params) return template;
-  return template.replace(/\{(\w+)\}/g, (match, name) => {
+  if (!params) {
+    warnIfUnresolvedPlaceholder(key, template);
+    return template;
+  }
+  const result = template.replace(/\{(\w+)\}/g, (match, name) => {
     const value = params[name];
     return value === undefined ? match : String(value);
   });
+  warnIfUnresolvedPlaceholder(key, result);
+  return result;
+}
+
+// #345: packages/shared は Node.js 固有 API を使わない方針（tsconfig の lib に DOM/Node 型を含まない）
+// のため、token.ts の btoa/atob と同じ流儀でグローバルの最小シグネチャだけを宣言する。
+declare const console: { warn(...args: unknown[]): void };
+
+/**
+ * #345: 置換後の文字列に未解決の `{placeholder}` が残っていないか検出する。
+ * #86→#90 / #293→#304 / #345 §40 の `{tool}` 欠落と同クラスの「呼び出し側の同期漏れ」を
+ * テストではなく実行時の構造で検出するための最小限のガード。表示は一切変えない（warn のみ）。
+ */
+function warnIfUnresolvedPlaceholder(key: ChatMessageKey, text: string): void {
+  if (/\{[a-zA-Z][a-zA-Z0-9_]*\}/.test(text)) {
+    console.warn(`[i18n] unresolved placeholder in tChat('${key}'): ${text}`);
+  }
 }
 
 // -----------------------------------------------------------------------------

@@ -6,6 +6,68 @@
 
 ## 実装済み機能
 
+### #345: Devin CLI が workspace trust で拒否される問題を解消 + `{tool}` 未置換 + `--agent-config` 誤判定の診断強化 (2026-08-31)
+
+#### 背景
+#344 を commit + push し当該 Windows CLI 機で `u` を実行したところ、無内容な `(No response from AI)`
+は解消され devin 自身の実エラーが表示されるようになったが、実チャットで新たに3つの問題が判明した：
+❶ `--agent-config` に対応していないという誤警告が残る、❷ エラーメッセージ内の `{tool}` プレースホルダが
+未置換のまま表示される、❸（本丸）`devin: error=Refusing to run in an untrusted workspace: ...` で
+Devin CLI が全ターン拒否され続ける。
+
+#### 実測と方針
+DB とソースの read-only 実測により、`probeDevinCapabilities()` は `ok:true`（probe 自体は成功）かつ
+`promptFile:true`・`agentConfig:false` を返しており、正規表現のバグでもリトライ未発火でもないことを
+確認。ユーザーが手打ちした実機 `devin --help`（3000.1.27）とは環境が異なる可能性（H-A: Agent プロセスの
+PATH が解決する devin が別実体／H-B: devin config の影響）が濃厚だが、証拠なしに直すと外す恐れがあるため
+❶は「1回のチャットで確定させる観測性」の追加に留め、憶測での修正はしない。
+
+❸ については devin 3000.1.27 の `--help` が
+`--respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>]`（既定: 対話モードは true、非対話/print
+モードは false）と文書化しているにもかかわらず、DevRelay は常に `-p`（非対話）で起動しているのに拒否
+された。拒否メッセージ自身が「config で `respect_workspace_trust: false` を設定してください」と案内して
+いることから、ユーザー側の devin config が CLI の既定より優先されていると判断。リモート実行では対話の
+trust プロンプトを人間が押せないため構造的に詰んでいる。
+
+#### 変更内容（3 OS: `agents/{linux,macos,windows}` + `packages/shared`）
+1. **❷ `{tool}` 未置換の修正**: `ai.cliFailed` の `tChat()` 呼び出しに `tool: aiTool` を追加（3 OS 全て）。
+2. **再発防止**: `packages/shared/src/i18n.ts` の `tChat()` に未置換プレースホルダ検出を追加
+   （`warnIfUnresolvedPlaceholder()`、`console.warn` のみで戻り値は変更しない）。`{tool}` 欠落は
+   #86→#90・#293→#304 に続き3回目の同クラスの同期漏れであり、個別キーのテストではなく仕組みで検出できる
+   ようにする狙い。
+3. **❸ 本丸**: `probeDevinCapabilities()` の戻り値に `respectWorkspaceTrust: boolean` を追加
+   （`/--respect-workspace-trust\b/` を help に対して判定、probe 失敗時の楽観既定は他フラグと同じく
+   `true`）。devin 起動引数の組み立てに
+   `if (devinHasRespectWorkspaceTrust && process.env.DEVRELAY_DEVIN_RESPECT_WORKSPACE_TRUST !== '1')
+   args.push('--respect-workspace-trust', 'false')` を追加。これは devin 自身が文書化している
+   非対話モードの既定へ明示的に戻すだけで、権限拡大ではない。キルスイッチ
+   `DEVRELAY_DEVIN_RESPECT_WORKSPACE_TRUST=1` で従来動作に戻せる。`devinDroppedFlags`（#329 の自動
+   リトライ安全網）にも自動的に乗るため、当該フラグを拒否する旧 devin でも安全に動作する。
+4. **安全網**: `cli-failure.ts`（3 OS byte-for-byte 同一、`classifyCliFailure()` 自体は無変更）に
+   純関数 `isWorkspaceTrustError(stderr)` を追加（`Refusing to run in an untrusted workspace` または
+   `respect_workspace_trust` を検出）。catch-all の `emptyNonZero` 分岐内でこれが真の場合、生 stderr
+   ダンプの代わりに新規 i18n キー `devin.workspaceUntrusted`（対処手順3点、`{path}` 埋め込み）を表示。
+5. **❶ 診断強化のみ（修正はしない）**: `probeDevinCapabilities()` を拡張し `devin --version`・
+   `helpBytes`・`ok`・`reason` を保持。`devin.readonlyUnsupported`/`devin.execPermissionUnsupported`/
+   `devin.probeFailed` の3キーに `{detail}`（例: `devin 3000.1.27 / help 4128 chars / probe=ok`）を
+   追加し、次回のユーザー発話1回で H-A/H-B の切り分けができるようにした。
+
+#### 検証
+`pnpm build` 6 workspace green、`node --test` 個別実行で `packages/shared` **9/9**（既存5+新規4）・
+`apps/server` 54/54（非退行）・**`agents/linux` 59/59**（既存55+新規4）・
+**`agents/macos` 59/59**（既存55+新規4）。`diff` で `cli-failure.ts` の linux/macos/windows 3 者
+byte-for-byte 同一、`cli-failure.test.mjs` の linux/macos 同一。`git diff` で `classifyCliFailure()`
+本体が3 OS とも無変更（`isWorkspaceTrustError()` の追加のみ）であることを確認。
+`grep -rn "'ai.cliFailed'" agents/*/src/` の全ヒットに `tool:` が含まれること、
+`grep -rn "respect-workspace-trust" agents/*/dist/` が3 OS すべてでヒットすること、
+`grep -c 'require('`（apps/web）= 0、`git diff --stat -- apps/` が空（`apps/server`/`apps/web` 無変更）を確認。
+
+#### 反映
+DB マイグレーション不要、`apps/server`/`apps/web` 無変更のため **server 再起動不要**。
+Agent 側の修正が本体のため **各マシン（Linux/macOS/Windows CLI Agent）の `u` が必要**。
+実チャットでの E2E 確認（`{tool}` 置換確認、workspace trust 拒否が出ないこと、❶ の診断行での
+H-A/H-B 切り分け）は人間の反映後に別サイクルで実施。
+
 ### #344: Devin CLI が `(No response from AI)` で沈黙する問題を解消 + argv 経路のコマンド注入穴を削除 (2026-08-31)
 
 #### 背景

@@ -10,7 +10,7 @@ import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { matchesToolRule, isAllowedByRules, decidePlanPermission } from './plan-permission.js';
-import { classifyCliFailure } from './cli-failure.js';
+import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
@@ -48,10 +48,24 @@ let geminiCapabilitiesCache: { model: boolean } | null = null;
 // #344: `ok:false`（probe 失敗）の場合は全フラグ true と楽観的に仮定して cache する（理由は関数 JSDoc 参照）。
 // 楽観キャッシュは TTL 付き（devinCapabilitiesFailedAt と併用）で、devin が後から PATH に現れても
 // Agent プロセスを再起動しなくても再検出できるようにする。`ok:true`（実際に probe 成功）は無期限キャッシュ。
-let devinCapabilitiesCache: { model: boolean; agentConfig: boolean; permissionMode: boolean; promptFile: boolean; export: boolean; ok: boolean; reason?: string } | null = null;
+let devinCapabilitiesCache: {
+  model: boolean;
+  agentConfig: boolean;
+  permissionMode: boolean;
+  promptFile: boolean;
+  export: boolean;
+  respectWorkspaceTrust: boolean;
+  version: string;
+  helpBytes: number;
+  ok: boolean;
+  reason?: string;
+} | null = null;
 let devinCapabilitiesFailedAt: number | null = null;
 // #344: probe 失敗（ok:false）の警告はプロセス寿命中 1 回だけ出す（毎ターン繰り返さない）。
 let devinProbeFailedWarned = false;
+// #345: `--agent-config` が「非対応」と判定されたときの `--help` 全文ダンプは
+// H-A（別バイナリ解決）/H-B（config差）切り分けの証拠採取用。プロセス寿命中 1 回だけ出す。
+let devinAgentConfigHelpDumped = false;
 
 // #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
 let claudeFallbackLogged = false;
@@ -215,8 +229,13 @@ function probeGeminiCapabilities(command: string): { model: boolean } {
  * 自動リトライ（最大3回、フラグを1つずつ外す）が安全網として受け止める。
  * 失敗キャッシュのみ `DEVRELAY_DEVIN_PROBE_TTL_MS`（既定60000ms）で期限切れにし、
  * 成功キャッシュは Agent プロセス寿命いっぱい保持する。
+ *
+ * #345: `--respect-workspace-trust`（workspace trust 拒否対策）を追加。また、`--agent-config` が
+ * 実機の `devin --help` には存在するのに false と判定される事例（#345 §40）の切り分け用に
+ * `devin --version` と `helpBytes`（help 文字数）も 1 回だけ計測して診断ログ・診断メッセージに使う
+ * （version/helpBytes 自体は probe の成否や各フラグ判定に一切影響しない）。
  * @param command devin コマンドのフルパス
- * @returns 各フラグの対応可否 + `ok`（probe 自体が成功したか）+ 失敗時の `reason`
+ * @returns 各フラグの対応可否 + 診断情報（version/helpBytes）+ `ok`（probe 自体が成功したか）+ 失敗時の `reason`
  */
 function probeDevinCapabilities(command: string): {
   model: boolean;
@@ -224,6 +243,9 @@ function probeDevinCapabilities(command: string): {
   permissionMode: boolean;
   promptFile: boolean;
   export: boolean;
+  respectWorkspaceTrust: boolean;
+  version: string;
+  helpBytes: number;
   ok: boolean;
   reason?: string;
 } {
@@ -241,15 +263,41 @@ function probeDevinCapabilities(command: string): {
     const permissionMode = /--permission-mode\b/.test(help);
     const promptFile = /--prompt-file\b/.test(help);
     const exportFlag = /--export\b/.test(help);
-    devinCapabilitiesCache = { model, agentConfig, permissionMode, promptFile, export: exportFlag, ok: true };
+    const respectWorkspaceTrust = /--respect-workspace-trust\b/.test(help);
+    let version = 'unknown';
+    try {
+      // #345: 診断専用の 1 行取得。失敗しても probe 自体（フラグ判定）は失敗させない。
+      version = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000 }).trim().split('\n')[0] || 'unknown';
+    } catch {
+      // バージョン取得は診断用のため失敗は無視（version は 'unknown' のまま）
+    }
+    const helpBytes = help.length;
+    devinCapabilitiesCache = { model, agentConfig, permissionMode, promptFile, export: exportFlag, respectWorkspaceTrust, version, helpBytes, ok: true };
     devinCapabilitiesFailedAt = null;
-    console.log(`[devin] 🔎 capabilities: --model=${model} --agent-config=${agentConfig} --permission-mode=${permissionMode} --prompt-file=${promptFile} --export=${exportFlag}`);
+    const detectedFlags = Array.from(new Set(help.match(/--[a-z][a-z-]*/gi) ?? [])).sort();
+    console.log(`[devin] 🔎 capabilities: --model=${model} --agent-config=${agentConfig} --permission-mode=${permissionMode} --prompt-file=${promptFile} --export=${exportFlag} --respect-workspace-trust=${respectWorkspaceTrust} version=${version} helpBytes=${helpBytes}`);
+    console.log(`[devin] 🔎 detected flags: ${detectedFlags.join(' ')}`);
+    if (!agentConfig && !devinAgentConfigHelpDumped) {
+      // #345: --agent-config が「非対応」と判定された場合のみ、H-A/H-B 切り分けのため help 全文を 1 回だけ dump
+      devinAgentConfigHelpDumped = true;
+      console.log(`[devin] 🔎 --agent-config not detected, full --help dump:\n${help}`);
+    }
   } catch (err) {
-    devinCapabilitiesCache = { model: true, agentConfig: true, permissionMode: true, promptFile: true, export: true, ok: false, reason: (err as Error).message };
+    devinCapabilitiesCache = { model: true, agentConfig: true, permissionMode: true, promptFile: true, export: true, respectWorkspaceTrust: true, version: 'unknown', helpBytes: 0, ok: false, reason: (err as Error).message };
     devinCapabilitiesFailedAt = Date.now();
     console.warn(`[devin] --help probe failed, assuming all flags supported (optimistic, TTL applies):`, (err as Error).message);
   }
   return devinCapabilitiesCache;
+}
+
+/**
+ * #345: `devin.readonlyUnsupported`/`devin.execPermissionUnsupported`/`devin.probeFailed` の
+ * `{detail}` プレースホルダに埋める短い診断行を組み立てる（H-A/H-B 切り分け用）。
+ * @param caps probeDevinCapabilities() の戻り値
+ * @returns 例: "devin 3000.1.27 / help 4128 chars / probe=ok"
+ */
+function buildDevinCapabilityDetail(caps: { version: string; helpBytes: number; ok: boolean }): string {
+  return `devin ${caps.version} / help ${caps.helpBytes} chars / probe=${caps.ok ? 'ok' : 'failed'}`;
 }
 
 /**
@@ -1548,6 +1596,8 @@ export async function sendPromptToAi(
     const devinHasAgentConfig = devinCaps.agentConfig && !devinDropped.has('--agent-config');
     const devinHasPermissionMode = devinCaps.permissionMode && !devinDropped.has('--permission-mode');
     const devinHasPromptFile = devinCaps.promptFile && !devinDropped.has('--prompt-file');
+    // #345: workspace trust 拒否対策。devinDropped に載れば #329 の自動リトライ安全網が既に外している。
+    const devinHasRespectWorkspaceTrust = devinCaps.respectWorkspaceTrust && !devinDropped.has('--respect-workspace-trust');
     // #329: 読み取り専用強制がプロンプト指示のみに劣化した場合、静かなフォールバック禁止の方針に従い1行警告する
     // #344: 理由を enum 化。exec モードの --permission-mode 非対応は plan 用の readonlyUnsupported
     // ではなく専用の execPermissionUnsupported で通知する（従来は同じ boolean で plan 用文言が誤って
@@ -1556,7 +1606,7 @@ export async function sendPromptToAi(
     // #344: probe 自体が失敗した（ok:false）場合は「対応ありと仮定して続行する」旨を1回だけ知らせる
     if (!devinCaps.ok && !devinProbeFailedWarned) {
       devinProbeFailedWarned = true;
-      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.probeFailed')}\n`, false);
+      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.probeFailed', { detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
     }
 
     // 保存済み Devin セッション ID があれば -r で resume
@@ -1635,6 +1685,16 @@ export async function sendPromptToAi(
       args.push('--model', devinModel);
     }
 
+    // #345: DevRelay は常に -p（非対話）で起動する。devin の --help は
+    // 「Defaults to ... false for non-interactive (print) mode」と明記しているが、
+    // 実機ではユーザー config の respect_workspace_trust が優先され
+    // 「Refusing to run in an untrusted workspace」で全ターンが失敗する。
+    // リモート実行では対話の trust プロンプトを人間が押せないため構造的に復旧不能。
+    // よって CLI 引数で devin 自身の print モード既定を明示的に指定する（権限拡大ではない）。
+    if (devinHasRespectWorkspaceTrust && process.env.DEVRELAY_DEVIN_RESPECT_WORKSPACE_TRUST !== '1') {
+      args.push('--respect-workspace-trust', 'false');
+    }
+
     // #344: 位置引数フォールバック（`--` の後にプロンプトを argv として直接渡す経路）を廃止した。
     // Node の `spawn(..., {shell:true})` は引数をクォートしないため、この経路は
     // プロンプトに含まれる `\n`/バッククォート/`&` 等がシェルに解釈される任意コマンド実行の脆弱性だった
@@ -1654,9 +1714,9 @@ export async function sendPromptToAi(
     }
 
     if (devinDegradedReason === 'planReadonly') {
-      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.readonlyUnsupported')}\n`, false);
+      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.readonlyUnsupported', { detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
     } else if (devinDegradedReason === 'execPermission') {
-      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.execPermissionUnsupported')}\n`, false);
+      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.execPermissionUnsupported', { detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
     }
 
     console.log(`🔧 Running: ${command} ${args.join(' ').replace(promptFilePath, '...')}`);
@@ -2458,8 +2518,11 @@ export async function sendPromptToAi(
           const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
           if (cliFailure.kind === 'commandNotFound') {
             onOutput(tChat(lang, 'ai.cliNotFound', { tool: aiTool, command }), true, result.usageData);
+          } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'devin' && isWorkspaceTrustError(stderrOutput)) {
+            // #345: devin が workspace trust 拒否で即死したケース。生 stderr のダンプではなく対処手順を出す。
+            onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData);
           } else if (cliFailure.kind === 'emptyNonZero') {
-            onOutput(tChat(lang, 'ai.cliFailed', { code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData);
+            onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData);
           } else {
             onOutput('(No response from AI)', true, result.usageData);
           }

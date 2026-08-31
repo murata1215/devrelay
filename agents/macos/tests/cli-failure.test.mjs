@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyCliFailure } from '../dist/services/cli-failure.js';
+import { classifyCliFailure, isWorkspaceTrustError } from '../dist/services/cli-failure.js';
 
 test('stdout が空でなければ none（stdoutLength > 0）', () => {
   const result = classifyCliFailure({ exitCode: 1, stdoutLength: 10, stderr: 'unexpected argument \'--foo\' found' });
@@ -85,4 +85,26 @@ test('stderr が undefined でも例外を投げない', () => {
   const result = classifyCliFailure({ exitCode: 1, stdoutLength: 0, stderr: undefined });
   assert.equal(result.kind, 'emptyNonZero');
   assert.equal(result.stderrTail, '');
+});
+
+// #345: isWorkspaceTrustError() — classifyCliFailure() 自体は無変更のまま、
+// emptyNonZero の中身をさらに細分類するための独立した純関数のテスト。
+
+test('isWorkspaceTrustError: "Refusing to run in an untrusted workspace" を検出する', () => {
+  const stderr = "devin: error=Refusing to run in an untrusted workspace: d:\\iap\\eBuilder8\\workspace\\Lafit";
+  assert.equal(isWorkspaceTrustError(stderr), true);
+});
+
+test('isWorkspaceTrustError: config 案内の "respect_workspace_trust" を検出する', () => {
+  const stderr = 'Start `devin` interactively in this directory to trust it, or set\n`respect_workspace_trust: false` in your config to restore the previous behavior.';
+  assert.equal(isWorkspaceTrustError(stderr), true);
+});
+
+test('isWorkspaceTrustError: 大文字小文字を区別しない', () => {
+  assert.equal(isWorkspaceTrustError('REFUSING TO RUN IN AN UNTRUSTED WORKSPACE'), true);
+});
+
+test('isWorkspaceTrustError: 無関係な stderr では false（例外も投げない）', () => {
+  assert.equal(isWorkspaceTrustError('panic: something broke'), false);
+  assert.equal(isWorkspaceTrustError(''), false);
 });

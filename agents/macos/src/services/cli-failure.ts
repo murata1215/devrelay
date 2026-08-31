@@ -89,3 +89,17 @@ function isCommandNotFoundMessage(stderr: string): boolean {
     /\bENOENT\b/.test(stderr)
   );
 }
+
+/**
+ * #345: Devin CLI が workspace trust 拒否（`Refusing to run in an untrusted workspace` /
+ * `respect_workspace_trust` の config 案内）で即死したかどうかを判定する。
+ * `classifyCliFailure()` 自体（#344）は判定順序を含め一切変更しない。この関数はその外側で
+ * 呼び出し側（ai-runner.ts）が `emptyNonZero` の中身をさらに細分類するために使う。
+ * @param stderr 子プロセスの stderr 全文
+ */
+export function isWorkspaceTrustError(stderr: string): boolean {
+  return (
+    /Refusing to run in an untrusted workspace/i.test(stderr) ||
+    /respect_workspace_trust/i.test(stderr)
+  );
+}
