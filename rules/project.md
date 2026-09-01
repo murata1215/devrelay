@@ -1447,6 +1447,33 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
 - **Agent の起動方式は機体ごとに 1 つに固定する**。この機体は crontab `@reboot` の nohup 起動が正で、
   pm2 に登録してよいのは `devrelay-server` のみ（`CLAUDE.md` に明記済み）
 
+### `u` 自己更新が無音で失敗し stale dist を自己増殖させる罠 (#351, 2026-09-01)
+
+- **PowerShell はコマンドが見つからないとき `$LASTEXITCODE` を更新しない**。直前に成功したコマンドの
+  `0` がそのまま残り「exit=0」と誤記録される。ネイティブコマンドの実行前に必ず
+  `$global:LASTEXITCODE = 0` でリセットしてから判定すること（`install-agent.ps1` は #328 で既に
+  対応済みだったが、`u`（自己更新）フロー側の `connection.ts` には移植されておらず**非対称**になっていた
+  ——同種の安全対策を入れた箇所は、兄弟プロセス（インストーラー vs 自己更新）にも横展開されているか
+  必ず確認する）
+- **コンソール無しプロセス（`wscript.exe`経由）は、失敗の出力先が無いので沈黙する**。
+  `CommandNotFoundException` の stderr は誰にも読まれず消える。ログを `Out-File -Append` で
+  取っていても、パイプに到達する前に例外で止まれば記録されない
+- **「exit=0」の噓 × 存在チェックのみの成果物ゲート（#329）が組み合わさると自己増殖ループになる**:
+  古い dist で動く Agent が `u` を実行 → 壊れた `update.ps1`（古い dist が生成）→ 依存コマンドが
+  見つからない → 嘘の exit=0 → 存在チェックだけのゲートを素通り → 旧 Agent を kill → 同じ古い dist で
+  再起動 → 次の `u` でも同じ壊れたスクリプトが再生成される。**`pm2 restart` を何度実行しても直らない**
+  （サーバー側の変更は対象端末の dist に一切影響しないため）。この手のループを断つには
+  「成果物が存在するか」ではなく「ビルド開始時刻より後に実際に書き換わったか」（`LastWriteTime` 比較）
+  まで見る必要がある
+- **`reconcileLastAttempt` の早期 return（`status !== 'pending'`）が回復不能なステータス残留を生む**。
+  一度 `timeout:...` に落ちると、その後どれだけ健全な状態（`runningCodeStale=false` かつ
+  `localCommit===lastAttemptCommit`）になっても照合が走らず `lastAutoUpdateStatus` が永久に残る。
+  `MAX_ATTEMPTS_PER_COMMIT` の disable ゲートに近づいたまま放置されるため実害がある。
+  → **#351 で対処済み**。`decideReconcileOutcome()`（外部 import ゼロの純関数）に判定を切り出し、
+  `status` を条件にせず「成功の証拠（commit一致+stale=false）が揃っているか」だけで success を確定
+  できるようにした（旧 Agent の `stale=undefined` ケースは従来どおり `status==='pending'` 限定の
+  fail-safe を維持）
+
 ### トークン高止まり警告 (#300 / #321、#330 で廃止)
 
 - **`w` と `x` の役割は別物**（今後も有効な運用知識）: `w`（wrap up）は exec マーカー＋ドキュメント更新・commit/push のみで、

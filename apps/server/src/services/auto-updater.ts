@@ -19,6 +19,7 @@ import { prisma } from '../db/client.js';
 import { checkAgentVersion, updateAgentAuto, isAgentConnected, getConnectedAgents } from './agent-manager.js';
 import { isSessionRunning } from './session-manager.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
+import { decideReconcileOutcome } from './auto-update-reconcile.js';
 
 /** 同一コミットへの試行上限（超えたらそのマシンの自動更新を停止する） */
 const MAX_ATTEMPTS_PER_COMMIT = 2;
@@ -150,6 +151,12 @@ async function isMachineBusy(machineId: string): Promise<boolean> {
  * 更新後の結果を照合する（#256 の stale dist 検出）
  * 直前に狙ったコミットに到達していれば success、到達していなければ試行回数を維持したまま次サイクルへ
  *
+ * #351: 判定そのものは `decideReconcileOutcome()`（外部 import ゼロの純関数）に集約した。
+ * 従来は `status === 'pending'` のときにしか照合していなかったため、一度 `timeout:...` に
+ * 落ちると健全な状態に戻っても `lastAutoUpdateStatus` が永久に残ってしまっていた
+ * （DESKTOP-1JR1NLL/c-shiraki で実際に発生）。`decideReconcileOutcome()` は
+ * `status` を条件にせず「成功の証拠が揃っているか」だけで success を確定できるようにする。
+ *
  * @param lastAttemptAt 直近の試行日時（pending の滞留判定に使う）
  */
 async function reconcileLastAttempt(
@@ -160,45 +167,47 @@ async function reconcileLastAttempt(
   status: string | null,
   runningCodeStale: boolean | undefined
 ): Promise<void> {
-  if (!lastAttemptCommit || status !== 'pending') return;
+  const outcome = decideReconcileOutcome({
+    localCommit,
+    lastAttemptCommit,
+    status,
+    runningCodeStale,
+    lastAttemptAt,
+    nowMs: Date.now(),
+    pendingTimeoutMs: PENDING_TIMEOUT_MS,
+  });
 
-  // #302: runningCodeStale は Agent 任意フィールド。旧 Agent（#256 以前）は送ってこず undefined になる。
-  // 以前は `!runningCodeStale` で undefined を「stale でない」と誤解釈し、ビルドが古くても
-  // success 確定させていた（5 ヶ月間 stale dist を見逃した直接原因）。三値で明示的に分岐する。
-  if (localCommit === lastAttemptCommit) {
-    if (runningCodeStale === false) {
-      await prisma.machine.update({
-        where: { id: machineId },
-        data: { lastAutoUpdateStatus: 'success', autoUpdateAttempts: 0 },
-      });
-      console.log(`✅ Auto-update verified for ${machineId}: now at ${localCommit.slice(0, 7)}`);
-      return;
-    }
-    if (runningCodeStale === undefined) {
-      // 旧 Agent: commit は進んだがビルド鮮度を自己申告できない。「成功」と確定はさせず、
-      // unverified として記録する（WebUI で旧 Agent と分かるよう可視化。#302）
-      await prisma.machine.update({
-        where: { id: machineId },
-        data: { lastAutoUpdateStatus: 'success:unverified', autoUpdateAttempts: 0 },
-      });
-      console.log(`✅ Auto-update commit advanced for ${machineId} but unverified (old agent: build freshness unknown): now at ${localCommit.slice(0, 7)}`);
-      return;
-    }
-    // runningCodeStale === true はここを通らず下の pending/timeout 経路へ
-  }
+  if (outcome.action === 'none') return;
 
-  const detail = runningCodeStale ? 'running code is stale (rebuild did not take effect)' : 'commit unchanged';
-  console.log(`⚠️ Auto-update did not take effect for ${machineId}: ${detail}`);
-
-  // #297: 長時間 pending のままだと WebUI 上は「更新中」に見えたまま滞留する。timeout として可視化する
-  // （試行回数は変えない。MAX_ATTEMPTS_PER_COMMIT による暴走抑止はそのまま効かせる）
-  if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() > PENDING_TIMEOUT_MS) {
+  if (outcome.action === 'success') {
     await prisma.machine.update({
       where: { id: machineId },
-      data: { lastAutoUpdateStatus: `timeout:${detail}`.slice(0, 200) },
+      data: { lastAutoUpdateStatus: 'success', autoUpdateAttempts: 0 },
     });
-    console.warn(`⏱️ Auto-update pending timed out for ${machineId} (${detail})`);
+    console.log(`✅ Auto-update verified for ${machineId}: now at ${localCommit.slice(0, 7)}`);
+    return;
   }
+
+  if (outcome.action === 'success:unverified') {
+    // 旧 Agent: commit は進んだがビルド鮮度を自己申告できない。「成功」と確定はさせず、
+    // unverified として記録する（WebUI で旧 Agent と分かるよう可視化。#302）
+    await prisma.machine.update({
+      where: { id: machineId },
+      data: { lastAutoUpdateStatus: 'success:unverified', autoUpdateAttempts: 0 },
+    });
+    console.log(`✅ Auto-update commit advanced for ${machineId} but unverified (old agent: build freshness unknown): now at ${localCommit.slice(0, 7)}`);
+    return;
+  }
+
+  // outcome.action === 'timeout'
+  // #297: 長時間 pending のままだと WebUI 上は「更新中」に見えたまま滞留する。timeout として可視化する
+  // （試行回数は変えない。MAX_ATTEMPTS_PER_COMMIT による暴走抑止はそのまま効かせる）
+  console.log(`⚠️ Auto-update did not take effect for ${machineId}: ${outcome.detail}`);
+  await prisma.machine.update({
+    where: { id: machineId },
+    data: { lastAutoUpdateStatus: `timeout:${outcome.detail}`.slice(0, 200) },
+  });
+  console.warn(`⏱️ Auto-update pending timed out for ${machineId} (${outcome.detail})`);
 }
 
 /**

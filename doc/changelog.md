@@ -6,6 +6,93 @@
 
 ## 実装済み機能
 
+### #351: `u`（自己更新）が無音で失敗し「stale dist が自分を永続させる」自己増殖デッドロックの根絶 (2026-09-01)
+
+#### 背景
+#350 対応後、ユーザーから「該当端末は `pm2 restart` を何回もやった翌日に同じ症状なんだけど、今回は
+直る？？」と問い返され、read-only 実測（DB + pm2 ログ + git + ユーザー提供の実ログ2本）で
+「`pm2 restart` では原理的に直りようがなかった」ことと「#350 だけでは再発を防げない」ことの両方が
+確定した。実ログ（`install-build.log`/`update.log`）から4つの独立した証拠が同じ結論を指した:
+`u` の全ステップが `exit=0` を記録していたのに実際にはビルドが1回も走っていなかった（証拠A: 直後に
+`runningCodeStale=true`を観測、証拠B: `pnpm install`/ビルドの出力が0行、証拠C: `Build done, restarting...`
+という#329より前の文言が出ていた＝生成元のdist自体が数日前で凍結、証拠D: `pnpm` パスが空欄でPATH補完
+依存の端末だった）。
+
+#### 真因（メカニズム）
+Windows 分岐の `psRunAndLog`/`psRunAndLogChecked` が、コマンド実行前に `$LASTEXITCODE` をリセット
+していなかった。PowerShell はコマンドが見つからない（`CommandNotFoundException`）とき
+`$LASTEXITCODE` を更新しないため、直前に成功した `git reset` の `0` がそのまま残り「exit=0」と
+誤記録される。この結果「古い dist（PATH補完なし）で動く Agent → `u` → 壊れた update.ps1 生成 →
+pnpm が見つからない → 出力はコンソール無し(wscript.exe)のため消える → 嘘の exit=0 → 成果物ゲート
+（#329、存在チェックのみ）を素通り → 旧 Agent を kill → 同じ古い dist で再起動」という**自分自身を
+永続させる自己増殖ループ**が成立していた。`u` を何度送っても同じ壊れたスクリプトが再生成され続ける。
+これは #328 で `install-agent.ps1` に入った同種の修正（`$global:LASTEXITCODE = 0`）が、`u` 自己更新
+フロー側には一度も移植されていなかったことが原因（非対称）。
+
+#### 修正（本丸: `agents/linux/src/services/connection.ts` Windows 分岐のみ）
+- **Fix1**: `psRunAndLog`/`psRunAndLogChecked` の両方で、コマンド実行の直前に
+  `$global:LASTEXITCODE = 0` を挿入（#328 と同じ手当てを `u` にも適用、「exit=0 の嘘」を構造的に
+  不可能にする）
+- **Fix2**: PATH 補完の直後・`git fetch`/`git reset` より前に `Get-Command git/node/pnpm` の事前ゲートを
+  追加。1つでも見つからなければ作業ツリーを一切進めず中止し、結果を必ずログへ残す（旧 Agent は kill
+  せず生存させたまま＝stale 状態そのものを作らない）
+- **Fix3**: ビルド開始前に `$buildStart = Get-Date` を記録し、成果物ゲートを
+  「`sharedBuildExit -eq 0 -and agentBuildExit -eq 0 -and Test-Path -and LastWriteTime -ge $buildStart`」
+  の4条件 AND に強化（#329 の「存在するか」だけの判定では「ビルドが1回も走らなかった」ケースを
+  検出できなかった穴を塞ぐ）
+- **Fix4**: `shared build`/`agent build` を `psRunAndLog` から `psRunAndLogChecked`（#329で既存）に変更し
+  exit code を実際に判定する分岐にした（Fix1があって初めて意味を持つ）
+
+Linux/macOS 分岐（bash の `$?` を使用、`command not found` は正しく非ゼロを返す）は無変更。
+`agents/macos` はこの Windows 分岐自体を持たない（`agents/linux` が Windows CLI Agent の実体）ため対象外。
+
+**なお、この修正が効き始めるのは「次の次の `u`」から**。現在稼働中の dist は #327/#329 入りの正しい
+`update.ps1` を生成するため、次の `u` で #350（`eb236dc`）+ 本サイクルは正常に届く見込み。本修正は
+その後の再発を構造的に封じるためのもの。
+
+#### 副次修正（欠陥④: 自動更新の失敗ステータスが二度と自己回復しない）
+`apps/server/src/services/auto-updater.ts` の `reconcileLastAttempt()` が
+`if (!lastAttemptCommit || status !== 'pending') return;` という早期returnを持ち、**`status==='pending'`
+のときにしか照合していなかった**。一度 `timeout:...` に落ちると、その後 `runningCodeStale=false` かつ
+`localCommit===lastAttemptCommit` という成功の証拠が揃っても照合が走らず `lastAutoUpdateStatus` が
+永久に `timeout:...` のまま残る（実際に `DESKTOP-1JR1NLL/c-shiraki` でこの状態を確認、
+`autoUpdateAttempts=1` で `MAX_ATTEMPTS_PER_COMMIT=2` の disable ゲートに近づいたまま放置されていた）。
+新規 `apps/server/src/services/auto-update-reconcile.ts`（外部 import ゼロの純関数
+`decideReconcileOutcome()`、#350 `agent-update-decision.ts` と同じ流儀）に判定を切り出し、
+判定順を「①lastAttemptCommitなし→none」「②commit一致+stale=false→**statusを条件にせず**success」
+「③commit一致+stale=undefined(旧Agent)→status==='pending'のときだけsuccess:unverified、それ以外none
+（fail-safe）」「④status!=='pending'→none（二重記録防止）」「⑤pendingTimeoutMs超過→timeout」
+「⑥それ以外→none」に固定。`reconcileLastAttempt()` をこれ経由に書き換え、
+`evaluateAutoUpdateGates()`（別軸のゲート判定）は無変更。
+
+#### 検証
+`pnpm build` 6 workspace green。`node --test` を workspace ごと個別実行し
+`packages/shared` 9/9・`apps/server` **83→92**（新規 `auto-update-reconcile.test.mjs` 9件、
+うち #351 本題の回帰テスト「commit一致+stale=false+status=timeout:...→success」を含む）・
+`agents/linux` 103/103（非退行）・`agents/macos` 95/95（非退行）すべて green。静的検証8項目
+すべて確認済み: コンパイル済み `connection.js` に `$LASTEXITCODE=0` リセット・依存コマンド事前ゲート
+（`git fetch`/`git reset`より前に配置）・`LastWriteTime`鮮度判定が反映されていること、`git diff`で
+Linux/macOS分岐（bashの`runAndLog`系）と`evaluateAutoUpdateGates()`が無変更であること、
+`git diff --stat -- apps/web/ agents/macos/ agents/windows/ packages/`が空、
+`grep -c 'require('`(apps/web)=0、`apps/server/dist/services/auto-update-reconcile.js`の存在とコンパイル
+内容を確認。
+
+#### 変更ファイル
+`agents/linux/src/services/connection.ts`（Windows分岐のみ、本丸）、新規
+`apps/server/src/services/auto-update-reconcile.ts`、`apps/server/src/services/auto-updater.ts`
+（`reconcileLastAttempt()`を純関数経由に置き換え）、新規
+`apps/server/tests/auto-update-reconcile.test.mjs`。`agents/macos`/`agents/windows`/`packages/shared`/
+`apps/web`は無変更。DBマイグレーション不要、i18n追加なし、新規WSメッセージ型なし。
+
+#### 反映
+**commit + push が必須**。`pm2 restart devrelay-server`が必須（**人間が実行**、#350 §18と本サイクル
+欠陥④がこれで効く）。各マシンの`u`が必須（**人間が実行**、§28本体。#350と1回の`u`で一緒に届く）。
+DBマイグレーション不要。実チャットでのE2E確認（`DESKTOP-1JR1NLL/c-shiraki`の`u`実行、
+`pnpm resolved: <実パス>`のログ出力確認、`Build done, checking artifact...`→`artifact OK, restarting...`
+の確認、`localCommit`が本コミット以降になり`runningCodeStale=false`を維持すること、
+`lastAutoUpdateStatus`が`timeout:...`→`success`に回復すること、他24台の非退行）は人間の反映後に
+別サイクルで実施。
+
 ### #350: devin 専用 Windows 端末のインストール異常（stale dist デッドロック + コンソール窓の乱立 + POSIX コマンド誤用） (2026-09-01)
 
 #### 背景

@@ -2507,15 +2507,22 @@ async function handleAgentUpdate() {
     const psTs = `Get-Date -Format 'yyyy-MM-dd HH:mm:ss'`;
     const psLog = (msg: string) =>
       `"[$(${psTs})] ${msg}" | Out-File -Append "${updateLogFile}"`;
-    /** コマンド実行 + exit code ログ記録ヘルパー（PowerShell 用） */
+    /**
+     * コマンド実行 + exit code ログ記録ヘルパー（PowerShell 用）。
+     * #351 欠陥⑤: PowerShell はコマンドが見つからない（CommandNotFoundException）場合
+     * `$LASTEXITCODE` を更新せず直前の値（例: git reset の 0）が残ってしまうため、
+     * 実行直前に必ず `$global:LASTEXITCODE = 0` でリセットする
+     * （install-agent.ps1:426-427 の #328 と同じ手当てを `u` にも適用）。
+     */
     const psRunAndLog = (label: string, cmd: string) =>
-      `${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
+      `$global:LASTEXITCODE = 0; ${psLog(label)}; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; ${psLog(`${label} exit=$LASTEXITCODE`)}`;
     /**
      * #329 Part B: 終了コードを PowerShell 変数に保存する版（分岐判定に使う）。
      * `$LASTEXITCODE` はパイプの直後にしか読めないため、判定に使う場合はここで変数へ退避する。
+     * #351 欠陥⑤: こちらも実行直前に `$global:LASTEXITCODE = 0` でリセットする。
      */
     const psRunAndLogChecked = (label: string, cmd: string, varName: string) =>
-      `${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; $${varName} = $LASTEXITCODE; ${psLog(`${label} exit=$${varName}`)}`;
+      `$global:LASTEXITCODE = 0; ${cmd} 2>&1 | Out-File -Append "${updateLogFile}"; $${varName} = $LASTEXITCODE; ${psLog(`${label} exit=$${varName}`)}`;
 
     // PowerShell 更新スクリプトを .ps1 に書き出し、VBS ラッパー経由で実行（#116）
     // 直接 spawn('powershell') だと DETACHED_PROCESS でサイレント終了するため
@@ -2529,6 +2536,22 @@ async function handleAgentUpdate() {
       // Linux/macOS 分岐の `export PATH="${nodeBinDir}:$PATH"` と同じ意図で PATH を補う。
       `$env:Path = "$env:APPDATA\\devrelay\\node;$env:APPDATA\\npm;$env:Path"`,
       psLog('=== Update started ==='),
+      // #351 欠陥⑥（無音失敗の根絶）: git/node/pnpm が PATH 上で解決できるかを
+      // git reset より前に確認し、結果を必ずログへ残す。1 つでも見つからなければ
+      // 作業ツリーを一切進めず（git fetch/reset も実行しない）中止する。
+      // 旧 Agent は kill せず生かしたままにする（stale 状態そのものを作らない）。
+      [
+        `$gitCmd = Get-Command git -ErrorAction SilentlyContinue`,
+        `$nodeCmd = Get-Command node -ErrorAction SilentlyContinue`,
+        `$pnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue`,
+        `"[$(${psTs})] git resolved: $(if ($gitCmd) { $gitCmd.Source } else { 'NOT FOUND' })" | Out-File -Append "${updateLogFile}"`,
+        `"[$(${psTs})] node resolved: $(if ($nodeCmd) { $nodeCmd.Source } else { 'NOT FOUND' })" | Out-File -Append "${updateLogFile}"`,
+        `"[$(${psTs})] pnpm resolved: $(if ($pnpmCmd) { $pnpmCmd.Source } else { 'NOT FOUND' })" | Out-File -Append "${updateLogFile}"`,
+        `if (-not $gitCmd -or -not $nodeCmd -or -not $pnpmCmd) {`,
+        `  ${psLog('!! required tool not found, aborting update (agent kept alive)')}`,
+        `  return`,
+        `}`,
+      ].join('\n'),
       `cd "${agentDir}"`,
       psRunAndLog('git fetch', 'git fetch origin'),
       `$remoteBranch = try { (git symbolic-ref refs/remotes/origin/HEAD 2>$null) -replace 'refs/remotes/', '' } catch { 'origin/main' }`,
@@ -2578,20 +2601,27 @@ async function handleAgentUpdate() {
         `}`,
         psLog('ensure conpty.node end'),
       ].join('\n'),
-      psRunAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
-      psRunAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
+      // #351 欠陥⑥: ビルド開始時刻を記録し、成果物の mtime と比較して「本当にビルドが
+      // 走ったか」を判定する（存在チェックだけでは古い dist を誤って正常扱いしてしまう）
+      `$buildStart = Get-Date`,
+      // #351 欠陥⑤: build ステップも psRunAndLogChecked にして exit code を実際に判定する
+      // （Fix 1 で $LASTEXITCODE が正しくリセットされるようになって初めて意味を持つ）
+      psRunAndLogChecked('shared build', 'pnpm --filter @devrelay/shared build', 'sharedBuildExit'),
+      psRunAndLogChecked('agent build', 'pnpm --filter @devrelay/agent build', 'agentBuildExit'),
       psLog('Build done, checking artifact...'),
-      // #329 Part B: build 後・kill 前に成果物ゲート。dist/index.js が無ければ
-      // 旧 Agent を kill せずスクリプトを終了する（壊れたビルドで動いている Agent を殺さない）
+      // #329 Part B → #351 欠陥⑥で強化: build の exit code + 成果物の存在 + 鮮度
+      // （LastWriteTime >= $buildStart）の全てを満たさない限り、旧 Agent を kill せず
+      // スクリプトを終了する（壊れたビルド・stale dist で動いている Agent を殺さない）
       [
-        `if (Test-Path "${agentDir}\\agents\\linux\\dist\\index.js") {`,
+        `$distPath = "${agentDir}\\agents\\linux\\dist\\index.js"`,
+        `if ($sharedBuildExit -eq 0 -and $agentBuildExit -eq 0 -and (Test-Path $distPath) -and ((Get-Item $distPath).LastWriteTime -ge $buildStart)) {`,
         psLog('artifact OK, restarting...'),
         `  Start-Sleep -Seconds 2`,
         // 旧 Agent プロセスを停止（Get-CimInstance で node.exe + devrelay を検出して kill）
         ...(stopCmd ? [`  ${psRunAndLog('stop old agent', stopCmd.command)}`, '  Start-Sleep -Seconds 2'] : []),
         `  ${restartCmd.command}`,
         `} else {`,
-        psLog('!! build failed, keeping current agent (dist/index.js missing)'),
+        `  ${psLog('!! build failed or artifact stale, keeping current agent (sharedBuildExit=$sharedBuildExit agentBuildExit=$agentBuildExit distExists=$(Test-Path $distPath))')}`,
         `}`,
       ].join('\n'),
     ];
