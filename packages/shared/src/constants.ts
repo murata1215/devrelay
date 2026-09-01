@@ -67,15 +67,16 @@ export type ModelSelectableAiTool = 'claude' | 'codex' | 'gemini' | 'devin';
  * ツールごとのモデル選択肢カタログ。
  * server（command-handler.ts）・web（SettingsPage.tsx）の両方がここだけを参照する単一情報源。
  * ここに無い ID もチャット/WebUI から自由入力で指定可能（新モデル追従のため、カタログは随時更新する運用）。
- * 2026-08 時点のスナップショット。
+ * 2026-09 時点のスナップショット（#353: Claude Fable 5.1 追加。既存モデルは全て Active のため削除なし）。
  */
 export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
   claude: [
-    { id: 'claude-fable-5', name: 'Claude Fable 5', description: '最高性能（Mythos クラス）' },
-    { id: 'claude-opus-5', name: 'Claude Opus 5', description: '高性能（最新）' },
+    { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', description: '最高性能（最新、$10/$50 per MTok、文脈1M/出力128K、adaptive thinking 常時）' },
+    { id: 'claude-fable-5', name: 'Claude Fable 5', description: '最高性能（Mythos クラス、$10/$50 per MTok）' },
+    { id: 'claude-opus-5', name: 'Claude Opus 5', description: '高性能（$5/$25 per MTok）' },
     { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', description: '高性能' },
-    { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', description: 'バランス型（最新）' },
-    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: '高速・低コスト（最新）' },
+    { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', description: 'バランス型（$2/$10 per MTok）' },
+    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: '高速・低コスト（$1/$5 per MTok、文脈200K/出力64K）' },
     { id: 'opus', name: 'Claude Opus（CLI版）', description: 'CLI デフォルト解決' },
     { id: 'sonnet', name: 'Claude Sonnet（CLI版）', description: 'CLI デフォルト解決' },
     { id: 'haiku', name: 'Claude Haiku（CLI版）', description: 'CLI デフォルト解決' },
@@ -108,6 +109,20 @@ export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
     { id: 'gemini', name: 'Gemini', description: 'fuzzy 名（family/alias）で指定' },
   ],
 };
+
+/**
+ * サーバー内部の要約・分類タスク（会話要約・ビルド要約・自然言語コマンド解析・Dev Report 生成等）が
+ * 内部固定で使う Anthropic モデル ID。ユーザー選択可能な `AI_MODEL_CATALOG` とは別軸（ユーザーには
+ * 露出しない内部ユーティリティ呼び出し専用）。
+ *
+ * #353 で 7 箇所に分散していた `'claude-haiku-4-5-20251001'` ハードコードをこの定数へ集約（値は無変更）。
+ *
+ * 【重要・次に触る人へ】このスナップショットの retirement は 2026-10-15 以降（カタログ内で最も近い）。
+ * 差し替える際は、呼び出し元 7 箇所すべてが `temperature` を渡している点に注意すること
+ * （`temperature`/`top_p`/`top_k` は Claude Opus 4.7 以降で 400 エラーになる。#353 調査時点の呼び出し先は
+ * すべて Haiku 系のため無害だが、Opus/Sonnet 系スナップショットへ変更する場合は `temperature` を先に外すこと）。
+ */
+export const UTILITY_MODEL_ANTHROPIC = 'claude-haiku-4-5-20251001';
 
 /** モデル ID として許可しない危険文字を含むかチェック（CLI 引数・TOML インジェクション防止） */
 export function isUnsafeModelId(value: string): boolean {

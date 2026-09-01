@@ -6,6 +6,90 @@
 
 ## 実装済み機能
 
+### #353: AI モデル選択リストの見直し（Claude Fable 5.1 対応） (2026-09-02)
+
+#### 背景
+Claude Fable 5.1（API モデル ID `claude-fable-5-1`）が 2026-09-01 にリリースされたのを受け、
+DevRelay のモデル選択（server の allow-list/既定値、Agent の `--model` 渡し、UI 選択肢、ドキュメント）
+を現行ラインナップに追従させる依頼。依頼文には「公式ラインナップは Fable 5.1/Opus 5/Sonnet 5/
+Haiku 4.5 の4モデル」「Opus 5.1/Sonnet 5.1 は存在しない（追加禁止）」「Fable 5 を残すか非推奨にする
+か判断してほしい」「料金テーブルを追加」という前提が含まれていたが、実測でそのうち3点が誤りと判明。
+
+#### 調査（前提の検証）
+- `claude-fable-5` は **Active**（retirement ≥2027-06-09）。非推奨にする根拠なし → 維持
+- `claude-opus-4-8` も **Active**（retirement ≥2027-05-28）。公式 deprecation table には他にも
+  opus-4-7/4-6/4-5・sonnet-4-6/4-5 が Active として並んでおり、「ラインナップは4モデル」という
+  前提に従うと Active なモデルを誤って削除することになるため不採用
+- 料金テーブルはリポジトリのどこにも存在しない（`price`/`cost`/`perMTok` 等の該当実装なし）。
+  「追加」ではなく新規実装が必要な項目だったため、既存 `ModelOption` にフィールドを追加せず
+  `description` に埋め込む方式を採用（料金を計算に使う消費者コードが1つも存在せず、新規フィールドは
+  死にデータになるため）
+- Fable 5.1 の breaking changes 3点はいずれも該当なし: `tool_choice`/`toolChoice` 使用箇所0件、
+  `thinking`/`budget_tokens` 使用箇所0件、DevRelay は messages 配列を手編集しない（Agent SDK と
+  `--resume`/`codex exec resume` が会話継続を管理する設計のため）
+- `AI_MODEL_CATALOG`（`packages/shared/src/constants.ts`）が server（`command-handler.ts`）・
+  web（`SettingsPage.tsx`）両方の唯一の参照元であることを確認（#309 の集約設計どおり）。
+  Agent はカタログを持たず `--help` プローブで対応可否を見るのみ。Flutter/Dart の UI は
+  リポジトリに存在しない（`apps/web` の Vite + React のみ）
+
+#### 副次発見（本題より緊急度が高いリスク）
+カタログの**外**で、要約/解析用の内部 Anthropic API 呼び出しが `'claude-haiku-4-5-20251001'` を
+7箇所（8呼び出し）に分散してハードコードしていた: `chat-provider.ts`（`AnthropicChatProvider` の
+既定引数）・`build-summarizer.ts`・`conversation-summarizer.ts`・`natural-language-parser.ts`・
+`dev-report-generator.ts`・`agent-manager.ts`（画面解析/応答要約の2箇所）。このスナップショットの
+retirement は **2026-10-15 以降でカタログ内最短**（約6週間）。加えて7箇所全てが `temperature` を
+呼び出しに含めており、`temperature`/`top_p`/`top_k` は **Claude Opus 4.7 以降で 400 エラー**になる
+ため、退役が近いからと安易に新しいモデルへ差し替えると7箇所が同時に壊れる地雷になっていた。
+
+#### 実装
+- `packages/shared/src/constants.ts`: `AI_MODEL_CATALOG.claude` の先頭に `claude-fable-5-1`
+  （$10/$50 per MTok、文脈1M/出力128K、adaptive thinking 常時）を追加。既存6エントリ（`claude-fable-5`/
+  `claude-opus-5`/`claude-opus-4-8`/`claude-sonnet-5`/`claude-haiku-4-5`/CLIエイリアス3種）は
+  **1件も削除せず**、料金/文脈情報を `description` に追記。新規 `UTILITY_MODEL_ANTHROPIC` 定数
+  （値は `'claude-haiku-4-5-20251001'` のまま無変更）を新設し、上記7箇所のハードコードをこれ経由に
+  集約（JSDoc に retirement 日と `temperature` 地雷の注意書きを明記）。ユーザー選択可能な
+  `AI_MODEL_CATALOG` とは別軸の「内部固定モデル」であることを明示
+- `packages/shared/src/index.ts`: `UTILITY_MODEL_ANTHROPIC` を #309/#310 と同じ明示 named export
+  方式で追加（`export *` は CJS interop で消える経路があるため踏襲）
+- `apps/server/src/services/command-handler.ts`: `handleModelList()`（`l` コマンド）に、
+  保存済みモデル ID がカタログ外の場合の警告表示を追加（`⚠️ カタログ外（廃止・改名の可能性）`）。
+  #325 の「静かなフォールバック禁止」方針に従い保存値の書き換えは一切行わない（表示のみ）
+- 新規 `packages/shared/tests/model-catalog.test.mjs`: `claude-fable-5-1` の存在・既存モデル非削除・
+  全モデル ID の `isUnsafeModelId()` 通過・ID重複なし・`UTILITY_MODEL_ANTHROPIC` 値の意図しない
+  変更検出、の6ケース
+- `README.md`/`rules/project.md`: モデル一覧の記述と「AI モデル選択」節に #353 の判断根拠・
+  `UTILITY_MODEL_ANTHROPIC` の注意点を追記
+- **既定モデルは変更していない**（そもそも存在しない設計。`resolveModelForTool()` は未設定時
+  `undefined` を返し、Agent は CLI 引数自体を省略して各 CLI 自身の既定に委ねる。「Fable 5.1 を既定に
+  しない」という依頼は現状の設計と自動的に整合）
+- スコープ外（次サイクル送り）: `UTILITY_MODEL_ANTHROPIC` 自体のモデル差し替え（`temperature` を
+  先に外す必要があるため挙動が変わる）、料金計算機能の新設、codex/gemini/devin カタログの更新
+  （#311 と同じ理由で実機の `~/.codex/models_cache.json` 等の確認が必要）、`agents/`（3 OS）・
+  DB スキーマ・Flutter UI（存在しない）
+
+#### 検証
+`pnpm build` 6 workspace green。`node --test` を workspace ごと個別実行し `packages/shared`
+**9→15**（新規 `model-catalog.test.mjs` 6件）・`apps/server` **92/92**（非退行）・`agents/linux`
+**103/103**（非退行、無変更）・`agents/macos` **95/95**（非退行、無変更）すべて green。
+`grep -rc "claude-haiku-4-5-20251001" apps/server/src`=0（7箇所すべて集約済み）、
+`apps/server/dist`/`packages/shared/dist`/`apps/web/dist` の3箇所全てで置換・追加が反映されている
+ことをコンパイル済み成果物で確認、`grep -c 'require('`(apps/web)=0、
+`git diff --stat -- agents/ apps/server/prisma/` が空、`git status --short` の変更ファイル一覧が
+プラン記載の9ファイル+新規テスト1件と完全一致することを確認。
+
+#### 変更ファイル
+`packages/shared/src/constants.ts`、`packages/shared/src/index.ts`、新規
+`packages/shared/tests/model-catalog.test.mjs`、`apps/server/src/services/command-handler.ts`・
+`agent-manager.ts`・`build-summarizer.ts`・`chat-provider.ts`・`conversation-summarizer.ts`・
+`dev-report-generator.ts`・`natural-language-parser.ts`、`README.md`、`rules/project.md`。
+`agents/`（3 OS）・DB スキーマ・`apps/web` のソースコード（`AI_MODEL_CATALOG` import 経由で
+自動追従するため無変更）は対象外。DB マイグレーション不要、WS メッセージ型変更なし。
+
+#### 反映
+`apps/server`/`packages/shared` の変更のため **commit + push + `pm2 restart devrelay-server` が必要**
+（人間が実行）。`agents/` は無変更のため **各マシンの `u` は不要**。実チャットでの `l`/`l claude`
+表示確認（Fable 5.1 が一覧に出ること、カタログ外 ID 警告の表示）は人間の反映後に別サイクルで実施。
+
 ### #351: `u`（自己更新）が無音で失敗し「stale dist が自分を永続させる」自己増殖デッドロックの根絶 (2026-09-01)
 
 #### 背景

@@ -14,6 +14,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { AiProvider } from '@devrelay/shared';
+import { UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import { getApiKeyForProvider } from './user-settings.js';
 
 /** Chat パラメータ */
@@ -84,7 +85,7 @@ class OpenAIChatProvider implements ChatProvider {
 // ============================================================
 
 class AnthropicChatProvider implements ChatProvider {
-  constructor(private apiKey: string, private model = 'claude-haiku-4-5-20251001') {}
+  constructor(private apiKey: string, private model = UTILITY_MODEL_ANTHROPIC) {}
 
   async chat(params: ChatParams): Promise<ChatResult> {
     const anthropic = new Anthropic({ apiKey: this.apiKey });

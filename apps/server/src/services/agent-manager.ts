@@ -38,7 +38,7 @@ import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
-import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language } from '@devrelay/shared';
+import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
@@ -2561,7 +2561,7 @@ async function handleScreenAnalyze(ws: WebSocket, payload: ScreenAnalyzeRequestP
     if (providerInfo.provider === 'anthropic') {
       const anthropic = new Anthropic({ apiKey: providerInfo.apiKey });
       const response = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
+        model: UTILITY_MODEL_ANTHROPIC,
         max_tokens: 256,
         system: SCREEN_ANALYSIS_SYSTEM,
         messages: [{ role: 'user', content: userContent }],
@@ -2669,7 +2669,7 @@ async function handleResponseSummarize(ws: WebSocket, payload: ResponseSummarize
     if (providerInfo.provider === 'anthropic') {
       const anthropic = new Anthropic({ apiKey: providerInfo.apiKey });
       const response = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
+        model: UTILITY_MODEL_ANTHROPIC,
         max_tokens: 512,
         system: RESPONSE_SUMMARY_SYSTEM,
         messages: [{ role: 'user', content: textForSummary }],

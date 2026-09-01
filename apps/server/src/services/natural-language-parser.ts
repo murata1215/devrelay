@@ -9,7 +9,7 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { type AiProvider, SHORTCUTS } from '@devrelay/shared';
+import { type AiProvider, SHORTCUTS, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import { getApiKeyForChatAi } from './user-settings.js';
 
 // パース結果の型定義
@@ -148,7 +148,7 @@ async function parseWithAnthropic(
 ): Promise<ParsedCommand> {
   const anthropic = new Anthropic({ apiKey });
   const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: UTILITY_MODEL_ANTHROPIC,
     max_tokens: 256,
     system: SYSTEM_PROMPT + contextInfo + '\n\n必ず JSON のみを返してください。他のテキストは含めないでください。',
     messages: [{ role: 'user', content: input }],

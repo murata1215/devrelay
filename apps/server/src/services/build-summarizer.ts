@@ -12,6 +12,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { AiProvider } from '@devrelay/shared';
+import { UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import { getApiKeyForBuildSummary } from './user-settings.js';
 
 /** 要約用システムプロンプト */
@@ -87,7 +88,7 @@ async function summarizeWithOpenAI(apiKey: string, output: string, execPrompt?: 
 async function summarizeWithAnthropic(apiKey: string, output: string, execPrompt?: string): Promise<string | null> {
   const anthropic = new Anthropic({ apiKey });
   const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: UTILITY_MODEL_ANTHROPIC,
     max_tokens: 256,
     system: SUMMARY_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserMessage(output, execPrompt) }],

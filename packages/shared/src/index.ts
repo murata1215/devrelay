@@ -15,6 +15,7 @@ export {
   type ModelOption,
   type ModelSelectableAiTool,
   AI_MODEL_CATALOG,
+  UTILITY_MODEL_ANTHROPIC,
   isUnsafeModelId,
   isModelSelectableAiTool,
   STATUS_EMOJI,

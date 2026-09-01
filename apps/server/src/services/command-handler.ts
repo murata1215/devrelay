@@ -1403,9 +1403,15 @@ async function handleModelList(context: UserContext, tool?: ModelSelectableAiToo
   const planModel = await getUserSetting(context.userId, modelSettingKey(targetTool, 'plan')) || '(default)';
   const execModel = await getUserSetting(context.userId, modelSettingKey(targetTool, 'exec')) || '(default)';
 
+  // カタログ外（廃止・改名等で追従できていない可能性がある）ID を通知する。
+  // #325 の「静かなフォールバック禁止」方針に従い、保存値の書き換えは一切行わない（表示のみ）。
+  const isKnownModel = (id: string) => id === '(default)' || catalog.some(m => m.id.toLowerCase() === id.toLowerCase());
+  const planWarning = isKnownModel(planModel) ? '' : ' ⚠️ カタログ外（廃止・改名の可能性）';
+  const execWarning = isKnownModel(execModel) ? '' : ' ⚠️ カタログ外（廃止・改名の可能性）';
+
   const lines = [`🧠 **${toolLabel} モデル設定**\n`];
-  lines.push(`Plan: **${planModel}**`);
-  lines.push(`Exec: **${execModel}**\n`);
+  lines.push(`Plan: **${planModel}**${planWarning}`);
+  lines.push(`Exec: **${execModel}**${execWarning}\n`);
   lines.push('**候補モデル**（カタログ外の ID も指定可能）:');
   for (const m of catalog) {
     lines.push(`  \`${m.id}\` — ${m.name}（${m.description}）`);

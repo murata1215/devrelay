@@ -12,6 +12,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { AiProvider } from '@devrelay/shared';
+import { UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { getApiKeyForDevReport } from './user-settings.js';
@@ -143,7 +144,7 @@ const callOpenAI: AiCaller = async (apiKey, systemPrompt, userMessage) => {
 const callAnthropic: AiCaller = async (apiKey, systemPrompt, userMessage) => {
   const anthropic = new Anthropic({ apiKey });
   const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: UTILITY_MODEL_ANTHROPIC,
     max_tokens: 4096,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
