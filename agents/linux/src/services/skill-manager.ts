@@ -146,7 +146,7 @@ if [ "$1" = "--get" ]; then
     exit 1
   fi
   FILE_ID="$2"
-  RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+  RESPONSE=$(curl -s -w "\\n%{http_code}" \\
     -H "Authorization: Bearer $TOKEN" \\
     "\${API_URL}/api/agent/documents/\${FILE_ID}" 2>&1) || {
     echo "エラー: API リクエストに失敗しました"
@@ -169,7 +169,7 @@ fi
 
 # 検索モード
 QUERY="$*"
-RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+RESPONSE=$(curl -s -w "\\n%{http_code}" \\
   -X POST \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $TOKEN" \\
@@ -314,7 +314,7 @@ fi
 
 # --list モード: メンバー一覧取得
 if [ "$1" = "--list" ]; then
-  RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+  RESPONSE=$(curl -s -w "\\n%{http_code}" \\
     -H "Authorization: Bearer $TOKEN" \\
     "\${API_URL}/api/agent/members" 2>&1) || {
     echo "エラー: API リクエストに失敗しました"
@@ -326,7 +326,13 @@ if [ "$1" = "--list" ]; then
   BODY=$(echo "$RESPONSE" | sed '$d')
 
   if [ "$HTTP_CODE" != "200" ]; then
-    echo "エラー (HTTP $HTTP_CODE): $BODY"
+    # #349: curl -f を外したことで BODY にサーバーのエラー詳細が入るようになった。jq 不在・非 JSON ボディでは生ボディにフォールバック
+    DETAIL=$(printf '%s' "$BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)
+    if [ -n "$DETAIL" ]; then
+      echo "エラー (HTTP $HTTP_CODE): $DETAIL"
+    else
+      echo "エラー (HTTP $HTTP_CODE): $BODY"
+    fi
     exit 1
   fi
 
@@ -384,7 +390,7 @@ if [ -n "$AI" ] && [ -n "$EXEC_MODE" ]; then
 fi
 
 # まずメンバー一覧からプロジェクト ID を取得
-MEMBERS_RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+MEMBERS_RESPONSE=$(curl -s -w "\\n%{http_code}" \\
   -H "Authorization: Bearer $TOKEN" \\
   "\${API_URL}/api/agent/members" 2>&1) || {
   echo "エラー: メンバー一覧の取得に失敗しました"
@@ -395,7 +401,13 @@ MEMBERS_HTTP=$(echo "$MEMBERS_RESPONSE" | tail -1)
 MEMBERS_BODY=$(echo "$MEMBERS_RESPONSE" | sed '$d')
 
 if [ "$MEMBERS_HTTP" != "200" ]; then
-  echo "エラー (HTTP $MEMBERS_HTTP): $MEMBERS_BODY"
+  # #349: curl -f を外したことで MEMBERS_BODY にサーバーのエラー詳細が入るようになった。jq 不在・非 JSON ボディでは生ボディにフォールバック
+  DETAIL=$(printf '%s' "$MEMBERS_BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)
+  if [ -n "$DETAIL" ]; then
+    echo "エラー (HTTP $MEMBERS_HTTP): $DETAIL"
+  else
+    echo "エラー (HTTP $MEMBERS_HTTP): $MEMBERS_BODY"
+  fi
   exit 1
 fi
 
@@ -503,7 +515,7 @@ if command -v jq &>/dev/null; then
 
   # 送信（ask: 10分、teamexec: 60分）
   # printf + curl -d @- でパイプ渡し（Content-Length を確実に一致させる）
-  RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -f -w "\\n%{http_code}" --max-time $CURL_TIMEOUT \\
+  RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -w "\\n%{http_code}" --max-time $CURL_TIMEOUT \\
     -X POST \\
     -H "Content-Type: application/json" \\
     -H "Authorization: Bearer $TOKEN" \\
@@ -518,7 +530,13 @@ if command -v jq &>/dev/null; then
   BODY=$(echo "$RESPONSE" | sed '$d')
 
   if [ "$HTTP_CODE" != "200" ]; then
-    echo "エラー (HTTP $HTTP_CODE): $BODY"
+    # #349: curl -f を外したことで BODY にサーバーのエラー詳細（#348 の noRetryNote 等）が入るようになった。jq 不在・非 JSON ボディでは生ボディにフォールバック
+    DETAIL=$(printf '%s' "$BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)
+    if [ -n "$DETAIL" ]; then
+      echo "エラー (HTTP $HTTP_CODE): $DETAIL"
+    else
+      echo "エラー (HTTP $HTTP_CODE): $BODY"
+    fi
     exit 1
   fi
 
@@ -610,7 +628,7 @@ fi
 
 # --list モード: メンバー一覧取得
 if [ "$1" = "--list" ]; then
-  RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+  RESPONSE=$(curl -s -w "\\n%{http_code}" \\
     -H "Authorization: Bearer $TOKEN" \\
     "\${API_URL}/api/agent/members" 2>&1) || {
     echo "エラー: API リクエストに失敗しました"
@@ -622,7 +640,13 @@ if [ "$1" = "--list" ]; then
   BODY=$(echo "$RESPONSE" | sed '$d')
 
   if [ "$HTTP_CODE" != "200" ]; then
-    echo "エラー (HTTP $HTTP_CODE): $BODY"
+    # #349: curl -f を外したことで BODY にサーバーのエラー詳細が入るようになった。jq 不在・非 JSON ボディでは生ボディにフォールバック
+    DETAIL=$(printf '%s' "$BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)
+    if [ -n "$DETAIL" ]; then
+      echo "エラー (HTTP $HTTP_CODE): $DETAIL"
+    else
+      echo "エラー (HTTP $HTTP_CODE): $BODY"
+    fi
     exit 1
   fi
 
@@ -671,7 +695,7 @@ if [ -z "$PROJECT" ]; then
 fi
 
 # まずメンバー一覧からプロジェクト ID を取得
-MEMBERS_RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+MEMBERS_RESPONSE=$(curl -s -w "\\n%{http_code}" \\
   -H "Authorization: Bearer $TOKEN" \\
   "\${API_URL}/api/agent/members" 2>&1) || {
   echo "エラー: メンバー一覧の取得に失敗しました"
@@ -682,7 +706,13 @@ MEMBERS_HTTP=$(echo "$MEMBERS_RESPONSE" | tail -1)
 MEMBERS_BODY=$(echo "$MEMBERS_RESPONSE" | sed '$d')
 
 if [ "$MEMBERS_HTTP" != "200" ]; then
-  echo "エラー (HTTP $MEMBERS_HTTP): $MEMBERS_BODY"
+  # #349: curl -f を外したことで MEMBERS_BODY にサーバーのエラー詳細が入るようになった。jq 不在・非 JSON ボディでは生ボディにフォールバック
+  DETAIL=$(printf '%s' "$MEMBERS_BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)
+  if [ -n "$DETAIL" ]; then
+    echo "エラー (HTTP $MEMBERS_HTTP): $DETAIL"
+  else
+    echo "エラー (HTTP $MEMBERS_HTTP): $MEMBERS_BODY"
+  fi
   exit 1
 fi
 
@@ -751,7 +781,7 @@ if command -v jq &>/dev/null; then
     ROLE_ARG=(--data-urlencode "role=$ROLE")
   fi
 
-  RESPONSE=$(curl -s -f -w "\\n%{http_code}" --max-time 60 \\
+  RESPONSE=$(curl -s -w "\\n%{http_code}" --max-time 60 \\
     -H "Authorization: Bearer $TOKEN" \\
     --get \\
     --data-urlencode "projectId=$TARGET_ID" \\
@@ -767,7 +797,13 @@ if command -v jq &>/dev/null; then
   BODY=$(echo "$RESPONSE" | sed '$d')
 
   if [ "$HTTP_CODE" != "200" ]; then
-    echo "エラー (HTTP $HTTP_CODE): $BODY"
+    # #349: curl -f を外したことで BODY にサーバーのエラー詳細が入るようになった。jq 不在・非 JSON ボディでは生ボディにフォールバック
+    DETAIL=$(printf '%s' "$BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)
+    if [ -n "$DETAIL" ]; then
+      echo "エラー (HTTP $HTTP_CODE): $DETAIL"
+    else
+      echo "エラー (HTTP $HTTP_CODE): $BODY"
+    fi
     exit 1
   fi
 
@@ -820,7 +856,7 @@ set -euo pipefail
 API_URL="${httpUrl}"
 TOKEN="${token}"
 
-RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+RESPONSE=$(curl -s -w "\\n%{http_code}" \\
   -H "Authorization: Bearer $TOKEN" \\
   "\${API_URL}/api/agent/inventory" 2>&1) || {
   echo "エラー: API リクエストに失敗しました"
@@ -953,7 +989,7 @@ echo ""
 # jq で安全に JSON を構築
 JSON_BODY=$(jq -n --arg m "$MACHINE" --arg n "$NAME" --arg t "$TEMPLATE" '{machineName: $m, name: $n, template: $t}' | tr -d '\\r')
 
-RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -f -w "\\n%{http_code}" --max-time 300 \\
+RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -w "\\n%{http_code}" --max-time 300 \\
   -X POST \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $TOKEN" \\

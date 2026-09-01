@@ -138,7 +138,7 @@ if [ "$1" = "--get" ]; then
     exit 1
   fi
   FILE_ID="$2"
-  RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+  RESPONSE=$(curl -s -w "\\n%{http_code}" \\
     -H "Authorization: Bearer $TOKEN" \\
     "\${API_URL}/api/agent/documents/\${FILE_ID}" 2>&1) || {
     echo "エラー: API リクエストに失敗しました"
@@ -161,7 +161,7 @@ fi
 
 # 検索モード
 QUERY="$*"
-RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+RESPONSE=$(curl -s -w "\\n%{http_code}" \\
   -X POST \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $TOKEN" \\
@@ -285,7 +285,7 @@ fi
 
 # --list モード: メンバー一覧取得
 if [ "$1" = "--list" ]; then
-  RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+  RESPONSE=$(curl -s -w "\\n%{http_code}" \\
     -H "Authorization: Bearer $TOKEN" \\
     "\${API_URL}/api/agent/members" 2>&1) || {
     echo "エラー: API リクエストに失敗しました"
@@ -347,7 +347,7 @@ if [ -z "$PROJECT" ] || [ -z "$QUESTION" ]; then
 fi
 
 # まずメンバー一覧からプロジェクト ID を取得
-MEMBERS_RESPONSE=$(curl -s -f -w "\\n%{http_code}" \\
+MEMBERS_RESPONSE=$(curl -s -w "\\n%{http_code}" \\
   -H "Authorization: Bearer $TOKEN" \\
   "\${API_URL}/api/agent/members" 2>&1) || {
   echo "エラー: メンバー一覧の取得に失敗しました"
@@ -445,7 +445,7 @@ if command -v jq &>/dev/null; then
 
   # 送信（ask: 10分、teamexec: 60分）
   # printf + curl -d @- でパイプ渡し（Content-Length を確実に一致させる）
-  RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -f -w "\\n%{http_code}" --max-time $CURL_TIMEOUT \\
+  RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -w "\\n%{http_code}" --max-time $CURL_TIMEOUT \\
     -X POST \\
     -H "Content-Type: application/json" \\
     -H "Authorization: Bearer $TOKEN" \\
@@ -575,7 +575,7 @@ echo ""
 # jq で安全に JSON を構築
 JSON_BODY=$(jq -n --arg m "$MACHINE" --arg n "$NAME" --arg t "$TEMPLATE" '{machineName: $m, name: $n, template: $t}' | tr -d '\\r')
 
-RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -f -w "\\n%{http_code}" --max-time 300 \\
+RESPONSE=$(printf '%s' "$JSON_BODY" | curl -s -w "\\n%{http_code}" --max-time 300 \\
   -X POST \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $TOKEN" \\

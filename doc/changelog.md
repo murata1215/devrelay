@@ -6,6 +6,76 @@
 
 ## 実装済み機能
 
+### #349: `ask.sh`/`read.sh` が HTTP エラー本文を捨てている問題を修正（#348 層Aの無力化を解消） (2026-09-01)
+
+#### 背景
+#348（`a6f0e3f`）を commit・push・`pm2 restart devrelay-server` 済み後の read-only 反映確認で発見。
+`pm2 describe`/`dist` mtime/`🏗️ build:` ログの3点照合で層Aはサーバー上で確かに稼働中と確認できた一方、
+層B（Agent側）は全20台中0台が反映済みという状況だった。この反映確認の過程で、**層Aが設計どおりに
+機能しない実バグ**を発見したため本サイクルを起こした。
+
+#### 原因
+`skill-manager.ts` が生成する全スクリプト（`ask.sh`/`read.sh`/`search.sh`/`list.sh`/`create.sh`）が
+`curl -s -f` を使っていた。`curl --fail`（`-f`）は HTTP 4xx/5xx のとき**レスポンスボディを一切出力
+せず** exit 22 で終わる。稼働中の本番サーバーに対して認証なし GET を実測したところ、`-f` ありでは
+`exit_code=22`／`RESPONSE=[\n401]`（ボディが空）、`-f` を外すと
+`[{"error":"Invalid or missing machine token"}\n401]` とボディが正しく取得できることを確認した。
+生成スクリプトの`if [ "$HTTP_CODE" != "200" ]`分岐自体は**全10箇所で既に正しく書かれていた**が、
+`-f`のため4xx/5xxでは`|| { ... }`のタイムアウト用フォールバック（「エラー: 質問に失敗しました
+（タイムアウトまたは接続エラー）」という**AIが最もリトライしたくなる文言**）に落ちて**到達不能な
+デッドコード**になっていた。これにより#348で設計した`buildCrossTargetRejectionMessage()`の拒否理由
+と`noRetryNote`（#294でリトライ誘発防止のため追加された最重要要素）が**AIに一切届かず**、#348層Aは
+400/429を返せてはいても意図した「リトライ抑止」が成立していなかった。同じ経路のため#295（Team未登録
+宛先403）・#294（レート制限拒否）等の拒否メッセージも従来から握りつぶされていたと判明（#344で解消した
+`(No response from AI)`と同クラスの「実エラーが汎用文言に化けて原因が届かない」問題）。
+
+#### 修正
+`-f`を外し、既に正しく書かれている`HTTP_CODE != 200`分岐を生かす方針を採用（新しい分岐は足さず到達
+可能にするだけ）。`-f`なしでも本物のネットワーク障害・タイムアウトでは curl は非ゼロ終了する
+（exit 6/7/28等）ため`|| { ... }`分岐は従来どおり機能し、「HTTPエラー」と「タイムアウト」が初めて正しく
+区別されるようになった。生JSONをそのまま echo すると改行がエスケープされ読みづらいため、cross-query系
+の6箇所（`ask.sh`の`--list`分岐・members検索・POST応答、`read.sh`の`--list`分岐・members検索・GET応答）
+に限り`DETAIL=$(printf '%s' "$BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)`で
+本文を抽出し`エラー (HTTP $HTTP_CODE): $DETAIL`を表示、jq不在・非JSONボディ（Caddyの502 HTMLページ等）
+では`$BODY`をそのまま出す生ボディへフォールバックする設計にした。documents/inventory/scaffold側は
+既存の生ボディechoのまま最小差分を優先。
+
+`agents/linux/src/services/skill-manager.ts`は10箇所全て`curl -s -f`→`curl -s`に変更し、うち
+cross-query系6箇所にjq抽出を追加。`agents/macos/src/services/skill-manager.ts`は6箇所（`search.sh`の
+`--get`/POST、`ask.sh`の`--list`/members検索/POST、`create.sh`のscaffold POST）を`-f`除去のみの機械的
+変更に留めた（#348§8で保留したmacOSの内容同期には踏み込まない——macOSの`ask.sh`は依然として#348が
+除去した危険な自動選択ロジックを持ち、`devrelay-read-messages`スキル自体が存在しない）。
+`agents/windows`は`skill-manager.ts`自体が存在しないため対象外。`apps/server`/`apps/web`/
+`packages/shared`は無変更。
+
+#### 検証
+`pnpm build`6 workspace green。`node --test`を個別実行し`packages/shared`9/9・`apps/server`77/77・
+`agents/linux`95/95・`agents/macos`95/95すべてgreen（#349はテストファイル・DBスキーマを一切変更して
+いないため件数は#348と完全一致、非退行を確認）。`grep -c 'curl -s -f'`が両OSとも0（linux/macos）。
+一時HOMEで`ensureSkillFiles()`を実行し生成された全スクリプト（linux6本・macos4本）を`bash -n`で構文
+チェックしすべてOK、`curl -s -f`の残存が生成物側でも0であることを確認。**実挙動の証明（本題）**:
+生成した`ask.sh`のAPI_URLを本番`https://app.devrelay.io`に向け、意図的に不正なトークンで`--list`を
+実行したところ`エラー (HTTP 401): Invalid or missing machine token`と表示され、旧来の
+「タイムアウトまたは接続エラー」という誤誘導文言ではなく実際のサーバーエラーが読めることを実証した
+（`read.sh`でも同様に確認）。**非退行の証明**: 存在しないホストへ向けて同様に実行したところ、従来
+どおり`|| { ... }`のフォールバック（`エラー: API リクエストに失敗しました`）に正しく落ちることを
+確認した。`grep -c 'require('`（apps/web）=0、`git diff --stat -- apps/ agents/windows/`が空
+（変更が2つの`skill-manager.ts`のみであることを構造的に確認）。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `agents/linux/src/services/skill-manager.ts` | `curl -s -f`→`curl -s`を10箇所、うちcross-query系6箇所にjqエラー抽出を追加 |
+| `agents/macos/src/services/skill-manager.ts` | `curl -s -f`→`curl -s`を6箇所（`-f`除去のみ、内容同期はスコープ外） |
+
+DBマイグレーション不要、`apps/server`/`apps/web`/`packages/shared`無変更のため**server再起動不要**。
+**commit + push が必須、各マシン（Linux/macOS/Windows CLI Agent）の`u`が必須**（Agent側のみの変更が
+本体）。層B（#348）はまだ1台も反映されていないため、`u`を先に回してしまうと2周必要になる——今#349を
+入れておけば1回の`u`で#348層Bと#349が同時に届く。#348のE2E本体（自己宛400・`ask --list`の自己除外・
+`--resume`が出ないこと等）は#349適用後の方が拒否理由が実際に読める分だけ確実なため、`u`反映後に別
+サイクルで実施する。
+
 ### #348: 「なんか今すごい輻輳している気がする」の解消（自己宛 ask + 同一 projectPath 状態の共有）(2026-09-01)
 
 #### 背景
