@@ -37,6 +37,9 @@ export async function checkClaudeAuth(): Promise<ClaudeAuthCheckResult> {
   try {
     const { stdout } = await execFileAsync(claudePath, ['auth', 'status', '--json'], {
       timeout: 15000,
+      // #350: windowsHide が無いと wscript.exe 起動（コンソール無し）環境で
+      // 15分ごとのこのヘルスチェックのたびに新規コンソール窓が開く
+      windowsHide: true,
     });
     const parsed = JSON.parse(stdout);
     if (typeof parsed?.loggedIn !== 'boolean') {

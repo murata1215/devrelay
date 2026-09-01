@@ -111,6 +111,11 @@ export const chatMessages = {
     en: '📦 **{machine}**\n  local: {localCommit} ({localDate})\n  remote: {remoteCommit} ({remoteDate})\n  ⚠️ Update available{runningCodeLines}\n\nSend `u` again to update.',
     ja: '📦 **{machine}**\n  ローカル: {localCommit} ({localDate})\n  リモート: {remoteCommit} ({remoteDate})\n  ⚠️ 更新があります{runningCodeLines}\n\nもう一度 `u` を送信すると更新を実行します。',
   },
+  // #350: git は最新だが実行中コードが古い（stale dist デッドロック）。もう一度 u で再ビルドを促す
+  'update.staleRebuild': {
+    en: '✅ Git is up to date, but the running code looks stale\n  commit: {commit} ({date}){runningCodeLines}\n\nSend `u` again to rebuild.',
+    ja: '✅ git は最新ですが、実行中コードが古い可能性があります\n  commit: {commit} ({date}){runningCodeLines}\n\nもう一度 `u` を送信すると再ビルドを実行します。',
+  },
   // #320: u の非同期通知（agent-manager.ts、sessionId/UserContext を持たないためここに専用キー）
   'update.completed': { en: '✅ **{machine}** update completed', ja: '✅ **{machine}** の更新が完了しました' },
   'update.failed': { en: '❌ Agent update failed: {error}', ja: '❌ Agent 更新に失敗しました: {error}' },

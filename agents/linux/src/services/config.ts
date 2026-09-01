@@ -163,7 +163,9 @@ export async function detectAndUpdateAiTools(config: AgentConfig): Promise<boole
     if (config.aiTools[name]) continue;
 
     try {
-      execSync(`${findCmd} ${command}`, { stdio: 'pipe', timeout: 5000 });
+      // #350: Agent は wscript.exe 経由でコンソール無しに起動されるため、windowsHide が無いと
+      // where/which を1本呼ぶたびに新規コンソール窓が開く（5ツール分で最大5窓）
+      execSync(`${findCmd} ${command}`, { stdio: 'pipe', timeout: 5000, windowsHide: true });
       // コマンドが見つかった → config に追加
       config.aiTools[name] = { command };
       console.log(`🔍 Detected ${name} CLI → added to config`);

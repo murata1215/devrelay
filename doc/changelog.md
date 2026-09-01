@@ -6,6 +6,82 @@
 
 ## 実装済み機能
 
+### #350: devin 専用 Windows 端末のインストール異常（stale dist デッドロック + コンソール窓の乱立 + POSIX コマンド誤用） (2026-09-01)
+
+#### 背景
+ユーザーが devin CLI のみインストールされた Windows 端末（`DESKTOP-1JR1NLL/c-shiraki`、社内プロキシ
+配下）の `agent.log`・Discord・WebUI スクリーンショット計3点を添付して「インストール途中でコマンド
+ウインドウが4-5個開く」「インストール中の挙動がおかしい」と報告。read-only 調査の結果、症状は独立した
+3つの欠陥に分解でき、うち2つはコード上で原因を確定できた（3つ目のビルド失敗の一次原因は未確定、次項参照）。
+
+#### 原因と修正
+**欠陥①（本丸）**: git は最新（`hasUpdate:false`）だがビルドが失敗し実行中 dist が古い
+（`runningCodeStale:true`）という「stale dist デッドロック」から `u` で抜け出す手段が無かった。
+#328/#329 の成果物ゲートは正しく旧 Agent を生かし続けるが、`command-handler.ts` の `handleUpdate()` は
+`!hasUpdate` のときは「最新です」+ stale 警告を出すだけで再ビルドを促す経路が無く、チャットから
+自力で復旧不可能だった。新規 `apps/server/src/services/agent-update-decision.ts`（外部 import ゼロの
+純関数 `decideUpdateAction()`、判定順「hasUpdate→'update'」「hasUpdate=false かつ
+runningCodeStale=true→'rebuild'」「それ以外（旧 Agent 含む）→'upToDate'」固定）を新設し、
+`handleUpdate()` を経由するよう変更。`'rebuild'` 時は `'update'` と同じ `pendingUpdate` フローに乗せ、
+2回目の `u` で既存の `updateAgent()`（再ビルド機構）をそのまま呼ぶ（新しい WS メッセージ型・新コマンド
+は追加せず、既存機構を再利用）。`packages/shared/src/i18n.ts` に `update.staleRebuild`（ja/en）追加。
+
+**欠陥②**: `agents/linux/src/services/ai-runner.ts` の `resolveSystemClaude()` が POSIX シェルビルトイン
+`command -v claude` を OS 分岐なしに実行しており、Windows（`agents/linux` は Windows CLI Agent の実体
+でもある）では必ず失敗し `stdio` 未指定のため cmd.exe の生エラーが `agent.log` に流出していた
+（15分ごとの `checkClaudeAuth()` から呼ばれる `resolveSystemClaude()` 経由でログ汚染の周期と一致）。
+新規 `agents/linux/src/services/claude-locator.ts`（外部 import ゼロの純関数、
+`buildClaudeLookupCommand(platform)` が win32 で `where claude`・それ以外で `command -v claude` を返し、
+`claudeFallbackCandidates(platform, home)` が OS 別フォールバック候補パスを返す）を新設。
+`resolveSystemClaude()` をこれ経由に書き換え、`where` の複数行出力にも対応（既存 `resolveClaudePath()`
+と同じ `.split(/\r?\n/)[0]` 方式）。`agents/macos` は対象外（`command -v` は macOS で正しく動作しており
+移植不要、明示的にスコープ外とした）。
+
+**欠陥③**: `agents/linux` 配下のどの子プロセス起動にも `windowsHide: true` が指定されておらず、
+`wscript.exe` 経由でコンソール無しに起動される Agent が Windows で子プロセス（`where`/`which` 系の
+プローブ、AI CLI 起動本体）を spawn するたびに新規コンソール窓が割り当てられていた。起動直後だけで
+`ensureDevrelaySymlinks()`（`index.ts`、1回）+ `detectAndUpdateAiTools()`（`config.ts`、devin 専用端末
+では未インストールの4ツール分）で最大5-6窓が開く計算になり、ユーザー報告の「4-5個」と一致。
+`ai-runner.ts`（claude 解決・各 CLI の `--help`/`--version` プローブ・devin `list`・AI CLI 本体の
+`spawn` 4箇所、計11箇所）・`config.ts`（1箇所）・`index.ts`（1箇所）に `windowsHide: true` を追加。
+`claude-auth.ts` は「linux/macos の agents は意図的に同一内容を維持する」という JSDoc 明記があるため
+両 OS に同一の変更（1箇所ずつ）を適用し `diff` で byte-for-byte 同一を維持。
+
+**欠陥③'（未確定、Phase 0 として次サイクル送り）**: ビルドがそもそも失敗した一次原因（`pnpm install` の
+プロキシ起因ネットワーク失敗か `tsc` エラーか等）は当該端末の
+`%APPDATA%\devrelay\logs\install-build.log`/`update.log` を読まないと確定できず、証拠なしに直さない方針
+（#345 の教訓）により本サイクルではスコープ外とした。§18〜20 の修正はこのログの有無と独立して実装可能。
+
+#### 検証
+`pnpm build` 6 workspace green。`node --test` を workspace ごと個別実行し
+`packages/shared` 9/9・`apps/server` **83/83**（77→83、新規6件）・
+`agents/linux` **103/103**（95→103、新規8件）・`agents/macos` 95/95（非退行、変更なし）すべて green。
+静的検証: `grep -rn "command -v claude" agents/linux/src/` はコメント/OS分岐済み関数内の3件のみで、
+無条件のハードコード呼び出し（`execSync('command -v claude'`）は0件であることを確認。
+`windowsHide` の実コード行数は `ai-runner.ts`=11・`index.ts`=1・`config.ts`=1・`claude-auth.ts`=1で
+plan の想定どおり（grep の生カウントはJSDocコメント分+1ずつ多いが実際の呼び出し箇所は一致）。
+`diff agents/linux/src/services/claude-auth.ts agents/macos/src/services/claude-auth.ts` が空
+（byte-for-byte 同一を維持）。`git diff` で `handleAgentUpdate()` 本体・#329 Part B の成果物ゲート・
+`formatRunningCodeLines()`・`install-agent.ps1`・`terminal-runner.ts` がいずれも無変更であることを確認。
+`git diff --stat -- apps/web/ agents/windows/ scripts/` が空。`grep -c 'require(' apps/web/dist/assets/index-*.js`
+= 0。dist反映確認: `apps/server/dist/services/agent-update-decision.js` と
+`agents/linux/dist/services/claude-locator.js` の存在、両ファイルの中身が期待どおりコンパイルされている
+こと、`agents/linux/dist/services/ai-runner.js` に `windowsHide` が12件（実コード11+コメント1）出ること
+を確認。**変更ファイル**: 新規 `apps/server/src/services/agent-update-decision.ts` +
+`apps/server/tests/agent-update-decision.test.mjs`、新規 `agents/linux/src/services/claude-locator.ts` +
+`agents/linux/tests/claude-locator.test.mjs`、既存 `apps/server/src/services/command-handler.ts`・
+`packages/shared/src/i18n.ts`・`agents/linux/src/services/ai-runner.ts`・
+`agents/linux/src/services/config.ts`・`agents/linux/src/index.ts`・
+`agents/{linux,macos}/src/services/claude-auth.ts`。`apps/web`/`agents/windows`/`scripts/install-agent.ps1`
+は無変更。DB マイグレーション不要、WS メッセージ型変更なし、新規コマンドなし。
+
+#### 反映
+**順序が重要**: `pm2 restart devrelay-server`（§18が即効、いま詰んでいる端末を救う、**人間が実行**）→
+commit + push → 各マシン（Linux/macOS/Windows CLI Agent）の `u`（§19/§20 の本体、**人間が実行**、
+#349 と同じ1回の `u` で一緒に届く）。DB マイグレーション不要。実チャットでの E2E 確認
+（`DESKTOP-1JR1NLL/c-shiraki` での2段階 `u`・stale解消・コンソール窓が開かないこと・devin応答の正常化・
+Linux/macOS の非退行）は人間の反映後に別サイクルで実施。
+
 ### #349: `ask.sh`/`read.sh` が HTTP エラー本文を捨てている問題を修正（#348 層Aの無力化を解消） (2026-09-01)
 
 #### 背景

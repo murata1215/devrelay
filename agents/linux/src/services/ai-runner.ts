@@ -14,6 +14,7 @@ import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine } from './devin-diagnostics.js';
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
+import { buildClaudeLookupCommand, claudeFallbackCandidates } from './claude-locator.js';
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
 // 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
 type TerminalRunnerModule = typeof import('./terminal-runner.js');
@@ -80,22 +81,23 @@ let claudeFallbackLogged = false;
 
 /**
  * システムにインストールされた claude CLI の実行パスを解決する。
- * PATH（`command -v claude`）を最優先し、見つからなければ既知の標準パスを順に探す。
+ * PATH（Windows は `where claude`、それ以外は `command -v claude`、#350）を最優先し、
+ * 見つからなければ OS 別の既知パスを順に探す（判定ロジックは claude-locator.ts に集約）。
+ * `stdio` は `pipe`（stderr も捨てる）+ `windowsHide: true` で、コンソール無し起動時に
+ * 新規コンソール窓が開いたり agent.log へ生の cmd エラーが漏れたりしないようにする。
  * @returns 実在する claude のフルパス、無ければ null
  */
 export function resolveSystemClaude(): string | null {
   try {
-    const p = execSync('command -v claude', { encoding: 'utf-8' }).trim();
+    const lookupCmd = buildClaudeLookupCommand(process.platform);
+    const raw = execSync(lookupCmd, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
+    // `where` は複数行を返すことがあるため最初の行のみ使う（resolveClaudePath と同じ扱い）
+    const p = raw.split(/\r?\n/)[0]?.trim();
     if (p && fs.existsSync(p)) return p;
   } catch {
     // PATH に無い場合は既知パスへフォールバック
   }
-  for (const candidate of [
-    path.join(os.homedir(), '.local/bin/claude'),
-    path.join(os.homedir(), '.claude/local/claude'),
-    '/usr/local/bin/claude',
-    '/usr/bin/claude',
-  ]) {
+  for (const candidate of claudeFallbackCandidates(process.platform, os.homedir())) {
     try {
       if (fs.existsSync(candidate)) return candidate;
     } catch {
@@ -191,7 +193,7 @@ function probeDevinExportSupport(command: string): boolean {
 function probeCodexCapabilities(command: string): { json: boolean; resume: boolean } {
   if (codexCapabilitiesCache !== null) return codexCapabilitiesCache;
   try {
-    const help = execSync(`${command} exec --help`, { encoding: 'utf-8', timeout: 10000 });
+    const help = execSync(`${command} exec --help`, { encoding: 'utf-8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     const json = /--json\b/.test(help);
     const resume = /\bresume\b/.test(help);
     codexCapabilitiesCache = { json, resume };
@@ -212,7 +214,7 @@ function probeCodexCapabilities(command: string): { json: boolean; resume: boole
 function probeGeminiCapabilities(command: string): { model: boolean } {
   if (geminiCapabilitiesCache !== null) return geminiCapabilitiesCache;
   try {
-    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
+    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     const model = /-m,?\s*--model\b|--model\b/.test(help);
     geminiCapabilitiesCache = { model };
     console.log(`[gemini] 🔎 capabilities: --model=${model}`);
@@ -267,7 +269,7 @@ function probeDevinCapabilities(command: string): {
     if (!cacheExpired) return devinCapabilitiesCache;
   }
   try {
-    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
+    const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     const model = /--model\b/.test(help);
     const agentConfig = /--agent-config\b/.test(help);
     // #347: --agent-config は廃止済み（#346）で、後継が --config（グローバル引数、Phase 0 実測で確認済み）。
@@ -279,7 +281,7 @@ function probeDevinCapabilities(command: string): {
     let version = 'unknown';
     try {
       // #345: 診断専用の 1 行取得。失敗しても probe 自体（フラグ判定）は失敗させない。
-      version = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000 }).trim().split('\n')[0] || 'unknown';
+      version = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim().split('\n')[0] || 'unknown';
     } catch {
       // バージョン取得は診断用のため失敗は無視（version は 'unknown' のまま）
     }
@@ -1589,6 +1591,7 @@ export async function sendPromptToAi(
       cwd: projectPath,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
       env: {
         ...process.env,
         ...proxyEnv,
@@ -1771,6 +1774,7 @@ export async function sendPromptToAi(
       cwd: projectPath,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
       env: {
         ...process.env,
         ...proxyEnv,
@@ -1839,6 +1843,7 @@ export async function sendPromptToAi(
       cwd: projectPath,
       shell: isWindowsCodex,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
       env: {
         ...process.env,
         ...proxyEnv,
@@ -1863,6 +1868,7 @@ export async function sendPromptToAi(
       cwd: projectPath,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
       env: { ...process.env, ...proxyEnv },
     });
 
@@ -2305,7 +2311,7 @@ export async function sendPromptToAi(
         try {
           if (!devinOutputEmpty) {
           const listOutput = execSync(`${command} list --format json`, {
-            cwd: projectPath, encoding: 'utf-8', timeout: 10000,
+            cwd: projectPath, encoding: 'utf-8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
           });
           const sessions = JSON.parse(listOutput);
           // cwd が一致するセッションの最新を取得（Windows: パス区切り正規化）
@@ -2708,7 +2714,7 @@ export function resolveClaudePath(): string {
   console.log(`⚠️ ${wrapperName} not found, searching for claude...`);
 
   try {
-    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8', timeout: 5000 }).trim();
+    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
     // where コマンドは複数行を返す場合があるため、最初の行を使用
     const claudePath = claudePathRaw.split(/\r?\n/)[0];
     console.log(`✅ Found claude at: ${claudePath}`);

@@ -725,6 +725,8 @@ Discord/Telegram から `u` / `update` コマンドで Agent のバージョン�
 - **git commit ベースの表示だけでは stale dist を検知できない**。#256 で `u` のバージョン確認に「実行中コード（`process.argv[1]`）の mtime」を追加。ローカルコミット日時より古ければ `⚠️ 実行中コードが古い可能性` を表示して再ビルド漏れを可視化する（`AgentVersionInfoPayload.runningCodeMtime` / `runningCodeStale`、`command-handler.ts` の `formatRunningCodeLines()`）
 - **デッドロックの外部からの破壊**: 一度でも正しいビルドコマンドを外部（teamexec / 手動 SSH）で実行すれば新 dist に置き換わり、以降は自己更新が正常化する
 
+**続き（#350）**: 上記までで「stale dist の可視化」（`⚠️ 実行中コードが古い可能性`）はできていたが、**そこから `u` だけで抜け出す手段が無かった**。`hasUpdate===false`（git は最新）かつ `runningCodeStale===true`（実行中 dist は古い＝ビルド失敗のまま）という組み合わせのとき、`handleUpdate()` は警告表示だけで再ビルドを促す経路が無く、チャットからは自力復旧不可能だった（#328/#329 の成果物ゲートが「壊れたビルドで旧 Agent を殺さない」ことには成功していた分、逆に「壊れたまま生き続ける」固定化を招いていた）。新規 `apps/server/src/services/agent-update-decision.ts` の純関数 `decideUpdateAction()` で `'update'|'rebuild'|'upToDate'` の3値判定に分離し、`'rebuild'`（stale dist デッドロック）のときも `'update'` と同じ `pendingUpdate` フローに乗せて2回目の `u` で既存の再ビルド機構を呼べるようにした（新しい WS メッセージ型・新コマンドは追加せず、既存機構の再利用のみ）。**教訓**: 「異常を検知して可視化する」機能を追加した後は、必ず「検知した異常から実際に復旧できる経路があるか」を別途確認すること。可視化だけでは詰み状態を固定化するだけになりうる。
+
 ---
 
 ## コマンド定義の単一ソース・オブ・トゥルース

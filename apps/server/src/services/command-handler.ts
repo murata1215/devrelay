@@ -45,6 +45,7 @@ import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
+import { decideUpdateAction } from './agent-update-decision.js';
 import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag, fenceIfHuman, buildHumanTextMeta } from './human-text-fence.js';
 import {
   createTestflightService,
@@ -1308,8 +1309,22 @@ async function handleUpdate(context: UserContext): Promise<string> {
       return tChat(lang, 'update.devRepoWarning');
     }
 
-    if (!info.hasUpdate) {
+    const action = decideUpdateAction({ hasUpdate: info.hasUpdate, runningCodeStale: info.runningCodeStale });
+
+    if (action === 'upToDate') {
       return tChat(lang, 'update.upToDate', {
+        commit: info.localCommit.slice(0, 7),
+        date: info.localDate,
+        runningCodeLines: formatRunningCodeLines(info, lang),
+      });
+    }
+
+    if (action === 'rebuild') {
+      // #350: git は最新だが実行中コードが古い（stale dist デッドロック）。
+      // 'update' と同じ pendingUpdate フローに乗せ、2回目の u で updateAgent() を呼ぶ
+      // （新しい WS メッセージ型・新コマンドは追加しない、既存の再ビルド機構をそのまま再利用）
+      pendingUpdate.add(chatKey);
+      return tChat(lang, 'update.staleRebuild', {
         commit: info.localCommit.slice(0, 7),
         date: info.localDate,
         runningCodeLines: formatRunningCodeLines(info, lang),

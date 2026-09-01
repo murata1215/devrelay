@@ -29,7 +29,9 @@ function ensureDevrelaySymlinks() {
 
     // claude バイナリのパスを取得（Linux: which, Windows: where）
     const findCmd = isWindows ? 'where' : 'which';
-    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8' }).trim();
+    // #350: windowsHide が無いと wscript.exe 起動（コンソール無し）環境でこの where/which の
+    // たびに新規コンソール窓が開く。stdio でも stderr を捨てて agent.log のノイズを抑える
+    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
     // where コマンドは複数行を返す場合があるため、最初の行を使用
     const claudePath = claudePathRaw.split(/\r?\n/)[0];
 
