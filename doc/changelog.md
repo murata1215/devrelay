@@ -6,6 +6,45 @@
 
 ## 実装済み機能
 
+### #356: Windows Agent の `u`（自己更新）が依存プローブで必ず中断する不具合を修正 (2026-09-03)
+
+#### 背景
+
+ユーザーからのバグ報告（`.devrelay-files/20260903_072133_devrelay-agent-win-update-probe-bug.md`）を実コード・実 dist・本番 DB・実 `update.log` で全数検証し、報告の主張がすべて事実であることを確認、さらに報告に無い欠陥2件を追加発見した。#352 で導入した依存コマンド機能プローブ（`buildDependencyProbeBlock()`）の生成 PowerShell 判定式に2つの独立バグが同居していた。
+
+#### 発見した欠陥
+
+- **B1**: 版番号一致チェックの左辺が `'$outVar'` とシングルクォートでリテラル評価となり変数展開されず常に false
+- **B2**: `^\d+\.\d+` という先頭アンカー正規表現が `git version 2.52.0.windows.1` / `v24.12.0` のような実際の出力形と不一致
+- **B3**（追加発見）: `UseShellExecute=$false` は CreateProcess を直接呼ぶため `.cmd`/`.bat`（pnpm の preferredPath は `pnpm.cmd`）を起動できず、B1/B2 を直してもpnpmプローブだけは中止し続ける
+- **B4**（追加発見）: `git fetch`/`git reset` が終了コードを捨てる `psRunAndLog` を使っており、`git reset` 失敗のまま古いソースでビルド→成果物鮮度ゲート通過→同一コミットのままrestartする経路が残存
+
+プローブは `git fetch` より前に配置されているため `u` は作業ツリーを一切進めずに毎回中止し、かつ壊れた `update.ps1` を生成するのはディスク上の stale dist 自身のため `u` を何度送っても同じ壊れたスクリプトが再生成される自己永続ロックアウトが成立していた（本番DB実測で完全ロックアウト4台+同一コミットで運命確定2台の計6台、いずれも `4ed208d`=#352導入コミット）。
+
+#### 設計方針の転換
+
+「判定の厳しさ」ではなく「間違えたときのコスト」で設計し直した。成果物の鮮度ゲート（`buildArtifactFreshnessGate`、`.gitignore` で dist 除外・非 incremental ビルドのため成功時は必ず mtime が動く）が既に「ビルドが実際に走ったか」を独立に担保しているため、プローブの判定を緩めても更新の安全性は落ちないと結論。ハード中止（`return`）は「実行ファイル未検出」「タイムアウト」の2条件のみに残し、exit code 不一致・版番号不一致は警告してログに残した上で処理を継続する方式に反転した。
+
+#### 実装
+
+`agents/linux/src/services/update-script.ts`: `isVersionLikeOutput()` の正規表現を非アンカー・ASCII明示の `[0-9]+\.[0-9]+` に変更（B2）。`buildDependencyProbeBlock()` を全面書き直し（B1修正=左辺クォート除去、B2修正=同正規表現、B3修正=`.cmd`/`.bat`検出時 `$env:ComSpec /c` 経由起動、中止条件を not-found + timeout の2つのみに分離、exit≠0・版番号不一致は `probe warning (continuing)` ログを残し継続）。JSDocを `$proc.ExitCode`（信用できる）と `$LASTEXITCODE`（#352が不信を表明していた対象）の違いを明記する形に訂正。
+
+`agents/linux/src/services/connection.ts`: `git fetch`/`git reset` の2箇所のみを `psRunAndLog`→`psRunAndLogChecked` に変更し明示的な `-ne 0` 中止ガードを追加（B4修正）。この2行以外は無変更。
+
+`agents/linux/tests/update-script.test.mjs`: バグそのものをアサートしていた旧テストを構造検査に置き換え（B1アンチリグレッション、`-match` 左辺がクォート無しであることの構造検証、`isVersionLikeOutput()` への実出力再現テスト、exit≠0・版番号不一致でreturnしないことの検証、`.cmd`分岐の検証を追加、9件新規）。
+
+#### 検証
+
+`pnpm build` 6 workspace green、`node --test` をworkspaceごと個別実行して `packages/shared` 15/15・`apps/server` 92/92・`agents/linux` 169→178（新規9件）・`agents/macos` 140/140（update-script.ts自体が存在せず対象外）すべて green・fail 0。生成物の実物確認（コンパイル済みdistから `buildDependencyProbeBlock()` をraw出力）でシングルクォート変数が0個・`-match`左辺がクォート無し・`.cmd`分岐で `$env:ComSpec`/`/c` が3コマンド全てに出現することを目視確認。静的検証: `git diff --stat -- agents/macos/ agents/windows/ apps/ packages/ prisma/ scripts/` が空、`buildArtifactFreshnessGate()`/`buildExecutableResolver()` 本体・Linux/macOS bash分岐の `[+-]` 行ゼロ、`connection.ts` の差分が `git fetch`/`git reset` の2箇所のみ。
+
+#### 反映
+
+**この機体では証明できないこと**: `pwsh`/`powershell` がLinuxホストに存在しないため生成PowerShellが実際に動くことはローカルで証明できない。テストが検証できるのは文字列の形までであり、実Windows機1台での実行が必須ステップとして残る。
+
+commit+push必須（`u`は届かないためインストーラー再実行が前提、`install-agent.ps1`は無変更）、`apps/server`無変更のため**server再起動不要**。E2Eはフェーズ1（ロックアウト4台のうち1台、推奨`DESKTOP-TR0SE8J/lfuser`でインストーラー再実行→`update.log`確認→`autoUpdate`をONに戻す）→フェーズ2（残り5台）→フェーズ3（Linux/macOS `u` 非退行、Windows `e`/`w`/`x`/`a` 非退行）の順で人間が反映後に別サイクルで実施。
+
+---
+
 ### #355: auto-compact 無限ループの検知・停止 + Claude SDK 実行のキャンセル可能化 (2026-09-02)
 
 #### 背景

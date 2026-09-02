@@ -1,8 +1,8 @@
 /**
  * `u`（Agent 自己更新）の Windows 版 update.ps1 が使う「依存コマンドの機能プローブ」と
- * 「成果物の鮮度ゲート」の PowerShell スクリプト片を組み立てる純関数群（#352）。
+ * 「成果物の鮮度ゲート」の PowerShell スクリプト片を組み立てる純関数群（#352、#356 で判定を修正）。
  *
- * 背景（詳細はプラン §34.9〜§34.10 参照）:
+ * 背景（#352、詳細はプラン §34.9〜§34.10 参照）:
  * #351 の `Get-Command pnpm -ErrorAction SilentlyContinue` は「解決できるか」しか見ていない。
  * PowerShell の解決優先順位（Alias > Function > Cmdlet > ExternalScript > Application）により
  * 裸の `pnpm` は常に `pnpm.ps1`（ExternalScript）を指し、`Get-Command` は必ず成功する。
@@ -10,12 +10,29 @@
  * 状態になっており、#351 の「存在チェック」も「$LASTEXITCODE リセット」もこれを検出できなかった
  * （直前のコマンドの exit code＝0 がそのまま残り、無音のまま "成功" と誤認される）。
  *
- * この修正は判定軸を「解決できるか」から「実際に動くか」に変える:
+ * この修正（#352）は判定軸を「解決できるか」から「実際に動くか」に変えた:
  *   1. `.ps1` を避けて `.cmd`/`.exe` を明示的に解決する（buildExecutableResolver）
  *   2. タイムアウト付きで実際に実行し、標準出力が「版番号らしいか」で判定する
  *      （isVersionLikeOutput / buildDependencyProbeBlock）
- * exit code はこの中では 3 条件のうちの 1 つでしかない（PowerShell の exit code は
- * 信用できないことが実測で分かっているため、主軸には使わない）。
+ *
+ * #356: しかし #352 で生成される PowerShell の判定式自体にバグがあり、git/node/pnpm が
+ * すべて正常でも必ず失敗と判定されていた（実測: `git probe: exit=0 ... out=[git version
+ * 2.52.0.windows.1]` の直後に `!! git probe failed` と記録される）。原因は2つ:
+ *   B1. 版番号一致チェックの左辺が PowerShell のシングルクォート文字列 `'$outVar'` になっており、
+ *       これはリテラルで変数展開されない（文字列 "$outVar" 自体に対して正規表現を評価していた）。
+ *   B2. 正規表現が `^\d+\.\d+`（先頭アンカー）だったため、`git version 2.52.0...` や
+ *       `v24.12.0` のように数字で始まらない実際の出力に一致しなかった。
+ * さらに `UseShellExecute = $false` は CreateProcess を直接呼ぶため `.cmd`/`.bat`
+ * （pnpm の解決結果は `pnpm.cmd`）を起動できない問題（B3）も判明した。
+ *
+ * #356 の設計判断: 「間違えたときのコスト」を下げる。成果物の鮮度ゲート
+ * （buildArtifactFreshnessGate、shared/agent の dist mtime が非 incremental ビルドで
+ * 必ず更新される）が既に「ビルドが実際に走ったか」を独立に担保しているため、
+ * このプローブの判定を誤って緩くしても restart の安全性は落ちない。
+ * したがってハード中止（`return`）は「実行ファイルが見つからない」「タイムアウト」の
+ * 2 つの決定的な条件のみに残し、exit code 不一致・版番号不一致は警告してログに残した上で
+ * 処理を継続する（exit code は $proc.ExitCode であり信用できる。不信の対象は
+ * PowerShell が管理する $LASTEXITCODE であって $proc.ExitCode ではない）。
  *
  * 成果物の鮮度ゲート（buildArtifactFreshnessGate）は #351 Fix 3 の「唯一この種のデッドロックを
  * 止められる防御」を、shared/agent の 2 ファイル AND に強化したもの。
@@ -26,11 +43,19 @@
 
 /**
  * 標準出力が「版番号らしい」か判定する。
- * 非空であり、かつ（複数行なら）1 行目が `^\d+\.\d+` に一致することを要求する。
- * `pnpm -v` / `node --version` / `git --version` のいずれも、正常時は数字始まりの
- * バージョン文字列を返す（`git --version` は `git version 2.43.0` のように前置詞が付くため
- * 呼び出し側で数字部分だけを渡す想定だが、この関数自体は「1 行目が数字始まりか」だけを見る
- * 保守的な判定にとどめる。誤検出よりも「疑わしきは失敗扱い」を優先する）。
+ * 非空であり、かつ 1 行目のどこかに `[0-9]+\.[0-9]+`（例: `2.52.0`）が現れることを要求する。
+ *
+ * #356: 当初は `^\d+\.\d+`（1 行目が数字で始まる）というアンカー付き判定だったが、
+ * `git --version` の実際の出力は `git version 2.52.0.windows.1`、`node --version` は
+ * `v24.12.0` のように数字始まりではないため、実運用でこの関数が意図した判定基準を
+ * 満たせなかった（実際に生成される PowerShell 側は独立した別バグ〔左辺のクォート漏れ〕で
+ * 無関係に常に失敗していたため、この関数のテストが green のままバグが見逃されていた）。
+ * `pnpm -v` は数字始まりの出力を返すため、非アンカー化しても引き続き true になる。
+ *
+ * 注意: この関数は生成される PowerShell の判定式（buildDependencyProbeBlock 内の
+ * `-match` 式）と同一の実装ではない（JS の正規表現と .NET の正規表現は意味論が異なる
+ * ため、共有定数化はしていない）。生成される PowerShell 自体の検証は
+ * buildDependencyProbeBlock() の出力文字列に対するテストで行う。
  */
 export function isVersionLikeOutput(stdout: string | null | undefined): boolean {
   if (!stdout) {
@@ -41,7 +66,7 @@ export function isVersionLikeOutput(stdout: string | null | undefined): boolean 
     return false;
   }
   const firstLine = trimmed.split(/\r?\n/)[0];
-  return /^\d+\.\d+/.test(firstLine);
+  return /[0-9]+\.[0-9]+/.test(firstLine);
 }
 
 /**
@@ -107,27 +132,38 @@ export interface DependencyProbeOptions {
  *
  * PowerShell 5.1 の制約（`Start-Process` に `-Timeout` が無い、`ProcessStartInfo` は `.ps1` を
  * 直接起動できない）により `System.Diagnostics.Process` + `WaitForExit(ms)` + タイムアウト時
- * `Kill()` で実装する（詳細はプラン §36.4）。
+ * `Kill()` で実装する。`.cmd`/`.bat`（`UseShellExecute=$false` では CreateProcess が直接
+ * 実行できない、#356 B3）は `%ComSpec% /c` 経由で起動する。
  *
- * 判定は 3 条件の AND（exit code に依存しない。詳細はプラン §36.1）:
- *   1. タイムアウト内に終了した（ハングを検出）
- *   2. 標準出力が版番号らしい（無音での即時終了を検出）
- *   3. exit code が 0
+ * exit code は `$proc.ExitCode`（OS 由来）であり信用できる。#352 が不信を表明していたのは
+ * PowerShell が管理する `$LASTEXITCODE`（コマンドが見つからない場合に更新されないことがある）
+ * であって、この `$proc.ExitCode` とは別物（#356 でこの JSDoc の誤記を訂正）。
  *
- * いずれかのコマンドで判定が false になった場合、**その時点で `return`** し、
- * 以降（`git fetch`/`git reset` を含む）を一切実行しない（旧 Agent は kill しない）。
+ * ハード中止（`return`、以降 `git fetch`/`git reset` を含め一切実行しない・旧 Agent は
+ * kill しない）は次の 2 条件のみ（#356 で decisive な条件だけに絞った）:
+ *   1. 実行ファイルが見つからない（`.cmd`/`.exe` のいずれも解決できない）
+ *   2. タイムアウト（プロセスがハングしている）
+ *
+ * 次の 2 条件は **警告してログに残した上で処理を継続する**（#356、以前はここもハード中止
+ * だったが、成果物の鮮度ゲート buildArtifactFreshnessGate が「ビルドが実際に走ったか」を
+ * 独立に担保しているため、ここを厳しくしても restart の安全性は上がらず、逆に判定式の
+ * バグ一つで更新が永久ロックする構造的リスクだけが残ることが実際に起きた〔#356 の本題〕
+ * ため反転した）:
+ *   3. exit code が 0 でない
+ *   4. 標準出力が版番号らしくない
  */
 export function buildDependencyProbeBlock(logFile: string, opts: DependencyProbeOptions): string {
   const blocks = opts.commands.map((cmd) => {
     assertSafeIdentifier(cmd.name);
     const resolvedVar = `${cmd.name}Resolved`;
-    const okVar = `${cmd.name}ProbeOk`;
     const outVar = `${cmd.name}ProbeOut`;
     const errVar = `${cmd.name}ProbeErr`;
     const exitVar = `${cmd.name}ProbeExit`;
     const elapsedVar = `${cmd.name}ProbeElapsedMs`;
     const startVar = `${cmd.name}ProbeStart`;
     const finishedVar = `${cmd.name}ProbeFinished`;
+    const timedOutVar = `${cmd.name}ProbeTimedOut`;
+    const versionLikeVar = `${cmd.name}ProbeVersionLike`;
     const psiVar = `${cmd.name}Psi`;
     const procVar = `${cmd.name}Proc`;
 
@@ -140,8 +176,16 @@ export function buildDependencyProbeBlock(logFile: string, opts: DependencyProbe
       `}`,
       `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ${cmd.name} resolved: $${resolvedVar}" | Out-File -Append "${logFile}"`,
       `$${psiVar} = New-Object System.Diagnostics.ProcessStartInfo`,
-      `$${psiVar}.FileName = $${resolvedVar}`,
-      `$${psiVar}.Arguments = '${cmd.versionArg}'`,
+      // #356 B3: UseShellExecute=$false は CreateProcess を直接呼ぶため .cmd/.bat を
+      // 起動できない（ERROR_BAD_EXE_FORMAT）。pnpm の preferredPath は pnpm.cmd のため
+      // 拡張子で分岐し、.cmd/.bat のときだけ %ComSpec% /c 経由で起動する。
+      `if ($${resolvedVar} -match '\\.(cmd|bat)$') {`,
+      `  $${psiVar}.FileName = $env:ComSpec`,
+      `  $${psiVar}.Arguments = '/c "' + $${resolvedVar} + '" ${cmd.versionArg}'`,
+      `} else {`,
+      `  $${psiVar}.FileName = $${resolvedVar}`,
+      `  $${psiVar}.Arguments = '${cmd.versionArg}'`,
+      `}`,
       `$${psiVar}.UseShellExecute = $false`,
       `$${psiVar}.RedirectStandardOutput = $true`,
       `$${psiVar}.RedirectStandardError = $true`,
@@ -149,30 +193,40 @@ export function buildDependencyProbeBlock(logFile: string, opts: DependencyProbe
       `$${procVar} = New-Object System.Diagnostics.Process`,
       `$${procVar}.StartInfo = $${psiVar}`,
       `$${startVar} = Get-Date`,
-      `$${okVar} = $false`,
       `$${outVar} = ''`,
       `$${errVar} = ''`,
       `$${exitVar} = -1`,
+      `$${timedOutVar} = $false`,
       `try {`,
       `  $${procVar}.Start() | Out-Null`,
       `  $${finishedVar} = $${procVar}.WaitForExit(${opts.timeoutMs})`,
       `  if (-not $${finishedVar}) {`,
       `    try { $${procVar}.Kill() } catch {}`,
+      `    $${timedOutVar} = $true`,
       `    $${errVar} = 'timeout'`,
       `  } else {`,
       `    $${outVar} = $${procVar}.StandardOutput.ReadToEnd()`,
       `    $${errVar} = $${procVar}.StandardError.ReadToEnd()`,
       `    $${exitVar} = $${procVar}.ExitCode`,
-      `    $${okVar} = ($${exitVar} -eq 0) -and ('$${outVar}'.Trim() -match '^\\d+\\.\\d+') -and ($${outVar}.Trim().Length -gt 0)`,
       `  }`,
       `} catch {`,
       `  $${errVar} = $_.Exception.Message`,
       `}`,
       `$${elapsedVar} = ((Get-Date) - $${startVar}).TotalMilliseconds`,
-      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ${cmd.name} probe: exit=$${exitVar} elapsed=$([math]::Round($${elapsedVar}))ms out=[$($${outVar}.Trim())] err=[$($${errVar}.Trim())]" | Out-File -Append "${logFile}"`,
-      `if (-not $${okVar}) {`,
-      `  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] !! ${cmd.name} probe failed, aborting update (agent kept alive)" | Out-File -Append "${logFile}"`,
+      // #356 B1/B2: 左辺をクォートせず（バグ再発防止）、非アンカー・ASCII 明示の
+      // [0-9]+\.[0-9]+ で判定する（.NET の \d は Unicode Nd にマッチし JS の \d と
+      // 意味が割れるため使わない）。
+      `$${versionLikeVar} = ($${outVar}.Trim() -match '[0-9]+\\.[0-9]+')`,
+      `"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ${cmd.name} probe: exit=$${exitVar} elapsed=$([math]::Round($${elapsedVar}))ms out=[$($${outVar}.Trim())] err=[$($${errVar}.Trim())] versionLike=$${versionLikeVar}" | Out-File -Append "${logFile}"`,
+      // #356: ハード中止はタイムアウトのみ（実行ファイル未解決は上のブロックで既に中止済み）。
+      `if ($${timedOutVar}) {`,
+      `  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] !! ${cmd.name} probe timed out, aborting update (agent kept alive)" | Out-File -Append "${logFile}"`,
       `  return`,
+      `}`,
+      // #356: exit code 不一致・版番号不一致はハード中止せず警告のみ（成果物鮮度ゲートが
+      // 「ビルドが実際に走ったか」を別途担保するため）。
+      `if (($${exitVar} -ne 0) -or (-not $${versionLikeVar})) {`,
+      `  "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] !! ${cmd.name} probe warning (continuing): exit=$${exitVar} versionLike=$${versionLikeVar}" | Out-File -Append "${logFile}"`,
       `}`,
     ].join('\n');
   });

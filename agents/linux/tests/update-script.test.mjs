@@ -45,6 +45,22 @@ test('isVersionLikeOutput: 先頭行が版番号でなければ以降が版番�
   assert.equal(isVersionLikeOutput('warning: something\n10.28.0'), false);
 });
 
+// #356 B2: 実際の `git --version` / `node --version` の生出力（数字始まりでない）を
+// そのまま与えても true になることを担保する（アンカー付き `^\d+\.\d+` だった旧実装では
+// これらは全て false になっていた＝実運用で一度も意図通り動いていなかった）。
+
+test('isVersionLikeOutput: 実際の git --version 出力（数字始まりでない）は true', () => {
+  assert.equal(isVersionLikeOutput('git version 2.52.0.windows.1'), true);
+});
+
+test('isVersionLikeOutput: 実際の node --version 出力（v プレフィックス）は true', () => {
+  assert.equal(isVersionLikeOutput('v24.12.0'), true);
+});
+
+test('isVersionLikeOutput: 実際の pnpm -v 出力は true', () => {
+  assert.equal(isVersionLikeOutput('10.15.0'), true);
+});
+
 // ---- buildExecutableResolver ----
 
 test('buildExecutableResolver: preferredPaths が先頭から順に現れる（探索順が保たれる）', () => {
@@ -110,23 +126,89 @@ test('buildDependencyProbeBlock: ログファイルパスが全ブロックに�
   assert.ok(occurrences >= 2);
 });
 
-test('buildDependencyProbeBlock: 失敗時に return して以降へ進まないガードが3箇所に出る', () => {
+test('buildDependencyProbeBlock: ハード中止（return）は not-found とタイムアウトの2箇所のみ', () => {
   const script = buildDependencyProbeBlock('C:\\log\\update.log', {
     timeoutMs: 60000,
     commands: [{ name: 'pnpm', versionArg: '-v', preferredPaths: [] }],
   });
   const returns = script.split('return').length - 1;
-  // 1) 未解決時の return、2) probe失敗時の return の計2箇所
+  // #356: 1) 未解決時の return、2) タイムアウト時の return の計2箇所。
+  // exit code 不一致・版番号不一致はハード中止しない（return しない）ため数は増えない。
   assert.equal(returns, 2);
 });
 
-test('buildDependencyProbeBlock: 判定式が exit code だけでなく版番号一致も条件に含む', () => {
+// #356 B1 アンチリグレッション（最重要）: 生成物のどこにも
+// 「シングルクォートで囲まれた変数」（例: '$gitProbeOut'）が現れないこと。
+// PowerShell のシングルクォートはリテラルで変数展開しないため、これが再発すると
+// 版番号一致判定が常に false になる（今回の一次原因そのもの）。
+test('buildDependencyProbeBlock: シングルクォートで囲まれた変数が1つも無い（B1再発防止）', () => {
+  const script = buildDependencyProbeBlock('C:\\log\\update.log', {
+    timeoutMs: 60000,
+    commands: [
+      { name: 'git', versionArg: '--version', preferredPaths: [] },
+      { name: 'node', versionArg: '--version', preferredPaths: [] },
+      { name: 'pnpm', versionArg: '-v', preferredPaths: ['C:\\devrelay\\node\\pnpm.cmd'] },
+    ],
+  });
+  assert.ok(!/'\$[A-Za-z_]\w*'/.test(script));
+});
+
+test('buildDependencyProbeBlock: -match の左辺は $<name>ProbeOut.Trim()（クォート無し）', () => {
   const script = buildDependencyProbeBlock('C:\\log\\update.log', {
     timeoutMs: 60000,
     commands: [{ name: 'pnpm', versionArg: '-v', preferredPaths: [] }],
   });
-  assert.ok(script.includes("-match '^\\d+\\.\\d+'"));
-  assert.ok(script.includes('-eq 0'));
+  assert.ok(/\$pnpmProbeOut\.Trim\(\) -match '\[0-9\]\+\\\.\[0-9\]\+'/.test(script));
+});
+
+test('buildDependencyProbeBlock: 正規表現は非アンカー・ASCII明示の [0-9]+\\.[0-9]+ を使う（B2修正）', () => {
+  const script = buildDependencyProbeBlock('C:\\log\\update.log', {
+    timeoutMs: 60000,
+    commands: [{ name: 'git', versionArg: '--version', preferredPaths: [] }],
+  });
+  assert.ok(script.includes("-match '[0-9]+\\.[0-9]+'"));
+  assert.ok(!script.includes("-match '^\\d+\\.\\d+'"));
+});
+
+test('buildDependencyProbeBlock: exit code 不一致・版番号不一致は警告のみで return しない', () => {
+  const script = buildDependencyProbeBlock('C:\\log\\update.log', {
+    timeoutMs: 60000,
+    commands: [{ name: 'pnpm', versionArg: '-v', preferredPaths: [] }],
+  });
+  const marker = '-ne 0) -or (-not';
+  const idx = script.indexOf(marker);
+  assert.ok(idx >= 0, 'exit code / versionLike の警告条件式が見つからない');
+  const closeIdx = script.indexOf('}', idx);
+  const warnBlock = script.slice(idx, closeIdx);
+  assert.ok(!warnBlock.includes('return'));
+  assert.ok(script.includes('probe warning (continuing)'));
+});
+
+test('buildDependencyProbeBlock: タイムアウトのみが return する（timedOut 変数を条件に使う）', () => {
+  const script = buildDependencyProbeBlock('C:\\log\\update.log', {
+    timeoutMs: 60000,
+    commands: [{ name: 'pnpm', versionArg: '-v', preferredPaths: [] }],
+  });
+  assert.ok(/if \(\$pnpmProbeTimedOut\) \{[\s\S]*?return/.test(script));
+});
+
+test('buildDependencyProbeBlock: preferredPaths に .cmd を含む場合、$env:ComSpec と /c 経由で起動する（B3修正）', () => {
+  const script = buildDependencyProbeBlock('C:\\log\\update.log', {
+    timeoutMs: 60000,
+    commands: [{ name: 'pnpm', versionArg: '-v', preferredPaths: ['C:\\devrelay\\node\\pnpm.cmd'] }],
+  });
+  assert.ok(script.includes('$env:ComSpec'));
+  assert.ok(/\/c ["\']/.test(script));
+});
+
+test('buildDependencyProbeBlock: .exe のみのコマンドは $env:ComSpec を経由しない', () => {
+  const script = buildDependencyProbeBlock('C:\\log\\update.log', {
+    timeoutMs: 60000,
+    commands: [{ name: 'git', versionArg: '--version', preferredPaths: [] }],
+  });
+  // git は .cmd/.bat の preferredPaths を持たないため、実行時分岐自体は生成されるが
+  // 少なくとも ComSpec 分岐のガード式（拡張子マッチ）が含まれることを確認する。
+  assert.ok(script.includes("-match '\\.(cmd|bat)"));
 });
 
 // ---- buildArtifactFreshnessGate ----

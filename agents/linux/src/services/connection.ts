@@ -2588,10 +2588,25 @@ async function handleAgentUpdate() {
         ],
       }),
       `cd "${agentDir}"`,
-      psRunAndLog('git fetch', 'git fetch origin'),
+      // #356 B4: git fetch/reset の終了コードを実際に判定する（従来は psRunAndLog で
+      // 終了コードを捨てており、reset 失敗のまま古いソースでビルド→成果物鮮度ゲートは
+      // 通過→同一コミットのまま restart する経路が残っていた）
+      psRunAndLogChecked('git fetch', 'git fetch origin', 'fetchExit'),
+      [
+        `if ($fetchExit -ne 0) {`,
+        `  ${psLog('!! git fetch failed, aborting update (agent kept alive)')}`,
+        `  return`,
+        `}`,
+      ].join('\n'),
       `$remoteBranch = try { (git symbolic-ref refs/remotes/origin/HEAD 2>$null) -replace 'refs/remotes/', '' } catch { 'origin/main' }`,
       `if (-not $remoteBranch) { $remoteBranch = 'origin/main' }`,
-      psRunAndLog('git reset', 'git reset --hard $remoteBranch'),
+      psRunAndLogChecked('git reset', 'git reset --hard $remoteBranch', 'resetExit'),
+      [
+        `if ($resetExit -ne 0) {`,
+        `  ${psLog('!! git reset failed, aborting update (agent kept alive)')}`,
+        `  return`,
+        `}`,
+      ].join('\n'),
       // #329 Part B: --frozen-lockfile が失敗したら（lockfile 不整合等）
       // --frozen-lockfile 無しで1回だけ再試行する（#328 の tier2 と同じ方針）
       // #352 Fix A: 直前のプローブで検証済みの $pnpmResolved（.cmd/.exe、.ps1 を通らない）を

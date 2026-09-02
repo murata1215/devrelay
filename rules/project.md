@@ -48,9 +48,21 @@ Agent の起動時 stale チェック（実行中のコードが最新ビルド�
 
 Windows の `u`（自己更新）で、`pnpm`/`node`/`git` が使えるかを `Get-Command <name>` の**存在チェック**だけで判定してはいけない。PowerShell のコマンド解決優先順位は Alias > Function > Cmdlet > ExternalScript > Application であり、裸の `pnpm` は環境によって `pnpm.cmd`/`pnpm.exe` ではなく `pnpm.ps1`（ExternalScript）に解決されることがある。この経路は「実在するので `Get-Command` は成功する」が「実行しても無音で何も返さず `$LASTEXITCODE` も更新しない」ことが実機で確認された（#352）。存在チェックは「呼べるかどうか」しか保証せず「呼んだら動くかどうか」は保証しない。
 
-そのため依存コマンドの事前ゲートは**実際に実行して結果を検証する**（`agents/linux/src/services/update-script.ts` の `buildDependencyProbeBlock()`）。判定は exit code 単体に依存せず、①タイムアウト内に終了したか、②標準出力が版番号らしいか（`isVersionLikeOutput()`）、③ exit code が 0 か、の3条件 AND とする（exit code は PowerShell の ExternalScript 経由では信用できないため、①②を主軸に置く）。あわせて `.ps1` shim を避け `.cmd`/`.exe` を明示的に優先探索する（`buildExecutableResolver()`）。
+そのため依存コマンドの事前ゲートは**実際に実行して結果を検証する**（`agents/linux/src/services/update-script.ts` の `buildDependencyProbeBlock()`）。あわせて `.ps1` shim を避け `.cmd`/`.exe` を明示的に優先探索する（`buildExecutableResolver()`）。
 
 この「機能プローブ」パターンは Windows の PATH 解決が絡む依存コマンド検証全般に適用できる汎用パターンであり、今後同種の判定を追加する場合は `Get-Command` 単体で済ませず、上記のいずれかの方式（機能プローブ、または少なくとも `.cmd`/`.exe` への明示解決）を検討すること。
+
+### 訂正: 判定の厳しさより「間違えたときのコスト」で設計する（#356、2026-09-03）
+
+#352 当初は「①タイムアウト内に終了したか、②標準出力が版番号らしいか、③ exit code が 0 か」の3条件 AND で判定していたが、これ自体が**新たな自己永続ロックアウト**を生んだ（`4ed208d` 導入コミットで6台がロックアウト）。実装に2つの独立バグが同居していた:
+
+- 版番号一致チェックの `-match` 左辺を `'$outVar'` とシングルクォートで書いてしまい、変数展開されずリテラル文字列と照合されるため常に false（B1）
+- 判定に使う正規表現が `^\d+\.\d+` という先頭アンカーで、`git version 2.52.0.windows.1` のような実際の出力形と一致しない（B2）
+- （副次）`UseShellExecute=$false` は `.cmd`/`.bat`（pnpm の既定パス）を起動できず、B1/B2 を直しても pnpm プローブだけ中止し続ける（B3）
+
+このプローブは `git fetch` より前に配置されているため、判定式の些細なバグがそのまま「毎回中止」に直結し、しかも壊れた `update.ps1` を生成するのはディスク上の stale dist 自身のため `u` を何度送っても直らない自己永続ロックアウトになった。
+
+教訓: 成果物の鮮度ゲート（`buildArtifactFreshnessGate`、dist は `.gitignore` 対象・非 incremental ビルドのため成功時は必ず mtime が動く）が既に「ビルドが実際に走ったか」を独立に担保しているなら、**手前のプローブの判定を厳しくしても安全性は上がらず、むしろ判定式自身のバグがロックアウトの新たな原因になる**。ハード中止（`return`）は「実行ファイル未検出」「タイムアウト」の2条件のみに絞り、exit code 不一致・版番号不一致は警告を残して処理を継続する設計に変更した（#356）。判定を追加する箇所では「これが誤検知したときに復旧不能になるか」を先に問うこと。
 
 ---
 
