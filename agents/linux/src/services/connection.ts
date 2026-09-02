@@ -86,6 +86,7 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // projectPath 上の永続状態（conversation.json / claude-session-id / .devrelay-output）を
 // 読み書きしないようにするための判定（層 B: Agent 側の直交化）
 import { isEphemeralSession } from './session-scope.js';
+import { buildDependencyProbeBlock, buildArtifactFreshnessGate } from './update-script.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -461,6 +462,7 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
             const child = spawn('wscript.exe', [restartVbsPath], {
               detached: true,
               stdio: 'ignore',
+              windowsHide: true,
             });
             child.unref();
             console.log(`✅ Scheduled delayed restart via VBS: ${restartVbsPath}`);
@@ -2536,22 +2538,22 @@ async function handleAgentUpdate() {
       // Linux/macOS 分岐の `export PATH="${nodeBinDir}:$PATH"` と同じ意図で PATH を補う。
       `$env:Path = "$env:APPDATA\\devrelay\\node;$env:APPDATA\\npm;$env:Path"`,
       psLog('=== Update started ==='),
-      // #351 欠陥⑥（無音失敗の根絶）: git/node/pnpm が PATH 上で解決できるかを
-      // git reset より前に確認し、結果を必ずログへ残す。1 つでも見つからなければ
-      // 作業ツリーを一切進めず（git fetch/reset も実行しない）中止する。
-      // 旧 Agent は kill せず生かしたままにする（stale 状態そのものを作らない）。
-      [
-        `$gitCmd = Get-Command git -ErrorAction SilentlyContinue`,
-        `$nodeCmd = Get-Command node -ErrorAction SilentlyContinue`,
-        `$pnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue`,
-        `"[$(${psTs})] git resolved: $(if ($gitCmd) { $gitCmd.Source } else { 'NOT FOUND' })" | Out-File -Append "${updateLogFile}"`,
-        `"[$(${psTs})] node resolved: $(if ($nodeCmd) { $nodeCmd.Source } else { 'NOT FOUND' })" | Out-File -Append "${updateLogFile}"`,
-        `"[$(${psTs})] pnpm resolved: $(if ($pnpmCmd) { $pnpmCmd.Source } else { 'NOT FOUND' })" | Out-File -Append "${updateLogFile}"`,
-        `if (-not $gitCmd -or -not $nodeCmd -or -not $pnpmCmd) {`,
-        `  ${psLog('!! required tool not found, aborting update (agent kept alive)')}`,
-        `  return`,
-        `}`,
-      ].join('\n'),
+      // #352 Fix A（本丸）: #351 欠陥⑥の Get-Command による存在チェックは
+      // 「解決できるか」しか見ておらず、裸の `pnpm` は PowerShell の優先順位
+      // （Alias > Function > Cmdlet > ExternalScript > Application）により必ず
+      // pnpm.ps1（ExternalScript）を指すため常に成功してしまう（実測: DESKTOP-1JR1NLL/c-shiraki）。
+      // この pnpm.ps1 は「起動はするが無音・$LASTEXITCODE も更新しない」状態になり得るため、
+      // 判定を「解決できるか」から「.cmd/.exe を明示指定して実際に実行し、版番号が返るか」に変える。
+      // git reset より前に実施し、いずれかが失敗したら作業ツリーを一切進めず
+      // （git fetch/reset も実行しない）中止する。旧 Agent は kill せず生かしたままにする。
+      buildDependencyProbeBlock(updateLogFile, {
+        timeoutMs: Number(process.env.DEVRELAY_UPDATE_PROBE_TIMEOUT_MS) || 60_000,
+        commands: [
+          { name: 'git', versionArg: '--version', preferredPaths: [] },
+          { name: 'node', versionArg: '--version', preferredPaths: ['$env:APPDATA\\devrelay\\node\\node.exe'] },
+          { name: 'pnpm', versionArg: '-v', preferredPaths: ['$env:APPDATA\\devrelay\\node\\pnpm.cmd'] },
+        ],
+      }),
       `cd "${agentDir}"`,
       psRunAndLog('git fetch', 'git fetch origin'),
       `$remoteBranch = try { (git symbolic-ref refs/remotes/origin/HEAD 2>$null) -replace 'refs/remotes/', '' } catch { 'origin/main' }`,
@@ -2559,16 +2561,18 @@ async function handleAgentUpdate() {
       psRunAndLog('git reset', 'git reset --hard $remoteBranch'),
       // #329 Part B: --frozen-lockfile が失敗したら（lockfile 不整合等）
       // --frozen-lockfile 無しで1回だけ再試行する（#328 の tier2 と同じ方針）
-      psRunAndLogChecked('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts', 'installExit'),
+      // #352 Fix A: 直前のプローブで検証済みの $pnpmResolved（.cmd/.exe、.ps1 を通らない）を
+      // 明示的に呼ぶ。裸の `pnpm` に戻すと再び ExternalScript（pnpm.ps1）に化ける可能性がある。
+      psRunAndLogChecked('pnpm install', '& $pnpmResolved install --frozen-lockfile --ignore-scripts', 'installExit'),
       [
         `if ($installExit -ne 0) {`,
         psLog('pnpm install (frozen-lockfile) failed, retrying without --frozen-lockfile'),
-        `  ${psRunAndLogChecked('pnpm install (retry)', 'pnpm install --ignore-scripts', 'installExit')}`,
+        `  ${psRunAndLogChecked('pnpm install (retry)', '& $pnpmResolved install --ignore-scripts', 'installExit')}`,
         `}`,
       ].join('\n'),
       // 端末モード用に PTY プリビルドをダウンロード（失敗しても継続）
       // 引数は引用符で囲む: PowerShell の `@homebridge` を splat operator として誤解釈されないように
-      psRunAndLog('rebuild PTY', 'pnpm rebuild "@homebridge/node-pty-prebuilt-multiarch"'),
+      psRunAndLog('rebuild PTY', '& $pnpmResolved rebuild "@homebridge/node-pty-prebuilt-multiarch"'),
       // pnpm rebuild が Windows で conpty.node を配置しない既知問題のフォールバック
       // build/Release/conpty.node が無ければ GitHub Releases から ABI 別 tarball を手動展開
       // インデント付き複数行 PowerShell スクリプト（バッククォートで改行継続せず素直に書く）
@@ -2606,22 +2610,31 @@ async function handleAgentUpdate() {
       `$buildStart = Get-Date`,
       // #351 欠陥⑤: build ステップも psRunAndLogChecked にして exit code を実際に判定する
       // （Fix 1 で $LASTEXITCODE が正しくリセットされるようになって初めて意味を持つ）
-      psRunAndLogChecked('shared build', 'pnpm --filter @devrelay/shared build', 'sharedBuildExit'),
-      psRunAndLogChecked('agent build', 'pnpm --filter @devrelay/agent build', 'agentBuildExit'),
+      // #352 Fix A: ここも $pnpmResolved（.cmd/.exe）を明示的に呼ぶ
+      psRunAndLogChecked('shared build', '& $pnpmResolved --filter @devrelay/shared build', 'sharedBuildExit'),
+      psRunAndLogChecked('agent build', '& $pnpmResolved --filter @devrelay/agent build', 'agentBuildExit'),
       psLog('Build done, checking artifact...'),
-      // #329 Part B → #351 欠陥⑥で強化: build の exit code + 成果物の存在 + 鮮度
-      // （LastWriteTime >= $buildStart）の全てを満たさない限り、旧 Agent を kill せず
+      // #352 Fix B: 成果物の鮮度ゲートを packages/shared と agents/linux の 2 ファイル AND に強化
+      // （shared build だけ無音失敗して agent build が古い shared を参照する組み合わせを弾く）
+      buildArtifactFreshnessGate(
+        [
+          `${agentDir}\\packages\\shared\\dist\\index.js`,
+          `${agentDir}\\agents\\linux\\dist\\index.js`,
+        ],
+        updateLogFile,
+      ),
+      // #329 Part B → #351 欠陥⑥ → #352 Fix B で強化: build の exit code + 2 ファイルの
+      // 存在・鮮度（$artifactsFresh）の全てを満たさない限り、旧 Agent を kill せず
       // スクリプトを終了する（壊れたビルド・stale dist で動いている Agent を殺さない）
       [
-        `$distPath = "${agentDir}\\agents\\linux\\dist\\index.js"`,
-        `if ($sharedBuildExit -eq 0 -and $agentBuildExit -eq 0 -and (Test-Path $distPath) -and ((Get-Item $distPath).LastWriteTime -ge $buildStart)) {`,
+        `if ($sharedBuildExit -eq 0 -and $agentBuildExit -eq 0 -and $artifactsFresh) {`,
         psLog('artifact OK, restarting...'),
         `  Start-Sleep -Seconds 2`,
         // 旧 Agent プロセスを停止（Get-CimInstance で node.exe + devrelay を検出して kill）
         ...(stopCmd ? [`  ${psRunAndLog('stop old agent', stopCmd.command)}`, '  Start-Sleep -Seconds 2'] : []),
         `  ${restartCmd.command}`,
         `} else {`,
-        `  ${psLog('!! build failed or artifact stale, keeping current agent (sharedBuildExit=$sharedBuildExit agentBuildExit=$agentBuildExit distExists=$(Test-Path $distPath))')}`,
+        `  ${psLog('!! build failed or artifact stale, keeping current agent (sharedBuildExit=$sharedBuildExit agentBuildExit=$agentBuildExit artifactsFresh=$artifactsFresh)')}`,
         `}`,
       ].join('\n'),
     ];
@@ -2643,6 +2656,7 @@ async function handleAgentUpdate() {
     const child = spawn('wscript.exe', [vbsPath], {
       detached: true,
       stdio: 'ignore',
+      windowsHide: true,
     });
     child.on('error', (err) => {
       console.error(`❌ Update script spawn failed: ${err.message}`);

@@ -5,6 +5,16 @@
 
 ---
 
+## 依存コマンドの検証は「存在」ではなく「機能」で行う（#352）
+
+Windows の `u`（自己更新）で、`pnpm`/`node`/`git` が使えるかを `Get-Command <name>` の**存在チェック**だけで判定してはいけない。PowerShell のコマンド解決優先順位は Alias > Function > Cmdlet > ExternalScript > Application であり、裸の `pnpm` は環境によって `pnpm.cmd`/`pnpm.exe` ではなく `pnpm.ps1`（ExternalScript）に解決されることがある。この経路は「実在するので `Get-Command` は成功する」が「実行しても無音で何も返さず `$LASTEXITCODE` も更新しない」ことが実機で確認された（#352）。存在チェックは「呼べるかどうか」しか保証せず「呼んだら動くかどうか」は保証しない。
+
+そのため依存コマンドの事前ゲートは**実際に実行して結果を検証する**（`agents/linux/src/services/update-script.ts` の `buildDependencyProbeBlock()`）。判定は exit code 単体に依存せず、①タイムアウト内に終了したか、②標準出力が版番号らしいか（`isVersionLikeOutput()`）、③ exit code が 0 か、の3条件 AND とする（exit code は PowerShell の ExternalScript 経由では信用できないため、①②を主軸に置く）。あわせて `.ps1` shim を避け `.cmd`/`.exe` を明示的に優先探索する（`buildExecutableResolver()`）。
+
+この「機能プローブ」パターンは Windows の PATH 解決が絡む依存コマンド検証全般に適用できる汎用パターンであり、今後同種の判定を追加する場合は `Get-Command` 単体で済ませず、上記のいずれかの方式（機能プローブ、または少なくとも `.cmd`/`.exe` への明示解決）を検討すること。
+
+---
+
 ## 人間入力テキストの provenance fence（#334）
 
 AI へ連結するプロンプトに人間入力テキスト（ゲート①`approve_implementation.note` / ②チャット

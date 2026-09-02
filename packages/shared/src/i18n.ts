@@ -112,9 +112,10 @@ export const chatMessages = {
     ja: '📦 **{machine}**\n  ローカル: {localCommit} ({localDate})\n  リモート: {remoteCommit} ({remoteDate})\n  ⚠️ 更新があります{runningCodeLines}\n\nもう一度 `u` を送信すると更新を実行します。',
   },
   // #350: git は最新だが実行中コードが古い（stale dist デッドロック）。もう一度 u で再ビルドを促す
+  // #352 Fix C-1: 2回目の u でも stale が消えない場合、u では直せない（自己増殖ループ）ためインストーラー再実行を案内
   'update.staleRebuild': {
-    en: '✅ Git is up to date, but the running code looks stale\n  commit: {commit} ({date}){runningCodeLines}\n\nSend `u` again to rebuild.',
-    ja: '✅ git は最新ですが、実行中コードが古い可能性があります\n  commit: {commit} ({date}){runningCodeLines}\n\nもう一度 `u` を送信すると再ビルドを実行します。',
+    en: '✅ Git is up to date, but the running code looks stale\n  commit: {commit} ({date}){runningCodeLines}\n\nSend `u` again to rebuild.\n\nIf `stale` is still shown after the 2nd `u`, `u` alone cannot fix it — please re-run the installer.',
+    ja: '✅ git は最新ですが、実行中コードが古い可能性があります\n  commit: {commit} ({date}){runningCodeLines}\n\nもう一度 `u` を送信すると再ビルドを実行します。\n\n2回目の `u` でも「古い」と表示され続ける場合、`u` では直りません。インストーラーを再実行してください。',
   },
   // #320: u の非同期通知（agent-manager.ts、sessionId/UserContext を持たないためここに専用キー）
   'update.completed': { en: '✅ **{machine}** update completed', ja: '✅ **{machine}** の更新が完了しました' },

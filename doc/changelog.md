@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### #352: `u`（Windows 自己更新）の依存コマンド検証を「存在」から「機能」へ強化し stale dist 自己増殖ループを塞ぐ (2026-09-02)
+
+#### 背景
+
+`DESKTOP-1JR1NLL/c-shiraki` で #351(`62ed897`)反映後も「翌日また同じ症状」が再発。read-only 実測（`update.log` 全文・生成済み `update.ps1` 全文・`Get-Command pnpm -All`・`pnpm -v` の直接実行・プロセスツリー・dist 内の世代マーカー文字列）で一次原因を確定した。
+
+#### 調査（真因の確定）
+
+PowerShell のコマンド解決優先順位（Alias > Function > Cmdlet > ExternalScript > Application）により、裸の `pnpm` は必ず `pnpm.ps1`（ExternalScript）を指す。この端末では `pnpm.ps1` 経由の `pnpm -v` が**無音**（標準出力 0 行）かつ**`$LASTEXITCODE` も更新しない**ことを実機で確認済み（プロンプトは戻るが `pnpm.exe` 子プロセスが約40秒後もゾンビ残存）。
+
+この結果、#351 Fix2（`Get-Command git/node/pnpm` の**存在**チェック）は `pnpm.ps1` が実在するため常に成功してしまい無力、#351 Fix1（`$LASTEXITCODE=0` リセット）も「実行はされたが何も返さない」ケースには効かず、ビルドが1行も走らないまま「exit=0」の嘘の成功記録 → #329 成果物ゲート（当時は存在チェックのみ）を素通り → 旧 Agent を kill して同じ古い dist で再起動、という自己増殖ループが継続していた（`update.log` の `shared build`/`agent build` が記録の残る全期間3回とも0〜1秒・出力0行で一度も成功していないことを実測で確認、H3プロキシ・H4 tsc エラーは出力0行から実測で否定）。
+
+#### 実装
+
+修正方針を「解決できるか（存在チェック）」から「実際に動くか（機能プローブ）」に転換。
+
+- 新規 `agents/linux/src/services/update-script.ts`（外部 import ゼロの純関数、#350 `agent-update-decision.ts`/#351 `auto-update-reconcile.ts` と同じ流儀）:
+  - `isVersionLikeOutput(stdout)`：非空かつ1行目が `^\d+\.\d+` に一致するかを判定
+  - `buildExecutableResolver(name, preferredPaths)`：`.cmd`/`.exe` のみを探索し `.ps1` を選ぶ経路を一切含まない文字列を生成
+  - `buildDependencyProbeBlock(logFile, opts)`：PowerShell 5.1 の制約（`Start-Process -Timeout` 非対応）により `System.Diagnostics.Process` + `ProcessStartInfo` + `WaitForExit(timeoutMs)` + タイムアウト時 `Kill()` で実装、判定は「タイムアウト内に終了」「標準出力が版番号らしい」「exit code 0」の3条件 AND（exit code に依存しない設計）
+  - `buildArtifactFreshnessGate(distPaths, logFile)`：複数パスの AND 判定 + `$buildStart` との `LastWriteTime` 比較
+- `agents/linux/src/services/connection.ts`（Windows 分岐のみ）: #351 Fix2 の `Get-Command` 存在チェックブロックを `buildDependencyProbeBlock()`（git/node/pnpm を実際に実行し版番号を確認）に置換し `git fetch` より前に配置、失敗時は作業ツリーを進めず中止・旧 Agent 生存。以降の `pnpm install`(2箇所)/`pnpm rebuild`(PTY)/`pnpm --filter shared build`/`pnpm --filter agent build` の計5箇所を裸の `pnpm` から探索済み `.cmd`/`.exe` パス（`& $pnpmResolved`）に統一。成果物鮮度ゲートを `agents/linux/dist/index.js` 単体から `buildArtifactFreshnessGate()` による `packages/shared/dist/index.js` + `agents/linux/dist/index.js` の2ファイル AND 判定に強化。`spawn('wscript.exe', ...)` の2箇所（restart/update）に `windowsHide: true` 追加（#350 の取りこぼし回収）。
+- `packages/shared/src/i18n.ts`: `update.staleRebuild` の本文のみ更新（キー名・`{commit}`/`{date}`/`{runningCodeLines}` プレースホルダは不変）。「2回目の `u` でも `stale` が消えない場合はインストーラーを再実行してください」の案内を追記（`install-agent.ps1` は毎回 GitHub から取得されるため stale dist の影響を受けない唯一の経路で、実際 2026-09-01 20:00:49 のユーザーによる再インストールがループ脱出の実績経路だったことを根拠とする）。
+
+明示的に無変更: `apps/server`/`apps/web`/`agents/macos`/`agents/windows`、`decideUpdateAction()`(#350)、`install-agent.ps1`、Linux/macOS bash 分岐（`runAndLog` ヘルパーとその6箇所の使用、裸の `pnpm` のまま）、#351 Fix1（`$global:LASTEXITCODE=0` リセット）。
+
+`pnpm build` 6 workspace green、`node --test` を個別実行（#333 の教訓、複合コマンドにしない）で `packages/shared` 9→15（新規6件）・`apps/server` 92/92（非退行）・`agents/macos` 95/95（非退行）・`agents/linux` 103→124（新規21件）すべて green。DB マイグレーション不要、新規コマンド・新規 WS メッセージ型なし。**反映**: commit+push 必須、`pm2 restart devrelay-server` 必須（人間が実行、`packages/shared` を変更するため）、各マシンの `u` 必須（人間が実行、Fix A/B/D の本体）。`DESKTOP-1JR1NLL/c-shiraki` は次の `u` だけでは直らない（ディスク上の dist が `ae1fbba` 世代＝存在チェックのみのゲートを持つ旧スクリプトを生成するため、同じ形で無音失敗する）— インストーラー再実行が必要、実施後は次の `u` から本サイクルが有効化される。
+
 ### #353: AI モデル選択リストの見直し（Claude Fable 5.1 対応） (2026-09-02)
 
 #### 背景
