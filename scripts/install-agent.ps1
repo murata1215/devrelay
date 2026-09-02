@@ -898,7 +898,7 @@ if ($ProxyUrl) {
 Write-Host ""
 
 Write-Host "管理コマンド:" -ForegroundColor Cyan
-Write-Host "  ログ確認:        Get-Content `"$LogFile`" -Tail 50" -ForegroundColor Green
+Write-Host "  ログ確認:        Get-Content `"$LogFile`" -Tail 50 -Encoding UTF8" -ForegroundColor Green
 Write-Host "  停止:            tasklist /FI `"IMAGENAME eq node.exe`" /FO CSV 2>`$null | Select-String 'devrelay' | ForEach-Object { if (`$_ -match '`"node\.exe`",`"(\d+)`"') { Stop-Process -Id `$Matches[1] -Force } }" -ForegroundColor Green
 Write-Host "  手動起動:        wscript.exe `"$VbsPath`"" -ForegroundColor Green
 if ($AutoStartRegistered) {

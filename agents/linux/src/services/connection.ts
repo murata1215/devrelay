@@ -87,6 +87,7 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // 読み書きしないようにするための判定（層 B: Agent 側の直交化）
 import { isEphemeralSession } from './session-scope.js';
 import { buildDependencyProbeBlock, buildArtifactFreshnessGate } from './update-script.js';
+import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -2370,9 +2371,11 @@ async function handleVersionCheck() {
     const hasUpdate = localCommit !== remoteCommit;
     console.log(`📦 Local: ${localCommit.slice(0, 7)} (${localDate}), Remote: ${remoteCommit.slice(0, 7)} (${remoteDate}), hasUpdate: ${hasUpdate}`);
 
-    // 実行中エントリファイル（process.argv[1]）の mtime を取得してビルド鮮度を判定（#256）
+    // 実行中エントリファイル（process.argv[1]）の mtime を取得してビルド鮮度を判定（#256、#354で複数ファイル化）
     // git reset は成功したのに dist が再ビルドされない「stale dist デッドロック」を検出するため、
-    // 実行中コードがローカルコミット日時より古ければ「再ビルド漏れ」の可能性として警告する
+    // 実行中コードがローカルコミット日時より古ければ「再ビルド漏れ」の可能性として警告する。
+    // #354: entry（index.js）だけでなく services/ 配下の主要ファイルも見る（partial build 対策）。
+    // 判定ロジック自体は running-code-stale.ts の純関数に集約（DB・WS payload の形は変えない）。
     let runningCodeMtime: string | undefined;
     let runningCodeStale = false;
     try {
@@ -2380,11 +2383,27 @@ async function handleVersionCheck() {
       if (entryPath) {
         const entryStat = await stat(entryPath);
         runningCodeMtime = entryStat.mtime.toISOString();
+
+        const targetPaths = buildRunningCodeTargets(entryPath);
+        const files: RunningCodeFile[] = await Promise.all(
+          targetPaths.map(async (p): Promise<RunningCodeFile> => {
+            try {
+              const s = await stat(p);
+              return { path: p, mtimeMs: s.mtime.getTime() };
+            } catch {
+              // ファイル不在は無視（fail-open、判定順2）
+              return { path: p, mtimeMs: null };
+            }
+          }),
+        );
         const commitMs = Date.parse(localDate);
-        if (!Number.isNaN(commitMs) && entryStat.mtime.getTime() < commitMs) {
-          runningCodeStale = true;
-        }
-        console.log(`📦 Running code: ${runningCodeMtime} (entry: ${entryPath}, stale: ${runningCodeStale})`);
+        const result = decideRunningCodeStale(files, commitMs);
+        runningCodeStale = result.stale;
+
+        const oldestSuffix = result.stale
+          ? `, oldest: ${result.oldestPath} @ ${new Date(result.oldestMtimeMs!).toISOString()}`
+          : '';
+        console.log(`📦 Running code: ${runningCodeMtime} (entry: ${entryPath}, stale: ${runningCodeStale}${oldestSuffix})`);
       }
     } catch (mtimeErr) {
       // mtime 取得失敗は非致命的（バージョン確認自体は成功させる）

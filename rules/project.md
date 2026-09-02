@@ -5,6 +5,26 @@
 
 ---
 
+## running-code の stale 判定は単一エントリファイルではなく複数ファイルで見る（#354）
+
+Agent の起動時 stale チェック（実行中のコードが最新ビルドかどうか）を `process.argv[1]`（エントリファイル、通常
+`dist/index.js`）1本の mtime だけで判定してはいけない。`pnpm --filter agent build` は tsc が1ファイルでもエラーに
+なると全体が失敗するはずだが、部分的な成果物残存（例: 以前のビルドの `services/ai-runner.js` が残ったまま
+`index.js` だけ再生成される等）や将来のビルド構成変更を考慮すると、単一ファイル判定は「本当に最新か」を
+保証しない。
+
+`agents/{linux,macos}/src/services/running-code-stale.ts` の `decideRunningCodeStale(files, commitMs)` /
+`buildRunningCodeTargets(entryPath)` のパターンに従うこと:
+
+- 判定対象はエントリファイル + 主要な `services/*.js` の複数ファイル（AND 判定、1つでも commit より古ければ stale）
+- fail-open を徹底する: `commitMs` が `NaN`（git 情報取得失敗等）なら `stale: false`、個別ファイルの `stat` が失敗
+  （`mtimeMs: null`）していればそのファイルはスキップし stale 扱いにしない。「判定できない」を「stale」に誤変換
+  しないこと（#350〜#352 の fail-open 設計を踏襲）。
+- 外部 import ゼロの純関数として切り出し、`node --test` でコンパイル済み `dist/` を直接 import してテストする
+  （#350 `agent-update-decision.ts` 以降の一貫した流儀）。
+
+---
+
 ## 依存コマンドの検証は「存在」ではなく「機能」で行う（#352）
 
 Windows の `u`（自己更新）で、`pnpm`/`node`/`git` が使えるかを `Get-Command <name>` の**存在チェック**だけで判定してはいけない。PowerShell のコマンド解決優先順位は Alias > Function > Cmdlet > ExternalScript > Application であり、裸の `pnpm` は環境によって `pnpm.cmd`/`pnpm.exe` ではなく `pnpm.ps1`（ExternalScript）に解決されることがある。この経路は「実在するので `Get-Command` は成功する」が「実行しても無音で何も返さず `$LASTEXITCODE` も更新しない」ことが実機で確認された（#352）。存在チェックは「呼べるかどうか」しか保証せず「呼んだら動くかどうか」は保証しない。

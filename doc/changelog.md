@@ -6,6 +6,45 @@
 
 ## 実装済み機能
 
+### #354: `DESKTOP-1JR1NLL/c-shiraki` 再インストール後も直らなかった3件を修正（D1: runningCodeStale の単一ファイル判定 / D2: agent.log 文字化け / D3: claude 未インストール時の誤警告） (2026-09-02)
+
+#### 背景
+
+`DESKTOP-1JR1NLL/c-shiraki` でユーザーがインストーラーを再実行した後も「まだダメっぽいね。会話はできてるっぽい」と再報告。読み取り専用診断スクリプト `dr354-diagnose.ps1`（`.devrelay-output/` に追加）を用意した上で、独立した3件の欠陥を特定・修正した。
+
+#### D1: `runningCodeStale` 判定が `dist/index.js` 単体しか見ておらず部分ビルド失敗を見逃す
+
+`connection.ts` の起動時 stale 判定は `process.argv[1]`（エントリファイル、通常 `dist/index.js`）1本の mtime と git commit 日時のみを比較していた。`pnpm --filter agent build` が `ai-runner.ts`/`connection.ts`/`config.ts` のいずれかだけ tsc エラーで失敗し `index.js` だけが再生成されるケースでは、この判定は「stale ではない」と誤判定してしまう構造的な穴があった。
+
+新規 `agents/{linux,macos}/src/services/running-code-stale.ts`（外部 import ゼロの純関数、#350〜#352 と同じ流儀）を新設:
+
+- `decideRunningCodeStale(files, commitMs)`: 複数ファイルの mtime を commit 日時と比較。fail-open 設計 — `commitMs` が `NaN` なら `stale: false`、個別ファイルの `stat` が失敗（`mtimeMs: null`）していればそのファイルはスキップ（stale 扱いにしない）、真に commit より古い mtime を持つファイルが1つでもあれば `stale: true` + 最も古いファイルのパスを返す。
+- `buildRunningCodeTargets(entryPath)`: エントリパスから `services/{ai-runner,connection,config}.js` の3ファイルを導出（Windows バックスラッシュ / POSIX スラッシュ両対応）。
+
+`connection.ts` の起動時チェックを `index.js` 単体から `index.js` + 上記3ファイルの複数ファイル AND 判定に置き換え、ログに最も古いファイルのパスと mtime を追加出力するようにした。
+
+#### D2: Windows `agent.log` 案内から `-Encoding UTF8` が抜けて文字化け
+
+`agents/{linux,macos}/src/cli/commands/logs.ts` は既に `-Encoding UTF8` 付きだったが、以下3箇所が未対応のままだった:
+
+- `scripts/install-agent.ps1`（:901、ユーザー向け agent.log 案内のみ。他5箇所の `Get-Content` は別用途につき意図的に無変更）
+- `agents/linux/src/services/management-info.ts`（Windows 管理コマンド生成）
+- `agents/windows/src/cli/commands/logs.ts`（2箇所）
+
+いずれも `Get-Content ... -Tail N` に `-Encoding UTF8` を追加。
+
+#### D3: claude 未インストール環境で `devrelay-claude.cmd` 生成時に無害な `⚠️` 警告が誤って出る
+
+`agents/linux/src/index.ts` の `ensureDevrelaySymlinks()` が `execSync('command -v claude')` を直接呼んでおり、claude が正当に未インストールの環境でも `execSync` が非ゼロ終了で例外を投げ `⚠️ Could not create devrelay-claude.cmd` という誤解を招く警告が出ていた。#350 で新設済みの `resolveSystemClaude()`（`ai-runner.ts`）経由に変更し、claude 非存在時は警告なしで静かにスキップするようにした（`agents/macos/src/index.ts` はスコープ外、意図的に無変更）。
+
+#### 検証
+
+`pnpm build` 6 workspace green（web バンドル `index-Bn2cSYc_.js` 486.75kB/gzip132.37kB）。`node --test` を workspace ごと個別実行（#333 の教訓）で `packages/shared` 15/15・`apps/server` 92/92・`agents/linux` 124→136（新規12件）・`agents/macos` 95→107（新規12件）すべて green・fail 0。
+
+静的検証8項目すべて確認済み: `-Encoding UTF8` 全数確認、linux/macos の `running-code-stale.ts`/テストが byte-for-byte 同一（`diff` 無出力）、既存防御（`decideUpdateAction`/`buildDependencyProbeBlock`/`buildArtifactFreshnessGate`/`LASTEXITCODE`/`runAndLog`/`resolveSystemClaude()` 本体）が `git diff` の `[+-]` 行に0件で無変更、`git diff --stat -- apps/ packages/ prisma/` が空、`grep -c 'require('`（apps/web）= 0、dist 反映確認（両 OS の `running-code-stale.js` が同一3989バイト、`connection.js` に `decideRunningCodeStale` が各2件、`agents/linux/dist/index.js` に `resolveSystemClaude` が3件）。
+
+**変更ファイル**: 新規 `agents/{linux,macos}/src/services/running-code-stale.ts` + `agents/{linux,macos}/tests/running-code-stale.test.mjs`、既存 `agents/linux/src/{index,services/connection,services/management-info}.ts`、`agents/macos/src/services/connection.ts`、`agents/windows/src/cli/commands/logs.ts`、`scripts/install-agent.ps1`。`apps/`/`packages/`/`prisma/` は無変更。DB マイグレーション不要、`apps/server` 無変更のため server 再起動不要。**反映**: commit+push が必須（`install-agent.ps1` は `raw.githubusercontent.com` 配信のため、D1/D3 は各マシンの `u` のため）。各マシン（特に `DESKTOP-1JR1NLL/c-shiraki`）の `u` が必須（D1/D3 の本体）。実機 E2E 確認（再インストール後の `agent.log` 文字化け解消、stale 判定の正確性、claude 未インストール環境での警告非表示）は反映後に別サイクルで実施。
+
 ### #352: `u`（Windows 自己更新）の依存コマンド検証を「存在」から「機能」へ強化し stale dist 自己増殖ループを塞ぐ (2026-09-02)
 
 #### 背景

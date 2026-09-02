@@ -27,7 +27,7 @@ export async function logsCommand(options: LogsOptions) {
 
     const ps = spawn('powershell', [
       '-Command',
-      `Get-Content -Path "${logFile}" -Tail ${lines} -Wait`
+      `Get-Content -Path "${logFile}" -Tail ${lines} -Wait -Encoding UTF8`
     ], {
       stdio: 'inherit'
     });
@@ -54,7 +54,7 @@ export async function logsCommand(options: LogsOptions) {
 function showLastLines(logFile: string, lines: number) {
   try {
     const output = execSync(
-      `powershell -Command "Get-Content -Path '${logFile}' -Tail ${lines}"`,
+      `powershell -Command "Get-Content -Path '${logFile}' -Tail ${lines} -Encoding UTF8"`,
       { encoding: 'utf-8' }
     );
     console.log(`Last ${lines} lines:\n`);

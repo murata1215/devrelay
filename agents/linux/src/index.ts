@@ -2,8 +2,7 @@ import { loadConfig, detectAndUpdateAiTools } from './services/config.js';
 import { getBinDir } from './services/config.js';
 import { connectToServer } from './services/connection.js';
 import { loadProjects, autoDiscoverProjects } from './services/projects.js';
-import { logClaudeExecutableStatus } from './services/ai-runner.js';
-import { execSync } from 'child_process';
+import { logClaudeExecutableStatus, resolveSystemClaude } from './services/ai-runner.js';
 import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
@@ -14,6 +13,13 @@ import os from 'os';
  * Claude Code のプロセスを識別しやすくするため、ラッパーを作成する。
  * - Linux: シンボリックリンク（devrelay-claude -> claude）
  * - Windows: .cmd バッチファイル（管理者権限不要）
+ *
+ * #354: claude 解決は `resolveSystemClaude()`（ai-runner.ts、#350 で OS 分岐・stderr 破棄済み）を
+ * 再利用する。従来は `execSync('where'/'which' + ' claude')` を直書きしており、
+ * PATH に無い場合の生 stderr が漏れる経路になっていた（`stdio` 指定はあったが、
+ * catch 後に「見つからなかっただけ」と「本当の失敗」を区別できず、
+ * claude 未インストールの端末（devin 専用機等）でも `⚠️ Could not create` という
+ * 誤解を招く警告が出ていた）。
  */
 function ensureDevrelaySymlinks() {
   const isWindows = process.platform === 'win32';
@@ -21,19 +27,19 @@ function ensureDevrelaySymlinks() {
   const wrapperName = isWindows ? 'devrelay-claude.cmd' : 'devrelay-claude';
   const devrelayClaude = join(devrelayBinDir, wrapperName);
 
+  // claude が見つからない場合は「正常な不在」として静かにスキップする（#325 の対象外：
+  // これは「フォールバック」ではなく「対象が無いので何もしない」ケース）
+  const claudePath = resolveSystemClaude();
+  if (!claudePath) {
+    console.log(`ℹ️ claude not found; skipping ${wrapperName} wrapper`);
+    return;
+  }
+
   try {
     // ディレクトリが存在しない場合は作成
     if (!existsSync(devrelayBinDir)) {
       mkdirSync(devrelayBinDir, { recursive: true });
     }
-
-    // claude バイナリのパスを取得（Linux: which, Windows: where）
-    const findCmd = isWindows ? 'where' : 'which';
-    // #350: windowsHide が無いと wscript.exe 起動（コンソール無し）環境でこの where/which の
-    // たびに新規コンソール窓が開く。stdio でも stderr を捨てて agent.log のノイズを抑える
-    const claudePathRaw = execSync(`${findCmd} claude`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
-    // where コマンドは複数行を返す場合があるため、最初の行を使用
-    const claudePath = claudePathRaw.split(/\r?\n/)[0];
 
     // 既存のラッパーがあれば削除
     if (existsSync(devrelayClaude)) {
@@ -49,6 +55,7 @@ function ensureDevrelaySymlinks() {
     }
     console.log(`🔗 Wrapper: ${wrapperName} -> ${claudePath}`);
   } catch (err) {
+    // claude は見つかったのにラッパー作成自体が失敗した＝本当の異常（#325 静かなフォールバック禁止）
     console.warn(`⚠️ Could not create ${wrapperName}:`, (err as Error).message);
   }
 }

@@ -139,7 +139,7 @@ function generateWindowsInfo(): ManagementInfo {
   const startupVbs = path.join(startupDir, 'DevRelay Agent.vbs');
 
   const commands: ManagementCommand[] = [
-    { type: 'logs', label: 'ログ', command: `Get-Content "${logFile}" -Tail 50` },
+    { type: 'logs', label: 'ログ', command: `Get-Content "${logFile}" -Tail 50 -Encoding UTF8` },
     {
       type: 'stop',
       label: '停止',
