@@ -698,6 +698,10 @@ async function handleAiCancel(payload: AiCancelPayload) {
       payload: {
         machineId: currentConfig.machineId,
         sessionId,
+        // #355: 従来は cancelAiSession() の戻り値を無視して常に「キャンセルしました」と
+        // 送信していた（Claude SDK 経路は必ず false を返すため嘘の成功表示になっていた）。
+        // 実際の戻り値をそのまま載せ、サーバー側で正直に判定できるようにする。
+        cancelled,
       },
     });
   }
@@ -1502,8 +1506,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         retryOptions
       );
 
-      // Update session info with new Claude session ID from retry
-      if (retryResult.extractedSessionId) {
+      // #355: loop-guard がループを検知しセッションを破棄した場合、ファイル側は既に
+      // clearClaudeSessionId() 済みだが、メモリ上の sessionInfo.claudeResumeSessionId は
+      // 従来 truthiness ガード（if extractedSessionId）のため一切クリアされず、次ターンで
+      // 肥大化したセッションが resume され即座にループが再発する穴があった。
+      // extractedSessionId を見る前に sessionDiscarded を必ずチェックする。
+      if (retryResult.sessionDiscarded) {
+        sessionInfo.claudeResumeSessionId = undefined;
+        console.log(`🛑 [loop-guard] Claude session discarded (after retry), resume session id cleared`);
+      } else if (retryResult.extractedSessionId) {
         sessionInfo.claudeResumeSessionId = retryResult.extractedSessionId;
         console.log(`📋 Updated Claude session ID (after retry): ${retryResult.extractedSessionId.substring(0, 8)}...`);
       }
@@ -1512,8 +1523,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       return;
     }
 
-    // Update session info with new Claude session ID if extracted
-    if (aiResult.extractedSessionId) {
+    // #355: sessionDiscarded を extractedSessionId より前にチェックする（上記と同じ理由）。
+    if (aiResult.sessionDiscarded) {
+      sessionInfo.claudeResumeSessionId = undefined;
+      console.log(`🛑 [loop-guard] Claude session discarded, resume session id cleared`);
+    } else if (aiResult.extractedSessionId) {
       sessionInfo.claudeResumeSessionId = aiResult.extractedSessionId;
       console.log(`📋 Updated Claude session ID: ${aiResult.extractedSessionId.substring(0, 8)}...`);
     }

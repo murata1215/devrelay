@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### #355: auto-compact 無限ループの検知・停止 + Claude SDK 実行のキャンセル可能化 (2026-09-02)
+
+#### 背景
+
+実チャットで Claude SDK 実行が 138.3 分・79 回連続の auto-compact 空回りに陥り、`c`（キャンセル）を送っても止まらないインシデントが発生。ユーザーからの再発防止依頼を受け、インシデントレポートを実測（pm2 ログ・DB）で裏取りしたうえで、報告書に無かった2つの深刻な欠陥（キャンセルが SDK 経路では効かないのに成功したと表示する／`return` では claude サブプロセスが実際には終了しない）も含めて対応した。
+
+#### A（本命・検知）
+
+新規 `agents/{linux,macos}/src/services/sdk-loop-guard.ts`（外部 import ゼロの純関数群、linux/macos byte-for-byte 同一）を新設。「進捗あり」を P1（前回 compact 以降にアシスタントテキスト1文字以上）または P2（異なるツール2種類以上使用）の OR で定義し、無進捗 compact が既定3回・同一ツール5連打・実行時間45分（サーバー側60分ハードタイムアウトより先行）のいずれかで打ち切り。閾値は全て `DEVRELAY_SDK_*` 環境変数で上書き可、`DEVRELAY_SDK_LOOP_GUARD_DISABLED=1` でキルスイッチ。**同一ツール連打カウンタは compact でリセットしない**（`COMPACT→tool→COMPACT→tool` という実際の事故パターンを捕まえるための設計、回帰テストで固定）。`ai-runner.ts`（`sendPromptToAiSdk()`）に6箇所フックし、`compact_metadata`/`compactMetadata`・`pre_tokens`/`preTokens` のフィールド名ゆらぎを両対応で防御的に読む。打ち切り時は `tChat()` で理由を明示（`loopGuard.compactLoop`/`toolRepeat`/`wallClock`、#325 静かなフォールバック禁止の方針を継続）。
+
+#### B（前提・実際に止める）
+
+`sdkOptions` に `abortController` を追加し `activeSdkAborts` Map で管理、`cancelAiSession()` に SDK abort 分岐を追加（PTY → SDK abort → 従来の `process.kill` の順）。**catch ブロックの罠**: abort で発生する `AbortError` が既存の `err.message.includes('session')` 判定に誤って一致し `resumeFailed=true` → 同一プロンプト再送でループが再開する事故を防ぐため、`catch` の**最初の文**で `loopGuardAborted` ガードを必ず通す設計にした。B-2（キャンセルの正直化）: `AiCancelledPayload.cancelled?` を追加し、`agent-manager.ts` の `handleAiCancelled()` が `cancelled===false` のときのみ「止められなかった」旨を通知（`undefined`=旧 Agent は fail-open）。
+
+#### C（根治・独立）
+
+ターン内で auto-compact が閾値回数（既定3、`DEVRELAY_AUTO_COMPACT_ROTATE_THRESHOLD`）以上発生したら、ターン自体は最後まで完走させたうえで次ターンの前に resume セッションを破棄する `finalizeAutoCompactRotation()` を `ai-runner.ts` に実装。呼び出しは正常完了パス2箇所のみで `abortController.abort()` は呼ばない（＝「ターンの途中では切らない」を構造的に担保）。判定に `contextUsage.percentage` は使用しない（壊れた指標のため）。
+
+#### 検証
+
+`pnpm build` 6 workspace green、`node --test` を workspace ごと個別実行して `packages/shared` 15/15・`apps/server` 92/92・`agents/linux` 169/169（新規33件）・`agents/macos` 140/140（新規33件）すべて green・fail 0。静的検証（byte-identical diff、既存3検知の無変更、`maxTurns:200` 残存、dist 反映、catch ガードが最初の文であること）すべて確認済み。
+
+#### 反映
+
+commit + push 必須、`pm2 restart devrelay-server` 必須（`packages/shared`/`apps/server` を変更したため）、各マシン（Linux/macOS）の `u` 必須（Agent 側が本体）。実チャットでの E2E 確認（意図的発火・通常長時間作業での非発火・`c` での実停止・Devin/Codex/PTY 非退行）は反映後に別サイクルで実施。
+
+---
+
 ### #354: `DESKTOP-1JR1NLL/c-shiraki` 再インストール後も直らなかった3件を修正（D1: runningCodeStale の単一ファイル判定 / D2: agent.log 文字化け / D3: claude 未インストール時の誤警告） (2026-09-02)
 
 #### 背景

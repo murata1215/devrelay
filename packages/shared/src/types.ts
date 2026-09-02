@@ -464,6 +464,10 @@ export interface AiCancelPayload {
 export interface AiCancelledPayload {
   machineId: string;
   sessionId: string;
+  /** #355: `cancelAiSession()` の実際の戻り値。true=実際に停止できた、false=対象プロセスが
+   *  見つからず停止できなかった（Claude SDK 経路で abortController が未登録だった等）。
+   *  未指定（旧 Agent）は従来どおり成功扱い（fail-open、後方互換のため）。 */
+  cancelled?: boolean;
 }
 
 /** Agent → Server: バージョン情報の応答 */

@@ -1054,10 +1054,17 @@ async function handleSessionAiTool(payload: { machineId: string; sessionId: stri
 
 /** Agent から AI プロセスキャンセル完了の通知を受信 */
 async function handleAiCancelled(payload: AiCancelledPayload) {
-  const { sessionId } = payload;
-  console.log(`⛔ AI process cancelled for session ${sessionId}`);
+  const { sessionId, cancelled } = payload;
+  console.log(`⛔ AI cancel result for session ${sessionId}: cancelled=${cancelled ?? '(unspecified, legacy agent)'}`);
   const lang = await resolveSessionLanguage(sessionId);
-  await broadcastToSession(sessionId, tChat(lang, 'cancel.done'), false);
+  // #355: cancelAiSession() の実際の戻り値を正直に反映する（#325 静かなフォールバック禁止）。
+  // `cancelled===false` のときだけ「止められなかった」と明示する。
+  // `undefined`（`cancelled` フィールドを送らない旧 Agent）は従来どおり成功扱い＝fail-open。
+  if (cancelled === false) {
+    await broadcastToSession(sessionId, tChat(lang, 'cancel.failed'), false);
+  } else {
+    await broadcastToSession(sessionId, tChat(lang, 'cancel.done'), false);
+  }
 }
 
 // -----------------------------------------------------------------------------

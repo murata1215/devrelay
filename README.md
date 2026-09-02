@@ -32,7 +32,8 @@ Turn your phone into a remote terminal for AI-powered development.
 - **Message File Storage**: Attached files stored in DB (PostgreSQL bytea) with inline image preview and lightbox
 - **Agent Doc Folder**: Upload documents via DocPanel, auto-synced to agent filesystem via WebSocket
 - **Soft Delete**: Machine deletion preserves all conversation history
-- **Kill Command**: Cancel running AI process mid-execution from chat
+- **Kill Command**: Cancel running AI process mid-execution from chat. On the Claude SDK execution path, `c` now actually aborts the run via `AbortController` (previously it reported success even though the SDK subprocess kept running) and honestly reports failure if the abort didn't succeed (#355)
+- **Auto-Compact Loop Guard**: Detects and stops Claude SDK runs stuck repeating `compact_boundary` with no real progress (observed incident: 138 minutes, 79 consecutive compacts). "Progress" is defined as either 1+ character of new assistant text or 2+ distinct tools used since the last compact; without either, the run is aborted after 3 no-progress compacts, 5 repeats of the same tool, or 45 minutes wall-clock (ahead of the server's 60-minute hard timeout). If a turn hits 3+ auto-compacts but still completes normally, the resume session is discarded before the next turn so the next prompt starts fresh instead of resuming a bloated context (#355)
 - **Remote Config**: Configure agent project search paths from WebUI (auto-sync via WebSocket)
 - **Plan Mode Log Access**: Read-only Bash commands (pm2 logs, git status, journalctl, etc.) available during plan mode via `--allowedTools`
 - **Allowed Tools Management**: Edit plan mode allowed tools from WebUI Settings page (Linux/Windows side-by-side, real-time sync to agents)

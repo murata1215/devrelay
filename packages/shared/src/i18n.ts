@@ -247,6 +247,9 @@ export const chatMessages = {
   'agreement.none': { en: '⚠️ DevRelay Agreement not applied - apply it with `ag`', ja: '⚠️ DevRelay Agreement 未対応 - `ag` で対応できます' },
   'storage.saved': { en: '💾 Storage context saved ({n} chars)', ja: '💾 ストレージコンテキストを保存しました（{n}文字）' },
   'cancel.done': { en: '⛔ AI process cancelled', ja: '⛔ AI プロセスをキャンセルしました' },
+  // #355: `c` が実際には効かなかった場合に正直に伝える（従来は cancelAiSession() の戻り値を
+  // 無視して常に「キャンセルしました」と表示しており、138分ループでも「止めた」と嘘をついていた）。
+  'cancel.failed': { en: '⚠️ Could not stop the AI process (no matching running process was found — it may have already finished, or the machine does not yet support cancellation for this run mode).', ja: '⚠️ AI プロセスを停止できませんでした（対象の実行中プロセスが見つかりませんでした。既に終了しているか、この実行方式ではまだキャンセルに対応していない可能性があります）。' },
 
   // --- session-manager.ts 残り（#319） ---
   'session.machineOffline': { en: '⚠️ Session ended because the machine went offline. Send `c` to reconnect.', ja: '⚠️ マシンがオフラインになったため、セッションが終了しました。`c` で再接続できます。' },
@@ -269,6 +272,29 @@ export const chatMessages = {
   'progress.codexFile': { en: '📝 Updating {path}...', ja: '📝 {path} を更新中...' },
   'progress.codexSearch': { en: '🔍 Searching: {query}', ja: '🔍 検索中: {query}' },
   'progress.devinStep': { en: '{tool} running', ja: '{tool} を実行中' },
+
+  // --- #355: Claude SDK auto-compact 無限ループ検知（sdk-loop-guard.ts） ---
+  // 実測 138.3 分・79 回連続の空回りを自動停止するための通知。
+  // いずれも「なぜ止めたか」と「セッションを破棄したので次は新規で始まる」を明記する。
+  'loopGuard.compactLoop': {
+    en: '🛑 **Stopped: auto-compact loop detected**\nAuto-compact happened {compacts} times in a row with no progress (no reply text, no new tool). The session context was already near its limit (~{preTokens} tokens) and kept compacting itself without moving forward for about {minutes} minutes.\nThe session has been discarded, so the next message will start a brand-new session (no resume). Please try your request again.',
+    ja: '🛑 **停止しました: auto-compact の無限ループを検知**\n進捗（返信テキストや新しいツール使用）が無いまま auto-compact が{compacts}回連続で発生しました。セッションのコンテキストが既に上限付近（約{preTokens}トークン）で、約{minutes}分間空回りし続けていました。\nセッションは破棄したので、次のメッセージは新規セッションから始まります（resume しません）。お手数ですがもう一度リクエストしてください。',
+  },
+  'loopGuard.toolRepeat': {
+    en: '🛑 **Stopped: identical tool call repeated**\nThe same tool call ({tool}, same arguments) repeated {repeats} times in a row with no progress, over about {minutes} minutes.\nThe session has been discarded, so the next message will start a brand-new session (no resume). Please try your request again.',
+    ja: '🛑 **停止しました: 同一ツール呼び出しの連打を検知**\n同じツール呼び出し（{tool}、同じ引数）が進捗なく{repeats}回連続しました（約{minutes}分間）。\nセッションは破棄したので、次のメッセージは新規セッションから始まります（resume しません）。お手数ですがもう一度リクエストしてください。',
+  },
+  'loopGuard.wallClock': {
+    en: '🛑 **Stopped: execution time limit reached**\nThis run has been going for about {minutes} minutes ({compacts} auto-compacts so far) and was force-stopped as a safety net.\nThe session has been discarded, so the next message will start a brand-new session (no resume). Please try your request again.',
+    ja: '🛑 **停止しました: 実行時間の上限に到達**\nこの実行は約{minutes}分続いており（これまでの auto-compact 回数: {compacts}回）、安全のため強制停止しました。\nセッションは破棄したので、次のメッセージは新規セッションから始まります（resume しません）。お手数ですがもう一度リクエストしてください。',
+  },
+  // #355 Workstream C（根治）: 今回のターン中に auto-compact が閾値回数以上発生した場合、
+  // ターン自体は最後まで完走させた上でこのメッセージを添え、次のメッセージから新規セッションにする
+  // （resume しない）。異常停止ではなく予防的なローテーションのため loopGuard.* とは別キーにする。
+  'sessionRotate.autoCompact': {
+    en: '🔄 **Note: session rotated (repeated auto-compact)**\nThis turn triggered auto-compact {count} times (threshold: {threshold}), which usually means the conversation history has grown too large. This turn completed normally, but the next message will start a brand-new session (no resume) to avoid the summary growing further.',
+    ja: '🔄 **お知らせ: セッションをローテーションしました（auto-compact の多発）**\n今回のターンで auto-compact が{count}回発生しました（しきい値: {threshold}回）。会話履歴が肥大化しているサインのため、このターン自体は最後まで完了しましたが、次のメッセージからは新規セッションで開始します（resume しません）。サマリーがこれ以上肥大化するのを防ぐための予防的な措置です。',
+  },
 
   // --- 権限/セキュリティ ---
   'security.permissionDenied': { en: '🔒 You do not have permission to run commands.', ja: '🔒 コマンドを実行する権限がありません。' },

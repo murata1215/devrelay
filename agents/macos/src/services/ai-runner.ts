@@ -12,8 +12,9 @@ import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWa
 import { decidePlanPermission } from './plan-permission.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine } from './devin-diagnostics.js';
-import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
+import { saveClaudeSessionId, clearClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
+import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 
@@ -450,7 +451,15 @@ export interface AiRunResult {
     fiveHour?: RateLimitEntry;
     sevenDay?: RateLimitEntry;
   };
+  /** #355: loop-guard がループを検知しセッションを破棄した場合 true。resume 用セッション ID の
+   *  ファイル・メモリ両方が破棄済みであることを示す（次ターンは新規セッションで開始する）。 */
+  sessionDiscarded?: boolean;
 }
+
+// #355: activeSdkAborts — 実行中の Claude SDK クエリを外部から中断するための
+// AbortController レジストリ（sessionId 単位）。cancelAiSession() の `c` コマンド経路と
+// sdk-loop-guard によるタイムアウト強制打ち切りの両方から使用する。
+const activeSdkAborts = new Map<string, AbortController>();
 
 // Active AI sessions: sessionId -> AiSession
 const activeSessions = new Map<string, AiSession>();
@@ -806,10 +815,18 @@ async function sendPromptToAiSdk(
     },
     // Claude SDK モデル指定（ユーザー設定 `l` コマンド／Settings で変更可能、#251）
     model: options.model,
+    // #355: `return` だけでは claude サブプロセスが死なないため（sdk.mjs 実測: signal は
+    // spawn() に渡され、abort リスナーが SIGTERM を送る）、外部から確実に中断できるように
+    // AbortController を渡す。cancelAiSession() の `c` コマンド経路と sdk-loop-guard の
+    // 強制打ち切りの両方がこれを使う。
+    abortController: new AbortController(),
   };
   if (options.model) {
     console.log(`🧠 [SDK] Using model: ${options.model}`);
   }
+  // #355: このセッションの中断ハンドルをレジストリに登録（cancelAiSession() から参照する）。
+  const sdkAbortController = sdkOptions.abortController as AbortController;
+  activeSdkAborts.set(sessionId, sdkAbortController);
 
   // #287: SDK 内蔵 cli.js が欠落している場合はシステム claude へフォールバック。
   // 内蔵版が健全なら null → pathToClaudeCodeExecutable を設定せず従来どおり内蔵版を使う。
@@ -1015,9 +1032,79 @@ async function sendPromptToAiSdk(
     console.log(`🔄 [SDK] Resuming session: ${options.resumeSessionId.substring(0, 8)}...`);
   }
 
+  // #355: auto-compact 無限ループ検知（実測 138.3 分・79 回連続の事故対策）。
+  const loopGuardConfig = resolveLoopGuardConfig(process.env);
+  const loopGuardState = createLoopGuardState(Date.now());
+  let loopGuardAborted = false;
+
+  const abortForLoopGuard = async (
+    reason: 'compactLoop' | 'toolRepeat' | 'wallClock',
+    detail?: { compacts?: number; preTokens?: number; minutes?: number; repeats?: number; tool?: string }
+  ): Promise<AiRunResult> => {
+    loopGuardAborted = true;
+    const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+    const key = reason === 'compactLoop' ? 'loopGuard.compactLoop' : reason === 'toolRepeat' ? 'loopGuard.toolRepeat' : 'loopGuard.wallClock';
+    console.log(`[claude/sdk] 🛑 loop-guard triggered: reason=${reason} detail=${JSON.stringify(detail ?? {})}`);
+    onOutput(tChat(lang, key, {
+      compacts: detail?.compacts ?? 0,
+      preTokens: detail?.preTokens ?? 0,
+      minutes: detail?.minutes ?? 0,
+      repeats: detail?.repeats ?? 0,
+      tool: detail?.tool ?? '',
+    }), true);
+    result.sessionDiscarded = true;
+    if (options.persistProjectState !== false) {
+      try {
+        await clearClaudeSessionId(projectPath);
+      } catch (e) {
+        console.error(`[claude/sdk] Failed to clear claude session id after loop-guard abort:`, e);
+      }
+    }
+    sdkAbortController.abort();
+    return result;
+  };
+
+  // #355 Workstream C（根治）: 今回のターン中に compact_boundary の trigger==='auto' が
+  // 何回発生したかを数える（loop-guard の noProgressCompactCount とは独立、進捗の有無を問わず
+  // 単純カウント）。判定に contextUsage.percentage は使わない（壊れた指標のため）。
+  let autoCompactCountThisTurn = 0;
+  const autoCompactRotateThresholdRaw = Number(process.env.DEVRELAY_AUTO_COMPACT_ROTATE_THRESHOLD);
+  const autoCompactRotateThreshold =
+    Number.isFinite(autoCompactRotateThresholdRaw) && autoCompactRotateThresholdRaw > 0
+      ? Math.floor(autoCompactRotateThresholdRaw)
+      : 3;
+
+  /**
+   * #355 Workstream C: auto-compact が閾値回数以上発生していたら、ターン完走後（結果確定後、
+   * まだ最終 onOutput を送る前）に resume 用セッションを破棄する。ターンの応答自体は変更せず、
+   * 「途中では切らない」という設計を守る。切ったことは必ず onOutput で明示する（#325）。
+   */
+  const finalizeAutoCompactRotation = async (): Promise<void> => {
+    if (autoCompactCountThisTurn < autoCompactRotateThreshold) return;
+    console.log(`[claude/sdk] 🔄 auto-compact rotate threshold reached (${autoCompactCountThisTurn}/${autoCompactRotateThreshold}), discarding session before next turn`);
+    onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'sessionRotate.autoCompact', {
+      count: autoCompactCountThisTurn,
+      threshold: autoCompactRotateThreshold,
+    }), false);
+    result.sessionDiscarded = true;
+    if (options.persistProjectState !== false) {
+      try {
+        await clearClaudeSessionId(projectPath);
+      } catch (e) {
+        console.error(`[claude/sdk] Failed to clear claude session id after auto-compact rotation:`, e);
+      }
+    }
+  };
+
   try {
     for await (const message of query({ prompt, options: sdkOptions })) {
       const m = message as any;
+
+      // #355: 実行時間上限チェック（既定45分、サーバー側60分ハードタイムアウトより先に発火させる）
+      const loopGuardWallClock = checkWallClock(loopGuardState, Date.now(), loopGuardConfig);
+      if (loopGuardWallClock.abort) {
+        return await abortForLoopGuard('wallClock', loopGuardWallClock.detail);
+      }
 
       // セッション ID 抽出（system/init または result から）
       if (m.session_id && !result.extractedSessionId) {
@@ -1029,6 +1116,25 @@ async function sendPromptToAiSdk(
             console.error(`Failed to save session ID:`, err);
           });
         }
+      }
+
+      // #355: compact_boundary イベント（auto-compact 発生）を loop-guard に通知する。
+      if (m.type === 'system' && m.subtype === 'compact_boundary') {
+        const compactMeta = m.compact_metadata ?? m.compactMetadata;
+        const preTokens = compactMeta?.pre_tokens ?? compactMeta?.preTokens;
+        // #355 Workstream C: auto-compact のみを数える（手動 /compact は対象外）
+        if (compactMeta?.trigger === 'auto') {
+          autoCompactCountThisTurn += 1;
+        }
+        const compactDecision = observeLoopGuardEvent(
+          loopGuardState,
+          { kind: 'compact', preTokens, nowMs: Date.now() },
+          loopGuardConfig
+        );
+        if (compactDecision.abort) {
+          return await abortForLoopGuard('compactLoop', compactDecision.detail);
+        }
+        continue;
       }
 
       // assistant メッセージ: テキストとツール使用を出力
@@ -1070,9 +1176,21 @@ async function sendPromptToAiSdk(
             fullOutput += block.text;
             console.log(`[claude/sdk] +${block.text.length} chars`);
             onOutput(block.text, false);
+            // #355: 「進捗あり」の証拠として P1（テキスト出力）を loop-guard に通知する
+            observeLoopGuardEvent(loopGuardState, { kind: 'text', text: block.text, nowMs: Date.now() }, loopGuardConfig);
           } else if (block.type === 'tool_use' && block.name) {
             console.log(`[claude/sdk] 🔧 Using tool: ${block.name}`);
             onOutput(`\n${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.usingTool', { tool: block.name })}\n`, false);
+            // #355: 「進捗あり」の証拠として P2（異なるツール種別）を loop-guard に通知、
+            // 同一ツール連打（層2）も同時に検知する
+            const toolDecision = observeLoopGuardEvent(
+              loopGuardState,
+              { kind: 'tool', name: block.name, input: block.input, nowMs: Date.now() },
+              loopGuardConfig
+            );
+            if (toolDecision.abort) {
+              return await abortForLoopGuard('toolRepeat', toolDecision.detail);
+            }
           }
         }
       }
@@ -1154,6 +1272,9 @@ async function sendPromptToAiSdk(
         if (fullOutput.length > 0 && !m.is_error) {
           reportClaudeAuthOkFromRuntime();
         }
+        // #355 Workstream C: ターンが完走したのでここで初めてローテーション判定を行う
+        // （最終 onOutput より前、応答内容自体には影響しない）
+        await finalizeAutoCompactRotation();
         if (fullOutput.length === 0) {
           onOutput('(No response from AI)', true, result.usageData);
         } else {
@@ -1165,6 +1286,14 @@ async function sendPromptToAiSdk(
       }
     }
   } catch (err: any) {
+    // #355: loop-guard による意図的な abort()（AbortError）は、既存の resume 失敗検出
+    // （err.message.includes('session') 等）に誤って一致し resumeFailed=true になると
+    // connection.ts が同じプロンプトを再送してループが再開してしまう。
+    // そのため catch の最初で必ずこのガードを通す（既存分岐より前）。
+    if (loopGuardAborted) {
+      console.log(`[claude/sdk] 🛑 loop-guard abort() caught (${err?.name ?? err?.message ?? 'unknown'}), returning discarded result without retry`);
+      return result;
+    }
     console.error(`[claude/sdk] Error:`, err.message);
 
     // resume 失敗のエラーを検出
@@ -1182,12 +1311,20 @@ async function sendPromptToAiSdk(
       onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true);
     }
     return result;
+  } finally {
+    // #355: このセッションの abort ハンドルをレジストリから除去する。
+    // 同一性ガード（===）で後続ターンの新しい controller を誤って消さないようにする。
+    if (activeSdkAborts.get(sessionId) === sdkAbortController) {
+      activeSdkAborts.delete(sessionId);
+    }
   }
 
   // 完了シグナル送信（フォールバック）
   // 通常は result ハンドラ内で送信済み（completionSent=true）。
   // ここに来るのは稀に result メッセージが来ずループが自然終了したケースのみ。
   if (!completionSent) {
+    // #355 Workstream C: result メッセージが来なかった稀なケースでもローテーション判定は行う
+    await finalizeAutoCompactRotation();
     if (fullOutput.length === 0) {
       onOutput('(No response from AI)', true, result.usageData);
     } else {
@@ -2329,6 +2466,17 @@ export async function stopAiSession(sessionId: string): Promise<void> {
  * @returns キャンセルできた場合 true、プロセスが存在しない場合 false
  */
 export function cancelAiSession(sessionId: string): boolean {
+  // #355: Claude SDK 経路（session.process が null のため下の分岐は必ず false を返す）。
+  // activeSdkAborts に登録済みの AbortController を実際に abort() することで
+  // claude サブプロセスに SIGTERM を送る（`c` コマンドが「キャンセルした」と嘘をつく問題の解消）。
+  // 注: macOS Agent は PTY（terminalMode）経路を持たないため、linux 版と異なり PTY 分岐は無い。
+  const sdkAbortController = activeSdkAborts.get(sessionId);
+  if (sdkAbortController) {
+    console.log(`⛔ Cancelling AI session (Claude SDK): ${sessionId}`);
+    sdkAbortController.abort();
+    return true;
+  }
+
   const session = activeSessions.get(sessionId);
   if (!session || !session.process || session.process.exitCode !== null) {
     return false;
