@@ -6,6 +6,63 @@
 
 ## 実装済み機能
 
+### #357: manager.devrelay.io へのログイン後トークン受け渡し (2026-09-04)
+
+#### 背景
+
+`devrelay-manager`（TestFlight 管理、`manager.devrelay.io` / :9026）を core の `AuthSession` に相乗りさせ、`https://manager.devrelay.io/#token=<token>` として開くことで認証させる。core 側は「ログイン後に manager へ行く」導線を追加するだけで、認証ロジック（`AuthSession` の発行・検証・IP 制限）には一切触れない。トークンは既に `localStorage['token']` に入っており、これを **URL フラグメント**（`#token=`）で渡す — フラグメントはサーバーへ送信されずアクセスログにも残らないため、クエリ文字列（`?token=`）は使わない。
+
+#### 実装
+
+**A. 遷移先の固定（オープンリダイレクト防止）**
+
+新規 `packages/shared/src/manager-redirect.ts`（外部 import ゼロの純粋関数3本）:
+- `resolveNextTarget(raw)`: クエリ `?next=` の値を検証。許容値は `'manager'` 完全一致のみで、任意 URL・相対パス・大文字違い・前後空白付き・`javascript:` スキーム等はすべて `null`。
+- `buildManagerTokenUrl(baseUrl, token)`: manager へのトークン付き遷移 URL を組み立てる。`http(s)://` 以外のスキーム、空文字は `null`。末尾スラッシュを正規化し `#token=` 形式のみを出力する。
+- `isManagerRedirectEnabled(value)`: `managerRedirect` 設定（文字列保存）が `'true'` かどうか。
+
+`packages/shared/src/index.ts` に明示的 named re-export を追加（#309/#310 の教訓により `export *` は使わない）。`apps/web/vite.config.ts` に `__MANAGER_WEB_URL__` を `define` 追加（既存 `__APP_VERSION__` と同じビルド時定数パターン、既定値 `https://manager.devrelay.io`、`vite-env.d.ts` に `declare const` 追加）。
+
+**B. ログイン画面の `?next=manager`**
+
+新規 `apps/web/src/lib/managerRedirect.ts` が shared の純粋関数と `window`/`localStorage`/`settings` API を繋ぐ薄いラッパー（`redirectToManager`/`openManagerInNewTab`/`maybeRedirectAfterLogin`）。
+
+- `LoginPage.tsx`: email/password ログイン成功後、および Google ボタン押下前（`next` を sessionStorage へ退避）に配線。
+- `AuthCallbackPage.tsx`: Google OAuth コールバックで sessionStorage から `next` を回収し即削除（使い捨て）。既存の 200ms 遅延（PWA Service Worker 競合回避）は維持したまま分岐。
+- `App.tsx` の `PublicRoute`: ログイン済みユーザーは現行実装だと `<Navigate to="/" replace />` により `LoginPage` が一度もマウントされないため、`?next=manager` の即時遷移はここに実装する必要があった（`useEffect` で判定、`managerRedirect` トグルはここでは見ない＝「ログイン成功の瞬間だけ」発火させる設計）。
+
+**C. ユーザー設定トグル「ログイン後に Manager を開く」**
+
+DDL 不要。既存 `UserSettings` の key/value 機構にそのまま追加。`apps/server/src/services/user-settings.ts` に `SettingKeys.MANAGER_REDIRECT: 'managerRedirect'` を追加、`apps/server/src/routes/api.ts` の `PUT /api/settings/:key` に `language` と同形の値検証（`'true'`/`'false'` のみ許可）を追加。`apps/web/src/pages/SettingsPage.tsx` の一般タブ、言語カード直後に同スタイルのカードでチェックボックスを1個追加（`data.managerRedirect === 'true'` を参照、`settings.update()` で保存、`common.enabled`/`common.disabled` ラベルを再利用）。
+
+**D. 手動の切替導線**
+
+`apps/web/src/components/Layout.tsx` のヘッダーにデスクトップ・モバイル2箇所「Manager を開く」ボタンを追加。`<a href>` ではなく `onClick={openManagerInNewTab}` を使用し、クリック時点の最新トークンで URL を組み立てる（トークンを DOM に置かない設計）。i18n 新規5キー（`nav.openManager` / `settings.managerRedirect.{title,description,saved,saveFailed}`）を `apps/web/src/i18n/messages.ts` に追加。
+
+#### 検証
+
+- `pnpm build` 6 workspace green。
+- `node --test` を workspace ごと個別実行（#333 の教訓）で `packages/shared` **15→39**（新規24件、`manager-redirect.ts` の攻撃形テスト含む）・`apps/server` 92/92（非退行、バリデーション追加のみのため新規テストなし）・`agents/linux` 178/178・`agents/macos` 140/140 すべて非退行で green。
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` = 0。
+- `git diff --stat -- agents/ prisma/` が空（Agent・DB 完全無変更）。
+- `grep -rn '?token=' apps/web/src` の8件はすべて本変更と無関係な既存ファイル（WebSocket 認証等）で、`git diff` が空であることを確認。
+- ビルド済みバンドルに `manager.devrelay.io` 文字列が含まれることを確認（`define` 注入の反映確認）。
+
+#### 変更ファイル（13件、プラン記載どおり過不足なし）
+
+新規: `packages/shared/src/manager-redirect.ts` + `tests/manager-redirect.test.mjs`、`apps/web/src/lib/managerRedirect.ts`。
+既存: `packages/shared/src/index.ts`、`apps/web/vite.config.ts`、`apps/web/src/vite-env.d.ts`、`apps/web/src/App.tsx`、`apps/web/src/components/Layout.tsx`、`apps/web/src/i18n/messages.ts`、`apps/web/src/pages/LoginPage.tsx`、`apps/web/src/pages/AuthCallbackPage.tsx`、`apps/web/src/pages/SettingsPage.tsx`、`apps/server/src/routes/api.ts`、`apps/server/src/services/user-settings.ts`。
+
+**DB マイグレーション不要**（既存 key/value テーブルを再利用）。Agent（3 OS）は完全無変更のため各マシンの `u` は不要。`apps/server` + `packages/shared` を変更しているため **server 再起動が必要**（人間が実行、本サイクルでは未実施）。`apps/web` は静的配信のためビルドのみで反映。
+
+#### 未実施（人間が反映後に別サイクルで実施）
+
+1. `pnpm build` 後 `pm2 restart devrelay-server`
+2. `app.devrelay.io/settings` 一般タブでのトグル ON/OFF・再読込後の永続化確認
+3. `https://app.devrelay.io/login?next=manager` での email/password ログイン → `manager.devrelay.io/#token=…` への遷移、戻るで `/login` に戻らないこと
+4. 同じく Google ログインでの遷移、`?next=evil` 等が無視され `/` に入ること
+5. ヘッダー「Manager を開く」での新規タブ遷移確認
+
 ### #356: Windows Agent の `u`（自己更新）が依存プローブで必ず中断する不具合を修正 (2026-09-03)
 
 #### 背景

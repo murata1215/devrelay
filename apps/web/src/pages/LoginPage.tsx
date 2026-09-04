@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import { resolveNextTarget, maybeRedirectAfterLogin, LOGIN_NEXT_STORAGE_KEY } from '../lib/managerRedirect';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
@@ -11,6 +12,8 @@ export function LoginPage() {
   const { login } = useAuth();
   const { t } = useLanguage();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const nextTarget = resolveNextTarget(searchParams.get('next'));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,12 +22,24 @@ export function LoginPage() {
 
     try {
       await login(email, password);
+      if (await maybeRedirectAfterLogin(nextTarget)) return;
       navigate('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : t('auth.loginFailed'));
     } finally {
       setLoading(false);
     }
+  };
+
+  // Google OAuth はページ全体が離脱するため、next をラウンドトリップ間 sessionStorage に退避する
+  // （コールバック側 AuthCallbackPage で回収・削除する）
+  const handleGoogleSignIn = () => {
+    if (nextTarget) {
+      sessionStorage.setItem(LOGIN_NEXT_STORAGE_KEY, nextTarget);
+    } else {
+      sessionStorage.removeItem(LOGIN_NEXT_STORAGE_KEY);
+    }
+    window.location.href = '/api/auth/google';
   };
 
   return (
@@ -41,7 +56,7 @@ export function LoginPage() {
         <div className="mt-6">
           <button
             type="button"
-            onClick={() => { window.location.href = '/api/auth/google'; }}
+            onClick={handleGoogleSignIn}
             className="w-full flex items-center justify-center gap-3 py-2 px-4 border border-[var(--border-color)] rounded-md shadow-sm text-sm font-medium text-[var(--text-primary)] bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] transition-colors"
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24">

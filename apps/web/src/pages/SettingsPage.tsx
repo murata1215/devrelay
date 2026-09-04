@@ -1311,6 +1311,33 @@ export function SettingsPage() {
           <option value="ja">{t('settings.language.japanese')}</option>
         </select>
       </div>
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">{t('settings.managerRedirect.title')}</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-4">{t('settings.managerRedirect.description')}</p>
+        <label className="flex items-center gap-2 text-sm text-[var(--text-primary)]">
+          <input
+            type="checkbox"
+            checked={data.managerRedirect === 'true'}
+            disabled={saving === 'managerRedirect'}
+            onChange={async (event) => {
+              const newValue = event.target.checked ? 'true' : 'false';
+              setSaving('managerRedirect');
+              setError('');
+              try {
+                await settings.update('managerRedirect', newValue);
+                setData((prev) => ({ ...prev, managerRedirect: newValue }));
+                setSuccess(t('settings.managerRedirect.saved'));
+              } catch {
+                setError(t('settings.managerRedirect.saveFailed'));
+              } finally {
+                setSaving(null);
+              }
+            }}
+            className="w-4 h-4"
+          />
+          {data.managerRedirect === 'true' ? t('common.enabled') : t('common.disabled')}
+        </label>
+      </div>
       </div>
 
       {/* Enterprise（組織）Section */}

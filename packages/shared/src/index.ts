@@ -45,3 +45,10 @@ export {
   getWCommandPrompt,
   W_COMMAND_PROMPT_PREFIXES,
 } from './i18n.js';
+// manager.devrelay.io へのログイン後リダイレクト用純粋関数（同じ理由で明示的 named export）
+export {
+  type ManagerRedirectTarget,
+  resolveNextTarget,
+  buildManagerTokenUrl,
+  isManagerRedirectEnabled,
+} from './manager-redirect.js';

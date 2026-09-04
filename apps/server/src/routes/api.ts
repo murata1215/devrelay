@@ -891,6 +891,11 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'Language must be en or ja' });
     }
 
+    // manager.devrelay.io へのログイン後リダイレクト設定も同様に文字列 'true'/'false' のみ許可する
+    if (key === SettingKeys.MANAGER_REDIRECT && value !== 'true' && value !== 'false') {
+      return reply.status(400).send({ error: 'managerRedirect must be true or false' });
+    }
+
     // API キー・トークンは暗号化して保存
     const shouldEncrypt = key.includes('api_key') || key.includes('secret') || key.includes('token');
     const storedValue = shouldEncrypt ? encrypt(value) : value;

@@ -6,6 +6,7 @@ import { useTheme } from '../contexts/ThemeContext';
 import { org as orgApi } from '../lib/api';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled } from '../utils/notification-sound';
 import { useLanguage } from '../contexts/LanguageContext';
+import { openManagerInNewTab } from '../lib/managerRedirect';
 
 interface LayoutProps {
   children: ReactNode;
@@ -120,6 +121,12 @@ export function Layout({ children }: LayoutProps) {
                   </svg>
                 )}
               </button>
+              <button
+                onClick={openManagerInNewTab}
+                className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-sm"
+              >
+                {t('nav.openManager')}
+              </button>
               <span className="text-[var(--text-secondary)] text-sm">{user?.name || user?.email}</span>
               <button
                 onClick={logout}
@@ -203,6 +210,15 @@ export function Layout({ children }: LayoutProps) {
             <div className="pt-4 pb-3 border-t border-[var(--border-color)]">
               <div className="px-4 flex items-center justify-between">
                 <span className="text-[var(--text-secondary)] text-sm">{user?.name || user?.email}</span>
+                <button
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    openManagerInNewTab();
+                  }}
+                  className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-sm"
+                >
+                  {t('nav.openManager')}
+                </button>
                 <button
                   onClick={() => {
                     setMobileMenuOpen(false);

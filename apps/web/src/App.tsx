@@ -1,4 +1,5 @@
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { OrganizationProvider } from './contexts/OrganizationContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -17,6 +18,7 @@ import { DevReportsPage } from './pages/DevReportsPage';
 import { TeamPage } from './pages/TeamPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { NotificationBanner } from './components/NotificationBanner';
+import { resolveNextTarget, redirectToManager } from './lib/managerRedirect';
 
 /**
  * 認証済みページのコンテンツ
@@ -75,6 +77,17 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const { t } = useLanguage();
+  const [searchParams] = useSearchParams();
+  const nextTarget = resolveNextTarget(searchParams.get('next'));
+
+  // ログイン済みで /login?next=manager を開いた場合も即座に manager へ遷移する。
+  // managerRedirect トグルはここでは見ない（「ログイン成功の瞬間だけ」発火させ、
+  // app.devrelay.io を直接開く導線を常に残すため）。
+  useEffect(() => {
+    if (!loading && user && nextTarget === 'manager') {
+      redirectToManager();
+    }
+  }, [loading, user, nextTarget]);
 
   if (loading) {
     return (
@@ -85,6 +98,14 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (user) {
+    if (nextTarget === 'manager') {
+      // redirectToManager() が発火するまでの一瞬、ローディング表示を維持する
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-[var(--bg-base)]">
+          <div className="text-[var(--text-muted)]">{t('common.loading')}</div>
+        </div>
+      );
+    }
     return <Navigate to="/" replace />;
   }
 

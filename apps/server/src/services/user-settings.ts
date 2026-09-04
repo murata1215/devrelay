@@ -74,6 +74,8 @@ export const SettingKeys = {
   ORG_SUMMARY_PROVIDER: 'org_summary_provider',
   /** Agent 自動更新のグローバル kill switch（#296）。'false' のときだけ無効（未設定＝有効） */
   AUTO_UPDATE_ENABLED: 'auto_update_enabled',
+  /** ログイン後に manager.devrelay.io へ自動遷移するかどうか（'true'|'false'、未設定＝無効） */
+  MANAGER_REDIRECT: 'managerRedirect',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

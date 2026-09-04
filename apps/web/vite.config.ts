@@ -51,6 +51,11 @@ export default defineConfig({
   ],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
+    // manager.devrelay.io の公開 URL。ビルド時定数として焼き込む
+    // （apps/web は静的 SPA で .env / import.meta.env を使わないため）。
+    // ここが遷移先の唯一の情報源で、クエリ等のユーザー入力から遷移先 URL を
+    // 組み立てる経路は存在しない（オープンリダイレクト防止）。
+    __MANAGER_WEB_URL__: JSON.stringify(process.env.MANAGER_WEB_URL || 'https://manager.devrelay.io'),
   },
   server: {
     port: 5173,
