@@ -25,6 +25,14 @@ import { checkCommandPermission } from '../services/org-control.js';
 import { buildApprovalExecPrompt } from './approval-prompt.js';
 import { resolvePermissionPolicy } from '../services/permission-policy.js';
 import { fenceHumanText, neutralizeHumanInputTag, validateHumanTextLength } from '../services/human-text-fence.js';
+import {
+  ATTACHMENT_MAX_FILE_SIZE,
+  ATTACHMENT_MAX_TOTAL_SIZE,
+  ATTACHMENT_MAX_COUNT,
+  ALLOWED_ATTACHMENT_MIME_TYPES,
+  validateAttachments,
+} from '../services/attachment-validation.js';
+import { processMessageFilesEmbedding } from '../services/embedding-service.js';
 
 /**
  * #334: 人間入力テキストの長さ上限（string.length = UTF-16 コードユニット数基準）。
@@ -446,8 +454,18 @@ export function registerMcpTools(server: McpServer, userId: string) {
       projectId: z.string().describe('The target project ID'),
       instruction: z.string().describe(`The coding instruction in Markdown format (max ${SUBMIT_INSTRUCTION_MAX_LENGTH} characters)`),
       council: z.boolean().optional().describe('Opt-in to council mode (default false). NOTE: the council engine is not implemented yet; the flag is recorded only and has no effect on execution.'),
+      attachments: z.array(z.object({
+        filename: z.string().describe('File name (basename only; path separators are stripped)'),
+        mimeType: z.string().describe(`MIME type. Allowed: ${ALLOWED_ATTACHMENT_MIME_TYPES.join(', ')}`),
+        content: z.string().describe('Base64-encoded file content'),
+      })).optional().describe(
+        `Optional file attachments (max ${ATTACHMENT_MAX_COUNT} files, ${ATTACHMENT_MAX_FILE_SIZE / 1024 / 1024}MB each, ` +
+        `${ATTACHMENT_MAX_TOTAL_SIZE / 1024 / 1024}MB total). Files are written to <projectPath>/.devrelay-files/ on the ` +
+        'agent machine and their absolute paths are prepended to the prompt. Oversized requests are rejected by the ' +
+        'server before this tool runs (HTTP 413), not as a tool error.'
+      ),
     },
-    async ({ projectId, instruction, council }) => {
+    async ({ projectId, instruction, council, attachments }) => {
       // エンタープライズ統制ゲート（#268）: マネージャー未割当の member はコマンド発行不可
       const permission = await checkCommandPermission(userId);
       if (!permission.allowed) {
@@ -488,6 +506,29 @@ export function registerMcpTools(server: McpServer, userId: string) {
         };
       }
 
+      // 添付ファイル検証も createSession より前に行う（#334 と同じ規約: 状態変更の前に全ての拒否判定を終える）。
+      // #添付対応: MIME はマジックバイトで実体検証し、ファイル名は basename 化・制御文字除去でサニタイズする
+      // （file-handler.ts がファイル名をディスク書き込み先とプロンプト平文の両方に使うため）。
+      const validatedAttachments = validateAttachments(attachments ?? []);
+      if (!validatedAttachments.ok) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            error: 'attachment validation failed',
+            kind: 'submitInstruction',
+            reason: validatedAttachments.reason,
+            limits: {
+              maxCount: ATTACHMENT_MAX_COUNT,
+              maxFileSize: ATTACHMENT_MAX_FILE_SIZE,
+              maxTotalSize: ATTACHMENT_MAX_TOTAL_SIZE,
+              allowedMimeTypes: ALLOWED_ATTACHMENT_MIME_TYPES,
+            },
+            ...(validatedAttachments.detail ? { detail: validatedAttachments.detail } : {}),
+            ...(validatedAttachments.failures.length > 0 ? { failures: validatedAttachments.failures } : {}),
+          }) }],
+          isError: true,
+        };
+      }
+
       // aiTool はプロジェクトの defaultAi を使用
       const aiTool = project.defaultAi || 'claude';
 
@@ -514,6 +555,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
       await startProgressTracking(sessionId);
 
       // #334: 監査メタ情報（raw text 自体は content にそのまま保存されるため、meta には含めない）
+      // #添付対応: 添付があるときだけ既存キーの末尾に attachments を追加する（無添付時は現行と1バイトも変わらない）。
       const { count: submitNeutralizedCount } = neutralizeHumanInputTag(trimmedInstruction);
       const submitHumanTextMeta = JSON.stringify({
         kind: 'submitInstruction',
@@ -523,27 +565,50 @@ export function registerMcpTools(server: McpServer, userId: string) {
         fenced: true,
         neutralized: submitNeutralizedCount,
         rawRef: 'message.content',
+        ...(validatedAttachments.files.length > 0 ? {
+          attachments: {
+            count: validatedAttachments.files.length,
+            totalBytes: validatedAttachments.totalBytes,
+            mimeTypes: validatedAttachments.files.map(f => f.mimeType),
+            sanitizedFilenames: validatedAttachments.sanitizedFilenameCount,
+          },
+        } : {}),
       });
 
       // メッセージを DB に保存（content は fence 前の raw text を無切り詰めで保存する）
-      await prisma.message.create({
+      // #添付対応: WebUI 受け口（command-handler.ts）と同一の形でネストした MessageFile を作成する（経路を二重化しない）。
+      const userMessage = await prisma.message.create({
         data: {
           sessionId,
           role: 'user',
           content: trimmedInstruction,
           platform: 'web',
           humanTextMeta: submitHumanTextMeta,
+          files: validatedAttachments.files.length > 0 ? {
+            create: validatedAttachments.files.map(f => ({
+              filename: f.filename,
+              mimeType: f.mimeType,
+              size: f.size,
+              content: Buffer.from(f.content, 'base64'),
+              direction: 'input',
+            })),
+          } : undefined,
         },
       });
+      if (validatedAttachments.files.length > 0) {
+        processMessageFilesEmbedding(userMessage.id).catch(err =>
+          console.error('[Embedding] fire-and-forget error:', err.message));
+      }
 
       // Agent にプロンプト送信（forceNewSession: 前回セッションの JSONL 注入・resume をスキップ）
       // #334: プロンプトへの連結は human-text fence（provenance 境界）で囲んだ文字列を使う
+      // #添付対応: files（第5引数）は Agent 側まで配線済み（.devrelay-files/ に書き出しプロンプトへ絶対パスを前置）。
       await sendPromptToAgent(
         project.machineId,
         sessionId,
         fenceHumanText('submitInstruction', trimmedInstruction),
         userId,
-        undefined,
+        validatedAttachments.files.length > 0 ? validatedAttachments.files : undefined,
         undefined,
         project.path,
         aiTool as any,
@@ -554,7 +619,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
       );
 
       // 監査ログ
-      console.log(`📋 [MCP] AUDIT submit: userId=${userId}, projectId=${projectId}, council=${council === true}, rawLength=${lengthCheck.rawLength}, instruction=${trimmedInstruction.slice(0, 100)}...`);
+      console.log(`📋 [MCP] AUDIT submit: userId=${userId}, projectId=${projectId}, council=${council === true}, rawLength=${lengthCheck.rawLength}, attachments=${validatedAttachments.files.length}, instruction=${trimmedInstruction.slice(0, 100)}...`);
 
       // #331: council 未指定時はキー自体を返さない（従来と完全同形）。
       // 指定時は「静かなフォールバック禁止」(#325) に従い、エンジン未実装であることを明示する。
@@ -569,6 +634,13 @@ export function registerMcpTools(server: McpServer, userId: string) {
           status: 'planning',
           message: 'Instruction submitted. Use get_plan to check the plan status.',
           ...(councilInfo ? { council: councilInfo } : {}),
+          ...(validatedAttachments.files.length > 0 ? {
+            attachments: {
+              count: validatedAttachments.files.length,
+              totalBytes: validatedAttachments.totalBytes,
+              files: validatedAttachments.files.map(f => ({ filename: f.filename, mimeType: f.mimeType, size: f.size })),
+            },
+          } : {}),
         }) }],
       };
     }

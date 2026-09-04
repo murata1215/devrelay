@@ -24,7 +24,16 @@ const SERVER_INSTRUCTIONS = `DevRelay はAIコーディングの投入・承認�
 4) get_plan でプランを取得し、要約して読み上げ、実装の可否を聞く。
 5) ユーザーが「実装して」と言ったら approve_implementation。
 6) get_build_status で進捗・完了を確認。
-調べ物は search_project_context を使う。会話履歴の閲覧は get_conversation_history で期間指定して取得できる。添付ファイル（画像等）は get_conversation_history で attachments を確認し、get_attachment で取得できる。submit/approve は破壊的操作なので必ず確認を取る。`;
+調べ物は search_project_context を使う。会話履歴の閲覧は get_conversation_history で期間指定して取得できる。添付ファイル（画像等）は get_conversation_history で attachments を確認し、get_attachment で取得できる。submit/approve は破壊的操作なので必ず確認を取る。
+submit_instruction には画像等の添付ファイル（attachments）を渡せるが、上限を超えるリクエストは submit_instruction 自体が呼ばれる前に HTTP エラーで拒否されるため、ツールの isError ではなく HTTP レベルのエラーとして現れる点に注意。`;
+
+/**
+ * /mcp のリクエストボディ上限（16 MiB）。
+ * 添付の生バイト合計上限 10MB → base64 で約 13.34MB、加えて JSON エスケープ・
+ * ファイル名・instruction（最大 20,000 文字）・JSON-RPC の封筒分の余裕を見て 16 MiB。
+ * Fastify のグローバル既定（1 MiB）ではこの用途に届かないため /mcp にのみ明示指定する。
+ */
+const MCP_BODY_LIMIT_BYTES = 16 * 1024 * 1024;
 
 /**
  * Fastify に MCP エンドポイントを登録する
@@ -34,7 +43,8 @@ export async function mcpRoutes(app: FastifyInstance) {
   await app.register(oauthRoutes);
 
   // POST /mcp — Streamable HTTP メインエンドポイント
-  app.post('/mcp', async (request: FastifyRequest, reply: FastifyReply) => {
+  // bodyLimit: 添付ファイル（画像等）を含むリクエストのため Fastify 既定の 1 MiB から引き上げる。
+  app.post('/mcp', { bodyLimit: MCP_BODY_LIMIT_BYTES }, async (request: FastifyRequest, reply: FastifyReply) => {
     // 認証
     const userId = await authenticateMcp(request);
     if (!userId) {
