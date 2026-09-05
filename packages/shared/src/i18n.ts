@@ -372,6 +372,12 @@ export const chatMessages = {
     ja: '❌ Devin CLI がこのワークスペース（{path}）を信頼していないため実行を拒否しました。\n\n① Agent が未更新の場合は `u` を実行してください — DevRelay は `--respect-workspace-trust false` を自動的に付与するようになりました（Devin 自身が文書化している非対話/print モードの既定値に戻すだけです）。\n② それでも発生する場合は、そのマシンでそのディレクトリで一度 `devin` を対話起動して trust してください。\n③ または、そのマシンの Devin CLI の config で `respect_workspace_trust: false` を設定してください。',
   },
 
+  // --- Devin モデル選択サイクル・サイクル B（変更5）: ATIF から読み取った実モデル名の1行通知 ---
+  'devin.modelUsed': {
+    en: '🧠 Devin model: {modelName} (`{modelId}`)',
+    ja: '🧠 Devin のモデル: {modelName}（`{modelId}`）',
+  },
+
   // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---
   'humanText.tooLong': {
     en: '❌ Instruction is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',

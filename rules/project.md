@@ -1646,3 +1646,26 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   一切効かない問題）の一般解は未実装**。本サイクルは strictReadonly 判定側で和集合を取ることで症状を
   回避したが、カスタム保存自体（WebUI Settings 経由の `allowed_tools_linux`/`allowed_tools_windows`）を
   diff ベースで更新する等の恒久対応は別サイクルで検討する
+
+### Devin ATIF パーサ: 「構造化データ抽出」と「表示文言組み立て」をファイルで分離 (#361, 2026-09-05)
+
+- **`devin-atif.ts`（純関数、`tChat()` を呼ばない）と `ai-runner.ts`（表示整形、`tChat()`/`console.*`/`log.*`
+  を呼ぶ）を分離**したことで、3 OS で `devin-atif.ts` を byte-for-byte 同一にできた。従来
+  `summarizeAtifEntry()` は `ai-runner.ts` 内のローカル関数だったため OS ごとの `console.*` vs `log.*` の
+  流儀差が混入し、3 OS 同一化ができていなかった。**「ロジックと表示を同じファイルに書かない」は、複数 OS
+  でコードを複製する必要があるこのリポジトリ特有の設計指針として今後も踏襲する**
+- **ATIF-v1.7 の実キーは `steps`（`messages` ではない）**。`tool_calls[].function_name` +
+  `arguments.command` を抽出対象とし、レガシー形（`tool_name`/`tool`/`name`）にもフォールバックする。
+  `observation.results[].content` は **絶対に読まない**（AI の内部観測ログをチャットに漏らさない方針、
+  漏洩ガードテストで担保）
+- **ATIF は「ターン終了時に一括書き出し」される仕様**であるため、ライブポーラーは ATIF が出現するまで常に
+  parse 失敗し続ける。つまり `maxSteps` コストガード（#277）は **ATIF 経由では原理的に機能しない**。
+  「誤カウントの是正」と「ガードの復活」は別物であることを混同しないこと（起動時1回だけ console 警告で
+  ユーザーに `maxRuntimeMinutes` の利用を促すのみ）
+- **`contextWindow` は意図的にカタログへ追加しない**。Codex はハードコード `200000` を持つが、Devin の
+  実際のコンテキスト長は ATIF から取得できず、消費者（`apps/server`/`apps/web`）も存在しないため、嘘の
+  値を書かない方針を優先した
+- **`AiUsageData.usage?: Record<string, number>` への代入は fresh object literal でなければならない**。
+  named interface（index signature 無し）由来の値をプロパティアクセス経由でそのまま代入すると TS2322
+  になる（fresh object literal には暗黙の index signature が合成されるが、変数経由の値には合成されない
+  という TypeScript の仕様）。`{ ...source }` のスプレッドで fresh literal 化すれば解消する

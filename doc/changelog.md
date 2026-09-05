@@ -6,6 +6,51 @@
 
 ## 実装済み機能
 
+### #361: Devin モデル選択サイクル・サイクルB（ATIF-v1.7 パーサ対応 + 実モデル名・トークン使用量出力） (2026-09-05)
+
+サイクルA（`1b42693`）から持ち越された変更4（ATIF-v1.7 パーサ対応）と変更5（実モデル名・トークン使用量の
+ATIF 由来出力）を同一サイクルで実施。同じ ATIF 読み取り箇所を触るため意図的に1サイクルにまとめた。
+
+- **新規** `agents/{linux,macos,windows}/src/services/devin-atif.ts`（3 OS byte-for-byte 同一、外部 import
+  ゼロの純関数モジュール）— `extractAtifEntries`（`steps` 優先→`messages`→配列そのもの→`[parsed]`）、
+  `summarizeAtifEntry`（`source` が system/user は skip、`tool_calls[].function_name` + `arguments.command`
+  抽出、レガシー `tool_name`/`tool`/`name` にも対応、`observation.results[].content` は一切参照しない）、
+  `extractAtifModel`（`agent.model_name` の人間可読名と `steps[].extra.generation_model` の機械可読 ID、
+  後者を優先）、`extractAtifUsage`（`final_metrics` を Claude 互換の4キー `input_tokens`/`output_tokens`/
+  `cache_read_input_tokens`/`cache_creation_input_tokens` にマップ、欠落は0埋め）、`buildAtifDigest`
+  （単一 JSON 優先パース + JSONL フォールバック、`totalSteps` は `extractAtifEntries()` の実長で
+  38→8 のような誤カウントを是正）を実装。
+- **`ai-runner.ts`（3 OS）**: 旧 `summarizeAtifEntry()`（ai-runner.ts 内のローカル定義）を削除し新モジュールへ
+  の import + 表示整形ヘルパー `formatAtifStepSummary()` を追加。`buildDevinStepSummary()` を
+  `readDevinTurnDigest()` に改名・拡張（戻り値に `modelName`/`modelId`/`usage`/`totalSteps`/`permissionMode`
+  を追加）。`result.usageData` への代入をターン終了時の全 close 経路より前に移動し、モデル名を
+  `devin.modelUsed` として1行通知。ライブポーラーの `devinStepCount++` を `summary` が非 null の時のみに
+  変更（誤カウント是正の実効側）。`maxSteps` が ATIF 経由では原理的に効かない旨の1回だけの console 警告
+  を追加。
+- **`packages/shared/src/i18n.ts`**: `devin.modelUsed`（ja/en、`{modelName}`/`{modelId}`）を1キー追加。
+- **新規テスト** `agents/{linux,macos}/tests/devin-atif.test.mjs`（34件、byte-for-byte 同一）— インライン
+  JSON フィクスチャ4種、8ステップ ATIF で `totalSteps===8` の中核回帰テスト、`observation.results[].content`
+  にマーカー文字列を埋めて `JSON.stringify(digest)` に一切現れないことを確認する漏洩ガードテストを含む。
+- **実装中に発見・修正した TypeScript の型エラー**: `AtifUsageTotals`（明示的 index signature なしの named
+  interface）を `AiUsageData.usage?: Record<string, number>` へプロパティアクセス経由でそのまま代入すると
+  TS2322（fresh object literal には暗黙の index signature が合成されるがプロパティアクセス値には合成されない
+  という TS の仕様が原因）。`usage: { ...digest.usage }` とスプレッドで fresh literal 化して解消（3 OS各1
+  箇所）。pnpm の並列ビルドが windows の失敗時点で中断していたため、実際は3 OS全てに同一の型エラーが潜在
+  していたと判明。
+- **検証**: `pnpm build` 6 workspace green、`node --test` を workspace ごと個別実行で `packages/shared`
+  43/43・`apps/server` 131/131・`agents/linux` 202→236（新規34件）・`agents/macos` 164→198（新規34件）
+  すべて非退行で green。`diff` で3 OSの `devin-atif.ts`・linux/macos の対応テストが byte-for-byte 同一、
+  `git diff --stat -- apps/ prisma/` 空、`grep -c 'require('`(apps/web)=0、`observation` の実プロパティ
+  アクセスはソース中0件（JSDoc コメント内の言及のみ）。
+- **変更ファイル**（9件、新規5・変更4）: 新規 `agents/{linux,macos,windows}/src/services/devin-atif.ts` +
+  `agents/{linux,macos}/tests/devin-atif.test.mjs`、既存 `agents/{linux,macos,windows}/src/services/
+  ai-runner.ts` + `packages/shared/src/i18n.ts`。`apps/server`/`apps/web`/`prisma` は完全無変更、DB
+  マイグレーション不要。
+- **反映**: `pm2 restart devrelay-server`（`packages/shared` 変更のため必須）+ 各マシン
+  （Linux/macOS/Windows CLI Agent）の `u`（Agent 側が本体）が必要。E2E 確認（実行ステップまとめの
+  ツール名表示・`🧠 Devin のモデル: ...` 1行表示・`Message.usageData` のトークン数反映・`observation`
+  非表示・Claude/Codex/Gemini 非退行・`e`/`x`/`u`/`w` 非退行）は反映後に別サイクルで実施。
+
 ### #360: Devin モデル選択サイクル・サイクルA（ビルド阻害バグ修正 + 拒否検出の実測追随 + モデルカタログ13件化） (2026-09-05)
 
 前セッションが 45 分・auto-compact 14 回で強制停止した後の再開サイクル。前セッションが未コミットのまま残していた

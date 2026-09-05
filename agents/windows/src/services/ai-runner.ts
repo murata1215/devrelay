@@ -9,6 +9,7 @@ import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWa
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from './devin-diagnostics.js';
+import { buildAtifDigest, summarizeAtifEntry, type AtifStepSummary } from './devin-atif.js';
 import log from './logger.js';
 
 interface AiSession {
@@ -98,6 +99,10 @@ let devinFlagListNotified = false;
 // 従来は黙って無視していた（#325「静かなフォールバック禁止」違反）。
 // 警告はプロセス寿命中 1 回だけ出す（devinFlagListNotified と同じ流儀）。
 let devinModelUnsupportedWarned = false;
+// Devin モデル選択サイクル・サイクル B（変更4）: ATIF-v1.7 はターン終了時に一括書き出しされるため、
+// `maxSteps` コストガード（ライブポーラー経由）は原理的に機能しない（正直な但し書き、プラン参照）。
+// devin 起動時（`devinMaxSteps > 0`）に1回だけ警告を出す（プロセス寿命中1回、毎ターン繰り返さない）。
+let devinMaxStepsWarned = false;
 
 /**
  * Gemini CLI が `-m/--model` フラグに対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
@@ -239,76 +244,73 @@ function summarizeCodexItem(item: any, lang: Language = DEFAULT_CHAT_LANGUAGE): 
 }
 
 /**
- * ATIF（Devin の --export）1行を人間可読な短い進捗要約に変換する。
- * ATIF スキーマは非公開のためベストエフォート。認識できるフィールドがなければ null を返す（進捗を出さない）。
- * @param entry JSON.parse 済みの ATIF 1エントリ
- * @returns 「⏳ ...」形式で表示する要約（先頭の ⏳ は呼び出し側で付与）／認識不能なら null
+ * Devin モデル選択サイクル・サイクル B（変更4/変更5）: `devin-atif.ts` の `summarizeAtifEntry()`
+ * 表示用文字列へ整形する（旧 `summarizeAtifEntry()` の表示部分のみを残したもの）。
+ * パース自体は `devin-atif.ts` の純関数群に委譲済みのため、ここでは文字列組み立てのみ行う。
+ * @param s `summarizeAtifEntry()`（devin-atif.ts 側）の戻り値
+ * @param lang 表示言語
+ * @returns 表示用文字列。`tool`/`title` とも無ければ null
  */
-function summarizeAtifEntry(entry: any, lang: Language = DEFAULT_CHAT_LANGUAGE): string | null {
-  if (!entry || typeof entry !== 'object') return null;
-  const toolName = entry.tool_name || entry.tool || entry.name;
-  if (toolName) {
-    const title = entry.title || entry.command || entry.action;
-    return title ? `${toolName}: ${String(title).slice(0, 80)}` : tChat(lang, 'progress.devinStep', { tool: toolName });
-  }
-  if (entry.title) return String(entry.title).slice(0, 100);
-  if (entry.type && typeof entry.type === 'string') return `[${entry.type}]`;
+function formatAtifStepSummary(s: AtifStepSummary, lang: Language = DEFAULT_CHAT_LANGUAGE): string | null {
+  if (s.tool && s.title) return `${s.tool}: ${s.title}`;
+  if (s.tool) return tChat(lang, 'progress.devinStep', { tool: s.tool });
+  if (s.title) return s.title;
   return null;
 }
 
+/** Devin ATIF ダイジェストの読み取り結果（`ai-runner.ts` 側で使う表示済み文字列 + 生データ） */
+interface DevinTurnDigest {
+  summaryText: string;
+  modelName: string | null;
+  modelId: string | null;
+  usage: import('./devin-atif.js').AtifUsageTotals | null;
+  totalSteps: number;
+  permissionMode: string | null;
+}
+
 /**
- * #281: ATIF エクスポートファイル全体を読み、実行ステップの要約文字列を作る。
+ * #281→変更4/5: ATIF エクスポートファイル全体を読み、実行ステップ要約・モデル名・使用量を読み取る。
  * devin は turn 終了時に ATIF を一括書き出しする（「Exports after each turn」）ため、
  * 実行中の live tail はゼロ件になる。そこで完了時にまとめて読み、最終回答の末尾へ
  * 「🧭 実行ステップ (N件): ...」として添付し、「何をやったか」を可視化する。
- * JSONL（1行1エントリ）を基本とし、単一 JSON（配列/オブジェクト）もフォールバックでパースする。
+ * パース本体（steps 抽出・tool_calls 対応・モデル/使用量マッピング）は `devin-atif.ts` の
+ * `buildAtifDigest()` に委譲し、ここでは fs I/O と表示用文字列の組み立てのみ行う。
  * @param exportPath ATIF ファイルパス
- * @returns 「\n\n🧭 実行ステップ ...」形式。ステップ0件なら空文字列
+ * @param lang 表示言語
+ * @returns ステップ要約文字列・モデル名・使用量・実ステップ数。読み取れなければ null
  */
-function buildDevinStepSummary(exportPath: string, lang: Language = DEFAULT_CHAT_LANGUAGE): string {
+function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_LANGUAGE): DevinTurnDigest | null {
   let content: string;
   try {
     content = fs.readFileSync(exportPath, 'utf-8');
   } catch {
-    return '';
+    return null;
   }
-  const steps: string[] = [];
-  // まず JSONL（1行1エントリ）として行ごとにパース
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const s = summarizeAtifEntry(JSON.parse(trimmed), lang);
-      if (s) steps.push(s);
-    } catch {
-      // 行パース失敗は無視（後段の単一 JSON フォールバックに委ねる）
-    }
-  }
-  // JSONL で1件も取れなければ、全体を単一 JSON（配列 / {messages:[]} / 単一オブジェクト）としてパース
-  if (steps.length === 0) {
-    try {
-      const parsed = JSON.parse(content);
-      const entries = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed?.messages)
-          ? parsed.messages
-          : [parsed];
-      for (const e of entries) {
-        const s = summarizeAtifEntry(e, lang);
-        if (s) steps.push(s);
-      }
-    } catch {
-      // 単一 JSON でもない
-    }
-  }
-  if (steps.length === 0) {
-    // スキーマ不一致の可能性 → 先頭を記録（原因 (c) の切り分け・v2 パーサ修正用）
+  const digest = buildAtifDigest(content);
+  if (!digest) {
+    // スキーマ不一致の可能性 → 先頭を記録（v2 パーサ修正用）
     log.info(`[devin] ATIF parsed 0 steps; head sample: ${content.slice(0, 500)}`);
-    return '';
+    return null;
   }
-  const shown = steps.slice(0, 10);
-  const more = steps.length > shown.length ? `（他${steps.length - shown.length}件）` : '';
-  return `\n\n🧭 実行ステップ (${steps.length}件): ${shown.join(' → ')}${more}\n`;
+  const formatted: string[] = [];
+  for (const s of digest.steps) {
+    const f = formatAtifStepSummary(s, lang);
+    if (f) formatted.push(f);
+  }
+  let summaryText = '';
+  if (formatted.length > 0) {
+    const shown = formatted.slice(0, 10);
+    const more = formatted.length > shown.length ? `（他${formatted.length - shown.length}件）` : '';
+    summaryText = `\n\n🧭 実行ステップ (${formatted.length}件): ${shown.join(' → ')}${more}\n`;
+  }
+  return {
+    summaryText,
+    modelName: digest.modelName,
+    modelId: digest.modelId,
+    usage: digest.usage,
+    totalSteps: digest.totalSteps,
+    permissionMode: digest.permissionMode,
+  };
 }
 
 /**
@@ -498,6 +500,11 @@ export async function sendPromptToAi(
   const devinReportedFiles = new Map<string, number>(); // ファイル名 → 最終通知時刻（スロットル用）
   // #281: 完了時に ATIF から作る「実行ステップまとめ」。最終回答の末尾に添付する。
   let devinStepSummary = '';
+  // Devin モデル選択サイクル・サイクル B（変更5）: ATIF から読み取った実モデル名（close ハンドラで代入）。
+  // devinCurrentModelForResume と同じ理由で関数スコープの let（block 内 const にすると
+  // close ハンドラから参照できず TS2304 になる、サイクル A の S0 で踏んだ落とし穴）。
+  let devinAtifModelName: string | null = null;
+  let devinAtifModelId: string | null = null;
   // #282: CHISEL_LOG_STDERR=1 で stderr に流れる devin 内部ログの分類用
   let devinToolRejectedInLog = false;   // ログ形式で検出したツール拒否（#274 検出の置き換え）
   let devinStderrLineBuffer = '';       // stderr の行バッファ（改行区切り処理の残り）
@@ -945,6 +952,16 @@ export async function sendPromptToAi(
       }, devinMaxRuntimeMin * 60_000);
     }
 
+    // Devin モデル選択サイクル・サイクル B（変更4）: `maxSteps` は ATIF 経由では原理的に
+    // 機能しない（ATIF はターン終了時に一括書き出しされるため、書き込み途中のファイルは
+    // parse に成功せずポーラーは毎回 null を返す）。有効時は 1 回だけ警告し、
+    // 実効的なコストガードとして `maxRuntimeMinutes` を使うよう案内する（#325 静かなフォールバック禁止）。
+    if (devinMaxSteps > 0 && !devinMaxStepsWarned) {
+      devinMaxStepsWarned = true;
+      log.info(`[devin] maxSteps is not enforceable with ATIF export (written at turn end).`);
+      log.info(`        Use maxRuntimeMinutes (current: ${devinMaxRuntimeMin}) as the effective cost guard.`);
+    }
+
     // #281: プロジェクトディレクトリのファイル変更を監視して「内部で何をしているか」を進捗表示する。
     // devin は -p 実行中 stdout 無出力 + ATIF は turn 終了時一括書き出しのため、
     // ファイル操作の監視がライブで内部動作を見せる唯一の手段。⏳ prefix で最終回答からは除外される。
@@ -985,14 +1002,21 @@ export async function sendPromptToAi(
               if (!trimmed) continue;
               try {
                 const entry = JSON.parse(trimmed);
-                const summary = summarizeAtifEntry(entry, options.language ?? DEFAULT_CHAT_LANGUAGE);
-                if (summary) onOutput(`⏳ ${summary}\n`, false);
-                // #277: ステップ数上限（--export 対応版のみ）。超過で SIGTERM 停止。
-                devinStepCount++;
-                if (devinMaxSteps > 0 && devinStepCount > devinMaxSteps && !devinStepLimitHit) {
-                  log.info(`[devin] Step limit ${devinMaxSteps} exceeded, killing process (cost guard)`);
-                  devinStepLimitHit = true;
-                  proc.kill('SIGTERM');
+                // 変更4（判明15）: pretty-print された単一 JSON の配列末尾スカラー行（`"pattern"`等）も
+                // 単独では valid JSON となり parse に成功してしまうため、summarizeAtifEntry() が
+                // 非 null を返した（＝実ステップと判定できた）ときだけ devinStepCount を進める。
+                // これが 8 ステップが 38 と誤カウントされていたバグの是正点。
+                const s = summarizeAtifEntry(entry);
+                const summary = s ? formatAtifStepSummary(s, options.language ?? DEFAULT_CHAT_LANGUAGE) : null;
+                if (summary) {
+                  onOutput(`⏳ ${summary}\n`, false);
+                  // #277: ステップ数上限（--export 対応版のみ）。超過で SIGTERM 停止。
+                  devinStepCount++;
+                  if (devinMaxSteps > 0 && devinStepCount > devinMaxSteps && !devinStepLimitHit) {
+                    log.info(`[devin] Step limit ${devinMaxSteps} exceeded, killing process (cost guard)`);
+                    devinStepLimitHit = true;
+                    proc.kill('SIGTERM');
+                  }
                 }
               } catch {
                 // ATIF が JSONL でない／不完全行 → 無視（ハートビートが生存を担保）
@@ -1287,8 +1311,31 @@ export async function sendPromptToAi(
       // #281: ファイル変更ウォッチャ停止
       if (devinFsWatcher) { try { devinFsWatcher.close(); } catch {} devinFsWatcher = null; }
       // #281: ATIF は turn 終了時に一括書き出しされるため、削除する前に読んで実行ステップまとめを作る
+      // Devin モデル選択サイクル・サイクル B（変更4/変更5）: パースは devin-atif.ts に委譲済み。
+      // ここで result.usageData / devinAtifModelName / devinAtifModelId も一緒に確定させる。
+      // 15箇所ある result.usageData 読み取り（コスト上限・SIGTERM・#329フラグ再試行・#274 plan tool-rejected
+      // の早期 return 経路含む）より前にこの代入が実行されることが重要。
       if (devinExportPath && fs.existsSync(devinExportPath)) {
-        try { devinStepSummary = buildDevinStepSummary(devinExportPath, options.language ?? DEFAULT_CHAT_LANGUAGE); } catch {}
+        try {
+          const digest = readDevinTurnDigest(devinExportPath, options.language ?? DEFAULT_CHAT_LANGUAGE);
+          if (digest) {
+            devinStepSummary = digest.summaryText;
+            devinAtifModelName = digest.modelName;
+            devinAtifModelId = digest.modelId;
+            if (digest.usage) {
+              const modelKey = digest.modelId ?? digest.modelName ?? 'devin';
+              result.usageData = {
+                usage: { ...digest.usage },
+                modelUsage: { [modelKey]: { ...digest.usage } },
+                model: modelKey,
+              };
+            }
+            if (digest.permissionMode) {
+              // permission_mode はチャットには出さずログのみ（診断用）
+              log.info(`[devin] permission_mode=${digest.permissionMode}`);
+            }
+          }
+        } catch {}
       }
       if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
       // #277: 実行時間上限タイマー停止
@@ -1589,6 +1636,13 @@ export async function sendPromptToAi(
         } else {
           // #281: Devin の実行ステップまとめを最終回答へ添付してから完了通知（⏳ でない=最終メッセージに残る）
           if (devinStepSummary) onOutput(devinStepSummary, false);
+          // Devin モデル選択サイクル・サイクル B（変更5）: 実モデル名を1行通知（チャット表示）
+          if (devinAtifModelName || devinAtifModelId) {
+            onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelUsed', {
+              modelName: devinAtifModelName ?? devinAtifModelId ?? '',
+              modelId: devinAtifModelId ?? devinAtifModelName ?? '',
+            }) + '\n', false);
+          }
           onOutput('', true, result.usageData); // Signal completion with usage data
         }
       }
