@@ -12,7 +12,8 @@ import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWa
 import { decidePlanPermission } from './plan-permission.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from './devin-diagnostics.js';
-import { buildAtifDigest, summarizeAtifEntry, type AtifStepSummary } from './devin-atif.js';
+import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, type AtifStepSummary } from './devin-atif.js';
+import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
 import { saveClaudeSessionId, clearClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
@@ -363,6 +364,8 @@ interface DevinTurnDigest {
   usage: import('./devin-atif.js').AtifUsageTotals | null;
   totalSteps: number;
   permissionMode: string | null;
+  /** 欠陥1対策: 最後のステップがツール呼び出しで終わっている（＝テキスト応答が無い無言終了）か */
+  endedWithoutAnswer: boolean;
 }
 
 /**
@@ -405,6 +408,7 @@ function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_L
     usage: digest.usage,
     totalSteps: digest.totalSteps,
     permissionMode: digest.permissionMode,
+    endedWithoutAnswer: endedWithoutAnswer(digest.steps),
   };
 }
 
@@ -1395,6 +1399,14 @@ export async function sendPromptToAi(
   // ATIF は turn 終了時にしか書かれずライブ tail 不可のため、ファイル操作を監視して補完する。
   let devinFsWatcher: fs.FSWatcher | null = null;
   const devinReportedFiles = new Map<string, number>(); // ファイル名 → 最終通知時刻（スロットル用）
+  // 欠陥2対策: ターンあたりのファイル変更通知件数の上限（既定20、DEVRELAY_DEVIN_FILEWATCH_MAX で上書き可）。
+  // SVN/Mercurial 等の作業コピーで大量ファイルが同時変更された際に無制限にチャットへ流れ込むのを防ぐ。
+  const devinFileWatchMaxEnv = Number(process.env.DEVRELAY_DEVIN_FILEWATCH_MAX);
+  const devinFileWatchMax = Number.isFinite(devinFileWatchMaxEnv) && devinFileWatchMaxEnv > 0
+    ? devinFileWatchMaxEnv
+    : DEFAULT_FILE_WATCH_NOTICE_LIMIT;
+  let devinFileWatchCount = 0;
+  let devinFileWatchLimitNotified = false; // 上限到達を1回だけ通知するためのガード（#325 静かなフォールバック禁止）
   // #281: 完了時に ATIF から作る「実行ステップまとめ」。最終回答の末尾に添付する。
   let devinStepSummary = '';
   // Devin モデル選択サイクル・サイクル B（変更5）: ATIF から読み取った実モデル名（close ハンドラで代入）。
@@ -1402,6 +1414,10 @@ export async function sendPromptToAi(
   // close ハンドラから参照できず TS2304 になる、サイクル A の S0 で踏んだ落とし穴）。
   let devinAtifModelName: string | null = null;
   let devinAtifModelId: string | null = null;
+  // 欠陥1対策（プランモード無言終了検知）: ATIF の最後のステップがツール呼び出しで終わっている
+  // （＝そのあと AI のテキスト応答が無い）かどうか。devinCurrentModelForResume と同じ理由で
+  // 関数スコープの let（block 内 const にすると close ハンドラから参照できず TS2304 になる）。
+  let devinAtifEndedWithoutAnswer = false;
   // #282: CHISEL_LOG_STDERR=1 で stderr に流れる devin 内部ログの分類用
   let devinToolRejectedInLog = false;   // ログ形式で検出したツール拒否（#274 検出の置き換え）
   let devinStderrLineBuffer = '';       // stderr の行バッファ（改行区切り処理の残り）
@@ -1528,20 +1544,32 @@ export async function sendPromptToAi(
       // （推論なので isDevinBannerLine() によるフィルタとセットで運用する。下記プレーンテキスト出力箇所）。
       // #347 Phase 0 実測: devin はこのファイルを書き換える（実測では merge/replace 双方を観測）。
       // DevRelay は毎ターンここで作り直し、close ハンドラで削除するため、書き換えられても持ち越さない。
+      // Devin プランモード欠陥1対策: Exec(**) の一括 deny は DevRelay 自身の調査系スキル
+      // （devrelay-list-inventory 等、実体はすべて bash スクリプト）を巻き添えにして拒否してしまい、
+      // Devin が前置き1文だけ出して無言終了する（実測: Lafit プロジェクトで再現）。
+      // deny は Write(**) のみに絞り、Exec は --permission-mode auto（Devin 自身の
+      // 「安全と判断したツールのみ自動承認」）に委ねる。Write(**) の deny は allow/deny のうち
+      // deny が常に優先されるため、config 側の書き込み禁止は変わらず維持される（多層防御）。
+      // DEVRELAY_DEVIN_PLAN_EXEC_DENY=1 で従来（Exec も config で一括 deny）に戻せる（キルスイッチ）。
+      const devinPlanDenyExecToo = process.env.DEVRELAY_DEVIN_PLAN_EXEC_DENY === '1';
       const planConfig = {
         version: 1,
         shell: { setup_complete: true },
         permissions: {
           allow: ['Read(**)'],
-          deny: ['Write(**)', 'Exec(**)'],
+          deny: devinPlanDenyExecToo ? ['Write(**)', 'Exec(**)'] : ['Write(**)'],
         },
       };
       const planConfigPath = path.join(os.tmpdir(), `devrelay-devin-plan-config-${sessionId}.json`);
       fs.writeFileSync(planConfigPath, JSON.stringify(planConfig), 'utf-8');
       const configFlagName = devinHasConfig ? '--config' : '--agent-config';
       args.push('-p', configFlagName, planConfigPath);
+      if (!devinPlanDenyExecToo && devinHasPermissionMode) {
+        // config の allow/deny だけに任せず、Devin 自身の安全判定（自動承認）も併用する
+        args.push('--permission-mode', 'auto');
+      }
       devinPlanConfigApplied = true;
-      console.log(`📋 Devin plan mode: using ${configFlagName} (Read only, Write/Exec denied)`);
+      console.log(`📋 Devin plan mode: using ${configFlagName} (${devinPlanDenyExecToo ? 'Read only, Write/Exec denied' : 'Read + safe Exec allowed, Write denied'})`);
     } else if (options.usePlanMode && !options.devinAutoPermFallback && devinHasPermissionMode) {
       // #329: --config/--agent-config 非対応の CLI → --permission-mode auto に劣化（読み取り専用強制はプロンプト指示のみ）
       args.push('-p', '--permission-mode', 'auto');
@@ -1785,13 +1813,20 @@ export async function sendPromptToAi(
       devinFsWatcher = fs.watch(projectPath, { recursive: true }, (_event, filename) => {
         if (!filename) return;
         const f = filename.toString().replace(/\\/g, '/');
-        // 除外: VCS・依存・生成物・一時ファイル（devin 自身の作業に無関係なノイズを弾く）
-        if (/(^|\/)(\.git|node_modules|\.devrelay|\.devrelay-output|dist|build|__pycache__|\.next|target|vendor)(\/|$)/.test(f)) return;
-        if (/~$|\.swp$|\.tmp$|\.log$|\.lock$/.test(f)) return;
+        // 除外: VCS・依存・生成物・一時ファイル（devin 自身の作業に無関係なノイズを弾く、欠陥2対策）
+        if (isNoisyChangedPath(f)) return;
         const now = Date.now();
         // 同一ファイルは10秒に1回まで（保存の連打でスパムにならないように）
         if (now - (devinReportedFiles.get(f) ?? 0) < 10_000) return;
         devinReportedFiles.set(f, now);
+        if (devinFileWatchCount >= devinFileWatchMax) {
+          if (!devinFileWatchLimitNotified) {
+            devinFileWatchLimitNotified = true;
+            onOutput(`⏳ ${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.fileWatchTruncated', { limit: String(devinFileWatchMax) })}\n`, false);
+          }
+          return;
+        }
+        devinFileWatchCount++;
         onOutput(`⏳ 📝 ${f} を更新中...\n`, false);
       });
     } catch (err) {
@@ -2152,6 +2187,7 @@ export async function sendPromptToAi(
             devinStepSummary = digest.summaryText;
             devinAtifModelName = digest.modelName;
             devinAtifModelId = digest.modelId;
+            devinAtifEndedWithoutAnswer = digest.endedWithoutAnswer;
             if (digest.usage) {
               const modelKey = digest.modelId ?? digest.modelName ?? 'devin';
               result.usageData = {
@@ -2497,6 +2533,14 @@ export async function sendPromptToAi(
               modelName: devinAtifModelName ?? devinAtifModelId ?? '',
               modelId: devinAtifModelId ?? devinAtifModelName ?? '',
             }) + '\n', false);
+          }
+          // 欠陥1対策: プランモードでツール呼び出し直後に無言終了した場合、黙ったまま終わらせず理由を明示する
+          // （#325 静かなフォールバック禁止）。devinPlanToolRejected/devinFallbackToolRejected は
+          // fullOutput.trim().length===0 を前提条件に持つためこの分岐（fullOutput 非空）では発火せず、
+          // 既存のリトライ経路とは排他的に動作する。自動リトライはしない
+          // （config を外すと読み取り専用保証が緩むため、#347 の設計意図に反する）。
+          if (aiTool === 'devin' && options.usePlanMode === true && devinPlanConfigApplied && code === 0 && devinAtifEndedWithoutAnswer) {
+            onOutput('\n' + tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.planTurnTruncated', { tool: aiTool }) + '\n', false);
           }
           onOutput('', true, result.usageData); // Signal completion with usage data
         }

@@ -254,3 +254,19 @@ export function buildAtifDigest(content: string): AtifDigest | null {
     permissionMode,
   };
 }
+
+/**
+ * プランモードの「無言で途中終了」検知（欠陥1の副作用対策）。
+ *
+ * Devin は config で Exec/Write を deny された際、非対話モードでは拒否テキストを一切出さず
+ * exit 0 で終わる（#347 Phase0 実測）。この場合 ATIF の最後のステップは「ツール呼び出し」で
+ * 終わっており、そのあとの AI テキスト応答（`tool: null` のステップ）が存在しない。
+ *
+ * `AtifStepSummary` は既に `tool: string | null` でツール呼び出し/テキスト応答を区別しているため、
+ * 新しいパースは不要——最後の要素だけを見れば判定できる。
+ */
+export function endedWithoutAnswer(steps: AtifStepSummary[]): boolean {
+  if (steps.length === 0) return false;
+  const last = steps[steps.length - 1];
+  return last.tool !== null;
+}

@@ -1669,3 +1669,34 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   named interface（index signature 無し）由来の値をプロパティアクセス経由でそのまま代入すると TS2322
   になる（fresh object literal には暗黙の index signature が合成されるが、変数経由の値には合成されない
   という TypeScript の仕様）。`{ ...source }` のスプレッドで fresh literal 化すれば解消する
+
+### Devin プランモードの「無言で途中終了」と `.svn` 洪水の解消 (#362, 2026-09-05)
+
+- **DevRelay の調査系スキル（`devrelay-list-inventory` 等）はすべて bash スクリプトであり、
+  プランモードの `Exec(**)` 一括 deny は「書き込み阻止」ではなく「DevRelay 自身のスキルを丸ごと殺す」**
+  という副作用を持つ。プランモードの権限は「ツール種別（Exec/Write）」ではなく「そのコマンドが
+  読み取り専用かどうか」で判定すべきだった。#333（Claude 側 `decidePlanPermission`）は最初からコマンド
+  単位で判定していたのに対し、Devin だけ `--config` の `permissions.deny` が `Exec(**)` 一括だったのが
+  食い違いの原因。今回は `deny` から `Exec(**)` を外し `--permission-mode auto`（Devin 自身の
+  「安全と判断したツールのみ自動承認」判定）と併用する多層防御に変更、`Write(**)` の deny は維持したまま。
+  **`--config` と `--permission-mode` の併用セマンティクスは実機未計測**のため、キルスイッチ
+  `DEVRELAY_DEVIN_PLAN_EXEC_DENY=1` で即座に旧動作（Exec 全 deny）へ戻せるようにしてある
+- **Devin の非対話 deny は拒否テキストを一切出さず exit 0 で終わる**（#347 Phase0 実測）。この性質により
+  「ツール呼び出しで deny されて終わった」ターンは、既存の空応答検知（`devinPlanToolRejected`、
+  `fullOutput.trim().length===0` が発火条件）を素通りする——deny される**前**に前置き1文を出しているため
+  `fullOutput` が非空になり、既存の自動リトライ条件に一度も一致しない。これは #347 の設計上の穴であり、
+  今回追加した `endedWithoutAnswer(steps)`（`devin-atif.ts`、最後のステップが `tool !== null` で終わって
+  いるか＝そのあとの AI テキスト応答が存在しないか）は**この穴を検知するだけ**の別軸のチェックとして
+  追加した。**既存の `devinPlanToolRejected` の判定ブロックは 1 バイトも変更していない**
+  （`git diff` で当該ブロックの `[+-]` 行が 0 であることを毎回確認すること）。自動リトライはしない
+  （config を外すと読み取り専用保証が緩むため、#347 の設計意図に反する）方針も維持
+- **`fs.watch` の除外リストはディレクトリ名ベースであり VCS の種類を網羅する必要がある**。既存の
+  `.git|node_modules|...` に `.svn`/`.hg`/`.bzr`/`CVS` を追加しただけで、SVN 作業コピー
+  （`.svn/pristine/**` に数百ファイルが分散する構造）のような「同一ファイルの更新ではなく大量の異なる
+  ファイルが短時間に更新される」パターンには**既存の「同一ファイル 10 秒スロットル」は無力**。
+  今回追加したターンあたりの通知上限（既定 20、`DEVRELAY_DEVIN_FILEWATCH_MAX` で上書き可）は
+  スロットルとは独立した別の防御層として設計した。上限到達時は「黙って打ち切る」のではなく
+  `devin.fileWatchTruncated` を1回だけ出す（#325 静かなフォールバック禁止）
+- **`isNoisyChangedPath()` は `(^|\/)(...)(\/|$)` の境界アンカーを持つため `.gitignore`/`.hgignore`
+  のような「ディレクトリ名と同じ接頭辞を持つファイル」を誤って除外しない**。VCS 系の除外パターンを
+  追加・変更する際は、この境界ケースを回帰テストに必ず含めること（`devin-file-watch.test.mjs`）

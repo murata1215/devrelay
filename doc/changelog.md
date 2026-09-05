@@ -6,6 +6,71 @@
 
 ## 実装済み機能
 
+### #362: Devin プランモードの「無言で途中終了」と `.svn` 洪水の解消 (2026-09-05)
+
+ユーザー報告「なんかうまく動かなくなっちゃった」を受け、添付ログと本番 DB の read-only 実測で2つの独立した欠陥
+（欠陥1: プランモードの `Exec(**)` 全 deny が DevRelay 自身の調査系スキル〔bash 実体〕を巻き添えにして拒否し、
+Devin の非対話 deny は拒否テキストを一切出さず exit 0 で終わるため「前置きだけ言って黙る」ように見える。
+欠陥2: `fs.watch` の除外リストに `.svn` が無く SVN 作業コピーで `.svn/pristine/**` の更新がチャットを洪水にする）
+を特定・解消。
+
+- **変更1（本丸）**: `agents/{linux,macos,windows}/src/services/ai-runner.ts` のプランモード Devin config
+  生成を変更。`deny` から `Exec(**)` を除去し `deny: ['Write(**)']` のみに（`allow: ['Read(**)']` は維持、
+  deny は allow より常に優先されるため Write(**) の禁止は変わらない）。`--permission-mode` 対応端末では
+  併せて `--permission-mode auto` を付与し Devin 自身の「安全と判断したツールのみ自動承認」も併用（多層防御）。
+  キルスイッチ `DEVRELAY_DEVIN_PLAN_EXEC_DENY=1` で従来（Exec も config で一括 deny、`--permission-mode` 無し）
+  に戻せる。console ログの文言も実態に合わせて更新。
+- **変更2**: 新規純関数 `endedWithoutAnswer(steps: AtifStepSummary[]): boolean` を
+  `agents/{linux,macos,windows}/src/services/devin-atif.ts`（3 OS byte-for-byte 同一）に追加——`steps` が空なら
+  false、最後の要素が `tool !== null`（＝ツール呼び出しで終わっている＝そのあと AI のテキスト応答が無い）なら
+  true。既存の `tool: string | null` 区別をそのまま使うため新しいパースは不要。`ai-runner.ts`（3 OS）の close
+  ハンドラで `aiTool==='devin' && usePlanMode && devinPlanConfigApplied && code===0 &&
+  endedWithoutAnswer(digest.steps)` のとき新規 i18n `devin.planTurnTruncated` を1行追記（自動リトライはしない
+  ——config を外すと読み取り専用保証が緩むため）。既存の出力ゼロ時リトライ `devinPlanToolRejected`（
+  `fullOutput.trim().length===0` が前提条件）は `git diff` の `[+-]` 行が0であることを確認し1バイトも変更せず、
+  今回の追加（`fullOutput` 非空だが回答なし）とは排他的に動作する。
+- **変更3**: 新規純関数モジュール `agents/{linux,macos,windows}/src/services/devin-file-watch.ts`（3 OS
+  byte-for-byte 同一、外部 import ゼロ）に `isNoisyChangedPath(relPath): boolean` と
+  `DEFAULT_FILE_WATCH_NOTICE_LIMIT = 20` を実装。除外ディレクトリに既存9種
+  （`.git|node_modules|.devrelay|.devrelay-output|dist|build|__pycache__|.next|target|vendor`）へ
+  `.svn`・`.hg`・`.bzr`・`CVS` を追加。`ai-runner.ts`（3 OS）の `fs.watch` コールバックをこの関数経由に置換し、
+  ターンあたりの通知上限（既定20、`DEVRELAY_DEVIN_FILEWATCH_MAX` で上書き可）を追加、上限到達時は新規 i18n
+  `devin.fileWatchTruncated` を1回だけ出して以降は黙る（黙って打ち切らない、#325 準拠）。既存の「同一ファイル
+  10秒スロットル」はそのまま残置。
+- **変更4**: `packages/shared/src/i18n.ts` に `devin.planTurnTruncated`（`{tool}`）・`devin.fileWatchTruncated`
+  （`{limit}`）の2キー（ja/en）を追加。既存キーのキー名・プレースホルダは無変更。
+- **変更5（テスト）**: `agents/{linux,macos}/tests/devin-atif.test.mjs`（byte-for-byte 同一）に
+  `endedWithoutAnswer` の5ケース（空配列/ツールで終わる=true・実測パターン「grep→exec で終了」を再現/
+  テキストで終わる=false/ツール→テキスト→ツール=true/テキストのみ=false）を追加。新規
+  `agents/{linux,macos}/tests/devin-file-watch.test.mjs`（byte-for-byte 同一、13件）を作成——
+  `.svn/pristine/91/913d75c4...`（実測パス）除外・`.hg`/`.bzr`/`CVS` 除外・既存9除外ディレクトリ+拡張子パターン
+  の非退行・`src/main/java/.../Foo.java` は除外されない・`.gitignore`/`.hgignore`（先頭が `.git`/`.hg` だが
+  ディレクトリでないファイル）を誤除外しない境界ケース・Windows パス区切り(`\`)対応・空文字/undefined で
+  例外を投げないこと・`DEFAULT_FILE_WATCH_NOTICE_LIMIT===20` を検証。
+- **検証**: `pnpm build` 6 workspace green。`node --test` を workspace ごと個別実行（#333 の教訓）で
+  `packages/shared` 43/43・`apps/server` 131/131・`agents/linux` 236→254（新規18件: devin-atif 5件+
+  devin-file-watch 13件）・`agents/macos` 198→216（新規18件、同内訳）すべて非退行で
+  green。`diff` で3 OS の `devin-file-watch.ts`・`devin-atif.ts`、linux/macos の対応テスト2種が byte-for-byte
+  同一であることを確認。`git status --short` が想定どおり9ファイル変更+5ファイル新規（新規は
+  `devin-file-watch.ts`×3 OS + `devin-file-watch.test.mjs`×2）で過不足なし。`git diff --stat -- apps/ prisma/
+  scripts/` が空。`git diff` で `devinPlanToolRejected` の判定ブロック（linux 2686-2701 付近）に `[+-]` 行が
+  0であることを確認（既存リトライ経路の不変条件維持）。`grep -rn 'observation' agents/*/src/services/
+  devin-atif.ts` のヒットは全てJSDocコメント内で `.observation` のプロパティアクセスは0件（漏洩ガード維持）。
+  `grep -c 'require('`(apps/web)=0。dist反映確認: 3 OS の `dist/services/devin-file-watch.js` が同一2788バイトで
+  存在、`packages/shared/dist/i18n.js` に新規2キー反映。
+- **変更ファイル**（新規5・変更9、計14件）: 新規 `agents/{linux,macos,windows}/src/services/
+  devin-file-watch.ts` + `agents/{linux,macos}/tests/devin-file-watch.test.mjs`、既存
+  `agents/{linux,macos,windows}/src/services/{ai-runner,devin-atif}.ts` + `agents/{linux,macos}/tests/
+  devin-atif.test.mjs` + `packages/shared/src/i18n.ts`。`apps/server`/`apps/web`/`prisma` は完全無変更、DB
+  マイグレーション不要。
+- **反映**: `pm2 restart devrelay-server`（`packages/shared` 変更のため必須）+ 各マシン
+  （Linux/macOS/Windows CLI Agent、最優先は `DESKTOP-5U400FO/lfuser`）の `u`（Agent 側が本体）が必要。
+  実機 E2E（プランモードでの読み取り系スキル正常動作・`.svn/pristine/**` の `⏳ 📝` が出ないこと・
+  書き込み指示が引き続き denyされること・黙って終わった場合に `devin.planTurnTruncated` が出ること・
+  `e`/`x`/`u`/`w` 非退行・キルスイッチ確認）は人間が反映後に別サイクルで実施。commit は本サイクル内で実施、
+  push・`pm2 restart devrelay-server`・各マシンの `u` はプラン記載どおりすべて人間の指示待ち（本サイクルでは
+  未実施）。
+
 ### #361: Devin モデル選択サイクル・サイクルB（ATIF-v1.7 パーサ対応 + 実モデル名・トークン使用量出力） (2026-09-05)
 
 サイクルA（`1b42693`）から持ち越された変更4（ATIF-v1.7 パーサ対応）と変更5（実モデル名・トークン使用量の

@@ -10,6 +10,7 @@ import {
   extractAtifModel,
   extractAtifUsage,
   buildAtifDigest,
+  endedWithoutAnswer,
 } from '../dist/services/devin-atif.js';
 
 // observation.results[].content に埋め込む漏洩検出用マーカー（このマーカーが返り値に一切現れないことを担保する）
@@ -329,4 +330,44 @@ test('buildAtifDigest: 空文字・null・undefined では null を返す（例�
 test('buildAtifDigest: 完全に無意味な内容（ステップもモデルも使用量も取得不能）は null', () => {
   assert.equal(buildAtifDigest('"just a scalar string"'), null);
   assert.equal(buildAtifDigest('{}'), null);
+});
+
+// --- endedWithoutAnswer（欠陥1対策: プランモードの「無言で途中終了」検知） ---
+
+test('endedWithoutAnswer: steps が空なら false', () => {
+  assert.equal(endedWithoutAnswer([]), false);
+});
+
+test('endedWithoutAnswer: 最後がツール呼び出しで終わっていれば true（実測パターン: grep → exec で終了）', () => {
+  const steps = [
+    { tool: null, title: '現在プランモードです' },
+    { tool: 'grep', title: 'grep を実行中' },
+    { tool: 'exec', title: 'bash "...\\scripts\\list.sh"' },
+  ];
+  assert.equal(endedWithoutAnswer(steps), true);
+});
+
+test('endedWithoutAnswer: 最後がテキスト応答（tool: null）で終わっていれば false', () => {
+  const steps = [
+    { tool: 'grep', title: 'grep を実行中' },
+    { tool: null, title: '調査結果はこちらです。' },
+  ];
+  assert.equal(endedWithoutAnswer(steps), false);
+});
+
+test('endedWithoutAnswer: ツール → テキスト → ツール で終わる場合は true', () => {
+  const steps = [
+    { tool: 'bash', title: 'ls -la' },
+    { tool: null, title: '結果を確認しています。' },
+    { tool: 'exec', title: 'bash "...\\scripts\\list.sh"' },
+  ];
+  assert.equal(endedWithoutAnswer(steps), true);
+});
+
+test('endedWithoutAnswer: テキスト応答のみの場合は false', () => {
+  const steps = [
+    { tool: null, title: '最初の応答です。' },
+    { tool: null, title: '最終的な回答です。' },
+  ];
+  assert.equal(endedWithoutAnswer(steps), false);
 });

@@ -378,6 +378,22 @@ export const chatMessages = {
     ja: '🧠 Devin のモデル: {modelName}（`{modelId}`）',
   },
 
+  // --- 欠陥1対策（プランモード「無言で途中終了」検知）: ATIF の最後のステップがツール呼び出しで
+  // 終わっている（＝そのあと AI のテキスト応答が無い）場合、黙ったまま終わらせず理由を明示する
+  // （#325 静かなフォールバック禁止）。Devin の非対話 deny は拒否テキストを一切出さず exit 0 で
+  // 終わるため、これが出ないと「前置きだけ言って黙った」ようにしか見えない。 ---
+  'devin.planTurnTruncated': {
+    en: '⚠️ {tool} ended this turn right after a tool call, without a final text response. This can happen when a write/exec operation was silently denied in plan mode. If you need write access, resend with `e` (exec mode).',
+    ja: '⚠️ {tool} はツール呼び出しの直後にテキスト応答なしでこのターンを終えました。プランモードで書き込み/実行操作が無言で拒否された可能性があります。書き込みが必要な場合は `e` を送って exec モードで依頼し直してください。',
+  },
+
+  // --- 欠陥2対策（ファイル変更ウォッチのノイズ抑止）: ターンあたりの通知件数が上限に達した際、
+  // 黙って打ち切るのではなく1回だけ明示する（#325 静かなフォールバック禁止）。 ---
+  'devin.fileWatchTruncated': {
+    en: '⏳ File change notifications reached the limit for this turn ({limit}). Further changes in this turn will not be shown individually.',
+    ja: '⏳ このターンのファイル変更通知が上限（{limit}件）に達しました。以降の変更は個別には表示されません。',
+  },
+
   // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---
   'humanText.tooLong': {
     en: '❌ Instruction is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',
