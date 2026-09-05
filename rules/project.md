@@ -5,6 +5,29 @@
 
 ---
 
+## Devin セッションIDとモデルは常に対で扱う・拒否検出は実測文言に追随（#360）
+
+`agents/{linux,macos,windows}/src/services/ai-runner.ts` の `devinCurrentModelForResume` は `devin`
+ブロック内の `const` ではなく `devinResumedSessionId` と同じ**関数スコープの `let`** で宣言すること。
+ブロックスコープの `const` にすると、`proc.on('close', ...)` コールバック（同一関数内だがブロック外）から
+参照できずビルドエラーになる（前セッションが実際に踏んだ罠）。
+
+`clearDevinSessionId()` を呼ぶ箇所には**必ず `clearDevinModel()` も並べる**（不変条件: セッションIDと
+モデルは常に対で扱う。片方だけクリアすると、次ターンで古いモデルのまま別セッションを resume する不整合が
+起きうる）。
+
+Devin CLI のツール拒否検出文言はバージョンアップで無警告に変わることがある（v3000.6.14 で
+`rejected a tool call that requires confirmation` という新パターンが実測で判明、旧2パターンとは不一致）。
+検出ロジックは `devin-diagnostics.ts` の純関数 `isDevinToolRejectionText()` に一本化し、直接の文字列/正規表現
+比較を分散させないこと（新パターンが出るたびに複数箇所を直すことになる）。
+
+`AI_MODEL_CATALOG.devin` の対応モデル一覧は CLI の実測でしか確定できない（公式ドキュメントの記載と実際に
+CLI が受理する slug が食い違うことがある、#353 と同種の教訓）。effort サフィックス等の表現力が無い項目は
+`description` 文字列に注記するだけに留め、スキーマ拡張や実装は伴わせない（「実装ゼロ」の判断はプランの
+スコープ記述と `git diff --stat -- apps/ prisma/` が空であることで検証する）。
+
+---
+
 ## SDK auto-compact ループガードは「進捗」を出力ゼロで判定する（#355）
 
 Claude SDK 経由（`sendPromptToAiSdk()`）の実行が `compact_boundary` を無進捗のまま連発する事故（実測 138.3 分・79 回連続）が発生した。既存の無応答タイムアウト（進捗トラッカー）はサーバー側で出力イベントの有無しか見ておらず、SDK が `tool_use`/テキスト以外の出力を一切出さない compact ループを検知できなかった。

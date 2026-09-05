@@ -7,6 +7,8 @@ const SESSION_FILE = 'claude-session-id';
 /** セッション ID + モード情報を JSON で保存するファイル */
 const SESSION_META_FILE = 'claude-session-meta.json';
 const DEVIN_SESSION_FILE = 'devin-session-id';
+/** このサイクル: Devin セッション作成時に使用したモデルを記録するファイル（resume時のモデル一致判定用） */
+const DEVIN_MODEL_FILE = 'devin-model';
 const CODEX_SESSION_FILE = 'codex-session-id';
 const CONTEXT_USAGE_FILE = 'context-usage.json';
 
@@ -173,6 +175,58 @@ export async function clearDevinSessionId(projectPath: string): Promise<void> {
     if (existsSync(filePath)) {
       await unlink(filePath);
       console.log(`🗑️ Cleared Devin session ID`);
+    }
+  } catch {
+    // 無視
+  }
+}
+
+/**
+ * Devin モデル記録ファイルのパスを取得
+ * （このサイクル: `devin -r` はモデル指定を無視するため、resume 判定に使う）
+ */
+function getDevinModelPath(projectPath: string): string {
+  return join(projectPath, SESSION_DIR, DEVIN_MODEL_FILE);
+}
+
+/**
+ * 直近の Devin ターンで使用したモデルを読み込む（未指定時は空文字列を保存しているため `''` が返ることもある）
+ */
+export async function loadDevinModel(projectPath: string): Promise<string | null> {
+  const filePath = getDevinModelPath(projectPath);
+  try {
+    if (!existsSync(filePath)) return null;
+    const content = await readFile(filePath, 'utf-8');
+    return content.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 今回の Devin ターンで使用したモデルを保存（`model` は未指定時は空文字列を渡すこと）
+ */
+export async function saveDevinModel(projectPath: string, model: string): Promise<void> {
+  const dirPath = join(projectPath, SESSION_DIR);
+  const filePath = getDevinModelPath(projectPath);
+  try {
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
+    await writeFile(filePath, model, 'utf-8');
+  } catch (err) {
+    console.error(`❌ Could not save Devin model:`, (err as Error).message);
+  }
+}
+
+/**
+ * Devin モデル記録をクリア（`x` コマンドで使用、`clearDevinSessionId()` と対で呼ぶ）
+ */
+export async function clearDevinModel(projectPath: string): Promise<void> {
+  const filePath = getDevinModelPath(projectPath);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
     }
   } catch {
     // 無視

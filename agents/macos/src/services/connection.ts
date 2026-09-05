@@ -34,7 +34,7 @@ import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
-import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearCodexSessionId } from './session-store.js';
+import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearCodexSessionId } from './session-store.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
@@ -854,6 +854,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   // 3. Claude / Devin / Codex セッション ID をクリア（次回プロンプトで新規セッション開始）
   await clearClaudeSessionId(projectPath);
   await clearDevinSessionId(projectPath);
+  await clearDevinModel(projectPath); // このサイクル: モデル情報もセッションIDと一緒にクリア
   await clearCodexSessionId(projectPath); // #308
 
   // 4. メモリ内の履歴とセッション ID もクリア

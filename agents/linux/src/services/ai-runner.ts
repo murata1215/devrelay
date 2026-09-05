@@ -11,8 +11,8 @@ import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { matchesToolRule, isAllowedByRules, decidePlanPermission } from './plan-permission.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
-import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine } from './devin-diagnostics.js';
-import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
+import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from './devin-diagnostics.js';
+import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 import { buildClaudeLookupCommand, claudeFallbackCandidates } from './claude-locator.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
@@ -76,6 +76,10 @@ let devinAgentConfigHelpDumped = false;
 // #346: `--agent-config` 非対応時、チャットへの「このマシンで使えるフラグ一覧」通知は
 // プロセス寿命中 1 回だけ出す（devinAgentConfigHelpDumped と同じ流儀）。
 let devinFlagListNotified = false;
+// このサイクル: `--model` が指定されているのに devin CLI が非対応の場合、
+// 従来は黙って無視していた（#325「静かなフォールバック禁止」違反）。
+// 警告はプロセス寿命中 1 回だけ出す（devinFlagListNotified と同じ流儀）。
+let devinModelUnsupportedWarned = false;
 
 // #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
 let claudeFallbackLogged = false;
@@ -1673,6 +1677,9 @@ export async function sendPromptToAi(
   let proc;
   // Devin: -r で resume したセッション ID を関数スコープで記録（close ハンドラから参照して空振り検出に使う）
   let devinResumedSessionId: string | null = null;
+  // このサイクル: 今回のターンで使った Devin モデルを関数スコープで記録（close ハンドラから
+  // 参照してセッション保存時にモデルも一緒に保存するため。devinResumedSessionId と同じ理由）
+  let devinCurrentModelForResume = '';
   // #347: plan モードで --config/--agent-config を実際に積んだか（close ハンドラの無音 deny 検出に使う）
   let devinPlanConfigApplied = false;
   // #276: Devin の途中経過表示用。--export の ATIF ファイルパス（対応版のみ設定）と進捗タイマー群を
@@ -1792,10 +1799,21 @@ export async function sendPromptToAi(
     const devinSessionId = options.usePlanMode && !options.devinAutoPermFallback
       ? await loadDevinSessionId(projectPath)
       : null;
+    // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
+    // そのまま使い続ける（`--model` を付けても CLI が warning を出して黙って無視する）。
+    // 「l devin:plan:X → 次のプロンプトから X で動く」を成立させるため、保存済みモデルと
+    // 今回指定のモデルが食い違っていたら resume せず新規セッションで開始する。
+    devinCurrentModelForResume = safeModelArg(options.model) ?? '';
     if (devinSessionId) {
-      args.push('-r', devinSessionId);
-      devinResumedSessionId = devinSessionId;
-      console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
+      const devinSavedModel = (await loadDevinModel(projectPath)) ?? '';
+      if (devinSavedModel === devinCurrentModelForResume) {
+        args.push('-r', devinSessionId);
+        devinResumedSessionId = devinSessionId;
+        console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
+      } else {
+        console.log(`[devin] Model changed (${devinSavedModel || '(default)'} → ${devinCurrentModelForResume || '(default)'}), starting a new session instead of resuming ${devinSessionId}`);
+        onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelChangedNewSession', { previousModel: devinSavedModel || '(default)', newModel: devinCurrentModelForResume || '(default)' })}\n`, false);
+      }
     }
 
     if (options.usePlanMode && !options.devinAutoPermFallback && (devinHasConfig || devinHasAgentConfig)) {
@@ -1868,6 +1886,11 @@ export async function sendPromptToAi(
     const devinModel = safeModelArg(options.model);
     if (devinModel && devinCaps.model) {
       args.push('--model', devinModel);
+    } else if (devinModel && !devinCaps.model && !devinModelUnsupportedWarned) {
+      // #325: 静かなフォールバック禁止。モデル指定が黙って無視されるのを防ぐため、
+      // プロセス寿命中 1 回だけチャットへ通知する（devinFlagListNotified と同じ流儀）。
+      devinModelUnsupportedWarned = true;
+      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelUnsupported', { model: devinModel, detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
     }
 
     // #345: DevRelay は常に -p（非対話）で起動する。devin の --help は
@@ -2369,8 +2392,9 @@ export async function sendPromptToAi(
       }
       const [, level, moduleName, message] = m;
       devinLastLogLevel = level;
-      // ツール拒否の検出（#274 の平文 "A tool was rejected" はログモードでは出ないため置き換え）
-      if (/rejecting tool \w+ that requires confirmation/.test(message)) {
+      // ツール拒否の検出（#274 の平文 "A tool was rejected" はログモードでは出ないため置き換え、
+      // 変更6: 実測(v3000.6.14)で確認済みの新パターンも isDevinToolRejectionText() でまとめて判定）
+      if (isDevinToolRejectionText(message)) {
         devinToolRejectedInLog = true;
         console.log(`[devin] 🔒 tool rejection detected in log: ${message}`);
         return;
@@ -2473,6 +2497,8 @@ export async function sendPromptToAi(
             .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
           if (latest?.id) {
             saveDevinSessionId(projectPath, latest.id).catch(() => {});
+            // このサイクル: 次回のモデル一致判定のため、今回使ったモデルもセッション ID と並べて保存する
+            saveDevinModel(projectPath, devinCurrentModelForResume).catch(() => {});
           }
           }
         } catch (err) {
@@ -2581,7 +2607,8 @@ export async function sendPromptToAi(
         fullOutput.trim().length === 0 &&
         (
           // #282: CHISEL_LOG_STDERR=1 では平文 "A tool was rejected" が出ずログ形式になるため両方で検出
-          /tool was rejected/i.test(stderrOutput) ||
+          // 変更6: isDevinToolRejectionText() に集約（旧2パターン+実測で確認済みの新パターン）
+          isDevinToolRejectionText(stderrOutput) ||
           devinToolRejectedInLog ||
           // #347 Phase 0 実測: 非対話 deny は説明テキストを一切出さない（バナーはフィルタ済みなので
           // fullOutput は既に空）。config を実際に適用したターンで exit 0・出力ゼロなら deny とみなす。
@@ -2592,7 +2619,8 @@ export async function sendPromptToAi(
         console.log(`[devin] ⚠️ Devin plan config rejected a tool (code ${code}), falling back to --permission-mode auto`);
         completionSent = true; // この呼び出しの後続 onOutput を抑止（フォールバック側が完了通知を送る）
         // 壊れた可能性のあるセッション ID をクリアしてからフォールバック（新規セッション）
-        clearDevinSessionId(projectPath).finally(() => {
+        // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
+        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath)]).finally(() => {
           const fallbackOptions: SendPromptOptions = {
             ...options,
             devinAutoPermFallback: true,
@@ -2617,7 +2645,8 @@ export async function sendPromptToAi(
         console.log(`[devin] ⚠️ Resumed session produced no output (code ${code}), clearing session ID and retrying fresh`);
         result.resumeFailed = true;
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
-        clearDevinSessionId(projectPath).finally(() => resolve(result));
+        // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
+        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath)]).finally(() => resolve(result));
         return;
       }
 
@@ -2691,13 +2720,15 @@ export async function sendPromptToAi(
         options.usePlanMode === true &&
         options.devinAutoPermFallback === true &&
         fullOutput.trim().length === 0 &&
-        // #282: ログ形式のツール拒否検出も含める（後方互換で平文検出も残す）
-        (/tool was rejected/i.test(stderrOutput) || devinToolRejectedInLog);
+        // 変更6: isDevinToolRejectionText() に集約（旧2パターン+実測で確認済みの新パターン）
+        (isDevinToolRejectionText(stderrOutput) || devinToolRejectedInLog);
       if (devinFallbackToolRejected && !completionSent) {
         completionSent = true;
         const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
+        // 変更6: --permission-mode auto フォールバック後もなお拒否された「二重空振り」は
+        // プランモードでの再試行を促さず、exec モードへの切り替えを明示する（#325 静かなフォールバック禁止）
         onOutput(
-          `⚠️ Devin がツール承認拒否で終了しました。\n端末で \`devin\` を単体実行して動作を確認してください。\n\n[stderr]\n${stderrTail}`,
+          tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.planToolRejectedNoRetry', { stderrTail }),
           true,
           result.usageData
         );

@@ -66,3 +66,22 @@ export function isDevinBannerLine(line: string): boolean {
   if (/^Logged in as \S+/.test(trimmed)) return true;
   return false;
 }
+
+/**
+ * 変更6: Devin CLI がプランモードでツール呼び出しを拒否した（＝書き込み/実行を試みて deny された）
+ * ことを示すテキストか判定する。#274/#282 由来の旧2パターン（`tool was rejected` の平文、
+ * `rejecting tool \w+ that requires confirmation` のログ形式）に加え、実測（v3000.6.14）で
+ * 新たに確認できた `rejected a tool call that requires confirmation` パターンを OR 条件で追加する。
+ * 旧2パターンはこのバージョンではもうマッチしないため、これが欠けていると拒否を検出できず
+ * 「(No response from AI)」等の汎用エラーに落ちてしまう（変更6 の主目的）。
+ * @param text 判定対象のテキスト（stderr の蓄積文字列、または JSON ログ1行分の message）
+ * @returns ツール拒否を示すテキストなら true。**例外を投げない。**
+ */
+export function isDevinToolRejectionText(text: string): boolean {
+  const value = text ?? '';
+  if (!value) return false;
+  if (/tool was rejected/i.test(value)) return true;
+  if (/rejecting tool \w+ that requires confirmation/i.test(value)) return true;
+  if (/rejected a tool call that requires confirmation/i.test(value)) return true;
+  return false;
+}

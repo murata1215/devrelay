@@ -102,11 +102,23 @@ export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: '旧世代・実績重視' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: '旧世代・高速' },
   ],
+  // 変更3: 実測13件に差し替え（値は slug か alias のみ、family_uid は書かない）。
+  // effort サフィックス（-low/-medium/-high/-xhigh/-max）は実装を追加せず、対応 family の
+  // description に書式を明記するだけで使えるようにしてある（判明7 で受理を実証済み）。
   devin: [
-    { id: 'opus', name: 'Claude Opus', description: 'fuzzy 名（family/alias）で指定' },
-    { id: 'sonnet', name: 'Claude Sonnet', description: 'fuzzy 名（family/alias）で指定' },
-    { id: 'gpt-5.5', name: 'GPT-5.5', description: 'fuzzy 名（family/alias）で指定' },
-    { id: 'gemini', name: 'Gemini', description: 'fuzzy 名（family/alias）で指定' },
+    { id: 'adaptive', name: 'Adaptive', description: '品質とコストを自動調整（既定候補）' },
+    { id: 'opus', name: 'Claude Opus', description: '最高性能 / High / 1M ctx（-low/-medium/-high/-xhigh/-max で推論量指定可、例: opus-low）' },
+    { id: 'sonnet', name: 'Claude Sonnet', description: 'バランス / Med / 1M ctx（-low/-medium/-high/-xhigh/-max で推論量指定可、例: sonnet-low）' },
+    { id: 'haiku', name: 'Claude Haiku', description: '高速・低コスト' },
+    { id: 'claude-fable-5.1', name: 'Claude Fable 5.1', description: '新モデル' },
+    { id: 'gpt', name: 'GPT', description: '新世代 GPT / High / 1M ctx（-low/-medium/-high/-xhigh/-max で推論量指定可、例: gpt-low）' },
+    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: 'Med / コスト重視' },
+    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: '軽量' },
+    { id: 'codex', name: 'Codex', description: 'コーディング特化 / 400K ctx' },
+    { id: 'gemini', name: 'Gemini', description: '新・高速 / Med / 1M ctx' },
+    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', description: '高精度 Gemini' },
+    { id: 'swe', name: 'SWE', description: 'SWE 特化・高速' },
+    { id: 'glm-5.3', name: 'GLM 5.3', description: '低コスト' },
   ],
 };
 

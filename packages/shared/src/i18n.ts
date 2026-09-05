@@ -347,6 +347,25 @@ export const chatMessages = {
     en: '⚠️ This machine\'s Devin CLI does not support `--permission-mode`, so tool auto-approval in exec mode is not enforced by a flag (Devin\'s own default behavior applies).\n({detail})',
     ja: '⚠️ この端末の Devin CLI は `--permission-mode` に対応していないため、exec モードのツール自動承認はフラグでは強制されません（Devin 自身の既定動作に従います）。\n({detail})',
   },
+  // --- このサイクル: `--model` が指定されているのに devin CLI が非対応の場合、
+  // 従来は黙って無視していた（#325「静かなフォールバック禁止」違反）。プロセス寿命中 1 回だけ通知する ---
+  'devin.modelUnsupported': {
+    en: '⚠️ Model `{model}` was requested, but this machine\'s Devin CLI does not support `--model`, so the request was ignored and Devin\'s own default model is being used instead. Please update the devin CLI on this machine.\n({detail})',
+    ja: '⚠️ モデル `{model}` の指定がありましたが、この端末の Devin CLI は `--model` に対応していないため無視され、Devin 自身の既定モデルで実行されています。この端末の devin CLI を更新してください。\n({detail})',
+  },
+  // --- このサイクル（G3実測で確定）: devin -r はモデル指定を無視しセッション作成時のモデルを
+  // 使い続けるため、モデルが変わっていたら resume せず新規セッションで開始する。その理由を通知 ---
+  'devin.modelChangedNewSession': {
+    en: 'ℹ️ Model changed from `{previousModel}` to `{newModel}`. Devin does not apply `--model` when resuming a session, so a new session is being started instead of continuing the previous one.',
+    ja: 'ℹ️ モデルが `{previousModel}` から `{newModel}` に変更されました。Devin はセッション再開（resume）時に `--model` を反映しないため、前回のセッションを継続せず新規セッションで開始します。',
+  },
+  // --- 変更6: --permission-mode auto フォールバック後もなおツール呼び出しが拒否された
+  // （＝二重に空振りした）場合、もう一度プランモードで再試行しても同じ結果になる公算が高いため、
+  // 「exec モードで依頼し直してください」と明示し、無駄なリトライを抑止する（#325 静かなフォールバック禁止） ---
+  'devin.planToolRejectedNoRetry': {
+    en: '⚠️ Devin refused a tool call even after falling back to `--permission-mode auto`. This usually means the task genuinely requires write/exec access. Please resend with `e` (exec mode) instead of retrying in plan mode.\n\n[stderr]\n{stderrTail}',
+    ja: '⚠️ Devin は `--permission-mode auto` へのフォールバック後もツール呼び出しを拒否しました。書き込み/実行が本当に必要なタスクである可能性が高いです。プランモードで再試行せず、`e` を送って exec モードで依頼し直してください。\n\n[stderr]\n{stderrTail}',
+  },
   // --- #345: workspace trust 拒否（devin --respect-workspace-trust）への対処案内 ---
   'devin.workspaceUntrusted': {
     en: '❌ Devin CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `--respect-workspace-trust false` automatically (restores Devin\'s own documented default for non-interactive/print mode).\n② If it still happens, run `devin` interactively once in that directory on that machine to trust it.\n③ Or set `respect_workspace_trust: false` in the Devin CLI config on that machine.',

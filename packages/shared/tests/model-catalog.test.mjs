@@ -66,3 +66,39 @@ test('UTILITY_MODEL_ANTHROPIC はユーザー選択可能な AI_MODEL_CATALOG.cl
   assert.equal(typeof UTILITY_MODEL_ANTHROPIC, 'string');
   assert.ok(UTILITY_MODEL_ANTHROPIC.length > 0);
 });
+
+// 変更3: devin カタログを実測13件に差し替え（4件→13件）。
+// 値は slug か alias のみで family_uid は含めない方針のため、'_' を含む値がないことも併せて検査する。
+test('devin カタログは実測13件である', () => {
+  assert.equal(AI_MODEL_CATALOG.devin.length, 13, `devin カタログの件数が想定と異なる: ${JSON.stringify(AI_MODEL_CATALOG.devin.map((m) => m.id))}`);
+});
+
+test('devin カタログに実測13件のIDがすべて含まれる', () => {
+  const ids = AI_MODEL_CATALOG.devin.map((m) => m.id);
+  const expected = [
+    'adaptive',
+    'opus',
+    'sonnet',
+    'haiku',
+    'claude-fable-5.1',
+    'gpt',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'codex',
+    'gemini',
+    'gemini-3.1-pro',
+    'swe',
+    'glm-5.3',
+  ];
+  assert.deepEqual(ids, expected, `devin カタログの内容が想定と異なる: ${JSON.stringify(ids)}`);
+});
+
+test('devin カタログから gpt-5.5（非 alias・削除対象）が削除されている', () => {
+  const ids = AI_MODEL_CATALOG.devin.map((m) => m.id);
+  assert.ok(!ids.includes('gpt-5.5'), `gpt-5.5 が削除されずに残っている: ${JSON.stringify(ids)}`);
+});
+
+test('devin カタログの ID は family_uid 形式（アンダースコア含む）を含まない', () => {
+  const offenders = AI_MODEL_CATALOG.devin.map((m) => m.id).filter((id) => id.includes('_'));
+  assert.deepEqual(offenders, [], `family_uid らしき ID が混入している: ${JSON.stringify(offenders)}`);
+});

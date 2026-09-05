@@ -6,6 +6,45 @@
 
 ## 実装済み機能
 
+### #360: Devin モデル選択サイクル・サイクルA（ビルド阻害バグ修正 + 拒否検出の実測追随 + モデルカタログ13件化） (2026-09-05)
+
+前セッションが 45 分・auto-compact 14 回で強制停止した後の再開サイクル。前セッションが未コミットのまま残していた
+「ビルドが通らない」状態（3 OS 同一の TS2304、`ai-runner.ts` の `devinCurrentModelForResume` のスコープ取り違え）を
+最優先で解消し、続けてサイクル A 分の3項目（変更6/変更3、S1含む）を完了。
+
+- **S0（ビルド阻害バグ修正）**: `agents/{linux,macos,windows}/src/services/ai-runner.ts` で `devin` ブロック内
+  `const` 宣言だった `devinCurrentModelForResume` を `devinResumedSessionId` と同じ関数スコープの `let` 宣言に
+  変更し、ブロック内は代入のみに変更（3 OS 各2行）。
+- **S1（不変条件の回復）**: `clearDevinSessionId()` の2箇所（3 OS 計6箇所）に `clearDevinModel()` を並べ
+  「セッションIDとモデルは常に対で扱う」不変条件を回復（linux の未使用 import 解消、macos/windows は import 追加）。
+- **変更6（Devin CLI v3000.6.14 の拒否検出文言への実測追随）**: `agents/{linux,macos,windows}/src/services/
+  devin-diagnostics.ts`（3 OS byte-for-byte 同一）に純関数 `isDevinToolRejectionText()` を追加し、
+  `/tool was rejected/i` 等の直接比較3パターン（実測 v3000.6.14 の新パターン `rejected a tool call that
+  requires confirmation` 含む）をこれ経由に差し替え（3 OS 計6箇所）、新規 i18n キー
+  `devin.planToolRejectedNoRetry` 追加、`agents/{linux,macos}/tests/devin-diagnostics.test.mjs` に実文言3種の
+  テスト追加（linux/macos byte-for-byte 同一）。
+- **変更3（Devin モデルカタログの実測反映）**: `packages/shared/src/constants.ts` の `AI_MODEL_CATALOG.devin` を
+  実測4件→13件に差し替え（`adaptive`/`opus`/`sonnet`/`haiku`/`claude-fable-5.1`/`gpt`/`gpt-5.6-terra`/
+  `gpt-5.6-luna`/`codex`/`gemini`/`gemini-3.1-pro`/`swe`/`glm-5.3`、非 alias `gpt-5.5` は削除、値は slug/alias
+  のみで family_uid は含めない、effort サフィックスは description 文字列に明記するのみで実装ゼロ）、
+  `packages/shared/tests/model-catalog.test.mjs` に4件の devin 検査テスト追加。
+- **実装中の逸脱と復旧**: 当初、旧プランの記述につられて `command-handler.ts` のヘルプ文言に effort サフィックス
+  注記を追加したが、現行プラン自身の変更3スコープ記述（「実装ゼロ」）と検証チェックリスト（
+  `git diff --stat -- apps/ prisma/` が空であること）に反すると気づき全面リバートして `apps/`/`prisma/` を
+  完全無変更の状態に復元。
+- **検証**: `pnpm build` 6 workspace green、`grep -c 'require('`(apps/web)=0、`node --test` を workspace ごと
+  個別実行で `packages/shared` 39→43（新規4件）・`apps/server` 131/131・`agents/linux` 197→202（新規5件）・
+  `agents/macos` 159→164（新規5件）すべて非退行で green（linux/macos とも初回実行時に単発 flaky failure が
+  発生したが再実行で即0件に戻り、既知の非決定的挙動と判断・コード修正なし）。`git diff --stat` が計17ファイル
+  とプラン想定に完全一致、`apps/`/`prisma/` は空を再確認。
+- **変更ファイル**: `agents/{linux,macos,windows}/src/services/{ai-runner,connection,devin-diagnostics,
+  session-store}.ts`、`agents/{linux,macos}/tests/devin-diagnostics.test.mjs`、`packages/shared/src/
+  {constants,i18n}.ts`、`packages/shared/tests/model-catalog.test.mjs`。DB マイグレーション不要、
+  `apps/server`/`apps/web`/`prisma` は完全無変更。
+- **次サイクル（サイクルB）に持ち越し**: 変更4（ATIF-v1.7 パーサ対応）と変更5（実モデル名・使用量の ATIF
+  由来出力）は同じ ATIF 読み取り箇所を触るため必ず同一サイクルで実施する方針。
+- **反映**: commit・push・`pm2 restart devrelay-server`・各マシンの `u` は人間の指示待ち。
+
 ### #359: WebUI ヘッダーの横幅圧迫を解消（二次ナビを歯車ドロップダウンへ集約） (2026-09-05)
 
 #### 背景
