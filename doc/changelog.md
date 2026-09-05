@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### #359: WebUI ヘッダーの横幅圧迫を解消（二次ナビを歯車ドロップダウンへ集約） (2026-09-05)
+
+#### 背景
+
+1505px 幅のウインドウでヘッダーナビ9項目（チャット/ダッシュボード/会話履歴/活動/開発レポート/エージェント/チーム/プロジェクト/設定）が2行に折り返すとユーザーがスクリーンショット付きで報告。要望は3点: ①開発レポート・プロジェクトを設定の中に入れる、②「Manager を開く」ボタンを「Manager」に短縮、③設定をテキストではなく歯車アイコンにする。
+
+「設定」がアイコン化されるとテキストラベルが消え「その中に他の項目を入れる」余地が構造的に無くなる点から、`SettingsPage.tsx`（2336行）のタブ化ではなく歯車ドロップダウンメニュー方式を採用した（既存ルート・`App.tsx` の Route 定義は無改修）。
+
+検討中にユーザーから追加指示「ユーザー名は全面に出したいからログアウトは表に出そう」を受け、当初案（ユーザー名・ログアウトもドロップダウンに格納）を撤回し、ヘッダーに残置する形に変更した。
+
+#### 実装
+
+`apps/web/src/components/Layout.tsx`:
+- `navigation` 配列を6項目（チャット/ダッシュボード/会話履歴/活動〔監督者のみ〕/エージェント/チーム）に削減し、新規 `secondaryNavigation` 配列（開発レポート/プロジェクト/設定の3項目）を新設。デスクトップの歯車ドロップダウンとモバイルメニュー下段の両方から同じ配列を参照（片方からしか参照しないとモバイルから到達不能になるため）。
+- 歯車ドロップダウンをサウンドトグルボタンと Manager ボタンの間に新設。`useState`+`useRef`+`useEffect`（`react` から追加 import）でクリック外側検知（`mousedown`）・`Escape` キー・項目クリックの3経路すべてで閉じる実装。`aria-haspopup="menu"`/`aria-expanded`/`role="menu"`/`role="menuitem"` を付与し、アクティブ時は既存ナビと同じ `bg-[var(--bg-base)] text-[var(--text-primary)]` でハイライト。メニュー本体は新規 CSS・新規ライブラリを使わず既存 CSS 変数（`--bg-secondary`/`--border-color` 等）のみで `absolute right-0 mt-2 w-48 z-50` として実装。
+- Manager ボタンは表示ラベルを `t('nav.openManager')`="Manager" に短縮しつつ `title={t('nav.openManagerTitle')}` でツールチップに旧文言を保持（デスクトップ・モバイル両方）。
+- ユーザー名 `<span>` とログアウトボタンは変更せず据え置き。
+
+`apps/web/src/i18n/messages.ts`:
+- `nav.openManager` の値を `{ en: 'Manager', ja: 'Manager' }` に変更。
+- 新規 `nav.openManagerTitle`（旧文言を保持）・`nav.settingsMenu`（歯車の aria-label/title）の2キーを追加。
+- `nav.devReports`/`nav.projects`/`nav.settings`/`nav.logout` はキー・値とも無変更。
+
+#### 検証
+
+`pnpm build` 6 workspace green。`grep -c 'require('`（apps/web ビルド成果物）= 0（#310 の CJS 混入チェック）。`git diff --stat -- apps/server/ agents/ packages/ prisma/` が空（スコープ外無変更）。`git diff --stat -- apps/web/` が `Layout.tsx`+`messages.ts` の2ファイルのみ（想定どおり過不足なし）。`pnpm --filter web lint` は25エラー/8警告で失敗するが、対象は `AuthContext.tsx`/`OrganizationContext.tsx`/`ThemeContext.tsx`/`useWebSocket.ts`/`ChatPage.tsx`/`ConversationsPage.tsx`/`MachinesPage.tsx`/`MemberActivityPage.tsx`/`SettingsPage.tsx` の9ファイルのみで、変更2ファイルを単独で `eslint` にかけると0件。`git stash` で変更を退避し同じ25エラー/8警告が変更前から存在することを確認し非退行と確定。
+
+DB マイグレーション不要、`apps/server`/`agents`/`packages/shared`/`prisma` は完全無変更のため server 再起動・各マシンの `u` は不要。`apps/web` は静的配信のためビルドのみで反映。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/web/src/components/Layout.tsx` | ナビ配列分割・歯車ドロップダウン新設・モバイルメニュー追従・Manager ラベル短縮 |
+| `apps/web/src/i18n/messages.ts` | `nav.openManager` 値変更 + `nav.openManagerTitle`/`nav.settingsMenu` 追加 |
+
 ### #357: manager.devrelay.io へのログイン後トークン受け渡し (2026-09-04)
 
 #### 背景
