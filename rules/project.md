@@ -212,7 +212,7 @@ Devin for Terminal は Gemini/Codex/Aider と同じ spawn パターンで統合�
 - 実行（exec、フル対応 CLI）: `devin -p --permission-mode dangerous --prompt-file <tmp>`
 - プロンプト: `--prompt-file` 一時ファイル経由（stdin パイプは panic するため使用不可）。**位置引数（`args.push('--', prompt)`）フォールバックは #344 で完全に削除した**。理由: Node の `spawn(..., {shell:true})` は引数をクォートしないため、DevRelay が毎回前置する ~170 行の Agreement/プランモード指示（`\n\n` やバッククォートを含む）がシェルに解釈される**コマンド注入経路**になっていた（実証済み）。`--prompt-file` が非対応と判明した場合は静かに劣化させず `devin.promptFileUnsupported` で明示的に中止する（#325「静かなフォールバック禁止」）
 - セッション継続: `-r <session-id>` で明示的に resume（`devin list --format json` で取得・`.devrelay/devin-session-id` に保存）
-- パーミッション（plan）: `--agent-config` で `Read(**)` のみ allow、`Write(**)` + `Exec(**)` を deny。`--permission-mode auto` は「安全と判断したツールを自動承認」するだけで厳密な読み取り専用ではないため、agent-config で明示的に強制する（#260）
+- パーミッション（plan、#363 で再設計）: `Exec()` はプレフィックス一致であり `Exec(**)` は無効なルール（公式ドキュメント明記）。`--config`/`--agent-config` で `allow:['Read(**)', ...Exec 許可プレフィックス]`（読み取り専用コマンド・`git log`/`git status`/`git diff`/`git show`/`git branch`・DevRelay スキルディレクトリ配下の bash 実行）、`deny:['Write(**)', ...Exec 拒否プレフィックス]`（書き込みコマンド + `sudo`）を明示生成する（`devin-plan-config.ts`、3 OS byte-for-byte 同一の純関数）。`--permission-mode auto` は「読み取り専用ツールのみ」を自動承認するだけでシェル実行（Exec）は対象外（`devin --help` 実測）——これが #260〜#362 で見落とされていた本当の根本原因。`smart` は「ルールが決めていない場合のみ安全性を判定して自動実行」するため、対応していれば `auto` より `smart` を優先する（`resolveDevinPlanPermissionMode()`）。キルスイッチ `DEVRELAY_DEVIN_PLAN_EXEC_DENY=1` で `allow:['Read(**)']`/`deny:['Write(**)']` のみ（Exec 許可/拒否なし）+ `--permission-mode auto` に戻せる（#260〜#362 の壊れていた挙動と等価）
 - パーミッション（exec）: `--permission-mode dangerous`（全ツール自動承認）
 - **フラグはケーパビリティ駆動（#329、#344 で判定方針を反転、#345 で診断項目追加）**: `--agent-config`/`--permission-mode`/`--prompt-file`/`--model`/`--export`/`--respect-workspace-trust` の対応可否は `devin --help` の単一 probe（キャッシュ付き、`probeDevinCapabilities()`）で判定する。**probe 自体が失敗した場合は #344 で「全て false（悲観）」から「全て true（楽観）」に反転した**——悲観側は「実際は devin が正しく対応しているのに probe だけが（PATH 不在・更新直後のキャッシュ汚染・`--help` の非 0 終了等で）失敗した」場合に、誤った非対応警告と（当時存在した）危険な argv フォールバックを静かに発動させてしまう構造的な穴だった。楽観側に倒しても、実際に非対応だった場合は `unexpected argument` を検出する既存の自動リトライ（最大3フラグ、#344 で2→3に引き上げ）が安全網として受け止める。失敗キャッシュのみ `DEVRELAY_DEVIN_PROBE_TTL_MS`（既定60000ms）で期限切れにし、成功キャッシュは Agent プロセス寿命いっぱい保持。plan モードで `--agent-config` 非対応の場合は `--permission-mode auto`（#274 の劣化パスと同レベル）→ さらに非対応なら `-p` のみへ段階的に劣化し、**読み取り専用強制が効かなくなる旨を必ずチャットに警告する**（#325「静かなフォールバック禁止」、ただし probe が実際に成功して非対応と判定した`ok===true`のときのみ警告——probe 自体が失敗した`ok===false`のときは代わりに `devin.probeFailed` を1回だけ通知）。`close` ハンドラでも `unexpected argument '--flag'` を検知したら該当フラグを落として自動リトライし、それでも失敗する場合は実際の stderr 末尾5行を明示エラーとして返す（`(No response from AI)` に丸め込まない）。**診断強化（#345）**: `probeDevinCapabilities()` は `devin --version`/`helpBytes`/`ok`/`reason` も保持し、劣化通知3キー（`devin.readonlyUnsupported`/`devin.execPermissionUnsupported`/`devin.probeFailed`）に `{detail}`（例: `devin 3000.1.27 / help 4128 chars / probe=ok`）として表示する——ある端末で `ok:true` かつ `agentConfig:false` のように「probe 自体は成功しているのに実機の `--help` と矛盾する」ケースが発生し、正規表現バグでもリトライ未発火でもなく環境差（Agent が解決する devin 実体がユーザーの対話シェルと別／devin config の差）が疑われたが証拠不足で断定できなかったため、**憶測で直さず**次回のチャット1回で切り分けられるようこの診断行を追加した
 - **workspace trust 対応（#345）**: devin は `-p`（非対話/print モード）では `--respect-workspace-trust` の既定が `false`（`devin --help` に明記）だが、実機では対象マシンの devin config（`respect_workspace_trust`）が CLI 既定より優先され `Refusing to run in an untrusted workspace` で拒否されるケースがある。DevRelay はリモート実行のため対話の trust プロンプトを人間が押せず構造的に復旧不能なので、`devinHasRespectWorkspaceTrust` かつ `DEVRELAY_DEVIN_RESPECT_WORKSPACE_TRUST !== '1'` のとき `--respect-workspace-trust false` を明示的に付与する（devin 自身が文書化している非対話モードの既定へ戻すだけで権限拡大ではない。キルスイッチ `DEVRELAY_DEVIN_RESPECT_WORKSPACE_TRUST=1` で従来動作に戻せる、`devinDroppedFlags` の自動リトライにも自動的に乗る）。当該フラグを付与してもなお拒否された場合（旧 devin での非対応や config の別経路）は `cli-failure.ts` の `isWorkspaceTrustError(stderr)`（`classifyCliFailure()` 本体は無変更のまま追加した純関数）が `Refusing to run in an untrusted workspace`/`respect_workspace_trust` を検出し、生 stderr の代わりに `devin.workspaceUntrusted`（対処手順3点）を表示する
@@ -1681,6 +1681,15 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   「安全と判断したツールのみ自動承認」判定）と併用する多層防御に変更、`Write(**)` の deny は維持したまま。
   **`--config` と `--permission-mode` の併用セマンティクスは実機未計測**のため、キルスイッチ
   `DEVRELAY_DEVIN_PLAN_EXEC_DENY=1` で即座に旧動作（Exec 全 deny）へ戻せるようにしてある
+  - **【#363 で訂正】上記の記述は不正確だった**。`Exec(**)` は元々一度も機能していなかった
+    （`Exec()` はプレフィックス一致で `Exec(**)` は無効なルールと公式ドキュメントに明記されており、
+    「deny から `Exec(**)` を外した」こと自体は何も変えていなかった）。また `--permission-mode auto` の
+    「安全と判断したツールのみ自動承認」という説明も誤りで、正しくは**読み取り専用ツールのみ自動承認**
+    （シェル実行=Exec は対象外）。したがって #362 時点では allow にも deny にも一致する Exec ルールが
+    一つも無く、DevRelay 自身のスキル呼び出しは相変わらず「ルール不一致→承認待ち→非対話モードで無言終了」
+    のままだった。#363 で `devin-plan-config.ts` により明示的な Exec allow/deny プレフィックス一覧を
+    導入し、かつ対応していれば `auto` ではなく `smart`（安全性を自動判定して実行）を優先するよう修正した。
+    詳細は下記「Devin プランモード『ツールが許可されず返事が返ってこない』の根治 (#363)」節を参照
 - **Devin の非対話 deny は拒否テキストを一切出さず exit 0 で終わる**（#347 Phase0 実測）。この性質により
   「ツール呼び出しで deny されて終わった」ターンは、既存の空応答検知（`devinPlanToolRejected`、
   `fullOutput.trim().length===0` が発火条件）を素通りする——deny される**前**に前置き1文を出しているため
@@ -1700,3 +1709,38 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
 - **`isNoisyChangedPath()` は `(^|\/)(...)(\/|$)` の境界アンカーを持つため `.gitignore`/`.hgignore`
   のような「ディレクトリ名と同じ接頭辞を持つファイル」を誤って除外しない**。VCS 系の除外パターンを
   追加・変更する際は、この境界ケースを回帰テストに必ず含めること（`devin-file-watch.test.mjs`）
+
+### Devin プランモード「ツールが許可されず返事が返ってこない」の根治 (#363, 2026-09-05)
+
+- **#362 は方向としては正しかったが不完全だった**。`Exec(**)` は元々一度も機能していなかった（`Exec()`
+  はプレフィックス一致で `Exec(**)` は無効なルールと公式ドキュメントに明記）ため、#362 の「deny から
+  `Exec(**)` を外す」は実質何も変えておらず、かつ「`--permission-mode auto` は安全と判断したツールを
+  自動承認する」という説明も誤りだった。実際は **`auto` は読み取り専用ツールのみを自動承認し、シェル実行
+  （Exec）は対象外**（`devin --help` 逐語実測）。この二重の誤解により、DevRelay 自身の調査系スキル
+  （`devrelay-list-inventory` 等、実体は bash スクリプト）は allow にも deny にも一致するルールが無いまま
+  「承認待ち→非対話モードでは無言終了」を #260 から #362 まで通して踏み続けていた
+- **新設計**: 新規純関数モジュール `devin-plan-config.ts`（`agents/{linux,macos,windows}/src/services/`、
+  3 OS byte-for-byte 同一・外部 import ゼロ、`devin-file-watch.ts`/`devin-atif.ts` と同じ流儀）に
+  `buildDevinPlanConfig(opts)` と `resolveDevinPlanPermissionMode(caps, opts)` の2純関数を集約。
+  `buildDevinPlanConfig()` は `strictExec=false`（既定）のとき `allow=['Read(**)', ...Exec 許可
+  プレフィックス]`（`PLAN_READONLY_BASH_COMMANDS` 由来の読み取り専用コマンド + `git log`/`git status`/
+  `git diff`/`git show`/`git branch`〔`git` 単体は許可しない、`git push` を巻き込まないため〕+
+  DevRelay スキルディレクトリ配下の bash 実行を通す4パターンのプレフィックス〔クォート有無・POSIX/Windows
+  パス区切りの揺れに対応〕）、`deny=['Write(**)', ...Exec 拒否プレフィックス]`（`PLAN_WRITE_BASH_COMMANDS`
+  由来の書き込みコマンド + `sudo`）を生成する。`strictExec=true`（キルスイッチ）のときは
+  `allow=['Read(**)']`/`deny=['Write(**)']` のみで `Exec(**)` という無効な文字列は**二度と出力しない**
+  （回帰テストで担保）
+- **`resolveDevinPlanPermissionMode()`**: `--permission-mode` 自体が非対応なら `null`（引数を付けない）、
+  対応していれば既定で `smart`（ルールが決めていない場合のみ安全性を自動判定して実行、`--permission-mode`
+  の選択肢に `"smart"` が現れるかを `probeDevinCapabilities()` の `permissionModeSmart` フィールドで
+  probe）、`smart` 非対応または `strictExec=true` のときは `auto` にフォールバック。
+  `DEVRELAY_DEVIN_PLAN_PERMISSION_MODE=auto|smart` で明示上書き可能（envOverride は strictExec/smart
+  判定より優先）
+- **`probeDevinCapabilities()` のキャッシュ変数の型注釈を追従させ忘れる罠（#347 で3 OS全滅を起こした既知の
+  罠）に今回も要注意**——`permissionModeSmart: boolean` を戻り値型に追加する際は、関数自身の返り値型注釈
+  だけでなく**モジュールレベルのキャッシュ変数 `devinCapabilitiesCache` の型注釈にも必ず追従させる**こと
+- **キルスイッチの整理**: `DEVRELAY_DEVIN_PLAN_EXEC_DENY=1`（`strictExec`）は Exec 許可/拒否リストを
+  一切生成せず `--permission-mode auto` のみを使う、#260〜#362 の壊れていた挙動と等価な状態に戻す。
+  `devinPlanToolRejected`（#274/#329/#344 の空応答自動リトライ）と `endedWithoutAnswer()`（#362 の無言
+  途中終了検知）は本サイクルで**1 バイトも変更していない**——真因を直せば発火不要になるだけで、トリガ拡張
+  は Devin の二重課金リスクがあるため意図的にスコープ外とした

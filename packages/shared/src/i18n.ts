@@ -309,8 +309,8 @@ export const chatMessages = {
   // #347: --config（--agent-config の後継）が使える端末では読み取り専用は実際に強制される（自動）。
   // このキーが出るのは --config も --agent-config も無い端末だけになった（両方見て先頭分岐が選ばれなかった場合）。
   'devin.readonlyUnsupported': {
-    en: '⚠️ This machine\'s Devin CLI has neither `--config` nor `--agent-config`. Plan-mode read-only enforcement is prompt-instruction only (file writes cannot be fully blocked). For a permanent fix, add a `permissions.deny` rule to this machine\'s Devin CLI config file (e.g. `~/.config/devin/config.json` or `%APPDATA%\\devin\\config.json`), such as `"permissions": { "deny": ["Write(**)", "Exec(**)"] }`.\n({detail})',
-    ja: '⚠️ この端末の Devin CLI には `--config` も `--agent-config` もありません。プランモードの読み取り専用強制はプロンプト指示のみになります（ファイル書き込みを完全にはブロックできません）。恒久的な対策としては、この端末の Devin CLI の config ファイル（例: `~/.config/devin/config.json` や `%APPDATA%\\devin\\config.json`）に `"permissions": { "deny": ["Write(**)", "Exec(**)"] }` のような `permissions.deny` ルールを追加してください。\n({detail})',
+    en: '⚠️ This machine\'s Devin CLI has neither `--config` nor `--agent-config`. Plan-mode read-only enforcement is prompt-instruction only (file writes cannot be fully blocked). For a permanent fix, add a `permissions.deny` rule to this machine\'s Devin CLI config file (e.g. `~/.config/devin/config.json` or `%APPDATA%\\devin\\config.json`). Note that `Exec()` rules are prefix-matches, not globs, and `Exec(**)` is not a valid rule (per Devin\'s own docs) — use concrete prefixes instead, such as `"permissions": { "deny": ["Write(**)", "rm", "git push"] }`.\n({detail})',
+    ja: '⚠️ この端末の Devin CLI には `--config` も `--agent-config` もありません。プランモードの読み取り専用強制はプロンプト指示のみになります（ファイル書き込みを完全にはブロックできません）。恒久的な対策としては、この端末の Devin CLI の config ファイル（例: `~/.config/devin/config.json` や `%APPDATA%\\devin\\config.json`）に `permissions.deny` ルールを追加してください。なお `Exec()` は glob ではなく「プレフィックス一致」であり、`Exec(**)` は無効なルールです（Devin 公式ドキュメントに明記）。具体的なプレフィックスを使ってください（例: `"permissions": { "deny": ["Write(**)", "rm", "git push"] }`）。\n({detail})',
   },
   // --- #346: --agent-config 非対応時に「このマシンで何が使えるか」を1回だけ可視化する（診断強化） ---
   'devin.flagList': {

@@ -6,6 +6,74 @@
 
 ## 実装済み機能
 
+### #363: Devin プランモード「ツールが許可されず返事が返ってこない」の根治 (2026-09-05)
+
+ユーザー報告（`DESKTOP-5U400FO/lfuser` / `Lafit` / Devin CLI / プランモード）を受けた #362 適用後も、
+質問「MB01の概要を教えて」に対し Devin が前置き1文だけ返して無言終了する問題が再発。#362 は「deny から
+`Exec(**)` を外す」対応だったが、実は **`Exec(**)` は元々一度も機能していなかった**（Devin 公式ドキュメント
+に `Exec()` はプレフィックス一致・`Exec(**)` は無効なルールと逐語で明記）ため #362 の修正は何も変えておらず、
+かつ「`--permission-mode auto` は安全と判断したツールを自動承認する」という従来の理解も誤りで、実際は
+**`auto` は読み取り専用ツールのみを自動承認しシェル実行（Exec）は対象外**（`devin --help` 3000.6.7 実測、
+UI 表示の `permission_mode=Normal` とも一致）。この二重の誤解により、DevRelay 自身の調査系スキル
+（`devrelay-list-inventory` 等、実体はすべて bash スクリプト）は allow にも deny にも一致するルールが
+無いまま「承認待ち→非対話 `-p` モードでは無言終了」を #260 から #362 まで踏み続けていたと結論。
+
+- **変更1（本丸）**: 新規純関数モジュール `agents/{linux,macos,windows}/src/services/devin-plan-config.ts`
+  （3 OS byte-for-byte 同一・外部 import ゼロ、`devin-file-watch.ts`/`devin-atif.ts` と同じ流儀）を新設。
+  `buildDevinPlanConfig(opts)` は `strictExec=false`（既定）のとき明示的な Exec 許可プレフィックス
+  （`PLAN_READONLY_BASH_COMMANDS` 由来の読み取り専用コマンド + `git log`/`git status`/`git diff`/`git show`/
+  `git branch`〔`git` 単体は許可せず `git push` を巻き込まない粒度〕+ DevRelay スキルディレクトリ配下の
+  bash 実行を通す4パターン〔クォート有無・POSIX/Windows パス区切りの揺れに対応〕）を `allow` に、
+  Exec 拒否プレフィックス（`PLAN_WRITE_BASH_COMMANDS` 由来の書き込みコマンド + `sudo`）を `deny` に追加する。
+  `strictExec=true`（キルスイッチ）のときは `allow=['Read(**)']`/`deny=['Write(**)']` のみで `Exec(**)` と
+  いう無効な文字列は一切生成しない（回帰テストで担保）。`resolveDevinPlanPermissionMode(caps, opts)` は
+  `--permission-mode` 非対応なら `null`、対応していれば既定で `smart`（ルール不一致時のみ安全性を自動判定
+  して実行、`probeDevinCapabilities()` に追加した `permissionModeSmart` フィールドで `--help` 文中の
+  `"smart"` の有無を probe）、`smart` 非対応または `strictExec=true` のときは `auto` にフォールバックする。
+- **変更2**: `agents/{linux,macos,windows}/src/services/ai-runner.ts` のプランモード分岐を上記2関数呼び出し
+  に置き換え、`--permission-mode` は解決結果（既定 `smart`）を渡すよう変更。一時ファイル名
+  （`devrelay-devin-plan-config-<sessionId>.json`）・書き出し・削除・`devinPlanConfigApplied` フラグの扱いは
+  現行のまま無変更。`probeDevinCapabilities()` の戻り値に `permissionModeSmart: boolean` を追加する際、
+  関数自身の返り値型注釈だけでなく**モジュールレベルのキャッシュ変数 `devinCapabilitiesCache` の型注釈にも
+  追従**させた（#347 で3 OS全滅のビルド不能を起こした既知の罠の再発防止）。
+- **変更3**: `packages/shared/src/i18n.ts` の `devin.readonlyUnsupported`（ja/en）から、無効ルールである
+  `"deny": ["Write(**)", "Exec(**)"]` という誤った案内例を削除し、プレフィックス形式の `Exec(...)` 記法へ
+  訂正。**キー名と `{detail}` プレースホルダは変更していない**ため呼び出し側3箇所は無修正。
+- **変更4（テスト）**: `agents/{linux,macos}/tests/devin-plan-config.test.mjs`（byte-for-byte 同一、17件）
+  を新設。`strictExec=true`/`false` それぞれの `allow`/`deny` 内容、git 読み取り専用サブコマンドの allow、
+  `sudo` の deny 追加、`Exec(**)` という文字列が strictExec の真偽どちらでも一切生成物に現れないことの
+  回帰テスト、skillsDir からの4パターンプレフィックス生成、`skillsDir` 空文字列時に prefix が追加されない
+  こと、`resolveDevinPlanPermissionMode()` の smart対応/非対応/`--permission-mode`非対応/envOverride/
+  strictExec時の全分岐、戻り値が `JSON.stringify` 可能で `version`/`shell.setup_complete` を保持することを
+  検証。
+- **変更5（ドキュメント）**: `README.md`（Devin Plan Mode Read-Only Enforcement 節・#362 節）と
+  `rules/project.md`（Devin CLI 統合節のパーミッション記述・#362 節への訂正追記・新設 #363 節）を
+  「`Exec()` はプレフィックス一致・`Exec(**)` は無効・`auto` は read-only のみ・`smart` が安全判定」に
+  訂正。
+- **検証**: `pnpm build` 6 workspace green。`node --test` を workspace ごと個別実行（#333 の教訓、複合
+  コマンドにしない）し `packages/shared`・`apps/server`・`agents/linux`（新規17件を含め非退行）・
+  `agents/macos`（同左）いずれも green。`diff` で3 OS の `devin-plan-config.ts` と linux/macos のテストが
+  byte-for-byte 同一であることを確認。`grep -rn 'Exec(\*\*)' agents/*/src agents/*/dist packages/shared/src`
+  が0件であることを確認。`git diff --stat -- apps/ prisma/ scripts/` が空（スコープ外無変更）を確認。
+  `git diff -- agents/linux/src/services/ai-runner.ts` で `devinPlanToolRejected` 判定ブロックと exec モード
+  分岐（`--permission-mode dangerous`）の `[+-]` 行が0件であることを確認（スコープ外の非改変を構造的に確認）。
+  dist 反映確認: 3 OS の `dist/services/devin-plan-config.js` が同一サイズで存在、`dist/services/ai-runner.js`
+  に `permissionModeSmart` が含まれることを確認。`grep -c 'require(' apps/web/dist/assets/index-*.js` = 0
+  （apps/web 無変更だが恒例チェック）。
+- **変更ファイル**（新規5・変更4、計9件）: 新規 `agents/{linux,macos,windows}/src/services/devin-plan-config.ts`
+  + `agents/{linux,macos}/tests/devin-plan-config.test.mjs`。既存
+  `agents/{linux,macos,windows}/src/services/ai-runner.ts`、`packages/shared/src/i18n.ts`。
+- **明示的にスコープ外**（プラン記載どおり）: `devinPlanToolRejected`（#274/#329/#344）と `endedWithoutAnswer()`
+  （#362）の判定ロジックは1バイトも変更していない（真因を直せば発火不要であり、トリガ拡張は Devin の
+  二重課金リスクがあるため）。exec モード（`--permission-mode dangerous`）・`devin-file-watch.ts`・
+  Claude/Codex/Gemini 経路は無変更。`apps/server`/`apps/web`/`prisma` は完全無変更（DB マイグレーション
+  不要・server 再起動不要）。
+- **反映**: `pnpm build` は本サイクル内で実施済み。**commit + push が必要**（人間の指示待ち）。
+  **`packages/shared` を変更するため `pm2 restart devrelay-server` が必要**。**Agent 側が本体のため
+  各マシンの `u` が必要（最優先: `DESKTOP-5U400FO/lfuser`）**。実チャットでの E2E 確認（プランモードでの
+  回答完走、`agent.log` の `permission_mode=Smart` 表示、書き込み拒否の維持、`e` 後の書き込み許可、
+  キルスイッチでの旧挙動再現、Claude/Codex/Gemini の非退行）は人間の反映後に別サイクルで実施。
+
 ### #362: Devin プランモードの「無言で途中終了」と `.svn` 洪水の解消 (2026-09-05)
 
 ユーザー報告「なんかうまく動かなくなっちゃった」を受け、添付ログと本番 DB の read-only 実測で2つの独立した欠陥

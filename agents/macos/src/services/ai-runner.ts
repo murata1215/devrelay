@@ -12,6 +12,7 @@ import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWa
 import { decidePlanPermission } from './plan-permission.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from './devin-diagnostics.js';
+import { buildDevinPlanConfig, resolveDevinPlanPermissionMode } from './devin-plan-config.js';
 import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, type AtifStepSummary } from './devin-atif.js';
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
 import { saveClaudeSessionId, clearClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
@@ -46,6 +47,10 @@ let devinCapabilitiesCache: {
   agentConfig: boolean;
   config: boolean;
   permissionMode: boolean;
+  // 本サイクル: `--permission-mode` の選択肢一覧に `smart` が含まれるか（#347 の罠の再発防止として
+  // devinCapabilitiesCache 型注釈にも必ず追加。probeDevinCapabilities() の戻り値型・成功/失敗
+  // 両方の代入箇所とあわせて計3箇所を同時に直す必要がある）。
+  permissionModeSmart: boolean;
   promptFile: boolean;
   export: boolean;
   respectWorkspaceTrust: boolean;
@@ -234,6 +239,7 @@ function probeDevinCapabilities(command: string): {
   agentConfig: boolean;
   config: boolean;
   permissionMode: boolean;
+  permissionModeSmart: boolean;
   promptFile: boolean;
   export: boolean;
   respectWorkspaceTrust: boolean;
@@ -257,6 +263,11 @@ function probeDevinCapabilities(command: string): {
     // #347: --agent-config は廃止済み（#346）で、後継が --config（グローバル引数、Phase 0 実測で確認済み）。
     const configFlag = /--config\b/.test(help);
     const permissionMode = /--permission-mode\b/.test(help);
+    // 本サイクル: `devin --help` の `--permission-mode` 選択肢の説明文中に `"smart"` が
+    // 現れるかで判定する（3000.6.7 実測の逐語: `"smart" additionally auto-runs actions a
+    // fast model judges safe`）。誤検出で存在しない値を CLI に渡すと未知の引数エラーに
+    // なるため、緩い `/smart/i` ではなくこの特定フレーズにマッチさせる。
+    const permissionModeSmart = /"smart"\s+additionally auto-runs/i.test(help);
     const promptFile = /--prompt-file\b/.test(help);
     const exportFlag = /--export\b/.test(help);
     const respectWorkspaceTrust = /--respect-workspace-trust\b/.test(help);
@@ -270,9 +281,9 @@ function probeDevinCapabilities(command: string): {
     const helpBytes = help.length;
     // #346: フラグ一覧を先に計算してキャッシュに含める（チャットへの「使えるフラグ」通知に使う）
     const detectedFlags = Array.from(new Set(help.match(/--[a-z][a-z-]*/gi) ?? [])).sort();
-    devinCapabilitiesCache = { model, agentConfig, config: configFlag, permissionMode, promptFile, export: exportFlag, respectWorkspaceTrust, version, helpBytes, flags: detectedFlags, ok: true };
+    devinCapabilitiesCache = { model, agentConfig, config: configFlag, permissionMode, permissionModeSmart, promptFile, export: exportFlag, respectWorkspaceTrust, version, helpBytes, flags: detectedFlags, ok: true };
     devinCapabilitiesFailedAt = null;
-    console.log(`[devin] 🔎 capabilities: --model=${model} --agent-config=${agentConfig} --config=${configFlag} --permission-mode=${permissionMode} --prompt-file=${promptFile} --export=${exportFlag} --respect-workspace-trust=${respectWorkspaceTrust} version=${version} helpBytes=${helpBytes}`);
+    console.log(`[devin] 🔎 capabilities: --model=${model} --agent-config=${agentConfig} --config=${configFlag} --permission-mode=${permissionMode} --permission-mode-smart=${permissionModeSmart} --prompt-file=${promptFile} --export=${exportFlag} --respect-workspace-trust=${respectWorkspaceTrust} version=${version} helpBytes=${helpBytes}`);
     console.log(`[devin] 🔎 detected flags: ${detectedFlags.join(' ')}`);
     if (!agentConfig && !configFlag && !devinAgentConfigHelpDumped) {
       // #345: --agent-config/--config どちらも「非対応」と判定された場合のみ、H-A/H-B 切り分けのため help 全文を 1 回だけ dump
@@ -280,7 +291,11 @@ function probeDevinCapabilities(command: string): {
       console.log(`[devin] 🔎 --agent-config/--config not detected, full --help dump:\n${help}`);
     }
   } catch (err) {
-    devinCapabilitiesCache = { model: true, agentConfig: true, config: true, permissionMode: true, promptFile: true, export: true, respectWorkspaceTrust: true, version: 'unknown', helpBytes: 0, flags: [], ok: false, reason: (err as Error).message };
+    // permissionModeSmart のみ他フラグと異なり楽観 true にしない: 他フラグは「実は対応しているのに
+    // 誤って非対応判定」しても実行時に `unexpected argument` エラーで #329 の自動リトライ安全網が
+    // 拾えるが、`--permission-mode smart` は値が enum 制約のため異なるエラー文言になりうる。
+    // probe 失敗時は安全側の 'auto' に倒す（resolveDevinPlanPermissionMode 参照）。
+    devinCapabilitiesCache = { model: true, agentConfig: true, config: true, permissionMode: true, permissionModeSmart: false, promptFile: true, export: true, respectWorkspaceTrust: true, version: 'unknown', helpBytes: 0, flags: [], ok: false, reason: (err as Error).message };
     devinCapabilitiesFailedAt = Date.now();
     console.warn(`[devin] --help probe failed, assuming all flags supported (optimistic, TTL applies):`, (err as Error).message);
   }
@@ -1533,48 +1548,59 @@ export async function sendPromptToAi(
     }
 
     if (options.usePlanMode && !options.devinAutoPermFallback && (devinHasConfig || devinHasAgentConfig)) {
-      // #347: プランモードの読み取り専用は Devin の config ファイルで強制する。
-      // --agent-config は新しい Devin CLI で廃止されたため（#346 で確定）、
-      // 現行の --config <PATH> に置き換える。deny は allow より常に優先されるため
-      // （docs.devin.ai/cli/reference/permissions）、Write/Exec は確実にブロックされる。
-      // 一時ファイルは os.tmpdir() に置く（プロジェクトディレクトリを汚さない）。
-      // #347 Phase 0 実測: devin は --config のファイルを「セットアップ状態の保存先」とみなし、
-      // shell.setup_complete が無いと毎回 Welcome バナーを stdout に出す（fullOutput を汚染し
-      // #274/#329 の「出力ゼロ」安全網を無効化する）。既定値を先に書いておいてバナー自体を抑止する
-      // （推論なので isDevinBannerLine() によるフィルタとセットで運用する。下記プレーンテキスト出力箇所）。
-      // #347 Phase 0 実測: devin はこのファイルを書き換える（実測では merge/replace 双方を観測）。
-      // DevRelay は毎ターンここで作り直し、close ハンドラで削除するため、書き換えられても持ち越さない。
-      // Devin プランモード欠陥1対策: Exec(**) の一括 deny は DevRelay 自身の調査系スキル
-      // （devrelay-list-inventory 等、実体はすべて bash スクリプト）を巻き添えにして拒否してしまい、
-      // Devin が前置き1文だけ出して無言終了する（実測: Lafit プロジェクトで再現）。
-      // deny は Write(**) のみに絞り、Exec は --permission-mode auto（Devin 自身の
-      // 「安全と判断したツールのみ自動承認」）に委ねる。Write(**) の deny は allow/deny のうち
-      // deny が常に優先されるため、config 側の書き込み禁止は変わらず維持される（多層防御）。
-      // DEVRELAY_DEVIN_PLAN_EXEC_DENY=1 で従来（Exec も config で一括 deny）に戻せる（キルスイッチ）。
-      const devinPlanDenyExecToo = process.env.DEVRELAY_DEVIN_PLAN_EXEC_DENY === '1';
-      const planConfig = {
-        version: 1,
-        shell: { setup_complete: true },
-        permissions: {
-          allow: ['Read(**)'],
-          deny: devinPlanDenyExecToo ? ['Write(**)', 'Exec(**)'] : ['Write(**)'],
-        },
-      };
+      // plan モード: --config（後継、#347）または --agent-config（旧、後方互換）で Read(**) を許可し、
+      // Write(**) は常に deny（多層防御の最終防波堤）。Exec は「読み取り専用コマンド・DevRelay
+      // スキル実行の prefix allow」+「破壊的コマンドの prefix deny」+「--permission-mode」の
+      // 三層で扱う（本サイクル、devin-plan-config.ts に集約）。
+      //
+      // 【本サイクルで直した根本原因】Devin 公式ドキュメント（docs.devin.ai/cli/reference/permissions）
+      // によれば Exec() は glob ではなく「プレフィックス一致」であり Exec(**) は無効なルール
+      // （"Exec(**) is not valid" と明記）。#260 以来使っていた deny:["Write(**)","Exec(**)"] の
+      // Exec(**) は元々一度も機能していなかった。ルールに一致しないツール呼び出しは「承認待ち」に
+      // 落ち、非対話 -p モードでは拒否・保留とも無言 exit 0 になる。加えて --permission-mode auto は
+      // 「読み取り専用ツールだけ」を自動承認する仕様（devin --help 逐語）であり、シェル実行は
+      // 読み取り専用ではないため auto だけでは自動承認されない。この2つが重なり、DevRelay 自身の
+      // 調査系スキル（devrelay-list-inventory 等、実体はすべて bash スクリプト）が allow にも
+      // deny にも一致せず承認待ちに落ち、非対話モードのため無言で終わっていた。
+      //
+      // 対策は二層: ①読み取り専用コマンド・スキル実行の prefix を明示的に Exec() allow へ追加、
+      // ②`--permission-mode` を（対応していれば）smart に切り替え、allow に無いが安全なコマンドは
+      // Devin 自身の安全判定に委ねる。deny（Write(**) + 破壊的コマンドの prefix）は常に allow/smart
+      // より優先されるため、書き込みは構造的に止まったまま。
+      // DEVRELAY_DEVIN_PLAN_EXEC_DENY=1 で Exec 許可リストなし + --permission-mode auto
+      // （今日までの（壊れていた）挙動）に戻せる（キルスイッチ）。
+      // DEVRELAY_DEVIN_PLAN_PERMISSION_MODE=auto|smart で --permission-mode を明示上書きできる。
+      const devinPlanStrictExec = process.env.DEVRELAY_DEVIN_PLAN_EXEC_DENY === '1';
+      const planConfig = buildDevinPlanConfig({
+        strictExec: devinPlanStrictExec,
+        skillsDir: path.join(os.homedir(), '.claude', 'skills'),
+        readonlyBashCommands: PLAN_READONLY_BASH_COMMANDS,
+        writeBashCommands: PLAN_WRITE_BASH_COMMANDS,
+      });
       const planConfigPath = path.join(os.tmpdir(), `devrelay-devin-plan-config-${sessionId}.json`);
       fs.writeFileSync(planConfigPath, JSON.stringify(planConfig), 'utf-8');
       const configFlagName = devinHasConfig ? '--config' : '--agent-config';
       args.push('-p', configFlagName, planConfigPath);
-      if (!devinPlanDenyExecToo && devinHasPermissionMode) {
-        // config の allow/deny だけに任せず、Devin 自身の安全判定（自動承認）も併用する
-        args.push('--permission-mode', 'auto');
+      const devinPlanPermMode = resolveDevinPlanPermissionMode(devinCaps, {
+        strictExec: devinPlanStrictExec,
+        envOverride: process.env.DEVRELAY_DEVIN_PLAN_PERMISSION_MODE,
+      });
+      if (devinPlanPermMode) {
+        // config の allow/deny だけに任せず、Devin 自身の安全判定（smart/auto）も併用する（多層防御）
+        args.push('--permission-mode', devinPlanPermMode);
       }
       devinPlanConfigApplied = true;
-      console.log(`📋 Devin plan mode: using ${configFlagName} (${devinPlanDenyExecToo ? 'Read only, Write/Exec denied' : 'Read + safe Exec allowed, Write denied'})`);
+      console.log(`📋 Devin plan mode: using ${configFlagName} (${devinPlanStrictExec ? 'Read only, Write/Exec denied' : 'Read + safe Exec allowed, Write denied'})${devinPlanPermMode ? ` + --permission-mode ${devinPlanPermMode}` : ''}`);
     } else if (options.usePlanMode && !options.devinAutoPermFallback && devinHasPermissionMode) {
-      // #329: --config/--agent-config 非対応の CLI → --permission-mode auto に劣化（読み取り専用強制はプロンプト指示のみ）
-      args.push('-p', '--permission-mode', 'auto');
+      // #329/#347: --config/--agent-config 非対応の CLI → --permission-mode に劣化(config による
+      // Exec allow/deny prefix は使えないため読み取り専用強制はプロンプト指示のみ)
+      const devinPlanPermMode = resolveDevinPlanPermissionMode(devinCaps, {
+        strictExec: process.env.DEVRELAY_DEVIN_PLAN_EXEC_DENY === '1',
+        envOverride: process.env.DEVRELAY_DEVIN_PLAN_PERMISSION_MODE,
+      }) ?? 'auto';
+      args.push('-p', '--permission-mode', devinPlanPermMode);
       devinDegradedReason = 'planReadonly';
-      console.log(`📋 Devin plan mode: --config/--agent-config unsupported, degraded to --permission-mode auto (readonly not enforced)`);
+      console.log(`📋 Devin plan mode: --config/--agent-config unsupported, degraded to --permission-mode ${devinPlanPermMode} (readonly not enforced)`);
     } else if (options.usePlanMode && !options.devinAutoPermFallback) {
       // #329: --config/--agent-config も --permission-mode も非対応 → -p のみ（最小フラグ、読み取り専用強制はプロンプト指示のみ）
       args.push('-p');
