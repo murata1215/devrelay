@@ -270,3 +270,48 @@ export function endedWithoutAnswer(steps: AtifStepSummary[]): boolean {
   const last = steps[steps.length - 1];
   return last.tool !== null;
 }
+
+/**
+ * #364 Phase1（1-A-3）: 失敗ターン（最後がツール呼び出しで終わっている＝`endedWithoutAnswer()` と
+ * 同じ構造条件）に限定して、最後のステップの `observation.results[].content` を 300 文字だけ
+ * 抜粋する。`summarizeAtifEntry()` 自体は #361 の設計どおり `observation` を一切参照しないため
+ * 変更しない——本関数はその例外として新設する別関数であり、既存関数のガードは崩さない。
+ *
+ * 本モジュールは外部 import ゼロの流儀のため、`devin-diagnostics.ts` の
+ * `isDevinToolRejectionText()`（拒否文言のパターン判定）はここでは呼ばない。
+ * ここでは「構造的に失敗ターンか」の判定と raw content の抽出のみを行い、
+ * 文言パターンでのフィルタは呼び出し側（`ai-runner.ts`、`isDevinToolRejectionText` を
+ * 既に import 済み）に委ねる設計。
+ *
+ * @param content ATIF ファイルの生テキスト（単一 JSON のみ対象、JSONL 旧形式は対象外）
+ * @returns 抜粋（最大300文字）。失敗ターンでない/observation が無い等は null。**例外を投げない**
+ */
+export function extractRejectionEvidence(content: string): string | null {
+  const raw = typeof content === 'string' ? content : '';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // JSONL（旧形式）は observation を持たない想定のため対象外
+    return null;
+  }
+  const entries = extractAtifEntries(parsed);
+  if (entries.length === 0) return null;
+  const last = entries[entries.length - 1];
+  if (!last || typeof last !== 'object') return null;
+  const summary = summarizeAtifEntry(last);
+  // テキスト応答（tool === null）で終わっている＝失敗ターンではない
+  if (!summary || summary.tool === null) return null;
+  const e = last as Record<string, unknown>;
+  const observation = e.observation;
+  if (!observation || typeof observation !== 'object') return null;
+  const results = (observation as Record<string, unknown>).results;
+  if (!Array.isArray(results)) return null;
+  for (const r of results) {
+    if (r && typeof r === 'object' && typeof (r as Record<string, unknown>).content === 'string') {
+      const c = (r as Record<string, unknown>).content as string;
+      if (c) return c.slice(0, 300);
+    }
+  }
+  return null;
+}

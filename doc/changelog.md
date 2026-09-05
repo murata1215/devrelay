@@ -6,6 +6,66 @@
 
 ## 実装済み機能
 
+### #364: Devin プランモードのスキル呼び出し失敗を根治（真因A/真因B修正）+ 失敗理由の可視化強化 (2026-09-06)
+
+`#363` 適用後も `DESKTOP-5U400FO/lfuser`/`Lafit`/Devin CLI/プランモードで「MB01の概要を教えて」に無言終了が再発。
+Phase0.5/Phase0.6 の実機実験（デバイス上での実測、推測ゼロ）で2つの独立した真因を確定し、同一サイクルで両方を修正した。
+
+**Phase1 1-A（拡張）: 失敗理由を必ず可視化する**
+
+- `devinPlanToolRejected` の自動リトライ発火条件を `fullOutput.trim().length === 0`（真の無言終了）に限定し直した。
+  前置き1文＋拒否のケースで devin を再実行しない（二重課金防止）。
+- untimestamped な stderr 行の拒否検出・`Smart permission mode is not available. Falling back to normal.` 検出を
+  `classifyDevinStderrLine()`（`devin-diagnostics.ts`）に一本化。新設 `isDevinSmartUnavailableLine()`。
+- ATIF の最後のステップが拒否されたツール呼び出しで終わっている場合、`observation.results[].content` から
+  300文字だけ抜粋する `extractRejectionEvidence()`（`devin-atif.ts`）を新設し、汎用文言ではなく実際の拒否理由を
+  `devin.rejectionEvidence` として表示する（#361 の「observation を表示しない」方針への唯一の意図的な例外。
+  `summarizeAtifEntry()` 自体は無変更）。
+- ターン終了時の通知を「ATIF拒否証拠 → stderr/ログ拒否検出 → `endedWithoutAnswer` 無言終了」の3分岐に変更し、
+  `devinPlanConfigApplied` のみをゲートにして必ず理由が1行出るようにした（`code===0` ゲートは撤去）。
+- 新規 i18n キー: `devin.rejectionEvidence`、`devin.smartUnavailable`（ja/en）。
+
+**1-B（真因A修正）: 壊れたスキル Exec 許可ルールの修正**
+
+`buildSkillExecPrefixes()`（`devin-plan-config.ts`）が生成する Exec 許可ルール文字列が
+`Exec(bash "<skills-dir>/...)` のようにクォートが閉じずトークン途中で終わっており、Devin の `Exec()` が
+トークン単位の前方一致（グロブでも部分文字列一致でもない、#364 Phase0.6 実機実測で確定）であるため、
+スキルが実際に実行する tilde 形コマンドと原理的に一致しなかった。
+
+- `buildSkillExecPrefixes()` を削除。`skill-manager.ts` に単一情報源 `SKILL_INVOCATIONS` を新設し、
+  生成される `SKILL.md` 本文（`getSkillMarkdownBodies()`）と Devin に許可すべき正確なコマンド文字列
+  （`buildSkillInvocationCommands()`）の両方をこのテーブル1つから導出するようにし、両者が再び乖離しない
+  ことを正規表現スキャンのテスト（`skill-invocations.test.mjs`）で担保。
+- `devin-plan-config.ts` の `DevinPlanConfigOptions.skillsDir: string` を `skillExecCommands: readonly string[]`
+  に変更（呼び出し側が `buildSkillInvocationCommands()` で完成形コマンドを事前に組み立てて渡す設計にし、
+  config モジュール自体は `skill-manager.ts` に依存しないまま維持）。
+
+**1-C（真因B修正）: Windows での bash パス解決の相互排他問題の修正**
+
+Windows では `bash` が、Devin の exec 経由だと **WSL** の bash に、Claude Code の Bash ツール経由だと
+**Git bash** に解決され、両者は必要なパス名前空間が相互排他（WSL は `/mnt/c/...` のみ有効、Git bash は
+`/c/...` のみ有効）——実機 4 象限すべてで実測確認済み（`DESKTOP-5U400FO/lfuser`）。
+
+- 新規 `windows-skill-path.ts`（linux/macos agent 間で byte-for-byte 同一、外部 import ゼロ）に
+  `toWslPath()`/`toGitBashPath()` を実装。
+- `buildSkillInvocationCommands({skillsDir, platform:'win32'})` に WSL 形・Git bash 形（各クォート有無）を
+  追加（既存のチルダ形・POSIX絶対パス形・バックスラッシュ形は無変更のまま残置）。
+- 新設 `windowsInvocationNote()` が win32 のときだけ「WSL形を第一候補にし、失敗時のみ Git bash 形を試す」
+  「2つのコマンドを `;`/`&&` で1つの複合コマンドに合成しない（Devin の権限層は複合コマンドを個々のコマンドの
+  許可可否に関わらず丸ごと拒否する、実機確認済み）」という案内を `SKILL.md` 本文に挿入。非 win32 の
+  `SKILL.md` 本文は本修正の前後で1バイトも変わらない。
+
+**検証**: `pnpm build` 6 workspace green。`node --test` を workspace ごと個別実行（#333 の教訓、複合コマンドに
+しない）で `packages/shared` 43/43・`apps/server` 131/131・`agents/linux` 316/316・`agents/macos` 278/278（うち
+Windows 実機依存の1件は macOS 環境のため意図的に `t.skip()`）すべて green。linux/macos 間で
+`devin-atif.ts`/`devin-diagnostics.ts`/`devin-plan-config.ts`/`windows-skill-path.ts` および対応する
+テストファイルすべてが byte-for-byte 同一であることを `diff` で確認。`git diff --stat -- apps/ prisma/ scripts/`
+が空（サーバー本体・DB・インストーラーは無変更、`packages/shared/src/i18n.ts` のみ新規2キー追加）。
+
+**反映**: `packages/shared` を変更しているため `pm2 restart devrelay-server` が必要。Agent（3 OS）本体の
+修正のため各マシンの `u` が必要（最優先 `DESKTOP-5U400FO/lfuser`）。実機 E2E（「MB01の概要を教えて」が
+実際に回答を返すこと、Windows 実機での WSL 形→Git bash 形フォールバックの実測）は人間の反映後に別サイクルで実施。
+
 ### #363: Devin プランモード「ツールが許可されず返事が返ってこない」の根治 (2026-09-05)
 
 ユーザー報告（`DESKTOP-5U400FO/lfuser` / `Lafit` / Devin CLI / プランモード）を受けた #362 適用後も、

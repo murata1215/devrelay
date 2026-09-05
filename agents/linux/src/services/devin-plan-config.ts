@@ -39,12 +39,16 @@ export interface DevinPlanConfigOptions {
    */
   strictExec: boolean;
   /**
-   * DevRelay スキルのディレクトリ（例: `<home>/.claude/skills`）。
-   * この配下の bash スクリプト実行を許可する prefix を生成するために使う。
-   * 呼び出し側（ai-runner.ts）が `path.join(os.homedir(), '.claude', 'skills')` 等で
-   * 解決した文字列を渡す（本モジュールは `os`/`path` を import しない）。
+   * DevRelay スキル実行時に実際に呼び出されうるコマンド文字列一覧（#364 1-B）。
+   * 呼び出し側（ai-runner.ts）が `skill-manager.ts` の `buildSkillInvocationCommands()`
+   * で組み立てた文字列をそのまま渡す（本モジュールは `os`/`path` は元より
+   * `skill-manager.ts` も import しない——SKILL.md 本文と Exec() allow ルールの
+   * 両方が単一情報源 `SKILL_INVOCATIONS`〔`skill-manager.ts`〕から導出されることで
+   * 「2箇所が独立にコマンド文字列を書いていてズレる」構造的欠陥〔#364 真因A、
+   * 旧 `buildSkillExecPrefixes()` がパス途中で閉じ括弧・スクリプト名を欠いたまま
+   * 切れた壊れたルールを生成していた〕を解消する）。
    */
-  skillsDir: string;
+  skillExecCommands: readonly string[];
   /**
    * 読み取り専用とみなす単語コマンド一覧（呼び出し側が `PLAN_READONLY_BASH_COMMANDS`
    * 〔`packages/shared/src/constants.ts`〕を渡す）。
@@ -78,26 +82,6 @@ const DEVIN_GIT_READONLY_PREFIXES: readonly string[] = ['git log', 'git status',
 const DEVIN_EXTRA_DENY_PREFIXES: readonly string[] = ['sudo'];
 
 /**
- * DevRelay スキルのディレクトリ配下で bash スクリプトを実行する呼び出しを許可するための
- * `Exec()` allow prefix を組み立てる。観測された実際の呼び出し形（例:
- * `bash "C:\Users\lfuser\.claude\skills\devrelay-list-inventory\scripts\list.sh"`）は
- * クォート有無・パス区切り（`/`/`\`）が環境によって揺れるため、4パターンすべてを候補に含める。
- * `skillsDir` が空文字列の場合は候補を返さない（呼び出し側の解決失敗を握りつぶさないための安全策）。
- */
-function buildSkillExecPrefixes(skillsDir: string): string[] {
-  if (!skillsDir) return [];
-  const posixPath = skillsDir.replace(/\\/g, '/');
-  const winPath = skillsDir.replace(/\//g, '\\');
-  const variants = new Set<string>([
-    `bash "${posixPath}`,
-    `bash ${posixPath}`,
-    `bash "${winPath}`,
-    `bash ${winPath}`,
-  ]);
-  return Array.from(variants).map((prefix) => `Exec(${prefix})`);
-}
-
-/**
  * Devin CLI の `--config`/`--agent-config` に渡す JSON を組み立てる。
  * @returns `JSON.stringify()` してそのままファイルに書き出せるオブジェクト
  */
@@ -112,7 +96,9 @@ export function buildDevinPlanConfig(opts: DevinPlanConfigOptions): DevinPlanCon
     for (const prefix of DEVIN_GIT_READONLY_PREFIXES) {
       allow.push(`Exec(${prefix})`);
     }
-    allow.push(...buildSkillExecPrefixes(opts.skillsDir));
+    for (const cmd of opts.skillExecCommands) {
+      allow.push(`Exec(${cmd})`);
+    }
 
     for (const cmd of opts.writeBashCommands) {
       deny.push(`Exec(${cmd})`);
@@ -133,15 +119,27 @@ export function buildDevinPlanConfig(opts: DevinPlanConfigOptions): DevinPlanCon
 export interface DevinPlanPermissionModeCaps {
   /** `--permission-mode` フラグ自体への対応可否。 */
   permissionMode: boolean;
-  /** `--permission-mode` の選択肢に `smart` が含まれるか（`--help` 文中に `"smart"` があるか）。 */
+  /**
+   * `--permission-mode` の選択肢に `smart` が含まれるか（`--help` 文中に `"smart"` という文字列があるか）。
+   * **注意（#364 Phase0.6 実測で確定）**: これは「`smart` が選択肢として存在するか」しか見ていない。
+   * `--help` には `smart` が常に選択肢として載っているため、このフラグは実質的に常に true になる。
+   * 実際にサーバー側で `smart` が使えるかどうかはこのフラグでは判定できない
+   * （Phase0.6 実測では5回中5回とも `Warning: Smart permission mode is not available. Falling back to normal.`
+   * が出て使えなかった）。実行時の可用性は `isDevinSmartUnavailableLine()`（`devin-diagnostics.ts`）でしか
+   * 検知できない。このフィールドを「smart が使える」の根拠にしてはならない。
+   */
   permissionModeSmart: boolean;
 }
 
 /**
  * プランモードで渡す `--permission-mode` の値を解決する。
+ * #364 Phase1（1-A-5）: 既定を `smart` から `auto` に戻した。Phase0.6 実測で `smart` は
+ * サーバー側事情により5回中5回とも使えず `normal` にフォールバックしており（`permissionModeSmart`
+ * probe はこの可用性を判定できない）、かつ `auto` + 正しい allow ルールで Exec が問題なく通ることが
+ * 確定した（E5'実測）ため、`smart` に頼る理由がない。
  * @param caps probe 済みの Devin ケーパビリティ
  * @param opts.strictExec true の場合は常に `'auto'`（今日の挙動と等価、キルスイッチ用）
- * @param opts.envOverride `DEVRELAY_DEVIN_PLAN_PERMISSION_MODE` の値（`'auto'`|`'smart'` のみ有効）
+ * @param opts.envOverride `DEVRELAY_DEVIN_PLAN_PERMISSION_MODE` の値（`'auto'`|`'smart'` のみ有効、明示上書き用）
  * @returns `--permission-mode` に渡す値。`--permission-mode` 自体が非対応なら `null`（引数を付けない）
  */
 export function resolveDevinPlanPermissionMode(
@@ -150,6 +148,5 @@ export function resolveDevinPlanPermissionMode(
 ): 'smart' | 'auto' | null {
   if (!caps.permissionMode) return null;
   if (opts.envOverride === 'auto' || opts.envOverride === 'smart') return opts.envOverride;
-  if (opts.strictExec) return 'auto';
-  return caps.permissionModeSmart ? 'smart' : 'auto';
+  return 'auto';
 }

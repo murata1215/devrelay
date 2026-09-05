@@ -15,6 +15,7 @@ import path from 'path';
 import os from 'os';
 import type { AgentConfig } from './config.js';
 import { SCAFFOLD_TEMPLATE_DEFS, type ScaffoldTemplateOs } from '@devrelay/shared';
+import { toWslPath, toGitBashPath } from './windows-skill-path.js';
 
 /** OS コードを表示ラベルに変換 */
 function scaffoldOsLabel(osCode: ScaffoldTemplateOs): string {
@@ -68,9 +69,125 @@ function wsToHttpUrl(wsUrl: string): string {
 }
 
 /**
+ * Devin プランモードの Exec() allow ルール（#364 1-B）と SKILL.md 本文の両方が
+ * ここから導出される単一情報源。2箇所が独立にコマンド文字列を書いていた
+ * （devin-plan-config.ts の buildSkillExecPrefixes() が生成する Exec() ルールと
+ * 各 generate*SkillMd() が書く実際の呼び出しコマンド）ことがズレの温床だった
+ * （#364 真因A: buildSkillExecPrefixes() の生成物がパス途中で閉じ括弧・スクリプト名
+ * を欠いたまま切れており、SKILL.md が書くチルダ形コマンドと原理的に一致しない）。
+ * macOS は devrelay-list-inventory / devrelay-read-messages スキルを持たないため
+ * linux 版（6件）と異なり4件のみ。
+ */
+export interface SkillInvocation {
+  name: string;
+  script: string;
+  readonly: boolean;
+}
+
+export const SKILL_INVOCATIONS: readonly SkillInvocation[] = [
+  { name: 'devrelay-docs', script: 'scripts/search.sh', readonly: true },
+  { name: 'devrelay-ask-member', script: 'scripts/ask.sh', readonly: false },
+  { name: 'devrelay-create-project', script: 'scripts/create.sh', readonly: false },
+  { name: 'devrelay-flutter-deploy', script: 'scripts/deploy.sh', readonly: false },
+];
+
+function skillInvocationCommand(inv: SkillInvocation): string {
+  return `bash ~/.claude/skills/${inv.name}/${inv.script}`;
+}
+
+/**
+ * Devin の Exec() allow ルールに使う「実際に呼び出されうるコマンド文字列」一覧を組み立てる。
+ * チルダ形（SKILL.md が指示する主形）に加え、skillsDir が渡された場合は絶対パス形
+ * （引用符あり/なし）、win32 の場合はバックスラッシュ区切り形も候補に含める。
+ * Exec() はトークン単位の前方一致のため、ここで返す文字列は必ず完全な形
+ * （スクリプトファイル名まで含み、閉じ引用符も欠かさない）でなければならない。
+ */
+export function buildSkillInvocationCommands(
+  opts?: { skillsDir?: string; platform?: NodeJS.Platform },
+): string[] {
+  const skillsDir = opts?.skillsDir ?? '';
+  const platform = opts?.platform;
+  const out = new Set<string>();
+  for (const inv of SKILL_INVOCATIONS) {
+    out.add(skillInvocationCommand(inv));
+    if (!skillsDir) continue;
+    const posixDir = skillsDir.replace(/\\/g, '/');
+    out.add(`bash ${posixDir}/${inv.name}/${inv.script}`);
+    out.add(`bash "${posixDir}/${inv.name}/${inv.script}"`);
+    if (platform === 'win32') {
+      const winDir = skillsDir.replace(/\//g, '\\');
+      const winScript = inv.script.replace(/\//g, '\\');
+      out.add(`bash ${winDir}\\${inv.name}\\${winScript}`);
+      out.add(`bash "${winDir}\\${inv.name}\\${winScript}"`);
+      // #364 1-C 真因B: Windows では bash が WSL/Git bash のどちらかに解決され、
+      // 実行環境ごとに必要なパス名前空間（/mnt/c/... または /c/...）が異なる。
+      // 両方を allow に載せ、SKILL.md 側で「1手目が失敗したら2手目」の順序を案内する。
+      const winSkillDir = `${winDir}\\${inv.name}`;
+      const wslSkillDir = toWslPath(winSkillDir);
+      if (wslSkillDir) {
+        out.add(`bash ${wslSkillDir}/${inv.script}`);
+        out.add(`bash "${wslSkillDir}/${inv.script}"`);
+      }
+      const gitBashSkillDir = toGitBashPath(winSkillDir);
+      if (gitBashSkillDir) {
+        out.add(`bash ${gitBashSkillDir}/${inv.script}`);
+        out.add(`bash "${gitBashSkillDir}/${inv.script}"`);
+      }
+    }
+  }
+  return Array.from(out);
+}
+
+/** SKILL.md 生成関数に渡す共通オプション（未指定時は既定の platform/skillsDir を使う）。 */
+export type SkillMdOptions = { platform?: NodeJS.Platform; skillsDir?: string };
+
+/**
+ * Windows 端末向けのコマンド形式の案内ブロックを返す。
+ * win32 以外では空文字列（＝非 Windows の SKILL.md は 1 バイトも変わらない）。
+ * win32 のときのみ、実測で動作確認済みの2形式（WSL優先→Git bash）を案内する。
+ */
+export function windowsInvocationNote(name: string, opts?: SkillMdOptions): string {
+  if (opts?.platform !== 'win32') return '';
+  const inv = SKILL_INVOCATIONS.find((i) => i.name === name);
+  if (!inv) return '';
+  const skillsDir = opts?.skillsDir ?? SKILLS_BASE;
+  const winDir = skillsDir.replace(/\//g, '\\');
+  const winSkillDir = `${winDir}\\${inv.name}`;
+  const wslSkillDir = toWslPath(winSkillDir) ?? `/mnt/c/Users/.../${inv.name}`;
+  const gitBashSkillDir = toGitBashPath(winSkillDir) ?? `/c/Users/.../${inv.name}`;
+  return `
+## Windows でのコマンド形式（重要）
+
+この端末では \`bash\` が WSL に解決されるため、次の形で実行してください。
+
+\`\`\`
+bash ${wslSkillDir}/${inv.script}
+\`\`\`
+
+上が \`No such file or directory\` になる場合のみ、次を使ってください（Git bash 環境）。
+
+\`\`\`
+bash ${gitBashSkillDir}/${inv.script}
+\`\`\`
+
+2 行を \`;\` や \`&&\` で 1 行にまとめないでください（複合コマンドは自動的に拒否されます）。
+`;
+}
+
+/** SKILL.md 本文を name→本文 のマップで返す（consistency テスト用）。 */
+export function getSkillMarkdownBodies(opts?: SkillMdOptions): Record<string, string> {
+  return {
+    'devrelay-docs': generateSkillMd(opts),
+    'devrelay-ask-member': generateAskMemberSkillMd(opts),
+    'devrelay-create-project': generateCreateProjectSkillMd(opts),
+    'devrelay-flutter-deploy': generateFlutterDeploySkillMd(opts),
+  };
+}
+
+/**
  * SKILL.md の内容を生成
  */
-function generateSkillMd(): string {
+function generateSkillMd(opts?: SkillMdOptions): string {
   return `---
 name: devrelay-docs
 description: DevRelayに保存されたドキュメントを検索・参照します。「〜を参照して」「さっきのファイルを見て」「マニュアルを確認して」「前に作った〜」などドキュメント参照が必要な場合に使用します。
@@ -78,7 +195,7 @@ allowed-tools: Bash(bash ~/.claude/skills/devrelay-docs/scripts/search.sh *)
 ---
 
 ## DevRelay ドキュメント検索
-
+${windowsInvocationNote('devrelay-docs', opts)}
 DevRelayサーバーに保存された過去のセッションのファイル（ユーザーアップロード・AI生成）をセマンティック検索で見つけます。
 
 ### 検索
@@ -202,7 +319,7 @@ fi
 /**
  * ask-member SKILL.md の内容を生成
  */
-function generateAskMemberSkillMd(): string {
+function generateAskMemberSkillMd(opts?: SkillMdOptions): string {
   return `---
 name: devrelay-ask-member
 description: 他プロジェクトのエージェントに質問や実行依頼を送ります。「pixblogに聞いて」「サーバー側のAPI仕様を確認して」「pixdraftにREADME更新を依頼して」など、別プロジェクトとの連携に使用します。
@@ -210,7 +327,7 @@ allowed-tools: Bash(bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh *)
 ---
 
 ## DevRelay クロスプロジェクト連携
-
+${windowsInvocationNote('devrelay-ask-member', opts)}
 他プロジェクトのエージェントに質問を送信したり、実行依頼（teamexec）を送ることができます。
 
 ### メンバー一覧を確認
@@ -477,7 +594,7 @@ fi
 /**
  * create-project SKILL.md の内容を生成
  */
-function generateCreateProjectSkillMd(): string {
+function generateCreateProjectSkillMd(opts?: SkillMdOptions): string {
   return `---
 name: devrelay-create-project
 description: 対象マシンに新しいプロジェクトの雛形を作成します。「新しいプロジェクトを作って」「yyyyにWebアプリを作成して」など、新規プロジェクトの scaffold に使用します。
@@ -485,7 +602,7 @@ allowed-tools: Bash(bash ~/.claude/skills/devrelay-create-project/scripts/create
 ---
 
 ## DevRelay プロジェクト作成（Scaffold）
-
+${windowsInvocationNote('devrelay-create-project', opts)}
 対象マシンに新しいプロジェクトの雛形を作成します。
 
 ### プロジェクト作成
@@ -611,7 +728,7 @@ fi
 /**
  * flutter-deploy SKILL.md の内容を生成
  */
-function generateFlutterDeploySkillMd(): string {
+function generateFlutterDeploySkillMd(opts?: SkillMdOptions): string {
   return `---
 name: devrelay-flutter-deploy
 description: Flutterアプリを USB 接続された実機（iPhone/Android）にビルド＆インストールします。「SE3に入れて」「実機にデプロイして」「Androidに入れて」などデバイスへのアプリ配備依頼に使用します。
@@ -619,7 +736,7 @@ allowed-tools: Bash(bash ~/.claude/skills/devrelay-flutter-deploy/scripts/deploy
 ---
 
 ## DevRelay Flutter 実機デプロイ
-
+${windowsInvocationNote('devrelay-flutter-deploy', opts)}
 Flutter アプリを USB 接続された実機（iPhone / Android）にビルドしてインストールします。
 flutter run（対話型）は使わず、build → install を非対話で実行します。
 
@@ -840,12 +957,15 @@ fi
  * @param config - Agent 設定（serverUrl, token を使用）
  */
 export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
+  // #364 1-C: 実行中の OS が win32 のときだけ SKILL.md に Windows 向けコマンド形式の案内を追加する
+  // （windowsInvocationNote() は win32 以外では空文字列を返すため、非 Windows では 1 バイトも変わらない）。
+  const skillMdOpts: SkillMdOptions = { platform: process.platform, skillsDir: SKILLS_BASE };
   try {
     // devrelay-docs スキル
     await fs.mkdir(SCRIPTS_DIR, { recursive: true });
 
     const skillMdPath = path.join(SKILL_DIR, 'SKILL.md');
-    await fs.writeFile(skillMdPath, generateSkillMd(), 'utf-8');
+    await fs.writeFile(skillMdPath, generateSkillMd(skillMdOpts), 'utf-8');
 
     const searchShPath = path.join(SCRIPTS_DIR, 'search.sh');
     await fs.writeFile(searchShPath, generateSearchScript(config.serverUrl, config.token), {
@@ -857,7 +977,7 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
     await fs.mkdir(ASK_SCRIPTS_DIR, { recursive: true });
 
     const askSkillMdPath = path.join(ASK_SKILL_DIR, 'SKILL.md');
-    await fs.writeFile(askSkillMdPath, generateAskMemberSkillMd(), 'utf-8');
+    await fs.writeFile(askSkillMdPath, generateAskMemberSkillMd(skillMdOpts), 'utf-8');
 
     const askShPath = path.join(ASK_SCRIPTS_DIR, 'ask.sh');
     await fs.writeFile(askShPath, generateAskScript(config.serverUrl, config.token), {
@@ -869,7 +989,7 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
     await fs.mkdir(CREATE_SCRIPTS_DIR, { recursive: true });
 
     const createSkillMdPath = path.join(CREATE_SKILL_DIR, 'SKILL.md');
-    await fs.writeFile(createSkillMdPath, generateCreateProjectSkillMd(), 'utf-8');
+    await fs.writeFile(createSkillMdPath, generateCreateProjectSkillMd(skillMdOpts), 'utf-8');
 
     const createShPath = path.join(CREATE_SCRIPTS_DIR, 'create.sh');
     await fs.writeFile(createShPath, generateCreateScript(config.serverUrl, config.token), {
@@ -881,7 +1001,7 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
     await fs.mkdir(FLUTTER_DEPLOY_SCRIPTS_DIR, { recursive: true });
 
     const flutterDeploySkillMdPath = path.join(FLUTTER_DEPLOY_SKILL_DIR, 'SKILL.md');
-    await fs.writeFile(flutterDeploySkillMdPath, generateFlutterDeploySkillMd(), 'utf-8');
+    await fs.writeFile(flutterDeploySkillMdPath, generateFlutterDeploySkillMd(skillMdOpts), 'utf-8');
 
     const deployShPath = path.join(FLUTTER_DEPLOY_SCRIPTS_DIR, 'deploy.sh');
     await fs.writeFile(deployShPath, generateFlutterDeployScript(), {

@@ -387,6 +387,23 @@ export const chatMessages = {
     ja: '⚠️ {tool} はツール呼び出しの直後にテキスト応答なしでこのターンを終えました。プランモードで書き込み/実行操作が無言で拒否された可能性があります。書き込みが必要な場合は `e` を送って exec モードで依頼し直してください。',
   },
 
+  // --- #364 Phase1（1-A-3）: プランモードでツール拒否が発生したことを ATIF の observation から
+  // 確認できた場合、汎用文言ではなく実際の拒否理由（300文字まで）をそのままチャットに出す
+  // （extractRejectionEvidence()、失敗ターン限定・#361 の非表示方針への例外は最小限に留める）。 ---
+  'devin.rejectionEvidence': {
+    en: '⚠️ Devin rejected a tool call in plan mode. Reason from Devin: {evidence}\nIf you need write access, resend with `e` (exec mode).',
+    ja: '⚠️ Devin がプランモードでツール呼び出しを拒否しました。Devin からの理由: {evidence}\n書き込みが必要な場合は `e` を送って exec モードで依頼し直してください。',
+  },
+
+  // --- #364 Phase1（1-A-4）: `--permission-mode smart` がサーバー側事情で使えず `normal` に
+  // フォールバックしたことを示す警告（Phase0.6 実測で5回中5回とも発生）。`permissionModeSmart`
+  // （--help 文字列 probe）はこの可用性を判定できないため、実行時のこの警告でしか分からない。
+  // プロセス寿命中 1 回だけ通知する（#325 静かなフォールバック禁止）。 ---
+  'devin.smartUnavailable': {
+    en: '⚠️ Devin reported that `smart` permission mode is not available on the server side for this session and fell back to `normal`. This is a known server-side limitation (observed 5/5 times in testing) — DevRelay now defaults to `auto` instead of `smart` for this reason.',
+    ja: '⚠️ Devin が今回のセッションではサーバー側の事情で `smart` パーミッションモードを使用できず、`normal` にフォールバックしたと報告しました。これは既知のサーバー側の制限です（検証では5回中5回とも発生）。DevRelay はこのため既定を `smart` ではなく `auto` に変更しています。',
+  },
+
   // --- 欠陥2対策（ファイル変更ウォッチのノイズ抑止）: ターンあたりの通知件数が上限に達した際、
   // 黙って打ち切るのではなく1回だけ明示する（#325 静かなフォールバック禁止）。 ---
   'devin.fileWatchTruncated': {

@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatDevinVersion, buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from '../dist/services/devin-diagnostics.js';
+import { formatDevinVersion, buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText, isDevinSmartUnavailableLine } from '../dist/services/devin-diagnostics.js';
 
 test('formatDevinVersion: 既に "devin " で始まる場合はそのまま（重複前置しない）', () => {
   assert.equal(formatDevinVersion('devin 3000.6.7 (260a97c8)'), 'devin 3000.6.7 (260a97c8)');
@@ -86,4 +86,20 @@ test('isDevinToolRejectionText: 拒否と無関係な通常の出力は false', 
 test('isDevinToolRejectionText: 空文字・undefined は false（例外を投げない）', () => {
   assert.equal(isDevinToolRejectionText(''), false);
   assert.equal(isDevinToolRejectionText(undefined), false);
+});
+
+// #364 Phase1: --permission-mode smart がサーバー側都合で使えず normal にフォールバックしたことを示す
+// 警告行の検知テスト。Phase0.6 実測で5回中5回とも発生した文言（判明F-1）。
+test('isDevinSmartUnavailableLine: 実測の警告文言は true', () => {
+  assert.equal(isDevinSmartUnavailableLine('Warning: Smart permission mode is not available. Falling back to normal.'), true);
+});
+
+test('isDevinSmartUnavailableLine: 通常の AI 回答文は false（誤爆しないことの担保）', () => {
+  assert.equal(isDevinSmartUnavailableLine('The current smart mode setting looks fine to me.'), false);
+  assert.equal(isDevinSmartUnavailableLine('この機能は現在利用できません。'), false);
+});
+
+test('isDevinSmartUnavailableLine: 空文字・空白のみは false（例外を投げない）', () => {
+  assert.equal(isDevinSmartUnavailableLine(''), false);
+  assert.equal(isDevinSmartUnavailableLine('   '), false);
 });

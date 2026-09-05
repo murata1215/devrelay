@@ -11,6 +11,7 @@ import {
   extractAtifUsage,
   buildAtifDigest,
   endedWithoutAnswer,
+  extractRejectionEvidence,
 } from '../dist/services/devin-atif.js';
 
 // observation.results[].content に埋め込む漏洩検出用マーカー（このマーカーが返り値に一切現れないことを担保する）
@@ -370,4 +371,56 @@ test('endedWithoutAnswer: テキスト応答のみの場合は false', () => {
     { tool: null, title: '最終的な回答です。' },
   ];
   assert.equal(endedWithoutAnswer(steps), false);
+});
+
+// --- extractRejectionEvidence（#364 Phase1: 失敗ターン限定で observation を300文字抜粋） ---
+
+test('extractRejectionEvidence: 失敗ターン（最後がツール呼び出しで終わる）は observation.results[0].content を返す', () => {
+  const content = JSON.stringify({
+    steps: [
+      { source: 'agent', message: '調査中です。' },
+      {
+        source: 'agent',
+        tool_calls: [{ function_name: 'exec', arguments: { command: 'bash "C:\\Users\\lfuser\\.claude\\skills\\devrelay-list-inventory\\scripts\\list.sh"' } }],
+        observation: { results: [{ content: 'Tool execution was rejected by the user' }] },
+      },
+    ],
+  });
+  assert.equal(extractRejectionEvidence(content), 'Tool execution was rejected by the user');
+});
+
+test('extractRejectionEvidence: テキスト応答で終わるターン（成功）は null', () => {
+  const content = JSON.stringify({
+    steps: [
+      { source: 'agent', tool_calls: [{ function_name: 'bash', arguments: { command: 'ls -la' } }], observation: { results: [{ content: 'total 0' }] } },
+      { source: 'agent', message: 'こちらが結果です。' },
+    ],
+  });
+  assert.equal(extractRejectionEvidence(content), null);
+});
+
+test('extractRejectionEvidence: 300文字で切り詰められる', () => {
+  const longContent = 'x'.repeat(400);
+  const content = JSON.stringify({
+    steps: [
+      { source: 'agent', tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script.sh' } }], observation: { results: [{ content: longContent }] } },
+    ],
+  });
+  const evidence = extractRejectionEvidence(content);
+  assert.equal(evidence.length, 300);
+  assert.equal(evidence, longContent.slice(0, 300));
+});
+
+test('extractRejectionEvidence: JSONL（複数トップレベル値）は単一 JSON として parse できないため null', () => {
+  const content = ['{"a":1}', '{"b":2}'].join('\n');
+  assert.equal(extractRejectionEvidence(content), null);
+});
+
+test('extractRejectionEvidence: steps が空、observation 無し、不正 JSON はいずれも null（例外を投げない）', () => {
+  assert.equal(extractRejectionEvidence('{}'), null);
+  assert.equal(extractRejectionEvidence('not json at all'), null);
+  const noObservation = JSON.stringify({
+    steps: [{ source: 'agent', tool_calls: [{ function_name: 'exec', arguments: { command: 'ls' } }] }],
+  });
+  assert.equal(extractRejectionEvidence(noObservation), null);
 });
