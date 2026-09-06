@@ -29,6 +29,9 @@ import {
   classifyRestoreAction,
   type PorcelainEntry,
 } from './git-guard-core.js';
+// connection.ts 側が `import { ..., type PorcelainEntry } from './git-guard.js'` する経路のため、
+// 型を再エクスポートしておく（re-export しないと TS2459 でビルドが通らない）。
+export type { PorcelainEntry };
 
 const execFileAsync = promisify(execFile);
 

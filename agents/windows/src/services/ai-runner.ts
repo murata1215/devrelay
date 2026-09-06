@@ -6,7 +6,7 @@ import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, PLAN_READONLY_BASH_COMMA
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinSmartUnavailableLine, isDevinToolRejectionText } from './devin-diagnostics.js';
 import { buildDevinPlanConfig, resolveDevinPlanPermissionMode } from './devin-plan-config.js';
@@ -727,12 +727,18 @@ export async function sendPromptToAi(
     // offset<=0 は全件返しにフォールバックする二重防御）。
     devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath)) ?? 0;
 
+    // #368 Phase2a-C: Devin は常に exec 相当（dangerous）で起動する。
+    // 下の plan 系分岐（①〜④）は usePlanMode が Devin では常に false になったため
+    // 到達しない（サイクル D で削除予定）。ここで求まる値は必ず分岐⑤と一致する。
+    const devinTurnPermissionMode: string | null = devinHasPermissionMode ? 'dangerous' : null;
+
     // 保存済み Devin セッション ID があれば -r で resume
     // ただし exec モードでは新規セッションを開始する（--permission-mode dangerous を
     // CLI で指定しても、resume したセッションは元の auto モードを保持して
     // 書き込みが拒否されるため）
     // フォールバック時（#274）は resume しない（壊れたセッション回避）
-    const devinSessionId = options.usePlanMode && !options.devinAutoPermFallback
+    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath);
+    const devinSessionId = devinSavedPermissionMode === devinTurnPermissionMode && !options.devinAutoPermFallback
       ? await loadDevinSessionId(projectPath)
       : null;
     // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
@@ -829,9 +835,9 @@ export async function sendPromptToAi(
       }
     } else {
       // exec モード: 全ツール自動承認
-      if (devinHasPermissionMode) {
-        args.push('-p', '--permission-mode', 'dangerous');
-        devinEffectivePermissionMode = 'dangerous';
+      if (devinTurnPermissionMode) {
+        args.push('-p', '--permission-mode', devinTurnPermissionMode);
+        devinEffectivePermissionMode = devinTurnPermissionMode;
       } else {
         // #329: --permission-mode 非対応の旧 CLI → -p のみ（劣化通知）
         args.push('-p');

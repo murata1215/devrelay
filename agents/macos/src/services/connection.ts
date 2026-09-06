@@ -31,10 +31,12 @@ import type {
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
-import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
+import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId } from './session-store.js';
+import { buildDevinPlanPreamble } from './devin-plan-prompt.js';
+import { isGitRepo, captureBaseline, restoreToBaseline, type PorcelainEntry } from './git-guard.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
@@ -1094,7 +1096,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const lastEntry = historyBeforeThisMessage[historyBeforeThisMessage.length - 1];
   const isExecTriggered = lastEntry?.role === 'exec';
   // Plan モード: permissionMode 'plan' + allowedTools、Exec モード: canUseTool コールバックで承認
-  const usePlanMode = !isExecTriggered;
+  const isPlanTurn = !isExecTriggered;
   console.log(`📋 Mode: ${isExecTriggered ? 'EXEC (canUseTool approval)' : 'PLAN (permissionMode plan)'}`);
 
   // Check for pending work state (auto-continue feature)
@@ -1117,7 +1119,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   }
 
   // Add plan/exec mode instruction to prompt
-  const modeInstruction = usePlanMode ? PLAN_MODE_INSTRUCTION : EXEC_MODE_INSTRUCTION;
+  const modeInstruction = isPlanTurn ? PLAN_MODE_INSTRUCTION : EXEC_MODE_INSTRUCTION;
 
   // Devin 専用端末等でサーバー指定の AI が未インストールなら、実行直前に使えるツールへ差し替える
   // （新規セッションの defaultAi 継承や古い active セッションの再利用で claude が渡されるケースを救済）
@@ -1128,6 +1130,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.aiTool = resolvedAiTool;
     }
   }
+
+  // #368 Phase2a-C: Devin はプランモードを使わない（常に dangerous で起動し、
+  // プランの規律は前置きプロンプト、安全性は git 自動復元ガードで担保する）
+  const isDevin = sessionInfo.aiTool === 'devin';
+  const usePlanMode = isPlanTurn && !isDevin;
+  const devinPlanPreamble = isDevin && isPlanTurn ? buildDevinPlanPreamble() : '';
+  const effectiveModeInstruction = devinPlanPreamble
+    ? `${devinPlanPreamble}\n\n${modeInstruction}`
+    : modeInstruction;
 
   // 会話履歴のサイズを記録（ログ出力用）
   let historyContextSize = 0;
@@ -1141,7 +1152,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   //   2. Claude: missed messages がある（SDK 内部履歴にない新規メッセージ）
   //   3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かずプロンプトが唯一のコンテキスト）
   const composeFullPrompt = (includeHistory: boolean): string => {
-    const basePrompt = modeInstruction + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+    const basePrompt = effectiveModeInstruction + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
     if (!(sessionInfo.history.length > 1 && includeHistory)) {
       historyContextSize = 0;
       return basePrompt;
@@ -1164,7 +1175,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
     historyContextSize = historyContext.length;
-    return `${modeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
+    return `${effectiveModeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
   };
 
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
@@ -1303,6 +1314,28 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       // JSONL ファイルログ
       appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: info.toolName, toolInput: info.toolInput, status: 'deny' });
     };
+  }
+
+  // #368 Phase2a-C: Devin のプランターンのみ、ターン前の作業ツリー状態を記録する。
+  // dangerous で走らせる代わりに、書き込みが起きたらターン後に自動で巻き戻す。
+  const lang = payload.language ?? DEFAULT_CHAT_LANGUAGE;
+  const sendGuardNotice = (output: string) => sendMessage({
+    type: 'agent:ai:output',
+    payload: {
+      machineId: currentConfig!.machineId,
+      sessionId,
+      output,
+      isComplete: false,
+    },
+  });
+  let devinGuardBaseline: PorcelainEntry[] | null = null;
+  if (isDevin && isPlanTurn) {
+    if (await isGitRepo(sessionInfo.projectPath)) {
+      devinGuardBaseline = await captureBaseline(sessionInfo.projectPath);
+    } else {
+      // 静かなフォールバック禁止（#325）: ガードが効かないことを必ず可視化する
+      sendGuardNotice(tChat(lang, 'devin.planGuardUnavailable', { path: sessionInfo.projectPath }));
+    }
   }
 
   // AI実行をtry/catchで囲む（Claude Code未インストール等のエラーでプロセスがクラッシュしないようにする）
@@ -1568,6 +1601,20 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         isComplete: true,
       },
     });
+  } finally {
+    if (devinGuardBaseline) {
+      const r = await restoreToBaseline(sessionInfo.projectPath, devinGuardBaseline);
+      if (r.restored.length || r.quarantined.length) {
+        sendGuardNotice(tChat(lang, 'devin.planGuardRestored', {
+          restored: r.restored.length, quarantined: r.quarantined.length, dir: '.devrelay/reverted/',
+        }));
+      }
+      if (r.failed.length) {
+        sendGuardNotice(tChat(lang, 'devin.planGuardFailed', {
+          failed: r.failed.length, detail: r.failed.slice(0, 3).join(', '),
+        }));
+      }
+    }
   }
 }
 

@@ -428,6 +428,23 @@ export const chatMessages = {
     ja: '⏳ このターンのファイル変更通知が上限（{limit}件）に達しました。以降の変更は個別には表示されません。',
   },
 
+  // --- #368 Phase2a-C: Devin はプランモードを廃止し常に dangerous で起動する。
+  // その代わりターン前後の git 差分を自動で巻き戻す安全網（git-guard.ts）を追加した。
+  // 非 git リポジトリではこのガードが効かないため、静かなフォールバックにせず1回だけ警告する
+  // （#325 静かなフォールバック禁止）。 ---
+  'devin.planGuardUnavailable': {
+    en: '⚠️ {path} is not a git repository, so the automatic restore guard for Devin plan turns is unavailable this turn. Any changes made will not be automatically reverted.',
+    ja: '⚠️ {path} は git リポジトリではないため、Devin のプランターン向け自動復元ガードが今回は使えません。行われた変更は自動では巻き戻されません。',
+  },
+  'devin.planGuardRestored': {
+    en: '🛡️ Plan-turn guard: reverted {restored} tracked file(s), quarantined {quarantined} untracked file(s) into {dir}.',
+    ja: '🛡️ プランターンガード: 追跡済みファイル {restored} 件を復元、未追跡ファイル {quarantined} 件を {dir} へ退避しました。',
+  },
+  'devin.planGuardFailed': {
+    en: '⚠️ Plan-turn guard: failed to restore {failed} file(s): {detail}',
+    ja: '⚠️ プランターンガード: {failed} 件のファイル復元に失敗しました: {detail}',
+  },
+
   // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---
   'humanText.tooLong': {
     en: '❌ Instruction is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',
