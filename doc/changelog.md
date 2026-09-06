@@ -6,6 +6,28 @@
 
 ## 実装済み機能
 
+### #369: Servers タブへのプロジェクト自動登録が実質機能していなかった不具合を修正 (2026-09-06)
+
+ユーザー報告「Servers タブでサーバーを全削除して作り直したら、Agents タブのプロジェクトが新サーバーに登録できない」を調査した結果、
+Team/TeamMember の残留データ問題ではなく（`chat_servers` は `UserSettings` の単一 JSON レコードで、削除は配列全体を上書きするため残留は起きない）、
+`ChatPage.tsx` の `handleSelectProject` に3つの独立したロジック欠陥が重なっていたことが判明。
+
+- **原因A**: 自動登録処理が `if (!existingTab)`（新規タブ作成時のみ）の内側にあり、**既にタブが開いている（★表示の）プロジェクトをクリックしても登録されなかった**（報告された症状そのもの）
+- **原因B**: 関数冒頭の早期 `return`（`activeTabIdRef.current === projectId`）により、**現在アクティブなタブと同じプロジェクトも登録対象から漏れていた**
+- **原因C（実質的な主因）**: `handleSelectProject` の `useCallback` 依存配列に `activeServerId` が含まれておらず、クロージャが初期値 `null` を永久にキャプチャ — `if (activeServerId)` が常に false 評価となり、**自動登録がほぼ常に無効化されていた**
+- 加えて D&D 経路も、新規作成サーバーは `projectIds` が空のため `visibleTabs` のフィルタでタブバー自体が空になり（`TabBar` は `tabs.length === 0` で `return null`）、唯一のドラッグ元が消滅するデッドロックがあった（`handleCreateServer` が作成直後に新サーバーを自動選択するため、作成した瞬間に発生）
+- `handleRemoveProjectFromServer` も `activeServerId` 固定で編集しており、非アクティブな展開中サーバーの × ボタンを押すとアクティブサーバー側が誤って変更される副作用も併せて発見・修正
+
+**修正**（`apps/web/src/pages/ChatPage.tsx` のみ、DB/スキーマ変更なし）:
+- 既存の `tabsRef`/`activeTabIdRef` パターンに倣い `activeServerIdRef`/`serversRef` を追加し、自動登録処理を関数の**先頭**（早期return・新規タブ判定より前）に移動 → 原因A・B・Cを解消
+- `visibleTabs` は空サーバー（`projectIds.length === 0`）のときフィルタせず全タブを表示、かつアクティブタブは常に表示対象に含める → D&D デッドロック解消
+- 空状態メッセージ（旧「Agents からプロジェクトを追加」）を実際に機能する操作内容に修正
+- `handleRemoveProjectFromServer(serverId, projectId)` にシグネチャ変更し、対象サーバーを明示的に指定するよう修正
+
+- **検証**: `pnpm build` 6 workspace green（`apps/web` 単体ビルドも型エラーなしを個別確認）
+
+---
+
 ### #368 Phase2a: Devin プランモード読み取り専用強制の再設計 — git 自動復元ガード方式へ全面転換（サブサイクル A〜E）(2026-09-06)
 
 #368 Phase1（直後のエントリ参照）で確定した真因——Devin は複合シェルコマンドを個々の裸コマンド名に分解して

@@ -1029,7 +1029,7 @@ function Sidebar({
   onCreateServer: (name: string) => void;
   onRenameServer: (id: string, name: string) => void;
   onDeleteServer: (id: string) => void;
-  onRemoveProject: (projectId: string) => void;
+  onRemoveProject: (serverId: string, projectId: string) => void;
   onAddProjectToServer: (serverId: string, projectId: string) => void;
   /** タブのカスタム名マップ（projectId → customName） */
   tabCustomNames: Record<string, string>;
@@ -1323,7 +1323,8 @@ function Sidebar({
                       <div className="ml-2">
                         {server.projectIds.length === 0 ? (
                           <div className="px-3 py-1 text-xs text-[var(--text-faint)] italic">
-                            Agents からプロジェクトを追加
+                            このサーバーを選択した状態で Agents タブのプロジェクトをクリック、
+                            またはタブバーからここへドラッグして追加
                           </div>
                         ) : (
                           server.projectIds.map((pid, pidIdx) => {
@@ -1374,7 +1375,7 @@ function Sidebar({
                                 </button>
                                 {/* サーバーからプロジェクトを除去 */}
                                 <button
-                                  onClick={(e) => { e.stopPropagation(); onRemoveProject(pid); }}
+                                  onClick={(e) => { e.stopPropagation(); onRemoveProject(server.id, pid); }}
                                   className="opacity-0 group-hover/proj:opacity-100 text-[var(--text-faint)] hover:text-red-400 px-1 mr-1 text-xs"
                                   title="サーバーから除去"
                                 >
@@ -2103,6 +2104,11 @@ export function ChatPage() {
   tabsRef.current = tabs;
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  /** servers/activeServerId の最新値を参照する ref（handleSelectProject の stale closure 対策） */
+  const serversRef = useRef(servers);
+  serversRef.current = servers;
+  const activeServerIdRef = useRef(activeServerId);
+  activeServerIdRef.current = activeServerId;
   /** 初回タブ復元済みフラグ */
   const restoredRef = useRef(false);
 
@@ -2889,6 +2895,24 @@ export function ChatPage() {
 
   /** プロジェクト選択（サイドバー or タブクリック） */
   const handleSelectProject = useCallback((projectId: string) => {
+    // アクティブサーバーがある場合はプロジェクトを自動登録。
+    // 既にタブが開いている（★）場合やアクティブタブ自身のクリックでも登録されるよう、
+    // 早期return・新規タブ判定より前に必ず実行する（ref から最新値を読み stale closure を回避）。
+    const currentServerId = activeServerIdRef.current;
+    if (currentServerId) {
+      const currentServers = serversRef.current;
+      const targetServer = currentServers.find(s => s.id === currentServerId);
+      if (targetServer && !targetServer.projectIds.includes(projectId)) {
+        const next = currentServers.map(s =>
+          s.id === currentServerId
+            ? { ...s, projectIds: [...s.projectIds, projectId] }
+            : s
+        );
+        setServers(next);
+        settingsApi.saveServers(next).catch(() => {});
+      }
+    }
+
     if (activeTabIdRef.current === projectId) return;
 
     const existingTab = tabsRef.current.find(t => t.projectId === projectId);
@@ -2925,19 +2949,6 @@ export function ChatPage() {
         settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
         return updated;
       });
-
-      // アクティブサーバーがある場合はプロジェクトを自動登録
-      if (activeServerId) {
-        setServers(prev => {
-          const next = prev.map(s =>
-            s.id === activeServerId && !s.projectIds.includes(projectId)
-              ? { ...s, projectIds: [...s.projectIds, projectId] }
-              : s
-          );
-          settingsApi.saveServers(next).catch(() => {});
-          return next;
-        });
-      }
     }
 
     setActiveTabId(projectId);
@@ -3060,15 +3071,14 @@ export function ChatPage() {
     if (activeServerId === id) handleSelectServer(null);
   }, [servers, activeServerId, persistServers, handleSelectServer]);
 
-  /** プロジェクトをアクティブサーバーから除去 */
-  const handleRemoveProjectFromServer = useCallback((projectId: string) => {
-    if (!activeServerId) return;
+  /** プロジェクトを指定サーバーから除去 */
+  const handleRemoveProjectFromServer = useCallback((serverId: string, projectId: string) => {
     persistServers(servers.map(s =>
-      s.id === activeServerId
+      s.id === serverId
         ? { ...s, projectIds: s.projectIds.filter(pid => pid !== projectId) }
         : s
     ));
-  }, [activeServerId, servers, persistServers]);
+  }, [servers, persistServers]);
 
   /** 指定サーバーにプロジェクトを追加（D&D 用） */
   const handleAddProjectToServer = useCallback((serverId: string, projectId: string) => {
@@ -3093,9 +3103,12 @@ export function ChatPage() {
   /** アクティブサーバー */
   const activeServer = servers.find(s => s.id === activeServerId) ?? null;
 
-  /** タブバーに表示するタブ（サーバーでフィルタ） */
-  const visibleTabs = activeServerId && activeServer
-    ? tabs.filter(t => activeServer.projectIds.includes(t.projectId))
+  /** タブバーに表示するタブ（サーバーでフィルタ）。
+   *  空のサーバー（projectIds が空）は絞り込み意図を持たないため、フィルタせず全タブを表示する
+   *  （新規作成直後の空サーバーが自動選択されてタブバーが消え、D&D の唯一のドラッグ元を失う問題への対処）。
+   *  また現在アクティブなタブは常に表示対象に含める。 */
+  const visibleTabs = activeServerId && activeServer && activeServer.projectIds.length > 0
+    ? tabs.filter(t => activeServer.projectIds.includes(t.projectId) || t.projectId === activeTabId)
     : tabs;
 
   /** ファイルを pendingFiles に追加 */

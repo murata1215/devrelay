@@ -691,6 +691,25 @@ CLAUDE.md           ← 軽量ハブ（2,000 トークン以内）
 - タブ → サーバーへのドラッグ&ドロップ: `dataTransfer.setData('text/x-devrelay-project', projectId)` で実装
 - サーバー内プロジェクト名は `tabCustomNames` → `projectNameMap` → `pid` の順でフォールバック
 
+### プロジェクト自動登録は `activeServerId` を state 直参照ではなく ref で読むこと（#369）
+
+`handleSelectProject` のような `useCallback` から `activeServerId`（`useState`）を条件分岐（`if (activeServerId)`）に
+使う場合、**依存配列に含めていないと初期値 `null` を永久にキャプチャする stale closure になり、条件が事実上常に
+false 評価される**（サーバーを何個作っても自動登録が一切発火しない、という形でしか症状が現れず気づきにくい）。
+依存配列に足す解決は避けること — `persistServers` 等このファイル後方で `const` 宣言される関数を将来的に
+使いたくなった際に TDZ で実行時クラッシュする罠がある。既存の `tabsRef`/`activeTabIdRef` と同じ「描画時に
+`ref.current = state` を代入する」パターンを踏襲し、`activeServerIdRef`/`serversRef` として読むこと。
+
+自動登録処理そのものも、`if (!existingTab)`（新規タブ作成時のみ実行されるブロック）の内側や、早期 `return`
+（`activeTabIdRef.current === projectId`）より後に書かないこと。**既にタブが開いている（★表示）プロジェクトの
+再クリックや、現在アクティブなタブと同じプロジェクトのクリックでも登録が効くべき**であり、これらのケースは
+「新規タブ作成」でも「非早期return」でもないため、登録処理は関数の一番先頭に置く。
+
+`visibleTabs`（サーバー選択中にタブバーを `projectIds` でフィルタする処理）は、`projectIds` が空のサーバーでは
+フィルタを無効化すること。空サーバーをフィルタしてしまうと `TabBar` が `tabs.length === 0` で `return null` し、
+D&D の唯一のドラッグ元（タブバー自体）が画面から消える。`handleCreateServer` は作成直後に新サーバーを自動選択
+する仕様のため、このガードが無いと**サーバーを作成した瞬間に登録手段が全て失われるデッドロックになる**。
+
 ---
 
 ## Agent プロキシ環境変数注入
