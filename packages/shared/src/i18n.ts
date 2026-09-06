@@ -510,6 +510,38 @@ function warnIfUnresolvedPlaceholder(key: ChatMessageKey, text: string): void {
 // -----------------------------------------------------------------------------
 
 /**
+ * #372: `w` の MEMORY.md 更新ルール（日本語版）。git リポジトリ有無の両分岐で使い回すため定数化する。
+ *
+ * 従来は「MEMORY.md があれば更新してください」としか書いておらず、書式も分量も対象パスも
+ * 指定していなかった。`doc/changelog.md` や `README.md` と並べて書かれているためモデルは
+ * 「リポジトリ直下の MEMORY.md」と解釈するが、直下に無いプロジェクトではコンテキストに載っている
+ * Claude Code の自動メモリ索引（`~/.claude/projects/<slug>/memory/MEMORY.md`）に本文を書き足す。
+ * これが 1 サイクルごとに数 KB ずつ積み上がり、2026-09-07 に `-opt-devrelay` で 330KB /
+ * 約 118,000 トークンまで肥大して、セッション開始時点で auto-compact しきい値の目前に達し
+ * exec が機能しなくなった（#372）。exec モードの【記憶の引き継ぎ】と同じルールをここにも適用する。
+ */
+const W_MEMORY_RULE_JA =
+  'MEMORY.md（リポジトリ直下に無い場合は Claude Code の自動メモリ索引 ' +
+  '`~/.claude/projects/<プロジェクトの絶対パスの英数字以外を - に置換したスラッグ>/memory/MEMORY.md`）は、' +
+  'Recent Changes に **1 行だけ** 追記してください。' +
+  '書式: `- #NNN (YYYY-MM-DD) 見出し — [詳細](archive_worklog_YYYY-MM.md)`。' +
+  '背景・原因・変更内容・検証結果などの本文は MEMORY.md に書かず、同じディレクトリの ' +
+  '`archive_worklog_YYYY-MM.md`（無ければ新規作成）に追記してください。' +
+  'MEMORY.md は毎セッション全文がコンテキストに載る索引ファイルで、本文を書くと数 KB ずつ肥大し、' +
+  '最終的に auto-compact ループでセッションが機能しなくなります。';
+
+/** #372: `w` の MEMORY.md 更新ルール（英語版）。内容は JA 版と同一。 */
+const W_MEMORY_RULE_EN =
+  'For MEMORY.md (if there is none at the repository root, this means the Claude Code auto-memory index ' +
+  '`~/.claude/projects/<the absolute project path with every non-alphanumeric character replaced by ->/memory/MEMORY.md`), ' +
+  'append **exactly one line** to its Recent Changes section, ' +
+  'formatted as `- #NNN (YYYY-MM-DD) title — [details](archive_worklog_YYYY-MM.md)`. ' +
+  'Do NOT write the body (background, root cause, changes, verification) into MEMORY.md; ' +
+  'append it to `archive_worklog_YYYY-MM.md` in the same directory instead (create it if missing). ' +
+  'MEMORY.md is an index file whose full contents are loaded into context every session: writing bodies into it ' +
+  'grows it by several KB per cycle and eventually breaks the session with an auto-compact loop.';
+
+/**
  * 「w」コマンドのワンショット exec プロンプト（日本語版）。
  * 実装後のドキュメント更新＋コミット/プッシュ専用。詳細は各言語版共通のコメントを参照。
  */
@@ -519,12 +551,15 @@ const W_COMMAND_PROMPT_JA =
   'git status / git diff で未コミットの変更があるか確認してください。' +
   'コミット対象の変更が無い場合は、存在しないプランを推測せず「コミット対象の変更はありません」とだけ報告して終了してください（追加の実装・調査は不要）。' +
   '変更がある場合のみ以下を行ってください: ' +
-  'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。MEMORY.md があれば更新してください。README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。' +
+  'doc/changelog.md があればそこに今回の変更を追記してください。rules/project.md があれば新しい設計判断を反映してください。CLAUDE.md を必要に応じて更新してください（技術スタック等の変更のみ）。' +
+  W_MEMORY_RULE_JA +
+  'README.md を今回の変更内容で更新してください。更新後、コミットしてプッシュしてください。' +
   '【git リポジトリでない場合（git コマンドが失敗する場合も含む）】' +
   'コミット・プッシュは一切行わないでください。git のエラーは無視して構いません。' +
   'git diff が使えないため、今回の会話でどんな作業を行ったか（作成・変更したファイル、決定事項）を会話履歴と現在のディレクトリの内容から把握し、以下のドキュメント更新のみを行ってください: ' +
   'README.md を今回の内容で更新してください（無ければ新規作成し、プロジェクトの概要・使い方・ディレクトリ構成を記載）。' +
-  'MEMORY.md を更新してください（無ければ新規作成し、日付つきで作業メモ・決定事項・次回への引き継ぎを追記）。' +
+  W_MEMORY_RULE_JA +
+  'MEMORY.md がまだ無い場合は新規作成し、Recent Changes セクションと 1 行の索引エントリだけを書いてください。' +
   'doc/changelog.md・CLAUDE.md・rules/project.md など他の .md は、既に存在する場合のみ併せて更新してください（新規作成は README.md と MEMORY.md のみ）。' +
   '記録すべき作業内容が無い場合は、存在しないプランを推測せず「記録する変更はありません」とだけ報告して終了してください。' +
   '最後に「git リポジトリではないためコミット・プッシュはスキップしました」と、更新したファイルの一覧を報告してください。';
@@ -536,12 +571,15 @@ const W_COMMAND_PROMPT_EN =
   'Check git status / git diff for uncommitted changes. ' +
   'If there is nothing to commit, do not invent a plan — just report "There are no changes to commit." and stop (no further implementation or investigation needed). ' +
   'Only if there are changes, do the following: ' +
-  'update doc/changelog.md with this change if it exists. Reflect any new design decisions in rules/project.md if it exists. Update CLAUDE.md if needed (tech stack changes only). Update MEMORY.md if it exists. Update README.md to reflect this change. After updating, commit and push. ' +
+  'update doc/changelog.md with this change if it exists. Reflect any new design decisions in rules/project.md if it exists. Update CLAUDE.md if needed (tech stack changes only). ' +
+  W_MEMORY_RULE_EN +
+  ' Update README.md to reflect this change. After updating, commit and push. ' +
   '[If it is NOT a git repository (including when the git command fails)] ' +
   'Do not commit or push at all. Ignore any git errors. ' +
   'Since git diff is unavailable, infer what work was done in this conversation (files created/changed, decisions made) from the conversation history and current directory contents, and only update documentation as follows: ' +
   'Update README.md to reflect this work (create it if missing, describing the project overview, usage, and directory structure). ' +
-  'Update MEMORY.md (create it if missing, with dated notes on work done, decisions, and handoff notes for next time). ' +
+  W_MEMORY_RULE_EN +
+  ' If MEMORY.md does not exist yet, create it with a Recent Changes section containing only the one-line index entry. ' +
   'Other .md files such as doc/changelog.md, CLAUDE.md, rules/project.md should only be updated if they already exist (only README.md and MEMORY.md may be newly created). ' +
   'If there is nothing worth recording, do not invent a plan — just report "There is nothing to record." and stop. ' +
   'Finally, report "This is not a git repository, so commit/push was skipped." along with a list of the files you updated.';
