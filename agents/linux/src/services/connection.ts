@@ -53,6 +53,12 @@ import {
   AGREEMENT_APPLY_PROMPT
 } from './output-collector.js';
 import { ensureSkillFiles } from './skill-manager.js';
+import {
+  stripProgressMarkers,
+  claudeMemoryIndexPath,
+  shouldWarnMemoryIndex,
+  MEMORY_INDEX_WARN_BYTES,
+} from './history-compaction.js';
 import { exec as execCallback, spawn } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
@@ -153,6 +159,8 @@ interface SessionInfo {
   /** 端末インタフェースモード（Project 単位、ai:prompt / exec payload から最新値を反映） */
   terminalMode?: boolean;
   contextWarned?: boolean; // #291-B: コンテキスト警告を既に送信済みか（スパム防止。閾値未満に戻ると解除）
+  /** #372: Claude 自動メモリ（MEMORY.md）肥大の警告を既に送信済みか（1 セッション 1 回まで） */
+  memoryIndexWarned?: boolean;
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -1131,6 +1139,44 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     }
   };
 
+  // #372: Claude Code の自動メモリ索引（`~/.claude/projects/<slug>/memory/MEMORY.md`）は
+  // 毎セッション全文がコンテキストに載る。2026-09-07 に 330KB（約 118,000 トークン）まで肥大し、
+  // セッション開始時点で auto-compact しきい値の目前まで埋まって exec が機能しなくなった。
+  // プロンプト側のルール（EXEC_MODE_INSTRUCTION の【記憶の引き継ぎ】）は風化しうるので、
+  // Agent 側でもサイズを見て 1 セッション 1 回だけ警告する。自動削除・自動編集は行わない。
+  const maybeWarnMemoryIndex = async (): Promise<void> => {
+    if (sessionInfo.aiTool !== 'claude') return;
+    if (sessionInfo.memoryIndexWarned) return;
+    const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+    const memoryPath = claudeMemoryIndexPath(configDir, sessionInfo.projectPath);
+    let bytes = 0;
+    try {
+      bytes = (await stat(memoryPath)).size;
+    } catch {
+      return; // 未作成なら何もしない
+    }
+    if (!shouldWarnMemoryIndex(bytes, !!sessionInfo.memoryIndexWarned)) return;
+    sessionInfo.memoryIndexWarned = true;
+    const kb = Math.round(bytes / 1024);
+    const limitKb = Math.round(MEMORY_INDEX_WARN_BYTES / 1024);
+    const warnBody =
+      `⚠️ Claude の自動メモリが肥大しています（${kb}KB / 目安 ${limitKb}KB）: \`${memoryPath}\`\n` +
+      `このファイルは毎セッション全文がコンテキストに載ります。Recent Changes の本文を ` +
+      `同ディレクトリの \`archive_worklog_YYYY-MM.md\` へ退避し、MEMORY.md は 1 行 1 件の索引に戻してください。` +
+      `放置すると auto-compact ループでセッションが応答しなくなります。`;
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig!.machineId,
+        sessionId,
+        output: warnBody,
+        isComplete: false,
+      },
+    });
+    console.warn(`⚠️ Claude memory index warning sent (${bytes} bytes): ${memoryPath}`);
+  };
+  await maybeWarnMemoryIndex();
+
   // プロンプトサイズの詳細ログ（原因特定用）
   console.log(`📊 Prompt size breakdown:`);
   console.log(`   - Mode instruction: ${modeInstruction.length} chars`);
@@ -1403,7 +1449,10 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           if (responseText.trim()) {
             sessionInfo.history.push({
               role: 'assistant',
-              content: responseText.trim(),
+              // #372: 進捗マーカー（🔧 ...を使用中...）は表示用の装飾で、次ターンの文脈としては
+              // 価値ゼロなのに conversation.json の 26.6% を占めていた。保存時に落とす。
+              // 全文が進捗マーカーだった場合だけ従来どおり原文を残す（空文字を保存しない）。
+              content: stripProgressMarkers(responseText).trim() || responseText.trim(),
               timestamp: new Date().toISOString()
             });
             if (!isEphemeral) {
@@ -1513,7 +1562,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             if (responseText.trim()) {
               sessionInfo.history.push({
                 role: 'assistant',
-                content: responseText.trim(),
+                // #372: 進捗マーカーを落として保存（上の通常経路と同じ理由）
+                content: stripProgressMarkers(responseText).trim() || responseText.trim(),
                 timestamp: new Date().toISOString()
               });
               if (!isEphemeral) {

@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import { withPathLock, normalizeLockKey } from './path-mutex.js';
 import { writeFileAtomic } from './atomic-write.js';
+import { stripProgressMarkers, selectPlanMessages, DEFAULT_MAX_PLAN_MESSAGES } from './history-compaction.js';
 
 const CONVERSATION_DIR = '.devrelay';
 const CONVERSATION_FILE = 'conversation.json';
@@ -260,6 +261,9 @@ export interface GetContextOptions {
  * 2. exec マーカーがない場合、全体から直近 maxMessages 件を返す
  * 3. exec マーカー自体は Claude に送るコンテキストには含めない
  * 4. includePlanBeforeExec が true の場合、exec マーカー前のプラン会話も含める
+ *    （#372: 「直前の exec 以降」に限定する。詳細は `history-compaction.ts` を参照）
+ * 5. #372: 進捗マーカー行（`🔧 Bashを使用中...` 等）は注入時に除去する。
+ *    保存済みの古い conversation.json にも効かせるため、保存時だけでなくここでも落とす。
  */
 export function getConversationContext(
   history: ConversationEntry[],
@@ -270,7 +274,11 @@ export function getConversationContext(
     return '';
   }
 
-  const { includePlanBeforeExec = false, maxPlanMessages = 10 } = options;
+  const { includePlanBeforeExec = false, maxPlanMessages = DEFAULT_MAX_PLAN_MESSAGES } = options;
+
+  /** #372: 注入用の 1 行整形（進捗マーカーを落としてから `User: ` / `Assistant: ` を付ける） */
+  const formatEntry = (h: ConversationEntry): string =>
+    `${h.role === 'user' ? 'User' : 'Assistant'}: ${stripProgressMarkers(h.content)}`;
 
   // Find the last exec marker
   let execIndex = -1;
@@ -284,16 +292,14 @@ export function getConversationContext(
   // If includePlanBeforeExec and exec marker exists, include plan messages
   let planContext = '';
   if (includePlanBeforeExec && execIndex >= 0) {
-    // Get messages before exec marker (the plan conversation)
-    const planMessages = history.slice(0, execIndex)
-      .filter(h => h.role === 'user' || h.role === 'assistant')
-      .slice(-maxPlanMessages);
+    // #372: 「直前の exec マーカー以降」に限定する（従来は exec を跨いで直近 10 件を無条件に
+    // 取っていたため、前サイクルの実装報告まで丸ごと注入されていた）。
+    // `e` 連打で無内容ターンだけが挟まった場合は 1 つ前の exec まで遡る（selectPlanMessages 側）。
+    const planMessages = selectPlanMessages(history, execIndex, { maxPlanMessages });
 
     if (planMessages.length > 0) {
       planContext = '--- Previous Plan Conversation ---\n' +
-        planMessages
-          .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
-          .join('\n') +
+        planMessages.map(formatEntry).join('\n') +
         '\n--- End of Plan ---\n\n';
       console.log(`📚 Including ${planMessages.length} plan messages before exec`);
     }
@@ -312,7 +318,7 @@ export function getConversationContext(
   console.log(`📚 Context: ${filteredMessages.length} messages after exec, sending ${recentHistory.length}`);
 
   const currentContext = recentHistory
-    .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
+    .map(formatEntry)
     .join('\n');
 
   return planContext + currentContext;

@@ -186,8 +186,16 @@ export const EXEC_MODE_INSTRUCTION = `
 【重要】シェルコマンド（ビルド・テスト・インストール等）はバックグラウンドではなく**フォアグラウンドで実行**し、完了を待ってから結果を報告してください。バックグラウンド実行するとセッション終了時にプロセスが停止します。
 
 【記憶の引き継ぎ】
-実装が完了したら、MEMORY.md の Recent Changes セクションを更新して今回の変更内容を簡潔に記録してください。
-これにより次回セッション（新しい Plan）でも作業内容を把握できます。MEMORY.md が存在しない場合はスキップしてください。`;
+実装が完了したら、Claude Code の自動メモリ索引
+\`~/.claude/projects/<プロジェクトの絶対パスの英数字以外を - に置換したスラッグ>/memory/MEMORY.md\`
+の Recent Changes セクションに **1 行だけ** 追記してください（MEMORY.md が存在しない場合はスキップ）。
+
+- 書式: \`- #NNN (YYYY-MM-DD) 見出し — [詳細](archive_worklog_YYYY-MM.md)\`
+- **背景・原因・変更内容・検証結果などの本文は MEMORY.md に書かないでください。**
+  同じ \`memory/\` ディレクトリの \`archive_worklog_YYYY-MM.md\`（無ければ新規作成）に追記します。
+- 理由: MEMORY.md は**毎セッション全文がコンテキストに載る索引ファイル**です。1 件でも本文を書くと
+  数 KB ずつ肥大し、最終的に auto-compact ループでセッションが機能しなくなります
+  （2026-09-07 に 330KB / 約 118,000 トークンまで肥大して実際に停止しました）。`;
 
 // DevRelay Agreement v6: ルールを rules/devrelay.md に分離
 // CLAUDE.md には軽量マーカーのみ配置し、Agreement 本体は rules/devrelay.md に置く
