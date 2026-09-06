@@ -710,6 +710,18 @@ false 評価される**（サーバーを何個作っても自動登録が一切
 D&D の唯一のドラッグ元（タブバー自体）が画面から消える。`handleCreateServer` は作成直後に新サーバーを自動選択
 する仕様のため、このガードが無いと**サーバーを作成した瞬間に登録手段が全て失われるデッドロックになる**。
 
+### プロジェクト自動登録は Agents タブの行クリックのみに限定すること（`registerToActiveServer` opt-in、#370）
+
+`handleSelectProject` は Agents タブの行クリック・Servers タブの行クリック・TabBar のタブ切り替えの **3 箇所から共有**
+される関数である。#369 で自動登録処理を関数の無条件の先頭に置いたことで、「別サーバー配下のプロジェクトを
+Servers タブで単にクリックしただけ」でも、現在アクティブなサーバーに登録されてしまう副作用が発生した（#370）。
+
+自動登録は `registerToActiveServer: boolean = false` という **opt-in の第2引数**でガードし、Agents タブの行
+（`onSelectProject(project.id, true)`）だけが `true` を渡すこと。Servers タブの行クリックと TabBar のタブ切り替え
+（`onSelectTab`）は「開く／切り替える」だけの操作であり、登録は行わない。`onSelectTab` の型は `(projectId: string) => void`
+のまま 1 引数でしか呼ばれないため、`onSelectProject` 側に optional な第2引数を追加しても型的に安全（誤って
+`true` が渡り込む経路は無い）。ref 経由の最新値参照や登録処理を早期 return より前に置く配置は #369 のまま維持する。
+
 ---
 
 ## Agent プロキシ環境変数注入

@@ -1018,7 +1018,7 @@ function Sidebar({
   machineList: Machine[];
   openTabIds: Set<string>;
   activeTabId: string | null;
-  onSelectProject: (projectId: string) => void;
+  onSelectProject: (projectId: string, registerToActiveServer?: boolean) => void;
   collapsed: boolean;
   onToggle: () => void;
   mode: 'agents' | 'servers';
@@ -1184,7 +1184,7 @@ function Sidebar({
                               <button
                                 key={project.id}
                                 onClick={() => {
-                                  onSelectProject(project.id);
+                                  onSelectProject(project.id, true);
                                   if (window.innerWidth < 768) onToggle();
                                 }}
                                 disabled={!isOnline}
@@ -2893,13 +2893,16 @@ export function ChatPage() {
     });
   }, [activeTab?.historyLoaded, activeTab?.hasMoreHistory, activeTab?.loadingHistory, loadOlderMessages]);
 
-  /** プロジェクト選択（サイドバー or タブクリック） */
-  const handleSelectProject = useCallback((projectId: string) => {
+  /** プロジェクト選択（サイドバー or タブクリック）。
+   *  registerToActiveServer=true のときのみ、アクティブサーバーへの自動登録を行う（#370）。
+   *  Servers タブの行クリックや TabBar のタブ切り替えは「開く／切り替える」だけで登録は行わず、
+   *  Agents タブの行クリック（onSelectProject(project.id, true)）だけが登録の起点となる。 */
+  const handleSelectProject = useCallback((projectId: string, registerToActiveServer = false) => {
     // アクティブサーバーがある場合はプロジェクトを自動登録。
     // 既にタブが開いている（★）場合やアクティブタブ自身のクリックでも登録されるよう、
     // 早期return・新規タブ判定より前に必ず実行する（ref から最新値を読み stale closure を回避）。
     const currentServerId = activeServerIdRef.current;
-    if (currentServerId) {
+    if (registerToActiveServer && currentServerId) {
       const currentServers = serversRef.current;
       const targetServer = currentServers.find(s => s.id === currentServerId);
       if (targetServer && !targetServer.projectIds.includes(projectId)) {

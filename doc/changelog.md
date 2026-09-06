@@ -6,6 +6,19 @@
 
 ## 実装済み機能
 
+### #370: Servers タブ / タブバー操作で意図せず別サーバーにプロジェクトが追加される不具合を修正 (2026-09-07)
+
+ユーザー報告「TISA を選択した状態で `devrelay/devrelay-fmv`（別サーバー配下のプロジェクト）をクリックすると TISA に追加されてしまう」を修正。
+#369 で自動登録処理を `handleSelectProject` の**無条件の先頭**に移動したことの副作用で、この関数は Agents タブの行クリック・Servers タブの行クリック・TabBar のタブ切り替えの **3 箇所から共有**されており、
+「開く／切り替える」だけのつもりの操作でも常に登録が発火するようになっていた。
+
+- `handleSelectProject(projectId, registerToActiveServer = false)` として第2引数を追加し、自動登録ブロックを `if (registerToActiveServer && currentServerId)` でガード（opt-in 化）
+- Agents タブの行クリック（`ChatPage.tsx:1187`）のみ `onSelectProject(project.id, true)` として明示的に opt-in
+- Servers タブの行クリック（`ChatPage.tsx:1358`）と TabBar のタブ切り替え（`onSelectTab`, `ChatPage.tsx:3305`）は無変更（既定値 `false` を継承し、登録されなくなる）
+- `TabBar` の `onSelectTab` 型は `(projectId: string) => void` のまま（1引数のみ呼び出し）で、Sidebar 側の `onSelectProject` 型に optional な第2引数を追加しても型的に安全
+- ref 経由での最新値参照（`activeServerIdRef`/`serversRef`）や、登録処理を早期 return より前に置く配置は #369 のまま維持（★表示中のプロジェクトやアクティブタブ自身のクリックでも Agents タブなら登録が効く）
+- タブバー→サーバー行への D&D（`onAddProjectToServer`）は明示的なジェスチャーのため変更なし
+
 ### #369: Servers タブへのプロジェクト自動登録が実質機能していなかった不具合を修正 (2026-09-06)
 
 ユーザー報告「Servers タブでサーバーを全削除して作り直したら、Agents タブのプロジェクトが新サーバーに登録できない」を調査した結果、
