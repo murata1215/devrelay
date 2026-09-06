@@ -1818,6 +1818,15 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   `skillsDir='C:\Users\lfuser\.claude\skills'` の生成物に完全一致で含まれる実測アンカー、macOS には
   当該スキルが存在しないため `t.skip()` で対応）/T9（非 win32 の SKILL.md 本文が opts 省略時と
   byte-for-byte 同一という非退行ガード）を追加。既存 T1/T2/T3 は無変更
+- **【#368 Phase2a で本節の方式は全廃された】** 本節が積み上げてきた `devin-plan-config.ts` /
+  `resolveDevinPlanPermissionMode()` / `buildSkillExecPrefixes()` / `SKILL_INVOCATIONS` 由来の
+  `Exec()` allow/deny プレフィックス一致方式は、#368 Phase2a（サブサイクル A〜E）で**全廃**され、
+  git 自動復元ガード方式に置き換わった（詳細は後述の #368 節参照）。理由は本節 1758 行目ですでに
+  実測確定していたとおり——`Exec()` はコマンド文字列全体ではなくトークン単位の前方一致であり、かつ
+  Devin 自身が複合シェルコマンド（`a && b`／`a ; b`／パイプ）を実行時に**個々の裸コマンド名へ分解**して
+  パーミッション判定するため、どれだけプレフィックスルールを正しく書いても「複合コマンドの組み合わせが
+  変われば再発する」という構造的な限界を原理的に超えられなかった。本節自体は #362→#363 の訂正追記と
+  同じ流儀で履歴として残し、削除はしない。
 
 ## システム管理者アローリスト（`DEVRELAY_SYSTEM_ADMIN_EMAILS`）(#367, 2026-09-06)
 
@@ -1846,7 +1855,7 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   マークアップ自体を送らない）。`services.status()` の呼び出しも `isSystemAdmin` 依存の専用 `useEffect` に
   分離し、非管理者が毎回意味のない 403 を踏まないようにした。
 
-## Devin プランモード「exec 無しで無言終了する」問題 — Phase1 のみ実施 (#368, 2026-09-06)
+## Devin プランモード「exec 無しで無言終了する」問題 — Phase1 + Phase2a 完了 (#368, 2026-09-06)
 
 ユーザー報告「devinでexec無しでエラー。原因教えて」の調査で、#260〜#364 まで積み重ねてきた
 「Devin の `Exec()` 許可コマンドを1つずつ allow-list に追加していく」方式そのものが構造的にモグラ叩きだと
@@ -1878,3 +1887,65 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   判断し、`git checkout --` で該当2ファイルを直前の commit 時点（HEAD）へ差し戻した。Phase2 の設計方針
   自体が否定されたわけではなく、単に「未完成のまま持ち越さない」という判断であり、Phase2〜4 はいずれも
   次サイクルで最初からやり直す。
+
+### Phase2a 完了内容（#368, サブサイクル A〜E, 2026-09-06）
+
+Phase2 を「1 セッションで巨大3ファイルを読もうとして auto-compact 無限ループに陥る」事故（前セッションが
+15.6分・約17.8万トークンを空回りしファイル0件のまま強制停止）の反省から、1サブサイクル=1セッションの
+5分割（A〜E）に再設計して実施。全サブサイクルがローカル commit 済み、本サイクル（E）で `origin/main` へ
+push する。
+
+- **サブサイクル A（新規モジュール追加、呼び出し元ゼロ・挙動変更ゼロ）**: `git-guard-core.ts`（外部import
+  ゼロの純関数、3 OS byte-for-byte 同一）に `parsePorcelainZ`/`isGuardExcludedPath`/`isSafeRelativePath`/
+  `diffAgainstBaseline`/`classifyRestoreAction` を実装。`git-guard.ts`（I/O 層、`execFile`+`shell:false`
+  のみでコマンドインジェクション経路なし）に `isGitRepo`/`captureBaseline`/`restoreToBaseline` を実装。
+  `devin-plan-prompt.ts` に `buildDevinPlanPreamble()`（調査に徹する・書き込み系コマンド不使用・**複合
+  コマンドは自由に使ってよい**〔#368 Phase1 で確定した真因への直接対策〕・勝手にプランモードを抜けない、
+  の4点を明示する前置き文字列）を実装。この時点ではどこからも呼ばれておらず挙動は1バイトも変わらない。
+- **サブサイクル B（パーミッションモードマーカーの追加、純追加・挙動変更ゼロ）**: `session-store.ts` に
+  `DEVIN_PERMISSION_MODE_FILE`（`devin-permission-mode`）マーカーの `save`/`load`/`clear` 3関数を追加し、
+  「セッションIDとモデルは常に対で扱う」という既存不変条件の3つ目の要素として、`ai-runner.ts` の実際に
+  使ったパーミッションモードを都度保存する配線と、`clearDevinSessionId()`+`clearDevinModel()` が共起する
+  全箇所（3 OS 実測で各3箇所＝当初のプラン記載「各2箇所」を訂正）に `clearDevinPermissionMode()` を追加。
+  この時点でもマーカーは誰も読まない（読み始めるのは C）。
+- **サブサイクル C（唯一の挙動変更サイクル）**: `connection.ts`（3 OS）で
+  `const isDevin = sessionInfo.aiTool === 'devin'; const usePlanMode = isPlanTurn && !isDevin;`
+  を新設し、`isPlanTurn`（旧 `usePlanMode` をリネーム、プランモードかどうかの指示文自体はこちらを参照）と
+  `usePlanMode`（実際の権限系はこちらを参照、Devin は常に false）を分離。Devin のプランターンは
+  `--permission-mode` 相当の分岐に一切乗らず常に `dangerous` 相当で起動する。`isDevin && isPlanTurn` の
+  ときだけ `buildDevinPlanPreamble()`（A で用意）を `modeInstruction` の前に連結。同条件でターン実行の
+  `try` 直前に `captureBaseline()`、`finally` で `restoreToBaseline()`（retry 経路の早期 return でも必ず
+  拾う設計）を実行し、復元/退避に応じて `devin.planGuardRestored`/`devin.planGuardFailed` を、非 git
+  リポジトリでは `devin.planGuardUnavailable` を通知して**続行**する（#325 静かなフォールバック禁止）。
+  `ai-runner.ts`（3 OS）では `resumeFailed` 判定を「プランモードかどうか」から「前回と同じパーミッション
+  モードかどうか」（`devinSavedPermissionMode === devinTurnPermissionMode && !options.devinAutoPermFallback`）
+  に切り替え、`devinTurnPermissionMode` はサブサイクル C 以降 Devin では常に `'dangerous'` に決定論的に
+  固定（実測で分岐①〜④より前にゲートがある前方参照問題のため、プラン記載の「今回値とマーカーを都度比較」
+  という設計から変更した逸脱として明記済み）。
+- **サブサイクル D（削除サイクル、挙動変更ゼロ）**: サブサイクル C で `usePlanMode` が Devin では常に
+  false 固定になったことで到達不能になったコードを純粋に削除。`devin-plan-config.ts`（3 OS）+ 対応テスト
+  2本を `git rm`、`devin-diagnostics.ts` から `isDevinSmartUnavailableLine()` を削除、`ai-runner.ts` から
+  `devinPlanToolRejected`/`devinFallbackToolRejected` の2つのリトライブロック（`devinAutoPermFallback`
+  再帰呼び出し込み、計約75行）を削除、`emitDevinPlanDiagnosis()` のゲートを `aiTool==='devin'` のみに
+  再設定、`skill-manager.ts` の JSDoc を実態（Devin は常に `dangerous` 相当で起動し `Exec()` allow/deny
+  ルール自体が存在しない）に合わせて更新。stale dist 成果物（`devin-plan-config.js` ×3）も手動削除
+  （#330 の教訓どおり `tsc` は削除元ソースの成果物を自動掃除しないため）。
+- **git ガードの設計（保守的な安全側の設計）**: 未追跡ファイルは**削除せず** `.devrelay/reverted/
+  <ISO8601>/` へ rename 退避する（誤って消える事故を避ける）。追跡済みの変更は `git reset` → `git
+  checkout` で復元。ターン開始時点で既に dirty だったファイルは、ターン前後で**同一ステータスのままなら
+  対象外**とする保守的な差分判定（`diffAgainstBaseline()`）——プランターンが引き起こした変更だけを復元
+  対象にし、無関係な作業中の変更を巻き込まない設計。`.git`/`.devrelay`/`.devrelay-output` は常に対象外。
+- **resume ゲートの判定軸変更**: 「プランモードかどうか」（旧）→「前回のターンと今回のターンで実際に
+  使ったパーミッションモードが一致するかどうか」（新、`devin-permission-mode` マーカーで判定）。プラン
+  モードとパーミッションモードが分離した（Devin のプランモードは C 以降存在しない）ことに合わせた必然的な
+  変更。
+- **削除した資産の一覧**: `devin-plan-config.ts`（linux/macos/windows）+ `devin-plan-config.test.mjs`
+  （linux/macos）の計5ファイル、`isDevinSmartUnavailableLine()`（`devin-diagnostics.ts`）、
+  `devinPlanToolRejected`/`devinFallbackToolRejected` のリトライブロック（`ai-runner.ts`）、
+  `devinPlanConfigApplied`/`permissionModeSmart` フラグ、`resolveDevinPlanPermissionMode()`。
+  `formatDevinVersion`/`buildDevinCapabilityDetail`/`formatDevinFlagList`/`isDevinBannerLine`/
+  `isDevinToolRejectionText` の5関数と `planToolRejectedNoRetry`（`emitDevinPlanDiagnosis()` 内）は
+  生存（`ai.cliFailed` 等の汎用診断で引き続き使用）。
+- **反映**: A〜D はローカル commit のみで進め、push は本サイクル（E）でまとめて実施する方針を最初から
+  採用（挙動変更ゼロのサイクルを単独で `u` しても意味がないため）。実際に挙動が変わるのは C の内容が
+  各マシンに届いた瞬間のみ。

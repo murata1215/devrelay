@@ -6,6 +6,48 @@
 
 ## 実装済み機能
 
+### #368 Phase2a: Devin プランモード読み取り専用強制の再設計 — git 自動復元ガード方式へ全面転換（サブサイクル A〜E）(2026-09-06)
+
+#368 Phase1（直後のエントリ参照）で確定した真因——Devin は複合シェルコマンドを個々の裸コマンド名に分解して
+パーミッション判定するため、`Exec()` プレフィックス一致の allow/deny-list（#260〜#363 で積み上げた方式）は
+原理的にモグラ叩きにしかならない——を受け、方式そのものを全廃し「Devin のプランターンは常に `dangerous`
+相当で起動 + 前置きプロンプトで調査に徹させる + git 自動復元ガードでターン終了後に書き込みを機械的に
+巻き戻す」という設計に転換した。前セッションが巨大3ファイル（`connection.ts`/`ai-runner.ts`/
+`session-store.ts` ×3 OS、合計約20万トークン）を1セッションで読もうとして auto-compact 無限ループに陥り
+15.6分・約17.8万トークンを空回りして強制停止した反省から、1サブサイクル=1セッションの5分割（A〜E）で実施。
+
+- **サブサイクル A**: 新規 `git-guard-core.ts`（純関数、3 OS byte-for-byte 同一）+ `git-guard.ts`（I/O 層、
+  `execFile`+`shell:false`）+ `devin-plan-prompt.ts`（前置きプロンプト、複合コマンドの使用を明示的に許可）を
+  追加。この時点では呼び出し元ゼロ・挙動変更ゼロ。
+- **サブサイクル B**: `session-store.ts` に `DEVIN_PERMISSION_MODE_FILE` マーカーの save/load/clear を追加し
+  「セッションIDとモデルは常に対で扱う」不変条件の3つ目の要素として配線。この時点でもマーカーは誰も読まない。
+- **サブサイクル C（唯一の挙動変更サイクル）**: `usePlanMode = isPlanTurn && !isDevin` により Devin のプラン
+  ターンは常に `dangerous` 相当で起動するよう分離。`isDevin && isPlanTurn` のときだけ前置きプロンプトを注入し、
+  ターン実行を `try`/`finally` で挟んで `captureBaseline()`/`restoreToBaseline()`（git ガード）を配線。resume
+  ゲートを「プランモードかどうか」から「前回と同じパーミッションモードかどうか」（`devin-permission-mode`
+  マーカー比較）に切り替え。非 git リポジトリでは `devin.planGuardUnavailable` を通知して続行（#325 静かな
+  フォールバック禁止）。
+- **サブサイクル D**: サブサイクル C で到達不能になった旧コードを削除——`devin-plan-config.ts`（3 OS）+
+  テスト2本、`isDevinSmartUnavailableLine()`、`devinPlanToolRejected`/`devinFallbackToolRejected` の
+  リトライブロック、`devinPlanConfigApplied`/`permissionModeSmart` フラグ。挙動は1バイトも変わらない。
+- **サブサイクル E（本サイクル）**: ドキュメント整備（`README.md`/`rules/project.md`/本ファイル/`doc/devlog/`）
+  + 全体静的検証の再実行 + A〜E 全コミットの `origin/main` への push。コード変更ゼロ。
+- **git ガードの設計**: 未追跡ファイルは削除せず `.devrelay/reverted/<ISO8601>/` へ退避、追跡済み変更は
+  `git reset`→`git checkout` で復元。ターン開始時点で既に dirty だったファイルは同一ステータスのままなら
+  対象外とする保守的な判定。`.git`/`.devrelay`/`.devrelay-output` は常に対象外。
+- **検証**: 各サブサイクルで `pnpm build` 6 workspace green・`node --test` を workspace ごと個別実行して
+  非退行を確認済み（詳細件数は各サブサイクルの完了時点で確認済み、本サイクルでも静的検証スイープを再実行し
+  A〜D で `apps/`/`packages/`/`prisma/` に一切変更が無いことを再確認）。
+- **反映**: A〜D はローカル commit のみで進め、本サイクル（E）で `origin/main` へ push。**push しただけでは
+  各マシンに届かない** — `u`（Agent 自己更新、`git fetch && git reset --hard origin/main`）が別途必要。
+  実際に挙動が変わるのは唯一 C の内容であり、最優先の反映先は Devin 搭載機（`DESKTOP-5U400FO/lfuser` /
+  `Lafit`）。`apps/server`/`apps/web`/`prisma` は Phase2a を通じて完全無変更（`packages/shared/src/i18n.ts`
+  のみ変更、C の3キー追加）のため **DB マイグレーション不要**、**`pm2 restart devrelay-server` は必須では
+  ないが実施しても害はない**（i18n カタログは Agent 側 `tChat()` 経由で参照されるため Agent の `u` で届く）。
+- **残件（次サイクル以降）**: Phase 3（`p,`/`i`/`revert` コマンド + git ガードの手動操作 + 検証コマンド）、
+  Phase 4（Agreement v6→v7、`output-collector.ts` の `PLAN_MODE_INSTRUCTION` 整理、3 OS で `'v6'`/`'v4'`
+  と不整合な Agreement バージョン表記の解消を含む）。
+
 ### #368 Phase1: Devin プランモード「exec 無しで無言終了する」問題の可視化（Phase2〜4 は未着手・見送り）(2026-09-06)
 
 ユーザー報告「devinでexec無しでエラー。原因教えて」を調査した結果、#260〜#364 まで積み重ねてきた
