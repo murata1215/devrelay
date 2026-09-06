@@ -69,12 +69,12 @@ function wsToHttpUrl(wsUrl: string): string {
 }
 
 /**
- * Devin プランモードの Exec() allow ルール（#364 1-B）と SKILL.md 本文の両方が
- * ここから導出される単一情報源。2箇所が独立にコマンド文字列を書いていた
- * （devin-plan-config.ts の buildSkillExecPrefixes() が生成する Exec() ルールと
- * 各 generate*SkillMd() が書く実際の呼び出しコマンド）ことがズレの温床だった
- * （#364 真因A: buildSkillExecPrefixes() の生成物がパス途中で閉じ括弧・スクリプト名
- * を欠いたまま切れており、SKILL.md が書くチルダ形コマンドと原理的に一致しない）。
+ * SKILL.md 本文が参照するスキル呼び出しコマンドの単一情報源（#364 1-B）。
+ * #368 Phase2a サブサイクル C 以降、Devin は常に `dangerous` 相当で起動し
+ * `Exec()` allow/deny ルール自体が存在しない（旧・プランモード専用の
+ * コマンド許可リスト生成ロジックはサブサイクル D で削除済み）ため、
+ * ここは純粋に各 generate*SkillMd() が書く実際の呼び出しコマンドを
+ * 一元管理するためだけの定義になっている。
  * macOS は devrelay-list-inventory / devrelay-read-messages スキルを持たないため
  * linux 版（6件）と異なり4件のみ。
  */

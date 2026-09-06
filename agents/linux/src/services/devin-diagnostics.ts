@@ -90,19 +90,3 @@ export function isDevinToolRejectionText(text: string): boolean {
   if (/auto-decided\s+Some\(Deny\)/i.test(value)) return true;
   return false;
 }
-
-/**
- * #364 Phase1（1-A-4）: Devin CLI が `--permission-mode smart` をサーバー側事情で使えず
- * `normal` にフォールバックしたことを示す警告行か判定する。Phase0.6 実測で5回中5回とも発生し、
- * ATIF の `agent.extra.permission_mode` は常に `Normal` になっていた（`smart` を渡していても）。
- * `probeDevinCapabilities()` の `permissionModeSmart`（`--help` 文中に `"smart"` の文字列があるか）は
- * **この可用性を判定できない**——`--help` には常に選択肢として載っているため、実際にサーバー側で
- * 使えるかどうかは実行時のこの警告行でしか分からない。
- * @param line 判定対象の1行（stderr 等）
- * @returns フォールバック警告行なら true。**例外を投げない。**
- */
-export function isDevinSmartUnavailableLine(line: string): boolean {
-  const value = (line ?? '').trim();
-  if (!value) return false;
-  return /Smart permission mode is not available/i.test(value);
-}
