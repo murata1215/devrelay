@@ -12,6 +12,7 @@ import {
   buildAtifDigest,
   endedWithoutAnswer,
   extractRejectionEvidence,
+  sliceStepsFromOffset,
 } from '../dist/services/devin-atif.js';
 
 // observation.results[].content に埋め込む漏洩検出用マーカー（このマーカーが返り値に一切現れないことを担保する）
@@ -203,12 +204,13 @@ test('extractAtifModel: steps[].extra.generation_model（機械可読）をス�
     steps: [
       { extra: {} },
       { extra: { generation_model: 'claude-fable-5-1' } },
-      { extra: { generation_model: 'should-not-be-used' } },
+      { extra: { generation_model: 'should-be-used' } },
     ],
   };
   const { modelName, modelId } = extractAtifModel(parsed);
   assert.equal(modelName, 'Claude Fable 5.1');
-  assert.equal(modelId, 'claude-fable-5-1'); // 最初に見つかったもの
+  // #365: 逆順走査のため最後に見つかったもの（配列末尾に近い方）が採用される
+  assert.equal(modelId, 'should-be-used');
 });
 
 test('extractAtifModel: 両方見つからなければ両方 null', () => {
@@ -423,4 +425,62 @@ test('extractRejectionEvidence: steps が空、observation 無し、不正 JSON 
     steps: [{ source: 'agent', tool_calls: [{ function_name: 'exec', arguments: { command: 'ls' } }] }],
   });
   assert.equal(extractRejectionEvidence(noObservation), null);
+});
+
+// --- sliceStepsFromOffset（#365） ---
+
+test('sliceStepsFromOffset: 正常な差分（offset が範囲内）は offset 以降だけを返す', () => {
+  const steps = [{ tool: 'a', title: null }, { tool: 'b', title: null }, { tool: 'c', title: null }, { tool: 'd', title: null }];
+  const { steps: sliced, omitted } = sliceStepsFromOffset(steps, 2);
+  assert.deepEqual(sliced, [{ tool: 'c', title: null }, { tool: 'd', title: null }]);
+  assert.equal(omitted, 2);
+});
+
+test('sliceStepsFromOffset: offset=0 は全件を返す（フォールバックではなく素通し）', () => {
+  const steps = [{ tool: 'a', title: null }, { tool: 'b', title: null }];
+  const { steps: sliced, omitted } = sliceStepsFromOffset(steps, 0);
+  assert.deepEqual(sliced, steps);
+  assert.equal(omitted, 0);
+});
+
+test('sliceStepsFromOffset: offset===steps.length（前ターンから増えていない）は全件返しにフォールバック', () => {
+  const steps = [{ tool: 'a', title: null }, { tool: 'b', title: null }];
+  const { steps: sliced, omitted } = sliceStepsFromOffset(steps, 2);
+  assert.deepEqual(sliced, steps);
+  assert.equal(omitted, 0);
+});
+
+test('sliceStepsFromOffset: offset>steps.length（devin 側で圧縮・再採番された等の異常値）は全件返しにフォールバック', () => {
+  const steps = [{ tool: 'a', title: null }];
+  const { steps: sliced, omitted } = sliceStepsFromOffset(steps, 99);
+  assert.deepEqual(sliced, steps);
+  assert.equal(omitted, 0);
+});
+
+test('sliceStepsFromOffset: 負の offset は全件返しにフォールバック（例外を投げない）', () => {
+  const steps = [{ tool: 'a', title: null }, { tool: 'b', title: null }];
+  const { steps: sliced, omitted } = sliceStepsFromOffset(steps, -3);
+  assert.deepEqual(sliced, steps);
+  assert.equal(omitted, 0);
+});
+
+test('sliceStepsFromOffset: steps が配列でない場合も例外を投げず空配列を返す', () => {
+  assert.deepEqual(sliceStepsFromOffset(null, 1), { steps: [], omitted: 0 });
+  assert.deepEqual(sliceStepsFromOffset(undefined, 1), { steps: [], omitted: 0 });
+});
+
+// --- extractAtifModel: 逆順走査の回帰テスト（#365） ---
+
+test('extractAtifModel: 複数ステップで generation_model が異なるとき最後の値を返す（今回のバグの回帰テスト）', () => {
+  // 実際に発生したケースの再現: 1件目が診断用の別モデル呼び出し（--model sonnet）、
+  // 最後のステップが今回実際に使われたモデル。旧実装（先頭から break）は 1 件目の値を誤って返していた。
+  const parsed = {
+    steps: [
+      { extra: { generation_model: 'sonnet' } },
+      { extra: { generation_model: 'swe-1-7-medium' } },
+      { extra: { generation_model: 'swe-1-7-medium' } },
+    ],
+  };
+  const { modelId } = extractAtifModel(parsed);
+  assert.equal(modelId, 'swe-1-7-medium');
 });

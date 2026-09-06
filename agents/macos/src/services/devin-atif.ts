@@ -125,6 +125,28 @@ export function summarizeAtifEntry(entry: unknown): AtifStepSummary | null {
 }
 
 /**
+ * 「今回のターンで実行されたステップ」だけを取り出す（#365、無関係な過去ターンの表示防止）。
+ *
+ * `--export` は turn ではなく **セッション全体**の ATIF を書き出すため（devin session を `-r` で
+ * resume すると毎ターン全トラジェクトリが書き直される）、前ターン終了時点のステップ数
+ * （オフセット、`session-store.ts` に永続化）との差分を取ることで今回分だけに絞り込む。
+ *
+ * `offset` が壊れている場合（devin 側でステップが圧縮・再採番された等、`offset <= 0` または
+ * `offset >= steps.length`）は **全件を返す**（`omitted: 0`）。壊れたオフセットのせいで
+ * 今回のステップが全て消えてしまう事故を避けるためのフォールバック。
+ *
+ * @param steps `buildAtifDigest()` が返した全ステップ
+ * @param offset 前ターン終了時点の累計ステップ数（0 または未保存なら先頭から全件が「今回分」）
+ * @returns 今回分のステップと、オフセットにより省かれた件数（フォールバック時は常に 0）
+ */
+export function sliceStepsFromOffset(steps: AtifStepSummary[], offset: number): { steps: AtifStepSummary[]; omitted: number } {
+  if (!Array.isArray(steps) || !Number.isFinite(offset) || offset <= 0 || offset >= steps.length) {
+    return { steps: Array.isArray(steps) ? steps : [], omitted: 0 };
+  }
+  return { steps: steps.slice(offset), omitted: offset };
+}
+
+/**
  * ATIF から使用モデル名を抽出する。
  * `agent.model_name`（人間可読）と `steps[].extra.generation_model`（機械可読）は別物であり、
  * 実際に生成へ使われた値である後者を `modelId` として優先的に採用する（判明11）。
@@ -141,8 +163,12 @@ export function extractAtifModel(parsed: unknown): { modelName: string | null; m
       const a = agent as Record<string, unknown>;
       if (typeof a.model_name === 'string' && a.model_name) modelName = a.model_name;
     }
+    // #365: 複数ステップで generation_model が異なる場合、実際に「最後に使われた」値を
+    // 採用するため逆順走査に変更（旧実装は先頭から走査し最初の一致で break していたため、
+    // 診断用の別モデル呼び出し等が先頭にあると誤ってそちらの値を表示してしまっていた）。
     const steps = Array.isArray(obj.steps) ? obj.steps : [];
-    for (const step of steps) {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const step = steps[i];
       if (!step || typeof step !== 'object') continue;
       const extra = (step as Record<string, unknown>).extra;
       if (extra && typeof extra === 'object') {

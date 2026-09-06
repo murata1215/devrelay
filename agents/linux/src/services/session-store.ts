@@ -9,6 +9,8 @@ const SESSION_META_FILE = 'claude-session-meta.json';
 const DEVIN_SESSION_FILE = 'devin-session-id';
 /** このサイクル: Devin セッション作成時に使用したモデルを記録するファイル（resume時のモデル一致判定用） */
 const DEVIN_MODEL_FILE = 'devin-model';
+/** #365: 前ターン終了時点の ATIF 累計ステップ数を記録するファイル（今回分だけの表示に使う差分の基準） */
+const DEVIN_ATIF_STEP_OFFSET_FILE = 'devin-atif-step-offset';
 const CODEX_SESSION_FILE = 'codex-session-id';
 const CONTEXT_USAGE_FILE = 'context-usage.json';
 
@@ -224,6 +226,61 @@ export async function saveDevinModel(projectPath: string, model: string): Promis
  */
 export async function clearDevinModel(projectPath: string): Promise<void> {
   const filePath = getDevinModelPath(projectPath);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+    }
+  } catch {
+    // 無視
+  }
+}
+
+/**
+ * #365: ATIF 累計ステップ数オフセットファイルのパスを取得
+ * （devin セッションが resume されるたびに --export が全トラジェクトリを書き直すため、
+ * 「前ターンまでに何ステップあったか」を記録しておき、今回ターン分だけを差分表示するために使う）
+ */
+function getDevinAtifStepOffsetPath(projectPath: string): string {
+  return join(projectPath, SESSION_DIR, DEVIN_ATIF_STEP_OFFSET_FILE);
+}
+
+/**
+ * 前ターン終了時点の ATIF 累計ステップ数を読み込む（未保存 or 不正な値は null）
+ */
+export async function loadDevinAtifStepOffset(projectPath: string): Promise<number | null> {
+  const filePath = getDevinAtifStepOffsetPath(projectPath);
+  try {
+    if (!existsSync(filePath)) return null;
+    const content = await readFile(filePath, 'utf-8');
+    const n = Number(content.trim());
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 今回ターン終了時点の ATIF 累計ステップ数を保存（次回ターンのオフセットとして使われる）
+ */
+export async function saveDevinAtifStepOffset(projectPath: string, offset: number): Promise<void> {
+  const dirPath = join(projectPath, SESSION_DIR);
+  const filePath = getDevinAtifStepOffsetPath(projectPath);
+  try {
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
+    await writeFile(filePath, String(offset), 'utf-8');
+  } catch (err) {
+    console.error(`❌ Could not save Devin ATIF step offset:`, (err as Error).message);
+  }
+}
+
+/**
+ * ATIF 累計ステップ数オフセットをクリア（`x` コマンド / resume 失敗 / モデル変更時に
+ * `clearDevinSessionId()` + `clearDevinModel()` と併せて呼ぶ）
+ */
+export async function clearDevinAtifStepOffset(projectPath: string): Promise<void> {
+  const filePath = getDevinAtifStepOffsetPath(projectPath);
   try {
     if (existsSync(filePath)) {
       await unlink(filePath);

@@ -6,11 +6,11 @@ import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, PLAN_READONLY_BASH_COMMA
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinSmartUnavailableLine, isDevinToolRejectionText } from './devin-diagnostics.js';
 import { buildDevinPlanConfig, resolveDevinPlanPermissionMode } from './devin-plan-config.js';
-import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, extractRejectionEvidence, type AtifStepSummary } from './devin-atif.js';
+import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, extractRejectionEvidence, sliceStepsFromOffset, type AtifStepSummary } from './devin-atif.js';
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
 import log from './logger.js';
 
@@ -297,11 +297,15 @@ interface DevinTurnDigest {
  * 「🧭 実行ステップ (N件): ...」として添付し、「何をやったか」を可視化する。
  * パース本体（steps 抽出・tool_calls 対応・モデル/使用量マッピング）は `devin-atif.ts` の
  * `buildAtifDigest()` に委譲し、ここでは fs I/O と表示用文字列の組み立てのみ行う。
+ * #365: `--export` はセッション全体（resume 分も含む累計）の ATIF を書くため、`offset`（前ターン終了
+ * 時点の累計ステップ数）を渡し `sliceStepsFromOffset()` で「今回のターンのステップ」だけに絞り込む。
+ * `offset` が壊れている（0以下・ステップ総数以上）場合はフォールバックして全件を今回分として扱う。
  * @param exportPath ATIF ファイルパス
  * @param lang 表示言語
+ * @param offset 前ターン終了時点の累計ステップ数（既定0＝全件を今回分として扱う）
  * @returns ステップ要約文字列・モデル名・使用量・実ステップ数。読み取れなければ null
  */
-function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_LANGUAGE): DevinTurnDigest | null {
+function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_LANGUAGE, offset: number = 0): DevinTurnDigest | null {
   let content: string;
   try {
     content = fs.readFileSync(exportPath, 'utf-8');
@@ -314,8 +318,9 @@ function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_L
     log.info(`[devin] ATIF parsed 0 steps; head sample: ${content.slice(0, 500)}`);
     return null;
   }
+  const { steps: turnSteps } = sliceStepsFromOffset(digest.steps, offset);
   const formatted: string[] = [];
-  for (const s of digest.steps) {
+  for (const s of turnSteps) {
     const f = formatAtifStepSummary(s, lang);
     if (f) formatted.push(f);
   }
@@ -323,7 +328,7 @@ function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_L
   if (formatted.length > 0) {
     const shown = formatted.slice(0, 10);
     const more = formatted.length > shown.length ? `（他${formatted.length - shown.length}件）` : '';
-    summaryText = `\n\n🧭 実行ステップ (${formatted.length}件): ${shown.join(' → ')}${more}\n`;
+    summaryText = `\n\n🧭 実行ステップ (今回${formatted.length}件 / 累計${digest.totalSteps}件): ${shown.join(' → ')}${more}\n`;
   }
   return {
     summaryText,
@@ -544,6 +549,12 @@ export async function sendPromptToAi(
   // #364 Phase1（1-A-3）: `endedWithoutAnswer` 時に読み取る拒否根拠（observation 抜粋、300文字まで）。
   // close ハンドラでのみ代入されるため devinAtifEndedWithoutAnswer と同じ理由で関数スコープの let。
   let devinAtifRejectionEvidence: string | null = null;
+  // #365: ATIF の累計ステップ数（今回ターン終了時点）。次ターンのオフセットとして保存するため
+  // close ハンドラの外（session-store 保存箇所）まで持ち越す必要があり、同上の理由で関数スコープの let。
+  let devinAtifTotalSteps = 0;
+  // #365: 今回のターン開始時点でのオフセット（前ターン終了時点の累計ステップ数）。
+  // devin プロセスを起動する前に読み込んでおき、close ハンドラでの digest 読み取りに渡す。
+  let devinAtifStepOffsetAtStart = 0;
   // #282: CHISEL_LOG_STDERR=1 で stderr に流れる devin 内部ログの分類用
   let devinToolRejectedInLog = false;   // ログ形式で検出したツール拒否（#274 検出の置き換え）
   let devinStderrLineBuffer = '';       // stderr の行バッファ（改行区切り処理の残り）
@@ -697,6 +708,12 @@ export async function sendPromptToAi(
       devinProbeFailedWarned = true;
       onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.probeFailed', { detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
     }
+
+    // #365: 前ターン終了時点の累計ステップ数（オフセット）を読み込む。close ハンドラでの
+    // ATIF 読み取り時にこれを渡し「今回のターンで新たに実行されたステップ」だけに絞り込む。
+    // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
+    // offset<=0 は全件返しにフォールバックする二重防御）。
+    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath)) ?? 0;
 
     // 保存済み Devin セッション ID があれば -r で resume
     // ただし exec モードでは新規セッションを開始する（--permission-mode dangerous を
@@ -1413,13 +1430,16 @@ export async function sendPromptToAi(
       // の早期 return 経路含む）より前にこの代入が実行されることが重要。
       if (devinExportPath && fs.existsSync(devinExportPath)) {
         try {
-          const digest = readDevinTurnDigest(devinExportPath, options.language ?? DEFAULT_CHAT_LANGUAGE);
+          const digest = readDevinTurnDigest(devinExportPath, options.language ?? DEFAULT_CHAT_LANGUAGE, devinAtifStepOffsetAtStart);
           if (digest) {
             devinStepSummary = digest.summaryText;
             devinAtifModelName = digest.modelName;
             devinAtifModelId = digest.modelId;
             devinAtifEndedWithoutAnswer = digest.endedWithoutAnswer;
             devinAtifRejectionEvidence = digest.rejectionEvidence;
+            // #365: 今回ターン終了時点の累計ステップ数。次ターンのオフセットとして保存するため
+            // close ハンドラの外（セッション ID 保存箇所）まで持ち越す。
+            devinAtifTotalSteps = digest.totalSteps;
             if (digest.usage) {
               const modelKey = digest.modelId ?? digest.modelName ?? 'devin';
               result.usageData = {
@@ -1502,6 +1522,9 @@ export async function sendPromptToAi(
             saveDevinSessionId(projectPath, latest.id).catch(() => {});
             // このサイクル: 次回のモデル一致判定のため、今回使ったモデルもセッション ID と並べて保存する
             saveDevinModel(projectPath, devinCurrentModelForResume).catch(() => {});
+            // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
+            // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
+            saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps).catch(() => {});
           }
           }
         } catch (err) {
@@ -1617,7 +1640,8 @@ export async function sendPromptToAi(
         completionSent = true; // この呼び出しの後続 onOutput を抑止（フォールバック側が完了通知を送る）
         // 壊れた可能性のあるセッション ID をクリアしてからフォールバック（新規セッション）
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
-        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath)]).finally(() => {
+        // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
+        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath)]).finally(() => {
           const fallbackOptions: SendPromptOptions = {
             ...options,
             devinAutoPermFallback: true,
@@ -1643,7 +1667,8 @@ export async function sendPromptToAi(
         result.resumeFailed = true;
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
-        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath)]).finally(() => resolve(result));
+        // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
+        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath)]).finally(() => resolve(result));
         return;
       }
 
