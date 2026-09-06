@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### #366: 実行時間の上限を 45分 → 120分 に引き上げ（#355 SDK loop-guard の wall-clock）(2026-09-06)
+
+ユーザーが実チャットで正常進捗中の実行を「実行時間の上限に到達」で強制停止される事故に遭遇。約46.3分・auto-compact 11回で
+`🛑 停止しました: 実行時間の上限に到達` となったが、`compactLoop`（無進捗3回連続）や`toolRepeat`（同一ツール5連打）には
+一致せず、`#355`で導入したwall-clock上限（既定45分）が「進捗はあった正常な長時間作業」を時間だけを理由に打ち切っていたと判明。
+
+**原因**: `agents/{linux,macos}/src/services/sdk-loop-guard.ts`の`DEFAULT_WALL_CLOCK_MS`（既定45分=2,700,000ms）。
+このAgent側の値は`rules/project.md`に明記済みの不変条件「サーバー側の無応答ハードタイムアウトより必ず先に発火させること」を
+満たすため`apps/server/src/services/session-manager.ts`の`PROGRESS_HARD_TIMEOUT`（既定60分）と対で設計されていた。
+
+**修正**: 両方の既定値を2倍以上の比率を保ったまま引き上げ、不変条件（Agent < サーバー）を維持したまま引き上げた。
+- Agent側 `DEFAULT_WALL_CLOCK_MS`: 45分(2,700,000ms) → **120分(7,200,000ms)**
+- サーバー側 `PROGRESS_HARD_TIMEOUT`: 60分(3,600,000ms) → **150分(9,000,000ms)**
+- `compactLoop`(3)/`toolRepeat`(5)の無進捗ループ検知閾値は無変更（今回の問題と無関係のため維持）。
+- 両方とも既存の env（`DEVRELAY_SDK_WALL_CLOCK_MS`/`DEVRELAY_PROGRESS_HARD_TIMEOUT_MS`）で個別に上書き可能な設計は無変更。
+
+**変更ファイル**（9件、新規ファイルなし）:
+- `agents/{linux,macos}/src/services/sdk-loop-guard.ts`（`DEFAULT_WALL_CLOCK_MS`本体、2行のみ、byte-for-byte同一を維持）
+- `agents/{linux,macos}/src/services/ai-runner.ts`（呼び出し箇所のコメント追従のみ、ロジック無変更）
+- `apps/server/src/services/session-manager.ts`（`PROGRESS_HARD_TIMEOUT`本体）
+- `agents/{linux,macos}/tests/sdk-loop-guard.test.mjs`（値固定用の回帰テスト`B0`を1件追加、byte-for-byte同一を維持）
+- `README.md`（Auto-Compact Loop Guardの記述を120分/150分に更新）
+- `rules/project.md`（#355節に現在値と「必ずセットで変更する」旨を追記）
+
+**検証**: `pnpm build`6 workspace green、`node --test`を workspace ごと個別実行（#333の教訓）で
+`packages/shared`43/43・`apps/server`131/131・`agents/linux`324/324・`agents/macos`285 pass+1 skip、いずれも非退行
+（既存カウントに新規1件`B0`を加えた数と一致）。`diff`で linux/macos の`sdk-loop-guard.ts`とテストがbyte-for-byte同一、
+`git diff --stat -- apps/web/ prisma/ agents/windows/ packages/shared/src`が空（DBマイグレーション不要、
+`agents/windows`は`sdk-loop-guard.ts`自体を持たないため対象外）、`grep -c 'require(' apps/web/dist/assets/index-*.js`=0。
+コンパイル済み`session-manager.js`に`9_000_000`（数値セパレータ付き）の反映を確認。
+
+**反映**: commit+push必須、**`pm2 restart devrelay-server`必須**（`apps/server`を変更するため）、
+**各マシン（Linux/macOS）の`u`必須**（Agent側が本丸、Windowsはこの変更に関する`u`は不要）。
+E2E確認（45〜60分かかる長時間作業が打ち切られず完走すること、`compactLoop`/`toolRepeat`は従来どおり数分で発火すること、
+`c`でのキャンセルが従来どおり効くこと）は人間が反映後に実施。
+
 ### #364: Devin プランモードのスキル呼び出し失敗を根治（真因A/真因B修正）+ 失敗理由の可視化強化 (2026-09-06)
 
 `#363` 適用後も `DESKTOP-5U400FO/lfuser`/`Lafit`/Devin CLI/プランモードで「MB01の概要を教えて」に無言終了が再発。

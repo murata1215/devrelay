@@ -77,8 +77,9 @@ const MAX_OUTPUT_LINES = 15;
  * （decideProgressTimeoutAction() 参照）。env で調整可能（#321 の DEVRELAY_TOKEN_WARN_SLOW_* の流儀）。
  */
 const PROGRESS_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_TIMEOUT_MS) || 300_000;
-/** #337: ハードタイムアウト（既定60分）。マシンが online でも無条件でタイムアウト確定する安全網。 */
-const PROGRESS_HARD_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_HARD_TIMEOUT_MS) || 3_600_000;
+/** #337: ハードタイムアウト（既定150分）。マシンが online でも無条件でタイムアウト確定する安全網。
+ *  #366: Agent 側 loop-guard の wall-clock（既定120分）より必ず後に発火させること。 */
+const PROGRESS_HARD_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_HARD_TIMEOUT_MS) || 9_000_000;
 
 // Restore session participants from ChannelSession on server startup
 export async function restoreSessionParticipants() {

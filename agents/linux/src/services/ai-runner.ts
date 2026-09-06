@@ -1232,7 +1232,7 @@ async function sendPromptToAiSdk(
     for await (const message of query({ prompt, options: sdkOptions })) {
       const m = message as any;
 
-      // #355: 実行時間上限チェック（既定45分、サーバー側60分ハードタイムアウトより先に発火させる）
+      // #355/#366: 実行時間上限チェック（既定120分、サーバー側150分ハードタイムアウトより先に発火させる）
       const loopGuardWallClock = checkWallClock(loopGuardState, Date.now(), loopGuardConfig);
       if (loopGuardWallClock.abort) {
         return await abortForLoopGuard('wallClock', loopGuardWallClock.detail);

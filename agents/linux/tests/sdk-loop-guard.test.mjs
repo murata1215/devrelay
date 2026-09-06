@@ -64,6 +64,10 @@ test('A5: stableToolSignature は非オブジェクト入力（文字列・数�
 // B. resolveLoopGuardConfig
 // ============================================================
 
+test('B0: #366 DEFAULT_WALL_CLOCK_MS は120分（サーバー側150分ハードタイムアウトより先に発火させる値）', () => {
+  assert.equal(DEFAULT_WALL_CLOCK_MS, 7_200_000);
+});
+
 test('B1: resolveLoopGuardConfig は env 未指定時に既定値を返す', () => {
   const cfg = resolveLoopGuardConfig({});
   assert.equal(cfg.maxNoProgressCompacts, DEFAULT_MAX_NO_PROGRESS_COMPACTS);

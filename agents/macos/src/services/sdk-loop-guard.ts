@@ -29,8 +29,8 @@ type EnvLike = Record<string, string | undefined>;
 /** compact ループ検知の閾値（既定値。全て env で上書き可能） */
 export const DEFAULT_MAX_NO_PROGRESS_COMPACTS = 3;
 export const DEFAULT_MAX_IDENTICAL_TOOL_REPEATS = 5;
-/** 45分。サーバー側 PROGRESS_HARD_TIMEOUT（60分）より先に Agent 側が主導権を持って止めるための値 */
-export const DEFAULT_WALL_CLOCK_MS = 2_700_000;
+/** #366: 120分。サーバー側 PROGRESS_HARD_TIMEOUT（150分）より先に Agent 側が主導権を持って止めるための値 */
+export const DEFAULT_WALL_CLOCK_MS = 7_200_000;
 export const DEFAULT_MIN_PROGRESS_TEXT_CHARS = 1;
 
 export interface LoopGuardConfig {
