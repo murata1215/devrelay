@@ -34,7 +34,7 @@ import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
-import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearCodexSessionId } from './session-store.js';
+import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId } from './session-store.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
@@ -856,6 +856,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   await clearDevinSessionId(projectPath);
   await clearDevinModel(projectPath); // このサイクル: モデル情報もセッションIDと一緒にクリア
   await clearDevinAtifStepOffset(projectPath); // #365: ATIF累計ステップ数オフセットも三つ目の要素として同時にクリアする
+  await clearDevinPermissionMode(projectPath); // #368 Phase2a: パーミッションモード記録も四つ目の要素として同時にクリアする
   await clearCodexSessionId(projectPath); // #308
 
   // 4. メモリ内の履歴とセッション ID もクリア

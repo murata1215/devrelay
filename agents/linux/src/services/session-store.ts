@@ -11,6 +11,8 @@ const DEVIN_SESSION_FILE = 'devin-session-id';
 const DEVIN_MODEL_FILE = 'devin-model';
 /** #365: 前ターン終了時点の ATIF 累計ステップ数を記録するファイル（今回分だけの表示に使う差分の基準） */
 const DEVIN_ATIF_STEP_OFFSET_FILE = 'devin-atif-step-offset';
+/** #368 Phase2a: Devin セッション作成時に使用したパーミッションモードを記録するファイル（resume 時のモード一致判定用） */
+const DEVIN_PERMISSION_MODE_FILE = 'devin-permission-mode';
 const CODEX_SESSION_FILE = 'codex-session-id';
 const CONTEXT_USAGE_FILE = 'context-usage.json';
 
@@ -281,6 +283,61 @@ export async function saveDevinAtifStepOffset(projectPath: string, offset: numbe
  */
 export async function clearDevinAtifStepOffset(projectPath: string): Promise<void> {
   const filePath = getDevinAtifStepOffsetPath(projectPath);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+    }
+  } catch {
+    // 無視
+  }
+}
+
+/**
+ * #368 Phase2a: Devin パーミッションモードマーカーファイルのパスを取得
+ * （Devin セッションはパーミッションモードを引き継ぐため、resume 時に前回と今回のモードが
+ * 一致するかどうかを判定するのに使う）
+ */
+function getDevinPermissionModePath(projectPath: string): string {
+  return join(projectPath, SESSION_DIR, DEVIN_PERMISSION_MODE_FILE);
+}
+
+/**
+ * 前回 Devin セッション作成時に使用したパーミッションモードを読み込む（未保存 or 読み取り失敗は null）
+ */
+export async function loadDevinPermissionMode(projectPath: string): Promise<string | null> {
+  const filePath = getDevinPermissionModePath(projectPath);
+  try {
+    if (!existsSync(filePath)) return null;
+    const content = await readFile(filePath, 'utf-8');
+    const mode = content.trim();
+    return mode ? mode : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 今回ターンで実際に Devin へ渡したパーミッションモードを保存（次回ターンの resume 一致判定に使う）
+ */
+export async function saveDevinPermissionMode(projectPath: string, mode: string): Promise<void> {
+  const dirPath = join(projectPath, SESSION_DIR);
+  const filePath = getDevinPermissionModePath(projectPath);
+  try {
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
+    await writeFile(filePath, mode, 'utf-8');
+  } catch (err) {
+    console.error(`❌ Could not save Devin permission mode:`, (err as Error).message);
+  }
+}
+
+/**
+ * Devin パーミッションモードマーカーをクリア（`x` コマンド / resume 失敗時に
+ * `clearDevinSessionId()` + `clearDevinModel()` + `clearDevinAtifStepOffset()` と併せて呼ぶ）
+ */
+export async function clearDevinPermissionMode(projectPath: string): Promise<void> {
+  const filePath = getDevinPermissionModePath(projectPath);
   try {
     if (existsSync(filePath)) {
       await unlink(filePath);

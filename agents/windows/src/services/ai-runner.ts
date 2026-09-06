@@ -6,7 +6,7 @@ import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, PLAN_READONLY_BASH_COMMA
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinSmartUnavailableLine, isDevinToolRejectionText } from './devin-diagnostics.js';
 import { buildDevinPlanConfig, resolveDevinPlanPermissionMode } from './devin-plan-config.js';
@@ -516,6 +516,8 @@ export async function sendPromptToAi(
   let devinCurrentModelForResume = '';
   // #347: plan モードで --config/--agent-config を実際に積んだか（close ハンドラの無音 deny 検出に使う）
   let devinPlanConfigApplied = false;
+  // #368 Phase2a: このターンで実際に Devin へ渡したパーミッションモード（未指定なら null）。次ターンの resume 一致判定に使う。
+  let devinEffectivePermissionMode: string | null = null;
   // #276: Devin の途中経過表示用。--export の ATIF ファイルパス（対応版のみ設定）と進捗タイマー群を
   // 関数スコープに置き、close/error ハンドラから停止・後始末できるようにする。
   let devinExportPath: string | null = null;
@@ -794,6 +796,7 @@ export async function sendPromptToAi(
         // config の allow/deny だけに任せず、Devin 自身の安全判定（smart/auto）も併用する（多層防御）
         args.push('--permission-mode', devinPlanPermMode);
       }
+      devinEffectivePermissionMode = devinPlanPermMode;
       devinPlanConfigApplied = true;
       log.info(`Devin plan mode: using ${configFlagName} (${devinPlanStrictExec ? 'Read only, Write/Exec denied' : 'Read + safe Exec allowed, Write denied'})${devinPlanPermMode ? ` + --permission-mode ${devinPlanPermMode}` : ''}`);
     } else if (options.usePlanMode && !options.devinAutoPermFallback && devinHasPermissionMode) {
@@ -804,6 +807,7 @@ export async function sendPromptToAi(
         envOverride: process.env.DEVRELAY_DEVIN_PLAN_PERMISSION_MODE,
       }) ?? 'auto';
       args.push('-p', '--permission-mode', devinPlanPermMode);
+      devinEffectivePermissionMode = devinPlanPermMode;
       devinDegradedReason = 'planReadonly';
       log.info(`Devin plan mode: --config/--agent-config unsupported, degraded to --permission-mode ${devinPlanPermMode} (readonly not enforced)`);
     } else if (options.usePlanMode && !options.devinAutoPermFallback) {
@@ -817,6 +821,7 @@ export async function sendPromptToAi(
       // 厳密読み取り専用は緩むが「プラン不能」よりまし。書き換え抑止はプロンプト側の指示に委ねる。
       if (devinHasPermissionMode) {
         args.push('-p', '--permission-mode', 'auto');
+        devinEffectivePermissionMode = 'auto';
         log.info(`Devin plan mode fallback: using --permission-mode auto (agent-config skipped)`);
       } else {
         args.push('-p');
@@ -826,6 +831,7 @@ export async function sendPromptToAi(
       // exec モード: 全ツール自動承認
       if (devinHasPermissionMode) {
         args.push('-p', '--permission-mode', 'dangerous');
+        devinEffectivePermissionMode = 'dangerous';
       } else {
         // #329: --permission-mode 非対応の旧 CLI → -p のみ（劣化通知）
         args.push('-p');
@@ -1539,6 +1545,8 @@ export async function sendPromptToAi(
             // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
             // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
             saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps).catch(() => {});
+            // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
+            saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '').catch(() => {});
           }
           }
         } catch (err) {
@@ -1655,7 +1663,7 @@ export async function sendPromptToAi(
         // 壊れた可能性のあるセッション ID をクリアしてからフォールバック（新規セッション）
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath)]).finally(() => {
+        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath), clearDevinPermissionMode(projectPath)]).finally(() => {
           const fallbackOptions: SendPromptOptions = {
             ...options,
             devinAutoPermFallback: true,
@@ -1682,7 +1690,7 @@ export async function sendPromptToAi(
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath)]).finally(() => resolve(result));
+        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath), clearDevinPermissionMode(projectPath)]).finally(() => resolve(result));
         return;
       }
 
