@@ -48,6 +48,12 @@ export interface AtifDigest {
   totalSteps: number;
   /** `agent.extra.permission_mode`（console ログ専用、チャットには出さない） */
   permissionMode: string | null;
+  /**
+   * #368 Phase1-3: `chisel/tool_failure: {"reason":"Blocked"}` と対になったコマンド文字列一覧
+   * （`extractBlockedCommands()`）。空配列は「拒否されたコマンドが見つからなかった」ことを示す
+   * （拒否自体が無かったことの証明ではない、他の根拠と併用する）。
+   */
+  blockedCommands: string[];
 }
 
 /**
@@ -278,6 +284,7 @@ export function buildAtifDigest(content: string): AtifDigest | null {
     usage,
     totalSteps: entries.length,
     permissionMode,
+    blockedCommands: extractBlockedCommands(entries),
   };
 }
 
@@ -312,7 +319,39 @@ export function endedWithoutAnswer(steps: AtifStepSummary[]): boolean {
  * @param content ATIF ファイルの生テキスト（単一 JSON のみ対象、JSONL 旧形式は対象外）
  * @returns 抜粋（最大300文字）。失敗ターンでない/observation が無い等は null。**例外を投げない**
  */
-export function extractRejectionEvidence(content: string): string | null {
+function extractObservationContents(entry: unknown): string[] {
+  if (!entry || typeof entry !== 'object') return [];
+  const summary = summarizeAtifEntry(entry);
+  // テキスト応答（tool === null）で終わっている＝ツール実行エントリではない
+  if (!summary || summary.tool === null) return [];
+  const e = entry as Record<string, unknown>;
+  const observation = e.observation;
+  if (!observation || typeof observation !== 'object') return [];
+  const results = (observation as Record<string, unknown>).results;
+  if (!Array.isArray(results)) return [];
+  const out: string[] = [];
+  for (const r of results) {
+    if (r && typeof r === 'object' && typeof (r as Record<string, unknown>).content === 'string') {
+      const c = (r as Record<string, unknown>).content as string;
+      if (c) out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * #368 Phase1-2: 拒否テキストが最後のエントリに乗っているとは限らない（並列ツール呼び出しの一部だけが
+ * 拒否され、無関係なエントリが最後に来るケースがある）ため、`isRejection` 判定関数が渡された場合は
+ * entries を**末尾から走査**し、`observation.results[].content` が拒否テキストに一致する最初の
+ * 1件（300文字まで）を返す。本モジュールは外部 import ゼロの流儀のため `isDevinToolRejectionText()`
+ * はここでは呼ばず、呼び出し側（`ai-runner.ts`）から関数として注入する設計。
+ * `isRejection` 未指定、または一致するものが無い場合は**従来どおり**最後のツール終了エントリの
+ * observation 先頭を返す（完全な後方互換）。
+ * @param content `--export` の生出力（単一 JSON を想定、JSONL は対象外）
+ * @param isRejection 拒否テキストか判定する関数（省略可、省略時は末尾一致固定の旧挙動）
+ * @returns 拒否根拠の抜粋（300文字まで）。該当なしは null。**例外を投げない。**
+ */
+export function extractRejectionEvidence(content: string, isRejection?: (text: string) => boolean): string | null {
   const raw = typeof content === 'string' ? content : '';
   let parsed: unknown;
   try {
@@ -323,21 +362,80 @@ export function extractRejectionEvidence(content: string): string | null {
   }
   const entries = extractAtifEntries(parsed);
   if (entries.length === 0) return null;
-  const last = entries[entries.length - 1];
-  if (!last || typeof last !== 'object') return null;
-  const summary = summarizeAtifEntry(last);
-  // テキスト応答（tool === null）で終わっている＝失敗ターンではない
-  if (!summary || summary.tool === null) return null;
-  const e = last as Record<string, unknown>;
-  const observation = e.observation;
-  if (!observation || typeof observation !== 'object') return null;
-  const results = (observation as Record<string, unknown>).results;
-  if (!Array.isArray(results)) return null;
-  for (const r of results) {
-    if (r && typeof r === 'object' && typeof (r as Record<string, unknown>).content === 'string') {
-      const c = (r as Record<string, unknown>).content as string;
-      if (c) return c.slice(0, 300);
+
+  if (typeof isRejection === 'function') {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const texts = extractObservationContents(entries[i]);
+      for (const t of texts) {
+        if (isRejection(t)) return t.slice(0, 300);
+      }
     }
+    // 一致なし → 後方互換のフォールバックへ（下記と同じ処理）
   }
-  return null;
+
+  const lastTexts = extractObservationContents(entries[entries.length - 1]);
+  return lastTexts.length > 0 ? lastTexts[0].slice(0, 300) : null;
+}
+
+/**
+ * #368 Phase1-3: Devin が並列ツール呼び出しの一部を拒否した際、ATIF の失敗エントリには
+ * `chisel/tool_failure: {"reason":"Blocked"}` 形式のマーカーが付き、そのエントリの
+ * `tool_calls[].arguments.command` が実際に拒否されたコマンドを指すという想定（実サンプル未確認、
+ * プラン記載の仕様どおりに防御的実装）。マーカーの正確なキー名・階層は未確定のため、エントリ内を
+ * 再帰的に走査して `reason === 'Blocked'` を持つオブジェクトが見つかった場合に、そのエントリ自身の
+ * `tool_calls[0].arguments.command` を採用する。該当なしなら空配列。**例外を投げない。**
+ * @param entries `extractAtifEntries()` の戻り値
+ * @returns 拒否されたコマンド文字列の一覧（重複除去なし、出現順）
+ */
+export function extractBlockedCommands(entries: unknown[]): string[] {
+  if (!Array.isArray(entries)) return [];
+
+  const hasBlockedMarker = (value: unknown, depth = 0): boolean => {
+    if (depth > 6 || !value || typeof value !== 'object') return false;
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.reason === 'string' && obj.reason === 'Blocked') return true;
+    for (const key of Object.keys(obj)) {
+      if (key === 'observation') continue; // #361 漏洩ガード: observation 配下は走査しない
+      if (hasBlockedMarker(obj[key], depth + 1)) return true;
+    }
+    return false;
+  };
+
+  const extractCommandFromEntry = (entry: unknown): string | null => {
+    if (!entry || typeof entry !== 'object') return null;
+    const e = entry as Record<string, unknown>;
+    if (Array.isArray(e.tool_calls) && e.tool_calls.length > 0) {
+      const call = e.tool_calls[0];
+      if (call && typeof call === 'object') {
+        const args = (call as Record<string, unknown>).arguments;
+        if (args && typeof args === 'object') {
+          const command = (args as Record<string, unknown>).command;
+          if (typeof command === 'string' && command) return command;
+        }
+      }
+    }
+    // レガシー形式のフォールバック
+    if (typeof e.command === 'string' && e.command) return e.command;
+    return null;
+  };
+
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    // observation 自体は #361 漏洩ガードのため走査対象から除外しつつ、失敗マーカー(chisel/tool_failure 等)は
+    // エントリ直下または tool_calls 配下に付与される想定のためそれらのみを見る
+    const candidateKeys = Object.keys(e).filter((k) => k !== 'observation');
+    let blocked = false;
+    for (const key of candidateKeys) {
+      if (hasBlockedMarker(e[key])) {
+        blocked = true;
+        break;
+      }
+    }
+    if (!blocked) continue;
+    const command = extractCommandFromEntry(entry);
+    if (command) out.push(command);
+  }
+  return out;
 }

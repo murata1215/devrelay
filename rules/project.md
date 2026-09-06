@@ -1818,3 +1818,63 @@ Agent の更新を、手動 `u` と**同じプロトコル**（`server:agent:ver
   `skillsDir='C:\Users\lfuser\.claude\skills'` の生成物に完全一致で含まれる実測アンカー、macOS には
   当該スキルが存在しないため `t.skip()` で対応）/T9（非 win32 の SKILL.md 本文が opts 省略時と
   byte-for-byte 同一という非退行ガード）を追加。既存 T1/T2/T3 は無変更
+
+## システム管理者アローリスト（`DEVRELAY_SYSTEM_ADMIN_EMAILS`）(#367, 2026-09-06)
+
+ユーザー報告「僕以外の人もサーバー再起動できると思う」を実測で確認: `POST /api/services/restart/server` は
+`authenticate` のみでロール/所有者チェックが皆無、`SettingsPage.tsx` の System タブは全ユーザーに常時表示。
+
+- **「システム管理者」は `OrganizationMember.role`（テナント内権限）とは別軸**と判断した。理由は両方向に
+  誤るため: 唯一存在する組織の admin は無関係な顧客テナントの管理者であり実運用者ではない、逆に実運用者
+  自身はどの組織にも `OrganizationMember` 行を持たない。組織ロールを転用すると「無関係な顧客に管理者権限が
+  付く」か「本来の運用者に権限が付かない」のどちらかが必ず起きる。
+- **採用した設計**: 環境変数アローリスト `DEVRELAY_SYSTEM_ADMIN_EMAILS`（カンマ区切り、未設定/空文字なら
+  全員 false = fail-closed）。DB にロールを持たせる案は「昇格させる操作」自体がアプリ内 API として露出し
+  攻撃面になるため採用せず、`.env` を編集できる人間と付与できる人間が構造的に一致する（サーバーに SSH できる
+  人間しか `.env` を書き換えられない）環境変数方式にした——権限昇格の余地が構造的に生まれない設計。
+- **実装は `apps/server/src/services/system-admin.ts` に集約**（外部 import ゼロの純関数
+  `parseSystemAdminEmails`/`isSystemAdminEmail`/`getSystemAdminAllowlist`/`requireSystemAdmin`）。
+  `auth.ts` の `formatUser()`（ユーザー情報整形の単一情報源）に `isSystemAdmin` を追加することで
+  register/login/me/Google OAuth callback の4経路すべてに自動反映させ、経路ごとの同期漏れ（#304 型バグ）を
+  構造的に防止。
+- **見つかったついでの欠陥も同時に修正**: `POST /api/services/restart/agent` は、この機体では Agent を
+  pm2 に登録しない運用（`CLAUDE.md` 参照）のため `pm2 restart devrelay-agent` が常に失敗するにもかかわらず
+  例外を握りつぶして偽の成功を返していた。実際に意味のある Agent 再起動は所有者スコープ済みの
+  `/api/machines/:id/restart` であり、こちらは無変更。紛らわしい・常に失敗する経路はハンドラごと削除した。
+- **WebUI 側**: `SettingsPage.tsx` は `isSystemAdmin` で `visibleTabs` をフィルタし、System パネルは
+  `hidden` 属性ではなく `{isSystemAdmin && (...)}` で DOM 自体から除外（非管理者のブラウザに管理者専用UIの
+  マークアップ自体を送らない）。`services.status()` の呼び出しも `isSystemAdmin` 依存の専用 `useEffect` に
+  分離し、非管理者が毎回意味のない 403 を踏まないようにした。
+
+## Devin プランモード「exec 無しで無言終了する」問題 — Phase1 のみ実施 (#368, 2026-09-06)
+
+ユーザー報告「devinでexec無しでエラー。原因教えて」の調査で、#260〜#364 まで積み重ねてきた
+「Devin の `Exec()` 許可コマンドを1つずつ allow-list に追加していく」方式そのものが構造的にモグラ叩きだと
+判明した。
+
+- **真因**: Devin は複合シェルコマンド（`a && b`、`a ; b`、パイプ）のパーミッションチェック時に、コマンド文字列
+  全体ではなく**個々の裸コマンド名に分解して**判定する。#363 以来 `devin-plan-config.ts` が生成してきた
+  `Exec(git log)` のようなプレフィックス一致ルールは単体コマンドにしか効かず、少しでも違う組み合わせが来ると
+  再発する——allow-list をどれだけ拡充しても原理的に追いつかない。
+- **さらに**、並列ツール呼び出しのうち1つでも拒否されると Devin は「Interrupting stop token」でターン全体を
+  キャンセルする。これが exit 0・出力ゼロという「無言終了」の正体で、実際には拒否が起きているのにユーザーには
+  何も表示されない状態になっていた。
+- **全4フェーズの計画を承認**（旧プラン `keen-purring-crystal.md` は破棄）: Phase1=無言終了の可視化、
+  Phase2=`devin-plan-config.ts` の `Exec()` allow/deny 生成そのものの全廃、Phase3=`p,`/`i`/`revert`
+  コマンド追加+git ガード+検証コマンド、Phase4=Agreement v6→v7。**本サイクルは Phase1 のみ完了**。
+- **Phase1 の設計**: `devin-atif.ts` に新規 `extractBlockedCommands()`（ATIF エントリを逆順スキャンし、
+  拒否 predicate に一致する実際のコマンド文字列を抽出）を追加し、汎用文言ではなく「実際に何が拒否されたか」を
+  そのままチャットに表示する（#325「静かなフォールバック禁止」の原則どおり）。拒否根拠が一切取れない場合の
+  最終フォールバックとして `devin.emptyExitZero`（stderr 末尾を付記）を用意。異常終了時は ATIF ファイルを
+  即座に消さず保持し、証拠保全を優先。`ai-runner.ts` 側に重複していた2つの診断ブロック（無言 exit 0 の汎用
+  診断＝Block A、プランモードのインライン診断＝Block B）は単一の `emitDevinPlanDiagnosis()` に統合し、
+  #304 型の同期漏れを構造的に防止した。
+- **【重要・自己改変判断の開示】Phase2 は着手したが未完了のまま差し戻した**: 実装中にセッションが
+  auto-compact のローテーションで中断され、`agents/linux/src/services/devin-plan-config.ts` のみが
+  新シグネチャ（パラメータなし・`permissions` ブロック生成を全廃）に書き換わった状態で、呼び出し元の
+  `ai-runner.ts`（linux）は旧シグネチャのまま、かつ macOS/Windows の `devin-plan-config.ts` は無変更という、
+  **ビルドが通らず 3 OS 間の一貫性も崩れた**状態で残っていた。「3 OS byte-for-byte 同一」「`pnpm build`
+  green」はこのプロジェクトの不変条件であり、これを壊した状態を本流のコミットに含めることはできないと
+  判断し、`git checkout --` で該当2ファイルを直前の commit 時点（HEAD）へ差し戻した。Phase2 の設計方針
+  自体が否定されたわけではなく、単に「未完成のまま持ち越さない」という判断であり、Phase2〜4 はいずれも
+  次サイクルで最初からやり直す。

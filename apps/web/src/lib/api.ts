@@ -54,6 +54,7 @@ export interface User {
   id: string;
   email: string | null;
   name: string | null;
+  isSystemAdmin?: boolean;
 }
 
 export interface AuthResponse {
@@ -476,10 +477,10 @@ export const platforms = {
   },
 };
 
-// サービス管理API
+// サービス管理API（システム管理者のみ、#367。Agent は pm2 に登録してはいけない機体のため
+// agent フィールド・restartAgent() は廃止済み）
 export interface ServiceStatus {
   server: 'active' | 'inactive';
-  agent: 'active' | 'inactive';
 }
 
 export const services = {
@@ -489,10 +490,6 @@ export const services = {
 
   async restartServer(): Promise<{ success: boolean; message: string }> {
     return request('POST', '/services/restart/server', {});
-  },
-
-  async restartAgent(): Promise<{ success: boolean; message: string }> {
-    return request('POST', '/services/restart/agent', {});
   },
 };
 

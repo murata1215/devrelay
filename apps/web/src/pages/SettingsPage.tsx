@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { settings, platforms, services, agreementTemplate, allowedTools, tokens as tokensApi, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity, type OrgRole, type OrgAuditLogEntry, type PersonalAccessTokenInfo } from '../lib/api';
 // #310: vite.config.ts の resolve.alias で @devrelay/shared を
@@ -710,8 +710,20 @@ export function SettingsPage() {
   const { language, setLanguage, t } = useLanguage();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement>>>({});
+
+  // システム管理者（このホストの運用者）のみ System タブを表示する（#367）。
+  // 組織ロールとは別軸のため user.isSystemAdmin（サーバーの allowlist 判定）のみを見る。
+  const isSystemAdmin = user?.isSystemAdmin === true;
+  const visibleTabs = useMemo(
+    () => SETTINGS_TABS.filter((tab) => tab.id !== 'system' || isSystemAdmin),
+    [isSystemAdmin]
+  );
+
   const requestedTab = searchParams.get('tab');
-  const activeTab: SettingsTab = isSettingsTab(requestedTab) ? requestedTab : 'general';
+  const activeTab: SettingsTab =
+    isSettingsTab(requestedTab) && visibleTabs.some((tab) => tab.id === requestedTab)
+      ? requestedTab
+      : 'general';
 
   const selectTab = (tab: SettingsTab) => {
     const next = new URLSearchParams(searchParams);
@@ -722,13 +734,13 @@ export function SettingsPage() {
 
   const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
     let nextIndex: number | null = null;
-    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % SETTINGS_TABS.length;
-    if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % visibleTabs.length;
+    if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + visibleTabs.length) % visibleTabs.length;
     if (event.key === 'Home') nextIndex = 0;
-    if (event.key === 'End') nextIndex = SETTINGS_TABS.length - 1;
+    if (event.key === 'End') nextIndex = visibleTabs.length - 1;
     if (nextIndex === null) return;
     event.preventDefault();
-    const nextTab = SETTINGS_TABS[nextIndex].id;
+    const nextTab = visibleTabs[nextIndex].id;
     selectTab(nextTab);
     tabRefs.current[nextTab]?.focus();
   };
@@ -823,9 +835,8 @@ export function SettingsPage() {
     saveChatDisplay(defaults);
   };
 
-  // Service restart state
+  // Service restart state（Agent restart は #367 で廃止済み、システム管理者のみ利用可能）
   const [restartingServer, setRestartingServer] = useState(false);
-  const [restartingAgent, setRestartingAgent] = useState(false);
 
   // Agreement テンプレート
   const [agreementData, setAgreementData] = useState<AgreementTemplateResponse | null>(null);
@@ -843,10 +854,9 @@ export function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const [settingsResult, platformsResult, serviceStatusResult, agreementResult, atResult, patResult] = await Promise.all([
+      const [settingsResult, platformsResult, agreementResult, atResult, patResult] = await Promise.all([
         settings.get(),
         platforms.list(),
-        services.status().catch(() => null),
         agreementTemplate.get().catch(() => null),
         allowedTools.get().catch(() => null),
         tokensApi.list().catch(() => ({ tokens: [] })),
@@ -869,7 +879,6 @@ export function SettingsPage() {
         } catch { /* ignore parse error */ }
       }
       setLinkedPlatforms(platformsResult);
-      setServiceStatus(serviceStatusResult);
       if (agreementResult) {
         setAgreementData(agreementResult);
         setAgreementDraft(agreementResult.template);
@@ -909,60 +918,16 @@ export function SettingsPage() {
     }
   };
 
-  const handleRestartAgent = async () => {
-    if (!confirm('Are you sure you want to restart the agent?')) {
-      return;
-    }
-
-    setRestartingAgent(true);
-    setError('');
-    setSuccess('');
-
-    try {
-      await services.restartAgent();
-      setSuccess('Agent restart initiated');
-      setTimeout(async () => {
-        try {
-          const status = await services.status();
-          setServiceStatus(status);
-        } catch {}
-        setRestartingAgent(false);
-      }, 2000);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to restart agent');
-      setRestartingAgent(false);
-    }
-  };
-
-  /** サーバーとエージェントを両方再起動 */
-  const handleRestartBoth = async () => {
-    if (!confirm('Are you sure you want to restart both server and agent? All connections will be temporarily lost.')) {
-      return;
-    }
-
-    setRestartingServer(true);
-    setRestartingAgent(true);
-    setError('');
-    setSuccess('');
-
-    try {
-      // Agent を先に再起動（サーバー再起動後は API 不通になるため）
-      await services.restartAgent();
-      await services.restartServer();
-      setSuccess('Both services restart initiated. The page will reload shortly...');
-      setTimeout(() => {
-        window.location.reload();
-      }, 3000);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to restart services');
-      setRestartingServer(false);
-      setRestartingAgent(false);
-    }
-  };
-
   useEffect(() => {
     loadSettings();
   }, []);
+
+  // System タブはシステム管理者のみ表示されるため、サービス状態の取得も
+  // isSystemAdmin のときだけ行う（非管理者が毎回 403 を踏まないため、#367）。
+  useEffect(() => {
+    if (!isSystemAdmin) return;
+    services.status().then(setServiceStatus).catch(() => setServiceStatus(null));
+  }, [isSystemAdmin]);
 
   /** API キー / Bot Token を保存 */
   const handleSaveApiKey = async (key: string, value: string, displayName: string) => {
@@ -1269,7 +1234,7 @@ export function SettingsPage() {
         aria-label={t('settings.title')}
         className="flex gap-1 overflow-x-auto rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-1"
       >
-        {SETTINGS_TABS.map((tab, index) => {
+        {visibleTabs.map((tab, index) => {
           const selected = activeTab === tab.id;
           return (
             <button
@@ -1998,74 +1963,44 @@ export function SettingsPage() {
         )}
       </div>
 
-      {/* Service Management Section */}
-      <div id="settings-panel-system" role="tabpanel" aria-labelledby="settings-tab-system" hidden={activeTab !== 'system'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Service Management</h2>
-        <p className="text-[var(--text-muted)] text-sm mb-6">
-          Restart DevRelay services. Use with caution.
-        </p>
+      {/* Service Management Section（システム管理者のみ、#367。DOM 自体から外すため hidden ではなく条件レンダリング） */}
+      {isSystemAdmin && (
+        <div id="settings-panel-system" role="tabpanel" aria-labelledby="settings-tab-system" hidden={activeTab !== 'system'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
+          <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Service Management</h2>
+          <p className="text-[var(--text-muted)] text-sm mb-6">
+            Restart DevRelay services. Use with caution.
+          </p>
 
-        <div className="space-y-4">
-          {/* Server */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-[var(--bg-tertiary)] px-4 py-3 rounded gap-2">
-            <div className="flex items-center space-x-3">
-              <span className="text-xl">🖥️</span>
-              <div>
-                <div className="text-[var(--text-primary)] font-medium">DevRelay Server</div>
-                <div className="text-[var(--text-faint)] text-xs">
-                  Status:{' '}
-                  <span className={serviceStatus?.server === 'active' ? 'text-[var(--text-success)]' : 'text-[var(--text-danger)]'}>
-                    {serviceStatus?.server || 'unknown'}
-                  </span>
+          <div className="space-y-4">
+            {/* Server */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-[var(--bg-tertiary)] px-4 py-3 rounded gap-2">
+              <div className="flex items-center space-x-3">
+                <span className="text-xl">🖥️</span>
+                <div>
+                  <div className="text-[var(--text-primary)] font-medium">DevRelay Server</div>
+                  <div className="text-[var(--text-faint)] text-xs">
+                    Status:{' '}
+                    <span className={serviceStatus?.server === 'active' ? 'text-[var(--text-success)]' : 'text-[var(--text-danger)]'}>
+                      {serviceStatus?.server || 'unknown'}
+                    </span>
+                  </div>
                 </div>
               </div>
+              <button
+                onClick={handleRestartServer}
+                disabled={restartingServer}
+                className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
+              >
+                {restartingServer ? 'Restarting...' : 'Restart'}
+              </button>
             </div>
-            <button
-              onClick={handleRestartServer}
-              disabled={restartingServer}
-              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
-            >
-              {restartingServer ? 'Restarting...' : 'Restart'}
-            </button>
           </div>
 
-          {/* Agent */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-[var(--bg-tertiary)] px-4 py-3 rounded gap-2">
-            <div className="flex items-center space-x-3">
-              <span className="text-xl">🤖</span>
-              <div>
-                <div className="text-[var(--text-primary)] font-medium">DevRelay Agent (Local)</div>
-                <div className="text-[var(--text-faint)] text-xs">
-                  Status:{' '}
-                  <span className={serviceStatus?.agent === 'active' ? 'text-[var(--text-success)]' : 'text-[var(--text-danger)]'}>
-                    {serviceStatus?.agent || 'unknown'}
-                  </span>
-                </div>
-              </div>
-            </div>
-            <button
-              onClick={handleRestartAgent}
-              disabled={restartingAgent}
-              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
-            >
-              {restartingAgent ? 'Restarting...' : 'Restart'}
-            </button>
-          </div>
-
-          {/* Restart Both */}
-          <button
-            onClick={handleRestartBoth}
-            disabled={restartingServer || restartingAgent}
-            className="w-full px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {restartingServer || restartingAgent ? 'Restarting...' : 'Restart Both'}
-          </button>
+          <p className="text-[var(--text-faint)] text-xs mt-4">
+            Note: Restarting the server will temporarily disconnect all agents. They will automatically reconnect.
+          </p>
         </div>
-
-        <p className="text-[var(--text-faint)] text-xs mt-4">
-          Note: Restarting the server will temporarily disconnect all agents. They will automatically reconnect.
-        </p>
-      </div>
+      )}
 
       {/* Chat Display Section */}
       <div hidden={activeTab !== 'general'} className="bg-[var(--bg-secondary)] rounded-lg p-6">

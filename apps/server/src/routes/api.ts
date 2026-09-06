@@ -9,6 +9,7 @@ import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExp
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
+import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
 import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS, type AiTool } from '@devrelay/shared';
@@ -1143,8 +1144,11 @@ export async function apiRoutes(app: FastifyInstance) {
   // サービス再起動（PM2 で管理）
   // ========================================
 
-  // サーバー再起動
+  // サーバー再起動（システム管理者のみ、#367）
   app.post('/api/services/restart/server', async (request, reply) => {
+    // FastifyRequest 型は request.user を宣言していない（他ハンドラも @ts-ignore で参照）ため、
+    // MinimalRequest への構造的キャストには一段 unknown を挟む必要がある。
+    if (!requireSystemAdmin(request as unknown as MinimalRequest, reply)) return;
     try {
       // バックグラウンドで再起動（レスポンスを返してから再起動）
       setTimeout(async () => {
@@ -1162,42 +1166,18 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
-  // Agent 再起動
-  app.post('/api/services/restart/agent', async (request, reply) => {
-    try {
-      // バックグラウンドで再起動
-      setTimeout(async () => {
-        try {
-          await execAsync('pm2 restart devrelay-agent');
-        } catch (err) {
-          console.error('Failed to restart agent:', err);
-        }
-      }, 500);
-
-      return { success: true, message: 'Agent restart initiated' };
-    } catch (err) {
-      console.error('Failed to initiate agent restart:', err);
-      return reply.status(500).send({ error: 'Failed to restart agent' });
-    }
-  });
-
-  // サービスステータス取得（PM2 の pid コマンドでプロセス存在チェック）
+  // サービスステータス取得（システム管理者のみ、#367。
+  // Agent は pm2 に登録してはいけない機体のため、Agent 側のプローブは行わない）
   app.get('/api/services/status', async (request, reply) => {
+    if (!requireSystemAdmin(request as unknown as MinimalRequest, reply)) return;
     try {
-      const [serverStatus, agentStatus] = await Promise.all([
-        execAsync('pm2 pid devrelay-server').then(
-          (result) => result.stdout.trim() !== '' && result.stdout.trim() !== '0' ? 'active' : 'inactive',
-          () => 'inactive'
-        ),
-        execAsync('pm2 pid devrelay-agent').then(
-          (result) => result.stdout.trim() !== '' && result.stdout.trim() !== '0' ? 'active' : 'inactive',
-          () => 'inactive'
-        ),
-      ]);
+      const serverStatus = await execAsync('pm2 pid devrelay-server').then(
+        (result) => result.stdout.trim() !== '' && result.stdout.trim() !== '0' ? 'active' : 'inactive',
+        () => 'inactive'
+      );
 
       return {
         server: serverStatus,
-        agent: agentStatus,
       };
     } catch (err) {
       console.error('Failed to get service status:', err);

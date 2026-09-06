@@ -74,6 +74,9 @@ export function isDevinBannerLine(line: string): boolean {
  * 新たに確認できた `rejected a tool call that requires confirmation` パターンを OR 条件で追加する。
  * 旧2パターンはこのバージョンではもうマッチしないため、これが欠けていると拒否を検出できず
  * 「(No response from AI)」等の汎用エラーに落ちてしまう（変更6 の主目的）。
+ * #368 Phase1-1: `findstr`/PowerShell 系コマンドが allow/deny どちらにも一致せず承認待ちに落ちた
+ * ケース（`Permission denied for this tool.` / `auto-decided Some(Deny)`）を追加で検出する。
+ * `Interrupting stop token` は拒否以外の理由でも出うるため意図的に採用しない（誤検知回避）。
  * @param text 判定対象のテキスト（stderr の蓄積文字列、または JSON ログ1行分の message）
  * @returns ツール拒否を示すテキストなら true。**例外を投げない。**
  */
@@ -83,6 +86,8 @@ export function isDevinToolRejectionText(text: string): boolean {
   if (/tool was rejected/i.test(value)) return true;
   if (/rejecting tool \w+ that requires confirmation/i.test(value)) return true;
   if (/rejected a tool call that requires confirmation/i.test(value)) return true;
+  if (/permission denied for this tool/i.test(value)) return true;
+  if (/auto-decided\s+Some\(Deny\)/i.test(value)) return true;
   return false;
 }
 

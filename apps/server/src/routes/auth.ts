@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { prisma } from '../db/client.js';
 import { checkIpAllowed } from '../services/org-control.js';
+import { isSystemAdminEmail, getSystemAdminAllowlist } from '../services/system-admin.js';
 
 /** PAT プレフィクス */
 const PAT_PREFIX = 'devrelay_pat_';
@@ -90,6 +91,7 @@ function formatUser(user: { id: string; email: string | null; name: string | nul
     id: user.id,
     email: user.email,
     name: user.name,
+    isSystemAdmin: isSystemAdminEmail(user.email, getSystemAdminAllowlist()),
   };
 }
 

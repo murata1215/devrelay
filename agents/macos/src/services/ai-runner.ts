@@ -389,6 +389,11 @@ interface DevinTurnDigest {
    * 実際に「拒否」かどうかは呼び出し側で `isDevinToolRejectionText()` と組み合わせて判定する。
    */
   rejectionEvidence: string | null;
+  /**
+   * #368 Phase1-3: `chisel/tool_failure: {"reason":"Blocked"}` と対になった拒否コマンド一覧
+   * （`devin-atif.ts` の `extractBlockedCommands()` をそのまま透過、空配列は「見つからなかった」の意）。
+   */
+  blockedCommands: string[];
 }
 
 /**
@@ -438,6 +443,7 @@ function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_L
     permissionMode: digest.permissionMode,
     endedWithoutAnswer: endedWithoutAnswer(digest.steps),
     rejectionEvidence: extractRejectionEvidence(content),
+    blockedCommands: digest.blockedCommands,
   };
 }
 
@@ -1450,6 +1456,10 @@ export async function sendPromptToAi(
   // #364 Phase1（1-A-3）: `devinAtifEndedWithoutAnswer` が true のときの、最後のステップの
   // observation 抜粋（300文字）。同上の理由で関数スコープの let。
   let devinAtifRejectionEvidence: string | null = null;
+  // #368 Phase1-3: ATIF の各エントリに chisel/tool_failure 等の「拒否」マーカーが付与されている場合に
+  // 実際に拒否されたコマンド文字列を抜き出したもの（extractBlockedCommands()）。同上の理由で
+  // 関数スコープの let。空配列＝拒否コマンドを特定できなかった（rejectionEvidence 等にフォールバック）。
+  let devinAtifBlockedCommands: string[] = [];
   // #365: ATIF の累計ステップ数（今回ターン終了時点）。次ターンのオフセットとして保存するため
   // close ハンドラの外（session-store 保存箇所）まで持ち越す必要があり、同上の理由で関数スコープの let。
   let devinAtifTotalSteps = 0;
@@ -2272,6 +2282,7 @@ export async function sendPromptToAi(
             devinAtifModelId = digest.modelId;
             devinAtifEndedWithoutAnswer = digest.endedWithoutAnswer;
             devinAtifRejectionEvidence = digest.rejectionEvidence;
+            devinAtifBlockedCommands = digest.blockedCommands;
             // #365: 今回ターン終了時点の累計ステップ数。次ターンのオフセットとして保存するため
             // close ハンドラの外（セッション ID 保存箇所）まで持ち越す。
             devinAtifTotalSteps = digest.totalSteps;
@@ -2290,7 +2301,6 @@ export async function sendPromptToAi(
           }
         } catch {}
       }
-      if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
       // #277: 実行時間上限タイマー停止
       if (devinLimitTimer) { clearTimeout(devinLimitTimer); devinLimitTimer = null; }
 
@@ -2328,11 +2338,14 @@ export async function sendPromptToAi(
         // Phase0.6 の Step F1 でユーザーが config を目視確認しようとした際、正常終了と同じ扱いで
         // 無条件削除していたため検証不能だった（実際 cfg-363.json は#363の生成物ではなく古いビルドの残骸
         // だった）反省。旧名（--agent-config 時代）の残骸掃除だけは無条件のまま維持する。
+        // #368 Phase1-4: 「出力ゼロ + exit 0」も失敗扱いに含める（無言終了時に一時ファイル
+        // ・export を残し検証可能にするため）。
         const devinTurnFailed =
           code !== 0 ||
           isDevinToolRejectionText(stderrOutput) ||
           devinToolRejectedInLog ||
-          (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence));
+          (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence)) ||
+          (fullOutput.trim().length === 0 && code === 0);
         const devinPromptTempPath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
         const devinPlanConfigTempPath = path.join(os.tmpdir(), `devrelay-devin-plan-config-${sessionId}.json`);
         if (devinTurnFailed) {
@@ -2340,6 +2353,7 @@ export async function sendPromptToAi(
         } else {
           try { fs.unlinkSync(devinPromptTempPath); } catch {}
           try { fs.unlinkSync(devinPlanConfigTempPath); } catch {}
+          if (devinExportPath) { try { fs.unlinkSync(devinExportPath); } catch {} }
         }
         // #347: 旧名（--agent-config 時代）の残骸も掃除する。次サイクル以降に削除してよい。
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`)); } catch {}
@@ -2609,13 +2623,42 @@ export async function sendPromptToAi(
         return;
       }
 
+      // #368 Phase1-5: Devin プランモードでの拒否・無言終了の理由を優先順位付きで1つ選んで返す。
+      // 優先順位: 拒否されたコマンド特定（extractBlockedCommands）→ ATIF observation 抜粋
+      // （extractRejectionEvidence）→ stderr/ログの拒否検出 → 無言終了検知（endedWithoutAnswer）。
+      // どれにも該当しなければ null（呼び出し側でフォールバック文言を出す）。
+      // #304 型の同期漏れ再発防止のため、Block A（完全無出力、直後）/ Block B（プランモード無言終了、
+      // 完了ブロック内）の2箇所から呼ぶ単一情報源として切り出した。自動リトライは追加しない
+      // （#364 の判断を維持、二重課金回避）。
+      const emitDevinPlanDiagnosis = (): string | null => {
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        if (devinAtifBlockedCommands.length > 0) {
+          return tChat(lang, 'devin.blockedCommands', { commands: devinAtifBlockedCommands.join('\n   ') });
+        }
+        if (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence)) {
+          return tChat(lang, 'devin.rejectionEvidence', { evidence: devinAtifRejectionEvidence });
+        }
+        if (isDevinToolRejectionText(stderrOutput) || devinToolRejectedInLog) {
+          const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
+          return tChat(lang, 'devin.planToolRejectedNoRetry', { stderrTail });
+        }
+        if (devinAtifEndedWithoutAnswer) {
+          return tChat(lang, 'devin.planTurnTruncated', { tool: aiTool });
+        }
+        return null;
+      };
+
       // #275: フラッシュ後もなお Devin が出力ゼロ + exit 0 で終わった場合は「(No response from AI)」でなく
       // 具体的な案内を出す（処理自体は実行された可能性を伝える。exec 自動リトライは二重実行の危険があるため行わない）
+      // #368 Phase1-5: ハードコード日本語1文だけだったものを emitDevinPlanDiagnosis() の判定結果へ差し替え、
+      // どれにも該当しなかった場合のみ新規 i18n キー devin.emptyExitZero にフォールバックする。
       if (aiTool === 'devin' && fullOutput.trim().length === 0 && code === 0 && !completionSent) {
         completionSent = true;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const diagnosis = emitDevinPlanDiagnosis();
         const stderrTail = stderrOutput.trim() ? `\n\n[stderr]\n${stderrOutput.trim().split('\n').slice(-5).join('\n')}` : '';
         onOutput(
-          `⚠️ Devin が出力なしで終了しました（exit 0）。処理自体は実行された可能性があります。\nプロジェクトの変更状況を確認してください。${stderrTail}`,
+          diagnosis ?? tChat(lang, 'devin.emptyExitZero', { stderrTail }),
           true,
           result.usageData
         );
@@ -2657,17 +2700,15 @@ export async function sendPromptToAi(
           // fullOutput が空のときだけ発火するため、ここに到達するのは
           // 「前置き1文＋拒否」「前置きすらなく exit 0」「拒否ではないが無言終了」の
           // いずれか。自動リトライはしない（config を外すと読み取り専用保証が緩むため、
-          // #347 の設計意図に反する）。判定順は ATIF証拠 → stderr/ログの拒否検出 → 無言終了
-          // （ATIF の observation から拒否理由が取れている場合はそれを優先、
-          // extractRejectionEvidence()、失敗ターン限定・300文字まで）。
+          // #347 の設計意図に反する）。
+          // #368 Phase1-5: 判定順（拒否コマンド特定 → ATIF証拠 → stderr/ログの拒否検出 →
+          // 無言終了）を Block A と共有する emitDevinPlanDiagnosis() に一本化（#304 型の
+          // 同期漏れ再発防止）。ゲート条件自体（devinPlanConfigApplied 前提）は Phase 2 で
+          // permissions 撤去に伴い aiTool==='devin' のみへ再設定する予定のため、ここでは変更しない。
           if (aiTool === 'devin' && options.usePlanMode === true && devinPlanConfigApplied) {
-            if (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence)) {
-              onOutput('\n' + tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.rejectionEvidence', { evidence: devinAtifRejectionEvidence }) + '\n', false);
-            } else if (isDevinToolRejectionText(stderrOutput) || devinToolRejectedInLog) {
-              const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
-              onOutput('\n' + tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.planToolRejectedNoRetry', { stderrTail }) + '\n', false);
-            } else if (devinAtifEndedWithoutAnswer) {
-              onOutput('\n' + tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.planTurnTruncated', { tool: aiTool }) + '\n', false);
+            const diagnosis = emitDevinPlanDiagnosis();
+            if (diagnosis) {
+              onOutput('\n' + diagnosis + '\n', false);
             }
           }
           onOutput('', true, result.usageData); // Signal completion with usage data

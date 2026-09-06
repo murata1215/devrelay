@@ -6,6 +6,85 @@
 
 ## 実装済み機能
 
+### #368 Phase1: Devin プランモード「exec 無しで無言終了する」問題の可視化（Phase2〜4 は未着手・見送り）(2026-09-06)
+
+ユーザー報告「devinでexec無しでエラー。原因教えて」を調査した結果、#260〜#364 まで積み重ねてきた
+「Devin の Exec 許可コマンドを1つずつ allow-list に追加していく」方式が構造的にモグラ叩きであると判明。
+Devin は複合シェルコマンド（`a && b`、`a ; b`、パイプ）をパーミッションチェック時に**個々の裸コマンド名に
+分解して**判定するため、どれだけ allow-list を積み増しても新しい組み合わせで再発する。また、並列ツール呼び出しの
+うち1つでも拒否されると「Interrupting stop token」でターン全体がキャンセルされ、exit 0・出力ゼロという
+「無言終了」に見える（実際は拒否されているのに、ユーザーには何も表示されない）。
+
+ユーザーが添付した依頼書に基づき、旧プラン `keen-purring-crystal.md` を破棄し新プランを承認。全4フェーズの
+うち **Phase1（無言終了の可視化、アーキテクチャに依存せず即効性のある修正）のみ本サイクルで完了・検証済み**。
+
+**Phase1 実装内容**（`agents/{linux,macos,windows}` の3 OS、byte-for-byte 同一を `diff` で確認済み）:
+- `devin-diagnostics.ts`: `isDevinToolRejectionText()` に新しい拒否検知パターンを追加。
+- `devin-atif.ts`: 新規 `extractBlockedCommands()` — ATIF エントリを逆順スキャンし、拒否predicateに
+  一致する実際のコマンド文字列を抽出（`devin.blockedCommands` として、汎用文言ではなく実際に拒否された
+  コマンドをそのままチャットに表示、#325「静かなフォールバック禁止」に準拠）。
+- `ai-runner.ts`: `devinTurnFailed` 判定条件を拡張。異常終了時は `fs.unlinkSync(devinExportPath)` で
+  ATIF を即座に消さず、証拠保全のため保持する分岐を追加。「Block A」（無言 exit 0 の汎用診断）と
+  「Block B」（プランモードのインライン診断）という重複していた2つの診断ブロックを、単一の
+  `emitDevinPlanDiagnosis()` に統合（#304 型の同期漏れ再発防止）。
+- `packages/shared/src/i18n.ts`: `devin.blockedCommands`（拒否コマンド実測表示）・`devin.emptyExitZero`
+  （拒否根拠が一切取れなかった場合の最終フォールバック文言、stderr末尾を付記）の2キー追加（ja/en）。
+- テスト: `devin-atif.test.mjs`（+171行、新規ケース含む）・`devin-diagnostics.test.mjs`（+15行）を
+  linux/macos に追加、byte-for-byte 同一を維持。
+
+**Phase2（Exec allow/deny 生成の全廃）は着手したが未完了のまま差し戻した**: 実装中にセッションが
+auto-compact のローテーションで中断され、`agents/linux/src/services/devin-plan-config.ts` のみが
+新シグネチャ（パラメータなし・`permissions` ブロック生成を全廃）に変更された状態で、呼び出し元の
+`ai-runner.ts`（linux）は旧シグネチャのまま、かつ macOS/Windows の `devin-plan-config.ts` は無変更という、
+ビルドが通らず 3 OS 間の一貫性も崩れた状態で残っていた。**このコミットに含めるとビルド不能な状態を
+本流に取り込むことになるため、`git checkout --` で該当2ファイルを直前の commit 時点（HEAD）へ差し戻し、
+Phase1 の成果のみを確定させた**（Phase2 自体の設計方針は否定されていない、単に「未完成のまま持ち越さない」
+判断）。**Phase2（`devin-plan-config.ts` の Exec allow/deny 全廃）・Phase3（`p,`/`i`/`revert` コマンド +
+git ガード + 検証コマンド追加）・Phase4（Agreement v6→v7）はいずれも次サイクル送り**。
+
+**検証**: `pnpm build` 6 workspace green、`node --test` を workspace ごと個別実行で `packages/shared`
+43/43・`apps/server`153/153・`agents/linux`340/340・`agents/macos`301 pass + 1 skip、すべて green。
+`devin-atif.ts`/`devin-diagnostics.ts`とその対応テストが3 OS間で byte-for-byte 同一であることを
+`diff` で確認、`grep -c 'require(' apps/web/dist/assets/index-*.js`=0。
+
+**変更ファイル**（12件、新規ファイルなし）: `agents/{linux,macos,windows}/src/services/{ai-runner,
+devin-atif,devin-diagnostics}.ts`、`agents/{linux,macos}/tests/{devin-atif,devin-diagnostics}.test.mjs`、
+`packages/shared/src/i18n.ts`。DB マイグレーション不要、`apps/server`/`apps/web`は完全無変更のため
+**server再起動不要**。**Agent側が本体のため各マシンの`u`が必須**。実チャットでの E2E 確認（拒否コマンドが
+実際に表示されること、`emptyExitZero`のフォールバック表示）は人間の反映後に別サイクルで実施。
+
+### #367: WebUI 管理者メニュー（Settings→System タブ・サーバー再起動）をシステム管理者のみに限定 (2026-09-06)
+
+ユーザー報告「僕以外の人もサーバー再起動できると思う」を実測で確認: `POST /api/services/restart/server`は
+`authenticate`のみでロール/所有者チェックが皆無、`SettingsPage.tsx`のSystemタブは全ユーザーに常時表示されていた。
+「システム管理者」は`OrganizationMember.role`（テナント内権限）とは別軸と判断——唯一の組織のadminは無関係な
+顧客テナント管理者で、実運用者自身はOrganizationMember行を持たないため組織ロールでは両方向に誤る。
+
+**採用した設計**: 環境変数allowlist `DEVRELAY_SYSTEM_ADMIN_EMAILS`（カンマ区切り、未設定/空なら全員false=
+fail-closed。`.env`編集権限と付与権限が一致するため権限昇格が構造的に起きない）。新規
+`apps/server/src/services/system-admin.ts`（外部importゼロの純関数`parseSystemAdminEmails`/
+`isSystemAdminEmail`/`getSystemAdminAllowlist`/`requireSystemAdmin`）+ `tests/system-admin.test.mjs`
+（23件）。`api.ts`の2エンドポイントに`requireSystemAdmin()`ガードを追加、`POST /api/services/restart/agent`
+（Agentをpm2登録禁止のこの機体では`pm2 restart devrelay-agent`が常に失敗し握りつぶして嘘の成功を返していた）
+をハンドラごと削除、`GET /api/services/status`からAgentプローブも削除。`auth.ts`の`formatUser()`単一情報源に
+`isSystemAdmin`を追加（register/login/me/Google OAuth callbackの4経路に自動反映）。`apps/web/src/lib/api.ts`
+の`User`に`isSystemAdmin?`追加、`services.restartAgent()`削除。`SettingsPage.tsx`: `visibleTabs`（
+`isSystemAdmin`でSystemタブをフィルタ）を導入しタブ一覧描画・矢印キー操作を差し替え、Systemパネルを
+`{isSystemAdmin && (...)}`でDOM自体から除外、`services.status()`を`isSystemAdmin`依存の専用`useEffect`に
+分離（非管理者が毎回403を踏まないため）。
+
+**検証**: `pnpm build`6 workspace green、`node --test`個別実行で`packages/shared`43/43・`apps/server`
+153/153（新規23件）すべてgreen、`grep -c 'require('`(web)=0、`grep -rn 'devrelay-agent' apps/server/src`=0件、
+`/api/machines/:id/restart`（既存の所有者スコープ済みAgent再起動、正しい経路）は無変更を確認。
+
+**変更ファイル**（6件、新規2）: `apps/server/src/services/system-admin.ts`+`tests/system-admin.test.mjs`
+（新規）、`apps/server/src/routes/{api,auth}.ts`+`apps/web/src/lib/api.ts`+
+`apps/web/src/pages/SettingsPage.tsx`。DBマイグレーション不要。**反映**: `apps/server/.env`に
+`DEVRELAY_SYSTEM_ADMIN_EMAILS=<運用者メール>`を追加（fail-closedのため`pm2 restart`より前に必須）→
+`pm2 restart devrelay-server`（人間が実行、`import 'dotenv/config'`により`.env`は起動毎に読み直されるため
+`--update-env`不要）。E2E（運用者はSystemタブ表示・再起動可能、組織adminだがシステム管理者でないユーザーは
+Systemタブ非表示、`?tab=system`直打ちでGeneralに落ちる、非管理者トークンでのcurlが403）は人間が反映後に実施。
+
 ### #366: 実行時間の上限を 45分 → 120分 に引き上げ（#355 SDK loop-guard の wall-clock）(2026-09-06)
 
 ユーザーが実チャットで正常進捗中の実行を「実行時間の上限に到達」で強制停止される事故に遭遇。約46.3分・auto-compact 11回で

@@ -12,6 +12,7 @@ import {
   buildAtifDigest,
   endedWithoutAnswer,
   extractRejectionEvidence,
+  extractBlockedCommands,
   sliceStepsFromOffset,
 } from '../dist/services/devin-atif.js';
 
@@ -425,6 +426,176 @@ test('extractRejectionEvidence: steps が空、observation 無し、不正 JSON 
     steps: [{ source: 'agent', tool_calls: [{ function_name: 'exec', arguments: { command: 'ls' } }] }],
   });
   assert.equal(extractRejectionEvidence(noObservation), null);
+});
+
+// --- extractRejectionEvidence（#368 Phase1-2: isRejection 述語による末尾からの逆順走査） ---
+
+test('extractRejectionEvidence: isRejection 述語指定時、最後のエントリではなく一致する最初の（末尾から見て）エントリを返す', () => {
+  const content = JSON.stringify({
+    steps: [
+      { source: 'agent', message: '調査開始します。' },
+      {
+        source: 'agent',
+        tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script-a.sh' } }],
+        observation: { results: [{ content: 'warning: rejected a tool call that requires confirmation.' }] },
+      },
+      {
+        source: 'agent',
+        tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script-b.sh' } }],
+        observation: { results: [{ content: 'unrelated informational output, not a rejection' }] },
+      },
+    ],
+  });
+  const isRejection = (t) => /rejected a tool call/i.test(t);
+  assert.equal(extractRejectionEvidence(content, isRejection), 'warning: rejected a tool call that requires confirmation.');
+});
+
+test('extractRejectionEvidence: isRejection 述語が一切一致しない場合は従来どおり最後のエントリにフォールバックする', () => {
+  const content = JSON.stringify({
+    steps: [
+      {
+        source: 'agent',
+        tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script-a.sh' } }],
+        observation: { results: [{ content: 'first observation, not a match' }] },
+      },
+      {
+        source: 'agent',
+        tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script-b.sh' } }],
+        observation: { results: [{ content: 'last observation, also not a match' }] },
+      },
+    ],
+  });
+  const isRejection = (t) => /never matches anything/i.test(t);
+  assert.equal(extractRejectionEvidence(content, isRejection), 'last observation, also not a match');
+});
+
+test('extractRejectionEvidence: isRejection 未指定時は従来どおり最後のエントリのみを見る（後方互換）', () => {
+  const content = JSON.stringify({
+    steps: [
+      {
+        source: 'agent',
+        tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script-a.sh' } }],
+        observation: { results: [{ content: 'rejected a tool call that requires confirmation.' }] },
+      },
+      {
+        source: 'agent',
+        tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script-b.sh' } }],
+        observation: { results: [{ content: 'unrelated last observation' }] },
+      },
+    ],
+  });
+  assert.equal(extractRejectionEvidence(content), 'unrelated last observation');
+});
+
+test('extractRejectionEvidence: isRejection 一致時も300文字で切り詰められる', () => {
+  const longContent = 'y'.repeat(400);
+  const content = JSON.stringify({
+    steps: [
+      { source: 'agent', tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script.sh' } }], observation: { results: [{ content: longContent }] } },
+    ],
+  });
+  const isRejection = (t) => t.startsWith('y');
+  const evidence = extractRejectionEvidence(content, isRejection);
+  assert.equal(evidence.length, 300);
+  assert.equal(evidence, longContent.slice(0, 300));
+});
+
+// --- extractBlockedCommands（#368 Phase1-3: 拒否されたコマンドの抽出） ---
+
+test('extractBlockedCommands: reason:"Blocked" マーカーを持つエントリから tool_calls[0].arguments.command を抽出する', () => {
+  const entries = [
+    { source: 'agent', message: '調査開始します。' },
+    {
+      source: 'agent',
+      tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script-a.sh' } }],
+      'chisel/tool_failure': { reason: 'Blocked' },
+      observation: { results: [{ content: LEAK_MARKER }] },
+    },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), ['bash script-a.sh']);
+});
+
+test('extractBlockedCommands: reason:"Blocked" が入れ子構造でも再帰的に検出する', () => {
+  const entries = [
+    {
+      source: 'agent',
+      tool_calls: [{ function_name: 'exec', arguments: { command: 'bash nested.sh' } }],
+      extra: { failure: { detail: { reason: 'Blocked' } } },
+    },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), ['bash nested.sh']);
+});
+
+test('extractBlockedCommands: reason が "Blocked" 以外（例: "Approved"）なら対象外', () => {
+  const entries = [
+    {
+      source: 'agent',
+      tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script.sh' } }],
+      'chisel/tool_failure': { reason: 'Approved' },
+    },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), []);
+});
+
+test('extractBlockedCommands: ブロックマーカーが無いエントリは対象外（空配列）', () => {
+  const entries = [
+    { source: 'agent', tool_calls: [{ function_name: 'exec', arguments: { command: 'bash script.sh' } }], observation: { results: [{ content: 'ok' }] } },
+    { source: 'agent', message: 'こちらが結果です。' },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), []);
+});
+
+test('extractBlockedCommands: tool_calls が無いレガシー形式は e.command 文字列にフォールバックする', () => {
+  const entries = [
+    {
+      source: 'agent',
+      command: 'bash legacy.sh',
+      'chisel/tool_failure': { reason: 'Blocked' },
+    },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), ['bash legacy.sh']);
+});
+
+test('extractBlockedCommands: 複数のブロック済みエントリはすべて出現順に返す', () => {
+  const entries = [
+    {
+      tool_calls: [{ function_name: 'exec', arguments: { command: 'bash first.sh' } }],
+      'chisel/tool_failure': { reason: 'Blocked' },
+    },
+    { source: 'agent', message: '中間のテキスト応答。' },
+    {
+      tool_calls: [{ function_name: 'exec', arguments: { command: 'bash second.sh' } }],
+      'chisel/tool_failure': { reason: 'Blocked' },
+    },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), ['bash first.sh', 'bash second.sh']);
+});
+
+test('extractBlockedCommands: observation 配下の reason:"Blocked" はマーカー検出対象から除外される（#361 漏洩ガード）', () => {
+  const entries = [
+    {
+      tool_calls: [{ function_name: 'exec', arguments: { command: 'bash should-not-match.sh' } }],
+      observation: { results: [{ content: LEAK_MARKER, reason: 'Blocked' }] },
+    },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), []);
+});
+
+test('extractBlockedCommands: 配列以外の入力・空配列は例外を投げず空配列を返す', () => {
+  assert.deepEqual(extractBlockedCommands([]), []);
+  assert.deepEqual(extractBlockedCommands(null), []);
+  assert.deepEqual(extractBlockedCommands(undefined), []);
+  assert.deepEqual(extractBlockedCommands('not an array'), []);
+});
+
+test('extractBlockedCommands: tool_calls[0].arguments.command が無い場合はコマンド抽出できず対象外', () => {
+  const entries = [
+    {
+      tool_calls: [{ function_name: 'exec', arguments: {} }],
+      'chisel/tool_failure': { reason: 'Blocked' },
+    },
+  ];
+  assert.deepEqual(extractBlockedCommands(entries), []);
 });
 
 // --- sliceStepsFromOffset（#365） ---

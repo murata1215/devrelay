@@ -395,6 +395,23 @@ export const chatMessages = {
     ja: '⚠️ Devin がプランモードでツール呼び出しを拒否しました。Devin からの理由: {evidence}\n書き込みが必要な場合は `e` を送って exec モードで依頼し直してください。',
   },
 
+  // --- #368 Phase1-3: ATIF から拒否された具体的なコマンドが特定できた場合、汎用文言ではなく
+  // 実際に拒否されたコマンド文字列をそのままチャットに出す（extractBlockedCommands()、
+  // #325 静かなフォールバック禁止）。 ---
+  'devin.blockedCommands': {
+    en: '⚠️ The following command was rejected, resulting in an empty response:\n   {commands}',
+    ja: '⚠️ 次のコマンドが拒否され、応答が空になりました:\n   {commands}',
+  },
+
+  // --- #368 Phase1-5: 出力ゼロ + exit 0 で終わった場合、旧来はハードコード日本語の1文だけを
+  // 出していた（#275由来）。他の拒否根拠（blockedCommands/rejectionEvidence/ログ検知/
+  // endedWithoutAnswer）がいずれも無かった場合の最終フォールバックとしてこのキーを使う
+  // （#304 型の同期漏れ再発防止のため close ハンドラ内の emitDevinPlanDiagnosis() に一本化）。 ---
+  'devin.emptyExitZero': {
+    en: '⚠️ Devin exited with no output (exit 0). The operation may have still run — please check the project for changes.{stderrTail}',
+    ja: '⚠️ Devin が出力なしで終了しました（exit 0）。処理自体は実行された可能性があります。プロジェクトの変更状況を確認してください。{stderrTail}',
+  },
+
   // --- #364 Phase1（1-A-4）: `--permission-mode smart` がサーバー側事情で使えず `normal` に
   // フォールバックしたことを示す警告（Phase0.6 実測で5回中5回とも発生）。`permissionModeSmart`
   // （--help 文字列 probe）はこの可用性を判定できないため、実行時のこの警告でしか分からない。

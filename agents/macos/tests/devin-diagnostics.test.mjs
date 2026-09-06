@@ -88,6 +88,21 @@ test('isDevinToolRejectionText: 空文字・undefined は false（例外を投�
   assert.equal(isDevinToolRejectionText(undefined), false);
 });
 
+// #368 Phase1-1: findstr/PowerShell 系コマンドが allow/deny どちらにも一致せず承認待ちに落ちた
+// ケース（判明F-2/F-3実測）の検出テスト。
+test('isDevinToolRejectionText: 実測の "Permission denied for this tool." は true', () => {
+  assert.equal(isDevinToolRejectionText('Permission denied for this tool.'), true);
+});
+
+test('isDevinToolRejectionText: 実測の "auto-decided Some(Deny)" ログ形式は true', () => {
+  assert.equal(isDevinToolRejectionText('tool_call decision: auto-decided Some(Deny) for command findstr'), true);
+});
+
+test('isDevinToolRejectionText: 通常の AI 回答文に "denied"/"permission" を含んでいても false（誤検知しないことの担保）', () => {
+  assert.equal(isDevinToolRejectionText('このAPIはpermissionチェックを追加しました。'), false);
+  assert.equal(isDevinToolRejectionText('Access was denied by the remote server, retrying.'), false);
+});
+
 // #364 Phase1: --permission-mode smart がサーバー側都合で使えず normal にフォールバックしたことを示す
 // 警告行の検知テスト。Phase0.6 実測で5回中5回とも発生した文言（判明F-1）。
 test('isDevinSmartUnavailableLine: 実測の警告文言は true', () => {
