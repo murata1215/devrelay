@@ -1,14 +1,20 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { withPathLock, normalizeLockKey } from './path-mutex.js';
+import { writeFileAtomic } from './atomic-write.js';
+import { stripProgressMarkers, selectPlanMessages, DEFAULT_MAX_PLAN_MESSAGES } from './history-compaction.js';
+import { resolveScopeDir } from './scope-dir.js';
 
 const CONVERSATION_DIR = '.devrelay';
 const CONVERSATION_FILE = 'conversation.json';
+// core#336: アーカイブは従来どおりプロジェクト単位のまま（スコープ対応しない）。
+// スコープ分離するのは「並行 submission が resume 先を取り違える」実害のある conversation.json 本体のみ。
 const ARCHIVE_DIR = 'conversation-archive';  // アーカイブ保存用ディレクトリ
-const MAX_CONTEXT_MESSAGES = 20;  // Max messages to send to Claude (save is unlimited)
+const MAX_CONTEXT_MESSAGES = 20;  // Claudeに送る最大メッセージ数（保存は無制限）
 
 export interface ConversationEntry {
-  role: 'user' | 'assistant' | 'exec';  // 'exec' = execution mode start marker
+  role: 'user' | 'assistant' | 'exec';  // 'exec' = 実行モード開始マーカー
   content: string;
   timestamp: string;
 }
@@ -19,15 +25,18 @@ export interface ConversationData {
   history: ConversationEntry[];
 }
 
-function getConversationPath(projectPath: string): string {
-  return join(projectPath, CONVERSATION_DIR, CONVERSATION_FILE);
+/**
+ * @param agentScopeId core#336: 指定時は `<projectPath>/.devrelay/sessions/<agentScopeId>/` 配下を使う（省略時は従来どおり `.devrelay/` 直下）
+ */
+function getConversationPath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), CONVERSATION_FILE);
 }
 
 /**
  * Load conversation history from project directory
  */
-export async function loadConversation(projectPath: string): Promise<ConversationEntry[]> {
-  const filePath = getConversationPath(projectPath);
+export async function loadConversation(projectPath: string, agentScopeId?: string): Promise<ConversationEntry[]> {
+  const filePath = getConversationPath(projectPath, agentScopeId);
 
   try {
     if (!existsSync(filePath)) {
@@ -37,24 +46,25 @@ export async function loadConversation(projectPath: string): Promise<Conversatio
     const content = await readFile(filePath, 'utf-8');
     const data: ConversationData = JSON.parse(content);
 
-    console.log(`Loaded ${data.history.length} messages from conversation history`);
+    console.log(`📜 Loaded ${data.history.length} messages from conversation history`);
     return data.history;
   } catch (err) {
-    console.warn(`Could not load conversation history:`, (err as Error).message);
+    console.warn(`⚠️ Could not load conversation history:`, (err as Error).message);
     return [];
   }
 }
 
 /**
  * Save conversation history to project directory
- * Save is unlimited, only send recent 20 to Claude (token savings)
+ * 保存は無制限、Claudeに送るのは直近20件のみ
  */
 export async function saveConversation(
   projectPath: string,
-  history: ConversationEntry[]
+  history: ConversationEntry[],
+  agentScopeId?: string
 ): Promise<void> {
-  const dirPath = join(projectPath, CONVERSATION_DIR);
-  const filePath = getConversationPath(projectPath);
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getConversationPath(projectPath, agentScopeId);
 
   try {
     // Ensure directory exists
@@ -70,18 +80,75 @@ export async function saveConversation(
 
     await writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.error(`Could not save conversation history:`, (err as Error).message);
+    console.error(`❌ Could not save conversation history:`, (err as Error).message);
   }
 }
 
 /**
+ * `saveConversation` のアトミック書き込み版（#348: 層 B 第 2 の防御）。
+ * temp へ書いて rename する `writeFileAtomic` を使うため、書き込み途中のファイルを
+ * 他プロセス/他セッションが読んでしまう事故を防ぐ。`saveConversation` 自体は
+ * 既存呼び出し元（`connection.ts` の直接呼び出し等）との後方互換のため無変更で残す。
+ */
+async function saveConversationAtomic(
+  projectPath: string,
+  history: ConversationEntry[],
+  agentScopeId?: string
+): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getConversationPath(projectPath, agentScopeId);
+
+  try {
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
+
+    const data: ConversationData = {
+      projectPath,
+      lastUpdated: new Date().toISOString(),
+      history
+    };
+
+    await writeFileAtomic(filePath, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error(`❌ Could not save conversation history (atomic):`, (err as Error).message);
+  }
+}
+
+/**
+ * 会話履歴を排他的に読み替えて保存する（#348）。
+ * ロックを取ってから「再読み込み → 変換 → アトミック書き込み」を行うため、
+ * 同一プロジェクトに複数セッションが同時に書いても lost update が起きない。
+ * （#348: 実測で 83 → 82 → 81 と件数が減る lost update を確認したための対策）
+ *
+ * @param projectPath プロジェクトのパス
+ * @param mutator 現在の履歴を受け取り、新しい履歴を返す純関数
+ */
+export async function mutateConversation(
+  projectPath: string,
+  mutator: (current: ConversationEntry[]) => ConversationEntry[],
+  agentScopeId?: string
+): Promise<ConversationEntry[]> {
+  const lockKey = normalizeLockKey(getConversationPath(projectPath, agentScopeId));
+
+  return withPathLock(lockKey, async () => {
+    const current = await loadConversation(projectPath, agentScopeId);
+    const updated = mutator(current);
+    await saveConversationAtomic(projectPath, updated, agentScopeId);
+    return updated;
+  });
+}
+
+/**
  * Append a message to conversation and save
+ * （#348: 内部実装を `mutateConversation` 経由に差し替え。引数・戻り値の型は無変更）
  */
 export async function appendToConversation(
   projectPath: string,
   history: ConversationEntry[],
   role: 'user' | 'assistant',
-  content: string
+  content: string,
+  agentScopeId?: string
 ): Promise<ConversationEntry[]> {
   const entry: ConversationEntry = {
     role,
@@ -89,18 +156,15 @@ export async function appendToConversation(
     timestamp: new Date().toISOString()
   };
 
-  const updatedHistory = [...history, entry];
-  await saveConversation(projectPath, updatedHistory);
-
-  return updatedHistory;
+  return mutateConversation(projectPath, (current) => [...current, entry], agentScopeId);
 }
 
 /**
  * Clear conversation history for a project
  */
-export async function clearConversation(projectPath: string): Promise<void> {
-  await saveConversation(projectPath, []);
-  console.log(`Conversation history cleared for ${projectPath}`);
+export async function clearConversation(projectPath: string, agentScopeId?: string): Promise<void> {
+  await saveConversation(projectPath, [], agentScopeId);
+  console.log(`🗑️ Conversation history cleared for ${projectPath}`);
 }
 
 /**
@@ -129,7 +193,7 @@ export async function archiveConversation(
 ): Promise<void> {
   // 空の履歴はアーカイブしない
   if (history.length === 0) {
-    console.log('No conversation to archive (empty history)');
+    console.log('📋 No conversation to archive (empty history)');
     return;
   }
 
@@ -165,19 +229,21 @@ export async function archiveConversation(
 
     // ファイルに保存
     await writeFile(archivePath, JSON.stringify(archiveData, null, 2), 'utf-8');
-    console.log(`Archived ${history.length} messages to ${filename}`);
+    console.log(`📦 Archived ${history.length} messages to ${filename}`);
   } catch (err) {
-    console.error(`Could not archive conversation:`, (err as Error).message);
+    console.error(`❌ Could not archive conversation:`, (err as Error).message);
   }
 }
 
 /**
  * Mark exec point in conversation history
  * This creates a reset point for context - only messages after exec are sent to Claude
+ * （#348: 内部実装を `mutateConversation` 経由に差し替え。引数・戻り値の型は無変更）
  */
 export async function markExecPoint(
   projectPath: string,
-  history: ConversationEntry[]
+  history: ConversationEntry[],
+  agentScopeId?: string
 ): Promise<ConversationEntry[]> {
   const entry: ConversationEntry = {
     role: 'exec',
@@ -185,9 +251,8 @@ export async function markExecPoint(
     timestamp: new Date().toISOString()
   };
 
-  const updatedHistory = [...history, entry];
-  await saveConversation(projectPath, updatedHistory);
-  console.log(`Exec point marked at position ${updatedHistory.length}`);
+  const updatedHistory = await mutateConversation(projectPath, (current) => [...current, entry], agentScopeId);
+  console.log(`🚀 Exec point marked at position ${updatedHistory.length}`);
 
   return updatedHistory;
 }
@@ -202,11 +267,14 @@ export interface GetContextOptions {
 /**
  * Get a summary of recent conversation for context
  *
- * Behavior:
- * 1. If exec marker exists in history, return recent maxMessages from the last exec marker
- * 2. If no exec marker, return recent maxMessages from the entire history
- * 3. exec marker itself is not included in context sent to Claude
- * 4. If includePlanBeforeExec is true, also include plan messages before exec marker
+ * 動作:
+ * 1. 履歴に exec マーカーがある場合、最後の exec から数えて直近 maxMessages 件を返す
+ * 2. exec マーカーがない場合、全体から直近 maxMessages 件を返す
+ * 3. exec マーカー自体は Claude に送るコンテキストには含めない
+ * 4. includePlanBeforeExec が true の場合、exec マーカー前のプラン会話も含める
+ *    （#372: 「直前の exec 以降」に限定する。詳細は `history-compaction.ts` を参照）
+ * 5. #372: 進捗マーカー行（`🔧 Bashを使用中...` 等）は注入時に除去する。
+ *    保存済みの古い conversation.json にも効かせるため、保存時だけでなくここでも落とす。
  */
 export function getConversationContext(
   history: ConversationEntry[],
@@ -217,7 +285,11 @@ export function getConversationContext(
     return '';
   }
 
-  const { includePlanBeforeExec = false, maxPlanMessages = 10 } = options;
+  const { includePlanBeforeExec = false, maxPlanMessages = DEFAULT_MAX_PLAN_MESSAGES } = options;
+
+  /** #372: 注入用の 1 行整形（進捗マーカーを落としてから `User: ` / `Assistant: ` を付ける） */
+  const formatEntry = (h: ConversationEntry): string =>
+    `${h.role === 'user' ? 'User' : 'Assistant'}: ${stripProgressMarkers(h.content)}`;
 
   // Find the last exec marker
   let execIndex = -1;
@@ -231,18 +303,16 @@ export function getConversationContext(
   // If includePlanBeforeExec and exec marker exists, include plan messages
   let planContext = '';
   if (includePlanBeforeExec && execIndex >= 0) {
-    // Get messages before exec marker (the plan conversation)
-    const planMessages = history.slice(0, execIndex)
-      .filter(h => h.role === 'user' || h.role === 'assistant')
-      .slice(-maxPlanMessages);
+    // #372: 「直前の exec マーカー以降」に限定する（従来は exec を跨いで直近 10 件を無条件に
+    // 取っていたため、前サイクルの実装報告まで丸ごと注入されていた）。
+    // `e` 連打で無内容ターンだけが挟まった場合は 1 つ前の exec まで遡る（selectPlanMessages 側）。
+    const planMessages = selectPlanMessages(history, execIndex, { maxPlanMessages });
 
     if (planMessages.length > 0) {
       planContext = '--- Previous Plan Conversation ---\n' +
-        planMessages
-          .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
-          .join('\n') +
+        planMessages.map(formatEntry).join('\n') +
         '\n--- End of Plan ---\n\n';
-      console.log(`Including ${planMessages.length} plan messages before exec`);
+      console.log(`📚 Including ${planMessages.length} plan messages before exec`);
     }
   }
 
@@ -256,10 +326,10 @@ export function getConversationContext(
   // Limit to maxMessages
   const recentHistory = filteredMessages.slice(-maxMessages);
 
-  console.log(`Context: ${filteredMessages.length} messages after exec, sending ${recentHistory.length}`);
+  console.log(`📚 Context: ${filteredMessages.length} messages after exec, sending ${recentHistory.length}`);
 
   const currentContext = recentHistory
-    .map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
+    .map(formatEntry)
     .join('\n');
 
   return planContext + currentContext;

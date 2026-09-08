@@ -10,7 +10,7 @@
  *
  * 外部 import ゼロの純関数のみで構成する（#332 `permission-policy.ts` / #337 `progress-timeout.ts` /
  * #339 `claude-login-code.ts` / #348 `cross-query-guard.ts` と同じ流儀）。
- * `agents/linux` と `agents/macos` で byte-for-byte 同一内容を維持すること。
+ * `agents/linux` と `agents/macos` と `agents/windows` で byte-for-byte 同一内容を維持すること。
  */
 
 export type SessionScope = 'interactive' | 'crossQuery' | 'teamExec' | 'askDesc';

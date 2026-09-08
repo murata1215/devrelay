@@ -8,7 +8,7 @@
  * その保険として Promise チェーンによる直列化ロックを提供する。
  *
  * 外部 import ゼロの純関数のみで構成する（#332 `permission-policy.ts` 等と同じ流儀）。
- * `agents/linux` と `agents/macos` で byte-for-byte 同一内容を維持すること。
+ * `agents/linux` と `agents/macos` と `agents/windows` で byte-for-byte 同一内容を維持すること。
  */
 
 /** キーごとの直列化キュー（末尾に積まれた Promise。解決済みなら次の呼び出しはすぐ実行できる） */

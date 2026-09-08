@@ -1,9 +1,11 @@
 import { readFile, writeFile, mkdir, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { resolveScopeDir } from './scope-dir.js';
 
-const SESSION_DIR = '.devrelay';
 const SESSION_FILE = 'claude-session-id';
+/** セッション ID + モード情報を JSON で保存するファイル */
+const SESSION_META_FILE = 'claude-session-meta.json';
 const DEVIN_SESSION_FILE = 'devin-session-id';
 /** このサイクル: Devin セッション作成時に使用したモデルを記録するファイル（resume時のモデル一致判定用） */
 const DEVIN_MODEL_FILE = 'devin-model';
@@ -14,6 +16,13 @@ const DEVIN_PERMISSION_MODE_FILE = 'devin-permission-mode';
 const CODEX_SESSION_FILE = 'codex-session-id';
 const CONTEXT_USAGE_FILE = 'context-usage.json';
 
+/** セッションメタ情報（session ID + 前回のモード） */
+export interface SessionMeta {
+  sessionId: string;
+  /** 前回のセッションがどのモードで実行されたか */
+  mode: 'plan' | 'exec';
+}
+
 export interface StoredContextUsage {
   used: number;
   total: number;
@@ -23,17 +32,18 @@ export interface StoredContextUsage {
 
 /**
  * Get the path to the Claude session ID file
+ * @param agentScopeId core#336: 指定時は `<projectPath>/.devrelay/sessions/<agentScopeId>/` 配下を使う（省略時は従来どおり `.devrelay/` 直下）
  */
-function getSessionPath(projectPath: string): string {
-  return join(projectPath, SESSION_DIR, SESSION_FILE);
+function getSessionPath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), SESSION_FILE);
 }
 
 /**
  * Load Claude session ID from project directory
  * Returns null if no session exists
  */
-export async function loadClaudeSessionId(projectPath: string): Promise<string | null> {
-  const filePath = getSessionPath(projectPath);
+export async function loadClaudeSessionId(projectPath: string, agentScopeId?: string): Promise<string | null> {
+  const filePath = getSessionPath(projectPath, agentScopeId);
 
   try {
     if (!existsSync(filePath)) {
@@ -44,22 +54,24 @@ export async function loadClaudeSessionId(projectPath: string): Promise<string |
     const sessionId = content.trim();
 
     if (sessionId) {
-      console.log(`Loaded Claude session ID: ${sessionId.substring(0, 8)}...`);
+      console.log(`📋 Loaded Claude session ID: ${sessionId.substring(0, 8)}...`);
       return sessionId;
     }
     return null;
   } catch (err) {
-    console.warn(`Could not load Claude session ID:`, (err as Error).message);
+    console.warn(`⚠️ Could not load Claude session ID:`, (err as Error).message);
     return null;
   }
 }
 
 /**
  * Save Claude session ID to project directory
+ * @param mode 省略時はメタファイルを更新しない（後方互換）
+ * @param agentScopeId core#336: スコープ識別子（省略時は従来どおり `.devrelay/` 直下）
  */
-export async function saveClaudeSessionId(projectPath: string, sessionId: string): Promise<void> {
-  const dirPath = join(projectPath, SESSION_DIR);
-  const filePath = getSessionPath(projectPath);
+export async function saveClaudeSessionId(projectPath: string, sessionId: string, mode?: 'plan' | 'exec', agentScopeId?: string): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getSessionPath(projectPath, agentScopeId);
 
   try {
     // Ensure directory exists
@@ -68,25 +80,48 @@ export async function saveClaudeSessionId(projectPath: string, sessionId: string
     }
 
     await writeFile(filePath, sessionId, 'utf-8');
-    console.log(`Saved Claude session ID: ${sessionId.substring(0, 8)}...`);
+
+    // モード情報付きメタファイルも保存（Plan→Plan resume 判定用）
+    if (mode) {
+      const metaPath = join(dirPath, SESSION_META_FILE);
+      const meta: SessionMeta = { sessionId, mode };
+      await writeFile(metaPath, JSON.stringify(meta), 'utf-8');
+    }
+
+    console.log(`💾 Saved Claude session ID: ${sessionId.substring(0, 8)}... (mode=${mode || 'unknown'})`);
   } catch (err) {
-    console.error(`Could not save Claude session ID:`, (err as Error).message);
+    console.error(`❌ Could not save Claude session ID:`, (err as Error).message);
+  }
+}
+
+/**
+ * セッションメタ情報（session ID + モード）を読み込む。
+ * Plan モードで前回も Plan だった場合に resume するかの判定に使用。
+ */
+export async function loadSessionMeta(projectPath: string, agentScopeId?: string): Promise<SessionMeta | null> {
+  const metaPath = join(resolveScopeDir(projectPath, agentScopeId), SESSION_META_FILE);
+  try {
+    if (!existsSync(metaPath)) return null;
+    const content = await readFile(metaPath, 'utf-8');
+    return JSON.parse(content) as SessionMeta;
+  } catch {
+    return null;
   }
 }
 
 /**
  * Clear Claude session ID from project directory
  */
-export async function clearClaudeSessionId(projectPath: string): Promise<void> {
-  const filePath = getSessionPath(projectPath);
+export async function clearClaudeSessionId(projectPath: string, agentScopeId?: string): Promise<void> {
+  const filePath = getSessionPath(projectPath, agentScopeId);
 
   try {
     if (existsSync(filePath)) {
       await unlink(filePath);
-      console.log(`Cleared Claude session ID`);
+      console.log(`🗑️ Cleared Claude session ID`);
     }
   } catch (err) {
-    console.warn(`Could not clear Claude session ID:`, (err as Error).message);
+    console.warn(`⚠️ Could not clear Claude session ID:`, (err as Error).message);
   }
 }
 
@@ -94,13 +129,18 @@ export async function clearClaudeSessionId(projectPath: string): Promise<void> {
 // Devin セッション ID 管理
 // -----------------------------------------------------------------------------
 
-function getDevinSessionPath(projectPath: string): string {
-  return join(projectPath, SESSION_DIR, DEVIN_SESSION_FILE);
+/**
+ * Devin セッション ID ファイルのパスを取得
+ */
+function getDevinSessionPath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), DEVIN_SESSION_FILE);
 }
 
-/** Devin セッション ID を読み込む */
-export async function loadDevinSessionId(projectPath: string): Promise<string | null> {
-  const filePath = getDevinSessionPath(projectPath);
+/**
+ * Devin セッション ID を読み込む（`-r` でセッション継続に使用）
+ */
+export async function loadDevinSessionId(projectPath: string, agentScopeId?: string): Promise<string | null> {
+  const filePath = getDevinSessionPath(projectPath, agentScopeId);
   try {
     if (!existsSync(filePath)) return null;
     const content = await readFile(filePath, 'utf-8');
@@ -110,58 +150,93 @@ export async function loadDevinSessionId(projectPath: string): Promise<string | 
       return sessionId;
     }
     return null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-/** Devin セッション ID を保存 */
-export async function saveDevinSessionId(projectPath: string, sessionId: string): Promise<void> {
-  const dirPath = join(projectPath, SESSION_DIR);
-  const filePath = getDevinSessionPath(projectPath);
+/**
+ * Devin セッション ID を保存
+ */
+export async function saveDevinSessionId(projectPath: string, sessionId: string, agentScopeId?: string): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getDevinSessionPath(projectPath, agentScopeId);
   try {
-    if (!existsSync(dirPath)) await mkdir(dirPath, { recursive: true });
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
     await writeFile(filePath, sessionId, 'utf-8');
     console.log(`💾 Saved Devin session ID: ${sessionId}`);
-  } catch (err) { console.error(`❌ Could not save Devin session ID:`, (err as Error).message); }
+  } catch (err) {
+    console.error(`❌ Could not save Devin session ID:`, (err as Error).message);
+  }
 }
 
-/** Devin セッション ID をクリア */
-export async function clearDevinSessionId(projectPath: string): Promise<void> {
-  const filePath = getDevinSessionPath(projectPath);
-  try { if (existsSync(filePath)) { await unlink(filePath); console.log(`🗑️ Cleared Devin session ID`); } } catch {}
+/**
+ * Devin セッション ID をクリア（`x` コマンドで使用）
+ */
+export async function clearDevinSessionId(projectPath: string, agentScopeId?: string): Promise<void> {
+  const filePath = getDevinSessionPath(projectPath, agentScopeId);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+      console.log(`🗑️ Cleared Devin session ID`);
+    }
+  } catch {
+    // 無視
+  }
 }
 
 /**
  * Devin モデル記録ファイルのパスを取得
  * （このサイクル: `devin -r` はモデル指定を無視するため、resume 判定に使う）
  */
-function getDevinModelPath(projectPath: string): string {
-  return join(projectPath, SESSION_DIR, DEVIN_MODEL_FILE);
+function getDevinModelPath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), DEVIN_MODEL_FILE);
 }
 
-/** 直近の Devin ターンで使用したモデルを読み込む（未指定時は空文字列を保存しているため `''` が返ることもある） */
-export async function loadDevinModel(projectPath: string): Promise<string | null> {
-  const filePath = getDevinModelPath(projectPath);
+/**
+ * 直近の Devin ターンで使用したモデルを読み込む（未指定時は空文字列を保存しているため `''` が返ることもある）
+ */
+export async function loadDevinModel(projectPath: string, agentScopeId?: string): Promise<string | null> {
+  const filePath = getDevinModelPath(projectPath, agentScopeId);
   try {
     if (!existsSync(filePath)) return null;
     const content = await readFile(filePath, 'utf-8');
     return content.trim();
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-/** 今回の Devin ターンで使用したモデルを保存（`model` は未指定時は空文字列を渡すこと） */
-export async function saveDevinModel(projectPath: string, model: string): Promise<void> {
-  const dirPath = join(projectPath, SESSION_DIR);
-  const filePath = getDevinModelPath(projectPath);
+/**
+ * 今回の Devin ターンで使用したモデルを保存（`model` は未指定時は空文字列を渡すこと）
+ */
+export async function saveDevinModel(projectPath: string, model: string, agentScopeId?: string): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getDevinModelPath(projectPath, agentScopeId);
   try {
-    if (!existsSync(dirPath)) await mkdir(dirPath, { recursive: true });
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
     await writeFile(filePath, model, 'utf-8');
-  } catch (err) { console.error(`❌ Could not save Devin model:`, (err as Error).message); }
+  } catch (err) {
+    console.error(`❌ Could not save Devin model:`, (err as Error).message);
+  }
 }
 
-/** Devin モデル記録をクリア（`x` コマンドで使用、`clearDevinSessionId()` と対で呼ぶ） */
-export async function clearDevinModel(projectPath: string): Promise<void> {
-  const filePath = getDevinModelPath(projectPath);
-  try { if (existsSync(filePath)) { await unlink(filePath); } } catch {}
+/**
+ * Devin モデル記録をクリア（`x` コマンドで使用、`clearDevinSessionId()` と対で呼ぶ）
+ */
+export async function clearDevinModel(projectPath: string, agentScopeId?: string): Promise<void> {
+  const filePath = getDevinModelPath(projectPath, agentScopeId);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+    }
+  } catch {
+    // 無視
+  }
 }
 
 /**
@@ -169,82 +244,127 @@ export async function clearDevinModel(projectPath: string): Promise<void> {
  * （devin セッションが resume されるたびに --export が全トラジェクトリを書き直すため、
  * 「前ターンまでに何ステップあったか」を記録しておき、今回ターン分だけを差分表示するために使う）
  */
-function getDevinAtifStepOffsetPath(projectPath: string): string {
-  return join(projectPath, SESSION_DIR, DEVIN_ATIF_STEP_OFFSET_FILE);
+function getDevinAtifStepOffsetPath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), DEVIN_ATIF_STEP_OFFSET_FILE);
 }
 
-/** 前ターン終了時点の ATIF 累計ステップ数を読み込む（未保存 or 不正な値は null） */
-export async function loadDevinAtifStepOffset(projectPath: string): Promise<number | null> {
-  const filePath = getDevinAtifStepOffsetPath(projectPath);
+/**
+ * 前ターン終了時点の ATIF 累計ステップ数を読み込む（未保存 or 不正な値は null）
+ */
+export async function loadDevinAtifStepOffset(projectPath: string, agentScopeId?: string): Promise<number | null> {
+  const filePath = getDevinAtifStepOffsetPath(projectPath, agentScopeId);
   try {
     if (!existsSync(filePath)) return null;
     const content = await readFile(filePath, 'utf-8');
     const n = Number(content.trim());
     return Number.isFinite(n) ? n : null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-/** 今回ターン終了時点の ATIF 累計ステップ数を保存（次回ターンのオフセットとして使われる） */
-export async function saveDevinAtifStepOffset(projectPath: string, offset: number): Promise<void> {
-  const dirPath = join(projectPath, SESSION_DIR);
-  const filePath = getDevinAtifStepOffsetPath(projectPath);
+/**
+ * 今回ターン終了時点の ATIF 累計ステップ数を保存（次回ターンのオフセットとして使われる）
+ */
+export async function saveDevinAtifStepOffset(projectPath: string, offset: number, agentScopeId?: string): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getDevinAtifStepOffsetPath(projectPath, agentScopeId);
   try {
-    if (!existsSync(dirPath)) await mkdir(dirPath, { recursive: true });
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
     await writeFile(filePath, String(offset), 'utf-8');
-  } catch (err) { console.error(`❌ Could not save Devin ATIF step offset:`, (err as Error).message); }
+  } catch (err) {
+    console.error(`❌ Could not save Devin ATIF step offset:`, (err as Error).message);
+  }
 }
 
 /**
  * ATIF 累計ステップ数オフセットをクリア（`x` コマンド / resume 失敗 / モデル変更時に
  * `clearDevinSessionId()` + `clearDevinModel()` と併せて呼ぶ）
  */
-export async function clearDevinAtifStepOffset(projectPath: string): Promise<void> {
-  const filePath = getDevinAtifStepOffsetPath(projectPath);
-  try { if (existsSync(filePath)) { await unlink(filePath); } } catch {}
+export async function clearDevinAtifStepOffset(projectPath: string, agentScopeId?: string): Promise<void> {
+  const filePath = getDevinAtifStepOffsetPath(projectPath, agentScopeId);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+    }
+  } catch {
+    // 無視
+  }
 }
 
-function getDevinPermissionModePath(projectPath: string): string {
-  return join(projectPath, SESSION_DIR, DEVIN_PERMISSION_MODE_FILE);
+/**
+ * #368 Phase2a: Devin パーミッションモードマーカーファイルのパスを取得
+ * （Devin セッションはパーミッションモードを引き継ぐため、resume 時に前回と今回のモードが
+ * 一致するかどうかを判定するのに使う）
+ */
+function getDevinPermissionModePath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), DEVIN_PERMISSION_MODE_FILE);
 }
 
-/** 直近の Devin セッション作成時に使用したパーミッションモードを読み込む（未保存/空なら null） */
-export async function loadDevinPermissionMode(projectPath: string): Promise<string | null> {
-  const filePath = getDevinPermissionModePath(projectPath);
+/**
+ * 前回 Devin セッション作成時に使用したパーミッションモードを読み込む（未保存 or 読み取り失敗は null）
+ */
+export async function loadDevinPermissionMode(projectPath: string, agentScopeId?: string): Promise<string | null> {
+  const filePath = getDevinPermissionModePath(projectPath, agentScopeId);
   try {
     if (!existsSync(filePath)) return null;
     const content = await readFile(filePath, 'utf-8');
     const mode = content.trim();
     return mode ? mode : null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-/** 今回の Devin セッション作成時に使用したパーミッションモードを保存（未指定時は空文字列を渡すこと） */
-export async function saveDevinPermissionMode(projectPath: string, mode: string): Promise<void> {
-  const dirPath = join(projectPath, SESSION_DIR);
-  const filePath = getDevinPermissionModePath(projectPath);
+/**
+ * 今回ターンで実際に Devin へ渡したパーミッションモードを保存（次回ターンの resume 一致判定に使う）
+ */
+export async function saveDevinPermissionMode(projectPath: string, mode: string, agentScopeId?: string): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getDevinPermissionModePath(projectPath, agentScopeId);
   try {
-    if (!existsSync(dirPath)) await mkdir(dirPath, { recursive: true });
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
     await writeFile(filePath, mode, 'utf-8');
-  } catch (err) { console.error(`❌ Could not save Devin permission mode:`, (err as Error).message); }
+  } catch (err) {
+    console.error(`❌ Could not save Devin permission mode:`, (err as Error).message);
+  }
 }
 
-/** Devin パーミッションモード記録をクリア（`x` コマンド / resume 失敗時に他3本と併せて呼ぶ） */
-export async function clearDevinPermissionMode(projectPath: string): Promise<void> {
-  const filePath = getDevinPermissionModePath(projectPath);
-  try { if (existsSync(filePath)) { await unlink(filePath); } } catch {}
+/**
+ * Devin パーミッションモードマーカーをクリア（`x` コマンド / resume 失敗時に
+ * `clearDevinSessionId()` + `clearDevinModel()` + `clearDevinAtifStepOffset()` と併せて呼ぶ）
+ */
+export async function clearDevinPermissionMode(projectPath: string, agentScopeId?: string): Promise<void> {
+  const filePath = getDevinPermissionModePath(projectPath, agentScopeId);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+    }
+  } catch {
+    // 無視
+  }
 }
 
 // -----------------------------------------------------------------------------
 // Codex CLI セッション（thread_id）管理（#308）
 // -----------------------------------------------------------------------------
 
-function getCodexSessionPath(projectPath: string): string {
-  return join(projectPath, SESSION_DIR, CODEX_SESSION_FILE);
+/**
+ * Codex セッション ID（thread_id）ファイルのパスを取得
+ */
+function getCodexSessionPath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), CODEX_SESSION_FILE);
 }
 
-/** Codex セッション ID（thread_id）を読み込む */
-export async function loadCodexSessionId(projectPath: string): Promise<string | null> {
-  const filePath = getCodexSessionPath(projectPath);
+/**
+ * Codex セッション ID（thread_id）を読み込む（`codex exec resume <ID>` で継続に使用）
+ */
+export async function loadCodexSessionId(projectPath: string, agentScopeId?: string): Promise<string | null> {
+  const filePath = getCodexSessionPath(projectPath, agentScopeId);
   try {
     if (!existsSync(filePath)) return null;
     const content = await readFile(filePath, 'utf-8');
@@ -254,38 +374,55 @@ export async function loadCodexSessionId(projectPath: string): Promise<string | 
       return sessionId;
     }
     return null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-/** Codex セッション ID（thread_id）を保存 */
-export async function saveCodexSessionId(projectPath: string, sessionId: string): Promise<void> {
-  const dirPath = join(projectPath, SESSION_DIR);
-  const filePath = getCodexSessionPath(projectPath);
+/**
+ * Codex セッション ID（thread_id）を保存
+ */
+export async function saveCodexSessionId(projectPath: string, sessionId: string, agentScopeId?: string): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getCodexSessionPath(projectPath, agentScopeId);
   try {
-    if (!existsSync(dirPath)) await mkdir(dirPath, { recursive: true });
+    if (!existsSync(dirPath)) {
+      await mkdir(dirPath, { recursive: true });
+    }
     await writeFile(filePath, sessionId, 'utf-8');
     console.log(`💾 Saved Codex session ID: ${sessionId}`);
-  } catch (err) { console.error(`❌ Could not save Codex session ID:`, (err as Error).message); }
+  } catch (err) {
+    console.error(`❌ Could not save Codex session ID:`, (err as Error).message);
+  }
 }
 
-/** Codex セッション ID をクリア */
-export async function clearCodexSessionId(projectPath: string): Promise<void> {
-  const filePath = getCodexSessionPath(projectPath);
-  try { if (existsSync(filePath)) { await unlink(filePath); console.log(`🗑️ Cleared Codex session ID`); } } catch {}
+/**
+ * Codex セッション ID をクリア（`x` コマンドで使用）
+ */
+export async function clearCodexSessionId(projectPath: string, agentScopeId?: string): Promise<void> {
+  const filePath = getCodexSessionPath(projectPath, agentScopeId);
+  try {
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+      console.log(`🗑️ Cleared Codex session ID`);
+    }
+  } catch {
+    // 無視
+  }
 }
 
 /**
  * Get the path to the context usage file
  */
-function getContextUsagePath(projectPath: string): string {
-  return join(projectPath, SESSION_DIR, CONTEXT_USAGE_FILE);
+function getContextUsagePath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), CONTEXT_USAGE_FILE);
 }
 
 /**
  * Load previous context usage from project directory
  */
-export async function loadContextUsage(projectPath: string): Promise<StoredContextUsage | null> {
-  const filePath = getContextUsagePath(projectPath);
+export async function loadContextUsage(projectPath: string, agentScopeId?: string): Promise<StoredContextUsage | null> {
+  const filePath = getContextUsagePath(projectPath, agentScopeId);
 
   try {
     if (!existsSync(filePath)) {
@@ -296,7 +433,7 @@ export async function loadContextUsage(projectPath: string): Promise<StoredConte
     const data = JSON.parse(content) as StoredContextUsage;
     return data;
   } catch (err) {
-    console.warn(`Could not load context usage:`, (err as Error).message);
+    console.warn(`⚠️ Could not load context usage:`, (err as Error).message);
     return null;
   }
 }
@@ -304,9 +441,9 @@ export async function loadContextUsage(projectPath: string): Promise<StoredConte
 /**
  * Save context usage to project directory
  */
-export async function saveContextUsage(projectPath: string, usage: { used: number; total: number; percentage: number }): Promise<void> {
-  const dirPath = join(projectPath, SESSION_DIR);
-  const filePath = getContextUsagePath(projectPath);
+export async function saveContextUsage(projectPath: string, usage: { used: number; total: number; percentage: number }, agentScopeId?: string): Promise<void> {
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getContextUsagePath(projectPath, agentScopeId);
 
   try {
     if (!existsSync(dirPath)) {
@@ -320,15 +457,15 @@ export async function saveContextUsage(projectPath: string, usage: { used: numbe
 
     await writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.error(`Could not save context usage:`, (err as Error).message);
+    console.error(`❌ Could not save context usage:`, (err as Error).message);
   }
 }
 
 /**
  * Clear context usage from project directory
  */
-export async function clearContextUsage(projectPath: string): Promise<void> {
-  const filePath = getContextUsagePath(projectPath);
+export async function clearContextUsage(projectPath: string, agentScopeId?: string): Promise<void> {
+  const filePath = getContextUsagePath(projectPath, agentScopeId);
 
   try {
     if (existsSync(filePath)) {

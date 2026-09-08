@@ -13,7 +13,7 @@
  * （#325 「静かなフォールバック禁止」）。
  *
  * Node 標準モジュール（`fs/promises` / `path`）以外の外部依存はゼロ。
- * `agents/linux` と `agents/macos` で byte-for-byte 同一内容を維持すること。
+ * `agents/linux` と `agents/macos` と `agents/windows` で byte-for-byte 同一内容を維持すること。
  */
 
 import { writeFile, rename, unlink, mkdir } from 'fs/promises';

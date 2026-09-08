@@ -6,6 +6,37 @@
 
 ## 実装済み機能
 
+### #379: Windows Agent 移植 サブサイクル B — ストア層の置換 + 先送りテスト + JSDoc 3 OS 修正 (2026-09-09)
+
+サブサイクル A（#378）で先送りにした `session-store.ts` / `conversation-store.ts` を
+`agents/linux` 版で byte-for-byte 置換し、A で green にできなかった 3 テストを回収。
+`agents/windows/src/services/connection.ts` / `ai-runner.ts` は無変更（`git diff` 空を実測維持）。
+
+- **B1**: `session-store.ts` を linux 版で置換（`resolveScopeDir()` 経由化 / `SessionMeta` +
+  `loadSessionMeta()` / `saveClaudeSessionId(path, id, mode?, scope?)` 4 引数化）。
+  `session-store-scope.test.mjs`（3件）を verbatim コピー
+- **B2**: `conversation-store.ts` を linux 版で置換（`mutateConversation()` 新設・`markExecPoint()` が
+  内部でロック+ディスク再読込+アトミック書き込みを行うよう変化・`getConversationContext()` へ
+  進捗マーカー除去/プラン区間絞り込みを適用）。`conversation-store-scope.test.mjs`（5件）+
+  `path-mutex.test.mjs`（10件）を verbatim コピー
+- **B3**: `session-scope.ts` / `path-mutex.ts` / `atomic-write.ts` の JSDoc 不変条件コメントを
+  「linux と macos」→「linux と macos と windows」に 3 OS × 3 ファイル = 9 行修正。
+  コメント以外は無変更（md5sum で 3 OS 一致を再確認）
+- windows テスト 72→**90**（+18）・linux **438**・macos **384**(+1skip) すべて非退行（`--test-concurrency=1`
+  で安定実測。デフォルト並行実行では node --test 内部の IPC デシリアライズ起因と見られる
+  flaky failure が3OSとも散発したため、確定値は逐次実行で取得）
+- R-A1（`markExecPoint` が `sessionInfo.history` 引数を無視しディスクから読み直す挙動）を事前調査で
+  検証済み：単一セッション正常系では従来と結果同一。差が出る3経路（D1: 保存失敗時の自己修復喪失/
+  D2: 複数セッション同時実行時の lost update 解消＝改善/D4: 既存の projectPath 不一致バグの露出面拡大）
+  はサイクル C への申し送りとして `doc/migrations/379_windows_store_layout.md` に明記
+- macOS の両ストアも linux と byte 不一致・`history-compaction.ts`（#372）自体が macOS 未移植のまま
+  （本サイクルは対象外、既知の積み残し）
+- **対象**: `agents/windows`（+ `agents/linux`/`agents/macos` は B3 のコメント 9 行のみ）。
+  `apps/`/`packages/`/`prisma/` 無変更
+- **反映**: server 再起動不要・DB マイグレーション不要。Windows 機は次回 `u` で反映（レイアウト変更は
+  本サイクルでは発生しない、詳細は `doc/migrations/379_windows_store_layout.md`）
+- 移植元 hash: `9c49644`(#376) / `8c1dc69`(#377) / `a6f0e3f`(#348) / `4e2bcae`(#372)
+
 ### #378: Windows Agent 移植 サブサイクル A — 純モジュール + テスト基盤の追加 (2026-09-09)
 
 `agents/windows` は core#376（`9c49644`）/ #377（`8c1dc69`）に含まれておらず、#348/#372/#375/#376/#377 の
