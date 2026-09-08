@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### #380: MCP ツールの長文切り詰め改善（get_conversation_history / get_build_status） (2026-09-09)
+
+exec 完了報告の commit hash / push 結果はメッセージ末尾にあるが、`get_conversation_history` が
+先頭 2000 文字固定で切り詰めるため MCP 経由では読めなかった（#378/#379 で2回連続発生）。
+
+- 新規外部 import ゼロ純関数モジュール `apps/server/src/services/content-truncate.ts`
+  （`stop-reason.ts` と同じ流儀）に `truncateOnLineBoundary(text, maxLength, keep)` を追加。
+  `keep`（残す側）と `truncatedSide`（捨てた側、`keep` の逆）を JSDoc とテストで明示的に固定。
+  行境界カット（CRLF の孤立 `\r` 除去・サロゲートペア境界の安全処理）を両方向に実装し、
+  「改行なし」「窓内唯一の改行が境界外」等でも空文字を返さない不変条件をテストで保証
+- `get_conversation_history` に `tail: boolean` 入力を追加（既定 false = 先頭保持）。`truncated` に加え
+  `truncatedSide`（`truncated:false` のときはキー自体を出さない）を追加。ローカル定数
+  `MAX_CONTENT_LENGTH` は削除し新モジュールの `CONVERSATION_MAX_CONTENT_LENGTH`（2000、値不変）に統一
+- `get_build_status` に `tail` フィールド（最新 AI メッセージ末尾 1500 文字固定・新規入力パラメータには
+  しない）を追加。`latestMsg` クエリを `buildLog` 検索より前に移動し `select: { content: true }` で
+  列を絞ることで、他分岐の無駄な列取得（`usageData` 等）も削減。`summary`/`truncated`/`stopReason`
+  等の既存フィールドは無変更
+- commit hash の正規表現抽出は行わない（v2 で agent の完了報告に構造化フィールドを足す方が筋、
+  今回はスコープ外）
+- 6 workspace green・`apps/server` 194→**223**（新規 29 件）・shared 47/linux 438/macos 384(+1skip)
+  すべて非退行（`--test-concurrency=1` で実測）
+- 静的検証: `git diff --stat -- agents/ apps/web/ packages/ apps/server/prisma/` 空、新モジュール
+  本体/dist とも `import`/`require` 0 件、diff に `RegExp`/`match(` の追加なし、既存上限
+  （`.slice(0, 500)` / `build-summarizer.ts` の 200・8000）は diff マーカーなしで不変
+- **対象**: `apps/server` のみ（`prisma/`/`agents/`/`apps/web/`/`packages/` 無変更）
+- **反映**: server 再起動が必要（DB マイグレーション不要・agent `u` 不要）。`pm2 restart` は
+  人間が実施
+
 ### #379: Windows Agent 移植 サブサイクル B — ストア層の置換 + 先送りテスト + JSDoc 3 OS 修正 (2026-09-09)
 
 サブサイクル A（#378）で先送りにした `session-store.ts` / `conversation-store.ts` を

@@ -35,6 +35,7 @@ import {
 import { processMessageFilesEmbedding } from '../services/embedding-service.js';
 import { evaluateApproveGuard, decideClaimResult, buildClaimReleaseWhere, buildTurnId } from '../services/submission-guard.js';
 import { normalizeStopReason, isStopReasonTruncated, applyStopReasonMark } from '../services/stop-reason.js';
+import { truncateOnLineBoundary, CONVERSATION_MAX_CONTENT_LENGTH, BUILD_STATUS_TAIL_LENGTH } from '../services/content-truncate.js';
 import { tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 
 /**
@@ -151,17 +152,19 @@ export function registerMcpTools(server: McpServer, userId: string) {
    */
   server.tool(
     'get_conversation_history',
-    'Get conversation messages for a project in chronological order. Use this to browse full conversation history, or to dive deeper into results from search_project_context. Supports pagination via before/after timestamps.',
+    'Get conversation messages for a project in chronological order. Use this to browse full conversation history, or to dive deeper into results from search_project_context. Supports pagination via before/after timestamps. Each message body is truncated to 2000 characters; by default the BEGINNING is kept. Set tail: true to keep the END instead — required for reading exec completion reports, where the commit hash and push result appear at the very end of the message. Truncation always lands on a line boundary. When a body was truncated, truncated is true and truncatedSide names the side that was REMOVED ("tail" = the end was dropped, "head" = the beginning was dropped). truncatedSide is absent when truncated is false.',
     {
       projectId: z.string().describe('The project ID'),
       limit: z.number().optional().describe('Number of messages to return (default 50, max 200)'),
       before: z.string().optional().describe('Return messages before this ISO timestamp (for backward pagination)'),
       after: z.string().optional().describe('Return messages after this ISO timestamp (for forward pagination)'),
       order: z.enum(['asc', 'desc']).optional().describe('Sort order by timestamp (default "asc")'),
+      tail: z.boolean().optional().describe('Keep the END of each message body instead of the beginning when it exceeds the 2000-character limit (default false). Use true to read exec completion reports, where the commit hash and push result are at the end.'),
     },
-    async ({ projectId, limit: rawLimit, before, after, order: rawOrder }) => {
+    async ({ projectId, limit: rawLimit, before, after, order: rawOrder, tail: rawTail }) => {
       const limit = Math.min(Math.max(rawLimit ?? 50, 1), 200);
       const order = rawOrder ?? 'asc';
+      const keepSide = rawTail === true ? 'tail' : 'head';
 
       // createdAt フィルタ構築
       const createdAtFilter: Record<string, Date> = {};
@@ -187,17 +190,15 @@ export function registerMcpTools(server: McpServer, userId: string) {
         take: limit,
       });
 
-      /** 1 メッセージあたりの最大本文長（超過分は切り詰め） */
-      const MAX_CONTENT_LENGTH = 2000;
-
       const result = {
         messages: messages.map(m => {
-          const truncated = m.content.length > MAX_CONTENT_LENGTH;
+          const t = truncateOnLineBoundary(m.content, CONVERSATION_MAX_CONTENT_LENGTH, keepSide);
           return {
             id: m.id,
             role: m.role,
-            content: truncated ? m.content.slice(0, MAX_CONTENT_LENGTH) : m.content,
-            truncated,
+            content: t.content,
+            truncated: t.truncated,
+            ...(t.truncatedSide ? { truncatedSide: t.truncatedSide } : {}),
             timestamp: m.createdAt.toISOString(),
             sessionId: m.sessionId,
             attachments: m.files.map(f => ({
@@ -352,7 +353,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
    */
   server.tool(
     'get_build_status',
-    'Check the progress and result of an approved implementation. Call this after approve_implementation to monitor the build. Poll periodically until done is true.',
+    'Check the progress and result of an approved implementation. Call this after approve_implementation to monitor the build. Poll periodically until done is true. summary is a short AI-generated description (max 200 chars) and does NOT contain the commit hash or push result. To confirm completion details, read tail — the last 1500 characters of the latest AI message, cut on a line boundary, which is where the commit hash and push result appear. tail is absent when no AI output exists yet.',
     { submissionId: z.string().describe('The submission ID') },
     async ({ submissionId }) => {
       // exec メッセージの最新タイムスタンプを取得（approve_implementation が保存する）
@@ -362,6 +363,21 @@ export function registerMcpTools(server: McpServer, userId: string) {
         orderBy: { createdAt: 'desc' },
       });
       const execTimestamp = execMessage?.createdAt;
+
+      // #380: BuildLog 分岐でも tail を返すため、latestMsg の取得を BuildLog 検索より前に移動。
+      // 参照するのは content のみなので select で絞る（旧コードは全カラム＋usageData を無駄に取得していた）。
+      const latestMsg = await prisma.message.findFirst({
+        where: {
+          sessionId: submissionId,
+          role: 'ai',
+          ...(execTimestamp ? { createdAt: { gt: execTimestamp } } : {}),
+        },
+        select: { content: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      const tail = latestMsg?.content
+        ? truncateOnLineBoundary(latestMsg.content, BUILD_STATUS_TAIL_LENGTH, 'tail').content
+        : undefined;
 
       // submissionId = sessionId として BuildLog を検索（exec 以降に限定）
       const buildLog = await prisma.buildLog.findFirst({
@@ -385,6 +401,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
             done: true,
             truncated,
             stopReason: sr,
+            ...(tail !== undefined ? { tail } : {}),
           }) }],
         };
       }
@@ -394,27 +411,21 @@ export function registerMcpTools(server: McpServer, userId: string) {
       const mcpChatId = `mcp:${userId}:${submissionId}`;
       const progress = getActiveProgressForChatId(mcpChatId);
 
-      // DB から最新 AI メッセージも取得（exec 以降に限定）
-      const latestMsg = await prisma.message.findFirst({
-        where: {
-          sessionId: submissionId,
-          role: 'ai',
-          ...(execTimestamp ? { createdAt: { gt: execTimestamp } } : {}),
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-
       if (progress) {
         // 進行中: DB の最新メッセージがあればそちらを優先（progress tracker より正確）
         const summary = latestMsg
           ? latestMsg.content.slice(0, 500)
           : progress.output.slice(0, 500);
+        const progressTail = latestMsg?.content
+          ? tail
+          : truncateOnLineBoundary(progress.output, BUILD_STATUS_TAIL_LENGTH, 'tail').content;
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'exec',
             progressSummary: summary,
             elapsedSeconds: progress.elapsed,
             done: false,
+            ...(progressTail !== undefined ? { tail: progressTail } : {}),
           }) }],
         };
       }
@@ -433,6 +444,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
             done: true,
             truncated: false,
             stopReason: 'success',
+            ...(tail !== undefined ? { tail } : {}),
           }) }],
         };
       }
