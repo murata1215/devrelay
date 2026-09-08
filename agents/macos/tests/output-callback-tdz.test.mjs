@@ -33,5 +33,12 @@ test('output-callback-tdz: 完了 payload が aiResult.extractedSessionId / retr
 
 test('output-callback-tdz: OutputCallback のコールバック引数に extractedSessionId が定義されている', async () => {
   const src = await readFile(CONNECTION_TS, 'utf-8');
-  assert.ok(/async \(output, isComplete, usageData, extractedSessionId\)/.test(src), 'コールバックシグネチャに extractedSessionId 第4引数が見当たらない');
+  // #377: 第5引数 stopReason を追加したため、末尾の `)` を許容する形に更新（第4引数までの存在を確認する主旨は不変）
+  assert.ok(/async \(output, isComplete, usageData, extractedSessionId, stopReason\)/.test(src), 'コールバックシグネチャに extractedSessionId 第4引数 / stopReason 第5引数が見当たらない');
+});
+
+test('#377: 完了 payload が stopReason を配線している（2 箇所以上、配線忘れ検出）', async () => {
+  const src = await readFile(CONNECTION_TS, 'utf-8');
+  const matches = src.match(/^\s*stopReason,\s*$/gm) || [];
+  assert.ok(matches.length >= 2, `stopReason, の出現数が想定より少ない (${matches.length})`);
 });

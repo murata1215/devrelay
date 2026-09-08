@@ -34,6 +34,8 @@ import {
 } from '../services/attachment-validation.js';
 import { processMessageFilesEmbedding } from '../services/embedding-service.js';
 import { evaluateApproveGuard, decideClaimResult, buildClaimReleaseWhere, buildTurnId } from '../services/submission-guard.js';
+import { normalizeStopReason, isStopReasonTruncated, applyStopReasonMark } from '../services/stop-reason.js';
+import { tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 
 /**
  * #334: 人間入力テキストの長さ上限（string.length = UTF-16 コードユニット数基準）。
@@ -371,12 +373,18 @@ export function registerMcpTools(server: McpServer, userId: string) {
       });
 
       if (buildLog) {
+        // #377: stopReason は BuildLog に実値があるのでそのまま使う（未指定は 'success' 正規化）
+        const sr = normalizeStopReason(buildLog.stopReason ?? undefined);
+        const truncated = isStopReasonTruncated(sr);
+        const mark = truncated ? tChat(DEFAULT_CHAT_LANGUAGE, 'buildStatus.truncatedMark', { stopReason: sr }) : '';
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'done',
             buildId: buildLog.id,
-            summary: buildLog.summary || 'Build completed',
+            summary: applyStopReasonMark(buildLog.summary || 'Build completed', mark),
             done: true,
+            truncated,
+            stopReason: sr,
           }) }],
         };
       }
@@ -412,12 +420,19 @@ export function registerMcpTools(server: McpServer, userId: string) {
       }
 
       // 進行中トラッカーがない + exec 後の AI メッセージがある → exec 完了
+      // #377: この分岐は BuildLog が存在しない場合のフォールバック（isExec フラグ欠落や
+      // BuildLog 作成失敗など）であり、Message には stopReason を保存していないため実際の
+      // 打ち切り有無を判定できない。打ち切りのある exec は agent-manager.ts 側のゲート緩和により
+      // 必ず上の BuildLog 分岐で拾われるようになったため、ここに到達するのは通常 stopReason='success'
+      // 相当のケースのみ（既知の限界として明示的にハードコードする。devlog に記載）。
       if (latestMsg) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'done',
             summary: latestMsg.content.slice(0, 500),
             done: true,
+            truncated: false,
+            stopReason: 'success',
           }) }],
         };
       }

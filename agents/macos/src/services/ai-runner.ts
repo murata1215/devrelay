@@ -17,6 +17,7 @@ import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-fil
 import { saveClaudeSessionId, clearClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
+import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
 import { decideResume } from './resume-priority.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
@@ -505,8 +506,12 @@ const activeSessions = new Map<string, AiSession>();
  * core#336: 第4引数 extractedSessionId は isComplete=true 時に抽出済みセッション ID を運ぶ。
  * `const aiResult = await sendPromptToAi(...)` のコールバックは aiResult 初期化前に発火するため
  * （TDZ）、aiResult.extractedSessionId を直接参照できない。この引数経由で渡すことで回避する。
+ *
+ * #377: 第5引数 stopReason は 'success' | 'max_turns' | 'error' | 'aborted'。Claude SDK 経路のみ実値が入り、
+ * 他ツール（Devin/Codex）は常に undefined（サーバー側で 'success' に正規化される）。
+ * optional のため既存の呼び出し箇所（第5引数を渡さない箇所）は無改修でコンパイルが通る。
  */
-type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData, extractedSessionId?: string) => void;
+type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData, extractedSessionId?: string, stopReason?: string) => void;
 
 export async function startAiSession(
   sessionId: string,
@@ -847,10 +852,13 @@ async function sendPromptToAiSdk(
     proxyEnv.https_proxy = proxyUrl;
   }
 
+  // #377: maxTurns は env DEVRELAY_SDK_MAX_TURNS で上書き可能（既定 400、plan/exec 共通）
+  const sdkMaxTurns = resolveSdkMaxTurns(process.env);
+
   /** SDK query のオプション構築 */
   const sdkOptions: Parameters<typeof query>[0]['options'] = {
     cwd: projectPath,
-    maxTurns: 200,
+    maxTurns: sdkMaxTurns,
     settingSources: ['user', 'project'],
     env: {
       ...process.env,
@@ -1102,13 +1110,14 @@ async function sendPromptToAiSdk(
     const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
     const key = reason === 'compactLoop' ? 'loopGuard.compactLoop' : reason === 'toolRepeat' ? 'loopGuard.toolRepeat' : 'loopGuard.wallClock';
     console.log(`[claude/sdk] 🛑 loop-guard triggered: reason=${reason} detail=${JSON.stringify(detail ?? {})}`);
+    // #377: loop-guard による強制停止も stopReason='aborted' として伝播する
     onOutput(tChat(lang, key, {
       compacts: detail?.compacts ?? 0,
       preTokens: detail?.preTokens ?? 0,
       minutes: detail?.minutes ?? 0,
       repeats: detail?.repeats ?? 0,
       tool: detail?.tool ?? '',
-    }), true);
+    }), true, undefined, undefined, 'aborted');
     result.sessionDiscarded = true;
     if (options.persistProjectState !== false) {
       try {
@@ -1309,8 +1318,20 @@ async function sendPromptToAiSdk(
         };
         console.log(`[claude/sdk] 💾 Usage data captured: duration=${m.duration_ms}ms`);
 
-        // resume 失敗検出
-        if (m.is_error && options.resumeSessionId) {
+        // #377: subtype から打ち切り理由を判定する（resumeFailed 判定より必ず前に行う）。
+        // error_max_turns は is_error: true として返ってくるため、判定前に resumeFailed へ回すと
+        // 「resume 失敗」と誤認され、connection.ts が composeFullPrompt(true) でプロンプト全体を
+        // 再実行してしまう（打ち切り報告自体も送られなくなる）。
+        const { stopReason, unknownSubtype } = mapResultSubtypeToStopReason(m.subtype, m.is_error);
+        if (unknownSubtype) {
+          console.log(`[claude/sdk] ⚠️ Unknown SDK result subtype=${String(m.subtype)}`);
+        }
+        if (stopReason !== 'success') {
+          console.log(`[claude/sdk] ⚠️ SDK result subtype=${String(m.subtype)} (maxTurns=${sdkMaxTurns}, turns=${m.num_turns ?? 'unknown'})`);
+        }
+
+        // resume 失敗検出（#377: max_turns は resume 失敗ではないため除外する）
+        if (m.is_error && options.resumeSessionId && stopReason !== 'max_turns') {
           console.log(`[claude/sdk] ⚠️ Result is error with --resume, flagging for retry`);
           result.resumeFailed = true;
         }
@@ -1333,12 +1354,12 @@ async function sendPromptToAiSdk(
         // （最終 onOutput より前、応答内容自体には影響しない）
         await finalizeAutoCompactRotation();
         if (fullOutput.length === 0) {
-          onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
+          onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId, stopReason);
         } else {
-          onOutput('', true, result.usageData, result.extractedSessionId);
+          onOutput('', true, result.usageData, result.extractedSessionId, stopReason);
         }
         completionSent = true;
-        console.log(`[claude/sdk] 📨 Completion sent from result handler (fullOutput=${fullOutput.length} chars)`);
+        console.log(`[claude/sdk] 📨 Completion sent from result handler (fullOutput=${fullOutput.length} chars, stopReason=${stopReason})`);
         return result;
       }
     }

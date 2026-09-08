@@ -2030,3 +2030,25 @@ MCP `submit_instruction`（plan）→ `approve_implementation`（exec）の subm
 6. **Windows agent は core#376 未移植**（#348 / #375 も未適用のため今回のスコープに含めなかった）。
    Windows 機からの MCP `approve_implementation` は `Session.planAiSessionId` が null のまま
    `evaluateApproveGuard()` の `planAiSessionMissing` で fail-closed になる（安全側。対話経路には影響しない）。
+
+---
+
+## SDK maxTurns 打ち切りの可視化（#377）
+
+1. **SDK maxTurns は env `DEVRELAY_SDK_MAX_TURNS` で上書き可能（既定 400、plan/exec 共通）**。
+   到達時（`result.subtype === 'error_max_turns'`）は `stopReason='max_turns'` として最後まで報告し、
+   `isComplete`/`done` は従来どおり `true` のまま維持する（「打ち切りだが完了報告はする」設計。
+   MCP クライアントは `get_build_status` の `truncated`/`stopReason` フィールドで打ち切りを判別する）。
+2. **`error_max_turns` は SDK 型定義上 `is_error: true` を伴う**ため、resume 失敗判定
+   （`is_error && resumeSessionId` → `resumeFailed = true` → `composeFullPrompt(true)` で全プロンプト再実行）
+   に誤って食われないよう、`stopReason` 判定は resume 失敗判定より必ず前に行い、
+   `stopReason === 'max_turns'` を resume 失敗から明示的に除外すること。
+   `error_max_budget_usd` 等の他のエラー系 subtype は本サイクルでは対象外（引き続き resume 失敗経路に乗る）。
+3. **env は crontab `@reboot` 行の `export` でしか渡せない**（稼働中の Agent は
+   `.env`/dotenv/`config.yaml` の `env` セクションを持たない）。`DEVRELAY_SDK_MAX_TURNS` を変更する場合は
+   `crontab -e` で該当行を編集し、OS 再起動または Agent プロセス再起動が必要。
+4. **MCP 経由の Session は exec 完了後も ended にしない**（24h cleanup に委ねる）。
+   変更する場合は本サイクルのスコープ外・別サイクルで扱うこと。
+5. `⚠️` 打ち切りマークは `output`/`BuildLog.summary` の元データには混ぜず、
+   `get_build_status` の `summary` と完了通知の先頭にのみ付与する（`applyStopReasonMark()`）。
+   `extractBuildSummary()` には常に生の `output` を渡すこと（200 文字要約の予算をマークに奪わせない）。

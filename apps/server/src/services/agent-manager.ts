@@ -48,6 +48,7 @@ import type { ManagementInfo } from '@devrelay/shared';
 import { decideClaudeAuthUpdate } from './claude-auth-precedence.js';
 import { validateOAuthCode } from './claude-login-code.js';
 import { shouldRecordPlanAiSession, buildPlanAiSessionWhere } from './submission-guard.js';
+import { normalizeStopReason, isStopReasonTruncated } from './stop-reason.js';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
 const MIN_PROTOCOL_VERSION = 0; // TODO: revert to 1 after agent update
@@ -610,8 +611,8 @@ async function handleProjectsUpdate(machineId: string, projects: Project[]) {
   await reconcileProjects(machineId, projects);
 }
 
-async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[]; usageData?: any; isExec?: boolean; execPrompt?: string; aiSessionId?: string; aiTool?: string; turnId?: string }) {
-  const { sessionId, output, isComplete, files, usageData, isExec, execPrompt, aiSessionId, aiTool, turnId } = payload;
+async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[]; usageData?: any; isExec?: boolean; execPrompt?: string; aiSessionId?: string; aiTool?: string; turnId?: string; stopReason?: string }) {
+  const { sessionId, output, isComplete, files, usageData, isExec, execPrompt, aiSessionId, aiTool, turnId, stopReason } = payload;
 
   console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}${isExec ? ' [EXEC]' : ''}`);
 
@@ -643,10 +644,18 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
       // early return せず、通常のメッセージ保存フローに進む
     }
 
+    // #377: stopReason を正規化し、途中終了時のみローカライズ済みマークを用意する。
+    // マークは output 自体には混ぜず、DB 保存内容と完了通知の先頭にのみ付与する
+    // （extractBuildSummary() には生の output を渡すため要約の 200 文字予算を圧迫しない）。
+    const sr = normalizeStopReason(stopReason);
+    const truncated = isStopReasonTruncated(sr);
+    const lang = await resolveSessionLanguage(sessionId);
+    const mark = truncated ? tChat(lang, 'buildStatus.truncatedMark', { stopReason: sr }) : '';
+
     // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
     // contextInfo（📊 Rate Limit 等）を含めて保存（WS 配信内容と DB 内容を一致させる）
     const contextPrefix = getSessionContextInfo(sessionId);
-    const contentWithContext = contextPrefix + output;
+    const contentWithContext = contextPrefix + mark + output;
     const aiMessage = await prisma.message.create({
       data: {
         sessionId,
@@ -680,7 +689,9 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
     // BuildLog: exec 実行完了時にビルドログを自動作成
     // フォールバックサマリー（先頭200文字）で即座に作成し、
     // 非同期で AI 要約を生成して DB を上書きする（fire-and-forget）
-    if (isExec && output.trim()) {
+    // #377: 出力が空でも打ち切り（stopReason !== 'success'）なら BuildLog を作成する
+    // （途中終了の記録を欠落させないため。output.trim() だけのゲートだと空出力の打ち切りが素通りしていた）
+    if (isExec && (output.trim() || truncated)) {
       try {
         const session = await prisma.session.findUnique({
           where: { id: sessionId },
@@ -698,6 +709,7 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
             userId: session.userId,
             summary: fallbackSummary,
             prompt: execPrompt,
+            stopReason: sr,
           });
           console.log(`📋 BuildLog #${buildNumber} created for ${session.project.name}`);
 
@@ -721,7 +733,9 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
     }
 
     // Finalize progress with final message（DB メッセージ ID を付与して WS 配信）
-    await finalizeProgress(sessionId, output, files, aiMessage.id);
+    // #377: マークは DB 保存内容（contentWithContext）と同様にここでも先頭に付与する
+    // （mark + contextPrefix... にすると DB と Discord/Web で並び順が食い違うため、常に mark を output 側に付ける）
+    await finalizeProgress(sessionId, mark + output, files, aiMessage.id);
   } else {
     // Append partial output to progress buffer
     appendSessionOutput(sessionId, output);
@@ -805,6 +819,7 @@ async function createBuildLog(params: {
   userId: string;
   summary: string;
   prompt?: string;
+  stopReason?: string;
 }): Promise<number> {
   const MAX_RETRIES = 3;
 
@@ -830,6 +845,7 @@ async function createBuildLog(params: {
             userId: params.userId,
             summary: params.summary,
             prompt: params.prompt,
+            stopReason: params.stopReason,
           },
         });
 

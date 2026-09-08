@@ -237,6 +237,11 @@ export interface AiOutputPayload {
    * サーバー側が plan ターン送信時の turnId と完了報告の turnId を突き合わせて対応付けに使う。
    */
   turnId?: string;
+  /**
+   * #377: AI 実行の終了理由。'success' | 'max_turns' | 'error' | 'aborted'。
+   * 未指定（旧 agent）は 'success' 扱いとしてサーバー側で正規化する。
+   */
+  stopReason?: string;
 }
 
 export interface AiStatusPayload {

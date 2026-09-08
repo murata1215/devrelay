@@ -6,6 +6,35 @@
 
 ## 実装済み機能
 
+### #377: SDK maxTurns 打ち切りの可視化と上限の設定可能化 (2026-09-08)
+
+Claude Agent SDK が `maxTurns` 上限に到達して打ち切られても、DevRelay がこれまで「正常完了」として
+報告していた問題を修正。実測（打ち切りexec 2件が228/209ツール呼び出し、正常完了2件が84/28）で確定した
+とおり、result メッセージの `subtype`（`success` / `error_max_turns` / `error_during_execution` /
+`error_max_budget_usd` / `error_max_structured_output_retries`）を一切見ずに `isComplete=true` を
+送っていたことが原因。
+
+- **agent（linux/macos）**: 新規 `sdk-stop-reason.ts`（外部 import ゼロ・両 OS byte-for-byte 同一）で
+  `mapResultSubtypeToStopReason()` により `stopReason`（`'success'` | `'max_turns'` | `'error'` | `'aborted'`）
+  を判定し、`OutputCallback` 第 5 引数として完了報告に伝播。`maxTurns` は既定 200→400 に引き上げ、
+  env `DEVRELAY_SDK_MAX_TURNS` で上書き可能（crontab `@reboot` 行の `export` 経由のみ、`.env`/`config.yaml`
+  からは渡せない）
+- **【最重要の修正】resume 誤判定の解消**: `error_max_turns` は SDK 型定義上 `is_error: true` を伴うため、
+  従来コードの `if (m.is_error && options.resumeSessionId) { resumeFailed = true }` に食われ、
+  打ち切り報告が送られないばかりか `connection.ts` が `composeFullPrompt(true)` でプロンプト全体を
+  再実行していた（実測 228/209 回の正体）。stopReason 判定を resumeFailed 判定より前に行い、
+  `stopReason === 'max_turns'` を resumeFailed から除外することで解消
+- **server**: `BuildLog` に `stopReason String?` を追加（手順は `doc/migrations/377_sdk_max_turns_stop_reason.md`）。
+  新規 `stop-reason.ts`（`normalizeStopReason`/`isStopReasonTruncated`/`applyStopReasonMark`）を使い、
+  `agent-manager.ts` は途中終了時に DB 保存内容・完了通知の先頭へローカライズ済みマーク
+  （`⚠️ 途中終了（{stopReason}）: `）を付与（`output` 自体には混ぜない）。空出力の打ち切りでも
+  BuildLog を作成するようゲートを緩和。`get_build_status`（MCP）に `truncated`/`stopReason` を追加
+  （既存フィールドの型・意味は無変更）
+- **対象 OS**: Linux / macOS。Windows は `maxTurns` を持たない CLI spawn 経路のためスコープ外
+  （`stopReason` 未送信 → サーバー側で `'success'` 扱い、従来どおり）
+- **反映**: ALTER 1 本 → `npx prisma generate && pnpm build` → `pm2 restart devrelay-server` → 全 Linux/macOS `u`
+  （ロールバックは crontab に `DEVRELAY_SDK_MAX_TURNS=200` を追記）
+
 ### #376（旧 core#336）: MCP submission 単位の会話セッション境界導入 (2026-09-08)
 
 MCP `submit_instruction`（plan）→ `approve_implementation`（exec）の submission 単位で会話セッションの境界を分離。

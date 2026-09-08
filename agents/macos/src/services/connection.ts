@@ -1389,7 +1389,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.aiTool,
       sessionInfo.claudeSessionId,
       currentConfig,
-      async (output, isComplete, usageData, extractedSessionId) => {
+      async (output, isComplete, usageData, extractedSessionId, stopReason) => {
         // #276: ⏳ 始まりは進捗専用チャンク。サーバーへは流す（進捗ボックス表示 + タイムアウトリセット）が、
         // 最終保存メッセージ responseText には含めない（最終回答の汚染防止）。
         if (!output.startsWith('⏳')) {
@@ -1463,6 +1463,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               aiSessionId: extractedSessionId,
               aiTool: sessionInfo.aiTool,
               turnId: payload.turnId,
+              // #377: AI 実行の終了理由（'success' | 'max_turns' | 'error' | 'aborted'）。
+              // Claude SDK 経路のみ実値。他ツールは undefined のままサーバー側で 'success' 正規化。
+              stopReason,
             },
           });
 
@@ -1549,7 +1552,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         sessionInfo.aiTool,
         sessionInfo.claudeSessionId,
         currentConfig,
-        async (output, isComplete, usageData, extractedSessionId) => {
+        async (output, isComplete, usageData, extractedSessionId, stopReason) => {
           // #276: ⏳ 始まりは進捗専用チャンク（最終保存メッセージには含めない）。
           if (!output.startsWith('⏳')) {
             responseText += output;
@@ -1582,6 +1585,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 aiSessionId: extractedSessionId,
                 aiTool: sessionInfo.aiTool,
                 turnId: payload.turnId,
+                // #377: AI 実行の終了理由（'success' | 'max_turns' | 'error' | 'aborted'）。
+                // Claude SDK 経路のみ実値。他ツールは undefined のままサーバー側で 'success' 正規化。
+                stopReason,
               },
             });
 

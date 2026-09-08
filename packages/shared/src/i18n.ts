@@ -296,6 +296,12 @@ export const chatMessages = {
     ja: '🔄 **お知らせ: セッションをローテーションしました（auto-compact の多発）**\n今回のターンで auto-compact が{count}回発生しました（しきい値: {threshold}回）。会話履歴が肥大化しているサインのため、このターン自体は最後まで完了しましたが、次のメッセージからは新規セッションで開始します（resume しません）。サマリーがこれ以上肥大化するのを防ぐための予防的な措置です。',
   },
 
+  // --- #377: SDK maxTurns 打ち切りの可視化（get_build_status / BuildLog 完了通知の先頭マーク） ---
+  'buildStatus.truncatedMark': {
+    en: '⚠️ Stopped early ({stopReason}): ',
+    ja: '⚠️ 途中終了（{stopReason}）: ',
+  },
+
   // --- 権限/セキュリティ ---
   'security.permissionDenied': { en: '🔒 You do not have permission to run commands.', ja: '🔒 コマンドを実行する権限がありません。' },
   'security.ipRestricted': {

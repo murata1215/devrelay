@@ -364,6 +364,7 @@ model BuildLog {
   summary      String   // AI 応答先頭部分から自動生成された要約
   prompt       String?  // exec 時のプロンプト（カスタムプロンプトまたはデフォルト）
   createdAt    DateTime @default(now())
+  stopReason   String?  // #377: AI 実行の終了理由（'success' | 'max_turns' | 'error' | 'aborted'）。未指定は旧 agent（success 扱い）
 
   @@unique([projectName, buildNumber])  // プロジェクト名+ビルド番号で一意
   @@index([projectName])                // プロジェクト名での検索用
