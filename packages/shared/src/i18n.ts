@@ -374,8 +374,8 @@ export const chatMessages = {
 
   // --- Devin モデル選択サイクル・サイクル B（変更5）: ATIF から読み取った実モデル名の1行通知 ---
   'devin.modelUsed': {
-    en: '🧠 Devin model: {modelName} (`{modelId}`)',
-    ja: '🧠 Devin のモデル: {modelName}（`{modelId}`）',
+    en: '🧠 Devin model: {modelName} ({modelId})',
+    ja: '🧠 Devin のモデル: {modelName}（{modelId}）',
   },
 
   // --- 欠陥1対策（プランモード「無言で途中終了」検知）: ATIF の最後のステップがツール呼び出しで

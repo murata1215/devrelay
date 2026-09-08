@@ -14,6 +14,7 @@ import {
   extractRejectionEvidence,
   extractBlockedCommands,
   sliceStepsFromOffset,
+  formatStepTitle,
 } from '../dist/services/devin-atif.js';
 
 // observation.results[].content に埋め込む漏洩検出用マーカー（このマーカーが返り値に一切現れないことを担保する）
@@ -121,15 +122,15 @@ test('summarizeAtifEntry: tool_calls[0].function_name + arguments.command を正
   assert.deepEqual(s, { tool: 'bash', title: 'ls -la /tmp' });
 });
 
-test('summarizeAtifEntry: arguments.command は80文字にスライスされる', () => {
+test('summarizeAtifEntry: arguments.command は80文字+「…」に切り詰められる（#374）', () => {
   const longCommand = 'x'.repeat(100);
   const s = summarizeAtifEntry({
     source: 'agent',
     tool_calls: [{ function_name: 'str_replace_editor', arguments: { command: longCommand } }],
   });
   assert.equal(s.tool, 'str_replace_editor');
-  assert.equal(s.title, longCommand.slice(0, 80));
-  assert.equal(s.title.length, 80);
+  assert.equal(s.title, `${longCommand.slice(0, 80)}…`);
+  assert.equal(s.title.length, 81);
 });
 
 test('summarizeAtifEntry: tool_calls はあるが arguments.command が無ければ title は null', () => {
@@ -190,6 +191,68 @@ test('summarizeAtifEntry: observation.results[].content は一切参照しない
     observation: { results: [{ content: LEAK_MARKER }] },
   });
   assert.equal(JSON.stringify(s).includes(LEAK_MARKER), false);
+});
+
+// --- formatStepTitle（#374） ---
+
+test('formatStepTitle: maxLength ちょうどの長さでは「…」を付けない', () => {
+  const exact = 'y'.repeat(80);
+  assert.equal(formatStepTitle(exact, 80), exact);
+  assert.equal(formatStepTitle(exact, 80).length, 80);
+});
+
+test('formatStepTitle: maxLength を1文字でも超えたら末尾に「…」を付けて切り詰める', () => {
+  const over = 'y'.repeat(81);
+  const result = formatStepTitle(over, 80);
+  assert.equal(result, `${'y'.repeat(80)}…`);
+  assert.equal(result.length, 81);
+});
+
+test('formatStepTitle: 改行/タブ等の空白文字を半角スペース1個へ畳む（複数行テキストが1行の🧭表示に混ざらないように）', () => {
+  assert.equal(formatStepTitle('line1\nline2\r\nline3\ttab', 100), 'line1 line2 line3 tab');
+});
+
+test('formatStepTitle: 前後の空白はトリムされる', () => {
+  assert.equal(formatStepTitle('  padded  ', 100), 'padded');
+});
+
+test('formatStepTitle: サロゲートペアを分断しない（絵文字の途中で切らない）', () => {
+  // U+1F600 (😀) はサロゲートペア（\uD83D\uDE00）。ペア境界のちょうど手前で切れるケースを作る。
+  const emoji = '\uD83D\uDE00'; // 😀
+  const text = 'x'.repeat(79) + emoji; // 79 文字目までが 'x'、80文字目(コードユニット)が上位サロゲート
+  const result = formatStepTitle(text, 80);
+  // 80文字目で切ると上位サロゲートだけが残ってしまうため、79文字まで戻してから「…」を付ける
+  assert.equal(result, `${'x'.repeat(79)}…`);
+  // 孤立サロゲート（壊れた UTF-16）が含まれていないことを確認
+  assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(result), false);
+});
+
+test('formatStepTitle: 空文字はそのまま空文字', () => {
+  assert.equal(formatStepTitle('', 80), '');
+});
+
+// --- endedWithoutAnswer 非退行テスト（#374でai-runner.ts側にtool===nullフィルタを追加したが、
+//     devin-atif.ts のパース結果・endedWithoutAnswer() 自体は一切変更していないことを確認する） ---
+
+test('endedWithoutAnswer: #374 のフィルタは表示層のみであり、summarizeAtifEntry は引き続き tool:null のテキスト応答ステップを返す', () => {
+  const s = summarizeAtifEntry({ source: 'agent', message: 'Final answer text.' });
+  assert.deepEqual(s, { tool: null, title: 'Final answer text.' });
+});
+
+test('endedWithoutAnswer: 最後がテキスト応答（tool:null）なら false のまま（回帰なし）', () => {
+  const steps = [
+    { tool: 'bash', title: 'ls' },
+    { tool: null, title: 'Done.' },
+  ];
+  assert.equal(endedWithoutAnswer(steps), false);
+});
+
+test('endedWithoutAnswer: 最後がツール呼び出し（tool!=null）のままなら true（プランモード無言終了検知の回帰なし）', () => {
+  const steps = [
+    { tool: null, title: 'Thinking...' },
+    { tool: 'bash', title: 'rm -rf /tmp/x' },
+  ];
+  assert.equal(endedWithoutAnswer(steps), true);
 });
 
 // --- extractAtifModel ---

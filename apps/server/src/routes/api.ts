@@ -7,6 +7,7 @@ import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
+import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
 import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
@@ -693,7 +694,9 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     try {
-      const result = await requestLatestPlanFile(project.machineId);
+      // #375: projectPath を渡してプロジェクトスコープにする。
+      // 渡さないと machineId スコープになり、同一マシンの別プロジェクトのプランが返る（#246）。
+      const result = await requestLatestPlanFile(project.machineId, project.path);
       return { filename: result.filename, content: result.content };
     } catch (err: any) {
       return reply.status(500).send({ error: err.message || 'Failed to read plan file' });
@@ -897,6 +900,11 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'managerRedirect must be true or false' });
     }
 
+    // #372: 組織AIデフォルトでロックされているモデル設定キーは変更を拒否する
+    if (await isModelSettingLocked(userId, key)) {
+      return reply.status(403).send({ error: 'この設定は組織管理者によりロックされています' });
+    }
+
     // API キー・トークンは暗号化して保存
     const shouldEncrypt = key.includes('api_key') || key.includes('secret') || key.includes('token');
     const storedValue = shouldEncrypt ? encrypt(value) : value;
@@ -911,10 +919,17 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // 設定削除
-  app.delete('/api/settings/:key', async (request) => {
+  app.delete('/api/settings/:key', async (request, reply) => {
     // @ts-ignore
     const userId = request.user.id;
     const { key } = request.params as { key: string };
+
+    // #372: 組織AIデフォルトでロックされているモデル設定キーは削除も拒否する
+    // （削除すると undefined になり decideEffectiveModel の org フォールバックは効くが、
+    //  ロック中に個人操作を受理したように見せない明示拒否のほうが挙動が分かりやすいため）
+    if (await isModelSettingLocked(userId, key)) {
+      return reply.status(403).send({ error: 'この設定は組織管理者によりロックされています' });
+    }
 
     await prisma.userSettings.delete({
       where: { userId_key: { userId, key } },

@@ -9,6 +9,7 @@ import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 import type { AiProvider, ModelSelectableAiTool, Language } from '@devrelay/shared';
 import { isLanguage, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import { resolveOrgAiContext, decideEffectiveModel } from './org-ai-defaults.js';
 
 // 設定キーの定義
 export const SettingKeys = {
@@ -197,14 +198,21 @@ export function modelSettingKey(aiTool: ModelSelectableAiTool, mode: 'plan' | 'e
 /**
  * AI ツール + モード（plan/exec）に対応するモデル設定値を解決する
  * 未設定の場合は undefined（呼び出し側で CLI/SDK のデフォルトに委ねる）
+ *
+ * #372: 組織 AI デフォルト（`Organization.aiModelDefaults`）とメンバーの
+ * `canOverrideAiSettings` を考慮した実効値を返す（単一情報源、判定は
+ * `decideEffectiveModel()` に集約。`agent-manager.ts` 側は無変更で対応済み）。
  */
 export async function resolveModelForTool(
   userId: string,
   aiTool: ModelSelectableAiTool,
   mode: 'plan' | 'exec',
 ): Promise<string | undefined> {
-  const value = await getUserSetting(userId, modelSettingKey(aiTool, mode));
-  return value || undefined;
+  const key = modelSettingKey(aiTool, mode);
+  const userValue = (await getUserSetting(userId, key)) || undefined;
+  const { orgDefaults, canOverride } = await resolveOrgAiContext(userId);
+  const { value } = decideEffectiveModel({ userValue, orgDefault: orgDefaults[key], canOverride });
+  return value;
 }
 
 /**

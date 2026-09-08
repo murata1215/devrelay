@@ -73,6 +73,31 @@ export function extractAtifEntries(parsed: unknown): unknown[] {
 }
 
 /**
+ * ATIF ステップのタイトル文字列を表示用に整形する（#374）。
+ *
+ * 素の `.slice(0, n)` には 2 つの問題がある。
+ * 1. 切り詰められたのか元々短いのか区別が付かない（実例: `.devrelay-output` というコマンド引数が
+ *    ちょうど 80 文字目で `.devrelay-ou` のまま `…` も無く表示され、返信が「途中で切れた」ように見えた）。
+ * 2. 複数行のテキスト（AI のテキスト回答等）がそのまま 1 行の 🧭 表示行に流れ込み読みにくくなる。
+ *
+ * `packages/shared/src/text.ts` の `truncateSafe()` と同じ規則（サロゲートペアを分断しない）を
+ * ローカルに再実装する（この関数群は外部 import ゼロの流儀を維持するため、shared を import しない）。
+ *
+ * @param text 整形対象の生テキスト
+ * @param maxLength 最大文字数（この長さを超える場合のみ末尾に `…` を付与、サフィックスを含まない）
+ * @returns 改行/タブ等の空白文字を半角スペース 1 個へ畳み、必要なら `…` を付けて切り詰めた文字列
+ */
+export function formatStepTitle(text: string, maxLength: number): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= maxLength) return collapsed;
+  let cut = maxLength;
+  // 切断位置の直前が上位サロゲート（サロゲートペアの1文字目）なら、ペアを割らないよう 1 文字戻す
+  const code = collapsed.charCodeAt(cut - 1);
+  if (cut > 0 && code >= 0xd800 && code <= 0xdbff) cut--;
+  return `${collapsed.slice(0, cut)}…`;
+}
+
+/**
  * ATIF 1 エントリを表示用の要約（ツール名 + タイトル）に変換する。
  * 非オブジェクト（pretty-print された配列末尾のスカラー行等）は必ず null を返すため、
  * これ自体がステップ数の誤カウントに対する構造的なガードになる。
@@ -98,7 +123,7 @@ export function summarizeAtifEntry(entry: unknown): AtifStepSummary | null {
         const command = args && typeof args === 'object' && typeof (args as Record<string, unknown>).command === 'string'
           ? ((args as Record<string, unknown>).command as string)
           : null;
-        return { tool, title: command ? command.slice(0, 80) : null };
+        return { tool, title: command ? formatStepTitle(command, 80) : null };
       }
     }
   }
@@ -113,16 +138,16 @@ export function summarizeAtifEntry(entry: unknown): AtifStepSummary | null {
       || (typeof e.command === 'string' && e.command)
       || (typeof e.action === 'string' && e.action)
       || null;
-    return { tool: legacyTool, title: legacyTitle ? legacyTitle.slice(0, 80) : null };
+    return { tool: legacyTool, title: legacyTitle ? formatStepTitle(legacyTitle, 80) : null };
   }
 
   // tool_calls を持たない agent エントリ（テキスト応答ステップ）
   if (e.source === 'agent' && typeof e.message === 'string' && e.message) {
-    return { tool: null, title: e.message.slice(0, 80) };
+    return { tool: null, title: formatStepTitle(e.message, 80) };
   }
 
   if (typeof e.title === 'string' && e.title) {
-    return { tool: null, title: e.title.slice(0, 100) };
+    return { tool: null, title: formatStepTitle(e.title, 100) };
   }
   if (typeof e.type === 'string' && e.type) {
     return { tool: null, title: `[${e.type}]` };

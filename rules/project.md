@@ -722,6 +722,30 @@ Servers タブで単にクリックしただけ」でも、現在アクティブ
 のまま 1 引数でしか呼ばれないため、`onSelectProject` 側に optional な第2引数を追加しても型的に安全（誤って
 `true` が渡り込む経路は無い）。ref 経由の最新値参照や登録処理を早期 return より前に置く配置は #369 のまま維持する。
 
+### `visibleTabs` の「アクティブタブは常に表示」例外は撤去し、貼り替えで整合を取ること（#371）
+
+#369 は `visibleTabs` に `|| t.projectId === activeTabId`（アクティブなタブは選択中サーバーに属さなくても
+常に表示対象に含める）という例外条項を持たせていたが、これが原因で **`activeServerId` を切り替えても
+`activeTabId` が前のサーバーのプロジェクトを指したままだと、そのタブがタブバーに残り続ける**リグレッション
+になっていた（例: TISA を選択しても直前にアクティブだった別サーバー配下のタブが表示され続ける）。
+
+この例外条項は撤去した。`activeServerId` と `activeTabId` の整合は「フィルタ側で例外を作る」のではなく、
+以下の **3 経路で `activeTabId` を貼り替える**ことで担保する。
+
+1. `handleSelectServer`: 選択したサーバーに現在の `activeTabId` が属していなければ、そのサーバーに属する
+   最初の「開いているタブ」へ貼り替える（開いているタブが無ければ何もしない — サーバー選択だけで新規に
+   タブを開くと `saveTabOrder` 等の永続状態が書き変わってしまうため）。
+2. `handleSelectProject`: 選択したプロジェクトが現在の `activeServerId`（非空）に属さない場合、そのプロジェクト
+   を含むサーバーへ `activeServerId` 側を追従させる（無ければ「すべて」に落とす）。ただし `registerToActiveServer`
+   による自動登録（#369/#370）が同一呼び出し内で発火した場合、`serversRef.current` は同一レンダー内では
+   更新前の値のままなので、この追従判定はスキップすること（今まさに追加したプロジェクトを「属していない」と
+   誤判定してしまうため）。
+3. マウント時復元: 復元した `activeServerId`（非空・`projectIds` を持つ）に属する最初の開いているタブを
+   初期アクティブタブに選ぶ。属するタブが無い/サーバーが空/「すべて」の場合は従来どおり先頭タブにフォールバック。
+
+空サーバー（`projectIds.length === 0`）を `visibleTabs` のフィルタから除外する #369 の例外（D&D の唯一の
+ドラッグ元を失わないための救済）は撤去せず維持すること。
+
 ---
 
 ## Agent プロキシ環境変数注入
@@ -1980,3 +2004,29 @@ push する。
 - **反映**: A〜D はローカル commit のみで進め、push は本サイクル（E）でまとめて実施する方針を最初から
   採用（挙動変更ゼロのサイクルを単独で `u` しても意味がないため）。実際に挙動が変わるのは C の内容が
   各マシンに届いた瞬間のみ。
+
+---
+
+## 会話セッション境界（MCP submission 単位、core#376 / 旧 core#336）
+
+MCP `submit_instruction`（plan）→ `approve_implementation`（exec）の submission 単位で
+会話セッションの境界を分離する設計。以下は実装時に確定した契約・設計判断。
+
+1. **会話セッションの並行は保証するが、同一 project の exec 並行実行は保証しない**（排他制御は別サイクル）。
+   `agentScopeId` によるファイル分離は「別々の resume 先/履歴を持てる」ことのみを保証し、
+   同時に複数の exec が同一プロジェクトディレクトリへ書き込む場合の競合防止（ファイルロック等）はスコープ外。
+2. **`agentScopeId` は現時点で `submissionId` と同値だが契約上は独立**の識別子として扱う。
+   agent 側のコード（`resolveScopeDir()` 等）は `submissionId` という名前・型に直接依存せず、
+   汎用的な「スコープ識別子」として受け渡しする（将来 submissionId 以外の粒度でスコープを切る余地を残す）。
+3. **plan→exec の紐付けは `Session.planAiSessionId` + exec payload の `resumeSessionId` で保証**し、
+   agent 側のファイル（`conversation.json`/`claude-session-id` 等）には依存しない。
+   サーバー側 DB が正であり、agent はサーバーから渡された `resumeSessionId` に従うだけの受動的な役割。
+4. **resume の優先順位**: `resumeSessionId`（明示） > `forceNewSession` > スコープ内保存 ID。
+   判定ロジックは `resume-priority.ts` の `decideResume()` に集約（linux/macos で byte-for-byte 同一）。
+5. **`planAiSessionId` は起動元ターン（`planTurnId`）へ対応付けた plan 完了報告からのみ保存する**
+   （`submission-guard.ts` の `shouldRecordPlanAiSession()`/`buildPlanAiSessionWhere()`）。
+   `planTurnId` 一致を where 句の必須条件にすることで、遅延して届いた exec/retry の完了報告が
+   plan の記録を誤って上書きすることを構造的に防ぐ。
+6. **Windows agent は core#376 未移植**（#348 / #375 も未適用のため今回のスコープに含めなかった）。
+   Windows 機からの MCP `approve_implementation` は `Session.planAiSessionId` が null のまま
+   `evaluateApproveGuard()` の `planAiSessionMissing` で fail-closed になる（安全側。対話経路には影響しない）。

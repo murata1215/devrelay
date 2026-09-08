@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { org as orgApi } from '../lib/api';
 import type {
   OrgSupervisedMember,
@@ -31,9 +32,11 @@ export function MemberActivityPage() {
   const { t } = useLanguage();
   const { organization } = useOrganization();
   const canSupervise = organization?.role === 'admin' || organization?.role === 'manager';
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [members, setMembers] = useState<OrgSupervisedMember[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>('');
+  const [notSupervisedNotice, setNotSupervisedNotice] = useState<string | null>(null);
 
   const [sessions, setSessions] = useState<OrgMemberSession[]>([]);
   const [total, setTotal] = useState(0);
@@ -46,6 +49,8 @@ export function MemberActivityPage() {
   const [fromInput, setFromInput] = useState('');
   const [toInput, setToInput] = useState('');
   const [appliedFilters, setAppliedFilters] = useState<{ q: string; from: string; to: string }>({ q: '', from: '', to: '' });
+  // 空セッション（Agent 接続のたびに作られメッセージ0件のもの）を表示するか。既定は非表示
+  const [includeEmpty, setIncludeEmpty] = useState(false);
 
   // 要約生成中のセッション ID 集合
   const [summarizing, setSummarizing] = useState<Set<string>>(new Set());
@@ -62,9 +67,21 @@ export function MemberActivityPage() {
       .myMembers()
       .then(({ members }) => {
         setMembers(members);
-        if (members.length > 0) setSelectedUserId((prev) => prev || members[0].userId);
+        if (members.length === 0) return;
+        const requestedUserId = searchParams.get('userId');
+        if (requestedUserId) {
+          const found = members.some((m) => m.userId === requestedUserId);
+          if (found) {
+            setSelectedUserId(requestedUserId);
+            setNotSupervisedNotice(null);
+            return;
+          }
+          setNotSupervisedNotice('指定されたメンバーは監視対象ではありません。一覧の先頭のメンバーを表示しています。');
+        }
+        setSelectedUserId((prev) => prev || members[0].userId);
       })
       .catch(() => setMembers([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canSupervise]);
 
   // セッション一覧を取得
@@ -79,6 +96,7 @@ export function MemberActivityPage() {
         q: appliedFilters.q || undefined,
         from: appliedFilters.from ? new Date(appliedFilters.from).toISOString() : undefined,
         to: appliedFilters.to ? new Date(appliedFilters.to).toISOString() : undefined,
+        includeEmpty,
       });
       setSessions(res.sessions);
       setTotal(res.total);
@@ -89,7 +107,7 @@ export function MemberActivityPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedUserId, page, appliedFilters]);
+  }, [selectedUserId, page, appliedFilters, includeEmpty]);
 
   useEffect(() => {
     loadSessions();
@@ -98,8 +116,10 @@ export function MemberActivityPage() {
   // ユーザー切り替え時はページ・フィルタをリセット
   const handleSelectUser = (userId: string) => {
     setSelectedUserId(userId);
+    setNotSupervisedNotice(null);
     setPage(0);
     setDetail(null);
+    setSearchParams({ userId });
   };
 
   // フィルタ適用
@@ -250,6 +270,14 @@ export function MemberActivityPage() {
         >
           クリア
         </button>
+        <label className="flex items-center gap-1.5 text-sm text-[var(--text-secondary)] cursor-pointer select-none px-1 py-2">
+          <input
+            type="checkbox"
+            checked={includeEmpty}
+            onChange={(e) => { setIncludeEmpty(e.target.checked); setPage(0); }}
+          />
+          空のセッションも表示
+        </label>
         {unsummarizedIds.length > 0 && (
           <button
             onClick={() => handleSummarize(unsummarizedIds)}
@@ -262,6 +290,11 @@ export function MemberActivityPage() {
         )}
       </div>
 
+      {notSupervisedNotice && (
+        <div className="mb-3 text-sm text-yellow-600 bg-yellow-500/10 border border-yellow-500/30 rounded-md px-3 py-2">
+          {notSupervisedNotice}
+        </div>
+      )}
       {summarizeError && (
         <div className="mb-3 text-sm text-red-500 bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2">
           {summarizeError}

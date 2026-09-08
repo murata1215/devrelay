@@ -46,6 +46,7 @@ model Organization {
   logo             Bytes?              // 会社ロゴ（PostgreSQL bytea）
   logoMimeType     String?             // ロゴの MIME タイプ（image/png 等）
   allowedIpRanges  String?             // IP アクセス制限（#285）: 許可 CIDR の JSON 配列文字列。null/空配列=制限なし
+  aiModelDefaults  String?             // 組織AIデフォルト（#372）: <tool>_model_<mode> キーの JSON マップ文字列。null=未設定
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -61,6 +62,7 @@ model OrganizationMember {
   userId         String       @unique
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   role           String       @default("member") // 'admin' | 'manager' | 'member'
+  canOverrideAiSettings Boolean @default(false) // #372: true なら組織AIデフォルトより個人設定を優先できる
   createdAt      DateTime     @default(now())
 
   @@index([organizationId])
@@ -250,6 +252,11 @@ model Session {
   summarizedAt  DateTime? // 要約生成日時
   councilMode   Boolean   @default(false) // council mode opt-in（#331。エンジンは未実装、受理の記録のみ）
   approvalNote  String?   // approve_implementation の note（#331。監査用）
+  // core#336: 会話セッション境界（MCP submission 単位）。すべて nullable = 既存行は従来挙動のまま。
+  planTurnId       String?   // plan ターン送信時に採番した correlation ID。完了報告の対応付けに使う
+  planAiSessionId  String?   // plan ターン完了時に確定した AI ツール側セッション ID（exec の resume 元）
+  planAiTool       String?   // 上記が属するツール種別（'claude' | 'devin' | 'codex' 等）
+  approvedAt       DateTime? // 承認 claim。null = 未承認。atomic に claim/解放する
 
   messages       Message[]
   buildLogs      BuildLog[]

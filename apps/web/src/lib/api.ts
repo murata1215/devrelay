@@ -716,7 +716,12 @@ export interface OrgMember {
   isSelf: boolean;
   /** 割り当てられた manager 数（member のみ、それ以外 null）。0 ならコマンド発行不可 */
   managerCount: number | null;
+  /** 組織AIデフォルトのロックを個別解除されているか（#372。admin は常に実質 true 扱いだが値はそのまま） */
+  canOverrideAiSettings: boolean;
 }
+
+/** 組織AIデフォルトのキー（<tool>_model_<plan|exec>）→ モデル ID のマップ */
+export type OrgAiModelDefaults = Record<string, string>;
 
 /** メンバーアクティビティ（監視用） */
 export interface OrgActivity {
@@ -780,6 +785,8 @@ export interface OrgAuditLogEntry {
   action: string;
   detail: string | null;
   createdAt: string;
+  viewerUserId: string;
+  targetUserId: string;
   viewer: { email: string | null; name: string | null };
   target: { email: string | null; name: string | null };
 }
@@ -841,6 +848,11 @@ export const org = {
     await request('PATCH', `/org/members/${userId}`, { role });
   },
 
+  /** メンバーの組織AIデフォルト個別上書き許可を切替（admin、#372） */
+  async updateMemberAiOverride(userId: string, allowed: boolean): Promise<void> {
+    await request('PATCH', `/org/members/${userId}`, { canOverrideAiSettings: allowed });
+  },
+
   /** メンバーアクティビティ監視（admin=全員 / manager=担当のみ） */
   async activity(): Promise<{ activity: OrgActivity[] }> {
     return request('GET', '/org/activity');
@@ -864,7 +876,7 @@ export const org = {
   /** 対象メンバーのセッション一覧（統制 v3 #270、要約付き・検索/期間絞り込み対応） */
   async memberSessions(
     userId: string,
-    opts: { offset?: number; limit?: number; q?: string; from?: string; to?: string } = {},
+    opts: { offset?: number; limit?: number; q?: string; from?: string; to?: string; includeEmpty?: boolean } = {},
   ): Promise<{ total: number; sessions: OrgMemberSession[] }> {
     const params = new URLSearchParams();
     if (opts.offset) params.set('offset', String(opts.offset));
@@ -872,6 +884,7 @@ export const org = {
     if (opts.q) params.set('q', opts.q);
     if (opts.from) params.set('from', opts.from);
     if (opts.to) params.set('to', opts.to);
+    if (opts.includeEmpty) params.set('includeEmpty', '1');
     const qs = params.toString();
     return request('GET', `/org/members/${userId}/sessions${qs ? `?${qs}` : ''}`);
   },
@@ -910,5 +923,15 @@ export const org = {
     force = false,
   ): Promise<{ ok: boolean; allowedIpRanges: string[]; currentIp: string }> {
     return request('PUT', '/org/ip-ranges', { allowedIpRanges, force });
+  },
+
+  /** 組織AIデフォルト取得（メンバー全員が閲覧可、#372）。自分がロック中かどうかも返る */
+  async getAiDefaults(): Promise<{ aiModelDefaults: OrgAiModelDefaults; canOverrideAiSettings: boolean; role: OrgRole }> {
+    return request('GET', '/org/ai-defaults');
+  },
+
+  /** 組織AIデフォルト設定（admin のみ、#372）。値を空文字にするとそのキーをクリアする */
+  async updateAiDefaults(aiModelDefaults: OrgAiModelDefaults): Promise<{ ok: boolean; aiModelDefaults: OrgAiModelDefaults }> {
+    return request('PUT', '/org/ai-defaults', { aiModelDefaults });
   },
 };

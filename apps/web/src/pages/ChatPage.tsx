@@ -2537,6 +2537,9 @@ export function ChatPage() {
         let pinnedIds: Set<string>;
         let tabOrder: string[] = [];
         let savedNames: Record<string, string> = {};
+        // 復元したサーバー定義（#371: 初期アクティブタブの選定に使うため外側スコープへ持ち出す）
+        let restoredServers: ChatServer[] = [];
+        let restoredActiveServerId: string | null = null;
         try {
           const [serverPinned, serverOrder, serverNames, savedServers, savedActiveServer] = await Promise.all([
             settingsApi.getPinnedTabs(),
@@ -2557,6 +2560,8 @@ export function ChatPage() {
             setServers(savedServers);
             if (savedActiveServer) setActiveServerId(savedActiveServer);
           }
+          restoredServers = savedServers;
+          restoredActiveServerId = savedActiveServer;
         } catch {
           pinnedIds = getPinnedTabIds();
           savedNames = getTabNames();
@@ -2624,13 +2629,24 @@ export function ChatPage() {
         }));
 
         setTabs(newTabs);
-        setActiveTabId(newTabs[0].projectId);
-        activeTabIdRef.current = newTabs[0].projectId;
+
+        // 復元したアクティブサーバーに属する最初のタブをアクティブにする（#371）。
+        // 属するタブが無い/サーバーが空/「すべて」の場合は従来どおり先頭タブにフォールバック。
+        const restoredServer = restoredActiveServerId
+          ? restoredServers.find(s => s.id === restoredActiveServerId)
+          : undefined;
+        const initialTab =
+          (restoredServer && restoredServer.projectIds.length > 0
+            ? newTabs.find(t => restoredServer.projectIds.includes(t.projectId))
+            : undefined) ?? newTabs[0];
+
+        setActiveTabId(initialTab.projectId);
+        activeTabIdRef.current = initialTab.projectId;
 
         // 最初のタブの履歴を読み込み + サーバーコンテキスト同期
-        sendCommand(`//connect ${newTabs[0].projectId}`);
+        sendCommand(`//connect ${initialTab.projectId}`);
         suppressConnectRef.current = true;
-        loadHistory(newTabs[0].projectId, newTabs[0].sessionId ?? undefined);
+        loadHistory(initialTab.projectId, initialTab.sessionId ?? undefined);
       } catch {
         // 復元失敗は無視
       }
@@ -2918,6 +2934,26 @@ export function ChatPage() {
 
     if (activeTabIdRef.current === projectId) return;
 
+    // 選択したプロジェクトが現在のアクティブサーバー（非空）に属さない場合、
+    // そのプロジェクトを含むサーバーへ切り替える（無ければ「すべて」に落とす）。
+    // これがないと visibleTabs（#371）から即座に消えるタブがアクティブになってしまう。
+    // 直前の自動登録処理（registerToActiveServer）が実行された場合、serversRef.current は
+    // 同一レンダー内ではまだ更新前の値のため、ここでの追従判定はスキップする
+    // （今まさに追加したプロジェクトを「属していない」と誤判定してしまうため）。
+    if (!(registerToActiveServer && currentServerId)) {
+      const srvId = activeServerIdRef.current;
+      if (srvId) {
+        const current = serversRef.current.find(s => s.id === srvId);
+        if (current && current.projectIds.length > 0 && !current.projectIds.includes(projectId)) {
+          const owner = serversRef.current.find(s => s.projectIds.includes(projectId));
+          const nextServerId = owner ? owner.id : null;
+          setActiveServerId(nextServerId);
+          activeServerIdRef.current = nextServerId;
+          settingsApi.saveActiveServer(nextServerId).catch(() => {});
+        }
+      }
+    }
+
     const existingTab = tabsRef.current.find(t => t.projectId === projectId);
     if (!existingTab) {
       let projectName = projectId;
@@ -3044,11 +3080,36 @@ export function ChatPage() {
     settingsApi.saveServers(next).catch(() => {});
   }, []);
 
-  /** アクティブサーバーを切り替え */
+  /** アクティブサーバーを切り替え。
+   *  選択したサーバーに現在のアクティブタブが属していない場合、そのサーバーに属する
+   *  最初の「開いているタブ」へアクティブタブを貼り替える（#371、他サーバーのタブが
+   *  タブバーに残り続ける不具合の修正）。開いているタブが無ければ何もしない
+   *  （サーバー選択だけでタブを新規に開くと saveTabOrder 等の永続状態が書き変わってしまうため）。 */
   const handleSelectServer = useCallback((id: string | null) => {
     setActiveServerId(id);
     settingsApi.saveActiveServer(id).catch(() => {});
-  }, []);
+
+    // 「すべて」または空サーバーは絞り込み意図がないためアクティブタブを動かさない
+    if (!id) return;
+    const target = serversRef.current.find(s => s.id === id);
+    if (!target || target.projectIds.length === 0) return;
+
+    // 現在のアクティブタブが選択サーバーに属していれば何もしない
+    const currentTabId = activeTabIdRef.current;
+    if (currentTabId && target.projectIds.includes(currentTabId)) return;
+
+    // 選択サーバーに属する最初の「開いているタブ」へ貼り替える
+    const nextTab = tabsRef.current.find(t => target.projectIds.includes(t.projectId));
+    if (!nextTab) return;   // 開いているタブが無ければ何もしない（勝手にタブを開かない）
+
+    setActiveTabId(nextTab.projectId);
+    activeTabIdRef.current = nextTab.projectId;
+    suppressConnectRef.current = true;
+    sendCommand(`//connect ${nextTab.projectId}`);
+    if (nextTab.sessionId && !nextTab.historyLoaded && !nextTab.loadingHistory) {
+      loadHistory(nextTab.projectId, nextTab.sessionId);
+    }
+  }, [sendCommand, loadHistory]);
 
   /** サーバーを新規作成 */
   const handleCreateServer = useCallback((name: string) => {
@@ -3108,10 +3169,12 @@ export function ChatPage() {
 
   /** タブバーに表示するタブ（サーバーでフィルタ）。
    *  空のサーバー（projectIds が空）は絞り込み意図を持たないため、フィルタせず全タブを表示する
-   *  （新規作成直後の空サーバーが自動選択されてタブバーが消え、D&D の唯一のドラッグ元を失う問題への対処）。
-   *  また現在アクティブなタブは常に表示対象に含める。 */
+   *  （新規作成直後の空サーバーが自動選択されてタブバーが消え、D&D の唯一のドラッグ元を失う問題への対処、#369）。
+   *  アクティブタブの例外表示は行わない（他サーバーのタブが残る #369 のリグレッション、本修正で撤去）。
+   *  代わりに activeServerId / activeTabId の整合は handleSelectServer / handleSelectProject / マウント時復元の
+   *  3 経路で貼り替えることで担保する（#371）。 */
   const visibleTabs = activeServerId && activeServer && activeServer.projectIds.length > 0
-    ? tabs.filter(t => activeServer.projectIds.includes(t.projectId) || t.projectId === activeTabId)
+    ? tabs.filter(t => activeServer.projectIds.includes(t.projectId))
     : tabs;
 
   /** ファイルを pendingFiles に追加 */

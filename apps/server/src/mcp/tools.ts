@@ -33,6 +33,7 @@ import {
   validateAttachments,
 } from '../services/attachment-validation.js';
 import { processMessageFilesEmbedding } from '../services/embedding-service.js';
+import { evaluateApproveGuard, decideClaimResult, buildClaimReleaseWhere, buildTurnId } from '../services/submission-guard.js';
 
 /**
  * #334: 人間入力テキストの長さ上限（string.length = UTF-16 コードユニット数基準）。
@@ -304,6 +305,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
    * submissionId (= sessionId) に紐づく DB の Message からプランを取得。
    * requestLatestPlanFile（machineId スコープ）は使わない — 別プロジェクトの
    * ゴーストプランを返す致命的なスコープバグがあった (#246 実機テストで発見)。
+   * #375: requestLatestPlanFile 自体は projectPath スコープ化されたが、get_plan は
+   * submissionId 単位の厳密性を保つため引き続き DB 経由のままとする。
    */
   server.tool(
     'get_plan',
@@ -535,6 +538,12 @@ export function registerMcpTools(server: McpServer, userId: string) {
       // セッション作成
       const sessionId = await createSession(userId, project.machineId, project.id, aiTool);
 
+      // core#336: plan ターンの correlation ID。agent に prompt を dispatch する前に Session へ
+      // 永続化する（turnId 生成 → planTurnId 保存 → 送信 の順）。これにより完了報告が遅延しても
+      // Session.planTurnId との一致判定で正しいターンにのみ対応付けられる。
+      const planTurnId = buildTurnId(Date.now(), Math.random().toString(36).slice(2, 9));
+      await prisma.session.update({ where: { id: sessionId }, data: { planTurnId } });
+
       // #331: council opt-in の記録のみ（council 実行エンジンは未実装。既定は false のため
       // 未指定時はこの更新自体を行わず、DB の @default(false) のまま = 従来と完全同形）
       if (council === true) {
@@ -548,8 +557,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
       addParticipant(sessionId, 'web', mcpChatId);
       console.log(`⏱️ [MCP] session created: sessionId=${sessionId.substring(0, 12)}, participant chatId=${mcpChatId.substring(0, 25)}`);
 
-      // Agent にセッション開始を通知
-      await startAgentSession(project.machineId, sessionId, project.name, project.path, aiTool as any);
+      // Agent にセッション開始を通知（core#336: agentScopeId = submissionId で状態をスコープ分離する）
+      await startAgentSession(project.machineId, sessionId, project.name, project.path, aiTool as any, sessionId);
 
       // 進捗トラッキング開始
       await startProgressTracking(sessionId);
@@ -616,6 +625,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
         undefined, // model: 未指定（UserSettings から補完）
         undefined, // language: 未指定（UserSettings から補完）
         resolvePermissionPolicy('mcp'),  // #332: MCP plan は allowlist 外のツールを聞かずに deny する
+        { agentScopeId: sessionId, turnId: planTurnId },  // core#336: 会話セッション境界 + 完了報告の対応付け
       );
 
       // 監査ログ
@@ -697,6 +707,43 @@ export function registerMcpTools(server: McpServer, userId: string) {
         }
       }
 
+      // core#336: approve の所有検証。submissionId が本当にこの projectId / userId の Session かを
+      // ここで確認しないと、他プロジェクト・他ユーザーの submissionId を渡されても exec してしまう
+      // （#336 調査で発見した既存の穴、旧実装には Session の存在・所有チェックが一切無かった）。
+      // 満たさない場合は exec を送らず明確なエラーを返し、拒否理由はサーバーログに残す。
+      const session = await prisma.session.findUnique({ where: { id: submissionId } });
+      const planMessage = session
+        ? await prisma.message.findFirst({ where: { sessionId: submissionId, role: 'ai' } })
+        : null;
+      const guard = evaluateApproveGuard({
+        session,
+        requestedProjectId: projectId,
+        requestedUserId: userId,
+        hasPlanMessage: !!planMessage,
+      });
+      if (!guard.ok) {
+        console.warn(`⚠️ [MCP] approve rejected: ${guard.code} (submissionId=${submissionId}, userId=${userId})`);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: guard.message }) }], isError: true };
+      }
+      // guard.ok === true が保証されたので session / session.planAiSessionId は non-null
+      // （TypeScript の絞り込みが evaluateApproveGuard() の戻り値までは追跡できないため、
+      // ここで明示的にアサートする。evaluateApproveGuard() が既に両方の非 null を検証済み）
+      const nonNullSession = session!;
+
+      // core#336: 二重 approve の競合防止。read → update ではなく atomic に claim する。
+      // 同一 submission に approve が並行到着しても、この updateMany の count === 1 になるのは
+      // 1 要求だけ（DB のロー単位 UPDATE が直列化するため）。exec 完了後の再 approve も
+      // approvedAt が非 null のままなのでここで同じ経路で拒否される。
+      const claimedAt = new Date();
+      const claim = await prisma.session.updateMany({
+        where: { id: submissionId, approvedAt: null },
+        data: { approvedAt: claimedAt },
+      });
+      if (!decideClaimResult(claim.count).claimed) {
+        console.warn(`⚠️ [MCP] approve rejected: already approved (submissionId=${submissionId})`);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'This submission has already been approved.' }) }], isError: true };
+      }
+
       // #334: 監査メタ情報。raw text 自体は Session.approvalNote に無切り詰めで保存されるため
       // meta には含めない（rawRef で参照先を明記する）
       const approvalHumanTextMeta = trimmedNote
@@ -729,14 +776,31 @@ export function registerMcpTools(server: McpServer, userId: string) {
       }
 
       // Plan → Exec 遷移（note は exec プロンプト自体に追記して Agent/AI に届ける。
-      // #334: buildApprovalExecPrompt 内部で human-text fence により囲まれる）
-      await execConversation(
-        project.machineId,
-        submissionId,
-        project.path,
-        userId,
-        buildApprovalExecPrompt(note),
-      );
+      // #334: buildApprovalExecPrompt 内部で human-text fence により囲まれる）。
+      // core#336: agentScopeId で状態をスコープ分離し、resumeSessionId で plan ターンの
+      // AI セッションを明示 resume する（Agent 側の共有ファイルは一切参照させない）。
+      try {
+        await execConversation(
+          project.machineId,
+          submissionId,
+          project.path,
+          userId,
+          buildApprovalExecPrompt(note),
+          undefined,
+          undefined,
+          undefined,
+          { agentScopeId: submissionId, resumeSessionId: nonNullSession.planAiSessionId! },
+        );
+      } catch (err) {
+        // core#336: claim 解放は自要求が取得した claim に限る。claim 時に設定した approvedAt
+        // （claimedAt）との一致を条件に atomic に解放し、他要求が更新した状態を巻き戻さない。
+        await prisma.session.updateMany({
+          where: buildClaimReleaseWhere(submissionId, claimedAt),
+          data: { approvedAt: null },
+        });
+        console.error(`❌ [MCP] approve exec failed, claim released: submissionId=${submissionId}`, (err as Error).message);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Failed to start execution. Please try again.' }) }], isError: true };
+      }
 
       // 監査ログ
       console.log(`📋 [MCP] AUDIT approve: userId=${userId}, projectId=${projectId}, submissionId=${submissionId}, rawLength=${trimmedNote?.length ?? 0}, note=${trimmedNote ? trimmedNote.slice(0, 100) : '(none)'}`);

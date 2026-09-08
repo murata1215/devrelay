@@ -225,6 +225,18 @@ export interface AiOutputPayload {
   isExec?: boolean;
   /** exec 実行時のプロンプト（BuildLog AI 要約のコンテキスト用） */
   execPrompt?: string;
+  /**
+   * core#336: このターンで使用/生成された AI ツール側のセッション ID（例: Claude SDK の session_id）。
+   * plan→exec の明示 resume に使う。取得できない場合は省略する（既存挙動は変わらない）。
+   */
+  aiSessionId?: string;
+  /** core#336: aiSessionId が属するツール種別（'claude' | 'devin' | 'codex' 等）。aiSessionId とセットで送る */
+  aiTool?: string;
+  /**
+   * core#336: server から送られた turnId をそのままエコーバックする（Agent 側では解釈しない）。
+   * サーバー側が plan ターン送信時の turnId と完了報告の turnId を突き合わせて対応付けに使う。
+   */
+  turnId?: string;
 }
 
 export interface AiStatusPayload {
@@ -336,6 +348,9 @@ export interface ProjectFileContentPayload {
 /** Server → Agent: 最新プランファイル読み取り要求 */
 export interface PlanLatestRequestPayload {
   requestId: string;
+  /** #375: 対象プロジェクトの絶対パス。指定時は .devrelay/plans/ を最優先で探す。
+   *  未指定（旧サーバー）のときは従来どおり ~/.claude/plans/ のみを見る。 */
+  projectPath?: string;
 }
 
 /** Agent → Server: プランファイル内容 */
@@ -387,6 +402,19 @@ export interface ConversationExecPayload {
    * enum ではなく string（Agent 側の後方互換のため、未知の値は 'interactive' 相当にフォールバック）
    */
   permissionPolicy?: string;
+  /**
+   * core#336: 会話セッションのスコープ ID。未指定はプロジェクト単位（従来 = 対話経路）。
+   * 指定時、Agent は `<projectPath>/.devrelay/sessions/<agentScopeId>/` 配下の状態ファイルを使う。
+   * 現時点では MCP submissionId と同値だが、契約上は独立の識別子として扱う（Agent は submissionId を直接キーにしない）。
+   */
+  agentScopeId?: string;
+  /**
+   * core#336: exec 時に resume する AI ツール側のセッション ID。指定時は forceNewSession より優先し、
+   * Agent はスコープ内保存済み ID を参照しない（plan→exec の明示 resume）。
+   */
+  resumeSessionId?: string;
+  /** core#336: サーバーが plan/exec 送信時に採番する correlation ID。Agent は完了報告にそのまま返す */
+  turnId?: string;
 }
 
 export interface SessionRestoredPayload {
@@ -433,6 +461,8 @@ export interface SessionStartPayload {
   projectName: string;
   projectPath: string;
   aiTool: AiTool;
+  /** core#336: 会話セッションのスコープ ID。ConversationExecPayload.agentScopeId の JSDoc を参照 */
+  agentScopeId?: string;
 }
 
 // AI ツール切り替え関連
@@ -596,6 +626,12 @@ export interface AiPromptPayload {
    * MCP submit_instruction は 'strictReadonly' を送る。チャット/exec 経路は 'interactive' を明示送信する。
    */
   permissionPolicy?: string;
+  /** core#336: 会話セッションのスコープ ID。ConversationExecPayload.agentScopeId の JSDoc を参照 */
+  agentScopeId?: string;
+  /** core#336: resume する AI ツール側のセッション ID。ConversationExecPayload.resumeSessionId の JSDoc を参照 */
+  resumeSessionId?: string;
+  /** core#336: correlation ID。ConversationExecPayload.turnId の JSDoc を参照 */
+  turnId?: string;
 }
 
 // -----------------------------------------------------------------------------

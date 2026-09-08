@@ -35,6 +35,8 @@ import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } f
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId, loadSessionMeta } from './session-store.js';
+import { savePlanFile, loadLatestPlanFile } from './plan-file-store.js';
+import { decideResume } from './resume-priority.js';
 import { buildDevinPlanPreamble } from './devin-plan-prompt.js';
 import { isGitRepo, captureBaseline, restoreToBaseline, type PorcelainEntry } from './git-guard.js';
 import { extractLastAssistantText } from './terminal-parser.js';
@@ -161,6 +163,8 @@ interface SessionInfo {
   contextWarned?: boolean; // #291-B: コンテキスト警告を既に送信済みか（スパム防止。閾値未満に戻ると解除）
   /** #372: Claude 自動メモリ（MEMORY.md）肥大の警告を既に送信済みか（1 セッション 1 回まで） */
   memoryIndexWarned?: boolean;
+  /** core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を使う（対話経路は未指定のまま = 従来どおり） */
+  agentScopeId?: string;
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -582,10 +586,10 @@ async function handleClaudeLoginCode(requestId: string, authorizationCode: strin
 }
 
 async function handleSessionStart(
-  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool },
+  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool; agentScopeId?: string },
   config: AgentConfig
 ) {
-  const { sessionId, projectName, projectPath, aiTool: requestedAiTool } = payload;
+  const { sessionId, projectName, projectPath, aiTool: requestedAiTool, agentScopeId } = payload;
   // Devin 専用端末等でサーバー指定の AI が未インストールなら、実際に使えるツールへ差し替える
   const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
   if (aiTool !== requestedAiTool) {
@@ -609,7 +613,8 @@ async function handleSessionStart(
   }
 
   // #348: 一時セッションは conversation.json を読まない（全セッション共有の resume/履歴汚染を防ぐ）
-  const history = isEphemeral ? [] : await loadConversation(projectPath);
+  // core#336: agentScopeId 指定時はスコープ専用ディレクトリを読む（対話経路は agentScopeId 未指定 = 従来どおり）
+  const history = isEphemeral ? [] : await loadConversation(projectPath, agentScopeId);
 
   // Check for pending work state (auto-continue feature)
   const pendingWorkState = await loadWorkState(projectPath);
@@ -630,7 +635,8 @@ async function handleSessionStart(
 
   // Load existing Claude session ID for --resume
   // #348: 一時セッションは resume しない（対話セッションと同じ --resume を共有すると輻輳の原因になる）
-  const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath);
+  // core#336: agentScopeId 指定時はスコープ専用ディレクトリから読む
+  const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath, agentScopeId);
   if (claudeResumeSessionId) {
     console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
   }
@@ -643,7 +649,8 @@ async function handleSessionStart(
     claudeSessionId,
     claudeResumeSessionId: claudeResumeSessionId || undefined,
     history,
-    pendingWorkState: pendingWorkState || undefined
+    pendingWorkState: pendingWorkState || undefined,
+    agentScopeId
   });
   console.log(`📋 Session ${sessionId} -> Claude Session ${claudeSessionId}`);
 
@@ -764,7 +771,7 @@ function markExecPointInMemory(history: ConversationEntry[]): ConversationEntry[
   }];
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; terminalMode?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean; language?: Language; permissionPolicy?: string }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; terminalMode?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -797,15 +804,20 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
         sessionInfo.aiTool = resolved;
       }
     }
+    // core#336: 通常は plan の server:session:start で既に agentScopeId が入っているが、
+    // Agent 再起動等で欠けているケースに備えて payload 側の値で補完する（既存値は上書きしない）。
+    if (payload.agentScopeId && !sessionInfo.agentScopeId) {
+      sessionInfo.agentScopeId = payload.agentScopeId;
+    }
     // Mark exec point in history (this becomes the reset point)
     sessionInfo.history = isEphemeral
       ? markExecPointInMemory(sessionInfo.history)
-      : await markExecPoint(projectPath, sessionInfo.history);
+      : await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
     console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   } else {
     // Session not in memory (e.g., after server restart), initialize from file
     console.log(`📋 Session not found in memory, initializing from file...`);
-    const history = isEphemeral ? [] : await loadConversation(projectPath);
+    const history = isEphemeral ? [] : await loadConversation(projectPath, payload.agentScopeId);
     const claudeSessionId = uuidv4();
     // #307: Server から渡された aiTool（DB の Session.aiTool）を優先する。
     // ここでハードコードの config 既定値にフォールバックすると、`a` で選択した AI ツール
@@ -816,14 +828,14 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
       : requestedAiTool;
 
     // Create session info and add to map
-    sessionInfo = { projectPath, aiTool, claudeSessionId, history };
+    sessionInfo = { projectPath, aiTool, claudeSessionId, history, agentScopeId: payload.agentScopeId };
     sessionInfoMap.set(sessionId, sessionInfo);
     console.log(`📋 Session ${sessionId} initialized with ${history.length} history entries (aiTool=${aiTool})`);
 
     // Mark exec point in history
     sessionInfo.history = isEphemeral
       ? markExecPointInMemory(sessionInfo.history)
-      : await markExecPoint(projectPath, sessionInfo.history);
+      : await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
     console.log(`📋 Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
@@ -849,6 +861,10 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     isWCommand: payload.isWCommand,  // #312: Codex w コマンドのサンドボックス切替判定に使用
     language: payload.language,  // #316: チャット表示言語を継承
     permissionPolicy: payload.permissionPolicy,  // #332: 権限ポリシーを継承（exec は常に 'interactive'）
+    // core#336: MCP submission 単位のスコープと明示 resume 指定を exec 実行へ伝搬
+    agentScopeId: sessionInfo?.agentScopeId ?? payload.agentScopeId,
+    resumeSessionId: payload.resumeSessionId,
+    turnId: payload.turnId,
   });
 }
 
@@ -864,7 +880,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   // #348: 一時セッションは projectPath 上の状態（conversation.json / .devrelay-output）を読み書きしない
   const isEphemeral = isEphemeralSession(sessionId);
@@ -894,8 +910,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Agent 再起動で sessionInfoMap が消失した場合、payload の projectPath/aiTool で自動初期化
   if (!sessionInfo && payload.projectPath && payload.aiTool && currentConfig) {
     console.log(`🔄 Auto-initializing session ${sessionId} (agent may have restarted)`);
-    const history = isEphemeral ? [] : await loadConversation(payload.projectPath);
-    const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(payload.projectPath);
+    const history = isEphemeral ? [] : await loadConversation(payload.projectPath, payload.agentScopeId);
+    const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(payload.projectPath, payload.agentScopeId);
     if (claudeResumeSessionId) {
       console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
     }
@@ -905,6 +921,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       claudeSessionId: uuidv4(),
       claudeResumeSessionId: claudeResumeSessionId || undefined,
       history,
+      // core#336: MCP submission 単位のスコープ識別子（未指定 = 対話経路 = 従来どおり）
+      agentScopeId: payload.agentScopeId,
     };
     sessionInfoMap.set(sessionId, sessionInfo);
 
@@ -979,7 +997,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   });
   // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
   if (!isEphemeral) {
-    await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+    await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
   }
 
   // Clear output directory before running
@@ -1048,7 +1066,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   let prevExecSummary = '';
   if (isClaudeTerminalMode && isPlanTurn && !payload.forceNewSession) {
     try {
-      const meta = await loadSessionMeta(sessionInfo.projectPath);
+      const meta = await loadSessionMeta(sessionInfo.projectPath, sessionInfo.agentScopeId);
       if (meta && meta.mode === 'exec') {
         console.log(`📝 [exec→plan] previous exec session: ${meta.sessionId.slice(0, 8)}...`);
         const prevText = extractLastAssistantText(sessionInfo.projectPath, meta.sessionId);
@@ -1214,9 +1232,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // strictReadonly は plan モードでのみ意味を持つ（exec には一切影響しない）
   const strictReadonly = permissionPolicy === 'strictReadonly' && usePlanMode;
 
+  // core#336: resume 優先順位（PTY 経路・SDK 経路と統一）。判定ロジックは resume-priority.ts に集約。
+  const effectiveResumeSessionId = decideResume({
+    explicitResumeSessionId: payload.resumeSessionId,
+    forceNewSession: payload.forceNewSession,
+    storedSessionId: sessionInfo.claudeResumeSessionId,
+  }).resumeSessionId;
+
   // Prepare send options
   const sendOptions: SendPromptOptions = {
-    resumeSessionId: sessionInfo.claudeResumeSessionId,
+    resumeSessionId: effectiveResumeSessionId,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
     // #332: skipPermissions は permissionPolicy から導出する（forceNewSession はもう使わない）。
@@ -1234,6 +1259,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     language: payload.language,
     // #348: 一時セッションは claude-session-id / context-usage を projectPath 上に書かない
     persistProjectState: !isEphemeral,
+    // core#336: MCP submission 単位のスコープ識別子 / plan-exec 対応付け correlation ID
+    agentScopeId: sessionInfo.agentScopeId,
+    turnId: payload.turnId,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）
@@ -1355,6 +1383,18 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       isComplete: false,
     },
   });
+  // #375: プランターンの回答本文をプロジェクト内 .devrelay/plans/ に保存する（全 AI ツール共通）。
+  // DevRelay では ExitPlanMode を禁止しているため、プラン本文はプランターンの回答テキストそのもの。
+  // Claude 以外（Devin/Codex/Gemini/Aider）はプランファイルが一切残らず、Claude も
+  // ~/.claude/plans/ の機体グローバル走査で別プロジェクトのプランを掴む穴があった（#246）ため、
+  // 全ツール共通でここに保存する。保存失敗は savePlanFile 内部で握り潰される
+  // （プラン保存の失敗で AI 応答自体を壊さないため throw しない設計）。
+  const persistPlanFile = async (text: string) => {
+    if (!isPlanTurn || isEphemeral) return;
+    const body = stripProgressMarkers(text).trim();
+    const saved = await savePlanFile(sessionInfo.projectPath, body);
+    if (saved) console.log(`📋 Plan file saved: ${saved}`);
+  };
   let devinGuardBaseline: PorcelainEntry[] | null = null;
   if (isDevin && isPlanTurn) {
     if (await isGitRepo(sessionInfo.projectPath)) {
@@ -1377,7 +1417,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.aiTool,
       sessionInfo.claudeSessionId,
       currentConfig,
-      async (output, isComplete, usageData) => {
+      async (output, isComplete, usageData, extractedSessionId) => {
         // #276: ⏳ 始まりは進捗専用チャンク。サーバーへは流す（進捗ボックス表示 + タイムアウトリセット）が、
         // 最終保存メッセージ responseText には含めない（最終回答の汚染防止）。
         if (!output.startsWith('⏳')) {
@@ -1441,12 +1481,23 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               usageData,  // AI 使用量データ（DB 保存用）
               isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
               execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
+              // core#336: plan 完了報告に AI セッション ID / ツール / turnId をエコーバック
+              // （サーバー側が Session.planTurnId と突き合わせて planAiSessionId を保存する）
+              // 注意: この時点では sendPromptToAi() 自体はまだ resolve していない
+              // （このコールバックは sendPromptToAi 内部から isComplete=true で呼ばれる）ため、
+              // 後で代入される aiResult 変数（const）は参照できない（TDZ）。
+              // コールバック引数の extractedSessionId（ai-runner.ts 側で同一の result オブジェクトから
+              // 渡される値）を使う。
+              aiSessionId: extractedSessionId,
+              aiTool: sessionInfo.aiTool,
+              turnId: payload.turnId,
             },
           });
 
           // Save response to history and persist to file
           // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
           if (responseText.trim()) {
+            await persistPlanFile(responseText);
             sessionInfo.history.push({
               role: 'assistant',
               // #372: 進捗マーカー（🔧 ...を使用中...）は表示用の装飾で、次ターンの文脈としては
@@ -1456,7 +1507,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               timestamp: new Date().toISOString()
             });
             if (!isEphemeral) {
-              await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+              await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
               console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
             }
           }
@@ -1490,7 +1541,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       // #348: 一時セッションは projectPath 上の claude-session-id ファイルを消さない
       // （そもそも読んでいないため = undefined のはずだが、念のため書き込み経路も揃えておく）
       if (!isEphemeral) {
-        await clearClaudeSessionId(sessionInfo.projectPath);
+        await clearClaudeSessionId(sessionInfo.projectPath, sessionInfo.agentScopeId);
       }
 
       // Retry without resume session ID（completionSent をリセットして retry の完了を受け付ける）
@@ -1510,6 +1561,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         language: sendOptions.language,
         // #348: persistProjectState も retry で引き継ぐ
         persistProjectState: sendOptions.persistProjectState,
+        // core#336: スコープ識別子 / turnId も retry で引き継ぐ（resumeSessionId は意図的に undefined のまま）
+        agentScopeId: sendOptions.agentScopeId,
+        turnId: sendOptions.turnId,
       };
 
       // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。
@@ -1526,7 +1580,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         sessionInfo.aiTool,
         sessionInfo.claudeSessionId,
         currentConfig,
-        async (output, isComplete, usageData) => {
+        async (output, isComplete, usageData, extractedSessionId) => {
           // #276: ⏳ 始まりは進捗専用チャンク（最終保存メッセージには含めない）。
           if (!output.startsWith('⏳')) {
             responseText += output;
@@ -1555,11 +1609,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 usageData,  // AI 使用量データ（DB 保存用）
                 isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
                 execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
+                // core#336: retry 完了報告にも同様にエコーバック（理由は通常経路の注釈と同じ）
+                aiSessionId: extractedSessionId,
+                aiTool: sessionInfo.aiTool,
+                turnId: payload.turnId,
               },
             });
 
             // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
             if (responseText.trim()) {
+              await persistPlanFile(responseText);
               sessionInfo.history.push({
                 role: 'assistant',
                 // #372: 進捗マーカーを落として保存（上の通常経路と同じ理由）
@@ -1567,7 +1626,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 timestamp: new Date().toISOString()
               });
               if (!isEphemeral) {
-                await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+                await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
                 console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
               }
             }
@@ -2937,11 +2996,44 @@ async function handleDocDelete(payload: DocDeletePayload) {
 }
 
 /**
+ * agent:plan:content を送信する（handlePlanLatest の各分岐で共通利用）
+ */
+function replyPlan(
+  requestId: string,
+  filename: string | null,
+  content: string | null,
+  error?: string,
+) {
+  if (!currentMachineId) return;
+  sendMessage({
+    type: 'agent:plan:content',
+    payload: { machineId: currentMachineId, requestId, filename, content, error },
+  });
+}
+
+/**
  * 最新のプランファイルを読み取って返す
- * ~/.claude/plans/ 内の .md ファイルから更新日時が最も新しいものを選択
+ * #375: 優先順位は
+ *   1. <projectPath>/.devrelay/plans/ の最新（DevRelay が全 AI ツール共通で保存。プロジェクトスコープ確定）
+ *   2. ~/.claude/plans/ の最新（Claude Code ハーネスが書く。機体グローバルなので後方互換のフォールバック）
+ * projectPath 未指定（旧サーバー）の場合は従来どおり 2 のみを見る。
+ * 1 を優先する理由: ~/.claude/plans/ は機体グローバルのため、同一マシンに複数プロジェクトが
+ * あると別プロジェクトのプランを返してしまう「ゴーストプラン」バグがあった（#246）。
  */
 async function handlePlanLatest(payload: PlanLatestRequestPayload) {
-  const { requestId } = payload;
+  const { requestId, projectPath } = payload;
+
+  // 1. プロジェクト内の .devrelay/plans/ を最優先
+  if (projectPath) {
+    const local = await loadLatestPlanFile(projectPath);
+    if (local) {
+      console.log(`📋 Plan file read (project-scoped): ${local.filename} (${local.content.length} chars)`);
+      replyPlan(requestId, `plans/${local.filename}`, local.content);
+      return;
+    }
+  }
+
+  // 2. 従来の ~/.claude/plans/ フォールバック（Claude Code ハーネスが書くファイル）
   const plansDir = join(homedir(), '.claude', 'plans');
 
   try {
@@ -2949,12 +3041,7 @@ async function handlePlanLatest(payload: PlanLatestRequestPayload) {
     const mdFiles = entries.filter(f => f.endsWith('.md'));
 
     if (mdFiles.length === 0) {
-      if (currentMachineId) {
-        sendMessage({
-          type: 'agent:plan:content',
-          payload: { machineId: currentMachineId, requestId, filename: null, content: null },
-        });
-      }
+      replyPlan(requestId, null, null);
       return;
     }
 
@@ -2971,23 +3058,13 @@ async function handlePlanLatest(payload: PlanLatestRequestPayload) {
 
     const content = await readFile(join(plansDir, latestFile), 'utf-8');
     console.log(`📋 Plan file read: ${latestFile} (${content.length} chars)`);
-    if (currentMachineId) {
-      sendMessage({
-        type: 'agent:plan:content',
-        payload: { machineId: currentMachineId, requestId, filename: latestFile, content },
-      });
-    }
+    replyPlan(requestId, latestFile, content);
   } catch (err: any) {
     const notFound = err.code === 'ENOENT';
     if (!notFound) {
       console.error(`❌ Plan file read failed:`, err.message);
     }
-    if (currentMachineId) {
-      sendMessage({
-        type: 'agent:plan:content',
-        payload: { machineId: currentMachineId, requestId, filename: null, content: null, error: notFound ? undefined : err.message },
-      });
-    }
+    replyPlan(requestId, null, null, notFound ? undefined : err.message);
   }
 }
 

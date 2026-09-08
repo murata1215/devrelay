@@ -15,6 +15,7 @@ import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isD
 import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, extractRejectionEvidence, extractBlockedCommands, sliceStepsFromOffset, type AtifStepSummary } from './devin-atif.js';
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
+import { decideResume } from './resume-priority.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 import { buildClaudeLookupCommand, claudeFallbackCandidates } from './claude-locator.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
@@ -426,14 +427,22 @@ function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_L
   const { steps: turnSteps } = sliceStepsFromOffset(digest.steps, offset);
   const formatted: string[] = [];
   for (const s of turnSteps) {
+    // #374: AI のテキスト回答（tool === null）は直上の本文で全文表示済みのため、
+    // 🧭 実行ステップには含めない（重複表示 + 80文字で切れて見える問題の解消）。
+    // devin-atif.ts の endedWithoutAnswer() はこのフィルタより前の digest.steps を見るため
+    // プランモード無言終了検知（#362/#364）には影響しない。
+    if (s.tool === null) continue;
     const f = formatAtifStepSummary(s, lang);
     if (f) formatted.push(f);
   }
+  // #374: 「累計」も「今回」と同じ基準（ツール呼び出しステップのみ）に揃えて表示する。
+  // digest.totalSteps 自体（次回オフセットとして session-store.ts に永続化される値）は変更しない。
+  const cumulativeToolSteps = digest.steps.filter((s) => s.tool !== null).length;
   let summaryText = '';
   if (formatted.length > 0) {
     const shown = formatted.slice(0, 10);
     const more = formatted.length > shown.length ? `（他${formatted.length - shown.length}件）` : '';
-    summaryText = `\n\n🧭 実行ステップ (今回${formatted.length}件 / 累計${digest.totalSteps}件): ${shown.join(' → ')}${more}\n`;
+    summaryText = `\n\n🧭 実行ステップ (今回${formatted.length}件 / 累計${cumulativeToolSteps}件): ${shown.join(' → ')}${more}\n`;
   }
   return {
     summaryText,
@@ -513,8 +522,13 @@ const activeSdkAborts = new Map<string, AbortController>();
 // Active AI sessions: sessionId -> AiSession
 const activeSessions = new Map<string, AiSession>();
 
-/** AI出力コールバック。isComplete=true の場合、usageData に使用量データが含まれる */
-type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData) => void;
+/**
+ * AI出力コールバック。isComplete=true の場合、usageData に使用量データが含まれる。
+ * core#336: isComplete=true 時、抽出済みの AI セッション ID があれば extractedSessionId に含まれる
+ * （Claude SDK 経路のみ実値が入る。Devin/Codex/Claude terminal mode は常に undefined）。
+ * connection.ts はこれをそのまま `agent:ai:output` の `aiSessionId` としてサーバーへエコーバックする。
+ */
+type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData, extractedSessionId?: string) => void;
 
 export async function startAiSession(
   sessionId: string,
@@ -871,6 +885,17 @@ export interface SendPromptOptions {
    * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
    */
   persistProjectState?: boolean;
+  /**
+   * core#336: MCP submission 単位のスコープ識別子。指定時は session-store / conversation-store の
+   * 読み書きが `.devrelay/sessions/<agentScopeId>/` 配下に切り替わる（対話経路は未指定 = 従来どおり）。
+   */
+  agentScopeId?: string;
+  /**
+   * core#336: plan/exec 送信ごとにサーバーが採番する correlation ID。
+   * Agent は解釈せず、完了報告（`agent:ai:output` の `isComplete=true`）でそのままエコーバックする。
+   * サーバー側で `Session.planTurnId` と突き合わせて `planAiSessionId` を保存するために使う。
+   */
+  turnId?: string;
 }
 
 /**
@@ -1132,10 +1157,22 @@ async function sendPromptToAiSdk(
     }
   }
 
-  // セッション resume
-  if (options.resumeSessionId) {
-    sdkOptions.resume = options.resumeSessionId;
-    console.log(`🔄 [SDK] Resuming session: ${options.resumeSessionId.substring(0, 8)}...`);
+  // セッション resume（core#336: 優先順位を PTY 経路と統一。判定ロジックは resume-priority.ts に集約）。
+  // 注: SDK 経路のみ、explicit resumeSessionId + forceNewSession が同時に来た場合は
+  // connection.ts 側のバグの可能性が高いとみなし二重防御として resume させない
+  // （decideResume() 自体は explicit を forceNewSession より優先する設計のため、ここでは
+  // decideResume() を呼ぶ前に明示的に弾く）。
+  if (options.resumeSessionId && options.forceNewSession) {
+    console.log(`🆕 [SDK] forceNewSession set: ignoring resumeSessionId (${options.resumeSessionId.substring(0, 8)}...)`);
+  } else {
+    const sdkResumeDecision = decideResume({
+      explicitResumeSessionId: options.resumeSessionId,
+      forceNewSession: options.forceNewSession,
+    });
+    if (sdkResumeDecision.resumeSessionId) {
+      sdkOptions.resume = sdkResumeDecision.resumeSessionId;
+      console.log(`🔄 [SDK] Resuming session: ${sdkResumeDecision.resumeSessionId.substring(0, 8)}...`);
+    }
   }
 
   // #355: auto-compact 無限ループ検知（実測 138.3 分・79 回連続の事故対策）。
@@ -1169,7 +1206,7 @@ async function sendPromptToAiSdk(
     result.sessionDiscarded = true;
     if (options.persistProjectState !== false) {
       try {
-        await clearClaudeSessionId(projectPath);
+        await clearClaudeSessionId(projectPath, options.agentScopeId);
       } catch (e) {
         console.error(`[claude/sdk] Failed to clear claude session id after loop-guard abort:`, e);
       }
@@ -1203,7 +1240,7 @@ async function sendPromptToAiSdk(
     result.sessionDiscarded = true;
     if (options.persistProjectState !== false) {
       try {
-        await clearClaudeSessionId(projectPath);
+        await clearClaudeSessionId(projectPath, options.agentScopeId);
       } catch (e) {
         console.error(`[claude/sdk] Failed to clear claude session id after auto-compact rotation:`, e);
       }
@@ -1226,7 +1263,7 @@ async function sendPromptToAiSdk(
         console.log(`[claude/sdk] 📋 Session ID: ${m.session_id.substring(0, 8)}...`);
         // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
         if (options.persistProjectState !== false) {
-          saveClaudeSessionId(projectPath, m.session_id).catch(err => {
+          saveClaudeSessionId(projectPath, m.session_id, undefined, options.agentScopeId).catch(err => {
             console.error(`Failed to save session ID:`, err);
           });
         }
@@ -1264,7 +1301,7 @@ async function sendPromptToAiSdk(
                 result.resumeFailed = true;
                 return result;
               }
-              onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true);
+              onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, undefined, result.extractedSessionId);
               return result;
             }
             // Claude Code 未ログイン検出（resume リトライしても直らないので即座に案内して打ち切る）
@@ -1286,7 +1323,7 @@ async function sendPromptToAiSdk(
             if (isClaudeAuthExpiredMessage(block.text)) {
               console.log(`[claude/sdk] 🔒 OAuth token expired detected in assistant text`);
               reportClaudeAuthExpiredFromRuntime();
-              onOutput(formatAiErrorMessage(block.text, options.language ?? DEFAULT_CHAT_LANGUAGE), true);
+              onOutput(formatAiErrorMessage(block.text, options.language ?? DEFAULT_CHAT_LANGUAGE), true, undefined, result.extractedSessionId);
               return result;
             }
             fullOutput += block.text;
@@ -1353,7 +1390,7 @@ async function sendPromptToAiSdk(
           console.log(`[claude/sdk] ${formatContextUsage(result.contextUsage)}`);
           // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
           if (options.persistProjectState !== false) {
-            saveContextUsage(projectPath, result.contextUsage).catch(err => {
+            saveContextUsage(projectPath, result.contextUsage, options.agentScopeId).catch(err => {
               console.error(`Failed to save context usage:`, err);
             });
           }
@@ -1393,9 +1430,9 @@ async function sendPromptToAiSdk(
         // （最終 onOutput より前、応答内容自体には影響しない）
         await finalizeAutoCompactRotation();
         if (fullOutput.length === 0) {
-          onOutput('(No response from AI)', true, result.usageData);
+          onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
         } else {
-          onOutput('', true, result.usageData);
+          onOutput('', true, result.usageData, result.extractedSessionId);
         }
         completionSent = true;
         console.log(`[claude/sdk] 📨 Completion sent from result handler (fullOutput=${fullOutput.length} chars)`);
@@ -1425,7 +1462,7 @@ async function sendPromptToAiSdk(
     }
 
     if (fullOutput.length === 0) {
-      onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true);
+      onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true, undefined, result.extractedSessionId);
     }
     return result;
   } finally {
@@ -1443,9 +1480,9 @@ async function sendPromptToAiSdk(
     // #355 Workstream C: result メッセージが来なかった稀なケースでもローテーション判定は行う
     await finalizeAutoCompactRotation();
     if (fullOutput.length === 0) {
-      onOutput('(No response from AI)', true, result.usageData);
+      onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
     } else {
-      onOutput('', true, result.usageData);
+      onOutput('', true, result.usageData, result.extractedSessionId);
     }
   }
 
@@ -1506,16 +1543,25 @@ async function sendPromptToTerminalClaude(
 
   // SDK が保存した Claude セッション ID を読み込んで CLI の `--resume` で復元する
   // SDK と CLI は `~/.claude/projects/<hash>/sessions/<id>.jsonl` を共有しているので互換
-  // resume 判定:
-  //   forceNewSession (MCP) → 常に新規（前回文脈の汚染防止）
-  //   exec モード → 常に resume（前回の plan/exec を継続）
-  //   plan モード → 前回も plan なら resume（会話継続）、前回が exec なら新規（#238 暴走防止）
+  // resume 優先順位（core#336, SDK 経路と統一）:
+  //   1. options.resumeSessionId 指定あり（サーバーからの明示 resume 指定。approve_implementation の
+  //      exec 等）→ その ID を resume。forceNewSession は無視し、スコープ内ファイルも読まない
+  //   2. 指定なし + forceNewSession (MCP submit) → 常に新規（前回文脈の汚染防止）
+  //   3. 指定なし + exec モード → 常に resume（前回の plan/exec を継続）
+  //   4. 指定なし + plan モード → 前回も plan なら resume（会話継続）、前回が exec なら新規（#238 暴走防止）
   let resumeSessionId: string | undefined;
-  if (options.forceNewSession) {
+  const ptyResumeDecision = decideResume({
+    explicitResumeSessionId: options.resumeSessionId,
+    forceNewSession: options.forceNewSession,
+  });
+  if (ptyResumeDecision.source === 'explicit') {
+    resumeSessionId = ptyResumeDecision.resumeSessionId;
+    console.log(`🔄 [terminal-mode] explicit resume (from server): ${resumeSessionId!.slice(0, 8)}...`);
+  } else if (ptyResumeDecision.source === 'none') {
     resumeSessionId = undefined;
     console.log(`🆕 [terminal-mode] forceNewSession: starting fresh (MCP submit)`);
   } else if (options.usePlanMode) {
-    const meta = await loadSessionMeta(projectPath);
+    const meta = await loadSessionMeta(projectPath, options.agentScopeId);
     if (meta && meta.mode === 'plan') {
       resumeSessionId = meta.sessionId;
       console.log(`🔄 [terminal-mode] plan→plan resume: ${resumeSessionId.slice(0, 8)}...`);
@@ -1524,7 +1570,7 @@ async function sendPromptToTerminalClaude(
       console.log(`🆕 [terminal-mode] ${meta ? 'exec→plan' : 'no previous session'}: starting fresh`);
     }
   } else {
-    resumeSessionId = await loadClaudeSessionId(projectPath) || undefined;
+    resumeSessionId = await loadClaudeSessionId(projectPath, options.agentScopeId) || undefined;
   }
 
   // 診断ログ: WebUI トグルとの食い違いを調査するため、判定根拠を出力する
@@ -1592,6 +1638,7 @@ async function sendPromptToTerminalClaude(
       onScreenAnalyze: makeScreenAnalyzer,
       onResponseSummarize: makeResponseSummarizer,
       sessionMode: options.usePlanMode ? 'plan' : 'exec',
+      agentScopeId: options.agentScopeId,
     });
 
     // プロンプト未送信のまま早期 exit した場合のフォールバック（1 回のみリトライ）:
@@ -1605,7 +1652,7 @@ async function sendPromptToTerminalClaude(
       console.warn(`⚠️ [terminal-mode] ${reason} (${runResult.durationMs}ms, promptSent=false) → retrying without --resume`);
       // --resume のセッション ID があればクリア（壊れている可能性）
       if (resumeSessionId) {
-        await clearClaudeSessionId(projectPath);
+        await clearClaudeSessionId(projectPath, options.agentScopeId);
       }
       onOutput(`\n⚠️ Claude CLI が起動中に終了しました。リトライします...\n`, false);
       onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${approveAllMode ? ' --dangerously-skip-permissions' : ''}\n`, false);
@@ -1837,7 +1884,7 @@ export async function sendPromptToAi(
     // ATIF 読み取り時にこれを渡し「今回のターンで新たに実行されたステップ」だけに絞り込む。
     // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
     // offset<=0 は全件返しにフォールバックする二重防御）。
-    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath)) ?? 0;
+    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0;
 
     // #368 Phase2a-C: Devin は常に exec 相当（dangerous）で起動する。
     // 下の plan 系分岐（①〜④）は usePlanMode が Devin では常に false になったため
@@ -1849,9 +1896,9 @@ export async function sendPromptToAi(
     // CLI で指定しても、resume したセッションは元の auto モードを保持して
     // 書き込みが拒否されるため）
     // フォールバック時（#274）は resume しない（壊れたセッション回避）
-    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath);
+    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath, options.agentScopeId);
     const devinSessionId = devinSavedPermissionMode === devinTurnPermissionMode
-      ? await loadDevinSessionId(projectPath)
+      ? await loadDevinSessionId(projectPath, options.agentScopeId)
       : null;
     // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
     // そのまま使い続ける（`--model` を付けても CLI が warning を出して黙って無視する）。
@@ -1859,7 +1906,7 @@ export async function sendPromptToAi(
     // 今回指定のモデルが食い違っていたら resume せず新規セッションで開始する。
     devinCurrentModelForResume = safeModelArg(options.model) ?? '';
     if (devinSessionId) {
-      const devinSavedModel = (await loadDevinModel(projectPath)) ?? '';
+      const devinSavedModel = (await loadDevinModel(projectPath, options.agentScopeId)) ?? '';
       if (devinSavedModel === devinCurrentModelForResume) {
         args.push('-r', devinSessionId);
         devinResumedSessionId = devinSessionId;
@@ -1867,6 +1914,11 @@ export async function sendPromptToAi(
       } else {
         console.log(`[devin] Model changed (${devinSavedModel || '(default)'} → ${devinCurrentModelForResume || '(default)'}), starting a new session instead of resuming ${devinSessionId}`);
         onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelChangedNewSession', { previousModel: devinSavedModel || '(default)', newModel: devinCurrentModelForResume || '(default)' })}\n`, false);
+        // #374: モデル変更時は新規セッションで開始するため、旧セッションの ATIF 累計ステップ
+        // オフセットも一緒にクリアする（session-store.ts の docstring が元々要求していたが漏れていた）。
+        // 放置すると新セッションの浅い steps 配列に古い大きいオフセットが適用され、今回分の
+        // ステップが誤って全省略される/無関係な過去ターンが混入する不具合が発生する。
+        clearDevinAtifStepOffset(projectPath, options.agentScopeId).catch(() => {});
       }
     }
 
@@ -1928,7 +1980,7 @@ export async function sendPromptToAi(
       args.push('--prompt-file', promptFilePath);
     } else {
       console.error(`[devin] --prompt-file unsupported, aborting (unsafe argv fallback removed in #344)`);
-      onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.promptFileUnsupported'), true);
+      onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.promptFileUnsupported'), true, undefined, result.extractedSessionId);
       return {};
     }
 
@@ -2003,7 +2055,7 @@ export async function sendPromptToAi(
     }
 
     // 保存済み thread_id があれば resume で継続（フラグを全部書いた"後"に置く必要がある）
-    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath) : null;
+    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath, options.agentScopeId) : null;
     if (codexThreadIdToResume) {
       args.push('resume', codexThreadIdToResume);
       codexResumedThreadId = codexThreadIdToResume;
@@ -2255,7 +2307,7 @@ export async function sendPromptToAi(
                 codexThreadId = threadId;
                 result.extractedSessionId = threadId;
                 console.log(`[codex] 📋 Thread ID: ${threadId}`);
-                saveCodexSessionId(projectPath, threadId).catch(err => {
+                saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
                   console.error(`Failed to save Codex session ID:`, err);
                 });
               }
@@ -2331,7 +2383,7 @@ export async function sendPromptToAi(
             // Save session ID for future resumption
             // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
             if (options.persistProjectState !== false) {
-              saveClaudeSessionId(projectPath, parsed.sessionId).catch(err => {
+              saveClaudeSessionId(projectPath, parsed.sessionId, undefined, options.agentScopeId).catch(err => {
                 console.error(`Failed to save session ID:`, err);
               });
             }
@@ -2342,7 +2394,7 @@ export async function sendPromptToAi(
             // Save context usage for display at start of next prompt
             // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
             if (options.persistProjectState !== false) {
-              saveContextUsage(projectPath, parsed.contextUsage).catch(err => {
+              saveContextUsage(projectPath, parsed.contextUsage, options.agentScopeId).catch(err => {
                 console.error(`Failed to save context usage:`, err);
               });
             }
@@ -2586,14 +2638,14 @@ export async function sendPromptToAi(
             .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
             .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
           if (latest?.id) {
-            saveDevinSessionId(projectPath, latest.id).catch(() => {});
+            saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
             // このサイクル: 次回のモデル一致判定のため、今回使ったモデルもセッション ID と並べて保存する
-            saveDevinModel(projectPath, devinCurrentModelForResume).catch(() => {});
+            saveDevinModel(projectPath, devinCurrentModelForResume, options.agentScopeId).catch(() => {});
             // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
             // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-            saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps).catch(() => {});
+            saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
             // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
-            saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '').catch(() => {});
+            saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
           }
           }
         } catch (err) {
@@ -2645,7 +2697,7 @@ export async function sendPromptToAi(
         }
         if (!completionSent) {
           completionSent = true;
-          onOutput('', true, result.usageData);
+          onOutput('', true, result.usageData, result.extractedSessionId);
         }
         resolve(result);
         return;
@@ -2674,7 +2726,7 @@ export async function sendPromptToAi(
             .catch((err) => {
               console.error(`[devin] unknown-flag retry failed: ${(err as Error).message}`);
               if (fullOutput.length === 0) {
-                onOutput('(No response from AI)', true, result.usageData);
+                onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
               }
               resolve(result);
             });
@@ -2684,7 +2736,7 @@ export async function sendPromptToAi(
         if (!completionSent) {
           completionSent = true;
           const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
-          onOutput(tChat(lang, 'devin.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData);
+          onOutput(tChat(lang, 'devin.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData, result.extractedSessionId);
         }
         resolve(result);
         return;
@@ -2698,7 +2750,7 @@ export async function sendPromptToAi(
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath), clearDevinPermissionMode(projectPath)]).finally(() => resolve(result));
+        Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
         return;
       }
 
@@ -2708,14 +2760,14 @@ export async function sendPromptToAi(
       if (codexResumeEmpty) {
         console.log(`[codex] ⚠️ Resumed thread produced no output (code ${code}), clearing session ID and retrying fresh`);
         result.resumeFailed = true;
-        clearCodexSessionId(projectPath).finally(() => resolve(result));
+        clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
         return;
       }
 
       // #308: Codex: turn.failed イベントを受信した場合は理由を明示して完了通知
       if (aiTool === 'codex' && codexTurnFailed && !completionSent) {
         completionSent = true;
-        onOutput(`⚠️ Codex の実行が失敗しました: ${codexTurnFailedMessage}`, true, result.usageData);
+        onOutput(`⚠️ Codex の実行が失敗しました: ${codexTurnFailedMessage}`, true, result.usageData, result.extractedSessionId);
         resolve(result);
         return;
       }
@@ -2737,7 +2789,7 @@ export async function sendPromptToAi(
         // --resume なし → 日本語の警告メッセージを送信
         if (!completionSent) {
           completionSent = true;
-          onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData);
+          onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData, result.extractedSessionId);
         }
         resolve(result);
         return;
@@ -2759,7 +2811,7 @@ export async function sendPromptToAi(
         // Still send the error output to the user so they know what happened
         if (!completionSent) {
           completionSent = true;
-          onOutput('', true, result.usageData);
+          onOutput('', true, result.usageData, result.extractedSessionId);
         }
         resolve(result);
         return;
@@ -2817,14 +2869,14 @@ export async function sendPromptToAi(
           const cliFailure = classifyCliFailure({ exitCode: code, stdoutLength: fullOutput.length, stderr: stderrOutput });
           const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
           if (cliFailure.kind === 'commandNotFound') {
-            onOutput(tChat(lang, 'ai.cliNotFound', { tool: aiTool, command }), true, result.usageData);
+            onOutput(tChat(lang, 'ai.cliNotFound', { tool: aiTool, command }), true, result.usageData, result.extractedSessionId);
           } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'devin' && isWorkspaceTrustError(stderrOutput)) {
             // #345: devin が workspace trust 拒否で即死したケース。生 stderr のダンプではなく対処手順を出す。
-            onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData);
+            onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
           } else if (cliFailure.kind === 'emptyNonZero') {
-            onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData);
+            onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData, result.extractedSessionId);
           } else {
-            onOutput('(No response from AI)', true, result.usageData);
+            onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
           }
         } else {
           // #281: Devin の実行ステップまとめを最終回答へ添付してから完了通知（⏳ でない=最終メッセージに残る）
@@ -2850,7 +2902,7 @@ export async function sendPromptToAi(
               onOutput('\n' + diagnosis + '\n', false);
             }
           }
-          onOutput('', true, result.usageData); // Signal completion with usage data
+          onOutput('', true, result.usageData, result.extractedSessionId); // Signal completion with usage data
         }
       }
       resolve(result);
@@ -2874,7 +2926,7 @@ export async function sendPromptToAi(
       console.error(`[${aiTool}] Process error:`, err);
       if (!completionSent) {
         completionSent = true;
-        onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true);
+        onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true, undefined, result.extractedSessionId);
       }
       resolve(result);
     });

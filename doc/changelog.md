@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### #376（旧 core#336）: MCP submission 単位の会話セッション境界導入 (2026-09-08)
+
+MCP `submit_instruction`（plan）→ `approve_implementation`（exec）の submission 単位で会話セッションの境界を分離。
+従来は同一プロジェクトへの並行 submission が resume 先や会話履歴（`conversation.json`/`claude-session-id`）を
+取り違える構造だった（2026-09-01 の輻輳事故と同根）。
+
+- **DB**: `Session` に `planTurnId` / `planAiSessionId` / `planAiTool` / `approvedAt` の 4 カラムを追加
+  （すべて nullable、既存行は無変更のまま残る。手順は `doc/migrations/376_session_scope.md` 参照）
+- **agent**: `resolveScopeDir()` により `agentScopeId`（= submissionId）指定時のみ
+  `<projectPath>/.devrelay/sessions/<agentScopeId>/` に読み書きを分離（`agentScopeId` 未指定の対話経路＝
+  WebUI/Discord/Telegram/LINE は従来どおり `.devrelay/` 直下のまま＝挙動無変更）。resume 優先順位は
+  `decideResume()` に集約（`resumeSessionId`（明示） > `forceNewSession` > スコープ内保存 ID）。
+  完了報告には `aiSessionId` / `aiTool` / `turnId` をエコーバックする（`OutputCallback` 第 4 引数
+  `extractedSessionId` を新設し TDZ を回避）
+- **server**: `submission-guard.ts` の `evaluateApproveGuard()` が approve 時に
+  project/user 一致・plan 完了・`planAiSessionId` 存在を検証し、`updateMany({ approvedAt: null })` による
+  atomic claim で二重 approve を防止（claim 失敗時は自分がセットした `approvedAt` とのマッチ条件で
+  自 claim のみ解放）。`planAiSessionId` は `planTurnId` 一致時のみ保存し、遅延した exec/retry の
+  完了報告による誤上書きを構造的に防ぐ
+- **対象 OS**: Linux / macOS。**Windows は未移植**（Windows 機からの MCP approve は `planAiSessionId` が
+  null のまま fail-closed になる＝安全側。対話経路は影響なし）
+- **反映**: ALTER 4 本 → カラム検証 → `pnpm build` → `pm2 restart devrelay-server` → 全マシン `u`
+  （Windows は移植後）
+
+### #371: Servers タブ切り替え時に他サーバーのタブが残る不具合を修正 (2026-09-07)
+
+ユーザー報告「左の TISA というサーバーを選択すると、右のタブバーに devrelay（別サーバー配下のタブ）が残ってしまう」を修正。
+原因は #369 が `visibleTabs` に入れた「アクティブなタブは選択中サーバーに属さなくても常に表示する」という例外条項（`|| t.projectId === activeTabId`）と、
+`handleSelectServer` がサーバー切り替え時に `activeTabId` を貼り替えないことの組み合わせで、サーバーを切り替えるたびに必ず前のサーバーのタブが1枚残っていた。
+
+- `visibleTabs` から `|| t.projectId === activeTabId` の例外条項を撤去（空サーバーの全タブ表示という #369 の救済措置は維持）
+- `handleSelectServer`: 選択したサーバーに現在の `activeTabId` が属していなければ、そのサーバーに属する最初の開いているタブへ貼り替える（開いているタブが無ければ何もしない）
+- `handleSelectProject`: 選択したプロジェクトが現在の `activeServerId`（非空）に属さない場合、そのプロジェクトを含むサーバーへ `activeServerId` を追従させる（`registerToActiveServer` による自動登録が同一呼び出し内で発火した場合はこの追従判定をスキップ、stale closure による誤判定を防止）
+- マウント時復元: 復元した `activeServerId` に属する最初の開いているタブを初期アクティブタブに選ぶ（属するタブが無い/サーバーが空/「すべて」の場合は従来どおり先頭タブにフォールバック）
+- 変更ファイルは `apps/web/src/pages/ChatPage.tsx` の1本のみ（DB/API/Agent 変更なし）
+
 ### #370: Servers タブ / タブバー操作で意図せず別サーバーにプロジェクトが追加される不具合を修正 (2026-09-07)
 
 ユーザー報告「TISA を選択した状態で `devrelay/devrelay-fmv`（別サーバー配下のプロジェクト）をクリックすると TISA に追加されてしまう」を修正。

@@ -47,6 +47,7 @@ import { resolvePermissionPolicy } from './permission-policy.js';
 import type { ManagementInfo } from '@devrelay/shared';
 import { decideClaudeAuthUpdate } from './claude-auth-precedence.js';
 import { validateOAuthCode } from './claude-login-code.js';
+import { shouldRecordPlanAiSession, buildPlanAiSessionWhere } from './submission-guard.js';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
 const MIN_PROTOCOL_VERSION = 0; // TODO: revert to 1 after agent update
@@ -609,12 +610,29 @@ async function handleProjectsUpdate(machineId: string, projects: Project[]) {
   await reconcileProjects(machineId, projects);
 }
 
-async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[]; usageData?: any; isExec?: boolean; execPrompt?: string }) {
-  const { sessionId, output, isComplete, files, usageData, isExec, execPrompt } = payload;
+async function handleAiOutput(payload: { machineId: string; sessionId: string; output: string; isComplete: boolean; files?: FileAttachment[]; usageData?: any; isExec?: boolean; execPrompt?: string; aiSessionId?: string; aiTool?: string; turnId?: string }) {
+  const { sessionId, output, isComplete, files, usageData, isExec, execPrompt, aiSessionId, aiTool, turnId } = payload;
 
   console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}${isExec ? ' [EXEC]' : ''}`);
 
   if (isComplete) {
+    // core#336: plan ターンの完了報告であれば、起動元ターンに対応付けた場合のみ
+    // planAiSessionId/planAiTool を保存する。turnId が Session.planTurnId と一致しない
+    // （exec/retry の完了報告や、対話経路など turnId 自体を送っていない場合）は何もしない。
+    // where 句に planTurnId を含めることで、遅延した完了報告による誤上書きを構造的に防ぐ。
+    if (shouldRecordPlanAiSession({ isComplete, turnId, aiSessionId })) {
+      try {
+        const updated = await prisma.session.updateMany({
+          where: buildPlanAiSessionWhere(sessionId, turnId!),
+          data: { planAiSessionId: aiSessionId, planAiTool: aiTool },
+        });
+        if (updated.count > 0) {
+          console.log(`📌 planAiSessionId saved: session=${sessionId}, turnId=${turnId}, aiSessionId=${aiSessionId!.substring(0, 8)}..., aiTool=${aiTool}`);
+        }
+      } catch (err) {
+        console.error(`❌ Could not save planAiSessionId:`, (err as Error).message);
+      }
+    }
     // クロスプロジェクトクエリの待機中なら resolve（DB 保存は通常フローで行う）
     const pendingQuery = pendingCrossQueries.get(sessionId);
     if (pendingQuery) {
@@ -1158,11 +1176,13 @@ export async function startSession(
   sessionId: string,
   projectName: string,
   projectPath: string,
-  aiTool: AiTool
+  aiTool: AiTool,
+  /** core#336: 会話セッションのスコープ ID。MCP 経由のみ渡す（対話経路は未指定=従来のプロジェクト単位） */
+  agentScopeId?: string,
 ) {
   sendToAgent(machineId, {
     type: 'server:session:start',
-    payload: { sessionId, projectName, projectPath, aiTool }
+    payload: { sessionId, projectName, projectPath, aiTool, agentScopeId }
   });
 }
 
@@ -1193,6 +1213,11 @@ export async function sendPromptToAgent(
    * （静かなフォールバック禁止のため、送信 payload には常に明示値を載せる）。
    */
   permissionPolicy?: string,
+  /**
+   * core#336: 会話セッション境界。MCP 経由のみ渡す（対話経路は未指定=従来のプロジェクト単位 resume）。
+   * 位置引数がすでに多いため、これ以上は増やさずオプション束にまとめる。
+   */
+  scopeOptions?: { agentScopeId?: string; resumeSessionId?: string; turnId?: string },
 ) {
   // #316/#320: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
   // outdatedAgents チェックのエラーメッセージでも使うため、先に解決しておく
@@ -1248,7 +1273,13 @@ export async function sendPromptToAgent(
 
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
-    payload: { sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession, model: resolvedModel, language: resolvedLanguage, permissionPolicy: resolvedPermissionPolicy }
+    payload: {
+      sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession,
+      model: resolvedModel, language: resolvedLanguage, permissionPolicy: resolvedPermissionPolicy,
+      agentScopeId: scopeOptions?.agentScopeId,
+      resumeSessionId: scopeOptions?.resumeSessionId,
+      turnId: scopeOptions?.turnId,
+    }
   });
 }
 
@@ -1760,7 +1791,15 @@ export async function clearConversation(machineId: string, sessionId: string, pr
   });
 }
 
-export async function execConversation(machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string, model?: string, isWCommand?: boolean, language?: Language) {
+export async function execConversation(
+  machineId: string, sessionId: string, projectPath: string, userId: string, prompt?: string,
+  model?: string, isWCommand?: boolean, language?: Language,
+  /**
+   * core#336: 会話セッション境界。MCP 経由（approve_implementation）のみ渡す
+   * （対話経路の exec は未指定=従来のプロジェクト単位・保存済み ID による resume）。
+   */
+  scopeOptions?: { agentScopeId?: string; resumeSessionId?: string; turnId?: string },
+) {
   // exec 開始時に最新の skipPermissions / disableAsk を DB から取得して再送（config:update 配信失敗のフォールバック）
   const machine = await prisma.machine.findUnique({ where: { id: machineId }, select: { skipPermissions: true, disableAsk: true } });
   // セッションに紐づくプロジェクトの terminalMode を取得（Project 単位の設定）
@@ -1817,6 +1856,9 @@ export async function execConversation(machineId: string, sessionId: string, pro
       language: resolvedLanguage,
       // #332: exec は人間承認済みでフル権限が仕様のため常に 'interactive'（Machine.skipPermissions に従う、従来挙動）
       permissionPolicy: resolvePermissionPolicy('exec'),
+      agentScopeId: scopeOptions?.agentScopeId,
+      resumeSessionId: scopeOptions?.resumeSessionId,
+      turnId: scopeOptions?.turnId,
     }
   });
 }
@@ -2062,6 +2104,7 @@ const PLAN_READ_TIMEOUT = 15000; // 15 seconds
  */
 export function requestLatestPlanFile(
   machineId: string,
+  projectPath?: string,   // #375: プロジェクトスコープの .devrelay/plans/ を優先させるために渡す
 ): Promise<{ filename: string | null; content: string | null }> {
   return new Promise((resolve, reject) => {
     const ws = connectedAgents.get(machineId);
@@ -2081,7 +2124,7 @@ export function requestLatestPlanFile(
 
     sendToAgent(ws, {
       type: 'server:plan:latest',
-      payload: { requestId },
+      payload: { requestId, projectPath },
     });
   });
 }

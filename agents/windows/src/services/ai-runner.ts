@@ -314,14 +314,22 @@ function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_L
   const { steps: turnSteps } = sliceStepsFromOffset(digest.steps, offset);
   const formatted: string[] = [];
   for (const s of turnSteps) {
+    // #374: AI のテキスト回答（tool === null）は直上の本文で全文表示済みのため、
+    // 🧭 実行ステップには含めない（重複表示 + 80文字で切れて見える問題の解消）。
+    // devin-atif.ts の endedWithoutAnswer() はこのフィルタより前の digest.steps を見るため
+    // プランモード無言終了検知（#362/#364）には影響しない。
+    if (s.tool === null) continue;
     const f = formatAtifStepSummary(s, lang);
     if (f) formatted.push(f);
   }
+  // #374: 「累計」も「今回」と同じ基準（ツール呼び出しステップのみ）に揃えて表示する。
+  // digest.totalSteps 自体（次回オフセットとして session-store.ts に永続化される値）は変更しない。
+  const cumulativeToolSteps = digest.steps.filter((s) => s.tool !== null).length;
   let summaryText = '';
   if (formatted.length > 0) {
     const shown = formatted.slice(0, 10);
     const more = formatted.length > shown.length ? `（他${formatted.length - shown.length}件）` : '';
-    summaryText = `\n\n🧭 実行ステップ (今回${formatted.length}件 / 累計${digest.totalSteps}件): ${shown.join(' → ')}${more}\n`;
+    summaryText = `\n\n🧭 実行ステップ (今回${formatted.length}件 / 累計${cumulativeToolSteps}件): ${shown.join(' → ')}${more}\n`;
   }
   return {
     summaryText,
@@ -730,6 +738,11 @@ export async function sendPromptToAi(
       } else {
         log.info(`[devin] Model changed (${devinSavedModel || '(default)'} → ${devinCurrentModelForResume || '(default)'}), starting a new session instead of resuming ${devinSessionId}`);
         onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelChangedNewSession', { previousModel: devinSavedModel || '(default)', newModel: devinCurrentModelForResume || '(default)' })}\n`, false);
+        // #374: モデル変更時は新規セッションで開始するため、旧セッションの ATIF 累計ステップ
+        // オフセットも一緒にクリアする（session-store.ts の docstring が元々要求していたが漏れていた）。
+        // 放置すると新セッションの浅い steps 配列に古い大きいオフセットが適用され、今回分の
+        // ステップが誤って全省略される/無関係な過去ターンが混入する不具合が発生する。
+        clearDevinAtifStepOffset(projectPath).catch(() => {});
       }
     }
 

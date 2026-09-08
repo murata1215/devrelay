@@ -12,6 +12,8 @@ import {
   clearIpRangeCache,
 } from '../services/org-control.js';
 import { summarizeSessionActivity } from '../services/conversation-summarizer.js';
+import { parseOrgAiDefaults, serializeOrgAiDefaults, isOrgAiDefaultKey } from '../services/org-ai-defaults.js';
+import { isUnsafeModelId } from '@devrelay/shared';
 
 /**
  * エンタープライズモード（組織）API。
@@ -342,6 +344,65 @@ export async function organizationRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // GET /api/org/ai-defaults — 組織AIデフォルト取得（メンバー全員が閲覧可、#372）
+  // メンバーは自分がロックされているかどうかを知る必要があるため admin 限定にしない
+  // ========================================
+  app.get('/api/org/ai-defaults', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id as string;
+    const membership = await getMembership(userId);
+    if (!membership) {
+      return reply.status(404).send({ error: '組織に所属していません' });
+    }
+
+    return {
+      aiModelDefaults: parseOrgAiDefaults(membership.organization.aiModelDefaults),
+      canOverrideAiSettings: membership.role === 'admin' || membership.canOverrideAiSettings,
+      role: membership.role,
+    };
+  });
+
+  // ========================================
+  // PUT /api/org/ai-defaults — 組織AIデフォルト設定（admin のみ、#372）
+  // body: { aiModelDefaults: Record<string, string> }（キーは <tool>_model_<plan|exec> の8種、値は空文字でクリア）
+  // ========================================
+  app.put('/api/org/ai-defaults', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id as string;
+    const membership = await requireOrgAdmin(userId, reply);
+    if (!membership) return;
+
+    const body = request.body as { aiModelDefaults?: unknown };
+    const raw = body.aiModelDefaults;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return reply.status(400).send({ error: 'aiModelDefaults はオブジェクトで指定してください' });
+    }
+
+    const map: Record<string, string> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (!isOrgAiDefaultKey(key)) {
+        return reply.status(400).send({ error: `不正な設定キーです: ${key}` });
+      }
+      // 空文字・null・undefined はそのキーを未設定（クリア）にする
+      if (value === '' || value === null || value === undefined) continue;
+      if (typeof value !== 'string') {
+        return reply.status(400).send({ error: `モデル ID は文字列で指定してください: ${key}` });
+      }
+      if (isUnsafeModelId(value)) {
+        return reply.status(400).send({ error: `モデル ID に使用できない文字が含まれています: ${key}` });
+      }
+      map[key] = value.trim();
+    }
+
+    await prisma.organization.update({
+      where: { id: membership.organizationId },
+      data: { aiModelDefaults: serializeOrgAiDefaults(map) },
+    });
+
+    return { ok: true, aiModelDefaults: map };
+  });
+
+  // ========================================
   // GET /api/org/logo — ロゴ画像配信（メンバーなら誰でも取得可）
   // ========================================
   app.get('/api/org/logo', async (request, reply) => {
@@ -438,6 +499,8 @@ export async function organizationRoutes(app: FastifyInstance) {
         isSelf: m.userId === userId,
         // member のみ割当数を返す（admin/manager は統制対象外のため null）
         managerCount: m.role === 'member' ? (countMap.get(m.userId) ?? 0) : null,
+        // #372: 組織AIデフォルトのロックを個別解除されているか（admin は常に解除扱いだが UI 混乱防止のため生値をそのまま返す）
+        canOverrideAiSettings: m.canOverrideAiSettings,
       })),
     };
   });
@@ -473,7 +536,8 @@ export async function organizationRoutes(app: FastifyInstance) {
   });
 
   // ========================================
-  // PATCH /api/org/members/:userId — role 変更（admin のみ）
+  // PATCH /api/org/members/:userId — role 変更 / AI設定個別許可の切替（admin のみ、#372 で canOverrideAiSettings 対応）
+  // body: { role?: 'admin'|'manager'|'member', canOverrideAiSettings?: boolean }（どちらか一方または両方）
   // ========================================
   app.patch('/api/org/members/:userId', async (request, reply) => {
     // @ts-ignore
@@ -482,9 +546,16 @@ export async function organizationRoutes(app: FastifyInstance) {
     if (!membership) return;
 
     const { userId: targetUserId } = request.params as { userId: string };
-    const { role } = request.body as { role?: string };
-    if (role !== 'admin' && role !== 'manager' && role !== 'member') {
+    const { role, canOverrideAiSettings } = request.body as { role?: string; canOverrideAiSettings?: unknown };
+
+    if (role === undefined && canOverrideAiSettings === undefined) {
+      return reply.status(400).send({ error: 'role または canOverrideAiSettings を指定してください' });
+    }
+    if (role !== undefined && role !== 'admin' && role !== 'manager' && role !== 'member') {
       return reply.status(400).send({ error: 'role は admin / manager / member を指定してください' });
+    }
+    if (canOverrideAiSettings !== undefined && typeof canOverrideAiSettings !== 'boolean') {
+      return reply.status(400).send({ error: 'canOverrideAiSettings は真偽値で指定してください' });
     }
 
     const target = await prisma.organizationMember.findUnique({ where: { userId: targetUserId } });
@@ -492,8 +563,8 @@ export async function organizationRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'メンバーが見つかりません' });
     }
 
-    // admin → 非 admin への降格で admin が0人になる場合は拒否
-    if (target.role === 'admin' && role !== 'admin') {
+    // admin → 非 admin への降格で admin が0人になる場合は拒否（role 指定時のみ）
+    if (role !== undefined && target.role === 'admin' && role !== 'admin') {
       const adminCount = await prisma.organizationMember.count({
         where: { organizationId: membership.organizationId, role: 'admin' },
       });
@@ -502,20 +573,24 @@ export async function organizationRoutes(app: FastifyInstance) {
       }
     }
 
+    const data: { role?: string; canOverrideAiSettings?: boolean } = {};
+    if (role !== undefined) data.role = role;
+    if (canOverrideAiSettings !== undefined) data.canOverrideAiSettings = canOverrideAiSettings;
+
     await prisma.organizationMember.update({
       where: { userId: targetUserId },
-      data: { role },
+      data,
     });
 
     // manager でなくなった場合、その人が担当していた割当を解除する
     // （admin は暗黙的に全員を監督するため割当不要 / member に降格したら監督権限を失う）
-    if (target.role === 'manager' && role !== 'manager') {
+    if (role !== undefined && target.role === 'manager' && role !== 'manager') {
       await prisma.managerAssignment.deleteMany({
         where: { organizationId: membership.organizationId, managerUserId: targetUserId },
       });
     }
     // member でなくなった場合（manager/admin に昇格）、その人が「担当される側」だった割当も解除する
-    if (target.role === 'member' && role !== 'member') {
+    if (role !== undefined && target.role === 'member' && role !== 'member') {
       await prisma.managerAssignment.deleteMany({
         where: { organizationId: membership.organizationId, memberUserId: targetUserId },
       });
@@ -704,12 +779,12 @@ export async function organizationRoutes(app: FastifyInstance) {
   // ========================================
 
   // GET /api/org/members/:userId/sessions — 対象メンバーのセッション一覧（要約付き・検索可）
-  // クエリ: offset / limit / q（メッセージ全文検索）/ from / to（startedAt 期間、ISO 文字列）
+  // クエリ: offset / limit / q（メッセージ全文検索）/ from / to（startedAt 期間、ISO 文字列）/ includeEmpty（'1'でメッセージ0件のセッションも含める、既定は除外）
   app.get('/api/org/members/:userId/sessions', async (request, reply) => {
     // @ts-ignore
     const viewerUserId = request.user.id as string;
     const { userId: targetUserId } = request.params as { userId: string };
-    const query = request.query as { offset?: string; limit?: string; q?: string; from?: string; to?: string };
+    const query = request.query as { offset?: string; limit?: string; q?: string; from?: string; to?: string; includeEmpty?: string };
 
     // 権限チェック（本人 / 同組織 admin / 担当 manager）
     const allowed = await canViewMemberHistory(viewerUserId, targetUserId);
@@ -737,8 +812,12 @@ export async function organizationRoutes(app: FastifyInstance) {
       where.startedAt = startedAtFilter;
     }
     // q が指定されていればセッション内メッセージの部分一致で絞り込み
+    // 未指定時は既定でメッセージ0件（Agent接続のたびに作られる空セッション）を除外する。includeEmpty=1 で表示に含める
+    const includeEmpty = query.includeEmpty === '1';
     if (q) {
       where.messages = { some: { content: { contains: q, mode: 'insensitive' } } };
+    } else if (!includeEmpty) {
+      where.messages = { some: {} };
     }
 
     const [total, sessions] = await Promise.all([
@@ -771,7 +850,7 @@ export async function organizationRoutes(app: FastifyInstance) {
     ]);
 
     // 監査ログ記録（他人閲覧時のみ、fire-and-forget）
-    recordSupervisionAudit(viewerUserId, targetUserId, 'view_sessions', JSON.stringify({ q: q || undefined, from: query.from, to: query.to }));
+    recordSupervisionAudit(viewerUserId, targetUserId, 'view_sessions', JSON.stringify({ q: q || undefined, from: query.from, to: query.to, includeEmpty: includeEmpty || undefined }));
 
     return {
       total,
@@ -972,6 +1051,8 @@ export async function organizationRoutes(app: FastifyInstance) {
         action: l.action,
         detail: l.detail,
         createdAt: l.createdAt.toISOString(),
+        viewerUserId: l.viewerUserId,
+        targetUserId: l.targetUserId,
         viewer: userMap.get(l.viewerUserId)
           ? { email: userMap.get(l.viewerUserId)!.email, name: userMap.get(l.viewerUserId)!.name }
           : { email: null, name: null },

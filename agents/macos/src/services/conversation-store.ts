@@ -3,9 +3,12 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import { withPathLock, normalizeLockKey } from './path-mutex.js';
 import { writeFileAtomic } from './atomic-write.js';
+import { resolveScopeDir } from './scope-dir.js';
 
 const CONVERSATION_DIR = '.devrelay';
 const CONVERSATION_FILE = 'conversation.json';
+// core#336: アーカイブは従来どおりプロジェクト単位のまま（スコープ対応しない）。
+// スコープ分離するのは「並行 submission が resume 先を取り違える」実害のある conversation.json 本体のみ。
 const ARCHIVE_DIR = 'conversation-archive';  // アーカイブ保存用ディレクトリ
 const MAX_CONTEXT_MESSAGES = 20;  // Claudeに送る最大メッセージ数（保存は無制限）
 
@@ -21,15 +24,18 @@ export interface ConversationData {
   history: ConversationEntry[];
 }
 
-function getConversationPath(projectPath: string): string {
-  return join(projectPath, CONVERSATION_DIR, CONVERSATION_FILE);
+/**
+ * @param agentScopeId core#336: 指定時は `<projectPath>/.devrelay/sessions/<agentScopeId>/` 配下を使う（省略時は従来どおり `.devrelay/` 直下）
+ */
+function getConversationPath(projectPath: string, agentScopeId?: string): string {
+  return join(resolveScopeDir(projectPath, agentScopeId), CONVERSATION_FILE);
 }
 
 /**
  * Load conversation history from project directory
  */
-export async function loadConversation(projectPath: string): Promise<ConversationEntry[]> {
-  const filePath = getConversationPath(projectPath);
+export async function loadConversation(projectPath: string, agentScopeId?: string): Promise<ConversationEntry[]> {
+  const filePath = getConversationPath(projectPath, agentScopeId);
 
   try {
     if (!existsSync(filePath)) {
@@ -53,10 +59,11 @@ export async function loadConversation(projectPath: string): Promise<Conversatio
  */
 export async function saveConversation(
   projectPath: string,
-  history: ConversationEntry[]
+  history: ConversationEntry[],
+  agentScopeId?: string
 ): Promise<void> {
-  const dirPath = join(projectPath, CONVERSATION_DIR);
-  const filePath = getConversationPath(projectPath);
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getConversationPath(projectPath, agentScopeId);
 
   try {
     // Ensure directory exists
@@ -84,10 +91,11 @@ export async function saveConversation(
  */
 async function saveConversationAtomic(
   projectPath: string,
-  history: ConversationEntry[]
+  history: ConversationEntry[],
+  agentScopeId?: string
 ): Promise<void> {
-  const dirPath = join(projectPath, CONVERSATION_DIR);
-  const filePath = getConversationPath(projectPath);
+  const dirPath = resolveScopeDir(projectPath, agentScopeId);
+  const filePath = getConversationPath(projectPath, agentScopeId);
 
   try {
     if (!existsSync(dirPath)) {
@@ -117,14 +125,15 @@ async function saveConversationAtomic(
  */
 export async function mutateConversation(
   projectPath: string,
-  mutator: (current: ConversationEntry[]) => ConversationEntry[]
+  mutator: (current: ConversationEntry[]) => ConversationEntry[],
+  agentScopeId?: string
 ): Promise<ConversationEntry[]> {
-  const lockKey = normalizeLockKey(getConversationPath(projectPath));
+  const lockKey = normalizeLockKey(getConversationPath(projectPath, agentScopeId));
 
   return withPathLock(lockKey, async () => {
-    const current = await loadConversation(projectPath);
+    const current = await loadConversation(projectPath, agentScopeId);
     const updated = mutator(current);
-    await saveConversationAtomic(projectPath, updated);
+    await saveConversationAtomic(projectPath, updated, agentScopeId);
     return updated;
   });
 }
@@ -137,7 +146,8 @@ export async function appendToConversation(
   projectPath: string,
   history: ConversationEntry[],
   role: 'user' | 'assistant',
-  content: string
+  content: string,
+  agentScopeId?: string
 ): Promise<ConversationEntry[]> {
   const entry: ConversationEntry = {
     role,
@@ -145,14 +155,14 @@ export async function appendToConversation(
     timestamp: new Date().toISOString()
   };
 
-  return mutateConversation(projectPath, (current) => [...current, entry]);
+  return mutateConversation(projectPath, (current) => [...current, entry], agentScopeId);
 }
 
 /**
  * Clear conversation history for a project
  */
-export async function clearConversation(projectPath: string): Promise<void> {
-  await saveConversation(projectPath, []);
+export async function clearConversation(projectPath: string, agentScopeId?: string): Promise<void> {
+  await saveConversation(projectPath, [], agentScopeId);
   console.log(`🗑️ Conversation history cleared for ${projectPath}`);
 }
 
@@ -231,7 +241,8 @@ export async function archiveConversation(
  */
 export async function markExecPoint(
   projectPath: string,
-  history: ConversationEntry[]
+  history: ConversationEntry[],
+  agentScopeId?: string
 ): Promise<ConversationEntry[]> {
   const entry: ConversationEntry = {
     role: 'exec',
@@ -239,7 +250,7 @@ export async function markExecPoint(
     timestamp: new Date().toISOString()
   };
 
-  const updatedHistory = await mutateConversation(projectPath, (current) => [...current, entry]);
+  const updatedHistory = await mutateConversation(projectPath, (current) => [...current, entry], agentScopeId);
   console.log(`🚀 Exec point marked at position ${updatedHistory.length}`);
 
   return updatedHistory;

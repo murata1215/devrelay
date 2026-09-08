@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { settings, platforms, services, agreementTemplate, allowedTools, tokens as tokensApi, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity, type OrgRole, type OrgAuditLogEntry, type PersonalAccessTokenInfo } from '../lib/api';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { settings, platforms, services, agreementTemplate, allowedTools, tokens as tokensApi, org as orgApi, type LinkedPlatform, type ServiceStatus, type AgreementTemplateResponse, type AllowedToolsResponse, type OrgMember, type OrgActivity, type OrgRole, type OrgAuditLogEntry, type OrgAiModelDefaults, type PersonalAccessTokenInfo } from '../lib/api';
 // #310: vite.config.ts の resolve.alias で @devrelay/shared を
 // packages/shared/src/index.ts（TS ソース）に直接向けているため、
 // 通常の named import で問題ない（CJS interop が発生しないため）。
@@ -150,6 +150,7 @@ interface ChatDisplaySettings {
  */
 function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
   const { organization, refresh } = useOrganization();
+  const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [ok, setOk] = useState('');
@@ -311,6 +312,19 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
       setMembers(mr.members);
       setActivity(ar.activity);
       flash('権限を変更しました');
+    } catch (e) {
+      flash(e instanceof Error ? e.message : '変更に失敗しました', true);
+    } finally { setBusy(false); }
+  };
+
+  /** メンバーの「AI設定の個別許可」（組織デフォルトのロック解除）を切り替える（#372） */
+  const handleToggleAiOverride = async (m: OrgMember, allowed: boolean) => {
+    setBusy(true);
+    try {
+      await orgApi.updateMemberAiOverride(m.userId, allowed);
+      const r = await orgApi.listMembers();
+      setMembers(r.members);
+      flash(allowed ? 'AI設定の個別許可を有効にしました' : 'AI設定の個別許可を無効にしました');
     } catch (e) {
       flash(e instanceof Error ? e.message : '変更に失敗しました', true);
     } finally { setBusy(false); }
@@ -548,6 +562,7 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
                     <th className="py-2 pr-4">メンバー</th>
                     <th className="py-2 pr-4">権限</th>
                     <th className="py-2 pr-4">担当マネージャー</th>
+                    <th className="py-2 pr-4">AI設定の個別許可</th>
                     <th className="py-2 pr-4">参加日</th>
                     <th className="py-2"></th>
                   </tr>
@@ -611,6 +626,21 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
                           </span>
                         )}
                       </td>
+                      <td className="py-2 pr-4 text-[var(--text-secondary)]">
+                        {m.role === 'admin' ? (
+                          <span className="text-[var(--text-faint)]" title="admin は常に自分で変更できます">— (admin)</span>
+                        ) : (
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={m.canOverrideAiSettings}
+                              disabled={busy}
+                              onChange={(e) => handleToggleAiOverride(m, e.target.checked)}
+                            />
+                            <span className="text-xs">{m.canOverrideAiSettings ? '許可済み' : 'ロック中'}</span>
+                          </label>
+                        )}
+                      </td>
                       <td className="py-2 pr-4 text-[var(--text-faint)]">{new Date(m.createdAt).toLocaleDateString()}</td>
                       <td className="py-2 text-right whitespace-nowrap">
                         {!m.isSelf && (
@@ -641,7 +671,19 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
                 </thead>
                 <tbody>
                   {activity.map((a) => (
-                    <tr key={a.userId} className="border-b border-[var(--border-color)]">
+                    <tr
+                      key={a.userId}
+                      className="border-b border-[var(--border-color)] cursor-pointer hover:bg-[var(--bg-secondary)]"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => navigate(`/activity?userId=${a.userId}`)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          navigate(`/activity?userId=${a.userId}`);
+                        }
+                      }}
+                    >
                       <td className="py-2 pr-4 text-[var(--text-primary)]">{a.email || a.name || a.userId}</td>
                       <td className="py-2 pr-4 text-[var(--text-faint)]">{a.lastActiveAt ? new Date(a.lastActiveAt).toLocaleString() : '—'}</td>
                       <td className="py-2 pr-4 text-[var(--text-secondary)]">{a.sessionCount}</td>
@@ -686,8 +728,15 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
                           <td className="py-2 pr-4 text-[var(--text-primary)]">{log.viewer.email || log.viewer.name || log.viewer.email || '—'}</td>
                           <td className="py-2 pr-4 text-[var(--text-secondary)]">{log.target.email || log.target.name || '—'}</td>
                           <td className="py-2 text-[var(--text-secondary)]">
-                            {log.action === 'view_sessions' ? '会話一覧を閲覧'
-                              : log.action === 'view_messages' ? '会話全文を閲覧'
+                            {log.action === 'view_sessions' ? (
+                              <button
+                                type="button"
+                                onClick={() => navigate(`/activity?userId=${log.targetUserId}`)}
+                                className="text-[var(--accent-color,#3b82f6)] hover:underline"
+                              >
+                                会話一覧を閲覧
+                              </button>
+                            ) : log.action === 'view_messages' ? '会話全文を閲覧'
                               : log.action === 'summarize' ? 'AI 要約を生成'
                               : log.action}
                           </td>
@@ -771,6 +820,34 @@ export function SettingsPage() {
   // AI モデル設定のカスタム入力ドラフト（キー名 → 未保存の入力値）。#309
   // select で「カスタム…」を選んだ、またはカタログ外の値が既に保存されている場合にテキスト入力を表示する
   const [modelCustomDrafts, setModelCustomDrafts] = useState<Record<string, string>>({});
+
+  // #372: 組織AIデフォルト（右カラム）。組織未所属なら null のまま
+  const { organization: orgInfo } = useOrganization();
+  const [orgAiDefaults, setOrgAiDefaults] = useState<OrgAiModelDefaults>({});
+  const [orgAiCanOverride, setOrgAiCanOverride] = useState(true);
+  const [orgAiLoaded, setOrgAiLoaded] = useState(false);
+  // 組織デフォルト編集（admin のみ）のカスタム入力ドラフト
+  const [orgModelCustomDrafts, setOrgModelCustomDrafts] = useState<Record<string, string>>({});
+
+  const loadOrgAiDefaults = async () => {
+    try {
+      const r = await orgApi.getAiDefaults();
+      setOrgAiDefaults(r.aiModelDefaults);
+      setOrgAiCanOverride(r.canOverrideAiSettings);
+    } catch {
+      // 組織未所属（404）等はロック無しとして扱う
+      setOrgAiDefaults({});
+      setOrgAiCanOverride(true);
+    } finally {
+      setOrgAiLoaded(true);
+    }
+  };
+
+  /** 指定キーが組織AIデフォルトでロックされているか（#372） */
+  const isModelKeyLocked = (key: string): boolean => !orgAiCanOverride && !!orgAiDefaults[key];
+
+  /** 表示・編集に使う実効値（ロック中は組織既定を優先表示） */
+  const effectiveModelValue = (key: string): string => (isModelKeyLocked(key) ? orgAiDefaults[key] : (data[key] || ''));
 
   // Bot Token 入力
   const [discordToken, setDiscordToken] = useState('');
@@ -920,6 +997,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     loadSettings();
+    loadOrgAiDefaults();
   }, []);
 
   // System タブはシステム管理者のみ表示されるため、サービス状態の取得も
@@ -1035,6 +1113,48 @@ export function SettingsPage() {
     if (!value) return;
     await handleModelChange(key, value);
     setModelCustomDrafts((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  /** 組織AIデフォルトを1キー分更新して保存する（admin のみ、#372）。値が空文字ならそのキーをクリアする */
+  const handleOrgAiDefaultChange = async (key: string, value: string) => {
+    setError('');
+    setSuccess('');
+    const next = { ...orgAiDefaults, [key]: value };
+    if (!value) delete next[key];
+    try {
+      const r = await orgApi.updateAiDefaults(next);
+      setOrgAiDefaults(r.aiModelDefaults);
+      setSuccess('組織AIデフォルトを更新しました');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save organization AI default');
+    }
+  };
+
+  /** 組織AIデフォルトの select で「カスタム…」を選んだ時の処理 */
+  const handleOrgModelSelectChange = (key: string, value: string) => {
+    if (value === CUSTOM_MODEL_VALUE) {
+      setOrgModelCustomDrafts((prev) => ({ ...prev, [key]: orgAiDefaults[key] || '' }));
+      return;
+    }
+    setOrgModelCustomDrafts((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    handleOrgAiDefaultChange(key, value);
+  };
+
+  /** 組織AIデフォルトのカスタム入力欄を確定保存する */
+  const handleOrgModelCustomSave = async (key: string) => {
+    const value = (orgModelCustomDrafts[key] || '').trim();
+    if (!value) return;
+    await handleOrgAiDefaultChange(key, value);
+    setOrgModelCustomDrafts((prev) => {
       const next = { ...prev };
       delete next[key];
       return next;
@@ -1525,74 +1645,186 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {/* AI Model Settings Section — ツール別・plan/exec 別のデフォルトモデル選択（#309） */}
+      {/* AI Model Settings Section — ツール別・plan/exec 別のデフォルトモデル選択（#309）+ 組織AIデフォルト2カラム化（#372） */}
       <div hidden={activeTab !== 'ai'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">AI Model Settings</h2>
-        <p className="text-[var(--text-muted)] text-sm mb-6">
+        <p className="text-[var(--text-muted)] text-sm mb-4">
           Plan / Exec モードで使用する AI モデルのデフォルトを AI ツールごとに設定します。
           チャットの <code className="px-1 rounded bg-[var(--input-bg)]">l</code> コマンドでも変更でき、同じ設定を共有します（後から変更した方が優先）。
           候補にないモデル ID は「カスタム…」から自由入力できます。
         </p>
 
-        <div className="space-y-8">
-          {MODEL_SELECTABLE_AI_TOOLS.map((tool) => (
-            <div key={tool}>
-              <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{AI_TOOL_NAMES[tool] || tool}</h3>
-              <div className="space-y-4 sm:pl-2">
-                {(['plan', 'exec'] as const).map((mode) => {
-                  const key = modelSettingKey(tool, mode);
-                  const catalog = AI_MODEL_CATALOG[tool];
-                  const currentValue = data[key] || '';
-                  const isCustomDraftOpen = key in modelCustomDrafts;
-                  const isCatalogValue = currentValue === '' || catalog.some((m) => m.id === currentValue);
-                  const selectValue = isCustomDraftOpen ? CUSTOM_MODEL_VALUE : (isCatalogValue ? currentValue : CUSTOM_MODEL_VALUE);
+        {orgAiLoaded && !!orgInfo && !orgAiCanOverride && (
+          <div className="mb-6 px-3 py-2 rounded bg-[var(--bg-base)] border border-[var(--border-color)] text-xs text-[var(--text-muted)]">
+            🔒 この組織では AI モデル設定が管理者によりロックされています。組織デフォルトが設定されている項目は変更できません。個別に変更を許可するよう管理者に依頼してください。
+          </div>
+        )}
 
-                  return (
-                    <div key={key}>
-                      <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
-                        {mode === 'plan' ? 'Plan モード' : 'Exec モード'}
-                      </label>
-                      <p className="text-[var(--text-faint)] text-xs mb-2">
-                        {mode === 'plan' ? 'プランモードで使用するモデル' : '実行モードで使用するモデル'}
-                      </p>
-                      <select
-                        value={selectValue}
-                        onChange={(e) => handleModelSelectChange(key, e.target.value)}
-                        className="w-full sm:w-72 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
-                      >
-                        <option value="">(default) — CLI 標準</option>
-                        {catalog.map((opt) => (
-                          <option key={opt.id} value={opt.id}>
-                            {opt.name}（{opt.description}）
-                          </option>
-                        ))}
-                        <option value={CUSTOM_MODEL_VALUE}>カスタム…</option>
-                      </select>
-                      {selectValue === CUSTOM_MODEL_VALUE && (
-                        <div className="flex gap-2 mt-2 w-full sm:w-72">
-                          <input
-                            type="text"
-                            value={modelCustomDrafts[key] ?? (isCatalogValue ? '' : currentValue)}
-                            onChange={(e) => setModelCustomDrafts((prev) => ({ ...prev, [key]: e.target.value }))}
-                            onKeyDown={(e) => { if (e.key === 'Enter') handleModelCustomSave(key); }}
-                            placeholder="モデル ID を入力"
-                            className="flex-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleModelCustomSave(key)}
-                            className="px-3 py-2 bg-[var(--accent-blue)] text-white rounded text-sm hover:opacity-90"
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* 左カラム: 個人設定 */}
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">個人設定</h3>
+            <div className="space-y-8">
+              {MODEL_SELECTABLE_AI_TOOLS.map((tool) => (
+                <div key={tool}>
+                  <h4 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{AI_TOOL_NAMES[tool] || tool}</h4>
+                  <div className="space-y-4 sm:pl-2">
+                    {(['plan', 'exec'] as const).map((mode) => {
+                      const key = modelSettingKey(tool, mode);
+                      const catalog = AI_MODEL_CATALOG[tool];
+                      const locked = isModelKeyLocked(key);
+                      const currentValue = effectiveModelValue(key);
+                      const isCustomDraftOpen = key in modelCustomDrafts;
+                      const isCatalogValue = currentValue === '' || catalog.some((m) => m.id === currentValue);
+                      const selectValue = isCustomDraftOpen ? CUSTOM_MODEL_VALUE : (isCatalogValue ? currentValue : CUSTOM_MODEL_VALUE);
+
+                      return (
+                        <div key={key}>
+                          <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
+                            {mode === 'plan' ? 'Plan モード' : 'Exec モード'}
+                            {locked && <span className="ml-2 text-xs text-[var(--text-faint)]">🔒 組織既定</span>}
+                          </label>
+                          <p className="text-[var(--text-faint)] text-xs mb-2">
+                            {mode === 'plan' ? 'プランモードで使用するモデル' : '実行モードで使用するモデル'}
+                          </p>
+                          <select
+                            value={selectValue}
+                            disabled={locked}
+                            onChange={(e) => handleModelSelectChange(key, e.target.value)}
+                            className="w-full sm:w-72 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] disabled:opacity-60 disabled:cursor-not-allowed"
                           >
-                            適用
-                          </button>
+                            <option value="">(default) — CLI 標準</option>
+                            {catalog.map((opt) => (
+                              <option key={opt.id} value={opt.id}>
+                                {opt.name}（{opt.description}）
+                              </option>
+                            ))}
+                            <option value={CUSTOM_MODEL_VALUE}>カスタム…</option>
+                          </select>
+                          {!locked && selectValue === CUSTOM_MODEL_VALUE && (
+                            <div className="flex gap-2 mt-2 w-full sm:w-72">
+                              <input
+                                type="text"
+                                value={modelCustomDrafts[key] ?? (isCatalogValue ? '' : currentValue)}
+                                onChange={(e) => setModelCustomDrafts((prev) => ({ ...prev, [key]: e.target.value }))}
+                                onKeyDown={(e) => { if (e.key === 'Enter') handleModelCustomSave(key); }}
+                                placeholder="モデル ID を入力"
+                                className="flex-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleModelCustomSave(key)}
+                                className="px-3 py-2 bg-[var(--accent-blue)] text-white rounded text-sm hover:opacity-90"
+                              >
+                                適用
+                              </button>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
+          </div>
+
+          {/* 右カラム: 組織デフォルト（#372） */}
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">組織デフォルト</h3>
+            {!orgInfo ? (
+              <p className="text-sm text-[var(--text-faint)]">組織に所属していないため、組織デフォルトは適用されません。</p>
+            ) : orgInfo.role === 'admin' ? (
+              <>
+                <p className="text-[var(--text-faint)] text-xs mb-4">
+                  ここで設定した値が、個別許可のないメンバーの既定値になります。メンバーごとの個別許可は Enterprise タブから設定できます。
+                </p>
+                <div className="space-y-8">
+                  {MODEL_SELECTABLE_AI_TOOLS.map((tool) => (
+                    <div key={tool}>
+                      <h4 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{AI_TOOL_NAMES[tool] || tool}</h4>
+                      <div className="space-y-4 sm:pl-2">
+                        {(['plan', 'exec'] as const).map((mode) => {
+                          const key = modelSettingKey(tool, mode);
+                          const catalog = AI_MODEL_CATALOG[tool];
+                          const currentValue = orgAiDefaults[key] || '';
+                          const isCustomDraftOpen = key in orgModelCustomDrafts;
+                          const isCatalogValue = currentValue === '' || catalog.some((m) => m.id === currentValue);
+                          const selectValue = isCustomDraftOpen ? CUSTOM_MODEL_VALUE : (isCatalogValue ? currentValue : CUSTOM_MODEL_VALUE);
+
+                          return (
+                            <div key={key}>
+                              <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
+                                {mode === 'plan' ? 'Plan モード' : 'Exec モード'}
+                              </label>
+                              <select
+                                value={selectValue}
+                                onChange={(e) => handleOrgModelSelectChange(key, e.target.value)}
+                                className="w-full sm:w-72 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+                              >
+                                <option value="">(未設定) — 個人設定 / CLI 標準に従う</option>
+                                {catalog.map((opt) => (
+                                  <option key={opt.id} value={opt.id}>
+                                    {opt.name}（{opt.description}）
+                                  </option>
+                                ))}
+                                <option value={CUSTOM_MODEL_VALUE}>カスタム…</option>
+                              </select>
+                              {selectValue === CUSTOM_MODEL_VALUE && (
+                                <div className="flex gap-2 mt-2 w-full sm:w-72">
+                                  <input
+                                    type="text"
+                                    value={orgModelCustomDrafts[key] ?? (isCatalogValue ? '' : currentValue)}
+                                    onChange={(e) => setOrgModelCustomDrafts((prev) => ({ ...prev, [key]: e.target.value }))}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') handleOrgModelCustomSave(key); }}
+                                    placeholder="モデル ID を入力"
+                                    className="flex-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOrgModelCustomSave(key)}
+                                    className="px-3 py-2 bg-[var(--accent-blue)] text-white rounded text-sm hover:opacity-90"
+                                  >
+                                    適用
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-[var(--text-faint)] text-xs mb-4">
+                  組織管理者が設定したデフォルトです。
+                  {orgAiCanOverride ? '個別に上書きが許可されているため、左の個人設定が優先されます。' : '変更するには管理者に個別許可を依頼してください。'}
+                </p>
+                <div className="space-y-6">
+                  {MODEL_SELECTABLE_AI_TOOLS.map((tool) => (
+                    <div key={tool}>
+                      <h4 className="text-sm font-semibold text-[var(--text-primary)] mb-2">{AI_TOOL_NAMES[tool] || tool}</h4>
+                      <div className="space-y-1 sm:pl-2 text-sm">
+                        {(['plan', 'exec'] as const).map((mode) => {
+                          const key = modelSettingKey(tool, mode);
+                          const v = orgAiDefaults[key];
+                          return (
+                            <div key={key} className="flex items-center justify-between gap-4 text-[var(--text-secondary)]">
+                              <span>{mode === 'plan' ? 'Plan' : 'Exec'}</span>
+                              <span className="text-[var(--text-faint)] truncate">{v || '(未設定)'}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 

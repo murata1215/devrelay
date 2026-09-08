@@ -168,6 +168,11 @@ export interface TerminalRunOptions {
   onResponseSummarize?: (assistantText: string) => Promise<string>;
   /** セッションのモード（session ID 保存時にメタ情報として記録し、次回 resume 判定に使用） */
   sessionMode?: 'plan' | 'exec';
+  /**
+   * core#336: MCP submission 単位のスコープ識別子。指定時は `saveClaudeSessionId()` が
+   * `.devrelay/sessions/<agentScopeId>/` 配下に書く（対話経路は未指定 = 従来どおり）。
+   */
+  agentScopeId?: string;
 }
 
 export interface TerminalRunResult {
@@ -374,7 +379,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // promptSent=false の場合は保存しない（壊れたセッション ID の残留防止, #237）
         const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
         if (claudeSessionId && promptSent) {
-          saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode).catch(err => {
+          saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode, opts.agentScopeId).catch(err => {
             console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
           });
           console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}... (mode=${opts.sessionMode})`);

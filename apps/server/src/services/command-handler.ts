@@ -43,6 +43,7 @@ import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
+import { resolveOrgAiContext, decideEffectiveModel, isModelSettingLocked } from './org-ai-defaults.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
 import { decideUpdateAction } from './agent-update-decision.js';
@@ -1394,14 +1395,26 @@ async function resolveContextModelTool(context: UserContext): Promise<ModelSelec
   return 'claude';
 }
 
-/** AI モデル一覧 + 現在の設定を表示（#309: tool 省略時は現在セッションのツール） */
+/** AI モデル一覧 + 現在の設定を表示（#309: tool 省略時は現在セッションのツール、#372: 実効値+出所+ロック表示） */
 async function handleModelList(context: UserContext, tool?: ModelSelectableAiTool): Promise<string> {
   const targetTool = tool ?? await resolveContextModelTool(context);
   const toolLabel = AI_TOOL_NAMES[targetTool] || targetTool;
   const catalog = AI_MODEL_CATALOG[targetTool];
 
-  const planModel = await getUserSetting(context.userId, modelSettingKey(targetTool, 'plan')) || '(default)';
-  const execModel = await getUserSetting(context.userId, modelSettingKey(targetTool, 'exec')) || '(default)';
+  const planKey = modelSettingKey(targetTool, 'plan');
+  const execKey = modelSettingKey(targetTool, 'exec');
+  const planUserValue = (await getUserSetting(context.userId, planKey)) || undefined;
+  const execUserValue = (await getUserSetting(context.userId, execKey)) || undefined;
+
+  // #372: 組織AIデフォルトとの合成後の実効値・出所を求める
+  const { orgDefaults, canOverride } = await resolveOrgAiContext(context.userId);
+  const planEffective = decideEffectiveModel({ userValue: planUserValue, orgDefault: orgDefaults[planKey], canOverride });
+  const execEffective = decideEffectiveModel({ userValue: execUserValue, orgDefault: orgDefaults[execKey], canOverride });
+
+  const planModel = planEffective.value ?? '(default)';
+  const execModel = execEffective.value ?? '(default)';
+  const sourceLabel = (source: 'user' | 'org' | 'default') =>
+    source === 'org' ? ' 🔒 組織既定' : source === 'default' ? '' : '';
 
   // カタログ外（廃止・改名等で追従できていない可能性がある）ID を通知する。
   // #325 の「静かなフォールバック禁止」方針に従い、保存値の書き換えは一切行わない（表示のみ）。
@@ -1410,8 +1423,11 @@ async function handleModelList(context: UserContext, tool?: ModelSelectableAiToo
   const execWarning = isKnownModel(execModel) ? '' : ' ⚠️ カタログ外（廃止・改名の可能性）';
 
   const lines = [`🧠 **${toolLabel} モデル設定**\n`];
-  lines.push(`Plan: **${planModel}**${planWarning}`);
-  lines.push(`Exec: **${execModel}**${execWarning}\n`);
+  lines.push(`Plan: **${planModel}**${planWarning}${sourceLabel(planEffective.source)}`);
+  lines.push(`Exec: **${execModel}**${execWarning}${sourceLabel(execEffective.source)}\n`);
+  if (!canOverride) {
+    lines.push('⚠️ この組織では AI モデル設定が管理者によりロックされています（管理者に個別許可を依頼してください）\n');
+  }
   lines.push('**候補モデル**（カタログ外の ID も指定可能）:');
   for (const m of catalog) {
     lines.push(`  \`${m.id}\` — ${m.name}（${m.description}）`);
@@ -1424,7 +1440,7 @@ async function handleModelList(context: UserContext, tool?: ModelSelectableAiToo
   return lines.join('\n');
 }
 
-/** AI モデルを設定する（#309: tool 省略時は現在セッションのツール） */
+/** AI モデルを設定する（#309: tool 省略時は現在セッションのツール、#372: 組織ロック時は拒否） */
 async function handleModelSet(context: UserContext, target: 'both' | 'plan' | 'exec', model: string, tool?: ModelSelectableAiTool): Promise<string> {
   const targetTool = tool ?? await resolveContextModelTool(context);
   const toolLabel = AI_TOOL_NAMES[targetTool] || targetTool;
@@ -1433,6 +1449,16 @@ async function handleModelSet(context: UserContext, target: 'both' | 'plan' | 'e
   // 危険文字（引数・TOML インジェクション対策）は無条件で拒否
   if (isUnsafeModelId(model)) {
     return `❌ モデル ID に使用できない文字が含まれています: \`${model}\``;
+  }
+
+  // #372: 組織AIデフォルトでロックされている場合は変更を拒否する
+  const planKey = modelSettingKey(targetTool, 'plan');
+  const execKey = modelSettingKey(targetTool, 'exec');
+  const keysToCheck = target === 'both' ? [planKey, execKey] : [target === 'plan' ? planKey : execKey];
+  for (const key of keysToCheck) {
+    if (await isModelSettingLocked(context.userId, key)) {
+      return `🔒 ${toolLabel} のモデル設定は組織管理者によりロックされています。変更するには管理者に個別許可を依頼してください。`;
+    }
   }
 
   // カタログ一致を優先（大文字小文字を無視）、無ければカタログ外 ID として警告付きで許可
