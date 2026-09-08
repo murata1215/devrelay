@@ -6,6 +6,26 @@
 
 ## 実装済み機能
 
+### #378: Windows Agent 移植 サブサイクル A — 純モジュール + テスト基盤の追加 (2026-09-09)
+
+`agents/windows` は core#376（`9c49644`）/ #377（`8c1dc69`）に含まれておらず、#348/#372/#375/#376/#377 の
+4〜5 サイクル分の Agent 層変更が未反映だった問題の是正（Option A「Linux 構造に寄せる」、全 5 サブサイクルの
+最初の 1 本）。呼び出し元ゼロ・挙動変更ゼロの純追加のみ。
+
+- 8 モジュール（`scope-dir.ts`/`resume-priority.ts`/`session-scope.ts`/`path-mutex.ts`/`atomic-write.ts`/
+  `plan-file-store.ts`/`sdk-stop-reason.ts`/`history-compaction.ts`）を `agents/linux/src/services/` から
+  `agents/windows/src/services/` へ byte-for-byte コピー（`md5sum` 実測で一致確認）
+- `agents/windows/tests/` を新設し 7 テストを verbatim コピー、`package.json` に `"test": "node --test tests/"` を追加
+- 依頼当初の「10 テスト」のうち `session-store-scope`/`conversation-store-scope`/`path-mutex` の 3 本は、
+  windows の `session-store.ts`/`conversation-store.ts` が旧構造のまま（`agentScopeId`/`mutateConversation`
+  未対応）で green にできないため次サブサイクル B へ送付（`path-mutex.ts` 本体は予定どおりコピー済み）
+- `connection.ts`/`ai-runner.ts`/`session-store.ts`/`conversation-store.ts` は無変更。どの新規ファイルからも
+  import されていないことを grep + `git diff --stat` で機械的に確認
+- windows テスト 72 件 pass、linux 438 件 pass（退行なし）、`git status` は `agents/windows/`+`doc/` のみ
+- Plan 全文を `doc/plans/windows-agent-migration-plan.md` へ退避
+- **対象**: `agents/windows` のみ。`apps/`/`packages/`/`prisma/`/`agents/linux`/`agents/macos` 無変更
+- **反映**: server 再起動不要・DB マイグレーション不要。Windows 機は次サブサイクル以降で配線が入るまで挙動変化なし
+
 ### #377: SDK maxTurns 打ち切りの可視化と上限の設定可能化 (2026-09-08)
 
 Claude Agent SDK が `maxTurns` 上限に到達して打ち切られても、DevRelay がこれまで「正常完了」として
