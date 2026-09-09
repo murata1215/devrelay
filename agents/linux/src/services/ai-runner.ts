@@ -20,6 +20,11 @@ import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportCla
 import { buildClaudeLookupCommand, claudeFallbackCandidates } from './claude-locator.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
+import { classifyTerminalStartupFailure } from './terminal-session-id.js';
+// core#383: 旧 Claude CLI（--session-id 未対応）を検出した場合のプロセス内フォールバックフラグ。
+// 一度 true になったら、この Agent プロセスが再起動されるまで以後の全ターンで
+// --session-id を渡さない（legacy argv = 画面スクレイプによる旧来のセッション ID 取得に戻す）。
+let legacyCliSessionIdUnsupported = false;
 // terminal-runner は node-pty / @xterm/headless に依存するネイティブ寄りモジュール。
 // 端末モード未使用時はロードしない（node-pty のネイティブビルド欠落でも Agent 全体は起動できる）
 type TerminalRunnerModule = typeof import('./terminal-runner.js');
@@ -1598,7 +1603,9 @@ async function sendPromptToTerminalClaude(
   // これにより完了報告で aiSessionId を確実にエコーバックでき、MCP approve_implementation が
   // 参照する Session.planAiSessionId を保存できるようになる（端末モード PTY 経路の従来の穴）。
   // resumeSessionId と newSessionId は排他（terminal-runner.ts の argv 構築で強制）。
-  const newSessionId: string | undefined = resumeSessionId ? undefined : crypto.randomUUID();
+  // legacyCliSessionIdUnsupported が立っている場合は --session-id 自体を渡さない
+  // （旧 CLI フォールバック。scrape ベースの旧来経路に戻す）。
+  const newSessionId: string | undefined = (resumeSessionId || legacyCliSessionIdUnsupported) ? undefined : crypto.randomUUID();
 
   // 診断ログ: WebUI トグルとの食い違いを調査するため、判定根拠を出力する
   console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}, resumeSessionId=${resumeSessionId ? resumeSessionId.slice(0, 8) + '...' : '(none)'}, newSessionId=${newSessionId ? newSessionId.slice(0, 8) + '...' : '(none)'}`);
@@ -1684,10 +1691,22 @@ async function sendPromptToTerminalClaude(
         await clearClaudeSessionId(projectPath, options.agentScopeId);
       }
       onOutput(`\n⚠️ Claude CLI が起動中に終了しました。リトライします...\n`, false);
-      // core#383: リトライは常に新しい UUID を採番する。Claude CLI は既存 ID の再指定を
-      // 「Session ID ... is already in use.」で拒否するため、1 回目の spawn が JSONL を
-      // 作りかけていた場合に同じ ID を使い回すと即座に失敗する
-      const retrySessionId = crypto.randomUUID();
+
+      // core#383: 起動失敗が「旧 CLI が --session-id / --fork-session フラグ自体を拒否した」
+      // ことに起因するかを画面出力から判定する。該当する場合はプロセス内フラグを立てて
+      // 以後の全ターン（このリトライ含む）で --session-id を渡さない legacy 経路
+      // （scrape ベースのセッション ID 取得）に自動フォールバックする。
+      if (newSessionId && !legacyCliSessionIdUnsupported) {
+        const failureKind = classifyTerminalStartupFailure(runResult.finalOutput);
+        if (failureKind === 'legacy-session-id-unsupported') {
+          legacyCliSessionIdUnsupported = true;
+          console.warn(`⚠️ [terminal-mode] legacy Claude CLI detected (--session-id unsupported) → falling back to scrape-based session id for this and future turns`);
+        }
+      }
+      // core#383: リトライは（legacy フォールバック中でなければ）常に新しい UUID を採番する。
+      // Claude CLI は既存 ID の再指定を「Session ID ... is already in use.」で拒否するため、
+      // 1 回目の spawn が JSONL を作りかけていた場合に同じ ID を使い回すと即座に失敗する
+      const retrySessionId = legacyCliSessionIdUnsupported ? undefined : crypto.randomUUID();
       onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${approveAllMode ? ' --dangerously-skip-permissions' : ''}\n`, false);
 
       runResult = await runTerminalClaude({

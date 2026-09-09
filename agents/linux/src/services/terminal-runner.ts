@@ -43,6 +43,7 @@ import {
 import { registerScreenAnalysisResolver } from './ai-runner.js';
 import type { ScreenAnalysis } from '@devrelay/shared';
 import crypto from 'crypto';
+import { decideTerminalSessionArgs, resolveTerminalAiSessionId } from './terminal-session-id.js';
 
 /** PTY サイズ */
 const TERM_COLS = 120;
@@ -288,13 +289,12 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   if (opts.approveAllMode) {
     args.push('--dangerously-skip-permissions');
   }
-  if (opts.resumeSessionId) {
-    args.push('--resume', opts.resumeSessionId);
-  } else if (opts.newSessionId) {
-    // core#383: resume しない場合は必ず ID を事前採番する。Claude CLI は
-    // 「--session-id can only be used with --continue or --resume if --fork-session is
-    // also specified.」で拒否するため resumeSessionId と同時指定はしない（if/else if で排他）。
-    args.push('--session-id', opts.newSessionId);
+  // core#383: --resume と --session-id は相互排他（Claude CLI が
+  // 「--session-id can only be used with --continue or --resume if --fork-session is
+  // also specified.」で拒否するため）。判定は純関数 decideTerminalSessionArgs() に集約。
+  const sessionArgs = decideTerminalSessionArgs({ resumeSessionId: opts.resumeSessionId, newSessionId: opts.newSessionId });
+  if (sessionArgs.flag) {
+    args.push(sessionArgs.flag, sessionArgs.value!);
   }
 
   console.log(`🖥️ [terminal-mode] spawning: ${opts.claudeCommand} ${args.join(' ')} (cwd=${opts.projectPath})`);
@@ -470,11 +470,14 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           usageData = { durationMs: Date.now() - start };
         }
 
-        // core#383: サーバーへエコーバックする aiSessionId。優先順位は
-        // 「採番した ID（--session-id で確実に使われた）」→「resume 指定した ID（CLI が維持する）」
-        // →「画面スクレイプで拾えた ID（旧経路のフォールバック）」。promptSent=false なら送らない
-        // （#237 の「壊れたセッション ID 残留」防止と同じ理由）。
-        const aiSessionId = promptSent ? (opts.newSessionId || opts.resumeSessionId || claudeSessionId || undefined) : undefined;
+        // core#383: サーバーへエコーバックする aiSessionId。優先順位判定は純関数
+        // resolveTerminalAiSessionId() に集約（main onExit 側と同一ロジック）。
+        const aiSessionId = resolveTerminalAiSessionId({
+          promptSent,
+          newSessionId: opts.newSessionId,
+          resumeSessionId: opts.resumeSessionId,
+          scrapedSessionId: claudeSessionId ?? undefined,
+        });
 
         // === JSONL Recovery: finish() で画面抽出が失敗した場合に JSONL から応答を復元 ===
         // onExit 時点では Claude session ID が確定しているため JSONL を確実に読める。
@@ -1288,9 +1291,14 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         };
       }
 
-      // core#383: サーバーへエコーバックする aiSessionId。優先順位は finish() 側の resolve と同じ
-      // （採番した ID → resume 指定した ID → 画面スクレイプの ID）。promptSent=false なら送らない。
-      const aiSessionId = promptSent ? (opts.newSessionId || opts.resumeSessionId || claudeSessionId || undefined) : undefined;
+      // core#383: サーバーへエコーバックする aiSessionId。優先順位判定は純関数
+      // resolveTerminalAiSessionId() に集約（finish() 側と同一ロジック）。
+      const aiSessionId = resolveTerminalAiSessionId({
+        promptSent,
+        newSessionId: opts.newSessionId,
+        resumeSessionId: opts.resumeSessionId,
+        scrapedSessionId: claudeSessionId ?? undefined,
+      });
 
       resolve({
         finalOutput,
