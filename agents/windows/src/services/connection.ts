@@ -34,6 +34,7 @@ import log from './logger.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
 import { decideResume } from './resume-priority.js';
 import { isEphemeralSession } from './session-scope.js';
+import { stripProgressMarkers } from './history-compaction.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId } from './session-store.js';
 import { buildDevinPlanPreamble } from './devin-plan-prompt.js';
 import { isGitRepo, captureBaseline, restoreToBaseline, type PorcelainEntry } from './git-guard.js';
@@ -920,7 +921,10 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           if (responseText.trim()) {
             sessionInfo.history.push({
               role: 'assistant',
-              content: responseText.trim(),
+              // #372: 進捗マーカー（🔧 ...を使用中...）は表示用の装飾で、次ターンの文脈としては
+              // 価値ゼロなのに conversation.json を肥大させていた。保存時に落とす。
+              // 全文が進捗マーカーだった場合だけ従来どおり原文を残す（空文字を保存しない）。
+              content: stripProgressMarkers(responseText).trim() || responseText.trim(),
               timestamp: new Date().toISOString()
             });
             if (!isEphemeral) {
@@ -1028,7 +1032,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             if (responseText.trim()) {
               sessionInfo.history.push({
                 role: 'assistant',
-                content: responseText.trim(),
+                // #372: 進捗マーカーを落として保存（上の通常経路と同じ理由）
+                content: stripProgressMarkers(responseText).trim() || responseText.trim(),
                 timestamp: new Date().toISOString()
               });
               if (!isEphemeral) {

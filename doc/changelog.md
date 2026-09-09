@@ -6,6 +6,40 @@
 
 ## 実装済み機能
 
+### #381: Windows Agent 移植 サブサイクル C — agentScopeId/resumeSessionId/turnId 受信配線 (2026-09-09)
+
+core#336（MCP submission 単位の会話セッション境界）は Linux/macOS では完成済みだったが、Windows は
+サブサイクル A（#378）・B（#379）で純モジュール配置・ストア層置換のみ済みで、呼び出し側の受信配線が
+無かったため実効果ゼロ（サーバーは `agentScopeId`/`resumeSessionId`/`turnId` を送信していたが Windows
+Agent がすべて無視）。本サイクルで Windows も配線し、最大の実害
+（server の `Session.planAiSessionId` が永久に null → Windows マシンへの MCP `approve_implementation`
+が fail-closed のまま）を解消した。
+
+- **commit1 (C1+C2)**: `connection.ts`/`ai-runner.ts` に `agentScopeId` を9+18箇所配線。
+  従来 `payload.resumeSessionId` を完全に無視していた欠陥を `decideResume()`（A で配置済みの純関数）
+  導入で修正。R-B2（`saveClaudeSessionId` の4引数形取り違え）を明示 `undefined` で防止
+- **commit2 (C3)**: `OutputCallback` を5引数形に拡張し、完了報告（`agent:ai:output` の
+  `isComplete=true`）に `aiSessionId`/`aiTool`/`turnId` のエコーバックを追加（server 側の
+  `planAiSessionId` 紐付けに必須）。TDZ 回帰テスト新設。retry 経路に Linux パリティ修正
+  （`allowedTools` 継承漏れで plan ターンの retry が読み取りツールを全喪失する既存欠陥を解消）も同梱
+- **commit3 (C1b)**: `isEphemeralSession()` ゲートを読み取り・書き込み同時に導入（#348）。
+  ask-member/teamexec-member/askDesc セッションが projectPath 上の永続状態
+  （conversation.json/claude-session-id/context-usage/.devrelay-output）を対話セッションと
+  共有しないようにした。片方だけ先行導入すると新規リグレッションになるため承認ノートの指定どおり
+  1コミットにまとめた。`ai-runner.ts` の `persistProjectState` ガードは Windows CLI 経路の2箇所のみ
+  （Linux の残り4箇所は Claude Agent SDK 専用でWindowsに対応箇所なしと実測確認）
+- **commit4 (C4)**: 完了保存時に `stripProgressMarkers()` を適用（#372 の save 側、Windows 未移植だった
+  片翼を解消）。`scope-wiring.test.mjs` 新設（R-B2 トリップワイヤ + `handleAgreementApply` に
+  `agentScopeId` が将来追加されないことの固定化）。`doc/migrations/381_windows_scope_wiring.md` で
+  R-B1（`u` 後の初回 MCP submission が一度きり新規セッションから始まる）を明文化
+- 全コミットで `pnpm exec tsc --noEmit`/`pnpm build`（6 workspace）/`node --test
+  --test-concurrency=1`（windows/linux/macos 個別実行）を実施し非退行を実測（windows 90→93→93→98、
+  linux 438、macos 384+1skip すべて維持）
+- **対象**: `agents/windows/` + `doc/` のみ（`apps/server`/`agents/linux`/`agents/macos`/
+  `packages/shared` 無変更、DB マイグレーション不要、server 再起動不要）
+- **反映**: commit+push 後、各 Windows 機で `u`。実機 E2E 手順は devlog
+  `doc/devlog/2026-09-09_104210.md` に記載（けいすけ側で実施）
+
 ### #380: MCP ツールの長文切り詰め改善（get_conversation_history / get_build_status） (2026-09-09)
 
 exec 完了報告の commit hash / push 結果はメッセージ末尾にあるが、`get_conversation_history` が
