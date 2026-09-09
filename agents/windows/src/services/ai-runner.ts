@@ -468,6 +468,22 @@ export interface SendPromptOptions {
    * 未指定・'ja' の場合は従来どおり何も付与しない（既存挙動を変えないため）。
    */
   language?: import('@devrelay/shared').Language;
+  /**
+   * core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を
+   * セッションストア／会話履歴ストアの読み書き先として使う（対話経路は未指定のまま = 従来どおり）。
+   */
+  agentScopeId?: string;
+  /**
+   * core#336: サーバーが発行するターン相関 ID。Agent 側では内容を解釈せず、完了報告
+   * （`agent:ai:output` の `isComplete=true`）にそのままエコーバックする（server 側で
+   * `Session.planAiSessionId` を紐付けるため）。
+   */
+  turnId?: string;
+  /**
+   * core#336: true の場合、ストア済みセッション ID があっても resume せず新規セッションとして開始する
+   * （MCP submit_instruction の初回ターン等）。
+   */
+  forceNewSession?: boolean;
 }
 
 export async function sendPromptToAi(
@@ -595,7 +611,8 @@ export async function sendPromptToAi(
     }
 
     // Add resume option if we have a previous session ID
-    if (options.resumeSessionId) {
+    // core#336: forceNewSession 指定時は resumeSessionId があっても resume しない（二重防御）
+    if (options.resumeSessionId && !options.forceNewSession) {
       args.push('--resume', options.resumeSessionId);
       log.info(`Resuming session: ${options.resumeSessionId.substring(0, 8)}...`);
     }
@@ -708,7 +725,7 @@ export async function sendPromptToAi(
     // ATIF 読み取り時にこれを渡し「今回のターンで新たに実行されたステップ」だけに絞り込む。
     // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
     // offset<=0 は全件返しにフォールバックする二重防御）。
-    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath)) ?? 0;
+    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0;
 
     // #368 Phase2a-C: Devin は常に exec 相当（dangerous）で起動する。
     // 下の plan 系分岐（①〜④）は usePlanMode が Devin では常に false になったため
@@ -720,9 +737,9 @@ export async function sendPromptToAi(
     // CLI で指定しても、resume したセッションは元の auto モードを保持して
     // 書き込みが拒否されるため）
     // フォールバック時（#274）は resume しない（壊れたセッション回避）
-    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath);
+    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath, options.agentScopeId);
     const devinSessionId = devinSavedPermissionMode === devinTurnPermissionMode
-      ? await loadDevinSessionId(projectPath)
+      ? await loadDevinSessionId(projectPath, options.agentScopeId)
       : null;
     // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
     // そのまま使い続ける（`--model` を付けても CLI が warning を出して黙って無視する）。
@@ -730,7 +747,7 @@ export async function sendPromptToAi(
     // 今回指定のモデルが食い違っていたら resume せず新規セッションで開始する。
     devinCurrentModelForResume = safeModelArg(options.model) ?? '';
     if (devinSessionId) {
-      const devinSavedModel = (await loadDevinModel(projectPath)) ?? '';
+      const devinSavedModel = (await loadDevinModel(projectPath, options.agentScopeId)) ?? '';
       if (devinSavedModel === devinCurrentModelForResume) {
         args.push('-r', devinSessionId);
         devinResumedSessionId = devinSessionId;
@@ -742,7 +759,7 @@ export async function sendPromptToAi(
         // オフセットも一緒にクリアする（session-store.ts の docstring が元々要求していたが漏れていた）。
         // 放置すると新セッションの浅い steps 配列に古い大きいオフセットが適用され、今回分の
         // ステップが誤って全省略される/無関係な過去ターンが混入する不具合が発生する。
-        clearDevinAtifStepOffset(projectPath).catch(() => {});
+        clearDevinAtifStepOffset(projectPath, options.agentScopeId).catch(() => {});
       }
     }
 
@@ -879,7 +896,7 @@ export async function sendPromptToAi(
     }
 
     // 保存済み thread_id があれば resume で継続（フラグを全部書いた"後"に置く必要がある）
-    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath) : null;
+    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath, options.agentScopeId) : null;
     if (codexThreadIdToResume) {
       args.push('resume', codexThreadIdToResume);
       codexResumedThreadId = codexThreadIdToResume;
@@ -1115,7 +1132,7 @@ export async function sendPromptToAi(
                 codexThreadId = threadId;
                 result.extractedSessionId = threadId;
                 log.info(`[codex] Thread ID: ${threadId}`);
-                saveCodexSessionId(projectPath, threadId).catch(err => {
+                saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
                   log.error(`Failed to save Codex session ID: ${err}`);
                 });
               }
@@ -1188,7 +1205,8 @@ export async function sendPromptToAi(
             result.extractedSessionId = parsed.sessionId;
             log.info(`[${aiTool}] Session ID: ${parsed.sessionId.substring(0, 8)}...`);
             // Save session ID for future resumption
-            saveClaudeSessionId(projectPath, parsed.sessionId).catch(err => {
+            // R-B2: 3引数形にすると agentScopeId が mode に誤って入る。必ず undefined を明示した4引数形にする
+            saveClaudeSessionId(projectPath, parsed.sessionId, undefined, options.agentScopeId).catch(err => {
               log.error(`Failed to save session ID:`, err);
             });
           }
@@ -1196,7 +1214,7 @@ export async function sendPromptToAi(
             result.contextUsage = parsed.contextUsage;
             log.info(`[${aiTool}] ${formatContextUsage(parsed.contextUsage)}`);
             // Save context usage for display at start of next prompt
-            saveContextUsage(projectPath, parsed.contextUsage).catch(err => {
+            saveContextUsage(projectPath, parsed.contextUsage, options.agentScopeId).catch(err => {
               log.error(`Failed to save context usage:`, err);
             });
           }
@@ -1443,14 +1461,14 @@ export async function sendPromptToAi(
             .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
             .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
           if (latest?.id) {
-            saveDevinSessionId(projectPath, latest.id).catch(() => {});
+            saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
             // このサイクル: 次回のモデル一致判定のため、今回使ったモデルもセッション ID と並べて保存する
-            saveDevinModel(projectPath, devinCurrentModelForResume).catch(() => {});
+            saveDevinModel(projectPath, devinCurrentModelForResume, options.agentScopeId).catch(() => {});
             // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
             // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-            saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps).catch(() => {});
+            saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
             // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
-            saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '').catch(() => {});
+            saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
           }
           }
         } catch (err) {
@@ -1544,7 +1562,7 @@ export async function sendPromptToAi(
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath), clearDevinModel(projectPath), clearDevinAtifStepOffset(projectPath), clearDevinPermissionMode(projectPath)]).finally(() => resolve(result));
+        Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
         return;
       }
 
@@ -1554,7 +1572,7 @@ export async function sendPromptToAi(
       if (codexResumeEmpty) {
         log.info(`[codex] Resumed thread produced no output (code ${code}), clearing session ID and retrying fresh`);
         result.resumeFailed = true;
-        clearCodexSessionId(projectPath).finally(() => resolve(result));
+        clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
         return;
       }
 

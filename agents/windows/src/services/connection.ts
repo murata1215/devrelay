@@ -32,6 +32,7 @@ import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_WINDOWS } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import log from './logger.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
+import { decideResume } from './resume-priority.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId } from './session-store.js';
 import { buildDevinPlanPreamble } from './devin-plan-prompt.js';
 import { isGitRepo, captureBaseline, restoreToBaseline, type PorcelainEntry } from './git-guard.js';
@@ -107,6 +108,8 @@ interface SessionInfo {
   history: ConversationEntry[]; // Conversation history (persisted to file)
   pendingWorkState?: WorkState; // Work state to include in next prompt
   contextWarned?: boolean; // #291-B: コンテキスト警告を既に送信済みか（スパム防止。閾値未満に戻ると解除）
+  /** core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を使う（対話経路は未指定のまま = 従来どおり） */
+  agentScopeId?: string;
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -347,10 +350,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 }
 
 async function handleSessionStart(
-  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool },
+  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool; agentScopeId?: string },
   config: AgentConfig
 ) {
-  const { sessionId, projectName, projectPath, aiTool: requestedAiTool } = payload;
+  const { sessionId, projectName, projectPath, aiTool: requestedAiTool, agentScopeId } = payload;
   // Devin 専用端末等でサーバー指定の AI が未インストールなら、実際に使えるツールへ差し替える
   const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
   if (aiTool !== requestedAiTool) {
@@ -366,7 +369,7 @@ async function handleSessionStart(
   currentProjectName = projectName;
 
   // Load previous conversation history from file
-  const history = await loadConversation(projectPath);
+  const history = await loadConversation(projectPath, agentScopeId);
 
   // Check for pending work state (auto-continue feature)
   const pendingWorkState = await loadWorkState(projectPath);
@@ -387,7 +390,7 @@ async function handleSessionStart(
   }
 
   // Load existing Claude session ID for --resume
-  const claudeResumeSessionId = await loadClaudeSessionId(projectPath);
+  const claudeResumeSessionId = await loadClaudeSessionId(projectPath, agentScopeId);
   if (claudeResumeSessionId) {
     log.info(`Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
   }
@@ -400,7 +403,8 @@ async function handleSessionStart(
     claudeSessionId,
     claudeResumeSessionId: claudeResumeSessionId || undefined,
     history,
-    pendingWorkState: pendingWorkState || undefined
+    pendingWorkState: pendingWorkState || undefined,
+    agentScopeId
   });
   log.info(`Session ${sessionId} -> Claude Session ${claudeSessionId}`);
 
@@ -487,7 +491,7 @@ async function handleConversationClear(payload: { sessionId: string; projectPath
   }
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean; language?: Language }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; aiTool?: AiTool; model?: string; isWCommand?: boolean; language?: Language; agentScopeId?: string; resumeSessionId?: string; turnId?: string }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   log.info(`Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -503,13 +507,18 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
         sessionInfo.aiTool = resolved;
       }
     }
+    // core#336: sessionInfo が session:start より前（server restart 後の初回 exec 等）に生成されていて
+    // agentScopeId が未設定のままの場合、exec の payload から後付けで補完する（Linux :809-811 の写し）
+    if (payload.agentScopeId && !sessionInfo.agentScopeId) {
+      sessionInfo.agentScopeId = payload.agentScopeId;
+    }
     // Mark exec point in history (this becomes the reset point)
-    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
+    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
     log.info(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
   } else {
     // Session not in memory (e.g., after server restart), initialize from file
     log.info(`Session not found in memory, initializing from file...`);
-    const history = await loadConversation(projectPath);
+    const history = await loadConversation(projectPath, payload.agentScopeId);
     const claudeSessionId = uuidv4();
     // #307: Server から渡された aiTool（DB の Session.aiTool）を優先する。
     // ここでハードコードの config 既定値にフォールバックすると、`a` で選択した AI ツール
@@ -520,12 +529,12 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
       : requestedAiTool;
 
     // Create session info and add to map
-    sessionInfo = { projectPath, aiTool, claudeSessionId, history };
+    sessionInfo = { projectPath, aiTool, claudeSessionId, history, agentScopeId: payload.agentScopeId };
     sessionInfoMap.set(sessionId, sessionInfo);
     log.info(`Session ${sessionId} initialized with ${history.length} history entries (aiTool=${aiTool})`);
 
     // Mark exec point in history
-    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history);
+    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
     log.info(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
@@ -541,6 +550,10 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     model: payload.model,  // #309: AI モデル指定を継承（claude/codex/gemini/devin 共通）
     isWCommand: payload.isWCommand,  // #312: Codex w コマンドのサンドボックス切替判定に使用
     language: payload.language,  // #316: チャット表示言語を継承
+    // core#336: MCP submission 単位のスコープ + resume 指定 + turnId を継承
+    agentScopeId: sessionInfo?.agentScopeId ?? payload.agentScopeId,
+    resumeSessionId: payload.resumeSessionId,
+    turnId: payload.turnId,
   });
 }
 
@@ -556,7 +569,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; model?: string; isWCommand?: boolean; language?: Language }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; model?: string; isWCommand?: boolean; language?: Language; agentScopeId?: string; resumeSessionId?: string; turnId?: string; forceNewSession?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   log.info(`Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
@@ -609,7 +622,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     content: prompt,
     timestamp: new Date().toISOString()
   });
-  await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+  await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
 
   // Clear output directory before running
   await clearOutputDir(sessionInfo.projectPath);
@@ -766,14 +779,26 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     },
   });
 
+  // core#336: サーバーが明示指定した resumeSessionId（MCP approve_implementation 等）を最優先とし、
+  // forceNewSession 指定時は resume させず、それ以外は従来どおりストア済みセッション ID を使う。
+  const effectiveResumeSessionId = decideResume({
+    explicitResumeSessionId: payload.resumeSessionId,
+    forceNewSession: payload.forceNewSession,
+    storedSessionId: sessionInfo.claudeResumeSessionId,
+  }).resumeSessionId;
+
   // Prepare send options
   const sendOptions: SendPromptOptions = {
-    resumeSessionId: sessionInfo.claudeResumeSessionId,
+    resumeSessionId: effectiveResumeSessionId,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_WINDOWS) : undefined,
     model: payload.model,  // #309: AI モデル指定（claude/codex/gemini/devin 共通、l コマンド／Settings で設定）
     isWCommand: payload.isWCommand,  // #312: Codex の w コマンドのみ danger-full-access に切り替える
     language: payload.language,  // #316: チャット表示言語（'en' の場合のみ AI への英語応答指示が付与される）
+    // core#336: MCP submission 単位のスコープ配線
+    agentScopeId: sessionInfo.agentScopeId,
+    turnId: payload.turnId,
+    forceNewSession: payload.forceNewSession,
   };
 
   // #368 Phase2a-C: Devin のプランターンのみ、ターン前の作業ツリー状態を記録する。
@@ -852,7 +877,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               content: responseText.trim(),
               timestamp: new Date().toISOString()
             });
-            await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+            await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
             log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
           }
         } else {
@@ -876,7 +901,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     if (aiResult.resumeFailed) {
       log.info(`Retrying without --resume due to session failure...`);
       sessionInfo.claudeResumeSessionId = undefined;
-      await clearClaudeSessionId(sessionInfo.projectPath);
+      await clearClaudeSessionId(sessionInfo.projectPath, sessionInfo.agentScopeId);
 
       // Retry without resume session ID（completionSent をリセットして retry の完了を受け付ける）
       responseText = '';
@@ -940,7 +965,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 content: responseText.trim(),
                 timestamp: new Date().toISOString()
               });
-              await saveConversation(sessionInfo.projectPath, sessionInfo.history);
+              await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
               log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
             }
           } else {
