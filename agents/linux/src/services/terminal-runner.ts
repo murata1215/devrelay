@@ -1257,7 +1257,9 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // 次回 --resume すると不安定な挙動になる（#237: bypass "No, exit" の session ID が残留した事故）
       const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
       if (claudeSessionId && promptSent) {
-        saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode).catch(err => {
+        // core#383: agentScopeId が抜けていたバグを修正（finish() 側の同等コードには元々あった）。
+        // 抜けたままだと非スコープの `.devrelay/` に書かれ、MCP submission スコープ（core#336）の分離が破られる。
+        saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode, opts.agentScopeId).catch(err => {
           console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
         });
         console.log(`💾 [terminal-mode] captured Claude session id: ${claudeSessionId.slice(0, 8)}... (mode=${opts.sessionMode})`);

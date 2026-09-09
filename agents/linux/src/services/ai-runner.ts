@@ -1704,6 +1704,10 @@ async function sendPromptToTerminalClaude(
         onScreenAnalyze: makeScreenAnalyzer,
         onResponseSummarize: makeResponseSummarizer,
         sessionMode: options.usePlanMode ? 'plan' : 'exec',
+        // core#383: リトライ spawn に agentScopeId が抜けていたバグを修正。
+        // 抜けたままだと非スコープの `.devrelay/` にセッション状態が書かれ、
+        // MCP submission スコープ（core#336）の分離が破られる。
+        agentScopeId: options.agentScopeId,
       });
     }
 
