@@ -33,6 +33,7 @@ import type { AgentConfig } from './config.js';
 import log from './logger.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, type SendPromptOptions } from './ai-runner.js';
 import { decideResume } from './resume-priority.js';
+import { isEphemeralSession } from './session-scope.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId } from './session-store.js';
 import { buildDevinPlanPreamble } from './devin-plan-prompt.js';
 import { isGitRepo, captureBaseline, restoreToBaseline, type PorcelainEntry } from './git-guard.js';
@@ -349,6 +350,16 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
   }
 }
 
+// #348: 一時セッション（ask-member/teamexec-member/askDesc）用の exec マーカー付与。
+// disk I/O をせずメモリ内 history のみに追記する（agents/linux/src/services/connection.ts の写し）。
+function markExecPointInMemory(history: ConversationEntry[]): ConversationEntry[] {
+  return [...history, {
+    role: 'exec',
+    content: '--- EXEC: Implementation Started ---',
+    timestamp: new Date().toISOString()
+  }];
+}
+
 async function handleSessionStart(
   payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool; agentScopeId?: string },
   config: AgentConfig
@@ -360,6 +371,9 @@ async function handleSessionStart(
     log.info(`⚠️ AI ${requestedAiTool} not installed on this machine → using ${aiTool} instead`);
   }
 
+  // #348: crossquery_/teamexec_/askdesc_ は一時セッション（projectPath 上の状態を読み書きしない）
+  const isEphemeral = isEphemeralSession(sessionId);
+
   log.info(`Starting session: ${sessionId}`);
   log.info(`   Project: ${projectName} (${projectPath})`);
   log.info(`   AI Tool: ${aiTool}`);
@@ -368,8 +382,9 @@ async function handleSessionStart(
   currentProjectPath = projectPath;
   currentProjectName = projectName;
 
-  // Load previous conversation history from file
-  const history = await loadConversation(projectPath, agentScopeId);
+  // #348: 一時セッションは conversation.json を読まない（全セッション共有の resume/履歴汚染を防ぐ）
+  // core#336: agentScopeId 指定時はスコープ専用ディレクトリを読む（対話経路は agentScopeId 未指定 = 従来どおり）
+  const history = isEphemeral ? [] : await loadConversation(projectPath, agentScopeId);
 
   // Check for pending work state (auto-continue feature)
   const pendingWorkState = await loadWorkState(projectPath);
@@ -390,7 +405,8 @@ async function handleSessionStart(
   }
 
   // Load existing Claude session ID for --resume
-  const claudeResumeSessionId = await loadClaudeSessionId(projectPath, agentScopeId);
+  // #348: 一時セッションは resume しない（対話セッションと同じ --resume を共有すると輻輳の原因になる）
+  const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath, agentScopeId);
   if (claudeResumeSessionId) {
     log.info(`Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
   }
@@ -452,6 +468,11 @@ async function handleSessionEnd(sessionId: string) {
   // Clear current session state
   currentProjectPath = null;
   currentProjectName = null;
+
+  // #348: 一時セッションは sessionInfoMap にも残さない（対話セッションと違い再接続で復元する必要がない）
+  if (isEphemeralSession(sessionId)) {
+    sessionInfoMap.delete(sessionId);
+  }
 }
 
 function handleSessionRestored(payload: { sessionId: string; projectPath: string; chatId: string; platform: string }) {
@@ -495,6 +516,10 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   log.info(`Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
+  // #348: 一時セッションは exec マーカーも projectPath 上のファイルに書かない
+  // （対話セッションと conversation.json を共有しているため、書くと相互汚染する）
+  const isEphemeral = isEphemeralSession(sessionId);
+
   let sessionInfo = sessionInfoMap.get(sessionId);
 
   if (sessionInfo) {
@@ -513,12 +538,14 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
       sessionInfo.agentScopeId = payload.agentScopeId;
     }
     // Mark exec point in history (this becomes the reset point)
-    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
+    sessionInfo.history = isEphemeral
+      ? markExecPointInMemory(sessionInfo.history)
+      : await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
     log.info(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
   } else {
     // Session not in memory (e.g., after server restart), initialize from file
     log.info(`Session not found in memory, initializing from file...`);
-    const history = await loadConversation(projectPath, payload.agentScopeId);
+    const history = isEphemeral ? [] : await loadConversation(projectPath, payload.agentScopeId);
     const claudeSessionId = uuidv4();
     // #307: Server から渡された aiTool（DB の Session.aiTool）を優先する。
     // ここでハードコードの config 既定値にフォールバックすると、`a` で選択した AI ツール
@@ -534,7 +561,9 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     log.info(`Session ${sessionId} initialized with ${history.length} history entries (aiTool=${aiTool})`);
 
     // Mark exec point in history
-    sessionInfo.history = await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
+    sessionInfo.history = isEphemeral
+      ? markExecPointInMemory(sessionInfo.history)
+      : await markExecPoint(projectPath, sessionInfo.history, sessionInfo.agentScopeId);
     log.info(`Exec point marked, history now has ${sessionInfo.history.length} entries`);
   }
 
@@ -571,6 +600,8 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
 
 async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; model?: string; isWCommand?: boolean; language?: Language; agentScopeId?: string; resumeSessionId?: string; turnId?: string; forceNewSession?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
+  // #348: 一時セッションは projectPath 上の状態（conversation.json / .devrelay-output）を読み書きしない
+  const isEphemeral = isEphemeralSession(sessionId);
   log.info(`Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (files && files.length > 0) {
     log.info(`Received ${files.length} file(s): ${files.map(f => f.filename).join(', ')}`);
@@ -622,10 +653,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     content: prompt,
     timestamp: new Date().toISOString()
   });
-  await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
+  // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
+  if (!isEphemeral) {
+    await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
+  }
 
   // Clear output directory before running
-  await clearOutputDir(sessionInfo.projectPath);
+  // #348: 一時セッションは呼ばない（対話セッションが書きかけの .devrelay-output/ 成果物を
+  // cross-query 開始のたびに rm -rf されてしまう事故を防ぐ）
+  if (!isEphemeral) {
+    await clearOutputDir(sessionInfo.projectPath);
+  }
 
   // Check if the last entry (before current user message) is an exec marker
   // This means exec was just sent, so this prompt should run in exec mode
@@ -795,6 +833,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     model: payload.model,  // #309: AI モデル指定（claude/codex/gemini/devin 共通、l コマンド／Settings で設定）
     isWCommand: payload.isWCommand,  // #312: Codex の w コマンドのみ danger-full-access に切り替える
     language: payload.language,  // #316: チャット表示言語（'en' の場合のみ AI への英語応答指示が付与される）
+    // #348: 一時セッションは claude-session-id / context-usage を projectPath 上に書かない
+    persistProjectState: !isEphemeral,
     // core#336: MCP submission 単位のスコープ配線
     agentScopeId: sessionInfo.agentScopeId,
     turnId: payload.turnId,
@@ -876,14 +916,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           });
 
           // Save response to history and persist to file
+          // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
           if (responseText.trim()) {
             sessionInfo.history.push({
               role: 'assistant',
               content: responseText.trim(),
               timestamp: new Date().toISOString()
             });
-            await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
-            log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
+            if (!isEphemeral) {
+              await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
+              log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
+            }
           }
         } else {
           // Stream intermediate output without files
@@ -906,7 +949,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     if (aiResult.resumeFailed) {
       log.info(`Retrying without --resume due to session failure...`);
       sessionInfo.claudeResumeSessionId = undefined;
-      await clearClaudeSessionId(sessionInfo.projectPath, sessionInfo.agentScopeId);
+      // #348: 一時セッションは projectPath 上の claude-session-id ファイルを消さない
+      // （そもそも読んでいないため = undefined のはずだが、念のため書き込み経路も揃えておく）
+      if (!isEphemeral) {
+        await clearClaudeSessionId(sessionInfo.projectPath, sessionInfo.agentScopeId);
+      }
 
       // Retry without resume session ID（completionSent をリセットして retry の完了を受け付ける）
       responseText = '';
@@ -916,6 +963,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         usePlanMode,
         model: payload.model,  // #309: AI モデル指定を retry でも維持
         language: payload.language,  // #316: チャット表示言語を retry でも維持
+        // #348: persistProjectState も retry で引き継ぐ
+        persistProjectState: sendOptions.persistProjectState,
         // core#336: 1ターンの前半（--resume 失敗）と後半（retry）で保存先スコープが割れないよう継承する
         agentScopeId: sendOptions.agentScopeId,
         turnId: sendOptions.turnId,
@@ -975,14 +1024,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               },
             });
 
+            // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
             if (responseText.trim()) {
               sessionInfo.history.push({
                 role: 'assistant',
                 content: responseText.trim(),
                 timestamp: new Date().toISOString()
               });
-              await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
-              log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
+              if (!isEphemeral) {
+                await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
+                log.info(`Conversation saved (${sessionInfo.history.length} messages)`);
+              }
             }
           } else {
             log.info(`Streaming output (${output.length} chars): ${output.substring(0, 50)}...`);

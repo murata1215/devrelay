@@ -469,6 +469,12 @@ export interface SendPromptOptions {
    */
   language?: import('@devrelay/shared').Language;
   /**
+   * #348: projectPath 上の永続状態（claude-session-id / context-usage）を書き込むかどうか。
+   * 既定 true（従来どおり）。一時セッション（ask-member/teamexec-member/askDesc）は
+   * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
+   */
+  persistProjectState?: boolean;
+  /**
    * core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を
    * セッションストア／会話履歴ストアの読み書き先として使う（対話経路は未指定のまま = 従来どおり）。
    */
@@ -1206,17 +1212,23 @@ export async function sendPromptToAi(
             log.info(`[${aiTool}] Session ID: ${parsed.sessionId.substring(0, 8)}...`);
             // Save session ID for future resumption
             // R-B2: 3引数形にすると agentScopeId が mode に誤って入る。必ず undefined を明示した4引数形にする
-            saveClaudeSessionId(projectPath, parsed.sessionId, undefined, options.agentScopeId).catch(err => {
-              log.error(`Failed to save session ID:`, err);
-            });
+            // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
+            if (options.persistProjectState !== false) {
+              saveClaudeSessionId(projectPath, parsed.sessionId, undefined, options.agentScopeId).catch(err => {
+                log.error(`Failed to save session ID:`, err);
+              });
+            }
           }
           if (parsed.contextUsage) {
             result.contextUsage = parsed.contextUsage;
             log.info(`[${aiTool}] ${formatContextUsage(parsed.contextUsage)}`);
             // Save context usage for display at start of next prompt
-            saveContextUsage(projectPath, parsed.contextUsage, options.agentScopeId).catch(err => {
-              log.error(`Failed to save context usage:`, err);
-            });
+            // #348: persistProjectState===false（一時セッション）なら projectPath 上には書かない
+            if (options.persistProjectState !== false) {
+              saveContextUsage(projectPath, parsed.contextUsage, options.agentScopeId).catch(err => {
+                log.error(`Failed to save context usage:`, err);
+              });
+            }
           }
           // usageData をそのまま保存（DB 格納用）
           if (parsed.usageData) {
