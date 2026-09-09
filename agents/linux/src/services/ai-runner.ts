@@ -1594,8 +1594,14 @@ async function sendPromptToTerminalClaude(
     resumeSessionId = await loadClaudeSessionId(projectPath, options.agentScopeId) || undefined;
   }
 
+  // core#383: resume しない場合は必ず新規セッション ID を事前採番し `--session-id` で渡す。
+  // これにより完了報告で aiSessionId を確実にエコーバックでき、MCP approve_implementation が
+  // 参照する Session.planAiSessionId を保存できるようになる（端末モード PTY 経路の従来の穴）。
+  // resumeSessionId と newSessionId は排他（terminal-runner.ts の argv 構築で強制）。
+  const newSessionId: string | undefined = resumeSessionId ? undefined : crypto.randomUUID();
+
   // 診断ログ: WebUI トグルとの食い違いを調査するため、判定根拠を出力する
-  console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}, resumeSessionId=${resumeSessionId ? resumeSessionId.slice(0, 8) + '...' : '(none)'}`);
+  console.log(`🖥️ [terminal-mode] permissions state: options.skipPermissions=${!!options.skipPermissions}, isApproveAllMode()=${isApproveAllMode()}, computed approveAllMode=${approveAllMode}, resumeSessionId=${resumeSessionId ? resumeSessionId.slice(0, 8) + '...' : '(none)'}, newSessionId=${newSessionId ? newSessionId.slice(0, 8) + '...' : '(none)'}`);
 
   // 起動メッセージ（仕様書 §2.2.2）
   // 実際に渡される args を表示することで、approveAllMode / resumeSessionId の有無が WebUI から確認できる
@@ -1603,6 +1609,7 @@ async function sendPromptToTerminalClaude(
   const previewArgs: string[] = [];
   if (approveAllMode) previewArgs.push('--dangerously-skip-permissions');
   if (resumeSessionId) previewArgs.push('--resume', resumeSessionId.slice(0, 8) + '...');
+  else if (newSessionId) previewArgs.push('--session-id', newSessionId.slice(0, 8) + '...');
   const argsDisplay = previewArgs.length > 0 ? ` ${previewArgs.join(' ')}` : '';
   onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${argsDisplay}\n`, false);
 
@@ -1654,6 +1661,7 @@ async function sendPromptToTerminalClaude(
       claudeCommand,
       sessionId,
       resumeSessionId: resumeSessionId || undefined,
+      newSessionId,
       onOutput: (chunk) => onOutput(chunk, false),
       onChoiceRequest: makeChoiceHandler,
       onScreenAnalyze: makeScreenAnalyzer,
@@ -1676,6 +1684,10 @@ async function sendPromptToTerminalClaude(
         await clearClaudeSessionId(projectPath, options.agentScopeId);
       }
       onOutput(`\n⚠️ Claude CLI が起動中に終了しました。リトライします...\n`, false);
+      // core#383: リトライは常に新しい UUID を採番する。Claude CLI は既存 ID の再指定を
+      // 「Session ID ... is already in use.」で拒否するため、1 回目の spawn が JSONL を
+      // 作りかけていた場合に同じ ID を使い回すと即座に失敗する
+      const retrySessionId = crypto.randomUUID();
       onOutput(`🖥️ 端末インタフェースを起動中...\n  → ${claudeCommand}${approveAllMode ? ' --dangerously-skip-permissions' : ''}\n`, false);
 
       runResult = await runTerminalClaude({
@@ -1686,6 +1698,7 @@ async function sendPromptToTerminalClaude(
         claudeCommand,
         sessionId,
         resumeSessionId: undefined, // リトライは常に --resume なし
+        newSessionId: retrySessionId,
         onOutput: (chunk) => onOutput(chunk, false),
         onChoiceRequest: makeChoiceHandler,
         onScreenAnalyze: makeScreenAnalyzer,
@@ -1699,6 +1712,7 @@ async function sendPromptToTerminalClaude(
         `\n⚠️ AskUserQuestion が出たため、Ask 無効設定により中断しました。\n（実行時間: ${(runResult.durationMs / 1000).toFixed(1)} 秒）`,
         true,
         runResult.usageData,  // JSONL から集計した usageData を伝搬
+        runResult.aiSessionId,  // core#383: SDK 経路のエラー時も extractedSessionId を送る前例に合わせる
       );
       return result;
     }
@@ -1712,7 +1726,7 @@ async function sendPromptToTerminalClaude(
       ? `\n⚠️ Claude CLI がクラッシュしました (exit code ${runResult.exitCode})。（実行時間: ${durationStr} 秒）\nログ: logs/terminal-${sessionId}.log`
       : `\n✅ 完了。セッションを終了しました。（実行時間: ${durationStr} 秒）`;
 
-    onOutput(suffix, true, runResult.usageData);  // JSONL から集計した usageData を伝搬
+    onOutput(suffix, true, runResult.usageData, runResult.aiSessionId);  // JSONL から集計した usageData を伝搬 + core#383: aiSessionId エコーバック
   } catch (err) {
     const msg = (err as Error).message;
     console.error(`❌ [terminal-mode] runTerminalClaude failed: ${msg}`);

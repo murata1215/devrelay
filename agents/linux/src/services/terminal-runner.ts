@@ -150,6 +150,15 @@ export interface TerminalRunOptions {
    */
   resumeSessionId?: string;
   /**
+   * core#383: `claude --session-id <uuid>` で新規セッションの ID を事前採番する場合の UUID。
+   * `resumeSessionId` と排他（Claude CLI が「--session-id can only be used with --continue or
+   * --resume if --fork-session is also specified.」で起動を拒否するため、両方指定してはいけない）。
+   * resume しないすべてのケース（forceNewSession・plan/exec の初回ターン等）で採番することで、
+   * 完了報告に aiSessionId を確実にエコーバックできるようにする（MCP approve_implementation の
+   * planAiSessionId 保存に必須）。
+   */
+  newSessionId?: string;
+  /**
    * 承認/質問プロンプト発生時のコールバック。
    * 設定されている場合、Claude CLI の番号付き選択肢プロンプトを検出すると呼ばれる。
    * 未設定の場合は自動的に "2"（拒否）を送信する後方互換挙動になる
@@ -191,6 +200,12 @@ export interface TerminalRunResult {
   promptSent: boolean;
   /** JSONL セッションファイルから集計した使用量データ（Conversations 表示用） */
   usageData?: import('@devrelay/shared').AiUsageData;
+  /**
+   * core#383: このターンで確定した Claude 会話セッション ID（サーバーへ aiSessionId としてエコーバックする）。
+   * `opts.newSessionId`（採番）または `opts.resumeSessionId`（resume）のうち実際に使われた方。
+   * `promptSent === false` の場合は undefined（#237 の「壊れたセッション ID 残留」防止と同じ理由）。
+   */
+  aiSessionId?: string;
 }
 
 /**
@@ -275,6 +290,11 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
   }
   if (opts.resumeSessionId) {
     args.push('--resume', opts.resumeSessionId);
+  } else if (opts.newSessionId) {
+    // core#383: resume しない場合は必ず ID を事前採番する。Claude CLI は
+    // 「--session-id can only be used with --continue or --resume if --fork-session is
+    // also specified.」で拒否するため resumeSessionId と同時指定はしない（if/else if で排他）。
+    args.push('--session-id', opts.newSessionId);
   }
 
   console.log(`🖥️ [terminal-mode] spawning: ${opts.claudeCommand} ${args.join(' ')} (cwd=${opts.projectPath})`);
@@ -450,6 +470,12 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           usageData = { durationMs: Date.now() - start };
         }
 
+        // core#383: サーバーへエコーバックする aiSessionId。優先順位は
+        // 「採番した ID（--session-id で確実に使われた）」→「resume 指定した ID（CLI が維持する）」
+        // →「画面スクレイプで拾えた ID（旧経路のフォールバック）」。promptSent=false なら送らない
+        // （#237 の「壊れたセッション ID 残留」防止と同じ理由）。
+        const aiSessionId = promptSent ? (opts.newSessionId || opts.resumeSessionId || claudeSessionId || undefined) : undefined;
+
         // === JSONL Recovery: finish() で画面抽出が失敗した場合に JSONL から応答を復元 ===
         // onExit 時点では Claude session ID が確定しているため JSONL を確実に読める。
         // Haiku 要約は非同期だが、resolve() 前に完了を待つ（session 完了前に output を届ける）
@@ -461,6 +487,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
             cancelledByAskDisable,
             promptSent,
             usageData,
+            aiSessionId,
           });
         };
 
@@ -1259,6 +1286,10 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         };
       }
 
+      // core#383: サーバーへエコーバックする aiSessionId。優先順位は finish() 側の resolve と同じ
+      // （採番した ID → resume 指定した ID → 画面スクレイプの ID）。promptSent=false なら送らない。
+      const aiSessionId = promptSent ? (opts.newSessionId || opts.resumeSessionId || claudeSessionId || undefined) : undefined;
+
       resolve({
         finalOutput,
         durationMs: Date.now() - start,
@@ -1267,6 +1298,7 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         promptSent,
         exitCode: exitCode ?? undefined,
         usageData,
+        aiSessionId,
       });
     });
 
