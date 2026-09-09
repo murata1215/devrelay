@@ -26,6 +26,7 @@ import {
   detectToolApprovalPrompt,
   detectAskQuestionPrompt,
   detectStartupChoicePrompt,
+  detectTrustPrompt,
   extractFinalOutput,
   extractClaudeResponse,
   extractChoicePrompt,
@@ -190,6 +191,54 @@ export interface TerminalRunResult {
   promptSent: boolean;
   /** JSONL セッションファイルから集計した使用量データ（Conversations 表示用） */
   usageData?: import('@devrelay/shared').AiUsageData;
+}
+
+/**
+ * カーソル選択型プロンプト（`Enter to confirm/select` パターン）への応答を、
+ * 現在のカーソル位置 (`cursorIndex`) から `targetIndex` への **相対移動** で行う。
+ *
+ * 旧実装は「option 1 = 既定選択」固定で `choice > 1` の場合のみ `↓` を押していたが、
+ * 2026-09 の Claude Code 新レイアウトで trust folder の既定選択が
+ * `No, exit`（旧: `Yes, I trust this folder`）に変わったため、絶対位置決め打ちは危険
+ * （新レイアウトのまま option 1 = 決め打ちで Enter を送ると意図せず終了を選んでしまう）。
+ * `extractChoicePrompt` が返す `cursorIndex`（実際に `❯` が乗っている位置）を基準に
+ * 相対移動することで、レイアウト変更に追従する。
+ *
+ * 番号入力（`${choice}\r`）は Claude CLI の SelectInput を混乱させて Enter が効かなくなる
+ * 事象が確認されているため（#234 clipped trust prompt）、矢印キー + Enter を維持する。
+ */
+function answerChoice(ptyProcess: IPty, cursorIndex: number, targetIndex: number, delayMs = 100): void {
+  const delta = targetIndex - cursorIndex;
+  try {
+    if (delta > 0) {
+      ptyProcess.write('\x1B[B'.repeat(delta));
+    } else if (delta < 0) {
+      ptyProcess.write('\x1B[A'.repeat(-delta));
+    }
+    if (delta === 0) {
+      ptyProcess.write('\r');
+    } else {
+      setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, delayMs);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * `onChoiceRequest` 未配線時のフォールバック用: options の中から「安全な選択肢」を探す。
+ *
+ * 従来は「option 1 自動選択」だったが、2026-09 の新レイアウトでは option 1 相当が
+ * `No, exit`（フォルダを信頼しない＝終了）になり得るため、決め打ちは危険。
+ * `trust this folder` を含む、または `exit` を含まない `yes` 系の選択肢を明示的に探し、
+ * 見つからなければ **何も押さない**（起動タイムアウトに委ねる方が「誤って終了させる」より安全）。
+ *
+ * @returns 選ぶべき options 配列内の 0-based 位置。見つからなければ -1
+ */
+function findSafeAutoChoiceIndex(options: string[]): number {
+  return options.findIndex(o =>
+    /trust\s*this\s*folder/i.test(o) || (/\byes\b/i.test(o) && !/\bexit\b/i.test(o))
+  );
 }
 
 /** ランニング中の PTY プロセス（キャンセル用） */
@@ -487,8 +536,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
           }
           runningProcesses.delete(opts.sessionId);
           logStream?.end();
+          // detectStartupChoicePrompt/extractChoicePrompt がレイアウト変更等で選択肢を
+          // 抽出できずタイムアウトした場合でも、trust folder 特有の文言だけは
+          // detectTrustPrompt（レイアウト非依存）で拾えることがあるため、診断メッセージに含める
+          const trustPromptStillUnanswered = detectTrustPrompt(rendered);
           reject(new Error(
             '端末モードの起動がタイムアウトしました（15 秒）\n' +
+            (trustPromptStillUnanswered
+              ? '⚠️ フォルダ信頼確認プロンプトが未応答のまま残っています。選択肢の自動抽出に失敗した可能性があります。\n'
+              : '') +
             'ヒント: Claude CLI 側に未処理のプロンプト（フォルダ信頼確認・モデル選択等）が残っている可能性があります。\n' +
             '一度 Agent ホストで `claude --continue` を手動実行して初期セットアップを完了させてください。'
           ));
@@ -521,7 +577,9 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // 起動時の選択肢プロンプト（trust folder / resume summary / 等）
       // 「ターミナルモードは Claude CLI の薄い UI ラッパ」という設計思想に基づき、agent が
       // 自動判断せずユーザーに選ばせる（既存 tool 承認と同じ承認カード経路に bridge）。
-      // onChoiceRequest 未配線の自動実行環境では option 1 自動選択で後方互換を保つ
+      // onChoiceRequest 未配線の自動実行環境では「安全な選択肢」（trust this folder 等）が
+      // 特定できた場合のみ自動選択し、特定できなければ何も押さない（findSafeAutoChoiceIndex）。
+      // 2026-09: trust folder の既定選択が `No, exit` に変わったため「option 1 自動選択」は廃止
       //
       // 検出は画面末尾 30 行のみ対象: scrollback 上部に確認済み prompt が残っていると
       // 二重検出されて同じ trust prompt が再 forwarding される事故が発生（#235 pixdraft）
@@ -540,23 +598,13 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
             const elapsed = Date.now() - start;
 
             // --dangerously-skip-permissions の bypass permissions 確認プロンプトを自動承認:
-            // 「1. No, exit / 2. Yes, I accept」形式。trust prompt（1. Yes / 2. No）とは逆順。
+            // 「No, exit / Yes, I accept」形式（番号の有無・順序はレイアウトにより変わる）。
             // approveAllMode=true なら --dangerously-skip-permissions を明示指定済みなので
             // ユーザーに聞く意味がなく、"Yes, I accept" を自動選択する（#237）
             const acceptOptionIdx = meta.options.findIndex(o => /yes.*accept/i.test(o));
             if (opts.approveAllMode && acceptOptionIdx >= 0) {
-              const choice = acceptOptionIdx + 1; // 1-indexed
-              console.log(`🔐 [terminal-mode] bypass permissions prompt auto-accepted (option ${choice}, ${elapsed}ms after spawn)`);
-              try {
-                if (choice > 1) {
-                  ptyProcess.write('\x1B[B'.repeat(choice - 1));
-                  setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 200);
-                } else {
-                  setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 200);
-                }
-              } catch {
-                // ignore
-              }
+              console.log(`🔐 [terminal-mode] bypass permissions prompt auto-accepted (option ${acceptOptionIdx + 1}, ${elapsed}ms after spawn)`);
+              answerChoice(ptyProcess, meta.cursorIndex, acceptOptionIdx, 200);
               pendingStartupChoice = false;
               lastChoiceAnsweredAt = Date.now();
               installStartupTimer();
@@ -578,24 +626,11 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                 options: meta.options,
                 respond: (optionIndex: number) => {
                   if (finished) return;
-                  const choice = Math.max(0, Math.min(meta.options.length - 1, optionIndex)) + 1;  // 1-indexed, clamp
-                  console.log(`✅ [terminal-mode] user chose option ${choice} for startup choice (requestId=${requestId.slice(0, 8)})`);
-                  // startup prompt はカーソル選択型 UI（❯ ↑↓ + Enter）なので
-                  // 番号タイプではなく矢印キー移動 + Enter で選択する。
-                  // 番号入力（`1\r`）は Claude CLI の SelectInput を混乱させて
-                  // Enter が効かなくなる事象が確認された（#234 clipped trust prompt）
-                  try {
-                    if (choice > 1) {
-                      // option 1 がデフォルト選択。N > 1 は ↓ を (N-1) 回押してから Enter
-                      ptyProcess.write('\x1B[B'.repeat(choice - 1));
-                      setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 100);
-                    } else {
-                      // option 1 はデフォルト → Enter のみ
-                      ptyProcess.write('\r');
-                    }
-                  } catch {
-                    // ignore
-                  }
+                  const targetIndex = Math.max(0, Math.min(meta.options.length - 1, optionIndex));  // clamp
+                  console.log(`✅ [terminal-mode] user chose option ${targetIndex + 1} for startup choice (requestId=${requestId.slice(0, 8)})`);
+                  // startup prompt はカーソル選択型 UI（❯ ↑↓ + Enter）なので、現在のカーソル
+                  // 位置 (meta.cursorIndex) からの相対移動で応答する（「option 1 = 既定」決め打ち禁止）
+                  answerChoice(ptyProcess, meta.cursorIndex, targetIndex);
                   pendingStartupChoice = false;
                   lastChoiceAnsweredAt = Date.now();
                   // 応答後のレンダリング待ちで startup timer を再起動（summary 生成は 30-60s かかる）
@@ -603,12 +638,15 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                 },
               });
             } else {
-              // フォールバック: onChoiceRequest 未配線 → option 1 自動選択（後方互換）
-              console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting option 1 (${elapsed}ms after spawn): "${meta.question.slice(0, 80)}"`);
-              try {
-                ptyProcess.write('\r');  // option 1 はデフォルト → Enter のみ
-              } catch {
-                // ignore
+              // フォールバック: onChoiceRequest 未配線。
+              // 「trust this folder」等の安全な選択肢が特定できる場合のみ自動選択し、
+              // 特定できない場合は何も押さない（`No, exit` を誤って選んで終了させるより安全）
+              const safeIdx = findSafeAutoChoiceIndex(meta.options);
+              if (safeIdx >= 0) {
+                console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting safe option ${safeIdx + 1} (${elapsed}ms after spawn): "${meta.question.slice(0, 80)}"`);
+                answerChoice(ptyProcess, meta.cursorIndex, safeIdx);
+              } else {
+                console.warn(`⚠️ [terminal-mode] no choice callback configured and no safe option identified → leaving unanswered (${elapsed}ms after spawn): "${meta.question.slice(0, 80)}"`);
               }
               pendingStartupChoice = false;
               lastChoiceAnsweredAt = Date.now();
@@ -721,32 +759,26 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
                 options: meta.options,
                 respond: (optionIndex: number) => {
                   if (finished) return;
-                  const choice = Math.max(0, Math.min(meta.options.length - 1, optionIndex)) + 1;
-                  console.log(`✅ [terminal-mode] user chose option ${choice} for mid-session choice (requestId=${requestId.slice(0, 8)})`);
+                  const targetIndex = Math.max(0, Math.min(meta.options.length - 1, optionIndex));
+                  console.log(`✅ [terminal-mode] user chose option ${targetIndex + 1} for mid-session choice (requestId=${requestId.slice(0, 8)})`);
                   // mid-session choice もカーソル選択型 UI（Enter to confirm パターン）なので
-                  // 矢印キー + Enter で選択する（startup choice と同じ理由）
-                  try {
-                    if (choice > 1) {
-                      ptyProcess.write('\x1B[B'.repeat(choice - 1));
-                      setTimeout(() => { try { ptyProcess.write('\r'); } catch { /* ignore */ } }, 100);
-                    } else {
-                      ptyProcess.write('\r');
-                    }
-                  } catch {
-                    // ignore
-                  }
+                  // 現在のカーソル位置 (meta.cursorIndex) からの相対移動で応答する（startup choice と同じ理由）
+                  answerChoice(ptyProcess, meta.cursorIndex, targetIndex);
                   pendingStartupChoice = false;
                   pendingApprovalCount = Math.max(0, pendingApprovalCount - 1);
                   resetIdleTimer();
                 },
               });
             } else {
-              // フォールバック: onChoiceRequest 未配線 → option 1 自動選択（後方互換）
-              console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting option 1: "${meta.question.slice(0, 80)}"`);
-              try {
-                ptyProcess.write('\r');  // option 1 はデフォルト → Enter のみ
-              } catch {
-                // ignore
+              // フォールバック: onChoiceRequest 未配線。
+              // 安全な選択肢が特定できる場合のみ自動選択し、できなければ何も押さない
+              // （startup choice のフォールバックと同じ理由）
+              const safeIdx = findSafeAutoChoiceIndex(meta.options);
+              if (safeIdx >= 0) {
+                console.log(`🔐 [terminal-mode] no choice callback configured → auto-selecting safe option ${safeIdx + 1}: "${meta.question.slice(0, 80)}"`);
+                answerChoice(ptyProcess, meta.cursorIndex, safeIdx);
+              } else {
+                console.warn(`⚠️ [terminal-mode] no choice callback configured and no safe option identified → leaving unanswered: "${meta.question.slice(0, 80)}"`);
               }
               pendingStartupChoice = false;
               pendingApprovalCount = Math.max(0, pendingApprovalCount - 1);

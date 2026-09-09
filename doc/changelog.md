@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### #382: 端末インタフェースモード（PTY）が Claude Code の新しい信頼確認ダイアログで無応答になる問題を修正 (2026-09-09)
+
+Windows 機の端末インタフェースモード（terminalMode）セッションが Claude からの応答を一切返さずハングする
+不具合を修正。ユーザー添付ログ（`%APPDATA%\devrelay\logs\terminal-<sessionId>.log`）から、Claude Code の
+フォルダ信頼確認ダイアログが 2026-09 に **番号なし・順序反転**（`❯ No, exit` が既定選択、次点が
+`Yes, I trust this folder`）のレイアウトへ変わっていたことが判明した。
+
+- **根本原因1（検出できない）**: `detectStartupChoicePrompt()` が番号付き選択肢
+  （`^\s*[❯>]?\s*1\.\s+\S`）を必須条件にしていたため、番号なしダイアログを一切検出できず、
+  承認カードがチャットへ転送されないまま 15 秒の起動タイムアウトで PTY が kill されていた。
+- **根本原因2（検出を緩めるだけでは危険）**: 応答処理・フォールバックが「option 1 = 既定選択」
+  決め打ちの絶対位置指定（`choice > 1` のときだけ `↓`）だったため、新レイアウトでは
+  Enter を送ると意図せず `No, exit`（終了）を選んでしまう構造だった。
+- **修正**:
+  - `terminal-parser.ts`: `extractChoicePrompt()` の戻り値に `cursorIndex`（`❯` が乗っている
+    options 配列内位置）を追加。番号付きシーケンスが取れない場合のフォールバックとして、
+    カーソル行のテキスト開始列を基準に上下の兄弟行を収集する `extractCursorListOptions()` を新設
+    （列基準にすることで見出し `Security guide` や指示行 `Enter to confirm · Esc to cancel` を
+    誤って選択肢に含めない）。`detectStartupChoicePrompt()` は番号付き **または** 番号なし
+    カーソルリストのいずれかで true を返すよう拡張。
+  - `terminal-runner.ts`: 応答方式を「option 1 からの相対移動」に統一する `answerChoice()` を新設し、
+    startup choice / mid-session choice / bypass permissions 自動承認の 3 経路すべてで
+    `meta.cursorIndex` 基準の相対移動に置き換え。`onChoiceRequest` 未配線時のフォールバックは
+    「option 1 自動選択」を廃止し、`trust this folder` 等の安全な選択肢が意味的に特定できた場合の
+    み自動選択、特定できなければ**何も押さない**（`No, exit` を誤って選んで終了させるより安全）。
+  - 起動タイムアウト時の診断メッセージに、レイアウト非依存の `detectTrustPrompt()`（既存だが
+    呼び出し元ゼロだった）による「フォルダ信頼確認が未応答のまま残っている」旨の警告を追加。
+- **対象範囲**: `agents/linux`（Windows CLI Agent もこのコードを使用）のみ。`agents/macos` /
+  `agents/windows`（Electron GUI 版）に `terminal-*.ts` は存在せず無関係。`apps/server` / `apps/web`
+  / `packages/shared` は無変更。
+- **テスト**: 新規 `agents/linux/tests/terminal-parser.test.mjs`（13 件）に、今回の実障害ログの実文面
+  を含む新レイアウト・旧レイアウト（回帰防止）・bypass permissions・AskUserQuestion形式（#228/#232
+  回帰防止）・誤検出防止・スクロールバック優先順位（#232 回帰防止）のケースを収録。
+- **反映**: `apps/server` 無変更のため DB マイグレーション・`pm2 restart` 不要。対象 Windows 機で
+  `u`（Agent 更新）のみで反映。
+
 ### #381: Windows Agent 移植 サブサイクル C — agentScopeId/resumeSessionId/turnId 受信配線 (2026-09-09)
 
 core#336（MCP submission 単位の会話セッション境界）は Linux/macOS では完成済みだったが、Windows は

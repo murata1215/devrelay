@@ -82,12 +82,22 @@ export function detectAskQuestionPrompt(text: string): boolean {
 /**
  * 「このフォルダを信頼しますか」プロンプト（trust folder prompt）を判定する
  *
- * Claude CLI は初回ワークスペース利用時に以下のプロンプトを表示する:
+ * Claude CLI は初回ワークスペース利用時に以下のプロンプトを表示する（旧レイアウト、番号付き）:
  *   Quick safety check: Is this a project you created or one you trust?
  *   Claude Code'll be able to read, edit, and execute files here.
  *   > 1. Yes, I trust this folder
  *     2. No, exit
  *   Enter to confirm · Esc to cancel
+ *
+ * 2026-09 時点の新レイアウトでは番号が無くなり、順序も反転している
+ * （`No, exit` が既定選択でカーソル `❯` が乗る）:
+ *   ❯ No, exit
+ *     Yes, I trust this folder
+ *   Enter to confirm · Esc to cancel
+ *
+ * どちらの形も "trust this folder" と "No, exit" のテキスト自体は変わらないため、
+ * この関数はレイアウト非依存で機能する。`detectStartupChoicePrompt`/`extractChoicePrompt`
+ * が選択肢抽出に失敗した場合の**安全網**（起動タイムアウト時の診断メッセージ）として使う。
  *
  * `--dangerously-skip-permissions` を付けても表示されるため、端末モードでは
  * 自動承認して通常プロンプトまで進める必要がある。
@@ -124,7 +134,11 @@ export function detectStartupChoicePrompt(text: string): boolean {
   // ("Esc to cancel", "Esc to keep browser tools off" 等) ため、Enter 部分のみで判定する
   const hasInstruction = /Enter\s+to\s+(?:confirm|select)/i.test(text);
   const hasNumberedOptions = /^\s*[❯>]?\s*1\.\s+\S/m.test(text);
-  return hasInstruction && hasNumberedOptions;
+  // 番号なしカーソル選択リスト（2026-09 の Claude Code 新レイアウトで確認、trust folder が
+  // `❯ No, exit` / `  Yes, I trust this folder` のように番号なし・順序反転で表示されるようになった）。
+  // `❯` カーソル行が 1 つでもあれば候補とする（実際に 2 択以上あるかは extractChoicePrompt 側で判定）
+  const hasCursorList = /^\s*❯\s+\S/m.test(text);
+  return hasInstruction && (hasNumberedOptions || hasCursorList);
 }
 
 /**
@@ -376,20 +390,20 @@ export function countNewBullets(baselineMap: Map<string, number>, currentLines: 
 }
 
 /**
- * 番号付き選択肢プロンプトから質問本文と選択肢リストを抽出する
+ * 選択肢プロンプトから質問本文と選択肢リストを抽出する（番号付き / 番号なしカーソルリストの両対応）
  *
- * Claude CLI の承認プロンプト典型例（会話中の tool 承認）:
+ * Claude CLI の承認プロンプト典型例（会話中の tool 承認、番号付き）:
  *   [Bash] git status を実行してよろしいですか?
  *   1. はい
  *   2. いいえ (理由を入力)
  *   ❯
  *
- * 起動時の選択肢プロンプト典型例（trust folder / resume summary）:
+ * 起動時の選択肢プロンプト典型例（trust folder / resume summary、旧レイアウト・番号付き）:
  *   Quick safety check: Is this a project you created or one you trust?
  *   ❯ 1. Yes, I trust this folder
  *     2. No, exit
  *
- * AskUserQuestion 典型例（インデント説明文 + 末尾 separator + Chat about this）:
+ * AskUserQuestion 典型例（インデント説明文 + 末尾 separator + Chat about this、番号付き）:
  *   依頼の意図を確認させてください
  *   ❯ 1. 再ビルドしてexe生成
  *        既存のelectron-builder設定で...    ← インデント説明文
@@ -399,6 +413,13 @@ export function countNewBullets(baselineMap: Map<string, number>, currentLines: 
  *     5. Type something.
  *   ─────────────────
  *     6. Chat about this
+ *
+ * 2026-09 の Claude Code 新レイアウト（trust folder、番号なし・順序反転）:
+ *   Quick safety check: Is this a project you created or one you trust?
+ *   Security guide
+ *   ❯ No, exit
+ *     Yes, I trust this folder
+ *   Enter to confirm · Esc to cancel
  *
  * 起動時はカーソル `❯` が option 1 行頭に乗るパターンがあるため、
  * 番号の前に `❯` / `>` を許容する正規表現を使う。
@@ -411,23 +432,30 @@ export function countNewBullets(baselineMap: Map<string, number>, currentLines: 
  *    採用する方式に変更
  *  - Claude CLI の choice プロンプトは常に画面最下部に表示されるため、最下部の `1.` から
  *    forward に集めれば常に現プロンプトに一致する
+ *  - 2026-09: trust folder が番号なしカーソルリストに変わったため、番号付きシーケンスが
+ *    取れない場合のフォールバックとして「カーソル行のテキスト開始列に揃った兄弟行」を
+ *    収集する方式を追加。列基準にすることで `Security guide`（列が浅い見出し）や
+ *    `Enter to confirm · Esc to cancel`（指示行）を誤って選択肢に含めない
  *
- * @returns { question, options } または null（選択肢が抽出できない場合）
+ * @returns { question, options, cursorIndex } または null（選択肢が抽出できない場合）。
+ *   `cursorIndex` は `❯` が乗っている（＝現在の既定選択）options 配列内の 0-based 位置
  */
-export function extractChoicePrompt(text: string): { question: string; options: string[] } | null {
+export function extractChoicePrompt(
+  text: string
+): { question: string; options: string[]; cursorIndex: number } | null {
   const lines = text.split('\n');
 
-  // (1) 全ての「番号付き選択肢行」候補を収集（先頭 `❯`/`>` カーソルマーカー許容）
-  type OptCandidate = { index: number; num: number; text: string };
+  // (1) 番号付き選択肢の抽出を試みる（先頭 `❯`/`>` カーソルマーカー許容）
+  type OptCandidate = { index: number; num: number; text: string; cursor: boolean };
   const candidates: OptCandidate[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/);
+    const m = lines[i].match(/^\s*([❯>])?\s*(\d+)\.\s+(.+?)\s*$/);
     if (m) {
-      candidates.push({ index: i, num: Number(m[1]), text: m[2] });
+      candidates.push({ index: i, num: Number(m[2]), text: m[3], cursor: !!m[1] });
     }
   }
 
-  // (2) 「最も下（最新）の有効シーケンス」を採用する。
+  // 「最も下（最新）の有効シーケンス」を採用する。
   // 画面下部から num===1 候補を遡って試し、forward に 2,3,... が続けば現プロンプトと判定。
   // 古い番号付きリスト（PixBlog 履歴の 4 オプション等）がスクロールバックに残っていても、
   // 最下部の `1.` を起点にすれば常に現在の Claude プロンプトに一致する。
@@ -455,8 +483,19 @@ export function extractChoicePrompt(text: string): { question: string; options: 
     }
   }
 
-  const optionLines = bestSeq;
+  let optionLines: { index: number; text: string; cursor: boolean }[] = bestSeq;
+
+  // (2) 番号付きで見つからなかった場合: 番号なしカーソルリストのフォールバック抽出
+  if (optionLines.length < 2) {
+    optionLines = extractCursorListOptions(lines);
+  }
+
   if (optionLines.length < 2) return null;
+
+  // cursorIndex: `❯` が乗っている行の options 配列内位置。見つからなければ 0（安全側フォールバック
+  // ではなく「情報が取れなかった」ことを示すが、呼び出し側は cursorIndex=0 前提の相対移動をするため
+  // 実質は「現在地不明→動かさない」扱いになる）
+  const cursorIdx = optionLines.findIndex(o => o.cursor);
 
   // 質問本文: 最初の選択肢の直前の連続テキスト行（空行・セパレータで境界）。
   // 質問とその上のメッセージは通常空行で区切られているため、最初の空行で停止する
@@ -481,7 +520,68 @@ export function extractChoicePrompt(text: string): { question: string; options: 
   return {
     question: questionLines.join('\n').trim() || '(質問テキストを抽出できませんでした)',
     options: optionLines.map(o => o.text),
+    cursorIndex: cursorIdx >= 0 ? cursorIdx : 0,
   };
+}
+
+/**
+ * 番号なしカーソル選択リスト（`❯ No, exit` / `  Yes, I trust this folder` 形式）を抽出する。
+ *
+ * カーソル行（`❯` + 空白 + テキスト）のテキスト開始列を基準に、上下の「同じ列から
+ * テキストが始まる非空行」を兄弟選択肢として収集する。列基準にすることで、見出し
+ * （`Security guide` 等、列が浅い）や指示行（`Enter to confirm · Esc to cancel`）を
+ * 誤って選択肢に含めない。
+ *
+ * カーソル行は画面最下部（スクロールバックの古い選択肢より現在のプロンプトを優先）から
+ * 探す。番号付き行（`❯ 1. ...`）は既存の番号付きパスが先に処理するため、ここでは
+ * 数字始まりを除外する。
+ */
+function extractCursorListOptions(lines: string[]): { index: number; text: string; cursor: boolean }[] {
+  // 最下部から `❯ <数字以外>` 行を探す
+  let cursorIdx = -1;
+  let textCol = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/^(\s*❯\s+)(?!\d+\.)(\S.*)$/);
+    if (m) {
+      cursorIdx = i;
+      textCol = m[1].length;
+      break;
+    }
+  }
+  if (cursorIdx === -1) return [];
+
+  const isSibling = (line: string): string | null => {
+    if (line.length <= textCol) return null;
+    const prefix = line.slice(0, textCol);
+    if (prefix.trim() !== '') return null;  // 列が揃っていない = 兄弟行ではない
+    const rest = line.slice(textCol).trimEnd();
+    if (rest.trim() === '') return null;
+    if (/^[─━╭╰⏵]/.test(rest)) return null;              // セパレータ / 入力枠
+    if (/^Enter\s+to\s+/i.test(rest)) return null;         // 指示行
+    if (/^[●●]/.test(rest)) return null;                   // 履歴メッセージ
+    return rest;
+  };
+
+  const items: { index: number; text: string; cursor: boolean }[] = [
+    { index: cursorIdx, text: lines[cursorIdx].slice(textCol).trimEnd(), cursor: true },
+  ];
+
+  // 下方向に走査
+  for (let i = cursorIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim() === '') break;
+    const rest = isSibling(lines[i]);
+    if (rest === null) break;
+    items.push({ index: i, text: rest, cursor: false });
+  }
+  // 上方向に走査
+  for (let i = cursorIdx - 1; i >= 0; i--) {
+    if (lines[i].trim() === '') break;
+    const rest = isSibling(lines[i]);
+    if (rest === null) break;
+    items.unshift({ index: i, text: rest, cursor: false });
+  }
+
+  return items;
 }
 
 // ---------------------------------------------------------------------------
