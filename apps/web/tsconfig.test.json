@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "types": [],
+    "outDir": "./dist-test",
+    "rootDir": "./src",
+    "declaration": false,
+    "sourceMap": false,
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": false,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "erasableSyntaxOnly": true
+  },
+  "include": [
+    "src/lib/thread-list-rules.ts",
+    "src/lib/thread-routing-client.ts"
+  ]
+}

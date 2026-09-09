@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getToken } from '../lib/api';
+import { getTabId } from '../lib/tab-id';
 
 /** ツール承認プロンプト情報 */
 export interface ToolApprovalPrompt {
@@ -29,12 +30,12 @@ export interface ToolApprovalAuto {
   projectId?: string;
 }
 
-/** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用） */
+/** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用、sessionId: スレッドルーティング用） */
 type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; messageId?: string } }
-  | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
-  | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
-  | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; messageId?: string } }
+  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; sessionId?: string; messageId?: string } }
+  | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string; sessionId?: string } }
+  | { type: 'web:session_info'; payload: { projectId: string; sessionId: string; title?: string; agentScopeId?: string } }
+  | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; sessionId?: string; messageId?: string } }
   | { type: 'web:tool:approval'; payload: ToolApprovalPrompt }
   | { type: 'web:tool:approval:resolved'; payload: ToolApprovalResolved }
   | { type: 'web:tool:approval:auto'; payload: ToolApprovalAuto }
@@ -57,12 +58,12 @@ export interface ProgressInfo {
   elapsed: number;
 }
 
-/** コールバック設定（projectId: 対象タブ特定用、省略時はアクティブタブ） */
+/** コールバック設定（projectId: 対象タブ特定用、省略時はアクティブタブ。sessionId: タブ内スレッド特定用、サイクル3） */
 export interface WebSocketCallbacks {
-  onMessage?: (msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string) => void;
-  onProgress?: (info: ProgressInfo, projectId?: string) => void;
-  onProgressClear?: (projectId?: string) => void;
-  onSessionInfo?: (projectId: string, sessionId: string) => void;
+  onMessage?: (msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string, sessionId?: string) => void;
+  onProgress?: (info: ProgressInfo, projectId?: string, sessionId?: string) => void;
+  onProgressClear?: (projectId?: string, sessionId?: string) => void;
+  onSessionInfo?: (projectId: string, sessionId: string, title?: string, agentScopeId?: string) => void;
   /** ツール承認リクエスト受信時のコールバック */
   onToolApproval?: (prompt: ToolApprovalPrompt) => void;
   /** ツール承認解決（他ブラウザからの応答含む）受信時のコールバック */
@@ -79,16 +80,6 @@ interface UseWebSocketReturn {
   sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>, projectId?: string) => void;
   /** ツール承認応答を送信（ユーザーが許可/拒否を選択） */
   sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => void;
-}
-
-/** tabId を sessionStorage で管理（タブごとに独立） */
-function getTabId(): string {
-  let tabId = sessionStorage.getItem('devrelay-tab-id');
-  if (!tabId) {
-    tabId = crypto.randomUUID();
-    sessionStorage.setItem('devrelay-tab-id', tabId);
-  }
-  return tabId;
 }
 
 /** WebSocket URL を構築 */
@@ -164,20 +155,20 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
           const cb = callbacksRef.current;
           switch (msg.type) {
             case 'web:response':
-              cb?.onProgressClear?.(msg.payload.projectId);
+              cb?.onProgressClear?.(msg.payload.projectId, msg.payload.sessionId);
               if (msg.payload.message) {
-                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files, messageId: msg.payload.messageId }, msg.payload.projectId);
+                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files, messageId: msg.payload.messageId }, msg.payload.projectId, msg.payload.sessionId);
               }
               break;
             case 'web:progress':
-              cb?.onProgress?.({ output: msg.payload.output, elapsed: msg.payload.elapsed }, msg.payload.projectId);
+              cb?.onProgress?.({ output: msg.payload.output, elapsed: msg.payload.elapsed }, msg.payload.projectId, msg.payload.sessionId);
               break;
             case 'web:session_info':
-              cb?.onSessionInfo?.(msg.payload.projectId, msg.payload.sessionId);
+              cb?.onSessionInfo?.(msg.payload.projectId, msg.payload.sessionId, msg.payload.title, msg.payload.agentScopeId);
               break;
             case 'web:user_message':
               // 他タブ/ウィンドウからのユーザーメッセージ
-              cb?.onMessage?.({ role: 'user', content: msg.payload.content, files: msg.payload.files, messageId: msg.payload.messageId }, msg.payload.projectId);
+              cb?.onMessage?.({ role: 'user', content: msg.payload.content, files: msg.payload.files, messageId: msg.payload.messageId }, msg.payload.projectId, msg.payload.sessionId);
               break;
             case 'web:tool:approval':
               cb?.onToolApproval?.(msg.payload);

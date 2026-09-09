@@ -5,6 +5,9 @@ import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
 import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT, type DocPanelSettings } from '../utils/doc-panel-settings';
 import { useLanguage } from '../contexts/LanguageContext';
+import { shouldRouteToTab, resolveHistorySource } from '../lib/thread-routing-client';
+import { ThreadList } from '../components/ThreadList';
+import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -35,6 +38,13 @@ interface Tab {
   completed: boolean;
   /** タブごとの入力テキスト（タブ切り替え時に保持） */
   inputText: string;
+  /** スレッド管理 サイクル3: 現在のスレッドのタイトル（未設定なら null） */
+  title?: string | null;
+  /** スレッド管理 サイクル3: 現在のスレッドの agentScopeId（既定スレッドなら undefined） */
+  agentScopeId?: string;
+  /** スレッド管理 サイクル3: 直前に履歴取得した対象（sessionId 優先・無ければ projectId）。
+   * `loadHistory('replace')` 後にどの取得元で読み込んだかを記録し、二重ロード判定に使う */
+  historySessionId?: string | null;
 }
 
 /** File → base64 FileAttachment 変換 */
@@ -2027,6 +2037,27 @@ export function ChatPage() {
   const [terminalModeMap, setTerminalModeMap] = useState<Record<string, boolean>>({});
   /** セッション情報パネル再取得トリガー（将来の拡張用） */
   const [, setSessionRefreshCount] = useState(0);
+  /** スレッド管理 サイクル3: ThreadList 再取得トリガー（session_info 受信時等にインクリメント） */
+  const [threadRefreshToken, setThreadRefreshToken] = useState(0);
+  /** スレッド管理 サイクル3: スレッド一覧パネルの折りたたみ状態（localStorage 永続化） */
+  const [threadPanelCollapsed, setThreadPanelCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('devrelay-thread-panel-collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleThreadPanelCollapsed = useCallback(() => {
+    setThreadPanelCollapsed(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('devrelay-thread-panel-collapsed', next ? '1' : '0');
+      } catch {
+        // localStorage 不可（プライベートモード等）でも動作を継続
+      }
+      return next;
+    });
+  }, []);
   /** チャットエリア最大化（サイドバー・右パネル・ナビバー非表示） */
   const [maximized, setMaximized] = useState(false);
   /** 右パネル（DocPanel）のタブ表示設定。Settings から変更されたらイベントで即時反映 */
@@ -2142,9 +2173,16 @@ export function ChatPage() {
 
   /**
    * セッションIDからタブにメッセージ履歴を読み込む
-   * @param refresh true の場合は最新メッセージで既存メッセージと時系列マージ（WS 再接続時用）
+   *
+   * スレッド管理 サイクル3: `sessionId` が分かっていれば `resolveHistorySource()` により
+   * `/api/sessions/:id/messages`（スレッド単位）を使い、無ければ従来通り
+   * `/api/projects/:id/messages`（プロジェクト横断）にフォールバックする（後方互換）。
+   *
+   * @param mode 'initial'=スクロールバック用に既存メッセージの前に prepend（既定・従来の refresh=false と同一動作）
+   *             'refresh'=最新メッセージで既存メッセージと時系列マージ（WS 再接続時用・従来の refresh=true と同一動作）
+   *             'replace'=既存メッセージを丸ごと置換（スレッド切替時専用。他モードの重複排除ロジックを一切通さない）
    */
-  const loadHistory = useCallback(async (projectId: string, _sessionId?: string, refresh = false) => {
+  const loadHistory = useCallback(async (projectId: string, sessionId?: string | null, mode: 'initial' | 'refresh' | 'replace' = 'initial') => {
     // 履歴読み込み中はスクロールを抑制
     shouldAutoScrollRef.current = false;
     // 読み込み中フラグを立てる
@@ -2152,9 +2190,12 @@ export function ChatPage() {
       t.projectId === projectId ? { ...t, loadingHistory: true } : t
     ));
 
+    const source = resolveHistorySource({ sessionId, projectId });
+
     try {
-      // プロジェクト横断で全セッションのメッセージを取得
-      const { messages, hasMore } = await projectsApi.getMessages(projectId, { limit: 10 });
+      const { messages, hasMore } = source.kind === 'session'
+        ? await sessionsApi.getMessages(source.id, { limit: 10 })
+        : await projectsApi.getMessages(source.id, { limit: 10 });
       const chatMessages: ChatMessage[] = messages.map(m => ({
         id: m.id,
         role: m.role === 'ai' ? 'system' as const : m.role,
@@ -2163,7 +2204,7 @@ export function ChatPage() {
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
       }));
-      console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, refresh=${refresh}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
+      console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, source=${source.kind}, mode=${mode}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
 
       // 自動スクロールガードを setTabs より前に同期セット
       // React の DOM 更新で handleScroll が発火 → loadOlderMessages の連鎖発火を防止
@@ -2171,11 +2212,25 @@ export function ChatPage() {
         autoScrollingUntilRef.current = Date.now() + 1000;
       }
 
+      const historySessionId = source.kind === 'session' ? source.id : null;
+
       setTabs(prev => prev.map(t => {
         if (t.projectId !== projectId) return t;
         // 診断ログ: setTabs 時点での既存メッセージ状態（古いメッセージ混入経路の特定用）
-        console.log(`[loadHistory:setTabs] tab=${t.projectId.substring(0, 8)}, existing=${t.messages.length}, historyLoaded=${t.historyLoaded}, refresh=${refresh}${t.messages.length > 0 ? `, oldest=${t.messages[0].content.substring(0, 40).replace(/\n/g, ' ')}` : ''}`);
-        if (refresh) {
+        console.log(`[loadHistory:setTabs] tab=${t.projectId.substring(0, 8)}, existing=${t.messages.length}, historyLoaded=${t.historyLoaded}, mode=${mode}${t.messages.length > 0 ? `, oldest=${t.messages[0].content.substring(0, 40).replace(/\n/g, ' ')}` : ''}`);
+        if (mode === 'replace') {
+          // スレッド切替: 他モードのマージ/重複排除を一切通さず丸ごと置換（リスクB対策）
+          console.log(`[loadHistory] replace: api=${chatMessages.length}`);
+          return {
+            ...t,
+            messages: chatMessages,
+            historyLoaded: true,
+            hasMoreHistory: hasMore,
+            loadingHistory: false,
+            historySessionId,
+          };
+        }
+        if (mode === 'refresh') {
           // リフレッシュモード: API メッセージ + API 最古以降の WS メッセージのみ保持
           // API 最古より古い stale メッセージを除外（再接続時の古いメッセージ蓄積防止）
           const apiIds = new Set(chatMessages.map(m => m.id));
@@ -2201,9 +2256,10 @@ export function ChatPage() {
             historyLoaded: true,
             hasMoreHistory: hasMore,
             loadingHistory: false,
+            historySessionId,
           };
         }
-        // 通常モード（スクロールバック）: 既存メッセージの前に prepend
+        // 通常モード（初回・スクロールバック）: 既存メッセージの前に prepend
         if (t.messages.length > 0) {
           console.warn(`[loadHistory:prepend] tab=${t.projectId.substring(0, 8)} has ${t.messages.length} existing msgs BEFORE prepend! historyLoaded=${t.historyLoaded}`, t.messages.map(m => `${m.role}:${m.content.substring(0, 40)}`));
         }
@@ -2215,6 +2271,7 @@ export function ChatPage() {
           historyLoaded: true,
           hasMoreHistory: hasMore,
           loadingHistory: false,
+          historySessionId,
         };
       }));
 
@@ -2257,7 +2314,7 @@ export function ChatPage() {
    * projectId が指定されているのに該当タブがない場合は破棄する
    * （異なるプロジェクトの出力がアクティブタブに漏れるのを防止 — #247）
    */
-  const addMessageToTab = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string) => {
+  const addMessageToTab = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string, sessionId?: string) => {
     // projectId 指定あり → 該当タブが存在する場合のみルーティング（フォールバックしない）
     // projectId 省略 → アクティブタブに追加（従来動作）
     const targetId = projectId
@@ -2268,6 +2325,17 @@ export function ChatPage() {
         console.log(`[addMessageToTab] dropped: no tab for projectId=${projectId.substring(0, 8)}, content=${msg.content.substring(0, 60).replace(/\n/g, ' ')}`);
       }
       return;
+    }
+
+    // スレッド管理 サイクル3: fail-open ゲート（既存の projectId ルーティングより後、重複排除より前）。
+    // payload と tab の両方に sessionId があって不一致の場合だけ drop（背景スレッドの出力混入防止）
+    {
+      const tab = tabsRef.current.find(t => t.projectId === targetId);
+      const decision = shouldRouteToTab({ payloadSessionId: sessionId, tabSessionId: tab?.sessionId });
+      if (decision.route === 'drop') {
+        console.log(`[addMessageToTab] dropped by shouldRouteToTab: reason=${decision.reason}, payloadSessionId=${sessionId?.substring(0, 8)}, tabSessionId=${tab?.sessionId?.substring(0, 8)}`);
+        return;
+      }
     }
 
     // 診断ログ: 全メッセージ追加を記録（古いメッセージ混入の原因特定用）
@@ -2323,11 +2391,19 @@ export function ChatPage() {
    * 進捗を更新（projectId で対象タブを特定、省略時はアクティブタブ）
    * projectId が指定されているのに該当タブがない場合は破棄する（#247）
    */
-  const updateProgressOnTab = useCallback((info: ProgressInfo, projectId?: string) => {
+  const updateProgressOnTab = useCallback((info: ProgressInfo, projectId?: string, sessionId?: string) => {
     const targetId = projectId
       ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : null)
       : activeTabIdRef.current;
     if (!targetId) return;
+
+    // スレッド管理 サイクル3: fail-open ゲート（addMessageToTab と同じ判定基準）
+    {
+      const tab = tabsRef.current.find(t => t.projectId === targetId);
+      const decision = shouldRouteToTab({ payloadSessionId: sessionId, tabSessionId: tab?.sessionId });
+      if (decision.route === 'drop') return;
+    }
+
     setTabs(prev => prev.map(t =>
       t.projectId === targetId ? { ...t, progress: info } : t
     ));
@@ -2337,11 +2413,18 @@ export function ChatPage() {
    * 進捗をクリア（projectId で対象タブを特定、省略時はアクティブタブ）
    * //connect レスポンスは projectId 付きで新タブを対象にするため、旧タブの進捗に影響しない
    */
-  const clearProgressOnTab = useCallback((projectId?: string) => {
+  const clearProgressOnTab = useCallback((projectId?: string, sessionId?: string) => {
     const targetId = projectId
       ? (tabsRef.current.some(t => t.projectId === projectId) ? projectId : null)
       : activeTabIdRef.current;
     if (!targetId) return;
+
+    // スレッド管理 サイクル3: fail-open ゲート（addMessageToTab と同じ判定基準）
+    {
+      const tab = tabsRef.current.find(t => t.projectId === targetId);
+      const decision = shouldRouteToTab({ payloadSessionId: sessionId, tabSessionId: tab?.sessionId });
+      if (decision.route === 'drop') return;
+    }
 
     // //connect 応答による clearProgress では progress/completed を変更しない
     // （タブ切り替え時に処理中スピナーが一瞬 ✅ に変わるのを防止）
@@ -2358,22 +2441,54 @@ export function ChatPage() {
     setSessionRefreshCount(c => c + 1);
   }, []);
 
-  /** セッション情報受信: sessionId をタブに保存し、履歴未読み込みなら読み込み開始 */
-  const handleSessionInfo = useCallback((projectId: string, sessionId: string) => {
-    setTabs(prev => {
-      const tab = prev.find(t => t.projectId === projectId);
-      if (!tab) return prev;
-      // sessionId を更新
-      const updated = prev.map(t =>
-        t.projectId === projectId ? { ...t, sessionId } : t
-      );
-      // 履歴未読み込みなら読み込み開始
-      if (!tab.historyLoaded && !tab.loadingHistory) {
-        loadHistory(projectId, sessionId);
-      }
-      return updated;
-    });
+  /**
+   * セッション情報受信: sessionId/title/agentScopeId をタブに保存し、履歴未読み込みなら読み込み開始する。
+   *
+   * リスクC対策: 副作用（`loadHistory` 呼び出し・ThreadList 再取得トリガー）は `setTabs` の
+   * updater 内では実行しない（React 19 で updater が複数回呼ばれることがあり二重ロードしうる既存バグ）。
+   * `tabsRef.current` を見て判定 → `setTabs` → その後に副作用、の順で行う。
+   */
+  const handleSessionInfo = useCallback((projectId: string, sessionId: string, title?: string, agentScopeId?: string) => {
+    const tab = tabsRef.current.find(t => t.projectId === projectId);
+    if (!tab) return;
+    const shouldLoadHistory = !tab.historyLoaded && !tab.loadingHistory;
+
+    setTabs(prev => prev.map(t =>
+      t.projectId === projectId ? { ...t, sessionId, title: title ?? t.title, agentScopeId } : t
+    ));
+
+    // 副作用は setTabs の外（updater の外）で実行する
+    if (shouldLoadHistory) {
+      loadHistory(projectId, sessionId);
+    }
+    // スレッド一覧パネルを再取得（新規スレッド作成・切替直後の反映用）
+    setThreadRefreshToken(c => c + 1);
   }, [loadHistory]);
+
+  /**
+   * スレッド管理 サイクル3: タブの current スレッドを切り替える（`ThreadList` の switch/create 成功後に呼ばれる）。
+   * `loadHistory(..., 'replace')` を使うため他モードの重複排除/マージを一切通さず丸ごと置換する（リスクB対策）。
+   * `suppressConnectRef` は `//connect` 経路専用のため、ここでは立てない（リスクF対策）。
+   */
+  const switchTabToThread = useCallback((projectId: string, sessionId: string, title: string | null) => {
+    setTabs(prev => prev.map(t =>
+      t.projectId === projectId
+        ? { ...t, sessionId, title, messages: [], historyLoaded: false, hasMoreHistory: false }
+        : t
+    ));
+    loadHistory(projectId, sessionId, 'replace');
+    setThreadRefreshToken(c => c + 1);
+  }, [loadHistory]);
+
+  /** ThreadList: スレッド切替成功後のハンドラ */
+  const handleThreadSelect = useCallback((result: ThreadSwitchResult) => {
+    switchTabToThread(result.projectId, result.sessionId, result.title);
+  }, [switchTabToThread]);
+
+  /** ThreadList: 新規スレッド作成成功後のハンドラ */
+  const handleThreadCreate = useCallback((result: ThreadCreateResult) => {
+    switchTabToThread(result.projectId, result.sessionId, result.title);
+  }, [switchTabToThread]);
 
   /** ツール承認リクエスト受信時のハンドラ */
   const handleToolApproval = useCallback((prompt: ToolApprovalPrompt) => {
@@ -2442,7 +2557,8 @@ export function ChatPage() {
     sendCommandRef.current(`//connect ${activeId}`);
 
     // 最新メッセージでリフレッシュ（DB から再取得してマージ）
-    loadHistory(activeId, undefined, true);
+    const activeTab = tabsRef.current.find(t => t.projectId === activeId);
+    loadHistory(activeId, activeTab?.sessionId, 'refresh');
   }, [loadHistory]);
 
   const { connected, sendCommand, sendToolApprovalResponse } = useWebSocket({
@@ -2466,7 +2582,8 @@ export function ChatPage() {
         const activeId = activeTabIdRef.current;
         if (activeId) {
           console.log(`[visibilitychange] page visible, refreshing history for ${activeId.substring(0, 8)}`);
-          loadHistory(activeId, undefined, true);
+          const activeTab = tabsRef.current.find(t => t.projectId === activeId);
+          loadHistory(activeId, activeTab?.sessionId, 'refresh');
         }
       }
     };
@@ -3376,133 +3493,147 @@ export function ChatPage() {
           onRenameTab={handleRenameTab}
         />
 
-        {/* メッセージエリア */}
-        <div
-          ref={messagesContainerRef}
-          className="flex-1 overflow-y-auto px-4 py-4"
-          onScroll={handleScroll}
-        >
-          {/* 履歴読み込み中インジケーター */}
-          {activeTab?.loadingHistory && (
-            <div className="flex justify-center py-2 mb-2">
-              <span className="text-xs text-[var(--text-faint)] animate-pulse">{t('chat.historyLoading')}</span>
+        {/* スレッド管理 サイクル3: TabBar 下に flex 行を挿入し ThreadList を左に配置（単独ステップ） */}
+        <div className="flex-1 flex min-h-0">
+          <ThreadList
+            projectId={activeTab?.projectId}
+            currentSessionId={activeTab?.sessionId ?? null}
+            onSelect={handleThreadSelect}
+            onCreate={handleThreadCreate}
+            refreshToken={threadRefreshToken}
+            collapsed={threadPanelCollapsed}
+            onToggleCollapse={toggleThreadPanelCollapsed}
+          />
+          <div className="flex-1 flex flex-col min-w-0">
+            {/* メッセージエリア */}
+            <div
+              ref={messagesContainerRef}
+              className="flex-1 overflow-y-auto px-4 py-4"
+              onScroll={handleScroll}
+            >
+              {/* 履歴読み込み中インジケーター */}
+              {activeTab?.loadingHistory && (
+                <div className="flex justify-center py-2 mb-2">
+                  <span className="text-xs text-[var(--text-faint)] animate-pulse">{t('chat.historyLoading')}</span>
+                </div>
+              )}
+              {!activeTab && (
+                <div className="flex items-center justify-center h-full">
+                  <div className="text-center text-[var(--text-faint)]">
+                    <p className="text-lg mb-2 text-[var(--text-muted)]">DevRelay Chat</p>
+                    <p className="text-sm">
+                      {machineList.length > 0
+                        ? t('chat.chooseProject')
+                        : t('chat.showAgents')}
+                    </p>
+                    <p className="text-xs mt-1">
+                      {t('chat.keyboardHint')}
+                    </p>
+                  </div>
+                </div>
+              )}
+              {activeTab && activeTab.messages.length === 0 && !activeTab.progress && !activeTab.loadingHistory && (
+                <div className="flex items-center justify-center h-full">
+                  <div className="text-center text-[var(--text-faint)]">
+                    <p className="text-sm">
+                      <span className="text-[var(--text-muted)] font-semibold"># {activeTab.customName || activeTab.projectName}</span> に接続中
+                    </p>
+                    <p className="text-xs mt-1">
+                      {t('chat.sendMessage')}
+                    </p>
+                  </div>
+                </div>
+              )}
+              {activeTab?.messages.map((msg) => (
+                <MessageRow
+                  key={msg.id}
+                  message={msg}
+                  userName={chatDisplay.userName}
+                  userColor={chatDisplay.userColor}
+                  userAvatar={chatDisplay.userAvatar}
+                  aiName={chatDisplay.aiName}
+                  aiColor={chatDisplay.aiColor}
+                  aiAvatar={chatDisplay.aiAvatar}
+                  onImageClick={setLightboxImage}
+                />
+              ))}
+              {/* ツール承認カード / 質問カード（アクティブタブの projectId に一致するもののみ表示） */}
+              {Array.from(toolApprovals.values())
+                .filter(a => !a.projectId || a.projectId === activeTabId || a.originProjectId === activeTabId)
+                .map(approval => (
+                  approval.isQuestion ? (
+                    <QuestionCard
+                      key={approval.requestId}
+                      approval={approval}
+                      onRespond={handleToolApprovalRespond}
+                    />
+                  ) : (
+                    <ToolApprovalCard
+                      key={approval.requestId}
+                      approval={approval}
+                      onRespond={handleToolApprovalRespond}
+                    />
+                  )
+                ))}
+              {activeTab?.progress && (
+                <ProgressIndicator
+                  output={activeTab.progress.output}
+                  elapsed={activeTab.progress.elapsed}
+                  aiName={chatDisplay.aiName}
+                  aiColor={chatDisplay.aiColor}
+                  aiAvatar={chatDisplay.aiAvatar}
+                />
+              )}
+              <div ref={messagesEndRef} />
             </div>
-          )}
-          {!activeTab && (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center text-[var(--text-faint)]">
-                <p className="text-lg mb-2 text-[var(--text-muted)]">DevRelay Chat</p>
-                <p className="text-sm">
-                  {machineList.length > 0
-                    ? t('chat.chooseProject')
-                    : t('chat.showAgents')}
-                </p>
-                <p className="text-xs mt-1">
-                  {t('chat.keyboardHint')}
-                </p>
-              </div>
-            </div>
-          )}
-          {activeTab && activeTab.messages.length === 0 && !activeTab.progress && !activeTab.loadingHistory && (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center text-[var(--text-faint)]">
-                <p className="text-sm">
-                  <span className="text-[var(--text-muted)] font-semibold"># {activeTab.customName || activeTab.projectName}</span> に接続中
-                </p>
-                <p className="text-xs mt-1">
-                  {t('chat.sendMessage')}
-                </p>
-              </div>
-            </div>
-          )}
-          {activeTab?.messages.map((msg) => (
-            <MessageRow
-              key={msg.id}
-              message={msg}
-              userName={chatDisplay.userName}
-              userColor={chatDisplay.userColor}
-              userAvatar={chatDisplay.userAvatar}
-              aiName={chatDisplay.aiName}
-              aiColor={chatDisplay.aiColor}
-              aiAvatar={chatDisplay.aiAvatar}
+
+            {/* 添付プレビュー */}
+            <AttachmentPreview
+              files={pendingFiles}
+              onRemove={(i) => setPendingFiles(prev => prev.filter((_, idx) => idx !== i))}
               onImageClick={setLightboxImage}
             />
-          ))}
-          {/* ツール承認カード / 質問カード（アクティブタブの projectId に一致するもののみ表示） */}
-          {Array.from(toolApprovals.values())
-            .filter(a => !a.projectId || a.projectId === activeTabId || a.originProjectId === activeTabId)
-            .map(approval => (
-              approval.isQuestion ? (
-                <QuestionCard
-                  key={approval.requestId}
-                  approval={approval}
-                  onRespond={handleToolApprovalRespond}
-                />
-              ) : (
-                <ToolApprovalCard
-                  key={approval.requestId}
-                  approval={approval}
-                  onRespond={handleToolApprovalRespond}
-                />
-              )
-            ))}
-          {activeTab?.progress && (
-            <ProgressIndicator
-              output={activeTab.progress.output}
-              elapsed={activeTab.progress.elapsed}
-              aiName={chatDisplay.aiName}
-              aiColor={chatDisplay.aiColor}
-              aiAvatar={chatDisplay.aiAvatar}
-            />
-          )}
-          <div ref={messagesEndRef} />
-        </div>
 
-        {/* 添付プレビュー */}
-        <AttachmentPreview
-          files={pendingFiles}
-          onRemove={(i) => setPendingFiles(prev => prev.filter((_, idx) => idx !== i))}
-          onImageClick={setLightboxImage}
-        />
-
-        {/* 入力エリア */}
-        <div className="px-4 py-3 bg-[var(--bg-secondary)] border-t border-[var(--border-color)]">
-          <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-          <div className="flex gap-2 items-end">
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={!connected || !activeTab}
-              className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors"
-              title={t('chat.attachFile')}
-            >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
-              </svg>
-            </button>
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={!activeTab ? t('chat.selectProject') : connected ? t('chat.enterMessage') : t('chat.connecting')}
-              disabled={!connected || !activeTab}
-              rows={1}
-              className="flex-1 bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg px-4 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 placeholder-[var(--text-faint)]"
-              style={{ minHeight: '40px', maxHeight: '120px' }}
-              onInput={(e) => {
-                const target = e.target as HTMLTextAreaElement;
-                target.style.height = '40px';
-                target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
-              }}
-            />
-            <button
-              onClick={handleSend}
-              disabled={!connected || !activeTab || (!input.trim() && pendingFiles.length === 0)}
-              className="px-4 py-2 bg-[var(--accent-blue)] text-white rounded-lg hover:bg-[var(--accent-blue-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {t('chat.send')}
-            </button>
+            {/* 入力エリア */}
+            <div className="px-4 py-3 bg-[var(--bg-secondary)] border-t border-[var(--border-color)]">
+              <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+              <div className="flex gap-2 items-end">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!connected || !activeTab}
+                  className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors"
+                  title={t('chat.attachFile')}
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
+                  </svg>
+                </button>
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  placeholder={!activeTab ? t('chat.selectProject') : connected ? t('chat.enterMessage') : t('chat.connecting')}
+                  disabled={!connected || !activeTab}
+                  rows={1}
+                  className="flex-1 bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg px-4 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 placeholder-[var(--text-faint)]"
+                  style={{ minHeight: '40px', maxHeight: '120px' }}
+                  onInput={(e) => {
+                    const target = e.target as HTMLTextAreaElement;
+                    target.style.height = '40px';
+                    target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
+                  }}
+                />
+                <button
+                  onClick={handleSend}
+                  disabled={!connected || !activeTab || (!input.trim() && pendingFiles.length === 0)}
+                  className="px-4 py-2 bg-[var(--accent-blue)] text-white rounded-lg hover:bg-[var(--accent-blue-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {t('chat.send')}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 

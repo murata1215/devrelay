@@ -99,6 +99,23 @@ export const messages = {
   'chat.autoApprove': { en: 'Auto-approve', ja: '自動承認' },
   'chat.disableAsk': { en: 'Disable Ask', ja: 'Ask無効' },
   'chat.terminal': { en: 'Terminal', ja: '端末' },
+  'thread.panelTitle': { en: 'Threads', ja: 'スレッド' },
+  'thread.new': { en: '+ New', ja: '＋ 新規' },
+  'thread.creating': { en: 'Creating...', ja: '作成中...' },
+  'thread.default': { en: 'Default', ja: '既定' },
+  'thread.untitled': { en: '(untitled)', ja: '(無題)' },
+  'thread.rename': { en: 'Rename thread', ja: 'スレッド名を変更' },
+  'thread.renamePlaceholder': { en: 'Thread name', ja: 'スレッド名' },
+  'thread.collapse': { en: 'Collapse thread panel', ja: 'スレッド一覧を折りたたむ' },
+  'thread.expand': { en: 'Expand thread panel', ja: 'スレッド一覧を開く' },
+  'thread.empty': { en: 'No threads yet', ja: 'スレッドがありません' },
+  'thread.loadFailed': { en: 'Failed to load threads', ja: 'スレッド一覧の取得に失敗しました' },
+  'thread.retry': { en: 'Retry', ja: '再試行' },
+  'thread.machineOffline': { en: 'Agent is offline', ja: 'エージェントがオフラインです' },
+  'thread.createFailed': { en: 'Failed to create thread', ja: 'スレッドの作成に失敗しました' },
+  'thread.switchFailed': { en: 'Failed to switch thread', ja: 'スレッドの切替に失敗しました' },
+  'thread.renameFailed': { en: 'Failed to rename thread', ja: 'スレッド名の変更に失敗しました' },
+  'thread.timeJustNow': { en: 'just now', ja: 'たった今' },
 } as const;
 
 export type TranslationKey = keyof typeof messages;

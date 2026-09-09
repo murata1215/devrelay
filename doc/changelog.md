@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### スレッド管理 サイクル3（WebUI）: スレッド一覧パネル (2026-09-10)
+
+サイクル1（server）・サイクル2（agent、scope-aware な会話クリア）に続き、WebUI 側にスレッド一覧
+（`ThreadList`）と sessionId ベースのルーティング/履歴取得を追加。スコープは `apps/web` + `doc` のみ。
+
+- **純モジュール2本 新設**（外部 import ゼロ、`tests/thread-{list-rules,routing-client}.test.mjs` 計31件）:
+  `thread-list-rules.ts`（並び順・ラベル導出・既定スレッド判定・楽観更新）、
+  `thread-routing-client.ts`（**fail-open ルーティング** `shouldRouteToTab()` — payload と tab の両方に
+  sessionId があって不一致のときのみ drop、`resolveHistorySource()` — sessionId 無しは従来の
+  `/api/projects/:id/messages` にフォールバック）
+- **`components/ThreadList.tsx`** 新設: 一覧/新規作成/切替/改名の API 呼び出しを自前で持つ独立コンポーネント
+  （`projectId?` 省略時はユーザー全スレッド = Lite シェル v2 へそのまま持ち上げ可能）。全 API 呼び出しを
+  try/catch で握り例外を ChatPage に伝播させない
+- **`useWebSocket.ts`**: `ServerToWebMessage`/`WebSocketCallbacks` に `sessionId`/`title`/`agentScopeId` を
+  追加（server 側はサイクル1で既に payload に載せていたが、クライアントのローカル型が定義しておらず
+  受信側で捨てていた）。`getTabId()` を `lib/tab-id.ts` へ共有化
+- **`ChatPage.tsx`**: `loadHistory` を `mode: 'initial'|'refresh'|'replace'` 化（`replace` は既存の
+  merge/dedup を通さず丸ごと置換、スレッド切替時の履歴混入防止）。`addMessageToTab`/`updateProgressOnTab`/
+  `clearProgressOnTab` に `shouldRouteToTab()` の fail-open ゲートを重複排除より前に挿入。
+  `handleSessionInfo` の副作用を `setTabs` updater の外へ移動（React 19 二重実行対策）。
+  TabBar 下に `ThreadList` を配置する flex レイアウトを追加（単独ステップで実施）
+- **`lib/api.ts`**: `threads.list()`/`threads.create()`、`sessions.switchThread()`/`sessions.rename()` 追加
+- v1 の既知の制約: `/api/sessions/:id/messages` は `sourceProjectName` を返さない（スレッド内のみの
+  スクロールバックとして許容）／Plan・Issues・承認履歴は projectId ベースのまま（#375 で意図的にプロジェクト
+  スコープ設計）／`packages/shared` の `ServerToWebMessage` は追従せず apps/web 独自のローカル型を使用
+  （spec からの意図的な逸脱）
+- サイクル4への引き継ぎ: ツール承認カードが sessionId を持たない（表示のみの穴、承認自体は誤動作しない）、
+  `decideConnectTarget().explicitSessionId` が `//connect` 経路から未使用のデッドコード（`apps/server` 側
+  1〜2行の修正が必要）。いずれも `apps/server` スコープのため本サイクルでは対応不可
+- 検証: `pnpm build` 6 workspace green、`grep -c 'require(' apps/web/dist/assets/index-*.js` = 0（#310 の
+  再発防止）、`node --test --test-concurrency=1` を5 workspace個別実行しすべて green（web 31/31 新規・
+  shared 47/47・server 320/320・agents/linux 480/480・agents/macos 390 pass+1 skip・agents/windows 104/104）、
+  `git diff --stat -- apps/server agents packages prisma` 空を確認
+- **人間側の反映手順**: `apps/web` のみの変更のため server 再起動・agent の `u` は不要。
+  `pnpm build` 済み・dist 配信経路への反映のみ（詳細は devlog `doc/devlog/2026-09-10_013311.md` 末尾）
+
 ### スレッド管理 サイクル1（server）: Session のスレッド化と「1 project 1 active」前提の解消 (2026-09-09)
 
 1 プロジェクト内で複数の会話スレッドを持てるようにする設計（案 A: Session 行 = スレッド、

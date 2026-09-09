@@ -579,6 +579,67 @@ export const sessions = {
   async getClaudeSession(sessionId: string): Promise<ClaudeSessionInfo> {
     return request('GET', `/sessions/${sessionId}/claude-session`);
   },
+
+  /** スレッドの表示名を変更する（PATCH /api/sessions/:id） */
+  async rename(sessionId: string, title: string): Promise<{ sessionId: string; title: string }> {
+    return request('PATCH', `/sessions/${sessionId}`, { title });
+  },
+
+  /** 指定タブ(tabId)の current スレッドを切り替える（POST /api/sessions/:id/switch） */
+  async switchThread(sessionId: string, tabId: string): Promise<ThreadSwitchResult> {
+    return request('POST', `/sessions/${sessionId}/switch`, { tabId });
+  },
+};
+
+/** スレッド管理 サイクル3: スレッド一覧の1件分（server の GET /api/threads レスポンス要素と同一） */
+export interface ThreadSummary {
+  sessionId: string;
+  title: string | null;
+  projectId: string;
+  projectName: string;
+  machineName: string;
+  machineOnline: boolean;
+  aiTool: string;
+  status: 'active' | 'ended';
+  lastActiveAt: string;
+  firstUserMessage: string | null;
+  messageCount: number;
+  isScoped: boolean;
+}
+
+/** POST /api/sessions/:id/switch のレスポンス */
+export interface ThreadSwitchResult {
+  sessionId: string;
+  projectId: string;
+  projectName: string;
+  machineId: string;
+  machineDisplayName: string;
+  title: string | null;
+}
+
+/** POST /api/threads のレスポンス */
+export interface ThreadCreateResult {
+  sessionId: string;
+  projectId: string;
+  projectName: string;
+  title: string | null;
+}
+
+// スレッド管理 サイクル3: /api/threads（一覧・新規作成）
+export const threads = {
+  /** スレッド一覧を取得（projectId 省略時はユーザーの全スレッド。Lite シェル v2 で使用） */
+  async list(projectId?: string, limit?: number): Promise<{ threads: ThreadSummary[] }> {
+    const params = new URLSearchParams();
+    if (projectId) params.set('projectId', projectId);
+    if (limit) params.set('limit', String(limit));
+    const q = params.toString() ? `?${params.toString()}` : '';
+    return request('GET', `/threads${q}`);
+  },
+
+  /** 新規スレッド（= Session 行）を作成する。tabId を渡すとそのタブの current スレッドをこの新規スレッドに差し替える */
+  async create(opts: { projectId: string; tabId?: string; title?: string }): Promise<ThreadCreateResult> {
+    return request('POST', '/threads', opts);
+  },
 };
 
 /** Claude セッション推定情報 */

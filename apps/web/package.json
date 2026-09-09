@@ -9,7 +9,9 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "setup:service": "./scripts/setup-service.sh"
+    "setup:service": "./scripts/setup-service.sh",
+    "pretest": "tsc -p tsconfig.test.json",
+    "test": "node --test tests/"
   },
   "dependencies": {
     "@devrelay/shared": "workspace:*",
