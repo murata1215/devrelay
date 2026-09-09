@@ -6,6 +6,40 @@
 
 ## 実装済み機能
 
+### #383: 端末モード（PTY）× MCP: session ID エコーバック未実装によるapprove fail-closedの修正 (2026-09-09)
+
+MCP `submit_instruction` はプロジェクトの「端末」設定を引き継ぐ。端末 ON のプロジェクトでは
+`terminal-runner.ts`（agents/linux）が PTY で Claude TUI を起動するが、完了報告に AI セッション ID
+（`aiSessionId`）を一切載せていなかった。その結果 `Session.planAiSessionId` が NULL のままとなり、
+`approve_implementation` が `planAiSessionMissing` で fail-closed していた。**Windows 固有ではない**
+（hp630g9 は `agents/windows` ではなく `agents/linux` を node.exe で実行しており、端末 ON のプロジェクト
+であれば Linux 機でも同様に再現する。macOS Agent は PTY 経路自体を持たないため影響を受けない）。
+
+実測: 端末 ON `cmtthpfkv018jb1md7qxc0yb0` → `planAiSessionId` NULL / 端末 OFF `cmttocjpx01f2b1mdot9h05te`
+→ `planAiSessionId` 非 NULL・approve 成功・同一 session resume 成功。
+
+- **真因（1行）**: `agents/linux/src/services/ai-runner.ts` の `onOutput(suffix, true, runResult.usageData);`
+  がコールバックの第4引数（`extractedSessionId`）を渡していなかった。SDK 経路は渡していた。
+- **Commit 1**（最小修正）: resume しない全ケース（`forceNewSession`・plan/exec の初回ターン等）で
+  `crypto.randomUUID()` を事前採番し `claude --session-id <uuid>` で起動（`--resume` とは相互排他。
+  Claude CLI は両方指定を「--session-id can only be used with --continue or --resume if
+  --fork-session is also specified.」で拒否するため if/else if で強制）。完了報告の `onOutput()` に
+  `aiSessionId` を配線（成功時・`cancelledByAskDisable` 時の両方）。リトライは既存 ID が
+  「already in use」で即失敗するため必ず新規 UUID を採番。
+- **Commit 2**: `agentScopeId` 抜け2件を修正（`terminal-runner.ts` のメイン `onExit` の
+  `saveClaudeSessionId()` 呼び出し、`ai-runner.ts` のリトライ spawn）。抜けたままだと非スコープの
+  `.devrelay/` にセッション状態が書かれ、MCP submission スコープ（core#336）の分離が破られていた。
+- **Commit 3**: argv 構築判定・aiSessionId 優先順位判定を純関数モジュール `terminal-session-id.ts`
+  （agents/linux 専用・外部 import ゼロ、`resume-priority.ts` と同じ流儀）に集約し、2箇所の重複を解消。
+  併せて旧 CLI（`--session-id` 未対応）検出時にプロセス内フラグで legacy argv（画面スクレイプ）へ
+  自動フォールバックする仕組みを追加。新規テスト23件追加。
+- **変更範囲**: `agents/linux/` のみ（server / shared / macos / windows は無変更）。
+  `node --test --test-concurrency=1` で 451→474 green（新規23件、退行ゼロ）。
+- **ドキュメント訂正**: `doc/plans/windows-agent-migration-plan.md` / `doc/migrations/381_windows_scope_wiring.md`
+  の「hp630g9 の fail-closed は Windows Agent 移植の遅延が原因」という誤った個別事象への紐付けを訂正
+  （真因は OS 非依存の端末モード PTY 経路の穴であり、hp630g9 自体が `agents/linux` 実行機のため
+  Windows Agent 移植状況とは無関係）。
+
 ### #382: 端末インタフェースモード（PTY）が Claude Code の新しい信頼確認ダイアログで無応答になる問題を修正 (2026-09-09)
 
 Windows 機の端末インタフェースモード（terminalMode）セッションが Claude からの応答を一切返さずハングする

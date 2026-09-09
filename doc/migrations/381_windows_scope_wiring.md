@@ -67,3 +67,26 @@ DB 変更が無いため `ALTER` は不要。
   非該当（本サイクルは server 変更ゼロ）
 - 対話経路（WebUI/Discord/Telegram/LINE）は `agentScopeId` を送らないため、resume 挙動・ファイル配置は
   本サイクルの前後で無変更
+
+## 訂正（2026-09-09、core#383）
+
+本ドキュメントの「本サイクルで初めて Windows の挙動が変わる点」節の記述は、hp630g9 で実測された
+MCP `approve_implementation` の fail-closed（`planAiSessionMissing`）を「Windows Agent 移植の遅延」に
+起因するものとしていたが、これは誤りである。
+
+- hp630g9 は **`agents/windows` ではなく `agents/linux` を node.exe で実行**しており、
+  `agents/windows` は未デプロイである。したがって Windows Agent の移植状況は当該事象と無関係。
+- 真因は **端末モード（`Project.terminalMode = true`）の PTY 経路が AI セッション ID を
+  完了報告にエコーバックしていなかったこと**（`agents/linux/src/services/ai-runner.ts` が
+  `onOutput()` の第 4 引数 `extractedSessionId` を渡していなかった）。
+  その結果 `Session.planAiSessionId` が NULL となり、`submission-guard.ts` の
+  `shouldRecordPlanAiSession()` が false を返し、`approve_implementation` が fail-closed していた。
+- この穴は **OS 非依存**で、端末 ON のプロジェクトであれば Linux 機でも同様に再現する。
+  逆に macOS Agent は PTY 経路自体を持たない（`agents/macos/src/services/ai-runner.ts` に明記）
+  ため影響を受けない。
+- 実測: 端末 ON `cmtthpfkv018jb1md7qxc0yb0` → `planAiSessionId` NULL /
+  端末 OFF `cmttocjpx01f2b1mdot9h05te` → `planAiSessionId` 非 NULL・approve 成功。
+- 修正は core#383（`agents/linux` のみ・3 commit）で実施済み。本サイクル（#381）が行った
+  Windows Agent への scope 配線移植自体は、Windows マシンでの MCP submission スコープ分離を
+  有効にするための独立した価値のある作業であり誤りではない。誤りは
+  「hp630g9 の fail-closed の原因」という個別事象への紐付けの部分のみである。

@@ -337,3 +337,28 @@ git diff --stat -- apps/ packages/ prisma/   # 空であること
 ### サブサイクル E の E2E
 Windows マシンのプロジェクトに対し MCP `get_plan` を実行し、
 **15 秒ハングせずに**プラン本文が返ることを確認（F5 の解消）。
+
+---
+
+### 訂正（2026-09-09、core#383）
+
+本ドキュメントの背景説明（サブサイクル C の動機付け等）は、Windows マシン（hp630g9）で観測された
+MCP `approve_implementation` の fail-closed（`planAiSessionMissing`）を「Windows Agent 移植の遅延
+（core#336 の scope 配線が Windows に未反映）」に起因するものと位置づけていたが、これは誤りである。
+
+- hp630g9 は **`agents/windows` ではなく `agents/linux` を node.exe で実行**しており、
+  `agents/windows` は未デプロイである。したがって Windows Agent の移植状況は当該事象と無関係。
+- 真因は **端末モード（`Project.terminalMode = true`）の PTY 経路が AI セッション ID を
+  完了報告にエコーバックしていなかったこと**（`agents/linux/src/services/ai-runner.ts` の
+  `onOutput()` 呼び出しが第 4 引数 `extractedSessionId` を渡していなかった）。
+  その結果 `Session.planAiSessionId` が NULL となり、`submission-guard.ts` の
+  `shouldRecordPlanAiSession()` が false を返し、`approve_implementation` が fail-closed していた。
+- この穴は **OS 非依存**で、端末 ON のプロジェクトであれば Linux 機でも同様に再現する
+  （実測: 端末 ON プロジェクトで再現、端末 OFF プロジェクトでは発生せず）。
+  逆に macOS Agent は PTY 経路自体を持たない（`agents/macos/src/services/ai-runner.ts` に
+  「macOS Agent は PTY（terminalMode）経路を持たない」と明記）ため影響を受けない。
+- 修正は core#383（`agents/linux` のみ・3 commit）で実施済み。本ドキュメントが記述する
+  Windows Agent 移植（core#336 の scope 配線を Windows へ適用する作業）自体は、
+  Windows マシンで **MCP submission スコープ分離**（`.devrelay/sessions/<agentScopeId>/`）を
+  有効にするための独立した価値のある作業であり、それ自体は誤りではない。誤りは
+  「hp630g9 の fail-closed の原因」という**個別事象への紐付け**の部分のみである。
