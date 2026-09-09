@@ -5,6 +5,26 @@
 
 ---
 
+## `Session.agentScopeId` は絶対にバックフィルしない（スレッド管理 cycle1）
+
+`Session` テーブルの `title` / `lastActiveAt` / `agentScopeId`（すべて nullable）は
+「案 A: Session 行 = スレッド」の実装土台（`doc/thread-management-spec.md`）。
+このうち **`agentScopeId` は既存行に対して絶対に値を埋めてはいけない**（推測での補完も禁止）。
+
+- `agentScopeId = NULL` は「従来の共有スレッド（`.devrelay/` 直下を使う既定スレッド）」を意味する。
+  NULL を非 NULL に書き換えると、そのスレッドが使っていた Agent 側の会話状態
+  （`claude-session-id` / `conversation.json` 等）への参照が構造的に失われる
+- 変換の唯一の実装点は `apps/server/src/services/thread-scope.ts` の
+  `resolveOutboundAgentScopeId()`。**`resolveOutboundAgentScopeId(null) === undefined`**
+  （stored→wire で NULL を「未指定」に変換し、agent には何も送らない）がこの不変条件のテスト。
+  新しいコード経路を追加するときも、DB→Agent 送信の変換は必ずこの関数を経由すること
+- 新規スレッド作成時の scope 採番は `decideNewSessionScopeId()`、Agent 再起動時の scope 継承は
+  `inheritScopeForReestablishedSession()`（`{oldAgentScopeId:null} → null` を維持し、
+  再起動のたびに新しい scope が生えないようにする）。どちらも `thread-scope.ts` に集約
+- 将来 UI 側の要望で「全既存セッションにも scope を持たせたい」という話が出ても、
+  それは新しいセッションの挙動を変える話であって **既存行の一括更新（バックフィル）ではない**。
+  バックフィルは既存スレッドの会話履歴を静かに壊す（R3、`~/.claude/plans/curious-watching-whistle.md` 参照）
+
 ## Devin セッションIDとモデルは常に対で扱う・拒否検出は実測文言に追随（#360）
 
 `agents/{linux,macos,windows}/src/services/ai-runner.ts` の `devinCurrentModelForResume` は `devin`

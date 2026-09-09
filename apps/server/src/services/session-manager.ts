@@ -27,6 +27,8 @@ import { sendPushNotificationForSession } from './push-notification-service.js';
 import { sendFcmNotificationForSession } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { decideProgressTimeoutAction } from './progress-timeout.js';
+import { isEphemeralSessionId, decideNewSessionScopeId, resolveOutboundAgentScopeId, inheritScopeForReestablishedSession } from './thread-scope.js';
+import { resolveChatSessionId } from './thread-routing.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
@@ -37,12 +39,29 @@ export function getSessionParticipants(sessionId: string): Array<{ platform: Pla
   return sessionParticipants.get(sessionId) || [];
 }
 
-/** chatId が参加しているセッション ID を逆引き */
-export function getSessionIdByChatId(chatId: string): string | null {
+/**
+ * chatId が参加している全セッション ID を返す（候補が複数ありうることを前提にした逆引き）。
+ * スレッド管理 cycle1: 1 chatId が複数プロジェクトタブとして複数セッションに参加するのは
+ * 意図された挙動（web.ts）であるため、呼び出し側はこの結果を「1件に確定できるとは限らない」
+ * ものとして扱うこと（`resolveChatSessionId()` 参照）。
+ */
+export function getSessionIdCandidatesByChatId(chatId: string): string[] {
+  const candidates: string[] = [];
   for (const [sessionId, participants] of sessionParticipants) {
-    if (participants.some(p => p.chatId === chatId)) return sessionId;
+    if (participants.some(p => p.chatId === chatId)) candidates.push(sessionId);
   }
-  return null;
+  return candidates;
+}
+
+/**
+ * chatId が参加しているセッション ID を逆引きする。
+ * スレッド管理 cycle1: 候補が複数ある場合は **null を返す（推測しない）**。
+ * 旧実装は Map 走査の「最初の1件」を無条件に返しており、これが S1〜S8（他プロジェクトタブへの
+ * 誤配送・承認カードの誤復元）の実体だった（`thread-routing.ts` の `resolveChatSessionId` 参照）。
+ */
+export function getSessionIdByChatId(chatId: string): string | null {
+  const candidates = getSessionIdCandidatesByChatId(chatId);
+  return resolveChatSessionId({ contextSessionId: null, fallbackCandidates: candidates });
 }
 
 // Progress tracking for streaming output
@@ -68,6 +87,14 @@ const sessionProjectMap = new Map<string, string>();
 
 /** sessionId → machineId のキャッシュ（#337、sessionProjectMap と同じ流儀） */
 const sessionMachineMap = new Map<string, string>();
+
+/**
+ * sessionId → agentScopeId（DB 保存値。string | null）のキャッシュ。
+ * スレッド管理 cycle1: sessionProjectMap と同じ流儀。値が Map に無い（未キャッシュ）場合と
+ * 「DB 上 null（従来スレッド）」の場合を区別するため、キャッシュヒット時は必ず
+ * `string | null` を格納する（`undefined` を格納しない）。
+ */
+const sessionScopeMap = new Map<string, string | null>();
 
 const PROGRESS_UPDATE_INTERVAL = 8000; // 8 seconds
 const MAX_OUTPUT_LINES = 15;
@@ -101,9 +128,10 @@ export async function restoreSessionParticipants() {
       });
 
       if (session) {
-        // sessionId → projectId / machineId キャッシュを更新
+        // sessionId → projectId / machineId / agentScopeId キャッシュを更新
         sessionProjectMap.set(session.id, session.projectId);
         sessionMachineMap.set(session.id, session.machineId);
+        sessionScopeMap.set(session.id, session.agentScopeId);
         // Restore if machine is online (regardless of session status)
         if (session.machine.status === 'online') {
           addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
@@ -166,6 +194,7 @@ export async function restoreSessionParticipantsForMachine(machineId: string) {
       if (session) {
         sessionProjectMap.set(session.id, session.projectId);
         sessionMachineMap.set(session.id, session.machineId);
+        sessionScopeMap.set(session.id, session.agentScopeId);
         addParticipant(cs.currentSessionId, cs.platform as Platform, cs.chatId);
         restoredCount++;
 
@@ -186,11 +215,38 @@ export async function restoreSessionParticipantsForMachine(machineId: string) {
   }
 }
 
+/**
+ * スレッド管理 cycle1: createSession() の追加オプション。
+ * 未指定（従来の呼び出し）の場合、`agentScopeId` は一切採番せず null のまま
+ * （＝完全に後方互換。既存 5 箇所の呼び出しはこのオプションを渡さないため無変更で動く）。
+ */
+export interface CreateSessionOptions {
+  /**
+   * 作成経路。
+   * - 'interactive': 対話経路（`//connect` 等）での新規スレッド作成。
+   *   `DEVRELAY_THREADS_SCOPE_INTERACTIVE`（既定 '1'）が有効な場合のみ、
+   *   自身の Session id を agentScopeId として採番する
+   * - 'mcp': MCP `submit_instruction` 経由。呼び出し元は既にワイヤ上で
+   *   `agentScopeId = sessionId` を agent に送っている（#331 以前から）ため、
+   *   ここでは DB にもその事実を記録するだけ（ワイヤ上の変更はゼロ）
+   */
+  origin?: 'interactive' | 'mcp';
+  /** スレッド表示名（あれば Session.title に保存） */
+  title?: string | null;
+  /**
+   * agent 再起動等でセッションを再確立する経路で、旧 Session の agentScopeId を
+   * そのまま引き継がせたい場合に渡す（null 可＝従来スレッドはそのまま null で引き継ぐ）。
+   * 指定された場合は `origin` の値に関わらずこちらが最優先される（新規採番しない。R2 対策）。
+   */
+  inheritAgentScopeId?: string | null;
+}
+
 export async function createSession(
   userId: string,
   machineId: string,
   projectId: string,
-  aiTool: string
+  aiTool: string,
+  options?: CreateSessionOptions
 ): Promise<string> {
   const session = await prisma.session.create({
     data: {
@@ -198,14 +254,77 @@ export async function createSession(
       machineId,
       projectId,
       aiTool,
-      status: 'active'
+      status: 'active',
+      title: options?.title ?? undefined,
     }
   });
-  
+
   sessionParticipants.set(session.id, []);
   sessionProjectMap.set(session.id, projectId);
   sessionMachineMap.set(session.id, machineId);
+
+  // agentScopeId の決定（バックフィル禁止の不変条件: options 未指定なら常に null のまま）
+  let agentScopeId: string | null = null;
+  if (options?.inheritAgentScopeId !== undefined) {
+    agentScopeId = inheritScopeForReestablishedSession({ oldAgentScopeId: options.inheritAgentScopeId });
+  } else if (options?.origin === 'interactive') {
+    const interactiveScopeEnabled = process.env.DEVRELAY_THREADS_SCOPE_INTERACTIVE !== '0';
+    agentScopeId = decideNewSessionScopeId({ newSessionId: session.id, interactiveScopeEnabled });
+  } else if (options?.origin === 'mcp') {
+    agentScopeId = session.id;
+  }
+
+  sessionScopeMap.set(session.id, agentScopeId);
+  if (agentScopeId !== null) {
+    await prisma.session.update({ where: { id: session.id }, data: { agentScopeId } });
+  }
+
   return session.id;
+}
+
+/**
+ * 指定セッションへ agent プロンプト送信時に付与する scope オプションを解決する。
+ * `sendPromptToAgent` / `execConversation` の呼び出し元はこの関数の戻り値をそのまま
+ * `scopeOptions` にスプレッドすることで、agentScopeId の DB→wire 変換ロジックを
+ * 一箇所（`resolveOutboundAgentScopeId`）に集約する。
+ *
+ * キャッシュ（sessionScopeMap）にヒットしない場合は DB から解決してキャッシュする
+ * （sessionProjectMap と同じ流儀。サーバー再起動直後等でキャッシュが空でも動作する）。
+ */
+export async function resolveScopeOptionsForSession(
+  sessionId: string
+): Promise<{ agentScopeId?: string }> {
+  let stored = sessionScopeMap.get(sessionId);
+  if (stored === undefined) {
+    try {
+      const session = await prisma.session.findUnique({
+        where: { id: sessionId },
+        select: { agentScopeId: true },
+      });
+      stored = session?.agentScopeId ?? null;
+      sessionScopeMap.set(sessionId, stored);
+    } catch (err) {
+      console.error(`Failed to resolve agentScopeId for session ${sessionId}:`, err);
+      stored = null;
+    }
+  }
+  const agentScopeId = resolveOutboundAgentScopeId(stored);
+  return agentScopeId !== undefined ? { agentScopeId } : {};
+}
+
+/**
+ * セッションの最終アクティビティ時刻（`lastActiveAt`）を更新する（fire-and-forget）。
+ * `teamexec_` / `crossquery_` 等の一時セッションは一覧に出さないため更新をスキップする。
+ * 呼び出し元は await しない（プロンプト送信の応答性を lastActiveAt の DB 書き込みで
+ * 遅延させないため。失敗してもチャット機能には影響しない）。
+ */
+export function touchSessionActivity(sessionId: string): void {
+  if (isEphemeralSessionId(sessionId)) return;
+  prisma.session
+    .update({ where: { id: sessionId }, data: { lastActiveAt: new Date() } })
+    .catch((err: unknown) => {
+      console.error(`Failed to touch lastActiveAt for session ${sessionId}:`, err);
+    });
 }
 
 export function addParticipant(sessionId: string, platform: Platform, chatId: string) {
@@ -288,9 +407,10 @@ export async function broadcastToSession(sessionId: string, message: string, isC
         stopWebTyping(chatId);
       }
     }
-    // Web クライアントには projectId を含めてルーティング可能にする
+    // Web クライアントには projectId / sessionId を含めてルーティング可能にする
+    // （sessionId はサイクル3のクライアント側ルーティング用。配送先自体は従来どおり participant ベース）
     if (platform === 'web') {
-      await sendWebMessage(chatId, message, files, projectId);
+      await sendWebMessage(chatId, message, files, projectId, undefined, sessionId);
     } else {
       await sendMessage(platform, chatId, message, files);
     }
@@ -363,7 +483,7 @@ export async function startProgressTracking(sessionId: string) {
         tracker.messages.set(chatId, { messageId, platform });
       }
     } else if (platform === 'web') {
-      const messageId = await sendWebMessageWithId(chatId, formatProgressMessage('', 0, language), projectId);
+      const messageId = await sendWebMessageWithId(chatId, formatProgressMessage('', 0, language), projectId, sessionId);
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
@@ -470,7 +590,7 @@ async function updateProgressMessages(sessionId: string) {
       await editTelegramMessage(chatId, messageId as number, content);
     } else if (platform === 'web') {
       const elapsed = Math.floor((Date.now() - (progressTrackers.get(sessionId)?.startTime ?? Date.now())) / 1000);
-      await editWebMessage(chatId, messageId as string, content, elapsed, tracker.projectId);
+      await editWebMessage(chatId, messageId as string, content, elapsed, tracker.projectId, sessionId);
     }
   }
 }
@@ -604,7 +724,7 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       stopWebTyping(chatId);
       // tracker の projectId がない場合は sessionProjectMap からフォールバック
       const finalProjectId = tracker?.projectId ?? sessionProjectMap.get(sessionId);
-      await sendWebMessage(chatId, messageToSend, files, finalProjectId, messageId);
+      await sendWebMessage(chatId, messageToSend, files, finalProjectId, messageId, sessionId);
     }
   }
 
@@ -627,7 +747,7 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
     .catch(() => {});
 }
 
-export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[], projectId?: string | null) {
+export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[], projectId?: string | null, sessionId?: string) {
   switch (platform) {
     case 'discord':
       await sendDiscordMessage(chatId, message, files);
@@ -636,7 +756,7 @@ export async function sendMessage(platform: Platform, chatId: string, message: s
       await sendTelegramMessage(chatId, message, files);
       break;
     case 'web':
-      await sendWebMessage(chatId, message, files, projectId);
+      await sendWebMessage(chatId, message, files, projectId, undefined, sessionId);
       break;
     case 'line':
       // await sendLineMessage(chatId, message, files);

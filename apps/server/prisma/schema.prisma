@@ -257,10 +257,17 @@ model Session {
   planAiSessionId  String?   // plan ターン完了時に確定した AI ツール側セッション ID（exec の resume 元）
   planAiTool       String?   // 上記が属するツール種別（'claude' | 'devin' | 'codex' 等）
   approvedAt       DateTime? // 承認 claim。null = 未承認。atomic に claim/解放する
+  // スレッド管理 cycle1: 1 プロジェクト複数スレッド（Session 行 = スレッド）。
+  // すべて nullable = 既存行は従来挙動のまま（backfill 絶対禁止。NULL のまま = 従来の .devrelay/ 直下）。
+  title        String?   // スレッド表示名。null = 未命名（UI 側が先頭メッセージ等で代替表示）
+  lastActiveAt DateTime? // 最終プロンプト送信時刻。null = startedAt を代用（一覧ソート用）
+  agentScopeId String?   // Agent 側 scope dir の ID（= 自身の id）。null = 従来の .devrelay/ 直下
 
   messages       Message[]
   buildLogs      BuildLog[]
   toolApprovals  ToolApproval[]
+
+  @@index([projectId, status, lastActiveAt])
 }
 
 // 監視監査ログ（統制 v3 #270）

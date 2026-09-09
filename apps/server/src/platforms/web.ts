@@ -4,9 +4,10 @@ import type { FileAttachment, WebClientMessage, ServerToWebMessage } from '@devr
 import { redactChatInput } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
-import { getActiveProgressForChatId, getSessionIdByChatId, getSessionParticipants, removeWebParticipantFromAllSessions } from '../services/session-manager.js';
+import { getActiveProgressForChatId, getSessionParticipants, removeWebParticipantFromAllSessions } from '../services/session-manager.js';
 import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession } from '../services/agent-manager.js';
 import { handleVoiceAssist } from '../services/voice-assist.js';
+import { buildSessionInfoPayload } from '../services/thread-routing.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -17,7 +18,7 @@ const webClients = new Map<string, WebSocket>();
 const typingStates = new Map<string, boolean>();
 
 /** WS 不在時の未送信レスポンスキュー: chatId -> メッセージ配列 */
-const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string; messageId?: string }>>();
+const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string; messageId?: string; sessionId?: string }>>();
 
 /**
  * Web クライアントの WebSocket 接続をセットアップする
@@ -90,7 +91,11 @@ export async function setupWebClientWebSocket(
   }
 
   // 保留中のツール承認/質問カードを復元（リロード時に承認操作を継続可能にする）
-  const sessionId = getSessionIdByChatId(chatId);
+  // スレッド管理 cycle1: chatId の「今の current session」は ChannelSession が正（getUserContext 経由）。
+  // 1 chatId は複数セッションに参加しうるため（複数プロジェクトタブ）、Map 走査で最初の1件を
+  // 誤って使わないよう、この単一情報源（context.currentSessionId）だけを使う（S1〜S8 対策）。
+  const initialContext = await getUserContext(userId, 'web', chatId);
+  const sessionId = initialContext.currentSessionId ?? null;
   if (sessionId) {
     const pendingApprovals = getPendingToolApprovalsForSession(sessionId);
     for (const approval of pendingApprovals) {
@@ -131,9 +136,20 @@ export async function setupWebClientWebSocket(
             // 接続後にセッションIDをクライアントに通知（タブ復元用）
             const updatedContext = await getUserContext(userId, 'web', chatId);
             if (updatedContext.currentSessionId) {
+              // スレッド管理 cycle1: title/agentScopeId を追加（従来スレッドは null なので
+              // buildSessionInfoPayload がキー自体を省略し、既存クライアントとの互換性を維持する）
+              const sessionForInfo = await prisma.session.findUnique({
+                where: { id: updatedContext.currentSessionId },
+                select: { title: true, agentScopeId: true },
+              });
               sendJson(ws, {
                 type: 'web:session_info',
-                payload: { projectId, sessionId: updatedContext.currentSessionId },
+                payload: buildSessionInfoPayload({
+                  projectId,
+                  sessionId: updatedContext.currentSessionId,
+                  title: sessionForInfo?.title,
+                  agentScopeId: sessionForInfo?.agentScopeId,
+                }),
               });
 
               // //connect 後に保留中の承認/質問カードを復元（新タブ対応）
@@ -153,8 +169,10 @@ export async function setupWebClientWebSocket(
 
           // 同じセッションの他 Web クライアントにユーザーメッセージをブロードキャスト（全コマンド対象）
           // #326 Phase2: login の認可コードが他タブに生表示されないよう redactChatInput を適用
+          // スレッド管理 cycle1 (S1〜S8): Map 走査の最初の1件を誤って使わないよう、
+          // このソケットの唯一の正である context.currentSessionId を使う（chatId から逆引きしない）。
           {
-            const sessionId = getSessionIdByChatId(chatId);
+            const sessionId = context.currentSessionId ?? null;
             if (sessionId) {
               const participants = getSessionParticipants(sessionId);
               for (const p of participants) {
@@ -175,15 +193,16 @@ export async function setupWebClientWebSocket(
           console.log(`📨 Web: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 
           // レスポンスがある場合は同じセッションの全 Web クライアントにブロードキャスト
+          // スレッド管理 cycle1: context.currentSessionId が唯一の正（S1〜S8 対策、上記と同じ理由）。
           if (response) {
-            const sessionId = getSessionIdByChatId(chatId);
+            const sessionId = context.currentSessionId ?? null;
             if (sessionId) {
               const participants = getSessionParticipants(sessionId);
               for (const p of participants) {
                 if (p.platform === 'web') {
                   const targetWs = webClients.get(p.chatId);
                   if (targetWs && targetWs.readyState === targetWs.OPEN) {
-                    sendJson(targetWs, { type: 'web:response', payload: { message: response, projectId: context.lastProjectId } });
+                    sendJson(targetWs, { type: 'web:response', payload: { message: response, projectId: context.lastProjectId, sessionId } });
                   }
                 }
               }
@@ -253,18 +272,37 @@ export async function setupWebClientWebSocket(
  * Web クライアントにメッセージを送信する
  * session-manager.ts の sendMessage() から呼ばれる
  * @param projectId メッセージのルーティング先タブ特定用（省略時はアクティブタブに表示）
+ * @param sessionId スレッド管理 cycle1: クライアント側ルーティング用（サイクル3で使用。追加のみ、配送先自体は
+ *   従来どおり participant ベース。packages/shared の型は cycle3 で追従するため、ここでは
+ *   sendJson の unknown 型を経由して追加プロパティとして載せる）
  */
-export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[], projectId?: string | null, messageId?: string) {
+export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[], projectId?: string | null, messageId?: string, sessionId?: string) {
   const ws = webClients.get(chatId);
   if (ws && ws.readyState === ws.OPEN) {
-    sendJson(ws, { type: 'web:response', payload: { message, files, projectId: projectId ?? undefined, messageId } });
+    sendJson(ws, { type: 'web:response', payload: { message, files, projectId: projectId ?? undefined, messageId, sessionId } });
   } else {
     // WS 不在 → キューに保存（再接続時にフラッシュ）
     const queue = pendingMessages.get(chatId) || [];
-    queue.push({ message, files, projectId: projectId ?? undefined, messageId });
+    queue.push({ message, files, projectId: projectId ?? undefined, messageId, sessionId });
     pendingMessages.set(chatId, queue);
     console.log(`📥 Queued message for offline client ${chatId} (${queue.length} pending)`);
   }
+}
+
+/**
+ * スレッド管理 cycle1: REST API（/api/threads 系）からスレッド切替/作成を通知するために使う。
+ * `web:session_info` は title/agentScopeId を含むため既存の `ServerToWebMessage` 型（packages/shared、
+ * 本サイクルではノータッチ）に定義が無く、`sendWebRawMessage` は使えない。
+ * `sendJson(ws, data: unknown)` の型穴を経由し、`buildSessionInfoPayload()` のテストで型ドリフトを代替検知する。
+ * WS が繋がっていなければ何もしない（REST の応答自体で状態は返しているため、フロント側は無視してよい）。
+ */
+export function pushSessionInfoToChat(chatId: string, payload: ReturnType<typeof buildSessionInfoPayload>): boolean {
+  const ws = webClients.get(chatId);
+  if (ws && ws.readyState === ws.OPEN) {
+    sendJson(ws, { type: 'web:session_info', payload });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -301,12 +339,12 @@ export function broadcastWebRawMessage(message: ServerToWebMessage): number {
  * session-manager.ts の startProgressTracking() から呼ばれる
  * @param projectId ルーティング先タブ特定用
  */
-export async function sendWebMessageWithId(chatId: string, content: string, projectId?: string | null): Promise<string | null> {
+export async function sendWebMessageWithId(chatId: string, content: string, projectId?: string | null, sessionId?: string): Promise<string | null> {
   const ws = webClients.get(chatId);
   if (!ws || ws.readyState !== ws.OPEN) return null;
 
   const messageId = `webmsg_${crypto.randomUUID()}`;
-  sendJson(ws, { type: 'web:progress', payload: { output: content, elapsed: 0, projectId: projectId ?? undefined } });
+  sendJson(ws, { type: 'web:progress', payload: { output: content, elapsed: 0, projectId: projectId ?? undefined, sessionId } });
   return messageId;
 }
 
@@ -320,14 +358,15 @@ export async function editWebMessage(
   _messageId: string,
   content: string,
   elapsed?: number,
-  projectId?: string | null
+  projectId?: string | null,
+  sessionId?: string
 ): Promise<boolean> {
   const ws = webClients.get(chatId);
   if (!ws || ws.readyState !== ws.OPEN) return false;
 
   sendJson(ws, {
     type: 'web:progress',
-    payload: { output: content, elapsed: elapsed ?? 0, projectId: projectId ?? undefined },
+    payload: { output: content, elapsed: elapsed ?? 0, projectId: projectId ?? undefined, sessionId },
   });
   return true;
 }

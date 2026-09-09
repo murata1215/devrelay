@@ -37,8 +37,11 @@ import {
   stopProgressTracking,
   sendMessage,
   getActiveSessions,
-  getSessionParticipants
+  getSessionParticipants,
+  resolveScopeOptionsForSession,
+  touchSessionActivity
 } from './session-manager.js';
+import { decideConnectTarget } from './thread-routing.js';
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
@@ -477,19 +480,23 @@ export async function handleProjectConnect(projectId: string, context: UserConte
     return tChat(lang, 'project.userInfoFailed');
   }
 
-  // 既存のアクティブセッションを検索（同一ユーザー・同一プロジェクト・同一マシン）
+  // 既存のアクティブセッション（＝スレッド）を検索（同一ユーザー・同一プロジェクト・同一マシン）。
+  // スレッド管理 cycle1: `//connect` の互換仕様は「active な最新スレッドがあれば再利用、無ければ新規作成」
+  // （spec §3.2）。1 プロジェクトに複数 active スレッドが存在しうる前提のため、
+  // findFirst の startedAt 降順ではなく decideConnectTarget（lastActiveAt 優先、無ければ startedAt）で
+  // 「最新に活動したスレッド」を選ぶ。
   let sessionId: string;
   let isResumed = false;
 
-  const existingSession = await prisma.session.findFirst({
+  const activeSessions = await prisma.session.findMany({
     where: {
       userId: user.id,
       projectId: project.id,
       machineId: project.machineId,
       status: 'active',
     },
-    orderBy: { startedAt: 'desc' },
   });
+  const connectTarget = decideConnectTarget({ candidates: activeSessions });
 
   // #307: このプロジェクトで直近使っていた AI ツールを引き継ぐための単一情報源。
   // active セッションがあればその aiTool、無ければ status を問わず直近セッションの aiTool、
@@ -497,10 +504,10 @@ export async function handleProjectConnect(projectId: string, context: UserConte
   // これをやらないと Agent 切断→再接続のたびに `a` で選んだツールが project.defaultAi に巻き戻る。
   let effectiveAi: string;
 
-  if (existingSession) {
-    sessionId = existingSession.id;
+  if (connectTarget.action === 'reuse') {
+    sessionId = connectTarget.thread.id;
     isResumed = true;
-    effectiveAi = existingSession.aiTool;
+    effectiveAi = connectTarget.thread.aiTool;
   } else {
     const lastSession = await prisma.session.findFirst({
       where: {
@@ -516,7 +523,8 @@ export async function handleProjectConnect(projectId: string, context: UserConte
       user.id,
       project.machineId,
       project.id,
-      effectiveAi
+      effectiveAi,
+      { origin: 'interactive' }
     );
   }
 
@@ -535,12 +543,16 @@ export async function handleProjectConnect(projectId: string, context: UserConte
 
   // 新規セッションのみ Agent に通知（再利用時は Agent 側で既に活性化済み）
   if (!isResumed) {
+    // スレッド管理 cycle1: このスレッドの agentScopeId（キルスイッチ OFF・従来スレッドなら undefined）を
+    // agent へ送る。resolveOutboundAgentScopeId がバックフィル禁止の唯一の実装点。
+    const { agentScopeId } = await resolveScopeOptionsForSession(sessionId);
     await startAgentSession(
       project.machineId,
       sessionId,
       project.name,
       project.path,
-      effectiveAi as any
+      effectiveAi as any,
+      agentScopeId
     );
     // Agent 再起動フラグをクリア（handleProjectConnect でセッションを開始済みのため、
     // handleAiPrompt / handleExec での二重セッション作成を防止）
@@ -565,6 +577,74 @@ export async function handleProjectConnect(projectId: string, context: UserConte
     return tChat(lang, 'continue.reconnected', { project: project.name, ai: aiName });
   }
   return tChat(lang, 'continue.connected', { project: project.name, ai: aiName });
+}
+
+/**
+ * スレッド管理 cycle1: REST 経由でチャット(chatId)の current スレッドを切り替える。
+ * `updateUserContext()`（メモリ+DB 両方）と `addParticipant()`（配送用 participant リスト）を
+ * 必ず両方経由して更新する（`getUserContext()` のインメモリキャッシュが実質の正のため、
+ * prisma を直接叩くとメモリ側が stale になる）。
+ * ended スレッドへの切替は active に再活性化する（承認条件）。
+ * 他セッションからの participant 除去は web では行わない
+ * （1 chatId = 複数プロジェクト擬似タブに意図的に同時参加するため）。
+ */
+export interface SwitchChatToThreadInput {
+  userId: string;
+  platform: Platform;
+  chatId: string;
+  sessionId: string;
+}
+
+export interface SwitchChatToThreadResult {
+  projectId: string;
+  projectName: string;
+  machineId: string;
+  machineDisplayName: string;
+  title: string | null;
+  agentScopeId: string | null;
+}
+
+export async function switchChatToThread(input: SwitchChatToThreadInput): Promise<SwitchChatToThreadResult> {
+  const { userId, platform, chatId, sessionId } = input;
+
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    include: { project: true, machine: true },
+  });
+  if (!session || session.userId !== userId) {
+    throw new Error('Session not found');
+  }
+
+  // ended スレッドへの切替は active に再活性化する（承認条件）
+  if (session.status === 'ended') {
+    await prisma.session.update({ where: { id: sessionId }, data: { status: 'active' } });
+  }
+
+  const context = await getUserContext(userId, platform, chatId);
+  if (context.currentSessionId && context.currentSessionId !== sessionId && platform !== 'web') {
+    stopProgressTracking(context.currentSessionId);
+    removeParticipant(context.currentSessionId, platform, chatId);
+  }
+
+  addParticipant(sessionId, platform, chatId);
+
+  const machineDisplayName = session.machine.displayName ?? session.machine.name;
+  await updateUserContext(userId, platform, chatId, {
+    currentSessionId: sessionId,
+    currentProjectName: session.project.name,
+    currentMachineId: session.machineId,
+    currentMachineName: machineDisplayName,
+    lastProjectId: session.projectId,
+  });
+
+  return {
+    projectId: session.projectId,
+    projectName: session.project.name,
+    machineId: session.machineId,
+    machineDisplayName,
+    title: session.title,
+    agentScopeId: session.agentScopeId,
+  };
 }
 
 async function handleRecentConnect(sessionId: string, context: UserContext): Promise<string> {
@@ -703,6 +783,22 @@ async function handleClear(context: UserContext): Promise<string> {
     return tChat(lang, 'common.sessionNotFound');
   }
 
+  // TODO(スレッド管理 cycle2): `server:conversation:clear` payload（packages/shared）と
+  // agent 側 handleConversationClear（agents/*/connection.ts）が agentScopeId 未対応のため、
+  // scoped スレッドで `x` を実行すると agent は `.devrelay/` 直下（レガシー既定スレッドの状態）を
+  // 消してしまう（このスレッド自身の状態ではなく、無関係な既定スレッドを巻き添えで破壊する）。
+  // cycle2 で agent 側がスレッド単位のクリアに対応するまで、scoped スレッドでは fail-closed で拒否する
+  // （D2、承認ノートに明記された「サイクル2までの暫定措置」）。
+  // このガードを外してよいのは、agents/ 側が agentScopeId を受け取ってスコープ内だけを
+  // クリアできるようになった後（cycle2 完了後）のみ。
+  if (session.agentScopeId !== null) {
+    // #packages/shared には触れないため（本サイクルのスコープ外）、tChat の型付き ChatMessageKey を
+    // 拡張せずローカルの簡易文言で返す。cycle3 以降で shared 側の i18n に正式に載せ替えてよい。
+    return lang === 'ja'
+      ? '⚠️ このスレッドでは x（会話クリア）は未対応です（サイクル2で対応予定）。区切りたい場合は新しいスレッドを作成してください。'
+      : '⚠️ x (clear conversation) is not supported for this thread yet (planned for cycle 2). Start a new thread if you want a fresh context.';
+  }
+
   // Send clear command to agent
   await clearConversation(
     context.currentMachineId,
@@ -814,20 +910,25 @@ async function handleExec(
     }
 
     // oldSession.userId を使用（context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
+    // スレッド管理 cycle1: agentScopeId は必ず旧セッションから引き継ぐ（新規採番しない。R2 対策）。
+    // 引き継がないと agent 再起動のたびにスレッドの状態ディレクトリが分裂する。
     const newSessionId = await createSession(
       oldSession.userId,
       context.currentMachineId,
       oldSession.projectId,
-      oldSession.aiTool
+      oldSession.aiTool,
+      { inheritAgentScopeId: oldSession.agentScopeId }
     );
     addParticipant(newSessionId, context.platform, context.chatId);
 
+    const { agentScopeId: reestablishedScopeId } = await resolveScopeOptionsForSession(newSessionId);
     await startAgentSession(
       context.currentMachineId,
       newSessionId,
       oldSession.project.name,
       oldSession.project.path,
-      oldSession.aiTool as any
+      oldSession.aiTool as any,
+      reestablishedScopeId
     );
 
     await updateUserContext(context.userId, context.platform, context.chatId, {
@@ -896,6 +997,9 @@ async function handleExec(
       ? fenceHumanText('execInstruction', customPrompt)
       : customPrompt;
 
+  // スレッド管理 cycle1: このスレッドの scope（agentScopeId）を解決して agent へ渡す。
+  // 従来スレッド（agentScopeId=null）は resolveScopeOptionsForSession が {} を返すため無変更。
+  const execScopeOptions = await resolveScopeOptionsForSession(context.currentSessionId);
   await execConversation(
     context.currentMachineId,
     context.currentSessionId,
@@ -904,7 +1008,10 @@ async function handleExec(
     promptForAgent,
     undefined,
     isWCommand,
+    undefined, // language: 未指定（UserSettings から補完）
+    execScopeOptions,
   );
+  touchSessionActivity(context.currentSessionId);
 
   // Return empty since progress message is already sent
   return '';
@@ -1628,11 +1735,13 @@ async function handleAiPrompt(
     }
 
     // 新しいセッションを作成（oldSession.userId を使用。context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
+    // スレッド管理 cycle1: agentScopeId は必ず旧セッションから引き継ぐ（新規採番しない。R2 対策）。
     const newSessionId = await createSession(
       oldSession.userId,
       context.currentMachineId,
       oldSession.projectId,
-      oldSession.aiTool
+      oldSession.aiTool,
+      { inheritAgentScopeId: oldSession.agentScopeId }
     );
 
     // 旧セッションの全参加者を新セッションにマイグレーション（他ブラウザも含む）
@@ -1644,12 +1753,14 @@ async function handleAiPrompt(
     addParticipant(newSessionId, context.platform, context.chatId);
 
     // Agent に server:session:start を送信（Agent 側の sessionInfoMap を初期化）
+    const { agentScopeId: reestablishedPromptScopeId } = await resolveScopeOptionsForSession(newSessionId);
     await startAgentSession(
       context.currentMachineId,
       newSessionId,
       oldSession.project.name,
       oldSession.project.path,
-      oldSession.aiTool as any
+      oldSession.aiTool as any,
+      reestablishedPromptScopeId
     );
 
     // context を新しいセッションIDで更新
@@ -1720,6 +1831,8 @@ async function handleAiPrompt(
   // Send to agent with files and missed messages
   // エラー時はトラッカーをクリーンアップして永遠にスタックしないようにする
   try {
+    // スレッド管理 cycle1: このスレッドの scope を解決して agent へ渡す（従来スレッドは {} = 無変更）。
+    const promptScopeOptions = await resolveScopeOptionsForSession(context.currentSessionId);
     await sendPromptToAgent(
       context.currentMachineId,
       context.currentSessionId,
@@ -1733,7 +1846,9 @@ async function handleAiPrompt(
       undefined, // model: 未指定（UserSettings から補完）
       undefined, // language: 未指定（UserSettings から補完）
       resolvePermissionPolicy('chat'),  // #332: チャット経由は従来どおり Machine.skipPermissions に従う
+      promptScopeOptions,
     );
+    touchSessionActivity(context.currentSessionId);
   } catch (error) {
     stopProgressTracking(context.currentSessionId);
     throw error;

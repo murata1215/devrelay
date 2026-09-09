@@ -6,6 +6,39 @@
 
 ## 実装済み機能
 
+### スレッド管理 サイクル1（server）: Session のスレッド化と「1 project 1 active」前提の解消 (2026-09-09)
+
+1 プロジェクト内で複数の会話スレッドを持てるようにする設計（案 A: Session 行 = スレッド、
+`doc/thread-management-spec.md`）の server 側実装。サイクル1 は `apps/server` + `doc` のみ
+（agent 側スコープ対応はサイクル2、WebUI はサイクル3）。
+
+- **スキーマ**: `Session` に `title` / `lastActiveAt` / `agentScopeId`（すべて nullable）を追加。
+  **既存行は NULL のまま・バックフィル禁止**（`rules/project.md` に不変条件を明記）
+- **純モジュール4本 新設**（外部 import ゼロ、`tests/thread-{scope,title,routing,api-guard}.test.mjs`
+  計61件）: `thread-scope.ts`（scope 採番/継承、バックフィル禁止の唯一の実装点）、
+  `thread-title.ts`（タイトル導出・検証）、`thread-routing.ts`（S1〜S8 誤配送回帰の直接テスト付き
+  ルーティング解決）、`thread-api-guard.ts`（所有者チェック、常に404で存在を漏らさない）
+- **`session-manager.ts`**: `getSessionIdByChatId()` を「候補が複数なら推測しない」実装に修正
+  （旧実装は Map 走査の最初の1件を誤って返していた = S1〜S8 誤配送の本体）。
+  `createSession()` に scope オプション追加、`resolveScopeOptionsForSession()` /
+  `touchSessionActivity()` 新設
+- **`command-handler.ts`**: `//connect` を `findFirst` → `findMany` + `decideConnectTarget()` に変更し
+  「active な最新スレッドを再利用、無ければ新規」に（1 プロジェクトに複数 active スレッドが存在しうる
+  前提に対応）。Agent 再起動時の scope 継承、`x`（clear）の fail-closed ガード（scope 付きスレッドでは
+  サイクル2まで `x` 非対応）、`switchChatToThread()` 新設
+- **`web.ts`**: `getSessionIdByChatId(chatId)` の呼び出し3箇所を `context.currentSessionId` に置換
+  （S3 誤配送の本丸を直接解消）。`web:session_info` に `title`/`agentScopeId` を追加
+- **REST API 4本追加**（`apps/server/src/routes/api.ts`）: `GET /api/threads`（プロジェクト横断一覧、
+  active+ended）、`POST /api/threads`（新規スレッド作成）、`PATCH /api/sessions/:id`（改名）、
+  `POST /api/sessions/:id/switch`（タブの current スレッド切替、ended は active に再活性化）
+- **MCP**: `submit_instruction` の `createSession()` に `origin:'mcp'` を渡し、既に agent に送信していた
+  `agentScopeId=sessionId` を DB にも記録（ワイヤ上の変更はゼロ）
+- キルスイッチ `DEVRELAY_THREADS_SCOPE_INTERACTIVE`（既定 `1`）で対話経路の scope 採番のみ即時ロールバック可能
+- 検証: `apps/server` の `node --test` 315/315 green、monorepo 全 workspace `pnpm build` green、
+  `git diff --stat` で `apps/server/` + `doc/` 以外に差分ゼロを確認
+- **人間側の反映手順**: ALTER 3本の適用 + `prisma generate` + `pnpm build` 済み確認 + `pm2 restart devrelay-server`
+  （手順詳細は devlog `doc/devlog/2026-09-09_202517.md` 末尾）
+
 ### #384: get_build_status summary「不明」+ 承認直後の誤報解消 (2026-09-09)
 
 MCP `get_build_status` の `summary` が「不明」で返る事象（2026-09-09 に再現性あり実測5件）と

@@ -5,8 +5,15 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected } from '../services/agent-manager.js';
+import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession } from '../services/agent-manager.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
+import { createSession, resolveScopeOptionsForSession } from '../services/session-manager.js';
+import { switchChatToThread } from '../services/command-handler.js';
+import { evaluateProjectOwnership, evaluateSessionOwnership, evaluateThreadCreate, evaluateThreadSwitch } from '../services/thread-api-guard.js';
+import { validateThreadTitle } from '../services/thread-title.js';
+import { buildSessionInfoPayload, sortThreadsDesc } from '../services/thread-routing.js';
+import { isEphemeralSessionId } from '../services/thread-scope.js';
+import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
@@ -1517,6 +1524,218 @@ export async function apiRoutes(app: FastifyInstance) {
         files: m.files,
       })),
       hasMore,
+    });
+  });
+
+  // ========================================
+  // スレッド管理 cycle1: /api/threads・/api/sessions/:id 系
+  // ========================================
+
+  /**
+   * プロジェクト横断のスレッド一覧（1 project 1 active 前提の解消）
+   * @route GET /api/threads?projectId=&limit=
+   */
+  app.get('/api/threads', async (request: FastifyRequest<{ Querystring: { projectId?: string; limit?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { projectId } = request.query;
+    const limit = Math.min(50, Math.max(1, parseInt(request.query.limit || '50', 10) || 50));
+
+    if (projectId) {
+      const project = await prisma.project.findUnique({ where: { id: projectId }, include: { machine: true } });
+      const guard = evaluateProjectOwnership({
+        project: project ? { machine: { userId: project.machine.userId } } : null,
+        requestUserId: userId,
+      });
+      if (!guard.ok) {
+        return reply.status(guard.status).send({ error: guard.error });
+      }
+    }
+
+    // D3: 既定で active + ended を返す（v1 にアーカイブは無いため ended は単なる idle）。
+    // 24h 掃除（index.ts）で ended になった放置スレッドも一覧から消えないようにする。
+    const sessions = await prisma.session.findMany({
+      where: {
+        userId,
+        status: { in: ['active', 'ended'] },
+        ...(projectId ? { projectId } : {}),
+      },
+      include: {
+        project: { select: { id: true, name: true } },
+        machine: { select: { id: true, name: true, displayName: true } },
+        _count: { select: { messages: true } },
+      },
+      take: 500,
+    });
+
+    // teamexec_ / crossquery_ の一時セッションを除外（thread-scope.ts の isEphemeralSessionId が単一情報源）
+    const nonEphemeral = sessions.filter(s => !isEphemeralSessionId(s.id));
+    const sorted = sortThreadsDesc(nonEphemeral).slice(0, limit);
+
+    const connectedAgents = getConnectedAgents();
+
+    const threads = await Promise.all(sorted.map(async (s) => {
+      const firstMessage = await prisma.message.findFirst({
+        where: { sessionId: s.id, role: 'user' },
+        orderBy: { createdAt: 'asc' },
+        select: { content: true },
+      });
+      return {
+        sessionId: s.id,
+        title: s.title,
+        projectId: s.project.id,
+        projectName: s.project.name,
+        machineName: s.machine.displayName ?? s.machine.name,
+        machineOnline: connectedAgents.has(s.machineId),
+        aiTool: s.aiTool,
+        status: s.status,
+        lastActiveAt: (s.lastActiveAt ?? s.startedAt).toISOString(),
+        firstUserMessage: firstMessage?.content ? firstMessage.content.slice(0, 60) : null,
+        messageCount: s._count.messages,
+        isScoped: s.agentScopeId !== null,
+      };
+    }));
+
+    return reply.send({ threads });
+  });
+
+  /**
+   * 新規スレッド（= Session 行）を作成する
+   * @route POST /api/threads
+   * @body {projectId, tabId?, title?}
+   */
+  app.post('/api/threads', async (request: FastifyRequest<{ Body: { projectId?: string; tabId?: string; title?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { projectId, tabId, title } = request.body || {};
+
+    if (!projectId) {
+      return reply.status(400).send({ error: 'projectId is required' });
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { machine: true },
+    });
+
+    const connectedAgents = getConnectedAgents();
+    const machineOnline = !!project && connectedAgents.has(project.machineId);
+
+    const guard = evaluateThreadCreate({
+      project: project ? { machine: { userId: project.machine.userId } } : null,
+      requestUserId: userId,
+      machineOnline,
+    });
+    if (!guard.ok) {
+      return reply.status(guard.status).send({ error: guard.error });
+    }
+    const proj = project as NonNullable<typeof project>;
+
+    let resolvedTitle: string | null = null;
+    if (title) {
+      const validation = validateThreadTitle(title);
+      if (!validation.ok) {
+        return reply.status(400).send({ error: validation.reason === 'empty' ? 'title must not be empty' : 'title too long' });
+      }
+      resolvedTitle = validation.title;
+    }
+
+    const sessionId = await createSession(userId, proj.machineId, proj.id, proj.defaultAi, {
+      origin: 'interactive',
+      title: resolvedTitle,
+    });
+
+    // スレッド管理 cycle1: このスレッドの agentScopeId（キルスイッチ OFF・従来スレッドなら undefined）を agent へ送る
+    const { agentScopeId } = await resolveScopeOptionsForSession(sessionId);
+    await startAgentSession(proj.machineId, sessionId, proj.name, proj.path, proj.defaultAi as AiTool, agentScopeId);
+
+    // tabId が指定されていれば、そのタブの current スレッドをこの新規スレッドに差し替える
+    if (tabId) {
+      const chatId = `web:${userId}:${tabId}`;
+      const switchResult = await switchChatToThread({ userId, platform: 'web', chatId, sessionId });
+      pushSessionInfoToChat(chatId, buildSessionInfoPayload({
+        projectId: proj.id,
+        sessionId,
+        title: switchResult.title,
+        agentScopeId: switchResult.agentScopeId,
+      }));
+    }
+
+    return reply.status(201).send({
+      sessionId,
+      projectId: proj.id,
+      projectName: proj.name,
+      title: resolvedTitle,
+    });
+  });
+
+  /**
+   * スレッドの表示名を変更する
+   * @route PATCH /api/sessions/:id
+   * @body {title}
+   */
+  app.patch('/api/sessions/:id', async (request: FastifyRequest<{ Params: { id: string }; Body: { title?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { id: sessionId } = request.params;
+    const { title } = request.body || {};
+
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true } });
+    const guard = evaluateSessionOwnership({
+      session: session ? { userId: session.userId } : null,
+      requestUserId: userId,
+    });
+    if (!guard.ok) {
+      return reply.status(guard.status).send({ error: guard.error });
+    }
+
+    if (title === undefined) {
+      return reply.status(400).send({ error: 'title is required' });
+    }
+    const validation = validateThreadTitle(title);
+    if (!validation.ok) {
+      return reply.status(400).send({ error: validation.reason === 'empty' ? 'title must not be empty' : 'title too long' });
+    }
+
+    await prisma.session.update({ where: { id: sessionId }, data: { title: validation.title } });
+
+    return reply.send({ sessionId, title: validation.title });
+  });
+
+  /**
+   * 指定タブ(tabId)の current スレッドを切り替える
+   * @route POST /api/sessions/:id/switch
+   * @body {tabId}
+   */
+  app.post('/api/sessions/:id/switch', async (request: FastifyRequest<{ Params: { id: string }; Body: { tabId?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { id: sessionId } = request.params;
+    const { tabId } = request.body || {};
+
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true } });
+    const guard = evaluateThreadSwitch({
+      tabId: tabId ?? null,
+      session: session ? { userId: session.userId } : null,
+      requestUserId: userId,
+    });
+    if (!guard.ok) {
+      return reply.status(guard.status).send({ error: guard.error });
+    }
+
+    const chatId = `web:${userId}:${tabId}`;
+    const result = await switchChatToThread({ userId, platform: 'web', chatId, sessionId });
+
+    pushSessionInfoToChat(chatId, buildSessionInfoPayload({
+      projectId: result.projectId,
+      sessionId,
+      title: result.title,
+      agentScopeId: result.agentScopeId,
+    }));
+
+    return reply.send({
+      sessionId,
+      projectId: result.projectId,
+      projectName: result.projectName,
+      machineId: result.machineId,
+      machineDisplayName: result.machineDisplayName,
+      title: result.title,
     });
   });
 

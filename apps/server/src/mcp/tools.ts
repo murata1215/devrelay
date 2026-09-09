@@ -20,7 +20,9 @@ import {
   startProgressTracking,
   addParticipant,
   getActiveProgressForChatId,
+  touchSessionActivity,
 } from '../services/session-manager.js';
+import { deriveThreadTitle } from '../services/thread-title.js';
 import { checkCommandPermission } from '../services/org-control.js';
 import { buildApprovalExecPrompt } from './approval-prompt.js';
 import { resolvePermissionPolicy } from '../services/permission-policy.js';
@@ -595,7 +597,13 @@ export function registerMcpTools(server: McpServer, userId: string) {
       const aiTool = project.defaultAi || 'claude';
 
       // セッション作成
-      const sessionId = await createSession(userId, project.machineId, project.id, aiTool);
+      // スレッド管理 cycle1: origin:'mcp' で agentScopeId=sessionId を DB に記録する。
+      // Agent への送信（下の startAgentSession 呼び出し）は core#336 から既に sessionId を渡しており
+      // ワイヤ上の変更はゼロ。ここは「既に送っている値」を DB に永続化するだけ。
+      const sessionId = await createSession(userId, project.machineId, project.id, aiTool, {
+        origin: 'mcp',
+        title: deriveThreadTitle(trimmedInstruction),
+      });
 
       // core#336: plan ターンの correlation ID。agent に prompt を dispatch する前に Session へ
       // 永続化する（turnId 生成 → planTurnId 保存 → 送信 の順）。これにより完了報告が遅延しても
@@ -621,6 +629,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
 
       // 進捗トラッキング開始
       await startProgressTracking(sessionId);
+      touchSessionActivity(sessionId);
 
       // #334: 監査メタ情報（raw text 自体は content にそのまま保存されるため、meta には含めない）
       // #添付対応: 添付があるときだけ既存キーの末尾に attachments を追加する（無添付時は現行と1バイトも変わらない）。
