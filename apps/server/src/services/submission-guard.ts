@@ -78,6 +78,17 @@ export function buildClaimReleaseWhere(submissionId: string, claimedAt: Date): {
 }
 
 /**
+ * exec 起動失敗時のロールバックで削除する exec Message の where 句を組み立てる。
+ * （2026-09-09 調査サイクル: claim 解放（approvedAt を null に戻す）だけでは
+ * 既に作成済みの exec Message が残ってしまい、`get_build_status` の execTimestamp
+ * アンカーが残り続けて「実行中」を永久に返し続ける状態異常が起きるバグへの対処。
+ * messageId 一致を必須にすることで、自要求が作成した exec Message だけを対象にする。）
+ */
+export function buildExecMessageRollbackWhere(messageId: string): { id: string } {
+  return { id: messageId };
+}
+
+/**
  * AI 完了報告を Session.planAiSessionId として保存してよいかを判定する。
  * isComplete かつ turnId・aiSessionId の両方が揃っている場合のみ true
  * （exec/retry の完了報告や、turnId 自体を送っていない対話経路では false）。

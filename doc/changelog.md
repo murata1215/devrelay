@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### #384: get_build_status summary「不明」+ 承認直後の誤報解消 (2026-09-09)
+
+MCP `get_build_status` の `summary` が「不明」で返る事象（2026-09-09 に再現性あり実測5件）と
+`approve_implementation` 直後の `get_build_status` が「承認が受理されていない」と誤読される事象を
+read-only 調査で真因確定後に修正。両者は同根ではない別問題（前者は BuildLog 要約サービスの入力切り詰め、
+後者は `get_build_status` の応答スキーマに承認状態が無いこと）だが、修正対象ファイルが重なるため
+1 サイクルで同時に修正した。
+
+- **真因1（「不明」）**: `build-summarizer.ts` の `buildUserMessage()` が要約対象出力を**先頭 8000 文字**
+  で切っていたため、進捗マーカー行（`🔧 Editを使用中...` 等）で埋め尽くされた長いターンでは末尾にある
+  実装完了報告が丸ごと切り捨てられ、AI がシステムプロンプトの指示どおり「不明」と回答し、それが
+  そのまま DB→MCP へ透過していた。DB 実値は null ではなく文字列 `"不明"`（サーバーログで確認）。
+- **真因2（"No approval received"）**: この文字列自体はコードベースに存在しない。`get_build_status`
+  が `Session.approvedAt` を一切参照しない設計のため、未承認と承認直後（exec 開始直後）が同じ
+  `phase:'queued'` 応答に潰れ、呼び出し側モデルが誤って言い換えていたと推定。
+- **副次発見**: `approve_implementation` の exec 起動失敗ロールバックが `approvedAt` を null に戻すのみで、
+  先に作成した `exec` Message を削除していなかったため、失敗した submission が永久に「実行中」を
+  返し続けるバグがあった。
+
+修正内容:
+- 新規 `apps/server/src/services/progress-markers.ts`（外部 import ゼロ純関数、`agents/linux/src/services/
+  history-compaction.ts` の `stripProgressMarkers()` 等をバイト単位コピー）。
+- `build-summarizer.ts`: `buildUserMessage()` を進捗マーカー除去＋先頭2000文字/末尾6000文字の
+  `truncateOnLineBoundary()` 連結に変更（完了報告が構造的に失われなくなる）。`normalizeSummary()` に
+  「不明」検疫（trim 後・大小無視の完全一致のみ対象、部分一致は誤検疫しない）を追加。
+- `agent-manager.ts` の `extractBuildSummary()`（AI 要約が使えない場合のフォールバック）を先頭200文字
+  切り出しから `truncateOnLineBoundary(..., 'tail')` による末尾200文字切り出しに変更（意図的な挙動変更）。
+- `mcp/tools.ts` の `get_build_status`: `Session.approvedAt` を参照し未承認時は新設 `phase:'plan'` を返す。
+  承認済みの全分岐に `approved`/`approvedAt` を追加。ツール description に呼び出し順序制約を明記。
+- `mcp/tools.ts` の `approve_implementation`: exec 起動失敗時のロールバックで `exec` Message も削除
+  （新設純関数 `buildExecMessageRollbackWhere()` を `submission-guard.ts` に追加）。
+
+検証: `pnpm build` 6 workspace green。`apps/server` の `node --test` 254/254 pass（新規17件: build-summarizer
+15件 + submission-guard 2件）。`git diff --stat -- agents/ apps/web/ packages/` 空（Agent 側は無変更）。
+DB マイグレーション不要。`pm2 restart devrelay-server` が必要（人間が実施）。
+
 ### #383: 端末モード（PTY）× MCP: session ID エコーバック未実装によるapprove fail-closedの修正 (2026-09-09)
 
 MCP `submit_instruction` はプロジェクトの「端末」設定を引き継ぐ。端末 ON のプロジェクトでは

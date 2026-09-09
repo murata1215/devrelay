@@ -14,6 +14,8 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { AiProvider } from '@devrelay/shared';
 import { UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import { getApiKeyForBuildSummary } from './user-settings.js';
+import { truncateOnLineBoundary } from './content-truncate.js';
+import { stripProgressMarkers } from './progress-markers.js';
 
 /** 要約用システムプロンプト */
 const SUMMARY_SYSTEM_PROMPT = `あなたはソフトウェア開発のビルドログ要約アシスタントです。
@@ -32,19 +34,58 @@ Claude Code（AI コーディングツール）の実行結果を読み、「何
 - "WebSocket 再接続時の Race Condition を修正。stale 接続の判定ロジックを handleAgentDisconnect に追加"`;
 
 /** 出力テキストの最大長（トークン節約のため切り詰め） */
-const MAX_OUTPUT_LENGTH = 8000;
+export const MAX_OUTPUT_LENGTH = 8000;
+
+/**
+ * head+tail 分割時に先頭へ割り当てる文字数。
+ * 残り（MAX_OUTPUT_LENGTH - OUTPUT_HEAD_LENGTH = 6000）は末尾に割り当てる。
+ * 完了報告は末尾に来ることが多いため、末尾側を手厚く残す非対称配分にしている
+ * （2026-09-09 調査サイクル: 「不明」の真因＝先頭 8000 文字のみ残す head 切りが
+ * 完了報告を丸ごと捨てていたことへの対処）。
+ */
+export const OUTPUT_HEAD_LENGTH = 2000;
+
+/** head+tail 分割時に末尾へ割り当てる文字数 */
+export const OUTPUT_TAIL_LENGTH = MAX_OUTPUT_LENGTH - OUTPUT_HEAD_LENGTH;
 
 /** 要約テキストの最大長 */
-const MAX_SUMMARY_LENGTH = 200;
+export const MAX_SUMMARY_LENGTH = 200;
+
+/**
+ * AI が「結果が不明確」と回答した際に返す定型文の集合（検疫対象）。
+ * trim 後の完全一致・大小無視で判定する。
+ * 2026-09-09 調査サイクル: この文字列がそのまま DB に保存され `get_build_status.summary`
+ * へ透過していた事象（#849 等）への対処。null を返すことで呼び出し元
+ * （`updateBuildLogSummaryAsync` の `if (aiSummary)` ガード）が
+ * より有用なフォールバック要約を上書きしないようにする。
+ */
+const UNKNOWN_SUMMARY_VALUES = new Set(['不明', '「不明」', 'unknown']);
 
 /**
  * ユーザーメッセージを構築
  * exec プロンプト（あれば）と実行結果テキストを組み合わせる
+ *
+ * 出力テキストはまず進捗マーカー行（`🔧 Editを使用中...` 等）を除去し、
+ * それでも MAX_OUTPUT_LENGTH を超える場合は先頭 OUTPUT_HEAD_LENGTH 文字と
+ * 末尾 OUTPUT_TAIL_LENGTH 文字を行境界で安全に切り出して連結する
+ * （head のみだと末尾にある完了報告が構造的に失われるため）。
+ *
+ * export: `apps/server/tests/build-summarizer.test.mjs` から `node --test` で直接検証するため
+ * （このモジュール自体は openai/anthropic/google-generative-ai を import するが、いずれも
+ * モジュール読み込み時に副作用は無い＝コンストラクタ呼び出しは各 summarizeWithXxx() 内のみ
+ * なので dist を直接 import してもネットワークアクセスは発生しない）。
  */
-function buildUserMessage(output: string, execPrompt?: string): string {
-  const trimmedOutput = output.length > MAX_OUTPUT_LENGTH
-    ? output.substring(0, MAX_OUTPUT_LENGTH) + '\n\n[...truncated...]'
-    : output;
+export function buildUserMessage(output: string, execPrompt?: string): string {
+  const cleaned = stripProgressMarkers(output);
+
+  let trimmedOutput: string;
+  if (cleaned.length > MAX_OUTPUT_LENGTH) {
+    const head = truncateOnLineBoundary(cleaned, OUTPUT_HEAD_LENGTH, 'head');
+    const tail = truncateOnLineBoundary(cleaned, OUTPUT_TAIL_LENGTH, 'tail');
+    trimmedOutput = `${head.content}\n\n[...omitted...]\n\n${tail.content}`;
+  } else {
+    trimmedOutput = cleaned;
+  }
 
   let message = '';
   if (execPrompt) {
@@ -55,11 +96,20 @@ function buildUserMessage(output: string, execPrompt?: string): string {
 }
 
 /**
- * 要約テキストを正規化（長さ制限 + トリム）
+ * 要約テキストを正規化（長さ制限 + トリム + 「不明」検疫）
+ *
+ * AI が「結果が不明確」の定型文（UNKNOWN_SUMMARY_VALUES）を返した場合は null を返す。
+ * これにより呼び出し元は「AI 要約が得られなかった」ケースと同様にフォールバック
+ * （extractBuildSummary の末尾抜粋）を維持できる。
+ *
+ * export: buildUserMessage 同様、テストから直接呼べるようにするため。
  */
-function normalizeSummary(summary: string | null | undefined): string | null {
+export function normalizeSummary(summary: string | null | undefined): string | null {
   if (!summary || summary.trim().length === 0) return null;
   const trimmed = summary.trim();
+  if (UNKNOWN_SUMMARY_VALUES.has(trimmed.toLowerCase())) {
+    return null;
+  }
   return trimmed.length > MAX_SUMMARY_LENGTH
     ? trimmed.substring(0, MAX_SUMMARY_LENGTH) + '...'
     : trimmed;

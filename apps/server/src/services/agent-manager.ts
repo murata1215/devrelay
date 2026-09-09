@@ -49,6 +49,8 @@ import { decideClaudeAuthUpdate } from './claude-auth-precedence.js';
 import { validateOAuthCode } from './claude-login-code.js';
 import { shouldRecordPlanAiSession, buildPlanAiSessionWhere } from './submission-guard.js';
 import { normalizeStopReason, isStopReasonTruncated } from './stop-reason.js';
+import { truncateOnLineBoundary } from './content-truncate.js';
+import { stripProgressMarkers } from './progress-markers.js';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
 const MIN_PROTOCOL_VERSION = 0; // TODO: revert to 1 after agent update
@@ -743,11 +745,20 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
 }
 
 /**
- * AI 応答テキストからビルドサマリーを抽出する
- * Markdown 装飾を除去し、先頭 maxLength 文字を取得
+ * AI 応答テキストからビルドサマリーを抽出する（AI 要約が使えない場合のフォールバック）
+ * 進捗マーカー行・Markdown 装飾を除去し、末尾 maxLength 文字を取得する。
+ *
+ * 2026-09-09 調査サイクル: 従来は先頭 maxLength 文字を切り出していたため、
+ * AI 要約プロバイダー未設定のユーザー（フォールバックのみに依存）にとっては
+ * 「探索の書き出し（🔧 …を使用中... の羅列等）」だけが summary になり、
+ * 実際に知りたい完了報告（末尾にあることが多い）が見えていなかった。
+ * 末尾切り出しに変更することで、この構造的欠陥を解消する（意図的な挙動変更）。
  */
 function extractBuildSummary(output: string, maxLength: number = 200): string {
   let text = output;
+
+  // 進捗マーカー行を除去（🔧 …を使用中... / 🔧 Using …...）
+  text = stripProgressMarkers(text);
 
   // contextInfo 行を除去（📊, 📝 で始まる行）
   text = text.replace(/^[📊📝].+\n?/gm, '');
@@ -765,15 +776,12 @@ function extractBuildSummary(output: string, maxLength: number = 200): string {
   // 連続する空白行を1行に圧縮
   text = text.replace(/\n{3,}/g, '\n\n');
 
-  // 先頭の空白行を除去
-  text = text.trimStart();
+  // 前後の空白行を除去
+  text = text.trim();
 
-  // 指定文字数で切り詰め
-  if (text.length > maxLength) {
-    text = text.substring(0, maxLength) + '...';
-  }
-
-  return text;
+  // 末尾 maxLength 文字を行境界で安全に切り出す（完了報告が末尾にあるため）
+  const result = truncateOnLineBoundary(text, maxLength, 'tail');
+  return result.truncated ? `...${result.content}` : result.content;
 }
 
 /**

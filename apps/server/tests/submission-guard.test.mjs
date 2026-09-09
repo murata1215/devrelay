@@ -8,6 +8,7 @@ import {
   evaluateApproveGuard,
   decideClaimResult,
   buildClaimReleaseWhere,
+  buildExecMessageRollbackWhere,
   shouldRecordPlanAiSession,
   buildPlanAiSessionWhere,
   buildTurnId,
@@ -200,4 +201,33 @@ test('buildPlanAiSessionWhere + fake updateMany: planTurnId 一致時のみ保�
   );
   assert.equal(execResult.count, 0);
   assert.equal(fakeRow.planAiSessionId, 'ai-sess-abc'); // 巻き戻らない
+});
+
+// --- buildExecMessageRollbackWhere: exec 起動失敗時の exec Message 削除 ---
+// 2026-09-09 調査サイクル: claim 解放（approvedAt を null に戻す）だけでは
+// 既に作成済みの exec Message が残り、get_build_status が「実行中」を
+// 永久に返し続ける状態異常が起きていたバグへの対処。
+
+test('buildExecMessageRollbackWhere: 生成した exec Message の id を where 句に含める', () => {
+  assert.deepEqual(buildExecMessageRollbackWhere('msg-123'), { id: 'msg-123' });
+});
+
+test('buildExecMessageRollbackWhere + fake delete: 自要求が作成した exec Message だけが削除される', () => {
+  // fake: 2件の exec Message が存在（別 submission の要求が作った msg-OTHER と自要求の msg-123）
+  const fakeMessages = new Map([
+    ['msg-123', { id: 'msg-123', sessionId: 'sub-1', content: 'exec' }],
+    ['msg-OTHER', { id: 'msg-OTHER', sessionId: 'sub-2', content: 'exec' }],
+  ]);
+  function fakeDelete(where) {
+    if (!fakeMessages.has(where.id)) return null;
+    const deleted = fakeMessages.get(where.id);
+    fakeMessages.delete(where.id);
+    return deleted;
+  }
+
+  const deleted = fakeDelete(buildExecMessageRollbackWhere('msg-123'));
+  assert.equal(deleted.sessionId, 'sub-1');
+  assert.equal(fakeMessages.has('msg-123'), false);
+  // 他要求（別 submission）の exec Message は無傷
+  assert.equal(fakeMessages.has('msg-OTHER'), true);
 });

@@ -33,7 +33,7 @@ import {
   validateAttachments,
 } from '../services/attachment-validation.js';
 import { processMessageFilesEmbedding } from '../services/embedding-service.js';
-import { evaluateApproveGuard, decideClaimResult, buildClaimReleaseWhere, buildTurnId } from '../services/submission-guard.js';
+import { evaluateApproveGuard, decideClaimResult, buildClaimReleaseWhere, buildExecMessageRollbackWhere, buildTurnId } from '../services/submission-guard.js';
 import { normalizeStopReason, isStopReasonTruncated, applyStopReasonMark } from '../services/stop-reason.js';
 import { truncateOnLineBoundary, CONVERSATION_MAX_CONTENT_LENGTH, BUILD_STATUS_TAIL_LENGTH } from '../services/content-truncate.js';
 import { tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
@@ -353,9 +353,31 @@ export function registerMcpTools(server: McpServer, userId: string) {
    */
   server.tool(
     'get_build_status',
-    'Check the progress and result of an approved implementation. Call this after approve_implementation to monitor the build. Poll periodically until done is true. summary is a short AI-generated description (max 200 chars) and does NOT contain the commit hash or push result. To confirm completion details, read tail — the last 1500 characters of the latest AI message, cut on a line boundary, which is where the commit hash and push result appear. tail is absent when no AI output exists yet.',
+    'Check the progress and result of an approved implementation. Call this ONLY AFTER approve_implementation has returned — do not call it in parallel with approve_implementation, since a race can make an already-approved submission look unapproved. Poll periodically until done is true. summary is a short AI-generated description (max 200 chars) and does NOT contain the commit hash or push result. To confirm completion details, read tail — the last 1500 characters of the latest AI message, cut on a line boundary, which is where the commit hash and push result appear. tail is absent when no AI output exists yet. The response always includes approved (boolean) and, once approved, approvedAt (ISO timestamp) so you can distinguish "not approved yet" (phase: plan) from "approved and starting" (phase: exec).',
     { submissionId: z.string().describe('The submission ID') },
     async ({ submissionId }) => {
+      // 承認状態を取得（#380/core#376 で導入された Session.approvedAt）。
+      // 2026-09-09 調査サイクル: 未承認と「承認直後・exec 開始直前」がどちらも
+      // phase:'queued' に潰れていたため、呼び出し側モデルが「承認が受理されていない」と
+      // 誤読する事象があった。approvedAt を応答へ明示することでこの混同を解消する。
+      const session = await prisma.session.findUnique({
+        where: { id: submissionId },
+        select: { approvedAt: true },
+      });
+      if (session?.approvedAt == null) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            phase: 'plan',
+            approved: false,
+            message: session
+              ? 'Not approved yet. Call approve_implementation first (and wait for it to return).'
+              : 'Submission not found. Call submit_instruction first.',
+            done: false,
+          }) }],
+        };
+      }
+      const approvedAt = session.approvedAt.toISOString();
+
       // exec メッセージの最新タイムスタンプを取得（approve_implementation が保存する）
       // exec 以前の BuildLog / AI メッセージ（plan フェーズ）を除外するための基準点
       const execMessage = await prisma.message.findFirst({
@@ -396,6 +418,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'done',
+            approved: true,
+            approvedAt,
             buildId: buildLog.id,
             summary: applyStopReasonMark(buildLog.summary || 'Build completed', mark),
             done: true,
@@ -422,6 +446,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'exec',
+            approved: true,
+            approvedAt,
             progressSummary: summary,
             elapsedSeconds: progress.elapsed,
             done: false,
@@ -440,6 +466,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'done',
+            approved: true,
+            approvedAt,
             summary: latestMsg.content.slice(0, 500),
             done: true,
             truncated: false,
@@ -454,6 +482,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             phase: 'exec',
+            approved: true,
+            approvedAt,
             message: 'Execution is in progress. Please wait and try again.',
             done: false,
           }) }],
@@ -463,6 +493,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({
           phase: 'queued',
+          approved: true,
+          approvedAt,
           message: 'Build is queued or in progress. Please wait and try again.',
           done: false,
         }) }],
@@ -787,7 +819,10 @@ export function registerMcpTools(server: McpServer, userId: string) {
 
       // exec メッセージを保存（content は 'exec' の完全一致固定。get_build_status がこの値を
       // exec 開始時刻のアンカーとして使うため、note を混ぜてはいけない（#331 調査で判明した既存の罠）
-      await prisma.message.create({
+      // id を保持しておく（execConversation 失敗時のロールバックで削除するため。2026-09-09 調査サイクル:
+      // 従来は approvedAt だけ null に戻し、この Message を消していなかったため、execTimestamp が残り続け
+      // get_build_status が失敗した submission を永久に「実行中」と報告し続けるバグがあった）
+      const execMessageRecord = await prisma.message.create({
         data: {
           sessionId: submissionId,
           role: 'user',
@@ -825,6 +860,15 @@ export function registerMcpTools(server: McpServer, userId: string) {
           where: buildClaimReleaseWhere(submissionId, claimedAt),
           data: { approvedAt: null },
         });
+        // 2026-09-09 調査サイクル: 上で保存した exec Message も削除する。残したままだと
+        // get_build_status の execTimestamp アンカーが残り続け、approvedAt=null（未承認）に
+        // 戻っているにもかかわらず phase:'exec' の「実行中」を永久に返し続ける状態異常が発生する。
+        // 削除自体の失敗はロールバック本体（claim 解放）を妨げないよう握り潰す。
+        try {
+          await prisma.message.delete({ where: buildExecMessageRollbackWhere(execMessageRecord.id) });
+        } catch (deleteErr) {
+          console.error(`⚠️ [MCP] failed to delete exec Message during rollback: submissionId=${submissionId}, messageId=${execMessageRecord.id}`, (deleteErr as Error).message);
+        }
         console.error(`❌ [MCP] approve exec failed, claim released: submissionId=${submissionId}`, (err as Error).message);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Failed to start execution. Please try again.' }) }], isError: true };
       }
