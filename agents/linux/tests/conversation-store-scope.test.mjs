@@ -1,7 +1,9 @@
-// core#336: conversation-store.ts の agentScopeId スコープ分離の単体テスト。
-// saveConversation / appendToConversation / markExecPoint がスコープ配下に書かれ、
-// 未指定時は従来パスに書かれることを検証する。archiveConversation は常にプロジェクト
-// 単位のまま（スコープ化しないことの回帰テスト）。
+// core#336 / スレッド管理 cycle2: conversation-store.ts の agentScopeId スコープ分離の単体テスト。
+// saveConversation / appendToConversation / markExecPoint / archiveConversation が
+// スコープ配下に書かれ、未指定時は従来パスに書かれることを検証する。
+// cycle2 で archiveConversation もスコープ対応になったため、cycle1 時点の
+// 「アーカイブは常にプロジェクト単位のまま」という回帰テストは scoped 版に置き換える
+// （doc/thread-management-spec.md §4）。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -69,10 +71,9 @@ test('conversation-store: markExecPoint はスコープ配下に exec マーカ�
   });
 });
 
-test('archiveConversation: agentScopeId に関わらず常に <projectPath>/.devrelay/conversation-archive/ に保存される（回帰テスト）', async () => {
+test('archiveConversation: agentScopeId 未指定時は従来どおり <projectPath>/.devrelay/conversation-archive/ に保存される（後方互換）', async () => {
   await withTempProject(async (projectPath) => {
     const history = [{ role: 'user', content: 'archive me', timestamp: new Date().toISOString() }];
-    // archiveConversation はスコープ引数を受け取らない（意図的にプロジェクト単位のまま）
     await archiveConversation(projectPath, history);
 
     const archiveDir = join(projectPath, '.devrelay', 'conversation-archive');
@@ -81,7 +82,40 @@ test('archiveConversation: agentScopeId に関わらず常に <projectPath>/.dev
     assert.equal(files.length, 1);
     assert.ok(files[0].startsWith('conversation_'));
 
-    // sessions/<id>/conversation-archive/ のようなスコープ化されたアーカイブは作られない
+    // scoped なアーカイブは作られない
     assert.equal(existsSync(join(projectPath, '.devrelay', 'sessions')), false);
+  });
+});
+
+test('archiveConversation: agentScopeId 指定時は <projectPath>/.devrelay/sessions/<id>/conversation-archive/ に保存される（スレッド管理 cycle2）', async () => {
+  await withTempProject(async (projectPath) => {
+    const scopeId = 'scope-archive';
+    const history = [{ role: 'user', content: 'archive me too', timestamp: new Date().toISOString() }];
+    await archiveConversation(projectPath, history, scopeId);
+
+    const scopedArchiveDir = join(projectPath, '.devrelay', 'sessions', scopeId, 'conversation-archive');
+    assert.ok(existsSync(scopedArchiveDir));
+    const files = await readdir(scopedArchiveDir);
+    assert.equal(files.length, 1);
+    assert.ok(files[0].startsWith('conversation_'));
+
+    // 既定スレッド（.devrelay/ 直下）のアーカイブディレクトリは作られない（無傷）
+    assert.equal(existsSync(join(projectPath, '.devrelay', 'conversation-archive')), false);
+  });
+});
+
+test('archiveConversation: agentScopeId 指定時に .devrelay/ 直下の他ファイルは一切変更されない（既定スレッド無傷の回帰テスト）', async () => {
+  await withTempProject(async (projectPath) => {
+    // 既定スレッド側に先に会話を保存しておく
+    await saveConversation(projectPath, [{ role: 'user', content: 'default thread', timestamp: new Date().toISOString() }]);
+    const defaultConversationPath = join(projectPath, '.devrelay', 'conversation.json');
+    const before = await (await import('node:fs/promises')).readFile(defaultConversationPath, 'utf-8');
+
+    const scopeId = 'scope-archive-isolated';
+    await archiveConversation(projectPath, [{ role: 'user', content: 'scoped', timestamp: new Date().toISOString() }], scopeId);
+
+    const after = await (await import('node:fs/promises')).readFile(defaultConversationPath, 'utf-8');
+    assert.equal(after, before, '既定スレッドの conversation.json が変更されてはならない');
+    assert.equal(existsSync(join(projectPath, '.devrelay', 'conversation-archive')), false, '既定スレッドのアーカイブディレクトリが作られてはならない');
   });
 });

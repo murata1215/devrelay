@@ -26,6 +26,7 @@ import {
   type ClaudeAuthStatusPayload,
   type ClaudeLoginUrlPayload,
   type ClaudeLoginResultPayload,
+  type AgentCapability,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, notifySessionsForMachine } from './session-manager.js';
@@ -57,6 +58,14 @@ const MIN_PROTOCOL_VERSION = 0; // TODO: revert to 1 after agent update
 
 /** バージョン不足の Agent を記録（接続は許可するが会話は拒否、u コマンドのみ許可） */
 const outdatedAgents = new Set<string>();
+
+/**
+ * スレッド管理 cycle2: 接続中の Agent が申告した capability（machineId -> Set<AgentCapability>）。
+ * `outdatedAgents` と同じパターン（接続時 set → 切断時 delete）。DB には永続化しない
+ * （オフライン機に `x` を送る経路はそもそも無く、再接続のたびに正しい値で上書きされるため、
+ * 永続化するとむしろ stale な値が残るリスクがあるだけで得るものがない）。
+ */
+const agentCapabilities = new Map<string, Set<AgentCapability>>();
 
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
@@ -343,7 +352,7 @@ async function reconcileProjects(machineId: string, projects: Project[]): Promis
 
 async function handleAgentConnect(
   ws: WebSocket,
-  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[]; protocolVersion?: number },
+  payload: { machineId: string; machineName: string; token: string; projects: Project[]; availableAiTools: AiTool[]; managementInfo?: any; projectsDirs?: string[]; protocolVersion?: number; capabilities?: AgentCapability[] },
   clientIp?: string
 ): Promise<string | null> {
   const { machineId, machineName, token, projects, availableAiTools, managementInfo, projectsDirs: localDirs } = payload;
@@ -386,6 +395,9 @@ async function handleAgentConnect(
     // 更新後の再接続でクリア
     outdatedAgents.delete(machine.id);
   }
+
+  // スレッド管理 cycle2: capability 申告を記録（未送信の旧 Agent は「capability ゼロ」扱い）
+  agentCapabilities.set(machine.id, new Set(payload.capabilities ?? []));
 
   // 切断猶予タイマーをキャンセル（短時間の再接続ではオフライン通知を抑制）
   const pendingDisconnectTimer = disconnectTimers.get(machine.id);
@@ -574,6 +586,7 @@ async function handleAgentDisconnect(machineId: string, disconnectedWs?: WebSock
   agentLocalProjectsDirs.delete(machineId);
   pendingConfigUpdates.delete(machineId);
   outdatedAgents.delete(machineId);
+  agentCapabilities.delete(machineId);
 
   try {
     await prisma.machine.update({
@@ -1312,6 +1325,14 @@ export function isAgentOutdated(machineId: string): boolean {
   return outdatedAgents.has(machineId);
 }
 
+/**
+ * スレッド管理 cycle2: 接続中の Agent が指定 capability を申告しているかを判定する。
+ * 未接続（切断済み・未接続）の machineId は capability ゼロ扱い（false）。
+ */
+export function agentHasCapability(machineId: string, cap: AgentCapability): boolean {
+  return agentCapabilities.get(machineId)?.has(cap) ?? false;
+}
+
 export async function endSession(machineId: string, sessionId: string) {
   sendToAgent(machineId, {
     type: 'server:session:end',
@@ -1808,10 +1829,16 @@ export function updateAgentAuto(machineId: string) {
   });
 }
 
-export async function clearConversation(machineId: string, sessionId: string, projectPath: string) {
+/**
+ * @param agentScopeId スレッド管理 cycle2: 指定時は agent 側にそのスレッドの scope dir だけを
+ * クリアさせる。未指定時は従来どおり `.devrelay/` 直下（既定スレッド）をクリアする。
+ * 呼び出し元（`command-handler.ts`）で `decideClearDispatch()` による許可判定を経ること
+ * （capability 未申告の agent に scoped な値を送らない）。
+ */
+export async function clearConversation(machineId: string, sessionId: string, projectPath: string, agentScopeId?: string) {
   sendToAgent(machineId, {
     type: 'server:conversation:clear',
-    payload: { sessionId, projectPath }
+    payload: { sessionId, projectPath, agentScopeId }
   });
 }
 

@@ -5,6 +5,7 @@ import { SocksProxyAgent } from 'socks-proxy-agent';
 import type { Agent } from 'http';
 import {
   PROTOCOL_VERSION,
+  AGENT_CAPABILITIES,
   tChat,
   DEFAULT_CHAT_LANGUAGE,
 } from '@devrelay/shared';
@@ -183,6 +184,7 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           projects,
           availableAiTools: getAvailableAiTools(config),
           protocolVersion: PROTOCOL_VERSION,
+          capabilities: [...AGENT_CAPABILITIES],
         },
       });
 
@@ -483,33 +485,48 @@ function handleSessionRestored(payload: { sessionId: string; projectPath: string
   log.info(`   Chat: ${chatId} (${platform})`);
 }
 
-async function handleConversationClear(payload: { sessionId: string; projectPath: string }) {
+/**
+ * スレッド管理 cycle2: `agentScopeId` を解決してそのスレッドの scope dir 配下だけをクリアする。
+ * payload に `agentScopeId` が無い場合は sessionInfoMap に記録済みの値にフォールバックする
+ * （旧サーバー × 新 Agent の組み合わせでも既定スレッドを巻き添えにしない防御）。
+ * どちらも無ければ従来どおり `.devrelay/` 直下（既定スレッド）をクリアする。
+ *
+ * 例外安全: `resolveScopeDir()`（呼び出し先の各 clear/archive 関数経由）は不正な agentScopeId で
+ * throw するが、このハンドラは await されずに呼ばれる（server:conversation:clear のディスパッチ側）ため、
+ * 捕捉しないと unhandled rejection で Agent プロセスが落ちうる。必ず try/catch で囲む。
+ */
+export async function handleConversationClear(payload: { sessionId: string; projectPath: string; agentScopeId?: string }) {
   const { sessionId, projectPath } = payload;
-  log.info(`Clearing conversation for session ${sessionId}`);
+  const agentScopeId = payload.agentScopeId ?? sessionInfoMap.get(sessionId)?.agentScopeId;
+  log.info(`Clearing conversation for session ${sessionId} (scope: ${agentScopeId ?? 'default'})`);
 
-  // 1. 現在の履歴をロードしてアーカイブ保存
-  const history = await loadConversation(projectPath);
-  if (history.length > 0) {
-    await archiveConversation(projectPath, history);
-  }
+  try {
+    // 1. 現在の履歴をロードしてアーカイブ保存（アーカイブ先も scope 配下）
+    const history = await loadConversation(projectPath, agentScopeId);
+    if (history.length > 0) {
+      await archiveConversation(projectPath, history, agentScopeId);
+    }
 
-  // 2. 会話履歴ファイルをクリア
-  await clearConversation(projectPath);
+    // 2. 会話履歴ファイルをクリア
+    await clearConversation(projectPath, agentScopeId);
 
-  // 3. Claude / Devin / Codex セッション ID をクリア（次回プロンプトで新規セッション開始）
-  await clearClaudeSessionId(projectPath);
-  await clearDevinSessionId(projectPath);
-  await clearDevinModel(projectPath); // このサイクル: モデル情報もセッションIDと一緒にクリア
-  await clearDevinAtifStepOffset(projectPath); // #365: ATIF累計ステップ数オフセットも三つ目の要素として同時にクリアする
-  await clearDevinPermissionMode(projectPath); // #368 Phase2a: パーミッションモード記録も四つ目の要素として同時にクリアする
-  await clearCodexSessionId(projectPath); // #308
+    // 3. Claude / Devin / Codex セッション ID をクリア（次回プロンプトで新規セッション開始）
+    await clearClaudeSessionId(projectPath, agentScopeId);
+    await clearDevinSessionId(projectPath, agentScopeId);
+    await clearDevinModel(projectPath, agentScopeId);
+    await clearDevinAtifStepOffset(projectPath, agentScopeId);
+    await clearDevinPermissionMode(projectPath, agentScopeId);
+    await clearCodexSessionId(projectPath, agentScopeId);
 
-  // 4. メモリ内の履歴とセッション ID もクリア
-  const sessionInfo = sessionInfoMap.get(sessionId);
-  if (sessionInfo) {
-    sessionInfo.history = [];
-    sessionInfo.claudeResumeSessionId = undefined;
-    log.info(`In-memory history and Claude session ID cleared for session ${sessionId}`);
+    // 4. メモリ内の履歴とセッション ID もクリア
+    const sessionInfo = sessionInfoMap.get(sessionId);
+    if (sessionInfo) {
+      sessionInfo.history = [];
+      sessionInfo.claudeResumeSessionId = undefined;
+      log.info(`In-memory history and Claude session ID cleared for session ${sessionId}`);
+    }
+  } catch (err) {
+    log.error(`Failed to clear conversation for session ${sessionId} (scope: ${agentScopeId ?? 'default'}):`, (err as Error).message);
   }
 }
 

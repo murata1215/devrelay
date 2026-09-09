@@ -8,8 +8,12 @@ import { resolveScopeDir } from './scope-dir.js';
 
 const CONVERSATION_DIR = '.devrelay';
 const CONVERSATION_FILE = 'conversation.json';
-// core#336: アーカイブは従来どおりプロジェクト単位のまま（スコープ対応しない）。
-// スコープ分離するのは「並行 submission が resume 先を取り違える」実害のある conversation.json 本体のみ。
+// スレッド管理 cycle2: アーカイブも scope dir 配下に保存する（doc/thread-management-spec.md §4）。
+// cycle1（core#336）時点では「並行 submission が resume 先を取り違える」実害のある
+// conversation.json 本体のみをスコープ分離し、アーカイブは意図的にプロジェクト単位のままにしていたが、
+// スレッド単位で `x` した際にそのスレッドのアーカイブだけを残したいという要件（cycle2）により、
+// `archiveConversation` にも `agentScopeId` を渡せるようにする。未指定時は従来どおり
+// `<projectPath>/.devrelay/conversation-archive/`（後方互換）。
 const ARCHIVE_DIR = 'conversation-archive';  // アーカイブ保存用ディレクトリ
 const MAX_CONTEXT_MESSAGES = 20;  // Claudeに送る最大メッセージ数（保存は無制限）
 
@@ -186,10 +190,12 @@ export interface ArchivedConversation {
  *
  * @param projectPath プロジェクトのパス
  * @param history アーカイブする会話履歴
+ * @param agentScopeId スレッド管理 cycle2: 指定時は `<projectPath>/.devrelay/sessions/<agentScopeId>/conversation-archive/` に保存する（省略時は従来どおり `<projectPath>/.devrelay/conversation-archive/`）
  */
 export async function archiveConversation(
   projectPath: string,
-  history: ConversationEntry[]
+  history: ConversationEntry[],
+  agentScopeId?: string
 ): Promise<void> {
   // 空の履歴はアーカイブしない
   if (history.length === 0) {
@@ -197,7 +203,7 @@ export async function archiveConversation(
     return;
   }
 
-  const archiveDir = join(projectPath, CONVERSATION_DIR, ARCHIVE_DIR);
+  const archiveDir = join(resolveScopeDir(projectPath, agentScopeId), ARCHIVE_DIR);
 
   try {
     // アーカイブディレクトリを作成（存在しない場合）

@@ -25,7 +25,9 @@ import {
   startClaudeLogin,
   submitClaudeLoginCode,
   cancelClaudeLogin,
+  agentHasCapability,
 } from './agent-manager.js';
+import { decideClearDispatch } from './thread-clear-guard.js';
 import {
   createSession,
   addParticipant,
@@ -783,27 +785,28 @@ async function handleClear(context: UserContext): Promise<string> {
     return tChat(lang, 'common.sessionNotFound');
   }
 
-  // TODO(スレッド管理 cycle2): `server:conversation:clear` payload（packages/shared）と
-  // agent 側 handleConversationClear（agents/*/connection.ts）が agentScopeId 未対応のため、
-  // scoped スレッドで `x` を実行すると agent は `.devrelay/` 直下（レガシー既定スレッドの状態）を
-  // 消してしまう（このスレッド自身の状態ではなく、無関係な既定スレッドを巻き添えで破壊する）。
-  // cycle2 で agent 側がスレッド単位のクリアに対応するまで、scoped スレッドでは fail-closed で拒否する
-  // （D2、承認ノートに明記された「サイクル2までの暫定措置」）。
-  // このガードを外してよいのは、agents/ 側が agentScopeId を受け取ってスコープ内だけを
-  // クリアできるようになった後（cycle2 完了後）のみ。
-  if (session.agentScopeId !== null) {
+  // スレッド管理 cycle2: agent が 'scoped-clear' capability を申告済みかどうかで
+  // scoped スレッドの `x` を許可するか判定する（cycle1 の暫定 fail-closed を capability 判定に置換）。
+  // 既定スレッド（agentScopeId === null）は capability 不問で常に許可（従来どおり .devrelay/ 直下）。
+  const decision = decideClearDispatch({
+    storedAgentScopeId: session.agentScopeId,
+    agentSupportsScopedClear: agentHasCapability(context.currentMachineId, 'scoped-clear'),
+  });
+
+  if (!decision.allowed) {
     // #packages/shared には触れないため（本サイクルのスコープ外）、tChat の型付き ChatMessageKey を
     // 拡張せずローカルの簡易文言で返す。cycle3 以降で shared 側の i18n に正式に載せ替えてよい。
     return lang === 'ja'
-      ? '⚠️ このスレッドでは x（会話クリア）は未対応です（サイクル2で対応予定）。区切りたい場合は新しいスレッドを作成してください。'
-      : '⚠️ x (clear conversation) is not supported for this thread yet (planned for cycle 2). Start a new thread if you want a fresh context.';
+      ? '⚠️ このスレッドでは x（会話クリア）は未対応です（この機体の Agent が未更新のため。`u` で更新してください）。'
+      : '⚠️ x (clear conversation) is not supported for this thread yet (this machine\'s Agent is outdated. Run `u` to update).';
   }
 
   // Send clear command to agent
   await clearConversation(
     context.currentMachineId,
     context.currentSessionId,
-    session.project.path
+    session.project.path,
+    decision.outboundAgentScopeId
   );
 
   return tChat(lang, 'clear.done');

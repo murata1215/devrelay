@@ -23,6 +23,20 @@ import type { Language } from './i18n.js';
  */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Agent が接続時に申告する機能フラグ（スレッド管理 cycle2）。
+ * 'scoped-clear' = `server:conversation:clear` の `agentScopeId` を解釈し、
+ * そのスレッドの scope dir だけをクリアできる（handleConversationClear が対応済み）。
+ *
+ * `PROTOCOL_VERSION` とは別軸。protocolVersion は「ワイヤフォーマットに追従できるか」、
+ * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
+ * protocolVersion を上げずに済ませるための仕組み）。
+ */
+export type AgentCapability = 'scoped-clear';
+
+/** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear'];
+
 // -----------------------------------------------------------------------------
 // Machine & Project
 // -----------------------------------------------------------------------------
@@ -187,6 +201,8 @@ export interface AgentConnectPayload {
   projectsDirs?: string[];
   /** プロトコルバージョン（未送信の旧 Agent は 0 として扱う） */
   protocolVersion?: number;
+  /** スレッド管理 cycle2: この Agent が対応する機能一覧（未送信の旧 Agent は空扱い） */
+  capabilities?: AgentCapability[];
 }
 
 export interface FileAttachment {
@@ -259,7 +275,17 @@ export type ServerToAgentMessage =
   | { type: 'server:session:start'; payload: SessionStartPayload }
   | { type: 'server:session:end'; payload: { sessionId: string } }
   | { type: 'server:ai:prompt'; payload: AiPromptPayload }
-  | { type: 'server:conversation:clear'; payload: { sessionId: string; projectPath: string } }
+  | { type: 'server:conversation:clear'; payload: {
+      sessionId: string;
+      projectPath: string;
+      /**
+       * スレッド管理 cycle2: 指定時は `.devrelay/sessions/<agentScopeId>/` 配下だけをクリアする。
+       * 未指定（従来どおり）は `.devrelay/` 直下（既定スレッド）をクリアする。
+       * 'scoped-clear' capability を申告していない Agent はこのフィールドを無視して従来動作になる
+       * （server 側は capability 未申告の Agent には scoped スレッドの `x` 自体を送らない）。
+       */
+      agentScopeId?: string;
+    } }
   | { type: 'server:conversation:exec'; payload: ConversationExecPayload }
   | { type: 'server:workstate:save'; payload: WorkStateSavePayload }
   | { type: 'server:agreement:apply'; payload: AgreementApplyPayload }
