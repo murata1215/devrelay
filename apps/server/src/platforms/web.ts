@@ -179,9 +179,13 @@ export async function setupWebClientWebSocket(
                 if (p.platform === 'web' && p.chatId !== chatId) {
                   const otherWs = webClients.get(p.chatId);
                   if (otherWs && otherWs.readyState === otherWs.OPEN) {
+                    // スレッド管理 cycle4: sessionId を追加。apps/web の shouldRouteToTab()（cycle3）は
+                    // 「payload と tab の両方に sessionId があって不一致のときのみ drop」という fail-open
+                    // ゲートのため、追加するだけで web 側は無変更のまま正しいタブにのみ配送されるようになる
+                    // （doc/devlog/2026-09-10_013311.md 引き継ぎ#2、cycle1 の web:response には既にある）。
                     sendJson(otherWs, {
                       type: 'web:user_message',
-                      payload: { content: redactChatInput(text || ''), files: msg.payload.files, projectId: context.lastProjectId },
+                      payload: { content: redactChatInput(text || ''), files: msg.payload.files, projectId: context.lastProjectId, sessionId },
                     });
                   }
                 }

@@ -6,6 +6,7 @@ import {
   decideConnectTarget,
   resolveChatSessionId,
   buildSessionInfoPayload,
+  resolvePreferredThreadId,
 } from '../dist/services/thread-routing.js';
 
 const mkThread = (id, { status = 'active', startedAt, lastActiveAt = null } = {}) => ({
@@ -88,6 +89,67 @@ describe('decideConnectTarget（//connect 互換）', () => {
     const result = decideConnectTarget({ candidates: [older, newer], explicitSessionId: 'not-exist' });
     assert.equal(result.action, 'reuse');
     assert.equal(result.thread.id, 'newer');
+  });
+});
+
+describe('resolvePreferredThreadId（サイクル4: //connect の直前スレッド優先）', () => {
+  test('explicitSessionId があれば最優先', () => {
+    const result = resolvePreferredThreadId({ explicitSessionId: 'explicit', contextSessionId: 'ctx' });
+    assert.equal(result, 'explicit');
+  });
+
+  test('explicitSessionId が無ければ contextSessionId を使う', () => {
+    const result = resolvePreferredThreadId({ explicitSessionId: null, contextSessionId: 'ctx' });
+    assert.equal(result, 'ctx');
+  });
+
+  test('explicitSessionId が undefined でも contextSessionId にフォールバック', () => {
+    const result = resolvePreferredThreadId({ contextSessionId: 'ctx' });
+    assert.equal(result, 'ctx');
+  });
+
+  test('両方無ければ null', () => {
+    const result = resolvePreferredThreadId({ explicitSessionId: null, contextSessionId: null });
+    assert.equal(result, null);
+  });
+
+  test('空白のみの explicitSessionId は「指定なし」として扱い contextSessionId にフォールバック', () => {
+    const result = resolvePreferredThreadId({ explicitSessionId: '   ', contextSessionId: 'ctx' });
+    assert.equal(result, 'ctx');
+  });
+
+  test('空白のみの contextSessionId は null 扱い（両方空白なら null）', () => {
+    const result = resolvePreferredThreadId({ explicitSessionId: '  ', contextSessionId: '  ' });
+    assert.equal(result, null);
+  });
+});
+
+describe('decideConnectTarget × resolvePreferredThreadId（//connect の統合ケース、サイクル4）', () => {
+  test('直前 Session あり（候補に含まれる）→ そのスレッドへ接続', () => {
+    const prev = mkThread('prev', { startedAt: '2026-01-01T00:00:00Z' });
+    const latest = mkThread('latest', { startedAt: '2026-01-05T00:00:00Z' });
+    const preferred = resolvePreferredThreadId({ contextSessionId: 'prev' });
+    const result = decideConnectTarget({ candidates: [prev, latest], explicitSessionId: preferred });
+    assert.equal(result.action, 'reuse');
+    assert.equal(result.thread.id, 'prev');
+  });
+
+  test('直前 Session なし（新規タブ）→ 最新 active スレッドへ接続', () => {
+    const older = mkThread('older', { startedAt: '2026-01-01T00:00:00Z' });
+    const latest = mkThread('latest', { startedAt: '2026-01-05T00:00:00Z' });
+    const preferred = resolvePreferredThreadId({ contextSessionId: null });
+    const result = decideConnectTarget({ candidates: [older, latest], explicitSessionId: preferred });
+    assert.equal(result.action, 'reuse');
+    assert.equal(result.thread.id, 'latest');
+  });
+
+  test('直前 Session が候補に無い（別プロジェクトのセッション等）→ 最新 active にフォールバック（誤配送しない）', () => {
+    const older = mkThread('older', { startedAt: '2026-01-01T00:00:00Z' });
+    const latest = mkThread('latest', { startedAt: '2026-01-05T00:00:00Z' });
+    const preferred = resolvePreferredThreadId({ contextSessionId: 'other-project-session' });
+    const result = decideConnectTarget({ candidates: [older, latest], explicitSessionId: preferred });
+    assert.equal(result.action, 'reuse');
+    assert.equal(result.thread.id, 'latest');
   });
 });
 

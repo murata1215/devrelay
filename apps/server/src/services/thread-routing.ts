@@ -65,6 +65,40 @@ export function decideConnectTarget<T extends ThreadLike>(
   return { action: 'reuse', thread: sorted[0] };
 }
 
+/** `resolvePreferredThreadId` の入力。 */
+export interface ResolvePreferredThreadIdInput {
+  /** 呼び出し側が明示的に指定したセッション ID（例: `handleRecentConnect` の対象セッション）。最優先。 */
+  explicitSessionId?: string | null;
+  /** そのタブ（chatId）が直前に開いていたセッション ID（`ChannelSession.currentSessionId`）。次点。 */
+  contextSessionId?: string | null;
+}
+
+/**
+ * `//connect` で `decideConnectTarget()` に渡すべき `explicitSessionId` を1本化して決める。
+ *
+ * サイクル4: `decideConnectTarget()` 自体は cycle1 の時点で `explicitSessionId` を受け付ける
+ * 実装済みだったが、`//connect` 経路（`command-handler.ts` の `handleProjectConnect`）がこれを
+ * 一切渡していなかったため常に「最新 active スレッド」が選ばれ、ユーザーが手動で選択していた
+ * スレッドから `//connect` で意図せず離脱する問題があった（doc/devlog/2026-09-10_013311.md 引き継ぎ#3）。
+ *
+ * 優先順位:
+ * 1. `explicitSessionId`（呼び出し側が対象を確定できている場合。例: `handleRecentConnect`）
+ * 2. `contextSessionId`（タブが直前に開いていたセッション。`//connect <projectId>` の通常経路）
+ * 3. どちらも無ければ `null`（`decideConnectTarget()` が候補から最新を選ぶフォールバックに委ねる）
+ *
+ * 前後の空白のみの値は「指定なし」として扱う（`.trim()` 後に空文字なら無視）。
+ * `contextSessionId` が別プロジェクトのセッション ID であっても安全: `decideConnectTarget()` は
+ * `candidates`（同一プロジェクト・同一ユーザーの active スレッドのみ）に含まれない ID を渡された
+ * 場合は自動的に最新スレッドへフォールバックするため、誤ったスレッドへ接続することはない。
+ */
+export function resolvePreferredThreadId(input: ResolvePreferredThreadIdInput): string | null {
+  const explicit = input.explicitSessionId?.trim();
+  if (explicit) return explicit;
+  const fromContext = input.contextSessionId?.trim();
+  if (fromContext) return fromContext;
+  return null;
+}
+
 /** `resolveChatSessionId` の入力。 */
 export interface ResolveChatSessionIdInput {
   /** `UserContext.currentSessionId`（chatId が今どのセッションを current にしているか）。最優先。 */

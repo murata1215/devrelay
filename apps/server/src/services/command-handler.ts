@@ -43,7 +43,7 @@ import {
   resolveScopeOptionsForSession,
   touchSessionActivity
 } from './session-manager.js';
-import { decideConnectTarget } from './thread-routing.js';
+import { decideConnectTarget, resolvePreferredThreadId } from './thread-routing.js';
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
@@ -465,7 +465,11 @@ async function handleMachineConnect(machineId: string, context: UserContext): Pr
   return tChat(lang, 'machine.connected', { name: machineDisplayName });
 }
 
-export async function handleProjectConnect(projectId: string, context: UserContext): Promise<string> {
+export async function handleProjectConnect(
+  projectId: string,
+  context: UserContext,
+  explicitSessionId?: string | null
+): Promise<string> {
   const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   const project = await prisma.project.findUnique({
     where: { id: projectId },
@@ -498,7 +502,17 @@ export async function handleProjectConnect(projectId: string, context: UserConte
       status: 'active',
     },
   });
-  const connectTarget = decideConnectTarget({ candidates: activeSessions });
+  // スレッド管理 cycle4: `explicitSessionId`（呼び出し側が対象を確定できている場合）優先、
+  // 次点で `context.currentSessionId`（このタブが直前に開いていたスレッド）を使う。
+  // これにより「//connect でプロジェクトタブへ戻ると常に最新スレッドに強制的に切り替わる」
+  // 問題を解消する（doc/devlog/2026-09-10_013311.md 引き継ぎ#3）。
+  // `activeSessions`（同一ユーザー・同一プロジェクトの候補）に含まれない ID が渡されても
+  // `decideConnectTarget()` が自動的に最新スレッドへフォールバックするため安全（誤配送なし）。
+  const preferredThreadId = resolvePreferredThreadId({
+    explicitSessionId,
+    contextSessionId: context.currentSessionId,
+  });
+  const connectTarget = decideConnectTarget({ candidates: activeSessions, explicitSessionId: preferredThreadId });
 
   // #307: このプロジェクトで直近使っていた AI ツールを引き継ぐための単一情報源。
   // active セッションがあればその aiTool、無ければ status を問わず直近セッションの aiTool、
@@ -667,7 +681,10 @@ async function handleRecentConnect(sessionId: string, context: UserContext): Pro
     currentMachineName: recentMachineDisplayName
   });
 
-  return handleProjectConnect(session.projectId, context);
+  // スレッド管理 cycle4: 「最近使ったスレッドに戻る」操作なので、対象スレッドを明示指定する
+  // （指定しないと `handleProjectConnect` が最新 active スレッドを選んでしまい、
+  // ユーザーが選んだ `session` とは別のスレッドに接続してしまう）。
+  return handleProjectConnect(session.projectId, context, sessionId);
 }
 
 async function handleStatus(context: UserContext): Promise<string> {

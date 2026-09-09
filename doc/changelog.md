@@ -6,6 +6,44 @@
 
 ## 実装済み機能
 
+### スレッド管理 サイクル4（server 小修正）: サイクル3申し送りの解消 (2026-09-10)
+
+サイクル3（WebUI）devlog 末尾の「サイクル4への引き継ぎ」3件のうち2件を解消し、残り1件は報告のみに
+留めた。加えて Lite シェル（`doc/thread-management-spec.md` §0）に必要な server API が既存2本
+（`GET /api/threads` / `GET /api/projects`）で満たされていることを確認した。スコープは `apps/server` +
+`doc` のみ。
+
+- **`//connect` の explicitSessionId 配線**（引き継ぎ#3 解消）: `thread-routing.ts` に純関数
+  `resolvePreferredThreadId()` を新規追加（`explicitSessionId` > タブが直前に開いていた
+  `context.currentSessionId` > `null` の優先順位）。`command-handler.ts` の `handleProjectConnect()`
+  に第3引数 `explicitSessionId?` を追加し `decideConnectTarget()` へ配線、`handleRecentConnect()` も
+  対象スレッドを明示指定するように変更。これにより `//connect` でプロジェクトタブへ戻ったとき、
+  ユーザーが選んでいたスレッドから常に最新スレッドへ強制切り替えされていた問題を解消
+  （候補に含まれない ID が渡っても `decideConnectTarget()` が自動で最新へフォールバックするため誤配送なし）
+- **ツール承認カード payload に sessionId**（引き継ぎ#1 の一部解消）: 新規 `tool-approval-payload.ts`
+  （外部 import ゼロの純関数 `buildToolApprovalPromptPayload()`、`buildSessionInfoPayload` と同じ流儀）を
+  `agent-manager.ts` の `handleToolApprovalRequest()` と `getPendingToolApprovalsForSession()` の両方に配線。
+  `packages/shared` の `ToolApprovalPromptPayload` は変更せず、ローカル拡張型 `ToolApprovalPromptPayloadWithSession`
+  を TypeScript の構造的型付け（変数経由の代入は超過プロパティチェック対象外）で通す設計。
+  **表示側（`apps/web`）が sessionId でゲートする対応は次サイクルへ申し送り**（本サイクルは payload 供給のみ）
+- **`web:user_message` に sessionId**（引き継ぎ#2 解消）: `web.ts` の他タブへのブロードキャスト payload に
+  `context.currentSessionId` を追加。**`apps/web` は無変更で即効く**（cycle3 の `shouldRouteToTab()` が
+  fail-open ゲートとして既に対応済みのため）。`//connect` 応答（`web.ts:134`）には意図的に付けない
+  （接続応答到達時点でタブ側 sessionId がまだ古く、自分の応答が drop されるため）
+- **プランモードのプロンプト条件化**: 人間承認によりコード変更は見送り、調査結果の報告のみ。実効的な
+  注入元は `agents/{linux,macos,windows}/src/services/output-collector.ts:171-172` の `PLAN_MODE_INSTRUCTION`
+  （3 OS 同一文言）であり `apps/server` スコープ外。`apps/server` 側は `agreement-template.ts:40-41`
+  のみだが、既に `rules/devrelay.md`（`AGREEMENT_VERSION='v6'`）を持つ既存プロジェクトには
+  Agreement 再適用まで効かないため単独修正は見送り、次の agent サイクル（3 OS + 全機 `u`）へ申し送り
+- **Lite シェル前提確認**（コード変更なし）: `GET /api/threads`（`api.ts:1538-1599`）が既に
+  `projectId` 省略時のプロジェクト横断一覧＋`projectName`/`machineName`/`machineOnline` を返し、
+  `GET /api/projects`（`api.ts:483-536`）が machine 名＋オンライン状態付きの所有プロジェクト一覧を
+  返すことを確認。専用の新規 GET は不要と判断
+- 検証: `pnpm build` 6 workspace green、`apps/server` `node --test tests/` 334/334 pass（新規11件、fail 0）、
+  `git diff --stat -- agents/ packages/ apps/web/ prisma/` 空を確認
+- **人間側の反映手順**: `apps/server` の変更のため `pm2 restart devrelay-server` が必要。DB マイグレーション
+  不要、agent の `u` 不要（`agents/` 無変更）。詳細は devlog `doc/devlog/2026-09-10_070123.md`
+
 ### スレッド管理 サイクル3（WebUI）: スレッド一覧パネル (2026-09-10)
 
 サイクル1（server）・サイクル2（agent、scope-aware な会話クリア）に続き、WebUI 側にスレッド一覧

@@ -37,6 +37,7 @@ import { summarizeBuildOutput } from './build-summarizer.js';
 import { sendFcmNotificationForToolApproval } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { buildAgreementApplyPrompt } from './agreement-template.js';
+import { buildToolApprovalPromptPayload, type ToolApprovalPromptPayloadWithSession } from './tool-approval-payload.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
 import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
@@ -2349,7 +2350,12 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
   }
 
   // セッション参加者に承認リクエストを送信（Web + Discord/Telegram）
-  const approvalPayload = { requestId, toolName, toolInput, title, description, projectId, isQuestion, originProjectId };
+  // スレッド管理 cycle4: payload に sessionId を追加（同一プロジェクトの別スレッドを表示中の
+  // タブに誤って承認カードが出る表示上の穴の解消。誤承認自体は requestId 一致で防止済みのため
+  // 発生していなかった）。表示側（apps/web）が sessionId でゲートする対応は次サイクル。
+  const approvalPayload = buildToolApprovalPromptPayload({
+    requestId, toolName, toolInput, sessionId, title, description, projectId, isQuestion, originProjectId,
+  });
   broadcastToolApprovalToWeb(sessionId, {
     type: 'web:tool:approval',
     payload: approvalPayload,
@@ -2461,17 +2467,18 @@ export function handleToolApprovalUserResponse(
  * 指定セッションの保留中ツール承認一覧を取得する（WS 再接続時・//connect 時の復元用）
  * メモリ Map から直接ペイロードを構築（DB round-trip 不要、DB 保存失敗時でも復元可能）
  */
-export function getPendingToolApprovalsForSession(sessionId: string): ToolApprovalPromptPayload[] {
-  const results: ToolApprovalPromptPayload[] = [];
+export function getPendingToolApprovalsForSession(sessionId: string): ToolApprovalPromptPayloadWithSession[] {
+  const results: ToolApprovalPromptPayloadWithSession[] = [];
   for (const [requestId, entry] of pendingToolApprovalRequests) {
     if (entry.sessionId === sessionId) {
-      results.push({
+      results.push(buildToolApprovalPromptPayload({
         requestId,
         toolName: entry.toolName,
         toolInput: entry.toolInput,
+        sessionId: entry.sessionId,
         projectId: entry.projectId,
-        isQuestion: entry.isQuestion || undefined,
-      });
+        isQuestion: entry.isQuestion,
+      }));
     }
   }
   return results;
