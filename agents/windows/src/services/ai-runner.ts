@@ -385,7 +385,7 @@ export interface AiRunResult {
 const activeSessions = new Map<string, AiSession>();
 
 /** AI出力コールバック。isComplete=true の場合、usageData に使用量データが含まれる */
-type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData) => void;
+type OutputCallback = (output: string, isComplete: boolean, usageData?: AiUsageData, extractedSessionId?: string, stopReason?: string) => void;
 
 /**
  * Find the full path to claude command on Windows
@@ -1509,7 +1509,7 @@ export async function sendPromptToAi(
         log.info(`[${aiTool}] Process was cancelled`);
         if (!completionSent) {
           completionSent = true;
-          onOutput('', true, result.usageData);
+          onOutput('', true, result.usageData, result.extractedSessionId);
         }
         resolve(result);
         return;
@@ -1538,7 +1538,7 @@ export async function sendPromptToAi(
             .catch((err) => {
               log.error(`[devin] unknown-flag retry failed: ${(err as Error).message}`);
               if (fullOutput.length === 0) {
-                onOutput('(No response from AI)', true, result.usageData);
+                onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
               }
               resolve(result);
             });
@@ -1548,7 +1548,7 @@ export async function sendPromptToAi(
         if (!completionSent) {
           completionSent = true;
           const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
-          onOutput(tChat(lang, 'devin.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData);
+          onOutput(tChat(lang, 'devin.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData, result.extractedSessionId);
         }
         resolve(result);
         return;
@@ -1579,7 +1579,7 @@ export async function sendPromptToAi(
       // #308: Codex: turn.failed イベントを受信した場合は理由を明示して完了通知
       if (aiTool === 'codex' && codexTurnFailed && !completionSent) {
         completionSent = true;
-        onOutput(`⚠️ Codex の実行が失敗しました: ${codexTurnFailedMessage}`, true, result.usageData);
+        onOutput(`⚠️ Codex の実行が失敗しました: ${codexTurnFailedMessage}`, true, result.usageData, result.extractedSessionId);
         resolve(result);
         return;
       }
@@ -1601,7 +1601,7 @@ export async function sendPromptToAi(
         // --resume なし → 日本語の警告メッセージを送信
         if (!completionSent) {
           completionSent = true;
-          onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData);
+          onOutput('⚠️ プロンプトが長すぎます。`x` コマンドで会話履歴をクリアしてください。', true, result.usageData, result.extractedSessionId);
         }
         resolve(result);
         return;
@@ -1667,14 +1667,14 @@ export async function sendPromptToAi(
           const cliFailure = classifyCliFailure({ exitCode: code, stdoutLength: fullOutput.length, stderr: stderrOutput });
           const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
           if (cliFailure.kind === 'commandNotFound') {
-            onOutput(tChat(lang, 'ai.cliNotFound', { tool: aiTool, command }), true, result.usageData);
+            onOutput(tChat(lang, 'ai.cliNotFound', { tool: aiTool, command }), true, result.usageData, result.extractedSessionId);
           } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'devin' && isWorkspaceTrustError(stderrOutput)) {
             // #345: devin が workspace trust 拒否で即死したケース。生 stderr のダンプではなく対処手順を出す。
-            onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData);
+            onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
           } else if (cliFailure.kind === 'emptyNonZero') {
-            onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData);
+            onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData, result.extractedSessionId);
           } else {
-            onOutput('(No response from AI)', true, result.usageData);
+            onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
           }
         } else {
           // #281: Devin の実行ステップまとめを最終回答へ添付してから完了通知（⏳ でない=最終メッセージに残る）
@@ -1704,7 +1704,7 @@ export async function sendPromptToAi(
               onOutput('\n' + diagnosis + '\n', false);
             }
           }
-          onOutput('', true, result.usageData); // Signal completion with usage data
+          onOutput('', true, result.usageData, result.extractedSessionId); // Signal completion with usage data
         }
       }
       resolve(result);

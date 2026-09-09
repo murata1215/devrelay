@@ -835,7 +835,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.aiTool,
       sessionInfo.claudeSessionId,
       currentConfig,
-      async (output, isComplete, usageData) => {
+      async (output, isComplete, usageData, extractedSessionId) => {
         // #276: ⏳ 始まりは進捗専用チャンク。サーバーへは流す（進捗ボックス表示 + タイムアウトリセット）が、
         // 最終保存メッセージ responseText には含めない（最終回答の汚染防止）。
         if (!output.startsWith('⏳')) {
@@ -867,6 +867,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               usageData,  // AI 使用量データ（DB 保存用）
               isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
               execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
+              // core#336: server が Session.planAiSessionId を紐付けるためのエコーバック。
+              // aiResult.extractedSessionId を直接参照すると TDZ エラーになるためコールバック引数を使う。
+              aiSessionId: extractedSessionId,
+              aiTool: sessionInfo.aiTool,
+              turnId: payload.turnId,
             },
           });
 
@@ -911,6 +916,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         usePlanMode,
         model: payload.model,  // #309: AI モデル指定を retry でも維持
         language: payload.language,  // #316: チャット表示言語を retry でも維持
+        // core#336: 1ターンの前半（--resume 失敗）と後半（retry）で保存先スコープが割れないよう継承する
+        agentScopeId: sendOptions.agentScopeId,
+        turnId: sendOptions.turnId,
+        // Linux パリティ追加（Windows のみ継承漏れがあり、plan ターンの retry で読み取りツールが
+        // 全て失われる既存欠陥。forceNewSession は Linux も継承しないため意図的に含めない）
+        allowedTools: sendOptions.allowedTools,
       };
 
       // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。
@@ -927,7 +938,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         sessionInfo.aiTool,
         sessionInfo.claudeSessionId,
         currentConfig,
-        async (output, isComplete, usageData) => {
+        async (output, isComplete, usageData, extractedSessionId) => {
           // #276: ⏳ 始まりは進捗専用チャンク（最終保存メッセージには含めない）。
           if (!output.startsWith('⏳')) {
             responseText += output;
@@ -956,6 +967,11 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 usageData,  // AI 使用量データ（DB 保存用）
                 isExec: isExecTriggered || undefined,  // exec モードフラグ（BuildLog 作成用）
                 execPrompt: isExecTriggered ? callerExecPrompt : undefined,  // exec プロンプト（AI 要約用）
+                // core#336: server が Session.planAiSessionId を紐付けるためのエコーバック。
+                // retryResult.extractedSessionId を直接参照すると TDZ エラーになるためコールバック引数を使う。
+                aiSessionId: extractedSessionId,
+                aiTool: sessionInfo.aiTool,
+                turnId: payload.turnId,
               },
             });
 
