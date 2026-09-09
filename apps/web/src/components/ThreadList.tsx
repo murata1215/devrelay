@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, type MouseEvent } from 'react';
 import { threads as threadsApi, sessions as sessionsApi, type ThreadSummary, type ThreadSwitchResult, type ThreadCreateResult } from '../lib/api';
 import { getTabId } from '../lib/tab-id';
-import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, applyThreadRename, upsertThread } from '../lib/thread-list-rules';
+import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, applyThreadRename, upsertThread, resolveCreateTargetProjectId } from '../lib/thread-list-rules';
 import { useLanguage } from '../contexts/LanguageContext';
 
 /**
@@ -39,6 +39,11 @@ function formatRelativeTime(iso: string, locale: 'en-US' | 'ja-JP', justNowLabel
 export interface ThreadListProps {
   /** 省略時はユーザーの全スレッド（Lite シェル v2 用）。v1（ChatPage内）はタブの projectId を渡す */
   projectId?: string;
+  /**
+   * Lite シェル用: 一覧は `projectId` 省略時と同じ横断表示のまま、「＋新規」の作成先だけを指定する。
+   * `projectId` が指定されている場合はそちらが優先される（`resolveCreateTargetProjectId` で導出）。
+   */
+  createProjectId?: string;
   /** ハイライト対象の現在スレッド */
   currentSessionId: string | null;
   /** switch 成功後に呼ばれる */
@@ -51,7 +56,10 @@ export interface ThreadListProps {
   onToggleCollapse?: () => void;
 }
 
-export function ThreadList({ projectId, currentSessionId, onSelect, onCreate, refreshToken, collapsed, onToggleCollapse }: ThreadListProps) {
+export function ThreadList({ projectId, createProjectId, currentSessionId, onSelect, onCreate, refreshToken, collapsed, onToggleCollapse }: ThreadListProps) {
+  /** 「＋新規」の作成先。`projectId` が無ければ `createProjectId` にフォールバックする（Lite シェル用）。
+   * 一覧取得（横断表示かどうか）は生の `projectId` のまま判定するため、ここでは分けて扱う。 */
+  const createTargetProjectId = resolveCreateTargetProjectId(projectId, createProjectId);
   const { t, locale } = useLanguage();
   const [items, setItems] = useState<ThreadSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -91,11 +99,11 @@ export function ThreadList({ projectId, currentSessionId, onSelect, onCreate, re
 
   /** 新規スレッド作成 */
   const handleCreate = useCallback(async () => {
-    if (!projectId || creating) return;
+    if (!createTargetProjectId || creating) return;
     setCreating(true);
     try {
       const tabId = getTabId();
-      const result = await threadsApi.create({ projectId, tabId });
+      const result = await threadsApi.create({ projectId: createTargetProjectId, tabId });
       setItems((prev) => upsertThread(prev, {
         sessionId: result.sessionId,
         title: result.title,
@@ -117,7 +125,7 @@ export function ThreadList({ projectId, currentSessionId, onSelect, onCreate, re
     } finally {
       setCreating(false);
     }
-  }, [projectId, creating, onCreate, fetchThreads]);
+  }, [createTargetProjectId, creating, onCreate, fetchThreads]);
 
   /** スレッド切替 */
   const handleSelect = useCallback(async (sessionId: string) => {
@@ -178,7 +186,7 @@ export function ThreadList({ projectId, currentSessionId, onSelect, onCreate, re
         <div className="flex items-center gap-1">
           <button
             onClick={handleCreate}
-            disabled={!projectId || creating}
+            disabled={!createTargetProjectId || creating}
             className="text-xs px-2 py-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
           >
             {creating ? t('thread.creating') : t('thread.new')}

@@ -7,6 +7,7 @@ import {
   truncateDisplay,
   applyThreadRename,
   upsertThread,
+  resolveCreateTargetProjectId,
 } from '../dist-test/lib/thread-list-rules.js';
 
 const mkItem = (sessionId, overrides = {}) => ({
@@ -153,5 +154,23 @@ describe('upsertThread（楽観的挿入/更新・再ソート済み・非破壊
     const list = [mkItem('a')];
     upsertThread(list, mkItem('b'));
     assert.equal(list.length, 1);
+  });
+});
+
+describe('resolveCreateTargetProjectId（Lite シェル L1: ThreadList の作成先導出）', () => {
+  test('projectId と createProjectId の両方があれば projectId を優先する（表示中プロジェクト優先）', () => {
+    assert.equal(resolveCreateTargetProjectId('p1', 'p2'), 'p1');
+  });
+
+  test('projectId が無ければ createProjectId にフォールバックする（Lite シェル横断一覧の作成先）', () => {
+    assert.equal(resolveCreateTargetProjectId(undefined, 'p2'), 'p2');
+  });
+
+  test('両方 undefined なら undefined（L1 が従来 UI の挙動を変えないことの機械的な証明）', () => {
+    assert.equal(resolveCreateTargetProjectId(undefined, undefined), undefined);
+  });
+
+  test('projectId が空文字なら空文字を返す（?? の意味論を固定。|| だと createProjectId になり前項の同一性主張が崩れる）', () => {
+    assert.equal(resolveCreateTargetProjectId('', 'p2'), '');
   });
 });

@@ -99,3 +99,21 @@ export function upsertThread<T extends { sessionId: string; lastActiveAt: string
   const next = exists ? list.map((t) => (t.sessionId === item.sessionId ? item : t)) : [item, ...list];
   return sortThreadsDesc(next);
 }
+
+/**
+ * Lite シェル L1: `ThreadList` の「＋新規」作成先 projectId を導出する。
+ * `projectId`（v1: ChatPage 内タブの projectId）を優先し、無ければ `createProjectId`
+ * （v2: Lite シェルが横断一覧のまま作成先だけ指定する場合）にフォールバックする。
+ *
+ * 両方 `undefined` なら `undefined` を返す（`undefined ?? undefined === undefined`）。
+ * これは「`ThreadList` の呼び出し元が `createProjectId` を渡さない限り従来の導出値と数学的に同一」
+ * であることの根拠になる（L1 が従来 UI の挙動を変えないことの機械的な保証点）。
+ * `??` を使うこと（`||` にしない）: `projectId: ''` のような falsy だが意味を持つ値を
+ * `createProjectId` に上書きさせない（意味論を `??` に固定する）。
+ */
+export function resolveCreateTargetProjectId(
+  projectId?: string,
+  createProjectId?: string
+): string | undefined {
+  return projectId ?? createProjectId;
+}
