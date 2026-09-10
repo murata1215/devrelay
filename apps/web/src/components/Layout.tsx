@@ -50,6 +50,7 @@ export function Layout({ children }: LayoutProps) {
     { name: t('nav.devReports'), href: '/dev-reports' },
     { name: t('nav.projects'), href: '/projects' },
     { name: t('nav.settings'), href: '/settings' },
+    { name: t('nav.liteUi'), href: '/lite' },
   ];
 
   const isActive = (href: string) => {

@@ -9,6 +9,12 @@ import {
   FORBIDDEN_LITE_BINDINGS,
   FORBIDDEN_LITE_MODULES,
   findForbiddenLiteImports,
+  L2_FORBIDDEN_LITE_BINDINGS,
+  L2_FORBIDDEN_LITE_MODULES,
+  containsNamespaceImport,
+  containsRawWebSocketConstruction,
+  decideThreadRowAction,
+  buildProjectSelectorOptions,
 } from '../dist-test/components/lite/lite-shell-rules.js';
 // F4 pin ブロック: このモジュールのソースは無変更。既存の fail-open ゲートが Lite の前提として
 // 崩れていないことを固定する（D2: ソース変更ゼロ、cycle3 の実装を再利用する想定）。
@@ -348,5 +354,143 @@ describe('F4 pin: shouldRouteToTab の fail-open 前提（ソース変更ゼロ�
   test('両方あって不一致なら drop（Lite でも背景スレッドの出力が混入しない）', () => {
     const result = shouldRouteToTab({ payloadSessionId: 'sess-1', tabSessionId: 'sess-2' });
     assert.equal(result.route, 'drop');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L2: /lite ルーティング・行選択・プロジェクトセレクタの純ロジック
+// ---------------------------------------------------------------------------
+
+describe('decideThreadRowAction（B1: readOnly のとき絶対に server-switch を返さない）', () => {
+  test('readOnly=true・未選択・非switching中 → local-select', () => {
+    const action = decideThreadRowAction({ sessionId: 's1', currentSessionId: null, readOnly: true, switching: false });
+    assert.deepEqual(action, { kind: 'local-select', sessionId: 's1' });
+  });
+
+  test('readOnly=false・未選択・非switching中 → server-switch（従来 UI の非退行を固定）', () => {
+    const action = decideThreadRowAction({ sessionId: 's1', currentSessionId: null, readOnly: false, switching: false });
+    assert.deepEqual(action, { kind: 'server-switch', sessionId: 's1' });
+  });
+
+  test('既に current なら readOnly の値によらず noop（already-current）', () => {
+    for (const readOnly of [true, false]) {
+      const action = decideThreadRowAction({ sessionId: 's1', currentSessionId: 's1', readOnly, switching: false });
+      assert.deepEqual(action, { kind: 'noop', reason: 'already-current' });
+    }
+  });
+
+  test('switching 中なら readOnly の値によらず noop（switching）', () => {
+    for (const readOnly of [true, false]) {
+      const action = decideThreadRowAction({ sessionId: 's1', currentSessionId: 's2', readOnly, switching: true });
+      assert.deepEqual(action, { kind: 'noop', reason: 'switching' });
+    }
+  });
+
+  test('B1 の核心: readOnly=true のとき、あらゆる入力の組み合わせで server-switch を一度も返さない', () => {
+    const sessionIds = ['s1', 's2', ''];
+    const currentIds = [null, undefined, 's1', 's2', 'other'];
+    const switchingVals = [true, false];
+    for (const sessionId of sessionIds) {
+      for (const currentSessionId of currentIds) {
+        for (const switching of switchingVals) {
+          const action = decideThreadRowAction({ sessionId, currentSessionId, readOnly: true, switching });
+          assert.notEqual(action.kind, 'server-switch');
+        }
+      }
+    }
+  });
+});
+
+describe('buildProjectSelectorOptions（F2/F3: displayName ?? name を各行に適用）', () => {
+  test('displayName があれば displayName、無ければ name にフォールバック', () => {
+    const options = buildProjectSelectorOptions([
+      { id: 'p1', name: 'raw-1', displayName: 'Pretty 1', machine: { name: 'm1', displayName: 'Machine 1', online: true } },
+      { id: 'p2', name: 'raw-2', displayName: null, machine: { name: 'm2', displayName: null, online: false } },
+    ]);
+    assert.deepEqual(options, [
+      { projectId: 'p1', label: 'Pretty 1', machineLabel: 'Machine 1', online: true },
+      { projectId: 'p2', label: 'raw-2', machineLabel: 'm2', online: false },
+    ]);
+  });
+
+  test('machine が無ければ machineLabel は空文字・online は false', () => {
+    const options = buildProjectSelectorOptions([{ id: 'p1', name: 'raw-1' }]);
+    assert.deepEqual(options, [{ projectId: 'p1', label: 'raw-1', machineLabel: '', online: false }]);
+  });
+
+  test('空配列を渡せば空配列を返す', () => {
+    assert.deepEqual(buildProjectSelectorOptions([]), []);
+  });
+
+  test('API の返す並び順をそのまま保持する（ソートしない）', () => {
+    const options = buildProjectSelectorOptions([
+      { id: 'z', name: 'z-proj' },
+      { id: 'a', name: 'a-proj' },
+    ]);
+    assert.deepEqual(options.map((o) => o.projectId), ['z', 'a']);
+  });
+
+  test('オフライン機は online: false を返す（セレクタ側でバッジ表示に使う）', () => {
+    const options = buildProjectSelectorOptions([
+      { id: 'p1', name: 'raw-1', machine: { name: 'm1', online: false } },
+    ]);
+    assert.equal(options[0].online, false);
+  });
+});
+
+describe('containsNamespaceImport（findForbiddenLiteImports の既知の限界を塞ぐ）', () => {
+  test('namespace import を検出する', () => {
+    assert.equal(containsNamespaceImport(`import * as Layout from '../components/Layout';`), true);
+  });
+
+  test('通常の named import では false', () => {
+    assert.equal(containsNamespaceImport(`import { Layout } from '../components/Layout';`), false);
+  });
+
+  test('import が無ければ false', () => {
+    assert.equal(containsNamespaceImport('const x = 1;'), false);
+  });
+});
+
+describe('containsRawWebSocketConstruction（LitePage が WS を生成しないことの検出用）', () => {
+  test('new WebSocket(...) を検出する', () => {
+    assert.equal(containsRawWebSocketConstruction(`const ws = new WebSocket('wss://example');`), true);
+  });
+
+  test('WebSocket という文字列が単に import/コメントに現れるだけでは検出しない', () => {
+    assert.equal(containsRawWebSocketConstruction(`// WebSocket is used elsewhere`), false);
+  });
+
+  test('new を伴わなければ false', () => {
+    assert.equal(containsRawWebSocketConstruction(`function WebSocket() {}`), false);
+  });
+});
+
+describe('findForbiddenLiteImports（L2: 禁止リストを optional 引数で切り替え可能にする一般化）', () => {
+  test('引数省略時は従来どおり恒久リスト（Layout/useOrganization）で判定する（既存呼び出し元の非退行）', () => {
+    const hits = findForbiddenLiteImports(`import { Layout } from '../components/Layout';`);
+    assert.ok(hits.includes('Layout'));
+  });
+
+  test('L2_FORBIDDEN_LITE_BINDINGS を明示的に渡すと useWebSocket の import を検出する', () => {
+    const hits = findForbiddenLiteImports(
+      `import { useWebSocket } from '../hooks/useWebSocket';`,
+      L2_FORBIDDEN_LITE_BINDINGS,
+      L2_FORBIDDEN_LITE_MODULES
+    );
+    assert.ok(hits.includes('useWebSocket'));
+    assert.ok(hits.some((h) => h.includes('hooks/useWebSocket')));
+  });
+
+  test('恒久リストで判定するときは useWebSocket を検出しない（リストの独立性を固定）', () => {
+    const hits = findForbiddenLiteImports(`import { useWebSocket } from '../hooks/useWebSocket';`);
+    assert.deepEqual(hits, []);
+  });
+});
+
+describe('L2_FORBIDDEN_LITE_BINDINGS / L2_FORBIDDEN_LITE_MODULES（定数の内容固定）', () => {
+  test('useWebSocket / hooks/useWebSocket を含む', () => {
+    assert.ok(L2_FORBIDDEN_LITE_BINDINGS.includes('useWebSocket'));
+    assert.ok(L2_FORBIDDEN_LITE_MODULES.includes('hooks/useWebSocket'));
   });
 });

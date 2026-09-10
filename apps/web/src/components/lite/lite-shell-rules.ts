@@ -2,12 +2,18 @@
  * Lite シェル（`doc/thread-management-spec.md` §0）の純ロジック層。
  *
  * 外部 import ゼロ（`apps/web/src/lib/thread-routing-client.ts` と同じ流儀）。React・api.ts・
- * 型を一切 import しない。呼び出し元は L2 以降（`LitePage.tsx` 等、次サイクル）で追加される予定で、
- * 本サイクル（L0）時点ではどこからも import されていない（純ロジック + テストのみ）。
+ * 型を一切 import しない。L0 時点ではどこからも import されていなかったが、L2（本サイクル）から
+ * `ThreadList.tsx` / `LitePage.tsx` が利用を開始する。
  *
  * 設計判断の根拠は read-only 調査 `~/.claude/plans/quizzical-zooming-flute.md` の F1〜F6 / R2〜R9。
  * 特に F1（プロジェクトを変えて送信しても既存スレッドに自動 reuse される）は、UI を書く前に
  * 型と関数へ先に凍結しておかないと後から直しにくい判断であるため、本ファイルの中核になっている。
+ *
+ * L2 追記: `/lite` ルーティング・モード切替の骨組みを追加。B1（ThreadList は行クリックで必ず
+ * サーバー switch を発行してしまう）を解消するための `decideThreadRowAction()` と、
+ * プロジェクトセレクタ表示用の `buildProjectSelectorOptions()` を追加する。
+ * B2（`/` → `/lite` 自動リダイレクト・localStorage によるモード永続化）は L2 では撤回され、
+ * URL のみを状態とする方針になったため、このファイルにモード判定・永続化ロジックは置かない。
  */
 
 // ---------------------------------------------------------------------------
@@ -236,9 +242,19 @@ export const FORBIDDEN_LITE_MODULES: readonly string[] = ['contexts/Organization
  *
  * 既知の限界: `import * as X from '...'` の namespace import は検出できない（禁止識別子の名前が
  * ソースの import 文に直接現れないため）。この検出方式を採用する場合は、namespace import 自体を
- * `components/lite/` でレビュー時に禁止する運用と併用すること。
+ * `components/lite/` でレビュー時に禁止する運用と併用すること
+ * （L2 では `containsNamespaceImport()` を併用してこの穴を塞ぐ）。
+ *
+ * L2: 判定に使う禁止リストを optional 引数に一般化した。省略時は恒久リスト
+ * （`FORBIDDEN_LITE_BINDINGS` / `FORBIDDEN_LITE_MODULES`、F5 トリップワイヤ）を使うため、
+ * 既存呼び出し元・既存テストの挙動は完全に不変。L2 固有の禁止（`useWebSocket` 等）を検査したい
+ * 呼び出し元だけが `L2_FORBIDDEN_LITE_BINDINGS` / `L2_FORBIDDEN_LITE_MODULES` を明示的に渡す。
  */
-export function findForbiddenLiteImports(source: string): readonly string[] {
+export function findForbiddenLiteImports(
+  source: string,
+  bindings: readonly string[] = FORBIDDEN_LITE_BINDINGS,
+  modules: readonly string[] = FORBIDDEN_LITE_MODULES
+): readonly string[] {
   const hits: string[] = [];
   const importBlockPattern = /import\s+(?:type\s+)?\{([\s\S]*?)\}\s+from\s+['"]([^'"]+)['"]/g;
   let match: RegExpExecArray | null;
@@ -250,11 +266,97 @@ export function findForbiddenLiteImports(source: string): readonly string[] {
       .map((b) => b.trim().split(/\s+as\s+/)[0].trim())
       .filter((b) => b.length > 0);
     for (const name of bindingNames) {
-      if (FORBIDDEN_LITE_BINDINGS.includes(name)) hits.push(name);
+      if (bindings.includes(name)) hits.push(name);
     }
-    for (const forbiddenModule of FORBIDDEN_LITE_MODULES) {
+    for (const forbiddenModule of modules) {
       if (modulePath.includes(forbiddenModule)) hits.push(modulePath);
     }
   }
   return hits;
+}
+
+// ---------------------------------------------------------------------------
+// 7. L2: /lite ルーティング・行選択・プロジェクトセレクタの純ロジック
+// ---------------------------------------------------------------------------
+
+/**
+ * L2 固有の禁止識別子。恒久リスト（`FORBIDDEN_LITE_BINDINGS`、F5 トリップワイヤ）とは別に持つ。
+ * `LitePage` は「画面は出る・切替できる・しかし通信は増やさない」の制約下にあり、L2 の間は
+ * `useWebSocket` を一切使わないことを回帰テストで固定する。L3 で WS 受信を実装する際に
+ * この定数の利用箇所（テスト）を更新すること（L0+L1 の申し送り参照）。
+ */
+export const L2_FORBIDDEN_LITE_BINDINGS: readonly string[] = ['useWebSocket'];
+
+/** 対応する禁止モジュール（import 元パスの部分文字列一致で判定する） */
+export const L2_FORBIDDEN_LITE_MODULES: readonly string[] = ['hooks/useWebSocket'];
+
+/**
+ * `findForbiddenLiteImports()` の名前付き import 検出の穴（namespace import）を塞ぐ、
+ * 独立した静的チェック。`import * as X from '...'` の形が現れたら true。
+ * モジュールパスは問わない（Lite 配下では namespace import 自体を禁止する運用のため）。
+ */
+export function containsNamespaceImport(source: string): boolean {
+  return /import\s+\*\s+as\s+\w+\s+from\s+['"][^'"]+['"]/.test(source);
+}
+
+/**
+ * `new WebSocket(...)` の直接生成を検出する。`useWebSocket` フックの import を経由しない
+ * 抜け道（生の `WebSocket` API を直接呼ぶ）を塞ぐための、独立した静的チェック。
+ */
+export function containsRawWebSocketConstruction(source: string): boolean {
+  return /\bnew\s+WebSocket\s*\(/.test(source);
+}
+
+/**
+ * B1: `ThreadList` の行クリックが常にサーバー `switchThread`（POST）を発行してしまう問題への対処。
+ * `readOnly` が true のときは**いかなる入力でも** `'server-switch'` を返してはならない
+ * （呼び出し側 `ThreadList.tsx` はこの結果が `'local-select'` のときだけローカル state を更新し、
+ * `'server-switch'` のときだけ `sessionsApi.switchThread()` を呼ぶ設計にする。これにより
+ * L2 の「行選択はローカル state のみ・サーバー操作は一切発火しない」がこの関数 1 点に集約される）。
+ */
+export type ThreadRowAction =
+  | { kind: 'local-select'; sessionId: string }
+  | { kind: 'server-switch'; sessionId: string }
+  | { kind: 'noop'; reason: 'already-current' | 'switching' };
+
+export function decideThreadRowAction(input: {
+  sessionId: string;
+  currentSessionId?: string | null;
+  readOnly: boolean;
+  switching: boolean;
+}): ThreadRowAction {
+  if (input.sessionId === input.currentSessionId) return { kind: 'noop', reason: 'already-current' };
+  if (input.switching) return { kind: 'noop', reason: 'switching' };
+  if (input.readOnly) return { kind: 'local-select', sessionId: input.sessionId };
+  return { kind: 'server-switch', sessionId: input.sessionId };
+}
+
+/** プロジェクトセレクタの 1 行分の表示情報 */
+export interface ProjectSelectorOption {
+  projectId: string;
+  label: string;
+  machineLabel: string;
+  online: boolean;
+}
+
+/**
+ * プロジェクトセレクタの表示行を組み立てる。各要素に既存の `resolveThreadProjectView()`
+ * （F2/F3 吸収層、`displayName ?? name` を一本化）をそのまま適用する。新しい displayName 解決
+ * ロジックはここには書かない。API の返す並び順をそのまま保持する（呼び出し側でソートしない）。
+ */
+export function buildProjectSelectorOptions(
+  projects: readonly ProjectViewSource[]
+): readonly ProjectSelectorOption[] {
+  return projects.map((p) => {
+    const view = resolveThreadProjectView({
+      projectId: p.id,
+      projects: new Map([[p.id, p]]),
+    });
+    return {
+      projectId: p.id,
+      label: view.projectLabel,
+      machineLabel: view.machineLabel,
+      online: view.online,
+    };
+  });
 }

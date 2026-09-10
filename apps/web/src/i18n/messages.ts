@@ -27,6 +27,7 @@ export const messages = {
   'nav.openManager': { en: 'Manager', ja: 'Manager' },
   'nav.openManagerTitle': { en: 'Open Manager', ja: 'Manager を開く' },
   'nav.settingsMenu': { en: 'Settings menu', ja: '設定メニュー' },
+  'nav.liteUi': { en: 'Lite UI', ja: 'Lite UI' },
   'auth.signInToAccount': { en: 'Sign in to your account', ja: 'アカウントにサインイン' },
   'auth.createAccount': { en: 'Create a new account', ja: '新しいアカウントを作成' },
   'auth.googleSignIn': { en: 'Sign in with Google', ja: 'Googleでサインイン' },
@@ -116,6 +117,14 @@ export const messages = {
   'thread.switchFailed': { en: 'Failed to switch thread', ja: 'スレッドの切替に失敗しました' },
   'thread.renameFailed': { en: 'Failed to rename thread', ja: 'スレッド名の変更に失敗しました' },
   'thread.timeJustNow': { en: 'just now', ja: 'たった今' },
+  'lite.title': { en: 'Lite', ja: 'Lite' },
+  'lite.backToClassic': { en: 'Back to classic UI', ja: '従来 UI に戻る' },
+  'lite.emptyState': { en: 'Choose a project and send a message to start a conversation.', ja: 'プロジェクトを選んで送信すると会話が始まります。' },
+  'lite.projectLabel': { en: 'Project', ja: 'プロジェクト' },
+  'lite.projectPlaceholder': { en: 'Select a project...', ja: 'プロジェクトを選択...' },
+  'lite.offline': { en: 'Offline', ja: 'オフライン' },
+  'lite.composerPlaceholder': { en: 'Enter a message...', ja: 'メッセージを入力...' },
+  'lite.projectLoadFailed': { en: 'Failed to load projects', ja: 'プロジェクト一覧の取得に失敗しました' },
 } as const;
 
 export type TranslationKey = keyof typeof messages;

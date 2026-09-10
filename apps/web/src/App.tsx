@@ -17,6 +17,7 @@ import { ChatPage } from './pages/ChatPage';
 import { DevReportsPage } from './pages/DevReportsPage';
 import { TeamPage } from './pages/TeamPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
+import { LitePage } from './pages/LitePage';
 import { NotificationBanner } from './components/NotificationBanner';
 import { resolveNextTarget, redirectToManager } from './lib/managerRedirect';
 
@@ -133,6 +134,23 @@ function AppRoutes() {
       />
       {/* Google OAuth コールバック（認証状態に関係なくアクセス可能） */}
       <Route path="/auth/callback" element={<AuthCallbackPage />} />
+      {/*
+        Lite シェル L2: `/lite` は `ProtectedContent`（:33 以降）の外にある兄弟ルート。
+        意図的にこの位置に置いている（順序への依存ではなく「ProtectedContent の外である」ことが本質）。
+        `ProtectedContent` は ChatPage を常時マウントするため、内側に置くと `/lite` を開いた瞬間に
+        ChatPage の WebSocket と Lite の WebSocket が同一 chatId で衝突し無限再接続ループになる
+        （詳細は ~/.claude/plans/quizzical-zooming-flute.md :104-122）。
+        `ProtectedRoute` は useAuth/useLanguage のみに依存し OrganizationProvider を要求しないため、
+        認証ガードだけを安全に再利用できる（F5 対策）。
+      */}
+      <Route
+        path="/lite"
+        element={
+          <ProtectedRoute>
+            <LitePage />
+          </ProtectedRoute>
+        }
+      />
       {/* 認証済み: 全 protected routes を ProtectedContent でラップ */}
       <Route
         path="/*"

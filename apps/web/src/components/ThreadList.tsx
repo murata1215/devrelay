@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, type MouseEvent } from 'react
 import { threads as threadsApi, sessions as sessionsApi, type ThreadSummary, type ThreadSwitchResult, type ThreadCreateResult } from '../lib/api';
 import { getTabId } from '../lib/tab-id';
 import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, applyThreadRename, upsertThread, resolveCreateTargetProjectId } from '../lib/thread-list-rules';
+import { decideThreadRowAction } from './lite/lite-shell-rules';
 import { useLanguage } from '../contexts/LanguageContext';
 
 /**
@@ -54,9 +55,23 @@ export interface ThreadListProps {
   refreshToken?: number;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /**
+   * Lite シェル L2 用（B1）: true のとき行クリック・「＋新規」・改名がサーバー操作
+   * （`switchThread`/`create`/`rename` の POST/PATCH）を一切発行しなくなる。
+   * 判定は `decideThreadRowAction()` に集約する（未指定時は従来どおり false = 全て有効）。
+   */
+  readOnly?: boolean;
+  /** `readOnly` のとき、行クリックで呼ばれる（サーバー switch の代わり）。ローカル state 更新専用 */
+  onLocalSelect?: (item: ThreadSummary) => void;
+  /**
+   * F3: `item.projectName` はサーバー側で `project.name`（`displayName` ではない）。
+   * 指定するとプロジェクトバッジの表示に使う（Lite シェルの横断一覧用）。未指定時は従来どおり
+   * `item.projectName` をそのまま表示する。
+   */
+  resolveProjectLabel?: (projectId: string, fallbackName: string) => string;
 }
 
-export function ThreadList({ projectId, createProjectId, currentSessionId, onSelect, onCreate, refreshToken, collapsed, onToggleCollapse }: ThreadListProps) {
+export function ThreadList({ projectId, createProjectId, currentSessionId, onSelect, onCreate, refreshToken, collapsed, onToggleCollapse, readOnly = false, onLocalSelect, resolveProjectLabel }: ThreadListProps) {
   /** 「＋新規」の作成先。`projectId` が無ければ `createProjectId` にフォールバックする（Lite シェル用）。
    * 一覧取得（横断表示かどうか）は生の `projectId` のまま判定するため、ここでは分けて扱う。 */
   const createTargetProjectId = resolveCreateTargetProjectId(projectId, createProjectId);
@@ -97,9 +112,9 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
     if (renamingId) renameInputRef.current?.focus();
   }, [renamingId]);
 
-  /** 新規スレッド作成 */
+  /** 新規スレッド作成（readOnly のときは発火しない。B1） */
   const handleCreate = useCallback(async () => {
-    if (!createTargetProjectId || creating) return;
+    if (!createTargetProjectId || creating || readOnly) return;
     setCreating(true);
     try {
       const tabId = getTabId();
@@ -125,22 +140,36 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
     } finally {
       setCreating(false);
     }
-  }, [createTargetProjectId, creating, onCreate, fetchThreads]);
+  }, [createTargetProjectId, creating, readOnly, onCreate, fetchThreads]);
 
-  /** スレッド切替 */
-  const handleSelect = useCallback(async (sessionId: string) => {
-    if (sessionId === currentSessionId || switchingId) return;
-    setSwitchingId(sessionId);
+  /**
+   * スレッド行クリック時の行動を決める。B1: `readOnly` のときは `decideThreadRowAction()` が
+   * 'server-switch' を返さないことで、`sessionsApi.switchThread()`（POST）に絶対に到達しない
+   * （この分岐自体を type-level に固定するのではなく decideThreadRowAction の結果分岐に一本化する）。
+   */
+  const handleSelect = useCallback(async (item: ThreadSummary) => {
+    const action = decideThreadRowAction({
+      sessionId: item.sessionId,
+      currentSessionId,
+      readOnly,
+      switching: switchingId !== null,
+    });
+    if (action.kind === 'noop') return;
+    if (action.kind === 'local-select') {
+      onLocalSelect?.(item);
+      return;
+    }
+    setSwitchingId(item.sessionId);
     try {
       const tabId = getTabId();
-      const result = await sessionsApi.switchThread(sessionId, tabId);
+      const result = await sessionsApi.switchThread(item.sessionId, tabId);
       onSelect(result);
     } catch {
       // 失敗時は何もしない（切替前の状態を維持）
     } finally {
       setSwitchingId(null);
     }
-  }, [currentSessionId, switchingId, onSelect]);
+  }, [currentSessionId, switchingId, readOnly, onLocalSelect, onSelect]);
 
   /** 改名開始 */
   const startRename = useCallback((e: MouseEvent, sessionId: string, currentTitle: string | null) => {
@@ -186,7 +215,7 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
         <div className="flex items-center gap-1">
           <button
             onClick={handleCreate}
-            disabled={!createTargetProjectId || creating}
+            disabled={!createTargetProjectId || creating || readOnly}
             className="text-xs px-2 py-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
           >
             {creating ? t('thread.creating') : t('thread.new')}
@@ -224,7 +253,7 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
           return (
             <div
               key={item.sessionId}
-              onClick={() => !isRenaming && handleSelect(item.sessionId)}
+              onClick={() => !isRenaming && handleSelect(item)}
               className={`
                 group px-3 py-2 border-b border-[var(--border-color)] cursor-pointer
                 ${isActive ? 'bg-[var(--bg-selected)]' : 'hover:bg-[var(--bg-hover)]'}
@@ -251,7 +280,7 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
                     {displayText}
                   </span>
                 )}
-                {!isRenaming && (
+                {!isRenaming && !readOnly && (
                   <button
                     onClick={(e) => startRename(e, item.sessionId, item.title)}
                     title={t('thread.rename')}
@@ -268,7 +297,9 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
                   <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)]">{t('thread.default')}</span>
                 )}
                 {!projectId && (
-                  <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)] truncate">{item.projectName}</span>
+                  <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)] truncate">
+                    {resolveProjectLabel ? resolveProjectLabel(item.projectId, item.projectName) : item.projectName}
+                  </span>
                 )}
                 <span className="text-[10px] text-[var(--text-faint)] ml-auto shrink-0">
                   {formatRelativeTime(item.lastActiveAt, locale, t('thread.timeJustNow'))}
