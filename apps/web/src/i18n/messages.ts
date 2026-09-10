@@ -137,6 +137,11 @@ export const messages = {
   },
   'lite.approvePlaceholder': { en: 'Approve', ja: '承認' },
   'lite.denyPlaceholder': { en: 'Deny', ja: '拒否' },
+  'lite.composerPlaceholderConnecting': { en: 'Connecting...', ja: '接続中…' },
+  'lite.composerPlaceholderNoProject': { en: 'Select a project', ja: 'プロジェクトを選択してください' },
+  'lite.composerPlaceholderMachineOffline': { en: 'Agent is offline', ja: 'マシンがオフラインです' },
+  'lite.newThreadNoticePrefix': { en: 'Sending will start a new thread in ', ja: '送信すると' },
+  'lite.newThreadNoticeSuffix': { en: '.', ja: 'に新しいスレッドを作ります' },
 } as const;
 
 export type TranslationKey = keyof typeof messages;

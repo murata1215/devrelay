@@ -17,6 +17,12 @@ import {
   buildProjectSelectorOptions,
   filterProjectsByLiveMachines,
   looksLikeDeletedMachineName,
+  sortProjectSelectorOptions,
+  resolveComposerPlaceholderReason,
+  decideProjectSelectorUrl,
+  shouldShowNewThreadNotice,
+  decideThreadCreateButton,
+  stripComments,
 } from '../dist-test/components/lite/lite-shell-rules.js';
 // F4 pin ブロック: このモジュールのソースは無変更。既存の fail-open ゲートが Lite の前提として
 // 崩れていないことを固定する（D2: ソース変更ゼロ、cycle3 の実装を再利用する想定）。
@@ -556,5 +562,265 @@ describe('looksLikeDeletedMachineName（診断専用。フィルタには使わ�
 
   test('末尾以外に __deleted_ が含まれても数字で終わらなければ一致しない', () => {
     assert.equal(looksLikeDeletedMachineName('my-machine__deleted_abc'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L4: sortProjectSelectorOptions / resolveComposerPlaceholderReason /
+//     decideProjectSelectorUrl / shouldShowNewThreadNotice / decideThreadCreateButton / stripComments
+// ---------------------------------------------------------------------------
+
+describe('sortProjectSelectorOptions（A1: マシン名 → プロジェクト名の順でソート）', () => {
+  const opt = (projectId, label, machineLabel, online = true) => ({ projectId, label, machineLabel, online });
+
+  test('マシン名を優先してソートする', () => {
+    const input = [
+      opt('p1', 'proj-a', 'zzz-machine'),
+      opt('p2', 'proj-b', 'aaa-machine'),
+    ];
+    const result = sortProjectSelectorOptions(input);
+    assert.deepEqual(result.map((o) => o.projectId), ['p2', 'p1']);
+  });
+
+  test('同一マシン内はプロジェクト名でソートする', () => {
+    const input = [
+      opt('p1', 'zzz-proj', 'same-machine'),
+      opt('p2', 'aaa-proj', 'same-machine'),
+    ];
+    const result = sortProjectSelectorOptions(input);
+    assert.deepEqual(result.map((o) => o.projectId), ['p2', 'p1']);
+  });
+
+  test('オフラインも同じ並びに混ざる（online はソートキーに含めない）', () => {
+    const input = [
+      opt('p1', 'proj-a', 'aaa-machine', false),
+      opt('p2', 'proj-b', 'bbb-machine', true),
+    ];
+    const result = sortProjectSelectorOptions(input);
+    assert.deepEqual(result.map((o) => o.projectId), ['p1', 'p2']);
+  });
+
+  test('マシン名・プロジェクト名が同名なら projectId で決定的にソートする', () => {
+    const input = [
+      opt('z', 'same-proj', 'same-machine'),
+      opt('a', 'same-proj', 'same-machine'),
+    ];
+    const result = sortProjectSelectorOptions(input);
+    assert.deepEqual(result.map((o) => o.projectId), ['a', 'z']);
+  });
+
+  test('入力配列を破壊しない（非破壊）', () => {
+    const input = [opt('p1', 'z', 'z'), opt('p2', 'a', 'a')];
+    const before = [...input];
+    sortProjectSelectorOptions(input);
+    assert.deepEqual(input, before);
+  });
+
+  test('buildProjectSelectorOptions の並び順保持テストは影響を受けない（既存の非破壊性の確認）', () => {
+    const options = buildProjectSelectorOptions([
+      { id: 'z', name: 'z-proj' },
+      { id: 'a', name: 'a-proj' },
+    ]);
+    assert.deepEqual(options.map((o) => o.projectId), ['z', 'a']);
+    const sorted = sortProjectSelectorOptions(options);
+    assert.deepEqual(sorted.map((o) => o.projectId), ['a', 'z']);
+  });
+});
+
+describe('resolveComposerPlaceholderReason（A2: 入力不可の理由をプレースホルダ種別へ写す）', () => {
+  test('disconnected → connecting', () => {
+    assert.equal(resolveComposerPlaceholderReason('disconnected'), 'connecting');
+  });
+
+  test('offline（マシンオフライン） → machine-offline（人間の承認条件 4: connecting とは区別する）', () => {
+    assert.equal(resolveComposerPlaceholderReason('offline'), 'machine-offline');
+  });
+
+  test('no-project → no-project', () => {
+    assert.equal(resolveComposerPlaceholderReason('no-project'), 'no-project');
+  });
+
+  test('no-tab-id → no-project', () => {
+    assert.equal(resolveComposerPlaceholderReason('no-tab-id'), 'no-project');
+  });
+
+  test('empty → ready（空文字は入力不可の理由ではない）', () => {
+    assert.equal(resolveComposerPlaceholderReason('empty'), 'ready');
+  });
+
+  test('in-flight → ready', () => {
+    assert.equal(resolveComposerPlaceholderReason('in-flight'), 'ready');
+  });
+
+  test('null → ready', () => {
+    assert.equal(resolveComposerPlaceholderReason(null), 'ready');
+  });
+});
+
+describe('decideProjectSelectorUrl（A3: プロジェクトセレクタ変更時の URL 遷移）', () => {
+  test('別プロジェクトを選ぶと session を破棄する', () => {
+    assert.deepEqual(
+      decideProjectSelectorUrl({ currentProjectId: 'p1', currentSessionId: 's1', nextProjectId: 'p2' }),
+      { project: 'p2', session: null }
+    );
+  });
+
+  test('同一プロジェクトを選び直しても session を維持する', () => {
+    assert.deepEqual(
+      decideProjectSelectorUrl({ currentProjectId: 'p1', currentSessionId: 's1', nextProjectId: 'p1' }),
+      { project: 'p1', session: 's1' }
+    );
+  });
+
+  test('nextProjectId が空文字なら project も session も null', () => {
+    assert.deepEqual(
+      decideProjectSelectorUrl({ currentProjectId: 'p1', currentSessionId: 's1', nextProjectId: '' }),
+      { project: null, session: null }
+    );
+  });
+
+  test('currentSessionId が無くても別プロジェクトへの遷移は成立する', () => {
+    assert.deepEqual(
+      decideProjectSelectorUrl({ currentProjectId: null, currentSessionId: null, nextProjectId: 'p2' }),
+      { project: 'p2', session: null }
+    );
+  });
+});
+
+describe('shouldShowNewThreadNotice（A3: 新規スレッド告知の表示可否は decideSendAction の needsNewThread と一致する）', () => {
+  test('プロジェクト未選択なら false', () => {
+    assert.equal(
+      shouldShowNewThreadNotice({ selectedProjectId: null, selectedSessionId: null, selectedThreadProjectId: null }),
+      false
+    );
+  });
+
+  test('プロジェクト選択済み・スレッド未選択なら true', () => {
+    assert.equal(
+      shouldShowNewThreadNotice({ selectedProjectId: 'p1', selectedSessionId: null, selectedThreadProjectId: null }),
+      true
+    );
+  });
+
+  test('プロジェクト選択済み・スレッド選択済みでプロジェクトが一致すれば false', () => {
+    assert.equal(
+      shouldShowNewThreadNotice({ selectedProjectId: 'p1', selectedSessionId: 's1', selectedThreadProjectId: 'p1' }),
+      false
+    );
+  });
+
+  test('プロジェクト選択済み・スレッド選択済みでプロジェクトが不一致なら true', () => {
+    assert.equal(
+      shouldShowNewThreadNotice({ selectedProjectId: 'p1', selectedSessionId: 's1', selectedThreadProjectId: 'p-other' }),
+      true
+    );
+  });
+
+  test('decideSendAction の needsNewThread 判定と一致する（単一情報源の担保）', () => {
+    const cases = [
+      { selectedProjectId: 'p1', selectedSessionId: null, selectedThreadProjectId: null },
+      { selectedProjectId: 'p1', selectedSessionId: 's1', selectedThreadProjectId: 'p1' },
+      { selectedProjectId: 'p1', selectedSessionId: 's1', selectedThreadProjectId: 'p-other' },
+    ];
+    for (const c of cases) {
+      const notice = shouldShowNewThreadNotice(c);
+      const action = decideSendAction({
+        ...c,
+        tabId: 't1',
+        machineOnline: true,
+        connected: true,
+        hasText: true,
+        hasFiles: false,
+        inFlight: false,
+      });
+      const needsNewThread = action.kind === 'create-then-send';
+      assert.equal(notice, needsNewThread);
+    }
+  });
+});
+
+describe('decideThreadCreateButton（B4: classic 8 パターンの真理値表一致 + Lite 経路）', () => {
+  test('classic（hasRequestCreate=false）は既存の disabled 判定と完全一致する', () => {
+    for (const createTargetProjectId of [null, 'p1']) {
+      for (const creating of [true, false]) {
+        for (const readOnly of [true, false]) {
+          const expected = !createTargetProjectId || creating || readOnly;
+          const result = decideThreadCreateButton({
+            createTargetProjectId,
+            creating,
+            readOnly,
+            hasRequestCreate: false,
+            createInFlight: false,
+          });
+          assert.equal(result.disabled, expected);
+          assert.equal(result.label, creating ? 'creating' : 'new');
+        }
+      }
+    }
+  });
+
+  test('Lite（hasRequestCreate=true）は readOnly を無視し createInFlight を使う', () => {
+    const result = decideThreadCreateButton({
+      createTargetProjectId: 'p1',
+      creating: false,
+      readOnly: true,
+      hasRequestCreate: true,
+      createInFlight: false,
+    });
+    assert.equal(result.disabled, false);
+    assert.equal(result.label, 'new');
+  });
+
+  test('Lite で createInFlight のとき disabled=true・label=creating', () => {
+    const result = decideThreadCreateButton({
+      createTargetProjectId: 'p1',
+      creating: false,
+      readOnly: true,
+      hasRequestCreate: true,
+      createInFlight: true,
+    });
+    assert.equal(result.disabled, true);
+    assert.equal(result.label, 'creating');
+  });
+
+  test('Lite で createTargetProjectId が無ければ disabled=true', () => {
+    const result = decideThreadCreateButton({
+      createTargetProjectId: null,
+      creating: false,
+      readOnly: true,
+      hasRequestCreate: true,
+      createInFlight: false,
+    });
+    assert.equal(result.disabled, true);
+  });
+});
+
+describe('stripComments（R4/C-2: ソース静的走査用のコメント除去）', () => {
+  test('行コメントを除去する', () => {
+    const result = stripComments('const x = 1; // これはコメント //connect\nconst y = 2;');
+    assert.equal(result.includes('//connect'), false);
+    assert.match(result, /const x = 1;/);
+    assert.match(result, /const y = 2;/);
+  });
+
+  test('ブロックコメントを除去する', () => {
+    const result = stripComments('/* //connect の説明 */\nconst z = 3;');
+    assert.equal(result.includes('//connect'), false);
+    assert.match(result, /const z = 3;/);
+  });
+
+  test('文字列リテラル中の // は保持する', () => {
+    const result = stripComments(`const url = 'https://example.com';`);
+    assert.match(result, /https:\/\/example\.com/);
+  });
+
+  test('テンプレートリテラル中の // は保持する', () => {
+    const result = stripComments('const url = `https://example.com`;');
+    assert.match(result, /https:\/\/example\.com/);
+  });
+
+  test('コメントの無いソースはそのまま（改行構造以外は不変）', () => {
+    const src = 'const a = 1;\nconst b = 2;';
+    assert.equal(stripComments(src), src);
   });
 });

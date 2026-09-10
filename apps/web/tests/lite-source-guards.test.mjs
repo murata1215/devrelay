@@ -11,6 +11,7 @@ import {
   findForbiddenLiteImports,
   containsNamespaceImport,
   containsRawWebSocketConstruction,
+  stripComments,
 } from '../dist-test/components/lite/lite-shell-rules.js';
 
 // Lite シェル L2/L3: ソース静的走査テスト（node:fs で実ソースを読み、コンパイル成果物には依存しない）。
@@ -95,20 +96,96 @@ describe('lite-source-guards: useWebSocket 呼び出しは LitePage.tsx の 1 �
   });
 });
 
-describe('lite-source-guards: LitePage.tsx が送信/承認操作の識別子を一切含まない（L3 では読み取りのみ。L4/L5 のスコープ外）', () => {
-  test('sendCommand を含まない', () => {
+// L4: 送信が解禁されたため「sendCommand を一切含まない」は成立しなくなった（R3 の読み替え）。
+// 読み替えの内容: 「web:command を送らないこと」は文字どおりには実装不可能（classic の通常送信自体が
+// web:command フレームであるため）。意図は (a) コマンド文字列（u/w/x/e、//connect）を送らないこと、
+// (b) フレームを自前組み立てしない（構築は useWebSocket 内に閉じる。'web:command' という文字列
+// リテラルを LitePage.tsx に書かない）ことだと解釈し、後者は従来どおり文字列非存在テストで担保、
+// 前者は新設のコマンド文字列リテラル直渡し禁止テストで担保する。
+describe('lite-source-guards: LitePage.tsx の送信操作（L4 で正規に使用開始。R3 の読み替えを固定）', () => {
+  test('sendCommand( の呼び出しがちょうど 1 箇所（L4 で正規に使用開始）', () => {
     const source = readLiteSource(LITE_PAGE_PATH);
-    assert.equal(source.includes('sendCommand'), false);
+    const matches = source.match(/\bsendCommand\s*\(/g) ?? [];
+    assert.equal(matches.length, 1);
   });
 
-  test("'web:command' を含まない", () => {
+  test("'web:command' を含まない（フレームを自前組み立てしない = useWebSocket 内に閉じる。R3）", () => {
     const source = readLiteSource(LITE_PAGE_PATH);
     assert.equal(source.includes('web:command'), false);
   });
 
-  test('sendToolApprovalResponse を含まない', () => {
+  test('sendCommand( の引数がコマンド文字列リテラル（u/w/x/e///connect 等）の直渡しでない（R3/R4）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const calls = source.match(/sendCommand\(\s*[^)]*\)/g) ?? [];
+    assert.ok(calls.length >= 1, 'sendCommand( の呼び出しが見つからない');
+    for (const call of calls) {
+      // 引数の先頭が文字列リテラル（' " ` のいずれかで始まる）でないことを確認する
+      // （`sendCommand(text)` のような変数渡しのみを許可する）
+      assert.doesNotMatch(call, /sendCommand\(\s*['"`]/, `sendCommand へのコマンド文字列直渡しを検出: ${call}`);
+    }
+  });
+
+  test('コメント除去後の本文に //connect が現れない（R4: JSDoc 中の言及を stripComments で除外した上で検査）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const stripped = stripComments(source);
+    assert.equal(stripped.includes('//connect'), false);
+  });
+
+  test('sendToolApprovalResponse を含まない（L5 スコープ外）', () => {
     const source = readLiteSource(LITE_PAGE_PATH);
     assert.equal(source.includes('sendToolApprovalResponse'), false);
+  });
+});
+
+// R8: 新規スレッド作成は tabId 必須の buildThreadCreateRequest() を唯一の入口とし、
+// threadsApi.create() へ tabId 抜きのオブジェクトを直接組み立てて渡す経路が増えないことを固定する。
+describe('lite-source-guards: スレッド作成の tabId 単一性拡張（B3/B4, R8）', () => {
+  test('threadsApi.create( の呼び出し引数はすべて action.request か request（buildThreadCreateRequest() 経由のみ）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const calls = source.match(/threadsApi\.create\([^)]*\)/g) ?? [];
+    assert.ok(calls.length >= 1, 'threadsApi.create( の呼び出しが見つからない');
+    for (const call of calls) {
+      assert.match(
+        call,
+        /threadsApi\.create\(\s*(action\.request|request)\s*\)/,
+        `threadsApi.create の引数が想定外（tabId 抜きのその場組み立てオブジェクトの疑い）: ${call}`
+      );
+    }
+  });
+
+  test('buildThreadCreateRequest( の呼び出し引数に tabId（同名変数）が含まれる', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const calls = source.match(/buildThreadCreateRequest\(\s*\{[^}]*\}\s*\)/g) ?? [];
+    assert.ok(calls.length >= 1, 'buildThreadCreateRequest( の呼び出しが見つからない');
+    for (const call of calls) {
+      assert.match(call, /\btabId\b/, `buildThreadCreateRequest の引数に tabId が無い: ${call}`);
+    }
+  });
+
+  test('crypto.randomUUID() の代入形（.current = ...）はちょうど 1 箇所のまま（outbox の clientId 生成は代入形にしない書き方にして誤検知を避ける）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const matches = source.match(/\.current\s*=\s*crypto\.randomUUID\(\)/g) ?? [];
+    assert.equal(matches.length, 1);
+  });
+
+  test('getTabId を import していない（classic の sessionStorage 由来 tabId 混入防止）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.equal(/\bgetTabId\b/.test(source), false);
+  });
+});
+
+describe('lite-source-guards: ThreadList.tsx の onRequestCreate prop（B4 の回帰検知）', () => {
+  test('ThreadList.tsx に onRequestCreate prop が存在する', () => {
+    const source = readFileSync(path.join(webRoot, 'src/components/ThreadList.tsx'), 'utf8');
+    assert.match(source, /\bonRequestCreate\b/);
+  });
+
+  test('LitePage.tsx の <ThreadList 使用箇所に onRequestCreate と createInFlight が渡されている', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const match = source.match(/<ThreadList[\s\S]*?\/>/);
+    assert.ok(match, '<ThreadList ... /> が見つからない');
+    assert.match(match[0], /\bonRequestCreate\b/);
+    assert.match(match[0], /\bcreateInFlight\b/);
   });
 });
 

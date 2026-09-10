@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, type MouseEvent } from 'react
 import { threads as threadsApi, sessions as sessionsApi, type ThreadSummary, type ThreadSwitchResult, type ThreadCreateResult } from '../lib/api';
 import { getTabId } from '../lib/tab-id';
 import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, applyThreadRename, upsertThread, resolveCreateTargetProjectId } from '../lib/thread-list-rules';
-import { decideThreadRowAction } from './lite/lite-shell-rules';
+import { decideThreadRowAction, decideThreadCreateButton } from './lite/lite-shell-rules';
 import { useLanguage } from '../contexts/LanguageContext';
 
 /**
@@ -69,9 +69,19 @@ export interface ThreadListProps {
    * `item.projectName` をそのまま表示する。
    */
   resolveProjectLabel?: (projectId: string, fallbackName: string) => string;
+  /**
+   * Lite シェル L4 B4: 指定時、「＋新規」ボタンは classic の `handleCreate`（`getTabId()` 由来の
+   * tabId を使う）の代わりにこの関数を呼ぶ（Lite は自前の tabId で作成する必要があるため、
+   * tabId 絶対規則を守るには呼び出し元が作成を行う必要がある）。指定すると `readOnly` は
+   * 「＋新規」ボタンの disabled 判定に限り無視され、`createInFlight` が使われる
+   * （`decideThreadCreateButton()` 参照）。未指定時は従来どおり（classic の非退行）。
+   */
+  onRequestCreate?: (projectId: string) => void;
+  /** `onRequestCreate` 使用時の作成中フラグ（呼び出し側が管理。classic の内部 `creating` の代わり） */
+  createInFlight?: boolean;
 }
 
-export function ThreadList({ projectId, createProjectId, currentSessionId, onSelect, onCreate, refreshToken, collapsed, onToggleCollapse, readOnly = false, onLocalSelect, resolveProjectLabel }: ThreadListProps) {
+export function ThreadList({ projectId, createProjectId, currentSessionId, onSelect, onCreate, refreshToken, collapsed, onToggleCollapse, readOnly = false, onLocalSelect, resolveProjectLabel, onRequestCreate, createInFlight = false }: ThreadListProps) {
   /** 「＋新規」の作成先。`projectId` が無ければ `createProjectId` にフォールバックする（Lite シェル用）。
    * 一覧取得（横断表示かどうか）は生の `projectId` のまま判定するため、ここでは分けて扱う。 */
   const createTargetProjectId = resolveCreateTargetProjectId(projectId, createProjectId);
@@ -141,6 +151,27 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
       setCreating(false);
     }
   }, [createTargetProjectId, creating, readOnly, onCreate, fetchThreads]);
+
+  /** L4 B4: 「＋新規」ボタンのクリック先を決める。`onRequestCreate` が指定されていればそちらを呼ぶ
+   * （Lite: 自前の tabId で作成する必要があるため）。未指定なら従来どおり `handleCreate`。 */
+  const handleCreateClick = useCallback(() => {
+    if (!createTargetProjectId) return;
+    if (onRequestCreate) {
+      onRequestCreate(createTargetProjectId);
+      return;
+    }
+    handleCreate();
+  }, [createTargetProjectId, onRequestCreate, handleCreate]);
+
+  /** `disabled`/ラベルの決定を `decideThreadCreateButton()` に一本化する（B4: classic の
+   * 既存挙動 `!createTargetProjectId || creating || readOnly` を真理値表テストで不変に固定済み）。 */
+  const createButtonState = decideThreadCreateButton({
+    createTargetProjectId: createTargetProjectId ?? null,
+    creating,
+    readOnly,
+    hasRequestCreate: Boolean(onRequestCreate),
+    createInFlight,
+  });
 
   /**
    * スレッド行クリック時の行動を決める。B1: `readOnly` のときは `decideThreadRowAction()` が
@@ -214,11 +245,11 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
         <span className="text-xs font-semibold text-[var(--text-muted)]">{t('thread.panelTitle')}</span>
         <div className="flex items-center gap-1">
           <button
-            onClick={handleCreate}
-            disabled={!createTargetProjectId || creating || readOnly}
+            onClick={handleCreateClick}
+            disabled={createButtonState.disabled}
             className="text-xs px-2 py-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
           >
-            {creating ? t('thread.creating') : t('thread.new')}
+            {createButtonState.label === 'creating' ? t('thread.creating') : t('thread.new')}
           </button>
           {onToggleCollapse && (
             <button onClick={onToggleCollapse} title={t('thread.collapse')} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1">

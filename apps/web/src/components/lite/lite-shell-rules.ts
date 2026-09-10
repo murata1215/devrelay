@@ -418,3 +418,173 @@ export function filterProjectsByLiveMachines<T extends ProjectViewSource>(
 export function looksLikeDeletedMachineName(name: string): boolean {
   return /__deleted_\d+$/.test(name);
 }
+
+// ---------------------------------------------------------------------------
+// 9. L4 A1: プロジェクトセレクタの並び（マシン名 → プロジェクト名）
+// ---------------------------------------------------------------------------
+
+/**
+ * `buildProjectSelectorOptions()` 自体は変更しない（`lite-shell-rules.test.mjs:427`
+ * 「API の返す並び順をそのまま保持する（ソートしない）」が既にその無変更を固定しているため）。
+ * ソートは呼び出し側が別関数として適用する。
+ *
+ * マシン名 → プロジェクト名の順で安定ソートする（`localeCompare`）。オフライン機も同じ並びに
+ * 混ぜる（`online` はソートキーに含めない）。同名衝突時は `projectId` で決定的にする
+ * （テストの再現性のため）。入力配列は破壊しない。
+ */
+export function sortProjectSelectorOptions(
+  options: readonly ProjectSelectorOption[]
+): readonly ProjectSelectorOption[] {
+  return [...options].sort((a, b) => {
+    const byMachine = a.machineLabel.localeCompare(b.machineLabel);
+    if (byMachine !== 0) return byMachine;
+    const byLabel = a.label.localeCompare(b.label);
+    if (byLabel !== 0) return byLabel;
+    return a.projectId.localeCompare(b.projectId);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 10. L4 A2: 入力不可時のプレースホルダ理由
+// ---------------------------------------------------------------------------
+
+export type ComposerPlaceholderReason = 'connecting' | 'machine-offline' | 'no-project' | 'ready';
+
+/**
+ * `decideSendAction()` の `blocked.reason`（または未算出時の `null`）を、Composer が表示すべき
+ * プレースホルダの種別へ写す。`'empty'` / `'in-flight'` / `null` は「入力欄自体は使える」状態なので
+ * 通常のプレースホルダ（`'ready'`）にまとめる。
+ *
+ * `'offline'`（`decideSendAction` の `machineOnline` ブロック、R7）は `'disconnected'`（WS 未接続）
+ * とは別の `'machine-offline'` に写す（人間の承認条件 4: 「マシンがオフラインです」を独立して
+ * 表示するため。`'disconnected'` は「WebSocket 自体が繋がっていない」を表す `'connecting'` のまま）。
+ */
+export function resolveComposerPlaceholderReason(
+  reason: SendBlockedReason | null
+): ComposerPlaceholderReason {
+  if (reason === 'disconnected') return 'connecting';
+  if (reason === 'offline') return 'machine-offline';
+  if (reason === 'no-project' || reason === 'no-tab-id') return 'no-project';
+  return 'ready';
+}
+
+// ---------------------------------------------------------------------------
+// 11. L4 A3: プロジェクトセレクタ変更時の URL 遷移 + 新規スレッド告知
+// ---------------------------------------------------------------------------
+
+/**
+ * プロジェクトセレクタ変更時に URL パラメータへ適用すべき値を決める。
+ * `nextProjectId` が現在と異なるときのみ `session` を消す（A3: セレクタ変更でスレッド選択を解除する）。
+ * 同一プロジェクトを選び直したときは `session` を維持する（無用な選択解除を避ける）。
+ */
+export function decideProjectSelectorUrl(input: {
+  currentProjectId: string | null;
+  currentSessionId: string | null;
+  nextProjectId: string;
+}): { project: string | null; session: string | null } {
+  if (!input.nextProjectId) return { project: null, session: null };
+  if (input.nextProjectId === input.currentProjectId) {
+    return { project: input.nextProjectId, session: input.currentSessionId };
+  }
+  return { project: input.nextProjectId, session: null };
+}
+
+/**
+ * 「送信すると新しいスレッドを作ります」告知の表示可否を決める。`decideSendAction()` の
+ * `needsNewThread` 判定と**同じ条件**にすること（単一情報源。テストで一致を固定する）。
+ */
+export function shouldShowNewThreadNotice(input: {
+  selectedProjectId: string | null;
+  selectedSessionId: string | null;
+  selectedThreadProjectId: string | null;
+}): boolean {
+  if (!input.selectedProjectId) return false;
+  return !input.selectedSessionId || input.selectedThreadProjectId !== input.selectedProjectId;
+}
+
+// ---------------------------------------------------------------------------
+// 12. L4 B4: 「+ 新規」ボタンの disabled 判定（ThreadList.tsx の純加算 prop 用）
+// ---------------------------------------------------------------------------
+
+export interface ThreadCreateButtonState {
+  disabled: boolean;
+  label: 'creating' | 'new';
+}
+
+/**
+ * `ThreadList.tsx` の「＋新規」ボタンの状態を決める。`hasRequestCreate === false`（= classic、
+ * `onRequestCreate` 未指定）のときに返る `disabled` は、既存の
+ * `!createTargetProjectId || creating || readOnly` と**完全一致**すること
+ * （テストで classic 8 パターンの真理値表一致を固定する）。
+ *
+ * `hasRequestCreate === true`（= Lite、`onRequestCreate` 指定）のときは `readOnly` を無視し
+ * `createInFlight` を使う（Lite は readOnly のまま「＋新規」だけを有効化するための入口）。
+ */
+export function decideThreadCreateButton(input: {
+  createTargetProjectId: string | null;
+  creating: boolean;
+  readOnly: boolean;
+  hasRequestCreate: boolean;
+  createInFlight: boolean;
+}): ThreadCreateButtonState {
+  if (input.hasRequestCreate) {
+    return {
+      disabled: !input.createTargetProjectId || input.createInFlight,
+      label: input.createInFlight ? 'creating' : 'new',
+    };
+  }
+  return {
+    disabled: !input.createTargetProjectId || input.creating || input.readOnly,
+    label: input.creating ? 'creating' : 'new',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 13. L4 R4/C-2: ソース静的走査用のコメント除去ヘルパー
+// ---------------------------------------------------------------------------
+
+/**
+ * ソース文字列から行コメント（`//...`）とブロックコメント（`/* ... *\/`）を除去する。
+ * 文字列リテラル（`'...'` / `"..."` / `` `...` `` ）内の `//` は保持する（誤検出防止）。
+ * 静的走査テスト（`lite-source-guards.test.mjs`）が JSDoc 中の文言（例: `//connect` への言及）を
+ * 実コードと誤認しないようにするための前処理専用。TS/JS の完全なパーサではない
+ * （ネストしたテンプレートリテラル内の `${}` 等の複雑なケースは想定しない。Lite ソースの
+ * 既知の範囲で十分な簡易実装）。
+ */
+export function stripComments(source: string): string {
+  let result = '';
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const ch = source[i];
+    const two = source.slice(i, i + 2);
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      let j = i + 1;
+      while (j < n) {
+        if (source[j] === '\\') { j += 2; continue; }
+        if (source[j] === quote) { j += 1; break; }
+        j += 1;
+      }
+      result += source.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (two === '//') {
+      let j = i + 2;
+      while (j < n && source[j] !== '\n') j += 1;
+      result += '\n';
+      i = j;
+      continue;
+    }
+    if (two === '/*') {
+      let j = i + 2;
+      while (j < n && source.slice(j, j + 2) !== '*/') j += 1;
+      i = j + 2;
+      continue;
+    }
+    result += ch;
+    i += 1;
+  }
+  return result;
+}
