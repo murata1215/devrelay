@@ -256,6 +256,13 @@ export async function createSession(
       aiTool,
       status: 'active',
       title: options?.title ?? undefined,
+      // スレッド一覧（GET /api/threads）は `lastActiveAt desc nulls last` で DB 側ソートするため、
+      // NULL のまま作られたスレッドは take の外に落ち、一覧から永久に見えなくなる（fail-closed）。
+      // そのため全 create 経路で必ず初期化する。
+      // startedAt は DB の CURRENT_TIMESTAMP、こちらは app サーバーのクロックなので数 ms ずれるが、
+      // lastActiveAt はソートキーと表示にしか使わないため影響しない。
+      // 【非不変条件】`lastActiveAt >= startedAt` は成立を仮定してはならない。
+      lastActiveAt: new Date(),
     }
   });
 

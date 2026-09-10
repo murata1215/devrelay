@@ -2082,6 +2082,7 @@ async function handleAskMember(
       projectId: targetProject.id,
       aiTool: targetProject.defaultAi,
       status: 'active',
+      lastActiveAt: new Date(),
     },
   });
 
@@ -2192,6 +2193,7 @@ async function handleTeamExec(
       projectId: targetProject.id,
       aiTool: targetProject.defaultAi,
       status: 'active',
+      lastActiveAt: new Date(),
     },
   });
 

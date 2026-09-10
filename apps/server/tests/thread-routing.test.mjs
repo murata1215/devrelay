@@ -51,6 +51,17 @@ describe('sortThreadsDesc', () => {
     sortThreadsDesc(original);
     assert.deepEqual(original.map((t) => t.id), ['a', 'b']);
   });
+
+  // GET /api/threads は DB 側で `orderBy: { lastActiveAt: { sort: 'desc', nulls: 'last' } }` を
+  // 使うようになった（server 小修正・Lite L3 申し送り）。sortThreadsDesc はその後段の防御的再ソートで、
+  // DB が正しく desc で返した配列に対しては恒等変換（no-op）になるのが正しい。
+  test('DB が lastActiveAt desc で返した配列に対しては恒等変換（防御的再ソートは no-op が正常）', () => {
+    const rows = [
+      mkThread('a', { startedAt: '2026-01-01T00:00:00Z', lastActiveAt: '2026-03-01T00:00:00Z' }),
+      mkThread('b', { startedAt: '2026-02-01T00:00:00Z', lastActiveAt: '2026-02-01T00:00:00Z' }),
+    ];
+    assert.deepEqual(sortThreadsDesc(rows).map((t) => t.id), ['a', 'b']);
+  });
 });
 
 describe('decideConnectTarget（//connect 互換）', () => {

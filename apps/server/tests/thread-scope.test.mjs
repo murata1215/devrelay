@@ -5,6 +5,7 @@ import {
   decideNewSessionScopeId,
   resolveOutboundAgentScopeId,
   inheritScopeForReestablishedSession,
+  buildEphemeralSessionIdExclusion,
 } from '../dist/services/thread-scope.js';
 
 describe('isEphemeralSessionId', () => {
@@ -14,6 +15,10 @@ describe('isEphemeralSessionId', () => {
 
   test('crossquery_ プレフィックスは一時セッション', () => {
     assert.equal(isEphemeralSessionId('crossquery_abc123'), true);
+  });
+
+  test('askdesc_ プレフィックスは一時セッション', () => {
+    assert.equal(isEphemeralSessionId('askdesc_a1b2c3'), true);
   });
 
   test('通常の cuid は一時セッションではない', () => {
@@ -27,6 +32,39 @@ describe('isEphemeralSessionId', () => {
 
   test('空文字は false', () => {
     assert.equal(isEphemeralSessionId(''), false);
+  });
+});
+
+describe('buildEphemeralSessionIdExclusion（一覧 where への展開）', () => {
+  test('NOT { OR: [...] } の形で全プレフィックスを返す', () => {
+    assert.deepEqual(buildEphemeralSessionIdExclusion(), {
+      NOT: {
+        OR: [
+          { id: { startsWith: 'teamexec_' } },
+          { id: { startsWith: 'crossquery_' } },
+          { id: { startsWith: 'askdesc_' } },
+        ],
+      },
+    });
+  });
+
+  // 単一情報源の担保: where 用フィルタと isEphemeralSessionId が同じ定数から派生していること。
+  // 片方だけにプレフィックスを足す実装ミスをここで落とす。
+  test('フィルタの各プレフィックスは isEphemeralSessionId でも true になる', () => {
+    const prefixes = buildEphemeralSessionIdExclusion().NOT.OR.map((c) => c.id.startsWith);
+    assert.ok(prefixes.length > 0);
+    for (const prefix of prefixes) {
+      assert.equal(isEphemeralSessionId(`${prefix}deadbeef`), true, prefix);
+    }
+    assert.equal(isEphemeralSessionId('clx1234567890abcdef'), false);
+  });
+
+  test('呼び出しごとに新しいオブジェクトを返す（共有ミュータブル状態を作らない）', () => {
+    const a = buildEphemeralSessionIdExclusion();
+    const b = buildEphemeralSessionIdExclusion();
+    assert.notEqual(a, b);
+    assert.notEqual(a.NOT, b.NOT);
+    assert.notEqual(a.NOT.OR, b.NOT.OR);
   });
 });
 

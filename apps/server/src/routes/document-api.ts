@@ -623,6 +623,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         projectId: targetProjectId,
         aiTool: effectiveAi,
         status: 'active',
+        lastActiveAt: new Date(),
       },
     });
 
@@ -828,6 +829,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         projectId: targetProjectId,
         aiTool: targetProject.defaultAi,
         status: 'active',
+        lastActiveAt: new Date(),
       },
     });
 

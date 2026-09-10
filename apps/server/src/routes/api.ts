@@ -12,7 +12,7 @@ import { switchChatToThread } from '../services/command-handler.js';
 import { evaluateProjectOwnership, evaluateSessionOwnership, evaluateThreadCreate, evaluateThreadSwitch } from '../services/thread-api-guard.js';
 import { validateThreadTitle } from '../services/thread-title.js';
 import { buildSessionInfoPayload, sortThreadsDesc } from '../services/thread-routing.js';
-import { isEphemeralSessionId } from '../services/thread-scope.js';
+import { buildEphemeralSessionIdExclusion } from '../services/thread-scope.js';
 import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
@@ -1553,23 +1553,43 @@ export async function apiRoutes(app: FastifyInstance) {
 
     // D3: 既定で active + ended を返す（v1 にアーカイブは無いため ended は単なる idle）。
     // 24h 掃除（index.ts）で ended になった放置スレッドも一覧から消えないようにする。
+    //
+    // 【最重要】orderBy が無いと PostgreSQL は順序を一切保証しない（実測では物理順＝最古から）。
+    // その状態で take するとページの中身が「新しい順の先頭」ではなくなり、
+    // /lite のプロジェクト横断一覧に古いゴミスレッドしか出ない、というのが元の不具合だった。
+    //
+    // 除外条件（一時セッション / ソフトデリート済み project・machine）は必ず LIMIT より
+    // 手前（= DB の where）に置く。取得後に filter すると「除外された件数だけ一覧が短くなる」
+    // 欠落バグになるため、この順序は不変条件として守ること。
     const sessions = await prisma.session.findMany({
       where: {
         userId,
         status: { in: ['active', 'ended'] },
         ...(projectId ? { projectId } : {}),
+        // ソフトデリート済みのプロジェクト / マシンに属するスレッドは一覧に出さない。
+        // machine は Session.machineId 側で見る（表示する machineName / machineOnline が
+        // s.machine 由来のため。project.machine とは別カラムで、乖離しうる）。
+        project: { deletedAt: null },
+        machine: { deletedAt: null },
+        // teamexec_ / crossquery_ / askdesc_ の一時セッションを除外。
+        // プレフィックス一覧の単一情報源は thread-scope.ts。
+        ...buildEphemeralSessionIdExclusion(),
       },
       include: {
         project: { select: { id: true, name: true } },
         machine: { select: { id: true, name: true, displayName: true } },
         _count: { select: { messages: true } },
       },
-      take: 500,
+      // lastActiveAt は nullable。backfill 済み（NULL 0 件）かつ全 create 経路で
+      // 初期化するようにしたが、万一 NULL が再発しても先頭を汚さないよう末尾に落とす。
+      orderBy: { lastActiveAt: { sort: 'desc', nulls: 'last' } },
+      take: limit,
     });
 
-    // teamexec_ / crossquery_ の一時セッションを除外（thread-scope.ts の isEphemeralSessionId が単一情報源）
-    const nonEphemeral = sessions.filter(s => !isEphemeralSessionId(s.id));
-    const sorted = sortThreadsDesc(nonEphemeral).slice(0, limit);
+    // DB 側で並び替え済み。これは `threadSortKey`（lastActiveAt ?? startedAt）との
+    // 差分を吸収する防御的な再ソートで、正常時は恒等変換になるのが正しい。
+    // 【注意】ページ内の並べ替えしかできない。DB が take の外に落とした行は復活しない。
+    const sorted = sortThreadsDesc(sessions);
 
     const connectedAgents = getConnectedAgents();
 
@@ -2403,6 +2423,7 @@ export async function apiRoutes(app: FastifyInstance) {
         projectId,
         aiTool: project.defaultAi,
         status: 'active',
+        lastActiveAt: new Date(),
       },
     });
 
