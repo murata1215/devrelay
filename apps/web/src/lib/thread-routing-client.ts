@@ -60,3 +60,56 @@ export function resolveHistorySource(input: ResolveHistorySourceInput): HistoryS
   if (input.sessionId) return { kind: 'session', id: input.sessionId };
   return { kind: 'project', id: input.projectId };
 }
+
+/**
+ * Lite シェル L3 B4: WS 受信メッセージ（`web:response` / `web:progress` 等。承認カードは含まない。
+ * 承認カードは `shouldShowApprovalCard()`（別関数、fail-closed）が唯一の例外として別ポリシーを持つ）
+ * を、今表示中のタブに表示してよいか判定する。`shouldRouteToTab` を土台にし、判定不能なときだけ
+ * projectId 比較へフォールバックする 2 段構え。
+ *
+ * 規則（終端優先）:
+ * 1. session ゲートが `drop`（両方 sessionId があって不一致）→ 非表示で終端。
+ * 2. session ゲートが `match`（両方 sessionId があって一致）→ 表示で終端。**projectId は見ない**
+ *    （クロスプロジェクト応答であっても sessionId が一致していれば信頼する）。
+ * 3. session ゲートが判定不能（`no-payload-session` / `tab-session-unknown`）のときのみ、
+ *    projectId 比較に落ちる。**両方あって不一致のときだけ**非表示。片方でも欠けていれば表示（fail-open）。
+ *
+ * 再接続時の progress 復元（`web.ts:86-89`）は `{output, elapsed, projectId}` で sessionId を
+ * 持たないため、常にこの 3. の分岐（projectId 比較）を通る。fail-open だからこそ表示される。
+ */
+export interface DecideInboundDisplayInput {
+  /** `web:response` / `web:progress` payload の sessionId。 */
+  payloadSessionId?: string | null;
+  /** 配送先タブが現在表示しているスレッドの sessionId。 */
+  tabSessionId?: string | null;
+  /** payload の projectId（sessionId 判定不能時のみ参照する）。 */
+  payloadProjectId?: string | null;
+  /** タブが現在表示しているプロジェクトの projectId（sessionId 判定不能時のみ参照する）。 */
+  tabProjectId?: string | null;
+}
+
+/** `decideInboundDisplay` の判定結果。 */
+export type InboundDisplayDecision =
+  | { display: true; reason: 'session-match' | 'project-fallback-accept' }
+  | { display: false; reason: 'session-mismatch' | 'project-mismatch' };
+
+export function decideInboundDisplay(input: DecideInboundDisplayInput): InboundDisplayDecision {
+  const sessionDecision = shouldRouteToTab({
+    payloadSessionId: input.payloadSessionId,
+    tabSessionId: input.tabSessionId,
+  });
+
+  if (sessionDecision.route === 'drop') {
+    return { display: false, reason: 'session-mismatch' };
+  }
+
+  if (sessionDecision.reason === 'match') {
+    return { display: true, reason: 'session-match' };
+  }
+
+  // ここに来るのは 'no-payload-session' / 'tab-session-unknown'（session 判定不能）のときのみ。
+  if (input.payloadProjectId && input.tabProjectId && input.payloadProjectId !== input.tabProjectId) {
+    return { display: false, reason: 'project-mismatch' };
+  }
+  return { display: true, reason: 'project-fallback-accept' };
+}

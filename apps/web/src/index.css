@@ -60,3 +60,12 @@
 body.chat-maximized nav {
   display: none !important;
 }
+
+/* Lite シェル L3 A1: ダークテーマで <select> がネイティブ描画のまま白地に白文字になる問題の修正。
+   classic のネイティブ UI 描画を変えないため :root 直下には書かず、Lite ルートにのみスコープする。 */
+.lite-root {
+  color-scheme: dark;
+}
+:root.light .lite-root {
+  color-scheme: light;
+}

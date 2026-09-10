@@ -14,6 +14,10 @@ export interface ToolApprovalPrompt {
   isQuestion?: boolean;
   /** teamexec/crossquery 時の発信元プロジェクトID（発信元タブにも承認カードを表示） */
   originProjectId?: string;
+  /** Lite シェル L3: 対象スレッドの sessionId（server サイクル4で付与済み `tool-approval-payload.ts`）。
+   * `shouldShowApprovalCard()`（`lite-shell-rules.ts`、fail-closed）の判定に使う。無いと Lite の
+   * 承認ゲートが素通りしてしまうため、classic 側は使わなくても常に受信・保持する（加算のみ）。 */
+  sessionId?: string;
 }
 
 /** ツール承認解決情報 */
@@ -90,11 +94,21 @@ function buildWsUrl(tabId: string): string {
   return `${protocol}//${host}/ws/web?token=${token}&tabId=${tabId}`;
 }
 
+/** Lite シェル L3: `useWebSocket` の optional 引数。 */
+export interface UseWebSocketOptions {
+  /** 指定時はこの tabId で WS を張る（省略時は従来どおり `getTabId()`＝classic の
+   * sessionStorage 由来の値）。Lite はマウント時にメモリ生成した tabId をここに渡す。
+   * **絶対規則**: `sessionsApi.switchThread()` に渡す tabId と必ず同一値にすること。
+   * 食い違うと「参加登録は chatId B・ソケットは chatId A」となり、エラーを一切出さずに
+   * WS が無音になる（S1/S2 参照）。 */
+  tabId?: string;
+}
+
 /**
  * Web チャット用 WebSocket 接続を管理するフック
  * メッセージ・進捗はコールバックで外部管理（タブ切り替え対応）
  */
-export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn {
+export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSocketOptions): UseWebSocketReturn {
   const [connected, setConnected] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -105,12 +119,17 @@ export function useWebSocket(callbacks?: WebSocketCallbacks): UseWebSocketReturn
   /** コールバックの最新値を常に参照するための ref */
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  /** `options.tabId` の最新値を常に参照するための ref（`connect` の依存配列を `[]` のまま保つため。
+   * 依存配列に入れると、呼び出し側が毎レンダー新しい tabId 値を作った場合に close/open の
+   * 再接続ストームになり、そのたびにサーバーで `removeWebParticipantFromAllSessions` が走る）。 */
+  const tabIdOverrideRef = useRef(options?.tabId);
+  tabIdOverrideRef.current = options?.tabId;
 
   const connect = useCallback(() => {
     const token = getToken();
     if (!token) return;
 
-    const tabId = getTabId();
+    const tabId = tabIdOverrideRef.current || getTabId();
     const url = buildWsUrl(tabId);
 
     // 既存の WS があればクリーンアップ（stale close イベント防止）

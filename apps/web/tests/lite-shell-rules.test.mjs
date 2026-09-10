@@ -15,6 +15,8 @@ import {
   containsRawWebSocketConstruction,
   decideThreadRowAction,
   buildProjectSelectorOptions,
+  filterProjectsByLiveMachines,
+  looksLikeDeletedMachineName,
 } from '../dist-test/components/lite/lite-shell-rules.js';
 // F4 pin ブロック: このモジュールのソースは無変更。既存の fail-open ゲートが Lite の前提として
 // 崩れていないことを固定する（D2: ソース変更ゼロ、cycle3 の実装を再利用する想定）。
@@ -492,5 +494,67 @@ describe('L2_FORBIDDEN_LITE_BINDINGS / L2_FORBIDDEN_LITE_MODULES（定数の内�
   test('useWebSocket / hooks/useWebSocket を含む', () => {
     assert.ok(L2_FORBIDDEN_LITE_BINDINGS.includes('useWebSocket'));
     assert.ok(L2_FORBIDDEN_LITE_MODULES.includes('hooks/useWebSocket'));
+  });
+});
+
+describe('filterProjectsByLiveMachines（L3 A2: 削除済みマシンのプロジェクトを除外する交差案）', () => {
+  const proj = (id, machineId) => ({
+    id,
+    name: `proj-${id}`,
+    machine: machineId ? { id: machineId, name: `m-${machineId}`, online: true } : null,
+  });
+
+  test('liveMachineIds が null（取得失敗・未取得）なら fail-open で入力をそのまま返す', () => {
+    const projects = [proj('p1', 'm1'), proj('p2', 'm2')];
+    const result = filterProjectsByLiveMachines(projects, null);
+    assert.deepEqual(result, projects);
+  });
+
+  test('liveMachineIds が空の Set（正常取得・生存マシン 0 件）なら machine.id を持つ行を全除外する（fail-open にしない）', () => {
+    const projects = [proj('p1', 'm1'), proj('p2', 'm2')];
+    const result = filterProjectsByLiveMachines(projects, new Set());
+    assert.deepEqual(result, []);
+  });
+
+  test('machine が不在の行は常に残す（fail-open。liveMachineIds が空でも）', () => {
+    const projects = [proj('p1', undefined)];
+    const result = filterProjectsByLiveMachines(projects, new Set());
+    assert.deepEqual(result, projects);
+  });
+
+  test('machine.id が不在の行（machine はあるが id 無し）は常に残す', () => {
+    const projects = [{ id: 'p1', name: 'proj-p1', machine: { name: 'm', online: true } }];
+    const result = filterProjectsByLiveMachines(projects, new Set());
+    assert.deepEqual(result, projects);
+  });
+
+  test('生存 id 集合に含まれる machine.id の行だけを残す（順序保存）', () => {
+    const projects = [proj('p1', 'm1'), proj('p2', 'm2'), proj('p3', 'm1')];
+    const result = filterProjectsByLiveMachines(projects, new Set(['m1']));
+    assert.deepEqual(
+      result.map((p) => p.id),
+      ['p1', 'p3']
+    );
+  });
+
+  test('入力配列を破壊しない（非破壊）', () => {
+    const projects = [proj('p1', 'm1'), proj('p2', 'm2')];
+    const before = [...projects];
+    filterProjectsByLiveMachines(projects, new Set(['m1']));
+    assert.deepEqual(projects, before);
+  });
+});
+
+describe('looksLikeDeletedMachineName（診断専用。フィルタには使わない）', () => {
+  test('`__deleted_<timestamp>` 形式に一致する', () => {
+    assert.equal(looksLikeDeletedMachineName('my-machine__deleted_1234567890'), true);
+  });
+
+  test('通常の名前には一致しない', () => {
+    assert.equal(looksLikeDeletedMachineName('my-machine'), false);
+  });
+
+  test('末尾以外に __deleted_ が含まれても数字で終わらなければ一致しない', () => {
+    assert.equal(looksLikeDeletedMachineName('my-machine__deleted_abc'), false);
   });
 });

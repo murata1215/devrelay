@@ -156,6 +156,9 @@ export interface ProjectViewSource {
   name: string;
   displayName?: string | null;
   machine?: {
+    /** L3 A2: `filterProjectsByLiveMachines()` の絞り込みキー。optional のため既存 fixture /
+     * `buildProjectSelectorOptions` 呼び出しは無改変で通る。 */
+    id?: string;
     name: string;
     displayName?: string | null;
     online: boolean;
@@ -281,9 +284,12 @@ export function findForbiddenLiteImports(
 
 /**
  * L2 固有の禁止識別子。恒久リスト（`FORBIDDEN_LITE_BINDINGS`、F5 トリップワイヤ）とは別に持つ。
- * `LitePage` は「画面は出る・切替できる・しかし通信は増やさない」の制約下にあり、L2 の間は
- * `useWebSocket` を一切使わないことを回帰テストで固定する。L3 で WS 受信を実装する際に
- * この定数の利用箇所（テスト）を更新すること（L0+L1 の申し送り参照）。
+ *
+ * L3 更新: `LitePage.tsx` は WS 受信を実装したため、この定数を `LitePage.tsx` に適用するのをやめた
+ * （`lite-source-guards.test.mjs` を参照）。ただし「`useWebSocket` の呼び出し箇所は
+ * `LitePage.tsx` の 1 箇所に限定する」という B2 の不変条件は変わらないため、この定数は
+ * `LiteHeader.tsx` / `LiteComposer.tsx` / `LiteMessageList.tsx` / `LiteApprovalCard.tsx` の
+ * 子コンポーネント側には引き続き適用し、WS 二重接続経路が増えないことを固定する。
  */
 export const L2_FORBIDDEN_LITE_BINDINGS: readonly string[] = ['useWebSocket'];
 
@@ -359,4 +365,56 @@ export function buildProjectSelectorOptions(
       online: view.online,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// 8. L3 A2: 削除済みマシンのプロジェクトを除外する（交差案）
+// ---------------------------------------------------------------------------
+
+/**
+ * `GET /api/projects` を情報源のまま維持し、`GET /api/machines` の id 集合を「生存マシンの許可
+ * リスト」として使って絞り込む（S3 の交差案）。`GET /api/projects` の where 句は
+ * `machine.deletedAt` を見ておらず、マシンのソフトデリートは名前リネームのみで Project の
+ * `deletedAt` を設定しないため、削除済みマシン配下の Project が一覧に残り続ける（`_deleted_` の
+ * 真因）。`GET /api/machines` は `where: { userId, deletedAt: null }` で既に除外済みなので、
+ * その id 集合を権威ある生存マシン一覧として使う（サーバー変更ゼロ）。
+ *
+ * `liveMachineIds` の意味論（人間の承認条件 1 により厳密化）:
+ * - `null`: `/api/machines` の取得失敗・異常応答・未取得（fetch 自体が信頼できない状態）を表す。
+ *   このときのみ fail-open で `projects` をそのまま返す（「プロジェクトが 1 つも無い」という
+ *   誤読を防ぐため）。
+ * - 空の `Set`（要素数 0）: `/api/machines` が**正常に**取得できて生存マシンが 0 件だったことを
+ *   表す。この場合は fail-open にせず、`machine.id` を持つ行はすべて除外する
+ *   （成功した取得結果は権威ある情報として扱う）。
+ *
+ * `machine` 不在 / `machine.id` 不在の行は常に残す（fail-open。判定に必要な情報がそもそも無い
+ * ケースであり、`liveMachineIds` の意味論とは独立）。順序は `projects` の並びをそのまま保持する。
+ */
+export function filterProjectsByLiveMachines<T extends ProjectViewSource>(
+  projects: readonly T[],
+  liveMachineIds: ReadonlySet<string> | null
+): readonly T[] {
+  if (liveMachineIds === null) return projects;
+  return projects.filter((p) => {
+    const machineId = p.machine?.id;
+    if (!machineId) return true;
+    return liveMachineIds.has(machineId);
+  });
+}
+
+/**
+ * 診断専用ヘルパー（フィルタには使わない）。マシン名が `looksLikeDeletedMachineName` パターン
+ * （ソフトデリート時のリネーム規則 `` `${name}__deleted_${Date.now()}` ``、`api.ts:222`）に
+ * 一致するかどうかを判定する。
+ *
+ * **フィルタとして使わない理由**（S3 参照）:
+ * 1. `displayName` はリネームされないため、UI に表示したい名前には `_deleted_` は現れない
+ *    （`name` のみがリネームされる）
+ * 2. 正当なマシン名（例: `foo__deleted_bar` というプロジェクト名）への誤爆が
+ *    「無言でプロジェクトが消える」という致命的な退行になる
+ * 3. `filterProjectsByLiveMachines()` という権威ある信号（`machine.deletedAt` 由来の id 集合）が
+ *    既にあるため、文字列推測を重ねる意味がない
+ */
+export function looksLikeDeletedMachineName(name: string): boolean {
+  return /__deleted_\d+$/.test(name);
 }

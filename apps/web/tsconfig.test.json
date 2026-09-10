@@ -19,6 +19,7 @@
   "include": [
     "src/lib/thread-list-rules.ts",
     "src/lib/thread-routing-client.ts",
-    "src/components/lite/lite-shell-rules.ts"
+    "src/components/lite/lite-shell-rules.ts",
+    "src/lib/lite-message-log.ts"
   ]
 }

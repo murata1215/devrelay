@@ -125,6 +125,18 @@ export const messages = {
   'lite.offline': { en: 'Offline', ja: 'オフライン' },
   'lite.composerPlaceholder': { en: 'Enter a message...', ja: 'メッセージを入力...' },
   'lite.projectLoadFailed': { en: 'Failed to load projects', ja: 'プロジェクト一覧の取得に失敗しました' },
+  'lite.connected': { en: 'Connected', ja: '接続済み' },
+  'lite.disconnected': { en: 'Disconnected', ja: '切断中' },
+  'lite.historyLoading': { en: 'Loading messages...', ja: 'メッセージを読み込み中...' },
+  'lite.historyLoadFailed': { en: 'Failed to load messages', ja: 'メッセージの取得に失敗しました' },
+  'lite.noMessagesYet': { en: 'No messages yet', ja: 'まだメッセージがありません' },
+  'lite.approvalPlaceholderTitle': { en: 'Approval required', ja: '承認が必要です' },
+  'lite.approvalPlaceholderBody': {
+    en: 'Please respond from the classic UI for now (approval actions are not available in Lite yet).',
+    ja: '今のところ従来 UI から応答してください（Lite では承認操作は未対応です）。',
+  },
+  'lite.approvePlaceholder': { en: 'Approve', ja: '承認' },
+  'lite.denyPlaceholder': { en: 'Deny', ja: '拒否' },
 } as const;
 
 export type TranslationKey = keyof typeof messages;

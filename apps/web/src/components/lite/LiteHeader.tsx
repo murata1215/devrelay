@@ -13,8 +13,15 @@ import { useTheme } from '../../contexts/ThemeContext';
  * B2（`/` への自動リダイレクト・localStorage によるモード永続化）は L2 で撤回された。
  * URL のみを状態とする方針のため、「従来 UI に戻る」は単なる `<Link to="/chat">` であり、
  * モードの書き込みは一切行わない。
+ *
+ * L3: `connected`（WS 接続状態）は optional prop。未指定時は L2 と完全に同一の見た目
+ * （インジケータ非表示）になる。
  */
-export function LiteHeader() {
+export interface LiteHeaderProps {
+  connected?: boolean;
+}
+
+export function LiteHeader({ connected }: LiteHeaderProps = {}) {
   const { t } = useLanguage();
   const { theme, toggleTheme } = useTheme();
 
@@ -22,6 +29,14 @@ export function LiteHeader() {
     <header className="h-12 shrink-0 flex items-center justify-between px-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]">
       <span className="text-sm font-semibold text-[var(--text-primary)]">{t('lite.title')}</span>
       <div className="flex items-center gap-2">
+        {connected !== undefined && (
+          <span className="flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+            <span
+              className={`w-2 h-2 rounded-full ${connected ? 'bg-[var(--text-success)]' : 'bg-[var(--text-danger)]'}`}
+            />
+            {connected ? t('lite.connected') : t('lite.disconnected')}
+          </span>
+        )}
         <button
           onClick={toggleTheme}
           title={theme === 'dark' ? t('nav.lightMode') : t('nav.darkMode')}
