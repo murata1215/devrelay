@@ -8,6 +8,7 @@ import { getActiveProgressForChatId, getSessionParticipants, removeWebParticipan
 import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession } from '../services/agent-manager.js';
 import { handleVoiceAssist } from '../services/voice-assist.js';
 import { buildSessionInfoPayload } from '../services/thread-routing.js';
+import { decideSessionInfoPush } from '../services/thread-reestablish.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -19,6 +20,47 @@ const typingStates = new Map<string, boolean>();
 
 /** WS 不在時の未送信レスポンスキュー: chatId -> メッセージ配列 */
 const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string; messageId?: string; sessionId?: string }>>();
+
+/**
+ * スレッド管理 サイクル6（事象2対策）: `web:command` 処理の前後で `context.currentSessionId` が
+ * 変わっていないか調べ、変わっていれば新セッションの全 web 参加者（他ブラウザタブ含む）に
+ * `web:session_info` を再送する。
+ *
+ * 対象となる3経路（いずれもこの1箇所を通ることで tab.sessionId の取りこぼしを構造的に防ぐ）:
+ * - hintProjectId フォールバック（handleProjectConnect による暗黙のプロジェクト切り替え）
+ * - handleContinue 経由の自動再接続（`command-handler.ts` の handleAiPrompt/handleExec 内部）
+ * - Agent 再確立（Fix A 適用後は同一 sessionId のままなのでここでは検知されないが、
+ *   将来 sessionId が変わる経路が復活しても自動的に拾える防御として機能する）
+ *
+ * `//connect` の明示コマンド（`text.startsWith('//connect ')`）は既に自前で `web:session_info` を
+ * 送って `break` するため、この関数の呼び出し箇所には到達しない（二重送信は発生しない）。
+ */
+async function emitSessionInfoIfChanged(userId: string, chatId: string, beforeSessionId: string | null): Promise<void> {
+  const updatedContext = await getUserContext(userId, 'web', chatId);
+  const afterSessionId = updatedContext.currentSessionId ?? null;
+  const decision = decideSessionInfoPush({ beforeSessionId, afterSessionId });
+  if (!decision.shouldPush || !afterSessionId) return;
+
+  const sessionForInfo = await prisma.session.findUnique({
+    where: { id: afterSessionId },
+    select: { title: true, agentScopeId: true, projectId: true },
+  });
+  if (!sessionForInfo) return;
+
+  const payload = buildSessionInfoPayload({
+    projectId: sessionForInfo.projectId,
+    sessionId: afterSessionId,
+    title: sessionForInfo.title,
+    agentScopeId: sessionForInfo.agentScopeId,
+  });
+
+  // 送信元タブ自身に加え、同一セッションの他 web 参加者（別ブラウザタブ）にも再送する。
+  const participants = getSessionParticipants(afterSessionId);
+  const targetChatIds = new Set<string>([chatId, ...participants.filter(p => p.platform === 'web').map(p => p.chatId)]);
+  for (const targetChatId of targetChatIds) {
+    pushSessionInfoToChat(targetChatId, payload);
+  }
+}
 
 /**
  * Web クライアントの WebSocket 接続をセットアップする
@@ -117,6 +159,9 @@ export async function setupWebClientWebSocket(
           if (!text && (!msg.payload.files || msg.payload.files.length === 0)) break;
 
           const context = await getUserContext(userId, 'web', chatId);
+          // スレッド管理 サイクル6（事象2対策）: このコマンド処理を開始する前の currentSessionId を
+          // 記録しておき、処理後に emitSessionInfoIfChanged() で変化を検知する。
+          const beforeSessionId = context.currentSessionId ?? null;
 
           // projectId ヒント: クライアントが送信した projectId とコンテキストが一致しない場合、自動切り替え
           // タブ切替直後のレースコンディションを防止（//connect が先に到着しない場合に対応）
@@ -215,6 +260,10 @@ export async function setupWebClientWebSocket(
               sendJson(ws, { type: 'web:response', payload: { message: response } });
             }
           }
+
+          // hintProjectId フォールバック（handleProjectConnect）や handleContinue 経由の
+          // 自動再接続でセッションが暗黙に切り替わっていた場合、tab.sessionId を最新化する。
+          await emitSessionInfoIfChanged(userId, chatId, beforeSessionId);
           break;
         }
         case 'web:tool:approval:response':

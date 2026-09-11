@@ -39,11 +39,11 @@ import {
   stopProgressTracking,
   sendMessage,
   getActiveSessions,
-  getSessionParticipants,
   resolveScopeOptionsForSession,
   touchSessionActivity
 } from './session-manager.js';
 import { decideConnectTarget, resolvePreferredThreadId } from './thread-routing.js';
+import { decideSessionReactivation, decideEndedRevival } from './thread-reestablish.js';
 import { getHelpText } from './command-parser.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
@@ -525,23 +525,62 @@ export async function handleProjectConnect(
     isResumed = true;
     effectiveAi = connectTarget.thread.aiTool;
   } else {
-    const lastSession = await prisma.session.findFirst({
-      where: {
-        userId: user.id,
-        projectId: project.id,
-        machineId: project.machineId,
-      },
-      orderBy: { startedAt: 'desc' },
-    });
-    effectiveAi = lastSession?.aiTool || project.defaultAi;
+    // スレッド管理 サイクル6（事象3対策）: active 候補が無い場合でも、このタブが直前に見ていた
+    // スレッド（preferredThreadId）が ended になっているだけなら新規作成せず復活させる。
+    // Agent オフライン中に clearSessionsForMachine() で全セッションが ended になった直後の
+    // //connect が「候補ゼロ→新規 Session 作成→Agent オフラインで起動失敗→空 ended セッションが
+    // 増殖する」というバグの直接原因だったため。「最新の ended」ではなく preferredThreadId に
+    // ちょうど一致する ended のみを復活対象にする（decideEndedRevival 参照。24h アイドルスイープの
+    // 対象になっている無関係な古い ended スレッドまで復活させないための制約）。
+    let revivedSessionId: string | null = null;
+    if (preferredThreadId) {
+      const endedSessions = await prisma.session.findMany({
+        where: {
+          userId: user.id,
+          projectId: project.id,
+          machineId: project.machineId,
+          status: 'ended',
+        },
+        select: { id: true },
+      });
+      const revival = decideEndedRevival({
+        preferredThreadId,
+        endedCandidateIds: endedSessions.map((s) => s.id),
+      });
+      if (revival.action === 'revive') revivedSessionId = revival.sessionId;
+    }
 
-    sessionId = await createSession(
-      user.id,
-      project.machineId,
-      project.id,
-      effectiveAi,
-      { origin: 'interactive' }
-    );
+    if (revivedSessionId) {
+      // reuse と同じ扱い: isResumed=true にすることで startAgentSession はここでは呼ばない。
+      // Agent 側の sessionInfoMap にこのセッションが無くても、次のプロンプト送信時に
+      // Agent 側の自己修復（未知 sessionId の自動初期化）または本関数と対になる
+      // handleAiPrompt/handleExec の Fix A 再確立ブロック（isAgentRestarted）が遅延初期化する。
+      const revived = await prisma.session.update({
+        where: { id: revivedSessionId },
+        data: { status: 'active', endedAt: null },
+      });
+      sessionId = revived.id;
+      isResumed = true;
+      effectiveAi = revived.aiTool;
+    } else {
+      const lastSession = await prisma.session.findFirst({
+        where: {
+          userId: user.id,
+          projectId: project.id,
+          machineId: project.machineId,
+        },
+        orderBy: { startedAt: 'desc' },
+      });
+      effectiveAi = lastSession?.aiTool || project.defaultAi;
+
+      sessionId = await createSession(
+        user.id,
+        project.machineId,
+        project.id,
+        effectiveAi,
+        { origin: 'interactive' }
+      );
+    }
   }
 
   // 前のセッションのクリーンアップ
@@ -917,7 +956,6 @@ async function handleExec(
     console.log(`🔄 [exec] Agent was restarted, re-establishing session for ${context.currentMachineId}`);
 
     stopProgressTracking(context.currentSessionId);
-    removeParticipant(context.currentSessionId, context.platform, context.chatId);
 
     const oldSession = await prisma.session.findUnique({
       where: { id: context.currentSessionId },
@@ -929,35 +967,30 @@ async function handleExec(
       return tChat(lang, 'exec.sessionInfoNotFound');
     }
 
-    // oldSession.userId を使用（context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
-    // スレッド管理 cycle1: agentScopeId は必ず旧セッションから引き継ぐ（新規採番しない。R2 対策）。
-    // 引き継がないと agent 再起動のたびにスレッドの状態ディレクトリが分裂する。
-    const newSessionId = await createSession(
-      oldSession.userId,
-      context.currentMachineId,
-      oldSession.projectId,
-      oldSession.aiTool,
-      { inheritAgentScopeId: oldSession.agentScopeId }
-    );
-    addParticipant(newSessionId, context.platform, context.chatId);
+    // スレッド管理 サイクル6（事象1対策）: interactive 経路（handleAiPrompt）と同じ理由で、
+    // 新しい Session 行は作らず同一 sessionId のまま再確立する。ended なら active に戻す。
+    const reactivation = decideSessionReactivation({ status: oldSession.status });
+    if (reactivation.shouldReactivate) {
+      await prisma.session.update({ where: { id: context.currentSessionId }, data: reactivation.data });
+    }
 
-    const { agentScopeId: reestablishedScopeId } = await resolveScopeOptionsForSession(newSessionId);
+    // 旧実装は再確立の最初に removeParticipant してから新セッションへ addParticipant していたが、
+    // 同一 sessionId のまま再利用する本実装では removeParticipant 自体が不要（むしろ一瞬でも
+    // participants から消えると、その間に届く配送を取りこぼす）。addParticipant のみで良い。
+    addParticipant(context.currentSessionId, context.platform, context.chatId);
+
+    const { agentScopeId: reestablishedScopeId } = await resolveScopeOptionsForSession(context.currentSessionId);
     await startAgentSession(
       context.currentMachineId,
-      newSessionId,
+      context.currentSessionId,
       oldSession.project.name,
       oldSession.project.path,
       oldSession.aiTool as any,
       reestablishedScopeId
     );
 
-    await updateUserContext(context.userId, context.platform, context.chatId, {
-      currentSessionId: newSessionId
-    });
-    context.currentSessionId = newSessionId;
-
     clearAgentRestarted(context.currentMachineId);
-    console.log(`✅ [exec] Session re-established: ${newSessionId}`);
+    console.log(`✅ [exec] Session re-established (same id, no fork): ${context.currentSessionId}`);
   }
 
   // Get project path from session
@@ -1737,13 +1770,10 @@ async function handleAiPrompt(
   if (isAgentRestarted(context.currentMachineId)) {
     console.log(`🔄 Agent was restarted, re-establishing session for ${context.currentMachineId}`);
 
-    // 旧セッションの全参加者を取得（新セッションへのマイグレーション用）
-    const oldParticipants = getSessionParticipants(context.currentSessionId);
-
     // 旧セッションの進捗トラッカーをクリーンアップ
     stopProgressTracking(context.currentSessionId);
 
-    // DB から旧セッションのプロジェクト情報を取得
+    // DB から対象セッションのプロジェクト情報を取得
     const oldSession = await prisma.session.findUnique({
       where: { id: context.currentSessionId },
       include: { project: true }
@@ -1754,44 +1784,35 @@ async function handleAiPrompt(
       return tChat(lang, 'exec.sessionInfoNotFound');
     }
 
-    // 新しいセッションを作成（oldSession.userId を使用。context.userId は Discord のプラットフォームID であり、DB の User ID ではない）
-    // スレッド管理 cycle1: agentScopeId は必ず旧セッションから引き継ぐ（新規採番しない。R2 対策）。
-    const newSessionId = await createSession(
-      oldSession.userId,
-      context.currentMachineId,
-      oldSession.projectId,
-      oldSession.aiTool,
-      { inheritAgentScopeId: oldSession.agentScopeId }
-    );
-
-    // 旧セッションの全参加者を新セッションにマイグレーション（他ブラウザも含む）
-    for (const p of oldParticipants) {
-      addParticipant(newSessionId, p.platform, p.chatId);
-      removeParticipant(context.currentSessionId, p.platform, p.chatId);
+    // スレッド管理 サイクル6（事象1対策）: 新しい Session 行は作らず、同一 sessionId のまま
+    // 再確立する（agentScopeId 等も一切変わらない）。`isAgentRestarted` は WS 再接続のたびに
+    // 立つため（Agent プロセス自体が再起動していなくても立つ）、毎回 createSession していた
+    // 旧実装はそれ自体が「送信が新規スレッドに入る」バグの直接原因だった。Agent 側は未知の
+    // sessionId を自動初期化する自己修復を持ち、同一 sessionId への session:start 再送は
+    // Agent 側で冪等なので、サーバー側で新規 Session を作る必要は無い。
+    const reactivation = decideSessionReactivation({ status: oldSession.status });
+    if (reactivation.shouldReactivate) {
+      await prisma.session.update({ where: { id: context.currentSessionId }, data: reactivation.data });
     }
-    // 送信者が旧セッションに含まれていなかった場合のフォールバック
-    addParticipant(newSessionId, context.platform, context.chatId);
+
+    // clearSessionsForMachine 等で participants マップから消えている可能性があるため必ず再登録する
+    // （既に登録済みでも addParticipant は重複追加しない実装のため無害）。
+    addParticipant(context.currentSessionId, context.platform, context.chatId);
 
     // Agent に server:session:start を送信（Agent 側の sessionInfoMap を初期化）
-    const { agentScopeId: reestablishedPromptScopeId } = await resolveScopeOptionsForSession(newSessionId);
+    const { agentScopeId: reestablishedPromptScopeId } = await resolveScopeOptionsForSession(context.currentSessionId);
     await startAgentSession(
       context.currentMachineId,
-      newSessionId,
+      context.currentSessionId,
       oldSession.project.name,
       oldSession.project.path,
       oldSession.aiTool as any,
       reestablishedPromptScopeId
     );
 
-    // context を新しいセッションIDで更新
-    await updateUserContext(context.userId, context.platform, context.chatId, {
-      currentSessionId: newSessionId
-    });
-    context.currentSessionId = newSessionId;
-
     // フラグをクリア（次回以降は通常フロー）
     clearAgentRestarted(context.currentMachineId);
-    console.log(`✅ Session re-established: ${newSessionId}`);
+    console.log(`✅ Session re-established (same id, no fork): ${context.currentSessionId}`);
   }
 
   // Save missed messages to DB (for history)
