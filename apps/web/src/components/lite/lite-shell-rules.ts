@@ -540,7 +540,98 @@ export function decideThreadCreateButton(input: {
 }
 
 // ---------------------------------------------------------------------------
-// 13. L4 R4/C-2: ソース静的走査用のコメント除去ヘルパー
+// 13. L4.1: 「＋新規」直後の送信先固定 + 一覧の自動再取得
+// ---------------------------------------------------------------------------
+
+/**
+ * 送信をブロックすべきか（`decideSendAction()` の `inFlight` に渡す値）を決める。
+ *
+ * 背景（L4.1 調査結論、`~/.claude/plans/nifty-watching-elephant.md`）: react-router-dom v7 の
+ * `BrowserRouter` は履歴更新を `React.startTransition` でラップするため、URL 由来の
+ * `selectedSessionId` / `selectedProjectId` は**低優先度**でコミットされるのに対し、
+ * `setThreadProjectConfirmation` / `setCreatingThread(false)` は通常優先度でコミットされる。
+ * この隙間（サーバーは新スレッドを確定させたのに URL がまだ追いついていない瞬間）に送信すると、
+ * `decideSendAction()` は `selectedThreadProjectId !== selectedProjectId` を「不一致」と誤認して
+ * `create-then-send` を選んでしまい、重複スレッドが実際に作られる。
+ *
+ * `confirmationSessionId !== null && confirmationSessionId !== urlSessionId` は通常優先度で
+ * 確実に取れる「URL がまだ追いついていない」シグナルであり、これを `inFlight` としてブロックに使う。
+ * `confirmationSessionId === null`（まだ何も確定していない。深いリンク初回ロード等）のときは
+ * ブロックしない（fail-open）。project 軸（プロジェクト切替直後）も同型のレースが起こりうるため
+ * 同じ形で判定する。
+ */
+export function resolveSendInFlight(input: {
+  sending: boolean;
+  creatingThread: boolean;
+  /** 直近でサーバーが確定したスレッドの sessionId（未確定なら null） */
+  confirmationSessionId: string | null;
+  /** URL 上の session パラメータ */
+  urlSessionId: string | null;
+  /** 直近でユーザーが選択操作したプロジェクト ID（未操作なら null） */
+  requestedProjectId: string | null;
+  /** URL 上の project パラメータ */
+  urlProjectId: string | null;
+}): boolean {
+  if (input.sending || input.creatingThread) return true;
+  if (input.confirmationSessionId !== null && input.confirmationSessionId !== input.urlSessionId) return true;
+  if (input.requestedProjectId !== null && input.requestedProjectId !== input.urlProjectId) return true;
+  return false;
+}
+
+/**
+ * プロジェクトセレクタ変更時に `threadProjectConfirmation` を捨てるべきかを決める。
+ *
+ * これを行わないと、プロジェクト切替後も古い confirmation（別プロジェクトの sessionId 由来）が
+ * 残り続け、`resolveSendInFlight()` の project 軸判定（`requestedProjectId !== urlProjectId`）とは
+ * 別に `confirmationSessionId` 由来の判定が食い違ったままになり、送信操作の見通しが悪くなる
+ * （呼び出し側は `handleProjectChange` の中でこの関数の戻り値を `setThreadProjectConfirmation` に
+ * 渡すことで、プロジェクト切替のたびに confirmation を最新のプロジェクトに揃える）。
+ */
+export function resolveConfirmationOnProjectChange(
+  confirmation: { sessionId: string; projectId: string } | null,
+  nextProjectId: string
+): { sessionId: string; projectId: string } | null {
+  if (!confirmation) return null;
+  if (confirmation.projectId === nextProjectId) return confirmation;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// 14. L4.1: スレッド一覧再取得のスロットリング（ポーリングの代替）
+// ---------------------------------------------------------------------------
+
+/** 一覧再取得の最短間隔（ms）。leading + trailing throttle に使う。 */
+export const THREAD_REFRESH_MIN_INTERVAL_MS = 1500;
+
+export type ThreadListRefreshDecision =
+  | { kind: 'refresh-now' }
+  | { kind: 'schedule'; delayMs: number }
+  | { kind: 'skip' };
+
+/**
+ * スレッド一覧の再取得トリガー（作成成功後・送信成功後・WS `web:session_info`/`web:user_message`/
+ * `web:response` 受信時・タブ復帰時）が短時間に連続したときの合体を決める（leading + trailing
+ * throttle）。**ポーリングではない**: `now` は呼び出し側で実際にトリガーが発生した時刻であり、
+ * この関数自体がタイマーで能動的に呼び出されることは無い（`setInterval` を使わないことは
+ * `lite-source-guards.test.mjs` で静的に固定する）。
+ */
+export function decideThreadListRefresh(input: {
+  /** 呼び出し時点の時刻（`Date.now()`） */
+  now: number;
+  /** 直近に実際に再取得を実行した時刻。まだ 1 度も実行していなければ null */
+  lastRefreshAt: number | null;
+  /** 既に trailing 用のタイマーを仕込み済みかどうか（二重スケジュール防止） */
+  pendingTimer: boolean;
+}): ThreadListRefreshDecision {
+  if (input.lastRefreshAt === null) return { kind: 'refresh-now' };
+  const elapsed = input.now - input.lastRefreshAt;
+  if (elapsed >= THREAD_REFRESH_MIN_INTERVAL_MS) return { kind: 'refresh-now' };
+  if (input.pendingTimer) return { kind: 'skip' };
+  return { kind: 'schedule', delayMs: THREAD_REFRESH_MIN_INTERVAL_MS - elapsed };
+}
+
+// ---------------------------------------------------------------------------
+// 15. L4 R4/C-2: ソース静的走査用のコメント除去ヘルパー
 // ---------------------------------------------------------------------------
 
 /**

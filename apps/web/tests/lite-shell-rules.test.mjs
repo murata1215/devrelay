@@ -23,6 +23,10 @@ import {
   shouldShowNewThreadNotice,
   decideThreadCreateButton,
   stripComments,
+  resolveSendInFlight,
+  resolveConfirmationOnProjectChange,
+  decideThreadListRefresh,
+  THREAD_REFRESH_MIN_INTERVAL_MS,
 } from '../dist-test/components/lite/lite-shell-rules.js';
 // F4 pin ブロック: このモジュールのソースは無変更。既存の fail-open ゲートが Lite の前提として
 // 崩れていないことを固定する（D2: ソース変更ゼロ、cycle3 の実装を再利用する想定）。
@@ -822,5 +826,198 @@ describe('stripComments（R4/C-2: ソース静的走査用のコメント除去�
   test('コメントの無いソースはそのまま（改行構造以外は不変）', () => {
     const src = 'const a = 1;\nconst b = 2;';
     assert.equal(stripComments(src), src);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L4.1: 「＋新規」直後の送信先固定 + 一覧の自動再取得
+// ---------------------------------------------------------------------------
+
+describe('resolveSendInFlight（startTransition レース対策の核心）', () => {
+  const base = {
+    sending: false,
+    creatingThread: false,
+    confirmationSessionId: null,
+    urlSessionId: null,
+    requestedProjectId: null,
+    urlProjectId: null,
+  };
+
+  test('sending 単独で true', () => {
+    assert.equal(resolveSendInFlight({ ...base, sending: true }), true);
+  });
+
+  test('creatingThread 単独で true', () => {
+    assert.equal(resolveSendInFlight({ ...base, creatingThread: true }), true);
+  });
+
+  test('「＋新規」直後: confirmation は新 sessionId、URL はまだ旧値 → true（重複スレッド作成レースの核心）', () => {
+    const result = resolveSendInFlight({
+      ...base,
+      confirmationSessionId: 'new-session',
+      urlSessionId: 'old-session-or-null',
+    });
+    assert.equal(result, true);
+  });
+
+  test('URL が追いついた後（confirmation と urlSessionId が一致）→ false', () => {
+    const result = resolveSendInFlight({
+      ...base,
+      confirmationSessionId: 'sess-1',
+      urlSessionId: 'sess-1',
+    });
+    assert.equal(result, false);
+  });
+
+  test('confirmationSessionId が null（未確定・深いリンク初回ロード等）→ fail-open で false', () => {
+    const result = resolveSendInFlight({
+      ...base,
+      confirmationSessionId: null,
+      urlSessionId: 'sess-1',
+    });
+    assert.equal(result, false);
+  });
+
+  test('project 軸: requestedProjectId と urlProjectId が不一致なら true', () => {
+    const result = resolveSendInFlight({
+      ...base,
+      requestedProjectId: 'p-new',
+      urlProjectId: 'p-old',
+    });
+    assert.equal(result, true);
+  });
+
+  test('project 軸: requestedProjectId が urlProjectId に追いつけば false', () => {
+    const result = resolveSendInFlight({
+      ...base,
+      requestedProjectId: 'p1',
+      urlProjectId: 'p1',
+    });
+    assert.equal(result, false);
+  });
+
+  test('requestedProjectId が null（未操作）→ fail-open で project 軸はブロックしない', () => {
+    const result = resolveSendInFlight({
+      ...base,
+      requestedProjectId: null,
+      urlProjectId: 'p1',
+    });
+    assert.equal(result, false);
+  });
+
+  test('両軸 null・sending/creatingThread も false → false（fail-open の総合確認）', () => {
+    assert.equal(resolveSendInFlight(base), false);
+  });
+
+  test('session 軸と project 軸が両方追いついていれば false（通常状態）', () => {
+    const result = resolveSendInFlight({
+      sending: false,
+      creatingThread: false,
+      confirmationSessionId: 'sess-1',
+      urlSessionId: 'sess-1',
+      requestedProjectId: 'p1',
+      urlProjectId: 'p1',
+    });
+    assert.equal(result, false);
+  });
+});
+
+describe('resolveConfirmationOnProjectChange（プロジェクト切替時の confirmation クリア）', () => {
+  test('同一 projectId なら confirmation をそのまま保持する', () => {
+    const confirmation = { sessionId: 's1', projectId: 'p1' };
+    assert.equal(resolveConfirmationOnProjectChange(confirmation, 'p1'), confirmation);
+  });
+
+  test('異なる projectId なら null にする（必須: 無いと送信が永久ブロックされる）', () => {
+    const confirmation = { sessionId: 's1', projectId: 'p1' };
+    assert.equal(resolveConfirmationOnProjectChange(confirmation, 'p2'), null);
+  });
+
+  test('confirmation が null なら null のまま', () => {
+    assert.equal(resolveConfirmationOnProjectChange(null, 'p1'), null);
+  });
+});
+
+describe('decideThreadListRefresh（一覧再取得のスロットリング。ポーリングではない）', () => {
+  test('初回（lastRefreshAt が null）は常に refresh-now', () => {
+    const result = decideThreadListRefresh({ now: 1000, lastRefreshAt: null, pendingTimer: false });
+    assert.deepEqual(result, { kind: 'refresh-now' });
+  });
+
+  test('窓外（経過時間が最短間隔以上）なら refresh-now', () => {
+    const result = decideThreadListRefresh({
+      now: 10000,
+      lastRefreshAt: 10000 - THREAD_REFRESH_MIN_INTERVAL_MS,
+      pendingTimer: false,
+    });
+    assert.deepEqual(result, { kind: 'refresh-now' });
+  });
+
+  test('窓内・pendingTimer 無し → schedule（残り時間を返す）', () => {
+    const lastRefreshAt = 10000;
+    const now = lastRefreshAt + 500;
+    const result = decideThreadListRefresh({ now, lastRefreshAt, pendingTimer: false });
+    assert.deepEqual(result, { kind: 'schedule', delayMs: THREAD_REFRESH_MIN_INTERVAL_MS - 500 });
+  });
+
+  test('窓内・pendingTimer 有り → skip（二重スケジュール防止）', () => {
+    const result = decideThreadListRefresh({
+      now: 10500,
+      lastRefreshAt: 10000,
+      pendingTimer: true,
+    });
+    assert.deepEqual(result, { kind: 'skip' });
+  });
+
+  test('境界: 経過時間がちょうど最短間隔 → refresh-now', () => {
+    const lastRefreshAt = 10000;
+    const now = lastRefreshAt + THREAD_REFRESH_MIN_INTERVAL_MS;
+    const result = decideThreadListRefresh({ now, lastRefreshAt, pendingTimer: false });
+    assert.deepEqual(result, { kind: 'refresh-now' });
+  });
+});
+
+describe('decideSendAction（「＋新規 直後」の送信先固定を回帰テストとして固定、指示項目1）', () => {
+  test('「＋新規」で作られた新スレッドが選択中で、送信先プロジェクトも同一なら send-existing（新スレッドの sessionId を維持）', () => {
+    const action = decideSendAction({
+      selectedSessionId: 'new-session-from-plus-button',
+      selectedThreadProjectId: 'p1',
+      selectedProjectId: 'p1',
+      tabId: 't1',
+      machineOnline: true,
+      connected: true,
+      hasText: true,
+      hasFiles: false,
+      inFlight: false,
+    });
+    assert.deepEqual(action, {
+      kind: 'send-existing',
+      sessionId: 'new-session-from-plus-button',
+      sendProjectIdHint: 'p1',
+    });
+  });
+
+  test('上と同じ状況でも resolveSendInFlight が true を返す窓（URL 未追従）では in-flight で blocked になる', () => {
+    const inFlight = resolveSendInFlight({
+      sending: false,
+      creatingThread: false,
+      confirmationSessionId: 'new-session-from-plus-button',
+      urlSessionId: null, // URL がまだ追いついていない
+      requestedProjectId: null,
+      urlProjectId: null,
+    });
+    assert.equal(inFlight, true);
+    const action = decideSendAction({
+      selectedSessionId: 'new-session-from-plus-button',
+      selectedThreadProjectId: 'p1',
+      selectedProjectId: 'p1',
+      tabId: 't1',
+      machineOnline: true,
+      connected: true,
+      hasText: true,
+      hasFiles: false,
+      inFlight,
+    });
+    assert.deepEqual(action, { kind: 'blocked', reason: 'in-flight' });
   });
 });

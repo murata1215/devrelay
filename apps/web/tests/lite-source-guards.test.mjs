@@ -249,6 +249,81 @@ describe('lite-source-guards: A3（並び順）の防波堤 — ThreadList.tsx �
   });
 });
 
+// L4.1: 「＋新規」直後の送信先固定（startTransition レース対策）+ 一覧の自動再取得。
+// ChatPage.tsx / ThreadList.tsx / LiteComposer.tsx / useWebSocket.ts はプランの制約により無変更
+// （このファイルでは変更しないことの直接ガードは置かず、`git diff --stat` の確認に委ねる）。
+describe('lite-source-guards: L4.1 送信先固定（resolveSendInFlight）の配線固定', () => {
+  test('resolveSendInFlight( の呼び出しがちょうど 2 箇所（currentSendAction と handleSend。コメント中の言及は除く）', () => {
+    const source = stripComments(readLiteSource(LITE_PAGE_PATH));
+    const matches = source.match(/\bresolveSendInFlight\s*\(/g) ?? [];
+    assert.equal(matches.length, 2);
+  });
+
+  test('inFlight: sending という素の値渡し（startTransition レースを塞がない古い書き方）が残っていない', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.equal(/inFlight\s*:\s*sending\b/.test(source), false);
+  });
+
+  test('inFlight: sendingRef.current という素の値渡し（同上）が残っていない', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.equal(/inFlight\s*:\s*sendingRef\.current\b/.test(source), false);
+  });
+
+  test('decideSendAction( の呼び出しがちょうど 2 箇所（currentSendAction と handleSend。コメント中の言及は除く）', () => {
+    const source = stripComments(readLiteSource(LITE_PAGE_PATH));
+    const matches = source.match(/\bdecideSendAction\s*\(/g) ?? [];
+    assert.equal(matches.length, 2);
+  });
+
+  test('resolveConfirmationOnProjectChange( を handleProjectChange 内で使っている（プロジェクト切替時の confirmation クリア）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.match(source, /\bresolveConfirmationOnProjectChange\s*\(/);
+  });
+});
+
+describe('lite-source-guards: L4.1 スレッド一覧の自動再取得（ポーリング禁止）の配線固定', () => {
+  test('<ThreadList 使用箇所に refreshToken が渡っている', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const match = source.match(/<ThreadList[\s\S]*?\/>/);
+    assert.ok(match, '<ThreadList ... /> が見つからない');
+    assert.match(match[0], /\brefreshToken\s*=/);
+  });
+
+  test('onSessionInfo が useWebSocket の呼び出しに存在する（WS 受信での再取得トリガ）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.match(source, /\bonSessionInfo\s*:/);
+  });
+
+  test('onReconnect が useWebSocket の呼び出しに存在する（再接続時の再取得トリガ）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.match(source, /\bonReconnect\s*:/);
+  });
+
+  test('decideThreadListRefresh( を使っている（一覧再取得のスロットリング）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.match(source, /\bdecideThreadListRefresh\s*\(/);
+  });
+
+  test('setInterval( が 0 件（ポーリング禁止。可視化復帰/WS受信/作成後/送信後のイベント駆動のみ）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const matches = source.match(/\bsetInterval\s*\(/g) ?? [];
+    assert.equal(matches.length, 0);
+  });
+
+  test('setSearchParams( の呼び出しがちょうど 4 箇所のまま（増えていたら session_info→setSearchParams の無限ループ経路を疑う）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const matches = source.match(/\bsetSearchParams\s*\(/g) ?? [];
+    assert.equal(matches.length, 4);
+  });
+
+  test('handleSessionInfo（onSessionInfo のコールバック本体）が setSearchParams を呼んでいない（無限ループ防止）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    const match = source.match(/const handleSessionInfo\s*=\s*useCallback\(\(\)\s*=>\s*\{[\s\S]*?\},\s*\[[^\]]*\]\);/);
+    assert.ok(match, 'handleSessionInfo の定義が見つからない');
+    assert.equal(match[0].includes('setSearchParams'), false);
+  });
+});
+
 describe('lite-source-guards: lite-message-log.ts のビルド設定回帰検知', () => {
   test('lite-message-log.ts の import 文が 0 件（外部 import ゼロの不変条件）', () => {
     const source = readFileSync(path.join(webRoot, 'src/lib/lite-message-log.ts'), 'utf8');
