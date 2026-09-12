@@ -803,3 +803,102 @@ export function decideApprovalRespond(
   if (!input.connected) return { kind: 'blocked', reason: 'disconnected' };
   return { kind: 'send', requestId: input.requestId, behavior };
 }
+
+// ---------------------------------------------------------------------------
+// 17. L5.0.1: 承認カードに表示する「実行内容」の要約
+// ---------------------------------------------------------------------------
+
+/** command / file_path 等の本文の上限。カード側は max-h + スクロールなので長めに許す。 */
+export const LITE_APPROVAL_INPUT_MAX_CHARS = 2000;
+/** 未知ツールの JSON フォールバックの上限（classic の 120 より少し広い程度に留める）。 */
+export const LITE_APPROVAL_JSON_MAX_CHARS = 400;
+
+export type LiteApprovalInputKind = 'command' | 'path' | 'pattern' | 'json';
+
+export interface LiteApprovalInputSummary {
+  readonly kind: LiteApprovalInputKind;
+  /** 既に上限で切り詰め済みの本文。呼び出し側はそのまま描画してよい。 */
+  readonly text: string;
+  /** 切り詰めが発生したか（カード側で省略記号を足す判断に使う）。 */
+  readonly truncated: boolean;
+}
+
+/** `toolInput` が非 null のプレーンオブジェクト（配列でない）かどうか。 */
+function isPlainInputObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 非空文字列なら string、それ以外は undefined。fail-open のための共通ガード。 */
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** 上限で切り詰め、`truncated` フラグを添える。省略記号はここでは付与しない（描画側の責務）。 */
+function truncateSummary(kind: LiteApprovalInputKind, text: string, max: number): LiteApprovalInputSummary {
+  if (text.length > max) {
+    return { kind, text: text.slice(0, max), truncated: true };
+  }
+  return { kind, text, truncated: false };
+}
+
+/**
+ * classic `ChatPage.tsx` の `formatInput()`（428-444行）と**同じフィールド・同じ優先順位**で
+ * 承認カードの「実行内容」を要約する。推測で別フィールドを使わない。
+ *
+ * fail-open: 判定に失敗しても例外を投げず `null` を返す（呼び出し側は `null` なら従来どおり
+ * ツール名+定型文のみを表示する）。markdown/HTML 解釈は行わない（プレーンテキストの `text` を
+ * 返すのみで、描画方法は呼び出し側の責務）。
+ *
+ * 引数は `ToolApprovalPrompt` を直接 import せず構造型で受け取る（このファイルの外部 import
+ * ゼロ方針を維持するため）。`ToolApprovalPrompt` は構造的に適合するのでそのまま渡せる。
+ */
+export function summarizeApprovalInput(
+  prompt: { toolName?: unknown; toolInput?: unknown },
+  limits?: { maxChars?: number; jsonMaxChars?: number }
+): LiteApprovalInputSummary | null {
+  const toolInput = prompt.toolInput;
+  if (!isPlainInputObject(toolInput)) return null;
+
+  const toolName = typeof prompt.toolName === 'string' ? prompt.toolName : undefined;
+  const maxChars = limits?.maxChars ?? LITE_APPROVAL_INPUT_MAX_CHARS;
+  const jsonMaxChars = limits?.jsonMaxChars ?? LITE_APPROVAL_JSON_MAX_CHARS;
+
+  if (toolName === 'Bash') {
+    const command = asNonEmptyString(toolInput.command);
+    if (command !== undefined) return truncateSummary('command', command, maxChars);
+  }
+
+  if (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') {
+    const filePath = asNonEmptyString(toolInput.file_path);
+    if (filePath !== undefined) return truncateSummary('path', filePath, maxChars);
+  }
+
+  if (toolName === 'NotebookEdit') {
+    const notebookPath = asNonEmptyString(toolInput.notebook_path) ?? asNonEmptyString(toolInput.file_path);
+    if (notebookPath !== undefined) return truncateSummary('path', notebookPath, maxChars);
+  }
+
+  if (toolName === 'Glob') {
+    const pattern = asNonEmptyString(toolInput.pattern);
+    if (pattern !== undefined) return truncateSummary('pattern', pattern, maxChars);
+  }
+
+  if (toolName === 'Grep') {
+    const pattern = asNonEmptyString(toolInput.pattern);
+    if (pattern !== undefined) {
+      const path = asNonEmptyString(toolInput.path);
+      const text = path !== undefined ? `${pattern} in ${path}` : pattern;
+      return truncateSummary('pattern', text, maxChars);
+    }
+  }
+
+  // その他: JSON 表示（classic と同じフォールバック）。循環参照等で throw しうるため try/catch。
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(toolInput);
+  } catch {
+    json = undefined;
+  }
+  if (!json || json === '{}') return null;
+  return truncateSummary('json', json, jsonMaxChars);
+}

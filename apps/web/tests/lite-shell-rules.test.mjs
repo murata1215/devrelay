@@ -34,6 +34,9 @@ import {
   canRespondToApproval,
   decideApprovalRespond,
   LITE_APPROVAL_MAX_ENTRIES,
+  summarizeApprovalInput,
+  LITE_APPROVAL_INPUT_MAX_CHARS,
+  LITE_APPROVAL_JSON_MAX_CHARS,
 } from '../dist-test/components/lite/lite-shell-rules.js';
 // F4 pin ブロック: このモジュールのソースは無変更。既存の fail-open ゲートが Lite の前提として
 // 崩れていないことを固定する（D2: ソース変更ゼロ、cycle3 の実装を再利用する想定）。
@@ -1186,5 +1189,143 @@ describe('decideApprovalRespond（送信可否の優先順位: 二重送信済�
       'deny'
     );
     assert.deepEqual(result, { kind: 'blocked', reason: 'disconnected' });
+  });
+});
+
+describe('summarizeApprovalInput（L5.0.1: classic formatInput() と同じフィールド・優先順位で実行内容を要約）', () => {
+  test('Bash + command（非空文字列）→ kind: command、そのままの文字列', () => {
+    const result = summarizeApprovalInput({ toolName: 'Bash', toolInput: { command: 'rm -v /tmp/x.txt' } });
+    assert.deepEqual(result, { kind: 'command', text: 'rm -v /tmp/x.txt', truncated: false });
+  });
+
+  test('Bash + command に改行を含む → そのまま保持される（改行を潰さない）', () => {
+    const result = summarizeApprovalInput({ toolName: 'Bash', toolInput: { command: 'line1\nline2' } });
+    assert.equal(result.text, 'line1\nline2');
+  });
+
+  test('Bash + command が空文字 → JSON フォールバックへ落ちる', () => {
+    const result = summarizeApprovalInput({ toolName: 'Bash', toolInput: { command: '' } });
+    assert.deepEqual(result, { kind: 'json', text: '{"command":""}', truncated: false });
+  });
+
+  test('Bash + command が非 string（数値） → JSON フォールバックへ落ちる', () => {
+    const result = summarizeApprovalInput({ toolName: 'Bash', toolInput: { command: 42 } });
+    assert.deepEqual(result, { kind: 'json', text: '{"command":42}', truncated: false });
+  });
+
+  for (const toolName of ['Read', 'Write', 'Edit', 'MultiEdit']) {
+    test(`${toolName} + file_path（非空文字列） → kind: path`, () => {
+      const result = summarizeApprovalInput({ toolName, toolInput: { file_path: '/opt/devrelay/foo.ts' } });
+      assert.deepEqual(result, { kind: 'path', text: '/opt/devrelay/foo.ts', truncated: false });
+    });
+  }
+
+  test('Edit の old_string/new_string は text に含まれない（差分非表示の固定、要件1）', () => {
+    const result = summarizeApprovalInput({
+      toolName: 'Edit',
+      toolInput: { file_path: '/a.ts', old_string: 'SECRET_OLD', new_string: 'SECRET_NEW' },
+    });
+    assert.equal(result.text, '/a.ts');
+    assert.equal(result.text.includes('SECRET_OLD'), false);
+    assert.equal(result.text.includes('SECRET_NEW'), false);
+  });
+
+  test('MultiEdit は classic の formatInput() に分岐が無いが、file_path が文字列なら path として表示する（要件1の明示要求）', () => {
+    const result = summarizeApprovalInput({ toolName: 'MultiEdit', toolInput: { file_path: '/b.ts', edits: [{ old_string: 'x', new_string: 'y' }] } });
+    assert.deepEqual(result, { kind: 'path', text: '/b.ts', truncated: false });
+  });
+
+  test('NotebookEdit + notebook_path → kind: path', () => {
+    const result = summarizeApprovalInput({ toolName: 'NotebookEdit', toolInput: { notebook_path: '/n.ipynb' } });
+    assert.deepEqual(result, { kind: 'path', text: '/n.ipynb', truncated: false });
+  });
+
+  test('NotebookEdit + notebook_path が無く file_path のみ → kind: path（フォールバック）', () => {
+    const result = summarizeApprovalInput({ toolName: 'NotebookEdit', toolInput: { file_path: '/n2.ipynb' } });
+    assert.deepEqual(result, { kind: 'path', text: '/n2.ipynb', truncated: false });
+  });
+
+  test('Glob + pattern → kind: pattern', () => {
+    const result = summarizeApprovalInput({ toolName: 'Glob', toolInput: { pattern: '**/*.ts' } });
+    assert.deepEqual(result, { kind: 'pattern', text: '**/*.ts', truncated: false });
+  });
+
+  test('Grep + pattern のみ → pattern 単独', () => {
+    const result = summarizeApprovalInput({ toolName: 'Grep', toolInput: { pattern: 'foo' } });
+    assert.deepEqual(result, { kind: 'pattern', text: 'foo', truncated: false });
+  });
+
+  test('Grep + pattern + path → classic と同一文字列 "pattern in path"', () => {
+    const result = summarizeApprovalInput({ toolName: 'Grep', toolInput: { pattern: 'foo', path: '/tmp' } });
+    assert.deepEqual(result, { kind: 'pattern', text: 'foo in /tmp', truncated: false });
+  });
+
+  test('未知ツール → JSON.stringify(toolInput) と一致（kind: json）', () => {
+    const result = summarizeApprovalInput({ toolName: 'WebFetch', toolInput: { url: 'https://example.com' } });
+    assert.deepEqual(result, { kind: 'json', text: JSON.stringify({ url: 'https://example.com' }), truncated: false });
+  });
+
+  test('toolName が未指定でも throw せず JSON フォールバックへ落ちる', () => {
+    const result = summarizeApprovalInput({ toolInput: { foo: 'bar' } });
+    assert.deepEqual(result, { kind: 'json', text: '{"foo":"bar"}', truncated: false });
+  });
+
+  test('toolName が非 string でも throw せず JSON フォールバックへ落ちる', () => {
+    const result = summarizeApprovalInput({ toolName: 123, toolInput: { foo: 'bar' } });
+    assert.deepEqual(result, { kind: 'json', text: '{"foo":"bar"}', truncated: false });
+  });
+
+  test('toolInput が null → null（fail-open）', () => {
+    assert.equal(summarizeApprovalInput({ toolName: 'Bash', toolInput: null }), null);
+  });
+
+  test('toolInput が undefined → null（fail-open）', () => {
+    assert.equal(summarizeApprovalInput({ toolName: 'Bash' }), null);
+  });
+
+  test('toolInput が配列 → null（fail-open、プレーンオブジェクトのみ許容）', () => {
+    assert.equal(summarizeApprovalInput({ toolName: 'Bash', toolInput: ['x'] }), null);
+  });
+
+  test('toolInput が文字列 → null（fail-open）', () => {
+    assert.equal(summarizeApprovalInput({ toolName: 'Bash', toolInput: 'not-an-object' }), null);
+  });
+
+  test('toolInput が {} → null（JSON フォールバックが空オブジェクトを意味のある表示にしない）', () => {
+    assert.equal(summarizeApprovalInput({ toolName: 'Unknown', toolInput: {} }), null);
+  });
+
+  test('循環参照オブジェクト → throw せず null を返す（fail-open）', () => {
+    const circular = {};
+    circular.self = circular;
+    assert.doesNotThrow(() => summarizeApprovalInput({ toolName: 'Unknown', toolInput: circular }));
+    assert.equal(summarizeApprovalInput({ toolName: 'Unknown', toolInput: circular }), null);
+  });
+
+  test('長い command（maxChars 超）→ maxChars ちょうどに切り詰め、truncated: true', () => {
+    const long = 'x'.repeat(10);
+    const result = summarizeApprovalInput({ toolName: 'Bash', toolInput: { command: long } }, { maxChars: 5 });
+    assert.deepEqual(result, { kind: 'command', text: 'xxxxx', truncated: true });
+  });
+
+  test('ちょうど maxChars の長さ → truncated: false', () => {
+    const exact = 'x'.repeat(5);
+    const result = summarizeApprovalInput({ toolName: 'Bash', toolInput: { command: exact } }, { maxChars: 5 });
+    assert.deepEqual(result, { kind: 'command', text: 'xxxxx', truncated: false });
+  });
+
+  test('jsonMaxChars の上書きが JSON フォールバックに効く', () => {
+    const result = summarizeApprovalInput(
+      { toolName: 'Unknown', toolInput: { a: 'x'.repeat(20) } },
+      { jsonMaxChars: 10 }
+    );
+    assert.equal(result.kind, 'json');
+    assert.equal(result.text.length, 10);
+    assert.equal(result.truncated, true);
+  });
+
+  test('既定の上限定数は正の整数', () => {
+    assert.ok(Number.isInteger(LITE_APPROVAL_INPUT_MAX_CHARS) && LITE_APPROVAL_INPUT_MAX_CHARS > 0);
+    assert.ok(Number.isInteger(LITE_APPROVAL_JSON_MAX_CHARS) && LITE_APPROVAL_JSON_MAX_CHARS > 0);
   });
 });

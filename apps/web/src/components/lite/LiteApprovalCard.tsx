@@ -1,6 +1,6 @@
 import { useLanguage } from '../../contexts/LanguageContext';
 import type { ToolApprovalPrompt } from '../../hooks/useWebSocket';
-import type { LiteApprovalStatus } from './lite-shell-rules';
+import { summarizeApprovalInput, type LiteApprovalStatus } from './lite-shell-rules';
 
 /**
  * Lite シェル L5: 承認/質問カード。**内部 state を一切持たない受動コンポーネント**（D6）。
@@ -30,6 +30,7 @@ export interface LiteApprovalCardProps {
 export function LiteApprovalCard({ prompt, onRespond, status }: LiteApprovalCardProps) {
   const { t } = useLanguage();
   const responded = (status ?? 'pending') !== 'pending';
+  const summary = summarizeApprovalInput(prompt);
 
   return (
     <div className="mx-3 my-2 shrink-0 rounded border border-[var(--border-danger)] bg-[var(--bg-danger)] p-3 text-sm">
@@ -37,6 +38,12 @@ export function LiteApprovalCard({ prompt, onRespond, status }: LiteApprovalCard
       <div className="mt-1 text-[var(--text-secondary)]">{prompt.title ?? prompt.toolName}</div>
       {prompt.description && (
         <div className="mt-1 text-xs text-[var(--text-muted)] whitespace-pre-wrap">{prompt.description}</div>
+      )}
+      {summary && (
+        <div className="mt-2 text-xs font-mono text-[var(--text-secondary)] bg-black/5 dark:bg-white/10 rounded px-2 py-1 max-h-40 overflow-y-auto break-all whitespace-pre-wrap">
+          {summary.text}
+          {summary.truncated ? '\u2026' : ''}
+        </div>
       )}
       <div className="mt-2 text-xs text-[var(--text-faint)]">
         {!onRespond

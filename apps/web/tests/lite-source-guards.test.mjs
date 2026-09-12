@@ -374,3 +374,21 @@ describe('lite-source-guards: lite-message-log.ts のビルド設定回帰検知
     );
   });
 });
+
+describe('lite-source-guards: L5.0.1 承認カードの実行内容表示（配線固定 + 恒久禁止事項）', () => {
+  test('LiteApprovalCard.tsx が summarizeApprovalInput( を呼んでいる（実行内容描画の配線固定）', () => {
+    const source = readLiteSource('src/components/lite/LiteApprovalCard.tsx');
+    assert.match(source, /\bsummarizeApprovalInput\s*\(/);
+  });
+
+  test('LiteApprovalCard.tsx に dangerouslySetInnerHTML が現れない（markdown/HTML 解釈禁止の恒久固定）', () => {
+    const source = readLiteSource('src/components/lite/LiteApprovalCard.tsx');
+    assert.equal(source.includes('dangerouslySetInnerHTML'), false);
+  });
+
+  test('LiteApprovalCard.tsx に useState/useReducer が現れない（受動コンポーネント性質の維持、D6）', () => {
+    const source = readLiteSource('src/components/lite/LiteApprovalCard.tsx');
+    assert.equal(/\buseState\s*\(/.test(source), false);
+    assert.equal(/\buseReducer\s*\(/.test(source), false);
+  });
+});
