@@ -1378,7 +1378,22 @@ export function executeCrossProjectQuery(
     startSession(machineId, sessionId, projectName, projectPath, aiTool);
     // 少し待ってからプロンプト送信（セッション登録のタイミング確保）
     setTimeout(() => {
-      sendPromptToAgent(machineId, sessionId, prompt, userId);
+      // プランモード書き込みゲート穴の根治: ask（クロスプロジェクトクエリ）経由も
+      // permissionPolicy 未指定のまま 'interactive' に落ちていた穴を塞ぎ、strictReadonly を明示送信する。
+      sendPromptToAgent(
+        machineId,
+        sessionId,
+        prompt,
+        userId,
+        undefined, // files
+        undefined, // missedMessages
+        undefined, // projectPath: startSession 側で既に確立済み
+        undefined, // aiTool: startSession 側で既に確立済み
+        undefined, // forceNewSession
+        undefined, // model
+        undefined, // language
+        resolvePermissionPolicy('ask'),
+      );
     }, 500);
   });
 }

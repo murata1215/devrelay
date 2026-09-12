@@ -1326,22 +1326,23 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: request.toolName, toolInput: request.toolInput, status: 'pending' });
   };
 
-  // 自動承認通知（exec モードの approveAllMode、または #332 の plan strictReadonly で
-  // WebUI の Approvals タブに履歴表示する用。plan モードでも記録するよう #332 で拡張）
-  if (!usePlanMode || strictReadonly) {
-    sendOptions.onAutoApproved = (info) => {
-      sendMessage({
-        type: 'agent:tool:approval:auto',
-        payload: {
-          ...info,
-          machineId: currentMachineId || currentConfig!.machineId,
-          sessionId,
-        },
-      });
-      // JSONL ファイルログ
-      appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: info.toolName, toolInput: info.toolInput, status: 'auto' });
-    };
-  }
+  // 自動承認通知（exec モードの approveAllMode、#332 の plan strictReadonly、または
+  // strictReadonly=false の plan allow で WebUI の Approvals タブに履歴表示する用。
+  // プランモード書き込みゲート穴の根治サイクルで無条件配線に変更: 09:41 の Write 無承認成功が
+  // 「Approvals タブにも一切残らず不可視だった」問題（旧 !usePlanMode || strictReadonly ガードにより
+  // 非strict plan の allow だけが観測対象から漏れていた）を解消する。
+  sendOptions.onAutoApproved = (info) => {
+    sendMessage({
+      type: 'agent:tool:approval:auto',
+      payload: {
+        ...info,
+        machineId: currentMachineId || currentConfig!.machineId,
+        sessionId,
+      },
+    });
+    // JSONL ファイルログ
+    appendApprovalLog({ timestamp: new Date().toISOString(), sessionId, toolName: info.toolName, toolInput: info.toolInput, status: 'auto' });
+  };
 
   // #332: strictReadonly で allowlist 外のツールが deny された際の監査通知
   if (strictReadonly) {

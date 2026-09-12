@@ -379,7 +379,12 @@ export function decideBashCommand(params: {
  *     default にあってカスタムに無い読み取り系ルールを欠落扱いにしない。この和集合は
  *     strictReadonly 判定専用であり、options.allowedTools 自体（interactive の SDK 事前承認や
  *     exec モードの isToolSessionApproved が参照する値）は書き換えない。
- * - strictReadonly=false: 従来どおり allow（skipPermissions の値に関係なく plan モードのデフォルト動作）
+ * - strictReadonly=false: writeTools（Write/Edit/MultiEdit/NotebookEdit 等）は permissionPolicy の
+ *   到達状況（キルスイッチ OFF・旧 server × 新 agent 等）に依存しない最終防衛線として常に deny する
+ *   （プランモード書き込みゲート穴の根治サイクルで追加。理由・detail 文言は strictReadonly=true 時と同一）。
+ *   Bash を含むそれ以外のツールは従来どおり allow（skipPermissions の値に関係なく plan モードのデフォルト動作。
+ *   Bash の argv0 単位判定まで plan モードで常時強制すると未カバー経路の挙動変更が大きすぎるため、
+ *   このサイクルでは write tool 限定のガードに留める）。
  */
 export function decidePlanPermission(params: {
   toolName: string;
@@ -393,12 +398,15 @@ export function decidePlanPermission(params: {
   writeTools?: string[];
   skipPermissions: boolean;
 }): PlanPermissionDecision {
-  if (!params.strictReadonly) {
-    return { behavior: 'allow' };
-  }
-
+  // プランモード書き込みゲート穴の根治: permissionPolicy が strictReadonly を運ばない経路
+  // （キルスイッチ OFF・旧 server 等）でも write tool だけは必ず deny する最終防衛線。
+  // strictReadonly の有無にかかわらず判定するため、この文だけは早期 return より前に置く。
   if ((params.writeTools ?? []).includes(params.toolName)) {
     return { behavior: 'deny', reason: 'planPolicy:writeTool', detail: `書き込み系ツール: ${params.toolName}` };
+  }
+
+  if (!params.strictReadonly) {
+    return { behavior: 'allow' };
   }
 
   // #333 人間承認時の追記: ユーザーカスタム allowedTools ∪ 対象 OS の DEFAULT_ALLOWED_TOOLS の和集合。

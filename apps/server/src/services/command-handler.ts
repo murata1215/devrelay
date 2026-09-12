@@ -1886,7 +1886,9 @@ async function handleAiPrompt(
       false,  // forceNewSession
       undefined, // model: 未指定（UserSettings から補完）
       undefined, // language: 未指定（UserSettings から補完）
-      resolvePermissionPolicy('chat'),  // #332: チャット経由は従来どおり Machine.skipPermissions に従う
+      // プランモード書き込みゲート穴の根治: chat 経路のプランターンにも strictReadonly を適用する。
+      // キルスイッチ DEVRELAY_PLAN_STRICT_CHAT=0 で従来の 'interactive' に戻せる（chat のみに作用）。
+      resolvePermissionPolicy('chat', { strictChatPlan: process.env.DEVRELAY_PLAN_STRICT_CHAT !== '0' }),
       promptScopeOptions,
     );
     touchSessionActivity(context.currentSessionId);

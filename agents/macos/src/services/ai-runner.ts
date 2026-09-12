@@ -1001,6 +1001,11 @@ async function sendPromptToAiSdk(
         }
 
         // AskUserQuestion 以外は plan モードのデフォルト動作（allowedTools で制御済み）
+        // プランモード書き込みゲート穴の根治: decidePlanPermission が deny を返さない全ケース
+        // （strictReadonly=true の allowlist 内許可、strictReadonly=false の従来allow）で
+        // onAutoApproved を呼び、Approvals タブ監査ログの不可視ギャップを塞ぐ
+        // （connection.ts 側の onAutoApproved 無条件配線とセットで初めて成立する）。
+        options.onAutoApproved?.({ toolName, toolInput: input });
         return { behavior: 'allow', updatedInput: input };
       };
     }

@@ -104,7 +104,11 @@ test('strictReadonly × Write は deny/writeTool になる（skipPermissions=tru
   assert.equal(decision.reason, 'planPolicy:writeTool');
 });
 
-test('interactive（strictReadonly=false）は Write でも allow になる（従来挙動、AskUserQuestion は呼び出し側で先に処理される前提）', () => {
+// ---- プランモード書き込みゲート穴の根治サイクル: write tool 早期 deny の回帰テスト ----
+// 旧テスト「interactive（strictReadonly=false）は Write でも allow になる」はこのサイクルの
+// 修正対象そのもの（09:41 の無承認 Write 成功）を assert していたため削除し、以下に置換する。
+
+test('#根治-1: strictReadonly=false でも Write は planPolicy:writeTool で deny になる（最終防衛線）', () => {
   const decision = decidePlanPermission({
     toolName: 'Write',
     input: { file_path: '/tmp/x.txt', content: 'x' },
@@ -114,7 +118,70 @@ test('interactive（strictReadonly=false）は Write でも allow になる（�
     writeTools: WRITE_TOOLS,
     skipPermissions: false,
   });
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:writeTool');
+});
+
+test('#根治-2: strictReadonly=false でも Edit/MultiEdit/NotebookEdit は同様に deny になる', () => {
+  for (const toolName of ['Edit', 'MultiEdit', 'NotebookEdit']) {
+    const decision = decidePlanPermission({
+      toolName,
+      input: {},
+      strictReadonly: false,
+      allowedTools: ALLOWED_TOOLS,
+      readonlyTools: READONLY_TOOLS,
+      writeTools: WRITE_TOOLS,
+      skipPermissions: false,
+    });
+    assert.equal(decision.behavior, 'deny', `${toolName} は deny になるべき`);
+    assert.equal(decision.reason, 'planPolicy:writeTool');
+  }
+});
+
+test('#根治-3: strictReadonly=false ＋ writeTools 未指定は従来どおり allow（後方互換、旧 server × 新 agent 等）', () => {
+  const decision = decidePlanPermission({
+    toolName: 'Write',
+    input: { file_path: '/tmp/x.txt', content: 'x' },
+    strictReadonly: false,
+    allowedTools: ALLOWED_TOOLS,
+    readonlyTools: READONLY_TOOLS,
+    // writeTools を意図的に渡さない
+    skipPermissions: false,
+  });
   assert.equal(decision.behavior, 'allow');
+});
+
+test('#根治-4: strictReadonly=false の Read は allow のまま', () => {
+  const decision = decidePlanPermission({
+    toolName: 'Read',
+    input: { file_path: '/opt/devrelay/CLAUDE.md' },
+    strictReadonly: false,
+    allowedTools: ALLOWED_TOOLS,
+    readonlyTools: READONLY_TOOLS,
+    writeTools: WRITE_TOOLS,
+    skipPermissions: false,
+  });
+  assert.equal(decision.behavior, 'allow');
+});
+
+test('#根治-5: strictReadonly=false の Bash は allow のまま（第2層の適用範囲が write tool 限定であることを固定）', () => {
+  const decision = decideBash('rm -rf /', { strictReadonly: false, writeTools: WRITE_TOOLS });
+  assert.equal(decision.behavior, 'allow');
+});
+
+test('#根治-6: strictReadonly=true の Write deny は reason/detail とも従来と完全一致（MCP 経路は無変更）', () => {
+  const decision = decidePlanPermission({
+    toolName: 'Write',
+    input: { file_path: '/tmp/x.txt', content: 'x' },
+    strictReadonly: true,
+    allowedTools: ALLOWED_TOOLS,
+    readonlyTools: READONLY_TOOLS,
+    writeTools: WRITE_TOOLS,
+    skipPermissions: true,
+  });
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:writeTool');
+  assert.equal(decision.detail, '書き込み系ツール: Write');
 });
 
 test('interactive × skipPermissions=true でも decidePlanPermission 自体は allow（skipPermissions 分岐は呼び出し側の canUseTool で先に処理される）', () => {

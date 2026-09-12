@@ -2074,3 +2074,61 @@ MCP `submit_instruction`（plan）→ `approve_implementation`（exec）の subm
 5. `⚠️` 打ち切りマークは `output`/`BuildLog.summary` の元データには混ぜず、
    `get_build_status` の `summary` と完了通知の先頭にのみ付与する（`applyStopReasonMark()`）。
    `extractBuildSummary()` には常に生の `output` を渡すこと（200 文字要約の予算をマークに奪わせない）。
+
+---
+
+## プランモード書き込みゲート穴の根治（chat 経路、2026-09-12）
+
+test009 で「TEST.TXT を作る作業をしてみてください」（`e.` で始まるためカンマ無し＝通常メッセージ扱い）を
+送ったところ、承認カードも deny も出ないまま `Write` が成功した事故を受けた根治サイクル。
+
+1. **chat 経路のプランモード読み取り専用は、これまでプロンプト文言（`PLAN_MODE_INSTRUCTION`）
+   だけが担保しており、実行時ゲートが存在しなかった**（#332/#333 の `strictReadonly` は MCP 経路のみに
+   配線されていた）。`resolvePermissionPolicy('chat')` の既定を `'interactive'` → `'strictReadonly'` に
+   変更し、chat のプランターンにも MCP と同じゲートを適用する。`options.strictChatPlan === false`
+   のときのみ従来の `'interactive'` に戻すキルスイッチ（env `DEVRELAY_PLAN_STRICT_CHAT`）を用意。
+   キルスイッチは `'chat'` にのみ作用し、`'mcp'` を弱めることも `'exec'` を強めることもできない
+   （`resolvePermissionPolicy` 内でリテラル比較により意図的に分岐を分離）。
+2. **server は plan/exec のどちらのターンかを知らないが、agent 側の `usePlanMode`（会話履歴から
+   `lastEntry.role === 'exec'` で導出）との AND 演算（`strictReadonly = permissionPolicy ===
+   'strictReadonly' && usePlanMode`）により、chat 経路に無条件で `'strictReadonly'` を送っても
+   exec ターンでは必ず `false` に落ちる**。これが「server 側だけの変更で exec を一切壊さずに
+   chat のプラン穴だけを塞げる」根拠。同じ理由で `executeCrossProjectQuery`（`ask` 経路、
+   teamexec の質問のみ版）にも同じ穴があったため `PermissionPolicySource` に `'ask'` を追加し
+   `'strictReadonly'` を返すよう統一した（`sendPromptToAgent` に `permissionPolicy` を渡し忘れると
+   既定の `'interactive'` に fail-open する — このサイクルで見つかった2件目の同種の穴）。
+3. **新しいポリシー文字列を発明しない**。`connection.ts` の `strictReadonly` 判定はリテラル比較
+   （`permissionPolicy === 'strictReadonly'`）のため、独自の値（例 `'planWriteGuard'`）を使うと
+   #332 以前の未更新 Agent や実装ミスで fail-open する。既存の `'strictReadonly'` を再利用することで、
+   **server の `pm2 restart` だけで全ての #332 以降の Agent に即座に反映され、Agent 側の `u` は不要**
+   になる（第1層）。
+4. **Agent 側にも「permissionPolicy が届かない経路」に対する最終防衛線を追加**（第2層、要 `u`）:
+   `decidePlanPermission`（`plan-permission.ts`）の write tool（`Write`/`Edit`/`MultiEdit`/
+   `NotebookEdit`）deny チェックを、`!strictReadonly` の早期 return より**前**に移動。これにより
+   `strictReadonly=false`（キルスイッチ OFF・旧 server × 新 agent 等）でも write tool だけは
+   常に deny される。`writeTools` は既存の optional 引数のまま（`?? []` で未指定時は従来どおり
+   allow）でシグネチャ変更なし。Bash は対象外（第1層の責務。plan モードで Bash まで一律 deny すると
+   未カバー経路の挙動変更が大きすぎるため、write tool 限定に留めた）。
+5. **監査ログの不可視ギャップも同時に解消**: 旧コードは `connection.ts` の
+   `if (!usePlanMode || strictReadonly) { sendOptions.onAutoApproved = ... }` というガードにより、
+   「plan かつ strictReadonly=false」の allow だけが Approvals タブから漏れていた（今回の事故が
+   長期間気付かれなかった理由そのもの）。ガードを外して無条件配線し、`ai-runner.ts` の plan モード
+   `canUseTool` が deny を返さない全パス（末尾の `return { behavior: 'allow', ... }` の直前）で
+   `options.onAutoApproved?.(...)` を呼ぶよう追加。この2箇所はセットで初めて機能する
+   （`connection.ts` だけでは `ai-runner.ts` が呼ばないので配線が繋がらない）。
+6. **`Task` サブエージェントの `canUseTool` バイパス疑惑（`constants.ts` の「実機 E2E で要確認」
+   コメント）は、SDK (`@anthropic-ai/claude-agent-sdk@0.2.77`) の `sdk.mjs`/`cli.js` の静的解析で
+   バイパスなしと確定した**。`sdk.mjs` の `processControlRequest` は `subtype==="can_use_tool"` の
+   control_request を唯一の分岐で `this.canUseTool(tool_name, input, { ..., agentID:
+   request.agent_id })` に渡しており、トップレベル呼び出しかサブエージェント呼び出しかは
+   `agent_id`/`agentID` フィールドで識別されるだけで、**呼び出し窓口自体は完全に同一**。
+   `cli.js` の PermissionRequest フック用 zod スキーマにも「Present only when the hook fires from
+   within a subagent」という `agent_id` の説明文があり、サブエージェントのツール呼び出しが
+   独自に `can_use_tool` control_request を発行することが裏付けられる。DevRelay の `canUseTool`
+   実装は `agentID` を分岐に使わないため、`decidePlanPermission` によるゲートはサブエージェント
+   発のツール呼び出しにも等しく適用される。
+7. **今回のサイクルで意図的に対象外としたもの**（残存リスクとして記録のみ）: Bash の argv0 単位
+   判定の抜け穴（`find ... -delete`/`find ... -exec`/`curl -o`/`curl -d` 等、引数を見ない判定）、
+   gemini のハードコード `auto_edit`（plan モードを見ない）、PTY/terminalMode（`canUseTool` 自体を
+   使わない）、devin（`usePlanMode` を常に false に強制、別のガードで担保）、Windows agent
+   （`plan-permission.ts` 自体が存在しない）。

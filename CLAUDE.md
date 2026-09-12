@@ -65,6 +65,7 @@ pm2 restart devrelay-server
 | TELEGRAM_BOT_TOKEN | Telegram Bot |
 | ENCRYPTION_KEY | API キー暗号化 |
 | FIREBASE_SERVICE_ACCOUNT_PATH | FCM プッシュ通知用サービスアカウント JSON |
+| DEVRELAY_PLAN_STRICT_CHAT | チャット経路のプランターンを strictReadonly にするか（既定 `1`。`0` で従来の `interactive` に戻すキルスイッチ。chat のみに作用し mcp/exec には影響しない） |
 
 ## DB テーブル（概要）
 
