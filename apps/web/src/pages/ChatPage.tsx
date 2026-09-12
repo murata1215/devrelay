@@ -8,6 +8,8 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { shouldRouteToTab, resolveHistorySource } from '../lib/thread-routing-client';
 import { ThreadList } from '../components/ThreadList';
 import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
+import { RightRail } from '../components/RightRail';
+import { RAIL_COLLAPSED_STORAGE_KEY, readRailCollapsed, serializeRailCollapsed, countPendingApprovals, resolveSidebarShellClass } from '../lib/right-rail-rules';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -1024,6 +1026,8 @@ function Sidebar({
   onAddProjectToServer,
   tabCustomNames,
   onReorderServerProjects,
+  variant,
+  headerAction,
 }: {
   machineList: Machine[];
   openTabIds: Set<string>;
@@ -1044,6 +1048,10 @@ function Sidebar({
   /** タブのカスタム名マップ（projectId → customName） */
   tabCustomNames: Record<string, string>;
   onReorderServerProjects: (serverId: string, fromIndex: number, toIndex: number) => void;
+  /** 'drawer': モバイル専用の左端固定ドロワー（従来位置） / 'rail': 右レール内（幅・スクロールは親が管理） */
+  variant: 'drawer' | 'rail';
+  /** rail インスタンスのみ: 右レールの折りたたみボタン等をヘッダー行に追加表示する */
+  headerAction?: React.ReactNode;
 }) {
   const [expandedMachines, setExpandedMachines] = useState<Set<string>>(new Set());
   /** サーバー内プロジェクトの展開状態 */
@@ -1107,24 +1115,18 @@ function Sidebar({
     }
   }
 
+  /** drawer インスタンスのみ、開いている間はモバイルオーバーレイを出す（rail インスタンスは常に非表示） */
+  const showMobileOverlay = variant === 'drawer' && !collapsed;
+  /** transform は variant='drawer' のときのみ collapsed に応じて切り替える（rail は常に translate なし） */
+  const drawerTranslateClass = variant === 'drawer' ? (collapsed ? '-translate-x-full' : 'translate-x-0') : '';
+
   return (
     <>
-      {!collapsed && (
+      {showMobileOverlay && (
         <div className="fixed inset-0 bg-black/50 z-20 md:hidden" onClick={onToggle} />
       )}
 
-      <aside
-        className={`
-          ${collapsed ? '-translate-x-full' : 'translate-x-0'}
-          fixed md:relative md:translate-x-0
-          z-30 md:z-auto
-          w-56 h-full
-          bg-[var(--bg-secondary)] border-r border-[var(--border-color)]
-          flex flex-col
-          transition-transform duration-200 ease-in-out
-          shrink-0
-        `}
-      >
+      <aside className={`${drawerTranslateClass} ${resolveSidebarShellClass(variant)}`}>
         {/* ヘッダー: Agents / Servers 切り替え */}
         <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
           <div className="flex gap-1">
@@ -1145,11 +1147,14 @@ function Sidebar({
               }`}
             >Agents</button>
           </div>
-          <button onClick={onToggle} className="md:hidden text-[var(--text-muted)] hover:text-[var(--text-primary)]">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1">
+            <button onClick={onToggle} className="md:hidden text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+              </svg>
+            </button>
+            {headerAction}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto py-1">
@@ -1195,7 +1200,7 @@ function Sidebar({
                                 key={project.id}
                                 onClick={() => {
                                   onSelectProject(project.id, true);
-                                  if (window.innerWidth < 768) onToggle();
+                                  if (variant === 'drawer' && window.innerWidth < 768) onToggle();
                                 }}
                                 disabled={!isOnline}
                                 className={`
@@ -1366,7 +1371,7 @@ function Sidebar({
                                 <button
                                   onClick={() => {
                                     onSelectProject(pid);
-                                    if (window.innerWidth < 768) onToggle();
+                                    if (variant === 'drawer' && window.innerWidth < 768) onToggle();
                                   }}
                                   className={`
                                     flex-1 text-left flex items-center gap-1.5 px-3 py-1 rounded-md mx-1 text-sm
@@ -1602,15 +1607,6 @@ function DocPanel({ machineId, projectId, approvalHistory, tabSettings }: { mach
   const [planLoading, setPlanLoading] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
 
-  // リサイズ状態
-  const [panelWidth, setPanelWidth] = useState(() => {
-    const saved = localStorage.getItem('devrelay-panel-width');
-    return saved ? parseInt(saved, 10) : 208;
-  });
-  const [resizing, setResizing] = useState(false);
-  const panelWidthRef = useRef(panelWidth);
-  panelWidthRef.current = panelWidth;
-
   /** ドキュメント一覧を取得 */
   const fetchDocuments = useCallback(async () => {
     if (!machineId) { setDocuments([]); return; }
@@ -1745,50 +1741,14 @@ function DocPanel({ machineId, projectId, approvalHistory, tabSettings }: { mach
     }
   }, [handleUpload]);
 
-  /** リサイズハンドル */
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setResizing(true);
-    const startX = e.clientX;
-    const startWidth = panelWidthRef.current;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      // 右端パネルなので左にドラッグ = 幅拡大
-      const delta = startX - e.clientX;
-      const newWidth = Math.max(160, Math.min(600, startWidth + delta));
-      setPanelWidth(newWidth);
-    };
-
-    const handleMouseUp = () => {
-      setResizing(false);
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      localStorage.setItem('devrelay-panel-width', String(panelWidthRef.current));
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  }, []);
-
   return (
-    <>
-      {/* リサイズ中のオーバーレイ（テキスト選択防止） */}
-      {resizing && <div className="fixed inset-0 z-50 cursor-col-resize" />}
-
-      <aside
-        style={{ width: panelWidth }}
-        className="shrink-0 hidden lg:flex flex-col border-l border-[var(--border-color)] bg-[var(--bg-secondary)] relative"
+      <div
+        className="flex-1 min-h-0 flex flex-col"
         onDragEnter={activePanel === 'docs' ? handleDragEnter : undefined}
         onDragLeave={activePanel === 'docs' ? handleDragLeave : undefined}
         onDragOver={activePanel === 'docs' ? handleDragOver : undefined}
         onDrop={activePanel === 'docs' ? handleDrop : undefined}
       >
-        {/* リサイズハンドル */}
-        <div
-          className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[var(--accent-blue)] hover:opacity-50 z-10"
-          onMouseDown={handleResizeStart}
-        />
-
         {/* タブヘッダー（有効なタブのみ表示） */}
         <div className="flex items-center border-b border-[var(--border-color)]">
           {tabSettings.approvals && (
@@ -2004,8 +1964,7 @@ function DocPanel({ machineId, projectId, approvalHistory, tabSettings }: { mach
             )}
           </div>
         )}
-      </aside>
-    </>
+      </div>
   );
 }
 
@@ -2052,6 +2011,25 @@ export function ChatPage() {
       const next = !prev;
       try {
         localStorage.setItem('devrelay-thread-panel-collapsed', next ? '1' : '0');
+      } catch {
+        // localStorage 不可（プライベートモード等）でも動作を継続
+      }
+      return next;
+    });
+  }, []);
+  /** 右レール（Servers/Agents + DocPanel）の折りたたみ状態。既定は展開（false） */
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    try {
+      return readRailCollapsed(localStorage.getItem(RAIL_COLLAPSED_STORAGE_KEY));
+    } catch {
+      return false;
+    }
+  });
+  const toggleRailCollapsed = useCallback(() => {
+    setRailCollapsed(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem(RAIL_COLLAPSED_STORAGE_KEY, serializeRailCollapsed(next));
       } catch {
         // localStorage 不可（プライベートモード等）でも動作を継続
       }
@@ -3420,6 +3398,7 @@ export function ChatPage() {
           onAddProjectToServer={handleAddProjectToServer}
           tabCustomNames={Object.fromEntries(tabs.filter(t => t.customName).map(t => [t.projectId, t.customName!]))}
           onReorderServerProjects={handleReorderServerProjects}
+          variant="drawer"
         />
       )}
 
@@ -3647,15 +3626,59 @@ export function ChatPage() {
         )}
       </div>
 
-      {/* ドキュメントパネル（右サイド、大画面のみ、最大化時は非表示）
-          有効タブが1つも無い場合はパネルごと非表示 */}
-      {!maximized && isAnyDocPanelTabEnabled(docPanelSettings) && (
-        <DocPanel
-          machineId={activeMachineId}
-          machineDisplayName={activeTab?.machineDisplayName ?? ''}
-          projectId={activeTab?.projectId ?? null}
-          approvalHistory={approvalHistory}
-          tabSettings={docPanelSettings}
+      {/* 右レール（Servers/Agents + DocPanel の縦積み、最大化時は非表示）。
+          Servers は docPanelSettings（ユーザーが OFF にできる設定）に結合しないため常に渡す。
+          DocPanel 側は有効タブが1つも無い場合のみ null（レール自体は Servers のために残す） */}
+      {!maximized && (
+        <RightRail
+          collapsed={railCollapsed}
+          onToggle={toggleRailCollapsed}
+          pendingApprovalCount={countPendingApprovals(Array.from(toolApprovals.values()))}
+          serversSlot={
+            <Sidebar
+              machineList={machineList}
+              openTabIds={openTabIds}
+              activeTabId={activeTabId}
+              onSelectProject={handleSelectProject}
+              collapsed={false}
+              onToggle={() => {}}
+              mode={sidebarMode}
+              onChangeMode={setSidebarMode}
+              servers={servers}
+              activeServerId={activeServerId}
+              onSelectServer={handleSelectServer}
+              onCreateServer={handleCreateServer}
+              onRenameServer={handleRenameServer}
+              onDeleteServer={handleDeleteServer}
+              onRemoveProject={handleRemoveProjectFromServer}
+              onAddProjectToServer={handleAddProjectToServer}
+              tabCustomNames={Object.fromEntries(tabs.filter(t => t.customName).map(t => [t.projectId, t.customName!]))}
+              onReorderServerProjects={handleReorderServerProjects}
+              variant="rail"
+              headerAction={
+                <button
+                  onClick={toggleRailCollapsed}
+                  title={t('rail.collapse')}
+                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
+                  </svg>
+                </button>
+              }
+            />
+          }
+          docPanelSlot={
+            isAnyDocPanelTabEnabled(docPanelSettings) ? (
+              <DocPanel
+                machineId={activeMachineId}
+                machineDisplayName={activeTab?.machineDisplayName ?? ''}
+                projectId={activeTab?.projectId ?? null}
+                approvalHistory={approvalHistory}
+                tabSettings={docPanelSettings}
+              />
+            ) : null
+          }
         />
       )}
 
