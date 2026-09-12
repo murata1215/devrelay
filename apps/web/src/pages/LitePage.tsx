@@ -28,6 +28,13 @@ import {
   resolveSendInFlight,
   resolveConfirmationOnProjectChange,
   decideThreadListRefresh,
+  upsertApproval,
+  removeApproval,
+  markApprovalResponded,
+  selectVisibleApprovals,
+  canRespondToApproval,
+  decideApprovalRespond,
+  type LiteApprovalEntry,
 } from '../components/lite/lite-shell-rules';
 import { decideInboundDisplay } from '../lib/thread-routing-client';
 import { appendMessage, mergeHistory, type LiteMessage } from '../lib/lite-message-log';
@@ -105,8 +112,11 @@ export function LitePage() {
   /** E2（参加登録）成功後にインクリメントし、E3（履歴取得）を再実行させる（GET と参加登録成立の
    * 隙間に落ちたメッセージを埋めるための 'refresh' 再取得トリガー）。 */
   const [historyEpoch, setHistoryEpoch] = useState(0);
-  /** R5 fail-closed の唯一の例外（`shouldShowApprovalCard`）を通過したカードのみ保持する。 */
-  const [approvalPrompt, setApprovalPrompt] = useState<ToolApprovalPrompt | null>(null);
+  /** R5 fail-closed の唯一の例外（`shouldShowApprovalCard`）を通過したカードのみ保持する。
+   * L5: requestId キーの `Map` にして同時複数件を保持する（単数 state だと 2 件目到着で
+   * 1 件目が消えていた）。描画時にも `selectVisibleApprovals()` で同じ述語を再適用する
+   * （§16、下記 `approvalList` 参照）。 */
+  const [approvals, setApprovals] = useState<ReadonlyMap<string, LiteApprovalEntry>>(new Map());
 
   /** L4 B0: 送信中・未確定の自分の発言。表示は `composeDisplayMessages()` がレンダー時に合成する
    * （`messages` state へは書き戻さない）。 */
@@ -152,6 +162,13 @@ export function LitePage() {
   /** 送信の二重発火防止（React state 更新の非同期性を跨いで即座に判定する必要があるため ref を使う。
    * classic `ChatPage.tsx` の `sendingRef` と同じ流儀）。 */
   const sendingRef = useRef(false);
+
+  /** L5 D4: 承認応答の二重送信防止。`entry.status` は `setState` 経由の非同期反映のため同一 tick の
+   * 2 回目クリックには古い値のまま見える。`sendingRef` と同じ流儀で同期的な ref を使う。 */
+  const respondedRef = useRef<Set<string>>(new Set());
+  /** L5 D3: `sendToolApprovalResponse` は WS が OPEN でないと無言で `return` する（戻り値なし）ため、
+   * 応答可否判定に `connected` を含める。WS コールバックと同じ理由でレンダーごとに ref へ反映する。 */
+  const connectedRef = useRef(false);
 
   // ---------------------------------------------------------------------
   // L4.1: スレッド一覧（ThreadList）の自動再取得。ポーリングはしない。
@@ -254,14 +271,24 @@ export function LitePage() {
     [requestThreadRefresh]
   );
 
+  /** L5: 到着時ゲートは §5 の fail-closed 述語を一字一句そのまま維持する。通過後は D5 に従い
+   * `respondedRef` からも削除する（サーバー再送＝まだ pending が権威。楽観的な応答済み扱いを
+   * リセットしないと、送信が実際には届いていなかった場合に二度と応答できなくなる）。 */
   const handleToolApproval = useCallback((prompt: ToolApprovalPrompt) => {
     if (!shouldShowApprovalCard({ viewSessionId: viewRef.current.sessionId, payloadSessionId: prompt.sessionId })) return;
-    setApprovalPrompt(prompt);
+    respondedRef.current.delete(prompt.requestId);
+    setApprovals((prev) => upsertApproval(prev, prompt));
+  }, []);
+
+  /** 後始末（カードを閉じる）の唯一の入口。`respondedRef` と `approvals` state を必ず同時に掃除する。 */
+  const forgetApproval = useCallback((id: string) => {
+    respondedRef.current.delete(id);
+    setApprovals((prev) => removeApproval(prev, id));
   }, []);
 
   const handleToolApprovalResolved = useCallback((resolved: ToolApprovalResolved) => {
-    setApprovalPrompt((prev) => (prev && prev.requestId === resolved.requestId ? null : prev));
-  }, []);
+    forgetApproval(resolved.requestId);
+  }, [forgetApproval]);
 
   /** L4.1 項目2: `web:session_info` 受信時は一覧再取得のみ行う。**`setSearchParams` は絶対に呼ばない**
    * （`session_info → setSearchParams → E2 → switchThread → session_info` の無限ループになるため）。 */
@@ -274,7 +301,7 @@ export function LitePage() {
     requestThreadRefresh();
   }, [requestThreadRefresh]);
 
-  const { connected, sendCommand } = useWebSocket(
+  const { connected, sendCommand, sendToolApprovalResponse } = useWebSocket(
     {
       onMessage: handleMessage,
       onToolApproval: handleToolApproval,
@@ -283,6 +310,25 @@ export function LitePage() {
       onReconnect: handleReconnect,
     },
     { tabId }
+  );
+  // L5 D3: レンダーごとに最新の接続状態を ref へ反映する（`viewRef` と同じ理由）。
+  connectedRef.current = connected;
+
+  /** L5: 承認/拒否ボタンのクリック。`decideApprovalRespond()`（純関数）が可否を判定し、
+   * `send` のときだけ実際に `sendToolApprovalResponse` を呼ぶ。D2: 2000ms タイマーは移植しない
+   * （`resolved` 受信で `forgetApproval` が呼ばれてカードが閉じるのを待つのみ）。 */
+  const handleApprovalRespond = useCallback(
+    (requestId: string, isQuestion: boolean | undefined, behavior: 'allow' | 'deny') => {
+      const decision = decideApprovalRespond(
+        { requestId, isQuestion, alreadySent: respondedRef.current.has(requestId), connected: connectedRef.current },
+        behavior
+      );
+      if (decision.kind !== 'send') return;
+      respondedRef.current.add(decision.requestId);
+      sendToolApprovalResponse(decision.requestId, decision.behavior);
+      setApprovals((prev) => markApprovalResponded(prev, decision.requestId, decision.behavior));
+    },
+    [sendToolApprovalResponse]
   );
 
   // ---------------------------------------------------------------------
@@ -556,6 +602,10 @@ export function LitePage() {
   }, [tabId, setSearchParams, requestThreadRefresh]);
 
   const displayMessages = composeDisplayMessages(messages, outbox, selectedSessionId);
+  /** L5: §5 の fail-closed 述語（`shouldShowApprovalCard` 経由）を描画時にも再適用する。到着時ゲート
+   * だけだと、スレッド A を見ている間に届いたカードが B へ切替後も残り続けてしまう（申し送り済みの
+   * 既知の穴を今回はここで塞ぐ。新しいゲートは作らず既存述語の適用箇所を増やすだけ）。 */
+  const approvalList = selectVisibleApprovals(approvals, selectedSessionId);
 
   return (
     <div className="lite-root h-screen flex flex-col bg-[var(--bg-primary)]">
@@ -573,7 +623,7 @@ export function LitePage() {
           /* L3 でも readOnly のため呼ばれない（S5）。将来 L5 で差し替える。 */
           onSelect={() => {}}
         />
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-w-0 min-h-0">
           {!selectedSessionId ? (
             <div className="flex-1 flex items-center justify-center px-4">
               <div className="text-sm text-[var(--text-faint)] text-center">{t('lite.emptyState')}</div>
@@ -594,7 +644,22 @@ export function LitePage() {
               )}
             </>
           )}
-          {approvalPrompt && <LiteApprovalCard prompt={approvalPrompt} />}
+          {approvalList.length > 0 && (
+            <div className="shrink-0 max-h-[40vh] overflow-y-auto">
+              {approvalList.map((entry) => (
+                <LiteApprovalCard
+                  key={entry.requestId}
+                  prompt={entry}
+                  status={entry.status}
+                  onRespond={
+                    canRespondToApproval(entry)
+                      ? (behavior) => handleApprovalRespond(entry.requestId, entry.isQuestion, behavior)
+                      : undefined
+                  }
+                />
+              ))}
+            </div>
+          )}
           <LiteComposer
             options={projectOptions}
             selectedProjectId={selectedProjectId}

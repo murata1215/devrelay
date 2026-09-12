@@ -131,10 +131,45 @@ describe('lite-source-guards: LitePage.tsx の送信操作（L4 で正規に使�
     assert.equal(stripped.includes('//connect'), false);
   });
 
-  test('sendToolApprovalResponse を含まない（L5 スコープ外）', () => {
-    const source = readLiteSource(LITE_PAGE_PATH);
+  test('sendToolApprovalResponse( の呼び出しがちょうど 1 箇所（L5 で正規に使用開始。分割代入は \\s*\\( に一致しないため対象外）', () => {
+    const source = stripComments(readLiteSource(LITE_PAGE_PATH));
+    const matches = source.match(/\bsendToolApprovalResponse\s*\(/g) ?? [];
+    assert.equal(matches.length, 1);
+  });
+});
+
+// L5: 承認カードの応答（web:tool:approval に対する allow/deny）。フレームの自前組み立て禁止・
+// fail-closed ゲート（到着時+描画時）の残存・resolved 経路の生存を機械的に固定する。
+describe('lite-source-guards: L5 承認カード応答の配線固定', () => {
+  test("'web:tool:approval' という文字列リテラルが Lite 全ソースに現れない（応答フレームを自前組み立てしない）", () => {
+    for (const relPath of LITE_SOURCE_FILES) {
+      const source = stripComments(readLiteSource(relPath));
+      assert.equal(source.includes('web:tool:approval'), false, `${relPath} に 'web:tool:approval' 文字列が見つかった`);
+    }
+  });
+
+  test('LiteApprovalCard.tsx に sendToolApprovalResponse が一切現れない（応答送信は LitePage.tsx の責務）', () => {
+    const source = readLiteSource('src/components/lite/LiteApprovalCard.tsx');
     assert.equal(source.includes('sendToolApprovalResponse'), false);
   });
+
+  test('LitePage.tsx: shouldShowApprovalCard( の呼び出しが（コメント除去後）1 箇所残っている（到着時 fail-closed ゲートの消失検知）', () => {
+    const source = stripComments(readLiteSource(LITE_PAGE_PATH));
+    const matches = source.match(/\bshouldShowApprovalCard\s*\(/g) ?? [];
+    assert.equal(matches.length, 1);
+  });
+
+  test('LitePage.tsx: onToolApprovalResolved が useWebSocket の呼び出しに存在する（resolved 経由でカードが自動的に閉じる経路の残存確認）', () => {
+    const source = readLiteSource(LITE_PAGE_PATH);
+    assert.match(source, /\bonToolApprovalResolved\s*:/);
+  });
+
+  for (const relPath of LITE_SOURCE_FILES) {
+    test(`${relPath}: コメント除去後に CJK 文字（日本語ハードコード文字列）が現れない`, () => {
+      const source = stripComments(readLiteSource(relPath));
+      assert.equal(/[\u3040-\u30ff\u4e00-\u9fff]/.test(source), false);
+    });
+  }
 });
 
 // R8: 新規スレッド作成は tabId 必須の buildThreadCreateRequest() を唯一の入口とし、

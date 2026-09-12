@@ -137,6 +137,8 @@ export const messages = {
   },
   'lite.approvePlaceholder': { en: 'Approve', ja: '承認' },
   'lite.denyPlaceholder': { en: 'Deny', ja: '拒否' },
+  'lite.approvalRespondBody': { en: 'Approve or deny this tool request.', ja: 'このツール実行を許可または拒否してください。' },
+  'lite.approvalResponded': { en: 'Waiting for confirmation...', ja: '確定待ち…' },
   'lite.composerPlaceholderConnecting': { en: 'Connecting...', ja: '接続中…' },
   'lite.composerPlaceholderNoProject': { en: 'Select a project', ja: 'プロジェクトを選択してください' },
   'lite.composerPlaceholderMachineOffline': { en: 'Agent is offline', ja: 'マシンがオフラインです' },

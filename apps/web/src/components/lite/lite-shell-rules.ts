@@ -679,3 +679,127 @@ export function stripComments(source: string): string {
   }
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// 16. L5: 承認カードの状態管理と応答可否
+// ---------------------------------------------------------------------------
+
+/** 承認カードの表示ステータス。`allow`/`deny` は「応答送信済み・`resolved` 待ち」を表す
+ * （classic のような楽観的な即時消去はしない。§16 の設計判断は devlog 参照）。 */
+export type LiteApprovalStatus = 'pending' | 'allow' | 'deny';
+
+/** classic `ChatPage.tsx` の `toolApprovals` エントリと同形（構造的に同じ形にして
+ * サーバー payload との変換コストをゼロにする）。`sessionId` は `shouldShowApprovalCard()`
+ * （§5）の判定に必須。 */
+export interface LiteApprovalEntry {
+  readonly requestId: string;
+  readonly toolName: string;
+  readonly toolInput: Record<string, unknown>;
+  readonly title?: string;
+  readonly description?: string;
+  readonly projectId?: string;
+  readonly originProjectId?: string;
+  readonly sessionId?: string;
+  readonly isQuestion?: boolean;
+  readonly status: LiteApprovalStatus;
+}
+
+/** 保持上限（`lite-outbox.ts` の `OUTBOX_MAX_ENTRIES` と同じ流儀）。無限増殖を防ぐ最終防波堤で、
+ * 通常運用でここに達することは想定しない。 */
+export const LITE_APPROVAL_MAX_ENTRIES = 20;
+
+/**
+ * 承認要求の受信を `Map` へ反映する。**サーバーは WS 再接続のたびに保留中の承認を再送する**
+ * （`apps/server/src/platforms/web.ts` の起動時リストア処理）ため、既存の requestId でも
+ * **常に `status: 'pending'` で入れ直す**（サーバーからの再送＝まだ pending、が権威。ローカルの
+ * 楽観的な `allow`/`deny` はサーバーが未受理だった可能性があり、再送を無視すると Lite からは
+ * 二度と応答できずエージェントがサーバー側 5 分タイムアウトまでハングする）。
+ * `Map.set` は既存キーの挿入位置を保つため、再送によってカードの並びが動くことはない。
+ * 上限超過時は挿入順が最も古いものから捨てる（Map の反復順は挿入順）。
+ */
+export function upsertApproval(
+  prev: ReadonlyMap<string, LiteApprovalEntry>,
+  prompt: Omit<LiteApprovalEntry, 'status'>
+): ReadonlyMap<string, LiteApprovalEntry> {
+  const next = new Map(prev);
+  next.set(prompt.requestId, { ...prompt, status: 'pending' });
+  if (next.size > LITE_APPROVAL_MAX_ENTRIES) {
+    const oldestKey = next.keys().next().value;
+    if (oldestKey !== undefined) next.delete(oldestKey);
+  }
+  return next;
+}
+
+/** requestId のエントリを取り除く。存在しなければ**同一参照**を返す（React の `Object.is`
+ * bail-out を効かせ、無駄な再描画を避ける）。 */
+export function removeApproval(
+  prev: ReadonlyMap<string, LiteApprovalEntry>,
+  requestId: string
+): ReadonlyMap<string, LiteApprovalEntry> {
+  if (!prev.has(requestId)) return prev;
+  const next = new Map(prev);
+  next.delete(requestId);
+  return next;
+}
+
+/** 応答送信後の表示状態遷移。存在しなければ同一参照を返す。**二重送信防止には使わない**
+ * （`setState` は非同期なので同一 tick の 2 回目クリックには古い値のまま見える。二重送信防止は
+ * 呼び出し側の同期的な ref で行う）。 */
+export function markApprovalResponded(
+  prev: ReadonlyMap<string, LiteApprovalEntry>,
+  requestId: string,
+  behavior: 'allow' | 'deny'
+): ReadonlyMap<string, LiteApprovalEntry> {
+  const existing = prev.get(requestId);
+  if (!existing) return prev;
+  const next = new Map(prev);
+  next.set(requestId, { ...existing, status: behavior });
+  return next;
+}
+
+/**
+ * §5 `shouldShowApprovalCard()` の**唯一の fail-closed 例外**を、到着時（`handleToolApproval`）
+ * だけでなく描画時にも適用する。到着時ゲートだけだと、スレッド A を見ている間に届いたカードが
+ * スレッド B へ切り替えた後も残り続け、「見ていないスレッドのツール実行を承認できる」穴になる
+ * （L5 でボタンが実際にクリック可能になって初めて実害が生じる）。判定ロジックは §5 と共有し、
+ * 複製しない。
+ */
+export function selectVisibleApprovals(
+  approvals: ReadonlyMap<string, LiteApprovalEntry>,
+  viewSessionId: string | null | undefined
+): readonly LiteApprovalEntry[] {
+  const result: LiteApprovalEntry[] = [];
+  for (const entry of approvals.values()) {
+    if (shouldShowApprovalCard({ viewSessionId, payloadSessionId: entry.sessionId })) {
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
+/** AskUserQuestion（`isQuestion: true`）は L5 のスコープ外（L5.1 送り）のため応答不可。 */
+export function canRespondToApproval(entry: Pick<LiteApprovalEntry, 'isQuestion'>): boolean {
+  return !entry.isQuestion;
+}
+
+export type DecideApprovalRespondBlockedReason = 'already-responded' | 'question-unsupported' | 'disconnected';
+
+export type DecideApprovalRespondResult =
+  | { kind: 'send'; requestId: string; behavior: 'allow' | 'deny' }
+  | { kind: 'blocked'; reason: DecideApprovalRespondBlockedReason };
+
+/**
+ * 承認応答ボタンのクリックを実際に送信してよいか判定する。`entry` そのものではなく
+ * requestId に対して不変な事実だけを受け取る（`entry` を渡すと、呼び出し元のクロージャが
+ * `upsertApproval()` によるサーバー再送リセットの後で stale になりうるため）。
+ * 優先順位（先に該当した理由を返す）: 二重送信済み → 質問カード → 切断中。
+ */
+export function decideApprovalRespond(
+  input: { requestId: string; isQuestion?: boolean; alreadySent: boolean; connected: boolean },
+  behavior: 'allow' | 'deny'
+): DecideApprovalRespondResult {
+  if (input.alreadySent) return { kind: 'blocked', reason: 'already-responded' };
+  if (input.isQuestion) return { kind: 'blocked', reason: 'question-unsupported' };
+  if (!input.connected) return { kind: 'blocked', reason: 'disconnected' };
+  return { kind: 'send', requestId: input.requestId, behavior };
+}

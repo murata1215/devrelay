@@ -27,6 +27,13 @@ import {
   resolveConfirmationOnProjectChange,
   decideThreadListRefresh,
   THREAD_REFRESH_MIN_INTERVAL_MS,
+  upsertApproval,
+  removeApproval,
+  markApprovalResponded,
+  selectVisibleApprovals,
+  canRespondToApproval,
+  decideApprovalRespond,
+  LITE_APPROVAL_MAX_ENTRIES,
 } from '../dist-test/components/lite/lite-shell-rules.js';
 // F4 pin ブロック: このモジュールのソースは無変更。既存の fail-open ゲートが Lite の前提として
 // 崩れていないことを固定する（D2: ソース変更ゼロ、cycle3 の実装を再利用する想定）。
@@ -1019,5 +1026,165 @@ describe('decideSendAction（「＋新規 直後」の送信先固定を回帰�
       inFlight,
     });
     assert.deepEqual(action, { kind: 'blocked', reason: 'in-flight' });
+  });
+});
+
+describe('upsertApproval（L5: 承認カードの Map への反映）', () => {
+  function prompt(overrides = {}) {
+    return {
+      requestId: 'req-1',
+      toolName: 'Bash',
+      toolInput: { command: 'ls' },
+      sessionId: 'sess-1',
+      ...overrides,
+    };
+  }
+
+  test('新規追加は status: pending で入る', () => {
+    const next = upsertApproval(new Map(), prompt());
+    assert.deepEqual(next.get('req-1'), { ...prompt(), status: 'pending' });
+  });
+
+  test('サーバー再送（同一 requestId）は非 pending でも pending に巻き戻る（デッドロック防止の核心）', () => {
+    const withResponded = new Map([['req-1', { ...prompt(), status: 'allow' }]]);
+    const next = upsertApproval(withResponded, prompt());
+    assert.equal(next.get('req-1').status, 'pending');
+  });
+
+  test('既存キーへの再送は挿入順を変えない', () => {
+    let map = upsertApproval(new Map(), prompt({ requestId: 'req-1' }));
+    map = upsertApproval(map, prompt({ requestId: 'req-2' }));
+    map = upsertApproval(map, prompt({ requestId: 'req-1' })); // req-1 を再送
+    assert.deepEqual(Array.from(map.keys()), ['req-1', 'req-2']);
+  });
+
+  test(`上限 ${LITE_APPROVAL_MAX_ENTRIES} 件を超えると最古のエントリが落ちる`, () => {
+    let map = new Map();
+    for (let i = 0; i < LITE_APPROVAL_MAX_ENTRIES + 1; i++) {
+      map = upsertApproval(map, prompt({ requestId: `req-${i}` }));
+    }
+    assert.equal(map.size, LITE_APPROVAL_MAX_ENTRIES);
+    assert.equal(map.has('req-0'), false); // 最古が落ちている
+    assert.equal(map.has(`req-${LITE_APPROVAL_MAX_ENTRIES}`), true); // 最新は残る
+  });
+});
+
+describe('removeApproval（不在時は同一参照を返す）', () => {
+  test('存在しない requestId を削除しようとすると同一参照を返す', () => {
+    const map = new Map([['req-1', { requestId: 'req-1', status: 'pending' }]]);
+    const next = removeApproval(map, 'req-unknown');
+    assert.equal(next, map); // Object.is で同一参照
+  });
+
+  test('存在する requestId を削除すると新しい Map を返し、当該エントリが消える', () => {
+    const map = new Map([['req-1', { requestId: 'req-1', status: 'pending' }]]);
+    const next = removeApproval(map, 'req-1');
+    assert.notEqual(next, map);
+    assert.equal(next.has('req-1'), false);
+  });
+});
+
+describe('markApprovalResponded（表示専用の状態遷移。不在時は同一参照）', () => {
+  test('不在の requestId は同一参照を返す', () => {
+    const map = new Map();
+    const next = markApprovalResponded(map, 'req-unknown', 'allow');
+    assert.equal(next, map);
+  });
+
+  test('存在する requestId の status を allow に更新する', () => {
+    const map = new Map([['req-1', { requestId: 'req-1', status: 'pending' }]]);
+    const next = markApprovalResponded(map, 'req-1', 'allow');
+    assert.equal(next.get('req-1').status, 'allow');
+  });
+
+  test('存在する requestId の status を deny に更新する', () => {
+    const map = new Map([['req-1', { requestId: 'req-1', status: 'pending' }]]);
+    const next = markApprovalResponded(map, 'req-1', 'deny');
+    assert.equal(next.get('req-1').status, 'deny');
+  });
+});
+
+describe('selectVisibleApprovals（§5 shouldShowApprovalCard の到着時ゲートを描画時にも適用）', () => {
+  test('viewSessionId が null なら 1 件も表示しない（fail-closed）', () => {
+    const map = new Map([['req-1', { requestId: 'req-1', sessionId: 'sess-1', status: 'pending' }]]);
+    assert.deepEqual(selectVisibleApprovals(map, null), []);
+  });
+
+  test('viewSessionId と一致するエントリのみ表示する（別スレッドへ切替後は非表示）', () => {
+    const map = new Map([
+      ['req-1', { requestId: 'req-1', sessionId: 'sess-1', status: 'pending' }],
+      ['req-2', { requestId: 'req-2', sessionId: 'sess-2', status: 'pending' }],
+    ]);
+    const visible = selectVisibleApprovals(map, 'sess-2');
+    assert.deepEqual(visible.map((e) => e.requestId), ['req-2']);
+  });
+
+  test('sessionId 欠落エントリ（後方互換 payload）は viewSessionId さえあれば表示する', () => {
+    const map = new Map([['req-1', { requestId: 'req-1', status: 'pending' }]]);
+    assert.deepEqual(selectVisibleApprovals(map, 'sess-1').map((e) => e.requestId), ['req-1']);
+  });
+
+  test('複数一致は挿入順を維持したまま全件返す', () => {
+    const map = new Map([
+      ['req-1', { requestId: 'req-1', sessionId: 'sess-1', status: 'pending' }],
+      ['req-2', { requestId: 'req-2', sessionId: 'sess-1', status: 'pending' }],
+    ]);
+    assert.deepEqual(selectVisibleApprovals(map, 'sess-1').map((e) => e.requestId), ['req-1', 'req-2']);
+  });
+});
+
+describe('canRespondToApproval（AskUserQuestion は L5 のスコープ外）', () => {
+  test('isQuestion: true なら false', () => {
+    assert.equal(canRespondToApproval({ isQuestion: true }), false);
+  });
+
+  test('isQuestion 未指定なら true', () => {
+    assert.equal(canRespondToApproval({}), true);
+  });
+
+  test('isQuestion: false なら true', () => {
+    assert.equal(canRespondToApproval({ isQuestion: false }), true);
+  });
+});
+
+describe('decideApprovalRespond（送信可否の優先順位: 二重送信済み → 質問カード → 切断中）', () => {
+  test('すべて満たせば send（behavior をそのまま echo back する）', () => {
+    const result = decideApprovalRespond(
+      { requestId: 'req-1', isQuestion: false, alreadySent: false, connected: true },
+      'allow'
+    );
+    assert.deepEqual(result, { kind: 'send', requestId: 'req-1', behavior: 'allow' });
+  });
+
+  test('deny も同様に send で echo back される', () => {
+    const result = decideApprovalRespond(
+      { requestId: 'req-1', isQuestion: false, alreadySent: false, connected: true },
+      'deny'
+    );
+    assert.deepEqual(result, { kind: 'send', requestId: 'req-1', behavior: 'deny' });
+  });
+
+  test('alreadySent が最優先（isQuestion/connected が同時に false でも already-responded）', () => {
+    const result = decideApprovalRespond(
+      { requestId: 'req-1', isQuestion: true, alreadySent: true, connected: false },
+      'allow'
+    );
+    assert.deepEqual(result, { kind: 'blocked', reason: 'already-responded' });
+  });
+
+  test('alreadySent=false かつ isQuestion=true なら question-unsupported（connected=false でも）', () => {
+    const result = decideApprovalRespond(
+      { requestId: 'req-1', isQuestion: true, alreadySent: false, connected: false },
+      'allow'
+    );
+    assert.deepEqual(result, { kind: 'blocked', reason: 'question-unsupported' });
+  });
+
+  test('alreadySent=false, isQuestion=false, connected=false なら disconnected（事実 C の穴埋め）', () => {
+    const result = decideApprovalRespond(
+      { requestId: 'req-1', isQuestion: false, alreadySent: false, connected: false },
+      'deny'
+    );
+    assert.deepEqual(result, { kind: 'blocked', reason: 'disconnected' });
   });
 });
