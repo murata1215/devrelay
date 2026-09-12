@@ -1,6 +1,8 @@
-import { useState, useRef, useCallback, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { useLanguage } from '../contexts/LanguageContext';
-import { RAIL_WIDTH_STORAGE_KEY, readRailWidth, clampRailWidth, resolveRailBadge } from '../lib/right-rail-rules';
+import { RAIL_WIDTH_STORAGE_KEY, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX, RAIL_WIDTH_DEFAULT, resolveRailBadge } from '../lib/right-rail-rules';
+import { usePanelResize } from '../hooks/usePanelResize';
+import { RESIZE_OVERLAY_CLASS } from '../lib/panel-resize-rules';
 
 /**
  * classic チャット画面の右レール。
@@ -25,55 +27,16 @@ export interface RightRailProps {
   docPanelSlot: ReactNode | null;
 }
 
-/** localStorage 読み取りを try/catch で包む（プライベートモード等で例外になる環境向け） */
-function safeGetItem(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-/** localStorage 書き込みを try/catch で包む */
-function safeSetItem(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    /* プライベートモード等で書き込み不可でも動作を継続 */
-  }
-}
-
 export function RightRail({ collapsed, onToggle, pendingApprovalCount, serversSlot, docPanelSlot }: RightRailProps) {
   const { t } = useLanguage();
-  /** リサイズ状態（旧 DocPanel から移設。ロジック・定数は無変更） */
-  const [railWidth, setRailWidth] = useState(() => readRailWidth(safeGetItem(RAIL_WIDTH_STORAGE_KEY)));
-  const [resizing, setResizing] = useState(false);
-  const railWidthRef = useRef(railWidth);
-  railWidthRef.current = railWidth;
-
-  /** リサイズハンドル（旧 DocPanel の handleResizeStart と同一ロジック） */
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setResizing(true);
-    const startX = e.clientX;
-    const startWidth = railWidthRef.current;
-
-    const handleMouseMove = (ev: MouseEvent) => {
-      // 右端パネルなので左にドラッグ = 幅拡大
-      const delta = startX - ev.clientX;
-      setRailWidth(clampRailWidth(startWidth + delta));
-    };
-
-    const handleMouseUp = () => {
-      setResizing(false);
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      safeSetItem(RAIL_WIDTH_STORAGE_KEY, String(railWidthRef.current));
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  }, []);
+  /** リサイズ状態（`usePanelResize` に一本化。ロジック・定数は無変更、キー `devrelay-panel-width` を維持） */
+  const { width: railWidth, resizing, onResizeStart: handleResizeStart } = usePanelResize({
+    storageKey: RAIL_WIDTH_STORAGE_KEY,
+    min: RAIL_WIDTH_MIN,
+    max: RAIL_WIDTH_MAX,
+    defaultWidth: RAIL_WIDTH_DEFAULT,
+    edge: 'left',
+  });
 
   const badge = resolveRailBadge({ collapsed, pendingCount: pendingApprovalCount });
 
@@ -100,8 +63,8 @@ export function RightRail({ collapsed, onToggle, pendingApprovalCount, serversSl
 
   return (
     <>
-      {/* リサイズ中のオーバーレイ（テキスト選択防止。旧 DocPanel から移設） */}
-      {resizing && <div className="fixed inset-0 z-50 cursor-col-resize" />}
+      {/* リサイズ中のオーバーレイ（テキスト選択防止。usePanelResize 経由で共通化） */}
+      {resizing && <div className={RESIZE_OVERLAY_CLASS} />}
 
       <aside
         style={{ width: railWidth }}

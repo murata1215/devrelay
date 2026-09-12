@@ -7,6 +7,7 @@ import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT,
 import { useLanguage } from '../contexts/LanguageContext';
 import { shouldRouteToTab, resolveHistorySource } from '../lib/thread-routing-client';
 import { ThreadList } from '../components/ThreadList';
+import { ThreadPane } from '../components/ThreadPane';
 import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
 import { RightRail } from '../components/RightRail';
 import { RAIL_COLLAPSED_STORAGE_KEY, readRailCollapsed, serializeRailCollapsed, countPendingApprovals, resolveSidebarShellClass } from '../lib/right-rail-rules';
@@ -3474,15 +3475,17 @@ export function ChatPage() {
 
         {/* スレッド管理 サイクル3: TabBar 下に flex 行を挿入し ThreadList を左に配置（単独ステップ） */}
         <div className="flex-1 flex min-h-0">
-          <ThreadList
-            projectId={activeTab?.projectId}
-            currentSessionId={activeTab?.sessionId ?? null}
-            onSelect={handleThreadSelect}
-            onCreate={handleThreadCreate}
-            refreshToken={threadRefreshToken}
-            collapsed={threadPanelCollapsed}
-            onToggleCollapse={toggleThreadPanelCollapsed}
-          />
+          <ThreadPane collapsed={threadPanelCollapsed}>
+            <ThreadList
+              projectId={activeTab?.projectId}
+              currentSessionId={activeTab?.sessionId ?? null}
+              onSelect={handleThreadSelect}
+              onCreate={handleThreadCreate}
+              refreshToken={threadRefreshToken}
+              collapsed={threadPanelCollapsed}
+              onToggleCollapse={toggleThreadPanelCollapsed}
+            />
+          </ThreadPane>
           <div className="flex-1 flex flex-col min-w-0">
             {/* メッセージエリア */}
             <div

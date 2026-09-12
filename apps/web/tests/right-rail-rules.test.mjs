@@ -11,13 +11,12 @@ import {
   RAIL_WIDTH_MAX,
   readRailCollapsed,
   serializeRailCollapsed,
-  readRailWidth,
-  clampRailWidth,
   countPendingApprovals,
   resolveRailBadge,
   resolveRailSections,
   resolveSidebarShellClass,
 } from '../dist-test/lib/right-rail-rules.js';
+import { clampWidth, readWidth } from '../dist-test/lib/panel-resize-rules.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const readSrc = (relPath) => readFileSync(path.join(__dirname, '..', relPath), 'utf8');
@@ -60,38 +59,41 @@ describe('readRailCollapsed / serializeRailCollapsed', () => {
   });
 });
 
-describe('clampRailWidth', () => {
+// clampRailWidth / readRailWidth は panel-resize-rules.ts の clampWidth / readWidth に一本化した
+// （right-rail-rules.ts から削除済み）。RAIL_* 定数を渡して同じ契約を検証する。
+describe('clampWidth（RAIL_WIDTH_MIN/MAX を渡した場合。旧 clampRailWidth 相当）', () => {
   test('範囲内はそのまま', () => {
-    assert.equal(clampRailWidth(300), 300);
+    assert.equal(clampWidth(300, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX), 300);
   });
   test('下限未満は下限に丸める', () => {
-    assert.equal(clampRailWidth(0), RAIL_WIDTH_MIN);
-    assert.equal(clampRailWidth(-100), RAIL_WIDTH_MIN);
+    assert.equal(clampWidth(0, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX), RAIL_WIDTH_MIN);
+    assert.equal(clampWidth(-100, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX), RAIL_WIDTH_MIN);
   });
   test('上限超過は上限に丸める', () => {
-    assert.equal(clampRailWidth(9999), RAIL_WIDTH_MAX);
+    assert.equal(clampWidth(9999, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX), RAIL_WIDTH_MAX);
   });
   test('境界値はそのまま通す', () => {
-    assert.equal(clampRailWidth(RAIL_WIDTH_MIN), RAIL_WIDTH_MIN);
-    assert.equal(clampRailWidth(RAIL_WIDTH_MAX), RAIL_WIDTH_MAX);
+    assert.equal(clampWidth(RAIL_WIDTH_MIN, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX), RAIL_WIDTH_MIN);
+    assert.equal(clampWidth(RAIL_WIDTH_MAX, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX), RAIL_WIDTH_MAX);
   });
 });
 
-describe('readRailWidth', () => {
+describe('readWidth（RAIL_WIDTH_MIN/MAX/DEFAULT を渡した場合。旧 readRailWidth 相当）', () => {
+  const args = { min: RAIL_WIDTH_MIN, max: RAIL_WIDTH_MAX, fallback: RAIL_WIDTH_DEFAULT };
   test('null（未保存）は既定幅', () => {
-    assert.equal(readRailWidth(null), RAIL_WIDTH_DEFAULT);
+    assert.equal(readWidth(null, args), RAIL_WIDTH_DEFAULT);
   });
   test("ゴミ値（'abc'）は既定幅", () => {
-    assert.equal(readRailWidth('abc'), RAIL_WIDTH_DEFAULT);
+    assert.equal(readWidth('abc', args), RAIL_WIDTH_DEFAULT);
   });
   test("'0' は下限へ clamp される（既定幅ではない）", () => {
-    assert.equal(readRailWidth('0'), RAIL_WIDTH_MIN);
+    assert.equal(readWidth('0', args), RAIL_WIDTH_MIN);
   });
   test("'9999' は上限へ clamp される", () => {
-    assert.equal(readRailWidth('9999'), RAIL_WIDTH_MAX);
+    assert.equal(readWidth('9999', args), RAIL_WIDTH_MAX);
   });
   test("'208' はそのまま", () => {
-    assert.equal(readRailWidth('208'), 208);
+    assert.equal(readWidth('208', args), 208);
   });
 });
 

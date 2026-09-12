@@ -36,22 +36,12 @@ export function serializeRailCollapsed(collapsed: boolean): '1' | '0' {
   return collapsed ? '1' : '0';
 }
 
-/** 幅を [RAIL_WIDTH_MIN, RAIL_WIDTH_MAX] の範囲に収める */
-export function clampRailWidth(width: number): number {
-  return Math.min(RAIL_WIDTH_MAX, Math.max(RAIL_WIDTH_MIN, width));
-}
-
 /**
- * localStorage の生の文字列から幅を復元する。
- * `null`・数値変換不能（NaN）・非有限値は既定幅（`RAIL_WIDTH_DEFAULT`）にフォールバックしたうえで、
- * 常に `clampRailWidth` を通す（保存後に MIN/MAX 定数を変更した場合の異常値も吸収する）。
+ * 幅の clamp/read ロジックは `panel-resize-rules.ts`（`clampWidth`/`readWidth`）に一本化した
+ * （本モジュールが持っていた旧・幅専用の2関数は削除済み。本モジュールは `^import` ゼロの規約があるため
+ * 委譲もできず、`RightRail.tsx` 側が `RAIL_WIDTH_MIN`/`RAIL_WIDTH_MAX`/`RAIL_WIDTH_DEFAULT` を
+ * 汎用関数に渡す形にした。定数はこのファイルに残す）。
  */
-export function readRailWidth(raw: string | null): number {
-  if (raw === null) return RAIL_WIDTH_DEFAULT;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return RAIL_WIDTH_DEFAULT;
-  return clampRailWidth(parsed);
-}
 
 /** 承認待ち（`status === 'pending'`）件数を数える */
 export function countPendingApprovals(list: { status: string }[]): number {

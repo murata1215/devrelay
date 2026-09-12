@@ -69,3 +69,21 @@ body.chat-maximized nav {
 :root.light .lite-root {
   color-scheme: light;
 }
+
+/* classic: スレッド一覧ペインの可変幅（web のみ）。ThreadList.tsx は /lite と共有のため無変更とし、
+   その root の w-56 をここで上書きする（アンレイヤー宣言は @layer utilities の Tailwind ユーティリティに
+   詳細度に関わらず必ず勝つため、.thread-pane { width: 14rem } は .w-56 { width: 14rem } を確実に上書きする）。
+   モバイル（<48rem）は 14rem 固定のまま（現行と完全一致）、48rem 以上でのみ --thread-pane-w 変数を適用する。
+   `> :not(.panel-resize-handle)` に注意: `> div` にするとリサイズハンドル自身（絶対配置の子要素）まで
+   幅 100% になってしまい、ペイン全面がドラッグ判定になってスレッド行がクリックできなくなる。 */
+.thread-pane {
+  width: 14rem;
+}
+@media (min-width: 48rem) {
+  .thread-pane {
+    width: var(--thread-pane-w, 14rem);
+  }
+  .thread-pane > :not(.panel-resize-handle) {
+    width: 100%;
+  }
+}

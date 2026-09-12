@@ -22,6 +22,7 @@
     "src/components/lite/lite-shell-rules.ts",
     "src/lib/lite-message-log.ts",
     "src/lib/lite-outbox.ts",
-    "src/lib/right-rail-rules.ts"
+    "src/lib/right-rail-rules.ts",
+    "src/lib/panel-resize-rules.ts"
   ]
 }
