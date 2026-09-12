@@ -66,6 +66,7 @@ pm2 restart devrelay-server
 | ENCRYPTION_KEY | API キー暗号化 |
 | FIREBASE_SERVICE_ACCOUNT_PATH | FCM プッシュ通知用サービスアカウント JSON |
 | DEVRELAY_PLAN_STRICT_CHAT | チャット経路のプランターンを strictReadonly にするか（既定 `1`。`0` で従来の `interactive` に戻すキルスイッチ。chat のみに作用し mcp/exec には影響しない） |
+| DEVRELAY_THREADS_HIDE_EMPTY_ENDED | `GET /api/threads` で ended かつ Message 0件の抜け殻スレッドを一覧から隠すか（既定 `1`。`0` で従来どおり全件表示するキルスイッチ） |
 
 ## DB テーブル（概要）
 

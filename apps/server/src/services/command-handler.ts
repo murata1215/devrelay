@@ -532,23 +532,35 @@ export async function handleProjectConnect(
     // 増殖する」というバグの直接原因だったため。「最新の ended」ではなく preferredThreadId に
     // ちょうど一致する ended のみを復活対象にする（decideEndedRevival 参照。24h アイドルスイープの
     // 対象になっている無関係な古い ended スレッドまで復活させないための制約）。
+    // 「(無題)」大量発生の根治 サイクルC（案3-1a）: 従来は preferredThreadId が無ければ
+    // ended 候補のクエリ自体をスキップしていたが、「Agent オフライン時のみ直近の ended を
+    // 復活させる」緩和（decideEndedRevival の②）を通すため、ended 候補は preferredThreadId の
+    // 有無に関わらず取得する。オンライン経路（machineOnline!==false）は decideEndedRevival の
+    // ②判定に到達しないため、クエリ発行の有無こそ変わるが復活可否の判定結果は
+    // 69bcd3e と数学的に同一（オンライン経路には副作用ゼロ）。
     let revivedSessionId: string | null = null;
-    if (preferredThreadId) {
-      const endedSessions = await prisma.session.findMany({
-        where: {
-          userId: user.id,
-          projectId: project.id,
-          machineId: project.machineId,
-          status: 'ended',
-        },
-        select: { id: true },
-      });
-      const revival = decideEndedRevival({
-        preferredThreadId,
-        endedCandidateIds: endedSessions.map((s) => s.id),
-      });
-      if (revival.action === 'revive') revivedSessionId = revival.sessionId;
-    }
+    const endedSessions = await prisma.session.findMany({
+      where: {
+        userId: user.id,
+        projectId: project.id,
+        machineId: project.machineId,
+        status: 'ended',
+      },
+      select: { id: true },
+      // 「直近アクティブだった ended」を②の候補にするための並び。①（preferredThreadId 一致）が
+      // 優先されるため、オンライン経路ではこの orderBy の結果は一切参照されない。
+      orderBy: { lastActiveAt: { sort: 'desc', nulls: 'last' } },
+    });
+    // `api.ts` の `machineOnline` 導出（`connectedAgents.has(machineId)`）と同じ意味論。
+    // オフライン判定はここでは `Machine.status` も併せて見る（切断直後の反映ラグ対策）。
+    const machineOnline = project.machine.status === 'online' && isAgentConnected(project.machineId);
+    const revival = decideEndedRevival({
+      preferredThreadId,
+      endedCandidateIds: endedSessions.map((s) => s.id),
+      machineOnline,
+      mostRecentEndedId: endedSessions[0]?.id ?? null,
+    });
+    if (revival.action === 'revive') revivedSessionId = revival.sessionId;
 
     if (revivedSessionId) {
       // reuse と同じ扱い: isResumed=true にすることで startAgentSession はここでは呼ばない。

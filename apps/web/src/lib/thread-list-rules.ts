@@ -17,6 +17,11 @@ export interface ThreadListItem {
   sessionId: string;
   title: string | null;
   firstUserMessage: string | null;
+  /** 「(無題)」大量発生の根治 サイクルB: `[exec]`/`[w]`/`[teamexec]` タグを剥がしたユーザーメッセージ。
+   * 旧サーバー応答には存在しないため optional（`deriveThreadLabel` 側で `??` フォールバックする）。 */
+  labelFromUser?: string | null;
+  /** 「(無題)」大量発生の根治 サイクルB: 📊 contextInfo / 🔧 進捗マーカー行を除いた AI 応答。同上 optional。 */
+  labelFromAi?: string | null;
   /** false の場合は agentScopeId = NULL（既定スレッド） */
   isScoped: boolean;
   /** ISO 文字列。サーバー側で `lastActiveAt ?? startedAt` に解決済み（常に non-null） */
@@ -44,7 +49,13 @@ export function truncateDisplay(text: string, max: number): string {
 
 /**
  * スレッドの表示ラベルを導出する。
- * 優先順位: `title`（空白のみは無視） → `firstUserMessage` の先頭 `max` 字（既定 40, 空白のみは無視） → fallback
+ * 優先順位: `title`（空白のみは無視） → `labelFromUser ?? firstUserMessage` の先頭 `max` 字
+ * （既定 40, 空白のみは無視） → `labelFromAi` の先頭 `max` 字 → fallback
+ *
+ * 「(無題)」大量発生の根治 サイクルB: `labelFromUser`/`labelFromAi` は
+ * `[exec]`/`[w]`/`[teamexec]` タグ除去済み・AI 応答ノイズ除去済みのラベル材料
+ * （サーバーが都度導出。DB へは非永続化）。旧サーバー応答（`labelFromUser`/`labelFromAi` が
+ * 無い）でも `??` により従来どおり `firstUserMessage` にフォールバックするため後方互換。
  *
  * `kind: 'fallback'` の場合 `text` は空文字を返す。この純モジュールは外部 import（i18n 含む）を
  * 一切持てないため、未命名時の表示文字列（例: 日本語「(無題)」/ 英語 "(untitled)"）は
@@ -54,12 +65,20 @@ export function truncateDisplay(text: string, max: number): string {
  * それを優先表示する（ユーザーが明示的に改名した場合はその意図を尊重する）。
  */
 export function deriveThreadLabel(
-  item: Pick<ThreadListItem, 'title' | 'firstUserMessage'>,
+  item: Pick<ThreadListItem, 'title' | 'firstUserMessage' | 'labelFromUser' | 'labelFromAi'>,
   max: number = 40
-): { text: string; kind: 'title' | 'firstMessage' | 'fallback' } {
+): { text: string; kind: 'title' | 'firstMessage' | 'aiMessage' | 'fallback' } {
   if (item.title && item.title.trim()) return { text: item.title, kind: 'title' };
-  if (item.firstUserMessage && item.firstUserMessage.trim()) {
-    return { text: truncateDisplay(item.firstUserMessage, max), kind: 'firstMessage' };
+  // `labelFromUser` キー自体が無い（旧サーバー応答）場合のみ `firstUserMessage` にフォールバックする。
+  // `labelFromUser: null`（コマンドタグ単体などラベルの材料が無いとサーバーが判定済み）のときは
+  // `firstUserMessage`（タグ除去前の生テキスト、例: "[exec]"）に巻き戻さず、次点の `labelFromAi` へ進む
+  // （`??` だと null も undefined と同様に巻き戻ってしまい、サーバー側の判定が意味を持たなくなる）。
+  const userLabel = item.labelFromUser !== undefined ? item.labelFromUser : item.firstUserMessage;
+  if (userLabel && userLabel.trim()) {
+    return { text: truncateDisplay(userLabel, max), kind: 'firstMessage' };
+  }
+  if (item.labelFromAi && item.labelFromAi.trim()) {
+    return { text: truncateDisplay(item.labelFromAi, max), kind: 'aiMessage' };
   }
   return { text: '', kind: 'fallback' };
 }

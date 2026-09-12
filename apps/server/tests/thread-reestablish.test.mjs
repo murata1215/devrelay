@@ -85,6 +85,68 @@ describe('decideEndedRevival（Fix C: //connect の ended 復活は preferredThr
   });
 });
 
+describe('decideEndedRevival: サイクルC（案3-1a）machineOnline による緩和（②）', () => {
+  // 【最重要・退行ガード】machineOnline 省略/true のときは①と createNew しか通らない
+  // = 69bcd3e と数学的に同一であることを、既存の①系テストと同じ入力の組み合わせで再確認する。
+  test('machineOnline 省略（undefined）は従来と同じ結果（mostRecentEndedId があっても無視）', () => {
+    const result = decideEndedRevival({
+      preferredThreadId: null,
+      endedCandidateIds: ['sess-a', 'sess-b'],
+      mostRecentEndedId: 'sess-b',
+    });
+    assert.deepEqual(result, { action: 'createNew' });
+  });
+
+  test('machineOnline: true は従来と同じ結果（mostRecentEndedId があっても無視）', () => {
+    const result = decideEndedRevival({
+      preferredThreadId: null,
+      endedCandidateIds: ['sess-a', 'sess-b'],
+      machineOnline: true,
+      mostRecentEndedId: 'sess-b',
+    });
+    assert.deepEqual(result, { action: 'createNew' });
+  });
+
+  test('machineOnline: false かつ preferredThreadId 不一致（①失敗）なら mostRecentEndedId を復活させる（②）', () => {
+    const result = decideEndedRevival({
+      preferredThreadId: null,
+      endedCandidateIds: ['sess-a', 'sess-b'],
+      machineOnline: false,
+      mostRecentEndedId: 'sess-b',
+    });
+    assert.deepEqual(result, { action: 'revive', sessionId: 'sess-b' });
+  });
+
+  test('machineOnline: false でも preferredThreadId 一致（①）があればそちらを優先する', () => {
+    const result = decideEndedRevival({
+      preferredThreadId: 'sess-a',
+      endedCandidateIds: ['sess-a', 'sess-b'],
+      machineOnline: false,
+      mostRecentEndedId: 'sess-b',
+    });
+    assert.deepEqual(result, { action: 'revive', sessionId: 'sess-a' });
+  });
+
+  test('machineOnline: false でも mostRecentEndedId が null/未指定なら新規作成', () => {
+    const result = decideEndedRevival({
+      preferredThreadId: null,
+      endedCandidateIds: ['sess-a'],
+      machineOnline: false,
+      mostRecentEndedId: null,
+    });
+    assert.deepEqual(result, { action: 'createNew' });
+  });
+
+  test('machineOnline: false でも endedCandidateIds が空なら新規作成（mostRecentEndedId 自体が無いはず）', () => {
+    const result = decideEndedRevival({
+      preferredThreadId: null,
+      endedCandidateIds: [],
+      machineOnline: false,
+    });
+    assert.deepEqual(result, { action: 'createNew' });
+  });
+});
+
 describe('decideSessionInfoPush（Fix B: web:session_info 再送要否）', () => {
   test('前後で currentSessionId が変わっていれば再送すべき', () => {
     const result = decideSessionInfoPush({ beforeSessionId: 'a', afterSessionId: 'b' });
@@ -175,6 +237,14 @@ describe('静的ガード: handleProjectConnect が decideEndedRevival( を使�
     assert.notEqual(idx, -1);
     const after = source.slice(idx, idx + 800);
     assert.match(after, /revival\.action === 'revive'/);
+  });
+
+  test('サイクルC: decideEndedRevival( 呼び出しに machineOnline と mostRecentEndedId が配線されている', () => {
+    const idx = source.indexOf('decideEndedRevival(');
+    assert.notEqual(idx, -1);
+    const call = source.slice(idx, idx + 400);
+    assert.match(call, /machineOnline/);
+    assert.match(call, /mostRecentEndedId/);
   });
 });
 

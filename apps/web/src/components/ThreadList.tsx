@@ -37,6 +37,17 @@ function formatRelativeTime(iso: string, locale: 'en-US' | 'ja-JP', justNowLabel
   return justNowLabel;
 }
 
+/** 「(無題)」大量発生の根治 サイクルB: `deriveThreadLabel()` が `kind:'fallback'`（title 無し・
+ * ラベルの材料になるメッセージも無し）を返したときの表示文字列を「プロジェクト名 + 日時」で
+ * 合成する。`thread-list-rules.ts` は i18n・`Intl` 補間の都合で置けないため、`formatRelativeTime`
+ * と同じ理由でこのコンポーネント内だけの非純関数として保持する。 */
+function formatFallbackLabel(projectName: string, iso: string, locale: 'en-US' | 'ja-JP'): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return projectName;
+  const formatted = new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(ms));
+  return `${projectName} ${formatted}`;
+}
+
 export interface ThreadListProps {
   /** 省略時はユーザーの全スレッド（Lite シェル v2 用）。v1（ChatPage内）はタブの projectId を渡す */
   projectId?: string;
@@ -278,7 +289,11 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
         )}
         {items.map((item) => {
           const label = deriveThreadLabel(item);
-          const displayText = label.kind === 'fallback' ? t('thread.untitled') : label.text;
+          // 「(無題)」大量発生の根治 サイクルB: fallback（title 無し・材料になるメッセージも無し）を
+          // 「プロジェクト名 + 日時」に変更（従来は `t('thread.untitled')` 固定文字列だった）。
+          const displayText = label.kind === 'fallback'
+            ? formatFallbackLabel(item.projectName, item.lastActiveAt, locale)
+            : label.text;
           const isActive = item.sessionId === currentSessionId;
           const isRenaming = renamingId === item.sessionId;
           return (

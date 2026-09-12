@@ -53,6 +53,20 @@ export interface DecideEndedRevivalInput {
   preferredThreadId: string | null;
   /** 同一ユーザー・同一プロジェクト・同一マシンの `ended` 状態の候補セッション ID 一覧。 */
   endedCandidateIds: string[];
+  /**
+   * 【サイクルC・optional】対象マシンの Agent が現在オンラインかどうか。
+   * 省略、または `true` の場合は従来どおり（`preferredThreadId` に一致する ended のみ復活）。
+   * これにより「(無題)」大量発生の根治 サイクルC の対象外呼び出し（オンライン経路）は
+   * 69bcd3e の挙動と数学的に同一のまま維持される。
+   */
+  machineOnline?: boolean;
+  /**
+   * 【サイクルC・optional】`machineOnline === false` のときのみ参照する、
+   * 直近アクティブだった（`lastActiveAt` 降順の先頭）ended 候補の ID。
+   * オンライン経路では一切参照しない（24h アイドルスイープを殺さないという
+   * 69bcd3e の設計意図をオンライン経路で完全に保つため）。
+   */
+  mostRecentEndedId?: string | null;
 }
 
 /** `decideEndedRevival` の結果。 */
@@ -67,10 +81,21 @@ export type EndedRevivalDecision =
  * それ以外（`preferredThreadId` が null、または一致するものが無い）は必ず新規作成する。
  * 「最新の ended を復活」させないのが意図的な設計: 24時間アイドルスイープの対象である
  * 古い ended スレッドまで無条件に復活させると、スイープが機能しなくなってしまう。
+ *
+ * 【サイクルC】上記①（`preferredThreadId` 一致）で復活できなかった場合のみ、
+ * `machineOnline === false`（Agent がオフライン）なら②として `mostRecentEndedId` を復活させる。
+ * オフライン中に新規 Session を作っても `startAgentSession` が実質失敗して空 ended セッションの
+ * 抜け殻が増えるだけで価値が無いため、「オフラインなら作らない」を優先する
+ * （`POST /api/threads` が既にオフライン時 409 を返す設計＝`thread-api-guard.ts` と整合）。
+ * `machineOnline` 省略/`true` のときはこの②に一切到達しない＝オンライン経路は①と `createNew`
+ * しか通らず 69bcd3e と数学的に同一（24h アイドルスイープを殺さないという意図を完全維持）。
  */
 export function decideEndedRevival(input: DecideEndedRevivalInput): EndedRevivalDecision {
   if (input.preferredThreadId && input.endedCandidateIds.includes(input.preferredThreadId)) {
     return { action: 'revive', sessionId: input.preferredThreadId };
+  }
+  if (input.machineOnline === false && input.mostRecentEndedId) {
+    return { action: 'revive', sessionId: input.mostRecentEndedId };
   }
   return { action: 'createNew' };
 }

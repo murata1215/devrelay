@@ -603,6 +603,12 @@ export interface ThreadSummary {
   status: 'active' | 'ended';
   lastActiveAt: string;
   firstUserMessage: string | null;
+  /** 「(無題)」大量発生の根治 サイクルB: `[exec]`/`[w]`/`[teamexec]` タグを剥がしたユーザーメッセージ（先頭60字）。
+   * サーバー都度導出・DB非永続化。旧サーバー応答には無いため `thread-list-rules.ts` 側で `??` フォールバックする。 */
+  labelFromUser?: string | null;
+  /** 「(無題)」大量発生の根治 サイクルB: 📊 contextInfo / 🔧 進捗マーカー行を除いた AI 応答の先頭60字。
+   * サーバー都度導出・DB非永続化。 */
+  labelFromAi?: string | null;
   messageCount: number;
   isScoped: boolean;
 }

@@ -13,6 +13,8 @@ import { evaluateProjectOwnership, evaluateSessionOwnership, evaluateThreadCreat
 import { validateThreadTitle } from '../services/thread-title.js';
 import { buildSessionInfoPayload, sortThreadsDesc } from '../services/thread-routing.js';
 import { buildEphemeralSessionIdExclusion } from '../services/thread-scope.js';
+import { buildEmptyEndedThreadExclusion, isHideEmptyEndedEnabled } from '../services/thread-list-filter.js';
+import { stripCommandTag, stripAiNoise } from '../services/thread-label-source.js';
 import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
@@ -1574,6 +1576,15 @@ export async function apiRoutes(app: FastifyInstance) {
         // teamexec_ / crossquery_ / askdesc_ の一時セッションを除外。
         // プレフィックス一覧の単一情報源は thread-scope.ts。
         ...buildEphemeralSessionIdExclusion(),
+        // 「(無題)」大量発生の根治 サイクルA: ended かつ Message が1件も無い抜け殻
+        // （u/x/a/`//connect` しか実行していない、または Agent オフラインで起動失敗した
+        // スレッド）を一覧から隠す。「＋新規」直後（active・Message 0件）は隠れない。
+        // buildEphemeralSessionIdExclusion() が既にトップレベル NOT キーを使っているため、
+        // 本フィルタは AND キーで返す（thread-list-filter.ts のコメント参照。NOT キー衝突回避）。
+        // キルスイッチ DEVRELAY_THREADS_HIDE_EMPTY_ENDED=0 で従来どおり全件表示に戻せる。
+        ...buildEmptyEndedThreadExclusion(
+          isHideEmptyEndedEnabled(process.env.DEVRELAY_THREADS_HIDE_EMPTY_ENDED)
+        ),
       },
       include: {
         project: { select: { id: true, name: true } },
@@ -1593,12 +1604,36 @@ export async function apiRoutes(app: FastifyInstance) {
 
     const connectedAgents = getConnectedAgents();
 
-    const threads = await Promise.all(sorted.map(async (s) => {
-      const firstMessage = await prisma.message.findFirst({
-        where: { sessionId: s.id, role: 'user' },
-        orderBy: { createdAt: 'asc' },
-        select: { content: true },
-      });
+    // 「(無題)」大量発生の根治 サイクルB: 従来は sessions 1件ごとに
+    // `prisma.message.findFirst()` を呼んでいた（最大 take=limit 件の N+1）。
+    // `DISTINCT ON (sessionId, role)` の 1 クエリに集約し、role='user'/'ai' それぞれの
+    // 最初のメッセージを同時に取得する（`@@index([sessionId, createdAt])` で高速）。
+    // ids.length===0（sessions が空）のときは早期 return し、無意味な IN () クエリを避ける。
+    const ids = sorted.map((s) => s.id);
+    type FirstMessageRow = { sessionId: string; role: string; content: string };
+    const firstMessageRows: FirstMessageRow[] = ids.length === 0 ? [] : await prisma.$queryRaw<FirstMessageRow[]>`
+      SELECT DISTINCT ON ("sessionId", role) "sessionId", role, content
+      FROM "Message"
+      WHERE "sessionId" IN (${Prisma.join(ids)}) AND role IN ('user', 'ai')
+      ORDER BY "sessionId", role, "createdAt" ASC
+    `;
+    const firstBySessionRole = new Map<string, { user?: string; ai?: string }>();
+    for (const row of firstMessageRows) {
+      const entry = firstBySessionRole.get(row.sessionId) ?? {};
+      if (row.role === 'user') entry.user = row.content;
+      else if (row.role === 'ai') entry.ai = row.content;
+      firstBySessionRole.set(row.sessionId, entry);
+    }
+
+    const threads = sorted.map((s) => {
+      const first = firstBySessionRole.get(s.id);
+      // 後方互換: 従来どおり role='user' の先頭 60 字を firstUserMessage として維持する。
+      const firstUserMessage = first?.user ? first.user.slice(0, 60) : null;
+      // 新規: タイトル導出のための追加ラベル材料（DB へは永続化せず、都度導出）。
+      // labelFromUser: `[exec]`/`[w]`/`[teamexec]` タグを剥がしたユーザーメッセージ。
+      // labelFromAi: 📊 contextInfo / 🔧 進捗マーカー行を除いた AI 応答の残り。
+      const labelFromUser = first?.user ? stripCommandTag(first.user) : null;
+      const labelFromAi = first?.ai ? stripAiNoise(first.ai) : null;
       return {
         sessionId: s.id,
         title: s.title,
@@ -1609,11 +1644,13 @@ export async function apiRoutes(app: FastifyInstance) {
         aiTool: s.aiTool,
         status: s.status,
         lastActiveAt: (s.lastActiveAt ?? s.startedAt).toISOString(),
-        firstUserMessage: firstMessage?.content ? firstMessage.content.slice(0, 60) : null,
+        firstUserMessage,
+        labelFromUser: labelFromUser ? labelFromUser.slice(0, 60) : null,
+        labelFromAi: labelFromAi ? labelFromAi.slice(0, 60) : null,
         messageCount: s._count.messages,
         isScoped: s.agentScopeId !== null,
       };
-    }));
+    });
 
     return reply.send({ threads });
   });

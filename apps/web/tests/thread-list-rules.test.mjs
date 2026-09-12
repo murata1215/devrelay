@@ -96,6 +96,56 @@ describe('deriveThreadLabel（§5: title / firstUserMessage 先頭40字 / fallba
   });
 });
 
+describe('deriveThreadLabel: labelFromUser / labelFromAi（「(無題)」大量発生の根治 サイクルB）', () => {
+  test('labelFromUser があれば firstUserMessage より優先する（kind: firstMessage）', () => {
+    const label = deriveThreadLabel({
+      title: null,
+      firstUserMessage: '[exec] 認証を直して',
+      labelFromUser: '認証を直して',
+    });
+    assert.deepEqual(label, { text: '認証を直して', kind: 'firstMessage' });
+  });
+
+  test('labelFromUser が無ければ firstUserMessage にフォールバックする（旧サーバー応答との後方互換）', () => {
+    const label = deriveThreadLabel({ title: null, firstUserMessage: 'hello world' });
+    assert.deepEqual(label, { text: 'hello world', kind: 'firstMessage' });
+  });
+
+  test('labelFromUser が null（コマンドタグ単体等）なら firstUserMessage にフォールバックする', () => {
+    const label = deriveThreadLabel({
+      title: null,
+      firstUserMessage: '[exec]',
+      labelFromUser: null,
+    });
+    assert.equal(label.kind, 'fallback');
+  });
+
+  test('title も labelFromUser/firstUserMessage も無ければ labelFromAi を使う（kind: aiMessage）', () => {
+    const label = deriveThreadLabel({
+      title: null,
+      firstUserMessage: null,
+      labelFromAi: 'ビルドが完了しました',
+    });
+    assert.deepEqual(label, { text: 'ビルドが完了しました', kind: 'aiMessage' });
+  });
+
+  test('labelFromAi も空白のみなら fallback', () => {
+    const label = deriveThreadLabel({ title: null, firstUserMessage: null, labelFromAi: '   ' });
+    assert.equal(label.kind, 'fallback');
+  });
+
+  test('優先順位は title > labelFromUser > labelFromAi', () => {
+    const label = deriveThreadLabel({
+      title: null,
+      firstUserMessage: null,
+      labelFromUser: 'ユーザー発言',
+      labelFromAi: 'AI応答',
+    });
+    assert.equal(label.text, 'ユーザー発言');
+    assert.equal(label.kind, 'firstMessage');
+  });
+});
+
 describe('isDefaultThread（§6: agentScopeId = NULL は「既定」ラベル付きで常に表示）', () => {
   test('isScoped=false（agentScopeId=NULL）なら既定スレッド', () => {
     assert.equal(isDefaultThread({ isScoped: false }), true);
