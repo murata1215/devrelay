@@ -21,6 +21,8 @@ import { buildClaudeLookupCommand, claudeFallbackCandidates } from './claude-loc
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
 import { classifyTerminalStartupFailure } from './terminal-session-id.js';
+// サイクルP1: Capability 配布基盤の prelaunch 入口（provider 判定は共通層側の表で行う）
+import { reconcileForRunner } from './capability-sync.js';
 // core#383: 旧 Claude CLI（--session-id 未対応）を検出した場合のプロセス内フォールバックフラグ。
 // 一度 true になったら、この Agent プロセスが再起動されるまで以後の全ターンで
 // --session-id を渡さない（legacy argv = 画面スクレイプによる旧来のセッション ID 取得に戻す）。
@@ -1782,6 +1784,11 @@ export async function sendPromptToAi(
   if (options.language === 'en') {
     prompt = `${prompt}\n\n---\nIMPORTANT: Respond to the user in English from now on, regardless of the language used in any instructions above.`;
   }
+
+  // サイクルP1: runner 起動直前の唯一のチョークポイント（PTY/SDK 両分岐より前）。
+  // provider 判定は共通層の表で行うため、ai-runner は provider を一切知らない。
+  // 失敗・timeout しても起動をブロックしない（例外を投げない設計、reconcileForRunner 内で担保）。
+  await reconcileForRunner(aiTool, projectPath);
 
   // 端末インタフェースモード（PTY 経由で claude --continue 起動）
   // aiTool が claude かつ terminalMode フラグが立っている場合のみ分岐

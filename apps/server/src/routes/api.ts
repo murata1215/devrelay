@@ -5,7 +5,8 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession } from '../services/agent-manager.js';
+import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability } from '../services/agent-manager.js';
+import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { createSession, resolveScopeOptionsForSession } from '../services/session-manager.js';
 import { switchChatToThread } from '../services/command-handler.js';
@@ -477,6 +478,97 @@ export async function apiRoutes(app: FastifyInstance) {
     console.log(`🔄 Restart command sent to agent: ${machine.name} (${id})`);
 
     return { success: true, message: 'Restart command sent' };
+  });
+
+  // ========================================
+  // サイクルP1: Capability 配布基盤（provider × kind で識別する追加能力の配布設定）
+  // Server は capabilityConfig / capabilitySyncStatus の2フィールドのみを扱い、
+  // どの AI ベンダー（provider）固有知識も持たない
+  // ========================================
+
+  /** マシンの Capability 配布設定 + 直近の同期結果を取得 */
+  app.get('/api/machines/:id/capability-config', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+      // prisma generate 未実行環境でも型エラーにならないよう select は絞らず全体取得する
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+
+    return {
+      capabilityConfig: (machine as any).capabilityConfig ?? null,
+      capabilitySyncStatus: (machine as any).capabilitySyncStatus ?? null,
+      // 'capability-sync' 未申告の旧 Agent は「未同期」ではなく「Agent 更新が必要」と Web 側で区別する
+      capabilitySyncSupported: isAgentConnected(id) ? agentHasCapability(id, 'capability-sync') : null,
+    };
+  });
+
+  /**
+   * マシンの Capability 配布設定を更新し、Agent がオンラインならリアルタイム配信する。
+   * §14-2: 同一ホスト名の全マシンに一括適用する（hostname-alias と同じクエリ形）
+   */
+  app.put('/api/machines/:id/capability-config', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+    const { capabilityConfig } = request.body as { capabilityConfig: unknown };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+
+    const validation = validateCapabilityConfigInput(capabilityConfig);
+    if (!validation.valid) {
+      return reply.status(400).send({ error: validation.error });
+    }
+
+    // ホスト名（"hostname/username" の hostname 部分）が同じ全マシンに一括適用
+    const hostname = machine.name.split('/')[0];
+    const siblings = await prisma.machine.findMany({
+      where: { userId, name: { startsWith: `${hostname}/` }, deletedAt: null },
+    });
+
+    // prisma generate 未実行（人間側作業）のため MachineUpdateInput 型に未反映。カラムは ALTER 済み前提
+    await Promise.all(siblings.map(m => prisma.machine.update({
+      where: { id: m.id },
+      data: { capabilityConfig: (validation.config ?? Prisma.DbNull) } as any,
+    })));
+
+    // オンラインな各マシンにリアルタイム配信
+    const connectedAgents = getConnectedAgents();
+    for (const m of siblings) {
+      if (connectedAgents.has(m.id)) {
+        pushConfigUpdate(m.id, { capabilityConfig: validation.config });
+      }
+    }
+
+    return { success: true, capabilityConfig: validation.config, updatedCount: siblings.length };
+  });
+
+  /** マシンに Capability 同期を即時実行させる（Sync now） */
+  app.post('/api/machines/:id/capability-sync', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { id } = request.params as { id: string };
+
+    const machine = await prisma.machine.findFirst({
+      where: { id, userId, deletedAt: null },
+    });
+    if (!machine) return reply.status(404).send({ error: 'Machine not found' });
+
+    const connectedAgents = getConnectedAgents();
+    if (!connectedAgents.has(id)) {
+      return reply.status(503).send({ error: 'Agent is offline' });
+    }
+
+    sendToAgent(id, { type: 'server:capability:sync', payload: { trigger: 'manual' } });
+    console.log(`🔄 Capability sync command sent to agent: ${machine.name} (${id})`);
+
+    return { success: true, message: 'Capability sync command sent' };
   });
 
   // ========================================

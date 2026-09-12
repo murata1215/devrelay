@@ -32,10 +32,67 @@ export const PROTOCOL_VERSION = 1;
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
  */
-export type AgentCapability = 'scoped-clear';
+export type AgentCapability = 'scoped-clear' | 'capability-sync';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync'];
+
+// -----------------------------------------------------------------------------
+// Capability 配布基盤（サイクルP1）
+//
+// 注意: この節の「Capability」は上記の `AgentCapability`（Agent の機能フラグ、
+// protocolVersion とは別軸で「対応しているか」を表すもの）とは全くの別概念。
+// こちらは「特定の AI ランナー（provider）に DevRelay が導入・同期できる追加能力
+// （kind）」を指す（例: provider=claude, kind=plugin）。'scoped-clear' 同様
+// 'capability-sync' を AgentCapability に追加したのは、この節の Capability 配布に
+// 対応済みかどうかを Server が判別するため（Web の「未同期」表示の根拠）。
+// v1 で有効な組み合わせは provider=claude / kind=plugin のみ。Server・共通層は
+// 未知の provider/kind を受けても Agent を落とさず failed に記録する。
+// -----------------------------------------------------------------------------
+
+/** Claude adapter が使う設定（v1 で唯一実装される provider） */
+export interface CapabilityClaudeProviderConfig {
+  /** `claude plugin marketplace add` で登録する索引名（`marketplace list` の name と一致させる） */
+  marketplaceName: string;
+  /** マーケットプレイスの取得元（`owner/repo` 形式の GitHub リポジトリ） */
+  marketplaceSource: string;
+}
+
+/** 配布対象の論理宣言（provider/kind を必ず明示。将来 providers.codex / providers.devin を追加できる） */
+export interface CapabilityConfig {
+  providers: {
+    claude?: CapabilityClaudeProviderConfig;
+  };
+  items: Array<{
+    provider: string;
+    kind: string;
+    /** bare 名（例: 'unity'）。マーケットプレイス修飾子は adapter 側で付与する */
+    id: string;
+  }>;
+}
+
+/** provider/kind 1 組ぶんの reconcile 結果 */
+export interface CapabilityResult {
+  provider: string;
+  kind: string;
+  /** 例: `claude --version` の出力。取得できない場合は null */
+  runtimeVersion: string | null;
+  installed: string[];
+  updated: string[];
+  present: string[];
+  failed: Array<{ id: string; reason: string }>;
+  /** 索引外の ID（宣言はされたが devrelay 索引に無いため無視した） */
+  notAllowed: string[];
+}
+
+/** Agent → Server: Capability 同期の結果報告 */
+export interface AgentCapabilitySyncPayload {
+  machineId: string;
+  status: 'done' | 'error' | 'skipped';
+  results: CapabilityResult[];
+  durationMs: number;
+  trigger: 'connect' | 'config' | 'idle' | 'manual' | 'prelaunch';
+}
 
 // -----------------------------------------------------------------------------
 // Machine & Project
@@ -133,7 +190,8 @@ export type AgentMessage =
   | { type: 'agent:response:summarize'; payload: ResponseSummarizeRequestPayload }
   | { type: 'agent:claude:auth:status'; payload: ClaudeAuthStatusPayload }
   | { type: 'agent:claude:login:url'; payload: ClaudeLoginUrlPayload }
-  | { type: 'agent:claude:login:result'; payload: ClaudeLoginResultPayload };
+  | { type: 'agent:claude:login:result'; payload: ClaudeLoginResultPayload }
+  | { type: 'agent:capability:sync'; payload: AgentCapabilitySyncPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -312,7 +370,8 @@ export type ServerToAgentMessage =
   | { type: 'server:response:summarized'; payload: ResponseSummarizeResponsePayload }
   | { type: 'server:claude:login:start'; payload: ClaudeLoginStartPayload }
   | { type: 'server:claude:login:code'; payload: ClaudeLoginCodePayload }
-  | { type: 'server:claude:login:cancel'; payload: ClaudeLoginCancelPayload };
+  | { type: 'server:claude:login:cancel'; payload: ClaudeLoginCancelPayload }
+  | { type: 'server:capability:sync'; payload: { trigger?: 'idle' | 'manual' } };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -339,6 +398,8 @@ export interface ServerConnectAckPayload {
   skipPermissions?: boolean;
   /** AskUserQuestion 無効化（SDK disallowedTools で除去） */
   disableAsk?: boolean;
+  /** サイクルP1: Capability 配布設定（null = 未設定 = 機能OFF。未対応の旧 Agent はこのフィールドを無視する） */
+  capabilityConfig?: CapabilityConfig | null;
 }
 
 /** Server → Agent: 設定更新の配信（リアルタイム） */
@@ -347,6 +408,8 @@ export interface ServerConfigUpdatePayload {
   allowedTools?: string[] | null;  // プランモード許可ツールの更新（null = デフォルトに戻す）
   skipPermissions?: boolean;  // 全ツール自動許可モードの更新
   disableAsk?: boolean;  // AskUserQuestion 無効化の更新
+  /** サイクルP1: Capability 配布設定の更新（null = 機能OFFに戻す。未対応の旧 Agent はこのフィールドを無視する） */
+  capabilityConfig?: CapabilityConfig | null;
 }
 
 /** ドキュメント同期ペイロード（サーバー → Agent、ファイル追加） */

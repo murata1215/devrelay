@@ -20,6 +20,7 @@ import { decrypt } from './services/user-settings.js';
 import { initVapid } from './services/push-notification-service.js';
 import { initFcm } from './services/fcm-service.js';
 import { startAutoUpdateSweep } from './services/auto-updater.js';
+import { startCapabilitySweep } from './services/capability-sweep.js';
 import { mcpRoutes } from './mcp/server.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
@@ -112,6 +113,9 @@ async function main() {
 
   // #296: Agent 自動更新の定期スイープを開始（接続時トリガーは agent-manager 側）
   startAutoUpdateSweep();
+
+  // サイクルP1: Capability 配布基盤の定期スイープを開始
+  startCapabilitySweep();
 
   // Plugins
   await app.register(cors, { origin: true });

@@ -173,6 +173,9 @@ model Machine {
   claudeAuthOk        Boolean?  // true=ログイン済み / false=切れている / null=未確認
   claudeAuthCheckedAt DateTime? // 直近のチェック時刻
   claudeAuthAccount   String?   // ログイン中アカウントのメールアドレス（判明時のみ）
+  // サイクルP1: Capability 配布基盤（provider × kind で識別する追加能力の配布設定）
+  capabilityConfig     Json?     // 配布対象の宣言（null = 未設定 = 機能OFF）
+  capabilitySyncStatus Json?     // agent:capability:sync の結果 + receivedAt（null = 未同期）
   deletedAt      DateTime? // ソフトデリート（null = アクティブ）
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

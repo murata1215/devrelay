@@ -128,8 +128,11 @@ export function evaluateAutoUpdateGates(input: AutoUpdateGateInput): AutoUpdateD
 /**
  * マシンが作業中か判定する
  * active セッションで AI 応答が進行中、または直近 10 分にメッセージがあれば作業中とみなす
+ *
+ * サイクルP1: capability-sweep.ts からも busy ゲートとして再利用するため export する
+ * （bake/cooldown/試行上限は自動更新固有なので流用しない。busy 判定だけを共有する）
  */
-async function isMachineBusy(machineId: string): Promise<boolean> {
+export async function isMachineBusy(machineId: string): Promise<boolean> {
   const sessions = await prisma.session.findMany({
     where: { machineId, status: 'active' },
     select: { id: true },

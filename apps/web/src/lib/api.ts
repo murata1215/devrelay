@@ -1,6 +1,9 @@
 // 開発環境ではViteのプロキシを使用（相対パス）、本番環境でも相対パスでOK（Caddyがリバースプロキシ）
 const API_BASE = '/api';
 
+// サイクルP1: Capability 配布基盤の型は純ロジックモジュール側に定義済みのものを再利用する
+import type { CapabilityConfigLike, CapabilitySyncStatusLike } from './capability-config-rules';
+
 // トークンをlocalStorageに保存
 export function getToken(): string | null {
   return localStorage.getItem('token');
@@ -225,6 +228,25 @@ export const machines = {
   /** Agent を再起動（WebSocket 経由でリスタート指示を送信） */
   async restart(id: string): Promise<{ success: boolean; message: string }> {
     return request('POST', `/machines/${id}/restart`, {});
+  },
+
+  /** サイクルP1: Capability 配布設定 + 直近の同期結果を取得 */
+  async getCapabilityConfig(id: string): Promise<{
+    capabilityConfig: CapabilityConfigLike | null;
+    capabilitySyncStatus: CapabilitySyncStatusLike | null;
+    capabilitySyncSupported: boolean | null;
+  }> {
+    return request('GET', `/machines/${id}/capability-config`);
+  },
+
+  /** サイクルP1: Capability 配布設定を更新（同一ホスト名の全マシンに一括適用） */
+  async setCapabilityConfig(id: string, capabilityConfig: CapabilityConfigLike | null): Promise<{ success: boolean; capabilityConfig: CapabilityConfigLike | null; updatedCount: number }> {
+    return request('PUT', `/machines/${id}/capability-config`, { capabilityConfig });
+  },
+
+  /** サイクルP1: Capability 同期を即時実行（Sync now） */
+  async syncCapability(id: string): Promise<{ success: boolean; message: string }> {
+    return request('POST', `/machines/${id}/capability-sync`, {});
   },
 };
 

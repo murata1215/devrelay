@@ -99,6 +99,13 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 import { isEphemeralSession } from './session-scope.js';
 import { buildDependencyProbeBlock, buildArtifactFreshnessGate } from './update-script.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
+// サイクルP1: Capability 配布基盤（共通層への配線。connection.ts は Claude 固有処理を一切知らない）
+import { setCapabilityConfig, setCapabilitySyncSender, requestReconcile, registerCapabilityAdapter } from './capability-sync.js';
+import { claudePluginAdapter } from './capabilities/claude-plugin-adapter.js';
+import type { AgentCapabilitySyncPayload } from '@devrelay/shared';
+
+// Capability adapter の登録（起動時 1 回。将来 Codex/Devin adapter を足すときはここに 1 行追加するだけでよい）
+registerCapabilityAdapter(claudePluginAdapter);
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -116,6 +123,15 @@ let serverAllowedTools: string[] | null = null;
 let serverSkipPermissions = false;
 /** Server から配信された AskUserQuestion 無効化フラグ */
 let serverDisableAsk = false;
+
+// サイクルP1: capability-sync.ts（共通層）からの結果送信を DI で受け取る。
+// connection.ts → capability-sync.ts への一方向 import に留め、逆方向の直接 import による
+// 循環を避けるための注入（capability-sync.ts 冒頭のコメント参照）。
+setCapabilitySyncSender((outcome) => {
+  if (!currentMachineId) return; // 認証未完了時は送りようがない（reconcile 側も currentConfig 無ければ動かない想定）
+  const payload: AgentCapabilitySyncPayload = { ...outcome, machineId: currentMachineId };
+  sendMessage({ type: 'agent:capability:sync', payload });
+});
 
 /** serverSkipPermissions の現在値を返すゲッター（セッション中の動的参照用） */
 export function getServerSkipPermissions(): boolean {
@@ -348,6 +364,12 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         // Claude Code スキルファイルを作成・更新（ドキュメント検索用）
         ensureSkillFiles(config).catch(err =>
           console.error('❌ Skill files update failed:', err.message));
+        // サイクルP1: Capability 配布設定を受信 → 初回 reconcile を machine スコープキューに積む
+        if (message.payload.capabilityConfig !== undefined) {
+          setCapabilityConfig(message.payload.capabilityConfig);
+          console.log(`🧩 Capability config received: ${message.payload.capabilityConfig ? 'enabled' : 'disabled'}`);
+          void requestReconcile('connect');
+        }
       } else {
         console.error('❌ Authentication failed:', message.payload.error);
         if (message.payload.updateRequired) {
@@ -440,8 +462,15 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
         serverDisableAsk = message.payload.disableAsk;
         console.log(`${serverDisableAsk ? '🚫' : '❓'} Disable AskUserQuestion updated: ${serverDisableAsk}`);
       }
-      // ack を送信（pending リトライを停止させる）
-      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.projectsDirs !== undefined || message.payload.skipPermissions !== undefined || message.payload.disableAsk !== undefined)) {
+      // サイクルP1: Capability 配布設定の更新（null = 機能OFFに戻す）
+      if (message.payload.capabilityConfig !== undefined) {
+        setCapabilityConfig(message.payload.capabilityConfig);
+        console.log(`🧩 Capability config updated: ${message.payload.capabilityConfig ? 'enabled' : 'disabled'}`);
+        void requestReconcile('config');
+      }
+      // ack を送信（pending リトライを停止させる）。capabilityConfig を条件から漏らすと
+      // ack が返らず pendingConfigUpdates が MAX_CONFIG_RETRIES まで再送し続けるため必ず含める
+      if (currentMachineId && (message.payload.allowedTools !== undefined || message.payload.projectsDirs !== undefined || message.payload.skipPermissions !== undefined || message.payload.disableAsk !== undefined || message.payload.capabilityConfig !== undefined)) {
         sendMessage({
           type: 'agent:config:ack',
           payload: { machineId: currentMachineId },
@@ -455,6 +484,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:agent:update':
       handleAgentUpdate();
+      break;
+
+    case 'server:capability:sync':
+      // busy でも受理し machine スコープの直列化キューに積む（未指定 = 'manual' 扱いで後方互換）
+      void requestReconcile(message.payload.trigger ?? 'manual');
       break;
 
     case 'server:agent:restart':

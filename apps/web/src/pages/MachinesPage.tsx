@@ -2,6 +2,13 @@ import { useEffect, useState } from 'react';
 import { machines } from '../lib/api';
 import type { Machine, MachineCreateResponse } from '../lib/api';
 import { useLanguage } from '../contexts/LanguageContext';
+import {
+  capabilityConfigToFormState,
+  formStateToCapabilityConfig,
+  formatPluginTag,
+  decideSyncStatusDisplay,
+} from '../lib/capability-config-rules';
+import type { CapabilitySyncStatusLike } from '../lib/capability-config-rules';
 
 export function MachinesPage() {
   const { t } = useLanguage();
@@ -42,6 +49,18 @@ export function MachinesPage() {
   const [projectsDirsSaving, setProjectsDirsSaving] = useState(false);
   const [newDirInput, setNewDirInput] = useState('');
   const [projectsDirsModified, setProjectsDirsModified] = useState(false);
+
+  // サイクルP1: Capability 配布基盤（Claude Code Plugins）
+  const [marketplaceName, setMarketplaceName] = useState('');
+  const [marketplaceSource, setMarketplaceSource] = useState('');
+  const [pluginIds, setPluginIds] = useState<string[]>([]);
+  const [newPluginInput, setNewPluginInput] = useState('');
+  const [capabilityConfigModified, setCapabilityConfigModified] = useState(false);
+  const [capabilityConfigLoading, setCapabilityConfigLoading] = useState(false);
+  const [capabilityConfigSaving, setCapabilityConfigSaving] = useState(false);
+  const [capabilitySyncStatus, setCapabilitySyncStatus] = useState<CapabilitySyncStatusLike | null>(null);
+  const [capabilitySyncSupported, setCapabilitySyncSupported] = useState<boolean | null>(null);
+  const [capabilitySyncing, setCapabilitySyncing] = useState(false);
 
   // 全許可モード
   const [skipPermissions, setSkipPermissions] = useState(false);
@@ -121,12 +140,15 @@ export function MachinesPage() {
       : '';
     setAliasValue(currentAlias !== hostname ? currentAlias : '');
 
+    setCapabilityConfigLoading(true);
+
     try {
-      const [tokenResult, dirsResult, skipResult, autoUpdateResult] = await Promise.all([
+      const [tokenResult, dirsResult, skipResult, autoUpdateResult, capabilityResult] = await Promise.all([
         machines.getToken(machine.id),
         machines.getProjectsDirs(machine.id),
         fetch(`/api/machines/${machine.id}/skip-permissions`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ skipPermissions: false })),
         fetch(`/api/machines/${machine.id}/auto-update`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ autoUpdate: true })),
+        machines.getCapabilityConfig(machine.id).catch(() => ({ capabilityConfig: null, capabilitySyncStatus: null, capabilitySyncSupported: null })),
       ]);
       setSettingsToken(tokenResult.token);
       // DB 設定があればそれを使用、なければ Agent ローカル設定をプリセット
@@ -138,11 +160,19 @@ export function MachinesPage() {
         lastAutoUpdateCommit: autoUpdateResult.lastAutoUpdateCommit,
         lastAutoUpdateStatus: autoUpdateResult.lastAutoUpdateStatus,
       });
+      // サイクルP1: Capability 配布設定（純関数でフォーム状態へ変換）
+      const capabilityFormState = capabilityConfigToFormState(capabilityResult.capabilityConfig ?? null);
+      setMarketplaceName(capabilityFormState.marketplaceName);
+      setMarketplaceSource(capabilityFormState.marketplaceSource);
+      setPluginIds(capabilityFormState.pluginIds);
+      setCapabilitySyncStatus(capabilityResult.capabilitySyncStatus ?? null);
+      setCapabilitySyncSupported(capabilityResult.capabilitySyncSupported ?? null);
     } catch (err) {
       setSettingsToken('(Failed to load token)');
     } finally {
       setSettingsTokenLoading(false);
       setProjectsDirsLoading(false);
+      setCapabilityConfigLoading(false);
     }
   };
 
@@ -162,6 +192,17 @@ export function MachinesPage() {
     setProjectsDirsSaving(false);
     setNewDirInput('');
     setProjectsDirsModified(false);
+    // サイクルP1: Capability 配布基盤
+    setMarketplaceName('');
+    setMarketplaceSource('');
+    setPluginIds([]);
+    setNewPluginInput('');
+    setCapabilityConfigModified(false);
+    setCapabilityConfigLoading(false);
+    setCapabilityConfigSaving(false);
+    setCapabilitySyncStatus(null);
+    setCapabilitySyncSupported(null);
+    setCapabilitySyncing(false);
   };
 
   const handleDelete = async () => {
@@ -773,6 +814,154 @@ export function MachinesPage() {
                   )}
                 </div>
               </label>
+            </div>
+
+            {/* サイクルP1: Capability 配布基盤（provider × kind の追加能力配布。v1 は Claude Code Plugins のみ） */}
+            <div className="mb-4">
+              <label className="block text-[var(--text-muted)] text-sm mb-2">
+                Capabilities
+                <span className="text-[var(--text-faint)] ml-2 text-xs">
+                  (追加で配布する能力。将来 Codex/Devin 用セクションを追加予定)
+                </span>
+              </label>
+              <div className="bg-[var(--bg-base)] rounded-lg p-3 border border-[var(--border-color)]">
+                <div className="text-sm font-medium text-[var(--text-primary)] mb-2">Claude Code Plugins</div>
+                {capabilityConfigLoading ? (
+                  <div className="text-[var(--text-faint)] text-sm">Loading...</div>
+                ) : (
+                  <>
+                    <div className="flex flex-col sm:flex-row gap-2 mb-2">
+                      <input
+                        type="text"
+                        value={marketplaceName}
+                        onChange={(e) => { setMarketplaceName(e.target.value); setCapabilityConfigModified(true); }}
+                        placeholder="Marketplace name (例: devrelay)"
+                        className="flex-1 bg-[var(--bg-primary)] text-[var(--text-primary)] px-3 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
+                      />
+                      <input
+                        type="text"
+                        value={marketplaceSource}
+                        onChange={(e) => { setMarketplaceSource(e.target.value); setCapabilityConfigModified(true); }}
+                        placeholder="Marketplace source (例: murata1215/devrelay-plugins)"
+                        className="flex-1 bg-[var(--bg-primary)] text-[var(--text-primary)] px-3 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
+                      />
+                    </div>
+                    {/* plugin id タグ入力（表示は marketplace 修飾子を補完） */}
+                    {pluginIds.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {pluginIds.map((id, i) => (
+                          <span key={i} className="inline-flex items-center bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-xs px-3 py-1.5 rounded-lg">
+                            <code className="mr-2">{formatPluginTag(id, marketplaceName)}</code>
+                            <button
+                              onClick={() => {
+                                setPluginIds(pluginIds.filter((_, idx) => idx !== i));
+                                setCapabilityConfigModified(true);
+                              }}
+                              className="text-[var(--text-faint)] hover:text-[var(--text-danger)] transition-colors"
+                              title="Remove plugin"
+                            >
+                              &times;
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="text"
+                        value={newPluginInput}
+                        onChange={(e) => setNewPluginInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && newPluginInput.trim()) {
+                            setPluginIds([...pluginIds, newPluginInput.trim()]);
+                            setNewPluginInput('');
+                            setCapabilityConfigModified(true);
+                          }
+                        }}
+                        placeholder="Plugin id (例: unity)"
+                        className="flex-1 bg-[var(--bg-primary)] text-[var(--text-primary)] px-4 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
+                      />
+                      <button
+                        onClick={() => {
+                          if (newPluginInput.trim()) {
+                            setPluginIds([...pluginIds, newPluginInput.trim()]);
+                            setNewPluginInput('');
+                            setCapabilityConfigModified(true);
+                          }
+                        }}
+                        className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 mt-2">
+                      {capabilityConfigModified && (
+                        <>
+                          <button
+                            onClick={async () => {
+                              if (!settingsTarget) return;
+                              setCapabilityConfigSaving(true);
+                              try {
+                                const config = formStateToCapabilityConfig({ marketplaceName, marketplaceSource, pluginIds });
+                                await machines.setCapabilityConfig(settingsTarget.id, config);
+                                setCapabilityConfigModified(false);
+                              } catch (err) {
+                                alert(err instanceof Error ? err.message : 'Failed to save');
+                              } finally {
+                                setCapabilityConfigSaving(false);
+                              }
+                            }}
+                            disabled={capabilityConfigSaving}
+                            className="bg-[var(--accent-blue)] hover:bg-[var(--accent-blue-hover)] disabled:bg-[var(--bg-tertiary)] disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg transition-colors text-sm"
+                          >
+                            {capabilityConfigSaving ? 'Saving...' : 'Save & Apply'}
+                          </button>
+                          <span className="text-[var(--text-faint)] text-xs">
+                            Applies to all agents with the same hostname
+                          </span>
+                        </>
+                      )}
+                      <button
+                        onClick={async () => {
+                          if (!settingsTarget) return;
+                          setCapabilitySyncing(true);
+                          try {
+                            await machines.syncCapability(settingsTarget.id);
+                          } catch (err) {
+                            alert(err instanceof Error ? err.message : 'Failed to sync');
+                          } finally {
+                            setCapabilitySyncing(false);
+                          }
+                        }}
+                        disabled={capabilitySyncing || settingsTarget?.status !== 'online'}
+                        className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed text-[var(--text-primary)] px-3 py-1.5 rounded-lg transition-colors text-sm"
+                      >
+                        {capabilitySyncing ? 'Syncing...' : 'Sync now'}
+                      </button>
+                    </div>
+                    {/* 最終同期ステータス（Auto Update の「最終自動更新」行と同じ書式） */}
+                    {(() => {
+                      const display = decideSyncStatusDisplay(capabilitySyncStatus, capabilitySyncSupported);
+                      if (display.kind === 'unsynced-unsupported') {
+                        return (
+                          <div className="text-[var(--text-danger)] text-xs mt-2">
+                            未同期（Agent 更新が必要です。`u` で更新してください）
+                          </div>
+                        );
+                      }
+                      if (display.kind === 'unsynced') {
+                        return <div className="text-[var(--text-faint)] text-xs mt-2">未同期</div>;
+                      }
+                      const s = display.summary!;
+                      return (
+                        <div className="text-[var(--text-faint)] text-xs mt-2">
+                          最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''} / {s.trigger}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
             </div>
 
             {/* プロジェクト検索パス */}

@@ -27,6 +27,8 @@ import {
   type ClaudeLoginUrlPayload,
   type ClaudeLoginResultPayload,
   type AgentCapability,
+  type CapabilityConfig,
+  type AgentCapabilitySyncPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, notifySessionsForMachine } from './session-manager.js';
@@ -126,7 +128,14 @@ const lastSeenMap = new Map<string, Date>();
 // 旧バージョン Agent は ack を返さないため、最大リトライ回数で打ち切る。
 const MAX_CONFIG_RETRIES = 5;
 interface PendingConfigUpdate {
-  config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; skipPermissions?: boolean };
+  config: {
+    projectsDirs?: string[] | null;
+    allowedTools?: string[] | null;
+    skipPermissions?: boolean;
+    disableAsk?: boolean;
+    // サイクルP1: Capability 配布設定（null = 明示的にクリア、undefined = このフィールドは今回更新しない）
+    capabilityConfig?: CapabilityConfig | null;
+  };
   retries: number;
 }
 const pendingConfigUpdates = new Map<string, PendingConfigUpdate>();
@@ -244,6 +253,11 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
 
         case 'agent:update:status':
           await handleUpdateStatus(message.payload);
+          break;
+
+        case 'agent:capability:sync':
+          // サイクルP1: Capability 配布結果の受信（provider/kind 固有知識は持たず payload をそのまま保存）
+          await handleCapabilitySync(message.payload);
           break;
 
         case 'agent:project:file:content':
@@ -531,6 +545,8 @@ async function handleAgentConnect(
       allowedTools,
       skipPermissions: machine.skipPermissions || undefined,
       disableAsk: machine.disableAsk || undefined,
+      // サイクルP1: Capability 配布設定（'capability-sync' 未申告の旧 Agent もフィールドごと無視するだけで安全）
+      capabilityConfig: (machine as any).capabilityConfig as CapabilityConfig | null,
       ...(isOutdated && {
         updateRequired: true,
         minProtocolVersion: MIN_PROTOCOL_VERSION,
@@ -1454,7 +1470,7 @@ export async function cancelAiProcess(machineId: string, sessionId: string) {
  * Agent がオフラインの場合は何もしない（次回接続時に server:connect:ack で配信される）
  * 送信失敗に備え pendingConfigUpdates に登録し、次回 agent:ping 時にリトライする
  */
-export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; skipPermissions?: boolean; disableAsk?: boolean }) {
+export function pushConfigUpdate(machineId: string, config: { projectsDirs?: string[] | null; allowedTools?: string[] | null; skipPermissions?: boolean; disableAsk?: boolean; capabilityConfig?: CapabilityConfig | null }) {
   // 既存の pending があればマージ（projectsDirs と allowedTools が同時に pending でも欠落しない）
   const existing = pendingConfigUpdates.get(machineId);
   const mergedConfig = existing ? { ...existing.config, ...config } : config;
@@ -1544,6 +1560,28 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
       const { recordAutoUpdateError } = await import('./auto-updater.js');
       await recordAutoUpdateError(machineId, error ?? 'unknown').catch(() => {});
     }
+  }
+}
+
+/**
+ * サイクルP1: Agent から Capability 配布結果を受信 → Machine.capabilitySyncStatus に保存する。
+ * provider/kind 固有の意味づけは一切行わず、payload をそのまま結果+受信時刻として永続化するだけ
+ * （どのベンダー adapter が返した結果でも同じ扱い）。
+ * Web へのリアルタイム配信は行わない。MachinesPage.tsx の 5 秒ポーリングが DB の値を拾う。
+ */
+async function handleCapabilitySync(payload: AgentCapabilitySyncPayload) {
+  const { machineId, ...result } = payload;
+  try {
+    await prisma.machine.update({
+      where: { id: machineId },
+      data: {
+        // @ts-expect-error prisma generate 未実行（人間側作業）のため型未反映。カラムは ALTER 済み前提
+        capabilitySyncStatus: { ...result, receivedAt: new Date().toISOString() },
+      },
+    });
+    console.log(`✅ Capability sync status saved for ${machineId} (trigger=${result.trigger}, status=${result.status})`);
+  } catch (err) {
+    console.error(`❌ Failed to save capability sync status for ${machineId}:`, (err as Error).message);
   }
 }
 
