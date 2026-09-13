@@ -28,6 +28,7 @@ import {
   listConfiguredProviders,
   resolveReconcileTargets,
   hasReportableOutcome,
+  decidePrelaunchStatus,
   type QueueState,
   type MergeableResult,
   type PrelaunchCacheEntry,
@@ -38,6 +39,13 @@ export interface CapabilityCtx {
   config: CapabilityConfig;
   /** capabilityConfig.items のうち、この adapter の provider/kind に該当するものだけ */
   items: Array<{ provider: string; kind: string; id: string }>;
+  /**
+   * サイクルP1.3 要件5: prelaunch 専用の machine reconcile 委譲コールバック。
+   * machine 経路（`runMachineReconcile` 内で adapter に渡す ctx）では注入しない（undefined）ため、
+   * 「prelaunch でしか呼べない」ことを型で表現し、adapter が machine 経路で誤って自己再帰させる
+   * ことを防ぐ（呼び出しは fire-and-forget。await しない・throw しない前提）。
+   */
+  requestMachineReconcile?: () => void;
 }
 
 /** 個別の provider×kind Capability を配布する adapter の最小インタフェース（指示書§14-4 準拠） */
@@ -227,12 +235,21 @@ export async function reconcileForRunner(aiTool: string, projectPath: string): P
   ).filter(t => t.hasAdapter);
   const results: MergeableResult[] = [];
 
+  // サイクルP1.3 要件5: machine キューへの委譲は「1 回だけ」（この reconcileForRunner 呼び出し内で
+  // 複数 adapter が not-registered を検知しても、1回のトリガーにまとめる）。
+  let machineReconcileRequested = false;
+  const requestMachineReconcile = (): void => {
+    if (machineReconcileRequested) return;
+    machineReconcileRequested = true;
+    void requestReconcile('config');
+  };
+
   for (const target of targets) {
     const adapter = adapterRegistry.get(`${target.provider}:${target.kind}`);
     if (!adapter) continue;
     try {
       const outcome = await withTimeout(
-        adapter.reconcileProject({ config: currentConfig, items: target.items }, projectPath),
+        adapter.reconcileProject({ config: currentConfig, items: target.items, requestMachineReconcile }, projectPath),
         PRELAUNCH_WAIT_MS,
       );
       if (outcome !== 'timeout') results.push(outcome);
@@ -246,6 +263,8 @@ export async function reconcileForRunner(aiTool: string, projectPath: string): P
   // 上書きしてしまう（server 側は trigger を問わず全上書きのため）のを防ぐ。
   const merged = mergeCapabilityResults(results);
   if (hasReportableOutcome(merged) && sendResultCallback) {
-    sendResultCallback({ status: 'done', results: merged, durationMs: 0, trigger: 'prelaunch' });
+    // サイクルP1.3 要件6: 従来は無条件 'done' だったが、failed の中身に応じて
+    // 'error'（実失敗）/ 'skipped'（marketplace-not-registered 等の先送りのみ）を導出する。
+    sendResultCallback({ status: decidePrelaunchStatus(merged), results: merged, durationMs: 0, trigger: 'prelaunch' });
   }
 }

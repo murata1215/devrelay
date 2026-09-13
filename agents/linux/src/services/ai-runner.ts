@@ -17,7 +17,9 @@ import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-fil
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { decideResume } from './resume-priority.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
-import { buildClaudeLookupCommand, claudeFallbackCandidates } from './claude-locator.js';
+// サイクルP1.3: resolveSystemClaude() は claude-path.ts（外部 import ゼロに近い最小モジュール）へ移設し、
+// ここでは re-export のみ行う（src/index.ts・services/claude-auth.ts の既存 import 経路を維持するため）。
+import { resolveSystemClaude } from './claude-path.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
 import { classifyTerminalStartupFailure } from './terminal-session-id.js';
@@ -99,33 +101,9 @@ let devinMaxStepsWarned = false;
 // #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
 let claudeFallbackLogged = false;
 
-/**
- * システムにインストールされた claude CLI の実行パスを解決する。
- * PATH（Windows は `where claude`、それ以外は `command -v claude`、#350）を最優先し、
- * 見つからなければ OS 別の既知パスを順に探す（判定ロジックは claude-locator.ts に集約）。
- * `stdio` は `pipe`（stderr も捨てる）+ `windowsHide: true` で、コンソール無し起動時に
- * 新規コンソール窓が開いたり agent.log へ生の cmd エラーが漏れたりしないようにする。
- * @returns 実在する claude のフルパス、無ければ null
- */
-export function resolveSystemClaude(): string | null {
-  try {
-    const lookupCmd = buildClaudeLookupCommand(process.platform);
-    const raw = execSync(lookupCmd, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
-    // `where` は複数行を返すことがあるため最初の行のみ使う（resolveClaudePath と同じ扱い）
-    const p = raw.split(/\r?\n/)[0]?.trim();
-    if (p && fs.existsSync(p)) return p;
-  } catch {
-    // PATH に無い場合は既知パスへフォールバック
-  }
-  for (const candidate of claudeFallbackCandidates(process.platform, os.homedir())) {
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      // ignore
-    }
-  }
-  return null;
-}
+// サイクルP1.3: resolveSystemClaude() の実体は claude-path.ts に移設済み。
+// index.ts / claude-auth.ts が引き続き `from './ai-runner.js'` で import できるよう再エクスポートする。
+export { resolveSystemClaude };
 
 /**
  * Claude Agent SDK が spawn する実行ファイルを解決する（#287）。

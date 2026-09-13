@@ -1,9 +1,18 @@
-# DevRelay Capability 配布基盤 指示書 v2（サイクル P1）
+# DevRelay Capability 配布基盤 指示書 v2.1（サイクル P1〜P1.3）
 
-- 作成日: 2026-09-13
+- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）
 - 対象: devrelay 本体（`/opt/devrelay`, projectId `cmm5tpzil0042f3p2ieotnow4`）
-- ステータス: **人間レビュー待ち（未 submit）**
+- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの
 - 置き換え: 本書は同日の「Plugin 配布機能 指示書 v1」を Capability 抽象化で改訂したもの。2026-09-03 の「Toolkit 配布機能（レシピ実行基盤）」案は破棄
+
+## v2.1 改訂差分（サイクル P1.3、2026-09-13）
+
+hp630g9/fwjg2 の実機検証で、リポの `.claude/settings.json` に `enabledPlugins` を宣言してタスク投入しても Claude Code 側で `✘ failed to load` になり配布が機能していないことが判明した。真因は2点:
+
+1. **cwd 未指定**: prelaunch の CLI 呼び出しに `cwd` が無く、Agent プロセス自身の作業ディレクトリ（`u` で `git reset --hard` されうる場所）に install していた。
+2. **install scope の不一致**: 常に `--scope local` を渡していたため、`.claude/settings.json`（project scope 宣言）で有効化したプラグインが `--scope project` で install されず読み込まれなかった。
+
+これを受け、以下を実装済み挙動として仕様を改訂する（§7.4 / §8.2 / §12 E2E-4）。あわせて索引未知 ID への `marketplace update` 1 回リトライと、marketplace 未登録時の初回フォールバック（machine reconcile への委譲）を実装した。
 
 ---
 
@@ -148,11 +157,15 @@ v1 では Claude runner だけが `provider=claude` で共通層の prelaunch �
 - AI セッション実行中は prelaunch 以外の reconcile をしない（Auto Update の「アイドル時」原則）
 - 各 CLI 呼び出しはタイムアウト 3 分。timeout 後も runner 起動判断へ戻る
 
-### 7.4 CLI 実行の安全性
+### 7.4 CLI 実行の安全性（v2.1 改訂）
 
 - `spawn` / `execFile` でコマンドと引数を分離。**シェル文字列連結で実行しない**。Web から受け取った plugin ID / marketplaceSource をそのままシェル文字列へ結合してはいけない
-- `claude` 実行ファイルの解決は ai-runner が Claude Code を起動するのと**同じ方法**を使う
-- 機械可読 JSON オプションがあるコマンドでは JSON を使う（Plan で実機確認。無ければ行パースを純関数化してテスト）
+- `claude` 実行ファイルの解決は ai-runner が Claude Code を起動するのと**同じ方法**を使う（`claude-path.ts` に切り出し、`ai-runner.ts` から再エクスポートして後方互換を保つ）
+- 機械可読 JSON オプションがあるコマンドでは JSON を使う（実機確認済み。`plugin list` / `plugin marketplace list` とも `--json` あり）
+- **`cwd` は型レベルで必須**（P1.3）。Claude Code は CLI 実行時の cwd を「プロジェクト」とみなし、install scope の解決や `installed_plugins.json` の `projectPath` 記録に使う。cwd を省略すると Agent プロセス自身の作業ディレクトリに install される事故になる（実機で発生）。
+  - `reconcileProject`（prelaunch）: 全 CLI 呼び出しの `cwd` は対象プロジェクトの `projectPath`
+  - `reconcileMachine`（machine/user scope）: 全 CLI 呼び出しの `cwd` は `projectPath` と無関係の安定したディレクトリ（既定 `getConfigDir()`＝`~/.devrelay` 等。存在しなければ `os.homedir()`。**`os.tmpdir()` は使わない**＝他ユーザーに共有ディレクトリを汚染されうるため）
+  - 共有 spawn ヘルパ（`capabilities/claude-cli.ts`）の型シグネチャで `cwd` を省略不可にし、呼び出し漏れを型で防ぐ
 
 ## 8. Claude adapter v1 の手順（冪等）
 
@@ -171,13 +184,28 @@ v1 では Claude runner だけが `provider=claude` で共通層の prelaunch �
 9. 1 件ずつ実行。失敗しても次へ（CLI 失敗が他 plugin の処理を止めない）
 10. `CapabilityResult` を返す
 
-### 8.2 project/prelaunch（`reconcileProject`、trigger prelaunch）
+### 8.2 project/prelaunch（`reconcileProject`、trigger prelaunch、v2.1 改訂）
 
-- 通常は 8.1 の 1〜4（存在確認 / marketplace 登録 / marketplace update）を行わない。**例外（初回フォールバック）**: marketplace が未登録、またはプロセス内に有効な plugin list キャッシュが一度も無い場合（Agent 起動直後に config 受信 → reconcile 未完のままタスク投入、の競合）だけ、3 分上限の中で必要最小限の初期化（存在確認 → marketplace add → list 取得）を行う。実機確認で不要と分かれば簡略化可
-- `<projectPath>/.claude/settings.json` の `enabledPlugins` から true のものを抽出（このファイルを読むのは **adapter 内**）
+- `<projectPath>/.claude/settings.json`（project scope）と `<projectPath>/.claude/settings.local.json`（local scope）の両方の `enabledPlugins` から true のものを抽出（このファイルを読むのは **adapter 内**）
 - `@<marketplaceName>` でない ID は `notAllowed`（install しない）
-- 対象を直近の `claude plugin list` 結果（プロセス内キャッシュ、reconcile のたびに更新）と比較。**user scope で既に有効なものは local へ重複 install しない**（`present`）。差分がある場合のみ list を取り直して確認し、`claude plugin install <id> --scope local` → `installed`
-- **差分が無ければ CLI を呼ばない**
+- **差分が無ければ CLI を呼ばない**（candidate 0 件なら `claude` の存在確認すら行わない）
+- **候補が 1 件以上ある場合のみ** `claude plugin marketplace list --json` を実行し、宣言された `marketplaceName` の登録状態を確認する:
+  - 登録済み（`registered`）→ 通常どおり続行
+  - パース不能・CLI 失敗（`unknown`）→ **fail-open**（登録済みとみなして続行。ネットワーク瞬断等で毎回ブロックしないため）
+  - **未登録（`not-registered`）→ 初回フォールバック**: prelaunch は `marketplace add` を**行わない**（cwd がプロジェクトディレクトリのため、ここで addすると意図しない場所に marketplace 状態が残るリスクがあるのと、3分予算内で完結させるため）。代わりに `requestMachineReconcile()`（共通層 `capability-sync.ts` から prelaunch にのみ注入されるコールバック。machine 経路には注入されず自己再帰しない）を**1回だけ** fire-and-forget で呼び machine reconcile（§8.1 の 1〜4 を含む）に処理を委譲し、`failed: [{ id: 'marketplace:<name>', reason: 'marketplace-not-registered' }]` を積んで**即 return**（起動を一切ブロックしない）
+- **install scope は宣言元ファイルに合わせる**（実機で `enabledPlugins` の宣言 scope と install scope が不一致だと Claude Code がプラグインを読み込まないことを確認済み）:
+  - project の `.claude/settings.json` にのみ宣言 → `--scope project`
+  - local の `.claude/settings.local.json` にのみ宣言 → `--scope local`
+  - 両方に宣言 → **project を優先し 1 回だけ** install（local への重複 install はしない）
+- **present 判定は宣言 scope と cross-check する**: `claude plugin list --json` の結果に対象 ID が存在するだけでは不十分。**scope が宣言 scope と一致し、かつ enabled、かつ（project/local の場合）`projectPath` が対象プロジェクトと一致**して初めて `present`。scope 情報が list に出ない（未知）場合は `unknownScopePolicy: 'accept'` で fail-open 扱いにし、その旨を Agent ログに 1 行 `console.warn` する（reject 既定にすると scope が出ない実装/バージョンで毎 prelaunch 全件再 install する install storm になるため）
+- **install 後は同じ list を取り直して再検証**し、対象 ID が宣言 scope で satisfied になって初めて `installed` に数える。再検証で satisfied でなければ `installed` ではなく `failed`（reason `install-verify-failed`）
+- **索引未知 ID への 1 回のみのリトライ**: install が失敗し、そのエラーが「索引に存在しない」パターン（`PLUGIN_NOT_IN_INDEX_PATTERNS`、実機文言 `Plugin "<name>" not found in marketplace "<marketplace>"` を含む）に一致し、かつこの `reconcileProject` 呼び出し内でまだ 1 度もリフレッシュしていなければ、`claude plugin marketplace update <marketplaceName>` を 1 回実行し install を 1 回だけ再試行する。フラグは呼び出しごとのローカル変数（モジュールグローバルにしない）。timeout kill・spawn 失敗（ENOENT 等）・出力空はこのパターンに一致させず即 `failed`（無限リトライ・誤判定防止）
+- v1 では **uninstall は行わない**（既に present なもの・不要になったものを削除する処理は無い）
+- 1 件ずつ実行。失敗しても次へ（CLI 失敗が他 plugin の処理を止めない）
+- **prelaunch の status**（P1.3 で新規導出。`packages/shared` の `CapabilityResult` 型は凍結のため `failed[].reason` から `capability-rules.ts` の純関数 `decidePrelaunchStatus()` で導出しWS送信 payload の `status` に反映）:
+  - installed/updated/notAllowed が 1 件でもあれば `done`
+  - 上記が無く failed が `marketplace-not-registered` のみで構成されていれば `skipped`（初回フォールバック中の一時的な状態。委譲先の machine reconcile が直後に完了すれば自己修復する）
+  - それ以外で failed が 1 件以上あれば `error`（**旧仕様からの意図的な変更**。従来は install 失敗時も常に `done` と報告していた）
 
 ## 9. Web（Agent Settings モーダル）
 
@@ -214,7 +242,7 @@ Devin / Codex adapter・その CLI 調査と操作、provider 共通の独自 pl
 1. `psql` で ALTER 2 本 → `cd apps/server` → `npx prisma generate` → `pnpm build` → `pm2 restart`
 2. Linux / macOS の全 Agent に `u`（hp630g9 含む）
 3. tisa-lenovo の Agent Settings で Marketplace 既定値 + Plugins に `commit-commands`（索引に置いておく）→ Save → Sync now → 「最終同期」に installed 1 → 当該マシンの `claude plugin list` に出る → 同一ホスト名の別 Agent にも入る
-4. test010 の `.claude/settings.json` に `{"enabledPlugins": {"commit-commands@devrelay": true}}` を置き `claude plugin uninstall` した状態でタスク投入 → 起動前に `--scope local` で入り `.claude/settings.local.json` が作られる
+4. **（v2.1 改訂）** 対象リポの `.claude/settings.json`（project scope）に `{"enabledPlugins": {"commit-commands@devrelay": true}}` を置いた状態でタスク投入 → 起動前にそのプロジェクト cwd で `--scope project` で入り、`~/.claude/plugins/installed_plugins.json` の該当 entry が `scope: project` かつ `projectPath` が対象リポのパスと一致する → プロジェクト cwd での `claude plugin list` が `Scope: project` / `✔ enabled` になる。`.claude/settings.local.json` は生成されない（project scope 専用ではなく local scope 専用のファイルのため）。`.claude/settings.local.json` にのみ宣言した場合は同様に `--scope local` で入ることを別途確認する
 5. 索引外 ID（`foo@claude-plugins-official`）を宣言したリポで `notAllowed` に載る
 6. 索引の `sha`（必要なら entry の `version` も）を進めて Sync now → `updated` に載る（8.1-8 の実機確認。通らなければ P2 送り）
 

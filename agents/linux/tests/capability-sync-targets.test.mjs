@@ -197,6 +197,54 @@ test('prelaunch: installed が 1 件でもあれば送信する（payload 形状
   assert.deepEqual(sent[0].results[0].installed, ['unity@devrelay']);
 });
 
+// ---- サイクルP1.3 要件5: requestMachineReconcile の注入（prelaunch のみ） ----
+
+test('P1.3: prelaunch の ctx には requestMachineReconcile（function）が注入される', async () => {
+  clearCapabilityAdapters();
+  const { adapter, projectCalls } = makeFakeClaudeAdapter(emptyPluginResult(), emptyPluginResult());
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({ providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } }, items: [] });
+  captureOutcomes();
+
+  await reconcileForRunner('claude', '/tmp/devrelay-test-p1.3-request-machine-reconcile');
+
+  assert.equal(projectCalls.length, 1);
+  assert.equal(typeof projectCalls[0].ctx.requestMachineReconcile, 'function');
+});
+
+test('P1.3: machine 経路の ctx には requestMachineReconcile が注入されない（undefined）', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeClaudeAdapter(emptyPluginResult(), emptyPluginResult());
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({ providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } }, items: [] });
+  captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 1);
+  assert.equal(machineCalls[0].requestMachineReconcile, undefined);
+});
+
+// ---- サイクルP1.3 要件6: fake adapter が deferred のみの failed を返すと status:'skipped' ----
+
+test('P1.3: fake adapter が marketplace-not-registered のみの failed を返すと送信 payload が status:skipped + 非空 results になる', async () => {
+  clearCapabilityAdapters();
+  const { adapter } = makeFakeClaudeAdapter(
+    emptyPluginResult(),
+    emptyPluginResult({ failed: [{ id: 'marketplace:devrelay', reason: 'marketplace-not-registered' }] }),
+  );
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({ providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } }, items: [] });
+  const sent = captureOutcomes();
+
+  await reconcileForRunner('claude', '/tmp/devrelay-test-p1.3-skipped-status');
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].status, 'skipped');
+  assert.ok(sent[0].results.length > 0);
+  assert.equal(sent[0].results[0].failed[0].reason, 'marketplace-not-registered');
+});
+
 test('prelaunch: aiTool が provider に解決できなければ何もしない', async () => {
   clearCapabilityAdapters();
   const { adapter, projectCalls } = makeFakeClaudeAdapter(emptyPluginResult(), emptyPluginResult({ installed: ['x'] }));

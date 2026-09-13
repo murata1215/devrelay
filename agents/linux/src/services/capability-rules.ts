@@ -267,3 +267,40 @@ export function decidePrelaunchAction(
   if (!cache || cache.key !== key) return 'run';
   return (nowMs - cache.cachedAtMs) < ttlMs ? 'use-cache' : 'run';
 }
+
+/**
+ * サイクルP1.3 要件5: prelaunch が machine キューへ委譲して即 return する際の failed reason。
+ * `AgentCapabilitySyncPayload.status`（`packages/shared` で凍結）に無い `'skipped'` 相当の状態を
+ * `failed[].reason` 側で表現するための「先送り理由」一覧。`decidePrelaunchStatus()` がこれを見て
+ * 「実際の失敗」ではなく「委譲による一時的な保留」と判定する。
+ */
+export const PRELAUNCH_DEFERRED_REASONS: readonly string[] = ['marketplace-not-registered'];
+
+/**
+ * prelaunch（`reconcileForRunner`）の送信ペイロード用 status を導出する（純粋関数、要件6）。
+ * `packages/shared` の `CapabilityResult` に status フィールドを足せない（型凍結）ため、
+ * `MergeableResult[]` の中身から導出する。
+ * - installed/updated/notAllowed のいずれかが 1 件でもあれば `'done'`
+ *   （何かしら実際の変化があった＝先送りではない、が優先）
+ * - それ以外で failed が 1 件以上あり、**すべて** deferredReasons に含まれる reason なら `'skipped'`
+ *   （§8.2 初回フォールバックのように、実際には何もせず machine へ委譲しただけのケース）
+ * - それ以外で failed が 1 件以上あれば `'error'`（machine 側 `runMachineReconcile` と揃える。
+ *   従来 prelaunch は install 失敗でも `'done'` を報告していたが、P1.3 から意図的に変更する）
+ * - 何もなければ（failed も無ければ）`'done'`
+ */
+export function decidePrelaunchStatus(
+  results: MergeableResult[],
+  deferredReasons: readonly string[] = PRELAUNCH_DEFERRED_REASONS,
+): 'done' | 'error' | 'skipped' {
+  const hasInstalledOutcome = results.some(
+    (r) => r.installed.length > 0 || r.updated.length > 0 || r.notAllowed.length > 0,
+  );
+  if (hasInstalledOutcome) return 'done';
+
+  const allFailed = results.flatMap((r) => r.failed);
+  if (allFailed.length === 0) return 'done';
+
+  const deferredSet = new Set(deferredReasons);
+  const allDeferred = allFailed.every((f) => deferredSet.has(f.reason));
+  return allDeferred ? 'skipped' : 'error';
+}

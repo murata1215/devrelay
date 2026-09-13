@@ -15,6 +15,8 @@ import {
   listConfiguredProviders,
   resolveReconcileTargets,
   hasReportableOutcome,
+  decidePrelaunchStatus,
+  PRELAUNCH_DEFERRED_REASONS,
 } from '../dist/services/capability-rules.js';
 
 // ---- aiToolToCapabilityProvider ----
@@ -324,4 +326,49 @@ test('hasReportableOutcome: notAllowed が 1 件でもあれば true', () => {
 
 test('hasReportableOutcome: 空配列は false', () => {
   assert.equal(hasReportableOutcome([]), false);
+});
+
+// ---- decidePrelaunchStatus（サイクルP1.3 要件6: prelaunch の status 導出） ----
+
+test('decidePrelaunchStatus: failed が deferred reason のみ → skipped', () => {
+  const results = [baseResult({ failed: [{ id: 'marketplace:devrelay', reason: 'marketplace-not-registered' }] })];
+  assert.equal(decidePrelaunchStatus(results), 'skipped');
+});
+
+test('decidePrelaunchStatus: deferred + 実失敗が混在 → error', () => {
+  const results = [
+    baseResult({
+      failed: [
+        { id: 'marketplace:devrelay', reason: 'marketplace-not-registered' },
+        { id: 'x@devrelay', reason: 'install-failed' },
+      ],
+    }),
+  ];
+  assert.equal(decidePrelaunchStatus(results), 'error');
+});
+
+test('decidePrelaunchStatus: installed が 1 件でもあれば failed が混在していても done', () => {
+  const results = [baseResult({ installed: ['a@devrelay'], failed: [{ id: 'marketplace:devrelay', reason: 'marketplace-not-registered' }] })];
+  assert.equal(decidePrelaunchStatus(results), 'done');
+});
+
+test('decidePrelaunchStatus: 空（failed 無し）は done', () => {
+  assert.equal(decidePrelaunchStatus([baseResult()]), 'done');
+});
+
+test('decidePrelaunchStatus: 未知の reason 単独は error（deferred 扱いしない）', () => {
+  const results = [baseResult({ failed: [{ id: 'x@devrelay', reason: 'claude-not-found' }] })];
+  assert.equal(decidePrelaunchStatus(results), 'error');
+});
+
+test('decidePrelaunchStatus: PRELAUNCH_DEFERRED_REASONS に marketplace-not-registered が含まれる', () => {
+  assert.ok(PRELAUNCH_DEFERRED_REASONS.includes('marketplace-not-registered'));
+});
+
+test('decidePrelaunchStatus: updated 単独でも done', () => {
+  assert.equal(decidePrelaunchStatus([baseResult({ updated: ['a@devrelay'] })]), 'done');
+});
+
+test('decidePrelaunchStatus: notAllowed 単独でも done', () => {
+  assert.equal(decidePrelaunchStatus([baseResult({ notAllowed: ['a@devrelay'] })]), 'done');
 });

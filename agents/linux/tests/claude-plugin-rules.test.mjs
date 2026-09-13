@@ -16,6 +16,13 @@ import {
   findBlockedEntry,
   computeInstallDiff,
   resolveFailureIds,
+  resolveInstallScope,
+  evaluatePluginAtScope,
+  isSatisfiedAtScope,
+  parseMarketplaceListJson,
+  evaluateMarketplaceList,
+  isPluginNotInIndexError,
+  PLUGIN_NOT_IN_INDEX_PATTERNS,
 } from '../dist/services/capabilities/claude-plugin-rules.js';
 
 // ---- parsePluginListJson ----
@@ -46,6 +53,26 @@ test('parsePluginListJson: name が無い要素はスキップされる', () => 
   const result = parsePluginListJson(raw);
   assert.equal(result.length, 1);
   assert.equal(result[0].name, 'x@devrelay');
+});
+
+// サイクルP1.3 Step 0 実機確認: 実フィールドは `name` ではなく `id`（既存バグの是正）。
+// `id` を正式値として `name` は後方互換のエイリアス（常に同値）として両方埋める。
+test('parsePluginListJson: 実機の id フィールドを正しく解析し id/name 両方に同値を入れる（P1.3 実機バグ修正）', () => {
+  const raw = JSON.stringify([
+    { id: 'pr-review-toolkit@devrelay', version: '1.0.0', scope: 'project', enabled: true, projectPath: '/home/x/proj' },
+  ]);
+  const result = parsePluginListJson(raw);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, 'pr-review-toolkit@devrelay');
+  assert.equal(result[0].name, 'pr-review-toolkit@devrelay');
+  assert.equal(result[0].scope, 'project');
+  assert.equal(result[0].enabled, true);
+  assert.equal(result[0].projectPath, '/home/x/proj');
+});
+
+test('parsePluginListJson: id/name のどちらも無い要素はスキップされる', () => {
+  const raw = JSON.stringify([{ foo: 'bar' }]);
+  assert.deepEqual(parsePluginListJson(raw), []);
 });
 
 // ---- parsePluginListText ----
@@ -209,4 +236,142 @@ test('resolveFailureIds: items が空なら fallback id を 1 件返す', () => 
 
 test('resolveFailureIds: fallback は marketplace 名など任意の文字列でよい', () => {
   assert.deepEqual(resolveFailureIds([], 'marketplace:devrelay'), ['marketplace:devrelay']);
+});
+
+// ---- resolveInstallScope（サイクルP1.3 要件2） ----
+
+test('resolveInstallScope: project にのみ宣言 → project', () => {
+  assert.equal(resolveInstallScope('x@devrelay', { 'x@devrelay': true }, {}), 'project');
+});
+
+test('resolveInstallScope: local にのみ宣言 → local', () => {
+  assert.equal(resolveInstallScope('x@devrelay', {}, { 'x@devrelay': true }), 'local');
+});
+
+test('resolveInstallScope: 両方に宣言 → project を優先（1回だけ install させるため）', () => {
+  assert.equal(resolveInstallScope('x@devrelay', { 'x@devrelay': true }, { 'x@devrelay': true }), 'project');
+});
+
+test('resolveInstallScope: どちらにも無ければ null', () => {
+  assert.equal(resolveInstallScope('x@devrelay', {}, {}), null);
+});
+
+// ---- evaluatePluginAtScope / isSatisfiedAtScope（サイクルP1.3 要件3: 実機の scope×projectPath cross-check） ----
+
+test('evaluatePluginAtScope: id が list に無ければ not-installed', () => {
+  const result = evaluatePluginAtScope([], 'x@devrelay', 'project', '/proj');
+  assert.equal(result, 'not-installed');
+});
+
+test('evaluatePluginAtScope: scope が declared と一致し enabled:true なら satisfied', () => {
+  const entries = [{ id: 'x@devrelay', name: 'x@devrelay', scope: 'project', enabled: true, projectPath: '/proj' }];
+  assert.equal(evaluatePluginAtScope(entries, 'x@devrelay', 'project', '/proj'), 'satisfied');
+});
+
+test('evaluatePluginAtScope: scope が declared と異なれば wrong-scope（enabled:true でも）', () => {
+  const entries = [{ id: 'x@devrelay', name: 'x@devrelay', scope: 'local', enabled: true, projectPath: '/proj' }];
+  assert.equal(evaluatePluginAtScope(entries, 'x@devrelay', 'project', '/proj'), 'wrong-scope');
+});
+
+test('evaluatePluginAtScope: scope は一致するが projectPath が異なれば wrong-scope（実機再現ケース）', () => {
+  const entries = [{ id: 'x@devrelay', name: 'x@devrelay', scope: 'project', enabled: true, projectPath: '/other-proj' }];
+  assert.equal(evaluatePluginAtScope(entries, 'x@devrelay', 'project', '/proj'), 'wrong-scope');
+});
+
+test('evaluatePluginAtScope: scope 一致・projectPath 一致だが enabled:false なら disabled', () => {
+  const entries = [{ id: 'x@devrelay', name: 'x@devrelay', scope: 'project', enabled: false, projectPath: '/proj' }];
+  assert.equal(evaluatePluginAtScope(entries, 'x@devrelay', 'project', '/proj'), 'disabled');
+});
+
+test('evaluatePluginAtScope: scope 不明 + unknownScopePolicy=accept（既定）は enabled 値のみで判定', () => {
+  const entries = [{ id: 'x@devrelay', name: 'x@devrelay', enabled: true }];
+  assert.equal(evaluatePluginAtScope(entries, 'x@devrelay', 'project', '/proj', 'accept'), 'satisfied');
+  assert.equal(evaluatePluginAtScope(entries, 'x@devrelay', 'project', '/proj'), 'satisfied');
+});
+
+test('evaluatePluginAtScope: scope 不明 + unknownScopePolicy=reject は常に wrong-scope', () => {
+  const entries = [{ id: 'x@devrelay', name: 'x@devrelay', enabled: true }];
+  assert.equal(evaluatePluginAtScope(entries, 'x@devrelay', 'project', '/proj', 'reject'), 'wrong-scope');
+});
+
+test('isSatisfiedAtScope: evaluatePluginAtScope の真偽値版（satisfied のときだけ true）', () => {
+  const entries = [{ id: 'x@devrelay', name: 'x@devrelay', scope: 'project', enabled: true, projectPath: '/proj' }];
+  assert.equal(isSatisfiedAtScope(entries, 'x@devrelay', 'project', '/proj'), true);
+  assert.equal(isSatisfiedAtScope([], 'x@devrelay', 'project', '/proj'), false);
+});
+
+// ---- parseMarketplaceListJson / evaluateMarketplaceList（サイクルP1.3 要件5） ----
+
+test('parseMarketplaceListJson: 実機確認済み形状 [{name,source,repo,installLocation}] を解析できる', () => {
+  const raw = JSON.stringify([{ name: 'devrelay', source: 'github', repo: 'murata1215/devrelay-plugins', installLocation: '/x' }]);
+  const result = parseMarketplaceListJson(raw);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].name, 'devrelay');
+  assert.equal(result[0].source, 'github');
+  assert.equal(result[0].repo, 'murata1215/devrelay-plugins');
+});
+
+test('parseMarketplaceListJson: 空配列 "[]" は空配列', () => {
+  assert.deepEqual(parseMarketplaceListJson('[]'), []);
+});
+
+test('parseMarketplaceListJson: 非配列 JSON は null', () => {
+  assert.equal(parseMarketplaceListJson('{}'), null);
+});
+
+test('parseMarketplaceListJson: 壊れた文字列は null', () => {
+  assert.equal(parseMarketplaceListJson('not json'), null);
+});
+
+test('evaluateMarketplaceList: 登録済みなら registered', () => {
+  const entries = [{ name: 'devrelay', repo: 'murata1215/devrelay-plugins' }];
+  assert.equal(evaluateMarketplaceList(entries, 'devrelay', 'murata1215/devrelay-plugins'), 'registered');
+});
+
+test('evaluateMarketplaceList: 名前が見つからなければ not-registered', () => {
+  assert.equal(evaluateMarketplaceList([], 'devrelay', 'murata1215/devrelay-plugins'), 'not-registered');
+});
+
+test('evaluateMarketplaceList: repo が期待値と異なれば name-mismatch', () => {
+  const entries = [{ name: 'devrelay', repo: 'someone-else/devrelay-plugins' }];
+  assert.equal(evaluateMarketplaceList(entries, 'devrelay', 'murata1215/devrelay-plugins'), 'name-mismatch');
+});
+
+test('evaluateMarketplaceList: entries が null（パース不能/CLI失敗）は unknown（fail-open）', () => {
+  assert.equal(evaluateMarketplaceList(null, 'devrelay', 'murata1215/devrelay-plugins'), 'unknown');
+});
+
+// ---- isPluginNotInIndexError（サイクルP1.3 要件4） ----
+
+test('isPluginNotInIndexError: 実機確認済み文言（stdout）を検知する', () => {
+  const failure = { stdout: 'Plugin "definitely-does-not-exist" not found in marketplace "devrelay"', code: 1 };
+  assert.equal(isPluginNotInIndexError(failure), true);
+});
+
+test('isPluginNotInIndexError: message に含まれていても検知する（大小文字無視）', () => {
+  const failure = { message: 'PLUGIN "X" NOT FOUND IN MARKETPLACE "devrelay"', code: 1 };
+  assert.equal(isPluginNotInIndexError(failure), true);
+});
+
+test('isPluginNotInIndexError: timeout kill（killed:true）は false', () => {
+  const failure = { stdout: 'not found in marketplace', killed: true, code: null };
+  assert.equal(isPluginNotInIndexError(failure), false);
+});
+
+test('isPluginNotInIndexError: spawn 失敗（code が文字列 ENOENT）は false', () => {
+  const failure = { message: 'not found in marketplace', code: 'ENOENT' };
+  assert.equal(isPluginNotInIndexError(failure), false);
+});
+
+test('isPluginNotInIndexError: 出力が空なら false', () => {
+  assert.equal(isPluginNotInIndexError({ code: 1 }), false);
+});
+
+test('isPluginNotInIndexError: 分類外の一般的なエラーは false', () => {
+  const failure = { message: 'network timeout', stderr: 'ETIMEDOUT', code: 1 };
+  assert.equal(isPluginNotInIndexError(failure), false);
+});
+
+test('PLUGIN_NOT_IN_INDEX_PATTERNS: 実機確認済み文言が先頭に含まれる', () => {
+  assert.ok(PLUGIN_NOT_IN_INDEX_PATTERNS.some(p => p.toLowerCase() === 'not found in marketplace'));
 });
