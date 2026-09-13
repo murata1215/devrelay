@@ -153,7 +153,13 @@ export interface SyncStatusDisplay {
   };
   /** kind==='error' のときだけ埋まる failed 明細（最大 MAX_FAILURE_DETAILS 件。総数は summary.failedCount） */
   failures?: Array<{ id: string; reason: string }>;
-  /** kind==='synced' かつ results が空（配布対象ゼロ）のときだけ true。他の場合はキー自体を生やさない */
+  /**
+   * kind==='synced' かつ results が空（配布対象ゼロ）のときだけ true。他の場合はキー自体を生やさない。
+   * サイクルP1.2以降: Agent 側は `providers.<provider>` が設定されていれば items が 0 件でも
+   * marketplace 登録/update までは行い `results.length` が 1 以上になるため、`emptyTargets` が立つのは
+   * 「有効な provider 設定自体が無い（配布設定が実質空）」場合のみになる。P1.1 時点の意味
+   * （＝「Plugin 未指定」）とは異なる点に注意（MachinesPage.tsx の文言もこれに合わせて更新済み）。
+   */
   emptyTargets?: true;
 }
 

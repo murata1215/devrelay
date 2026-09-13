@@ -12,6 +12,9 @@ import {
   buildUnsupportedResult,
   buildPrelaunchCacheKey,
   decidePrelaunchAction,
+  listConfiguredProviders,
+  resolveReconcileTargets,
+  hasReportableOutcome,
 } from '../dist/services/capability-rules.js';
 
 // ---- aiToolToCapabilityProvider ----
@@ -203,4 +206,122 @@ test('decidePrelaunchAction: 同一キーでも TTL 超過なら run', () => {
   const cache = { key: 'claude\u0000/proj', cachedAtMs: 1000 };
   const action = decidePrelaunchAction(cache, 'claude\u0000/proj', 10000, 5000);
   assert.equal(action, 'run');
+});
+
+// ---- listConfiguredProviders（サイクルP1.2） ----
+
+test('listConfiguredProviders: null/undefined は空配列', () => {
+  assert.deepEqual(listConfiguredProviders(null), []);
+  assert.deepEqual(listConfiguredProviders(undefined), []);
+});
+
+test('listConfiguredProviders: 空オブジェクトは空配列', () => {
+  assert.deepEqual(listConfiguredProviders({}), []);
+});
+
+test('listConfiguredProviders: 値が非 null オブジェクトのキーだけを返す', () => {
+  const result = listConfiguredProviders({ claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } });
+  assert.deepEqual(result, ['claude']);
+});
+
+test('listConfiguredProviders: 値が null/配列/非オブジェクトのキーは無視する', () => {
+  const result = listConfiguredProviders({ claude: { marketplaceName: 'a', marketplaceSource: 'b' }, codex: null, devin: 'x', gemini: [1, 2] });
+  assert.deepEqual(result, ['claude']);
+});
+
+test('listConfiguredProviders: 複数 provider が設定されていれば全て返す', () => {
+  const result = listConfiguredProviders({ claude: { a: 1 }, codex: { b: 2 } });
+  assert.deepEqual(result.sort(), ['claude', 'codex']);
+});
+
+// ---- resolveReconcileTargets（サイクルP1.2の中核） ----
+
+const item = (provider, kind, id) => ({ provider, kind, id });
+
+test('resolveReconcileTargets: items 空 + providers.claude あり → registry 由来 1 件（items:[]・hasAdapter:true）', () => {
+  const result = resolveReconcileTargets(['claude'], [], ['claude:plugin']);
+  assert.deepEqual(result, [{ provider: 'claude', kind: 'plugin', items: [], hasAdapter: true }]);
+});
+
+test('resolveReconcileTargets: providers 未設定 + items 空 → 空配列（何も対象にならない）', () => {
+  const result = resolveReconcileTargets([], [], ['claude:plugin']);
+  assert.deepEqual(result, []);
+});
+
+test('回帰ガード: items 2件 + providers.claude あり → ターゲット1件に items 2件が保持される（items が [] に潰れない）', () => {
+  const items = [item('claude', 'plugin', 'a'), item('claude', 'plugin', 'b')];
+  const result = resolveReconcileTargets(['claude'], items, ['claude:plugin']);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].items, items);
+  assert.equal(result[0].hasAdapter, true);
+});
+
+test('resolveReconcileTargets: providers 未設定でも items があれば items 由来のターゲットは作る', () => {
+  const items = [item('claude', 'plugin', 'a')];
+  const result = resolveReconcileTargets([], items, ['claude:plugin']);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].items, items);
+});
+
+test('resolveReconcileTargets: 未知 provider の item は hasAdapter:false（unsupported-provider 経路に流れる）', () => {
+  const items = [item('codex', 'plugin', 'a')];
+  const result = resolveReconcileTargets([], items, ['claude:plugin']);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].hasAdapter, false);
+});
+
+test('resolveReconcileTargets: providerFilter 指定時は該当 provider の items 以外を除外する', () => {
+  const items = [item('claude', 'plugin', 'a'), item('codex', 'plugin', 'b')];
+  const result = resolveReconcileTargets(['claude', 'codex'], items, ['claude:plugin', 'codex:plugin'], 'claude');
+  assert.equal(result.length, 1);
+  assert.equal(result[0].provider, 'claude');
+});
+
+test('resolveReconcileTargets: providerFilter 指定時は registry 由来ターゲットも該当 provider のみに絞る', () => {
+  const result = resolveReconcileTargets(['claude', 'codex'], [], ['claude:plugin', 'codex:plugin'], 'claude');
+  assert.deepEqual(result, [{ provider: 'claude', kind: 'plugin', items: [], hasAdapter: true }]);
+});
+
+test('resolveReconcileTargets: items が配列でなくても例外を投げず空扱いにする', () => {
+  const result = resolveReconcileTargets(['claude'], undefined, ['claude:plugin']);
+  assert.deepEqual(result, [{ provider: 'claude', kind: 'plugin', items: [], hasAdapter: true }]);
+});
+
+test('resolveReconcileTargets: providers も items も無ければ空配列', () => {
+  assert.deepEqual(resolveReconcileTargets([], [], ['claude:plugin']), []);
+});
+
+test('resolveReconcileTargets: 複数 kind の registry キーは provider が一致する分だけ追加される', () => {
+  const result = resolveReconcileTargets(['claude'], [], ['claude:plugin', 'claude:skill', 'codex:plugin']);
+  assert.deepEqual(result.map(t => `${t.provider}:${t.kind}`).sort(), ['claude:plugin', 'claude:skill']);
+});
+
+// ---- hasReportableOutcome（サイクルP1.2: prelaunch の無意味な送信抑止） ----
+
+test('hasReportableOutcome: 全フィールド空なら false', () => {
+  assert.equal(hasReportableOutcome([baseResult()]), false);
+});
+
+test('hasReportableOutcome: present のみでも false（変化なしは報告しない）', () => {
+  assert.equal(hasReportableOutcome([baseResult({ present: ['a@devrelay'] })]), false);
+});
+
+test('hasReportableOutcome: installed が 1 件でもあれば true', () => {
+  assert.equal(hasReportableOutcome([baseResult({ installed: ['a@devrelay'] })]), true);
+});
+
+test('hasReportableOutcome: updated が 1 件でもあれば true', () => {
+  assert.equal(hasReportableOutcome([baseResult({ updated: ['a@devrelay'] })]), true);
+});
+
+test('hasReportableOutcome: failed が 1 件でもあれば true', () => {
+  assert.equal(hasReportableOutcome([baseResult({ failed: [{ id: 'a', reason: 'x' }] })]), true);
+});
+
+test('hasReportableOutcome: notAllowed が 1 件でもあれば true', () => {
+  assert.equal(hasReportableOutcome([baseResult({ notAllowed: ['a@devrelay'] })]), true);
+});
+
+test('hasReportableOutcome: 空配列は false', () => {
+  assert.equal(hasReportableOutcome([]), false);
 });

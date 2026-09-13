@@ -1049,7 +1049,7 @@ export function MachinesPage() {
                       return (
                         <div className="text-[var(--text-faint)] text-xs mt-2">
                           最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''} / {s.trigger}
-                          {display.emptyTargets && '（対象 0 件。Plugin 未指定のため marketplace の登録も行われません）'}
+                          {display.emptyTargets && '（対象 0 件。有効な配布設定（Marketplace）が見つかりません。Marketplace name / source を入力して保存し直してください）'}
                         </div>
                       );
                     })()}

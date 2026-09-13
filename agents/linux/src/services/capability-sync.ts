@@ -25,6 +25,9 @@ import {
   buildUnsupportedResult,
   buildPrelaunchCacheKey,
   decidePrelaunchAction,
+  listConfiguredProviders,
+  resolveReconcileTargets,
+  hasReportableOutcome,
   type QueueState,
   type MergeableResult,
   type PrelaunchCacheEntry,
@@ -101,6 +104,10 @@ function failedResult(provider: string, kind: string, reason: string): Mergeable
 /**
  * 現在の capabilityConfig を全 adapter に対して machine レベルで reconcile する。
  * 未登録の provider/kind は throw せず failed に積んで処理を続行する（1 件の失敗が全体を止めない）。
+ *
+ * サイクルP1.2: `items` が空でも `providers.<provider>` が設定されていれば対象 provider の adapter を
+ * 呼ぶ（`resolveReconcileTargets()` が items 由来 + registry 由来のターゲットを合成する。§8.1 は
+ * items 0 件でも marketplace 登録/update までは行う設計）。
  */
 async function runMachineReconcile(trigger: AgentCapabilitySyncPayload['trigger']): Promise<CapabilitySyncOutcome> {
   const startedAt = Date.now();
@@ -110,18 +117,17 @@ async function runMachineReconcile(trigger: AgentCapabilitySyncPayload['trigger'
     return { status: 'skipped', results: [], durationMs: Date.now() - startedAt, trigger };
   }
 
-  const byProviderKind = new Map<string, Array<{ provider: string; kind: string; id: string }>>();
-  for (const item of config.items) {
-    const key = `${item.provider}:${item.kind}`;
-    if (!byProviderKind.has(key)) byProviderKind.set(key, []);
-    byProviderKind.get(key)!.push(item);
-  }
-
   const knownProviders = new Set(Array.from(adapterRegistry.values()).map(a => a.provider));
+  const targets = resolveReconcileTargets(
+    listConfiguredProviders(config.providers),
+    config.items,
+    Array.from(adapterRegistry.keys()),
+  );
   const results: MergeableResult[] = [];
 
-  for (const [key, items] of byProviderKind.entries()) {
-    const [provider, kind] = key.split(':');
+  for (const target of targets) {
+    const { provider, kind, items } = target;
+    const key = `${provider}:${kind}`;
     const adapter = adapterRegistry.get(key);
     if (!adapter) {
       results.push(buildUnsupportedResult(provider, kind, knownProviders.has(provider)));
@@ -180,8 +186,15 @@ export async function requestReconcile(trigger: 'connect' | 'config' | 'idle' | 
 const prelaunchCache = new Map<string, PrelaunchCacheEntry>();
 /** 同一 (provider, projectPath) の直近 reconcile から何 ms 以内なら再実行しないか */
 const PRELAUNCH_TTL_MS = 5 * 60 * 1000;
-/** prelaunch がキャッシュ不在時に待てる上限（§E-5: 最大 5 秒だけ待ち、超えたら起動を優先） */
-export const PRELAUNCH_WAIT_MS = 5000;
+/**
+ * prelaunch がブロックしてよい上限（§7.3: runner 起動直前のブロック上限は 3 分。
+ * サイクルP1.2 で 5 秒 → 3 分に変更: `--scope local` install が実測 20.7 秒かかり
+ * 旧 5 秒予算では毎回 timeout して install が事実上機能していなかったため、
+ * `ADAPTER_TIMEOUT_MS`（machine 側）と同じ 3 分に揃えた。
+ * ただし adapter 側（`claude-plugin-adapter.ts`）が「差分が無ければ CLI を呼ばず即 return」する
+ * ため、この 3 分は「差分があるときだけ」実際に消費される（§8.2 末尾）。
+ */
+export const PRELAUNCH_WAIT_MS = ADAPTER_TIMEOUT_MS;
 
 /**
  * `ai-runner.ts` の起動直前チョークポイント（唯一の呼び出し元）から呼ばれる。
@@ -189,10 +202,15 @@ export const PRELAUNCH_WAIT_MS = 5000;
  * machine スコープの直列化キューには入らず、専用の TTL キャッシュで 1 ターン内の
  * 複数回再入（`connection.ts` のリトライ・`ai-runner.ts` のフォールバック）を no-op にする。
  * 失敗・timeout しても runner の起動をブロックしない（例外を投げない設計）。
+ *
+ * サイクルP1.2: `capabilityConfig.items` の件数に依存しない（§8.2 は project の
+ * `.claude/settings.json` の `enabledPlugins` で駆動する設計であり、Machine 側 items が
+ * 0 件でも動く必要がある）。`providers.<provider>` が設定されているかどうかだけで判定する。
  */
 export async function reconcileForRunner(aiTool: string, projectPath: string): Promise<void> {
   const provider = aiToolToCapabilityProvider(aiTool);
   if (!provider || !currentConfig) return;
+  if (!listConfiguredProviders(currentConfig.providers).includes(provider)) return; // TTL キャッシュを汚す前に return
 
   const cacheKey = buildPrelaunchCacheKey(provider, projectPath);
   const cached = prelaunchCache.get(provider) ?? null;
@@ -201,18 +219,20 @@ export async function reconcileForRunner(aiTool: string, projectPath: string): P
   }
   prelaunchCache.set(provider, { key: cacheKey, cachedAtMs: Date.now() });
 
-  const items = currentConfig.items.filter(i => i.provider === provider);
-  if (items.length === 0) return;
-
-  const kinds = Array.from(new Set(items.map(i => i.kind)));
+  const targets = resolveReconcileTargets(
+    listConfiguredProviders(currentConfig.providers),
+    currentConfig.items,
+    Array.from(adapterRegistry.keys()),
+    provider,
+  ).filter(t => t.hasAdapter);
   const results: MergeableResult[] = [];
 
-  for (const kind of kinds) {
-    const adapter = adapterRegistry.get(`${provider}:${kind}`);
+  for (const target of targets) {
+    const adapter = adapterRegistry.get(`${target.provider}:${target.kind}`);
     if (!adapter) continue;
     try {
       const outcome = await withTimeout(
-        adapter.reconcileProject({ config: currentConfig, items: items.filter(i => i.kind === kind) }, projectPath),
+        adapter.reconcileProject({ config: currentConfig, items: target.items }, projectPath),
         PRELAUNCH_WAIT_MS,
       );
       if (outcome !== 'timeout') results.push(outcome);
@@ -221,7 +241,11 @@ export async function reconcileForRunner(aiTool: string, projectPath: string): P
     }
   }
 
-  if (results.length > 0 && sendResultCallback) {
-    sendResultCallback({ status: 'done', results: mergeCapabilityResults(results), durationMs: 0, trigger: 'prelaunch' });
+  // サイクルP1.2: installed/updated/failed/notAllowed のいずれも無い（present のみ・完全空）
+  // 結果は送らない。毎起動ごとに `capabilitySyncStatus` を無意味な全ゼロ結果で
+  // 上書きしてしまう（server 側は trigger を問わず全上書きのため）のを防ぐ。
+  const merged = mergeCapabilityResults(results);
+  if (hasReportableOutcome(merged) && sendResultCallback) {
+    sendResultCallback({ status: 'done', results: merged, durationMs: 0, trigger: 'prelaunch' });
   }
 }

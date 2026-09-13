@@ -25,6 +25,7 @@ import {
   checkMarketplaceRegistration,
   findBlockedEntry,
   computeInstallDiff,
+  resolveFailureIds,
   type ParsedPluginEntry,
   type KnownMarketplaceEntry,
   type BlocklistEntry,
@@ -33,7 +34,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-/** CLI 呼び出し 1 回あたりの個別タイムアウト（共通層の 3 分/5 秒枠の内側で使う軽量な安全弁） */
+/** CLI 呼び出し 1 回あたりの個別タイムアウト（共通層の 3 分枠の内側で使う軽量な安全弁） */
 const CLI_TIMEOUT_MS = 60 * 1000;
 
 /** `~/.claude/plugins/known_marketplaces.json` の絶対パス */
@@ -124,19 +125,29 @@ async function ensureMarketplaceRegistered(
  * machine/user scope の reconcile（trigger connect/config/idle/manual）。
  * §8.1 の手順どおり: 存在確認 → runtimeVersion → marketplace 登録確認/追加 → marketplace update
  * → user scope での install/update 差分計算 → 1 件ずつ実行（失敗しても次へ進む）。
+ *
+ * サイクルP1.2: `ctx.items` が空（`providers.claude` は設定済みだが Plugin 未指定）でも
+ * ここまで（存在確認〜marketplace update）は必ず実行する（`capability-sync.ts` の
+ * `resolveReconcileTargets()` が items 0 件でも provider 設定があればこの adapter を呼ぶため）。
+ * 失敗時は `resolveFailureIds()` で fallback id を積み、無言の `done` にしない。
  */
 async function reconcileMachine(ctx: CapabilityCtx): Promise<CapabilityResult> {
   const result = emptyResult();
   const providerConfig: CapabilityClaudeProviderConfig | undefined = ctx.config.providers.claude;
 
   if (!providerConfig) {
-    for (const item of ctx.items) result.failed.push({ id: item.id, reason: 'missing-provider-config' });
+    // サイクルP1.2: items 0 件でも無言 done にしないよう fallback id（`claude:plugin`）で報告する
+    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'claude:plugin')) {
+      result.failed.push({ id, reason: 'missing-provider-config' });
+    }
     return result;
   }
 
   const claudePath = resolveSystemClaude();
   if (!claudePath) {
-    for (const item of ctx.items) result.failed.push({ id: item.id, reason: 'claude-not-found' });
+    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'claude:plugin')) {
+      result.failed.push({ id, reason: 'claude-not-found' });
+    }
     return result;
   }
 
@@ -148,13 +159,19 @@ async function reconcileMachine(ctx: CapabilityCtx): Promise<CapabilityResult> {
   if (marketplaceState !== 'ok') {
     // marketplace 自体が使えないと個々の plugin 判定が無意味なので打ち切る（§8.1-3）
     const reason = marketplaceState === 'name-mismatch' ? 'marketplace-name-mismatch' : 'marketplace-not-registered';
-    for (const item of ctx.items) result.failed.push({ id: item.id, reason });
+    for (const id of resolveFailureIds(ctx.items.map(i => i.id), `marketplace:${marketplaceName}`)) {
+      result.failed.push({ id, reason });
+    }
     return result;
   }
 
   // オフライン等の失敗は続行する（§8.1-4）
   const updateResult = await runClaude(claudePath, ['plugin', 'marketplace', 'update', marketplaceName]);
   if (!updateResult.ok) result.failed.push({ id: `marketplace:${marketplaceName}`, reason: 'marketplace-update-failed' });
+
+  // サイクルP1.2: items 0 件なら install/update 差分計算は必ず空になるため、
+  // ここで打ち切って settings/blocklist の読み取りを省く（marketplace 登録/update までは完了済み）。
+  if (ctx.items.length === 0) return result;
 
   const [userEnabled, blocklistRaw] = await Promise.all([
     readEnabledPlugins(userSettingsPath()),

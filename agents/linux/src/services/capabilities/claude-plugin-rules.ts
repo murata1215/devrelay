@@ -194,3 +194,19 @@ export function computeInstallDiff(desiredIds: string[], maps: ScopeEnabledMaps)
 
   return { toInstall, alreadyEnabled, disabledNeedsEnable };
 }
+
+// -----------------------------------------------------------------------------
+// サイクルP1.2: items 0 件でも失敗を無言にしないための ID 解決
+// -----------------------------------------------------------------------------
+
+/**
+ * `reconcileMachine` の失敗（`claude-not-found` / `missing-provider-config` / `marketplace-*`）を
+ * `result.failed` に積むときの id 一覧を返す（純粋関数）。
+ * `ctx.items` が 1 件以上あれば各 item の id をそのまま使う（既存挙動）。
+ * `ctx.items` が空（サイクルP1.2 で新たに reconcile 対象になったケース）の場合は、
+ * `buildUnsupportedResult`/`marketplace-update-failed` と同じ「provider×kind 全体の失敗」ID 規約
+ * （`fallbackId`）に倣って 1 件だけ積む（無言の `done` を防ぐ）。
+ */
+export function resolveFailureIds(itemIds: string[], fallbackId: string): string[] {
+  return itemIds.length > 0 ? itemIds : [fallbackId];
+}

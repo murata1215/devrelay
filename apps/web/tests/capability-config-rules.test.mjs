@@ -245,6 +245,8 @@ test('decideSyncStatusDisplay: error は failures を最大 MAX_FAILURE_DETAILS 
   assert.equal(result.failures.length, 5);
 });
 
+// サイクルP1.2以降、results:[] は「provider 設定自体が無い（配布設定が実質空）」ケースのみで発生する
+// （providers.<provider> が設定されていれば Agent 側は items 0 件でも results.length>=1 を返すため）
 test('decideSyncStatusDisplay: done + results:[] は synced かつ emptyTargets:true', () => {
   const status = { status: 'done', trigger: 'manual', durationMs: 0, receivedAt: 'x', results: [] };
   const result = decideSyncStatusDisplay(status, true);

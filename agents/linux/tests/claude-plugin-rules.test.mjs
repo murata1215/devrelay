@@ -15,6 +15,7 @@ import {
   checkMarketplaceRegistration,
   findBlockedEntry,
   computeInstallDiff,
+  resolveFailureIds,
 } from '../dist/services/capabilities/claude-plugin-rules.js';
 
 // ---- parsePluginListJson ----
@@ -194,4 +195,18 @@ test('computeInstallDiff: 複数 id を混在して正しく分類する', () =>
   const maps = { user: { a: true, b: false }, project: {}, local: {} };
   const result = computeInstallDiff(['a', 'b', 'c'], maps);
   assert.deepEqual(result, { toInstall: ['c'], alreadyEnabled: ['a'], disabledNeedsEnable: ['b'] });
+});
+
+// ---- resolveFailureIds（サイクルP1.2: items 0 件でも失敗を無言にしない） ----
+
+test('resolveFailureIds: items があればそのまま返す', () => {
+  assert.deepEqual(resolveFailureIds(['a@devrelay', 'b@devrelay'], 'claude:plugin'), ['a@devrelay', 'b@devrelay']);
+});
+
+test('resolveFailureIds: items が空なら fallback id を 1 件返す', () => {
+  assert.deepEqual(resolveFailureIds([], 'claude:plugin'), ['claude:plugin']);
+});
+
+test('resolveFailureIds: fallback は marketplace 名など任意の文字列でよい', () => {
+  assert.deepEqual(resolveFailureIds([], 'marketplace:devrelay'), ['marketplace:devrelay']);
 });
