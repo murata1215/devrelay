@@ -338,6 +338,74 @@ wss://<host>/ws/web?token=<AuthSession.token>&tabId=<uuid>
 なお `web:tool:approval` はセッション参加者が 0 件の場合、**接続中の全 Web クライアントへフォールバック配信**
 される仕様があるため、`sessionId` 一致フィルタは表示側で必ず自前実装する必要がある。
 
+### 3.3.1 永続化と配信スコープ（read-only 調査、2026-09-13）
+
+Flutter で「一時ステータス通知が AI 吹き出しとして 2 回出る」「`web:progress` だけ 2 回に 1 回届かない」が
+観測されたため調査した。**本節はコード変更を伴わない read-only 確認結果**。
+
+**(a) 永続化の唯一の判別子は `payload.messageId` の有無**
+
+`web:response` には 2 種類ある。専用の `type` やプレフィックス規約は存在しない。
+
+| 区分 | 条件 | 例 |
+|---|---|---|
+| 永続化済み AI 応答 | `messageId` **あり**（DB `Message.id` と同一値） | AI の最終応答（`agent:ai:output` の完了時のみ `prisma.message.create` を経由） |
+| 非永続の一時通知 | `messageId` **常に `undefined`** | `🤖 AI Status: {status}` + `✅/⚠️ DevRelay Agreement …`（1 フレーム内で `\n` 連結された 1 本の `message`）、`💾` ストレージ保存、`⛔`/`⚠️` キャンセル結果、`🛑` loop-guard、`🔄` session rotate、進捗タイムアウト通知、**および全コマンド応答**（`a`/`p`/`s`/`ag`/`//connect` 等、`executeCommand` の戻り値全般） |
+
+非永続系はいずれも `GET /api/sessions/:id/messages` に出現しない（`Message` テーブルへの `create` を経由しないため）。
+Flutter クライアントは **`messageId` の有無で「履歴に残る発言」と「一時通知」を区別すること**。
+プレフィックス（絵文字）でのマッチングは i18n 文言変更に弱く非推奨（補助手段にとどめる）。
+
+**(b) 一時通知が同一ターンで 2 回届くことがある（Agent 側の非冪等性）**
+
+`🤖 AI Status: …` は Agent が `server:session:start` を受けるたびに無条件で送り返す（冪等でない）。
+一方サーバー側は Agent 再接続のたびに内部フラグを立てるが、スレッド新規作成 API 経由の初回セッション開始では
+このフラグをクリアしないため、「スレッド作成 → 直後の最初の送信」の 1 ターンに限り
+`server:session:start` が実質 2 回発行され、結果として **同一の一時通知が数秒差で 2 通**届くことがある
+（2 ターン目以降はフラグがクリアされるため発生しない）。
+
+**Flutter 側の対策**: `messageId` が無いフレームには、classic（`apps/web`）と同じ
+**「role + content が完全一致 かつ 直近 5 件以内 かつ 30 秒以内なら 2 通目を破棄」** という dedupe を必ず実装すること。
+classic はこの dedupe を持つため 1 回しか表示されず、Flutter は未実装のため 2 回表示されていたと推定される。
+
+**(c) 配信スコープと参加者評価タイミングは frame ごとに異なる**
+
+| type | 配信先 | 参加者リストの評価タイミング |
+|---|---|---|
+| `web:response` | セッション参加者全員 | **フレーム送信のたびに live 評価** |
+| `web:user_message` | セッション参加者全員（送信元 chatId を除く） | **フレーム送信のたびに live 評価** |
+| `web:progress` | **そのターン開始時点のスナップショットに含まれ、かつその瞬間 WS が OPEN だった** chatId のみ | **ターン開始時の 1 回だけ**。以降 8 秒ごとの更新もこのスナップショットにしか送らない |
+
+**重要な帰結**: `web:progress` の初回送信時に対象タブの WS が **OPEN でなければ**、その chatId は
+このターンの配信対象リストに一切登録されない。`web:response` には再接続時に配送するキュー機構があるが、
+**`web:progress` には同等のキューが無い**。つまり:
+
+- ターン開始後に参加した（または開始直前に再接続が完了していなかった）クライアントは、
+  **そのターンの `web:progress` を 1 通も受け取れない**（仕様であり、バグ再送の対象ではない）
+- 一方 `web:response`（最終応答）・`web:user_message` は live 評価のため正常に届く
+
+これが「`web:progress` だけ届かない／2 回に 1 回」という観測の構造的な原因である
+（モバイル OS のバックグラウンド遷移で WS が瞬断・再接続するタイミングと重なると発生しやすい）。
+
+再接続時には現在の進捗が 1 回だけ復元送信される救済経路があるが、**この復元フレームには `sessionId` が
+含まれない**（`{ output, elapsed, projectId }` のみ）。fail-open ルーティング（3.3 節の推奨規則）であれば
+表示されるが、`web:progress` を fail-closed（`sessionId` 必須）で実装している場合は消えるため注意。
+
+**(d) `web:progress` の送信頻度**
+
+ツールイベント駆動ではなく、**ターン開始時 + 以降 8 秒固定周期**（env で調整不可）。
+Agent からの部分出力はいったんサーバー側バッファに溜まるだけで、それ自体はフレームを発生させない
+（次の 8 秒周期でまとめて反映される）。したがって出力の無い処理（例: 1 分の `sleep`）の間は、
+`output` が同一内容のまま `elapsed` だけ増える `web:progress` が **約 8 回**（0/8/16/…/56 秒）届き、
+最後に `messageId` 付きの `web:response` が 1 通届いて終わる。Flutter は `elapsed` の増分で
+更新を判定し、`output` の内容比較で新着扱いしないこと。
+
+**(e) §2.1 `labelFromAi` のマーカー集合とは無関係**
+
+`labelFromAi` が除去する `🔧`/`📊`/`📝` マーカーは、**DB に保存された AI 応答本文の中のノイズ**を
+除去する目的のものであり、本節の一時通知（`🤖`/`⚠️`/`✅`/`💾`/`⛔`/`🛑`/`🔄`）とは対象も目的も別集合である。
+一時通知はそもそも `Message` に保存されないため `labelFromAi` の対象にならない。両者を混同しないこと。
+
 ### 3.4 Client → Server フレーム一覧（全 4 種）
 
 | type | payload | 備考 |
@@ -466,8 +534,12 @@ web:command { text, projectId? } 受信
 | C | `GET /api/threads` のレスポンスに `isProcessing` / `pendingApprovalCount` を追加する（サーバー内部に既にある管理データを一覧 API に露出するだけ） | `apps/server` のみ | 不要 |
 | D | `PATCH /api/sessions/:id`（改名）でも `web:session_info` を他タブへ再送する | `apps/server` のみ | 不要 |
 | E | `web:tool:approval:resolved` / `web:tool:approval:auto` に `sessionId` を追加する（現状 `projectId` 止まりで、同一プロジェクトの別スレッドの承認カードに影響しうる表示上の穴がある） | `apps/server` のみ | 不要 |
+| C1 | `web:response` の payload に `transient?: true`（または `persisted: boolean`）を純加算し、3.3.1(a) の `messageId` 判別をクライアント側の推測ではなく明示フィールドにする | `apps/server` + `packages/shared` の型 | 不要 |
+| C2 | `POST /api/threads` の直後に Agent 再起動フラグをクリアし、3.3.1(b) の一時通知 2 重送信の起点そのものを断つ | `apps/server` のみ（1 行） | 不要 |
+| C3 | Agent 側で同一 `sessionId` への `session:start` 再送に対し `agent:ai:status` の再送を抑止（冪等化） | `agents/{linux,macos,windows}` | 不要（ただし commit+push+各機 `u` が必要） |
+| C4 | `web:progress` の配信先をターン開始時スナップショットではなく送信時 live 評価に変更し、3.3.1(c) の「開始後に参加したクライアントに届かない」問題を根治する | `apps/server` のみ | 不要 |
 
-いずれも本サイクルでは**実装しない**。採否・優先順位は次サイクルで判断する。
+いずれも本サイクルでは**実装しない**。採否・優先順位は次サイクルで判断する（C2 は変更が小さく副作用も低いため優先候補、C3 は反映コストが高いため優先度低）。
 
 ---
 
