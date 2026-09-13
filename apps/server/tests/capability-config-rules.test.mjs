@@ -93,3 +93,23 @@ test('decideSweepAction: capabilityConfig あり + busy でなければ sync', (
   const decision = decideSweepAction({ capabilityConfig: { providers: {}, items: [] }, busy: false });
   assert.deepEqual(decision, { action: 'sync', reason: 'ok' });
 });
+
+// ---- P1.1 回帰テスト: Web が「marketplace のみ・plugin 空」で送る payload が NULL 化しないことの保証 ----
+
+test('P1.1回帰: Web の marketplace-only payload（items:[]）は valid:true で config が null にならない', () => {
+  const input = {
+    providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'murata1215/devrelay-plugins' } },
+    items: [],
+  };
+  const result = validateCapabilityConfigInput(input);
+  assert.deepEqual(result, { valid: true, config: input });
+  assert.notEqual(result.config, null);
+});
+
+test('P1.1回帰: decideSweepAction は items:[] の capabilityConfig でも busy でなければ sync（既に受容済みの挙動の明文化）', () => {
+  const decision = decideSweepAction({
+    capabilityConfig: { providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'src' } }, items: [] },
+    busy: false,
+  });
+  assert.deepEqual(decision, { action: 'sync', reason: 'ok' });
+});

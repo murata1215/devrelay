@@ -47,23 +47,49 @@ export function capabilityConfigToFormState(config: CapabilityConfigLike | null)
   };
 }
 
+/** `validateCapabilityForm` が保存を拒否した理由（UI 文言はここに持たず MachinesPage.tsx 側で JSX にマップする） */
+export type CapabilityFormErrorCode =
+  | 'marketplace-name-required'
+  | 'marketplace-source-required'
+  | 'marketplace-required-for-plugins';
+
+export type CapabilityFormValidation =
+  | { ok: true; config: CapabilityConfigLike | null }
+  | { ok: false; error: CapabilityFormErrorCode };
+
 /**
- * UI フォーム状態を保存用の `CapabilityConfig` に変換する。
- * marketplaceName / marketplaceSource / pluginIds のいずれかが空なら「未設定」= `null`（機能 OFF）を返す
- * （中途半端な設定を DB に保存しないため。3 つ全部揃って初めて有効な設定になる）。
+ * UI フォーム状態を保存用の `CapabilityConfig` に変換する（検証つき）。
+ * P1.1: marketplaceName/marketplaceSource が両方揃っていれば pluginIds が空でも有効な設定として保存する
+ * （marketplace の登録だけ先に済ませ、plugin は後から追加する運用を想定）。
+ * marketplaceName/marketplaceSource の片方だけが入力されている状態、または
+ * pluginIds はあるのに marketplace が両方とも空の状態は、中途半端な設定として保存せず invalid を返す。
+ * 3 つとも空なら「未設定」= `null`（機能 OFF、既存設定のクリア）として有効に扱う。
  */
-export function formStateToCapabilityConfig(state: CapabilityConfigFormState): CapabilityConfigLike | null {
+export function validateCapabilityForm(state: CapabilityConfigFormState): CapabilityFormValidation {
   const marketplaceName = state.marketplaceName.trim();
   const marketplaceSource = state.marketplaceSource.trim();
   const pluginIds = nonEmptyTrimmed(state.pluginIds);
 
-  if (!marketplaceName || !marketplaceSource || pluginIds.length === 0) {
-    return null;
+  if (!marketplaceName && !marketplaceSource && pluginIds.length === 0) {
+    return { ok: true, config: null };
+  }
+  if (marketplaceName && !marketplaceSource) {
+    return { ok: false, error: 'marketplace-source-required' };
+  }
+  if (!marketplaceName && marketplaceSource) {
+    return { ok: false, error: 'marketplace-name-required' };
+  }
+  if (!marketplaceName && !marketplaceSource) {
+    // pluginIds.length > 0 はここまでの分岐で確定（上の全空チェックで弾かれているため）
+    return { ok: false, error: 'marketplace-required-for-plugins' };
   }
 
   return {
-    providers: { claude: { marketplaceName, marketplaceSource } },
-    items: pluginIds.map(id => ({ provider: 'claude', kind: 'plugin', id })),
+    ok: true,
+    config: {
+      providers: { claude: { marketplaceName, marketplaceSource } },
+      items: pluginIds.map(id => ({ provider: 'claude', kind: 'plugin', id })),
+    },
   };
 }
 
@@ -97,11 +123,26 @@ export interface CapabilitySyncStatusLike {
   receivedAt: string;
 }
 
-export type SyncStatusDisplayKind = 'unsynced-unsupported' | 'unsynced' | 'synced';
+/**
+ * P1.1: `status.status` が 'skipped'/'error' の場合も 0 件表示と区別できるよう種別を分ける。
+ * - 'skipped-no-config': capabilityConfig 自体が未保存（Web 側で保存前と判定できる場合）
+ * - 'skipped-agent-stale': 設定は保存済みだが Agent にまだ届いていない（Sync now 待ち・再接続待ち）
+ * - 'error': reconcile 中にいずれかの provider が failed を出した
+ */
+export type SyncStatusDisplayKind =
+  | 'unsynced-unsupported'
+  | 'unsynced'
+  | 'skipped-no-config'
+  | 'skipped-agent-stale'
+  | 'error'
+  | 'synced';
+
+/** error 表示時に列挙する failed 明細の上限件数（超過分は summary.failedCount との差分で「ほか n 件」表示） */
+export const MAX_FAILURE_DETAILS = 5;
 
 export interface SyncStatusDisplay {
   kind: SyncStatusDisplayKind;
-  /** kind==='synced' のときだけ埋まる集計値 */
+  /** kind==='skipped-*'|'error'|'synced' のときだけ埋まる集計値 */
   summary?: {
     receivedAt: string;
     installedCount: number;
@@ -110,18 +151,27 @@ export interface SyncStatusDisplay {
     notAllowedCount: number;
     trigger: string;
   };
+  /** kind==='error' のときだけ埋まる failed 明細（最大 MAX_FAILURE_DETAILS 件。総数は summary.failedCount） */
+  failures?: Array<{ id: string; reason: string }>;
+  /** kind==='synced' かつ results が空（配布対象ゼロ）のときだけ true。他の場合はキー自体を生やさない */
+  emptyTargets?: true;
 }
 
 /**
  * `capabilitySyncStatus` の表示区分を決める（純関数）。
  * - `capabilitySyncStatus` が null かつ Agent が capability-sync 未対応 → 「未同期（Agent 更新が必要）」
  * - null だが対応済み（まだ 1 回も reconcile していないだけ）→ 「未同期」
- * - 値があれば結果を集計して表示する
+ * - status.status==='skipped' → savedConfigPresent で「未保存」か「Agent 未反映」かを分ける
+ *   （savedConfigPresent が null＝判定不能なときは fail-open で 'skipped-agent-stale' 扱いにする）
+ * - status.status==='error' → 集計値 + failed 明細（最大 MAX_FAILURE_DETAILS 件）を返す
+ * - それ以外（'done'）→ 集計して 'synced'。results が空なら emptyTargets を立てる
  * @param capabilitySyncSupported Agent が 'capability-sync' capability を申告しているか（null = 判定不能。offline 等）
+ * @param savedConfigPresent capabilityConfig が現在 DB に保存されているか（省略・null は判定不能）
  */
 export function decideSyncStatusDisplay(
   status: CapabilitySyncStatusLike | null,
   capabilitySyncSupported: boolean | null,
+  savedConfigPresent: boolean | null = null,
 ): SyncStatusDisplay {
   if (!status) {
     return { kind: capabilitySyncSupported === false ? 'unsynced-unsupported' : 'unsynced' };
@@ -130,8 +180,18 @@ export function decideSyncStatusDisplay(
   const updatedCount = status.results.reduce((sum, r) => sum + r.updated.length, 0);
   const failedCount = status.results.reduce((sum, r) => sum + r.failed.length, 0);
   const notAllowedCount = status.results.reduce((sum, r) => sum + r.notAllowed.length, 0);
+  const summary = { receivedAt: status.receivedAt, installedCount, updatedCount, failedCount, notAllowedCount, trigger: status.trigger };
+
+  if (status.status === 'skipped') {
+    return { kind: savedConfigPresent === false ? 'skipped-no-config' : 'skipped-agent-stale', summary };
+  }
+  if (status.status === 'error') {
+    const failures = status.results.flatMap(r => r.failed);
+    return { kind: 'error', summary, failures: failures.slice(0, MAX_FAILURE_DETAILS) };
+  }
   return {
     kind: 'synced',
-    summary: { receivedAt: status.receivedAt, installedCount, updatedCount, failedCount, notAllowedCount, trigger: status.trigger },
+    summary,
+    ...(status.results.length === 0 ? { emptyTargets: true as const } : {}),
   };
 }

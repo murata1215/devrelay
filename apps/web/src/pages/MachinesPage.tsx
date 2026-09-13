@@ -4,11 +4,11 @@ import type { Machine, MachineCreateResponse } from '../lib/api';
 import { useLanguage } from '../contexts/LanguageContext';
 import {
   capabilityConfigToFormState,
-  formStateToCapabilityConfig,
+  validateCapabilityForm,
   formatPluginTag,
   decideSyncStatusDisplay,
 } from '../lib/capability-config-rules';
-import type { CapabilitySyncStatusLike } from '../lib/capability-config-rules';
+import type { CapabilitySyncStatusLike, CapabilityFormErrorCode } from '../lib/capability-config-rules';
 
 export function MachinesPage() {
   const { t } = useLanguage();
@@ -61,6 +61,10 @@ export function MachinesPage() {
   const [capabilitySyncStatus, setCapabilitySyncStatus] = useState<CapabilitySyncStatusLike | null>(null);
   const [capabilitySyncSupported, setCapabilitySyncSupported] = useState<boolean | null>(null);
   const [capabilitySyncing, setCapabilitySyncing] = useState(false);
+  // P1.1: capabilityConfig が現在 DB に保存されているか（skipped 表示の「未保存」/「Agent 未反映」の区別に使う）
+  const [savedConfigPresent, setSavedConfigPresent] = useState(false);
+  // P1.1: フォーム検証エラー（保存前にインライン表示。API は呼ばない）
+  const [capabilityFormError, setCapabilityFormError] = useState<CapabilityFormErrorCode | null>(null);
 
   // 全許可モード
   const [skipPermissions, setSkipPermissions] = useState(false);
@@ -108,6 +112,40 @@ export function MachinesPage() {
 
     return () => clearInterval(interval);
   }, []);
+
+  // P1.1: 設定モーダルを開いている間、Capability の同期状況だけを 5 秒ごとにポーリングする。
+  // フォーム入力値（marketplaceName/marketplaceSource/pluginIds）には一切触れない
+  // ——編集途中の内容をポーリング結果で上書きしてしまうため。id 文字列に依存させることで
+  // （オブジェクト参照ではなく）、将来 settingsTarget を再生成する変更が入っても
+  // 5 秒ごとの effect 再構築ループにならないようにする。
+  const settingsMachineId = settingsTarget?.id ?? null;
+  useEffect(() => {
+    if (!settingsMachineId) return;
+    let cancelled = false;
+
+    const pollCapabilityStatus = async () => {
+      try {
+        const result = await machines.getCapabilityConfig(settingsMachineId);
+        // モーダルを閉じた/別マシンに切り替えた後に届いた遅延応答は捨てる
+        if (cancelled) return;
+        setCapabilitySyncStatus(result.capabilitySyncStatus ?? null);
+        setCapabilitySyncSupported(result.capabilitySyncSupported ?? null);
+        setSavedConfigPresent(result.capabilityConfig != null);
+      } catch {
+        // ポーリング失敗は無視して次の間隔で再試行する（loadMachines(true) と同じ方針）
+      }
+    };
+
+    // 初回取得は handleOpenSettings 側の Promise.all で既に行っているため、
+    // ここでは即時実行せず +5 秒後から開始する（応答のレースを避ける）
+    const timer = setInterval(() => { void pollCapabilityStatus(); }, 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [settingsMachineId]);
+
+  // P1.1: Sync now の活性判定・設定モーダル内の他表示は、モーダルを開いた時点の
+  // settingsTarget スナップショットではなく、5 秒ポーリングで更新され続ける data から見た
+  // 最新の Machine 状態に追従させる（そうしないと開いたまま online/offline が切り替わっても反映されない）
+  const liveSettingsMachine = data.find(m => m.id === settingsMachineId) ?? settingsTarget;
 
   /** 「+ Add Agent」クリック時: 名前入力なしで即座にトークン生成・表示 */
   const handleAddAgent = async () => {
@@ -167,6 +205,7 @@ export function MachinesPage() {
       setPluginIds(capabilityFormState.pluginIds);
       setCapabilitySyncStatus(capabilityResult.capabilitySyncStatus ?? null);
       setCapabilitySyncSupported(capabilityResult.capabilitySyncSupported ?? null);
+      setSavedConfigPresent((capabilityResult.capabilityConfig ?? null) != null);
     } catch (err) {
       setSettingsToken('(Failed to load token)');
     } finally {
@@ -203,6 +242,8 @@ export function MachinesPage() {
     setCapabilitySyncStatus(null);
     setCapabilitySyncSupported(null);
     setCapabilitySyncing(false);
+    setSavedConfigPresent(false);
+    setCapabilityFormError(null);
   };
 
   const handleDelete = async () => {
@@ -834,17 +875,20 @@ export function MachinesPage() {
                       <input
                         type="text"
                         value={marketplaceName}
-                        onChange={(e) => { setMarketplaceName(e.target.value); setCapabilityConfigModified(true); }}
+                        onChange={(e) => { setMarketplaceName(e.target.value); setCapabilityConfigModified(true); setCapabilityFormError(null); }}
                         placeholder="Marketplace name (例: devrelay)"
                         className="flex-1 bg-[var(--bg-primary)] text-[var(--text-primary)] px-3 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
                       />
                       <input
                         type="text"
                         value={marketplaceSource}
-                        onChange={(e) => { setMarketplaceSource(e.target.value); setCapabilityConfigModified(true); }}
+                        onChange={(e) => { setMarketplaceSource(e.target.value); setCapabilityConfigModified(true); setCapabilityFormError(null); }}
                         placeholder="Marketplace source (例: murata1215/devrelay-plugins)"
                         className="flex-1 bg-[var(--bg-primary)] text-[var(--text-primary)] px-3 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
                       />
+                    </div>
+                    <div className="text-[var(--text-faint)] text-xs mb-2">
+                      Plugin を空のまま保存すると、marketplace 設定だけが保存されます（配布対象は 0 件）
                     </div>
                     {/* plugin id タグ入力（表示は marketplace 修飾子を補完） */}
                     {pluginIds.length > 0 && (
@@ -856,6 +900,7 @@ export function MachinesPage() {
                               onClick={() => {
                                 setPluginIds(pluginIds.filter((_, idx) => idx !== i));
                                 setCapabilityConfigModified(true);
+                                setCapabilityFormError(null);
                               }}
                               className="text-[var(--text-faint)] hover:text-[var(--text-danger)] transition-colors"
                               title="Remove plugin"
@@ -876,6 +921,7 @@ export function MachinesPage() {
                             setPluginIds([...pluginIds, newPluginInput.trim()]);
                             setNewPluginInput('');
                             setCapabilityConfigModified(true);
+                            setCapabilityFormError(null);
                           }
                         }}
                         placeholder="Plugin id (例: unity)"
@@ -887,6 +933,7 @@ export function MachinesPage() {
                             setPluginIds([...pluginIds, newPluginInput.trim()]);
                             setNewPluginInput('');
                             setCapabilityConfigModified(true);
+                            setCapabilityFormError(null);
                           }
                         }}
                         className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
@@ -900,11 +947,20 @@ export function MachinesPage() {
                           <button
                             onClick={async () => {
                               if (!settingsTarget) return;
+                              const validation = validateCapabilityForm({ marketplaceName, marketplaceSource, pluginIds });
+                              if (!validation.ok) {
+                                // P1.1: フォーム検証に失敗した場合は API を呼ばずインラインエラーだけ表示する
+                                setCapabilityFormError(validation.error);
+                                return;
+                              }
+                              setCapabilityFormError(null);
                               setCapabilityConfigSaving(true);
                               try {
-                                const config = formStateToCapabilityConfig({ marketplaceName, marketplaceSource, pluginIds });
-                                await machines.setCapabilityConfig(settingsTarget.id, config);
+                                await machines.setCapabilityConfig(settingsTarget.id, validation.config);
                                 setCapabilityConfigModified(false);
+                                setSavedConfigPresent(validation.config !== null);
+                                // 保存直後は古い同期結果（skipped 等）を表示し続けない。次のポーリングで最新化される
+                                setCapabilitySyncStatus(null);
                               } catch (err) {
                                 alert(err instanceof Error ? err.message : 'Failed to save');
                               } finally {
@@ -933,15 +989,23 @@ export function MachinesPage() {
                             setCapabilitySyncing(false);
                           }
                         }}
-                        disabled={capabilitySyncing || settingsTarget?.status !== 'online'}
+                        disabled={capabilitySyncing || liveSettingsMachine?.status !== 'online'}
                         className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed text-[var(--text-primary)] px-3 py-1.5 rounded-lg transition-colors text-sm"
                       >
                         {capabilitySyncing ? 'Syncing...' : 'Sync now'}
                       </button>
                     </div>
-                    {/* 最終同期ステータス（Auto Update の「最終自動更新」行と同じ書式） */}
+                    {/* P1.1: フォーム検証エラー（capabilityConfigModified の内外どちらでも表示され続けるよう外側に置く） */}
+                    {capabilityFormError && (
+                      <div className="text-[var(--text-danger)] text-xs mt-2">
+                        {capabilityFormError === 'marketplace-name-required' && 'Marketplace name を入力してください（source だけでは保存できません）'}
+                        {capabilityFormError === 'marketplace-source-required' && 'Marketplace source を入力してください（name だけでは保存できません）'}
+                        {capabilityFormError === 'marketplace-required-for-plugins' && 'Plugin が登録されています。Marketplace name / source を入力するか、Plugin をすべて削除してください'}
+                      </div>
+                    )}
+                    {/* 最終同期ステータス（Auto Update の「最終自動更新」行と同じ書式。P1.1 で skipped/error/emptyTargets を区別） */}
                     {(() => {
-                      const display = decideSyncStatusDisplay(capabilitySyncStatus, capabilitySyncSupported);
+                      const display = decideSyncStatusDisplay(capabilitySyncStatus, capabilitySyncSupported, savedConfigPresent);
                       if (display.kind === 'unsynced-unsupported') {
                         return (
                           <div className="text-[var(--text-danger)] text-xs mt-2">
@@ -952,10 +1016,40 @@ export function MachinesPage() {
                       if (display.kind === 'unsynced') {
                         return <div className="text-[var(--text-faint)] text-xs mt-2">未同期</div>;
                       }
+                      if (display.kind === 'skipped-no-config') {
+                        return (
+                          <div className="text-[var(--text-faint)] text-xs mt-2">
+                            未同期（配布設定が保存されていません。Marketplace を入力して Save & Apply を押してください）
+                          </div>
+                        );
+                      }
+                      if (display.kind === 'skipped-agent-stale') {
+                        return (
+                          <div className="text-[var(--text-faint)] text-xs mt-2">
+                            未同期（Agent にまだ設定が届いていません。Sync now を押すか Agent の再接続を待ってください）
+                          </div>
+                        );
+                      }
                       const s = display.summary!;
+                      if (display.kind === 'error') {
+                        const shownCount = display.failures?.length ?? 0;
+                        const remaining = s.failedCount - shownCount;
+                        return (
+                          <div className="text-xs mt-2">
+                            <div className="text-[var(--text-faint)]">
+                              最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''} / {s.trigger}
+                            </div>
+                            {display.failures?.map((f, i) => (
+                              <div key={i} className="text-[var(--text-danger)]">⚠️ {f.id}: {f.reason}</div>
+                            ))}
+                            {remaining > 0 && <div className="text-[var(--text-faint)]">ほか {remaining} 件</div>}
+                          </div>
+                        );
+                      }
                       return (
                         <div className="text-[var(--text-faint)] text-xs mt-2">
                           最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''} / {s.trigger}
+                          {display.emptyTargets && '（対象 0 件。Plugin 未指定のため marketplace の登録も行われません）'}
                         </div>
                       );
                     })()}
