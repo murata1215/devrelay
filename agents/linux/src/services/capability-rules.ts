@@ -85,10 +85,18 @@ export interface MergeableResult {
   present: string[];
   failed: Array<{ id: string; reason: string }>;
   notAllowed: string[];
+  /** 撤去した管理下 ID（サイクルP3-A、承認ノート#1）。純加算・非空のときだけキーを生やす */
+  removed?: string[];
 }
 
 function dedupeStrings(arr: string[]): string[] {
   return Array.from(new Set(arr));
+}
+
+/** `removed?: string[]`（optional 配列）どうしを結合 + 重複除去する。結果が空なら undefined を返す（純加算） */
+function mergeOptionalStrings(a: string[] | undefined, b: string[] | undefined): string[] | undefined {
+  const merged = dedupeStrings([...(a ?? []), ...(b ?? [])]);
+  return merged.length > 0 ? merged : undefined;
 }
 
 function dedupeFailed(arr: Array<{ id: string; reason: string }>): Array<{ id: string; reason: string }> {
@@ -120,6 +128,7 @@ export function mergeCapabilityResults(results: MergeableResult[]): MergeableRes
         present: [...r.present],
         failed: [...r.failed],
         notAllowed: [...r.notAllowed],
+        removed: r.removed && r.removed.length > 0 ? dedupeStrings(r.removed) : undefined,
       });
       continue;
     }
@@ -131,6 +140,7 @@ export function mergeCapabilityResults(results: MergeableResult[]): MergeableRes
       present: dedupeStrings([...existing.present, ...r.present]),
       notAllowed: dedupeStrings([...existing.notAllowed, ...r.notAllowed]),
       failed: dedupeFailed([...existing.failed, ...r.failed]),
+      removed: mergeOptionalStrings(existing.removed, r.removed),
     });
   }
 
@@ -232,14 +242,45 @@ export function resolveReconcileTargets(
 
 /**
  * reconcile 結果が「報告する価値があるか」を判定する（純粋関数）。
- * `installed`/`updated`/`failed`/`notAllowed` のいずれかが 1 件でもあれば true。
+ * `installed`/`updated`/`failed`/`notAllowed`/`removed` のいずれかが 1 件でもあれば true。
  * `present` のみ（変化なし）や完全に空の結果は false とし、prelaunch の無意味な送信
  * （= サーバー側 `capabilitySyncStatus` の無意味な上書き）を抑止するために使う。
  */
 export function hasReportableOutcome(results: MergeableResult[]): boolean {
   return results.some(
-    (r) => r.installed.length > 0 || r.updated.length > 0 || r.failed.length > 0 || r.notAllowed.length > 0,
+    (r) => r.installed.length > 0 || r.updated.length > 0 || r.failed.length > 0 || r.notAllowed.length > 0 || (r.removed?.length ?? 0) > 0,
   );
+}
+
+/**
+ * サイクルP3-A §2: 撤去経路（cleanup パス）の対象キーを決める純粋関数。
+ * 「registry にはあるが今回の reconcile ターゲットに含まれず（uncovered）、かつその adapter が
+ * 過去に配置した管理下の状態がこのマシンに残っている（managed）」キーだけを返す。
+ *
+ * `hasManagedState?()` を実装しない adapter（Claude 等）は `managedKeys` に現れ得ないため、
+ * 構造的にこの関数の戻り値に入らない（Claude 後方互換の保証）。
+ *
+ * @param registryKeys adapter レジストリの全キー（順序はこの引数の順序を保持する）
+ * @param coveredKeys `resolveReconcileTargets()` が返したターゲットのキー一覧
+ * @param managedKeys `hasManagedState()` が true を返したキー一覧
+ */
+export function resolveCleanupKeys(
+  registryKeys: string[],
+  coveredKeys: string[],
+  managedKeys: string[],
+): string[] {
+  const covered = new Set(coveredKeys);
+  const managed = new Set(managedKeys);
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const key of registryKeys) {
+    if (covered.has(key)) continue;
+    if (!managed.has(key)) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
 }
 
 /** prelaunch キャッシュのキー = provider と projectPath の組（同一プロジェクトでも provider が違えば別キャッシュ） */

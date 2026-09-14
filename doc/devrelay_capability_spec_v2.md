@@ -1,8 +1,8 @@
-# DevRelay Capability 配布基盤 指示書 v2.1（サイクル P1〜P1.3）
+# DevRelay Capability 配布基盤 指示書 v2.2（サイクル P1〜P3-A）
 
-- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）
+- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）／改訂: 2026-09-15（v2.2、サイクル P3-A）
 - 対象: devrelay 本体（`/opt/devrelay`, projectId `cmm5tpzil0042f3p2ieotnow4`）
-- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの
+- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの。v2.2 はサイクル P3-A で 2 つ目の provider×kind 実装（`devin:skill`）を追加し、provider×kind 抽象を実証したもの
 - 置き換え: 本書は同日の「Plugin 配布機能 指示書 v1」を Capability 抽象化で改訂したもの。2026-09-03 の「Toolkit 配布機能（レシピ実行基盤）」案は破棄
 
 ## v2.1 改訂差分（サイクル P1.3、2026-09-13）
@@ -13,6 +13,20 @@ hp630g9/fwjg2 の実機検証で、リポの `.claude/settings.json` に `enable
 2. **install scope の不一致**: 常に `--scope local` を渡していたため、`.claude/settings.json`（project scope 宣言）で有効化したプラグインが `--scope project` で install されず読み込まれなかった。
 
 これを受け、以下を実装済み挙動として仕様を改訂する（§7.4 / §8.2 / §12 E2E-4）。あわせて索引未知 ID への `marketplace update` 1 回リトライと、marketplace 未登録時の初回フォールバック（machine reconcile への委譲）を実装した。
+
+## v2.2 改訂差分（サイクル P3-A、2026-09-15）
+
+`claude:plugin` 1 つだけだった adapter レジストリに 2 つ目の実装 `devin:skill` を追加し、provider×kind 抽象が実際に機能することを実証した。同じ索引・同じ item（Claude plugin の `skills/<name>/`）を Claude Code と Devin CLI の両方へ配布できる。詳細な設計判断・却下案・実装手順はプラン `/home/devrelay/.claude/plans/floofy-giggling-pine.md` と承認ノート `doc/p3a_devin_skill_adapter_approval_note.md` を参照。仕様書としての差分は以下:
+
+1. **§7.1 adapter 契約に optional `hasManagedState?(): Promise<boolean>` を追加**（撤去経路用）。「true = この adapter が過去に配置した管理下の状態がこのマシンに残っている。未実装の adapter（Claude 等）は撤去（cleanup）経路に構造的に入らない。throw / timeout は false 扱い（fail-closed）」を不変条件とする。
+2. **§6 `CapabilityResult` に `removed?: string[]` を追加**（P1.3 までの「型は凍結、導出は純関数で」原則に対する初の例外）。純加算・非空のときだけキーを生やす。撤去の実行条件は「`resolveReconcileTargets()` の対象から外れた（uncovered）＋ `hasManagedState()` が true（managed）」の両方を満たす adapter のみ。`capabilityConfig` が全体 null の場合は `configDelivered` フラグ（`capabilityConfig` キー自体が payload に一度でも存在したか。値が null でも true）が true のときだけ撤去を許可する（P1 未満のサーバーへロールバックした際の誤撤去を防ぐ）。
+3. **§8.3（新設）Devin adapter v1 の手順**: 索引取得は `~/.claude/plugins/marketplaces` に依存せず `<configDir>/capabilities/marketplaces/<name>/` への shallow git clone + fetch/reset で独立取得する（非対話強制: `GIT_TERMINAL_PROMPT=0` 等）。展開単位は plugin 単位（`items[].id` は Claude 側と同じ ID 空間）で、1 plugin の `skills/` 直下の各ディレクトリを devin skills dir（既定 `%APPDATA%\devin\skills` / `~/.config/devin/skills`。`DEVRELAY_DEVIN_SKILLS_DIR` で上書き可）へ 1:1 コピーする。状態管理は宛先ディレクトリごとの marker ファイル（`.devrelay-capability.json`、所有権判定は `schema/managedBy/provider/kind` 一致）。更新はコピー先を staging → 既存を trash へ退避 → rename の 2 段アトミック手順。**CRITICAL RULE**: 索引取得（clone/fetch/manifest パース）が失敗した reconcile では撤去判定を一切行わず、既存の managed skill を last-known-good として保持し `failed` を報告する。非管理（marker 無し）の同名ディレクトリは触らず `failed: dest-occupied-unmanaged` を報告する。
+4. **§7.3 予算配分の内訳を明記**: `ADAPTER_TIMEOUT_MS`（3 分）のうち、Devin adapter は git 呼び出し全体で 90 秒（`allocateGitTimeout()` で各呼び出しに配分）、残り約 90 秒をコピー/削除に充てる設計とする。
+5. **provider 固有の設定フィールドはサーバー検証器を通せない**: `apps/server/src/services/capability-config-rules.ts` の `validateCapabilityConfigInput()` は `providers[key] = { marketplaceName, marketplaceSource }` の既知 2 フィールドだけを再構築し、未知キーは黙って捨てる。そのため `providers.devin.skillsDir` のような provider 固有フィールドはサーバーを経由できない。1 機体だけの上書きが必要な場合は Agent ローカルの環境変数（`DEVRELAY_DEVIN_SKILLS_DIR` 等）で代替する。
+6. **§10（やらないこと）に追記**: project scope（`.devin/skills/`）/ prelaunch 経由の Devin 配布 / Codex adapter / `.agents/skills/` / MCP・hooks・commands の変換 / 宛先ドリフト検知（手動でファイルを書き換えられても検知しない）は v1 スコープ外。
+7. **Web UI**: Agent Settings の Capabilities セクションに「Devin にも配布する」チェックボックスを追加。チェックすると `providers.devin` と `devin:skill` items（claude と同じ plugin id 群）が `providers.claude` / `claude:plugin` items の後ろに追加される。チェックを外す（＝ `providers.devin` を消す）と撤去経路（上記2.）が走り、次回 reconcile で managed skill が撤去される。
+
+**変更ファイル**: `agents/linux/src/services/capabilities/{devin-skill-rules,devin-skill-adapter,git-cli,skill-tree-io}.ts`（新規）、`agents/linux/src/services/{devin-locator,devin-path}.ts`（新規）、`agents/linux/src/services/{capability-rules,capability-sync,connection}.ts`（変更）、`packages/shared/src/types.ts`（型のみ追加）、`apps/web/src/lib/capability-config-rules.ts` + `apps/web/src/pages/MachinesPage.tsx`（変更）。**無変更**: `apps/server/**`、`prisma/**`、`agents/macos/**`、`agents/windows/**`（provider 非依存の検証器のため server は完全に無変更で済んだ）。
 
 ---
 

@@ -54,6 +54,8 @@ export function MachinesPage() {
   const [marketplaceName, setMarketplaceName] = useState('');
   const [marketplaceSource, setMarketplaceSource] = useState('');
   const [pluginIds, setPluginIds] = useState<string[]>([]);
+  // サイクルP3-A: 「Devin にも配布する」チェックボックス
+  const [distributeToDevin, setDistributeToDevin] = useState(false);
   const [newPluginInput, setNewPluginInput] = useState('');
   const [capabilityConfigModified, setCapabilityConfigModified] = useState(false);
   const [capabilityConfigLoading, setCapabilityConfigLoading] = useState(false);
@@ -203,6 +205,7 @@ export function MachinesPage() {
       setMarketplaceName(capabilityFormState.marketplaceName);
       setMarketplaceSource(capabilityFormState.marketplaceSource);
       setPluginIds(capabilityFormState.pluginIds);
+      setDistributeToDevin(capabilityFormState.distributeToDevin);
       setCapabilitySyncStatus(capabilityResult.capabilitySyncStatus ?? null);
       setCapabilitySyncSupported(capabilityResult.capabilitySyncSupported ?? null);
       setSavedConfigPresent((capabilityResult.capabilityConfig ?? null) != null);
@@ -235,6 +238,7 @@ export function MachinesPage() {
     setMarketplaceName('');
     setMarketplaceSource('');
     setPluginIds([]);
+    setDistributeToDevin(false);
     setNewPluginInput('');
     setCapabilityConfigModified(false);
     setCapabilityConfigLoading(false);
@@ -941,13 +945,27 @@ export function MachinesPage() {
                         Add
                       </button>
                     </div>
+                    {/* サイクルP3-A: Devin CLI にも同じ plugin の skills を配布するか */}
+                    <label className="flex items-center gap-2 mt-2 text-sm text-[var(--text-secondary)] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={distributeToDevin}
+                        onChange={(e) => {
+                          setDistributeToDevin(e.target.checked);
+                          setCapabilityConfigModified(true);
+                          setCapabilityFormError(null);
+                        }}
+                        className="rounded border-[var(--border-color)]"
+                      />
+                      Devin にも配布する
+                    </label>
                     <div className="flex flex-wrap items-center gap-2 mt-2">
                       {capabilityConfigModified && (
                         <>
                           <button
                             onClick={async () => {
                               if (!settingsTarget) return;
-                              const validation = validateCapabilityForm({ marketplaceName, marketplaceSource, pluginIds });
+                              const validation = validateCapabilityForm({ marketplaceName, marketplaceSource, pluginIds, distributeToDevin });
                               if (!validation.ok) {
                                 // P1.1: フォーム検証に失敗した場合は API を呼ばずインラインエラーだけ表示する
                                 setCapabilityFormError(validation.error);
@@ -1050,6 +1068,16 @@ export function MachinesPage() {
                         <div className="text-[var(--text-faint)] text-xs mt-2">
                           最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''} / {s.trigger}
                           {display.emptyTargets && '（対象 0 件。有効な配布設定（Marketplace）が見つかりません。Marketplace name / source を入力して保存し直してください）'}
+                          {/* サイクルP3-A §3-8: provider が複数（claude + devin 等）のときだけ内訳を出す */}
+                          {display.perProvider && (
+                            <div className="mt-1 pl-2 border-l border-[var(--border-color)]">
+                              {display.perProvider.map((p, i) => (
+                                <div key={i}>
+                                  {p.provider}:{p.kind} — installed {p.installedCount} / updated {p.updatedCount} / failed {p.failedCount}{p.notAllowedCount > 0 ? ` / notAllowed ${p.notAllowedCount}` : ''}{p.removedCount > 0 ? ` / removed ${p.removedCount}` : ''}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       );
                     })()}

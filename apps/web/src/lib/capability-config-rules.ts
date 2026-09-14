@@ -7,18 +7,27 @@
  * 変換関数を追加するだけで済む構造にする（Server/DB/WS には手を入れない）。
  */
 
-/** UI フォームが保持する編集対象の状態（Claude セクションのみ） */
+/** UI フォームが保持する編集対象の状態（Claude セクション + Devin 配布チェックボックス） */
 export interface CapabilityConfigFormState {
   marketplaceName: string;
   marketplaceSource: string;
   /** bare 名（例: 'unity'）の配列。表示時は `${id}@${marketplaceName}` に補完する */
   pluginIds: string[];
+  /**
+   * サイクルP3-A: 「Devin にも配布する」チェックボックスの状態。
+   * true のとき、marketplace 設定は claude/devin 両方の provider に複製され、
+   * items も plugin ごとに `{provider:'claude',kind:'plugin'}` と `{provider:'devin',kind:'skill'}` の
+   * 両方が生成される。
+   */
+  distributeToDevin: boolean;
 }
 
 /** `capabilityConfig`（Server 保存形）の最小形（`@devrelay/shared` の `CapabilityConfig` と構造互換） */
 export interface CapabilityConfigLike {
   providers: {
     claude?: { marketplaceName: string; marketplaceSource: string };
+    /** サイクルP3-A: devin:skill adapter 用（claude と同じ2フィールドのみ） */
+    devin?: { marketplaceName: string; marketplaceSource: string };
   };
   items: Array<{ provider: string; kind: string; id: string }>;
 }
@@ -34,7 +43,7 @@ function nonEmptyTrimmed(values: string[]): string[] {
  */
 export function capabilityConfigToFormState(config: CapabilityConfigLike | null): CapabilityConfigFormState {
   if (!config) {
-    return { marketplaceName: '', marketplaceSource: '', pluginIds: [] };
+    return { marketplaceName: '', marketplaceSource: '', pluginIds: [], distributeToDevin: false };
   }
   const claude = config.providers.claude;
   const pluginIds = config.items
@@ -44,6 +53,8 @@ export function capabilityConfigToFormState(config: CapabilityConfigLike | null)
     marketplaceName: claude?.marketplaceName ?? '',
     marketplaceSource: claude?.marketplaceSource ?? '',
     pluginIds,
+    // サイクルP3-A: providers.devin キーの有無だけでチェックボックス状態を復元する（items 側は見ない）
+    distributeToDevin: config.providers.devin !== undefined,
   };
 }
 
@@ -84,11 +95,21 @@ export function validateCapabilityForm(state: CapabilityConfigFormState): Capabi
     return { ok: false, error: 'marketplace-required-for-plugins' };
   }
 
+  // サイクルP3-A: 「Devin にも配布する」がチェックされていれば providers.devin と devin:skill items を複製する。
+  // devin: undefined のキー自体を生やさない（既存の deepEqual テストとの互換のため spread で条件付加）。
+  // 順序は claude → devin で固定する（claude 単独ケースの既存アサーションをバイト等価に保つため）。
+  const devinEnabled = state.distributeToDevin === true;
   return {
     ok: true,
     config: {
-      providers: { claude: { marketplaceName, marketplaceSource } },
-      items: pluginIds.map(id => ({ provider: 'claude', kind: 'plugin', id })),
+      providers: {
+        claude: { marketplaceName, marketplaceSource },
+        ...(devinEnabled ? { devin: { marketplaceName, marketplaceSource } } : {}),
+      },
+      items: [
+        ...pluginIds.map(id => ({ provider: 'claude', kind: 'plugin', id })),
+        ...(devinEnabled ? pluginIds.map(id => ({ provider: 'devin', kind: 'skill', id })) : []),
+      ],
     },
   };
 }
@@ -112,6 +133,8 @@ export interface CapabilityResultLike {
   present: string[];
   failed: Array<{ id: string; reason: string }>;
   notAllowed: string[];
+  /** サイクルP3-A: 撤去した管理下 ID（純加算・非空のときだけ存在） */
+  removed?: string[];
 }
 
 /** `Machine.capabilitySyncStatus`（保存形）の最小形 */
@@ -161,6 +184,35 @@ export interface SyncStatusDisplay {
    * （＝「Plugin 未指定」）とは異なる点に注意（MachinesPage.tsx の文言もこれに合わせて更新済み）。
    */
   emptyTargets?: true;
+  /**
+   * サイクルP3-A §3-8: `results.length > 1` のときだけ生やす provider 別の内訳。
+   * 1 件のときは既存の集計行（summary）と同じ情報になるため付けない（既存テストの形状回帰ガード）。
+   */
+  perProvider?: Array<{
+    provider: string;
+    kind: string;
+    installedCount: number;
+    updatedCount: number;
+    failedCount: number;
+    notAllowedCount: number;
+    removedCount: number;
+  }>;
+}
+
+/**
+ * `results.length > 1` のときだけ provider 別の内訳配列を作る（純関数）。1 件以下なら undefined。
+ */
+function buildPerProviderBreakdown(results: CapabilityResultLike[]): SyncStatusDisplay['perProvider'] {
+  if (results.length <= 1) return undefined;
+  return results.map(r => ({
+    provider: r.provider,
+    kind: r.kind,
+    installedCount: r.installed.length,
+    updatedCount: r.updated.length,
+    failedCount: r.failed.length,
+    notAllowedCount: r.notAllowed.length,
+    removedCount: r.removed?.length ?? 0,
+  }));
 }
 
 /**
@@ -187,17 +239,28 @@ export function decideSyncStatusDisplay(
   const failedCount = status.results.reduce((sum, r) => sum + r.failed.length, 0);
   const notAllowedCount = status.results.reduce((sum, r) => sum + r.notAllowed.length, 0);
   const summary = { receivedAt: status.receivedAt, installedCount, updatedCount, failedCount, notAllowedCount, trigger: status.trigger };
+  const perProvider = buildPerProviderBreakdown(status.results);
 
   if (status.status === 'skipped') {
-    return { kind: savedConfigPresent === false ? 'skipped-no-config' : 'skipped-agent-stale', summary };
+    return {
+      kind: savedConfigPresent === false ? 'skipped-no-config' : 'skipped-agent-stale',
+      summary,
+      ...(perProvider ? { perProvider } : {}),
+    };
   }
   if (status.status === 'error') {
     const failures = status.results.flatMap(r => r.failed);
-    return { kind: 'error', summary, failures: failures.slice(0, MAX_FAILURE_DETAILS) };
+    return {
+      kind: 'error',
+      summary,
+      failures: failures.slice(0, MAX_FAILURE_DETAILS),
+      ...(perProvider ? { perProvider } : {}),
+    };
   }
   return {
     kind: 'synced',
     summary,
     ...(status.results.length === 0 ? { emptyTargets: true as const } : {}),
+    ...(perProvider ? { perProvider } : {}),
   };
 }

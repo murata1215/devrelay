@@ -14,7 +14,35 @@ import {
 
 test('capabilityConfigToFormState: null は空フォーム', () => {
   const result = capabilityConfigToFormState(null);
-  assert.deepEqual(result, { marketplaceName: '', marketplaceSource: '', pluginIds: [] });
+  assert.deepEqual(result, { marketplaceName: '', marketplaceSource: '', pluginIds: [], distributeToDevin: false });
+});
+
+// ---- capabilityConfigToFormState: サイクルP3-A distributeToDevin ----
+
+test('capabilityConfigToFormState: providers.devin があれば distributeToDevin:true', () => {
+  const config = {
+    providers: {
+      claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' },
+      devin: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' },
+    },
+    items: [
+      { provider: 'claude', kind: 'plugin', id: 'access-migration' },
+      { provider: 'devin', kind: 'skill', id: 'access-migration' },
+    ],
+  };
+  const result = capabilityConfigToFormState(config);
+  assert.equal(result.distributeToDevin, true);
+  // devin items は pluginIds に漏れない（claude/plugin のみを見る）
+  assert.deepEqual(result.pluginIds, ['access-migration']);
+});
+
+test('capabilityConfigToFormState: providers.devin が無ければ distributeToDevin:false', () => {
+  const config = {
+    providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } },
+    items: [{ provider: 'claude', kind: 'plugin', id: 'a' }],
+  };
+  const result = capabilityConfigToFormState(config);
+  assert.equal(result.distributeToDevin, false);
 });
 
 test('capabilityConfigToFormState: providers.claude と items から復元する', () => {
@@ -132,6 +160,74 @@ test('validateCapabilityForm: pluginIds が空白要素だけなら items は空
     ok: true,
     config: { providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'src' } }, items: [] },
   });
+});
+
+// ---- validateCapabilityForm: サイクルP3-A distributeToDevin ----
+
+test('validateCapabilityForm: distributeToDevin:true → providers.devin と devin:skill items が claude の後に付く', () => {
+  const result = validateCapabilityForm({
+    marketplaceName: 'devrelay',
+    marketplaceSource: 'x/y',
+    pluginIds: ['access-migration'],
+    distributeToDevin: true,
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    config: {
+      providers: {
+        claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' },
+        devin: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' },
+      },
+      items: [
+        { provider: 'claude', kind: 'plugin', id: 'access-migration' },
+        { provider: 'devin', kind: 'skill', id: 'access-migration' },
+      ],
+    },
+  });
+});
+
+test('validateCapabilityForm: distributeToDevin:false（省略時含む）→ providers.devin キー自体が生えない', () => {
+  const result = validateCapabilityForm({
+    marketplaceName: 'devrelay',
+    marketplaceSource: 'x/y',
+    pluginIds: ['a'],
+  });
+  assert.equal('devin' in result.config.providers, false);
+  assert.deepEqual(result.config.items, [{ provider: 'claude', kind: 'plugin', id: 'a' }]);
+});
+
+test('validateCapabilityForm: distributeToDevin:true + pluginIds:0件 → providers.devin はあるが items は空', () => {
+  const result = validateCapabilityForm({
+    marketplaceName: 'devrelay',
+    marketplaceSource: 'x/y',
+    pluginIds: [],
+    distributeToDevin: true,
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    config: {
+      providers: {
+        claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' },
+        devin: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' },
+      },
+      items: [],
+    },
+  });
+});
+
+test('validateCapabilityForm: 全項目空なら distributeToDevin:true でも ok:true, config:null', () => {
+  const result = validateCapabilityForm({
+    marketplaceName: '',
+    marketplaceSource: '',
+    pluginIds: [],
+    distributeToDevin: true,
+  });
+  assert.deepEqual(result, { ok: true, config: null });
+});
+
+test('validateCapabilityForm: distributeToDevin プロパティ自体が省略されていれば false 扱い', () => {
+  const result = validateCapabilityForm({ marketplaceName: 'devrelay', marketplaceSource: 'x/y', pluginIds: [] });
+  assert.equal('devin' in result.config.providers, false);
 });
 
 // ---- formatPluginTag ----
@@ -262,4 +358,44 @@ test('decideSyncStatusDisplay: done + results 1件は emptyTargets が undefined
   const result = decideSyncStatusDisplay(status, true);
   assert.equal(result.kind, 'synced');
   assert.equal(result.emptyTargets, undefined);
+});
+
+// ---- decideSyncStatusDisplay: サイクルP3-A perProvider（results.length > 1 のときだけ） ----
+
+test('decideSyncStatusDisplay: results 1件は perProvider が undefined（形状回帰ガード）', () => {
+  const status = {
+    status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [{ provider: 'claude', kind: 'plugin', runtimeVersion: null, installed: ['a'], updated: [], present: [], failed: [], notAllowed: [] }],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.perProvider, undefined);
+});
+
+test('decideSyncStatusDisplay: results 2件（claude:plugin + devin:skill）は perProvider が provider 別に分かれる', () => {
+  const status = {
+    status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [
+      { provider: 'claude', kind: 'plugin', runtimeVersion: '2.1.263', installed: ['a@devrelay'], updated: [], present: [], failed: [], notAllowed: [] },
+      { provider: 'devin', kind: 'skill', runtimeVersion: null, installed: ['a/skill1'], updated: [], present: [], failed: [], notAllowed: [], removed: ['a/skill2'] },
+    ],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.deepEqual(result.perProvider, [
+    { provider: 'claude', kind: 'plugin', installedCount: 1, updatedCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 0 },
+    { provider: 'devin', kind: 'skill', installedCount: 1, updatedCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 1 },
+  ]);
+});
+
+test('decideSyncStatusDisplay: error でも results 2件以上なら perProvider が付く', () => {
+  const status = {
+    status: 'error', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [
+      { provider: 'claude', kind: 'plugin', runtimeVersion: null, installed: [], updated: [], present: [], failed: [], notAllowed: [] },
+      { provider: 'devin', kind: 'skill', runtimeVersion: null, installed: [], updated: [], present: [], failed: [{ id: 'x', reason: 'y' }], notAllowed: [] },
+    ],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.kind, 'error');
+  assert.equal(result.perProvider.length, 2);
+  assert.equal(result.perProvider[1].failedCount, 1);
 });

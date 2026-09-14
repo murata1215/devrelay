@@ -102,10 +102,13 @@ import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile }
 // サイクルP1: Capability 配布基盤（共通層への配線。connection.ts は Claude 固有処理を一切知らない）
 import { setCapabilityConfig, setCapabilitySyncSender, requestReconcile, registerCapabilityAdapter } from './capability-sync.js';
 import { claudePluginAdapter } from './capabilities/claude-plugin-adapter.js';
+// サイクルP3-A: devin:skill adapter（2つ目の provider×kind 実装）
+import { devinSkillAdapter } from './capabilities/devin-skill-adapter.js';
 import type { AgentCapabilitySyncPayload } from '@devrelay/shared';
 
-// Capability adapter の登録（起動時 1 回。将来 Codex/Devin adapter を足すときはここに 1 行追加するだけでよい）
+// Capability adapter の登録（起動時 1 回。将来 Codex adapter を足すときはここに 1 行追加するだけでよい）
 registerCapabilityAdapter(claudePluginAdapter);
+registerCapabilityAdapter(devinSkillAdapter);
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;

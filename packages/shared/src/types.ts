@@ -58,10 +58,25 @@ export interface CapabilityClaudeProviderConfig {
   marketplaceSource: string;
 }
 
-/** 配布対象の論理宣言（provider/kind を必ず明示。将来 providers.codex / providers.devin を追加できる） */
+/**
+ * Devin native skill adapter（`devin:skill`、サイクルP3-A）が使う設定。
+ * Claude 用と同じ marketplace 索引を共有する（同じ items id 空間から両 provider へ配布する設計）。
+ * `skillsDir` は意図的に持たない（承認ノート #4: サーバー検証器が provider 固有フィールドを
+ * 既知2フィールドだけに再構築するため通せない。上書きは Agent ローカルの
+ * `DEVRELAY_DEVIN_SKILLS_DIR` 環境変数でのみ行う）。
+ */
+export interface CapabilityDevinProviderConfig {
+  /** Claude 側と共有する索引名（表示・ログ用途。所有権判定の条件には使わない） */
+  marketplaceName: string;
+  /** マーケットプレイスの取得元（`owner/repo` 形式の GitHub リポジトリ、または https URL） */
+  marketplaceSource: string;
+}
+
+/** 配布対象の論理宣言（provider/kind を必ず明示。将来 providers.codex を追加できる） */
 export interface CapabilityConfig {
   providers: {
     claude?: CapabilityClaudeProviderConfig;
+    devin?: CapabilityDevinProviderConfig;
   };
   items: Array<{
     provider: string;
@@ -83,6 +98,13 @@ export interface CapabilityResult {
   failed: Array<{ id: string; reason: string }>;
   /** 索引外の ID（宣言はされたが devrelay 索引に無いため無視した） */
   notAllowed: string[];
+  /**
+   * 撤去した管理下 ID（サイクルP3-A、承認ノート #1）。
+   * P1.3 の「`CapabilityResult` は凍結、導出は純関数で」原則に対する初の例外。
+   * `updated[]` へ相乗りさせると UI が誤表示するため独立フィールドとして追加した。
+   * **純加算**: 非空のときだけキーを生やす（既存の `deepEqual` アサーションを壊さないため）。
+   */
+  removed?: string[];
 }
 
 /** Agent → Server: Capability 同期の結果報告 */

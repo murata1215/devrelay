@@ -17,6 +17,7 @@ import {
   hasReportableOutcome,
   decidePrelaunchStatus,
   PRELAUNCH_DEFERRED_REASONS,
+  resolveCleanupKeys,
 } from '../dist/services/capability-rules.js';
 
 // ---- aiToolToCapabilityProvider ----
@@ -326,6 +327,68 @@ test('hasReportableOutcome: notAllowed が 1 件でもあれば true', () => {
 
 test('hasReportableOutcome: 空配列は false', () => {
   assert.equal(hasReportableOutcome([]), false);
+});
+
+test('hasReportableOutcome: removed が 1 件でもあれば true（サイクルP3-A §3-8）', () => {
+  assert.equal(hasReportableOutcome([baseResult({ removed: ['a@devrelay'] })]), true);
+});
+
+// ---- mergeCapabilityResults: removed（サイクルP3-A §2 撤去結果）----
+
+test('mergeCapabilityResults: removed は結合 + 重複除去される', () => {
+  const input = [
+    baseResult({ removed: ['a'] }),
+    baseResult({ removed: ['a', 'b'] }),
+  ];
+  const result = mergeCapabilityResults(input);
+  assert.deepEqual(result[0].removed.sort(), ['a', 'b']);
+});
+
+test('mergeCapabilityResults: removed が無ければキー自体が生えない（純加算）', () => {
+  const input = [baseResult(), baseResult({ installed: ['x'] })];
+  const result = mergeCapabilityResults(input);
+  assert.equal(result[0].removed, undefined);
+});
+
+// ---- resolveCleanupKeys（サイクルP3-A §2: 撤去経路の対象キー判定）----
+
+test('resolveCleanupKeys: covered なキーは対象外', () => {
+  const result = resolveCleanupKeys(['devin:skill'], ['devin:skill'], ['devin:skill']);
+  assert.deepEqual(result, []);
+});
+
+test('resolveCleanupKeys: uncovered + managed → 対象になる', () => {
+  const result = resolveCleanupKeys(['devin:skill'], [], ['devin:skill']);
+  assert.deepEqual(result, ['devin:skill']);
+});
+
+test('resolveCleanupKeys: uncovered + unmanaged → 対象外', () => {
+  const result = resolveCleanupKeys(['devin:skill'], [], []);
+  assert.deepEqual(result, []);
+});
+
+test('resolveCleanupKeys: registry に無いキーは managed でも対象にならない', () => {
+  const result = resolveCleanupKeys(['devin:skill'], [], ['codex:plugin']);
+  assert.deepEqual(result, []);
+});
+
+test('resolveCleanupKeys: registryKeys の順序を保持する', () => {
+  const result = resolveCleanupKeys(['claude:plugin', 'devin:skill'], [], ['devin:skill', 'claude:plugin']);
+  assert.deepEqual(result, ['claude:plugin', 'devin:skill']);
+});
+
+test('resolveCleanupKeys: 空入力は空配列', () => {
+  assert.deepEqual(resolveCleanupKeys([], [], []), []);
+});
+
+test('resolveCleanupKeys: managedKeys の重複は結果に重複しない', () => {
+  const result = resolveCleanupKeys(['devin:skill'], [], ['devin:skill', 'devin:skill']);
+  assert.deepEqual(result, ['devin:skill']);
+});
+
+test('resolveCleanupKeys: claude:plugin が uncovered だが unmanaged → []（Claude は決して掃除されない）', () => {
+  const result = resolveCleanupKeys(['claude:plugin', 'devin:skill'], [], ['devin:skill']);
+  assert.deepEqual(result, ['devin:skill']);
 });
 
 // ---- decidePrelaunchStatus（サイクルP1.3 要件6: prelaunch の status 導出） ----

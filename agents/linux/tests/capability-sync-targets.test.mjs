@@ -19,6 +19,7 @@ import {
   setCapabilitySyncSender,
   requestReconcile,
   reconcileForRunner,
+  resetCapabilityConfigDeliveredForTests,
 } from '../dist/services/capability-sync.js';
 
 /** テストごとに sendResultCallback を差し替えて送信内容をキャプチャする */
@@ -39,6 +40,27 @@ function emptyPluginResult(overrides = {}) {
     failed: [],
     notAllowed: [],
     ...overrides,
+  };
+}
+
+/** サイクルP3-A §2: `hasManagedState` を持つ fake adapter（devin:skill 想定）を作る */
+function makeFakeManagedAdapter(provider, kind, { hasManagedState, machineResult } = {}) {
+  const machineCalls = [];
+  return {
+    adapter: {
+      provider,
+      kind,
+      async reconcileMachine(ctx) {
+        machineCalls.push(ctx);
+        const result = typeof machineResult === 'function' ? machineResult(ctx) : machineResult;
+        return result ?? emptyPluginResult({ provider, kind });
+      },
+      async reconcileProject() {
+        return emptyPluginResult({ provider, kind });
+      },
+      ...(hasManagedState !== undefined ? { hasManagedState } : {}),
+    },
+    machineCalls,
   };
 }
 
@@ -256,4 +278,134 @@ test('prelaunch: aiTool が provider に解決できなければ何もしない'
 
   assert.equal(projectCalls.length, 0);
   assert.equal(sent.length, 0);
+});
+
+// -----------------------------------------------------------------------------
+// サイクルP3-A §2: 撤去経路（cleanup パス）の配線テスト
+// -----------------------------------------------------------------------------
+
+test('回帰ガード: hasManagedState 未実装の fake claude + providers:{} → reconcileMachine 呼び出し 0 回', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeClaudeAdapter(emptyPluginResult(), emptyPluginResult());
+  registerCapabilityAdapter(adapter); // hasManagedState 未実装
+  setCapabilityConfig({ providers: {}, items: [] });
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 0);
+  assert.equal(sent[0].status, 'done');
+});
+
+test('ケース(b): providers から外れた managed devin → items:[] かつ providers.devin===undefined の ctx で cleanup が1回呼ばれる', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('devin', 'skill', {
+    hasManagedState: async () => true,
+    machineResult: emptyPluginResult({ provider: 'devin', kind: 'skill', removed: ['access-to-csharp'] }),
+  });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({ providers: {}, items: [] }); // devin が providers から外れた状態
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 1);
+  assert.deepEqual(machineCalls[0].items, []);
+  assert.equal(machineCalls[0].config.providers.devin, undefined);
+  assert.equal(sent[0].status, 'done');
+  assert.deepEqual(sent[0].results[0].removed, ['access-to-csharp']);
+});
+
+test('hasManagedState が false を返す devin adapter は cleanup で呼ばれない', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('devin', 'skill', { hasManagedState: async () => false });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({ providers: {}, items: [] });
+  captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 0);
+});
+
+test('ケース(c): capabilityConfig 全体が null でも configDelivered なら managed devin が cleanup される', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('devin', 'skill', {
+    hasManagedState: async () => true,
+    machineResult: emptyPluginResult({ provider: 'devin', kind: 'skill', removed: ['x'] }),
+  });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig(null); // 直前までの他テストで configDelivered は既に true（キー自体は存在した扱い）
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 1);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].status, 'done');
+  assert.deepEqual(sent[0].results[0].removed, ['x']);
+});
+
+test('ケース(c): capabilityConfig 全体が null かつ managed adapter 無し → manual で skipped 1通のみ', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('devin', 'skill', { hasManagedState: async () => false });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig(null);
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 0);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].status, 'skipped');
+});
+
+test('hasManagedState が throw しても fail-closed で呼ばれずクラッシュしない', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('devin', 'skill', {
+    hasManagedState: async () => { throw new Error('boom'); },
+  });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({ providers: {}, items: [] });
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 0);
+  assert.equal(sent[0].status, 'done');
+});
+
+test('prelaunch は cleanup を起動しない（reconcileForRunner は hasManagedState を呼ばない）', async () => {
+  clearCapabilityAdapters();
+  const { adapter: claudeAdapter } = makeFakeClaudeAdapter(emptyPluginResult(), emptyPluginResult());
+  registerCapabilityAdapter(claudeAdapter);
+  let hasManagedStateCalls = 0;
+  const devinAdapter = {
+    provider: 'devin',
+    kind: 'skill',
+    async reconcileMachine() { return emptyPluginResult({ provider: 'devin', kind: 'skill' }); },
+    async reconcileProject() { return emptyPluginResult({ provider: 'devin', kind: 'skill' }); },
+    async hasManagedState() { hasManagedStateCalls += 1; return true; },
+  };
+  registerCapabilityAdapter(devinAdapter);
+  setCapabilityConfig({ providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } }, items: [] });
+  captureOutcomes();
+
+  await reconcileForRunner('claude', '/tmp/devrelay-test-p3a-prelaunch-no-cleanup');
+
+  assert.equal(hasManagedStateCalls, 0);
+});
+
+test('configDelivered が false のまま（旧 server 相当）→ config null でも cleanup は起動せず skipped', async () => {
+  clearCapabilityAdapters();
+  resetCapabilityConfigDeliveredForTests();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('devin', 'skill', { hasManagedState: async () => true });
+  registerCapabilityAdapter(adapter);
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 0);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].status, 'skipped');
 });

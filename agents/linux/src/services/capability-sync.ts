@@ -29,6 +29,7 @@ import {
   resolveReconcileTargets,
   hasReportableOutcome,
   decidePrelaunchStatus,
+  resolveCleanupKeys,
   type QueueState,
   type MergeableResult,
   type PrelaunchCacheEntry,
@@ -54,6 +55,13 @@ export interface CapabilityAdapter {
   kind: string;
   reconcileMachine(ctx: CapabilityCtx): Promise<CapabilityResult>;
   reconcileProject(ctx: CapabilityCtx, projectPath: string): Promise<CapabilityResult>;
+  /**
+   * サイクルP3-A §2: optional な撤去経路サポート。true = この adapter が過去に配置した
+   * 管理下の状態がこのマシンに残っている。未実装の adapter（Claude 等）は cleanup 経路に
+   * 構造的に入らない。throw / timeout は false 扱い（fail-closed: 判定できないなら
+   * 破壊的操作をしない）。
+   */
+  hasManagedState?(): Promise<boolean>;
 }
 
 /** `agent:capability:sync` 送信ペイロード（machineId は connection.ts 側で付与するため除く） */
@@ -74,13 +82,32 @@ export function clearCapabilityAdapters(): void {
 /** Server から配信された Capability 配布設定（null = 機能 OFF） */
 let currentConfig: CapabilityConfig | null = null;
 
+/**
+ * サイクルP3-A §2: `capabilityConfig` キー自体が payload に一度でも存在したか（値が null でも true）。
+ * `connection.ts` は `message.payload.capabilityConfig !== undefined` のガード内でのみ
+ * `setCapabilityConfig()` を呼ぶため、この関数が呼ばれたこと自体が「キーが存在した」ことの根拠になる
+ * （connection.ts 側の変更は不要）。旧 server（capabilityConfig 未配信）ではこの関数が一度も呼ばれず
+ * false のままなので、`currentConfig === null` を「まだ配信されていない」と区別できる。
+ */
+let configDelivered = false;
+
 export function setCapabilityConfig(config: CapabilityConfig | null): void {
   currentConfig = config;
+  configDelivered = true;
 }
 
 export function getCapabilityConfig(): CapabilityConfig | null {
   return currentConfig;
 }
+
+/** テスト専用: `configDelivered` フラグをリセットする（通常運用では未使用） */
+export function resetCapabilityConfigDeliveredForTests(): void {
+  configDelivered = false;
+  currentConfig = null;
+}
+
+/** cleanup パス専用: 「明示的に何も設定されていない」ことを表す空の config（機体撤去用） */
+const EMPTY_CONFIG: CapabilityConfig = { providers: {}, items: [] };
 
 /** `agent:capability:sync` の送信先（connection.ts から注入） */
 let sendResultCallback: ((payload: CapabilitySyncOutcome) => void) | null = null;
@@ -94,6 +121,12 @@ const queueState: QueueState = { inFlight: false, pendingTrigger: null };
 
 /** adapter 呼び出しのタイムアウト（provider ごとの個別設定は持たず一律 3 分） */
 const ADAPTER_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * `hasManagedState()` 呼び出しのタイムアウト（サイクルP3-A §2）。
+ * fs 走査のみで完結する想定の軽量チェックのため、`ADAPTER_TIMEOUT_MS` より短く設定する。
+ */
+const HAS_MANAGED_STATE_TIMEOUT_MS = 30 * 1000;
 
 /** timeout してもハングしない Promise ラッパー。timeout 時は 'timeout' を返す（reject しない） */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | 'timeout'> {
@@ -110,19 +143,75 @@ function failedResult(provider: string, kind: string, reason: string): Mergeable
 }
 
 /**
+ * 指定 adapter の `hasManagedState()` を呼ぶ。未実装なら false、throw / timeout も false
+ * （fail-closed: 判定できないなら破壊的操作をしない）。
+ */
+async function checkHasManagedState(adapter: CapabilityAdapter): Promise<boolean> {
+  if (!adapter.hasManagedState) return false;
+  try {
+    const outcome = await withTimeout(adapter.hasManagedState(), HAS_MANAGED_STATE_TIMEOUT_MS);
+    return outcome === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * サイクルP3-A §2: 撤去経路（cleanup パス）。「registry にあるが今回の reconcile ターゲットに
+ * 含まれず（uncovered）、かつ管理下の状態が残っている（managed）」adapter だけを
+ * `items: []` で呼び、「管理下を全部撤去せよ」を伝える。
+ * `hasManagedState` 未実装の adapter（Claude 等）は構造的にここに入らない。
+ */
+async function runCleanupPass(coveredKeys: string[]): Promise<MergeableResult[]> {
+  const registryKeys = Array.from(adapterRegistry.keys());
+  const managedFlags = await Promise.all(
+    registryKeys.map(async (key) => ({ key, managed: await checkHasManagedState(adapterRegistry.get(key)!) })),
+  );
+  const managedKeys = managedFlags.filter((f) => f.managed).map((f) => f.key);
+  const cleanupKeys = resolveCleanupKeys(registryKeys, coveredKeys, managedKeys);
+
+  const results: MergeableResult[] = [];
+  for (const key of cleanupKeys) {
+    const adapter = adapterRegistry.get(key)!;
+    const [provider, kind] = key.split(':');
+    try {
+      const outcome = await withTimeout(adapter.reconcileMachine({ config: EMPTY_CONFIG, items: [] }), ADAPTER_TIMEOUT_MS);
+      results.push(outcome === 'timeout' ? failedResult(provider, kind, 'timeout') : outcome);
+    } catch (err) {
+      results.push(failedResult(provider, kind, (err as Error)?.message || 'error'));
+    }
+  }
+  return results;
+}
+
+/**
  * 現在の capabilityConfig を全 adapter に対して machine レベルで reconcile する。
  * 未登録の provider/kind は throw せず failed に積んで処理を続行する（1 件の失敗が全体を止めない）。
  *
  * サイクルP1.2: `items` が空でも `providers.<provider>` が設定されていれば対象 provider の adapter を
  * 呼ぶ（`resolveReconcileTargets()` が items 由来 + registry 由来のターゲットを合成する。§8.1 は
  * items 0 件でも marketplace 登録/update までは行う設計）。
+ *
+ * サイクルP3-A §2: `config === null` でも `configDelivered === true`（承認ノート#2 の
+ * authoritative cleanup 条件）なら、cleanup パスだけを実行して managed な adapter の状態を撤去する
+ * （旧 server で `capabilityConfig` キー自体が一度も配信されていない場合は `configDelivered` が
+ * false のままなので、ロールバック事故を起こさず何もしない）。
  */
 async function runMachineReconcile(trigger: AgentCapabilitySyncPayload['trigger']): Promise<CapabilitySyncOutcome> {
   const startedAt = Date.now();
   const config = currentConfig;
 
   if (!config) {
-    return { status: 'skipped', results: [], durationMs: Date.now() - startedAt, trigger };
+    if (!configDelivered) {
+      return { status: 'skipped', results: [], durationMs: Date.now() - startedAt, trigger };
+    }
+    const cleanupResults = await runCleanupPass([]);
+    const merged = mergeCapabilityResults(cleanupResults);
+    if (merged.length === 0) {
+      return { status: 'skipped', results: [], durationMs: Date.now() - startedAt, trigger };
+    }
+    const hasFailure = merged.some(r => r.failed.length > 0);
+    return { status: hasFailure ? 'error' : 'done', results: merged, durationMs: Date.now() - startedAt, trigger };
   }
 
   const knownProviders = new Set(Array.from(adapterRegistry.values()).map(a => a.provider));
@@ -148,6 +237,10 @@ async function runMachineReconcile(trigger: AgentCapabilitySyncPayload['trigger'
       results.push(failedResult(provider, kind, (err as Error)?.message || 'error'));
     }
   }
+
+  // サイクルP3-A §2: 設定から外れた（uncovered）が管理下の状態が残っている adapter を撤去する
+  const coveredKeys = targets.map((t) => `${t.provider}:${t.kind}`);
+  results.push(...(await runCleanupPass(coveredKeys)));
 
   const merged = mergeCapabilityResults(results);
   const hasFailure = merged.some(r => r.failed.length > 0);
