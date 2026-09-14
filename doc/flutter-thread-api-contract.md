@@ -364,9 +364,14 @@ Flutter クライアントは **`messageId` の有無で「履歴に残る発言
 `server:session:start` が実質 2 回発行され、結果として **同一の一時通知が数秒差で 2 通**届くことがある
 （2 ターン目以降はフラグがクリアされるため発生しない）。
 
-**Flutter 側の対策**: `messageId` が無いフレームには、classic（`apps/web`）と同じ
-**「role + content が完全一致 かつ 直近 5 件以内 かつ 30 秒以内なら 2 通目を破棄」** という dedupe を必ず実装すること。
-classic はこの dedupe を持つため 1 回しか表示されず、Flutter は未実装のため 2 回表示されていたと推定される。
+**C2 適用済み（サイクルS1、commit `1f29e2c`）**: `POST /api/threads` と MCP `submit_instruction`
+のスレッド作成直後に `clearAgentRestarted()` を呼ぶよう修正済み。`//connect`（`handleProjectConnect`）は
+元々この対策を持っていたため、現在は 3 経路すべてで揃っており、上記の 2 重送信は発生しない。
+
+**Flutter 側の対策（引き続き推奨）**: 上記修正後もサーバー障害・タイミング差などで理論上ゼロ通を
+保証するものではないため、`messageId` が無いフレームには classic（`apps/web`）と同じ
+**「role + content が完全一致 かつ 直近 5 件以内 かつ 30 秒以内なら 2 通目を破棄」** という dedupe を
+保険として実装しておくことを推奨する（必須ではなくなったが、他経路の保険として有効）。
 
 **(c) 配信スコープと参加者評価タイミングは frame ごとに異なる**
 
@@ -374,18 +379,23 @@ classic はこの dedupe を持つため 1 回しか表示されず、Flutter �
 |---|---|---|
 | `web:response` | セッション参加者全員 | **フレーム送信のたびに live 評価** |
 | `web:user_message` | セッション参加者全員（送信元 chatId を除く） | **フレーム送信のたびに live 評価** |
-| `web:progress` | **そのターン開始時点のスナップショットに含まれ、かつその瞬間 WS が OPEN だった** chatId のみ | **ターン開始時の 1 回だけ**。以降 8 秒ごとの更新もこのスナップショットにしか送らない |
+| `web:progress` | セッション参加者全員 | **C4 適用済み（サイクルS1、commit `1f29e2c`）: フレーム送信のたびに live 評価** |
 
-**重要な帰結**: `web:progress` の初回送信時に対象タブの WS が **OPEN でなければ**、その chatId は
-このターンの配信対象リストに一切登録されない。`web:response` には再接続時に配送するキュー機構があるが、
-**`web:progress` には同等のキューが無い**。つまり:
+**C4 適用済み（サイクルS1、commit `1f29e2c`）**: `web:progress` の配信先は、従来の「ターン開始時点の
+スナップショットに含まれ、かつその瞬間 WS が OPEN だった chatId のみ・以降 8 秒ごとの更新もこの
+スナップショットにしか送らない」という実装から、`web:response` / `web:user_message` と同じ
+**フレーム送信のたびに live 評価**する実装（`resolveProgressRecipients()`、
+`apps/server/src/services/progress-recipients.ts`）に置き換えた。
+これにより、ターン開始後に参加した（または開始直前に再接続が完了していなかった）クライアントも、
+**次の 8 秒フレームから** `web:progress` を受信できるようになった（1 ターン丸ごと 0 通、という状態は
+解消済み）。旧実装の帰結だった「`web:progress` だけ届かない／2 回に 1 回」という観測はこれで解消される
+（モバイル OS のバックグラウンド遷移で WS が瞬断・再接続するタイミングと重なると発生しやすかった）。
 
-- ターン開始後に参加した（または開始直前に再接続が完了していなかった）クライアントは、
-  **そのターンの `web:progress` を 1 通も受け取れない**（仕様であり、バグ再送の対象ではない）
-- 一方 `web:response`（最終応答）・`web:user_message` は live 評価のため正常に届く
-
-これが「`web:progress` だけ届かない／2 回に 1 回」という観測の構造的な原因である
-（モバイル OS のバックグラウンド遷移で WS が瞬断・再接続するタイミングと重なると発生しやすい）。
+なお discord/telegram は編集対象メッセージが無い chatId への新規投稿を避けるため、`tracker` に
+`messageId` の記録がある chatId のみを配信対象とする規則は維持している（web は編集を使わないため
+常に対象に含まれる）。セッション参加を外れた chatId（`sessionParticipants` に居ない）は、
+`tracker` に記録が残っていても以降のフレームを受け取らなくなる（`finalizeProgress()` と同じ挙動に揃えた
+ための意図的な変更）。
 
 再接続時には現在の進捗が 1 回だけ復元送信される救済経路があるが、**この復元フレームには `sessionId` が
 含まれない**（`{ output, elapsed, projectId }` のみ）。fail-open ルーティング（3.3 節の推奨規則）であれば
@@ -527,19 +537,20 @@ web:command { text, projectId? } 受信
 `pnpm build` + `pm2 restart devrelay-server` のみで全マシンに反映される想定。DB マイグレーションが
 必要なのは候補 B のみ。
 
-| ID | 内容 | 影響範囲 | DB マイグレーション |
-|---|---|---|---|
-| A | `web:command` payload に `sessionId?` を追加受付し、そのターンの配送先スレッドを直接確定できるようにする（現状は switch との2段階のためレースの余地が残る） | `apps/server` のみ | 不要 |
-| B | `Notification` テーブルに `sessionId` カラムを追加し、通知一覧からスレッドへ直接遷移できるようにする | `apps/server` のみ | **必要**（1カラム追加、nullable） |
-| C | `GET /api/threads` のレスポンスに `isProcessing` / `pendingApprovalCount` を追加する（サーバー内部に既にある管理データを一覧 API に露出するだけ） | `apps/server` のみ | 不要 |
-| D | `PATCH /api/sessions/:id`（改名）でも `web:session_info` を他タブへ再送する | `apps/server` のみ | 不要 |
-| E | `web:tool:approval:resolved` / `web:tool:approval:auto` に `sessionId` を追加する（現状 `projectId` 止まりで、同一プロジェクトの別スレッドの承認カードに影響しうる表示上の穴がある） | `apps/server` のみ | 不要 |
-| C1 | `web:response` の payload に `transient?: true`（または `persisted: boolean`）を純加算し、3.3.1(a) の `messageId` 判別をクライアント側の推測ではなく明示フィールドにする | `apps/server` + `packages/shared` の型 | 不要 |
-| C2 | `POST /api/threads` の直後に Agent 再起動フラグをクリアし、3.3.1(b) の一時通知 2 重送信の起点そのものを断つ | `apps/server` のみ（1 行） | 不要 |
-| C3 | Agent 側で同一 `sessionId` への `session:start` 再送に対し `agent:ai:status` の再送を抑止（冪等化） | `agents/{linux,macos,windows}` | 不要（ただし commit+push+各機 `u` が必要） |
-| C4 | `web:progress` の配信先をターン開始時スナップショットではなく送信時 live 評価に変更し、3.3.1(c) の「開始後に参加したクライアントに届かない」問題を根治する | `apps/server` のみ | 不要 |
+| ID | 内容 | 影響範囲 | DB マイグレーション | 状態 |
+|---|---|---|---|---|
+| A | `web:command` payload に `sessionId?` を追加受付し、そのターンの配送先スレッドを直接確定できるようにする（現状は switch との2段階のためレースの余地が残る） | `apps/server` のみ | 不要 | 未実装 |
+| B | `Notification` テーブルに `sessionId` カラムを追加し、通知一覧からスレッドへ直接遷移できるようにする | `apps/server` のみ | **必要**（1カラム追加、nullable） | 未実装 |
+| C | `GET /api/threads` のレスポンスに `isProcessing` / `pendingApprovalCount` を追加する（サーバー内部に既にある管理データを一覧 API に露出するだけ） | `apps/server` のみ | 不要 | 未実装 |
+| D | `PATCH /api/sessions/:id`（改名）でも `web:session_info` を他タブへ再送する | `apps/server` のみ | 不要 | 未実装 |
+| E | `web:tool:approval:resolved` / `web:tool:approval:auto` に `sessionId` を追加する（現状 `projectId` 止まりで、同一プロジェクトの別スレッドの承認カードに影響しうる表示上の穴がある） | `apps/server` のみ | 不要 | 未実装 |
+| C1 | `web:response` の payload に `transient?: true`（または `persisted: boolean`）を純加算し、3.3.1(a) の `messageId` 判別をクライアント側の推測ではなく明示フィールドにする | `apps/server` + `packages/shared` の型 | 不要 | 未実装 |
+| C2 | `POST /api/threads` の直後に Agent 再起動フラグをクリアし、3.3.1(b) の一時通知 2 重送信の起点そのものを断つ | `apps/server` のみ（1 行） | 不要 | **適用済み（サイクルS1、commit `1f29e2c`）**。あわせて MCP `submit_instruction` にも同じ対策を追加済み |
+| C3 | Agent 側で同一 `sessionId` への `session:start` 再送に対し `agent:ai:status` の再送を抑止（冪等化） | `agents/{linux,macos,windows}` | 不要（ただし commit+push+各機 `u` が必要） | 未実装 |
+| C4 | `web:progress` の配信先をターン開始時スナップショットではなく送信時 live 評価に変更し、3.3.1(c) の「開始後に参加したクライアントに届かない」問題を根治する | `apps/server` のみ | 不要 | **適用済み（サイクルS1、commit `1f29e2c`）** |
 
-いずれも本サイクルでは**実装しない**。採否・優先順位は次サイクルで判断する（C2 は変更が小さく副作用も低いため優先候補、C3 は反映コストが高いため優先度低）。
+C2・C4 は本サイクル（S1）で適用済み。C1・C3・A・B・D・E は引き続き**未実装**。
+採否・優先順位は次サイクルで判断する（C3 は Agent 側の反映コストが高いため引き続き優先度低）。
 
 ---
 
