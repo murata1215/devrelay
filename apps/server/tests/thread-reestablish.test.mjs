@@ -255,3 +255,65 @@ describe('静的ガード: mcp 経由の origin:\'mcp\' createSession は本サ�
     assert.match(source, /origin:\s*'mcp'/);
   });
 });
+
+describe('静的ガード: サイクルS1（C2）POST /api/threads 直後に clearAgentRestarted( を呼んでいる', () => {
+  const source = readServerSource('src/routes/api.ts');
+
+  test('agent-manager.js の import に clearAgentRestarted が含まれる', () => {
+    const importLine = source.split('\n').find((line) => line.includes("from '../services/agent-manager.js'"));
+    assert.notEqual(importLine, undefined, 'agent-manager.js からの import 行が見つからない');
+    assert.match(importLine, /\bclearAgentRestarted\b/);
+  });
+
+  test('POST /api/threads ハンドラ内で startAgentSession( の直後（順序込み）に clearAgentRestarted( が現れる', () => {
+    const routeIdx = source.indexOf("app.post('/api/threads'");
+    assert.notEqual(routeIdx, -1, 'POST /api/threads ハンドラが見つからない');
+    const startIdx = source.indexOf('await startAgentSession(', routeIdx);
+    assert.notEqual(startIdx, -1, 'ハンドラ内に startAgentSession( 呼び出しが無い');
+    const clearIdx = source.indexOf('clearAgentRestarted(', startIdx);
+    assert.notEqual(clearIdx, -1, 'startAgentSession( の後に clearAgentRestarted( が見つからない');
+    // 次のハンドラ定義（app.patch/app.post 等）より前に収まっていること（別ハンドラへの誤爆でないことの確認）
+    const nextHandlerIdx = source.indexOf('\n  app.', startIdx + 1);
+    if (nextHandlerIdx !== -1) {
+      assert.ok(clearIdx < nextHandlerIdx, 'clearAgentRestarted( が次のハンドラより後ろにある（誤検知の可能性）');
+    }
+  });
+});
+
+describe('静的ガード: サイクルS1（C2）MCP submit_instruction 直後に clearAgentRestarted( を呼んでいる', () => {
+  const source = readServerSource('src/mcp/tools.ts');
+
+  test('agent-manager.js の import に clearAgentRestarted が含まれる', () => {
+    const importBlockStart = source.indexOf("from '../services/agent-manager.js'");
+    assert.notEqual(importBlockStart, -1, 'agent-manager.js からの import が見つからない');
+    // import { ... } from '...agent-manager.js' は複数行にまたがるため、直前の import { を起点に含有チェックする
+    const blockStart = source.lastIndexOf('import {', importBlockStart);
+    const importBlock = source.slice(blockStart, importBlockStart);
+    assert.match(importBlock, /\bclearAgentRestarted\b/);
+  });
+
+  test('submit_instruction 内で startAgentSession( の直後（順序込み）に clearAgentRestarted( が現れる', () => {
+    const toolIdx = source.indexOf("'submit_instruction'");
+    assert.notEqual(toolIdx, -1, 'submit_instruction ツール定義が見つからない');
+    const startIdx = source.indexOf('await startAgentSession(', toolIdx);
+    assert.notEqual(startIdx, -1, 'submit_instruction 内に startAgentSession( 呼び出しが無い');
+    const clearIdx = source.indexOf('clearAgentRestarted(', startIdx);
+    assert.notEqual(clearIdx, -1, 'startAgentSession( の後に clearAgentRestarted( が見つからない');
+    // startProgressTracking( より前に収まっていること（同じ関数内での誤爆でないことの簡易確認）
+    const progressIdx = source.indexOf('startProgressTracking(', startIdx);
+    if (progressIdx !== -1) {
+      assert.ok(clearIdx < progressIdx, 'clearAgentRestarted( が startProgressTracking( より後ろにある（誤検知の可能性）');
+    }
+  });
+});
+
+describe('静的ガード: サイクルS1（C2） //connect 側（handleProjectConnect）は無変更のまま既存対策を維持している', () => {
+  // 内訳（実測5箇所）: handleProjectConnect(:626) + handleExec再確立ブロック(早期return + 本体、2箇所)
+  // + handleAiPrompt再確立ブロック(早期return + 本体、2箇所)。本サイクルは api.ts / mcp/tools.ts のみを
+  // 変更するため、command-handler.ts のこの件数は完全に不変であるべき。
+  test('command-handler.ts の clearAgentRestarted( 出現回数が従来の5箇所のまま', () => {
+    const source = readServerSource('src/services/command-handler.ts');
+    const count = (source.match(/clearAgentRestarted\(/g) || []).length;
+    assert.equal(count, 5, `clearAgentRestarted( の出現回数が想定外（想定5・実際${count}）。//connect / handleExec / handleAiPrompt の既存対策が変更された可能性がある`);
+  });
+});

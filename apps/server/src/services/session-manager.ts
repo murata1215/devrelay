@@ -27,6 +27,7 @@ import { sendPushNotificationForSession } from './push-notification-service.js';
 import { sendFcmNotificationForSession } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { decideProgressTimeoutAction } from './progress-timeout.js';
+import { resolveProgressRecipients } from './progress-recipients.js';
 import { isEphemeralSessionId, decideNewSessionScopeId, resolveOutboundAgentScopeId, inheritScopeForReestablishedSession } from './thread-scope.js';
 import { resolveChatSessionId } from './thread-routing.js';
 // import { sendLineMessage } from '../platforms/line.js';
@@ -590,14 +591,23 @@ async function updateProgressMessages(sessionId: string) {
   const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
   const content = formatProgressMessage(tracker.outputBuffer, elapsed, tracker.language);
 
-  for (const [chatId, { messageId, platform }] of tracker.messages) {
+  // S1/C4: 配信先はターン開始時スナップショット（tracker.messages）ではなく、
+  // フレーム送信のたびに現在のセッション参加者から live 評価する
+  // （web:response / web:user_message / finalizeProgress と同じ評価経路に揃える）。
+  // web は tracker に記録が無くても常に対象（ターン開始後に参加したタブにも次のフレームから届く）、
+  // discord/telegram は tracker に messageId の記録がある chatId のみ対象（新規投稿はしない）。
+  const recipients = resolveProgressRecipients({
+    liveParticipants: sessionParticipants.get(sessionId) ?? [],
+    trackerMessages: [...tracker.messages],
+  });
+
+  for (const { platform, chatId, messageId } of recipients) {
     if (platform === 'discord') {
       await editDiscordMessage(chatId, messageId as string, content);
     } else if (platform === 'telegram') {
       await editTelegramMessage(chatId, messageId as number, content);
     } else if (platform === 'web') {
-      const elapsed = Math.floor((Date.now() - (progressTrackers.get(sessionId)?.startTime ?? Date.now())) / 1000);
-      await editWebMessage(chatId, messageId as string, content, elapsed, tracker.projectId, sessionId);
+      await editWebMessage(chatId, (messageId as string) ?? '', content, elapsed, tracker.projectId, sessionId);
     }
   }
 }

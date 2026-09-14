@@ -14,6 +14,7 @@ import {
   execConversation,
   isAgentOutdated,
   startSession as startAgentSession,
+  clearAgentRestarted,
 } from '../services/agent-manager.js';
 import {
   createSession,
@@ -626,6 +627,9 @@ export function registerMcpTools(server: McpServer, userId: string) {
 
       // Agent にセッション開始を通知（core#336: agentScopeId = submissionId で状態をスコープ分離する）
       await startAgentSession(project.machineId, sessionId, project.name, project.path, aiTool as any, sessionId);
+      // S1/C2: このスレッド作成で session:start を発行済みのため Agent 再起動フラグをクリアする
+      // （routes/api.ts の POST /api/threads と同じ対策。//connect は既に同等の対策を持つ）。
+      clearAgentRestarted(project.machineId);
 
       // 進捗トラッキング開始
       await startProgressTracking(sessionId);

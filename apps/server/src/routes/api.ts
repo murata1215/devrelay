@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability } from '../services/agent-manager.js';
+import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted } from '../services/agent-manager.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { createSession, resolveScopeOptionsForSession } from '../services/session-manager.js';
@@ -1795,6 +1795,10 @@ export async function apiRoutes(app: FastifyInstance) {
     // スレッド管理 cycle1: このスレッドの agentScopeId（キルスイッチ OFF・従来スレッドなら undefined）を agent へ送る
     const { agentScopeId } = await resolveScopeOptionsForSession(sessionId);
     await startAgentSession(proj.machineId, sessionId, proj.name, proj.path, proj.defaultAi as AiTool, agentScopeId);
+    // S1/C2: このスレッド作成で session:start を発行済みのため Agent 再起動フラグをクリアする。
+    // クリアしないと直後の最初の送信で handleAiPrompt() が session:start を再発行し、
+    // Agent が返す一時通知（🤖 AI Status …）が同一ターンに 2 通届く（//connect の同種対策と揃える）。
+    clearAgentRestarted(proj.machineId);
 
     // tabId が指定されていれば、そのタブの current スレッドをこの新規スレッドに差し替える
     if (tabId) {
