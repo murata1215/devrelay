@@ -6,6 +6,7 @@ import {
   capabilityConfigToFormState,
   validateCapabilityForm,
   formatPluginTag,
+  normalizePluginIdInput,
   decideSyncStatusDisplay,
 } from '../lib/capability-config-rules';
 import type { CapabilitySyncStatusLike, CapabilityFormErrorCode } from '../lib/capability-config-rules';
@@ -54,9 +55,9 @@ export function MachinesPage() {
   const [marketplaceName, setMarketplaceName] = useState('');
   const [marketplaceSource, setMarketplaceSource] = useState('');
   const [pluginIds, setPluginIds] = useState<string[]>([]);
-  // サイクルP3-A: 「Devin にも配布する」チェックボックス
-  const [distributeToDevin, setDistributeToDevin] = useState(false);
   const [newPluginInput, setNewPluginInput] = useState('');
+  // サイクルP3-B §5-9(a): plugin id 追加時の警告文言（empty/duplicate。保存エラーとは別枠でその場に出す）
+  const [newPluginInputWarning, setNewPluginInputWarning] = useState<'empty' | 'duplicate' | null>(null);
   const [capabilityConfigModified, setCapabilityConfigModified] = useState(false);
   const [capabilityConfigLoading, setCapabilityConfigLoading] = useState(false);
   const [capabilityConfigSaving, setCapabilityConfigSaving] = useState(false);
@@ -205,7 +206,6 @@ export function MachinesPage() {
       setMarketplaceName(capabilityFormState.marketplaceName);
       setMarketplaceSource(capabilityFormState.marketplaceSource);
       setPluginIds(capabilityFormState.pluginIds);
-      setDistributeToDevin(capabilityFormState.distributeToDevin);
       setCapabilitySyncStatus(capabilityResult.capabilitySyncStatus ?? null);
       setCapabilitySyncSupported(capabilityResult.capabilitySyncSupported ?? null);
       setSavedConfigPresent((capabilityResult.capabilityConfig ?? null) != null);
@@ -238,8 +238,8 @@ export function MachinesPage() {
     setMarketplaceName('');
     setMarketplaceSource('');
     setPluginIds([]);
-    setDistributeToDevin(false);
     setNewPluginInput('');
+    setNewPluginInputWarning(null);
     setCapabilityConfigModified(false);
     setCapabilityConfigLoading(false);
     setCapabilityConfigSaving(false);
@@ -861,16 +861,16 @@ export function MachinesPage() {
               </label>
             </div>
 
-            {/* サイクルP1: Capability 配布基盤（provider × kind の追加能力配布。v1 は Claude Code Plugins のみ） */}
+            {/* サイクルP1〜P3-B: Capability 配布基盤（provider × kind の追加能力配布） */}
             <div className="mb-4">
               <label className="block text-[var(--text-muted)] text-sm mb-2">
                 Capabilities
-                <span className="text-[var(--text-faint)] ml-2 text-xs">
-                  (追加で配布する能力。将来 Codex/Devin 用セクションを追加予定)
-                </span>
               </label>
+              <div className="text-[var(--text-faint)] text-xs mb-2">
+                配布先: Claude Code は plugin、Devin / Codex 等は Agent Skills 標準（<code>~/.agents/skills</code>）
+              </div>
               <div className="bg-[var(--bg-base)] rounded-lg p-3 border border-[var(--border-color)]">
-                <div className="text-sm font-medium text-[var(--text-primary)] mb-2">Claude Code Plugins</div>
+                <div className="text-sm font-medium text-[var(--text-primary)] mb-2">配布するプラグイン</div>
                 {capabilityConfigLoading ? (
                   <div className="text-[var(--text-faint)] text-sm">Loading...</div>
                 ) : (
@@ -919,53 +919,47 @@ export function MachinesPage() {
                       <input
                         type="text"
                         value={newPluginInput}
-                        onChange={(e) => setNewPluginInput(e.target.value)}
+                        onChange={(e) => { setNewPluginInput(e.target.value); setNewPluginInputWarning(null); }}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter' && newPluginInput.trim()) {
-                            setPluginIds([...pluginIds, newPluginInput.trim()]);
+                          if (e.key === 'Enter') {
+                            // サイクルP3-B §5-9(a): trim → @marketplaceName 剥がし → 空/重複 reject（多重防御の第1段）
+                            const normalized = normalizePluginIdInput(newPluginInput, marketplaceName, pluginIds);
+                            if (!normalized.ok) { setNewPluginInputWarning(normalized.reason); return; }
+                            setPluginIds([...pluginIds, normalized.id]);
                             setNewPluginInput('');
+                            setNewPluginInputWarning(null);
                             setCapabilityConfigModified(true);
                             setCapabilityFormError(null);
                           }
                         }}
-                        placeholder="Plugin id (例: unity)"
+                        placeholder="Plugin id (例: unity または unity@devrelay)"
                         className="flex-1 bg-[var(--bg-primary)] text-[var(--text-primary)] px-4 py-2 rounded-lg text-sm border border-[var(--border-color)] focus:border-[var(--accent-blue)] focus:outline-none"
                       />
                       <button
                         onClick={() => {
-                          if (newPluginInput.trim()) {
-                            setPluginIds([...pluginIds, newPluginInput.trim()]);
-                            setNewPluginInput('');
-                            setCapabilityConfigModified(true);
-                            setCapabilityFormError(null);
-                          }
+                          const normalized = normalizePluginIdInput(newPluginInput, marketplaceName, pluginIds);
+                          if (!normalized.ok) { setNewPluginInputWarning(normalized.reason); return; }
+                          setPluginIds([...pluginIds, normalized.id]);
+                          setNewPluginInput('');
+                          setNewPluginInputWarning(null);
+                          setCapabilityConfigModified(true);
+                          setCapabilityFormError(null);
                         }}
                         className="bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] px-3 py-2 rounded-lg transition-colors shrink-0 text-sm"
                       >
                         Add
                       </button>
                     </div>
-                    {/* サイクルP3-A: Devin CLI にも同じ plugin の skills を配布するか */}
-                    <label className="flex items-center gap-2 mt-2 text-sm text-[var(--text-secondary)] cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={distributeToDevin}
-                        onChange={(e) => {
-                          setDistributeToDevin(e.target.checked);
-                          setCapabilityConfigModified(true);
-                          setCapabilityFormError(null);
-                        }}
-                        className="rounded border-[var(--border-color)]"
-                      />
-                      Devin にも配布する
-                    </label>
+                    {newPluginInputWarning === 'duplicate' && (
+                      <div className="text-[var(--text-faint)] text-xs mt-1">既に追加済みの plugin id です</div>
+                    )}
                     <div className="flex flex-wrap items-center gap-2 mt-2">
                       {capabilityConfigModified && (
                         <>
                           <button
                             onClick={async () => {
                               if (!settingsTarget) return;
-                              const validation = validateCapabilityForm({ marketplaceName, marketplaceSource, pluginIds, distributeToDevin });
+                              const validation = validateCapabilityForm({ marketplaceName, marketplaceSource, pluginIds });
                               if (!validation.ok) {
                                 // P1.1: フォーム検証に失敗した場合は API を呼ばずインラインエラーだけ表示する
                                 setCapabilityFormError(validation.error);
@@ -1055,7 +1049,7 @@ export function MachinesPage() {
                         return (
                           <div className="text-xs mt-2">
                             <div className="text-[var(--text-faint)]">
-                              最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''} / {s.trigger}
+                              最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / present {s.presentCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''}{s.removedCount > 0 ? ` / removed ${s.removedCount}` : ''} / {s.trigger}
                             </div>
                             {display.failures?.map((f, i) => (
                               <div key={i} className="text-[var(--text-danger)]">⚠️ {f.id}: {f.reason}</div>
@@ -1066,14 +1060,21 @@ export function MachinesPage() {
                       }
                       return (
                         <div className="text-[var(--text-faint)] text-xs mt-2">
-                          最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''} / {s.trigger}
+                          最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / present {s.presentCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''}{s.removedCount > 0 ? ` / removed ${s.removedCount}` : ''} / {s.trigger}
                           {display.emptyTargets && '（対象 0 件。有効な配布設定（Marketplace）が見つかりません。Marketplace name / source を入力して保存し直してください）'}
-                          {/* サイクルP3-A §3-8: provider が複数（claude + devin 等）のときだけ内訳を出す */}
+                          {/* サイクルP3-B §5-10: results が 1 件以上あれば常に provider 別の内訳を出す */}
                           {display.perProvider && (
                             <div className="mt-1 pl-2 border-l border-[var(--border-color)]">
                               {display.perProvider.map((p, i) => (
                                 <div key={i}>
-                                  {p.provider}:{p.kind} — installed {p.installedCount} / updated {p.updatedCount} / failed {p.failedCount}{p.notAllowedCount > 0 ? ` / notAllowed ${p.notAllowedCount}` : ''}{p.removedCount > 0 ? ` / removed ${p.removedCount}` : ''}
+                                  <div>
+                                    {p.provider}:{p.kind} — installed {p.installedCount} / updated {p.updatedCount} / present {p.presentCount} / failed {p.failedCount}{p.notAllowedCount > 0 ? ` / notAllowed ${p.notAllowedCount}` : ''}{p.removedCount > 0 ? ` / removed ${p.removedCount}` : ''}
+                                  </div>
+                                  {p.runtimeDiagnostics && (
+                                    <div className="text-[var(--text-faint)] opacity-70">
+                                      {p.runtimeDiagnostics}（診断情報。配布判断には影響しません）
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>

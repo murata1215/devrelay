@@ -30,6 +30,7 @@ import {
   hasReportableOutcome,
   decidePrelaunchStatus,
   resolveCleanupKeys,
+  normalizeCapabilityItems,
   type QueueState,
   type MergeableResult,
   type PrelaunchCacheEntry,
@@ -215,9 +216,11 @@ async function runMachineReconcile(trigger: AgentCapabilitySyncPayload['trigger'
   }
 
   const knownProviders = new Set(Array.from(adapterRegistry.values()).map(a => a.provider));
+  // サイクルP3-B §5-3: legacy items（devin:skill 等）を canonical key に読み替えてから targets を解決する
+  const normalizedItems = normalizeCapabilityItems(config.items);
   const targets = resolveReconcileTargets(
     listConfiguredProviders(config.providers),
-    config.items,
+    normalizedItems,
     Array.from(adapterRegistry.keys()),
   );
   const results: MergeableResult[] = [];
@@ -320,9 +323,11 @@ export async function reconcileForRunner(aiTool: string, projectPath: string): P
   }
   prelaunchCache.set(provider, { key: cacheKey, cachedAtMs: Date.now() });
 
+  // サイクルP3-B §5-3: legacy items（devin:skill 等）を canonical key に読み替えてから targets を解決する
+  const normalizedItems = normalizeCapabilityItems(currentConfig.items);
   const targets = resolveReconcileTargets(
     listConfiguredProviders(currentConfig.providers),
-    currentConfig.items,
+    normalizedItems,
     Array.from(adapterRegistry.keys()),
     provider,
   ).filter(t => t.hasAdapter);

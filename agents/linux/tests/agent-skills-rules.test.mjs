@@ -1,4 +1,5 @@
-// サイクルP3-A: devin-skill-rules.ts（外部 import ゼロの純粋関数群）の単体テスト。
+// サイクルP3-B: agent-skills-rules.ts（外部 import ゼロの純粋関数群）の単体テスト。
+// P3-A の devin-skill-rules.test.mjs から移設・改造（84件のうち rules 分 61件を継承 + 新規関数分を追加）。
 // コンパイル済み dist から直接 import する。
 
 import { test } from 'node:test';
@@ -7,25 +8,31 @@ import {
   SKILL_TREE_MAX_BYTES,
   SKILL_TREE_MAX_FILES,
   SKILL_TREE_MAX_DEPTH,
-  resolveDevinSkillsDirPath,
+  resolveAgentSkillsDirPath,
+  resolveLegacyDevinSkillsDirPath,
   resolveGitCloneUrl,
   isSafeRelativePath,
   resolvePluginSourceRelPath,
   isSafeSkillDirName,
   sanitizeMarketplaceDirName,
+  stripMarketplaceSuffix,
   allocateGitTimeoutMs,
   parseMarketplaceManifest,
   parsePluginManifest,
   resolveDesiredPluginVersion,
-  isOwnedMarker,
+  isOwnedAgentSkillsMarker,
+  isOwnedLegacyDevinMarker,
+  AGENT_SKILLS_MARKER_ADAPTER,
   buildSkillMarker,
   decideSkillActionFast,
   decideSkillActionSlow,
   buildDesiredSkillPlan,
   decideRemovals,
   canPerformRemoval,
+  decideLegacyMigration,
+  buildRuntimeDiagnostics,
   resolveFailureIds,
-} from '../dist/services/capabilities/devin-skill-rules.js';
+} from '../dist/services/capabilities/agent-skills-rules.js';
 
 // ---- 安全上限の定数 ----
 
@@ -35,55 +42,87 @@ test('安全上限の定数: v1 暫定値', () => {
   assert.equal(SKILL_TREE_MAX_DEPTH, 16);
 });
 
-// ---- resolveDevinSkillsDirPath ----
+// ---- resolveAgentSkillsDirPath（新配布先。T2） ----
 
-test('resolveDevinSkillsDirPath: env override 絶対パス(win32) は最優先', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'win32', env: { DEVRELAY_DEVIN_SKILLS_DIR: 'D:\\custom\\skills' }, homeDir: 'C:\\Users\\x' });
+test('resolveAgentSkillsDirPath: env override 絶対パス(win32) は最優先', () => {
+  const r = resolveAgentSkillsDirPath({ platform: 'win32', env: { DEVRELAY_AGENT_SKILLS_DIR: 'D:\\custom\\skills' }, homeDir: 'C:\\Users\\x' });
   assert.deepEqual(r, { ok: true, dir: 'D:\\custom\\skills', source: 'env-override' });
 });
 
-test('resolveDevinSkillsDirPath: env override 絶対パス(posix) は最優先', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'linux', env: { DEVRELAY_DEVIN_SKILLS_DIR: '/opt/custom-skills' }, homeDir: '/home/x' });
+test('resolveAgentSkillsDirPath: env override 絶対パス(posix) は最優先', () => {
+  const r = resolveAgentSkillsDirPath({ platform: 'linux', env: { DEVRELAY_AGENT_SKILLS_DIR: '/opt/custom-skills' }, homeDir: '/home/x' });
   assert.deepEqual(r, { ok: true, dir: '/opt/custom-skills', source: 'env-override' });
 });
 
-test('resolveDevinSkillsDirPath: env override が相対パスなら ok:false（黙って無視しない）', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'linux', env: { DEVRELAY_DEVIN_SKILLS_DIR: 'relative/skills' }, homeDir: '/home/x' });
+test('resolveAgentSkillsDirPath: env override が相対パスなら ok:false（黙って無視しない）', () => {
+  const r = resolveAgentSkillsDirPath({ platform: 'linux', env: { DEVRELAY_AGENT_SKILLS_DIR: 'relative/skills' }, homeDir: '/home/x' });
   assert.deepEqual(r, { ok: false, reason: 'override-not-absolute' });
 });
 
-test('resolveDevinSkillsDirPath: win32 で APPDATA 設定済みならそれを使う', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'win32', env: { APPDATA: 'C:\\Users\\x\\AppData\\Roaming' }, homeDir: 'C:\\Users\\x' });
-  assert.deepEqual(r, { ok: true, dir: 'C:\\Users\\x\\AppData\\Roaming\\devin\\skills', source: 'appdata' });
+test('resolveAgentSkillsDirPath: win32 は %USERPROFILE%（homeDir）起点で組み立てる（XDG分岐なし）', () => {
+  const r = resolveAgentSkillsDirPath({ platform: 'win32', env: { APPDATA: 'C:\\Users\\x\\AppData\\Roaming' }, homeDir: 'C:\\Users\\x' });
+  assert.deepEqual(r, { ok: true, dir: 'C:\\Users\\x\\.agents\\skills', source: 'home-default' });
 });
 
-test('resolveDevinSkillsDirPath: win32 で APPDATA 未設定なら home から組み立てる', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'win32', env: {}, homeDir: 'C:\\Users\\x' });
-  assert.deepEqual(r, { ok: true, dir: 'C:\\Users\\x\\AppData\\Roaming\\devin\\skills', source: 'appdata' });
+test('resolveAgentSkillsDirPath: posix は $HOME（homeDir）起点で組み立てる（XDG分岐なし）', () => {
+  const r = resolveAgentSkillsDirPath({ platform: 'linux', env: { XDG_CONFIG_HOME: '/home/x/.myconfig' }, homeDir: '/home/x' });
+  assert.deepEqual(r, { ok: true, dir: '/home/x/.agents/skills', source: 'home-default' });
 });
 
-test('resolveDevinSkillsDirPath: win32 で APPDATA も home も無ければ home-missing', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'win32', env: {}, homeDir: '' });
+test('resolveAgentSkillsDirPath: home も無ければ home-missing', () => {
+  const r = resolveAgentSkillsDirPath({ platform: 'linux', env: {}, homeDir: '' });
   assert.deepEqual(r, { ok: false, reason: 'home-missing' });
 });
 
-test('resolveDevinSkillsDirPath: posix で XDG_CONFIG_HOME 絶対パスならそれを使う', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'linux', env: { XDG_CONFIG_HOME: '/home/x/.myconfig' }, homeDir: '/home/x' });
+// ---- resolveLegacyDevinSkillsDirPath（P3-A の resolveDevinSkillsDirPath 改名。移行スキャン専用） ----
+
+test('resolveLegacyDevinSkillsDirPath: env override 絶対パス(win32) は最優先', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'win32', env: { DEVRELAY_DEVIN_SKILLS_DIR: 'D:\\custom\\skills' }, homeDir: 'C:\\Users\\x' });
+  assert.deepEqual(r, { ok: true, dir: 'D:\\custom\\skills', source: 'env-override' });
+});
+
+test('resolveLegacyDevinSkillsDirPath: env override 絶対パス(posix) は最優先', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'linux', env: { DEVRELAY_DEVIN_SKILLS_DIR: '/opt/custom-skills' }, homeDir: '/home/x' });
+  assert.deepEqual(r, { ok: true, dir: '/opt/custom-skills', source: 'env-override' });
+});
+
+test('resolveLegacyDevinSkillsDirPath: env override が相対パスなら ok:false（黙って無視しない）', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'linux', env: { DEVRELAY_DEVIN_SKILLS_DIR: 'relative/skills' }, homeDir: '/home/x' });
+  assert.deepEqual(r, { ok: false, reason: 'override-not-absolute' });
+});
+
+test('resolveLegacyDevinSkillsDirPath: win32 で APPDATA 設定済みならそれを使う', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'win32', env: { APPDATA: 'C:\\Users\\x\\AppData\\Roaming' }, homeDir: 'C:\\Users\\x' });
+  assert.deepEqual(r, { ok: true, dir: 'C:\\Users\\x\\AppData\\Roaming\\devin\\skills', source: 'appdata' });
+});
+
+test('resolveLegacyDevinSkillsDirPath: win32 で APPDATA 未設定なら home から組み立てる', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'win32', env: {}, homeDir: 'C:\\Users\\x' });
+  assert.deepEqual(r, { ok: true, dir: 'C:\\Users\\x\\AppData\\Roaming\\devin\\skills', source: 'appdata' });
+});
+
+test('resolveLegacyDevinSkillsDirPath: win32 で APPDATA も home も無ければ home-missing', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'win32', env: {}, homeDir: '' });
+  assert.deepEqual(r, { ok: false, reason: 'home-missing' });
+});
+
+test('resolveLegacyDevinSkillsDirPath: posix で XDG_CONFIG_HOME 絶対パスならそれを使う', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'linux', env: { XDG_CONFIG_HOME: '/home/x/.myconfig' }, homeDir: '/home/x' });
   assert.deepEqual(r, { ok: true, dir: '/home/x/.myconfig/devin/skills', source: 'xdg' });
 });
 
-test('resolveDevinSkillsDirPath: posix で XDG_CONFIG_HOME が相対なら無視し home-default', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'darwin', env: { XDG_CONFIG_HOME: 'relative' }, homeDir: '/Users/x' });
+test('resolveLegacyDevinSkillsDirPath: posix で XDG_CONFIG_HOME が相対なら無視し home-default', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'darwin', env: { XDG_CONFIG_HOME: 'relative' }, homeDir: '/Users/x' });
   assert.deepEqual(r, { ok: true, dir: '/Users/x/.config/devin/skills', source: 'home-default' });
 });
 
-test('resolveDevinSkillsDirPath: posix で XDG 未設定なら ~/.config/devin/skills', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'linux', env: {}, homeDir: '/home/x' });
+test('resolveLegacyDevinSkillsDirPath: posix で XDG 未設定なら ~/.config/devin/skills', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'linux', env: {}, homeDir: '/home/x' });
   assert.deepEqual(r, { ok: true, dir: '/home/x/.config/devin/skills', source: 'home-default' });
 });
 
-test('resolveDevinSkillsDirPath: posix で home も無ければ home-missing', () => {
-  const r = resolveDevinSkillsDirPath({ platform: 'linux', env: {}, homeDir: '' });
+test('resolveLegacyDevinSkillsDirPath: posix で home も無ければ home-missing', () => {
+  const r = resolveLegacyDevinSkillsDirPath({ platform: 'linux', env: {}, homeDir: '' });
   assert.deepEqual(r, { ok: false, reason: 'home-missing' });
 });
 
@@ -174,6 +213,26 @@ test('sanitizeMarketplaceDirName: 安全な文字だけに変換する', () => {
   assert.equal(sanitizeMarketplaceDirName('devrelay plugins!!'), 'devrelay_plugins__');
 });
 
+// ---- stripMarketplaceSuffix（§5-9 二重サフィックス防止。T8） ----
+
+test('stripMarketplaceSuffix: 末尾の @marketplaceName を1回だけ剥がす', () => {
+  assert.equal(stripMarketplaceSuffix('foo@devrelay', 'devrelay'), 'foo');
+});
+
+test('stripMarketplaceSuffix: サフィックスが無ければそのまま返す', () => {
+  assert.equal(stripMarketplaceSuffix('foo', 'devrelay'), 'foo');
+});
+
+test('stripMarketplaceSuffix: 二重サフィックスは1回だけ剥がす（冪等呼び出しで完全除去できる）', () => {
+  const once = stripMarketplaceSuffix('foo@devrelay@devrelay', 'devrelay');
+  assert.equal(once, 'foo@devrelay');
+  assert.equal(stripMarketplaceSuffix(once, 'devrelay'), 'foo');
+});
+
+test('stripMarketplaceSuffix: marketplaceName が空文字なら何もしない', () => {
+  assert.equal(stripMarketplaceSuffix('foo@devrelay', ''), 'foo@devrelay');
+});
+
 // ---- allocateGitTimeoutMs ----
 
 test('allocateGitTimeoutMs: 予定呼び出し数で均等割りする', () => {
@@ -215,38 +274,51 @@ test('resolveDesiredPluginVersion: plugin.json 優先、無ければ marketplace
   assert.equal(resolveDesiredPluginVersion(null, null), null);
 });
 
-// ---- isOwnedMarker ----
+// ---- isOwnedAgentSkillsMarker / isOwnedLegacyDevinMarker（§5-5。T3） ----
 
-test('isOwnedMarker: 正しい marker は true', () => {
-  assert.equal(isOwnedMarker({ schema: 1, managedBy: 'devrelay', provider: 'devin', kind: 'skill', skillName: 'x' }), true);
+test('isOwnedAgentSkillsMarker: adapter フィールドが一致すれば true', () => {
+  assert.equal(isOwnedAgentSkillsMarker({ schema: 1, managedBy: 'devrelay', adapter: AGENT_SKILLS_MARKER_ADAPTER, provider: 'agent-skills', kind: 'standard', skillName: 'x' }), true);
 });
 
-test('isOwnedMarker: marketplaceName は所有権の条件に含まれない（別索引でも回収できる）', () => {
-  assert.equal(isOwnedMarker({ schema: 1, managedBy: 'devrelay', provider: 'devin', kind: 'skill', skillName: 'x', marketplaceName: 'other' }), true);
+test('isOwnedAgentSkillsMarker: adapter フィールドが無くても provider+kind が一致すれば true（前方互換）', () => {
+  assert.equal(isOwnedAgentSkillsMarker({ schema: 1, managedBy: 'devrelay', provider: 'agent-skills', kind: 'standard', skillName: 'x' }), true);
 });
 
-test('isOwnedMarker: provider/kind が違えば false', () => {
-  assert.equal(isOwnedMarker({ schema: 1, managedBy: 'devrelay', provider: 'claude', kind: 'skill', skillName: 'x' }), false);
-  assert.equal(isOwnedMarker({ schema: 1, managedBy: 'devrelay', provider: 'devin', kind: 'plugin', skillName: 'x' }), false);
+test('isOwnedAgentSkillsMarker: marketplaceName は所有権の条件に含まれない（別索引でも回収できる）', () => {
+  assert.equal(isOwnedAgentSkillsMarker({ schema: 1, managedBy: 'devrelay', adapter: AGENT_SKILLS_MARKER_ADAPTER, provider: 'agent-skills', kind: 'standard', skillName: 'x', marketplaceName: 'other' }), true);
 });
 
-test('isOwnedMarker: 不正な形（null/文字列/空オブジェクト）は false', () => {
-  assert.equal(isOwnedMarker(null), false);
-  assert.equal(isOwnedMarker('x'), false);
-  assert.equal(isOwnedMarker({}), false);
+test('isOwnedAgentSkillsMarker: legacy（P3-A）の devin marker は所有扱いしない', () => {
+  assert.equal(isOwnedAgentSkillsMarker({ schema: 1, managedBy: 'devrelay', provider: 'devin', kind: 'skill', skillName: 'x' }), false);
 });
 
-test('buildSkillMarker: 入力どおりに組み立てる', () => {
+test('isOwnedAgentSkillsMarker: 不正な形（null/文字列/空オブジェクト）は false', () => {
+  assert.equal(isOwnedAgentSkillsMarker(null), false);
+  assert.equal(isOwnedAgentSkillsMarker('x'), false);
+  assert.equal(isOwnedAgentSkillsMarker({}), false);
+});
+
+test('isOwnedLegacyDevinMarker: P3-A marker（provider=devin, kind=skill）は true', () => {
+  assert.equal(isOwnedLegacyDevinMarker({ schema: 1, managedBy: 'devrelay', provider: 'devin', kind: 'skill', skillName: 'x' }), true);
+});
+
+test('isOwnedLegacyDevinMarker: 新配布先の marker（provider=agent-skills）は false（取り違え防止）', () => {
+  assert.equal(isOwnedLegacyDevinMarker({ schema: 1, managedBy: 'devrelay', adapter: AGENT_SKILLS_MARKER_ADAPTER, provider: 'agent-skills', kind: 'standard', skillName: 'x' }), false);
+});
+
+test('buildSkillMarker: 新 marker（agent-skills-standard）を組み立てる', () => {
   const m = buildSkillMarker({
     marketplaceName: 'devrelay', marketplaceSource: 'x/y', pluginId: 'access-migration',
     pluginVersion: '0.1.0', skillName: 'access-to-csharp', sourceCommit: 'abc', contentHash: 'sha256:def', nowIso: '2026-09-15T00:00:00.000Z',
   });
   assert.equal(m.schema, 1);
   assert.equal(m.managedBy, 'devrelay');
-  assert.equal(m.provider, 'devin');
-  assert.equal(m.kind, 'skill');
+  assert.equal(m.adapter, AGENT_SKILLS_MARKER_ADAPTER);
+  assert.equal(m.provider, 'agent-skills');
+  assert.equal(m.kind, 'standard');
   assert.equal(m.skillName, 'access-to-csharp');
-  assert.equal(isOwnedMarker(m), true);
+  assert.equal(isOwnedAgentSkillsMarker(m), true);
+  assert.equal(isOwnedLegacyDevinMarker(m), false);
 });
 
 // ---- decideSkillActionFast / decideSkillActionSlow ----
@@ -260,12 +332,12 @@ test('decideSkillActionFast: 宛先はあるが marker 無し/非所有 → conf
 });
 
 test('decideSkillActionFast: sourceCommit 一致で present（fast path）', () => {
-  const marker = { schema: 1, managedBy: 'devrelay', provider: 'devin', kind: 'skill', skillName: 'x', sourceCommit: 'abc' };
+  const marker = { schema: 1, managedBy: 'devrelay', provider: 'agent-skills', kind: 'standard', skillName: 'x', sourceCommit: 'abc' };
   assert.equal(decideSkillActionFast(true, marker, 'abc'), 'present');
 });
 
 test('decideSkillActionFast: sourceCommit 不一致なら needs-comparison', () => {
-  const marker = { schema: 1, managedBy: 'devrelay', provider: 'devin', kind: 'skill', skillName: 'x', sourceCommit: 'old' };
+  const marker = { schema: 1, managedBy: 'devrelay', provider: 'agent-skills', kind: 'standard', skillName: 'x', sourceCommit: 'old' };
   assert.equal(decideSkillActionFast(true, marker, 'new'), 'needs-comparison');
 });
 
@@ -355,6 +427,68 @@ test('canPerformRemoval: ok / skipped-empty-items のみ true', () => {
   assert.equal(canPerformRemoval('manifest-invalid'), false);
   assert.equal(canPerformRemoval('devin-not-found'), false);
   assert.equal(canPerformRemoval('git-not-found'), false);
+  assert.equal(canPerformRemoval('missing-marketplace-config'), false);
+});
+
+// ---- decideLegacyMigration（§5-4 移行ゲート。T5相当の純関数版） ----
+
+test('decideLegacyMigration: legacy に所有ディレクトリが無ければ no-legacy', () => {
+  assert.equal(decideLegacyMigration({ hasLegacyOwnedDir: false, canRemove: true, newInstallSucceeded: true, newMarkerVerified: true }), 'no-legacy');
+});
+
+test('decideLegacyMigration: canRemove が false なら keep-legacy（索引取得失敗時は一切触らない）', () => {
+  assert.equal(decideLegacyMigration({ hasLegacyOwnedDir: true, canRemove: false, newInstallSucceeded: true, newMarkerVerified: true }), 'keep-legacy');
+});
+
+test('decideLegacyMigration: 新配布先への install が失敗していれば keep-legacy', () => {
+  assert.equal(decideLegacyMigration({ hasLegacyOwnedDir: true, canRemove: true, newInstallSucceeded: false, newMarkerVerified: true }), 'keep-legacy');
+});
+
+test('decideLegacyMigration: marker 再読込検証が偽なら keep-legacy', () => {
+  assert.equal(decideLegacyMigration({ hasLegacyOwnedDir: true, canRemove: true, newInstallSucceeded: true, newMarkerVerified: false }), 'keep-legacy');
+});
+
+test('decideLegacyMigration: 4条件すべて真なら remove-legacy', () => {
+  assert.equal(decideLegacyMigration({ hasLegacyOwnedDir: true, canRemove: true, newInstallSucceeded: true, newMarkerVerified: true }), 'remove-legacy');
+});
+
+// ---- buildRuntimeDiagnostics（§5-6 診断。T12） ----
+
+test('buildRuntimeDiagnostics: Devin 検出 + Codex 設定あり', () => {
+  const s = buildRuntimeDiagnostics([
+    { label: 'Devin', detected: true, basis: 'runtime-detection', version: '3000.6.7' },
+    { label: 'Codex', detected: true, basis: 'config-presence' },
+  ]);
+  assert.equal(s, 'Devin 3000.6.7 検出 / Codex: 設定あり');
+});
+
+test('buildRuntimeDiagnostics: Devin 未検出 + Codex 設定なし', () => {
+  const s = buildRuntimeDiagnostics([
+    { label: 'Devin', detected: false, basis: 'runtime-detection' },
+    { label: 'Codex', detected: false, basis: 'config-presence' },
+  ]);
+  assert.equal(s, 'Devin 未検出 / Codex: 設定なし');
+});
+
+test('buildRuntimeDiagnostics: Devin 検出 + Codex 設定なし（混在）', () => {
+  const s = buildRuntimeDiagnostics([
+    { label: 'Devin', detected: true, basis: 'runtime-detection', version: '3000.6.7' },
+    { label: 'Codex', detected: false, basis: 'config-presence' },
+  ]);
+  assert.equal(s, 'Devin 3000.6.7 検出 / Codex: 設定なし');
+});
+
+test('buildRuntimeDiagnostics: Devin 未検出 + Codex 設定あり（混在）', () => {
+  const s = buildRuntimeDiagnostics([
+    { label: 'Devin', detected: false, basis: 'runtime-detection' },
+    { label: 'Codex', detected: true, basis: 'config-presence' },
+  ]);
+  assert.equal(s, 'Devin 未検出 / Codex: 設定あり');
+});
+
+test('buildRuntimeDiagnostics: version が無い runtime-detection でも「検出」表記になる', () => {
+  const s = buildRuntimeDiagnostics([{ label: 'Devin', detected: true, basis: 'runtime-detection', version: null }]);
+  assert.equal(s, 'Devin 検出');
 });
 
 // ---- resolveFailureIds ----

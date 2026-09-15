@@ -409,3 +409,114 @@ test('configDelivered が false のまま（旧 server 相当）→ config null 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].status, 'skipped');
 });
+
+// -----------------------------------------------------------------------------
+// サイクルP3-B §5-3（T11・最重要の回帰テスト）: normalizeCapabilityItems() 配線後、
+// legacy devin:skill items だけの config でも agent-skills:standard が「covered」になり、
+// cleanup パス（破壊的な再撤去呼び出し）の対象にならないことを保証する。
+// -----------------------------------------------------------------------------
+
+test('正規化後のtargets: legacy devin:skill items だけ → agent-skills:standard adapter が正規化済み items で呼ばれる', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('agent-skills', 'standard', {
+    hasManagedState: async () => true,
+    machineResult: emptyPluginResult({ provider: 'agent-skills', kind: 'standard', installed: ['context7/doc-lookup'] }),
+  });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({
+    providers: { claude: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } },
+    items: [{ provider: 'devin', kind: 'skill', id: 'context7/doc-lookup' }],
+  });
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 1);
+  assert.deepEqual(machineCalls[0].items, [{ provider: 'agent-skills', kind: 'standard', id: 'context7/doc-lookup' }]);
+  assert.equal(sent[0].status, 'done');
+});
+
+test('回帰ガード（最重要）: legacy items のみでも agent-skills:standard は covered になり、cleanup による2回目呼び出し（items:[]の再撤去）が起きない', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('agent-skills', 'standard', {
+    hasManagedState: async () => true,
+    machineResult: emptyPluginResult({ provider: 'agent-skills', kind: 'standard', installed: ['context7/doc-lookup'] }),
+  });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({
+    providers: {},
+    items: [{ provider: 'devin', kind: 'skill', id: 'context7/doc-lookup' }],
+  });
+  captureOutcomes();
+
+  await requestReconcile('manual');
+
+  // covered なら呼び出しは 1 回だけ（cleanup パスによる items:[] の破壊的再呼び出しが無い）
+  assert.equal(machineCalls.length, 1);
+  assert.notDeepEqual(machineCalls[0].items, []);
+});
+
+test('正規化後のtargets: legacy items と canonical items が混在しても同一キーに統合される（2件とも渡る）', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('agent-skills', 'standard', {
+    hasManagedState: async () => true,
+    machineResult: emptyPluginResult({ provider: 'agent-skills', kind: 'standard' }),
+  });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({
+    providers: {},
+    items: [
+      { provider: 'devin', kind: 'skill', id: 'legacy-one' },
+      { provider: 'agent-skills', kind: 'standard', id: 'canonical-one' },
+    ],
+  });
+  captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 1);
+  assert.equal(machineCalls[0].items.length, 2);
+  assert.deepEqual(
+    machineCalls[0].items.map((i) => i.id).sort(),
+    ['canonical-one', 'legacy-one'],
+  );
+});
+
+test('正規化後のtargets: providers.devin（legacy な設定キー）が残っていても registry に devin:* が無いので targets に混入しない', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('agent-skills', 'standard', {
+    hasManagedState: async () => true,
+    machineResult: emptyPluginResult({ provider: 'agent-skills', kind: 'standard' }),
+  });
+  registerCapabilityAdapter(adapter); // agent-skills:standard のみ登録（devin:* は登録しない）
+  setCapabilityConfig({
+    providers: { devin: { marketplaceName: 'devrelay', marketplaceSource: 'x/y' } },
+    items: [{ provider: 'devin', kind: 'skill', id: 'context7' }],
+  });
+  const sent = captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 1);
+  assert.equal(sent[0].results.length, 1);
+  assert.equal(sent[0].results[0].provider, 'agent-skills');
+});
+
+test('正規化後のtargets: canonical items のみ（legacy 無し）でも従来どおり動く（非退行確認）', async () => {
+  clearCapabilityAdapters();
+  const { adapter, machineCalls } = makeFakeManagedAdapter('agent-skills', 'standard', {
+    hasManagedState: async () => true,
+    machineResult: emptyPluginResult({ provider: 'agent-skills', kind: 'standard' }),
+  });
+  registerCapabilityAdapter(adapter);
+  setCapabilityConfig({
+    providers: {},
+    items: [{ provider: 'agent-skills', kind: 'standard', id: 'context7/doc-lookup' }],
+  });
+  captureOutcomes();
+
+  await requestReconcile('manual');
+
+  assert.equal(machineCalls.length, 1);
+  assert.deepEqual(machineCalls[0].items, [{ provider: 'agent-skills', kind: 'standard', id: 'context7/doc-lookup' }]);
+});

@@ -5,28 +5,33 @@
  * v1 で UI が編集できるのは `providers.claude`（Marketplace name/source + plugin id タグ入力）だけ。
  * Provider 選択 UI（Claude/Codex/Devin）は置かない。将来 provider が増えたときはこのファイルに
  * 変換関数を追加するだけで済む構造にする（Server/DB/WS には手を入れない）。
+ *
+ * サイクルP3-B §5-1/§5-7: `devin:skill` provider opt-in（チェックボックス）は廃止した。
+ * 索引宣言（`providers.claude`）を単一情報源として流用し、plugin id を 1 つ登録すれば
+ * `claude:plugin`（Claude Code には plugin として）と `agent-skills:standard`
+ * （Devin/Codex 等には Agent Skills 標準として）の items を**常に両方**生成する。
+ * ツール別の opt-in チェックボックスという UI 概念自体が無くなったため、
+ * `CapabilityConfigFormState.distributeToDevin` は削除した（型ごと廃止。@deprecated 経由の
+ * 後方互換は shared 側の `providers.devin` 型にのみ残す）。
  */
 
-/** UI フォームが保持する編集対象の状態（Claude セクション + Devin 配布チェックボックス） */
+/** UI フォームが保持する編集対象の状態（Claude セクションのみ） */
 export interface CapabilityConfigFormState {
   marketplaceName: string;
   marketplaceSource: string;
   /** bare 名（例: 'unity'）の配列。表示時は `${id}@${marketplaceName}` に補完する */
   pluginIds: string[];
-  /**
-   * サイクルP3-A: 「Devin にも配布する」チェックボックスの状態。
-   * true のとき、marketplace 設定は claude/devin 両方の provider に複製され、
-   * items も plugin ごとに `{provider:'claude',kind:'plugin'}` と `{provider:'devin',kind:'skill'}` の
-   * 両方が生成される。
-   */
-  distributeToDevin: boolean;
 }
 
 /** `capabilityConfig`（Server 保存形）の最小形（`@devrelay/shared` の `CapabilityConfig` と構造互換） */
 export interface CapabilityConfigLike {
   providers: {
     claude?: { marketplaceName: string; marketplaceSource: string };
-    /** サイクルP3-A: devin:skill adapter 用（claude と同じ2フィールドのみ） */
+    /**
+     * @deprecated サイクルP3-B §5-7: ツール別 opt-in の概念自体を廃止した。
+     * 新規保存では二度と生成しない。旧 DB 値の読み取り互換のためだけに型を残す
+     * （`capabilityConfigToFormState` はこのキーを一切参照しない）。
+     */
     devin?: { marketplaceName: string; marketplaceSource: string };
   };
   items: Array<{ provider: string; kind: string; id: string }>;
@@ -39,11 +44,12 @@ function nonEmptyTrimmed(values: string[]): string[] {
 
 /**
  * サーバー保存済みの `capabilityConfig`（null = 未設定）を UI フォーム初期値に変換する。
- * v1 で扱うのは provider=claude/kind=plugin の item のみ（他 provider の item があっても無視する）。
+ * pluginIds の抽出元は `{provider:'claude',kind:'plugin'}` の item のみ（`agent-skills:standard` 側は
+ * 同じ id が並行して入っているだけなので二重カウントしない。旧 `devin:skill` item も無視する）。
  */
 export function capabilityConfigToFormState(config: CapabilityConfigLike | null): CapabilityConfigFormState {
   if (!config) {
-    return { marketplaceName: '', marketplaceSource: '', pluginIds: [], distributeToDevin: false };
+    return { marketplaceName: '', marketplaceSource: '', pluginIds: [] };
   }
   const claude = config.providers.claude;
   const pluginIds = config.items
@@ -53,8 +59,6 @@ export function capabilityConfigToFormState(config: CapabilityConfigLike | null)
     marketplaceName: claude?.marketplaceName ?? '',
     marketplaceSource: claude?.marketplaceSource ?? '',
     pluginIds,
-    // サイクルP3-A: providers.devin キーの有無だけでチェックボックス状態を復元する（items 側は見ない）
-    distributeToDevin: config.providers.devin !== undefined,
   };
 }
 
@@ -75,6 +79,12 @@ export type CapabilityFormValidation =
  * marketplaceName/marketplaceSource の片方だけが入力されている状態、または
  * pluginIds はあるのに marketplace が両方とも空の状態は、中途半端な設定として保存せず invalid を返す。
  * 3 つとも空なら「未設定」= `null`（機能 OFF、既存設定のクリア）として有効に扱う。
+ *
+ * サイクルP3-B §5-1/§5-7: `pluginIds` から `claude:plugin` と `agent-skills:standard` の items を
+ * **常に両方**生成する（ツール別 opt-in は廃止）。`providers` に生成するのは `claude` のみ
+ * （索引宣言は `providers.claude` を単一情報源として流用し、`providers.devin`/`providers['agent-skills']`
+ * のような provider 別チェックボックスは復活させない＝ server 側 `capability-config-rules.ts` の
+ * 「provider ごとに marketplaceName/marketplaceSource を必須にする」検証を一切変更せずに済む）。
  */
 export function validateCapabilityForm(state: CapabilityConfigFormState): CapabilityFormValidation {
   const marketplaceName = state.marketplaceName.trim();
@@ -95,20 +105,15 @@ export function validateCapabilityForm(state: CapabilityConfigFormState): Capabi
     return { ok: false, error: 'marketplace-required-for-plugins' };
   }
 
-  // サイクルP3-A: 「Devin にも配布する」がチェックされていれば providers.devin と devin:skill items を複製する。
-  // devin: undefined のキー自体を生やさない（既存の deepEqual テストとの互換のため spread で条件付加）。
-  // 順序は claude → devin で固定する（claude 単独ケースの既存アサーションをバイト等価に保つため）。
-  const devinEnabled = state.distributeToDevin === true;
   return {
     ok: true,
     config: {
       providers: {
         claude: { marketplaceName, marketplaceSource },
-        ...(devinEnabled ? { devin: { marketplaceName, marketplaceSource } } : {}),
       },
       items: [
         ...pluginIds.map(id => ({ provider: 'claude', kind: 'plugin', id })),
-        ...(devinEnabled ? pluginIds.map(id => ({ provider: 'devin', kind: 'skill', id })) : []),
+        ...pluginIds.map(id => ({ provider: 'agent-skills', kind: 'standard', id })),
       ],
     },
   };
@@ -116,7 +121,41 @@ export function validateCapabilityForm(state: CapabilityConfigFormState): Capabi
 
 /** タグ表示用に bare 名へ marketplace 修飾子を補完する（例: 'unity' → 'unity@devrelay'） */
 export function formatPluginTag(id: string, marketplaceName: string): string {
-  return marketplaceName ? `${id}@${marketplaceName}` : id;
+  if (!marketplaceName) return id;
+  const suffix = `@${marketplaceName}`;
+  // サイクルP3-B §5-9(b): 既に `@<marketplaceName>` で終わっていれば二重に付与しない
+  return id.endsWith(suffix) ? id : `${id}${suffix}`;
+}
+
+/** `normalizePluginIdInput` の結果（`ok:false` の reason で UI の警告文言を出し分ける） */
+export type NormalizePluginIdResult =
+  | { ok: true; id: string }
+  | { ok: false; reason: 'empty' | 'duplicate' };
+
+/**
+ * サイクルP3-B §5-9(a): plugin id 追加欄からの生入力を正規化する（web 入力時の多重防御・第1段）。
+ * 1. trim
+ * 2. 末尾が `@<marketplaceName>` なら 1 回だけ剥がして bare id 化する（`context7@devrelay` → `context7`）
+ * 3. 剥がした結果が空なら `reason:'empty'` で reject
+ * 4. `existingIds`（現在のタグ一覧）に既に同じ bare id があれば `reason:'duplicate'` で reject（追加しない）
+ *
+ * 既に DB に入ってしまっている二重サフィックス値（`foo@mp@mp`）はここでは救わない（末尾一致は1回だけ剥がす
+ * ため素通りする）。それは表示側 `formatPluginTag` と Agent 側 `buildQualifiedPluginId` の多重防御で吸収する。
+ */
+export function normalizePluginIdInput(
+  raw: string,
+  marketplaceName: string,
+  existingIds: string[] = [],
+): NormalizePluginIdResult {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, reason: 'empty' };
+
+  const suffix = marketplaceName.trim() ? `@${marketplaceName.trim()}` : '';
+  const stripped = suffix && trimmed.endsWith(suffix) ? trimmed.slice(0, -suffix.length).trim() : trimmed;
+  if (!stripped) return { ok: false, reason: 'empty' };
+
+  if (existingIds.includes(stripped)) return { ok: false, reason: 'duplicate' };
+  return { ok: true, id: stripped };
 }
 
 // -----------------------------------------------------------------------------
@@ -133,7 +172,11 @@ export interface CapabilityResultLike {
   present: string[];
   failed: Array<{ id: string; reason: string }>;
   notAllowed: string[];
-  /** サイクルP3-A: 撤去した管理下 ID（純加算・非空のときだけ存在） */
+  /**
+   * 撤去した管理下 ID（純加算・非空のときだけ存在）。
+   * サイクルP3-B §5-4/§4: `agent-skills:standard` の legacy 回収分は `legacy:<pluginId>/<skillName>` の
+   * prefix 付きで載る（新配布先からの削除と区別できるようにする。集計上は removedCount に合算する）。
+   */
   removed?: string[];
 }
 
@@ -170,8 +213,12 @@ export interface SyncStatusDisplay {
     receivedAt: string;
     installedCount: number;
     updatedCount: number;
+    /** サイクルP3-B §5-10: 「配布されたのか present（既に配布済みで無変更）なのか」を区別できるようにする */
+    presentCount: number;
     failedCount: number;
     notAllowedCount: number;
+    /** サイクルP3-B §5-10: legacy 回収分も含めた撤去件数（prefix 付きの詳細は perProvider/results 側で見る） */
+    removedCount: number;
     trigger: string;
   };
   /** kind==='error' のときだけ埋まる failed 明細（最大 MAX_FAILURE_DETAILS 件。総数は summary.failedCount） */
@@ -185,33 +232,43 @@ export interface SyncStatusDisplay {
    */
   emptyTargets?: true;
   /**
-   * サイクルP3-A §3-8: `results.length > 1` のときだけ生やす provider 別の内訳。
-   * 1 件のときは既存の集計行（summary）と同じ情報になるため付けない（既存テストの形状回帰ガード）。
+   * `results.length >= 1` のときに生やす provider 別の内訳。
+   * サイクルP3-B §5-10: 従来は `results.length > 1` のときだけだったが、provider が
+   * 常に 2 つ（`claude:plugin` + `agent-skills:standard`）になったため 1 件でも出すよう条件を撤去した
+   * （cleanup-only 等で results が 1 件だけになる応答でも breakdown を隠さない）。
    */
   perProvider?: Array<{
     provider: string;
     kind: string;
     installedCount: number;
     updatedCount: number;
+    presentCount: number;
     failedCount: number;
     notAllowedCount: number;
     removedCount: number;
+    /**
+     * サイクルP3-B §5-6/§5-10: 配布判断には一切影響しない診断専用の文字列（例:
+     * `"Devin 3000.6.7 検出 / Codex 設定なし"`）。`runtimeVersion` が null の provider は undefined。
+     */
+    runtimeDiagnostics?: string;
   }>;
 }
 
 /**
- * `results.length > 1` のときだけ provider 別の内訳配列を作る（純関数）。1 件以下なら undefined。
+ * provider 別の内訳配列を作る（純関数）。`results` が 0 件のときだけ undefined。
  */
 function buildPerProviderBreakdown(results: CapabilityResultLike[]): SyncStatusDisplay['perProvider'] {
-  if (results.length <= 1) return undefined;
+  if (results.length === 0) return undefined;
   return results.map(r => ({
     provider: r.provider,
     kind: r.kind,
     installedCount: r.installed.length,
     updatedCount: r.updated.length,
+    presentCount: r.present.length,
     failedCount: r.failed.length,
     notAllowedCount: r.notAllowed.length,
     removedCount: r.removed?.length ?? 0,
+    ...(r.runtimeVersion ? { runtimeDiagnostics: r.runtimeVersion } : {}),
   }));
 }
 
@@ -236,9 +293,20 @@ export function decideSyncStatusDisplay(
   }
   const installedCount = status.results.reduce((sum, r) => sum + r.installed.length, 0);
   const updatedCount = status.results.reduce((sum, r) => sum + r.updated.length, 0);
+  const presentCount = status.results.reduce((sum, r) => sum + r.present.length, 0);
   const failedCount = status.results.reduce((sum, r) => sum + r.failed.length, 0);
   const notAllowedCount = status.results.reduce((sum, r) => sum + r.notAllowed.length, 0);
-  const summary = { receivedAt: status.receivedAt, installedCount, updatedCount, failedCount, notAllowedCount, trigger: status.trigger };
+  const removedCount = status.results.reduce((sum, r) => sum + (r.removed?.length ?? 0), 0);
+  const summary = {
+    receivedAt: status.receivedAt,
+    installedCount,
+    updatedCount,
+    presentCount,
+    failedCount,
+    notAllowedCount,
+    removedCount,
+    trigger: status.trigger,
+  };
   const perProvider = buildPerProviderBreakdown(status.results);
 
   if (status.status === 'skipped') {

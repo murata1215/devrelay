@@ -18,6 +18,7 @@ import {
   decidePrelaunchStatus,
   PRELAUNCH_DEFERRED_REASONS,
   resolveCleanupKeys,
+  normalizeCapabilityItems,
 } from '../dist/services/capability-rules.js';
 
 // ---- aiToolToCapabilityProvider ----
@@ -434,4 +435,63 @@ test('decidePrelaunchStatus: updated 単独でも done', () => {
 
 test('decidePrelaunchStatus: notAllowed 単独でも done', () => {
   assert.equal(decidePrelaunchStatus([baseResult({ notAllowed: ['a@devrelay'] })]), 'done');
+});
+
+// ---- normalizeCapabilityItems（サイクルP3-B §5-3: legacy devin:skill → agent-skills:standard）----
+
+test('normalizeCapabilityItems: devin:skill は agent-skills:standard に読み替えられる（id は不変）', () => {
+  const result = normalizeCapabilityItems([item('devin', 'skill', 'context7')]);
+  assert.deepEqual(result, [{ provider: 'agent-skills', kind: 'standard', id: 'context7' }]);
+});
+
+test('normalizeCapabilityItems: 既に canonical な agent-skills:standard は不変', () => {
+  const input = [item('agent-skills', 'standard', 'context7')];
+  const result = normalizeCapabilityItems(input);
+  assert.deepEqual(result, input);
+});
+
+test('normalizeCapabilityItems: 未知の provider/kind はそのまま返す', () => {
+  const input = [item('claude', 'plugin', 'context7'), item('codex', 'mcp', 'x')];
+  const result = normalizeCapabilityItems(input);
+  assert.deepEqual(result, input);
+});
+
+test('normalizeCapabilityItems: 空配列は空配列', () => {
+  assert.deepEqual(normalizeCapabilityItems([]), []);
+});
+
+test('normalizeCapabilityItems: 配列でない入力は空配列を返す（fail-safe）', () => {
+  assert.deepEqual(normalizeCapabilityItems(undefined), []);
+  assert.deepEqual(normalizeCapabilityItems(null), []);
+});
+
+test('normalizeCapabilityItems: legacy と canonical と未知の混在配列を順序保持で正規化する', () => {
+  const input = [
+    item('devin', 'skill', 'a'),
+    item('claude', 'plugin', 'b'),
+    item('devin', 'skill', 'c'),
+  ];
+  const result = normalizeCapabilityItems(input);
+  assert.deepEqual(result, [
+    { provider: 'agent-skills', kind: 'standard', id: 'a' },
+    { provider: 'claude', kind: 'plugin', id: 'b' },
+    { provider: 'agent-skills', kind: 'standard', id: 'c' },
+  ]);
+});
+
+test('normalizeCapabilityItems: 元の配列・要素を破壊しない（非破壊）', () => {
+  const original = item('devin', 'skill', 'context7');
+  const input = [original];
+  normalizeCapabilityItems(input);
+  assert.deepEqual(original, { provider: 'devin', kind: 'skill', id: 'context7' });
+});
+
+test('normalizeCapabilityItems: devin:skill 以外の devin kind は読み替えない', () => {
+  const input = [item('devin', 'other-kind', 'x')];
+  assert.deepEqual(normalizeCapabilityItems(input), input);
+});
+
+test('normalizeCapabilityItems: 1件のみでも配列で返す', () => {
+  const result = normalizeCapabilityItems([item('devin', 'skill', 'only')]);
+  assert.equal(result.length, 1);
 });

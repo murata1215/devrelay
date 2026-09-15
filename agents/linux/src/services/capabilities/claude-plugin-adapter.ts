@@ -38,6 +38,8 @@ import {
   parseMarketplaceListJson,
   evaluateMarketplaceList,
   isPluginNotInIndexError,
+  hasUserScopedInstall,
+  buildQualifiedPluginId,
   type ParsedPluginEntry,
   type KnownMarketplaceEntry,
   type BlocklistEntry,
@@ -61,6 +63,14 @@ function blocklistPath(): string {
 /** `~/.claude/settings.json`（user scope）の絶対パス */
 function userSettingsPath(): string {
   return path.join(os.homedir(), '.claude', 'settings.json');
+}
+
+/**
+ * `~/.claude/plugins/installed_plugins.json`（D-1 実測）の絶対パス。
+ * `~/.claude/settings.json`（有効化状態=present 判定）とは役割が異なるため混ぜない（§5-8）。
+ */
+function installedPluginsPath(): string {
+  return path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
 }
 
 /** `<projectPath>/.claude/settings.json`（project scope）の絶対パス */
@@ -251,9 +261,9 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: ClaudeP
 
   // §8.1-6: project/local にしか無いものを present と誤認しないため、user scope だけで判定する
   const maps: ScopeEnabledMaps = { user: userEnabled, project: {}, local: {} };
-  const desiredIds = ctx.items.map(item => `${item.id}@${marketplaceName}`);
+  const desiredIds = ctx.items.map(item => buildQualifiedPluginId(item.id, marketplaceName));
   const diff = computeInstallDiff(desiredIds, maps);
-  const idToItem = new Map(ctx.items.map(item => [`${item.id}@${marketplaceName}`, item]));
+  const idToItem = new Map(ctx.items.map(item => [buildQualifiedPluginId(item.id, marketplaceName), item]));
 
   // まだ user scope に存在しない（未 install または disabled で scope 不明扱いのもの含む）→ install
   for (const fullId of [...diff.toInstall, ...diff.disabledNeedsEnable]) {
@@ -264,8 +274,18 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: ClaudeP
       continue;
     }
     const installResult = await deps.runClaude(claudePath, ['plugin', 'install', fullId, '--scope', 'user'], cwd);
-    if (installResult.ok) result.installed.push(fullId);
-    else result.failed.push({ id: fullId, reason: installResult.error ?? 'install-failed' });
+    if (!installResult.ok) {
+      result.failed.push({ id: fullId, reason: installResult.error ?? 'install-failed' });
+      continue;
+    }
+    // §5-8: exit 0 は「CLI が落ちなかった」ことしか意味しない。installed_plugins.json を再読込して
+    // user scope のエントリが実在することを確認できたときだけ installed として報告する（D-1）。
+    const installedJson = await deps.readJson(installedPluginsPath());
+    if (hasUserScopedInstall(installedJson, fullId)) {
+      result.installed.push(fullId);
+    } else {
+      result.failed.push({ id: fullId, reason: 'install-verify-failed' });
+    }
   }
 
   // 既に user scope に存在するもの → update を試み、版が変わったかで updated/present を分ける

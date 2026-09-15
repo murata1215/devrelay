@@ -1,30 +1,38 @@
 /**
- * サイクル P3-A: Devin native skill capability の I/O 層（provider=devin, kind=skill の唯一の実装）。
+ * サイクル P3-B: Agent Skills 標準 capability（`agent-skills:standard`）の I/O 層。
  *
- * `git`/Devin CLI 呼び出し・marketplace リポジトリの clone/fetch・skill ツリーのコピー/削除を
- * **すべてここに閉じ込める**（共通層 `capability-sync.ts` は本ファイルの存在を知らず、
- * `CapabilityAdapter` インタフェース越しにしか呼ばない）。判断ロジックは全て
- * `devin-skill-rules.ts`（外部 import ゼロの純関数）に委譲し、ここではファイル I/O・CLI 実行・
- * オーケストレーションだけを行う。`claude-plugin-adapter.ts` と同じ deps 注入形にし、
- * テストで spawn ゼロの fake deps に差し替えられるようにする。
+ * サイクル P3-A で `devin:skill`（Devin という「ツール名」に紐づく adapter）として実装したものを、
+ * 配布フォーマット単位の adapter へ昇格したもの（`devin-skill-adapter.ts` からのリネーム改造）。
+ * 配布先は `~/.agents/skills/<name>/SKILL.md`（Agent Skills 標準。Devin CLI と Codex の両方が読む）。
+ * 索引宣言は `ctx.config.providers.claude`（Claude adapter と同じ marketplace 索引）を単一情報源として
+ * 流用する（D-5: server 側の再構築ロジックが `providers.<key>` を `marketplaceName`/`marketplaceSource`
+ * 必須の既知2フィールドにしか通さないため、新しい top-level キーを足すと server 変更が必要になる）。
  *
- * 承認ノート #6: Devin CLI 未検出時の早期 return は active reconcile（install/update/present）
- * のみに適用する。`ctx.items.length === 0`（provider OFF や `capabilityConfig` 全体 null による
- * cleanup 呼び出し）は git/Devin CLI を一切呼ばず、filesystem 操作（marker 走査 + 削除）だけで
- * 撤去を完了する。
+ * `git`/marketplace リポジトリの clone/fetch・skill ツリーのコピー/削除を**すべてここに閉じ込める**
+ * （共通層 `capability-sync.ts` は本ファイルの存在を知らず、`CapabilityAdapter` インタフェース越しにしか
+ * 呼ばない）。判断ロジックは全て `agent-skills-rules.ts`（外部 import ゼロの純関数）に委譲し、
+ * ここではファイル I/O・CLI 実行・オーケストレーションだけを行う。`claude-plugin-adapter.ts` と
+ * 同じ deps 注入形にし、テストで spawn ゼロの fake deps に差し替えられるようにする。
  *
- * 承認ノート #8（CRITICAL RULE）: marketplace の clone/fetch/manifest 解析失敗時は
- * desired state を確定できなかったものとして撤去を一切行わず、既存 managed skill を
- * last-known-good として保持し `failed` を報告する（`devin-skill-rules.ts` の
- * `canPerformRemoval()` で判定を 1 箇所に集約）。
+ * 承認ノート #6（P3-A）: `ctx.items.length === 0`（provider OFF や `capabilityConfig` 全体 null による
+ * cleanup 呼び出し）は git CLI を一切呼ばず、filesystem 操作（marker 走査 + 削除）だけで撤去を完了する。
+ * 承認ノート #8（P3-A CRITICAL RULE）: marketplace の clone/fetch/manifest 解析失敗時は desired state を
+ * 確定できなかったものとして撤去を一切行わず、既存 managed skill を last-known-good として保持し
+ * `failed` を報告する（`canPerformRemoval()` で判定を 1 箇所に集約）。
+ * 承認ノート #9（P3-A）: 宛先と同名の非管理ディレクトリは上書きも削除もせず `failed` として報告する。
  *
- * 承認ノート #9: 宛先と同名の非管理ディレクトリは上書きも削除もせず `failed` として報告する。
+ * サイクル P3-B §5-4（新規・最重要）: legacy（P3-A が `%APPDATA%\devin\skills` 等に作った managed 状態）
+ * の回収は「新配布先への install/update が成功し、書き込んだ marker を再読込して確認できた skill」
+ * だけに限定する（`decideLegacyMigration()`）。索引取得失敗時（last-known-good 維持中）は legacy にも
+ * 一切触らない。
+ * サイクル P3-B §5-6: ランタイム検出（Devin `--version` / Codex 設定有無）は**配布判断から完全に
+ * 切り離し**、`CapabilityResult.runtimeVersion` に表示専用の診断文字列を入れるだけに使う。
  */
-import { writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
+import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import * as os from 'os';
-import type { CapabilityResult, CapabilityDevinProviderConfig } from '@devrelay/shared';
+import type { CapabilityResult, CapabilityClaudeProviderConfig } from '@devrelay/shared';
 import { resolveSystemDevin, resolveDevinRuntimeVersion } from '../devin-path.js';
 import type { CapabilityAdapter, CapabilityCtx } from '../capability-sync.js';
 import { getConfigDir } from '../config.js';
@@ -43,53 +51,66 @@ import {
   type CopyTreeResult,
 } from './skill-tree-io.js';
 import {
-  resolveDevinSkillsDirPath,
+  resolveAgentSkillsDirPath,
+  resolveLegacyDevinSkillsDirPath,
   resolveGitCloneUrl,
   resolvePluginSourceRelPath,
   sanitizeMarketplaceDirName,
+  stripMarketplaceSuffix,
   allocateGitTimeoutMs,
   GIT_TOTAL_BUDGET_MS,
   parseMarketplaceManifest,
   parsePluginManifest,
-  isOwnedMarker,
+  isOwnedAgentSkillsMarker,
+  isOwnedLegacyDevinMarker,
   buildSkillMarker,
   decideSkillActionFast,
   decideSkillActionSlow,
   buildDesiredSkillPlan,
   decideRemovals,
   canPerformRemoval,
+  decideLegacyMigration,
+  buildRuntimeDiagnostics,
   resolveFailureIds,
   SKILL_TREE_MAX_BYTES,
   SKILL_TREE_MAX_FILES,
   SKILL_TREE_MAX_DEPTH,
-  type ResolveDevinSkillsDirResult,
+  type ResolveSkillsDirResult,
   type DesiredSkillPluginInput,
   type DesiredSkillEntry,
   type SkillMarker,
   type IndexOutcome,
-} from './devin-skill-rules.js';
+} from './agent-skills-rules.js';
 import { nextUniqueSuffix } from '../atomic-write.js';
 
 // -----------------------------------------------------------------------------
 // deps 注入（テストで CLI/git 呼び出しを spawn ゼロで検証できるようにする）
 // -----------------------------------------------------------------------------
 
-/** `devin-skill-adapter.ts` が使う外部依存の束（テストでは全て fake に差し替える） */
-export interface DevinSkillDeps {
-  /** 既定: `devin-path.js` の `resolveSystemDevin` */
+/** `agent-skills-adapter.ts` が使う外部依存の束（テストでは全て fake に差し替える） */
+export interface AgentSkillsDeps {
+  /** 既定: `devin-path.js` の `resolveSystemDevin`（§5-6: 診断専用。配布判断には使わない） */
   resolveDevinPath: () => string | null;
   /** 既定: `git-cli.js` の `resolveSystemGit` */
   resolveGitPath: () => string | null;
   /** 既定: `git-cli.js` の `execFileGitRunner`（cwd 必須） */
   runGit: GitCliRunner;
-  /** 既定: `devin-path.js` の `resolveDevinRuntimeVersion`（モジュール内 6 時間キャッシュ付き） */
+  /** 既定: `devin-path.js` の `resolveDevinRuntimeVersion`（モジュール内 6 時間キャッシュ付き。診断専用） */
   resolveRuntimeVersion: (devinPath: string) => Promise<string | null>;
+  /**
+   * サイクル P3-B §5-6: `config.aiTools[name]` が設定されているかどうかだけを見る（spawn ゼロ）。
+   * Codex には locator が存在しない（D-3）ため、ランタイム検出ではなく設定有無で診断する。
+   * 既定実装は `connection.ts` が `setAiToolsSnapshot()` で注入したスナップショットを参照する。
+   */
+  hasAiTool: (name: string) => boolean;
   /** JSON ファイルを読んでパースする。存在しない/壊れている場合は null（throw しない） */
   readJson: (filePath: string) => Promise<unknown>;
   /** marketplace clone の親ディレクトリの基点。既定 `getConfigDir()`（`claude-plugin-adapter.ts` と同じ流儀） */
   machineCwd: () => string;
-  /** Devin CLI のグローバル skills ディレクトリを解決する（純関数のラッパー） */
-  resolveSkillsDir: () => ResolveDevinSkillsDirResult;
+  /** Agent Skills 標準の新配布先ディレクトリを解決する（純関数のラッパー） */
+  resolveSkillsDir: () => ResolveSkillsDirResult;
+  /** legacy（P3-A Devin 専用）の移行元ディレクトリを解決する（移行スキャン専用） */
+  resolveLegacySkillsDir: () => ResolveSkillsDirResult;
   /** symlink 安全な再帰コピー */
   copyTree: (src: string, dest: string, limits: TreeLimits) => Promise<CopyTreeResult>;
   /** 決定的な再帰 sha256 */
@@ -123,15 +144,33 @@ function defaultMachineCwd(): string {
   return os.homedir();
 }
 
+/**
+ * サイクル P3-B §5-6: `connection.ts` から `config.aiTools` のスナップショットを注入するための DI。
+ * Agent 起動時・再接続時に `connectToServer()` が更新する（診断専用・spawn ゼロ・配布判断に非関与）。
+ * 未注入時は「設定なし」として扱う（fail-safe）。
+ */
+let aiToolsSnapshot: Record<string, unknown> | null = null;
+
+/** `connection.ts` が呼ぶセッター。テストでは呼ばず、直接 fake deps の `hasAiTool` を差し替える */
+export function setAiToolsSnapshot(aiTools: Record<string, unknown> | null | undefined): void {
+  aiToolsSnapshot = aiTools ?? null;
+}
+
+function defaultHasAiTool(name: string): boolean {
+  return Boolean(aiToolsSnapshot && Object.prototype.hasOwnProperty.call(aiToolsSnapshot, name));
+}
+
 /** 本番用の既定 deps */
-export const defaultDeps: DevinSkillDeps = {
+export const defaultDeps: AgentSkillsDeps = {
   resolveDevinPath: resolveSystemDevin,
   resolveGitPath: resolveSystemGit,
   runGit: execFileGitRunner,
   resolveRuntimeVersion: resolveDevinRuntimeVersion,
+  hasAiTool: defaultHasAiTool,
   readJson: readJsonSafe,
   machineCwd: defaultMachineCwd,
-  resolveSkillsDir: () => resolveDevinSkillsDirPath({ platform: process.platform, env: process.env, homeDir: os.homedir() }),
+  resolveSkillsDir: () => resolveAgentSkillsDirPath({ platform: process.platform, env: process.env, homeDir: os.homedir() }),
+  resolveLegacySkillsDir: () => resolveLegacyDevinSkillsDirPath({ platform: process.platform, env: process.env, homeDir: os.homedir() }),
   copyTree: copyTreeSafe,
   hashTree,
   atomicSwap: atomicSwapDir,
@@ -147,27 +186,31 @@ export const defaultDeps: DevinSkillDeps = {
 };
 
 function emptyResult(): CapabilityResult {
-  return { provider: 'devin', kind: 'skill', runtimeVersion: null, installed: [], updated: [], present: [], failed: [], notAllowed: [] };
+  return { provider: 'agent-skills', kind: 'standard', runtimeVersion: null, installed: [], updated: [], present: [], failed: [], notAllowed: [] };
 }
 
 // -----------------------------------------------------------------------------
-// marker 走査・削除の共通ヘルパ
+// marker 走査・削除の共通ヘルパ（新配布先/legacy 共通。predicate だけ差し替える）
 // -----------------------------------------------------------------------------
 
-/** `skillsDir` 直下を走査し、devrelay 管理下（`isOwnedMarker`）の skill 名 → marker を返す */
-async function scanOwnedSkills(deps: DevinSkillDeps, skillsDir: string): Promise<Map<string, SkillMarker>> {
+/** `skillsDir` 直下を走査し、`isOwned` が真の skill 名 → marker を返す */
+async function scanOwnedSkills(
+  deps: AgentSkillsDeps,
+  skillsDir: string,
+  isOwned: (data: unknown) => data is SkillMarker,
+): Promise<Map<string, SkillMarker>> {
   const names = await deps.listDirNames(skillsDir);
   const owned = new Map<string, SkillMarker>();
   for (const name of names) {
     const data = await deps.readJson(join(skillsDir, name, '.devrelay-capability.json'));
-    if (isOwnedMarker(data)) owned.set(name, data);
+    if (isOwned(data)) owned.set(name, data);
   }
   return owned;
 }
 
 /** `names` を 1 件ずつ削除し、成功したものだけ `removedIds` に積む（失敗は failed へ） */
 async function performRemovals(
-  deps: DevinSkillDeps,
+  deps: AgentSkillsDeps,
   skillsDir: string,
   names: string[],
   result: CapabilityResult,
@@ -183,24 +226,103 @@ async function performRemovals(
   }
 }
 
-/**
- * `ctx.items` が空のときの cleanup-only 経路（承認ノート#6）。
- * git/Devin CLI を一切呼ばず、marker 走査 + 削除だけで完結する。desired = 空集合のため
- * managed（marker 所有）な skill はすべて撤去対象になる。
- */
-async function finalizeCleanupOnly(
-  deps: DevinSkillDeps,
-  skillsDir: string,
-  result: CapabilityResult,
-  removedIds: string[],
-): Promise<void> {
-  await deps.cleanupResidue(skillsDir);
-  const ownedMarkers = await scanOwnedSkills(deps, skillsDir);
-  await performRemovals(deps, skillsDir, Array.from(ownedMarkers.keys()), result, removedIds);
+/** 新配布先に書き込んだ marker を読み直し、`isOwnedAgentSkillsMarker()` が真であることを確認する */
+async function verifyWrittenMarker(deps: AgentSkillsDeps, skillsDir: string, skillName: string): Promise<boolean> {
+  try {
+    const data = await deps.readJson(join(skillsDir, skillName, '.devrelay-capability.json'));
+    return isOwnedAgentSkillsMarker(data);
+  } catch {
+    return false;
+  }
 }
 
 // -----------------------------------------------------------------------------
-// marketplace リポジトリの clone/fetch（§3-1）
+// §5-4: legacy（P3-A）からの移行
+// -----------------------------------------------------------------------------
+
+interface MigrateLegacyInput {
+  /** 今回のサイクルで desired だった skill 名一覧（`plan.desired` 由来。cleanup-only なら空配列） */
+  desiredSkillNames: string[];
+  /** 今回のサイクルで新配布先への install/update/present/refresh-marker が成功した skill 名 */
+  installedThisCycle: Set<string>;
+  /** 今回のサイクルで新配布先の marker 再読込検証ができた skill 名 */
+  markerVerifiedThisCycle: Set<string>;
+  /** `canPerformRemoval(indexOutcome)`（索引取得が last-known-good を維持できているか） */
+  canRemove: boolean;
+}
+
+/**
+ * legacy dir（P3-A が `%APPDATA%\devin\skills` 等に作った managed 状態）をスキャンし、
+ * `decideLegacyMigration()` が `remove-legacy` を返した skill だけ削除する。
+ * - desired にある skill: 新配布先への install/update が成功し marker 再検証も通った場合のみ削除
+ * - desired に無い skill（config から外れた/cleanup-only）: `canRemove` が真であれば削除
+ * marker が無い/他者 marker/読めないディレクトリには一切触らない。
+ */
+async function migrateLegacyDevinSkills(
+  deps: AgentSkillsDeps,
+  result: CapabilityResult,
+  removedIds: string[],
+  input: MigrateLegacyInput,
+): Promise<void> {
+  const legacyDirResult = deps.resolveLegacySkillsDir();
+  if (!legacyDirResult.ok) return;
+  const legacyDir = legacyDirResult.dir;
+
+  let legacyNames: string[];
+  try {
+    legacyNames = await deps.listDirNames(legacyDir);
+  } catch {
+    return;
+  }
+  if (legacyNames.length === 0) return;
+
+  const desiredSet = new Set(input.desiredSkillNames);
+
+  for (const name of legacyNames) {
+    const data = await deps.readJson(join(legacyDir, name, '.devrelay-capability.json'));
+    if (!isOwnedLegacyDevinMarker(data)) continue;
+
+    const isDesiredThisCycle = desiredSet.has(name);
+    const decision = decideLegacyMigration({
+      hasLegacyOwnedDir: true,
+      canRemove: input.canRemove,
+      newInstallSucceeded: isDesiredThisCycle ? input.installedThisCycle.has(name) : true,
+      newMarkerVerified: isDesiredThisCycle ? input.markerVerifiedThisCycle.has(name) : true,
+    });
+    if (decision !== 'remove-legacy') continue;
+
+    const marker = data as SkillMarker;
+    const displayId = marker.pluginId ? `${marker.pluginId}/${name}` : name;
+    try {
+      await deps.removeManagedDir(join(legacyDir, name));
+      removedIds.push(`legacy:${displayId}`);
+    } catch (err) {
+      result.failed.push({ id: `legacy:${displayId}`, reason: (err as Error)?.message || 'remove-failed' });
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// §5-6: ランタイム診断（配布判断には非関与。表示専用）
+// -----------------------------------------------------------------------------
+
+/**
+ * サイクル P3-B §5-6・承認ノート#2: Devin は実機検出（`--version`）、Codex は
+ * `config.aiTools.codex` の設定有無で診断文字列を組み立てる（判定根拠が異なるため語彙も変える）。
+ * `ctx.items.length === 0` のときは呼ばない（無駄な spawn をしない）。
+ */
+async function buildDiagnostics(deps: AgentSkillsDeps): Promise<string> {
+  const devinPath = deps.resolveDevinPath();
+  const devinVersion = devinPath ? await deps.resolveRuntimeVersion(devinPath) : null;
+  const codexConfigured = deps.hasAiTool('codex');
+  return buildRuntimeDiagnostics([
+    { label: 'Devin', detected: Boolean(devinPath), basis: 'runtime-detection', version: devinVersion },
+    { label: 'Codex', detected: codexConfigured, basis: 'config-presence' },
+  ]);
+}
+
+// -----------------------------------------------------------------------------
+// marketplace リポジトリの clone/fetch（P3-A §3-1）
 // -----------------------------------------------------------------------------
 
 /**
@@ -210,7 +332,7 @@ async function finalizeCleanupOnly(
  * 存在確認は `deps.listDirNames()` のみで行う（fake deps でも spawn ゼロで検証できるようにするため）。
  */
 async function ensureMarketplaceClone(
-  deps: DevinSkillDeps,
+  deps: AgentSkillsDeps,
   cloneParentDir: string,
   dirName: string,
   gitPath: string,
@@ -259,11 +381,11 @@ const COPY_FAILURE_REASON: Record<string, string> = {
 };
 
 async function installOrUpdateSkill(
-  deps: DevinSkillDeps,
+  deps: AgentSkillsDeps,
   sourceSkillDir: string,
   entry: DesiredSkillEntry,
   indexCommit: string | null,
-  providerConfig: CapabilityDevinProviderConfig,
+  providerConfig: CapabilityClaudeProviderConfig,
   skillsDir: string,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const suffix = deps.uniqueSuffix();
@@ -311,21 +433,20 @@ async function installOrUpdateSkill(
 /**
  * machine scope の reconcile。
  *
- * - `ctx.items.length === 0`: cleanup-only 経路（承認ノート#6）。git/Devin CLI を呼ばず
- *   filesystem 操作だけで managed skill を全撤去する。
- * - それ以外: providerConfig 確認 → Devin CLI 検出 → git 検出 → marketplace clone/fetch →
- *   manifest 解析 → 1 plugin ずつ desired skill 一覧を構築 → 1 skill ずつ install/update/present
- *   を判定・実行 → 最後に非desiredな managed skill を撤去する
- *   （承認ノート#8: clone/fetch/manifest 解析が失敗した場合はここまで到達せず、既存 skill は
- *   last-known-good のまま保持される）。
+ * - `ctx.items.length === 0`: cleanup-only 経路（承認ノート#6）。git CLI を呼ばず filesystem 操作
+ *   だけで新配布先 + legacy 両方の managed skill を撤去する。
+ * - それ以外: `providers.claude` 索引宣言確認 → git 検出 → marketplace clone/fetch → manifest 解析 →
+ *   1 plugin ずつ desired skill 一覧を構築 → 1 skill ずつ install/update/present を判定・実行 →
+ *   非desired な managed skill を撤去 → legacy 移行判定（承認ノート#8: clone/fetch/manifest 解析が
+ *   失敗した場合はここまで到達せず、既存 skill も legacy も last-known-good のまま保持される）。
  */
-export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSkillDeps): Promise<CapabilityResult> {
+export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: AgentSkillsDeps): Promise<CapabilityResult> {
   const result = emptyResult();
   const removedIds: string[] = [];
 
   const skillsDirResult = deps.resolveSkillsDir();
   if (!skillsDirResult.ok) {
-    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'devin:skill')) {
+    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'agent-skills:standard')) {
       result.failed.push({ id, reason: `skills-dir-${skillsDirResult.reason}` });
     }
     return result;
@@ -333,31 +454,39 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
   const skillsDir = skillsDirResult.dir;
 
   if (ctx.items.length === 0) {
-    await finalizeCleanupOnly(deps, skillsDir, result, removedIds);
+    // 承認ノート#6: cleanup-only 経路。診断は行わない（無駄な spawn をしない）
+    await deps.cleanupResidue(skillsDir);
+    const ownedMarkers = await scanOwnedSkills(deps, skillsDir, isOwnedAgentSkillsMarker);
+    await performRemovals(deps, skillsDir, Array.from(ownedMarkers.keys()), result, removedIds);
+
+    await migrateLegacyDevinSkills(deps, result, removedIds, {
+      desiredSkillNames: [],
+      installedThisCycle: new Set(),
+      markerVerifiedThisCycle: new Set(),
+      canRemove: canPerformRemoval('skipped-empty-items'),
+    });
+
     if (removedIds.length > 0) result.removed = removedIds;
     return result;
   }
 
-  const providerConfig: CapabilityDevinProviderConfig | undefined = ctx.config.providers.devin;
+  // §5-6: 診断（配布判断には非関与）
+  result.runtimeVersion = await buildDiagnostics(deps);
+
+  const providerConfig: CapabilityClaudeProviderConfig | undefined = ctx.config.providers.claude;
   if (!providerConfig) {
-    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'devin:skill')) {
-      result.failed.push({ id, reason: 'missing-provider-config' });
+    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'agent-skills:standard')) {
+      result.failed.push({ id, reason: 'missing-marketplace-config' });
     }
     return result;
   }
 
-  const devinPath = deps.resolveDevinPath();
-  if (!devinPath) {
-    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'devin:skill')) {
-      result.failed.push({ id, reason: 'devin-not-found' });
-    }
-    return result;
-  }
-  result.runtimeVersion = await deps.resolveRuntimeVersion(devinPath);
+  // §5-9(c): item id の二重サフィックス防御（web 側の正規化が効いていない古い DB 値対策）
+  const strippedItems = ctx.items.map(i => ({ ...i, id: stripMarketplaceSuffix(i.id, providerConfig.marketplaceName) }));
 
   const gitPath = deps.resolveGitPath();
   if (!gitPath) {
-    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'devin:skill')) {
+    for (const id of resolveFailureIds(strippedItems.map(i => i.id), 'agent-skills:standard')) {
       result.failed.push({ id, reason: 'git-not-found' });
     }
     return result;
@@ -365,7 +494,7 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
 
   const urlResult = resolveGitCloneUrl(providerConfig.marketplaceSource);
   if (!urlResult.ok) {
-    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'devin:skill')) {
+    for (const id of resolveFailureIds(strippedItems.map(i => i.id), 'agent-skills:standard')) {
       result.failed.push({ id, reason: 'unsupported-source-format' });
     }
     return result;
@@ -384,8 +513,8 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
     urlResult.url,
   );
   if (!cloneOutcome.ok) {
-    // 承認ノート#8: desired state 未確定 → 撤去しない。既存 managed skill は last-known-good のまま
-    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'devin:skill')) {
+    // 承認ノート#8: desired state 未確定 → 撤去しない（新配布先・legacy とも last-known-good のまま）
+    for (const id of resolveFailureIds(strippedItems.map(i => i.id), 'agent-skills:standard')) {
       result.failed.push({ id, reason: 'clone-failed' });
     }
     return result;
@@ -395,7 +524,7 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
   const manifest = parseMarketplaceManifest(await deps.readJson(join(cloneDir, '.claude-plugin', 'marketplace.json')));
   if (!manifest) {
     // 承認ノート#8: manifest 解析失敗 → 撤去しない
-    for (const id of resolveFailureIds(ctx.items.map(i => i.id), 'devin:skill')) {
+    for (const id of resolveFailureIds(strippedItems.map(i => i.id), 'agent-skills:standard')) {
       result.failed.push({ id, reason: 'manifest-invalid' });
     }
     return result;
@@ -404,7 +533,7 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
   // 1 plugin ずつ desired plan 構築の入力を集める（plugin.json 読み取り + skills/ 一覧）
   const pluginInputs: DesiredSkillPluginInput[] = [];
   const pluginSkillsRoot = new Map<string, string>();
-  for (const item of ctx.items) {
+  for (const item of strippedItems) {
     const manifestEntry = manifest.plugins.find(p => p.name === item.id) ?? null;
     if (!manifestEntry) {
       pluginInputs.push({ pluginId: item.id, manifestEntry: null, pluginJsonVersion: null, skillDirNames: [] });
@@ -437,7 +566,11 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
   result.failed.push(...plan.failed);
 
   const allDestNames = new Set(await deps.listDirNames(skillsDir));
-  const ownedMarkers = await scanOwnedSkills(deps, skillsDir);
+  const ownedMarkers = await scanOwnedSkills(deps, skillsDir, isOwnedAgentSkillsMarker);
+
+  // §5-4: legacy 移行ゲートに使う「今回のサイクルで新配布先が確定した skill」の追跡
+  const installedThisCycle = new Set<string>();
+  const markerVerifiedThisCycle = new Set<string>();
 
   for (const entry of plan.desired) {
     const marker = ownedMarkers.get(entry.skillName) ?? null;
@@ -446,11 +579,13 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
 
     if (action === 'conflict-unmanaged') {
       // 承認ノート#9: 同名の非管理ディレクトリは上書きも削除もしない
-      result.failed.push({ id: entry.resultId, reason: 'dest-occupied-unmanaged' });
+      result.failed.push({ id: entry.resultId, reason: 'unmanaged-conflict' });
       continue;
     }
     if (action === 'present') {
       result.present.push(entry.resultId);
+      installedThisCycle.add(entry.skillName);
+      markerVerifiedThisCycle.add(entry.skillName); // scanOwnedSkills で既に isOwnedAgentSkillsMarker 検証済み
       continue;
     }
 
@@ -458,8 +593,13 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
 
     if (action === 'install') {
       const outcome = await installOrUpdateSkill(deps, sourceSkillDir, entry, indexCommit, providerConfig, skillsDir);
-      if (outcome.ok) result.installed.push(entry.resultId);
-      else result.failed.push({ id: entry.resultId, reason: outcome.reason });
+      if (outcome.ok) {
+        result.installed.push(entry.resultId);
+        installedThisCycle.add(entry.skillName);
+        if (await verifyWrittenMarker(deps, skillsDir, entry.skillName)) markerVerifiedThisCycle.add(entry.skillName);
+      } else {
+        result.failed.push({ id: entry.resultId, reason: outcome.reason });
+      }
       continue;
     }
 
@@ -473,8 +613,13 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
     );
     if (slowAction === 'update') {
       const outcome = await installOrUpdateSkill(deps, sourceSkillDir, entry, indexCommit, providerConfig, skillsDir);
-      if (outcome.ok) result.updated.push(entry.resultId);
-      else result.failed.push({ id: entry.resultId, reason: outcome.reason });
+      if (outcome.ok) {
+        result.updated.push(entry.resultId);
+        installedThisCycle.add(entry.skillName);
+        if (await verifyWrittenMarker(deps, skillsDir, entry.skillName)) markerVerifiedThisCycle.add(entry.skillName);
+      } else {
+        result.failed.push({ id: entry.resultId, reason: outcome.reason });
+      }
       continue;
     }
     // refresh-marker: 内容は同一だが commit のみ変化 → marker だけ差し替えて present 扱い
@@ -491,6 +636,8 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
     try {
       await deps.writeMarker(join(skillsDir, entry.skillName, '.devrelay-capability.json'), refreshed);
       result.present.push(entry.resultId);
+      installedThisCycle.add(entry.skillName);
+      markerVerifiedThisCycle.add(entry.skillName);
     } catch {
       result.failed.push({ id: entry.resultId, reason: 'marker-refresh-failed' });
     }
@@ -498,11 +645,20 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
 
   // desired state が確定した（clone/fetch/manifest 解析が成功した）ので撤去を実行してよい
   const indexOutcome: IndexOutcome = 'ok';
-  if (canPerformRemoval(indexOutcome)) {
+  const canRemove = canPerformRemoval(indexOutcome);
+  if (canRemove) {
     const desiredNames = plan.desired.map(d => d.skillName);
     const toRemove = decideRemovals(Array.from(ownedMarkers.keys()), desiredNames);
     await performRemovals(deps, skillsDir, toRemove, result, removedIds);
   }
+
+  // §5-4: legacy（P3-A）からの移行。新配布先の成功を確認できた skill だけ legacy を回収する
+  await migrateLegacyDevinSkills(deps, result, removedIds, {
+    desiredSkillNames: plan.desired.map(d => d.skillName),
+    installedThisCycle,
+    markerVerifiedThisCycle,
+    canRemove,
+  });
 
   if (removedIds.length > 0) result.removed = removedIds;
   return result;
@@ -516,7 +672,7 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: DevinSk
 export async function reconcileProjectWithDeps(
   _ctx: CapabilityCtx,
   _projectPath: string,
-  _deps: DevinSkillDeps,
+  _deps: AgentSkillsDeps,
 ): Promise<CapabilityResult> {
   return emptyResult();
 }
@@ -526,28 +682,39 @@ export async function reconcileProjectWithDeps(
 // -----------------------------------------------------------------------------
 
 /**
- * このマシンに devrelay 管理下の skill が 1 件でも残っているかを判定する。
+ * このマシンに devrelay 管理下の skill が 1 件でも残っているかを判定する
+ * （新配布先 **または** legacy のどちらかに 1 件でもあれば true）。
  * throw / 例外は false 扱い（fail-closed: 判定できないなら破壊的操作をしない）。
  */
-export async function hasManagedStateWithDeps(deps: DevinSkillDeps): Promise<boolean> {
+export async function hasManagedStateWithDeps(deps: AgentSkillsDeps): Promise<boolean> {
   try {
     const skillsDirResult = deps.resolveSkillsDir();
-    if (!skillsDirResult.ok) return false;
-    const owned = await scanOwnedSkills(deps, skillsDirResult.dir);
-    return owned.size > 0;
+    if (skillsDirResult.ok) {
+      const owned = await scanOwnedSkills(deps, skillsDirResult.dir, isOwnedAgentSkillsMarker);
+      if (owned.size > 0) return true;
+    }
   } catch {
-    return false;
+    // fall through to legacy check
   }
+  try {
+    const legacyDirResult = deps.resolveLegacySkillsDir();
+    if (legacyDirResult.ok) {
+      const owned = await scanOwnedSkills(deps, legacyDirResult.dir, isOwnedLegacyDevinMarker);
+      if (owned.size > 0) return true;
+    }
+  } catch {
+    // fall through
+  }
+  return false;
 }
 
 /**
- * Devin native skill adapter 本体（`capability-sync.ts` の `registerCapabilityAdapter()` に登録する）。
- * `hasManagedState` は `CapabilityAdapter` インタフェースへの optional 追加（D4）を先取りして実装している
- * （D4 がインタフェースへ `hasManagedState?()` を追加するまでは余剰プロパティとして無害に存在する）。
+ * Agent Skills 標準 adapter 本体（`capability-sync.ts` の `registerCapabilityAdapter()` に登録する）。
+ * `hasManagedState` は `CapabilityAdapter` インタフェースへの optional 追加（P3-A D4）を使う。
  */
-export const devinSkillAdapter: CapabilityAdapter & { hasManagedState: () => Promise<boolean> } = {
-  provider: 'devin',
-  kind: 'skill',
+export const agentSkillsAdapter: CapabilityAdapter & { hasManagedState: () => Promise<boolean> } = {
+  provider: 'agent-skills',
+  kind: 'standard',
   reconcileMachine: (ctx) => reconcileMachineWithDeps(ctx, defaultDeps),
   reconcileProject: (ctx, projectPath) => reconcileProjectWithDeps(ctx, projectPath, defaultDeps),
   hasManagedState: () => hasManagedStateWithDeps(defaultDeps),

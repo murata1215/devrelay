@@ -1,9 +1,30 @@
-# DevRelay Capability 配布基盤 指示書 v2.2（サイクル P1〜P3-A）
+# DevRelay Capability 配布基盤 指示書 v2.3（サイクル P1〜P3-B）
 
-- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）／改訂: 2026-09-15（v2.2、サイクル P3-A）
+- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）／改訂: 2026-09-15（v2.2、サイクル P3-A）／改訂: 2026-09-15（v2.3、サイクル P3-B）
 - 対象: devrelay 本体（`/opt/devrelay`, projectId `cmm5tpzil0042f3p2ieotnow4`）
-- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの。v2.2 はサイクル P3-A で 2 つ目の provider×kind 実装（`devin:skill`）を追加し、provider×kind 抽象を実証したもの
+- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの。v2.2 はサイクル P3-A で 2 つ目の provider×kind 実装（`devin:skill`）を追加し、provider×kind 抽象を実証したもの。v2.3 はサイクル P3-B で `devin:skill` を「配布フォーマット単位」の `agent-skills:standard` に昇格し、ツール別 opt-in（`providers.devin` チェックボックス）を廃止したもの
 - 置き換え: 本書は同日の「Plugin 配布機能 指示書 v1」を Capability 抽象化で改訂したもの。2026-09-03 の「Toolkit 配布機能（レシピ実行基盤）」案は破棄
+
+## v2.3 改訂差分（サイクル P3-B、2026-09-15）
+
+P3-A の `devin:skill` は「Devin という**ツール名**」に紐づいた adapter だったが、実際に配布しているのは Claude plugin の `skills/<name>/` を **Agent Skills 標準**（`~/.agents/skills/<name>/SKILL.md`）に置くことで、この置き場は Devin CLI と Codex が**両方**読む。adapter の単位は「ツール」ではなく「**配布フォーマット**」であるべき、という設計修正。詳細な設計判断・却下案はプラン `/home/devrelay/.claude/plans/rippling-humming-tide.md` を参照。仕様書としての差分は以下:
+
+1. **§2 の用語修正（capability はツール非依存）**: `provider='devin' / kind='skill'` を廃止し、`provider='agent-skills' / kind='standard'`（registry key `agent-skills:standard`）に昇格した。ファイルは `capabilities/agent-skills-{rules,adapter}.ts`（`devin-skill-{rules,adapter}.ts` からリネーム改造）。この adapter は「Agent Skills 標準という配布フォーマット」の実装であり、特定ツール名を冠さない。
+2. **§7.x 配布先解決**: `resolveAgentSkillsDirPath({env,platform,home})` を新設。優先順は① `DEVRELAY_AGENT_SKILLS_DIR`（絶対パスのみ採用）→② `<home>/.agents/skills`（win32 は `%USERPROFILE%`、posix は `$HOME` 起点）。P3-A の `resolveDevinSkillsDirPath()` は `resolveLegacyDevinSkillsDirPath()` に改名し**移行スキャン専用**（`DEVRELAY_DEVIN_SKILLS_DIR` も legacy 側として維持）。
+3. **§8.x `agent-skills:standard` の手順・marker・移行**:
+   - marker は `.devrelay-capability.json` に `{version, adapter:'agent-skills-standard', provider:'agent-skills', kind:'standard', pluginId, skillName, marketplaceName, sourceSha, treeHash, installedAt}`。所有判定 `isOwnedAgentSkillsMarker(m)` は `adapter==='agent-skills-standard'` **または** (`provider==='agent-skills' && kind==='standard'`)。legacy 認識は別関数 `isOwnedLegacyDevinMarker(m)`（`provider==='devin' && kind==='skill'`、P3-A marker 形そのまま）を分離し、新配布先で legacy marker を所有扱いしない。
+   - **移行手順（`reconcileMachineWithDeps()` 末尾、`canPerformRemoval(indexOutcome)` ブランチ内）**: ① `~/.agents/skills` へ install/update（staging→rename）② 書き込んだ marker を読み直して `isOwnedAgentSkillsMarker()` を確認 ③ legacy dir を `isOwnedLegacyDevinMarker()` が真のディレクトリだけ `removeManagedDir()` ④ marker なし/他者 marker/読めない は一切触らない。**ゲート（skill 単位）**: install failed または marker 再読込 NG の skill は legacy を削除しない（last-known-good 保全）。index fetch 失敗（`canPerformRemoval` false）時は削除系すべて停止。
+   - **`normalizeCapabilityItems()`**（`capability-rules.ts` 純追加）が `{provider:'devin',kind:'skill'}` items を `{provider:'agent-skills',kind:'standard'}` に読み替える。適用箇所は `capability-sync.ts` の `resolveReconcileTargets()` 呼び出し直前の 2 箇所（`runMachineReconcile()`/`reconcileForRunner()`）のみ。`resolveReconcileTargets()`/`listConfiguredProviders()`/`resolveCleanupKeys()` は無変更（items 先行駆動が既に成立しているため、legacy items を canonical key に寄せるだけで足りる）。これが無いと旧 DB 値の `providers.devin` + `devin:skill` items が「uncovered かつ managed」として `runCleanupPass()` に消される事故になる。
+   - **ランタイム診断**（配布判断には非関与、`CapabilityResult.runtimeVersion` に格納）: Devin は実際の `devin --version` ランタイム検出（既存 `resolveSystemDevin()`/`resolveDevinRuntimeVersion()` を再利用）で「検出/未検出」。Codex は DevRelay の `aiTools` config 有無だけで判定するため文言を変え「設定あり/設定なし」とする（ランタイム検出ではないことを明示。Codex locator は未実装のため）。`items` が空（cleanup-only 経路）では診断を計算しない。
+   - `devin-not-found` / `missing-provider-config` の early return は削除（§5-6の設計により Devin 未検出でも Codex 向けに配布は続行する desired-state 原則）。新規 reason: `unmanaged-conflict`（同名 unmanaged ディレクトリ、上書き・削除しない）、`missing-marketplace-config`（`providers.claude` 未設定）。
+4. **§5-8 Claude adapter の install 検証**: machine scope の `claude plugin install <fullId> --scope user` が exit 0 でも、`~/.claude/plugins/installed_plugins.json` を再読込し `scope:'user'` のエントリが実在することを確認できたときだけ `installed` に積む（`hasUserScopedInstall()`）。検証落ちは `failed: install-verify-failed`。present 判定（`~/.claude/settings.json` の `enabledPlugins`）とは役割が異なるため混ぜない。
+5. **§5-9 item id 二重サフィックス防止（3段防御）**: (a) web 入力時 `normalizePluginIdInput(raw, marketplaceName, existingIds)` で trim→末尾 `@marketplaceName` を1回だけ剥がす→空/重複は reject、(b) 表示 `formatPluginTag()` は既に `@marketplaceName` で終わっていれば付与しない、(c) Agent 側最終防波堤 `buildQualifiedPluginId(id, marketplaceName)`（既に付与済みなら素通し）を machine scope install の id 組み立てに使う。`stripMarketplaceSuffix()` は `agent-skills-rules.ts` 側で同様の bare id 化に使う。
+6. **§9 Web**: 「Devin にも配布する」チェックボックスを廃止。`CapabilityConfigFormState.distributeToDevin` を削除し、plugin id を 1 つ登録すれば `claude:plugin` と `agent-skills:standard` の items を**常に両方**生成する（`providers` は `claude` のみ生成。索引宣言を単一情報源として流用し server 側検証器は無変更）。セクション見出しは `Capabilities`、直下に「配布先: Claude Code は plugin、Devin/Codex 等は Agent Skills 標準（`~/.agents/skills`）」を明記。内側見出しは「配布するプラグイン」。breakdown（`perProvider`）は `results.length > 1` の条件を撤去し 1 件でも表示、`presentCount`/`runtimeDiagnostics`（診断情報である旨の注記付き）を追加。`summary` にも `presentCount`/`removedCount` を追加。
+7. **`providers.devin` 廃止の後方互換**: shared 型 `CapabilityDevinProviderConfig`/`CapabilityConfig.providers.devin` は `@deprecated` コメント付きで型のみ残す（削除しない）。旧 DB → 新 Agent/新 web は `normalizeCapabilityItems()` とフォーム変換の後方互換読み取りで正しく動く。新 DB → 旧 Agent は `agent-skills:standard` が `unsupported-provider` になるだけで `claude:plugin` は無傷（ロールバック安全）。
+
+**変更ファイル**: `agents/linux/src/services/capabilities/{agent-skills-rules,agent-skills-adapter}.ts`（新規、`devin-skill-*` からリネーム改造）、`agents/linux/src/services/{capability-rules,capability-sync,connection}.ts`（変更）、`agents/linux/src/services/capabilities/claude-plugin-{rules,adapter}.ts`（変更）、`packages/shared/src/types.ts`（`@deprecated` コメントのみ）、`apps/web/src/lib/capability-config-rules.ts` + `apps/web/src/pages/MachinesPage.tsx`（変更）。**無変更**: `apps/server/**`、`prisma/**`、`agents/macos/**`、`agents/windows/**`。
+
+---
 
 ## v2.1 改訂差分（サイクル P1.3、2026-09-13）
 

@@ -23,6 +23,8 @@ import {
   evaluateMarketplaceList,
   isPluginNotInIndexError,
   PLUGIN_NOT_IN_INDEX_PATTERNS,
+  hasUserScopedInstall,
+  buildQualifiedPluginId,
 } from '../dist/services/capabilities/claude-plugin-rules.js';
 
 // ---- parsePluginListJson ----
@@ -374,4 +376,64 @@ test('isPluginNotInIndexError: 分類外の一般的なエラーは false', () =
 
 test('PLUGIN_NOT_IN_INDEX_PATTERNS: 実機確認済み文言が先頭に含まれる', () => {
   assert.ok(PLUGIN_NOT_IN_INDEX_PATTERNS.some(p => p.toLowerCase() === 'not found in marketplace'));
+});
+
+// ---- hasUserScopedInstall（サイクルP3-B §5-8: installed_plugins.json 再読込検証） ----
+
+test('hasUserScopedInstall: D-1 実機確認済み形状で scope:user のエントリが実在すれば true', () => {
+  const json = { version: 2, plugins: { 'context7@devrelay': [{ scope: 'user' }] } };
+  assert.equal(hasUserScopedInstall(json, 'context7@devrelay'), true);
+});
+
+test('hasUserScopedInstall: fullId が plugins に存在しなければ false', () => {
+  const json = { version: 2, plugins: { 'other@devrelay': [{ scope: 'user' }] } };
+  assert.equal(hasUserScopedInstall(json, 'context7@devrelay'), false);
+});
+
+test('hasUserScopedInstall: エントリはあるが scope が user 以外のみなら false', () => {
+  const json = { version: 2, plugins: { 'context7@devrelay': [{ scope: 'project' }] } };
+  assert.equal(hasUserScopedInstall(json, 'context7@devrelay'), false);
+});
+
+test('hasUserScopedInstall: 複数エントリのうち1つでも user があれば true', () => {
+  const json = { version: 2, plugins: { 'context7@devrelay': [{ scope: 'project' }, { scope: 'user' }] } };
+  assert.equal(hasUserScopedInstall(json, 'context7@devrelay'), true);
+});
+
+test('hasUserScopedInstall: json が null/未定義なら false（fail-closed）', () => {
+  assert.equal(hasUserScopedInstall(null, 'context7@devrelay'), false);
+  assert.equal(hasUserScopedInstall(undefined, 'context7@devrelay'), false);
+});
+
+test('hasUserScopedInstall: plugins が配列でない/欠落なら false', () => {
+  assert.equal(hasUserScopedInstall({}, 'context7@devrelay'), false);
+  assert.equal(hasUserScopedInstall({ plugins: 'not-an-object' }, 'context7@devrelay'), false);
+});
+
+test('hasUserScopedInstall: エントリ配列自体が空なら false', () => {
+  const json = { plugins: { 'context7@devrelay': [] } };
+  assert.equal(hasUserScopedInstall(json, 'context7@devrelay'), false);
+});
+
+test('hasUserScopedInstall: json がオブジェクトでない（文字列/数値）なら false', () => {
+  assert.equal(hasUserScopedInstall('not-json', 'context7@devrelay'), false);
+  assert.equal(hasUserScopedInstall(42, 'context7@devrelay'), false);
+});
+
+// ---- buildQualifiedPluginId（サイクルP3-B §5-9(c): id 二重サフィックス防止・Agent 側最終防波堤） ----
+
+test('buildQualifiedPluginId: bare id には marketplaceName のサフィックスを1回付与する', () => {
+  assert.equal(buildQualifiedPluginId('context7', 'devrelay'), 'context7@devrelay');
+});
+
+test('buildQualifiedPluginId: 既に @marketplaceName で終わっている id はそのまま返す（冪等）', () => {
+  assert.equal(buildQualifiedPluginId('context7@devrelay', 'devrelay'), 'context7@devrelay');
+});
+
+test('buildQualifiedPluginId: 二重サフィックス値（DB残留想定）を渡しても再付与しない', () => {
+  assert.equal(buildQualifiedPluginId('context7@devrelay@devrelay', 'devrelay'), 'context7@devrelay@devrelay');
+});
+
+test('buildQualifiedPluginId: 別マーケットプレイス名のサフィックスが付いている場合は末尾一致しないので付与する', () => {
+  assert.equal(buildQualifiedPluginId('context7@other', 'devrelay'), 'context7@other@devrelay');
 });

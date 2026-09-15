@@ -185,6 +185,40 @@ export function listConfiguredProviders(providers: Record<string, unknown> | nul
   });
 }
 
+/**
+ * サイクルP3-B §5-3: legacy な provider/kind の宣言を canonical な provider/kind に読み替える表。
+ * DB の `Machine.capabilityConfig` JSONB には人間が web を再保存するまで旧 items
+ * （`{provider:'devin',kind:'skill'}`）が残り続けるため、ここで 1 箇所にまとめて読み替える。
+ */
+const LEGACY_ITEM_REMAP: Record<string, { provider: string; kind: string }> = {
+  'devin:skill': { provider: 'agent-skills', kind: 'standard' },
+};
+
+/**
+ * サイクルP3-B §5-3（最重要）: `capabilityConfig.items` の legacy provider/kind を
+ * canonical な provider/kind に読み替える純粋関数（id は不変）。
+ *
+ * `resolveReconcileTargets()` は items 由来のターゲットを先に積む設計（P1.2 で確立済み）なので、
+ * legacy items を canonical key に寄せておくだけで「items にあれば必ず配る」が新 adapter に対しても
+ * 成立する。`resolveReconcileTargets` / `listConfiguredProviders` / `resolveCleanupKeys` は
+ * この昇格のために一切変更しない（変更すると P1.1 と同種の事故 = 全 plugin 無言スキップを踏む）。
+ * これを呼ばないと、legacy items が新 adapter から見て「uncovered だが managed」になり
+ * `runCleanupPass()` が新配布先を消してしまう（D-4）。
+ *
+ * 未知の provider/kind の item はそのまま返す（触らない）。配列以外が渡っても安全に空配列を返す。
+ */
+export function normalizeCapabilityItems(
+  items: Array<{ provider: string; kind: string; id: string }>,
+): Array<{ provider: string; kind: string; id: string }> {
+  const safeItems = Array.isArray(items) ? items : [];
+  return safeItems.map((item) => {
+    const key = `${item.provider}:${item.kind}`;
+    const remap = LEGACY_ITEM_REMAP[key];
+    if (!remap) return item;
+    return { ...item, provider: remap.provider, kind: remap.kind };
+  });
+}
+
 /** `resolveReconcileTargets` が返す 1 ターゲット分の情報 */
 export interface ReconcileTarget {
   provider: string;

@@ -22,6 +22,7 @@ function localSettingsPath(p) { return path.join(p, '.claude', 'settings.local.j
 function userSettingsPath() { return path.join(os.homedir(), '.claude', 'settings.json'); }
 function blocklistPath() { return path.join(os.homedir(), '.claude', 'plugins', 'blocklist.json'); }
 function knownMarketplacesPath() { return path.join(os.homedir(), '.claude', 'plugins', 'known_marketplaces.json'); }
+function installedPluginsPath() { return path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'); }
 
 const okResult = (stdout = '') => ({ ok: true, stdout, stderr: '', code: 0, killed: false });
 const errResult = (overrides = {}) => ({ ok: false, stdout: '', stderr: '', code: 1, killed: false, error: 'error', ...overrides });
@@ -483,6 +484,111 @@ test('要件5 fail-open: requestMachineReconcile が undefined でも throw し�
   });
 
   await assert.doesNotReject(reconcileProjectWithDeps(baseCtx(), projectPath, deps));
+});
+
+// -----------------------------------------------------------------------------
+// サイクルP3-B §5-8: machine scope の install 検証（installed_plugins.json 再読込）
+// サイクルP3-B §5-9(c): item id 二重サフィックス防止（Agent 側最終防波堤）
+// -----------------------------------------------------------------------------
+
+test('§5-8: install 成功 + installed_plugins.json に scope:user のエントリあり → installed に載る', async () => {
+  const fullId = 'unity@devrelay';
+  const { deps, calls } = makeFakeDeps({
+    jsonFiles: {
+      [knownMarketplacesPath()]: { devrelay: { source: { repo: 'murata1215/devrelay-plugins' } } },
+      [userSettingsPath()]: {},
+      [blocklistPath()]: [],
+      [installedPluginsPath()]: { version: 2, plugins: { [fullId]: [{ scope: 'user' }] } },
+    },
+    onCall: (args) => {
+      if (args[0] === '--version') return okResult('2.1.263');
+      if (isPluginArgs(args, 'install')) return okResult();
+      return undefined;
+    },
+  });
+  const ctx = baseCtx({ items: [{ provider: 'claude', kind: 'plugin', id: 'unity' }] });
+
+  const result = await reconcileMachineWithDeps(ctx, deps);
+
+  assert.deepEqual(result.installed, [fullId]);
+  assert.deepEqual(result.failed, []);
+  const installCalls = calls.filter(c => isPluginArgs(c.args, 'install'));
+  assert.equal(installCalls.length, 1);
+  assert.ok(installCalls[0].args.includes('--scope'));
+  assert.equal(installCalls[0].args[installCalls[0].args.indexOf('--scope') + 1], 'user');
+});
+
+test('§5-8: install 成功でも installed_plugins.json が未検証（欠落）なら installed にせず failed(install-verify-failed)', async () => {
+  const fullId = 'unity@devrelay';
+  const { deps } = makeFakeDeps({
+    jsonFiles: {
+      [knownMarketplacesPath()]: { devrelay: { source: { repo: 'murata1215/devrelay-plugins' } } },
+      [userSettingsPath()]: {},
+      [blocklistPath()]: [],
+      // installedPluginsPath() を意図的に用意しない → readJson は null を返す
+    },
+    onCall: (args) => {
+      if (args[0] === '--version') return okResult('2.1.263');
+      if (isPluginArgs(args, 'install')) return okResult();
+      return undefined;
+    },
+  });
+  const ctx = baseCtx({ items: [{ provider: 'claude', kind: 'plugin', id: 'unity' }] });
+
+  const result = await reconcileMachineWithDeps(ctx, deps);
+
+  assert.deepEqual(result.installed, []);
+  assert.deepEqual(result.failed, [{ id: fullId, reason: 'install-verify-failed' }]);
+});
+
+test('§5-8: installed_plugins.json にエントリはあるが scope:project のみ → installed にせず failed(install-verify-failed)', async () => {
+  const fullId = 'unity@devrelay';
+  const { deps } = makeFakeDeps({
+    jsonFiles: {
+      [knownMarketplacesPath()]: { devrelay: { source: { repo: 'murata1215/devrelay-plugins' } } },
+      [userSettingsPath()]: {},
+      [blocklistPath()]: [],
+      [installedPluginsPath()]: { version: 2, plugins: { [fullId]: [{ scope: 'project' }] } },
+    },
+    onCall: (args) => {
+      if (args[0] === '--version') return okResult('2.1.263');
+      if (isPluginArgs(args, 'install')) return okResult();
+      return undefined;
+    },
+  });
+  const ctx = baseCtx({ items: [{ provider: 'claude', kind: 'plugin', id: 'unity' }] });
+
+  const result = await reconcileMachineWithDeps(ctx, deps);
+
+  assert.deepEqual(result.installed, []);
+  assert.deepEqual(result.failed, [{ id: fullId, reason: 'install-verify-failed' }]);
+});
+
+test('§5-9(c): item id が既に @marketplaceName 付きでも二重サフィックスにならない（install 呼び出しの id は1回だけ付与）', async () => {
+  const fullId = 'unity@devrelay';
+  const { deps, calls } = makeFakeDeps({
+    jsonFiles: {
+      [knownMarketplacesPath()]: { devrelay: { source: { repo: 'murata1215/devrelay-plugins' } } },
+      [userSettingsPath()]: {},
+      [blocklistPath()]: [],
+      [installedPluginsPath()]: { version: 2, plugins: { [fullId]: [{ scope: 'user' }] } },
+    },
+    onCall: (args) => {
+      if (args[0] === '--version') return okResult('2.1.263');
+      if (isPluginArgs(args, 'install')) return okResult();
+      return undefined;
+    },
+  });
+  // web 側の正規化が効いていない古い DB 値を模す（既に @devrelay 付き）
+  const ctx = baseCtx({ items: [{ provider: 'claude', kind: 'plugin', id: 'unity@devrelay' }] });
+
+  const result = await reconcileMachineWithDeps(ctx, deps);
+
+  assert.deepEqual(result.installed, [fullId]);
+  const installCalls = calls.filter(c => isPluginArgs(c.args, 'install'));
+  assert.equal(installCalls.length, 1);
+  assert.equal(installCalls[0].args[2], fullId);
+  assert.notEqual(installCalls[0].args[2], 'unity@devrelay@devrelay');
 });
 
 // -----------------------------------------------------------------------------

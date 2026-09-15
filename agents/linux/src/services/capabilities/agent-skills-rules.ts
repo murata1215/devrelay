@@ -1,19 +1,25 @@
 /**
- * サイクル P3-A: Devin native skill 配布 adapter（`devin:skill`）の純粋関数群（外部 import ゼロ）。
+ * サイクル P3-B: Agent Skills 標準 adapter（`agent-skills:standard`）の純粋関数群（外部 import ゼロ）。
+ *
+ * サイクル P3-A で `devin:skill`（Devin という「ツール名」に紐づく adapter）として実装したものを、
+ * 配布フォーマット単位の adapter へ昇格したもの（`devin-skill-rules.ts` からのリネーム改造）。
+ * 配布先は `~/.agents/skills/<name>/SKILL.md`（Agent Skills 標準。Devin CLI と Codex の両方が読む）。
  *
  * `claude-plugin-rules.ts` と同じ流儀: I/O は一切行わず、コンパイル済み dist を直接
- * `node --test` から import して単体検証する。`devin-skill-adapter.ts`（I/O 層）からのみ呼ばれる。
+ * `node --test` から import して単体検証する。`agent-skills-adapter.ts`（I/O 層）からのみ呼ばれる。
  *
  * `isSafeRelativePath()` は `git-guard-core.ts:90` と同一の判定式を意図的に再実装したもの
  * （rules ファイルは外部 import ゼロ規約のため import できない）。変更する場合は両方を確認すること。
  *
- * 承認ノート #3: skill tree の安全上限は v1 では aggregate size 20MB / files 500 / depth 16。
- * 承認ノート #7: 更新判定は sourceCommit 単独ではなく plugin.json version → marketplace entry
+ * 承認ノート #3（P3-A）: skill tree の安全上限は v1 では aggregate size 20MB / files 500 / depth 16。
+ * 承認ノート #7（P3-A）: 更新判定は sourceCommit 単独ではなく plugin.json version → marketplace entry
  * version → content hash の順（sourceCommit は marker の provenance としてのみ保持）。
+ * 承認ノート #5（P3-B）: 上記 P3-A の確認事項（移行ゲート・unmanaged 非干渉・last-known-good）は
+ * そのまま拘束力を持つ（削除も上書きもしない）。
  */
 
 // -----------------------------------------------------------------------------
-// 安全上限（承認ノート #3。定数化し単体テストする）
+// 安全上限（P3-A 承認ノート #3。定数化し単体テストする）
 // -----------------------------------------------------------------------------
 
 /** 1 skill あたりの合計バイト数上限（v1 暫定値） */
@@ -24,7 +30,7 @@ export const SKILL_TREE_MAX_FILES = 500;
 export const SKILL_TREE_MAX_DEPTH = 16;
 
 // -----------------------------------------------------------------------------
-// §3-6: Devin skills dir の OS 別パス解決
+// §5-2: 配布先ディレクトリの OS 別パス解決（新配布先 + legacy 移行元）
 // -----------------------------------------------------------------------------
 
 /** Windows の絶対パス（ドライブレター or UNC）かどうか */
@@ -50,28 +56,54 @@ function joinPosix(...parts: string[]): string {
   return cleaned.join('/');
 }
 
-export interface ResolveDevinSkillsDirInput {
+export interface ResolveSkillsDirInput {
   /** `process.platform` の値 */
   platform: string;
   /** `process.env` 相当 */
   env: Record<string, string | undefined>;
-  /** `os.homedir()` の値 */
+  /** `os.homedir()` の値（win32 では `%USERPROFILE%` 相当） */
   homeDir: string;
 }
 
-export type ResolveDevinSkillsDirResult =
+export type ResolveSkillsDirResult =
   | { ok: true; dir: string; source: 'env-override' | 'appdata' | 'xdg' | 'home-default' }
   | { ok: false; reason: 'home-missing' | 'override-not-absolute' };
 
+/** 後方互換のための型エイリアス（P3-A 由来の呼び出し元向け） */
+export type ResolveDevinSkillsDirInput = ResolveSkillsDirInput;
+export type ResolveDevinSkillsDirResult = ResolveSkillsDirResult;
+
 /**
- * Devin CLI のグローバル skills ディレクトリを解決する。
- * 1. `env.DEVRELAY_DEVIN_SKILLS_DIR` が非空なら最優先（絶対パスのときのみ採用。相対なら `ok:false` — 黙って無視しない）
+ * サイクル P3-B §5-2: Agent Skills 標準の配布先ディレクトリを解決する（新配布先。desired-state 側）。
+ * 1. `env.DEVRELAY_AGENT_SKILLS_DIR` が非空なら最優先（絶対パスのときのみ採用。相対なら `ok:false`）
+ * 2. `<home>/.agents/skills`（win32 は `%USERPROFILE%` 起点、posix は `$HOME` 起点。XDG 分岐は持たない
+ *    ― Agent Skills 標準の置き場は固定パスであり、XDG 分岐は legacy 側にのみ残す）
+ */
+export function resolveAgentSkillsDirPath(input: ResolveSkillsDirInput): ResolveSkillsDirResult {
+  const { platform, env, homeDir } = input;
+
+  const override = env.DEVRELAY_AGENT_SKILLS_DIR;
+  if (override !== undefined && override.length > 0) {
+    const isAbs = platform === 'win32' ? isAbsoluteWinPath(override) : isAbsolutePosixPath(override);
+    if (!isAbs) return { ok: false, reason: 'override-not-absolute' };
+    return { ok: true, dir: override, source: 'env-override' };
+  }
+
+  if (!homeDir) return { ok: false, reason: 'home-missing' };
+  if (platform === 'win32') {
+    return { ok: true, dir: joinWin(homeDir, '.agents', 'skills'), source: 'home-default' };
+  }
+  return { ok: true, dir: joinPosix(homeDir, '.agents', 'skills'), source: 'home-default' };
+}
+
+/**
+ * サイクル P3-B §5-2: legacy（P3-A 由来）の Devin 専用 skills ディレクトリを解決する
+ * （移行スキャン専用。新規配布には使わない）。P3-A の `resolveDevinSkillsDirPath()` を改名したもの。
+ * 1. `env.DEVRELAY_DEVIN_SKILLS_DIR` が非空なら最優先（絶対パスのときのみ採用）
  * 2. win32 → `%APPDATA%\devin\skills`（`APPDATA` 未設定なら `<home>\AppData\Roaming\devin\skills`）
  * 3. その他 → `XDG_CONFIG_HOME`（絶対のときのみ採用）→ `<home>/.config`、その下に `devin/skills`
- *
- * `providers.devin.skillsDir` は実装しない（承認ノート #4）。
  */
-export function resolveDevinSkillsDirPath(input: ResolveDevinSkillsDirInput): ResolveDevinSkillsDirResult {
+export function resolveLegacyDevinSkillsDirPath(input: ResolveSkillsDirInput): ResolveSkillsDirResult {
   const { platform, env, homeDir } = input;
 
   const override = env.DEVRELAY_DEVIN_SKILLS_DIR;
@@ -99,7 +131,7 @@ export function resolveDevinSkillsDirPath(input: ResolveDevinSkillsDirInput): Re
 }
 
 // -----------------------------------------------------------------------------
-// §3-1: 配布元 URL 変換・パス安全性
+// §3-1（P3-A）: 配布元 URL 変換・パス安全性
 // -----------------------------------------------------------------------------
 
 export type ResolveGitCloneUrlResult = { ok: true; url: string } | { ok: false; reason: 'unsupported-source-format' };
@@ -190,7 +222,23 @@ export function sanitizeMarketplaceDirName(name: string): string {
 }
 
 // -----------------------------------------------------------------------------
-// §3-1: git 呼び出し予算配分
+// §5-9: item id の二重サフィックス防止（Agent 側防御）
+// -----------------------------------------------------------------------------
+
+/**
+ * item id に既に `@<marketplaceName>` サフィックスが付いていた場合に剥がす（冪等）。
+ * items[].id は本来 bare な pluginId のはずだが、DB に残った二重サフィックス値
+ * （`foo@devrelay@devrelay` 等）の後方互換防御として使う。1 回だけ剥がす（多重サフィックスは
+ * 呼び出し側の web 正規化で防ぐため、ここでは 1 回で十分）。
+ */
+export function stripMarketplaceSuffix(id: string, marketplaceName: string): string {
+  if (typeof id !== 'string' || typeof marketplaceName !== 'string' || marketplaceName.length === 0) return id;
+  const suffix = `@${marketplaceName}`;
+  return id.endsWith(suffix) ? id.slice(0, -suffix.length) : id;
+}
+
+// -----------------------------------------------------------------------------
+// §3-1（P3-A）: git 呼び出し予算配分
 // -----------------------------------------------------------------------------
 
 /** git 呼び出し全体に許される予算（3 分の adapter 予算のうち git に割り当てる分。§7.3） */
@@ -207,7 +255,7 @@ export function allocateGitTimeoutMs(remainingMs: number, plannedCalls: number):
 }
 
 // -----------------------------------------------------------------------------
-// §5-2: marketplace.json / plugin.json のパース
+// §5-2（P3-A）: marketplace.json / plugin.json のパース
 // -----------------------------------------------------------------------------
 
 export interface MarketplacePluginEntry {
@@ -251,7 +299,7 @@ export function parsePluginManifest(data: unknown): PluginManifest | null {
   return { name: obj.name, version: typeof obj.version === 'string' ? obj.version : null };
 }
 
-/** plugin.json の version → marketplace entry の version の順で「望ましい版」を決める（承認ノート #7） */
+/** plugin.json の version → marketplace entry の version の順で「望ましい版」を決める（P3-A 承認ノート #7） */
 export function resolveDesiredPluginVersion(
   pluginJsonVersion: string | null,
   marketplaceEntryVersion: string | null,
@@ -260,12 +308,14 @@ export function resolveDesiredPluginVersion(
 }
 
 // -----------------------------------------------------------------------------
-// §3-3: marker ファイル（所有権・更新判定）
+// §5-5: marker ファイル（新配布先 = Agent Skills 標準 / legacy = P3-A Devin 専用）
 // -----------------------------------------------------------------------------
 
 export interface SkillMarker {
   schema: number;
   managedBy: string;
+  /** サイクル P3-B §5-5: 実装差し替えに耐えるための一次識別キー。新 marker は必ず持つ */
+  adapter?: string;
   provider: string;
   kind: string;
   marketplaceName?: string;
@@ -278,12 +328,34 @@ export interface SkillMarker {
   installedAt?: string;
 }
 
+/** 新 marker（Agent Skills 標準）の `adapter` 識別子 */
+export const AGENT_SKILLS_MARKER_ADAPTER = 'agent-skills-standard';
+
 /**
- * marker が devrelay 管理下の devin skill であるかを判定する（型ガード）。
- * `marketplaceName` は所有権の条件に**含めない**（索引を乗り換えた後も自分が置いた
- * 古いディレクトリを回収できるようにするため）。
+ * サイクル P3-B §5-5: marker が devrelay 管理下の Agent Skills 標準 skill であるかを判定する（型ガード）。
+ * `adapter` フィールドを一次キーとし、無ければ `provider==='agent-skills' && kind==='standard'`
+ * （前方互換の二重条件）で判定する。`marketplaceName` は所有権の条件に**含めない**
+ * （索引を乗り換えた後も自分が置いた古いディレクトリを回収できるようにするため）。
+ *
+ * legacy な P3-A marker（`provider==='devin'`）は**所有扱いしない**
+ * （新配布先に P3-A marker が存在することは有り得ず、移行コードが誤って
+ * legacy marker を新配布先の所有物とみなす事故を型レベルで防ぐ）。
  */
-export function isOwnedMarker(data: unknown): data is SkillMarker {
+export function isOwnedAgentSkillsMarker(data: unknown): data is SkillMarker {
+  if (!data || typeof data !== 'object') return false;
+  const m = data as Record<string, unknown>;
+  if (m.schema !== 1 || m.managedBy !== 'devrelay') return false;
+  if (typeof m.skillName !== 'string' || m.skillName.length === 0) return false;
+  if (m.adapter === AGENT_SKILLS_MARKER_ADAPTER) return true;
+  return m.provider === 'agent-skills' && m.kind === 'standard';
+}
+
+/**
+ * サイクル P3-B §5-5: marker が P3-A（legacy）の Devin 専用 skill 配布物であるかを判定する（型ガード）。
+ * P3-A の `isOwnedMarker()` をそのまま改名したもの（判定式は完全に同一）。**移行の削除対象判定にのみ使う**
+ * （新配布先の所有判定 = `isOwnedAgentSkillsMarker` とは別関数にすることで、両者を取り違える事故を防ぐ）。
+ */
+export function isOwnedLegacyDevinMarker(data: unknown): data is SkillMarker {
   if (!data || typeof data !== 'object') return false;
   const m = data as Record<string, unknown>;
   return (
@@ -307,13 +379,14 @@ export interface BuildSkillMarkerInput {
   nowIso: string;
 }
 
-/** marker ファイルの内容を組み立てる純関数（書き込みは呼び出し側の I/O 層が行う） */
+/** 新 marker（Agent Skills 標準）ファイルの内容を組み立てる純関数（書き込みは呼び出し側の I/O 層が行う） */
 export function buildSkillMarker(input: BuildSkillMarkerInput): SkillMarker {
   return {
     schema: 1,
     managedBy: 'devrelay',
-    provider: 'devin',
-    kind: 'skill',
+    adapter: AGENT_SKILLS_MARKER_ADAPTER,
+    provider: 'agent-skills',
+    kind: 'standard',
     marketplaceName: input.marketplaceName,
     marketplaceSource: input.marketplaceSource,
     pluginId: input.pluginId,
@@ -326,7 +399,7 @@ export function buildSkillMarker(input: BuildSkillMarkerInput): SkillMarker {
 }
 
 // -----------------------------------------------------------------------------
-// §3-3: action 判定（fast path つき2段構え）
+// §3-3（P3-A）: action 判定（fast path つき2段構え）
 // -----------------------------------------------------------------------------
 
 export type SkillActionFast = 'install' | 'conflict-unmanaged' | 'present' | 'needs-comparison';
@@ -367,11 +440,11 @@ export function decideSkillActionSlow(
 }
 
 // -----------------------------------------------------------------------------
-// §3-2/§3-4: desired plan 構築・削除判定
+// §3-2/§3-4（P3-A）: desired plan 構築・削除判定
 // -----------------------------------------------------------------------------
 
 export interface DesiredSkillPluginInput {
-  /** items[].id（= plugin 名） */
+  /** items[].id（= plugin 名。二重サフィックスは呼び出し側で `stripMarketplaceSuffix()` 済みの前提） */
   pluginId: string;
   /** marketplace.json で見つかったエントリ。見つからなければ null（→ notAllowed） */
   manifestEntry: MarketplacePluginEntry | null;
@@ -460,7 +533,7 @@ export function buildDesiredSkillPlan(inputs: DesiredSkillPluginInput[]): Desire
 
 /**
  * 現在 managed（marker 所有）な skill 名一覧のうち、desired に無いものを削除対象として返す。
- * 非管理ディレクトリはここに含めない（呼び出し側が isOwnedMarker で事前に絞り込む前提）。
+ * 非管理ディレクトリはここに含めない（呼び出し側が `isOwnedAgentSkillsMarker` で事前に絞り込む前提）。
  */
 export function decideRemovals(existingManagedNames: string[], desiredSkillNames: string[]): string[] {
   const desiredSet = new Set(desiredSkillNames);
@@ -468,7 +541,7 @@ export function decideRemovals(existingManagedNames: string[], desiredSkillNames
 }
 
 // -----------------------------------------------------------------------------
-// §3-1/§5-4 CRITICAL RULE: 索引取得結果 → 撤去可否
+// §3-1/§5-4 CRITICAL RULE（P3-A）: 索引取得結果 → 撤去可否
 // -----------------------------------------------------------------------------
 
 export type IndexOutcome =
@@ -477,15 +550,82 @@ export type IndexOutcome =
   | 'clone-failed'
   | 'manifest-invalid'
   | 'devin-not-found'
-  | 'git-not-found';
+  | 'git-not-found'
+  | 'missing-marketplace-config';
 
 /**
- * CRITICAL RULE（承認ノート #8）: marketplace clone/fetch/manifest 解析失敗、tree 検証失敗時は
+ * CRITICAL RULE（P3-A 承認ノート #8）: marketplace clone/fetch/manifest 解析失敗、tree 検証失敗時は
  * desired state を確定できなかったものとして撤去しない。`ok` と、items が空で clone 自体
  * 不要だった `skipped-empty-items`（cleanup パスの filesystem-only 実行）のみ撤去可能。
  */
 export function canPerformRemoval(outcome: IndexOutcome): boolean {
   return outcome === 'ok' || outcome === 'skipped-empty-items';
+}
+
+// -----------------------------------------------------------------------------
+// §5-4: legacy（P3-A）からの移行判定（純粋関数。実際の fs 操作は adapter 側が行う）
+// -----------------------------------------------------------------------------
+
+export type LegacyMigrationDecision = 'remove-legacy' | 'keep-legacy' | 'no-legacy';
+
+export interface DecideLegacyMigrationInput {
+  /** legacy dir にこの skill の owned（P3-A marker 所有）ディレクトリが存在するか */
+  hasLegacyOwnedDir: boolean;
+  /** 新配布先へ書き込んだ marker を読み直して `isOwnedAgentSkillsMarker()` が真だったか */
+  newMarkerVerified: boolean;
+  /** この skill の新配布先への install/update が成功したか（present も成功扱い） */
+  newInstallSucceeded: boolean;
+  /** `canPerformRemoval(indexOutcome)`（索引取得が last-known-good を維持できているか） */
+  canRemove: boolean;
+}
+
+/**
+ * サイクル P3-B §5-4: 1 skill 単位の legacy 回収可否を判定する（純粋関数）。
+ * 4 条件すべてが揃わない限り legacy を削除しない（last-known-good を保全する fail-safe）。
+ * - legacy に所有ディレクトリが無ければ `no-legacy`（触るものが無い）
+ * - `canRemove` が false（索引取得失敗等）なら `keep-legacy`
+ * - 新配布先への install/update が失敗していれば `keep-legacy`
+ * - marker 再読込検証が偽なら `keep-legacy`
+ * - すべて真なら `remove-legacy`
+ */
+export function decideLegacyMigration(input: DecideLegacyMigrationInput): LegacyMigrationDecision {
+  if (!input.hasLegacyOwnedDir) return 'no-legacy';
+  if (!input.canRemove) return 'keep-legacy';
+  if (!input.newInstallSucceeded) return 'keep-legacy';
+  if (!input.newMarkerVerified) return 'keep-legacy';
+  return 'remove-legacy';
+}
+
+// -----------------------------------------------------------------------------
+// §5-6: ランタイム診断（配布判断には非関与。表示専用の文字列組み立てのみ）
+// -----------------------------------------------------------------------------
+
+export interface RuntimeDiagnosticEntry {
+  /** 表示ラベル（例: 'Devin' / 'Codex'） */
+  label: string;
+  /** 検出/設定ありと判定されたか */
+  detected: boolean;
+  /** 判定根拠。P3-B 承認ノート#2: 根拠が異なる語彙で表現し、実機検出だと誤解させない */
+  basis: 'runtime-detection' | 'config-presence';
+  /** runtime-detection のときだけ使う版文字列（無ければ省略） */
+  version?: string | null;
+}
+
+/**
+ * サイクル P3-B §5-6（承認ノート#2）: 診断文字列を組み立てる純粋関数。
+ * Devin は実機検出（`devin --version`）、Codex は DevRelay `config.aiTools` の設定有無であり、
+ * 両者は判定根拠が異なるため**語彙を変えて**表現する（「未検出」に統一すると Codex も実機検出した
+ * ように誤解される）。配布可否には一切使わない（`CapabilityResult.runtimeVersion` に入れるだけ）。
+ */
+export function buildRuntimeDiagnostics(entries: RuntimeDiagnosticEntry[]): string {
+  return entries
+    .map((e) => {
+      if (e.basis === 'runtime-detection') {
+        return e.detected ? `${e.label} ${e.version ?? ''}`.trim() + ' 検出' : `${e.label} 未検出`;
+      }
+      return e.detected ? `${e.label}: 設定あり` : `${e.label}: 設定なし`;
+    })
+    .join(' / ');
 }
 
 // -----------------------------------------------------------------------------

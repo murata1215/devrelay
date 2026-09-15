@@ -102,13 +102,13 @@ import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile }
 // サイクルP1: Capability 配布基盤（共通層への配線。connection.ts は Claude 固有処理を一切知らない）
 import { setCapabilityConfig, setCapabilitySyncSender, requestReconcile, registerCapabilityAdapter } from './capability-sync.js';
 import { claudePluginAdapter } from './capabilities/claude-plugin-adapter.js';
-// サイクルP3-A: devin:skill adapter（2つ目の provider×kind 実装）
-import { devinSkillAdapter } from './capabilities/devin-skill-adapter.js';
+// サイクルP3-B: devin:skill から agent-skills:standard へ昇格（配布フォーマット単位の adapter）
+import { agentSkillsAdapter, setAiToolsSnapshot } from './capabilities/agent-skills-adapter.js';
 import type { AgentCapabilitySyncPayload } from '@devrelay/shared';
 
 // Capability adapter の登録（起動時 1 回。将来 Codex adapter を足すときはここに 1 行追加するだけでよい）
 registerCapabilityAdapter(claudePluginAdapter);
-registerCapabilityAdapter(devinSkillAdapter);
+registerCapabilityAdapter(agentSkillsAdapter);
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -219,6 +219,8 @@ function createProxyAgent(proxyConfig: ProxyConfig): Agent {
 
 export async function connectToServer(config: AgentConfig, projects: Project[]) {
   currentConfig = config;
+  // サイクルP3-B §5-6: Codex の診断（設定有無ベース、spawn ゼロ）用に aiTools スナップショットを注入
+  setAiToolsSnapshot(config.aiTools as unknown as Record<string, unknown>);
   // Agent 起動時にログローテーション（agent.log + 承認ログ）
   setupLogRotation().catch(err => console.error('Log rotation setup failed:', err));
   rotateApprovalLog().catch(err => console.error('Approval log rotation failed:', err));

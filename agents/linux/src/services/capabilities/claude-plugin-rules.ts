@@ -445,3 +445,49 @@ export function computeInstallDiff(desiredIds: string[], maps: ScopeEnabledMaps)
 export function resolveFailureIds(itemIds: string[], fallbackId: string): string[] {
   return itemIds.length > 0 ? itemIds : [fallbackId];
 }
+
+// -----------------------------------------------------------------------------
+// サイクルP3-B §5-8/§5-9(c): install 検証（machine scope）+ id 二重サフィックス防止
+// -----------------------------------------------------------------------------
+
+/** `~/.claude/plugins/installed_plugins.json` の 1 エントリ（実機確認済み: D-1） */
+export interface InstalledPluginEntry {
+  scope?: string;
+}
+
+/**
+ * `~/.claude/plugins/installed_plugins.json` の形状（実機確認済み: D-1）。
+ * `{"version":2,"plugins":{"<id>@<marketplace>":[{"scope":"user",...}]}}`。
+ */
+export interface InstalledPluginsJson {
+  version?: number;
+  plugins?: Record<string, InstalledPluginEntry[]>;
+}
+
+/**
+ * サイクルP3-B §5-8: machine scope の `claude plugin install <fullId> --scope user` は
+ * exit 0 でも「CLI が落ちなかった」ことしか意味しない（索引未知 ID・権限不足・別 scope への install
+ * でも exit 0 になりうる、P3-A E2E で実測）。この関数は `installed_plugins.json` を再読込した結果から
+ * `fullId` に対して `scope: 'user'` のエントリが 1 つ以上実在するかだけを判定する純粋関数。
+ * present 判定（`~/.claude/settings.json` の `enabledPlugins`）とは役割が異なるため混在させない（D-1）。
+ */
+export function hasUserScopedInstall(json: unknown, fullId: string): boolean {
+  if (typeof json !== 'object' || json === null) return false;
+  const plugins = (json as InstalledPluginsJson).plugins;
+  if (typeof plugins !== 'object' || plugins === null) return false;
+  const entries = (plugins as Record<string, unknown>)[fullId];
+  if (!Array.isArray(entries)) return false;
+  return entries.some(
+    (e) => typeof e === 'object' && e !== null && (e as InstalledPluginEntry).scope === 'user',
+  );
+}
+
+/**
+ * サイクルP3-B §5-9(c): item id が既に `@<marketplaceName>` で終わっていればそのまま返し（冪等）、
+ * そうでなければ 1 回だけ付与する。DB に残る旧い二重サフィックス値（`foo@mp@mp`）を再生産しないための
+ * Agent 側最終防波堤（web 側の入力正規化が効いていない古いレコードにも効く）。
+ */
+export function buildQualifiedPluginId(id: string, marketplaceName: string): string {
+  const suffix = `@${marketplaceName}`;
+  return id.endsWith(suffix) ? id : `${id}${suffix}`;
+}
