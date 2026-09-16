@@ -612,16 +612,43 @@ export interface RuntimeDiagnosticEntry {
 }
 
 /**
+ * サイクル P3-C（T3）: `devin --version` 等の生出力から診断文字列に埋め込む版文字列を作る純粋関数。
+ * `Devin devin 3000.6.7 (260a97c8) 検出` のような接頭辞重複を防ぐため、raw 出力の先頭に付いた
+ * label トークン（大小文字無視）を除去してから `buildRuntimeDiagnostics()` に渡す。
+ * 1. null / 空白のみ → null（「検出はできたが版が取れない」を表す。呼び出し側は `${label} 検出` にする）
+ * 2. 複数行対策として最初の非空行だけを採用して trim する
+ * 3. 先頭が label と大小文字無視で一致し、直後が空白または文字列末尾なら、その label トークンを
+ *    除去する（`^devin\s+` 等、または `devin` のみ＝版が取れない場合も含む）
+ * 4. 除去後が空なら null。80 文字超は先頭 80 文字 + `…` に丸める（payload 肥大防止）
+ * `devin-path.ts` 側の生値はここでは変更しない（他の利用者向けに raw のまま残す）。
+ */
+export function formatRuntimeVersion(label: string, version: string | null | undefined): string | null {
+  if (version === null || version === undefined) return null;
+  const firstNonEmptyLine = version.split(/\r?\n/).find((line) => line.trim().length > 0);
+  if (!firstNonEmptyLine) return null;
+  const trimmed = firstNonEmptyLine.trim();
+  // 直後が空白（`devin 3000.6.7...`）または文字列末尾（`devin` のみ＝版が取れない）のどちらでも除去する
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const stripped = trimmed.replace(new RegExp(`^${escapedLabel}(\\s+|$)`, 'i'), '').trim();
+  if (!stripped) return null;
+  return stripped.length > 80 ? `${stripped.slice(0, 80)}…` : stripped;
+}
+
+/**
  * サイクル P3-B §5-6（承認ノート#2）: 診断文字列を組み立てる純粋関数。
  * Devin は実機検出（`devin --version`）、Codex は DevRelay `config.aiTools` の設定有無であり、
  * 両者は判定根拠が異なるため**語彙を変えて**表現する（「未検出」に統一すると Codex も実機検出した
  * ように誤解される）。配布可否には一切使わない（`CapabilityResult.runtimeVersion` に入れるだけ）。
+ * サイクル P3-C（T3）: `runtime-detection` の版文字列は `formatRuntimeVersion()` 経由にし、
+ * label 接頭辞の二重表示（`Devin devin 3000.6.7...`）を解消した。
  */
 export function buildRuntimeDiagnostics(entries: RuntimeDiagnosticEntry[]): string {
   return entries
     .map((e) => {
       if (e.basis === 'runtime-detection') {
-        return e.detected ? `${e.label} ${e.version ?? ''}`.trim() + ' 検出' : `${e.label} 未検出`;
+        if (!e.detected) return `${e.label} 未検出`;
+        const formatted = formatRuntimeVersion(e.label, e.version);
+        return formatted ? `${e.label} ${formatted} 検出` : `${e.label} 検出`;
       }
       return e.detected ? `${e.label}: 設定あり` : `${e.label}: 設定なし`;
     })

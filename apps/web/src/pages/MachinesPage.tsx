@@ -10,6 +10,7 @@ import {
   decideSyncStatusDisplay,
 } from '../lib/capability-config-rules';
 import type { CapabilitySyncStatusLike, CapabilityFormErrorCode } from '../lib/capability-config-rules';
+import { normalizeManagementInfo, formatDateTimeSafe } from '../lib/machine-display-rules';
 
 export function MachinesPage() {
   const { t } = useLanguage();
@@ -513,18 +514,14 @@ export function MachinesPage() {
                           className="text-[var(--text-success)]"
                           title={`最新\nローカル: ${machine.localCommit?.slice(0, 7)}\nリモート: ${machine.remoteCommit?.slice(0, 7)}`}
                         >
-                          {machine.remoteCommitDate
-                            ? new Date(machine.remoteCommitDate).toLocaleString()
-                            : '-'}
+                          {formatDateTimeSafe(machine.remoteCommitDate)}
                         </span>
                       ) : machine.upToDate === false ? (
                         <span
                           className="text-[var(--text-muted)]"
-                          title={`更新あり\nローカル: ${machine.localCommit?.slice(0, 7)} (${machine.localCommitDate ? new Date(machine.localCommitDate).toLocaleString() : '-'})\nリモート: ${machine.remoteCommit?.slice(0, 7)} (${machine.remoteCommitDate ? new Date(machine.remoteCommitDate).toLocaleString() : '-'})`}
+                          title={`更新あり\nローカル: ${machine.localCommit?.slice(0, 7)} (${formatDateTimeSafe(machine.localCommitDate)})\nリモート: ${machine.remoteCommit?.slice(0, 7)} (${formatDateTimeSafe(machine.remoteCommitDate)})`}
                         >
-                          {machine.localCommitDate
-                            ? new Date(machine.localCommitDate).toLocaleString()
-                            : '-'}
+                          {formatDateTimeSafe(machine.localCommitDate)}
                         </span>
                       ) : (
                         <span className="text-[var(--text-faint)]">—</span>
@@ -533,7 +530,7 @@ export function MachinesPage() {
                       {machine.runningCodeStale === true ? (
                         <span
                           className="ml-2 text-xs text-[var(--text-danger)]"
-                          title={`⚠ 再ビルド漏れの可能性\n実行中コード: ${machine.runningCodeMtime ? new Date(machine.runningCodeMtime).toLocaleString() : '-'}\nローカルコミット日時: ${machine.localCommitDate ? new Date(machine.localCommitDate).toLocaleString() : '-'}`}
+                          title={`⚠ 再ビルド漏れの可能性\n実行中コード: ${formatDateTimeSafe(machine.runningCodeMtime)}\nローカルコミット日時: ${formatDateTimeSafe(machine.localCommitDate)}`}
                         >
                           ⚠ 再ビルド漏れ
                         </span>
@@ -549,16 +546,14 @@ export function MachinesPage() {
                       {machine.claudeAuthOk === false ? (
                         <span
                           className="ml-2 text-xs text-[var(--text-danger)]"
-                          title={`🔒 Claude のログインが切れています${machine.claudeAuthAccount ? `\nアカウント: ${machine.claudeAuthAccount}` : ''}\n確認時刻: ${machine.claudeAuthCheckedAt ? new Date(machine.claudeAuthCheckedAt).toLocaleString() : '-'}`}
+                          title={`🔒 Claude のログインが切れています${machine.claudeAuthAccount ? `\nアカウント: ${machine.claudeAuthAccount}` : ''}\n確認時刻: ${formatDateTimeSafe(machine.claudeAuthCheckedAt)}`}
                         >
                           🔒 Claude ログイン切れ
                         </span>
                       ) : null}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-[var(--text-muted)] text-sm">
-                      {machine.lastSeenAt
-                        ? new Date(machine.lastSeenAt).toLocaleString()
-                        : '-'}
+                      {formatDateTimeSafe(machine.lastSeenAt)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center space-x-2">
@@ -662,7 +657,7 @@ export function MachinesPage() {
                 </div>
                 {machine.lastSeenAt && (
                   <div className="text-[var(--text-faint)] text-xs mt-2">
-                    Last seen: {new Date(machine.lastSeenAt).toLocaleString()}
+                    Last seen: {formatDateTimeSafe(machine.lastSeenAt)}
                   </div>
                 )}
               </div>
@@ -847,7 +842,7 @@ export function MachinesPage() {
                   </span>
                   {autoUpdateInfo.lastAutoUpdateAt && (
                     <span className="block text-xs text-[var(--text-faint)] mt-1">
-                      最終自動更新: {new Date(autoUpdateInfo.lastAutoUpdateAt).toLocaleString()}
+                      最終自動更新: {formatDateTimeSafe(autoUpdateInfo.lastAutoUpdateAt)}
                       {autoUpdateInfo.lastAutoUpdateCommit && ` / ${autoUpdateInfo.lastAutoUpdateCommit.slice(0, 7)}`}
                       {autoUpdateInfo.lastAutoUpdateStatus && ` / ${autoUpdateInfo.lastAutoUpdateStatus}`}
                     </span>
@@ -1042,14 +1037,18 @@ export function MachinesPage() {
                           </div>
                         );
                       }
-                      const s = display.summary!;
+                      {/* summary が無いのは 'unsynced'/'unsynced-unsupported'/'skipped-*' の
+                          いずれかで上の return で既に抜けているはず。とはいえ将来この不変条件が
+                          崩れた場合に備え non-null assertion ではなく明示ガードで fail-closed にする */}
+                      if (!display.summary) return null;
+                      const s = display.summary;
                       if (display.kind === 'error') {
                         const shownCount = display.failures?.length ?? 0;
                         const remaining = s.failedCount - shownCount;
                         return (
                           <div className="text-xs mt-2">
                             <div className="text-[var(--text-faint)]">
-                              最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / present {s.presentCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''}{s.removedCount > 0 ? ` / removed ${s.removedCount}` : ''} / {s.trigger}
+                              最終同期: {formatDateTimeSafe(s.receivedAt)} / installed {s.installedCount} / updated {s.updatedCount} / present {s.presentCount}{s.noSkillsCount > 0 ? ` / skillなし ${s.noSkillsCount}` : ''} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''}{s.removedCount > 0 ? ` / removed ${s.removedCount}` : ''} / {s.trigger}
                             </div>
                             {display.failures?.map((f, i) => (
                               <div key={i} className="text-[var(--text-danger)]">⚠️ {f.id}: {f.reason}</div>
@@ -1060,7 +1059,7 @@ export function MachinesPage() {
                       }
                       return (
                         <div className="text-[var(--text-faint)] text-xs mt-2">
-                          最終同期: {new Date(s.receivedAt).toLocaleString()} / installed {s.installedCount} / updated {s.updatedCount} / present {s.presentCount} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''}{s.removedCount > 0 ? ` / removed ${s.removedCount}` : ''} / {s.trigger}
+                          最終同期: {formatDateTimeSafe(s.receivedAt)} / installed {s.installedCount} / updated {s.updatedCount} / present {s.presentCount}{s.noSkillsCount > 0 ? ` / skillなし ${s.noSkillsCount}` : ''} / failed {s.failedCount}{s.notAllowedCount > 0 ? ` / notAllowed ${s.notAllowedCount}` : ''}{s.removedCount > 0 ? ` / removed ${s.removedCount}` : ''} / {s.trigger}
                           {display.emptyTargets && '（対象 0 件。有効な配布設定（Marketplace）が見つかりません。Marketplace name / source を入力して保存し直してください）'}
                           {/* サイクルP3-B §5-10: results が 1 件以上あれば常に provider 別の内訳を出す */}
                           {display.perProvider && (
@@ -1068,8 +1067,13 @@ export function MachinesPage() {
                               {display.perProvider.map((p, i) => (
                                 <div key={i}>
                                   <div>
-                                    {p.provider}:{p.kind} — installed {p.installedCount} / updated {p.updatedCount} / present {p.presentCount} / failed {p.failedCount}{p.notAllowedCount > 0 ? ` / notAllowed ${p.notAllowedCount}` : ''}{p.removedCount > 0 ? ` / removed ${p.removedCount}` : ''}
+                                    {p.provider}:{p.kind} — installed {p.installedCount} / updated {p.updatedCount} / present {p.presentCount}{p.noSkillsCount > 0 ? ` / skillなし ${p.noSkillsCount}` : ''} / failed {p.failedCount}{p.notAllowedCount > 0 ? ` / notAllowed ${p.notAllowedCount}` : ''}{p.removedCount > 0 ? ` / removed ${p.removedCount}` : ''}
                                   </div>
+                                  {p.noSkillsIds && p.noSkillsIds.length > 0 && (
+                                    <div className="text-[var(--text-faint)] opacity-70">
+                                      skill なし: {p.noSkillsIds.join(', ')}（プラグインに skills/ がありません）
+                                    </div>
+                                  )}
                                   {p.runtimeDiagnostics && (
                                     <div className="text-[var(--text-faint)] opacity-70">
                                       {p.runtimeDiagnostics}（診断情報。配布判断には影響しません）
@@ -1237,14 +1241,17 @@ export function MachinesPage() {
               </div>
             </div>
 
-            {/* 管理コマンド（Agent 接続時に環境固有のコマンドを自動取得・保存） */}
-            {settingsTarget.managementInfo && settingsTarget.managementInfo.commands.length > 0 ? (
+            {/* 管理コマンド（Agent 接続時に環境固有のコマンドを自動取得・保存）
+                `managementInfo` は Agent が送ってきた JSON を Server が無検証で保存しているため、
+                直接 .os/.commands を参照せず normalizeManagementInfo() で安全な形に正規化してから使う
+                （実データで `{}` のようなケースがあり、旧コードはここで TypeError を投げていた） */}
+            {(() => { const mgmt = normalizeManagementInfo(settingsTarget.managementInfo); return mgmt && mgmt.commands.length > 0 ? (
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-[var(--text-muted)] text-sm">
                     Management Commands
                     <span className="text-[var(--text-faint)] ml-2 text-xs">
-                      ({settingsTarget.managementInfo.os === 'win32' ? 'Windows' : settingsTarget.managementInfo.os === 'darwin' ? 'macOS' : 'Linux'} / {settingsTarget.managementInfo.installType})
+                      ({mgmt.os === 'win32' ? 'Windows' : mgmt.os === 'darwin' ? 'macOS' : 'Linux'} / {mgmt.installType})
                     </span>
                   </label>
                   {settingsTarget.status === 'online' && (
@@ -1264,7 +1271,7 @@ export function MachinesPage() {
                   )}
                 </div>
                 <div className="space-y-2">
-                  {settingsTarget.managementInfo.commands.map((cmd, i) => (
+                  {mgmt.commands.map((cmd, i) => (
                     <div key={i} className="flex items-start space-x-2">
                       <span className="text-[var(--text-muted)] text-xs w-24 shrink-0 pt-2 text-right">{cmd.label}</span>
                       <code className="flex-1 bg-[var(--bg-base)] text-[var(--text-link)] px-3 py-2 rounded text-xs break-all leading-relaxed select-all">
@@ -1292,7 +1299,7 @@ export function MachinesPage() {
                   Agent が接続すると管理コマンドが表示されます。
                 </p>
               </div>
-            )}
+            ); })()}
 
             {/* アンインストールコマンド（折りたたみ） */}
             <details className="mb-4">

@@ -12,6 +12,8 @@ import {
   formatPluginTag,
   normalizePluginIdInput,
   decideSyncStatusDisplay,
+  partitionPresentIds,
+  NO_SKILLS_SUFFIX,
 } from '../dist-test/lib/capability-config-rules.js';
 
 // ---- capabilityConfigToFormState ----
@@ -239,6 +241,36 @@ test('normalizePluginIdInput: marketplaceName が空文字なら剥がす対象�
   assert.deepEqual(normalizePluginIdInput('unity', ''), { ok: true, id: 'unity' });
 });
 
+// ---- partitionPresentIds（サイクルP3-C T2: skill を持たないプラグインの分離） ----
+
+test('partitionPresentIds: 通常 present と :no-skills を分離する', () => {
+  const result = partitionPresentIds(['context7/skill1', 'unity:no-skills', 'a/b']);
+  assert.deepEqual(result, { present: ['context7/skill1', 'a/b'], noSkills: ['unity'] });
+});
+
+test('partitionPresentIds: :no-skills が無ければ noSkills は空配列', () => {
+  const result = partitionPresentIds(['a/skill1', 'b/skill2']);
+  assert.deepEqual(result, { present: ['a/skill1', 'b/skill2'], noSkills: [] });
+});
+
+test('partitionPresentIds: 空配列は両方空配列', () => {
+  assert.deepEqual(partitionPresentIds([]), { present: [], noSkills: [] });
+});
+
+test('partitionPresentIds: 文字列でない要素は捨てる（fail-open）', () => {
+  const result = partitionPresentIds(['a/skill1', 123, null, undefined, { x: 1 }, 'b:no-skills']);
+  assert.deepEqual(result, { present: ['a/skill1'], noSkills: ['b'] });
+});
+
+test('partitionPresentIds: skill id の "/" 区切りは :no-skills と誤爆しない', () => {
+  const result = partitionPresentIds(['no-skills-plugin/no-skills']);
+  assert.deepEqual(result, { present: ['no-skills-plugin/no-skills'], noSkills: [] });
+});
+
+test('NO_SKILLS_SUFFIX: 期待する定数値', () => {
+  assert.equal(NO_SKILLS_SUFFIX, ':no-skills');
+});
+
 // ---- decideSyncStatusDisplay ----
 
 test('decideSyncStatusDisplay: status null かつ未対応 Agent は unsynced-unsupported', () => {
@@ -277,6 +309,7 @@ test('decideSyncStatusDisplay: status ありなら集計して synced を返す�
     installedCount: 1,
     updatedCount: 0,
     presentCount: 1,
+    noSkillsCount: 0,
     failedCount: 1,
     notAllowedCount: 1,
     removedCount: 0,
@@ -377,7 +410,7 @@ test('decideSyncStatusDisplay: results 1件でも perProvider が出る（P3-B �
   };
   const result = decideSyncStatusDisplay(status, true);
   assert.deepEqual(result.perProvider, [
-    { provider: 'claude', kind: 'plugin', installedCount: 1, updatedCount: 0, presentCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 0, runtimeDiagnostics: '2.1.263' },
+    { provider: 'claude', kind: 'plugin', installedCount: 1, updatedCount: 0, presentCount: 0, noSkillsCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 0, runtimeDiagnostics: '2.1.263' },
   ]);
 });
 
@@ -400,8 +433,8 @@ test('decideSyncStatusDisplay: results 2件（claude:plugin + agent-skills:stand
   };
   const result = decideSyncStatusDisplay(status, true);
   assert.deepEqual(result.perProvider, [
-    { provider: 'claude', kind: 'plugin', installedCount: 1, updatedCount: 0, presentCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 0, runtimeDiagnostics: '2.1.263' },
-    { provider: 'agent-skills', kind: 'standard', installedCount: 1, updatedCount: 0, presentCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 1, runtimeDiagnostics: 'Devin 3000.6.7 検出 / Codex 設定なし' },
+    { provider: 'claude', kind: 'plugin', installedCount: 1, updatedCount: 0, presentCount: 0, noSkillsCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 0, runtimeDiagnostics: '2.1.263' },
+    { provider: 'agent-skills', kind: 'standard', installedCount: 1, updatedCount: 0, presentCount: 0, noSkillsCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 1, runtimeDiagnostics: 'Devin 3000.6.7 検出 / Codex 設定なし' },
   ]);
 });
 
@@ -429,4 +462,122 @@ test('decideSyncStatusDisplay: perProvider の removed は legacy: prefix を保
   const result = decideSyncStatusDisplay(status, true);
   assert.equal(result.perProvider[0].removedCount, 2);
   assert.deepEqual(status.results[0].removed, ['context7/skill1', 'legacy:context7/skill1']);
+});
+
+// ---- decideSyncStatusDisplay: :no-skills（サイクルP3-C T2） ----
+
+test('decideSyncStatusDisplay: present の :no-skills はサマリの presentCount から除かれ noSkillsCount に計上される', () => {
+  const status = {
+    status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [
+      { provider: 'agent-skills', kind: 'standard', runtimeVersion: null, installed: [], updated: [], present: ['context7:no-skills', 'a/skill1'], failed: [], notAllowed: [] },
+    ],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  // 従来の合計値（present.length = 2）は presentCount + noSkillsCount で一致する（仕様書 §9）
+  assert.equal(result.summary.presentCount, 1);
+  assert.equal(result.summary.noSkillsCount, 1);
+  assert.equal(result.summary.presentCount + result.summary.noSkillsCount, 2);
+});
+
+test('decideSyncStatusDisplay: perProvider にも noSkillsCount/noSkillsIds が付く', () => {
+  const status = {
+    status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [
+      { provider: 'agent-skills', kind: 'standard', runtimeVersion: null, installed: [], updated: [], present: ['context7:no-skills'], failed: [], notAllowed: [] },
+    ],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.deepEqual(result.perProvider, [
+    { provider: 'agent-skills', kind: 'standard', installedCount: 0, updatedCount: 0, presentCount: 0, noSkillsCount: 1, noSkillsIds: ['context7'], failedCount: 0, notAllowedCount: 0, removedCount: 0 },
+  ]);
+});
+
+test('decideSyncStatusDisplay: :no-skills が無ければ noSkillsIds キー自体を生やさない', () => {
+  const status = {
+    status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [
+      { provider: 'claude', kind: 'plugin', runtimeVersion: null, installed: [], updated: [], present: ['a@devrelay'], failed: [], notAllowed: [] },
+    ],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal('noSkillsIds' in result.perProvider[0], false);
+  assert.equal(result.perProvider[0].noSkillsCount, 0);
+  assert.equal(result.summary.noSkillsCount, 0);
+});
+
+// ---- decideSyncStatusDisplay: fail-open 正規化（aisignage/lfuser 全画面真っ白障害の再発防止） ----
+// `Machine.capabilitySyncStatus` は Agent 由来の未検証 JSON（Json?）。results が非配列/欠損、
+// 各要素の配列フィールドが欠損していても throw せず「0 件」として表示を継続できることを保証する。
+
+test('decideSyncStatusDisplay: results が配列でない（undefined）ときも throw せず 0 件集計を返す', () => {
+  const status = { status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x' };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.kind, 'synced');
+  assert.equal(result.summary.installedCount, 0);
+  assert.equal(result.summary.failedCount, 0);
+  assert.equal(result.emptyTargets, true);
+  assert.equal(result.perProvider, undefined);
+});
+
+test('decideSyncStatusDisplay: results が null のときも throw せず 0 件集計を返す', () => {
+  const status = { status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x', results: null };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.kind, 'synced');
+  assert.deepEqual(result.summary.installedCount, 0);
+  assert.equal(result.emptyTargets, true);
+});
+
+test('decideSyncStatusDisplay: results が配列でない要素（文字列）を含んでいても throw せず空扱いにする', () => {
+  const status = { status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x', results: ['not-an-object', 123, null] };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.kind, 'synced');
+  assert.equal(result.summary.installedCount, 0);
+  assert.equal(result.perProvider.length, 3);
+  assert.equal(result.perProvider[0].provider, '');
+});
+
+test('decideSyncStatusDisplay: results 要素の installed/updated/present/failed/notAllowed が非配列でも throw せず 0 件扱いにする', () => {
+  const status = {
+    status: 'done', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [
+      { provider: 'claude', kind: 'plugin', runtimeVersion: null, installed: undefined, updated: 'x', present: null, failed: 42, notAllowed: {} },
+    ],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.summary.installedCount, 0);
+  assert.equal(result.summary.updatedCount, 0);
+  assert.equal(result.summary.presentCount, 0);
+  assert.equal(result.summary.failedCount, 0);
+  assert.equal(result.summary.notAllowedCount, 0);
+  assert.deepEqual(result.perProvider[0], {
+    provider: 'claude', kind: 'plugin',
+    installedCount: 0, updatedCount: 0, presentCount: 0, noSkillsCount: 0, failedCount: 0, notAllowedCount: 0, removedCount: 0,
+  });
+});
+
+test('decideSyncStatusDisplay: receivedAt が string でなければ空文字にフォールバックする（formatDateTimeSafe 側で "-" 表示になる）', () => {
+  const status = { status: 'done', trigger: 'manual', durationMs: 1, receivedAt: null, results: [] };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.summary.receivedAt, '');
+});
+
+test('decideSyncStatusDisplay: error kind でも results の非配列フィールドで throw しない（failures は空配列）', () => {
+  const status = {
+    status: 'error', trigger: 'manual', durationMs: 1, receivedAt: 'x',
+    results: [{ provider: 'claude', kind: 'plugin', runtimeVersion: null, installed: [], updated: [], present: [], failed: undefined, notAllowed: [] }],
+  };
+  const result = decideSyncStatusDisplay(status, true);
+  assert.equal(result.kind, 'error');
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.summary.failedCount, 0);
+});
+
+// Phase 0 実データ（2026-09-15調査）: aisignage/lfuser は capabilitySyncStatus 自体が null だった
+// （今回の直接原因は managementInfo 側だが、capabilitySyncStatus も同じく未検証 JSON である以上
+//   同型の壊れ方が起きても画面を落とさないことをここで担保する）
+test('decideSyncStatusDisplay: Phase 0 実データ相当（capabilitySyncStatus:null）は unsynced 扱いで throw しない', () => {
+  const result = decideSyncStatusDisplay(null, true);
+  assert.equal(result.kind, 'unsynced');
+  assert.equal(result.summary, undefined);
 });

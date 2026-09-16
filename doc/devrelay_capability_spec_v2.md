@@ -1,9 +1,23 @@
-# DevRelay Capability 配布基盤 指示書 v2.3（サイクル P1〜P3-B）
+# DevRelay Capability 配布基盤 指示書 v2.4（サイクル P1〜P3-C）
 
-- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）／改訂: 2026-09-15（v2.2、サイクル P3-A）／改訂: 2026-09-15（v2.3、サイクル P3-B）
+- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）／改訂: 2026-09-15（v2.2、サイクル P3-A）／改訂: 2026-09-15（v2.3、サイクル P3-B）／改訂: 2026-09-17（v2.4、サイクル P3-C）
 - 対象: devrelay 本体（`/opt/devrelay`, projectId `cmm5tpzil0042f3p2ieotnow4`）
-- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの。v2.2 はサイクル P3-A で 2 つ目の provider×kind 実装（`devin:skill`）を追加し、provider×kind 抽象を実証したもの。v2.3 はサイクル P3-B で `devin:skill` を「配布フォーマット単位」の `agent-skills:standard` に昇格し、ツール別 opt-in（`providers.devin` チェックボックス）を廃止したもの
+- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの。v2.2 はサイクル P3-A で 2 つ目の provider×kind 実装（`devin:skill`）を追加し、provider×kind 抽象を実証したもの。v2.3 はサイクル P3-B で `devin:skill` を「配布フォーマット単位」の `agent-skills:standard` に昇格し、ツール別 opt-in（`providers.devin` チェックボックス）を廃止したもの。v2.4 はサイクル P3-C で P3-B 実機 E2E 後の運用上の粗（空 staging 残置・skill 無しプラグインの誤表示・診断文字列の重複）を掃除し、調査中に見つかった「skill の update が構造的に必ず失敗するバグ」を根治したもの
 - 置き換え: 本書は同日の「Plugin 配布機能 指示書 v1」を Capability 抽象化で改訂したもの。2026-09-03 の「Toolkit 配布機能（レシピ実行基盤）」案は破棄
+
+## v2.4 改訂差分（サイクル P3-C、2026-09-17）
+
+P3-B の実機 E2E（DESKTOP-1E6SDOQ）合格後、運用上の粗が 4 点残った（空 `.devrelay-staging` の残置／skill を持たないプラグインが web で通常 present と区別不能／診断文字列の接頭辞重複／役目を終えた `providers.devin` 型）。調査中に **skill の update 経路が構造的に必ず失敗する未発見バグ**（T1b）も見つかったため同一コード領域として同時に修正した。詳細な調査・設計判断はプラン `/home/devrelay/.claude/plans/calm-wishing-pinwheel.md` を参照。仕様書としての差分は以下:
+
+1. **§7.x（T1）同期後の空 `.devrelay-staging`/`.devrelay-trash` を削除**: `capabilities/skill-tree-io.ts` に `removeDirIfEmpty(dir)`（`readdir` が 0 件のときだけ非再帰 `rmdir`、それ以外は fail-soft で無視）と `removeResidueDirsIfEmpty(skillsDir)`（`['.devrelay-staging','.devrelay-trash']` に適用）を追加。`agent-skills-adapter.ts` の `AgentSkillsDeps` に `cleanupEmptyResidue` を追加し、`reconcileMachineWithDeps()` の cleanup-only 経路・通常経路の両 return 直前で呼ぶ。既存の冒頭強制掃除 `cleanupResidue()`（中身が残っていても丸ごと削除）とは別関数で、末尾処理は「空なら消す・空でなければ触らない」に限定する。
+2. **§7.x（T1b、バグ修正）`.devrelay-trash` 親ディレクトリ未作成による update の必発失敗を修正**: `atomicSwapDir()`（`skill-tree-io.ts`）は dest 既存時（＝ update）に `rename(destDir, trashDir)` を行うが、`.devrelay-trash` 親を作るコードがリポジトリ内に存在せず、**update 経路は必ず ENOENT で失敗していた**（新規 install は trash を使わないため成功し、実機 E2E をすり抜けていた）。`destExisted===true` の分岐で rename 直前に `mkdir(dirname(trashDir), {recursive:true})` を追加。dest 不在時（新規 install）は trash を触らないため mkdir もしない（空ディレクトリを作らない）。回帰テストは (a) `atomicSwapDir()` 単体で trash 親が存在しない状態からの成功（修正前コードでは失敗することを確認済み）、(b) `agent-skills-adapter.test.mjs` に実 `fs/promises`（`skill-tree-io.ts` の実装をそのまま deps 注入）で「install → marketplace 側の内容変更 → 2 回目 reconcile で `updated: 1`、同期後に `.devrelay-staging`/`.devrelay-trash` が残らない」を end-to-end 検証する専用テストを追加。`.devrelay-trash` へ rename する経路は `atomicSwapDir()` の 1 箇所のみ（grep で全数確認、他の `rename()` 呼び出しは無関係な用途）。
+3. **§9（T2）web で `<id>:no-skills` を「skill なし」として区別表示**: Agent 側 payload は無変更。`apps/web/src/lib/capability-config-rules.ts`（純関数）に `NO_SKILLS_SUFFIX = ':no-skills'` と `partitionPresentIds(present)`（`present` を実 present と `:no-skills` サフィックス付き plugin id に分離）を追加。`decideSyncStatusDisplay()` / `buildPerProviderBreakdown()` の `presentCount` を「no-skills を除いた実 present 件数」に変更し、`noSkillsCount` / `noSkillsIds?` を新設。**不変条件: `presentCount + noSkillsCount` は変更前の `present` 総数と一致する**（旧来 `present 1` だった context7 のみの状態は変更後 `present 0 / skillなし 1` になるが合計は不変）。`MachinesPage.tsx` のサマリ行・provider 別内訳に `noSkillsCount>0` のときだけ追記表示。
+4. **§8.x（T3）診断文字列の接頭辞重複を解消**: `devin --version` の生出力（例 `devin 3000.6.7 (260a97c8)`）をそのまま `${label} ${version}` に連結していたため `Devin devin 3000.6.7 ... 検出` と二重表示になっていた。`agent-skills-rules.ts` に純関数 `formatRuntimeVersion(label, version)` を追加: 空/空白のみ→`null`、最初の非空行を採用、先頭が label と大小文字無視で一致し直後が空白または文字列末尾なら label トークンを除去（`devin` のみ＝版が取れない場合も含む）、80 文字超は先頭 80 文字+`…`。`buildRuntimeDiagnostics()` をこの関数経由に差し替え、`Devin 3000.6.7 (260a97c8) 検出` / `Devin 検出`（版不明）/ `Devin 未検出` の 3 通りに整理。Codex 側の「設定あり/設定なし」語彙（P3-B）は不変。
+5. **§4.1 / 型（T4）`providers.devin` 型の削除**: `packages/shared/src/types.ts` の `CapabilityDevinProviderConfig` と `CapabilityConfig.providers.devin` を削除（P3-B で `@deprecated` 型のみ残していたものを完全撤去）。`apps/web/src/lib/capability-config-rules.ts` の web 独自 `CapabilityConfigLike.devin?` も同時に削除（SQL で legacy 表現 0 件を確認済み）。legacy items シム（`agents/linux/src/services/capability-rules.ts` の `LEGACY_ITEM_REMAP`/`normalizeCapabilityItems()`）は型ではなく値でキーしているため無変更で維持され、旧 DB 値の items 経由の読み替えは引き続き機能する。
+
+**変更ファイル**: `agents/linux/src/services/capabilities/{skill-tree-io,agent-skills-adapter,agent-skills-rules}.ts`（変更）、`apps/web/src/lib/capability-config-rules.ts` + `apps/web/src/pages/MachinesPage.tsx`（変更）、`packages/shared/src/types.ts`（型削除）。**無変更**: `apps/server/**`、`prisma/**`、`agents/macos/**`、`agents/windows/**`。
+
+---
 
 ## v2.3 改訂差分（サイクル P3-B、2026-09-15）
 
@@ -259,6 +273,7 @@ Capabilities
 - 「Provider: Claude / Devin / Codex」のような未実装の選択 UI は置かない。将来 provider が増えたときにセクションを追加できる構造だけ確保
 - 保存は Hostname Alias と同じ「同一ホスト名の全 Agent に適用」の注記
 - `capabilitySyncStatus` が null なら「未同期（Agent 更新が必要）」
+- **`presentCount` と `noSkillsCount`（v2.4、サイクル P3-C）**: Agent から届く `present` 配列には、skill を 1 つも持たないプラグイン用の `<pluginId>:no-skills` という値が混在しうる（payload は無変更）。web は `partitionPresentIds()` でこれを分離し、`presentCount` は「実際に present な skill/plugin の件数」、`noSkillsCount` は「skill が無いため present にならなかったプラグインの件数」を表す。**不変条件: `presentCount + noSkillsCount` は Agent が報告した `present` 配列の総要素数（＝ v2.3 以前の `presentCount` の値）と常に一致する**。将来 Flutter/モバイル等の別クライアントがこの数値を読む場合もこの式で従来の合計値を復元できる。
 
 ## 10. やらないこと（v1 外）
 

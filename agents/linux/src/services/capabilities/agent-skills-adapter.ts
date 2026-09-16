@@ -43,6 +43,7 @@ import {
   atomicSwapDir,
   removeManagedDir,
   cleanupResidue,
+  removeResidueDirsIfEmpty,
   listDirNames,
   readJsonSafe,
   ensureDir,
@@ -123,8 +124,13 @@ export interface AgentSkillsDeps {
   listDirNames: (dir: string) => Promise<string[]>;
   /** `mkdir -p` 相当 */
   ensureDir: (dir: string) => Promise<void>;
-  /** `.devrelay-staging` / `.devrelay-trash` の残骸掃除 */
+  /** `.devrelay-staging` / `.devrelay-trash` の残骸掃除（中身の有無を問わず強制削除。reconcile 冒頭専用） */
   cleanupResidue: (skillsDir: string) => Promise<void>;
+  /**
+   * サイクル P3-C（T1）: `.devrelay-staging` / `.devrelay-trash` が空になっていれば削除する
+   * （reconcile 末尾専用。中身が残っている場合は触らず次回の `cleanupResidue` に委ねる）。
+   */
+  cleanupEmptyResidue: (skillsDir: string) => Promise<void>;
   /** staging/trash ディレクトリ名の一意サフィックス */
   uniqueSuffix: () => string;
   /** marker の `installedAt` に使う ISO 時刻 */
@@ -178,6 +184,7 @@ export const defaultDeps: AgentSkillsDeps = {
   listDirNames,
   ensureDir,
   cleanupResidue,
+  cleanupEmptyResidue: removeResidueDirsIfEmpty,
   uniqueSuffix: nextUniqueSuffix,
   nowIso: () => new Date().toISOString(),
   writeMarker: async (filePath, marker) => {
@@ -466,7 +473,9 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: AgentSk
       canRemove: canPerformRemoval('skipped-empty-items'),
     });
 
+    // サイクル P3-C（T1）: この経路は install/update を行わないため通常は既に空のはずだが、念のため
     if (removedIds.length > 0) result.removed = removedIds;
+    await deps.cleanupEmptyResidue(skillsDir);
     return result;
   }
 
@@ -661,6 +670,8 @@ export async function reconcileMachineWithDeps(ctx: CapabilityCtx, deps: AgentSk
   });
 
   if (removedIds.length > 0) result.removed = removedIds;
+  // サイクル P3-C（T1）: install/update で持ち出された後の空 staging/trash 親ディレクトリを掃除する
+  await deps.cleanupEmptyResidue(skillsDir);
   return result;
 }
 

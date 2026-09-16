@@ -8,8 +8,8 @@
  *
  * `SkillTreeOps` としてまとめて export し、adapter のテストで fake に差し替えられる seam にする。
  */
-import { lstat, readdir, mkdir, copyFile, readFile, rm, rename, stat, unlink } from 'fs/promises';
-import { join, relative, resolve, sep, isAbsolute } from 'path';
+import { lstat, readdir, mkdir, copyFile, readFile, rm, rename, rmdir, stat, unlink } from 'fs/promises';
+import { join, relative, resolve, sep, isAbsolute, dirname } from 'path';
 import { createHash } from 'crypto';
 
 export interface TreeLimits {
@@ -122,13 +122,17 @@ export type AtomicSwapResult = { ok: true } | { ok: false; error: string };
 
 /**
  * `stagingDir` を `destDir` にアトミックに差し替える。
- * 1. `destDir` が既存なら `trashDir` へ退避（rename）
- * 2. `stagingDir` → `destDir` へ rename
- * 3. `trashDir` を削除（失敗しても無害）
- * 4. 手順2が失敗したら `trashDir` → `destDir` にロールバックする
+ * 1. `destDir` が既存なら `trashDir` の親ディレクトリを作成（サイクル P3-C T1b。呼び出し側は誰も
+ *    `.devrelay-trash` 親を作らないため、これが無いと次の rename が ENOENT で必ず失敗する）
+ * 2. `destDir` が既存なら `trashDir` へ退避（rename）
+ * 3. `stagingDir` → `destDir` へ rename
+ * 4. `trashDir` を削除（失敗しても無害）
+ * 5. 手順3が失敗したら `trashDir` → `destDir` にロールバックする
  *
  * 両 rename は同一ファイルシステム内であることが前提（`EXDEV` で失敗し得る。呼び出し側は
  * staging/trash を `skillsDir` と同じディレクトリ配下に置くこと）。
+ * `destDir` が存在しない（新規 install）ときは trash を一切使わないため mkdir もしない
+ * （空の `.devrelay-trash` を作らない）。
  */
 export async function atomicSwapDir(stagingDir: string, destDir: string, trashDir: string): Promise<AtomicSwapResult> {
   let destExisted = false;
@@ -140,6 +144,14 @@ export async function atomicSwapDir(stagingDir: string, destDir: string, trashDi
   }
 
   if (destExisted) {
+    // サイクル P3-C（T1b）: `.devrelay-trash` 親ディレクトリを作るコードが他に存在しないため、
+    // これが無いと update（dest 既存の差し替え）が rename の ENOENT で必ず失敗していた。
+    // dest が存在しないとき（新規 install）は trash を使わないため mkdir しない（空ディレクトリを作らない）。
+    try {
+      await mkdir(dirname(trashDir), { recursive: true });
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
     try {
       await rename(destDir, trashDir);
     } catch (err) {
@@ -203,6 +215,37 @@ export async function cleanupResidue(skillsDir: string): Promise<void> {
   }
 }
 
+/**
+ * サイクル P3-C（T1）: `dir` が存在し、かつ中身が空のときだけ削除する（非再帰 `rmdir` 相当）。
+ * 中身がある（クラッシュ等の残骸）場合は一切触らない（掃除は `cleanupResidue()` の役目のまま）。
+ * 存在しない/読めない/空でない/削除失敗、いずれも致命的ではないため握りつぶす。
+ */
+export async function removeDirIfEmpty(dir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return; // 存在しない/読めない
+  }
+  if (entries.length > 0) return; // 中身あり → 触らない
+  try {
+    await rmdir(dir);
+  } catch {
+    // 削除失敗（レース等）も致命的ではない
+  }
+}
+
+/**
+ * サイクル P3-C（T1）: 同期完了後、`.devrelay-staging` / `.devrelay-trash` が空になっていれば
+ * 削除する（`copyTreeSafe`/`atomicSwapDir` は子だけを持ち出すため親ディレクトリが空のまま残る）。
+ * 中身が残っている場合（クラッシュ等）はここでは触らず、次回 reconcile 冒頭の `cleanupResidue()` に委ねる。
+ */
+export async function removeResidueDirsIfEmpty(skillsDir: string): Promise<void> {
+  for (const name of ['.devrelay-staging', '.devrelay-trash']) {
+    await removeDirIfEmpty(join(skillsDir, name));
+  }
+}
+
 /** `dir` 直下のディレクトリ名一覧を返す（symlink・ファイルは除外）。`dir` が無ければ空配列 */
 export async function listDirNames(dir: string): Promise<string[]> {
   let entries: string[];
@@ -246,6 +289,7 @@ export const defaultSkillTreeOps = {
   atomicSwapDir,
   removeManagedDir,
   cleanupResidue,
+  removeResidueDirsIfEmpty,
   listDirNames,
   readJsonSafe,
   ensureDir,

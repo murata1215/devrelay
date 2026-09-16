@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, readFile, rm, lstat } from 'fs/promises';
+import { mkdtemp, mkdir, writeFile, symlink, readFile, rm, lstat, readdir } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -13,6 +13,8 @@ import {
   removeManagedDir,
   cleanupResidue,
   listDirNames,
+  removeDirIfEmpty,
+  removeResidueDirsIfEmpty,
 } from '../dist/services/capabilities/skill-tree-io.js';
 
 async function mkTemp() {
@@ -150,6 +152,102 @@ test('atomicSwapDir: staging→dest の rename が失敗したら dest を元に
   assert.equal(result.ok, false);
   // ロールバックにより dest は元の内容のまま残っている
   assert.equal(await readFile(join(dest, 'old.txt'), 'utf-8'), 'old');
+  await rm(root, { recursive: true, force: true });
+});
+
+// ---- atomicSwapDir: T1b 回帰テスト（.devrelay-trash 親ディレクトリ未作成バグ） ----
+
+test('atomicSwapDir: T1b回帰 — trash の親ディレクトリが存在しなくても update（dest既存）が成功する', async () => {
+  const root = await mkTemp();
+  const staging = join(root, 'staging');
+  const dest = join(root, 'dest');
+  // trash の親（.devrelay-trash 相当）がまだ存在しない状態を再現する
+  // （修正前のコードはここで `rename(destDir, trashDir)` が ENOENT で必ず失敗していた＝
+  //   skill の update 経路が構造的に必ず失敗するバグの再現条件）。
+  const trashParent = join(root, '.devrelay-trash');
+  const trash = join(trashParent, 'my-skill-abc123');
+  await mkdir(dest, { recursive: true });
+  await writeFile(join(dest, 'old.txt'), 'old');
+  await mkdir(staging, { recursive: true });
+  await writeFile(join(staging, 'new.txt'), 'new');
+
+  await assert.rejects(() => lstat(trashParent)); // 前提: 親がまだ無いことを確認
+
+  const result = await atomicSwapDir(staging, dest, trash);
+  assert.deepEqual(result, { ok: true });
+  assert.equal(await readFile(join(dest, 'new.txt'), 'utf-8'), 'new');
+  await assert.rejects(() => readFile(join(dest, 'old.txt'), 'utf-8'));
+  // swap 完了後、trash の子（旧内容）自体は掃除されるが、mkdir(recursive) で作った
+  // trash の親ディレクトリ（.devrelay-trash 相当）は atomicSwapDir の役目ではなく空のまま残る
+  // （T1 の removeResidueDirsIfEmpty が reconcile 末尾で回収する。ここでは atomicSwapDir 単体の
+  //   契約として「親は作られるが子までは掃除しない」ことだけを確認する）
+  const trashParentEntries = await readdir(trashParent);
+  assert.deepEqual(trashParentEntries, []);
+  await removeDirIfEmpty(trashParent);
+  await assert.rejects(() => lstat(trashParent));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('atomicSwapDir: dest が存在しない新規インストールでは trash 親を作らない（空ディレクトリを残さない）', async () => {
+  const root = await mkTemp();
+  const staging = join(root, 'staging');
+  const dest = join(root, 'dest-new');
+  const trashParent = join(root, '.devrelay-trash');
+  const trash = join(trashParent, 'my-skill-xyz');
+  await mkdir(staging, { recursive: true });
+  await writeFile(join(staging, 'new.txt'), 'new');
+
+  const result = await atomicSwapDir(staging, dest, trash);
+  assert.deepEqual(result, { ok: true });
+  // 新規 install（destExisted===false）は trash を一切使わないため、親ディレクトリも作られない
+  await assert.rejects(() => lstat(trashParent));
+  await rm(root, { recursive: true, force: true });
+});
+
+// ---- removeDirIfEmpty / removeResidueDirsIfEmpty（T1） ----
+
+test('removeDirIfEmpty: 中身が空なら削除する', async () => {
+  const root = await mkTemp();
+  const dir = join(root, 'empty-dir');
+  await mkdir(dir, { recursive: true });
+  await removeDirIfEmpty(dir);
+  await assert.rejects(() => lstat(dir));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('removeDirIfEmpty: 中身があれば削除しない', async () => {
+  const root = await mkTemp();
+  const dir = join(root, 'nonempty-dir');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'f.txt'), 'x');
+  await removeDirIfEmpty(dir);
+  const st = await lstat(dir); // 削除されていなければ lstat が成功する
+  assert.ok(st.isDirectory());
+  await rm(root, { recursive: true, force: true });
+});
+
+test('removeDirIfEmpty: 存在しないディレクトリは無害（throw しない）', async () => {
+  const root = await mkTemp();
+  await removeDirIfEmpty(join(root, 'does-not-exist'));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('removeResidueDirsIfEmpty: .devrelay-staging / .devrelay-trash が空ならどちらも削除する', async () => {
+  const root = await mkTemp();
+  await mkdir(join(root, '.devrelay-staging'), { recursive: true });
+  await mkdir(join(root, '.devrelay-trash'), { recursive: true });
+  await removeResidueDirsIfEmpty(root);
+  await assert.rejects(() => lstat(join(root, '.devrelay-staging')));
+  await assert.rejects(() => lstat(join(root, '.devrelay-trash')));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('removeResidueDirsIfEmpty: 中身が残っていれば触らない（次回 cleanupResidue に委ねる）', async () => {
+  const root = await mkTemp();
+  await mkdir(join(root, '.devrelay-staging', 'leftover'), { recursive: true });
+  await removeResidueDirsIfEmpty(root);
+  const st = await lstat(join(root, '.devrelay-staging'));
+  assert.ok(st.isDirectory()); // 中身ありなので残る
   await rm(root, { recursive: true, force: true });
 });
 

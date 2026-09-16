@@ -9,6 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, dirname, basename } from 'node:path';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import {
   reconcileMachineWithDeps,
   reconcileProjectWithDeps,
@@ -16,6 +18,17 @@ import {
   defaultDeps,
   setAiToolsSnapshot,
 } from '../dist/services/capabilities/agent-skills-adapter.js';
+import {
+  copyTreeSafe,
+  hashTree,
+  atomicSwapDir,
+  removeManagedDir as removeManagedDirIo,
+  cleanupResidue,
+  removeResidueDirsIfEmpty,
+  listDirNames as listDirNamesIo,
+  readJsonSafe,
+  ensureDir,
+} from '../dist/services/capabilities/skill-tree-io.js';
 
 const marketplaceName = 'devrelay';
 const marketplaceSource = 'murata1215/devrelay-plugins';
@@ -175,6 +188,8 @@ function makeFakeDeps(scenario = {}) {
     },
     async ensureDir() {},
     async cleanupResidue() {},
+    // サイクル P3-C（T1）: 空 staging/trash の掃除は仮想 fs では何も検証すべき状態が無いため no-op でよい
+    async cleanupEmptyResidue() {},
     uniqueSuffix: () => scenario.uniqueSuffix ?? 'u1',
     nowIso: () => scenario.nowIso ?? '2026-09-15T00:00:00.000Z',
     async writeMarker(filePath, marker) {
@@ -698,4 +713,132 @@ test('items:[] cleanup-only 経路では診断を計算しない（runtimeVersio
   assert.equal(calls.resolveDevinPath, 0);
   assert.equal(calls.resolveRuntimeVersion, 0);
   assert.equal(calls.hasAiTool.length, 0);
+});
+
+// -----------------------------------------------------------------------------
+// サイクル P3-C（T1b 回帰・承認事項2b）: 実 fs を使った end-to-end 検証。
+//
+// 上記の全テストは仮想ファイルシステム（Map/Set）で copyTree/atomicSwap/removeManagedDir を
+// シミュレートしており、`skill-tree-io.ts` の実装（実 `fs/promises` の rename 呼び出し）を一切
+// 経由しない。そのため T1b（`.devrelay-trash` 親ディレクトリ未作成による update の ENOENT 失敗）を
+// 検出・再現できない。ここでは git/spawn 系（runGit・resolveDevinPath 等）だけを fake にし、
+// ファイル操作（copyTree/hashTree/atomicSwap/removeManagedDir/listDirNames/readJson/ensureDir/
+// cleanupResidue/cleanupEmptyResidue）は `skill-tree-io.ts` の実実装をそのまま deps に差し込み、
+// 実 tmp ディレクトリ上で `reconcileMachineWithDeps()` を丸ごと2回走らせる
+// （1回目 install → marketplace 側の skill 内容を書き換え → 2回目 update）。
+// 修正前のコードでこのテストを実行すると、2回目の reconcile で atomicSwap が
+// `ENOENT ... rename '.../access-to-csharp' -> '.../.devrelay-trash/access-to-csharp-u1'`
+// で失敗し `second.failed` に `swap-failed` 相当の reason が入ることを事前に確認済み。
+// -----------------------------------------------------------------------------
+
+test('T1b E2E（実fs）: 既存 managed skill の内容変更で updated 1 になり、同期後に .devrelay-staging/.devrelay-trash が残らない', async () => {
+  const marketplaceName2 = 'devrelay';
+  const marketplaceSource2 = 'murata1215/devrelay-plugins';
+  const root = await mkdtemp(join(tmpdir(), 'agent-skills-e2e-'));
+  try {
+    const machineCwd2 = join(root, 'machine');
+    const skillsDir2 = join(root, 'skills');
+    const legacyDir2 = join(root, 'legacy'); // 実在しない（legacy スキャンは空扱いになる想定）
+    const cloneParentDir2 = join(machineCwd2, 'capabilities', 'marketplaces');
+    const cloneDir2 = join(cloneParentDir2, marketplaceName2);
+    const pluginDir2 = join(cloneDir2, 'plugins', 'access-migration');
+    const skillsRootDir2 = join(pluginDir2, 'skills');
+    const skillSrcDir2 = join(skillsRootDir2, 'access-to-csharp');
+
+    // marketplace clone を「既に git clone 済み」の体で実ディスク上に用意する
+    // （ensureMarketplaceClone は deps.listDirNames(cloneParentDir) の存在確認だけで
+    //   clone/fetch を分岐するため、git を一切呼ばなくても成立する）
+    await mkdir(skillSrcDir2, { recursive: true });
+    await writeFile(join(skillSrcDir2, 'SKILL.md'), '# access-to-csharp\ncontent A\n', 'utf-8');
+    await mkdir(join(cloneDir2, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(cloneDir2, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: marketplaceName2,
+        plugins: [{ name: 'access-migration', source: './plugins/access-migration', version: '0.1.0' }],
+      }),
+      'utf-8',
+    );
+    await mkdir(join(pluginDir2, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(pluginDir2, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'access-migration', version: '0.1.0' }),
+      'utf-8',
+    );
+
+    // rev-parse は reconcile 呼び出しごとに異なる commit を返す（fast path が 'present' に
+    // 短絡しないようにするため。実運用では marketplace 側が fetch のたびに新しい HEAD を返すのと同義）
+    let revParseCallIdx = 0;
+    const revParseCommits = ['commit1', 'commit2'];
+
+    const deps = {
+      resolveDevinPath: () => null, // 診断 spawn を避ける（配布判断には非関与のため無関係）
+      resolveGitPath: () => '/usr/bin/git',
+      async runGit(_gitPath, args) {
+        if (args[0] === 'rev-parse') {
+          const commit = revParseCommits[Math.min(revParseCallIdx, revParseCommits.length - 1)];
+          revParseCallIdx += 1;
+          return { ok: true, stdout: commit, stderr: '', code: 0, killed: false };
+        }
+        // clone/fetch/remote/reset/clean はすべて no-op 成功（実ファイルは事前配置済みのものを使う）
+        return { ok: true, stdout: '', stderr: '', code: 0, killed: false };
+      },
+      async resolveRuntimeVersion() { return null; },
+      hasAiTool: () => false,
+      readJson: readJsonSafe,
+      machineCwd: () => machineCwd2,
+      resolveSkillsDir: () => ({ ok: true, dir: skillsDir2, source: 'default' }),
+      resolveLegacySkillsDir: () => ({ ok: true, dir: legacyDir2, source: 'legacy' }),
+      copyTree: copyTreeSafe,
+      hashTree,
+      atomicSwap: atomicSwapDir, // ← T1b の修正対象そのもの（実 rename を使う）
+      removeManagedDir: removeManagedDirIo,
+      listDirNames: listDirNamesIo,
+      ensureDir,
+      cleanupResidue,
+      cleanupEmptyResidue: removeResidueDirsIfEmpty,
+      uniqueSuffix: () => 'u1',
+      nowIso: () => '2026-09-17T00:00:00.000Z',
+      async writeMarker(filePath, marker) {
+        await writeFile(filePath, JSON.stringify(marker, null, 2), 'utf-8');
+      },
+    };
+
+    const ctx = {
+      config: { providers: { claude: { marketplaceName: marketplaceName2, marketplaceSource: marketplaceSource2 } }, items: [] },
+      items: [{ provider: 'agent-skills', kind: 'standard', id: 'access-migration' }],
+    };
+
+    // 1回目: 新規 install
+    const first = await reconcileMachineWithDeps(ctx, deps);
+    assert.deepEqual(first.installed, ['access-migration/access-to-csharp']);
+    assert.deepEqual(first.updated, []);
+    assert.deepEqual(first.failed, []);
+    assert.equal(
+      await readFile(join(skillsDir2, 'access-to-csharp', 'SKILL.md'), 'utf-8'),
+      '# access-to-csharp\ncontent A\n',
+    );
+    // T1: install 直後に空 .devrelay-staging が残らない
+    await assert.rejects(() => readdir(join(skillsDir2, '.devrelay-staging')));
+    await assert.rejects(() => readdir(join(skillsDir2, '.devrelay-trash')));
+
+    // marketplace 側の skill 内容を書き換える（実機 E2E の「内容変更→再同期」に相当）
+    await writeFile(join(skillSrcDir2, 'SKILL.md'), '# access-to-csharp\ncontent B（変更後）\n', 'utf-8');
+
+    // 2回目: 内容変更を検知して update（T1b 修正前はここで ENOENT ... rename により失敗していた）
+    const second = await reconcileMachineWithDeps(ctx, deps);
+    assert.deepEqual(second.failed, [], 'T1b未修正だとここに swap-failed(ENOENT) が入る');
+    assert.deepEqual(second.updated, ['access-migration/access-to-csharp']);
+    assert.deepEqual(second.installed, []);
+    assert.equal(
+      await readFile(join(skillsDir2, 'access-to-csharp', 'SKILL.md'), 'utf-8'),
+      '# access-to-csharp\ncontent B（変更後）\n',
+    );
+
+    // T1: update 後も .devrelay-staging / .devrelay-trash が残らない（T1b の trash 親と合わせて確認）
+    await assert.rejects(() => readdir(join(skillsDir2, '.devrelay-staging')));
+    await assert.rejects(() => readdir(join(skillsDir2, '.devrelay-trash')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

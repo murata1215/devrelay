@@ -11,8 +11,15 @@
  * `claude:plugin`（Claude Code には plugin として）と `agent-skills:standard`
  * （Devin/Codex 等には Agent Skills 標準として）の items を**常に両方**生成する。
  * ツール別の opt-in チェックボックスという UI 概念自体が無くなったため、
- * `CapabilityConfigFormState.distributeToDevin` は削除した（型ごと廃止。@deprecated 経由の
- * 後方互換は shared 側の `providers.devin` 型にのみ残す）。
+ * `CapabilityConfigFormState.distributeToDevin` は削除した（型ごと廃止）。
+ *
+ * サイクルP3-C（T4）: `CapabilityConfigLike.providers.devin`（@deprecated 型）を削除した。
+ * DB に残りうる旧 `providers.devin` キーは `SELECT ... WHERE "capabilityConfig"::text LIKE '%"devin"%'`
+ * で 0 rows を確認済み。万一残っていても `capabilityConfigToFormState()` は元々 `providers.claude` と
+ * `{provider:'claude',kind:'plugin'}` の item しか見ないため、型を削除しても実害はない。
+ * 旧 `items[].provider==='devin'` （legacy items）側は本ファイルとは別経路で、Agent 側
+ * `agents/linux/src/services/capability-rules.ts` の `normalizeCapabilityItems()` が吸収する
+ * （型ではなく値でキーしているため、この型削除の影響を受けない）。
  */
 
 /** UI フォームが保持する編集対象の状態（Claude セクションのみ） */
@@ -27,12 +34,6 @@ export interface CapabilityConfigFormState {
 export interface CapabilityConfigLike {
   providers: {
     claude?: { marketplaceName: string; marketplaceSource: string };
-    /**
-     * @deprecated サイクルP3-B §5-7: ツール別 opt-in の概念自体を廃止した。
-     * 新規保存では二度と生成しない。旧 DB 値の読み取り互換のためだけに型を残す
-     * （`capabilityConfigToFormState` はこのキーを一切参照しない）。
-     */
-    devin?: { marketplaceName: string; marketplaceSource: string };
   };
   items: Array<{ provider: string; kind: string; id: string }>;
 }
@@ -162,6 +163,32 @@ export function normalizePluginIdInput(
 // 同期ステータス表示（Auto Update の「最終自動更新」行と同じ流儀）
 // -----------------------------------------------------------------------------
 
+/**
+ * サイクルP3-C（T2）: `agent-skills-rules.ts` の `buildDesiredSkillPlan()` が skill を持たないプラグインに
+ * 対して `present` へ積む `<pluginId>:no-skills` エントリの接尾辞。payload の形は一切変えず、
+ * web 側でこの接尾辞を目印に「通常 present」と「skill なし」を分離する。
+ */
+export const NO_SKILLS_SUFFIX = ':no-skills';
+
+/**
+ * `present` 配列（Agent 由来の未検証 JSON 要素）を「通常の present id」と「`:no-skills` の plugin id」に
+ * 分解する（純関数・fail-open）。文字列でない要素は `normalizeCapabilityResults` と同じ方針で捨てる。
+ * skill id は `<pluginId>/<skillName>` 形式で区切りが `/` のため、`:no-skills` の末尾一致は誤爆しない。
+ */
+export function partitionPresentIds(present: unknown[]): { present: string[]; noSkills: string[] } {
+  const presentIds: string[] = [];
+  const noSkills: string[] = [];
+  for (const item of present) {
+    if (typeof item !== 'string') continue;
+    if (item.endsWith(NO_SKILLS_SUFFIX)) {
+      noSkills.push(item.slice(0, -NO_SKILLS_SUFFIX.length));
+    } else {
+      presentIds.push(item);
+    }
+  }
+  return { present: presentIds, noSkills };
+}
+
 /** provider×kind 1 組ぶんの reconcile 結果（`@devrelay/shared` の `CapabilityResult` と構造互換） */
 export interface CapabilityResultLike {
   provider: string;
@@ -213,8 +240,14 @@ export interface SyncStatusDisplay {
     receivedAt: string;
     installedCount: number;
     updatedCount: number;
-    /** サイクルP3-B §5-10: 「配布されたのか present（既に配布済みで無変更）なのか」を区別できるようにする */
+    /**
+     * サイクルP3-B §5-10: 「配布されたのか present（既に配布済みで無変更）なのか」を区別できるようにする。
+     * サイクルP3-C（T2）: `<pluginId>:no-skills`（skill を持たないプラグイン）は除いた実 present 件数。
+     * 従来の合計値が欲しい場合は `presentCount + noSkillsCount` を参照する（仕様書 §9 参照）。
+     */
     presentCount: number;
+    /** サイクルP3-C（T2）: skill を持たないプラグインの件数（`present` から分離した内訳） */
+    noSkillsCount: number;
     failedCount: number;
     notAllowedCount: number;
     /** サイクルP3-B §5-10: legacy 回収分も含めた撤去件数（prefix 付きの詳細は perProvider/results 側で見る） */
@@ -242,7 +275,12 @@ export interface SyncStatusDisplay {
     kind: string;
     installedCount: number;
     updatedCount: number;
+    /** サイクルP3-C（T2）: `<pluginId>:no-skills` を除いた実 present 件数（summary.presentCount と同じ方針） */
     presentCount: number;
+    /** サイクルP3-C（T2）: この provider×kind で skill を持たなかったプラグインの件数 */
+    noSkillsCount: number;
+    /** サイクルP3-C（T2）: skill を持たなかったプラグイン id 一覧（非空のときだけキーを生やす） */
+    noSkillsIds?: string[];
     failedCount: number;
     notAllowedCount: number;
     removedCount: number;
@@ -255,21 +293,56 @@ export interface SyncStatusDisplay {
 }
 
 /**
+ * `status.results`（Agent 由来の未検証 JSON。`Machine.capabilitySyncStatus` は Server が
+ * 無検証で保存する `Json?`）を安全な配列に正規化する（純関数・fail-open）。
+ * - `results` 自体が配列でなければ `[]` とみなす。
+ * - 各要素の `installed`/`updated`/`present`/`failed`/`notAllowed` が配列でなければ `[]` として扱う
+ *   （`removed` は元々 optional 扱いなので、配列であるときだけキーを残す）。
+ * - `provider`/`kind` が string でなければ `''` にフォールバックする（要素自体は捨てない。捨てると
+ *   provider 別内訳と results の対応関係が崩れるため）。
+ * ここは承認カードのような安全性判断には使われないただの表示用集計なので fail-open が正しい選択
+ * （壊れていても「0 件」として表示を継続し、`machine-display-rules.ts` の Error Boundary 到達を待たず
+ * 画面を落とさないことを優先する）。
+ */
+function normalizeCapabilityResults(results: unknown): CapabilityResultLike[] {
+  if (!Array.isArray(results)) return [];
+  return results.map((r): CapabilityResultLike => {
+    const obj = r !== null && typeof r === 'object' ? (r as Record<string, unknown>) : {};
+    return {
+      provider: typeof obj.provider === 'string' ? obj.provider : '',
+      kind: typeof obj.kind === 'string' ? obj.kind : '',
+      runtimeVersion: typeof obj.runtimeVersion === 'string' ? obj.runtimeVersion : null,
+      installed: Array.isArray(obj.installed) ? (obj.installed as string[]) : [],
+      updated: Array.isArray(obj.updated) ? (obj.updated as string[]) : [],
+      present: Array.isArray(obj.present) ? (obj.present as string[]) : [],
+      failed: Array.isArray(obj.failed) ? (obj.failed as Array<{ id: string; reason: string }>) : [],
+      notAllowed: Array.isArray(obj.notAllowed) ? (obj.notAllowed as string[]) : [],
+      ...(Array.isArray(obj.removed) ? { removed: obj.removed as string[] } : {}),
+    };
+  });
+}
+
+/**
  * provider 別の内訳配列を作る（純関数）。`results` が 0 件のときだけ undefined。
  */
 function buildPerProviderBreakdown(results: CapabilityResultLike[]): SyncStatusDisplay['perProvider'] {
   if (results.length === 0) return undefined;
-  return results.map(r => ({
-    provider: r.provider,
-    kind: r.kind,
-    installedCount: r.installed.length,
-    updatedCount: r.updated.length,
-    presentCount: r.present.length,
-    failedCount: r.failed.length,
-    notAllowedCount: r.notAllowed.length,
-    removedCount: r.removed?.length ?? 0,
-    ...(r.runtimeVersion ? { runtimeDiagnostics: r.runtimeVersion } : {}),
-  }));
+  return results.map(r => {
+    const { present, noSkills } = partitionPresentIds(r.present);
+    return {
+      provider: r.provider,
+      kind: r.kind,
+      installedCount: r.installed.length,
+      updatedCount: r.updated.length,
+      presentCount: present.length,
+      noSkillsCount: noSkills.length,
+      ...(noSkills.length > 0 ? { noSkillsIds: noSkills } : {}),
+      failedCount: r.failed.length,
+      notAllowedCount: r.notAllowed.length,
+      removedCount: r.removed?.length ?? 0,
+      ...(r.runtimeVersion ? { runtimeDiagnostics: r.runtimeVersion } : {}),
+    };
+  });
 }
 
 /**
@@ -291,23 +364,31 @@ export function decideSyncStatusDisplay(
   if (!status) {
     return { kind: capabilitySyncSupported === false ? 'unsynced-unsupported' : 'unsynced' };
   }
-  const installedCount = status.results.reduce((sum, r) => sum + r.installed.length, 0);
-  const updatedCount = status.results.reduce((sum, r) => sum + r.updated.length, 0);
-  const presentCount = status.results.reduce((sum, r) => sum + r.present.length, 0);
-  const failedCount = status.results.reduce((sum, r) => sum + r.failed.length, 0);
-  const notAllowedCount = status.results.reduce((sum, r) => sum + r.notAllowed.length, 0);
-  const removedCount = status.results.reduce((sum, r) => sum + (r.removed?.length ?? 0), 0);
+  // status.results/receivedAt は Agent 由来の未検証 JSON なので、ここで一度正規化してから使う
+  // （fail-open: 壊れていても 0 件集計として表示を継続する）
+  const results = normalizeCapabilityResults(status.results);
+  const installedCount = results.reduce((sum, r) => sum + r.installed.length, 0);
+  const updatedCount = results.reduce((sum, r) => sum + r.updated.length, 0);
+  // サイクルP3-C（T2）: `<pluginId>:no-skills` を分離した実 present 件数 + skill なし件数。
+  // 合計は従来の `present.length` の総和と一致する（仕様書 §9: presentCount + noSkillsCount = 従来の present 総数）。
+  const partitioned = results.map(r => partitionPresentIds(r.present));
+  const presentCount = partitioned.reduce((sum, p) => sum + p.present.length, 0);
+  const noSkillsCount = partitioned.reduce((sum, p) => sum + p.noSkills.length, 0);
+  const failedCount = results.reduce((sum, r) => sum + r.failed.length, 0);
+  const notAllowedCount = results.reduce((sum, r) => sum + r.notAllowed.length, 0);
+  const removedCount = results.reduce((sum, r) => sum + (r.removed?.length ?? 0), 0);
   const summary = {
-    receivedAt: status.receivedAt,
+    receivedAt: typeof status.receivedAt === 'string' ? status.receivedAt : '',
     installedCount,
     updatedCount,
     presentCount,
+    noSkillsCount,
     failedCount,
     notAllowedCount,
     removedCount,
     trigger: status.trigger,
   };
-  const perProvider = buildPerProviderBreakdown(status.results);
+  const perProvider = buildPerProviderBreakdown(results);
 
   if (status.status === 'skipped') {
     return {
@@ -317,7 +398,7 @@ export function decideSyncStatusDisplay(
     };
   }
   if (status.status === 'error') {
-    const failures = status.results.flatMap(r => r.failed);
+    const failures = results.flatMap(r => r.failed);
     return {
       kind: 'error',
       summary,
@@ -328,7 +409,7 @@ export function decideSyncStatusDisplay(
   return {
     kind: 'synced',
     summary,
-    ...(status.results.length === 0 ? { emptyTargets: true as const } : {}),
+    ...(results.length === 0 ? { emptyTargets: true as const } : {}),
     ...(perProvider ? { perProvider } : {}),
   };
 }

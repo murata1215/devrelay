@@ -59,30 +59,15 @@ export interface CapabilityClaudeProviderConfig {
 }
 
 /**
- * @deprecated サイクル P3-B で `devin:skill` は `agent-skills:standard`（provider='agent-skills'）に
- * 昇格し、`providers.devin` は配布に使われなくなった（Agent 側は `normalizeCapabilityItems()` で
- * legacy items を読み替えて読み捨てる）。型は DB に残った旧値の後方互換のためだけに残す
- * （§10 O1: 全マシンの `Machine.capabilityConfig` から消えたことを確認できた次サイクルで削除予定）。
+ * 配布対象の論理宣言（provider/kind を必ず明示。将来 providers.codex を追加できる）。
  *
- * Devin native skill adapter（`devin:skill`、サイクルP3-A）が使っていた設定。
- * Claude 用と同じ marketplace 索引を共有する（同じ items id 空間から両 provider へ配布する設計）。
- * `skillsDir` は意図的に持たない（承認ノート #4: サーバー検証器が provider 固有フィールドを
- * 既知2フィールドだけに再構築するため通せない。上書きは Agent ローカルの
- * `DEVRELAY_DEVIN_SKILLS_DIR` 環境変数でのみ行う）。
+ * サイクル P3-C（T4）: `providers.devin`（`CapabilityDevinProviderConfig`、サイクル P3-B で @deprecated
+ * 化していた型）を削除した。DB に残りうる旧値は SQL で 0 rows を確認済み。旧 `items[].provider==='devin'`
+ * （legacy items）は本削除の影響を受けず、引き続き Agent 側 `normalizeCapabilityItems()` が読み替えて吸収する。
  */
-export interface CapabilityDevinProviderConfig {
-  /** Claude 側と共有する索引名（表示・ログ用途。所有権判定の条件には使わない） */
-  marketplaceName: string;
-  /** マーケットプレイスの取得元（`owner/repo` 形式の GitHub リポジトリ、または https URL） */
-  marketplaceSource: string;
-}
-
-/** 配布対象の論理宣言（provider/kind を必ず明示。将来 providers.codex を追加できる） */
 export interface CapabilityConfig {
   providers: {
     claude?: CapabilityClaudeProviderConfig;
-    /** @deprecated サイクル P3-B で廃止。DB に残った旧値の後方互換のためだけに型を残す（§10 O1） */
-    devin?: CapabilityDevinProviderConfig;
   };
   items: Array<{
     provider: string;

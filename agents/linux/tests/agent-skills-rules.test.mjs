@@ -31,6 +31,7 @@ import {
   canPerformRemoval,
   decideLegacyMigration,
   buildRuntimeDiagnostics,
+  formatRuntimeVersion,
   resolveFailureIds,
 } from '../dist/services/capabilities/agent-skills-rules.js';
 
@@ -488,6 +489,57 @@ test('buildRuntimeDiagnostics: Devin 未検出 + Codex 設定あり（混在）'
 
 test('buildRuntimeDiagnostics: version が無い runtime-detection でも「検出」表記になる', () => {
   const s = buildRuntimeDiagnostics([{ label: 'Devin', detected: true, basis: 'runtime-detection', version: null }]);
+  assert.equal(s, 'Devin 検出');
+});
+
+// ---- formatRuntimeVersion（P3-C T3: 診断文字列の接頭辞重複解消） ----
+
+test('formatRuntimeVersion: label と一致する接頭辞を除去する（実機出力）', () => {
+  assert.equal(formatRuntimeVersion('Devin', 'devin 3000.6.7 (260a97c8)'), '3000.6.7 (260a97c8)');
+});
+
+test('formatRuntimeVersion: label トークンのみ除去し残りは保持する', () => {
+  assert.equal(formatRuntimeVersion('Devin', 'Devin CLI 1.2'), 'CLI 1.2');
+});
+
+test('formatRuntimeVersion: label が無ければそのまま返す', () => {
+  assert.equal(formatRuntimeVersion('Devin', '3000.6.7'), '3000.6.7');
+});
+
+test('formatRuntimeVersion: null / undefined は null', () => {
+  assert.equal(formatRuntimeVersion('Devin', null), null);
+  assert.equal(formatRuntimeVersion('Devin', undefined), null);
+});
+
+test('formatRuntimeVersion: 空白のみは null', () => {
+  assert.equal(formatRuntimeVersion('Devin', '   '), null);
+});
+
+test('formatRuntimeVersion: label のみ（版が無い）は null', () => {
+  assert.equal(formatRuntimeVersion('Devin', 'devin'), null);
+  assert.equal(formatRuntimeVersion('Devin', 'devin   '), null);
+});
+
+test('formatRuntimeVersion: 複数行は最初の非空行のみ採用する', () => {
+  assert.equal(formatRuntimeVersion('Devin', '\n  \ndevin 3000.6.7\nsome other line'), '3000.6.7');
+});
+
+test('formatRuntimeVersion: 80文字超は先頭80文字+…に丸める', () => {
+  const long = 'x'.repeat(90);
+  const result = formatRuntimeVersion('Devin', `devin ${long}`);
+  assert.equal(result, `${long.slice(0, 80)}…`);
+  assert.equal(result.length, 81);
+});
+
+test('buildRuntimeDiagnostics: T3統合 — devin 生出力の接頭辞重複が解消される', () => {
+  const s = buildRuntimeDiagnostics([
+    { label: 'Devin', detected: true, basis: 'runtime-detection', version: 'devin 3000.6.7 (260a97c8)' },
+  ]);
+  assert.equal(s, 'Devin 3000.6.7 (260a97c8) 検出');
+});
+
+test('buildRuntimeDiagnostics: T3統合 — 版が label のみ（除去後空）なら「検出」のみになる', () => {
+  const s = buildRuntimeDiagnostics([{ label: 'Devin', detected: true, basis: 'runtime-detection', version: 'devin' }]);
   assert.equal(s, 'Devin 検出');
 });
 
