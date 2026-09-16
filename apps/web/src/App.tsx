@@ -19,6 +19,7 @@ import { TeamPage } from './pages/TeamPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { LitePage } from './pages/LitePage';
 import { NotificationBanner } from './components/NotificationBanner';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { resolveNextTarget, redirectToManager } from './lib/managerRedirect';
 
 /**
@@ -37,18 +38,26 @@ function ProtectedContent() {
       <div style={{ display: isChatRoute ? undefined : 'none' }}>
         <ChatPage />
       </div>
-      {/* 他のページ: /chat 時は非表示 */}
+      {/*
+        他のページ: /chat 時は非表示。
+        ErrorBoundary でラップし、1 ページのレンダー例外（例: Machine.managementInfo のような
+        DB/Agent 由来の未検証 JSON）が Layout（ヘッダー・ナビ）ごと巻き込んで全画面を白くしないようにする。
+        `key={location.pathname}` でパス遷移ごとに boundary を作り直し、別ページへ移動すれば
+        エラー表示が自動的にリセットされるようにする。
+      */}
       {!isChatRoute && (
-        <Routes>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/conversations" element={<ConversationsPage />} />
-          <Route path="/activity" element={<MemberActivityPage />} />
-          <Route path="/dev-reports" element={<DevReportsPage />} />
-          <Route path="/machines" element={<MachinesPage />} />
-          <Route path="/team" element={<TeamPage />} />
-          <Route path="/projects" element={<ProjectsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Routes>
+        <ErrorBoundary key={location.pathname}>
+          <Routes>
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/conversations" element={<ConversationsPage />} />
+            <Route path="/activity" element={<MemberActivityPage />} />
+            <Route path="/dev-reports" element={<DevReportsPage />} />
+            <Route path="/machines" element={<MachinesPage />} />
+            <Route path="/team" element={<TeamPage />} />
+            <Route path="/projects" element={<ProjectsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </ErrorBoundary>
       )}
       <NotificationBanner />
     </Layout>
@@ -147,7 +156,9 @@ function AppRoutes() {
         path="/lite"
         element={
           <ProtectedRoute>
-            <LitePage />
+            <ErrorBoundary>
+              <LitePage />
+            </ErrorBoundary>
           </ProtectedRoute>
         }
       />
@@ -170,7 +181,11 @@ export default function App() {
       <BrowserRouter basename="/">
         <AuthProvider>
           <LanguageProvider>
-            <AppRoutes />
+            {/* 最外周の最終防御。ページ単位の ErrorBoundary（ProtectedContent 内）が本命だが、
+                Provider 自体の描画例外等それより外側で起きうる例外もここで受け止める */}
+            <ErrorBoundary>
+              <AppRoutes />
+            </ErrorBoundary>
           </LanguageProvider>
         </AuthProvider>
       </BrowserRouter>
