@@ -341,6 +341,11 @@ export const chatMessages = {
     en: '❌ {tool} CLI exited with code {code} without producing any output.\n\n[stderr]\n{stderr}',
     ja: '❌ {tool} CLI が出力なしで終了しました（exit {code}）。\n\n[stderr]\n{stderr}',
   },
+  // --- 今サイクル: kill しても停まらなかったターンの強制確定（孤児プロセス警告） ---
+  'ai.killEscalationFailed': {
+    en: '⚠️ {tool} was asked to stop but did not terminate. This turn has been finalized, but a process (pid {pid}) and its children may still be running on the machine. Check and kill it manually if needed.',
+    ja: '⚠️ {tool} に停止を要求しましたが終了しませんでした。このターンは確定しましたが、プロセス（pid {pid}）とその子プロセスがマシン上に残っている可能性があります。必要に応じて手動で終了してください。',
+  },
   'devin.probeFailed': {
     en: '⚠️ Failed to probe this machine\'s Devin CLI (`devin --help`). Proceeding assuming all flags are supported; if an unsupported flag is rejected, DevRelay will automatically retry without it.\n({detail})',
     ja: '⚠️ この端末の Devin CLI のプローブ（`devin --help`）に失敗しました。全フラグ対応ありと仮定して続行します。非対応フラグが拒否された場合は自動的に外して再試行します。\n({detail})',

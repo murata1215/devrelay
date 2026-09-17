@@ -14,6 +14,7 @@ import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from './devin-diagnostics.js';
 import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, extractRejectionEvidence, extractBlockedCommands, sliceStepsFromOffset, type AtifStepSummary } from './devin-atif.js';
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
+import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
 import { saveClaudeSessionId, saveContextUsage, loadClaudeSessionId, clearClaudeSessionId, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadSessionMeta, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
 import { decideResume } from './resume-priority.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
@@ -47,6 +48,9 @@ interface AiSession {
   process: ChildProcess;
   projectPath: string;
   aiTool: AiTool;
+  /** 今サイクル: 実行中の子プロセスツリーを段階的に停止し、停まらなければターンを強制確定する。
+   *  sendPromptToAi() の実行中だけ設定される（close ハンドラで undefined に戻す）。 */
+  requestKill?: (reason: string) => void;
 }
 
 // #276: Devin の `--export`（ATIF 形式で各ステップをファイル書き出し）対応可否キャッシュ。
@@ -1805,7 +1809,7 @@ export async function sendPromptToAi(
   let devinRuntimeLimitHit = false; // 実行時間上限で kill したか
   let devinStepLimitHit = false;    // ステップ数上限で kill したか
   let devinStepCount = 0;           // ATIF ステップ数カウンタ
-  const devinMaxRuntimeMin = config.aiTools.devin?.maxRuntimeMinutes ?? 15; // 0=無制限
+  const devinMaxRuntimeMin = config.aiTools.devin?.maxRuntimeMinutes ?? 30; // 0=無制限（今サイクル: 既定 15→30分に変更、ユーザー指示）
   const devinMaxSteps = config.aiTools.devin?.maxSteps ?? 0;                 // 0=無効
   // #281: Devin の作業中ファイル変更ウォッチ（「内部で何をしているか」のライブ表示）。
   // ATIF は turn 終了時にしか書かれずライブ tail 不可のため、ファイル操作を監視して補完する。
@@ -1856,6 +1860,22 @@ export async function sendPromptToAi(
   const codexProgressReported = new Map<string, number>(); // 同一進捗メッセージ10秒スロットル
   let codexTurnFailed = false;      // turn.failed イベントを受信したか
   let codexTurnFailedMessage = '';  // turn.failed の error.message
+
+  // ---- 今サイクル: ターン終了の単一関門 + kill エスカレーション状態 ----
+  // 孫プロセス（Gradle/Kotlin デーモン等）がパイプを握ったまま devin.exe が終了すると
+  // 'close' が永久に来ず、ターンが確定しない（実測: 92分ハング）。'exit' を独立に観測し、
+  // 猶予後に自分側の stdio を destroy して自然な 'close' を誘発、それでも来なければ合成する。
+  // 385行ある close ハンドラ本体はリファクタせず、先頭のラッチ（turnEnded）で二重実行だけ防ぐ。
+  let turnEnded = false;      // close ハンドラ本体を二度と走らせないためのラッチ
+  let killRequested = false;  // kill を要求したか（ハートビート抑止に使う）
+  let processExited = false;  // 'exit' を受信したか
+  let forcedFinalize = false; // 停まらないまま強制確定したか（孤児警告・execSync スキップに使う）
+  let killStage: KillStage | null = null;
+  let exitFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let syntheticCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  let killForceTimer: ReturnType<typeof setTimeout> | null = null;
+  let killGiveUpTimer: ReturnType<typeof setTimeout> | null = null;
+  const killTimings = resolveKillTimings(process.env);
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -2159,10 +2179,66 @@ export async function sendPromptToAi(
     proc.stdin?.end();
   }
 
+  // ---- 今サイクル: kill エスカレーション用のタイマー・ヘルパー群 ----
+  // clearTurnTimers(): 'exit'/'close' いずれかでターンが終わったら呼ぶ。全 watchdog タイマーを止める。
+  const clearTurnTimers = () => {
+    if (exitFlushTimer) { clearTimeout(exitFlushTimer); exitFlushTimer = null; }
+    if (syntheticCloseTimer) { clearTimeout(syntheticCloseTimer); syntheticCloseTimer = null; }
+    if (killForceTimer) { clearTimeout(killForceTimer); killForceTimer = null; }
+    if (killGiveUpTimer) { clearTimeout(killGiveUpTimer); killGiveUpTimer = null; }
+  };
+  // runKillPlan(): 1段階分の停止手順を実行する。Windows は taskkill が先、proc.kill() は
+  // taskkill の起動に失敗したときの保険（先に proc.kill() すると親リンクが切れ taskkill が孫に届かなくなる）。
+  const runKillPlan = (stage: KillStage) => {
+    const plan = buildKillPlan({ platform: process.platform, pid: proc.pid ?? null, stage });
+    console.log(`[${aiTool}] kill stage=${stage}: ${plan.note}`);
+    if (plan.command) {
+      const killer = spawn(plan.command.file, plan.command.args, { stdio: 'ignore', windowsHide: true });
+      killer.on('error', (err) => {
+        console.warn(`[${aiTool}] taskkill failed to start (${err.message}), falling back to proc.kill(${plan.fallbackSignal})`);
+        try { proc.kill(plan.fallbackSignal); } catch {}
+      });
+      killer.on('close', (code) => {
+        console.log(`[${aiTool}] taskkill exited with code ${code}`);
+      });
+    } else {
+      try { proc.kill(plan.fallbackSignal); } catch {}
+    }
+  };
+  // requestKill(): kill ラダーの起点。term → (forceDelayMs 後) force → (giveUpDelayMs 後) 強制確定。
+  // 冪等（'c' 連打や複数の kill 要求元から呼ばれてもラダーを再起動しない）。
+  const requestKill = (reason: string) => {
+    if (turnEnded || killStage !== null) return;
+    killRequested = true;
+    killStage = 'term';
+    console.log(`[${aiTool}] kill requested (reason=${reason})`);
+    runKillPlan('term');
+    killForceTimer = setTimeout(() => {
+      if (turnEnded || proc.exitCode !== null) return;
+      killStage = 'force';
+      runKillPlan('force');
+    }, killTimings.forceDelayMs);
+    killGiveUpTimer = setTimeout(() => {
+      if (turnEnded) return;
+      console.warn(`[${aiTool}] ⚠️ process still alive after kill escalation, forcing turn finalize (pid=${proc.pid ?? '?'})`);
+      forcedFinalize = true;
+      proc.emit('close', proc.exitCode, proc.signalCode);
+    }, killTimings.forceDelayMs + killTimings.giveUpDelayMs);
+  };
+
   // 実行中のプロセスを activeSessions に保存（cancelAiSession で参照するため）
   const session = activeSessions.get(sessionId);
   if (session) {
+    // 今サイクル: 前ターンのプロセスが生きたまま参照を上書きすると、cancelAiSession/stopAiSession から
+    // 到達できない孤児になる（実測: ハートビートが 2 系列並走した原因の一つ）。
+    const prevProcess = session.process;
+    const prevRequestKill = session.requestKill;
+    if (prevProcess && prevProcess !== proc && prevProcess.exitCode === null && prevProcess.pid) {
+      console.warn(`[${aiTool}] ⚠️ previous process still alive (pid=${prevProcess.pid}), killing its tree before overwriting`);
+      prevRequestKill?.('supersededByNewTurn');
+    }
     session.process = proc;
+    session.requestKill = requestKill;
   }
 
   // #276: Devin は `-p` 実行中に stdout を出さないため、進捗ハートビートを送る。
@@ -2173,6 +2249,10 @@ export async function sendPromptToAi(
     const devinStartTime = Date.now();
     const lang: Language = options.language ?? DEFAULT_CHAT_LANGUAGE;
     devinHeartbeatTimer = setInterval(() => {
+      // 今サイクル: kill 要求後・プロセス終了後・ターン確定後は矛盾表示
+      // （例: 停止要求済みなのに「(43分経過 / 上限15分)」が出続ける）を防ぐため出さない。
+      // サーバー側 5 分ソフトタイムアウトの無限再武装（appendSessionOutput 経由）も止まる。
+      if (!shouldEmitHeartbeat({ killRequested, turnEnded, processExited })) return;
       const elapsedSec = Math.floor((Date.now() - devinStartTime) / 1000);
       // #277: 上限有効時は「/ 上限M分」を併記して残り時間を可視化
       const limitSuffix = devinMaxRuntimeMin > 0 ? tChat(lang, 'progress.runtimeLimitSuffix', { min: devinMaxRuntimeMin }) : '';
@@ -2188,7 +2268,7 @@ export async function sendPromptToAi(
       devinLimitTimer = setTimeout(() => {
         console.log(`[devin] ⏸️ Runtime limit ${devinMaxRuntimeMin}min reached, killing process (cost guard)`);
         devinRuntimeLimitHit = true;
-        proc.kill('SIGTERM');
+        requestKill('runtimeLimit');
       }, devinMaxRuntimeMin * 60_000);
     }
 
@@ -2262,7 +2342,7 @@ export async function sendPromptToAi(
                   if (devinMaxSteps > 0 && devinStepCount > devinMaxSteps && !devinStepLimitHit) {
                     console.log(`[devin] ⏸️ Step limit ${devinMaxSteps} exceeded, killing process (cost guard)`);
                     devinStepLimitHit = true;
-                    proc.kill('SIGTERM');
+                    requestKill('stepLimit');
                   }
                 }
               } catch {
@@ -2310,7 +2390,7 @@ export async function sendPromptToAi(
       if (fullOutput.length === 0 && !completionSent) {
         console.log(`[${aiTool}] ⚠️ --resume startup timeout (${RESUME_STARTUP_TIMEOUT / 1000}s), killing process for retry`);
         result.resumeFailed = true;
-        proc.kill('SIGTERM');
+        requestKill('resumeStartupTimeout');
       }
     }, RESUME_STARTUP_TIMEOUT);
   }
@@ -2572,7 +2652,37 @@ export async function sendPromptToAi(
       for (const line of lines) classifyDevinStderrLine(line);
     });
 
+    // 今サイクル: 'close' は「プロセス終了」かつ「全 stdio が閉じた」ときにしか発火しない。
+    // devin が起動した孫プロセス（gradle/kotlin daemon の java.exe 等）がパイプを継承したまま
+    // 生き残ると 'close' は永久に来ず、ターンが確定しない（実測 92 分ハング）。
+    // 'exit' を独立に観測し、猶予後にこちら側の読み書き端を destroy して maybeClose() を誘発する。
+    proc.on('exit', (code, signal) => {
+      processExited = true;
+      console.log(`[${aiTool}] 'exit' received (code=${code}, signal=${signal}), waiting for stdio close`);
+      if (turnEnded) return;
+      exitFlushTimer = setTimeout(() => {
+        if (turnEnded) return;
+        console.warn(`[${aiTool}] ⚠️ 'close' not fired ${killTimings.exitFlushGraceMs}ms after exit, destroying stdio`);
+        try { proc.stdin?.destroy(); } catch {}
+        try { proc.stdout?.destroy(); } catch {}
+        try { proc.stderr?.destroy(); } catch {}
+        syntheticCloseTimer = setTimeout(() => {
+          if (turnEnded) return;
+          console.warn(`[${aiTool}] ⚠️ 'close' still not fired after stdio destroy, synthesizing close`);
+          proc.emit('close', code, signal); // 実 exit の code/signal をそのまま渡す（close 本体の分岐条件を変えない）
+        }, killTimings.syntheticCloseGraceMs);
+      }, killTimings.exitFlushGraceMs);
+    });
+
     proc.on('close', (code, signal) => {
+      // 今サイクル: close は「自然発火」「stdio destroy 後の発火」「watchdog による合成」の
+      // 3 経路から来る。385 行の本体はリファクタせず、ここで 1 回だけに絞る。
+      if (turnEnded) {
+        console.log(`[${aiTool}] duplicate close ignored (code=${code}, signal=${signal})`);
+        return;
+      }
+      turnEnded = true;
+      clearTurnTimers();
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
@@ -2675,7 +2785,9 @@ export async function sendPromptToAi(
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`)); } catch {}
         // devin list --format json で最新セッション ID を取得して保存（出力ゼロ時はスキップ）
         try {
-          if (!devinOutputEmpty) {
+          // 今サイクル: kill が効かず強制確定したターンでは execSync（同期・最大10秒ブロック）を
+          // イベントループ上で走らせない（agent 全体が固まる事故を避ける）。
+          if (!devinOutputEmpty && !forcedFinalize) {
           const listOutput = execSync(`${command} list --format json`, {
             cwd: projectPath, encoding: 'utf-8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
           });
@@ -2708,8 +2820,24 @@ export async function sendPromptToAi(
       }
 
       // プロセス参照をクリア（キャンセル済み判定のため exitCode は残る）
-      if (session) {
+      // 今サイクル: session.process が「今回の proc」と一致する場合のみクリアする（H3 の修正）。
+      // AiSession はターンをまたいで再利用されるため、無条件クリアだと古いターンの close が
+      // 新しいターンの process 参照を消してしまい、以後 requestKill / c が無言で失敗していた。
+      if (session && session.process === proc) {
         session.process = null as any;
+        session.requestKill = undefined;
+      }
+
+      // 今サイクル: kill しても停まらず強制確定したターンでは、孤児プロセスが残っている
+      // 可能性をチャットに警告する（RC3 の安全網が発動したことをユーザーに伝える）。
+      if (forcedFinalize) {
+        onOutput(
+          `${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'ai.killEscalationFailed', {
+            tool: aiTool,
+            pid: String(proc.pid ?? '?'),
+          })}\n`,
+          false
+        );
       }
 
       // #277: 実行時間 / ステップ数の上限で停止したケース（課金暴走の抑止）。
@@ -2957,6 +3085,9 @@ export async function sendPromptToAi(
     });
 
     proc.on('error', (err) => {
+      // 今サイクル: kill エスカレーション用タイマーも停止する。turnEnded は立てない
+      // （spawn 自体の error 後でも、まれに正当な close が後から来ることがあるため）。
+      clearTurnTimers();
       if (startupTimeoutTimer) {
         clearTimeout(startupTimeoutTimer);
         startupTimeoutTimer = null;
@@ -2989,8 +3120,13 @@ export async function stopAiSession(sessionId: string): Promise<void> {
   }
 
   console.log(`⏹️ Stopping AI session: ${sessionId}`);
-  // 実行中のプロセスがあれば停止
-  if (session.process && session.process.exitCode === null) {
+  // 実行中のプロセスがあれば停止。
+  // 今サイクル: requestKill が登録されていれば（= sendPromptToAi 実行中）そちらを優先する。
+  // taskkill 経由でプロセスツリー全体を止められ、止まらなければターンも強制確定される。
+  // 未登録（後方互換・register 前のタイミング等）の場合のみ従来どおり単一 pid に SIGTERM。
+  if (session.requestKill) {
+    session.requestKill('stopAiSession');
+  } else if (session.process && session.process.exitCode === null) {
     session.process.kill('SIGTERM');
   }
   activeSessions.delete(sessionId);
@@ -3023,7 +3159,13 @@ export function cancelAiSession(sessionId: string): boolean {
   }
 
   console.log(`⛔ Cancelling AI session: ${sessionId}`);
-  session.process.kill('SIGTERM');
+  // 今サイクル: requestKill が登録されていれば（= sendPromptToAi 実行中）そちらを優先する
+  // （stopAiSession と同じ理由。taskkill でプロセスツリー全体を止め、止まらなければ強制確定する）。
+  if (session.requestKill) {
+    session.requestKill('userCancel');
+  } else {
+    session.process.kill('SIGTERM');
+  }
   return true;
 }
 
