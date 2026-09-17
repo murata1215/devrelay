@@ -17,16 +17,26 @@
 #
 # 削除対象:
 #   - devrelay 関連プロセス（node.exe/Electron/wscript.exe 問わず、実行中のものすべて）
-#   - 自動起動（Startup フォルダの VBS / タスクスケジューラ / レジストリ Run キー）
+#   - 自動起動（Startup フォルダの VBS ×2種 "DevRelay Agent.vbs" / "devrelay-agent.vbs" /
+#     タスクスケジューラ / レジストリ Run キー）
 #   - %APPDATA%\devrelay\ 一式（設定・ログ・Agent のリポジトリ clone・portable node を含む）
 #   - ~\.claude\skills\devrelay-*（Agent 起動時に再生成されるもの）
-#   - GUI版（Electron）本体（検出時のみ・確認の上でアンインストール）
+#   - GUI版（Electron）本体（検出時のみ・確認の上でアンインストール。プロセスの実行パス /
+#     既知インストール先 / 緩和したレジストリ検索の3経路で検出。レジストリの
+#     UninstallString が無い場合はインストールフォルダ内の Uninstall*.exe にフォールバックし、
+#     それでも残る場合はフォルダを直接削除する）
+#   - GUI版の userData（%APPDATA%\DevRelay Agent\）・Start Menu / デスクトップのショートカット
 #
 # 削除しないもの:
 #   - ユーザーのソースコード・git リポジトリ
 #   - Claude Code / Devin CLI 本体
 #   - ~\.claude\ の devrelay-* 以外のファイル
 #   - 各プロジェクトの .devrelay\（DEVRELAY_UNINSTALL_PROJECT_DATA=1 のときのみ削除）
+#   - %APPDATA%\Electron\（他の Electron 製アプリと共有されるため。残留スキャンで報告のみ）
+#
+# 安全対策:
+#   - Remove-Item -Recurse -Force を実行する前は必ず Test-SafeDeletePath でパスを検証し、
+#     ユーザープロファイル / LOCALAPPDATA / APPDATA / Program Files 配下以外は削除しません。
 #
 # このスクリプトはトークンを一切表示しません。
 # =============================================================================
@@ -43,16 +53,45 @@ $ConfigFile = Join-Path $ConfigDir "config.yaml"
 $LogFile = Join-Path $ConfigDir "logs\agent.log"
 $StartupDir = [Environment]::GetFolderPath("Startup")
 $StartupVbs = Join-Path $StartupDir "DevRelay Agent.vbs"
+# agents/windows（Electron GUI版）の CLI サブコマンドは Startup ファイル名が別（小文字・ハイフン区切り）。
+# scripts/install-agent.ps1 側（agents/linux 由来）は "DevRelay Agent.vbs"、
+# agents/windows/src/cli/commands/setup.ts は "devrelay-agent.vbs" を作るため両方消す必要がある（H4）。
+$StartupVbsAlt = Join-Path $StartupDir "devrelay-agent.vbs"
 $TaskName = "DevRelay Agent"
 $SkillsDir = Join-Path $env:USERPROFILE ".claude\skills"
 $SkillNames = @(
     "devrelay-docs", "devrelay-ask-member", "devrelay-read-messages",
     "devrelay-list-inventory", "devrelay-create-project", "devrelay-flutter-deploy"
 )
+# GUI版（Electron）は app.setName() を呼ばないため、Electron の既定挙動で productName
+# （"DevRelay Agent"）配下に userData（cache/localStorage 等）を作る（H3）。
+$GuiUserDataDir = Join-Path $env:APPDATA "DevRelay Agent"
+# NSIS（electron-builder）が作る Start Menu フォルダ・ショートカット・デスクトップショートカット（H5）
+$ProgramsDir = [Environment]::GetFolderPath("Programs")
+$StartMenuDir = Join-Path $ProgramsDir "DevRelay Agent"
+$StartMenuShortcut = Join-Path $ProgramsDir "DevRelay Agent.lnk"
+$DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "DevRelay Agent.lnk"
 # devrelay 系プロセスを止める際、自分自身（このスクリプトを実行している PowerShell ホスト）を
 # 誤って殺さないための除外リスト（G1）。irm | iex で起動したプロセスの CommandLine にも
 # "devrelay"（スクリプト URL）が含まれるため、ProcessId 自体の除外だけでは不十分。
 $SelfExcludeNames = @("powershell.exe", "pwsh.exe", "WindowsTerminal.exe", "conhost.exe")
+
+# H6: 削除対象を増やすほど誤削除のリスクが上がるため、Remove-Item -Recurse -Force する前に
+# 必ずこのガードを通す。ユーザープロファイル / LOCALAPPDATA / APPDATA / Program Files 配下のみ許可し、
+# 空文字列・ドライブ直下（C:\ 等）は弾く。Windows PowerShell 5.1 互換のため ?: や ?? は使わない。
+function Test-SafeDeletePath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($Path) } catch { return $false }
+    if ($full.Length -lt 12) { return $false }
+    if ($full -match '^[A-Za-z]:\\?$') { return $false }
+    $allowedRoots = @($env:USERPROFILE, $env:LOCALAPPDATA, $env:APPDATA, $env:ProgramFiles)
+    $progFilesX86 = ${env:ProgramFiles(x86)}
+    if ($progFilesX86) { $allowedRoots += $progFilesX86 }
+    foreach ($root in $allowedRoots) {
+        if ($root -and $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
 
 Write-Host ""
 Write-Host "+--------------------------------------------------+" -ForegroundColor Red
@@ -69,6 +108,11 @@ $TargetsFound = @()
 
 if (Test-Path $ConfigDir) { $TargetsFound += "設定/ログ/Agent本体: $ConfigDir" }
 if (Test-Path $StartupVbs) { $TargetsFound += "自動起動 (Startup): $StartupVbs" }
+if (Test-Path $StartupVbsAlt) { $TargetsFound += "自動起動 (Startup): $StartupVbsAlt" }
+if (Test-Path $GuiUserDataDir) { $TargetsFound += "GUI版 userData: $GuiUserDataDir" }
+if (Test-Path $StartMenuDir) { $TargetsFound += "ショートカット: $StartMenuDir" }
+if (Test-Path $StartMenuShortcut) { $TargetsFound += "ショートカット: $StartMenuShortcut" }
+if (Test-Path $DesktopShortcut) { $TargetsFound += "ショートカット: $DesktopShortcut" }
 
 $TaskExists = $false
 try {
@@ -117,9 +161,37 @@ foreach ($p in $RunningProcs) {
     $TargetsFound += "プロセス: PID=$($p.ProcessId) $($p.Name) [$cmdShort]"
 }
 
-# GUI版（Electron / NSIS、appId=io.devrelay.agent）の検出
+# GUI版（Electron / NSIS、appId=io.devrelay.agent）のインストール先検出（3経路・優先順位順。H1/H2）。
+# electron-builder の NSIS はレジストリの Uninstall キー名に appId ではなく GUID を使うことが多く、
+# 従来の DisplayName 完全一致 / PSChildName 限定一致だけでは検出漏れが起きる
+# （2026-09-17 実機で実証: GUI版が実行中にもかかわらずレジストリ検出は 0 件だった）。
 $GuiUninstallString = $null
 $GuiDisplayName = $null
+$GuiInstallDirs = @()
+
+# 経路1: 実行中プロセスの ExecutablePath から逆引き（レジストリが壊れていても効く最も確実な信号）
+foreach ($p in $RunningProcs) {
+    if ($p.Name -like "DevRelay Agent*.exe" -and $p.ExecutablePath) {
+        $dir = Split-Path -Parent $p.ExecutablePath
+        if ($dir -and ($GuiInstallDirs -notcontains $dir)) { $GuiInstallDirs += $dir }
+    }
+}
+
+# 経路2: 既知のインストール先パスを直接確認
+$KnownGuiDirs = @(
+    (Join-Path $env:LOCALAPPDATA "Programs\DevRelay Agent"),
+    (Join-Path $env:ProgramFiles "DevRelay Agent")
+)
+$ProgFilesX86 = ${env:ProgramFiles(x86)}
+if ($ProgFilesX86) { $KnownGuiDirs += (Join-Path $ProgFilesX86 "DevRelay Agent") }
+foreach ($d in $KnownGuiDirs) {
+    if ((Test-Path $d) -and ($GuiInstallDirs -notcontains $d)) { $GuiInstallDirs += $d }
+}
+
+foreach ($d in $GuiInstallDirs) { $TargetsFound += "GUI版: $d" }
+
+# 経路3: レジストリの Uninstall キー（DisplayName/DisplayIcon/InstallLocation/UninstallString/
+# Publisher/PSChildName のいずれかが devrelay にマッチすれば検出。-like は既定で大文字小文字不問）
 $UninstallRoots = @(
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -128,13 +200,19 @@ $UninstallRoots = @(
 foreach ($root in $UninstallRoots) {
     try {
         $entries = Get-ItemProperty -Path $root -EA SilentlyContinue | Where-Object {
-            $_.DisplayName -eq "DevRelay Agent" -or $_.PSChildName -like "*io.devrelay.agent*"
+            $_.DisplayName -like "*devrelay*" -or $_.DisplayIcon -like "*devrelay*" -or
+            $_.InstallLocation -like "*devrelay*" -or $_.UninstallString -like "*devrelay*" -or
+            $_.Publisher -like "*devrelay*" -or $_.PSChildName -like "*io.devrelay.agent*"
         }
         foreach ($e in $entries) {
             if ($e.UninstallString) {
                 $GuiUninstallString = $e.UninstallString
                 $GuiDisplayName = $e.DisplayName
                 $TargetsFound += "GUI版アンインストーラ: $($e.DisplayName) ($($e.UninstallString))"
+            }
+            if ($e.InstallLocation -and ($GuiInstallDirs -notcontains $e.InstallLocation)) {
+                $GuiInstallDirs += $e.InstallLocation
+                $TargetsFound += "GUI版: $($e.InstallLocation)"
             }
         }
     } catch {}
@@ -227,6 +305,10 @@ if (Test-Path $StartupVbs) {
     Remove-Item $StartupVbs -Force -EA SilentlyContinue
     Write-Host "  OK Startup フォルダのエントリを削除" -ForegroundColor Green
 }
+if (Test-Path $StartupVbsAlt) {
+    Remove-Item $StartupVbsAlt -Force -EA SilentlyContinue
+    Write-Host "  OK Startup フォルダのエントリを削除（devrelay-agent.vbs）" -ForegroundColor Green
+}
 
 if ($TaskExists) {
     try {
@@ -261,7 +343,7 @@ if (Test-Path $LogFile) {
 # G2: カレントディレクトリが削除対象の配下だと Remove-Item が失敗するため、先に退避する
 try { Set-Location $env:USERPROFILE } catch {}
 
-if (Test-Path $ConfigDir) {
+if ((Test-Path $ConfigDir) -and (Test-SafeDeletePath $ConfigDir)) {
     Remove-Item -Path $ConfigDir -Recurse -Force -EA SilentlyContinue
     if (-not (Test-Path $ConfigDir)) {
         Write-Host "  OK $ConfigDir を削除" -ForegroundColor Green
@@ -271,35 +353,95 @@ if (Test-Path $ConfigDir) {
 }
 
 foreach ($p in $SkillsFound) {
-    Remove-Item -Path $p -Recurse -Force -EA SilentlyContinue
+    if (Test-SafeDeletePath $p) {
+        Remove-Item -Path $p -Recurse -Force -EA SilentlyContinue
+    }
 }
 if ($SkillsFound.Count -gt 0) { Write-Host "  OK devrelay-* skills を削除" -ForegroundColor Green }
+
+# H3: GUI版（Electron）の userData（productName 配下、config.yaml とは別物）
+if ((Test-Path $GuiUserDataDir) -and (Test-SafeDeletePath $GuiUserDataDir)) {
+    Remove-Item -Path $GuiUserDataDir -Recurse -Force -EA SilentlyContinue
+    if (-not (Test-Path $GuiUserDataDir)) {
+        Write-Host "  OK GUI版 userData を削除: $GuiUserDataDir" -ForegroundColor Green
+    }
+}
+
+# H5: NSIS が作る Start Menu フォルダ・ショートカット・デスクトップショートカット
+$ShortcutTargets = @($StartMenuDir, $StartMenuShortcut, $DesktopShortcut)
+$ShortcutsRemoved = 0
+foreach ($shortcut in $ShortcutTargets) {
+    if ((Test-Path $shortcut) -and (Test-SafeDeletePath $shortcut)) {
+        Remove-Item -Path $shortcut -Recurse -Force -EA SilentlyContinue
+        if (-not (Test-Path $shortcut)) { $ShortcutsRemoved++ }
+    }
+}
+if ($ShortcutsRemoved -gt 0) { Write-Host "  OK ショートカットを削除（$ShortcutsRemoved 件）" -ForegroundColor Green }
 
 # =============================================================================
 # [5/6] GUI版（Electron）のアンインストール
 # =============================================================================
 Write-Host "[5/6] GUI版（Electron）を確認中..." -ForegroundColor Cyan
 
-if ($GuiUninstallString) {
+if ($GuiUninstallString -or $GuiInstallDirs.Count -gt 0) {
     $RunGuiUninstall = $UninstallGui
     if (-not $RunGuiUninstall -and -not $Yes) {
-        $GuiConfirm = Read-Host "GUI版（$GuiDisplayName）のインストールが見つかりました。アンインストールしますか？ (y/N)"
+        $GuiLabel = if ($GuiDisplayName) { $GuiDisplayName } else { "DevRelay Agent" }
+        $GuiConfirm = Read-Host "GUI版（$GuiLabel）のインストールが見つかりました。アンインストールしますか？ (y/N)"
         $RunGuiUninstall = $GuiConfirm -match "^[Yy]"
     }
     if ($RunGuiUninstall) {
-        try {
-            if ($GuiUninstallString -match '^"([^"]+)"(.*)$') {
-                $ExePath = $Matches[1]
-                $RestArgs = $Matches[2].Trim()
-            } else {
-                $Parts = $GuiUninstallString.Split(" ", 2)
-                $ExePath = $Parts[0]
-                $RestArgs = if ($Parts.Length -gt 1) { $Parts[1] } else { "" }
+        $GuiRemoved = $false
+
+        # 1段目: レジストリの UninstallString をサイレント実行
+        if ($GuiUninstallString) {
+            try {
+                if ($GuiUninstallString -match '^"([^"]+)"(.*)$') {
+                    $ExePath = $Matches[1]
+                    $RestArgs = $Matches[2].Trim()
+                } else {
+                    $Parts = $GuiUninstallString.Split(" ", 2)
+                    $ExePath = $Parts[0]
+                    $RestArgs = if ($Parts.Length -gt 1) { $Parts[1] } else { "" }
+                }
+                Start-Process -FilePath $ExePath -ArgumentList "$RestArgs /S" -Wait -EA Stop
+                Write-Host "  OK GUI版をアンインストールしました（レジストリのアンインストーラ）" -ForegroundColor Green
+                $GuiRemoved = $true
+            } catch {
+                Write-Host "  WARNING: レジストリのアンインストーラ実行に失敗しました" -ForegroundColor Yellow
             }
-            Start-Process -FilePath $ExePath -ArgumentList "$RestArgs /S" -Wait -EA Stop
-            Write-Host "  OK GUI版をアンインストールしました" -ForegroundColor Green
-        } catch {
-            Write-Host "  WARNING: GUI版の自動アンインストールに失敗しました。「アプリと機能」から手動削除してください。" -ForegroundColor Yellow
+        }
+
+        # 2段目: インストールフォルダ内の Uninstall*.exe を直接実行（レジストリが無い/失敗した場合）
+        if (-not $GuiRemoved) {
+            foreach ($dir in $GuiInstallDirs) {
+                if (-not (Test-Path $dir)) { continue }
+                $uninstallExe = Get-ChildItem -Path $dir -Filter "Uninstall*.exe" -EA SilentlyContinue | Select-Object -First 1
+                if ($uninstallExe) {
+                    try {
+                        Start-Process -FilePath $uninstallExe.FullName -ArgumentList "/S" -Wait -EA Stop
+                        Write-Host "  OK GUI版をアンインストールしました（$($uninstallExe.Name)）" -ForegroundColor Green
+                        $GuiRemoved = $true
+                        break
+                    } catch {
+                        Write-Host "  WARNING: $($uninstallExe.Name) の実行に失敗しました" -ForegroundColor Yellow
+                    }
+                }
+            }
+        }
+
+        # 3段目: それでもフォルダが残っていれば直接削除する。NSIS のアンインストーラは自分自身を
+        # temp にコピーしてから非同期で削除処理を行うことがあるため、-Wait だけでは消え切らない場合がある。
+        Start-Sleep -Seconds 3
+        foreach ($dir in $GuiInstallDirs) {
+            if ((Test-Path $dir) -and (Test-SafeDeletePath $dir)) {
+                Remove-Item -Path $dir -Recurse -Force -EA SilentlyContinue
+                if (-not (Test-Path $dir)) {
+                    Write-Host "  OK フォルダを削除: $dir" -ForegroundColor Green
+                } else {
+                    Write-Host "  WARNING: 削除できませんでした（手動確認してください）: $dir" -ForegroundColor Yellow
+                }
+            }
         }
     } else {
         Write-Host "  スキップしました（「アプリと機能」から手動削除できます）" -ForegroundColor Gray
@@ -318,8 +460,10 @@ if ($PurgeProjectData -and $ProjectsDirs.Count -gt 0) {
         try {
             $dirs = Get-ChildItem -Path $baseDir -Filter ".devrelay" -Directory -Recurse -Depth 5 -EA SilentlyContinue
             foreach ($d in $dirs) {
-                Remove-Item -Path $d.FullName -Recurse -Force -EA SilentlyContinue
-                Write-Host "  削除: $($d.FullName)" -ForegroundColor Gray
+                if (Test-SafeDeletePath $d.FullName) {
+                    Remove-Item -Path $d.FullName -Recurse -Force -EA SilentlyContinue
+                    Write-Host "  削除: $($d.FullName)" -ForegroundColor Gray
+                }
             }
         } catch {}
     }
@@ -336,13 +480,18 @@ Write-Host "残留チェック（このマシン上の別インストールの�
 $ResidualFound = $false
 $ResidualPaths = @(
     (Join-Path $env:LOCALAPPDATA "devrelay"),
-    (Join-Path $env:USERPROFILE ".devrelay")
+    (Join-Path $env:USERPROFILE ".devrelay"),
+    (Join-Path $env:LOCALAPPDATA "Programs\DevRelay Agent")
 )
 foreach ($rp in $ResidualPaths) {
     if (Test-Path $rp) {
         Write-Host "  WARNING: $rp が見つかりました" -ForegroundColor Yellow
         $ResidualFound = $true
     }
+}
+# %APPDATA%\Electron は他の Electron 製アプリと共有されるディレクトリのため削除しない。報告のみ。
+if (Test-Path (Join-Path $env:APPDATA "Electron")) {
+    Write-Host "  NOTE: $(Join-Path $env:APPDATA 'Electron') が見つかりました（他の Electron アプリと共有のため削除対象外。DevRelay 由来か手動確認してください）" -ForegroundColor DarkGray
 }
 try {
     $OtherProfiles = Get-ChildItem "C:\Users" -Directory -EA SilentlyContinue | Where-Object { $_.Name -ne $env:USERNAME }
