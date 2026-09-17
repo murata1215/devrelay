@@ -6,6 +6,55 @@
 
 ## 実装済み機能
 
+### Uninstall コマンドの強化：Windows GUI 版取り逃し穴の修正 (2026-09-17)
+
+lfuser 機で `a`（AI ツール一覧）から devin が消える障害を調査した結果、真因は「同一トークンで
+Agent が 2 本接続し、後発が先発の WebSocket を奪い合う」ことだった。`agents/windows`（Electron
+GUI 版）と `agents/linux`（Windows でも動く CLI 版）は同じ `%APPDATA%\devrelay\config.yaml` を
+読むため、1 台に両方入れると同じトークンで 2 本接続しうる。
+
+インストーラへの purge 組み込みはユーザー判断で「危険」として撤回し、既存の WebUI Uninstall
+セクション（`MachinesPage.tsx`）の穴を直す方針に転換。
+
+#### 修正内容
+
+- **Windows 一行コマンド**: `Name='node.exe'` 限定でプロセスを止めていたため Electron GUI 版
+  (`DevRelay Agent.exe`) を取り逃していた穴を修正。`CommandLine -like '*devrelay*'` で全プロセスを
+  対象にしつつ、`irm | iex` で実行される PowerShell 自身を誤って kill しないよう `$PID` と
+  `powershell.exe`/`pwsh.exe` を除外（自己 kill 防止）。タスクスケジューラのフォールバック登録
+  `schtasks /Delete /TN "DevRelay Agent" /F` の削除も追加
+- **OS タブの既定値**: 設定モーダルの OS タブが常に `linux` 固定だったため、Windows 機の設定を
+  開いても Linux 用コマンドが最初に表示される誤操作の温床になっていた。`resolveSettingsOs()` で
+  マシンの実 OS（`managementInfo.os`）から初期化するよう修正
+- **完全アンインストールスクリプト**（新規、Windows のみ WebUI に表示）: `scripts/uninstall-agent.ps1`。
+  既定はドライラン（削除対象一覧を表示するのみ）。GUI 版（Electron/NSIS、`appId=io.devrelay.agent`）
+  をレジストリの Uninstall キーから検出し個別確認の上でサイレントアンインストール、自動起動の
+  全経路（Startup VBS・スケジュールタスク・HKCU Run キー）を削除、`agent.log` は削除前に
+  `%TEMP%` へバックアップ、他ユーザープロファイルや WSL の存在は削除せず報告のみ
+
+#### 新規ファイル
+
+| ファイル | 内容 |
+|---------|------|
+| `apps/web/src/lib/uninstall-command-rules.ts` | 純関数群（`resolveSettingsOs`/`buildUninstallCommand`/`buildFullUninstallCommand`） |
+| `apps/web/tests/uninstall-command-rules.test.mjs` | 14 件（Windows 修正内容の確認 + Linux/macOS 非退行） |
+| `scripts/uninstall-agent.ps1` | 完全アンインストールスクリプト（382 行、既定ドライラン） |
+
+#### 検証
+
+`apps/web` テスト 512 pass（新規 14 件）、6 workspace `pnpm build` green、
+`grep -c 'require(' apps/web/dist/assets/index-*.js` = 0、
+`git status --short -- agents/ apps/server/ packages/ prisma/` 空（スコープ逸脱なし）。
+このサーバーに `pwsh` が無く PowerShell 実行検証は未実施（静的レビューで代替）。
+実機 E2E（lfuser 機での `a` 確認・再接続ループ停止確認）は人間側実施待ち。
+
+#### 申し送り
+
+- 別 PC に同一トークンの Agent が生きている場合はアンインストールでは直らない
+  （WebUI でマシン削除 → トークン無効化 → 新トークン発行が必要）
+- サーバー側の二重接続検知（差し替え回数がしきい値を超えたら通知）は未実装
+- `install-agent.ps1` のトークン事前検証は同一 PC 内の GUI+CLI 二重インストールを検出しない
+
 ### スレッド管理 サイクル4（server 小修正）: サイクル3申し送りの解消 (2026-09-10)
 
 サイクル3（WebUI）devlog 末尾の「サイクル4への引き継ぎ」3件のうち2件を解消し、残り1件は報告のみに

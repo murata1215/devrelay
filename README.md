@@ -564,6 +564,7 @@ agents/windows/
 - [x] WebUI reload tool approval card restoration (pending approvals pushed on WS reconnect)
 - [x] Multi-platform project scaffold (Flutter / Android / Xcode-SwiftUI / empty templates with OS auto-restriction)
 - [x] Flutter device deploy skill (`devrelay-flutter-deploy` — build & install to USB device via chat, iOS/Android, partial-match device resolution)
+- [x] Uninstall command hardening (Windows) — the one-liner in the Agent settings modal used to only stop `node.exe` processes, missing the Electron GUI Agent (`agents/windows`) entirely when it shares the same `%APPDATA%\devrelay\config.yaml` as the CLI Agent (`agents/linux`) on the same PC, which caused a same-token duplicate-connection loop where the AI tool list (`a`) would flip depending on which process last won the WebSocket. Fixed to match any `devrelay`-tagged process by command line (with self-kill protection for the `irm | iex` invocation itself), delete the Task Scheduler fallback entry, and default the settings-modal OS tab to the machine's actual OS instead of always Linux. Added a second "Full uninstall" script (`scripts/uninstall-agent.ps1`, dry-run by default) that additionally detects and silently uninstalls the GUI Agent via its NSIS uninstaller, clears all autostart paths (Startup shortcut, scheduled task, Registry Run key), backs up `agent.log` before deleting it, and reports (without deleting) any other-user or WSL installs it finds
 - [ ] LINE Bot
 - [ ] AI tool switching (Gemini/Aider)
 

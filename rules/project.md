@@ -5,6 +5,40 @@
 
 ---
 
+## `irm | iex` で配布する PowerShell スクリプトは自己 kill に注意する（Uninstall コマンド強化, 2026-09-17）
+
+`Get-Process`/`Get-CimInstance` で `devrelay` を含むプロセスを機械的に kill するスクリプトを
+`irm https://.../foo.ps1 | iex` の形で配布すると、**そのスクリプトを実行している PowerShell
+自身の `CommandLine` にもスクリプト URL 経由で `devrelay` という文字列が含まれる**ため、
+フィルタが甘いと自分自身を kill してスクリプトが途中で止まる（G1 ハザード）。
+
+- 対策: `CommandLine -like '*devrelay*'` のようなフィルタには必ず
+  `-and $_.ProcessId -ne $PID -and $_.Name -notin @('powershell.exe','pwsh.exe', ...)`
+  を付けてホストプロセス（自分自身・親の pwsh/Windows Terminal/conhost）を除外する
+- 合わせて、対象ディレクトリを `Remove-Item -Recurse` する前に `Set-Location` で
+  カレントディレクトリを対象の外（`$env:USERPROFILE` 等）へ退避すること（G2。cwd が削除対象の
+  中にあると `Remove-Item` が失敗する）。削除前提のログファイルは `%TEMP%` 等へコピーしてから
+  消すこと（G3。事後調査の証拠を破壊しない）
+- 実装は `scripts/uninstall-agent.ps1` と、その純ロジック部分を切り出した
+  `apps/web/src/lib/uninstall-command-rules.ts`（`buildUninstallCommand()`）を参照
+
+## Windows で GUI 版と CLI 版の Agent は同一 `config.yaml` を共有する（同上サイクル）
+
+`agents/windows`（Electron GUI 版）と `agents/linux`（Windows でも動く CLI 版）は、win32 では
+どちらも `%APPDATA%\devrelay\config.yaml` という**同一パス**を `CONFIG_DIR` として解決する
+（`agents/windows/src/services/config.ts` と `agents/linux/src/services/config.ts` の両方）。
+
+- 1 台の Windows PC に両方インストールすると**同一トークンで 2 本の WebSocket 接続**が発生し、
+  サーバー側は「後発が先発を `terminate()` する」（`agent-manager.ts` の `handleAgentConnect`）ため、
+  無限に接続が奪い合われる。症状は「`a`（AI ツール一覧）の結果が実行のたびに変わる／特定の AI が
+  消えたり戻ったりする」「サーバーログに `Closing stale WebSocket` が連発する」形で現れる
+- token = マシン識別子であり `machineId` ではない。同一トークンを持つ Agent はどこで動いていても
+  区別できないため、**この種の障害の切り分けはまず「同一トークンの Agent が複数動いていないか」を
+  疑う**こと（config 破損や DB 不整合を先に疑わない）
+- 恒久対策（GUI/CLI で別々の config パスにする等）は未実施。現状の緩和策は
+  `scripts/uninstall-agent.ps1`（両方を一括で完全アンインストールできる）を実行してから
+  片方だけを入れ直すこと
+
 ## `Session.agentScopeId` は絶対にバックフィルしない（スレッド管理 cycle1）
 
 `Session` テーブルの `title` / `lastActiveAt` / `agentScopeId`（すべて nullable）は

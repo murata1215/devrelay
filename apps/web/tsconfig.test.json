@@ -25,6 +25,7 @@
     "src/lib/right-rail-rules.ts",
     "src/lib/panel-resize-rules.ts",
     "src/lib/capability-config-rules.ts",
-    "src/lib/machine-display-rules.ts"
+    "src/lib/machine-display-rules.ts",
+    "src/lib/uninstall-command-rules.ts"
   ]
 }

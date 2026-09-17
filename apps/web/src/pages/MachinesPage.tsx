@@ -11,6 +11,7 @@ import {
 } from '../lib/capability-config-rules';
 import type { CapabilitySyncStatusLike, CapabilityFormErrorCode } from '../lib/capability-config-rules';
 import { normalizeManagementInfo, formatDateTimeSafe } from '../lib/machine-display-rules';
+import { resolveSettingsOs, buildUninstallCommand, buildFullUninstallCommand } from '../lib/uninstall-command-rules';
 
 export function MachinesPage() {
   const { t } = useLanguage();
@@ -37,6 +38,7 @@ export function MachinesPage() {
   const [settingsTokenCopied, setSettingsTokenCopied] = useState(false);
   const [settingsInstallCopied, setSettingsInstallCopied] = useState(false);
   const [settingsUninstallCopied, setSettingsUninstallCopied] = useState(false);
+  const [settingsFullUninstallCopied, setSettingsFullUninstallCopied] = useState(false);
   const [settingsOs, setSettingsOs] = useState<'linux' | 'macos' | 'windows'>('linux');
   const [mgmtCopiedIndex, setMgmtCopiedIndex] = useState<number | null>(null);
 
@@ -170,6 +172,9 @@ export function MachinesPage() {
   /** Agent 名クリック時: トークンを取得して設定モーダルを表示 */
   const handleOpenSettings = async (machine: Machine) => {
     setSettingsTarget(machine);
+    // OS タブの既定値を実際のマシン OS から初期化（従来は常に 'linux' 固定で、Windows 機を開いても
+    // 最初に Linux 用アンインストールコマンドが表示される誤操作の温床だった）
+    setSettingsOs(resolveSettingsOs(normalizeManagementInfo(machine.managementInfo)?.os ?? null));
     setSettingsTokenLoading(true);
     setSettingsToken('');
 
@@ -226,6 +231,7 @@ export function MachinesPage() {
     setSettingsTokenCopied(false);
     setSettingsInstallCopied(false);
     setSettingsUninstallCopied(false);
+    setSettingsFullUninstallCopied(false);
     setSettingsOs('linux');
     setMgmtCopiedIndex(null);
     setAliasHostname('');
@@ -315,16 +321,8 @@ export function MachinesPage() {
     return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${token}`;
   };
 
-  /** アンインストールコマンドを生成（OS 別） */
-  const getUninstallCommand = (os: 'linux' | 'macos' | 'windows' = 'linux') => {
-    if (os === 'windows') {
-      return `Get-CimInstance Win32_Process -Filter "Name='node.exe'" -EA 0 | Where-Object { $_.CommandLine -like '*devrelay*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Start-Sleep -Seconds 2; Remove-Item "$([Environment]::GetFolderPath('Startup'))\\DevRelay Agent.vbs" -EA 0; Remove-Item "$env:APPDATA\\devrelay" -Recurse -Force`;
-    }
-    if (os === 'macos') {
-      return `launchctl unload ~/Library/LaunchAgents/io.devrelay.agent.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/io.devrelay.agent.plist; pkill -f "devrelay.*index.js"; rm -rf ~/.devrelay`;
-    }
-    return `sudo systemctl stop devrelay-agent 2>/dev/null; sudo systemctl disable devrelay-agent 2>/dev/null; crontab -l 2>/dev/null | grep -v devrelay | crontab -; pkill -f "devrelay.*index.js"; rm -rf ~/.devrelay`;
-  };
+  /** アンインストールコマンドを生成（OS 別、実体は uninstall-command-rules.ts の純関数） */
+  const getUninstallCommand = (os: 'linux' | 'macos' | 'windows' = 'linux') => buildUninstallCommand(os);
 
   const copyInstallCommand = () => {
     if (!newMachine) return;
@@ -1324,6 +1322,31 @@ export function MachinesPage() {
                       ? 'Stops agent, removes LaunchAgent, deletes ~/.devrelay'
                       : 'Stops agent, removes systemd service/crontab, deletes ~/.devrelay'}
                 </div>
+
+                {/* 完全アンインストール（Windows のみ）: GUI 版（Electron）との共存や自動起動の
+                    取りこぼしまで掃除するスクリプトを scripts/uninstall-agent.ps1 として提供。
+                    既定はドライラン（何も消さず一覧表示のみ）で、実行前に確認できる。 */}
+                {buildFullUninstallCommand(settingsOs) && (
+                  <div className="mt-4">
+                    <label className="block text-[var(--text-muted)] text-sm mb-2">
+                      Full uninstall (recommended if a GUI Agent may also be installed)
+                    </label>
+                    <CommandBlock
+                      command={buildFullUninstallCommand(settingsOs)}
+                      copied={settingsFullUninstallCopied}
+                      onCopy={() => {
+                        copyToClipboard(buildFullUninstallCommand(settingsOs), () => {
+                          setSettingsFullUninstallCopied(true);
+                          setTimeout(() => setSettingsFullUninstallCopied(false), 2000);
+                        });
+                      }}
+                    />
+                    <div className="text-[var(--text-faint)] text-xs mt-2">
+                      Dry-run by default (lists what would be removed, deletes nothing until confirmed).
+                      Also removes the Electron GUI Agent, scheduled task, and Run-key auto-start if present.
+                    </div>
+                  </div>
+                )}
               </div>
             </details>
 
