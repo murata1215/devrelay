@@ -6,6 +6,47 @@
 
 ## 実装済み機能
 
+### Windows インストーラーの pnpm 誤検出「X pnpm が必要です」を修正 (2026-09-18)
+
+プロキシ環境の実機で `npm install -g pnpm` が成功（"added 2 packages in 24s"）した直後に
+`Get-Command pnpm` が失敗し、インストールが中断するというユーザー報告を受けて調査・修正した。
+
+#### 真因（2件、どちらか一方でも同じ症状になる）
+
+- **真因A（PATH 置き換え問題）**: `$env:Path` をレジストリの Machine+User PATH で丸ごと
+  置き換えていたため、プロセス限定の PATH エントリ（fnm/nvm/volta の shim、親シェルが注入した
+  npm prefix）が消え、`npm prefix -g`（社内 `.npmrc` で既定以外に変更されうる真の場所）を
+  一度も問い合わせていなかった
+- **真因B（`$ErrorActionPreference="Stop"` と `2>$null` の衝突）**: `cmd /c "npm install -g pnpm" 2>$null`
+  の `2>$null` は PowerShell 側のリダイレクトで、EAP=Stop 下では npm の stderr 出力（成功時の
+  notice も含む）1 行ごとに `NativeCommandError` が発生し、PATH 再解決ごと空の `catch {}` へ
+  飛んでいた
+
+#### 修正内容
+
+- `scripts/install-agent.ps1:234-266` を 1 ハンク置換
+- リダイレクトを `cmd.exe` 内部（`2>&1`）で完結させ EAP を一時的に `Continue` へ
+- 新規ヘルパー4本を追加: `Update-ProcessPathMerged`（PATH をマージ・置換しない）/
+  `Get-NpmGlobalBinCandidates`（`npm prefix -g` を権威に候補列挙）/
+  `Resolve-PnpmExecutable`（`.cmd`/`.exe`/`.bat` を実ファイル確認、`.ps1` は選ばない。探索順は
+  `agents/linux/src/services/update-script.ts` の `buildExecutableResolver()` と揃えた）/
+  `Get-PnpmVersionString`（`cmd /c` 経由で `.ps1` を回避）
+- 失敗時の診断を強化（npm prefix・探索した全ディレクトリと `pnpm.cmd` 有無マーカー・具体的な
+  回避策3つ・`setx` 使用禁止の警告）
+- 実装中に自己発見した副次バグも修正: `-split "`r?`n"` は二重引用符エスケープが `-split` より
+  先に評価され意図しないリテラル文字列になる不具合があり、`-split '\r?\n'`（単一引用符）に修正
+
+#### スコープ外（別サイクル送り）
+
+- ユーザー PATH（`HKCU\Environment\Path`）への永続化（REG_EXPAND_SZ→REG_SZ 変換の罠があり別実装が必要）
+- Agent の `u`（自己更新）側の同種の穴（`connection.ts:2810` の pnpm `preferredPaths`、TS 変更のため別サイクル）
+
+#### 反映
+
+`.ps1` のみの変更のため `pnpm build`/`pm2 restart`/DB マイグレーション/Agent の `u` いずれも
+不要。配信元が `raw.githubusercontent.com/.../main/scripts/install-agent.ps1` のため
+commit + push が必須。実機 E2E は人間側実施待ち。
+
 ### Uninstall コマンドの強化：Windows GUI 版取り逃し穴の修正 (2026-09-17)
 
 lfuser 機で `a`（AI ツール一覧）から devin が消える障害を調査した結果、真因は「同一トークンで

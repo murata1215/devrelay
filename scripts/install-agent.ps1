@@ -231,37 +231,255 @@ if ($ProxyUrl -and (Get-Command npm -ErrorAction SilentlyContinue)) {
     }
 }
 
+# =============================================================================
+# pnpm 解決ヘルパー群
+# =============================================================================
+# 背景（実測: 既存 Node v24.18.0 端末で `npm install -g pnpm` 成功直後に
+# 「X pnpm が必要です」で中断）:
+#   真因A: 従来は PATH を
+#            $env:Path = (Machine PATH) + ";" + (User PATH)
+#          とレジストリ値で丸ごと置き換えていた。プロセス PATH にしか無い
+#          エントリ（fnm/nvm-windows/volta の shim、ポータブル Node、親シェルが
+#          注入した npm prefix）が消える。補償の `%APPDATA%\npm` 追加は
+#          `if ($PortableNodeDir)` の中にあり、Node が既にインストール済みの
+#          端末では実行されない。npm のグローバル bin は `npm prefix -g` で
+#          決まり、社内 .npmrc / NPM_CONFIG_PREFIX で既定以外に変更されている
+#          場合があるのに、その場所を一度も問い合わせていなかった。
+#   真因B: `cmd /c "npm install -g pnpm" 2>$null` の `2>$null` は PowerShell 側の
+#          リダイレクトであり、$ErrorActionPreference="Stop" 下では stderr 1 行
+#          ごとに NativeCommandError（終了エラー）が送出される（本ファイル
+#          Invoke-LoggedCommand の注記と同じ落とし穴）。npm は成功時でも notice
+#          を stderr に出すため、PATH 再解決と Get-Command を丸ごと飛ばして
+#          空の catch {} に落ち、同じ症状になる。
+
+<#
+.SYNOPSIS
+  プロセス PATH を「マージ」で更新する（従来のように置き換えない）。
+.DESCRIPTION
+  優先順は $Prepend > 既存のプロセス PATH > Machine PATH > User PATH。
+  大文字小文字を無視して重複排除するが、比較キーだけ末尾の \ を落とし、
+  PATH に格納する値は元のまま使う（"C:\" を "C:" に壊さないため）。
+#>
+function Update-ProcessPathMerged {
+    param([string[]]$Prepend = @())
+
+    $ordered = @()
+    $ordered += $Prepend
+    $ordered += ($env:Path -split ';')
+    $ordered += ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';')
+    $ordered += ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in $ordered) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+        $value = $entry.Trim().Trim('"')
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        $key = $value.TrimEnd('\')
+        if ([string]::IsNullOrWhiteSpace($key)) { $key = $value }
+        if ($seen.Add($key)) { [void]$result.Add($value) }
+    }
+    $env:Path = ($result -join ';')
+}
+
+<#
+.SYNOPSIS
+  npm のグローバル bin ディレクトリ候補を、権威的な順に列挙する。
+.DESCRIPTION
+  stderr のリダイレクトは cmd.exe 内部（2>NUL）で完結させる。PowerShell 側の
+  `2>$null` は EAP=Stop 下で NativeCommandError を誘発するため使わない（真因B）。
+#>
+function Get-NpmGlobalBinCandidates {
+    param([string]$PortableNodeDir)
+
+    $dirs = @()
+
+    # (1) npm 自身が持つ prefix。社内 .npmrc / NPM_CONFIG_PREFIX で変更されている
+    #     場合はここだけが真の値になる。2 系統とも試す（片方が失敗しても続行）。
+    foreach ($probe in @('npm prefix -g', 'npm config get prefix')) {
+        try {
+            $out = cmd /c "$probe 2>NUL"
+            $prefix = (@($out) | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 1)
+            if ($prefix) {
+                $prefix = $prefix.Trim()
+                $dirs += $prefix
+                $dirs += (Join-Path $prefix 'bin')
+            }
+        } catch { }
+    }
+
+    # (2) 既定・準既定の置き場
+    if ($env:APPDATA)      { $dirs += (Join-Path $env:APPDATA 'npm') }
+    if ($env:LOCALAPPDATA) { $dirs += (Join-Path $env:LOCALAPPDATA 'npm') }
+    if ($env:LOCALAPPDATA) { $dirs += (Join-Path $env:LOCALAPPDATA 'pnpm') }  # corepack / pnpm standalone
+
+    # (3) ポータブル Node と、現在解決されている node の隣（corepack shim はここに出る）
+    if ($PortableNodeDir) { $dirs += $PortableNodeDir }
+    $nodeSrc = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeSrc -and $nodeSrc.Source) { $dirs += (Split-Path -Parent $nodeSrc.Source) }
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $result = @()
+    foreach ($d in $dirs) {
+        if ([string]::IsNullOrWhiteSpace($d)) { continue }
+        $t = $d.Trim().TrimEnd('\')
+        if ($seen.Add($t)) { $result += $t }
+    }
+    return $result
+}
+
+<#
+.SYNOPSIS
+  候補ディレクトリから pnpm の実行ファイル（.cmd / .exe / .bat）を実ファイルで探す。
+.DESCRIPTION
+  `.ps1` は決して選ばない。ExecutionPolicy の影響を受ける上、#352 の
+  「起動するが無音・$LASTEXITCODE も更新しない」事故の直接原因だったため。
+  探索方針は agents/linux/src/services/update-script.ts の
+  buildExecutableResolver()（明示パス優先 → .cmd → .exe）と揃えてある。
+#>
+function Resolve-PnpmExecutable {
+    param([string[]]$Dirs)
+
+    foreach ($dir in $Dirs) {
+        if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+        foreach ($leaf in @('pnpm.cmd', 'pnpm.exe', 'pnpm.bat')) {
+            try {
+                $p = Join-Path $dir $leaf
+                if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+            } catch {
+                # 不正な文字を含むパス等。EAP=Stop でも次の候補へ進む
+            }
+        }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+  pnpm のバージョン文字列を取得する（.ps1 経路を通さない）。
+.DESCRIPTION
+  cmd.exe は .ps1 を実行対象にしないため、`cmd /c` 経由の呼び出しは
+  ExecutionPolicy と pnpm.ps1 の無音問題（#352）を構造的に回避できる。
+  取得できない場合も中断せず '(unknown)' を返す（ビルドログのヘッダ用途）。
+#>
+function Get-PnpmVersionString {
+    param([string]$PnpmExe)
+
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($PnpmExe) { $out = cmd /c "`"$PnpmExe`" -v 2>NUL" }
+        else          { $out = cmd /c "pnpm -v 2>NUL" }
+        $line = (@($out) | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 1)
+        if ($line) { return $line.Trim() }
+        return '(unknown)'
+    } catch {
+        return '(unknown)'
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+# =============================================================================
 # pnpm チェック（未インストールなら自動インストール）
+# =============================================================================
 $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
+$PnpmExe = $null          # 解決できた実体パス（診断・バージョン取得用）
+$PnpmSearchDirs = @()
+
 if (-not $PnpmCmd) {
     # Node.js がある場合のみ自動インストールを試みる
     if ($NodeCmd) {
         Write-Host "  pnpm をインストール中..." -ForegroundColor Yellow
+        # 真因B 対策:
+        #   (a) リダイレクトを cmd.exe 内部（2>&1）で完結させ、PowerShell に
+        #       ErrorRecord を一切渡さない
+        #   (b) 念のため EAP も一時的に Continue に落とし、finally で必ず戻す
+        #   (c) 出力を捨てず変数に取り、末尾数行を表示（従来は 2>$null で全部捨てていた）
+        $PrevEapLocal = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $NpmInstallOut = ''
         try {
-            # cmd /c 経由で npm.cmd を直接呼び出し（npm.ps1 の ExecutionPolicy 問題を回避）
-            cmd /c "npm install -g pnpm" 2>$null
-            # npm install -g 後は PATH が更新されているので、PowerShell 側も環境変数をリフレッシュ
-            $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
-            # 上記のリフレッシュはレジストリの Machine/User PATH で $env:Path を丸ごと
-            # 置き換えるため、ポータブル Node（$PortableNodeDir）を先頭に足した分が消えてしまう。
-            # 再度先頭に追加し直す（ポータブル node の npm グローバルインストール先は
-            # $PortableNodeDir 直下、または %APPDATA%\npm のケースがあるため両方追加）。
-            if ($PortableNodeDir) {
-                $env:Path = "$PortableNodeDir;$(Join-Path $env:APPDATA 'npm');$env:Path"
+            $NpmInstallOut = (cmd /c "npm install -g pnpm 2>&1" | Out-String)
+        } catch {
+            $NpmInstallOut = "EXCEPTION: $($_.Exception.Message)"
+        } finally {
+            $ErrorActionPreference = $PrevEapLocal
+        }
+        if ($NpmInstallOut) {
+            ($NpmInstallOut.TrimEnd() -split '\r?\n') | Select-Object -Last 5 | ForEach-Object {
+                if ($_.Trim()) { Write-Host "    $_" -ForegroundColor DarkGray }
             }
-            $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
-        } catch {}
+        }
+
+        # --- PATH 再解決（置き換えではなくマージ）---
+        # 1) npm のグローバル bin を権威的に特定し、pnpm.cmd/.exe を実ファイルで探す
+        # 2) 見つかったディレクトリを PATH 先頭に足す（既存のプロセス PATH は保持）
+        # 以降のステップ（Step 3 の `pnpm install` 等）は裸の `pnpm` を呼ぶため、
+        # ここで必ず「裸の pnpm が解決できる」状態にしておく必要がある。
+        $PnpmSearchDirs = Get-NpmGlobalBinCandidates -PortableNodeDir $PortableNodeDir
+        $PnpmExe = Resolve-PnpmExecutable -Dirs $PnpmSearchDirs
+
+        $Prepend = @()
+        if ($PortableNodeDir) { $Prepend += $PortableNodeDir }
+        if ($PnpmExe)         { $Prepend += (Split-Path -Parent $PnpmExe) }
+        Update-ProcessPathMerged -Prepend $Prepend
+
+        # PATHEXT に .CMD が無い端末では、ディレクトリを PATH に足しても裸の `pnpm` は
+        # 解決されない（pnpm の実体は pnpm.cmd）。欠けていれば補う。
+        if ($env:PATHEXT -and ($env:PATHEXT -notmatch '(^|;)\.CMD(;|$)')) {
+            $env:PATHEXT = "$env:PATHEXT;.CMD"
+        }
+
+        $PnpmCmd = Get-Command pnpm -ErrorAction SilentlyContinue
+        if (-not $PnpmCmd -and $PnpmExe) {
+            # 実ファイルはあるのに裸で解決できない病的な端末向けの最後の一手
+            $PnpmCmd = Get-Command $PnpmExe -ErrorAction SilentlyContinue
+        }
     }
     if (-not $PnpmCmd) {
-        Write-Host "  X pnpm が必要です" -ForegroundColor Red
-        Write-Host "    インストール: npm install -g pnpm" -ForegroundColor Yellow
+        # --- 実行可能な診断（従来は「npm install -g pnpm」としか出さず、
+        #     すでにインストールに成功しているユーザーを誤誘導していた）---
+        $NpmPrefixShown = '(取得できませんでした)'
+        try {
+            $p = (cmd /c "npm prefix -g 2>NUL" | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 1)
+            if ($p) { $NpmPrefixShown = $p.Trim() }
+        } catch { }
+
+        Write-Host "  X pnpm を PATH 上で解決できませんでした" -ForegroundColor Red
+        Write-Host "    npm グローバル prefix: $NpmPrefixShown" -ForegroundColor Yellow
+        Write-Host "    探索したディレクトリ:" -ForegroundColor Yellow
+        foreach ($d in $PnpmSearchDirs) {
+            $mark = '(ディレクトリが存在しません)'
+            try {
+                if (Test-Path -LiteralPath $d) {
+                    $mark = 'pnpm 無し'
+                    foreach ($leaf in @('pnpm.cmd', 'pnpm.exe', 'pnpm.bat')) {
+                        if (Test-Path -LiteralPath (Join-Path $d $leaf) -PathType Leaf) { $mark = "$leaf あり"; break }
+                    }
+                }
+            } catch { $mark = '(確認失敗)' }
+            Write-Host "      $d  [$mark]" -ForegroundColor DarkGray
+        }
+        Write-Host "    対処:" -ForegroundColor Yellow
+        Write-Host "      1) 新しい PowerShell ウィンドウを開いて pnpm -v を確認し、通るならそのウィンドウで再実行" -ForegroundColor Green
+        Write-Host "      2) 上の一覧に『pnpm.cmd あり』の行があれば、同じウィンドウで PATH に足して再実行:" -ForegroundColor Green
+        Write-Host "         `$env:Path = `"<そのディレクトリ>;`$env:Path`"" -ForegroundColor Green
+        Write-Host "      3) どこにも無い場合は npm install -g pnpm を手動実行し、出力に出た場所を確認してください" -ForegroundColor Green
+        Write-Host "      ※ setx PATH `"%PATH%;...`" は 1024 文字で切り詰められ PATH を破壊するため使わないでください" -ForegroundColor Yellow
         $Missing++
     } else {
-        $PnpmVersion = pnpm -v
-        Write-Host "  OK pnpm $PnpmVersion (自動インストール)" -ForegroundColor Green
+        if (-not $PnpmExe) { $PnpmExe = $PnpmCmd.Source }
+        $PnpmVersion = Get-PnpmVersionString -PnpmExe $PnpmExe
+        Write-Host "  OK pnpm $PnpmVersion (自動インストール: $PnpmExe)" -ForegroundColor Green
     }
 } else {
-    $PnpmVersion = pnpm -v
+    # 既に PATH 上で解決できている場合は PATH を一切触らない（最小変更・最小リスク）。
+    # バージョン取得だけ .ps1 経路を避ける（#352）。
+    $PnpmProbe = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+    if (-not $PnpmProbe) { $PnpmProbe = Get-Command pnpm.exe -ErrorAction SilentlyContinue }
+    if ($PnpmProbe) { $PnpmExe = $PnpmProbe.Source }
+    $PnpmVersion = Get-PnpmVersionString -PnpmExe $PnpmExe
     Write-Host "  OK pnpm $PnpmVersion" -ForegroundColor Green
 }
 
