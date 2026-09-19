@@ -789,10 +789,18 @@ export interface RawResultPayload {
   requestId: string;
   /** raw-completion セッション ID（`RawPromptPayload.sessionId` のエコーバック） */
   sessionId: string;
-  /** true: 正常応答（`output` に本文）。false: SDK 実行自体が失敗（`errorMessage` を参照） */
+  /** true: 正常応答（`text` に本文）。false: SDK 実行自体が失敗（`errorMessage` を参照） */
   ok: boolean;
-  /** AI の応答本文（`ok: true` 時のみ） */
+  /**
+   * @deprecated 旧サーバー（Phase 1.1 より前）との後方互換のためだけに残す別名。
+   * 新 Agent は `text` と同値を載せる。サーバー側は `text ?? output` の順で解決すること。
+   */
   output?: string;
+  /**
+   * AI の応答本文（連結済み）。Phase 1.1 より前の Agent（`u` 未実行）はこのフィールドを送らない。
+   * `undefined` であること自体が「Agent が `u` 未実行（旧バージョン）」の検知シグナルになる。
+   */
+  text?: string;
   /** 使用量データ（DB の `Message.usageData` に保存） */
   usageData?: AiUsageData;
   /**
@@ -802,6 +810,12 @@ export interface RawResultPayload {
   stopReason?: string;
   /** `ok: false` 時のエラーメッセージ */
   errorMessage?: string;
+  /**
+   * `canUseTool`（D1 第3層・無条件 deny）が実際に deny したツール名（重複除去済み）。
+   * 空配列 = deny 発生なし（`tools:[]` 等の前段防御が効いている正常状態）。
+   * `undefined` = Phase 1.1 より前の Agent（この報告機能自体が無い）。
+   */
+  deniedTools?: string[];
   /** SDK 実測の実行時間（ミリ秒）。ルート側で計測する `latencyMs`（クライアント体感値）とは別軸 */
   agentDurationMs?: number;
 }

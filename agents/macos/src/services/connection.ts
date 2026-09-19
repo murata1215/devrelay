@@ -38,7 +38,7 @@ import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
-import { composeRawPrompt } from './raw-completion-mode.js';
+import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId } from './session-store.js';
 import { savePlanFile, loadLatestPlanFile } from './plan-file-store.js';
 import { buildDevinPlanPreamble } from './devin-plan-prompt.js';
@@ -508,7 +508,16 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
  *   - system prompt 完全置換（DevRelay の前置き・Agreement・プランモード指示を一切付与しない）
  *   - tools:[] + disallowedTools + canUseTool 無条件 deny + permissionMode:'plan' の4層防御
  *   - 言語指示付与をスキップ
- * `⏳` 等の進捗チャンクは `isComplete !== true` の呼び出しを無視することで除外する。
+ *
+ * Phase 1.1（空レスポンス根治）: `onOutput` は `isComplete` の観測に徹し、**連結は一切しない**。
+ * 理由は `sendPromptToAiSdk` の最終 `onOutput` 呼び出しが本文を渡さない仕様（出力ありなら空文字、
+ * 無しなら `'(No response from AI)'`）であることに加え、同じコールバックにツール使用マーカーや
+ * auto-compact 通知等の進捗ノイズが将来混入しうるため（4層防御が破れた際にゲーム応答へ
+ * 進捗ノイズが紛れ込む構造的な穴を、連結ロジックを持たないことで塞ぐ）。
+ * 本文は `sendPromptToAi()` の戻り値（`AiRunResult.rawOutput`）が唯一の正であり、
+ * `resolveRawCompletionResult()`（外部 import ゼロの純関数、`raw-completion-mode.ts`）に
+ * 判定を委譲する。deny されたツール名（`AiRunResult.rawDeniedTools`）も同様にここで受け取り、
+ * 非空なら `console.warn` で可観測にする（`agent.log` が読めない問題の恒久対策）。
  * `sent` ラッチで `agent:raw:result` の二重送信を防ぎ、`finally` で必ず応答する
  * （サーバー側 timeout に頼らない設計）。
  */
@@ -529,16 +538,18 @@ async function handleRawPrompt(payload: RawPromptPayload) {
   // Agent 側タイムアウト（Server 側 timeoutS より短い予算。実装プランの「timeout の歪み」対策で
   // Agent の finally 応答が Server 側 timeout より先に確定するようにする）
   const timeoutHandle = setTimeout(() => {
-    send({ ok: false, stopReason: 'timeout', errorMessage: 'raw-completion timed out on agent side' });
+    send({ ok: false, stopReason: 'timeout', errorMessage: 'raw-completion timed out on agent side', deniedTools: [] });
   }, timeoutMs);
 
   const startedAt = Date.now();
   try {
-    let finalOutput = '';
+    // isComplete=true の onOutput 呼び出しの観測結果（本文の連結はしない。上記 JSDoc 参照）
+    let completionText = '';
+    let completionSeen = false;
     let usageData: AiUsageData | undefined;
-    let stopReason: string | undefined;
+    let observedStopReason: string | undefined;
 
-    await sendPromptToAi(
+    const runResult = await sendPromptToAi(
       sessionId,
       composeRawPrompt(prompt),
       projectPath,
@@ -546,11 +557,11 @@ async function handleRawPrompt(payload: RawPromptPayload) {
       sessionId,
       currentConfig,
       (output, isComplete, usage, _extractedSessionId, reason) => {
-        // 進捗チャンク（⏳ 等）は raw-completion の応答本文に含めない
         if (!isComplete) return;
-        finalOutput = output;
+        completionSeen = true;
+        completionText = output;
         usageData = usage;
-        stopReason = reason;
+        observedStopReason = reason;
       },
       {
         rawMode: true,
@@ -561,11 +572,26 @@ async function handleRawPrompt(payload: RawPromptPayload) {
       }
     );
 
+    const resolved = resolveRawCompletionResult({
+      rawOutput: runResult.rawOutput,
+      completionText,
+      completionSeen,
+      stopReason: observedStopReason,
+      deniedTools: runResult.rawDeniedTools,
+    });
+
+    if (resolved.deniedTools.length > 0) {
+      console.warn(`🛑 raw mode: ${resolved.deniedTools.length} 件のツール呼び出しを deny しました (session=${sessionId}): ${resolved.deniedTools.join(', ')}`);
+    }
+
     send({
-      ok: true,
-      output: finalOutput,
+      ok: resolved.ok,
+      text: resolved.text,
+      output: resolved.text, // @deprecated 旧サーバー互換の別名
       usageData,
-      stopReason: stopReason ?? 'success',
+      stopReason: resolved.stopReason,
+      errorMessage: resolved.errorMessage,
+      deniedTools: resolved.deniedTools,
       agentDurationMs: Date.now() - startedAt,
     });
   } catch (err) {
@@ -573,6 +599,7 @@ async function handleRawPrompt(payload: RawPromptPayload) {
       ok: false,
       stopReason: 'error',
       errorMessage: err instanceof Error ? err.message : String(err),
+      deniedTools: [],
       agentDurationMs: Date.now() - startedAt,
     });
   } finally {

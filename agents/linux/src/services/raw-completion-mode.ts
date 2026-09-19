@@ -113,34 +113,100 @@ export function buildRawDenyMessage(toolName: string): string {
   return `raw mode: tool calls are disabled (denied: ${toolName})`;
 }
 
-/** `mapRawUsage()` の入力（SDK `result` メッセージのうち使用量に関わる部分のみ） */
-export interface RawUsageInput {
-  usage?: Record<string, unknown>;
-  modelUsage?: Record<string, unknown>;
-  durationMs?: number;
+/**
+ * `resolveRawCompletionResult()` の入力（`ai-runner.ts` の `AiRunResult` と `handleRawPrompt` の
+ * `onOutput` コールバック観測結果から集めたもの）。
+ *
+ * Phase 1.1 で判明した空レスポンスバグの根本原因: `ai-runner.ts` の最終 `onOutput` 呼び出し
+ * （`isComplete: true`）は本文を渡さない仕様（出力ありなら空文字、無しなら
+ * `'(No response from AI)'`）。本文の連結（`fullOutput`）は `sendPromptToAiSdk` の関数ローカルに
+ * 閉じているため、呼び出し元は `AiRunResult.rawOutput` 経由でしか本文を取得できない。
+ */
+export interface RawCompletionRunInput {
+  /**
+   * `AiRunResult.rawOutput`。完了経路（SDK result ハンドラ / 自然終了フォールバック）でのみ
+   * `rawMode` 時に設定される。`undefined` は「完了経路に到達せずエラー分岐で早期 return した」
+   * ことを表す構造的シグナル（ai-runner.ts の JSDoc と対）。
+   */
+  rawOutput?: string;
+  /** `isComplete: true` の `onOutput` 呼び出しで渡されたテキスト（一度も発火しなければ空文字） */
+  completionText: string;
+  /** `isComplete: true` の `onOutput` が一度でも呼ばれたか */
+  completionSeen: boolean;
+  /** `isComplete: true` の `onOutput` の第5引数（stopReason）。実値が入るのは限られた経路のみ */
+  stopReason?: string;
+  /** `AiRunResult.rawDeniedTools`（`canUseTool` が deny したツール名。重複あり得る） */
+  deniedTools?: readonly string[];
 }
 
-/** `mapRawUsage()` の出力（Message.usageData に保存する正規化済み形） */
-export interface RawUsageOutput {
-  usage?: Record<string, unknown>;
-  modelUsage?: Record<string, unknown>;
-  durationMs?: number;
-  model?: string;
+/** `resolveRawCompletionResult()` の出力（`agent:raw:result` の `RawResultPayload` に直結する形） */
+export interface RawCompletionRunResult {
+  /** false: 応答本文ではなく `errorMessage` を見るべき状態（SDK 実行自体の失敗） */
+  ok: boolean;
+  /** AI の応答本文（連結済み）。エラー時は空文字 */
+  text: string;
+  /** 'success' | 'max_turns' | 'error' | 'aborted' 等。無言の切り詰めを隠さないため必ず設定する（#325） */
+  stopReason: string;
+  /** `ok: false` 時、および `ok: true` でも異常を申告すべき場合のメッセージ */
+  errorMessage?: string;
+  /** deny されたツール名（重複除去済み・入力順維持）。常に配列を返す（`undefined` にしない） */
+  deniedTools: string[];
+}
+
+/** 重複を除去しつつ入力順を保つ（`Set` の挿入順保証を利用）。入力配列そのものは変更しない */
+function dedupeDeniedTools(tools?: readonly string[]): string[] {
+  if (!tools || tools.length === 0) return [];
+  return [...new Set(tools)];
 }
 
 /**
- * SDK の `result` メッセージから抽出した使用量情報を、DB 保存用の正規化された形へ写像する。
- * `ai-runner.ts` の通常経路（`result.usageData = { usage: m.usage, modelUsage: m.modelUsage,
- * durationMs: m.duration_ms, model: ..., rateLimits: ... } `）と同じキー構造だが、raw-completion は
- * `rateLimits` を持たない（対話セッションの rate limit 集計とは無関係のため）。
+ * `ai-runner.ts` の実行結果（`AiRunResult` + `onOutput` の観測）から raw-completion の最終結果を
+ * 導出する。3 経路を明示的に区別する（この分岐が Phase 1.1 の「空ボディ」バグの根治点）:
  *
- * @param input SDK result メッセージから抜き出した usage/modelUsage/durationMs
+ *   A. `rawOutput` あり … 完了経路（SDK result ハンドラ / 自然終了フォールバック）に到達した。
+ *      本文は `rawOutput` が唯一の正（最終 `onOutput` が渡す空文字ではない）。
+ *      `stopReason` が `'error'` なら `ok:false`、`'max_turns'`/`'aborted'` は `ok:true` のまま
+ *      部分出力と `stopReason` を返す（切り詰めを隠さない、#325 の踏襲）。
+ *   B. `rawOutput` 無し + 完了シグナルあり … ai-runner のエラー分岐（プロンプト長超過・未ログイン・
+ *      OAuth 期限切れ・SDK 例外等）で早期 return したケース。この `onOutput` テキストは
+ *      「AI の回答」ではなくエラー本文そのものなので `errorMessage` へ回す。
+ *   C. `rawOutput` 無し + 完了シグナルも無し（`resumeFailed` 等） … raw では通常到達しないが、
+ *      無言で成功扱いにはしない。
+ *
+ * 例外は一切投げない。
  */
-export function mapRawUsage(input: RawUsageInput): RawUsageOutput {
+export function resolveRawCompletionResult(input: RawCompletionRunInput): RawCompletionRunResult {
+  const deniedTools = dedupeDeniedTools(input.deniedTools);
+
+  // 経路A: 完了経路に到達済み。本文は rawOutput が唯一の正。
+  if (input.rawOutput !== undefined) {
+    const stopReason = input.stopReason && input.stopReason !== '' ? input.stopReason : 'success';
+    if (stopReason === 'error') {
+      // SDK が error subtype を返したケース。部分出力があれば握りつぶさず errorMessage に載せる
+      const message = input.rawOutput.trim().length > 0
+        ? input.rawOutput
+        : (input.completionText.trim().length > 0 ? input.completionText : 'SDK returned an error result');
+      return { ok: false, text: input.rawOutput, stopReason, errorMessage: message, deniedTools };
+    }
+    // 'max_turns' / 'aborted' 等は ok:true のまま部分出力と stopReason を返す（切り詰めを隠さない）
+    return { ok: true, text: input.rawOutput, stopReason, deniedTools };
+  }
+
+  // 経路B: 完了経路手前のエラー分岐で早期 return。onOutput のテキストはエラー本文。
+  if (input.completionSeen) {
+    const stopReason = input.stopReason && input.stopReason !== '' ? input.stopReason : 'error';
+    const message = input.completionText.trim().length > 0
+      ? input.completionText
+      : 'AI run ended without output';
+    return { ok: false, text: '', stopReason, errorMessage: message, deniedTools };
+  }
+
+  // 経路C: 完了シグナル自体が来なかった（resumeFailed 等）。無言の success にしない。
   return {
-    usage: input.usage,
-    modelUsage: input.modelUsage,
-    durationMs: input.durationMs,
-    model: input.modelUsage ? Object.keys(input.modelUsage)[0] : undefined,
+    ok: false,
+    text: '',
+    stopReason: 'error',
+    errorMessage: 'AI run ended without a completion signal',
+    deniedTools,
   };
 }

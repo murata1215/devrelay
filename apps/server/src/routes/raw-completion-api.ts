@@ -41,6 +41,7 @@ import {
   releaseRawSlot,
   type RawGuardState,
 } from '../services/raw-completion-guard.js';
+import { buildRawCompletionResponse } from '../services/raw-completion-response.js';
 
 /**
  * サーバー予算に対する Agent 側予算の比率（実装プラン「timeout の歪み」対策）。
@@ -203,45 +204,73 @@ export function registerRawCompletionRoutes(app: FastifyInstance) {
 
       await prisma.session.update({ where: { id: rawSessionId }, data: { status: 'ended', endedAt: new Date() } });
 
-      if (!result.ok) {
+      // Phase 1.1: レスポンス組み立ては raw-completion-response.ts に一本化（新 HTTP 契約、常に全キーを持つ）
+      const body = buildRawCompletionResponse({
+        result,
+        sessionId: rawSessionId,
+        requestedModel: model,
+        latencyMs: Date.now() - routeStartedAt,
+      });
+
+      // 要件4: deny されたツール名の可観測性（`agent.log` が読めない問題の恒久対策として
+      // サーバーログ + DB の二重記録にする）
+      if (body.deniedTools.length > 0) {
+        console.warn(
+          `🛑 raw-completion: ${body.deniedTools.length} 件のツール呼び出しを deny しました ` +
+          `(machineId=${machineId}, sessionId=${rawSessionId}, seatKey=${normalizedSeatKey}): ${body.deniedTools.join(', ')}`
+        );
         await prisma.message.create({
           data: {
             sessionId: rawSessionId,
             role: 'system',
-            content: result.errorMessage ?? 'raw-completion failed',
+            content: `⚠️ raw-completion: denied tool calls: ${body.deniedTools.join(', ')}`,
             platform: 'api',
           },
-        });
-        if (result.stopReason === 'timeout') {
-          return reply.status(504).send({ error: result.errorMessage ?? 'raw-completion timed out', code: 'timeout' });
-        }
-        return reply.status(502).send({ error: result.errorMessage ?? 'raw-completion agent error', code: 'agentError' });
+        }).catch(() => {});
+      }
+
+      if (body.error) {
+        // 「SDK が本当に失敗した」のか「配線が壊れた（旧 Agent 等）」のかを pm2 logs 1行で切り分けられるようにする
+        console.warn(`🎮 raw-completion error (machineId=${machineId}, sessionId=${rawSessionId}): ${body.error}`);
+        await prisma.message.create({
+          data: { sessionId: rawSessionId, role: 'system', content: body.error, platform: 'api' },
+        }).catch(() => {});
+
+        const code = body.stopReason === 'timeout'
+          ? 'timeout'
+          : (body.error.includes('outdated agent') ? 'outdatedAgent' : 'agentError');
+        const status = body.stopReason === 'timeout' ? 504 : 502;
+        return reply.status(status).send({ ...body, code });
+      }
+
+      // text が空で error も無い場合も「SDK が本当に無言」か「配線が壊れた」かを pm2 logs 1行で切り分けられるようにする
+      if (body.text.trim().length === 0) {
+        console.warn(`🎮 raw-completion: 本文が空でした（error 無し）(machineId=${machineId}, sessionId=${rawSessionId}, stopReason=${body.stopReason})`);
       }
 
       await prisma.message.create({
         data: {
           sessionId: rawSessionId,
           role: 'ai',
-          content: result.output ?? '',
+          content: body.text,
           platform: 'api',
           usageData: result.usageData ? (result.usageData as object) : undefined,
         },
       });
 
-      return reply.send({
-        output: result.output ?? '',
-        usageData: result.usageData,
-        model: result.usageData?.model,
-        stopReason: result.stopReason,
-        agentDurationMs: result.agentDurationMs,
-        latencyMs: Date.now() - routeStartedAt,
-      });
+      return reply.send(body);
     } catch (error: any) {
       releaseRawSlot(rawGuardState, auth.userId, normalizedSeatKey);
       await prisma.session.update({ where: { id: rawSessionId }, data: { status: 'ended', endedAt: new Date() } }).catch(() => {});
       if (clientDisconnected) return;
       console.error(`🎮 raw-completion failed: ${error?.message}`);
-      return reply.status(504).send({ error: `raw-completion timed out or failed: ${error?.message}`, code: 'timeout' });
+      const body = buildRawCompletionResponse({
+        result: { ok: false, errorMessage: `raw-completion timed out or failed: ${error?.message}`, stopReason: 'timeout' },
+        sessionId: rawSessionId,
+        requestedModel: model,
+        latencyMs: Date.now() - routeStartedAt,
+      });
+      return reply.status(504).send({ ...body, code: 'timeout' });
     }
   });
 }

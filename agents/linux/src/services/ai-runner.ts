@@ -504,6 +504,23 @@ export interface AiRunResult {
    * （resume すると肥大したサマリごと復活し即座に再発するため）。
    */
   sessionDiscarded?: boolean;
+  /**
+   * raw-completion（rawMode）専用: SDK の assistant テキストブロックを連結した本文そのもの
+   * （= 関数ローカルの fullOutput）。最終 onOutput は本文を渡さない仕様（出力ありなら空文字、
+   * 無しなら '(No response from AI)'）のため、呼び出し元はこのフィールドからしか本文を
+   * 取得できない（Phase 1.1 で判明した空レスポンスバグの根治点）。
+   *
+   * `undefined` は「完了経路（result ハンドラ / 自然終了フォールバック）に到達しなかった」ことを
+   * 表す信号として使う（エラー分岐はすべて result ハンドラより手前で早期 return するため設定されない）。
+   * rawMode 以外の呼び出しでは常に undefined であり、既存経路の挙動は一切変わらない。
+   */
+  rawOutput?: string;
+  /**
+   * raw-completion（rawMode）専用: `canUseTool`（D1 第3層）が deny したツール名の記録。
+   * deny クロージャは sendPromptToAiSdk の内側にあり onOutput 経由では返せないため、
+   * 配列の参照を先に result へ載せておき、以降の push がどの return 経路からも見えるようにする。
+   */
+  rawDeniedTools?: string[];
 }
 
 // #355: activeSdkAborts — 実行中の Claude SDK クエリを外部から中断するための
@@ -1002,8 +1019,14 @@ async function sendPromptToAiSdk(
   // 使わず、buildRawSdkOverrides() が組み立てる専用の disallowedTools で完全に上書きする。
   if (options.rawMode) {
     Object.assign(sdkOptions, buildRawSdkOverrides(options.systemPrompt ?? ''));
+    // deny されたツール名を収集する配列。result へ参照を1回だけ載せておくことで、
+    // どの return 経路（result ハンドラ／自然終了フォールバック／早期 return）からも
+    // 呼び出し元が canUseTool の deny 履歴を観測できるようにする（onOutput 経由では不可能なため）。
+    const rawDeniedTools: string[] = [];
+    result.rawDeniedTools = rawDeniedTools;
     sdkOptions.canUseTool = async (toolName, _input, _opts) => {
       isRawToolDenied();
+      rawDeniedTools.push(toolName);
       console.warn(`🛑 raw mode denied tool: ${toolName}`);
       return { behavior: 'deny', message: buildRawDenyMessage(toolName) };
     };
@@ -1470,6 +1493,10 @@ async function sendPromptToAiSdk(
         // #355 Workstream C: ターンが完走したのでここで初めてローテーション判定を行う
         // （最終 onOutput より前、応答内容自体には影響しない）
         await finalizeAutoCompactRotation();
+        // raw-completion（rawMode）専用: 連結済み本文を result へ載せる。最終 onOutput は
+        // 本文を渡さない仕様（下記の空文字/固定文言）のため、呼び出し元はここでしか
+        // 本文を取得できない（Phase 1.1 で判明した空レスポンスバグの根治点）。
+        if (options.rawMode) result.rawOutput = fullOutput;
         if (fullOutput.length === 0) {
           onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId, stopReason);
         } else {
@@ -1520,6 +1547,9 @@ async function sendPromptToAiSdk(
   if (!completionSent) {
     // #355 Workstream C: result メッセージが来なかった稀なケースでもローテーション判定は行う
     await finalizeAutoCompactRotation();
+    // raw-completion（rawMode）専用: 自然終了フォールバック経路でも本文を result へ載せる
+    // （理由は上の result ハンドラと同じ。#325 の踏襲でこちらも stopReason は 'success' 扱い）。
+    if (options.rawMode) result.rawOutput = fullOutput;
     if (fullOutput.length === 0) {
       onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
     } else {

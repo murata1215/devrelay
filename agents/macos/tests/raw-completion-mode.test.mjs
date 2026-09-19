@@ -11,8 +11,9 @@ import {
   buildRawSdkOverrides,
   isRawToolDenied,
   buildRawDenyMessage,
-  mapRawUsage,
+  resolveRawCompletionResult,
 } from '../dist/services/raw-completion-mode.js';
+import * as rawCompletionMode from '../dist/services/raw-completion-mode.js';
 
 // ---- 定数 ----
 
@@ -81,32 +82,172 @@ test('buildRawDenyMessage: ツール名を含む拒否メッセージを返す',
   assert.match(msg, /denied/);
 });
 
-// ---- mapRawUsage ----
+// ---- resolveRawCompletionResult（本文の配線。Phase 1.1 空レスポンス根治の核心） ----
 
-test('mapRawUsage: usage/modelUsage/durationMs をそのまま写像する', () => {
-  const usage = { input_tokens: 10, output_tokens: 20 };
-  const modelUsage = { 'claude-sonnet-4-5': { contextWindow: 200000 } };
-  const result = mapRawUsage({ usage, modelUsage, durationMs: 1234 });
-  assert.equal(result.usage, usage);
-  assert.equal(result.modelUsage, modelUsage);
-  assert.equal(result.durationMs, 1234);
+test('resolveRawCompletionResult: 連結済み本文（rawOutput）が最終コールバックの空文字より優先される（空レスポンス根治の核心）', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: 'こんにちは、P05です。',
+    completionText: '',
+    completionSeen: true,
+    stopReason: 'success',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'こんにちは、P05です。');
 });
 
-test('mapRawUsage: model は modelUsage の先頭キーから導出する', () => {
-  const result = mapRawUsage({ modelUsage: { 'claude-opus-4-1': {} } });
-  assert.equal(result.model, 'claude-opus-4-1');
+test('resolveRawCompletionResult: rawOutput が空文字でも success なら ok:true・text は空文字（例外を投げない）', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: '',
+    completionText: '(No response from AI)',
+    completionSeen: true,
+    stopReason: 'success',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.text, '');
 });
 
-test('mapRawUsage: modelUsage が無ければ model は undefined', () => {
-  const result = mapRawUsage({ usage: { input_tokens: 1 } });
-  assert.equal(result.model, undefined);
+test('resolveRawCompletionResult: 最終コールバックの (No response from AI) を本文として採用しない', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: '実際の回答テキスト',
+    completionText: '(No response from AI)',
+    completionSeen: true,
+    stopReason: 'success',
+  });
+  assert.equal(result.text, '実際の回答テキスト');
+  assert.notEqual(result.text, '(No response from AI)');
 });
 
-test('mapRawUsage: 入力が空でも例外を投げない', () => {
-  assert.doesNotThrow(() => mapRawUsage({}));
-  const result = mapRawUsage({});
-  assert.equal(result.usage, undefined);
-  assert.equal(result.modelUsage, undefined);
-  assert.equal(result.durationMs, undefined);
-  assert.equal(result.model, undefined);
+test('resolveRawCompletionResult: stopReason 未指定（rawOutput あり＝自然終了フォールバック）は success に正規化する', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: '応答本文',
+    completionText: '',
+    completionSeen: true,
+    stopReason: undefined,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.stopReason, 'success');
+});
+
+// ---- stopReason / エラー伝播 ----
+
+test('resolveRawCompletionResult: stopReason=max_turns は ok:true のまま部分出力と stopReason を返す（切り詰めを隠さない）', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: '途中まで書いた応答',
+    completionText: '',
+    completionSeen: true,
+    stopReason: 'max_turns',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.text, '途中まで書いた応答');
+  assert.equal(result.stopReason, 'max_turns');
+});
+
+test('resolveRawCompletionResult: stopReason=error は ok:false・errorMessage に本文を載せる', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: 'エラー時の部分出力',
+    completionText: '',
+    completionSeen: true,
+    stopReason: 'error',
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.stopReason, 'error');
+  assert.equal(result.errorMessage, 'エラー時の部分出力');
+});
+
+test('resolveRawCompletionResult: rawOutput 未設定（エラー分岐の早期 return）は完了テキストを errorMessage へ回し text は空にする', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: undefined,
+    completionText: '⚠️ プロンプトが長すぎます。',
+    completionSeen: true,
+    stopReason: undefined,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.text, '');
+  assert.equal(result.errorMessage, '⚠️ プロンプトが長すぎます。');
+});
+
+test('resolveRawCompletionResult: rawOutput 未設定 + stopReason 未指定は error として扱う（無言の success にしない）', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: undefined,
+    completionText: 'なんらかのエラー文言',
+    completionSeen: true,
+    stopReason: undefined,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.stopReason, 'error');
+});
+
+test('resolveRawCompletionResult: rawOutput 未設定 + stopReason=aborted（loop-guard）は aborted を保ったまま ok:false', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: undefined,
+    completionText: 'ループガードにより打ち切りました',
+    completionSeen: true,
+    stopReason: 'aborted',
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.stopReason, 'aborted');
+});
+
+test('resolveRawCompletionResult: 完了シグナル自体が来なければ ok:false・errorMessage を明示する', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: undefined,
+    completionText: '',
+    completionSeen: false,
+    stopReason: undefined,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.stopReason, 'error');
+  assert.match(result.errorMessage, /completion signal/);
+});
+
+test('resolveRawCompletionResult: 完了テキストが空白のみなら既定のエラー文言にフォールバックする', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: undefined,
+    completionText: '   ',
+    completionSeen: true,
+    stopReason: undefined,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.errorMessage, /without output/);
+});
+
+// ---- deniedTools ----
+
+test('resolveRawCompletionResult: deniedTools は重複を除去し入力順を保つ', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: 'ok',
+    completionText: '',
+    completionSeen: true,
+    stopReason: 'success',
+    deniedTools: ['Bash', 'Read', 'Bash', 'Write', 'Read'],
+  });
+  assert.deepEqual(result.deniedTools, ['Bash', 'Read', 'Write']);
+});
+
+test('resolveRawCompletionResult: deniedTools 未指定なら空配列を返す（undefined を返さない）', () => {
+  const result = resolveRawCompletionResult({
+    rawOutput: 'ok',
+    completionText: '',
+    completionSeen: true,
+    stopReason: 'success',
+  });
+  assert.deepEqual(result.deniedTools, []);
+});
+
+test('resolveRawCompletionResult: 入力の deniedTools 配列と戻り値の配列が同一参照でない（呼び出し元の破壊を防ぐ）', () => {
+  const input = ['Bash'];
+  const result = resolveRawCompletionResult({
+    rawOutput: 'ok',
+    completionText: '',
+    completionSeen: true,
+    stopReason: 'success',
+    deniedTools: input,
+  });
+  assert.notEqual(result.deniedTools, input);
+});
+
+// ---- mapRawUsage の削除確認（要件3の end state を表明: 死コードの復活防止） ----
+
+test('mapRawUsage: 削除済み（raw-completion-mode.js から export されていない）', () => {
+  assert.equal(rawCompletionMode.mapRawUsage, undefined);
 });

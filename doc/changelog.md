@@ -6,6 +6,91 @@
 
 ## 実装済み機能
 
+### raw-completion Phase 1.1 — スモークで判明した不具合の是正 (2026-09-20)
+
+前サイクル（Phase 1、commit `fae5174`）で新設した `POST /api/agent/raw-completion` を実機スモークした結果、
+**レスポンス本文が常に空**と判明した。真因はコードで確定済み（仮説ではない）: `ai-runner.ts` の
+`sendPromptToAiSdk` は assistant テキストをストリーミングで `onOutput(block.text, false)` として流し
+関数ローカルの `fullOutput` に連結するが、完了時の最終 `onOutput` 呼び出しは **本文を渡さない仕様**
+（出力ありなら空文字、無しなら `'(No response from AI)'`）だった。既存の `handleAiPrompt` は自分で
+`responseText += output` して連結していたが、`handleRawPrompt` は `finalOutput = output` としていたため、
+「出力があると空文字、無いと固定文言」という反転した結果を返していた。
+
+#### 修正1: 本文の配線（チャンク連結ではなく `AiRunResult` 経由）
+指示は「`isComplete=false` のチャンクを蓄積」だったが、あえて採らなかった。同じコールバックには
+ツール使用マーカー・auto-compact 通知・loop-guard 通知等の進捗ノイズが流れており、raw は `tools:[]`
+のため「今は」出ないが、4層防御が破れた瞬間にゲームの AI 応答へマーカーが混入する構造的な穴になる。
+また要件4（`deniedTools`）が `canUseTool` の deny クロージャ（`sendPromptToAiSdk` 内部にあり `onOutput`
+経由では返せない）を必要とし、どのみち `AiRunResult` 経由のチャネルが必須だった。
+`AiRunResult` に `rawOutput?: string` / `rawDeniedTools?: string[]` を追加（`rawMode` 時のみ設定、
+既存経路は無影響）。`rawOutput === undefined` という事実自体を「完了経路に到達しなかった＝エラー分岐
+で早期 return した」構造的シグナルとして使う、外部 import ゼロの純関数
+`resolveRawCompletionResult()`（`raw-completion-mode.ts`）を新設し、3経路を明示的に区別する:
+- **経路A**（`rawOutput` あり）: 完了経路に到達。本文は `rawOutput` が唯一の正。`stopReason` が
+  `'error'` なら `ok:false`、`'max_turns'`/`'aborted'` は `ok:true` のまま部分出力と `stopReason` を
+  返す（切り詰めを隠さない、#325 の踏襲）
+- **経路B**（`rawOutput` 無し + 完了シグナルあり）: ai-runner のエラー分岐（プロンプト長超過・未ログイン・
+  OAuth 期限切れ・SDK 例外等）で早期 return したケース。onOutput のテキストは AI 回答ではなく
+  エラー本文そのものなので `errorMessage` へ回す
+- **経路C**（完了シグナルも無し）: `resumeFailed` 等。無言の success にしない
+
+`handleRawPrompt`（`connection.ts`）はチャンクの連結を一切しない設計に変更（`isComplete` の観測のみ）。
+これにより進捗ノイズ混入は構造的に排除される。
+
+#### 修正2: `mapRawUsage()` の削除（死コード整理）
+本番呼び出し 0 件（テストからのみ）だったため agent 側から削除。ai-runner の `result.usageData` が
+既に同じ計算をして届いており、raw 用に再マップする価値がゼロと判断。代わりにサーバー側
+`apps/server/src/services/raw-completion-response.ts`（新規・外部 import ゼロ）に
+`summarizeRawUsage()`（SDK 実キー `input_tokens`/`output_tokens`/`cache_read_input_tokens`/
+`cache_creation_input_tokens` → HTTP 契約の `{input,output,cacheRead,cacheWrite}`、欠落・非数値・NaN・
+負値は0埋め）と `resolveRawModel()`（`usageData.model` → `modelUsage` 先頭キー → リクエスト指定の順）
+を新設し、`buildRawCompletionResponse()` で新 HTTP 契約のレスポンスボディを一本化して組み立てる。
+
+#### 修正3: HTTP レスポンス契約の確定（破壊的変更）
+`apps/server/src/routes/raw-completion-api.ts` のレスポンスを
+`{text, output, model, usage:{input,output,cacheRead,cacheWrite}, latencyMs, agentDurationMs,
+stopReason, sessionId, error?, deniedTools}` に統一。`output` は旧クライアント互換のための
+非推奨エイリアス（`text` と同値）。失敗時（502/504）も同じ形の superset を返す。
+
+| 旧（Phase 1） | 新（Phase 1.1） |
+|---|---|
+| `output` | `text`（`output` は非推奨エイリアスとして残す） |
+| `usageData`（生の `AiUsageData`） | `usage: {input, output, cacheRead, cacheWrite}`（`Message.usageData` には引き続き生データを保存） |
+| `deniedTools` フィールド無し | `deniedTools: string[]`（常に配列、重複除去済み） |
+| `sessionId` 無し | `sessionId: "raw_..."` |
+
+#### 修正4: `deniedTools` の可観測性
+`canUseTool` の deny クロージャで denied なツール名を配列に収集し `AiRunResult.rawDeniedTools` に
+載せる（agent側）。サーバー側は `deniedTools` が非空なら `console.warn`（machineId/sessionId/seatKey
+付き）+ `role:'system'` の `Message` 行を作成する二重記録にした（`agent.log` が `devrelay` ユーザーから
+読めない問題の恒久対策）。`text` が空で `error` も無い場合も `console.warn` し、「SDK が本当に無言」か
+「配線が壊れた」かを `pm2 logs` 1行で切り分けられるようにした。`typeof result.text !== 'string'`
+（`text` フィールド自体が無い）は「Phase 1.1 より前の Agent（`u` 未実行）」として `error` に明示する
+（無言の空文字にしない）。
+
+#### 変更ファイル
+`packages/shared/src/types.ts`（`RawResultPayload` に `text?`/`deniedTools?` 追加、`output?` は
+`@deprecated` 化）、`agents/{linux,macos}/src/services/raw-completion-mode.ts`（`mapRawUsage()` 削除、
+`resolveRawCompletionResult()` 追加、byte-identical）、`agents/{linux,macos}/src/services/ai-runner.ts`
+（`AiRunResult` に `rawOutput?`/`rawDeniedTools?` 追加、`rawMode` ガード内のみ）、
+`agents/{linux,macos}/src/services/connection.ts`（`handleRawPrompt` 書き換え、`handleAiPrompt` は
+無変更）、`apps/server/src/services/raw-completion-response.ts`（新規）、
+`apps/server/src/routes/raw-completion-api.ts`（レスポンス組み立てを新モジュールへ委譲）。
+`apps/server/src/services/agent-manager.ts`・`apps/server/src/routes/document-api.ts`・
+`apps/server/src/mcp`・`agents/windows` は無変更（`git diff --stat` で空を確認）。
+
+#### 未実施（人間側の反映待ち）
+プロジェクトルールにより `pm2 restart devrelay-server` は自分で実行しない。したがって実機再スモーク
+（(a)応答確認 / (b)ペルソナ非漏洩 / (c)DB確認 / (d)同時実行制御 / (e)モデル別動作確認）は本サイクルでは
+未実施。commit + push 後、けいすけの `pm2 restart` → `uso8m` 側 `u`（Agent 自己更新）確認後に次サイクルで
+再スモークする。再現用 curl コマンドは devlog 全文参照。
+
+#### Phase 0（Codex 調査、read-only、実装は次サイクル）
+本サイクルでは実施結果を devlog に全文掲載（`codex exec --help` の全文、system prompt 置換/ツール
+allow-deny/approval・sandbox 相当フラグの列挙、過去 codex セッション1件の `usageData` SELECT 結果）。
+
+---
+
 ### raw-completion エンドポイント（ゲーム席用の素の completion API）Phase 1: Claude (2026-09-19)
 
 外部の LLM 対戦ゲーム（dangou-card）等が Claude Code を1プレイヤー席として呼び出せるようにする、
