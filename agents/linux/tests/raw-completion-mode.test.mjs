@@ -54,9 +54,10 @@ test('buildRawSdkOverrides: disallowedTools は RAW_DISALLOWED_TOOLS そのも�
   assert.equal(overrides.disallowedTools, RAW_DISALLOWED_TOOLS);
 });
 
-test('buildRawSdkOverrides: permissionMode は plan 固定（D1 第4層）', () => {
+test('buildRawSdkOverrides: permissionMode は default 固定（Phase 1.2: plan は SDK が plan-mode reminder を注入するため不可）', () => {
   const overrides = buildRawSdkOverrides('sys');
-  assert.equal(overrides.permissionMode, 'plan');
+  assert.equal(overrides.permissionMode, 'default');
+  assert.notEqual(overrides.permissionMode, 'plan'); // 回帰防止: 'plan' へ戻すと Phase 1.2 の不具合が再発する
 });
 
 test('buildRawSdkOverrides: mcpServers は空オブジェクト + strictMcpConfig true（MCP 経由の再導入を塞ぐ）', () => {

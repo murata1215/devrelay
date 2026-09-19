@@ -911,8 +911,8 @@ export interface SendPromptOptions {
   turnId?: string;
   /**
    * raw-completion（ゲーム席用の素の completion API）専用モード。true の場合、
-   * `raw-completion-mode.ts` の `buildRawSdkOverrides()`（D1 の4層防御: tools:[] / disallowedTools /
-   * canUseTool 無条件 deny / permissionMode:'plan' + mcpServers:{}）を適用し、`systemPrompt` で
+   * `raw-completion-mode.ts` の `buildRawSdkOverrides()`（D1 の3層防御: tools:[] / disallowedTools /
+   * canUseTool 無条件 deny + permissionMode:'default' + mcpServers:{}）を適用し、`systemPrompt` で
    * system prompt を完全置換する。`sendPromptToAi` 側の言語指示付与・`reconcileForRunner()` も
    * スキップする（専用 WS チャネル `server:raw:prompt` からのみ true が渡る想定。既存の
    * plan/exec 経路には一切影響しない）。
@@ -1012,9 +1012,11 @@ async function sendPromptToAiSdk(
   }
 
   // パーミッションモード設定
-  // raw-completion（ゲーム席用の素の completion API）専用モード。D1 の4層防御:
-  // 1. tools:[]（本命） 2. disallowedTools（保険） 3. canUseTool 無条件 deny（最後の砦）
-  // 4. permissionMode:'plan'（万一1-3が漏れても編集系ツールを実行しない）。
+  // raw-completion（ゲーム席用の素の completion API）専用モード。D1 の3層防御:
+  // 1. tools:[]（本命） 2. disallowedTools（保険） 3. canUseTool 無条件 deny（最後の砦）。
+  // permissionMode は 'default' 固定（Phase 1.2 で 'plan' から変更。SDK 内蔵 cli.js が
+  // permissionMode:'plan' 時に plan-mode reminder を会話へ注入し、raw 応答が「Plan モード」を
+  // 自称する事故につながるため。raw-completion-mode.ts 冒頭 JSDoc 参照）。
   // 上記 disallowedTools（AskUserQuestion/ExitPlanMode 用、usePlanMode 系）を raw モードでは
   // 使わず、buildRawSdkOverrides() が組み立てる専用の disallowedTools で完全に上書きする。
   if (options.rawMode) {

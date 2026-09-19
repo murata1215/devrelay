@@ -6,6 +6,73 @@
 
 ## 実装済み機能
 
+### raw-completion Phase 1.2 — permissionMode の見直し（'plan'→'default'） (2026-09-20)
+
+Phase 1.1 適用後の実機再スモーク（submission `cmu8zcxcw00e5iwqczoz2am6n`）の (b)（ペルソナ非漏洩確認）で、
+`POST /api/agent/raw-completion` の応答が「Claude Agent SDK／Plan モードで動いている」と自称した。
+`system` を完全置換しているにもかかわらず Plan モードを名乗るのは、SDK に渡していた
+`permissionMode: 'plan'` が **CLI 側でプロンプトへ system-reminder を注入している**ためという仮説を、
+SDK ソース実測で確定させ、`permissionMode` を防御層から外した。
+
+#### 根本原因の実測確認
+
+SDK が既定で spawn する自前バンドル `cli.js`（`@anthropic-ai/claude-agent-sdk@0.2.77` 同梱、
+`pathToClaudeCodeExecutable` 未指定時に使われる）に、以下のガード付き注入が存在することを実測:
+
+```js
+async function jhY(A,q){
+  let Y=q.getAppState().toolPermissionContext;
+  if(Y.mode!=="plan")return[];              // ← mode が 'plan' のときだけ注入する
+  ...
+  w.push({type:"plan_mode",reminderType:$,isSubAgent:!!q.agentId,planFilePath:z,planExists:_!==null});
+  return w;
+}
+```
+
+注入される文言（verbatim、`reminderType:"full"`）:
+
+> Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT
+> make any edits (with the exception of the plan file mentioned below), run any non-readonly tools
+> (including changing configs or making commits), or otherwise make any changes to the system.
+> This supercedes any other instructions you have received.
+
+（sparse 版）:
+
+> Plan mode still active (see full instructions earlier in conversation). Read-only except plan
+> file (...). ... End turns with ... (for clarifications) or ... (for plan approval). Never ask
+> about plan approval via text or AskUserQuestion.
+
+この注入は `p1({content:K,isMeta:!0})` として**会話メッセージ列**に積まれるため、`systemPrompt` の
+完全置換では消えない（SDK ソース実測: `typeof systemPrompt==="string"` なら system prompt 自体は
+置換されるが、plan reminder は別経路の会話添付）。`PermissionMode` 型（`sdk.d.ts`）は
+`'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk'` で、`'default'` を使えば
+`toolPermissionContext.mode!=="plan"` の early return により注入は発生しない。
+
+#### 修正: 3層防御への変更（`agents/{linux,macos}/src/services/raw-completion-mode.ts`）
+
+raw-completion は `tools: []` / `disallowedTools` / `canUseTool` 無条件 deny の3層で既に
+ツール呼び出しを完全遮断済みであり、ツールが1個も存在しない raw 経路では `permissionMode:'plan'`
+（「編集系ツールを実行しない」保険）に実効的な防御価値が無い一方、上記のプロンプト汚染という
+明確な害があった。よって `buildRawSdkOverrides()` の `permissionMode` を `'plan'` → `'default'` に
+変更し、D1 の防御層説明を「4層」から「3層」に改めた。`tools:[]` / `disallowedTools` /
+`canUseTool` 無条件 deny の3層および `mcpServers:{}` + `strictMcpConfig:true` は無変更。
+`ai-runner.ts` の raw 分岐（`Object.assign(sdkOptions, buildRawSdkOverrides(...))`）はコード無変更、
+コメントのみ3層防御に追従。DevRelay 本来のプランモード（`usePlanMode` 側の
+`sdkOptions.permissionMode='plan'`、`ai-runner.ts`）は本修正の対象外で無変更。
+
+`agents/linux` と `agents/macos` の `raw-completion-mode.ts` / `raw-completion-mode.test.mjs` は
+byte-identical を維持（`diff` で無出力を確認）。`apps/server/**` および既存経路
+（`handleAiPrompt` / `sendPromptToAgent` / `crossquery_` / `teamexec_` / MCP）は無変更。
+
+検証: shared 47/47・server 496/496・linux 894/894・macos 449/450（既存 skip 1件）すべて green
+（`--test-concurrency=1` で確認。並列実行時の一部 flake は raw-completion と無関係な既存テスト
+ファイルの Node test runner IPC 問題と判明、`raw-completion-mode.test.mjs` 単体は並列実行でも
+26/26 green）。`pnpm build` 6 workspace green、`git diff --stat` で
+`apps/`/`packages/`/`prisma/`/`agents/windows/` が無変更、`grep -c 'require('`（apps/web）= 0。
+Agent 側のみの変更のため `pm2 restart devrelay-server` 不要。commit + push 後、対象機
+`x220-158-18-103/uso8m` の `u`（auto-update）による反映を確認してから実機スモーク（(b) モード
+自称の解消・(e) `claude-fable-5-1` 再検証・(a) 退行確認）を実施。
+
 ### raw-completion Phase 1.1 — スモークで判明した不具合の是正 (2026-09-20)
 
 前サイクル（Phase 1、commit `fae5174`）で新設した `POST /api/agent/raw-completion` を実機スモークした結果、

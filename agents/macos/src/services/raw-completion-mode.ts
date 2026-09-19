@@ -10,15 +10,24 @@
  *
  * D1（実装プランの判断）: `allowedTools: []` はツールを無効化しない（「プロンプト無しで自動許可する
  * ツール名」であり絞り込み用途ではない）。`tools: []` が「ビルトインツールを全無効化する」本来の
- * 手段。ただし SDK のバージョン変化や `permissionMode:'plan'` の既定挙動（Read/Grep/Glob/WebFetch
- * を調査目的で許可する設計）に備え、以下 4 層で多重防御する:
+ * 手段。ただし SDK のバージョン変化に備え、以下 3 層で多重防御する:
  *   1. `tools: []`（本命）
  *   2. `disallowedTools`（`RAW_DISALLOWED_TOOLS`、明示リスト。tools:[] が効かない SDK バージョンへの保険）
  *   3. `canUseTool` 無条件 deny（`isRawToolDenied` は常に true を返す。SDK 版が上がっても不変の最後の砦）
- *   4. `permissionMode: 'plan'`（万一 1-3 が全て漏れても、plan モードは編集系ツールを実行しない）
  * さらに `mcpServers: {}` + `strictMcpConfig: true` を重ねる（`tools:[]` 後に MCP サーバーがツールを
  * 再導入しうる唯一の経路のため）。`systemPrompt` は完全置換（DevRelay の前置き・Agreement 文言を
  * 一切混入させない契約）、`settingSources: []`（CLAUDE.md 等のプロジェクト設定を読み込ませない）。
+ *
+ * `permissionMode` は `'default'` 固定（Phase 1.2 で `'plan'` から変更）。SDK 内蔵 cli.js
+ * （`@anthropic-ai/claude-agent-sdk` 同梱、`pathToClaudeCodeExecutable` 未指定時に使われる自前
+ * バンドル）を実測したところ、`permissionMode:'plan'` は `toolPermissionContext.mode==="plan"` を
+ * ガードに「Plan mode is active. The user indicated that they do not want you to execute yet --
+ * you MUST NOT make any edits ...」という plan-mode reminder を会話メッセージへ `isMeta:true` で
+ * 注入する（`systemPrompt` の完全置換では消えない別経路）。raw-completion はゲーム席用の素の
+ * completion API であり、AI がこの reminder を読んで「Plan モードで動いている」と自称する事故
+ * （Phase 1 再スモーク (b) で実測）につながるため、`'plan'` を使わない。ツールが 1 個も無い
+ * raw 経路では `'plan'` に期待していた「編集系ツールを実行しない」保険としての価値は
+ * `canUseTool` 無条件 deny（第3層）が既に肩代わりしており、実効上の防御力低下は無い。
  *
  * maxTurns はプラン仕様の `1` ではなく `2` を採用する（実装プランのリスク欄参照）。SDK のターン計上が
  * 入口/出口どちらを指すか不明であり、off-by-one だと全コールが `error_max_turns` になるおそれがある。
@@ -69,14 +78,14 @@ export interface RawSdkOverrides {
   settingSources: never[];
   tools: never[];
   disallowedTools: readonly string[];
-  permissionMode: 'plan';
+  permissionMode: 'default';
   mcpServers: Record<string, never>;
   strictMcpConfig: true;
   maxTurns: number;
 }
 
 /**
- * raw-completion モードの SDK query() オプション上書き分を組み立てる（D1 の 4 層防御のうち
+ * raw-completion モードの SDK query() オプション上書き分を組み立てる（D1 の 3 層防御のうち
  * canUseTool を除く静的な部分）。`ai-runner.ts` はこの戻り値を `sdkOptions` へ spread するだけで、
  * SDK オプションの組み立てロジック自体は本ファイルに閉じ込める（テスト容易性のため）。
  *
@@ -88,7 +97,7 @@ export function buildRawSdkOverrides(systemPrompt: string): RawSdkOverrides {
     settingSources: [],
     tools: [],
     disallowedTools: RAW_DISALLOWED_TOOLS,
-    permissionMode: 'plan',
+    permissionMode: 'default',
     mcpServers: {},
     strictMcpConfig: true,
     maxTurns: RAW_MAX_TURNS,
