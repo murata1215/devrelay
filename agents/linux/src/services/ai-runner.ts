@@ -26,6 +26,8 @@ import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-rea
 import { classifyTerminalStartupFailure } from './terminal-session-id.js';
 // サイクルP1: Capability 配布基盤の prelaunch 入口（provider 判定は共通層側の表で行う）
 import { reconcileForRunner } from './capability-sync.js';
+// raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
+import { buildRawSdkOverrides, isRawToolDenied, buildRawDenyMessage } from './raw-completion-mode.js';
 // core#383: 旧 Claude CLI（--session-id 未対応）を検出した場合のプロセス内フォールバックフラグ。
 // 一度 true になったら、この Agent プロセスが再起動されるまで以後の全ターンで
 // --session-id を渡さない（legacy argv = 画面スクレイプによる旧来のセッション ID 取得に戻す）。
@@ -890,6 +892,17 @@ export interface SendPromptOptions {
    * サーバー側で `Session.planTurnId` と突き合わせて `planAiSessionId` を保存するために使う。
    */
   turnId?: string;
+  /**
+   * raw-completion（ゲーム席用の素の completion API）専用モード。true の場合、
+   * `raw-completion-mode.ts` の `buildRawSdkOverrides()`（D1 の4層防御: tools:[] / disallowedTools /
+   * canUseTool 無条件 deny / permissionMode:'plan' + mcpServers:{}）を適用し、`systemPrompt` で
+   * system prompt を完全置換する。`sendPromptToAi` 側の言語指示付与・`reconcileForRunner()` も
+   * スキップする（専用 WS チャネル `server:raw:prompt` からのみ true が渡る想定。既存の
+   * plan/exec 経路には一切影響しない）。
+   */
+  rawMode?: boolean;
+  /** rawMode: true の場合に使う system prompt（完全置換。未指定時は空文字列扱い） */
+  systemPrompt?: string;
 }
 
 /**
@@ -982,7 +995,20 @@ async function sendPromptToAiSdk(
   }
 
   // パーミッションモード設定
-  if (options.usePlanMode) {
+  // raw-completion（ゲーム席用の素の completion API）専用モード。D1 の4層防御:
+  // 1. tools:[]（本命） 2. disallowedTools（保険） 3. canUseTool 無条件 deny（最後の砦）
+  // 4. permissionMode:'plan'（万一1-3が漏れても編集系ツールを実行しない）。
+  // 上記 disallowedTools（AskUserQuestion/ExitPlanMode 用、usePlanMode 系）を raw モードでは
+  // 使わず、buildRawSdkOverrides() が組み立てる専用の disallowedTools で完全に上書きする。
+  if (options.rawMode) {
+    Object.assign(sdkOptions, buildRawSdkOverrides(options.systemPrompt ?? ''));
+    sdkOptions.canUseTool = async (toolName, _input, _opts) => {
+      isRawToolDenied();
+      console.warn(`🛑 raw mode denied tool: ${toolName}`);
+      return { behavior: 'deny', message: buildRawDenyMessage(toolName) };
+    };
+    console.log(`🎮 [SDK] Using raw-completion mode (tools disabled, systemPrompt replaced, maxTurns=${sdkOptions.maxTurns})`);
+  } else if (options.usePlanMode) {
     sdkOptions.permissionMode = 'plan';
     if (options.allowedTools && options.allowedTools.length > 0) {
       sdkOptions.allowedTools = options.allowedTools;
@@ -1763,14 +1789,19 @@ export async function sendPromptToAi(
   // #316: チャット表示言語が 'en' の場合のみ、AI への指示文言語（日本語のまま）はそのままに
   // 「ユーザーへの返答は英語で」という指示を末尾に追加する。
   // 'ja'（既定）の場合は何も付与せず、既存挙動を完全に維持する（回帰リスクを避けるため）。
-  if (options.language === 'en') {
+  // raw-completion（rawMode）: DevRelay 側の指示文を一切混入させない契約のためスキップする。
+  if (!options.rawMode && options.language === 'en') {
     prompt = `${prompt}\n\n---\nIMPORTANT: Respond to the user in English from now on, regardless of the language used in any instructions above.`;
   }
 
   // サイクルP1: runner 起動直前の唯一のチョークポイント（PTY/SDK 両分岐より前）。
   // provider 判定は共通層の表で行うため、ai-runner は provider を一切知らない。
   // 失敗・timeout しても起動をブロックしない（例外を投げない設計、reconcileForRunner 内で担保）。
-  await reconcileForRunner(aiTool, projectPath);
+  // raw-completion（rawMode）: 最大 3 分の prelaunch ブロック（PRELAUNCH_WAIT_MS）は
+  // 180 秒の raw タイムアウト予算を構造的に超えるためスキップする（実装プラン D2）。
+  if (!options.rawMode) {
+    await reconcileForRunner(aiTool, projectPath);
+  }
 
   // 端末インタフェースモード（PTY 経由で claude --continue 起動）
   // aiTool が claude かつ terminalMode フラグが立っている場合のみ分岐

@@ -28,6 +28,9 @@ import type {
   ProjectFileReadPayload,
   PlanLatestRequestPayload,
   ScaffoldCreatePayload,
+  RawPromptPayload,
+  RawResultPayload,
+  AiUsageData,
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -35,6 +38,7 @@ import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
+import { composeRawPrompt } from './raw-completion-mode.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId, loadSessionMeta } from './session-store.js';
 import { savePlanFile, loadLatestPlanFile } from './plan-file-store.js';
 import { decideResume } from './resume-priority.js';
@@ -397,6 +401,12 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
       handleAiPrompt(message.payload);
       break;
 
+    case 'server:raw:prompt':
+      // raw-completion（ゲーム席用の素の completion API）専用の受信ハンドラ。
+      // `handleAiPrompt` とは完全に独立した経路（実装プラン D2）。
+      handleRawPrompt(message.payload);
+      break;
+
     case 'server:conversation:clear':
       handleConversationClear(message.payload);
       break;
@@ -582,6 +592,87 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:claude:login:cancel':
       cancelClaudeLogin(message.payload.requestId, 'cancelled by server');
       break;
+  }
+}
+
+/**
+ * raw-completion（ゲーム席用の素の completion API）の Server → Agent プロンプト受信ハンドラ。
+ * `handleAiPrompt`（対話セッション向け）とは完全に独立した専用経路（実装プラン D2）。
+ * `sessionInfoMap` / `conversation-store` / `.devrelay-output` など対話セッション向けの永続状態は
+ * 一切読み書きしない。`sendPromptToAi` の `rawMode: true` により以下が適用される:
+ *   - system prompt 完全置換（DevRelay の前置き・Agreement・プランモード指示を一切付与しない）
+ *   - tools:[] + disallowedTools + canUseTool 無条件 deny + permissionMode:'plan' の4層防御
+ *   - `reconcileForRunner()`（最大3分ブロック）と言語指示付与をスキップ
+ * `⏳` 等の進捗チャンクは `isComplete !== true` の呼び出しを無視することで除外する。
+ * `sent` ラッチで `agent:raw:result` の二重送信を防ぎ、`finally` で必ず応答する
+ * （サーバー側 timeout に頼らない設計）。
+ */
+async function handleRawPrompt(payload: RawPromptPayload) {
+  const { requestId, sessionId, projectPath, system, prompt, model, timeoutMs } = payload;
+  if (!currentMachineId || !currentConfig) return;
+
+  let sent = false;
+  const send = (result: Omit<RawResultPayload, 'requestId' | 'sessionId'>) => {
+    if (sent) return;
+    sent = true;
+    sendMessage({
+      type: 'agent:raw:result',
+      payload: { requestId, sessionId, ...result },
+    });
+  };
+
+  // Agent 側タイムアウト（Server 側 timeoutS より短い予算。実装プランの「timeout の歪み」対策で
+  // Agent の finally 応答が Server 側 timeout より先に確定するようにする）
+  const timeoutHandle = setTimeout(() => {
+    send({ ok: false, stopReason: 'timeout', errorMessage: 'raw-completion timed out on agent side' });
+  }, timeoutMs);
+
+  const startedAt = Date.now();
+  try {
+    let finalOutput = '';
+    let usageData: AiUsageData | undefined;
+    let stopReason: string | undefined;
+
+    await sendPromptToAi(
+      sessionId,
+      composeRawPrompt(prompt),
+      projectPath,
+      'claude',
+      sessionId,
+      currentConfig,
+      (output, isComplete, usage, _extractedSessionId, reason) => {
+        // 進捗チャンク（⏳ 等）は raw-completion の応答本文に含めない
+        if (!isComplete) return;
+        finalOutput = output;
+        usageData = usage;
+        stopReason = reason;
+      },
+      {
+        rawMode: true,
+        systemPrompt: system,
+        model,
+        forceNewSession: true,
+        persistProjectState: false,
+        terminalMode: false,
+      }
+    );
+
+    send({
+      ok: true,
+      output: finalOutput,
+      usageData,
+      stopReason: stopReason ?? 'success',
+      agentDurationMs: Date.now() - startedAt,
+    });
+  } catch (err) {
+    send({
+      ok: false,
+      stopReason: 'error',
+      errorMessage: err instanceof Error ? err.message : String(err),
+      agentDurationMs: Date.now() - startedAt,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 }
 

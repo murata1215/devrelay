@@ -13,7 +13,7 @@
  * `agents/linux` と `agents/macos` と `agents/windows` で byte-for-byte 同一内容を維持すること。
  */
 
-export type SessionScope = 'interactive' | 'crossQuery' | 'teamExec' | 'askDesc';
+export type SessionScope = 'interactive' | 'crossQuery' | 'teamExec' | 'askDesc' | 'raw';
 
 /**
  * sessionId のプレフィックスからセッションの種別を判定する。
@@ -21,6 +21,10 @@ export type SessionScope = 'interactive' | 'crossQuery' | 'teamExec' | 'askDesc'
  * - `crossquery_` : ask-member（クロスプロジェクト問い合わせ）
  * - `teamexec_`    : teamexec-member（クロスプロジェクト実行依頼）
  * - `askdesc_`     : WebUI のプロジェクト説明生成（AI に1回だけ聞くだけの使い捨てセッション）
+ * - `raw_`         : raw-completion（ゲーム席用の素の completion API。専用 WS チャネル
+ *                    `server:raw:prompt`/`agent:raw:result` を通るため本経路には来ないが、
+ *                    将来の変更で `handleAiPrompt` に迷い込んだ場合に `saveConversation`/
+ *                    `clearOutputDir`/`archiveWorkState` を止める最後の砦として追加）
  * - それ以外        : 対話セッション（人間が継続して使うセッション）
  *
  * @param sessionId 判定対象のセッション ID
@@ -29,6 +33,7 @@ export function classifySessionScope(sessionId: string): SessionScope {
   if (sessionId.startsWith('crossquery_')) return 'crossQuery';
   if (sessionId.startsWith('teamexec_')) return 'teamExec';
   if (sessionId.startsWith('askdesc_')) return 'askDesc';
+  if (sessionId.startsWith('raw_')) return 'raw';
   return 'interactive';
 }
 
@@ -54,6 +59,8 @@ export function sessionScopeLabel(scope: SessionScope): string {
       return 'TEAM-EXEC';
     case 'askDesc':
       return 'ASK-DESC';
+    case 'raw':
+      return 'RAW';
     case 'interactive':
       return 'INTERACTIVE';
   }

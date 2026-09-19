@@ -29,6 +29,8 @@ import {
   type AgentCapability,
   type CapabilityConfig,
   type AgentCapabilitySyncPayload,
+  type RawPromptPayload,
+  type RawResultPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, notifySessionsForMachine } from './session-manager.js';
@@ -97,6 +99,14 @@ const pendingCrossQueries = new Map<string, HistoryRequest<{ output: string; fil
 const pendingScaffolds = new Map<string, HistoryRequest<{ name: string; path: string; ok: boolean; error?: string }>>();
 
 /**
+ * raw-completion（ゲーム席用の素の completion API）の待機: requestId → { resolve, reject, timeout }
+ * `pendingCrossQueries`（sessionId キー）とは別の専用 Map（requestId キー、実装プラン D2）。
+ * `handleAiOutput`/`sendPromptToAgent` は一切変更せず、専用チャネル `server:raw:prompt` /
+ * `agent:raw:result` の送受信のみをこの Map が担う。
+ */
+const pendingRawCompletions = new Map<string, HistoryRequest<RawResultPayload>>();
+
+/**
  * クロスプロジェクトクエリの待機をキャンセルする（HTTP 切断時のクリーンアップ用）
  * curl タイムアウト等でクライアントが切断した場合に呼び出し、Promise を reject してリソース解放する
  */
@@ -107,6 +117,53 @@ export function cancelPendingCrossQuery(sessionId: string) {
     pendingCrossQueries.delete(sessionId);
     pending.reject(new Error('Client disconnected'));
     console.log(`🔌 Pending cross query cancelled: ${sessionId}`);
+  }
+}
+
+/**
+ * raw-completion（ゲーム席用の素の completion API）の Server → Agent 送信。
+ * `sendPromptToAgent`（対話セッション向け・DB ラウンドトリップ有・`sessionInfoMap` 待機あり）とは
+ * 完全に独立した経路（実装プラン D2）。DB アクセスはゼロ、`sendToAgent` で即時送信するのみ
+ * （ルート側 `raw-completion-api.ts` で認証・所有権・capability 検証を終えている前提）。
+ * `payload.timeoutMs`（Agent 側予算）より長い猶予を持たせて server 側でも timeout する
+ * （Agent の `finally` 応答が来なかった場合の保険。通常は Agent 側の応答が先に届く）。
+ */
+export function sendRawPromptToAgent(machineId: string, payload: RawPromptPayload): Promise<RawResultPayload> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingRawCompletions.delete(payload.requestId);
+      reject(new Error('raw-completion timed out on server side'));
+    }, payload.timeoutMs + 10000);
+
+    pendingRawCompletions.set(payload.requestId, { resolve, reject, timeout });
+
+    sendToAgent(machineId, { type: 'server:raw:prompt', payload });
+  });
+}
+
+/**
+ * `agent:raw:result` 受信ハンドラ。`pendingRawCompletions` の該当 requestId を解決する。
+ * `handleAiOutput`（対話セッション向け）とは別関数（実装プラン D2、既存関数は 0 行変更）。
+ */
+async function handleRawResult(payload: RawResultPayload) {
+  const pending = pendingRawCompletions.get(payload.requestId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingRawCompletions.delete(payload.requestId);
+  pending.resolve(payload);
+}
+
+/**
+ * raw-completion の待機をキャンセルする（HTTP クライアント切断時のクリーンアップ用、
+ * `cancelPendingCrossQuery` と同じパターン）。
+ */
+export function cancelPendingRawCompletion(requestId: string) {
+  const pending = pendingRawCompletions.get(requestId);
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingRawCompletions.delete(requestId);
+    pending.reject(new Error('Client disconnected'));
+    console.log(`🔌 Pending raw completion cancelled: ${requestId}`);
   }
 }
 
@@ -292,6 +349,11 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           break;
         case 'agent:claude:login:result':
           await handleClaudeLoginResult(message.payload);
+          break;
+        case 'agent:raw:result':
+          // raw-completion（ゲーム席用の素の completion API）: 専用 Map で待機している
+          // requestId の Promise を解決するのみ（`handleAiOutput` は一切変更しない）
+          handleRawResult(message.payload);
           break;
       }
     } catch (err) {

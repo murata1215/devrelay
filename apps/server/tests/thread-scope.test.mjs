@@ -21,6 +21,10 @@ describe('isEphemeralSessionId', () => {
     assert.equal(isEphemeralSessionId('askdesc_a1b2c3'), true);
   });
 
+  test('raw_ プレフィックスは一時セッション（raw-completion）', () => {
+    assert.equal(isEphemeralSessionId('raw_a1b2c3'), true);
+  });
+
   test('通常の cuid は一時セッションではない', () => {
     assert.equal(isEphemeralSessionId('clx1234567890abcdef'), false);
   });
@@ -43,6 +47,7 @@ describe('buildEphemeralSessionIdExclusion（一覧 where への展開）', () =
           { id: { startsWith: 'teamexec_' } },
           { id: { startsWith: 'crossquery_' } },
           { id: { startsWith: 'askdesc_' } },
+          { id: { startsWith: 'raw_' } },
         ],
       },
     });

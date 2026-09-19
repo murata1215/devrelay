@@ -17,6 +17,10 @@ test('classifySessionScope: askdesc_ プレフィックスは askDesc', () => {
   assert.equal(classifySessionScope('askdesc_abc123'), 'askDesc');
 });
 
+test('classifySessionScope: raw_ プレフィックスは raw', () => {
+  assert.equal(classifySessionScope('raw_abc123'), 'raw');
+});
+
 test('classifySessionScope: それ以外は interactive', () => {
   assert.equal(classifySessionScope('cmthrit6d03ed1392nf83da8o'), 'interactive');
   assert.equal(classifySessionScope(''), 'interactive');
@@ -26,10 +30,11 @@ test('classifySessionScope: プレフィックスは前方一致のみ（途中�
   assert.equal(classifySessionScope('somesession_crossquery_notreally'), 'interactive');
 });
 
-test('isEphemeralSession: crossQuery/teamExec/askDesc は true', () => {
+test('isEphemeralSession: crossQuery/teamExec/askDesc/raw は true', () => {
   assert.equal(isEphemeralSession('crossquery_x'), true);
   assert.equal(isEphemeralSession('teamexec_x'), true);
   assert.equal(isEphemeralSession('askdesc_x'), true);
+  assert.equal(isEphemeralSession('raw_x'), true);
 });
 
 test('isEphemeralSession: interactive は false', () => {
@@ -40,5 +45,6 @@ test('sessionScopeLabel: 全スコープが既存のログ表記と互換のラ�
   assert.equal(sessionScopeLabel('crossQuery'), 'CROSS-QUERY');
   assert.equal(sessionScopeLabel('teamExec'), 'TEAM-EXEC');
   assert.equal(sessionScopeLabel('askDesc'), 'ASK-DESC');
+  assert.equal(sessionScopeLabel('raw'), 'RAW');
   assert.equal(sessionScopeLabel('interactive'), 'INTERACTIVE');
 });

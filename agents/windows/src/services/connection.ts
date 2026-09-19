@@ -184,7 +184,11 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           projects,
           availableAiTools: getAvailableAiTools(config),
           protocolVersion: PROTOCOL_VERSION,
-          capabilities: [...AGENT_CAPABILITIES],
+          // raw-completion（実装プラン D4）: Windows Electron agent の ai-runner.ts は
+          // @anthropic-ai/claude-agent-sdk を import しておらず claude CLI を直接 spawn する実装のため、
+          // system prompt 完全置換を原理的に実装できない。「できないのに申告する」状態を避けるため、
+          // capability 一覧から raw-completion のみ除外する（申告しなければサーバーは raw を投げない）。
+          capabilities: AGENT_CAPABILITIES.filter((c) => c !== 'raw-completion'),
         },
       });
 

@@ -107,7 +107,7 @@ async function countRecentCrossSessions(
  * @param targetProjectId 宛先プロジェクト ID
  * @returns allowed=許可するか / legacy=Team 未作成ユーザーの移行措置で通したか
  */
-async function checkCrossTargetAllowed(
+export async function checkCrossTargetAllowed(
   machineId: string,
   userId: string,
   targetProjectId: string
@@ -181,7 +181,7 @@ async function authenticateByMachineToken(request: FastifyRequest): Promise<stri
 /**
  * マシントークンから userId と machineId を取得する認証ヘルパー
  */
-async function authenticateByMachineTokenFull(request: FastifyRequest): Promise<{ userId: string; machineId: string } | null> {
+export async function authenticateByMachineTokenFull(request: FastifyRequest): Promise<{ userId: string; machineId: string } | null> {
   const authHeader = request.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) return null;
 

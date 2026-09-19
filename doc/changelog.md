@@ -6,6 +6,90 @@
 
 ## 実装済み機能
 
+### raw-completion エンドポイント（ゲーム席用の素の completion API）Phase 1: Claude (2026-09-19)
+
+外部の LLM 対戦ゲーム（dangou-card）等が Claude Code を1プレイヤー席として呼び出せるようにする、
+DevRelay の前置き・Agreement・プランモード指示を一切混入させない専用 API。前サイクルの調査
+（`doc/analysis/ask_raw_mode_investigation.md`）で判明した「`ask` はプロンプト構造（層A）と
+流量制御（層B）の両方が独立したブロッカーでゲーム席に不可」という結論を受け、既存の
+`ask`/`teamexec`/MCP exec のコードパス・定数・判定順序には一切触れず、専用エンドポイント +
+`raw_` 接頭辞で完全に分離する設計を実装した。Phase 1 は Claude SDK 経路のみ（linux/macos の
+Agent）。Codex は Phase 0 の事前調査（`codex exec --help` で `--json`/`resume` の存在を確認、
+DB 実データで usageData が 165/168 件・98.2% で記録されていることを確認）に留め、実装は次サイクル。
+
+#### エンドポイント
+- `POST /api/agent/raw-completion`（マシントークン認証。`document-api.ts` の
+  `authenticateByMachineTokenFull`/`checkCrossTargetAllowed` を共用、`export` 追加のみで
+  既存関数は 0 行変更）
+- ターゲットプロジェクトの所有権チェック・Team 登録チェック（`ask-member` と同じ「宛先は
+  Team 登録済みのみ」の原則）・`defaultAi==='claude'`/オンライン/capability 申告/Agent
+  最新版チェックを経てから WS 送信する
+
+#### 4層防御（tools 無効化）
+SDK 型定義の確認で `allowedTools: []` は「ツールを絞る」用途ではなく「プロンプト無しで
+自動許可するツール名」の意味であり空配列でも既定 read-only ツール一式にフォールバックすると
+判明したため、`tools: []`（本命・ツール allowlist を空にする）+ `disallowedTools` 明示（第2層）+
+`canUseTool` 無条件 deny（第3層・将来 SDK 版が上がってもツール解禁されない最後の砦）+
+`permissionMode: 'plan'`（第4層・万一1-3が漏れても編集系ツールは実行されない）の4層で防御。
+`strictMcpConfig: true` + `mcpServers: {}` で `tools:[]` 後に MCP がツールを再導入しうる
+唯一の経路も塞ぎ、`settingSources: []` により CLAUDE.md 等のプロジェクト設定も読み込ませない。
+
+#### 専用 WebSocket チャネル
+既存の `sendPromptToAgent()` を再利用すると `capability-sync.ts` の prelaunch チョークポイント
+（最大3分ブロック）や `sessionInfoMap` 登録待ち（15秒）等で構造的に 180 秒のタイムアウト予算を
+超過し、さらに `handleAiPrompt` 内の `archiveWorkState()`（pending work state の消費・削除）・
+`loadStorageContext()`（結果をプロンプトに連結し「完全置換」契約を破壊）・`saveConversation`・
+`clearOutputDir`（`.devrelay-output/` を rm -rf）といった対話セッション向けの副作用を
+個別にガードする必要があり取りこぼしのリスクが高いため、`server:raw:prompt`/`agent:raw:result`
+専用の WebSocket メッセージペアを新設した。`handleAiPrompt`/`sendPromptToAgent`/`handleAiOutput`
+は 1 行も変更していない（`git diff` で該当関数の行範囲に差分が無いことを確認済み）。
+
+#### 流量制御（インメモリ、D3）
+同時実行数の相互排他は DB の `count()`→`create()` では TOCTOU で数 ms 差の2リクエストが
+両方通ってしまうため、Node 単一スレッドの Map test-and-set によるインメモリガード
+（`raw-completion-guard.ts`）で正確に担保する。`seatKey` は DB カラムに追加せず
+（人手の `ALTER` 手順を回避）、`${userId}:${seatKey}` で名前空間化し他テナントが席名を
+推測して枠を占有できないようにした。判定順序を固定: stale reap → busy(`targetBusy`) →
+seat レート制限 → user レート制限 → 取得。スロットは `finally` と HTTP クライアント切断
+（`request.raw.on('close')`）の両方で解放する。`Session`/`Message` 行は usage 記録・
+スモークテスト検証のため新ルートが自前で作成する（`agentScopeId` は付与しない）。
+
+#### スレッド一覧からの除外
+`raw_` プレフィックスを `thread-scope.ts` の `EPHEMERAL_SESSION_ID_PREFIXES` に追加。
+入れないとゲームのコール数（試合あたり最大150）だけ「(無題)」スレッドが増殖する
+（#385投稿前の調査で判明していた事象の再来を未然に防止）。3 OS 全ての `session-scope.ts` にも
+`raw` 種別を追加した（本経路は専用 WS チャネルのため `handleAiPrompt` を通らず到達しないが、
+将来の変更で迷い込んだ場合に `saveConversation`/`clearOutputDir`/`archiveWorkState` を止める
+最後の砦として保険的に追加）。
+
+#### D4: Windows Electron agent は Phase 1 対象外
+`agents/windows/src/services/ai-runner.ts` は `@anthropic-ai/claude-agent-sdk` を import しておらず
+`claude` CLI を直接 spawn する実装のため、system prompt 完全置換を原理的に実装できない。
+`agents/windows/src/services/connection.ts` の capability 申告から `raw-completion` のみ
+`.filter()` で除外し、「できないのに申告してサーバーが 60 秒ハングする」事故を防止した。
+
+#### 検証
+`node --test` を4 workspace（packages/shared・apps/server・agents/linux・agents/macos）個別に
+実行しすべて green（shared 47/47・server 470/470・linux 883/883・macos 438/439+skip1）。
+並列実行時に既存の無関係な tmp ファイル競合による flake（本サイクル無変更のファイル）が
+発生したため `--test-concurrency=1` の直列実行で再確認し解消を確認した。`pnpm build` 6
+workspace green、`grep -c 'require('`（web dist）= 0（`packages/shared` を変更したため #310
+の教訓に従い必須確認）。`git diff` により `agent-manager.ts` は 62 行の純追加のみ・
+`document-api.ts` は `export` 2 語追加のみ・`handleAiOutput`/`sendPromptToAgent` の行範囲に
+差分無し・`archiveWorkState`/`loadStorageContext`/`clearOutputDir`/`saveConversation` の
+出現数が connection.ts で 11→11（linux/macos とも）不変・3 OS の `raw-completion-mode.ts` が
+byte-for-byte 同一であることを確認した。
+
+#### 未実施（人間側待ち）
+実機スモークテスト（(a) 応答が返る (b) コーディングアシスタントを名乗らず CLAUDE.md も知らない
+(c) `raw_` セッションの usage が DB に記録される (d) 同一 seatKey 同時2本→2本目 429、別 seatKey
+同時2本→両方成功）は、対象候補（Team `PixBlog Team` 内の `dangou-card`、machine
+`x220-158-18-103/uso8m`）が本サイクルの commit+push 後に `u` で自己更新するまで
+`raw-completion` capability を申告できず実行不可（構造的に届かないため 400 `aiUnavailable` に
+なる）。再現用の curl コマンド一式は devlog に記載。Codex 実装（Phase 2）も次サイクル送り。
+
+---
+
 ### Windows インストーラーの pnpm 誤検出「X pnpm が必要です」を修正 (2026-09-18)
 
 プロキシ環境の実機で `npm install -g pnpm` が成功（"added 2 packages in 24s"）した直後に

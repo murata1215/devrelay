@@ -16,6 +16,7 @@ import { organizationRoutes } from './routes/organization.js';
 import { publicApiRoutes } from './routes/public-api.js';
 import { registerDocumentApiRoutes } from './routes/document-api.js';
 import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
+import { registerRawCompletionRoutes } from './routes/raw-completion-api.js';
 import { decrypt } from './services/user-settings.js';
 import { initVapid } from './services/push-notification-service.js';
 import { initFcm } from './services/fcm-service.js';
@@ -91,6 +92,15 @@ async function main() {
       console.log(`🧹 Closed ${crossResult.count} stale cross-project session(s) (teamexec/crossquery)`);
     }
 
+    // raw-completion: 取り残された raw_ セッションを ended に（クラッシュ時の active 残骸の掃除）
+    const rawResult = await prisma.session.updateMany({
+      where: { status: 'active', id: { startsWith: 'raw_' } },
+      data: { status: 'ended' },
+    });
+    if (rawResult.count > 0) {
+      console.log(`🧹 Closed ${rawResult.count} stale raw-completion session(s)`);
+    }
+
     // 30分以上経過した pending ツール承認を timeout に
     const approvalResult = await prisma.toolApproval.updateMany({
       where: { status: 'pending', createdAt: { lt: new Date(Date.now() - 30 * 60 * 1000) } },
@@ -132,6 +142,7 @@ async function main() {
   await app.register(mcpRoutes);  // MCP エンドポイント（/mcp）— 認証は MCP 内部で処理
   registerDocumentApiRoutes(app);  // Agent 向けドキュメント検索 API（マシントークン認証）
   registerAgentDocumentApiRoutes(app);  // エージェントドキュメント CRUD API（WebUI 認証）
+  registerRawCompletionRoutes(app);  // raw-completion（ゲーム席用の素の completion API、マシントークン認証）
 
   // Agent WebSocket endpoint
   app.register(async (fastify) => {

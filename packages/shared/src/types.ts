@@ -32,10 +32,10 @@ export const PROTOCOL_VERSION = 1;
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion'];
 
 // -----------------------------------------------------------------------------
 // Capability 配布基盤（サイクルP1）
@@ -204,7 +204,8 @@ export type AgentMessage =
   | { type: 'agent:claude:auth:status'; payload: ClaudeAuthStatusPayload }
   | { type: 'agent:claude:login:url'; payload: ClaudeLoginUrlPayload }
   | { type: 'agent:claude:login:result'; payload: ClaudeLoginResultPayload }
-  | { type: 'agent:capability:sync'; payload: AgentCapabilitySyncPayload };
+  | { type: 'agent:capability:sync'; payload: AgentCapabilitySyncPayload }
+  | { type: 'agent:raw:result'; payload: RawResultPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -384,7 +385,8 @@ export type ServerToAgentMessage =
   | { type: 'server:claude:login:start'; payload: ClaudeLoginStartPayload }
   | { type: 'server:claude:login:code'; payload: ClaudeLoginCodePayload }
   | { type: 'server:claude:login:cancel'; payload: ClaudeLoginCancelPayload }
-  | { type: 'server:capability:sync'; payload: { trigger?: 'idle' | 'manual' } };
+  | { type: 'server:capability:sync'; payload: { trigger?: 'idle' | 'manual' } }
+  | { type: 'server:raw:prompt'; payload: RawPromptPayload };
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;
@@ -739,6 +741,69 @@ export interface AiPromptPayload {
   resumeSessionId?: string;
   /** core#336: correlation ID。ConversationExecPayload.turnId の JSDoc を参照 */
   turnId?: string;
+}
+
+// -----------------------------------------------------------------------------
+// raw-completion（ゲーム席用の素の completion API、`POST /api/agent/raw-completion`）
+//
+// `AiPromptPayload`（対話セッション用）とは完全に分離した専用チャネル。既存の
+// `handleAiPrompt` / `sendPromptToAgent` / `handleAiOutput` を一切経由しない構造的バイパスで、
+// `archiveWorkState()` / `loadStorageContext()` / `saveConversation` / `clearOutputDir` といった
+// 対話セッション向けの副作用（対象プロジェクトの pending work state 消費・system prompt 完全置換
+// 契約の汚染など）を踏まない設計にするための独立したメッセージ型（実装プラン D2 参照）。
+// `AiPromptPayload` はこの型のために一切変更していない（不正 payload で対話セッションを
+// system prompt 置換モードへ倒せないようにするため）。
+// -----------------------------------------------------------------------------
+
+/**
+ * raw-completion の Server → Agent プロンプト送信ペイロード。
+ * `sessionId` は `raw_` プレフィックス固定（`apps/server/src/services/raw-completion-guard.ts` の
+ * `buildRawSessionId` で生成）。
+ */
+export interface RawPromptPayload {
+  /** この送受信ペアを対応付ける correlation ID（Agent は解釈せず `agent:raw:result` でそのままエコーバックする） */
+  requestId: string;
+  /** raw-completion セッション ID（`raw_` プレフィックス固定） */
+  sessionId: string;
+  /** 対象プロジェクトの絶対パス（SDK query() の cwd） */
+  projectPath: string;
+  /** system prompt（完全置換。DevRelay の前置き・Agreement 文言・プランモード指示を一切付与しない） */
+  system: string;
+  /** user prompt（完全置換。composeRawPrompt() は恒等関数のため実質そのまま SDK へ渡る） */
+  prompt: string;
+  /** Claude SDK モデル指定。省略時は SDK デフォルト */
+  model?: string;
+  /**
+   * Agent 側のタイムアウト予算（ミリ秒）。Server 側の `timeoutS` より短く設定し
+   * （実装プランの「timeout の歪み」対策、目安 90%）、Agent の `finally` 応答が
+   * Server 側 timeout より先に確定するようにする。
+   */
+  timeoutMs: number;
+}
+
+/**
+ * raw-completion の Agent → Server 結果報告ペイロード。`RawPromptPayload` の対。
+ */
+export interface RawResultPayload {
+  /** `RawPromptPayload.requestId` のエコーバック */
+  requestId: string;
+  /** raw-completion セッション ID（`RawPromptPayload.sessionId` のエコーバック） */
+  sessionId: string;
+  /** true: 正常応答（`output` に本文）。false: SDK 実行自体が失敗（`errorMessage` を参照） */
+  ok: boolean;
+  /** AI の応答本文（`ok: true` 時のみ） */
+  output?: string;
+  /** 使用量データ（DB の `Message.usageData` に保存） */
+  usageData?: AiUsageData;
+  /**
+   * 終了理由。'success' | 'max_turns' | 'error' | 'aborted' | 'timeout' 等。
+   * 無言の切り詰めを検知可能にするため必ず設定する（#325 静かなフォールバック禁止の踏襲）。
+   */
+  stopReason?: string;
+  /** `ok: false` 時のエラーメッセージ */
+  errorMessage?: string;
+  /** SDK 実測の実行時間（ミリ秒）。ルート側で計測する `latencyMs`（クライアント体感値）とは別軸 */
+  agentDurationMs?: number;
 }
 
 // -----------------------------------------------------------------------------

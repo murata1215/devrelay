@@ -15,10 +15,13 @@
  * - `teamexec_` / `crossquery_`: MCP・チャットコマンド経由のクロスプロジェクト実行（HTTP リクエスト寿命）
  * - `askdesc_`: `POST /api/projects/:id/description` の内部ジョブ（api.ts）。
  *   user メッセージを持たず assistant 1 件だけの「タイトル無しスレッド」になるため一覧に出さない。
+ * - `raw_`: raw-completion（ゲーム席用の素の completion API、`POST /api/agent/raw-completion`）。
+ *   Session 行は usage 記録のために作るが（実装プラン D3）、スレッド一覧に出すと「(無題)」が
+ *   ゲームのコール数（試合あたり最大150）だけ増殖するため除外する。
  * ここを増やす前に `isEphemeralSessionId` の全呼び出し元を確認すること
  * （現在: api.ts のスレッド一覧 where と session-manager.ts の touchSessionActivity の2箇所のみ）。
  */
-const EPHEMERAL_SESSION_ID_PREFIXES = ['teamexec_', 'crossquery_', 'askdesc_'] as const;
+const EPHEMERAL_SESSION_ID_PREFIXES = ['teamexec_', 'crossquery_', 'askdesc_', 'raw_'] as const;
 
 /**
  * セッション ID が teamexec / crossquery / askdesc 等の一時セッション（スレッド一覧に出すべきでない）かどうかを判定する。
