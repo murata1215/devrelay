@@ -2,8 +2,9 @@
 
 サイクル SDK-1（`doc/sdk-0.3-migration-findings.md` の後継実装）で導入した、
 `@anthropic-ai/claude-agent-sdk` 同梱の Claude Code 実行ファイル検出器の仕様と運用手順。
-**本ドキュメントが対象とするのはコミット①②③（検出器の両対応化）のみ。
-依存バージョン自体を 0.3.x へ上げるコミット④は本ドキュメント公開時点でまだ実施していない。**
+コミット①②③（検出器の両対応化）に加え、サイクル SDK-2 でコミット④（依存バージョン自体を
+`0.3.278` へ引き上げ）を実施済み。以降の記述は④適用後を前提とする
+（④以前の 0.2.80 環境の挙動を知りたい場合は commit `d87d003` 以前の本ファイルを参照）。
 
 ## 1. 検出仕様
 
@@ -109,7 +110,7 @@ T8 で全パターン検証済み）:
 ## 2. `agent.log` の 1 行の読み方
 
 Agent 起動時に **1 回だけ**（コマンドごとには出さない）、以下の固定書式で出力する
-（grep キー: `[SDK] claude-exec`）。
+（grep キーは ASCII の `claude-exec` を使うこと。理由は後述「絵文字 grep キーを避ける理由」）。
 
 ```
 🩺 [SDK] claude-exec sdk=<version|unknown> cc=<claudeCodeVersion|unknown> form=<clijs|native|none|unresolved> decision=<sdk-default|system-claude|none> platform=<platform>-<arch> preferMusl=<true|false> probe=<ok|legacy> path=<実際に使われる実行ファイル|->
@@ -120,34 +121,79 @@ Agent 起動時に **1 回だけ**（コマンドごとには出さない）、�
 - ログレベル: `decision=sdk-default` → `console.log`、`decision=system-claude` → `console.warn`、
   `decision=none` → `console.error`
 
-### OS 別 grep コマンド
+### 出力先は installType ごとに異なる（最重要の訂正）
+
+**旧版の本ドキュメントは全 OS で `~/.devrelay/logs/agent.log` を見れば良いかのように書いていたが誤り。**
+Agent の起動方式（installType）によって標準出力の行き先が異なり、特に本番機の既定である
+systemd 起動では `agent.log` が空のままのことがある。
+
+| installType | 起動方式 | 標準出力の行き先 | 該当機体の例 |
+|---|---|---|---|
+| systemd（Linux、`install-agent.sh` 既定） | `systemctl --user start devrelay-agent` | **journald**（unit に `StandardOutput=` 指定が無く既定でジャーナルへ）。`~/.devrelay/logs/agent.log` は空のことがある | ubuntu-prod/uso8m |
+| nohup + crontab `@reboot`（Linux、手動/レガシー） | `nohup node ... > agent.log 2>&1 &` | `~/.devrelay/logs/agent.log` | この開発機（`/opt/devrelay` の Agent、`CLAUDE.md` 参照） |
+| launchd（macOS、`install-agent.sh` 既定） | plist の `StandardOutPath`/`StandardErrorPath` を明示指定してロード | `~/.devrelay/logs/agent.log` | tisanoMacBook-Air |
+| Windows タスクスケジューラ ONLOGON（`install-agent.ps1` 既定） | `start-agent.cmd` が `node ... >> agent.log 2>&1` | `%APPDATA%\devrelay\logs\agent.log`（`$env:USERPROFILE\.devrelay\...` **ではない**。`config.ts:57-59` の `CONFIG_DIR` 定義を参照） | DESKTOP-1E6SDOQ |
+
+**systemd 機で `agent.log` を確認して「出力が無い＝起動していない」と誤診断しないこと。**
+まず installType（`config.yaml` の `installType` フィールド、または起動方式を人間に確認）を特定し、
+対応する確認コマンドを使うこと。
+
+### installType 別 grep コマンド
 
 ```bash
-# Linux / macOS
-grep -F "[SDK] claude-exec" ~/.devrelay/logs/agent.log | tail -n 3
+# systemd（uso8m を含む本番機の既定）
+journalctl --user -u devrelay-agent --no-pager | grep claude-exec | tail -n 3
+```
+
+```bash
+# nohup / launchd（agent.log に標準出力する構成）
+grep claude-exec ~/.devrelay/logs/agent.log | tail -n 3
 ```
 
 ```powershell
-# Windows（-Encoding UTF8 必須。省略すると文字化けする、#354 D2 と同じ理由）
-Select-String -Path $env:USERPROFILE\.devrelay\logs\agent.log -SimpleMatch "[SDK] claude-exec" -Encoding UTF8 | Select-Object -Last 3
+# Windows（-Encoding UTF8 必須。省略すると絵文字部分が文字化けし grep パターンと一致しなくなることがある）
+Select-String -Path "$env:APPDATA\devrelay\logs\agent.log" -SimpleMatch "claude-exec" -Encoding UTF8 | Select-Object -Last 3
 ```
+
+### 絵文字 grep キーを避ける理由（mac 実機での実例）
+
+サイクル SDK-1（②実装検証、macOS/tisanoMacBook-Air、launchd 経由）で、`agent.log` 上の `🩺` 絵文字が
+`<0001fa7a>`（Unicode コードポイントのエスケープ表記）としてそのまま記録される事例を確認した。
+ターミナルのロケール/フォント設定次第で絵文字の記録され方が変わるため、grep パターンに絵文字を
+含めると環境依存で一致しなくなることがある。**grep キーは ASCII のみの `claude-exec` にすること**
+（`[SDK] claude-exec` を使う場合は `[`/`]` が正規表現の特殊文字なので `grep -F`（固定文字列検索）で
+使うか `\[SDK\]` とエスケープすること）。
 
 ### `form` × `decision` の組み合わせと意味
 
 | form | decision | 意味 | 対応 |
 |---|---|---|---|
-| `clijs` | `sdk-default` | 0.2 系、cli.js 健全 | 正常（現行の全機体の期待値） |
-| `native` | `sdk-default` | 0.3 系、ネイティブバイナリ健全 | 正常（④ 適用後の期待値） |
+| `clijs` | `sdk-default` | 0.2 系、cli.js 健全 | 正常（④ 適用前・ロールバック中の期待値） |
+| `native` | `sdk-default` | 0.3 系、ネイティブバイナリ健全 | 正常（④ 適用後＝現行の期待値） |
 | `unresolved` | `sdk-default` | SDK パッケージ自体が解決不能 | SDK 既定に委ねる。通常は SDK 側で別のエラーになるはず。`node_modules` 破損の疑い |
-| `none` | `system-claude` | 同梱実行ファイルが両方とも欠落、システム claude で代替 | 不完全インストールの疑い。`tried=` 行の specifier を確認し、`rm -rf node_modules/@anthropic-ai/claude-agent-sdk && pnpm install` |
+| `none` | `system-claude` | 同梱実行ファイルが両方とも欠落、システム claude で代替 | 不完全インストールの疑い（④ 適用後は §3.1「`u` インストール失敗時のサイレント劣化」を優先して疑うこと）。`tried=` 行の specifier を確認し、`rm -rf node_modules/@anthropic-ai/claude-agent-sdk && pnpm install` |
 | `none` | `none` | 同梱もシステム claude も無し | AI コマンドが確実に失敗する。最優先で対応 |
-| いずれか | — | `probe=legacy` が付く | 検出器自体が想定外の例外を投げた（バグ）。cli.js 判定結果へ退避しているので致命的ではないが、④ より先に直す |
+| いずれか | — | `probe=legacy` が付く | 検出器自体が想定外の例外を投げた（バグ）。cli.js 判定結果へ退避しているので致命的ではないが、直ちに調査すること |
 
-## 3. カナリア手順（②③ push 後、④ 着手前の確認フェーズ）
+### ④適用後の期待ログ行（3プラットフォーム）
+
+`sdk=0.3.278 cc=2.1.278`（同梱 `claudeCodeVersion`）は全プラットフォーム共通。
+
+| プラットフォーム | 期待する1行（要点） | 実測状況 |
+|---|---|---|
+| linux-x64 | `sdk=0.3.278 cc=2.1.278 form=native decision=sdk-default platform=linux-x64 preferMusl=false probe=ok path=.../claude-agent-sdk-linux-x64/claude` | ④実装コミットで本開発機（linux-x64）にて実測済み（`path` 解決先バイナリ 234,119,480 bytes） |
+| win32-x64 | `sdk=0.3.278 cc=2.1.278 form=native decision=sdk-default platform=win32-x64 preferMusl=false probe=ok path=...\claude-agent-sdk-win32-x64\claude.exe` | 未実測（本開発機は linux のため）。DESKTOP-1E6SDOQ 等の Windows 機で `u` 後に実測しこの行を差し替えること |
+| darwin-arm64 | `sdk=0.3.278 cc=2.1.278 form=native decision=sdk-default platform=darwin-arm64 preferMusl=false probe=ok path=.../claude-agent-sdk-darwin-arm64/claude` | 未実測（本開発機は linux のため）。tisanoMacBook-Air 等の macOS 機で `u` 後に実測しこの行を差し替えること |
+
+`preferMusl=true` になるのは musl ベース linux（Alpine 等）のみで、DevRelay の運用機体（glibc 系
+Ubuntu / Windows / macOS）では常に `false`。
+
+## 3. カナリア手順（②③ push 後、④ 着手前の確認フェーズ・実施済み）
 
 ②③は「挙動同一のリファクタ＋ログ追加」であり④のような依存バンプではないため、
-push 自体にカナリア段階を設ける必要はない。ただし④ の着手条件（3 系統すべてが
-`form=clijs decision=sdk-default probe=ok` を報告すること）を確認するための手順は必要。
+push 自体にカナリア段階を設ける必要はなかった。ただし④ の着手条件（3 系統すべてが
+`form=clijs decision=sdk-default probe=ok` を報告すること）を確認するための手順を以下のとおり
+実施し、SDK-1 で全機体確認済み（本節は履歴として残す。④固有のロールアウト手順は §3.1 以降）。
 
 1. commit + push 後、**bake time（既定 120 分）以内に**、対象機（uso8m）で人間が手動 `u` を実行し
    Auto Update のゲート（bake time・sweep 間隔）を待たずに反映させる。
@@ -168,11 +214,44 @@ push 自体にカナリア段階を設ける必要はない。ただし④ の�
 | ④-4 | 全機共通 | — | `probe=legacy` が 1 件も出ていない／`decision=system-claude` に退化した機体が無い |
 | ④-5 | 全機共通 | — | ②③前後で通常チャット・plan ターン・exec 承認カードが従来どおり動く（退行が無い） |
 
-**重要（④のスコープ、本サイクルには含まない）**: ④（依存バンプ）を実施する際は、
-実際にインストールした SDK に対して `probeSdkExecutable()` を実行し、`form=none` になったら
-red になるテストを追加すること。これは「検出器が実インストールと整合しているか」を機械的に
-保証するための回帰テストで、②③の時点（0.2.80 のみが実在する環境）では書けない
-（0.3 系パッケージが実際にインストールされていないと検証できないため）。
+### 3.1 `u` インストール失敗時のサイレント劣化（④固有・最重要の注意）
+
+0.3 系のプラットフォームバイナリパッケージ（`@anthropic-ai/claude-agent-sdk-<platform>-<arch>`、
+1本あたり約223MB）は `optionalDependencies` として宣言されている。これは pnpm の仕様上、
+**ダウンロードに失敗しても `pnpm install` の終了コードは `0`（成功）のまま**になることを意味する。
+
+`connection.ts` の Linux/macOS 側 `u` 実装は `[ -f dist/index.js ]` という「ファイルの存在」しか
+見ていないゲートしか持たない（`&&`/`set -e` 無しで `; ` 連結、`decideRunningCodeStale()` は
+`u` 実行時の起動ゲートではなく、次回 `u` 押下時の事後検知）。そのため、
+
+- `pnpm install` の該当プラットフォームパッケージだけが失敗（ネットワーク不安定・容量不足等）
+- `pnpm build`・アーティファクト鮮度ゲート・再起動はすべて正常に通過
+- チャットには「✅ 更新が完了しました」と表示される
+- しかし実際には `form=none decision=system-claude`（または `none`/`none`）へサイレント劣化する
+
+という事態が起こりうる。**したがって④適用後の受け入れ条件は「`u` が成功したこと」ではなく、
+`agent.log`（または journald）で `form=native decision=sdk-default probe=ok` の 1 行を
+目視確認したことにすること。** `decision=system-claude` や `form=none` を見つけたら、
+§2 の対応表に従い `rm -rf node_modules/@anthropic-ai/claude-agent-sdk* && pnpm install` で
+手動修復し、再度ログ行を確認する。
+
+### 3.2 プロキシ配下の機体での `u`（既知の注意点）
+
+- 223MB超のプラットフォームバイナリのダウンロードが発生するため、初回反映は**低速回線・
+  プロキシ配下の機体では数分かかることがある**。
+- Agent の 5 分無応答タイムアウト（`agent-manager.ts` の `UPDATE_TIMEOUT`）は、旧 Agent プロセスが
+  「ビルド完了後」にしか kill されない設計のため、ダウンロードに時間がかかる機体では**成功時でも
+  発火しうる誤報**になる。タイムアウト表示が出ても直ちに失敗と断定せず、`u` を再実行するか
+  該当機の実際の完了ログを確認すること。
+- Windows の `u` は `spawn('wscript.exe', ...)` に `env:` を渡していないため、プロキシ設定は
+  **プロセス起動時の環境変数では渡らない**。`pnpm config get proxy` / `pnpm config get https-proxy`
+  で永続化されたプロキシ設定が入っているかを事前に確認すること（入っていなければ Windows 機での
+  `u` はダウンロード段階で失敗しやすい）。
+
+**（実施済み）** 本要求はサイクル SDK-2 のコミット④a
+（`agents/{linux,macos}/tests/sdk-executable-real.test.mjs`）で満たした。実際にインストールした
+SDK に対して `probeSdkExecutable()` を実行し、`form=none` になったら red になるテストを、
+④b（依存バンプ本体）より先に 0.2.80 環境で green にしてから着手した。
 
 ## 4. ロールバック手順
 
@@ -221,18 +300,36 @@ pgrep -u $(whoami) -af "\.devrelay.*index\.js"
 ```
 
 node プロセスが**1本だけ**であることを確認してから kill する（2本以上あれば二重起動＝無限再接続の兆候、
-`CLAUDE.md` の二重起動注意を参照）。crontab `@reboot` で再起動されるため、kill 後は自動的に新しいコードで立ち上がる。
+`CLAUDE.md` の二重起動注意を参照）。
+
+**訂正（旧版の誤記）**: 旧版の本ドキュメントは「crontab `@reboot` で再起動されるため kill 後は
+自動的に新しいコードで立ち上がる」としていたが誤り。`@reboot` は **OS 起動時にのみ**発火するcronの
+特殊タイミング指定であり、稼働中に kill しても再起動のトリガーにはならない。
+**installType ごとに kill 後の復帰手順が異なる**:
+
+- **systemd**: kill ではなく `systemctl --user restart devrelay-agent` を使うこと（kill だけだと
+  停止したままになる。cron 相当の自動復帰機構は無い）
+- **nohup + crontab `@reboot`（レガシー）**: kill 後は死んだままになる。手動で
+  `nohup node ~/.devrelay/agent/agents/linux/dist/index.js > ~/.devrelay/logs/agent.log 2>&1 &`
+  を実行するか、機体を再起動して `@reboot` を発火させる必要がある
+- **launchd（macOS）**: plist に `KeepAlive` 指定があれば launchd が自動再起動する。無ければ
+  `launchctl load` を手動で再実行する
 
 ```bash
 kill <PID>
 ```
 
-再起動後、`agent.log` で `[SDK] claude-exec` の行を確認する。
+再起動（上記のいずれかの方法）後、installType に応じた確認コマンド（§2「installType 別 grep
+コマンド」参照。systemd なら `journalctl`、それ以外なら `agent.log`）で `claude-exec` の行を確認する。
 
 #### Windows
 
+**訂正（旧版の誤記）**: Agent のチェックアウト先は `$env:USERPROFILE\.devrelay\agent` ではなく
+`install-agent.ps1` の `$AgentDir = Join-Path $ConfigDir "agent"`（`$ConfigDir = $env:APPDATA\devrelay`）
+が示すとおり **`%APPDATA%\devrelay\agent`**。
+
 ```powershell
-cd $env:USERPROFILE\.devrelay\agent
+cd $env:APPDATA\devrelay\agent
 git log --oneline -5
 ```
 
@@ -256,11 +353,12 @@ Stop-Process -Id <PID>
 ```
 
 ```powershell
-Select-String -Path $env:USERPROFILE\.devrelay\logs\agent.log -SimpleMatch "[SDK] claude-exec" -Encoding UTF8 | Select-Object -Last 3
+Select-String -Path "$env:APPDATA\devrelay\logs\agent.log" -SimpleMatch "claude-exec" -Encoding UTF8 | Select-Object -Last 3
 ```
 
 **`-Encoding UTF8` は必須**（#354 D2。省略すると絵文字・日本語部分が文字化けし、
-grep パターンとの一致判定を誤らせる可能性がある）。
+grep パターンとの一致判定を誤らせる可能性がある）。grep キーは ASCII の `claude-exec`
+を使うこと（§2「絵文字 grep キーを避ける理由」参照）。
 
 ## 5. 落とし穴メモ
 
@@ -276,3 +374,11 @@ grep パターンとの一致判定を誤らせる可能性がある）。
   ファイルを直接読む必要がある（`sdk-executable-locator.ts` の `readPackageJson` 依存を参照）。
 - **cli.js 優先の順序を変えてはいけない**。0.2 系のみの環境で判定結果を完全に同一に保つための
   構造的保証がこの順序に依存している（`sdk-executable-locator.test.mjs` T3 で固定）。
+- **`@anthropic-ai/claude-agent-sdk@0.3.278` は peer dependency 警告を出す**（④実測、
+  `unmet peer @anthropic-ai/sdk@>=0.93.0: found 0.78.0`）。`.npmrc` に
+  `strict-peer-dependencies` が設定されていないため `pnpm install` は失敗せず警告のみで、
+  `tsconfig.json` の `skipLibCheck: true` により型チェックも通る。query() のスモーク実行
+  （既定モデル/`claude-fable-5-1` とも成功）で実行時にも無害であることを確認済みだが、
+  将来 `@modelcontextprotocol/sdk` 側を更新する際はこの警告が消えるかどうかを再確認すること。
+- **`u` のインストール失敗はサイレント劣化する**（④固有、詳細は §3.1）。プラットフォームバイナリが
+  `optionalDependencies` のため、ダウンロード失敗でも `pnpm install` は exit 0 になる。

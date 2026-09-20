@@ -6,6 +6,58 @@
 
 ## 実装済み機能
 
+### サイクル SDK-2 — `@anthropic-ai/claude-agent-sdk` を 0.3.278 へ引き上げる（コミット④） (2026-09-20)
+
+SDK-1（コミット①②③）で `claude-exec` 検出器を 0.2/0.3 両対応化した上に乗る最後の1手として、
+依存バージョン本体を `0.2.80` → `0.3.278` へ固定バンプした。`claude-fable-5-1` の要求下限
+（CC >= 2.1.251、#353）は 0.3.278 の同梱 CC 2.1.278 で満たす。
+
+#### コミット④a: テスト先行（依存変更なし）
+
+新規 `agents/{linux,macos}/tests/sdk-executable-real.test.mjs`（byte-identical）。実インストール
+済み SDK に対して `probeSdkExecutable()`（実 `createRequire` + 実 `fs`）を1回だけ呼び、
+`form` が `clijs`/`native` のいずれかで `none`/`unresolved` なら red になる回帰テストを追加。
+既存のモック deps ベースの `sdk-executable-locator.test.mjs`（18件）が一度も検証していなかった
+「実際にインストールされた SDK に対する検出」の穴を埋めた。0.2.80 上で green を確認してから
+依存をバンプする手順にした。
+
+#### コミット④b: 依存バンプ本体
+
+`package.json`（devDependencies）/`agents/linux/package.json`/`agents/macos/package.json` の
+3箇所をキャレット無しの完全固定 `"0.3.278"` に変更し `pnpm install` で `pnpm-lock.yaml` を更新。
+新規 `agents/{linux,macos}/tests/sdk-version.test.mjs`（byte-identical）で、同梱 CC が要求下限
+以上であることを成分ごとの数値比較（文字列比較の罠 `'2.1.80' > '2.1.251'` の回帰防止込み）で
+検証し、SDK の具体的なバージョン番号はハードコードしていない（将来の再バンプで二重修正が
+不要）。**ソース変更はゼロ**（SDK-1 の検出器設計がバンプを吸収し、`tsc --strict` も無変更で通過、
+プランで用意していた型修正コミットは不要だった）。
+
+直接確認（実測）: 検出器が `form=native decision=sdk-default probe=ok`（linux-x64、バイナリ
+234,119,480 バイト）、lockfile に 8 プラットフォームすべて（`win32-x64`/`darwin-arm64` 含む）が
+`os:`/`cpu:`（linux は `libc:`）付きで存在し 0.2 系残骸ゼロ、`@img/sharp` 57件→0件。peer
+dependency 警告（`@anthropic-ai/sdk >=0.93.0` 未達、実体 `0.78.0`）は `skipLibCheck` と
+`pnpm build` 全 green・`query()` 2回成功（既定モデル + `claude-fable-5-1`）により実行時無害と
+確認。raw-completion の auto-memory 3層防御が 0.3.278 上でも有効であることを sentinel 方式で
+再確認（使用後に痕跡は削除済み）。
+
+テスト: shared 47/47・server 496/496・`agents/linux` 924→**930**(+6)・`agents/macos`
+487+skip1→**493**+skip1(+6)、すべて green。`pnpm build` 6 workspace green。`git diff --stat --
+apps/ packages/ prisma/` 空（pm2 restart 不要）。`git diff -- agents/linux/src agents/macos/src`
+空（SDK-1 の設計が効いた証明）。
+
+#### コミット④c: ドキュメント
+
+`doc/sdk-executable-runbook.md` を改訂。installType 別ログ出力先の整理、grep キーを絵文字から
+ASCII `claude-exec` へ統一、`u` の `optionalDependencies` 起因のサイレント劣化
+（`form=none` への退化を `u` の成功表示だけでは検知できない）への対応方針、プロキシ配下の
+注意点、`@reboot` 自動復帰の誤記訂正、Windows パス誤記（`$env:USERPROFILE` →
+`$env:APPDATA`）の訂正、④適用後の期待ログ行（3プラットフォーム）を追加。
+
+`apps/server` 無変更のため **pm2 restart 不要**。DB マイグレーション不要。反映は各機の `u`
+または Auto Update（bake time 120分 + sweep 30分、基準はリモート最新コミットの author date）。
+詳細は devlog `doc/devlog/2026-09-20_161021.md` 参照。
+
+---
+
 ### サイクル SDK-1 — claude 実行ファイル検出器の 0.2 / 0.3 両対応化（コミット①②③） (2026-09-20)
 
 `doc/sdk-0.3-migration-findings.md`（サイクル SDK-0）で、0.2.80 → 0.3.278 移行時に壊れる箇所が
