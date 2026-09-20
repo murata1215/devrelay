@@ -6,6 +6,75 @@
 
 ## 実装済み機能
 
+### サイクル SDK-1 — claude 実行ファイル検出器の 0.2 / 0.3 両対応化（コミット①②③） (2026-09-20)
+
+`doc/sdk-0.3-migration-findings.md`（サイクル SDK-0）で、0.2.80 → 0.3.278 移行時に壊れる箇所が
+`getClaudeExecutableFallback()` の判定ロジック1箇所だけと特定されたのを受け、検出器を
+0.2 系（`cli.js`）/ 0.3 系（プラットフォーム別ネイティブバイナリ）の両対応にした。
+**依存バージョン自体を 0.3.x へ上げるコミット④は本サイクルに含まない**（`package.json` /
+`pnpm-lock.yaml` / `node_modules` の変更はゼロ）。
+
+#### コミット①: `agents/macos` への `claude-path` / `claude-locator` 移植
+
+`agents/macos` には `claude-path.ts` / `claude-locator.ts` が無く、`ai-runner.ts` に
+`resolveSystemClaude()` のインライン実装が残っていた。linux 版との差は
+`/opt/homebrew/bin/claude` 候補の有無のみだったため、`agents/linux/src/services/claude-locator.ts`
+の `claudeFallbackCandidates()` に `darwin` 専用分岐（`/opt/homebrew/bin/claude` を
+`/usr/local/bin` の前に挿入、macOS 現行の順序を厳密に保存）を追加し、
+`agents/macos/src/services/{claude-locator,claude-path}.ts`（linux と byte-identical）を新規作成。
+`ai-runner.ts` のインライン実装を `import { resolveSystemClaude } from './claude-path.js'` に
+置換し `export { resolveSystemClaude }` で再エクスポート（呼び出し元は無変更）。
+
+#### コミット②: 検出器の 0.2 / 0.3 両対応化
+
+新規 `agents/{linux,macos}/src/services/sdk-executable-locator.ts`（外部 import ゼロの純関数群、
+byte-identical）で、候補集合を「0.2 系 `cli.js`」∪「0.3 系ネイティブバイナリ」にし、
+バージョン判定を一切しない設計にした。`cli.js` を先に見るため、0.2.80 上ではネイティブ探索の
+コードに一度も到達せず、判定結果が変更前と完全に同一になることを構造的に保証している。
+0.3 系ネイティブバイナリの解決は「解決済み `sdk.mjs` を起点にした `createRequire`」を使用
+（findings 訂正3: pnpm はプラットフォームパッケージを SDK 自身の private `node_modules` にしか
+リンクしないため、Agent 側モジュール起点では健全なインストールでも必ず `MODULE_NOT_FOUND` になる）。
+ネイティブバイナリの specifier 組み立て規則は、0.3.278 の `sdk.mjs` の内部関数（難読化後の名前
+`tW()`/`Bze()`）を逆コンパイルして確定した（抽出元・抽出方法は `doc/sdk-executable-runbook.md` に記載）。
+検出器内の想定外の例外は `onWarn()` で警告した上で `cli.js` 判定結果へ legacy フォールバックし、
+検出器のバグで全 AI コマンドが止まることを防ぐ。
+
+新規 `agents/{linux,macos}/src/services/sdk-executable.ts`（I/O 薄皮）が
+`getClaudeExecutableFallback()` / `logClaudeExecutableStatus()` の実体を持ち、
+`ai-runner.ts` からは re-export のみに変更（呼び出し元 `index.ts` / `claude-login.ts` は無変更）。
+Agent 起動時に 1 回だけ、固定書式のログ行（grep キー `[SDK] claude-exec`）を `agent.log` に出力する:
+
+```
+🩺 [SDK] claude-exec sdk=<version> cc=<claudeCodeVersion> form=<clijs|native|none|unresolved> decision=<sdk-default|system-claude|none> platform=<platform>-<arch> preferMusl=<true|false> probe=<ok|legacy> path=<path>
+```
+
+新規テスト `sdk-executable-locator.test.mjs`（linux/macos byte-identical、T1〜T10）で、
+0.2 系のみ・0.3 系のみ・両方あり（cli.js 優先）・どちらも無し（システム claude 有無）・
+実ディレクトリ木での pnpm 配置回帰・想定外例外の legacy フォールバック・SDK エントリ解決失敗・
+specifier 候補順・musl 優先判定・ログ書式固定を検証した。
+
+直接確認: ビルド後の `sdk-executable.js` を実行し、`getClaudeExecutableFallback()` が
+`null`（＝変更前と完全に同一の判定）、`logClaudeExecutableStatus()` が
+`sdk=0.2.80 cc=2.1.80 form=clijs decision=sdk-default probe=ok` を含む行を出力することを確認した。
+
+テスト: shared 47/47・server 496/496・`agents/linux` 924/924（+30、うち 18 は新規
+`sdk-executable-locator.test.mjs`）・`agents/macos` 487/488+skip1（+18）・web 512/512、
+すべて green。`pnpm build` 6 workspace green。`sdk-executable-locator.ts` /
+`sdk-executable.ts` / それぞれのテストファイルの linux/macos 間 `diff` は無出力
+（byte-identical を確認済み）。`git diff --stat -- apps/ packages/ prisma/ agents/windows/
+package.json pnpm-lock.yaml` は空（スコープ逸脱なし）。
+
+#### コミット③: ドキュメント
+
+新規 `doc/sdk-executable-runbook.md`（検出仕様、`agent.log` 1 行の読み方、`form`×`decision`
+組み合わせ表、カナリア手順、ロールバック手順、落とし穴メモ）。
+
+`apps/server` 無変更のため **`pm2 restart devrelay-server` は不要**。DB マイグレーションも不要。
+反映は commit + push 後、各機の `u`（または Auto Update、bake time 120 分 + sweep 30 分）のみ。
+④（依存バンプ）は本サイクルに含まない。詳細は devlog `doc/devlog/2026-09-20_124356.md` 参照。
+
+---
+
 ### raw-completion Phase 1.3 — SDK 同梱 CLI の更新 ＋ auto-memory 遮断（Commit A のみ出荷） (2026-09-20)
 
 Phase 1.2 のスモークで判明した2件（(e) `claude-fable-5-1` が失敗する／(b) auto-memory 経由で
