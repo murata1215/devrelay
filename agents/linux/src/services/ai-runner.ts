@@ -26,6 +26,7 @@ import { resolveSystemClaude } from './claude-path.js';
 import { getClaudeExecutableFallback, logClaudeExecutableStatus } from './sdk-executable.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
+import { resolveBackgroundTaskConfig, createBackgroundTaskState, observeBackgroundTaskEvent, decideResultDeferral } from './sdk-background-tasks.js';
 import { classifyTerminalStartupFailure } from './terminal-session-id.js';
 // サイクルP1: Capability 配布基盤の prelaunch 入口（provider 判定は共通層側の表で行う）
 import { reconcileForRunner } from './capability-sync.js';
@@ -1254,9 +1255,38 @@ async function sendPromptToAiSdk(
     }
   };
 
+  // bg-task: バックグラウンド Agent 稼働中／resume 直後の空 result を「終端」と誤認しないための状態。
+  // 途中 result を延期している間は SDK からの無音をアイドルタイマーで監視し、長時間何も来なければ
+  // 手元の出力で完了扱いにして abort する（abort は catch 側で bgIdleTimedOut を見て処理する）。
+  const bgTaskConfig = resolveBackgroundTaskConfig(process.env);
+  const bgTaskState = createBackgroundTaskState();
+  let bgIdleTimer: NodeJS.Timeout | undefined;
+  let bgIdleTimedOut = false;
+  const clearBgIdleTimer = (): void => {
+    if (bgIdleTimer) {
+      clearTimeout(bgIdleTimer);
+      bgIdleTimer = undefined;
+    }
+  };
+  const armBgIdleTimer = (): void => {
+    clearBgIdleTimer();
+    bgIdleTimer = setTimeout(() => {
+      bgIdleTimer = undefined;
+      bgIdleTimedOut = true;
+      console.log(`[claude/sdk] ⏰ background-task idle timeout (${bgTaskConfig.idleTimeoutMs}ms, pending=[${Array.from(bgTaskState.pending).join(',')}]) → finalizing with current output`);
+      sdkAbortController.abort();
+    }, bgTaskConfig.idleTimeoutMs);
+    bgIdleTimer.unref?.();
+  };
+
   try {
     for await (const message of query({ prompt, options: sdkOptions })) {
       const m = message as any;
+
+      // bg-task: バックグラウンドタスクの生死を追跡する（task_started / background_tasks_changed /
+      // task_notification）。途中 result を延期中なら、何かメッセージが届くたびにアイドルタイマーを延長する。
+      observeBackgroundTaskEvent(bgTaskState, m);
+      if (bgIdleTimer) armBgIdleTimer();
 
       // #355/#366: 実行時間上限チェック（既定120分、サーバー側150分ハードタイムアウトより先に発火させる）
       const loopGuardWallClock = checkWallClock(loopGuardState, Date.now(), loopGuardConfig);
@@ -1434,6 +1464,23 @@ async function sendPromptToAiSdk(
           console.log(`[claude/sdk] ⚠️ SDK result subtype=${String(m.subtype)} (maxTurns=${sdkMaxTurns}, turns=${m.num_turns ?? 'unknown'})`);
         }
 
+        // bg-task: この result が「途中 result」なら終端扱いせず読み続ける。
+        // (a) バックグラウンド Agent が生きている（モデルが完了待ちで end_turn した result_index=0）
+        // (b) resume 直後に Claude Code が孤児タスク通知を合成して出す空 result（num_turns=0・本文なし）
+        // どちらも読み続ければ後続の result に本物の応答が来る（sdk-background-tasks.ts 冒頭参照）。
+        // 延期中の無音はアイドルタイマーで打ち切る。
+        const deferral = decideResultDeferral(
+          bgTaskState,
+          { isError: !!m.is_error, numTurns: m.num_turns, resultText: typeof m.result === 'string' ? m.result : undefined, fullOutputLength: fullOutput.length },
+          bgTaskConfig
+        );
+        if (deferral.defer) {
+          console.log(`[claude/sdk] ⏳ Intermediate result deferred (reason=${deferral.reason}, result_index=${m.result_index ?? 'n/a'}, pending=[${deferral.pendingTaskIds.join(',')}], deferrals=${bgTaskState.deferrals}/${bgTaskConfig.maxDeferrals})`);
+          armBgIdleTimer();
+          continue;
+        }
+        clearBgIdleTimer();
+
         // resume 失敗検出（#377: max_turns は resume 失敗ではないため除外する）
         if (m.is_error && options.resumeSessionId && stopReason !== 'max_turns') {
           console.log(`[claude/sdk] ⚠️ Result is error with --resume, flagging for retry`);
@@ -1480,6 +1527,20 @@ async function sendPromptToAiSdk(
       console.log(`[claude/sdk] 🛑 loop-guard abort() caught (${err?.name ?? err?.message ?? 'unknown'}), returning discarded result without retry`);
       return result;
     }
+    // bg-task: アイドルタイムアウトによる意図的な abort()。手元にある出力で完了扱いにする
+    // （resume 失敗判定より前に置く。AbortError を resume 失敗と誤認して再送させないため）。
+    if (bgIdleTimedOut) {
+      console.log(`[claude/sdk] ⏰ background-task idle abort() caught (${err?.name ?? err?.message ?? 'unknown'}), sending completion with ${fullOutput.length} chars`);
+      await finalizeAutoCompactRotation();
+      if (options.rawMode) result.rawOutput = fullOutput;
+      if (fullOutput.length === 0) {
+        onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId, 'success');
+      } else {
+        onOutput('', true, result.usageData, result.extractedSessionId, 'success');
+      }
+      completionSent = true;
+      return result;
+    }
     console.error(`[claude/sdk] Error:`, err.message);
 
     // resume 失敗のエラーを検出
@@ -1498,6 +1559,7 @@ async function sendPromptToAiSdk(
     }
     return result;
   } finally {
+    clearBgIdleTimer();
     // #355: このセッションの abort ハンドルをレジストリから除去する。
     // 同一性ガード（===）で後続ターンの新しい controller を誤って消さないようにする。
     if (activeSdkAborts.get(sessionId) === sdkAbortController) {

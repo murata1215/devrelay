@@ -6,6 +6,30 @@
 
 ## 実装済み機能
 
+### bg-task — バックグラウンド Agent 起動時の打ち切りと resume 時の `(No response from AI)` を根治 (2026-09-20)
+
+Claude Code 2.1.278 / SDK 0.3.278（stream-json 入力モード）では、モデルがバックグラウンド Agent
+を起動して「完了を待っています」で `end_turn` すると SDK はその時点で `result`（`result_index: 0`）
+を出す。`agents/{linux,macos}/src/services/ai-runner.ts` はこれを終端とみなして return していたため
+SDK プロセスが終了しサブエージェントは未完のまま殺されていた。さらにその状態で `--resume` すると
+Claude Code は孤児タスクの `<task-notification status=stopped>` を合成し、モデルを呼ばずに
+`result{num_turns:0, result:''}` を先に出すため、次の発話が `(No response from AI)` になっていた
+（2026-09-20 21:59〜22:16、session `cmu9tp9lc00jnhvp1jofjggc8` で発生、scratchpad で再現）。
+
+新規 `sdk-background-tasks.ts`（外部 import ゼロの純関数、linux/macos byte-identical）で
+`task_started` / `background_tasks_changed`（REPLACE、ambient 除外）/ `task_notification` から
+生きているバックグラウンドタスクを追跡し、`decideResultDeferral()` で result を終端扱いしてよいか
+判定する: (1) 生きているタスクがあれば延期、(2) `num_turns===0` かつ本文なしの空 result は
+1 ターン 1 回だけ延期、(3) `is_error` と延期回数上限（既定 20、`DEVRELAY_SDK_BG_TASK_MAX_DEFERRALS`）
+到達時は延期しない。`ai-runner.ts` は延期時に `⏳ Intermediate result deferred` を出して読み続け、
+無音が既定 10 分（`DEVRELAY_SDK_BG_TASK_IDLE_MS`）続いたら手元の出力で完了扱いにして abort する
+（catch 先頭で処理、resume 失敗とは誤認しない）。
+
+単体テスト `sdk-background-tasks.test.mjs`（12 件）新規、agents/linux 963・macos 527+skip1 green、
+`pnpm -r build` green。e2e（`sendPromptToAi()` 直叩き）で「Agent 起動 → 延期 → 本物の応答」と
+「孤児セッション resume → 空 result 延期 → 本物の応答」の両方を確認。サーバー無変更のため
+pm2 restart 不要。詳細: `doc/devlog/2026-09-20_224621.md`。
+
 ### raw-completion Phase 1.4 — model 欄の誤判定と環境情報の混入を是正 (2026-09-20)
 
 SDK 0.3.278 上の実機確認で判明した2件のバグを根治した。
