@@ -40,6 +40,7 @@ import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { ensureRawCwd } from './raw-cwd.js';
+import { runRawCodex } from './raw-codex-runner.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId, loadSessionMeta } from './session-store.js';
 import { savePlanFile, loadLatestPlanFile } from './plan-file-store.js';
 import { decideResume } from './resume-priority.js';
@@ -622,8 +623,17 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
  * SDK が自動注入する `type:"environment"` アタッチメント（cwd・OS・シェル・日付）に
  * プロジェクトパス・ユーザー名・プロジェクト名が載る事故を防ぐため（`payload.projectPath` は
  * 既存経路の cwd 決定ロジックには一切影響しない。raw 経路内でのみ未使用のまま残す）。
+ *
+ * Phase 2: `payload.ai === 'codex'` は `handleRawPromptCodex()`（`raw-codex-mode.ts`/
+ * `raw-codex-runner.ts` 経由で `codex exec` を実行）へ分岐する。以下の Claude SDK 経路
+ * （`sendPromptToAi(...,'claude',...)`）は `payload.ai` が未指定または `'claude'` のときのみ実行され、
+ * Phase 2 で 1 行も変更していない。
  */
 async function handleRawPrompt(payload: RawPromptPayload) {
+  if (payload.ai === 'codex') {
+    return handleRawPromptCodex(payload);
+  }
+
   const { requestId, sessionId, system, prompt, model, timeoutMs } = payload;
   if (!currentMachineId || !currentConfig) return;
 
@@ -695,6 +705,97 @@ async function handleRawPrompt(payload: RawPromptPayload) {
       stopReason: resolved.stopReason,
       errorMessage: resolved.errorMessage,
       deniedTools: resolved.deniedTools,
+      agentDurationMs: Date.now() - startedAt,
+    });
+  } catch (err) {
+    send({
+      ok: false,
+      stopReason: 'error',
+      errorMessage: err instanceof Error ? err.message : String(err),
+      deniedTools: [],
+      agentDurationMs: Date.now() - startedAt,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+/**
+ * raw-completion Phase 2: `payload.ai === 'codex'` 用のプロンプト受信ハンドラ（`handleRawPrompt()` から
+ * 分岐）。`sessionInfoMap`/`conversation-store`/`.devrelay-output` 等の対話セッション向け永続状態は
+ * 一切読み書きしない点は Claude 経路と同じ。
+ *
+ * Claude 経路との違い:
+ *   - system prompt の「完全置換」相当の手段が Codex に無いため、`raw-codex-mode.ts` の
+ *     `buildRawCodexArgs()` が `-c developer_instructions=` へ system を渡す（ファイル冒頭 JSDoc 参照）
+ *   - ツールの deny は事前ブロックではなく事後検出（`sandbox_mode="read-only"` + `approval_policy="never"`
+ *     で書き込み・ネットワークは失敗するが、読み取り系シェルコマンドは cwd 内で成立しうる。
+ *     `resolveRawCodexResult()` が `item.completed` の実行系アイテムを検出したらエラーにする）
+ *   - `codex` コマンドが未設定（`currentConfig.aiTools.codex` 無し）の場合はエラー応答する
+ *     （サーバー側 `decideRawAiGate()` が capability/availableAiTools で事前に弾く設計だが、
+ *     Agent 側でも二重に防御する）
+ *
+ * cwd は Claude 経路と同じ `ensureRawCwd()`（`/tmp/seat` 等、中立ディレクトリ）を使う。
+ */
+async function handleRawPromptCodex(payload: RawPromptPayload) {
+  const { requestId, sessionId, system, prompt, model, timeoutMs } = payload;
+  if (!currentMachineId || !currentConfig) return;
+
+  let sent = false;
+  const send = (result: Omit<RawResultPayload, 'requestId' | 'sessionId'>) => {
+    if (sent) return;
+    sent = true;
+    sendMessage({
+      type: 'agent:raw:result',
+      payload: { requestId, sessionId, ...result },
+    });
+  };
+
+  const codexCommand = currentConfig.aiTools.codex?.command;
+  if (!codexCommand) {
+    send({ ok: false, stopReason: 'error', errorMessage: 'codex is not configured on this agent', deniedTools: [] });
+    return;
+  }
+
+  // Agent 側タイムアウト（Server 側 timeoutS より短い予算。Claude 経路と同じ「timeout の歪み」対策の
+  // 保険。実際のプロセス kill は `runRawCodex()` 内部の timeoutMs で行われるため、ここは二重の安全網）。
+  const timeoutHandle = setTimeout(() => {
+    send({ ok: false, stopReason: 'timeout', errorMessage: 'raw-completion (codex) timed out on agent side', deniedTools: [] });
+  }, timeoutMs);
+
+  const startedAt = Date.now();
+  const proxyEnv: Record<string, string> = {};
+  if (currentConfig.proxy?.url) {
+    const proxyUrl = buildProxyUrl(currentConfig.proxy);
+    proxyEnv.HTTP_PROXY = proxyUrl;
+    proxyEnv.HTTPS_PROXY = proxyUrl;
+    proxyEnv.http_proxy = proxyUrl;
+    proxyEnv.https_proxy = proxyUrl;
+  }
+
+  try {
+    const result = await runRawCodex({
+      command: codexCommand,
+      cwd: ensureRawCwd(),
+      system,
+      prompt,
+      model,
+      timeoutMs,
+      proxyEnv,
+    });
+
+    if (result.deniedTools.length > 0) {
+      console.warn(`🛑 raw mode (codex): ${result.deniedTools.length} 件のツール呼び出しを deny しました (session=${sessionId}): ${result.deniedTools.join(', ')}`);
+    }
+
+    send({
+      ok: result.ok,
+      text: result.text,
+      output: result.text, // @deprecated 旧サーバー互換の別名
+      usageData: result.usageData,
+      stopReason: result.stopReason,
+      errorMessage: result.errorMessage,
+      deniedTools: result.deniedTools,
       agentDurationMs: Date.now() - startedAt,
     });
   } catch (err) {

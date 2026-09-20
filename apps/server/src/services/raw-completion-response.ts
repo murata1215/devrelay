@@ -166,6 +166,8 @@ export interface RawCompletionResponseInput {
   requestedModel?: string;
   /** ルートハンドラの開始時刻からの経過ミリ秒 */
   latencyMs: number;
+  /** Phase 2: このリクエストが実際に使った AI（`raw-completion-ai.ts` の `resolveRawAi()` で解決済み） */
+  ai: 'claude' | 'codex';
 }
 
 /** `buildRawCompletionResponse()` が返す HTTP レスポンスボディ（新契約、常に全キーが存在する） */
@@ -182,6 +184,8 @@ export interface RawCompletionResponseBody {
   /** `ok:false` 相当、または旧 Agent 検知時にのみ設定する */
   error?: string;
   deniedTools: string[];
+  /** Phase 2: このリクエストが実際に使った AI（常に存在する） */
+  ai: 'claude' | 'codex';
 }
 
 /**
@@ -198,7 +202,7 @@ export interface RawCompletionResponseBody {
  * 隠さない、#325 の踏襲）。`deniedTools` は常に配列（重複除去済み）を返す。
  */
 export function buildRawCompletionResponse(input: RawCompletionResponseInput): RawCompletionResponseBody {
-  const { result, sessionId, requestedModel, latencyMs } = input;
+  const { result, sessionId, requestedModel, latencyMs, ai } = input;
   const usage = summarizeRawUsage(result.usageData);
   const model = resolveRawModel(result.usageData, requestedModel);
   const agentDurationMs = toSafeCount(result.agentDurationMs);
@@ -223,6 +227,7 @@ export function buildRawCompletionResponse(input: RawCompletionResponseInput): R
         ? result.errorMessage
         : 'raw-completion failed',
       deniedTools,
+      ai,
     };
   }
 
@@ -239,6 +244,7 @@ export function buildRawCompletionResponse(input: RawCompletionResponseInput): R
       sessionId,
       error: 'Agent response is missing `text` (outdated agent — run `u` on the target machine to update)',
       deniedTools,
+      ai,
     };
   }
 
@@ -254,5 +260,6 @@ export function buildRawCompletionResponse(input: RawCompletionResponseInput): R
     stopReason: normalizedStopReason(result.stopReason, 'success'),
     sessionId,
     deniedTools,
+    ai,
   };
 }

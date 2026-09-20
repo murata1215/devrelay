@@ -120,6 +120,7 @@ function baseInput(overrides = {}) {
     sessionId: 'raw_abc123',
     requestedModel: 'claude-opus-5',
     latencyMs: 1234,
+    ai: 'claude',
   };
 }
 
@@ -213,6 +214,36 @@ test('buildRawCompletionResponse: 例外を一切投げない（壊れた入力�
   assert.doesNotThrow(() => buildRawCompletionResponse({
     result: { ok: true },
     sessionId: 'raw_x',
+    latencyMs: 0,
+  }));
+});
+
+// ---- Phase 2: ai フィールド（3分岐すべてで常に存在する） ----
+
+test('buildRawCompletionResponse: 成功分岐で ai が常に含まれる（claude）', () => {
+  const body = buildRawCompletionResponse(baseInput());
+  assert.equal(body.ai, 'claude');
+});
+
+test('buildRawCompletionResponse: 成功分岐で ai が常に含まれる（codex）', () => {
+  const body = buildRawCompletionResponse({ ...baseInput(), ai: 'codex' });
+  assert.equal(body.ai, 'codex');
+});
+
+test('buildRawCompletionResponse: ok:false 分岐でも ai が含まれる', () => {
+  const body = buildRawCompletionResponse({ ...baseInput({ ok: false, text: undefined, errorMessage: 'failed', stopReason: 'error' }), ai: 'codex' });
+  assert.equal(body.ai, 'codex');
+});
+
+test('buildRawCompletionResponse: 旧 Agent 検知分岐（text 欠落）でも ai が含まれる', () => {
+  const body = buildRawCompletionResponse({ ...baseInput({ text: undefined, output: '古い応答' }), ai: 'claude' });
+  assert.equal(body.ai, 'claude');
+});
+
+test('buildRawCompletionResponse: ai を渡さない呼び出しでも例外を投げない', () => {
+  assert.doesNotThrow(() => buildRawCompletionResponse({
+    result: { ok: true, text: 'hi', stopReason: 'success', deniedTools: [] },
+    sessionId: 'raw_y',
     latencyMs: 0,
   }));
 });

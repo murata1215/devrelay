@@ -32,10 +32,10 @@ export const PROTOCOL_VERSION = 1;
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex'];
 
 // -----------------------------------------------------------------------------
 // Capability 配布基盤（サイクルP1）
@@ -773,6 +773,12 @@ export interface RawPromptPayload {
   prompt: string;
   /** Claude SDK モデル指定。省略時は SDK デフォルト */
   model?: string;
+  /**
+   * Phase 2: 使用する AI（省略時 `'claude'`、旧サーバーとの後方互換のため optional）。
+   * `'codex'` の場合、Agent は `raw-codex-mode.ts`/`raw-codex-runner.ts` 経由で `codex exec` を実行する
+   * （`connection.ts` の `handleRawPrompt` が分岐。`ai-runner.ts` は 0 行変更）。
+   */
+  ai?: 'claude' | 'codex';
   /**
    * Agent 側のタイムアウト予算（ミリ秒）。Server 側の `timeoutS` より短く設定し
    * （実装プランの「timeout の歪み」対策、目安 90%）、Agent の `finally` 応答が

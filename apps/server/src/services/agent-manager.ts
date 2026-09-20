@@ -72,6 +72,15 @@ const outdatedAgents = new Set<string>();
  */
 const agentCapabilities = new Map<string, Set<AgentCapability>>();
 
+/**
+ * raw-completion Phase 2: 接続中の Agent が申告した `availableAiTools`（machineId -> AiTool[]）。
+ * `agentCapabilities` と同じパターン（接続時 set → 切断時 delete、DB 永続化なし）。
+ * 従来は `handleAgentConnect` が受け取って `reconcileProjects` にだけ渡し、値自体は保持していなかった
+ * （raw-completion-api.ts が `ai==='codex'` のとき「対象 Agent に Codex CLI がインストール済みか」を
+ * 判定する必要が生まれたため、Phase 2 で新設）。
+ */
+const agentAvailableAiTools = new Map<string, AiTool[]>();
+
 // Connected agents: machineId -> WebSocket
 const connectedAgents = new Map<string, WebSocket>();
 
@@ -476,6 +485,9 @@ async function handleAgentConnect(
   // スレッド管理 cycle2: capability 申告を記録（未送信の旧 Agent は「capability ゼロ」扱い）
   agentCapabilities.set(machine.id, new Set(payload.capabilities ?? []));
 
+  // raw-completion Phase 2: 接続時に申告された availableAiTools を保持（Codex インストール有無の判定用）
+  agentAvailableAiTools.set(machine.id, availableAiTools ?? []);
+
   // 切断猶予タイマーをキャンセル（短時間の再接続ではオフライン通知を抑制）
   const pendingDisconnectTimer = disconnectTimers.get(machine.id);
   if (pendingDisconnectTimer) {
@@ -666,6 +678,7 @@ async function handleAgentDisconnect(machineId: string, disconnectedWs?: WebSock
   pendingConfigUpdates.delete(machineId);
   outdatedAgents.delete(machineId);
   agentCapabilities.delete(machineId);
+  agentAvailableAiTools.delete(machineId);
 
   try {
     await prisma.machine.update({
@@ -1410,6 +1423,14 @@ export function isAgentOutdated(machineId: string): boolean {
  */
 export function agentHasCapability(machineId: string, cap: AgentCapability): boolean {
   return agentCapabilities.get(machineId)?.has(cap) ?? false;
+}
+
+/**
+ * raw-completion Phase 2: 接続中の Agent が申告した `availableAiTools` を返す。
+ * 未接続（切断済み・未接続）の machineId は空配列扱い。
+ */
+export function getAgentAvailableAiTools(machineId: string): AiTool[] {
+  return agentAvailableAiTools.get(machineId) ?? [];
 }
 
 export async function endSession(machineId: string, sessionId: string) {

@@ -6,6 +6,59 @@
 
 ## 実装済み機能
 
+### raw-completion Phase 2 — Codex 経路の追加（terra / sol 席） (2026-09-20)
+
+`POST /api/agent/raw-completion` は Phase 1.4 まで Claude SDK 経路のみだった。Phase 2 でリクエストの
+`ai: "claude"|"codex"`（省略時 `claude`）を追加し、**プロジェクトの `defaultAi` ではなくリクエストの
+`ai` で経路を決める**ように変更した（`defaultAi=codex` のプロジェクトでも `ai:"claude"` を指定すれば
+Claude 席として使える。Claude 席と Codex 席を同じ試合に混ぜるため）。
+
+Phase 0（devlog `2026-09-20_042939.md`）は「Codex には system prompt 完全置換フラグが無い」と結論して
+いたが、本サイクルの再調査（`codex debug prompt-input` によるオフライン描画の実測、子エージェント不使用）
+で以下を訂正・追加確認した:
+- `-c developer_instructions="<TOML basic string>"` が developer ロール先頭に載る（採用: 席の
+  `system` はこのチャネルへ渡す。`[SYSTEM]` を user prompt に前置する案は不採用）
+- `include_environment_context=false` / `skills.include_instructions=false`（**`/home/<user>/.codex/skills/...`
+  パス＝ユーザー名漏洩源を除去**）/ `include_apps_instructions=false` / `features.tool_suggest=false` /
+  `project_doc_max_bytes=0` / `mcp_servers={}` / `tools.web_search=false` / `--ephemeral` +
+  `history.persistence="none"` で混入の大半を除去できる
+- 除去手段が無く残存する既知の制約: `<permissions instructions>`（sandbox 説明、約340字）と
+  multi-agent 定型「You are `/root`, the primary agent in a team...」（約2.5K字、`features.multi_agent`
+  等すべて無効化しても消えない）。`$CODEX_HOME/AGENTS.md`（グローバル）も消せない
+
+サーバー側は新規 `raw-completion-ai.ts`（外部 import ゼロの純関数: `resolveRawAi`/`decideRawAiGate`/
+`validateRawCodexModel`）を追加し、`agent-manager.ts` に `availableAiTools` のインメモリ保持
+（`getAgentAvailableAiTools()`）を新設。`ai==='codex'` は対象 Agent が `availableAiTools` に `codex` を
+含み、かつ新設 capability `raw-completion-codex` を申告している場合のみ許可する（**自動フォールバック
+禁止** — どちらか欠ければ常に 400 `aiUnavailable`。旧 Agent が `payload.ai` を無視して黙って Claude を
+実行する「無言フォールバック」を capability ゲートで構造的に防ぐ）。`raw-completion-response.ts` の
+`buildRawCompletionResponse()` はレスポンスに `ai` を常時含めるよう拡張。
+
+Agent 側（linux/macos byte-identical）は新規 `raw-codex-mode.ts`（外部 import ゼロの純関数: TOML
+エスケープ・`codex exec` 引数組み立て・JSONL 集約・結果判定）+ `raw-codex-runner.ts`（I/O 実体、spawn/
+stdin/timeout kill）を追加。Codex には Claude の `canUseTool`（実行前ブロック）に相当する手段が無いため、
+`sandbox_mode="read-only"` + `approval_policy="never"` で書き込み・ネットワークを失敗させつつ、
+`item.completed` の実行系アイテム型（`command_execution`/`file_change`/`mcp_tool_call`/
+`collab_tool_call`/`web_search`）を検出したら **事後的に** `ok:false` にして本文を返さない設計にした
+（cwd は Claude 経路と同じ `raw-cwd.ts` の中立ディレクトリ `/tmp/seat` を共用するため、実行されても
+読めるファイルは無い）。`codex exec --json` 非対応の旧 CLI は fail-closed（プレーンテキストへ劣化させ
+ない）。`connection.ts` の `handleRawPrompt()` は `payload.ai==='codex'` を `handleRawPromptCodex()` へ
+分岐する 1 箇所のみ変更し、既存の Claude 分岐・`ai-runner.ts` は **0 行変更**（`git diff` で証明）。
+
+`model` は Codex の `turn.completed` JSONL にモデル名が含まれないためレスポンスへリクエスト値をそのまま
+エコーバックする（実際に使われた保証は無い）。`usage.cacheWrite` は Codex 側に対応フィールドが無いため
+常に `0`。
+
+テスト: server `raw-completion-ai.test.mjs`（新規21件）+ `raw-completion-response.test.mjs`（`ai` 分岐
+5件追加）、agents linux/macos `raw-codex-mode.test.mjs`（新規51件、純関数）+
+`raw-codex-runner.test.mjs`/`raw-codex-runner-no-json.test.mjs`（新規12件、`tests/fixtures/fake-codex*.mjs`
+という偽 Codex CLI を実際に spawn して引数列・stdin・timeout kill・`--json` 非対応 fail-closed を実測）。
+shared 47/47・server 523/523(+23)・linux 1026/1026(+63)・macos 590/590+skip1(+63) すべて green、
+6 workspace `pnpm -r build` green、`git diff` で `ai-runner.ts`/`agents/windows`/`prisma`/`apps/web` の
+無変更を証明。**サーバー変更のため `pm2 restart devrelay-server` 要**（DB マイグレーション無し）。
+uso8m 側は `u` で `raw-completion-codex` capability を申告後に別タスクで実機スモーク（curl (t)(s)(b)(c)(p)、
+devlog 参照）予定。commit 未実施。
+
 ### bg-task — バックグラウンド Agent 起動時の打ち切りと resume 時の `(No response from AI)` を根治 (2026-09-20)
 
 Claude Code 2.1.278 / SDK 0.3.278（stream-json 入力モード）では、モデルがバックグラウンド Agent
