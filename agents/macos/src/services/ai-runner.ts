@@ -20,6 +20,9 @@ import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, ch
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
 import { decideResume } from './resume-priority.js';
 import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
+// サイクル SDK-1 コミット①: resolveSystemClaude() は claude-path.ts（linux と byte-identical な最小モジュール）へ移設し、
+// ここでは re-export のみ行う（claude-auth.ts の既存 import 経路を維持するため）。
+import { resolveSystemClaude } from './claude-path.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 // raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
@@ -86,33 +89,9 @@ let devinMaxStepsWarned = false;
 // #287: SDK 内蔵 cli.js 欠落時のフォールバック用ログ抑制フラグ（同じ警告を毎回出さない）。
 let claudeFallbackLogged = false;
 
-/**
- * システムにインストールされた claude CLI の実行パスを解決する（macOS）。
- * PATH（`command -v claude`）を最優先し、見つからなければ既知の標準パスを順に探す。
- * @returns 実在する claude のフルパス、無ければ null
- */
-export function resolveSystemClaude(): string | null {
-  try {
-    const p = execSync('command -v claude', { encoding: 'utf-8' }).trim();
-    if (p && fs.existsSync(p)) return p;
-  } catch {
-    // PATH に無い場合は既知パスへフォールバック
-  }
-  for (const candidate of [
-    path.join(os.homedir(), '.local/bin/claude'),
-    path.join(os.homedir(), '.claude/local/claude'),
-    '/opt/homebrew/bin/claude',
-    '/usr/local/bin/claude',
-    '/usr/bin/claude',
-  ]) {
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      // ignore
-    }
-  }
-  return null;
-}
+// サイクル SDK-1 コミット①: resolveSystemClaude() の実体は claude-path.ts に移設済み（linux と byte-identical）。
+// claude-auth.ts が引き続き `from './ai-runner.js'` で import できるよう再エクスポートする。
+export { resolveSystemClaude };
 
 /**
  * Claude Agent SDK が spawn する実行ファイルを解決する（#287）。
