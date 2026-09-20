@@ -6,6 +6,95 @@
 
 ## 実装済み機能
 
+### raw-completion Phase 1.4 — model 欄の誤判定と環境情報の混入を是正 (2026-09-20)
+
+SDK 0.3.278 上の実機確認で判明した2件のバグを根治した。
+
+#### 1. model 欄の誤判定
+
+`agents/{linux,macos}/src/services/ai-runner.ts` の `usageData.model` が
+`Object.keys(m.modelUsage)[0]`（`modelUsage` の**先頭キー**）を使用モデルと決め打ちしていたが、
+SDK は毎ターン付随的にセッションタイトル生成（Haiku、`generate_session_title` サブタイプの
+内部呼び出し、input≈900〜1000）を行っており、この内部呼び出しが `modelUsage` に先に列挙される
+と `claude-haiku-4-5-...` が誤って「使用モデル」として報告されていた。
+
+新規 `resolveRawUsedModel()`（`raw-completion-mode.ts`、外部 import ゼロの純関数、
+linux/macos byte-identical）を導入し、以下の優先順位に是正した:
+
+1. テキストを生成した最後の assistant メッセージの `message.model`（`"<synthetic>"` 等の
+   無効値は除外）
+2. リクエスト指定 `model` と一致する `modelUsage` エントリ（完全一致 → 前方一致の順）
+3. `modelUsage` のうち `outputTokens` が最大のエントリ（最終手段。応答が数トークンのとき
+   Haiku 内部呼び出しの方が出力が多くなり再発するため、これを第一候補にはしない）
+
+`ai-runner.ts` はテキストブロック処理時に `lastTextAssistantModel` を記録し、raw 経路
+（`options.rawMode`）でのみこの新ロジックを使う。非 raw 経路（plan/exec）の `usageData.model`
+は従来の「先頭キー」のまま変更していない（既存経路への影響ゼロ）。
+
+サーバー側 `apps/server/src/services/raw-completion-response.ts` の `resolveRawModel()` も
+同じ優先順位に整合させた（`usageData.model` → requestedModel 一致の modelUsage エントリ →
+outputTokens 最大 → requestedModel → undefined）。
+
+調査の結果、HTTP `usage` フィールド（4キー）は SDK 仕様上「MAIN AGENT LOOP ONLY」であり、
+Haiku 内部呼び出し分は元から含まれないことを確認した（`usageData.modelUsage` には別キー・
+`costUSD` 付きで含まれ、分離してコスト分析可能）。今回の env 追加（下記）により Haiku
+呼び出し自体が発生しなくなるため、以後この分離作業は不要になる。
+
+#### 2. 応答本文への環境情報混入
+
+raw-completion の応答テキストにメールアドレス・cwd・OS 情報等が混入していた。調査の結果:
+
+- **メールアドレスは git ではなく OAuth アカウント情報が出所**（SDK の `userEmail` という
+  userContext ブロック）であり、**SDK 側にこれを止めるオプション・env は存在しない**
+  （既知の制約。対象機の Claude ログインアカウントを変更するか、`system` プロンプト側で
+  開示禁止を明示する運用でのみ回避可能）。当初想定していた「git のコミット用メールアドレスが
+  cwd の git 情報から混入する」という背景仮説は不成立と判明した。
+- cwd・OS・シェル・日付・モデル名は SDK が自動注入する `type:"environment"` アタッチメント
+  経由。`--bare`（`CLAUDE_CODE_SIMPLE`）はこれを止めるが OAuth 資格情報を一切読まず認証に
+  失敗するため採用不可（実測確認済み）。
+
+止められる範囲として以下を実装した:
+
+- 新規 `agents/{linux,macos}/src/services/raw-cwd.ts`（byte-identical）: raw 経路の cwd を
+  対象プロジェクトのパスから中立な固定ディレクトリ **`/tmp/seat`** へ差し替える。パスに
+  devrelay・ユーザー名・ホスト名を一切含まない。作成後に `lstat` でディレクトリ・非symlink・
+  所有 uid 一致を検証し、不合格ならプロセス寿命中 1 回だけ `mkdtemp` にフォールバックする
+  （共有 `/tmp` の安全策）。`handleRawPrompt()`（`connection.ts`）でこの cwd を使うよう変更、
+  既存経路（plan/exec）の cwd 決定ロジックには一切触れていない。
+- `buildRawSdkOverrides()` に `persistSession: false` を追加し、raw 呼び出しがトランスクリプト
+  を一切ディスクに書かない（`~/.claude/projects/<slug>/` のスラッグ増殖をゼロにする）。
+- `RAW_ENV_OVERRIDES` に `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`（セッションタイトル生成=Haiku
+  内部呼び出しを止める。実測で `modelUsage` から Haiku キーが消えることを確認）と
+  `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS`（git status/commit 指示注入の保険、raw では現状
+  未注入だが SDK バージョン変化への保険）を追加。いずれも raw 経路の env にのみマージし
+  既存経路には影響しない。
+
+#### 実装中に検出したバグ
+
+`raw-cwd.ts` の `resolveRawCwdPath()` で当初 `path.join`（ランタイム OS 依存でセパレータを
+選ぶ非名前空間版）を Windows フォールバックパス組み立てに使っていたが、これは引数の
+`platform` を無視して実行環境の OS でセパレータを決めてしまうバグだった。単体テスト作成時に
+POSIX ホスト上で `platform:'win32'` を渡すテストが失敗したことで発覚し、`path.win32.join` に
+修正した。
+
+#### 検証
+
+`pnpm build` 6 workspace すべて green。テスト（`--test-concurrency=1`）: shared 47/47・
+server 500/500（+21）・linux 951/951（+31）・macos 515/515+skip1（+21）・web 512/512、すべて
+green。`raw-completion-mode.ts` / `raw-cwd.ts` / 両テストファイルは linux/macos で byte-identical、
+`ai-runner.ts` / `connection.ts` の変更ハンクも内容完全一致。`git diff --stat` で
+`packages/`・`prisma/`・`agents/windows/` は無変更。
+
+実装後、実際に `query()` を1回実行するローカル検証（対象機の `u` を待たずに実施）で
+`modelUsage` が `claude-opus-5` 1 キーのみになること（Haiku キー消滅）、`~/.claude/projects/`
+にスラッグが増えないこと（persistSession:false の実証）を確認した。
+
+`apps/server`（`raw-completion-response.ts`）に変更が及ぶため **`pm2 restart devrelay-server`
+が必要**（DB マイグレーション無し）。実機スモーク（(e)(b)(a)）は対象機 `x220-158-18-103/uso8m`
+の `u`（auto-update）反映を待って別途実施する。
+
+詳細: [devlog 2026-09-20_200733](devlog/2026-09-20_200733.md)
+
 ### サイクル SDK-2 — `@anthropic-ai/claude-agent-sdk` を 0.3.278 へ引き上げる（コミット④） (2026-09-20)
 
 SDK-1（コミット①②③）で `claude-exec` 検出器を 0.2/0.3 両対応化した上に乗る最後の1手として、

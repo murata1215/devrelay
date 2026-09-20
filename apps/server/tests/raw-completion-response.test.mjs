@@ -57,16 +57,45 @@ test('summarizeRawUsage: 例外を投げない（壊れた形の usageData で�
   assert.doesNotThrow(() => summarizeRawUsage({ usage: null }));
 });
 
-// ---- resolveRawModel ----
+// ---- resolveRawModel（Phase 1.4: Agent 側 resolveRawUsedModel() と整合させた優先順位） ----
 
 test('resolveRawModel: usageData.model を最優先する', () => {
   const model = resolveRawModel({ model: 'claude-opus-5', modelUsage: { 'claude-fable-5-1': {} } }, 'claude-fable-5-1');
   assert.equal(model, 'claude-opus-5');
 });
 
-test('resolveRawModel: model 欠落時は modelUsage の先頭キーを使う', () => {
-  const model = resolveRawModel({ modelUsage: { 'claude-fable-5-1': {}, 'claude-opus-5': {} } }, 'claude-opus-5');
+test('resolveRawModel: (a) model 欠落時は requestedModel と一致する modelUsage キーを使う（先頭キーではない）', () => {
+  // 先頭キーは 'claude-haiku-4-5-20251001'（セッションタイトル生成の内部呼び出し）だが、
+  // requestedModel='claude-opus-5' に一致するキーを優先する（旧実装の Haiku 誤判定バグの回帰防止）
+  const model = resolveRawModel(
+    { modelUsage: { 'claude-haiku-4-5-20251001': { outputTokens: 15 }, 'claude-opus-5': { outputTokens: 675 } } },
+    'claude-opus-5'
+  );
+  assert.equal(model, 'claude-opus-5');
+});
+
+test('resolveRawModel: (b) 応答が数トークンで Haiku の output の方が多いケースでも requestedModel 一致を優先する', () => {
+  const model = resolveRawModel(
+    { modelUsage: { 'claude-fable-5-1': { outputTokens: 12 }, 'claude-haiku-4-5-20251001': { outputTokens: 20 } } },
+    'claude-fable-5-1'
+  );
   assert.equal(model, 'claude-fable-5-1');
+});
+
+test('resolveRawModel: (c) requestedModel の前方一致で解決する', () => {
+  const model = resolveRawModel(
+    { modelUsage: { 'claude-opus-5-20260301': { outputTokens: 100 }, 'claude-haiku-4-5-20251001': { outputTokens: 500 } } },
+    'claude-opus-5'
+  );
+  assert.equal(model, 'claude-opus-5-20260301');
+});
+
+test('resolveRawModel: (d) requestedModel 未指定なら outputTokens 最大の modelUsage キー（最終手段）', () => {
+  const model = resolveRawModel(
+    { modelUsage: { 'claude-haiku-4-5-20251001': { outputTokens: 15 }, 'claude-opus-5': { outputTokens: 675 } } },
+    undefined
+  );
+  assert.equal(model, 'claude-opus-5');
 });
 
 test('resolveRawModel: usageData に何も無ければリクエスト指定のモデルを使う', () => {
@@ -77,6 +106,10 @@ test('resolveRawModel: usageData に何も無ければリクエスト指定の�
 test('resolveRawModel: 全て無ければ undefined', () => {
   assert.equal(resolveRawModel(undefined, undefined), undefined);
   assert.equal(resolveRawModel({}, ''), undefined);
+});
+
+test('resolveRawModel: modelUsage が空オブジェクトでも例外を投げず requestedModel へフォールバック', () => {
+  assert.equal(resolveRawModel({ modelUsage: {} }, 'claude-opus-5'), 'claude-opus-5');
 });
 
 // ---- buildRawCompletionResponse ----

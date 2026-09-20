@@ -15,6 +15,13 @@
  * `result.usageData`（`{usage,modelUsage,durationMs,model,rateLimits}`）を HTTP 契約の
  * `{input,output,cacheRead,cacheWrite}` へ変換するのは Agent の関心ではなくサーバーの関心
  * （HTTP レスポンスの表現）であるため、ここに新設する。
+ *
+ * Phase 1.4: `resolveRawModel()` の優先順位を Agent 側 `resolveRawUsedModel()`
+ * （`agents/{linux,macos}/src/services/raw-completion-mode.ts`）と整合させた。旧実装は
+ * `usageData.modelUsage` の**先頭キー**を第2候補にしていたが、SDK が毎ターン付随的に行う
+ * セッションタイトル生成（Haiku 内部呼び出し）が先に列挙されると誤ったモデルを報告する事故が
+ * あった（2.1.278 実測）。新しい Agent は `usageData.model` に正しい値を送るため（分岐1）
+ * このサーバー側ロジックは主に旧 Agent との後方互換・保険として機能する。
  */
 
 /** `AiUsageData`（`packages/shared`）の一部だけを duck-typing で受ける（外部 import ゼロを維持） */
@@ -60,12 +67,52 @@ export function summarizeRawUsage(usageData?: RawUsageDataLike | null): RawUsage
   };
 }
 
+/** `usageData.modelUsage` の1エントリから `outputTokens` を安全に数値として取り出す（欠落・非数値は 0） */
+function readModelUsageOutputTokens(entry: unknown): number {
+  if (entry && typeof entry === 'object' && 'outputTokens' in entry) {
+    const v = (entry as { outputTokens?: unknown }).outputTokens;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return 0;
+}
+
 /**
- * レスポンスに載せる `model` を解決する。優先順:
- * 1. `usageData.model`（SDK が報告した実際の使用モデル）
- * 2. `usageData.modelUsage` の先頭キー（`model` が欠落していても modelUsage はあるケースへの保険）
- * 3. リクエストで指定された `model`（実行前の希望値。実際に使われた保証は無いが無いよりまし）
- * 4. すべて無ければ `undefined`
+ * `modelUsage` のキーのうち `requestedModel` と完全一致するもの、無ければ前方一致するものを探す
+ * （例: 指定 `claude-opus-5` に対し `claude-opus-5-20260301` を許容）。前方一致が複数あれば
+ * 最も短いキーを優先する（Agent 側 `findModelUsageKeyMatchingRequest()` と同じロジック）。
+ */
+function findModelUsageKeyMatchingRequest(modelUsage: Record<string, unknown>, requestedModel: string): string | undefined {
+  const keys = Object.keys(modelUsage);
+  if (keys.includes(requestedModel)) return requestedModel;
+  const prefixMatches = keys.filter((k) => k.startsWith(requestedModel));
+  if (prefixMatches.length === 0) return undefined;
+  return prefixMatches.reduce((shortest, k) => (k.length < shortest.length ? k : shortest));
+}
+
+/** `modelUsage` のうち `outputTokens` が最大のキーを返す（同点は先に列挙された方を優先） */
+function findModelUsageKeyWithMaxOutputTokens(modelUsage: Record<string, unknown>): string | undefined {
+  let best: string | undefined;
+  let bestTokens = -1;
+  for (const [key, entry] of Object.entries(modelUsage)) {
+    const tokens = readModelUsageOutputTokens(entry);
+    if (tokens > bestTokens) {
+      best = key;
+      bestTokens = tokens;
+    }
+  }
+  return best;
+}
+
+/**
+ * レスポンスに載せる `model` を解決する（Phase 1.4 で優先順位を是正、本ファイル冒頭 JSDoc 参照）。
+ * 優先順:
+ * 1. `usageData.model`（新 Agent が `resolveRawUsedModel()` で判定した実際の使用モデル）
+ * 2. `requestedModel` と一致する `usageData.modelUsage` キー（完全一致 → 前方一致の順。
+ *    旧 Agent が `model` を送らない場合への保険）
+ * 3. `usageData.modelUsage` のうち `outputTokens` が最大のキー（最終手段。セッションタイトル生成等の
+ *    内部呼び出しを先頭キーとして誤って拾わないよう、これを第一候補にはしない）
+ * 4. リクエストで指定された `model`（実行前の希望値。実際に使われた保証は無いが無いよりまし）
+ * 5. すべて無ければ `undefined`
  *
  * @param usageData `AiRunResult.usageData` 相当（未指定・null も許容）
  * @param requestedModel リクエストボディの `model`（未指定可）
@@ -74,9 +121,14 @@ export function resolveRawModel(usageData?: RawUsageDataLike | null, requestedMo
   if (usageData?.model && usageData.model.trim().length > 0) {
     return usageData.model;
   }
-  const modelUsageKeys = usageData?.modelUsage ? Object.keys(usageData.modelUsage) : [];
-  if (modelUsageKeys.length > 0) {
-    return modelUsageKeys[0];
+  const modelUsage = usageData?.modelUsage;
+  if (modelUsage && typeof modelUsage === 'object') {
+    if (requestedModel && requestedModel.trim().length > 0) {
+      const matched = findModelUsageKeyMatchingRequest(modelUsage, requestedModel);
+      if (matched !== undefined) return matched;
+    }
+    const maxOutput = findModelUsageKeyWithMaxOutputTokens(modelUsage);
+    if (maxOutput !== undefined) return maxOutput;
   }
   if (requestedModel && requestedModel.trim().length > 0) {
     return requestedModel;

@@ -39,6 +39,7 @@ import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } f
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
+import { ensureRawCwd } from './raw-cwd.js';
 import { loadClaudeSessionId, clearClaudeSessionId, clearDevinSessionId, clearDevinModel, clearDevinAtifStepOffset, clearDevinPermissionMode, clearCodexSessionId, loadSessionMeta } from './session-store.js';
 import { savePlanFile, loadLatestPlanFile } from './plan-file-store.js';
 import { decideResume } from './resume-priority.js';
@@ -615,9 +616,15 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
  * 非空なら `console.warn` で可観測にする（`agent.log` が読めない問題の恒久対策）。
  * `sent` ラッチで `agent:raw:result` の二重送信を防ぎ、`finally` で必ず応答する
  * （サーバー側 timeout に頼らない設計）。
+ *
+ * Phase 1.4: SDK の query() には `payload.projectPath`（対象プロジェクトのパス）ではなく
+ * `ensureRawCwd()`（`raw-cwd.ts`、中立な固定ディレクトリ `/tmp/seat` 等）を渡す。
+ * SDK が自動注入する `type:"environment"` アタッチメント（cwd・OS・シェル・日付）に
+ * プロジェクトパス・ユーザー名・プロジェクト名が載る事故を防ぐため（`payload.projectPath` は
+ * 既存経路の cwd 決定ロジックには一切影響しない。raw 経路内でのみ未使用のまま残す）。
  */
 async function handleRawPrompt(payload: RawPromptPayload) {
-  const { requestId, sessionId, projectPath, system, prompt, model, timeoutMs } = payload;
+  const { requestId, sessionId, system, prompt, model, timeoutMs } = payload;
   if (!currentMachineId || !currentConfig) return;
 
   let sent = false;
@@ -647,7 +654,7 @@ async function handleRawPrompt(payload: RawPromptPayload) {
     const runResult = await sendPromptToAi(
       sessionId,
       composeRawPrompt(prompt),
-      projectPath,
+      ensureRawCwd(),
       'claude',
       sessionId,
       currentConfig,

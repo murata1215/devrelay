@@ -15,6 +15,7 @@ import {
   isRawToolDenied,
   buildRawDenyMessage,
   resolveRawCompletionResult,
+  resolveRawUsedModel,
 } from '../dist/services/raw-completion-mode.js';
 import * as rawCompletionMode from '../dist/services/raw-completion-mode.js';
 
@@ -106,13 +107,22 @@ test('buildRawSdkOverrides: Phase 1.2 までの既存キーが settings 追加�
   assert.deepEqual(overrides.mcpServers, {});
   assert.equal(overrides.strictMcpConfig, true);
   assert.equal(overrides.maxTurns, RAW_MAX_TURNS);
-  assert.equal(Object.keys(overrides).length, 9); // キーの黙った追加を検出
+  assert.equal(Object.keys(overrides).length, 10); // キーの黙った追加を検出（Phase 1.4: persistSession 追加で 9→10）
 });
 
-// ---- buildRawEnv / RAW_ENV_OVERRIDES（auto-memory 遮断・第1層） ----
+test('buildRawSdkOverrides: persistSession は false（Phase 1.4、トランスクリプトを書かない）', () => {
+  const overrides = buildRawSdkOverrides('sys');
+  assert.equal(overrides.persistSession, false);
+});
 
-test('RAW_ENV_OVERRIDES: CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 のみを含む', () => {
-  assert.deepEqual(RAW_ENV_OVERRIDES, { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
+// ---- buildRawEnv / RAW_ENV_OVERRIDES（auto-memory 遮断・第1層 + Phase 1.4 追加分） ----
+
+test('RAW_ENV_OVERRIDES: Phase 1.4 で追加した3キーを含む', () => {
+  assert.deepEqual(RAW_ENV_OVERRIDES, {
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
+    CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: '1',
+  });
 });
 
 test('buildRawEnv: ベース env（PATH/HOME/proxy/DEVRELAY_*）を保持する', () => {
@@ -129,6 +139,8 @@ test('buildRawEnv: ベース env（PATH/HOME/proxy/DEVRELAY_*）を保持する'
     assert.equal(result[key], base[key], `${key} が保持されていない`);
   }
   assert.equal(result.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+  assert.equal(result.CLAUDE_CODE_DISABLE_TERMINAL_TITLE, '1');
+  assert.equal(result.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS, '1');
 });
 
 test('buildRawEnv: agent 側が 0 で起動していても 1 に倒す（override が後勝ち）', () => {
@@ -144,7 +156,7 @@ test('buildRawEnv: 入力オブジェクトを破壊しない', () => {
 });
 
 test('buildRawEnv: 空 env でも例外を投げず override のみを返す', () => {
-  assert.deepEqual(buildRawEnv({}), { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
+  assert.deepEqual(buildRawEnv({}), RAW_ENV_OVERRIDES);
 });
 
 test('buildRawEnv: 値が undefined のキーを落とさない（process.env は undefined を含みうる）', () => {
@@ -332,6 +344,98 @@ test('resolveRawCompletionResult: 入力の deniedTools 配列と戻り値の配
     deniedTools: input,
   });
   assert.notEqual(result.deniedTools, input);
+});
+
+// ---- resolveRawUsedModel（Phase 1.4: model 誤判定の根治） ----
+
+test('resolveRawUsedModel: (a) 通常ケース — assistant model が最優先（modelUsage の先頭が Haiku でも無視）', () => {
+  const model = resolveRawUsedModel({
+    lastAssistantModel: 'claude-opus-5',
+    requestedModel: 'claude-opus-5',
+    modelUsage: {
+      'claude-haiku-4-5-20251001': { outputTokens: 15 },
+      'claude-opus-5': { outputTokens: 675 },
+    },
+  });
+  assert.equal(model, 'claude-opus-5');
+});
+
+test('resolveRawUsedModel: (b) 応答が数トークンで Haiku 内部呼び出しの output の方が多いケース（必須ケース）', () => {
+  // assistant model が取れず、Haiku(out=20) > 本体(out=12) でも requestedModel 一致を優先する
+  const model = resolveRawUsedModel({
+    lastAssistantModel: undefined,
+    requestedModel: 'claude-fable-5-1',
+    modelUsage: {
+      'claude-fable-5-1': { outputTokens: 12 },
+      'claude-haiku-4-5-20251001': { outputTokens: 20 },
+    },
+  });
+  assert.equal(model, 'claude-fable-5-1');
+});
+
+test('resolveRawUsedModel: (c) assistant model 取れず、requested の前方一致で解決する', () => {
+  const model = resolveRawUsedModel({
+    lastAssistantModel: undefined,
+    requestedModel: 'claude-opus-5',
+    modelUsage: {
+      'claude-opus-5-20260301': { outputTokens: 100 },
+      'claude-haiku-4-5-20251001': { outputTokens: 500 },
+    },
+  });
+  assert.equal(model, 'claude-opus-5-20260301');
+});
+
+test('resolveRawUsedModel: (d) 全部取れず最終手段（outputTokens 最大）に落ちる', () => {
+  const model = resolveRawUsedModel({
+    lastAssistantModel: undefined,
+    requestedModel: undefined,
+    modelUsage: {
+      'claude-haiku-4-5-20251001': { outputTokens: 15 },
+      'claude-opus-5': { outputTokens: 675 },
+    },
+  });
+  assert.equal(model, 'claude-opus-5');
+});
+
+test('resolveRawUsedModel: lastAssistantModel が "<synthetic>" 等の無効値なら次の優先度へ落ちる', () => {
+  const model = resolveRawUsedModel({
+    lastAssistantModel: '<synthetic>',
+    requestedModel: 'claude-opus-5',
+    modelUsage: { 'claude-opus-5': { outputTokens: 10 } },
+  });
+  assert.equal(model, 'claude-opus-5');
+});
+
+test('resolveRawUsedModel: lastAssistantModel が空文字なら次の優先度へ落ちる', () => {
+  const model = resolveRawUsedModel({
+    lastAssistantModel: '',
+    requestedModel: undefined,
+    modelUsage: { 'claude-opus-5': { outputTokens: 10 } },
+  });
+  assert.equal(model, 'claude-opus-5');
+});
+
+test('resolveRawUsedModel: modelUsage が空オブジェクトなら undefined（例外を投げない）', () => {
+  assert.equal(resolveRawUsedModel({ modelUsage: {} }), undefined);
+});
+
+test('resolveRawUsedModel: すべて欠落していれば undefined（例外を投げない）', () => {
+  assert.equal(resolveRawUsedModel({}), undefined);
+});
+
+test('resolveRawUsedModel: modelUsage 未指定でも例外を投げない', () => {
+  assert.equal(resolveRawUsedModel({ lastAssistantModel: undefined, requestedModel: 'claude-opus-5' }), undefined);
+});
+
+test('resolveRawUsedModel: outputTokens が欠落・非数値のエントリは 0 扱い（例外を投げない）', () => {
+  const model = resolveRawUsedModel({
+    modelUsage: {
+      'model-a': {},
+      'model-b': { outputTokens: 'not-a-number' },
+      'model-c': { outputTokens: 5 },
+    },
+  });
+  assert.equal(model, 'model-c');
 });
 
 // ---- mapRawUsage の削除確認（要件3の end state を表明: 死コードの復活防止） ----

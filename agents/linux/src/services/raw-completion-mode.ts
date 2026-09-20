@@ -68,6 +68,27 @@
  * `proxyEnv`、`DEVRELAY_*`）が丸ごと置換されてしまうため、env のマージは呼び出し元の責務として
  * 明確に分離し、本ファイルは `buildRawEnv()` という「マージ後の新しいオブジェクトを返す」純関数
  * のみを提供する。
+ *
+ * Phase 1.4（model 誤判定 + 環境情報混入の是正、2.1.278 実測に基づく）:
+ * (1) `usageData.model` に `modelUsage` の**先頭キー**を使っていたため、SDK が毎ターン付随的に行う
+ *     セッションタイトル生成（Haiku、`generate_session_title`、`querySource` で識別できる内部呼び出し）
+ *     が先に列挙され `claude-haiku-4-5-...` が「使用モデル」として報告される事故があった。
+ *     `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`（公式 env）でこのタイトル生成呼び出し自体が発生しなく
+ *     なることを実測済みだが、SDK バージョン変化への保険として `resolveRawUsedModel()`（本ファイル
+ *     後方）で「テキストを生成した assistant メッセージの model」を最優先する判定に是正した。
+ * (2) raw 経路の cwd が対象プロジェクト（DevRelay 管理下の git リポジトリ）のままだったため、
+ *     SDK が自動注入する `type:"environment"` アタッチメント（cwd・OS・シェル・日付・モデル名）に
+ *     プロジェクトパスがそのまま載っていた。`connection.ts` 側で `raw-cwd.ts` の中立ディレクトリ
+ *     （`/tmp/seat` 等）に差し替えることで解消する（本ファイルの責務外、`raw-cwd.ts` 参照）。
+ * (3) 上記アタッチメントとは別に、SDK は OAuth アカウントのメールアドレスを `userEmail` という
+ *     userContext ブロックとして注入する（cwd/git とは無関係の経路）。調査の結果 SDK オプション・
+ *     env のいずれからも抑止する手段が無いことを確認した（既知の制約。対象機の Claude ログイン
+ *     アカウントを変更するか、`system` プロンプト側で開示禁止を明示する運用でのみ回避可能）。
+ * (4) `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`（公式 env）を保険として追加した。custom systemPrompt
+ *     下では git status ブロック自体が注入されないことを実測済みだが、SDK バージョン変化への保険。
+ * (5) `persistSession: false` を追加し、raw 呼び出しがトランスクリプトを一切ディスクに書かない
+ *     （`~/.claude/projects/<slug>/` にスラッグを作らない）ようにした。中立 cwd と組み合わせることで
+ *     呼び出しごとのスラッグ増殖を構造的にゼロにする。
  */
 
 /** raw-completion モードのターン数上限（1 ではなく 2。理由は本ファイル冒頭 JSDoc 参照） */
@@ -96,13 +117,21 @@ export const RAW_DISALLOWED_TOOLS: readonly string[] = [
 ];
 
 /**
- * raw-completion モードで SDK 実行時の env にマージする上書き分（auto-memory 遮断・第1層）。
- * `CLAUDE_CODE_DISABLE_AUTO_MEMORY` は同梱 cli.js のゲート関数が最優先で読む公式キルスイッチ。
- * 値は文字列 `'1'` にすること（cli.js 側の判定は小文字化した文字列に対する真偽判定であり、
- * boolean を渡すとそちら側で `.toLowerCase()` が失敗する）。
+ * raw-completion モードで SDK 実行時の env にマージする上書き分（auto-memory 遮断・第1層 +
+ * Phase 1.4 の追加2キー）。値はすべて文字列 `'1'` にすること（同梱 CLI 側の判定は小文字化した
+ * 文字列に対する真偽判定であり、boolean を渡すとそちら側で `.toLowerCase()` が失敗する）。
+ *
+ * - `CLAUDE_CODE_DISABLE_AUTO_MEMORY`: 同梱 CLI のゲート関数が最優先で読む公式キルスイッチ。
+ * - `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`（Phase 1.4）: セッションタイトル生成（Haiku 内部呼び出し）
+ *   を止める公式 env。2.1.278 実測でこの env により `modelUsage` からタイトル生成キーが消えることを
+ *   確認済み（本ファイル冒頭 JSDoc「Phase 1.4」節参照）。
+ * - `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS`（Phase 1.4）: git status/commit 指示の注入を止める公式
+ *   env。custom systemPrompt 下では現状未注入だが、SDK バージョン変化への保険として追加。
  */
 export const RAW_ENV_OVERRIDES: Readonly<Record<string, string>> = {
   CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+  CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
+  CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: '1',
 };
 
 /**
@@ -166,6 +195,8 @@ export interface RawSdkOverrides {
   strictMcpConfig: true;
   maxTurns: number;
   settings: RawSettingsOverride;
+  /** Phase 1.4: トランスクリプトをディスクに書かない（`~/.claude/projects/<slug>/` を作らない） */
+  persistSession: false;
 }
 
 /**
@@ -186,6 +217,7 @@ export function buildRawSdkOverrides(systemPrompt: string): RawSdkOverrides {
     strictMcpConfig: true,
     maxTurns: RAW_MAX_TURNS,
     settings: { autoMemoryEnabled: false, autoMemoryDirectory: RAW_AUTO_MEMORY_DIR },
+    persistSession: false,
   };
 }
 
@@ -303,4 +335,110 @@ export function resolveRawCompletionResult(input: RawCompletionRunInput): RawCom
     errorMessage: 'AI run ended without a completion signal',
     deniedTools,
   };
+}
+
+/**
+ * `resolveRawUsedModel()` が受け取る `modelUsage` の1エントリ（`ModelUsage` 相当）を duck-typing で
+ * 受ける。外部 import ゼロを維持するため、必要な `outputTokens` のみを見る。
+ */
+export interface RawModelUsageEntryLike {
+  outputTokens?: unknown;
+}
+
+/**
+ * `resolveRawUsedModel()` の入力。`ai-runner.ts` の raw 分岐が SDK result メッセージ・
+ * assistant メッセージの観測結果から集めて渡す。
+ */
+export interface RawModelResolutionInput {
+  /**
+   * 返却テキストを生成した最後の assistant メッセージの `message.model`。
+   * SDK はエラー系メッセージで `"<synthetic>"` を返すことがあるため、この値は無効値として扱う
+   * （呼び出し元でのフィルタ漏れに備え、本関数側でも防御的に弾く）。
+   */
+  lastAssistantModel?: string;
+  /** リクエストで指定された model（`RawPromptPayload.model`） */
+  requestedModel?: string;
+  /** SDK result の `modelUsage`（キー=モデル名） */
+  modelUsage?: Record<string, RawModelUsageEntryLike | unknown>;
+}
+
+/** `<synthetic>` 等、SDK がプレースホルダとして使う無効な model 文字列を弾く */
+function isValidModelName(value: string | undefined): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && !value.startsWith('<');
+}
+
+/** `modelUsage` エントリから `outputTokens` を安全に数値として取り出す（欠落・非数値は 0） */
+function readOutputTokens(entry: unknown): number {
+  if (entry && typeof entry === 'object' && 'outputTokens' in entry) {
+    const v = (entry as RawModelUsageEntryLike).outputTokens;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return 0;
+}
+
+/**
+ * `modelUsage` のキーのうち、`requestedModel` と完全一致するもの、無ければ前方一致するものを探す
+ * （例: 指定 `claude-opus-5` に対し `claude-opus-5-20260301` を許容）。前方一致が複数あれば、
+ * 最も短いキー（＝最も具体性の低い一般名に近いもの）を優先する。
+ */
+function findModelUsageKeyMatchingRequest(
+  modelUsage: Record<string, unknown>,
+  requestedModel: string
+): string | undefined {
+  const keys = Object.keys(modelUsage);
+  if (keys.includes(requestedModel)) return requestedModel;
+  const prefixMatches = keys.filter((k) => k.startsWith(requestedModel));
+  if (prefixMatches.length === 0) return undefined;
+  return prefixMatches.reduce((shortest, k) => (k.length < shortest.length ? k : shortest));
+}
+
+/** `modelUsage` のうち `outputTokens` が最大のキーを返す（同点は先に列挙された方を優先） */
+function findModelUsageKeyWithMaxOutputTokens(modelUsage: Record<string, unknown>): string | undefined {
+  let best: string | undefined;
+  let bestTokens = -1;
+  for (const [key, entry] of Object.entries(modelUsage)) {
+    const tokens = readOutputTokens(entry);
+    if (tokens > bestTokens) {
+      best = key;
+      bestTokens = tokens;
+    }
+  }
+  return best;
+}
+
+/**
+ * raw-completion の HTTP レスポンス `model` 欄に載せる「実際に応答テキストを生成したモデル」を
+ * 判定する（Phase 1.4、空レスポンス根治と同じ「無言の誤判定を許さない」思想）。
+ *
+ * 背景: 旧実装は `Object.keys(m.modelUsage)[0]`（`modelUsage` の**先頭キー**）を使用モデルと
+ * 決め打ちしていたが、SDK は毎ターン付随的にセッションタイトル生成（Haiku）等の内部呼び出しを
+ * 行うことがあり、その内部呼び出しが `modelUsage` に先に列挙されると誤った model が報告される
+ * （2.1.278 実測、本ファイル冒頭 JSDoc「Phase 1.4」節参照）。
+ *
+ * 優先順位（この順で最初に解決できた値を採用）:
+ *   1. `lastAssistantModel`（テキストを生成した最後の assistant メッセージの model。`<synthetic>`
+ *      等の無効値は除外）
+ *   2. `requestedModel` と一致する `modelUsage` キー（完全一致 → 前方一致の順）
+ *   3. `modelUsage` のうち `outputTokens` が最大のキー（最終手段。応答が数トークンしかない場合に
+ *      Haiku 内部呼び出しの output の方が多くなり再発しうるため、これを第一候補にはしない）
+ *   4. 上記いずれも解決できなければ `undefined`
+ *
+ * 例外は一切投げない。
+ */
+export function resolveRawUsedModel(input: RawModelResolutionInput): string | undefined {
+  if (isValidModelName(input.lastAssistantModel)) {
+    return input.lastAssistantModel;
+  }
+
+  const modelUsage = input.modelUsage;
+  if (modelUsage && typeof modelUsage === 'object') {
+    if (isValidModelName(input.requestedModel)) {
+      const matched = findModelUsageKeyMatchingRequest(modelUsage, input.requestedModel);
+      if (matched !== undefined) return matched;
+    }
+    const maxOutput = findModelUsageKeyWithMaxOutputTokens(modelUsage);
+    if (maxOutput !== undefined) return maxOutput;
+  }
+
+  return undefined;
 }

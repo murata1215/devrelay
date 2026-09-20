@@ -29,7 +29,7 @@ import { getClaudeExecutableFallback, logClaudeExecutableStatus } from './sdk-ex
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 // raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
-import { buildRawSdkOverrides, buildRawEnv, isRawToolDenied, buildRawDenyMessage } from './raw-completion-mode.js';
+import { buildRawSdkOverrides, buildRawEnv, isRawToolDenied, buildRawDenyMessage, resolveRawUsedModel } from './raw-completion-mode.js';
 
 interface AiSession {
   sessionId: string;
@@ -799,6 +799,9 @@ async function sendPromptToAiSdk(
   let fullOutput = '';
   // 完了シグナルを二重送信しないためのフラグ（result ハンドラで送信済みならループ後の送信をスキップ）
   let completionSent = false;
+  // Phase 1.4: raw-completion 専用。テキストを生成した最後の assistant メッセージの model を記録する
+  // （`resolveRawUsedModel()` の最優先入力。rawMode 以外では記録するだけで参照されない）。
+  let lastTextAssistantModel: string | undefined;
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -1229,6 +1232,10 @@ async function sendPromptToAiSdk(
               return result;
             }
             fullOutput += block.text;
+            // Phase 1.4: raw-completion 専用。このテキストを生成した assistant メッセージの model を
+            // 記録する（`m.message.model` は `BetaMessage.model`。rawMode 以外では記録するだけで
+            // `resolveRawUsedModel()` から参照されないため既存経路への影響は無い）。
+            lastTextAssistantModel = typeof m.message?.model === 'string' ? m.message.model : lastTextAssistantModel;
             console.log(`[claude/sdk] +${block.text.length} chars`);
             onOutput(block.text, false);
             // #355: 「進捗あり」の証拠として P1（テキスト出力）を loop-guard に通知する
@@ -1298,11 +1305,16 @@ async function sendPromptToAiSdk(
         }
 
         // 使用量データ（DB 保存用）
+        // Phase 1.4: rawMode では `modelUsage` の先頭キー（セッションタイトル生成等の内部呼び出しを
+        // 誤って拾いうる、raw-completion-mode.ts 冒頭 JSDoc 参照）ではなく `resolveRawUsedModel()`
+        // に判定を委譲する。非 rawMode（plan/exec 既存経路）は従来どおり先頭キーのまま変更しない。
         result.usageData = {
           usage: m.usage,
           modelUsage: m.modelUsage,
           durationMs: m.duration_ms,
-          model: m.modelUsage ? Object.keys(m.modelUsage)[0] : undefined,
+          model: options.rawMode
+            ? resolveRawUsedModel({ lastAssistantModel: lastTextAssistantModel, requestedModel: options.model, modelUsage: m.modelUsage })
+            : (m.modelUsage ? Object.keys(m.modelUsage)[0] : undefined),
           rateLimits: result.rateLimits,
         };
         console.log(`[claude/sdk] 💾 Usage data captured: duration=${m.duration_ms}ms`);
