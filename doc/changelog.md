@@ -6,6 +6,66 @@
 
 ## 実装済み機能
 
+### raw-completion Phase 1.3 — SDK 同梱 CLI の更新 ＋ auto-memory 遮断（Commit A のみ出荷） (2026-09-20)
+
+Phase 1.2 のスモークで判明した2件（(e) `claude-fable-5-1` が失敗する／(b) auto-memory 経由で
+対象プロジェクトの MEMORY.md が漏れる）の解消を計画した。**Commit A（auto-memory 遮断）は完了・
+commit `fc5fb57`。Commit B（SDK 0.2.77→0.3.278 更新）は停止条件4により中止**し、SDK は
+0.2.77 のまま据え置いている。
+
+#### Commit A: auto-memory 遮断（raw-completion 経路のみ）
+
+SDK 内蔵 `cli.js` の auto-memory ゲート関数を実測したところ、評価順は
+`env CLAUDE_CODE_DISABLE_AUTO_MEMORY`（最優先）→ `CLAUDE_CODE_REMOTE` 系 →
+`settings.autoMemoryEnabled`（未定義なら既定で有効）だった。さらに `settings`
+（`Options.settings` → `--settings` フラグ）は `flagSettings` として
+`settingSources` に依らず無条件でマージされることも確認した。この2点を踏まえ
+3層防御を実装した:
+
+1. env `CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1'`
+2. `settings.autoMemoryEnabled: false`
+3. `settings.autoMemoryDirectory: '~/.devrelay/raw-memory'`（1・2 が両方破られた場合の保険）
+
+一時ディレクトリ（cwd）方式は不採用とした。理由: (a) transcript slug が呼び出しごとに
+無制限増殖する、(b) SDK の `close()` は SIGTERM 後 5 秒で SIGKILL するため後始末が racy、
+(c) 未知の cwd は workspace-trust プロンプトの典型トリガーであり、SDK の大幅バージョンジャンプと
+同時に持ち込むと不確実性が二重化する。
+
+`agents/{linux,macos}/src/services/raw-completion-mode.ts`（byte-for-byte 同一）に
+`RAW_ENV_OVERRIDES` / `RAW_AUTO_MEMORY_DIR` / `buildRawEnv()` / `RawSettingsOverride` を追加。
+`buildRawSdkOverrides()` は意図的に `env` キーを返さない契約を維持（呼び出し元の
+`Object.assign` は全置換のため、`env` を返すと PATH/HOME/OAuth/proxy/DEVRELAY_* を丸ごと
+失う事故になる）。`ai-runner.ts` の raw モード分岐で `sdkOptions.env = buildRawEnv(sdkOptions.env ?? {})`
+として個別マージする。テスト12件追加（`agents/linux` 906/906・`agents/macos` 461/462+skip1、
+両方 green）。`apps/server` 無変更（496/496 不変）。
+
+#### Commit B: SDK 更新は停止条件4により中止
+
+`@anthropic-ai/claude-agent-sdk` を `0.3.278` に上げて実際に展開したところ、**`cli.js` が
+完全に存在しなくなっていた**。0.3.x 系では Claude Code 本体が Bun でコンパイルされた
+単一バイナリになり、`optionalDependencies` のプラットフォーム別パッケージ
+（`@anthropic-ai/claude-agent-sdk-linux-x64` 等、1本あたり217〜237MB）として配布され、
+新設の `extractFromBunfs.js` が実行時に `{tmpdir()}/claude-{uid}` へ抽出する方式に
+変わっていた。
+
+既存の `getClaudeExecutableFallback()` / `logClaudeExecutableStatus()`
+（`agents/{linux,macos}/src/services/ai-runner.ts`）は
+`fs.existsSync(path.join(path.dirname(sdkEntry), 'cli.js'))` のみで同梱バイナリの健全性を
+判定しており、`cli.js` が恒久的に存在しない 0.3.x 系では常に `false` を返す。結果として
+**全 AI コマンドが毎回システム `claude` へのフォールバックを試みる**ことになり、
+プラン記載の停止条件4「`cli.js` が `sdk.mjs` の兄弟でなくなった → 全経路がシステム claude
+に逸れる」がそのまま実測で確定した。型のリネーム等で吸収できる範囲を超えるため、
+プラン通り Commit B を中止し `package.json`（root/agents-linux/agents-macos）と
+`pnpm-lock.yaml` を `0.2.77` / `^0.2.80` へ復元、再ビルド・再テストで Commit A の
+グリーン状態が壊れていないことを確認した。
+
+`claude-fable-5-1` の修正（Phase 1.2 (e)）は本サイクルでは未解消のまま次サイクルへ持ち越す。
+次の試行では `pathToClaudeCodeExecutable` 未指定時の SDK 既定解決を実測し、
+`extractFromBunfs` ベースの新アーキテクチャに対応したフォールバック検出を設計してから
+着手すること。詳細は devlog `doc/devlog/2026-09-20_093326.md` 参照。
+
+---
+
 ### raw-completion Phase 1.2 — permissionMode の見直し（'plan'→'default'） (2026-09-20)
 
 Phase 1.1 適用後の実機再スモーク（submission `cmu8zcxcw00e5iwqczoz2am6n`）の (b)（ペルソナ非漏洩確認）で、
