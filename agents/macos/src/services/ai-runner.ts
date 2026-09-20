@@ -23,7 +23,7 @@ import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 // raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
-import { buildRawSdkOverrides, isRawToolDenied, buildRawDenyMessage } from './raw-completion-mode.js';
+import { buildRawSdkOverrides, buildRawEnv, isRawToolDenied, buildRawDenyMessage } from './raw-completion-mode.js';
 
 interface AiSession {
   sessionId: string;
@@ -948,6 +948,11 @@ async function sendPromptToAiSdk(
   // 使わず、buildRawSdkOverrides() が組み立てる専用の disallowedTools で完全に上書きする。
   if (options.rawMode) {
     Object.assign(sdkOptions, buildRawSdkOverrides(options.systemPrompt ?? ''));
+    // Phase 1.3: auto-memory（~/.claude/projects/<slug>/memory/MEMORY.md）の注入を env 層でも塞ぐ。
+    // SDK 内蔵 cli.js のゲートは env を最優先で読むため、settings 層（buildRawSdkOverrides の
+    // settings.autoMemoryEnabled:false）より確実。env 全体を置き換えず必ずマージする
+    // （buildRawSdkOverrides が env を返さないのはこのため。丸ごと置換すると PATH/proxy/DEVRELAY_* を失う）。
+    sdkOptions.env = buildRawEnv(sdkOptions.env ?? {});
     // deny されたツール名を収集する配列。result へ参照を1回だけ載せておくことで、
     // どの return 経路（result ハンドラ／自然終了フォールバック／早期 return）からも
     // 呼び出し元が canUseTool の deny 履歴を観測できるようにする（onOutput 経由では不可能なため）。
@@ -959,7 +964,7 @@ async function sendPromptToAiSdk(
       console.warn(`🛑 raw mode denied tool: ${toolName}`);
       return { behavior: 'deny', message: buildRawDenyMessage(toolName) };
     };
-    console.log(`🎮 [SDK] Using raw-completion mode (tools disabled, systemPrompt replaced, maxTurns=${sdkOptions.maxTurns})`);
+    console.log(`🎮 [SDK] Using raw-completion mode (tools disabled, systemPrompt replaced, auto-memory disabled, maxTurns=${sdkOptions.maxTurns})`);
   } else if (options.usePlanMode) {
     sdkOptions.permissionMode = 'plan';
     if (options.allowedTools && options.allowedTools.length > 0) {

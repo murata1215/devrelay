@@ -32,6 +32,42 @@
  * maxTurns はプラン仕様の `1` ではなく `2` を採用する（実装プランのリスク欄参照）。SDK のターン計上が
  * 入口/出口どちらを指すか不明であり、off-by-one だと全コールが `error_max_turns` になるおそれがある。
  * `tools:[]` の下では 2 ターン目に到達する手段（ツール呼び出し）が無いため、`2` にしてもコストはゼロ。
+ *
+ * Phase 1.3（auto-memory 遮断、CLAUDE.md・rules・MEMORY.md・auto-memory のいずれも注入されない契約）:
+ * `settingSources: []` は CLAUDE.md/rules（プロジェクト設定）を止めるが、SDK 内蔵の auto-memory 注入
+ * （`~/.claude/projects/<sanitized-cwd>/memory/MEMORY.md` を読み書きする機能）は別経路で、
+ * `settingSources` に依らず動く。同梱 cli.js を実測したところ、有効化ゲートは次の優先順で評価される:
+ *   1. `process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY` が truthy → 無効化（最優先、他の全てに勝つ）
+ *   2. `process.env.CLAUDE_CODE_REMOTE` が truthy かつ `CLAUDE_CODE_REMOTE_MEMORY_DIR` 未設定 → 無効化
+ *   3. `settings.autoMemoryEnabled`（flag settings 層）が定義済みならその値
+ *   4. 上記いずれにも該当しなければ既定で有効
+ * これを受け、raw-completion は 3 層で遮断する:
+ *   1. env `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（`RAW_ENV_OVERRIDES` / `buildRawEnv()`。ゲートが
+ *      最優先で読むため最も確実。`ai-runner.ts` 側で `sdkOptions.env` にマージする、本ファイルの
+ *      `buildRawSdkOverrides()` は env を返さない — 理由は下記）
+ *   2. `settings.autoMemoryEnabled: false`（`buildRawSdkOverrides()` の `settings`）。SDK の
+ *      `Options.settings` はインラインオブジェクトを受け付け、`--settings <json>` として CLI へ渡る。
+ *      cli.js の設定ソース一覧は `settingSources` に依らず `flagSettings`（= `--settings`）を
+ *      無条件で追加するため、`settingSources: []` と併存しても効く
+ *   3. `settings.autoMemoryDirectory: RAW_AUTO_MEMORY_DIR`。万一 1・2 が両方破れても、既定の
+ *      `~/.claude/projects/<sanitized-cwd>/memory/` という「対象プロジェクトの MEMORY.md」への
+ *      注入元を、raw 専用の共有ディレクトリへそらす最後の砦
+ *
+ * 実装プランは当初「raw の cwd を呼び出しごとの空の一時ディレクトリにし完了後に削除する」案だったが、
+ * 上記 3 層防御で同じ隔離をゼロ実行コストで達成できるため意図的に不採用とした。一時ディレクトリ方式は
+ * (a) cwd がトランスクリプトのスラッグも兼ねるため `~/.claude/projects/<slug>/` が呼び出しごとに
+ * 増殖する、(b) SDK の子プロセス終了は非同期（SIGTERM 後 5 秒で SIGKILL）なので `finally` での
+ * 削除が本質的に racy、(c) 未知の cwd は Claude Code の workspace-trust プロンプトの典型的な
+ * トリガーであり、SDK 大幅更新と同一サイクルに持ち込むと不確実性が積み重なる、という欠点があり
+ * この場では採らない。Phase 1.4 以降で `persistSession: false` によりトランスクリプト書き込み
+ * 自体を止める方が cwd 汚染の本筋の解であり、そちらに委ねる。
+ *
+ * `buildRawSdkOverrides()` が `env` キーを一切返さない理由: 呼び出し元（`ai-runner.ts`）は
+ * `Object.assign(sdkOptions, buildRawSdkOverrides(...))` で戻り値を丸ごと展開する。`env` を
+ * 含めてしまうと `sdkOptions.env` 全体（`process.env` 由来の PATH/HOME/OAuth・API キー、
+ * `proxyEnv`、`DEVRELAY_*`）が丸ごと置換されてしまうため、env のマージは呼び出し元の責務として
+ * 明確に分離し、本ファイルは `buildRawEnv()` という「マージ後の新しいオブジェクトを返す」純関数
+ * のみを提供する。
  */
 
 /** raw-completion モードのターン数上限（1 ではなく 2。理由は本ファイル冒頭 JSDoc 参照） */
@@ -60,6 +96,24 @@ export const RAW_DISALLOWED_TOOLS: readonly string[] = [
 ];
 
 /**
+ * raw-completion モードで SDK 実行時の env にマージする上書き分（auto-memory 遮断・第1層）。
+ * `CLAUDE_CODE_DISABLE_AUTO_MEMORY` は同梱 cli.js のゲート関数が最優先で読む公式キルスイッチ。
+ * 値は文字列 `'1'` にすること（cli.js 側の判定は小文字化した文字列に対する真偽判定であり、
+ * boolean を渡すとそちら側で `.toLowerCase()` が失敗する）。
+ */
+export const RAW_ENV_OVERRIDES: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+};
+
+/**
+ * raw-completion 専用の auto-memory ディレクトリ（auto-memory 遮断・第3層）。
+ * 第1・第2層が両方破れた場合でも、既定の `~/.claude/projects/<sanitized-cwd>/memory/`
+ * （＝対象プロジェクトの MEMORY.md）への注入経路をそらすための最後の砦。`~/` は SDK 内蔵
+ * cli.js 側で展開される（`Settings.autoMemoryDirectory` の型 JSDoc に明記されている仕様）。
+ */
+export const RAW_AUTO_MEMORY_DIR = '~/.devrelay/raw-memory';
+
+/**
  * raw-completion 用のユーザープロンプトを組み立てる。
  *
  * 恒等関数（入力をそのまま返す）。「DevRelay の前置き（Agreement / プランモード指示 / 出力先指示）を
@@ -72,6 +126,35 @@ export function composeRawPrompt(userPrompt: string): string {
   return userPrompt;
 }
 
+/**
+ * SDK に渡す `env`（`Options['env']` と構造互換。本ファイルは SDK 型を import しないため
+ * 独自に定義する）。値に `undefined` を許すのは `process.env` がそのまま渡ってくることを
+ * 想定するため。
+ */
+export type RawEnv = Record<string, string | undefined>;
+
+/**
+ * raw-completion 用の env オーバーライドをベース env にマージする（auto-memory 遮断・第1層）。
+ * 恒等関数ではない点が `composeRawPrompt` と異なる: `RAW_ENV_OVERRIDES` を**後勝ち**で上書きする。
+ * ベース env に `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` のような値が既に入っていても `'1'` に強制する
+ * 契約（Agent 起動時の環境変数に依存させない）。
+ *
+ * 呼び出し元の `baseEnv` オブジェクトは変更しない（新しいオブジェクトを返す）。この関数の戻り値を
+ * `sdkOptions.env` へ代入する形で使うこと（`buildRawSdkOverrides()` が `env` を返さない理由は
+ * ファイル冒頭 JSDoc の Phase 1.3 節を参照）。
+ *
+ * @param baseEnv マージ元の env（通常は `sdkOptions.env`）
+ */
+export function buildRawEnv(baseEnv: RawEnv): RawEnv {
+  return { ...baseEnv, ...RAW_ENV_OVERRIDES };
+}
+
+/** `buildRawSdkOverrides()` が `settings` として返す raw 専用の auto-memory 設定（第2・第3層） */
+export interface RawSettingsOverride {
+  autoMemoryEnabled: false;
+  autoMemoryDirectory: string;
+}
+
 /** `buildRawSdkOverrides()` が返す SDK query() オプションの部分集合 */
 export interface RawSdkOverrides {
   systemPrompt: string;
@@ -82,6 +165,7 @@ export interface RawSdkOverrides {
   mcpServers: Record<string, never>;
   strictMcpConfig: true;
   maxTurns: number;
+  settings: RawSettingsOverride;
 }
 
 /**
@@ -101,6 +185,7 @@ export function buildRawSdkOverrides(systemPrompt: string): RawSdkOverrides {
     mcpServers: {},
     strictMcpConfig: true,
     maxTurns: RAW_MAX_TURNS,
+    settings: { autoMemoryEnabled: false, autoMemoryDirectory: RAW_AUTO_MEMORY_DIR },
   };
 }
 

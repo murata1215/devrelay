@@ -7,8 +7,11 @@ import assert from 'node:assert/strict';
 import {
   RAW_MAX_TURNS,
   RAW_DISALLOWED_TOOLS,
+  RAW_ENV_OVERRIDES,
+  RAW_AUTO_MEMORY_DIR,
   composeRawPrompt,
   buildRawSdkOverrides,
+  buildRawEnv,
   isRawToolDenied,
   buildRawDenyMessage,
   resolveRawCompletionResult,
@@ -69,6 +72,90 @@ test('buildRawSdkOverrides: mcpServers は空オブジェクト + strictMcpConfi
 test('buildRawSdkOverrides: maxTurns は RAW_MAX_TURNS と一致する', () => {
   const overrides = buildRawSdkOverrides('sys');
   assert.equal(overrides.maxTurns, RAW_MAX_TURNS);
+});
+
+test('buildRawSdkOverrides: settings.autoMemoryEnabled は false（auto-memory 注入を settings 層で塞ぐ、Phase 1.3 第2層）', () => {
+  const overrides = buildRawSdkOverrides('sys');
+  assert.equal(overrides.settings.autoMemoryEnabled, false);
+});
+
+test('buildRawSdkOverrides: settings.autoMemoryDirectory は raw 専用ディレクトリ（Phase 1.3 第3層。~/ 展開に依存）', () => {
+  const overrides = buildRawSdkOverrides('sys');
+  assert.equal(overrides.settings.autoMemoryDirectory, RAW_AUTO_MEMORY_DIR);
+  assert.match(RAW_AUTO_MEMORY_DIR, /^~\//);
+});
+
+test('buildRawSdkOverrides: settings と settingSources:[] は併存する（flagSettings は setting-sources に依らず常にマージされる）', () => {
+  const overrides = buildRawSdkOverrides('sys');
+  assert.ok(overrides.settings, 'settings が存在しない');
+  assert.deepEqual(overrides.settingSources, []);
+});
+
+test('buildRawSdkOverrides: env を返さない（呼び出し元の env 全体を破壊しない契約）', () => {
+  const overrides = buildRawSdkOverrides('sys');
+  assert.equal('env' in overrides, false);
+});
+
+test('buildRawSdkOverrides: Phase 1.2 までの既存キーが settings 追加後も不変（回帰防止）', () => {
+  const overrides = buildRawSdkOverrides('sys');
+  assert.equal(overrides.systemPrompt, 'sys');
+  assert.deepEqual(overrides.tools, []);
+  assert.deepEqual(overrides.settingSources, []);
+  assert.equal(overrides.disallowedTools, RAW_DISALLOWED_TOOLS);
+  assert.equal(overrides.permissionMode, 'default');
+  assert.deepEqual(overrides.mcpServers, {});
+  assert.equal(overrides.strictMcpConfig, true);
+  assert.equal(overrides.maxTurns, RAW_MAX_TURNS);
+  assert.equal(Object.keys(overrides).length, 9); // キーの黙った追加を検出
+});
+
+// ---- buildRawEnv / RAW_ENV_OVERRIDES（auto-memory 遮断・第1層） ----
+
+test('RAW_ENV_OVERRIDES: CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 のみを含む', () => {
+  assert.deepEqual(RAW_ENV_OVERRIDES, { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
+});
+
+test('buildRawEnv: ベース env（PATH/HOME/proxy/DEVRELAY_*）を保持する', () => {
+  const base = {
+    PATH: '/usr/bin',
+    HOME: '/home/devrelay',
+    HTTPS_PROXY: 'http://proxy:8080',
+    DEVRELAY: '1',
+    DEVRELAY_SESSION_ID: 'raw_abc123',
+    DEVRELAY_PROJECT: '/opt/devrelay',
+  };
+  const result = buildRawEnv(base);
+  for (const key of Object.keys(base)) {
+    assert.equal(result[key], base[key], `${key} が保持されていない`);
+  }
+  assert.equal(result.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+});
+
+test('buildRawEnv: agent 側が 0 で起動していても 1 に倒す（override が後勝ち）', () => {
+  const result = buildRawEnv({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' });
+  assert.equal(result.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+});
+
+test('buildRawEnv: 入力オブジェクトを破壊しない', () => {
+  const base = { PATH: '/usr/bin' };
+  const result = buildRawEnv(base);
+  assert.equal('CLAUDE_CODE_DISABLE_AUTO_MEMORY' in base, false);
+  assert.notEqual(result, base);
+});
+
+test('buildRawEnv: 空 env でも例外を投げず override のみを返す', () => {
+  assert.deepEqual(buildRawEnv({}), { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
+});
+
+test('buildRawEnv: 値が undefined のキーを落とさない（process.env は undefined を含みうる）', () => {
+  const result = buildRawEnv({ FOO: undefined });
+  assert.ok('FOO' in result);
+  assert.equal(result.FOO, undefined);
+});
+
+test('buildRawEnv: 二重適用が冪等', () => {
+  const base = { PATH: '/usr/bin' };
+  assert.deepEqual(buildRawEnv(buildRawEnv(base)), buildRawEnv(base));
 });
 
 // ---- isRawToolDenied / buildRawDenyMessage ----
