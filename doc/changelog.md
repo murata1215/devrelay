@@ -6,6 +6,12 @@
 
 ## 実装済み機能
 
+### raw-completion Phase 2.1 — 軽量席（gpt-5.6-luna / claude-haiku-4-5）は既に許可済みと判明、テストで固定 (2026-09-21)
+
+Phase 2.1 として軽量モデル追加を検討したが、`gpt-5.6-luna`（Codex）・`claude-haiku-4-5`（Claude）は
+既存の `AI_MODEL_CATALOG` に既に含まれており許可リスト変更は不要だった。テスト追加と README 更新のみ
+（`src/` 配下 0 変更、実機確認済み、詳細 [devlog](devlog/2026-09-21_233011.md)）。
+
 ### raw-completion Phase 2 — Codex 経路の追加（terra / sol 席） (2026-09-20)
 
 `POST /api/agent/raw-completion` は Phase 1.4 まで Claude SDK 経路のみだった。Phase 2 でリクエストの

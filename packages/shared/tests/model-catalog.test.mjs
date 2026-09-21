@@ -67,6 +67,25 @@ test('UTILITY_MODEL_ANTHROPIC はユーザー選択可能な AI_MODEL_CATALOG.cl
   assert.ok(UTILITY_MODEL_ANTHROPIC.length > 0);
 });
 
+// raw-completion Phase 2.1（軽量席 gpt-5.6-luna / claude-haiku-4-5 追加の調査）: 両モデルとも
+// この時点で既にカタログに含まれていたと判明。回帰防止として固定する。
+test('codex カタログに gpt-5.6-luna が存在する（raw-completion Phase 2.1 の軽量席用）', () => {
+  const ids = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  assert.ok(ids.includes('gpt-5.6-luna'), `gpt-5.6-luna が見つからない: ${JSON.stringify(ids)}`);
+});
+
+test('codex カタログに sol/terra/luna の3席が揃っている', () => {
+  const ids = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  for (const id of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    assert.ok(ids.includes(id), `${id} が見つからない: ${JSON.stringify(ids)}`);
+  }
+});
+
+test('claude カタログに claude-haiku-4-5 が存在する（raw-completion Phase 2.1 の軽量席用）', () => {
+  const ids = AI_MODEL_CATALOG.claude.map((m) => m.id);
+  assert.ok(ids.includes('claude-haiku-4-5'), `claude-haiku-4-5 が見つからない: ${JSON.stringify(ids)}`);
+});
+
 // 変更3: devin カタログを実測13件に差し替え（4件→13件）。
 // 値は slug か alias のみで family_uid は含めない方針のため、'_' を含む値がないことも併せて検査する。
 test('devin カタログは実測13件である', () => {

@@ -11,6 +11,7 @@ import {
   decideRawAiGate,
   validateRawCodexModel,
 } from '../dist/services/raw-completion-ai.js';
+import { AI_MODEL_CATALOG } from '@devrelay/shared';
 
 // ---- isRawAi ----
 
@@ -103,6 +104,25 @@ test('validateRawCodexModel: 未指定は ok（CLI 既定モデルへフォー�
 test('validateRawCodexModel: terra/sol はカタログ内なので ok', () => {
   assert.deepEqual(validateRawCodexModel('gpt-5.6-terra', CATALOG_IDS), { ok: true });
   assert.deepEqual(validateRawCodexModel('gpt-5.6-sol', CATALOG_IDS), { ok: true });
+});
+
+// Phase 2.1: 軽量席（gpt-5.6-luna / claude-haiku-4-5）追加の動機で調査した結果、
+// gpt-5.6-luna は Phase 2 時点のカタログに既に含まれていたと判明。この事実を回帰防止として固定する。
+test('validateRawCodexModel: luna（軽量席）もカタログ内なので ok（Phase 2.1）', () => {
+  assert.deepEqual(validateRawCodexModel('gpt-5.6-luna', CATALOG_IDS), { ok: true });
+});
+
+test('validateRawCodexModel: 実カタログ（packages/shared の AI_MODEL_CATALOG.codex）で sol/terra/luna が ok', () => {
+  // テスト内の手書き CATALOG_IDS と実カタログの乖離を検出する（呼び出し元 raw-completion-api.ts は
+  // 手書きリストではなく AI_MODEL_CATALOG.codex.map(m => m.id) を渡すため、実カタログでの検証が本番挙動に忠実）。
+  const realCatalogIds = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    assert.deepEqual(
+      validateRawCodexModel(model, realCatalogIds),
+      { ok: true },
+      `${model} が実カタログで ok にならない: ${JSON.stringify(realCatalogIds)}`
+    );
+  }
 });
 
 test('validateRawCodexModel: カタログ外のモデル ID は NG', () => {
