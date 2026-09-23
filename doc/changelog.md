@@ -6,6 +6,68 @@
 
 ## 実装済み機能
 
+### DevRelay Sites Phase 1-B — 公開サイトのアクセスログ集計と全 34 host への展開 (2026-09-23)
+
+Phase 1-A の read-only discovery に続き、公開サイトの Caddy access log を実際に集計して
+`/sites`（管理者限定）でトラフィックを可視化する Phase 1-B を実装・本番展開した。
+
+- `/sites` の一覧・health に加え、アクセス解析（今日・7 日・30 日の PV / UU、Top paths、
+  Referer、UTM、bot 比率、4xx / 5xx、集計の coverage 表示）を追加
+- access log aggregator（`apps/server/src/services/sites/access-aggregator.ts` 等）: cold scan +
+  fd 保持 tail + rotation / gz 二重計上防止 + byte budget によるログ追跡、day bucket は
+  **JST 固定**（`SITES_TIME_ZONE`）で算出。UU は `sha256(secret|date|host|ip)` 先頭 16hex
+  （host を含むため site 間で合算不能）。404 等の非 2xx/3xx は PV に数えない
+- polling ログ削減: ゲームの state polling エンドポイントを Caddy `log_skip` で除外
+  （実測 polling 行 100% 削減・bytes 87.93% 削減、PV/UU/Referer/UTM は維持）
+- 自ヘルスチェック除外: DevRelay 自身の health checker（UA `DevRelay-Sites/1.0`）のログ行を
+  **UA 完全一致 1 条件のみ**で除外（path を条件に混ぜるとトップページの実 PV まで巻き込み、
+  前方一致だと検証専用 UA も巻き込むため、実測で確定した設計）
+- retention: `roll_size 64MiB` / `roll_keep 12` / `roll_keep_for 1440h`（aggregator の
+  cold scan byte budget から逆算して確定）
+- 本番展開は 4 段階: W1 pilot（1 host）→ W2 固定 21 host 一括 rollout → W3 特殊構成 9 host
+  （snippet import 順の是正・クエリ経由の資格情報が乗る host への `log_skip` 追加）→
+  W4 最終 3 host（pixblog.net / ribbon-re.jp / www.ribbon-re.jp、既存の独自 logger を
+  Sites 共有 snippet へ統合）
+- 安全装置（`apps/server/scripts/sites-enable-access-log.ts`）: backup manifest 方式
+  （batchId 完全一致・sha256 drift 検出）、適用状態の冪等ガード（already-applied /
+  inconsistent を eligibility 判定より先に検出）、`--rollback`、`--verify-mirror`
+  （本番非接触の `/tmp` ミラーで適用後の構造を事前検証）、`--no-reload`
+- 最終形: **host 34 / Sites logger 33 / health matcher 33 / 1 host = 1 logger**、
+  Phase 1-B の Caddy reload 累計 **6 回**、`MainPID` / `NRestarts` は一連の作業を通じて不変、
+  既知の regression なし
+- 既知の未対応（Sites の実装起因ではない）: `game001.devrelay.io` 等 backend 未起動による
+  既存 502/404、`/status` を `/sites` へ誘導する UX、ribbon / pixblog の legacy log の将来的な削除
+- 詳細は devlog（[Phase 1-A](devlog/2026-09-22_211641.md)、[B2-0](devlog/2026-09-23_011126.md)、
+  [B2-1](devlog/2026-09-23_102411.md)、[B2-2 Rollback](devlog/2026-09-23_120714.md)、
+  [B2-3](devlog/2026-09-23_124036.md)、[B2-4](devlog/2026-09-23_133642.md)、
+  [pre-W2 Safety Fixes](devlog/2026-09-23_141015.md)、[W2 Rollout](devlog/2026-09-23_144518.md)、
+  [W3 Rollout](devlog/2026-09-23_155800.md)、[W4 Rollout](devlog/2026-09-23_180700.md)）
+
+### DevRelay Sites Phase 1-A — 公開 site 骨格（read-only discovery） (2026-09-22)
+
+DevRelay が公開している Web サイト（Caddy 配下の testflight 等）を一覧化・監視する「DevRelay Sites」の
+Phase 1-A を実装。Caddy 設定変更・アクセスログ導入（Phase 1-B）は対象外とし、**Caddy Admin API・ss/ps・
+`/etc/passwd`・既存 DB（TestflightService/Project/Machine）・外向き HTTP GET だけ**で完結する骨格のみ。
+
+- 新規 `apps/server/src/services/sites/`: `caddy-inventory.ts`（Admin API JSON からの host/upstream/root/
+  ログ有無抽出）、`process-probe.ts`（`ss -Hltne`/`ps`/`/etc/passwd` パーサ、sudo 不使用）、`git-probe.ts`、
+  `site-resolver.ts`（突合ロジック。DB import ゼロの純粋関数として分離し `node --test` から直接検証可能）、
+  `site-inventory-service.ts`（Prisma/fs/execFile を使う I/O 層、60 秒キャッシュ）、`health-checker.ts`
+  （60 秒周期ヘルスチェック、`DEVRELAY_SITES_HEALTH=0` で無効化可）
+- 各値は `Evidence<T>`（確定/条件付き/推測/不明の 4 段階信頼度 + 出どころ）でラップし、directory は
+  「登録上（TestflightService.directory）/ runtime 推定（cwd or ps args）/ Project 候補一覧」を分離表示
+- 新規 `GET/POST /api/sites*`（`requireSystemAdmin` 限定、既存 `/api/services/status` と同じ流儀）、
+  WebUI `apps/web/src/pages/SitesPage.tsx`（`/sites`、管理者のみナビ表示）
+- **実機で発見した注意点**: Node の組み込み `fetch()`（undici）は Caddy Admin API 呼び出し時に既定で
+  空の `Origin:` ヘッダを送り `client is not allowed to access from origin ''` として 403 で弾かれる
+  （`curl`/`http.get` は通る）。`fetchCaddyInventory()` で明示的に `Origin: http://127.0.0.1:2019` を
+  付与して回避（`caddy-inventory.ts`）
+- テスト: `sites-caddy-inventory.test.mjs`/`sites-process-probe.test.mjs`/`sites-resolver.test.mjs`
+  （新規 20 件、実機の Caddy JSON 構造・`ss`/`ps` 出力を縮約したフィクスチャで検証）。実機の Caddy
+  Admin API・DB に対する読み取り専用スモークテストで dangou-card-viewer 等の突合結果を確認済み
+- DB schema 変更なし・Caddy 設定変更なし。`git diff --stat` に `testflight-manager.ts`/`schema.prisma`/
+  `scripts/` は含まれない。詳細 [devlog](devlog/2026-09-22_211641.md)
+
 ### raw-completion Phase 2.1 — 軽量席（gpt-5.6-luna / claude-haiku-4-5）は既に許可済みと判明、テストで固定 (2026-09-21)
 
 Phase 2.1 として軽量モデル追加を検討したが、`gpt-5.6-luna`（Codex）・`claude-haiku-4-5`（Claude）は

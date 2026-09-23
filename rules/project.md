@@ -5,6 +5,31 @@
 
 ---
 
+## Sites access log の除外条件は UA 完全一致で書く・roll 値は scan budget から逆算する（Phase 1-B B2-4, 2026-09-23）
+
+DevRelay Sites の自前ヘルスチェッカー（`health-checker.ts` の UA `DevRelay-Sites/1.0`）は
+`GET https://<host>/` を叩く。これは**実ユーザーのトップページ PV と全く同じパス**なので、
+access log から自ヘルスチェックだけを除外する `log_skip` matcher に path 条件を混ぜると
+実トラフィックの PV まで巻き込んで消してしまう。またログの保持設定（`roll_size`/`roll_keep`/
+`roll_keep_for`）を決める際は、ディスク容量だけでなく aggregator の cold scan が読める
+byte budget（展開後）も同時に満たす必要がある。予算を超えると `coverage.complete` が
+永久に false のまま固まる。
+
+- 自ヘルスチェックの除外は **UA 完全一致 1 条件のみ**にする。前方一致にすると
+  `DevRelay-Sites-ReadOnlyCheck/1.0` のような検証専用 UA まで巻き込み、
+  「1 request → 正確に 1 log line」という検証がそもそも成立しなくなる
+- host / remote_ip を条件に加えない（host ごとの差分を作らない、egress IP 変更で壊れる）
+- `roll_size × (roll_keep + 1)`（展開後の総コーパスサイズ）は、必ず
+  `access-aggregator.ts` の `DEFAULT_BYTE_BUDGET`（既定 1.5GiB、`SITES_LOG_SCAN_BYTES_MAX` で上書き可）
+  を下回る値にする。上回ると cold scan が `truncatedReason: 'byte_budget'` で打ち切られ、
+  `WINDOW_DAYS`（30日）分の coverage が完成しない
+- 実装は `apps/server/src/services/sites/site-log-rules.ts`（`ROLLOUT_ROLL_CONFIG` /
+  `resolveRollConfig()` / `renderSnippet()`）、`access-aggregator.ts`（`DEFAULT_BYTE_BUDGET` /
+  `WINDOW_DAYS`）、`health-checker.ts`（`USER_AGENT`）、`sites-rules.ts`（`OWN_HEALTH_CHECK_UA` /
+  `isOwnHealthCheck()`）を参照
+
+---
+
 ## `irm | iex` で配布する PowerShell スクリプトは自己 kill に注意する（Uninstall コマンド強化, 2026-09-17）
 
 `Get-Process`/`Get-CimInstance` で `devrelay` を含むプロセスを機械的に kill するスクリプトを

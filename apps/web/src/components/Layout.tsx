@@ -46,9 +46,13 @@ export function Layout({ children }: LayoutProps) {
   ];
 
   // 歯車メニュー（デスクトップ）／モバイルメニュー下段に出す二次ナビ
+  // DevRelay Sites（Phase 1-A）は user.isSystemAdmin のときのみ表示する（SettingsPage.tsx の
+  // isSystemAdmin タブ出し分けと同形。サーバー側も requireSystemAdmin で 403 にするので、
+  // ここでの出し分けは UI 上の見せ方の一貫性のためであり、それ自体がアクセス制御ではない）。
   const secondaryNavigation = [
     { name: t('nav.devReports'), href: '/dev-reports' },
     { name: t('nav.projects'), href: '/projects' },
+    ...(user?.isSystemAdmin ? [{ name: t('nav.sites'), href: '/sites' }] : []),
     { name: t('nav.settings'), href: '/settings' },
     { name: t('nav.liteUi'), href: '/lite' },
   ];

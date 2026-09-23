@@ -22,6 +22,9 @@ import { initVapid } from './services/push-notification-service.js';
 import { initFcm } from './services/fcm-service.js';
 import { startAutoUpdateSweep } from './services/auto-updater.js';
 import { startCapabilitySweep } from './services/capability-sweep.js';
+import { sitesApiRoutes } from './routes/sites-api.js';
+import { startSiteHealthChecker } from './services/sites/health-checker.js';
+import { startAccessLogAggregator } from './services/sites/access-aggregator.js';
 import { mcpRoutes } from './mcp/server.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
@@ -127,6 +130,15 @@ async function main() {
   // サイクルP1: Capability 配布基盤の定期スイープを開始
   startCapabilitySweep();
 
+  // DevRelay Sites Phase 1-A: 公開 site ヘルスチェックの定期スイープを開始
+  // （Caddy 設定・ログには一切触れない read-only discovery。DEVRELAY_SITES_HEALTH=0 で無効化可）
+  startSiteHealthChecker();
+
+  // DevRelay Sites Phase 1-B: アクセスログ集計（PV/UU/Referer/UTM/bot/4xx5xx）の定期スイープを開始。
+  // B1 時点では Caddy 側にログ設定が無いため実質 no-op（cold scan がファイル無しで完了するだけ）。
+  // DEVRELAY_SITES_ACCESS_LOG=0 で無効化可。
+  startAccessLogAggregator();
+
   // Plugins
   await app.register(cors, { origin: true });
   await app.register(websocket);
@@ -143,6 +155,7 @@ async function main() {
   registerDocumentApiRoutes(app);  // Agent 向けドキュメント検索 API（マシントークン認証）
   registerAgentDocumentApiRoutes(app);  // エージェントドキュメント CRUD API（WebUI 認証）
   registerRawCompletionRoutes(app);  // raw-completion（ゲーム席用の素の completion API、マシントークン認証）
+  await app.register(sitesApiRoutes);  // DevRelay Sites Phase 1-A: 公開 site 一覧・ヘルス（管理者限定・read-only）
 
   // Agent WebSocket endpoint
   app.register(async (fastify) => {

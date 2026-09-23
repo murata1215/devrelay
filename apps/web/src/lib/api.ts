@@ -1024,3 +1024,152 @@ export const org = {
     return request('PUT', '/org/ai-defaults', { aiModelDefaults });
   },
 };
+
+// DevRelay Sites Phase 1-A: 公開 site 一覧・ヘルス（システム管理者限定・read-only）
+export type SiteConfidence = 'confirmed' | 'conditional' | 'inferred' | 'unknown';
+export type SiteKind = 'testflight' | 'reverse_proxy' | 'file_server' | 'php' | 'other';
+export type SiteHealthState = 'up' | 'degraded' | 'down' | 'unknown';
+
+export interface SiteEvidence<T> {
+  value: T | null;
+  confidence: SiteConfidence;
+  source: string;
+  note?: string;
+}
+
+export interface SiteWarning {
+  code: string;
+  severity: 'error' | 'warn' | 'info';
+  message: string;
+}
+
+export interface SiteProjectCandidate {
+  id: string;
+  name: string;
+  displayName: string | null;
+  path: string;
+  machineName: string;
+  confidence: SiteConfidence;
+  reason: string;
+}
+
+export interface SiteHealth {
+  state: SiteHealthState;
+  httpStatus: number | null;
+  latencyMs: number | null;
+  checkedAt: string | null;
+  error: string | null;
+}
+
+export interface SiteRecord {
+  host: string;
+  aliases: string[];
+  kind: SiteKind;
+  configSource: string | null;
+  upstream: SiteEvidence<{ dial: string; port: number | null }>;
+  staticRoot: SiteEvidence<string>;
+  hasAccessLog: boolean;
+  listen: SiteEvidence<{ bind: string; uid: number; unixUser: string | null; cgroupUnit: string | null }>;
+  process: SiteEvidence<{ pid: number; cwd: string | null; cmdline: string }>;
+  testflight: SiteEvidence<{
+    id: string;
+    name: string;
+    port: number;
+    directory: string;
+    status: string;
+    template: string | null;
+    ownerUserId: string;
+    createdAt: string;
+  }>;
+  directories: {
+    registered: SiteEvidence<string>;
+    runtime: SiteEvidence<string>;
+    candidates: SiteProjectCandidate[];
+  };
+  project: SiteEvidence<{ id: string; name: string; displayName: string | null; path: string; machineName: string }>;
+  machine: SiteEvidence<{ id: string; name: string; online: boolean }>;
+  git: SiteEvidence<{ branch: string | null; head: string | null; remote: string | null }>;
+  health: SiteHealth;
+  warnings: SiteWarning[];
+  /** Phase 1-B: アクセス解析統計。ログ未導入 site や集計未完了時は null。 */
+  stats: SiteStats | null;
+}
+
+// DevRelay Sites Phase 1-B: アクセス解析（PV/UU/Referer/UTM/bot/4xx5xx）
+export interface SiteStatsCoverage {
+  requestedDays: 30;
+  oldestCoveredDate: string | null;
+  coveredDays: number;
+  complete: boolean;
+  truncated: boolean;
+  truncatedReason: 'byte_budget' | 'log_retention' | 'gap_detected' | null;
+  measuredSince: string | null;
+  /** day bucket 集計の基準タイムゾーン（B2-0 修正3。常に 'Asia/Tokyo'）。 */
+  timeZone: 'Asia/Tokyo';
+}
+
+export interface SiteDailyPv {
+  date: string;
+  count: number | null;
+}
+
+export interface SiteStatsCountEntry {
+  key: string;
+  count: number;
+}
+
+export interface SiteStats {
+  today: { pv: number; uu: number | null; uuTruncated: boolean };
+  last7d: { pv: number };
+  last30d: { pv: number; daily: SiteDailyPv[] };
+  topPaths: SiteStatsCountEntry[];
+  referers: SiteStatsCountEntry[];
+  utm: { source: SiteStatsCountEntry[]; medium: SiteStatsCountEntry[]; campaign: SiteStatsCountEntry[] };
+  botRatio: number | null;
+  status4xx: number;
+  status5xx: number;
+  detailTruncated: boolean;
+  coverage: SiteStatsCoverage;
+  excludedByRules: boolean;
+}
+
+export interface SitesMeta {
+  caddyAdminReachable: boolean;
+  ssAvailable: boolean;
+  hostname: string;
+  healthEnabled: boolean;
+  lastHealthRunAt: string | null;
+  counts: { up: number; degraded: number; down: number; unknown: number; withoutAccessLog: number };
+  orphans: Array<{ kind: 'testflight-row-no-caddy' | 'directory-only'; name: string; path: string; status?: string }>;
+  unmeasuredCount: number;
+  statsReady: boolean;
+  /** day bucket 集計の基準タイムゾーン（B2-0 修正3。常に 'Asia/Tokyo'）。 */
+  timeZone: 'Asia/Tokyo';
+}
+
+export const sites = {
+  /** 一覧取得。`refresh:true` でサーバー側 60 秒キャッシュを無視して再取得する。 */
+  async list(refresh = false): Promise<{ sites: SiteRecord[]; generatedAt: string; meta: SitesMeta }> {
+    return request('GET', `/sites${refresh ? '?refresh=1' : ''}`);
+  },
+
+  /** 1 site の詳細（Git・process・Project 候補一覧など、一覧より詳しい情報を含む）。 */
+  async get(host: string): Promise<SiteRecord> {
+    return request('GET', `/sites/${encodeURIComponent(host)}`);
+  },
+
+  /** 即時ヘルスチェック（読み取り専用の外向き HTTP GET を 1 回打つだけ）。 */
+  async healthCheck(host: string): Promise<SiteHealth> {
+    return request('POST', `/sites/${encodeURIComponent(host)}/health-check`);
+  },
+
+  /** 全体メタ情報（Caddy Admin API 到達性・ヘルスチェック有効状態・orphan 一覧等）。 */
+  async meta(): Promise<SitesMeta> {
+    return request('GET', '/sites/_meta');
+  },
+
+  /** Phase 1-B: 1 site のアクセス解析統計。ログ未導入・集計未完了時は `stats: null`。 */
+  async stats(host: string): Promise<{ host: string; stats: SiteStats | null }> {
+    return request('GET', `/sites/${encodeURIComponent(host)}/stats`);
+  },
+};

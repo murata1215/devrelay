@@ -8,6 +8,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { mkdir, writeFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
 import { prisma } from '../db/client.js';
@@ -17,6 +18,7 @@ import {
   PHASER_CLAUDE_MD,
   PHASER_PROJECT_RULES,
 } from '../templates/phaser-templates.js';
+import { ACCESS_LOG_SNIPPET_FILE, renderImportLine } from './sites/site-log-rules.js';
 
 const execAsync = promisify(exec);
 
@@ -125,10 +127,18 @@ function generatePlaceholderHtml(name: string): string {
  * Caddy サイト設定を生成（reverse_proxy + file_server フォールバック）
  * バックエンド未起動時は handle_errors でプレースホルダー HTML を自動表示。
  * ※ /home/devrelay に chmod o+x が必要（Caddy ユーザーがディレクトリを通過できるように）
+ *
+ * DevRelay Sites Phase 1-B: アクセスログ snippet（`sites.d/00-snippets` の `(sites_access_log)`）が
+ * 配備されている環境でのみ `import sites_access_log` 行を足す。**実行時ゲート**にしているのは、
+ * B1（コード実装のみ）リリース後・snippet 配備前（B2 実施前）に新規 testflight を作成すると、
+ * 存在しない snippet を import してしまい `caddy adapt`／reload が失敗する「順序ハザード」を
+ * 避けるため（Plan「新規 testflight への自動付与」参照）。
  */
 function generateCaddyConfig(name: string, port: number, directory: string): string {
+  const hasAccessLogSnippet = existsSync(`${CADDY_SITES_DIR}/${ACCESS_LOG_SNIPPET_FILE}`);
+  const importLine = hasAccessLogSnippet ? renderImportLine() : '';
   return `${name}.${DOMAIN_SUFFIX} {
-  reverse_proxy localhost:${port}
+${importLine}  reverse_proxy localhost:${port}
   handle_errors {
     rewrite * /index.html
     root * ${directory}/placeholder

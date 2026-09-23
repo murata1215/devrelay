@@ -16,6 +16,7 @@ import { MemberActivityPage } from './pages/MemberActivityPage';
 import { ChatPage } from './pages/ChatPage';
 import { DevReportsPage } from './pages/DevReportsPage';
 import { TeamPage } from './pages/TeamPage';
+import { SitesPage } from './pages/SitesPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { LitePage } from './pages/LitePage';
 import { NotificationBanner } from './components/NotificationBanner';
@@ -53,6 +54,7 @@ function ProtectedContent() {
             <Route path="/activity" element={<MemberActivityPage />} />
             <Route path="/dev-reports" element={<DevReportsPage />} />
             <Route path="/machines" element={<MachinesPage />} />
+            <Route path="/sites" element={<SitesPage />} />
             <Route path="/team" element={<TeamPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
