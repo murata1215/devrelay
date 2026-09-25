@@ -377,8 +377,21 @@ function readOutputTokens(entry: unknown): number {
 }
 
 /**
+ * 前方一致の残り部分が「日付スナップショット接尾辞」形式（`-YYYYMMDD`、8桁）かどうかを判定する。
+ * Opus 5.5 追加サイクルで発見: 単純な `startsWith()` だと `claude-opus-5` が
+ * `claude-opus-5-5`（別モデル・Claude Opus 5.5）にも前方一致してしまい、誤ったモデル名を
+ * 報告しうる。日付スナップショット接尾辞のみを許容することで、この種の「新モデルの ID が
+ * 旧モデルの ID を接頭辞として含む」ケースを排除する。
+ */
+function isDateSnapshotSuffix(remainder: string): boolean {
+  return /^-\d{8}$/.test(remainder);
+}
+
+/**
  * `modelUsage` のキーのうち、`requestedModel` と完全一致するもの、無ければ前方一致するものを探す
- * （例: 指定 `claude-opus-5` に対し `claude-opus-5-20260301` を許容）。前方一致が複数あれば、
+ * （例: 指定 `claude-opus-5` に対し `claude-opus-5-20260301` を許容）。前方一致は残り部分が
+ * 日付スナップショット接尾辞（`-YYYYMMDD`）の場合のみ許容する（`claude-opus-5` に対し
+ * `claude-opus-5-5` のような**別モデル**は許容しない）。前方一致が複数あれば、
  * 最も短いキー（＝最も具体性の低い一般名に近いもの）を優先する。
  */
 function findModelUsageKeyMatchingRequest(
@@ -387,7 +400,7 @@ function findModelUsageKeyMatchingRequest(
 ): string | undefined {
   const keys = Object.keys(modelUsage);
   if (keys.includes(requestedModel)) return requestedModel;
-  const prefixMatches = keys.filter((k) => k.startsWith(requestedModel));
+  const prefixMatches = keys.filter((k) => k.startsWith(requestedModel) && isDateSnapshotSuffix(k.slice(requestedModel.length)));
   if (prefixMatches.length === 0) return undefined;
   return prefixMatches.reduce((shortest, k) => (k.length < shortest.length ? k : shortest));
 }

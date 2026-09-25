@@ -90,6 +90,20 @@ test('resolveRawModel: (c) requestedModel の前方一致で解決する', () =>
   assert.equal(model, 'claude-opus-5-20260301');
 });
 
+// Opus 5.5 追加サイクル: claude-opus-5-5 の登場で claude-opus-5 の単純な startsWith 前方一致が
+// 別モデルへ誤マッチしうる問題を修正した回帰テスト。
+// 修正前は prefixMatches=['claude-opus-5-5','claude-opus-5-20260301'] のうち最短キー
+// 'claude-opus-5-5'（別モデル・Claude Opus 5.5）を誤って採用していた。
+// 修正後は日付スナップショット接尾辞（-YYYYMMDD）のみを前方一致として許容するため、
+// 本来の対象である 'claude-opus-5-20260301' のみが候補に残る。
+test('resolveRawModel: (c2) requestedModel が別モデルの ID の接頭辞になっていても誤マッチしない（claude-opus-5 → claude-opus-5-5 ではなく claude-opus-5-20260301 を選ぶ）', () => {
+  const model = resolveRawModel(
+    { modelUsage: { 'claude-opus-5-5': { outputTokens: 100 }, 'claude-opus-5-20260301': { outputTokens: 50 } } },
+    'claude-opus-5'
+  );
+  assert.equal(model, 'claude-opus-5-20260301');
+});
+
 test('resolveRawModel: (d) requestedModel 未指定なら outputTokens 最大の modelUsage キー（最終手段）', () => {
   const model = resolveRawModel(
     { modelUsage: { 'claude-haiku-4-5-20251001': { outputTokens: 15 }, 'claude-opus-5': { outputTokens: 675 } } },

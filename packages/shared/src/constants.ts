@@ -67,11 +67,20 @@ export type ModelSelectableAiTool = 'claude' | 'codex' | 'gemini' | 'devin';
  * ツールごとのモデル選択肢カタログ。
  * server（command-handler.ts）・web（SettingsPage.tsx）の両方がここだけを参照する単一情報源。
  * ここに無い ID もチャット/WebUI から自由入力で指定可能（新モデル追従のため、カタログは随時更新する運用）。
- * 2026-09 時点のスナップショット（#353: Claude Fable 5.1 追加。既存モデルは全て Active のため削除なし）。
+ * 2026-09 時点のスナップショット（#353: Claude Fable 5.1 追加。Opus 5.5 追加サイクル: 公式では
+ * Fable 5 / Opus 5 / Opus 4.8 が legacy 扱いに移ったが、いずれも Active で利用可能なため削除は0件）。
+ *
+ * 【新モデル追加時の注意】フル ID なら CLI/Node.js を更新せず使えるという設計判断（本ファイル末尾の
+ * `isUnsafeModelId` 節参照）は、#353（Fable 5.1 / 同梱 Claude Code ≥2.1.251 必須）と Opus 5.5 追加
+ * サイクル（≥2.1.280 必須）で**2度**破れている。カタログに ID を追加するだけでは Agent 側の同梱
+ * Claude Code（`@anthropic-ai/claude-agent-sdk` の `claudeCodeVersion`）が対応していなければ実行時に
+ * 400 で失敗する。新モデル追加時は必ず実機/実SDKで `query({options:{model:'<新ID>'}})` を試し、
+ * 拒否されないか・要求バージョンが何かを確認してから追加すること。
  */
 export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
   claude: [
     { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', description: '最高性能（最新、$10/$50 per MTok、文脈1M/出力128K、adaptive thinking 常時）' },
+    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: '高性能（最新・推奨、$4/$20 per MTok、文脈1M/出力128K、adaptive thinking 常時、既定 effort=medium）' },
     { id: 'claude-fable-5', name: 'Claude Fable 5', description: '最高性能（Mythos クラス、$10/$50 per MTok）' },
     { id: 'claude-opus-5', name: 'Claude Opus 5', description: '高性能（$5/$25 per MTok）' },
     { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', description: '高性能' },

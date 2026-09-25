@@ -12,9 +12,16 @@ test('claude カタログに claude-fable-5-1 が存在する', () => {
   assert.ok(ids.includes('claude-fable-5-1'), `claude-fable-5-1 が見つからない: ${JSON.stringify(ids)}`);
 });
 
-test('claude カタログから既存モデルが削除されていない（#353 時点で削除対象は0件）', () => {
+test('claude カタログに claude-opus-5-5 が存在する（Opus 5.5 追加サイクル）', () => {
+  const ids = AI_MODEL_CATALOG.claude.map((m) => m.id);
+  assert.ok(ids.includes('claude-opus-5-5'), `claude-opus-5-5 が見つからない: ${JSON.stringify(ids)}`);
+});
+
+test('claude カタログから既存モデルが削除されていない（#353/Opus 5.5 追加サイクル時点で削除対象は0件）', () => {
   const ids = AI_MODEL_CATALOG.claude.map((m) => m.id);
   const expectedRetained = [
+    'claude-fable-5-1',
+    'claude-opus-5-5',
     'claude-fable-5',
     'claude-opus-5',
     'claude-opus-4-8',

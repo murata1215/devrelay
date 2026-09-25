@@ -1,8 +1,12 @@
 // サイクル SDK-2 ④b: 同梱 Claude Code バージョンが claude-fable-5-1 の要求下限を満たすことを
 // 保証する回帰テスト。#353 で claude-fable-5-1 は CC >= 2.1.251 を要求すると判明した
 // （SDK 0.2.80 の同梱 CC は 2.1.80 で満たさない）。
+// Opus 5.5 追加サイクルで下限を 2.1.280 に引き上げ: claude-opus-5-5 は同梱 CC >= 2.1.280 を要求する
+// （SDK 0.3.278 の同梱 CC 2.1.278 では実測で
+// `API Error: 400 Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is required`
+// を返して拒否される。SDK を 0.3.282（同梱 CC 2.1.282）へバンプして解消）。
 // バージョン比較は成分ごとの数値比較で行う（文字列比較だと '2.1.80' > '2.1.251' になる罠がある）。
-// SDK の具体的なバージョン番号（例: '0.3.278'）はこのテストにハードコードしない
+// SDK の具体的なバージョン番号（例: '0.3.282'）はこのテストにハードコードしない
 // （将来の再バンプ時に二重修正が要らないように、package.json の宣言と実インストールの一致だけを見る）。
 // agents/macos/tests/sdk-version.test.mjs と byte-for-byte 同一。
 
@@ -29,7 +33,7 @@ function isVersionGte(a, b) {
   return aPat >= bPat;
 }
 
-const MIN_CLAUDE_CODE_VERSION = '2.1.251'; // claude-fable-5-1 の要求下限（#353）
+const MIN_CLAUDE_CODE_VERSION = '2.1.280'; // claude-opus-5-5 の要求下限（Opus 5.5 追加サイクル。#353 時点は 2.1.251）
 
 test('isVersionGte: 成分ごとの数値比較（文字列比較の罠を回避）', () => {
   assert.equal(isVersionGte('2.1.278', '2.1.251'), true);
@@ -39,7 +43,7 @@ test('isVersionGte: 成分ごとの数値比較（文字列比較の罠を回避
   assert.equal(isVersionGte('2.2.0', '2.1.251'), true);
 });
 
-test('同梱 Claude Code バージョンが claude-fable-5-1 の要求下限を満たす', () => {
+test('同梱 Claude Code バージョンが claude-opus-5-5 の要求下限を満たす', () => {
   const probe = probeSdkExecutable();
   assert.ok(probe.claudeCodeVersion, 'claudeCodeVersion が取得できていない');
   assert.ok(

@@ -6,6 +6,43 @@
 
 ## 実装済み機能
 
+### Claude Opus 5.5 対応 — カタログ追加 + SDK バンプ + raw-completion 前方一致修正 (2026-09-25)
+
+WebUI モデル選択ドロップダウンの画像添付を受け「opus5.5 対応できる？」という依頼を調査・実装した。
+公式 Models overview（`platform.claude.com/docs/en/about-claude/models/overview.md`）を実測し、
+Claude Opus 5.5（`claude-opus-5-5`、$4/input MTok・$20/output MTok、文脈1M/出力128K、adaptive
+thinking 常時、既定 effort=`medium`）の実在を確認した。
+
+- **カタログ追加だけでは動かないことを実機で先に実証**: 現行 SDK `0.3.278`（同梱 Claude Code
+  2.1.278）で `query({model:'claude-opus-5-5'})` を実行すると
+  `API Error: 400 Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is required`
+  で明示的に拒否される。`rules/project.md` の「フル ID は CLI 更新不要で使える」という設計判断は
+  #353（Claude Fable 5.1）に続き**2度目**破れた
+- `packages/shared/src/constants.ts`: `AI_MODEL_CATALOG.claude` に `claude-opus-5-5` を
+  `claude-fable-5-1` の直後に追加。**削除は0件**（Fable 5/Opus 5/Opus 4.8 は legacy 扱いに移ったが
+  引き続き Active のため）。新モデル追加時は実機で `query()` を試すべきという注意を JSDoc に追記
+- `@anthropic-ai/claude-agent-sdk` を `0.3.278` → `0.3.282`（同梱 Claude Code 2.1.282）へバンプ
+  （root / `agents/linux` / `agents/macos` の3箇所、キャレット無し完全固定）。
+  `sdk-version.test.mjs` の `MIN_CLAUDE_CODE_VERSION` を `2.1.251` → `2.1.280` へ引き上げ。
+  ソース変更は発生せず（サイクル SDK-1/SDK-2 と同じ設計がバンプを吸収）
+- raw-completion のモデル名解決ロジック（server `raw-completion-response.ts` の
+  `findModelUsageKeyMatchingRequest()`、agents/linux・macos `raw-completion-mode.ts` の同名関数）が
+  単純な `startsWith()` 前方一致だったため、`claude-opus-5` 指定時に `claude-opus-5-5`（別モデル）へ
+  誤マッチしうる問題を発見・修正した。前方一致を `-YYYYMMDD`（日付スナップショット接尾辞）の場合の
+  みに限定する `isDateSnapshotSuffix()` を新設（実害は表示のみで優先度1の `usageData.model`/
+  `lastAssistantModel` が通常勝つため発生頻度は低いが、Opus 5.5 登場で初めて顕在化する曖昧さ）
+- バンプ前後の実機スモークで `claude-opus-5-5` が拒否→成功に切り替わることを確認し、
+  `claude-fable-5-1` の非退行も確認した
+- テスト: `packages/shared` 51/51・`apps/server` 682/682（raw-completion 系のみ再実行でも
+  56/56）・`agents/linux` 1025/1026（1件はフルスイート内でのみ発生する既知 node:test ランナー
+  IPC flake と特定、単体実行では3/3連続 green、新規テストは53/53 green）・`agents/macos`
+  590/591 + skip1・`apps/web` 512/512（安全確認のため追加実行）すべて green。6 workspace
+  build green、linux/macos の byte-identical 維持を確認
+- 反映: `apps/`/`packages/` に変更ありのため `pm2 restart devrelay-server` 必須、各マシンで `u`
+  必須（SDK バンプ本体＋raw-completion 修正の適用）。DB マイグレーション不要
+
+詳細: [devlog](devlog/2026-09-25_123500.md)
+
 ### DevRelay Sites Phase 1-B — 公開サイトのアクセスログ集計と全 34 host への展開 (2026-09-23)
 
 Phase 1-A の read-only discovery に続き、公開サイトの Caddy access log を実際に集計して
