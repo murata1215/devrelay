@@ -2193,3 +2193,47 @@ test009 で「TEST.TXT を作る作業をしてみてください」（`e.` で�
    gemini のハードコード `auto_edit`（plan モードを見ない）、PTY/terminalMode（`canUseTool` 自体を
    使わない）、devin（`usePlanMode` を常に false に強制、別のガードで担保）、Windows agent
    （`plan-permission.ts` 自体が存在しない）。
+
+---
+
+## SDK query() の prompt は文字列を渡してはいけない（2026-09-26）
+
+exec ターンで Write/Edit/許可リスト外 Bash が `Tool permission request failed: AbortError: Stream
+closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合の根治サイクルで確定した設計判断。
+
+1. **`@anthropic-ai/claude-agent-sdk` の `query({ prompt, ... })` に文字列を渡すと、SDK は
+   `isSingleUserTurn = true` を立て、最初の `result` メッセージを受信した瞬間に CLI サブプロセスへの
+   stdin を閉じる**（`sdk.mjs` の `readMessages()` 内、`isSingleUserTurn` ガード付きで
+   `transport.endInput()` を呼ぶ）。この stdin は CLI がツール承認（`can_use_tool` control
+   request）をホストへ問い合わせるときの**唯一の応答経路**でもある。SDK にはこれを無効化する
+   オプションは存在せず、`isSingleUserTurn` は `typeof prompt === "string"` から機械的に決まる。
+2. **DevRelay は 2026-09-20（`840d1e4`、バックグラウンド Agent 対応）以降、「途中 result」
+   （bg task 稼働中の result、`--resume` 直後に CLI が合成する空 result）を終端とみなさず
+   `decideResultDeferral()`（`sdk-background-tasks.ts`）で延期して for-await を読み続ける**。
+   この設計と (1) の SDK の挙動が組み合わさると、stdin が閉じた状態でターンが続行され、以降
+   ホストへの問い合わせを要するツール呼び出しが全て `AbortError: Stream closed` になる。
+   Read や読み取り専用 Bash は SDK/CLI 内の安全判定で `canUseTool` 到達前に許可されるため、
+   そこだけ動いて見える（`CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` 警告が示す挙動そのもの）。
+3. **対策は `prompt` を「ターン完了まで完了しない `AsyncIterable`」に差し替えること**
+   （`agents/{linux,macos}/src/services/sdk-prompt-stream.ts`、`buildSdkPromptStream()`）。
+   SDK の `Query.streamInput()` は渡された stream を for-await で読み切ってから（＝ `done: true`
+   を返してから）初めて `transport.endInput()` を呼ぶため、呼び出し元（`ai-runner.ts`）がターンの
+   `finally` に到達するまで generator を pending のまま保持すれば stdin は閉じない。
+4. **単発 yield して即 return するだけの generator では不十分**なことに注意。それだと
+   `streamInput()` の for-await が即座に完了し、結局ターン完走前に stdin が閉じてしまう
+   （`hasBidirectionalNeeds()` が true の場合は `waitForFirstResult()` の後、いずれにせよ
+   for-await 完了直後に `endInput()` が呼ばれる）。
+5. **`verbatimPrompts` は DevRelay 側で未設定（既定 `false`）**なので、yield するメッセージに
+   `client_composed` フィールドを含めてはいけない。SDK が文字列 prompt から自ら組み立てる JSON
+   （`{type:"user",session_id:"",message:{role:"user",content:[{type:"text",text}]},
+   parent_tool_use_id:null}`）と完全に同形にすること。
+6. **`agents/windows`（Electron GUI 版）は対象外**。SDK の `query()` を直接呼ばず（PTY 経由の CLI
+   起動のみ）、`sdk-background-tasks.ts` も持たないため、この問題自体が発生しない。
+7. **`apps/server` は無変更で直せる**。原因・修正とも Agent 側（`ai-runner.ts` の SDK 呼び出し）に
+   閉じているため、この修正の適用に `pm2 restart devrelay-server` は不要（各機で `u` のみ必要）。
+8. **診断性**: 次回同種の障害の切り分けを速くするため、exec モードの `canUseTool` コールバックに
+   このターンで初めて到達した瞬間だけログするフラグ（`canUseToolEnteredOnce`）を追加した。
+   「Write/Edit 等が呼ばれているのに、このログが一度も出ない」状態は、CLI↔SDK 間のコントロール
+   チャネルが死んでいる兆候として使える。あわせて `sdk-background-tasks.ts` の延期ログにも
+   `inputStreamHeldOpen=true` を追記し、延期時に入力ストリームが意図的に開いたままであることを
+   ログだけで確認できるようにした。

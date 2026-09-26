@@ -6,6 +6,46 @@
 
 ## 実装済み機能
 
+### exec ターンで Write/Edit/Bash が承認待ちのまま失敗する不具合の根治 (2026-09-26)
+
+testflight test010 の exec で「Write/Edit/Bash 経由の python3/pm2/curl が全滅、Read/echo/ls/grep/cat
+は動く」という報告を調査し、根本原因を特定・修正した。
+
+- **根本原因**: `agents/{linux,macos}/src/services/ai-runner.ts` が Claude Agent SDK を
+  `query({ prompt: <string>, ... })`（`prompt` が文字列）で呼んでいた。SDK
+  （`@anthropic-ai/claude-agent-sdk` 0.3.282）は文字列 prompt を受け取ると `isSingleUserTurn = true`
+  を立て、**最初の `result` メッセージを受信した瞬間に CLI サブプロセスへの stdin を閉じる**
+  （`transport.endInput()`）。この stdin は CLI がツール承認（`can_use_tool`）をホストへ問い合わせる
+  唯一の応答経路でもある。2026-09-20 の `840d1e4`（バックグラウンド Agent 対応）以降、DevRelay は
+  「途中 result」（bg task 稼働中／`--resume` 直後の空 result）を終端とみなさず
+  `decideResultDeferral()` で延期して読み続けるため、**stdin が閉じた状態でターンが続行**され、
+  以降 Write/Edit や許可リスト外の Bash コマンドが `Tool permission request failed: AbortError:
+  Stream closed` で失敗していた。Read や読み取り専用 Bash（echo/ls/grep/cat）は SDK/CLI 内の
+  安全判定で `canUseTool` 到達前に許可されるため動いて見えていた
+- **実機証拠**（`~/.devrelay/logs/agent.log`・DB）: 成功 exec は延期0件・`Auto-approved`27件、
+  失敗 exec は `--resume` 直後の `emptyResult` 延期発生後 `Auto-approved` が**0件**（Write/Bash
+  呼び出しは多数あるのに）。`ToolApproval` テーブルにも該当セッション行は0件（サーバー往復以前に
+  CLI↔SDK 間のコントロールチャネルが死んでいたことを裏付け）。二重起動・WS 切断・サーバー側承認
+  タイムアウトはすべて否定した
+- **修正**: SDK には「stdin を閉じない」オプションが無いため、`prompt` を「ターン完了
+  （`release()` 呼び出し）まで完了しない `AsyncIterable`」に差し替える新規モジュール
+  `agents/{linux,macos}/src/services/sdk-prompt-stream.ts`（外部 import ゼロ、byte-identical）を
+  追加。`ai-runner.ts` の `query()` 呼び出しと `finally` 節（`release()` + 二重防御の
+  `close()`）を変更した。診断性向上として `canUseTool` 初回到達ログと、延期ログへの
+  `inputStreamHeldOpen=true` 追記も行った
+- `agents/windows`（SDK の `query()` を直接呼ばない）と `apps/server`（原因は Agent 側のみ）は無変更
+- テスト: 新規 `sdk-prompt-stream.test.mjs`（8ケース、linux/macos byte-identical）追加。
+  `agents/linux` 1035/1035 green、`agents/macos` 598/599 pass + skip1（フルスイートで1回
+  `handle-conversation-clear.test.mjs` が既知 flake で落ちたが単体・再実行では毎回 green、本変更とは
+  無関係と特定）。6 workspace build green
+- 副次発見（コード変更なし）: 調査時点で `devrelay-server` が `551f467`（Opus 5.5 対応）より古い
+  プロセスのまま稼働しており、`running code is stale` を繰り返し出力していた。今回の原因ではないが
+  別途 `pm2 restart devrelay-server` が必要
+- 反映: `apps/server` 無変更のため本修正自体に `pm2 restart devrelay-server` は不要。適用には
+  commit + push → 影響機（特に test010 が動くマシン）で `u` が必要。DB マイグレーション不要
+
+詳細: [devlog](devlog/2026-09-26_100917.md)
+
 ### Claude Opus 5.5 対応 — カタログ追加 + SDK バンプ + raw-completion 前方一致修正 (2026-09-25)
 
 WebUI モデル選択ドロップダウンの画像添付を受け「opus5.5 対応できる？」という依頼を調査・実装した。

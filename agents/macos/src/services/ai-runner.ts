@@ -18,6 +18,7 @@ import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportCla
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
 import { resolveBackgroundTaskConfig, createBackgroundTaskState, observeBackgroundTaskEvent, decideResultDeferral } from './sdk-background-tasks.js';
+import { buildSdkPromptStream } from './sdk-prompt-stream.js';
 import { decideResume } from './resume-priority.js';
 import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
 // サイクル SDK-1 コミット①: resolveSystemClaude() は claude-path.ts（linux と byte-identical な最小モジュール）へ移設し、
@@ -803,6 +804,10 @@ async function sendPromptToAiSdk(
   // Phase 1.4: raw-completion 専用。テキストを生成した最後の assistant メッセージの model を記録する
   // （`resolveRawUsedModel()` の最優先入力。rawMode 以外では記録するだけで参照されない）。
   let lastTextAssistantModel: string | undefined;
+  // sdk-prompt-stream: exec モードの canUseTool コールバックにこのターンで一度でも到達したかの観測フラグ
+  // （診断用ログにのみ使用。Write/Edit 等が呼ばれたのに一度もログが出ない場合、
+  // CLI↔SDK の承認用コントロールチャネルが死んでいる兆候として切り分けに使える）。
+  let canUseToolEnteredOnce = false;
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -1004,6 +1009,11 @@ async function sendPromptToAiSdk(
       // WebSocket 経由のユーザー承認（Phase 2+）
       const onApprovalRequest = options.onToolApprovalRequest;
       sdkOptions.canUseTool = async (toolName, input, opts) => {
+        // sdk-prompt-stream: このターンで初めて canUseTool に到達した瞬間だけログする（診断用）。
+        if (!canUseToolEnteredOnce) {
+          canUseToolEnteredOnce = true;
+          console.log(`🔐 [SDK] canUseTool entered for the first time this turn (toolName=${toolName})`);
+        }
         const isQuestion = toolName === 'AskUserQuestion';
 
         // 全許可モード: AskUserQuestion 以外は即座に allow（動的に最新値を参照）
@@ -1179,8 +1189,14 @@ async function sendPromptToAiSdk(
     bgIdleTimer.unref?.();
   };
 
+  // sdk-prompt-stream: query() に文字列 prompt を渡すと SDK は `isSingleUserTurn=true` を立て、
+  // 最初の result を受けた瞬間に CLI への stdin を閉じる（canUseTool の応答経路も道連れで死ぬ）。
+  // 「途中 result」を延期して読み続ける bg-task 判定（下記 for-await 内）と衝突するため、
+  // ターン完了まで閉じない AsyncIterable を渡す（詳細は sdk-prompt-stream.ts 冒頭コメント参照）。
+  const promptStream = buildSdkPromptStream(prompt);
+  const sdkQuery = query({ prompt: promptStream.stream, options: sdkOptions });
   try {
-    for await (const message of query({ prompt, options: sdkOptions })) {
+    for await (const message of sdkQuery) {
       const m = message as any;
 
       // bg-task: バックグラウンドタスクの生死を追跡する（task_started / background_tasks_changed /
@@ -1372,7 +1388,9 @@ async function sendPromptToAiSdk(
           bgTaskConfig
         );
         if (deferral.defer) {
-          console.log(`[claude/sdk] ⏳ Intermediate result deferred (reason=${deferral.reason}, result_index=${m.result_index ?? 'n/a'}, pending=[${deferral.pendingTaskIds.join(',')}], deferrals=${bgTaskState.deferrals}/${bgTaskConfig.maxDeferrals})`);
+          // sdk-prompt-stream: 入力ストリームは buildSdkPromptStream() により release() まで開いたままなので、
+          // ここで result を延期して読み続けても CLI への stdin（＝ canUseTool の応答経路）は生きている。
+          console.log(`[claude/sdk] ⏳ Intermediate result deferred (reason=${deferral.reason}, result_index=${m.result_index ?? 'n/a'}, pending=[${deferral.pendingTaskIds.join(',')}], deferrals=${bgTaskState.deferrals}/${bgTaskConfig.maxDeferrals}, inputStreamHeldOpen=true)`);
           armBgIdleTimer();
           continue;
         }
@@ -1457,6 +1475,17 @@ async function sendPromptToAiSdk(
     return result;
   } finally {
     clearBgIdleTimer();
+    // sdk-prompt-stream: 入力ストリームを解放して SDK 側の transport.endInput()（stdin close）を進行させる。
+    // ここに到達するのは正常終了・catch・abort のいずれの経路でも必ず通るため、
+    // release() 漏れは起きない（release() 自体は冪等）。
+    promptStream.release();
+    // 上記 release() で通常は CLI プロセスも自然終了するが、二重防御として明示的に close() する
+    // （既に終了済みの query に対する close() が例外を投げても、ターン結果には影響させない）。
+    try {
+      sdkQuery.close();
+    } catch (closeErr: any) {
+      console.log(`[claude/sdk] query.close() after release (likely already closed): ${closeErr?.message ?? closeErr}`);
+    }
     // #355: このセッションの abort ハンドルをレジストリから除去する。
     // 同一性ガード（===）で後続ターンの新しい controller を誤って消さないようにする。
     if (activeSdkAborts.get(sessionId) === sdkAbortController) {
