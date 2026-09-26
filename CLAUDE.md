@@ -69,6 +69,7 @@ pm2 restart devrelay-server
 | DEVRELAY_THREADS_HIDE_EMPTY_ENDED | `GET /api/threads` で ended かつ Message 0件の抜け殻スレッドを一覧から隠すか（既定 `1`。`0` で従来どおり全件表示するキルスイッチ） |
 | DEVRELAY_SITES_HEALTH | DevRelay Sites（`/sites`、管理者限定）の公開サイトヘルスチェック定期実行を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。`/api/sites` 自体は無効時も 200 を返し health は unknown になる） |
 | DEVRELAY_MCP_ASK | MCP の `ask_project` / `get_answer` ツールを登録するか（既定 `1`。`0` で登録自体をやめるキルスイッチ。`cancel_submission` と既存 8 ツールには影響しない） |
+| DEVRELAY_MCP_ANSWER_RAW | MCP `get_answer.answer` / `get_plan.planMarkdown`・`summary` から進捗表示行（📊 Rate Limit / 🔧 …を使用中... 等）を除去するかの逆キルスイッチ（既定 `0` = 除去する。`1` で従来どおり原文を返す）。`get_build_status.tail` 等の進捗確認用フィールドには影響しない |
 
 ## DB テーブル（概要）
 

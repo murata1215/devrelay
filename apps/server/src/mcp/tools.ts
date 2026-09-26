@@ -40,6 +40,7 @@ import { processMessageFilesEmbedding } from '../services/embedding-service.js';
 import { evaluateApproveGuard, decideClaimResult, buildClaimReleaseWhere, buildExecMessageRollbackWhere, buildTurnId } from '../services/submission-guard.js';
 import { normalizeStopReason, isStopReasonTruncated, applyStopReasonMark } from '../services/stop-reason.js';
 import { truncateOnLineBoundary, CONVERSATION_MAX_CONTENT_LENGTH, BUILD_STATUS_TAIL_LENGTH } from '../services/content-truncate.js';
+import { sanitizeAiAnswer, isMcpAnswerRawMode } from '../services/progress-markers.js';
 import { tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import {
   SESSION_KIND_QUESTION,
@@ -351,11 +352,18 @@ export function registerMcpTools(server: McpServer, userId: string) {
       });
 
       if (latestMessage) {
+        // 進捗表示行（📊 Rate Limit / 🔧 …を使用中... / ⏳ terminal-mode 心拍）を除去してから返す
+        // （2026-09-26 サイクル: 音声クライアント等がそのまま読み上げてしまう問題への対処）。
+        // summary は sanitize 後の文字列から切り出す（先頭バイトのズレを防ぐため）。
+        // DEVRELAY_MCP_ANSWER_RAW=1 で従来どおり原文を返すキルスイッチ。
+        const planMarkdown = isMcpAnswerRawMode(process.env)
+          ? latestMessage.content
+          : sanitizeAiAnswer(latestMessage.content);
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
             status: 'ready',
-            summary: latestMessage.content.slice(0, 500),
-            planMarkdown: latestMessage.content,
+            summary: planMarkdown.slice(0, 500),
+            planMarkdown,
             executable: true,
           }) }],
         };
@@ -1182,10 +1190,15 @@ export function registerMcpTools(server: McpServer, userId: string) {
         const base = { askId, state, elapsedSeconds, readOnlyEnforced, aiTool: session.aiTool };
 
         if (state === 'answered') {
+          // 進捗表示行（📊 Rate Limit / 🔧 …を使用中... / ⏳ terminal-mode 心拍）を除去してから返す
+          // （2026-09-26 サイクル）。DEVRELAY_MCP_ANSWER_RAW=1 で従来どおり原文を返すキルスイッチ。
+          const answer = isMcpAnswerRawMode(process.env)
+            ? latestAiMessage!.content
+            : sanitizeAiAnswer(latestAiMessage!.content);
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({
               ...base,
-              answer: latestAiMessage!.content,
+              answer,
             }) }],
           };
         }

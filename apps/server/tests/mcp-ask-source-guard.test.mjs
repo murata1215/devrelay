@@ -73,4 +73,43 @@ describe('mcp-ask-source-guard: ask_project の実装が読み取り専用強制
   test('cancel_submission は buildCancelClaimWhere を使って atomic claim している', () => {
     assert.match(source, /buildCancelClaimWhere\(submissionId\)/);
   });
+
+  // 2026-09-26 サイクル: get_answer/get_plan から進捗表示行（📊 Rate Limit / 🔧 …を使用中... 等）を
+  // 除外する対応が、将来のリファクタで黙って外れないための配線ガード。
+  // get_plan の本文だけを抽出（次ツール get_build_status の開始位置まで）。
+  const getPlanStart = source.indexOf("'get_plan'");
+  const getPlanEnd = source.indexOf("server.tool(\n    'get_build_status'");
+  const getPlanBody = source.slice(getPlanStart, getPlanEnd);
+
+  test('get_plan の本文が抽出できている（次ツールの開始位置が見つかっている）', () => {
+    assert.ok(getPlanStart > 0);
+    assert.ok(getPlanEnd > getPlanStart);
+  });
+
+  test('get_plan は sanitizeAiAnswer で進捗表示行を除去してから planMarkdown/summary を組み立てている', () => {
+    assert.match(getPlanBody, /sanitizeAiAnswer\(latestMessage\.content\)/);
+    // summary は sanitize 後の変数（planMarkdown）から切り出しており、
+    // latestMessage.content を直接 slice していない（先頭バイトのズレ防止）
+    assert.ok(!/latestMessage\.content\.slice/.test(getPlanBody));
+    assert.match(getPlanBody, /summary:\s*planMarkdown\.slice\(0,\s*500\)/);
+  });
+
+  // get_answer の本文だけを抽出（次ツール cancel_submission の開始位置まで）。
+  const getAnswerStart = source.indexOf("server.tool(\n      'get_answer'");
+  const getAnswerEnd = source.indexOf("server.tool(\n    'cancel_submission'");
+  const getAnswerBody = source.slice(getAnswerStart, getAnswerEnd);
+
+  test('get_answer の本文が抽出できている（次ツールの開始位置が見つかっている）', () => {
+    assert.ok(getAnswerStart > 0);
+    assert.ok(getAnswerEnd > getAnswerStart);
+  });
+
+  test('get_answer の answered 分岐は sanitizeAiAnswer で進捗表示行を除去してから answer を返している', () => {
+    assert.match(getAnswerBody, /sanitizeAiAnswer\(latestAiMessage!\.content\)/);
+  });
+
+  test('get_plan/get_answer は DEVRELAY_MCP_ANSWER_RAW キルスイッチで原文へ戻せる', () => {
+    assert.match(getPlanBody, /isMcpAnswerRawMode\(process\.env\)/);
+    assert.match(getAnswerBody, /isMcpAnswerRawMode\(process\.env\)/);
+  });
 });

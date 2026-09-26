@@ -2289,3 +2289,49 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    各機の `u`（Agent 更新）は不要（サーバーのみ `pnpm build` + `pm2 restart devrelay-server`）。
 10. **DB マイグレーションは追加 2 列のみ、バックフィルなし**（`Session.kind` / `Session.cancelledAt`、
     どちらも nullable）。core#336 で `planTurnId` 等を足したときと同じ規約。
+
+## get_answer / get_plan の進捗表示行除外（2026-09-26）
+
+`ask_project` の実機 E2E で `get_answer.answer` に `📊 Rate Limit: 5h: 0%` や `🔧 Bashを使用中...`
+×8 のような進捗表示が生のまま含まれていた事象への対処。`get_plan.planMarkdown`/`summary` も
+同じ `Message.content`（`agent-manager.ts:763-765` の `contextPrefix + mark + output`）を
+素で返しているため同様に発生する。音声クライアント（チャッピー）がこれをそのまま読み上げてしまう。
+
+1. **混入経路は 3 種類のみと特定した**: (A) `📊 Rate Limit: ...`（`agents/{linux,macos}/src/services/
+   connection.ts` の `` `📊 Rate Limit: ${parts.join(' | ')}\n` ``、i18n を通らない英語ハードコード）、
+   (B) `🔧 …を使用中...`/`🔧 Using …...`（`packages/shared/src/i18n.ts` `progress.usingTool`）、
+   (C) `⏳ [Ns 経過] ...`（terminal-mode の心拍表示、linux のみ、`terminal-runner.ts`）。
+   devin/codex 系の進捗（💻/🔍/📝/📖、`formatDevinToolLog`/`summarizeCodexItem`）は全て `⏳ ` prefix
+   付きで送られ `connection.ts` の `output.startsWith('⏳')` 判定で `responseText`（= DB 保存内容）
+   から除外されるため対処不要と確認済み。
+2. **(C) は `#276` 規約（⏳ 始まりのチャンクは最終回答から除外）の抜け穴**。terminal-runner.ts が
+   `` `\n⏳ [${elapsedSec}s 経過] ...\n` `` と**先頭に `\n` を付けて**送出するため、チャンク単位の
+   `startsWith('⏳')` 判定を素通りして `Message.content` に混入する（`Project.terminalMode` の
+   プロジェクトでのみ発生）。Agent 側の根治（各機 `u` が必要）は本サイクルではやらず、サーバー側の
+   返却時整形で行単位（`/^⏳\s/u`）に吸収する方針にした。**別課題として残っている**（Agent 側で
+   チャンク送出時に `\n` を付けずに送るか、受信側判定を `TrimStart` してから見るかのどちらかで
+   根治できるはず）。
+3. **`📊`/`📝` 判定は `Rate Limit:` 込みの厳密一致のみを採用**し、既存の
+   `thread-label-source.ts` の `/^[📊📝].+$/` は採用しなかった。理由: 本文中に正当に現れうる
+   `📊 集計結果は以下のとおり` や `📝 メモ` のような行まで消してしまうため
+   （「本文中にある通常の絵文字行や見出しを誤って消さないこと」という要件と衝突する）。
+   `📊 Context: 45K / 200K tokens (22%)`（`output-parser.ts` の `formatContextUsage()`）は
+   `console.log` のみで本文には混入しないため対象外。
+4. **既存の `progress-markers.ts`（`isProgressMarkerLine`/`stripProgressMarkers`）を拡張**し、
+   `isContextInfoLine`/`isEphemeralProgressLine`/`stripAiProgressNoise`/`sanitizeAiAnswer` を追加した。
+   `stripProgressMarkers()` の既存挙動・既存呼び出し元（`build-summarizer.ts`/`agent-manager.ts`）は
+   一切変えていない（内部実装を `stripLines(text, predicate)` 共通化しただけ）。
+5. **除去結果が空になる場合（進捗表示しか無い場合）は元テキストの trim を返す**。
+   `state === 'answered'` で `answer: ""` を返すと MCP のツール説明
+   （"answer has the full response"）と矛盾し、音声クライアントが無言になるため。
+   既存慣行（`agents/linux/src/services/connection.ts` の
+   `stripProgressMarkers(responseText).trim() || responseText.trim()`）に揃えた。
+6. **`packages/shared` へ定数を共有する案は見送った**。(A) の生成元は `agents/*` で、
+   サーバーから import できない（別 workspace・別ランタイム）。`packages/shared` に移すと
+   Agent 側の変更が必要になり各機 `u` が発生するため、既存の `progress-markers.ts`/
+   `thread-label-source.ts` と同じ「定数を複製し、生成元ソースを `readFileSync` して実際に
+   突き合わせるガードテストで一致を保証する」方式を踏襲した。
+7. **キルスイッチ `DEVRELAY_MCP_ANSWER_RAW=1`** で整形前の原文へ戻せる（既定は整形有効 `0`）。
+   `get_build_status.tail`/`progressTail`（経過確認用、意図的に進捗込み）、
+   `get_conversation_history`/`search_project_context`（会話ログ閲覧用）、WebUI の会話ログ表示、
+   DB の `Message.content` 自体は一切変更していない（MCP 返却直前の整形のみ）。
