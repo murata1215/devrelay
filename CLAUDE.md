@@ -68,6 +68,7 @@ pm2 restart devrelay-server
 | DEVRELAY_PLAN_STRICT_CHAT | チャット経路のプランターンを strictReadonly にするか（既定 `1`。`0` で従来の `interactive` に戻すキルスイッチ。chat のみに作用し mcp/exec には影響しない） |
 | DEVRELAY_THREADS_HIDE_EMPTY_ENDED | `GET /api/threads` で ended かつ Message 0件の抜け殻スレッドを一覧から隠すか（既定 `1`。`0` で従来どおり全件表示するキルスイッチ） |
 | DEVRELAY_SITES_HEALTH | DevRelay Sites（`/sites`、管理者限定）の公開サイトヘルスチェック定期実行を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。`/api/sites` 自体は無効時も 200 を返し health は unknown になる） |
+| DEVRELAY_MCP_ASK | MCP の `ask_project` / `get_answer` ツールを登録するか（既定 `1`。`0` で登録自体をやめるキルスイッチ。`cancel_submission` と既存 8 ツールには影響しない） |
 
 ## DB テーブル（概要）
 
@@ -76,7 +77,7 @@ pm2 restart devrelay-server
 | User | ユーザー |
 | Machine | Agent マシン（deletedAt でソフトデリート、autoUpdate で自動更新、localCommit 等でバージョン表示） |
 | Project | プロジェクト（displayName でリネーム可能、terminalMode で PTY 経由 claude 起動） |
-| Session | 作業セッション |
+| Session | 作業セッション（= MCP submission。`kind`='question' で ask_project の質問ターン、`cancelledAt` で cancel_submission の取消 claim） |
 | Message | 会話メッセージ |
 | BuildLog | ビルド履歴 |
 | MessageFile | メッセージ添付ファイル（bytea BLOB + pgvector embedding） |

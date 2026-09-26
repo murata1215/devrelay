@@ -17,10 +17,15 @@ import { authenticateMcp } from './auth.js';
 import { oauthRoutes } from './oauth.js';
 
 /** MCP サーバーの instructions（ツールの正しい使い方をホスト LLM に伝える） */
-const SERVER_INSTRUCTIONS = `DevRelay はAIコーディングの投入・承認を行うシステムです。手順:
+const SERVER_INSTRUCTIONS = `DevRelay はAIコーディングの投入・承認を行うシステムです。
+最初に「質問（知りたい）」か「指示（変えたい）」かを見極めてください。質問なら ask_project → get_answer、
+指示なら submit_instruction → get_plan → approve_implementation を使います。未承認のものは
+cancel_submission で取り消せます（ask_project の質問も取り消せます。承認済み・実行中のものは取り消せません）。
+手順:
 1) 投入先が曖昧なら list_projects で確認。
-2) 指示が固まるまではツールを呼ばず会話で詰める（勝手に submit しない）。
-3) ユーザーが「実行/送って」と言ったら submit_instruction。返る submissionId を保持。
+2) 指示が固まるまではツールを呼ばず会話で詰める（勝手に submit/ask しない）。
+3a) 質問なら ask_project。すぐに askId が返るので get_answer でポーリングして回答を取得する（承認は不要）。
+3b) ユーザーが「実行/送って」と言ったら submit_instruction。返る submissionId を保持。
 4) get_plan でプランを取得し、要約して読み上げ、実装の可否を聞く。
 5) ユーザーが「実装して」と言ったら approve_implementation。
 6) get_build_status で進捗・完了を確認。

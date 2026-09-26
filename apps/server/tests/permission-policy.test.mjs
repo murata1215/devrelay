@@ -18,7 +18,8 @@ test('チャット経路（通常メッセージ）は options 省略時 strictR
   assert.equal(resolvePermissionPolicy('chat'), 'strictReadonly');
 });
 
-test('ask 経路（executeCrossProjectQuery / teamexec の ask）は strictReadonly を組み立てる', () => {
+// MCP ask サイクル: ask_project（mcp/tools.ts）も同じ 'ask' 経路を再利用する（新しい source は増やさない）。
+test('ask 経路（executeCrossProjectQuery / teamexec の ask / ask_project）は strictReadonly を組み立てる', () => {
   assert.equal(resolvePermissionPolicy('ask'), 'strictReadonly');
 });
 

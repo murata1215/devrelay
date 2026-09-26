@@ -26,6 +26,11 @@ export interface ThreadListItem {
   isScoped: boolean;
   /** ISO 文字列。サーバー側で `lastActiveAt ?? startedAt` に解決済み（常に non-null） */
   lastActiveAt: string;
+  /** MCP ask サイクル: 'question' = ask_project の質問スレッド。旧サーバー応答には無いため optional
+   * （`isQuestionThread` 側で未定義時は false 扱いにする＝従来表示）。 */
+  kind?: string;
+  /** MCP ask サイクル: cancel_submission で取り消し済みかどうか。旧サーバー応答には無いため optional。 */
+  cancelled?: boolean;
 }
 
 /**
@@ -90,6 +95,22 @@ export function deriveThreadLabel(
  */
 export function isDefaultThread(item: Pick<ThreadListItem, 'isScoped'>): boolean {
   return !item.isScoped;
+}
+
+/**
+ * MCP ask サイクル: 質問スレッド（ask_project 経由）かどうかを判定する。
+ * `kind` キー自体が無い（旧サーバー応答）場合は false（= 従来の指示スレッドとして表示）。
+ */
+export function isQuestionThread(item: Pick<ThreadListItem, 'kind'>): boolean {
+  return item.kind === 'question';
+}
+
+/**
+ * MCP ask サイクル: 取り消し済みスレッドかどうかを判定する。
+ * `cancelled` キー自体が無い（旧サーバー応答）場合は false（= 従来表示）。
+ */
+export function isCancelledThread(item: Pick<ThreadListItem, 'cancelled'>): boolean {
+  return item.cancelled === true;
 }
 
 /**

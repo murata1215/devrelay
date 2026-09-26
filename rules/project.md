@@ -2237,3 +2237,55 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    チャネルが死んでいる兆候として使える。あわせて `sdk-background-tasks.ts` の延期ログにも
    `inputStreamHeldOpen=true` を追記し、延期時に入力ストリームが意図的に開いたままであることを
    ログだけで確認できるようにした。
+
+---
+
+## MCP ask サイクル: ask_project / get_answer / cancel_submission（2026-09-26）
+
+チャッピー（GPT-Live + DevRelay MCP、PAT 認証）から質問専用の経路が無かった問題を解消するため、
+既存 8 ツール（list_projects 等）に加えて 3 ツールを追加した設計判断の記録。
+
+1. **submission は enum ではなく `Session` 行そのもの**（`submissionId === sessionId`）。
+   質問（ask_project）もこのモデルに素直に乗せる案A（`Session.kind` 追加）を採用し、ask-member の
+   非同期化（案B）は採らなかった。ask-member の完了待ちは `pendingCrossQueries`（**メモリ上の
+   Promise**）に依存しており、非同期化すると `pm2 restart` で全 ask が宙に浮く。案A は完了が
+   DB の `Message`（role='ai'）に落ちるため再起動に耐える。
+2. **`role='ai'` の Message は `isComplete===true` のときだけ作られる**（`agent-manager.ts` の
+   `handleAiOutput`）。この 1 点により「AI Message が存在する」＝「ターンが完了した」が構造的に
+   保証されるため、`get_answer` は部分テキストを完了扱いすることが原理的に起きない
+   （`deriveAskState()` は `hasAiMessage` を見るだけで `answered` を確定できる）。
+3. **プラン相の書き込み不可強制は AI ツールによって実効性が異なる**（実測、2026-09-26 時点）:
+   claude（Agent SDK）と codex（CLI `-c sandbox_mode="read-only"`）は権限レベルで構造的に強制される
+   一方、devin（`usePlanMode` が常に false）・gemini（`--approval-mode auto_edit` 無条件付与）・
+   claude + `Project.terminalMode`（PTY 経由の素の `claude --continue`、`--permission-mode plan`
+   なし）は強制されない。`ENFORCED_READONLY_AI_TOOLS = ['claude', 'codex']`
+   （`ask-guard.ts`）に devin/gemini を絶対に加えないこと（テストで回帰ガード済み）。
+4. **人間判断（2026-09-26 承認サイクル）: 強制できない経路でも AI の差し替えは行わない**。
+   当初案は devin/gemini/terminalMode を claude/codex へ自動差し替えする方向だったが、
+   「そのままの AI で実行し、権限で強制できない経路には固定の禁止文をプロンプト先頭に付与する」
+   方針に変更した（`decideAskReadOnlyEnforcement()` は AI を選ばず、可否だけを判定する関数になった）。
+   `ask_project`/`get_answer` の応答に必ず `readOnlyEnforced`（true=権限で強制、false=プロンプト
+   指示のみ）を含め、WebUI 等でも区別できるようにする。禁止文自体は Agent 側の
+   `PLAN_MODE_INSTRUCTION`（Agent 無変更のため抑止できない）より後方（payload.prompt 側）に
+   置かれるため、より新しい・具体的な指示として実質的に上書きする設計にした。
+5. **質問ターンは `planTurnId` を採番しない**。これにより承認（approve_implementation）への
+   誤進入を 2 重に防ぐ: (a) `evaluateApproveGuard` が `kind==='question'` を
+   `questionNotApprovable` として明示拒否、(b) 仮に (a) が退行しても `planAiSessionId` が
+   永久に null のままなので既存の `planAiSessionMissing` で止まる。
+6. **cancel は approve と同一行・同一条件を atomic に争う**。
+   `approve: updateMany({ where: { id, approvedAt: null, cancelledAt: null }, ... })` /
+   `cancel: updateMany({ where: buildCancelClaimWhere(id) /* = { id, approvedAt: null,
+   cancelledAt: null } */, ... })`。PostgreSQL の行単位 UPDATE の直列化により、同時到着しても
+   `count===1` になるのは必ず片方だけ。
+7. **人間判断: 承認済み・exec 実行中の cancel は拒否固定（force オプションは設けない）**。
+   exec は `permissionPolicy: 'interactive'` のフル権限で走っており、Write/Edit/Bash を途中で
+   切ると作業ツリーが半端に書き換わった状態で止まる。git の自動復元は Devin 経路にしか無いため、
+   「途中で止める」より「完走させて結果を読む」方が回復可能性が高いと判断した。
+8. **`/mcp` 初のレート制限**を `ask_project` にだけ導入（既存 8 ツールは無変更）。ask-member の
+   実績値（プロジェクトあたり 8 件/5分、ユーザー全体 20 件/5分、同時実行 1 件）をそのまま流用し、
+   `crossquery_`/`teamexec_` の集計とは完全に独立させた（`Session.kind='question'` で絞り込む）。
+9. **Agent 側のコード変更はゼロ**。既存の wire フィールド（`permissionPolicy`）だけを使い、
+   新しい payload フィールドも capability も追加していない。そのため本サイクルの適用に
+   各機の `u`（Agent 更新）は不要（サーバーのみ `pnpm build` + `pm2 restart devrelay-server`）。
+10. **DB マイグレーションは追加 2 列のみ、バックフィルなし**（`Session.kind` / `Session.cancelledAt`、
+    どちらも nullable）。core#336 で `planTurnId` 等を足したときと同じ規約。

@@ -6,6 +6,39 @@
 
 ## 実装済み機能
 
+### DevRelay MCP に ask_project / get_answer / cancel_submission を追加 (2026-09-26)
+
+チャッピー（GPT-Live + DevRelay MCP、PAT 認証）から各プロジェクトの AI エージェントに質問できる
+経路が無かった問題を解消。既存 8 ツール（list_projects 等）に加えて 3 ツールを追加した。
+
+- **ask_project**: プロジェクトへ読み取り専用の質問を送る非同期ツール。すぐに `askId` を返し、
+  承認フロー（approve_implementation）には乗らない。`Session.kind='question'` として記録し、
+  `planTurnId` は採番しない（exec への 2 重防御）
+- **get_answer**: `askId` の状態（queued/running/answered/failed/cancelled）と回答を取得。
+  `role='ai'` の Message は完了時にしか作られないため、部分テキストを完了扱いすることは
+  構造的に起きない
+- **cancel_submission**: 未承認の submission/質問を取り消す。承認済み・実行中/完了済みのものは
+  拒否（人間判断: exec を途中で切ると作業ツリーが半端に壊れるため安全側に倒した）。既に取消済みは
+  エラーではなく冪等成功として扱う
+- **読み取り専用の強制**: claude（Agent SDK）・codex（CLI `sandbox_mode="read-only"`）は権限
+  レベルで構造的に強制されるが、devin・gemini・`Project.terminalMode` は強制できない。人間判断に
+  より AI の差し替えは行わず、そのままの AI で実行しつつ、強制できない経路には質問プロンプトの
+  先頭に固定の禁止文を付与する。応答には常に `readOnlyEnforced`（true=権限で強制、false=
+  プロンプト指示のみ）を含める
+- **DB**: `Session` に `kind`（'question' | null）・`cancelledAt` を追加（どちらも nullable、
+  バックフィルなし）
+- **レート制限**: `/mcp` 初のレート制限を ask_project にのみ導入（プロジェクトあたり 8 件/5分、
+  ユーザー全体 20 件/5分、同時実行 1 件。既存 ask-member の実績値を流用し、既存 8 ツール・
+  crossquery_/teamexec_ の集計には無関係）
+- **キルスイッチ**: `DEVRELAY_MCP_ASK`（既定 `1`。`0` で ask_project/get_answer の登録自体をやめる。
+  cancel_submission と既存 8 ツールには影響しない）
+- Agent 側のコード変更はゼロ（既存の wire フィールドのみ使用）。各機の `u` は不要、
+  `apps/server` の `pnpm build` + `pm2 restart devrelay-server` のみで反映される
+- 新規: `apps/server/src/services/ask-guard.ts`（外部 import ゼロの純関数群）。
+  `submission-guard.ts` の `evaluateApproveGuard` に `cancelled`/`questionNotApprovable` の
+  2 判定コードを追加（既存 5 コードの判定順・文言は不変）。テスト: server 736件・web 518件 green
+  （詳細: `doc/devlog/2026-09-26_140132.md`）
+
 ### exec ターンで Write/Edit/Bash が承認待ちのまま失敗する不具合の根治 (2026-09-26)
 
 testflight test010 の exec で「Write/Edit/Bash 経由の python3/pm2/curl が全滅、Read/echo/ls/grep/cat

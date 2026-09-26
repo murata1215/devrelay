@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, type MouseEvent } from 'react';
 import { threads as threadsApi, sessions as sessionsApi, type ThreadSummary, type ThreadSwitchResult, type ThreadCreateResult } from '../lib/api';
 import { getTabId } from '../lib/tab-id';
-import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, applyThreadRename, upsertThread, resolveCreateTargetProjectId } from '../lib/thread-list-rules';
+import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, isQuestionThread, isCancelledThread, applyThreadRename, upsertThread, resolveCreateTargetProjectId } from '../lib/thread-list-rules';
 import { decideThreadRowAction, decideThreadCreateButton } from './lite/lite-shell-rules';
 import { useLanguage } from '../contexts/LanguageContext';
 
@@ -341,6 +341,12 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
               <div className="flex items-center gap-1.5 mt-1">
                 {isDefaultThread(item) && (
                   <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)]">{t('thread.default')}</span>
+                )}
+                {isQuestionThread(item) && (
+                  <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)]">{t('thread.question')}</span>
+                )}
+                {isCancelledThread(item) && (
+                  <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)]">{t('thread.cancelled')}</span>
                 )}
                 {!projectId && (
                   <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)] truncate">

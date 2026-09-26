@@ -4,6 +4,8 @@ import {
   sortThreadsDesc,
   deriveThreadLabel,
   isDefaultThread,
+  isQuestionThread,
+  isCancelledThread,
   truncateDisplay,
   applyThreadRename,
   upsertThread,
@@ -159,6 +161,34 @@ describe('isDefaultThread（§6: agentScopeId = NULL は「既定」ラベル付
     const item = { title: 'Renamed', firstUserMessage: null, isScoped: false };
     assert.equal(isDefaultThread(item), true);
     assert.deepEqual(deriveThreadLabel(item), { text: 'Renamed', kind: 'title' });
+  });
+});
+
+describe('isQuestionThread（MCP ask サイクル: ask_project の質問スレッドを区別表示する）', () => {
+  test('kind: "question" なら質問スレッド', () => {
+    assert.equal(isQuestionThread({ kind: 'question' }), true);
+  });
+
+  test('kind: "instruction" なら質問スレッドではない', () => {
+    assert.equal(isQuestionThread({ kind: 'instruction' }), false);
+  });
+
+  test('kind キー自体が無い（旧サーバー応答）場合は false（従来表示）', () => {
+    assert.equal(isQuestionThread({}), false);
+  });
+});
+
+describe('isCancelledThread（MCP ask サイクル: cancel_submission で取消済みのスレッドを区別表示する）', () => {
+  test('cancelled: true なら取消済み', () => {
+    assert.equal(isCancelledThread({ cancelled: true }), true);
+  });
+
+  test('cancelled: false なら取消済みではない', () => {
+    assert.equal(isCancelledThread({ cancelled: false }), false);
+  });
+
+  test('cancelled キー自体が無い（旧サーバー応答）場合は false（従来表示）', () => {
+    assert.equal(isCancelledThread({}), false);
   });
 });
 

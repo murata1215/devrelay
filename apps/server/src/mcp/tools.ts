@@ -15,6 +15,7 @@ import {
   isAgentOutdated,
   startSession as startAgentSession,
   clearAgentRestarted,
+  cancelAiProcess,
 } from '../services/agent-manager.js';
 import {
   createSession,
@@ -40,6 +41,20 @@ import { evaluateApproveGuard, decideClaimResult, buildClaimReleaseWhere, buildE
 import { normalizeStopReason, isStopReasonTruncated, applyStopReasonMark } from '../services/stop-reason.js';
 import { truncateOnLineBoundary, CONVERSATION_MAX_CONTENT_LENGTH, BUILD_STATUS_TAIL_LENGTH } from '../services/content-truncate.js';
 import { tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import {
+  SESSION_KIND_QUESTION,
+  ASK_QUESTION_MAX_LENGTH,
+  ASK_RATE_WINDOW_MS,
+  ASK_ANSWER_TIMEOUT_MS,
+  decideAskReadOnlyEnforcement,
+  buildAskPromptPrefix,
+  pickInflightAskSession,
+  decideAskRateLimit,
+  deriveAskState,
+  decideCancel,
+  buildCancelClaimWhere,
+  isMcpAskEnabled,
+} from '../services/ask-guard.js';
 
 /**
  * #334: 人間入力テキストの長さ上限（string.length = UTF-16 コードユニット数基準）。
@@ -806,9 +821,12 @@ export function registerMcpTools(server: McpServer, userId: string) {
       // 同一 submission に approve が並行到着しても、この updateMany の count === 1 になるのは
       // 1 要求だけ（DB のロー単位 UPDATE が直列化するため）。exec 完了後の再 approve も
       // approvedAt が非 null のままなのでここで同じ経路で拒否される。
+      // MCP ask サイクル: cancelledAt も claim 条件に加える。approve と cancel_submission の
+      // atomic claim（buildCancelClaimWhere 参照）が同一行を争ったとき、DB の行単位 UPDATE の
+      // 直列化により必ずどちらか一方だけが count===1 になる。
       const claimedAt = new Date();
       const claim = await prisma.session.updateMany({
-        where: { id: submissionId, approvedAt: null },
+        where: { id: submissionId, approvedAt: null, cancelledAt: null },
         data: { approvedAt: claimedAt },
       });
       if (!decideClaimResult(claim.count).claimed) {
@@ -894,6 +912,400 @@ export function registerMcpTools(server: McpServer, userId: string) {
           phase: 'queued',
           message: 'Implementation approved and started. Use get_build_status to monitor progress.',
           noteApplied: !!trimmedNote,
+        }) }],
+      };
+    }
+  );
+
+  // ============================================================
+  // MCP ask サイクル: 質問（ask_project / get_answer）と取り消し（cancel_submission）
+  // ============================================================
+  if (isMcpAskEnabled(process.env.DEVRELAY_MCP_ASK)) {
+    /**
+     * ask_project — プロジェクトの AI エージェントに読み取り専用の質問を送る
+     *
+     * submit_instruction とは異なり、承認フロー（approve_implementation）には乗らない。
+     * `planTurnId` を採番しないため、`evaluateApproveGuard` の `planAiSessionMissing` が
+     * 誤って approve を通すことは構造的に無い（`questionNotApprovable` が先に効く 2 重防御）。
+     */
+    server.tool(
+      'ask_project',
+      'Ask a read-only question to a project\'s AI agent. Use this for "what/why/how" questions ' +
+      '(e.g. "what does this function do", "why did the last build fail", "is there an existing util for X") ' +
+      '— NOT for making changes. The agent will investigate (read code, logs, git history, etc.) and answer; ' +
+      'it will never modify files, run write commands, or start a plan. Returns an askId immediately ' +
+      '(does not block) — poll get_answer with it. Does NOT go through the approval flow ' +
+      '(approve_implementation will reject an askId). For most AI backends (claude, codex) the read-only ' +
+      'restriction is enforced at the permission level; for others (e.g. Devin, or a project with terminal ' +
+      'mode) it cannot be structurally enforced, so a fixed prohibition instruction is prepended to the ' +
+      'prompt instead — check the response\'s readOnlyEnforced field to tell which applied. ' +
+      `Max ${ASK_QUESTION_MAX_LENGTH} characters. Rate limited (per project and per user, 5 minute window); ` +
+      'only one question may be in flight per project at a time.',
+      {
+        projectId: z.string().describe('The target project ID'),
+        question: z.string().describe(`The question, in natural language (max ${ASK_QUESTION_MAX_LENGTH} characters)`),
+      },
+      async ({ projectId, question }) => {
+        // エンタープライズ統制ゲート（#268）: マネージャー未割当の member はコマンド発行不可
+        const permission = await checkCommandPermission(userId);
+        if (!permission.allowed) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: permission.reason }) }], isError: true };
+        }
+
+        // プロジェクト + マシン検索（submit_instruction と同じ所有者モデル）
+        const project = await prisma.project.findFirst({
+          where: { id: projectId, machine: { userId, deletedAt: null } },
+          include: { machine: true },
+        });
+
+        if (!project) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Project not found' }) }], isError: true };
+        }
+
+        if (!getConnectedAgents().has(project.machineId)) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Agent is offline' }) }], isError: true };
+        }
+
+        if (isAgentOutdated(project.machineId)) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Agent needs update. Send "u" command first.' }) }], isError: true };
+        }
+
+        // 状態変更の前に全ての拒否判定を終える（#334 と同じ規約）
+        const trimmedQuestion = question.trim();
+        const lengthCheck = validateHumanTextLength(trimmedQuestion, ASK_QUESTION_MAX_LENGTH);
+        if (!lengthCheck.ok) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              error: 'question is too long',
+              kind: 'askProject',
+              rawLength: lengthCheck.rawLength,
+              limit: lengthCheck.limit,
+            }) }],
+            isError: true,
+          };
+        }
+
+        // レート制限（ask-member の実績値を流用。crossquery_ の集計とは完全に独立）
+        const rateCutoff = new Date(Date.now() - ASK_RATE_WINDOW_MS);
+        const projectRecentCount = await prisma.session.count({
+          where: { projectId, kind: SESSION_KIND_QUESTION, startedAt: { gte: rateCutoff } },
+        });
+        const userRecentCount = await prisma.session.count({
+          where: { userId, kind: SESSION_KIND_QUESTION, startedAt: { gte: rateCutoff } },
+        });
+        const inflightWindowCutoff = new Date(Date.now() - ASK_ANSWER_TIMEOUT_MS);
+        const inflightRows = await prisma.session.findMany({
+          where: {
+            projectId,
+            kind: SESSION_KIND_QUESTION,
+            status: 'active',
+            cancelledAt: null,
+            startedAt: { gte: inflightWindowCutoff },
+          },
+          select: {
+            id: true,
+            startedAt: true,
+            messages: { where: { role: 'ai' }, take: 1, select: { id: true } },
+          },
+        });
+        const inflightAskSessionId = pickInflightAskSession(
+          inflightRows.map(r => ({ id: r.id, startedAt: r.startedAt, hasAnswer: r.messages.length > 0 })),
+          Date.now(),
+          ASK_ANSWER_TIMEOUT_MS,
+        );
+        const rateDecision = decideAskRateLimit({ projectRecentCount, userRecentCount, inflightAskSessionId });
+        if (!rateDecision.allowed) {
+          if (rateDecision.reason === 'projectBusy') {
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({
+                error: `A question is already in progress for this project (askId=${rateDecision.inflightSessionId}). Only one question may be in flight per project at a time. Call get_answer with that askId, or wait for it to complete.`,
+                reason: 'projectBusy',
+                inflightAskId: rateDecision.inflightSessionId,
+              }) }],
+              isError: true,
+            };
+          }
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              error: `Rate limit: ${rateDecision.count} questions in the last 5 minutes (limit ${rateDecision.limit}, scope: ${rateDecision.reason === 'projectRate' ? 'this project' : 'all projects'}). Wait before asking again.`,
+              reason: rateDecision.reason,
+              count: rateDecision.count,
+              limit: rateDecision.limit,
+            }) }],
+            isError: true,
+          };
+        }
+
+        // 読み取り専用の強制可否を判定（2026-09-26 承認サイクル: AI の差し替えは行わず、
+        // そのままの AI で実行する。強制できない経路はプロンプトの固定禁止文で補う）
+        const aiTool = project.defaultAi || 'claude';
+        const { readOnlyEnforced } = decideAskReadOnlyEnforcement({ aiTool, terminalMode: project.terminalMode });
+
+        // セッション作成（origin:'mcp' で agentScopeId=sessionId が DB に記録される）
+        const sessionId = await createSession(userId, project.machineId, project.id, aiTool, {
+          origin: 'mcp',
+          title: deriveThreadTitle(trimmedQuestion),
+        });
+        // 質問ターンであることを記録する。planTurnId は意図的に採番しない
+        // （exec への 2 重防御。evaluateApproveGuard の questionNotApprovable が先に効く）
+        await prisma.session.update({ where: { id: sessionId }, data: { kind: SESSION_KIND_QUESTION } });
+
+        // MCP 用の chatId で参加者登録（進捗トラッキング用。submit_instruction とは別 prefix にして
+        // get_build_status 側の mcp: prefix と衝突・混同しないようにする）
+        const mcpAskChatId = `mcpask:${userId}:${sessionId}`;
+        addParticipant(sessionId, 'web', mcpAskChatId);
+        console.log(`❓ [MCP] ask session created: sessionId=${sessionId.substring(0, 12)}, readOnlyEnforced=${readOnlyEnforced}, aiTool=${aiTool}`);
+
+        // Agent にセッション開始を通知
+        await startAgentSession(project.machineId, sessionId, project.name, project.path, aiTool as any, sessionId);
+        clearAgentRestarted(project.machineId);
+
+        // 進捗トラッキング開始
+        await startProgressTracking(sessionId);
+        touchSessionActivity(sessionId);
+
+        // 監査メタ情報
+        const { count: askNeutralizedCount } = neutralizeHumanInputTag(trimmedQuestion);
+        const askHumanTextMeta = JSON.stringify({
+          kind: 'askProject',
+          origin: 'human',
+          rawLength: lengthCheck.rawLength,
+          limit: ASK_QUESTION_MAX_LENGTH,
+          fenced: true,
+          neutralized: askNeutralizedCount,
+          rawRef: 'message.content',
+          readOnlyEnforced,
+        });
+
+        // メッセージを DB に保存
+        await prisma.message.create({
+          data: {
+            sessionId,
+            role: 'user',
+            content: trimmedQuestion,
+            platform: 'web',
+            humanTextMeta: askHumanTextMeta,
+          },
+        });
+
+        // プロンプト組み立て: 質問モードの前置き（+ 権限で強制できない経路は固定禁止文）+ fence された質問本文
+        const askPrompt = `${buildAskPromptPrefix(readOnlyEnforced)}\n\n${fenceHumanText('askProject', trimmedQuestion)}`;
+
+        await sendPromptToAgent(
+          project.machineId,
+          sessionId,
+          askPrompt,
+          userId,
+          undefined, // files: ask_project は v1 で添付未対応
+          undefined,
+          project.path,
+          aiTool as any,
+          true,  // forceNewSession: MCP ask は常に新規セッション
+          undefined,
+          undefined,
+          resolvePermissionPolicy('ask'),  // strictReadonly（claude/codex かつ非 terminalMode で構造的に強制される）
+          { agentScopeId: sessionId },  // turnId は渡さない（planTurnId 同様、質問ターンには不要）
+        );
+
+        // 監査ログ
+        console.log(`📋 [MCP] AUDIT ask: userId=${userId}, projectId=${projectId}, readOnlyEnforced=${readOnlyEnforced}, aiTool=${aiTool}, rawLength=${lengthCheck.rawLength}, question=${trimmedQuestion.slice(0, 100)}...`);
+
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            askId: sessionId,
+            projectId,
+            aiTool,
+            readOnlyEnforced,
+            status: 'queued',
+            message: 'Question submitted. Use get_answer to poll for the response.',
+          }) }],
+        };
+      }
+    );
+
+    /**
+     * get_answer — ask_project の質問への回答を取得する
+     *
+     * role='ai' の Message は isComplete===true のときだけ作られるため（agent-manager.ts の
+     * handleAiOutput）、`answered` は常に確定した完了報告であり、部分テキストが紛れ込むことはない。
+     */
+    server.tool(
+      'get_answer',
+      'Get the answer to a question submitted via ask_project. Returns a state: "queued" (not started yet), ' +
+      '"running" (agent is investigating — progressTail has partial output, NOT the final answer), ' +
+      '"answered" (done — answer has the full response), "failed" (no response within the timeout window), ' +
+      'or "cancelled" (the question was cancelled via cancel_submission). Only read `answer` when ' +
+      'state is "answered" — partial text during "running" is never treated as the final answer.',
+      { askId: z.string().describe('The askId returned by ask_project') },
+      async ({ askId }) => {
+        const session = await prisma.session.findUnique({
+          where: { id: askId },
+          select: {
+            userId: true, kind: true, cancelledAt: true, startedAt: true, aiTool: true,
+            project: { select: { terminalMode: true } },
+          },
+        });
+
+        if (!session || session.userId !== userId) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Ask not found' }) }], isError: true };
+        }
+        if (session.kind !== SESSION_KIND_QUESTION) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              error: 'This submissionId is not a question (ask_project). Use get_plan / get_build_status for instructions submitted via submit_instruction.',
+            }) }],
+            isError: true,
+          };
+        }
+
+        const latestAiMessage = await prisma.message.findFirst({
+          where: { sessionId: askId, role: 'ai' },
+          orderBy: { createdAt: 'desc' },
+        });
+        const mcpAskChatId = `mcpask:${userId}:${askId}`;
+        const progress = getActiveProgressForChatId(mcpAskChatId);
+
+        const { state, elapsedSeconds } = deriveAskState({
+          cancelledAt: session.cancelledAt,
+          hasAiMessage: !!latestAiMessage,
+          hasActiveProgress: !!progress,
+          startedAtMs: session.startedAt.getTime(),
+          nowMs: Date.now(),
+          timeoutMs: ASK_ANSWER_TIMEOUT_MS,
+        });
+
+        const { readOnlyEnforced } = decideAskReadOnlyEnforcement({
+          aiTool: session.aiTool,
+          terminalMode: !!session.project?.terminalMode,
+        });
+
+        const base = { askId, state, elapsedSeconds, readOnlyEnforced, aiTool: session.aiTool };
+
+        if (state === 'answered') {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              ...base,
+              answer: latestAiMessage!.content,
+            }) }],
+          };
+        }
+        if (state === 'running') {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              ...base,
+              progressTail: truncateOnLineBoundary(progress!.output, BUILD_STATUS_TAIL_LENGTH, 'tail').content,
+              message: 'Still investigating. This is partial output, not the final answer — poll again.',
+            }) }],
+          };
+        }
+        if (state === 'cancelled') {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              ...base,
+              message: 'This question was cancelled.',
+            }) }],
+          };
+        }
+        if (state === 'failed') {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              ...base,
+              message: `No response received within ${Math.floor(ASK_ANSWER_TIMEOUT_MS / 60000)} minutes. The agent may have failed silently.`,
+            }) }],
+          };
+        }
+        // queued
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            ...base,
+            message: 'Question is queued. Please wait and try again.',
+          }) }],
+        };
+      }
+    );
+  }
+
+  /**
+   * cancel_submission — 未承認（plan 段階）の submission / 質問を取り消す
+   *
+   * 承認済み・実行中/完了済みのものは拒否する（2026-09-26 承認サイクルの人間判断: フル権限で
+   * 走っている exec を途中で切ると作業ツリーが半端に壊れるため、安全側に倒す）。
+   * cancel_submission 自体は既存 8 ツールに影響しないためキルスイッチの対象外とする
+   * （ask 専用ではなく submit_instruction のプラン取り消しにも使うツールのため）。
+   */
+  server.tool(
+    'cancel_submission',
+    'Cancel an unapproved submission or question (from submit_instruction or ask_project) that has not ' +
+    'been approved yet. Returns state "cancelled" on success, or "alreadyCancelled" if it was already ' +
+    'cancelled (idempotent — not an error, safe to retry). Rejects with an error if the submission has ' +
+    'already been approved via approve_implementation — an in-progress or completed implementation is ' +
+    'never interrupted by this tool.',
+    {
+      submissionId: z.string().describe('The submissionId (from submit_instruction) or askId (from ask_project) to cancel'),
+      projectId: z.string().optional().describe('Optional: the project ID, for an extra ownership check'),
+    },
+    async ({ submissionId, projectId }) => {
+      const session = await prisma.session.findUnique({ where: { id: submissionId } });
+      const guard = decideCancel({
+        session: session ? {
+          userId: session.userId,
+          projectId: session.projectId,
+          approvedAt: session.approvedAt,
+          cancelledAt: session.cancelledAt,
+        } : null,
+        requestedUserId: userId,
+        requestedProjectId: projectId,
+      });
+
+      if (!guard.ok) {
+        if (guard.code === 'alreadyCancelled') {
+          // 冪等成功として扱う（LLM のリトライに優しい設計。#294 の思想を踏襲）
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              submissionId, state: 'alreadyCancelled', message: guard.message,
+            }) }],
+          };
+        }
+        console.warn(`⚠️ [MCP] cancel rejected: ${guard.code} (submissionId=${submissionId}, userId=${userId})`);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: guard.message, code: guard.code }) }], isError: true };
+      }
+
+      // atomic claim（approve_implementation の claim と同じ行・同じ条件を争う。
+      // buildCancelClaimWhere は approvedAt: null と cancelledAt: null の両方を条件にする）
+      const cancelledAt = new Date();
+      const claim = await prisma.session.updateMany({
+        where: buildCancelClaimWhere(submissionId),
+        data: { cancelledAt, status: 'ended', endedAt: cancelledAt },
+      });
+
+      if (claim.count !== 1) {
+        // claim に負けた: 承認と衝突したか、他要求が既に取消済み。再読込して実状態を報告する。
+        const fresh = await prisma.session.findUnique({ where: { id: submissionId }, select: { cancelledAt: true, approvedAt: true } });
+        if (fresh?.cancelledAt) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              submissionId, state: 'alreadyCancelled', message: 'This submission was already cancelled.',
+            }) }],
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            error: 'Cannot cancel: this submission has already been approved. Implementation is in progress or completed.',
+            code: 'alreadyApproved',
+          }) }],
+          isError: true,
+        };
+      }
+
+      // 読み取り専用ターン（plan 相の instruction、または質問）のみここに到達するため、
+      // 途中で中断しても作業ツリーを汚さない（exec は claim 条件で構造的に除外されている）
+      await cancelAiProcess(session!.machineId, submissionId);
+
+      console.log(`📋 [MCP] AUDIT cancel: userId=${userId}, submissionId=${submissionId}, kind=${session!.kind ?? 'instruction'}`);
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          submissionId, state: 'cancelled', message: 'Submission cancelled.',
         }) }],
       };
     }

@@ -76,6 +76,50 @@ test('evaluateApproveGuard: userMismatch', () => {
   assert.equal(result.message, 'Submission does not belong to this user');
 });
 
+// MCP ask サイクル: cancelled / questionNotApprovable の 2 ケース（planNotReady より前に判定される）
+
+test('evaluateApproveGuard: cancelled（cancel_submission で取消済み）', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, cancelledAt: new Date() },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'cancelled');
+});
+
+test('evaluateApproveGuard: questionNotApprovable（ask_project の質問は承認できない）', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, kind: 'question' },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'questionNotApprovable');
+});
+
+test('evaluateApproveGuard: cancelled は questionNotApprovable より先に判定される', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, kind: 'question', cancelledAt: new Date() },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.code, 'cancelled');
+});
+
+test('evaluateApproveGuard: kind/cancelledAt 未指定（既存の instruction 経路）は従来どおり通過する', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: 'sess-x' },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.deepEqual(result, { ok: true });
+});
+
 test('evaluateApproveGuard: planNotReady（plan メッセージ未完了）', () => {
   const result = evaluateApproveGuard({
     session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null },

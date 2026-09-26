@@ -633,6 +633,11 @@ export interface ThreadSummary {
   labelFromAi?: string | null;
   messageCount: number;
   isScoped: boolean;
+  /** MCP ask サイクル: 'instruction'（従来の submit_instruction 経由）| 'question'（ask_project の質問）。
+   * 旧サーバー応答には無いため `thread-list-rules.ts` 側で未定義時は 'instruction' 扱いにする。 */
+  kind?: string;
+  /** MCP ask サイクル: cancel_submission で取り消し済みかどうか。旧サーバー応答には無い。 */
+  cancelled?: boolean;
 }
 
 /** POST /api/sessions/:id/switch のレスポンス */

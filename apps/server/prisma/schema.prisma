@@ -265,6 +265,10 @@ model Session {
   title        String?   // スレッド表示名。null = 未命名（UI 側が先頭メッセージ等で代替表示）
   lastActiveAt DateTime? // 最終プロンプト送信時刻。null = startedAt を代用（一覧ソート用）
   agentScopeId String?   // Agent 側 scope dir の ID（= 自身の id）。null = 従来の .devrelay/ 直下
+  // MCP ask サイクル: 質問ターン（ask_project）と取り消し（cancel_submission）。
+  // どちらも nullable = 既存行はバックフィルせず従来挙動のまま（core#336 と同じ規約）。
+  kind        String?   // 'question' = ask_project の質問ターン。null = 従来の指示（instruction）
+  cancelledAt DateTime? // cancel_submission の取消 claim。null = 未取消。atomic に claim する
 
   messages       Message[]
   buildLogs      BuildLog[]

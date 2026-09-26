@@ -105,6 +105,8 @@ export const messages = {
   'thread.new': { en: '+ New', ja: '＋ 新規' },
   'thread.creating': { en: 'Creating...', ja: '作成中...' },
   'thread.default': { en: 'Default', ja: '既定' },
+  'thread.question': { en: 'Question', ja: '質問' },
+  'thread.cancelled': { en: 'Cancelled', ja: '取消済み' },
   'thread.untitled': { en: '(untitled)', ja: '(無題)' },
   'thread.rename': { en: 'Rename thread', ja: 'スレッド名を変更' },
   'thread.renamePlaceholder': { en: 'Thread name', ja: 'スレッド名' },

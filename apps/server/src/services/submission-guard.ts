@@ -16,6 +16,8 @@ export type ApproveRejectCode =
   | 'notFound'
   | 'projectMismatch'
   | 'userMismatch'
+  | 'cancelled'
+  | 'questionNotApprovable'
   | 'planNotReady'
   | 'planAiSessionMissing';
 
@@ -24,13 +26,23 @@ export type ApproveRejectCode =
  * submissionId が本当にこの projectId / userId の Session かどうか、plan が完了しているか、
  * plan ターンの AI セッション ID が記録されているかを判定する。
  *
+ * MCP ask サイクル（2026-09-26）: `cancelled` / `questionNotApprovable` の 2 ケースを
+ * `planNotReady` より前に追加した。`kind`/`cancelledAt` は既存呼び出し元（approve_implementation の
+ * 通常の instruction 経路）では undefined/null のままなので、既存 5 ケースの判定順・文言は不変。
+ *
  * @param input.session DB から取得した Session（存在しない場合は null を渡す）
  * @param input.requestedProjectId リクエストされた projectId
  * @param input.requestedUserId リクエストされた userId
  * @param input.hasPlanMessage submissionId に紐づく role='ai' の Message が存在するか
  */
 export function evaluateApproveGuard(input: {
-  session: { projectId: string; userId: string; planAiSessionId: string | null } | null;
+  session: {
+    projectId: string;
+    userId: string;
+    planAiSessionId: string | null;
+    kind?: string | null;
+    cancelledAt?: Date | null;
+  } | null;
   requestedProjectId: string;
   requestedUserId: string;
   hasPlanMessage: boolean;
@@ -45,6 +57,16 @@ export function evaluateApproveGuard(input: {
   }
   if (session.userId !== requestedUserId) {
     return { ok: false, code: 'userMismatch', message: 'Submission does not belong to this user' };
+  }
+  if (session.cancelledAt) {
+    return { ok: false, code: 'cancelled', message: 'This submission has been cancelled and cannot be approved.' };
+  }
+  if (session.kind === 'question') {
+    return {
+      ok: false,
+      code: 'questionNotApprovable',
+      message: 'This is a question (ask_project), not an instruction. Questions cannot be approved for implementation.',
+    };
   }
   if (!hasPlanMessage) {
     return { ok: false, code: 'planNotReady', message: 'Plan is not ready yet. Call get_plan first.' };

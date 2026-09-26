@@ -1741,6 +1741,10 @@ export async function apiRoutes(app: FastifyInstance) {
         labelFromAi: labelFromAi ? labelFromAi.slice(0, 60) : null,
         messageCount: s._count.messages,
         isScoped: s.agentScopeId !== null,
+        // MCP ask サイクル: 質問スレッド（ask_project）の区別表示用。
+        // 既存行は kind=NULL のため 'instruction' に正規化する（バックフィルなし、null 判定はしない）。
+        kind: s.kind ?? 'instruction',
+        cancelled: s.cancelledAt !== null,
       };
     });
 
