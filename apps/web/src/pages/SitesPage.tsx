@@ -133,7 +133,7 @@ function SiteDetailDrawer({ site, onClose, onHealthCheck, checking }: {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
-        className="bg-[var(--bg-secondary)] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto"
+        className="bg-[var(--bg-secondary)] rounded-lg p-4 sm:p-6 max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
@@ -149,7 +149,7 @@ function SiteDetailDrawer({ site, onClose, onHealthCheck, checking }: {
           <div className="text-xs text-[var(--text-faint)] mb-3">aliases: {site.aliases.join(', ')}</div>
         )}
 
-        <div className="flex items-center gap-3 mb-4">
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
           <HealthBadge state={site.health.state} httpStatus={site.health.httpStatus} />
           <span className="text-xs text-[var(--text-faint)]">
             {site.health.checkedAt ? new Date(site.health.checkedAt).toLocaleString() : t('sites.unknown')}
@@ -213,7 +213,7 @@ function SiteDetailDrawer({ site, onClose, onHealthCheck, checking }: {
                     })}
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <div className="text-[var(--text-faint)] text-xs mb-1">{t('sites.topPaths')}</div>
                       <CountList entries={site.stats.topPaths} emptyLabel={t('sites.noData')} />
@@ -226,7 +226,7 @@ function SiteDetailDrawer({ site, onClose, onHealthCheck, checking }: {
                   {(site.stats.utm.source.length > 0 || site.stats.utm.medium.length > 0 || site.stats.utm.campaign.length > 0) && (
                     <div>
                       <div className="text-[var(--text-faint)] text-xs mb-1">{t('sites.utm')}</div>
-                      <div className="grid grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <CountList entries={site.stats.utm.source} emptyLabel="-" />
                         <CountList entries={site.stats.utm.medium} emptyLabel="-" />
                         <CountList entries={site.stats.utm.campaign} emptyLabel="-" />
@@ -473,7 +473,7 @@ export function SitesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('sites.title')}</h1>
           <p className="text-sm text-[var(--text-muted)] mt-1">{t('sites.subtitle')}</p>
@@ -517,7 +517,7 @@ export function SitesPage() {
               ⚠️ {meta.orphans.length} {t('sites.metaOrphans')}
               <ul className="mt-1 ml-4 list-disc">
                 {meta.orphans.map((o) => (
-                  <li key={`${o.kind}-${o.name}`} className="font-mono text-xs">
+                  <li key={`${o.kind}-${o.name}`} className="font-mono text-xs break-all">
                     [{o.kind}] {o.name} ({o.path}){o.status ? ` status=${o.status}` : ''}
                   </li>
                 ))}
@@ -532,7 +532,9 @@ export function SitesPage() {
           <p className="text-[var(--text-muted)]">No sites found.</p>
         </div>
       ) : (
-        <div className="hidden md:block bg-[var(--bg-secondary)] rounded-lg overflow-hidden overflow-x-auto">
+        <>
+        {/* デスクトップ テーブルビュー */}
+        <div className="hidden md:block bg-[var(--bg-secondary)] rounded-lg overflow-x-auto">
           <table className="min-w-full divide-y divide-[var(--border-color)]">
             <thead className="bg-[var(--bg-tertiary)]/50">
               <tr>
@@ -580,6 +582,45 @@ export function SitesPage() {
             </tbody>
           </table>
         </div>
+
+        {/* モバイル カードビュー */}
+        <div className="md:hidden space-y-3">
+          {data.map((site) => (
+            <div
+              key={site.host}
+              onClick={() => setSelected(site)}
+              className="bg-[var(--bg-secondary)] rounded-lg p-4 cursor-pointer hover:bg-[var(--bg-tertiary)]/60 transition-colors"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-sm font-mono text-[var(--text-primary)] break-all">{site.host}</span>
+                <HealthBadge state={site.health.state} httpStatus={site.health.httpStatus} />
+              </div>
+              <div className="flex items-center justify-between gap-2 mt-2 text-xs text-[var(--text-faint)]">
+                <span>{t('sites.colLastAccess')}: {lastAccessDate(site.stats) ?? '-'}</span>
+                <WarningsBadge warnings={site.warnings} />
+              </div>
+              {site.stats ? (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-[var(--text-secondary)]">
+                  <span>{t('sites.colTodayPv')}: <span className="font-mono">{site.stats.today.pv.toLocaleString()}</span></span>
+                  <span>{t('sites.col7dPv')}: <span className="font-mono">{site.stats.last7d.pv.toLocaleString()}</span></span>
+                  <span>
+                    {t('sites.colTodayUu')}: <span className="font-mono">
+                      {site.stats.today.uu !== null ? site.stats.today.uu.toLocaleString() : t('sites.unknown')}
+                    </span>
+                    {site.stats.today.uuTruncated && <span className="text-[var(--text-faint)]">{'≥'}</span>}
+                  </span>
+                </div>
+              ) : (
+                <div className="mt-2">
+                  <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium border bg-gray-500/15 text-gray-400 border-gray-500/30">
+                    {t('sites.unmeasured')}
+                  </span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        </>
       )}
 
       {selected && (
