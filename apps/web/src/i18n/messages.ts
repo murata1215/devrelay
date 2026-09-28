@@ -66,6 +66,13 @@ export const messages = {
   'machines.title': { en: 'Agents', ja: 'エージェント' },
   'team.title': { en: 'Team', ja: 'チーム' },
   'conversations.title': { en: 'Conversations', ja: '会話履歴' },
+  'conversations.cost.header': { en: 'Cost', ja: 'コスト' },
+  'conversations.cost.tooltipSdk': { en: 'Actual cost reported by the AI SDK.', ja: 'AI SDK が報告した実測コストです。' },
+  'conversations.cost.tooltipEstimate': {
+    en: 'Estimated from token counts × published pricing (cache-write assumed at 1.25× input price). This is an approximation and may not match the actual bill.',
+    ja: 'トークン数 × 公開単価から算出した推定値です（キャッシュ書き込みは入力単価の1.25倍と仮定）。概算であり、実際の請求額とは一致しない場合があります。',
+  },
+  'conversations.cost.tooltipUnknown': { en: 'Cost data unavailable for this turn.', ja: 'このターンのコストデータは取得できていません。' },
   'activity.title': { en: 'Member Activity', ja: 'メンバー活動' },
   'reports.title': { en: 'Dev Reports', ja: '開発レポート' },
   'reports.noConversations': { en: 'No conversations found.', ja: '会話が見つかりません。' },

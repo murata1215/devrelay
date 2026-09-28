@@ -52,3 +52,16 @@ export {
   buildManagerTokenUrl,
   isManagerRedirectEnabled,
 } from './manager-redirect.js';
+// Devin 料金可視化サイクル: モデル単価の構造化 + コスト解決（同じ理由で明示的 named export）
+export {
+  type ModelPrice,
+  DEVIN_MODEL_PRICING,
+  type NormalizedDevinModelId,
+  normalizeDevinModelId,
+  resolveDevinModelPrice,
+  type UsageTokenCounts,
+  estimateCostUsd,
+  type CostSource,
+  type ResolvedMessageCost,
+  resolveMessageCost,
+} from './model-pricing.js';

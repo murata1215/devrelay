@@ -288,12 +288,26 @@ export interface FileAttachment {
 export interface AiUsageData {
   /** per-request トークン情報: { input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens } */
   usage?: Record<string, number>;
-  /** モデル別セッション累積トークン: { "claude-opus-4-6": { contextWindow, input, output, cacheRead, cacheCreation } } */
+  /**
+   * モデル別トークン: { "claude-opus-4-6": { contextWindow, input, output, cacheRead, cacheCreation, costUSD } }
+   * 【料金可視化サイクルで訂正】旧コメントは「セッション累積」としていたが誤り。実 DB を1セッション内で
+   * 追跡した結果 `costUSD`/各トークン数は単調増加せず変動しており、`outputTokens`/`cacheReadInputTokens`
+   * は同メッセージの `usage.output_tokens`/`usage.cache_read_input_tokens` と完全一致することを確認済み。
+   * **ターン単位**（= このメッセージ1件分）の値であり、メッセージ横断で単純合算してよい。
+   */
   modelUsage?: Record<string, any>;
   /** 実行時間（ミリ秒） */
   durationMs?: number;
   /** 使用モデル名（modelUsage の最初のキーから取得。例: "claude-opus-4-6"） */
   model?: string;
+  /**
+   * このターンを実行した AI ツール（料金可視化サイクルで追加）。
+   * `Session.aiTool` は `l` コマンドでセッション横断で上書きされる可変値のため、ツール切替後の
+   * セッションでは過去ターンの実ツールを判別できない（例: devin セッションに旧 claude ターンが残る）。
+   * ここに実行時点のツールを都度明示することで、将来のメッセージはこの値から正しく帰属できる。
+   * optional のため旧 Agent（未設定）との後方互換は維持される。
+   */
+  tool?: AiTool;
   /** レートリミット情報（Agent SDK の rate_limit_event から取得） */
   rateLimits?: {
     fiveHour?: { utilization: number; resetsAt?: number; status: string };

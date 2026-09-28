@@ -23,7 +23,7 @@ import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-co
 import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS, type AiTool } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, DEFAULT_ALLOWED_TOOLS_WINDOWS, type AiTool, resolveMessageCost } from '@devrelay/shared';
 import {
   getLinkedPlatforms,
   validateAndConsumeLinkCode,
@@ -2136,6 +2136,10 @@ export async function apiRoutes(app: FastifyInstance) {
       const cacheCreationTokens = data.usage?.cache_creation_input_tokens ?? 0;
       const durationMs = data.durationMs ?? 0;
       const model = data.model ?? null;
+      // 料金可視化サイクル: Claude は SDK 実額（costUSD）、Devin は usageData.tool==='devin' かつ
+      // 単価判明時のみ推定値（トークン×公開単価）。それ以外（単価不明・旧データ）は null のまま
+      // 返す（$0.00 と誤解させないため。フロント側で「-」表示にする）。
+      const cost = resolveMessageCost(aiMsg.usageData as any);
 
       // 同一セッション内で AI メッセージの直前にある user メッセージを探す
       const sessionUserMsgs = userMsgMap.get(aiMsg.sessionId) || [];
@@ -2167,6 +2171,8 @@ export async function apiRoutes(app: FastifyInstance) {
         outputTokens,
         cacheReadTokens,
         cacheCreationTokens,
+        costUsd: cost.usd,
+        costSource: cost.source,
         createdAt: aiMsg.createdAt.toISOString(),
         inputFiles,
         outputFiles: aiMsg.files || [],

@@ -217,8 +217,20 @@ export function extractAtifModel(parsed: unknown): { modelName: string | null; m
 /**
  * ATIF の `final_metrics` を Claude 互換キー（`input_tokens`/`output_tokens`/
  * `cache_read_input_tokens`/`cache_creation_input_tokens`）へマップする（変更5、判明12）。
+ *
+ * 【料金可視化サイクル・実測での訂正】旧実装が想定していた `total_input_tokens` 等のキーは
+ * 実機（devin 3000.x、ATIF-v1.7、`kimi-k2-7` 実行時、2026-09-29 実測）には存在せず、
+ * 常に 0 埋めになっていた（DB 上の Devin usageData が軒並み全ゼロだった根本原因。
+ * 「$0.00 に見える嘘のコスト行」を作り続けるバグでもあった）。
+ * 実測の正しいキー名は `total_prompt_tokens` / `total_completion_tokens` / `total_cached_tokens`。
+ * Devin はキャッシュを read/write に分けて報告しないため、`total_cached_tokens` を
+ * Claude 互換の `cache_read_input_tokens` 側へ割り当てる（`cache_creation_input_tokens` に
+ * 対応する Devin 側フィールドは存在しないため常に 0）。
+ * 旧キー名は ATIF のバージョン差異・将来のスキーマ変更に備えたフォールバックとして残す
+ * （`??` で実測キー優先→旧キーの順に解決）。
  * @param parsed JSON.parse 済みの ATIF 全体
- * @returns `final_metrics` が無ければ null。欠落フィールドは 0 埋め
+ * @returns `final_metrics` が無い、または既知キーが1つも見つからない（＝未知スキーマ）場合は
+ *   null（**0 埋めしない**。取得できたことにしない）。既知キーが1つでもあれば欠落フィールドは 0 埋め
  */
 export function extractAtifUsage(parsed: unknown): AtifUsageTotals | null {
   if (!parsed || typeof parsed !== 'object') return null;
@@ -227,10 +239,17 @@ export function extractAtifUsage(parsed: unknown): AtifUsageTotals | null {
   if (!metrics || typeof metrics !== 'object') return null;
   const m = metrics as Record<string, unknown>;
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  // 既知キー（実測キー + 旧キー）が1つも存在しなければ未知スキーマとみなし null を返す。
+  // 「final_metrics はあるが中身が読めない」状態で 0 埋めして「取得できた」と偽装しないため。
+  const KNOWN_KEYS = [
+    'total_prompt_tokens', 'total_completion_tokens', 'total_cached_tokens',
+    'total_input_tokens', 'total_output_tokens', 'total_cache_read_tokens', 'total_cache_creation_tokens',
+  ];
+  if (!KNOWN_KEYS.some((k) => k in m)) return null;
   return {
-    input_tokens: num(m.total_input_tokens),
-    output_tokens: num(m.total_output_tokens),
-    cache_read_input_tokens: num(m.total_cache_read_tokens),
+    input_tokens: num(m.total_prompt_tokens ?? m.total_input_tokens),
+    output_tokens: num(m.total_completion_tokens ?? m.total_output_tokens),
+    cache_read_input_tokens: num(m.total_cached_tokens ?? m.total_cache_read_tokens),
     cache_creation_input_tokens: num(m.total_cache_creation_tokens),
   };
 }

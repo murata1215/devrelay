@@ -69,13 +69,15 @@ export type ModelSelectableAiTool = 'claude' | 'codex' | 'gemini' | 'devin';
  * ここに無い ID もチャット/WebUI から自由入力で指定可能（新モデル追従のため、カタログは随時更新する運用）。
  * 2026-09 時点のスナップショット（#353: Claude Fable 5.1 追加。Opus 5.5 追加サイクル: 公式では
  * Fable 5 / Opus 5 / Opus 4.8 が legacy 扱いに移ったが、いずれも Active で利用可能なため削除は0件）。
+ * devin のみ 2026-09-28 に再実測（devin 3000.6.14、`devin models list --format json`、
+ * `tisa-lenovo/lfuser` 実機。詳細は devin セクションのコメント参照）。
  *
  * 【新モデル追加時の注意】フル ID なら CLI/Node.js を更新せず使えるという設計判断（本ファイル末尾の
  * `isUnsafeModelId` 節参照）は、#353（Fable 5.1 / 同梱 Claude Code ≥2.1.251 必須）と Opus 5.5 追加
  * サイクル（≥2.1.280 必須）で**2度**破れている。カタログに ID を追加するだけでは Agent 側の同梱
  * Claude Code（`@anthropic-ai/claude-agent-sdk` の `claudeCodeVersion`）が対応していなければ実行時に
  * 400 で失敗する。新モデル追加時は必ず実機/実SDKで `query({options:{model:'<新ID>'}})` を試し、
- * 拒否されないか・要求バージョンが何かを確認してから追加すること。
+ * 拒否されないか・要求バージョンが何かを確認してから追加すること（devin は素通しのためこの制約は無い）。
  */
 export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
   claude: [
@@ -111,23 +113,51 @@ export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: '旧世代・実績重視' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: '旧世代・高速' },
   ],
-  // 変更3: 実測13件に差し替え（値は slug か alias のみ、family_uid は書かない）。
+  // Devin モデルカタログ更新サイクル（2026-09-28）: devin 3000.6.14 実機で
+  // `devin models list --format json`（52 ファミリー、実行時にサーバから最新取得）を実測し
+  // 13 件 → 24 件へ純増（削除は0件、旧13件は全て今も Active）。
+  //
+  // 【重要】ローカルの `%LOCALAPPDATA%\devin\cli\model_configs_v5.*.bin` キャッシュは古くなるため
+  // 根拠にしないこと（今回の実測時点で 9/7 のキャッシュには Opus 5.5 が含まれていなかった）。
+  // 正は常に `devin models list --format json`（`aliases` フィールドでエイリアス解決先も分かる）。
+  //
+  // 【重要】opus/sonnet/haiku/gpt/gemini/swe/codex のようなエイリアスは、対応 family の世代が
+  // 上がると**無警告で解決先が変わる**（実測: opus は Opus5→5.5、gpt は GPT-5.6 Sol→GPT-6 Sol、
+  // gemini は→3.8 Flash へ移動していた）。そのため「最新に自動追従したい」エイリアスと
+  // 「世代を固定したい」family slug を**対で**カタログに載せる方針にした（片方だけだと、
+  // 自動追従派は気づかず単価が変わり、固定派は新モデルに永久に届かない）。
+  // 値は slug か alias のみ（family_uid は書かない）。
   // effort サフィックス（-low/-medium/-high/-xhigh/-max）は実装を追加せず、対応 family の
   // description に書式を明記するだけで使えるようにしてある（判明7 で受理を実証済み）。
   devin: [
     { id: 'adaptive', name: 'Adaptive', description: '品質とコストを自動調整（既定候補）' },
-    { id: 'opus', name: 'Claude Opus', description: '最高性能 / High / 1M ctx（-low/-medium/-high/-xhigh/-max で推論量指定可、例: opus-low）' },
-    { id: 'sonnet', name: 'Claude Sonnet', description: 'バランス / Med / 1M ctx（-low/-medium/-high/-xhigh/-max で推論量指定可、例: sonnet-low）' },
-    { id: 'haiku', name: 'Claude Haiku', description: '高速・低コスト' },
-    { id: 'claude-fable-5.1', name: 'Claude Fable 5.1', description: '新モデル' },
-    { id: 'gpt', name: 'GPT', description: '新世代 GPT / High / 1M ctx（-low/-medium/-high/-xhigh/-max で推論量指定可、例: gpt-low）' },
-    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: 'Med / コスト重視' },
-    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: '軽量' },
-    { id: 'codex', name: 'Codex', description: 'コーディング特化 / 400K ctx' },
-    { id: 'gemini', name: 'Gemini', description: '新・高速 / Med / 1M ctx' },
-    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', description: '高精度 Gemini' },
-    { id: 'swe', name: 'SWE', description: 'SWE 特化・高速' },
-    { id: 'glm-5.3', name: 'GLM 5.3', description: '低コスト' },
+    // -- Claude --
+    { id: 'opus', name: 'Claude Opus（最新追従）', description: '最新 Opus に自動追従（2026-09-28 時点: Claude Opus 5.5）。-low/-medium/-high/-xhigh/-max で推論量指定可、例: opus-low' },
+    { id: 'claude-opus-5.5', name: 'Claude Opus 5.5', description: '最高性能・推奨（$4/$0.2/$20 per MTok、1M ctx）。推論量は claude-opus-5-5-{low,medium,high,xhigh,max}、-fast 版は $8/$40' },
+    { id: 'claude-opus-5', name: 'Claude Opus 5', description: '旧世代 Opus に固定（$5/$0.5/$25 per MTok、1M ctx）' },
+    { id: 'claude-fable-5.1', name: 'Claude Fable 5.1', description: '最高性能クラス（$10/$0.25/$50 per MTok、1M ctx）' },
+    { id: 'sonnet', name: 'Claude Sonnet（最新追従）', description: 'バランス型。最新 Sonnet に自動追従（2026-09-28 時点: Claude Sonnet 5）。-low/-medium/-high/-xhigh/-max で推論量指定可、例: sonnet-low' },
+    { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', description: 'バランス型に固定（$2/$0.2/$10 per MTok、1M ctx）' },
+    { id: 'haiku', name: 'Claude Haiku（最新追従）', description: '高速・低コスト。最新 Haiku に自動追従（2026-09-28 時点: Claude Haiku 4.5）' },
+    { id: 'claude-haiku-4.5', name: 'Claude Haiku 4.5', description: '高速・低コストに固定（$1/$0.1/$5 per MTok、200K ctx）' },
+    // -- GPT --
+    { id: 'gpt', name: 'GPT（最新追従）', description: '最新 GPT に自動追従（2026-09-28 時点: GPT-6 Sol）。-low/-medium/-high/-xhigh/-max で推論量指定可、例: gpt-low' },
+    { id: 'gpt-6-sol', name: 'GPT-6 Sol', description: 'GPT-6 の本命・普段使い（$2/$0.2/$10 per MTok、1M ctx）' },
+    { id: 'gpt-6-astra', name: 'GPT-6 Astra', description: 'GPT-6 最上位（$10/$1/$50 per MTok、1M ctx）' },
+    { id: 'gpt-6-luna', name: 'GPT-6 Luna', description: '超低コスト（$0.1/$0.01/$0.5 per MTok、1M ctx）' },
+    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: '旧世代バランス（$2/$0.2/$12 per MTok）' },
+    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: '旧世代軽量（$0.2/$0.02/$1.2 per MTok）' },
+    { id: 'codex', name: 'Codex（最新追従）', description: 'コーディング特化。最新 Codex 系に自動追従（2026-09-28 時点: GPT-5.3-Codex）' },
+    { id: 'gpt-5.3-codex', name: 'GPT-5.3-Codex', description: 'コーディング特化に固定（$1.75/$0.17/$14 per MTok、400K ctx）' },
+    // -- Gemini --
+    { id: 'gemini', name: 'Gemini（最新追従）', description: '最新 Gemini に自動追従（2026-09-28 時点: Gemini 3.8 Flash）' },
+    { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: '高速・低コストに固定（$0.75/$0.08/$3.75 per MTok、1M ctx）' },
+    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', description: '高精度 Gemini（$2/$0.2/$12 per MTok）' },
+    // -- その他 --
+    { id: 'swe', name: 'SWE（最新追従）', description: 'SWE 特化・高速。最新 SWE に自動追従（2026-09-28 時点: SWE-2）' },
+    { id: 'swe-2', name: 'SWE-2', description: 'SWE 特化・高速に固定（262K ctx、無料）' },
+    { id: 'glm-5.3', name: 'GLM 5.3', description: '低コスト（$1.4/$0.26/$4.4 per MTok）' },
+    { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', description: '最安クラス（$0.22/$0.01/$0.66 per MTok、1M ctx）' },
   ],
 };
 

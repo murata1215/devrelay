@@ -23,6 +23,24 @@ function shortModelName(model: string | null): string {
   return model.replace(/^claude-/, '');
 }
 
+/**
+ * コストを表示用にフォーマットする。
+ * `source==='sdk'`（Claude 実額）はチルダなし、`source==='estimate'`（Devin 等の推定）は
+ * `~` を付けて推定値であることを明示する。`unknown`（単価不明・データ無し）は `-`
+ * （**`$0.00` は表示しない** — 実際には金額が取れていないだけなのに 0 円だったと誤解されるため）。
+ */
+function formatCost(item: ConversationItem): string {
+  if (item.costUsd === null || item.costUsd === undefined) return '-';
+  const formatted = item.costUsd < 0.01 && item.costUsd > 0 ? '<$0.01' : `$${item.costUsd.toFixed(2)}`;
+  return item.costSource === 'estimate' ? `~${formatted}` : formatted;
+}
+
+/** コストのツールチップに使う i18n キー（出所ごとに説明を変える。t() の呼び出しは呼び出し側で行う） */
+function costTooltipKey(item: ConversationItem): 'conversations.cost.tooltipUnknown' | 'conversations.cost.tooltipEstimate' | 'conversations.cost.tooltipSdk' {
+  if (item.costUsd === null || item.costUsd === undefined) return 'conversations.cost.tooltipUnknown';
+  return item.costSource === 'estimate' ? 'conversations.cost.tooltipEstimate' : 'conversations.cost.tooltipSdk';
+}
+
 /** 文字列を指定文字数で切り詰め */
 function truncate(text: string, maxLen: number): string {
   if (!text) return '';
@@ -223,6 +241,7 @@ export function ConversationsPage() {
                   <th className="text-left text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-28">Model</th>
                   <th className="text-right text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-20">Duration</th>
                   <th className="text-right text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-20">Tokens</th>
+                  <th className="text-right text-[var(--text-muted)] text-xs font-medium px-4 py-3 w-20">{t('conversations.cost.header')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -261,11 +280,14 @@ export function ConversationsPage() {
                       <td className="px-4 py-3 text-[var(--text-secondary)] text-sm text-right whitespace-nowrap font-mono">
                         {hasUsageData(item) ? formatTokens(totalTokens(item)) : '-'}
                       </td>
+                      <td className="px-4 py-3 text-[var(--text-secondary)] text-sm text-right whitespace-nowrap font-mono" title={t(costTooltipKey(item))}>
+                        {formatCost(item)}
+                      </td>
                     </tr>
                     {/* 展開パネル */}
                     {expandedRow === item.messageId && (
                       <tr key={`${item.messageId}-detail`}>
-                        <td colSpan={7} className="px-4 py-4 bg-[var(--bg-tertiary)]/20">
+                        <td colSpan={8} className="px-4 py-4 bg-[var(--bg-tertiary)]/20">
                           <div className="space-y-4">
                             {/* 入力ファイル */}
                             <FileList files={item.inputFiles} label="Input Files" onImageClick={setLightboxUrl} />
@@ -295,6 +317,7 @@ export function ConversationsPage() {
                                   <span>Cache Creation: <span className="text-[var(--text-secondary)]">{item.cacheCreationTokens.toLocaleString()}</span></span>
                                   <span>Duration: <span className="text-[var(--text-secondary)]">{formatDuration(item.durationMs)}</span></span>
                                   <span>Model: <span className="text-[var(--text-secondary)]">{item.model ?? 'unknown'}</span></span>
+                                  <span title={t(costTooltipKey(item))}>{t('conversations.cost.header')}: <span className="text-[var(--text-secondary)]">{formatCost(item)}</span></span>
                                 </>
                               ) : (
                                 <span>Usage: <span className="text-[var(--text-faint)]">N/A（Agent 更新で表示されます）</span></span>
@@ -336,6 +359,7 @@ export function ConversationsPage() {
                   <span>{shortModelName(item.model)}</span>
                   <span>{formatDuration(item.durationMs)}</span>
                   <span className="font-mono">{hasUsageData(item) ? formatTokens(totalTokens(item)) : '-'}</span>
+                  <span className="font-mono" title={t(costTooltipKey(item))}>{formatCost(item)}</span>
                 </div>
 
                 {/* モバイル展開 */}
@@ -361,6 +385,7 @@ export function ConversationsPage() {
                           <span>In: {item.inputTokens.toLocaleString()}</span>
                           <span>Out: {item.outputTokens.toLocaleString()}</span>
                           <span>Cache: {item.cacheReadTokens.toLocaleString()}</span>
+                          <span title={t(costTooltipKey(item))}>{t('conversations.cost.header')}: {formatCost(item)}</span>
                         </>
                       ) : (
                         <span className="text-[var(--text-faint)]">Usage: N/A</span>

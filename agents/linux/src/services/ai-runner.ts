@@ -1907,6 +1907,10 @@ export async function sendPromptToAi(
 
   const result: AiRunResult = {};
   let proc;
+  // 料金可視化サイクル: Devin の durationMs 算出用にターン開始時刻を関数スコープで記録する。
+  // 既存の `devinStartTime`（heartbeat 用）は `if (aiTool === 'devin') { ... }` ブロック内の
+  // ローカル変数で close ハンドラから参照できないため、別名でここに置く（durationMs 専用）。
+  const devinTurnStartedAt = Date.now();
   // Devin: -r で resume したセッション ID を関数スコープで記録（close ハンドラから参照して空振り検出に使う）
   let devinResumedSessionId: string | null = null;
   // このサイクル: 今回のターンで使った Devin モデルを関数スコープで記録（close ハンドラから
@@ -2826,12 +2830,26 @@ export async function sendPromptToAi(
             // #365: 今回ターン終了時点の累計ステップ数。次ターンのオフセットとして保存するため
             // close ハンドラの外（セッション ID 保存箇所）まで持ち越す。
             devinAtifTotalSteps = digest.totalSteps;
+            // 料金可視化サイクル: durationMs は digest.usage の有無に関わらず必ず記録する
+            // （旧実装は digest.usage が null だと usageData 自体を作らず、Duration 表示が
+            // 常に「-」になっていた。durationMs 単体でも Conversations 一覧の表示に使える）。
+            const devinDurationMs = Date.now() - devinTurnStartedAt;
             if (digest.usage) {
               const modelKey = digest.modelId ?? digest.modelName ?? 'devin';
               result.usageData = {
                 usage: { ...digest.usage },
                 modelUsage: { [modelKey]: { ...digest.usage } },
                 model: modelKey,
+                durationMs: devinDurationMs,
+                tool: 'devin',
+              };
+            } else {
+              // usage は取れなかったが、モデル名自体は agent.model_name 等から取れている場合がある
+              const devinFallbackModelKey = digest.modelId ?? digest.modelName ?? undefined;
+              result.usageData = {
+                durationMs: devinDurationMs,
+                tool: 'devin',
+                ...(devinFallbackModelKey ? { model: devinFallbackModelKey } : {}),
               };
             }
             if (digest.permissionMode) {

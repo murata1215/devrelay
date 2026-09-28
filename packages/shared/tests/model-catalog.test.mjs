@@ -93,28 +93,40 @@ test('claude カタログに claude-haiku-4-5 が存在する（raw-completion P
   assert.ok(ids.includes('claude-haiku-4-5'), `claude-haiku-4-5 が見つからない: ${JSON.stringify(ids)}`);
 });
 
-// 変更3: devin カタログを実測13件に差し替え（4件→13件）。
+// Devin モデルカタログ更新サイクル（2026-09-28）: devin 3000.6.14 実機で
+// `devin models list --format json` を再実測し 13件→24件（削除0件）に更新。
 // 値は slug か alias のみで family_uid は含めない方針のため、'_' を含む値がないことも併せて検査する。
-test('devin カタログは実測13件である', () => {
-  assert.equal(AI_MODEL_CATALOG.devin.length, 13, `devin カタログの件数が想定と異なる: ${JSON.stringify(AI_MODEL_CATALOG.devin.map((m) => m.id))}`);
+test('devin カタログは実測24件である', () => {
+  assert.equal(AI_MODEL_CATALOG.devin.length, 24, `devin カタログの件数が想定と異なる: ${JSON.stringify(AI_MODEL_CATALOG.devin.map((m) => m.id))}`);
 });
 
-test('devin カタログに実測13件のIDがすべて含まれる', () => {
+test('devin カタログに実測24件のIDがすべて含まれる', () => {
   const ids = AI_MODEL_CATALOG.devin.map((m) => m.id);
   const expected = [
     'adaptive',
     'opus',
-    'sonnet',
-    'haiku',
+    'claude-opus-5.5',
+    'claude-opus-5',
     'claude-fable-5.1',
+    'sonnet',
+    'claude-sonnet-5',
+    'haiku',
+    'claude-haiku-4.5',
     'gpt',
+    'gpt-6-sol',
+    'gpt-6-astra',
+    'gpt-6-luna',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
     'codex',
+    'gpt-5.3-codex',
     'gemini',
+    'gemini-3.8-flash',
     'gemini-3.1-pro',
     'swe',
+    'swe-2',
     'glm-5.3',
+    'deepseek-v4.1-flash',
   ];
   assert.deepEqual(ids, expected, `devin カタログの内容が想定と異なる: ${JSON.stringify(ids)}`);
 });
@@ -127,4 +139,30 @@ test('devin カタログから gpt-5.5（非 alias・削除対象）が削除さ
 test('devin カタログの ID は family_uid 形式（アンダースコア含む）を含まない', () => {
   const offenders = AI_MODEL_CATALOG.devin.map((m) => m.id).filter((id) => id.includes('_'));
   assert.deepEqual(offenders, [], `family_uid らしき ID が混入している: ${JSON.stringify(offenders)}`);
+});
+
+test('devin カタログに claude-opus-5.5 / gpt-6-sol が存在する（2026-09-28 実測サイクル）', () => {
+  const ids = AI_MODEL_CATALOG.devin.map((m) => m.id);
+  assert.ok(ids.includes('claude-opus-5.5'), `claude-opus-5.5 が見つからない: ${JSON.stringify(ids)}`);
+  assert.ok(ids.includes('gpt-6-sol'), `gpt-6-sol が見つからない: ${JSON.stringify(ids)}`);
+});
+
+test('devin カタログは各エイリアスの現在の解決先 family slug も併記している', () => {
+  // エイリアス（opus/sonnet/haiku/gpt/gemini/swe/codex）は世代が上がると無警告で解決先が
+  // 変わるため（実測: opus は Opus5→5.5 へ移動）、「自動追従」派と「世代固定」派の両方に
+  // 選択肢を出す設計方針をテストで固定する。
+  const ids = AI_MODEL_CATALOG.devin.map((m) => m.id);
+  const aliasToResolvedSlug = {
+    opus: 'claude-opus-5.5',
+    sonnet: 'claude-sonnet-5',
+    haiku: 'claude-haiku-4.5',
+    gpt: 'gpt-6-sol',
+    gemini: 'gemini-3.8-flash',
+    swe: 'swe-2',
+    codex: 'gpt-5.3-codex',
+  };
+  for (const [alias, resolvedSlug] of Object.entries(aliasToResolvedSlug)) {
+    assert.ok(ids.includes(alias), `エイリアス ${alias} が見つからない: ${JSON.stringify(ids)}`);
+    assert.ok(ids.includes(resolvedSlug), `${alias} の解決先 ${resolvedSlug} が見つからない: ${JSON.stringify(ids)}`);
+  }
 });

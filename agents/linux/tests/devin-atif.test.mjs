@@ -290,7 +290,7 @@ test('extractAtifModel: 非オブジェクト・null でも例外を投げない
 
 // --- extractAtifUsage ---
 
-test('extractAtifUsage: final_metrics を Claude 互換キーへマップする', () => {
+test('extractAtifUsage: 旧キー名（フォールバック）を Claude 互換キーへマップする', () => {
   const usage = extractAtifUsage({
     final_metrics: {
       total_input_tokens: 1000,
@@ -307,7 +307,38 @@ test('extractAtifUsage: final_metrics を Claude 互換キーへマップする'
   });
 });
 
-test('extractAtifUsage: 欠落フィールドは0埋め', () => {
+// 料金可視化サイクル・実測（2026-09-29、devin 3000.x、ATIF-v1.7、`kimi-k2-7` 実行時、
+// `Lafit` プロジェクトで `devrelay-ask-member` 経由の読み取り専用調査で確認）で判明した
+// 実際のキー名。旧キー名（total_input_tokens 等）は実機に存在せず、この修正前は常に
+// 0 埋めになっていた（DB 上の Devin usageData が軒並み全ゼロだった根本原因）。
+test('extractAtifUsage: 実測キー名（total_prompt_tokens 等）を Claude 互換キーへマップする', () => {
+  const usage = extractAtifUsage({
+    final_metrics: {
+      total_prompt_tokens: 40820,
+      total_completion_tokens: 1097,
+      total_cached_tokens: 24885,
+      total_steps: 11,
+    },
+  });
+  assert.deepEqual(usage, {
+    input_tokens: 40820,
+    output_tokens: 1097,
+    cache_read_input_tokens: 24885,
+    cache_creation_input_tokens: 0,
+  });
+});
+
+test('extractAtifUsage: 実測キーが旧キーより優先される（両方存在する場合）', () => {
+  const usage = extractAtifUsage({
+    final_metrics: {
+      total_prompt_tokens: 40820,
+      total_input_tokens: 999999, // 実測キーがあれば無視される
+    },
+  });
+  assert.equal(usage.input_tokens, 40820);
+});
+
+test('extractAtifUsage: 欠落フィールドは0埋め（既知キーが1つでもあれば）', () => {
   const usage = extractAtifUsage({ final_metrics: { total_input_tokens: 500 } });
   assert.deepEqual(usage, {
     input_tokens: 500,
@@ -319,6 +350,14 @@ test('extractAtifUsage: 欠落フィールドは0埋め', () => {
 
 test('extractAtifUsage: final_metrics 自体が無ければ null', () => {
   assert.equal(extractAtifUsage({}), null);
+});
+
+// 未知スキーマ（既知キーが1つも無い）の場合、0 埋めして「取得できた」と偽装せず null を返す。
+// この修正前は `final_metrics: {}` や未知キーのみの場合でも全ゼロの usage を返しており、
+// 「$0.00 に見える嘘のコスト行」を作り続けるバグの温床だった。
+test('extractAtifUsage: 既知キーが1つも無ければ0埋めせず null を返す（未知スキーマ）', () => {
+  assert.equal(extractAtifUsage({ final_metrics: {} }), null);
+  assert.equal(extractAtifUsage({ final_metrics: { unknown_field: 123 } }), null);
 });
 
 test('extractAtifUsage: 非オブジェクト・null でも例外を投げない（null を返す）', () => {

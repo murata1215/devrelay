@@ -6,6 +6,84 @@
 
 ## 実装済み機能
 
+### Devin 料金可視化 Phase2-3 — ATIF 実キー修正 + 単価構造化 + Conversations コスト列 (2026-09-29)
+
+「devinって料金の可視化ってできそう？」という質問を調査し、実装した。
+
+- **Devin の実額（ACU）は Enterprise 契約限定**: ACU 取得系 API は全て `/v3/enterprise/`
+  配下で service user token が必要。ユーザーの契約は Team プランのため対象外と判断
+  （Phase4 として拡張余地のみ残す）。self-serve/Team は「included quota + 超過分は
+  API pricing」のため、トークン数 × 公開単価が実課金の良い近似になる
+- **バグ根治**: `extractAtifUsage()` が想定していたキー名（`total_input_tokens` 等）が
+  実機に存在せず常に 0 埋めになっていたことが Devin のトークン数が全ゼロだった根本原因。
+  `devrelay-ask-member` で Devin 接続機（`tisa-lenovo/lfuser` の `Lafit`）へ読み取り専用の
+  調査を依頼し、実機の ATIF エクスポートから実キー名（`total_prompt_tokens`/
+  `total_completion_tokens`/`total_cached_tokens`）を確認。既知キーが1つも見つからなければ
+  0 埋めせず `null` を返すよう修正（「$0.00 に見える嘘のコスト行」の根絶）。あわせて
+  `durationMs` 欠落バグ（Devin 経路のみ Conversations の Duration が常に「-」だった）も修正
+- **`AiUsageData.tool` フィールド追加**: `Session.aiTool` は `l` コマンドでセッション横断に
+  上書きされる可変値のため信用できない（過去の Devin セッションに Claude 時代の行が混入する
+  事故が実 DB で確認済み）。以後のターンには実行時点のツールを明示保存する
+- **単価構造化**: 新規 `packages/shared/src/model-pricing.ts`。`AI_MODEL_CATALOG` の構造は
+  一切変更せず、description の `$a/$b/$c per MTok` 表記を機械可読な構造体として複製
+  （二重管理はテストで数値一致を検査）。DB 実測15種のモデル ID 正規化、未知モデルへの
+  単価 fallback は一切なし。cache-write 単価は Claude の実データ校正（実 `costUSD` の
+  残差から入力単価 × 1.25 と逆算確認）を採用
+- **表示**: `/api/conversations` に `costUsd`/`costSource` を追加、`ConversationsPage.tsx`
+  に Cost 列（推定値は `~$0.42` とチルダ表記、単価不明は `$0.00` ではなく `-`）。
+  副産物として、優先順位1位の Claude SDK 実額（`modelUsage[model].costUSD`、累計
+  $59,625.64 相当、9月単月で $45,037.42）も同じ列に可視化されるようになった
+- **スコープ外**: 専用 `/cost` ダッシュボード・日別バーチャート等はユーザー指示
+  （「Devinだけでいいよ」）により見送り。Devin Enterprise API 連携（実 ACU 取得）は
+  契約が Team プランのため対象外（`CostSource` に `'enterprise'` を予約済み）
+- テスト: 新規 `model-pricing.test.mjs`（17件）、`devin-atif.test.mjs`（linux/macos）に
+  3件追加。shared 70/70・server 762/762・web 518/518・linux 1038/1038・
+  macos 601/602+1skip すべて green。6 workspace build green
+
+反映: `pm2 restart devrelay-server` 必須。**Devin 接続機のみ各機 `u` 必須**
+（`agents/{linux,macos,windows}` の `devin-atif.ts`/`ai-runner.ts` を変更したため）。
+DB マイグレーション不要。
+
+詳細: `doc/devlog/2026-09-29_devin_cost_visualization.md`
+
+### Devin モデルカタログ更新 — Claude Opus 5.5 対応 + 実測リフレッシュ (2026-09-28)
+
+WebUI モデル選択ドロップダウンの画像添付を受け「devinのモデル一覧だけど更新できる？opus5.5とか
+使いたいな」という依頼を調査・実装した。添付画像は Codex CLI 見出しの上に開いた **Devin CLI** の
+ドロップダウンだったため、まず対象の取り違えを訂正した（`AI_MODEL_CATALOG.devin`、旧13件）。
+
+- **実測方法**: この機体に Devin CLI は無いため、唯一 Devin が入っている
+  `tisa-lenovo/lfuser`（Windows）へ `devrelay-ask-member` で読み取り専用の調査依頼を送信。
+  devin `3000.6.14` で前サイクルには無かった **`devin models list --format json`** サブコマンドの
+  存在を発見し、52 ファミリー全量を実測した
+- **重要な発見**: ローカルの `%LOCALAPPDATA%\devin\cli\model_configs_v5.*.bin` キャッシュ
+  （9/7 fetch）には Claude Opus 5.5 が含まれておらず、古い。`devin models list` は実行時にサーバから
+  最新一覧を取得しており、そちらが正（キャッシュを実測の根拠にしてはいけない、と `rules/project.md`
+  に明記）
+- **Claude Opus 5.5 は実在**: family slug `claude-opus-5.5`、UID
+  `claude-opus-5-5-{low,medium,high,xhigh,max}`（+`-fast` 版）、$4/$0.2/$20 per MTok・1M ctx
+- **エイリアス解決先の無警告シフトを発見**: `opus` が Claude Opus 5 → **5.5**、`gpt` が
+  GPT-5.6 Sol → **GPT-6 Sol**、`gemini` が → **Gemini 3.8 Flash** へ移動していた。ユーザーから
+  「gpt-6-sol は？」と指摘を受け、**エイリアス（最新追従）と、その解決先 family slug（世代固定）を
+  対で載せる**方針に設計を修正した（片方だけだと自動追従派は気づかず単価が変わり、固定派は新モデルに
+  永久に届かない）
+- `packages/shared/src/constants.ts`: `AI_MODEL_CATALOG.devin` を 13件 → **24件**へ更新
+  （**削除は0件**、旧13件は全て今も Active）。新規12件: `claude-opus-5.5` / `claude-opus-5` /
+  `claude-sonnet-5` / `claude-haiku-4.5` / `gpt-6-sol` / `gpt-6-astra` / `gpt-6-luna` /
+  `gpt-5.3-codex` / `gemini-3.8-flash` / `swe-2` / `deepseek-v4.1-flash`（+ 既存エイリアス4件の
+  ラベルに「（最新追従）」を追記）
+- Devin は catalog の値を `--model` に素通しするだけのため、Claude の時のような Agent 側 SDK
+  バージョン依存は**無い**（`agents/{linux,macos,windows}/ai-runner.ts` は変更不要）
+- `rules/project.md` の Devin 実測節に、`devin models list --format json` が正であること・
+  ローカルキャッシュを根拠にしないこと・エイリアス対の設計方針を追記
+- テスト: shared 53/53・server 762/762・web 518/518 すべて green。6 workspace build green。
+  `git diff --stat -- apps/ agents/ prisma/` は空（想定どおり `packages/shared` + `rules/` のみ）
+
+反映: `pm2 restart devrelay-server` 必須。各マシンの `u` は不要（Devin の `--model` は素通しのため）。
+DB マイグレーション不要。
+
+詳細: `doc/devlog/2026-09-28_devin_model_catalog.md`
+
 ### DevRelay MCP に ask_project / get_answer / cancel_submission を追加 (2026-09-26)
 
 チャッピー（GPT-Live + DevRelay MCP、PAT 認証）から各プロジェクトの AI エージェントに質問できる

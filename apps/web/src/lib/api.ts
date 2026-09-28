@@ -538,6 +538,10 @@ export interface ConversationItem {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** 推定/実測コスト（USD）。単価不明・データ無しの場合は null（0 と区別する） */
+  costUsd: number | null;
+  /** コストの出所: 'sdk'=Claude実額 / 'estimate'=Devin等の推定 / 'unknown'=不明 */
+  costSource: 'sdk' | 'estimate' | 'enterprise' | 'unknown';
   createdAt: string;
   inputFiles: MessageFileMeta[];
   outputFiles: MessageFileMeta[];

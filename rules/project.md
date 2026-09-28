@@ -105,6 +105,18 @@ CLI が受理する slug が食い違うことがある、#353 と同種の教�
 `description` 文字列に注記するだけに留め、スキーマ拡張や実装は伴わせない（「実装ゼロ」の判断はプランの
 スコープ記述と `git diff --stat -- apps/ prisma/` が空であることで検証する）。
 
+**実測の正は `devin models list --format json`。ローカルキャッシュ（`%LOCALAPPDATA%\devin\cli\
+model_configs_v5.*.bin` 等）は古くなるため根拠にしないこと**（2026-09-28 の再実測サイクルで、9/7 に
+fetch されたキャッシュに Claude Opus 5.5 が含まれていないと判明した。`devin models list` は実行時に
+サーバから最新一覧を取得しているため、こちらが常に正）。`--format json` を付けると `aliases` フィールドで
+エイリアス（`opus`/`sonnet`/`haiku`/`gpt`/`gemini`/`swe`/`codex` 等）の現在の解決先 family slug も分かる。
+
+**エイリアスの解決先は family の世代が上がると無警告で変わる**（2026-09-28 実測での移動: `opus` が
+Claude Opus 5 → Claude Opus 5.5、`gpt` が GPT-5.6 Sol → GPT-6 Sol、`gemini` が → Gemini 3.8 Flash）。
+このため `AI_MODEL_CATALOG.devin` は「最新に自動追従したい」エイリアスと「世代を固定したい」family slug を
+**対で**載せる方針にした（片方だけだと、自動追従派は単価変動に気づけず、固定派は新モデルに永久に届かない）。
+新モデル追加サイクルでは、既存エイリアスの解決先も併せて再実測し、対になる family slug の記載を更新すること。
+
 ---
 
 ## SDK auto-compact ループガードは「進捗」を出力ゼロで判定する（#355）
@@ -2335,3 +2347,54 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    `get_build_status.tail`/`progressTail`（経過確認用、意図的に進捗込み）、
    `get_conversation_history`/`search_project_context`（会話ログ閲覧用）、WebUI の会話ログ表示、
    DB の `Message.content` 自体は一切変更していない（MCP 返却直前の整形のみ）。
+
+---
+
+## Devin 料金可視化: コスト解決の優先順位と単価管理方針（2026-09-29）
+
+「devinの料金可視化」調査・実装サイクルで確定した設計判断。詳細は
+`doc/devlog/2026-09-29_devin_cost_visualization.md`。
+
+1. **`Session.aiTool` はコスト帰属の判定に使ってはいけない**。`command-handler.ts` の
+   `l` コマンドがセッション横断で `aiTool` を上書きするため、`aiTool='devin'` の
+   セッションに過去の Claude ターンの行が混入する（実 DB で混在セッションを確認済み）。
+   コスト解決は必ず `Message.usageData.tool`（メッセージ単位で明示保存される新フィールド）
+   のみを見て判定する。この値が無い旧データ（本サイクルの Agent 更新前に記録されたターン）は
+   `Session.aiTool` へのフォールバックをせず常に「単価不明」として扱う——
+   Devin の古い壊れたゼロ値データを Devin 単価で計算してしまう事故より、
+   「Agent 更新まで一時的に表示が空白」の方が安全だと判断した。
+2. **コスト解決の優先順位は「SDK 実額 → 推定 → 不明」の3段階固定、`0` へのフォールバックは
+   禁止**（`resolveMessageCost()`、`packages/shared/src/model-pricing.ts`）。
+   ① Claude Agent SDK が返す `modelUsage[model].costUSD` が最優先（実額）。
+   ② `usageData.tool==='devin'` かつ単価が判明しているモデルのみ推定値
+   （トークン数 × 公開単価）。③ それ以外は `usd: null`（**`0` にしない**）。
+   単価不明・データ欠落を `0` 円として表示すると「タダで使えた」という誤解を招くため、
+   UI 側も `null` と `0`（無料モデル `swe-2` 等）を明確に書き分ける
+   （`-` vs `$0.00`）。
+3. **未知モデルへの単価 fallback は一切禁止**。DB 実測で確認された
+   `kimi-k2-7`/`swe-1-7-*`/`MODEL_PRIVATE_11` 等、`AI_MODEL_CATALOG.devin` に無いモデルは
+   常に単価不明（`undefined`）として扱い、近い価格帯のモデルの単価を代用しない。
+   同様に `-fast` サフィックス付きモデルも、専用の fast 単価が判明していなければ
+   非 fast 単価を流用しない（`-fast` は通常より高額と判明しているため、流用は
+   常に過小評価になる）。
+4. **単価の正は `AI_MODEL_CATALOG` の description、構造化テーブルは複製**。
+   `packages/shared/src/model-pricing.ts` の `DEVIN_MODEL_PRICING` は
+   `AI_MODEL_CATALOG.devin` の description に埋め込まれた `$a/$b/$c per MTok` 表記の
+   複製であり、`AI_MODEL_CATALOG` 自体の構造・件数・順序は変更しない
+   （`model-catalog.test.mjs` の順序固定 `deepEqual` を壊さないため）。
+   二重管理はテスト（`model-pricing.test.mjs`）が description との数値一致を検査することで
+   防止する。新モデル追加時は両方を同時に更新すること。
+5. **キャッシュ書き込み（cache-creation）単価は仮定値**: Devin の公開単価表には
+   cache-write 用の列が無い。Claude の実データ（`modelUsage[model].costUSD`）を
+   1メッセージぶん逆算した結果、入力単価 × 1.25 と一致することを確認し
+   （実例: `costUSD=1.5069985` の in/cacheRead/out 3項合計を差し引いた残差が
+   cache-write 220,462 トークン分 ≒ $6.25/MTok = 入力単価 $5 × 1.25）、この倍率を
+   Devin モデルにも初期値として適用した。**Anthropic 公式のドキュメントで裏付けたものではなく
+   1サンプルからの逆算**であり、UI では推定値であることを明示する
+   （`~$0.42` のようにチルダを付ける）。より正確な値が判明したら差し替えること。
+6. **Devin の実額（ACU）取得は自前実装を諦め、Enterprise API 連携を将来課題として
+   分離した**。ACU 取得系エンドポイント（`GET /v3/enterprise/consumption/daily` 等）は
+   全て Enterprise 契約 + service user token が必要で、self-serve/Team プランでは
+   構造的に取得不可能（ローカル CLI にも金額 API は無い）。`CostSource` 型に
+   `'enterprise'` を先んじて予約し、将来 Enterprise 連携を追加する際に UI 側の分岐追加が
+   不要になるようにした。
