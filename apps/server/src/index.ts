@@ -26,6 +26,7 @@ import { sitesApiRoutes } from './routes/sites-api.js';
 import { startSiteHealthChecker } from './services/sites/health-checker.js';
 import { startAccessLogAggregator } from './services/sites/access-aggregator.js';
 import { mcpRoutes } from './mcp/server.js';
+import { initProxyDispatcher } from './services/proxy-dispatcher.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -56,6 +57,18 @@ function startExpiredSessionCleanup() {
 }
 
 async function main() {
+  // 社内オンプレ移設対応: HTTPS_PROXY 等が設定されていれば undici の globalDispatcher に
+  // ProxyAgent を登録する。未設定なら何もしない（VPS 環境の挙動は変わらない）
+  initProxyDispatcher();
+
+  // SETTINGS_ENCRYPTION_KEY 未設定時はリポジトリに書かれた公開デフォルト鍵にフォールバックする
+  // （services/user-settings.ts）。社内など新規環境では必ず独自の鍵を設定すること。
+  // 既存 VPS 環境（既にデフォルト鍵で暗号化済み）でこの警告を見て鍵を追加設定すると、
+  // 既存の暗号化済み設定（API キー等）が復号不能になるため絶対に行わないこと。
+  if (!process.env.SETTINGS_ENCRYPTION_KEY) {
+    console.warn('⚠️  SETTINGS_ENCRYPTION_KEY が未設定です。デフォルトの公開鍵で暗号化されます（新規環境では必ず設定してください。稼働中の環境に後から追加設定すると既存データが復号不能になるため行わないでください）');
+  }
+
   // trustProxy: Caddy 経由の X-Forwarded-For を信頼し request.ip を実クライアント IP にする（#285 IP 制限用）
   const app = Fastify({ logger: true, trustProxy: true });
 
@@ -260,11 +273,17 @@ async function main() {
 }
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\n👋 Shutting down...');
+// SIGINT: Ctrl+C（開発時・Linux/macOS 手動停止）
+// SIGTERM: pm2/systemd 等の一般的なプロセスマネージャによる停止
+// SIGBREAK: Windows サービス（NSSM 等）が送る停止シグナル。Windows には SIGTERM が無いため必須
+const shutdown = async (signal: string) => {
+  console.log(`\n👋 Shutting down (${signal})...`);
   stopHeartbeatMonitor();
   await prisma.$disconnect();
   process.exit(0);
-});
+};
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGBREAK', () => void shutdown('SIGBREAK'));
 
 main();

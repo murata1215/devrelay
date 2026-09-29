@@ -10,9 +10,10 @@
     "build": "tsc",
     "test": "node --test tests/",
     "start": "node dist/index.js",
-    "clean": "rm -rf dist",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
+    "db:bootstrap": "prisma db push && node -e \"const{execSync}=require('child_process');const fs=require('fs');const sql=fs.readFileSync('prisma/bootstrap.sql','utf8');execSync('npx prisma db execute --stdin',{input:sql,stdio:['pipe','inherit','inherit']})\"",
     "setup:service": "./scripts/setup-service.sh"
   },
   "dependencies": {
@@ -33,6 +34,7 @@
     "nanoid": "^5.0.4",
     "node-telegram-bot-api": "^0.67.0",
     "openai": "^6.16.0",
+    "undici": "^6.21.3",
     "web-push": "^3.6.7",
     "ws": "^8.16.0",
     "zod": "^4.4.3"

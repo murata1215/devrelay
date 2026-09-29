@@ -32,6 +32,19 @@ const CADDY_SITES_DIR = '/etc/caddy/sites.d';
 const DOMAIN_SUFFIX = 'devrelay.io';
 
 /**
+ * `DEVRELAY_TESTFLIGHT` 環境変数を解釈する（純粋関数）。
+ * 既定 ON（'0' が明示されたときのみ無効。sites/health-checker.ts の isSitesHealthEnabled と同じ流儀）。
+ *
+ * testflight は `sudo`/`pm2`/`systemctl reload caddy`/`/etc/caddy/sites.d`/`/home/devrelay/testflight`
+ * に全面依存しており、Linux + sudo + Caddy + PostgreSQL CLI が無い環境（Windows 等）では
+ * 動作しない。WebUI/Discord/Telegram のチャット欄から `testflight` コマンドで到達可能なため、
+ * 無効化していないと意味不明なエラー（sudo が無い等）になる。
+ */
+export function isTestflightEnabled(raw: string | undefined): boolean {
+  return raw !== '0';
+}
+
+/**
  * サービス名のバリデーション
  * 英小文字で始まり、英小文字・数字・ハイフンで構成、3〜30文字
  * @returns エラーメッセージ（null ならバリデーション成功）

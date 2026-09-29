@@ -6,6 +6,41 @@
 
 ## 実装済み機能
 
+### 社内オンプレ移設基盤整備（Windows Server ネイティブ対応） (2026-09-29)
+
+「devrelay を社内へ引っ越そうか」という相談を受けて調査・実装した。現行 `devrelay.io`（VPS）は
+個人利用としてそのまま残し、社内は**別インスタンス・別 DB として新規構築**する前提。
+
+- **調査で判明**: testflight（`sudo`/`pm2`/`systemctl reload caddy`/`/etc/caddy/sites.d` 前提）と
+  DevRelay Sites（`ss`/`ps`/`/etc/passwd`/`/proc`/inode 依存）の 2 機能を除けば、`apps/server/src`
+  の Linux 依存はほぼゼロで、残るシェル実行は `pm2 restart`/`pm2 pid` の 2 箇所のみ。
+  Windows Server ネイティブ稼働が現実的と判断（Hyper-V 等の VM は不要）
+- **`services/proxy-dispatcher.ts` 新設**: `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` を解釈し、
+  設定時のみ undici の `ProxyAgent` を globalDispatcher に登録。社内プロキシ経由でのみ外部
+  HTTPS（OpenAI/Anthropic/Gemini SDK・Google OAuth）に出られる環境向け。未設定なら何もしない
+- **サービス制御コマンドの env 化**: `routes/api.ts` の `pm2 restart/pid` を
+  `DEVRELAY_SERVICE_RESTART_CMD`/`DEVRELAY_SERVICE_STATUS_CMD` で上書き可能に（既定値は現行の
+  pm2 コマンドのまま。status 判定はカスタムコマンド時のみ終了コード判定に切替）
+- **`prisma/bootstrap.sql` 新設**: pgvector 拡張と `MessageFile`/`AgentDocument` の `embedding`
+  カラム・ivfflat 索引は `prisma/migrations/` に含まれておらず（手作業適用の履歴）、新規 DB では
+  再現できなかった。冪等な SQL として切り出し、`pnpm db:bootstrap` で適用。**現行本番 DB に実適用し
+  差分ゼロ（`already exists, skipping`）を確認済み**
+- **`DEVRELAY_TESTFLIGHT=0` キルスイッチ新設**: testflight は WebUI のチャット欄からも到達可能
+  （dead code ではない）ため、無効化しないと Windows 上で `sudo` 等の意味不明なエラーが露出する
+- **副産物のバグ修正**: `services/sites/access-aggregator.ts` の `void rebuild().then(...)`/
+  `void tick()` に `.catch` が無く、想定外の reject で unhandled rejection によりプロセスが落ちる
+  実バグを発見・修正（既定 ON の経路のため現行 VPS 側にも有効な修正）
+- **`index.ts` の graceful shutdown を `SIGTERM`/`SIGBREAK` にも対応**（Windows サービス化で
+  必要。従来は `SIGINT` のみ）
+- **`.env.example` を全面刷新**し、実際に使われているキー（`SETTINGS_ENCRYPTION_KEY` 等）を反映。
+  従来 CLAUDE.md に誤記載だった `ENCRYPTION_KEY` を正しい変数名 `SETTINGS_ENCRYPTION_KEY` に訂正
+- **`doc/onprem-windows-setup-guide.md` 新設**: DB 作成・pgvector 有効化・`.env`・
+  Caddy for Windows・NSSM でのサービス化・Agent 配布までの 8 ステップ手順書
+- Agent 側（`agents/*`）はコード変更不要。接続先サーバー URL はトークンに埋め込まれる仕組み
+  （`packages/shared/src/token.ts`）のため、社内 WebUI で発行したトークンを使うだけで社内サーバーを向く
+- 検証: `pnpm build`（全 7 パッケージ）green、`node --test tests/` が 774 件 green
+  （ベースライン 762 + 新規 12）
+
 ### Devin 料金可視化 Phase2-3 — ATIF 実キー修正 + 単価構造化 + Conversations コスト列 (2026-09-29)
 
 「devinって料金の可視化ってできそう？」という質問を調査し、実装した。

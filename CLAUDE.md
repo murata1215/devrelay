@@ -63,11 +63,15 @@ pm2 restart devrelay-server
 | DATABASE_URL | PostgreSQL 接続 |
 | DISCORD_BOT_TOKEN | Discord Bot |
 | TELEGRAM_BOT_TOKEN | Telegram Bot |
-| ENCRYPTION_KEY | API キー暗号化 |
+| SETTINGS_ENCRYPTION_KEY | UserSettings（API キー・Bot トークン）暗号化用の鍵（旧記載の `ENCRYPTION_KEY` は誤記）。未設定時はリポジトリ内の公開デフォルト値にフォールバックし起動時に警告。⚠️ 稼働中の環境に後から設定/変更すると既存の暗号化済み設定が復号不能になるため、新規構築時に一度だけ設定すること |
 | FIREBASE_SERVICE_ACCOUNT_PATH | FCM プッシュ通知用サービスアカウント JSON |
+| HTTPS_PROXY / HTTP_PROXY / NO_PROXY | 社内プロキシ経由でのみ外部 HTTPS（AI API 等）に出られる環境向け。設定すると undici の globalDispatcher に ProxyAgent を登録する（`services/proxy-dispatcher.ts`）。未設定なら何もしない（既定 VPS 環境は無変更） |
+| DEVRELAY_SERVICE_RESTART_CMD / DEVRELAY_SERVICE_STATUS_CMD | `POST /api/services/restart/server` / `GET /api/services/status` が実行するコマンド（既定は `pm2 restart devrelay-server` / `pm2 pid devrelay-server`）。Windows 等 pm2 を使わない環境で上書きする |
 | DEVRELAY_PLAN_STRICT_CHAT | チャット経路のプランターンを strictReadonly にするか（既定 `1`。`0` で従来の `interactive` に戻すキルスイッチ。chat のみに作用し mcp/exec には影響しない） |
 | DEVRELAY_THREADS_HIDE_EMPTY_ENDED | `GET /api/threads` で ended かつ Message 0件の抜け殻スレッドを一覧から隠すか（既定 `1`。`0` で従来どおり全件表示するキルスイッチ） |
 | DEVRELAY_SITES_HEALTH | DevRelay Sites（`/sites`、管理者限定）の公開サイトヘルスチェック定期実行を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。`/api/sites` 自体は無効時も 200 を返し health は unknown になる） |
+| DEVRELAY_SITES_ACCESS_LOG | DevRelay Sites のアクセスログ集計（PV/UU/Referer/UTM）定期実行を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。stats は null に縮退） |
+| DEVRELAY_TESTFLIGHT | testflight コマンド（`sudo`/`pm2`/`systemctl reload caddy`/`/etc/caddy/sites.d` 前提）を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。社内オンプレ等 Linux+sudo+Caddy が無い環境では `0` を推奨） |
 | DEVRELAY_MCP_ASK | MCP の `ask_project` / `get_answer` ツールを登録するか（既定 `1`。`0` で登録自体をやめるキルスイッチ。`cancel_submission` と既存 8 ツールには影響しない） |
 | DEVRELAY_MCP_ANSWER_RAW | MCP `get_answer.answer` / `get_plan.planMarkdown`・`summary` から進捗表示行（📊 Rate Limit / 🔧 …を使用中... 等）を除去するかの逆キルスイッチ（既定 `0` = 除去する。`1` で従来どおり原文を返す）。`get_build_status.tail` 等の進捗確認用フィールドには影響しない |
 

@@ -730,6 +730,36 @@ pm2 save && pm2 startup
 
 ---
 
+## 社内オンプレ（Windows Server）構成（2026-09-29〜）
+
+DevRelay ハブは `devrelay.io`（VPS/Ubuntu、個人利用として存続）とは**別インスタンス・別 DB**として、
+社内 Windows Server 上にネイティブ稼働する構成も存在する。データ移行は行わず完全併存。
+
+- **testflight / DevRelay Sites は使わない**。`DEVRELAY_TESTFLIGHT=0` / `DEVRELAY_SITES_HEALTH=0` /
+  `DEVRELAY_SITES_ACCESS_LOG=0` を明示設定する（3 つとも既定 ON のため未設定だと有効化される）。
+  この2機能を除けば `apps/server/src` の Linux 依存はほぼゼロ（`sudo`/`systemctl`/`ss`/`ps`/`/proc`/inode
+  依存は全部 testflight/sites 側にしかない）
+- **Discord / Telegram は使わない**（トークン未設定で自動無効化。コード変更不要）
+- **社内プロキシ経由でのみ外部 HTTPS に出られる**前提。`HTTPS_PROXY` 等を設定すると
+  `services/proxy-dispatcher.ts` が undici の globalDispatcher に ProxyAgent を登録する
+  （未設定時は何もしない＝ VPS 環境は無変更）。許可先は Anthropic / OpenAI / Google / Devin の
+  全エンドポイント（Claude Code・Gemini CLI・Devin いずれも外部 API 必須のため）
+- **Google ログインは使えない**（Google 側が公開 TLD の HTTPS リダイレクト URI を要求するため）。
+  ローカル email+password 認証（`/api/auth/register` / `/api/auth/login`）を使う
+- **Claude.ai の MCP コネクタは使えない**（Anthropic クラウドからの inbound が必要なため）。
+  社内から PAT で `/mcp` を叩く用途のみ可
+- **サービス再起動コマンドは `DEVRELAY_SERVICE_RESTART_CMD` / `DEVRELAY_SERVICE_STATUS_CMD` で上書き**
+  （既定は pm2 のまま。Windows は NSSM 等のコマンドに置き換える）
+- **PostgreSQL + pgvector は既存インスタンスに相乗り**。`CREATE EXTENSION vector` は DB 単位かつ
+  superuser 権限が必要（DB サーバー全体に入っていても新規 DB では改めて必要）。
+  `apps/server/prisma/bootstrap.sql` + `pnpm db:bootstrap` で pgvector 拡張と embedding
+  カラム・索引を冪等に作成する（`prisma/migrations/` には含まれていない手作業オブジェクトのため）
+- WebUI の静的配信は Fastify 側に実装が無い（`@fastify/static` 未使用）ため、
+  Windows でもリバースプロキシ（Caddy for Windows 等）による配信が必須
+- 詳細手順は `doc/onprem-windows-setup-guide.md` を参照
+
+---
+
 ## Agreement v6 アーキテクチャ
 
 - Agreement ルール本体は `rules/devrelay.md` に配置（CLAUDE.md には軽量マーカーのみ）

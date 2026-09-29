@@ -47,6 +47,16 @@ import {
 
 const execAsync = promisify(exec);
 
+// サービス再起動・ステータス確認コマンド（社内オンプレ移設対応）。
+// 既定値は現行 VPS の pm2 運用のまま（CLAUDE.md「Agent を pm2 に登録しないこと」の対象は Agent であり、
+// devrelay-server 自体を pm2 管理する現行運用とは矛盾しない）。
+// Windows など pm2 を使わない環境では .env で上書きする
+// （例: DEVRELAY_SERVICE_RESTART_CMD="nssm restart DevRelayServer"）。
+const DEFAULT_SERVICE_RESTART_CMD = 'pm2 restart devrelay-server';
+const DEFAULT_SERVICE_STATUS_CMD = 'pm2 pid devrelay-server';
+const SERVICE_RESTART_CMD = process.env.DEVRELAY_SERVICE_RESTART_CMD || DEFAULT_SERVICE_RESTART_CMD;
+const SERVICE_STATUS_CMD = process.env.DEVRELAY_SERVICE_STATUS_CMD || DEFAULT_SERVICE_STATUS_CMD;
+
 // Type for machine with projects
 type MachineWithProjects = Machine & {
   projects: Project[];
@@ -1269,7 +1279,7 @@ export async function apiRoutes(app: FastifyInstance) {
       // バックグラウンドで再起動（レスポンスを返してから再起動）
       setTimeout(async () => {
         try {
-          await execAsync('pm2 restart devrelay-server');
+          await execAsync(SERVICE_RESTART_CMD);
         } catch (err) {
           console.error('Failed to restart server:', err);
         }
@@ -1287,8 +1297,18 @@ export async function apiRoutes(app: FastifyInstance) {
   app.get('/api/services/status', async (request, reply) => {
     if (!requireSystemAdmin(request as unknown as MinimalRequest, reply)) return;
     try {
-      const serverStatus = await execAsync('pm2 pid devrelay-server').then(
-        (result) => result.stdout.trim() !== '' && result.stdout.trim() !== '0' ? 'active' : 'inactive',
+      // 既定の pm2 コマンドは `pm2 pid <name>` が対象未登録でも exit 0 で空文字を返す仕様のため
+      // 従来どおり stdout の内容で判定する。カスタムコマンド（Windows の `sc query` 等）を
+      // 設定した場合は、コマンドの成否（exit code）のみで active/inactive を判定する
+      // （終了コードが 0 以外、または実行自体に失敗した場合は inactive 扱い）。
+      const isDefaultStatusCmd = SERVICE_STATUS_CMD === DEFAULT_SERVICE_STATUS_CMD;
+      const serverStatus = await execAsync(SERVICE_STATUS_CMD).then(
+        (result) => {
+          if (isDefaultStatusCmd) {
+            return result.stdout.trim() !== '' && result.stdout.trim() !== '0' ? 'active' : 'inactive';
+          }
+          return 'active';
+        },
         () => 'inactive'
       );
 

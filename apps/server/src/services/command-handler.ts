@@ -59,6 +59,7 @@ import {
   removeTestflightService,
   copyTestflightService,
   getTestflightServiceInfo,
+  isTestflightEnabled,
 } from './testflight-manager.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
@@ -1922,6 +1923,13 @@ async function handleTestflight(
   command: Extract<UserCommand, { type: 'testflight' }>
 ): Promise<string> {
   console.log(`🚀 handleTestflight: subcommand=${command.subcommand}, name=${'name' in command ? command.name : '(none)'}, userId=${context.userId}`);
+
+  // DEVRELAY_TESTFLIGHT=0 で無効化（社内オンプレ移設対応）。
+  // testflight は sudo/pm2/systemctl/Caddy 前提のため、それらが無い環境では
+  // help を含めて全サブコマンドを未対応として返す。
+  if (!isTestflightEnabled(process.env.DEVRELAY_TESTFLIGHT)) {
+    return '⚠️ この DevRelay インスタンスでは testflight 機能は無効化されています。';
+  }
 
   // help は DB アクセス不要なので early return
   if (command.subcommand === 'help') {

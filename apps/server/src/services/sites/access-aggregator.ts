@@ -265,10 +265,22 @@ export function startAccessLogAggregator(): void {
   }
   started = true;
   const initialTimer = setTimeout(() => {
-    void rebuild().then(() => {
-      const interval = setInterval(() => void tick(), TICK_INTERVAL_MS);
-      interval.unref();
-    });
+    // rebuild()/tick() は内部で try/catch していないため、reject すると
+    // Node の既定挙動で unhandled rejection となりプロセスごと落ちる。
+    // ここは定期実行の read-only 集計処理であり、失敗しても致命的ではないため
+    // 必ず catch してログに残すだけに留める（Windows 移設調査で発見・修正）。
+    void rebuild()
+      .then(() => {
+        const interval = setInterval(() => {
+          void tick().catch((err) => {
+            console.error('⚠️  DevRelay Sites: access log tick failed:', err);
+          });
+        }, TICK_INTERVAL_MS);
+        interval.unref();
+      })
+      .catch((err) => {
+        console.error('⚠️  DevRelay Sites: access log initial rebuild failed:', err);
+      });
   }, INITIAL_DELAY_MS);
   initialTimer.unref();
   console.log('📊 DevRelay Sites: access log aggregator started');

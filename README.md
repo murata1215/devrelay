@@ -406,6 +406,33 @@ pnpm config delete proxy && pnpm config delete https-proxy
 npm  config delete proxy && npm  config delete https-proxy
 ```
 
+The section above covers the **Agent's** proxy. The **Server** also supports an outbound proxy
+(for on-premise deployments where the server itself can only reach the internet through a
+corporate proxy — see [On-Premise / Windows Server Deployment](#-on-premise--windows-server-deployment) below):
+set `HTTPS_PROXY` (or `HTTP_PROXY`) in `apps/server/.env` and the server registers an `undici`
+`ProxyAgent` as the global dispatcher on startup, so OpenAI/Anthropic/Gemini SDK calls and Google
+OAuth go through it. Leave it unset and behavior is unchanged (default for the hosted VPS).
+
+### On-Premise / Windows Server Deployment
+
+DevRelay's server core (Fastify + WebSocket + Prisma) has no Linux-only dependencies once two
+optional features are disabled: **DevRelay Sites** (`DEVRELAY_SITES_HEALTH=0` /
+`DEVRELAY_SITES_ACCESS_LOG=0`) and **testflight** (`DEVRELAY_TESTFLIGHT=0`) — both rely on
+`sudo`/`systemctl`/Caddy config files that don't exist on Windows. With those off, the server runs
+natively on Windows Server (as a Windows service via NSSM/WinSW, behind a Windows-native reverse
+proxy for TLS termination and static WebUI hosting, since Fastify itself doesn't serve static
+files). See **[doc/onprem-windows-setup-guide.md](doc/onprem-windows-setup-guide.md)** for the
+full walkthrough (PostgreSQL/pgvector setup, `.env` configuration, Caddy for Windows, service
+registration, Agent rollout). Notes:
+
+- Google OAuth login won't work on an internal domain (Google requires a public-TLD HTTPS redirect
+  URI) — use local email/password login instead.
+- The Claude.ai MCP connector requires inbound access from Anthropic's cloud, so it isn't usable
+  from a fully internal instance (PAT-based access to `/mcp` from inside the network still works).
+- `apps/server/prisma/bootstrap.sql` (run via `pnpm db:bootstrap`) creates the pgvector extension
+  and `embedding` columns that aren't tracked in `prisma/migrations/` — required for a fresh DB to
+  match the hosted instance's schema.
+
 ### Version Management
 
 Update all package versions at once:
@@ -478,7 +505,7 @@ agents/windows/
 ## 🔐 Security
 
 - Token-based machine authentication
-- API keys encrypted with AES-256-CBC (OpenAI, Anthropic, Gemini)
+- API keys encrypted with AES-256-CBC (OpenAI, Anthropic, Gemini), key configured via `SETTINGS_ENCRYPTION_KEY` in `apps/server/.env`. Falls back to a public default key with a startup warning if unset — always set a unique key on a fresh deployment (changing it later on a running instance makes existing encrypted settings undecryptable, so decide it once at setup time)
 - All communication over TLS
 - Prompts sent via stdin (invisible to `ps aux`)
 - **System Admin Allowlist (#367)**: Server-restart (`POST /api/services/restart/server`) and the Settings → System tab are gated behind a fail-closed `DEVRELAY_SYSTEM_ADMIN_EMAILS` env-var allowlist (comma-separated), deliberately kept independent of `OrganizationMember.role` (tenant-scoped org admin ≠ the person actually operating this DevRelay instance). Unset/empty → nobody is a system admin. The stale `POST /api/services/restart/agent` endpoint (which always failed silently on machines that intentionally don't register the Agent with pm2) was removed; the correct, owner-scoped Agent restart remains `POST /api/machines/:id/restart`.
