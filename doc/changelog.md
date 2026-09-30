@@ -6,6 +6,32 @@
 
 ## 実装済み機能
 
+### スレッド切替時に前スレッドの「処理中...」進捗が残るバグ修正 (2026-09-30)
+
+ユーザー報告「あるスレッドで質問中、スレッド新規で別の質問をしようとしたら元のスレッドで聞いてた内容が
+出てきた」を調査し、実装した。添付スクショと実 DB 調査（新規スレッドが Message 0 件なのに右ペインには
+元スレッドの「処理中...(158s)」だけが表示されていた）で再現・確認済みの実バグ。
+
+- **真因**: WebUI classic（`ChatPage.tsx`）の進捗表示は `Tab.progress` というタブ（projectId）単位の
+  state で、スレッド（sessionId）単位ではない。スレッド切替・新規作成の唯一の入口
+  `switchTabToThread` は `messages` を空にする一方 `progress`/`completed` のクリアが漏れており、
+  `ProgressIndicator` がクライアント側のローカル 1 秒タイマー（WS 切断中もカウント継続する設計）で
+  秒数を刻み続けるため、切替後も前スレッドの進捗表示が秒数だけ増え続けて見えていた。旧スレッド完了時の
+  `web:response` は sessionId 不一致で drop されるため、一度残った進捗は自然には消えない
+- **第 2 経路**: WS 再接続時の進捗復元（`platforms/web.ts` の `getActiveProgressForChatId` 呼び出し）が
+  `sessionId` を payload に含めておらず、クライアントの fail-open ゲートを素通りして無関係なスレッドの
+  進捗が貼り付く経路も存在した
+- **修正**: `apps/web/src/lib/thread-switch-rules.ts` に `buildThreadSwitchPatch()` 純関数を新設し
+  `progress: null, completed: false` を含む単一の真実に統一。`ProgressIndicator` に
+  `key={activeTab.sessionId}` を付与。サーバー側は `getActiveProgressForChatId` が `sessionId` を返すよう
+  拡張し復元 payload に追加。あわせて `packages/shared/src/types.ts` の `ServerToWebMessage` 型が
+  実装済みの `sessionId`/`title`/`agentScopeId` フィールドを宣言していなかった型ドリフトも解消
+- **別件で発見（今回は対応せず）**: ツール承認のフォールバック配信（`broadcastWebRawMessage`）が
+  `webClients` 全件に無条件送信しており userId の絞り込みが無い。複数ユーザー運用時に他ユーザーの
+  ブラウザへ承認カードが表示されうる懸念があり、別サイクルで扱う
+- 検証: `pnpm build`（全 7 パッケージ）green、`apps/web/dist` の CJS 混入チェック 0 件、
+  server774/web524(+6)/shared70 全 green
+
 ### 社内オンプレ移設基盤整備（Windows Server ネイティブ対応） (2026-09-29)
 
 「devrelay を社内へ引っ越そうか」という相談を受けて調査・実装した。現行 `devrelay.io`（VPS）は

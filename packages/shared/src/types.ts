@@ -1027,12 +1027,18 @@ export type WebClientMessage =
   | { type: 'web:assist'; payload: VoiceAssistRequestPayload }
   | { type: 'web:ping' };
 
-/** サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示） */
+/**
+ * サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示。
+ * sessionId: スレッドルーティング用、apps/web/src/lib/thread-routing-client.ts の
+ * shouldRouteToTab がこれを使って表示中スレッドと照合する。2026-09-30: 実装が既に
+ * 送信していた sessionId / title / agentScopeId フィールドが型に宣言されておらず
+ * apps/web/src/hooks/useWebSocket.ts 側で独自に再宣言されていた型ドリフトを解消）
+ */
 export type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string; messageId?: string } }
-  | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string } }
-  | { type: 'web:session_info'; payload: { projectId: string; sessionId: string } }
-  | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string; messageId?: string } }
+  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string; sessionId?: string; messageId?: string } }
+  | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string; sessionId?: string } }
+  | { type: 'web:session_info'; payload: { projectId: string; sessionId: string; title?: string; agentScopeId?: string } }
+  | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string; sessionId?: string; messageId?: string } }
   | { type: 'web:tool:approval'; payload: ToolApprovalPromptPayload }
   | { type: 'web:tool:approval:resolved'; payload: { requestId: string; behavior: 'allow' | 'deny'; projectId?: string } }
   | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string; status?: string; reason?: string } }

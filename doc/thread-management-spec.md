@@ -74,6 +74,12 @@ plan ファイルの S1〜S8 を全て **sessionId キー**に直す。
 - `getSessionIdByChatId()`（`session-manager.ts:40-45`）の線形探索を廃止し、`ChannelSession.currentSessionId` を正とする
 - `web:response` / `web:progress` の配送は sessionId 基準。**participant ベースの配送自体は維持**し、payload に `sessionId` を付与する形で識別可能にする（背景プロジェクトタブへの配送を退行させないため）
 - 受け入れ条件: 同一 project に active Session が 2 本ある状態で、片方への AI 出力がもう片方のタブに出ない
+- 受け入れ条件（2026-09-30 追記）: **同一タブでスレッドを切り替えたとき**（別スレッド選択・新規スレッド作成の
+  どちらも）、前スレッドの進捗表示（「処理中...(NNNs)」等）が残らないこと。
+  配送側の sessionId 基準フィルタだけでは不十分で、クライアント側の `Tab.progress`（タブ単位の state）を
+  切替時に明示的にクリアする必要がある（`apps/web/src/lib/thread-switch-rules.ts` の
+  `buildThreadSwitchPatch()` が担う）。この観点が抜けていたため、新規スレッド作成直後に
+  前スレッドの実行中進捗がそのまま表示され続ける不具合が発生した
 
 ### 3.2 API（新規 / 変更）
 

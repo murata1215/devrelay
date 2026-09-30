@@ -5,6 +5,30 @@
 
 ---
 
+## `Tab.progress`（WebUI classic）はタブ単位の state・スレッド切替時は明示クリアが必須（2026-09-30）
+
+WebUI classic（`ChatPage.tsx`）の進捗表示（「処理中...(NNNs)」）は `Tab.progress` という
+**タブ（projectId）単位で 1 つ**の state に保持されており、スレッド（sessionId）単位ではない。
+サーバー側の配送は sessionId でフィルタされているが（`web:progress` payload の `sessionId`、
+クライアント側 `shouldRouteToTab`）、**受信時のフィルタだけでは不十分**で、
+「スレッドを切り替えた瞬間に前スレッドの `progress` を消す」責任は別途クライアント側が持つ必要がある。
+
+- スレッド切替・新規作成の唯一の入口 `switchTabToThread()` は `messages` を空にする一方、
+  `progress` / `completed` のクリアが漏れていた（新規タブ生成時は明示していたのに、切替経路だけ漏れていた）
+- `ProgressIndicator` はローカルに 1 秒タイマーを持ち WS 切断中もカウントを続ける設計のため、
+  クリアし忘れた `progress` は**秒数が無限に増え続けるように見える**（サーバー更新の有無に関わらず）
+- 旧スレッドの完了通知（`web:response`）は sessionId 不一致で drop されるため、
+  **一度残った `progress` は自然には消えない**（`clearProgressOnTab` も同じゲートを通るため）
+- 修正は `apps/web/src/lib/thread-switch-rules.ts` の `buildThreadSwitchPatch()`
+  （`progress: null, completed: false` を含む単一の真実）に切り出し、テストで固定した
+- 受け入れ条件は `doc/thread-management-spec.md` §3.1 に追記済み
+- 関連する第2経路: WS 再接続時の進捗復元（`platforms/web.ts` の `getActiveProgressForChatId` 呼び出し）は
+  従来 `sessionId` を payload に含めていなかった。この関数は「chatId が参加している最初に見つかった
+  セッション」を返すだけで表示中スレッドとは限らないため、sessionId が無いとクライアントの
+  fail-open ゲートが必ず accept してしまう。`sessionId` を返す／送るよう修正済み
+
+---
+
 ## Sites access log の除外条件は UA 完全一致で書く・roll 値は scan budget から逆算する（Phase 1-B B2-4, 2026-09-23）
 
 DevRelay Sites の自前ヘルスチェッカー（`health-checker.ts` の UA `DevRelay-Sites/1.0`）は

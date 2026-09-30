@@ -123,11 +123,16 @@ export async function setupWebClientWebSocket(
   }
 
   // アクティブな進捗があれば即座に送信（WS 切断中の進捗ロスト復元）
+  // 2026-09-30 バグ修正: sessionId を payload に含める。この復元フレームは
+  // getActiveProgressForChatId() が「chatId が参加している最初に見つかったセッション」を
+  // 返すだけで、ブラウザが今表示中のスレッドとは限らない。sessionId が無いと
+  // クライアント側の shouldRouteToTab（fail-open）が必ず accept してしまい、
+  // 新規スレッドを開いた状態でのリロード時に無関係な旧スレッドの進捗が誤表示されうる。
   const progress = getActiveProgressForChatId(chatId);
   if (progress) {
     sendJson(ws, {
       type: 'web:progress',
-      payload: { output: progress.output, elapsed: progress.elapsed, projectId: progress.projectId ?? undefined },
+      payload: { output: progress.output, elapsed: progress.elapsed, projectId: progress.projectId ?? undefined, sessionId: progress.sessionId },
     });
     console.log(`📊 Restored active progress for ${chatId}`);
   }
@@ -344,9 +349,10 @@ export async function sendWebMessage(chatId: string, message: string, files?: Fi
 
 /**
  * スレッド管理 cycle1: REST API（/api/threads 系）からスレッド切替/作成を通知するために使う。
- * `web:session_info` は title/agentScopeId を含むため既存の `ServerToWebMessage` 型（packages/shared、
- * 本サイクルではノータッチ）に定義が無く、`sendWebRawMessage` は使えない。
- * `sendJson(ws, data: unknown)` の型穴を経由し、`buildSessionInfoPayload()` のテストで型ドリフトを代替検知する。
+ * `web:session_info` の title/agentScopeId は 2026-09-30 に `ServerToWebMessage` 型
+ * （packages/shared/src/types.ts）へ追記済み。`sendWebRawMessage` の型で直接送ってもよいが、
+ * 既存呼び出し元との差分を小さくするため `sendJson(ws, data: unknown)` 経由のままにしている。
+ * `buildSessionInfoPayload()` のテストが payload 形状を保証する。
  * WS が繋がっていなければ何もしない（REST の応答自体で状態は返しているため、フロント側は無視してよい）。
  */
 export function pushSessionInfoToChat(chatId: string, payload: ReturnType<typeof buildSessionInfoPayload>): boolean {

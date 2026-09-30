@@ -636,15 +636,23 @@ function formatProgressMessage(output: string, elapsedSeconds: number, language:
 /**
  * 指定 chatId にアクティブな進捗トラッカーがあれば最新状態を返す
  * WS 再接続時に進捗表示を即座に復元するために使用
+ *
+ * 2026-09-30 バグ修正: 戻り値に sessionId を含める。web タブは切替後も旧セッションの
+ * participant に残り続ける設計（command-handler.ts の switchChatToThread、platform !== 'web' 条件）
+ * のため、この関数は「その chatId が参加している最初に見つかったセッション」を返すだけで、
+ * 今ブラウザが表示中のスレッドとは限らない。sessionId を payload に含めておけば、
+ * 受信側（apps/web/src/lib/thread-routing-client.ts の shouldRouteToTab、fail-open 規約）が
+ * 表示中スレッドと不一致のときに正しく drop できる（sessionId が無いと fail-open で必ず accept され、
+ * 無関係なスレッドの進捗が新規スレッド等に誤表示される）。
  */
-export function getActiveProgressForChatId(chatId: string): { output: string; elapsed: number; projectId?: string | null } | null {
+export function getActiveProgressForChatId(chatId: string): { output: string; elapsed: number; projectId?: string | null; sessionId?: string } | null {
   for (const [sessionId, participants] of sessionParticipants.entries()) {
     if (!participants.some(p => p.chatId === chatId)) continue;
     const tracker = progressTrackers.get(sessionId);
     if (!tracker) continue;
     const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
     const content = formatProgressMessage(tracker.outputBuffer, elapsed, tracker.language);
-    return { output: content, elapsed, projectId: tracker.projectId };
+    return { output: content, elapsed, projectId: tracker.projectId, sessionId };
   }
   return null;
 }

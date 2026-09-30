@@ -6,6 +6,7 @@ import { playNotificationSound } from '../utils/notification-sound';
 import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT, type DocPanelSettings } from '../utils/doc-panel-settings';
 import { useLanguage } from '../contexts/LanguageContext';
 import { shouldRouteToTab, resolveHistorySource } from '../lib/thread-routing-client';
+import { buildThreadSwitchPatch } from '../lib/thread-switch-rules';
 import { ThreadList } from '../components/ThreadList';
 import { ThreadPane } from '../components/ThreadPane';
 import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
@@ -2452,7 +2453,7 @@ export function ChatPage() {
   const switchTabToThread = useCallback((projectId: string, sessionId: string, title: string | null) => {
     setTabs(prev => prev.map(t =>
       t.projectId === projectId
-        ? { ...t, sessionId, title, messages: [], historyLoaded: false, hasMoreHistory: false }
+        ? { ...t, ...buildThreadSwitchPatch(sessionId, title) }
         : t
     ));
     loadHistory(projectId, sessionId, 'replace');
@@ -3559,6 +3560,7 @@ export function ChatPage() {
                 ))}
               {activeTab?.progress && (
                 <ProgressIndicator
+                  key={activeTab.sessionId ?? 'none'}
                   output={activeTab.progress.output}
                   elapsed={activeTab.progress.elapsed}
                   aiName={chatDisplay.aiName}
