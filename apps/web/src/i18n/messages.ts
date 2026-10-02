@@ -99,6 +99,13 @@ export const messages = {
   'chat.connected': { en: 'Connected', ja: '接続中' },
   'chat.disconnected': { en: 'Disconnected...', ja: '切断中...' },
   'chat.processing': { en: 'Processing...', ja: '処理中...' },
+  // 2026-09-30: 進捗表示の停止ボタン（ProgressIndicator）。confirm は誤クリック防止の2回目確認、
+  // requesting は送信済みで応答待ち、stalled は45秒待っても応答が無い場合の再試行案内。
+  'chat.stop': { en: 'Stop', ja: '停止' },
+  'chat.stopConfirm': { en: 'Really stop?', ja: '本当に停止?' },
+  'chat.stopRequesting': { en: 'Stopping...', ja: '停止要求中...' },
+  'chat.stopStalled': { en: 'Not stopped yet (retry)', ja: '停止できていません（再試行）' },
+  'chat.stopTitle': { en: 'Same as sending `k` in chat', ja: 'チャットで `k` を送るのと同じです' },
   'chat.historyLoading': { en: 'Loading history...', ja: '履歴を読み込み中...' },
   'chat.chooseProject': { en: 'Choose a project from Servers to begin', ja: 'Servers からプロジェクトを選んで開始' },
   'chat.showAgents': { en: 'Use `m` to show the agent list and get started', ja: '`m` でエージェント一覧を表示して開始できます' },

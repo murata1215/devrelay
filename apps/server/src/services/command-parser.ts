@@ -377,6 +377,9 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
 \`s\` - Session info
 \`1\`, \`2\`, \`3\`... - Select from a list
 
+**Stop a running turn**
+\`k\` - Stop the running AI turn now (or use the Stop button in the WebUI progress box)
+
 **Plan execution**
 \`e\` or \`exec\` - Start executing the plan
 \`e, <instruction>\` - Skip the plan and execute directly (e.g. \`e, commit it\`)
@@ -422,7 +425,6 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
 **Other**
 \`ag\` - Apply DevRelay Agreement v4 (creates rules/devrelay.md)
 \`u\` - Check/update the agent version (send twice in a row to update)
-\`k\` - Force-stop the running AI process
 \`x\` - Clear conversation history (send twice in a row)
 \`q\` - Disconnect
 \`h\` - This help
@@ -440,6 +442,9 @@ Any other message is treated as an instruction to the AI
 \`c\` - 前回の接続先に再接続
 \`s\` - セッション情報
 \`1\`, \`2\`, \`3\`... - 一覧から選択
+
+**実行中の停止**
+\`k\` - 実行中の AI を今すぐ停止（WebUI は進捗表示の「停止」ボタンでも可）
 
 **プラン実行**
 \`e\` または \`exec\` - プラン実行開始
@@ -486,7 +491,6 @@ Any other message is treated as an instruction to the AI
 **その他**
 \`ag\` - DevRelay Agreement v4 を適用（rules/devrelay.md 作成）
 \`u\` - Agent バージョン確認・更新（2回連続で更新実行）
-\`k\` - 実行中の AI プロセスを強制停止
 \`x\` - 会話履歴をクリア（2回連続で実行）
 \`q\` - 切断
 \`h\` - このヘルプ

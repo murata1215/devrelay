@@ -7,6 +7,7 @@ import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT,
 import { useLanguage } from '../contexts/LanguageContext';
 import { shouldRouteToTab, resolveHistorySource } from '../lib/thread-routing-client';
 import { buildThreadSwitchPatch } from '../lib/thread-switch-rules';
+import { resolveCancelPhase, decideCancelClick, type CancelUiState, type CancelPhase } from '../lib/cancel-request-rules';
 import { ThreadList } from '../components/ThreadList';
 import { ThreadPane } from '../components/ThreadPane';
 import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
@@ -49,6 +50,9 @@ interface Tab {
   /** スレッド管理 サイクル3: 直前に履歴取得した対象（sessionId 優先・無ければ projectId）。
    * `loadHistory('replace')` 後にどの取得元で読み込んだかを記録し、二重ロード判定に使う */
   historySessionId?: string | null;
+  /** 停止ボタンの操作状態（null = 未操作）。cancel-request-rules.ts の sessionId 照合で
+   *  スレッド切替時に自動無効化される（2026-09-30 停止手段の発見可能性改善サイクル） */
+  cancel?: CancelUiState;
 }
 
 /** File → base64 FileAttachment 変換 */
@@ -729,8 +733,25 @@ function MessageRow({
   );
 }
 
-/** Discord 風進捗インジケーター */
-function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar }: { output: string; elapsed: number; aiName: string; aiColor: string; aiAvatar?: string }) {
+/**
+ * Discord 風進捗インジケーター。
+ * 2026-09-30: 停止ボタンを追加。`cancel` state は呼び出し元（ChatPage の Tab.cancel）に持たせ、
+ * このコンポーネントはアンマウント/再マウントされうる（`k` 直後、進捗表示は一度消えて最大30秒
+ * 再出現しうる）ため、停止ボタンの状態をこのコンポーネントのローカル state には一切持たない。
+ * `cancelPhase` は render のたびに `resolveCancelPhase()` で再計算し（既存の1秒タイマーが
+ * 再レンダーのトリガーを兼ねるため、確認状態の自動解除もこの再計算だけで成立する）。
+ */
+function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar, cancel, sessionId, connected, onCancelClick }: {
+  output: string;
+  elapsed: number;
+  aiName: string;
+  aiColor: string;
+  aiAvatar?: string;
+  cancel: CancelUiState;
+  sessionId: string | null;
+  connected: boolean;
+  onCancelClick: () => void;
+}) {
   const { locale, t } = useLanguage();
   /** ローカル経過タイマー（WS 切断中もカウント継続） */
   const [localElapsed, setLocalElapsed] = useState(elapsed);
@@ -741,13 +762,20 @@ function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar }: { out
     startTimeRef.current = Date.now() - elapsed * 1000;
   }, [elapsed]);
 
-  // 1秒間隔でローカルカウントアップ
+  // 1秒間隔でローカルカウントアップ（停止ボタンの confirm 猶予切れ等の再計算も兼ねる）
   useEffect(() => {
     const timer = setInterval(() => {
       setLocalElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  const cancelPhase: CancelPhase = resolveCancelPhase({ state: cancel, sessionId, nowMs: Date.now() });
+  const cancelLabel = cancelPhase === 'confirm' ? t('chat.stopConfirm')
+    : cancelPhase === 'requesting' ? t('chat.stopRequesting')
+    : cancelPhase === 'stalled' ? t('chat.stopStalled')
+    : t('chat.stop');
+  const cancelDisabled = !connected || cancelPhase === 'requesting';
 
   return (
     <div className="flex gap-3 px-2 py-1 hover:bg-[var(--bg-hover)] rounded">
@@ -764,6 +792,22 @@ function ProgressIndicator({ output, elapsed, aiName, aiColor, aiAvatar }: { out
         <div className="flex items-center gap-2 text-sm text-[var(--text-link)]">
           <span className="animate-pulse">●</span>
           <span>{t('chat.processing')} ({localElapsed}s)</span>
+          <button
+            type="button"
+            onClick={onCancelClick}
+            disabled={cancelDisabled}
+            title={t('chat.stopTitle')}
+            aria-label={t('chat.stopTitle')}
+            className={`ml-1 px-2 py-0.5 rounded text-xs border transition-colors ${
+              cancelPhase === 'confirm'
+                ? 'border-red-500 text-red-500 bg-red-500/10 hover:bg-red-500/20'
+                : cancelPhase === 'stalled'
+                ? 'border-amber-500 text-amber-500 bg-amber-500/10 hover:bg-amber-500/20'
+                : 'border-[var(--border-default)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+            } ${cancelDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            ⛔ {cancelLabel}
+          </button>
         </div>
         {output && (
           <pre className="text-xs text-[var(--text-secondary)] bg-[var(--bg-base)] rounded p-2 mt-1 overflow-x-auto max-h-48 overflow-y-auto">
@@ -2723,6 +2767,7 @@ export function ChatPage() {
           pinned: pinnedIds.has(s.projectId),
           completed: false,
           inputText: '',
+          cancel: null,
         }));
 
         setTabs(newTabs);
@@ -3078,6 +3123,7 @@ export function ChatPage() {
         pinned: false,
         completed: false,
         inputText: '',
+        cancel: null,
       };
       setTabs(prev => {
         const updated = [...prev, newTab];
@@ -3300,7 +3346,7 @@ export function ChatPage() {
         files: hasFiles ? pendingFiles : undefined,
       };
       setTabs(prev => prev.map(t =>
-        t.projectId === activeTabId ? { ...t, messages: [...t.messages, userMsg], completed: false } : t
+        t.projectId === activeTabId ? { ...t, messages: [...t.messages, userMsg], completed: false, cancel: null } : t
       ));
     }
 
@@ -3310,6 +3356,29 @@ export function ChatPage() {
     setPendingFiles([]);
     // 次フレームで送信ガードを解除
     requestAnimationFrame(() => { sendingRef.current = false; });
+  };
+
+  /**
+   * 進捗表示の停止ボタンのクリックハンドラ（2026-09-30、停止手段の発見可能性改善サイクル）。
+   * `decideCancelClick()` の判定に従い、1回目のクリックでは送らず「確認」状態に武装するだけ、
+   * 確認状態での2回目のクリックで実際に `k` コマンドを送信する。状態は Tab.cancel に保持し、
+   * `k` 直後に進捗表示が最大30秒再出現しても「停止要求中」が維持されるようにする（F1 対策）。
+   */
+  const handleCancelClick = () => {
+    if (!activeTabId || !activeTab?.progress) return;
+    const decision = decideCancelClick({
+      state: activeTab.cancel ?? null,
+      sessionId: activeTab.sessionId,
+      nowMs: Date.now(),
+      connected,
+    });
+    if (decision.send) {
+      const ok = sendCommand('k', undefined, activeTabId);
+      if (!ok) return; // WS 断で送れなかった場合は state を進めない
+    }
+    setTabs(prev => prev.map(t =>
+      t.projectId === activeTabId ? { ...t, cancel: decision.next } : t
+    ));
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -3566,6 +3635,10 @@ export function ChatPage() {
                   aiName={chatDisplay.aiName}
                   aiColor={chatDisplay.aiColor}
                   aiAvatar={chatDisplay.aiAvatar}
+                  cancel={activeTab.cancel ?? null}
+                  sessionId={activeTab.sessionId}
+                  connected={connected}
+                  onCancelClick={handleCancelClick}
                 />
               )}
               <div ref={messagesEndRef} />

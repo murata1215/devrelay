@@ -376,6 +376,14 @@ async function handleSessionStart(
   const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
   if (aiTool !== requestedAiTool) {
     log.info(`⚠️ AI ${requestedAiTool} not installed on this machine → using ${aiTool} instead`);
+    // 2026-10-02 修正: 差し替えをサーバーへ報告する（既存の agent:session:aiTool メッセージ・
+    // handleSessionAiTool() を利用）。これが無いと Session.aiTool / Project.defaultAi が
+    // 要求値（例: claude）のまま残り、サーバーは要求ツール用のモデル設定を解決し続けてしまい、
+    // 実際に動くツール（例: devin）へモデル未指定のまま渡ってしまう（組織 AI デフォルト無視事故）。
+    sendMessage({
+      type: 'agent:session:aiTool',
+      payload: { machineId: config.machineId, sessionId, aiTool },
+    });
   }
 
   // #348: crossquery_/teamexec_/askdesc_ は一時セッション（projectPath 上の状態を読み書きしない）
@@ -726,6 +734,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     if (resolvedAiTool !== sessionInfo.aiTool) {
       log.info(`⚠️ AI ${sessionInfo.aiTool} not installed on this machine → using ${resolvedAiTool} instead`);
       sessionInfo.aiTool = resolvedAiTool;
+      // 2026-10-02 修正: handleSessionStart と同じ理由でサーバーへ報告する（既存の
+      // agent:session:aiTool メッセージを利用。Session.aiTool / Project.defaultAi を実態に揃える）
+      sendMessage({
+        type: 'agent:session:aiTool',
+        payload: { machineId: currentConfig.machineId, sessionId, aiTool: resolvedAiTool },
+      });
     }
   }
 

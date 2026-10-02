@@ -74,6 +74,7 @@ pm2 restart devrelay-server
 | DEVRELAY_TESTFLIGHT | testflight コマンド（`sudo`/`pm2`/`systemctl reload caddy`/`/etc/caddy/sites.d` 前提）を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。社内オンプレ等 Linux+sudo+Caddy が無い環境では `0` を推奨） |
 | DEVRELAY_MCP_ASK | MCP の `ask_project` / `get_answer` ツールを登録するか（既定 `1`。`0` で登録自体をやめるキルスイッチ。`cancel_submission` と既存 8 ツールには影響しない） |
 | DEVRELAY_MCP_ANSWER_RAW | MCP `get_answer.answer` / `get_plan.planMarkdown`・`summary` から進捗表示行（📊 Rate Limit / 🔧 …を使用中... 等）を除去するかの逆キルスイッチ（既定 `0` = 除去する。`1` で従来どおり原文を返す）。`get_build_status.tail` 等の進捗確認用フィールドには影響しない |
+| DEVRELAY_PROGRESS_CANCEL_HINT | Discord/Telegram の進捗ボックス（実行中... N分経過）に「`k` で停止できます」の案内行（60秒経過後）を出すか（既定 `1`。`0` で無効化するキルスイッチ。WebUI は進捗表示に停止ボタンがあるため対象外） |
 
 ## DB テーブル（概要）
 

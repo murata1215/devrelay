@@ -119,6 +119,21 @@ byte budget（展開後）も同時に満たす必要がある。予算を超え
 モデルは常に対で扱う。片方だけクリアすると、次ターンで古いモデルのまま別セッションを resume する不整合が
 起きうる）。
 
+**2026-10-02 修正: `saveDevinModel()` に渡す値は「要求したモデル」ではなく ATIF 実測の「実際に
+動いたモデル」であること。** 組織AIデフォルト（Devin 用に Opus 5.5 を設定）が反映されず swe-2 が
+使われ続けた実機事故の真因は、`Project.defaultAi` と Agent の実インストール状況が食い違う機体で
+`resolveEffectiveAiTool()` が claude→devin へ無断で差し替え、サーバーが claude 用のモデル設定
+（未設定=`undefined`）を解決してしまい `--model` 無しで devin が起動していたこと（別件、
+サーバー側 `apps/server/src/services/ai-tool-availability.ts` の `pickAvailableAiTool()` で対策済み）。
+ただしこの調査で判明したもう一つの穴として、Devin が要求モデルを黙って別モデルへ振り替えた場合
+（アカウント未解放・レート制限等）に「要求値どうしの文字列比較」では検知できず、一度ズレると
+`devinSavedModel === devinCurrentModelForResume` が常に一致し続けて誤ったモデルで resume が
+永久に固定される問題があった。`packages/shared/src/model-pricing.ts` の `detectDevinModelMismatch()`
+（`normalizeDevinModelId()` で family slug + fast フラグへ正規化して比較）で実測値ベースの判定に
+切り替え、要求モデルと前回の実測モデルが食い違えば新規セッションを切るようにした。
+追従エイリアス（`opus`/`sonnet`/`gpt`/`gemini`/`swe`/`codex`、`adaptive` も含む）は解決先が
+無警告で変わる仕様のため比較対象外（`DEVIN_MODEL_TRACKING_ALIASES`）。
+
 Devin CLI のツール拒否検出文言はバージョンアップで無警告に変わることがある（v3000.6.14 で
 `rejected a tool call that requires confirmation` という新パターンが実測で判明、旧2パターンとは不一致）。
 検出ロジックは `devin-diagnostics.ts` の純関数 `isDevinToolRejectionText()` に一本化し、直接の文字列/正規表現
@@ -159,6 +174,11 @@ Claude SDK 経由（`sendPromptToAiSdk()`）の実行が `compact_boundary` を�
 `cancelAiSession()` は PTY プロセスだけでなく SDK 実行（`process: null` で登録される）にも対応させ、`AbortController` で実際に中断できるようにすること。**キャンセルが成功したかどうかを構造的に不明なまま「キャンセルしました」と表示してはならない**（#325 静かなフォールバック禁止の一種）— `cancelled?: boolean` のような明示フィールドで区別し、失敗時はその旨をユーザーに伝える。
 
 `AbortController.abort()` によって発生する `AbortError` は、既存の「resume 失敗」判定（エラーメッセージの文字列マッチ等）に誤って一致し、同一プロンプトの自動再送を引き起こしうる。abort 由来のエラーである旨を示すガード変数を `catch` ブロックの**最初の文**でチェックし、以降のリトライロジックに到達させないこと。
+
+**2026-09-30 追記（実測で発見）**: 上記ガード変数（`loopGuardAborted`/`bgIdleTimedOut` 等）は「内部で意図して abort した」場合のみ機能し、**外部（`cancelAiSession()` からの `k` コマンド）による abort は別扱いが必要**。理由は、内部 abort は「呼び出し元の関数が `return` するので catch に落ちないことが多い」のに対し、外部 abort は for-await ループが `await` で中断中にシグナルを受けるため確実に `catch` に落ちる。この経路を見落とすと2つの実害が出る:
+1. `fullOutput.length > 0`（既に何か出力済み）のときだけ完了シグナル（`isComplete=true`）が一切送られず、サーバーの進捗トラッカーがハードタイムアウト（150分）まで残り続ける。
+2. `fullOutput.length === 0` のときは完了シグナル自体は送られるが、`formatAiErrorMessage(err.message)` が「Error: ...」という失敗風の文言を DB に永続化してしまう（意図的なユーザー操作なのに失敗に見える）。
+→ `cancelAiSession()` の SDK abort 分岐で `userCancelRequested: Set<string>` に `sessionId` を登録し、`catch` の先頭（`loopGuardAborted` と同列）でこれを判定して `onOutput('', true, ..., 'aborted')`（`fullOutput` が空なら中立的な文言）を明示送出すること。`finally` でも next ターンへの誤伝播防止のため必ず delete する。
 
 ---
 

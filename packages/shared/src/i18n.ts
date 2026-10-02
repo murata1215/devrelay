@@ -238,6 +238,10 @@ export const chatMessages = {
   'progress.runtimeLimitSuffix': { en: ' / limit {min}m', ja: ' / 上限{min}分' },
   'progress.timeout': { en: '⏱️ Timeout: no response from agent ({min} minutes elapsed)', ja: '⏱️ タイムアウト: エージェントから応答がありませんでした（{min}分経過）' },
   'progress.complete': { en: '✅ Done', ja: '✅ 完了' },
+  // 2026-09-30: 停止手段の発見可能性改善。長時間実行中の Discord/Telegram 進捗ボックスにのみ表示
+  // （WebUI は進捗表示に停止ボタンがあるため対象外。progress-cancel-hint.ts の shouldShowCancelHint 参照）。
+  // 先頭絵文字は 💡 固定（⏳/🔧/📊 Rate Limit は progress-markers.ts の除去パターンと衝突するため避ける）。
+  'progress.cancelHint': { en: '💡 Send `k` to stop this run', ja: '💡 停止するには `k` を送信してください' },
 
   // --- agent-manager.ts（sessionId のみ保持するハンドラ、#319） ---
   'aiStatus.error': { en: '❌ Error: {error}', ja: '❌ Error: {error}' },
@@ -250,6 +254,10 @@ export const chatMessages = {
   // #355: `c` が実際には効かなかった場合に正直に伝える（従来は cancelAiSession() の戻り値を
   // 無視して常に「キャンセルしました」と表示しており、138分ループでも「止めた」と嘘をついていた）。
   'cancel.failed': { en: '⚠️ Could not stop the AI process (no matching running process was found — it may have already finished, or the machine does not yet support cancellation for this run mode).', ja: '⚠️ AI プロセスを停止できませんでした（対象の実行中プロセスが見つかりませんでした。既に終了しているか、この実行方式ではまだキャンセルに対応していない可能性があります）。' },
+  // 2026-09-30: Agent オフライン時に `k` が完全に沈黙していた既存の穴を塞ぐ（rules/project.md #157
+  // 「キャンセルは実際に止められたかを正直に報告する」の要求）。cancelAiProcess() の WS 送信自体が
+  // 届かないため、agent:ai:cancelled を待たずコマンドハンドラ側で即時に返す。
+  'cancel.agentOffline': { en: '⚠️ Could not send the stop request because the agent is not connected (the AI process may still be running on the target machine).', ja: '⚠️ エージェントに接続されていないため停止要求を送れませんでした（AI プロセスは対象マシン上で動き続けている可能性があります）。' },
 
   // --- session-manager.ts 残り（#319） ---
   'session.machineOffline': { en: '⚠️ Session ended because the machine went offline. Send `c` to reconnect.', ja: '⚠️ マシンがオフラインになったため、セッションが終了しました。`c` で再接続できます。' },
@@ -363,6 +371,21 @@ export const chatMessages = {
   'devin.modelUnsupported': {
     en: '⚠️ Model `{model}` was requested, but this machine\'s Devin CLI does not support `--model`, so the request was ignored and Devin\'s own default model is being used instead. Please update the devin CLI on this machine.\n({detail})',
     ja: '⚠️ モデル `{model}` の指定がありましたが、この端末の Devin CLI は `--model` に対応していないため無視され、Devin 自身の既定モデルで実行されています。この端末の devin CLI を更新してください。\n({detail})',
+  },
+  // --- 2026-10-02 新設: #325 静かなフォールバック禁止。モデルが一切指定されずに Devin を起動した場合
+  // （組織 AI デフォルトが未解決、または Project のデフォルト AI ツールと実際にこの機体へ
+  // インストールされているツールが食い違っている等）の通知。セッション単位で 1 回だけ出す ---
+  'devin.modelNotSpecified': {
+    en: 'ℹ️ No model was specified, so Devin is running with its own default model. Please check the AI tool setting (`a`) and model setting (`l`) for this project.',
+    ja: 'ℹ️ モデルが指定されていないため Devin の既定モデルで実行します。プロジェクトの AI ツール設定（`a`）とモデル設定（`l`）を確認してください。',
+  },
+  // --- 2026-10-02 新設: #325 静かなフォールバック禁止。--model で要求したモデルと、ATIF 実測の
+  // 実モデルが食い違っていた場合の通知（Devin が黙って別モデルへ振り替えた可能性がある）。
+  // 価格解決には使わない診断専用の通知（packages/shared/src/model-pricing.ts の
+  // detectDevinModelMismatch() 参照） ---
+  'devin.modelMismatch': {
+    en: '⚠️ Model `{requested}` was requested, but Devin actually ran with `{actual}`. This may be due to session resume or a model restriction on Devin\'s side.',
+    ja: '⚠️ モデル `{requested}` を指定しましたが、実際には `{actual}` で実行されました。セッション再開（resume）か Devin 側のモデル制限が原因の可能性があります。',
   },
   // --- このサイクル（G3実測で確定）: devin -r はモデル指定を無視しセッション作成時のモデルを
   // 使い続けるため、モデルが変わっていたら resume せず新規セッションで開始する。その理由を通知 ---

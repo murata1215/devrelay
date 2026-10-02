@@ -1422,6 +1422,14 @@ async function handleKill(context: UserContext): Promise<string> {
     return tChat(lang, 'common.notConnected');
   }
 
+  // 2026-09-30: Agent オフライン時は server:ai:cancel の WS 送信自体が Agent に届かず、
+  // agent:ai:cancelled も永久に来ないため、従来はユーザーに何のフィードバックも返らず完全に
+  // 沈黙していた（rules/project.md #157「キャンセルは実際に止められたかを正直に報告する」に反する）。
+  // ここで即座に判定し、正直に伝える。
+  if (!isAgentConnected(context.currentMachineId)) {
+    return tChat(lang, 'cancel.agentOffline');
+  }
+
   await cancelAiProcess(context.currentMachineId, context.currentSessionId);
 
   // フィードバックは agent:ai:cancelled 経由で返るため空文字

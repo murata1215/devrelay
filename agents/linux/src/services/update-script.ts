@@ -246,6 +246,53 @@ export function buildDependencyProbeBlock(logFile: string, opts: DependencyProbe
  * 実測 `LastWriteTime` と `$buildStart` を添えてログへ残す（#351 Fix 3 の「何秒ズレていたか
  * 後から読めない」問題への対応）。
  */
+/**
+ * `u`（自己更新）の `pnpm install` が使うワークスペースセレクタ（#cmurfdjgu0b2rjhjhjqdo4zux 案2）。
+ *
+ * `<pkg>...` は「pkg 自身 + pkg が依存するパッケージ」のみを選択する（pkg に依存する側は含まない）。
+ * モノレポ全体を対象にした素の `pnpm install` は Electron/Prisma/Vite/React まで取得してしまい
+ * （実測: 全体 1073MiB に対し agent+shared 相当は 304MiB・258/1153 パッケージ）、企業ネットワークでの
+ * 取得失敗の母数を不要に増やしていた。新規インストール（install-agent.sh/.ps1）側で既に同じ意図の
+ * filter（.ps1 tier3）があったため、`u` 側にも同じセレクタで揃える。
+ *
+ * `pnpm rebuild <pkg>`（`-r` 無し）はカレント importer の依存グラフしか歩かないため、ワークスペース
+ * ルートで実行する既存の PTY rebuild 行はこの変更の前後で挙動が変わらない（元から対象外）。
+ */
+export const AGENT_INSTALL_FILTER = '@devrelay/agent...';
+
+export interface PnpmInstallCommandOptions {
+  /** pnpm の起動形。bash 側は 'pnpm'、Windows 側は '& $pnpmResolved'（#352 で解決済みの実行ファイルを明示実行） */
+  pnpmCommand: string;
+  /** --frozen-lockfile を付けるか（1 段目 true・リトライ段 false）。--filter はどちらでも必ず付く */
+  frozen: boolean;
+  /** --filter に渡すセレクタ（例: '@devrelay/agent...'） */
+  filter: string;
+}
+
+/**
+ * filter 付き `pnpm install` コマンド文字列を組み立てる。
+ *
+ * - `--filter` は frozen の値に関係なく常に含める（リトライ段で外すと、素の `pnpm install` と
+ *   同じ全パッケージ取得に戻ってしまい filter 化の効果が失敗時にだけ消える）。
+ * - `--ignore-scripts` は常に含める（Electron 等の postinstall スキップ、既存方針を維持）。
+ * - セレクタは必ず `"` で囲む。PowerShell は先頭 `@` を splat operator として誤解釈し得るため
+ *   （既存 buildDependencyProbeBlock 周辺の同種コメント・install-agent.ps1 の既存コメントと同趣旨）。
+ */
+export function buildPnpmInstallCommand(opts: PnpmInstallCommandOptions): string {
+  if (!opts.pnpmCommand.trim()) {
+    throw new Error('update-script: pnpmCommand must not be empty');
+  }
+  if (!opts.filter.trim() || opts.filter.includes('"')) {
+    throw new Error(`update-script: unsafe filter: ${opts.filter}`);
+  }
+  const parts = [opts.pnpmCommand, 'install', '--filter', `"${opts.filter}"`];
+  if (opts.frozen) {
+    parts.push('--frozen-lockfile');
+  }
+  parts.push('--ignore-scripts');
+  return parts.join(' ');
+}
+
 export function buildArtifactFreshnessGate(distPaths: string[], logFile: string): string {
   const lines: string[] = [
     `$artifactPaths = @(${distPaths.map((p) => `"${p}"`).join(', ')})`,

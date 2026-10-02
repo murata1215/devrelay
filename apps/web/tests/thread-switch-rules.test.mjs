@@ -16,6 +16,11 @@ test('buildThreadSwitchPatch: completed を必ず false にクリアする', () 
   assert.equal(patch.completed, false);
 });
 
+test('buildThreadSwitchPatch: cancel を必ず null にクリアする（停止ボタン状態の引き継ぎ防止、2026-09-30）', () => {
+  const patch = buildThreadSwitchPatch('session-new', 'タイトル');
+  assert.equal(patch.cancel, null);
+});
+
 test('buildThreadSwitchPatch: messages を空配列にリセットする', () => {
   const patch = buildThreadSwitchPatch('session-new', null);
   assert.deepEqual(patch.messages, []);

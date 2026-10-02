@@ -103,7 +103,7 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // projectPath 上の永続状態（conversation.json / claude-session-id / .devrelay-output）を
 // 読み書きしないようにするための判定（層 B: Agent 側の直交化）
 import { isEphemeralSession } from './session-scope.js';
-import { buildDependencyProbeBlock, buildArtifactFreshnessGate } from './update-script.js';
+import { buildDependencyProbeBlock, buildArtifactFreshnessGate, buildPnpmInstallCommand, AGENT_INSTALL_FILTER } from './update-script.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
 // サイクルP1: Capability 配布基盤（共通層への配線。connection.ts は Claude 固有処理を一切知らない）
 import { setCapabilityConfig, setCapabilitySyncSender, requestReconcile, registerCapabilityAdapter } from './capability-sync.js';
@@ -861,6 +861,14 @@ async function handleSessionStart(
   const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
   if (aiTool !== requestedAiTool) {
     console.log(`⚠️ AI ${requestedAiTool} not installed on this machine → using ${aiTool} instead`);
+    // 2026-10-02 修正: 差し替えをサーバーへ報告する（既存の agent:session:aiTool メッセージ・
+    // handleSessionAiTool() を利用）。これが無いと Session.aiTool / Project.defaultAi が
+    // 要求値（例: claude）のまま残り、サーバーは要求ツール用のモデル設定を解決し続けてしまい、
+    // 実際に動くツール（例: devin）へモデル未指定のまま渡ってしまう（組織 AI デフォルト無視事故）。
+    sendMessage({
+      type: 'agent:session:aiTool',
+      payload: { machineId: config.machineId, sessionId, aiTool },
+    });
   }
 
   // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）
@@ -1326,6 +1334,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     if (resolvedAiTool !== sessionInfo.aiTool) {
       console.log(`⚠️ AI ${sessionInfo.aiTool} not installed on this machine → using ${resolvedAiTool} instead`);
       sessionInfo.aiTool = resolvedAiTool;
+      // 2026-10-02 修正: handleSessionStart と同じ理由でサーバーへ報告する（既存の
+      // agent:session:aiTool メッセージを利用。Session.aiTool / Project.defaultAi を実態に揃える）
+      sendMessage({
+        type: 'agent:session:aiTool',
+        payload: { machineId: currentConfig.machineId, sessionId, aiTool: resolvedAiTool },
+      });
     }
   }
 
@@ -3060,11 +3074,22 @@ async function handleAgentUpdate() {
       // --frozen-lockfile 無しで1回だけ再試行する（#328 の tier2 と同じ方針）
       // #352 Fix A: 直前のプローブで検証済みの $pnpmResolved（.cmd/.exe、.ps1 を通らない）を
       // 明示的に呼ぶ。裸の `pnpm` に戻すと再び ExternalScript（pnpm.ps1）に化ける可能性がある。
-      psRunAndLogChecked('pnpm install', '& $pnpmResolved install --frozen-lockfile --ignore-scripts', 'installExit'),
+      // #cmurfdjgu0b2rjhjhjqdo4zux 案2: --filter で Agent パッケージ + その依存のみに絞る
+      // （Electron/Prisma/Vite 等を除外）。リトライ段でも filter は外さない（外すと失敗時にだけ
+      // 全部入りに戻り、新規インストール側の絞り込みが初回 `u` で無効化されてしまう）。
+      psRunAndLogChecked(
+        'pnpm install',
+        buildPnpmInstallCommand({ pnpmCommand: '& $pnpmResolved', frozen: true, filter: AGENT_INSTALL_FILTER }),
+        'installExit',
+      ),
       [
         `if ($installExit -ne 0) {`,
         psLog('pnpm install (frozen-lockfile) failed, retrying without --frozen-lockfile'),
-        `  ${psRunAndLogChecked('pnpm install (retry)', '& $pnpmResolved install --ignore-scripts', 'installExit')}`,
+        `  ${psRunAndLogChecked(
+          'pnpm install (retry)',
+          buildPnpmInstallCommand({ pnpmCommand: '& $pnpmResolved', frozen: false, filter: AGENT_INSTALL_FILTER }),
+          'installExit',
+        )}`,
         `}`,
       ].join('\n'),
       // 端末モード用に PTY プリビルドをダウンロード（失敗しても継続）
@@ -3178,8 +3203,11 @@ async function handleAgentUpdate() {
       runAndLog('git reset', 'git reset --hard $REMOTE_BRANCH'),
       // #329 Part B: --frozen-lockfile が失敗したら --frozen-lockfile 無しで1回だけ再試行
       // （#328 の tier2 と同じ方針）
-      runAndLogChecked('pnpm install', 'pnpm install --frozen-lockfile --ignore-scripts'),
-      `if [ "$RC" != "0" ]; then ${log('pnpm install (frozen-lockfile) failed, retrying without --frozen-lockfile')}; ${runAndLogChecked('pnpm install (retry)', 'pnpm install --ignore-scripts')}; fi`,
+      // #cmurfdjgu0b2rjhjhjqdo4zux 案2: --filter で Agent パッケージ + その依存のみに絞る
+      // （Electron/Prisma/Vite 等を除外）。リトライ段でも filter は外さない（外すと失敗時にだけ
+      // 全部入りに戻り、新規インストール側の絞り込みが初回 `u` で無効化されてしまう）。
+      runAndLogChecked('pnpm install', buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: true, filter: AGENT_INSTALL_FILTER })),
+      `if [ "$RC" != "0" ]; then ${log('pnpm install (frozen-lockfile) failed, retrying without --frozen-lockfile')}; ${runAndLogChecked('pnpm install (retry)', buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: false, filter: AGENT_INSTALL_FILTER }))}; fi`,
       // 端末モード用に PTY プリビルドをダウンロード（ビルドツール不要、失敗しても継続）
       runAndLog('rebuild PTY', 'pnpm rebuild @homebridge/node-pty-prebuilt-multiarch || true'),
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),

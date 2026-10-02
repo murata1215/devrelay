@@ -27,6 +27,7 @@
     "src/lib/capability-config-rules.ts",
     "src/lib/machine-display-rules.ts",
     "src/lib/uninstall-command-rules.ts",
-    "src/lib/thread-switch-rules.ts"
+    "src/lib/thread-switch-rules.ts",
+    "src/lib/cancel-request-rules.ts"
   ]
 }

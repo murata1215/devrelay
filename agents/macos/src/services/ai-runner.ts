@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch } from '@devrelay/shared';
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
@@ -84,8 +84,16 @@ let devinAgentConfigHelpDumped = false;
 let devinFlagListNotified = false;
 // このサイクル: `--model` が指定されているのに devin CLI が非対応の場合、
 // 従来は黙って無視していた（#325「静かなフォールバック禁止」違反）。
-// 警告はプロセス寿命中 1 回だけ出す（devinFlagListNotified と同じ流儀）。
-let devinModelUnsupportedWarned = false;
+// 2026-10-02 修正: 当初はプロセス寿命中 1 回だけ出す仕様（devinFlagListNotified と同じ流儀）
+// だったが、常駐 Agent では数週間〜数か月に 1 回しか見えず実質無警告だった（組織 AI デフォルトが
+// devin に効かない事故で発覚）。セッション単位（Set<sessionId>）に変更し、スレッドを跨げば
+// 再度通知されるようにする。
+const devinModelUnsupportedWarnedSessions = new Set<string>();
+// 2026-10-02 新設: モデル未指定（options.model が undefined、または safeModelArg() で
+// 危険な値として破棄された）のまま Devin を起動した場合の通知用（同じく Set<sessionId>）。
+// Project.defaultAi と Agent の実インストール状況が食い違う機体で、サーバーが要求ツール用の
+// モデル設定を解決してしまい devin へモデル未指定のまま渡る事故があったため新設。
+const devinModelNotSpecifiedWarnedSessions = new Set<string>();
 // Devin モデル選択サイクル・サイクル B（変更4）: ATIF-v1.7 はターン終了時に一括書き出しされるため、
 // `maxSteps` コストガード（ライブポーラー経由）は原理的に機能しない（正直な但し書き、プラン参照）。
 // devin 起動時（`devinMaxSteps > 0`）に1回だけ console 警告を出す（プロセス寿命中1回、毎ターン繰り返さない）。
@@ -443,9 +451,21 @@ export interface AiRunResult {
 }
 
 // #355: activeSdkAborts — 実行中の Claude SDK クエリを外部から中断するための
-// AbortController レジストリ（sessionId 単位）。cancelAiSession() の `c` コマンド経路と
+// AbortController レジストリ（sessionId 単位）。cancelAiSession() の `c`/`k` コマンド経路と
 // sdk-loop-guard によるタイムアウト強制打ち切りの両方から使用する。
 const activeSdkAborts = new Map<string, AbortController>();
+
+// 2026-09-30: cancelAiSession() がこの Map 経由で abort() したセッションを記録する。
+// 実測（社内ユーザーのキャンセルテスト）で判明した問題への対処: ユーザーが `k` でキャンセルした際、
+// AbortError は catch ブロックの汎用エラー分岐に落ち、fullOutput が既にある場合は完了シグナル
+// （isComplete=true）が一切送られず、サーバーの進捗トラッカーが最大150分（ハードタイムアウト）
+// 残り続けていた。さらに fullOutput が空の場合は完了シグナル自体は送られるものの
+// 「Error: Claude Code process aborted by user」という、ユーザーの意図的な操作なのに
+// 失敗に見えるメッセージが DB の Message に永続化されていた。
+// このレジストリは loopGuardAborted / bgIdleTimedOut と同じ役割（catch ブロックの先頭で
+// 判定し、resume 失敗検出への誤ヒットより前に正しく完了扱いにする）をユーザーキャンセルにも
+// 適用するための単一情報源。cancelAiSession() で add、catch ブロックで判定後 delete する。
+const userCancelRequested = new Set<string>();
 
 // Active AI sessions: sessionId -> AiSession
 const activeSessions = new Map<string, AiSession>();
@@ -1434,6 +1454,20 @@ async function sendPromptToAiSdk(
       }
     }
   } catch (err: any) {
+    // 2026-09-30: `k`（cancelAiSession()）によるユーザーの意図的な abort()。
+    // loopGuardAborted / bgIdleTimedOut と同じ理由で catch の最初に置く（resume 失敗検出への
+    // 誤ヒットで同じプロンプトが再送されるのを防ぐ）。fullOutput の有無に関わらず必ず完了シグナルを
+    // 送る（従来は fullOutput>0 のとき完了シグナルが一切送られず進捗表示が最大150分残っていた実測バグ）。
+    // fullOutput===0 のときも「Error: ...」という失敗風の文言ではなく中立的な表示にする
+    // （ユーザーの意図的な操作であり失敗ではないため）。
+    if (userCancelRequested.has(sessionId)) {
+      userCancelRequested.delete(sessionId);
+      console.log(`[claude/sdk] 🛑 user cancel abort() caught (${err?.name ?? err?.message ?? 'unknown'}), finalizing with ${fullOutput.length} chars`);
+      if (options.rawMode) result.rawOutput = fullOutput;
+      onOutput(fullOutput.length === 0 ? '(Cancelled by user)' : '', true, result.usageData, result.extractedSessionId, 'aborted');
+      completionSent = true;
+      return result;
+    }
     // #355: loop-guard による意図的な abort()（AbortError）は、既存の resume 失敗検出
     // （err.message.includes('session') 等）に誤って一致し resumeFailed=true になると
     // connection.ts が同じプロンプトを再送してループが再開してしまう。
@@ -1491,6 +1525,10 @@ async function sendPromptToAiSdk(
     if (activeSdkAborts.get(sessionId) === sdkAbortController) {
       activeSdkAborts.delete(sessionId);
     }
+    // 2026-09-30: catch 内の分岐に到達しなかった経路（result ハンドラが先に completionSent=true に
+    // した後で abort() が呼ばれた等の稀なレース）でも、次ターンに誤って持ち越されないよう必ず消す
+    // （残存すると次ターンの無関係なエラーを「ユーザーキャンセル」と誤判定してしまう）。
+    userCancelRequested.delete(sessionId);
   }
 
   // 完了シグナル送信（フォールバック）
@@ -1726,10 +1764,17 @@ export async function sendPromptToAi(
     // そのまま使い続ける（`--model` を付けても CLI が warning を出して黙って無視する）。
     // 「l devin:plan:X → 次のプロンプトから X で動く」を成立させるため、保存済みモデルと
     // 今回指定のモデルが食い違っていたら resume せず新規セッションで開始する。
+    // 2026-10-02 修正: 保存値は「前回要求したモデル」ではなく「前回 ATIF で実測できた実モデル」
+    // （saveDevinModel 呼び出し側を参照）。Devin が要求モデルを黙って別モデルへ振り替えた場合
+    // （2026-10-02 実機事故）、旧ロジック（要求値どうしの文字列一致）だと「要求は毎回同じだから
+    // 一致」と判定して誤ったモデルのまま resume し続け、組織 AI デフォルトが永久に反映されない
+    // 状態に陥っていた。detectDevinModelMismatch() で実モデルベースに正規化して比較することで、
+    // 今回要求したモデルと前回実際に動いていたモデルが食い違っていれば新規セッションを切り、
+    // --model を再適用する。要求が未指定/追従エイリアス/比較不能なときは従来どおり resume する。
     devinCurrentModelForResume = safeModelArg(options.model) ?? '';
     if (devinSessionId) {
       const devinSavedModel = (await loadDevinModel(projectPath, options.agentScopeId)) ?? '';
-      if (devinSavedModel === devinCurrentModelForResume) {
+      if (!detectDevinModelMismatch(devinCurrentModelForResume, devinSavedModel)) {
         args.push('-r', devinSessionId);
         devinResumedSessionId = devinSessionId;
         console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
@@ -1767,11 +1812,18 @@ export async function sendPromptToAi(
     const devinModel = safeModelArg(options.model);
     if (devinModel && devinCaps.model) {
       args.push('--model', devinModel);
-    } else if (devinModel && !devinCaps.model && !devinModelUnsupportedWarned) {
+    } else if (devinModel && !devinCaps.model && !devinModelUnsupportedWarnedSessions.has(sessionId)) {
       // #325: 静かなフォールバック禁止。モデル指定が黙って無視されるのを防ぐため、
-      // プロセス寿命中 1 回だけチャットへ通知する（devinFlagListNotified と同じ流儀）。
-      devinModelUnsupportedWarned = true;
+      // セッション単位で 1 回だけチャットへ通知する。
+      devinModelUnsupportedWarnedSessions.add(sessionId);
       onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelUnsupported', { model: devinModel, detail: buildDevinCapabilityDetail(devinCaps) })}\n`, false);
+    } else if (!devinModel && !devinModelNotSpecifiedWarnedSessions.has(sessionId)) {
+      // 2026-10-02 新設: #325 静かなフォールバック禁止。options.model が未指定（または
+      // safeModelArg() で破棄）のまま Devin を起動すると、組織 AI デフォルト／個人設定の
+      // モデルが一切反映されず Devin 自身の既定モデルで動いてしまう。これに気づけず
+      // 「組織デフォルトを設定したのに反映されない」事故に繋がったため、セッション単位で通知する。
+      devinModelNotSpecifiedWarnedSessions.add(sessionId);
+      onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelNotSpecified')}\n`, false);
     }
 
     // #345: DevRelay は常に -p（非対話）で起動する。devin の --help は
@@ -2540,8 +2592,16 @@ export async function sendPromptToAi(
             .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
           if (latest?.id) {
             saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
-            // このサイクル: 次回のモデル一致判定のため、今回使ったモデルもセッション ID と並べて保存する
-            saveDevinModel(projectPath, devinCurrentModelForResume, options.agentScopeId).catch(() => {});
+            // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
+            // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
+            // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
+            // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
+            // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
+            // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
+            const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
+            if (devinActualModelForSave) {
+              saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+            }
             // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
             // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
             saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
@@ -2804,6 +2864,15 @@ export async function sendPromptToAi(
               modelName: devinAtifModelName ?? devinAtifModelId ?? '',
               modelId: devinAtifModelId ?? devinAtifModelName ?? '',
             }) + '\n', false);
+            // 2026-10-02 新設: #325 静かなフォールバック禁止。要求モデルと ATIF 実測の実モデルが
+            // 食い違っていれば通知する（Devin が黙って別モデルへ振り替えた可能性の検知）。
+            // 追従エイリアス（opus 等）・adaptive・比較不能（片方不明）は detectDevinModelMismatch() 内で除外済み。
+            if (detectDevinModelMismatch(devinCurrentModelForResume, devinAtifModelId ?? devinAtifModelName)) {
+              onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelMismatch', {
+                requested: devinCurrentModelForResume,
+                actual: devinAtifModelId ?? devinAtifModelName ?? '',
+              })}\n`, false);
+            }
           }
           // 欠陥1対策: 無言（または前置き1文のみ）のまま終わった場合、
           // 黙ったまま終わらせず理由を明示する（#325 静かなフォールバック禁止）。
@@ -2885,6 +2954,9 @@ export function cancelAiSession(sessionId: string): boolean {
   const sdkAbortController = activeSdkAborts.get(sessionId);
   if (sdkAbortController) {
     console.log(`⛔ Cancelling AI session (Claude SDK): ${sessionId}`);
+    // 2026-09-30: sendPromptToAiSdk() の catch ブロックが「ユーザーによる意図的なキャンセル」だと
+    // 判別できるように先に登録する（loopGuardAborted / bgIdleTimedOut と同じ役割）。
+    userCancelRequested.add(sessionId);
     sdkAbortController.abort();
     return true;
   }

@@ -210,7 +210,14 @@ export async function loadDevinModel(projectPath: string, agentScopeId?: string)
 }
 
 /**
- * 今回の Devin ターンで使用したモデルを保存（`model` は未指定時は空文字列を渡すこと）
+ * 今回の Devin ターンで実際に使用されたモデルを保存する。
+ *
+ * 2026-10-02 修正: 以前は「要求したモデル」（`options.model`）をそのまま保存していたが、
+ * Devin が要求モデルを黙って別モデルへ振り替えた場合（例: 組織 AI デフォルトが未解決のまま
+ * 起動し、Devin 自身の既定モデルが使われた）に「要求は毎回同じだから一致」と誤判定し続け、
+ * 誤ったモデルのまま resume が永久に固定される事故が発生した。呼び出し側は ATIF
+ * （`devin --export`）で実測できた実際のモデル ID を渡すこと。実測できなかった場合は
+ * 呼び出さない（空文字列や未知の値で上書きしない。前回までの実測値をそのまま残す）。
  */
 export async function saveDevinModel(projectPath: string, model: string, agentScopeId?: string): Promise<void> {
   const dirPath = resolveScopeDir(projectPath, agentScopeId);

@@ -6,6 +6,97 @@
 
 ## 実装済み機能
 
+### Agent 新規インストール / `u` 自己更新の pnpm install を --filter で絞る (2026-10-03)
+
+新規インストール（`install-agent.sh`/`.ps1`）と自己更新（`u`）の `pnpm install` がワークスペース
+ルートから引用符なしで実行されており、pnpm の仕様上「全プロジェクトの依存」を取得していた
+（Agent の動作に無関係な Electron/Prisma/Vite/React まで含む）。実測: 全体 1073MiB・1153
+パッケージに対し `agents/linux`+`shared` のみなら 304MiB・258 パッケージ（22.4%）。
+
+- **install-agent.sh**: 既存の `$AGENT_PKG` を使い `--filter "${AGENT_PKG}..."` を frozen 段・
+  フォールバック段の両方に付与
+- **install-agent.ps1**: `$AgentPkg`/`$AgentFilter` を導入し install filter とビルド filter を
+  単一ソース化。3 段フォールバック（lockfile固定+全体 → lockfile固定なし+全体 → filter付き）を
+  「全段 filter 付き」の 2 段に変更（旧 tier3 は tier2 と同一コマンドになるため統合）。失敗時の
+  人間向けヒントにも filter 付きコマンドを掲載
+- **`u`（自己更新）の filter 化**: `agents/{linux,macos}/src/services/connection.ts` の
+  Windows/bash 両経路（1 段目 + リトライ段）を filter 化。コマンド組み立てを新規
+  `update-script.ts` の純関数 `buildPnpmInstallCommand()`（外部 import ゼロ、`AGENT_INSTALL_FILTER`
+  定数と合わせて dist 直 import テスト可能）に切り出し。**リトライ段でも filter は外さない**
+  （外すと失敗時にだけ全部入りに戻り、新規インストール側の絞り込みが初回 `u` で無効化される）
+- `pnpm rebuild @homebridge/node-pty-prebuilt-multiarch`（ワークスペースルートで `-r` 無し実行）は
+  元々カレント importer のグラフしか歩かないため今回の変更前後で挙動不変（既存の Windows
+  conpty.node 手動フォールバックが実質的な担い手）。filter 付き install 後に filter なし install
+  を走らせると全 workspace が入り直すこと（pnpm の既定動作）を確認した上で `u` 側にも filter を
+  適用（= 既存の全部入り機で filter 付き `u` を実行しても、選択外パッケージの prune はされず
+  ビルドも成功することを `/tmp` スクラッチクローンで実測）
+- `agents/windows`、`apps/server`、`apps/web`、prisma、lockfile/package.json/workspace 定義は無変更
+
+#### 検証
+`/tmp` スクラッチクローンで `pnpm install --filter "@devrelay/agent..." --frozen-lockfile
+--ignore-scripts` を実行 → `node_modules` 332MiB（electron/prisma/vite 0 件）・lockfile 無改変・
+shared/agent build green・`node dist/index.js` 起動確認。6 workspace build green、
+shared78/linux1048(+10)/macos612+1skip(+10、既存2件の flake は分離実行で再現しグリーン確認済み)。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `scripts/install-agent.sh` | install 行に `--filter "${AGENT_PKG}..."` を追加 |
+| `scripts/install-agent.ps1` | `$AgentPkg`/`$AgentFilter` 導入、3 段フォールバック→全段 filter 付き 2 段に変更 |
+| `agents/linux/src/services/update-script.ts` | `buildPnpmInstallCommand()`/`AGENT_INSTALL_FILTER` 追加 |
+| `agents/macos/src/services/update-script.ts` | 新規。linux 版と同じ関数 + `WIN32_AGENT_INSTALL_FILTER` |
+| `agents/{linux,macos}/src/services/connection.ts` | `u` の pnpm install 呼び出しを filter 化 |
+
+### 実行中 AI ターンの「停止」発見可能性改善 + SDK キャンセルの完了シグナル欠落修正 (2026-09-30)
+
+社内ユーザー（TISA小倉さん / SalesForce-SUN プロジェクト）から「別プロジェクト向けの質問を誤って
+Devin に投げてしまったが、止め方が分からず8分待った」という改善要望を受けて調査した。
+
+- **調査結果**: 停止コマンド `k`/`kill`（`command-handler.ts` の `handleKill()`）は既に実装済みで
+  実際に機能する（実測で Claude SDK 経路のキャンセルを確認済み）ことが判明した。欠けていたのは
+  「止め方の発見可能性」のみ
+
+**Phase 1（発見可能性改善、Agent 側変更ゼロ）**
+- **WebUI 停止ボタン**: `ChatPage.tsx` の `ProgressIndicator`（「🤖 処理中... (Ns)」表示）に停止ボタンを
+  追加。誤クリック防止のため DevRelay の「2回連続で確認」流儀（`x`/`u` と同型）をボタン内で再現
+  （1回目クリック=武装、6秒放置で自動解除、2回目クリックで `k` を送信）。判定ロジックは
+  `apps/web/src/lib/cancel-request-rules.ts` に外部 import ゼロの純関数として切り出し
+  （`resolveCancelPhase`/`decideCancelClick`）。**設計上の要点**: `k` 直後、Agent の kill ラダー
+  （term→10s→force→20s強制確定）により進捗表示は最大30秒再出現しうるため、「停止要求中」の状態は
+  `ProgressIndicator` のコンポーネントローカル state ではなく `Tab.cancel`（親の React state）に
+  持たせ、`sessionId` 照合で無効化する設計にした（アンマウント/再マウントで消えないように）
+- **進捗ボックスへの案内行**: Discord/Telegram の進捗ボックス（60秒経過後）に
+  「💡 停止するには `k` を送信してください」を表示。WebUI は停止ボタンがあるため対象外
+  （`session-manager.ts` の `formatProgressMessage()` に `options.cancelHint` を追加、
+  判定は新設 `apps/server/src/services/progress-cancel-hint.ts`）。キルスイッチ
+  `DEVRELAY_PROGRESS_CANCEL_HINT`（既定 `1`）
+- **ヘルプの位置改善**: `getHelpText()`（ja/en）で `k` を「その他」最下部から「実行中の停止」の
+  専用ブロックへ昇格
+- **Agent オフライン時の沈黙を解消**: `handleKill()` に `isAgentConnected()` チェックを追加。
+  従来は Agent オフライン時に `server:ai:cancel` が届かず `agent:ai:cancelled` も永久に来ないため、
+  ユーザーに何のフィードバックも返らなかった（`rules/project.md` #157「キャンセルは実際に止められた
+  かを正直に報告する」に反していた既存の穴）
+
+**Phase 2（Agent 側、実測で新たに発見したバグの修正）**
+- 実装前の実機テストで「⛔ AI プロセスをキャンセルしました」の直後に「Error: Claude Code process
+  aborted by user」という失敗風のメッセージが表示される事象を発見。調査の結果、ユーザーキャンセル
+  （`AbortController.abort()`）による `AbortError` は `sendPromptToAiSdk()` の `catch` ブロックの
+  汎用エラー分岐に落ち、①既に何か出力済み（`fullOutput.length > 0`）の場合は完了シグナル
+  （`isComplete=true`）が一切送られず進捗トラッカーがハードタイムアウト（150分）まで残り続ける、
+  ②出力ゼロの場合は完了シグナルは送られるが `formatAiErrorMessage()` により失敗風の文言が DB に
+  永続化される、という2つの実害があると判明
+- `agents/{linux,macos}/src/services/ai-runner.ts` に `userCancelRequested: Set<string>` を新設。
+  `cancelAiSession()` の SDK abort 分岐で登録し、`catch` の先頭（`loopGuardAborted`/`bgIdleTimedOut`
+  と同列）で判定して `onOutput('', true, ..., 'aborted')`（出力ゼロ時は「(Cancelled by user)」）を
+  明示送出するよう修正。`finally` でも次ターンへの誤伝播防止のため必ず delete する
+- **ギャップとして提示されていた Windows Agent の SDK キャンセル未対応は非該当と判明**: 調査の結果、
+  Windows Agent は Claude を Agent SDK の `query()` ではなく CLI 直接 spawn（`-p --output-format
+  stream-json`）で実行しており、そもそも SDK 側の `AbortController` 概念が存在しない。キャンセルは
+  Devin/Codex と同じ汎用 kill ラダー（`session.requestKill`）で既にカバーされているため対応不要
+- 検証: `pnpm build`（全7パッケージ）green、`apps/web/dist` の CJS 混入チェック 0 件、
+  shared70/server783(+8)/web540(+16)/linux1038/macos601+1skip 全 green
+
 ### スレッド切替時に前スレッドの「処理中...」進捗が残るバグ修正 (2026-09-30)
 
 ユーザー報告「あるスレッドで質問中、スレッド新規で別の質問をしようとしたら元のスレッドで聞いてた内容が

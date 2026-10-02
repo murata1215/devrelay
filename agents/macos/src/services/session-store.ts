@@ -149,7 +149,12 @@ export async function loadDevinModel(projectPath: string, agentScopeId?: string)
   } catch { return null; }
 }
 
-/** 今回の Devin ターンで使用したモデルを保存（`model` は未指定時は空文字列を渡すこと） */
+/**
+ * 今回の Devin ターンで実際に使用されたモデルを保存する。
+ * 2026-10-02 修正: 「要求したモデル」ではなく ATIF で実測できた実際のモデル ID を渡すこと
+ * （要求値を保存すると、Devin が黙って別モデルへ振り替えた場合に誤判定が永久に固定される事故が
+ * あったため）。実測できなかった場合は呼び出さない（前回までの実測値を上書きしない）。
+ */
 export async function saveDevinModel(projectPath: string, model: string, agentScopeId?: string): Promise<void> {
   const dirPath = resolveScopeDir(projectPath, agentScopeId);
   const filePath = getDevinModelPath(projectPath, agentScopeId);

@@ -50,6 +50,14 @@ $ConfigFile = Join-Path $ConfigDir "config.yaml"
 $LogDir = Join-Path $ConfigDir "logs"
 $BinDir = Join-Path $ConfigDir "bin"
 $TaskName = "DevRelay Agent"
+# Windows は agents/linux の Agent（@devrelay/agent）をそのまま実行する（agents/windows の
+# Electron 版はこのインストーラーでは使わない）。pnpm install の --filter と build の --filter を
+# 単一ソース化する（従来はビルド行にのみハードコードされていた）。
+$AgentPkg = "@devrelay/agent"
+# "<pkg>..." は pkg 自身 + pkg が依存するパッケージのみを選択する（pkg に依存する側は含まない）。
+# モノレポ全体を対象にした素の install は Electron/Prisma/Vite/React まで取得してしまう
+# （実測: 全体 1073MiB に対し agent+shared 相当は 304MiB・258/1153 パッケージ）。
+$AgentFilter = "$AgentPkg..."
 # ビルド成果物のパス。Step 3 の成果物検証（#328）と Step 6 のランチャー生成の両方で使うため
 # 先頭で定義する（従来は Step 6 で初めて定義していた）。
 $AgentEntry = Join-Path $AgentDir "agents\linux\dist\index.js"
@@ -739,19 +747,20 @@ Push-Location $AgentDir
 Write-Host "  依存関係をインストール中..."
 # --ignore-scripts: Electron 等の postinstall をスキップ（CLI Agent には不要）
 # 企業ネットワークで Electron バイナリ取得が ECONNRESET で失敗する問題を回避
-# 3 段階フォールバック（#328、前段が非ゼロ終了したときだけ次に進む）:
-#   1. lockfile 固定 + モノレポ全体（従来の第一候補・成功すればここで終わる）
-#   2. lockfile 固定なし + モノレポ全体（lockfile ズレ対策。従来 catch で走っていた方）
-#   3. Agent に必要なワークスペースだけに絞る（Electron/Prisma/Vite を丸ごと外し、
-#      企業ネットワークでのパッケージ取得失敗の母数を減らす最後の砦）
+# --filter "$AgentFilter": Agent パッケージ + その依存のみに絞る（#cmurfdjgu0b2rjhjhjqdo4zux 案2）。
+# モノレポ全体を対象にした素の install は Electron/Prisma/Vite/React まで取得してしまう
+# （実測: 全体 1073MiB に対し agent+shared 相当は 304MiB・258/1153 パッケージ）。
+# 2 段階フォールバック（#328 の 3 段から filter 常時付与に変更。前段が非ゼロ終了したときだけ次に進む）:
+#   1. lockfile 固定（従来の第一候補・成功すればここで終わる）
+#   2. lockfile 固定なし（lockfile ズレ対策。従来 catch で走っていた方）
+# どちらの段でも filter は外さない（外すと失敗時にだけ全部入りに戻り、絞り込みの効果が消える）。
+# 旧 tier3「lockfile 固定なし + filter」は tier2 と同一コマンドになるため統合（3 段 → 2 段）。
 $InstallOk = $false
 $InstallTiers = @(
-    @{ Label = "pnpm install --frozen-lockfile --ignore-scripts";
-       Command = { pnpm install --frozen-lockfile --ignore-scripts } },
-    @{ Label = "pnpm install --ignore-scripts";
-       Command = { pnpm install --ignore-scripts } },
-    @{ Label = "pnpm install --ignore-scripts --filter @devrelay/agent...";
-       Command = { pnpm install --ignore-scripts --filter "@devrelay/agent..." } }
+    @{ Label = "pnpm install --filter $AgentFilter --frozen-lockfile --ignore-scripts";
+       Command = { pnpm install --filter "$AgentFilter" --frozen-lockfile --ignore-scripts } },
+    @{ Label = "pnpm install --filter $AgentFilter --ignore-scripts";
+       Command = { pnpm install --filter "$AgentFilter" --ignore-scripts } }
 )
 foreach ($tier in $InstallTiers) {
     Write-Host "  > $($tier.Label)" -ForegroundColor DarkGray
@@ -777,6 +786,8 @@ if (-not $InstallOk) {
     Write-Host ""
     Write-Host "  手動で切り分ける場合:" -ForegroundColor Yellow
     Write-Host "    cd `"$AgentDir`"" -ForegroundColor Green
+    Write-Host "    pnpm install --filter `"$AgentFilter`" --ignore-scripts" -ForegroundColor Green
+    Write-Host "    # それでも通らない場合（filter 自体が壊れている可能性）:" -ForegroundColor DarkGray
     Write-Host "    pnpm install --ignore-scripts" -ForegroundColor Green
     Write-Host ""
     Write-Host "  ※ 自動起動の登録と Agent の起動は行っていません。" -ForegroundColor Yellow
@@ -831,8 +842,8 @@ $SharedBuildCode = Invoke-LoggedCommand -Label "pnpm --filter @devrelay/shared b
     -Command { pnpm --filter "@devrelay/shared" build } -LogFile $BuildLog
 
 Write-Host "  Agent をビルド中..."
-$AgentBuildCode = Invoke-LoggedCommand -Label "pnpm --filter @devrelay/agent build" `
-    -Command { pnpm --filter "@devrelay/agent" build } -LogFile $BuildLog
+$AgentBuildCode = Invoke-LoggedCommand -Label "pnpm --filter $AgentPkg build" `
+    -Command { pnpm --filter "$AgentPkg" build } -LogFile $BuildLog
 
 Pop-Location
 
@@ -857,9 +868,9 @@ if (($SharedBuildCode -ne 0) -or ($AgentBuildCode -ne 0) -or (-not $SharedExists
     Write-Host ""
     Write-Host "  手動で切り分ける場合:" -ForegroundColor Yellow
     Write-Host "    cd `"$AgentDir`"" -ForegroundColor Green
-    Write-Host "    pnpm install --ignore-scripts" -ForegroundColor Green
+    Write-Host "    pnpm install --filter `"$AgentFilter`" --ignore-scripts" -ForegroundColor Green
     Write-Host "    pnpm --filter @devrelay/shared build" -ForegroundColor Green
-    Write-Host "    pnpm --filter @devrelay/agent build" -ForegroundColor Green
+    Write-Host "    pnpm --filter $AgentPkg build" -ForegroundColor Green
     Write-Host ""
     Write-Host "  ※ 自動起動の登録と Agent の起動は行っていません（起動しても即座に" -ForegroundColor Yellow
     Write-Host "     MODULE_NOT_FOUND で落ちるだけのため）。" -ForegroundColor Yellow

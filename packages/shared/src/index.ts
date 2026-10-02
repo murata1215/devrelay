@@ -64,4 +64,5 @@ export {
   type CostSource,
   type ResolvedMessageCost,
   resolveMessageCost,
+  detectDevinModelMismatch,
 } from './model-pricing.js';

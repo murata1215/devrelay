@@ -130,6 +130,46 @@ export function resolveDevinModelPrice(rawModelId: string | null | undefined): M
   return DEVIN_MODEL_PRICING[id];
 }
 
+/**
+ * 2026-10-02 実機事故（組織デフォルト Opus 5.5 設定済みの devin 機で swe-2 が使われた）対策。
+ *
+ * 「最新に自動追従する」エイリアス（`AI_MODEL_CATALOG.devin` のエイリアス系エントリ）は
+ * CLI バージョンによって無警告で解決先が変わる仕様（rules/project.md 参照）であり、
+ * 要求モデルと実モデルが一致しなくて当然のため比較対象から除外する。
+ * `adaptive` も品質/コストを動的選択する専用モデルのため同様に除外する。
+ */
+const DEVIN_MODEL_TRACKING_ALIASES = new Set(['adaptive', 'opus', 'sonnet', 'haiku', 'gpt', 'codex', 'gemini', 'swe']);
+
+/**
+ * `--model` で要求した Devin モデルと、ターン終了後に ATIF から実測できた実際のモデルが
+ * 食い違っているかどうかを判定する（`normalizeDevinModelId()` で family slug + fast フラグへ
+ * 正規化して比較）。
+ *
+ * 2026-10-02 実機事故の教訓: Devin が要求モデルを黙って別モデルへ振り替えても（アカウント未解放・
+ * レート制限等）DevRelay 側はそれを検知する手段が無く、「組織デフォルトを設定したのに反映されない」
+ * ことに利用者が気づくまで放置される。この関数はその不一致を検出するためだけに存在し、
+ * 価格解決（`resolveDevinModelPrice`）には使わない。
+ *
+ * - `requestedModel` が未指定（`--model` を付けずに起動した、または追従エイリアスを指定した）
+ *   場合や、`actualModel` が ATIF から取得できなかった場合は、比較不能として `false` を返す
+ *   （静かなフォールバック禁止の原則上「不明」と「不一致」は意味が異なるため、不明を不一致として
+ *   誤報しない）。
+ * - `-fast` の有無が違う場合も不一致として扱う（単価が別のため実質別モデル）。
+ *
+ * @param requestedModel Agent が devin に `--model` で渡した値（渡さなかった場合は undefined/null）
+ * @param actualModel ATIF（`devin --export`）から実測できたモデル ID（取得できなければ undefined/null）
+ */
+export function detectDevinModelMismatch(
+  requestedModel: string | null | undefined,
+  actualModel: string | null | undefined,
+): boolean {
+  if (!requestedModel || !actualModel) return false;
+  if (DEVIN_MODEL_TRACKING_ALIASES.has(requestedModel.trim().toLowerCase())) return false;
+  const requested = normalizeDevinModelId(requestedModel);
+  const actual = normalizeDevinModelId(actualModel);
+  return requested.id !== actual.id || requested.fast !== actual.fast;
+}
+
 /** コスト計算に使う4種のトークン数（Claude 互換キーの `usage` から取り出した後の形） */
 export interface UsageTokenCounts {
   inputTokens: number;

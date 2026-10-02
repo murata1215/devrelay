@@ -422,7 +422,12 @@ cd "$AGENT_DIR"
 echo "  依存関係をインストール中..."
 # --ignore-scripts: Electron 等の postinstall をスキップ（CLI Agent には不要）
 # 企業ネットワークで Electron バイナリ取得が ECONNRESET で失敗する問題を回避
-pnpm install --frozen-lockfile --ignore-scripts 2>/dev/null || pnpm install --ignore-scripts
+# --filter "$AGENT_PKG...": Agent パッケージ + その依存のみに絞る（pkg... は pkg 自身とその依存の
+# 集合、pkg に依存する側は含まない）。モノレポ全体を対象にした素の install は Electron/Prisma/Vite/
+# React まで取得してしまう（実測: 全体 1073MiB に対し agent+shared 相当は 304MiB・258/1153 パッケージ）。
+# フォールバック側も filter を外さない（外すと失敗時にだけ全部入りに戻り、絞り込みの効果が消える）。
+pnpm install --filter "${AGENT_PKG}..." --frozen-lockfile --ignore-scripts 2>/dev/null \
+  || pnpm install --filter "${AGENT_PKG}..." --ignore-scripts
 
 # 端末インタフェースモード用に PTY のプリビルドバイナリをダウンロード
 # @homebridge/node-pty-prebuilt-multiarch は Linux/macOS/Windows のプリビルドを同梱しており、

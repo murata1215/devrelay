@@ -14,6 +14,10 @@
  * 新規タブ生成時（ChatPage.tsx の初期化処理）は `progress: null, completed: false` を
  * 明示していたが、スレッド切替経路だけこれが漏れていた。本関数はその漏れを塞ぐための
  * 単一の真実（両経路から呼ぶことで再発を防ぐ）。
+ *
+ * 2026-09-30 追記: `cancel`（停止ボタンの操作状態、cancel-request-rules.ts）も同様にクリアする。
+ * `resolveCancelPhase()` は sessionId 不一致で自動的に 'idle' を返すため本来これが漏れても
+ * 表示は壊れないが、念のため Tab state 側でも明示的にリセットしておく（二重の安全網）。
  */
 
 /** `buildThreadSwitchPatch` が返す、Tab state に spread で適用するパッチ。 */
@@ -27,6 +31,8 @@ export interface ThreadSwitchPatch {
   progress: null;
   /** 前スレッドの完了フラグも引き継がない */
   completed: false;
+  /** 前スレッドの停止ボタン操作状態も引き継がない（2026-09-30） */
+  cancel: null;
 }
 
 /**
@@ -45,5 +51,6 @@ export function buildThreadSwitchPatch(sessionId: string, title: string | null):
     hasMoreHistory: false,
     progress: null,
     completed: false,
+    cancel: null,
   };
 }

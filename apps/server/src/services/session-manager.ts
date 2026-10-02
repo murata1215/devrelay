@@ -28,6 +28,7 @@ import { sendFcmNotificationForSession } from './fcm-service.js';
 import { createNotification } from './notification-service.js';
 import { decideProgressTimeoutAction } from './progress-timeout.js';
 import { resolveProgressRecipients } from './progress-recipients.js';
+import { shouldShowCancelHint } from './progress-cancel-hint.js';
 import { isEphemeralSessionId, decideNewSessionScopeId, resolveOutboundAgentScopeId, inheritScopeForReestablishedSession } from './thread-scope.js';
 import { resolveChatSessionId } from './thread-routing.js';
 // import { sendLineMessage } from '../platforms/line.js';
@@ -479,14 +480,18 @@ export async function startProgressTracking(sessionId: string) {
   };
 
   // Send initial progress message to all participants
+  // 2026-09-30: 開始直後は elapsed=0 のため shouldShowCancelHint() は常に false（案内行なし）。
+  // 呼び出しは一貫性のため明示的に行う（しきい値変更時にここだけ取り残されないように）。
   for (const { platform, chatId } of participants) {
     if (platform === 'discord') {
-      const messageId = await sendDiscordMessageWithId(chatId, formatProgressMessage('', 0, language));
+      const cancelHint = shouldShowCancelHint({ platform: 'discord', elapsedSeconds: 0, env: process.env });
+      const messageId = await sendDiscordMessageWithId(chatId, formatProgressMessage('', 0, language, { cancelHint }));
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
     } else if (platform === 'telegram') {
-      const messageId = await sendTelegramMessageWithId(chatId, formatProgressMessage('', 0, language));
+      const cancelHint = shouldShowCancelHint({ platform: 'telegram', elapsedSeconds: 0, env: process.env });
+      const messageId = await sendTelegramMessageWithId(chatId, formatProgressMessage('', 0, language, { cancelHint }));
       if (messageId) {
         tracker.messages.set(chatId, { messageId, platform });
       }
@@ -588,9 +593,6 @@ async function updateProgressMessages(sessionId: string) {
   const tracker = progressTrackers.get(sessionId);
   if (!tracker) return;
 
-  const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
-  const content = formatProgressMessage(tracker.outputBuffer, elapsed, tracker.language);
-
   // S1/C4: 配信先はターン開始時スナップショット（tracker.messages）ではなく、
   // フレーム送信のたびに現在のセッション参加者から live 評価する
   // （web:response / web:user_message / finalizeProgress と同じ評価経路に揃える）。
@@ -601,19 +603,31 @@ async function updateProgressMessages(sessionId: string) {
     trackerMessages: [...tracker.messages],
   });
 
+  const elapsed = Math.floor((Date.now() - tracker.startTime) / 1000);
+  // 2026-09-30: web は案内行なし（停止ボタンが案内そのもの）、discord/telegram はしきい値判定を通す。
+  // recipient 数だけ整形しないよう1回ずつ先に作る（progress-cancel-hint.ts 参照）。
+  const contentPlain = formatProgressMessage(tracker.outputBuffer, elapsed, tracker.language);
+  const contentWithHint = formatProgressMessage(tracker.outputBuffer, elapsed, tracker.language, {
+    cancelHint: shouldShowCancelHint({ platform: 'discord', elapsedSeconds: elapsed, env: process.env }),
+  });
+
   for (const { platform, chatId, messageId } of recipients) {
     if (platform === 'discord') {
-      await editDiscordMessage(chatId, messageId as string, content);
+      await editDiscordMessage(chatId, messageId as string, contentWithHint);
     } else if (platform === 'telegram') {
-      await editTelegramMessage(chatId, messageId as number, content);
+      await editTelegramMessage(chatId, messageId as number, contentWithHint);
     } else if (platform === 'web') {
-      await editWebMessage(chatId, (messageId as string) ?? '', content, elapsed, tracker.projectId, sessionId);
+      await editWebMessage(chatId, (messageId as string) ?? '', contentPlain, elapsed, tracker.projectId, sessionId);
     }
   }
 }
 
 // Format the progress message
-function formatProgressMessage(output: string, elapsedSeconds: number, language: Language = DEFAULT_CHAT_LANGUAGE): string {
+// 2026-09-30: 第4引数 options.cancelHint で「`k` で停止できます」の案内行を出せるようにした
+// （progress-cancel-hint.ts の shouldShowCancelHint() で呼び出し側が判定する）。
+// ⏱️ 経過時間の直後・``` フェンスの前に挿入する（末尾だと長い出力に押し流され、
+// Discord の2000字分割で2通目に飛ばされ8秒ごとに新規投稿される危険があるため）。
+function formatProgressMessage(output: string, elapsedSeconds: number, language: Language = DEFAULT_CHAT_LANGUAGE, options?: { cancelHint?: boolean }): string {
   const lines = output.split('\n').filter(line => line.trim());
   const lastLines = lines.slice(-MAX_OUTPUT_LINES);
 
@@ -623,6 +637,9 @@ function formatProgressMessage(output: string, elapsedSeconds: number, language:
 
   let content = `${tChat(language, 'progress.processing')}\n`;
   content += `⏱️ ${elapsedLabel}\n`;
+  if (options?.cancelHint) {
+    content += `${tChat(language, 'progress.cancelHint')}\n`;
+  }
 
   if (lastLines.length > 0) {
     content += `\`\`\`\n`;

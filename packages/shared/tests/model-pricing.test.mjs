@@ -13,6 +13,7 @@ import {
   resolveDevinModelPrice,
   estimateCostUsd,
   resolveMessageCost,
+  detectDevinModelMismatch,
 } from '../dist/model-pricing.js';
 
 // --- 二重管理防止: description の $a/$b/$c per MTok 表記と DEVIN_MODEL_PRICING の数値一致 ---
@@ -194,4 +195,41 @@ test('resolveMessageCost: durationMs のみ（usage 無し）の devin データ
   const result = resolveMessageCost(usageData);
   assert.equal(result.source, 'unknown');
   assert.equal(result.usd, null);
+});
+
+// --- detectDevinModelMismatch（2026-10-02 実機事故対策）---
+
+test('detectDevinModelMismatch: 完全一致 → false', () => {
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', 'claude-opus-5.5'), false);
+});
+
+test('detectDevinModelMismatch: 推論量サフィックス違いのみ → false（正規化後は一致）', () => {
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', 'claude-opus-5-5-high'), false);
+});
+
+test('detectDevinModelMismatch: 実機事故の再現ケース（opus5.5 要求 → swe-2 実測）→ true', () => {
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', 'swe-2-high'), true);
+});
+
+test('detectDevinModelMismatch: -fast の有無が違う → true（単価が別のため不一致扱い）', () => {
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', 'claude-opus-5-5-fast'), true);
+});
+
+test('detectDevinModelMismatch: 追従エイリアス（opus 等）を要求した場合は判定対象外 → false', () => {
+  assert.equal(detectDevinModelMismatch('opus', 'claude-opus-5-5-high'), false);
+  assert.equal(detectDevinModelMismatch('opus', 'swe-2-high'), false);
+});
+
+test('detectDevinModelMismatch: adaptive を要求した場合は判定対象外 → false', () => {
+  assert.equal(detectDevinModelMismatch('adaptive', 'swe-2-high'), false);
+});
+
+test('detectDevinModelMismatch: 要求モデル未指定（undefined/null）→ 判定対象外 → false', () => {
+  assert.equal(detectDevinModelMismatch(undefined, 'swe-2-high'), false);
+  assert.equal(detectDevinModelMismatch(null, 'swe-2-high'), false);
+});
+
+test('detectDevinModelMismatch: 実モデル取得不可（undefined/null）→ 判定対象外 → false', () => {
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', undefined), false);
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', null), false);
 });

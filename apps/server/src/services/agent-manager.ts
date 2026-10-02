@@ -44,6 +44,7 @@ import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { buildToolApprovalPromptPayload, type ToolApprovalPromptPayloadWithSession } from './tool-approval-payload.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
+import { pickAvailableAiTool } from './ai-tool-availability.js';
 import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
@@ -1190,10 +1191,24 @@ async function handleSessionAiTool(payload: { machineId: string; sessionId: stri
 
   // Update session in DB
   try {
-    await prisma.session.update({
+    const session = await prisma.session.update({
       where: { id: sessionId },
-      data: { aiTool }
+      data: { aiTool },
+      select: { projectId: true, project: { select: { defaultAi: true } } },
     });
+    // 2026-10-02 修正: このメッセージは Agent が要求ツールを未インストールの別ツールへ
+    // 無断で差し替えた場合にのみ送られてくる。Project.defaultAi を揃えておかないと、
+    // 次に作る新規スレッドでも同じ不一致（サーバーは要求ツール用のモデル設定を解決し続け、
+    // 実際に動くツールへモデル未指定のまま渡る）が再発する。
+    // `a` コマンド（handleAiToolSelect, command-handler.ts）と同じ「実態に合わせる」方針。
+    if (session.project.defaultAi !== aiTool) {
+      await prisma.project.update({
+        where: { id: session.projectId },
+        data: { defaultAi: aiTool },
+      }).catch((err) => {
+        console.error('⚠️ Could not update project.defaultAi from session aiTool report:', err);
+      });
+    }
   } catch (err) {
     console.error(`⚠️ Could not update session AI tool:`, err);
   }
@@ -1371,18 +1386,34 @@ export async function sendPromptToAgent(
   // これが無いと model 解決がツール判定できず常に claude 用キーを読んでしまう（#306 時点の潜在バグ）。
   let terminalMode = false;
   let resolvedAiTool: AiTool = aiTool ?? 'claude';
+  let sessionAiToolForFallback: AiTool | undefined;
+  let projectDefaultAiForFallback: AiTool | undefined;
   try {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { aiTool: true, project: { select: { terminalMode: true } } },
+      select: { aiTool: true, project: { select: { terminalMode: true, defaultAi: true } } },
     });
     terminalMode = !!session?.project?.terminalMode;
     if (!aiTool && session?.aiTool) {
       resolvedAiTool = session.aiTool as AiTool;
     }
+    sessionAiToolForFallback = session?.aiTool as AiTool | undefined;
+    projectDefaultAiForFallback = session?.project?.defaultAi as AiTool | undefined;
   } catch {
     // DB 失敗時は false / デフォルト aiTool のまま（既存挙動を維持）
   }
+
+  // 2026-10-02 実機事故の対策: Agent が resolveEffectiveAiTool() で要求ツールを未インストールの
+  // 別ツールへ無断で差し替える場合（例: Project.defaultAi='claude' だが Agent に Claude Code が無く
+  // Devin へ差し替え）、サーバーは claude 用のモデル設定を解決してしまい、実際に動く devin には
+  // --model 無しで渡ってしまう（Devin 自身の既定モデルに落ち、組織 AI デフォルトが無視される）。
+  // Agent 接続時に申告された availableAiTools でサーバー側も先回りして差し替える。
+  const requestedAiToolBeforeSubstitution = resolvedAiTool;
+  const availableAiTools = getAgentAvailableAiTools(machineId);
+  resolvedAiTool = pickAvailableAiTool(resolvedAiTool, availableAiTools, [sessionAiToolForFallback, projectDefaultAiForFallback]);
+  const substitutedLog = resolvedAiTool !== requestedAiToolBeforeSubstitution
+    ? `, substituted=${requestedAiToolBeforeSubstitution}→${resolvedAiTool}`
+    : '';
 
   // model 未指定時は UserSettings の該当ツールの plan モデルで補完する（#306 → #309 で aiTool 対応）
   // ask / teamexec / MCP 経由の呼び出しは model を渡さないため、
@@ -1395,7 +1426,7 @@ export async function sendPromptToAgent(
       // 設定取得に失敗しても送信は継続（従来どおり undefined = SDK/CLI デフォルト）
     }
   }
-  console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
+  console.log(`🧠 sendPromptToAgent model resolved: ${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'}${substitutedLog})`);
 
   // #332: permissionPolicy 未指定時は 'interactive' に解決して常に明示値を送る
   const resolvedPermissionPolicy = permissionPolicy ?? 'interactive';
@@ -1403,7 +1434,11 @@ export async function sendPromptToAgent(
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
     payload: {
-      sessionId, prompt, userId, files, missedMessages, projectPath, aiTool, terminalMode, forceNewSession,
+      // 2026-10-02 修正: aiTool は差し替え後の resolvedAiTool を送る（生の aiTool 引数のまま送ると、Agent が
+      // 未インストールの要求ツールを別ツールへ無断で差し替えた後も、サーバーは古いツール名を
+      // 送り続けてしまう。Agent 再起動直後の sessionInfoMap 消失時の自動初期化でも resolveEffectiveAiTool()
+      // を経ずに payload.aiTool がそのまま採用されるため、ここで実態に合わせておく必要がある）
+      sessionId, prompt, userId, files, missedMessages, projectPath, aiTool: resolvedAiTool, terminalMode, forceNewSession,
       model: resolvedModel, language: resolvedLanguage, permissionPolicy: resolvedPermissionPolicy,
       agentScopeId: scopeOptions?.agentScopeId,
       resumeSessionId: scopeOptions?.resumeSessionId,
@@ -1996,11 +2031,18 @@ export async function execConversation(
   // `a` で選択した AI ツール（例: Devin CLI）が無視されてしまう。
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
-    select: { aiTool: true, project: { select: { terminalMode: true } } },
+    select: { aiTool: true, project: { select: { terminalMode: true, defaultAi: true } } },
   });
   const terminalMode = !!session?.project?.terminalMode;
   // #309: aiTool 対応の model 解決に使う（未取得時は 'claude' フォールバック、Agent 側の既定と一致させる）
-  const resolvedAiTool = (session?.aiTool as AiTool | undefined) ?? 'claude';
+  const requestedAiTool = (session?.aiTool as AiTool | undefined) ?? 'claude';
+
+  // 2026-10-02 実機事故の対策: sendPromptToAgent と同じく、Agent が resolveEffectiveAiTool() で
+  // 未インストールの要求ツールを別ツールへ差し替える場合に備え、サーバー側も申告された
+  // availableAiTools で先回りして差し替えてから model を解決する（devin への model 未送付事故の対策）。
+  const availableAiTools = getAgentAvailableAiTools(machineId);
+  const resolvedAiTool = pickAvailableAiTool(requestedAiTool, availableAiTools, [session?.project?.defaultAi as AiTool | undefined]);
+  const substitutedLog = resolvedAiTool !== requestedAiTool ? `, substituted=${requestedAiTool}→${resolvedAiTool}` : '';
 
   // model 未指定時は UserSettings の該当ツールの exec モデルで補完する（#306 → #309 で aiTool 対応）
   // ask / teamexec / MCP 経由の呼び出しは model を渡さないため、
@@ -2024,7 +2066,7 @@ export async function execConversation(
     }
   }
 
-  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}, model resolved=${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'})`);
+  console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}, model resolved=${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'}${substitutedLog})`);
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
     payload: {
@@ -2036,7 +2078,11 @@ export async function execConversation(
       disableAsk: machine?.disableAsk ?? false,
       terminalMode,
       model: resolvedModel,
-      aiTool: session?.aiTool as AiTool | undefined,
+      // 2026-10-02 修正: 差し替え後の resolvedAiTool を送る（生の session.aiTool のままだと
+      // Agent が実際に使うツールと食い違ったログ・診断になる。Agent 側は handleConversationExec で
+      // 独自に resolveEffectiveAiTool() を再適用するため実行自体への影響はないが、
+      // model 解決と送信内容を一致させておく）
+      aiTool: resolvedAiTool,
       // #312: w コマンド（ドキュメント更新+commit/push）は Codex の workspace-write サンドボックスだと
       // .git が read-only で commit が失敗するため、Agent 側で sandbox_mode を danger-full-access に切り替える
       isWCommand,

@@ -9,6 +9,8 @@ import {
   buildExecutableResolver,
   buildDependencyProbeBlock,
   buildArtifactFreshnessGate,
+  buildPnpmInstallCommand,
+  AGENT_INSTALL_FILTER,
 } from '../dist/services/update-script.js';
 
 // ---- isVersionLikeOutput ----
@@ -237,4 +239,57 @@ test('buildArtifactFreshnessGate: 判定結果を $artifactsFresh に格納す�
 test('buildArtifactFreshnessGate: 単一パスでも動作する（配列長1）', () => {
   const script = buildArtifactFreshnessGate(['C:\\agent\\dist\\index.js'], 'C:\\log\\update.log');
   assert.ok(script.includes('@("C:\\agent\\dist\\index.js")'));
+});
+
+// ---- buildPnpmInstallCommand / AGENT_INSTALL_FILTER（#cmurfdjgu0b2rjhjhjqdo4zux 案2） ----
+
+test('AGENT_INSTALL_FILTER: linux Agent パッケージ + 依存のみを選択するセレクタ（末尾 ...）', () => {
+  assert.equal(AGENT_INSTALL_FILTER, '@devrelay/agent...');
+  assert.ok(AGENT_INSTALL_FILTER.endsWith('...'));
+});
+
+test('buildPnpmInstallCommand: frozen=true は --filter と --frozen-lockfile の両方を含む完全一致', () => {
+  const cmd = buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: true, filter: '@devrelay/agent...' });
+  assert.equal(cmd, 'pnpm install --filter "@devrelay/agent..." --frozen-lockfile --ignore-scripts');
+});
+
+test('buildPnpmInstallCommand: frozen=false（リトライ段）でも --filter は残る（本件の核心）', () => {
+  const cmd = buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: false, filter: '@devrelay/agent...' });
+  assert.equal(cmd, 'pnpm install --filter "@devrelay/agent..." --ignore-scripts');
+  assert.ok(cmd.includes('--filter'));
+});
+
+test('buildPnpmInstallCommand: frozen=false では --frozen-lockfile を含まない', () => {
+  const cmd = buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: false, filter: '@devrelay/agent...' });
+  assert.ok(!cmd.includes('--frozen-lockfile'));
+});
+
+test('buildPnpmInstallCommand: --ignore-scripts は frozen の真偽に関係なく必ず含む', () => {
+  for (const frozen of [true, false]) {
+    const cmd = buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen, filter: '@devrelay/agent...' });
+    assert.ok(cmd.includes('--ignore-scripts'));
+  }
+});
+
+test('buildPnpmInstallCommand: Windows 形（& $pnpmResolved）はその形で始まり裸の pnpm に戻らない', () => {
+  const cmd = buildPnpmInstallCommand({ pnpmCommand: '& $pnpmResolved', frozen: true, filter: '@devrelay/agent...' });
+  assert.ok(cmd.startsWith('& $pnpmResolved install '));
+});
+
+test('buildPnpmInstallCommand: セレクタは必ずダブルクォートで囲む（PowerShell splat operator 誤解釈回避）', () => {
+  const cmd = buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: true, filter: '@devrelay/agent...' });
+  assert.ok(cmd.includes('--filter "@devrelay/agent..."'));
+  assert.ok(!/--filter @devrelay/.test(cmd));
+});
+
+test('buildPnpmInstallCommand: filter が空文字なら throw', () => {
+  assert.throws(() => buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: true, filter: '' }));
+});
+
+test('buildPnpmInstallCommand: filter がダブルクォートを含むなら throw（コマンドインジェクション防御）', () => {
+  assert.throws(() => buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: true, filter: '@devrelay/agent"...' }));
+});
+
+test('buildPnpmInstallCommand: pnpmCommand が空文字なら throw', () => {
+  assert.throws(() => buildPnpmInstallCommand({ pnpmCommand: '', frozen: true, filter: '@devrelay/agent...' }));
 });
