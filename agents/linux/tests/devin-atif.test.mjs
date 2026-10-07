@@ -288,6 +288,19 @@ test('extractAtifModel: 非オブジェクト・null でも例外を投げない
   assert.deepEqual(extractAtifModel('scalar'), { modelName: null, modelId: null });
 });
 
+// --- 2026-10-08 新設: 古い Devin CLI の「簡易形式 ATIF」の再現（実機確認事例）。
+// steps/final_metrics を一切含まず agent.model_name だけを持つ ATIF を模す。
+// ai-runner.ts の devinAtifDegraded 判定（!modelId && !usage && !!modelName）が true になる
+// 入力であることを、extractAtifModel + extractAtifUsage の組み合わせで固定する。
+
+test('extractAtifModel + extractAtifUsage: 簡易形式 ATIF（古い Devin CLI）は modelName のみ取得でき modelId も usage も null になる', () => {
+  const degraded = { agent: { model_name: 'Claude Opus 5.5' } }; // steps も final_metrics も無い
+  const { modelName, modelId } = extractAtifModel(degraded);
+  assert.equal(modelName, 'Claude Opus 5.5');
+  assert.equal(modelId, null);
+  assert.equal(extractAtifUsage(degraded), null);
+});
+
 // --- extractAtifUsage ---
 
 test('extractAtifUsage: 旧キー名（フォールバック）を Claude 互換キーへマップする', () => {

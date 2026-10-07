@@ -412,6 +412,22 @@ export const chatMessages = {
     ja: '🧠 Devin のモデル: {modelName}（{modelId}）',
   },
 
+  // --- 2026-10-08 新設: modelId が取得できず modelName のみのときは括弧の重複表示
+  // （例: 「Claude Opus 5.5（Claude Opus 5.5）」）を避けるための単独表示版 ---
+  'devin.modelUsedNameOnly': {
+    en: '🧠 Devin model: {modelName}',
+    ja: '🧠 Devin のモデル: {modelName}',
+  },
+
+  // --- 2026-10-08 新設: 古い Devin CLI は ATIF が steps/final_metrics を含まない簡易形式しか
+  // 出力しないことが実機で確認された（agent.model_name のみ取得でき、生成モデル ID もトークン
+  // 使用量も取れない）。この状態を検知したら「devin update してください」と1回だけ案内する
+  // （#325 静かなフォールバック禁止。これまでこの原因は一度も通知されていなかった） ---
+  'devin.atifDegraded': {
+    en: 'ℹ️ This machine\'s Devin CLI produced a reduced export (no step details or token metrics), so token usage and cost cannot be shown for this turn. Please run `devin update` on this machine.',
+    ja: 'ℹ️ この端末の Devin CLI の出力が簡易形式でした（ステップ詳細・トークン集計なし）。このターンのトークン使用量とコストは表示できません。この端末で `devin update` を実行してください。',
+  },
+
   // --- 欠陥1対策（プランモード「無言で途中終了」検知）: ATIF の最後のステップがツール呼び出しで
   // 終わっている（＝そのあと AI のテキスト応答が無い）場合、黙ったまま終わらせず理由を明示する
   // （#325 静かなフォールバック禁止）。Devin の非対話 deny は拒否テキストを一切出さず exit 0 で

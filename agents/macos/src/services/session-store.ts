@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, unlink } from 'fs/promises';
+import { readFile, writeFile, mkdir, unlink, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { resolveScopeDir } from './scope-dir.js';
@@ -95,6 +95,15 @@ export async function clearClaudeSessionId(projectPath: string, agentScopeId?: s
 // Devin セッション ID 管理
 // -----------------------------------------------------------------------------
 
+/**
+ * ログ表示用にスコープ識別子を整形する（`agentScopeId` 未指定 = 対話経路の従来スコープ）。
+ * Devin のスレッド跨ぎ文脈汚染サイクル: load/save の scope が一致しているかを agent.log 上で
+ * 突き合わせられるようにするための表示専用ヘルパー。
+ */
+function scopeLabel(agentScopeId?: string): string {
+  return agentScopeId ?? 'default';
+}
+
 function getDevinSessionPath(projectPath: string, agentScopeId?: string): string {
   return join(resolveScopeDir(projectPath, agentScopeId), DEVIN_SESSION_FILE);
 }
@@ -107,7 +116,7 @@ export async function loadDevinSessionId(projectPath: string, agentScopeId?: str
     const content = await readFile(filePath, 'utf-8');
     const sessionId = content.trim();
     if (sessionId) {
-      console.log(`📋 Loaded Devin session ID: ${sessionId}`);
+      console.log(`📋 Loaded Devin session ID: ${sessionId} (scope: ${scopeLabel(agentScopeId)})`);
       return sessionId;
     }
     return null;
@@ -121,14 +130,58 @@ export async function saveDevinSessionId(projectPath: string, sessionId: string,
   try {
     if (!existsSync(dirPath)) await mkdir(dirPath, { recursive: true });
     await writeFile(filePath, sessionId, 'utf-8');
-    console.log(`💾 Saved Devin session ID: ${sessionId}`);
+    console.log(`💾 Saved Devin session ID: ${sessionId} (scope: ${scopeLabel(agentScopeId)})`);
   } catch (err) { console.error(`❌ Could not save Devin session ID:`, (err as Error).message); }
 }
 
 /** Devin セッション ID をクリア */
 export async function clearDevinSessionId(projectPath: string, agentScopeId?: string): Promise<void> {
   const filePath = getDevinSessionPath(projectPath, agentScopeId);
-  try { if (existsSync(filePath)) { await unlink(filePath); console.log(`🗑️ Cleared Devin session ID`); } } catch {}
+  try { if (existsSync(filePath)) { await unlink(filePath); console.log(`🗑️ Cleared Devin session ID (scope: ${scopeLabel(agentScopeId)})`); } } catch {}
+}
+
+/**
+ * Devin のスレッド跨ぎ文脈汚染サイクル: `projectPath` 配下の全スコープ（default scope +
+ * 全 `agentScopeId` スコープ）に保存済みの Devin セッション ID を走査し、
+ * `セッション ID → スコープキー`（`'default'` または `agentScopeId`）の対応を返す。
+ * `devin list` から新たに採用しようとしている ID が既に別スレッドのものであることを
+ * 検出する専用の read-only ヘルパー（`ai-runner.ts` の `pickDevinSessionId()` から使う）。
+ * @param projectPath プロジェクトのルートパス
+ * @returns 発見した Devin セッション ID → スコープキーの Map。走査自体は best-effort で
+ *   例外を投げない（読めないスコープ・ディレクトリが無い等はすべて無視して空 Map 側に倒す）
+ */
+export async function listDevinSessionOwners(projectPath: string): Promise<Map<string, string>> {
+  const owners = new Map<string, string>();
+
+  const readOwner = async (filePath: string, scopeKey: string): Promise<void> => {
+    try {
+      if (!existsSync(filePath)) return;
+      const id = (await readFile(filePath, 'utf-8')).trim();
+      if (id && !owners.has(id)) owners.set(id, scopeKey);
+    } catch {
+      // best-effort: 読めないスコープは無視する
+    }
+  };
+
+  // default scope（agentScopeId 未指定の対話経路／レガシースレッド）
+  await readOwner(getDevinSessionPath(projectPath), 'default');
+
+  // スコープ付き（`.devrelay/sessions/<agentScopeId>/devin-session-id`）。
+  // ディレクトリ名 'sessions' は scope-dir.ts の SCOPED_SESSIONS_DIR と一致させる必要がある。
+  const scopedRoot = join(projectPath, '.devrelay', 'sessions');
+  try {
+    if (existsSync(scopedRoot)) {
+      const scopeDirs = await readdir(scopedRoot, { withFileTypes: true });
+      for (const entry of scopeDirs) {
+        if (!entry.isDirectory()) continue;
+        await readOwner(join(scopedRoot, entry.name, DEVIN_SESSION_FILE), entry.name);
+      }
+    }
+  } catch {
+    // best-effort: ディレクトリが読めない場合は無視する
+  }
+
+  return owners;
 }
 
 /**
@@ -151,9 +204,13 @@ export async function loadDevinModel(projectPath: string, agentScopeId?: string)
 
 /**
  * 今回の Devin ターンで実際に使用されたモデルを保存する。
- * 2026-10-02 修正: 「要求したモデル」ではなく ATIF で実測できた実際のモデル ID を渡すこと
+ * 2026-10-02 修正: 「要求したモデル」ではなく ATIF で実測できた実際のモデルを渡すこと
  * （要求値を保存すると、Devin が黙って別モデルへ振り替えた場合に誤判定が永久に固定される事故が
  * あったため）。実測できなかった場合は呼び出さない（前回までの実測値を上書きしない）。
+ * 2026-10-08 訂正: 「実際のモデル ID」と書いていたが、ATIF は機械可読 slug の代わりに
+ * 人間可読の表示名（`agent.model_name`、例: `Claude Opus 5.5`）しか返せないことがある
+ * （古い Devin CLI 実機で確認）。ここに渡す値は slug でも表示名でもよい — 比較は常に
+ * 読み出し側（`normalizeDevinModelId()`）で正規化してから行う。
  */
 export async function saveDevinModel(projectPath: string, model: string, agentScopeId?: string): Promise<void> {
   const dirPath = resolveScopeDir(projectPath, agentScopeId);

@@ -14,6 +14,7 @@ import {
   estimateCostUsd,
   resolveMessageCost,
   detectDevinModelMismatch,
+  DEVIN_MODEL_TRACKING_ALIASES,
 } from '../dist/model-pricing.js';
 
 // --- 二重管理防止: description の $a/$b/$c per MTok 表記と DEVIN_MODEL_PRICING の数値一致 ---
@@ -70,7 +71,9 @@ test('normalizeDevinModelId: DB 実測キーを正しく正規化する', () => 
     ['gpt-5-6-sol-low', 'gpt-5.6-sol'],
     ['gpt-6-luna-high', 'gpt-6-luna'],
     ['swe-1-7-lightning', 'swe-1.7'],
-    ['MODEL_PRIVATE_11', 'MODEL_PRIVATE_11'],
+    // 2026-10-08 修正: 小文字化を無条件で行うようにしたため、大文字を含む未知モデルも
+    // 小文字化される（意図的な仕様変更。resolveDevinModelPrice が undefined を返すことに変わりはない）。
+    ['MODEL_PRIVATE_11', 'model_private_11'],
   ];
   for (const [raw, expectedId] of cases) {
     const { id } = normalizeDevinModelId(raw);
@@ -232,4 +235,58 @@ test('detectDevinModelMismatch: 要求モデル未指定（undefined/null）→ 
 test('detectDevinModelMismatch: 実モデル取得不可（undefined/null）→ 判定対象外 → false', () => {
   assert.equal(detectDevinModelMismatch('claude-opus-5.5', undefined), false);
   assert.equal(detectDevinModelMismatch('claude-opus-5.5', null), false);
+});
+
+// --- 2026-10-08 修正: ATIF が machine slug の代わりに人間可読の表示名（agent.model_name）
+// しか返さないケース（古い Devin CLI の実機確認事例）。normalizeDevinModelId() の
+// 小文字化 + 空白→ハイフン変換がカタログの非エイリアスモデル全件で正しく効くことを、
+// マスタ（AI_MODEL_CATALOG.devin）を直接走査して固定する（手書きケースより強い保証：
+// 将来 slug 化しない表示名を持つモデルが追加されたらこのテストがビルドで落ちる）。
+
+test('normalizeDevinModelId: AI_MODEL_CATALOG.devin の非エイリアス全件で 表示名 → id の slug化が成立する', () => {
+  for (const m of AI_MODEL_CATALOG.devin) {
+    if (DEVIN_MODEL_TRACKING_ALIASES.has(m.id)) continue; // エイリアス系は日本語名のため対象外
+    const { id } = normalizeDevinModelId(m.name);
+    assert.equal(id, m.id, `normalizeDevinModelId(${JSON.stringify(m.name)}) → ${id}、期待値 ${m.id}`);
+  }
+});
+
+test('detectDevinModelMismatch: 表示名 vs id（今回報告されたバグ）→ false', () => {
+  // スクショで報告された実例: 「claude-opus-5.5 を要求したのに Claude Opus 5.5 で実行された」
+  // という誤報が出ていた。正規化後は同一モデルのため false が正しい。
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', 'Claude Opus 5.5'), false);
+});
+
+test('detectDevinModelMismatch: 空白を含まない表示名（SWE-2 / GPT-5.3-Codex）でも誤報しない → false', () => {
+  // 「空白があるときだけ小文字化する」という実装だとこの2件だけ正規化漏れが残るため、
+  // 無条件の小文字化が効いていることをこのケースで固定する。
+  assert.equal(detectDevinModelMismatch('swe-2', 'SWE-2'), false);
+  assert.equal(detectDevinModelMismatch('gpt-5.3-codex', 'GPT-5.3-Codex'), false);
+});
+
+test('detectDevinModelMismatch: 表示名同士でも本物の不一致は検知し続ける → true', () => {
+  assert.equal(detectDevinModelMismatch('claude-opus-5.5', 'SWE-2'), true);
+  assert.equal(detectDevinModelMismatch('claude-opus-5', 'Claude Opus 5.5'), true);
+});
+
+test('detectDevinModelMismatch: 既知の限界 — 表示名のみのターンは -fast の有無を判別できず誤検知する', () => {
+  // ATIF が表示名しか返さないターンでは `-fast` の痕跡が消えるため、要求が -fast 版でも
+  // 不一致として誤検知し続ける（許容する既知の限界。detectDevinModelMismatch() の JSDoc 参照）。
+  assert.equal(detectDevinModelMismatch('claude-opus-5-5-fast', 'Claude Opus 5.5'), true);
+});
+
+test('resolveDevinModelPrice: 表示名からも単価解決できる（遡及回復: 既存 DB 行のコスト表示が直る）', () => {
+  assert.deepEqual(resolveDevinModelPrice('Claude Opus 5.5'), { input: 4, cacheRead: 0.2, output: 20 });
+  assert.equal(resolveDevinModelPrice('SWE-2').free, true);
+});
+
+test('resolveMessageCost: 表示名で保存された既存 Devin 行もコスト推定が遡及的に復活する', () => {
+  const usageData = {
+    model: 'Claude Opus 5.5',
+    tool: 'devin',
+    usage: { input_tokens: 40820, output_tokens: 1097, cache_read_input_tokens: 24885, cache_creation_input_tokens: 0 },
+  };
+  const result = resolveMessageCost(usageData);
+  assert.equal(result.source, 'estimate');
+  assert.ok(result.usd > 0);
 });

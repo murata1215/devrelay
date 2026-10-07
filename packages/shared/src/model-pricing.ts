@@ -85,10 +85,19 @@ const DIGIT_DASH_DIGIT_RE = /(\d)-(\d)(?=-|$)/g;
  * DB 実測（15種）で確認された Devin の実際の `usageData.model` 表記をカタログ照合用に正規化する。
  * 例: `claude-sonnet-5-medium` → `claude-sonnet-5`、`gpt-5-6-luna-medium` → `gpt-5.6-luna`、
  * `claude-opus-4-6[1m]` → `claude-opus-4.6`（カタログに無いため結果的に単価不明のまま）。
- * @param raw ATIF 由来の生のモデル ID 文字列
+ *
+ * 【2026-10-08 修正】ATIF は `steps[].extra.generation_model`（機械可読 slug、例:
+ * `claude-opus-5-5-high`）の代わりに `agent.model_name`（人間可読表示名、例: `Claude Opus 5.5`）
+ * しか返さないことがある（実機確認: 古い Devin CLI は ATIF 自体が `steps`/`final_metrics` を
+ * 含まない簡易形式を出力する）。カタログの非エイリアス全 16 件で
+ * `name.toLowerCase().replace(/\s+/g, '-') === id` が成立する（`model-catalog.test.mjs` が固定）
+ * ため、小文字化 + 空白→ハイフン変換を**無条件で**行うことで両表記を同一 ID へ正規化する。
+ * `SWE-2` / `GPT-5.3-Codex` のように空白を含まない表示名もあるため、変換を空白の有無で
+ * 条件分岐してはいけない（条件分岐するとこの 2 件だけ正規化漏れが残る）。
+ * @param raw ATIF 由来の生のモデル ID 文字列（slug または表示名）
  */
 export function normalizeDevinModelId(raw: string): NormalizedDevinModelId {
-  let id = typeof raw === 'string' ? raw.trim() : '';
+  let id = typeof raw === 'string' ? raw.trim().toLowerCase().replace(/\s+/g, '-') : '';
   let longContext = false;
   let fast = false;
 
@@ -137,8 +146,11 @@ export function resolveDevinModelPrice(rawModelId: string | null | undefined): M
  * CLI バージョンによって無警告で解決先が変わる仕様（rules/project.md 参照）であり、
  * 要求モデルと実モデルが一致しなくて当然のため比較対象から除外する。
  * `adaptive` も品質/コストを動的選択する専用モデルのため同様に除外する。
+ *
+ * `export` している理由: `model-pricing.test.mjs` がカタログ駆動の正規化テスト
+ * （`AI_MODEL_CATALOG.devin` を走査してエイリアスだけ除外）でこの Set を直接参照するため。
  */
-const DEVIN_MODEL_TRACKING_ALIASES = new Set(['adaptive', 'opus', 'sonnet', 'haiku', 'gpt', 'codex', 'gemini', 'swe']);
+export const DEVIN_MODEL_TRACKING_ALIASES = new Set(['adaptive', 'opus', 'sonnet', 'haiku', 'gpt', 'codex', 'gemini', 'swe']);
 
 /**
  * `--model` で要求した Devin モデルと、ターン終了後に ATIF から実測できた実際のモデルが
@@ -155,6 +167,12 @@ const DEVIN_MODEL_TRACKING_ALIASES = new Set(['adaptive', 'opus', 'sonnet', 'hai
  *   （静かなフォールバック禁止の原則上「不明」と「不一致」は意味が異なるため、不明を不一致として
  *   誤報しない）。
  * - `-fast` の有無が違う場合も不一致として扱う（単価が別のため実質別モデル）。
+ *
+ * 【既知の限界】ATIF が `agent.model_name`（表示名）しか返さないターンでは、要求モデルが
+ * `-fast` 版（例: `claude-opus-5.5-fast`）だったとしても表示名に `-fast` の痕跡が無いため
+ * 判別できず、`fast` の有無不一致として誤検知し続ける（`model-pricing.test.mjs` に許容する
+ * 既知の誤検知として固定済み）。根治するには実測 baseline に「表示名由来か slug 由来か」の
+ * provenance を保存する必要があり、現状は未対応。
  *
  * @param requestedModel Agent が devin に `--model` で渡した値（渡さなかった場合は undefined/null）
  * @param actualModel ATIF（`devin --export`）から実測できたモデル ID（取得できなければ undefined/null）

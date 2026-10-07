@@ -1,4 +1,5 @@
-import { spawn, ChildProcess, execSync } from 'child_process';
+import { spawn, ChildProcess, execSync, exec as execCb } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -13,7 +14,8 @@ import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from './devin-diagnostics.js';
 import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, extractRejectionEvidence, sliceStepsFromOffset, type AtifStepSummary } from './devin-atif.js';
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
-import { saveClaudeSessionId, clearClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId } from './session-store.js';
+import { parseDevinSessionList, pickDevinSessionId, type DevinSessionEntry } from './devin-session-pick.js';
+import { saveClaudeSessionId, clearClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId, listDevinSessionOwners } from './session-store.js';
 import { getServerSkipPermissions, reportClaudeAuthExpiredFromRuntime, reportClaudeAuthOkFromRuntime } from './connection.js';
 import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, checkWallClock } from './sdk-loop-guard.js';
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
@@ -94,10 +96,53 @@ const devinModelUnsupportedWarnedSessions = new Set<string>();
 // Project.defaultAi と Agent の実インストール状況が食い違う機体で、サーバーが要求ツール用の
 // モデル設定を解決してしまい devin へモデル未指定のまま渡る事故があったため新設。
 const devinModelNotSpecifiedWarnedSessions = new Set<string>();
+// 2026-10-08 新設: 古い Devin CLI は ATIF（--export）が steps/final_metrics を含まない
+// 簡易形式しか出力しないことが実機で確認された（agent.model_name のみ取得でき、生成モデル ID も
+// トークン使用量も取れない）。この状態が続くとトークン使用量・コスト表示が静かに欠落し続け、
+// かつ表示名しか無いため resume 判定/mismatch 判定も不安定になる。devinModelUnsupportedWarnedSessions
+// と同じ流儀（セッション単位 Set、常駐 Agent でプロセス寿命 1 回だと実質無警告になった教訓）で、
+// 「devin update してください」をセッション単位で 1 回だけ案内する。
+const devinAtifDegradedWarnedSessions = new Set<string>();
 // Devin モデル選択サイクル・サイクル B（変更4）: ATIF-v1.7 はターン終了時に一括書き出しされるため、
 // `maxSteps` コストガード（ライブポーラー経由）は原理的に機能しない（正直な但し書き、プラン参照）。
 // devin 起動時（`devinMaxSteps > 0`）に1回だけ console 警告を出す（プロセス寿命中1回、毎ターン繰り返さない）。
 let devinMaxStepsWarned = false;
+
+// Devin のスレッド跨ぎ文脈汚染サイクル: `devin list --format json` を非同期で呼ぶための
+// promisify ラッパー。旧実装の execSync（同期・最大10秒ブロック）を close ハンドラから排除し、
+// spawn 直前のスナップショット取得（`pickDevinSessionId()` の `beforeIds`）にも使う。
+const execAsync = promisify(execCb);
+
+/**
+ * `devin list --format json` を実行し、`projectPath` に属するセッション一覧を取得する。
+ * Devin のスレッド跨ぎ文脈汚染サイクル: 旧実装の execSync 呼び出しを非同期化し、
+ * spawn 前後のスナップショット比較（`pickDevinSessionId()`）の両方から使う共通ヘルパー。
+ * @param command devin コマンド
+ * @param projectPath 絞り込み対象のプロジェクトパス
+ * @param timeoutMs タイムアウト（ms）
+ * @returns 正規化済みエントリ配列。取得・パースに失敗した場合は null（例外を投げない）
+ */
+async function fetchDevinSessionEntries(command: string, projectPath: string, timeoutMs: number): Promise<DevinSessionEntry[] | null> {
+  try {
+    const { stdout } = await execAsync(`${command} list --format json`, {
+      cwd: projectPath, encoding: 'utf-8', timeout: timeoutMs, windowsHide: true,
+    });
+    return parseDevinSessionList(stdout, projectPath);
+  } catch (err) {
+    console.warn(`[devin] Could not list sessions:`, (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Devin のスレッド跨ぎ文脈汚染サイクル: キルスイッチ。`1` を指定すると、本サイクルで追加した
+ * スナップショット差分・所有権ガード・resume スキップを一切使わず、旧実装（`devin list` の
+ * 「cwd 一致・last_activity_at 最新」1 件を無条件採用）に戻す。新方式に未知の不具合が
+ * 見つかった場合の緊急ロールバック用（既定は新方式、未設定 = `'1'` 以外なら新方式）。
+ */
+function isDevinSessionPickLegacy(): boolean {
+  return process.env.DEVRELAY_DEVIN_SESSION_PICK_LEGACY === '1';
+}
 
 // サイクル SDK-1 コミット①: resolveSystemClaude() の実体は claude-path.ts に移設済み（linux と byte-identical）。
 // claude-auth.ts が引き続き `from './ai-runner.js'` で import できるよう再エクスポートする。
@@ -1589,6 +1634,10 @@ export async function sendPromptToAi(
   const devinTurnStartedAt = Date.now();
   // Devin: -r で resume したセッション ID を関数スコープで記録（close ハンドラから参照して空振り検出に使う）
   let devinResumedSessionId: string | null = null;
+  // Devin のスレッド跨ぎ文脈汚染サイクル: 新規セッションのターンのみ、spawn 直前に
+  // 当該プロジェクトのセッション ID 一覧をスナップショットしておく（close 後との差分で
+  // 「今回新しく現れた ID」を特定するため）。resume ターンでは null のまま使わない。
+  let devinSessionIdsBeforeSpawn: string[] | null = null;
   // このサイクル: 今回のターンで使った Devin モデルを関数スコープで記録（close ハンドラから
   // 参照してセッション保存時にモデルも一緒に保存するため。devinResumedSessionId と同じ理由）
   let devinCurrentModelForResume = '';
@@ -1626,6 +1675,9 @@ export async function sendPromptToAi(
   // close ハンドラから参照できず TS2304 になる、サイクル A の S0 で踏んだ落とし穴）。
   let devinAtifModelName: string | null = null;
   let devinAtifModelId: string | null = null;
+  // 2026-10-08 新設: ATIF が steps/final_metrics を欠いた簡易形式だったか（= modelId も usage も
+  // 取れず modelName のみ取れた状態）。devinAtifModelName と同じ理由で関数スコープの let。
+  let devinAtifDegraded = false;
   // 欠陥1対策（プランモード無言終了検知）: ATIF の最後のステップがツール呼び出しで終わっている
   // （＝そのあと AI のテキスト応答が無い）かどうか。devinCurrentModelForResume と同じ理由で
   // 関数スコープの let（block 内 const にすると close ハンドラから参照できず TS2304 になる）。
@@ -1777,7 +1829,7 @@ export async function sendPromptToAi(
       if (!detectDevinModelMismatch(devinCurrentModelForResume, devinSavedModel)) {
         args.push('-r', devinSessionId);
         devinResumedSessionId = devinSessionId;
-        console.log(`🔄 Resuming Devin session: ${devinSessionId}`);
+        console.log(`🔄 Resuming Devin session: ${devinSessionId} (scope: ${options.agentScopeId ?? 'default'})`);
       } else {
         console.log(`[devin] Model changed (${devinSavedModel || '(default)'} → ${devinCurrentModelForResume || '(default)'}), starting a new session instead of resuming ${devinSessionId}`);
         onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelChangedNewSession', { previousModel: devinSavedModel || '(default)', newModel: devinCurrentModelForResume || '(default)' })}\n`, false);
@@ -1875,6 +1927,18 @@ export async function sendPromptToAi(
     const devinEnvPath = devinDir === '.'
       ? (process.env.PATH ?? devinDir)
       : (process.env.PATH ? `${devinDir}${devinPathSep}${process.env.PATH}` : devinDir);
+
+    // Devin のスレッド跨ぎ文脈汚染サイクル: resume ターンは今回のセッション ID が既知のため
+    // list を見る必要がない（pickDevinSessionId() の 'resumed' 分岐）。新規セッションのターンのみ、
+    // spawn 直前に当該プロジェクトのセッション ID 一覧をスナップショットし、close 後の結果との
+    // 差分で「今回新しく現れた ID」を特定する（旧実装は「cwd 一致・last_activity_at 最新」の
+    // 1 件を無条件採用しており、並行実行や ISO8601 タイムスタンプで他スレッドの ID を誤って
+    // 拾っていた）。スナップショット取得自体に失敗した場合は null のまま close 側の
+    // タイムスタンプ最新フォールバックに委ねる。
+    if (!devinResumedSessionId && !isDevinSessionPickLegacy()) {
+      const beforeEntries = await fetchDevinSessionEntries(command, projectPath, 5000);
+      devinSessionIdsBeforeSpawn = beforeEntries ? beforeEntries.map((e) => e.id) : null;
+    }
 
     proc = spawn(command, args, {
       cwd: projectPath,
@@ -2459,7 +2523,12 @@ export async function sendPromptToAi(
       }, killTimings.exitFlushGraceMs);
     });
 
-    proc.on('close', (code, signal) => {
+    proc.on('close', async (code, signal) => {
+      // Devin のスレッド跨ぎ文脈汚染サイクル: devin セッション ID の確定ロジックを非同期化した
+      // （旧 execSync → fetchDevinSessionEntries/listDevinSessionOwners の await）ため、このハンドラ
+      // 自体を async にした。EventEmitter は listener の戻り値を待たないため、他の 'close' listener
+      // や外側の Promise executor には影響しない（`resolve(result)` は本ハンドラ内の後続処理として
+      // そのまま await の後に実行される）。
       // 今サイクル: close は「自然発火」「stdio destroy 後の発火」「watchdog による合成」の
       // 3 経路から来る。385 行の本体はリファクタせず、ここで 1 回だけに絞る。
       if (turnEnded) {
@@ -2489,6 +2558,9 @@ export async function sendPromptToAi(
             devinStepSummary = digest.summaryText;
             devinAtifModelName = digest.modelName;
             devinAtifModelId = digest.modelId;
+            // 2026-10-08 新設: modelId（steps[].extra.generation_model）も usage（final_metrics）も
+            // 取れず、modelName（agent.model_name）だけ取れている状態 = 古い Devin CLI の簡易形式 ATIF。
+            devinAtifDegraded = !digest.modelId && !digest.usage && !!digest.modelName;
             devinAtifEndedWithoutAnswer = digest.endedWithoutAnswer;
             devinAtifRejectionEvidence = digest.rejectionEvidence;
             devinAtifBlockedCommands = digest.blockedCommands;
@@ -2578,36 +2650,79 @@ export async function sendPromptToAi(
         }
         // #347: 旧名（--agent-config 時代）の残骸も掃除する。次サイクル以降に削除してよい。
         try { fs.unlinkSync(path.join(os.tmpdir(), `devrelay-devin-agent-config-${sessionId}.json`)); } catch {}
+        // Devin のスレッド跨ぎ文脈汚染サイクル: 旧実装は「cwd 一致・last_activity_at 最新」の
+        // 1 件を無条件にこのスレッドの scope dir へ保存しており、並行実行や last_activity_at の
+        // 型（ISO8601 文字列だと旧比較器が NaN になりソート無効化）次第で他スレッドの Devin
+        // セッション ID を誤って保存しうる構造的な欠陥があった（実機報告: スレッド切替後に
+        // 前スレッドの文脈を引きずる）。resume したターンは今回のセッション ID が既知のため
+        // list を叩かない。新規セッションのターンのみ、spawn 前のスナップショットとの差分で
+        // 「今回新しく現れた ID」を特定し、差分が取れない/曖昧な場合はタイムスタンプ最新へ
+        // フォールバックするか、採用を見送る（`pickDevinSessionId()`、純関数本体は
+        // devin-session-pick.ts）。
         try {
-          // 今サイクル: kill が効かず強制確定したターンでは execSync（同期・最大10秒ブロック）を
-          // イベントループ上で走らせない（agent 全体が固まる事故を避ける）。
+          // 今サイクル: kill が効かず強制確定したターンでは execSync 相当の外部プロセス呼び出しを
+          // イベントループ上で待たせない（agent 全体が固まる事故を避ける）。
           if (!devinOutputEmpty && !forcedFinalize) {
-          const listOutput = execSync(`${command} list --format json`, {
-            cwd: projectPath, encoding: 'utf-8', timeout: 10000,
-          });
-          const sessions = JSON.parse(listOutput);
-          const normalizedPath = projectPath.replace(/\\/g, '/').toLowerCase();
-          const latest = sessions
-            .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
-            .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
-          if (latest?.id) {
-            saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
-            // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
-            // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
-            // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
-            // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
-            // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
-            // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
-            const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
-            if (devinActualModelForSave) {
-              saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+            if (isDevinSessionPickLegacy()) {
+              // キルスイッチ ON: 新方式に未知の不具合が見つかった場合の緊急ロールバック。
+              // 旧実装どおり「cwd 一致・last_activity_at 最新」1 件を無条件採用する。
+              const listOutput = execSync(`${command} list --format json`, {
+                cwd: projectPath, encoding: 'utf-8', timeout: 10000,
+              });
+              const sessions = JSON.parse(listOutput);
+              const normalizedPath = projectPath.replace(/\\/g, '/').toLowerCase();
+              const latest = sessions
+                .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
+                .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
+              if (latest?.id) {
+                saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
+                const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
+                if (devinActualModelForSave) {
+                  saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                }
+                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
+                saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
+              }
+            } else {
+              const currentScopeKey = options.agentScopeId ?? 'default';
+              // resume ターンは devin list を一切叩かない（pickDevinSessionId() の 'resumed' 分岐が
+              // afterEntries/beforeIds を見ずに即座に確定するため、取得自体が不要）。
+              const afterEntries = devinResumedSessionId ? [] : (await fetchDevinSessionEntries(command, projectPath, 10000)) ?? [];
+              const devinOwners = devinResumedSessionId ? null : await listDevinSessionOwners(projectPath);
+              const pick = pickDevinSessionId({
+                resumedId: devinResumedSessionId,
+                beforeIds: devinSessionIdsBeforeSpawn,
+                afterEntries,
+                ownedByOtherScope: (id) => {
+                  const owner = devinOwners?.get(id);
+                  return !!owner && owner !== currentScopeKey;
+                },
+              });
+              if (pick.id) {
+                saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
+                console.log(`[devin] Session ID decided: ${pick.id} (reason=${pick.reason}, scope=${currentScopeKey})`);
+                // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
+                // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
+                // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
+                // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
+                // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
+                // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
+                const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
+                if (devinActualModelForSave) {
+                  saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                }
+                // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
+                // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
+                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
+                // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
+                saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
+              } else if (pick.reason !== 'none') {
+                // 'ambiguous'/'ownedByOtherScope': 誤った ID を固定化するより未保存のほうが安全。
+                // 次ターンは新規セッションになるが、Devin は会話履歴を常にプロンプトへ注入するため
+                // 文脈自体は維持される（connection.ts の非 Claude 常時履歴注入）。
+                console.warn(`[devin] ⚠️ Skipped saving session ID (reason=${pick.reason}, scope=${currentScopeKey})`);
+              }
             }
-            // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
-            // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-            saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
-            // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
-            saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
-          }
           }
         } catch (err) {
           console.warn(`[devin] Could not retrieve session ID:`, (err as Error).message);
@@ -2860,10 +2975,19 @@ export async function sendPromptToAi(
           if (devinStepSummary) onOutput(devinStepSummary, false);
           // Devin モデル選択サイクル・サイクル B（変更5）: 実モデル名を1行通知（チャット表示）
           if (devinAtifModelName || devinAtifModelId) {
-            onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelUsed', {
-              modelName: devinAtifModelName ?? devinAtifModelId ?? '',
-              modelId: devinAtifModelId ?? devinAtifModelName ?? '',
-            }) + '\n', false);
+            // 2026-10-08 修正: modelId と modelName が両方取れて、かつ異なる場合のみ両方表示する
+            // （推論量付き slug が見える有用なケース）。modelId が無い/同一のときは modelName 単独
+            // で表示し、「Claude Opus 5.5（Claude Opus 5.5）」のような重複表示を避ける。
+            if (devinAtifModelId && devinAtifModelName && devinAtifModelId !== devinAtifModelName) {
+              onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelUsed', {
+                modelName: devinAtifModelName,
+                modelId: devinAtifModelId,
+              }) + '\n', false);
+            } else {
+              onOutput(tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.modelUsedNameOnly', {
+                modelName: devinAtifModelName ?? devinAtifModelId ?? '',
+              }) + '\n', false);
+            }
             // 2026-10-02 新設: #325 静かなフォールバック禁止。要求モデルと ATIF 実測の実モデルが
             // 食い違っていれば通知する（Devin が黙って別モデルへ振り替えた可能性の検知）。
             // 追従エイリアス（opus 等）・adaptive・比較不能（片方不明）は detectDevinModelMismatch() 内で除外済み。
@@ -2873,6 +2997,13 @@ export async function sendPromptToAi(
                 actual: devinAtifModelId ?? devinAtifModelName ?? '',
               })}\n`, false);
             }
+          }
+          // 2026-10-08 新設: #325 静かなフォールバック禁止。古い Devin CLI の ATIF 簡易形式出力を
+          // 検知した場合、セッション単位で 1 回だけ `devin update` を案内する（真因がこれまで一度も
+          // 通知されておらず、利用者が原因不明のまま数日単位で誤った警告に振り回されていた反省）。
+          if (devinAtifDegraded && !devinAtifDegradedWarnedSessions.has(sessionId)) {
+            devinAtifDegradedWarnedSessions.add(sessionId);
+            onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'devin.atifDegraded')}\n`, false);
           }
           // 欠陥1対策: 無言（または前置き1文のみ）のまま終わった場合、
           // 黙ったまま終わらせず理由を明示する（#325 静かなフォールバック禁止）。

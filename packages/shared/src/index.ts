@@ -65,4 +65,5 @@ export {
   type ResolvedMessageCost,
   resolveMessageCost,
   detectDevinModelMismatch,
+  DEVIN_MODEL_TRACKING_ALIASES,
 } from './model-pricing.js';

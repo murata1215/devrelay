@@ -156,6 +156,20 @@ Claude Opus 5 → Claude Opus 5.5、`gpt` が GPT-5.6 Sol → GPT-6 Sol、`gemin
 **対で**載せる方針にした（片方だけだと、自動追従派は単価変動に気づけず、固定派は新モデルに永久に届かない）。
 新モデル追加サイクルでは、既存エイリアスの解決先も併せて再実測し、対になる family slug の記載を更新すること。
 
+**2026-10-08 修正: 古い Devin CLI では ATIF（`devin --export`）が `steps`/`final_metrics` を含まない
+簡易形式しか出力しないことが実機で確認された（`DESKTOP-TR0SE8J/lfuser` 機、2026-09-30〜10-07 の
+68ターン、DB 実測で `usageData.model` が機械可読 slug ではなく `agent.model_name` の表示名
+（例: `Claude Opus 5.5`）のまま保存され、同時に `usageData.usage` も常に欠落していた。`devin update`
+後は両方とも正常化）。** この状態では `extractAtifModel()` の `modelId` が取れず `modelName`
+（表示名）にフォールバックするため、`normalizeDevinModelId()`（`model-pricing.ts`）は
+**小文字化 + 空白→ハイフン変換を無条件で**行い、`AI_MODEL_CATALOG.devin` の非エイリアス全16件で
+成立する `name.toLowerCase().replace(/\s+/g,'-') === id` の恒等式を使って表示名を slug と同一視する
+（`SWE-2`/`GPT-5.3-Codex` のように空白を含まない表示名もあるため、空白の有無で変換を条件分岐しては
+いけない）。`saveDevinModel()` にディスク保存済みの古い表示名 baseline も、この読み出し側正規化だけで
+次ターンから自動的に一致判定されるようになる（書き込み側の変更・手動クリーンアップ不要）。
+この簡易形式 ATIF を検知したら `devin.atifDegraded`（セッション単位で1回）で `devin update` を案内する
+（真因が一度も通知されずユーザーが原因不明のまま数日単位で誤った警告に振り回された反省、#325）。
+
 ---
 
 ## SDK auto-compact ループガードは「進捗」を出力ゼロで判定する（#355）
@@ -359,7 +373,8 @@ Devin for Terminal は Gemini/Codex/Aider と同じ spawn パターンで統合�
 - **出力ゼロ終了の分類（#344）**: 上記の既存分岐（unknownFlag 自動リトライ・exit 0 空応答案内等）に該当しなかった残りのケースは `cli-failure.ts` の `classifyCliFailure()`（外部 import ゼロの純関数、linux/macos/windows で byte-for-byte 同一）で分類する。`commandNotFound`（PATH に無い/ENOENT）→ `ai.cliNotFound`（`u` での再検出を案内）、`emptyNonZero`（原因不明の非 0 終了、workspace trust エラーの場合は上記のとおり専用メッセージ）→ `ai.cliFailed`（exit code + stderr 末尾5行を必ず表示）。シグナル kill 等（`exitCode===null`）は CLI 自体の失敗ではないため従来どおり `(No response from AI)`
 - **`--config` による読み取り専用の再強制（#347）**: `--agent-config`（#346 で廃止確定）の後継として `--config <PATH>` が現行 CLI に存在する（Phase0 実測、devin 3000.6.7）。プラン分岐の優先順位を `devinHasConfig || devinHasAgentConfig` に変更し、`--config` が使える端末では従来どおり `permissions.{allow,deny}` で読み取り専用を実効的に強制する。実測で判明した3つの罠に対応: ①**merge ではなく replace**（渡したファイルの内容のみが有効になる）——生成 JSON を `permissions` のみの最小構成に保ちユーザー config をマージしない既存方針（#56 Step3）で対応済み、②【#364 Phase0.5 で訂正】**devin はファイルを書き換えない**（sha256 不変を実機実測、#347 時点の「devin 自身がファイルを書き換える」という記述は誤りだった）、③【#364 Phase0.5 で訂正】**`shell.setup_complete` はバナー抑止に効いていない**（実測で `Welcome to Devin CLI!` 等の初回起動バナーは `shell.setup_complete:true` を入れても出続けることを確認済み）——実際に効くのは `devin-diagnostics.ts` の `isDevinBannerLine(line)`（trim 後の完全一致/正規表現一致のみで判定する保守的な純関数）による出力フィルタのみで、これが唯一の防御。④【#364 Phase0.5 で訂正】**非対話 deny は無言ではない**——実際には `warning: rejected a tool call that requires confirmation. proceeding without it.`（新パターン、旧パターンは `A tool was rejected by the user`/`rejecting tool ... that requires confirmation`）という警告テキストを出力してから exit 0 する（#347 時点の「拒否テキストを一切出さず完全無音」という前提は誤りだった）。`devinPlanToolRejected`（#274）に3つ目の OR 条件 `devinPlanConfigApplied && code===0` を追加し、`--permission-mode auto` フォールバック（既存の `--agent-config` 非対応時と同レベルの劣化パス）が発火するようにした（この条件自体は誤った前提のもとで追加されたが結果的にフォールバックとして機能している）。`--config`/`--agent-config` どちらも無い端末だけが従来どおり `devin.readonlyUnsupported` の対象になる（文言をこの実態に合わせて更新、キー名・`{detail}` は不変）。一時ファイル名は `devrelay-devin-plan-config-<sessionId>.json` に改名（旧名 `devrelay-devin-agent-config-` の掃除行は1バージョン残置）
 - **PATH 汚染ガード（#344）**: `config.aiTools.devin.command`/`gemini.command` はベース名のみ保存されるため `path.dirname(command)` が `'.'` になり得る（プロジェクトの cwd が PATH の先頭に積まれ、悪意あるリポジトリ内の `git`/`node` を拾う穴）。`dir === '.'` のときは PATH に追加しない
-- **`-r` resume は plan モード時のみ**: Devin の resume は元セッションの permission-mode を保持して CLI の `--permission-mode dangerous` を上書きしない仕様。exec モードでは新規セッションを起動して dangerous を確実に効かせる（#231 で判明）。session continuity は plan 中のみ。plan→exec は元々文脈リセット点なので問題なし
+- **`-r` resume は保存済み permission-mode が今回のターンと一致するときのみ**【訂正】: 旧記載は「resume は plan モード時のみ」としていたが、#368 Phase2a で Devin は常に exec 相当（`--permission-mode dangerous`）で起動するようになったため、この記載は現状と乖離している。実際の判定は `devinSavedPermissionMode === devinTurnPermissionMode`（保存済みモードと今回のモードの一致）のみで、Devin は常に `dangerous` なので通常運用では**毎ターン resume が成立する**（`-r` はモデル変更時のみ新規セッションに切り替わる、`detectDevinModelMismatch()`）。plan→exec の文脈リセットは発生しない
+- **Devin のスレッド跨ぎ文脈汚染の根治（スレッド跨ぎ文脈汚染サイクル）**: 旧実装は毎ターン `devin list --format json` の「cwd 一致・`last_activity_at` 最新」1 件を無条件にそのスレッドの scope dir へ保存していたが、これは構造的な欠陥だった——① `working_directory` 一致のみの絞り込みはプロジェクト全体で、スレッド（`agentScopeId`）を識別できない、②`last_activity_at` が ISO8601 文字列だと旧ソート比較器（`(b||0)-(a||0)`）が NaN になりソート無効化（JSON スキーマは Devin 公式ドキュメント未記載で数値保証なし）、③同一プロジェクトの複数スレッド並行実行で先に close した側が相手の ID を拾う。実機報告（スレッド A で会話後、B に切替えて会話すると A の文脈を引きずる）と整合した。**対策**: `agents/*/src/services/devin-session-pick.ts`（外部 import ゼロの純関数、3 OS byte-for-byte 同一）の `pickDevinSessionId()` で判定を一本化。resume したターンは今回のセッション ID が既知のため `devin list` を一切叩かない（`reason: 'resumed'`）。新規セッションのターンは spawn 直前に当該プロジェクトのセッション ID 一覧をスナップショットし、close 後の結果との差分で「今回新しく現れた ID」を特定する（`reason: 'newlyAppeared'`）。差分が取れない場合のみ従来のタイムスタンプ最新フォールバック（`reason: 'latestFallback'`、比較器は ISO8601 文字列対応に修正済み）、差分が複数件（並行実行等）なら `reason: 'ambiguous'` として保存を見送る。採用候補が既に別スコープ（`session-store.ts` の `listDevinSessionOwners()` で全スコープを走査）に記録済みなら `reason: 'ownedByOtherScope'` として保存を見送る（誤った ID を固定化するより未保存のほうが安全——次ターンは新規セッションになるが、下記の会話履歴注入で文脈自体は維持される）。`devin list` 呼び出しは `execSync`（同期・最大10秒ブロック）から `execFile` 相当の非同期呼び出しへ変更し、`close` ハンドラ自体も async 化した。キルスイッチ `DEVRELAY_DEVIN_SESSION_PICK_LEGACY=1`（Agent 実行環境の環境変数、未設定/`'0'` が既定）で旧実装（無条件最新 1 件採用）に戻せる
 - 会話履歴: 非 Claude ツールでは常にプロンプトに会話履歴を含める（`isClaudeSdk` 判定で Claude は従来通り SDK --resume）。Devin が exec で `-r` を使わなくても、この履歴注入で文脈は維持される
 - PATH: コマンドのディレクトリを自動追加（サービス実行時の PATH 不足を回避）
 - 有効化: Agent 起動時に自動検出（`detectAndUpdateAiTools()`）、または手動設定

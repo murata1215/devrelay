@@ -6,6 +6,51 @@
 
 ## 実装済み機能
 
+### Devin のスレッド跨ぎ文脈汚染（セッション ID 取り違え）の根治 (2026-10-08)
+
+ユーザー報告「セッション管理がおかしい。Devin だけかな？スレッド A で会話中に B へ切替えて
+会話すると A の内容を引きずる」を調査。スレッド分離の仕組み自体（`Session.agentScopeId` →
+scope dir）は正常に動作しており、Claude（SDK の `session_id`）・Codex（`thread.started` の
+`thread_id`）は自分の run が返した ID をそのまま保存するため取り違えが原理的に起きない。
+**Devin だけ「今回のターンのセッション ID」を `devin list --format json` の
+「working_directory 一致・`last_activity_at` 最新」1 件から推測していた**ため、以下の構造的
+欠陥で他スレッドのセッション ID を誤って保存しうる状態だった:
+
+1. フィルタが `working_directory` 一致のみ＝プロジェクト全体で、スレッド（`agentScopeId`）を
+   識別する情報がどこにも無い
+2. `last_activity_at` が ISO8601 文字列だと旧ソート比較器 `(b||0)-(a||0)` が `NaN` になり
+   ソートが実質無効化される（JSON スキーマは Devin 公式ドキュメント未記載で数値保証なし）
+3. 同一プロジェクトの複数スレッドが並行実行すると、先に close した側が相手の ID を拾う
+
+破綻シナリオ: スレッド B の1通目は新規セッション（正常に見える）→終了時に `devin list` から
+A のセッション ID を誤って B の scope dir へ保存→B の2通目で `-r <A の ID>` resume→A の
+会話が丸ごと復元される、という報告どおりの動作を特定した。
+
+- 新規 `agents/{linux,macos,windows}/src/services/devin-session-pick.ts`（外部 import ゼロ、
+  3 OS byte-for-byte 同一の純関数）に判定を一本化。`pickDevinSessionId()`:
+  resume ターンは今回のセッション ID が既知のため `devin list` を一切叩かない
+  （`reason: 'resumed'`）。新規セッションのターンは spawn 直前に取得したスナップショットと
+  close 後の結果の差分で「今回新しく現れた ID」を特定（`reason: 'newlyAppeared'`）。差分が
+  取れない場合のみタイムスタンプ最新フォールバック（`reason: 'latestFallback'`、ISO8601
+  文字列対応に比較器を修正）。差分が複数件なら `reason: 'ambiguous'` として保存を見送る
+- `session-store.ts` に `listDevinSessionOwners()` を新設し、採用候補が既に別スコープに
+  記録済みなら `reason: 'ownedByOtherScope'` として保存を見送る（誤った ID を固定化するより
+  未保存のほうが安全——Devin は会話履歴を常にプロンプトへ注入するため文脈自体は維持される）
+- `ai-runner.ts`: 旧 `execSync`（同期・最大10秒ブロック）を非同期化し、`close` ハンドラ自体も
+  `async` 化。セッション ID の load/save ログに `(scope: ...)` を追記
+- キルスイッチ `DEVRELAY_DEVIN_SESSION_PICK_LEGACY=1`（Agent 実行環境の環境変数）で旧実装に
+  完全に戻せる
+- `rules/project.md` の「`-r` resume は plan モード時のみ」という記載（#368 Phase2a で Devin が
+  常に `dangerous` で起動するようになり現状と乖離していた）を訂正
+
+新規テスト `devin-session-pick.test.mjs`（17ケース、3 OS 同一内容、ISO8601 文字列3件での
+取り違えを再現する回帰ケース含む）。`pnpm build`（shared/agent/agent-macos/agent-windows）
+green、クリーン実行時 linux1066/1066・macos630/630+skip1・windows149/149 green（フルスイート
+内で秒単位タイムスタンプ衝突による既存 flake が散発するが本変更と無関係、windows は変更を
+一時 stash してもflake再現を確認済み）、`devin-session-pick.ts` の sha256sum が3 OS で一致。
+サーバー/WebUI/DB 無変更のため pm2 restart 不要。Devin を使っている機は各機で `u` が必須。
+詳細: [devlog](devlog/2026-10-08_devin_thread_session_bleed.md)
+
 ### Agent 新規インストール / `u` 自己更新の pnpm install を --filter で絞る (2026-10-03)
 
 新規インストール（`install-agent.sh`/`.ps1`）と自己更新（`u`）の `pnpm install` がワークスペース
