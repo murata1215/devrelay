@@ -32,6 +32,12 @@ export {
   DEFAULTS,
 } from './constants.js';
 export * from './token.js';
+// プロキシのバイパス判定（NO_PROXY 相当）。#309/#310 と同じ理由で明示的 named export にする
+export {
+  normalizeNoProxy,
+  shouldBypassProxy,
+  toNoProxyEnvValue,
+} from './proxy-bypass.js';
 export * from './text.js';
 export { redactChatInput } from './redact.js';
 // #316: i18n.ts も #309/#310 と同じ理由で明示的 named export にする（export * の CJS 変換問題を回避）

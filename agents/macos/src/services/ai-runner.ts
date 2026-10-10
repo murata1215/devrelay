@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue } from '@devrelay/shared';
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
@@ -882,6 +882,11 @@ async function sendPromptToAiSdk(
     proxyEnv.HTTPS_PROXY = proxyUrl;
     proxyEnv.http_proxy = proxyUrl;
     proxyEnv.https_proxy = proxyUrl;
+    // noProxy があれば AI CLI 側にも引き渡す（社内 Server は直結、外部 API はプロキシ経由）
+    if (config.proxy.noProxy?.length) {
+      proxyEnv.NO_PROXY = toNoProxyEnvValue(config.proxy.noProxy);
+      proxyEnv.no_proxy = proxyEnv.NO_PROXY;
+    }
   }
 
   // #377: maxTurns は env DEVRELAY_SDK_MAX_TURNS で上書き可能（既定 400、plan/exec 共通）
@@ -1733,6 +1738,11 @@ export async function sendPromptToAi(
     proxyEnv.HTTPS_PROXY = proxyUrl;
     proxyEnv.http_proxy = proxyUrl;
     proxyEnv.https_proxy = proxyUrl;
+    // noProxy があれば AI CLI 側にも引き渡す（社内 Server は直結、外部 API はプロキシ経由）
+    if (config.proxy.noProxy?.length) {
+      proxyEnv.NO_PROXY = toNoProxyEnvValue(config.proxy.noProxy);
+      proxyEnv.no_proxy = proxyEnv.NO_PROXY;
+    }
   }
 
   if (aiTool === 'gemini') {

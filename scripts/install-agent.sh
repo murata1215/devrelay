@@ -460,6 +460,36 @@ else
   PROJECTS_DIRS_YAML="  - $HOME\n  - /opt"
 fi
 
+# --- プロキシのバイパス対象（noProxy）の決定 ---
+# config.yaml に proxy.url を書くと、AI CLI の外向き通信だけでなく **Server への
+# WebSocket 接続もプロキシ経由になる**（agents/*/src/services/connection.ts）。
+# 社内に Server を立てている場合、社内プロキシは社内アドレスへ到達できないのが通常なので、
+# プロキシを指定した途端に Agent が Server に接続できなくなる。
+# サーバーへ直結できるなら Server 宛だけバイパスする。
+# DEVRELAY_NO_PROXY で明示指定も可能（カンマ区切り。NO_PROXY 記法）。
+NO_PROXY_LIST="${DEVRELAY_NO_PROXY:-}"
+if [ -n "$PROXY_URL" ] && [ -z "$NO_PROXY_LIST" ]; then
+  SERVER_HOST=$(echo "$SERVER_URL" | sed -E 's|^[a-zA-Z0-9+.-]+://||; s|/.*$||; s|^.*@||; s|:[0-9]+$||')
+  HEALTH_PROBE_URL="$(echo "$SERVER_URL" | sed -E 's|^wss://|https://|; s|^ws://|http://|; s|/ws/agent$||')/health"
+  if [ -n "$SERVER_HOST" ] && curl -fsS --noproxy '*' --max-time 10 -o /dev/null "$HEALTH_PROBE_URL" 2>/dev/null; then
+    NO_PROXY_LIST="$SERVER_HOST"
+    echo -e "  ${GREEN}✅ サーバーに直結できるため $SERVER_HOST はプロキシをバイパスします${NC}"
+  else
+    echo -e "${YELLOW}  ⚠️ サーバーへ直結できないため、サーバー宛もプロキシ経由にします${NC}"
+  fi
+fi
+
+# config.yaml の proxy セクションを組み立てる（noProxy は YAML 配列で出力）
+build_proxy_yaml() {
+  printf 'proxy:\n  url: "%s"\n' "$PROXY_URL"
+  if [ -n "$NO_PROXY_LIST" ]; then
+    printf '  noProxy:\n'
+    for entry in $(echo "$NO_PROXY_LIST" | tr ',' ' '); do
+      [ -n "$entry" ] && printf '    - "%s"\n' "$entry"
+    done
+  fi
+}
+
 if [ -f "$CONFIG_FILE" ]; then
   echo -e "${YELLOW}  ⚠️ config.yaml が既に存在します。トークン・サーバーURL・マシン名を更新します${NC}"
   # 既存ファイルのトークンを更新（sed_inplace で macOS/Linux 互換）
@@ -481,15 +511,14 @@ if [ -f "$CONFIG_FILE" ]; then
     echo "machineName: \"$MACHINE_NAME\"" >> "$CONFIG_FILE"
   fi
 
-  # プロキシが指定されている場合、既存設定に追加/更新
+  # プロキシが指定されている場合、既存設定を書き直す
   if [ -n "$PROXY_URL" ]; then
-    if grep -q "^proxy:" "$CONFIG_FILE"; then
-      # 既存の proxy.url を更新（BSD/GNU 両対応: アドレス範囲 + s、{} ブロックは BSD sed 非対応）
-      sed_inplace "/^proxy:/,/^[^ ]/s|^  url:.*|  url: \"$PROXY_URL\"|" "$CONFIG_FILE"
-    else
-      # proxy セクションを末尾に追加
-      printf "\nproxy:\n  url: \"%s\"\n" "$PROXY_URL" >> "$CONFIG_FILE"
-    fi
+    # 既存の proxy ブロック（proxy: とそれに続くインデント行）をまとめて除去してから
+    # 書き直す。noProxy を含むと複数行になるため、url 行だけの置換では不整合になる。
+    awk '/^proxy:/{skip=1; next} skip==1 && /^[ \t]+[^ \t]/{next} {skip=0; print}' \
+      "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    printf '\n' >> "$CONFIG_FILE"
+    build_proxy_yaml >> "$CONFIG_FILE"
     echo -e "  プロキシ設定を更新しました"
   fi
 else
@@ -530,7 +559,7 @@ EOF
 
   # プロキシ設定がある場合は config.yaml に追記
   if [ -n "$PROXY_URL" ]; then
-    printf "proxy:\n  url: \"%s\"\n" "$PROXY_URL" >> "$CONFIG_FILE"
+    build_proxy_yaml >> "$CONFIG_FILE"
   fi
 
   echo -e "  作成: $CONFIG_FILE"

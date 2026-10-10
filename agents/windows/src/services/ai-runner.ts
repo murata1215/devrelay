@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch } from '@devrelay/shared';
+import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue } from '@devrelay/shared';
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -722,6 +722,11 @@ export async function sendPromptToAi(
       proxyEnv.HTTPS_PROXY = config.proxy.url;
       proxyEnv.http_proxy = config.proxy.url;
       proxyEnv.https_proxy = config.proxy.url;
+      // noProxy があれば AI CLI 側にも引き渡す（社内 Server は直結、外部 API はプロキシ経由）
+      if (config.proxy.noProxy?.length) {
+        proxyEnv.NO_PROXY = toNoProxyEnvValue(config.proxy.noProxy);
+        proxyEnv.no_proxy = proxyEnv.NO_PROXY;
+      }
       log.info(`Setting proxy env for Claude: ${config.proxy.url}`);
     }
 
@@ -769,6 +774,11 @@ export async function sendPromptToAi(
       geminiProxyEnv.HTTPS_PROXY = config.proxy.url;
       geminiProxyEnv.http_proxy = config.proxy.url;
       geminiProxyEnv.https_proxy = config.proxy.url;
+      // noProxy があれば AI CLI 側にも引き渡す（社内 Server は直結、外部 API はプロキシ経由）
+      if (config.proxy.noProxy?.length) {
+        geminiProxyEnv.NO_PROXY = toNoProxyEnvValue(config.proxy.noProxy);
+        geminiProxyEnv.no_proxy = geminiProxyEnv.NO_PROXY;
+      }
     }
 
     proc = spawn(command, args, {
@@ -952,6 +962,11 @@ export async function sendPromptToAi(
       devinProxyEnv.HTTPS_PROXY = config.proxy.url;
       devinProxyEnv.http_proxy = config.proxy.url;
       devinProxyEnv.https_proxy = config.proxy.url;
+      // noProxy があれば AI CLI 側にも引き渡す（社内 Server は直結、外部 API はプロキシ経由）
+      if (config.proxy.noProxy?.length) {
+        devinProxyEnv.NO_PROXY = toNoProxyEnvValue(config.proxy.noProxy);
+        devinProxyEnv.no_proxy = devinProxyEnv.NO_PROXY;
+      }
     }
 
     // Devin のスレッド跨ぎ文脈汚染サイクル: resume ターンは今回のセッション ID が既知のため
@@ -1033,6 +1048,11 @@ export async function sendPromptToAi(
       codexProxyEnv.HTTPS_PROXY = config.proxy.url;
       codexProxyEnv.http_proxy = config.proxy.url;
       codexProxyEnv.https_proxy = config.proxy.url;
+      // noProxy があれば AI CLI 側にも引き渡す（社内 Server は直結、外部 API はプロキシ経由）
+      if (config.proxy.noProxy?.length) {
+        codexProxyEnv.NO_PROXY = toNoProxyEnvValue(config.proxy.noProxy);
+        codexProxyEnv.no_proxy = codexProxyEnv.NO_PROXY;
+      }
     }
 
     // npm がグローバルインストールする codex は Windows では `codex.cmd` シムになるため、

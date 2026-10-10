@@ -542,6 +542,49 @@ Write-Host "OK 依存ツール OK" -ForegroundColor Green
 Write-Host ""
 
 # =============================================================================
+# プロキシのバイパス対象（noProxy）の決定
+# =============================================================================
+# config.yaml に proxy.url を書くと、AI CLI の外向き通信だけでなく **Server への
+# WebSocket 接続もプロキシ経由になる**（agents/*/src/services/connection.ts）。
+# 社内に Server を立てている場合、社内プロキシは社内アドレスへ到達できないのが通常なので、
+# プロキシを指定した途端に Agent が Server に接続できなくなる。
+# サーバーへ直結できるなら Server 宛だけバイパスする（直結できるなら常に直結が有利）。
+# $env:DEVRELAY_NO_PROXY で明示指定も可能（カンマ区切り。NO_PROXY 記法）。
+$NoProxyList = $env:DEVRELAY_NO_PROXY
+if ($ProxyUrl -and -not $NoProxyList) {
+    $ServerHostName = ""
+    try { $ServerHostName = ([Uri]$ServerUrl).Host } catch { $ServerHostName = "" }
+    if ($ServerHostName) {
+        $HealthProbeUrl = ($ServerUrl -replace '^wss://', 'https://' -replace '^ws://', 'http://' -replace '/ws/agent$', '') + "/health"
+        $PrevDefaultProxy = [System.Net.WebRequest]::DefaultWebProxy
+        try {
+            # Invoke-WebRequest は HTTP_PROXY 環境変数ではなくシステムプロキシを見るため、
+            # 直結の可否を見るには DefaultWebProxy を一時的に外す必要がある
+            [System.Net.WebRequest]::DefaultWebProxy = $null
+            $null = Invoke-WebRequest -Uri $HealthProbeUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+            $NoProxyList = $ServerHostName
+            Write-Host "  OK サーバーに直結できるため $ServerHostName はプロキシをバイパスします" -ForegroundColor Green
+        } catch {
+            Write-Host "  ! サーバーへ直結できないため、サーバー宛もプロキシ経由にします" -ForegroundColor Yellow
+        } finally {
+            [System.Net.WebRequest]::DefaultWebProxy = $PrevDefaultProxy
+        }
+    }
+}
+
+# config.yaml の proxy セクションを組み立てる（noProxy は YAML 配列で出力）
+function Get-ProxyYamlBlock {
+    $lines = @("proxy:", "  url: `"$ProxyUrl`"")
+    if ($NoProxyList) {
+        $lines += "  noProxy:"
+        foreach ($entry in ($NoProxyList -split '[,\s]+' | Where-Object { $_ })) {
+            $lines += "    - `"$entry`""
+        }
+    }
+    return ($lines -join "`n")
+}
+
+# =============================================================================
 # トークン事前検証
 # =============================================================================
 # サーバーに問い合わせて、トークンが別のマシンに割り当て済みでないか確認する
@@ -913,16 +956,13 @@ if (Test-Path $ConfigFile) {
     }
     Set-Content -Path $ConfigFile -Value $Content -Encoding UTF8
 
-    # プロキシが指定されている場合、既存設定に追加/更新
+    # プロキシが指定されている場合、既存設定を書き直す
     if ($ProxyUrl) {
         $Content = Get-Content $ConfigFile -Raw
-        if ($Content -match "(?m)^proxy:") {
-            # 既存の proxy.url を更新
-            $Content = $Content -replace '(?m)^(  url:).*', "`$1 `"$ProxyUrl`""
-        } else {
-            # proxy セクションを末尾に追加
-            $Content += "`nproxy:`n  url: `"$ProxyUrl`""
-        }
+        # 既存の proxy ブロック（proxy: とそれに続くインデント行）をまとめて除去してから
+        # 書き直す。noProxy を含むと複数行になるため、url 行だけの置換では不整合になる。
+        $Content = [regex]::Replace($Content, '(?m)^proxy:\r?\n(?:[ \t]+\S.*\r?\n?)*', '')
+        $Content = $Content.TrimEnd() + "`n`n" + (Get-ProxyYamlBlock) + "`n"
         Set-Content -Path $ConfigFile -Value $Content -Encoding UTF8
         Write-Host "  プロキシ設定を更新しました"
     }
@@ -964,7 +1004,7 @@ logLevel: info
 
     # プロキシ設定がある場合は追記
     if ($ProxyUrl) {
-        $ConfigContent += "`nproxy:`n  url: `"$ProxyUrl`""
+        $ConfigContent += "`n" + (Get-ProxyYamlBlock)
     }
 
     Set-Content -Path $ConfigFile -Value $ConfigContent -Encoding UTF8

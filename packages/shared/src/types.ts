@@ -144,6 +144,14 @@ export interface ProxyConfig {
   url: string;          // Proxy URL (http://, https://, socks4://, socks5://)
   username?: string;    // Optional: username for authentication
   password?: string;    // Optional: password for authentication
+  /**
+   * プロキシをバイパスするホスト（`NO_PROXY` 記法。`proxy-bypass.ts` 参照）。
+   *
+   * 社内に DevRelay Server を置き、AI API だけ社内プロキシ経由で外に出す構成では、
+   * ここに Server のホストを入れないと **Server への WebSocket 接続まで社内プロキシへ
+   * 送られて接続できない**（社内プロキシは社内アドレスへ到達できないのが通常）。
+   */
+  noProxy?: string[];
 }
 
 // -----------------------------------------------------------------------------

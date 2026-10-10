@@ -6,6 +6,7 @@ import type { Agent } from 'http';
 import {
   PROTOCOL_VERSION,
   AGENT_CAPABILITIES,
+  shouldBypassProxy,
 } from '@devrelay/shared';
 import type {
   AgentMessage,
@@ -234,7 +235,12 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     // Build WebSocket options with optional proxy
     const wsOptions: WebSocket.ClientOptions = {};
 
-    if (config.proxy?.url) {
+    if (config.proxy?.url && shouldBypassProxy(config.serverUrl, config.proxy.noProxy)) {
+      // noProxy に一致 → サーバー接続だけ直結する。社内に Server を置き AI API だけ
+      // 社内プロキシ経由にする構成では、ここを直結にしないと接続できない
+      // （社内プロキシは社内アドレスへ到達できないのが通常）。
+      console.log(`🔌 Connecting to ${config.serverUrl} directly (noProxy match, proxy bypassed)...`);
+    } else if (config.proxy?.url) {
       wsOptions.agent = createProxyAgent(config.proxy);
       console.log(`🔌 Connecting to ${config.serverUrl} via proxy ${config.proxy.url}...`);
     } else {
