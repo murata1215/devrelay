@@ -87,6 +87,28 @@ async function generateEmbeddingVector(text: string, apiKey: string): Promise<nu
 }
 
 /**
+ * OpenAI API で埋め込みベクトルを配列入力でまとめて生成する（高辻ナレッジ サイクル1）。
+ * 1 リクエストに複数テキストを渡すことで API コール数を減らす（バックフィル CLI 用）。
+ *
+ * `response.data` は OpenAI 側が `index` を付けて返すため、入力順と一致するよう `index` で
+ * 明示的に並べ替える（ドキュメント上は入力順で返るとされているが、念のため保証する）。
+ *
+ * @param texts - 埋め込み対象テキストの配列
+ * @param apiKey - OpenAI API キー
+ * @returns `texts` と同じ順序・同じ長さの 1536 次元ベクトル配列
+ */
+export async function generateEmbeddingVectors(texts: string[], apiKey: string): Promise<number[][]> {
+  if (texts.length === 0) return [];
+  const openai = new OpenAI({ apiKey });
+  const response = await openai.embeddings.create({
+    model: EMBEDDING_MODEL,
+    input: texts,
+    dimensions: EMBEDDING_DIMENSIONS,
+  });
+  return [...response.data].sort((a, b) => a.index - b.index).map((item) => item.embedding);
+}
+
+/**
  * MessageFile の userId を取得（MessageFile → Message → Session → userId）
  * @param messageId - メッセージ ID
  * @returns ユーザー ID。見つからない場合は null

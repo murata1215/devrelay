@@ -6,6 +6,92 @@
 
 ## 実装済み機能
 
+### 高辻ナレッジ サイクル1 — KnowledgeChunk + ハイブリッド検索 + MCP search_knowledge (2026-10-10)
+
+会話ターン（AI 応答＋直前の人間入力）を検索可能なナレッジ資産として蓄積する「高辻ナレッジ」
+サイクル1 を実装した。過去の指示・ask_project の質問・実装報告を、プロジェクトを横断して
+キーワード／意味の両面から検索できるようにする。
+
+- **新テーブル `KnowledgeChunk`**（`prisma/schema.prisma`）: Prisma 側 14 列 + raw SQL の
+  `embedding vector(1536)` ＝計 15 列。`sourceType='turn'` / `sourceId`=AI `Message.id`、
+  `chunkIndex`/`chunkCount`、`userId`/`projectId`/`sessionId`（権限フィルタ・結果の遡り用）、
+  `userMessageId`（対になった人間入力、無ければ null）、`textContent`、`embeddingStatus`
+  （`none|processing|done|failed|skipped`）、`occurredAt`。索引は
+  `@@unique([sourceType, sourceId, chunkIndex])` と `[userId, occurredAt]` / `[projectId]` /
+  `[sessionId]` の計 4 本＋HNSW 1 本（計 5 索引＋ユニーク制約）。**FK は張らない**
+  （`Message`/`Session` の削除・クリアで検索資産を道連れにしないため。`SupervisionAuditLog`
+  と同じ理由）
+- **HNSW 索引**: `idx_knowledgechunk_embedding` = `hnsw (embedding vector_cosine_ops)`
+  `m=16, ef_construction=64`。行が継続的に増え続けるテーブルのため、学習（training）が
+  必要な ivfflat ではなく HNSW を採用（既存 `idx_messagefile_embedding` は ivfflat/lists=100
+  のままで非対称。pgvector 0.5.0+ で利用可、本番は 0.6.0）
+- **`db push` 禁止の理由**（本サイクルで実証）: `pnpm db:bootstrap` は内部で
+  `prisma db push` を実行し、schema.prisma に書けない `embedding` 列を「スキーマに無い列」と
+  見なして **DROP COLUMN する**（`prisma migrate diff` で実証済み）。稼働中 DB へは
+  `npx prisma db execute --stdin` で該当セクションのみ直接適用した。`db:bootstrap` は
+  新規 DB 構築専用と `bootstrap.sql` に明記、手作業オブジェクト一覧も 4 → 6 件に更新
+- **チャンク化**（`knowledge-chunker.ts`、外部依存最小の純関数）: AI 本文から進捗ノイズ
+  （🔧使用中.../📊Rate Limit/⏳心拍表示）を除去し、残りが 20 文字未満なら対象外。固定 4 行
+  ヘッダ（`【プロジェクト】/【スレッド】/【指示/質問】/【回答】`、上限 1,200 字）を前置し、
+  行境界で 4,500 字窓に分割（`MAX_CHUNK_LENGTH=6000`。サロゲートペアを割らない）
+- **ハイブリッド検索**（`knowledge-rank.ts`、外部 import ゼロ）: キーワード ILIKE
+  （`ESCAPE '\'` でエスケープ、出現回数降順）と pgvector cosine 距離（`<=>` 昇順）の各最大
+  50 件候補を **RRF（Reciprocal Rank Fusion、`KNOWLEDGE_RRF_K=60`、寄与 `1/(60+rank)`）**で
+  統合。同一 `sourceId` はリスト内最良順位に集約してから加点し二重加点を防止、同点は
+  `occurredAt` 降順。OpenAI API キー未設定時は `mode='hybrid'` が keyword のみへ graceful
+  degrade（`coverage.vector=false` / `vectorSkippedReason='no_openai_api_key'`）、
+  `mode='vector'` 指定時は明示エラーで拒否する（静かなフォールバックはしない）
+- **MCP `search_knowledge`**（全プロジェクト横断）: パラメータ `query`（必須・500 字上限）、
+  `mode`（`hybrid`既定｜`keyword`｜`vector`）、`projectId`（省略時は全件）、`kind`
+  （`all`既定｜`instruction`=通常の submit_instruction ターン｜`question`=ask_project の
+  質問ターン）、`since`/`until`（ISO）、`limit`（既定 10・最大 30 でクランプ）。返却は
+  `{query, mode, coverage, total, results, hint?}`。各 result に `rank/score/matchedBy/
+  sessionId/threadTitle/kind/projectId/projectName/aiTool/aiMessageId/userMessageId/
+  occurredAt/snippet/chunkIndex/chunkCount` を含み、結果がある場合は
+  `get_conversation_history` で全文を辿るための hint を付加。MCP server instructions にも
+  `search_knowledge`（横断・履歴探索用）と既存 `search_project_context`（1 プロジェクトの
+  直近ビルド要約用）の使い分けを追記
+- **`GET /api/knowledge/search`**（`routes/knowledge-api.ts`、次サイクルの WebUI 用。
+  本サイクルは API のみ）: `authenticate` preHandler（Bearer のみ、Cookie 不使用）。
+  クエリパラメータは MCP と同一の 7 項目。検証エラーは 400、キルスイッチ OFF 時は 404
+- **`DEVRELAY_KNOWLEDGE`**（既定 `1`）: `0` で MCP ツール未登録・REST 404・新規会話での
+  行作成も停止するキルスイッチ。`knowledge:backfill` CLI はこの変数を見ない（明示実行は
+  常時可）
+- **`knowledge:backfill` CLI**（`src/scripts/knowledge-backfill.ts` /
+  `pnpm --filter server knowledge:backfill`）: Phase A（チャンク行の作成のみ。
+  `PAGE_SIZE=200` の cursor ページングで冪等・再開可能、`teamexec_`/`crossquery_`/
+  `askdesc_`/`raw_` 前置の ephemeral セッションは除外）＋ Phase B（embedding 生成、
+  `EMBED_BATCH_SIZE=32`）の 2 段構成。フラグ `--user/--project/--since/--limit/--dry-run/
+  --no-embed/--retry-failed`。コスト推定は文字数÷2 をトークン数とみなし
+  text-embedding-3-small（1536 次元）の $0.02/1M tokens で算出
+- **400/422 の個別リトライ**: embedding API がバッチ全体を入力起因エラー（400 または
+  422、`isInputCausedEmbeddingError`）で拒否した場合は 1 件ずつ再試行し、失敗した 1 件のみを
+  `failed` にする（バッチ全体を落とさない）。429/5xx は従来どおり `2^attempt` 秒バックオフで
+  最大 3 回リトライ
+- **オンライン経路**: `agent-manager.ts` の `handleAiOutput()` で AI メッセージ保存直後に
+  `processTurnKnowledge(aiMessage.id)` を fire-and-forget で呼ぶ（既存の
+  `processMessageFilesEmbedding` と同じ流儀、例外は握りつぶしログのみ）。
+  `embedding-service.ts` に `generateEmbeddingVectors(texts, apiKey)` を追加し、OpenAI
+  応答の `index` でソートして入力順を明示的に保証
+- **実装時の判断**: ① `migrate dev`/`db push` が使えない制約から手書き DDL を正式経路とした
+  ② `embedding` 列は Prisma 非対応型のため `bootstrap.sql` 側で管理し新規構築専用と明記
+  ③ OpenAI キー未設定のユーザーはチャンク行自体は残し `embeddingStatus='skipped'` にして
+  キー設定後に遡及可能にした ④ バックフィル実行中に `nohup` の `&&`/`&` 優先順位の罠で
+  プロセスが二重起動した事故を Phase B 開始前に検知し片方を kill、重複・二重課金なしで収束
+  させた（詳細は devlog 参照）
+- テスト 855/855 PASS（既存 790 ＋ 新規 65。`knowledge-chunker`/`knowledge-rank`/
+  `knowledge-wiring` の 3 ファイル）
+- 全件バックフィル実施済み: Phase A `scanned=11511 created=11330 chunksCreated=13189
+  skippedExisting=124 skippedIneligible=57`、Phase B `processed=10314 done=10314 failed=0
+  skippedNoKey=2922`、送信 20,624,903 文字 / 推定 10,312,452 トークン / 推定コスト $0.2062
+- DB 実測: `KnowledgeChunk` 13,336 行 / `done` 10,414 / `skipped` 2,922 / `failed` 0 /
+  `count(DISTINCT sourceId)` 11,454 / `(sourceType,sourceId,chunkIndex)` 重複 0
+- exec 中の Agent 自己更新で AI 子プロセスが kill され Session が active のまま固着する
+  既知課題を `doc/issues.md` に起票（対策は未実装、次回以降の課題）
+- **DB マイグレーション適用済み**（手書き DDL、`KnowledgeChunk` 15 列・索引 6 本）。
+  稼働中サーバーは本サイクル実装時点では旧 dist のままのため `pm2 restart devrelay-server`
+  要。Agent 側コード変更ゼロ（各機 `u` 不要）
+
 ### 社内オンプレ Windows Server 構築手順書を「既存稼働ホストへの相乗り」対応に改訂 (2026-10-10)
 
 社内サーバー（Windows Server 2025）への `devrelay-server` 新規構築を検討する中で、実機調査

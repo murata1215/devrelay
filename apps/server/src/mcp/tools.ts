@@ -56,6 +56,8 @@ import {
   buildCancelClaimWhere,
   isMcpAskEnabled,
 } from '../services/ask-guard.js';
+import { searchKnowledge } from '../services/knowledge-service.js';
+import { isKnowledgeEnabled } from '../services/knowledge-rank.js';
 
 /**
  * #334: 人間入力テキストの長さ上限（string.length = UTF-16 コードユニット数基準）。
@@ -527,6 +529,57 @@ export function registerMcpTools(server: McpServer, userId: string) {
       };
     }
   );
+
+  // ============================================================
+  // 高辻ナレッジ サイクル1: search_knowledge（会話ターンのハイブリッド検索）
+  // ============================================================
+  if (isKnowledgeEnabled(process.env.DEVRELAY_KNOWLEDGE)) {
+    /**
+     * search_knowledge — 会話ターン（指示/質問＋AI 応答）をキーワード＋ベクトルのハイブリッドで検索
+     */
+    server.tool(
+      'search_knowledge',
+      'Search the user\'s accumulated knowledge — past AI conversations (instructions, plans, ' +
+      'implementation reports, research Q&A) across ALL the user\'s projects — by keyword and by ' +
+      'meaning (hybrid). Use this to find how/why something was built, what was investigated before, ' +
+      'or prior decisions, before submitting a new instruction. Results are conversation turns; use ' +
+      'get_conversation_history(projectId, after/before around occurredAt) to read the full thread. ' +
+      'For recent build summaries of ONE project use search_project_context instead.',
+      {
+        query: z.string().describe('Search query (keyword or natural-language description of what to find)'),
+        mode: z.enum(['hybrid', 'keyword', 'vector']).optional().describe(
+          'Search mode (default "hybrid"). "keyword" is substring match only. "vector" is semantic-only ' +
+          'and requires an OpenAI API key to be configured (errors if not). "hybrid" combines both and ' +
+          'gracefully degrades to keyword-only (with coverage.vector=false) if no key is configured.'
+        ),
+        projectId: z.string().optional().describe('Limit results to one project (default: search across all the user\'s projects)'),
+        kind: z.enum(['instruction', 'question', 'all']).optional().describe(
+          'Filter by turn kind: "instruction" (regular submit_instruction turns), "question" (ask_project turns), or "all" (default).'
+        ),
+        since: z.string().optional().describe('Only include turns at or after this ISO timestamp'),
+        until: z.string().optional().describe('Only include turns at or before this ISO timestamp'),
+        limit: z.number().optional().describe('Max results to return (default 10, max 30)'),
+      },
+      async ({ query, mode, projectId, kind, since, until, limit }) => {
+        const result = await searchKnowledge({ userId, query, mode, projectId, kind, since, until, limit });
+        if (!result.ok) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error }) }], isError: true };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            query: result.query,
+            mode: result.mode,
+            coverage: result.coverage,
+            total: result.total,
+            results: result.results,
+            ...(result.results.length > 0
+              ? { hint: 'Call get_conversation_history(projectId, after/before around occurredAt, limit=50) to read the full thread.' }
+              : {}),
+          }, null, 2) }],
+        };
+      }
+    );
+  }
 
   // ============================================================
   // 書き込み系ツール（readOnlyHint なし → ホストが確認）

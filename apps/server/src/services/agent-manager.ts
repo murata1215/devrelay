@@ -49,6 +49,8 @@ import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type
 import OpenAI from 'openai';
 import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
+import { processTurnKnowledge } from './knowledge-service.js';
+import { isKnowledgeEnabled } from './knowledge-rank.js';
 import { checkIpAllowed } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
 import type { ManagementInfo } from '@devrelay/shared';
@@ -787,6 +789,12 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
     if (files && files.length > 0) {
       processMessageFilesEmbedding(aiMessage.id).catch(err =>
         console.error('[Embedding] fire-and-forget error:', err.message));
+    }
+
+    // 会話ターンのナレッジ化を非同期生成（fire-and-forget、高辻ナレッジ サイクル1）
+    if (isKnowledgeEnabled(process.env.DEVRELAY_KNOWLEDGE)) {
+      processTurnKnowledge(aiMessage.id).catch(err =>
+        console.error('[Knowledge] fire-and-forget error:', err.message));
     }
 
     if (usageData) {

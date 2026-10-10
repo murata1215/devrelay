@@ -23,6 +23,7 @@ import { initFcm } from './services/fcm-service.js';
 import { startAutoUpdateSweep } from './services/auto-updater.js';
 import { startCapabilitySweep } from './services/capability-sweep.js';
 import { sitesApiRoutes } from './routes/sites-api.js';
+import { knowledgeApiRoutes } from './routes/knowledge-api.js';
 import { startSiteHealthChecker } from './services/sites/health-checker.js';
 import { startAccessLogAggregator } from './services/sites/access-aggregator.js';
 import { mcpRoutes } from './mcp/server.js';
@@ -169,6 +170,7 @@ async function main() {
   registerAgentDocumentApiRoutes(app);  // エージェントドキュメント CRUD API（WebUI 認証）
   registerRawCompletionRoutes(app);  // raw-completion（ゲーム席用の素の completion API、マシントークン認証）
   await app.register(sitesApiRoutes);  // DevRelay Sites Phase 1-A: 公開 site 一覧・ヘルス（管理者限定・read-only）
+  await app.register(knowledgeApiRoutes);  // 高辻ナレッジ サイクル1: 会話ターンのハイブリッド検索 API
 
   // Agent WebSocket endpoint
   app.register(async (fastify) => {

@@ -293,6 +293,32 @@ model SupervisionAuditLog {
   @@index([targetUserId])
 }
 
+// 高辻ナレッジ サイクル1: 検索単位のチャンク（sourceType='turn' のみ。将来 'document' 等を追加）。
+// Message / Session の都合（削除・クリア）で検索資産を道連れにしないため FK は張らない
+// （SupervisionAuditLog と同じ理由）。
+model KnowledgeChunk {
+  id              String   @id @default(cuid())
+  sourceType      String   // 'turn'（AI 応答＋直前 user）。将来 'document' 等を追加
+  sourceId        String   // sourceType='turn' のとき AI Message.id
+  chunkIndex      Int      // 0-indexed。長いターンを分割したときの連番
+  chunkCount      Int      // 同一 source のチャンク総数
+  userId          String   // Session.userId（権限フィルタ用。FK は張らない）
+  projectId       String   // Session.projectId（FK は張らない）
+  sessionId       String   // Session.id（結果をスレッドへ辿るため。FK は張らない）
+  userMessageId   String?  // 対になった user Message.id（見つからなければ null）
+  textContent     String   // チャンク本文（embedding 生成元かつ ILIKE 対象）
+  embeddingStatus String   @default("none") // 'none' | 'processing' | 'done' | 'failed' | 'skipped'
+  occurredAt      DateTime // AI Message.createdAt（期間フィルタ・並び順用）
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  // embedding vector(1536) は raw SQL で追加（Prisma 非対応型。MessageFile/AgentDocument と同じ流儀）
+
+  @@unique([sourceType, sourceId, chunkIndex])
+  @@index([userId, occurredAt])
+  @@index([projectId])
+  @@index([sessionId])
+}
+
 // メッセージ履歴
 model Message {
   id          String        @id @default(cuid())

@@ -75,6 +75,7 @@ pm2 restart devrelay-server
 | DEVRELAY_MCP_ASK | MCP の `ask_project` / `get_answer` ツールを登録するか（既定 `1`。`0` で登録自体をやめるキルスイッチ。`cancel_submission` と既存 8 ツールには影響しない） |
 | DEVRELAY_MCP_ANSWER_RAW | MCP `get_answer.answer` / `get_plan.planMarkdown`・`summary` から進捗表示行（📊 Rate Limit / 🔧 …を使用中... 等）を除去するかの逆キルスイッチ（既定 `0` = 除去する。`1` で従来どおり原文を返す）。`get_build_status.tail` 等の進捗確認用フィールドには影響しない |
 | DEVRELAY_PROGRESS_CANCEL_HINT | Discord/Telegram の進捗ボックス（実行中... N分経過）に「`k` で停止できます」の案内行（60秒経過後）を出すか（既定 `1`。`0` で無効化するキルスイッチ。WebUI は進捗表示に停止ボタンがあるため対象外） |
+| DEVRELAY_KNOWLEDGE | 会話ターンのナレッジ化（`KnowledgeChunk` への embedding 生成）と MCP `search_knowledge` / REST `GET /api/knowledge/search` を有効にするか（既定 `1`。`0` で MCP ツール未登録・REST 404・新規会話での行作成も停止するキルスイッチ。バックフィル CLI（`knowledge:backfill`）はこの変数を見ない＝明示実行は常時可） |
 
 ## DB テーブル（概要）
 
@@ -94,6 +95,7 @@ pm2 restart devrelay-server
 | TeamMember | チーム内プロジェクト（Team → Project 参照） |
 | ToolApproval | ツール承認履歴（exec モードの canUseTool 記録） |
 | Notification | プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理） |
+| KnowledgeChunk | 高辻ナレッジ: 会話ターン（AI 応答＋直前の人間入力）の検索用チャンク（キーワード ILIKE + pgvector ベクトルのハイブリッド検索。FK は張らない） |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`

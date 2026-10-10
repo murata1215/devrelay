@@ -30,7 +30,8 @@ cancel_submission で取り消せます（ask_project の質問も取り消せ�
 5) ユーザーが「実装して」と言ったら approve_implementation。
 6) get_build_status で進捗・完了を確認。
 調べ物は search_project_context を使う。会話履歴の閲覧は get_conversation_history で期間指定して取得できる。添付ファイル（画像等）は get_conversation_history で attachments を確認し、get_attachment で取得できる。submit/approve は破壊的操作なので必ず確認を取る。
-submit_instruction には画像等の添付ファイル（attachments）を渡せるが、上限を超えるリクエストは submit_instruction 自体が呼ばれる前に HTTP エラーで拒否されるため、ツールの isError ではなく HTTP レベルのエラーとして現れる点に注意。`;
+submit_instruction には画像等の添付ファイル（attachments）を渡せるが、上限を超えるリクエストは submit_instruction 自体が呼ばれる前に HTTP エラーで拒否されるため、ツールの isError ではなく HTTP レベルのエラーとして現れる点に注意。
+過去の経緯・調査結果・判断を探すときは search_knowledge（全プロジェクト横断・ハイブリッド）。1 プロジェクトの直近ビルド要約は従来どおり search_project_context。`;
 
 /**
  * /mcp のリクエストボディ上限（16 MiB）。
