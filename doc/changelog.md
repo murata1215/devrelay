@@ -6,6 +6,38 @@
 
 ## 実装済み機能
 
+### 社内オンプレ Windows Server 構築手順書を「既存稼働ホストへの相乗り」対応に改訂 (2026-10-10)
+
+社内サーバー（Windows Server 2025）への `devrelay-server` 新規構築を検討する中で、実機調査
+（導入先ホスト: 社内サイネージ IIS サイト + pm2 本番アプリ4本が稼働中、Node グローバル v24.15.0、
+PostgreSQL 18.1 + pgvector 0.8.1 導入済み、Machine スコープにプロキシ env 設定済み）の結果を
+反映し、`doc/onprem-windows-setup-guide.md`（2026-09-29 新設）を改訂した。
+
+- 冒頭に「導入先が空きマシンでない場合の第一制約」節を新設。80/443 占有・既存 pm2・グローバル
+  Node 共用の確認を公開方式決定より前段の必須チェックに位置付けた
+- 公開方式を Caddy 専用（パターン A）と IIS + ARR 相乗り（パターン B）の 2 択に分離。
+  パターン B では現行 `app.devrelay.io` Caddyfile ブロック（`/api/*` `/ws/*` `/mcp`
+  `/.well-known/*` `/oauth/*` のプロキシ + SPA フォールバック）と同じ契約を IIS の
+  `web.config` で再現する方針を追記（`.webmanifest` の MIME 登録・`Web-WebSockets` 機能の
+  導入有無が W3SVC 再起動を伴う点も記載）
+- `DEVRELAY_TESTFLIGHT=0` が必須な理由を補強: `testflight-manager.ts` が `pm2 start/delete/save`
+  を実行するため、既存 pm2 デーモンに他の本番プロセスが登録されているホストでは
+  `pm2 save` がその `dump.pm2` を意図せず上書きする恐れがある
+- プロキシ節に dotenv の優先順位の注意を追加: `index.ts` の `dotenv/config` は既定で既存の
+  `process.env` を上書きしないため、Machine スコープにプロキシが設定済みのホストでは
+  `.env` に空値を書いても無効。NSSM の `AppEnvironmentExtra` で上書きする必要がある
+  （Step 7 に手順を追加）
+- `PUBLIC_URL` 未設定時の `https://app.devrelay.io` フォールバック、`prisma migrate deploy`
+  禁止（migrations が schema.prisma より古く Organization/Notification 等が欠落）、
+  `onlyBuiltDependencies` の定義競合、Node 新メジャー × Prisma 5.x の検証手順と
+  side-by-side フォールバック、既存 DB インスタンス相乗り時の `connection_limit` 明示、
+  Discord/Telegram トークンが env より DB（`UserSettings`）優先で保存されてしまう運用上の
+  注意、LINE 未実装の訂正などを追加
+- 実際の導入先ホスト向けに `.devrelay-output/` へ実作業用ランブック
+  （`devrelay-setup-runbook.md`）・IIS 設定雛形（`devrelay-web.config`）・
+  `.env` テンプレート（`devrelay.env.template`）の 3 点を出力
+- コード変更なし（ドキュメントのみ）。ビルド・再起動不要
+
 ### Devin のスレッド跨ぎ文脈汚染（セッション ID 取り違え）の根治 (2026-10-08)
 
 ユーザー報告「セッション管理がおかしい。Devin だけかな？スレッド A で会話中に B へ切替えて
