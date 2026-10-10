@@ -399,6 +399,12 @@ if [ -d "$AGENT_DIR/.git" ]; then
   # 既存なら最新に更新
   echo "  既存のリポジトリを更新中..."
   cd "$AGENT_DIR"
+  # 前回の install が lockfile を書き換えている場合、その変更は git pull では
+  # 復元されない（取り込むコミット側が lockfile を変更していなければ競合せず、
+  # ローカルの改変がそのまま残る）。設定（overrides 等）と不一致になると
+  # --frozen-lockfile が ERR_PNPM_LOCKFILE_CONFIG_MISMATCH で落ち続けるため、
+  # 毎回コミット済みの状態へ戻す。lockfile はリポジトリが唯一の情報源。
+  git checkout -- pnpm-lock.yaml 2>/dev/null || true
   git pull --quiet 2>/dev/null || {
     echo -e "${YELLOW}  ⚠️ git pull に失敗。既存のコードで続行します${NC}"
   }

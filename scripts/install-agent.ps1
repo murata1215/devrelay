@@ -768,6 +768,12 @@ if (Test-Path (Join-Path $AgentDir ".git")) {
     # 既存なら最新に更新（失敗しても致命的ではないので警告のみ）
     Write-Host "  既存のリポジトリを更新中..."
     Push-Location $AgentDir
+    # 前回の install が lockfile を書き換えている場合、その変更は git pull では
+    # 復元されない（取り込むコミット側が lockfile を変更していなければ競合せず、
+    # ローカルの改変がそのまま残る）。設定（overrides 等）と不一致になると
+    # --frozen-lockfile が ERR_PNPM_LOCKFILE_CONFIG_MISMATCH で落ち続けるため、
+    # 毎回コミット済みの状態へ戻す。lockfile はリポジトリが唯一の情報源。
+    $null = Invoke-LoggedCommand -Label "git checkout -- pnpm-lock.yaml" -Command { git checkout -- pnpm-lock.yaml } -LogFile $BuildLog
     $PullCode = Invoke-LoggedCommand -Label "git pull" -Command { git pull --quiet } -LogFile $BuildLog
     Pop-Location
     if ($PullCode -ne 0) {
