@@ -403,9 +403,33 @@ nssm set devrelay-server AppEnvironmentExtra "HTTPS_PROXY= " "HTTP_PROXY= " "htt
 `apps/server/src/index.ts` は `SIGINT` / `SIGTERM` に加え、Windows サービスが送る
 `SIGBREAK` も捕捉して graceful shutdown する実装になっている。
 
-`.env` の `DEVRELAY_SERVICE_RESTART_CMD` / `DEVRELAY_SERVICE_STATUS_CMD` を対応するコマンド
-（`nssm restart devrelay-server` / `nssm status devrelay-server` 等）に設定し、WebUI の
-サービス再起動ボタン（システム管理者限定）が機能することを確認する。
+`.env` の `DEVRELAY_SERVICE_STATUS_CMD` は `nssm status devrelay-server` でよい
+（`SERVICE_RUNNING` を返し、WebUI には `active` と表示される）。
+
+**`DEVRELAY_SERVICE_RESTART_CMD` に `nssm restart devrelay-server` を直接指定してはいけない。**
+再起動 API は Server プロセス自身から `exec` でこのコマンドを起動するため、nssm が停止のために
+送る Ctrl+C が同じコンソールグループ全体に飛び、**停止を実行している nssm.exe 自身も巻き込まれて
+死ぬ。その結果 start が発行されず、サービスは停止したまま復帰しない**（実機で再現。
+`server.err.log` に `cmd: 'nssm.exe restart devrelay-server', stderr: '^C'` が残り、
+`nssm status` が `SERVICE_STOPPED` になる。IIS 側は 502 を返すようになる）。
+
+新しいコンソールへ切り離し、呼び出し元の終了を待ってから起動する .cmd を用意して、
+それを指定する:
+
+```bat
+@echo off
+rem C:\tools\devrelay-restart.cmd
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 3; Restart-Service devrelay-server"
+```
+
+```env
+DEVRELAY_SERVICE_RESTART_CMD=C:\tools\devrelay-restart.cmd
+DEVRELAY_SERVICE_STATUS_CMD=C:\tools\nssm.exe status devrelay-server
+```
+
+nssm / Node が PATH に無いサービス環境でも解決できるよう、いずれも絶対パスで書くこと。
+WebUI のサービス再起動ボタン（システム管理者限定）を実行し、**サービスの PID が変わって
+`Running` に戻ること**を確認する（PID が 0 のままなら上記の自殺パターンに陥っている）。
 
 - [ ] サービスとして起動・自動起動設定が完了している
 - [ ] WebUI からサービス再起動を実行し、正常に反映される
