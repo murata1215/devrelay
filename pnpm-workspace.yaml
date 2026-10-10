@@ -2,4 +2,50 @@ packages:
   - 'apps/*'
   - 'packages/*'
   - 'agents/*'
+
+# =============================================================================
+# pnpm の設定はここに置く（package.json の "pnpm" フィールドには書かない）
+# =============================================================================
+# pnpm 11 以降、package.json の "pnpm" フィールドは読まれない。pnpm 自身が
+#   [WARN] The "pnpm" field in package.json is no longer read by pnpm.
+#          The following keys were ignored: "pnpm.onlyBuiltDependencies", "pnpm.overrides"
+# と警告し、次の 2 つが同時に壊れる（pnpm 11.28.5 で実機確認）:
+#
+#   1. overrides が無視されて pnpm-lock.yaml の overrides と不一致になり、
+#      --frozen-lockfile が ERR_PNPM_LOCKFILE_CONFIG_MISMATCH で失敗する
+#      → scripts/install-agent.* の依存インストールが 1 段目で落ちる
+#   2. ビルドスクリプトの許可が無視され、@prisma/engines の postinstall が走らず
+#      query engine バイナリが揃わない。さらに pnpm 11 では未判断のパッケージが
+#      残ると ERR_PNPM_IGNORED_BUILDS で install 自体が失敗する
+#
+# ビルド許可の設定名は pnpm 10 系と 11 系で違う（11 で改名された）ため **両方書く**:
+#   - pnpm 10 以前: onlyBuiltDependencies（名前の配列）
+#   - pnpm 11 以降: allowBuilds（名前 → true/false のマップ）
+# =============================================================================
+
+# pnpm 10 以前が読む
 onlyBuiltDependencies:
+  - electron
+  - esbuild
+  - '@prisma/client'
+  - '@prisma/engines'
+  - prisma
+  - '@homebridge/node-pty-prebuilt-multiarch'
+
+# pnpm 11 以降が読む
+allowBuilds:
+  electron: true
+  esbuild: true
+  '@prisma/client': true
+  '@prisma/engines': true
+  prisma: true
+  '@homebridge/node-pty-prebuilt-multiarch': true
+  # 以下は従来どおりビルドを走らせない。pnpm 10 では警告されるだけだが、
+  # pnpm 11 では「未判断」が 1 つでも残ると install が失敗するため明示的に false にする。
+  '@firebase/util': false
+  protobufjs: false
+
+# pnpm-lock.yaml の overrides セクションと一致していること
+# （不一致だと --frozen-lockfile が ERR_PNPM_LOCKFILE_CONFIG_MISMATCH で失敗する）
+overrides:
+  readable-stream: 2.3.8
