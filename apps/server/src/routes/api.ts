@@ -30,6 +30,7 @@ import {
   unlinkPlatform,
 } from '../services/platform-link.js';
 import { encodeToken } from '@devrelay/shared';
+import { buildAgentWsUrl } from '../services/agent-token-url.js';
 import {
   getVapidPublicKey,
   savePushSubscription,
@@ -163,10 +164,8 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     // トークン生成（サーバーURLを埋め込んだ新形式）
-    // リクエストの Host ヘッダーからサーバーの WebSocket URL を構築
-    const host = request.headers.host || 'localhost:3000';
-    const protocol = request.headers['x-forwarded-proto'] === 'https' || host.includes('devrelay.io') ? 'wss' : 'ws';
-    const serverWsUrl = `${protocol}://${host}/ws/agent`;
+    // PUBLIC_URL があればそれを基準にする（リバースプロキシ配下・サブパス配信対応）
+    const serverWsUrl = buildAgentWsUrl(request);
     const token = encodeToken(serverWsUrl, randomBytes(32).toString('hex'));
 
     const machine = await prisma.machine.create({
