@@ -442,6 +442,13 @@ Agent 側は**コード変更不要**。社内 WebUI のエージェント作成
 接続先サーバー URL がトークンに自動で埋め込まれる（`packages/shared/src/token.ts`）ため、
 社内端末で以下を実行するだけで社内サーバーに接続する。
 
+**前提: `.env` の `PUBLIC_URL` を正しく設定しておくこと。** トークンに埋め込まれる URL は
+`PUBLIC_URL` から組み立てられる（`services/agent-token-url.ts`）。未設定だとリクエストの
+`Host` ヘッダーが使われ、IIS + ARR 配下（既定 `preserveHostHeader=false`）では
+`wss://localhost:3000/ws/agent` という接続不能なトークンが発行される。
+**`PUBLIC_URL` を直したら、それ以前に発行したトークンは作り直すこと**（トークンは発行時の
+URL を固定で持つため、サーバー設定を直しても既存トークンは直らない）。
+
 ```powershell
 # Windows 端末
 $env:DEVRELAY_TOKEN="<社内 WebUI で発行したトークン>"
@@ -453,6 +460,27 @@ irm https://<社内ドメイン>/install-agent.ps1 | iex
 # Linux/macOS 端末
 curl -fsSL https://<社内ドメイン>/install-agent.sh | bash -s -- --token "<トークン>" --proxy "http://proxy.corp.example:8080"
 ```
+
+### サーバーが社内ネットワークにある場合のプロキシ指定
+
+**インストーラのプロキシ質問に `y` と答えてはいけない（社内サーバーに接続できなくなる）。**
+
+`DEVRELAY_PROXY` を指定すると `config.yaml` に `proxy.url` が書き込まれ、Agent は
+**サーバーへの WebSocket 接続にもそのプロキシを使う**
+（`agents/*/src/services/connection.ts` が `HttpsProxyAgent` を WS の agent に設定する）。
+`ProxyConfig` にバイパス指定（no_proxy 相当）は無いため、社内サーバー宛の接続まで
+社内プロキシへ送られて失敗する。
+
+社内サーバー + 外部 AI API という構成では、プロキシは **Agent の設定ではなく OS の
+環境変数で与える**こと:
+
+- Windows: Machine スコープの `HTTPS_PROXY` / `HTTP_PROXY`（+ `git config --global http.proxy`、
+  `npm config set proxy`）。Agent が起動する AI CLI は親プロセスの環境を継承するため、
+  `config.yaml` に `proxy` が無くてもプロキシ経由で外部 API に出られる
+- Linux/macOS: systemd の `Environment=` やシェルのプロファイル
+
+インストーラのプロキシ指定が必要なのは、**サーバー自体がプロキシ越しにしか見えない場合**
+（インターネット経由のマネージド環境など）に限られる。
 
 ### DevRelay Server と同じホストに Agent を同居させる場合の注意
 
