@@ -94,7 +94,7 @@ cd C:\devrelay
 
 # ルートで pnpm install すると agents/windows（Electron、~100MB超）等まで対象になるため、
 # サーバー運用に不要なパッケージも含めて依存解決される。--filter で必要な3パッケージに絞る。
-pnpm install --filter @devrelay/shared --filter @devrelay/server --filter @devrelay/web...
+pnpm install --filter @devrelay/shared... --filter @devrelay/server... --filter web...
 ```
 
 - [ ] `pnpm install` が完了する
@@ -209,7 +209,8 @@ pnpm db:bootstrap
 
 ```powershell
 cd C:\devrelay
-pnpm --filter @devrelay/shared --filter @devrelay/server --filter @devrelay/web build
+pnpm --filter @devrelay/shared build
+pnpm --filter @devrelay/server --filter web build
 ```
 
 - [ ] `.env` を作成し、上表の項目をすべて埋めた
@@ -240,9 +241,13 @@ node dist\index.js
 ## Step 6: リバースプロキシ
 
 **Fastify 側に静的配信の実装は無い**ため、WebUI（`apps/web/dist`）の配信にはリバースプロキシが必須。
-`apps/web/vite.config.ts` の `base: '/'` と PWA の `start_url` により**サブパス配信は不可**
-（社内ドメインはルートで配信すること）。公開方式は、冒頭「導入先が空きマシンでない場合の
-第一制約」の確認結果に応じて以下の 2 パターンから選ぶ。
+公開方式は、冒頭「導入先が空きマシンでない場合の第一制約」の確認結果に応じて以下の
+3 パターンから選ぶ。
+
+`apps/web` はビルド時に `DEVRELAY_WEB_BASE` を与えることでサブパス配信（例
+`https://host/foo/devrelay/`）にも対応する（未指定ならルート配信で従来どおり）。
+既存サイトが 80/443 を占有していて新規ホストヘッダ（＝DNS / ELB の追加作業）が
+取れない環境では、**パターン C が最も外部依存が少ない**。
 
 ### パターン A: 専用ホスト・80/443 が空いている場合（Caddy）
 
@@ -284,6 +289,82 @@ ARR で `http://127.0.0.1:<PORT>/` にリライトし、それ以外は静的配
 - [ ] `/api/health` 相当が Server 経由で応答する
 - [ ] WebSocket（Agent 接続・チャットのリアルタイム更新）が通る（Agent 追加後に確認）
 
+### パターン C: 既存サイトのサブパスに相乗りする場合（IIS + ARR / ホストヘッダ追加なし）
+
+既存サイトの URL 空間の一部として配信する（例 `https://service.example.co.jp/tsinternal/devrelay/`）。
+**DNS・ELB・TLS 証明書の追加作業が一切不要**で、既存サイトの HTTPS をそのまま使える。
+さらに IIS サイトも仮想ディレクトリも作らない（`applicationHost.config` を変更しない）ため、
+**既存アプリケーションの再起動が発生しない**のが最大の利点。パターン B のホストヘッダ追加が
+ネットワーク担当の作業待ちになる環境では、こちらを先に立ち上げて評価できる。
+
+手順:
+
+1. 既存サイトの物理パス配下に配信用フォルダを作る（例 `D:\tsinternal\devrelay\`）
+2. サブパスを指定して WebUI をビルドし、成果物をコピーする
+
+```powershell
+cd C:\devrelay
+$env:DEVRELAY_WEB_BASE = "/tsinternal/devrelay"
+pnpm -F web build
+Copy-Item C:\devrelay\apps\web\dist\* D:\tsinternal\devrelay\ -Recurse -Force
+```
+
+3. そのフォルダに `web.config` を置く（`dist` に含まれないのでコピーで消えない）
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <system.webServer>
+    <rewrite>
+      <rules>
+        <rule name="devrelay-backend" stopProcessing="true">
+          <match url="^(api|ws|mcp|oauth|health|\.well-known)(/.*)?$" />
+          <action type="Rewrite" url="http://localhost:3000/{R:0}" />
+        </rule>
+        <rule name="devrelay-spa" stopProcessing="true">
+          <match url=".*" />
+          <conditions logicalGrouping="MatchAll">
+            <add input="{REQUEST_FILENAME}" matchType="IsFile" negate="true" />
+            <add input="{REQUEST_FILENAME}" matchType="IsDirectory" negate="true" />
+          </conditions>
+          <action type="Rewrite" url="index.html" />
+        </rule>
+      </rules>
+    </rewrite>
+    <staticContent>
+      <remove fileExtension=".webmanifest" />
+      <mimeMap fileExtension=".webmanifest" mimeType="application/manifest+json" />
+    </staticContent>
+  </system.webServer>
+</configuration>
+```
+
+4. `.env` の `PUBLIC_URL` をサブパス込みの URL にする
+   （例 `PUBLIC_URL=https://service.example.co.jp/tsinternal/devrelay`）
+
+実機で踏んだ注意点:
+
+- **フォルダ階層の `web.config` では `<match url>` がそのフォルダからの相対 URL にマッチする。**
+  したがって `{R:0}` で転送するとプレフィックスが自然に剥がれ、Fastify が期待する `/api/...`
+  の絶対パスに戻る。既存の Express 系アプリ（`kitei` 等）がプレフィックスを剥がさずに
+  転送しているのとは逆になる点に注意（Fastify 側はルートが絶対パス固定で、かつ静的配信を
+  持たないため、静的ファイルは IIS が直接配信し、API だけを剥がして渡す形になる）
+- **`.webmanifest` の MIME 登録が無いと PWA マニフェストが 404.3 になる。**
+- **XML コメント内にハイフン 2 連（`--`）を書くと 500.19（エラーコード `0x8007000d`）で
+  そのフォルダ配下が全滅する。** デプロイコマンドを `web.config` のコメントに残す場合は
+  `pnpm -F` のような短縮形で書くこと
+- IIS WebSocket 機能が無効だと ARR が WebSocket を中継できず、Agent 接続が通らない
+  （パターン B と同じ。導入時に W3SVC 再起動が発生するためメンテナンス枠が必要）
+- 機械レベルの ARR タイムアウトは既定 `00:02:00`。長時間アイドルする WebSocket が
+  切断される可能性があるため、必要なら ARR のプロキシタイムアウトを延ばす
+
+- [ ] `https://<既存ホスト>/<サブパス>/` で WebUI が表示される
+- [ ] `/<サブパス>/health` が `{"status":"ok"}` を返す
+- [ ] `/<サブパス>/manifest.webmanifest` が `application/manifest+json` で 200 を返す
+- [ ] `/<サブパス>/chat` 等の SPA ルートが 200（`index.html` フォールバック）になる
+- [ ] `wss://<既存ホスト>/<サブパス>/ws/web` が `101 Switching Protocols` になる
+- [ ] 既存サイトが引き続き正常応答する（相乗り先のアプリを必ず確認する）
+
 ---
 
 ## Step 7: Windows サービス化
@@ -308,8 +389,15 @@ NSSM のプロセス環境変数で上書きする（上記「プロキシ設定
 Machine スコープの値に負ける）:
 
 ```powershell
-nssm set devrelay-server AppEnvironmentExtra HTTPS_PROXY= HTTP_PROXY=
+nssm set devrelay-server AppEnvironmentExtra "HTTPS_PROXY= " "HTTP_PROXY= " "https_proxy= " "http_proxy= "
 ```
+
+**値は空文字ではなく「空白 1 文字」にすること。** NSSM は `AppEnvironmentExtra` に空値
+（`HTTPS_PROXY=`）を渡すとレジストリ（`REG_MULTI_SZ`）には書き込むが、環境ブロックを
+組み立てる際に無視するため Machine スコープの値がそのまま残る（実機で確認。起動ログに
+`🌐 プロキシ経由で外向き通信します: ...` が出続ける）。空白 1 文字なら NSSM が値として
+保持し、`resolveProxyUrl()` 側の `candidate && candidate.trim() !== ''` 判定で除外されて
+プロキシが無効になる。
 
 停止は NSSM からの既定の停止要求（Ctrl+C 相当）で正常終了する。
 `apps/server/src/index.ts` は `SIGINT` / `SIGTERM` に加え、Windows サービスが送る
