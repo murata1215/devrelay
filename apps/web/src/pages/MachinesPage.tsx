@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/base';
 import { useEffect, useState } from 'react';
 import { machines } from '../lib/api';
 import type { Machine, MachineCreateResponse } from '../lib/api';
@@ -193,8 +194,8 @@ export function MachinesPage() {
       const [tokenResult, dirsResult, skipResult, autoUpdateResult, capabilityResult] = await Promise.all([
         machines.getToken(machine.id),
         machines.getProjectsDirs(machine.id),
-        fetch(`/api/machines/${machine.id}/skip-permissions`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ skipPermissions: false })),
-        fetch(`/api/machines/${machine.id}/auto-update`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ autoUpdate: true })),
+        fetch(apiUrl(`/machines/${machine.id}/skip-permissions`), { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ skipPermissions: false })),
+        fetch(apiUrl(`/machines/${machine.id}/auto-update`), { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()).catch(() => ({ autoUpdate: true })),
         machines.getCapabilityConfig(machine.id).catch(() => ({ capabilityConfig: null, capabilitySyncStatus: null, capabilitySyncSupported: null })),
       ]);
       setSettingsToken(tokenResult.token);
@@ -775,7 +776,7 @@ export function MachinesPage() {
                       const newValue = e.target.checked;
                       setSkipPermissionsLoading(true);
                       try {
-                        await fetch(`/api/machines/${settingsTarget!.id}/skip-permissions`, {
+                        await fetch(apiUrl(`/machines/${settingsTarget!.id}/skip-permissions`), {
                           method: 'PUT',
                           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
                           body: JSON.stringify({ skipPermissions: newValue }),
@@ -813,7 +814,7 @@ export function MachinesPage() {
                       const newValue = e.target.checked;
                       setAutoUpdateLoading(true);
                       try {
-                        await fetch(`/api/machines/${settingsTarget!.id}/auto-update`, {
+                        await fetch(apiUrl(`/machines/${settingsTarget!.id}/auto-update`), {
                           method: 'PUT',
                           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
                           body: JSON.stringify({ autoUpdate: newValue }),

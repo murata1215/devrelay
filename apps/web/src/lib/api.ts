@@ -1,5 +1,9 @@
-// 開発環境ではViteのプロキシを使用（相対パス）、本番環境でも相対パスでOK（Caddyがリバースプロキシ）
-const API_BASE = '/api';
+import { apiUrl, withBase } from './base';
+
+// 開発環境では Vite のプロキシ、本番ではリバースプロキシ（Caddy / IIS+ARR）が
+// `<base>api/*` をサーバーへ転送する。サブパス配信に追従させるため `lib/base` 経由で
+// 組み立てる（ルート配信なら従来どおり `/api` になる）。
+const API_BASE = apiUrl('');
 
 // サイクルP1: Capability 配布基盤の型は純ロジックモジュール側に定義済みのものを再利用する
 import type { CapabilityConfigLike, CapabilitySyncStatusLike } from './capability-config-rules';
@@ -43,7 +47,7 @@ async function request<T>(
     // セッション期限切れ → 自動ログアウト＆ログイン画面にリダイレクト
     if (response.status === 401 && error.error === 'Session expired') {
       clearToken();
-      window.location.href = '/login';
+      window.location.href = withBase('/login');
       throw new Error('Session expired');
     }
     throw new Error(error.error || `HTTP ${response.status}`);

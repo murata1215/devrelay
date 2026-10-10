@@ -3,6 +3,15 @@ import { cleanupOutdatedCaches, precacheAndRoute } from 'workbox-precaching';
 
 declare let self: ServiceWorkerGlobalScope;
 
+/**
+ * サブパス配信（`vite.config.ts` の `base`）に追従させるための前置パス。
+ * Service Worker 内では `import.meta.env.BASE_URL` も Vite が埋め込むが、
+ * SW の実際の管理範囲は登録スコープそのものなので、スコープを基準に
+ * 絶対 URL を組み立てる（スコープは必ず末尾 `/` を持つ）。
+ */
+const scopeUrl = (path: string): string =>
+  new URL(path.replace(/^\/+/, ''), self.registration.scope).href;
+
 // Workbox プリキャッシュ（ビルド時に自動注入される）
 cleanupOutdatedCaches();
 precacheAndRoute(self.__WB_MANIFEST);
@@ -30,8 +39,8 @@ self.addEventListener('push', (event) => {
     event.waitUntil(
       self.registration.showNotification(data.title || 'DevRelay', {
         body: data.body || '',
-        icon: '/icons/icon-192.png',
-        badge: '/icons/icon-192.png',
+        icon: scopeUrl('/icons/icon-192.png'),
+        badge: scopeUrl('/icons/icon-192.png'),
         tag: data.tag || 'devrelay-default',
         data: data.data,
       })
@@ -41,7 +50,7 @@ self.addEventListener('push', (event) => {
     event.waitUntil(
       self.registration.showNotification('DevRelay', {
         body: event.data.text(),
-        icon: '/icons/icon-192.png',
+        icon: scopeUrl('/icons/icon-192.png'),
       })
     );
   }
@@ -63,7 +72,7 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       // なければ新規ウィンドウで開く
-      return self.clients.openWindow('/chat');
+      return self.clients.openWindow(scopeUrl('/chat'));
     })
   );
 });

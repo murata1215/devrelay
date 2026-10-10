@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/base';
 import { useState, useEffect, useCallback } from 'react';
 import { useLanguage } from '../contexts/LanguageContext';
 
@@ -40,8 +41,8 @@ export function DevReportsPage() {
     try {
       const headers = getAuthHeaders();
       const [projRes, repRes] = await Promise.all([
-        fetch('/api/dev-reports/projects', { headers }),
-        fetch('/api/dev-reports', { headers }),
+        fetch(apiUrl('/dev-reports/projects'), { headers }),
+        fetch(apiUrl('/dev-reports'), { headers }),
       ]);
 
       if (projRes.ok) {
@@ -81,7 +82,7 @@ export function DevReportsPage() {
     setError(null);
 
     try {
-      const res = await fetch('/api/dev-reports', {
+      const res = await fetch(apiUrl('/dev-reports'), {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ projectName }),
@@ -111,7 +112,7 @@ export function DevReportsPage() {
     if (!confirm(t('reports.confirmDelete'))) return;
 
     try {
-      const res = await fetch(`/api/dev-reports/${reportId}`, {
+      const res = await fetch(apiUrl(`/dev-reports/${reportId}`), {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
@@ -127,7 +128,7 @@ export function DevReportsPage() {
   /** ZIP ダウンロード */
   const handleDownload = async (reportId: string) => {
     const token = localStorage.getItem('token');
-    window.open(`/api/dev-reports/${reportId}/download?token=${token}`, '_blank');
+    window.open(apiUrl(`/dev-reports/${reportId}/download?token=${token}`), '_blank');
   };
 
   /** 日時フォーマット */

@@ -6,8 +6,17 @@ import { VitePWA } from 'vite-plugin-pwa'
 import pkg from './package.json'
 
 // https://vite.dev/config/
+// サブパス配信（例: `/foo/devrelay/`）に対応するための公開ベースパス。
+// 未指定なら従来どおりルート配信（`'/'`）。前後のスラッシュは正規化するため
+// `foo/devrelay` のような指定でも動く。
+const base = (() => {
+  const raw = process.env.DEVRELAY_WEB_BASE?.trim();
+  if (!raw || raw === '/') return '/';
+  return `/${raw.replace(/^\/+|\/+$/g, '')}/`;
+})();
+
 export default defineConfig({
-  base: '/',
+  base,
   // #310: @devrelay/shared は CJS ビルド（dist/index.js）のみを持つ。
   // pnpm workspace のシンボリックリンクは realpath が node_modules の外
   // （/opt/devrelay/packages/shared/dist）になるため、Vite の
@@ -37,11 +46,14 @@ export default defineConfig({
         theme_color: '#000000',
         background_color: '#0f172a',
         display: 'standalone',
-        start_url: '/',
+        // Service Worker が制御できる範囲は配信パス以下に限られるため、
+        // start_url / scope / アイコンはすべて base に追従させる。
+        start_url: base,
+        scope: base,
         icons: [
-          { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
-          { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          { src: `${base}icons/icon-192.png`, sizes: '192x192', type: 'image/png' },
+          { src: `${base}icons/icon-512.png`, sizes: '512x512', type: 'image/png' },
+          { src: `${base}icons/icon-512.png`, sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       injectManifest: {

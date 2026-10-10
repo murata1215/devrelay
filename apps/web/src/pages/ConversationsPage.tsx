@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/base';
 import { useEffect, useState } from 'react';
 import { conversations, org as orgApi, getToken } from '../lib/api';
 import type { ConversationItem, ConversationsResponse, MessageFileMeta, OrgSupervisedMember } from '../lib/api';
@@ -68,7 +69,7 @@ function formatFileSize(bytes: number): string {
 /** ファイルのダウンロード/表示 URL を生成 */
 function fileUrl(fileId: string): string {
   const token = getToken();
-  return `/api/files/${fileId}?token=${token}`;
+  return apiUrl(`/files/${fileId}?token=${token}`);
 }
 
 /** ファイル一覧を表示するコンポーネント（画像はサムネイル + クリックで拡大） */

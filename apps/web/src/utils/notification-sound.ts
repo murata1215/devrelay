@@ -1,3 +1,4 @@
+import { withBase } from '../lib/base';
 /**
  * AI レスポンス完了時・メッセージ送信時の通知音ユーティリティ
  */
@@ -19,7 +20,7 @@ export function playNotificationSound(): void {
   if (!isNotificationSoundEnabled()) return;
 
   try {
-    const audio = new Audio('/sounds/notification.mp3');
+    const audio = new Audio(withBase('/sounds/notification.mp3'));
     audio.volume = 0.5;
     audio.play().catch(() => {});
   } catch {

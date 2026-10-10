@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/base';
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved, type ToolApprovalAuto } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
@@ -280,7 +281,7 @@ function TextPreviewCard({ file, fileUrl }: {
     // 履歴メッセージ: API から遅延取得
     if (file.id) {
       setLoading(true);
-      fetch(`/api/files/${file.id}?token=${getToken()}`)
+      fetch(apiUrl(`/files/${file.id}?token=${getToken()}`))
         .then(res => {
           if (!res.ok) throw new Error('fetch failed');
           return res.text();
@@ -389,7 +390,7 @@ function FilePreviewCard({ file, onImageClick }: {
     ? URL.createObjectURL(
         new Blob([Uint8Array.from(atob(file.content), c => c.charCodeAt(0))], { type: file.mimeType })
       )
-    : file.id ? `/api/files/${file.id}?token=${getToken()}` : '';
+    : file.id ? apiUrl(`/files/${file.id}?token=${getToken()}`) : '';
 
   if (!fileUrl) return null;
 
@@ -2834,14 +2835,14 @@ export function ChatPage() {
   useEffect(() => {
     if (!activeMachineId) return;
     if (skipPermissionsMap[activeMachineId] === undefined) {
-      fetch(`/api/machines/${activeMachineId}/skip-permissions`, {
+      fetch(apiUrl(`/machines/${activeMachineId}/skip-permissions`), {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       }).then(r => r.json()).then(data => {
         setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: data.skipPermissions }));
       }).catch(() => {});
     }
     if (disableAskMap[activeMachineId] === undefined) {
-      fetch(`/api/machines/${activeMachineId}/disable-ask`, {
+      fetch(apiUrl(`/machines/${activeMachineId}/disable-ask`), {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       }).then(r => r.json()).then(data => {
         setDisableAskMap(prev => ({ ...prev, [activeMachineId]: data.disableAsk }));
@@ -2853,7 +2854,7 @@ export function ChatPage() {
   useEffect(() => {
     if (!activeTabId) return;
     if (terminalModeMap[activeTabId] === undefined) {
-      fetch(`/api/projects/${activeTabId}/terminal-mode`, {
+      fetch(apiUrl(`/projects/${activeTabId}/terminal-mode`), {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       }).then(r => r.json()).then(data => {
         setTerminalModeMap(prev => ({ ...prev, [activeTabId]: data.terminalMode }));
@@ -2867,7 +2868,7 @@ export function ChatPage() {
     const newValue = !skipPermissionsMap[activeMachineId];
     setSkipPermissionsMap(prev => ({ ...prev, [activeMachineId]: newValue }));
     try {
-      await fetch(`/api/machines/${activeMachineId}/skip-permissions`, {
+      await fetch(apiUrl(`/machines/${activeMachineId}/skip-permissions`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
         body: JSON.stringify({ skipPermissions: newValue }),
@@ -2884,7 +2885,7 @@ export function ChatPage() {
     const newValue = !disableAskMap[activeMachineId];
     setDisableAskMap(prev => ({ ...prev, [activeMachineId]: newValue }));
     try {
-      await fetch(`/api/machines/${activeMachineId}/disable-ask`, {
+      await fetch(apiUrl(`/machines/${activeMachineId}/disable-ask`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
         body: JSON.stringify({ disableAsk: newValue }),
@@ -2902,7 +2903,7 @@ export function ChatPage() {
     const newValue = !terminalModeMap[projectId];
     setTerminalModeMap(prev => ({ ...prev, [projectId]: newValue }));
     try {
-      await fetch(`/api/projects/${projectId}/terminal-mode`, {
+      await fetch(apiUrl(`/projects/${projectId}/terminal-mode`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
         body: JSON.stringify({ terminalMode: newValue }),

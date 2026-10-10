@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/base';
 /**
  * プッシュ通知の許可バナー
  *
@@ -45,7 +46,7 @@ export function NotificationBanner() {
 
       // VAPID 公開鍵を取得
       const token = getToken();
-      const vapidRes = await fetch('/api/push/vapid-key', {
+      const vapidRes = await fetch(apiUrl('/push/vapid-key'), {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!vapidRes.ok) throw new Error('Failed to get VAPID key');
@@ -62,7 +63,7 @@ export function NotificationBanner() {
 
       // サーバーに登録
       const subJson = subscription.toJSON();
-      await fetch('/api/push/subscribe', {
+      await fetch(apiUrl('/push/subscribe'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

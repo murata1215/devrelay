@@ -180,7 +180,7 @@ function AppRoutes() {
 export default function App() {
   return (
     <ThemeProvider>
-      <BrowserRouter basename="/">
+      <BrowserRouter basename={import.meta.env.BASE_URL}>
         <AuthProvider>
           <LanguageProvider>
             {/* 最外周の最終防御。ページ単位の ErrorBoundary（ProtectedContent 内）が本命だが、

@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/base';
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -42,7 +43,7 @@ export function RegisterPage() {
         <div className="mt-6">
           <button
             type="button"
-            onClick={() => { window.location.href = '/api/auth/google'; }}
+            onClick={() => { window.location.href = apiUrl('/auth/google'); }}
             className="w-full flex items-center justify-center gap-3 py-2 px-4 border border-[var(--border-color)] rounded-md shadow-sm text-sm font-medium text-[var(--text-primary)] bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] transition-colors"
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24">

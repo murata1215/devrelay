@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/base';
 import { useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -39,7 +40,7 @@ export function LoginPage() {
     } else {
       sessionStorage.removeItem(LOGIN_NEXT_STORAGE_KEY);
     }
-    window.location.href = '/api/auth/google';
+    window.location.href = apiUrl('/auth/google');
   };
 
   return (

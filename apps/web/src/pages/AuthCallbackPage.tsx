@@ -1,3 +1,4 @@
+import { withBase } from '../lib/base';
 import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { setToken } from '../lib/api';
@@ -30,7 +31,7 @@ export function AuthCallbackPage() {
     // タイミングを揃えるため同じ 200ms 待ちに乗せる。
     const timer = setTimeout(() => {
       void maybeRedirectAfterLogin(stashedNext).then((moved) => {
-        if (!moved) window.location.replace('/');
+        if (!moved) window.location.replace(withBase('/'));
       });
     }, 200);
     return () => clearTimeout(timer);

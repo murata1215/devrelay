@@ -1,3 +1,4 @@
+import { wsUrl } from '../lib/base';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getToken } from '../lib/api';
 import { getTabId } from '../lib/tab-id';
@@ -92,9 +93,9 @@ interface UseWebSocketReturn {
 /** WebSocket URL を構築 */
 function buildWsUrl(tabId: string): string {
   const token = getToken();
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.host;
-  return `${protocol}//${host}/ws/web?token=${token}&tabId=${tabId}`;
+  // スキームとホストの決定、および base（サブパス配信時の前置パス）の付与は
+  // `lib/base` の `wsUrl()` に集約している。
+  return `${wsUrl('/ws/web')}?token=${token}&tabId=${tabId}`;
 }
 
 /** Lite シェル L3: `useWebSocket` の optional 引数。 */
