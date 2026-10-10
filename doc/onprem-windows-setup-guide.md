@@ -463,24 +463,48 @@ curl -fsSL https://<社内ドメイン>/install-agent.sh | bash -s -- --token "<
 
 ### サーバーが社内ネットワークにある場合のプロキシ指定
 
-**インストーラのプロキシ質問に `y` と答えてはいけない（社内サーバーに接続できなくなる）。**
+社内に Server を立て、AI API（Anthropic 等）だけ社内プロキシ経由で外に出す構成では、
+**プロキシ質問に `y` と答えてよい**（インストール時の `git clone` / `pnpm install` に
+プロキシが必要なため、むしろ `y` が必要）。
 
-`DEVRELAY_PROXY` を指定すると `config.yaml` に `proxy.url` が書き込まれ、Agent は
+インストーラは `y` のとき、**Server へ直結できるかを実際にプローブし、直結できる場合だけ
+Server のホストを `config.yaml` の `proxy.noProxy` に書く**。これにより
+
+- Server への WebSocket 接続 → 直結
+- AI CLI の外部 API → プロキシ経由
+
+に分かれる。生成される `config.yaml` はこうなる:
+
+```yaml
+proxy:
+  url: "http://proxy.corp.example:8080"
+  noProxy:
+    - "service.corp.example"
+```
+
+`noProxy` は `NO_PROXY` 記法（カンマ区切り・`*`・ドメインサフィックス・`host:port`）で、
+`$env:DEVRELAY_NO_PROXY` / `DEVRELAY_NO_PROXY` で明示指定もできる。
+
+**なぜ必要か**: `config.yaml` に `proxy.url` を書くと、Agent は
 **サーバーへの WebSocket 接続にもそのプロキシを使う**
 （`agents/*/src/services/connection.ts` が `HttpsProxyAgent` を WS の agent に設定する）。
-`ProxyConfig` にバイパス指定（no_proxy 相当）は無いため、社内サーバー宛の接続まで
-社内プロキシへ送られて失敗する。
+社内プロキシは社内アドレスへ到達できないのが通常なので、`noProxy` が無いと
+プロキシを指定した途端に Agent が Server に接続できなくなる
+（実測: 社内プロキシ経由で社内サーバー → 接続不可 / 直結 → 200）。
 
-社内サーバー + 外部 AI API という構成では、プロキシは **Agent の設定ではなく OS の
-環境変数で与える**こと:
+`noProxy` に対応していない古い Agent を使う場合は、`config.yaml` の `proxy` ブロックを
+削除し、プロキシを **OS の環境変数で与える**ことで同じ状態にできる:
 
 - Windows: Machine スコープの `HTTPS_PROXY` / `HTTP_PROXY`（+ `git config --global http.proxy`、
   `npm config set proxy`）。Agent が起動する AI CLI は親プロセスの環境を継承するため、
   `config.yaml` に `proxy` が無くてもプロキシ経由で外部 API に出られる
 - Linux/macOS: systemd の `Environment=` やシェルのプロファイル
 
-インストーラのプロキシ指定が必要なのは、**サーバー自体がプロキシ越しにしか見えない場合**
-（インターネット経由のマネージド環境など）に限られる。
+**既知の制約**: インストーラの Node 自動ダウンロードとトークン事前検証は
+`Invoke-WebRequest` / `Invoke-RestMethod` を使うが、PowerShell 5.1 のこれらは
+`HTTP_PROXY` 環境変数ではなく**システム（IE）のプロキシ設定**を見る。Node 未導入かつ
+システムプロキシ未設定の端末では、`DEVRELAY_PROXY` を指定しても Node のダウンロードに
+失敗する。その場合は Node 20 以上を手動で導入してから再実行する。
 
 ### DevRelay Server と同じホストに Agent を同居させる場合の注意
 
