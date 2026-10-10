@@ -136,6 +136,23 @@ if ($ProxyUrl) {
     $env:HTTPS_PROXY = $ProxyUrl
 }
 
+# 外部ファイルのダウンロード共通処理。
+#
+# PowerShell 5.1 の Invoke-WebRequest は **HTTP_PROXY / HTTPS_PROXY 環境変数を見ない**
+# （システム＝IE のプロキシ設定を使う）。上で環境変数をセットしても、この後の
+# Node 本体や node-pty prebuilt のダウンロードには一切効かないため、`-Proxy` を
+# 明示的に渡す必要がある。これが無いと「プロキシを指定したのに Node が落ちてこない」
+# という分かりにくい失敗になる（システムプロキシ未設定の端末で再現）。
+function Invoke-DownloadFile {
+    param(
+        [Parameter(Mandatory = $true)][string] $Uri,
+        [Parameter(Mandatory = $true)][string] $OutFile
+    )
+    $params = @{ Uri = $Uri; OutFile = $OutFile; UseBasicParsing = $true; ErrorAction = 'Stop' }
+    if ($ProxyUrl) { $params['Proxy'] = $ProxyUrl }
+    Invoke-WebRequest @params
+}
+
 # =============================================================================
 # Step 1: 依存ツール確認
 # =============================================================================
@@ -158,7 +175,7 @@ function Install-PortableNode {
             $tmpZip = Join-Path $env:TEMP "devrelay-node-$NodeDlVersion-$NodeArch.zip"
             $tmpExtract = Join-Path $env:TEMP "devrelay-node-extract-$NodeDlVersion-$NodeArch"
             Write-Host "     ダウンロード: $NodeZipUrl"
-            Invoke-WebRequest -Uri $NodeZipUrl -OutFile $tmpZip -UseBasicParsing -ErrorAction Stop
+            Invoke-DownloadFile -Uri $NodeZipUrl -OutFile $tmpZip
             if (Test-Path $tmpExtract) { Remove-Item $tmpExtract -Recurse -Force }
             Expand-Archive -Path $tmpZip -DestinationPath $tmpExtract -Force
             # Windows 版 zip は node-v20.20.0-win-x64\ という単一フォルダ直下に node.exe があり、
@@ -865,7 +882,7 @@ foreach ($d in $ptyDirs) {
         $tmp = "$env:TEMP\node-pty-prebuild-$abi.tar.gz"
         Write-Host "  conpty.node が見つかりません。手動 download: $url"
         try {
-            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+            Invoke-DownloadFile -Uri $url -OutFile $tmp
             # Windows 10+ 内蔵の tar コマンドで展開
             & tar -xzf $tmp -C $ptyPkg
             Remove-Item $tmp -Force

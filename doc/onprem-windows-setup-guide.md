@@ -500,11 +500,16 @@ proxy:
   `config.yaml` に `proxy` が無くてもプロキシ経由で外部 API に出られる
 - Linux/macOS: systemd の `Environment=` やシェルのプロファイル
 
-**既知の制約**: インストーラの Node 自動ダウンロードとトークン事前検証は
-`Invoke-WebRequest` / `Invoke-RestMethod` を使うが、PowerShell 5.1 のこれらは
-`HTTP_PROXY` 環境変数ではなく**システム（IE）のプロキシ設定**を見る。Node 未導入かつ
-システムプロキシ未設定の端末では、`DEVRELAY_PROXY` を指定しても Node のダウンロードに
-失敗する。その場合は Node 20 以上を手動で導入してから再実行する。
+**既知の制約**: PowerShell 5.1 の `Invoke-WebRequest` / `Invoke-RestMethod` は
+`HTTP_PROXY` 環境変数を見ず、**システム（IE）のプロキシ設定**を使う。
+
+- Node 本体と node-pty prebuilt のダウンロードは `-Proxy` を明示的に渡すよう修正済みで、
+  `DEVRELAY_PROXY` が効く
+- **トークン事前検証（`/api/public/validate-token`）はシステムプロキシを使う。**
+  その端末のシステムプロキシに社内ドメインのバイパスが設定されていないと、
+  Server へ到達できず「サーバーに接続できません」で中断する。ブラウザから社内 URL が
+  見えていれば通常は通るが、失敗する場合は `$env:DEVRELAY_FORCE="true"` を付けて
+  検証をスキップする（Agent 本体の接続は `noProxy` により直結するため動作する）
 
 ### DevRelay Server と同じホストに Agent を同居させる場合の注意
 
