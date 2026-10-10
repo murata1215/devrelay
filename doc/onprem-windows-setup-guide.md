@@ -3,6 +3,9 @@
 `doc/service-setup-guide.md`（VPS/Ubuntu 向け）の社内 Windows Server 版。
 現行 `devrelay.io`（VPS）とは**別インスタンス・別 DB**として新規構築する。データ移行は行わない。
 
+既存サービスが稼働しているホストへ相乗りした実例と、実際に踏んだ問題の症状別まとめは
+`doc/onprem-windows-case-study.md` にある。エラーメッセージで詰まったときはそちらを参照。
+
 ## 前提・スコープ
 
 - **testflight / DevRelay Sites は使わない**（`sudo`/`systemctl`/Caddy 前提のため Windows では動かない）

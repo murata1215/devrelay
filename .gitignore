@@ -54,3 +54,7 @@ test-ask-user.mjs
 
 # Internal incident reports (contain secrets: DB passwords, internal IPs)
 doc/testflight_error_20260425.md
+
+# 社内固有の構築記録・調査メモ（ホスト名 / IP / メールアドレス等を含むため公開しない）。
+# 他環境でも使える知見は匿名化して doc/ 直下のドキュメントへ反映する。
+doc/local/
