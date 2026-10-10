@@ -4,6 +4,9 @@ import {
   shouldRouteToTab,
   resolveHistorySource,
   decideInboundDisplay,
+  resolveOlderMessagesSource,
+  pickOlderCursorId,
+  isSameHistorySource,
 } from '../dist-test/lib/thread-routing-client.js';
 
 describe('shouldRouteToTab（fail-open: 両方あって不一致のときだけ drop）', () => {
@@ -130,5 +133,93 @@ describe('decideInboundDisplay（session ゲート優先 + 判定不能時のみ
       tabProjectId: 'proj-other',
     });
     assert.deepEqual(result, { display: false, reason: 'project-mismatch' });
+  });
+});
+
+describe('resolveOlderMessagesSource（スクロールバック時の取得元を loadHistory と揃える）', () => {
+  test('historySessionId が string → スレッド単位（表示中の履歴と同じカーソル空間）', () => {
+    const result = resolveOlderMessagesSource({
+      historySessionId: 'sess-1',
+      tabSessionId: 'sess-1',
+      projectId: 'proj-1',
+    });
+    assert.deepEqual(result, { kind: 'session', id: 'sess-1' });
+  });
+
+  test('historySessionId が string → tabSessionId と異なっていても historySessionId を優先（表示中の履歴に合わせる）', () => {
+    const result = resolveOlderMessagesSource({
+      historySessionId: 'sess-1',
+      tabSessionId: 'sess-2',
+      projectId: 'proj-1',
+    });
+    assert.deepEqual(result, { kind: 'session', id: 'sess-1' });
+  });
+
+  test('historySessionId が null → loadHistory がプロジェクト横断で読んだので横断を継続', () => {
+    const result = resolveOlderMessagesSource({
+      historySessionId: null,
+      tabSessionId: 'sess-1',
+      projectId: 'proj-1',
+    });
+    assert.deepEqual(result, { kind: 'project', id: 'proj-1' });
+  });
+
+  test('historySessionId が undefined（loadHistory 未実行）→ tabSessionId にフォールバック', () => {
+    const result = resolveOlderMessagesSource({
+      historySessionId: undefined,
+      tabSessionId: 'sess-1',
+      projectId: 'proj-1',
+    });
+    assert.deepEqual(result, { kind: 'session', id: 'sess-1' });
+  });
+
+  test('historySessionId・tabSessionId 両方無し → プロジェクト横断にフォールバック', () => {
+    const result = resolveOlderMessagesSource({ projectId: 'proj-1' });
+    assert.deepEqual(result, { kind: 'project', id: 'proj-1' });
+  });
+});
+
+describe('pickOlderCursorId（before カーソルに使える DB 由来 ID を選ぶ）', () => {
+  test('先頭が DB ID ならそれを返す', () => {
+    const result = pickOlderCursorId([{ id: 'db-id-1' }, { id: 'msg_123_1' }]);
+    assert.equal(result, 'db-id-1');
+  });
+
+  test('先頭がクライアント生成 ID（msg_ プレフィックス）なら次の DB ID まで走査する', () => {
+    const result = pickOlderCursorId([{ id: 'msg_123_1' }, { id: 'db-id-2' }]);
+    assert.equal(result, 'db-id-2');
+  });
+
+  test('全部クライアント生成 ID なら null（カーソル無効）', () => {
+    const result = pickOlderCursorId([{ id: 'msg_123_1' }, { id: 'msg_124_2' }]);
+    assert.equal(result, null);
+  });
+
+  test('空配列なら null', () => {
+    const result = pickOlderCursorId([]);
+    assert.equal(result, null);
+  });
+});
+
+describe('isSameHistorySource（レースガード用の同値判定）', () => {
+  test('kind・id とも一致すれば true', () => {
+    assert.equal(
+      isSameHistorySource({ kind: 'session', id: 'sess-1' }, { kind: 'session', id: 'sess-1' }),
+      true
+    );
+  });
+
+  test('kind が違えば false（同じ id でも session と project は別物）', () => {
+    assert.equal(
+      isSameHistorySource({ kind: 'session', id: 'x' }, { kind: 'project', id: 'x' }),
+      false
+    );
+  });
+
+  test('id が違えば false', () => {
+    assert.equal(
+      isSameHistorySource({ kind: 'session', id: 'sess-1' }, { kind: 'session', id: 'sess-2' }),
+      false
+    );
   });
 });

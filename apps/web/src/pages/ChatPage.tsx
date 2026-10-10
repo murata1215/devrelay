@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
 import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT, type DocPanelSettings } from '../utils/doc-panel-settings';
 import { useLanguage } from '../contexts/LanguageContext';
-import { shouldRouteToTab, resolveHistorySource } from '../lib/thread-routing-client';
+import { shouldRouteToTab, resolveHistorySource, resolveOlderMessagesSource, pickOlderCursorId, isSameHistorySource } from '../lib/thread-routing-client';
 import { buildThreadSwitchPatch } from '../lib/thread-switch-rules';
 import { resolveCancelPhase, decideCancelClick, type CancelUiState, type CancelPhase } from '../lib/cancel-request-rules';
 import { ThreadList } from '../components/ThreadList';
@@ -2209,6 +2209,15 @@ export function ChatPage() {
   const loadHistory = useCallback(async (projectId: string, sessionId?: string | null, mode: 'initial' | 'refresh' | 'replace' = 'initial') => {
     // 履歴読み込み中はスクロールを抑制
     shouldAutoScrollRef.current = false;
+    // レースガード用スナップショット: リクエスト開始時点の historySessionId を保持する。
+    // 応答到着時にこれが変わっていれば、フェッチ中に別の loadHistory（スレッド切替の 'replace' 等）
+    // が先に完了したということなので stale response として破棄する（'replace' 自身は対象外）。
+    const requestHistorySessionId = tabsRef.current.find(t => t.projectId === projectId)?.historySessionId;
+    // スレッド切替時は initialLoadCompleteRef をリセットし、新スレッドで loadOlderMessages の
+    // 連鎖発火ガードを再び有効化する（旧スレッドで一度 true になった後ずっと true のままだった）
+    if (mode === 'replace') {
+      initialLoadCompleteRef.current = false;
+    }
     // 読み込み中フラグを立てる
     setTabs(prev => prev.map(t =>
       t.projectId === projectId ? { ...t, loadingHistory: true } : t
@@ -2240,6 +2249,12 @@ export function ChatPage() {
 
       setTabs(prev => prev.map(t => {
         if (t.projectId !== projectId) return t;
+        // レースガード（'replace' 以外）: フェッチ中に別の loadHistory が先に完了していたら
+        // （代表例: スレッド切替の 'replace'）stale response として破棄する
+        if (mode !== 'replace' && t.historySessionId !== requestHistorySessionId) {
+          console.log(`[loadHistory] discarded stale response: mode=${mode}, requestHistorySessionId=${requestHistorySessionId}, current=${t.historySessionId}`);
+          return { ...t, loadingHistory: false };
+        }
         // 診断ログ: setTabs 時点での既存メッセージ状態（古いメッセージ混入経路の特定用）
         console.log(`[loadHistory:setTabs] tab=${t.projectId.substring(0, 8)}, existing=${t.messages.length}, historyLoaded=${t.historyLoaded}, mode=${mode}${t.messages.length > 0 ? `, oldest=${t.messages[0].content.substring(0, 40).replace(/\n/g, ' ')}` : ''}`);
         if (mode === 'replace') {
@@ -2955,11 +2970,29 @@ export function ChatPage() {
     const tab = tabsRef.current.find(t => t.projectId === tabId);
     if (!tab || !tab.hasMoreHistory || tab.loadingHistory) return;
 
-    const oldestMsg = tab.messages[0];
-    if (!oldestMsg) return;
+    // バグ修正: スクロールバック時は、表示中の履歴と同じ取得元（スレッド単位 or プロジェクト横断）
+    // を踏襲する。以前は常にプロジェクト横断で取得しており、スレッド表示中に上スクロールすると
+    // 別スレッドのメッセージが混入していた（スレッド表示中に上スクロール→下に戻ると別スレッドの
+    // 内容が表示されるバグの直接原因）。
+    const source = resolveOlderMessagesSource({
+      historySessionId: tab.historySessionId,
+      tabSessionId: tab.sessionId,
+      projectId: tabId,
+    });
+
+    // before カーソルは DB 由来 ID のみ有効（クライアント生成 ID だとサーバがカーソル条件を
+    // 無視して最新 N 件を返してしまう）。見つからなければページネーションを打ち切る。
+    const cursorId = pickOlderCursorId(tab.messages);
+    if (!cursorId) {
+      console.log('[loadOlderMessages] blocked: no DB-origin cursor id available');
+      setTabs(prev => prev.map(t =>
+        t.projectId === tabId ? { ...t, loadingHistory: false } : t
+      ));
+      return;
+    }
 
     // 診断ログ: loadOlderMessages 発火（スクロールバックで古いメッセージ読み込み）
-    console.log(`[loadOlderMessages] triggered! tabId=${tabId.substring(0, 8)}, msgs=${tab.messages.length}, oldest=${oldestMsg.content.substring(0, 40).replace(/\n/g, ' ')}`);
+    console.log(`[loadOlderMessages] triggered! tabId=${tabId.substring(0, 8)}, source=${source.kind}, msgs=${tab.messages.length}, cursor=${cursorId.substring(0, 12)}`);
 
     const prevScrollHeight = container.scrollHeight;
     shouldAutoScrollRef.current = false;
@@ -2968,8 +3001,11 @@ export function ChatPage() {
       t.projectId === tabId ? { ...t, loadingHistory: true } : t
     ));
 
-    // プロジェクト横断で全セッションのメッセージを取得
-    projectsApi.getMessages(tabId, { before: oldestMsg.id, limit: 20 }).then(({ messages, hasMore }) => {
+    const fetchPromise = source.kind === 'session'
+      ? sessionsApi.getMessages(source.id, { before: cursorId, limit: 20 })
+      : projectsApi.getMessages(source.id, { before: cursorId, limit: 20 });
+
+    fetchPromise.then(({ messages, hasMore }) => {
       const chatMessages: ChatMessage[] = messages.map(m => ({
         id: m.id,
         role: m.role === 'ai' ? 'system' as const : m.role,
@@ -2981,6 +3017,17 @@ export function ChatPage() {
 
       setTabs(prev => prev.map(t => {
         if (t.projectId !== tabId) return t;
+        // レースガード: フェッチ中にスレッドが切り替わっていたら stale response を破棄
+        // （別スレッドへの流し込み防止）
+        const current = resolveOlderMessagesSource({
+          historySessionId: t.historySessionId,
+          tabSessionId: t.sessionId,
+          projectId: t.projectId,
+        });
+        if (!isSameHistorySource(current, source)) {
+          console.log(`[loadOlderMessages] discarded stale response: requested=${source.kind}:${source.id.substring(0, 8)}, current=${current.kind}:${current.id.substring(0, 8)}`);
+          return { ...t, loadingHistory: false };
+        }
         const existingIds = new Set(t.messages.map(m => m.id));
         const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
         const merged = [...newMsgs, ...t.messages];

@@ -113,3 +113,55 @@ export function decideInboundDisplay(input: DecideInboundDisplayInput): InboundD
   }
   return { display: true, reason: 'project-fallback-accept' };
 }
+
+/** `resolveOlderMessagesSource` の入力。 */
+export interface ResolveOlderMessagesSourceInput {
+  /** `loadHistory` が直前に実際に読み込んだ取得元（`Tab.historySessionId`）。
+   *  string = スレッド単位で読んだ、null = プロジェクト横断で読んだ、undefined = まだ読んでいない。 */
+  historySessionId?: string | null;
+  /** タブが現在表示しているスレッドの sessionId（`historySessionId` が undefined のときのフォールバック用）。 */
+  tabSessionId?: string | null;
+  projectId: string;
+}
+
+/**
+ * スクロールバック時（`loadOlderMessages`）の履歴取得元を解決する。
+ *
+ * バグ修正: 従来は常に `projectsApi.getMessages()`（プロジェクト横断）を使っており、
+ * `loadHistory` がスレッド単位で表示した履歴に対して、上スクロールだけ別スレッドの
+ * メッセージを混入させていた（スレッド表示中に上スクロール→別スレッドの内容が
+ * 表示されるバグの直接原因）。表示中の履歴と**同じカーソル空間**を維持するため、
+ * 直前の `loadHistory` が実際に使った取得元（`historySessionId`）を最優先で踏襲する。
+ */
+export function resolveOlderMessagesSource(input: ResolveOlderMessagesSourceInput): HistorySource {
+  if (input.historySessionId === undefined) {
+    // loadHistory 未実行（初回ロード前にスクロールが発火した等）→ 従来のフォールバックに委譲
+    return resolveHistorySource({ sessionId: input.tabSessionId, projectId: input.projectId });
+  }
+  if (input.historySessionId === null) {
+    // loadHistory が明示的にプロジェクト横断で読んだ → 表示も横断なので継続
+    return { kind: 'project', id: input.projectId };
+  }
+  // loadHistory が実際にスレッド単位で読んだ → 表示中はそのスレッド
+  return { kind: 'session', id: input.historySessionId };
+}
+
+/**
+ * `before` カーソルに使える DB 由来のメッセージ ID を選ぶ。
+ * クライアント生成 ID（`msg_<timestamp>_<n>` 形式、`nextMessageId()` 参照）はサーバの
+ * `findUnique` で解決できず、サーバ側がカーソル条件を無視して最新 N 件を返してしまう
+ * （時系列崩れ・重複の原因）ため、先頭から走査して最初の非クライアント生成 ID を返す。
+ */
+export function pickOlderCursorId(messages: { id: string }[]): string | null {
+  for (const m of messages) {
+    if (!m.id.startsWith('msg_')) return m.id;
+  }
+  return null;
+}
+
+/** `resolveOlderMessagesSource` / `resolveHistorySource` の結果同士が同じ取得元を指すか判定する。
+ *  `loadOlderMessages` / `loadHistory` の応答適用時、フェッチ中にスレッドが切り替わっていないかの
+ *  レースガードに使う。 */
+export function isSameHistorySource(a: HistorySource, b: HistorySource): boolean {
+  return a.kind === b.kind && a.id === b.id;
+}
