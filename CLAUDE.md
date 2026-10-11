@@ -75,7 +75,8 @@ pm2 restart devrelay-server
 | DEVRELAY_MCP_ASK | MCP の `ask_project` / `get_answer` ツールを登録するか（既定 `1`。`0` で登録自体をやめるキルスイッチ。`cancel_submission` と既存 8 ツールには影響しない） |
 | DEVRELAY_MCP_ANSWER_RAW | MCP `get_answer.answer` / `get_plan.planMarkdown`・`summary` から進捗表示行（📊 Rate Limit / 🔧 …を使用中... 等）を除去するかの逆キルスイッチ（既定 `0` = 除去する。`1` で従来どおり原文を返す）。`get_build_status.tail` 等の進捗確認用フィールドには影響しない |
 | DEVRELAY_PROGRESS_CANCEL_HINT | Discord/Telegram の進捗ボックス（実行中... N分経過）に「`k` で停止できます」の案内行（60秒経過後）を出すか（既定 `1`。`0` で無効化するキルスイッチ。WebUI は進捗表示に停止ボタンがあるため対象外） |
-| DEVRELAY_KNOWLEDGE | 会話ターンのナレッジ化（`KnowledgeChunk` への embedding 生成）と MCP `search_knowledge` / REST `GET /api/knowledge/search` を有効にするか（既定 `1`。`0` で MCP ツール未登録・REST 404・新規会話での行作成も停止するキルスイッチ。バックフィル CLI（`knowledge:backfill`）はこの変数を見ない＝明示実行は常時可） |
+| DEVRELAY_KNOWLEDGE | 会話ターンのナレッジ化（`KnowledgeChunk` への embedding 生成）と MCP `search_knowledge` / REST `GET /api/knowledge/search` を有効にするか（既定 `1`。`0` で MCP ツール未登録・REST 404・新規会話での行作成も停止するキルスイッチ。バックフィル CLI（`knowledge:backfill`）はこの変数を見ない＝明示実行は常時可。サイクル2 の `get_knowledge_thread` / `set_thread_classification` / `routes/knowledge-admin-api.ts` も同じキルスイッチを共用） |
+| DEVRELAY_EMBEDDING_API_KEY | 高辻ナレッジ サイクル2: embedding 生成・検索に使う組織共通の OpenAI API キー。個人キー（UserSettings）が未設定のユーザーのフォールバック先（優先順位: 個人キー → 本変数）。未設定時は個人キーのみで従来どおり動作（個人キーも無ければ `skipped`）。値はログに出さない |
 
 ## DB テーブル（概要）
 
@@ -96,6 +97,7 @@ pm2 restart devrelay-server
 | ToolApproval | ツール承認履歴（exec モードの canUseTool 記録） |
 | Notification | プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理） |
 | KnowledgeChunk | 高辻ナレッジ: 会話ターン（AI 応答＋直前の人間入力）の検索用チャンク（キーワード ILIKE + pgvector ベクトルのハイブリッド検索。FK は張らない） |
+| UserClearance | 高辻ナレッジ サイクル2: 人の権限（`readLevel`/`writeLevel` 0〜10、`compartments String[]`。行が無ければ既定値 0/0/[]。`userId` unique、FK なし） |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`

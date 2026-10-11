@@ -56,7 +56,7 @@ import {
   buildCancelClaimWhere,
   isMcpAskEnabled,
 } from '../services/ask-guard.js';
-import { searchKnowledge } from '../services/knowledge-service.js';
+import { searchKnowledge, getKnowledgeThread, setThreadClassification } from '../services/knowledge-service.js';
 import { isKnowledgeEnabled } from '../services/knowledge-rank.js';
 
 /**
@@ -531,19 +531,26 @@ export function registerMcpTools(server: McpServer, userId: string) {
   );
 
   // ============================================================
-  // 高辻ナレッジ サイクル1: search_knowledge（会話ターンのハイブリッド検索）
+  // 高辻ナレッジ サイクル1/2: search_knowledge（会話ターンのハイブリッド検索）/
+  // get_knowledge_thread（他人のスレッドを可視判定つきで読む）
   // ============================================================
   if (isKnowledgeEnabled(process.env.DEVRELAY_KNOWLEDGE)) {
     /**
      * search_knowledge — 会話ターン（指示/質問＋AI 応答）をキーワード＋ベクトルのハイブリッドで検索
+     * サイクル2: 既定で同じ組織の可視判定を通る他人の会話も検索対象になる（scope='all'）。
      */
     server.tool(
       'search_knowledge',
       'Search the user\'s accumulated knowledge — past AI conversations (instructions, plans, ' +
-      'implementation reports, research Q&A) across ALL the user\'s projects — by keyword and by ' +
-      'meaning (hybrid). Use this to find how/why something was built, what was investigated before, ' +
-      'or prior decisions, before submitting a new instruction. Results are conversation turns; use ' +
-      'get_conversation_history(projectId, after/before around occurredAt) to read the full thread. ' +
+      'implementation reports, research Q&A) by keyword and by meaning (hybrid). By default (scope ' +
+      '"all") this includes the user\'s own conversations across ALL their projects, plus other ' +
+      'organization members\' conversations that are visible under the numeric classification system ' +
+      '(level 0-10 + named compartments) — see the viewer field in the response for your own ' +
+      'readLevel/compartments. Use this to find how/why something was built, what was investigated ' +
+      'before, or prior decisions, before submitting a new instruction. Results are conversation turns; ' +
+      'for your OWN turns use get_conversation_history(projectId, after/before around occurredAt) to ' +
+      'read the full thread; for OTHER members\' turns (isOwn:false) use ' +
+      'get_knowledge_thread(sessionId) instead (reading another member\'s thread is audit-logged). ' +
       'For recent build summaries of ONE project use search_project_context instead.',
       {
         query: z.string().describe('Search query (keyword or natural-language description of what to find)'),
@@ -559,23 +566,63 @@ export function registerMcpTools(server: McpServer, userId: string) {
         since: z.string().optional().describe('Only include turns at or after this ISO timestamp'),
         until: z.string().optional().describe('Only include turns at or before this ISO timestamp'),
         limit: z.number().optional().describe('Max results to return (default 10, max 30)'),
+        scope: z.enum(['all', 'mine']).optional().describe(
+          'Search scope (default "all"): "all" includes other organization members\' visible ' +
+          'conversations; "mine" restricts to only the caller\'s own conversations.'
+        ),
+        compartment: z.string().optional().describe('Limit results to this named compartment (project/case name) only.'),
+        maxLevel: z.number().optional().describe('Limit results to this classification level or lower (0-10).'),
       },
-      async ({ query, mode, projectId, kind, since, until, limit }) => {
-        const result = await searchKnowledge({ userId, query, mode, projectId, kind, since, until, limit });
+      async ({ query, mode, projectId, kind, since, until, limit, scope, compartment, maxLevel }) => {
+        const result = await searchKnowledge({ userId, query, mode, projectId, kind, since, until, limit, scope, compartment, maxLevel });
         if (!result.ok) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error }) }], isError: true };
         }
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({
+            viewer: result.viewer,
             query: result.query,
             mode: result.mode,
             coverage: result.coverage,
             total: result.total,
             results: result.results,
             ...(result.results.length > 0
-              ? { hint: 'Call get_conversation_history(projectId, after/before around occurredAt, limit=50) to read the full thread.' }
+              ? { hint: 'For your own turns (isOwn:true), call get_conversation_history(projectId, after/before around occurredAt, limit=50) to read the full thread. For other members\' turns (isOwn:false), call get_knowledge_thread(sessionId) instead (audit-logged).' }
               : {}),
           }, null, 2) }],
+        };
+      }
+    );
+
+    /**
+     * get_knowledge_thread — 高辻ナレッジ サイクル2: 他人のスレッドを可視判定つきで 1 件読む。
+     * 不可視・不存在のどちらも同一文言を返す（存在の有無を漏らさない）。他人のスレッドを
+     * 読んだ場合は監査ログ（SupervisionAuditLog）に記録される。添付ファイルは返さない
+     * （`get_attachment` が自分スコープのままのため非スコープ）。
+     */
+    server.tool(
+      'get_knowledge_thread',
+      'Read one full conversation thread by sessionId, as surfaced by search_knowledge. Works for ' +
+      'your own threads AND other organization members\' threads that are visible to you under the ' +
+      'classification system (reading another member\'s thread is audit-logged in SupervisionAuditLog). ' +
+      'Returns a "Thread not found or not visible" error for both nonexistent and invisible sessions ' +
+      '(this tool never reveals which case applies). Does not include attachments — use ' +
+      'get_conversation_history/get_attachment for your own threads\' attachments.',
+      {
+        sessionId: z.string().describe('The session ID (thread) to read, e.g. from a search_knowledge result'),
+        limit: z.number().optional().describe('Number of messages to return (default 50, max 200)'),
+        before: z.string().optional().describe('Return messages before this ISO timestamp (for backward pagination)'),
+        after: z.string().optional().describe('Return messages after this ISO timestamp (for forward pagination)'),
+        tail: z.boolean().optional().describe('Keep the END of each message body instead of the beginning when it exceeds the 2000-character limit (default false).'),
+      },
+      async ({ sessionId, limit, before, after, tail }) => {
+        const result = await getKnowledgeThread({ viewerUserId: userId, sessionId, limit, before, after, tail });
+        if (!result.ok) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error }) }], isError: true };
+        }
+        const { ok: _ok, ...body } = result;
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(body, null, 2) }],
         };
       }
     );
@@ -977,6 +1024,36 @@ export function registerMcpTools(server: McpServer, userId: string) {
       };
     }
   );
+
+  /**
+   * set_thread_classification — 高辻ナレッジ サイクル2: スレッド（会話）の機密度を付与・変更する。
+   * 権限: スレッド所有者、または同じ組織の admin/manager。加えて writeLevel/compartments による
+   * 付与制限（指示書 §4.4。7→3 のような引き下げも現在値に対して同じ判定を行う。admin はバイパス）。
+   */
+  if (isKnowledgeEnabled(process.env.DEVRELAY_KNOWLEDGE)) {
+    server.tool(
+      'set_thread_classification',
+      'Set or change the classification (level 0-10 + named compartment) of a conversation thread. ' +
+      'Only the thread owner, or an organization admin/manager, may call this. Raising OR lowering the ' +
+      'level, and adding OR removing a compartment, requires your writeLevel/compartments to cover ' +
+      'BOTH the current and the new value (organization admins bypass this). Omit a field to leave it ' +
+      'unchanged; pass null to revert it to inherit the project\'s default.',
+      {
+        sessionId: z.string().describe('The session ID (thread) to classify'),
+        level: z.number().nullable().optional().describe('New level (0-10), or null to inherit the project default. Omit to leave unchanged.'),
+        compartment: z.string().nullable().optional().describe('New compartment (project/case name), or null to inherit the project default. Omit to leave unchanged.'),
+      },
+      async ({ sessionId, level, compartment }) => {
+        const result = await setThreadClassification({ viewerUserId: userId, sessionId, level, compartment });
+        if (!result.ok) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error }) }], isError: true };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ before: result.before, after: result.after }, null, 2) }],
+        };
+      }
+    );
+  }
 
   // ============================================================
   // MCP ask サイクル: 質問（ask_project / get_answer）と取り消し（cancel_submission）

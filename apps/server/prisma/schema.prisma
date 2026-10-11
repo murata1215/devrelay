@@ -203,6 +203,9 @@ model Project {
   terminalMode Boolean   @default(false)  // 端末インタフェースモード（PTY 経由で claude 起動）。新規プロジェクトはデフォルト無効
   createdAt    DateTime  @default(now())
   deletedAt    DateTime? // ソフトデリート（#322）。Agent が projects.yaml で送ってこなくなったプロジェクトを非表示化。再出現で自動復活（null に戻る）
+  // 高辻ナレッジ サイクル2: この案件で始まる会話の既定値（null = level 0・壁なし。D3）。
+  defaultLevel       Int?
+  defaultCompartment String?
 
   sessions       Session[]
   buildLogs      BuildLog[]
@@ -269,6 +272,10 @@ model Session {
   // どちらも nullable = 既存行はバックフィルせず従来挙動のまま（core#336 と同じ規約）。
   kind        String?   // 'question' = ask_project の質問ターン。null = 従来の指示（instruction）
   cancelledAt DateTime? // cancel_submission の取消 claim。null = 未取消。atomic に claim する
+  // 高辻ナレッジ サイクル2: 会話の機密度（null = Project の既定値を継承。D2）。
+  // すべて nullable = 既存行は従来挙動のまま（null = level 0・壁なしとして扱われる）。
+  level       Int?      // 0〜10。この会話個別の機密度（null = Project.defaultLevel を継承）
+  compartment String?   // 案件名（正規化済み・完全一致）。null = Project.defaultCompartment を継承
 
   messages       Message[]
   buildLogs      BuildLog[]
@@ -317,6 +324,21 @@ model KnowledgeChunk {
   @@index([userId, occurredAt])
   @@index([projectId])
   @@index([sessionId])
+}
+
+// 高辻ナレッジ サイクル2: 人の権限（数値権限 0〜10 ＋ 案件の壁）。
+// 行が無ければ既定値（readLevel=0, writeLevel=0, compartments=[]）として扱う（D4）。
+// User を削除しても権限設定だけが残らないよう FK は張る想定だが、User 側へ逆リレーションは
+// 張らない（KnowledgeChunk / SupervisionAuditLog と同じ「権限フィルタ用。FK は張らない」規約）。
+model UserClearance {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  readLevel    Int      @default(0)
+  writeLevel   Int      @default(0)
+  compartments String[] @default([]) // 案件名のリスト。["*"] で全案件
+  updatedBy    String?  // 設定した admin の userId（監査用。FK なし）
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 // メッセージ履歴

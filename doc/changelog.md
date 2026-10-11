@@ -6,6 +6,98 @@
 
 ## 実装済み機能
 
+### 高辻ナレッジ サイクル2 — 数値権限（level 0〜10）+ 案件の壁（compartment）+ 検索監査 + 組織共通 embedding キー (2026-10-11)
+
+サイクル1（`search_knowledge` は自分の会話のみ）を拡張し、同じ組織のメンバー同士で
+「誰が何を見られるか」を数字 1 本の機密度と案件名の文字列で決められるようにした。他人の
+会話が見えたときは既存の統制 v3 監査（`SupervisionAuditLog`）に残す。対象は `apps/server`
+のみ（agents/web/shared は 0 行変更）。
+
+- **データモデル**: `Session.level Int? / compartment String?`（null = Project の既定値を
+  継承）、`Project.defaultLevel Int? / defaultCompartment String?`（null = level 0・壁なし）、
+  新規 `UserClearance`（`userId` unique、`readLevel`/`writeLevel`/`compartments String[]`
+  既定 0/0/[]。行が無ければ既定値扱い）。既存行は全部 null のままでバックフィル不要
+- **可視条件**（1 行）: 自分の会話、または「同じ組織 かつ `level ≤ readLevel` かつ
+  （`compartment` が null または自分の `compartments` に含む。`"*"` は全案件）」
+- **新規 `services/knowledge-access.ts`**（外部 import ゼロの純関数）: `resolveEffectiveClassification`
+  （Session→Project→0/null の 3 段フォールバック）、`isTurnVisible`、`buildVisibilityPredicate`
+  （所有者条件 `kc."userId" = $1` を可視判定 SQL に展開。compartment の複数値照合は raw SQL
+  への配列バインドではなく `IN ($n, $n+1, …)` への個別展開に統一。本スキーマで `text[]` 列は
+  本サイクルが初出のため前例に頼らない設計とした）、`canAssignClassification`（writeLevel/
+  compartments による付与制限。level を上げる場合も下げる場合も現在値・新値の両方に同じ
+  判定を適用、organization admin はバイパス）、`normalizeCompartment`（trim→NFKC 正規化→
+  64 文字上限、比較は完全一致で大文字小文字を区別）、`decideAuditTargets`、
+  `normalizeClearanceInput`
+- **`knowledge-service.ts`**: `loadKnowledgeViewer`（閲覧者の実効権限を 1 回の呼び出しで解決）、
+  `getEmbeddingApiKey`（個人 OpenAI キー→組織共通キー `DEVRELAY_EMBEDDING_API_KEY` の順に
+  フォールバック。`processTurnKnowledge`/`searchKnowledge`/`knowledge:backfill` が利用）。
+  `fetchKeywordCandidates`/`fetchVectorCandidates` の所有者条件を可視判定述語に差し替え
+  （`JOIN "Project"` ＋ `LEFT JOIN "OrganizationMember"` を追加）。`searchKnowledge` に
+  `scope`（既定 `'all'`。`'mine'` でサイクル1 と同じ単一ユーザー検索）、`compartment`/
+  `maxLevel` の絞り込み、結果への `ownerUserId`/`ownerName`/`isOwn`/`level`/`compartment`、
+  レスポンス先頭への `viewer: {readLevel, compartments, organization}` を追加。SQL 側の
+  可視判定に加え、hydration 後の最終行を `isTurnVisible` で再評価する fail-closed の
+  二重化（SQL が正しければ 1 行も落ちないが、バグがあっても漏洩ではなくログとして現れる）。
+  他人のターンが結果に含まれたら所有者ごとに 1 行、`SupervisionAuditLog` に
+  `action='search_knowledge'` を記録（本人操作では記録しない）
+- **新規 `getKnowledgeThread`**: 他人のスレッドを可視判定つきで 1 件読む共通実装（MCP
+  `get_knowledge_thread` / REST `GET /api/knowledge/threads/:sessionId`）。不可視・不存在の
+  どちらも同一文言 `Thread not found or not visible` を返し存在の有無を漏らさない。他人の
+  スレッドを読んだ場合は `action='view_messages'`（`detail:{via:'knowledge', sessionId}`）
+  で監査。添付ファイルは返さない（`get_attachment` が自分スコープのままのため非スコープ）
+- **新規 `setThreadClassification`/`getThreadClassification`/`setProjectClassification`/
+  `getProjectClassification`**: スレッド・案件の機密度を取得・付与する。権限はスレッド
+  所有者（またはプロジェクト所有者）／同じ組織の admin・manager（`canManageClassificationFor`）
+  に加え `canAssignClassification` の判定
+- **MCP**: `search_knowledge` に `scope`/`compartment`/`maxLevel` を追加（既存パラメータの
+  既定値は不変）、`hint` 文言を更新。新規 `get_knowledge_thread`（`search_knowledge` の直後、
+  同じ `isKnowledgeEnabled` ブロック内）。新規 `set_thread_classification`
+  （`approve_implementation` の直後、`MCP ask サイクル` セクションより前。`ask_project`/
+  `get_answer` の間には触れずインデント位置を不変に保った）。`SERVER_INSTRUCTIONS` に
+  `scope` と `get_knowledge_thread` の使い分けを追記
+- **REST**: 新規 `routes/knowledge-admin-api.ts`（`GET/PUT /api/org/members/:userId/clearance`、
+  `GET /api/org/clearance`、`GET /api/org/compartments`、`GET/PUT
+  /api/projects/:projectId/classification`、`GET/PUT /api/threads/:sessionId/classification`、
+  `GET /api/knowledge/threads/:sessionId`。全ルート `authenticate` preHandler ＋ killswitch
+  404）。`GET /api/knowledge/search` に `scope`/`compartment`/`maxLevel`/`viewer` を追加
+  （既定値不変）。`routes/organization.ts` の `getMembership`/`requireOrgAdmin`/
+  `requireOrgManagerOrAdmin` を export 化して再利用（本体は無変更）
+- **`DEVRELAY_EMBEDDING_API_KEY`**（新規環境変数）: OpenAI キー。未設定時は個人キーのみで
+  従来どおり動作。キルスイッチは追加せず、サイクル1 の `DEVRELAY_KNOWLEDGE` を共用
+- **DB マイグレーション**: 手書き DDL（`doc/migrations/knowledge2_classification.md`）を
+  devrelay.io に適用（`Session`/`Project` へ各 2 列、新規テーブル `UserClearance`）。
+  `UserClearance.compartments`（`text[]`）は Prisma の仕様で `NOT NULL` が付かないため、
+  手書き DDL も `NOT NULL` を省略して `prisma db push` と形を一致させた（`prisma migrate
+  diff --from-empty --to-schema-datamodel` で実測して確認）。社内新規 DB は
+  `pnpm db:bootstrap` だけで同じ形になる
+- **検証**: 一時組織 2 件・一時ユーザー 5 名・一時 Machine/Project/Session/Message/
+  KnowledgeChunk を SQL で作成し、`searchKnowledge`/`getKnowledgeThread`/
+  `setThreadClassification`/`setProjectClassification` を実関数呼び出しで 26 ケース検証
+  （可視判定の 5 段階遷移、組織なし/別組織への非公開、監査ログの生成と本人操作での
+  非生成、writeLevel/compartment の付与制限と admin バイパス、引き下げ制限）。全件 PASS 後、
+  一時データ・監査ログを全て削除し SQL で残骸 0 件を確認
+- **テスト**: 新規 `knowledge-access.test.mjs`（57 件）、`knowledge-admin-wiring.test.mjs`
+  （18 件）、`knowledge-rank.test.mjs` に 8 件追加。既存 867 件は無変更で green（合計
+  950/950 PASS）
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/server/prisma/schema.prisma` | `Session`/`Project` へ各 2 列、新規 `UserClearance` |
+| `apps/server/src/services/knowledge-access.ts` | 新規。可視判定・付与判定の純関数 |
+| `apps/server/src/services/knowledge-service.ts` | viewer 解決・可視判定 SQL・新規関数群 |
+| `apps/server/src/services/knowledge-rank.ts` | `scope`/`compartment`/`maxLevel` を追加 |
+| `apps/server/src/services/org-control.ts` | `SupervisionAction` に `'search_knowledge'` |
+| `apps/server/src/scripts/knowledge-backfill.ts` | `getEmbeddingApiKey` へ切替 |
+| `apps/server/src/mcp/tools.ts` | `search_knowledge` 拡張、新規 2 ツール |
+| `apps/server/src/mcp/server.ts` | `SERVER_INSTRUCTIONS` 追記 |
+| `apps/server/src/routes/knowledge-admin-api.ts` | 新規。9 ルート |
+| `apps/server/src/routes/knowledge-api.ts` | パラメータ・レスポンス拡張 |
+| `apps/server/src/routes/organization.ts` | ヘルパー 3 件を export 化 |
+| `apps/server/src/index.ts` | ルート登録 1 行 |
+| `doc/migrations/knowledge2_classification.md` | 新規。手書き DDL |
+
 ### 高辻ナレッジ サイクル1 — KnowledgeChunk + ハイブリッド検索 + MCP search_knowledge (2026-10-10)
 
 会話ターン（AI 応答＋直前の人間入力）を検索可能なナレッジ資産として蓄積する「高辻ナレッジ」

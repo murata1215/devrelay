@@ -1,5 +1,7 @@
 /**
- * 高辻ナレッジ サイクル1 — `GET /api/knowledge/search`（次サイクルの WebUI 用。本サイクルは API のみ）。
+ * 高辻ナレッジ サイクル1/2 — `GET /api/knowledge/search`（次サイクルの WebUI 用。本サイクルは API のみ）。
+ * サイクル2: `scope` / `compartment` / `maxLevel` を追加、レスポンスに `viewer` を追加
+ * （既存パラメータ・既定値は不変）。可視判定の付与・閲覧 API は `routes/knowledge-admin-api.ts`。
  *
  * WebUI の他エンドポイントと同じ認証（`routes/sites-api.ts` と同形: `addHook('preHandler', authenticate)`、
  * `Authorization: Bearer <AuthSession.token>`、Cookie は使わない）。
@@ -29,6 +31,9 @@ export async function knowledgeApiRoutes(app: FastifyInstance) {
       since?: string;
       until?: string;
       limit?: string;
+      scope?: string;
+      compartment?: string;
+      maxLevel?: string;
     };
 
     const result = await searchKnowledge({
@@ -40,6 +45,9 @@ export async function knowledgeApiRoutes(app: FastifyInstance) {
       since: query.since,
       until: query.until,
       limit: query.limit !== undefined ? Number(query.limit) : undefined,
+      scope: query.scope,
+      compartment: query.compartment,
+      maxLevel: query.maxLevel !== undefined ? Number(query.maxLevel) : undefined,
     });
 
     if (!result.ok) {
@@ -47,6 +55,7 @@ export async function knowledgeApiRoutes(app: FastifyInstance) {
     }
 
     return reply.send({
+      viewer: result.viewer,
       query: result.query,
       mode: result.mode,
       coverage: result.coverage,

@@ -57,6 +57,56 @@ describe('normalizeKnowledgeParams', () => {
     assert.equal(result.params.limit, 10);
   });
 
+  // 高辻ナレッジ サイクル2: scope / compartment / maxLevel（既存パラメータの既定値・文言は上記のまま不変）
+
+  test('既定値: scope=all, compartment=undefined, maxLevel=undefined', () => {
+    const result = normalizeKnowledgeParams({ query: 'test' });
+    assert.equal(result.ok, true);
+    assert.equal(result.params.scope, 'all');
+    assert.equal(result.params.compartment, undefined);
+    assert.equal(result.params.maxLevel, undefined);
+  });
+
+  test('scope=mine は明示指定できる', () => {
+    const result = normalizeKnowledgeParams({ query: 'test', scope: 'mine' });
+    assert.equal(result.ok, true);
+    assert.equal(result.params.scope, 'mine');
+  });
+
+  test('不正な scope はエラー', () => {
+    const result = normalizeKnowledgeParams({ query: 'test', scope: 'bogus' });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /invalid scope/);
+  });
+
+  test('compartment は trim・NFKC 正規化される', () => {
+    const result = normalizeKnowledgeParams({ query: 'test', compartment: '  LAFIT  ' });
+    assert.equal(result.ok, true);
+    assert.equal(result.params.compartment, 'LAFIT');
+  });
+
+  test('compartment が空文字 → undefined（絞り込みなし）', () => {
+    const result = normalizeKnowledgeParams({ query: 'test', compartment: '   ' });
+    assert.equal(result.ok, true);
+    assert.equal(result.params.compartment, undefined);
+  });
+
+  test('compartment が文字列でなければエラー', () => {
+    const result = normalizeKnowledgeParams({ query: 'test', compartment: 123 });
+    assert.equal(result.ok, false);
+  });
+
+  test('maxLevel は 0〜10 の整数', () => {
+    const result = normalizeKnowledgeParams({ query: 'test', maxLevel: 3 });
+    assert.equal(result.ok, true);
+    assert.equal(result.params.maxLevel, 3);
+  });
+
+  test('maxLevel が範囲外（-1 / 11）はエラー', () => {
+    assert.equal(normalizeKnowledgeParams({ query: 'test', maxLevel: -1 }).ok, false);
+    assert.equal(normalizeKnowledgeParams({ query: 'test', maxLevel: 11 }).ok, false);
+  });
+
   test('limit=31 は 30（最大値）にクランプされる', () => {
     const result = normalizeKnowledgeParams({ query: 'test', limit: 31 });
     assert.equal(result.ok, true);

@@ -61,8 +61,10 @@ async function generateUniqueOrgCode(): Promise<string> {
 
 /**
  * リクエストユーザーの組織メンバー情報を取得する（組織本体を含む）。
+ * 高辻ナレッジ サイクル2: `routes/knowledge-admin-api.ts` からも再利用するため export する
+ * （本体は無変更）。
  */
-async function getMembership(userId: string) {
+export async function getMembership(userId: string) {
   return prisma.organizationMember.findUnique({
     where: { userId },
     include: { organization: true },
@@ -72,8 +74,10 @@ async function getMembership(userId: string) {
 /**
  * admin 権限を要求する共通ヘルパー。
  * admin でなければ 403 を送信して null を返す。
+ * 高辻ナレッジ サイクル2: `routes/knowledge-admin-api.ts` からも再利用するため export する
+ * （本体は無変更）。
  */
-async function requireOrgAdmin(userId: string, reply: FastifyReply) {
+export async function requireOrgAdmin(userId: string, reply: FastifyReply) {
   const membership = await getMembership(userId);
   if (!membership) {
     reply.status(404).send({ error: '組織に所属していません' });
@@ -90,8 +94,10 @@ async function requireOrgAdmin(userId: string, reply: FastifyReply) {
  * admin または manager 権限を要求する共通ヘルパー。
  * member（一般ユーザー）または未所属なら 403/404 を送信して null を返す。
  * 監督（担当ユーザーの活動・会話閲覧）に使う。
+ * 高辻ナレッジ サイクル2: `routes/knowledge-admin-api.ts` からも再利用するため export する
+ * （本体は無変更）。
  */
-async function requireOrgManagerOrAdmin(userId: string, reply: FastifyReply) {
+export async function requireOrgManagerOrAdmin(userId: string, reply: FastifyReply) {
   const membership = await getMembership(userId);
   if (!membership) {
     reply.status(404).send({ error: '組織に所属していません' });

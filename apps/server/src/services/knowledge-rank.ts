@@ -1,6 +1,8 @@
 /**
  * 高辻ナレッジ サイクル1: `search_knowledge`（MCP）/ `GET /api/knowledge/search`（REST）が共有する
- * 純関数モジュール。外部 import ゼロ（`ask-guard.ts` / `thread-list-filter.ts` と同じ流儀。
+ * 純関数モジュール。`knowledge-access.ts`（同じく外部 import ゼロの純関数モジュール）だけを import
+ * する（`knowledge-chunker.ts` が `progress-markers.ts` を import しているのと同じ範囲に収める。
+ * DB/ネットワーク非依存を保ち、`node --test` から dist を直接 import して単体検証できるようにする。
  * `packages/shared` ではなく `apps/server` に置く＝#310 白画面事故の回避）。
  *
  * - パラメータ検証（`normalizeKnowledgeParams`）
@@ -10,6 +12,8 @@
  * - スニペット生成（`buildKnowledgeSnippet`）
  * - ILIKE 用エスケープ（`escapeLikePattern`）
  */
+
+import { normalizeCompartment, CLASSIFICATION_LEVEL_MIN, CLASSIFICATION_LEVEL_MAX } from './knowledge-access.js';
 
 /** `DEVRELAY_KNOWLEDGE` 環境変数を解釈する。既定 ON（'0' が明示されたときのみ無効）。`isMcpAskEnabled` と同じ流儀。 */
 export function isKnowledgeEnabled(raw: string | undefined): boolean {
@@ -22,6 +26,12 @@ export type KnowledgeSearchMode = 'hybrid' | 'keyword' | 'vector';
 /** `Session.kind` によるフィルタ。既定 'all'。 */
 export type KnowledgeSearchKind = 'instruction' | 'question' | 'all';
 
+/**
+ * 高辻ナレッジ サイクル2: 検索対象の範囲。既定 'all'（D6 の可視判定に従って自分＋見える他人の会話）。
+ * 'mine' は従来（サイクル1）どおり自分の会話のみ。
+ */
+export type KnowledgeSearchScope = 'all' | 'mine';
+
 /** 検証済みパラメータ。 */
 export interface NormalizedKnowledgeParams {
   query: string;
@@ -31,6 +41,12 @@ export interface NormalizedKnowledgeParams {
   since?: string;
   until?: string;
   limit: number;
+  /** 高辻ナレッジ サイクル2 */
+  scope: KnowledgeSearchScope;
+  /** この案件名の会話だけに絞る（指定時は正規化済みであること。呼び出し側で normalizeCompartment 済み） */
+  compartment?: string;
+  /** この機密度以下の会話だけに絞る（0〜10） */
+  maxLevel?: number;
 }
 
 /** `normalizeKnowledgeParams` の戻り値（成功/失敗の判別可能ユニオン）。 */
@@ -47,6 +63,10 @@ export interface RawKnowledgeParams {
   since?: unknown;
   until?: unknown;
   limit?: unknown;
+  /** 高辻ナレッジ サイクル2 */
+  scope?: unknown;
+  compartment?: unknown;
+  maxLevel?: unknown;
 }
 
 const QUERY_MAX_LENGTH = 500;
@@ -108,9 +128,40 @@ export function normalizeKnowledgeParams(raw: RawKnowledgeParams): NormalizeKnow
     limit = Math.min(n, MAX_LIMIT);
   }
 
+  // 高辻ナレッジ サイクル2: scope / compartment / maxLevel（既存パラメータの既定値・文言は不変）。
+  let scope: KnowledgeSearchScope = 'all';
+  if (raw.scope !== undefined) {
+    if (raw.scope !== 'all' && raw.scope !== 'mine') {
+      return { ok: false, error: `invalid scope: ${String(raw.scope)}` };
+    }
+    scope = raw.scope;
+  }
+
+  let compartment: string | undefined;
+  if (raw.compartment !== undefined) {
+    if (typeof raw.compartment !== 'string') {
+      return { ok: false, error: 'compartment must be a string' };
+    }
+    const normalized = normalizeCompartment(raw.compartment);
+    if (!normalized.ok) return normalized;
+    if (normalized.value !== null) compartment = normalized.value;
+  }
+
+  let maxLevel: number | undefined;
+  if (raw.maxLevel !== undefined) {
+    const n = Number(raw.maxLevel);
+    if (!Number.isInteger(n) || n < CLASSIFICATION_LEVEL_MIN || n > CLASSIFICATION_LEVEL_MAX) {
+      return {
+        ok: false,
+        error: `maxLevel must be an integer between ${CLASSIFICATION_LEVEL_MIN} and ${CLASSIFICATION_LEVEL_MAX}`,
+      };
+    }
+    maxLevel = n;
+  }
+
   return {
     ok: true,
-    params: { query, mode, projectId, kind, since: since.value, until: until.value, limit },
+    params: { query, mode, projectId, kind, since: since.value, until: until.value, limit, scope, compartment, maxLevel },
   };
 }
 

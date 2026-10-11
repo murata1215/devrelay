@@ -21,8 +21,12 @@
 
 import { prisma } from '../db/client.js';
 import { buildEphemeralSessionIdExclusion } from '../services/thread-scope.js';
-import { createTurnChunkRows, embedPendingChunks, listUserIdsWithPendingChunks } from '../services/knowledge-service.js';
-import { getOpenAiApiKey } from '../services/user-settings.js';
+import {
+  createTurnChunkRows,
+  embedPendingChunks,
+  listUserIdsWithPendingChunks,
+  getEmbeddingApiKey,
+} from '../services/knowledge-service.js';
 import { KNOWLEDGE_SOURCE_TYPE_TURN } from '../services/knowledge-chunker.js';
 
 /** Phase A で 1 回に DB から取得する Message のページサイズ */
@@ -206,7 +210,8 @@ async function runPhaseB(args: Args): Promise<{ processed: number; done: number;
   log(`  対象ユーザー数: ${userIds.length}`);
 
   for (const userId of userIds) {
-    const apiKey = await getOpenAiApiKey(userId);
+    // 高辻ナレッジ サイクル2 D11: 個人キー → 組織共通キー（DEVRELAY_EMBEDDING_API_KEY）の順にフォールバック
+    const apiKey = await getEmbeddingApiKey(userId);
     if (!apiKey) {
       const result = await prisma.knowledgeChunk.updateMany({
         where: {

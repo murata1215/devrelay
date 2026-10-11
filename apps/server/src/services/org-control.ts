@@ -300,8 +300,8 @@ export async function hasIpRestriction(userId: string): Promise<boolean> {
   return ranges.length > 0;
 }
 
-/** 監査ログの操作種別 */
-export type SupervisionAction = 'view_sessions' | 'view_messages' | 'summarize';
+/** 監査ログの操作種別（'search_knowledge' は高辻ナレッジ サイクル2: 他人の会話が検索結果に含まれた操作） */
+export type SupervisionAction = 'view_sessions' | 'view_messages' | 'summarize' | 'search_knowledge';
 
 /**
  * 統制 v3（#270）: 監視監査ログを記録する（fire-and-forget）。
