@@ -211,6 +211,14 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     };
   }
 
+  // 0.95. 「u force」「u!」「update force」コマンド: サイクル3.1
+  // 実行中 AI ターンによる更新保留（D4）を無視して強制更新する。`u` は 2 文字未満キーのため
+  // natural-language-parser.ts の汎用「キー + 空白」パターン（:252）に乗らず、個別パターンで拾う必要がある
+  // （:233 の `a <tool>` と同じ理由）。
+  if (/^u(?:pdate)?(?:\s+force|!)$/.test(normalized)) {
+    return { type: 'update', force: true };
+  }
+
   // 1. Check shortcuts
   if (normalized in SHORTCUTS) {
     return parseShortcut(normalized, context);
@@ -425,6 +433,7 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
 **Other**
 \`ag\` - Apply DevRelay Agreement v4 (creates rules/devrelay.md)
 \`u\` - Check/update the agent version (send twice in a row to update)
+\`u force\` - Update now even if an AI turn is in progress
 \`x\` - Clear conversation history (send twice in a row)
 \`q\` - Disconnect
 \`h\` - This help

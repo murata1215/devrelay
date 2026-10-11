@@ -27,6 +27,7 @@ import {
   cancelClaudeLogin,
   agentHasCapability,
 } from './agent-manager.js';
+import { isMachineBusyWithReason } from './auto-updater.js';
 import { decideClearDispatch } from './thread-clear-guard.js';
 import {
   createSession,
@@ -52,6 +53,7 @@ import { resolveOrgAiContext, decideEffectiveModel, isModelSettingLocked } from 
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
 import { decideUpdateAction } from './agent-update-decision.js';
+import { isUpdateBusyGuardEnabled, decideManualUpdate, extractBusyCount } from './update-busy-rules.js';
 import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag, fenceIfHuman, buildHumanTextMeta } from './human-text-fence.js';
 import {
   createTestflightService,
@@ -300,7 +302,7 @@ export async function executeCommand(
       return handleKill(context);
 
     case 'update':
-      return handleUpdate(context);
+      return handleUpdate(context, command.force ?? false);
 
     case 'quit':
       return handleQuit(context);
@@ -1454,13 +1456,24 @@ function formatRunningCodeLines(info: { runningCodeMtime?: string; runningCodeSt
 }
 
 /** Agent のバージョン確認・更新（2回連続で更新実行） */
-async function handleUpdate(context: UserContext): Promise<string> {
+async function handleUpdate(context: UserContext, force: boolean = false): Promise<string> {
   const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentMachineId) {
     return tChat(lang, 'common.agentNotConnected');
   }
 
   const chatKey = `${context.platform}:${context.chatId}`;
+
+  // サイクル3.1 (D4): busy なら 1 回目・2 回目のどちらでも保留する（`force` で無視できる）。
+  // pendingUpdate の状態は変えない（busy のまま終了を待ち、終了後に `u` を 1 回送るだけで
+  // 続きから進められるようにする。2回目の確定を busy のたびにリセットすると、ユーザーが
+  // 何度も `u` → `u` を打ち直す必要が出てしまう）。
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    const busyReason = await isMachineBusyWithReason(context.currentMachineId);
+    if (decideManualUpdate({ busy: busyReason !== null, force }) === 'hold') {
+      return tChat(lang, 'update.deferredBusy', { count: extractBusyCount(busyReason) });
+    }
+  }
 
   // 2回目の u: 更新実行
   if (pendingUpdate.has(chatKey)) {

@@ -6,6 +6,8 @@ import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted } from '../services/agent-manager.js';
+import { isMachineBusyWithReason } from '../services/auto-updater.js';
+import { isUpdateBusyGuardEnabled, decideManualUpdate, extractBusyCount } from '../services/update-busy-rules.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { createSession, resolveScopeOptionsForSession } from '../services/session-manager.js';
@@ -481,6 +483,21 @@ export async function apiRoutes(app: FastifyInstance) {
     const connectedAgents = getConnectedAgents();
     if (!connectedAgents.has(id)) {
       return reply.status(503).send({ error: 'Agent is offline' });
+    }
+
+    // サイクル3.1 (D8/C4): 実行中 AI ターンがあれば再起動を保留する（force で無視できる）。
+    // apps/web は 0 行変更で済む（既存の `machines.restart()` の catch が `err.message` を alert するため、
+    // 409 の `error` フィールドがそのまま表示される）。
+    const body = (request.body ?? {}) as { force?: boolean };
+    const query = (request.query ?? {}) as { force?: string };
+    const force = body.force === true || query.force === '1' || query.force === 'true';
+    if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+      const busyReason = await isMachineBusyWithReason(id);
+      if (decideManualUpdate({ busy: busyReason !== null, force }) === 'hold') {
+        return reply.status(409).send({
+          error: `AI turn in progress (${extractBusyCount(busyReason)}). Wait for it to finish, or retry with { "force": true }.`,
+        });
+      }
     }
 
     sendToAgent(id, { type: 'server:agent:restart', payload: {} });

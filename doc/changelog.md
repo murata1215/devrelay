@@ -6,6 +6,62 @@
 
 ## 実装済み機能
 
+### サイクル3.1 — Agent 自己更新の保留（実行中 AI ターンの保護） (2026-10-11)
+
+高辻ナレッジ サイクル1・サイクル3 の exec が、Agent 自己更新による再起動で 2 回殺された
+（`doc/issues.md` 起票済み）事故の根治。根本原因は `isMachineBusy()`（auto-updater.ts）が
+`progressTracker` の有無と直近 10 分のメッセージしか見ておらず、MCP の exec
+（`approve_implementation` → `execConversation`）・crossquery/teamexec・raw-completion は
+いずれも tracker を張らないため、これらのターン実行中に busy と判定されず自己更新が走っていた
+（本番ログで `busy (session running)` による skip が実測 0 回、`⚠️ No tracker found` が 1174 回）。
+
+- **サーバー側 D1**: 新規 `InFlightTurnRegistry`（`in-flight-turns.ts`、外部 import ゼロ）。
+  Agent へ AI プロンプトを送る 4 箇所（`sendPromptToAgent` / `execConversation` /
+  `sendRawPromptToAgent` / `applyAgreement`）全てで送信直前に `start()` し、ターン完了
+  （`handleAiOutput` の `isComplete`）・キャンセル（`handleAiCancelled`、意図的に楽観的に解除）・
+  Agent 切断（`handleAgentDisconnect` で `clearMachine()`）のいずれかで `end()`/`clearMachine()`
+  する。TTL 6 時間で取りこぼし経路も自然に失効（定期スイープで `sweepStale()`）。
+  `isMachineBusy()` は新設の `isMachineBusyWithReason()`（in-flight turn → session running →
+  recent activity の優先順位で理由文字列を返す）に委譲する薄いラッパへ変更（既存シグネチャ非破壊、
+  `capability-sweep.ts` の既存呼び出しは 0 行変更）
+- **サーバー側 D2 連携**: `agent:version:info` の `activeAiTurns`（Agent 自己申告）も busy 判定の
+  追加の安全網として利用（新 Agent のみ、旧 Agent は無視して非退行）
+- **サーバー側 D3**: `agent:update:status` に `'deferred'` を追加。自動更新起点の `deferred` 受信時は
+  `recordAutoUpdateDeferred()` が送信時に +1 済みの `autoUpdateAttempts` を 1 戻し、
+  `inProgress` を即座に解放し、短縮クールダウン（10 分、通常 30 分）を効かせる。手動 `u`/`u force`
+  起点は attempts を触っていないため DB 変更なし。未知 status は warn ログのみ（attempts 不変）
+- **サーバー側 D4**: 手動 `u`（1 回目・2 回目とも）と `POST /api/machines/:id/restart`（D8）に
+  busy ガードを追加。busy なら保留メッセージ（`update.deferredBusy`）/ 409 を返す。
+  `u force` / `u!`（`command-parser.ts` + `natural-language-parser.ts` に個別パターン追加、
+  `UserCommand.update.force?: boolean`）、REST は `{ force: true }` または `?force=1` で無視できる
+- **Agent 側 D2（最後の砦、二重防御）**: `sendPromptToAi()`（SDK / PTY(terminalMode) /
+  Devin・Codex・Gemini の spawn 経路・rawMode が全て通る唯一のチョークポイント）を
+  実装本体 `sendPromptToAiImpl()` + 薄い `try/finally` ラッパへ分離し、`inFlightAiTurnStartedAt`
+  Map で実行中ターン数を計測（`getActiveAiTurnCount()`）。**`activeSessions`（会話セッション全体の
+  台帳、conversation が続く限り残る）とは意味が異なるため別カウンタで管理**（当初案の
+  `activeSessions.size` 判定は「Agent が永久に更新されなくなる」誤りだったため設計時に訂正）。
+  `handleAgentUpdate()` は `decideAgentUpdateAction()`（純関数、agents/linux・macos で
+  byte-for-byte 同一）で `start`/`defer`/`wait` を判定、`defer` なら `agent:update:status
+  { status: 'deferred' }` を送って 30 秒間隔で再確認（最大 2 時間で諦め、サーバーの次スイープに委ねる）。
+  `agents/windows` は `server:agent:update` を処理しないため対象外（0 行変更、確認済み）
+- キルスイッチ `DEVRELAY_UPDATE_BUSY_GUARD`（既定 `1`）。Agent 側 D2 にはキルスイッチなし（常時安全側）
+- テスト: 新規 `in-flight-turns.test.mjs`（13）・`update-busy-rules.test.mjs`（22、
+  `evaluateAutoUpdateGates` の busyReason 区別・deferred クールダウン短縮を含む）・
+  `update-guard-wiring.test.mjs`（32、送信点 4 箇所の `start(` ガード・解除点・
+  `agent:update:status` の payload に `force` が無いこと・linux/macos の
+  `update-guard-rules.ts` が byte-identical であること等を静的検証）・
+  agents/linux・macos 各 `update-guard-rules.test.mjs`（8）。
+  server **1024/1024**・web **756/756**（0 行変更）・shared・linux **1070/1071**
+  （1 件は `handle-conversation-clear.test.mjs` の node:test ランナー内部 IPC シリアライズ起因の
+  既知flake、単独実行で 4/4 green 確認済み・非retro）・macos **637/638+1skip**・
+  windows **147/148**（同種の既知flake、単独実行で 11/11 green 確認済み・0 行変更のため非該当）green。
+  6 workspace build green、`git diff --stat -- apps/web agents/windows prisma` 空を確認
+- DB マイグレーション不要・`apps/web`/`agents/windows`/`prisma` 0 行変更。
+  実機の `x220-158-18-103/*`（13 機体）は全て `autoUpdate=true` のまま進めることをユーザー承認
+  （現時点で `localCommit == remoteCommit`＝`up to date` で即 skip、かつ bake time 120 分あるため
+  本サイクルの commit/push 後も 2 時間は配布されない）。pm2 restart 要・各機 `u` 不要
+  （Agent は自動更新で順次新版になる。`autoUpdate=true` のため次のスイープ・bake 明けで配布される）
+
 ### 高辻ナレッジ サイクル3 — WebUI: ナレッジ検索・スレッドビューア・権限設定 (2026-10-11)
 
 サイクル1（検索）・サイクル2（権限モデル）を WebUI に実装した。対象は `apps/web`（新規ページ 1・

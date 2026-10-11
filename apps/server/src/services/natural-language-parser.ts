@@ -264,6 +264,11 @@ export function isTraditionalCommand(input: string): boolean {
   // 'a 1', 'a claude' 等（AI 選択）- 1文字キーの特殊パターン
   if (/^a\s+(\d+|claude|gemini|codex|aider)$/i.test(trimmed)) return true;
 
+  // 'u force' / 'u!'（サイクル3.1: busy 保留を無視して強制更新）- 1文字キーの特殊パターン
+  // （`u` は :252 の「2文字以上のキーのみ」ガードに引っかからず AI プロンプト扱いになっていたため、
+  // `a`/`l`/`login` と同じ個別パターンで明示的に拾う）
+  if (/^u(?:pdate)?(?:\s+force|!)$/i.test(trimmed)) return true;
+
   // 'l' (モデル一覧), 'l sonnet', 'l plan:haiku', 'l exec:opus' 等（モデル選択）
   if (trimmed === 'l' || /^l\s+.+$/i.test(trimmed)) return true;
 

@@ -35,6 +35,7 @@ import { classifyTerminalStartupFailure } from './terminal-session-id.js';
 import { reconcileForRunner } from './capability-sync.js';
 // raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
 import { buildRawSdkOverrides, buildRawEnv, isRawToolDenied, buildRawDenyMessage, resolveRawUsedModel } from './raw-completion-mode.js';
+import { isTurnStale } from './update-guard-rules.js';
 // core#383: 旧 Claude CLI（--session-id 未対応）を検出した場合のプロセス内フォールバックフラグ。
 // 一度 true になったら、この Agent プロセスが再起動されるまで以後の全ターンで
 // --session-id を渡さない（legacy argv = 画面スクレイプによる旧来のセッション ID 取得に戻す）。
@@ -542,6 +543,30 @@ const userCancelRequested = new Set<string>();
 
 // Active AI sessions: sessionId -> AiSession
 const activeSessions = new Map<string, AiSession>();
+
+/**
+ * サイクル3.1 (C1): 実行中 AI ターンの開始時刻（sessionId -> 開始時刻ms）。
+ * `activeSessions` とは意味が異なる点に注意: `activeSessions` は「登録済み会話セッション」の台帳で
+ * `session:start`〜`session:end` の間ずっと残る（会話全体のスコープ）。こちらは
+ * `sendPromptToAi()` が呼ばれてから実際に resolve するまでの「1 ターンの実行中」だけを表す
+ * （`server:agent:update` の保留判定に使う。会話セッション全体ではなく、今まさに AI が動いているかを見る）。
+ */
+const inFlightAiTurnStartedAt = new Map<string, number>();
+
+/** `server:agent:update` の保留判定 TTL（ハングしたターンで永久に更新できなくなるのを防ぐ保険） */
+const IN_FLIGHT_TURN_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * サイクル3.1: 現在実行中の AI ターン数（TTL 超過分は数えない）。
+ * `server:agent:update` の受信時・`agent:version:info` の応答に使う。
+ */
+export function getActiveAiTurnCount(nowMs: number = Date.now()): number {
+  let count = 0;
+  for (const startedAt of inFlightAiTurnStartedAt.values()) {
+    if (!isTurnStale(startedAt, nowMs, IN_FLIGHT_TURN_TTL_MS)) count++;
+  }
+  return count;
+}
 
 /**
  * AI出力コールバック。isComplete=true の場合、usageData に使用量データが含まれる。
@@ -1947,7 +1972,35 @@ async function sendPromptToTerminalClaude(
   return result;
 }
 
+/**
+ * サイクル3.1 (C1): `sendPromptToAi()` の実行中 AI ターン台帳つきラッパ。
+ * 実装本体は `sendPromptToAiImpl()`（直後の関数）に移した。SDK / PTY(terminalMode) /
+ * Devin・Codex・Gemini の spawn 経路・rawMode が全てこの 1 関数を通るため、ここが唯一の
+ * チョークポイントになる（内部の fallback 再帰呼び出し・`connection.ts` の各呼び出し元を含む）。
+ * `try/finally` で確実に解除する（内部実装がどこで return しても、この関数が返す Promise が
+ * 実際に解決/拒否された時点で解除される。内部実装が持つ複数の早期 return・ネストした
+ * `new Promise(...)` に手を入れず安全に計測するため、内部実装を直接 try/finally で包むのではなく、
+ * この薄いラッパで `await` してから解除する設計にしている）。
+ */
 export async function sendPromptToAi(
+  sessionId: string,
+  prompt: string,
+  projectPath: string,
+  aiTool: AiTool,
+  claudeSessionId: string,
+  config: AgentConfig,
+  onOutput: OutputCallback,
+  options: SendPromptOptions = {}
+): Promise<AiRunResult> {
+  inFlightAiTurnStartedAt.set(sessionId, Date.now());
+  try {
+    return await sendPromptToAiImpl(sessionId, prompt, projectPath, aiTool, claudeSessionId, config, onOutput, options);
+  } finally {
+    inFlightAiTurnStartedAt.delete(sessionId);
+  }
+}
+
+async function sendPromptToAiImpl(
   sessionId: string,
   prompt: string,
   projectPath: string,

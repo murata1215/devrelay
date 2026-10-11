@@ -645,14 +645,25 @@ export interface AgentVersionInfoPayload {
   runningCodeMtime?: string;
   /** 実行中コードがローカルコミットより古い（再ビルド漏れの可能性）(#256) */
   runningCodeStale?: boolean;
+  /**
+   * サイクル3.1: Agent が自己把握している実行中 AI ターン数（`sendPromptToAi()` の in-flight カウンタ）。
+   * 省略時（旧 Agent）はサーバー側の台帳・既存 2 判定のみで busy を判定する（fail-open、非退行）。
+   */
+  activeAiTurns?: number;
   error?: string;
 }
 
 /** Agent → Server: 更新処理の進捗・結果 */
 export interface AgentUpdateStatusPayload {
   machineId: string;
-  status: 'started' | 'error';
+  /**
+   * サイクル3.1: `'deferred'` を追加。実行中 AI ターンがあるため Agent 側で更新を保留したことを示す
+   * （D2。旧 Agent は送らない。サーバー側は未知 status を受けても attempts を増やさず warn ログのみ）。
+   */
+  status: 'started' | 'error' | 'deferred';
   error?: string;
+  /** `status === 'deferred'` のときの保留理由（実行中 AI ターン数） */
+  activeAiTurns?: number;
 }
 
 /**
@@ -881,7 +892,7 @@ export type UserCommand =
   | { type: 'model:set'; target: 'both' | 'plan' | 'exec'; model: string; tool?: ModelSelectableAiTool }  // モデル設定（#309）
   | { type: 'ai:prompt'; text: string }
   | { type: 'kill' }     // 実行中の AI プロセスを強制停止
-  | { type: 'update' }   // Agent バージョン確認・更新
+  | { type: 'update'; force?: boolean }   // Agent バージョン確認・更新（サイクル3.1: force=true で busy 保留を無視）
   | { type: 'testflight'; subcommand: 'list' }
   | { type: 'testflight'; subcommand: 'create'; name: string; template?: string }
   | { type: 'testflight'; subcommand: 'remove'; name: string }

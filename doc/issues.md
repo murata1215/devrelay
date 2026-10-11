@@ -7,6 +7,9 @@
 
 ## exec ターン実行中の Agent 自己更新で AI 子プロセスが kill され、Session が active のまま固着する
 
+- **対応済み（サイクル3.1、2026-10-11）**: 実行中ターン台帳（サーバー側、経路問わず）＋ Agent 側
+  `sendPromptToAi()` 実行中カウンタ（最後の砦）の二重防御で解消。詳細は
+  `doc/devlog/2026-10-11_230713.md` 参照
 - 発生日時: 2026-10-10 18:14 JST
 - submission: `cmv250bf60a8byut2sxd9eona`
 - 事実: exec ターン実行中（18:02 開始、コード生成進行中）に `server:agent:update`（Agent 自己更新）が走り、

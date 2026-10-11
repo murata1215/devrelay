@@ -127,6 +127,11 @@ export const chatMessages = {
   'update.agentOffline': { en: 'Agent is offline', ja: 'Agent がオフラインです' },
   'update.versionCheckTimeout': { en: 'Timed out', ja: 'タイムアウト' },
   'update.required': { en: '⚠️ This agent needs an update. Send `u` to update.', ja: '⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。' },
+  // サイクル3.1: 実行中 AI ターンがあるため更新を保留した（D4）。force=true の `u force` で無視できる
+  'update.deferredBusy': {
+    en: '⏸️ AI turn in progress ({count}). Update held. Send `u` again after it finishes, or `u force` to update now anyway.',
+    ja: '⏸️ AI 実行中（{count}件）のため更新を保留しました。終了後に `u` を再送するか、`u force` で今すぐ更新できます。',
+  },
 
   // --- claude auth（Claude ログイン切れ検知、リモート再ログイン中継 Phase1） ---
   'claudeAuth.expired': {

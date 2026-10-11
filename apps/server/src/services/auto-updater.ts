@@ -20,11 +20,19 @@ import { checkAgentVersion, updateAgentAuto, isAgentConnected, getConnectedAgent
 import { isSessionRunning } from './session-manager.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
 import { decideReconcileOutcome } from './auto-update-reconcile.js';
+import { inFlightTurns } from './in-flight-turns.js';
+import { isUpdateBusyGuardEnabled, resolveBusyReason, resolveCooldownMs } from './update-busy-rules.js';
 
 /** 同一コミットへの試行上限（超えたらそのマシンの自動更新を停止する） */
 const MAX_ATTEMPTS_PER_COMMIT = 2;
 /** 直近の自動更新からこの時間内は再試行しない（再起動 → 再接続 → 再チェックのループ防止） */
 const COOLDOWN_MS = 30 * 60 * 1000;
+/**
+ * サイクル3.1: 直前の試行が `deferred`（Agent 側が実行中 AI ターンを検知して保留）だった場合の
+ * クールダウン短縮値。通常の 30 分だと「ターンが 5 分で終わっても次スイープまで気づけない」ため、
+ * 次回スイープ（既定 30 分間隔）で早めに再評価できるよう短くする。
+ */
+const DEFERRED_COOLDOWN_MS = 10 * 60 * 1000;
 /** 同時に更新するマシン数の上限（32 台が一斉に再起動するのを防ぐ） */
 const MAX_CONCURRENT_UPDATES = 3;
 /** リモートコミットがこの時間以上前でなければ配らない（bake time。壊れたコミットを配る前に直せる猶予） */
@@ -73,12 +81,20 @@ export interface AutoUpdateGateInput {
   lastAttemptAt: Date | null;
   /** 直近に狙ったコミット */
   lastAttemptCommit: string | null;
+  /** 直近の自動更新試行結果（サイクル3.1: cooldown 短縮判定に使う。'deferred' のときだけ短縮） */
+  lastAttemptStatus?: string | null;
   /** リモートの最新コミット */
   remoteCommit: string;
   /** 同一コミットへの試行回数 */
   attempts: number;
   /** そのマシンで AI が動いている / 直近に作業があるか */
   busy: boolean;
+  /**
+   * サイクル3.1: busy の理由（`busy (in-flight turn: N)` / `busy (session running)` /
+   * `busy (recent activity)`）。skip ログで原因を区別できるようにするため、`busy: boolean` と
+   * 併せて渡す（省略時は従来どおり固定文言にフォールバック、既存シグネチャ非破壊）。
+   */
+  busyReason?: string | null;
   /** 現在進行中の自動更新数 */
   concurrent: number;
   /** 判定基準時刻 */
@@ -107,7 +123,9 @@ export function evaluateAutoUpdateGates(input: AutoUpdateGateInput): AutoUpdateD
     return { action: 'disable', reason: `failed ${input.attempts} times for ${input.remoteCommit.slice(0, 7)}` };
   }
 
-  if (input.lastAttemptAt && input.now.getTime() - input.lastAttemptAt.getTime() < COOLDOWN_MS) {
+  // サイクル3.1: 直前が deferred なら短縮クールダウンで早めに再評価する
+  const cooldownMs = resolveCooldownMs(input.lastAttemptStatus, { normalMs: COOLDOWN_MS, deferredMs: DEFERRED_COOLDOWN_MS });
+  if (input.lastAttemptAt && input.now.getTime() - input.lastAttemptAt.getTime() < cooldownMs) {
     return { action: 'skip', reason: 'cooldown' };
   }
 
@@ -119,27 +137,42 @@ export function evaluateAutoUpdateGates(input: AutoUpdateGateInput): AutoUpdateD
     }
   }
 
-  if (input.busy) return { action: 'skip', reason: 'busy (session running)' };
+  // サイクル3.1: busyReason があれば原因を区別できる文言を使う（省略時は従来の固定文言）
+  if (input.busy) return { action: 'skip', reason: input.busyReason ?? 'busy (session running)' };
   if (input.concurrent >= MAX_CONCURRENT_UPDATES) return { action: 'skip', reason: 'concurrency limit' };
 
   return { action: 'update', reason: `${input.remoteCommit.slice(0, 7)}` };
 }
 
 /**
- * マシンが作業中か判定する
- * active セッションで AI 応答が進行中、または直近 10 分にメッセージがあれば作業中とみなす
+ * マシンが作業中か判定し、理由文字列を返す（busy でなければ null）。
  *
- * サイクルP1: capability-sweep.ts からも busy ゲートとして再利用するため export する
- * （bake/cooldown/試行上限は自動更新固有なので流用しない。busy 判定だけを共有する）
+ * サイクル3.1: 判定の優先順位を 3 段に拡張した。
+ * 1. 実行中ターン台帳（`InFlightTurnRegistry`）— 経路を問わず AI プロンプト送信〜完了検知までを
+ *    捕捉する（根本原因の修正。MCP exec / crossquery・teamexec / raw-completion は従来 2〜3 では
+ *    捕捉できなかった）
+ * 2. 既存: active セッションで `progressTracker` が張られている（対話経路・`ag`・MCP submit/ask）
+ * 3. 既存: 直近 10 分以内にそのマシンの active セッションへの Message があるか
+ *
+ * `DEVRELAY_UPDATE_BUSY_GUARD=0` のときは 1 を無効化し、2〜3 のみ（従来挙動）に戻す。
  */
-export async function isMachineBusy(machineId: string): Promise<boolean> {
+export async function isMachineBusyWithReason(machineId: string): Promise<string | null> {
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    const inFlightTurnCount = inFlightTurns.count(machineId, Date.now());
+    if (inFlightTurnCount > 0) {
+      return resolveBusyReason({ inFlightTurnCount, sessionRunning: false, recentActivity: false });
+    }
+  }
+
   const sessions = await prisma.session.findMany({
     where: { machineId, status: 'active' },
     select: { id: true },
   });
-  if (sessions.some(s => isSessionRunning(s.id))) return true;
+  if (sessions.some(s => isSessionRunning(s.id))) {
+    return resolveBusyReason({ inFlightTurnCount: 0, sessionRunning: true, recentActivity: false });
+  }
 
-  if (sessions.length === 0) return false;
+  if (sessions.length === 0) return null;
   const recent = await prisma.message.findFirst({
     where: {
       sessionId: { in: sessions.map(s => s.id) },
@@ -147,7 +180,21 @@ export async function isMachineBusy(machineId: string): Promise<boolean> {
     },
     select: { id: true },
   });
-  return recent !== null;
+  if (recent !== null) {
+    return resolveBusyReason({ inFlightTurnCount: 0, sessionRunning: false, recentActivity: true });
+  }
+  return null;
+}
+
+/**
+ * マシンが作業中か判定する（boolean 版）。
+ *
+ * サイクルP1: capability-sweep.ts からも busy ゲートとして再利用するため export する
+ * （bake/cooldown/試行上限は自動更新固有なので流用しない。busy 判定だけを共有する）。
+ * 実装は `isMachineBusyWithReason()` に委譲する薄いラッパ（既存呼び出し元 0 行変更で済ませるため）。
+ */
+export async function isMachineBusy(machineId: string): Promise<boolean> {
+  return (await isMachineBusyWithReason(machineId)) !== null;
 }
 
 /**
@@ -268,7 +315,13 @@ export async function maybeAutoUpdate(machineId: string, trigger: 'connect' | 's
     machine.lastAutoUpdateStatus, version.runningCodeStale
   );
 
-  const busy = version.hasUpdate ? await isMachineBusy(machineId) : false;
+  let busyReason = version.hasUpdate ? await isMachineBusyWithReason(machineId) : null;
+  // サイクル3.1 (D2 連携): version-check 応答に Agent 自己申告の実行中ターン数があれば、
+  // サーバー側台帳が見落とした場合の追加の安全網として busy 判定に加える（新 Agent のみ。
+  // 省略時 undefined は無視＝旧 Agent で非退行）
+  if (busyReason === null && version.hasUpdate && (version.activeAiTurns ?? 0) > 0) {
+    busyReason = `busy (agent-reported turn: ${version.activeAiTurns})`;
+  }
   const decision = evaluateAutoUpdateGates({
     globallyEnabled,
     machineEnabled: machine.autoUpdate,
@@ -279,9 +332,11 @@ export async function maybeAutoUpdate(machineId: string, trigger: 'connect' | 's
     remoteDate: version.remoteDate,
     lastAttemptAt: machine.lastAutoUpdateAt,
     lastAttemptCommit: machine.lastAutoUpdateCommit,
+    lastAttemptStatus: machine.lastAutoUpdateStatus,
     remoteCommit: version.remoteCommit,
     attempts: machine.autoUpdateAttempts,
-    busy,
+    busy: busyReason !== null,
+    busyReason,
     concurrent: inProgress.size,
     now: new Date(),
     bakeMinutes: envInt('DEVRELAY_AUTO_UPDATE_BAKE_MIN', DEFAULT_BAKE_MIN),
@@ -353,6 +408,9 @@ export function startAutoUpdateSweep(): void {
   const initialMin = envInt('DEVRELAY_AUTO_UPDATE_INITIAL_SWEEP_MIN', DEFAULT_INITIAL_SWEEP_MIN);
 
   const run = async () => {
+    // サイクル3.1: 取りこぼし経路（kill・切断検知漏れ等）で残り続ける台帳エントリを TTL で掃除する
+    inFlightTurns.sweepStale(Date.now());
+
     const machineIds = Array.from(getConnectedAgents().keys());
     if (machineIds.length === 0) return;
     console.log(`🔁 [auto-update:sweep] checking ${machineIds.length} online agent(s)`);
@@ -400,4 +458,36 @@ export async function recordAutoUpdateError(machineId: string, error: string): P
     where: { id: machineId },
     data: { lastAutoUpdateStatus: `error:${error.slice(0, 200)}` },
   });
+}
+
+/**
+ * サイクル3.1 (C3): Agent から `'deferred'`（実行中 AI ターンのため更新を保留した）の通知を
+ * 受けた際に記録する（自動更新起点のときのみ。手動 `u`/`u force` 起点は `autoUpdateAttempts` を
+ * 一切触っていないため呼ばない。呼び出し元の `agent-manager.ts` が `pendingUpdateNotify` の有無で
+ * 振り分ける）。
+ *
+ * - `autoUpdateAttempts` を 1 戻す（`maybeAutoUpdate` が送信直前に +1 済みのため。D3 が目的とする
+ *   「deferred は試行回数に数えない」を実現する。0 未満にはしない）
+ * - `lastAutoUpdateStatus` を `'deferred'` に。`lastAutoUpdateAt` は変えない
+ *   （`resolveCooldownMs()` の短縮クールダウンはこの時刻を起点にする）
+ * - `inProgress` から即座に外す（既定 `COOLDOWN_MS`=30分保持だと次スイープが `already updating` で
+ *   skip されてしまい、短縮クールダウンが効かない）
+ */
+export async function recordAutoUpdateDeferred(machineId: string, activeAiTurns: number | undefined): Promise<void> {
+  inProgress.delete(machineId);
+
+  const machine = await prisma.machine.findUnique({
+    where: { id: machineId },
+    select: { autoUpdateAttempts: true },
+  });
+  if (!machine) return;
+
+  await prisma.machine.update({
+    where: { id: machineId },
+    data: {
+      lastAutoUpdateStatus: 'deferred',
+      autoUpdateAttempts: Math.max(0, machine.autoUpdateAttempts - 1),
+    },
+  });
+  console.log(`⏸️ [auto-update] deferred for ${machineId} (activeAiTurns=${activeAiTurns ?? 'unknown'})`);
 }

@@ -77,6 +77,7 @@ pm2 restart devrelay-server
 | DEVRELAY_PROGRESS_CANCEL_HINT | Discord/Telegram の進捗ボックス（実行中... N分経過）に「`k` で停止できます」の案内行（60秒経過後）を出すか（既定 `1`。`0` で無効化するキルスイッチ。WebUI は進捗表示に停止ボタンがあるため対象外） |
 | DEVRELAY_KNOWLEDGE | 会話ターンのナレッジ化（`KnowledgeChunk` への embedding 生成）と MCP `search_knowledge` / REST `GET /api/knowledge/search` を有効にするか（既定 `1`。`0` で MCP ツール未登録・REST 404・新規会話での行作成も停止するキルスイッチ。バックフィル CLI（`knowledge:backfill`）はこの変数を見ない＝明示実行は常時可。サイクル2 の `get_knowledge_thread` / `set_thread_classification` / `routes/knowledge-admin-api.ts` も同じキルスイッチを共用） |
 | DEVRELAY_EMBEDDING_API_KEY | 高辻ナレッジ サイクル2: embedding 生成・検索に使う組織共通の OpenAI API キー。個人キー（UserSettings）が未設定のユーザーのフォールバック先（優先順位: 個人キー → 本変数）。未設定時は個人キーのみで従来どおり動作（個人キーも無ければ `skipped`）。値はログに出さない |
+| DEVRELAY_UPDATE_BUSY_GUARD | サイクル3.1: 実行中 AI ターン中の Agent 自己更新保留（`isMachineBusy()` の実行中ターン台帳 + 手動 `u`/`server:agent:restart` の busy ガード）を有効にするか（既定 `1`。`0` で従来挙動に戻すキルスイッチ。Agent 側の D2（`sendPromptToAi()` 実行中は `server:agent:update` を保留する最後の砦）にはキルスイッチを置かず常時有効） |
 
 ## DB テーブル（概要）
 

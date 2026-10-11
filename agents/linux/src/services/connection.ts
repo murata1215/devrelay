@@ -38,7 +38,8 @@ import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
-import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, type SendPromptOptions } from './ai-runner.js';
+import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
+import { decideAgentUpdateAction } from './update-guard-rules.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { ensureRawCwd } from './raw-cwd.js';
 import { runRawCodex } from './raw-codex-runner.js';
@@ -162,6 +163,47 @@ let protocolUpdateRequired = false;
 
 /** 最後に更新を開始した時刻（二重更新防止用、60秒で自動解除） */
 let updateStartedAt = 0;
+
+/**
+ * サイクル3.1 (D2): 実行中 AI ターンのため更新を保留中か。
+ * プロセス寿命内だけのフラグ（永続化しない。サーバー側は次スイープで `server:agent:update` を
+ * 再送するので、Agent 再起動等で失われても問題ない）。30 秒間隔の再確認タイマーが動いている間 true。
+ */
+let pendingUpdate = false;
+/** 保留を開始した時刻（`PENDING_UPDATE_GIVE_UP_MS` 超過の判定に使う） */
+let pendingUpdateSince = 0;
+/** 保留中の再確認タイマー（`clearInterval` 用に保持） */
+let pendingUpdateRecheckTimer: ReturnType<typeof setInterval> | null = null;
+/** 保留してからこの時間を超えたら諦める（サーバーが次スイープで再送するため失っても問題ない） */
+const PENDING_UPDATE_GIVE_UP_MS = 2 * 60 * 60 * 1000;
+/** 再確認の間隔 */
+const PENDING_UPDATE_RECHECK_MS = 30 * 1000;
+
+/**
+ * サイクル3.1 (D2): 保留中の再確認タイマーを起動する（既に動いていれば何もしない）。
+ * `activeSdkAborts`/`activeSessions` と違い ai-runner.ts の状態には触れず、
+ * `handleAgentUpdate()` を再入させて判定し直すだけ（判定ロジックの単一情報源を保つため）。
+ */
+function armPendingUpdateRecheck(): void {
+  if (pendingUpdateRecheckTimer) return;
+  pendingUpdateRecheckTimer = setInterval(() => {
+    if (Date.now() - pendingUpdateSince > PENDING_UPDATE_GIVE_UP_MS) {
+      console.warn(`⏰ Agent update deferred for over ${PENDING_UPDATE_GIVE_UP_MS / 60000}min, giving up (server will resend on next sweep)`);
+      clearPendingUpdateRecheck();
+      return;
+    }
+    void handleAgentUpdate();
+  }, PENDING_UPDATE_RECHECK_MS);
+}
+
+/** サイクル3.1 (D2): 保留状態を解除する（更新を実際に開始する直前、または諦めるときに呼ぶ） */
+function clearPendingUpdateRecheck(): void {
+  if (pendingUpdateRecheckTimer) {
+    clearInterval(pendingUpdateRecheckTimer);
+    pendingUpdateRecheckTimer = null;
+  }
+  pendingUpdate = false;
+}
 
 // Pong timeout detection
 const PONG_TIMEOUT = 45000; // 45 seconds
@@ -2905,6 +2947,8 @@ async function handleVersionCheck() {
         isDevRepo,
         runningCodeMtime,
         runningCodeStale,
+        // サイクル3.1 (D2 連携): サーバー側台帳が見落とした場合の追加の安全網として busy 判定に使える
+        activeAiTurns: getActiveAiTurnCount(),
       },
     });
   } catch (err) {
@@ -2971,6 +3015,33 @@ async function handleAgentUpdate() {
       },
     });
     return;
+  }
+
+  // サイクル3.1 (D2): 実行中 AI ターンがあれば更新を保留する（最後の砦。サーバー側の busy 判定の
+  // 穴が再発した場合でも、Agent が自分の子プロセスを見て確実に止める）。
+  const activeAiTurns = getActiveAiTurnCount();
+  const action = decideAgentUpdateAction({ activeAiTurns, pendingUpdate });
+  if (action === 'defer') {
+    pendingUpdate = true;
+    pendingUpdateSince = Date.now();
+    console.log(`⏸️ Agent update deferred: ${activeAiTurns} AI turn(s) in progress`);
+    sendMessage({
+      type: 'agent:update:status',
+      payload: { machineId, status: 'deferred', activeAiTurns },
+    });
+    armPendingUpdateRecheck();
+    return;
+  }
+  if (action === 'wait') {
+    // 既に保留中・再確認タイマーが動いている。'deferred' を再送しない
+    // （サーバー側のログ・lastAutoUpdateAt を無駄に上書きしないため）
+    return;
+  }
+
+  // action === 'start': 保留していた場合は解除してから進める
+  if (pendingUpdate) {
+    console.log('▶️ Agent update resuming: AI turns finished');
+    clearPendingUpdateRecheck();
   }
 
   updateStartedAt = Date.now();

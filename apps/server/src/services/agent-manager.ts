@@ -60,6 +60,8 @@ import { shouldRecordPlanAiSession, buildPlanAiSessionWhere } from './submission
 import { normalizeStopReason, isStopReasonTruncated } from './stop-reason.js';
 import { truncateOnLineBoundary } from './content-truncate.js';
 import { stripProgressMarkers } from './progress-markers.js';
+import { inFlightTurns } from './in-flight-turns.js';
+import { isUpdateBusyGuardEnabled } from './update-busy-rules.js';
 
 /** サーバーが要求する最小プロトコルバージョン（これ未満の Agent は会話制限） */
 const MIN_PROTOCOL_VERSION = 0; // TODO: revert to 1 after agent update
@@ -141,7 +143,12 @@ export function cancelPendingCrossQuery(sessionId: string) {
  * （Agent の `finally` 応答が来なかった場合の保険。通常は Agent 側の応答が先に届く）。
  */
 export function sendRawPromptToAgent(machineId: string, payload: RawPromptPayload): Promise<RawResultPayload> {
-  return new Promise((resolve, reject) => {
+  // サイクル3.1: 実行中ターン台帳に登録（requestId をキーにする、台帳は machine 単位の Map のためキー自体は
+  // sessionId と衝突しない独立空間）。完了・timeout・切断のいずれでも必ず end() されるよう finally で解除する。
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    inFlightTurns.start(machineId, payload.requestId, Date.now());
+  }
+  return new Promise<RawResultPayload>((resolve, reject) => {
     const timeout = setTimeout(() => {
       pendingRawCompletions.delete(payload.requestId);
       reject(new Error('raw-completion timed out on server side'));
@@ -150,6 +157,8 @@ export function sendRawPromptToAgent(machineId: string, payload: RawPromptPayloa
     pendingRawCompletions.set(payload.requestId, { resolve, reject, timeout });
 
     sendToAgent(machineId, { type: 'server:raw:prompt', payload });
+  }).finally(() => {
+    inFlightTurns.end(machineId, payload.requestId);
   });
 }
 
@@ -682,6 +691,11 @@ async function handleAgentDisconnect(machineId: string, disconnectedWs?: WebSock
   outdatedAgents.delete(machineId);
   agentCapabilities.delete(machineId);
   agentAvailableAiTools.delete(machineId);
+  // サイクル3.1: 切断した Agent 宛の実行中ターンは二度と完了報告が来ない（取りこぼし経路の保険。
+  // 通常は TTL 6 時間で自然に失効するが、再接続後すぐ busy と誤判定されるのを防ぐため即時クリアする）
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    inFlightTurns.clearMachine(machineId);
+  }
 
   try {
     await prisma.machine.update({
@@ -727,6 +741,10 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
   console.log(`📥 AI Output received: isComplete=${isComplete}, length=${output.length}${isExec ? ' [EXEC]' : ''}`);
 
   if (isComplete) {
+    // サイクル3.1: 実行中ターン台帳から解除（最終出力。経路を問わずここが「ターン完了」の主経路）
+    if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+      inFlightTurns.end(payload.machineId, sessionId);
+    }
     // core#336: plan ターンの完了報告であれば、起動元ターンに対応付けた場合のみ
     // planAiSessionId/planAiTool を保存する。turnId が Session.planTurnId と一致しない
     // （exec/retry の完了報告や、対話経路など turnId 自体を送っていない場合）は何もしない。
@@ -1226,6 +1244,12 @@ async function handleSessionAiTool(payload: { machineId: string; sessionId: stri
 async function handleAiCancelled(payload: AiCancelledPayload) {
   const { sessionId, cancelled } = payload;
   console.log(`⛔ AI cancel result for session ${sessionId}: cancelled=${cancelled ?? '(unspecified, legacy agent)'}`);
+  // サイクル3.1: 実行中ターン台帳から解除。意図的に楽観的（最終 isComplete 出力を待たず解除する）。
+  // キャンセル時に isComplete が届かない既知の事故クラスに当たった場合、ユーザーが自分で止めた
+  // ターンのせいで更新が TTL（6時間）ぶん止まるほうが明確に悪いため
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    inFlightTurns.end(payload.machineId, sessionId);
+  }
   const lang = await resolveSessionLanguage(sessionId);
   // #355: cancelAiSession() の実際の戻り値を正直に反映する（#325 静かなフォールバック禁止）。
   // `cancelled===false` のときだけ「止められなかった」と明示する。
@@ -1438,6 +1462,13 @@ export async function sendPromptToAgent(
 
   // #332: permissionPolicy 未指定時は 'interactive' に解決して常に明示値を送る
   const resolvedPermissionPolicy = permissionPolicy ?? 'interactive';
+
+  // サイクル3.1: 実行中ターン台帳に登録。解除は handleAiOutput(isComplete) / handleAiCancelled /
+  // handleAgentDisconnect（切断時 clearMachine）のいずれかで行う（単一の try/finally にできない
+  // 非同期・別メッセージでの完了報告のため、送信直前の start のみここで行う）。
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    inFlightTurns.start(machineId, sessionId, Date.now());
+  }
 
   sendToAgent(machineId, {
     type: 'server:ai:prompt',
@@ -1667,7 +1698,7 @@ async function persistVersionInfo(payload: AgentVersionInfoPayload): Promise<voi
 
 /** Agent から更新処理のステータスを受信 → エラー時はユーザーに通知 */
 async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
-  const { machineId, status, error } = payload;
+  const { machineId, status, error, activeAiTurns } = payload;
 
   if (status === 'started') {
     console.log(`🔄 Agent update started for ${machineId}`);
@@ -1686,6 +1717,20 @@ async function handleUpdateStatus(payload: AgentUpdateStatusPayload) {
       const { recordAutoUpdateError } = await import('./auto-updater.js');
       await recordAutoUpdateError(machineId, error ?? 'unknown').catch(() => {});
     }
+  } else if (status === 'deferred') {
+    // サイクル3.1 (D2/D6): Agent 側が実行中 AI ターン（最後の砦）を検知して更新を保留した。
+    console.log(`⏸️ Agent update deferred for ${machineId} (activeAiTurns=${activeAiTurns ?? 'unknown'})`);
+    // 手動 `u`/`u force` 起点（pendingUpdateNotify 登録あり）は autoUpdateAttempts を一切
+    // 触っていないため DB 変更は不要（Agent が再入し、完了後の reconnect で update.completed が通知される）。
+    if (!pendingUpdateNotify.has(machineId)) {
+      // 自動更新起点（C3）: 送信時に +1 済みの attempts を 1 戻し、inProgress を即座に解放する
+      const { recordAutoUpdateDeferred } = await import('./auto-updater.js');
+      await recordAutoUpdateDeferred(machineId, activeAiTurns).catch(() => {});
+    }
+  } else {
+    // D6: 未知の status は warn ログのみ（autoUpdateAttempts は増やさない。将来の新 status 追加・
+    // 新旧サーバー混在時でも事故にしない）
+    console.warn(`⚠️ Unknown agent:update:status for ${machineId}: ${String(status)}`);
   }
 }
 
@@ -2075,6 +2120,13 @@ export async function execConversation(
   }
 
   console.log(`🔧 execConversation: machineId=${machineId}, dbResult=${JSON.stringify(machine)}, terminalMode=${terminalMode}, model resolved=${resolvedModel ?? '(default)'} (aiTool=${resolvedAiTool}, explicit=${model ?? 'none'}${substitutedLog})`);
+
+  // サイクル3.1: 実行中ターン台帳に登録（根本原因そのもの。exec は従来 startProgressTracking を
+  // 呼ばないため isMachineBusy() が常に false になっていた）
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    inFlightTurns.start(machineId, sessionId, Date.now());
+  }
+
   sendToAgent(machineId, {
     type: 'server:conversation:exec',
     payload: {
@@ -2118,6 +2170,11 @@ export async function saveWorkState(machineId: string, sessionId: string, projec
 export async function applyAgreement(machineId: string, sessionId: string, projectPath: string, userId: string) {
   const customTemplate = await getUserSetting(userId, SettingKeys.AGREEMENT_TEMPLATE);
   const agreementPrompt = buildAgreementApplyPrompt(customTemplate ?? undefined);
+  // サイクル3.1: 実行中ターン台帳に登録（`ag` は既に startProgressTracking 経由で busy 判定されているが、
+  // 他 3 経路と形を揃えるため台帳にも登録する。二重登録は害がない＝同一 sessionId の上書きのみ）
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    inFlightTurns.start(machineId, sessionId, Date.now());
+  }
   sendToAgent(machineId, {
     type: 'server:agreement:apply',
     payload: { sessionId, projectPath, userId, agreementPrompt }
