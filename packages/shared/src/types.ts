@@ -1063,7 +1063,39 @@ export type ServerToWebMessage =
   | { type: 'web:tool:approval:auto'; payload: { toolName: string; toolInput: Record<string, unknown>; projectId?: string; status?: string; reason?: string } }
   | { type: 'web:error'; payload: { error: string } }
   | { type: 'web:assist:response'; payload: VoiceAssistResponsePayload }
-  | { type: 'web:pong' };
+  | { type: 'web:pong' }
+  // 高辻ナレッジ サイクル4: ナレッジ回答（RAG）のストリーミング配信。answerId で複数の進行中
+  // 回答（新しい検索で前の回答が破棄される場合等）を区別する。
+  | { type: 'knowledge:answer:delta'; payload: { answerId: string; text: string } }
+  | { type: 'knowledge:answer:done'; payload: KnowledgeAnswerDonePayload }
+  | { type: 'knowledge:answer:error'; payload: { answerId: string; message: string } };
+
+/** `knowledge:answer:done` の payload（1 件の根拠ソース）。`sourceType` は D7: ソース非依存の契約。 */
+export interface KnowledgeAnswerSourcePayload {
+  rank: number;
+  sourceType: string;
+  sessionId: string;
+  aiMessageId: string;
+  title: string | null;
+  projectName: string;
+  ownerName: string;
+  occurredAt: string;
+  level: number;
+  compartment: string | null;
+}
+
+/** `knowledge:answer:done` の payload。`audited`: 他人のターンを context に含んだため監査ログに記録したか。 */
+export interface KnowledgeAnswerDonePayload {
+  answerId: string;
+  answer: string;
+  sources: KnowledgeAnswerSourcePayload[];
+  model: string;
+  provider: string;
+  usage?: { input: number; output: number };
+  context: { items: number; omitted: number; chars: number };
+  elapsedMs: number;
+  audited: boolean;
+}
 
 // -----------------------------------------------------------------------------
 // Scaffold（Manager → Agent プロジェクト雛形展開）

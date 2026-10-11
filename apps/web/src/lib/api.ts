@@ -1299,7 +1299,70 @@ export const knowledge = {
     const qs = params.toString();
     return request('GET', `/knowledge/threads/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ''}`);
   },
+
+  /**
+   * 高辻ナレッジ サイクル4: `POST /api/knowledge/answer`。
+   * killswitch（`DEVRELAY_KNOWLEDGE_ANSWER=0`）時は 404 `{error: 'Knowledge answer is disabled...'}`
+   * が `Error` として throw される（`isKnowledgeAnswerDisabledError()` で判定する）。鍵未設定時は
+   * 200 で返るが `delivery:'http'` のレスポンス自体がエラー文言を含むのではなく、サーバーが
+   * 503 を返す（`isKnowledgeAnswerKeyMissingError()` で判定する）。
+   * レスポンスは常にステータス 200（`delivery` で分岐）。`stream:true` かつ利用者の WS が接続中なら
+   * `{ delivery: 'ws', answerId }` を即返し、以降は WS の `knowledge:answer:*` で配信される。
+   */
+  async answer(req: KnowledgeAnswerRequest): Promise<KnowledgeAnswerResponse> {
+    return request('POST', '/knowledge/answer', req);
+  },
 };
+
+/** `POST /api/knowledge/answer` のリクエストボディ。`searchKnowledge` と同形のフィルタを渡す。 */
+export interface KnowledgeAnswerRequest {
+  answerId: string;
+  question: string;
+  stream: boolean;
+  /** WS 配信先の特定に使う（`useWebSocket` が張っているソケットと同じ tabId を渡すこと）。 */
+  tabId?: string;
+  mode?: string;
+  scope?: string;
+  projectId?: string;
+  kind?: string;
+  compartment?: string;
+  maxLevel?: number;
+  since?: string;
+  until?: string;
+  limit?: number;
+}
+
+/** `POST /api/knowledge/answer` の 1 件の根拠ソース。カード番号（`rank`）＝本文中の [n]。 */
+export interface KnowledgeAnswerSource {
+  rank: number;
+  sourceType: string;
+  sessionId: string;
+  aiMessageId: string;
+  title: string | null;
+  projectName: string;
+  ownerName: string;
+  occurredAt: string;
+  level: number;
+  compartment: string | null;
+}
+
+/** `POST /api/knowledge/answer` の完成結果（`delivery:'http'` のレスポンス本体、または WS `knowledge:answer:done` の payload と同形）。 */
+export interface KnowledgeAnswerDoneResult {
+  answerId: string;
+  answer: string;
+  sources: KnowledgeAnswerSource[];
+  model: string;
+  provider: string;
+  usage?: { input: number; output: number };
+  context: { items: number; omitted: number; chars: number };
+  elapsedMs: number;
+  audited: boolean;
+}
+
+/** `POST /api/knowledge/answer` のレスポンス（`delivery` で分岐する判別可能ユニオン）。 */
+export type KnowledgeAnswerResponse =
+  | { delivery: 'ws'; answerId: string }
+  | ({ delivery: 'http' } & KnowledgeAnswerDoneResult);
 
 // ========================================
 // 高辻ナレッジ サイクル3 — 人の権限 / 案件・スレッドの機密度 API（WebUI）

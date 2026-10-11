@@ -6,6 +6,94 @@
 
 ## 実装済み機能
 
+### 高辻ナレッジ サイクル4 — ナレッジ回答（RAG）: ひとつの検索箱で根拠カード＋ストリーミング回答 (2026-10-12)
+
+サイクル1〜3 の `/knowledge` は RAG の「R」（検索結果カード）のみ。本サイクルで「AG」
+（AI 回答）を足し、検索箱に打った質問に対し「根拠カード（従来どおり即出る）＋カードと同じ条件で
+生成される AI 回答（ストリーミング表示、[n] はカード番号と一致）」が同時に得られる体験にした。
+対象は `apps/server` ＋ `apps/web`。agent / flutter / Lite / ChatPage は **0 行変更**。
+
+- **D1（入口統合）**: 検索実行時に、根拠（既存 `searchKnowledge`）と回答生成が**同じクエリ・同じ
+  フィルタ**で同時に走る。「AI 回答」トグル（既定 ON、localStorage で閲覧者ごとに記憶）で OFF にすれば
+  従来の検索だけになる
+- **D2（context 構築）**: 検索結果の**上位 12 ターン**について、新規 `loadKnowledgeTurnTexts()`
+  （`knowledge-service.ts`）で**同一ターンの兄弟チャンクを連結した全文**を取得（既存
+  `searchKnowledge` は最良チャンク 1 個の `snippet` しか持たないため新設）。
+  `buildKnowledgeContext()`（`knowledge-answer-rules.ts`）で 1 件 1,500 文字・合計 18,000 文字を
+  行境界で打ち切り、`[n]` ＝カード順位（`rank`）をそのまま引用番号に使う
+- **D3（鍵・モデル、ユーザー承認の最終決定）**: 指示書 D3 の「個人キー優先」は**取り下げ**。
+  `DEVRELAY_ANSWER_API_KEY`（**専用・共有のみ**。個人の Chat AI キーにも汎用 `OPENAI_API_KEY`
+  にもフォールバックしない＝費用をキー単位で用途別に分けるため）が無ければ回答欄に鍵未設定の
+  1 行のみ出し、検索（カード）は従来どおり動く。provider は OpenAI 固定、model は
+  `DEVRELAY_ANSWER_MODEL`（既定 `gpt-4o-mini`）。`maxTokens 1500`・`temperature 0.2`・60 秒
+  タイムアウト（`AbortController`）
+- **D4（配信）**: `chat-provider.ts` の `ChatProvider` に任意メソッド `chatStream` を追加
+  （OpenAI のみ実装。`resolveChatProvider` に任意第 4 引数 `model` を追加。既存 `chat()`・
+  既存呼び出し元（`voice-assist.ts`）は無変更）。配信は既存の WebUI 向け WS（`/ws/web`、
+  `platforms/web.ts`）を流用し、新規 export `isWebClientConnected()` ＋既存 `sendWebRawMessage()`
+  で `knowledge:answer:delta/done/error`（`answerId` 付き）を送る。`POST /api/knowledge/answer` は
+  常に 200 を返し、body の `delivery:'ws'|'http'` で分岐（WS 接続中なら `{delivery:'ws',answerId}`
+  を即返して裏で生成・配信、それ以外は生成を待って完成形を返す）
+- **設計上の発見と対処（調査で判明、プランで確認済み）**: `KnowledgePage` が素朴に
+  `useWebSocket` を使うと、chatId（`web:${userId}:${tabId}`）が ChatPage と衝突し、
+  WS 切断中に完了していたチャットの応答を接続時に無条件 flush で消費してしまう実害がある。
+  → `${getTabId()}:knowledge` という**専用 tabId** で chatId の名前空間を分離（`getUserContext`
+  は未知の chatId に参加登録を一切行わないため、ChatPage 側に副作用ゼロと確認済み）
+- **D5（プロンプト）**: 固定システムプロンプト（ja/en）。抜粋だけから答える・各主張直後に `[n]`・
+  抜粋に無いことは明言・整理が要る質問は見出しで整理
+- **D6（引用の確定）**: `sanitizeCitations()` で本文中の無効な `[n]` を除去。`done` 時に
+  `sources[]`（rank/sourceType/sessionId/aiMessageId/title/projectName/ownerName/occurredAt/
+  level/compartment）を確定返却
+- **D7（ソース非依存の契約）**: `KnowledgeContextItem`/`sources[]` は `sourceType` を持つのみで、
+  回答生成コード自体はソース種別に依存しない（将来の文書ソース投入＝サイクル5 を見据えた形）
+- **D8（監査）**: context に他人のターンを含んだら所有者ごとに
+  `recordSupervisionAudit(viewer, owner, 'summarize', {via:'knowledge_answer', answerId, refs})`
+  （既存 `search_knowledge` の監査とは別アクション）。`done` payload に `audited: boolean` を追加し、
+  WebUI は監査対象のときのみ「この回答の作成は監査に記録されます」を表示
+- **D9（流量制御）**: ユーザー単位で同時 1・5 回/分・100 回/日（`knowledge-answer-rules.ts` の
+  `AnswerGuardState`、`raw-completion-guard.ts` と同じ「state は呼び出し側所有・`nowMs` 注入」の
+  流儀）。質問は 1〜1,000 文字。検索自体は対象外（検索だけは常に使える）
+- **D10（キルスイッチ）**: `DEVRELAY_KNOWLEDGE_ANSWER`（既定 `1`。`0` で REST 404・トグル非表示。
+  既存の検索用 `DEVRELAY_KNOWLEDGE` とは独立）
+- **D11（最小安全レンダラ、承認済みの範囲限定緩和）**: 新規 `AnswerMarkdown.tsx` ＋
+  `KnowledgeAnswerPanel.tsx` のみ見出し・箇条書き・太字・インラインコード・`[n]` リンクを描画する
+  （`dangerouslySetInnerHTML` は使わない＝生 HTML はテキストのまま）。`KnowledgeResultCard.tsx` /
+  `KnowledgeThreadViewer.tsx` は本サイクルでもプレーン表示のまま変更していない。
+  **ライブの経過秒カウンタは出さない**（ユーザー承認の最終決定。`setInterval` 禁止ガードは
+  緩めない）。スピナーのみ表示し、完了後にサーバーの `elapsedMs`/`model`/`usage` を小さく表示する
+- サイクル3 のガードテスト（`knowledge-source-guards.test.mjs`）の**範囲を絞った緩和 3 件**
+  （全面撤廃ではない。ファイル先頭コメントに明記）: ①`hooks/useWebSocket` の import 禁止は
+  `KnowledgePage.tsx` に限り解除（`components/knowledge/*` は引き続き禁止）、②markdown 描画禁止は
+  `AnswerMarkdown.tsx`/`KnowledgeAnswerPanel.tsx` に限り対象外、③新規純ロジック
+  `knowledge-answer-rules.ts` を `PURE_LOGIC_MODULES`/`tsconfig.test.json` に追加。
+  `ChatPage.tsx`（3818 行）/`LitePage.tsx`（682 行）の無変更ピンは変更なし
+- **MCP `ask_knowledge`・Discord/Telegram・追い質問（マルチターン）・回答の保存/共有・他ソース投入
+  自体（サイクル5）は非スコープ**（指示書 §9）
+
+#### 変更ファイル
+
+| 区分 | ファイル |
+|---|---|
+| 新規 | `apps/server/src/services/{knowledge-answer-rules,knowledge-answer}.ts`、`apps/server/tests/{knowledge-answer-rules,knowledge-answer-wiring}.test.mjs` |
+| 変更 | `apps/server/src/services/chat-provider.ts`（`chatStream` 任意メソッド追加・`resolveChatProvider` 第4引数追加）、`apps/server/src/services/knowledge-service.ts`（`loadKnowledgeTurnTexts()` 追加）、`apps/server/src/services/user-settings.ts`（`resolveUserLanguage()` 追加・`resolveSessionLanguage()` が委譲）、`apps/server/src/platforms/web.ts`（`isWebClientConnected()` 追加）、`apps/server/src/routes/knowledge-api.ts`（`POST /api/knowledge/answer` 追加）、`packages/shared/src/types.ts`（`ServerToWebMessage` に `knowledge:answer:*` 3 種追加） |
+| 新規 | `apps/web/src/lib/knowledge-answer-rules.ts`、`apps/web/src/components/knowledge/{AnswerMarkdown,KnowledgeAnswerPanel}.tsx`、`apps/web/tests/knowledge-answer-rules.test.mjs` |
+| 変更 | `apps/web/src/pages/KnowledgePage.tsx`（トグル・回答パネル・[n] クリック連動・専用 WS tabId）、`apps/web/src/hooks/useWebSocket.ts`（`knowledge:answer:*` 購読口を純加算）、`apps/web/src/lib/api.ts`（`knowledge.answer()`）、`apps/web/src/i18n/messages.ts`、`apps/web/tsconfig.test.json`、`apps/web/tests/knowledge-source-guards.test.mjs`（範囲限定の緩和 3 件） |
+
+#### テスト
+
+server 新規 43（`knowledge-answer-rules.test.mjs`）＋ 16（`knowledge-answer-wiring.test.mjs`）、
+web 新規 27（`knowledge-answer-rules.test.mjs`）＋ guard 追加分。
+server **1083/1083**・web **802/802** green、6 workspace `pnpm build` green、
+`grep -c 'require(' apps/web/dist/assets/index-*.js` = 0 を確認。
+agents（linux/macos/windows）は **0 行変更**（`git diff --stat -- agents/ prisma/` 空）、
+各フルスイート実行で既知の node:test ランナー内部 IPC シリアライズ起因のフレーク 1 件ずつを観測
+（`conversation-store-scope.test.mjs` / `file-handler.test.mjs`、いずれも単独・複数回再実行で
+non-flaky に green 確認済み、過去サイクルから繰り返し観測されている既知事象で本サイクルとは無関係）。
+
+DB マイグレーション不要。pm2 restart 要。`.env`/pm2 に入れる変数（人間が実施）:
+`DEVRELAY_KNOWLEDGE_ANSWER`（任意、既定 ON）・`DEVRELAY_ANSWER_API_KEY`（必須、機能を使うなら）・
+`DEVRELAY_ANSWER_MODEL`（任意、既定 `gpt-4o-mini`）。各機 `u` 不要（Agent 側 0 行変更）。
+
 ### サイクル3.1 — Agent 自己更新の保留（実行中 AI ターンの保護） (2026-10-11)
 
 高辻ナレッジ サイクル1・サイクル3 の exec が、Agent 自己更新による再起動で 2 回殺された

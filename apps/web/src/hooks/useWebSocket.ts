@@ -35,6 +35,33 @@ export interface ToolApprovalAuto {
   projectId?: string;
 }
 
+/** 高辻ナレッジ サイクル4: `knowledge:answer:done` の payload（WebUI 側の写し）。 */
+export interface KnowledgeAnswerSourcePayload {
+  rank: number;
+  sourceType: string;
+  sessionId: string;
+  aiMessageId: string;
+  title: string | null;
+  projectName: string;
+  ownerName: string;
+  occurredAt: string;
+  level: number;
+  compartment: string | null;
+}
+
+/** 高辻ナレッジ サイクル4: `knowledge:answer:done` の payload（WebUI 側の写し）。 */
+export interface KnowledgeAnswerDonePayload {
+  answerId: string;
+  answer: string;
+  sources: KnowledgeAnswerSourcePayload[];
+  model: string;
+  provider: string;
+  usage?: { input: number; output: number };
+  context: { items: number; omitted: number; chars: number };
+  elapsedMs: number;
+  audited: boolean;
+}
+
 /** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用、sessionId: スレッドルーティング用） */
 type ServerToWebMessage =
   | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; sessionId?: string; messageId?: string } }
@@ -45,7 +72,11 @@ type ServerToWebMessage =
   | { type: 'web:tool:approval:resolved'; payload: ToolApprovalResolved }
   | { type: 'web:tool:approval:auto'; payload: ToolApprovalAuto }
   | { type: 'web:error'; payload: { error: string } }
-  | { type: 'web:pong' };
+  | { type: 'web:pong' }
+  // 高辻ナレッジ サイクル4: ナレッジ回答（RAG）のストリーミング配信。既存 9 種は無変更（純加算）。
+  | { type: 'knowledge:answer:delta'; payload: { answerId: string; text: string } }
+  | { type: 'knowledge:answer:done'; payload: KnowledgeAnswerDonePayload }
+  | { type: 'knowledge:answer:error'; payload: { answerId: string; message: string } };
 
 /** チャットメッセージ */
 export interface ChatMessage {
@@ -77,6 +108,12 @@ export interface WebSocketCallbacks {
   onToolApprovalAuto?: (info: ToolApprovalAuto) => void;
   /** WebSocket 再接続時のコールバック（セッション再登録・履歴リフレッシュ用） */
   onReconnect?: () => void;
+  /** 高辻ナレッジ サイクル4: ナレッジ回答のストリーミング断片受信時のコールバック */
+  onKnowledgeAnswerDelta?: (payload: { answerId: string; text: string }) => void;
+  /** 高辻ナレッジ サイクル4: ナレッジ回答の完了受信時のコールバック */
+  onKnowledgeAnswerDone?: (payload: KnowledgeAnswerDonePayload) => void;
+  /** 高辻ナレッジ サイクル4: ナレッジ回答のエラー受信時のコールバック */
+  onKnowledgeAnswerError?: (payload: { answerId: string; message: string }) => void;
 }
 
 /** WebSocket フックの戻り値 */
@@ -206,6 +243,15 @@ export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSoc
               cb?.onMessage?.({ role: 'system', content: `❌ ${msg.payload.error}` });
               break;
             case 'web:pong':
+              break;
+            case 'knowledge:answer:delta':
+              cb?.onKnowledgeAnswerDelta?.(msg.payload);
+              break;
+            case 'knowledge:answer:done':
+              cb?.onKnowledgeAnswerDone?.(msg.payload);
+              break;
+            case 'knowledge:answer:error':
+              cb?.onKnowledgeAnswerError?.(msg.payload);
               break;
           }
         } catch {

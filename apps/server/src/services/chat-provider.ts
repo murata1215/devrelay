@@ -29,6 +29,9 @@ export interface ChatParams {
   maxTokens?: number;
   /** 温度（0.0-1.0） */
   temperature?: number;
+  /** 高辻ナレッジ サイクル4: タイムアウト中断用（`chatStream` の OpenAI 実装でのみ使用。
+   * 既存 `chat()` 呼び出し元（voice-assist.ts 等）は未指定のままで無変更）。 */
+  signal?: AbortSignal;
 }
 
 /** Chat レスポンス */
@@ -42,6 +45,11 @@ export interface ChatResult {
 /** ChatProvider インターフェース */
 export interface ChatProvider {
   chat(params: ChatParams): Promise<ChatResult>;
+  /**
+   * 高辻ナレッジ サイクル4: ストリーミング版（任意実装）。`onDelta` を本文の断片ごとに呼ぶ。
+   * 未実装のプロバイダーでは `undefined`（呼び出し側は `chat()` へフォールバックすること）。
+   */
+  chatStream?(params: ChatParams, onDelta: (text: string) => void): Promise<ChatResult>;
 }
 
 // ============================================================
@@ -77,6 +85,47 @@ class OpenAIChatProvider implements ChatProvider {
         output: response.usage.completion_tokens,
       } : undefined,
     };
+  }
+
+  /**
+   * 高辻ナレッジ サイクル4: ストリーミング版。`stream_options.include_usage` を付けないと
+   * チャンクに `usage` が載らず D6 の `usage` フィールドが取れないため必須。
+   */
+  async chatStream(params: ChatParams, onDelta: (text: string) => void): Promise<ChatResult> {
+    const openai = new OpenAI({ apiKey: this.apiKey });
+    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+      { role: 'system', content: params.system },
+      ...params.messages.map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
+    ];
+
+    const stream = await openai.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        max_tokens: params.maxTokens ?? 1024,
+        temperature: params.temperature ?? 0.3,
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      { signal: params.signal }
+    );
+
+    let text = '';
+    let usage: { input: number; output: number } | undefined;
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta?.content;
+      if (delta) {
+        text += delta;
+        onDelta(delta);
+      }
+      if (chunk.usage) {
+        usage = { input: chunk.usage.prompt_tokens, output: chunk.usage.completion_tokens };
+      }
+    }
+    return { text, usage };
   }
 }
 
@@ -184,21 +233,25 @@ class GeminiChatProvider implements ChatProvider {
  * ユーザー設定に基づいて ChatProvider を生成する
  *
  * @param userId ユーザー ID
- * @param settingKey UserSettings のプロバイダーキー（例: 'voice_assist_provider'）
+ * @param provider AI プロバイダー
+ * @param apiKey API キー
+ * @param model 高辻ナレッジ サイクル4: モデル名を外から指定する（省略時は各プロバイダーの
+ *   コンストラクタ既定値。既存呼び出し元（voice-assist.ts 等）は未指定のままで無変更）。
  * @returns ChatProvider インスタンス。API キー未設定の場合は null
  */
 export async function resolveChatProvider(
   userId: string,
   provider: AiProvider,
   apiKey: string,
+  model?: string,
 ): Promise<ChatProvider> {
   switch (provider) {
     case 'openai':
-      return new OpenAIChatProvider(apiKey);
+      return new OpenAIChatProvider(apiKey, model);
     case 'anthropic':
-      return new AnthropicChatProvider(apiKey);
+      return new AnthropicChatProvider(apiKey, model);
     case 'gemini':
-      return new GeminiChatProvider(apiKey);
+      return new GeminiChatProvider(apiKey, model);
     default:
       throw new Error(`Unsupported provider: ${provider}`);
   }

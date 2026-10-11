@@ -10,6 +10,16 @@
 //   URL を書く（LitePage で文書化済みの再検索ループの再発）
 // - `maxLevel=`/`limit=` の手組みクエリ文字列が復活する（罠の再発）
 // - ChatPage.tsx / LitePage.tsx が本サイクルの作業中に意図せず変更される（0 行変更の制約）
+//
+// 高辻ナレッジ サイクル4（ナレッジ回答/RAG）での承認済みの緩和（ユーザー承認の最終決定。全面撤廃ではなく
+// 対象を絞った例外として明示する）:
+// - `hooks/useWebSocket` の import 禁止は `KnowledgePage.tsx` に限り解除する（D4: 回答のストリーミング
+//   配信専用。`components/knowledge/*` には引き続き適用し、ソケットは Page が一元管理する）。
+//   KnowledgePage.tsx は `${getTabId()}:knowledge` という専用 tabId を使うこと（ChatPage と chatId が
+//   衝突すると、ChatPage の未送信キューが接続時に無条件 flush される実害がある。below のテストで固定）。
+// - markdown 描画禁止（§4）は `AnswerMarkdown.tsx` / `KnowledgeAnswerPanel.tsx` に限り対象外とする
+//   （D11: 回答パネルのみ最小安全レンダラを使う。`dangerouslySetInnerHTML` は依然ゼロ＝生 HTML は
+//   テキストとしてしか出ない。カード/ビューアは本サイクルでも変更なし＝引き続きプレーン表示）。
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,7 +39,10 @@ function countLines(relPath) {
   return readSource(relPath).split('\n').length;
 }
 
-const PURE_LOGIC_MODULES = ['src/lib/knowledge-search-rules.ts', 'src/lib/clearance-rules.ts'];
+const PURE_LOGIC_MODULES = ['src/lib/knowledge-search-rules.ts', 'src/lib/clearance-rules.ts', 'src/lib/knowledge-answer-rules.ts'];
+
+/** D11 の例外: 回答パネルのみ markdown 描画を許可する（§4 参照）。 */
+const ANSWER_PANEL_FILES = ['src/components/knowledge/KnowledgeAnswerPanel.tsx', 'src/components/knowledge/AnswerMarkdown.tsx'];
 
 const KNOWLEDGE_COMPONENT_DIR = 'src/components/knowledge';
 const KNOWLEDGE_COMPONENT_FILES = readdirSync(path.join(webRoot, KNOWLEDGE_COMPONENT_DIR))
@@ -72,15 +85,33 @@ describe('tsconfig.test.json: 新規純ロジック 2 本が include されて�
 });
 
 // ---- 3) 分離: ChatPage / LitePage / components/lite / useWebSocket を import しない ----
+//
+// サイクル4 の承認済み例外（ファイル先頭コメント参照）: `KnowledgePage.tsx` のみ `hooks/useWebSocket`
+// の import を許可する（他の禁止参照は変わらず禁止）。`components/knowledge/*` は従来どおり全面禁止。
 
-describe('KnowledgePage / components/knowledge/*: ChatPage・LitePage・Lite シェル・useWebSocket から分離されている', () => {
-  const FORBIDDEN_PATTERN = /ChatPage|LitePage|components\/lite|hooks\/useWebSocket/;
-  for (const relPath of KNOWLEDGE_SOURCE_FILES) {
+describe('KnowledgePage / components/knowledge/*: ChatPage・LitePage・Lite シェルから分離されている（useWebSocket は KnowledgePage.tsx のみ例外）', () => {
+  const FULL_FORBIDDEN_PATTERN = /ChatPage|LitePage|components\/lite|hooks\/useWebSocket/;
+  const PAGE_FORBIDDEN_PATTERN = /ChatPage|LitePage|components\/lite/;
+
+  test(`${KNOWLEDGE_PAGE_FILE}: ChatPage/LitePage/components-lite を import していない（useWebSocket は D4 により許可）`, () => {
+    const source = readSource(KNOWLEDGE_PAGE_FILE);
+    const importLines = source.match(/^import[^;]+;/gm) ?? [];
+    for (const line of importLines) {
+      assert.equal(PAGE_FORBIDDEN_PATTERN.test(line), false, `${KNOWLEDGE_PAGE_FILE} に禁止 import がある: ${line}`);
+    }
+  });
+
+  test(`${KNOWLEDGE_PAGE_FILE}: useWebSocket 接続は専用 tabId（\`\${getTabId()}:knowledge\`）を使っている（ChatPage との chatId 衝突防止）`, () => {
+    const source = readSource(KNOWLEDGE_PAGE_FILE);
+    assert.match(source, /`\$\{getTabId\(\)\}:knowledge`/);
+  });
+
+  for (const relPath of KNOWLEDGE_COMPONENT_FILES) {
     test(`${relPath}: 禁止参照（ChatPage/LitePage/components/lite/useWebSocket）を import していない`, () => {
       const source = readSource(relPath);
       const importLines = source.match(/^import[^;]+;/gm) ?? [];
       for (const line of importLines) {
-        assert.equal(FORBIDDEN_PATTERN.test(line), false, `${relPath} に禁止 import がある: ${line}`);
+        assert.equal(FULL_FORBIDDEN_PATTERN.test(line), false, `${relPath} に禁止 import がある: ${line}`);
       }
     });
   }
@@ -101,6 +132,29 @@ describe('ナレッジ画面は markdown を描画しない（ChatPage の rende
 
   test('KnowledgeResultCard.tsx は whitespace-pre-wrap でプレーン表示する', () => {
     assert.ok(readSource('src/components/knowledge/KnowledgeResultCard.tsx').includes('whitespace-pre-wrap'));
+  });
+
+  // サイクル4 の承認済み例外: markdown 装飾を描画してよいのは ANSWER_PANEL_FILES の 2 ファイルのみ
+  // （`dangerouslySetInnerHTML` は上のループで引き続き全ファイル禁止のまま＝生 HTML は出さない）。
+  // `AnswerMarkdown.tsx` がトークナイザ本体を import し、`KnowledgeAnswerPanel.tsx` がその
+  // `AnswerMarkdown` コンポーネントを使う（直接 import するわけではない）という 2 段構成のため、
+  // 「どちらかの経由で markdown 描画に触れているか」を 1 つの判定にまとめる。
+  test('markdown 描画（tokenizeAnswerMarkdown 直接 or AnswerMarkdown 経由）に触れているのは ANSWER_PANEL_FILES のみ', () => {
+    for (const relPath of KNOWLEDGE_SOURCE_FILES) {
+      const source = readSource(relPath);
+      const touchesMarkdownRendering = source.includes('tokenizeAnswerMarkdown') || /\bAnswerMarkdown\b/.test(source);
+      assert.equal(
+        touchesMarkdownRendering,
+        ANSWER_PANEL_FILES.includes(relPath),
+        `${relPath} の markdown 描画への関与が想定外（想定: ${ANSWER_PANEL_FILES.includes(relPath)}）`
+      );
+    }
+  });
+
+  test('KnowledgePage.tsx は KnowledgeAnswerPanel を使うが tokenizeAnswerMarkdown / AnswerMarkdown を直接 import しない（Panel に委譲）', () => {
+    const source = readSource(KNOWLEDGE_PAGE_FILE);
+    assert.match(source, /KnowledgeAnswerPanel/);
+    assert.equal(source.includes('tokenizeAnswerMarkdown'), false);
   });
 
   test('KnowledgeThreadViewer.tsx は whitespace-pre-wrap でプレーン表示する', () => {
@@ -129,6 +183,13 @@ describe('setSearchParams はKnowledgePage.tsx の apply() にのみ存在する
     const match = source.match(/useEffect\(\(\) => \{[\s\S]*?knowledgeApi\s*\n?\s*\.search[\s\S]*?\}, \[searchQueryKey\]\);/);
     assert.ok(match, '検索 useEffect ブロックが見つからない（refactor で形が変わった可能性）');
     assert.equal(match[0].includes('setSearchParams'), false, '検索 useEffect 内で setSearchParams を呼んでいる（再検索ループの危険）');
+  });
+
+  test('サイクル4: 回答生成の useEffect 本体（knowledgeApi.answer を呼ぶブロック）も setSearchParams を呼ばない', () => {
+    const source = readSource(KNOWLEDGE_PAGE_FILE);
+    const match = source.match(/useEffect\(\(\) => \{[\s\S]*?knowledgeApi\s*\n?\s*\.answer[\s\S]*?\}, \[searchQueryKey, answerEnabled, answerFeatureDisabled, knowledgeTabId\]\);/);
+    assert.ok(match, '回答生成 useEffect ブロックが見つからない（refactor で形が変わった可能性）');
+    assert.equal(match[0].includes('setSearchParams'), false, '回答生成 useEffect 内で setSearchParams を呼んでいる（再検索ループの危険）');
   });
 });
 

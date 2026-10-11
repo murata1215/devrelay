@@ -415,12 +415,31 @@ export async function getApiKeyForTerminalAi(userId: string): Promise<{ provider
 }
 
 /**
+ * userId から表示言語を解決する（高辻ナレッジ サイクル4）。
+ *
+ * `resolveSessionLanguage` の本体（Session → userId の解決部分を除いたもの）を単一情報源として
+ * 切り出したもの。userId を直接持つハンドラ（`routes/knowledge-api.ts` の `POST /api/knowledge/answer`
+ * 等）はこちらを使う。解決に失敗した場合（設定なし等）は DEFAULT_CHAT_LANGUAGE にフォールバックする。
+ */
+export async function resolveUserLanguage(userId: string): Promise<Language> {
+  try {
+    const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
+    return isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+  } catch (err) {
+    console.error(`⚠️ resolveUserLanguage failed for user ${userId}:`, err);
+    return DEFAULT_CHAT_LANGUAGE;
+  }
+}
+
+/**
  * sessionId のみから表示言語を解決する（#319）
  *
  * agent-manager.ts の一部ハンドラは payload に sessionId しか持たないため、
  * Session → userId → UserSettings.language の解決ロジックを単一情報源として集約する。
  * #304/#306/#309 と同種の「分散した同期漏れバグ」の再発防止。
  * 解決に失敗した場合（Session/userId/設定なし）は DEFAULT_CHAT_LANGUAGE にフォールバックする。
+ * 高辻ナレッジ サイクル4: userId → 言語の解決部分自体は `resolveUserLanguage` に委譲する
+ * （挙動は不変。単一情報源化）。
  */
 export async function resolveSessionLanguage(sessionId: string): Promise<Language> {
   try {
@@ -430,8 +449,7 @@ export async function resolveSessionLanguage(sessionId: string): Promise<Languag
     });
     if (!session) return DEFAULT_CHAT_LANGUAGE;
 
-    const stored = await getUserSetting(session.userId, SettingKeys.LANGUAGE);
-    return isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+    return await resolveUserLanguage(session.userId);
   } catch (err) {
     console.error(`⚠️ resolveSessionLanguage failed for session ${sessionId}:`, err);
     return DEFAULT_CHAT_LANGUAGE;

@@ -365,6 +365,15 @@ export function pushSessionInfoToChat(chatId: string, payload: ReturnType<typeof
 }
 
 /**
+ * 高辻ナレッジ サイクル4: 指定 chatId の Web クライアントが接続中か判定する
+ * （`decideDelivery` が WS 配信 vs HTTP フォールバックを選ぶために使う。送信は行わない）。
+ */
+export function isWebClientConnected(chatId: string): boolean {
+  const ws = webClients.get(chatId);
+  return !!ws && ws.readyState === ws.OPEN;
+}
+
+/**
  * Web クライアントに生の ServerToWebMessage を送信する
  * ツール承認リクエスト等、専用の型メッセージを直接送信する場合に使用
  */

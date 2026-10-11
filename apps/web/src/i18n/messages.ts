@@ -306,6 +306,20 @@ export const messages = {
   'knowledge.thread.loading': { en: 'Loading…', ja: '読み込み中...' },
 
   // ======================================================================
+  // 高辻ナレッジ サイクル4: ナレッジ回答（RAG）パネル
+  // ======================================================================
+  'knowledge.answer.toggle': { en: 'AI answer', ja: 'AI 回答' },
+  'knowledge.answer.thinking': { en: 'Thinking…', ja: '考え中...' },
+  'knowledge.answer.tokens': { en: '{n} tokens', ja: '{n} トークン' },
+  'knowledge.answer.elapsed': { en: '{s}s', ja: '{s}秒' },
+  'knowledge.answer.auditNotice': { en: 'Generating this answer is recorded in the audit log.', ja: 'この回答の作成は監査に記録されます。' },
+  'knowledge.answer.error.generic': { en: 'Failed to generate an answer.', ja: '回答の生成に失敗しました。' },
+  'knowledge.answer.error.keyMissing': { en: 'Knowledge answer is not configured (no API key). Search still works.', ja: 'ナレッジ回答は未設定です（鍵未設定）。検索は従来どおり使えます。' },
+  'knowledge.answer.error.busy': { en: 'An answer is already being generated. Please wait for it to finish.', ja: '回答を生成中です。完了をお待ちください。' },
+  'knowledge.answer.error.rateLimited': { en: 'Too many answer requests. Please wait a moment and try again.', ja: '回答リクエストが多すぎます。少し待って再度お試しください。' },
+  'knowledge.answer.error.timeout': { en: 'Answer generation timed out.', ja: '回答の生成がタイムアウトしました。' },
+
+  // ======================================================================
   // 高辻ナレッジ サイクル3（WebUI）: 機密度（classification）エディタ
   // ======================================================================
   'classification.title': { en: 'Classification', ja: '機密度' },

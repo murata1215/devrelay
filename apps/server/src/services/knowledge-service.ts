@@ -889,6 +889,102 @@ export async function searchKnowledge(params: KnowledgeSearchParams): Promise<Se
   return { ok: true, query, mode, coverage, total: results.length, results, viewer: viewerSummary };
 }
 
+/**
+ * 高辻ナレッジ サイクル4: 検索結果カード（ターン）の全文を取得する。`searchKnowledge` が
+ * hydration する `snippet` は最良チャンク 1 個の抜粋のみだが、ナレッジ回答の context には
+ * 同一ターンの兄弟チャンク（`chunkIndex` 0..chunkCount-1）をすべて連結した全文が必要
+ * （指示書 D2「同一ターンの複数チャンク連結」）。
+ *
+ * `isTurnVisible` で可視判定を再チェックする fail-closed の二重化（`searchKnowledge` 本体の
+ * 二重チェックと同じ考え方。検索時点で可視だったはずだが、ここでも独立して守る）。
+ *
+ * @param viewerUserId 要求者（AI に渡してよいかの可視判定に使う）
+ * @param turns 対象ターン（検索結果の `aiMessageId`/`sessionId` の組。重複は呼び出し側で排除不要）
+ * @returns `aiMessageId` → 連結済み全文 の Map（不可視・不存在・チャンク無しのターンは含まれない）
+ */
+export async function loadKnowledgeTurnTexts(
+  viewerUserId: string,
+  turns: Array<{ sourceId: string; sessionId: string }>
+): Promise<Map<string, string>> {
+  if (turns.length === 0) {
+    return new Map();
+  }
+
+  const viewer = await loadKnowledgeViewer(viewerUserId);
+
+  const sessionIds = [...new Set(turns.map((t) => t.sessionId))];
+  const sessions = await prisma.session.findMany({
+    where: { id: { in: sessionIds } },
+    select: {
+      id: true,
+      userId: true,
+      level: true,
+      compartment: true,
+      project: { select: { defaultLevel: true, defaultCompartment: true } },
+    },
+  });
+  const sessionMap = new Map(sessions.map((s) => [s.id, s]));
+
+  const ownerIds = [...new Set(sessions.map((s) => s.userId))];
+  const ownerMemberships = ownerIds.length
+    ? await prisma.organizationMember.findMany({
+        where: { userId: { in: ownerIds } },
+        select: { userId: true, organizationId: true },
+      })
+    : [];
+  const ownerOrgMap = new Map(ownerMemberships.map((m) => [m.userId, m.organizationId]));
+
+  const chunkRows = await prisma.knowledgeChunk.findMany({
+    where: {
+      OR: turns.map((t) => ({ sourceType: KNOWLEDGE_SOURCE_TYPE_TURN, sourceId: t.sourceId })),
+    },
+    select: { sourceId: true, chunkIndex: true, textContent: true },
+    orderBy: [{ sourceId: 'asc' }, { chunkIndex: 'asc' }],
+  });
+
+  const chunksByTurn = new Map<string, string[]>();
+  for (const row of chunkRows) {
+    const arr = chunksByTurn.get(row.sourceId) ?? [];
+    arr[row.chunkIndex] = row.textContent;
+    chunksByTurn.set(row.sourceId, arr);
+  }
+
+  const result = new Map<string, string>();
+  for (const turn of turns) {
+    const session = sessionMap.get(turn.sessionId);
+    if (!session) continue;
+
+    const effective = resolveEffectiveClassification(
+      { level: session.level, compartment: session.compartment },
+      { defaultLevel: session.project.defaultLevel, defaultCompartment: session.project.defaultCompartment }
+    );
+    const turnClassification: TurnClassification = {
+      ownerUserId: session.userId,
+      ownerOrganizationId: ownerOrgMap.get(session.userId) ?? null,
+      effectiveLevel: effective.level,
+      effectiveCompartment: effective.compartment,
+    };
+
+    if (!isTurnVisible(viewer, turnClassification)) {
+      console.error('[Knowledge] loadKnowledgeTurnTexts: visibility mismatch (dropped):', {
+        viewerId: viewerUserId,
+        ownerId: session.userId,
+        sessionId: turn.sessionId,
+      });
+      continue;
+    }
+
+    const chunks = chunksByTurn.get(turn.sourceId);
+    if (!chunks || chunks.length === 0) continue;
+    const joined = chunks.filter((c) => typeof c === 'string' && c.length > 0).join('\n\n');
+    if (joined.length > 0) {
+      result.set(turn.sourceId, joined);
+    }
+  }
+
+  return result;
+}
+
 /** `getKnowledgeThread` の入力。 */
 export interface GetKnowledgeThreadParams {
   viewerUserId: string;

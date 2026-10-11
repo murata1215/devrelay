@@ -30,6 +30,7 @@
     "src/lib/thread-switch-rules.ts",
     "src/lib/cancel-request-rules.ts",
     "src/lib/knowledge-search-rules.ts",
-    "src/lib/clearance-rules.ts"
+    "src/lib/clearance-rules.ts",
+    "src/lib/knowledge-answer-rules.ts"
   ]
 }
