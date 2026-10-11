@@ -13,6 +13,7 @@ import {
   KNOWLEDGE_RRF_K,
   fuseKnowledgeCandidates,
   buildKnowledgeSnippet,
+  resolveThreadPageOrder,
 } from '../dist/services/knowledge-rank.js';
 
 // --- isKnowledgeEnabled ---
@@ -309,5 +310,28 @@ describe('buildKnowledgeSnippet', () => {
     const snippet = buildKnowledgeSnippet(text, 'no-match');
     assert.equal(snippet.includes('\n'), false);
     assert.equal(snippet, 'line1 line2 line3');
+  });
+});
+
+// --- resolveThreadPageOrder（高辻ナレッジ サイクル3） ---
+
+describe('resolveThreadPageOrder', () => {
+  test('指定なし（初回読み込み）は asc', () => {
+    assert.equal(resolveThreadPageOrder({}), 'asc');
+  });
+
+  test('after のみ（後を読む）は asc', () => {
+    assert.equal(resolveThreadPageOrder({ after: '2026-01-01T00:00:00.000Z' }), 'asc');
+  });
+
+  test('before のみ（前を読む）は desc（X の直前 limit 件を取るため）', () => {
+    assert.equal(resolveThreadPageOrder({ before: '2026-01-01T00:00:00.000Z' }), 'desc');
+  });
+
+  test('before + after 両方（範囲が有界）は asc', () => {
+    assert.equal(
+      resolveThreadPageOrder({ before: '2026-01-02T00:00:00.000Z', after: '2026-01-01T00:00:00.000Z' }),
+      'asc'
+    );
   });
 });

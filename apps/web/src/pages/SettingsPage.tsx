@@ -10,6 +10,7 @@ import { useOrganization } from '../contexts/OrganizationContext';
 import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificationSound } from '../utils/notification-sound';
 import { getDocPanelSettings, setDocPanelSettings, type DocPanelSettings } from '../utils/doc-panel-settings';
 import { useLanguage } from '../contexts/LanguageContext';
+import { ClearanceAdminSection } from '../components/knowledge/ClearanceAdminSection';
 
 type SettingsTab = 'general' | 'ai' | 'agent' | 'integrations' | 'organization' | 'system';
 
@@ -748,6 +749,13 @@ function EnterpriseSection({ userEmail }: { userEmail: string | null }) {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* 高辻ナレッジ サイクル3: ナレッジ権限（admin/manager のみ。member・組織なしは自己判定で非表示） */}
+      {organization && (
+        <div className="mt-6 pt-6 border-t border-[var(--border-color)]">
+          <ClearanceAdminSection />
         </div>
       )}
     </div>

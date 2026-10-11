@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { projects, history } from '../lib/api';
 import type { Project, BuildLogItem } from '../lib/api';
 import { useLanguage } from '../contexts/LanguageContext';
+import { LevelBadge } from '../components/knowledge/LevelBadge';
+import { CompartmentChips } from '../components/knowledge/CompartmentChips';
+import { ClassificationEditor } from '../components/knowledge/ClassificationEditor';
 
 /** 日付を M/D 形式にフォーマット */
 function formatShortDate(dateStr: string): string {
@@ -184,28 +187,36 @@ export function ProjectsPage() {
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   /** ビルド履歴モーダル用の選択プロジェクト */
   const [buildProject, setBuildProject] = useState<Project | null>(null);
+  /** 高辻ナレッジ サイクル3: 機密度エディタを開いているプロジェクト（1 件のみ） */
+  const [editingClassificationId, setEditingClassificationId] = useState<string | null>(null);
+
+  const loadProjects = async () => {
+    try {
+      const result = await projects.list();
+      // latestBuild.createdAt の降順でソート（ビルドなしは末尾に配置）
+      result.sort((a, b) => {
+        if (!a.latestBuild && !b.latestBuild) return 0;
+        if (!a.latestBuild) return 1;
+        if (!b.latestBuild) return -1;
+        return new Date(b.latestBuild.createdAt).getTime() - new Date(a.latestBuild.createdAt).getTime();
+      });
+      setData(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load projects');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const result = await projects.list();
-        // latestBuild.createdAt の降順でソート（ビルドなしは末尾に配置）
-        result.sort((a, b) => {
-          if (!a.latestBuild && !b.latestBuild) return 0;
-          if (!a.latestBuild) return 1;
-          if (!b.latestBuild) return -1;
-          return new Date(b.latestBuild.createdAt).getTime() - new Date(a.latestBuild.createdAt).getTime();
-        });
-        setData(result);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load projects');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    load();
+    loadProjects();
   }, []);
+
+  /** 機密度保存後: 再検索ではなく一覧を再取得する（安価なため。knowledge 検索結果の更新方針とは別）。 */
+  const handleClassificationSaved = () => {
+    setEditingClassificationId(null);
+    loadProjects();
+  };
 
   if (loading) {
     return (
@@ -253,6 +264,9 @@ export function ProjectsPage() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
                     Latest Build
                   </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
+                    {t('projects.colClassification')}
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-color)]">
@@ -298,6 +312,28 @@ export function ProjectsPage() {
                         <span className="text-[var(--text-faint)]">-</span>
                       )}
                     </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2">
+                        <LevelBadge level={project.defaultLevel ?? 0} compact />
+                        {project.defaultCompartment && <CompartmentChips values={[project.defaultCompartment]} />}
+                        <button
+                          onClick={() => setEditingClassificationId(editingClassificationId === project.id ? null : project.id)}
+                          className="text-[var(--text-link)] hover:opacity-80 text-xs"
+                          title={t('projects.classificationEdit')}
+                        >
+                          ✎
+                        </button>
+                      </div>
+                      {editingClassificationId === project.id && (
+                        <div className="mt-2">
+                          <ClassificationEditor
+                            target={{ kind: 'project', projectId: project.id }}
+                            canEdit
+                            onSaved={handleClassificationSaved}
+                          />
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -341,6 +377,27 @@ export function ProjectsPage() {
                   </button>
                 ) : (
                   <div className="text-[var(--text-faint)] text-xs mt-2">No builds</div>
+                )}
+                {/* 高辻ナレッジ サイクル3: 機密度（モバイル） */}
+                <div className="mt-2 flex items-center gap-2">
+                  <LevelBadge level={project.defaultLevel ?? 0} compact />
+                  {project.defaultCompartment && <CompartmentChips values={[project.defaultCompartment]} />}
+                  <button
+                    onClick={() => setEditingClassificationId(editingClassificationId === project.id ? null : project.id)}
+                    className="text-[var(--text-link)] hover:opacity-80 text-xs"
+                    title={t('projects.classificationEdit')}
+                  >
+                    ✎
+                  </button>
+                </div>
+                {editingClassificationId === project.id && (
+                  <div className="mt-2">
+                    <ClassificationEditor
+                      target={{ kind: 'project', projectId: project.id }}
+                      canEdit
+                      onSaved={handleClassificationSaved}
+                    />
+                  </div>
                 )}
               </div>
             ))}

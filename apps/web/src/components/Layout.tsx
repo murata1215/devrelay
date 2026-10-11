@@ -39,6 +39,7 @@ export function Layout({ children }: LayoutProps) {
     { name: t('nav.chat'), href: '/chat' },
     { name: t('nav.dashboard'), href: '/' },
     { name: t('nav.conversations'), href: '/conversations' },
+    { name: t('nav.knowledge'), href: '/knowledge' },
     // Activity は監督者（admin/manager）のみ表示
     ...(canSupervise ? [{ name: t('nav.activity'), href: '/activity' }] : []),
     { name: t('nav.agents'), href: '/machines' },

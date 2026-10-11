@@ -166,6 +166,9 @@ export interface Project {
   displayName?: string | null;  // ユーザーが設定する表示名（null なら name を使用）
   path: string;
   lastUsedAt: string | null;
+  /** 高辻ナレッジ サイクル3 D9: この案件で始まる会話の既定機密度（null = level 0・壁なし継承） */
+  defaultLevel?: number | null;
+  defaultCompartment?: string | null;
   machine?: {
     id: string;
     name: string;
@@ -1184,5 +1187,212 @@ export const sites = {
   /** Phase 1-B: 1 site のアクセス解析統計。ログ未導入・集計未完了時は `stats: null`。 */
   async stats(host: string): Promise<{ host: string; stats: SiteStats | null }> {
     return request('GET', `/sites/${encodeURIComponent(host)}/stats`);
+  },
+};
+
+// ========================================
+// 高辻ナレッジ サイクル3 — 検索 / スレッド閲覧 API（WebUI）
+// ========================================
+
+/** `GET /api/knowledge/search` の viewer（自分の権限）。組織なしでも 200（readLevel:0 等）。 */
+export interface KnowledgeSearchViewer {
+  readLevel: number;
+  compartments: string[];
+  /** 組織に所属しているか。false なら「自分の会話のみ検索されます」表示に使う。 */
+  organization: boolean;
+}
+
+export interface KnowledgeCoverage {
+  keyword: boolean;
+  vector: boolean;
+  vectorSkippedReason?: string;
+}
+
+/**
+ * 検索結果 1 件。`id` は無い（同一性は `sessionId` + `aiMessageId`）。
+ * 日時フィールドは `occurredAt`（`createdAt` ではない）。
+ */
+export interface KnowledgeSearchResultItem {
+  rank: number;
+  score: number;
+  matchedBy: Array<'keyword' | 'vector'>;
+  sessionId: string;
+  threadTitle: string | null;
+  kind: string | null;
+  projectId: string;
+  projectName: string;
+  aiTool: string;
+  aiMessageId: string;
+  userMessageId: string | null;
+  occurredAt: string;
+  snippet: string;
+  chunkIndex: number;
+  chunkCount: number;
+  ownerUserId: string;
+  ownerName: string;
+  isOwn: boolean;
+  level: number;
+  compartment: string | null;
+}
+
+/** `GET /api/knowledge/search` の 200 レスポンス。`hint` は無い（MCP `search_knowledge` 専用）。 */
+export interface KnowledgeSearchResponse {
+  viewer: KnowledgeSearchViewer;
+  query: string;
+  mode: 'hybrid' | 'keyword' | 'vector';
+  coverage: KnowledgeCoverage;
+  total: number;
+  results: KnowledgeSearchResultItem[];
+}
+
+/** `GET /api/knowledge/threads/:sessionId` の `messages[]` 1 件。日時フィールドは `timestamp`。 */
+export interface KnowledgeThreadMessage {
+  id: string;
+  role: string;
+  content: string;
+  truncated: boolean;
+  truncatedSide?: 'head' | 'tail';
+  timestamp: string;
+}
+
+export interface KnowledgeThread {
+  sessionId: string;
+  threadTitle: string | null;
+  kind: string | null;
+  projectId: string;
+  projectName: string;
+  ownerUserId: string;
+  ownerName: string;
+  isOwn: boolean;
+  level: number;
+  compartment: string | null;
+  messages: KnowledgeThreadMessage[];
+  count: number;
+  hasMore: boolean;
+}
+
+export const knowledge = {
+  /**
+   * `buildKnowledgeSearchQuery()`（`lib/knowledge-search-rules.ts`）の出力をそのまま渡す
+   * （空値を出さない組み立てを 1 箇所に集約しているため、ここでは文字列操作をしない）。
+   * killswitch（`DEVRELAY_KNOWLEDGE=0`）時は 404 `{error: 'Knowledge search is disabled...'}`
+   * が `Error` として throw される（`isKnowledgeDisabledError()` で判定する）。
+   */
+  async search(queryEntries: Array<[string, string]>): Promise<KnowledgeSearchResponse> {
+    const params = new URLSearchParams(queryEntries);
+    return request('GET', `/knowledge/search?${params.toString()}`);
+  },
+
+  /**
+   * `buildThreadPageRequest()`（`lib/knowledge-search-rules.ts`）の出力をそのまま渡す。
+   * 不可視・不存在のどちらも 404 `{error: 'Thread not found or not visible'}`（同一文言）。
+   */
+  async getThread(
+    sessionId: string,
+    page: { limit?: number; before?: string; after?: string; tail?: boolean }
+  ): Promise<KnowledgeThread> {
+    const params = new URLSearchParams();
+    if (page.limit !== undefined) params.set('limit', String(page.limit));
+    if (page.before) params.set('before', page.before);
+    if (page.after) params.set('after', page.after);
+    if (page.tail) params.set('tail', 'true');
+    const qs = params.toString();
+    return request('GET', `/knowledge/threads/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ''}`);
+  },
+};
+
+// ========================================
+// 高辻ナレッジ サイクル3 — 人の権限 / 案件・スレッドの機密度 API（WebUI）
+// ========================================
+
+/** `GET /api/org/clearance` の 1 行（admin / manager のみ閲覧可）。 */
+export interface ClearanceMember {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  role: OrgRole;
+  readLevel: number;
+  writeLevel: number;
+  compartments: string[];
+}
+
+/** `GET/PUT /api/org/members/:userId/clearance` のボディ（自分自身は組織なしでも 200）。 */
+export interface MemberClearance {
+  userId: string;
+  readLevel: number;
+  writeLevel: number;
+  compartments: string[];
+}
+
+/** 案件/スレッドの機密度（raw 値のみ。`null` = 継承）。 */
+export interface ClassificationValue {
+  level: number | null;
+  compartment: string | null;
+}
+
+/** スレッドの機密度（raw 値 + 実効値）。 */
+export interface ThreadClassification extends ClassificationValue {
+  effectiveLevel: number;
+  effectiveCompartment: string | null;
+}
+
+/** 機密度 PUT のレスポンス（変更前後のスナップショット）。 */
+export interface ClassificationChangeResult<T> {
+  before: T;
+  after: T;
+}
+
+export const clearance = {
+  /** admin / manager のみ（member は 403 `管理者またはマネージャー権限が必要です`）。 */
+  async listOrg(): Promise<{ members: ClearanceMember[] }> {
+    return request('GET', '/org/clearance');
+  },
+
+  /**
+   * 自分自身は常に 200（組織なしでも `{readLevel:0, writeLevel:0, compartments:[]}`）。
+   * 他人は同組織 admin のみ（それ以外は 403 `管理者権限が必要です`）。
+   */
+  async getMember(userId: string): Promise<MemberClearance> {
+    return request('GET', `/org/members/${encodeURIComponent(userId)}/clearance`);
+  },
+
+  /** admin のみ。3 フィールドとも必須（省略不可。`validateClearanceDraft()` が常に揃えて返す）。 */
+  async setMember(
+    userId: string,
+    body: { readLevel: number; writeLevel: number; compartments: string[] }
+  ): Promise<MemberClearance> {
+    return request('PUT', `/org/members/${encodeURIComponent(userId)}/clearance`, body);
+  },
+
+  /** 組織内で使われている案件名の一覧（組織なしは 404 `組織に所属していません`）。 */
+  async compartments(): Promise<{ compartments: string[] }> {
+    return request('GET', '/org/compartments');
+  },
+
+  async getProjectClassification(projectId: string): Promise<ClassificationValue> {
+    return request('GET', `/projects/${encodeURIComponent(projectId)}/classification`);
+  },
+
+  /**
+   * 省略 = 変更なし、`null` = 継承へ戻す（`buildClassificationPatch()` が組み立てる）。
+   * 権限エラーは 403 ではなく 400 で返る点に注意（呼び出し側はステータスで分岐しないこと）。
+   */
+  async setProjectClassification(
+    projectId: string,
+    patch: { level?: number | null; compartment?: string | null }
+  ): Promise<ClassificationChangeResult<ClassificationValue>> {
+    return request('PUT', `/projects/${encodeURIComponent(projectId)}/classification`, patch);
+  },
+
+  async getThreadClassification(sessionId: string): Promise<ThreadClassification> {
+    return request('GET', `/threads/${encodeURIComponent(sessionId)}/classification`);
+  },
+
+  /** 省略 = 変更なし、`null` = 継承へ戻す。権限エラーは 403 ではなく 400 で返る点に注意。 */
+  async setThreadClassification(
+    sessionId: string,
+    patch: { level?: number | null; compartment?: string | null }
+  ): Promise<ClassificationChangeResult<ThreadClassification>> {
+    return request('PUT', `/threads/${encodeURIComponent(sessionId)}/classification`, patch);
   },
 };

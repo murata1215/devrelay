@@ -28,6 +28,7 @@ import {
   fuseKnowledgeCandidates,
   normalizeKnowledgeParams,
   isInputCausedEmbeddingError,
+  resolveThreadPageOrder,
   type KnowledgeCoverage,
   type KnowledgeSearchMode,
   type KnowledgeSearchKind,
@@ -984,8 +985,11 @@ export async function getKnowledgeThread(params: GetKnowledgeThreadParams): Prom
   const createdAtFilter: Record<string, Date> = {};
   if (params.before) createdAtFilter.lt = new Date(params.before);
   if (params.after) createdAtFilter.gt = new Date(params.after);
+  // サイクル3: `before` のみ指定時は「X の直前 limit 件」を返すため desc で取得し、下で reverse() して asc に戻す
+  // （`before` のみでの asc+take は「全体の最古 limit 件」になってしまうバグの修正。knowledge-rank.ts 参照）。
+  const pageOrder = resolveThreadPageOrder({ before: params.before, after: params.after });
 
-  const [messages, owner] = await Promise.all([
+  const [rows, owner] = await Promise.all([
     prisma.message.findMany({
       where: {
         sessionId: params.sessionId,
@@ -993,11 +997,12 @@ export async function getKnowledgeThread(params: GetKnowledgeThreadParams): Prom
         ...(Object.keys(createdAtFilter).length > 0 ? { createdAt: createdAtFilter } : {}),
       },
       select: { id: true, role: true, content: true, createdAt: true },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: pageOrder },
       take: limit,
     }),
     prisma.user.findUnique({ where: { id: session.userId }, select: { name: true, email: true } }),
   ]);
+  const messages = pageOrder === 'desc' ? [...rows].reverse() : rows;
   const ownerName = owner?.name ?? owner?.email ?? session.userId;
 
   if (!isOwn) {

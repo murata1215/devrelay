@@ -12,6 +12,7 @@ import { MachinesPage } from './pages/MachinesPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { ConversationsPage } from './pages/ConversationsPage';
+import { KnowledgePage } from './pages/KnowledgePage';
 import { MemberActivityPage } from './pages/MemberActivityPage';
 import { ChatPage } from './pages/ChatPage';
 import { DevReportsPage } from './pages/DevReportsPage';
@@ -51,6 +52,7 @@ function ProtectedContent() {
           <Routes>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/conversations" element={<ConversationsPage />} />
+            <Route path="/knowledge" element={<KnowledgePage />} />
             <Route path="/activity" element={<MemberActivityPage />} />
             <Route path="/dev-reports" element={<DevReportsPage />} />
             <Route path="/machines" element={<MachinesPage />} />

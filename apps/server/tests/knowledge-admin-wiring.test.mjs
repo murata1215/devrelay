@@ -147,6 +147,20 @@ describe('knowledge-service.ts: getEmbeddingApiKey が組織共通キーへフ�
   });
 });
 
+describe('knowledge-service.ts: getKnowledgeThread はサイクル3の resolveThreadPageOrder を使っている', () => {
+  const source = readServerSource('src/services/knowledge-service.ts');
+
+  test('getKnowledgeThread の本体が resolveThreadPageOrder() を呼び、orderBy に pageOrder を渡している（before 直読みの asc 固定への退行防止）', () => {
+    const start = source.indexOf('export async function getKnowledgeThread');
+    const end = source.indexOf('\n/** `setThreadClassification` の入力');
+    assert.ok(start > 0, 'getKnowledgeThread not found');
+    assert.ok(end > start, '`setThreadClassification` の入力 マーカーが見つからない');
+    const body = source.slice(start, end);
+    assert.match(body, /resolveThreadPageOrder\(\{/);
+    assert.match(body, /orderBy:\s*\{\s*createdAt:\s*pageOrder\s*\}/);
+  });
+});
+
 describe('org-control.ts: SupervisionAction に search_knowledge が追加されている', () => {
   const source = readServerSource('src/services/org-control.ts');
 

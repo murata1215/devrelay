@@ -6,6 +6,29 @@
 
 ## 実装済み機能
 
+### 高辻ナレッジ サイクル3 — WebUI: ナレッジ検索・スレッドビューア・権限設定 (2026-10-11)
+
+サイクル1（検索）・サイクル2（権限モデル）を WebUI に実装した。対象は `apps/web`（新規ページ 1・
+コンポーネント 7・純ロジック 2）と `apps/server`（REST 2 列追加・ページングの不具合修正）のみ
+（ChatPage / LitePage / Lite シェル / `agents/**` は 0 行変更、guard テストで固定）。
+
+- **新規ページ** `apps/web/src/pages/KnowledgePage.tsx`（320 行、`/knowledge`）。ナビ・ルート各 1 行追加
+- **新規コンポーネント 7**（`apps/web/src/components/knowledge/`）: `LevelBadge` / `KnowledgeResultCard` /
+  `CompartmentChips` / `KnowledgeFilterBar` / `KnowledgeThreadViewer` / `ClassificationEditor` /
+  `ClearanceAdminSection`
+- **純ロジック 2**: `lib/knowledge-search-rules.ts`（476 行）・`lib/clearance-rules.ts`（282 行）
+- **i18n**: `messages.ts` に `knowledge.*` / `clearance.*` / `classification.*` 97 キー追加。
+  ハードコード CJK 禁止を guard テストで固定
+- **案 B（`before` ページングの修正）**: `knowledge-rank.ts` に純関数 `resolveThreadPageOrder()` を新設。
+  `before` のみ指定時は「全体の最古 limit 件」になってしまうバグを `desc` 取得 → `reverse()` で
+  asc に戻す方式に修正し、`knowledge-service.ts` の `getKnowledgeThread()` 1 箇所に適用
+  （REST `GET /api/knowledge/threads/:sessionId` と MCP `get_knowledge_thread` の共通実装のため両方に効く）
+- **D9**: `GET /api/projects` に `defaultLevel` / `defaultCompartment` を追加（カラム自体はサイクル2 で
+  既存）。`ProjectsPage.tsx` に機密度列、`SettingsPage.tsx` にナレッジ権限節
+- テスト: web **756/756**・server **955/955** PASS（新規 `knowledge-search-rules.test.mjs` /
+  `clearance-rules.test.mjs` / `knowledge-source-guards.test.mjs` 含む）
+- DB マイグレーション不要・Agent 側 0 行変更（各機 `u` 不要）・`pm2 restart devrelay-server` 要
+
 ### 高辻ナレッジ サイクル2 — 数値権限（level 0〜10）+ 案件の壁（compartment）+ 検索監査 + 組織共通 embedding キー (2026-10-11)
 
 サイクル1（`search_knowledge` は自分の会話のみ）を拡張し、同じ組織のメンバー同士で

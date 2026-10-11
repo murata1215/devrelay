@@ -222,6 +222,20 @@ export function escapeLikePattern(query: string): string {
 }
 
 /**
+ * 高辻ナレッジ サイクル3: `getKnowledgeThread`（MCP `get_knowledge_thread` / REST
+ * `GET /api/knowledge/threads/:sessionId` 共通実装）のページング取得順を決める。
+ *
+ * `before` のみ指定時は「X の直前 limit 件」を期待されるが、`orderBy createdAt asc, take: limit`
+ * では「全体の最古 limit 件（かつ X より前）」になってしまう（カーソルが古いほど穴が空く）。
+ * `before` のみのときは `desc` で取得し、呼び出し側で `reverse()` して asc に戻すことで
+ * 「X の直前 limit 件」を正しく返す。`after` のみ、または `before`+`after` 両方（範囲が
+ * 明示的に有界）のときは従来どおり `asc` で問題ない。
+ */
+export function resolveThreadPageOrder(input: { before?: string; after?: string }): 'asc' | 'desc' {
+  return input.before && !input.after ? 'desc' : 'asc';
+}
+
+/**
  * OpenAI embeddings API のエラーが「入力起因」（= リトライしても同じ結果になる）かを判定する
  * （バックフィル承認時の追加指示）。
  *

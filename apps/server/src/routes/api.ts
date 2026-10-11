@@ -623,6 +623,9 @@ export async function apiRoutes(app: FastifyInstance) {
         path: p.path,
         defaultAi: p.defaultAi,
         lastUsedAt: p.lastUsedAt,
+        // 高辻ナレッジ サイクル3 D9: WebUI の「機密度」列表示用（カラムは既存。サイクル2 で追加済み）
+        defaultLevel: p.defaultLevel ?? null,
+        defaultCompartment: p.defaultCompartment ?? null,
         machine: {
           id: p.machine.id,
           name: p.machine.name,
