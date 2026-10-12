@@ -35,15 +35,21 @@ export interface ToolApprovalAuto {
   projectId?: string;
 }
 
-/** 高辻ナレッジ サイクル4: `knowledge:answer:done` の payload（WebUI 側の写し）。 */
+/**
+ * 高辻ナレッジ サイクル4: `knowledge:answer:done` の payload（WebUI 側の写し）。
+ * サイクル4.5: `ref`/`projectId`/`isOwn` を追加。
+ */
 export interface KnowledgeAnswerSourcePayload {
   rank: number;
+  ref: number;
   sourceType: string;
   sessionId: string;
   aiMessageId: string;
+  projectId: string;
   title: string | null;
   projectName: string;
   ownerName: string;
+  isOwn: boolean;
   occurredAt: string;
   level: number;
   compartment: string | null;

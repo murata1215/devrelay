@@ -1070,15 +1070,21 @@ export type ServerToWebMessage =
   | { type: 'knowledge:answer:done'; payload: KnowledgeAnswerDonePayload }
   | { type: 'knowledge:answer:error'; payload: { answerId: string; message: string } };
 
-/** `knowledge:answer:done` の payload（1 件の根拠ソース）。`sourceType` は D7: ソース非依存の契約。 */
+/**
+ * `knowledge:answer:done` の payload（1 件の根拠ソース）。`sourceType` は D7: ソース非依存の契約。
+ * サイクル4.5: `ref`（会話一意の番号。会話でないときは `rank` と同値）/`projectId`/`isOwn` を追加。
+ */
 export interface KnowledgeAnswerSourcePayload {
   rank: number;
+  ref: number;
   sourceType: string;
   sessionId: string;
   aiMessageId: string;
+  projectId: string;
   title: string | null;
   projectName: string;
   ownerName: string;
+  isOwn: boolean;
   occurredAt: string;
   level: number;
   compartment: string | null;

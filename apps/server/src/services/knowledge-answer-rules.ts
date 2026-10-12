@@ -21,6 +21,220 @@ export function isKnowledgeAnswerEnabled(raw: string | undefined): boolean {
 }
 
 // ============================================================
+// 会話継続（サイクル4.5 D1〜D5）
+// ============================================================
+
+/** 会話の 1 往復（直前の質問と、それに対する確定済み回答）。 */
+export interface AnswerHistoryTurn {
+  question: string;
+  answer: string;
+}
+
+/** `normalizeHistory` が保持する往復数の上限（D4）。 */
+export const ANSWER_HISTORY_MAX_TURNS = 6;
+/** `normalizeHistory` が各質問に許す文字数上限（D4、行境界打ち切り）。 */
+export const ANSWER_HISTORY_QUESTION_CHARS = 1000;
+/** `normalizeHistory` が各回答に許す文字数上限（D4、行境界打ち切り）。 */
+export const ANSWER_HISTORY_ANSWER_CHARS = 1500;
+
+/**
+ * クライアント申告の `history` を検証・正規化する（D4）。不正な要素（文字列でない
+ * question/answer を持つ等）は黒く捨てる。直近 `ANSWER_HISTORY_MAX_TURNS` 往復のみ残し
+ * （古いものを先頭から捨てる）、各質問・各回答を行境界で打ち切る。
+ */
+export function normalizeHistory(raw: unknown): AnswerHistoryTurn[] {
+  if (!Array.isArray(raw)) return [];
+
+  const valid: AnswerHistoryTurn[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const question = (entry as Record<string, unknown>).question;
+    const answer = (entry as Record<string, unknown>).answer;
+    if (typeof question !== 'string' || typeof answer !== 'string') continue;
+    const trimmedQuestion = question.trim();
+    const trimmedAnswer = answer.trim();
+    if (trimmedQuestion.length === 0 || trimmedAnswer.length === 0) continue;
+    valid.push({
+      question: truncateToLineBoundary(trimmedQuestion, ANSWER_HISTORY_QUESTION_CHARS),
+      answer: truncateToLineBoundary(trimmedAnswer, ANSWER_HISTORY_ANSWER_CHARS),
+    });
+  }
+
+  return valid.length > ANSWER_HISTORY_MAX_TURNS ? valid.slice(valid.length - ANSWER_HISTORY_MAX_TURNS) : valid;
+}
+
+/**
+ * 追い質問の検索クエリ（D2）: 「直前の質問 ＋ 今回の質問」を連結する。短い追い質問
+ * （「それはいつ？」等）でも前の質問の語が検索に残るようにする。`previousQuestion` が
+ * 無ければ `question` のみ。500 文字で切る（`searchKnowledge` 側の `QUERY_MAX_LENGTH` と同じ上限）。
+ */
+export function buildConversationSearchQuery(input: { previousQuestion?: string; question: string }): string {
+  const previous = input.previousQuestion?.trim();
+  const combined = previous ? `${previous} ${input.question}` : input.question;
+  return combined.slice(0, 500);
+}
+
+/** 会話で既に番号を振った根拠 1 件（クライアントから渡される）。 */
+export interface KnownSourceRef {
+  sourceType: string;
+  sourceId: string;
+  sessionId: string;
+  ref: number;
+}
+
+/** `normalizeKnownSources` が保持する `knownSources` 件数の上限（安全弁。D4 の 6 往復 ×上位 12 件より十分広い）。 */
+export const ANSWER_KNOWN_SOURCES_MAX = 60;
+
+/**
+ * クライアント申告の `knownSources` を検証・正規化する。不正な要素（文字列でない
+ * sourceType/sourceId/sessionId、数値でない ref 等）は捨てる。`sourceId` 重複は先に出てきた方を残す。
+ * `ANSWER_KNOWN_SOURCES_MAX` を超える分は末尾を切る（安全弁。実運用では history 6 往復・1 往復あたり
+ * 上位 12 件の累積で自然に収まる想定）。
+ */
+export function normalizeKnownSources(raw: unknown): KnownSourceRef[] {
+  if (!Array.isArray(raw)) return [];
+
+  const seen = new Set<string>();
+  const valid: KnownSourceRef[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.sourceType !== 'string' || typeof e.sourceId !== 'string' || typeof e.sessionId !== 'string' || typeof e.ref !== 'number') {
+      continue;
+    }
+    if (!Number.isFinite(e.ref) || e.ref <= 0) continue;
+    if (seen.has(e.sourceId)) continue;
+    seen.add(e.sourceId);
+    valid.push({ sourceType: e.sourceType, sourceId: e.sourceId, sessionId: e.sessionId, ref: e.ref });
+    if (valid.length >= ANSWER_KNOWN_SOURCES_MAX) break;
+  }
+
+  return valid;
+}
+
+/** `mergeConversationSources` が返す統合済み 1 件。`origin` は番号付け直しの判定に使う。 */
+export interface MergedSourceRef extends KnownSourceRef {
+  origin: 'known' | 'new';
+}
+
+/** `mergeConversationSources` の入力。 */
+export interface MergeConversationSourcesInput {
+  /** 会話で既に番号を振った根拠（クライアント申告）。 */
+  known: readonly KnownSourceRef[];
+  /** 今回の検索でヒットした新しい根拠（カード順位を維持した配列）。 */
+  newHits: readonly { sourceType: string; sourceId: string; sessionId: string }[];
+  /** 再取得・可視判定し直した結果、実際に見える `sourceId` の集合（`known` ∪ `newHits` 両方の判定に使う）。 */
+  visibleSourceIds: readonly string[];
+}
+
+/** `mergeConversationSources` の結果。 */
+export interface MergeConversationSourcesResult {
+  items: MergedSourceRef[];
+  added: number;
+  droppedInvisible: number;
+}
+
+/**
+ * 会話の根拠リストを統合する（D3）。既知（`known`）は番号をそのまま維持して先頭に並べ、
+ * 新ヒット（`newHits`）のうち既出でないものを `max(ref)+1` から続き番号で追加する。
+ * 既出判定は `(sourceType, sourceId)` の組（会話を跨いで同じ発言が異なる `sessionId` を
+ * 持つことは無いが、念のため両方見る必要はない＝`sourceId` はグローバルに一意）。
+ * `visibleSourceIds` に無い既知は結果から落とす（番号は欠番になる＝再利用しない）。
+ */
+export function mergeConversationSources(input: MergeConversationSourcesInput): MergeConversationSourcesResult {
+  const visible = new Set(input.visibleSourceIds);
+  const seenSourceIds = new Set<string>();
+  const items: MergedSourceRef[] = [];
+  let droppedInvisible = 0;
+
+  for (const k of input.known) {
+    if (!visible.has(k.sourceId)) {
+      droppedInvisible++;
+      continue;
+    }
+    if (seenSourceIds.has(k.sourceId)) continue;
+    seenSourceIds.add(k.sourceId);
+    items.push({ ...k, origin: 'known' });
+  }
+
+  // 続き番号は「実際に残った既知」ではなく「クライアント申告の known 全体」の最大 ref から
+  // 算出する（不可視で落ちた既知の番号を、同じ呼び出しの新ヒットに再利用しないため）。
+  let nextRef = input.known.reduce((max, k) => Math.max(max, k.ref), 0) + 1;
+  let added = 0;
+  for (const hit of input.newHits) {
+    if (!visible.has(hit.sourceId)) continue;
+    if (seenSourceIds.has(hit.sourceId)) continue;
+    seenSourceIds.add(hit.sourceId);
+    items.push({ ...hit, ref: nextRef, origin: 'new' });
+    nextRef++;
+    added++;
+  }
+
+  return { items, added, droppedInvisible };
+}
+
+/**
+ * 正規化済み `history` の各回答本文から、実際に引用された `[n]` の集合を抽出する
+ * （D3-b: クライアント申告に頼らず、サーバー側で再導出する）。
+ */
+export function extractCitedRefs(answers: readonly string[]): Set<number> {
+  const cited = new Set<number>();
+  for (const answer of answers) {
+    const matches = answer.matchAll(/\[(\d+)\]/g);
+    for (const m of matches) {
+      cited.add(Number(m[1]));
+    }
+  }
+  return cited;
+}
+
+/** `evictForBudget` が受け取る 1 件（`buildKnowledgeContext` に渡す前の予算判定用エントリ）。 */
+export interface BudgetEntry {
+  ref: number;
+  origin: 'known' | 'new';
+  /** `buildKnowledgeContext` に渡す前の見積り文字数（実際の打ち切りは `buildKnowledgeContext` 側）。 */
+  chars: number;
+  /** 会話の過去の回答で実際に引用されたか（`extractCitedRefs` の結果から判定）。 */
+  cited: boolean;
+}
+
+/** `evictForBudget` の結果。 */
+export interface EvictForBudgetResult {
+  keptRefs: number[];
+  droppedRefs: number[];
+}
+
+/**
+ * 合計文字数予算を超える場合に落とす対象を選ぶ（D3）。優先順位（落とす側から):
+ * 1. 未引用の既知（`origin==='known' && !cited`）
+ * 2. 新ヒットの下位（`origin==='new'`、`ref` の大きい方＝順位の低い方から）
+ * 3. 引用済みの既知（`origin==='known' && cited`、最後まで残す）
+ * 同じ優先度内では配列の末尾側から落とす。合計が予算内に収まるまで落とし続ける。
+ */
+export function evictForBudget(entries: readonly BudgetEntry[], totalChars: number): EvictForBudgetResult {
+  const byRef = new Map(entries.map((e) => [e.ref, e]));
+  let remaining = entries.reduce((sum, e) => sum + e.chars, 0);
+  const dropped = new Set<number>();
+
+  const tierUnkownKnown = entries.filter((e) => e.origin === 'known' && !e.cited);
+  const tierNewLowToHigh = [...entries.filter((e) => e.origin === 'new')].sort((a, b) => b.ref - a.ref);
+  const tierCitedKnown = entries.filter((e) => e.origin === 'known' && e.cited);
+
+  for (const tier of [tierUnkownKnown, tierNewLowToHigh, tierCitedKnown]) {
+    for (const entry of tier) {
+      if (remaining <= totalChars) break;
+      dropped.add(entry.ref);
+      remaining -= entry.chars;
+    }
+    if (remaining <= totalChars) break;
+  }
+
+  const keptRefs = entries.map((e) => e.ref).filter((ref) => !dropped.has(ref));
+  const droppedRefs = [...dropped].filter((ref) => byRef.has(ref));
+  return { keptRefs, droppedRefs };
+}
+
+// ============================================================
 // context 構築（D2）
 // ============================================================
 
@@ -30,9 +244,13 @@ export interface KnowledgeContextItem {
   sourceType: string;
   sessionId: string;
   aiMessageId: string;
+  /** サイクル4.5: `KnowledgeAnswerSource`/MCP `ask_knowledge` の戻り値に必要（D6）。 */
+  projectId: string;
   title: string | null;
   projectName: string;
+  ownerUserId: string;
   ownerName: string;
+  isOwn: boolean;
   occurredAt: string;
   level: number;
   compartment: string | null;
@@ -121,36 +339,67 @@ Answer the question using ONLY the excerpts provided below.
 - For questions that need structure (history, decisions, issues, open items), organize the answer with headings (##)
 - For simple questions, answer in plain prose`;
 
+/**
+ * サイクル4.5 D5: `history` があるときだけ system プロンプトに追加する 1 段落（会話の続きであることと、
+ * 既出の根拠にも同じ番号を使うことを明示する）。
+ */
+const CONVERSATION_SUFFIX_JA =
+  '\n\nこれは会話の続きです。これまでの質問と回答（history）を踏まえて答えてください。' +
+  '[n] は根拠リストの番号です。以前の回答で使った根拠と同じものを引用するときは、必ず同じ番号を使ってください。';
+const CONVERSATION_SUFFIX_EN =
+  "\n\nThis is a continuation of a conversation. Answer taking the previous questions and answers (history) into account. " +
+  '[n] refers to the numbered source list. When citing a source you already cited in a previous answer, reuse the same number.';
+
 /** `buildKnowledgePrompt` の入力。 */
 export interface BuildKnowledgePromptInput {
   language: 'ja' | 'en';
   question: string;
   /** 既に `buildKnowledgeContext` で打ち切り済みの context（カード順位維持）。 */
   items: readonly KnowledgeContextItem[];
+  /** サイクル4.5: 直近の会話（D4 で正規化済み）。省略時はサイクル4 と完全同一の出力になる。 */
+  history?: readonly AnswerHistoryTurn[];
 }
 
 /** `buildKnowledgePrompt` の結果。 */
 export interface BuildKnowledgePromptResult {
   system: string;
   user: string;
+  /** サイクル4.5: `history` を user/assistant ペアに展開し、末尾に今回の `user` を積んだもの。
+   * `ChatParams.messages` にそのまま渡せる（`history` 無しなら `[{role:'user', content: user}]` の 1 件）。 */
+  messages: { role: 'user' | 'assistant'; content: string }[];
 }
 
-/** D5 の固定システムプロンプト（ja/en）＋ 抜粋を番号付きで並べた user プロンプトを組み立てる。 */
+/**
+ * D5 の固定システムプロンプト（ja/en）＋ 抜粋を番号付きで並べた user プロンプトを組み立てる。
+ * `history` は分岐の外（system 段落・messages 構成）で扱う — `items` が空のときの早期 return
+ * （`user === question` のみを返す、既存テストでバイト一致固定）には一切影響しない。
+ */
 export function buildKnowledgePrompt(input: BuildKnowledgePromptInput): BuildKnowledgePromptResult {
-  const system = input.language === 'en' ? SYSTEM_PROMPT_EN : SYSTEM_PROMPT_JA;
+  const baseSystem = input.language === 'en' ? SYSTEM_PROMPT_EN : SYSTEM_PROMPT_JA;
+  const history = input.history ?? [];
+  const system = history.length > 0 ? baseSystem + (input.language === 'en' ? CONVERSATION_SUFFIX_EN : CONVERSATION_SUFFIX_JA) : baseSystem;
 
+  let user: string;
   if (input.items.length === 0) {
-    return { system, user: input.question };
+    user = input.question;
+  } else {
+    const excerptLines: string[] = [];
+    for (const item of input.items) {
+      excerptLines.push(`[${item.rank}] ${item.title ?? '(no title)'} / ${item.projectName} / ${item.ownerName} / ${item.occurredAt}`);
+      excerptLines.push(item.text);
+      excerptLines.push('');
+    }
+    user = `${input.question}\n\n--- excerpts ---\n${excerptLines.join('\n')}`;
   }
 
-  const excerptLines: string[] = [];
-  for (const item of input.items) {
-    excerptLines.push(`[${item.rank}] ${item.title ?? '(no title)'} / ${item.projectName} / ${item.ownerName} / ${item.occurredAt}`);
-    excerptLines.push(item.text);
-    excerptLines.push('');
+  const messages: { role: 'user' | 'assistant'; content: string }[] = [];
+  for (const turn of history) {
+    messages.push({ role: 'user', content: turn.question });
+    messages.push({ role: 'assistant', content: turn.answer });
   }
-  const user = `${input.question}\n\n--- excerpts ---\n${excerptLines.join('\n')}`;
-  return { system, user };
+  messages.push({ role: 'user', content: user });
+
+  return { system, user, messages };
 }
 
 /** context が 1 件も無い（検索結果 0 件）ときに返す固定回答（AI 呼び出し自体を省略する）。 */

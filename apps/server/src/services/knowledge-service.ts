@@ -889,23 +889,45 @@ export async function searchKnowledge(params: KnowledgeSearchParams): Promise<Se
   return { ok: true, query, mode, coverage, total: results.length, results, viewer: viewerSummary };
 }
 
+/** `loadKnowledgeTurnDetails` が 1 件の対象ターンに対して返す詳細情報（全文＋表示用メタデータ）。 */
+export interface KnowledgeTurnDetail {
+  sourceId: string;
+  sessionId: string;
+  projectId: string;
+  projectName: string;
+  title: string | null;
+  ownerUserId: string;
+  ownerName: string;
+  isOwn: boolean;
+  occurredAt: string;
+  level: number;
+  compartment: string | null;
+  text: string;
+}
+
 /**
  * 高辻ナレッジ サイクル4: 検索結果カード（ターン）の全文を取得する。`searchKnowledge` が
  * hydration する `snippet` は最良チャンク 1 個の抜粋のみだが、ナレッジ回答の context には
  * 同一ターンの兄弟チャンク（`chunkIndex` 0..chunkCount-1）をすべて連結した全文が必要
  * （指示書 D2「同一ターンの複数チャンク連結」）。
  *
+ * サイクル4.5: 会話の「既知の根拠」（`knownSources`）を再取得・再可視判定するためには全文だけでなく
+ * 表示用メタデータ（title/projectName/ownerName/occurredAt/level/compartment/projectId/isOwn）も要る
+ * ため、本体は `loadKnowledgeTurnDetails` に実装し、全文のみ欲しい既存呼び出し元
+ * （サイクル4 `answerKnowledge` の「新ヒット」経路）向けに `loadKnowledgeTurnTexts` を薄いラッパとして残す
+ * （関数名・シグネチャは既存 wiring テストのピンのため変更しない）。
+ *
  * `isTurnVisible` で可視判定を再チェックする fail-closed の二重化（`searchKnowledge` 本体の
  * 二重チェックと同じ考え方。検索時点で可視だったはずだが、ここでも独立して守る）。
  *
  * @param viewerUserId 要求者（AI に渡してよいかの可視判定に使う）
  * @param turns 対象ターン（検索結果の `aiMessageId`/`sessionId` の組。重複は呼び出し側で排除不要）
- * @returns `aiMessageId` → 連結済み全文 の Map（不可視・不存在・チャンク無しのターンは含まれない）
+ * @returns `aiMessageId` → 詳細 の Map（不可視・不存在・チャンク無しのターンは含まれない）
  */
-export async function loadKnowledgeTurnTexts(
+export async function loadKnowledgeTurnDetails(
   viewerUserId: string,
   turns: Array<{ sourceId: string; sessionId: string }>
-): Promise<Map<string, string>> {
+): Promise<Map<string, KnowledgeTurnDetail>> {
   if (turns.length === 0) {
     return new Map();
   }
@@ -918,38 +940,49 @@ export async function loadKnowledgeTurnTexts(
     select: {
       id: true,
       userId: true,
+      title: true,
       level: true,
       compartment: true,
-      project: { select: { defaultLevel: true, defaultCompartment: true } },
+      project: { select: { name: true, displayName: true, defaultLevel: true, defaultCompartment: true } },
     },
   });
   const sessionMap = new Map(sessions.map((s) => [s.id, s]));
 
   const ownerIds = [...new Set(sessions.map((s) => s.userId))];
-  const ownerMemberships = ownerIds.length
-    ? await prisma.organizationMember.findMany({
-        where: { userId: { in: ownerIds } },
-        select: { userId: true, organizationId: true },
-      })
-    : [];
+  const [ownerMemberships, owners] = await Promise.all([
+    ownerIds.length
+      ? prisma.organizationMember.findMany({
+          where: { userId: { in: ownerIds } },
+          select: { userId: true, organizationId: true },
+        })
+      : Promise.resolve([] as Array<{ userId: string; organizationId: string }>),
+    ownerIds.length
+      ? prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, name: true, email: true } })
+      : Promise.resolve([] as Array<{ id: string; name: string | null; email: string | null }>),
+  ]);
   const ownerOrgMap = new Map(ownerMemberships.map((m) => [m.userId, m.organizationId]));
+  const ownerNameMap = new Map(owners.map((u) => [u.id, u.name ?? u.email ?? u.id]));
 
   const chunkRows = await prisma.knowledgeChunk.findMany({
     where: {
       OR: turns.map((t) => ({ sourceType: KNOWLEDGE_SOURCE_TYPE_TURN, sourceId: t.sourceId })),
     },
-    select: { sourceId: true, chunkIndex: true, textContent: true },
+    select: { sourceId: true, chunkIndex: true, textContent: true, projectId: true, occurredAt: true },
     orderBy: [{ sourceId: 'asc' }, { chunkIndex: 'asc' }],
   });
 
   const chunksByTurn = new Map<string, string[]>();
+  const metaByTurn = new Map<string, { projectId: string; occurredAt: Date }>();
   for (const row of chunkRows) {
     const arr = chunksByTurn.get(row.sourceId) ?? [];
     arr[row.chunkIndex] = row.textContent;
     chunksByTurn.set(row.sourceId, arr);
+    if (!metaByTurn.has(row.sourceId)) {
+      metaByTurn.set(row.sourceId, { projectId: row.projectId, occurredAt: row.occurredAt });
+    }
   }
 
-  const result = new Map<string, string>();
+  const result = new Map<string, KnowledgeTurnDetail>();
   for (const turn of turns) {
     const session = sessionMap.get(turn.sessionId);
     if (!session) continue;
@@ -966,7 +999,7 @@ export async function loadKnowledgeTurnTexts(
     };
 
     if (!isTurnVisible(viewer, turnClassification)) {
-      console.error('[Knowledge] loadKnowledgeTurnTexts: visibility mismatch (dropped):', {
+      console.error('[Knowledge] loadKnowledgeTurnDetails: visibility mismatch (dropped):', {
         viewerId: viewerUserId,
         ownerId: session.userId,
         sessionId: turn.sessionId,
@@ -977,11 +1010,43 @@ export async function loadKnowledgeTurnTexts(
     const chunks = chunksByTurn.get(turn.sourceId);
     if (!chunks || chunks.length === 0) continue;
     const joined = chunks.filter((c) => typeof c === 'string' && c.length > 0).join('\n\n');
-    if (joined.length > 0) {
-      result.set(turn.sourceId, joined);
-    }
+    if (joined.length === 0) continue;
+
+    const meta = metaByTurn.get(turn.sourceId);
+    result.set(turn.sourceId, {
+      sourceId: turn.sourceId,
+      sessionId: turn.sessionId,
+      projectId: meta?.projectId ?? '',
+      projectName: session.project.displayName || session.project.name,
+      title: session.title,
+      ownerUserId: session.userId,
+      ownerName: ownerNameMap.get(session.userId) ?? session.userId,
+      isOwn: session.userId === viewer.userId,
+      occurredAt: (meta?.occurredAt ?? new Date()).toISOString(),
+      level: effective.level,
+      compartment: effective.compartment,
+      text: joined,
+    });
   }
 
+  return result;
+}
+
+/**
+ * `loadKnowledgeTurnDetails` の薄いラッパ。全文のみ必要な既存呼び出し元
+ * （`answerKnowledge` の「新ヒット」経路）向けに残す（関数名・シグネチャは wiring テストのピン）。
+ *
+ * @returns `aiMessageId` → 連結済み全文 の Map（不可視・不存在・チャンク無しのターンは含まれない）
+ */
+export async function loadKnowledgeTurnTexts(
+  viewerUserId: string,
+  turns: Array<{ sourceId: string; sessionId: string }>
+): Promise<Map<string, string>> {
+  const details = await loadKnowledgeTurnDetails(viewerUserId, turns);
+  const result = new Map<string, string>();
+  for (const [sourceId, detail] of details) {
+    result.set(sourceId, detail.text);
+  }
   return result;
 }
 

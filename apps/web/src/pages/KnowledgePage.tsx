@@ -26,15 +26,16 @@ import {
 } from '../lib/knowledge-search-rules';
 import { canEditClassification } from '../lib/clearance-rules';
 import {
-  IDLE_ANSWER_STATE,
-  DISABLED_ANSWER_STATE,
-  startingAnswerState,
-  reduceAnswerStream,
+  IDLE_CONVERSATION,
+  DISABLED_CONVERSATION,
+  reduceConversation,
+  buildFollowUpRequest,
+  resolveCitationTarget,
   parseAnswerToggleValue,
   serializeAnswerToggleValue,
   isKnowledgeAnswerDisabledError,
   buildAnswerRequestFilters,
-  type AnswerState,
+  type ConversationState,
 } from '../lib/knowledge-answer-rules';
 import { KnowledgeFilterBar } from '../components/knowledge/KnowledgeFilterBar';
 import { KnowledgeResultCard } from '../components/knowledge/KnowledgeResultCard';
@@ -122,7 +123,9 @@ export function KnowledgePage() {
   // （既存の検索 killswitch 発見と同じ「実際に叩いて初めて分かる」流儀。他ページ/useWebSocket は無変更）。
   const [answerEnabled, setAnswerEnabled] = useState(readAnswerToggleFromStorage);
   const [answerFeatureDisabled, setAnswerFeatureDisabled] = useState(false);
-  const [answerState, setAnswerState] = useState<AnswerState>(IDLE_ANSWER_STATE);
+  // サイクル4.5: 回答欄は 1 問 1 答ではなく会話（追い質問可能）。`conversation.turns` が往復の列、
+  // `conversation.sources` が会話全体で蓄積された根拠リスト（`ref` 順・一意）。
+  const [conversation, setConversation] = useState<ConversationState>(IDLE_CONVERSATION);
   const answerIdRef = useRef<string | null>(null);
 
   // カードへのスクロール＋ハイライト（[n] クリック用）。KnowledgeResultCard.tsx 自体は変更しない
@@ -144,15 +147,15 @@ export function KnowledgePage() {
     {
       onKnowledgeAnswerDelta: (payload) => {
         if (payload.answerId !== answerIdRef.current) return;
-        setAnswerState((s) => reduceAnswerStream(s, { type: 'delta', answerId: payload.answerId, text: payload.text }));
+        setConversation((c) => reduceConversation(c, { type: 'delta', answerId: payload.answerId, text: payload.text }));
       },
       onKnowledgeAnswerDone: (payload) => {
         if (payload.answerId !== answerIdRef.current) return;
-        setAnswerState((s) => reduceAnswerStream(s, { type: 'done', answerId: payload.answerId, data: payload }));
+        setConversation((c) => reduceConversation(c, { type: 'done', answerId: payload.answerId, data: payload }));
       },
       onKnowledgeAnswerError: (payload) => {
         if (payload.answerId !== answerIdRef.current) return;
-        setAnswerState((s) => reduceAnswerStream(s, { type: 'error', answerId: payload.answerId, message: payload.message }));
+        setConversation((c) => reduceConversation(c, { type: 'error', answerId: payload.answerId, message: payload.message }));
       },
     },
     { tabId: knowledgeTabId }
@@ -249,19 +252,20 @@ export function KnowledgePage() {
   useEffect(() => {
     if (!answerEnabled || answerFeatureDisabled) {
       answerIdRef.current = null;
-      setAnswerState(answerFeatureDisabled ? DISABLED_ANSWER_STATE : IDLE_ANSWER_STATE);
+      setConversation(answerFeatureDisabled ? DISABLED_CONVERSATION : IDLE_CONVERSATION);
       return;
     }
     if (!isSearchable(urlState)) {
       answerIdRef.current = null;
-      setAnswerState(IDLE_ANSWER_STATE);
+      setConversation(IDLE_CONVERSATION);
       return;
     }
 
     let dead = false;
     const answerId = crypto.randomUUID();
     answerIdRef.current = answerId;
-    setAnswerState(startingAnswerState(answerId));
+    // 新しい検索・フィルタ変更のたびに会話はリセットし、1 問目として開始する（D1）。
+    setConversation(reduceConversation(IDLE_CONVERSATION, { type: 'ask', answerId, question: urlState.q.trim() }));
 
     const filters = buildAnswerRequestFilters(JSON.parse(searchQueryKey));
     knowledgeApi
@@ -275,7 +279,7 @@ export function KnowledgePage() {
       .then((res) => {
         if (dead || answerIdRef.current !== answerId) return;
         if (res.delivery === 'http') {
-          setAnswerState((s) => reduceAnswerStream(s, { type: 'done', answerId, data: res }));
+          setConversation((c) => reduceConversation(c, { type: 'done', answerId, data: res }));
         }
         // delivery === 'ws' の場合は useWebSocket の onKnowledgeAnswerDelta/Done/Error が後続を処理する。
       })
@@ -284,10 +288,10 @@ export function KnowledgePage() {
         const message = e instanceof Error ? e.message : String(e);
         if (isKnowledgeAnswerDisabledError(message)) {
           setAnswerFeatureDisabled(true);
-          setAnswerState(DISABLED_ANSWER_STATE);
+          setConversation(DISABLED_CONVERSATION);
           return;
         }
-        setAnswerState((s) => reduceAnswerStream(s, { type: 'error', answerId, message }));
+        setConversation((c) => reduceConversation(c, { type: 'error', answerId, message }));
       });
 
     return () => {
@@ -295,6 +299,54 @@ export function KnowledgePage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQueryKey, answerEnabled, answerFeatureDisabled, knowledgeTabId]);
+
+  // サイクル4.5: 追い質問（会話継続）。effect ではなくユーザー操作起点のコールバックで送る
+  // （`setSearchParams` は呼ばない＝ guard テストの「検索/回答 useEffect は setSearchParams を
+  // 呼ばない」とは無関係だが、同じ理由で再検索ループの芽を作らないため effect 化しない）。
+  const handleFollowUp = useCallback(
+    (question: string) => {
+      const trimmed = question.trim();
+      if (trimmed.length === 0) return;
+
+      const answerId = crypto.randomUUID();
+      answerIdRef.current = answerId;
+      setConversation((c) => reduceConversation(c, { type: 'ask', answerId, question: trimmed }));
+
+      const filters = buildAnswerRequestFilters(JSON.parse(searchQueryKey));
+      const followUp = buildFollowUpRequest(conversation, trimmed);
+      knowledgeApi
+        .answer({
+          answerId,
+          question: trimmed,
+          stream: true,
+          tabId: knowledgeTabId,
+          ...filters,
+          ...followUp,
+        })
+        .then((res) => {
+          if (answerIdRef.current !== answerId) return;
+          if (res.delivery === 'http') {
+            setConversation((c) => reduceConversation(c, { type: 'done', answerId, data: res }));
+          }
+        })
+        .catch((e) => {
+          if (answerIdRef.current !== answerId) return;
+          const message = e instanceof Error ? e.message : String(e);
+          if (isKnowledgeAnswerDisabledError(message)) {
+            setAnswerFeatureDisabled(true);
+            setConversation(DISABLED_CONVERSATION);
+            return;
+          }
+          setConversation((c) => reduceConversation(c, { type: 'error', answerId, message }));
+        });
+    },
+    [conversation, searchQueryKey, knowledgeTabId]
+  );
+
+  const handleClearConversation = useCallback(() => {
+    answerIdRef.current = null;
+    setConversation(answerFeatureDisabled ? DISABLED_CONVERSATION : IDLE_CONVERSATION);
+  }, [answerFeatureDisabled]);
 
   const handleSubmit = () => {
     const trimmed = qDraft.trim();
@@ -345,19 +397,32 @@ export function KnowledgePage() {
 
   // 高辻ナレッジ サイクル4: 回答本文の [n] クリック。1 回目はそのカードへスクロール＋ハイライト、
   // 同じ [n] を続けてクリックするとスレッドビューアを開く（指示書 §3）。
+  // サイクル4.5: 会話の根拠リストから `resolveCitationTarget` で対象を決める（カードに一致する
+  // ものだけスクロール対象になり、会話で新たに増えた根拠はビューア直行になる）。
   const handleCitationClick = useCallback(
-    (rank: number) => {
-      const result = data?.results.find((r) => r.rank === rank);
-      if (!result) return;
-      const key = `${result.sessionId}:${result.aiMessageId}`;
+    (ref: number) => {
+      const cardResults = (data?.results ?? []).map((r) => ({
+        sessionId: r.sessionId,
+        aiMessageId: r.aiMessageId,
+        occurredAt: r.occurredAt,
+        rank: r.rank,
+      }));
+      const target = resolveCitationTarget(conversation.sources, cardResults, ref);
+      if (!target) return;
 
-      if (lastCitationRankRef.current === rank) {
-        lastCitationRankRef.current = null;
-        handleOpen(result.sessionId, result.aiMessageId, result.occurredAt);
+      if (target.kind === 'viewer') {
+        handleOpen(target.sessionId, target.aiMessageId, target.occurredAt);
         return;
       }
 
-      lastCitationRankRef.current = rank;
+      const key = `${target.sessionId}:${target.aiMessageId}`;
+      if (lastCitationRankRef.current === ref) {
+        lastCitationRankRef.current = null;
+        handleOpen(target.sessionId, target.aiMessageId, target.occurredAt);
+        return;
+      }
+
+      lastCitationRankRef.current = ref;
       const el = cardRefs.current[key];
       el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       setHighlightedCardKey(key);
@@ -365,7 +430,7 @@ export function KnowledgePage() {
         setHighlightedCardKey((cur) => (cur === key ? null : cur));
       }, 2000);
     },
-    [data]
+    [data, conversation.sources]
   );
 
   if (disabled) {
@@ -448,7 +513,12 @@ export function KnowledgePage() {
 
       <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
         <div className={urlState.thread ? 'hidden md:block' : ''}>
-          <KnowledgeAnswerPanel state={answerState} onCitationClick={handleCitationClick} />
+          <KnowledgeAnswerPanel
+            conversation={conversation}
+            onCitationClick={handleCitationClick}
+            onFollowUp={handleFollowUp}
+            onClear={handleClearConversation}
+          />
 
           {loading && <p className="text-sm text-[var(--text-muted)]">{t('knowledge.loading')}</p>}
           {!loading && data && data.results.length === 0 && (

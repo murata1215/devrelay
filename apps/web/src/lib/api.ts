@@ -1330,17 +1330,27 @@ export interface KnowledgeAnswerRequest {
   since?: string;
   until?: string;
   limit?: number;
+  /** サイクル4.5: 追い質問（会話継続）。`lib/knowledge-answer-rules.ts` の `buildFollowUpRequest` が組み立てる。 */
+  history?: { question: string; answer: string }[];
+  knownSources?: { sourceType: string; sourceId: string; sessionId: string; ref: number }[];
+  previousQuestion?: string;
 }
 
-/** `POST /api/knowledge/answer` の 1 件の根拠ソース。カード番号（`rank`）＝本文中の [n]。 */
+/**
+ * `POST /api/knowledge/answer` の 1 件の根拠ソース。カード番号（`rank`）＝本文中の [n]。
+ * サイクル4.5: `ref`（会話一意の番号。会話でないときは `rank` と同値）/`projectId`/`isOwn` を追加。
+ */
 export interface KnowledgeAnswerSource {
   rank: number;
+  ref: number;
   sourceType: string;
   sessionId: string;
   aiMessageId: string;
+  projectId: string;
   title: string | null;
   projectName: string;
   ownerName: string;
+  isOwn: boolean;
   occurredAt: string;
   level: number;
   compartment: string | null;

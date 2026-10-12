@@ -94,15 +94,21 @@ export function tokenizeAnswerMarkdown(markdown: string): AnswerBlock[] {
 
 export type AnswerStatus = 'idle' | 'loading' | 'streaming' | 'done' | 'error' | 'disabled';
 
-/** `KnowledgeAnswerDoneResult`（サーバー）の WebUI 側の写し。 */
+/**
+ * `KnowledgeAnswerDoneResult`（サーバー）の WebUI 側の写し。
+ * サイクル4.5: `ref`（会話一意の番号。会話でないときは `rank` と同値）/`projectId`/`isOwn` を追加。
+ */
 export interface AnswerSource {
   rank: number;
+  ref: number;
   sourceType: string;
   sessionId: string;
   aiMessageId: string;
+  projectId: string;
   title: string | null;
   projectName: string;
   ownerName: string;
+  isOwn: boolean;
   occurredAt: string;
   level: number;
   compartment: string | null;
@@ -199,6 +205,138 @@ export function reduceAnswerStream(state: AnswerState, event: AnswerStreamEvent)
     default:
       return state;
   }
+}
+
+// ============================================================
+// 会話継続（サイクル4.5 D1〜D3）
+// ============================================================
+
+/** 会話 1 往復。`answer` は既存 `AnswerState`/`reduceAnswerStream` をそのまま再利用する。 */
+export interface ConversationTurn {
+  question: string;
+  answer: AnswerState;
+}
+
+/** 会話全体の状態。`sources` は往復を通して蓄積された根拠リスト（`ref` 順・一意）。 */
+export interface ConversationState {
+  status: AnswerStatus;
+  turns: ConversationTurn[];
+  sources: AnswerSource[];
+}
+
+/** 会話未開始の初期状態。 */
+export const IDLE_CONVERSATION: ConversationState = { status: 'idle', turns: [], sources: [] };
+
+/** 回答機能が killswitch で無効、またはトグル OFF のときの状態。 */
+export const DISABLED_CONVERSATION: ConversationState = { status: 'disabled', turns: [], sources: [] };
+
+/** `reduceConversation` に渡すイベント。`ask` 以外は `AnswerStreamEvent` をそのまま使う（末尾ターンに適用）。 */
+export type ConversationEvent = { type: 'ask'; answerId: string; question: string } | AnswerStreamEvent | { type: 'clear' };
+
+/** `existing`/`incoming` を `ref` で統合する（重複は `incoming` を優先、`ref` 昇順で返す）。 */
+function mergeAnswerSources(existing: readonly AnswerSource[], incoming: readonly AnswerSource[]): AnswerSource[] {
+  const byRef = new Map<number, AnswerSource>();
+  for (const s of existing) byRef.set(s.ref, s);
+  for (const s of incoming) byRef.set(s.ref, s);
+  return [...byRef.values()].sort((a, b) => a.ref - b.ref);
+}
+
+/**
+ * 会話イベントを状態に適用する（D1）。
+ *
+ * - `ask`: 新しい往復を末尾に積む（質問文を記録し、回答は `startingAnswerState` で `loading` 開始）
+ * - `delta`/`done`/`error`: 常に**末尾ターンにのみ**適用する（進行中なのは常に最後の往復だけ）。
+ *   `answerId` 不一致、または末尾ターンが既に `done`/`error` で確定済みなら `reduceAnswerStream` が
+ *   state をそのまま返すため、ここでも無視される（他の `turns` は不変のまま）
+ * - `done`: 末尾ターンの回答が確定した根拠（`AnswerDoneData.sources`）を会話全体の `sources` に統合する
+ *   （`mergeAnswerSources`。既出の `ref` は新しい方で上書き、未出の `ref` は追加）
+ * - `clear`: `IDLE_CONVERSATION` に戻す（新しい検索・フィルタ変更・トグル OFF・「会話をクリア」で呼ぶ）
+ */
+export function reduceConversation(state: ConversationState, event: ConversationEvent): ConversationState {
+  if (event.type === 'clear') {
+    return IDLE_CONVERSATION;
+  }
+
+  if (event.type === 'ask') {
+    const turn: ConversationTurn = { question: event.question, answer: startingAnswerState(event.answerId) };
+    return { status: 'loading', turns: [...state.turns, turn], sources: state.sources };
+  }
+
+  const lastIndex = state.turns.length - 1;
+  if (lastIndex < 0) return state;
+  const lastTurn = state.turns[lastIndex];
+  const nextAnswer = reduceAnswerStream(lastTurn.answer, event);
+  if (nextAnswer === lastTurn.answer) {
+    // answerId 不一致、または既に done/error で確定済み（`reduceAnswerStream` が無視した）。
+    return state;
+  }
+
+  const nextTurns = [...state.turns];
+  nextTurns[lastIndex] = { ...lastTurn, answer: nextAnswer };
+  const nextSources = event.type === 'done' ? mergeAnswerSources(state.sources, nextAnswer.sources) : state.sources;
+
+  return { status: nextAnswer.status, turns: nextTurns, sources: nextSources };
+}
+
+/** `POST /api/knowledge/answer` に渡す「追い質問」部分（`history`/`knownSources`/`previousQuestion`）。 */
+export interface FollowUpRequestParts {
+  history: { question: string; answer: string }[];
+  knownSources: { sourceType: string; sourceId: string; sessionId: string; ref: number }[];
+  previousQuestion: string;
+}
+
+/**
+ * 会話状態から追い質問のリクエスト部分を組み立てる（D2/D3）。`history` は確定済み（`done`）の往復のみ
+ * （進行中・失敗した往復は含めない）。`knownSources` は会話で蓄積済みの根拠リストをそのまま渡す
+ * （サーバー側の `normalizeHistory`/`normalizeKnownSources` が件数・文字数を最終的に切り詰める）。
+ * `question`（これから送る新しい質問）自体は呼び出し側が別途 `question` フィールドで渡す。
+ */
+export function buildFollowUpRequest(conversation: ConversationState, question: string): FollowUpRequestParts {
+  void question;
+  const doneTurns = conversation.turns.filter((t) => t.answer.status === 'done');
+  const history = doneTurns.map((t) => ({ question: t.question, answer: t.answer.text }));
+  const knownSources = conversation.sources.map((s) => ({
+    sourceType: s.sourceType,
+    sourceId: s.aiMessageId,
+    sessionId: s.sessionId,
+    ref: s.ref,
+  }));
+  const previousQuestion = doneTurns.length > 0 ? doneTurns[doneTurns.length - 1].question : '';
+  return { history, knownSources, previousQuestion };
+}
+
+/** `resolveCitationTarget` が参照するカード 1 件（検索結果 `results` から渡す）。 */
+export interface CitationCardResult {
+  sessionId: string;
+  aiMessageId: string;
+  occurredAt: string;
+  rank: number;
+}
+
+/** `resolveCitationTarget` の結果。`card` はカードへスクロール、`viewer` はスレッドビューアへ直行する。 */
+export type CitationTarget =
+  | { kind: 'card'; sessionId: string; aiMessageId: string; occurredAt: string; rank: number }
+  | { kind: 'viewer'; sessionId: string; aiMessageId: string; occurredAt: string };
+
+/**
+ * 回答本文の `[n]` クリック先を決める。会話の根拠リストから `ref` に対応するソースを引き、
+ * その `(sessionId, aiMessageId)` と同じカードが検索結果に存在すればそのカード、無ければ
+ * （会話で新たに増えた根拠はカード一覧には無い）スレッドビューア直行とする。
+ * `ref` に対応するソースが見つからない場合（無効な引用番号）は `null`。
+ */
+export function resolveCitationTarget(
+  conversationSources: readonly AnswerSource[],
+  cardResults: readonly CitationCardResult[],
+  ref: number
+): CitationTarget | null {
+  const source = conversationSources.find((s) => s.ref === ref);
+  if (!source) return null;
+
+  const card = cardResults.find((c) => c.sessionId === source.sessionId && c.aiMessageId === source.aiMessageId);
+  if (card) {
+    return { kind: 'card', sessionId: card.sessionId, aiMessageId: card.aiMessageId, occurredAt: card.occurredAt, rank: card.rank };
+  }
+  return { kind: 'viewer', sessionId: source.sessionId, aiMessageId: source.aiMessageId, occurredAt: source.occurredAt };
 }
 
 // ============================================================

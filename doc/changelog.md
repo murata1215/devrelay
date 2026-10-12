@@ -6,6 +6,83 @@
 
 ## 実装済み機能
 
+### 高辻ナレッジ サイクル4.5 — 追い質問（会話として続ける）＋ MCP `ask_knowledge` (2026-10-12)
+
+サイクル4（`f989d30`）の回答欄は「1 問 1 答」だった。本サイクルで答えに続けて聞けるようにし、
+あわせて Claude Code からも出典つきの答えを 1 回で得られる MCP `ask_knowledge` を新設した。
+対象: `apps/server` ＋ `apps/web`（MCP 含む）。agent / flutter / Lite / ChatPage は **0 行変更**。
+DB 変更なし（サーバーは無状態。会話はクライアント側の状態、保存はしない）。
+
+- **D1（無状態の会話）**: サーバーは毎回 `history`（直近の Q/A）と `knownSources`（会話で既に
+  番号を振った根拠）を受け取るだけで、会話そのものは保存しない。新しい検索・フィルタ変更・
+  トグル OFF・「会話をクリア」で会話は破棄される
+- **D2（検索し直し）**: 追い質問でも毎回検索し直す。検索クエリは「直前の質問 ＋ 追い質問」を
+  連結したもの（`buildConversationSearchQuery`、500 文字で切る）。LLM によるクエリ書き換えは
+  しない（追加の AI 呼び出しを増やさない）
+- **D3（根拠番号は会話で一意）**: `mergeConversationSources` が既知の根拠はそのままの番号で先頭に
+  並べ、新ヒットのうち既出でないものを続き番号で追加する。既知は `loadKnowledgeTurnDetails`
+  （`loadKnowledgeTurnTexts` を拡張、`knowledge-service.ts`）で**全文・表示用メタデータを
+  再取得・再可視判定し直す**（クライアント申告の title/level/compartment を信用しない）。
+  18,000 文字の予算を超えたら `evictForBudget` が「未引用の既知 → 新ヒットの下位 →
+  引用済みの既知」の順で落とす。**「引用済みか」はクライアント申告に頼らず、正規化済み
+  `history[].answer` に実際に出現する `[n]` からサーバー側で導出する**（ユーザー承認の
+  追加要件）。会話でないとき（`history`/`knownSources` が両方空）はこの経路を一切通らず、
+  **サイクル4と完全に同一のコードパス**（検索結果の `rank` をそのまま引用番号に使う、
+  カードクリックとの整合を崩さない）
+- **D4（history の正規化）**: 直近 6 往復・各質問 1,000 文字・各回答 1,500 文字で行境界打ち切り
+  （`normalizeHistory`）。`knownSources` も検証・正規化し、安全弁として 60 件で切る
+  （`normalizeKnownSources`）
+- **D5（プロンプト）**: `buildKnowledgePrompt` に `history?` を追加。**`history` 省略時はサイクル4
+  とバイト一致**（既存テストを維持）。`history` があるときだけ「会話の続き、既出の根拠には
+  同じ番号を使う」の 1 段落を system に追加し、`messages` を user/assistant で往復させる
+- **D6（MCP `ask_knowledge`）**: `search_knowledge` の直後・`get_knowledge_thread` の前に新設
+  （`isKnowledgeEnabled` と `isKnowledgeAnswerEnabled` の両方が ON のときのみ登録）。非ストリーミング
+  で `answerKnowledge` を呼ぶ。**ユーザー承認の追加要件**: `history` に加えて前回の `sources[]`
+  配列をそのまま `knownSources` として渡せるよう、戻り値の各 source に `sourceId`（`aiMessageId`
+  のエイリアス）を含める（`history` だけでは追い質問ごとに番号が 1 から振り直され、history 内の
+  `[n]` とずれるため）。説明文・`hint`・`mcp/server.ts` の `SERVER_INSTRUCTIONS` にこの使い方を明記
+- **D7/D8（流量制御・監査の共有）**: `createAnswerGuardState()` の生成点を新規
+  `services/knowledge-answer-slot.ts` の 1 箇所に切り出し、REST `/api/knowledge/answer` と MCP
+  `ask_knowledge` が**同じ** `AnswerGuardState`（同時 1・5 回/分・100 回/日）を共有する。監査
+  （`recordSupervisionAudit(..., 'summarize')`）は会話経路でも `ownerUserId`/`isOwn` を
+  `KnowledgeContextItem` に持たせて正しく判定する（既知の根拠は `resultByMessageId` に無いため、
+  サイクル4のロジックのままだと監査対象を取り逃す問題を先に修正）
+- **WebUI（会話表示）**: `KnowledgeAnswerPanel.tsx` を拡張（新規コンポーネントは作らず、
+  `ANSWER_PANEL_FILES` ガードの対象を増やさない）。往復を縦に積み、2 問目以降は質問を小さく
+  右寄せで表示、最後の往復が確定（`done`）したときだけ「続けて聞く…」入力を表示する。
+  `[n]` クリックは `resolveCitationTarget` で会話の根拠から `(sessionId, aiMessageId)` を引き、
+  カードに一致すればスクロール、無ければ（会話で新たに増えた根拠）スレッドビューアへ直行する
+  （旧 `rank` 数値一致ではなく identity 一致にしたため、会話が進んでも破綻しない）
+- **非スコープ（指示書 §8）**: 会話の保存・再開・共有、LLM による質問の書き換え（standalone
+  question 化）、Discord/Telegram、他ソース投入（サイクル5）
+
+#### 変更ファイル
+
+| 区分 | ファイル |
+|---|---|
+| 変更 | `apps/server/src/services/{knowledge-answer-rules,knowledge-answer,knowledge-service}.ts`、`apps/server/src/routes/knowledge-api.ts`、`apps/server/src/mcp/{tools,server}.ts`、`packages/shared/src/types.ts` |
+| 新規 | `apps/server/src/services/knowledge-answer-slot.ts`、`apps/server/tests/{knowledge-conversation-rules,ask-knowledge-wiring}.test.mjs` |
+| 変更 | `apps/server/tests/knowledge-answer-wiring.test.mjs`（`createAnswerGuardState` 生成点ピンを `knowledge-answer-slot.ts` の 1 箇所に強化） |
+| 変更 | `apps/web/src/lib/knowledge-answer-rules.ts`、`apps/web/src/pages/KnowledgePage.tsx`、`apps/web/src/components/knowledge/KnowledgeAnswerPanel.tsx`、`apps/web/src/lib/api.ts`、`apps/web/src/hooks/useWebSocket.ts`、`apps/web/src/i18n/messages.ts` |
+| 新規 | `apps/web/tests/knowledge-conversation-rules.test.mjs` |
+| 変更 | `CLAUDE.md`（`DEVRELAY_KNOWLEDGE_ANSWER` 行に `ask_knowledge` 共用を追記）、`doc/changelog.md`、`doc/devlog/INDEX.md` |
+
+#### テスト
+
+- server: `knowledge-conversation-rules.test.mjs` 30 件・`ask-knowledge-wiring.test.mjs` 17 件 新規、
+  フルスイート **1132/1132** green（既存 1083 + 新規 47 + 既存ファイル拡張分 2）
+- web: `knowledge-conversation-rules.test.mjs` 17 件 新規、フルスイート **819/819** green
+  （既存 802 + 新規 17。既存 `knowledge-source-guards.test.mjs` は無変更のまま全通過＝
+  `KnowledgeAnswerPanel.tsx` 拡張のみで対応できたことを確認）
+- 6 workspace `pnpm build` green（shared/server/web/linux/macos/windows）
+- `grep -c 'require(' apps/web/dist/assets/index-*.js` = 0
+- agents（linux/macos/windows）は本サイクルで **0 行変更**。各フルスイート実行で
+  `conversation-store-scope.test.mjs` / `file-handler.test.mjs` の既知フレーク（node:test
+  ランナー内部 IPC シリアライズ起因、サイクル4 devlog でも観測済み）を 1 件ずつ観測。単独実行では
+  green、本サイクルの変更（0 行）と無関係と確認済み
+
+DB マイグレーション不要。pm2 restart 要。各機 `u` 不要（Agent 側 0 行変更）。
+
 ### 高辻ナレッジ サイクル4 — ナレッジ回答（RAG）: ひとつの検索箱で根拠カード＋ストリーミング回答 (2026-10-12)
 
 サイクル1〜3 の `/knowledge` は RAG の「R」（検索結果カード）のみ。本サイクルで「AG」

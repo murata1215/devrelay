@@ -320,6 +320,15 @@ export const messages = {
   'knowledge.answer.error.timeout': { en: 'Answer generation timed out.', ja: '回答の生成がタイムアウトしました。' },
 
   // ======================================================================
+  // 高辻ナレッジ サイクル4.5: 会話として続ける（追い質問）
+  // ======================================================================
+  'knowledge.answer.followUpPlaceholder': { en: 'Ask a follow-up question…', ja: '続けて聞く...' },
+  'knowledge.answer.followUpSend': { en: 'Send', ja: '送信' },
+  'knowledge.answer.clearConversation': { en: 'Clear conversation', ja: '会話をクリア' },
+  'knowledge.answer.sourcesLabel': { en: 'Sources', ja: '根拠' },
+  'knowledge.answer.questionPrefix': { en: 'Q:', ja: '質問:' },
+
+  // ======================================================================
   // 高辻ナレッジ サイクル3（WebUI）: 機密度（classification）エディタ
   // ======================================================================
   'classification.title': { en: 'Classification', ja: '機密度' },

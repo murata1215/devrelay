@@ -32,7 +32,8 @@ cancel_submission で取り消せます（ask_project の質問も取り消せ�
 調べ物は search_project_context を使う。会話履歴の閲覧は get_conversation_history で期間指定して取得できる。添付ファイル（画像等）は get_conversation_history で attachments を確認し、get_attachment で取得できる。submit/approve は破壊的操作なので必ず確認を取る。
 submit_instruction には画像等の添付ファイル（attachments）を渡せるが、上限を超えるリクエストは submit_instruction 自体が呼ばれる前に HTTP エラーで拒否されるため、ツールの isError ではなく HTTP レベルのエラーとして現れる点に注意。
 過去の経緯・調査結果・判断を探すときは search_knowledge（全プロジェクト横断・ハイブリッド）。既定の scope='all' では同じ組織の他メンバーの会話も可視判定を通れば結果に含まれる（scope='mine' で自分のみに絞れる）。1 プロジェクトの直近ビルド要約は従来どおり search_project_context。
-他メンバーのスレッド本文は get_conversation_history では読めない（自分のセッション限定）。search_knowledge の結果で isOwn:false のスレッドは get_knowledge_thread(sessionId) で読む（閲覧は監査ログに記録される）。`;
+他メンバーのスレッド本文は get_conversation_history では読めない（自分のセッション限定）。search_knowledge の結果で isOwn:false のスレッドは get_knowledge_thread(sessionId) で読む（閲覧は監査ログに記録される）。
+ヒット一覧ではなく出典つきの答えが 1 回で欲しいときは ask_knowledge。会話として続けたいときは、前回の sources 配列をそのまま knownSources に渡し、history に今回の質問と回答を積んでから再度呼ぶ（これで引用番号が会話を通して変わらない）。`;
 
 /**
  * /mcp のリクエストボディ上限（16 MiB）。

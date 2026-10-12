@@ -46,14 +46,29 @@ describe('routes/knowledge-api.ts: POST /api/knowledge/answer の配線', () => 
     assert.match(source, /`web:\$\{userId\}:\$\{body\.tabId\}`/);
   });
 
-  test('answerGuardState はモジュールスコープで 1 個だけ保持する（raw-completion-guard と同じ流儀）', () => {
-    const matches = source.match(/createAnswerGuardState\(\)/g) ?? [];
-    assert.equal(matches.length, 1, 'createAnswerGuardState() の呼び出しは 1 回だけであること');
+  test('answerGuardState は knowledge-answer-slot.ts から import している（サイクル4.5: MCP ask_knowledge と共有するため切り出し済み）', () => {
+    assert.match(source, /import\s*\{\s*answerGuardState\s*\}\s*from\s*['"]\.\.\/services\/knowledge-answer-slot\.js['"]/);
+    assert.equal(source.includes('createAnswerGuardState'), false, 'createAnswerGuardState の生成はこのファイルでは行わない（knowledge-answer-slot.ts に 1 箇所だけ）');
   });
 
   test('スロット解放（releaseAnswerSlot）が http 経路・ws 経路の両方にある', () => {
     const matches = source.match(/releaseAnswerSlot\(/g) ?? [];
     assert.ok(matches.length >= 2, `releaseAnswerSlot の呼び出しが想定より少ない: ${matches.length}`);
+  });
+});
+
+describe('services/knowledge-answer-slot.ts: answerGuardState の生成点がプロセス内で 1 箇所だけ（サイクル4.5 D7）', () => {
+  const slotSource = readServerSource('src/services/knowledge-answer-slot.ts');
+
+  test('createAnswerGuardState() の呼び出しは 1 回だけ', () => {
+    const matches = slotSource.match(/=\s*createAnswerGuardState\(\);/g) ?? [];
+    assert.equal(matches.length, 1, 'createAnswerGuardState() の呼び出し（代入）は 1 回だけであること');
+  });
+
+  test('mcp/tools.ts も同じ answerGuardState を import している（REST と MCP ask_knowledge で流量制御を共有）', () => {
+    const toolsSource = readServerSource('src/mcp/tools.ts');
+    assert.match(toolsSource, /import\s*\{\s*answerGuardState\s*\}\s*from\s*['"]\.\.\/services\/knowledge-answer-slot\.js['"]/);
+    assert.equal(toolsSource.includes('createAnswerGuardState'), false, 'mcp/tools.ts は createAnswerGuardState() を自前で呼んではいけない（state が二重になる）');
   });
 });
 

@@ -19,19 +19,14 @@ import {
   normalizeQuestion,
   normalizeAnswerId,
   decideDelivery,
-  createAnswerGuardState,
   acquireAnswerSlot,
   releaseAnswerSlot,
+  type KnownSourceRef,
+  type AnswerHistoryTurn,
 } from '../services/knowledge-answer-rules.js';
+import { answerGuardState } from '../services/knowledge-answer-slot.js';
 import { isWebClientConnected, sendWebRawMessage } from '../platforms/web.js';
 import { resolveUserLanguage } from '../services/user-settings.js';
-
-/**
- * 高辻ナレッジ サイクル4: `POST /api/knowledge/answer` の流量制御状態。このプロセス内で
- * 1 個だけ保持する（`raw-completion-guard.ts` の `rawGuardState` と同じ流儀。
- * `knowledge-answer-rules.ts` はこの state を一切内部に隠し持たない）。
- */
-const answerGuardState = createAnswerGuardState();
 
 /** `POST /api/knowledge/answer` のリクエストボディ（未検証。`searchKnowledge` と同形のフィルタ）。 */
 interface KnowledgeAnswerRequestBody {
@@ -49,6 +44,10 @@ interface KnowledgeAnswerRequestBody {
   since?: string;
   until?: string;
   limit?: number;
+  /** サイクル4.5: 追い質問（会話継続）。直近の Q/A・会話で既に番号を振った根拠・検索クエリ連結用の前回質問。 */
+  history?: AnswerHistoryTurn[];
+  knownSources?: KnownSourceRef[];
+  previousQuestion?: string;
 }
 
 export async function knowledgeApiRoutes(app: FastifyInstance) {
@@ -156,6 +155,9 @@ export async function knowledgeApiRoutes(app: FastifyInstance) {
       since: body.since,
       until: body.until,
       limit: body.limit,
+      history: body.history,
+      knownSources: body.knownSources,
+      previousQuestion: body.previousQuestion,
     };
 
     if (delivery === 'http') {

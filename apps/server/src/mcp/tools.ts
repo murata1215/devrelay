@@ -58,6 +58,11 @@ import {
 } from '../services/ask-guard.js';
 import { searchKnowledge, getKnowledgeThread, setThreadClassification } from '../services/knowledge-service.js';
 import { isKnowledgeEnabled } from '../services/knowledge-rank.js';
+import { answerKnowledge, type AnswerSink, type KnowledgeAnswerDoneResult } from '../services/knowledge-answer.js';
+import { isKnowledgeAnswerEnabled, acquireAnswerSlot, releaseAnswerSlot, ANSWER_KEY_MISSING_MESSAGE } from '../services/knowledge-answer-rules.js';
+import { answerGuardState } from '../services/knowledge-answer-slot.js';
+import { resolveUserLanguage } from '../services/user-settings.js';
+import crypto from 'crypto';
 
 /**
  * #334: 人間入力テキストの長さ上限（string.length = UTF-16 コードユニット数基準）。
@@ -593,6 +598,129 @@ export function registerMcpTools(server: McpServer, userId: string) {
         };
       }
     );
+
+    // ============================================================
+    // 高辻ナレッジ サイクル4.5: ask_knowledge（出典つきの回答を 1 回で得る。D6）
+    // ============================================================
+    if (isKnowledgeAnswerEnabled(process.env.DEVRELAY_KNOWLEDGE_ANSWER)) {
+      /**
+       * ask_knowledge — search_knowledge のヒット一覧ではなく、LLM が合成した出典つきの回答を返す
+       * （非ストリーミング。完成形を 1 回で返す）。REST `/api/knowledge/answer` と同じ
+       * `answerKnowledge`（鍵・流量制御・監査も共通、D6/D7/D8）を呼ぶ。`history`/`knownSources` を
+       * 渡すと会話として続けられる（サイクル4.5 D1〜D3）。
+       */
+      server.tool(
+        'ask_knowledge',
+        'Ask the knowledge base a question and get a cited answer synthesized from the user\'s past AI ' +
+        'conversations (hybrid search + LLM). Use this for how/why/when questions about prior work; use ' +
+        'search_knowledge instead when you want the raw hits. To continue the conversation with a ' +
+        'follow-up question, pass `history` (the prior Q/A turns) AND `knownSources` set to the exact ' +
+        '`sources` array this tool returned last time (pass it back verbatim) — this keeps citation ' +
+        'numbers [n] stable across turns. If you omit `knownSources` and only pass `history`, citation ' +
+        'numbers restart at 1 on this call and will no longer match the [n] used in the history answers.',
+        {
+          question: z.string().describe('The question, in natural language (max 1000 characters)'),
+          scope: z.enum(['all', 'mine']).optional().describe(
+            'Search scope (default "all"): "all" includes other organization members\' visible conversations; "mine" restricts to the caller\'s own.'
+          ),
+          projectId: z.string().optional().describe('Limit to one project (default: search across all the user\'s projects)'),
+          kind: z.enum(['instruction', 'question', 'all']).optional().describe('Filter by turn kind (default "all")'),
+          compartment: z.string().optional().describe('Limit to this named compartment (project/case name) only'),
+          maxLevel: z.number().optional().describe('Limit to this classification level or lower (0-10)'),
+          since: z.string().optional().describe('Only include turns at or after this ISO timestamp'),
+          until: z.string().optional().describe('Only include turns at or before this ISO timestamp'),
+          history: z.array(z.object({
+            question: z.string(),
+            answer: z.string(),
+          })).optional().describe(
+            'Prior Q/A turns of this conversation, oldest first. Only the last 6 are used; each question ' +
+            'is truncated to 1000 characters and each answer to 1500 characters server-side.'
+          ),
+          knownSources: z.array(z.object({
+            sourceType: z.string(),
+            sourceId: z.string(),
+            sessionId: z.string(),
+            ref: z.number(),
+          })).optional().describe(
+            'The `sources` array returned by a previous ask_knowledge call in this conversation — pass it ' +
+            'back verbatim (extra fields are ignored) so citation numbers [n] stay stable across turns.'
+          ),
+        },
+        async ({ question, scope, projectId, kind, compartment, maxLevel, since, until, history, knownSources }) => {
+          const answerId = crypto.randomUUID();
+          const rateDecision = acquireAnswerSlot(answerGuardState, { userId, answerId, nowMs: Date.now() });
+          if (!rateDecision.ok) {
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({
+                error: rateDecision.reason,
+                ...(rateDecision.reason !== 'answerBusy' ? { retryAfterSec: rateDecision.retryAfterSec } : {}),
+              }) }],
+              isError: true,
+            };
+          }
+
+          try {
+            const language = await resolveUserLanguage(userId);
+            let doneResult: KnowledgeAnswerDoneResult | null = null;
+            let errorMessage: string | null = null;
+            const sink: AnswerSink = {
+              delta: () => {},
+              done: (result) => { doneResult = result; },
+              error: (message) => { errorMessage = message; },
+            };
+
+            await answerKnowledge(
+              { userId, answerId, question, language, scope, projectId, kind, compartment, maxLevel, since, until, history, knownSources },
+              sink
+            );
+
+            if (!doneResult) {
+              const message: string = errorMessage || 'Unknown error';
+              return {
+                content: [{ type: 'text' as const, text: JSON.stringify({
+                  error: message,
+                  ...(message === ANSWER_KEY_MISSING_MESSAGE ? { hint: 'DEVRELAY_ANSWER_API_KEY is not configured on the server.' } : {}),
+                }) }],
+                isError: true,
+              };
+            }
+
+            const result = doneResult as KnowledgeAnswerDoneResult;
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({
+                question,
+                answer: result.answer,
+                sources: result.sources.map((s) => ({
+                  ref: s.ref,
+                  sourceType: s.sourceType,
+                  sourceId: s.aiMessageId,
+                  sessionId: s.sessionId,
+                  aiMessageId: s.aiMessageId,
+                  title: s.title,
+                  projectId: s.projectId,
+                  projectName: s.projectName,
+                  ownerName: s.ownerName,
+                  isOwn: s.isOwn,
+                  occurredAt: s.occurredAt,
+                  level: s.level,
+                  compartment: s.compartment,
+                })),
+                usage: result.usage,
+                model: result.model,
+                audited: result.audited,
+                context: result.context,
+                hint: 'For the full text of a source, call get_knowledge_thread(sessionId). To continue this ' +
+                  'conversation, call ask_knowledge again with `history` set to this turn\'s {question, answer} ' +
+                  'appended to the previous history, and `knownSources` set to this response\'s `sources` array ' +
+                  '(pass it back verbatim) so citation numbers stay stable.',
+              }, null, 2) }],
+            };
+          } finally {
+            releaseAnswerSlot(answerGuardState, userId);
+          }
+        }
+      );
+    }
 
     /**
      * get_knowledge_thread — 高辻ナレッジ サイクル2: 他人のスレッドを可視判定つきで 1 件読む。

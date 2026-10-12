@@ -1,13 +1,17 @@
 /**
  * 高辻ナレッジ サイクル4: ナレッジ回答（RAG）のオーケストレーション。
+ * サイクル4.5: 会話として続けられるように拡張（D1〜D5）。`history`/`knownSources` が両方空のときは
+ * サイクル4 と完全に同じコードパス（検索→`loadKnowledgeTurnTexts`→`buildKnowledgeContext` を素通し）
+ * を通る。いずれか一方でもあれば「会話」として `mergeConversationSources`/`evictForBudget` を経由する
+ * （会話一意の根拠番号 `ref` を付け直す。D3）。
  *
  * `searchKnowledge`（既存。カード＝根拠）と同じクエリ・同じフィルタで検索した上位ターンの全文を
  * `loadKnowledgeTurnTexts` で取得し、OpenAI（`DEVRELAY_ANSWER_API_KEY` 専用鍵）にストリーミングで
- * 生成させる。可視判定・監査は `searchKnowledge` / `loadKnowledgeTurnTexts` に委譲する
- * （見えないものは AI にも渡らない。D2）。
+ * 生成させる。可視判定・監査は `searchKnowledge` / `loadKnowledgeTurnTexts` / `loadKnowledgeTurnDetails`
+ * に委譲する（見えないものは AI にも渡らない。D2）。
  */
 
-import { searchKnowledge, loadKnowledgeTurnTexts, type KnowledgeSearchResultItem } from './knowledge-service.js';
+import { searchKnowledge, loadKnowledgeTurnTexts, loadKnowledgeTurnDetails, type KnowledgeSearchResultItem } from './knowledge-service.js';
 import { decideAuditTargets } from './knowledge-access.js';
 import { recordSupervisionAudit } from './org-control.js';
 import { resolveChatProvider } from './chat-provider.js';
@@ -17,7 +21,16 @@ import {
   buildEmptyContextAnswer,
   sanitizeCitations,
   resolveAnswerKey,
+  normalizeHistory,
+  normalizeKnownSources,
+  buildConversationSearchQuery,
+  mergeConversationSources,
+  extractCitedRefs,
+  evictForBudget,
   type KnowledgeContextItem,
+  type AnswerHistoryTurn,
+  type KnownSourceRef,
+  type BudgetEntry,
 } from './knowledge-answer-rules.js';
 
 /** context 構築の予算（指示書 D2）。 */
@@ -44,15 +57,22 @@ export interface AnswerSink {
   error(message: string): void;
 }
 
-/** `sink.done` が受け取る 1 件の根拠ソース。 */
+/**
+ * `sink.done` が受け取る 1 件の根拠ソース。
+ * サイクル4.5: `ref`（会話一意の番号。会話でないときは `rank` と同値）/`projectId`/`isOwn` を追加。
+ * `rank` は既存クライアント（検索カードの `rank` フィールド）との互換のため同値のまま残す。
+ */
 export interface KnowledgeAnswerSource {
   rank: number;
+  ref: number;
   sourceType: string;
   sessionId: string;
   aiMessageId: string;
+  projectId: string;
   title: string | null;
   projectName: string;
   ownerName: string;
+  isOwn: boolean;
   occurredAt: string;
   level: number;
   compartment: string | null;
@@ -86,6 +106,17 @@ export interface AnswerKnowledgeParams {
   since?: string;
   until?: string;
   limit?: number;
+  /** サイクル4.5 D1/D4: 直近の会話（クライアント申告、未検証。本関数内で `normalizeHistory` する）。 */
+  history?: AnswerHistoryTurn[];
+  /** サイクル4.5 D3: 会話で既に番号を振った根拠（クライアント申告、未検証）。 */
+  knownSources?: KnownSourceRef[];
+  /** サイクル4.5 D2: 検索クエリ連結用の直前の質問（未指定なら `history` の末尾から取る）。 */
+  previousQuestion?: string;
+}
+
+/** 1 件の KnowledgeContextItem を AI context の文字数予算（粗い見積り）に変換する。 */
+function estimateItemChars(text: string): number {
+  return Math.min(text.length, ANSWER_CONTEXT_PER_ITEM_CHARS);
 }
 
 /**
@@ -106,9 +137,19 @@ export async function answerKnowledge(params: AnswerKnowledgeParams, sink: Answe
       return;
     }
 
-    // 検索クエリは質問文そのもの（ただし検索側の文字数上限 500 文字に合わせて切り詰める。
-    // AI へ渡す質問文自体は切り詰めない）。
-    const searchQuery = params.question.slice(0, SEARCH_QUERY_MAX_LENGTH);
+    // サイクル4.5 D4: history・knownSources はクライアント申告（未検証）のため、まず正規化する。
+    // 両方空なら「会話でない」＝サイクル4 と同一コードパスを通る（isConversation の分岐で判定）。
+    const history = normalizeHistory(params.history);
+    const knownSources = normalizeKnownSources(params.knownSources);
+    const isConversation = history.length > 0 || knownSources.length > 0;
+
+    // サイクル4.5 D2: 検索クエリは「直前の質問 ＋ 今回の質問」の連結（前の質問が無ければ質問文そのまま）。
+    // `previousQuestion` 未指定時は `history` の末尾（直前の往復）から取る。
+    const previousQuestionForSearch = params.previousQuestion ?? history[history.length - 1]?.question;
+    const searchQuery = buildConversationSearchQuery({
+      previousQuestion: previousQuestionForSearch,
+      question: params.question,
+    }).slice(0, SEARCH_QUERY_MAX_LENGTH);
 
     const searchResult = await searchKnowledge({
       userId: params.userId,
@@ -131,30 +172,116 @@ export async function answerKnowledge(params: AnswerKnowledgeParams, sink: Answe
     const topResults = searchResult.results.slice(0, ANSWER_MAX_TURNS);
     const resultByMessageId = new Map<string, KnowledgeSearchResultItem>(topResults.map((r) => [r.aiMessageId, r]));
 
-    const turnTexts = await loadKnowledgeTurnTexts(
-      params.userId,
-      topResults.map((r) => ({ sourceId: r.aiMessageId, sessionId: r.sessionId }))
-    );
+    let contextInputItems: KnowledgeContextItem[];
+    /** 会話でないときの `omitted`/`chars` はサイクル4 と同一の `buildKnowledgeContext` 呼び出し 1 回で決まる。
+     * 会話のときは `evictForBudget` で先に間引いた分も合算する。 */
+    let preEvictOmitted = 0;
 
-    const contextInputItems: KnowledgeContextItem[] = topResults
-      .map((r) => {
-        const text = turnTexts.get(r.aiMessageId);
-        if (text === undefined) return null;
-        return {
-          rank: r.rank,
-          sourceType: 'turn',
-          sessionId: r.sessionId,
-          aiMessageId: r.aiMessageId,
-          title: r.threadTitle,
-          projectName: r.projectName,
-          ownerName: r.ownerName,
-          occurredAt: r.occurredAt,
-          level: r.level,
-          compartment: r.compartment,
-          text,
-        };
-      })
-      .filter((item): item is KnowledgeContextItem => item !== null);
+    if (!isConversation) {
+      // サイクル4 と完全に同一のコードパス（ランク＝検索結果の `rank` をそのまま維持。欠番が出ても
+      // 詰め直さない＝カードの `rank` とこの後の引用番号が一致し続ける、既存のクリック挙動の前提）。
+      const turnTexts = await loadKnowledgeTurnTexts(
+        params.userId,
+        topResults.map((r) => ({ sourceId: r.aiMessageId, sessionId: r.sessionId }))
+      );
+
+      contextInputItems = topResults
+        .map((r) => {
+          const text = turnTexts.get(r.aiMessageId);
+          if (text === undefined) return null;
+          return {
+            rank: r.rank,
+            sourceType: 'turn',
+            sessionId: r.sessionId,
+            aiMessageId: r.aiMessageId,
+            projectId: r.projectId,
+            title: r.threadTitle,
+            projectName: r.projectName,
+            ownerUserId: r.ownerUserId,
+            ownerName: r.ownerName,
+            isOwn: r.isOwn,
+            occurredAt: r.occurredAt,
+            level: r.level,
+            compartment: r.compartment,
+            text,
+          } satisfies KnowledgeContextItem;
+        })
+        .filter((item): item is KnowledgeContextItem => item !== null);
+    } else {
+      // サイクル4.5: 会話。既知の根拠（knownSources）は全文・表示用メタデータを再取得・再可視判定し直す
+      // （D3: クライアント申告の title/level/compartment を信用せず、サーバーで再導出する）。
+      const [knownDetails, turnTexts] = await Promise.all([
+        loadKnowledgeTurnDetails(params.userId, knownSources.map((k) => ({ sourceId: k.sourceId, sessionId: k.sessionId }))),
+        loadKnowledgeTurnTexts(params.userId, topResults.map((r) => ({ sourceId: r.aiMessageId, sessionId: r.sessionId }))),
+      ]);
+
+      const visibleSourceIds = [...knownDetails.keys(), ...turnTexts.keys()];
+      const merged = mergeConversationSources({
+        known: knownSources,
+        newHits: topResults.map((r) => ({ sourceType: 'turn', sourceId: r.aiMessageId, sessionId: r.sessionId })),
+        visibleSourceIds,
+      });
+
+      const mergedItems: KnowledgeContextItem[] = merged.items
+        .map((m): KnowledgeContextItem | null => {
+          if (m.origin === 'known') {
+            const detail = knownDetails.get(m.sourceId);
+            if (!detail) return null;
+            return {
+              rank: m.ref,
+              sourceType: m.sourceType,
+              sessionId: detail.sessionId,
+              aiMessageId: detail.sourceId,
+              projectId: detail.projectId,
+              title: detail.title,
+              projectName: detail.projectName,
+              ownerUserId: detail.ownerUserId,
+              ownerName: detail.ownerName,
+              isOwn: detail.isOwn,
+              occurredAt: detail.occurredAt,
+              level: detail.level,
+              compartment: detail.compartment,
+              text: detail.text,
+            } satisfies KnowledgeContextItem;
+          }
+          const r = resultByMessageId.get(m.sourceId);
+          const text = turnTexts.get(m.sourceId);
+          if (!r || text === undefined) return null;
+          return {
+            rank: m.ref,
+            sourceType: m.sourceType,
+            sessionId: r.sessionId,
+            aiMessageId: r.aiMessageId,
+            projectId: r.projectId,
+            title: r.threadTitle,
+            projectName: r.projectName,
+            ownerUserId: r.ownerUserId,
+            ownerName: r.ownerName,
+            isOwn: r.isOwn,
+            occurredAt: r.occurredAt,
+            level: r.level,
+            compartment: r.compartment,
+            text,
+          } satisfies KnowledgeContextItem;
+        })
+        .filter((item): item is KnowledgeContextItem => item !== null);
+
+      // D3-b（ユーザー承認）: 「引用済みか」はクライアント申告に頼らず、正規化済み history の
+      // 回答本文に実際に出現する [n] からサーバー側で導出する。
+      const citedRefs = extractCitedRefs(history.map((h) => h.answer));
+      const originByRef = new Map(merged.items.map((m) => [m.ref, m.origin]));
+      const budgetEntries: BudgetEntry[] = mergedItems.map((item) => ({
+        ref: item.rank,
+        origin: originByRef.get(item.rank) ?? 'new',
+        chars: estimateItemChars(item.text),
+        cited: citedRefs.has(item.rank),
+      }));
+      const evictResult = evictForBudget(budgetEntries, ANSWER_CONTEXT_TOTAL_CHARS);
+      preEvictOmitted = evictResult.droppedRefs.length;
+
+      const keptRefs = new Set(evictResult.keptRefs);
+      contextInputItems = mergedItems.filter((item) => keptRefs.has(item.rank));
+    }
 
     const context = buildKnowledgeContext(contextInputItems, {
       perItemChars: ANSWER_CONTEXT_PER_ITEM_CHARS,
@@ -168,14 +295,19 @@ export async function answerKnowledge(params: AnswerKnowledgeParams, sink: Answe
         sources: [],
         model: keyResolution.model,
         provider: 'openai',
-        context: { items: 0, omitted: context.omitted, chars: 0 },
+        context: { items: 0, omitted: context.omitted + preEvictOmitted, chars: 0 },
         elapsedMs: Date.now() - startedAt,
         audited: false,
       });
       return;
     }
 
-    const prompt = buildKnowledgePrompt({ language: params.language, question: params.question, items: context.items });
+    const prompt = buildKnowledgePrompt({
+      language: params.language,
+      question: params.question,
+      items: context.items,
+      history,
+    });
     const chatProvider = await resolveChatProvider(params.userId, keyResolution.provider, keyResolution.apiKey, keyResolution.model);
 
     const controller = new AbortController();
@@ -187,7 +319,7 @@ export async function answerKnowledge(params: AnswerKnowledgeParams, sink: Answe
 
       const chatParams = {
         system: prompt.system,
-        messages: [{ role: 'user' as const, content: prompt.user }],
+        messages: prompt.messages,
         jsonMode: false,
         maxTokens: ANSWER_MAX_TOKENS,
         temperature: ANSWER_TEMPERATURE,
@@ -215,12 +347,15 @@ export async function answerKnowledge(params: AnswerKnowledgeParams, sink: Answe
         .filter((item) => sanitized.cited.includes(item.rank))
         .map((item) => ({
           rank: item.rank,
+          ref: item.rank,
           sourceType: item.sourceType,
           sessionId: item.sessionId,
           aiMessageId: item.aiMessageId,
+          projectId: item.projectId,
           title: item.title,
           projectName: item.projectName,
           ownerName: item.ownerName,
+          isOwn: item.isOwn,
           occurredAt: item.occurredAt,
           level: item.level,
           compartment: item.compartment,
@@ -229,10 +364,9 @@ export async function answerKnowledge(params: AnswerKnowledgeParams, sink: Answe
       // 高辻ナレッジ サイクル4 D8: context に他人のターンが含まれたら所有者ごとに 1 行監査する
       // （fire-and-forget。`search_knowledge` の監査とは別アクション 'summarize'）。`sink.done` を
       // 呼ぶ前に対象を確定させ、`audited` フラグを結果に含める（WebUI の監査記録バナー表示用）。
-      const otherOwnerIds = context.items
-        .map((item) => resultByMessageId.get(item.aiMessageId))
-        .filter((r): r is KnowledgeSearchResultItem => !!r && !r.isOwn)
-        .map((r) => r.ownerUserId);
+      // サイクル4.5: `item.ownerUserId`/`item.isOwn` は会話経路（既知の根拠含む）でも再導出済みのため、
+      // そのまま使う（`resultByMessageId` に無い既知の根拠でも監査対象を正しく拾える）。
+      const otherOwnerIds = context.items.filter((item) => !item.isOwn).map((item) => item.ownerUserId);
       const auditTargets = decideAuditTargets(params.userId, otherOwnerIds);
 
       sink.done({
@@ -242,7 +376,7 @@ export async function answerKnowledge(params: AnswerKnowledgeParams, sink: Answe
         model: keyResolution.model,
         provider: 'openai',
         usage,
-        context: { items: context.items.length, omitted: context.omitted, chars: context.chars },
+        context: { items: context.items.length, omitted: context.omitted + preEvictOmitted, chars: context.chars },
         elapsedMs: Date.now() - startedAt,
         audited: auditTargets.length > 0,
       });
