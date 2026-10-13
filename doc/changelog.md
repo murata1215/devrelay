@@ -6,6 +6,20 @@
 
 ## 実装済み機能
 
+### Linux 版 Agent の resume 失敗リトライで model が失われる不具合を修正 (2026-10-13)
+
+組織 AI デフォルト（`devin_model_plan`/`devin_model_exec` = `claude-opus-5.5`、上書き不可）が
+設定されたユーザーで、exec 直後のプランターンだけ「ℹ️ モデルが指定されていないため Devin の既定モデルで
+実行します」が表示され、実際に `swe-2-high`（Devin 既定）で実行された。
+
+- 調査: サーバーログでは当該ターンも `sendPromptToAgent model resolved: claude-opus-5.5 (aiTool=devin)`
+  で正しく送信済み。Agent の再接続・更新も無し。Devin の `-r` resume が出力ゼロで空振り
+  （`devinResumeEmpty`）→ `resumeFailed` → 汎用リトライの経路で、`agents/linux/src/services/connection.ts`
+  の `retryOptions` に `model` が無かった（Windows 版・macOS 版は継承済み、Linux 版のみ当初から欠落）
+- Windows の CLI 版 Agent も `scripts/install-agent.ps1` 経由で `agents/linux` を実行するため影響を受けていた
+- 修正: `retryOptions` に `model` / `isWCommand` / `disableAsk` を `sendOptions` から引き継ぐよう追加
+- 反映には対象機体の Agent 更新（`u` / 自動更新）が必要。サーバー側の変更なし
+
 ### 高辻ナレッジ サイクル4.5 — 追い質問（会話として続ける）＋ MCP `ask_knowledge` (2026-10-12)
 
 サイクル4（`f989d30`）の回答欄は「1 問 1 答」だった。本サイクルで答えに続けて聞けるようにし、

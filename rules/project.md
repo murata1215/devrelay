@@ -710,6 +710,7 @@ AI SDK/CLI モードで使うモデルを Plan/Exec 別に選択する仕組み�
 - **`execConversation()`（exec 実行）は DB の `Session.aiTool` を `server:conversation:exec` payload に含めて Agent に伝搬する**（#307）。Agent 側 `handleConversationExec()` はこれを `resolveEffectiveAiTool()`（#289 の未インストール時フォールバックを内包）経由で解決する。以前は Agent 再起動で `sessionInfoMap` が消えていると無条件 `'claude'` にフォールバックする潜在バグがあった（#306 の model 渡し漏れと同型）
 - **未ログインガイダンス**（#262）: claude 出力に「Not logged in · Please run /login」を検出したら、生エラーではなく「ログインするか `a` で別 AI に切替」を案内する（3 Agent の ai-runner.ts）
 - **Devin plan モードの resume フォールバック**（#263）: devin は plan モードで前回セッション ID を `-r` で resume するが、`-r` + `-p`/`--agent-config` の組み合わせで CLI が**エラーも出力も出さず exit 0 で空振り**することがある。close ハンドラで「resume 使用 + 出力ゼロ」を exit code 不問で検出 → `clearDevinSessionId` で ID 破棄 → `resumeFailed` を立てて汎用リトライへ委譲 → `-r` なしの新規セッションで再実行する（3 Agent の ai-runner.ts）。会話文脈はプロンプトの History context で毎回渡すため resume が切れても継続性は保たれる。exec モードは元々 resume しない（resume したセッションは元の権限モードを保持するため）
+  - **汎用リトライの `retryOptions` は `sendOptions` のターン単位指定（`model`/`isWCommand`/`disableAsk`/`language`/スコープ等）を必ず引き継ぐこと**（2026-10-13）: `agents/linux/src/services/connection.ts` の `retryOptions` だけ `model` が欠落しており、resume 空振り → リトライで `--model` 無しの Devin 既定モデル（`swe-2-high`）に落ち、組織 AI デフォルトが無視されて `devin.modelNotSpecified` 通知が出ていた（exec 直後のプランターンで実発生）。Windows の CLI 版 Agent も `scripts/install-agent.ps1` 経由で `agents/linux` を実行するため、Linux 版の漏れは Windows 機にも波及する点に注意。`sendOptions` にフィールドを足したら `retryOptions` も同時に更新する
 
 ---
 

@@ -1906,6 +1906,14 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         onToolApprovalRequest: sendOptions.onToolApprovalRequest,
         onAutoApproved: sendOptions.onAutoApproved,
         onPolicyDenied: sendOptions.onPolicyDenied,
+        // 2026-10-13: model / isWCommand / disableAsk も retry で引き継ぐ（Windows/macOS 版はパリティ済みで
+        // Linux 版のみ継承漏れ）。漏れていると Devin の resume 空振り（devinResumeEmpty）→ retry で
+        // --model が付かず、組織 AI デフォルト（例: claude-opus-5.5）を無視して Devin 既定モデル
+        // （swe-2 等）で走り「モデルが指定されていないため…」通知が出ていた。exec 直後のプランターンで実発生。
+        // ※ Windows 機も scripts/install-agent.ps1 経由でこの agents/linux を実行するため同じく影響を受ける。
+        model: sendOptions.model,
+        isWCommand: sendOptions.isWCommand,
+        disableAsk: sendOptions.disableAsk,
         // #316: チャット表示言語は retry でも引き継ぐ
         language: sendOptions.language,
         // #348: persistProjectState も retry で引き継ぐ
