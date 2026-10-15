@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+### macOS の install-agent.sh でトークンのサーバー URL 末尾が欠ける不具合を修正 (2026-10-16)
+
+macOS でトークン事前検証が「サーバーに接続できません」で中断（表示 URL が `.../ws/agen`）。
+
+- 原因: トークンは base64url の `=` パディングを除去して発行される（`packages/shared/src/token.ts`）が、
+  `install-agent.sh` はパディングを戻さず `base64 -D` に渡していた。macOS の base64 は不完全な末尾グループを
+  黙って捨てるため、URL 長が 3 の倍数でないと末尾 1〜2 文字が欠ける（GNU base64 は出力するので Linux では未発生。
+  `install-agent.ps1` は補完済み）
+- 修正: デコード前に `=` を補完し、結果が `ws://` / `wss://` で始まる場合のみ採用
+- 副次修正: `--server` を指定してもトークン由来 URL で上書きされていた（コメントと実装の不一致）→ `--server` 明示時は抽出をスキップ
+
 ### Linux 版 Agent の resume 失敗リトライで model が失われる不具合を修正 (2026-10-13)
 
 組織 AI デフォルト（`devin_model_plan`/`devin_model_exec` = `claude-opus-5.5`、上書き不可）が

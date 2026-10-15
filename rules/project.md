@@ -655,6 +655,9 @@ AI SDK/CLI モードで使うモデルを Plan/Exec 別に選択する仕組み�
 - macOS config: `~/.devrelay/config.yaml`（Linux と同じパス）
 - デフォルト projectsDirs: ホームディレクトリのみ（`/opt` は macOS で一般的でないため除外）
 - install-agent.sh: `uname -s` で OS 判定、macOS は `base64 -D`、`sed -i ''`、`darwin-arm64` Node.js URL
+- install-agent.sh のトークン URL デコード: トークンは `=` パディング除去済みの base64url。BSD `base64 -D` は
+  パディング無しの末尾グループを黙って捨てるため、**デコード前に必ず `=` を補完する**（ps1 と同じ）。
+  結果は `ws://` / `wss://` 始まりのみ採用。`--server` 明示時はトークンからの抽出を行わない（明示指定優先）
 - launchd restart: `launchctl kickstart -k gui/$(id -u)/io.devrelay.agent`
 - Apple Silicon Homebrew パス: `/opt/homebrew/bin` を PATH に含む
 

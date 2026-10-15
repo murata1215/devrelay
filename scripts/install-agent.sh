@@ -67,6 +67,7 @@ sed_inplace() {
 # --- 引数パース ---
 TOKEN=""
 SERVER_URL="wss://devrelay.io/ws/agent"
+SERVER_URL_EXPLICIT=false
 PROXY_URL=""
 FORCE=false
 
@@ -78,6 +79,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --server)
       SERVER_URL="$2"
+      SERVER_URL_EXPLICIT=true
       shift 2
       ;;
     --proxy)
@@ -93,7 +95,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --token   (必須) WebUI で生成したエージェントトークン"
-      echo "  --server  サーバーURL (デフォルト: wss://devrelay.io/ws/agent)"
+      echo "  --server  サーバーURL (指定時はトークン埋め込みURLより優先。未指定時はトークンから抽出、旧形式トークンは wss://devrelay.io/ws/agent)"
       echo "  --proxy   プロキシURL (例: http://proxy:8080, socks5://proxy:1080)"
       echo "  --force   トークン検証をスキップ（意図的なトークン再利用時に使用）"
       exit 0
@@ -119,19 +121,27 @@ fi
 # --- 新形式トークン（drl_）からサーバーURL自動抽出 ---
 # トークン形式: drl_<base64url エンコードされたサーバーURL>_<ランダム hex>
 # --server が明示指定されていない場合のみ、トークンからURLを抽出する
-if [[ "$TOKEN" == drl_* ]]; then
+if [ "$SERVER_URL_EXPLICIT" = false ] && [[ "$TOKEN" == drl_* ]]; then
   # drl_ プレフィックスを除去し、最後の _<hex> 部分を除去して base64url 部分を取得
   TOKEN_BODY="${TOKEN#drl_}"
   B64_PART="${TOKEN_BODY%_*}"
   if [ -n "$B64_PART" ]; then
-    # Base64URL → 標準 Base64 に変換（- → +, _ → /）してデコード
+    # Base64URL → 標準 Base64 に変換（- → +, _ → /）
+    STD_B64=$(echo "$B64_PART" | tr '_-' '/+')
+    # トークンは '=' パディングを除去して発行される（packages/shared/src/token.ts）。
+    # macOS の base64 -D はパディング無しの末尾グループを黙って捨てるため、URL 長が
+    # 3 の倍数でないと末尾 1〜2 文字が欠ける（例: .../ws/agent → .../ws/agen）。補完してからデコードする。
+    case $(( ${#STD_B64} % 4 )) in
+      2) STD_B64="${STD_B64}==" ;;
+      3) STD_B64="${STD_B64}=" ;;
+    esac
     # macOS は base64 -D、Linux は base64 -d
     if [ "$OS_TYPE" = "Darwin" ]; then
-      DECODED_URL=$(echo "$B64_PART" | tr '_-' '/+' | base64 -D 2>/dev/null || true)
+      DECODED_URL=$(echo "$STD_B64" | base64 -D 2>/dev/null || true)
     else
-      DECODED_URL=$(echo "$B64_PART" | tr '_-' '/+' | base64 -d 2>/dev/null || true)
+      DECODED_URL=$(echo "$STD_B64" | base64 -d 2>/dev/null || true)
     fi
-    if [ -n "$DECODED_URL" ]; then
+    if [[ "$DECODED_URL" == ws://* || "$DECODED_URL" == wss://* ]]; then
       SERVER_URL="$DECODED_URL"
     fi
   fi
