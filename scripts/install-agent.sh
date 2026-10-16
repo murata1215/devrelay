@@ -335,6 +335,36 @@ echo -e "${GREEN}✅ 依存ツール OK${NC}"
 echo ""
 
 # =============================================================================
+# プロキシのバイパス対象（noProxy）の決定
+# =============================================================================
+# config.yaml に proxy.url を書くと、AI CLI の外向き通信だけでなく **Server への
+# WebSocket 接続もプロキシ経由になる**（agents/*/src/services/connection.ts）。
+# 社内に Server を立てている場合、社内プロキシは社内アドレスへ到達できないのが通常なので、
+# プロキシを指定した途端に Agent が Server に接続できなくなる。
+# サーバーへ直結できるなら Server 宛だけバイパスする。
+# DEVRELAY_NO_PROXY で明示指定も可能（カンマ区切り。NO_PROXY 記法）。
+#
+# ※ トークン事前検証より **前** に行うこと（install-agent.ps1 と同順）。上で HTTPS_PROXY を
+#   export しているため、ここで NO_PROXY を立てないと検証の curl まで社内プロキシ経由になり、
+#   社内サーバーに届かず数分ハング → 「サーバーに接続できません」で中断する（macOS 実測）。
+NO_PROXY_LIST="${DEVRELAY_NO_PROXY:-}"
+if [ -n "$PROXY_URL" ] && [ -z "$NO_PROXY_LIST" ]; then
+  SERVER_HOST=$(echo "$SERVER_URL" | sed -E 's|^[a-zA-Z0-9+.-]+://||; s|/.*$||; s|^.*@||; s|:[0-9]+$||')
+  HEALTH_PROBE_URL="$(echo "$SERVER_URL" | sed -E 's|^wss://|https://|; s|^ws://|http://|; s|/ws/agent$||')/health"
+  if [ -n "$SERVER_HOST" ] && curl -fsS --noproxy '*' --connect-timeout 5 --max-time 10 -o /dev/null "$HEALTH_PROBE_URL" 2>/dev/null; then
+    NO_PROXY_LIST="$SERVER_HOST"
+    echo -e "  ${GREEN}✅ サーバーに直結できるため $SERVER_HOST はプロキシをバイパスします${NC}"
+  else
+    echo -e "${YELLOW}  ⚠️ サーバーへ直結できないため、サーバー宛もプロキシ経由にします${NC}"
+  fi
+fi
+# 以降の curl / git / pnpm でも Server 宛は直結させる
+if [ -n "$NO_PROXY_LIST" ]; then
+  export NO_PROXY="$NO_PROXY_LIST"
+  export no_proxy="$NO_PROXY_LIST"
+fi
+
+# =============================================================================
 # トークン事前検証
 # =============================================================================
 # サーバーに問い合わせて、トークンが別のマシンに割り当て済みでないか確認する
@@ -345,13 +375,26 @@ if [ "$FORCE" = false ]; then
 
   echo -e "🔍 トークンを検証中..."
 
-  VALIDATE_RESPONSE=$(curl -s -f -X POST "${API_BASE_URL}/api/public/validate-token" \
+  # タイムアウト必須: 届かない経路（例: 社内プロキシ経由の社内ホスト）で数分ハングさせない
+  VALIDATE_STATUS=0
+  VALIDATE_RESPONSE=$(curl -s -f --connect-timeout 10 --max-time 30 -X POST "${API_BASE_URL}/api/public/validate-token" \
     -H "Content-Type: application/json" \
-    -d "{\"token\": \"$TOKEN\"}" 2>/dev/null) || {
+    -d "{\"token\": \"$TOKEN\"}" 2>/dev/null) || VALIDATE_STATUS=$?
+  if [ "$VALIDATE_STATUS" -ne 0 ]; then
     # サーバーに接続できない場合はインストールを中断
     echo -e "${RED}❌ エラー: サーバーに接続できません${NC}"
     echo -e ""
     echo -e "   サーバー: ${YELLOW}${API_BASE_URL}${NC}"
+    case "$VALIDATE_STATUS" in
+      22) echo -e "   詳細: サーバーがエラー応答を返しました（curl exit 22 = HTTP 4xx/5xx）" ;;
+      28) echo -e "   詳細: タイムアウトしました（curl exit 28）" ;;
+      *)  echo -e "   詳細: curl exit ${VALIDATE_STATUS}" ;;
+    esac
+    if [ -n "$NO_PROXY_LIST" ]; then
+      echo -e "   経路: 直結（noProxy: ${NO_PROXY_LIST}）"
+    elif [ -n "$PROXY_URL" ]; then
+      echo -e "   経路: プロキシ経由"
+    fi
     if [ -n "$PROXY_URL" ]; then
       echo -e "   プロキシ: ${YELLOW}${PROXY_URL}${NC}"
       echo -e ""
@@ -360,7 +403,7 @@ if [ "$FORCE" = false ]; then
     echo -e ""
     echo -e "   強制インストールする場合は ${GREEN}--force${NC} オプションを使用してください。"
     exit 1
-  }
+  fi
 
   if [ -n "$VALIDATE_RESPONSE" ]; then
     # レスポンスを解析（jq が無い環境でも動作するよう grep + cut で処理）
@@ -474,25 +517,6 @@ if [ "$OS_TYPE" = "Darwin" ]; then
   PROJECTS_DIRS_YAML="  - $HOME"
 else
   PROJECTS_DIRS_YAML="  - $HOME\n  - /opt"
-fi
-
-# --- プロキシのバイパス対象（noProxy）の決定 ---
-# config.yaml に proxy.url を書くと、AI CLI の外向き通信だけでなく **Server への
-# WebSocket 接続もプロキシ経由になる**（agents/*/src/services/connection.ts）。
-# 社内に Server を立てている場合、社内プロキシは社内アドレスへ到達できないのが通常なので、
-# プロキシを指定した途端に Agent が Server に接続できなくなる。
-# サーバーへ直結できるなら Server 宛だけバイパスする。
-# DEVRELAY_NO_PROXY で明示指定も可能（カンマ区切り。NO_PROXY 記法）。
-NO_PROXY_LIST="${DEVRELAY_NO_PROXY:-}"
-if [ -n "$PROXY_URL" ] && [ -z "$NO_PROXY_LIST" ]; then
-  SERVER_HOST=$(echo "$SERVER_URL" | sed -E 's|^[a-zA-Z0-9+.-]+://||; s|/.*$||; s|^.*@||; s|:[0-9]+$||')
-  HEALTH_PROBE_URL="$(echo "$SERVER_URL" | sed -E 's|^wss://|https://|; s|^ws://|http://|; s|/ws/agent$||')/health"
-  if [ -n "$SERVER_HOST" ] && curl -fsS --noproxy '*' --max-time 10 -o /dev/null "$HEALTH_PROBE_URL" 2>/dev/null; then
-    NO_PROXY_LIST="$SERVER_HOST"
-    echo -e "  ${GREEN}✅ サーバーに直結できるため $SERVER_HOST はプロキシをバイパスします${NC}"
-  else
-    echo -e "${YELLOW}  ⚠️ サーバーへ直結できないため、サーバー宛もプロキシ経由にします${NC}"
-  fi
 fi
 
 # config.yaml の proxy セクションを組み立てる（noProxy は YAML 配列で出力）
@@ -633,6 +657,12 @@ if [ -n "$PROXY_URL" ]; then
 Environment=HTTPS_PROXY=${PROXY_URL}
 Environment=http_proxy=${PROXY_URL}
 Environment=https_proxy=${PROXY_URL}"
+  # Server 宛の直結指定（noProxy）も子プロセス・Agent 内 HTTP に引き継ぐ
+  if [ -n "$NO_PROXY_LIST" ]; then
+    SYSTEMD_PROXY_LINES="${SYSTEMD_PROXY_LINES}
+Environment=NO_PROXY=${NO_PROXY_LIST}
+Environment=no_proxy=${NO_PROXY_LIST}"
+  fi
 fi
 
 if [ "$OS_TYPE" = "Darwin" ]; then
@@ -660,6 +690,13 @@ if [ "$OS_TYPE" = "Darwin" ]; then
     <string>${PROXY_URL}</string>
     <key>https_proxy</key>
     <string>${PROXY_URL}</string>"
+    if [ -n "$NO_PROXY_LIST" ]; then
+      PLIST_PROXY_ENTRIES="${PLIST_PROXY_ENTRIES}
+    <key>NO_PROXY</key>
+    <string>${NO_PROXY_LIST}</string>
+    <key>no_proxy</key>
+    <string>${NO_PROXY_LIST}</string>"
+    fi
   fi
 
   cat > "$PLIST_FILE" << PLIST_EOF
@@ -791,6 +828,9 @@ EOF
       CRONTAB_ENV="PATH=${SERVICE_PATH}"
       if [ -n "$PROXY_URL" ]; then
         CRONTAB_ENV="${CRONTAB_ENV} HTTP_PROXY=${PROXY_URL} HTTPS_PROXY=${PROXY_URL} http_proxy=${PROXY_URL} https_proxy=${PROXY_URL}"
+        if [ -n "$NO_PROXY_LIST" ]; then
+          CRONTAB_ENV="${CRONTAB_ENV} NO_PROXY=${NO_PROXY_LIST} no_proxy=${NO_PROXY_LIST}"
+        fi
       fi
       CRONTAB_CMD="@reboot export ${CRONTAB_ENV}; cd $AGENT_DIR/$AGENT_SUBDIR && $NODE_ABS_PATH $AGENT_ENTRY > $CONFIG_DIR/logs/agent.log 2>&1"
       # 既存の devrelay エントリを除去してから新しいエントリを追加（重複防止）

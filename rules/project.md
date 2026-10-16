@@ -658,6 +658,9 @@ AI SDK/CLI モードで使うモデルを Plan/Exec 別に選択する仕組み�
 - install-agent.sh のトークン URL デコード: トークンは `=` パディング除去済みの base64url。BSD `base64 -D` は
   パディング無しの末尾グループを黙って捨てるため、**デコード前に必ず `=` を補完する**（ps1 と同じ）。
   結果は `ws://` / `wss://` 始まりのみ採用。`--server` 明示時はトークンからの抽出を行わない（明示指定優先）
+- install-agent.sh / .ps1 共通: noProxy（Server 直結可否）の判定は **トークン事前検証より前** に行う。
+  `.sh` は `HTTPS_PROXY` を export するため、判定後に `NO_PROXY`/`no_proxy` も export しないと
+  社内 Server 宛の検証が社内プロキシ経由になり到達しない。Server 宛 curl には必ずタイムアウトを付ける
 - launchd restart: `launchctl kickstart -k gui/$(id -u)/io.devrelay.agent`
 - Apple Silicon Homebrew パス: `/opt/homebrew/bin` を PATH に含む
 

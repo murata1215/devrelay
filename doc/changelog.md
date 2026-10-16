@@ -6,6 +6,20 @@
 
 ## 実装済み機能
 
+### install-agent.sh: プロキシ指定時に社内サーバー宛のトークン検証がハングする不具合を修正 (2026-10-16)
+
+macOS（社内プロキシ `y` 指定）で「🔍 トークンを検証中...」が数分止まり「サーバーに接続できません」。
+実測: 直結 200 / 社内プロキシ経由 timeout。
+
+- 原因: プロキシ指定時は `HTTPS_PROXY` を export するため、トークン検証の curl も社内プロキシ経由になり
+  社内ホストに届かない。「サーバーへ直結できれば Server 宛はバイパス」する noProxy 判定（d13ae95）は
+  `.sh` では **トークン検証の後**（Step 4）に置かれていた（`.ps1` は検証前、かつ `Invoke-RestMethod` が
+  `HTTPS_PROXY` を見ないため Windows では発生しなかった）。検証 curl にタイムアウトも無かった
+- 修正: noProxy 判定をトークン検証の前へ移動し、決まったら `NO_PROXY`/`no_proxy` を export。
+  検証 curl に `--connect-timeout 10 --max-time 30`、直結プローブに `--connect-timeout 5`。
+  失敗時は curl 終了コード（22=HTTP エラー / 28=タイムアウト）と経路（直結/プロキシ）を表示
+- launchd plist / systemd unit / crontab の環境変数にも `NO_PROXY`/`no_proxy` を併記
+
 ### macOS の install-agent.sh でトークンのサーバー URL 末尾が欠ける不具合を修正 (2026-10-16)
 
 macOS でトークン事前検証が「サーバーに接続できません」で中断（表示 URL が `.../ws/agen`）。
