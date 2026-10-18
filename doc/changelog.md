@@ -6,6 +6,53 @@
 
 ## 実装済み機能
 
+### testflight ポート採番の衝突根治: 9001-9299 / 9300-9499 レンジ分離 (2026-10-18)
+
+`testflight` コマンドが払い出したポート 9027 が、手動作成済みの Caddy サイト
+（`gentei-janken-viewer`、DB に行の無いサービス）と衝突。ユーザーが手動で 9029 に退避したが、
+DB の `TestflightService.port` 行は 9027 のまま残り、次の自動採番で別の手動サイト
+（`shousuu-ketsu-viewer`、9028）と再衝突する時限爆弾になっていた。
+
+#### 原因
+`testflight-manager.ts` の旧 `getNextPort()` は `TestflightService` テーブルの `max(port)+1`
+のみを見て採番しており、Caddy 設定（`/etc/caddy/sites.d`）も実 LISTEN 状態も確認していなかった。
+手動作成サイトは DB に行が無いため、原理的に衝突し得る設計だった。
+
+#### 実機調査で確定した事実
+- 9001-9029: testflight DB 行 27 件 + 手動サイト 2 件（9027・9028）が混在
+- 9100-9999: `ss -Hltne` で LISTEN ゼロ、Caddy Admin API 上の設定もゼロ（完全に空き）
+
+#### 設計判断
+「DB + Caddy + `ss` を全部見て賢く判定する」方向は採らず、**採番専用レンジを手動プロジェクト用
+レンジから分離**する方針にした（実機で 9100-9999 が完全に空いていたため成立）。保険として
+`net.createServer().listen(port, '0.0.0.0')` による実 bind 確認のみ最終ゲートに残した。
+既存 27 サービス（9001-9029 稼働中）は移設しない。詳細は `rules/project.md` 末尾。
+
+#### 修正内容
+- `apps/server/src/services/testflight-manager.ts`: 自動採番レンジを `9300-9499` に変更。
+  旧 `getNextPort()` を削除し、純粋関数 `pickTestflightPort()` / `resolvePortRangeStart()` と
+  I/O 関数 `probeBindable()` / `allocateTestflightPort()`（export）に分割
+- `createTestflightService` / `copyTestflightService` の両方に、DB 行が無いのに Caddy 設定が
+  既に存在する名前では作成を中止するガードを追加（手動サイトの上書き防止）
+- 新規環境変数 `DEVRELAY_TESTFLIGHT_PORT_START`（既定 `9300`、clamp 9001〜9900）
+- `schema.prisma` の `TestflightService.port` コメント更新（マイグレーション不要）
+- `testflight help` に「ポート自動採番」節を追加
+- DB: `uso8m` 行の port を 9027 → 9029 に修正（`.env`/`CLAUDE.md` は既に 9029 に更新済みの
+  ドリフトを解消）
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `apps/server/src/services/testflight-manager.ts` | ポートレンジ分離・手動サイト衝突ガード |
+| `apps/server/src/services/command-handler.ts` | `testflight help` に採番レンジの説明追加 |
+| `apps/server/prisma/schema.prisma` | `port` カラムのコメント更新のみ |
+| `apps/server/tests/testflight-port-range.test.mjs` | 新規（9件） |
+
+#### テスト
+`apps/server` 1202/1202（新規9）green。副作用なしの実機 smoke: `allocateTestflightPort()` が
+9300 を返すことを確認。Agent 側変更ゼロ、DB マイグレーション不要（uso8m 1行の UPDATE のみ）。
+
 ### 会話履歴レール: 右レール第3タブ「会話」（直近20スレッド横断・実行中/未確認表示・クリック遷移） (2026-10-18)
 
 ユーザー要望: 右上 `Servers`/`Agents` タブの隣に会話履歴を作りたい。直近20スレッドを羅列し、

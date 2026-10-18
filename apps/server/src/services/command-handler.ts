@@ -2022,6 +2022,10 @@ Vite + Phaser 3 + TypeScript のゲーム開発環境を自動構築します。
 - 3〜30文字
 - 予約語不可: devrelay, app, api, www, admin, test, staging, prod
 
+**ポート自動採番**
+- 新規サービスのポートは自動採番レンジ 9300-9499 から割り当てられます
+- 手動で Caddy サイトを作る場合は 9001-9299 側から選んでください（衝突防止）
+
 **例**
 \`testflight mygame --phaser\` → https://mygame.devrelay.io に Nim 対戦ゲーム
 \`testflight mysite\` → https://mysite.devrelay.io にプレースホルダー

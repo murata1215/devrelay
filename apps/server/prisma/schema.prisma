@@ -439,7 +439,7 @@ model TestflightService {
   userId      String
   user        User      @relation(fields: [userId], references: [id])
   name        String    @unique  // サービス名（英小文字+数字+ハイフン）
-  port        Int       @unique  // 割り当てポート（9001+）
+  port        Int       @unique  // 割り当てポート。新規は自動採番レンジ 9300-9499（旧採番の既存サービスは 9001-9029）
   domain      String    @unique  // <name>.devrelay.io
   directory   String              // /home/devrelay/testflight/<name>
   status      String    @default("placeholder") // placeholder | active | archived

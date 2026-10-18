@@ -56,6 +56,17 @@ pm2 restart devrelay-server
 5. `pnpm build` でビルド
 6. 再起動案内時に「DB マイグレーション適用済み」を明記する
 
+## ポート割り当て規約（90xx 番台）
+
+`/etc/caddy/sites.d` 配下のサイトが使う 9000 番台ポートは、手動作成と `testflight` 自動作成が混在するため、衝突を避けるためレンジを分離している（2026-10-18 `testflight` が手動作成サイトと同じポート 9027 を払い出した衝突事故の根治）。
+
+| レンジ | 用途 |
+|---|---|
+| 9001-9299 | 手動作成プロジェクト・`testflight` 旧採番の既存サービス（現在 9001-9029 使用中） |
+| 9300-9499 | `testflight` の自動採番専用（`DEVRELAY_TESTFLIGHT_PORT_START` で開始位置変更可、既定 9300） |
+
+**新規に手動で Caddy サイトを作る場合は 9001-9299 側からポートを選ぶこと。** `testflight` コマンドは常に 9300-9499 からのみ採番するため、この規約を守れば両者は交わらない。
+
 ## 環境変数（apps/server/.env）
 
 | 変数 | 説明 |
@@ -72,6 +83,7 @@ pm2 restart devrelay-server
 | DEVRELAY_SITES_HEALTH | DevRelay Sites（`/sites`、管理者限定）の公開サイトヘルスチェック定期実行を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。`/api/sites` 自体は無効時も 200 を返し health は unknown になる） |
 | DEVRELAY_SITES_ACCESS_LOG | DevRelay Sites のアクセスログ集計（PV/UU/Referer/UTM）定期実行を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。stats は null に縮退） |
 | DEVRELAY_TESTFLIGHT | testflight コマンド（`sudo`/`pm2`/`systemctl reload caddy`/`/etc/caddy/sites.d` 前提）を有効にするか（既定 `1`。`0` で無効化するキルスイッチ。社内オンプレ等 Linux+sudo+Caddy が無い環境では `0` を推奨） |
+| DEVRELAY_TESTFLIGHT_PORT_START | testflight 自動採番レンジの開始ポート（既定 `9300`、clamp 9001〜9900）。2026-10-18 の 9027 衝突事故後、新規採番は 9001-9299（手動プロジェクト・旧採番サービス用）と重ならない 9300-9499 に分離した。上限は 9499 固定 |
 | DEVRELAY_MCP_ASK | MCP の `ask_project` / `get_answer` ツールを登録するか（既定 `1`。`0` で登録自体をやめるキルスイッチ。`cancel_submission` と既存 8 ツールには影響しない） |
 | DEVRELAY_MCP_ANSWER_RAW | MCP `get_answer.answer` / `get_plan.planMarkdown`・`summary` から進捗表示行（📊 Rate Limit / 🔧 …を使用中... 等）を除去するかの逆キルスイッチ（既定 `0` = 除去する。`1` で従来どおり原文を返す）。`get_build_status.tail` 等の進捗確認用フィールドには影響しない |
 | DEVRELAY_PROGRESS_CANCEL_HINT | Discord/Telegram の進捗ボックス（実行中... N分経過）に「`k` で停止できます」の案内行（60秒経過後）を出すか（既定 `1`。`0` で無効化するキルスイッチ。WebUI は進捗表示に停止ボタンがあるため対象外） |

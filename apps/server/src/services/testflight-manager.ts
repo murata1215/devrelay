@@ -6,6 +6,7 @@
  */
 
 import { exec } from 'child_process';
+import { createServer } from 'net';
 import { promisify } from 'util';
 import { mkdir, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -24,8 +25,18 @@ const execAsync = promisify(exec);
 
 /** テストフライトの基本ディレクトリ */
 const TESTFLIGHT_BASE_DIR = '/home/devrelay/testflight';
-/** テストフライト用ポートの開始番号 */
-const TESTFLIGHT_PORT_START = 9001;
+/**
+ * テストフライト自動採番の既定開始ポート。
+ * 9001-9299 は手動作成プロジェクト・旧採番の既存 testflight サービス（9001-9029）に明け渡し、
+ * 9300-9499 を testflight の自動採番専用レンジにする（2026-10-18 9027 衝突事故の根治）。
+ * `DEVRELAY_TESTFLIGHT_PORT_START` で上書き可能。
+ */
+const TESTFLIGHT_PORT_DEFAULT_START = 9300;
+/** 自動採番レンジの上限（超えたら作成を中止してエラーを返す） */
+const TESTFLIGHT_PORT_RANGE_MAX = 9499;
+/** `DEVRELAY_TESTFLIGHT_PORT_START` の受理範囲（9001 未満・9900 超は clamp） */
+const TESTFLIGHT_PORT_START_MIN = 9001;
+const TESTFLIGHT_PORT_START_MAX = 9900;
 /** Caddy のサイト設定ディレクトリ */
 const CADDY_SITES_DIR = '/etc/caddy/sites.d';
 /** ドメインサフィックス */
@@ -62,14 +73,77 @@ function validateServiceName(name: string): string | null {
 }
 
 /**
- * 次に利用可能なポート番号を取得
+ * `DEVRELAY_TESTFLIGHT_PORT_START` 環境変数を解釈する（純粋関数）。
+ * 未設定・非数値・範囲外（9001〜9900 の外）のときは既定値 9300 に clamp する。
  */
-async function getNextPort(): Promise<number> {
-  const latest = await prisma.testflightService.findFirst({
-    orderBy: { port: 'desc' },
-    select: { port: true },
+export function resolvePortRangeStart(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return TESTFLIGHT_PORT_DEFAULT_START;
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return TESTFLIGHT_PORT_DEFAULT_START;
+  if (n < TESTFLIGHT_PORT_START_MIN || n > TESTFLIGHT_PORT_START_MAX) return TESTFLIGHT_PORT_DEFAULT_START;
+  return n;
+}
+
+/**
+ * 既存ポート一覧（status 不問・レンジ内外混在）から、自動採番レンジ内の次の空きポートを決める（純粋関数）。
+ * レンジ外（9001-9029 等、手動プロジェクト・旧採番サービス）の既存ポートは無視する。
+ * 欠番があっても再利用しない（単調増加。pm2 残骸やブラウザキャッシュとの紛れを避ける）。
+ * @returns 空きポート。レンジが埋まっている場合は null
+ */
+export function pickTestflightPort(
+  existingPorts: number[],
+  start: number = TESTFLIGHT_PORT_DEFAULT_START,
+  max: number = TESTFLIGHT_PORT_RANGE_MAX
+): number | null {
+  const inRangeMax = existingPorts
+    .filter((p) => p >= start && p <= max)
+    .reduce((acc, p) => Math.max(acc, p), start - 1);
+  const next = inRangeMax + 1;
+  return next <= max ? next : null;
+}
+
+/**
+ * 指定ポートが実際に bind 可能か実測する（`0.0.0.0` への bind なので `127.0.0.1:port` 占有でも弾ける）。
+ * レンジ分離が将来破られた場合の保険。失敗時は使用中とみなす（安全側に倒す）。
+ */
+function probeBindable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once('error', () => resolve(false));
+    server.listen(port, '0.0.0.0', () => {
+      server.close(() => resolve(true));
+    });
   });
-  return latest ? latest.port + 1 : TESTFLIGHT_PORT_START;
+}
+
+/**
+ * 次に利用可能なポート番号を自動採番レンジ（既定 9300-9499）から取得する。
+ * DB の全ステータス（archived 含む。`port` は @unique のため再利用不可）のポートを参照し、
+ * レンジ内の最大値 + 1 から実 bind を確認しつつ前進する。
+ */
+export async function allocateTestflightPort(): Promise<number> {
+  const start = resolvePortRangeStart(process.env.DEVRELAY_TESTFLIGHT_PORT_START);
+  const rows = await prisma.testflightService.findMany({ select: { port: true } });
+  const existingPorts = rows.map((r) => r.port);
+
+  let candidate = pickTestflightPort(existingPorts, start, TESTFLIGHT_PORT_RANGE_MAX);
+  const MAX_PROBE_ATTEMPTS = 20;
+  for (let i = 0; i < MAX_PROBE_ATTEMPTS; i++) {
+    if (candidate === null) {
+      throw new Error(
+        `自動採番レンジ（${start}-${TESTFLIGHT_PORT_RANGE_MAX}）に空きがありません。\`testflight list\` を確認してください。`
+      );
+    }
+    // eslint-disable-next-line no-await-in-loop
+    if (await probeBindable(candidate)) {
+      return candidate;
+    }
+    existingPorts.push(candidate);
+    candidate = pickTestflightPort(existingPorts, start, TESTFLIGHT_PORT_RANGE_MAX);
+  }
+  throw new Error(
+    `自動採番レンジ（${start}-${TESTFLIGHT_PORT_RANGE_MAX}）に空きが見つかりません。\`testflight list\` を確認してください。`
+  );
 }
 
 /**
@@ -269,8 +343,14 @@ export async function createTestflightService(userId: string, name: string, temp
     }
   }
 
+  // 2.5. 手動作成サイトとの衝突チェック（DB 行は無いが Caddy 設定が既に存在する場合は上書きしない）
+  if (existsSync(join(CADDY_SITES_DIR, `${name}.${DOMAIN_SUFFIX}`))) {
+    console.log(`🛫 testflight [${name}]: caddy config already exists without DB row, aborting`);
+    return `⚠️ \`${name}.${DOMAIN_SUFFIX}\` は手動作成済みの Caddy 設定と衝突するため作成できません。別の名前を使用してください。`;
+  }
+
   // 3. ポート採番
-  const port = await getNextPort();
+  const port = await allocateTestflightPort();
   const domain = `${name}.${DOMAIN_SUFFIX}`;
   const directory = join(TESTFLIGHT_BASE_DIR, name);
   const dbPassword = generatePassword();
@@ -601,8 +681,14 @@ export async function copyTestflightService(userId: string, srcName: string, des
     return `⚠️ \`${destName}\` は既に存在します。\n🌐 https://${destName}.${DOMAIN_SUFFIX}`;
   }
 
+  // 3.5. 手動作成サイトとの衝突チェック（DB 行は無いが Caddy 設定が既に存在する場合は上書きしない）
+  if (existsSync(join(CADDY_SITES_DIR, `${destName}.${DOMAIN_SUFFIX}`))) {
+    console.log(`📋 testflight cp [${destName}]: caddy config already exists without DB row, aborting`);
+    return `⚠️ \`${destName}.${DOMAIN_SUFFIX}\` は手動作成済みの Caddy 設定と衝突するため作成できません。別の名前を使用してください。`;
+  }
+
   // 4. ポート採番
-  const port = await getNextPort();
+  const port = await allocateTestflightPort();
   const domain = `${destName}.${DOMAIN_SUFFIX}`;
   const destDir = join(TESTFLIGHT_BASE_DIR, destName);
   const dbPassword = generatePassword();
