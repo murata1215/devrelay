@@ -25,6 +25,7 @@ WebUI（classic ChatPage）で `testflight uso8m` を実行すると完了メッ
   （`messageId` を使う仕組みが既に両方の型にある）
 - キルスイッチ `DEVRELAY_WEB_COMMAND_PERSIST`（既定 `1`）
 - DB スキーマ変更なし（マイグレーション不要）。テスト server 1151/1151（新規19）・web 819/819 green
+- commit `59a55a4` push 済み（main 直接）。`apps/server` 変更のため pm2 restart 要（未実施）
 
 ### install-agent.sh: プロキシ指定時に社内サーバー宛のトークン検証がハングする不具合を修正 (2026-10-16)
 
