@@ -7,8 +7,7 @@ import websocket from '@fastify/websocket';
 import { setupAgentWebSocket, startHeartbeatMonitor, stopHeartbeatMonitor } from './services/agent-manager.js';
 import { setupWebClientWebSocket } from './platforms/web.js';
 import { restoreSessionParticipants } from './services/session-manager.js';
-import { setupDiscordBot } from './platforms/discord.js';
-import { setupTelegramBot } from './platforms/telegram.js';
+import { startBotSupervisors, stopBotSupervisors, getBotsHealth } from './services/bot-supervisor.js';
 import { prisma } from './db/client.js';
 import { authRoutes } from './routes/auth.js';
 import { apiRoutes } from './routes/api.js';
@@ -17,7 +16,6 @@ import { publicApiRoutes } from './routes/public-api.js';
 import { registerDocumentApiRoutes } from './routes/document-api.js';
 import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
 import { registerRawCompletionRoutes } from './routes/raw-completion-api.js';
-import { decrypt } from './services/user-settings.js';
 import { initVapid } from './services/push-notification-service.js';
 import { initFcm } from './services/fcm-service.js';
 import { startAutoUpdateSweep } from './services/auto-updater.js';
@@ -32,6 +30,35 @@ import { initProxyDispatcher } from './services/proxy-dispatcher.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
+
+/**
+ * `app.listen()` より前に行う初期化処理（DB メンテナンス・セッション復元・FCM 初期化）を、
+ * `ms` 以内に終わらなければ諦めて続行する形で実行する。
+ *
+ * 2026-10-18 の起動ハング障害（Discord/Telegram bot の起動を listen より前で await していた）
+ * の修正として bot 起動は listen より後ろへ移したが、`app.listen()` より前に残る DB アクセス
+ * （全マシン offline 化・stale セッション掃除・`restoreSessionParticipants()`・`initFcm()`）も
+ * 同じ理由（マシン再起動直後に PostgreSQL がまだ上がっていない等）でハング／クラッシュループの
+ * 引き金になりうる。`main().catch()` を足すだけでは「bot で止まる」が「DB で止まる」に
+ * 原因が移るだけなので、listen 前のすべての処理を非致命・時間制限付きにする。
+ * 詳細: `doc/server_listen_hang_20261018.md`。
+ */
+async function runStartupInitWithTimeout(name: string, fn: () => Promise<void>, ms = 20_000): Promise<void> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      fn(),
+      new Promise<void>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms);
+        timer.unref();
+      }),
+    ]);
+  } catch (err) {
+    console.error(`⚠️  起動前処理「${name}」に失敗しました（続行します）:`, err);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * 期限切れ AuthSession を定期削除するクリーンアップを開始する。
@@ -74,15 +101,18 @@ async function main() {
   // trustProxy: Caddy 経由の X-Forwarded-For を信頼し request.ip を実クライアント IP にする（#285 IP 制限用）
   const app = Fastify({ logger: true, trustProxy: true });
 
-  // Reset all machines to offline on startup
-  // (In case server crashed without proper disconnect handling)
-  await prisma.machine.updateMany({
-    where: { deletedAt: null },
-    data: { status: 'offline' }
-  });
+  // 起動前の DB メンテナンス（全マシン offline 化・stale セッション掃除）。
+  // マシン再起動直後に PostgreSQL がまだ上がっていないケースに備え、非致命・20s 上限で実行する
+  // （失敗してもログを出すだけで listen には進む。runStartupInitWithTimeout の JSDoc 参照）。
+  await runStartupInitWithTimeout('DB メンテナンス', async () => {
+    // Reset all machines to offline on startup
+    // (In case server crashed without proper disconnect handling)
+    await prisma.machine.updateMany({
+      where: { deletedAt: null },
+      data: { status: 'offline' }
+    });
 
-  // Stale セッションクリーンアップ（24時間以上活動がない active セッション → ended）
-  {
+    // Stale セッションクリーンアップ（24時間以上活動がない active セッション → ended）
     const staleThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const staleSessions = await prisma.$queryRaw<Array<{ id: string }>>`
       SELECT s.id FROM "Session" s
@@ -127,17 +157,18 @@ async function main() {
     if (approvalResult.count > 0) {
       console.log(`🧹 Timed out ${approvalResult.count} pending tool approval(s)`);
     }
-  }
+  });
 
   // Restore session participants from ChannelSession
   // (So users can continue conversations after server restart)
-  await restoreSessionParticipants();
+  await runStartupInitWithTimeout('セッション復元', () => restoreSessionParticipants());
 
   // Web Push 通知の VAPID キー初期化
   initVapid();
 
-  // FCM（Firebase Cloud Messaging）初期化
-  await initFcm();
+  // FCM（Firebase Cloud Messaging）初期化。サービスアカウント読み込み等で詰まる可能性に備え
+  // 同じく非致命・時間制限付きにする
+  await runStartupInitWithTimeout('FCM 初期化', async () => { await initFcm(); });
 
   // #296: Agent 自動更新の定期スイープを開始（接続時トリガーは agent-manager 側）
   startAutoUpdateSweep();
@@ -159,7 +190,9 @@ async function main() {
   await app.register(websocket);
 
   // Health check
-  app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+  // bot（discord/telegram）の状態を追加（常に 200 を返す。scripts/install-agent.sh が
+  // curl -fsS で疎通判定に使っているため、bot 不調で 500 にしてはならない）。
+  app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString(), bots: getBotsHealth() }));
 
   // API routes
   await app.register(publicApiRoutes);  // 認証不要のパブリック API（インストーラー用トークン検証など）
@@ -187,58 +220,6 @@ async function main() {
       setupWebClientWebSocket(connection, req);
     });
   });
-
-  // Bot Token の取得（UserSettings > 環境変数 の優先順）
-  // ユーザーに依存せず、設定されているトークンを直接検索
-  async function getBotTokenFromSettings(key: string): Promise<string | null> {
-    const setting = await prisma.userSettings.findFirst({
-      where: { key },
-    });
-    if (!setting) return null;
-
-    // 暗号化されている場合は復号化
-    if (setting.encrypted) {
-      try {
-        return decrypt(setting.value);
-      } catch {
-        console.error(`Failed to decrypt ${key}`);
-        return null;
-      }
-    }
-    return setting.value;
-  }
-
-  // Discord Bot Token を取得
-  let discordToken = await getBotTokenFromSettings('discord_bot_token');
-  if (discordToken) {
-    console.log('📝 Using Discord bot token from user settings');
-  } else {
-    discordToken = process.env.DISCORD_BOT_TOKEN || null;
-  }
-
-  // Telegram Bot Token を取得
-  let telegramToken = await getBotTokenFromSettings('telegram_bot_token');
-  if (telegramToken) {
-    console.log('📝 Using Telegram bot token from user settings');
-  } else {
-    telegramToken = process.env.TELEGRAM_BOT_TOKEN || null;
-  }
-
-  // Start Discord bot
-  if (discordToken) {
-    await setupDiscordBot(discordToken);
-    console.log('✅ Discord bot started');
-  } else {
-    console.log('⚠️  DISCORD_BOT_TOKEN not set, Discord bot disabled');
-  }
-
-  // Start Telegram bot
-  if (telegramToken) {
-    await setupTelegramBot(telegramToken);
-    console.log('✅ Telegram bot started');
-  } else {
-    console.log('⚠️  TELEGRAM_BOT_TOKEN not set, Telegram bot disabled');
-  }
 
   // Start heartbeat monitor for agent connection health
   startHeartbeatMonitor();
@@ -270,6 +251,13 @@ async function main() {
     } catch (err) {
       console.warn('⚠️  build timestamp log failed:', err);
     }
+
+    // Discord/Telegram bot の起動は listen 成功後に開始する（await しない）。
+    // 2026-10-18 の起動ハング障害の根治: 外部サービスに繋がるかどうかで本体の起動が
+    // 左右されないようにし、bot はバックグラウンドで無制限リトライして自力復帰する。
+    // listen 前ではなく後にするのは、HTTP/Agent WS が上がる前に Discord メッセージを処理して
+    // 「マシンオフライン」を返す事故を避けるため。詳細: `doc/server_listen_hang_20261018.md`。
+    startBotSupervisors();
   } catch (err) {
     app.log.error(err);
     process.exit(1);
@@ -280,9 +268,16 @@ async function main() {
 // SIGINT: Ctrl+C（開発時・Linux/macOS 手動停止）
 // SIGTERM: pm2/systemd 等の一般的なプロセスマネージャによる停止
 // SIGBREAK: Windows サービス（NSSM 等）が送る停止シグナル。Windows には SIGTERM が無いため必須
+let shuttingDown = false;
 const shutdown = async (signal: string) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`\n👋 Shutting down (${signal})...`);
   stopHeartbeatMonitor();
+  // pm2 restart 等のオーバーラップで旧プロセスが Telegram の long poll / Discord gateway を
+  // 掴んだままだと 409 Conflict や二重応答になるため、bot を確実に破棄する。
+  // ただし shutdown 自体が hang しないよう 3 秒で打ち切る（stopBotSupervisors 内部でも race 済み）。
+  await stopBotSupervisors();
   await prisma.$disconnect();
   process.exit(0);
 };
@@ -290,4 +285,14 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGBREAK', () => void shutdown('SIGBREAK'));
 
-main();
+// listen 済みの健全なプロセスを bot 側の例外で落とさないための最後の砦。
+// ログのみで握りつぶす（2026-10-18 障害の第2の牙 — 裸の promise reject による
+// プロセス異常終了 → pm2 再起動ループ — を防ぐ）。
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️  Unhandled rejection:', reason);
+});
+
+main().catch((err) => {
+  console.error('❌ Fatal error during startup:', err);
+  process.exit(1);
+});

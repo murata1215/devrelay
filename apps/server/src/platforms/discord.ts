@@ -6,6 +6,7 @@ import { executeCommand, getUserContext } from '../services/command-handler.js';
 import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
 import { prisma } from '../db/client.js';
 import { formatToolInputForText } from '../services/tool-format.js';
+import type { BotAttempt } from '../services/bot-supervisor.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
@@ -178,10 +179,31 @@ async function downloadAttachment(attachment: Attachment): Promise<FileAttachmen
   }
 }
 
+// client: ClientReady が発火した後のみ非 null。既存の送信系関数群（sendDiscordMessage 等）は
+// すべて `if (!client)` でガードしているため、代入を ClientReady まで遅らせるだけで
+// 「準備中は警告して捨てる」が既存コードを 1 行も変えずに成立する。
 let client: Client | null = null;
+// activeClient: connecting 中も含む生存インスタンス（dispose() での破棄対象）。
+let activeClient: Client | null = null;
+// 世代カウンタ。`connect()` の呼び出しごとに +1 し、コールバック先頭と代入直前で
+// `myGen !== generation` なら無視することで、タイムアウト後に遅れて解決した旧試行が
+// 新しい状態を書き換える事故（二重応答・二重ハンドラ）を防ぐ。
+let generation = 0;
 
-export async function setupDiscordBot(token?: string) {
-  client = new Client({
+/**
+ * bot-supervisor 向けの BotAttempt を生成する（supervisor から呼ばれる唯一の入口）。
+ * `connect()` の解決＝使用可能（ClientReady まで待つ）。
+ */
+export function createDiscordBotAttempt(token: string): BotAttempt {
+  return {
+    connect: () => connectDiscordBot(token),
+    dispose: disposeDiscordBot,
+  };
+}
+
+function connectDiscordBot(token: string): Promise<void> {
+  const myGen = ++generation;
+  const c = new Client({
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
@@ -189,96 +211,141 @@ export async function setupDiscordBot(token?: string) {
       GatewayIntentBits.MessageContent,
     ],
   });
+  activeClient = c;
 
-  client.once(Events.ClientReady, (c) => {
-    console.log(`🤖 Discord bot logged in as ${c.user.tag}`);
-  });
+  return new Promise<void>((resolve, reject) => {
+    // Discord.js の Client は EventEmitter 派生のため、'error' にリスナが無いまま emit されると
+    // プロセスが落ちる（既存の潜在バグ）。恒久登録して reject はしない — ready 前の一時的な
+    // WS エラーは discord.js が自力で再接続するため。失敗判定は login() の reject と
+    // supervisor 側のタイムアウトの 2 つに限定する。
+    c.on(Events.Error, (err) => {
+      if (myGen !== generation) return;
+      console.error('Discord client error:', err);
+    });
 
-  client.on(Events.MessageCreate, async (message: Message) => {
-    console.log(`📨 Message received: "${redactChatInput(message.content)}" from ${message.author.tag} (ID: ${message.author.id})`);
+    c.once(Events.ClientReady, (ready) => {
+      if (myGen !== generation) return;
+      client = c;
+      console.log(`🤖 Discord bot logged in as ${ready.user.tag}`);
+      resolve();
+    });
 
-    // Ignore bot messages
-    if (message.author.bot) return;
+    c.on(Events.MessageCreate, async (message: Message) => {
+      if (myGen !== generation) return;
+      console.log(`📨 Message received: "${redactChatInput(message.content)}" from ${message.author.tag} (ID: ${message.author.id})`);
 
-    // Only respond to DMs or mentions
-    const isDM = !message.guild;
-    const isMentioned = message.mentions.has(client!.user!.id);
+      // Ignore bot messages
+      if (message.author.bot) return;
 
-    if (!isDM && !isMentioned) return;
+      const selfId = c.user?.id;
+      if (!selfId) return;
 
-    // Get message content (remove mention if present)
-    let content = message.content;
-    if (isMentioned) {
-      content = content.replace(/<@!?\d+>/g, '').trim();
-    }
+      // Only respond to DMs or mentions
+      const isDM = !message.guild;
+      const isMentioned = message.mentions.has(selfId);
 
-    if (!content && message.attachments.size === 0) return;
+      if (!isDM && !isMentioned) return;
 
-    try {
-      // Get or create user context
-      const context = await getUserContext(
-        message.author.id,
-        'discord',
-        message.channel.id
-      );
+      // Get message content (remove mention if present)
+      let content = message.content;
+      if (isMentioned) {
+        content = content.replace(/<@!?\d+>/g, '').trim();
+      }
 
-      // If this is a mention in a guild channel, fetch messages since last mention
-      let missedMessages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
-      if (isMentioned && !isDM && message.channel.isTextBased()) {
-        const lastMentionMessageId = await getLastMentionMessageId('discord', message.author.id);
-        missedMessages = await fetchMessagesSinceLastMention(
-          message.channel as TextChannel,
-          lastMentionMessageId,
-          message.id,
-          client!.user!.id
+      if (!content && message.attachments.size === 0) return;
+
+      try {
+        // Get or create user context
+        const context = await getUserContext(
+          message.author.id,
+          'discord',
+          message.channel.id
         );
 
-        // Update last mention message ID
-        await updateLastMentionMessageId('discord', message.author.id, message.id);
-      }
+        // If this is a mention in a guild channel, fetch messages since last mention
+        let missedMessages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
+        if (isMentioned && !isDM && message.channel.isTextBased()) {
+          const lastMentionMessageId = await getLastMentionMessageId('discord', message.author.id);
+          missedMessages = await fetchMessagesSinceLastMention(
+            message.channel as TextChannel,
+            lastMentionMessageId,
+            message.id,
+            selfId
+          );
 
-      // Download attachments if present
-      const files: FileAttachment[] = [];
-      if (message.attachments.size > 0) {
-        console.log(`📎 Downloading ${message.attachments.size} attachment(s)...`);
-        for (const [, attachment] of message.attachments) {
-          const file = await downloadAttachment(attachment);
-          if (file) {
-            console.log(`✅ Downloaded: ${file.filename} (${file.size} bytes)`);
-            files.push(file);
+          // Update last mention message ID
+          await updateLastMentionMessageId('discord', message.author.id, message.id);
+        }
+
+        // Download attachments if present
+        const files: FileAttachment[] = [];
+        if (message.attachments.size > 0) {
+          console.log(`📎 Downloading ${message.attachments.size} attachment(s)...`);
+          for (const [, attachment] of message.attachments) {
+            const file = await downloadAttachment(attachment);
+            if (file) {
+              console.log(`✅ Downloaded: ${file.filename} (${file.size} bytes)`);
+              files.push(file);
+            }
           }
         }
-      }
 
-      // Parse and execute command (with NLP if enabled)
-      const command = await parseCommandWithNLP(content || '', context);
-      console.log(`📨 Discord: executing command type=${command.type}, input="${redactChatInput(content || '').substring(0, 50)}"`);
-      const response = await executeCommand(command, context, files, missedMessages);
-      console.log(`📨 Discord: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
+        // Parse and execute command (with NLP if enabled)
+        const command = await parseCommandWithNLP(content || '', context);
+        console.log(`📨 Discord: executing command type=${command.type}, input="${redactChatInput(content || '').substring(0, 50)}"`);
+        const response = await executeCommand(command, context, files, missedMessages);
+        console.log(`📨 Discord: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 
-      // Send response (skip if empty - progress tracking handles it)
-      if (response) {
-        // Split response if it exceeds Discord's limit
-        const chunks = splitMessage(response);
+        // Send response (skip if empty - progress tracking handles it)
+        if (response) {
+          // Split response if it exceeds Discord's limit
+          const chunks = splitMessage(response);
 
-        // Reply with first chunk
-        await message.reply(chunks[0]);
+          // Reply with first chunk
+          await message.reply(chunks[0]);
 
-        // Send remaining chunks as follow-up messages
-        for (let i = 1; i < chunks.length; i++) {
-          await (message.channel as TextChannel | DMChannel).send(chunks[i]);
+          // Send remaining chunks as follow-up messages
+          for (let i = 1; i < chunks.length; i++) {
+            await (message.channel as TextChannel | DMChannel).send(chunks[i]);
+          }
         }
+      } catch (error) {
+        console.error('Discord message handling error:', error);
+        await message.reply('❌ エラーが発生しました。しばらくしてからお試しください。');
       }
-    } catch (error) {
-      console.error('Discord message handling error:', error);
-      await message.reply('❌ エラーが発生しました。しばらくしてからお試しください。');
-    }
+    });
+
+    // ツール承認ボタンのインタラクションハンドラを登録
+    setupToolApprovalInteractionHandler(c, () => myGen === generation);
+
+    c.login(token).catch((err) => {
+      if (myGen !== generation) return;
+      reject(err);
+    });
   });
+}
 
-  // ツール承認ボタンのインタラクションハンドラを登録
-  setupToolApprovalInteractionHandler();
+/**
+ * 現在の attempt を破棄する。`generation++` を最初に行うため、`destroy()` が失敗・遅延しても
+ * 旧ハンドラは即座に無効化される（正しさが destroy() の成功に依存しない）。
+ */
+async function disposeDiscordBot(): Promise<void> {
+  generation++;
+  const c = activeClient;
+  activeClient = null;
+  client = null;
+  if (!c) return;
 
-  await client.login(token || process.env.DISCORD_BOT_TOKEN);
+  try {
+    await c.destroy();
+  } catch (err) {
+    console.error('⚠️  Discord client destroy failed (ignored):', err);
+  }
+  try {
+    c.removeAllListeners();
+  } catch {
+    // removeAllListeners 自体の失敗も無視する
+  }
 }
 
 export async function sendDiscordMessage(channelId: string, content: string, files?: FileAttachment[]) {
@@ -550,12 +617,12 @@ export async function sendDiscordToolApprovalAuto(channelId: string, toolName: s
 
 /**
  * Discord の InteractionCreate ハンドラを設定する（ボタン承認用）
- * setupDiscordBot() から呼ばれる
+ * `connectDiscordBot()` から呼ばれる。`isCurrent()` が false を返す（= この接続試行が
+ * 世代ガードにより旧世代になった）場合はイベントを無視する。
  */
-function setupToolApprovalInteractionHandler() {
-  if (!client) return;
-
-  client.on(Events.InteractionCreate, async (interaction) => {
+function setupToolApprovalInteractionHandler(c: Client, isCurrent: () => boolean) {
+  c.on(Events.InteractionCreate, async (interaction) => {
+    if (!isCurrent()) return;
     if (!interaction.isButton()) return;
 
     const customId = interaction.customId;

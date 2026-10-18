@@ -82,6 +82,9 @@ pm2 restart devrelay-server
 | DEVRELAY_ANSWER_MODEL | 高辻ナレッジ サイクル4: ナレッジ回答に使う OpenAI モデル名（既定 `gpt-4o-mini`）。provider は常に OpenAI 固定 |
 | DEVRELAY_UPDATE_BUSY_GUARD | サイクル3.1: 実行中 AI ターン中の Agent 自己更新保留（`isMachineBusy()` の実行中ターン台帳 + 手動 `u`/`server:agent:restart` の busy ガード）を有効にするか（既定 `1`。`0` で従来挙動に戻すキルスイッチ。Agent 側の D2（`sendPromptToAi()` 実行中は `server:agent:update` を保留する最後の砦）にはキルスイッチを置かず常時有効） |
 | DEVRELAY_WEB_COMMAND_PERSIST | WebUI のコマンド入力/応答（`testflight`・`status`・`log` 等の非 AI ターン）を `Message` に保存するか（既定 `1`。`0` で従来どおり WS 配信のみ＝再接続・リロード・スレッド切替で消えるキルスイッチ。AI ターン系（`exec`/`agreement`/`ai:prompt`/`ask:member`/`teamexec:member`）は元々自前で保存しているため対象外、`login*`/`clear`/`quit` も対象外） |
+| DEVRELAY_BOT_SUPERVISOR | 2026-10-18 起動ハング対策A: Discord/Telegram bot 起動の監督ループ（`services/bot-supervisor.ts`）が無制限リトライするか（既定 `1`。`0` で「1 回だけ試行して諦める」に縮退するキルスイッチ。`app.listen()` を bot 起動より先に行う起動順序自体にはキルスイッチを置かない＝無効化は障害の再導入のため。詳細 `doc/server_listen_hang_20261018.md`） |
+| DEVRELAY_BOT_LOGIN_TIMEOUT_MS | bot 起動 1 回分の試行タイムアウト（既定 `30000`、clamp 5000〜300000） |
+| DEVRELAY_BOT_RETRY_MAX_MS | bot 起動リトライ間隔の上限（既定 `300000`、clamp 10000〜3600000） |
 
 ## DB テーブル（概要）
 

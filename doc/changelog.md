@@ -6,6 +6,32 @@
 
 ## 実装済み機能
 
+### サーバー起動ハング対策A: 外部 bot 起動の非ブロッキング化 (2026-10-18)
+
+2026-10-18 02:46 のマシン再起動後、`devrelay-server` がポート 3005 で listen せず約 6.5 時間全停止
+（Web UI・Agent WebSocket・API 全部）。詳細: `doc/server_listen_hang_20261018.md`。
+
+- 原因: `index.ts` の `main()` が Discord/Telegram bot の起動（`client.login()`/`bot.getMe()`）を
+  `app.listen()` より前で await していた。再起動直後にまだ外部ネットワークへ出られず、
+  discord.com への REST 呼び出し（`fetchGatewayInformation()`）がハングし listen まで進まなかった
+- 対策（スコープはA のみ。D/B/C は今回未実施・ユーザー決定）:
+  1. `app.listen()` を最優先にし、bot 起動はトークン取得も含めて listen 成功後に
+     `startBotSupervisors()` で fire-and-forget 開始（新規 `services/bot-supervisor.ts` +
+     `services/bot-supervisor-rules.ts`、1 試行 30s タイムアウト・10s→最大5分バックオフで無制限リトライ）
+  2. listen 前に残る DB メンテナンス・`restoreSessionParticipants()`・`initFcm()` も 20s 上限の
+     非致命処理に変更（`main().catch()` だけでは DB 未起動時に同じクラッシュループが再発するため）
+  3. Discord: `client` の代入を `ClientReady` まで遅延（送信系関数のガード無変更で「準備中は捨てる」
+     を実現）、世代カウンタで二重応答防止、`Events.Error` 未登録バグ（潜在クラッシュ要因）を修正
+  4. Telegram: `{polling:true}`（コンストラクタ時点で polling 開始）を `{polling:false}` →
+     `getMe()` → ハンドラ登録 → `startPolling()` の順に変更。失敗した試行が polling を開始しない
+     ため、リトライの 409 Conflict リスクが構造的に消える
+  5. `/health` に `bots`（discord/telegram の phase）を追加。常に 200
+     （`scripts/install-agent.sh` の疎通判定が壊れないよう維持）
+- キルスイッチ `DEVRELAY_BOT_SUPERVISOR`（既定 `1`）、調整値 `DEVRELAY_BOT_LOGIN_TIMEOUT_MS` /
+  `DEVRELAY_BOT_RETRY_MAX_MS`。「listen を先にする」順序自体にはキルスイッチなし（無効化は障害の再導入）
+- DB スキーマ変更なし。Agent/`packages/shared` 変更ゼロ（`u` 不要）
+- テスト server 1177/1177（新規26）green。commit/push 未実施・`apps/server` 変更のため pm2 restart 要（未実施）
+
 ### WebUI のコマンド応答が消える問題の根治（testflight 完了メッセージが即消える） (2026-10-18)
 
 WebUI（classic ChatPage）で `testflight uso8m` を実行すると完了メッセージ（URL/Port/DB 情報）が

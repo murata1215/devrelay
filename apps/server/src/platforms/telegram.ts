@@ -5,11 +5,19 @@ import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
 import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
 import { formatToolInputForText } from '../services/tool-format.js';
+import type { BotAttempt } from '../services/bot-supervisor.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
 
+// bot: getMe() 成功 + startPolling() 完了後のみ非 null。既存の送信系関数群（sendTelegramMessage 等）は
+// すべて `if (!bot)` でガードしているため、代入を成功後まで遅らせるだけで
+// 「準備中は警告して捨てる」が既存コードを 1 行も変えずに成立する。
 let bot: TelegramBot | null = null;
+// activeBot: connecting 中も含む生存インスタンス（dispose() での破棄対象）。
+let activeBot: TelegramBot | null = null;
+// 世代カウンタ。discord.ts と同じ理由（タイムアウト後に遅れて解決した旧試行の無効化）。
+let generation = 0;
 
 async function downloadFile(fileId: string): Promise<FileAttachment | null> {
   if (!bot) return null;
@@ -59,23 +67,38 @@ async function downloadFile(fileId: string): Promise<FileAttachment | null> {
   }
 }
 
-// トークンをモジュールレベルで保持（ファイルダウンロード用）
+// トークンをモジュールレベルで保持（ファイルダウンロード用）。
+// 失敗したトークンが残って downloadFile() が誤った URL を組むのを避けるため、
+// 代入は getMe() 成功後（connectTelegramBot 内）まで遅らせる。
 let currentToken: string | null = null;
 
-export async function setupTelegramBot(providedToken?: string) {
-  const token = providedToken || process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    throw new Error('TELEGRAM_BOT_TOKEN is required');
-  }
-  currentToken = token;
+/**
+ * bot-supervisor 向けの BotAttempt を生成する（supervisor から呼ばれる唯一の入口）。
+ * `connect()` の解決＝使用可能（`startPolling()` 完了まで待つ）。
+ */
+export function createTelegramBotAttempt(token: string): BotAttempt {
+  return {
+    connect: () => connectTelegramBot(token),
+    dispose: disposeTelegramBot,
+  };
+}
 
-  // Create bot with polling (no webhook needed)
-  bot = new TelegramBot(token, { polling: true });
+async function connectTelegramBot(token: string): Promise<void> {
+  const myGen = ++generation;
 
-  const botInfo = await bot.getMe();
+  // polling:false で生成する。getMe() が失敗した試行は polling を一度も開始していないため、
+  // dispose() が実質 no-op になり、リトライに 409 Conflict のリスクが無い
+  // （{polling:true} だとコンストラクタ時点で long polling が始まり、getMe() 失敗時に
+  //   インスタンスがリークして 409 の温床になっていた＝今回の修正前の問題）。
+  const b = new TelegramBot(token, { polling: false });
+  activeBot = b;
+
+  const botInfo = await b.getMe();
+  if (myGen !== generation) return;
   console.log(`🤖 Telegram bot logged in as @${botInfo.username}`);
 
-  bot.on('message', async (msg: Message) => {
+  b.on('message', async (msg: Message) => {
+    if (myGen !== generation) return;
     // Get chat info
     const chatId = msg.chat.id.toString();
     const userId = msg.from?.id.toString() || chatId;
@@ -135,11 +158,54 @@ export async function setupTelegramBot(providedToken?: string) {
   });
 
   // ツール承認インラインキーボードのコールバックハンドラを登録
-  setupToolApprovalCallbackHandler();
+  setupToolApprovalCallbackHandler(b, () => myGen === generation);
 
-  bot.on('polling_error', (error) => {
-    console.error('Telegram polling error:', error.message);
+  b.on('polling_error', (error) => {
+    if (myGen !== generation) return;
+    // ETELEGRAM 409 Conflict は「別プロセスが同じトークンで polling している」ことを示す。
+    // pm2 restart のオーバーラップ等で起きるため、原因を特定しやすいよう明示ログを出す。
+    if (/\b409\b/.test(error.message)) {
+      console.error('⚠️  Telegram polling 409 Conflict — 別プロセスが同じトークンで polling している可能性があります:', error.message);
+    } else {
+      console.error('Telegram polling error:', error.message);
+    }
   });
+
+  await b.startPolling();
+  if (myGen !== generation) {
+    // startPolling 完了直後に dispose された場合はここで後始末する
+    try { await b.stopPolling({ cancel: true }); } catch { /* 無視 */ }
+    return;
+  }
+
+  bot = b;
+  currentToken = token;
+}
+
+/**
+ * 現在の attempt を破棄する。`generation++` を最初に行うため、`stopPolling()` が失敗・遅延しても
+ * 旧ハンドラは即座に無効化される（正しさが stopPolling() の成功に依存しない）。
+ */
+async function disposeTelegramBot(): Promise<void> {
+  generation++;
+  const b = activeBot;
+  activeBot = null;
+  bot = null;
+  currentToken = null;
+  if (!b) return;
+
+  try {
+    if (b.isPolling()) {
+      await b.stopPolling({ cancel: true });
+    }
+  } catch (err) {
+    console.error('⚠️  Telegram bot stopPolling failed (ignored):', err);
+  }
+  try {
+    b.removeAllListeners();
+  } catch {
+    // removeAllListeners 自体の失敗も無視する
+  }
 }
 
 export async function sendTelegramMessage(chatId: string, content: string, files?: FileAttachment[]) {
@@ -405,12 +471,12 @@ export async function sendTelegramToolApprovalAuto(chatId: string, toolName: str
 
 /**
  * Telegram の callback_query ハンドラを設定する（インラインキーボード承認用）
- * setupTelegramBot() から呼ばれる
+ * `connectTelegramBot()` から呼ばれる。`isCurrent()` が false（= この接続試行が
+ * 世代ガードにより旧世代になった）場合はイベントを無視する。
  */
-function setupToolApprovalCallbackHandler() {
-  if (!bot) return;
-
-  bot.on('callback_query', async (query) => {
+function setupToolApprovalCallbackHandler(b: TelegramBot, isCurrent: () => boolean) {
+  b.on('callback_query', async (query) => {
+    if (!isCurrent()) return;
     // AskUserQuestion の質問回答（tq_ プレフィックス）
     if (query.data?.startsWith('tq_')) {
       const parts = query.data.split('_');
@@ -436,9 +502,9 @@ function setupToolApprovalCallbackHandler() {
       if (handled) {
         toolApprovalMessages.delete(requestId);
         try {
-          await bot!.answerCallbackQuery(query.id, { text: `回答: ${selectedLabel}` });
+          await b.answerCallbackQuery(query.id, { text: `回答: ${selectedLabel}` });
           if (query.message) {
-            await bot!.editMessageText(
+            await b.editMessageText(
               `❓ *質問*\n✅ 回答: ${selectedLabel}`,
               { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
             );
@@ -448,7 +514,7 @@ function setupToolApprovalCallbackHandler() {
         }
       } else {
         try {
-          await bot!.answerCallbackQuery(query.id, { text: '⚠️ この質問は既に回答済みです' });
+          await b.answerCallbackQuery(query.id, { text: '⚠️ この質問は既に回答済みです' });
         } catch (err) {
           console.error('Failed to update Telegram question callback:', err);
         }
@@ -496,9 +562,9 @@ function setupToolApprovalCallbackHandler() {
         : '❌ 拒否しました';
 
       try {
-        await bot!.answerCallbackQuery(query.id, { text: statusText });
+        await b.answerCallbackQuery(query.id, { text: statusText });
         if (query.message) {
-          await bot!.editMessageText(
+          await b.editMessageText(
             `🔧 *ツール承認*\n${statusText}`,
             { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
           );
@@ -509,9 +575,9 @@ function setupToolApprovalCallbackHandler() {
     } else {
       // 既に応答済みまたはタイムアウト
       try {
-        await bot!.answerCallbackQuery(query.id, { text: '⚠️ この承認は既に処理済みです' });
+        await b.answerCallbackQuery(query.id, { text: '⚠️ この承認は既に処理済みです' });
         if (query.message) {
-          await bot!.editMessageText(
+          await b.editMessageText(
             `🔧 *ツール承認*\n⚠️ この承認は既に処理済みです`,
             { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
           );
