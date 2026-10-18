@@ -6,6 +6,26 @@
 
 ## 実装済み機能
 
+### WebUI のコマンド応答が消える問題の根治（testflight 完了メッセージが即消える） (2026-10-18)
+
+WebUI（classic ChatPage）で `testflight uso8m` を実行すると完了メッセージ（URL/Port/DB 情報）が
+一瞬表示されるが数秒で消える、という報告。
+
+- 原因（3つが重なっていた）:
+  1. `platforms/web.ts` は `executeCommand()` の戻り値を `web:response` で WS 配信するだけで `Message`
+     テーブルに保存していなかった（保存するのは AI ターン系ハンドラのみ）
+  2. `ChatPage.tsx` の `loadHistory()` は DB 履歴を正として再構成するため、再接続・リロード・スレッド切替の
+     たびに DB に無い WS 専用メッセージが捨てられる
+  3. `testflight create` は完了メッセージ返却の 2 秒後に `sudo systemctl reload caddy` を実行し、これが
+     WebUI の WS を自ら切断する → 再接続 → 履歴再構成 が毎回・即座に発生していた
+- 修正: WebUI のコマンド往復（ユーザー入力＋応答）を AI ターンと同じく `Message` に永続化する新規
+  `services/web-command-persistence.ts`（純関数のみ）を追加し、`platforms/web.ts` から呼び出す。
+  AI ターン系コマンド（`exec`/`agreement`/`ai:prompt`/`ask:member`/`teamexec:member`、自前で保存済み）と
+  `login*`/`clear`/`quit` は保存対象から除外。`apps/web`・`packages/shared` は無変更
+  （`messageId` を使う仕組みが既に両方の型にある）
+- キルスイッチ `DEVRELAY_WEB_COMMAND_PERSIST`（既定 `1`）
+- DB スキーマ変更なし（マイグレーション不要）。テスト server 1151/1151（新規19）・web 819/819 green
+
 ### install-agent.sh: プロキシ指定時に社内サーバー宛のトークン検証がハングする不具合を修正 (2026-10-16)
 
 macOS（社内プロキシ `y` 指定）で「🔍 トークンを検証中...」が数分止まり「サーバーに接続できません」。

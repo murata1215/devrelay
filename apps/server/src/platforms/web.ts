@@ -9,6 +9,14 @@ import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession } fro
 import { handleVoiceAssist } from '../services/voice-assist.js';
 import { buildSessionInfoPayload } from '../services/thread-routing.js';
 import { decideSessionInfoPush } from '../services/thread-reestablish.js';
+import {
+  isWebCommandPersistEnabled,
+  shouldPersistWebCommandTurn,
+  shouldPersistWebResponse,
+  buildWebUserMessageRow,
+  buildWebResponseMessageRow,
+  type WebMessageRow,
+} from '../services/web-command-persistence.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 
@@ -59,6 +67,23 @@ async function emitSessionInfoIfChanged(userId: string, chatId: string, beforeSe
   const targetChatIds = new Set<string>([chatId, ...participants.filter(p => p.platform === 'web').map(p => p.chatId)]);
   for (const targetChatId of targetChatIds) {
     pushSessionInfoToChat(targetChatId, payload);
+  }
+}
+
+/**
+ * WebUI のコマンド応答が消える問題の根治（2026-10-18）: `web-command-persistence.ts` の
+ * 判定結果に従って Message 行を 1 件作成し、id を返す。
+ * DB 失敗は握りつぶして WS 配信（ブロードキャスト）を巻き込まない — 永続化はあくまで
+ * 「再接続後も残す」ための付加機能であり、ここで例外を投げるとユーザーに応答が
+ * 一切届かなくなる本末転倒を招くため。
+ */
+async function createWebMessageRow(row: WebMessageRow, label: string): Promise<string | null> {
+  try {
+    const created = await prisma.message.create({ data: row, select: { id: true } });
+    return created.id;
+  } catch (error) {
+    console.warn(`⚠️ [web-persist] ${label} message の保存に失敗しました:`, error);
+    return null;
   }
 }
 
@@ -163,6 +188,10 @@ export async function setupWebClientWebSocket(
           const text = msg.payload.text?.trim();
           if (!text && (!msg.payload.files || msg.payload.files.length === 0)) break;
 
+          // WebUI のコマンド応答が消える問題の根治（2026-10-18）: コマンド受信時刻を
+          // ユーザー入力行の createdAt に使う（web-command-persistence.ts 参照）。
+          const receivedAt = new Date();
+
           const context = await getUserContext(userId, 'web', chatId);
           // スレッド管理 サイクル6（事象2対策）: このコマンド処理を開始する前の currentSessionId を
           // 記録しておき、処理後に emitSessionInfoIfChanged() で変化を検知する。
@@ -215,15 +244,25 @@ export async function setupWebClientWebSocket(
           }
 
           const command = await parseCommandWithNLP(text || '', context);
-          console.log(`📨 Web: executing command type=${command.type}, input="${redactChatInput(text || '').substring(0, 50)}"`);
+          const userText = redactChatInput(text || '');
+          console.log(`📨 Web: executing command type=${command.type}, input="${userText.substring(0, 50)}"`);
+
+          // WebUI のコマンド応答が消える問題の根治（2026-10-18）: 永続化が有効かどうかの
+          // 判定結果（`persistEnabled`）はこのコマンド1往復（入力行・応答行）で共有する。
+          const persistEnabled = isWebCommandPersistEnabled(process.env.DEVRELAY_WEB_COMMAND_PERSIST);
 
           // 同じセッションの他 Web クライアントにユーザーメッセージをブロードキャスト（全コマンド対象）
           // #326 Phase2: login の認可コードが他タブに生表示されないよう redactChatInput を適用
           // スレッド管理 cycle1 (S1〜S8): Map 走査の最初の1件を誤って使わないよう、
           // このソケットの唯一の正である context.currentSessionId を使う（chatId から逆引きしない）。
+          let userMessageId: string | undefined;
           {
             const sessionId = context.currentSessionId ?? null;
             if (sessionId) {
+              const userDecision = shouldPersistWebCommandTurn({ enabled: persistEnabled, commandType: command.type, sessionId, userText });
+              if (userDecision.persist) {
+                userMessageId = (await createWebMessageRow(buildWebUserMessageRow({ sessionId, content: userText, receivedAt }), 'user')) ?? undefined;
+              }
               const participants = getSessionParticipants(sessionId);
               for (const p of participants) {
                 if (p.platform === 'web' && p.chatId !== chatId) {
@@ -235,7 +274,7 @@ export async function setupWebClientWebSocket(
                     // （doc/devlog/2026-09-10_013311.md 引き継ぎ#2、cycle1 の web:response には既にある）。
                     sendJson(otherWs, {
                       type: 'web:user_message',
-                      payload: { content: redactChatInput(text || ''), files: msg.payload.files, projectId: context.lastProjectId, sessionId },
+                      payload: { content: userText, files: msg.payload.files, projectId: context.lastProjectId, sessionId, messageId: userMessageId },
                     });
                   }
                 }
@@ -244,6 +283,7 @@ export async function setupWebClientWebSocket(
           }
 
           const response = await executeCommand(command, context, msg.payload.files);
+          const completedAt = new Date();
           console.log(`📨 Web: response ${response ? `(${response.length} chars): ${response.substring(0, 80)}...` : '(empty)'}`);
 
           // レスポンスがある場合は同じセッションの全 Web クライアントにブロードキャスト
@@ -251,12 +291,17 @@ export async function setupWebClientWebSocket(
           if (response) {
             const sessionId = context.currentSessionId ?? null;
             if (sessionId) {
+              let responseMessageId: string | undefined;
+              const responseDecision = shouldPersistWebCommandTurn({ enabled: persistEnabled, commandType: command.type, sessionId, userText: response });
+              if (responseDecision.persist && shouldPersistWebResponse(response)) {
+                responseMessageId = (await createWebMessageRow(buildWebResponseMessageRow({ sessionId, content: response, receivedAt, completedAt }), 'response')) ?? undefined;
+              }
               const participants = getSessionParticipants(sessionId);
               for (const p of participants) {
                 if (p.platform === 'web') {
                   const targetWs = webClients.get(p.chatId);
                   if (targetWs && targetWs.readyState === targetWs.OPEN) {
-                    sendJson(targetWs, { type: 'web:response', payload: { message: response, projectId: context.lastProjectId, sessionId } });
+                    sendJson(targetWs, { type: 'web:response', payload: { message: response, projectId: context.lastProjectId, sessionId, messageId: responseMessageId } });
                   }
                 }
               }

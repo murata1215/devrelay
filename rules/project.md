@@ -1358,6 +1358,26 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - `detectRemoteBranch()`: `git symbolic-ref refs/remotes/origin/HEAD` → `origin/main` → `origin/master` の順で検出
 - bash/PowerShell 更新スクリプト内でも同様にインラインで動的検出
 
+### 非 AI コマンド応答（testflight/status/log 等）の DB 永続化（2026-10-18）
+- 症状: WebUI で `testflight` の完了メッセージ（URL/Port/DB 情報）が数秒で消える
+- 原因: `executeCommand()` の戻り値は `web:response` で WS 配信されるだけで `Message` に保存されない
+  （保存するのは `handleExec`/`handleAgreement`/`handleAiPrompt`/`handleAskMember`/`handleTeamExec`
+  の AI ターン系ハンドラのみ）。一方 `ChatPage.tsx` の `loadHistory()` は DB 履歴を正として
+  再接続・リロード・スレッド切替のたびに再構成するため、DB に無い WS 専用メッセージは消える。
+  `testflight create` は完了メッセージ返却の 2 秒後に `sudo systemctl reload caddy` で WS を
+  自ら切断するため、この消失が毎回・即座に発生していた
+- 設計判断: 「WS 配信するコマンドはすべて DB にも保存する」を原則にする。AI ターン系ハンドラは
+  既に自前で保存しているため `services/web-command-persistence.ts` の `SELF_PERSISTING_TYPES` で
+  除外（二重保存防止）。`login`/`login:code`/`login:cancel` は認可コードが `Message.content` に
+  残らないよう構造的に除外、`clear`/`quit` は「(無題)」スレッド復活（`thread-list-filter.ts`）防止
+  のため除外
+- `createdAt` は user 行＝コマンド受信時刻（送信者タブの楽観表示時刻・`ChatPage` の60秒重複排除窓に
+  合わせる）、応答行＝`max(完了時刻, 受信時刻+1ms)`（user 行より必ず後にする）
+- `apps/web`・`packages/shared` は無変更: `messageId` を受け取って dedup に使う仕組み
+  （`web:response`/`web:user_message` payload の `messageId?`、`ChatPage.tsx` の
+  `addMessageToTab`）が既存の型にあったため、サーバー側で保存して id を乗せるだけで直った
+- キルスイッチ `DEVRELAY_WEB_COMMAND_PERSIST`（既定 ON）
+
 ---
 
 ## チーム管理 + クロスプロジェクトクエリ

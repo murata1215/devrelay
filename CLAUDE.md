@@ -81,6 +81,7 @@ pm2 restart devrelay-server
 | DEVRELAY_ANSWER_API_KEY | 高辻ナレッジ サイクル4: ナレッジ回答の生成に使う**組織共通・専用**の OpenAI API キー。個人の Chat AI キーにも汎用 `OPENAI_API_KEY` にもフォールバックしない（用途別に費用を分けるため、ユーザー承認の最終決定）。未設定時は回答欄に鍵未設定の 1 行が出るのみで、検索（カード）は従来どおり動く。値はログに出さない |
 | DEVRELAY_ANSWER_MODEL | 高辻ナレッジ サイクル4: ナレッジ回答に使う OpenAI モデル名（既定 `gpt-4o-mini`）。provider は常に OpenAI 固定 |
 | DEVRELAY_UPDATE_BUSY_GUARD | サイクル3.1: 実行中 AI ターン中の Agent 自己更新保留（`isMachineBusy()` の実行中ターン台帳 + 手動 `u`/`server:agent:restart` の busy ガード）を有効にするか（既定 `1`。`0` で従来挙動に戻すキルスイッチ。Agent 側の D2（`sendPromptToAi()` 実行中は `server:agent:update` を保留する最後の砦）にはキルスイッチを置かず常時有効） |
+| DEVRELAY_WEB_COMMAND_PERSIST | WebUI のコマンド入力/応答（`testflight`・`status`・`log` 等の非 AI ターン）を `Message` に保存するか（既定 `1`。`0` で従来どおり WS 配信のみ＝再接続・リロード・スレッド切替で消えるキルスイッチ。AI ターン系（`exec`/`agreement`/`ai:prompt`/`ask:member`/`teamexec:member`）は元々自前で保存しているため対象外、`login*`/`clear`/`quit` も対象外） |
 
 ## DB テーブル（概要）
 
