@@ -242,11 +242,14 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // （行数・renderMarkdown 出現数）を実測して更新すること（sha256 ではなく行数＋出現数にしているのは、
 // 失敗時に「何が変わったか」をメッセージで名指しできるようにするため。等行数の改変に対する弱さは
 // 既存 lite-source-guards.test.mjs の出現数ピン（setSearchParams=4 等）と合わせて補完する）。
+//
+// 会話履歴レール サイクルで ChatPage.tsx に右レール第3タブ（Servers/Agents の隣の「会話」タブ）を
+// 追加したため、ChatPage.tsx の行数ピンのみ実測値（3818 → 3927）に更新した
+// （renderMarkdown 出現数・LitePage.tsx の行数は本サイクルで無変更のため据え置き）。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    // `split('\n').length` は末尾改行がある場合 `wc -l` より 1 大きくなる（3817 行 + 末尾改行 → 3818）。
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 3818, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 3927, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

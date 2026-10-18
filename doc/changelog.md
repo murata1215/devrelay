@@ -6,6 +6,39 @@
 
 ## 実装済み機能
 
+### 会話履歴レール: 右レール第3タブ「会話」（直近20スレッド横断・実行中/未確認表示・クリック遷移） (2026-10-18)
+
+ユーザー要望: 右上 `Servers`/`Agents` タブの隣に会話履歴を作りたい。直近20スレッドを羅列し、
+未確認=緑✓・実行中=スピナー・確認済み=マークなし（上部プロジェクトタブの状態アイコンと同じ見た目）を
+出したい。左スレッドペインは現プロジェクトの全履歴、上部タブは「開いているタブ」の一覧（プロジェクト粒度）
+で、「最新を追う」導線がどこにも無かった。
+
+- 右レール `Servers`/`Agents` の隣に第3タブ「会話」を追加（`Sidebar` の drawer/rail 両インスタンスに
+  共通表示。`sidebarMode` を3値化し localStorage に永続化）
+- データは `GET /api/threads`（既に `projectId` 省略で全プロジェクト横断・`limit` 対応済み）を
+  10秒ポーリング（会話タブを開いている間のみ有効化。開いた瞬間に即フェッチするため常時バックグラウンド
+  ポーリングを避けつつ「見たときには最新」を実現）
+- 実行中判定: `isSessionRunning()`（チャット経路）と `inFlightTurns`（MCP exec/crossquery/teamexec も
+  網羅する既存台帳、サイクル3.1）の OR。台帳本体の TTL（6時間、自己更新ガード用）より大幅に短い表示用
+  TTL（30分）を別途適用し、UI で延々スピナーが回り続けるのを防止
+- 未確認（緑✓）判定: `Session.lastActiveAt` はユーザー送信時のみ更新され AI 応答到着時には更新されない
+  ため使えない。サーバーが新たに `role='ai'` の最新 createdAt（`lastAiAt`）を返すよう変更し、これと
+  ブラウザの既読時刻（localStorage）を比較。DB スキーマ変更なし（既読状態は localStorage 管理、
+  複数端末では同期しない）
+- クリック時の遷移: 既存の `//connect` 送信はサーバー側で「プロジェクトの最新 active スレッド」を
+  選び直してしまうため、特定スレッドへの遷移ではレースで上書きされる。`handleSelectProject` に
+  `skipConnect` オプションを追加して `//connect` をスキップし、`switchChatToThread`
+  （`POST /api/sessions/:id/switch`）だけで context 確立を完結させる
+- 新規 `thread-activity.ts`（サーバー）・`conversation-rail-rules.ts`（web、既読管理の純関数）・
+  `useConversationFeed.ts`（取得フック）・`ConversationRail.tsx`（表示専用コンポーネント）。
+  既存 `ThreadList.tsx` は再利用せず温存（classic/Lite の2系統を既に支えており拡張の退行リスクが
+  高いため）。`thread-list-rules.ts` の純関数（ラベル導出・バッジ判定）のみ流用
+- キルスイッチ `DEVRELAY_CONVERSATION_RAIL`（既定 `1`。`0` で `running`/`lastAiAt` を一切返さず
+  旧レスポンスと構造的に同一になる）
+- DB スキーマ変更なし。Agent/`packages/shared` 変更ゼロ（`u` 不要）
+- テスト server 1194/1194（新規16）・web 850/850（新規31）green。commit/push 未実施・
+  `apps/server`/`apps/web` 変更のため pm2 restart 要（未実施、DB マイグレーション不要）
+
 ### サーバー起動ハング対策A: 外部 bot 起動の非ブロッキング化 (2026-10-18)
 
 2026-10-18 02:46 のマシン再起動後、`devrelay-server` がポート 3005 で listen せず約 6.5 時間全停止

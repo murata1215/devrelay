@@ -102,6 +102,39 @@ describe('InFlightTurnRegistry: TTL 失効', () => {
   });
 });
 
+describe('InFlightTurnRegistry: getStartedAt（会話履歴レール「実行中」表示用）', () => {
+  test('start した key の開始時刻を返す', () => {
+    const reg = new InFlightTurnRegistry();
+    reg.start('m1', 's1', 1234);
+    assert.equal(reg.getStartedAt('m1', 's1'), 1234);
+  });
+
+  test('未登録 key は undefined', () => {
+    const reg = new InFlightTurnRegistry();
+    reg.start('m1', 's1', 1000);
+    assert.equal(reg.getStartedAt('m1', 'never-started'), undefined);
+  });
+
+  test('未登録 machineId は undefined', () => {
+    const reg = new InFlightTurnRegistry();
+    assert.equal(reg.getStartedAt('ghost', 's1'), undefined);
+  });
+
+  test('end 後は undefined に戻る', () => {
+    const reg = new InFlightTurnRegistry();
+    reg.start('m1', 's1', 1000);
+    reg.end('m1', 's1');
+    assert.equal(reg.getStartedAt('m1', 's1'), undefined);
+  });
+
+  test('TTL 超過していても削除前なら値を返す（TTL 判定は呼び出し側の責務という契約の固定）', () => {
+    const reg = new InFlightTurnRegistry(1000); // TTL=1000ms
+    reg.start('m1', 's1', 0);
+    // TTL（1000ms）を大きく超えた時刻でも、sweepStale/end していなければ値はまだ読める
+    assert.equal(reg.getStartedAt('m1', 's1'), 0);
+  });
+});
+
 describe('InFlightTurnRegistry: 別マシンの独立性', () => {
   test('あるマシンの start/end は別マシンに影響しない', () => {
     const reg = new InFlightTurnRegistry();

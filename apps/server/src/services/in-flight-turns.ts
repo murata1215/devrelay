@@ -67,6 +67,17 @@ export class InFlightTurnRegistry {
   }
 
   /**
+   * 指定 key の開始時刻（ms）を返す（会話履歴レールの「実行中」表示用、サイクル: 会話履歴レール）。
+   * TTL 判定はここでは行わない（6時間 TTL は自己更新ガード用の安全側の値であり、
+   * UI 表示用の「実行中とみなす期間」はこれより短くすべきため、判定は呼び出し側
+   * （`thread-activity.ts` の `resolveRunning()`）の責務とする）。
+   * @returns 開始時刻（ms）。未登録（machine 自体が無い、または key が無い）なら undefined
+   */
+  getStartedAt(machineId: string, key: string): number | undefined {
+    return this.byMachine.get(machineId)?.get(key);
+  }
+
+  /**
    * TTL を超過した全エントリを削除する（取りこぼし経路の保険）。
    * @returns 削除した件数（全マシン合計）
    */

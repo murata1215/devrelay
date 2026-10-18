@@ -137,6 +137,16 @@ export const messages = {
   'thread.switchFailed': { en: 'Failed to switch thread', ja: 'スレッドの切替に失敗しました' },
   'thread.renameFailed': { en: 'Failed to rename thread', ja: 'スレッド名の変更に失敗しました' },
   'thread.timeJustNow': { en: 'just now', ja: 'たった今' },
+  // 会話履歴レール（右レール第3タブ）。既存の 'Servers'/'Agents' タブラベルは
+  // ハードコード英語のまま据え置き（日本語化は要望外の見た目変更になるため別途判断に委ねる）、
+  // 新タブのみ i18n キーを使う。
+  'sidebar.servers': { en: 'Servers', ja: 'Servers' },
+  'sidebar.agents': { en: 'Agents', ja: 'Agents' },
+  'sidebar.conversations': { en: 'History', ja: '会話' },
+  'conversation.empty': { en: 'No conversations yet', ja: '会話がありません' },
+  'conversation.loadFailed': { en: 'Failed to load conversations', ja: '会話履歴の取得に失敗しました' },
+  'conversation.running': { en: 'Running', ja: '実行中' },
+  'conversation.unread': { en: 'New response', ja: '未確認の応答' },
   'lite.title': { en: 'Lite', ja: 'Lite' },
   'lite.backToClassic': { en: 'Back to classic UI', ja: '従来 UI に戻る' },
   'lite.emptyState': { en: 'Choose a project and send a message to start a conversation.', ja: 'プロジェクトを選んで送信すると会話が始まります。' },

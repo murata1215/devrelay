@@ -649,6 +649,15 @@ export interface ThreadSummary {
   kind?: string;
   /** MCP ask サイクル: cancel_submission で取り消し済みかどうか。旧サーバー応答には無い。 */
   cancelled?: boolean;
+  /** 会話履歴レール: 実行中判定（`isSessionRunning()` OR `inFlightTurns` の30分以内）。
+   * 旧サーバー応答・キルスイッチ OFF 時には無い（undefined は `conversation-rail-rules.ts` の
+   * `resolveConversationStatus` 側で false 相当に扱われる）。 */
+  running?: boolean;
+  /** 会話履歴レール: `role='ai'` の最新メッセージ時刻（未確認=緑✓ 判定用）。
+   * まだ AI 応答が無いスレッドは `null`。旧サーバー応答・キルスイッチ OFF 時にはキー自体が無い
+   * （`undefined`）。`conversation-rail-rules.ts` の `resolveConversationStatus` が
+   * `undefined` のときだけ `lastActiveAt` にフォールバックする。 */
+  lastAiAt?: string | null;
 }
 
 /** POST /api/sessions/:id/switch のレスポンス */

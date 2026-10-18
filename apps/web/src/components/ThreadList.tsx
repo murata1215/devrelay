@@ -15,8 +15,10 @@ import { useLanguage } from '../contexts/LanguageContext';
  */
 
 /** 相対時刻表示（`Intl.RelativeTimeFormat` を使用。純モジュール `thread-list-rules.ts` には
- * i18n 補間の都合で置けないため、このコンポーネント内だけの非純関数として保持する） */
-function formatRelativeTime(iso: string, locale: 'en-US' | 'ja-JP', justNowLabel: string): string {
+ * i18n 補間の都合で置けないため、このコンポーネント内だけの非純関数として保持する）。
+ * `ConversationRail.tsx`（会話履歴レール）でも同じ表示形式を使うため export する
+ * （実装を複製しない。`ThreadList` のロジック自体は無変更）。 */
+export function formatRelativeTime(iso: string, locale: 'en-US' | 'ja-JP', justNowLabel: string): string {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return '';
   const diffSec = Math.round((Date.now() - ms) / 1000);

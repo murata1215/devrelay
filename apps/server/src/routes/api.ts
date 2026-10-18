@@ -10,7 +10,7 @@ import { isMachineBusyWithReason } from '../services/auto-updater.js';
 import { isUpdateBusyGuardEnabled, decideManualUpdate, extractBusyCount } from '../services/update-busy-rules.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
-import { createSession, resolveScopeOptionsForSession } from '../services/session-manager.js';
+import { createSession, resolveScopeOptionsForSession, isSessionRunning } from '../services/session-manager.js';
 import { switchChatToThread } from '../services/command-handler.js';
 import { evaluateProjectOwnership, evaluateSessionOwnership, evaluateThreadCreate, evaluateThreadSwitch } from '../services/thread-api-guard.js';
 import { validateThreadTitle } from '../services/thread-title.js';
@@ -18,6 +18,8 @@ import { buildSessionInfoPayload, sortThreadsDesc } from '../services/thread-rou
 import { buildEphemeralSessionIdExclusion } from '../services/thread-scope.js';
 import { buildEmptyEndedThreadExclusion, isHideEmptyEndedEnabled } from '../services/thread-list-filter.js';
 import { stripCommandTag, stripAiNoise } from '../services/thread-label-source.js';
+import { isConversationRailEnabled, resolveRunning } from '../services/thread-activity.js';
+import { inFlightTurns } from '../services/in-flight-turns.js';
 import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
@@ -1756,6 +1758,24 @@ export async function apiRoutes(app: FastifyInstance) {
       firstBySessionRole.set(row.sessionId, entry);
     }
 
+    // 会話履歴レール: 「未確認（緑✓）」判定用に、`role='ai'` の最新 createdAt をスレッドごとに
+    // 取得する（`lastActiveAt` はユーザー送信時にしか更新されず AI 応答到着時には更新されない
+    // ため、未読判定には使えない。詳細は thread-activity.ts のコメント参照）。
+    // キルスイッチ OFF 時はクエリ自体を実行しない（レスポンス構造を旧実装と完全に一致させる）。
+    const railEnabled = isConversationRailEnabled(process.env.DEVRELAY_CONVERSATION_RAIL);
+    const nowMs = Date.now();
+    type LastAiRow = { sessionId: string; lastAiAt: Date };
+    const lastAiRows: LastAiRow[] = !railEnabled || ids.length === 0 ? [] : await prisma.$queryRaw<LastAiRow[]>`
+      SELECT "sessionId", MAX("createdAt") AS "lastAiAt"
+      FROM "Message"
+      WHERE "sessionId" IN (${Prisma.join(ids)}) AND role = 'ai'
+      GROUP BY "sessionId"
+    `;
+    const lastAiAtBySession = new Map<string, Date>();
+    for (const row of lastAiRows) {
+      lastAiAtBySession.set(row.sessionId, row.lastAiAt);
+    }
+
     const threads = sorted.map((s) => {
       const first = firstBySessionRole.get(s.id);
       // 後方互換: 従来どおり role='user' の先頭 60 字を firstUserMessage として維持する。
@@ -1784,6 +1804,16 @@ export async function apiRoutes(app: FastifyInstance) {
         // 既存行は kind=NULL のため 'instruction' に正規化する（バックフィルなし、null 判定はしない）。
         kind: s.kind ?? 'instruction',
         cancelled: s.cancelledAt !== null,
+        // 会話履歴レール: 実行中判定（`undefined` のときはキー自体を JSON に出さない。
+        // キルスイッチ OFF 時のレスポンスを旧実装と構造的に同一にするため）。
+        running: resolveRunning({
+          enabled: railEnabled,
+          progressTracked: isSessionRunning(s.id),
+          inFlightStartedAtMs: inFlightTurns.getStartedAt(s.machineId, s.id),
+          nowMs,
+        }),
+        // 会話履歴レール: 未確認（緑✓）判定用。キルスイッチ OFF 時は undefined（キー省略）。
+        lastAiAt: railEnabled ? (lastAiAtBySession.get(s.id)?.toISOString() ?? null) : undefined,
       };
     });
 

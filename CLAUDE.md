@@ -85,6 +85,7 @@ pm2 restart devrelay-server
 | DEVRELAY_BOT_SUPERVISOR | 2026-10-18 起動ハング対策A: Discord/Telegram bot 起動の監督ループ（`services/bot-supervisor.ts`）が無制限リトライするか（既定 `1`。`0` で「1 回だけ試行して諦める」に縮退するキルスイッチ。`app.listen()` を bot 起動より先に行う起動順序自体にはキルスイッチを置かない＝無効化は障害の再導入のため。詳細 `doc/server_listen_hang_20261018.md`） |
 | DEVRELAY_BOT_LOGIN_TIMEOUT_MS | bot 起動 1 回分の試行タイムアウト（既定 `30000`、clamp 5000〜300000） |
 | DEVRELAY_BOT_RETRY_MAX_MS | bot 起動リトライ間隔の上限（既定 `300000`、clamp 10000〜3600000） |
+| DEVRELAY_CONVERSATION_RAIL | 右レール第3タブ「会話履歴」（直近20スレッド横断・実行中スピナー・未確認緑✓）向けに `GET /api/threads` が `running`/`lastAiAt` フィールドを返すか（既定 `1`。`0` で両フィールドを一切出さない＝旧レスポンスと構造的に同一になるキルスイッチ。DB 変更なし・既読状態はブラウザの localStorage 管理） |
 
 ## DB テーブル（概要）
 

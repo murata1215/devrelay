@@ -5,6 +5,45 @@
 
 ---
 
+## 会話履歴レール: `lastActiveAt` を未読判定に使わない・`//connect` を送らず `switchThread` だけで遷移する（会話履歴レール サイクル, 2026-10-18）
+
+右レール第3タブ「会話」（全プロジェクト横断の直近20スレッド、実行中/未確認表示）を追加した際の
+2つの非自明な判断。将来この機能に手を入れる・類似のスレッド横断表示を作る際は踏襲すること。
+
+- **未読（緑✓）判定に `Session.lastActiveAt` を使ってはいけない**: `touchSessionActivity()`
+  （`session-manager.ts`）は MCP 投入・チャットのユーザー送信時にしか呼ばれず、AI 応答の
+  `Message` 保存（`agent-manager.ts` の `role:'ai'` 行作成）では呼ばれない。`lastActiveAt` だけで
+  未読を判定すると「AI が返事をした」を取りこぼし、かつ「自分が送信しただけで自分のスレッドが
+  未読になる」誤爆も起きる。正しい情報源は新設した `lastAiAt`（`role='ai'` の最新 `createdAt`、
+  `GET /api/threads` が都度算出・DB 非永続化）。
+- **スレッド横断一覧からの遷移で `//connect` を送ってはいけない**: `handleSelectProject`
+  （`ChatPage.tsx`）は末尾で必ず `sendCommand('//connect ' + projectId)` を送るが、これはサーバー側
+  （`command-handler.ts` の `handleRecentConnect`）で「そのプロジェクトの最新 active スレッド」を
+  選び直してしまう。特定のスレッド（横断一覧でクリックしたスレッド）へ遷移したい場合、
+  `switchThread`/`handleSelectProject` の呼び出し順をどう入れ替えても、後から非同期で届く
+  `web:session_info` が意図したスレッドを上書きするレースが残る。対策として
+  `handleSelectProject(projectId, registerToActiveServer, { skipConnect: true })` を追加し、
+  `//connect` の送信だけをスキップする（タブ生成・`activeServerId` の貼り替え＝`#371` の
+  `visibleTabs` 整合はそのまま実行する）。`switchChatToThread`（サーバー側
+  `POST /api/sessions/:id/switch`）は `currentSessionId`/`currentProjectName`/`currentMachineId`/
+  `lastProjectId`/`addParticipant` を全部設定するため＝`//connect` がやることを内包しており、
+  これだけで context 確立が完結する。
+- 未読状態は DB 列を増やさず localStorage で管理（既存 `Tab.completed`＝プロジェクトタブ単位・
+  メモリのみ・非永続、より強い永続性を持たせた形。複数端末では同期しない。将来 `Session.lastReadAt`
+  列を足す場合も `resolveConversationStatus()`（`conversation-rail-rules.ts`）の `seenAt` 供給元を
+  差し替えるだけで共存できる設計にしてある）
+- 「実行中」は `isSessionRunning()`（`progressTrackers`）と `InFlightTurnRegistry.getStartedAt()`
+  （サイクル3.1の実行中ターン台帳、MCP exec/crossquery/teamexec も網羅）の OR。台帳本体の TTL（6時間、
+  自己更新ガード用の安全側の値）をそのまま UI に出すと「6時間スピナーが回り続ける」バグに見えるため、
+  表示用には別途 `RUNNING_DISPLAY_TTL_MS`（30分、`thread-activity.ts`）を適用する
+- `ThreadList.tsx` は再利用しない方針にした: 既に props 13個で classic 左ペインと Lite シェルの
+  2系統を同時に支えており（`projectId` 省略時横断・`readOnly`/`onLocalSelect`/`onRequestCreate` 等）、
+  幅可変の右レールに入れるにはルートの `w-56 shrink-0 border-r` 固定も崩す必要がある。表示は新規
+  `ConversationRail.tsx`（表示専用）を作り、ラベル導出・ソート・バッジ判定の純関数（`sortThreadsDesc`/
+  `deriveThreadLabel`/`isQuestionThread`/`isCancelledThread`、`thread-list-rules.ts`）だけ流用する
+
+---
+
 ## `Tab.progress`（WebUI classic）はタブ単位の state・スレッド切替時は明示クリアが必須（2026-09-30）
 
 WebUI classic（`ChatPage.tsx`）の進捗表示（「処理中...(NNNs)」）は `Tab.progress` という

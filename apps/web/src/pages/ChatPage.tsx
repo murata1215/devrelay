@@ -14,6 +14,10 @@ import { ThreadPane } from '../components/ThreadPane';
 import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
 import { RightRail } from '../components/RightRail';
 import { RAIL_COLLAPSED_STORAGE_KEY, readRailCollapsed, serializeRailCollapsed, countPendingApprovals, resolveSidebarShellClass } from '../lib/right-rail-rules';
+import { ConversationRail } from '../components/ConversationRail';
+import { useConversationFeed, type ConversationFeedItem } from '../hooks/useConversationFeed';
+import { SIDEBAR_MODE_STORAGE_KEY, readSidebarMode, type SidebarMode } from '../lib/conversation-rail-rules';
+import { getTabId } from '../lib/tab-id';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -1075,6 +1079,7 @@ function Sidebar({
   onReorderServerProjects,
   variant,
   headerAction,
+  conversationsSlot,
 }: {
   machineList: Machine[];
   openTabIds: Set<string>;
@@ -1082,8 +1087,8 @@ function Sidebar({
   onSelectProject: (projectId: string, registerToActiveServer?: boolean) => void;
   collapsed: boolean;
   onToggle: () => void;
-  mode: 'agents' | 'servers';
-  onChangeMode: (mode: 'agents' | 'servers') => void;
+  mode: SidebarMode;
+  onChangeMode: (mode: SidebarMode) => void;
   servers: ChatServer[];
   activeServerId: string | null;
   onSelectServer: (id: string | null) => void;
@@ -1099,7 +1104,13 @@ function Sidebar({
   variant: 'drawer' | 'rail';
   /** rail インスタンスのみ: 右レールの折りたたみボタン等をヘッダー行に追加表示する */
   headerAction?: React.ReactNode;
+  /** `mode === 'conversations'` のとき描画する中身（`ConversationRail`）。
+   *  表示専用コンポーネント自体は ChatPage 側で1つだけ生成し、両インスタンス（drawer/rail）に渡す
+   *  （`useConversationFeed` のポーリングを二重化しないため）。 */
+  conversationsSlot?: React.ReactNode;
 }) {
+  const { t } = useLanguage();
+  const sidebarConversationsLabel = t('sidebar.conversations');
   const [expandedMachines, setExpandedMachines] = useState<Set<string>>(new Set());
   /** サーバー内プロジェクトの展開状態 */
   const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
@@ -1174,12 +1185,14 @@ function Sidebar({
       )}
 
       <aside className={`${drawerTranslateClass} ${resolveSidebarShellClass(variant)}`}>
-        {/* ヘッダー: Agents / Servers 切り替え */}
-        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
-          <div className="flex gap-1">
+        {/* ヘッダー: Agents / Servers / 会話履歴 切り替え。会話履歴レール追加で3タブになったため
+            （会話履歴レール サイクル）、160px（RAIL_WIDTH_MIN）でも折り返さないよう
+            padding を詰め、コンテナに min-w-0 + overflow-hidden を付けている。 */}
+        <div className="flex items-center justify-between px-2 py-2 border-b border-[var(--border-color)] min-w-0">
+          <div className="flex gap-0.5 min-w-0 overflow-hidden">
             <button
               onClick={() => onChangeMode('servers')}
-              className={`text-xs px-2 py-1 rounded ${
+              className={`text-xs px-1.5 py-1 rounded shrink-0 ${
                 mode === 'servers'
                   ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
                   : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
@@ -1187,12 +1200,20 @@ function Sidebar({
             >Servers</button>
             <button
               onClick={() => onChangeMode('agents')}
-              className={`text-xs px-2 py-1 rounded ${
+              className={`text-xs px-1.5 py-1 rounded shrink-0 ${
                 mode === 'agents'
                   ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
                   : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
               }`}
             >Agents</button>
+            <button
+              onClick={() => onChangeMode('conversations')}
+              className={`text-xs px-1.5 py-1 rounded shrink-0 ${
+                mode === 'conversations'
+                  ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
+              }`}
+            >{sidebarConversationsLabel}</button>
           </div>
           <div className="flex items-center gap-1">
             <button onClick={onToggle} className="md:hidden text-[var(--text-muted)] hover:text-[var(--text-primary)]">
@@ -1204,7 +1225,10 @@ function Sidebar({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto py-1">
+        {/* ===== 会話履歴モード（表示専用。中身は ChatPage が1つだけ生成して渡す） ===== */}
+        {mode === 'conversations' && conversationsSlot}
+
+        <div className={`flex-1 overflow-y-auto py-1 ${mode === 'conversations' ? 'hidden' : ''}`}>
           {/* ===== Agents モード ===== */}
           {mode === 'agents' && (
             <>
@@ -2031,8 +2055,23 @@ export function ChatPage() {
   const [servers, setServers] = useState<ChatServer[]>([]);
   /** アクティブサーバー ID（null = 「すべて」表示） */
   const [activeServerId, setActiveServerId] = useState<string | null>(null);
-  /** サイドバーモード切り替え */
-  const [sidebarMode, setSidebarMode] = useState<'agents' | 'servers'>('servers');
+  /** サイドバーモード切り替え（Servers/Agents/会話履歴の3値。localStorage に永続化する） */
+  const [sidebarMode, setSidebarModeRaw] = useState<SidebarMode>(() => {
+    try {
+      return readSidebarMode(localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY));
+    } catch {
+      return 'servers';
+    }
+  });
+  /** `setSidebarMode` のラッパ（`toggleRailCollapsed` と同じ流儀で localStorage へ永続化） */
+  const setSidebarMode = useCallback((mode: SidebarMode) => {
+    setSidebarModeRaw(mode);
+    try {
+      localStorage.setItem(SIDEBAR_MODE_STORAGE_KEY, mode);
+    } catch {
+      // localStorage 不可（プライベートモード等）でも動作を継続
+    }
+  }, []);
   /** ライトボックス表示用の画像 URL */
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   /** Machine ごとの skipPermissions キャッシュ（machineId → boolean） */
@@ -2814,6 +2853,26 @@ export function ChatPage() {
   // アクティブタブ取得
   const activeTab = tabs.find(t => t.projectId === activeTabId) ?? null;
 
+  // 会話履歴レール: 自ブラウザの tab.progress から「今実行中とみなす sessionId の集合」を導出する
+  // （サーバーの10秒ポーリングより速く反映するための即時性の補完。`conversation-rail-rules.ts` の
+  // `resolveConversationStatus` 側で `running` と OR される）。
+  const localRunningSessionIds = new Set(
+    tabs.filter(t => t.progress !== null && t.sessionId).map(t => t.sessionId as string)
+  );
+  const conversationFeed = useConversationFeed({
+    refreshToken: threadRefreshToken,
+    localRunningSessionIds,
+    activeSessionId: activeTab?.sessionId ?? null,
+    enabled: sidebarMode === 'conversations',
+  });
+  // 単純な識別子として分割代入しておく（`handleConversationSelect` の依存配列に
+  // `conversationFeed.markConversationSeen` という member access を渡すと、
+  // react-hooks/exhaustive-deps が「`conversationFeed` オブジェクト自体を依存に入れろ」と
+  // 要求してしまう。`conversationFeed` 自体は毎レンダー新しいオブジェクトのため、それに従うと
+  // 逆に不要な再生成を招く。関数自体は `useConversationFeed` 内部で安定しているため、
+  // 分割代入した識別子を直接依存配列に渡すのが正しい）。
+  const { markConversationSeen } = conversationFeed;
+
   /** タブごとの入力テキスト（グローバル state ではなくタブデータから派生） */
   const input = activeTab?.inputText ?? '';
   const setInput = useCallback((text: string) => {
@@ -3102,8 +3161,15 @@ export function ChatPage() {
   /** プロジェクト選択（サイドバー or タブクリック）。
    *  registerToActiveServer=true のときのみ、アクティブサーバーへの自動登録を行う（#370）。
    *  Servers タブの行クリックや TabBar のタブ切り替えは「開く／切り替える」だけで登録は行わず、
-   *  Agents タブの行クリック（onSelectProject(project.id, true)）だけが登録の起点となる。 */
-  const handleSelectProject = useCallback((projectId: string, registerToActiveServer = false) => {
+   *  Agents タブの行クリック（onSelectProject(project.id, true)）だけが登録の起点となる。
+   *
+   *  `opts.skipConnect`（会話履歴レール サイクル）: true のとき `//connect` の送信（＝サーバー側で
+   *  「このプロジェクトの最新 active スレッド」を選び直す処理）をスキップする。タブを開く・
+   *  activeServerId を追従させる（#371）処理はそのまま実行する。会話履歴レールから特定スレッドへ
+   *  遷移する際、`//connect` が送ったあとに非同期で届く `web:session_info` が意図したスレッドを
+   *  上書きしてしまうレースを避けるために使う（`handleConversationSelect` 専用、既存呼び出し元は
+   *  第3引数を渡さないため挙動は不変）。 */
+  const handleSelectProject = useCallback((projectId: string, registerToActiveServer = false, opts?: { skipConnect?: boolean }) => {
     // アクティブサーバーがある場合はプロジェクトを自動登録。
     // 既にタブが開いている（★）場合やアクティブタブ自身のクリックでも登録されるよう、
     // 早期return・新規タブ判定より前に必ず実行する（ref から最新値を読み stale closure を回避）。
@@ -3183,15 +3249,43 @@ export function ChatPage() {
 
     setActiveTabId(projectId);
 
-    // サーバーにコンテキスト切り替えを通知
-    suppressConnectRef.current = true;
-    sendCommand(`//connect ${projectId}`);
+    if (!opts?.skipConnect) {
+      // サーバーにコンテキスト切り替えを通知
+      suppressConnectRef.current = true;
+      sendCommand(`//connect ${projectId}`);
 
-    // 既存タブでセッションIDがあり、履歴未読み込みなら読み込み開始
-    if (existingTab?.sessionId && !existingTab.historyLoaded && !existingTab.loadingHistory) {
-      loadHistory(projectId, existingTab.sessionId);
+      // 既存タブでセッションIDがあり、履歴未読み込みなら読み込み開始
+      if (existingTab?.sessionId && !existingTab.historyLoaded && !existingTab.loadingHistory) {
+        loadHistory(projectId, existingTab.sessionId);
+      }
     }
   }, [machineList, sendCommand, loadHistory]);
+
+  /**
+   * 会話履歴レール: 行クリックでそのスレッドへ遷移する。
+   * `//connect` を送らない（`handleSelectProject` の `skipConnect` 参照）。`//connect` は
+   * サーバー側で「このプロジェクトの最新 active スレッド」を選び直してしまうため、順序をどう
+   * 入れ替えても意図したスレッドが別スレッドに上書きされるレースが残る。
+   * 一方 `switchChatToThread`（サーバー側 `POST /api/sessions/:id/switch`）は
+   * `currentSessionId`/`currentProjectName`/`currentMachineId`/`lastProjectId`/`addParticipant` を
+   * すべて設定する＝`//connect` がやることを内包しているため、これだけで context 確立が完結する。
+   * 失敗時は切替前の状態を維持する（`ThreadList.tsx` の `handleSelect` と同じ fail-soft 方針）。
+   * `registerToActiveServer` は false 固定（#370: 登録の起点は Agents タブの行クリックだけ。
+   * 会話履歴のクリックでサーバー＝タブグループのメンバーシップを勝手に書き換えない）。
+   */
+  const handleConversationSelect = useCallback(async (item: ConversationFeedItem) => {
+    // 1) タブを開く/アクティブ化/activeServerId 貼り替え（#371 の visibleTabs 整合。//connect は送らない）
+    handleSelectProject(item.projectId, false, { skipConnect: true });
+    try {
+      // 2) サーバー側 current スレッドを差し替える（context 確立の唯一の経路）
+      const result = await sessionsApi.switchThread(item.sessionId, getTabId());
+      // 3) タブへ反映＋履歴を 'replace' で丸ごと差し替え
+      switchTabToThread(result.projectId, result.sessionId, result.title);
+    } catch {
+      // 失敗時は何もしない（切替前の状態を維持）
+    }
+    markConversationSeen(item.sessionId, item.lastAiAt ?? null);
+  }, [handleSelectProject, switchTabToThread, markConversationSeen]);
 
   /** タブを閉じる（ピン止めタブは閉じない） */
   const handleCloseTab = useCallback((projectId: string) => {
@@ -3313,7 +3407,7 @@ export function ChatPage() {
     persistServers(next);
     handleSelectServer(newServer.id);
     setSidebarMode('servers');
-  }, [servers, persistServers, handleSelectServer]);
+  }, [servers, persistServers, handleSelectServer, setSidebarMode]);
 
   /** サーバー名を変更 */
   const handleRenameServer = useCallback((id: string, name: string) => {
@@ -3494,6 +3588,19 @@ export function ChatPage() {
 
   const openTabIds = new Set(tabs.map(t => t.projectId));
 
+  // 会話履歴レール: 表示専用コンポーネントは ChatPage が1つだけ生成し、drawer/rail 両方の
+  // Sidebar インスタンスへ同じものを渡す（`useConversationFeed` のポーリングを二重化しないため）。
+  const conversationsSlot = (
+    <ConversationRail
+      items={conversationFeed.items}
+      loading={conversationFeed.loading}
+      error={conversationFeed.error}
+      onRetry={conversationFeed.refetch}
+      currentSessionId={activeTab?.sessionId ?? null}
+      onSelect={handleConversationSelect}
+    />
+  );
+
   return (
     <div className={`flex ${maximized ? 'h-screen' : 'h-[calc(100vh-4rem)]'}`}>
       {/* サイドバー（最大化時は非表示） */}
@@ -3518,6 +3625,7 @@ export function ChatPage() {
           tabCustomNames={Object.fromEntries(tabs.filter(t => t.customName).map(t => [t.projectId, t.customName!]))}
           onReorderServerProjects={handleReorderServerProjects}
           variant="drawer"
+          conversationsSlot={conversationsSlot}
         />
       )}
 
@@ -3781,6 +3889,7 @@ export function ChatPage() {
               tabCustomNames={Object.fromEntries(tabs.filter(t => t.customName).map(t => [t.projectId, t.customName!]))}
               onReorderServerProjects={handleReorderServerProjects}
               variant="rail"
+              conversationsSlot={conversationsSlot}
               headerAction={
                 <button
                   onClick={toggleRailCollapsed}
