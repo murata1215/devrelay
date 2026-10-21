@@ -276,6 +276,12 @@ model Session {
   // すべて nullable = 既存行は従来挙動のまま（null = level 0・壁なしとして扱われる）。
   level       Int?      // 0〜10。この会話個別の機密度（null = Project.defaultLevel を継承）
   compartment String?   // 案件名（正規化済み・完全一致）。null = Project.defaultCompartment を継承
+  // 会話既読状態のサーバー管理化（Flutter/WebUI 端末間同期）: このスレッドを最後に既読にした時点の
+  // lastAiAt（= role='ai' の最新 createdAt）を記録する。null = 未読（または AI 応答がまだ無い）。
+  // マイグレーション時は既存行を現時点の lastAiAt で埋める（でないと導入直後に全スレッド未読になる偽未読）。
+  // クライアントから値を受け取らず POST /api/sessions/:id/seen がサーバー側で書く（古い値送信による
+  // 既読の巻き戻り防止、および閲覧中に届いた応答の自動既読化のため）。
+  lastSeenAiAt DateTime?
 
   messages       Message[]
   buildLogs      BuildLog[]
@@ -537,6 +543,9 @@ model Notification {
   body        String   @default("")
   isRead      Boolean  @default(false)
   createdAt   DateTime @default(now())
+  // 通知一覧からスレッド直行するための対象 Session.id（FK は張らない。KnowledgeChunk.sessionId と同じ規約）。
+  // null 許容 = 既存行・対象スレッドが特定できない通知（将来の種別追加等）はそのまま null。
+  sessionId   String?
 
   @@index([userId, createdAt])
   @@index([userId, isRead])

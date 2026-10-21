@@ -78,6 +78,21 @@ export class InFlightTurnRegistry {
   }
 
   /**
+   * 会話履歴レール「スピナーが止まらない」調査用の診断エンドポイント（`GET /api/debug/turns`）向け:
+   * 全エントリをそのまま列挙する（TTL フィルタなし。削除もしない＝読み出し専用）。
+   * 通常の判定ロジック（`isBusy`/`count`/`getStartedAt`）はこの関数を使わない。
+   */
+  listAll(nowMs: number): Array<{ machineId: string; key: string; startedAtMs: number; ageMs: number }> {
+    const result: Array<{ machineId: string; key: string; startedAtMs: number; ageMs: number }> = [];
+    for (const [machineId, turns] of this.byMachine.entries()) {
+      for (const [key, startedAt] of turns.entries()) {
+        result.push({ machineId, key, startedAtMs: startedAt, ageMs: nowMs - startedAt });
+      }
+    }
+    return result;
+  }
+
+  /**
    * TTL を超過した全エントリを削除する（取りこぼし経路の保険）。
    * @returns 削除した件数（全マシン合計）
    */

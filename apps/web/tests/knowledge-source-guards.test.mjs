@@ -246,10 +246,14 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // 会話履歴レール サイクルで ChatPage.tsx に右レール第3タブ（Servers/Agents の隣の「会話」タブ）を
 // 追加したため、ChatPage.tsx の行数ピンのみ実測値（3818 → 3927）に更新した
 // （renderMarkdown 出現数・LitePage.tsx の行数は本サイクルで無変更のため据え置き）。
+//
+// 会話履歴レール 見た目改修サイクル（2026-10-22）で、行1行目を「エージェント名/プロジェクト名」に
+// するため ConversationRail への `resolveProjectLabel` 配線を ChatPage.tsx に追加したため、
+// 行数ピンのみ実測値（3927 → 3942）に再更新した（renderMarkdown 出現数は無変更のため据え置き）。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 3927, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 3942, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

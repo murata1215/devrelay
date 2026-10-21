@@ -3284,7 +3284,7 @@ export function ChatPage() {
     } catch {
       // 失敗時は何もしない（切替前の状態を維持）
     }
-    markConversationSeen(item.sessionId, item.lastAiAt ?? null);
+    markConversationSeen(item.sessionId);
   }, [handleSelectProject, switchTabToThread, markConversationSeen]);
 
   /** タブを閉じる（ピン止めタブは閉じない） */
@@ -3588,6 +3588,20 @@ export function ChatPage() {
 
   const openTabIds = new Set(tabs.map(t => t.projectId));
 
+  // 会話履歴レール 2026-10-22 見た目改修: 主役行（エージェント名/プロジェクト名）に
+  // 改名・タブのカスタム名を反映させるための projectId → 表示名マップ。
+  // `Sidebar` 内の `projectNameMap`（1169行付近）と同じロジック（displayName 優先）。
+  const conversationProjectNameMap = new Map<string, string>();
+  for (const m of machineList) {
+    for (const p of m.projects) {
+      conversationProjectNameMap.set(p.id, p.displayName ?? p.name);
+    }
+  }
+  const resolveConversationProjectLabel = (projectId: string, fallbackName: string) => {
+    const tab = tabsRef.current.find(t => t.projectId === projectId);
+    return tab?.customName || conversationProjectNameMap.get(projectId) || fallbackName;
+  };
+
   // 会話履歴レール: 表示専用コンポーネントは ChatPage が1つだけ生成し、drawer/rail 両方の
   // Sidebar インスタンスへ同じものを渡す（`useConversationFeed` のポーリングを二重化しないため）。
   const conversationsSlot = (
@@ -3598,6 +3612,7 @@ export function ChatPage() {
       onRetry={conversationFeed.refetch}
       currentSessionId={activeTab?.sessionId ?? null}
       onSelect={handleConversationSelect}
+      resolveProjectLabel={resolveConversationProjectLabel}
     />
   );
 

@@ -154,3 +154,29 @@ describe('InFlightTurnRegistry: 別マシンの独立性', () => {
     assert.equal(reg.count('m1', 1000), 2);
   });
 });
+
+describe('InFlightTurnRegistry: listAll（GET /api/debug/turns 向けの読み出し専用列挙）', () => {
+  test('空なら空配列', () => {
+    const reg = new InFlightTurnRegistry();
+    assert.deepEqual(reg.listAll(1000), []);
+  });
+
+  test('全マシン・全キーを ageMs 付きで列挙する（TTL フィルタなし）', () => {
+    const reg = new InFlightTurnRegistry(1000); // TTL=1000ms
+    reg.start('m1', 's1', 0);
+    reg.start('m2', 's2', 500);
+    // TTL（1000ms）を大きく超過していても listAll は削除・フィルタしない（読み出し専用の契約）
+    const all = reg.listAll(10_000).sort((a, b) => a.machineId.localeCompare(b.machineId));
+    assert.deepEqual(all, [
+      { machineId: 'm1', key: 's1', startedAtMs: 0, ageMs: 10_000 },
+      { machineId: 'm2', key: 's2', startedAtMs: 500, ageMs: 9_500 },
+    ]);
+  });
+
+  test('end 後はそのキーが消える', () => {
+    const reg = new InFlightTurnRegistry();
+    reg.start('m1', 's1', 0);
+    reg.end('m1', 's1');
+    assert.deepEqual(reg.listAll(1000), []);
+  });
+});

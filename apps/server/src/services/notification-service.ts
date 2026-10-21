@@ -20,6 +20,8 @@ type NotificationType = 'response' | 'approval' | 'error';
  * @param projectName プロジェクト名（非正規化、表示用）
  * @param title 通知タイトル
  * @param body 通知本文（200文字に切り詰め）
+ * @param sessionId 通知一覧からスレッド直行するための対象 Session.id（省略可。
+ *   呼び出し元が対象スレッドを特定できない場合は undefined のまま null で保存する）
  */
 export async function createNotification(
   userId: string,
@@ -27,7 +29,8 @@ export async function createNotification(
   projectId: string,
   projectName: string,
   title: string,
-  body: string
+  body: string,
+  sessionId?: string
 ): Promise<void> {
   try {
     // 絵文字（サロゲートペア）を途中で切ると不正な UTF-16 になり Prisma が JSON を拒否する
@@ -40,6 +43,7 @@ export async function createNotification(
         projectName,
         title: stripLoneSurrogates(title),
         body: truncateSafe(body, 200),
+        sessionId: sessionId ?? null,
       },
     });
   } catch (err: any) {
@@ -89,6 +93,9 @@ export async function getNotifications(
       body: n.body,
       isRead: n.isRead,
       createdAt: n.createdAt.toISOString(),
+      // 依頼2: 通知一覧からスレッド直行するための対象 Session.id。無ければ null
+      // （既存行・対象スレッドを特定できない通知）。
+      sessionId: n.sessionId ?? null,
     })),
     hasMore,
   };

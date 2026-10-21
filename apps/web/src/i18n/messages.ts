@@ -140,9 +140,13 @@ export const messages = {
   // 会話履歴レール（右レール第3タブ）。既存の 'Servers'/'Agents' タブラベルは
   // ハードコード英語のまま据え置き（日本語化は要望外の見た目変更になるため別途判断に委ねる）、
   // 新タブのみ i18n キーを使う。
+  // 2026-10-22 見た目改修: タブ名を 'History'（ja: '会話'）→ 'Pulse' に改名（ユーザー承認の最終決定）。
+  // 'Servers'/'Agents' が英語ハードコードのため、ja も英語にして3タブの並びを揃える
+  // （Servers/Agents と同じ理由で ja: 'Pulse'）。'Conversion'（変換・転換の意）と誤読されないよう、
+  // 意味が離れた短い語を選んだ（原語 Conversation は幅制約で収まらない。詳細 devlog 参照）。
   'sidebar.servers': { en: 'Servers', ja: 'Servers' },
   'sidebar.agents': { en: 'Agents', ja: 'Agents' },
-  'sidebar.conversations': { en: 'History', ja: '会話' },
+  'sidebar.conversations': { en: 'Pulse', ja: 'Pulse' },
   'conversation.empty': { en: 'No conversations yet', ja: '会話がありません' },
   'conversation.loadFailed': { en: 'Failed to load conversations', ja: '会話履歴の取得に失敗しました' },
   'conversation.running': { en: 'Running', ja: '実行中' },

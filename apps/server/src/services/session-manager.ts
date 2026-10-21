@@ -31,6 +31,8 @@ import { resolveProgressRecipients } from './progress-recipients.js';
 import { shouldShowCancelHint } from './progress-cancel-hint.js';
 import { isEphemeralSessionId, decideNewSessionScopeId, resolveOutboundAgentScopeId, inheritScopeForReestablishedSession } from './thread-scope.js';
 import { resolveChatSessionId } from './thread-routing.js';
+import { inFlightTurns } from './in-flight-turns.js';
+import { isUpdateBusyGuardEnabled } from './update-busy-rules.js';
 // import { sendLineMessage } from '../platforms/line.js';
 
 // Active sessions: sessionId -> Session participants
@@ -81,6 +83,13 @@ interface ProgressTracker {
   projectId: string | null;  // Web クライアントへのルーティング用
   language: Language;  // #318: 進捗表示メッセージの言語（開始時に1回だけ解決してキャッシュ）
   machineId: string | null;  // #337: ソフトタイムアウト満了時にマシン生存確認するため
+  /**
+   * 会話履歴レール 根治(2026-10-18): 最後に `appendSessionOutput()` が呼ばれた時刻（ms）。
+   * tracker 作成時は `startTime` と同値で初期化する。`getProgressTrackerAgeMs()` の鮮度判定に使う
+   * （tracker の「有無」だけで running を判定すると、回収漏れで恒久的に running=true が返る事故に
+   * なるため、「最後に動いた証拠からの経過時間」を別軸で持つ）。
+   */
+  lastOutputAt: number;
 }
 const progressTrackers = new Map<string, ProgressTracker>();
 
@@ -467,16 +476,18 @@ export async function startProgressTracking(sessionId: string) {
   // 解決ロジックは resolveSessionLanguage() に単一情報源化（agent-manager.ts と共用、#304/#306/#309 と同種の再発防止）
   const language: Language = await resolveSessionLanguage(sessionId);
 
+  const now = Date.now();
   const tracker: ProgressTracker = {
     messages: new Map(),
     outputBuffer: '',
     contextInfo: '',
-    startTime: Date.now(),
+    startTime: now,
     updateInterval: null,
     timeoutTimer: null,
     projectId,
     language,
     machineId,
+    lastOutputAt: now,
   };
 
   // Send initial progress message to all participants
@@ -574,6 +585,8 @@ export function appendSessionOutput(sessionId: string, output: string) {
   if (tracker) {
     // タイムアウトタイマーをリセット（最後の出力から PROGRESS_TIMEOUT に延長、#337 で一本化）
     armProgressTimeout(sessionId);
+    // 会話履歴レール 根治(2026-10-18): 鮮度判定の基準時刻も更新する
+    tracker.lastOutputAt = Date.now();
 
     // Check if this is context info (starts with 📊)
     if (output.startsWith('📊') && tracker.contextInfo === '') {
@@ -696,6 +709,35 @@ export function isSessionRunning(sessionId: string): boolean {
   return progressTrackers.has(sessionId);
 }
 
+/**
+ * 会話履歴レール 根治(2026-10-18): 進捗トラッカーの「最後に動いた証拠からの経過時間」（ms）を返す。
+ * `isSessionRunning()`（tracker の有無のみ）とは異なり、`thread-activity.ts` の `resolveRunning()` が
+ * 鮮度判定（`RUNNING_FRESHNESS_MS`）に使う。tracker が無ければ undefined。
+ */
+export function getProgressTrackerAgeMs(sessionId: string, nowMs: number): number | undefined {
+  const tracker = progressTrackers.get(sessionId);
+  if (!tracker) return undefined;
+  return nowMs - tracker.lastOutputAt;
+}
+
+/**
+ * `GET /api/debug/turns`（管理者限定診断エンドポイント）向け: 全進捗トラッカーをそのまま列挙する
+ * （フィルタ・削除なし、読み出し専用）。
+ */
+export function listProgressTrackers(nowMs: number): Array<{ sessionId: string; machineId: string | null; startedAtMs: number; lastOutputAtMs: number; ageMs: number }> {
+  const result: Array<{ sessionId: string; machineId: string | null; startedAtMs: number; lastOutputAtMs: number; ageMs: number }> = [];
+  for (const [sessionId, tracker] of progressTrackers.entries()) {
+    result.push({
+      sessionId,
+      machineId: tracker.machineId,
+      startedAtMs: tracker.startTime,
+      lastOutputAtMs: tracker.lastOutputAt,
+      ageMs: nowMs - tracker.lastOutputAt,
+    });
+  }
+  return result;
+}
+
 /** セッションの contextInfo（📊 Rate Limit 等）を取得する */
 export function getSessionContextInfo(sessionId: string): string {
   return progressTrackers.get(sessionId)?.contextInfo || '';
@@ -712,6 +754,16 @@ export function appendSessionContextInfo(sessionId: string, text: string): void 
 }
 
 // Finalize progress with final message
+/**
+ * 会話履歴レール 根治(2026-10-18) D1: 従来はこの関数の途中（Discord/Telegram/web への配信）で
+ * 例外が throw すると、末尾の `progressTrackers.delete(sessionId)` に到達できず tracker が
+ * **恒久的に残る**事故があった（`isSessionRunning()` が永久に true を返す＝「返事が返ってきても
+ * スピナーが止まらない」）。実際にこの事故を踏んだ機体では Discord への到達性が無く
+ * `editDiscordMessage`/`sendDiscordMessage` が高確率で throw する状態だった。
+ * 以下の2点で構造的に塞ぐ:
+ * - 配信は participant 単位で try/catch し、1件の配信失敗が他の配信・後処理を止めない
+ * - tracker と `inFlightTurns` の回収は `finally` で必ず行う（配信が全滅しても「実行中」表示を終わらせる）
+ */
 export async function finalizeProgress(sessionId: string, finalMessage: string, files?: FileAttachment[], messageId?: string) {
   const tracker = progressTrackers.get(sessionId);
   const participants = sessionParticipants.get(sessionId) || [];
@@ -724,69 +776,86 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
     clearTimeout(tracker.timeoutTimer);
   }
 
-  // Prepend context info to final message if available
-  let messageToSend = finalMessage;
-  if (tracker?.contextInfo) {
-    messageToSend = tracker.contextInfo + finalMessage;
-  }
+  try {
+    // Prepend context info to final message if available
+    let messageToSend = finalMessage;
+    if (tracker?.contextInfo) {
+      messageToSend = tracker.contextInfo + finalMessage;
+    }
 
-  // Delete progress messages and send final response
-  for (const { platform, chatId } of participants) {
-    const msgInfo = tracker?.messages.get(chatId);
+    // Delete progress messages and send final response
+    for (const { platform, chatId } of participants) {
+      const msgInfo = tracker?.messages.get(chatId);
 
-    if (platform === 'discord') {
-      stopDiscordTyping(chatId);
+      try {
+        if (platform === 'discord') {
+          stopDiscordTyping(chatId);
 
-      // Edit progress message to show completion, or send new message
-      if (msgInfo && !files?.length) {
-        // Edit existing message with final content
-        await editDiscordMessage(chatId, msgInfo.messageId as string, messageToSend);
-      } else {
-        // Delete progress message and send new one with files
-        if (msgInfo) {
-          await editDiscordMessage(chatId, msgInfo.messageId as string, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
+          // Edit progress message to show completion, or send new message
+          if (msgInfo && !files?.length) {
+            // Edit existing message with final content
+            await editDiscordMessage(chatId, msgInfo.messageId as string, messageToSend);
+          } else {
+            // Delete progress message and send new one with files
+            if (msgInfo) {
+              await editDiscordMessage(chatId, msgInfo.messageId as string, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
+            }
+            await sendDiscordMessage(chatId, messageToSend, files);
+          }
+        } else if (platform === 'telegram') {
+          stopTelegramTyping(chatId);
+
+          // Edit progress message to show completion, or send new message
+          if (msgInfo && !files?.length) {
+            // Edit existing message with final content
+            await editTelegramMessage(chatId, msgInfo.messageId as number, messageToSend);
+          } else {
+            // Delete progress message and send new one with files
+            if (msgInfo) {
+              await editTelegramMessage(chatId, msgInfo.messageId as number, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
+            }
+            await sendTelegramMessage(chatId, messageToSend, files);
+          }
+        } else if (platform === 'web') {
+          stopWebTyping(chatId);
+          // tracker の projectId がない場合は sessionProjectMap からフォールバック
+          const finalProjectId = tracker?.projectId ?? sessionProjectMap.get(sessionId);
+          await sendWebMessage(chatId, messageToSend, files, finalProjectId, messageId, sessionId);
         }
-        await sendDiscordMessage(chatId, messageToSend, files);
+      } catch (err) {
+        // D1: 1 participant への配信失敗（例: Discord 到達不可）で tracker 回収自体を止めない。
+        // 配信は失敗してもターンは完了扱いにする（でなければ running が恒久的に true のまま張り付く）。
+        console.error(`[SessionManager] finalizeProgress: failed to deliver to ${platform}/${chatId} for session ${sessionId}:`, (err as Error).message);
       }
-    } else if (platform === 'telegram') {
-      stopTelegramTyping(chatId);
+    }
 
-      // Edit progress message to show completion, or send new message
-      if (msgInfo && !files?.length) {
-        // Edit existing message with final content
-        await editTelegramMessage(chatId, msgInfo.messageId as number, messageToSend);
-      } else {
-        // Delete progress message and send new one with files
-        if (msgInfo) {
-          await editTelegramMessage(chatId, msgInfo.messageId as number, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
+    // プッシュ通知（タブが閉じていても届く）
+    sendPushNotificationForSession(sessionId, messageToSend).catch(() => {});
+    // FCM プッシュ通知（モバイルアプリ用）
+    sendFcmNotificationForSession(sessionId, messageToSend).catch(() => {});
+
+    // 通知レコード作成（モバイルアプリの通知一覧用）
+    prisma.session.findUnique({ where: { id: sessionId }, include: { project: true } })
+      .then(session => {
+        if (session) {
+          const projectName = session.project?.displayName || session.project?.name || 'Unknown';
+          // 切り詰めは createNotification 側（truncateSafe）に任せる。ここで slice すると絵文字を分断する
+          // 依頼2: 通知一覧からスレッド直行できるよう対象 sessionId を記録する
+          createNotification(session.userId, 'response', session.projectId, projectName, `✅ ${projectName}`, messageToSend, sessionId).catch(() => {});
         }
-        await sendTelegramMessage(chatId, messageToSend, files);
-      }
-    } else if (platform === 'web') {
-      stopWebTyping(chatId);
-      // tracker の projectId がない場合は sessionProjectMap からフォールバック
-      const finalProjectId = tracker?.projectId ?? sessionProjectMap.get(sessionId);
-      await sendWebMessage(chatId, messageToSend, files, finalProjectId, messageId, sessionId);
+      })
+      .catch(() => {});
+  } finally {
+    // D1: 配信が何件失敗しても、tracker と inFlightTurns の回収は必ず行う。
+    progressTrackers.delete(sessionId);
+    if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+      // D4: タイムアウト finalize 経路（onProgressTimeout）はこれまで inFlightTurns を解除していなかった。
+      // handleAiOutput(isComplete) 経路からの呼び出しでは既に agent-manager.ts 側で end() 済みだが、
+      // end() は未登録キーに対して no-op（二重登録は害がない、applyAgreement と同じ方針）なので安全に重複呼び出しできる。
+      const machineId = tracker?.machineId ?? sessionMachineMap.get(sessionId) ?? null;
+      if (machineId) inFlightTurns.end(machineId, sessionId);
     }
   }
-
-  progressTrackers.delete(sessionId);
-
-  // プッシュ通知（タブが閉じていても届く）
-  sendPushNotificationForSession(sessionId, messageToSend).catch(() => {});
-  // FCM プッシュ通知（モバイルアプリ用）
-  sendFcmNotificationForSession(sessionId, messageToSend).catch(() => {});
-
-  // 通知レコード作成（モバイルアプリの通知一覧用）
-  prisma.session.findUnique({ where: { id: sessionId }, include: { project: true } })
-    .then(session => {
-      if (session) {
-        const projectName = session.project?.displayName || session.project?.name || 'Unknown';
-        // 切り詰めは createNotification 側（truncateSafe）に任せる。ここで slice すると絵文字を分断する
-        createNotification(session.userId, 'response', session.projectId, projectName, `✅ ${projectName}`, messageToSend).catch(() => {});
-      }
-    })
-    .catch(() => {});
 }
 
 export async function sendMessage(platform: Platform, chatId: string, message: string, files?: FileAttachment[], projectId?: string | null, sessionId?: string) {
@@ -833,31 +902,48 @@ export async function getSessionMessages(sessionId: string, limit: number = 10) 
 }
 
 // Clear all sessions for a specific machine (called when machine goes offline)
+/**
+ * 会話履歴レール 根治(2026-10-18) D2: 従来は (a) DB 到達不可等で 1 セッションの判定が throw すると
+ * ループ全体が中断し残りのセッションが一切片付かず、(b) tracker（`progressTrackers`）自体を
+ * 回収していなかった（切断中に実行中だったターンの running が最長150分張り付く）。
+ * セッション単位 try/catch にし、`stopProgressTracking()` を明示的に呼んで塞ぐ。
+ */
 export async function clearSessionsForMachine(machineId: string) {
   const sessionsToClear: string[] = [];
 
   for (const [sessionId, participants] of sessionParticipants.entries()) {
-    // Get session info from DB to check if it belongs to this machine
-    const session = await prisma.session.findUnique({
-      where: { id: sessionId },
-      select: { machineId: true },
-    });
+    try {
+      // Get session info from DB to check if it belongs to this machine
+      const session = await prisma.session.findUnique({
+        where: { id: sessionId },
+        select: { machineId: true },
+      });
 
-    if (session && session.machineId === machineId) {
-      sessionsToClear.push(sessionId);
+      if (session && session.machineId === machineId) {
+        sessionsToClear.push(sessionId);
 
-      // Notify participants that the session ended
-      const lang = await resolveSessionLanguage(sessionId);
-      const offlineMessage = tChat(lang, 'session.machineOffline');
-      for (const { platform, chatId } of participants) {
-        await sendMessage(platform, chatId, offlineMessage);
+        // Notify participants that the session ended
+        const lang = await resolveSessionLanguage(sessionId);
+        const offlineMessage = tChat(lang, 'session.machineOffline');
+        for (const { platform, chatId } of participants) {
+          try {
+            await sendMessage(platform, chatId, offlineMessage);
+          } catch (err) {
+            console.error(`[SessionManager] Failed to notify ${platform}/${chatId} of machine offline (session ${sessionId}):`, (err as Error).message);
+          }
+        }
       }
+    } catch (err) {
+      // D2: 1 セッションの評価失敗（DB 到達不可等）で残りのセッションの後始末を止めない
+      console.error(`[SessionManager] Failed to evaluate session ${sessionId} for machine ${machineId} disconnect:`, (err as Error).message);
     }
   }
 
   // Clear the sessions
   for (const sessionId of sessionsToClear) {
     sessionParticipants.delete(sessionId);
+    // D2: 進捗トラッカーも確実に回収する（回収漏れがあると running が張り付いたまま復帰できない）
+    stopProgressTracking(sessionId);
 
     // Update DB session status
     await prisma.session.update({

@@ -1,15 +1,10 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { threads as threadsApi, type ThreadSummary } from '../lib/api';
+import { threads as threadsApi, sessions as sessionsApi, type ThreadSummary } from '../lib/api';
 import {
   CONVERSATION_RAIL_LIMIT,
   CONVERSATION_RAIL_POLL_MS,
-  CONVERSATION_SEEN_STORAGE_KEY,
-  CONVERSATION_SEEN_MAX,
-  readSeenMap,
-  serializeSeenMap,
-  seedSeenMap,
   markSeen,
-  pruneSeenMap,
+  resolveEffectiveSeenAt,
   decideAutoSeen,
   resolveConversationStatus,
   type ConversationStatus,
@@ -23,28 +18,13 @@ import {
  * `ChatPage` に1インスタンスだけ置き、drawer/rail 両方の `ConversationRail` へ同じ結果を配る
  * （ポーリングの二重化を避けるため）。
  *
- * 既読状態（緑✓の解除）は localStorage で管理する（DB 変更なし。複数端末では同期しない）。
+ * 既読状態（緑✓の解除）はサーバー管理（`Session.lastSeenAiAt` / `GET /api/threads` の `seenAt` /
+ * `POST /api/sessions/:id/seen`）。端末・ブラウザをまたいで同期する（旧 localStorage 管理から移行）。
+ * `localSeenOverrides` はポーリング間隔（`CONVERSATION_RAIL_POLL_MS`）中の楽観的 UI 反映のためだけの
+ * つなぎで、永続化しない（次回ポーリングでサーバー値に必ず追いつく）。
  * 算術・判定ロジックは一切ここに書かず、すべて `conversation-rail-rules.ts` の純関数に委譲する
  * （`src/hooks/` は `tsconfig.test.json` の対象外で単体テストできないため、`usePanelResize.ts` と同じ方針）。
  */
-
-/** localStorage 読み取りを try/catch で包む（プライベートモード等で例外になる環境向け） */
-function safeGetItem(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-/** localStorage 書き込みを try/catch で包む */
-function safeSetItem(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    /* プライベートモード等で書き込み不可でも動作を継続 */
-  }
-}
 
 export interface UseConversationFeedOptions {
   /** この値が変化するたびに即座に再取得する（ChatPage の `threadRefreshToken` 等） */
@@ -69,10 +49,10 @@ export interface UseConversationFeedResult {
   error: boolean;
   /** 一覧を手動で再取得する（「再試行」ボタン等） */
   refetch: () => void;
-  /** 指定スレッドを既読にする（行クリック時に呼ぶ）。`lastAiAt` は呼び出し時点でサーバーが
-   *  返していた値をそのまま渡すこと（`Date.now()` を渡すとサーバー/ブラウザの時計ずれで
-   *  永久未読・永久既読になりうる）。 */
-  markConversationSeen: (sessionId: string, lastAiAt: string | null | undefined) => void;
+  /** 指定スレッドを既読にする（行クリック時に呼ぶ）。`POST /api/sessions/:id/seen` を叩き、
+   *  サーバーが実際に書き込んだ値（応答の `seenAt`）でローカル上書きを更新する。
+   *  クライアント側で時刻を計算しない（サーバー/ブラウザの時計ずれで永久未読・永久既読になるのを防ぐ）。 */
+  markConversationSeen: (sessionId: string) => void;
 }
 
 export function useConversationFeed(options: UseConversationFeedOptions = {}): UseConversationFeedResult {
@@ -81,13 +61,9 @@ export function useConversationFeed(options: UseConversationFeedOptions = {}): U
   const [rawItems, setRawItems] = useState<ThreadSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
-  /** 既読マップ（sessionId → 既読時点の lastAiAt ISO 文字列）。初期値は localStorage から同期的に復元 */
-  const [seenMap, setSeenMap] = useState<Record<string, string>>(() => readSeenMap(safeGetItem(CONVERSATION_SEEN_STORAGE_KEY)).seen);
-  /** 初回シード（未初期化時の全件既読化）を一度だけ行うためのフラグ */
-  const seededRef = useRef(false);
-  useEffect(() => {
-    seededRef.current = readSeenMap(safeGetItem(CONVERSATION_SEEN_STORAGE_KEY)).initialized;
-  }, []);
+  /** ポーリング間隔中だけ有効な楽観的上書き（sessionId → 既読時点の lastAiAt ISO 文字列）。
+   *  永続化しない。次回ポーリングでサーバー応答の `seenAt` に置き換わる（`resolveEffectiveSeenAt` 参照）。 */
+  const [localSeenOverrides, setLocalSeenOverrides] = useState<Record<string, string>>({});
 
   /** stale-response 防止（並行フェッチ時に古い結果を捨てる。`ThreadList.tsx` の `fetchThreads` と同じ方針） */
   const requestSeqRef = useRef(0);
@@ -95,13 +71,16 @@ export function useConversationFeed(options: UseConversationFeedOptions = {}): U
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
 
-  /** 既読マップを更新し、同時に localStorage へ永続化する（上限超過分は古い順に破棄） */
-  const commitSeenMap = useCallback((updater: (prev: Record<string, string>) => Record<string, string>) => {
-    setSeenMap((prev) => {
-      const next = pruneSeenMap(updater(prev), CONVERSATION_SEEN_MAX);
-      if (next !== prev) safeSetItem(CONVERSATION_SEEN_STORAGE_KEY, serializeSeenMap(next));
-      return next;
-    });
+  /** `POST /api/sessions/:id/seen` を叩き、応答の `seenAt` でローカル上書きを更新する（fire-and-forget）。 */
+  const markConversationSeen = useCallback((sessionId: string) => {
+    sessionsApi.markSeen(sessionId)
+      .then(({ seenAt }) => {
+        if (!seenAt) return; // まだ AI 応答が無いスレッド（既読化は実質 no-op）
+        setLocalSeenOverrides((prev) => markSeen(prev, sessionId, seenAt));
+      })
+      .catch(() => {
+        // 既読化の失敗は表示を壊さない（次にポーリング or 再クリックで自然に追いつく）
+      });
   }, []);
 
   const fetchFeed = useCallback(async () => {
@@ -113,26 +92,29 @@ export function useConversationFeed(options: UseConversationFeedOptions = {}): U
       if (requestSeqRef.current !== seq) return; // stale response
       setRawItems(threads);
 
-      // 初回（未初期化）のみ全件既読シード。これを先に行ってから自動既読を適用する。
-      if (!seededRef.current) {
-        seededRef.current = true;
-        commitSeenMap((prev) => seedSeenMap({ initialized: false, seen: prev }, threads));
-      }
+      // サーバー応答に出てこなくなった sessionId の上書きは捨てる（無限成長防止。
+      // 一覧の件数上限は CONVERSATION_RAIL_LIMIT のため、保持件数も自然にそれ以下に収まる）。
+      setLocalSeenOverrides((prev) => {
+        const idsInList = new Set(threads.map((t) => t.sessionId));
+        let changed = false;
+        const next: Record<string, string> = {};
+        for (const [sessionId, atIso] of Object.entries(prev)) {
+          if (idsInList.has(sessionId)) {
+            next[sessionId] = atIso;
+          } else {
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
 
       // 現在開いているスレッドに新しい応答が来ていれば、可視時に限り自動既読化する
       // （一覧に出ただけでは既読にしない。要望「未確認を羅列して最新を追う」を壊さないため）。
       const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
-      const autoSeenEntries = threads.filter((t) =>
-        decideAutoSeen({ sessionId: t.sessionId, activeSessionId: activeSessionIdRef.current, visible })
-      );
-      if (autoSeenEntries.length > 0) {
-        commitSeenMap((prev) => {
-          let next = prev;
-          for (const t of autoSeenEntries) {
-            if (t.lastAiAt) next = markSeen(next, t.sessionId, t.lastAiAt);
-          }
-          return next;
-        });
+      for (const t of threads) {
+        if (decideAutoSeen({ sessionId: t.sessionId, activeSessionId: activeSessionIdRef.current, visible })) {
+          markConversationSeen(t.sessionId);
+        }
       }
     } catch {
       if (requestSeqRef.current !== seq) return;
@@ -140,7 +122,7 @@ export function useConversationFeed(options: UseConversationFeedOptions = {}): U
     } finally {
       if (requestSeqRef.current === seq) setLoading(false);
     }
-  }, [commitSeenMap]);
+  }, [markConversationSeen]);
 
   // 初回フェッチ・refreshToken 変化時の即時再取得
   useEffect(() => {
@@ -180,10 +162,6 @@ export function useConversationFeed(options: UseConversationFeedOptions = {}): U
     };
   }, [enabled, fetchFeed]);
 
-  const markConversationSeen = useCallback((sessionId: string, lastAiAt: string | null | undefined) => {
-    commitSeenMap((prev) => markSeen(prev, sessionId, lastAiAt));
-  }, [commitSeenMap]);
-
   const items = useMemo<ConversationFeedItem[]>(() => {
     return rawItems.map((item) => ({
       ...item,
@@ -192,10 +170,10 @@ export function useConversationFeed(options: UseConversationFeedOptions = {}): U
         localRunning: localRunningSessionIds?.has(item.sessionId) ?? false,
         lastAiAt: item.lastAiAt,
         lastActiveAt: item.lastActiveAt,
-        seenAt: seenMap[item.sessionId] ?? null,
+        seenAt: resolveEffectiveSeenAt(item.seenAt, localSeenOverrides[item.sessionId]),
       }),
     }));
-  }, [rawItems, seenMap, localRunningSessionIds]);
+  }, [rawItems, localSeenOverrides, localRunningSessionIds]);
 
   return { items, loading, error, refetch: fetchFeed, markConversationSeen };
 }

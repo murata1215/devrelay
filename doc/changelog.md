@@ -6,6 +6,48 @@
 
 ## 実装済み機能
 
+### 会話既読状態のサーバー管理化 + Notification.sessionId 追加 (2026-10-22)
+
+devrelay_flutter（モバイルクライアント）からの実装依頼。WebUI の会話履歴レールの未読判定が
+localStorage（`devrelay-conversation-seen`）で行われていたため、端末・ブラウザをまたいで
+未読状態が同期しない問題を解消した。詳細は
+[devlog](devlog/2026-10-22_conversation_seen_server_managed.md) 参照。
+
+#### 依頼1: スレッド既読状態のサーバー管理
+- `Session.lastSeenAiAt`（DATETIME NULL）を追加。既存行は導入直後の偽の全件未読を防ぐため
+  現時点の `lastAiAt`（role='ai' の MAX(createdAt)）でバックフィル（11672 行中 10445 行に適用、
+  残りは AI 応答が一度も無い行で意図どおり null のまま）
+- `GET /api/threads` のレスポンスに `seenAt` を追加。`running`/`lastAiAt` と同じキルスイッチ
+  （`DEVRELAY_CONVERSATION_RAIL`）・同じ流儀（OFF 時はキー自体を省略し旧レスポンスと構造的に同一にする）
+- `POST /api/sessions/:id/seen` を新設。body 不要、クライアントから既読時刻の値を受け取らず
+  サーバー側で「このスレッドの現在の lastAiAt」を 1 クエリ（相関サブクエリ）で読んで書く
+  （古い値送信による既読の巻き戻り防止 + 開いている間に届いた応答の自動既読化）。
+  他人のセッション／存在しない ID は 404（`POST /api/sessions/:id/switch` と同じ規約）。
+  AI 応答が一度も無いスレッドは `lastSeenAiAt` も null のまま（実質 no-op、`null` を返す）
+- WebUI 側（`useConversationFeed.ts`）の既読状態を localStorage から上記 API へ移行。
+  `conversation-rail-rules.ts` の `readSeenMap`/`serializeSeenMap`/`seedSeenMap`/`pruneSeenMap`/
+  `CONVERSATION_SEEN_STORAGE_KEY`/`CONVERSATION_SEEN_MAX` は不要になったため削除、
+  `markSeen` は「ポーリング間隔中の楽観的 UI 反映」用に用途を変えて存続。新設
+  `resolveEffectiveSeenAt()`（サーバー値とローカル上書きのうち新しい方を採用、巻き戻さない）
+
+#### 依頼2: Notification.sessionId 追加
+- `Notification.sessionId`（nullable、FK は張らない。`KnowledgeChunk.sessionId` と同じ規約）を追加
+- 通知生成時（`createNotification()`）に対象セッション ID を書くよう2呼び出し元
+  （`session-manager.ts` の AI 応答通知、`agent-manager.ts` の承認待ち通知）を修正
+- `GET /api/notifications` のレスポンスに `sessionId: string | null` を追加
+
+#### 変更ファイル
+`apps/server/prisma/schema.prisma`、`apps/server/src/routes/api.ts`、
+`apps/server/src/services/{notification-service,session-manager,agent-manager}.ts`、
+`apps/web/src/{lib/api,lib/conversation-rail-rules,hooks/useConversationFeed,pages/ChatPage}.ts(x)`、
+テスト `apps/web/tests/conversation-rail-rules.test.mjs`
+
+#### 検証
+DB マイグレーション適用済み（`prisma db execute` 直接適用、SQL でカラム存在・バックフィル件数を検証、
+`prisma generate` 再生成済み）。server1209/1209・web854/854（新規 markSeen 系 5 件、削除 11 件）green、
+6 workspace build green。Agent 側変更ゼロ（`u` 不要）。pm2 restart 済み・`GET /api/threads` の
+`seenAt` を実機 curl で確認済み。commit/push 済み（main 直接）。
+
 ### testflight ポート採番の衝突根治: 9001-9299 / 9300-9499 レンジ分離 (2026-10-18)
 
 `testflight` コマンドが払い出したポート 9027 が、手動作成済みの Caddy サイト

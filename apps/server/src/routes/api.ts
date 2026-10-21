@@ -10,7 +10,7 @@ import { isMachineBusyWithReason } from '../services/auto-updater.js';
 import { isUpdateBusyGuardEnabled, decideManualUpdate, extractBusyCount } from '../services/update-busy-rules.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
-import { createSession, resolveScopeOptionsForSession, isSessionRunning } from '../services/session-manager.js';
+import { createSession, resolveScopeOptionsForSession, getProgressTrackerAgeMs, listProgressTrackers } from '../services/session-manager.js';
 import { switchChatToThread } from '../services/command-handler.js';
 import { evaluateProjectOwnership, evaluateSessionOwnership, evaluateThreadCreate, evaluateThreadSwitch } from '../services/thread-api-guard.js';
 import { validateThreadTitle } from '../services/thread-title.js';
@@ -19,6 +19,7 @@ import { buildEphemeralSessionIdExclusion } from '../services/thread-scope.js';
 import { buildEmptyEndedThreadExclusion, isHideEmptyEndedEnabled } from '../services/thread-list-filter.js';
 import { stripCommandTag, stripAiNoise } from '../services/thread-label-source.js';
 import { isConversationRailEnabled, resolveRunning } from '../services/thread-activity.js';
+import { isDebugTurnsEnabled } from '../services/debug-turns-rules.js';
 import { inFlightTurns } from '../services/in-flight-turns.js';
 import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
@@ -1288,6 +1289,29 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // 診断（会話履歴レール「スピナーが止まらない」調査用、システム管理者限定・read-only）
+  // ========================================
+
+  /**
+   * 2026-10-18 根治サイクル: `progressTrackers`（session-manager.ts）と `inFlightTurns` の
+   * 全エントリをそのまま返す（フィルタ・削除なし）。「running が張り付いている」報告が来たとき、
+   * 推測で調査を再開せず 1 コマンドで「どのセッションのどちらの台帳が残っているか」を確定させるため。
+   * キルスイッチ DEVRELAY_DEBUG_TURNS（既定 ON。'0' で 404、既存キルスイッチと同じ流儀）。
+   */
+  app.get('/api/debug/turns', async (request, reply) => {
+    if (!isDebugTurnsEnabled(process.env.DEVRELAY_DEBUG_TURNS)) {
+      return reply.status(404).send({ error: 'Debug turns endpoint is disabled (DEVRELAY_DEBUG_TURNS=0)' });
+    }
+    if (!requireSystemAdmin(request as unknown as MinimalRequest, reply)) return;
+    const nowMs = Date.now();
+    return {
+      nowMs,
+      progressTrackers: listProgressTrackers(nowMs),
+      inFlightTurns: inFlightTurns.listAll(nowMs),
+    };
+  });
+
+  // ========================================
   // サービス再起動（PM2 で管理）
   // ========================================
 
@@ -1806,14 +1830,21 @@ export async function apiRoutes(app: FastifyInstance) {
         cancelled: s.cancelledAt !== null,
         // 会話履歴レール: 実行中判定（`undefined` のときはキー自体を JSON に出さない。
         // キルスイッチ OFF 時のレスポンスを旧実装と構造的に同一にするため）。
+        // 2026-10-18 根治: tracker の「有無」ではなく「鮮度」で判定する（thread-activity.ts 参照。
+        // 回収漏れが再発しても自己回復するための二重の安全策）。
         running: resolveRunning({
           enabled: railEnabled,
-          progressTracked: isSessionRunning(s.id),
+          progressTrackerAgeMs: getProgressTrackerAgeMs(s.id, nowMs),
           inFlightStartedAtMs: inFlightTurns.getStartedAt(s.machineId, s.id),
           nowMs,
         }),
         // 会話履歴レール: 未確認（緑✓）判定用。キルスイッチ OFF 時は undefined（キー省略）。
         lastAiAt: railEnabled ? (lastAiAtBySession.get(s.id)?.toISOString() ?? null) : undefined,
+        // 会話既読状態のサーバー管理化: このスレッドを最後に既読にした時点の lastAiAt
+        // （= Session.lastSeenAiAt）。端末・ブラウザをまたいで既読状態を同期するため、
+        // 従来の localStorage（devrelay-conversation-seen）に代わる出どころ。
+        // running/lastAiAt と同じキルスイッチ・同じ流儀（OFF 時はキー自体を省略する）。
+        seenAt: railEnabled ? (s.lastSeenAiAt?.toISOString() ?? null) : undefined,
       };
     });
 
@@ -1963,6 +1994,49 @@ export async function apiRoutes(app: FastifyInstance) {
       machineDisplayName: result.machineDisplayName,
       title: result.title,
     });
+  });
+
+  /**
+   * スレッドを既読にする（会話既読状態のサーバー管理化。Flutter/WebUI 端末間で未読状態を同期するため、
+   * 従来の localStorage（`devrelay-conversation-seen`）管理から移行）。
+   * @route POST /api/sessions/:id/seen
+   * body 不要。
+   *
+   * クライアントから既読時刻の値を受け取らず、サーバー側で「このスレッドの現在の lastAiAt
+   * （= role='ai' の最新 Message.createdAt）」を読み取って `Session.lastSeenAiAt` に書く。
+   * - クライアントから値を受け取る形にすると、古い値を送られて既読が巻き戻る事故が起こりうる
+   * - SELECT と UPDATE を分けず 1 クエリ（相関サブクエリ）にまとめることで、
+   *   「既読 API を叩いている最中に新しい AI 応答が届く」レースでも常に最新値を拾う
+   *   （= チャットを開いている間に届いた応答が自動的に既読になる、という望ましい挙動になる）
+   * - 他人のセッション／存在しない ID は 404（`POST /api/sessions/:id/switch` と同じ規約）
+   * - 対象スレッドにまだ AI 応答が無い（`lastAiAt` が null）場合は `lastSeenAiAt` も null のまま
+   *   書き込まれる（= 実質 no-op）。`resolveConversationStatus`（WebUI 側）は `lastAiAt === null`
+   *   を無条件で 'seen' 扱いにするため、null のままでも判定上の不整合は生じない。
+   */
+  app.post('/api/sessions/:id/seen', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { id: sessionId } = request.params;
+
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true } });
+    const guard = evaluateSessionOwnership({
+      session: session ? { userId: session.userId } : null,
+      requestUserId: userId,
+    });
+    if (!guard.ok) {
+      return reply.status(guard.status).send({ error: guard.error });
+    }
+
+    const rows = await prisma.$queryRaw<{ lastSeenAiAt: Date | null }[]>`
+      UPDATE "Session" s
+      SET "lastSeenAiAt" = (
+        SELECT MAX("createdAt") FROM "Message" WHERE "sessionId" = s.id AND role = 'ai'
+      )
+      WHERE s.id = ${sessionId}
+      RETURNING "lastSeenAiAt"
+    `;
+
+    const seenAt = rows[0]?.lastSeenAiAt ?? null;
+    return reply.send({ seenAt: seenAt ? seenAt.toISOString() : null });
   });
 
   // ========================================

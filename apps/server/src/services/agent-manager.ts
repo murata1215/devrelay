@@ -2615,7 +2615,8 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
     sendFcmNotificationForToolApproval(userId, toolName, projectName, sessionId, projectId).catch(() => {});
     // 通知レコード作成（通知一覧用）
     const toolDesc = isQuestion ? `質問: ${(toolInput as any)?.question || toolName}` : `${toolName}`;
-    createNotification(userId, 'approval', projectId, projectName, '🔐 承認待ち', toolDesc).catch(() => {});
+    // 依頼2: 通知一覧からスレッド直行できるよう対象 sessionId を記録する
+    createNotification(userId, 'approval', projectId, projectName, '🔐 承認待ち', toolDesc, sessionId).catch(() => {});
   }
 }
 

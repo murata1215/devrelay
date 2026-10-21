@@ -622,6 +622,16 @@ export const sessions = {
   async switchThread(sessionId: string, tabId: string): Promise<ThreadSwitchResult> {
     return request('POST', `/sessions/${sessionId}/switch`, { tabId });
   },
+
+  /** スレッドを既読にする（POST /api/sessions/:id/seen）。
+   * body は不要（サーバー側が現在の lastAiAt を読んで書くため、クライアントからは値を渡さない）。
+   * 戻り値の `seenAt` はサーバーが実際に書き込んだ値（`null` = まだ AI 応答が無いスレッド）。 */
+  async markSeen(sessionId: string): Promise<{ seenAt: string | null }> {
+    // body は `{}`（空オブジェクト）を明示的に送る。`undefined` にすると Content-Type: application/json
+    // ヘッダーだけが残り、Fastify の JSON パーサーが空ボディを 400 にする事故
+    // （`POST /api/notifications/read-all` で踏んだものと同種）を避けるため。
+    return request('POST', `/sessions/${sessionId}/seen`, {});
+  },
 };
 
 /** スレッド管理 サイクル3: スレッド一覧の1件分（server の GET /api/threads レスポンス要素と同一） */
@@ -658,6 +668,12 @@ export interface ThreadSummary {
    * （`undefined`）。`conversation-rail-rules.ts` の `resolveConversationStatus` が
    * `undefined` のときだけ `lastActiveAt` にフォールバックする。 */
   lastAiAt?: string | null;
+  /** 会話既読状態のサーバー管理化: このスレッドを最後に既読にした時点の `lastAiAt`
+   * （= サーバー側 `Session.lastSeenAiAt`）。端末・ブラウザをまたいで同期するための出どころ。
+   * まだ一度も既読化されていない／AI 応答が無いスレッドは `null`。
+   * 旧サーバー応答・キルスイッチ OFF 時にはキー自体が無い（`undefined`）。
+   * `running`/`lastAiAt` と同じ流儀で `conversation-rail-rules.ts` 側が解釈する。 */
+  seenAt?: string | null;
 }
 
 /** POST /api/sessions/:id/switch のレスポンス */

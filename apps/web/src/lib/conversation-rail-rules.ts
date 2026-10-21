@@ -18,15 +18,6 @@ export const CONVERSATION_RAIL_POLL_MS = 10_000;
 /** Sidebar（Servers/Agents/会話）のモード選択を保存する localStorage キー */
 export const SIDEBAR_MODE_STORAGE_KEY = 'devrelay-sidebar-mode';
 
-/** 会話履歴レールの既読状態（sessionId → 既読時点の lastAiAt ISO 文字列）を保存する localStorage キー */
-export const CONVERSATION_SEEN_STORAGE_KEY = 'devrelay-conversation-seen';
-
-/** 既読マップの保持上限件数（超過分は古い順に破棄し localStorage の無限成長を防ぐ） */
-export const CONVERSATION_SEEN_MAX = 200;
-
-/** 既読マップのスキーマバージョン（将来の形式変更時に無条件で initialized:false に倒すための印） */
-const SEEN_MAP_VERSION = 1;
-
 /** Sidebar の表示モード（`Servers`/`Agents` タブに「会話」タブが加わった3値） */
 export type SidebarMode = 'agents' | 'servers' | 'conversations';
 
@@ -84,72 +75,19 @@ export function resolveConversationStatus(args: {
   return targetMs > seenMs ? 'unread' : 'seen';
 }
 
-/** `readSeenMap()` の戻り値 */
-export interface SeenMapState {
-  /** localStorage に有効な既読マップが保存されていたか（false なら未初期化＝初回起動扱い） */
-  initialized: boolean;
-  /** sessionId → 既読時点の lastAiAt ISO 文字列 */
-  seen: Record<string, string>;
-}
-
 /**
- * localStorage の生の文字列から既読マップを復元する。
- * キー無し（`null`）・JSON 不正・`v` 不一致・`seen` が object でない場合は
- * `{ initialized:false, seen:{} }` に潰す（壊れたデータを握ったまま進行しない）。
- * `seen` の各値は文字列であることを確認し、そうでないものは読み捨てる。
+ * 会話既読状態のサーバー管理化（端末・ブラウザ間同期）に伴い、既読マップの localStorage
+ * 永続化（旧 `readSeenMap`/`serializeSeenMap`/`seedSeenMap`/`pruneSeenMap`/
+ * `CONVERSATION_SEEN_STORAGE_KEY`/`CONVERSATION_SEEN_MAX`）は廃止した。
+ * 既読の出どころは `GET /api/threads` の `seenAt`（= サーバー側 `Session.lastSeenAiAt`）に一本化され、
+ * 「初回起動時に全件シード」のような特別扱いも不要になった（サーバーが導入時に
+ * 既存行をバックフィル済みのため、初回表示から正しい既読状態が返る）。
+ * `markSeen` だけは、ポーリング間隔中の楽観的 UI 反映（`useConversationFeed.ts` の
+ * `localSeenOverrides`）に引き続き使うため残す。
  */
-export function readSeenMap(raw: string | null): SeenMapState {
-  if (raw === null) return { initialized: false, seen: {} };
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      !parsed ||
-      typeof parsed !== 'object' ||
-      (parsed as { v?: unknown }).v !== SEEN_MAP_VERSION ||
-      typeof (parsed as { seen?: unknown }).seen !== 'object' ||
-      (parsed as { seen?: unknown }).seen === null
-    ) {
-      return { initialized: false, seen: {} };
-    }
-    const rawSeen = (parsed as { seen: Record<string, unknown> }).seen;
-    const seen: Record<string, string> = {};
-    for (const [sessionId, value] of Object.entries(rawSeen)) {
-      if (typeof value === 'string') seen[sessionId] = value;
-    }
-    return { initialized: true, seen };
-  } catch {
-    return { initialized: false, seen: {} };
-  }
-}
-
-/** 既読マップを localStorage 保存用の文字列に変換する（`readSeenMap` と往復可能な形式） */
-export function serializeSeenMap(seen: Record<string, string>): string {
-  return JSON.stringify({ v: SEEN_MAP_VERSION, seen });
-}
-
-/** `seedSeenMap()` に渡すスレッド1件分の最小情報 */
-export interface ConversationSeedItem {
-  sessionId: string;
-  lastAiAt?: string | null;
-}
 
 /**
- * 初回起動時（`state.initialized === false`）にのみ、取得した全スレッドを既読シードする。
- * これにより「初めて会話履歴レールを開いたら20件全部が緑✓」という最悪の第一印象を回避する。
- * 既に初期化済み（`state.initialized === true`）の場合は既存の `seen` をそのまま返す（恒等）。
- * `lastAiAt` が無い/null のスレッド（AI 応答がまだ無い）はシード対象にしない。
- */
-export function seedSeenMap(state: SeenMapState, items: ConversationSeedItem[]): Record<string, string> {
-  if (state.initialized) return state.seen;
-  const seen: Record<string, string> = {};
-  for (const item of items) {
-    if (item.lastAiAt) seen[item.sessionId] = item.lastAiAt;
-  }
-  return seen;
-}
-
-/**
- * スレッドを既読にする。`atIso`（クリック時点でサーバーが返していた `lastAiAt`）が
+ * スレッドを既読にする。`atIso`（`POST /api/sessions/:id/seen` のレスポンス `seenAt`）が
  * 無ければ何もしない（比較対象が無いなら既読化できない＝恒等）。
  * 既存の既読時刻より新しい場合のみ更新し、**巻き戻さない**
  * （ポーリング結果の順序入れ替わりで既読が未読に戻るレースを防ぐ）。
@@ -172,21 +110,27 @@ export function markSeen(
 }
 
 /**
- * 既読マップの保持件数を `max` 以下に切り詰める。超過分は「古い順」
- * （= オブジェクトのキー挿入順。JS は文字列キーの挿入順を保持するため、
- * 初めて既読化された順＝先頭ほど古い、という近似で十分機能する）に破棄する。
- * `max` 以下であれば元のオブジェクトをそのまま返す（恒等）。
+ * サーバー由来の `seenAt`（`GET /api/threads` の `seenAt`、複数端末間で同期される真実の情報源）と、
+ * このブラウザが直近で行った楽観的な既読更新（`POST /api/sessions/:id/seen` 応答の
+ * ローカル上書き。次回ポーリングでサーバー値が追いつくまでのつなぎ）をマージする。
+ *
+ * - `localOverride` が無ければサーバー値をそのまま返す（恒等）
+ * - サーバー値が `null`/`undefined`（未既読 or 旧サーバー応答）でも `localOverride` があればそちらを使う
+ * - 両方あれば新しい方を採用する（巻き戻さない。`markSeen` と同じ方針）
+ * - 日時パース不能な側は無視してもう一方を採用する
  */
-export function pruneSeenMap(seen: Record<string, string>, max: number): Record<string, string> {
-  const keys = Object.keys(seen);
-  if (keys.length <= max) return seen;
-  const dropCount = keys.length - max;
-  const keysToDrop = new Set(keys.slice(0, dropCount));
-  const next: Record<string, string> = {};
-  for (const key of keys) {
-    if (!keysToDrop.has(key)) next[key] = seen[key];
-  }
-  return next;
+export function resolveEffectiveSeenAt(
+  serverSeenAt: string | null | undefined,
+  localOverride: string | undefined
+): string | null | undefined {
+  if (localOverride === undefined) return serverSeenAt;
+  if (serverSeenAt === null || serverSeenAt === undefined) return localOverride;
+
+  const serverMs = Date.parse(serverSeenAt);
+  const overrideMs = Date.parse(localOverride);
+  if (Number.isNaN(serverMs)) return localOverride;
+  if (Number.isNaN(overrideMs)) return serverSeenAt;
+  return overrideMs > serverMs ? localOverride : serverSeenAt;
 }
 
 /**
@@ -203,4 +147,46 @@ export function decideAutoSeen(args: {
   visible: boolean;
 }): boolean {
   return args.visible && args.activeSessionId === args.sessionId;
+}
+
+/**
+ * 2026-10-22 見た目改修: `ThreadSummary.machineName` は常に `エイリアス(ホスト名)/ユーザー名` の
+ * 2セグメント（`agent-manager.ts` の自動 displayName 計算も `alias/username` 形式を維持する。
+ * 例: `x220-158-18-103/devrelay`）。会話履歴レールの行で「エージェント名」として見せたいのは
+ * 先頭セグメント（ホスト名側）のみで、末尾のユーザー名セグメントは不要（`formatConversationScope`
+ * 側でプロジェクト名と連結するため、そのまま繋ぐと `ubuntu-prod/devrelay/pixtalk` のように
+ * 3セグメントになってしまう）。
+ *
+ * - スラッシュが無ければそのまま返す（旧データ・異常値への fail-open）
+ * - 空・null・undefined は `''`
+ * - 前後の空白は trim する
+ */
+export function deriveAgentLabel(machineName: string | null | undefined): string {
+  if (!machineName) return '';
+  const trimmed = machineName.trim();
+  if (!trimmed) return '';
+  const slashIdx = trimmed.indexOf('/');
+  if (slashIdx === -1) return trimmed;
+  return trimmed.slice(0, slashIdx).trim();
+}
+
+/**
+ * 会話履歴レールの行1行目（主役）に出す「エージェント名/プロジェクト名」を組み立てる。
+ * 要望: 「右上 Servers/Agents タブの隣」という置き場所の性質上、全プロジェクト横断の一覧では
+ * どのエージェントのどのプロジェクトの会話かが先に分かるべき（会話タイトルより優先度が高い）。
+ *
+ * - エージェント名が空 → プロジェクト名のみ
+ * - プロジェクト名が空 → エージェント名のみ
+ * - 両方空 → `''`（呼び出し側が `thread.untitled` 等へフォールバックする）
+ */
+export function formatConversationScope(args: {
+  /** `deriveAgentLabel()` 適用後の値を渡すこと（`machineName` をそのまま渡さない） */
+  agentLabel: string;
+  /** `resolveProjectLabel` 解決後のプロジェクト表示名 */
+  projectLabel: string;
+}): string {
+  const agent = args.agentLabel.trim();
+  const project = args.projectLabel.trim();
+  if (agent && project) return `${agent}/${project}`;
+  return agent || project;
 }

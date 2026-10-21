@@ -6,13 +6,11 @@ import assert from 'node:assert/strict';
 import {
   readSidebarMode,
   resolveConversationStatus,
-  readSeenMap,
-  serializeSeenMap,
-  seedSeenMap,
   markSeen,
-  pruneSeenMap,
+  resolveEffectiveSeenAt,
   decideAutoSeen,
-  CONVERSATION_SEEN_MAX,
+  deriveAgentLabel,
+  formatConversationScope,
 } from '../dist-test/lib/conversation-rail-rules.js';
 
 describe('readSidebarMode', () => {
@@ -94,59 +92,6 @@ describe('resolveConversationStatus', () => {
   });
 });
 
-describe('readSeenMap / serializeSeenMap', () => {
-  test('null は initialized:false', () => {
-    assert.deepEqual(readSeenMap(null), { initialized: false, seen: {} });
-  });
-
-  test('不正 JSON は initialized:false', () => {
-    assert.deepEqual(readSeenMap('{not json'), { initialized: false, seen: {} });
-  });
-
-  test('v 不一致は initialized:false', () => {
-    assert.deepEqual(readSeenMap(JSON.stringify({ v: 999, seen: { s1: 'x' } })), { initialized: false, seen: {} });
-  });
-
-  test('seen が object でない場合は initialized:false', () => {
-    assert.deepEqual(readSeenMap(JSON.stringify({ v: 1, seen: 'not-an-object' })), { initialized: false, seen: {} });
-  });
-
-  test('正常なデータは initialized:true で復元される', () => {
-    const result = readSeenMap(JSON.stringify({ v: 1, seen: { s1: '2026-10-18T00:00:00.000Z' } }));
-    assert.deepEqual(result, { initialized: true, seen: { s1: '2026-10-18T00:00:00.000Z' } });
-  });
-
-  test('seen の値が文字列でないエントリは読み捨てる', () => {
-    const result = readSeenMap(JSON.stringify({ v: 1, seen: { s1: '2026-10-18T00:00:00.000Z', s2: 12345 } }));
-    assert.deepEqual(result, { initialized: true, seen: { s1: '2026-10-18T00:00:00.000Z' } });
-  });
-
-  test('serializeSeenMap → readSeenMap の往復は恒等', () => {
-    const original = { s1: '2026-10-18T00:00:00.000Z', s2: '2026-10-17T00:00:00.000Z' };
-    const roundTripped = readSeenMap(serializeSeenMap(original));
-    assert.deepEqual(roundTripped, { initialized: true, seen: original });
-  });
-});
-
-describe('seedSeenMap', () => {
-  test('未初期化のとき、lastAiAt がある行だけ全件シードする', () => {
-    const state = { initialized: false, seen: {} };
-    const items = [
-      { sessionId: 's1', lastAiAt: '2026-10-18T00:00:00.000Z' },
-      { sessionId: 's2', lastAiAt: null },
-      { sessionId: 's3' }, // lastAiAt 自体が無い
-    ];
-    assert.deepEqual(seedSeenMap(state, items), { s1: '2026-10-18T00:00:00.000Z' });
-  });
-
-  test('初期化済みなら恒等（既存 seen を書き換えない）', () => {
-    const existing = { s1: '2026-10-18T00:00:00.000Z' };
-    const state = { initialized: true, seen: existing };
-    const items = [{ sessionId: 's2', lastAiAt: '2026-10-18T01:00:00.000Z' }];
-    assert.equal(seedSeenMap(state, items), existing); // 同一参照（新規オブジェクトを作らない）
-  });
-});
-
 describe('markSeen', () => {
   test('新規 sessionId を追加する', () => {
     const result = markSeen({}, 's1', '2026-10-18T00:00:00.000Z');
@@ -173,20 +118,35 @@ describe('markSeen', () => {
   });
 });
 
-describe('pruneSeenMap', () => {
-  test('上限以下なら恒等', () => {
-    const seen = { s1: 'a', s2: 'b' };
-    assert.equal(pruneSeenMap(seen, 10), seen);
+describe('resolveEffectiveSeenAt', () => {
+  test('localOverride が無ければサーバー値をそのまま返す', () => {
+    assert.equal(resolveEffectiveSeenAt('2026-10-18T00:00:00.000Z', undefined), '2026-10-18T00:00:00.000Z');
+    assert.equal(resolveEffectiveSeenAt(null, undefined), null);
+    assert.equal(resolveEffectiveSeenAt(undefined, undefined), undefined);
   });
 
-  test('超過時に古い順（キー挿入順の先頭）から落とす', () => {
-    const seen = { s1: 'a', s2: 'b', s3: 'c' };
-    const result = pruneSeenMap(seen, 2);
-    assert.deepEqual(result, { s2: 'b', s3: 'c' });
+  test('サーバー値が null でも localOverride があればそちらを使う', () => {
+    assert.equal(resolveEffectiveSeenAt(null, '2026-10-18T00:00:00.000Z'), '2026-10-18T00:00:00.000Z');
   });
 
-  test('CONVERSATION_SEEN_MAX は 200', () => {
-    assert.equal(CONVERSATION_SEEN_MAX, 200);
+  test('サーバー値が undefined（キルスイッチ OFF 等）でも localOverride があればそちらを使う', () => {
+    assert.equal(resolveEffectiveSeenAt(undefined, '2026-10-18T00:00:00.000Z'), '2026-10-18T00:00:00.000Z');
+  });
+
+  test('両方あれば新しい方を採用する（巻き戻さない）', () => {
+    assert.equal(
+      resolveEffectiveSeenAt('2026-10-18T00:00:00.000Z', '2026-10-18T01:00:00.000Z'),
+      '2026-10-18T01:00:00.000Z'
+    );
+    assert.equal(
+      resolveEffectiveSeenAt('2026-10-18T02:00:00.000Z', '2026-10-18T01:00:00.000Z'),
+      '2026-10-18T02:00:00.000Z'
+    );
+  });
+
+  test('日時パース不能な側は無視してもう一方を採用する', () => {
+    assert.equal(resolveEffectiveSeenAt('not-a-date', '2026-10-18T01:00:00.000Z'), '2026-10-18T01:00:00.000Z');
+    assert.equal(resolveEffectiveSeenAt('2026-10-18T00:00:00.000Z', 'not-a-date'), '2026-10-18T00:00:00.000Z');
   });
 });
 
@@ -205,5 +165,55 @@ describe('decideAutoSeen', () => {
 
   test('activeSessionId が null なら false', () => {
     assert.equal(decideAutoSeen({ sessionId: 's1', activeSessionId: null, visible: true }), false);
+  });
+});
+
+describe('deriveAgentLabel', () => {
+  test('machineName（alias/username の2セグメント）の先頭セグメントのみ返す', () => {
+    assert.equal(deriveAgentLabel('ubuntu-prod/devrelay'), 'ubuntu-prod');
+  });
+
+  test('スラッシュが無ければそのまま返す（旧データ・異常値への fail-open）', () => {
+    assert.equal(deriveAgentLabel('x220'), 'x220');
+  });
+
+  test('複数スラッシュがあっても最初のスラッシュで区切る', () => {
+    assert.equal(deriveAgentLabel('host/user/extra'), 'host');
+  });
+
+  test('前後の空白を trim する', () => {
+    assert.equal(deriveAgentLabel('  ubuntu-prod/devrelay  '), 'ubuntu-prod');
+  });
+
+  test('空文字・null・undefined は空文字', () => {
+    assert.equal(deriveAgentLabel(''), '');
+    assert.equal(deriveAgentLabel(null), '');
+    assert.equal(deriveAgentLabel(undefined), '');
+  });
+
+  test('空白のみは空文字', () => {
+    assert.equal(deriveAgentLabel('   '), '');
+  });
+});
+
+describe('formatConversationScope', () => {
+  test('両方あれば agent/project で連結する（ユーザー提示例 ubuntu-prod/devrelay と一致）', () => {
+    assert.equal(formatConversationScope({ agentLabel: 'ubuntu-prod', projectLabel: 'devrelay' }), 'ubuntu-prod/devrelay');
+  });
+
+  test('エージェント名が空ならプロジェクト名のみ', () => {
+    assert.equal(formatConversationScope({ agentLabel: '', projectLabel: 'pixtalk' }), 'pixtalk');
+  });
+
+  test('プロジェクト名が空ならエージェント名のみ', () => {
+    assert.equal(formatConversationScope({ agentLabel: 'ubuntu-prod', projectLabel: '' }), 'ubuntu-prod');
+  });
+
+  test('両方空なら空文字（呼び出し側が thread.untitled 等へフォールバックする）', () => {
+    assert.equal(formatConversationScope({ agentLabel: '', projectLabel: '' }), '');
+  });
+
+  test('前後の空白を trim してから連結する', () => {
+    assert.equal(formatConversationScope({ agentLabel: ' ubuntu-prod ', projectLabel: ' devrelay ' }), 'ubuntu-prod/devrelay');
   });
 });
