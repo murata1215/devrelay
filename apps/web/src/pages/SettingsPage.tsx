@@ -11,6 +11,7 @@ import { isNotificationSoundEnabled, setNotificationSoundEnabled, playNotificati
 import { getDocPanelSettings, setDocPanelSettings, type DocPanelSettings } from '../utils/doc-panel-settings';
 import { useLanguage } from '../contexts/LanguageContext';
 import { ClearanceAdminSection } from '../components/knowledge/ClearanceAdminSection';
+import { PushDevicesSection } from '../components/settings/PushDevicesSection';
 
 type SettingsTab = 'general' | 'ai' | 'agent' | 'integrations' | 'organization' | 'system';
 
@@ -2470,6 +2471,9 @@ export function SettingsPage() {
             <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${soundEnabled ? 'translate-x-5' : ''}`} />
           </button>
         </div>
+
+        {/* モバイルプッシュ通知（FCM）の登録済み端末一覧 + テスト送信。2026-10-22 の無音故障の再発防止 */}
+        <PushDevicesSection />
 
         {/* チャット右パネル（DocPanel）の表示設定 */}
         <h3 className="text-sm font-semibold text-[var(--text-secondary)] mt-6 mb-3">Chat Side Panel</h3>

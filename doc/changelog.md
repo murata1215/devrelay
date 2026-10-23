@@ -75,6 +75,57 @@ macos 657+1skip green（macos の 1 件 flake は `conversation-store-scope.test
 不要（スキーマ変更なし）。新規キルスイッチなし（`DEVRELAY_AGENT_REPO_URL` 未設定が既定で現行動作
 そのもの）。
 
+### FCM プッシュ通知の無音故障の根治 (2026-10-23)
+
+ユーザー報告「Flutter アプリ入れ直し後、iPhone に通知が来なくなった」を調査。真因は
+`flutter install --release` による実機への再インストールで iOS の通知許可が `notDetermined` に
+リセットされ、新しい FCM トークンが一度もサーバーに登録されなかったこと（DevRelay サーバーの
+メンテは無関係）。サーバー側には配信先の無い古いトークンだけが残り、FCM がエラーも出さず受理
+するため 110 件超の通知が無音のまま消失していた。詳細は
+[devlog](devlog/2026-10-23_fcm_push_silent_failure.md) 参照。
+
+#### Phase A: 無音故障の可視化と削除の安全化
+- 新規 `services/fcm-token-rules.ts`（外部 import ゼロの純関数）: トークン正規化・FCM エラー分類・
+  削除判定・健全性判定・マスク処理・ポリシー解決
+- 新規 `services/fcm-token-store.ts`: トークン永続化 + userId ごとの直列化（read-modify-write の
+  競合を実用上解消）、新規 `services/fcm-metrics.ts`: プロセス寿命の送信メトリクス
+- `fcm-service.ts` を全面再構成: 配信先 0 件・未初期化での無言 return を廃止し必ずログに残す。
+  削除ポリシーを安全化（`invalid-argument` は連続 5 回失敗まで削除しない。全トークンが同一エラーで
+  失敗した場合は「全滅ガード」で削除自体を中止し、環境ズレで正しいトークンまで消える事故を防ぐ）
+- 同梱修正: ツール承認通知の `projectName` に実はマシン名が渡っていた表示バグ（`agent-manager.ts`）。
+  `GET /api/settings` が素の FCM トークン・Web Push 秘密鍵（auth/p256dh）をそのまま返していた漏洩を修正
+
+#### Phase B: 診断・テスト送信 API
+- `GET /api/push/fcm/devices`: 登録済み端末一覧（トークンは先頭マスクのみ）+ 健全性サマリ
+- `POST /api/push/fcm/test`: 自分の全端末にテスト通知を送り端末ごとの成否を返す（削除は行わない）
+- `POST /api/push/fcm/verify`: トークン登録状況の自己診断（Flutter 側の起動時自己復帰に使う想定）
+- `DELETE /api/push/fcm/devices/:tokenPrefix`: 死んだ端末の手動削除
+
+#### Phase C: WebUI 設定画面
+- 新規 `components/settings/PushDevicesSection.tsx` / `lib/push-device-rules.ts`: 設定画面
+  Notification セクションに端末一覧・ヘルスバッジ（正常/連続失敗/1日以上成功なし等）・
+  「テスト通知を送る」ボタンを追加
+
+#### 見送り・別途依頼
+- Phase D（stale トークンの自動掃除）は本サイクルでは見送り
+- Phase E（Flutter 側: subscribe 契機の拡張・起動時自己診断・権限無効時バナー）は
+  `doc/flutter-push-api-contract.md` にまとめ、別途依頼
+
+#### キルスイッチ
+`DEVRELAY_PUSH_DIAG`（既定1）/ `DEVRELAY_FCM_STRICT_DELETE`（既定0）/ `DEVRELAY_FCM_TEST_API`（既定1）
+
+#### 変更ファイル
+`apps/server/src/services/{fcm-service,fcm-token-rules,fcm-token-store,fcm-metrics,agent-manager}.ts`、
+`apps/server/src/routes/api.ts`、`apps/server/tests/fcm-token-rules.test.mjs`、
+`apps/web/src/{lib/api.ts,lib/push-device-rules.ts,pages/SettingsPage.tsx,components/settings/PushDevicesSection.tsx}`、
+`apps/web/tests/push-device-rules.test.mjs`、`apps/web/tsconfig.test.json`、
+`doc/flutter-push-api-contract.md`、`CLAUDE.md`
+
+DB マイグレーションなし（`UserSettings` の JSON に optional フィールド追加のみ）。
+テスト: server 1263/1263（新規47）・web 873/873（新規19）green。
+
+---
+
 ### 会話既読状態のサーバー管理化 + Notification.sessionId 追加 (2026-10-22)
 
 devrelay_flutter（モバイルクライアント）からの実装依頼。WebUI の会話履歴レールの未読判定が

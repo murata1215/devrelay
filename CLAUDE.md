@@ -98,6 +98,9 @@ pm2 restart devrelay-server
 | DEVRELAY_BOT_LOGIN_TIMEOUT_MS | bot 起動 1 回分の試行タイムアウト（既定 `30000`、clamp 5000〜300000） |
 | DEVRELAY_BOT_RETRY_MAX_MS | bot 起動リトライ間隔の上限（既定 `300000`、clamp 10000〜3600000） |
 | DEVRELAY_CONVERSATION_RAIL | 右レール第3タブ「会話履歴」（直近20スレッド横断・実行中スピナー・未確認緑✓）向けに `GET /api/threads` が `running`/`lastAiAt` フィールドを返すか（既定 `1`。`0` で両フィールドを一切出さない＝旧レスポンスと構造的に同一になるキルスイッチ。DB 変更なし・既読状態はブラウザの localStorage 管理） |
+| DEVRELAY_PUSH_DIAG | 2026-10-22 の FCM 無音故障（アプリ再インストール後、配信先の無いトークンへ送信し続けエラーも出ないまま無音で壊れた）の再発防止として追加した診断ログ（配信先 0 件の警告・送信結果1行ログ）を出すか（既定 `1`。`0` で従来どおり無言。`fcm-service.ts`） |
+| DEVRELAY_FCM_STRICT_DELETE | FCM トークン削除ポリシーを旧挙動（`invalid-argument` を即削除）に戻すキルスイッチ（既定 `0` ＝安全側。`1` で旧挙動。`invalid-argument` は別 Firebase プロジェクト発行トークン等でも返るため、既定では連続5回失敗するまで削除しない） |
+| DEVRELAY_FCM_TEST_API | 設定画面の「テスト通知を送る」が使う `POST /api/push/fcm/test` を有効にするか（既定 `1`。`0` で 404。`GET /api/push/fcm/devices`・`POST /api/push/fcm/verify`・`DELETE /api/push/fcm/devices/:tokenPrefix` には影響しない） |
 | DEVRELAY_AGENT_REPO_URL | 会社 private リポジトリ clone 対応サイクル: `GET /api/machines/:id/token` が WebUI に返す、Agent インストール一行コマンドに付与する clone 先 URL（`https://` 必須・userinfo 付き URL は拒否して無視）。**未設定時は WebUI のコマンドが現行と完全に同じ文字列になる**（実質的なキルスイッチ）。PAT はこの変数にも DB にも一切保存しない（Agent PC ローカルの `.git/config` の `http.<repoUrl>.extraHeader` にのみ保存。インストーラ側は `--repo`/`$env:DEVRELAY_REPO_URL`、PAT は `DEVRELAY_REPO_TOKEN`/`$env:DEVRELAY_REPO_TOKEN` または対話入力。詳細 `doc/company-repo-sync.md`） |
 
 ## DB テーブル（概要）

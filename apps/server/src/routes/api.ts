@@ -45,7 +45,18 @@ import {
 import {
   saveFcmToken,
   removeFcmToken,
+  sendFcmNotification,
+  isFcmEnabled,
+  getFcmTokens,
 } from '../services/fcm-service.js';
+import { withFcmTokens } from '../services/fcm-token-store.js';
+import {
+  summarizePushHealth,
+  maskFcmToken,
+  resolveFcmPolicy,
+  DEFAULT_PUSH_HEALTH_STALE_DAYS,
+} from '../services/fcm-token-rules.js';
+import { getFcmMetrics, recordFcmTestCall, FCM_METRICS_SINCE } from '../services/fcm-metrics.js';
 import {
   getNotifications,
   markAllAsRead,
@@ -990,6 +1001,10 @@ export async function apiRoutes(app: FastifyInstance) {
     for (const s of settings) {
       // Agreement テンプレートは専用 API で取得するため、汎用設定レスポンスからは除外
       if (s.key === SettingKeys.AGREEMENT_TEMPLATE) continue;
+      // 2026-10-23: FCM トークン・Web Push 購読情報（auth/p256dh 秘密鍵含む）は
+      // 素の値のまま WebUI に流れていた（WebUI 側は未使用）。専用 API
+      // （GET /api/push/fcm/devices、マスク済み）で見せるため汎用設定レスポンスからは除外する
+      if (s.key === SettingKeys.FCM_TOKENS || s.key === SettingKeys.PUSH_SUBSCRIPTIONS) continue;
       // 暗号化された値は復号化
       result[s.key] = s.encrypted ? decrypt(s.value) : s.value;
     }
@@ -2603,6 +2618,134 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     await removeFcmToken(userId, fcmToken);
+    return reply.send({ success: true });
+  });
+
+  // ─── プッシュ通知診断 API（2026-10-23: 無音故障の再発防止）───
+  // 2026-10-22 の事故（アプリ再インストール後、サーバーには配信先の無い古いトークンだけが
+  // 残り、エラーも出ないまま通知が無音で届かなくなった）を受けて追加。
+  // 登録済み端末の状態を見える化し、テスト送信で実際に届くかをその場で確認できるようにする。
+
+  /** テスト送信 API のレートリミット（同一ユーザー 10 秒 1 回） */
+  const FCM_TEST_RATE_LIMIT_MS = 10_000;
+
+  /** 登録済み端末一覧 + 健全性サマリ + プロセス寿命メトリクスを返す（トークンは先頭 12 文字のみ） */
+  app.get('/api/push/fcm/devices', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const nowIso = new Date().toISOString();
+    const tokens = await getFcmTokens(userId);
+    const health = summarizePushHealth(tokens, nowIso, DEFAULT_PUSH_HEALTH_STALE_DAYS);
+    const metrics = getFcmMetrics(userId);
+
+    return reply.send({
+      enabled: isFcmEnabled(),
+      health,
+      devices: tokens.map((t) => ({
+        tokenPrefix: maskFcmToken(t.token),
+        platform: t.platform,
+        registeredAt: t.registeredAt,
+        lastRegisteredAt: t.lastRegisteredAt ?? t.registeredAt,
+        lastSuccessAt: t.lastSuccessAt ?? null,
+        lastFailureAt: t.lastFailureAt ?? null,
+        lastErrorCode: t.lastErrorCode ?? null,
+        consecutiveFailures: t.consecutiveFailures ?? 0,
+        deviceLabel: t.deviceLabel ?? null,
+      })),
+      metrics: {
+        attempts: metrics.attempts,
+        sendOk: metrics.sendOk,
+        sendFail: metrics.sendFail,
+        dropNoToken: metrics.dropNoToken,
+        lastErrorCode: metrics.lastErrorCode,
+        // サーバー再起動でリセットされる値であることをクライアント側が示せるように起動時刻を返す
+        since: FCM_METRICS_SINCE,
+      },
+    });
+  });
+
+  /**
+   * 自分の全端末にテスト通知を送り、端末ごとの成否をそのままレスポンスで返す。
+   * removalPolicy: 'never' を必ず指定する（診断ボタンがトークン削除装置になる事故を防ぐ）。
+   * DEVRELAY_FCM_TEST_API=0 で無効化（既定 ON）。
+   */
+  app.post('/api/push/fcm/test', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const policy = resolveFcmPolicy(process.env);
+    if (!policy.testApiEnabled) {
+      return reply.status(404).send({ error: 'Push test API is disabled (DEVRELAY_FCM_TEST_API=0)' });
+    }
+
+    const nowIso = new Date().toISOString();
+    const metrics = getFcmMetrics(userId);
+    if (metrics.lastTestAt) {
+      const sinceMs = new Date(nowIso).getTime() - new Date(metrics.lastTestAt).getTime();
+      if (sinceMs < FCM_TEST_RATE_LIMIT_MS) {
+        return reply.status(429).send({ error: 'Too many test requests, please wait a few seconds' });
+      }
+    }
+    recordFcmTestCall(userId, nowIso);
+
+    const result = await sendFcmNotification(
+      userId,
+      '🔔 DevRelay テスト通知',
+      `${nowIso} に送信しました`,
+      { type: 'test' },
+      { reason: 'test', removalPolicy: 'never' }
+    );
+
+    if (!result) {
+      return reply.send({ total: 0, success: 0, failed: 0, results: [], hint: 'FCM が未設定または初期化に失敗しています' });
+    }
+    if (result.summary.total === 0) {
+      return reply.send({
+        total: 0,
+        success: 0,
+        failed: 0,
+        results: [],
+        hint: '端末が未登録です。アプリを起動して通知許可を確認してください',
+      });
+    }
+
+    return reply.send({
+      total: result.summary.total,
+      success: result.summary.success,
+      failed: result.summary.failed,
+      results: result.outcomes.map((o) => ({ tokenPrefix: o.tokenPrefix, ok: o.ok, errorCode: o.code ?? null })),
+    });
+  });
+
+  /**
+   * 自分の現トークンがサーバーに登録済みかを確認する（Phase E: Flutter が起動時の
+   * 自己診断に使う想定の部品。アプリ側対応前でも先に受け口だけ用意しておく）。
+   */
+  app.post('/api/push/fcm/verify', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { fcmToken } = request.body as { fcmToken?: string };
+    if (!fcmToken) {
+      return reply.status(400).send({ error: 'fcmToken required' });
+    }
+    const tokens = await getFcmTokens(userId);
+    return reply.send({ registered: tokens.some((t) => t.token === fcmToken) });
+  });
+
+  /** 死んだ端末を WebUI から手動削除する（トークン先頭の前方一致。1件に確定しなければ 409） */
+  app.delete('/api/push/fcm/devices/:tokenPrefix', { preHandler: [authenticate] }, async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { tokenPrefix } = request.params as { tokenPrefix: string };
+    if (!tokenPrefix) {
+      return reply.status(400).send({ error: 'tokenPrefix required' });
+    }
+
+    const outcome = await withFcmTokens<'removed' | 'notFound' | 'ambiguous'>(userId, (list) => {
+      const matches = list.filter((t) => t.token.startsWith(tokenPrefix));
+      if (matches.length === 0) return { result: 'notFound' };
+      if (matches.length > 1) return { result: 'ambiguous' };
+      const next = list.filter((t) => t.token !== matches[0].token);
+      return { next, result: 'removed' };
+    });
+
+    if (outcome === 'notFound') return reply.status(404).send({ error: 'Device not found' });
+    if (outcome === 'ambiguous') return reply.status(409).send({ error: 'tokenPrefix matches multiple devices' });
     return reply.send({ success: true });
   });
 

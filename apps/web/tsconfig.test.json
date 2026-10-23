@@ -33,6 +33,7 @@
     "src/lib/knowledge-search-rules.ts",
     "src/lib/clearance-rules.ts",
     "src/lib/knowledge-answer-rules.ts",
-    "src/lib/conversation-rail-rules.ts"
+    "src/lib/conversation-rail-rules.ts",
+    "src/lib/push-device-rules.ts"
   ]
 }

@@ -7,6 +7,8 @@ const API_BASE = apiUrl('');
 
 // サイクルP1: Capability 配布基盤の型は純ロジックモジュール側に定義済みのものを再利用する
 import type { CapabilityConfigLike, CapabilitySyncStatusLike } from './capability-config-rules';
+// 2026-10-23: FCM プッシュ通知診断の型も同様に純ロジックモジュール側で定義済みのものを再利用する
+import type { PushDevicesResponse, PushTestResponse } from './push-device-rules';
 
 // トークンをlocalStorageに保存
 export function getToken(): string | null {
@@ -403,6 +405,24 @@ export const settings = {
   /** アクティブサーバー ID を保存 */
   async saveActiveServer(id: string | null): Promise<void> {
     await this.update('active_server', id || '');
+  },
+};
+
+// FCM プッシュ通知 診断 API（2026-10-23: 無音故障の再発防止。設定画面の端末一覧 + テスト送信用）
+export const pushDevices = {
+  /** 登録済み端末一覧 + 健全性サマリ + プロセス寿命メトリクスを取得 */
+  async list(): Promise<PushDevicesResponse> {
+    return request('GET', '/push/fcm/devices');
+  },
+
+  /** 自分の全端末にテスト通知を送り、端末ごとの成否を取得（削除は一切行われない） */
+  async test(): Promise<PushTestResponse> {
+    return request('POST', '/push/fcm/test');
+  },
+
+  /** 死んだ端末を手動削除（トークン先頭の前方一致） */
+  async remove(tokenPrefix: string): Promise<void> {
+    await request('DELETE', `/push/fcm/devices/${encodeURIComponent(tokenPrefix)}`);
   },
 };
 
