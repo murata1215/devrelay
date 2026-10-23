@@ -6,6 +6,75 @@
 
 ## 実装済み機能
 
+### Agent インストールの clone 先切替（会社 private リポジトリ対応） (2026-10-23)
+
+社内展開のため、本流（個人 GitHub `murata1215/devrelay`、public）は変えず、Agent のインストール・
+自己更新（`u`）だけを会社 private リポジトリから行えるようにした。インストーラ本体の配信路
+（`raw.githubusercontent.com/murata1215/devrelay/...`）自体は変更していない。認証は Fine-grained
+PAT（対象リポジトリのみ・`Contents: Read` のみ）。詳細手順は
+[doc/company-repo-sync.md](company-repo-sync.md)、devlog は
+[2026-10-23_135146.md](devlog/2026-10-23_135146.md) 参照。
+
+#### PAT 保存方式
+`git config --local` の URL スコープ `http.<repoUrl>.extraHeader`（`.git/config` に base64 の
+Basic 認証ヘッダを保存）を採用。credential helper を一度も経由しないため GCM/keyring 等の対話
+プロンプトが起動する余地がなく、開発者本人の `github.com` 全体の資格情報に一切干渉しない。
+PAT は URL にも argv にも乗せない（clone 時だけ `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0` の env 経由で
+一時注入し、永続化は `.git/config` へのファイル追記 + `chmod 600`/`icacls` で行う）。
+
+#### インストーラ（`scripts/install-agent.sh` / `install-agent.ps1`）
+- `--repo <URL>` / `$env:DEVRELAY_REPO_URL`: clone 先を変更（未指定時は従来の public URL と
+  1 バイト同一、後方互換）
+- `--repo-auth-only` / `$env:DEVRELAY_REPO_AUTH_ONLY="1"`: Node/pnpm チェック・ビルド・サービス
+  登録・DevRelay トークン検証を一切行わず、既存インストールの PAT だけを差し替える軽量経路
+  （`reconcile_remote` で origin 張替え → PAT 書き込み → `git ls-remote` で検証）
+- PAT は `DEVRELAY_REPO_TOKEN`/`$env:DEVRELAY_REPO_TOKEN` または対話入力（sh: `read -rs`、
+  ps1: `Read-Host -AsSecureString`）。画面・ログ・`install-build.log` には出さない
+- 既存機で `--repo` を渡しても古い `origin` から `pull` し続ける穴（`.git` の有無だけで
+  「流用」判定していた従来ロジック）を `reconcile_remote()` で根治
+- 全 git 呼び出しに `GIT_TERMINAL_PROMPT=0`（ps1 は `GCM_INTERACTIVE=never` も）を設定し、
+  PAT 失効時に認証プロンプトでハングする事故を構造的に防止
+
+#### Agent 側（`agents/linux` / `agents/macos` の `connection.ts`）
+- 新規 `services/repo-auth-rules.ts`（両 OS に複製、外部 import ゼロ）: `buildExtraHeaderConfigKey`・
+  `classifyGitRemoteFailure`（auth/network/other 判定）・`buildRepoAuthFailureMessage`・
+  `redactSecrets`・`GIT_NONINTERACTIVE_ENV`
+- `getExecEnv()`（両 OS）に非対話化 env（`GIT_TERMINAL_PROMPT=0`/`GCM_INTERACTIVE=never`/
+  `GIT_ASKPASS=/bin/true`）を追加。呼び出し元は `handleVersionCheck`・`u` の更新スクリプト
+  spawn・`commandExists`・`getScaffoldEnv` の 4 箇所のみで、AI CLI（claude/gemini/devin 等）の
+  spawn はここを経由しないため、プロジェクトリポジトリでの git 操作には影響しない
+- **Linux のみ**: `handleAgentUpdate()` に detached spawn 前の pre-flight 認証チェック
+  （`git ls-remote --exit-code origin HEAD`）を追加。認証失敗を検知した場合はスクリプトを
+  spawn せず、チャットへ「PAT の期限切れ・権限不足の可能性」を返して既存 Agent を維持する
+- **Linux のみ**: bash 分岐の `git fetch`/`git reset` の exit code チェックを追加（Windows 分岐は
+  `#356 B4` で既に対応済み）。従来は `runAndLog`（exit code 未チェック）だったため、PAT 失効で
+  fetch/reset が失敗したまま古い dist で restart し、サーバーには `update.completed` が返ってしまう
+  「静かな失敗」の穴があった。失敗時は中止し既存 Agent を維持する
+- **macOS は本サイクルでは `getExecEnv()` への env 注入のみ対応**（fetch/reset exit code チェックと
+  pre-flight チェックは対象外。PAT 失効時に静かに古いコードで restart してしまう既知の制約として
+  `doc/company-repo-sync.md` に明記）
+
+#### サーバー + WebUI
+- 新規 `services/agent-repo-rules.ts`: `resolveAgentRepoUrl()` が `DEVRELAY_AGENT_REPO_URL`
+  （環境変数）を検証・正規化。`https://` 以外・userinfo（PAT 埋め込み URL）を含む値は拒否して
+  `null`（PAT がブラウザ・DB に露出する経路を構造的に封じる）
+- `GET /api/machines/:id/token` の戻り値に `agentRepoUrl` を追加（既存の `token` フィールドは不変）
+- 新規 `apps/web/src/lib/install-command-rules.ts`: `buildInstallCommand()` が OS 別のインストール
+  一行コマンドを生成。`repoUrl` 未指定時は従来の `MachinesPage.tsx` のインライン文字列と
+  1 バイト同一（テストで固定）
+- `MachinesPage.tsx`: 新規/既存マシンの両方のインストールコマンス表示に `agentRepoUrl` を反映。
+  `agentRepoUrl` が設定されている場合のみ PAT の渡し方の案内行を表示
+
+#### テスト
+新規 `repo-auth-rules.test.mjs`（linux/macos 各 15 件）・`install-command-rules.test.mjs`（web
+11 件）・`agent-repo-rules.test.mjs`（server 10 件）。既存 `uninstall-command-rules.test.mjs`・
+`update-script.test.mjs`・`update-guard-rules.test.mjs` は無変更で green（影響なしの機械的証明）。
+`pnpm build` 全 6 ワークスペース green。テスト server 1273/1273・web 884/884・linux 1099/1099・
+macos 657+1skip green（macos の 1 件 flake は `conversation-store-scope.test.mjs` の既知の非同期
+タイミング競合で本変更と無関係、単独実行・複数回再実行で再現なしを確認済み）。DB マイグレーション
+不要（スキーマ変更なし）。新規キルスイッチなし（`DEVRELAY_AGENT_REPO_URL` 未設定が既定で現行動作
+そのもの）。
+
 ### 会話既読状態のサーバー管理化 + Notification.sessionId 追加 (2026-10-22)
 
 devrelay_flutter（モバイルクライアント）からの実装依頼。WebUI の会話履歴レールの未読判定が

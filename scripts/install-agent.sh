@@ -10,6 +10,10 @@
 # プロキシ環境:
 #   curl -fsSL ... | bash -s -- --token YOUR_TOKEN --proxy http://proxy:8080
 #
+# 会社 private リポジトリから clone する場合（詳細: doc/company-repo-sync.md）:
+#   DEVRELAY_REPO_TOKEN=<PAT> curl -fsSL ... | bash -s -- --token YOUR_TOKEN --repo https://github.com/ORG/REPO.git
+#   PAT だけ差し替える場合: curl -fsSL ... | bash -s -- --repo-auth-only --repo https://github.com/ORG/REPO.git
+#
 # 前提条件:
 #   - git
 #   - AI CLI（claude / gemini / codex / aider / devin のいずれか。任意・後からでも可）
@@ -48,11 +52,17 @@ else
 fi
 
 # --- 定数 ---
-REPO_URL="https://github.com/murata1215/devrelay.git"
+# 会社 private リポジトリ clone 対応サイクル: clone 先は既定で public murata1215/devrelay のまま、
+# --repo / $DEVRELAY_REPO_URL で上書きできる（後方互換: どちらも未指定なら従来と同じ URL）。
+REPO_URL_DEFAULT="https://github.com/murata1215/devrelay.git"
 AGENT_DIR="$HOME/.devrelay/agent"
 CONFIG_DIR="$HOME/.devrelay"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 SERVICE_NAME="devrelay-agent"
+
+# 非対話 git を強制する（private リポジトリの PAT 失効時に認証プロンプトでハングする事故を防ぐ。
+# agents/linux/src/services/capabilities/git-cli.ts の既存パターンと同趣旨。全 git 呼び出しより前に設定）
+export GIT_TERMINAL_PROMPT=0
 
 # --- macOS 互換の sed インプレース編集関数 ---
 # GNU sed (Linux) は `sed -i "..."` だが、BSD sed (macOS) は `sed -i '' "..."` が必要
@@ -64,12 +74,90 @@ sed_inplace() {
   fi
 }
 
+# =============================================================================
+# 会社 private リポジトリ clone 対応サイクル: repo URL / PAT 関連のヘルパー関数
+# =============================================================================
+
+# stderr 文字列が認証失敗らしいかを判定する（PAT 期限切れ・権限不足・repo 名違いの典型メッセージ）
+is_repo_auth_failure() {
+  echo "$1" | grep -qiE "authentication failed|could not read username|could not read password|terminal prompts disabled|repository not found|access denied|403|bad credentials"
+}
+
+# --repo が明示指定され、PAT が未指定で tty が使える場合のみ対話入力する（画面にも履歴にも残さない）
+prompt_repo_token() {
+  if [ -n "$REPO_TOKEN" ]; then
+    return
+  fi
+  if [ -r /dev/tty ]; then
+    echo -n -e "🔑 リポジトリ用 PAT を入力してください（不要な場合は Enter）: "
+    read -rs REPO_TOKEN < /dev/tty 2>/dev/null || REPO_TOKEN=""
+    echo ""
+  fi
+}
+
+# 既存 clone の origin が $REPO_URL と異なる場合だけ張り替える
+# （.git の有無だけで「流用」判定していた既存ロジックでは、--repo を渡しても古い origin から
+#   pull し続けてしまう穴があったため、ここで必ず揃える）
+reconcile_remote() {
+  local current_url
+  current_url=$(git -C "$AGENT_DIR" remote get-url origin 2>/dev/null || echo "")
+  if [ -n "$current_url" ] && [ "$current_url" != "$REPO_URL" ]; then
+    echo -e "  ${YELLOW}⚠️ origin を更新: $current_url → $REPO_URL${NC}"
+    git -C "$AGENT_DIR" remote set-url origin "$REPO_URL"
+  fi
+}
+
+# repo ローカル・URL スコープの http.<repoUrl>.extraHeader を .git/config に書き込む（冪等）。
+# credential.helper を一度も経由しないため GCM/keyring の対話プロンプトが起動する余地がなく、
+# 開発者本人の github.com 資格情報にも一切干渉しない。PAT は argv ではなくファイル追記で渡す
+# （argv は /proc/<pid>/cmdline が world-readable なため、PAT は絶対に `git config <value>` の
+#   コマンドライン引数として渡さない）。
+# $1 = repo URL, $2 = PAT（空文字なら既存セクションを除去するだけで追記しない）
+write_repo_auth() {
+  local repo_url="$1"
+  local pat="$2"
+  local git_config="$AGENT_DIR/.git/config"
+  [ -f "$git_config" ] || return 0
+
+  # 既存の [http "<repo_url>"] セクション（前回の PAT 設定）を除去してから書き直す（冪等）。
+  # 行の完全一致で判定するため、repo_url に正規表現の特殊文字が含まれても安全。
+  local section_line="[http \"$repo_url\"]"
+  awk -v want="$section_line" '
+    BEGIN { skip = 0 }
+    {
+      if ($0 == want) { skip = 1; next }
+      if (skip == 1 && $0 ~ /^\[/) { skip = 0 }
+      if (skip == 1) { next }
+      print
+    }
+  ' "$git_config" > "${git_config}.tmp" && mv "${git_config}.tmp" "$git_config"
+
+  if [ -n "$pat" ]; then
+    local header_b64
+    header_b64=$(printf 'x-access-token:%s' "$pat" | base64 | tr -d '\n')
+    {
+      printf '[http "%s"]\n' "$repo_url"
+      printf '\textraHeader = Authorization: Basic %s\n' "$header_b64"
+    } >> "$git_config"
+  fi
+
+  chmod 600 "$git_config" 2>/dev/null || true
+}
+
 # --- 引数パース ---
 TOKEN=""
 SERVER_URL="wss://devrelay.io/ws/agent"
 SERVER_URL_EXPLICIT=false
 PROXY_URL=""
 FORCE=false
+# 会社 private リポジトリ clone 対応サイクル: repo/PAT 関連のデフォルトは env から読む
+# （DEVRELAY_TOKEN 等が無い sh 版では --flag が正、PAT は画面履歴に残さないため env or 対話入力のみ）
+REPO_URL="${DEVRELAY_REPO_URL:-$REPO_URL_DEFAULT}"
+REPO_URL_EXPLICIT=false
+[ -n "$DEVRELAY_REPO_URL" ] && REPO_URL_EXPLICIT=true
+REPO_TOKEN="${DEVRELAY_REPO_TOKEN:-}"
+REPO_AUTH_ONLY=false
+[ "$DEVRELAY_REPO_AUTH_ONLY" = "1" ] && REPO_AUTH_ONLY=true
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -86,18 +174,30 @@ while [[ $# -gt 0 ]]; do
       PROXY_URL="$2"
       shift 2
       ;;
+    --repo)
+      REPO_URL="$2"
+      REPO_URL_EXPLICIT=true
+      shift 2
+      ;;
+    --repo-auth-only)
+      REPO_AUTH_ONLY=true
+      shift 1
+      ;;
     --force)
       FORCE=true
       shift 1
       ;;
     --help|-h)
-      echo "Usage: $0 --token YOUR_TOKEN [--server SERVER_URL] [--proxy PROXY_URL] [--force]"
+      echo "Usage: $0 --token YOUR_TOKEN [--server SERVER_URL] [--proxy PROXY_URL] [--repo REPO_URL] [--repo-auth-only] [--force]"
       echo ""
       echo "Options:"
-      echo "  --token   (必須) WebUI で生成したエージェントトークン"
-      echo "  --server  サーバーURL (指定時はトークン埋め込みURLより優先。未指定時はトークンから抽出、旧形式トークンは wss://devrelay.io/ws/agent)"
-      echo "  --proxy   プロキシURL (例: http://proxy:8080, socks5://proxy:1080)"
-      echo "  --force   トークン検証をスキップ（意図的なトークン再利用時に使用）"
+      echo "  --token           (必須。--repo-auth-only 指定時は不要) WebUI で生成したエージェントトークン"
+      echo "  --server          サーバーURL (指定時はトークン埋め込みURLより優先。未指定時はトークンから抽出、旧形式トークンは wss://devrelay.io/ws/agent)"
+      echo "  --proxy           プロキシURL (例: http://proxy:8080, socks5://proxy:1080)"
+      echo "  --repo            会社 private リポジトリ等への clone 先 URL (省略時は $REPO_URL_DEFAULT)"
+      echo "                    PAT は \$DEVRELAY_REPO_TOKEN または対話入力で渡す（画面・ログには出ません）"
+      echo "  --repo-auth-only  Node/pnpm/ビルド/サービス登録を行わず、既存インストールの PAT だけ差し替える"
+      echo "  --force           トークン検証をスキップ（意図的なトークン再利用時に使用）"
       exit 0
       ;;
     *)
@@ -106,6 +206,29 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# =============================================================================
+# 会社 private リポジトリ clone 対応サイクル: --repo-auth-only は既存インストールの
+# PAT だけを差し替えるための軽量経路（Node/pnpm チェック・ビルド・サービス登録・トークン検証は行わない）
+# =============================================================================
+if [ "$REPO_AUTH_ONLY" = true ]; then
+  if [ ! -d "$AGENT_DIR/.git" ]; then
+    echo -e "${RED}エラー: $AGENT_DIR が見つかりません。先に通常インストールを実行してください${NC}"
+    exit 1
+  fi
+  prompt_repo_token
+  echo "  既存リポジトリの remote / 認証情報を更新中..."
+  reconcile_remote
+  write_repo_auth "$REPO_URL" "$REPO_TOKEN"
+  echo "  🔍 接続を確認中..."
+  if git -C "$AGENT_DIR" ls-remote --exit-code origin HEAD > /dev/null 2>&1; then
+    echo -e "${GREEN}✅ リポジトリ認証 OK（$REPO_URL）${NC}"
+    exit 0
+  else
+    echo -e "${RED}❌ リポジトリへの接続に失敗しました（PAT の期限切れ・権限不足の可能性）${NC}"
+    exit 1
+  fi
+fi
 
 # --- トークン必須チェック ---
 if [ -z "$TOKEN" ]; then
@@ -448,23 +571,48 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$CONFIG_DIR/logs"
 mkdir -p "$CONFIG_DIR/bin"
 
+if [ "$REPO_URL_EXPLICIT" = true ] && [ -z "$REPO_TOKEN" ]; then
+  prompt_repo_token
+fi
+
 if [ -d "$AGENT_DIR/.git" ]; then
   # 既存なら最新に更新
   echo "  既存のリポジトリを更新中..."
   cd "$AGENT_DIR"
+  # 会社 private リポジトリ clone 対応サイクル: --repo で clone 先が変わっていれば
+  # origin を張り替え、PAT も .git/config に反映する（.git の存在だけで「流用」判定していた
+  # 従来ロジックのままだと、既存機で --repo を渡しても古い origin から pull し続けてしまう）
+  reconcile_remote
+  write_repo_auth "$REPO_URL" "$REPO_TOKEN"
   # 前回の install が lockfile を書き換えている場合、その変更は git pull では
   # 復元されない（取り込むコミット側が lockfile を変更していなければ競合せず、
   # ローカルの改変がそのまま残る）。設定（overrides 等）と不一致になると
   # --frozen-lockfile が ERR_PNPM_LOCKFILE_CONFIG_MISMATCH で落ち続けるため、
   # 毎回コミット済みの状態へ戻す。lockfile はリポジトリが唯一の情報源。
   git checkout -- pnpm-lock.yaml 2>/dev/null || true
-  git pull --quiet 2>/dev/null || {
+  PULL_ERR=$(git pull --quiet 2>&1) || {
     echo -e "${YELLOW}  ⚠️ git pull に失敗。既存のコードで続行します${NC}"
+    if is_repo_auth_failure "$PULL_ERR"; then
+      echo -e "${YELLOW}  ℹ️ PAT の期限切れ・権限不足の可能性があります。--repo-auth-only で PAT を再設定してください${NC}"
+    fi
   }
 else
   # 新規 clone
   echo "  クローン中... (初回は時間がかかります)"
-  git clone --quiet --depth 1 "$REPO_URL" "$AGENT_DIR"
+  if [ -n "$REPO_TOKEN" ]; then
+    # PAT を argv に載せないため、git clone には env 経由（GIT_CONFIG_COUNT/KEY/VALUE）で
+    # 一時的に渡す。これは clone 先リポジトリの .git/config には自動で永続化されないため、
+    # clone 成功後に write_repo_auth で明示的に書き込む。
+    HEADER_B64=$(printf 'x-access-token:%s' "$REPO_TOKEN" | base64 | tr -d '\n')
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="http.${REPO_URL}.extraHeader" \
+    GIT_CONFIG_VALUE_0="Authorization: Basic ${HEADER_B64}" \
+    git clone --quiet --depth 1 "$REPO_URL" "$AGENT_DIR"
+    unset HEADER_B64
+  else
+    git clone --quiet --depth 1 "$REPO_URL" "$AGENT_DIR"
+  fi
+  write_repo_auth "$REPO_URL" "$REPO_TOKEN"
 fi
 
 echo -e "${GREEN}✅ リポジトリ取得完了${NC}"

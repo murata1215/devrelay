@@ -464,6 +464,17 @@ irm https://<社内ドメイン>/install-agent.ps1 | iex
 curl -fsSL https://<社内ドメイン>/install-agent.sh | bash -s -- --token "<トークン>" --proxy "http://proxy.corp.example:8080"
 ```
 
+上記は「インストーラ本体を社内ドメインにミラーする」方式（スクリプトのソースを差し替える）。
+もう一つの選択肢として、**インストーラ本体は public の raw から取得したまま、Agent の
+clone 先（`git clone` する repo）だけを会社 private リポジトリに切り替える**方式もある
+（Fine-grained PAT・`Contents: Read` のみで認証）。社内ドメインへのミラー構築が難しい・
+したくない環境向け。詳細は [doc/company-repo-sync.md](company-repo-sync.md) を参照:
+
+```bash
+DEVRELAY_REPO_TOKEN=<PAT> curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh \
+  | bash -s -- --token "<トークン>" --repo https://github.com/ORG/REPO.git --proxy "http://proxy.corp.example:8080"
+```
+
 ### サーバーが社内ネットワークにある場合のプロキシ指定
 
 社内に Server を立て、AI API（Anthropic 等）だけ社内プロキシ経由で外に出す構成では、

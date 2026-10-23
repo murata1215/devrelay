@@ -20,6 +20,7 @@ import { buildEmptyEndedThreadExclusion, isHideEmptyEndedEnabled } from '../serv
 import { stripCommandTag, stripAiNoise } from '../services/thread-label-source.js';
 import { isConversationRailEnabled, resolveRunning } from '../services/thread-activity.js';
 import { isDebugTurnsEnabled } from '../services/debug-turns-rules.js';
+import { resolveAgentRepoUrl } from '../services/agent-repo-rules.js';
 import { inFlightTurns } from '../services/in-flight-turns.js';
 import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
@@ -208,7 +209,10 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Machine not found' });
     }
 
-    return { token: machine.token };
+    // 会社 private リポジトリ clone 対応サイクル: サーバー env に設定されていれば、WebUI の
+    // インストール一行コマンドに付与する clone 先 URL も一緒に返す（PAT はここに含めない。
+    // サーバーは PAT を一切読まない設計 — resolveAgentRepoUrl() が userinfo 付き URL を拒否する）。
+    return { token: machine.token, agentRepoUrl: resolveAgentRepoUrl(process.env.DEVRELAY_AGENT_REPO_URL) };
   });
 
   // ========================================

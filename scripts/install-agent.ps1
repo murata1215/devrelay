@@ -8,6 +8,11 @@
 # プロキシ環境:
 #   $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_PROXY="http://proxy:8080"; irm ... | iex
 #
+# 会社 private リポジトリから clone する場合（詳細: doc/company-repo-sync.md）:
+#   $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_REPO_URL="https://github.com/ORG/REPO.git"; $env:DEVRELAY_REPO_TOKEN="<PAT>"; irm ... | iex
+#   PAT だけ差し替える場合:
+#   $env:DEVRELAY_REPO_URL="https://github.com/ORG/REPO.git"; $env:DEVRELAY_REPO_AUTH_ONLY="1"; irm ... | iex
+#
 # 前提条件:
 #   - Node.js 20+
 #   - git
@@ -43,7 +48,9 @@ try {
 }
 
 # --- 定数 ---
-$RepoUrl = "https://github.com/murata1215/devrelay.git"
+# 会社 private リポジトリ clone 対応サイクル: clone 先は既定で public murata1215/devrelay のまま、
+# $env:DEVRELAY_REPO_URL で上書きできる（後方互換: 未設定なら従来と同じ URL）。
+$RepoUrlDefault = "https://github.com/murata1215/devrelay.git"
 $ConfigDir = Join-Path $env:APPDATA "devrelay"
 $AgentDir = Join-Path $ConfigDir "agent"
 $ConfigFile = Join-Path $ConfigDir "config.yaml"
@@ -70,6 +77,151 @@ $Token = $env:DEVRELAY_TOKEN
 $ProxyUrl = $env:DEVRELAY_PROXY
 $Force = $env:DEVRELAY_FORCE -eq "true" -or $env:DEVRELAY_FORCE -eq "1"
 $ServerUrl = "wss://devrelay.io/ws/agent"
+
+# 会社 private リポジトリ clone 対応サイクル: repo/PAT 関連も同じ $env:DEVRELAY_* の並びで読む
+# （ps1 には param() が無く irm | iex 経由のため、CLI 引数ではなく env 経由のみサポートする）
+$RepoUrl = if ($env:DEVRELAY_REPO_URL) { $env:DEVRELAY_REPO_URL } else { $RepoUrlDefault }
+$RepoUrlExplicit = [bool]$env:DEVRELAY_REPO_URL
+$RepoToken = $env:DEVRELAY_REPO_TOKEN
+$RepoAuthOnly = ($env:DEVRELAY_REPO_AUTH_ONLY -eq "1") -or ($env:DEVRELAY_REPO_AUTH_ONLY -eq "true")
+
+# 非対話 git を強制する（private リポジトリの PAT 失効時に認証プロンプトでハングする事故を防ぐ。
+# agents/linux/src/services/capabilities/git-cli.ts の既存パターンと同趣旨。全 git 呼び出しより前に設定）
+$env:GIT_TERMINAL_PROMPT = "0"
+$env:GCM_INTERACTIVE = "never"
+
+# リポジトリ URL に万一 userinfo（PAT 埋め込み等）が混入していた場合の表示用マスク
+# （本設計の通常経路では URL に秘密は入らないが、画面表示直前の最後の防御として適用する）
+function Format-RepoUrlForDisplay {
+    param([string]$Url)
+    if ($Url -match "^(https?://)[^/@]*@(.*)$") {
+        return "$($Matches[1])***@$($Matches[2])"
+    }
+    return $Url
+}
+
+# git の出力/エラーメッセージが認証失敗らしいかを判定する（PAT 期限切れ・権限不足・repo 名違いの典型）
+function Test-RepoAuthFailure {
+    param([string]$Text)
+    if (-not $Text) { return $false }
+    return $Text -match "(?i)authentication failed|could not read username|could not read password|terminal prompts disabled|repository not found|access denied|403|bad credentials"
+}
+
+# ログ/画面に出す前に秘密情報を伏せ字にする最後の防御線（通常経路では PAT は出力に現れない設計だが保険）
+function Redact-Secrets {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    $Text = $Text -replace "(?i)Authorization:\s*Basic\s+\S+", "Authorization: Basic ***"
+    $Text = $Text -replace "(?i)(https?://)[^/\s@]+@", '$1***@'
+    return $Text
+}
+
+# --repo 相当（$env:DEVRELAY_REPO_URL）が明示指定され、PAT が未指定のとき対話入力する
+# （Read-Host -AsSecureString は画面にも履歴にも残らない。irm | iex のパイプライン中でもコンソールから読める）
+function Read-RepoToken {
+    if ($RepoToken) { return $RepoToken }
+    $secure = Read-Host "リポジトリ用 PAT を入力してください（不要な場合は Enter）" -AsSecureString
+    if ($secure.Length -eq 0) { return "" }
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    } finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+}
+
+# 既存 clone の origin が $RepoUrl と異なる場合だけ張り替える
+# （.git の有無だけで「流用」判定していた既存ロジックでは、$env:DEVRELAY_REPO_URL を変えても
+#   古い origin から pull し続けてしまう穴があったため、ここで必ず揃える）
+function Reconcile-Remote {
+    param([string]$RepoUrl, [string]$AgentDir)
+    Push-Location $AgentDir
+    try {
+        $currentUrl = (git remote get-url origin 2>$null)
+        if ($currentUrl) { $currentUrl = $currentUrl.Trim() }
+        if ($currentUrl -and ($currentUrl -ne $RepoUrl)) {
+            Write-Host "  WARNING: origin を更新: $currentUrl -> $RepoUrl" -ForegroundColor Yellow
+            git remote set-url origin $RepoUrl
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+# repo ローカル・URL スコープの http.<repoUrl>.extraHeader を .git\config に書き込む（冪等）。
+# credential.helper を一度も経由しないため GCM 等の対話プロンプトが起動する余地がなく、開発者本人の
+# github.com 資格情報にも一切干渉しない。PAT は argv ではなくファイル追記で渡す
+# （コマンドライン引数で渡すとプロセス一覧から見える可能性があるため、必ずファイルへの追記で設定する）。
+function Write-RepoAuth {
+    param(
+        [string]$RepoUrl,
+        [string]$Pat,
+        [string]$AgentDir
+    )
+    $gitConfigPath = Join-Path $AgentDir ".git\config"
+    if (-not (Test-Path $gitConfigPath)) { return }
+
+    # 既存の [http "<RepoUrl>"] セクション（前回の PAT 設定）を除去してから書き直す（冪等）。
+    # 行の完全一致で判定するため、RepoUrl に正規表現の特殊文字が含まれても安全。
+    $sectionLine = "[http `"$RepoUrl`"]"
+    $lines = @(Get-Content -LiteralPath $gitConfigPath -Encoding UTF8)
+    $output = New-Object System.Collections.Generic.List[string]
+    $skip = $false
+    foreach ($line in $lines) {
+        if ((-not $skip) -and ($line -eq $sectionLine)) { $skip = $true; continue }
+        if ($skip -and ($line -match '^\[')) { $skip = $false }
+        if ($skip) { continue }
+        $output.Add($line)
+    }
+    Set-Content -LiteralPath $gitConfigPath -Value $output -Encoding UTF8
+
+    if ($Pat) {
+        $headerB64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("x-access-token:$Pat"))
+        Add-Content -LiteralPath $gitConfigPath -Value $sectionLine -Encoding UTF8
+        Add-Content -LiteralPath $gitConfigPath -Value "`textraHeader = Authorization: Basic $headerB64" -Encoding UTF8
+    }
+
+    try {
+        icacls $gitConfigPath /inheritance:r /grant:r "$env:USERDOMAIN\$($env:USERNAME):(R,W)" 2>&1 | Out-Null
+    } catch {
+        # ACL 設定失敗はインストール自体を止めない
+    }
+}
+
+# =============================================================================
+# 会社 private リポジトリ clone 対応サイクル: $env:DEVRELAY_REPO_AUTH_ONLY は既存インストールの
+# PAT だけを差し替えるための軽量経路（Node/pnpm チェック・ビルド・タスク登録・トークン検証は行わない）
+# =============================================================================
+if ($RepoAuthOnly) {
+    if (-not (Test-Path (Join-Path $AgentDir ".git"))) {
+        Write-Host "ERROR: $AgentDir が見つかりません。先に通常インストールを実行してください" -ForegroundColor Red
+        $env:DEVRELAY_REPO_URL = $null
+        $env:DEVRELAY_REPO_TOKEN = $null
+        $env:DEVRELAY_REPO_AUTH_ONLY = $null
+        $ErrorActionPreference = $PrevEAP
+        return
+    }
+    if (-not $RepoToken) { $RepoToken = Read-RepoToken }
+    Write-Host "  既存リポジトリの remote / 認証情報を更新中..."
+    Reconcile-Remote -RepoUrl $RepoUrl -AgentDir $AgentDir
+    Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
+    Write-Host "  接続を確認中..."
+    Push-Location $AgentDir
+    git ls-remote --exit-code origin HEAD 2>&1 | Out-Null
+    $lsCode = $LASTEXITCODE
+    Pop-Location
+    if ($lsCode -eq 0) {
+        Write-Host "OK リポジトリ認証 OK（$(Format-RepoUrlForDisplay $RepoUrl)）" -ForegroundColor Green
+    } else {
+        Write-Host "X リポジトリへの接続に失敗しました（PAT の期限切れ・権限不足の可能性）" -ForegroundColor Red
+    }
+    $RepoToken = $null
+    $env:DEVRELAY_REPO_URL = $null
+    $env:DEVRELAY_REPO_TOKEN = $null
+    $env:DEVRELAY_REPO_AUTH_ONLY = $null
+    $ErrorActionPreference = $PrevEAP
+    return
+}
 
 if (-not $Token) {
     Write-Host ""
@@ -719,6 +871,9 @@ function Invoke-LoggedCommand {
                 $line = [string]$_
             }
             $line = $line -replace "$esc\[[0-9;?]*[A-Za-z]", ""
+            # 会社 private リポジトリ clone 対応サイクル: install-build.log への保険（通常経路では
+            # PAT はここに現れない設計だが、想定外の git メッセージに備えた最後の防御線）
+            $line = Redact-Secrets $line
             Write-Host "    $line"
             if ($writer) { $writer.WriteLine($line) }
         }
@@ -764,9 +919,18 @@ $BuildLogHeader = @(
 )
 Set-Content -LiteralPath $BuildLog -Value $BuildLogHeader -Encoding UTF8
 
+if ($RepoUrlExplicit -and (-not $RepoToken)) {
+    $RepoToken = Read-RepoToken
+}
+
 if (Test-Path (Join-Path $AgentDir ".git")) {
     # 既存なら最新に更新（失敗しても致命的ではないので警告のみ）
     Write-Host "  既存のリポジトリを更新中..."
+    # 会社 private リポジトリ clone 対応サイクル: $env:DEVRELAY_REPO_URL で clone 先が変わっていれば
+    # origin を張り替え、PAT も .git\config に反映する（.git の有無だけで「流用」判定していた従来
+    # ロジックのままだと、既存機で URL を変えても古い origin から pull し続けてしまう）
+    Reconcile-Remote -RepoUrl $RepoUrl -AgentDir $AgentDir
+    Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
     Push-Location $AgentDir
     # 前回の install が lockfile を書き換えている場合、その変更は git pull では
     # 復元されない（取り込むコミット側が lockfile を変更していなければ競合せず、
@@ -778,15 +942,33 @@ if (Test-Path (Join-Path $AgentDir ".git")) {
     Pop-Location
     if ($PullCode -ne 0) {
         Write-Host "  WARNING: git pull に失敗しました (exit $PullCode)。既存のコードで続行します" -ForegroundColor Yellow
+        $pullLogTail = (Get-Content -LiteralPath $BuildLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+        if (Test-RepoAuthFailure $pullLogTail) {
+            Write-Host '  INFO: PAT の期限切れ・権限不足の可能性があります。$env:DEVRELAY_REPO_AUTH_ONLY="1" で再実行して PAT を更新してください' -ForegroundColor Yellow
+        }
     }
 } else {
     # 新規 clone
     Write-Host "  クローン中... (初回は時間がかかります)"
-    $CloneCode = Invoke-LoggedCommand -Label "git clone" -Command { git clone --quiet --depth 1 $RepoUrl $AgentDir } -LogFile $BuildLog
+    if ($RepoToken) {
+        # PAT を argv に載せないため、git clone には env 経由（GIT_CONFIG_COUNT/KEY/VALUE）で
+        # 一時的に渡す。これは clone 先リポジトリの .git\config には自動で永続化されないため、
+        # clone 成功後に Write-RepoAuth で明示的に書き込む。
+        $headerB64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("x-access-token:$RepoToken"))
+        $env:GIT_CONFIG_COUNT = "1"
+        $env:GIT_CONFIG_KEY_0 = "http.$RepoUrl.extraHeader"
+        $env:GIT_CONFIG_VALUE_0 = "Authorization: Basic $headerB64"
+        $CloneCode = Invoke-LoggedCommand -Label "git clone" -Command { git clone --quiet --depth 1 $RepoUrl $AgentDir } -LogFile $BuildLog
+        Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
+        Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
+        Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
+    } else {
+        $CloneCode = Invoke-LoggedCommand -Label "git clone" -Command { git clone --quiet --depth 1 $RepoUrl $AgentDir } -LogFile $BuildLog
+    }
     if (($CloneCode -ne 0) -or (-not (Test-Path (Join-Path $AgentDir "package.json")))) {
         Write-Host ""
         Write-Host "X エラー: リポジトリの取得に失敗しました (git clone exit $CloneCode)" -ForegroundColor Red
-        Write-Host "  URL:      $RepoUrl" -ForegroundColor Yellow
+        Write-Host "  URL:      $(Format-RepoUrlForDisplay $RepoUrl)" -ForegroundColor Yellow
         Write-Host "  ログ:     $BuildLog" -ForegroundColor Yellow
         if ($ProxyUrl) {
             Write-Host "  プロキシ: $ProxyUrl （URL が正しいか確認してください）" -ForegroundColor Yellow
@@ -794,9 +976,13 @@ if (Test-Path (Join-Path $AgentDir ".git")) {
             Write-Host '  プロキシ環境の場合は $env:DEVRELAY_PROXY="http://proxy:8080" を指定して再実行してください。' -ForegroundColor Yellow
         }
         Write-Host "インストールを中断しました。" -ForegroundColor Red
+        $RepoToken = $null
+        $env:DEVRELAY_REPO_URL = $null
+        $env:DEVRELAY_REPO_TOKEN = $null
         $ErrorActionPreference = $PrevEAP
         return
     }
+    Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
 }
 
 Write-Host "OK リポジトリ取得完了" -ForegroundColor Green
@@ -1205,6 +1391,12 @@ $env:DEVRELAY_PROXY = $null
 $env:DEVRELAY_FORCE = $null
 $env:HTTP_PROXY = $null
 $env:HTTPS_PROXY = $null
+# 会社 private リポジトリ clone 対応サイクル: PAT を irm | iex した対話シェルに残さない
+$env:DEVRELAY_REPO_URL = $null
+$env:DEVRELAY_REPO_TOKEN = $null
+$env:DEVRELAY_REPO_AUTH_ONLY = $null
+$env:GIT_TERMINAL_PROMPT = $null
+$env:GCM_INTERACTIVE = $null
 
 # `irm | iex` 実行時、$ErrorActionPreference の変更が対話セッションに残留しないよう復元
 $ErrorActionPreference = $PrevEAP

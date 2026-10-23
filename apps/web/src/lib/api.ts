@@ -212,8 +212,8 @@ export const machines = {
     await request('DELETE', `/machines/${id}`);
   },
 
-  /** 既存エージェントのトークンを取得 */
-  async getToken(id: string): Promise<{ token: string }> {
+  /** 既存エージェントのトークンを取得（agentRepoUrl: 会社 private リポジトリ等への clone 先。未設定時は null） */
+  async getToken(id: string): Promise<{ token: string; agentRepoUrl?: string | null }> {
     return request('GET', `/machines/${id}/token`);
   },
 

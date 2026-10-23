@@ -73,6 +73,9 @@ devrelay/
 
 ### 1. Agent のインストール（開発マシン側）
 
+> 会社の private リポジトリから Agent を clone・自己更新したい場合（本流は public のまま）は
+> [doc/company-repo-sync.md](doc/company-repo-sync.md) を参照。
+
 #### Linux Agent
 
 ```bash

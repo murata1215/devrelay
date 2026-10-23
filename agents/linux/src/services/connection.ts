@@ -35,11 +35,12 @@ import type {
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
-import { readdirSync, mkdirSync, writeFileSync, existsSync } from 'fs';
+import { readdirSync, mkdirSync, writeFileSync, existsSync, appendFileSync } from 'fs';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { decideAgentUpdateAction } from './update-guard-rules.js';
+import { GIT_NONINTERACTIVE_ENV, classifyGitRemoteFailure, buildRepoAuthFailureMessage, redactSecrets } from './repo-auth-rules.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { ensureRawCwd } from './raw-cwd.js';
 import { runRawCodex } from './raw-codex-runner.js';
@@ -2838,9 +2839,18 @@ function isInstalledAgent(agentDir: string): boolean {
 /**
  * プロキシ設定を含む環境変数オブジェクトを構築する
  * Agent の config.yaml にプロキシが設定されている場合、git/pnpm にも適用
+ *
+ * 会社 private リポジトリ clone 対応サイクル: 非対話 git を強制する env
+ * （`GIT_NONINTERACTIVE_ENV` = `GIT_TERMINAL_PROMPT=0`/`GCM_INTERACTIVE=never`、非 win32 のみ
+ * `GIT_ASKPASS=/bin/true`）も常に注入する。呼び出し元は `handleVersionCheck()`・`u` の更新スクリプト
+ * spawn・`commandExists()`・`getScaffoldEnv()` の 4 箇所のみで、AI CLI（claude/gemini/devin 等）の
+ * spawn はここを経由しない（プロジェクトリポジトリでの git 操作には影響しない）。
  */
 function getExecEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...GIT_NONINTERACTIVE_ENV };
+  if (process.platform !== 'win32') {
+    env.GIT_ASKPASS = '/bin/true';
+  }
   if (currentConfig?.proxy?.url) {
     const proxyUrl = buildProxyUrl(currentConfig.proxy);
     env.HTTP_PROXY = proxyUrl;
@@ -2961,6 +2971,11 @@ async function handleVersionCheck() {
     });
   } catch (err) {
     console.error(`❌ Version check failed:`, (err as Error).message);
+    // 会社 private リポジトリ clone 対応サイクル: PAT 失効等の認証失敗は、生の git stderr
+    // （万一 PAT が混入していても漏らさないよう）ではなく固定の案内文に差し替えてチャット/ログに出す
+    const stderr = (err as NodeJS.ErrnoException & { stderr?: string }).stderr || '';
+    const kind = classifyGitRemoteFailure(stderr || (err as Error).message);
+    const errorMessage = kind === 'auth' ? redactSecrets(buildRepoAuthFailureMessage(kind)) : (err as Error).message;
     sendMessage({
       type: 'agent:version:info',
       payload: {
@@ -2971,7 +2986,7 @@ async function handleVersionCheck() {
         remoteDate: '',
         hasUpdate: false,
         isDevRepo,
-        error: (err as Error).message,
+        error: errorMessage,
       },
     });
   }
@@ -3050,6 +3065,33 @@ async function handleAgentUpdate() {
   if (pendingUpdate) {
     console.log('▶️ Agent update resuming: AI turns finished');
     clearPendingUpdateRecheck();
+  }
+
+  // 会社 private リポジトリ clone 対応サイクル: detached スクリプトを spawn する前に、
+  // 認証（PAT 失効等）だけを軽く検証する。detached プロセスは WS を持たないため、
+  // スクリプト内で失敗してもチャットには届かない（update.log にしか出ない）。ここで事前に
+  // 認証失敗を検出してチャットに返し、ハング・古い dist での「静かな成功」を防ぐ
+  // （network/other の失敗はここでは止めず、後続の fetch/reset 失敗チェックに委ねる）。
+  try {
+    await execAsync('git ls-remote --exit-code origin HEAD', { cwd: agentDir, env: getExecEnv(), timeout: 30000 });
+  } catch (preflightErr) {
+    const stderr = (preflightErr as NodeJS.ErrnoException & { stderr?: string }).stderr || (preflightErr as Error).message || '';
+    if (classifyGitRemoteFailure(stderr) === 'auth') {
+      const message = redactSecrets(buildRepoAuthFailureMessage('auth'));
+      console.error(`❌ Agent update aborted (pre-flight auth check failed): ${message}`);
+      try {
+        const preflightLogsDir = join(getConfigDir(), 'logs');
+        mkdirSync(preflightLogsDir, { recursive: true });
+        appendFileSync(join(preflightLogsDir, 'update.log'), `[${new Date().toISOString()}] !! pre-flight auth check failed, aborting update (agent kept alive): ${message}\n`);
+      } catch {
+        // ログ書き込み失敗は非致命的（チャット通知は既に行う）
+      }
+      sendMessage({
+        type: 'agent:update:status',
+        payload: { machineId, status: 'error', error: message },
+      });
+      return;
+    }
   }
 
   updateStartedAt = Date.now();
@@ -3282,10 +3324,16 @@ async function handleAgentUpdate() {
       `export PATH="${nodeBinDir}:$PATH"`,
       `cd "${agentDir}"`,
       log('=== Update started ==='),
-      runAndLog('git fetch', 'git fetch origin'),
+      // 会社 private リポジトリ clone 対応サイクル: fetch/reset の exit code を実際に判定する
+      // （従来は runAndLog で終了コードを捨てており、PAT 失効等で fetch/reset が失敗したまま
+      // 古いソース/dist で restart し、サーバーには update.completed が返ってしまう穴があった。
+      // Windows 分岐（#356 B4）と同じ「失敗したら中止・既存 Agent を維持」に揃える）
+      runAndLogChecked('git fetch', 'git fetch origin'),
+      `if [ "$RC" != "0" ]; then ${log('!! git fetch failed, aborting update (agent kept alive)')}; exit 0; fi`,
       `REMOTE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' || echo "origin/main")`,
       `[ -z "$REMOTE_BRANCH" ] && REMOTE_BRANCH="origin/main"`,
-      runAndLog('git reset', 'git reset --hard $REMOTE_BRANCH'),
+      runAndLogChecked('git reset', 'git reset --hard $REMOTE_BRANCH'),
+      `if [ "$RC" != "0" ]; then ${log('!! git reset failed, aborting update (agent kept alive)')}; exit 0; fi`,
       // #329 Part B: --frozen-lockfile が失敗したら --frozen-lockfile 無しで1回だけ再試行
       // （#328 の tier2 と同じ方針）
       // #cmurfdjgu0b2rjhjhjqdo4zux 案2: --filter で Agent パッケージ + その依存のみに絞る

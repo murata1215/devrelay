@@ -41,6 +41,7 @@ import { saveConfig, getConfigDir, type AgentConfig } from './config.js';
 import { buildPnpmInstallCommand, AGENT_INSTALL_FILTER, WIN32_AGENT_INSTALL_FILTER } from './update-script.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { decideAgentUpdateAction } from './update-guard-rules.js';
+import { GIT_NONINTERACTIVE_ENV } from './repo-auth-rules.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { ensureRawCwd } from './raw-cwd.js';
 import { runRawCodex } from './raw-codex-runner.js';
@@ -2759,9 +2760,15 @@ function isInstalledAgent(agentDir: string): boolean {
 /**
  * プロキシ設定を含む環境変数オブジェクトを構築する
  * Agent の config.yaml にプロキシが設定されている場合、git/pnpm にも適用
+ *
+ * 会社 private リポジトリ clone 対応サイクル: 非対話 git を強制する env（`GIT_NONINTERACTIVE_ENV`
+ * = `GIT_TERMINAL_PROMPT=0`/`GCM_INTERACTIVE=never` + `GIT_ASKPASS=/bin/true`）も常に注入する。
+ * macOS は本サイクルでは `getExecEnv()` への env 注入のみ対応（`u` の fetch/reset exit code
+ * チェックと spawn 前の pre-flight 認証チェックは対象外。PAT 失効時は従来どおり静かに古いコードで
+ * restart する既知の制約として残る。詳細: doc/company-repo-sync.md）。
  */
 function getExecEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...GIT_NONINTERACTIVE_ENV, GIT_ASKPASS: '/bin/true' };
   if (currentConfig?.proxy?.url) {
     const proxyUrl = buildProxyUrl(currentConfig.proxy);
     env.HTTP_PROXY = proxyUrl;

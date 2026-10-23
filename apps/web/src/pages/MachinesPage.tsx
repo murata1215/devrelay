@@ -13,6 +13,7 @@ import {
 import type { CapabilitySyncStatusLike, CapabilityFormErrorCode } from '../lib/capability-config-rules';
 import { normalizeManagementInfo, formatDateTimeSafe } from '../lib/machine-display-rules';
 import { resolveSettingsOs, buildUninstallCommand, buildFullUninstallCommand } from '../lib/uninstall-command-rules';
+import { buildInstallCommand } from '../lib/install-command-rules';
 
 export function MachinesPage() {
   const { t } = useLanguage();
@@ -31,6 +32,11 @@ export function MachinesPage() {
 
   // OS タブ切り替え（Linux / macOS / Windows）
   const [installOs, setInstallOs] = useState<'linux' | 'macos' | 'windows'>('linux');
+
+  // 会社 private リポジトリ clone 対応サイクル: サーバー env（DEVRELAY_AGENT_REPO_URL）が設定されている
+  // ときだけ、インストール一行コマンドに --repo / $env:DEVRELAY_REPO_URL を付与する（未設定なら null で
+  // 現行動作のまま）。GET /api/machines/:id/token の戻り値を使い、新規 route は増やさない。
+  const [agentRepoUrl, setAgentRepoUrl] = useState<string | null>(null);
 
   // Agent 設定モーダル（既存 Agent の詳細表示）
   const [settingsTarget, setSettingsTarget] = useState<Machine | null>(null);
@@ -163,6 +169,9 @@ export function MachinesPage() {
       setNewMachine(result);
       setShowTokenModal(true);
       loadMachines();
+      // 新規作成直後のインストールコマンドにも --repo を乗せるため取得する（失敗しても
+      // インストールコマンド自体は repo 指定なしで引き続き表示できるので無視してよい）
+      machines.getToken(result.id).then((r) => setAgentRepoUrl(r.agentRepoUrl ?? null)).catch(() => {});
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to create agent');
     } finally {
@@ -199,6 +208,7 @@ export function MachinesPage() {
         machines.getCapabilityConfig(machine.id).catch(() => ({ capabilityConfig: null, capabilitySyncStatus: null, capabilitySyncSupported: null })),
       ]);
       setSettingsToken(tokenResult.token);
+      setAgentRepoUrl(tokenResult.agentRepoUrl ?? null);
       // DB 設定があればそれを使用、なければ Agent ローカル設定をプリセット
       setProjectsDirs(dirsResult.projectsDirs ?? dirsResult.localProjectsDirs ?? []);
       setSkipPermissions(skipResult.skipPermissions ?? false);
@@ -312,15 +322,10 @@ export function MachinesPage() {
     });
   };
 
-  // ワンライナーインストールコマンドを生成（OS 別）
-  const getInstallCommand = (token: string, os: 'linux' | 'macos' | 'windows' = 'linux') => {
-    if (!token) return '';
-    if (os === 'windows') {
-      return `$env:DEVRELAY_TOKEN="${token}"; irm https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.ps1 | iex`;
-    }
-    // macOS と Linux は同じインストーラー（install-agent.sh が uname -s で自動判定）
-    return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${token}`;
-  };
+  // ワンライナーインストールコマンドを生成（OS 別。実体は install-command-rules.ts の純関数。
+  // agentRepoUrl が null（DEVRELAY_AGENT_REPO_URL 未設定）のときは従来の文字列と完全に同じになる）
+  const getInstallCommand = (token: string, os: 'linux' | 'macos' | 'windows' = 'linux') =>
+    buildInstallCommand({ os, token, repoUrl: agentRepoUrl });
 
   /** アンインストールコマンドを生成（OS 別、実体は uninstall-command-rules.ts の純関数） */
   const getUninstallCommand = (os: 'linux' | 'macos' | 'windows' = 'linux') => buildUninstallCommand(os);
@@ -704,6 +709,14 @@ export function MachinesPage() {
                     ? 'Requires: Node.js 20+, git, Xcode CLT. Proxy support: add --proxy URL'
                     : 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'}
               </div>
+              {agentRepoUrl && (
+                <div className="text-[var(--text-faint)] text-xs mt-1">
+                  {installOs === 'windows'
+                    ? 'Private リポジトリ用の PAT が必要な場合、実行前に $env:DEVRELAY_REPO_TOKEN="<PAT>" を設定してください（サーバーには保存されません）。'
+                    : 'Private リポジトリ用の PAT が必要な場合、実行前に export DEVRELAY_REPO_TOKEN=<PAT> を設定してください（サーバーには保存されません）。'}
+                  {' '}詳細: doc/company-repo-sync.md
+                </div>
+              )}
             </div>
             <div className="flex justify-end">
               <button
@@ -1238,6 +1251,14 @@ export function MachinesPage() {
                     ? 'Requires: Node.js 20+, git, Xcode CLT. Proxy support: add --proxy URL'
                     : 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'}
               </div>
+              {agentRepoUrl && (
+                <div className="text-[var(--text-faint)] text-xs mt-1">
+                  {settingsOs === 'windows'
+                    ? 'Private リポジトリ用の PAT が必要な場合、実行前に $env:DEVRELAY_REPO_TOKEN="<PAT>" を設定してください（サーバーには保存されません）。'
+                    : 'Private リポジトリ用の PAT が必要な場合、実行前に export DEVRELAY_REPO_TOKEN=<PAT> を設定してください（サーバーには保存されません）。'}
+                  {' '}詳細: doc/company-repo-sync.md
+                </div>
+              )}
             </div>
 
             {/* 管理コマンド（Agent 接続時に環境固有のコマンドを自動取得・保存）

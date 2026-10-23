@@ -204,6 +204,12 @@ curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/in
 
 `git` required (macOS: Xcode Command Line Tools). An **AI CLI is optional** — Claude Code, Gemini, Codex, Aider, or Devin; any one works, and the installer no longer aborts if none is present (a Devin-only machine is fine). The generated `config.yaml` picks its `default` from whichever AI CLI is detected (priority: claude > devin > gemini > codex > aider), and the agent's startup auto-detection adds any tool installed later. Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `~/.devrelay/node/`, sudo fallback for global pnpm install). Get your token from the WebUI Agents page (click "+ Add Agent"). The agent name will be set automatically from your hostname. The installer auto-detects OS (Linux/macOS) and configures the appropriate process manager (systemd/launchd).
 
+To clone the agent from a company private repository instead of the public one, add `--repo <URL>` (PAT via `$DEVRELAY_REPO_TOKEN` or interactive prompt; see [doc/company-repo-sync.md](doc/company-repo-sync.md)):
+
+```bash
+DEVRELAY_REPO_TOKEN=<PAT> curl -fsSL ... | bash -s -- --token YOUR_TOKEN --repo https://github.com/ORG/REPO.git
+```
+
 #### Windows CLI Agent (One-liner)
 
 ```powershell
@@ -211,6 +217,12 @@ $env:DEVRELAY_TOKEN="YOUR_TOKEN"; irm https://raw.githubusercontent.com/murata12
 ```
 
 `git` required. Node.js 20+ and pnpm are **auto-installed** if missing (downloaded to `%APPDATA%\devrelay\node\`, #327). An AI CLI (Claude Code / Gemini / Codex / Aider / Devin) is **optional** — any one works and the installer no longer aborts if none is present. ExecutionPolicy is set automatically. Installs to `%APPDATA%\devrelay\agent\` with Startup folder auto-start. Since the script is delivered via `irm | iex`, all failure paths use `return` instead of `exit` — a top-level `exit` inside an `iex`-executed script would close the caller's PowerShell window before the error message could be read (#327).
+
+To clone from a company private repository instead, set `$env:DEVRELAY_REPO_URL` (and optionally `$env:DEVRELAY_REPO_TOKEN` for the PAT; see [doc/company-repo-sync.md](doc/company-repo-sync.md)):
+
+```powershell
+$env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_REPO_URL="https://github.com/ORG/REPO.git"; irm ... | iex
+```
 
 #### Linux Agent (Manual)
 
@@ -395,6 +407,8 @@ curl -fsSL ... | bash -s -- --token YOUR_TOKEN --proxy http://proxy:8080
 # Windows: skip prompt with $env:DEVRELAY_PROXY
 $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_PROXY="http://proxy:8080"; irm ... | iex
 ```
+
+For cloning the agent from a company private repository (instead of the public `murata1215/devrelay`), see [doc/company-repo-sync.md](doc/company-repo-sync.md) — `--repo <URL>` / `$env:DEVRELAY_REPO_URL`, with the PAT passed via `$DEVRELAY_REPO_TOKEN` / `$env:DEVRELAY_REPO_TOKEN` (never embedded in the URL, never sent to the server).
 
 To configure proxy manually, add settings to `~/.devrelay/config.yaml`:
 

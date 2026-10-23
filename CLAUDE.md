@@ -98,6 +98,7 @@ pm2 restart devrelay-server
 | DEVRELAY_BOT_LOGIN_TIMEOUT_MS | bot 起動 1 回分の試行タイムアウト（既定 `30000`、clamp 5000〜300000） |
 | DEVRELAY_BOT_RETRY_MAX_MS | bot 起動リトライ間隔の上限（既定 `300000`、clamp 10000〜3600000） |
 | DEVRELAY_CONVERSATION_RAIL | 右レール第3タブ「会話履歴」（直近20スレッド横断・実行中スピナー・未確認緑✓）向けに `GET /api/threads` が `running`/`lastAiAt` フィールドを返すか（既定 `1`。`0` で両フィールドを一切出さない＝旧レスポンスと構造的に同一になるキルスイッチ。DB 変更なし・既読状態はブラウザの localStorage 管理） |
+| DEVRELAY_AGENT_REPO_URL | 会社 private リポジトリ clone 対応サイクル: `GET /api/machines/:id/token` が WebUI に返す、Agent インストール一行コマンドに付与する clone 先 URL（`https://` 必須・userinfo 付き URL は拒否して無視）。**未設定時は WebUI のコマンドが現行と完全に同じ文字列になる**（実質的なキルスイッチ）。PAT はこの変数にも DB にも一切保存しない（Agent PC ローカルの `.git/config` の `http.<repoUrl>.extraHeader` にのみ保存。インストーラ側は `--repo`/`$env:DEVRELAY_REPO_URL`、PAT は `DEVRELAY_REPO_TOKEN`/`$env:DEVRELAY_REPO_TOKEN` または対話入力。詳細 `doc/company-repo-sync.md`） |
 
 ## DB テーブル（概要）
 
@@ -125,3 +126,4 @@ pm2 restart devrelay-server
 - サイクル別 devlog: `doc/devlog/`（1 サイクル = 1 ファイル + `INDEX.md` 索引）
 - 設計・アーキテクチャ: `rules/project.md`
 - マイグレーションガイド: `doc/devrelay-claudemd-migration.md`
+- 会社 private リポジトリ clone 対応: `doc/company-repo-sync.md`
