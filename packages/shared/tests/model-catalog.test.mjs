@@ -88,6 +88,32 @@ test('codex カタログに sol/terra/luna の3席が揃っている', () => {
   }
 });
 
+// 2026-10-23: GPT-6 世代3件（astra/sol/luna）を追加。uso8m / 本機の codex-cli 実測で
+// visibility==='list' を確認済み（詳細は AI_MODEL_CATALOG.codex 直上のコメント参照）。
+test('codex カタログに GPT-6 世代3件（astra/sol/luna）が存在する', () => {
+  const ids = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  for (const id of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']) {
+    assert.ok(ids.includes(id), `${id} が見つからない: ${JSON.stringify(ids)}`);
+  }
+});
+
+test('codex カタログに GPT-6 追加後も既存6件（GPT-5.6/5.5/5.4 世代）が残っている', () => {
+  const ids = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  for (const id of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']) {
+    assert.ok(ids.includes(id), `${id} が見つからない（削除事故の回帰）: ${JSON.stringify(ids)}`);
+  }
+});
+
+test('codex カタログは GPT-6 世代が GPT-5.6 世代より前に並んでいる', () => {
+  const ids = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  assert.deepEqual(ids.slice(0, 3), ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'], `先頭3件の並びが想定と異なる: ${JSON.stringify(ids)}`);
+});
+
+test('codex カタログに gpt-6.1-sol は未追加（今回のスコープ外、意図的に足さない）', () => {
+  const ids = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  assert.ok(!ids.includes('gpt-6.1-sol'), `gpt-6.1-sol が含まれている（スコープ外のはず）: ${JSON.stringify(ids)}`);
+});
+
 test('claude カタログに claude-haiku-4-5 が存在する（raw-completion Phase 2.1 の軽量席用）', () => {
   const ids = AI_MODEL_CATALOG.claude.map((m) => m.id);
   assert.ok(ids.includes('claude-haiku-4-5'), `claude-haiku-4-5 が見つからない: ${JSON.stringify(ids)}`);

@@ -125,6 +125,25 @@ test('validateRawCodexModel: 実カタログ（packages/shared の AI_MODEL_CATA
   }
 });
 
+// 2026-10-23: Codex モデル許可リストに GPT-6 世代3件（astra/sol/luna）を追加。
+test('validateRawCodexModel: 実カタログ（AI_MODEL_CATALOG.codex）で GPT-6 世代3件が ok', () => {
+  const realCatalogIds = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']) {
+    assert.deepEqual(
+      validateRawCodexModel(model, realCatalogIds),
+      { ok: true },
+      `${model} が実カタログで ok にならない: ${JSON.stringify(realCatalogIds)}`
+    );
+  }
+});
+
+test('validateRawCodexModel: gpt-6.1-sol は未追加なので NG（今回のスコープ外）', () => {
+  const realCatalogIds = AI_MODEL_CATALOG.codex.map((m) => m.id);
+  const result = validateRawCodexModel('gpt-6.1-sol', realCatalogIds);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Unknown Codex model/);
+});
+
 test('validateRawCodexModel: カタログ外のモデル ID は NG', () => {
   const result = validateRawCodexModel('gpt-9.9-unknown', CATALOG_IDS);
   assert.equal(result.ok, false);

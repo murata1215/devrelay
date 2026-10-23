@@ -97,7 +97,17 @@ export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
   // 旧カタログの gpt-5.3-codex/gpt-5.2-codex/gpt-5.1-codex-max/gpt-5.1-codex は
   // このバージョンには存在しない（#309 実装時に実機確認せず記載した誤り）。
   // 実際の CLI 既定モデルは gpt-5.5 ではなく gpt-5.6-sol（過去セッションログで実測確認済み）。
+  // 2026-10-23 追記: GPT-6 世代3件（astra/sol/luna）を追加。uso8m の codex-cli 0.163.0 の
+  // `~/.codex/models_cache.json` で visibility==='list' を実測し、`codex exec -m <slug>` で
+  // 3件とも応答を確認済み。本機（x220-158-18-103、codex-cli 0.164.0）の同キャッシュでも存在を再確認した。
+  // 同キャッシュには priority 最上位の `gpt-6.1-sol` も載っているが、今回は意図的に未追加
+  // （次に世代を追うならここが候補）。`gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini` は新バージョンの
+  // キャッシュには存在しないが、旧 CLI を使う機のために残置する（削除しない）。
+  // CLI 既定モデルの扱いは今回変更しない（`gpt-5.6-sol` の「（CLI 既定）」表記は据え置き）。
   codex: [
+    { id: 'gpt-6-astra', name: 'GPT-6 Astra', description: 'GPT-6 世代の最上位' },
+    { id: 'gpt-6-sol', name: 'GPT-6 Sol', description: 'GPT-6 世代のバランス型' },
+    { id: 'gpt-6-luna', name: 'GPT-6 Luna', description: 'GPT-6 世代の軽量・高速' },
     { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', description: '最上位・難バグ/設計（CLI 既定）' },
     { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: 'バランス型・普段使いの本命' },
     { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: '軽量・高速・低コスト' },
