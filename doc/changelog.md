@@ -498,6 +498,25 @@ macOS でトークン事前検証が「サーバーに接続できません」�
 - 修正: デコード前に `=` を補完し、結果が `ws://` / `wss://` で始まる場合のみ採用
 - 副次修正: `--server` を指定してもトークン由来 URL で上書きされていた（コメントと実装の不一致）→ `--server` 明示時は抽出をスキップ
 
+### Devin 専用端末で `a 1` しないと devin が選ばれない問題を修正 (2026-10-15)
+
+#261（インストーラの Claude 任意化）/ #289（Agent のフォールバック）/ 10-02（サーバー `pickAvailableAiTool`）の
+残りの穴。「インストール済み」の判定が **config.yaml に `aiTools.<tool>` エントリがあるか** だけで、実体を見ていなかった。
+
+- 原因: インストーラが AI CLI を 1 つも検出できないと（Linux で devin が PATH 外の `~/.local/bin` にある／
+  Windows で devin を入れた直後の同じ PowerShell で PATH 未反映）`default: claude` + `claude:` を書く。
+  起動時の自動検出で devin が追加されても claude エントリが残り available=[claude, devin] →
+  要求 'claude'（Project.defaultAi 既定）が尊重され Claude 未ログインで止まっていた
+- Agent（linux / macos）: 新規 `ai-tool-presence.ts`（純関数）+ `ai-tool-probe.ts`（PATH→既知パス、10 分キャッシュ）。
+  `getAvailableAiTools()` は実体のあるツールだけを返す（1 つも無ければ従来どおり config 全件）。
+  claude は system CLI か認証情報（`~/.claude/.credentials.json` / `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`）があれば実在扱い。
+  サーバーへの申告も実態になるのでサーバー側 `pickAvailableAiTool` も自動で正しくなる
+- `detectAndUpdateAiTools()`: which のみ → 既知パス（`~/.local/bin` / `/opt/homebrew/bin` / npm グローバル等）も探す。
+  `aiTools.default` が実在しないツールを指し、他に実在ツールがあれば優先順（claude > devin > …）で差し替えて保存
+- `install-agent.sh`: 検出前に `~/.local/bin` を PATH に足す。`install-agent.ps1`: 検出前に PATH を
+  レジストリ（Machine+User）+ 既知ディレクトリから再構築
+- `agents/windows`（Electron 版、インストーラ非使用）は対象外。サーバー変更なし。反映には各機の Agent 更新（`u`）が必要
+
 ### Linux 版 Agent の resume 失敗リトライで model が失われる不具合を修正 (2026-10-13)
 
 組織 AI デフォルト（`devin_model_plan`/`devin_model_exec` = `claude-opus-5.5`、上書き不可）が

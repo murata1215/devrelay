@@ -790,6 +790,28 @@ if ($ProxyUrl -and $PnpmCmd) {
 # Claude Code は必須ではなく、claude / gemini / codex / aider / devin のいずれか
 # 1 つあれば動作する（どれも無くても Agent 自体は起動でき、後からインストールすれば
 # 起動時の自動検出が config に追加する）。
+#
+# 検出前に PATH をレジストリ（Machine + User）から読み直し、既知のインストール先も足す。
+# devin / claude を入れた直後の同じ PowerShell でインストーラを実行すると、このプロセスの
+# $env:Path には新しい PATH が反映されておらず Get-Command が失敗する → config.yaml に
+# `default: claude` が書かれ、Devin 専用端末で `a 1` しないと devin が選ばれなかった。
+$RegistryPath = @(
+    [Environment]::GetEnvironmentVariable('Path', 'Machine'),
+    [Environment]::GetEnvironmentVariable('Path', 'User')
+) | Where-Object { $_ }
+$KnownAiDirs = @()
+if ($env:USERPROFILE)  { $KnownAiDirs += "$env:USERPROFILE\.local\bin" }
+if ($env:APPDATA)      { $KnownAiDirs += "$env:APPDATA\npm" }
+if ($env:LOCALAPPDATA) { $KnownAiDirs += "$env:LOCALAPPDATA\Programs\devin"; $KnownAiDirs += "$env:LOCALAPPDATA\Programs\claude" }
+$KnownAiDirs = @($KnownAiDirs | Where-Object { Test-Path -LiteralPath $_ })
+$PathParts = New-Object System.Collections.Generic.List[string]
+foreach ($p in (@($env:Path) + $RegistryPath + $KnownAiDirs)) {
+    foreach ($part in ($p -split ';')) {
+        if ($part -and -not $PathParts.Contains($part)) { $PathParts.Add($part) }
+    }
+}
+$env:Path = $PathParts -join ';'
+
 $ClaudeCmd = Get-Command claude -ErrorAction SilentlyContinue
 if (-not $ClaudeCmd) {
     # Claude Code が無くても他の AI CLI があれば続行する

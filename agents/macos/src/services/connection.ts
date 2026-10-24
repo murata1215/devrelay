@@ -56,6 +56,8 @@ import { isGitRepo, captureBaseline, restoreToBaseline, type PorcelainEntry } fr
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
+import { filterPresentAiTools } from './ai-tool-presence.js';
+import { isAiToolPresent } from './ai-tool-probe.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
@@ -2011,7 +2013,9 @@ function getAvailableAiTools(config: AgentConfig): AiTool[] {
   if (config.aiTools.codex) tools.push('codex');
   if (config.aiTools.aider) tools.push('aider');
   if (config.aiTools.devin) tools.push('devin');
-  return tools;
+  // config にエントリがあるだけでなく実体が見つかるものに絞る（ai-tool-presence.ts 冒頭の背景参照）。
+  // 1 つも実在しない場合は従来どおり config の全エントリを返す。
+  return filterPresentAiTools(tools, (t) => isAiToolPresent(t, config.aiTools[t]?.command));
 }
 
 /**

@@ -2,8 +2,9 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import yaml from 'yaml';
-import { execSync } from 'child_process';
 import type { AiTool, ProxyConfig } from '@devrelay/shared';
+import { isAiToolPresent } from './ai-tool-probe.js';
+import { pickReplacementDefaultAiTool } from './ai-tool-presence.js';
 
 export interface AgentConfig {
   machineName: string;
@@ -155,24 +156,30 @@ const KNOWN_AI_TOOLS: { name: AiTool; command: string }[] = [
  * @returns 新しいツールが検出されたかどうか
  */
 export async function detectAndUpdateAiTools(config: AgentConfig): Promise<boolean> {
-  const findCmd = process.platform === 'win32' ? 'where' : 'which';
   let updated = false;
 
   for (const { name, command } of KNOWN_AI_TOOLS) {
     // 既に config にあるツールはスキップ（ユーザー設定を尊重）
     if (config.aiTools[name]) continue;
 
-    try {
-      // #350: Agent は wscript.exe 経由でコンソール無しに起動されるため、windowsHide が無いと
-      // where/which を1本呼ぶたびに新規コンソール窓が開く（5ツール分で最大5窓）
-      execSync(`${findCmd} ${command}`, { stdio: 'pipe', timeout: 5000, windowsHide: true });
-      // コマンドが見つかった → config に追加
+    // PATH（where / command -v、#350 の windowsHide 済み）→ 既知パス（~/.local/bin 等）の順で探す。
+    // 従来は which のみで、PATH に無い ~/.local/bin/devin 等を拾えなかった。
+    if (isAiToolPresent(name, command)) {
       config.aiTools[name] = { command };
       console.log(`🔍 Detected ${name} CLI → added to config`);
       updated = true;
-    } catch {
-      // コマンドなし → 何もしない
     }
+  }
+
+  // aiTools.default が実在しないツール（インストーラが AI CLI を検出できず書いた `claude` 等）を指していて、
+  // 他に実在するツールがあれば差し替える。新規自動登録プロジェクトの defaultAi もこれに揃う。
+  const configured = KNOWN_AI_TOOLS.map((t) => t.name).filter((n) => config.aiTools[n]);
+  const present = configured.filter((n) => isAiToolPresent(n, config.aiTools[n]?.command));
+  const replacement = pickReplacementDefaultAiTool(config.aiTools.default, present);
+  if (replacement) {
+    console.log(`🔍 aiTools.default '${config.aiTools.default}' is not installed → switched to '${replacement}'`);
+    config.aiTools.default = replacement as AiTool;
+    updated = true;
   }
 
   if (updated) {

@@ -56,6 +56,8 @@ import { extractLastAssistantText } from './terminal-parser.js';
 import { appendApprovalLog, rotateApprovalLog } from './approval-logger.js';
 import { setupLogRotation } from './log-rotator.js';
 import { loadLastAiTool, saveLastAiTool } from './agent-state.js';
+import { filterPresentAiTools } from './ai-tool-presence.js';
+import { isAiToolPresent } from './ai-tool-probe.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
   clearOutputDir,
@@ -2083,6 +2085,12 @@ function sendMessage(message: AgentMessage) {
   }
 }
 
+/**
+ * この端末で使える AI ツール一覧（サーバーへの申告と `resolveEffectiveAiTool()` の両方で使う）。
+ * config.yaml にエントリがあるだけでなく、実体が見つかるものに絞る（`ai-tool-presence.ts` 冒頭の背景参照。
+ * インストーラが残した実体の無い `claude:` エントリのせいで Devin 専用端末でも claude が選ばれ `a 1` が必要に
+ * なっていた）。1 つも実在しない場合は従来どおり config の全エントリを返す。
+ */
 function getAvailableAiTools(config: AgentConfig): AiTool[] {
   const tools: AiTool[] = [];
   if (config.aiTools.claude) tools.push('claude');
@@ -2090,7 +2098,7 @@ function getAvailableAiTools(config: AgentConfig): AiTool[] {
   if (config.aiTools.codex) tools.push('codex');
   if (config.aiTools.aider) tools.push('aider');
   if (config.aiTools.devin) tools.push('devin');
-  return tools;
+  return filterPresentAiTools(tools, (t) => isAiToolPresent(t, config.aiTools[t]?.command));
 }
 
 /**

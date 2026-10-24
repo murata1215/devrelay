@@ -523,6 +523,12 @@ fi
 # AI タスクを実行する。Claude Code は必須ではなく、いずれか 1 つあれば動作する
 # （どれも無くても Agent 自体は起動でき、後からインストールすれば起動時の
 #  自動検出が config に追加する）。
+# ~/.local/bin（claude / devin 等の一般的なインストール先）が PATH に無ければ先に足す。
+# 従来は claude だけ特別扱いしていたため、~/.local/bin/devin しか無い Devin 専用端末で
+# AI CLI 未検出 → config.yaml に `default: claude` が書かれ、`a 1` しないと devin が選ばれなかった。
+if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
 if ! command -v claude &> /dev/null; then
   # ~/.local/bin にインストール済みだが PATH に入っていない場合のフォールバック
   if [ -x "$HOME/.local/bin/claude" ]; then
