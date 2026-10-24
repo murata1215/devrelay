@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideUpdateAction } from '../dist/services/agent-update-decision.js';
+import { decideUpdateAction, decideUpdateFlow } from '../dist/services/agent-update-decision.js';
 
 test('hasUpdate=true なら常に update（runningCodeStale の値に関わらず）', () => {
   assert.equal(decideUpdateAction({ hasUpdate: true, runningCodeStale: true }), 'update');
@@ -31,4 +31,27 @@ test('hasUpdate=false かつ runningCodeStale 未指定（キー自体無し）�
 test('境界値: hasUpdate=false, runningCodeStale=true の判定は入力オブジェクトの余分なキーに影響されない', () => {
   const input = { hasUpdate: false, runningCodeStale: true, extra: 'ignored' };
   assert.equal(decideUpdateAction(input), 'rebuild');
+});
+
+// 2026-10-24: `u force` 一発化（decideUpdateFlow）。素の u の 2段階確認は不変で、
+// force 時だけ確認を待たず即実行（execute）に倒す。
+test('decideUpdateFlow: action=upToDate は force の有無に関わらず常に upToDate', () => {
+  assert.equal(decideUpdateFlow({ action: 'upToDate', force: false }), 'upToDate');
+  assert.equal(decideUpdateFlow({ action: 'upToDate', force: true }), 'upToDate');
+});
+
+test('decideUpdateFlow: action=update, force=false は confirm（従来の2段階確認）', () => {
+  assert.equal(decideUpdateFlow({ action: 'update', force: false }), 'confirm');
+});
+
+test('decideUpdateFlow: action=update, force=true は execute（1回で実行）', () => {
+  assert.equal(decideUpdateFlow({ action: 'update', force: true }), 'execute');
+});
+
+test('decideUpdateFlow: action=rebuild, force=false は confirm', () => {
+  assert.equal(decideUpdateFlow({ action: 'rebuild', force: false }), 'confirm');
+});
+
+test('decideUpdateFlow: action=rebuild, force=true は execute', () => {
+  assert.equal(decideUpdateFlow({ action: 'rebuild', force: true }), 'execute');
 });

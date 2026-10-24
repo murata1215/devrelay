@@ -6,8 +6,8 @@ import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted } from '../services/agent-manager.js';
-import { isMachineBusyWithReason } from '../services/auto-updater.js';
-import { isUpdateBusyGuardEnabled, decideManualUpdate, extractBusyCount } from '../services/update-busy-rules.js';
+import { getMachineBusyState } from '../services/auto-updater.js';
+import { isUpdateBusyGuardEnabled, decideManualUpdate, buildBusyHoldApiMessage, formatBusyReason } from '../services/update-busy-rules.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
 import { createSession, resolveScopeOptionsForSession, getProgressTrackerAgeMs, listProgressTrackers } from '../services/session-manager.js';
@@ -515,11 +515,11 @@ export async function apiRoutes(app: FastifyInstance) {
     const query = (request.query ?? {}) as { force?: string };
     const force = body.force === true || query.force === '1' || query.force === 'true';
     if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
-      const busyReason = await isMachineBusyWithReason(id);
-      if (decideManualUpdate({ busy: busyReason !== null, force }) === 'hold') {
-        return reply.status(409).send({
-          error: `AI turn in progress (${extractBusyCount(busyReason)}). Wait for it to finish, or retry with { "force": true }.`,
-        });
+      const busyState = await getMachineBusyState(id);
+      if (decideManualUpdate({ busy: busyState !== null, force }) === 'hold') {
+        // 観測性（2026-10-24）: 手動再起動が保留されたときに理由を 1 行ログ出力する
+        console.log(`⏸️ [restart] held for ${id}: ${formatBusyReason(busyState)} (force=${force})`);
+        return reply.status(409).send({ error: buildBusyHoldApiMessage(busyState) });
       }
     }
 

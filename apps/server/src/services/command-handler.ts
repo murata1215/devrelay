@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { UserCommand, UserContext, Platform, FileAttachment, AiTool, ModelSelectableAiTool, Language } from '@devrelay/shared';
+import type { UserCommand, UserContext, Platform, FileAttachment, AiTool, ModelSelectableAiTool, Language, ChatMessageKey } from '@devrelay/shared';
 import { STATUS_EMOJI, AI_TOOL_NAMES, AI_MODEL_CATALOG, isModelSelectableAiTool, isUnsafeModelId, DEFAULT_CHAT_LANGUAGE, isLanguage, tChat, W_COMMAND_PROMPT_PREFIXES } from '@devrelay/shared';
 import { Machine, Project, Session, Message } from '@prisma/client';
 import { prisma } from '../db/client.js';
@@ -27,7 +27,7 @@ import {
   cancelClaudeLogin,
   agentHasCapability,
 } from './agent-manager.js';
-import { isMachineBusyWithReason } from './auto-updater.js';
+import { getMachineBusyState } from './auto-updater.js';
 import { decideClearDispatch } from './thread-clear-guard.js';
 import {
   createSession,
@@ -52,8 +52,8 @@ import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './
 import { resolveOrgAiContext, decideEffectiveModel, isModelSettingLocked } from './org-ai-defaults.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
-import { decideUpdateAction } from './agent-update-decision.js';
-import { isUpdateBusyGuardEnabled, decideManualUpdate, extractBusyCount } from './update-busy-rules.js';
+import { decideUpdateAction, decideUpdateFlow } from './agent-update-decision.js';
+import { isUpdateBusyGuardEnabled, decideManualUpdate, resolveDeferredBusyMessage, formatBusyReason } from './update-busy-rules.js';
 import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag, fenceIfHuman, buildHumanTextMeta } from './human-text-fence.js';
 import {
   createTestflightService,
@@ -1455,7 +1455,25 @@ function formatRunningCodeLines(info: { runningCodeMtime?: string; runningCodeSt
   return lines;
 }
 
-/** Agent のバージョン確認・更新（2回連続で更新実行） */
+/**
+ * `updateAgent()` の呼び出しをまとめるヘルパ（2026-10-24）。
+ * 「2回目の u」分岐と `u force` の一発実行分岐の両方から使う（コピペ防止）。
+ * セッションから projectId を取得する（WebUI でリクエスト元タブに結果を返すため）。
+ */
+async function runUpdateNow(context: UserContext, lang: Language): Promise<void> {
+  let projectId: string | undefined;
+  if (context.currentSessionId) {
+    const session = await prisma.session.findUnique({
+      where: { id: context.currentSessionId },
+      select: { projectId: true },
+    });
+    projectId = session?.projectId;
+  }
+  // #320: 更新完了/失敗/タイムアウト通知の表示言語を伝搬
+  updateAgent(context.currentMachineId!, context.platform, context.chatId, projectId, lang);
+}
+
+/** Agent のバージョン確認・更新（2回連続で更新実行。`force` 時は 1 回で実行） */
 async function handleUpdate(context: UserContext, force: boolean = false): Promise<string> {
   const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   if (!context.currentMachineId) {
@@ -1469,26 +1487,19 @@ async function handleUpdate(context: UserContext, force: boolean = false): Promi
   // 続きから進められるようにする。2回目の確定を busy のたびにリセットすると、ユーザーが
   // 何度も `u` → `u` を打ち直す必要が出てしまう）。
   if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
-    const busyReason = await isMachineBusyWithReason(context.currentMachineId);
-    if (decideManualUpdate({ busy: busyReason !== null, force }) === 'hold') {
-      return tChat(lang, 'update.deferredBusy', { count: extractBusyCount(busyReason) });
+    const busyState = await getMachineBusyState(context.currentMachineId);
+    if (decideManualUpdate({ busy: busyState !== null, force }) === 'hold') {
+      // 観測性（2026-10-24）: 手動 `u` が保留されたときに理由を 1 行ログ出力する
+      console.log(`⏸️ [u] held for ${context.currentMachineId}: ${formatBusyReason(busyState)} (platform=${context.platform}, force=${force})`);
+      const { key, params } = resolveDeferredBusyMessage(busyState);
+      return tChat(lang, key as ChatMessageKey, params);
     }
   }
 
   // 2回目の u: 更新実行
   if (pendingUpdate.has(chatKey)) {
     pendingUpdate.delete(chatKey);
-    // セッションから projectId を取得（WebUI でリクエスト元タブに結果を返すため）
-    let projectId: string | undefined;
-    if (context.currentSessionId) {
-      const session = await prisma.session.findUnique({
-        where: { id: context.currentSessionId },
-        select: { projectId: true },
-      });
-      projectId = session?.projectId;
-    }
-    // #320: 更新完了/失敗/タイムアウト通知の表示言語を伝搬
-    updateAgent(context.currentMachineId, context.platform, context.chatId, projectId, lang);
+    await runUpdateNow(context, lang);
     return tChat(lang, 'update.updating');
   }
 
@@ -1514,7 +1525,16 @@ async function handleUpdate(context: UserContext, force: boolean = false): Promi
       });
     }
 
+    // `u force` 一発化（2026-10-24）: action が 'update'/'rebuild' かつ force なら、
+    // 確認（pendingUpdate）を待たずそのまま実行する。素の `u`（force なし）は従来どおり 2 段階確認。
+    const flow = decideUpdateFlow({ action, force });
+
     if (action === 'rebuild') {
+      if (flow === 'execute') {
+        pendingUpdate.delete(chatKey);
+        await runUpdateNow(context, lang);
+        return tChat(lang, 'update.forcedRebuilding', { commit: info.localCommit.slice(0, 7) });
+      }
       // #350: git は最新だが実行中コードが古い（stale dist デッドロック）。
       // 'update' と同じ pendingUpdate フローに乗せ、2回目の u で updateAgent() を呼ぶ
       // （新しい WS メッセージ型・新コマンドは追加しない、既存の再ビルド機構をそのまま再利用）
@@ -1526,7 +1546,16 @@ async function handleUpdate(context: UserContext, force: boolean = false): Promi
       });
     }
 
-    // 更新あり: pendingUpdate フラグを設定
+    // 更新あり
+    if (flow === 'execute') {
+      pendingUpdate.delete(chatKey);
+      await runUpdateNow(context, lang);
+      return tChat(lang, 'update.forcedUpdating', {
+        localCommit: info.localCommit.slice(0, 7),
+        remoteCommit: info.remoteCommit.slice(0, 7),
+      });
+    }
+    // pendingUpdate フラグを設定（従来どおりの 2 段階確認）
     pendingUpdate.add(chatKey);
     const displayName = context.currentMachineName || 'Agent';
     return tChat(lang, 'update.available', {

@@ -184,39 +184,120 @@ describe('auto-updater.ts: sweepStale 呼び出し・isMachineBusyWithReason の
   });
 });
 
-describe('command-handler.ts: 手動 `u` の busy ガード（D4）', () => {
+describe('command-handler.ts: 手動 `u` の busy ガード（D4、2026-10-24 自家中毒修正・force 一発化）', () => {
   const source = readServerSource('src/services/command-handler.ts');
 
   test('handleUpdate は force 引数を受け取る', () => {
     assert.match(source, /async function handleUpdate\(context: UserContext, force: boolean/);
   });
 
-  test('isMachineBusyWithReason / decideManualUpdate を使っている', () => {
+  test('getMachineBusyState / decideManualUpdate を使っている（isMachineBusyWithReason の素の文字列判定はやめた）', () => {
     const fnIdx = source.indexOf('async function handleUpdate(');
     const body = source.slice(fnIdx, fnIdx + 1500);
-    assert.match(body, /isMachineBusyWithReason\(/);
+    assert.match(body, /getMachineBusyState\(/);
     assert.match(body, /decideManualUpdate\(/);
+    assert.doesNotMatch(body, /isMachineBusyWithReason\(/);
   });
 
-  test(`update.deferredBusy を使っている`, () => {
-    assert.match(source, /'update\.deferredBusy'/);
+  test('busy hold 時に理由を 1 行ログ出力している（観測性）', () => {
+    const fnIdx = source.indexOf('async function handleUpdate(');
+    const body = source.slice(fnIdx, fnIdx + 1500);
+    assert.match(body, /console\.log\(`⏸️ \[u\] held for/);
+  });
+
+  test('resolveDeferredBusyMessage を使って理由別キーを返している', () => {
+    const fnIdx = source.indexOf('async function handleUpdate(');
+    const body = source.slice(fnIdx, fnIdx + 1500);
+    assert.match(body, /resolveDeferredBusyMessage\(/);
+  });
+
+  test(`update.deferredBusy（フォールバック）を update-busy-rules.ts 側で使っている`, () => {
+    const rulesSource = readServerSource('src/services/update-busy-rules.ts');
+    assert.match(rulesSource, /'update\.deferredBusy'/);
   });
 
   test('update コマンドの dispatch で command.force を渡している', () => {
     assert.match(source, /handleUpdate\(context, command\.force/);
   });
+
+  test('`u force` 一発化: decideUpdateFlow を使い、execute 時は pendingUpdate を経由せず runUpdateNow を呼ぶ', () => {
+    const fnIdx = source.indexOf('async function handleUpdate(');
+    const fnEnd = source.indexOf('\nasync function handleQuit', fnIdx);
+    const body = source.slice(fnIdx, fnEnd > 0 ? fnEnd : fnIdx + 4000);
+    assert.match(body, /decideUpdateFlow\(/);
+    assert.match(body, /flow === 'execute'/);
+    assert.match(body, /runUpdateNow\(/);
+  });
 });
 
-describe('routes/api.ts: POST /api/machines/:id/restart の busy ガード（D8/C4）', () => {
+describe('routes/api.ts: POST /api/machines/:id/restart の busy ガード（D8/C4、2026-10-24 自家中毒修正）', () => {
   const source = readRepoFile('apps/server/src/routes/api.ts');
 
-  test('restart ルートに isMachineBusyWithReason / decideManualUpdate がある', () => {
+  test('restart ルートに getMachineBusyState / decideManualUpdate がある（isMachineBusyWithReason の素の文字列判定はやめた）', () => {
     const idx = source.indexOf(`/api/machines/:id/restart`);
     assert.ok(idx > 0);
     const body = source.slice(idx, idx + 2000);
-    assert.match(body, /isMachineBusyWithReason\(/);
+    assert.match(body, /getMachineBusyState\(/);
     assert.match(body, /decideManualUpdate\(/);
     assert.match(body, /reply\.status\(409\)/);
+    assert.doesNotMatch(body, /isMachineBusyWithReason\(/);
+  });
+
+  test('busy hold 時に理由を 1 行ログ出力している（観測性）', () => {
+    const idx = source.indexOf(`/api/machines/:id/restart`);
+    const body = source.slice(idx, idx + 2000);
+    assert.match(body, /console\.log\(`⏸️ \[restart\] held for/);
+  });
+
+  test('buildBusyHoldApiMessage を使って 409 本文を組み立てている', () => {
+    const idx = source.indexOf(`/api/machines/:id/restart`);
+    const body = source.slice(idx, idx + 2000);
+    assert.match(body, /buildBusyHoldApiMessage\(/);
+  });
+});
+
+describe('auto-updater.ts: busy 判定の自家中毒修正（2026-10-24）', () => {
+  const source = readServerSource('src/services/auto-updater.ts');
+
+  test('getMachineBusyState がエクスポートされている（新しい単一情報源）', () => {
+    assert.match(source, /export\s+async\s+function\s+getMachineBusyState\(/);
+  });
+
+  test('isMachineBusyWithReason は getMachineBusyState + formatBusyReason に委譲する薄いラッパ', () => {
+    const idx = source.indexOf('export async function isMachineBusyWithReason(');
+    assert.ok(idx > 0);
+    const body = source.slice(idx, idx + 300);
+    assert.match(body, /formatBusyReason\(await getMachineBusyState\(machineId\)\)/);
+  });
+
+  test('recent activity の判定が buildRecentAiActivityWhere( 経由（role 限定の配線固定）', () => {
+    const idx = source.indexOf('export async function getMachineBusyState(');
+    assert.ok(idx > 0);
+    const body = source.slice(idx, idx + 2000);
+    assert.match(body, /buildRecentAiActivityWhere\(/);
+  });
+
+  test('session running の判定が isSessionRunning ではなく getProgressTrackerAgeMs + RUNNING_FRESHNESS_MS（鮮度ベース）', () => {
+    const idx = source.indexOf('export async function getMachineBusyState(');
+    assert.ok(idx > 0);
+    const body = source.slice(idx, idx + 2000);
+    assert.match(body, /getProgressTrackerAgeMs\(/);
+    assert.match(body, /RUNNING_FRESHNESS_MS/);
+    assert.doesNotMatch(source, /isSessionRunning\(/);
+  });
+});
+
+describe('agent-manager.ts: handleAgentConnect での台帳掃除（再接続時の取りこぼし対策、2026-10-24）', () => {
+  const source = readServerSource('src/services/agent-manager.ts');
+
+  test('handleAgentConnect 内（connectedAgents.set の後）に inFlightTurns.clearMachine( がある', () => {
+    const fnIdx = source.indexOf('async function handleAgentConnect(');
+    assert.ok(fnIdx > 0);
+    const setIdx = source.indexOf('connectedAgents.set(machine.id, ws);', fnIdx);
+    assert.ok(setIdx > 0);
+    const after = source.slice(setIdx, setIdx + 600);
+    assert.match(after, /isUpdateBusyGuardEnabled\(process\.env\.DEVRELAY_UPDATE_BUSY_GUARD\)/);
+    assert.match(after, /inFlightTurns\.clearMachine\(/);
   });
 });
 

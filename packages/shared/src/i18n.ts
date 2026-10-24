@@ -128,9 +128,33 @@ export const chatMessages = {
   'update.versionCheckTimeout': { en: 'Timed out', ja: 'タイムアウト' },
   'update.required': { en: '⚠️ This agent needs an update. Send `u` to update.', ja: '⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。' },
   // サイクル3.1: 実行中 AI ターンがあるため更新を保留した（D4）。force=true の `u force` で無視できる
+  // 2026-10-24: 未知の busy 理由のフォールバック専用に残す（通常は下の理由別キーが使われる）
   'update.deferredBusy': {
     en: '⏸️ AI turn in progress ({count}). Update held. Send `u` again after it finishes, or `u force` to update now anyway.',
     ja: '⏸️ AI 実行中（{count}件）のため更新を保留しました。終了後に `u` を再送するか、`u force` で今すぐ更新できます。',
+  },
+  // 2026-10-24: busy 理由を正直に分ける（数えていない値を件数として表示しない）。
+  // in-flight turn（実行中ターン台帳）由来のみ件数つき、他は件数なしの文言。
+  'update.deferredBusyTurn': {
+    en: '⏸️ AI turn in progress ({count}). Update held. Send `u` again after it finishes, or `u force` to update now anyway.',
+    ja: '⏸️ AI 実行中（{count}件）のため更新を保留しました。終了後に `u` を再送するか、`u force` で今すぐ更新できます。',
+  },
+  'update.deferredBusySessionRunning': {
+    en: '⏸️ A process is currently running. Update held. Send `u` again after it finishes, or `u force` to update now anyway.',
+    ja: '⏸️ 実行中の処理があるため更新を保留しました。終了後に `u` を再送するか、`u force` で今すぐ更新できます。',
+  },
+  'update.deferredBusyRecentAi': {
+    en: '⏸️ AI output was produced in the last 10 minutes. Update held. Send `u` again after it finishes, or `u force` to update now anyway.',
+    ja: '⏸️ 直近10分に AI の出力があったため更新を保留しました。終了後に `u` を再送するか、`u force` で今すぐ更新できます。',
+  },
+  // 2026-10-24: `u force` 一発化（確認なしで即実行した場合の応答）
+  'update.forcedUpdating': {
+    en: '🔄 `u force`: updating now ({localCommit} → {remoteCommit})...\n(connection will be briefly interrupted)',
+    ja: '🔄 `u force`: 今すぐ更新を実行します（{localCommit} → {remoteCommit}）\n（接続が一時的に切断されます）',
+  },
+  'update.forcedRebuilding': {
+    en: '🔄 `u force`: rebuilding now (commit {commit})...\n(connection will be briefly interrupted)',
+    ja: '🔄 `u force`: 今すぐ再ビルドを実行します（commit {commit}）\n（接続が一時的に切断されます）',
   },
 
   // --- claude auth（Claude ログイン切れ検知、リモート再ログイン中継 Phase1） ---

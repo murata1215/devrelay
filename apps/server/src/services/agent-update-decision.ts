@@ -45,3 +45,25 @@ export function decideUpdateAction(input: AgentUpdateDecisionInput): AgentUpdate
   }
   return 'upToDate';
 }
+
+/**
+ * `u force` 一発化（2026-10-24）の判定。
+ *
+ * 背景: 従来 `force` は busy ゲートの貫通にしか使われず、2 段階確認（`pendingUpdate`）には
+ * 一切作用しなかった。そのため `u force` の 1 回目はバージョン表示だけで終わり、2 回目に
+ * 素の `u` を送るとまた busy で hold される（force が実質機能していなかった）。
+ *
+ * `decideUpdateAction()` の結果（1回目の判定）に `force` を重ねて、
+ * 「このまま確認なしで実行してよいか」を決める。
+ * - `'upToDate'` は force の有無に関わらず常に `'upToDate'`（最新なら更新も再ビルドも不要）
+ * - `'update'` / `'rebuild'` で `force` なら `'execute'`（確認を待たず即実行）
+ * - `'update'` / `'rebuild'` で `force` でなければ `'confirm'`（従来どおり pendingUpdate で確認）
+ *
+ * 素の `u` の 2 段階確認フロー自体は変えない（`force` が無いときは常に `'confirm'`）。
+ */
+export type AgentUpdateFlow = 'execute' | 'confirm' | 'upToDate';
+
+export function decideUpdateFlow(input: { action: AgentUpdateAction; force: boolean }): AgentUpdateFlow {
+  if (input.action === 'upToDate') return 'upToDate';
+  return input.force ? 'execute' : 'confirm';
+}

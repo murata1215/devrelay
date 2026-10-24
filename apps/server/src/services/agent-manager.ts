@@ -580,6 +580,18 @@ async function handleAgentConnect(
   }
   connectedAgents.set(machine.id, ws);
 
+  // 2026-10-24: 実行中ターン台帳の掃除漏れ対策。handleAgentDisconnect 側の clearMachine() は
+  // 「旧 close が新 connect より後に発火する」順序だと stale 判定で早期 return し、台帳の残骸が
+  // TTL 6 時間残ってしまう（再接続直後に busy と誤判定され続ける）。接続登録直後のここは
+  // 「旧 close → 新 connect」「新 connect → 旧 close（stale 早期 return）」のどちらの順序でも
+  // 必ず通る唯一の点のため、ここでも掃除する（disconnect 側の既存呼び出しとの二重実行は無害）。
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    const clearedCount = inFlightTurns.clearMachine(machine.id);
+    if (clearedCount > 0) {
+      console.log(`🧹 Cleared ${clearedCount} stale in-flight turn(s) for ${machine.id} on reconnect`);
+    }
+  }
+
   // Agent から送信された machineName で DB の名前を自動更新する条件:
   // 1. 仮名（agent-N）→ 正式名への更新（初回接続時）
   // 2. 旧形式（hostname のみ）→ 新形式（hostname/username）への自動マイグレーション
@@ -2673,7 +2685,13 @@ async function handleToolApprovalRequest(payload: ToolApprovalRequestPayload) {
 
   // FCM プッシュ通知 + 通知レコード作成（モバイルアプリ用）
   if (userId && projectId) {
-    const projectName = getMachineDisplayName(machineId) || 'Unknown';
+    // 2026-10-23 修正: 以前は `projectName` にマシン名（getMachineDisplayName）を渡していた表示バグ。
+    // `projectId` は手元にあるので、プロジェクト名を正しく解決する
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { displayName: true, name: true },
+    });
+    const projectName = project?.displayName || project?.name || 'Unknown';
     sendFcmNotificationForToolApproval(userId, toolName, projectName, sessionId, projectId).catch(() => {});
     // 通知レコード作成（通知一覧用）
     const toolDesc = isQuestion ? `質問: ${(toolInput as any)?.question || toolName}` : `${toolName}`;

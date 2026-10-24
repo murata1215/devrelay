@@ -17,11 +17,15 @@
 
 import { prisma } from '../db/client.js';
 import { checkAgentVersion, updateAgentAuto, isAgentConnected, getConnectedAgents } from './agent-manager.js';
-import { isSessionRunning } from './session-manager.js';
+import { getProgressTrackerAgeMs } from './session-manager.js';
+import { RUNNING_FRESHNESS_MS } from './thread-activity.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
 import { decideReconcileOutcome } from './auto-update-reconcile.js';
 import { inFlightTurns } from './in-flight-turns.js';
-import { isUpdateBusyGuardEnabled, resolveBusyReason, resolveCooldownMs } from './update-busy-rules.js';
+import {
+  isUpdateBusyGuardEnabled, resolveBusyState, formatBusyReason, resolveCooldownMs,
+  buildRecentAiActivityWhere, type BusyState,
+} from './update-busy-rules.js';
 
 /** 同一コミットへの試行上限（超えたらそのマシンの自動更新を停止する） */
 const MAX_ATTEMPTS_PER_COMMIT = 2;
@@ -145,22 +149,30 @@ export function evaluateAutoUpdateGates(input: AutoUpdateGateInput): AutoUpdateD
 }
 
 /**
- * マシンが作業中か判定し、理由文字列を返す（busy でなければ null）。
+ * マシンが作業中か判定する（busy でなければ null）。
  *
  * サイクル3.1: 判定の優先順位を 3 段に拡張した。
  * 1. 実行中ターン台帳（`InFlightTurnRegistry`）— 経路を問わず AI プロンプト送信〜完了検知までを
  *    捕捉する（根本原因の修正。MCP exec / crossquery・teamexec / raw-completion は従来 2〜3 では
  *    捕捉できなかった）
- * 2. 既存: active セッションで `progressTracker` が張られている（対話経路・`ag`・MCP submit/ask）
- * 3. 既存: 直近 10 分以内にそのマシンの active セッションへの Message があるか
+ * 2. 進捗トラッカー（session-manager.ts）の**鮮度**（tracker の有無ではなく「最後に動いた証拠からの
+ *    経過時間」が `RUNNING_FRESHNESS_MS` 以内か）。2026-10-24: 従来は tracker の有無だけを見ていたが、
+ *    `finalizeProgress()` の配信失敗や Agent 切断時の回収漏れで tracker が残ると busy が恒久的に
+ *    true になる事故クラスがあった（会話履歴レールの `resolveRunning()` が 2026-10-18 に同じ理由で
+ *    取った対策と同じ考え方をここにも適用する。本物の長時間ターンは 1 の台帳（6時間 TTL）が捕捉する
+ *    ため判定力は落ちない）
+ * 3. 直近 10 分以内にそのマシンの active セッションへ `role='ai'` の Message があるか
+ *    （2026-10-24: 従来は role を問わず見ていたため、WebUI からの `u` 自身の入力/応答行
+ *    （`role='user'`/`'system'`）を踏んで busy と誤判定し続ける「自家中毒」があった。
+ *    AI の出力だけを証拠として扱うことで、観測対象（AI の活動）と観測記録（コマンドの往復）を分離する）
  *
  * `DEVRELAY_UPDATE_BUSY_GUARD=0` のときは 1 を無効化し、2〜3 のみ（従来挙動）に戻す。
  */
-export async function isMachineBusyWithReason(machineId: string): Promise<string | null> {
+export async function getMachineBusyState(machineId: string): Promise<BusyState | null> {
   if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
     const inFlightTurnCount = inFlightTurns.count(machineId, Date.now());
     if (inFlightTurnCount > 0) {
-      return resolveBusyReason({ inFlightTurnCount, sessionRunning: false, recentActivity: false });
+      return resolveBusyState({ inFlightTurnCount, sessionRunning: false, recentActivity: false });
     }
   }
 
@@ -168,22 +180,34 @@ export async function isMachineBusyWithReason(machineId: string): Promise<string
     where: { machineId, status: 'active' },
     select: { id: true },
   });
-  if (sessions.some(s => isSessionRunning(s.id))) {
-    return resolveBusyReason({ inFlightTurnCount: 0, sessionRunning: true, recentActivity: false });
+  const now = Date.now();
+  const sessionRunning = sessions.some(s => {
+    const ageMs = getProgressTrackerAgeMs(s.id, now);
+    return ageMs !== undefined && ageMs < RUNNING_FRESHNESS_MS;
+  });
+  if (sessionRunning) {
+    return resolveBusyState({ inFlightTurnCount: 0, sessionRunning: true, recentActivity: false });
   }
 
   if (sessions.length === 0) return null;
   const recent = await prisma.message.findFirst({
-    where: {
-      sessionId: { in: sessions.map(s => s.id) },
-      createdAt: { gte: new Date(Date.now() - RECENT_ACTIVITY_MS) },
-    },
+    where: buildRecentAiActivityWhere(sessions.map(s => s.id), new Date(now - RECENT_ACTIVITY_MS)),
     select: { id: true },
   });
   if (recent !== null) {
-    return resolveBusyReason({ inFlightTurnCount: 0, sessionRunning: false, recentActivity: true });
+    return resolveBusyState({ inFlightTurnCount: 0, sessionRunning: false, recentActivity: true });
   }
   return null;
+}
+
+/**
+ * マシンが作業中か判定し、理由文字列を返す（busy でなければ null）。
+ * 実装は `getMachineBusyState()` に委譲する薄いラッパ（既存シグネチャ非破壊。
+ * command-handler.ts / routes/api.ts の既存呼び出し元は本サイクルで構造化版に乗せ替えるが、
+ * ログ用の文字列が必要な場所（自動更新スイープ）向けにこの関数自体は残す）。
+ */
+export async function isMachineBusyWithReason(machineId: string): Promise<string | null> {
+  return formatBusyReason(await getMachineBusyState(machineId));
 }
 
 /**
@@ -320,7 +344,7 @@ export async function maybeAutoUpdate(machineId: string, trigger: 'connect' | 's
   // サーバー側台帳が見落とした場合の追加の安全網として busy 判定に加える（新 Agent のみ。
   // 省略時 undefined は無視＝旧 Agent で非退行）
   if (busyReason === null && version.hasUpdate && (version.activeAiTurns ?? 0) > 0) {
-    busyReason = `busy (agent-reported turn: ${version.activeAiTurns})`;
+    busyReason = formatBusyReason({ kind: 'agent-reported-turn', count: version.activeAiTurns ?? 0 });
   }
   const decision = evaluateAutoUpdateGates({
     globallyEnabled,

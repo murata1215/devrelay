@@ -6,6 +6,50 @@
 
 ## 実装済み機能
 
+### `u` の busy 判定の自家中毒修正と `u force` 一発化 (2026-10-24)
+
+WebUI から `u` を送っても自動更新が永久に保留され続ける不具合を根治した。合わせて、保留理由の
+誤表示・Agent 再接続時の台帳掃除漏れ・`u force` が実質機能しない問題も併せて修正した。
+
+#### 真因: 観測対象と観測記録の混在（自家中毒）
+2026-10-18 の WebUI コマンド永続化（`web.ts`）により、`u` コマンド自体が `executeCommand()` の前に
+`Message`（`role='user'`）として保存されるようになった。直後の busy 判定（`isMachineBusyWithReason()`）は
+「直近10分に active セッションへの `Message` があるか」を **role を問わず** 見ていたため、`u` が
+**自分自身の入力行を踏んで** busy と誤判定し続けていた。hold 応答も `role='system'` で保存されるため
+10分窓が毎回リセットされ、WebUI からの `u` が永久に通らなかった。
+
+#### 修正内容
+- **自家中毒の根治**: recent activity の判定を `role='ai'` の Message のみに限定（新設の純関数
+  `buildRecentAiActivityWhere()`）。`RECENT_ACTIVITY_MS`（10分）の値は変更していない。AI プロンプト
+  送信〜出力前の窓は既存の実行中ターン台帳（`inFlightTurns`、サイクル3.1）が経路を問わず捕捉するため、
+  判定力は落ちない。
+- **busy 構造化**: `BusyState { kind, count }` を新設し、数えていない理由（session-running /
+  recent-ai-output）の `count` を `null` に。従来 `extractBusyCount()` が数字を含まない理由を一律
+  「1」に丸めて表示していた誤誘導を解消（**削除**）。ja/en に理由別の文言キー
+  （`update.deferredBusyTurn` / `...SessionRunning` / `...RecentAi`）を追加。
+- **session running 判定の鮮度ベース化**: `isSessionRunning()`（tracker の有無のみ）をやめ、
+  `getProgressTrackerAgeMs()` + 既存の `RUNNING_FRESHNESS_MS`（10分、`thread-activity.ts`）で判定。
+  `finalizeProgress()` の配信失敗等で tracker が回収漏れしても、最長 10 分で自己回復する
+  （2026-10-18 の会話履歴レール根治と同じ考え方を自動更新の busy 判定にも適用）。
+- **台帳の掃除漏れ**: `handleAgentConnect()`（接続登録直後）でも `inFlightTurns.clearMachine()` を
+  呼ぶようにした。「旧 close → 新 connect」「新 connect → 旧 close（stale 早期 return）」のどちらの
+  順序でも必ず通る点のため、`handleAgentDisconnect()` 側だけでは塞げなかった穴を塞いだ
+  （既存の disconnect 側呼び出しとの二重実行は無害）。
+- **`u force` 一発化**: 新設の `decideUpdateFlow()` により、`force` 指定時はバージョン確認後
+  `pendingUpdate` の 2 段階確認を待たずそのまま更新/再ビルドを実行する（最新ならそのまま終了）。
+  素の `u`（force 無し）の 2 段階確認フローは不変。
+- **観測性**: 手動 `u`（`command-handler.ts`）・`POST /api/machines/:id/restart`（`routes/api.ts`）が
+  busy で hold した際に理由を 1 行ログ出力するようにした。
+
+#### 対象外
+`RECENT_ACTIVITY_MS`（10分）・`inFlightTurns` の TTL（6時間）の値、Discord/Telegram のコマンド
+永続化。DB マイグレーションなし（スキーマ変更ゼロ）。既存キルスイッチ（`DEVRELAY_UPDATE_BUSY_GUARD`）
+をそのまま流用し、新設キルスイッチは無し。`agents/*` は 0 行変更のため各機 `u` 不要。
+
+#### 検証
+server1371/1371（新規28）・shared104/104・web888/888（0行変更）green。6 workspace build green。
+Agent 側変更ゼロ（`u` 不要）。pm2 restart 要（未実施）。commit/push 済み（main 直接）。
+
 ### インストーラのサーバー配布PAT取得が IIS 経由で 415 になる不具合の修正 (2026-10-24)
 
 社内サーバーが IIS（ARR）配下のサブパスで稼働する構成で、前サイクル（読取PATのサーバー配布）の
