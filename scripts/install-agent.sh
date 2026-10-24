@@ -13,6 +13,8 @@
 # 会社 private リポジトリから clone する場合（詳細: doc/company-repo-sync.md）:
 #   DEVRELAY_REPO_TOKEN=<PAT> curl -fsSL ... | bash -s -- --token YOUR_TOKEN --repo https://github.com/ORG/REPO.git
 #   PAT だけ差し替える場合: curl -fsSL ... | bash -s -- --repo-auth-only --repo https://github.com/ORG/REPO.git
+#   社内サーバーが PAT を配布している場合は $DEVRELAY_REPO_TOKEN/対話入力ともに省略可（サーバーの
+#   .env に DEVRELAY_AGENT_REPO_TOKEN が設定済みなら、マシントークン認証つきで自動取得される）
 #
 # 前提条件:
 #   - git
@@ -109,13 +111,16 @@ reconcile_remote() {
 
 # repo ローカル・URL スコープの http.<repoUrl>.extraHeader を .git/config に書き込む（冪等）。
 # credential.helper を一度も経由しないため GCM/keyring の対話プロンプトが起動する余地がなく、
-# 開発者本人の github.com 資格情報にも一切干渉しない。PAT は argv ではなくファイル追記で渡す
-# （argv は /proc/<pid>/cmdline が world-readable なため、PAT は絶対に `git config <value>` の
-#   コマンドライン引数として渡さない）。
-# $1 = repo URL, $2 = PAT（空文字なら既存セクションを除去するだけで追記しない）
-write_repo_auth() {
+# 開発者本人の github.com 資格情報にも一切干渉しない。
+# $1 = repo URL, $2 = header 値（"Authorization: Basic <b64>" 形式。空文字なら既存セクションを
+#      除去するだけで追記しない）
+#
+# 読取PATのサーバー配布サイクル: 従来の `write_repo_auth(repo_url, pat)`（PAT を受け取り自前で
+# base64 化する版）は下に残し、本関数はヘッダ値を既に受け取っている前提に切り出した
+# （サーバーから取得した `authHeader` はこの形式で返るため、ここでは base64 化不要）。
+write_repo_auth_header() {
   local repo_url="$1"
-  local pat="$2"
+  local header_value="$2"
   local git_config="$AGENT_DIR/.git/config"
   [ -f "$git_config" ] || return 0
 
@@ -132,16 +137,61 @@ write_repo_auth() {
     }
   ' "$git_config" > "${git_config}.tmp" && mv "${git_config}.tmp" "$git_config"
 
-  if [ -n "$pat" ]; then
-    local header_b64
-    header_b64=$(printf 'x-access-token:%s' "$pat" | base64 | tr -d '\n')
+  if [ -n "$header_value" ]; then
     {
       printf '[http "%s"]\n' "$repo_url"
-      printf '\textraHeader = Authorization: Basic %s\n' "$header_b64"
+      printf '\textraHeader = %s\n' "$header_value"
     } >> "$git_config"
   fi
 
   chmod 600 "$git_config" 2>/dev/null || true
+}
+
+# PAT は argv ではなくファイル追記で渡す（argv は /proc/<pid>/cmdline が world-readable なため、
+# PAT は絶対に `git config <value>` のコマンドライン引数として渡さない）。
+# $1 = repo URL, $2 = PAT（空文字なら既存セクションを除去するだけで追記しない）
+write_repo_auth() {
+  local repo_url="$1"
+  local pat="$2"
+  local header_value=""
+  if [ -n "$pat" ]; then
+    header_value="Authorization: Basic $(printf 'x-access-token:%s' "$pat" | base64 | tr -d '\n')"
+  fi
+  write_repo_auth_header "$repo_url" "$header_value"
+}
+
+# =============================================================================
+# 読取PATのサーバー配布サイクル: サーバーから読取PATを取得する（インストール時のみ、HTTP）
+# =============================================================================
+#
+# $1 = API ベース URL（https:// のみ許可。http/SSH 等は何もせず無言で return）
+# $2 = DevRelay マシントークン（Bearer 認証に使う。空なら無言で return）
+#
+# 成否にかかわらずグローバル変数 SERVER_REPO_URL / SERVER_REPO_HEADER にセットする
+# （失敗・未設定・非 https のいずれも空文字のまま＝呼び出し側は空文字を「サーバー配布なし」
+# として手入力フローにフォールバックする）。レスポンス本文は一切 echo/ログ出力しない
+# （authHeader が画面・履歴に出る経路を作らないため）。
+SERVER_REPO_URL=""
+SERVER_REPO_HEADER=""
+fetch_server_repo_auth() {
+  SERVER_REPO_URL=""
+  SERVER_REPO_HEADER=""
+
+  # HTTPS 以外（http/SSH 等）では送らない
+  case "$1" in
+    https://*) ;;
+    *) return 0 ;;
+  esac
+  [ -z "$2" ] && return 0
+
+  local response
+  response=$(curl -s -f --connect-timeout 10 --max-time 20 -X POST "$1/api/agent/repo-auth" \
+    -H "Authorization: Bearer $2" 2>/dev/null) || return 0
+  [ -z "$response" ] && return 0
+
+  SERVER_REPO_URL=$(echo "$response" | grep -o '"repoUrl":"[^"]*"' | cut -d'"' -f4)
+  SERVER_REPO_HEADER=$(echo "$response" | grep -o '"authHeader":"[^"]*"' | cut -d'"' -f4)
+  return 0
 }
 
 # --- 引数パース ---
@@ -197,6 +247,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --repo            会社 private リポジトリ等への clone 先 URL (省略時は $REPO_URL_DEFAULT)"
       echo "                    PAT は \$DEVRELAY_REPO_TOKEN または対話入力で渡す（画面・ログには出ません）"
       echo "  --repo-auth-only  Node/pnpm/ビルド/サービス登録を行わず、既存インストールの PAT だけ差し替える"
+      echo "                    （サーバーが PAT を配布していれば --token か既存 config.yaml から自動取得）"
       echo "  --force           トークン検証をスキップ（意図的なトークン再利用時に使用）"
       exit 0
       ;;
@@ -216,10 +267,33 @@ if [ "$REPO_AUTH_ONLY" = true ]; then
     echo -e "${RED}エラー: $AGENT_DIR が見つかりません。先に通常インストールを実行してください${NC}"
     exit 1
   fi
-  prompt_repo_token
+
+  # 読取PATのサーバー配布サイクル: 手入力 PAT が無ければ、まずサーバーからの取得を試みる
+  # （--token 未指定なら既存 config.yaml の token/serverUrl を使う。取得できなければ
+  # 無言で従来の対話入力にフォールバックする＝後方互換）
+  if [ -z "$REPO_TOKEN" ]; then
+    REPO_AUTH_TOKEN="$TOKEN"
+    REPO_AUTH_SERVER_URL="$SERVER_URL"
+    if [ -z "$REPO_AUTH_TOKEN" ] && [ -f "$CONFIG_FILE" ]; then
+      REPO_AUTH_TOKEN=$(grep '^token:' "$CONFIG_FILE" | sed -E 's/^token: *"?([^"]*)"?.*$/\1/')
+      REPO_AUTH_CFG_SERVER_URL=$(grep '^serverUrl:' "$CONFIG_FILE" | sed -E 's/^serverUrl: *"?([^"]*)"?.*$/\1/')
+      [ -n "$REPO_AUTH_CFG_SERVER_URL" ] && REPO_AUTH_SERVER_URL="$REPO_AUTH_CFG_SERVER_URL"
+    fi
+    if [ -n "$REPO_AUTH_TOKEN" ]; then
+      REPO_AUTH_API_BASE=$(echo "$REPO_AUTH_SERVER_URL" | sed 's|^wss://|https://|; s|^ws://|http://|; s|/ws/agent$||')
+      fetch_server_repo_auth "$REPO_AUTH_API_BASE" "$REPO_AUTH_TOKEN"
+      [ -n "$SERVER_REPO_HEADER" ] && echo "  🔑 サーバーから読取PATを取得しました（手入力不要）"
+    fi
+  fi
+  [ -z "$SERVER_REPO_HEADER" ] && prompt_repo_token
+
   echo "  既存リポジトリの remote / 認証情報を更新中..."
   reconcile_remote
-  write_repo_auth "$REPO_URL" "$REPO_TOKEN"
+  if [ -n "$SERVER_REPO_HEADER" ]; then
+    write_repo_auth_header "$REPO_URL" "$SERVER_REPO_HEADER"
+  else
+    write_repo_auth "$REPO_URL" "$REPO_TOKEN"
+  fi
   echo "  🔍 接続を確認中..."
   if git -C "$AGENT_DIR" ls-remote --exit-code origin HEAD > /dev/null 2>&1; then
     echo -e "${GREEN}✅ リポジトリ認証 OK（$REPO_URL）${NC}"
@@ -572,7 +646,16 @@ mkdir -p "$CONFIG_DIR/logs"
 mkdir -p "$CONFIG_DIR/bin"
 
 if [ "$REPO_URL_EXPLICIT" = true ] && [ -z "$REPO_TOKEN" ]; then
-  prompt_repo_token
+  # 読取PATのサーバー配布サイクル: 手入力 PAT が無ければ、まずサーバーからの取得を試みる
+  # （$API_BASE_URL は --force 時は未設定のことがあるため、ここで改めて算出する。この時点で
+  # $TOKEN は必須チェック済みなので非空が保証されている）
+  REPO_AUTH_API_BASE=$(echo "$SERVER_URL" | sed 's|^wss://|https://|; s|^ws://|http://|; s|/ws/agent$||')
+  fetch_server_repo_auth "$REPO_AUTH_API_BASE" "$TOKEN"
+  if [ -n "$SERVER_REPO_HEADER" ]; then
+    echo "  🔑 サーバーから読取PATを取得しました（手入力不要）"
+  else
+    prompt_repo_token
+  fi
 fi
 
 if [ -d "$AGENT_DIR/.git" ]; then
@@ -583,7 +666,11 @@ if [ -d "$AGENT_DIR/.git" ]; then
   # origin を張り替え、PAT も .git/config に反映する（.git の存在だけで「流用」判定していた
   # 従来ロジックのままだと、既存機で --repo を渡しても古い origin から pull し続けてしまう）
   reconcile_remote
-  write_repo_auth "$REPO_URL" "$REPO_TOKEN"
+  if [ -n "$SERVER_REPO_HEADER" ]; then
+    write_repo_auth_header "$REPO_URL" "$SERVER_REPO_HEADER"
+  else
+    write_repo_auth "$REPO_URL" "$REPO_TOKEN"
+  fi
   # 前回の install が lockfile を書き換えている場合、その変更は git pull では
   # 復元されない（取り込むコミット側が lockfile を変更していなければ競合せず、
   # ローカルの改変がそのまま残る）。設定（overrides 等）と不一致になると
@@ -609,14 +696,30 @@ else
     GIT_CONFIG_VALUE_0="Authorization: Basic ${HEADER_B64}" \
     git clone --quiet --depth 1 "$REPO_URL" "$AGENT_DIR"
     unset HEADER_B64
+  elif [ -n "$SERVER_REPO_HEADER" ]; then
+    # 読取PATのサーバー配布サイクル: サーバーから取得した header 値（すでに "Authorization:
+    # Basic ..." 形式）をそのまま env 経由で一時注入する
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="http.${REPO_URL}.extraHeader" \
+    GIT_CONFIG_VALUE_0="${SERVER_REPO_HEADER}" \
+    git clone --quiet --depth 1 "$REPO_URL" "$AGENT_DIR"
   else
     git clone --quiet --depth 1 "$REPO_URL" "$AGENT_DIR"
   fi
-  write_repo_auth "$REPO_URL" "$REPO_TOKEN"
+  if [ -n "$SERVER_REPO_HEADER" ]; then
+    write_repo_auth_header "$REPO_URL" "$SERVER_REPO_HEADER"
+  else
+    write_repo_auth "$REPO_URL" "$REPO_TOKEN"
+  fi
 fi
 
 echo -e "${GREEN}✅ リポジトリ取得完了${NC}"
 echo ""
+
+# 読取PATのサーバー配布サイクル: 以降のステップでは PAT 関連の値を使わないため、
+# プロセス env から消す（念のための保険。この env は子プロセスにしか継承されず、呼び出し元の
+# シェルには元から残らない）
+unset REPO_TOKEN SERVER_REPO_HEADER SERVER_REPO_URL
 
 # =============================================================================
 # Step 3: ビルド

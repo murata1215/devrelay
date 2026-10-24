@@ -213,7 +213,8 @@ export type AgentMessage =
   | { type: 'agent:claude:login:url'; payload: ClaudeLoginUrlPayload }
   | { type: 'agent:claude:login:result'; payload: ClaudeLoginResultPayload }
   | { type: 'agent:capability:sync'; payload: AgentCapabilitySyncPayload }
-  | { type: 'agent:raw:result'; payload: RawResultPayload };
+  | { type: 'agent:raw:result'; payload: RawResultPayload }
+  | { type: 'agent:repo:auth:request'; payload: RepoAuthRequestPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -408,7 +409,33 @@ export type ServerToAgentMessage =
   | { type: 'server:claude:login:code'; payload: ClaudeLoginCodePayload }
   | { type: 'server:claude:login:cancel'; payload: ClaudeLoginCancelPayload }
   | { type: 'server:capability:sync'; payload: { trigger?: 'idle' | 'manual' } }
-  | { type: 'server:raw:prompt'; payload: RawPromptPayload };
+  | { type: 'server:raw:prompt'; payload: RawPromptPayload }
+  | { type: 'server:repo:auth'; payload: RepoAuthResponsePayload };
+
+/**
+ * 読取PATのサーバー配布サイクル: Agent が自分の origin URL（`.git/config` の `remote.origin.url`）を
+ * 添えてサーバーに読取PATを要求する（要求ドリブン＝PAT が不要な機体は一度もこの型を送らない）。
+ */
+export interface RepoAuthRequestPayload {
+  requestId: string;
+  /** Agent 自身が `git remote get-url origin` で読んだ値（秘密は含まない） */
+  originUrl: string;
+}
+
+/**
+ * 読取PATのサーバー配布サイクル: `agent:repo:auth:request` への応答。
+ *
+ * **`authHeader` は秘密情報**（`Authorization: Basic <base64(x-access-token:PAT)>` 形式）。
+ * ログ・DB・WebUI には絶対に出さないこと（サーバー側は `console.*` に出さず machineId のみ記録、
+ * Agent 側は `.git/config` への書き込み以外に一切出力しない）。
+ * サーバー env（`DEVRELAY_AGENT_REPO_TOKEN`）未設定時・リクエストした `originUrl` が配布対象の
+ * `repoUrl` と一致しない場合は `repoUrl`/`authHeader` ともに `null`。
+ */
+export interface RepoAuthResponsePayload {
+  requestId: string;
+  repoUrl: string | null;
+  authHeader: string | null;
+}
 
 export interface HistoryDatesRequestPayload {
   projectPath: string;

@@ -214,8 +214,13 @@ export const machines = {
     await request('DELETE', `/machines/${id}`);
   },
 
-  /** 既存エージェントのトークンを取得（agentRepoUrl: 会社 private リポジトリ等への clone 先。未設定時は null） */
-  async getToken(id: string): Promise<{ token: string; agentRepoUrl?: string | null }> {
+  /**
+   * 既存エージェントのトークンを取得。
+   * - agentRepoUrl: 会社 private リポジトリ等への clone 先。未設定時は null
+   * - agentRepoTokenConfigured: 読取PATのサーバー配布サイクル: サーバー env に読取PATが設定済みか
+   *   （値そのものは含まれない。インストール時に自動取得されるため WebUI の案内文言を出し分けるためだけに使う）
+   */
+  async getToken(id: string): Promise<{ token: string; agentRepoUrl?: string | null; agentRepoTokenConfigured?: boolean }> {
     return request('GET', `/machines/${id}/token`);
   },
 

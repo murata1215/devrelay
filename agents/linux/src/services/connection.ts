@@ -32,15 +32,18 @@ import type {
   RawPromptPayload,
   RawResultPayload,
   AiUsageData,
+  RepoAuthResponsePayload,
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync, existsSync, appendFileSync } from 'fs';
+import { chmod } from 'fs/promises';
 import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
+import { writeFileAtomic } from './atomic-write.js';
 import { decideAgentUpdateAction } from './update-guard-rules.js';
-import { GIT_NONINTERACTIVE_ENV, classifyGitRemoteFailure, buildRepoAuthFailureMessage, redactSecrets } from './repo-auth-rules.js';
+import { GIT_NONINTERACTIVE_ENV, classifyGitRemoteFailure, buildRepoAuthFailureMessage, redactSecrets, shouldRequestServerRepoAuth, readExtraHeaderFromGitConfig, upsertExtraHeaderInGitConfig } from './repo-auth-rules.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { ensureRawCwd } from './raw-cwd.js';
 import { runRawCodex } from './raw-codex-runner.js';
@@ -642,6 +645,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
 
     case 'server:claude:login:cancel':
       cancelClaudeLogin(message.payload.requestId, 'cancelled by server');
+      break;
+
+    case 'server:repo:auth':
+      // 読取PATのサーバー配布サイクル: `refreshRepoAuthFromServer()` が待っている Promise を解決する
+      resolveRepoAuthRequest(message.payload);
       break;
   }
 }
@@ -2836,6 +2844,117 @@ function isInstalledAgent(agentDir: string): boolean {
   return agentDir.startsWith(installedDir);
 }
 
+// =============================================================================
+// 読取PATのサーバー配布サイクル: `server:repo:auth` の要求ドリブン往復（Agent → Server → Agent）
+// =============================================================================
+
+/** `agent:repo:auth:request` の応答待ちリゾルバ（requestId → resolve/timeout）。*/
+const pendingRepoAuthRequests = new Map<string, { resolve: (payload: RepoAuthResponsePayload | null) => void; timeout: NodeJS.Timeout }>();
+
+/** この機体がサーバーから PAT を受け取った実績（プロセス寿命内のみ保持。失敗文言の分岐に使う）。 */
+let serverDistributedRepoAuth = false;
+
+/** 直近のサーバー問い合わせ時刻（ms epoch）。`handleVersionCheck`→`handleAgentUpdate` の連続呼び出しで二重送信しないためのクールダウン。 */
+let lastRepoAuthRefreshAt = 0;
+const REPO_AUTH_REFRESH_COOLDOWN_MS = 60 * 1000;
+
+/**
+ * `server:repo:auth` 受信ハンドラ。`refreshRepoAuthFromServer()` が待っている Promise を解決する。
+ */
+function resolveRepoAuthRequest(payload: RepoAuthResponsePayload) {
+  const pending = pendingRepoAuthRequests.get(payload.requestId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingRepoAuthRequests.delete(payload.requestId);
+  pending.resolve(payload);
+}
+
+/**
+ * `u`/バージョン確認の前に、サーバーから読取PATを取得し、必要なら `.git/config` の
+ * `http.<repoUrl>.extraHeader` を更新する（読取PATのサーバー配布サイクル）。
+ *
+ * **後方互換の要**: origin が公開既定 URL（`DEFAULT_AGENT_REPO_URL`）の機体、または
+ * `config.serverUrl` が HTTPS/WSS 相当でない機体は `shouldRequestServerRepoAuth()` が false を
+ * 返し、**新しい WS メッセージを一度も送らない**（個人 devrelay.io を含む既存の全環境は無変更）。
+ *
+ * サーバーが無応答・タイムアウト（5秒）・PAT 未配布のいずれでも、**ローカルの `.git/config` は
+ * 一切変更しない**（手入力 PAT 運用の機体を壊さないため）。値（PAT/authHeader）は一切
+ * `console.*`/`update.log` に出さない。
+ */
+async function refreshRepoAuthFromServer(agentDir: string): Promise<'applied' | 'unchanged' | 'skipped' | 'failed'> {
+  try {
+    const execOpts = { cwd: agentDir, env: getExecEnv(), timeout: 10000 };
+    const { stdout } = await execAsync('git remote get-url origin', execOpts);
+    const originUrl = stdout.trim();
+    const serverUrl = currentConfig?.serverUrl || '';
+
+    if (!shouldRequestServerRepoAuth({ originUrl, serverUrl })) {
+      return 'skipped';
+    }
+
+    const now = Date.now();
+    if (now - lastRepoAuthRefreshAt < REPO_AUTH_REFRESH_COOLDOWN_MS) {
+      return 'skipped';
+    }
+    lastRepoAuthRefreshAt = now;
+
+    const requestId = `repoauth_${now}_${Math.random().toString(36).slice(2, 9)}`;
+    const response = await new Promise<RepoAuthResponsePayload | null>((resolve) => {
+      const timeout = setTimeout(() => {
+        pendingRepoAuthRequests.delete(requestId);
+        resolve(null);
+      }, 5000);
+      pendingRepoAuthRequests.set(requestId, { resolve, timeout });
+      sendMessage({ type: 'agent:repo:auth:request', payload: { requestId, originUrl } });
+    });
+
+    // 旧サーバー（本メッセージ型未対応）・無応答・タイムアウト・PAT 未配布のいずれも
+    // 「何もしない」に倒す（ローカルの手入力 PAT 設定を壊さない）
+    if (!response || !response.repoUrl || !response.authHeader) {
+      return 'skipped';
+    }
+    if (response.repoUrl !== originUrl) {
+      console.warn('[repo-auth] server repoUrl does not match local origin, skipping');
+      return 'skipped';
+    }
+
+    const gitConfigPath = join(agentDir, '.git', 'config');
+    let configText: string;
+    try {
+      configText = await readFile(gitConfigPath, 'utf8');
+    } catch {
+      return 'failed';
+    }
+
+    const existing = readExtraHeaderFromGitConfig(configText, originUrl);
+    if (existing === response.authHeader) {
+      serverDistributedRepoAuth = true;
+      return 'unchanged';
+    }
+
+    const updatedConfigText = upsertExtraHeaderInGitConfig(configText, originUrl, response.authHeader);
+    await writeFileAtomic(gitConfigPath, updatedConfigText);
+
+    // `writeFileAtomic()` は rename でファイルを作り直すため、親ディレクトリの ACL を継承して
+    // 緩くなりうる。インストーラーと同じ権限（POSIX: chmod 600 / Windows: icacls）を再適用する。
+    try {
+      if (process.platform === 'win32') {
+        await execAsync(`icacls "${gitConfigPath}" /inheritance:r /grant:r "%USERDOMAIN%\\%USERNAME%:(R,W)"`, { timeout: 10000 });
+      } else {
+        await chmod(gitConfigPath, 0o600);
+      }
+    } catch {
+      // 権限再適用の失敗は非致命的（書き込み自体は成功している）
+    }
+
+    serverDistributedRepoAuth = true;
+    return 'applied';
+  } catch (err) {
+    console.warn(`[repo-auth] refresh failed: ${(err as Error).message}`);
+    return 'failed';
+  }
+}
+
 /**
  * プロキシ設定を含む環境変数オブジェクトを構築する
  * Agent の config.yaml にプロキシが設定されている場合、git/pnpm にも適用
@@ -2892,6 +3011,14 @@ async function handleVersionCheck() {
   const machineId = currentMachineId || currentConfig?.machineId || '';
 
   console.log(`📦 Version check requested (dir: ${agentDir}, isDevRepo: ${isDevRepo})`);
+
+  // 読取PATのサーバー配布サイクル: `git fetch`（下記）より前に、サーバーから最新 PAT を取得して
+  // `.git/config` を更新しておく（失効 PAT のまま fetch に失敗する事故を防ぐ）。public 既定 URL の
+  // 機体は `refreshRepoAuthFromServer()` 内の判定で何もせず即 return する。
+  if (!isDevRepo) {
+    const repoAuthResult = await refreshRepoAuthFromServer(agentDir);
+    console.log(`[repo-auth] version-check refresh: ${repoAuthResult}`);
+  }
 
   try {
     const execEnv = getExecEnv();
@@ -2975,7 +3102,7 @@ async function handleVersionCheck() {
     // （万一 PAT が混入していても漏らさないよう）ではなく固定の案内文に差し替えてチャット/ログに出す
     const stderr = (err as NodeJS.ErrnoException & { stderr?: string }).stderr || '';
     const kind = classifyGitRemoteFailure(stderr || (err as Error).message);
-    const errorMessage = kind === 'auth' ? redactSecrets(buildRepoAuthFailureMessage(kind)) : (err as Error).message;
+    const errorMessage = kind === 'auth' ? redactSecrets(buildRepoAuthFailureMessage(kind, { serverDistributed: serverDistributedRepoAuth })) : (err as Error).message;
     sendMessage({
       type: 'agent:version:info',
       payload: {
@@ -3067,6 +3194,12 @@ async function handleAgentUpdate() {
     clearPendingUpdateRecheck();
   }
 
+  // 読取PATのサーバー配布サイクル: pre-flight 認証チェック（直後）より前に、サーバーから
+  // 最新 PAT を取得して `.git/config` を更新しておく（ローテーション直後の `u` でも
+  // 失効済みの古い PAT で pre-flight に失敗しないようにする）。
+  const repoAuthResult = await refreshRepoAuthFromServer(agentDir);
+  console.log(`[repo-auth] update refresh: ${repoAuthResult}`);
+
   // 会社 private リポジトリ clone 対応サイクル: detached スクリプトを spawn する前に、
   // 認証（PAT 失効等）だけを軽く検証する。detached プロセスは WS を持たないため、
   // スクリプト内で失敗してもチャットには届かない（update.log にしか出ない）。ここで事前に
@@ -3077,7 +3210,7 @@ async function handleAgentUpdate() {
   } catch (preflightErr) {
     const stderr = (preflightErr as NodeJS.ErrnoException & { stderr?: string }).stderr || (preflightErr as Error).message || '';
     if (classifyGitRemoteFailure(stderr) === 'auth') {
-      const message = redactSecrets(buildRepoAuthFailureMessage('auth'));
+      const message = redactSecrets(buildRepoAuthFailureMessage('auth', { serverDistributed: serverDistributedRepoAuth }));
       console.error(`❌ Agent update aborted (pre-flight auth check failed): ${message}`);
       try {
         const preflightLogsDir = join(getConfigDir(), 'logs');

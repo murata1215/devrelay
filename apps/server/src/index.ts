@@ -16,6 +16,7 @@ import { publicApiRoutes } from './routes/public-api.js';
 import { registerDocumentApiRoutes } from './routes/document-api.js';
 import { registerAgentDocumentApiRoutes } from './routes/agent-document-api.js';
 import { registerRawCompletionRoutes } from './routes/raw-completion-api.js';
+import { agentRepoAuthRoutes } from './routes/agent-repo-auth-api.js';
 import { initVapid } from './services/push-notification-service.js';
 import { initFcm } from './services/fcm-service.js';
 import { startAutoUpdateSweep } from './services/auto-updater.js';
@@ -196,6 +197,7 @@ async function main() {
 
   // API routes
   await app.register(publicApiRoutes);  // 認証不要のパブリック API（インストーラー用トークン検証など）
+  await app.register(agentRepoAuthRoutes);  // 読取PATのサーバー配布サイクル: マシントークン認証の PAT 配布 API
   await app.register(authRoutes);
   await app.register(apiRoutes);
   await app.register(organizationRoutes);  // エンタープライズモード（組織）API

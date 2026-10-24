@@ -12,6 +12,10 @@ import {
   classifyGitRemoteFailure,
   buildRepoAuthFailureMessage,
   redactSecrets,
+  readExtraHeaderFromGitConfig,
+  upsertExtraHeaderInGitConfig,
+  isSecureServerUrl,
+  shouldRequestServerRepoAuth,
 } from '../dist/services/repo-auth-rules.js';
 
 test('DEFAULT_AGENT_REPO_URL は public murata1215/devrelay', () => {
@@ -103,4 +107,127 @@ test('redactSecrets: URL 埋め込みの userinfo（ダミー PAT）を伏せ字
 test('redactSecrets: 秘密情報が無い文字列は変化しない', () => {
   const input = 'git fetch failed, aborting update (agent kept alive)';
   assert.equal(redactSecrets(input), input);
+});
+
+test('buildRepoAuthFailureMessage: serverDistributed:true のときは管理者への案内文になる', () => {
+  const msg = buildRepoAuthFailureMessage('auth', { serverDistributed: true });
+  assert.match(msg, /管理者/);
+  assert.match(msg, /DEVRELAY_AGENT_REPO_TOKEN/);
+  assert.ok(!msg.includes('--repo-auth-only'));
+});
+
+test('buildRepoAuthFailureMessage: serverDistributed 省略時は従来どおり --repo-auth-only の案内文', () => {
+  const msg = buildRepoAuthFailureMessage('auth');
+  assert.match(msg, /--repo-auth-only/);
+});
+
+test('buildRepoAuthFailureMessage: serverDistributed:false は従来どおり --repo-auth-only の案内文', () => {
+  const msg = buildRepoAuthFailureMessage('auth', { serverDistributed: false });
+  assert.match(msg, /--repo-auth-only/);
+});
+
+// =============================================================================
+// 読取PATのサーバー配布サイクル: readExtraHeaderFromGitConfig / upsertExtraHeaderInGitConfig /
+// isSecureServerUrl / shouldRequestServerRepoAuth
+// =============================================================================
+
+const DUMMY_REPO_URL = 'https://github.com/tisa-devin/devrelay.git';
+const DUMMY_HEADER = 'Authorization: Basic ZHVtbXlzZWNyZXQ=';
+
+test('readExtraHeaderFromGitConfig: セクションが無ければ null', () => {
+  const configText = '[core]\n\trepositoryformatversion = 0\n';
+  assert.equal(readExtraHeaderFromGitConfig(configText, DUMMY_REPO_URL), null);
+});
+
+test('readExtraHeaderFromGitConfig: 対象セクションの extraHeader を読み取る', () => {
+  const configText = `[core]\n\trepositoryformatversion = 0\n[http "${DUMMY_REPO_URL}"]\n\textraHeader = ${DUMMY_HEADER}\n`;
+  assert.equal(readExtraHeaderFromGitConfig(configText, DUMMY_REPO_URL), DUMMY_HEADER);
+});
+
+test('readExtraHeaderFromGitConfig: 他 URL のセクションとは混同しない', () => {
+  const otherUrl = 'https://github.com/other/repo.git';
+  const configText = `[http "${otherUrl}"]\n\textraHeader = ${DUMMY_HEADER}\n`;
+  assert.equal(readExtraHeaderFromGitConfig(configText, DUMMY_REPO_URL), null);
+});
+
+test('readExtraHeaderFromGitConfig: 末尾 .git の有無で一致しない（完全一致制約）', () => {
+  const configText = `[http "${DUMMY_REPO_URL}"]\n\textraHeader = ${DUMMY_HEADER}\n`;
+  const withoutGit = DUMMY_REPO_URL.replace(/\.git$/, '');
+  assert.equal(readExtraHeaderFromGitConfig(configText, withoutGit), null);
+});
+
+test('upsertExtraHeaderInGitConfig: 新規追加（既存セクション無し）', () => {
+  const configText = '[core]\n\trepositoryformatversion = 0\n';
+  const result = upsertExtraHeaderInGitConfig(configText, DUMMY_REPO_URL, DUMMY_HEADER);
+  assert.equal(readExtraHeaderFromGitConfig(result, DUMMY_REPO_URL), DUMMY_HEADER);
+  assert.match(result, /\[core\]/); // 既存セクションは保持される
+});
+
+test('upsertExtraHeaderInGitConfig: 既存セクションを冪等に置換する', () => {
+  const configText = `[http "${DUMMY_REPO_URL}"]\n\textraHeader = Authorization: Basic old===\n`;
+  const result = upsertExtraHeaderInGitConfig(configText, DUMMY_REPO_URL, DUMMY_HEADER);
+  assert.equal(readExtraHeaderFromGitConfig(result, DUMMY_REPO_URL), DUMMY_HEADER);
+  // 1回適用しても2回適用しても同じ結果になる（冪等性）
+  const result2 = upsertExtraHeaderInGitConfig(result, DUMMY_REPO_URL, DUMMY_HEADER);
+  assert.equal(result, result2);
+});
+
+test('upsertExtraHeaderInGitConfig: headerValue が null なら削除のみ（新セクション追加なし）', () => {
+  const configText = `[http "${DUMMY_REPO_URL}"]\n\textraHeader = ${DUMMY_HEADER}\n`;
+  const result = upsertExtraHeaderInGitConfig(configText, DUMMY_REPO_URL, null);
+  assert.equal(readExtraHeaderFromGitConfig(result, DUMMY_REPO_URL), null);
+  assert.ok(!result.includes('extraHeader'));
+});
+
+test('upsertExtraHeaderInGitConfig: 他セクションを保全する', () => {
+  const configText = `[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = ${DUMMY_REPO_URL}\n`;
+  const result = upsertExtraHeaderInGitConfig(configText, DUMMY_REPO_URL, DUMMY_HEADER);
+  assert.match(result, /\[core\]/);
+  assert.match(result, /\[remote "origin"\]/);
+  assert.match(result, new RegExp(`url = ${DUMMY_REPO_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+});
+
+test('isSecureServerUrl: wss:// は true', () => {
+  assert.equal(isSecureServerUrl('wss://devrelay.io/ws/agent'), true);
+});
+
+test('isSecureServerUrl: ws://localhost は true', () => {
+  assert.equal(isSecureServerUrl('ws://localhost:3000/ws/agent'), true);
+  assert.equal(isSecureServerUrl('ws://127.0.0.1:3000/ws/agent'), true);
+});
+
+test('isSecureServerUrl: ws://（非ローカル）は false', () => {
+  assert.equal(isSecureServerUrl('ws://devrelay.example.com/ws/agent'), false);
+});
+
+test('isSecureServerUrl: http:// 等は false', () => {
+  assert.equal(isSecureServerUrl('http://devrelay.io'), false);
+});
+
+test('shouldRequestServerRepoAuth: origin が公開既定 URL なら false（後方互換の要）', () => {
+  assert.equal(
+    shouldRequestServerRepoAuth({ originUrl: DEFAULT_AGENT_REPO_URL, serverUrl: 'wss://devrelay.io/ws/agent' }),
+    false
+  );
+});
+
+test('shouldRequestServerRepoAuth: private repo かつ wss:// なら true', () => {
+  assert.equal(
+    shouldRequestServerRepoAuth({ originUrl: DUMMY_REPO_URL, serverUrl: 'wss://devrelay.io/ws/agent' }),
+    true
+  );
+});
+
+test('shouldRequestServerRepoAuth: private repo でも serverUrl が非 HTTPS/WSS 相当なら false', () => {
+  assert.equal(
+    shouldRequestServerRepoAuth({ originUrl: DUMMY_REPO_URL, serverUrl: 'ws://devrelay.example.com/ws/agent' }),
+    false
+  );
+});
+
+test('shouldRequestServerRepoAuth: private repo かつローカル ws:// なら true', () => {
+  assert.equal(
+    shouldRequestServerRepoAuth({ originUrl: DUMMY_REPO_URL, serverUrl: 'ws://localhost:3000/ws/agent' }),
+    true
+  );
 });

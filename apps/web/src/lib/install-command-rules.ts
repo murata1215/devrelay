@@ -6,8 +6,14 @@
  * （Linux/macOS）/ `$env:DEVRELAY_REPO_URL`（Windows）を追加する。**未指定時は従来のコマンド文字列と
  * 1 バイト同一**（後方互換の確認は `install-command-rules.test.mjs` の非退行アサーションで固定する）。
  *
- * PAT（`DEVRELAY_REPO_TOKEN`）はこの関数には一切渡さない・含めない（サーバーに保存しない方針を
- * 型レベルで保証するため、引数そのものに token/PAT を受け取らない）。
+ * PAT（`DEVRELAY_REPO_TOKEN`）はこの関数には一切渡さない・含めない（インストールコマンドの
+ * **文字列には PAT を一切載せない**方針を型レベルで保証するため、引数そのものに token/PAT を
+ * 受け取らない）。
+ *
+ * 読取PATのサーバー配布サイクル: PAT 自体は `POST /api/agent/repo-auth`（マシントークン認証）経由で
+ * インストーラーが取得するようになったため、コマンド文字列は不変のまま `resolvePatHint()` が
+ * 案内文言だけを出し分ける（`buildInstallCommand()` 自体は 1 行も変更しない＝既存 11 件の非退行
+ * テストが無変更で通ることがその保証）。
  */
 
 export type InstallOs = 'linux' | 'macos' | 'windows';
@@ -36,4 +42,21 @@ export function buildInstallCommand(opts: BuildInstallCommandOptions): string {
   // macOS と Linux は同じインストーラー（install-agent.sh が uname -s で自動判定）
   const repoArg = repoUrl ? ` --repo ${repoUrl}` : '';
   return `curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token ${token}${repoArg}`;
+}
+
+/** `resolvePatHint()` が返す PAT 案内文言の種別 */
+export type PatHintKind = 'none' | 'manual' | 'server';
+
+/**
+ * インストールコマンド直下に出す PAT 案内文言の種別を決める（読取PATのサーバー配布サイクル）。
+ *
+ * - `repoUrl` が空 → `'none'`（private リポジトリ未使用。案内行自体を出さない）
+ * - `repoUrl` あり & サーバー側に PAT 設定済み（`tokenConfigured`）→ `'server'`
+ *   （「PAT は自動取得されます。手入力不要」の案内）
+ * - `repoUrl` あり & サーバー側未設定 → `'manual'`（従来どおり `DEVRELAY_REPO_TOKEN` の手入力案内）
+ */
+export function resolvePatHint(input: { repoUrl?: string | null; tokenConfigured?: boolean }): PatHintKind {
+  const repoUrl = input.repoUrl?.trim() || '';
+  if (!repoUrl) return 'none';
+  return input.tokenConfigured ? 'server' : 'manual';
 }

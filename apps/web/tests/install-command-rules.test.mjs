@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildInstallCommand } from '../dist-test/lib/install-command-rules.js';
+import { buildInstallCommand, resolvePatHint } from '../dist-test/lib/install-command-rules.js';
 
 test('非退行: repoUrl 未指定の Linux/macOS コマンドは現行文字列と完全一致する', () => {
   assert.equal(
@@ -79,4 +79,37 @@ test('repoUrl の前後空白は trim されてコマンドに反映される', 
     buildInstallCommand({ os: 'linux', token: 'TOKEN123', repoUrl: '  https://github.com/tisa-devin/devrelay.git  ' }),
     'curl -fsSL https://raw.githubusercontent.com/murata1215/devrelay/main/scripts/install-agent.sh | bash -s -- --token TOKEN123 --repo https://github.com/tisa-devin/devrelay.git'
   );
+});
+
+// =============================================================================
+// 読取PATのサーバー配布サイクル: resolvePatHint
+// =============================================================================
+
+test("resolvePatHint: repoUrl 未指定なら 'none'（private リポジトリ未使用）", () => {
+  assert.equal(resolvePatHint({}), 'none');
+  assert.equal(resolvePatHint({ repoUrl: null }), 'none');
+  assert.equal(resolvePatHint({ repoUrl: '' }), 'none');
+  assert.equal(resolvePatHint({ repoUrl: '   ' }), 'none');
+});
+
+test("resolvePatHint: repoUrl あり・tokenConfigured:true は 'server'", () => {
+  assert.equal(
+    resolvePatHint({ repoUrl: 'https://github.com/tisa-devin/devrelay.git', tokenConfigured: true }),
+    'server'
+  );
+});
+
+test("resolvePatHint: repoUrl あり・tokenConfigured:false/未指定は 'manual'", () => {
+  assert.equal(
+    resolvePatHint({ repoUrl: 'https://github.com/tisa-devin/devrelay.git', tokenConfigured: false }),
+    'manual'
+  );
+  assert.equal(
+    resolvePatHint({ repoUrl: 'https://github.com/tisa-devin/devrelay.git' }),
+    'manual'
+  );
+});
+
+test('resolvePatHint: repoUrl 未指定なら tokenConfigured:true でも none（URL とセットでなければ無効）', () => {
+  assert.equal(resolvePatHint({ repoUrl: null, tokenConfigured: true }), 'none');
 });

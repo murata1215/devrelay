@@ -101,7 +101,8 @@ pm2 restart devrelay-server
 | DEVRELAY_PUSH_DIAG | 2026-10-22 の FCM 無音故障（アプリ再インストール後、配信先の無いトークンへ送信し続けエラーも出ないまま無音で壊れた）の再発防止として追加した診断ログ（配信先 0 件の警告・送信結果1行ログ）を出すか（既定 `1`。`0` で従来どおり無言。`fcm-service.ts`） |
 | DEVRELAY_FCM_STRICT_DELETE | FCM トークン削除ポリシーを旧挙動（`invalid-argument` を即削除）に戻すキルスイッチ（既定 `0` ＝安全側。`1` で旧挙動。`invalid-argument` は別 Firebase プロジェクト発行トークン等でも返るため、既定では連続5回失敗するまで削除しない） |
 | DEVRELAY_FCM_TEST_API | 設定画面の「テスト通知を送る」が使う `POST /api/push/fcm/test` を有効にするか（既定 `1`。`0` で 404。`GET /api/push/fcm/devices`・`POST /api/push/fcm/verify`・`DELETE /api/push/fcm/devices/:tokenPrefix` には影響しない） |
-| DEVRELAY_AGENT_REPO_URL | 会社 private リポジトリ clone 対応サイクル: `GET /api/machines/:id/token` が WebUI に返す、Agent インストール一行コマンドに付与する clone 先 URL（`https://` 必須・userinfo 付き URL は拒否して無視）。**未設定時は WebUI のコマンドが現行と完全に同じ文字列になる**（実質的なキルスイッチ）。PAT はこの変数にも DB にも一切保存しない（Agent PC ローカルの `.git/config` の `http.<repoUrl>.extraHeader` にのみ保存。インストーラ側は `--repo`/`$env:DEVRELAY_REPO_URL`、PAT は `DEVRELAY_REPO_TOKEN`/`$env:DEVRELAY_REPO_TOKEN` または対話入力。詳細 `doc/company-repo-sync.md`） |
+| DEVRELAY_AGENT_REPO_URL | 会社 private リポジトリ clone 対応サイクル: `GET /api/machines/:id/token` が WebUI に返す、Agent インストール一行コマンドに付与する clone 先 URL（`https://` 必須・userinfo 付き URL は拒否して無視）。**未設定時は WebUI のコマンドが現行と完全に同じ文字列になる**（実質的なキルスイッチ）。PAT は**本変数には**一切乗せられない（userinfo 付き URL は拒否）。PAT の配布方式は下記 `DEVRELAY_AGENT_REPO_TOKEN` 参照。詳細 `doc/company-repo-sync.md` |
+| DEVRELAY_AGENT_REPO_TOKEN | 読取PATのサーバー配布サイクル: 上記 `DEVRELAY_AGENT_REPO_URL` とセットのときのみ有効な読取 PAT。DB には一切保存しない（env のみ）。`POST /api/agent/repo-auth`（HTTP、インストール時）・WS `agent:repo:auth:request`（`u` 実行前のローテーション）のどちらも**マシントークンで認証済みの Agent にのみ**配布する（値は `Authorization: Basic <base64>` 形式でのみ渡し、WebUI・ログ・DB には一切出さない）。未設定時は Agent 側で一切の新規通信が発生しない（既存の個人 devrelay.io 含む全環境は無変更）。前サイクルの「PAT をサーバーに送らない」方針を本サイクルで**サーバー env に限り**見直した判断（`Machine.token` 平文保存 ⇒ DB 侵害時のリスクを明示的に受容。前提は Fine-grained・対象リポジトリのみ・`Contents: Read-only`・有効期限必須）。詳細・優先順位・ローテーション手順は `doc/company-repo-sync.md` §9 |
 
 ## DB テーブル（概要）
 

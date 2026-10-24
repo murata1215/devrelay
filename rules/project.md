@@ -2636,3 +2636,48 @@ Flutter）で共有する「既読マーカー」系の機能を今後追加す�
    ポーリング間隔中のつなぎとして `localSeenOverrides`（`useConversationFeed.ts`）を持つが、
    localStorage には書かない。サーバーが複数端末間の唯一の真実の情報源であるという前提を
    崩すと、以前の「localStorage 管理のため端末間で同期しない」という元の不具合に逆戻りする。
+
+---
+
+## 読取PATのサーバー配布: 「サーバーに送らない」方針を env に限って覆した判断（2026-10-24）
+
+前サイクル（会社 private リポジトリ clone 対応、commit `fa62645`）は「PAT はサーバー・DB・WS に
+一切送らない」設計だった。本サイクルでこれを **サーバー env（`.env`）に限って**意図的に覆し、
+認証済み Agent への自動配布に変えた。判断の経緯と、なぜ WS を「要求ドリブン」にしたかを残す。
+
+1. **前提の見直しは「DB には送らない」を残したまま行った**。`Machine.token` が DB に平文保存
+   されている事実（検証済み）から、「サーバー env に PAT を置く」＝「DB 侵害時に配布中の PAT も
+   奪われる」という新しいリスクを負う。これは人間判断で明示的に受容した
+   （前提として Fine-grained・対象リポジトリ 1 つのみ・`Contents: Read-only`・有効期限必須を
+   厳守することが条件。`doc/company-repo-sync.md` §9.1 に明記）。**「DB には保存しない」は
+   本サイクルでも不変**——PAT が触れるのは `.env`（プロセス env）→ HTTP/WS 応答 → Agent ローカル
+   `.git/config` の 3 点のみで、Prisma 経由の永続化は一度も挟まない。
+2. **WS 配布は「サーバーが push する」ではなく「Agent が要求する」形にした**。
+   `server:agent:update`（既存、payload 空）に PAT を同梱する案は、**PAT が不要な機体（public
+   clone 運用）にも毎回秘密を送る**ことになり露出面が不必要に広がる。要求ドリブン
+   （`agent:repo:auth:request` → `server:repo:auth`）なら、private repo を使っている機体が
+   必要な瞬間（`u` 実行前）だけ能動的に取りに行く形になり、「送らなくていい機体には一度も
+   送らない」が構造的に保証される（`shouldRequestServerRepoAuth()` が origin を見て判定）。
+3. **HTTP エンドポイントを `/api/public/*` には置かなかった**。既存の `/api/public/validate-token`
+   は「認証不要」が定義そのものであり、無効トークンでも 200 を返す・レート制限が無い・
+   `--force` 時はスキップされる等、秘密配布の前提（認証必須・失敗を隠す・常にレート制限）と
+   正面衝突する。新設 `POST /api/agent/repo-auth` は既存の `/api/agent/*` 慣習
+   （`authenticateByMachineTokenFull` + Bearer 認証）にそのまま乗せた。
+4. **サーバーは生 PAT ではなく `Authorization: Basic <base64>` を返す**。クライアント側に
+   base64 化や `x-access-token:` 規約を再実装させないための選択であり、同時に既存の
+   `redactSecrets()`（`Authorization:\s*Basic\s+\S+` を伏せ字化）が万一のログ漏れにも
+   そのまま効く形を保てる。
+5. **サーバーから配布された `repoUrl` が origin と 1 バイトでも違えば書き込まない**。
+   `git config --get-urlmatch` は URL 完全一致（末尾 `.git` の有無も区別）でしかマッチしない
+   という前サイクルの制約がそのまま効くため、ここで曖昧な正規化（`.git` の補完/除去等）を
+   行うと「書いたつもりの extraHeader が効かない」事故になる。一致しない場合は warn のみで
+   何もしない（安全側）。
+6. **origin の張り替え（`git remote set-url`）は runtime では一切行わない**。
+   サーバー配布は PAT（`authHeader`）と参考情報としての `repoUrl` を返すだけで、Agent 側は
+   `repoUrl` が自分の origin と一致するときだけ使う。env の設定ミス一つで全社内機の clone 先が
+   黙って変わる事故を防ぐため、origin の切替は今後も人間が明示的に行うインストーラー
+   `--repo`/`$env:DEVRELAY_REPO_URL` の責務のままにした。
+7. **macOS の `u` を本サイクルで Linux（fa62645）と同等の exit code チェック + pre-flight
+   チェックに揃えた**（人間判断、要件に追加）。サーバー配布導入後は「配布は効いたが
+   macOS だけ exit code を見ずに古いコードで静かに restart する」という非対称な故障モードが
+   新たに起きやすくなるため、本サイクルの範囲に含めて先に解消した。

@@ -13,7 +13,7 @@ import {
 import type { CapabilitySyncStatusLike, CapabilityFormErrorCode } from '../lib/capability-config-rules';
 import { normalizeManagementInfo, formatDateTimeSafe } from '../lib/machine-display-rules';
 import { resolveSettingsOs, buildUninstallCommand, buildFullUninstallCommand } from '../lib/uninstall-command-rules';
-import { buildInstallCommand } from '../lib/install-command-rules';
+import { buildInstallCommand, resolvePatHint } from '../lib/install-command-rules';
 
 export function MachinesPage() {
   const { t } = useLanguage();
@@ -37,6 +37,9 @@ export function MachinesPage() {
   // ときだけ、インストール一行コマンドに --repo / $env:DEVRELAY_REPO_URL を付与する（未設定なら null で
   // 現行動作のまま）。GET /api/machines/:id/token の戻り値を使い、新規 route は増やさない。
   const [agentRepoUrl, setAgentRepoUrl] = useState<string | null>(null);
+  // 読取PATのサーバー配布サイクル: サーバー側に PAT が設定済みか（値は含まれない）。
+  // true のときは「PAT は自動取得されます」案内に切り替える（resolvePatHint() で出し分け）。
+  const [agentRepoTokenConfigured, setAgentRepoTokenConfigured] = useState(false);
 
   // Agent 設定モーダル（既存 Agent の詳細表示）
   const [settingsTarget, setSettingsTarget] = useState<Machine | null>(null);
@@ -171,7 +174,10 @@ export function MachinesPage() {
       loadMachines();
       // 新規作成直後のインストールコマンドにも --repo を乗せるため取得する（失敗しても
       // インストールコマンド自体は repo 指定なしで引き続き表示できるので無視してよい）
-      machines.getToken(result.id).then((r) => setAgentRepoUrl(r.agentRepoUrl ?? null)).catch(() => {});
+      machines.getToken(result.id).then((r) => {
+        setAgentRepoUrl(r.agentRepoUrl ?? null);
+        setAgentRepoTokenConfigured(r.agentRepoTokenConfigured ?? false);
+      }).catch(() => {});
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to create agent');
     } finally {
@@ -209,6 +215,7 @@ export function MachinesPage() {
       ]);
       setSettingsToken(tokenResult.token);
       setAgentRepoUrl(tokenResult.agentRepoUrl ?? null);
+      setAgentRepoTokenConfigured(tokenResult.agentRepoTokenConfigured ?? false);
       // DB 設定があればそれを使用、なければ Agent ローカル設定をプリセット
       setProjectsDirs(dirsResult.projectsDirs ?? dirsResult.localProjectsDirs ?? []);
       setSkipPermissions(skipResult.skipPermissions ?? false);
@@ -709,7 +716,13 @@ export function MachinesPage() {
                     ? 'Requires: Node.js 20+, git, Xcode CLT. Proxy support: add --proxy URL'
                     : 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'}
               </div>
-              {agentRepoUrl && (
+              {resolvePatHint({ repoUrl: agentRepoUrl, tokenConfigured: agentRepoTokenConfigured }) === 'server' && (
+                <div className="text-[var(--text-faint)] text-xs mt-1">
+                  Private リポジトリ用の PAT はサーバー側で設定済みです。手入力は不要です（インストール時に自動取得されます）。
+                  {' '}詳細: doc/company-repo-sync.md
+                </div>
+              )}
+              {resolvePatHint({ repoUrl: agentRepoUrl, tokenConfigured: agentRepoTokenConfigured }) === 'manual' && (
                 <div className="text-[var(--text-faint)] text-xs mt-1">
                   {installOs === 'windows'
                     ? 'Private リポジトリ用の PAT が必要な場合、実行前に $env:DEVRELAY_REPO_TOKEN="<PAT>" を設定してください（サーバーには保存されません）。'
@@ -1251,7 +1264,13 @@ export function MachinesPage() {
                     ? 'Requires: Node.js 20+, git, Xcode CLT. Proxy support: add --proxy URL'
                     : 'Requires: Node.js 20+, git. Proxy support: add --proxy URL'}
               </div>
-              {agentRepoUrl && (
+              {resolvePatHint({ repoUrl: agentRepoUrl, tokenConfigured: agentRepoTokenConfigured }) === 'server' && (
+                <div className="text-[var(--text-faint)] text-xs mt-1">
+                  Private リポジトリ用の PAT はサーバー側で設定済みです。手入力は不要です（インストール時に自動取得されます）。
+                  {' '}詳細: doc/company-repo-sync.md
+                </div>
+              )}
+              {resolvePatHint({ repoUrl: agentRepoUrl, tokenConfigured: agentRepoTokenConfigured }) === 'manual' && (
                 <div className="text-[var(--text-faint)] text-xs mt-1">
                   {settingsOs === 'windows'
                     ? 'Private リポジトリ用の PAT が必要な場合、実行前に $env:DEVRELAY_REPO_TOKEN="<PAT>" を設定してください（サーバーには保存されません）。'

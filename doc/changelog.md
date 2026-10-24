@@ -6,6 +6,92 @@
 
 ## 実装済み機能
 
+### 読取PATのサーバー配布（会社 private リポジトリ用） (2026-10-24)
+
+前サイクル（会社 private リポジトリ clone 対応、`fa62645`）は PAT をサーバー・DB・WS に
+一切送らない「手入力専用」設計だった。本サイクルで**サーバー env（`.env`）に限って**この方針を
+覆し、管理者が `apps/server/.env` に 1 か所設定するだけで認証済み Agent に自動配布する方式を
+追加した（手入力運用は従来どおりフォールバックとして併存）。設計判断の詳細は
+[rules/project.md](../rules/project.md) の「読取PATのサーバー配布」節、運用手順は
+[doc/company-repo-sync.md](company-repo-sync.md) §9 を参照。
+
+#### 配布経路（2つ、どちらもマシントークン認証必須・HTTPS/WSS 限定）
+1. **インストール時（HTTP）**: 新規 `POST /api/agent/repo-auth`（`Authorization: Bearer <machine
+   token>`）。インストーラー（`install-agent.sh`/`.ps1`）が手入力 PAT 未指定のときだけ叩く。
+2. **`u`（自己更新）実行前（WS、ローテーション反映）**: 新規 WS 往復
+   `agent:repo:auth:request` → `server:repo:auth`（`requestId` 相関、5秒タイムアウト）。
+   Agent 側 `refreshRepoAuthFromServer()` が `handleVersionCheck()`/`handleAgentUpdate()` の
+   冒頭で呼ぶ。**origin が public 既定 URL の機体は一度も問い合わせない**
+   （`shouldRequestServerRepoAuth()` の判定。個人 devrelay.io を含む既存の全環境は無変更）。
+
+サーバーは生 PAT ではなく `Authorization: Basic <base64>` 形式のヘッダ値を返す
+（`resolveAgentRepoAuthFromEnv()`。クライアント側は base64 化を再実装しなくてよい）。
+
+#### サーバー
+- `apps/server/.env` に `DEVRELAY_AGENT_REPO_TOKEN`（`DEVRELAY_AGENT_REPO_URL` とセットのときのみ
+  有効）。印字可能 ASCII・20〜255文字以外は自動で無視（値はログに出さず警告のみ、CRLF
+  インジェクション対策）。DB には一切保存しない
+- 新規 `apps/server/src/routes/agent-repo-auth-api.ts`: `authenticateByMachineTokenFull()` で
+  認証、転送路（HTTPS/loopback）チェック、machineId 単位のレート制限（1分10回）
+- `apps/server/src/services/agent-repo-rules.ts` に `resolveAgentRepoToken`/`buildRepoAuthHeader`/
+  `resolveAgentRepoAuth`/`resolveAgentRepoAuthFromEnv`/`isAgentRepoTokenConfigured`/
+  `decideRepoAuthRateLimit` を追加（`DEVRELAY_AGENT_REPO_TOKEN` を `process.env` から直接読むのは
+  本ファイルのみに集約。静的ガードテストで固定）
+- `apps/server/src/services/agent-manager.ts`: WS `case 'agent:repo:auth:request'` を追加
+  （origin が配布対象の `repoUrl` と一致しない場合は配布しない）
+- `GET /api/machines/:id/token` のレスポンスに `agentRepoTokenConfigured`（真偽値のみ、PAT の値は
+  含まない）を追加。WebUI の案内文言出し分けに使う
+
+#### WebUI
+- `apps/web/src/lib/install-command-rules.ts` に `resolvePatHint()` を追加（`'none'|'manual'|
+  'server'`）。**`buildInstallCommand()` 自体は無変更**（既存 11 件の非退行テストがそのまま通る＝
+  インストール一行コマンドの文字列は不変）
+- `MachinesPage.tsx`: PAT 案内行をサーバー配布時は「手入力不要（インストール時に自動取得）」に
+  出し分け
+
+#### Agent（`agents/linux` / `agents/macos`、両方に実装）
+- `services/repo-auth-rules.ts`（両 OS で byte-for-byte 同一を維持）に純関数4つを追加:
+  `readExtraHeaderFromGitConfig`/`upsertExtraHeaderInGitConfig`（`.git/config` の読み書き、
+  `git config` を spawn しないため PAT が argv に出る経路が無い）・`isSecureServerUrl`・
+  `shouldRequestServerRepoAuth`。`buildRepoAuthFailureMessage()` に第2引数
+  `{ serverDistributed? }` を追加（サーバー配布機体は「管理者に `.env` 更新を依頼」、手入力機体は
+  従来どおり `--repo-auth-only` の案内。省略時は従来どおり後方互換）
+- `connection.ts`: 新規 `refreshRepoAuthFromServer()`（要求ドリブン・5秒タイムアウト・
+  サーバー無応答時はローカル設定を一切変更しない）を `handleVersionCheck()`/`handleAgentUpdate()`
+  の冒頭に配線。書き込みは既存 `writeFileAtomic()` 経由、書き込み後に権限再適用
+  （POSIX: `chmod 600` / Windows: `icacls`、`writeFileAtomic` の rename で ACL 継承が緩くなるため）
+- **macOS の `u` を本サイクルで Linux（`fa62645`）相当に揃えた**（人間判断、追加要件）:
+  `git fetch`/`git reset` を `runAndLogChecked` + exit code 判定に変更（失敗時は
+  `update.log` に記録して中止・既存 Agent 維持）、`handleAgentUpdate()` に spawn 前の
+  `git ls-remote` pre-flight 認証チェックを追加。従来の既知の制約（「PAT 失効時に静かに古い
+  コードで restart する」）を解消
+
+#### インストーラ（`scripts/install-agent.sh` / `install-agent.ps1`）
+- 新規 `fetch_server_repo_auth()`/`Get-ServerRepoAuth`: サーバーから PAT を取得（HTTPS 以外・
+  トークン未指定では無言でスキップ。失敗時は応答本文を一切表示しない）
+- `write_repo_auth()`/`Write-RepoAuth`（PAT→ヘッダ変換）と、ヘッダ値を直接受け取る
+  `write_repo_auth_header()`/`Write-RepoAuthHeader`（サーバー配布用）に分離
+- `--repo-auth-only` 経路・Step2（明示 `--repo` 時）ともに「手入力 PAT が無ければサーバーに
+  問い合わせ→取得できなければ従来の対話入力」の順で後方互換を維持
+- `--repo-auth-only` は `--token`/`$env:DEVRELAY_TOKEN` 未指定でも既存 `config.yaml` の
+  `token`/`serverUrl` を読んで問い合わせる（PAT を知らない社員でも実行できる）
+
+#### テスト
+新規/拡張: `apps/server/tests/agent-repo-rules.test.mjs`（+25）・
+`agent-repo-auth-wiring.test.mjs`（新規10）・`install-agent-repo-auth-guard.test.mjs`（新規14）・
+`agents/{linux,macos}/tests/repo-auth-rules.test.mjs`（各+19）・
+`agents/{linux,macos}/tests/repo-auth-wiring.test.mjs`（linux新規6・macos新規8）・
+`apps/web/tests/install-command-rules.test.mjs`（+4）。
+shared104/104・server1324/1324・web888/888・linux1124/1124・macos686+1skip/687 green（6
+workspace `pnpm build` 全て green）。既存テストは1行も変更していない（非退行の既存アサーションは
+すべてそのまま通過）。DB マイグレーション不要。新規キルスイッチなし（`DEVRELAY_AGENT_REPO_TOKEN`
+未設定が実質キルスイッチ、前サイクル `DEVRELAY_AGENT_REPO_URL` と同じ流儀）。
+
+#### 対象外（次サイクル候補）
+PAT の DB 管理・WebUI からの設定画面、ユーザー/組織単位の PAT 出し分け、`agents/windows`
+（Electron GUI）、`scripts/uninstall-agent.ps1` の `extraHeader` 消去（前サイクルからの既知の穴、
+未着手）。
+
 ### Agent インストールの clone 先切替（会社 private リポジトリ対応） (2026-10-23)
 
 社内展開のため、本流（個人 GitHub `murata1215/devrelay`、public）は変えず、Agent のインストール・

@@ -20,7 +20,7 @@ import { buildEmptyEndedThreadExclusion, isHideEmptyEndedEnabled } from '../serv
 import { stripCommandTag, stripAiNoise } from '../services/thread-label-source.js';
 import { isConversationRailEnabled, resolveRunning } from '../services/thread-activity.js';
 import { isDebugTurnsEnabled } from '../services/debug-turns-rules.js';
-import { resolveAgentRepoUrl } from '../services/agent-repo-rules.js';
+import { resolveAgentRepoUrl, isAgentRepoTokenConfigured } from '../services/agent-repo-rules.js';
 import { inFlightTurns } from '../services/in-flight-turns.js';
 import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
@@ -221,9 +221,14 @@ export async function apiRoutes(app: FastifyInstance) {
     }
 
     // 会社 private リポジトリ clone 対応サイクル: サーバー env に設定されていれば、WebUI の
-    // インストール一行コマンドに付与する clone 先 URL も一緒に返す（PAT はここに含めない。
-    // サーバーは PAT を一切読まない設計 — resolveAgentRepoUrl() が userinfo 付き URL を拒否する）。
-    return { token: machine.token, agentRepoUrl: resolveAgentRepoUrl(process.env.DEVRELAY_AGENT_REPO_URL) };
+    // インストール一行コマンドに付与する clone 先 URL も一緒に返す。
+    //
+    // 読取PATのサーバー配布サイクル: PAT の値自体はこのレスポンスには含めない（配布は
+    // `POST /api/agent/repo-auth`（HTTP、インストール時）/ `agent:repo:auth:request`（WS、`u` 時）の
+    // マシントークン認証つきの専用経路のみで行う）。ここで返すのは「サーバー側で PAT が設定済みか」の
+    // 真偽値だけ（WebUI がインストール案内の文言を「PAT は自動取得されます」に出し分けるために使う）。
+    const agentRepoUrl = resolveAgentRepoUrl(process.env.DEVRELAY_AGENT_REPO_URL);
+    return { token: machine.token, agentRepoUrl, agentRepoTokenConfigured: isAgentRepoTokenConfigured() };
   });
 
   // ========================================

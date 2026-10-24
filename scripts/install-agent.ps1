@@ -12,6 +12,8 @@
 #   $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_REPO_URL="https://github.com/ORG/REPO.git"; $env:DEVRELAY_REPO_TOKEN="<PAT>"; irm ... | iex
 #   PAT だけ差し替える場合:
 #   $env:DEVRELAY_REPO_URL="https://github.com/ORG/REPO.git"; $env:DEVRELAY_REPO_AUTH_ONLY="1"; irm ... | iex
+#   社内サーバーが PAT を配布している場合は $env:DEVRELAY_REPO_TOKEN/対話入力ともに省略可（サーバーの
+#   .env に DEVRELAY_AGENT_REPO_TOKEN が設定済みなら、マシントークン認証つきで自動取得される）
 #
 # 前提条件:
 #   - Node.js 20+
@@ -188,6 +190,76 @@ function Write-RepoAuth {
     }
 }
 
+# 既存 Write-RepoAuth（PAT を受け取り自前で base64 化する版）と同じ書き込み処理だが、
+# ヘッダ値（"Authorization: Basic <b64>" 形式）を既に受け取っている前提に切り出した版。
+# 読取PATのサーバー配布サイクル: サーバーから取得した authHeader はこの形式で返るため、
+# ここでは base64 化しない。
+function Write-RepoAuthHeader {
+    param(
+        [string]$RepoUrl,
+        [string]$HeaderValue,
+        [string]$AgentDir
+    )
+    $gitConfigPath = Join-Path $AgentDir ".git\config"
+    if (-not (Test-Path $gitConfigPath)) { return }
+
+    $sectionLine = "[http `"$RepoUrl`"]"
+    $lines = @(Get-Content -LiteralPath $gitConfigPath -Encoding UTF8)
+    $output = New-Object System.Collections.Generic.List[string]
+    $skip = $false
+    foreach ($line in $lines) {
+        if ((-not $skip) -and ($line -eq $sectionLine)) { $skip = $true; continue }
+        if ($skip -and ($line -match '^\[')) { $skip = $false }
+        if ($skip) { continue }
+        $output.Add($line)
+    }
+    Set-Content -LiteralPath $gitConfigPath -Value $output -Encoding UTF8
+
+    if ($HeaderValue) {
+        Add-Content -LiteralPath $gitConfigPath -Value $sectionLine -Encoding UTF8
+        Add-Content -LiteralPath $gitConfigPath -Value "`textraHeader = $HeaderValue" -Encoding UTF8
+    }
+
+    try {
+        icacls $gitConfigPath /inheritance:r /grant:r "$env:USERDOMAIN\$($env:USERNAME):(R,W)" 2>&1 | Out-Null
+    } catch {
+        # ACL 設定失敗はインストール自体を止めない
+    }
+}
+
+# =============================================================================
+# 読取PATのサーバー配布サイクル: サーバーから読取PATを取得する（インストール時のみ、HTTP）
+# =============================================================================
+#
+# 成否にかかわらず $script:ServerRepoUrl / $script:ServerRepoHeader にセットする
+# （失敗・未設定・非 https のいずれも空文字のまま＝呼び出し側は空文字を「サーバー配布なし」として
+# 手入力フローにフォールバックする）。レスポンス本文は一切 Write-Host しない
+# （authHeader が画面・履歴に出る経路を作らないため）。
+$script:ServerRepoUrl = ""
+$script:ServerRepoHeader = ""
+function Get-ServerRepoAuth {
+    param([string]$ApiBaseUrl, [string]$MachineToken)
+    $script:ServerRepoUrl = ""
+    $script:ServerRepoHeader = ""
+
+    if (-not ($ApiBaseUrl -match "^https://")) { return }
+    if (-not $MachineToken) { return }
+
+    try {
+        $response = Invoke-RestMethod -Uri "$ApiBaseUrl/api/agent/repo-auth" `
+            -Method Post `
+            -Headers @{ Authorization = "Bearer $MachineToken" } `
+            -TimeoutSec 20 `
+            -ErrorAction Stop
+    } catch {
+        # 失敗は無言でスキップ（応答本文・エラーメッセージを一切表示しない）
+        return
+    }
+
+    if ($response.repoUrl) { $script:ServerRepoUrl = $response.repoUrl }
+    if ($response.authHeader) { $script:ServerRepoHeader = $response.authHeader }
+}
+
 # =============================================================================
 # 会社 private リポジトリ clone 対応サイクル: $env:DEVRELAY_REPO_AUTH_ONLY は既存インストールの
 # PAT だけを差し替えるための軽量経路（Node/pnpm チェック・ビルド・タスク登録・トークン検証は行わない）
@@ -201,10 +273,33 @@ if ($RepoAuthOnly) {
         $ErrorActionPreference = $PrevEAP
         return
     }
-    if (-not $RepoToken) { $RepoToken = Read-RepoToken }
+
+    # 読取PATのサーバー配布サイクル: 手入力 PAT が無ければ、まずサーバーからの取得を試みる
+    # （$Token 未指定なら既存 config.yaml の token/serverUrl を使う。取得できなければ
+    # 無言で従来の対話入力にフォールバックする＝後方互換）
+    if (-not $RepoToken) {
+        $RepoAuthToken = $Token
+        $RepoAuthServerUrl = $ServerUrl
+        if ((-not $RepoAuthToken) -and (Test-Path $ConfigFile)) {
+            $cfgContent = Get-Content $ConfigFile -Raw
+            if ($cfgContent -match '(?m)^token:\s*"?([^"\r\n]*)"?') { $RepoAuthToken = $Matches[1] }
+            if ($cfgContent -match '(?m)^serverUrl:\s*"?([^"\r\n]*)"?') { $RepoAuthServerUrl = $Matches[1] }
+        }
+        if ($RepoAuthToken) {
+            $RepoAuthApiBase = $RepoAuthServerUrl -replace '^wss://', 'https://' -replace '^ws://', 'http://' -replace '/ws/agent$', ''
+            Get-ServerRepoAuth -ApiBaseUrl $RepoAuthApiBase -MachineToken $RepoAuthToken
+            if ($script:ServerRepoHeader) { Write-Host "  サーバーから読取PATを取得しました（手入力不要）" -ForegroundColor Green }
+        }
+    }
+    if (-not $script:ServerRepoHeader) { $RepoToken = Read-RepoToken }
+
     Write-Host "  既存リポジトリの remote / 認証情報を更新中..."
     Reconcile-Remote -RepoUrl $RepoUrl -AgentDir $AgentDir
-    Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
+    if ($script:ServerRepoHeader) {
+        Write-RepoAuthHeader -RepoUrl $RepoUrl -HeaderValue $script:ServerRepoHeader -AgentDir $AgentDir
+    } else {
+        Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
+    }
     Write-Host "  接続を確認中..."
     Push-Location $AgentDir
     git ls-remote --exit-code origin HEAD 2>&1 | Out-Null
@@ -920,7 +1015,16 @@ $BuildLogHeader = @(
 Set-Content -LiteralPath $BuildLog -Value $BuildLogHeader -Encoding UTF8
 
 if ($RepoUrlExplicit -and (-not $RepoToken)) {
-    $RepoToken = Read-RepoToken
+    # 読取PATのサーバー配布サイクル: 手入力 PAT が無ければ、まずサーバーからの取得を試みる
+    # （$ApiBaseUrl は $Force 時は未定義のことがあるため、ここで改めて算出する。この時点で
+    # $Token は必須チェック済みなので非空が保証されている）
+    $RepoAuthApiBase = $ServerUrl -replace '^wss://', 'https://' -replace '^ws://', 'http://' -replace '/ws/agent$', ''
+    Get-ServerRepoAuth -ApiBaseUrl $RepoAuthApiBase -MachineToken $Token
+    if ($script:ServerRepoHeader) {
+        Write-Host "  サーバーから読取PATを取得しました（手入力不要）" -ForegroundColor Green
+    } else {
+        $RepoToken = Read-RepoToken
+    }
 }
 
 if (Test-Path (Join-Path $AgentDir ".git")) {
@@ -930,7 +1034,11 @@ if (Test-Path (Join-Path $AgentDir ".git")) {
     # origin を張り替え、PAT も .git\config に反映する（.git の有無だけで「流用」判定していた従来
     # ロジックのままだと、既存機で URL を変えても古い origin から pull し続けてしまう）
     Reconcile-Remote -RepoUrl $RepoUrl -AgentDir $AgentDir
-    Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
+    if ($script:ServerRepoHeader) {
+        Write-RepoAuthHeader -RepoUrl $RepoUrl -HeaderValue $script:ServerRepoHeader -AgentDir $AgentDir
+    } else {
+        Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
+    }
     Push-Location $AgentDir
     # 前回の install が lockfile を書き換えている場合、その変更は git pull では
     # 復元されない（取り込むコミット側が lockfile を変更していなければ競合せず、
@@ -962,6 +1070,16 @@ if (Test-Path (Join-Path $AgentDir ".git")) {
         Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
         Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
         Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
+    } elseif ($script:ServerRepoHeader) {
+        # 読取PATのサーバー配布サイクル: サーバーから取得した header 値（すでに "Authorization:
+        # Basic ..." 形式）をそのまま env 経由で一時注入する
+        $env:GIT_CONFIG_COUNT = "1"
+        $env:GIT_CONFIG_KEY_0 = "http.$RepoUrl.extraHeader"
+        $env:GIT_CONFIG_VALUE_0 = $script:ServerRepoHeader
+        $CloneCode = Invoke-LoggedCommand -Label "git clone" -Command { git clone --quiet --depth 1 $RepoUrl $AgentDir } -LogFile $BuildLog
+        Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
+        Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
+        Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
     } else {
         $CloneCode = Invoke-LoggedCommand -Label "git clone" -Command { git clone --quiet --depth 1 $RepoUrl $AgentDir } -LogFile $BuildLog
     }
@@ -982,7 +1100,11 @@ if (Test-Path (Join-Path $AgentDir ".git")) {
         $ErrorActionPreference = $PrevEAP
         return
     }
-    Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
+    if ($script:ServerRepoHeader) {
+        Write-RepoAuthHeader -RepoUrl $RepoUrl -HeaderValue $script:ServerRepoHeader -AgentDir $AgentDir
+    } else {
+        Write-RepoAuth -RepoUrl $RepoUrl -Pat $RepoToken -AgentDir $AgentDir
+    }
 }
 
 Write-Host "OK リポジトリ取得完了" -ForegroundColor Green
@@ -1397,6 +1519,9 @@ $env:DEVRELAY_REPO_TOKEN = $null
 $env:DEVRELAY_REPO_AUTH_ONLY = $null
 $env:GIT_TERMINAL_PROMPT = $null
 $env:GCM_INTERACTIVE = $null
+# 読取PATのサーバー配布サイクル: サーバーから取得した値もスクリプト変数として残さない
+$script:ServerRepoHeader = $null
+$script:ServerRepoUrl = $null
 
 # `irm | iex` 実行時、$ErrorActionPreference の変更が対話セッションに残留しないよう復元
 $ErrorActionPreference = $PrevEAP

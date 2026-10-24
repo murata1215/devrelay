@@ -408,7 +408,7 @@ curl -fsSL ... | bash -s -- --token YOUR_TOKEN --proxy http://proxy:8080
 $env:DEVRELAY_TOKEN="YOUR_TOKEN"; $env:DEVRELAY_PROXY="http://proxy:8080"; irm ... | iex
 ```
 
-For cloning the agent from a company private repository (instead of the public `murata1215/devrelay`), see [doc/company-repo-sync.md](doc/company-repo-sync.md) — `--repo <URL>` / `$env:DEVRELAY_REPO_URL`, with the PAT passed via `$DEVRELAY_REPO_TOKEN` / `$env:DEVRELAY_REPO_TOKEN` (never embedded in the URL, never sent to the server).
+For cloning the agent from a company private repository (instead of the public `murata1215/devrelay`), see [doc/company-repo-sync.md](doc/company-repo-sync.md) — `--repo <URL>` / `$env:DEVRELAY_REPO_URL`, with the PAT passed via `$DEVRELAY_REPO_TOKEN` / `$env:DEVRELAY_REPO_TOKEN` (never embedded in the URL). A company server can also distribute the PAT itself to authenticated agents (see doc §9); in that case the PAT lives only in the server's `.env` (never the database) and is delivered over an authenticated, HTTPS/WSS-only channel.
 
 To configure proxy manually, add settings to `~/.devrelay/config.yaml`:
 

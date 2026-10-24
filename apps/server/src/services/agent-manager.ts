@@ -31,8 +31,10 @@ import {
   type AgentCapabilitySyncPayload,
   type RawPromptPayload,
   type RawResultPayload,
+  type RepoAuthRequestPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
+import { resolveAgentRepoAuthFromEnv, decideRepoAuthRateLimit } from './agent-repo-rules.js';
 import { appendSessionOutput, finalizeProgress, broadcastToSession, clearSessionsForMachine, restoreSessionParticipantsForMachine, sendMessage, getSessionParticipants, getSessionContextInfo, notifySessionsForMachine } from './session-manager.js';
 import { sendWebRawMessage, broadcastWebRawMessage } from '../platforms/web.js';
 import { sendDiscordToolApproval, resolveDiscordToolApproval, sendDiscordToolApprovalAuto } from '../platforms/discord.js';
@@ -186,6 +188,60 @@ export function cancelPendingRawCompletion(requestId: string) {
     pending.reject(new Error('Client disconnected'));
     console.log(`🔌 Pending raw completion cancelled: ${requestId}`);
   }
+}
+
+/**
+ * 読取PATのサーバー配布サイクル: `agent:repo:auth:request` のレート制限用スライディング窓
+ * （machineId → 直近リクエスト時刻の配列。プロセス内メモリのみ、再起動で消えて問題ない）。
+ * HTTP 側 `agent-repo-auth-api.ts` の Map とは別個（WS/HTTP いずれの経路からも独立して制限する）。
+ */
+const repoAuthWsRequests = new Map<string, number[]>();
+const REPO_AUTH_WS_RATE_WINDOW_MS = 60 * 1000;
+const REPO_AUTH_WS_RATE_LIMIT = 10;
+
+/**
+ * `agent:repo:auth:request`（Agent → Server、要求ドリブン）の受信ハンドラ。
+ * サーバーは既にこの WS 接続で `drl_` トークン認証済み（`handleAgentConnect`）なので、
+ * ここでは再認証せず `machineId`（接続時に確定済み）だけを使う。
+ *
+ * **`authHeader`/PAT を一切 `console.*` に出さない**（`sendToAgent` も type のみログする既存仕様）。
+ * `secureTransport`（WS upgrade 時の `req.protocol`/loopback 判定）が false の場合は
+ * 要件5（HTTPS/WSS 以外では送らない）により配布しない。
+ */
+function handleRepoAuthRequest(machineId: string | null, payload: RepoAuthRequestPayload, secureTransport: boolean) {
+  if (!machineId) return;
+
+  if (!secureTransport) {
+    console.warn(`[agent-repo-auth] machineId=${machineId} insecure transport, not distributing`);
+    sendToAgent(machineId, { type: 'server:repo:auth', payload: { requestId: payload.requestId, repoUrl: null, authHeader: null } });
+    return;
+  }
+
+  const now = Date.now();
+  const timestamps = repoAuthWsRequests.get(machineId) ?? [];
+  const allowed = decideRepoAuthRateLimit({ timestamps, now, windowMs: REPO_AUTH_WS_RATE_WINDOW_MS, max: REPO_AUTH_WS_RATE_LIMIT });
+  if (!allowed) {
+    console.warn(`[agent-repo-auth] machineId=${machineId} rate limited (WS)`);
+    sendToAgent(machineId, { type: 'server:repo:auth', payload: { requestId: payload.requestId, repoUrl: null, authHeader: null } });
+    return;
+  }
+  const updated = timestamps.filter((t) => t > now - REPO_AUTH_WS_RATE_WINDOW_MS);
+  updated.push(now);
+  repoAuthWsRequests.set(machineId, updated);
+
+  const resolved = resolveAgentRepoAuthFromEnv((s: string) => Buffer.from(s).toString('base64'));
+
+  // originUrl が配布対象の repoUrl と一致しない場合は配布しない（別リポジトリの origin に
+  // PAT を渡しても意味がなく、設定ミスで誤った repo に PAT が渡る事故を防ぐ）
+  const repoUrl = resolved.repoUrl === payload.originUrl ? resolved.repoUrl : null;
+  const authHeader = repoUrl ? resolved.authHeader : null;
+
+  console.log(`[agent-repo-auth] machineId=${machineId} distributed=${authHeader !== null} (WS)`);
+
+  sendToAgent(machineId, {
+    type: 'server:repo:auth',
+    payload: { requestId: payload.requestId, repoUrl, authHeader },
+  });
 }
 
 // プロジェクトファイル読み取り要求の待機: requestId → { resolve, reject, timeout }
@@ -375,6 +431,12 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           // raw-completion（ゲーム席用の素の completion API）: 専用 Map で待機している
           // requestId の Promise を解決するのみ（`handleAiOutput` は一切変更しない）
           handleRawResult(message.payload);
+          break;
+        case 'agent:repo:auth:request':
+          // 読取PATのサーバー配布サイクル: WS upgrade 時の req から転送路（HTTPS/WSS）を判定する
+          // （`agent-repo-auth-api.ts` の `isSecureRequest` と同じ考え方。`trustProxy: true` のため
+          // `req.protocol` は Caddy/IIS の X-Forwarded-Proto を反映する）
+          handleRepoAuthRequest(machineId, message.payload, req.protocol === 'https' || ['localhost', '127.0.0.1', '::1'].includes(req.hostname || ''));
           break;
       }
     } catch (err) {
