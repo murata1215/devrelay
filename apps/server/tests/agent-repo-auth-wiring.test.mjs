@@ -60,6 +60,48 @@ describe('agent-repo-auth-api.ts: 認証・ログの配線', () => {
       assert.match(call, /authHeader\s*(!==|===)\s*null/, `authHeader を参照する console 呼び出しは真偽判定のみであること: ${call}`);
     }
   });
+
+  // インストーラのサーバー配布PAT取得が IIS 経由で 415 になる不具合の修正サイクル:
+  // content-type parser の置き換えがこのルートのスコープに限定されたまま配線されているかの静的ガード
+  test('applyRepoAuthContentTypeParser を import している', () => {
+    assert.match(source, /import\s*\{\s*applyRepoAuthContentTypeParser\s*\}\s*from\s*['"]\.\/repo-auth-content-type\.js['"]/);
+  });
+
+  test('applyRepoAuthContentTypeParser(app) を app.post より前で呼んでいる', () => {
+    const applyIdx = source.indexOf('applyRepoAuthContentTypeParser(app)');
+    const postIdx = source.indexOf("app.post('/api/agent/repo-auth'");
+    assert.ok(applyIdx !== -1, 'applyRepoAuthContentTypeParser(app) の呼び出しが見つかること');
+    assert.ok(postIdx !== -1, "app.post('/api/agent/repo-auth' の呼び出しが見つかること");
+    assert.ok(applyIdx < postIdx, 'applyRepoAuthContentTypeParser(app) は app.post より前で呼ばれていること');
+  });
+});
+
+describe('repo-auth-content-type.ts / index.ts: content-type parser の置き換えがグローバルに漏れていない', () => {
+  // `addContentTypeParser` 単体（既存の `src/mcp/oauth.ts` の
+  // 'application/x-www-form-urlencoded' 追加等）は各プラグインスコープへの追加登録であり無害。
+  // 危険なのは「既定パーサーを丸ごと消す」`removeAllContentTypeParsers()` の方で、
+  // これを呼ぶのは本サイクルの `repo-auth-content-type.ts` だけであること。
+  test('removeAllContentTypeParsers を呼ぶのは repo-auth-content-type.ts だけ', () => {
+    const srcDir = path.join(serverRoot, 'src');
+    const offenders = [];
+
+    function walk(dir) {
+      for (const entry of readdirSync(dir)) {
+        const full = path.join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          walk(full);
+        } else if (entry.endsWith('.ts') && entry !== 'repo-auth-content-type.ts') {
+          const content = readFileSync(full, 'utf8');
+          if (content.includes('removeAllContentTypeParsers')) {
+            offenders.push(full);
+          }
+        }
+      }
+    }
+    walk(srcDir);
+    assert.deepEqual(offenders, [], `removeAllContentTypeParsers を直接呼んでいる意図しないファイル: ${offenders.join(', ')}`);
+  });
 });
 
 describe('agent-manager.ts: agent:repo:auth:request の配線', () => {

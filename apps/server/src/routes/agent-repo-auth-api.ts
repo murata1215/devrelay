@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { authenticateByMachineTokenFull } from './document-api.js';
 import { resolveAgentRepoAuthFromEnv, decideRepoAuthRateLimit } from '../services/agent-repo-rules.js';
+import { applyRepoAuthContentTypeParser } from './repo-auth-content-type.js';
 
 /**
  * 読取PATのサーバー配布サイクル: `POST /api/agent/repo-auth`。
@@ -37,6 +38,12 @@ function isSecureRequest(request: FastifyRequest): boolean {
 }
 
 export async function agentRepoAuthRoutes(app: FastifyInstance) {
+  // インストーラのサーバー配布PAT取得が IIS 経由で 415 になる不具合の修正サイクル:
+  // このプラグインスコープ（= このルートのみ）に限り、Content-Type の有無・ボディの有無に
+  // かかわらず 415/400 を起こさないようにする。他ルートの JSON パースには影響しない
+  // （`repo-auth-content-type.ts` のコメント参照）。
+  applyRepoAuthContentTypeParser(app);
+
   app.post('/api/agent/repo-auth', async (request: FastifyRequest, reply: FastifyReply) => {
     const auth = await authenticateByMachineTokenFull(request);
     if (!auth) {

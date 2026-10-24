@@ -235,6 +235,13 @@ function Write-RepoAuthHeader {
 # （失敗・未設定・非 https のいずれも空文字のまま＝呼び出し側は空文字を「サーバー配布なし」として
 # 手入力フローにフォールバックする）。レスポンス本文は一切 Write-Host しない
 # （authHeader が画面・履歴に出る経路を作らないため）。
+#
+# インストーラのサーバー配布PAT取得が IIS 経由で 415 になる不具合の修正サイクル:
+# IIS(ARR) 等のリバースプロキシは Content-Type 無しの POST にもボディ framing ヘッダを
+# 付けて転送することがあり、Fastify 側が 415 を返していた（実測確認済み）。
+# -ContentType/-Body を明示して本文ありの JSON POST として送る。また、失敗時は
+# 「無言」をやめ、**ステータスコードだけ** を 1 行表示する（応答本文・例外メッセージ全文は
+# PAT を含みうるため絶対に表示しない）。
 $script:ServerRepoUrl = ""
 $script:ServerRepoHeader = ""
 function Get-ServerRepoAuth {
@@ -248,16 +255,28 @@ function Get-ServerRepoAuth {
     try {
         $response = Invoke-RestMethod -Uri "$ApiBaseUrl/api/agent/repo-auth" `
             -Method Post `
+            -ContentType 'application/json' `
+            -Body '{}' `
             -Headers @{ Authorization = "Bearer $MachineToken" } `
             -TimeoutSec 20 `
             -ErrorAction Stop
     } catch {
-        # 失敗は無言でスキップ（応答本文・エラーメッセージを一切表示しない）
+        # 失敗時はステータスコードだけ表示する（応答本文・例外メッセージ全文は一切表示しない）
+        $statusCode = $null
+        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($statusCode) {
+            Write-Host "  ! サーバーからの読取PAT取得に失敗しました（HTTP $statusCode）。手入力にフォールバックします" -ForegroundColor Yellow
+        } else {
+            Write-Host "  ! サーバーからの読取PAT取得に失敗しました（HTTP 応答なし: 接続失敗またはタイムアウト）。手入力にフォールバックします" -ForegroundColor Yellow
+        }
         return
     }
 
     if ($response.repoUrl) { $script:ServerRepoUrl = $response.repoUrl }
     if ($response.authHeader) { $script:ServerRepoHeader = $response.authHeader }
+    if ($script:ServerRepoUrl -and (-not $script:ServerRepoHeader)) {
+        Write-Host "  ! サーバー側に読取PATが設定されていません（DEVRELAY_AGENT_REPO_TOKEN 未設定または無効）。手入力にフォールバックします" -ForegroundColor Yellow
+    }
 }
 
 # =============================================================================

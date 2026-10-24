@@ -6,6 +6,54 @@
 
 ## 実装済み機能
 
+### インストーラのサーバー配布PAT取得が IIS 経由で 415 になる不具合の修正 (2026-10-24)
+
+社内サーバーが IIS（ARR）配下のサブパスで稼働する構成で、前サイクル（読取PATのサーバー配布）の
+`POST /api/agent/repo-auth` 呼び出しが **415（`FST_ERR_CTP_INVALID_MEDIA_TYPE`）** になり、
+インストーラが PAT を自動取得できずに手入力プロンプトへ無言で落ちる不具合を修正した。
+
+#### 真因
+`install-agent.ps1`/`.sh` が Content-Type なし・ボディなしで POST していたが、IIS(ARR) 経由では
+ボディ framing ヘッダ（`Content-Length`/`Transfer-Encoding`）が付与される。Fastify の
+`handleRequest.js` はこれを「Content-Type 未指定だがボディはある」と判定し、一致するパーサーが
+無いため 415 を返す（実測確認済み: Content-Type なし→415 / `-ContentType application/json
+-Body '{}'`→200）。失敗が `catch { return }`（ps1）/`curl -s -f ... || return 0`（sh）で
+完全に無言のため、原因調査が不可能だった。
+
+#### クライアント修正
+- `install-agent.ps1` の `Get-ServerRepoAuth`: `Invoke-RestMethod` に `-ContentType
+  'application/json' -Body '{}'` を追加。失敗時は**ステータスコードだけ**（`$_.Exception.Response.StatusCode`）
+  を 1 行表示するようにし、無言フォールバックを廃止（応答本文・例外メッセージ全文は表示しない）
+- `install-agent.sh` の `fetch_server_repo_auth`: `curl` に `-H 'Content-Type: application/json'
+  -d '{}'` を追加。`-w '%{http_code}'` でステータスコードを取得し、200 以外は**コードだけ** 1 行表示
+- 両スクリプトとも、200 だが `authHeader` が空（`DEVRELAY_AGENT_REPO_TOKEN` 未設定/無効）の場合も
+  別文言で 1 行表示するようにした
+- PAT を含みうる生レスポンスは一時ファイルに書かず、シェル変数のみで処理（sh 版）
+
+#### サーバー側の保険
+新規 `apps/server/src/routes/repo-auth-content-type.ts`（`applyRepoAuthContentTypeParser()`）を
+`agentRepoAuthRoutes` の先頭で呼び、`/api/agent/repo-auth` の**プラグインスコープに限り**
+content-type parser を「何でも受けてボディを捨てる」1 本に置き換えた。`agentRepoAuthRoutes` は
+`fastify-plugin` でラップしていない素の関数として `app.register()` されているため、Fastify が
+このスコープ専用の ContentTypeParser 複製を持つ（`pluginOverride.js`）ことを利用し、他ルートの
+JSON パースには一切影響しない（既存の `src/mcp/oauth.ts` の `addContentTypeParser` 併存とは無関係）。
+
+#### ドキュメント
+`doc/company-repo-sync.md` に §9.7「IIS 等リバースプロキシのサブパス配下で動かす場合の注意」を
+追加（`X-Forwarded-Proto: https` の転送必須・本不具合の説明・`DEVRELAY_AGENT_REPO_URL` と Agent
+origin の文字列完全一致・PAT を表示しない切り分けコマンド例）。
+
+#### 検証
+新規 `apps/server/tests/repo-auth-content-type.test.mjs`（実 Fastify + `app.inject()`）で
+Content-Type なし/chunked/json空ボディ/text-plain 等が 415/400 にならないこと、かつ**別スコープの
+JSON ルートは従来どおり 415 のままであること**（スコープ漏れの回帰防止）を確認。既存
+`agent-repo-auth-wiring.test.mjs`/`install-agent-repo-auth-guard.test.mjs` に静的ガードを追加
+（`removeAllContentTypeParsers` を呼ぶのは本ファイルだけ、インストーラが Content-Type/ボディ付きで
+送っている、失敗時メッセージが応答本文を含まない 等）。テスト 1343/1343 green（新規 19）、
+6 workspace build green、`agents/*`・`apps/web`・`packages/shared`・Prisma は 0 行変更
+（各機 `u` 不要・DB マイグレーション不要）。`u`（WS 経路）・`u force` の UX は対象外（後者は
+次サイクル候補として devlog に記録）。
+
 ### 読取PATのサーバー配布（会社 private リポジトリ用） (2026-10-24)
 
 前サイクル（会社 private リポジトリ clone 対応、`fa62645`）は PAT をサーバー・DB・WS に

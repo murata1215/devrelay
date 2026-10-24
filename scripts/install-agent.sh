@@ -171,6 +171,13 @@ write_repo_auth() {
 # （失敗・未設定・非 https のいずれも空文字のまま＝呼び出し側は空文字を「サーバー配布なし」
 # として手入力フローにフォールバックする）。レスポンス本文は一切 echo/ログ出力しない
 # （authHeader が画面・履歴に出る経路を作らないため）。
+#
+# インストーラのサーバー配布PAT取得が IIS 経由で 415 になる不具合の修正サイクル:
+# IIS(ARR) 等のリバースプロキシは Content-Type 無しの POST にもボディ framing ヘッダを
+# 付けて転送することがあり、Fastify 側が 415 を返していた（実測確認済み）。
+# `-H 'Content-Type: application/json' -d '{}'` を付けて本文ありの JSON POST として送る。
+# また失敗時は「無言」をやめ、**ステータスコードだけ** を 1 行表示する（応答本文は
+# パース用途以外で一切 echo しない。PAT を含みうるため）。
 SERVER_REPO_URL=""
 SERVER_REPO_HEADER=""
 fetch_server_repo_auth() {
@@ -184,13 +191,28 @@ fetch_server_repo_auth() {
   esac
   [ -z "$2" ] && return 0
 
-  local response
-  response=$(curl -s -f --connect-timeout 10 --max-time 20 -X POST "$1/api/agent/repo-auth" \
-    -H "Authorization: Bearer $2" 2>/dev/null) || return 0
-  [ -z "$response" ] && return 0
+  local raw code response
+  raw=$(curl -s -w '\n%{http_code}' --connect-timeout 10 --max-time 20 -X POST "$1/api/agent/repo-auth" \
+    -H "Authorization: Bearer $2" \
+    -H 'Content-Type: application/json' \
+    -d '{}' 2>/dev/null) || true
+  code=$(printf '%s' "$raw" | tail -n1)
+  response=$(printf '%s' "$raw" | sed '$d')
+
+  if [ "$code" != "200" ]; then
+    if [ -z "$code" ] || [ "$code" = "000" ]; then
+      echo "  ⚠ サーバーからの読取PAT取得に失敗しました（HTTP 応答なし: 接続失敗またはタイムアウト）。手入力にフォールバックします"
+    else
+      echo "  ⚠ サーバーからの読取PAT取得に失敗しました（HTTP $code）。手入力にフォールバックします"
+    fi
+    return 0
+  fi
 
   SERVER_REPO_URL=$(echo "$response" | grep -o '"repoUrl":"[^"]*"' | cut -d'"' -f4)
   SERVER_REPO_HEADER=$(echo "$response" | grep -o '"authHeader":"[^"]*"' | cut -d'"' -f4)
+  if [ -n "$SERVER_REPO_URL" ] && [ -z "$SERVER_REPO_HEADER" ]; then
+    echo "  ⚠ サーバー側に読取PATが設定されていません（DEVRELAY_AGENT_REPO_TOKEN 未設定または無効）。手入力にフォールバックします"
+  fi
   return 0
 }
 

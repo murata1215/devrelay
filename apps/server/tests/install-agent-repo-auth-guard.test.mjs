@@ -6,6 +6,12 @@
 // - HTTPS 以外（http/SSH 等）でも PAT 配布エンドポイントを叩いてしまう後退
 // - 手入力 PAT フォールバック（prompt_repo_token/Read-RepoToken）の消失
 // - set -x の混入（bash の実行トレースで変数展開が丸ごと出力される）
+//
+// インストーラのサーバー配布PAT取得が IIS 経由で 415 になる不具合の修正サイクル（追加分）:
+// - curl/Invoke-RestMethod が Content-Type・ボディ付きで送るようになっているか
+// - 失敗時に無言で終わらず、ステータスコードだけを 1 行表示するようになっているか
+//   （応答本文・例外メッセージ全文は出さない）
+// - 生レスポンス（$raw 等）が一時ファイル（mktemp）に落ちていないか（PAT が /tmp に残る経路を作らない）
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -63,6 +69,36 @@ describe('install-agent.sh', () => {
   test('スクリプト末尾で SERVER_REPO_HEADER / REPO_TOKEN を unset している', () => {
     assert.match(source, /unset .*SERVER_REPO_HEADER/);
   });
+
+  // IIS 経由 415 修正: curl が Content-Type: application/json + ボディ付きで POST しているか
+  test('fetch_server_repo_auth の curl が Content-Type: application/json と -d を付けている', () => {
+    const idx = source.indexOf('fetch_server_repo_auth() {');
+    assert.ok(idx !== -1, 'fetch_server_repo_auth 関数が見つかること');
+    const body = source.slice(idx, idx + 1500);
+    assert.match(body, /-H 'Content-Type: application\/json'/);
+    assert.match(body, /-d '\{\}'/);
+  });
+
+  test('fetch_server_repo_auth がステータスコードで成否判定し、失敗時にコードだけ表示する', () => {
+    const idx = source.indexOf('fetch_server_repo_auth() {');
+    const body = source.slice(idx, idx + 1500);
+    assert.match(body, /http_code/);
+    assert.match(body, /if \[ "\$code" != "200" \]/);
+    assert.match(body, /HTTP \$code/);
+  });
+
+  test('$raw / $response をパース用途（grep/sed/tail へのパイプ）以外で出力する行が無い', () => {
+    const lines = source.split('\n');
+    const offenders = lines.filter((l) => /(echo|cat)\s+"\$raw"(?!\s*\|)/.test(l) || /(echo|cat)\s+"\$response"(?!\s*\|)/.test(l));
+    assert.deepEqual(offenders, [], `$raw/$response を生ダンプする行が無いこと: ${offenders.join(' / ')}`);
+  });
+
+  test('fetch_server_repo_auth 内で mktemp を使っていない（PAT を一時ファイルに落とさない）', () => {
+    const idx = source.indexOf('fetch_server_repo_auth() {');
+    const endIdx = source.indexOf('\n}', idx);
+    const body = source.slice(idx, endIdx);
+    assert.ok(!body.includes('mktemp'), 'fetch_server_repo_auth 内で mktemp を使っていないこと');
+  });
 });
 
 describe('install-agent.ps1', () => {
@@ -95,5 +131,31 @@ describe('install-agent.ps1', () => {
 
   test('スクリプト末尾で $script:ServerRepoHeader を $null クリアしている', () => {
     assert.match(source, /\$script:ServerRepoHeader = \$null/);
+  });
+
+  // IIS 経由 415 修正: Invoke-RestMethod が Content-Type: application/json + ボディ付きで POST しているか
+  test('Get-ServerRepoAuth の Invoke-RestMethod が -ContentType と -Body を付けている', () => {
+    const idx = source.indexOf('function Get-ServerRepoAuth {');
+    assert.ok(idx !== -1, 'Get-ServerRepoAuth 関数が見つかること');
+    const body = source.slice(idx, idx + 1500);
+    assert.match(body, /-ContentType\s+'application\/json'/);
+    assert.match(body, /-Body\s+'\{\}'/);
+  });
+
+  test('catch ブロックが例外メッセージ全文・応答本文を Write-Host していない（ステータスコードのみ）', () => {
+    const idx = source.indexOf('function Get-ServerRepoAuth {');
+    const catchIdx = source.indexOf('} catch {', idx);
+    const endIdx = source.indexOf('\n}', catchIdx);
+    const catchBlock = source.slice(catchIdx, endIdx);
+    assert.ok(!/\$_\.Exception\.Message/.test(catchBlock), '$_.Exception.Message を Write-Host していないこと');
+    assert.ok(!/\$_\.ErrorDetails/.test(catchBlock), '$_.ErrorDetails を Write-Host していないこと');
+    assert.match(catchBlock, /statusCode/i, 'ステータスコードだけを扱う変数があること');
+  });
+
+  test('失敗時にステータスコードを含む1行を表示し、repoUrl はあるが authHeader が無い場合も別文言で表示する', () => {
+    const idx = source.indexOf('function Get-ServerRepoAuth {');
+    const body = source.slice(idx, idx + 2500);
+    assert.match(body, /HTTP \$statusCode/);
+    assert.match(body, /ServerRepoUrl -and \(-not \$script:ServerRepoHeader\)/);
   });
 });

@@ -148,6 +148,7 @@ git ls-remote --exit-code origin HEAD >/dev/null && echo OK
 | chat/ログに PAT が出ていないか不安 | 設計上 URL にも stderr にも PAT は出ない（`http.<url>.extraHeader` は credential helper を経由しないため 401 が発生せず、認証エラーメッセージに PAT 自体は含まれない）。想定外の出力に備えて `update.log`/チャットへの出力前に伏せ字化処理も入れている |
 | サーバー配布された PAT が効いているか確認したい（§9） | `~/.devrelay/logs/update.log` に `[repo-auth] update refresh: applied` または `unchanged` が出ていれば配布済み・反映済み（`skipped` は public 既定 URL または HTTPS/WSS 以外・`failed` は取得失敗） |
 | サーバー配布と手入力 PAT が混在したらどちらが使われるか | **サーバー配布が優先**（`u` 実行ごとに最新を取得して `.git/config` を上書きする）。手入力のみ使いたい場合はサーバー `.env` の `DEVRELAY_AGENT_REPO_TOKEN` を未設定にする |
+| インストール時にサーバー配布 PAT の取得が失敗する（IIS 等サブパス配下） | §9.7 参照。インストーラが表示する **HTTP ステータスコードのみ**（応答本文・例外メッセージ全文は表示されない設計）で切り分ける。切り分け手順は §9.7 のコマンド例を使う |
 
 ## 9. サーバー配布方式（社内推奨）
 
@@ -216,3 +217,58 @@ DEVRELAY_AGENT_REPO_TOKEN=<Fine-grained PAT>
 - `agents/windows`（Electron GUI 版）は対象外（§6 の手入力運用のみ、サーバー配布は未対応）
 - PAT の DB 管理・WebUI からの設定画面（`.env` 直接編集のみ）
 - ユーザー単位・組織単位での PAT 出し分け（サーバー全体で 1 つの PAT のみ）
+
+### 9.7 IIS 等リバースプロキシのサブパス配下で動かす場合の注意
+
+社内サーバーが IIS（ARR）等のリバースプロキシ配下のサブパス
+（例: `https://service.internal.atg.co.jp/tsinternal/devrelay`）で稼働している構成で、
+インストール時のサーバー配布 PAT 取得（§9.3 の 1.）がうまく動かない場合の注意点。
+
+#### `X-Forwarded-Proto: https` の転送が必須
+
+`POST /api/agent/repo-auth` は HTTPS（または localhost）以外のリクエストを **403
+`insecureTransport`** で拒否する（`isSecureRequest()`、`agent-repo-auth-api.ts`）。
+サーバーは `Fastify({ trustProxy: true })` が前提のため、リバースプロキシが
+`X-Forwarded-Proto: https` を正しく転送していないと、実際は HTTPS 経由でも
+`request.protocol` が `http` のままになり 403 になる。IIS の ARR 設定で
+`X-Forwarded-Proto` ヘッダを確実に付与するルールが入っていることを確認すること。
+
+#### ボディ framing による 415（2026-10-24 の不具合、修正済み）
+
+IIS(ARR) 等は Content-Type ヘッダ無しの POST にも `Content-Length`/
+`Transfer-Encoding` のようなボディ framing ヘッダを付けて転送することがあり、
+Fastify はこれを「Content-Type 未指定だがボディはある」と判定して **415
+（`FST_ERR_CTP_INVALID_MEDIA_TYPE`）** を返す。本サイクルでクライアント側
+（`install-agent.sh`/`.ps1`）が `Content-Type: application/json` + `{}` を明示して送るように修正し、
+サーバー側も `/api/agent/repo-auth` に限り Content-Type の有無にかかわらず 415/400 を返さないよう
+スコープ限定の content-type parser（`repo-auth-content-type.ts`）を追加した（他ルートには影響しない）。
+
+#### `DEVRELAY_AGENT_REPO_URL` と Agent origin は文字列完全一致が必要
+
+`u` 実行時のローテーション判定（§9.3 の 2.）は、Agent の現在の origin が
+「サーバーが配布する `repoUrl` と文字列完全一致」かどうかで「サーバー配布の対象か」を
+判定する。末尾 `.git` の有無・大文字小文字・サブパスの差があると一致せず、
+`update.log` に `skipped` と記録される（§8 参照）。`DEVRELAY_AGENT_REPO_URL` は
+インストーラーに渡す `--repo`/`$env:DEVRELAY_REPO_URL` と**全く同じ文字列**にすること。
+
+#### 切り分け手順（PAT を画面に一切出さずに確認する）
+
+```bash
+# 疎通とステータスコードだけを見る（本文は出さない = PAT を画面に出さない）
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  -H "Authorization: Bearer <machine token>" \
+  -H 'Content-Type: application/json' -d '{}' \
+  https://service.internal.atg.co.jp/tsinternal/devrelay/api/agent/repo-auth
+# 200 = 正常 / 401 = マシントークン不正 / 403 = X-Forwarded-Proto 未転送 /
+# 415 = 本サイクル前の症状（修正済みのはずなら再発を疑う） / 429 = レート制限（1分10回超）
+
+# 「配布されたか否か」だけを真偽で見る（authHeader の値そのものは出さない）
+curl -s -X POST -H "Authorization: Bearer <machine token>" \
+  -H 'Content-Type: application/json' -d '{}' \
+  https://service.internal.atg.co.jp/tsinternal/devrelay/api/agent/repo-auth \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("repoUrl=",d.get("repoUrl"),"hasAuthHeader=",bool(d.get("authHeader")))'
+```
+
+サーバー側ログ（`pm2 logs devrelay-server`）に出る
+`[agent-repo-auth] machineId=... distributed=true/false` の行でも、値を一切出さずに
+「配布したか否か」を確認できる。
