@@ -2712,3 +2712,32 @@ Flutter）で共有する「既読マーカー」系の機能を今後追加す�
    の両方の順序が起こりうる。`handleAgentDisconnect()` の早期 return 経路は通らない可能性がある
    ため、`handleAgentConnect()`（新接続の登録直後）側にも同じ掃除（`clearMachine()`）を置く。
    二重実行（disconnect 側・connect 側の両方で呼ばれる）は no-op のため安全。
+
+## チャット Markdown 表示: 外部ライブラリを入れず自前トークナイザにする理由（2026-10-25）
+
+WebUI のチャット本文に Markdown レンダリング（テーブル対応等）を足すにあたり、
+`react-markdown` 等の外部ライブラリを使わず `apps/web/src/lib/markdown-rules.ts` の自前
+トークナイザ + `components/MarkdownBody.tsx` の薄い React レンダラで実装した。再発防止のため
+判断根拠をここに記録する。
+
+1. **ライブラリ追加は CJS 混入事故の面を広げる**。#309→#310 で `packages/shared` を Vite から
+   使うだけで CJS が混入し白画面になった前例がある。`react-markdown` は unified/remark/micromark
+   系で transitive 依存が 20 以上増え、同種の事故面が広がる。`grep -c 'require(' dist/assets/index-*.js`
+   が 0 であることをビルドごとに確認する運用（既存ルール）は変わらないが、確認対象を増やさない
+   方が安全。
+2. **サーバーが本文を「素のまま連結」して配信するため、厳密な GFM パーサだと実配信形で壊れる**。
+   `agent-manager.ts` は AI 本文の先頭に `📊 Rate Limit: …` 行を連結してから配信する（WebUI 向けの
+   除去はしていない）。GFM 標準は「段落の直後に空行なしで続くテーブル」を認識しないため、厳密な
+   GFM 実装を入れると `📊` 行の直後に表が来るケースで表が出ない。行ベースで「ヘッダ行＋区切り行が
+   揃っていればその場でテーブル」と判定する自前実装なら、この事故が構造的に起きない。
+3. **斜体（`*text*`/`_text_`）は実装しない**（ユーザー承認の最終決定）。`*.ts`/`agents/*` の
+   ような glob や `foo_bar_baz`/`DEVRELAY_AGENT_REPO_TOKEN` のようなスネークケース識別子を誤って
+   装飾する事故がほぼすべて斜体の誤爆に由来する一方、AI が強調に斜体を使うことはまず無く得られる
+   価値がほぼ無いため、実装しないことで誤爆のバグクラスを丸ごと避ける。将来必要になったら
+   `MdInline` に `italic` を 1 ケース追加するだけで戻せる設計にしてある。
+4. **再帰するインライン解析では、モジュール共有の `RegExp.lastIndex` 手動管理を使わない**。
+   `tokenizeInline()` は link/bold/strike の中身を自分自身で再解析するため、共有 `RegExp` の
+   `exec()` + `lastIndex` で反復すると、再帰呼び出しが親フレームの `lastIndex` を書き換えて
+   無限ループ→ OOM になる（実装中に `node --test` の SIGABRT で検出）。`String.prototype.matchAll()`
+   は呼び出しごとに正規表現を複製する（spec 上の挙動）ため、再帰呼び出しがあるインライン解析では
+   必ず `matchAll` を使う。

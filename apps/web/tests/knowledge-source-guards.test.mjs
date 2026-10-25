@@ -250,10 +250,18 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // 会話履歴レール 見た目改修サイクル（2026-10-22）で、行1行目を「エージェント名/プロジェクト名」に
 // するため ConversationRail への `resolveProjectLabel` 配線を ChatPage.tsx に追加したため、
 // 行数ピンのみ実測値（3927 → 3942）に再更新した（renderMarkdown 出現数は無変更のため据え置き）。
+//
+// チャット Markdown 表示強化サイクル（2026-10-25）で、チャット本文の簡易レンダリング関数
+// `renderContent()`（テーブル・見出し・リスト未対応）を `components/MarkdownBody.tsx`
+// （`lib/markdown-rules.ts` ベース）に差し替えたため、ChatPage.tsx の行数ピンを実測値
+// （3942 → 3911）に更新した。LitePage.tsx は本サイクルでも無変更（`LitePage.tsx` 自体ではなく
+// `components/lite/LiteMessageList.tsx` のみ変更）のため行数ピン（682）は据え置き。
+// renderMarkdown 出現数（DocPanel 専用、チャット本文とは別経路）・components/lite/* のファイル数も
+// いずれも本サイクルで無変更のため据え置き。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 3942, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 3911, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

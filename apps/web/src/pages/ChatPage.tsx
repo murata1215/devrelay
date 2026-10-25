@@ -11,6 +11,7 @@ import { buildThreadSwitchPatch } from '../lib/thread-switch-rules';
 import { resolveCancelPhase, decideCancelClick, type CancelUiState, type CancelPhase } from '../lib/cancel-request-rules';
 import { ThreadList } from '../components/ThreadList';
 import { ThreadPane } from '../components/ThreadPane';
+import { MarkdownBody } from '../components/MarkdownBody';
 import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
 import { RightRail } from '../components/RightRail';
 import { RAIL_COLLAPSED_STORAGE_KEY, readRailCollapsed, serializeRailCollapsed, countPendingApprovals, resolveSidebarShellClass } from '../lib/right-rail-rules';
@@ -111,38 +112,6 @@ function isTextPreviewable(mimeType: string, filename: string): boolean {
 let messageIdCounter = 0;
 function nextMessageId(): string {
   return `msg_${Date.now()}_${++messageIdCounter}`;
-}
-
-/** マークダウン風テキスト簡易レンダリング */
-function renderContent(content: string) {
-  const parts = content.split(/(```[\s\S]*?```)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith('```') && part.endsWith('```')) {
-      const code = part.slice(3, -3).replace(/^\w*\n/, '');
-      return (
-        <pre key={i} className="bg-[var(--bg-base)] rounded p-3 my-2 overflow-x-auto text-sm">
-          <code>{code}</code>
-        </pre>
-      );
-    }
-    const inlineParts = part.split(/(`[^`]+`)/g);
-    return (
-      <span key={i}>
-        {inlineParts.map((ip, j) => {
-          if (ip.startsWith('`') && ip.endsWith('`')) {
-            return <code key={j} className="bg-[var(--bg-tertiary)] px-1 rounded text-sm">{ip.slice(1, -1)}</code>;
-          }
-          const boldParts = ip.split(/(\*\*[^*]+\*\*)/g);
-          return boldParts.map((bp, k) => {
-            if (bp.startsWith('**') && bp.endsWith('**')) {
-              return <strong key={`${j}-${k}`}>{bp.slice(2, -2)}</strong>;
-            }
-            return bp;
-          });
-        })}
-      </span>
-    );
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -723,8 +692,8 @@ function MessageRow({
             {message.timestamp.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
-        <div className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words">
-          {renderContent(message.content)}
+        <div className="text-sm text-[var(--text-primary)] leading-relaxed">
+          <MarkdownBody text={message.content} />
         </div>
         {message.files && message.files.length > 0 && (
           <div className="mt-2 space-y-2">

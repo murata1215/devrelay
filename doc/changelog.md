@@ -6,6 +6,57 @@
 
 ## 実装済み機能
 
+### チャット画面の Markdown 表示強化（テーブル対応、斜体は意図的に非対応） (2026-10-25)
+
+WebUI のチャット画面で AI 応答本文を描画していた `ChatPage.tsx` の `renderContent()` は
+コードブロック・インラインコード・`**bold**` の 3 つしか対応しておらず、`|` 区切りのテーブル・
+見出し・箇条書き・引用・水平線・リンク・取り消し線が崩れて表示されていた（ユーザー起票）。
+
+#### 方針: 外部 Markdown ライブラリは入れない
+`react-markdown` 等を導入すると (1) #309→#310 の白画面事故（`packages/shared` を Vite から使う
+だけで CJS 混入）の再発リスクが増える、(2) サーバーが AI 本文の先頭に `📊 Rate Limit: …` 行を
+連結してから配信するため（`agent-manager.ts`）、GFM 標準パーサでは「段落直後に空行なしで続く
+テーブル」を認識できず実配信形で表が出ない事故になる。既存の `knowledge-answer-rules.ts`
+（純関数トークナイザ）+ `AnswerMarkdown.tsx`（薄い React レンダラ）の2層構成を踏襲し、
+`apps/web` 内だけで完結する自前実装にした。
+
+**斜体（`*text*`/`_text_`）は意図的に非対応**（ユーザー承認の最終決定）。`*.ts`/`agents/*` の
+ような glob や `foo_bar_baz` のようなスネークケース識別子を誤って装飾する事故がほぼすべて
+斜体の誤爆に由来するため、実装自体をしない方針にした。
+
+#### 変更内容
+- `apps/web/src/lib/markdown-rules.ts`（新規）: 外部 import ゼロの純関数 `tokenizeMarkdown()` /
+  `tokenizeInline()`。テーブルは「ヘッダ行＋区切り行」が揃ったときのみ認識（誤検知防止）。
+  リストは記号直後に空白必須（行頭 glob を誤認しない）。`---` は常に水平線（setext 見出しは
+  実装しない）。連続する paragraph 行は結合せず1行1ブロックのまま。
+- `apps/web/src/components/MarkdownBody.tsx`（新規）: トークンを React 要素に変換する薄い
+  レンダラ。`dangerouslySetInnerHTML` は一切使わない。テーブルは横スクロール対応、CSS 変数で
+  ライト/ダーク両対応。
+- `ChatPage.tsx`: 旧 `renderContent()` を削除し `MarkdownBody` に差し替え。
+- `components/lite/LiteMessageList.tsx`: AI バブルのみ `MarkdownBody` を適用（user バブルは
+  自分の入力を勝手に装飾しないよう素テキストのまま）。
+
+#### 実装中に見つけたバグ2件（テストで検出・修正済み）
+- `tokenizeInline()` が再帰（link/bold/strike の中身を自身で再解析）する一方、モジュール共有の
+  `RegExp` を `lastIndex` 手動管理で反復していたため、再帰呼び出しが親フレームの状態を破壊して
+  無限ループ→ OOM。`String.prototype.matchAll()`（呼び出しごとに正規表現を複製する spec 仕様）
+  に切り替えて根治。
+- リンク href の正規表現が `[^)\s]+` だったため、`https://.../Foo_(bar)` のような1段括弧入り
+  URL で href が途中の `)` で切れるバグ。「`(`/`)`/空白以外の文字、または1段までの `(...)` を
+  1単位とする繰り返し」に変更して修正。
+
+#### 対象外
+`apps/server`・`agents/*`・`packages/shared`・`schema.prisma` は 0 行変更。DB マイグレーション
+不要。各機 `u` 不要。新規 npm 依存なし。キルスイッチなし（表示のみの変更で、問題時は revert が
+最短との判断）。`ChatPage.tsx` の `renderMarkdown()`/`renderInline()`（DocPanel の Issues/Plan
+タブ専用、別経路）・`components/knowledge/*`（引用番号 `[n]` クリック要件があり別サイクル判断）
+は本サイクルでは変更しない。
+
+#### 検証
+`cd apps/web && node --test tests/`: 924/924 green（新規36含む）。`pnpm build`（apps/web 単体・
+モノレポ全体 `pnpm -r build` 6 workspace とも）green。`grep -c 'require(' apps/web/dist/assets/index-*.js`
+= 0（#310 の教訓、CJS 混入なし確認済み）。pm2 restart 不要（`apps/server` 無変更）。
+
 ### `u` の busy 判定の自家中毒修正と `u force` 一発化 (2026-10-24)
 
 WebUI から `u` を送っても自動更新が永久に保留され続ける不具合を根治した。合わせて、保留理由の

@@ -1,12 +1,13 @@
 import { useLanguage } from '../../contexts/LanguageContext';
 import type { LiteMessage } from '../../lib/lite-message-log';
+import { MarkdownBody } from '../MarkdownBody';
 
 /**
  * Lite シェル L3 B5: メッセージ一覧の純表示コンポーネント。
  *
- * markdown は描画しない（`renderMarkdown` は `ChatPage.tsx:1455` のモジュールローカル関数で
- * export されておらず、export すると `ChatPage.tsx` diff 0 制約を破る）。`whitespace-pre-wrap` の
- * 素テキストのみを表示する。
+ * AI バブル（`role !== 'user'`）のみ `MarkdownBody`（`lib/markdown-rules.ts` + 自前 React レンダラ、
+ * `dangerouslySetInnerHTML` 不使用）で Markdown を描画する。user バブルは自分の入力を勝手に
+ * 装飾しないよう、従来どおり `whitespace-pre-wrap` の素テキストのまま。
  *
  * dedupe/マージ済みの `LiteMessage[]`（`lib/lite-message-log.ts`）をそのまま描画するだけで、
  * このコンポーネント自身は重複排除・ソート等のロジックを一切持たない（state も持たない）。
@@ -31,13 +32,13 @@ export function LiteMessageList({ messages }: LiteMessageListProps) {
       {messages.map((m, i) => (
         <div
           key={m.messageId ?? `${m.timestampMs}-${i}`}
-          className={`max-w-[80%] rounded px-3 py-2 text-sm whitespace-pre-wrap break-words ${
+          className={`max-w-[80%] rounded px-3 py-2 text-sm ${
             m.role === 'user'
-              ? 'self-end bg-[var(--user-bubble)] text-white'
+              ? 'self-end bg-[var(--user-bubble)] text-white whitespace-pre-wrap break-words'
               : 'self-start bg-[var(--ai-bubble)] text-[var(--text-primary)]'
           }`}
         >
-          {m.content}
+          {m.role === 'user' ? m.content : <MarkdownBody text={m.content} />}
         </div>
       ))}
     </div>
