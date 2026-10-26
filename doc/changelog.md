@@ -6,6 +6,33 @@
 
 ## 実装済み機能
 
+### codex が `spawn codex ENOENT` で起動しない問題の根治 (2026-10-26)
+
+チャットで AI を codex に切替えて送信すると `Error: spawn codex ENOENT`。ユーザーの初期仮説
+「認証切れ」は誤りで、実測で2つの真因を確定した。詳細は
+[devlog](devlog/2026-10-26_222803_codex_spawn_enoent.md) 参照。
+
+#### 真因A: `u` 自己更新の nohup 再起動が裸の `node` を使っていた
+crontab が渡していた nvm node（v20.20.0）を失い `/usr/bin/node`（v18.19.1）で再起動される。
+nvm グローバルに入れた codex 等の CLI はその node 専用 bin にしか無いため見えなくなる。
+
+#### 真因B: 更新スクリプトの PATH 補完先が固定値で、この機体には存在しない
+`~/.devrelay/node/bin`（Windows ポータブル node 想定）がこの機体に無く、かつ非冪等で `u` 毎に
+無効パスが重複していた（実測5個、2026-10-18 の crontab `;;` 増殖事故と同型）。
+
+#### 対応
+Phase 0: `~/.devrelay/config.yaml` の codex を絶対パス化して即時復旧（`codex exec` で認証生存も確認）。
+Phase 1: 新設 `node-bin-path.ts`（純関数・外部 import ゼロ）の `prependBinDir()` で
+`dirname(process.execPath)` を PATH へ冪等前置。`index.ts` 起動時・`connection.ts` の `u` 再起動
+（nohup を `process.execPath` の絶対パスに）に配線、`ai-tool-presence.ts` の
+`aiToolFallbackCandidates()` に `execDir` 候補を追加（後方互換）。
+
+#### 影響範囲
+`agents/linux` + `agents/macos`（windows 対象外）。`apps/server` / `apps/web` /
+`packages/shared` / Prisma は無変更。linux1149/1149・macos711件中710pass（既知flake1件、
+今回変更と無関係な node:test ランナーの IPC flake）green。pm2 restart 不要・各機 `u` 必須・
+DB マイグレーション不要・キルスイッチなし。
+
 ### チャット画面の Markdown 表示強化（テーブル対応、斜体は意図的に非対応） (2026-10-25)
 
 WebUI のチャット画面で AI 応答本文を描画していた `ChatPage.tsx` の `renderContent()` は

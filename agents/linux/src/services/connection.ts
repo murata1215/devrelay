@@ -43,6 +43,8 @@ import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { writeFileAtomic } from './atomic-write.js';
 import { decideAgentUpdateAction } from './update-guard-rules.js';
+import { buildFixCrontabCommand } from './crontab-fix-rules.js';
+import { prependBinDir } from './node-bin-path.js';
 import { GIT_NONINTERACTIVE_ENV, classifyGitRemoteFailure, buildRepoAuthFailureMessage, redactSecrets, shouldRequestServerRepoAuth, readExtraHeaderFromGitConfig, upsertExtraHeaderInGitConfig } from './repo-auth-rules.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { ensureRawCwd } from './raw-cwd.js';
@@ -3460,9 +3462,19 @@ async function handleAgentUpdate() {
   } else {
     // Linux/macOS: bash スクリプトで更新
     // 各ステップの exit code を個別にログ記録し、障害時の原因特定を容易にする
-    const nodeBinDir = join(homedir(), '.devrelay', 'node', 'bin');
+    //
+    // 2026-10-26 `spawn codex ENOENT` 障害の根治: 旧実装は Windows ポータブル node 想定の固定パス
+    // `~/.devrelay/node/bin` を無条件・非冪等に前置していた（この機体には存在せず、`u` を実行するたびに
+    // 同じ無効パスが重複して積み上がっていた）。`process.execPath`（このスクリプトを生成している現行
+    // Agent 自身を起動している node）の bin を冪等に前置する方式に変える。nvm 等でグローバルインストール
+    // した AI CLI（codex 等）はこの bin にしかないため、`u` 後も見えなくならない（詳細は node-bin-path.ts）。
+    // 旧パスも存在する場合のみ後方互換で追加する。
+    const execNodeBinDir = dirname(process.execPath);
+    const legacyNodeBinDir = join(homedir(), '.devrelay', 'node', 'bin');
+    let updatePath = prependBinDir(process.env.PATH, legacyNodeBinDir, ':', existsSync);
+    updatePath = prependBinDir(updatePath, execNodeBinDir, ':', existsSync);
     const buildSteps = [
-      `export PATH="${nodeBinDir}:$PATH"`,
+      `export PATH="${updatePath}"`,
       `cd "${agentDir}"`,
       log('=== Update started ==='),
       // 会社 private リポジトリ clone 対応サイクル: fetch/reset の exit code を実際に判定する
@@ -3487,7 +3499,9 @@ async function handleAgentUpdate() {
       runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
       runAndLog('agent build', 'pnpm --filter @devrelay/agent build'),
       // crontab の PATH= → export PATH= 修正（reboot 後に環境変数が子プロセスに継承されない問題）
-      runAndLog('fix crontab', `crontab -l 2>/dev/null | sed 's/^@reboot PATH=/@reboot export PATH=/' | sed 's/export PATH=\\([^ ]*\\) cd/export PATH=\\1; cd/' | crontab -`),
+      // 2026-10-18: 旧 sed が冪等でなく `u` を実行するたびに crontab が壊れる障害があったため
+      // crontab-fix-rules.ts に切り出して修正済み（詳細は同ファイルの JSDoc 参照）
+      runAndLog('fix crontab', buildFixCrontabCommand()),
     ].join('; ');
 
     // nohup の場合: restartCmd.command をそのまま使うと、bash -c の cmdline に
@@ -3502,7 +3516,12 @@ async function handleAgentUpdate() {
         '{ pgrep -u $(whoami) -f "\\.devrelay.*index\\.js"; pgrep -u $(whoami) -fx "node index\\.js"; } 2>/dev/null | sort -u | grep -v "^$$\\$" | xargs kill 2>/dev/null || true',
         'sleep 1',
         // disown でバックグラウンドジョブを bash から切り離し、bash -c が即終了するようにする
-        `cd "${dirname(agentIndex)}" ; nohup node "${agentIndex}" < /dev/null >> "${agentLogFile}" 2>&1 & disown`,
+        // 2026-10-26: 裸の `node` ではなく `process.execPath`（このスクリプトを生成している現行
+        // Agent 自身を起動している node の絶対パス）を使う。従来は裸の `node` で起動していたため、
+        // crontab が nvm 等の特定バージョンの node を絶対パスで指定していても `u` 後は
+        // システム標準の node（PATH 上の別バージョン）に差し替わってしまい、その node 専用の
+        // グローバル bin（nvm 配下の codex 等）が見えなくなっていた（真因A、詳細は node-bin-path.ts）。
+        `cd "${dirname(agentIndex)}" ; nohup "${process.execPath}" "${agentIndex}" < /dev/null >> "${agentLogFile}" 2>&1 & disown`,
       ].join('; ');
     } else {
       actualRestartCmd = restartCmd.command;

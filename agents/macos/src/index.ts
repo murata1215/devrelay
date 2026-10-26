@@ -3,9 +3,24 @@ import { getBinDir } from './services/config.js';
 import { connectToServer } from './services/connection.js';
 import { loadProjects, autoDiscoverProjects } from './services/projects.js';
 import { logClaudeExecutableStatus } from './services/ai-runner.js';
+import { prependBinDir } from './services/node-bin-path.js';
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+
+/**
+ * Agent 自身を起動している node（`process.execPath`）の bin ディレクトリを PATH に前置する。
+ *
+ * 2026-10-26 `spawn codex ENOENT` 障害の根治: nvm 等でグローバルインストールした AI CLI
+ * （codex 等）はその node バージョン専用の bin にしか存在しない。launchd 起動や `u`
+ * 自己更新後の nohup 再起動で PATH が最小構成になっても、Agent を実行している node の bin を
+ * 入れておけば同じ環境に入れた CLI は常に見える（詳細は `node-bin-path.ts` の JSDoc 参照）。
+ * `loadConfig()` / `detectAndUpdateAiTools()` より前に呼ぶ必要がある。
+ */
+function augmentPathWithExecDir() {
+  const sep = process.platform === 'win32' ? ';' : ':';
+  process.env.PATH = prependBinDir(process.env.PATH, dirname(process.execPath), sep, existsSync);
+}
 
 /**
  * devrelay-claude ラッパーを作成する（クロスプラットフォーム対応）
@@ -56,6 +71,9 @@ async function main() {
 │  DevRelay Agent                                │
 └─────────────────────────────────────────────────┘
   `);
+
+  // Agent 自身を起動している node の bin を PATH に前置（codex 等 nvm グローバル CLI の検出・spawn 対策）
+  augmentPathWithExecDir();
 
   // Load config
   const config = await loadConfig();

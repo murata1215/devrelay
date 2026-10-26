@@ -75,3 +75,37 @@ test('aiToolFallbackCandidates: その他ツールは ~/.local/bin / npm グロ�
   assert.deepEqual(aiToolFallbackCandidates('gemini', 'gemini', 'linux', '/home/u'), ['/home/u/.local/bin/gemini', '/usr/local/bin/gemini']);
   assert.ok(aiToolFallbackCandidates('gemini', 'gemini', 'win32', 'C:\\Users\\u').includes('C:\\Users\\u\\AppData\\Roaming\\npm\\gemini.cmd'));
 });
+
+// ---- aiToolFallbackCandidates: execDir（2026-10-26 `spawn codex ENOENT` 障害の根治） ----
+
+test('aiToolFallbackCandidates: execDir 省略時は従来どおり（後方互換）', () => {
+  assert.deepEqual(
+    aiToolFallbackCandidates('codex', 'codex', 'linux', '/home/u'),
+    ['/home/u/.local/bin/codex', '/usr/local/bin/codex'],
+  );
+});
+
+test('aiToolFallbackCandidates: execDir 指定時は候補の先頭に入る（codex, linux）', () => {
+  assert.deepEqual(
+    aiToolFallbackCandidates('codex', 'codex', 'linux', '/home/u', '/home/u/.nvm/versions/node/v20.20.0/bin'),
+    ['/home/u/.nvm/versions/node/v20.20.0/bin/codex', '/home/u/.local/bin/codex', '/usr/local/bin/codex'],
+  );
+});
+
+test('aiToolFallbackCandidates: execDir は claude/devin の分岐でも先頭に入る', () => {
+  assert.equal(
+    aiToolFallbackCandidates('claude', 'claude', 'linux', '/home/u', '/exec/bin')[0],
+    '/exec/bin/claude',
+  );
+  assert.equal(
+    aiToolFallbackCandidates('devin', 'devin', 'linux', '/home/u', '/exec/bin')[0],
+    '/exec/bin/devin',
+  );
+});
+
+test('aiToolFallbackCandidates: execDir は win32 では .cmd 拡張子になる', () => {
+  assert.equal(
+    aiToolFallbackCandidates('codex', 'codex', 'win32', 'C:\\Users\\u', 'C:\\nvm\\v20')[0],
+    'C:\\nvm\\v20\\codex.cmd',
+  );
+});

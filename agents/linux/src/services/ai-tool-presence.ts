@@ -26,19 +26,24 @@ export const AI_TOOL_PRIORITY = ['claude', 'devin', 'gemini', 'codex', 'aider'] 
  * @param command config.yaml の `aiTools.<tool>.command`（通常はツール名と同じ）
  * @param platform `process.platform` の値
  * @param home ホームディレクトリ
+ * @param execDir 2026-10-26 追加: Agent 自身を起動している node（`process.execPath`）の bin
+ *   ディレクトリ。nvm 等でグローバルインストールした AI CLI（codex 等）はその node バージョン
+ *   専用の bin にしかないため、他の候補より先に見る（省略可。既存呼び出し元との後方互換用）。
  */
-export function aiToolFallbackCandidates(tool: string, command: string, platform: string, home: string): string[] {
-  if (tool === 'claude' && command === 'claude') return claudeFallbackCandidates(platform, home);
+export function aiToolFallbackCandidates(tool: string, command: string, platform: string, home: string, execDir?: string): string[] {
+  const execCandidate = execDir ? [platform === 'win32' ? `${execDir}\\${command}.cmd` : `${execDir}/${command}`] : [];
+  if (tool === 'claude' && command === 'claude') return [...execCandidate, ...claudeFallbackCandidates(platform, home)];
   // macOS の launchd 起動では PATH に Homebrew が入らないことがあるため /opt/homebrew/bin も見る
   const homebrew = platform === 'darwin' ? [`/opt/homebrew/bin/${command}`] : [];
-  if (tool === 'devin' && command === 'devin') return [...devinFallbackCandidates(platform, home), ...homebrew];
+  if (tool === 'devin' && command === 'devin') return [...execCandidate, ...devinFallbackCandidates(platform, home), ...homebrew];
   if (platform === 'win32') {
     return [
+      ...execCandidate,
       `${home}\\AppData\\Roaming\\npm\\${command}.cmd`,
       `${home}\\.local\\bin\\${command}.exe`,
     ];
   }
-  return [`${home}/.local/bin/${command}`, ...homebrew, `/usr/local/bin/${command}`];
+  return [...execCandidate, `${home}/.local/bin/${command}`, ...homebrew, `/usr/local/bin/${command}`];
 }
 
 /**

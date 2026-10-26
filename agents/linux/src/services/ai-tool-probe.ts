@@ -17,6 +17,13 @@ import * as path from 'path';
 import { resolveSystemClaude } from './claude-path.js';
 import { aiToolFallbackCandidates, isPathLikeCommand } from './ai-tool-presence.js';
 
+/**
+ * 2026-10-26 `spawn codex ENOENT` 障害の根治: Agent 自身を起動している node（`process.execPath`）
+ * の bin ディレクトリ。nvm 等でグローバルインストールした AI CLI（codex 等）はその node
+ * バージョン専用の bin にしかないため、フォールバック候補の先頭に加える（`ai-tool-presence.ts` 参照）。
+ */
+const execDir = path.dirname(process.execPath);
+
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const cache = new Map<string, { present: boolean; at: number }>();
 
@@ -51,7 +58,7 @@ function probe(tool: string, command: string): boolean {
     return resolveSystemClaude() !== null || hasClaudeCredentials();
   }
   if (lookupOnPath(command)) return true;
-  return aiToolFallbackCandidates(tool, command, process.platform, os.homedir()).some(existsSafe);
+  return aiToolFallbackCandidates(tool, command, process.platform, os.homedir(), execDir).some(existsSafe);
 }
 
 /**
