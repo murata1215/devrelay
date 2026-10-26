@@ -378,8 +378,11 @@ bash ~/.claude/skills/devrelay-ask-member/scripts/ask.sh --exec --project pixblo
 
 /**
  * ask.sh スクリプトの内容を生成
+ *
+ * テスト（`tests/ask-script-contract.test.mjs`）から生成本文を検証するため export する
+ * （linux 側は同名の非 export 関数のまま。今回の変更は macOS 限定のため export 範囲も揃えない）。
  */
-function generateAskScript(serverUrl: string, token: string): string {
+export function generateAskScript(serverUrl: string, token: string): string {
   const httpUrl = wsToHttpUrl(serverUrl);
 
   return `#!/bin/bash
@@ -390,6 +393,11 @@ set -euo pipefail
 
 API_URL="${httpUrl}"
 TOKEN="${token}"
+
+# #348: 自分の素性を拾う（DEVRELAY_PROJECT は全 AI 起動経路で注入済みの環境変数。
+# set -euo pipefail のため \${VAR:-} 形式が必須。自己宛のガードはサーバー側が最終防衛だが、
+# ここでも候補から自分自身を除外し、そもそも誤送信の選択肢を見せない）
+SELF_PATH="\${DEVRELAY_PROJECT:-}"
 
 # 引数チェック
 if [ $# -eq 0 ]; then
@@ -485,27 +493,32 @@ fi
 # 誤った宛先へ実行依頼が飛んで無限ピンポンを起こした事故への対策）
 if command -v jq &>/dev/null; then
   # 候補の絞り込みフィルタ
-  # 入力: [{id, name, orig, machine, online, same}]
+  # 入力: [{id, name, orig, machine, online, same, path, self}]
+  # #348: 自動選択（$same が1件なら無条件採用）は輻輳事故の直接原因だったため廃止。
+  # 代わりに候補一覧そのものから自分自身（.self）を除外する
   FILTER_JQ='
-    ( if ($machine | length) > 0
-      then map(select(.machine | ascii_downcase | contains($machine | ascii_downcase)))
-      else . end ) as $scoped
+    ( map(select(.self | not)) ) as $noself
+    | ( if ($machine | length) > 0
+      then ($noself | map(select(.machine | ascii_downcase | contains($machine | ascii_downcase))))
+      else $noself end ) as $scoped
     | ( $scoped | map(select((.name | ascii_downcase) == ($name | ascii_downcase) or (.orig | ascii_downcase) == ($name | ascii_downcase))) ) as $exact
     | ( if ($exact | length) > 0 then $exact
         else ($scoped | map(select((.name | ascii_downcase | contains($name | ascii_downcase)) or (.orig | ascii_downcase | contains($name | ascii_downcase))))) end ) as $named
     | ( $named | map(select(.online)) ) as $online
     | ( if ($online | length) > 0 then $online else $named end ) as $avail
-    | ( $avail | map(select(.same)) ) as $same
-    | ( if ($same | length) == 1 then $same else $avail end )
+    | $avail
   '
 
-  CANDIDATES=$(echo "$MEMBERS_BODY" | jq '[ .[] | {
+  # #348: self は path 完全一致による best-effort 判定（正規化はサーバー側 decideCrossTarget が最終防衛）
+  CANDIDATES=$(echo "$MEMBERS_BODY" | jq --arg self_path "$SELF_PATH" '[ .[] | {
     id: .memberProjectId,
     name: .memberProjectName,
     orig: (.memberProjectOriginalName // .memberProjectName),
     machine: .memberMachineName,
     online: (.memberMachineStatus == "online"),
-    same: (.isSameMachine // false)
+    same: (.isSameMachine // false),
+    path: (.memberProjectPath // ""),
+    self: (($self_path | length) > 0 and ((.memberProjectPath // "") == $self_path))
   } ]')
   MATCHED=$(echo "$CANDIDATES" | jq --arg name "$PROJECT" --arg machine "$MACHINE" "$FILTER_JQ")
   MATCH_COUNT=$(echo "$MATCHED" | jq 'length')
@@ -558,7 +571,13 @@ if command -v jq &>/dev/null; then
 
   # jq で安全に JSON を構築（shell エスケープの問題を回避）
   # tr -d '\\r' で Windows CRLF を除去（Git Bash + プロキシ環境での Content-Length 不一致防止）
-  JSON_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}' | tr -d '\\r')
+  BASE_BODY=$(jq -n --arg id "$TARGET_ID" --arg q "$QUESTION" '{targetProjectId: $id, question: $q}')
+  # #348: SELF_PATH（DEVRELAY_PROJECT）が空の場合は従来と1バイト同一の body にする（後方互換の要、旧 Agent はこの変数を持たない）
+  if [ -n "$SELF_PATH" ]; then
+    JSON_BODY=$(echo "$BASE_BODY" | jq --arg cp "$SELF_PATH" '. + {callerProjectPath: $cp}' | tr -d '\\r')
+  else
+    JSON_BODY=$(echo "$BASE_BODY" | tr -d '\\r')
+  fi
 
   # 送信（ask: 10分、teamexec: 60分）
   # printf + curl -d @- でパイプ渡し（Content-Length を確実に一致させる）

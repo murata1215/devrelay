@@ -23,7 +23,7 @@ import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, ca
 import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
 import type { AiTool, ManagementInfo } from '@devrelay/shared';
 import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef, AI_TOOL_NAMES } from '@devrelay/shared';
-import { decideCrossTarget, pickInflightCrossSession, buildCrossTargetRejectionMessage, ASK_INFLIGHT_WINDOW_MS } from '../services/cross-query-guard.js';
+import { decideCrossTarget, pickInflightCrossSession, buildCrossTargetRejectionMessage, resolveCrossSourceLabel, ASK_INFLIGHT_WINDOW_MS } from '../services/cross-query-guard.js';
 
 /**
  * #294: クロスプロジェクト連携のループ防止パラメータ
@@ -71,6 +71,32 @@ async function findInflightTeamExec(machineId: string): Promise<string | null> {
     select: { id: true },
   });
   return inflight?.id ?? null;
+}
+
+/**
+ * ask / teamexec の「依頼元プロジェクト名」表示ラベルを解決する（2026-10-22 TruckBoard 誤表示の根治）。
+ *
+ * 発信元マシン配下の生存プロジェクトと機体名を引いて `resolveCrossSourceLabel()`（純関数、
+ * `cross-query-guard.ts`）に渡すだけの薄い DB ラッパー。判定ロジック本体はそちらを参照。
+ *
+ * @param machineId 発信元マシン ID
+ * @param callerProjectPath 発信元 Agent の自己申告 projectPath（#348 の `DEVRELAY_PROJECT`。未送信なら undefined）
+ * @returns 表示用ラベル文字列（`resolveCrossSourceLabel()` の `label`。常に非空）
+ */
+async function resolveCrossSourceProjectName(
+  machineId: string,
+  callerProjectPath: string | null | undefined,
+): Promise<{ label: string; source: 'path' | 'soleProject' | 'machine' }> {
+  const candidates = await prisma.project.findMany({
+    where: { machineId, deletedAt: null },
+    select: { name: true, displayName: true, path: true },
+  });
+  const machine = await prisma.machine.findUnique({
+    where: { id: machineId },
+    select: { name: true, displayName: true },
+  });
+  const machineLabel = machine?.displayName ?? machine?.name ?? 'unknown';
+  return resolveCrossSourceLabel({ callerProjectPath, candidates, machineLabel });
 }
 
 /**
@@ -603,15 +629,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       });
     }
 
-    // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
-    const sourceProjects = await prisma.project.findMany({
-      where: { machineId: auth.machineId, deletedAt: null },
-      select: { name: true },
-    });
-    const sourceProjectName = sourceProjects.length === 1
-      ? sourceProjects[0].name
-      : (await prisma.machine.findUnique({ where: { id: auth.machineId }, select: { displayName: true, name: true } }))
-        ?.displayName ?? sourceProjects[0]?.name ?? 'unknown';
+    // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用。2026-10-22 TruckBoard 誤表示の根治）
+    const { label: sourceProjectName, source: sourceProjectNameSource } = await resolveCrossSourceProjectName(auth.machineId, callerProjectPath);
 
     // 一時セッションを作成
     const tempSessionId = `crossquery_${crypto.randomUUID()}`;
@@ -650,7 +669,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       }
     }
 
-    console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName} (ai=${effectiveAi}, explicit=${ai ?? 'none'})`);
+    console.log(`🔗 Cross-project query: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName} (source=${sourceProjectNameSource}, ai=${effectiveAi}, explicit=${ai ?? 'none'})`);
 
     // HTTP 切断検知: curl タイムアウト等でクライアントが切断した場合にセッションをクリーンアップ
     let clientDisconnected = false;
@@ -809,15 +828,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       });
     }
 
-    // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用）
-    const sourceProjects = await prisma.project.findMany({
-      where: { machineId: auth.machineId, deletedAt: null },
-      select: { name: true },
-    });
-    const sourceProjectName = sourceProjects.length === 1
-      ? sourceProjects[0].name
-      : (await prisma.machine.findUnique({ where: { id: auth.machineId }, select: { displayName: true, name: true } }))
-        ?.displayName ?? sourceProjects[0]?.name ?? 'unknown';
+    // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用。2026-10-22 TruckBoard 誤表示の根治）
+    const { label: sourceProjectName, source: sourceProjectNameSource } = await resolveCrossSourceProjectName(auth.machineId, callerProjectPath);
 
     // teamexec 用セッションを作成
     const tempSessionId = `teamexec_${crypto.randomUUID()}`;
@@ -860,7 +872,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       }
     }
 
-    console.log(`🚀 Team exec: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName}`);
+    console.log(`🚀 Team exec: ${tempSessionId} → ${targetProject.name} from ${sourceProjectName} (source=${sourceProjectNameSource})`);
 
     // HTTP 切断検知: curl タイムアウト等でクライアントが切断した場合にセッションをクリーンアップ
     let clientDisconnected = false;

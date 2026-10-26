@@ -142,6 +142,61 @@ export function decideCrossTarget(input: CrossTargetGuardInput): CrossTargetDeci
   return { allowed: true, selfCheck: 'unverified' };
 }
 
+/** 送信元プロジェクト名解決の入力候補（発信元マシン配下のプロジェクト） */
+export interface CrossSourceCandidate {
+  name: string;
+  displayName?: string | null;
+  path: string;
+}
+
+export interface CrossSourceLabel {
+  label: string;
+  /** 'path' = callerProjectPath 一致で確定 / 'soleProject' = マシン内に候補が1件だけだった / 'machine' = 特定不能（マシン名にフォールバック） */
+  source: 'path' | 'soleProject' | 'machine';
+}
+
+/**
+ * ask / teamexec の「依頼元プロジェクト名」表示ラベルを解決する（2026-10-22 TruckBoard 誤表示の根治）。
+ *
+ * 従来は発信元マシン配下のプロジェクトが複数件のとき `findMany()` の先頭 1 件（orderBy 無し＝
+ * DB の任意順）を「依頼元」として名乗らせており、無関係なプロジェクト名が表示される事故があった
+ * （マシンに devrelay_flutter と TruckBoard の両方があり、実際の依頼元は devrelay_flutter なのに
+ * TruckBoard と表示された）。本関数はその代わりに:
+ *
+ * 1. `callerProjectPath`（#348 で Agent が自己申告する `DEVRELAY_PROJECT`）が候補のいずれかと
+ *    正規化後に一致すれば、それを正解として採用する（`source: 'path'`）
+ * 2. 一致しない／未送信でも、マシン内の候補がちょうど 1 件ならそれを採用する（`source: 'soleProject'`）
+ * 3. それ以外（複数候補で特定不能）は、**無関係な候補名を名乗らせず** `machineLabel` を返す
+ *    （`source: 'machine'`）。嘘のプロジェクト名よりマシン名のほうが実害が小さいため。
+ *
+ * @param input.callerProjectPath 発信元 Agent の自己申告 projectPath（未送信なら undefined/null）
+ * @param input.candidates 発信元マシン配下の生存プロジェクト一覧
+ * @param input.machineLabel 特定不能時のフォールバック表示名（呼び出し側で `machine.displayName ?? machine.name` を渡す想定。必ず非空）
+ */
+export function resolveCrossSourceLabel(input: {
+  callerProjectPath?: string | null;
+  candidates: CrossSourceCandidate[];
+  machineLabel: string;
+}): CrossSourceLabel {
+  const { callerProjectPath, candidates, machineLabel } = input;
+
+  if (callerProjectPath) {
+    const normCaller = normalizeProjectPath(callerProjectPath);
+    if (normCaller) {
+      const matches = candidates.filter((c) => normalizeProjectPath(c.path) === normCaller);
+      if (matches.length === 1) {
+        return { label: matches[0].displayName ?? matches[0].name, source: 'path' };
+      }
+    }
+  }
+
+  if (candidates.length === 1) {
+    return { label: candidates[0].displayName ?? candidates[0].name, source: 'soleProject' };
+  }
+
+  return { label: machineLabel, source: 'machine' };
+}
+
 /**
  * 拒否時にチャットへ返す文言を組み立てる。
  *
