@@ -6,6 +6,60 @@
 
 ## 実装済み機能
 
+### `chatgpt-user` 障害の根治: AI CLI 検出が絶対パスを捨てて spawn ENOENT になる問題 (2026-10-27)
+
+OS ユーザー `chatgpt-user` に codex を導入後、チャットで `Error: spawn codex ENOENT`。
+`u` / `u force` も「最新です」で何も起きなかった。前日（2026-10-26）に直した同名の
+ENOENT 障害（真因＝nvm 環境喪失）とは別の真因であることを実機診断で確定した。詳細は
+[devlog](devlog/2026-10-27_003811_chatgpt_user_spawn_enoent.md) 参照。
+
+#### 真因
+インストーラ実行時点で `~/.local/bin` が未作成だと systemd unit の PATH に含まれず、
+後から導入した CLI を検出できても spawn できない。さらに `ai-tool-probe.ts` の `probe()`
+が実在判定で**見つけた絶対パスを捨てて boolean しか返していなかった**ため、
+フォールバック候補（`~/.local/bin` 等）で見つかった場合でも `config.yaml` には
+素のコマンド名（例 `command: codex`）が保存され、サービス起動時の限定された PATH では
+解決できず ENOENT になっていた。既存エントリは再起動のたびにスキップされるため
+（「ユーザー設定を尊重」のため）、何度 Agent を再起動しても自然には直らない罠だった。
+
+#### 対応
+- `ai-tool-probe.ts` を拡張し、見つかった絶対パスをキャッシュ経由で取得できる
+  `resolveAiToolFallbackPath()` を新設（`isAiToolPresent()` は完全後方互換）
+- `ai-tool-presence.ts` に純関数 `decideAiToolPathSelfHeal()` を追加。「パスでない」
+  ×「PATH 解決不能」×「フォールバックに実在」の3条件を満たす時だけ既存エントリを
+  絶対パスへ自己修復する（ユーザー明示の絶対パスは一切触らない）
+- `config.ts` の `detectAndUpdateAiTools()` が新規検出・既存エントリ自己修復の両方で
+  上記ロジックを使うように変更
+- `service-path-rules.ts` の `buildServicePath()` から `~/.local/bin` の存在確認分岐を
+  廃止し無条件で PATH に含める（インストール順序依存の罠そのものを解消）
+- `install-agent.sh` / `install-agent.ps1` が新規 `config.yaml` 生成時に解決済みの
+  絶対パスを書き込むよう変更
+- `ai-runner.ts`（3 OS）の `proc.on('error')` で `ENOENT` を検知し `ai.cliNotFound`
+  を出す（従来は生エラーがそのまま出ていた）
+- `connection.ts`（linux/macos）で fail-open 発動時にプロセス寿命中 1 回だけ警告ログ
+- `ai.cliNotFound` の文面を訂正（「`u` で再検出されます」は誤りと実証されたため、
+  実際に効く手段 `a` での切替・WebUI 再起動ボタンに変更）
+
+#### 見送った項目（ユーザー判断）
+`u force` を「最新でも再起動する」に変更することは却下。`upToDate` 応答への案内文
+追加も見送り（`apps/server` 変更が必要になり `pm2 restart` を要するため）。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `agents/{linux,macos}/src/services/ai-tool-probe.ts` | `resolveAiToolFallbackPath()` 新設 |
+| `agents/{linux,macos}/src/services/ai-tool-presence.ts` | `decideAiToolPathSelfHeal()` 新設 |
+| `agents/{linux,macos}/src/services/config.ts` | `detectAndUpdateAiTools()` が絶対パスを保存・自己修復 |
+| `agents/linux/src/services/service-path-rules.ts` | `hasLocalBin` 分岐廃止、`setup.ts` の存在確認コード削除 |
+| `agents/{linux,macos,windows}/src/services/ai-runner.ts` | `proc.on('error')` の ENOENT 検知 |
+| `agents/{linux,macos}/src/services/connection.ts` | fail-open の 1 回警告 |
+| `packages/shared/src/i18n.ts` | `ai.cliNotFound` 文面訂正 |
+| `scripts/install-agent.sh` / `install-agent.ps1` | 絶対パス書き込み |
+
+`apps/server`・`apps/web` は 0 行変更のため `pm2 restart devrelay-server` は不要。
+各機 `u` 必須（新 commit で初めて実際に更新・再起動される）。DB マイグレーション不要。
+
 ### Gemini CLI の exec モードでシェル実行が機能しない問題の根治 (2026-10-26)
 
 実機で Gemini CLI に切替え「"こんにちは、けいすけさん" と話す MP3 を作って」→ `e`（exec）を
