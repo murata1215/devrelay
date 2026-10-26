@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### 未コミットファイル import 事故の機械的検知ガード追加 + 他2サイクルのコミット整理 (2026-10-26)
+
+直前の codex 修正サイクル（`fd95657`）で、未コミットファイルを import したままコミットし
+Agent が起動不能になる障害を起こした。外部対応で被害は復旧済みだったが、原因そのもの
+（壊れたコミットを作ってしまうこと自体）は未解決だったため、新設
+`apps/server/tests/tracked-imports.test.mjs` で機械的に検知するガードを追加した。詳細は
+[devlog](devlog/2026-10-26_230702_tracked_imports_guard.md) 参照。
+
+#### 判定ルール
+「追跡済み or stage 済み」の importer が import する相対パスの実体は、それ自身も
+「追跡済み or stage 済み」でなければならない。`git ls-files` ∪
+`git diff --cached --name-only` の集合で判定することで、`git add` し忘れた瞬間（commit する前）
+に落ちる。HEAD だけを見るチェックでは手遅れになるため、この集合を使う。
+
+#### 併せて実施
+6パッケージ全ての `package.json` の `"test"` スクリプトを node v20 の glob 非展開バグ対応で
+`node --test tests/` に修正（`pnpm test` が全滅していた）。
+
+#### 他2サイクルのコミット整理
+ユーザー指示により、作業ツリーに混在していた他2サイクルの未コミット WIP（いずれも
+archive_worklog 記録済み・検証済み）も再検証の上サイクルごとに分離してコミットした:
+x220 crontab/service-path サイクル（`setup.ts` の systemd unit PATH 未設定を修正）、
+TruckBoard 誤表示根治サイクル（会話履歴の依頼元プロジェクト名誤表示を根治）。
+
+#### 検証結果
+shared104/104・server1380/1380（新規9）・linux1159/1159・macos721/722+既知flake1件・
+windows149/149・web924/924、全て `pnpm test` 経由で green。
+
 ### codex が `spawn codex ENOENT` で起動しない問題の根治 (2026-10-26)
 
 チャットで AI を codex に切替えて送信すると `Error: spawn codex ENOENT`。ユーザーの初期仮説
