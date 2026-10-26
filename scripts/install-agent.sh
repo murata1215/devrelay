@@ -846,15 +846,25 @@ else
   # 1 つも無ければ従来どおり claude を default（後からインストールされたら起動時自動検出が拾う）。
   AI_DEFAULT=""
   AI_TOOLS_YAML=""
+  # 2026-10-27 `chatgpt-user` 障害の根治: 従来は検出できても素のコマンド名（`command: codex` 等）を
+  # 書いていたため、systemd user service の PATH が対話シェルと異なる環境（nvm/npm グローバル等）で
+  # 検出直後から spawn ENOENT になっていた。ここで解決した絶対パスをそのまま書き込む。
   for tool in claude devin gemini codex aider; do
-    if command -v "$tool" &> /dev/null || { [ "$tool" = "claude" ] && [ -x "$HOME/.local/bin/claude" ]; }; then
+    TOOL_PATH=""
+    if command -v "$tool" &> /dev/null; then
+      TOOL_PATH="$(command -v "$tool")"
+    elif [ "$tool" = "claude" ] && [ -x "$HOME/.local/bin/claude" ]; then
+      TOOL_PATH="$HOME/.local/bin/claude"
+    fi
+    if [ -n "$TOOL_PATH" ]; then
       if [ -z "$AI_DEFAULT" ]; then
         AI_DEFAULT="$tool"
       fi
-      AI_TOOLS_YAML="${AI_TOOLS_YAML}  ${tool}:\n    command: ${tool}\n"
+      AI_TOOLS_YAML="${AI_TOOLS_YAML}  ${tool}:\n    command: ${TOOL_PATH}\n"
     fi
   done
-  # AI CLI が 1 つも無い場合は claude を既定エントリとして書いておく（従来互換）
+  # AI CLI が 1 つも無い場合は claude を既定エントリとして書いておく（従来互換。絶対パスは
+  # まだ無いので素の名前のまま。インストール後に detectAndUpdateAiTools() が解決する）
   if [ -z "$AI_DEFAULT" ]; then
     AI_DEFAULT="claude"
     AI_TOOLS_YAML="  claude:\n    command: claude\n"
@@ -920,10 +930,12 @@ SERVICE_PATH="/usr/local/bin:/usr/bin:/bin"
 # Node.js のディレクトリ
 NODE_BIN_DIR=$(dirname "$(which node)")
 SERVICE_PATH="${NODE_BIN_DIR}:${SERVICE_PATH}"
-# ~/.local/bin（claude CLI の一般的なインストール先）
-if [ -d "$HOME/.local/bin" ]; then
-  SERVICE_PATH="$HOME/.local/bin:${SERVICE_PATH}"
-fi
+# ~/.local/bin（claude/codex 等の npm グローバルインストール先として一般的）。
+# 2026-10-27 `chatgpt-user` 障害の根治: 従来はインストール時点で存在する場合のみ含めていたが、
+# 「AI CLI をインストールする前に Agent をインストールする」順序だと欠落し、後から CLI を
+# 入れても検出した CLI を spawn できない（ENOENT）事故になっていた。存在しないディレクトリが
+# PATH に含まれていても無害なため、無条件で含める。
+SERVICE_PATH="$HOME/.local/bin:${SERVICE_PATH}"
 # ~/.devrelay/bin（devrelay-claude シンボリックリンク）
 SERVICE_PATH="$CONFIG_DIR/bin:${SERVICE_PATH}"
 

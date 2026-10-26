@@ -55,6 +55,31 @@ export function isPathLikeCommand(command: string): boolean {
 }
 
 /**
+ * 2026-10-27 `chatgpt-user` 障害の根治: 既存の `config.aiTools.<tool>.command` を
+ * 絶対パスへ自己修復すべきかを判定する純関数。
+ *
+ * 背景: `detectAndUpdateAiTools()` は従来「既に config にあるツールはスキップ」していたため、
+ * インストーラが書いた素のコマンド名（例: `codex`）が PATH に無い環境（systemd user service が
+ * `~/.local/bin` を PATH に含めない等）では、Agent を何度再起動しても直らなかった
+ * （`spawn codex ENOENT` が再現し続ける）。
+ *
+ * 次の条件をすべて満たすときだけ書き換える。ユーザーが明示した絶対パスや、
+ * 現に PATH で解決できているエントリは一切触らない。
+ * 1. `existingCommand` が `isPathLikeCommand()` で**パスでない**（素の名前）
+ * 2. かつ `fallbackPath`（`resolveAiToolFallbackPath()` の結果）が非 null
+ *    （＝ PATH では解決できないが、既知のフォールバック候補には実在する）
+ *
+ * @param existingCommand 現在の config.yaml の command 値
+ * @param fallbackPath `resolveAiToolFallbackPath()` の結果（PATH 解決可／未検出なら null）
+ * @returns 書き換えるべき新しい command 値。不要なら null
+ */
+export function decideAiToolPathSelfHeal(existingCommand: string, fallbackPath: string | null): string | null {
+  if (isPathLikeCommand(existingCommand)) return null; // 既に絶対/相対パス → 触らない
+  if (!fallbackPath) return null; // PATH 解決可、または未検出 → 触らない
+  return fallbackPath;
+}
+
+/**
  * config に書かれたツールのうち実在するものだけを残す。
  * 1 つも実在しない場合は **config のまま返す**（判定ミスで全ツールが消えて何も起動できなくなる事故を防ぐ後方互換）。
  * @param configured config.yaml にエントリのあるツール（順序は保持される）

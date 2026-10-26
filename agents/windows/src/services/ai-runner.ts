@@ -2098,7 +2098,13 @@ export async function sendPromptToAi(
       log.error(`[${aiTool}] Process error:`, err);
       if (!completionSent) {
         completionSent = true;
-        onOutput(`Error: ${err.message}`, true);
+        // 2026-10-27 `chatgpt-user` 障害の根治: spawn 自体が失敗した場合（CLI が PATH に無い等）、
+        // 従来は生の `Error: spawn codex ENOENT` がそのままユーザーに届いていた。
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const message = (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? tChat(lang, 'ai.cliNotFound', { tool: aiTool, command })
+          : `Error: ${err.message}`;
+        onOutput(message, true);
       }
       resolve(result);
     });

@@ -25,7 +25,12 @@ import { aiToolFallbackCandidates, isPathLikeCommand } from './ai-tool-presence.
 const execDir = path.dirname(process.execPath);
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
-const cache = new Map<string, { present: boolean; at: number }>();
+/**
+ * 2026-10-27 `chatgpt-user` 障害の根治: `present` だけでなく「フォールバック候補でのみ
+ * 見つかった場合の絶対パス」も一緒にキャッシュする（`resolveAiToolFallbackPath()` 用）。
+ * PATH で解決できた場合・見つからなかった場合は `resolvedPath: null`。
+ */
+const cache = new Map<string, { present: boolean; resolvedPath: string | null; at: number }>();
 
 function existsSafe(p: string): boolean {
   try {
@@ -52,13 +57,40 @@ function hasClaudeCredentials(): boolean {
   return existsSafe(path.join(os.homedir(), '.claude', '.credentials.json'));
 }
 
-function probe(tool: string, command: string): boolean {
-  if (isPathLikeCommand(command)) return existsSafe(command);
-  if (tool === 'claude' && command === 'claude') {
-    return resolveSystemClaude() !== null || hasClaudeCredentials();
+/**
+ * 実在確認の本体。`present` に加え、**フォールバック候補でのみ**見つかった場合は
+ * その絶対パスを `resolvedPath` に入れて返す（2026-10-27 `chatgpt-user` 障害の根治:
+ * `detectAndUpdateAiTools()` が従来 boolean しか受け取れず、せっかく見つけた絶対パスを
+ * 捨てて素のコマンド名を保存していたため、systemd user service 等 PATH が限定された
+ * 環境で検出直後から spawn ENOENT になっていた）。
+ * PATH で解決できた場合は `resolvedPath: null` にする（呼び出し元は従来どおり素の
+ * コマンド名を使う。PATH で引けるものまで絶対パス化すると、ツール更新でパスが変わった
+ * ときに逆に壊れるため）。
+ */
+function probeDetailed(tool: string, command: string): { present: boolean; resolvedPath: string | null } {
+  if (isPathLikeCommand(command)) {
+    const present = existsSafe(command);
+    return { present, resolvedPath: present ? command : null };
   }
-  if (lookupOnPath(command)) return true;
-  return aiToolFallbackCandidates(tool, command, process.platform, os.homedir(), execDir).some(existsSafe);
+  if (tool === 'claude' && command === 'claude') {
+    if (lookupOnPath('claude')) return { present: true, resolvedPath: null };
+    const sys = resolveSystemClaude();
+    if (sys) return { present: true, resolvedPath: sys };
+    return { present: hasClaudeCredentials(), resolvedPath: null };
+  }
+  if (lookupOnPath(command)) return { present: true, resolvedPath: null };
+  const found = aiToolFallbackCandidates(tool, command, process.platform, os.homedir(), execDir).find(existsSafe);
+  return { present: !!found, resolvedPath: found ?? null };
+}
+
+function probeCached(tool: string, cmd: string): { present: boolean; resolvedPath: string | null } {
+  const key = `${tool}\u0000${cmd}`;
+  const now = Date.now();
+  const hit = cache.get(key);
+  if (hit && now - hit.at < CACHE_TTL_MS) return hit;
+  const result = probeDetailed(tool, cmd);
+  cache.set(key, { ...result, at: now });
+  return result;
 }
 
 /**
@@ -68,13 +100,20 @@ function probe(tool: string, command: string): boolean {
  */
 export function isAiToolPresent(tool: string, command?: string): boolean {
   const cmd = (command || tool).trim();
-  const key = `${tool}\u0000${cmd}`;
-  const now = Date.now();
-  const hit = cache.get(key);
-  if (hit && now - hit.at < CACHE_TTL_MS) return hit.present;
-  const present = probe(tool, cmd);
-  cache.set(key, { present, at: now });
-  return present;
+  return probeCached(tool, cmd).present;
+}
+
+/**
+ * 2026-10-27 `chatgpt-user` 障害の根治: ツールが「PATH では解決できないが、既知の
+ * フォールバック候補（`~/.local/bin` 等）には実在する」場合に、その絶対パスを返す。
+ * `isAiToolPresent()` と同じキャッシュを共有する。
+ * @param tool AI ツール名
+ * @param command config.yaml の `aiTools.<tool>.command`（未指定ならツール名）
+ * @returns フォールバック候補で見つかった絶対パス。PATH で解決できる／未検出なら null
+ */
+export function resolveAiToolFallbackPath(tool: string, command?: string): string | null {
+  const cmd = (command || tool).trim();
+  return probeCached(tool, cmd).resolvedPath;
 }
 
 /** テスト・再検出用: キャッシュを破棄する */

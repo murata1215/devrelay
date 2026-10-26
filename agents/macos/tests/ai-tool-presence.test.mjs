@@ -8,6 +8,7 @@ import {
   isPathLikeCommand,
   filterPresentAiTools,
   pickReplacementDefaultAiTool,
+  decideAiToolPathSelfHeal,
 } from '../dist/services/ai-tool-presence.js';
 
 // ---- filterPresentAiTools ----
@@ -108,4 +109,26 @@ test('aiToolFallbackCandidates: execDir は win32 では .cmd 拡張子になる
     aiToolFallbackCandidates('codex', 'codex', 'win32', 'C:\\Users\\u', 'C:\\nvm\\v20')[0],
     'C:\\nvm\\v20\\codex.cmd',
   );
+});
+
+// ---- decideAiToolPathSelfHeal（2026-10-27 `chatgpt-user` 障害の根治） ----
+
+test('decideAiToolPathSelfHeal: 素の名前 + PATH解決不能だがフォールバックに実在 → 絶対パスへ昇格', () => {
+  assert.equal(decideAiToolPathSelfHeal('codex', '/home/chatgpt-user/.local/bin/codex'), '/home/chatgpt-user/.local/bin/codex');
+});
+
+test('decideAiToolPathSelfHeal: 既に絶対パス指定は触らない（fallbackPath があっても無視）', () => {
+  assert.equal(decideAiToolPathSelfHeal('/usr/local/bin/codex', '/home/u/.local/bin/codex'), null);
+});
+
+test('decideAiToolPathSelfHeal: 既に相対パス風（\\区切り含む）も触らない', () => {
+  assert.equal(decideAiToolPathSelfHeal('C:\\tools\\codex.exe', 'C:\\other\\codex.exe'), null);
+});
+
+test('decideAiToolPathSelfHeal: PATH で解決できる（fallbackPath が null）場合は触らない', () => {
+  assert.equal(decideAiToolPathSelfHeal('codex', null), null);
+});
+
+test('decideAiToolPathSelfHeal: 未検出（fallbackPath が null）の場合も触らない', () => {
+  assert.equal(decideAiToolPathSelfHeal('nonexistent-tool', null), null);
 });

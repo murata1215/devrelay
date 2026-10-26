@@ -2088,11 +2088,16 @@ function sendMessage(message: AgentMessage) {
   }
 }
 
+// 2026-10-27 `chatgpt-user` 障害の根治（#325 静かなフォールバック禁止）: 下記 getAvailableAiTools()
+// の fail-open（1つも実在しないため config のまま返す）が発動したことを、プロセス寿命中 1 回だけ
+// 警告ログに出す（devinProbeFailedWarned 等と同じ流儀）。
+let aiToolsFailOpenWarned = false;
+
 /**
  * この端末で使える AI ツール一覧（サーバーへの申告と `resolveEffectiveAiTool()` の両方で使う）。
  * config.yaml にエントリがあるだけでなく、実体が見つかるものに絞る（`ai-tool-presence.ts` 冒頭の背景参照。
  * インストーラが残した実体の無い `claude:` エントリのせいで Devin 専用端末でも claude が選ばれ `a 1` が必要に
- * なっていた）。1 つも実在しない場合は従来どおり config の全エントリを返す。
+ * なっていた）。1 つも実在しない場合は従来どおり config の全エントリを返す（fail-open）。
  */
 function getAvailableAiTools(config: AgentConfig): AiTool[] {
   const tools: AiTool[] = [];
@@ -2101,7 +2106,14 @@ function getAvailableAiTools(config: AgentConfig): AiTool[] {
   if (config.aiTools.codex) tools.push('codex');
   if (config.aiTools.aider) tools.push('aider');
   if (config.aiTools.devin) tools.push('devin');
-  return filterPresentAiTools(tools, (t) => isAiToolPresent(t, config.aiTools[t]?.command));
+  const isPresent = (t: AiTool) => isAiToolPresent(t, config.aiTools[t]?.command);
+  // 2026-10-27: fail-open 検知。isAiToolPresent は 10 分キャッシュされるため、ここでの
+  // 再チェック（tools.some）はコスト上問題ない。
+  if (tools.length > 0 && !aiToolsFailOpenWarned && !tools.some(isPresent)) {
+    aiToolsFailOpenWarned = true;
+    console.warn(`⚠️ [ai-tools] None of the configured AI tools (${tools.join(', ')}) could be verified present on this machine. Reporting all of them as available anyway (fail-open) — a 'command' entry in config.yaml is likely stale/wrong. Check config.yaml.`);
+  }
+  return filterPresentAiTools(tools, isPresent);
 }
 
 /**

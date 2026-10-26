@@ -247,15 +247,10 @@ async function installUserService(machineName: string) {
 
   // 2026-10-18: install-agent.sh と同じ PATH を Environment= に明示する（systemd user service
   // は .bashrc を読まないため、PATH 未指定だと `which` ベースの AI ツール検出が失敗する実害があった）
+  // 2026-10-27: `~/.local/bin` の存在確認はやめて無条件で含める（`chatgpt-user` 障害の根治、
+  // 詳細は service-path-rules.ts のコメント参照）
   const home = process.env.HOME || os.homedir();
-  let hasLocalBin = false;
-  try {
-    await fs.access(path.join(home, '.local', 'bin'));
-    hasLocalBin = true;
-  } catch {
-    hasLocalBin = false;
-  }
-  const envPath = buildServicePath(home, getBinDir(), process.execPath, hasLocalBin);
+  const envPath = buildServicePath(home, getBinDir(), process.execPath);
 
   const serviceContent = `[Unit]
 Description=DevRelay Agent (${machineName})

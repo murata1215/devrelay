@@ -370,9 +370,13 @@ export const chatMessages = {
   },
 
   // --- #344: probe 失敗時の楽観化 + argv フォールバック廃止 + (No response from AI) の置き換え ---
+  // 2026-10-27 `chatgpt-user` 障害の根治: 「`u` で再起動すると再検出されます」という従来の
+  // 案内は誤りだと実証された（commit が最新だと `u`/`u force` は再起動しない。また再検出は
+  // 既存エントリを自動では書き換えない場合がある）。実際に効く手段（`a` で切替・WebUI の
+  // 再起動ボタン）に訂正する。
   'ai.cliNotFound': {
-    en: '❌ {tool} CLI (`{command}`) was not found by the Agent. If you installed or updated it, restart the Agent with `u` so it can be detected again.',
-    ja: '❌ {tool} CLI（`{command}`）が Agent から見つかりませんでした。インストール・更新した直後の場合は `u` で Agent を再起動すると再検出されます。',
+    en: '❌ {tool} CLI (`{command}`) was not found by the Agent. Try `a` to switch to another installed AI tool, or restart the Agent from the WebUI machine page (Note: `u` does NOT restart the Agent when it is already up to date, even with `force`).',
+    ja: '❌ {tool} CLI（`{command}`）が Agent から見つかりませんでした。`a` で別の AI ツールに切り替えるか、WebUI のマシンページから Agent を再起動してください（`u`/`u force` は Agent が既に最新の場合は再起動しません）。',
   },
   'ai.cliFailed': {
     en: '❌ {tool} CLI exited with code {code} without producing any output.\n\n[stderr]\n{stderr}',

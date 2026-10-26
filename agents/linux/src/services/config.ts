@@ -3,8 +3,8 @@ import path from 'path';
 import os from 'os';
 import yaml from 'yaml';
 import type { AiTool, ProxyConfig } from '@devrelay/shared';
-import { isAiToolPresent } from './ai-tool-probe.js';
-import { pickReplacementDefaultAiTool } from './ai-tool-presence.js';
+import { isAiToolPresent, resolveAiToolFallbackPath } from './ai-tool-probe.js';
+import { pickReplacementDefaultAiTool, decideAiToolPathSelfHeal } from './ai-tool-presence.js';
 
 export interface AgentConfig {
   machineName: string;
@@ -149,7 +149,10 @@ const KNOWN_AI_TOOLS: { name: AiTool; command: string }[] = [
 /**
  * PATH 上の AI ツールを自動検出し、config.aiTools に存在しないものを追加する。
  *
- * - 既存の設定（カスタムコマンドパス等）は上書きしない
+ * - 既存の設定（カスタムコマンドパス等）は上書きしない。ただし 2026-10-27
+ *   `chatgpt-user` 障害の根治として、素のコマンド名のまま PATH で解決できなくなった
+ *   既存エントリだけは、フォールバック候補に実在すれば絶対パスへ自己修復する
+ *   （`decideAiToolPathSelfHeal()` 参照。ユーザーが明示した絶対パスは対象外）
  * - 検出なしのツールでも既存設定があれば削除しない（オフライン環境対応）
  * - 変更があった場合のみ config.yaml に保存
  *
@@ -159,14 +162,26 @@ export async function detectAndUpdateAiTools(config: AgentConfig): Promise<boole
   let updated = false;
 
   for (const { name, command } of KNOWN_AI_TOOLS) {
-    // 既に config にあるツールはスキップ（ユーザー設定を尊重）
-    if (config.aiTools[name]) continue;
+    const existing = config.aiTools[name];
+    if (existing) {
+      // 2026-10-27 `chatgpt-user` 障害の根治: 既存エントリの自己修復（他フィールドは保持）
+      const healed = decideAiToolPathSelfHeal(existing.command, resolveAiToolFallbackPath(name, existing.command));
+      if (healed) {
+        config.aiTools[name] = { ...existing, command: healed };
+        console.log(`🔧 Self-healed ${name} CLI path: '${existing.command}' → '${healed}' (not on PATH, found via fallback)`);
+        updated = true;
+      }
+      continue;
+    }
 
     // PATH（where / command -v、#350 の windowsHide 済み）→ 既知パス（~/.local/bin 等）の順で探す。
     // 従来は which のみで、PATH に無い ~/.local/bin/devin 等を拾えなかった。
+    // 2026-10-27: フォールバック候補でのみ見つかった場合はその絶対パスを保存する
+    // （PATH で引ける場合は従来どおり素の名前のまま。ツール更新でパスが変わっても壊れないように）。
     if (isAiToolPresent(name, command)) {
-      config.aiTools[name] = { command };
-      console.log(`🔍 Detected ${name} CLI → added to config`);
+      const fallbackPath = resolveAiToolFallbackPath(name, command);
+      config.aiTools[name] = { command: fallbackPath ?? command };
+      console.log(`🔍 Detected ${name} CLI → added to config${fallbackPath ? ` (absolute path: ${fallbackPath})` : ''}`);
       updated = true;
     }
   }

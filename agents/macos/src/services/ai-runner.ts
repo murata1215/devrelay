@@ -3132,7 +3132,15 @@ async function sendPromptToAiImpl(
       console.error(`[${aiTool}] Process error:`, err);
       if (!completionSent) {
         completionSent = true;
-        onOutput(formatAiErrorMessage(err.message, options.language ?? DEFAULT_CHAT_LANGUAGE), true, undefined, result.extractedSessionId);
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        // 2026-10-27 `chatgpt-user` 障害の根治: spawn 自体が失敗した場合（CLI が PATH に無い等）、
+        // 従来は生の `Error: spawn codex ENOENT` がそのままユーザーに届いていた。
+        // close ハンドラ経由の cliNotFound はプロセスが起動できた場合にしか通らないため、
+        // ここでも同じ案内を出す。
+        const message = (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? tChat(lang, 'ai.cliNotFound', { tool: aiTool, command })
+          : formatAiErrorMessage(err.message, lang);
+        onOutput(message, true, undefined, result.extractedSessionId);
       }
       resolve(result);
     });

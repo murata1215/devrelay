@@ -1345,11 +1345,14 @@ if (Test-Path $ConfigFile) {
     # 1 つも無ければ従来どおり claude を default（後からインストールされたら起動時自動検出が拾う）。
     $AiDefault = ""
     $AiToolLines = @()
+    # 2026-10-27 `chatgpt-user` 障害の根治（Linux/systemd 側）と揃え、検出できた場合は
+    # 解決済みの絶対パスを書き込む（サービス実行環境の PATH が対話シェルと異なっても壊れないように）。
     foreach ($tool in @('claude', 'devin', 'gemini', 'codex', 'aider')) {
-        if (Get-Command $tool -ErrorAction SilentlyContinue) {
+        $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+        if ($cmd) {
             if (-not $AiDefault) { $AiDefault = $tool }
             $AiToolLines += "  ${tool}:"
-            $AiToolLines += "    command: ${tool}"
+            $AiToolLines += "    command: $($cmd.Source)"
         }
     }
     if (-not $AiDefault) {

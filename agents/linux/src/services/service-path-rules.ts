@@ -11,6 +11,12 @@
  * （`devrelay setup` 経由で作られた `pixblog` の unit で実際に発生）。
  *
  * この関数で両経路の PATH 組み立てを一致させる。
+ *
+ * 2026-10-27 `chatgpt-user` 障害の根治: 従来は `~/.local/bin` の存在確認を呼び出し側が行い、
+ * **インストール実行時点で存在する場合のみ** PATH に含めていた。「Agent を先にインストールし、
+ * AI CLI を後から `~/.local/bin` に入れる」順序だと欠落したまま unit が固定され、CLI を
+ * 検出できても spawn できない（ENOENT）事故になっていた。存在しないディレクトリが PATH に
+ * 含まれていても無害なため、存在確認はやめて無条件で含める。
  */
 
 import { dirname, join } from 'path';
@@ -22,21 +28,15 @@ import { dirname, join } from 'path';
  * @param home ホームディレクトリ（`os.homedir()` の値）
  * @param binDir devrelay-claude ラッパー格納ディレクトリ（`getBinDir()` の値）
  * @param nodeExecPath 現在実行中の node の絶対パス（`process.execPath`）
- * @param hasLocalBin `~/.local/bin` が存在するか（存在確認は呼び出し側が行う。
- *   claude CLI の一般的なインストール先のため、存在する場合のみ PATH に含める）
  * @returns `:` 区切りの PATH 文字列
  */
 export function buildServicePath(
   home: string,
   binDir: string,
   nodeExecPath: string,
-  hasLocalBin: boolean,
 ): string {
   const nodeBinDir = dirname(nodeExecPath);
-  const parts: string[] = [nodeBinDir, '/usr/local/bin', '/usr/bin', '/bin'];
-  if (hasLocalBin) {
-    parts.unshift(join(home, '.local', 'bin'));
-  }
+  const parts: string[] = [join(home, '.local', 'bin'), nodeBinDir, '/usr/local/bin', '/usr/bin', '/bin'];
   parts.unshift(binDir);
   return parts.join(':');
 }
