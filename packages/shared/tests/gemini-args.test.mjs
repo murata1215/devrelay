@@ -12,6 +12,7 @@ import {
   parseGeminiCapabilities,
   buildGeminiApprovalArgs,
   GEMINI_CAPABILITIES_NONE,
+  detectGeminiModelUnavailable,
 } from '../dist/gemini-args.js';
 
 // fixture A: この母艦で実際に確認した gemini 0.65.0 の --help 抜粋
@@ -157,4 +158,28 @@ test('droppedFlags に --approval-mode が入ると plan ターンはフラグ�
     droppedFlags: ['--approval-mode'],
   });
   assert.deepEqual(result, { args: [], degraded: 'planNoFlag' });
+});
+
+// ---- detectGeminiModelUnavailable: 2026-10-27 gemini-user 機体で発覚したモデル廃止 404 ----
+
+// 実機ログそのまま（`[API Error: ...]` でラップされた二重エスケープ JSON、`--approval-mode` 根治後に発生）
+const STDERR_MODEL_RETIRED = '[API Error: {"error":{"message":"{\\n  \\"error\\": {\\n    \\"code\\": 404,\\n    \\"message\\": \\"This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started).\\",\\n    \\"status\\": \\"NOT_FOUND\\"\\n  }\\n}\\n","code":404,"status":"Not Found"}}]';
+
+// 対話モード（`gemini -m <id> -p ...`）で見られる別形式（存在しないモデル ID を明示指定した場合）
+const STDERR_MODEL_NOT_FOUND = `Error when talking to Gemini API Full report available at: /tmp/gemini-client-error-Turn.run-sendMessageStream.json ModelNotFoundError: models/gemini-3.1-pro is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods.
+    at classifyGoogleError (...)`;
+
+test('detectGeminiModelUnavailable: 実機ログ（廃止モデル 404）からモデル名と推奨移行先を抽出する', () => {
+  const info = detectGeminiModelUnavailable(STDERR_MODEL_RETIRED);
+  assert.deepEqual(info, { model: 'gemini-2.5-pro', recommendedModel: 'gemini-3.1-pro-preview' });
+});
+
+test('detectGeminiModelUnavailable: ModelNotFoundError 形式（推奨移行先の案内なし）も検出する', () => {
+  const info = detectGeminiModelUnavailable(STDERR_MODEL_NOT_FOUND);
+  assert.deepEqual(info, { model: 'gemini-3.1-pro' });
+});
+
+test('detectGeminiModelUnavailable: 該当パターンが無ければ null', () => {
+  assert.equal(detectGeminiModelUnavailable('some unrelated stderr'), null);
+  assert.equal(detectGeminiModelUnavailable(''), null);
 });

@@ -110,3 +110,30 @@ export function buildGeminiApprovalArgs(
   }
   return { args: [], degraded: 'planNoFlag' };
 }
+
+/**
+ * Gemini API が「このモデルは廃止/提供終了」と返した 404 を stderr から検出する
+ * （2026-10-27: `--approval-mode` 根治後に `gemini-user` 機体で発覚。旧 CLI の既定モデル
+ * `gemini-2.5-pro` が Google 側で提供終了されており、生の二重エスケープ JSON がそのまま
+ * ユーザーに届いていた。`AI_MODEL_CATALOG.gemini` の `gemini-3.1-pro` が実は 404 だった
+ * 事故の調査中に発見）。
+ *
+ * 想定する stderr の実例（今回の実機ログ、`[API Error: ...]` でラップされた二重エスケープ JSON）:
+ *   "This model models/gemini-2.5-pro is no longer available to new users.
+ *    Please update your code to use models/gemini-3.1-pro-preview for the latest features..."
+ * および対話モード（`gemini --skip-trust -m <id> -p ...`）で見られる別形式:
+ *   "ModelNotFoundError: models/gemini-3.1-pro is not found for API version v1beta, ..."
+ *
+ * @param stderr 子プロセスの収集済み stderr 全文
+ * @returns 廃止/未検出だったモデル名と、メッセージから読み取れた推奨移行先（無ければ undefined）。
+ *   該当パターンに一致しなければ null。
+ */
+export function detectGeminiModelUnavailable(stderr: string): { model: string; recommendedModel?: string } | null {
+  if (!stderr) return null;
+  const retiredMatch = stderr.match(/models\/([A-Za-z0-9_.\-]+)\s+is no longer available/i);
+  const notFoundMatch = stderr.match(/models\/([A-Za-z0-9_.\-]+)\s+is not found for API version/i);
+  const model = retiredMatch?.[1] ?? notFoundMatch?.[1];
+  if (!model) return null;
+  const recommendedMatch = stderr.match(/use\s+models\/([A-Za-z0-9_.\-]+)/i);
+  return recommendedMatch ? { model, recommendedModel: recommendedMatch[1] } : { model };
+}

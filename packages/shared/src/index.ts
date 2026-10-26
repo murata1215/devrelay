@@ -81,4 +81,5 @@ export {
   type GeminiDegradeReason,
   type GeminiApprovalArgsResult,
   buildGeminiApprovalArgs,
+  detectGeminiModelUnavailable,
 } from './gemini-args.js';

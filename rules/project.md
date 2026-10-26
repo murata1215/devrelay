@@ -183,6 +183,17 @@ CLI が受理する slug が食い違うことがある、#353 と同種の教�
 `description` 文字列に注記するだけに留め、スキーマ拡張や実装は伴わせない（「実装ゼロ」の判断はプランの
 スコープ記述と `git diff --stat -- apps/ prisma/` が空であることで検証する）。
 
+**2026-10-27: 同じ罠が `AI_MODEL_CATALOG.gemini` でも3度目に発生した。** `gemini-3.1-pro`（#309で
+実機未検証のまま追加、カタログ先頭＝最も選ばれやすい「最新フラッグシップ」表記）と `gemini-2.5-pro`
+（Google 側で永久廃止）の2件が、WebUI Settings・`l` コマンドの両方から選べるにもかかわらず全ユーザー・
+全マシンで hard 404 だった（`gemini-user` 機体の別件調査中に `gemini --skip-trust --approval-mode
+plan -m <id> -p "..."` で全6件を実測して発覚、正しい ID は `gemini-3.1-pro-preview`。pro 系は
+`-preview` サフィックス必須）。`isUnsafeModelId()` はシェル注入対策のみで存在検証はしないため、
+カタログに載せた時点で検証したかどうかが唯一の防波堤になる。**`gemini-2.5-pro` は削除した**— Devin
+カタログの「新 CLI は知らないが旧 CLI では動くので残置する」慣習とは異なり、サーバー側永久廃止は
+CLI バージョンに関係なく 404 になるため、残す意味がない（詳細 `doc/devlog/2026-10-27_063526_
+gemini_model_catalog_404.md`）。
+
 **実測の正は `devin models list --format json`。ローカルキャッシュ（`%LOCALAPPDATA%\devin\cli\
 model_configs_v5.*.bin` 等）は古くなるため根拠にしないこと**（2026-09-28 の再実測サイクルで、9/7 に
 fetch されたキャッシュに Claude Opus 5.5 が含まれていないと判明した。`devin models list` は実行時に

@@ -462,6 +462,13 @@ export const chatMessages = {
     en: '❌ Gemini CLI still rejects the `{flag}` flag as unknown after retrying. This machine\'s gemini CLI may be a version DevRelay does not yet support.\n\n[stderr]\n{stderr}',
     ja: '❌ 再試行しても Gemini CLI がフラグ `{flag}` を未知の引数として拒否します。この端末の gemini CLI は DevRelay が未対応のバージョンの可能性があります。\n\n[stderr]\n{stderr}',
   },
+  // --- 2026-10-27: Gemini API がモデル廃止/提供終了（404）を返した場合、二重エスケープされた
+  // 生 JSON ではなく次の一手を提示する（gemini-user 機体で発覚。旧 CLI の既定モデル
+  // `gemini-2.5-pro` が Google 側で提供終了されていた） ---
+  'gemini.modelUnavailable': {
+    en: '❌ Gemini CLI tried to use model `{model}`, which Google has discontinued (recommended replacement: `{suggestedModel}`).\n\n① Update this machine\'s gemini CLI — newer versions auto-resolve to an available model, so this stops happening when no model flag is passed.\n② To fix this right away, run `l {suggestedModel}` to pin an explicit model.',
+    ja: '❌ Gemini CLI が使おうとしたモデル `{model}` は Google 側で提供終了しています（推奨移行先: `{suggestedModel}`）。\n\n① この端末の gemini CLI を更新してください — 新しい CLI は自動で有効なモデルに解決するため、モデル未指定の起動ではこの問題が起きなくなります。\n② 今すぐ直したい場合は `l {suggestedModel}` でモデルを明示指定してください。',
+  },
   // --- #345: workspace trust 拒否（devin --respect-workspace-trust）への対処案内 ---
   'devin.workspaceUntrusted': {
     en: '❌ Devin CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `--respect-workspace-trust false` automatically (restores Devin\'s own documented default for non-interactive/print mode).\n② If it still happens, run `devin` interactively once in that directory on that machine to trust it.\n③ Or set `respect_workspace_trust: false` in the Devin CLI config on that machine.',

@@ -6,6 +6,48 @@
 
 ## 実装済み機能
 
+### Gemini モデルカタログの死んだ ID 2 件の修正 + 廃止モデル 404 の診断メッセージ化 (2026-10-27)
+
+前サイクル（`--approval-mode` 根治、下記エントリ）反映後 `gemini-user` 機体で再テストしたところ、
+警告 1 行つきで CLI 起動まで進んだが、`[API Error: ...]` 形式の二重エスケープ JSON で
+`This model models/gemini-2.5-pro is no longer available to new users.` 404 が発生した。
+詳細は [devlog](devlog/2026-10-27_063526_gemini_model_catalog_404.md) 参照。
+
+#### 真因
+サーバーログで `model resolved: (default)` を確認し、DevRelay は `-m` を渡していない —
+旧 CLI 自前の既定モデル `gemini-2.5-pro` が Google 側で廃止されたことが原因で、DevRelay 側の
+不具合ではなかった（母艦の新 CLI はサーバー側ルーティングで回避するため無害）。
+
+調査の過程で `AI_MODEL_CATALOG.gemini`（`constants.ts`）の全 6 ID を母艦の実 API で実測したところ、
+**本物の DevRelay バグ**を発見した: `gemini-3.1-pro`（カタログ先頭＝最も選ばれやすい「最新
+フラッグシップ」表記）と `gemini-2.5-pro` の 2 件が全ユーザー・全マシンで hard 404 だった
+（`gemini-3.1-pro` の正しい ID は `gemini-3.1-pro-preview`、pro 系は `-preview` サフィックス必須）。
+`constants.ts` 冒頭 JSDoc が自ら警告する「実機未検証で追加するな」の罠の 3 度目
+（`gemini-3.1-pro` は #309 で未検証のまま追加された ID）。
+
+#### 対応
+カタログを実測結果で差し替え（死んだ 2 件 → `gemini-3.1-pro-preview` 修正 + `gemini-2.5-pro`
+削除、新たに有効と確認した `gemini-3.8-flash`/`gemini-3.5-flash-lite` を追加。`gemini-2.5-pro`
+削除は codex カタログの「旧 CLI のために残置する」慣習の例外 — サーバー側永久廃止は CLI 更新
+でも直らないため）。Phase 2 として `gemini-args.ts` に純粋関数 `detectGeminiModelUnavailable()`
+を追加し 3 エージェントの終了ハンドラに 1 分岐追加、廃止モデル 404 を生 JSON でなく
+「① CLI 更新 ② `l <モデル>` で今すぐ直す」の診断メッセージ（`gemini.modelUnavailable` 新設）に
+変換。Devin 側カタログの `gemini-3.1-pro`（別名前空間、Devin 自身の slug）は変更していない。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `packages/shared/src/constants.ts` | `AI_MODEL_CATALOG.gemini` 差し替え + 実測ログコメント |
+| `packages/shared/src/gemini-args.ts` | `detectGeminiModelUnavailable()` 追加 |
+| `packages/shared/src/i18n.ts` | `gemini.modelUnavailable` 追加 |
+| `packages/shared/tests/gemini-args.test.mjs` | 実 stderr fixture 2 種のテスト追加（3件） |
+| `agents/{linux,macos,windows}/src/services/ai-runner.ts` | 404 検出分岐を1つ追加、JSDoc 例示を修正 |
+
+前サイクルと異なり `packages/shared` のカタログ/i18n を `apps/server`・`apps/web` が参照するため
+**本サイクルは `pm2 restart devrelay-server` が必要**。`agents/*` 変更分は Gemini 使用機の各機
+`u` が必要。DB マイグレーション不要、新規キルスイッチなし。
+
 ### Gemini CLI の plan ターンが probe 結果を無視し `--approval-mode` 非対応機で会話不能になる問題の根治 (2026-10-27)
 
 `gemini-user` 機体で「こんにちは」と送っただけで `gemini CLI が出力なしで終了しました（exit 1）`

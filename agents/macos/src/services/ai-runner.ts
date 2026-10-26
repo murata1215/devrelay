@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue, parseGeminiCapabilities, buildGeminiApprovalArgs, GEMINI_CAPABILITIES_NONE } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue, parseGeminiCapabilities, buildGeminiApprovalArgs, GEMINI_CAPABILITIES_NONE, detectGeminiModelUnavailable } from '@devrelay/shared';
 import type { AiTool, AiUsageData, Language, GeminiCapabilities, GeminiDegradeReason } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
@@ -809,7 +809,7 @@ export interface SendPromptOptions {
    * AI モデル指定（#309: claude/codex/gemini/devin 共通）。#251 の `l` コマンド／Settings で設定される。
    * claude: 'sonnet', 'opus', 'claude-fable-5' 等（Claude SDK にそのまま渡す）
    * codex: `-c model="..."` で渡す（例: 'gpt-5.5'）
-   * gemini: `-m` で渡す（例: 'gemini-3.1-pro'）
+   * gemini: `-m` で渡す（例: 'gemini-3.1-pro-preview'。pro 系は -preview サフィックス必須、2026-10-27 実測）
    * devin: `--model` で渡す（fuzzy 名可、例: 'opus'）
    * 未指定なら各 CLI のデフォルト
    */
@@ -2985,6 +2985,22 @@ async function sendPromptToAiImpl(
           return;
         }
         // 未知のフラグ名をマッピングできない場合は通常の ai.cliFailed 経路へフォールスルーする
+      }
+
+      // 2026-10-27: Gemini API が「このモデルは廃止/提供終了」と 404 を返した場合、二重エスケープされた
+      // 生 JSON ではなく次の一手を提示する（gemini-user 機体で発覚。旧 CLI の既定モデル
+      // `gemini-2.5-pro` が Google 側で提供終了されていた。DevRelay 側が `-m` を明示指定していない
+      // ケースでも CLI 自身の既定モデルが廃止されていれば起きるため、`--approval-mode` 根治後も残る）。
+      const geminiModelUnavailable = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? detectGeminiModelUnavailable(stderrOutput)
+        : null;
+      if (geminiModelUnavailable && !completionSent) {
+        completionSent = true;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const suggestedModel = geminiModelUnavailable.recommendedModel ?? 'gemini-3.1-pro-preview';
+        onOutput(tChat(lang, 'gemini.modelUnavailable', { model: geminiModelUnavailable.model, suggestedModel }), true, result.usageData, result.extractedSessionId);
+        resolve(result);
+        return;
       }
 
       // Devin: resume（-r）が出力ゼロで終了（exit code 不問）→ セッション ID を破棄して新規セッションでリトライ
