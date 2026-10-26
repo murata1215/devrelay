@@ -45,6 +45,7 @@ import { buildPnpmInstallCommand, AGENT_INSTALL_FILTER, WIN32_AGENT_INSTALL_FILT
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { decideAgentUpdateAction } from './update-guard-rules.js';
 import { prependBinDir } from './node-bin-path.js';
+import { buildCheckedBuildSteps, buildRecordPrevHead, buildRestartGate, buildRollbackOnBuildFailure, buildRunAndLog } from './update-script-rules.js';
 import { GIT_NONINTERACTIVE_ENV, classifyGitRemoteFailure, buildRepoAuthFailureMessage, redactSecrets, shouldRequestServerRepoAuth, readExtraHeaderFromGitConfig, upsertExtraHeaderInGitConfig } from './repo-auth-rules.js';
 import { composeRawPrompt, resolveRawCompletionResult } from './raw-completion-mode.js';
 import { ensureRawCwd } from './raw-cwd.js';
@@ -3171,14 +3172,16 @@ async function handleAgentUpdate() {
   /** タイムスタンプ付きログ出力ヘルパー（bash 用） */
   const ts = `date '+%Y-%m-%d %H:%M:%S'`;
   const log = (msg: string) => `echo "[\$(${ts})] ${msg}" >> "${updateLogFile}"`;
-  /** コマンド実行 + exit code ログ記録ヘルパー */
-  const runAndLog = (label: string, cmd: string) =>
-    `${log(label)}; ${cmd} >> "${updateLogFile}" 2>&1; ${log(`${label} exit=$?`)}`;
+  /**
+   * コマンド実行 + exit code ログ記録ヘルパー。
+   * 2026-10-26: 旧実装は `$?` を `$(date ...)` の後に評価しており常に exit=0 を記録していたため、
+   * runAndLogChecked と同じく `RC` に退避してから記録する（詳細は update-script-rules.ts）。
+   */
+  const runAndLog = (label: string, cmd: string) => buildRunAndLog(updateLogFile, label, cmd);
   /**
    * #329 Part B: 終了コードを $RC に保存する版（分岐判定に使う）。
    */
-  const runAndLogChecked = (label: string, cmd: string) =>
-    `${log(label)}; ${cmd} >> "${updateLogFile}" 2>&1; RC=$?; ${log(`${label} exit=$RC`)}`;
+  const runAndLogChecked = (label: string, cmd: string) => buildRunAndLog(updateLogFile, label, cmd);
 
   if (process.platform === 'win32') {
     // Windows: PowerShell スクリプトで更新
@@ -3261,6 +3264,10 @@ async function handleAgentUpdate() {
     const legacyNodeBinDir = join(homedir(), '.devrelay', 'node', 'bin');
     let updatePath = prependBinDir(process.env.PATH, legacyNodeBinDir, ':', existsSync);
     updatePath = prependBinDir(updatePath, execNodeBinDir, ':', existsSync);
+    const agentBuildSteps = [
+      { label: 'shared build', cmd: 'pnpm --filter @devrelay/shared build' },
+      { label: 'agent build', cmd: 'pnpm --filter @devrelay/agent-macos build' },
+    ];
     const buildSteps = [
       `export PATH="${updatePath}"`,
       `cd "${agentDir}"`,
@@ -3271,6 +3278,8 @@ async function handleAgentUpdate() {
       // Linux（fa62645）・Windows 分岐（#356 B4）と同じ「失敗したら中止・既存 Agent を維持」に揃える）
       runAndLogChecked('git fetch', 'git fetch origin'),
       `if [ "$RC" != "0" ]; then ${log('!! git fetch failed, aborting update (agent kept alive)')}; exit 0; fi`,
+      // ビルド失敗時のロールバック先（buildRollbackOnBuildFailure）として更新前のコミットを記録
+      buildRecordPrevHead(),
       `REMOTE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' || echo "origin/main")`,
       `[ -z "$REMOTE_BRANCH" ] && REMOTE_BRANCH="origin/main"`,
       runAndLogChecked('git reset', 'git reset --hard $REMOTE_BRANCH'),
@@ -3284,8 +3293,14 @@ async function handleAgentUpdate() {
       `if [ "$RC" != "0" ]; then ${log('pnpm install (frozen-lockfile) failed, retrying without --frozen-lockfile')}; ${runAndLogChecked('pnpm install (retry)', buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: false, filter: AGENT_INSTALL_FILTER }))}; fi`,
       // 端末モード用に PTY プリビルドをダウンロード（ビルドツール不要、失敗しても継続）
       runAndLog('rebuild PTY', 'pnpm rebuild @homebridge/node-pty-prebuilt-multiarch || true'),
-      runAndLog('shared build', 'pnpm --filter @devrelay/shared build'),
-      runAndLog('agent build', 'pnpm --filter @devrelay/agent-macos build'),
+      // 2026-10-26: ビルド結果を BUILD_OK で判定する。従来は判定しておらず、tsc は型エラーでも
+      // dist を出力するため壊れた dist で再起動して Agent が停止していた（詳細は update-script-rules.ts）。
+      // 失敗時は更新前のコミットに戻して再ビルドし、dist を稼働中の旧 Agent のコードに戻す。
+      buildCheckedBuildSteps(updateLogFile, agentBuildSteps),
+      buildRollbackOnBuildFailure(updateLogFile, [
+        { label: 'pnpm install', cmd: buildPnpmInstallCommand({ pnpmCommand: 'pnpm', frozen: false, filter: AGENT_INSTALL_FILTER }) },
+        ...agentBuildSteps,
+      ]),
     ].join('; ');
 
     // nohup の場合: restartCmd.command をそのまま使うと、bash -c の cmdline に
@@ -3311,10 +3326,10 @@ async function handleAgentUpdate() {
       actualRestartCmd = restartCmd.command;
     }
 
-    // #329 Part B: build 後・kill 前に成果物ゲート。dist/index.js が無ければ
-    // 旧 Agent を kill せずスクリプトを終了する（壊れたビルドで動いている Agent を殺さない）
+    // #329 Part B: build 後・kill 前に成果物ゲート。ビルド失敗（BUILD_OK!=1）または dist/index.js が
+    // 無ければ旧 Agent を kill せずスクリプトを終了する（壊れたビルドで動いている Agent を殺さない）
     const distIndexPath = join(agentDir, 'agents', 'macos', 'dist', 'index.js');
-    const script = `${buildSteps}; if [ -f "${distIndexPath}" ]; then ${log('restarting...')}; sleep 2; ${actualRestartCmd}; else ${log('!! build failed, keeping current agent (dist/index.js missing)')}; fi`;
+    const script = `${buildSteps}; ${buildRestartGate(updateLogFile, distIndexPath, actualRestartCmd)}`;
 
     const child = spawn('bash', ['-c', script], {
       detached: true,
