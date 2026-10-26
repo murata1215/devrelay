@@ -55,7 +55,11 @@ let devinSupportsExport: boolean | null = null;
 let codexCapabilitiesCache: { json: boolean; resume: boolean } | null = null;
 
 // #309: Gemini CLI / Devin CLI の `--model` フラグ対応可否キャッシュ（plan/exec モデル分離用）。
-let geminiCapabilitiesCache: { model: boolean } | null = null;
+// 2026-10-26: exec ターンでシェル実行を自動承認するための `--approval-mode`（choices に yolo を含むか）/
+// `--yolo` 対応可否もここに追加。
+let geminiCapabilitiesCache: { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } | null = null;
+// Gemini exec ターンで yolo 系フラグが渡せなかった場合の警告をプロセス寿命中 1 回だけ出すためのラッチ
+let geminiYoloDegradedWarned = false;
 
 // #344: `ok:false`（probe 失敗）の場合は全フラグ true と楽観的に仮定して cache する（理由は関数 JSDoc 参照）。
 // 楽観キャッシュは TTL 付き（devinCapabilitiesFailedAt と併用）で、devin が後から PATH に現れても
@@ -176,21 +180,24 @@ function probeCodexCapabilities(command: string): { json: boolean; resume: boole
 }
 
 /**
- * Gemini CLI が `-m/--model` フラグに対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
- * 失敗時は false に倒し、モデル引数を付けずに CLI デフォルトへ劣化させる。
+ * Gemini CLI が `-m/--model`・`--approval-mode`（yolo choice 付き）・`--yolo` フラグに
+ * 対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
+ * 失敗時は全て false に倒し、CLI デフォルト（auto_edit 相当）へ劣化させる。
  * @param command gemini コマンドのフルパス
- * @returns `{ model }` 対応可否
+ * @returns `{ model, approvalModeYolo, yoloFlag }` 対応可否
  */
-function probeGeminiCapabilities(command: string): { model: boolean } {
+function probeGeminiCapabilities(command: string): { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } {
   if (geminiCapabilitiesCache !== null) return geminiCapabilitiesCache;
   try {
     const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
     const model = /-m,?\s*--model\b|--model\b/.test(help);
-    geminiCapabilitiesCache = { model };
-    console.log(`[gemini] 🔎 capabilities: --model=${model}`);
+    const approvalModeYolo = /--approval-mode\b/.test(help) && /"?yolo"?/.test(help);
+    const yoloFlag = /-y,?\s*--yolo\b|--yolo\b/.test(help);
+    geminiCapabilitiesCache = { model, approvalModeYolo, yoloFlag };
+    console.log(`[gemini] 🔎 capabilities: --model=${model} --approval-mode(yolo)=${approvalModeYolo} --yolo=${yoloFlag}`);
   } catch (err) {
-    geminiCapabilitiesCache = { model: false };
-    console.warn(`[gemini] --help probe failed, disabling --model:`, (err as Error).message);
+    geminiCapabilitiesCache = { model: false, approvalModeYolo: false, yoloFlag: false };
+    console.warn(`[gemini] --help probe failed, disabling --model/--approval-mode(yolo)/--yolo:`, (err as Error).message);
   }
   return geminiCapabilitiesCache;
 }
@@ -1799,11 +1806,27 @@ async function sendPromptToAiImpl(
   }
 
   if (aiTool === 'gemini') {
-    // Gemini CLI with auto_edit approval mode
     // Use stdin to pass prompt (same as Claude) to avoid shell interpretation issues
-    const args = ['--approval-mode', 'auto_edit'];
-    // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
     const geminiCaps = probeGeminiCapabilities(command);
+    // 2026-10-26: exec ターンのみシェル実行を自動承認する（従来は plan/exec とも auto_edit 固定で、
+    // 非対話起動では run_shell_command の確認プロンプトに誰も答えられず exec が機能していなかった）。
+    // キルスイッチ DEVRELAY_GEMINI_YOLO=0 で従来挙動（常に auto_edit）に戻せる。
+    const geminiYoloEnabled = process.env.DEVRELAY_GEMINI_YOLO !== '0';
+    const wantYolo = !options.usePlanMode && geminiYoloEnabled;
+    let args: string[];
+    if (wantYolo && geminiCaps.approvalModeYolo) {
+      args = ['--approval-mode', 'yolo'];
+    } else if (wantYolo && geminiCaps.yoloFlag) {
+      args = ['--yolo']; // --approval-mode 非対応の旧 CLI 向けフォールバック
+    } else {
+      args = ['--approval-mode', 'auto_edit']; // plan ターン、または yolo 系フラグに非対応の旧 CLI
+      if (wantYolo && !geminiYoloDegradedWarned) {
+        // #325 静かなフォールバック禁止: exec なのに yolo 化できなかった場合は 1 回だけ知らせる
+        geminiYoloDegradedWarned = true;
+        onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'gemini.yoloUnsupported')}\n`, false);
+      }
+    }
+    // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
     const geminiModel = safeModelArg(options.model);
     if (geminiModel && geminiCaps.model) {
       args.push('-m', geminiModel);

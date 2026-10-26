@@ -6,6 +6,43 @@
 
 ## 実装済み機能
 
+### Gemini CLI の exec モードでシェル実行が機能しない問題の根治 (2026-10-26)
+
+実機で Gemini CLI に切替え「"こんにちは、けいすけさん" と話す MP3 を作って」→ `e`（exec）を
+送信したところ、Gemini は「現在の Gemini CLI 実行環境ではシェル実行権限が付与されていない」と
+応答し、`edge-tts` を実行せずスクリプトだけ置いて終了した（MP3 は生成されなかった）。詳細は
+[devlog](devlog/2026-10-26_233258_gemini_exec_shell.md) 参照。
+
+#### 真因
+`agents/{linux,macos,windows}/src/services/ai-runner.ts` の gemini 分岐が
+`options.usePlanMode` を一切見ずに `--approval-mode auto_edit` をハードコードしていた。
+`auto_edit` は編集系ツールのみ自動承認し `run_shell_command` は確認プロンプトを要求するため、
+TTY 無しの非対話起動では誰も答えられず黒塗りで失敗していた（plan/exec で argv が完全に同一
+という既知の穴。`doc/devin_gate_investigation.md:82`、`rules/project.md:2360,2426` に記録済み）。
+
+#### 対応
+Codex の `sandbox_mode` 分岐（唯一 plan/exec で argv を変えている既存パターン）に倣い、
+`usePlanMode === false`（exec ターン）のときだけ `--approval-mode yolo`（非対応の旧 CLI は
+`--yolo` へフォールバック）を渡すように変更。plan ターンは `auto_edit` のまま据え置き
+（`--approval-mode plan` は Gemini 自身のプランモード用システムプロンプトを注入し Agreement v6
+の出力書式に影響しうるため、別軸としてスコープ外）。`probeGeminiCapabilities()` を拡張し
+`gemini --help` から `--approval-mode`（yolo choice 含む）/`--yolo` 対応を判定、非対応時は
+プロセス寿命中 1 回だけ警告（#325 静かなフォールバック禁止）。キルスイッチ
+`DEVRELAY_GEMINI_YOLO`（既定 `1`）で従来挙動（常に `auto_edit`）に戻せる。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `agents/linux/src/services/ai-runner.ts` | gemini 分岐: `usePlanMode` で `--approval-mode yolo`/`auto_edit` を分岐、`probeGeminiCapabilities()` 拡張 |
+| `agents/macos/src/services/ai-runner.ts` | 同上（linux と同一コードの複製） |
+| `agents/windows/src/services/ai-runner.ts` | 同上 |
+| `packages/shared/src/i18n.ts` | `gemini.yoloUnsupported` 追加 |
+
+#### 今回やらないこと
+plan ターンの機構的 readonly 化（`--approval-mode plan`）。`ENFORCED_READONLY_AI_TOOLS`
+（`claude`/`codex`）に gemini を加えないこと（テストで回帰ガード済み）は変更していない。
+
 ### 未コミットファイル import 事故の機械的検知ガード追加 + 他2サイクルのコミット整理 (2026-10-26)
 
 直前の codex 修正サイクル（`fd95657`）で、未コミットファイルを import したままコミットし

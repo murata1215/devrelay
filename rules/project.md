@@ -2423,10 +2423,14 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    （`deriveAskState()` は `hasAiMessage` を見るだけで `answered` を確定できる）。
 3. **プラン相の書き込み不可強制は AI ツールによって実効性が異なる**（実測、2026-09-26 時点）:
    claude（Agent SDK）と codex（CLI `-c sandbox_mode="read-only"`）は権限レベルで構造的に強制される
-   一方、devin（`usePlanMode` が常に false）・gemini（`--approval-mode auto_edit` 無条件付与）・
-   claude + `Project.terminalMode`（PTY 経由の素の `claude --continue`、`--permission-mode plan`
-   なし）は強制されない。`ENFORCED_READONLY_AI_TOOLS = ['claude', 'codex']`
-   （`ask-guard.ts`）に devin/gemini を絶対に加えないこと（テストで回帰ガード済み）。
+   一方、devin（`usePlanMode` が常に false）・gemini・claude + `Project.terminalMode`（PTY 経由の
+   素の `claude --continue`、`--permission-mode plan` なし）は強制されない。`ENFORCED_READONLY_AI_TOOLS
+   = ['claude', 'codex']`（`ask-guard.ts`）に devin/gemini を絶対に加えないこと（テストで回帰ガード済み）。
+   2026-10-26: gemini は exec ターンのみ `--approval-mode yolo`（旧 CLI は `--yolo`）でシェル実行を
+   機構的に自動承認するようになったが、これは「exec を機能させる」ための変更であり plan ターンの
+   読み取り専用強制とは無関係（plan ターンは変更前と同じ `auto_edit` のまま、プロンプト指示のみ）。
+   gemini の plan/exec 区別自体が機構的になったわけではない点に注意（上記リストの「強制されない」
+   認定は変更なし）。
 4. **人間判断（2026-09-26 承認サイクル）: 強制できない経路でも AI の差し替えは行わない**。
    当初案は devin/gemini/terminalMode を claude/codex へ自動差し替えする方向だったが、
    「そのままの AI で実行し、権限で強制できない経路には固定の禁止文をプロンプト先頭に付与する」

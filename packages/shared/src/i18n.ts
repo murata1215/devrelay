@@ -429,6 +429,12 @@ export const chatMessages = {
     en: '⚠️ Devin refused a tool call even after falling back to `--permission-mode auto`. This usually means the task genuinely requires write/exec access. Please resend with `e` (exec mode) instead of retrying in plan mode.\n\n[stderr]\n{stderrTail}',
     ja: '⚠️ Devin は `--permission-mode auto` へのフォールバック後もツール呼び出しを拒否しました。書き込み/実行が本当に必要なタスクである可能性が高いです。プランモードで再試行せず、`e` を送って exec モードで依頼し直してください。\n\n[stderr]\n{stderrTail}',
   },
+  // --- 2026-10-26: exec ターンで Gemini CLI がシェル自動承認フラグ（--approval-mode yolo /
+  // --yolo）に非対応だった場合の劣化通知（#325 静かなフォールバック禁止、プロセス寿命中 1 回だけ） ---
+  'gemini.yoloUnsupported': {
+    en: '⚠️ This machine\'s Gemini CLI does not support `--approval-mode yolo` or `--yolo`, so shell commands in exec mode will still wait for confirmation that nobody can answer (they will likely fail silently). Please update the gemini CLI on this machine.',
+    ja: '⚠️ この端末の Gemini CLI は `--approval-mode yolo` / `--yolo` に対応していないため、exec モードでもシェルコマンドは誰も答えられない確認待ちのままになります（無言で失敗する可能性があります）。この端末の gemini CLI を更新してください。',
+  },
   // --- #345: workspace trust 拒否（devin --respect-workspace-trust）への対処案内 ---
   'devin.workspaceUntrusted': {
     en: '❌ Devin CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `--respect-workspace-trust false` automatically (restores Devin\'s own documented default for non-interactive/print mode).\n② If it still happens, run `devin` interactively once in that directory on that machine to trust it.\n③ Or set `respect_workspace_trust: false` in the Devin CLI config on that machine.',

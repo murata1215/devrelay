@@ -83,6 +83,14 @@ const devinTurnPermissionMode: string | null =
 
 サーバ側ポリシー決定: `apps/server/src/services/permission-policy.ts:37-47` の `resolvePermissionPolicy()`（`chat`/`ask`/`mcp` → `strictReadonly`、`exec` → `interactive`）。WebSocket の `permissionPolicy` フィールドで Agent に届き `connection.ts:1287-1290` で解釈される。**この値は Devin の argv には一切影響しない。**
 
+> **2026-10-26 追記**: 上表の Gemini 行（exec も `auto_edit` で差分なし）は実害として表面化した
+> （exec でも `run_shell_command` の確認プロンプトに誰も答えられず、AI がシェル実行を諦める）。
+> 対応として exec ターンのみ `--approval-mode yolo`（旧 CLI は `--yolo`）へ分岐させた
+> （`doc/changelog.md` 2026-10-26 エントリ参照）。plan ターンは本調査時点と同じ `auto_edit` のまま
+> （= plan 側の「プロンプトのみ」という強制レイヤの評価は変更なし。Codex 行の `read-only`/
+> `danger-full-access` 分岐と同じ形を exec 側にだけ後追いで適用したものであり、Gemini の
+> plan/exec 判定全体が機構化されたわけではない）。
+
 ---
 
 ## Q2. Devin の「従わない」の実体
