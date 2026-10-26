@@ -2431,6 +2431,11 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    読み取り専用強制とは無関係（plan ターンは変更前と同じ `auto_edit` のまま、プロンプト指示のみ）。
    gemini の plan/exec 区別自体が機構的になったわけではない点に注意（上記リストの「強制されない」
    認定は変更なし）。
+   2026-10-27: gemini の承認モード argv（`--approval-mode`/`--yolo`）決定は `packages/shared/src/
+   gemini-args.ts` の純粋関数 `parseGeminiCapabilities()`/`buildGeminiApprovalArgs()` に一本化した。
+   `--approval-mode` 自体に非対応の旧 CLI では plan ターンもフラグ無しで起動する（probe 結果を無視
+   して `auto_edit` を渡す旧実装のバグにより、対応機では plan ターンの会話自体が不成立になっていた
+   事故の根治）。この変更はフラグの有無のみで、読み取り専用強制の有無（上記 3. の認定）には影響しない。
 4. **人間判断（2026-09-26 承認サイクル）: 強制できない経路でも AI の差し替えは行わない**。
    当初案は devin/gemini/terminalMode を claude/codex へ自動差し替えする方向だったが、
    「そのままの AI で実行し、権限で強制できない経路には固定の禁止文をプロンプト先頭に付与する」

@@ -439,6 +439,29 @@ export const chatMessages = {
     en: '⚠️ This machine\'s Gemini CLI does not support `--approval-mode yolo` or `--yolo`, so shell commands in exec mode will still wait for confirmation that nobody can answer (they will likely fail silently). Please update the gemini CLI on this machine.',
     ja: '⚠️ この端末の Gemini CLI は `--approval-mode yolo` / `--yolo` に対応していないため、exec モードでもシェルコマンドは誰も答えられない確認待ちのままになります（無言で失敗する可能性があります）。この端末の gemini CLI を更新してください。',
   },
+  // --- 2026-10-27: Gemini CLI が `--approval-mode` 自体に非対応（旧版）の場合、plan/exec とも
+  // フラグを渡さず CLI 既定の承認モードで起動する（gemini-user 機体で `Unknown arguments:
+  // approval-mode, approvalMode` により会話が一度も成立しなかった事故の根治、プロセス寿命中 1 回だけ） ---
+  'gemini.approvalModeUnsupported': {
+    en: '⚠️ This machine\'s Gemini CLI does not support `--approval-mode` at all, so it is starting with the CLI\'s own default approval mode instead. Run `gemini --version` to check, and update the gemini CLI on this machine.',
+    ja: '⚠️ この端末の Gemini CLI は `--approval-mode` 自体に対応していないため、CLI 既定の承認モードで起動します。`gemini --version` で確認し、この端末の gemini CLI を更新してください。',
+  },
+  // --- 2026-10-27: `gemini --help` の実行自体に失敗した場合、承認モードフラグを一切渡さずに起動する
+  // （フラグを渡して Unknown arguments で全滅するより安全側に倒す） ---
+  'gemini.probeFailed': {
+    en: '⚠️ Failed to run `gemini --help` on this machine, so no approval-mode flags will be passed and Gemini CLI will start with its own default behavior.',
+    ja: '⚠️ この端末で `gemini --help` の実行に失敗したため、承認モード関連のフラグを一切渡さずに Gemini CLI を起動します（CLI 既定の挙動になります）。',
+  },
+  // --- 2026-10-27 Phase 2: #329 と同じ流儀の自動リトライ安全網。probe 誤判定で `Unknown arguments`
+  // になった場合、該当フラグを1つ落として最大2回まで自動リトライする ---
+  'gemini.unknownFlagRetry': {
+    en: '⚠️ Gemini CLI rejected the `{flag}` flag as unknown. Retrying without it.',
+    ja: '⚠️ Gemini CLI がフラグ `{flag}` を未知の引数として拒否しました。このフラグを外して再試行します。',
+  },
+  'gemini.unknownFlagFailed': {
+    en: '❌ Gemini CLI still rejects the `{flag}` flag as unknown after retrying. This machine\'s gemini CLI may be a version DevRelay does not yet support.\n\n[stderr]\n{stderr}',
+    ja: '❌ 再試行しても Gemini CLI がフラグ `{flag}` を未知の引数として拒否します。この端末の gemini CLI は DevRelay が未対応のバージョンの可能性があります。\n\n[stderr]\n{stderr}',
+  },
   // --- #345: workspace trust 拒否（devin --respect-workspace-trust）への対処案内 ---
   'devin.workspaceUntrusted': {
     en: '❌ Devin CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `--respect-workspace-trust false` automatically (restores Devin\'s own documented default for non-interactive/print mode).\n② If it still happens, run `devin` interactively once in that directory on that machine to trust it.\n③ Or set `respect_workspace_trust: false` in the Devin CLI config on that machine.',

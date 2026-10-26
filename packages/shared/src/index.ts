@@ -73,3 +73,12 @@ export {
   detectDevinModelMismatch,
   DEVIN_MODEL_TRACKING_ALIASES,
 } from './model-pricing.js';
+// 2026-10-27: Gemini CLI `--approval-mode` probe 駆動化（同じ理由で明示的 named export）
+export {
+  type GeminiCapabilities,
+  GEMINI_CAPABILITIES_NONE,
+  parseGeminiCapabilities,
+  type GeminiDegradeReason,
+  type GeminiApprovalArgsResult,
+  buildGeminiApprovalArgs,
+} from './gemini-args.js';

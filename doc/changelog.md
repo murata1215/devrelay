@@ -6,6 +6,48 @@
 
 ## 実装済み機能
 
+### Gemini CLI の plan ターンが probe 結果を無視し `--approval-mode` 非対応機で会話不能になる問題の根治 (2026-10-27)
+
+`gemini-user` 機体で「こんにちは」と送っただけで `gemini CLI が出力なしで終了しました（exit 1）`
+`[stderr] Unknown arguments: approval-mode, approvalMode` となり、plan ターン（通常のチャット）が
+一度も成立しなかった。詳細は [devlog](devlog/2026-10-27_061134_gemini_approval_mode_probe.md) 参照。
+
+#### 真因
+2026-10-26 サイクル（exec の yolo 化）で追加した `usePlanMode` 分岐の else 節（plan ターン、または
+yolo 系フラグに非対応の場合）が、`probeGeminiCapabilities()` の判定結果を一切見ずに
+`--approval-mode auto_edit` をハードコードしていた。`--approval-mode` フラグ自体を持たない旧 CLI
+では yargs の `strict()` が `Unknown arguments` で exit 1・stdout 空になる。これは 2026-10-26 サイクル
+の退行ではなく、plan ターンの argv はそのサイクルの前後で変わっていない — この機体の Gemini は
+DevRelay 導入以来一度も会話が成立していなかった（母艦の Gemini 0.65.0 は全 choices 対応のため無回帰）。
+
+#### 対応
+承認モード argv の決定ロジックを `packages/shared/src/gemini-args.ts`（新規）の純粋関数
+`parseGeminiCapabilities()` / `buildGeminiApprovalArgs()` に切り出し、3 エージェントの個別
+ハードコードを廃止（`capability-rules.ts` と同方針）。**`--approval-mode` 非対応時は plan ターンでも
+フラグ無しで起動する**ようになった点が根治の核心。probe 失敗時の「それでも auto_edit を渡す」
+楽観フォールバックも廃止（未検証フラグで全滅するより CLI 既定起動が安全）。i18n に
+`gemini.approvalModeUnsupported` / `gemini.probeFailed` を追加（既存 `gemini.yoloUnsupported` は維持）。
+
+Phase 2 として #329 の `devinUnknownFlagMatch` と同じ流儀で、`Unknown arguments` を実行時に検出し
+フラグを 1 つ外して最大 2 回まで自動リトライする安全網も追加（`geminiDroppedFlags`、
+`gemini.unknownFlagRetry` / `gemini.unknownFlagFailed`）。probe の誤判定があってもヘルプ全文の
+エラーをユーザーに見せない最後の砦。
+
+新しいキルスイッチは追加していない。既存 `DEVRELAY_GEMINI_YOLO`（既定 `1`）は維持。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `packages/shared/src/gemini-args.ts` | 新規。`parseGeminiCapabilities` / `buildGeminiApprovalArgs` |
+| `packages/shared/src/index.ts` | 上記の named export 追加 |
+| `packages/shared/src/i18n.ts` | `gemini.approvalModeUnsupported` / `gemini.probeFailed` / `gemini.unknownFlagRetry` / `gemini.unknownFlagFailed` 追加 |
+| `packages/shared/tests/gemini-args.test.mjs` | 新規14テスト（決定表 + droppedFlags） |
+| `agents/{linux,macos,windows}/src/services/ai-runner.ts` | probe 委譲 + gemini 分岐差し替え + Phase 2 リトライ |
+
+`apps/server`・`apps/web` のランタイムコードは無変更のため `pm2 restart devrelay-server` は不要。
+Gemini 使用機は各機 `u` 必須。DB マイグレーション不要。
+
 ### `chatgpt-user` 障害の根治: AI CLI 検出が絶対パスを捨てて spawn ENOENT になる問題 (2026-10-27)
 
 OS ユーザー `chatgpt-user` に codex を導入後、チャットで `Error: spawn codex ENOENT`。

@@ -3,8 +3,8 @@ import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue } from '@devrelay/shared';
-import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
+import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue, parseGeminiCapabilities, buildGeminiApprovalArgs, GEMINI_CAPABILITIES_NONE } from '@devrelay/shared';
+import type { AiTool, AiUsageData, Language, GeminiCapabilities, GeminiDegradeReason } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId, listDevinSessionOwners } from './session-store.js';
@@ -74,9 +74,13 @@ function probeCodexCapabilities(command: string): { json: boolean; resume: boole
 // #309: Gemini CLI / Devin CLI の `--model` フラグ対応可否キャッシュ（plan/exec モデル分離用）。
 // 2026-10-26: exec ターンでシェル実行を自動承認するための `--approval-mode`（choices に yolo を含むか）/
 // `--yolo` 対応可否もここに追加。
-let geminiCapabilitiesCache: { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } | null = null;
-// Gemini exec ターンで yolo 系フラグが渡せなかった場合の警告をプロセス寿命中 1 回だけ出すためのラッチ
-let geminiYoloDegradedWarned = false;
+// 2026-10-27: 判定本体は `@devrelay/shared` の `parseGeminiCapabilities()`（純粋関数）に委譲。
+// ここでは probe 結果のキャッシュのみ保持する。
+let geminiCapabilitiesCache: GeminiCapabilities | null = null;
+// `gemini --help` 自体の実行に失敗したかどうか（all-false キャッシュと区別して警告文言を切り替えるため）
+let geminiProbeFailed = false;
+// Gemini で劣化が起きた場合の警告をプロセス寿命中 1 回だけ出すためのラッチ（理由ごと）
+const geminiDegradeWarned = new Set<GeminiDegradeReason>();
 
 // #344: `ok:false`（probe 失敗）の場合は全フラグ true と楽観的に仮定して cache する（理由は関数 JSDoc 参照）。
 // 楽観キャッシュは TTL 付き（devinCapabilitiesFailedAt と併用）で、devin が後から PATH に現れても
@@ -167,24 +171,31 @@ function isDevinSessionPickLegacy(): boolean {
 }
 
 /**
- * Gemini CLI が `-m/--model`・`--approval-mode`（yolo choice 付き）・`--yolo` フラグに
- * 対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
- * 失敗時は全て false に倒し、CLI デフォルト（auto_edit 相当）へ劣化させる。
+ * Gemini CLI が `-m/--model`・`--approval-mode`（auto_edit/yolo choice 付き）・`--yolo` フラグに
+ * 対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。判定本体は
+ * `@devrelay/shared` の `parseGeminiCapabilities()`（純粋関数、テスト済み）に委譲する。
+ * 失敗時は全て false に倒す。2026-10-27: 旧版は未検証フラグを渡して全滅する方が悪いため、
+ * 「それでも --approval-mode auto_edit を渡す」という従来の楽観フォールバックは廃止した
+ * （`buildGeminiApprovalArgs()` 側がフラグ無し起動に倒す）。
  * @param command gemini コマンドのフルパス
- * @returns `{ model, approvalModeYolo, yoloFlag }` 対応可否
+ * @returns 対応可否（`GeminiCapabilities`）
  */
-function probeGeminiCapabilities(command: string): { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } {
+function probeGeminiCapabilities(command: string): GeminiCapabilities {
   if (geminiCapabilitiesCache !== null) return geminiCapabilitiesCache;
   try {
     const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
-    const model = /-m,?\s*--model\b|--model\b/.test(help);
-    const approvalModeYolo = /--approval-mode\b/.test(help) && /"?yolo"?/.test(help);
-    const yoloFlag = /-y,?\s*--yolo\b|--yolo\b/.test(help);
-    geminiCapabilitiesCache = { model, approvalModeYolo, yoloFlag };
-    log.info(`[gemini] capabilities: --model=${model} --approval-mode(yolo)=${approvalModeYolo} --yolo=${yoloFlag}`);
+    geminiCapabilitiesCache = parseGeminiCapabilities(help);
+    // 「どの版か」が切り分けの第一手になるよう、version も 1 回だけ取得してログに残す（probe 失敗は無視）
+    let version = 'unknown';
+    try {
+      version = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000 }).trim();
+    } catch { /* バージョン取得失敗は致命的ではないため無視 */ }
+    const c = geminiCapabilitiesCache;
+    log.info(`[gemini] version=${version} capabilities: --model=${c.model} --approval-mode=${c.approvalMode}(auto_edit=${c.approvalModeAutoEdit},yolo=${c.approvalModeYolo}) --yolo=${c.yoloFlag}`);
   } catch (err) {
-    geminiCapabilitiesCache = { model: false, approvalModeYolo: false, yoloFlag: false };
-    log.warn(`[gemini] --help probe failed, disabling --model/--approval-mode(yolo)/--yolo: ${(err as Error).message}`);
+    geminiCapabilitiesCache = GEMINI_CAPABILITIES_NONE;
+    geminiProbeFailed = true;
+    log.warn(`[gemini] --help probe failed, disabling all approval-mode/model flags: ${(err as Error).message}`);
   }
   return geminiCapabilitiesCache;
 }
@@ -511,6 +522,12 @@ export interface SendPromptOptions {
    */
   devinDroppedFlags?: string[];
   /**
+   * 2026-10-27 Phase 2: 「Unknown arguments」で拒否された Gemini CLI フラグ名のリスト
+   * （`--approval-mode` / `--yolo`）。#329 の devinDroppedFlags と同じ仕組みで、
+   * `probeGeminiCapabilities()` の誤判定時にも自動リトライで復旧できるようにする（上限2個）。
+   */
+  geminiDroppedFlags?: string[];
+  /**
    * AI モデル指定（#309: claude/codex/gemini/devin 共通）。`l` コマンド／Settings で設定される。
    * claude: `--model` で渡す（例: 'sonnet', 'opus'）
    * codex: `-c model="..."` で渡す（例: 'gpt-5.5'）
@@ -759,20 +776,26 @@ export async function sendPromptToAi(
     // 2026-10-26: exec ターンのみシェル実行を自動承認する（従来は plan/exec とも auto_edit 固定で、
     // 非対話起動では run_shell_command の確認プロンプトに誰も答えられず exec が機能していなかった）。
     // キルスイッチ DEVRELAY_GEMINI_YOLO=0 で従来挙動（常に auto_edit）に戻せる。
+    // 2026-10-27: 承認モード関連 argv の決定自体は `buildGeminiApprovalArgs()`（純粋関数、テスト済み）に
+    // 委譲する。plan ターンでも probe 結果を必ず見るようになった点が今回の修正（事故ケースの根治）。
     const geminiYoloEnabled = process.env.DEVRELAY_GEMINI_YOLO !== '0';
-    const wantYolo = !options.usePlanMode && geminiYoloEnabled;
-    let args: string[];
-    if (wantYolo && geminiCaps.approvalModeYolo) {
-      args = ['--approval-mode', 'yolo'];
-    } else if (wantYolo && geminiCaps.yoloFlag) {
-      args = ['--yolo']; // --approval-mode 非対応の旧 CLI 向けフォールバック
-    } else {
-      args = ['--approval-mode', 'auto_edit']; // plan ターン、または yolo 系フラグに非対応の旧 CLI
-      if (wantYolo && !geminiYoloDegradedWarned) {
-        // #325 静かなフォールバック禁止: exec なのに yolo 化できなかった場合は 1 回だけ知らせる
-        geminiYoloDegradedWarned = true;
-        onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'gemini.yoloUnsupported')}\n`, false);
+    const { args: approvalArgs, degraded } = buildGeminiApprovalArgs(geminiCaps, {
+      usePlanMode: !!options.usePlanMode,
+      yoloEnabled: geminiYoloEnabled,
+      droppedFlags: options.geminiDroppedFlags,
+    });
+    const args: string[] = [...approvalArgs];
+    // #325 静かなフォールバック禁止: 希望どおりに動けなかった場合は理由ごとに 1 回だけ知らせる
+    if (degraded !== 'none' && !geminiDegradeWarned.has(degraded)) {
+      geminiDegradeWarned.add(degraded);
+      const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+      if (degraded === 'execAutoEdit') {
+        onOutput(`${tChat(lang, 'gemini.yoloUnsupported')}\n`, false);
+      } else if (degraded === 'execNoFlag' || degraded === 'planNoFlag') {
+        // probe 自体が失敗していた場合は原因が異なるため文言を分ける
+        onOutput(`${tChat(lang, geminiProbeFailed ? 'gemini.probeFailed' : 'gemini.approvalModeUnsupported')}\n`, false);
       }
+      // 'execYoloFlag'（旧 --yolo へのフォールバック）は正常劣化のため警告しない
     }
     // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
     const geminiModel = safeModelArg(options.model);
@@ -1898,6 +1921,50 @@ export async function sendPromptToAi(
         }
         resolve(result);
         return;
+      }
+
+      // 2026-10-27 Phase 2: Gemini CLI が `--approval-mode`/`--yolo` を未知の引数として拒否した場合
+      // （probe が誤判定していた、または probe 自体が通っていてもバージョンにより実際は非対応等）、
+      // yargs が `Unknown arguments: approval-mode, approvalMode` 等で exit 1・stdout 空になる。
+      // #329 の devinUnknownFlagMatch と同じ流儀でフラグを1つ外して最大2回まで自動リトライする。
+      const geminiUnknownArgMatch = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? stderrOutput.match(/Unknown arguments?:\s*([^\n]+)/i)
+        : null;
+      if (geminiUnknownArgMatch) {
+        const rawArgs = geminiUnknownArgMatch[1];
+        const droppedFlag = /approval-?mode/i.test(rawArgs) ? '--approval-mode' : (/\byolo\b/i.test(rawArgs) ? '--yolo' : null);
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        if (droppedFlag) {
+          const alreadyDropped = options.geminiDroppedFlags ?? [];
+          if (!alreadyDropped.includes(droppedFlag) && alreadyDropped.length < 2) {
+            log.info(`[gemini] Unknown flag '${droppedFlag}' rejected by CLI (code ${code}), retrying without it`);
+            completionSent = true;
+            onOutput(`${tChat(lang, 'gemini.unknownFlagRetry', { flag: droppedFlag })}\n`, false);
+            const fallbackOptions: SendPromptOptions = {
+              ...options,
+              geminiDroppedFlags: [...alreadyDropped, droppedFlag],
+            };
+            sendPromptToAi(sessionId, prompt, projectPath, aiTool, claudeSessionId, config, onOutput, fallbackOptions)
+              .then((fallbackResult) => resolve(fallbackResult))
+              .catch((err) => {
+                log.error(`[gemini] unknown-flag retry failed: ${(err as Error).message}`);
+                if (fullOutput.length === 0) {
+                  onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
+                }
+                resolve(result);
+              });
+            return;
+          }
+          // リトライ済みでも解消しない → 「(No response from AI)」ではなく実際の stderr を明示して停止
+          if (!completionSent) {
+            completionSent = true;
+            const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
+            onOutput(tChat(lang, 'gemini.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData, result.extractedSessionId);
+          }
+          resolve(result);
+          return;
+        }
+        // 未知のフラグ名をマッピングできない場合は通常の ai.cliFailed 経路へフォールスルーする
       }
 
       // Devin: resume（-r）が出力ゼロで終了（exit code 不問）→ セッション ID を破棄して新規セッションでリトライ
