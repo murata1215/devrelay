@@ -8,6 +8,7 @@ import chalk from 'chalk';
 import { fileURLToPath } from 'url';
 import { decodeTokenUrl } from '@devrelay/shared';
 import { loadConfig, saveConfig, ensureConfigDir, getConfigDir, getBinDir } from '../../services/config.js';
+import { buildServicePath } from '../../services/service-path-rules.js';
 
 export async function setupCommand() {
   console.log(chalk.blue(`
@@ -244,6 +245,18 @@ async function installUserService(machineName: string) {
   const agentDir = path.resolve(__dirname, '../..');
   const agentIndex = path.join(agentDir, 'index.js');
 
+  // 2026-10-18: install-agent.sh と同じ PATH を Environment= に明示する（systemd user service
+  // は .bashrc を読まないため、PATH 未指定だと `which` ベースの AI ツール検出が失敗する実害があった）
+  const home = process.env.HOME || os.homedir();
+  let hasLocalBin = false;
+  try {
+    await fs.access(path.join(home, '.local', 'bin'));
+    hasLocalBin = true;
+  } catch {
+    hasLocalBin = false;
+  }
+  const envPath = buildServicePath(home, getBinDir(), process.execPath, hasLocalBin);
+
   const serviceContent = `[Unit]
 Description=DevRelay Agent (${machineName})
 After=network.target
@@ -255,12 +268,13 @@ ExecStart=${process.execPath} ${agentIndex}
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
+Environment=PATH=${envPath}
 
 [Install]
 WantedBy=default.target
 `;
 
-  const userServiceDir = path.join(process.env.HOME || '', '.config', 'systemd', 'user');
+  const userServiceDir = path.join(home, '.config', 'systemd', 'user');
   const servicePath = path.join(userServiceDir, 'devrelay-agent.service');
 
   try {

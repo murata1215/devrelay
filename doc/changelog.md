@@ -421,8 +421,33 @@ localStorage（`devrelay-conversation-seen`）で行われていたため、端�
 #### 検証
 DB マイグレーション適用済み（`prisma db execute` 直接適用、SQL でカラム存在・バックフィル件数を検証、
 `prisma generate` 再生成済み）。server1209/1209・web854/854（新規 markSeen 系 5 件、削除 11 件）green、
-6 workspace build green。Agent 側変更ゼロ（`u` 不要）。pm2 restart 済み・`GET /api/threads` の
-`seenAt` を実機 curl で確認済み。commit/push 済み（main 直接）。
+6 workspace build green。Agent 側変更ゼロ（`u` 不要）。pm2 restart 要（未実施）。commit/push 未実施。
+
+### x220-158-18-103 Agent 12体オフライン事故: Phase 0復旧＋真因2件の根治 (2026-10-18)
+
+2026-10-18 02:46 のマシン再起動後、Agent 13 体のうち 12 体がオフラインのまま復帰しなかった。
+調査の過程で **DevRelay 本体の独立したバグ 2 件**（crontab 書き換え sed の非冪等性、
+systemd unit テンプレートの2経路乖離）を発見・根治した。詳細は
+[devlog](devlog/2026-10-18_144713_agent_reboot_offline_root_cause.md) 参照。
+
+#### 真因1: `u` 自己更新の crontab 書き換え sed が冪等でなかった
+`agents/linux/src/services/connection.ts` の `fix crontab` ステップの sed が
+`[^ ]*`（空白以外）でセミコロンまで飲み込み、`u` を実行するたびに crontab 行の
+セミコロンが1個増え続けていた。数回の `u` で `;;` のシェル構文エラーになり、
+`@reboot` が発火しても何も実行されなくなる。新設 `crontab-fix-rules.ts` で
+`[^ ;]*` に修正し、冪等性を node:test で保証（実機の97セミコロン破損行でも検証）。
+
+#### 真因2: systemd unit を書く2経路でテンプレートが乖離していた
+`scripts/install-agent.sh` と `agents/linux/src/cli/commands/setup.ts` の
+`installUserService()` で生成する systemd unit の内容が異なり、後者は
+`Environment=PATH=` を書いていなかった。systemd user service は `.bashrc` を
+読まないため、AI ツール検出（`which` 依存）が失敗しうる。新設
+`service-path-rules.ts` で両経路の PATH 組み立てを一致させた。
+
+#### 影響範囲
+`agents/linux` のみ（`agents/macos` / `agents/windows` は対象外）。
+`apps/server` / `apps/web` / `packages/shared` / Prisma は無変更。DB マイグレーション不要。
+全機 `u` が必要（commit/push 待ち）。
 
 ### testflight ポート採番の衝突根治: 9001-9299 / 9300-9499 レンジ分離 (2026-10-18)
 
