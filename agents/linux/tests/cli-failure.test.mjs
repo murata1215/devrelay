@@ -108,3 +108,24 @@ test('isWorkspaceTrustError: 無関係な stderr では false（例外も投げ�
   assert.equal(isWorkspaceTrustError('panic: something broke'), false);
   assert.equal(isWorkspaceTrustError(''), false);
 });
+
+// 2026-10-27: Gemini CLI の workspace trust 拒否文言の検出。gemini-user 機体の障害調査で
+// 実際に出た stderr（スクリーンショット添付、ANSI エスケープ混じり）をそのまま fixture にする。
+
+test('isWorkspaceTrustError: Gemini CLI の実機 stderr（ANSI エスケープ混じり）を検出する', () => {
+  const stderr = 'Approval mode overridden to "default" because the current folder is not trusted. '
+    + 'Approval mode overridden to "default" because the current folder is not trusted. '
+    + '\x1b[31mGemini CLI is not running in a trusted directory. To proceed, either use --skip-trust, '
+    + 'set the GEMINI_CLI_TRUST_WORKSPACE=true environment variable, or trust this directory '
+    + 'in interactive mode. For more details, see '
+    + 'https://geminicli.com/docs/cli/trusted-folders/#headless-and-automated-environments\x1b[0m';
+  assert.equal(isWorkspaceTrustError(stderr), true);
+});
+
+test('isWorkspaceTrustError: Gemini の "folder is not trusted" 文言単独でも検出する', () => {
+  assert.equal(isWorkspaceTrustError('Approval mode overridden to "default" because the current folder is not trusted.'), true);
+});
+
+test('isWorkspaceTrustError: Gemini/Devin いずれの文言でも大文字小文字を区別しない', () => {
+  assert.equal(isWorkspaceTrustError('GEMINI CLI IS NOT RUNNING IN A TRUSTED DIRECTORY'), true);
+});

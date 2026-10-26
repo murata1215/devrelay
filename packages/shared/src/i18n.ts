@@ -474,6 +474,13 @@ export const chatMessages = {
     en: '❌ Devin CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `--respect-workspace-trust false` automatically (restores Devin\'s own documented default for non-interactive/print mode).\n② If it still happens, run `devin` interactively once in that directory on that machine to trust it.\n③ Or set `respect_workspace_trust: false` in the Devin CLI config on that machine.',
     ja: '❌ Devin CLI がこのワークスペース（{path}）を信頼していないため実行を拒否しました。\n\n① Agent が未更新の場合は `u` を実行してください — DevRelay は `--respect-workspace-trust false` を自動的に付与するようになりました（Devin 自身が文書化している非対話/print モードの既定値に戻すだけです）。\n② それでも発生する場合は、そのマシンでそのディレクトリで一度 `devin` を対話起動して trust してください。\n③ または、そのマシンの Devin CLI の config で `respect_workspace_trust: false` を設定してください。',
   },
+  // --- 2026-10-27: workspace trust 拒否（gemini GEMINI_CLI_TRUST_WORKSPACE）への対処案内。
+  // DevRelay は spawn env に GEMINI_CLI_TRUST_WORKSPACE=true を自動付与するためこの安全網に
+  // 到達するのは DEVRELAY_GEMINI_TRUST_WORKSPACE=0 設定時、または環境変数非対応の旧 CLI のみ ---
+  'gemini.workspaceUntrusted': {
+    en: '❌ Gemini CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `GEMINI_CLI_TRUST_WORKSPACE=true` automatically (Gemini\'s own documented setting for headless/automated environments).\n② If `DEVRELAY_GEMINI_TRUST_WORKSPACE=0` is set on this machine, unset it, or run `gemini` interactively once in that directory to trust it.',
+    ja: '❌ Gemini CLI がこのワークスペース（{path}）を信頼していないため実行を拒否しました。\n\n① Agent が未更新の場合は `u` を実行してください — DevRelay は `GEMINI_CLI_TRUST_WORKSPACE=true` を自動的に付与するようになりました（Gemini 自身が headless/automated 環境向けに文書化している設定です）。\n② この端末で `DEVRELAY_GEMINI_TRUST_WORKSPACE=0` を設定している場合は解除するか、そのディレクトリで一度 `gemini` を対話起動して trust してください。',
+  },
 
   // --- Devin モデル選択サイクル・サイクル B（変更5）: ATIF から読み取った実モデル名の1行通知 ---
   'devin.modelUsed': {

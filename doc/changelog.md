@@ -6,6 +6,46 @@
 
 ## 実装済み機能
 
+### Gemini のワークスペース信頼を DevRelay 側で付与する（exec の yolo が黙って無効化されていた問題の根治） (2026-10-27)
+
+`gemini-user` 機体の障害調査（3 サイクル連続）の最終局面。前サイクルまでで `--approval-mode`
+無視・モデルカタログの死んだ ID・CLI の古さ・Node 18/20 混同・probe キャッシュの陳腐化を解消し、
+Agent 再起動後の再テストで `gemini CLI が出力なしで終了しました（exit 55）[stderr] Gemini CLI
+is not running in a trusted directory.` が発生した。詳細は
+[devlog](devlog/2026-10-27_072248_gemini_workspace_trust.md) 参照。
+
+#### 真因
+Gemini CLI は**未信頼ディレクトリでは承認モードを問答無用で `default` に落とす**。plan ターンは
+exit 55 で即死（今回の症状）、exec ターンは `--approval-mode yolo` を渡しても**黙って降格**され
+`run_shell_command` が誰も答えられない確認待ちになる。これは **2026-10-26 サイクル（exec の
+yolo 化）が未信頼ディレクトリでは最初から無効化されていた**ことを意味する（あのサイクルの元の症状
+「シェル実行権限が付与されていない」と完全に一致）。母艦で当時効いて見えたのは過去の対話起動で
+信頼済みだったからに過ぎず、新規プロジェクトディレクトリでは全マシンで同じ穴が開いていた。
+DevRelay は Devin には既に同じ手当てをしていた（#345 `--respect-workspace-trust false`）が、
+Gemini にだけ無かった。
+
+#### 対応
+3 エージェントの gemini spawn env に `GEMINI_CLI_TRUST_WORKSPACE=true`（Gemini 公式が
+headless/automated 環境向けに文書化している環境変数）を追加。`--skip-trust` フラグではなく
+環境変数を選んだのは、旧 CLI で `Unknown arguments` にならないため（2 サイクル前の
+`--approval-mode` 無条件付与事故を繰り返さない）。非対話実行では誰も信頼プロンプトに答えられず
+付与しても安全性は下がらないため、今回は意図的な既定変更と判断し、前 2 サイクルと異なり
+キルスイッチ `DEVRELAY_GEMINI_TRUST_WORKSPACE`（既定 `1`）を新設した。安全網として
+`isWorkspaceTrustError()` に Gemini の拒否文言を追加し、`gemini.workspaceUntrusted`（新規）で
+対処手順を案内する。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `agents/{linux,macos,windows}/src/services/ai-runner.ts` | gemini spawn env に `GEMINI_CLI_TRUST_WORKSPACE`、信頼エラー分岐の追加 |
+| `agents/{linux,macos,windows}/src/services/cli-failure.ts` | `isWorkspaceTrustError()` に Gemini 文言を追加 |
+| `packages/shared/src/i18n.ts` | `gemini.workspaceUntrusted` 追加 |
+| `agents/{linux,macos}/tests/cli-failure.test.mjs` | 実機 stderr を fixture にしたテスト3件追加 |
+
+`agents/*` のみの変更のため Gemini 使用機は各機 `u` が必要。`apps/server`・`apps/web` は無変更の
+ため `pm2 restart devrelay-server` は不要。DB マイグレーション不要。
+
 ### Gemini モデルカタログの死んだ ID 2 件の修正 + 廃止モデル 404 の診断メッセージ化 (2026-10-27)
 
 前サイクル（`--approval-mode` 根治、下記エントリ）反映後 `gemini-user` 機体で再テストしたところ、

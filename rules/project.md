@@ -2447,6 +2447,19 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    `--approval-mode` 自体に非対応の旧 CLI では plan ターンもフラグ無しで起動する（probe 結果を無視
    して `auto_edit` を渡す旧実装のバグにより、対応機では plan ターンの会話自体が不成立になっていた
    事故の根治）。この変更はフラグの有無のみで、読み取り専用強制の有無（上記 3. の認定）には影響しない。
+   **2026-10-27 追加発見: 未信頼ディレクトリでは Gemini CLI が承認モードを問答無用で `default` に
+   落とす**（`gemini-user` 機体の障害調査中、母艦の `/tmp` で実機再現: `gemini --approval-mode
+   yolo -p "..."` が "Approval mode overridden to \"default\"" と stderr に出して降格される）。
+   これは 2026-10-26 サイクルの exec yolo 化が**未信頼ディレクトリでは最初から無効化されていた**
+   ことを意味する（母艦で当時効いて見えたのは既に対話起動で信頼済みだったため。新規プロジェクトでは
+   全マシンで同じ穴）。対応: gemini 分岐の spawn env に `GEMINI_CLI_TRUST_WORKSPACE=true` を
+   付与（Gemini 公式が headless/automated 環境向けに文書化。Devin の `--respect-workspace-trust
+   false`、#345 と同じ判断・同じ理由＝非対話実行では信頼プロンプトに答えられる人間がおらず、
+   付与しても安全性は下がらない）。`--skip-trust` フラグではなく環境変数を選んだのは、未知の
+   環境変数は旧 CLI でも黙って無視されるため（`--approval-mode` のフラグ非対応事故を繰り返さない）。
+   キルスイッチ `DEVRELAY_GEMINI_TRUST_WORKSPACE`（既定 `1`、Agent 環境の env var。`0` で付与しない）。
+   `isWorkspaceTrustError()`（`cli-failure.ts`）に Gemini の拒否文言も追加し、キルスイッチ使用時や
+   環境変数非対応の旧 CLI でも `gemini.workspaceUntrusted` で対処手順を案内する安全網を用意した。
 4. **人間判断（2026-09-26 承認サイクル）: 強制できない経路でも AI の差し替えは行わない**。
    当初案は devin/gemini/terminalMode を claude/codex へ自動差し替えする方向だったが、
    「そのままの AI で実行し、権限で強制できない経路には固定の禁止文をプロンプト先頭に付与する」

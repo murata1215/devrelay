@@ -1865,6 +1865,16 @@ async function sendPromptToAiImpl(
       ? (process.env.PATH ?? geminiDir)
       : (process.env.PATH ? `${geminiDir}${pathSep}${process.env.PATH}` : geminiDir);
 
+    // 2026-10-27: 未信頼ディレクトリでは Gemini CLI が承認モードを問答無用で `default` に落とす
+    // （plan は exit 55 で即死、exec は `--approval-mode yolo` を渡しても黙って降格され
+    // run_shell_command が誰も答えられない確認待ちになる＝2026-10-26 サイクルが無効化される）。
+    // DevRelay はユーザーが明示的に接続したマシン・プロジェクトで非対話実行するため、workspace trust
+    // プロンプトに答えられる人間がそもそもおらず、付与しても安全性は下がらない（Devin の
+    // `--respect-workspace-trust false`、#345 と同じ判断）。Gemini 公式が headless/automated 環境向けに
+    // 文書化している環境変数を使う（`--skip-trust` フラグだと旧 CLI で Unknown arguments になりうるため
+    // 避ける。未知の環境変数は CLI 側が黙って無視するだけで安全）。
+    const geminiTrustWorkspace = process.env.DEVRELAY_GEMINI_TRUST_WORKSPACE !== '0';
+
     proc = spawn(command, args, {
       cwd: projectPath,
       shell: true,
@@ -1873,6 +1883,7 @@ async function sendPromptToAiImpl(
         ...process.env,
         ...proxyEnv,
         PATH: envPath,  // Add gemini's directory to PATH so node can be found
+        ...(geminiTrustWorkspace ? { GEMINI_CLI_TRUST_WORKSPACE: 'true' } : {}),
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
@@ -3134,6 +3145,10 @@ async function sendPromptToAiImpl(
           } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'devin' && isWorkspaceTrustError(stderrOutput)) {
             // #345: devin が workspace trust 拒否で即死したケース。生 stderr のダンプではなく対処手順を出す。
             onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
+          } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'gemini' && isWorkspaceTrustError(stderrOutput)) {
+            // 2026-10-27: gemini が workspace trust 拒否で即死したケース（GEMINI_CLI_TRUST_WORKSPACE
+            // キルスイッチ無効化時、または環境変数を解さない旧 CLI でのみ到達する安全網）。
+            onOutput(tChat(lang, 'gemini.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
           } else if (cliFailure.kind === 'emptyNonZero') {
             onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData, result.extractedSessionId);
           } else {
