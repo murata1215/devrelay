@@ -861,15 +861,20 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 
   // core#336: サーバーが明示指定した resumeSessionId（MCP approve_implementation 等）を最優先とし、
   // forceNewSession 指定時は resume させず、それ以外は従来どおりストア済みセッション ID を使う。
-  const effectiveResumeSessionId = decideResume({
+  const resumeDecision = decideResume({
     explicitResumeSessionId: payload.resumeSessionId,
     forceNewSession: payload.forceNewSession,
     storedSessionId: sessionInfo.claudeResumeSessionId,
-  }).resumeSessionId;
+  });
+  const effectiveResumeSessionId = resumeDecision.resumeSessionId;
 
   // Prepare send options
   const sendOptions: SendPromptOptions = {
     resumeSessionId: effectiveResumeSessionId,
+    // 2026-10-27 サイクル2（D2、plan→exec resume）: gemini 分岐は resumeSource === 'explicit'
+    // （サーバーが approve_implementation 等で明示指定した ID）のときのみ --resume に使う。
+    // claude/codex/devin は resumeSessionId のみ参照し resumeSource を見ないため無影響。
+    resumeSource: resumeDecision.source,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_WINDOWS) : undefined,
     model: payload.model,  // #309: AI モデル指定（claude/codex/gemini/devin 共通、l コマンド／Settings で設定）
@@ -1016,6 +1021,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         // Linux パリティ追加（Windows のみ継承漏れがあり、plan ターンの retry で読み取りツールが
         // 全て失われる既存欠陥。forceNewSession は Linux も継承しないため意図的に含めない）
         allowedTools: sendOptions.allowedTools,
+        // 2026-10-27 サイクル2（D2）: resumeSource は意図的に渡さない（undefined = 新規セッション扱い）。
+        // resumeSessionId: undefined と対で、gemini 分岐が壊れた ID を --resume に使わないようにする。
       };
 
       // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。

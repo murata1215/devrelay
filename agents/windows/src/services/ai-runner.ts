@@ -3,8 +3,9 @@ import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue, parseGeminiCapabilities, buildGeminiApprovalArgs, GEMINI_CAPABILITIES_NONE, detectGeminiModelUnavailable } from '@devrelay/shared';
-import type { AiTool, AiUsageData, Language, GeminiCapabilities, GeminiDegradeReason } from '@devrelay/shared';
+import crypto from 'crypto';
+import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue, parseGeminiCapabilities, buildGeminiApprovalArgs, GEMINI_CAPABILITIES_NONE, detectGeminiModelUnavailable, buildGeminiSessionArgs, resolveGeminiAiSessionId, classifyGeminiSessionFailure } from '@devrelay/shared';
+import type { AiTool, AiUsageData, Language, GeminiCapabilities, GeminiDegradeReason, GeminiSessionDegradeReason } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId, listDevinSessionOwners } from './session-store.js';
@@ -14,6 +15,7 @@ import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, extractRejecti
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
 import { parseDevinSessionList, pickDevinSessionId, type DevinSessionEntry } from './devin-session-pick.js';
 import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
+import type { ResumeSource } from './resume-priority.js';
 import log from './logger.js';
 
 interface AiSession {
@@ -81,6 +83,11 @@ let geminiCapabilitiesCache: GeminiCapabilities | null = null;
 let geminiProbeFailed = false;
 // Gemini で劣化が起きた場合の警告をプロセス寿命中 1 回だけ出すためのラッチ（理由ごと）
 const geminiDegradeWarned = new Set<GeminiDegradeReason>();
+// 2026-10-27 サイクル2: probe 時に取得した `gemini --version` の結果をモジュール変数に保持する。
+// `gemini.sessionIdUnsupported` 等の警告文言に実バージョンを埋め込むために使う。
+let geminiVersionCache = 'unknown';
+// セッション関連（--session-id / --resume）の劣化警告をプロセス寿命中 1 回だけ出すためのラッチ
+const geminiSessionDegradeWarned = new Set<GeminiSessionDegradeReason>();
 
 // #344: `ok:false`（probe 失敗）の場合は全フラグ true と楽観的に仮定して cache する（理由は関数 JSDoc 参照）。
 // 楽観キャッシュは TTL 付き（devinCapabilitiesFailedAt と併用）で、devin が後から PATH に現れても
@@ -185,13 +192,14 @@ function probeGeminiCapabilities(command: string): GeminiCapabilities {
   try {
     const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
     geminiCapabilitiesCache = parseGeminiCapabilities(help);
-    // 「どの版か」が切り分けの第一手になるよう、version も 1 回だけ取得してログに残す（probe 失敗は無視）
-    let version = 'unknown';
+    // 「どの版か」が切り分けの第一手になるよう、version も 1 回だけ取得してログに残す（probe 失敗は無視）。
+    // 2026-10-27 サイクル2: モジュール変数にも保持し、gemini.sessionIdUnsupported 等の警告文言に
+    // 実バージョンを埋め込めるようにする。
     try {
-      version = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000 }).trim();
+      geminiVersionCache = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000 }).trim();
     } catch { /* バージョン取得失敗は致命的ではないため無視 */ }
     const c = geminiCapabilitiesCache;
-    log.info(`[gemini] version=${version} capabilities: --model=${c.model} --approval-mode=${c.approvalMode}(auto_edit=${c.approvalModeAutoEdit},yolo=${c.approvalModeYolo}) --yolo=${c.yoloFlag}`);
+    log.info(`[gemini] version=${geminiVersionCache} capabilities: --model=${c.model} --approval-mode=${c.approvalMode}(auto_edit=${c.approvalModeAutoEdit},yolo=${c.approvalModeYolo}) --yolo=${c.yoloFlag} --session-id=${c.sessionId} --resume=${c.resume}`);
   } catch (err) {
     geminiCapabilitiesCache = GEMINI_CAPABILITIES_NONE;
     geminiProbeFailed = true;
@@ -512,6 +520,12 @@ export async function startAiSession(
 export interface SendPromptOptions {
   /** Claude session ID to resume (from previous execution) */
   resumeSessionId?: string;
+  /**
+   * 2026-10-27 サイクル2（plan→exec resume）: `resumeSessionId` の出所（`decideResume()` の判定結果）。
+   * gemini 分岐は `resumeSource === 'explicit'`（= サーバーが approve_implementation 等で明示指定した ID）
+   * のときのみ `--resume` に使う。claude/codex/devin には影響しない（既存の `resumeSessionId` 読み取りのまま）。
+   */
+  resumeSource?: ResumeSource;
   /** Use plan mode (--permission-mode plan) instead of skip-permissions */
   usePlanMode?: boolean;
   /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
@@ -523,8 +537,9 @@ export interface SendPromptOptions {
   devinDroppedFlags?: string[];
   /**
    * 2026-10-27 Phase 2: 「Unknown arguments」で拒否された Gemini CLI フラグ名のリスト
-   * （`--approval-mode` / `--yolo`）。#329 の devinDroppedFlags と同じ仕組みで、
-   * `probeGeminiCapabilities()` の誤判定時にも自動リトライで復旧できるようにする（上限2個）。
+   * （`--approval-mode` / `--yolo`。2026-10-27 サイクル2で `--session-id` / `--resume` も同じリストに
+   * 追加するようになった）。#329 の devinDroppedFlags と同じ仕組みで、probe の誤判定時にも
+   * 自動リトライで復旧できるようにする（上限2個、承認モード系・セッション系合わせて共通の枠）。
    */
   geminiDroppedFlags?: string[];
   /**
@@ -680,6 +695,12 @@ export async function sendPromptToAi(
   let codexTurnFailed = false;
   let codexTurnFailedMessage = '';
 
+  // 2026-10-27 サイクル2（plan→exec resume）: Gemini CLI 用のセッション状態（close ハンドラから参照する）。
+  // このターンで実際に `--session-id` / `--resume` に渡した ID を保持し、close ハンドラで
+  // `resolveGeminiAiSessionId()` に渡して `result.extractedSessionId` を確定する。
+  let geminiSessionIdUsed: string | undefined;
+  let geminiResumedSessionId: string | undefined;
+
   // ---- 今サイクル: ターン終了の単一関門 + kill エスカレーション状態 ----
   // 孫プロセス（Gradle/Kotlin デーモン等）がパイプを握ったまま devin.exe が終了すると
   // 'close' が永久に来ず、ターンが確定しない（実測: 92分ハング）。'exit' を独立に観測し、
@@ -802,6 +823,41 @@ export async function sendPromptToAi(
     if (geminiModel && geminiCaps.model) {
       args.push('-m', geminiModel);
     }
+
+    // 2026-10-27 サイクル2（plan→exec resume）: `--resume` / `--session-id` の argv を決定する。
+    // D1: 新規セッション採番は MCP plan ターン（`options.turnId` がある場合）のみ行う。
+    //   → chat ターン（turnId 無し）は argv が従来と 1 バイトも変わらない。
+    // D2: resume は `options.resumeSource === 'explicit'`（サーバーが approve_implementation 等で
+    //   明示指定した ID）のときのみ使う。`'stored'`（チャット前ターンの保存 ID）まで使うと、
+    //   同一チャットで claude → gemini とツールを切り替えた場合に別ツールの ID を渡してしまい exit 42 になる。
+    const geminiSessionEnabled = process.env.DEVRELAY_GEMINI_SESSION_ID !== '0';
+    const geminiExplicitResume = (geminiSessionEnabled && options.resumeSource === 'explicit')
+      ? options.resumeSessionId : undefined;
+    // リトライのたびに採り直すため、ここで randomUUID する（options 経由で持ち回さない。
+    // 同じ ID を再 spawn で使い回すと「Session ID ... already exists」で exit 42 になる）。
+    const geminiNewSessionId = (geminiSessionEnabled && !geminiExplicitResume && options.turnId)
+      ? crypto.randomUUID() : undefined;
+    const geminiSessionResult = buildGeminiSessionArgs({
+      caps: geminiCaps,
+      resumeSessionId: geminiExplicitResume,
+      newSessionId: geminiNewSessionId,
+      droppedFlags: options.geminiDroppedFlags,
+    });
+    args.push(...geminiSessionResult.args);
+    geminiSessionIdUsed = geminiSessionResult.sessionId;
+    geminiResumedSessionId = geminiSessionResult.resumeId;
+    // #325 静かなフォールバック禁止: 希望どおりに動けなかった場合は理由ごとに 1 回だけ知らせる
+    if (geminiSessionResult.degraded !== 'none' && !geminiSessionDegradeWarned.has(geminiSessionResult.degraded)) {
+      geminiSessionDegradeWarned.add(geminiSessionResult.degraded);
+      const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+      if (geminiSessionResult.degraded === 'sessionIdUnsupported') {
+        onOutput(`${tChat(lang, 'gemini.sessionIdUnsupported', { version: geminiVersionCache })}\n`, false);
+      } else if (geminiSessionResult.degraded === 'resumeUnsupported') {
+        onOutput(`${tChat(lang, 'gemini.resumeUnsupported', { version: geminiVersionCache })}\n`, false);
+      }
+      // 'invalidId'（UUID 形式でない）は通常到達しない防御的分岐のため警告しない
+    }
+
     log.info(`Running: ${command} ${args.join(' ')} (prompt via stdin)`);
 
     // Extract directory from gemini command path and add to PATH
@@ -1650,6 +1706,18 @@ export async function sendPromptToAi(
       clearTurnTimers();
       log.info(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
+      // 2026-10-27 サイクル2（plan→exec resume）: gemini は claude SDK/codex と異なり JSONL 出力から
+      // セッション ID を拾えないため、このターンで実際に --session-id / --resume に渡した ID から
+      // 確定する。以降の全完了経路（onOutput(..., result.extractedSessionId)）が自動的に運ぶ。
+      // fullOutput が空（起動失敗・早期終了等）のターンでは常に undefined（fail-closed、core#383 と同じ方針）。
+      if (aiTool === 'gemini') {
+        result.extractedSessionId = resolveGeminiAiSessionId({
+          producedOutput: fullOutput.trim().length > 0,
+          newSessionId: geminiSessionIdUsed,
+          resumeSessionId: geminiResumedSessionId,
+        });
+      }
+
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
       if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
       if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
@@ -1938,12 +2006,18 @@ export async function sendPromptToAi(
       // （probe が誤判定していた、または probe 自体が通っていてもバージョンにより実際は非対応等）、
       // yargs が `Unknown arguments: approval-mode, approvalMode` 等で exit 1・stdout 空になる。
       // #329 の devinUnknownFlagMatch と同じ流儀でフラグを1つ外して最大2回まで自動リトライする。
+      // 2026-10-27 サイクル2: `--session-id`/`--resume` も同じ機構（同じ geminiDroppedFlags・同じ上限2個）
+      // に乗せる（probe 誤判定時の自己修復、D1/D2 のセッション引数も対象）。
       const geminiUnknownArgMatch = aiTool === 'gemini' && fullOutput.trim().length === 0
         ? stderrOutput.match(/Unknown arguments?:\s*([^\n]+)/i)
         : null;
       if (geminiUnknownArgMatch) {
         const rawArgs = geminiUnknownArgMatch[1];
-        const droppedFlag = /approval-?mode/i.test(rawArgs) ? '--approval-mode' : (/\byolo\b/i.test(rawArgs) ? '--yolo' : null);
+        const droppedFlag = /approval-?mode/i.test(rawArgs) ? '--approval-mode'
+          : /\byolo\b/i.test(rawArgs) ? '--yolo'
+          : /session-?id/i.test(rawArgs) ? '--session-id'
+          : /\bresume\b/i.test(rawArgs) ? '--resume'
+          : null;
         const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
         if (droppedFlag) {
           const alreadyDropped = options.geminiDroppedFlags ?? [];
@@ -1976,6 +2050,24 @@ export async function sendPromptToAi(
           return;
         }
         // 未知のフラグ名をマッピングできない場合は通常の ai.cliFailed 経路へフォールスルーする
+      }
+
+      // 2026-10-27 サイクル2（D3、plan→exec resume）: Gemini CLI がセッション関連エラー（exit code 42）
+      // で終了した場合の分類。静かなフォールバック禁止（#325）: `resumeFailed` に乗せて
+      // connection.ts の既存リトライ機構（プラン本文の再注入 + --resume 無しでの再実行）に合流しつつ、
+      // 1 行だけ理由を知らせる。リトライは別の UUID を採番し直すため（分岐内で crypto.randomUUID()
+      // している）、同じ argv で再 spawn して 42 を繰り返すことはない。
+      const geminiSessionFailure = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? classifyGeminiSessionFailure({ exitCode: code, stderr: stderrOutput })
+        : 'none';
+      if (geminiSessionFailure !== 'none' && !completionSent) {
+        completionSent = true;
+        result.resumeFailed = true;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const key = geminiSessionFailure === 'resumeInvalid' ? 'gemini.resumeInvalid' : 'gemini.sessionIdCollision';
+        onOutput(`${tChat(lang, key)}\n`, false);
+        resolve(result);
+        return;
       }
 
       // 2026-10-27: Gemini API が「このモデルは廃止/提供終了」と 404 を返した場合、二重エスケープされた

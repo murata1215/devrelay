@@ -1,6 +1,7 @@
 /**
- * Gemini CLI の承認モード関連フラグ（`--approval-mode` / `--yolo` / `-m,--model`）の
- * 対応可否判定と、plan/exec ターンに応じた argv 決定を行う純粋関数群。
+ * Gemini CLI の承認モード関連フラグ（`--approval-mode` / `--yolo` / `-m,--model`）および
+ * セッション関連フラグ（`--session-id` / `-r,--resume`）の対応可否判定と、
+ * plan/exec ターンに応じた argv 決定を行う純粋関数群。
  *
  * 2026-10-27: `agents/{linux,macos,windows}/src/services/ai-runner.ts` の gemini 分岐が、
  * `probeGeminiCapabilities()` で `--approval-mode` の対応可否を判定しているにもかかわらず、
@@ -8,6 +9,12 @@
  * `--approval-mode auto_edit` をハードコードしていた。`--approval-mode` 自体が存在しない
  * 旧 CLI ではこれが `Unknown arguments: approval-mode, approvalMode`（yargs strict）で
  * exit 1・stdout 空となり、会話が一度も成立しなかった（gemini-user 機体で発覚）。
+ *
+ * 2026-10-27 サイクル2: MCP `approve_implementation` が gemini だけ `planAiSessionMissing` で
+ * fail-closed する問題の根治（真因: gemini 分岐が AI セッション ID の概念を一切持たず、
+ * `result.extractedSessionId` を一度も設定しない）。claude 端末モード core#383 と同じ
+ * 「resume するなら --resume、しないなら UUID を事前採番して --session-id」パターンを
+ * `buildGeminiSessionArgs()` / `resolveGeminiAiSessionId()` / `classifyGeminiSessionFailure()` として追加した。
  *
  * ここでは Node API に依存しない純粋関数として切り出し、3 エージェントでのコピペ実装を解消し、
  * `node --test` で実ヘルプ fixture ベースの決定表テストを可能にする
@@ -26,6 +33,13 @@ export type GeminiCapabilities = {
   approvalModeYolo: boolean;
   /** `-y, --yolo` フラグに対応しているか */
   yoloFlag: boolean;
+  /**
+   * 2026-10-27 サイクル2（plan→exec resume）: `--session-id` フラグ（新規セッションを UUID 事前採番で
+   * 開始する）に対応しているか。
+   */
+  sessionId: boolean;
+  /** `-r, --resume` フラグ（既存セッションを再開する）に対応しているか */
+  resume: boolean;
 };
 
 /** 対応不可時（probe 失敗等）に使う全 false のキャパビリティ */
@@ -35,6 +49,8 @@ export const GEMINI_CAPABILITIES_NONE: GeminiCapabilities = {
   approvalModeAutoEdit: false,
   approvalModeYolo: false,
   yoloFlag: false,
+  sessionId: false,
+  resume: false,
 };
 
 /**
@@ -46,6 +62,10 @@ export const GEMINI_CAPABILITIES_NONE: GeminiCapabilities = {
 export function parseGeminiCapabilities(help: string): GeminiCapabilities {
   const model = /(^|\s)(-m,?\s*)?--model\b/.test(help);
   const yoloFlag = /(^|\s)(-y,?\s*)?--yolo\b/.test(help);
+  // 2026-10-27 サイクル2: `--session-id` / `-r, --resume` の対応可否。
+  // `--session-file`（JSON ファイルからセッション読み込み）と誤マッチしないよう `--session-id\b` で区切る。
+  const sessionId = /(^|\s)--session-id\b/.test(help);
+  const resume = /(^|\s)(-r,?\s*)?--resume\b/.test(help);
 
   const approvalModeIdx = help.search(/--approval-mode\b/);
   let approvalMode = false;
@@ -61,7 +81,7 @@ export function parseGeminiCapabilities(help: string): GeminiCapabilities {
     approvalModeYolo = /"?yolo"?/.test(span);
   }
 
-  return { model, approvalMode, approvalModeAutoEdit, approvalModeYolo, yoloFlag };
+  return { model, approvalMode, approvalModeAutoEdit, approvalModeYolo, yoloFlag, sessionId, resume };
 }
 
 /** `buildGeminiApprovalArgs()` が希望どおりに動けなかった場合の劣化理由（#325 静かなフォールバック禁止） */
@@ -109,6 +129,131 @@ export function buildGeminiApprovalArgs(
     return { args: ['--approval-mode', 'auto_edit'], degraded: 'none' };
   }
   return { args: [], degraded: 'planNoFlag' };
+}
+
+/**
+ * 文字列が UUID 形式（大まかな構文チェックのみ）かを判定する。
+ * `terminal-session-id.ts` の `isUuidV4Like()` と同じ正規表現（バージョン/バリアントビットまでは検証しない）。
+ * gemini は `spawn(..., { shell: true })` で起動するため、ID はこの関数を通してからでないと argv に渡さない
+ * （`-m` を `safeModelArg()` に通しているのと同じ理由、シェルインジェクション対策）。
+ */
+export function isUuidLike(value: string | undefined | null): boolean {
+  if (!value || typeof value !== 'string') return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+/** `buildGeminiSessionArgs()` が希望どおりに動けなかった場合の劣化理由（#325 静かなフォールバック禁止） */
+export type GeminiSessionDegradeReason =
+  | 'none'               // 希望どおり（resume または新規セッション採番ができた）
+  | 'resumeUnsupported'  // resume したいが CLI が --resume 非対応
+  | 'sessionIdUnsupported' // 新規セッション採番したいが CLI が --session-id 非対応
+  | 'invalidId';         // 渡された ID が UUID 形式でない（安全側でフラグを渡さない）
+
+export type GeminiSessionArgsResult = {
+  args: string[];
+  /** 実際に `--session-id` で渡した ID（渡していなければ undefined） */
+  sessionId?: string;
+  /** 実際に `--resume` で渡した ID（渡していなければ undefined） */
+  resumeId?: string;
+  degraded: GeminiSessionDegradeReason;
+};
+
+/**
+ * 2026-10-27 サイクル2（plan→exec resume）: `--resume` / `--session-id` の argv を決定する。
+ * `decideTerminalSessionArgs()`（`agents/linux/src/services/terminal-session-id.ts`）と同形の
+ * 相互排他ロジック（resume 優先 → 新規採番 → 何もしない）。
+ *
+ * 呼び出し側の契約（D1/D2、`agents/*\/src/services/ai-runner.ts` のサイクル2 変更箇所が担保する）:
+ * - `resumeSessionId` はサーバーが明示指定した ID（`decideResume()` の `source === 'explicit'`）のときのみ渡すこと。
+ *   チャットの前ターン保存 ID（`source === 'stored'`）を渡すと、同一チャットで他ツールと行き来した場合に
+ *   別ツールの ID を `gemini --resume` に渡してしまい exit 42 になる。
+ * - `newSessionId` は MCP plan ターン（`options.turnId` がある場合）のみ渡すこと。chat ターンの argv を
+ *   変えないため。
+ *
+ * @param droppedFlags 実行時に `Unknown arguments` で拒否されたフラグ名のリスト（probe 誤判定の自己修復用）。
+ *   `--session-id` / `--resume` が含まれていれば、probe が対応と判定していても候補から除外する。
+ */
+export function buildGeminiSessionArgs(input: {
+  caps: GeminiCapabilities;
+  resumeSessionId?: string;
+  newSessionId?: string;
+  droppedFlags?: string[];
+}): GeminiSessionArgsResult {
+  const dropped = new Set(input.droppedFlags ?? []);
+  const canResume = input.caps.resume && !dropped.has('--resume');
+  const canSessionId = input.caps.sessionId && !dropped.has('--session-id');
+
+  if (input.resumeSessionId) {
+    if (!isUuidLike(input.resumeSessionId)) {
+      return { args: [], degraded: 'invalidId' };
+    }
+    if (!canResume) {
+      return { args: [], degraded: 'resumeUnsupported' };
+    }
+    return { args: ['--resume', input.resumeSessionId], resumeId: input.resumeSessionId, degraded: 'none' };
+  }
+
+  if (input.newSessionId) {
+    if (!isUuidLike(input.newSessionId)) {
+      return { args: [], degraded: 'invalidId' };
+    }
+    if (!canSessionId) {
+      return { args: [], degraded: 'sessionIdUnsupported' };
+    }
+    return { args: ['--session-id', input.newSessionId], sessionId: input.newSessionId, degraded: 'none' };
+  }
+
+  return { args: [], degraded: 'none' };
+}
+
+/**
+ * 完了報告でサーバーへエコーバックする aiSessionId を決定する。
+ * `resolveTerminalAiSessionId()`（`terminal-session-id.ts`）と同形。
+ *
+ * 優先順位: 「採番した ID（--session-id で確実に使われた）」→「resume 指定した ID（CLI が維持する）」。
+ * `producedOutput === false`（応答が 1 バイトも出ていない = 起動失敗・早期終了等）の場合は常に undefined を返す
+ * （壊れた ID を `Session.planAiSessionId` に残さない。core#383 の `resolveTerminalAiSessionId()` と同じ
+ * fail-closed 方針）。
+ *
+ * @param input.producedOutput このターンで何か出力が得られたか（fullOutput.trim().length > 0）
+ * @param input.newSessionId 今回 `--session-id` で渡した UUID（渡していなければ省略）
+ * @param input.resumeSessionId 今回 `--resume` で渡した ID（渡していなければ省略）
+ */
+export function resolveGeminiAiSessionId(input: {
+  producedOutput: boolean;
+  newSessionId?: string;
+  resumeSessionId?: string;
+}): string | undefined {
+  if (!input.producedOutput) {
+    return undefined;
+  }
+  return input.newSessionId || input.resumeSessionId || undefined;
+}
+
+/** `classifyGeminiSessionFailure()` の分類結果 */
+export type GeminiSessionFailureKind =
+  /** 採番した ID が既に使用中だった（クラッシュ後の再送信等。別 ID を採番し直せば自己修復する） */
+  | 'sessionIdAlreadyExists'
+  /** resume 先セッションが見つからなかった（壊れた/古い ID 等） */
+  | 'resumeInvalid'
+  /** 上記以外（セッション起因ではない失敗。通常の `ai.cliFailed` 経路に任せる） */
+  | 'none';
+
+/**
+ * Gemini CLI がセッション関連のエラー（exit code 42）で終了したかどうかを stderr から分類する。
+ * 本日の実機検証で確認した実際の stderr 文言（gemini-cli 0.65.0）:
+ *   - 採番した ID の重複: `Error starting session: Session ID "<uuid>" already exists. Use --resume to resume it, or provide a different ID.`
+ *   - resume 先が存在しない: `Error resuming session: Invalid session identifier "<uuid>".`
+ * どちらも stdout 空・exit code 42 で終了する。
+ * @param exitCode 子プロセスの終了コード（シグナル終了時は null）
+ * @param stderr 子プロセスの stderr 全文
+ */
+export function classifyGeminiSessionFailure(input: { exitCode: number | null; stderr: string }): GeminiSessionFailureKind {
+  const stderr = input.stderr ?? '';
+  if (input.exitCode !== 42) return 'none';
+  if (/Error starting session:.*already exists/i.test(stderr)) return 'sessionIdAlreadyExists';
+  if (/Error resuming session/i.test(stderr)) return 'resumeInvalid';
+  return 'none';
 }
 
 /**

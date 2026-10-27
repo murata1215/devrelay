@@ -6,6 +6,38 @@
 
 ## 実装済み機能
 
+### gemini plan→exec resume（MCP approve_implementation の planAiSessionMissing 根治） (2026-10-27)
+
+MCP `submit_instruction` → `get_plan` → `approve_implementation` 経路が gemini プロジェクトだけ
+必ず `planAiSessionMissing` で弾かれる問題を根治した。詳細は
+[devlog](devlog/2026-10-27_122303_gemini_session_resume.md) 参照。
+
+#### 真因
+サーバー側は本当にツール非依存（`aiSessionId` が完了報告に乗りさえすれば無改造で保存・resume
+できる）だが、`agents/{linux,macos,windows}/src/services/ai-runner.ts` の gemini 分岐が
+**AI セッション ID の概念を一切持たず**、`result.extractedSessionId` に一度も代入していなかった
+（claude SDK は `m.session_id`、codex は `thread.started` イベントから拾う）。
+
+#### 対応
+claude 端末モード core#383 と同じ「resume するなら `--resume`、しないなら UUID を事前採番して
+`--session-id`」パターンを移植した。本日の実機検証（gemini-cli 0.65.0）で `--session-id`/`--resume`
+の両対応・ヘッドレスでの resume 継続・ID 重複/resume 先なしは exit 42 + 明確な stderr になることを
+確認した上で、`packages/shared/src/gemini-args.ts` に `buildGeminiSessionArgs()` /
+`resolveGeminiAiSessionId()` / `classifyGeminiSessionFailure()` を追加し、3 エージェントの gemini
+分岐に配線した。新規採番は MCP plan ターン限定（chat ターンの argv は無変化）、resume はサーバー
+明示指定（`decideResume()` の `source === 'explicit'`）のときのみ使う。60 秒 resume watchdog は
+gemini の対象外にした（実測で初回出力に約 23 秒かかるため）。
+
+サーバー側は `apps/server/src/services/submission-guard.ts` に `PLAN_RESUME_CAPABLE_AI_TOOLS`
+を新設し、`planAiSessionMissing` のエラー文言を出し分けた（devin/aider 等の resume 未対応ツールは
+「plan→exec の引き継ぎに未対応、`e` を送ってください」という誤解のない文言に切り替え）。
+
+新キルスイッチ `DEVRELAY_GEMINI_SESSION_ID`（既定 `1`）。DB スキーマ変更なし。
+`submission-guard.ts`/`i18n.ts` を変更したため `pm2 restart devrelay-server` が必要、
+gemini を使用する各機体は `u` が必須。
+
+---
+
 ### Gemini のワークスペース信頼を DevRelay 側で付与する（exec の yolo が黙って無効化されていた問題の根治） (2026-10-27)
 
 `gemini-user` 機体の障害調査（3 サイクル連続）の最終局面。前サイクルまでで `--approval-mode`

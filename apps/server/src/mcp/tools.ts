@@ -1038,6 +1038,9 @@ export function registerMcpTools(server: McpServer, userId: string) {
       const planMessage = session
         ? await prisma.message.findFirst({ where: { sessionId: submissionId, role: 'ai' } })
         : null;
+      // 2026-10-27 サイクル2: evaluateApproveGuard() の session 型が aiTool?（任意）を受け取るように
+      // なったが、Prisma の Session は元々 aiTool フィールドを持つため `session` をそのまま渡すだけで
+      // 構造的に流れ込む（`kind`/`cancelledAt` と同じ扱い。呼び出し側の追加変更は不要）。
       const guard = evaluateApproveGuard({
         session,
         requestedProjectId: projectId,

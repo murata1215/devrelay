@@ -2489,6 +2489,33 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    各機の `u`（Agent 更新）は不要（サーバーのみ `pnpm build` + `pm2 restart devrelay-server`）。
 10. **DB マイグレーションは追加 2 列のみ、バックフィルなし**（`Session.kind` / `Session.cancelledAt`、
     どちらも nullable）。core#336 で `planTurnId` 等を足したときと同じ規約。
+11. **2026-10-27 サイクル2: gemini の plan→exec resume（`planAiSessionMissing` 根治）**。
+    サーバー側は `aiTool` を見ない真にツール非依存の設計だが、`planAiSessionId` が埋まるかどうかは
+    Agent 側の実装に完全に依存する（codex は `thread.started` から拾う、devin/gemini は従来
+    `result.extractedSessionId` を一度も設定していなかった）。gemini は本サイクルで claude 端末モード
+    core#383 と同じ「resume するなら `--resume`、しないなら UUID を事前採番して `--session-id`」
+    パターンを獲得したが、設計上 4 つの判断を要した:
+    - **採番は MCP plan ターン限定**（`options.turnId` がある場合のみ。`turnId` を送るのは
+      `submit_instruction` だけのため、chat ターンの argv は 1 バイトも変わらない）。
+    - **resume はサーバー明示指定（`decideResume()` の `source === 'explicit'`）のときのみ使う**。
+      `source === 'stored'`（チャット前ターンの保存 ID）まで使うと、同一チャットで claude→gemini と
+      ツールを切り替えた場合に別ツールの ID を `gemini --resume` に渡してしまい exit 42 になる
+      （gemini には chat 経路の session-store が無いため、`stored` は構造的に「別ツールの
+      resumeSessionId が巻き戻ってきただけ」の可能性が常にある）。
+    - **resume 失敗（実機確認: exit code 42 固定、`Error starting session: ... already exists` /
+      `Error resuming session: Invalid session identifier`）は明示検知して `resumeFailed` に乗せ、
+      既存のリトライ機構（プラン本文を `composeFullPrompt(true)` で再注入 + `--resume` 無しで
+      再実行）に合流させる**。再試行のたびに別 UUID を採番し直すため、同じ argv で再 spawn して
+      42 を繰り返すことはない。
+    - **gemini は 60 秒 `RESUME_STARTUP_TIMEOUT` watchdog の対象外**（`options.resumeSessionId` の
+      有無だけで発火するツール非依存の既存機構。実測で gemini は初回出力まで約 23 秒かかるため
+      「60 秒無音」が異常の証拠にならず、armすると正常な exec ターンを誤 kill する危険があった。
+      windows にはこの watchdog 自体が無い＝claude が Agent SDK ではなく直接 CLI spawn のため）。
+    `evaluateApproveGuard()` の `planAiSessionMissing` 文言は `PLAN_RESUME_CAPABLE_AI_TOOLS =
+    ['claude', 'codex', 'gemini']`（`submission-guard.ts`）で出し分ける。`aiTool` 未指定（既存呼び出し元・
+    旧テスト互換）または上記リストに含まれる場合は従来文言のまま、devin/aider 等の明示的に
+    非対応と分かるツールだけ「plan→exec の引き継ぎに未対応、`e` を送ってください」という誤解を招か
+    ない新文言にする。
 
 ## get_answer / get_plan の進捗表示行除外（2026-09-26）
 

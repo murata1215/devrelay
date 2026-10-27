@@ -1592,15 +1592,20 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const strictReadonly = permissionPolicy === 'strictReadonly' && usePlanMode;
 
   // core#336: resume 優先順位（PTY 経路・SDK 経路と統一）。判定ロジックは resume-priority.ts に集約。
-  const effectiveResumeSessionId = decideResume({
+  const resumeDecision = decideResume({
     explicitResumeSessionId: payload.resumeSessionId,
     forceNewSession: payload.forceNewSession,
     storedSessionId: sessionInfo.claudeResumeSessionId,
-  }).resumeSessionId;
+  });
+  const effectiveResumeSessionId = resumeDecision.resumeSessionId;
 
   // Prepare send options
   const sendOptions: SendPromptOptions = {
     resumeSessionId: effectiveResumeSessionId,
+    // 2026-10-27 サイクル2（D2、plan→exec resume）: gemini 分岐は resumeSource === 'explicit'
+    // （サーバーが approve_implementation 等で明示指定した ID）のときのみ --resume に使う。
+    // claude/codex/devin は resumeSessionId のみ参照し resumeSource を見ないため無影響。
+    resumeSource: resumeDecision.source,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
     // #332: skipPermissions は permissionPolicy から導出する（forceNewSession はもう使わない）。
@@ -1935,6 +1940,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         // core#336: スコープ識別子 / turnId も retry で引き継ぐ（resumeSessionId は意図的に undefined のまま）
         agentScopeId: sendOptions.agentScopeId,
         turnId: sendOptions.turnId,
+        // 2026-10-27 サイクル2（D2）: resumeSource は意図的に渡さない（undefined = 新規セッション扱い）。
+        // resumeSessionId: undefined と対で、gemini 分岐が壊れた ID を --resume に使わないようにする。
       };
 
       // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。

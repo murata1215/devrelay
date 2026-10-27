@@ -481,6 +481,32 @@ export const chatMessages = {
     en: '❌ Gemini CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `GEMINI_CLI_TRUST_WORKSPACE=true` automatically (Gemini\'s own documented setting for headless/automated environments).\n② If `DEVRELAY_GEMINI_TRUST_WORKSPACE=0` is set on this machine, unset it, or run `gemini` interactively once in that directory to trust it.',
     ja: '❌ Gemini CLI がこのワークスペース（{path}）を信頼していないため実行を拒否しました。\n\n① Agent が未更新の場合は `u` を実行してください — DevRelay は `GEMINI_CLI_TRUST_WORKSPACE=true` を自動的に付与するようになりました（Gemini 自身が headless/automated 環境向けに文書化している設定です）。\n② この端末で `DEVRELAY_GEMINI_TRUST_WORKSPACE=0` を設定している場合は解除するか、そのディレクトリで一度 `gemini` を対話起動して trust してください。',
   },
+  // --- 2026-10-27 サイクル2（plan→exec resume）: `--session-id` 自体が無い旧 CLI の場合、
+  // MCP の approve_implementation が使えないことを実バージョン入りで案内する（#325 静かなフォールバック禁止、
+  // プロセス寿命中 1 回だけ） ---
+  'gemini.sessionIdUnsupported': {
+    en: '⚠️ This machine\'s Gemini CLI ({version}) does not support `--session-id`, so MCP `approve_implementation` (plan→exec handoff) cannot work for this tool yet. Please send `e` from the chat screen instead, or update this machine\'s gemini CLI to 0.65.0 or later.',
+    ja: '⚠️ この端末の Gemini CLI（{version}）は `--session-id` に対応していないため、MCP の `approve_implementation`（plan→exec の引き継ぎ）はまだ使えません。チャット画面から `e` を送って実行するか、この端末の gemini CLI を 0.65.0 以降に更新してください。',
+  },
+  // --- 2026-10-27 サイクル2: `--resume` 自体が無い旧 CLI の場合、exec ターンはプラン本文を
+  // プロンプトに再注入して実行する（resume できないだけで実行自体は続行できる） ---
+  'gemini.resumeUnsupported': {
+    en: '⚠️ This machine\'s Gemini CLI ({version}) does not support `--resume`, so this exec turn will re-send the plan as part of the prompt instead of resuming the previous session.',
+    ja: '⚠️ この端末の Gemini CLI（{version}）は `--resume` に対応していないため、このターンは前回セッションの再開ではなくプラン内容をプロンプトに含めて実行します。',
+  },
+  // --- 2026-10-27 サイクル2: `--resume` が exit 42 + `Error resuming session` で失敗した場合
+  // （plan 時のセッションが壊れている/見当たらない）、resumeFailed に乗せて履歴（プラン）を
+  // 再注入した新規セッションでリトライする（connection.ts の既存リトライ機構に合流） ---
+  'gemini.resumeInvalid': {
+    en: '⚠️ Gemini CLI could not find the plan session to resume. Retrying as a new session with the plan included in the prompt.',
+    ja: '⚠️ Gemini CLI が resume 先のプランセッションを見つけられませんでした。プラン内容をプロンプトに含めた新規セッションとして再試行します。',
+  },
+  // --- 2026-10-27 サイクル2: 採番した UUID が既に使用中だった場合（通常は起きないが、クラッシュ後の
+  // 再送信等）、別 UUID を採番し直して再試行する ---
+  'gemini.sessionIdCollision': {
+    en: '⚠️ Gemini CLI reported the generated session ID was already in use. Retrying with a new ID.',
+    ja: '⚠️ Gemini CLI が、採番したセッション ID は既に使用中だと報告しました。別の ID を採番して再試行します。',
+  },
 
   // --- Devin モデル選択サイクル・サイクル B（変更5）: ATIF から読み取った実モデル名の1行通知 ---
   'devin.modelUsed': {
