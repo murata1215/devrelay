@@ -5,6 +5,23 @@
 
 ---
 
+## Agent の `server:session:start` は冪等に扱う・会話履歴は必ずアトミックに書く（Devin 記憶喪失事故, 2026-10-29）
+
+サーバーは WS 再接続後の次のプロンプト直前に `server:session:start` を再送する（`needsSessionRestart`）。
+Agent のディスパッチャは `handleSessionStart` / `handleAiPrompt` を await せずに呼ぶため、両者は並行して走る。
+従来は `handleSessionStart` がファイルから読み直した履歴で SessionInfo を丸ごと置き換えていたため、
+非アトミックな `saveConversation` の書きかけ（空ファイル）を読んで履歴 0 件の SessionInfo に差し替わり、
+次のターンで Devin に履歴が渡らず、`conversation.json` も 2 件で上書きされた。
+
+- **同じ sessionId・projectPath・agentScopeId の SessionInfo がメモリにあれば置き換えない**（`session-info-reuse.ts` の
+  `canReuseSessionInfo()`）。aiTool と pendingWorkState だけ更新する。一時セッション（crossquery_ 等）は従来どおり作り直す
+- **`conversation.json` の書き込みは必ず `writeFileAtomic` を経由する**（`saveConversation` も含む）。直接 `writeFile` で書かない
+- **`loadConversation` の parse 失敗を「履歴なし」と同一視しない**。1 回読み直し、それでも駄目なら `.corrupt-<ts>` に退避してから `[]` を返す
+  （退避しないと次の保存で消える）
+- Devin は resume が効かない場合があり（`ownedByOtherScope`）、履歴注入が唯一の文脈になる。履歴の消失はそのまま「記憶喪失」になる
+
+---
+
 ## 会話履歴レール: `lastActiveAt` を未読判定に使わない・`//connect` を送らず `switchThread` だけで遷移する（会話履歴レール サイクル, 2026-10-18）
 
 右レール第3タブ「会話」（全プロジェクト横断の直近20スレッド、実行中/未確認表示）を追加した際の

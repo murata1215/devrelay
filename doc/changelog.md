@@ -6,6 +6,25 @@
 
 ## 実装済み機能
 
+### Devin が前の会話を忘れる問題（WS 再接続後の会話履歴の競合消失）を修正 (2026-10-29)
+
+Windows 機の Devin プロジェクトで、プラン相談の途中のターンに前の会話が一切渡らず
+（Agent ログ `History length: 1`）、`.devrelay/conversation.json` も 2 件で上書きされて消えた。
+
+#### 真因
+WS 再接続後、サーバーは次のプロンプトの直前に `server:session:start` を再送する。Agent では
+`handleSessionStart` と `handleAiPrompt` が並行して走り、`handleAiPrompt` の非アトミックな
+`saveConversation()`（truncate → write）の途中を `handleSessionStart` の `loadConversation()` が読んで
+`Unexpected end of JSON input` → `[]`。`handleSessionStart` はその空履歴で `sessionInfoMap` の SessionInfo を
+置き換えたため、実行中のターンは旧オブジェクトで正常に終わったが、次のターンは空履歴で動いた。
+
+#### 対応（agents/linux）
+- 新規 `session-info-reuse.ts`（`canReuseSessionInfo()`）: 同じ sessionId・projectPath・agentScopeId の
+  SessionInfo が既にあれば `handleSessionStart` は置き換えず使い回す（ファイルも読み直さない）
+- `saveConversation()` を `writeFileAtomic` 経由に変更
+- `loadConversation()` は parse 失敗時に 100ms 後 1 回読み直し、駄目なら `conversation.json.corrupt-<ts>` に退避してから `[]`
+- テスト `tests/conversation-race.test.mjs` を追加
+
 ### `chatgpt-user` 障害の根治: AI CLI 検出が絶対パスを捨てて spawn ENOENT になる問題 (2026-10-27)
 
 OS ユーザー `chatgpt-user` に codex を導入後、チャットで `Error: spawn codex ENOENT`。

@@ -42,19 +42,53 @@ function getConversationPath(projectPath: string, agentScopeId?: string): string
 export async function loadConversation(projectPath: string, agentScopeId?: string): Promise<ConversationEntry[]> {
   const filePath = getConversationPath(projectPath, agentScopeId);
 
-  try {
-    if (!existsSync(filePath)) {
-      return [];
+  // 2026-10-29 Devin 記憶喪失事故: 書き込み途中の空ファイルを読んで JSON.parse が失敗し、
+  // `[]` が返った結果、次の保存で履歴全体が 2 件に上書きされた。
+  // parse 失敗は「書き込み途中」の一時的な状態の可能性があるので 1 回だけ読み直し、
+  // それでも壊れていれば中身を `.corrupt-<ts>` に退避してから `[]` を返す（次の保存で消えないようにする）。
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (!existsSync(filePath)) {
+        return [];
+      }
+
+      const content = await readFile(filePath, 'utf-8');
+      const data: ConversationData = JSON.parse(content);
+
+      console.log(`📜 Loaded ${data.history.length} messages from conversation history`);
+      return data.history;
+    } catch (err) {
+      lastError = err as Error;
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, LOAD_RETRY_DELAY_MS));
+      }
     }
+  }
 
-    const content = await readFile(filePath, 'utf-8');
-    const data: ConversationData = JSON.parse(content);
+  console.warn(`⚠️ Could not load conversation history:`, lastError?.message);
+  await quarantineCorruptConversation(filePath);
+  return [];
+}
 
-    console.log(`📜 Loaded ${data.history.length} messages from conversation history`);
-    return data.history;
+/** loadConversation の parse 失敗時に読み直すまでの待ち時間（ms） */
+const LOAD_RETRY_DELAY_MS = 100;
+
+/**
+ * 読めなかった conversation.json を `conversation.json.corrupt-<ts>` にコピーして残す。
+ * 本体は動かさない（他の書き込みと競合しないように）。空ファイルは残す価値が無いので退避しない。
+ * 退避の失敗で呼び出し元を落とさない。
+ */
+async function quarantineCorruptConversation(filePath: string): Promise<void> {
+  try {
+    if (!existsSync(filePath)) return;
+    const raw = await readFile(filePath, 'utf-8');
+    if (raw.trim().length === 0) return;
+    const backupPath = `${filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    await writeFile(backupPath, raw, 'utf-8');
+    console.warn(`⚠️ Corrupt conversation history backed up to ${backupPath}`);
   } catch (err) {
-    console.warn(`⚠️ Could not load conversation history:`, (err as Error).message);
-    return [];
+    console.warn(`⚠️ Could not back up corrupt conversation history:`, (err as Error).message);
   }
 }
 
@@ -82,7 +116,10 @@ export async function saveConversation(
       history
     };
 
-    await writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    // 2026-10-29: 直接 writeFile だと「切り詰め → 書き込み」の間に他の非同期処理
+    // （server:session:start の再送で走る loadConversation）が空ファイルを読み、
+    // 履歴が丸ごと失われた。temp に書いて rename するアトミック書き込みにする。
+    await writeFileAtomic(filePath, JSON.stringify(data, null, 2));
   } catch (err) {
     console.error(`❌ Could not save conversation history:`, (err as Error).message);
   }
@@ -91,8 +128,8 @@ export async function saveConversation(
 /**
  * `saveConversation` のアトミック書き込み版（#348: 層 B 第 2 の防御）。
  * temp へ書いて rename する `writeFileAtomic` を使うため、書き込み途中のファイルを
- * 他プロセス/他セッションが読んでしまう事故を防ぐ。`saveConversation` 自体は
- * 既存呼び出し元（`connection.ts` の直接呼び出し等）との後方互換のため無変更で残す。
+ * 他プロセス/他セッションが読んでしまう事故を防ぐ。
+ * （2026-10-29: `saveConversation` 自体もアトミック書き込みに変更済み。こちらは mutateConversation 専用として残す）
  */
 async function saveConversationAtomic(
   projectPath: string,

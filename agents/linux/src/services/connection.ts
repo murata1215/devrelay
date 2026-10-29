@@ -95,6 +95,7 @@ import {
   markExecPoint,
   type ConversationEntry
 } from './conversation-store.js';
+import { canReuseSessionInfo } from './session-info-reuse.js';
 import {
   loadWorkState,
   saveWorkState,
@@ -949,9 +950,15 @@ async function handleSessionStart(
     sessionTimings.set(sessionId, Date.now());
   }
 
+  // 2026-10-29 Devin 記憶喪失事故: WS 再接続後の server:session:start 再送で、メモリ上の履歴が
+  // 「書きかけファイルから読んだ空の履歴」に置き換わった。同じ会話の SessionInfo が既にあれば
+  // 置き換えずに使い回す（ファイルも読み直さない）。判定は session-info-reuse.ts。
+  const existingSessionInfo = sessionInfoMap.get(sessionId);
+  const reuseSessionInfo = canReuseSessionInfo(existingSessionInfo, { projectPath, agentScopeId, isEphemeral });
+
   // #348: 一時セッションは conversation.json を読まない（全セッション共有の resume/履歴汚染を防ぐ）
   // core#336: agentScopeId 指定時はスコープ専用ディレクトリを読む（対話経路は agentScopeId 未指定 = 従来どおり）
-  const history = isEphemeral ? [] : await loadConversation(projectPath, agentScopeId);
+  const history = reuseSessionInfo || isEphemeral ? [] : await loadConversation(projectPath, agentScopeId);
 
   // Check for pending work state (auto-continue feature)
   const pendingWorkState = await loadWorkState(projectPath);
@@ -970,26 +977,36 @@ async function handleSessionStart(
     console.log(`📂 Storage context found for project`);
   }
 
-  // Load existing Claude session ID for --resume
-  // #348: 一時セッションは resume しない（対話セッションと同じ --resume を共有すると輻輳の原因になる）
-  // core#336: agentScopeId 指定時はスコープ専用ディレクトリから読む
-  const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath, agentScopeId);
-  if (claudeResumeSessionId) {
-    console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
-  }
+  if (reuseSessionInfo && existingSessionInfo) {
+    // 履歴・resume ID・端末モード等はメモリ上の値をそのまま引き継ぐ（並行中のターンが同じオブジェクトを使っているため）。
+    // サーバー指定の AI ツールと保留中の作業状態だけ最新に合わせる。
+    existingSessionInfo.aiTool = aiTool;
+    if (pendingWorkState) {
+      existingSessionInfo.pendingWorkState = pendingWorkState;
+    }
+    console.log(`📋 Session ${sessionId} already in memory, reusing (history: ${existingSessionInfo.history.length} entries)`);
+  } else {
+    // Load existing Claude session ID for --resume
+    // #348: 一時セッションは resume しない（対話セッションと同じ --resume を共有すると輻輳の原因になる）
+    // core#336: agentScopeId 指定時はスコープ専用ディレクトリから読む
+    const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath, agentScopeId);
+    if (claudeResumeSessionId) {
+      console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
+    }
 
-  // Generate UUID for Claude Code session and store session info
-  const claudeSessionId = uuidv4();
-  sessionInfoMap.set(sessionId, {
-    projectPath,
-    aiTool,
-    claudeSessionId,
-    claudeResumeSessionId: claudeResumeSessionId || undefined,
-    history,
-    pendingWorkState: pendingWorkState || undefined,
-    agentScopeId
-  });
-  console.log(`📋 Session ${sessionId} -> Claude Session ${claudeSessionId}`);
+    // Generate UUID for Claude Code session and store session info
+    const claudeSessionId = uuidv4();
+    sessionInfoMap.set(sessionId, {
+      projectPath,
+      aiTool,
+      claudeSessionId,
+      claudeResumeSessionId: claudeResumeSessionId || undefined,
+      history,
+      pendingWorkState: pendingWorkState || undefined,
+      agentScopeId
+    });
+    console.log(`📋 Session ${sessionId} -> Claude Session ${claudeSessionId}`);
+  }
 
   try {
     await startAiSession(sessionId, projectPath, aiTool, config, (output, isComplete) => {
