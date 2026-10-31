@@ -1,4 +1,5 @@
 import { writeFile, mkdir } from 'fs/promises';
+import { statSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import type { FileAttachment } from '@devrelay/shared';
 
@@ -48,6 +49,11 @@ export function sanitizeSavedFilename(raw: string): string {
 
   // 制御文字除去（改行・タブ・DEL・NUL 等、プロンプトへの行注入対策）
   name = name.replace(/[\u0000-\u001F\u007F]/g, '');
+
+  // 空白（全角含む）は '_' に置換する。2026-10-31、Windows の Devin が
+  // `20260817 _任意保険….xlsx` を python -c で開けず、`Get-ChildItem *.xlsx | Select -First 1`
+  // で代用して .devrelay-files 内の古い別 xlsx を読んだ事故の再発防止（AI がシェルでパスを扱いやすくする）
+  name = name.replace(/\s/g, '_');
 
   if (name.length === 0 || name === '.' || name === '..') {
     return 'attachment';
@@ -134,6 +140,31 @@ export function buildPromptWithFiles(prompt: string, filePaths: string[]): strin
     return prompt;
   }
 
-  const fileList = filePaths.map(p => `- ${p}`).join('\n');
-  return `以下のファイルが添付されています:\n${fileList}\n\n${prompt}`;
+  const fileList = filePaths.map(p => {
+    const size = formatFileSize(p);
+    return size ? `- "${p}" (${size})` : `- "${p}"`;
+  }).join('\n');
+  return `以下のファイルが添付されています:\n${fileList}\n${ATTACHMENT_USAGE_NOTE}\n\n${prompt}`;
+}
+
+/**
+ * 添付ファイルの扱いに関する AI 向けの注意書き。
+ * 2026-10-31、AI が日本語＋空白入りのパスを開けず、ワイルドカードで .devrelay-files 内の
+ * 古い別ファイルを開いて「中身が違う」と回答した事故の再発防止。
+ */
+const ATTACHMENT_USAGE_NOTE =
+  '（注意: 上記のフルパスのファイルだけを使ってください。ワイルドカードや `.devrelay-files` 内の別ファイルで代用しないでください。' +
+  'PowerShell では -LiteralPath を使い、Python ではパスを pathlib/glob（日時プレフィックスで絞り込み）で扱ってください。' +
+  'サイズが一致するか確認し、どうしても開けない場合は代わりのファイルを探さずにその旨を報告してください）';
+
+/** ファイルサイズを "73.2 KB" 形式で返す。取得できなければ null */
+function formatFileSize(filePath: string): string | null {
+  try {
+    const bytes = statSync(filePath).size;
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  } catch {
+    return null;
+  }
 }

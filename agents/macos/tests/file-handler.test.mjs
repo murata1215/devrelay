@@ -145,3 +145,28 @@ test('buildPromptWithFiles: ファイルありの場合は絶対パス一覧を�
   assert.ok(result.includes('/tmp/b.png'));
   assert.ok(result.endsWith('hello'));
 });
+
+// --- 2026-10-31 添付取り違え対策 ---
+
+test('sanitizeSavedFilename: 空白（半角・全角）は _ に置換される', () => {
+  assert.equal(sanitizeSavedFilename('20260817 _任意保険.xlsx'), '20260817__任意保険.xlsx');
+  assert.equal(sanitizeSavedFilename('見積　書.xlsx'), '見積_書.xlsx');
+});
+
+test('buildPromptWithFiles: パスをクォートし、サイズと代用禁止の注意書きを付ける', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'devrelay-attach-'));
+  try {
+    const paths = await saveReceivedFiles(dir, [
+      { filename: 'a b.xlsx', mimeType: 'application/octet-stream', content: Buffer.alloc(2048).toString('base64'), size: 2048 },
+    ]);
+    const result = buildPromptWithFiles('hello', [...paths, join(dir, 'missing.txt')]);
+    assert.ok(result.includes(`- "${paths[0]}" (2.0 KB)`));
+    assert.ok(paths[0].endsWith('_a_b.xlsx'));
+    // stat できないファイルはサイズなしで列挙される
+    assert.ok(result.includes(`- "${join(dir, 'missing.txt')}"\n`));
+    assert.ok(result.includes('代用しないでください'));
+    assert.ok(result.endsWith('hello'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
