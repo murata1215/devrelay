@@ -611,6 +611,7 @@ agents/windows/
 - [x] Chat history persistence - session restoration across page reload, cursor-based pagination, infinite scroll
 - [x] Discord-style chat layout - left-aligned messages, colored usernames, avatar images, chat display settings
 - [x] Image attachment preview - inline preview with lightbox, history image display via `/api/files/:id`
+- [x] Non-ASCII (e.g. Japanese) attachment filenames download correctly — `Content-Disposition` now sends an ASCII `filename` fallback plus RFC 5987 `filename*=UTF-8''…` (previously Node.js rejected the raw header with `ERR_INVALID_CHAR` → HTTP 500)
 - [x] Testflight command - automated service creation
 - [x] Agent Doc Folder - file sync from DocPanel to agent local filesystem (`~/.devrelay/docs/`) via WebSocket
 - [x] Resume startup timeout - auto-retry without `--resume` when Claude Code hangs on stale sessions

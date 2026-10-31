@@ -11,6 +11,7 @@ import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { processAgentDocumentEmbedding } from '../services/embedding-service.js';
 import { sendToAgent } from '../services/agent-manager.js';
+import { contentDisposition } from '../services/content-disposition.js';
 
 /** エージェントドキュメント API ルートを登録 */
 export function registerAgentDocumentApiRoutes(app: FastifyInstance) {
@@ -124,7 +125,7 @@ export function registerAgentDocumentApiRoutes(app: FastifyInstance) {
 
       return reply
         .header('Content-Type', doc.mimeType)
-        .header('Content-Disposition', `inline; filename="${doc.filename}"`)
+        .header('Content-Disposition', contentDisposition('inline', doc.filename))
         .header('Cache-Control', 'private, max-age=86400')
         .send(doc.content);
     });

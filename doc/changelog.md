@@ -6,6 +6,11 @@
 
 ## 実装済み機能
 
+### 日本語ファイル名の添付がダウンロードできない不具合を修正 (2026-10-31)
+
+`GET /api/files/:id` が `Content-Disposition: inline; filename="社内….docx"` を日本語のまま返しており、Node.js の `ERR_INVALID_CHAR` で 500 → ブラウザが「ダウンロードできませんでした」になっていた。
+`services/content-disposition.ts` を追加し、ASCII フォールバックの `filename` と RFC 5987 の `filename*=UTF-8''…` を併記するように変更。`/api/files/:id`・エージェントドキュメント配信・履歴 ZIP（プロジェクト名）に適用。サーバー再起動のみで反映。
+
 ### スレッド引継ぎを「元スレッドで `n make` → 新スレッドで `n` / `n 1`」に変更 (2026-10-31)
 
 初版（87af6a0）は新スレッドの `n` で既存スレッド全部を一覧し、`n 1` の時点で元スレッドの AI に裏で書かせていた。

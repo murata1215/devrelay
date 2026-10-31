@@ -62,6 +62,7 @@ import {
   markAllAsRead,
   getUnreadCount,
 } from '../services/notification-service.js';
+import { contentDisposition } from '../services/content-disposition.js';
 
 const execAsync = promisify(exec);
 
@@ -1457,7 +1458,7 @@ export async function apiRoutes(app: FastifyInstance) {
       const buffer = Buffer.from(zipContent, 'base64');
 
       reply.header('Content-Type', 'application/zip');
-      reply.header('Content-Disposition', `attachment; filename="${project.name}_${date}.zip"`);
+      reply.header('Content-Disposition', contentDisposition('attachment', `${project.name}_${date}.zip`));
       return reply.send(buffer);
     } catch (err: any) {
       console.error('Failed to export history:', err);
@@ -2203,7 +2204,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
     return reply
       .header('Content-Type', file.mimeType)
-      .header('Content-Disposition', `inline; filename="${file.filename}"`)
+      .header('Content-Disposition', contentDisposition('inline', file.filename))
       .header('Cache-Control', 'private, max-age=86400')
       .send(file.content);
   });

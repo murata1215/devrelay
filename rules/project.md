@@ -2793,3 +2793,12 @@ Windows の Devin が空白入りの xlsx 名を開けず、`Get-ChildItem .devr
 - `buildPromptWithFiles` はパスを `"…"` で囲みサイズを併記し、「このフルパスだけを使う・ワイルドカードや別ファイルで
   代用しない・開けなければ報告する・PowerShell は -LiteralPath」を明記する。`.devrelay-files/` には過去の添付が
   残るため、AI が「それらしいファイル」で代用すると静かに誤答する（#325 静かなフォールバック禁止と同じ考え方）
+
+## Content-Disposition は必ず `contentDisposition()` で組み立てる（2026-10-31）
+
+Node.js の HTTP ヘッダーは Latin-1 範囲外の文字を受け付けず、`filename="社内….docx"` を生で入れると
+`ERR_INVALID_CHAR` で 500 になる（WebUI で日本語名の添付がダウンロードできなかった原因）。
+ファイル名を含む `Content-Disposition` は `apps/server/src/services/content-disposition.ts` の
+`contentDisposition(type, filename)` を使い、ASCII フォールバックの `filename` と RFC 5987 の
+`filename*=UTF-8''…` を併記する（`/api/files/:id`・エージェントドキュメント配信・履歴 ZIP で適用済み）。
+新しいダウンロード系エンドポイントを足すときもテンプレート文字列で直接組み立てないこと。
