@@ -15,6 +15,7 @@ export const SHORTCUTS: Record<string, string> = {
   'w': 'wrap',       // ドキュメント更新＋コミットプッシュ（wrap up）
   'link': 'link',   // プラットフォームリンクコード生成
   'a': 'ai:list',   // AI ツール一覧・切り替え
+  'n': 'handover:list', // スレッド引継ぎ（next thread）: 引継ぎ元の一覧。`n 1` で引継ぐ
   'ag': 'agreement', // DevRelay Agreement を CLAUDE.md に追加
   'agreement': 'agreement',
   's': 'session',    // セッション情報を表示

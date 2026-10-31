@@ -50,6 +50,7 @@ export {
   tChat,
   getWCommandPrompt,
   W_COMMAND_PROMPT_PREFIXES,
+  getHandoverPrompt,
 } from './i18n.js';
 // manager.devrelay.io へのログイン後リダイレクト用純粋関数（同じ理由で明示的 named export）
 export {

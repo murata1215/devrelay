@@ -66,6 +66,63 @@ export const chatMessages = {
   'select.outOfRange': { en: '⚠️ {number} is out of range. Enter a number from 1 to {max}.', ja: '⚠️ {number} は範囲外です。1〜{max} の数字を入力してください。' },
   'select.unknown': { en: '⚠️ Unknown selection.', ja: '⚠️ 不明な選択です。' },
 
+  // --- handover (n): スレッド引継ぎ ---
+  'handover.listHeader': {
+    en: '📋 **Which handover do you want to use?** (project: {project})\n{current}\n{list}\n\nSend `n <number>` to use it (e.g. `n 1`).',
+    ja: '📋 **どの引継ぎを使いますか？**（プロジェクト: {project}）\n{current}\n{list}\n\n`n 番号` で引継ぎます（例: `n 1`）。',
+  },
+  'handover.currentNote': {
+    en: '⚠️ This thread currently uses the handover from "{title}". Using another one will discard it.',
+    ja: '⚠️ 現在「{title}」の引継ぎを使っています。別の引継ぎを使うと元の引継ぎは消えます。',
+  },
+  'handover.empty': {
+    en: '📋 There are no other threads in this project to hand over from.',
+    ja: '📋 このプロジェクトには引継ぎ元にできる他のスレッドがありません。',
+  },
+  'handover.notConnected': {
+    en: '⚠️ Not connected to a thread. Open the new thread first, then send `n`.',
+    ja: '⚠️ スレッドに接続していません。引継ぎ先の新しいスレッドを開いてから `n` を送ってください。',
+  },
+  'handover.disabled': { en: '⚠️ Thread handover is disabled on this server.', ja: '⚠️ このサーバーではスレッド引継ぎが無効になっています。' },
+  'handover.offline': { en: '⚠️ The agent is offline.', ja: '⚠️ エージェントがオフラインです。' },
+  'handover.agentOutdated': {
+    en: '⚠️ This agent does not support thread handover yet. Update it with `u`.',
+    ja: '⚠️ このエージェントはスレッド引継ぎに未対応です。`u` で更新してください。',
+  },
+  'handover.terminalMode': {
+    en: '⚠️ Thread handover is not available for terminal-mode projects.',
+    ja: '⚠️ ターミナルモードのプロジェクトではスレッド引継ぎを使えません。',
+  },
+  'handover.currentRunning': {
+    en: '⚠️ This thread is running an AI turn. Try again after it finishes.',
+    ja: '⚠️ このスレッドは AI が実行中です。終わってからもう一度お試しください。',
+  },
+  'handover.sourceRunning': {
+    en: '⚠️ "{title}" is running an AI turn. Try again after it finishes.',
+    ja: '⚠️ 「{title}」は AI が実行中です。終わってからもう一度お試しください。',
+  },
+  'handover.busy': {
+    en: '⚠️ A handover is already in progress. Please wait.',
+    ja: '⚠️ 引継ぎ処理が進行中です。少しお待ちください。',
+  },
+  'handover.generating': {
+    en: '📝 Asking the AI of "{title}" to write a handover note...',
+    ja: '📝 「{title}」の AI に引継ぎ書を書いてもらっています...',
+  },
+  'handover.reusing': {
+    en: '♻️ No new conversation in "{title}" since the last handover note, so it is reused.',
+    ja: '♻️ 「{title}」は前回の引継ぎ書の作成以降に会話が無いので、保存済みの引継ぎ書を使います。',
+  },
+  'handover.done': {
+    en: '✅ Handover complete.\nFrom: {title}\nFile: `doc/handover/{file}`\n\n{preview}',
+    ja: '✅ 引継ぎを完了しました。\n引継ぎ元: {title}\nファイル: `doc/handover/{file}`\n\n{preview}',
+  },
+  'handover.failed': { en: '❌ Handover failed: {error}', ja: '❌ 引継ぎに失敗しました: {error}' },
+  'handover.emptyOutput': {
+    en: 'the AI did not return a handover note',
+    ja: 'AI から引継ぎ書が返ってきませんでした',
+  },
+
   // --- clear (x) ---
   'clear.wWarning': {
     en: '⚠️ You have not run the `w` command (update docs / commit) yet.\n',
@@ -686,3 +743,32 @@ export const W_COMMAND_PROMPT_PREFIXES: readonly [string, string] = [
   W_COMMAND_PROMPT_JA.slice(0, 30),
   W_COMMAND_PROMPT_EN.slice(0, 30),
 ];
+
+// -----------------------------------------------------------------------------
+// スレッド引継ぎ（`n`）: 引継ぎ元スレッドの AI に引継ぎ書を書かせるプロンプト
+// -----------------------------------------------------------------------------
+
+const HANDOVER_PROMPT_JA =
+  '【スレッド引継ぎ】このスレッドの作業を、新しいスレッドに引き継ぐための「引継ぎ書」を Markdown で書いてください。' +
+  '新しいスレッドの AI はこの会話を一切知らないので、それだけ読めば作業を再開できるように具体的に書いてください。\n' +
+  '- ファイルの作成・変更・削除、コミット、コマンドの実行は一切しないでください（引継ぎ書を返答として出力するだけ）。\n' +
+  '- 返答は引継ぎ書の本文だけにしてください（前置きやあいさつは不要）。\n' +
+  '- 1 行目は `# <この作業を一言で表すタイトル>` にしてください。\n' +
+  '- 続けて次の見出しをこの順で書いてください。該当が無い見出しは「なし」と書いてください。\n' +
+  '  ## 目的\n  ## 完了したこと\n  ## 未完了・次の一手\n  ## 決定事項・制約\n  ## 触ったファイル\n  ## 落とし穴\n  ## 未解決の質問\n' +
+  '- ファイルはパスで、決定事項は理由と一緒に書いてください。';
+
+const HANDOVER_PROMPT_EN =
+  '[Thread handover] Write a "handover note" in Markdown so that the work in this thread can be continued in a new thread. ' +
+  'The AI in the new thread knows nothing about this conversation, so be concrete enough that it can resume the work from this note alone.\n' +
+  '- Do not create, modify or delete any files, do not commit and do not run commands (just output the note as your reply).\n' +
+  '- Reply with the note only (no preface or greetings).\n' +
+  '- The first line must be `# <a short title for this work>`.\n' +
+  '- Then write the following headings in this order. Write "None" under headings that do not apply.\n' +
+  '  ## Goal\n  ## Done\n  ## Not done / next step\n  ## Decisions and constraints\n  ## Files touched\n  ## Pitfalls\n  ## Open questions\n' +
+  '- Give files as paths and decisions together with their reasons.';
+
+/** `lang` に応じた引継ぎ書作成プロンプトを返す */
+export function getHandoverPrompt(lang: Language): string {
+  return lang === 'en' ? HANDOVER_PROMPT_EN : HANDOVER_PROMPT_JA;
+}

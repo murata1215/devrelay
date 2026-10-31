@@ -282,6 +282,15 @@ model Session {
   // クライアントから値を受け取らず POST /api/sessions/:id/seen がサーバー側で書く（古い値送信による
   // 既読の巻き戻り防止、および閲覧中に届いた応答の自動既読化のため）。
   lastSeenAiAt DateTime?
+  // スレッド引継ぎ（`n` コマンド）。すべて nullable = 既存行は従来挙動のまま（backfill しない、FK なし）。
+  // 引継ぎ先（`n` を打ったスレッド）側: 使用中の引継ぎ元と本文（Agent 側ファイルが消えた場合の控え）
+  handoverFromSessionId String?
+  handoverNote          String?
+  handoverStamp         String?   // 使用中の引継ぎ書のファイル名スタンプ（YYYYMMDD_HHmmss）。差し替え時に旧ファイルを特定する
+  // 引継ぎ元（引継ぎ書を書いたスレッド）側: 使い回し用の最新の引継ぎ書
+  handoverDoc           String?
+  handoverDocAt         DateTime?
+  handoverDocStamp      String?   // 上記のファイル名スタンプ
 
   messages       Message[]
   buildLogs      BuildLog[]

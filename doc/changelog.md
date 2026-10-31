@@ -6,6 +6,20 @@
 
 ## 実装済み機能
 
+### スレッド引継ぎ `n`（next thread）を追加 (2026-10-31)
+
+長くなったスレッドから新しいスレッドへ乗り換えるとき、元スレッドの AI に引継ぎ書を書かせて新スレッドに渡すコマンド。
+仕様は `doc/thread-management-spec.md` §11。
+
+- `n`: 同じプロジェクトの他スレッドを最大 9 件一覧。使用中の引継ぎがあれば「別の引継ぎを使うと元の引継ぎは消えます」と警告
+- `n 1`: 元スレッドの AI に引継ぎ書を書かせ（裏で 1 ターン・読み取り専用・プッシュ通知なし）、
+  `doc/handover/YYYYMMDD_HHmmss_<元ID>_<新ID>.md` に保存して今のスレッドに設定。元スレッドで会話が進んでいなければ保存済みを使い回す
+- Agent は【前スレッドからの引継ぎ】を、履歴注入の条件のとき（Devin/Gemini/Codex は毎回、Claude は resume ID が無い間）と、引継ぎ・差し替え直後の 1 回に注入
+- DB: Session に `handoverFromSessionId` / `handoverNote` / `handoverStamp` / `handoverDoc` / `handoverDocAt` / `handoverDocStamp`（nullable、SQL で直接適用）
+- WS: `server:handover:apply` / `agent:handover:applied`、capability `thread-handover`（linux/macos。Windows Electron 版は未対応）
+- キルスイッチ `DEVRELAY_THREAD_HANDOVER`（既定 `1`）
+- テスト: `apps/server/tests/thread-handover-rules.test.mjs`、`agents/linux/tests/handover-store.test.mjs`
+
 ### Devin が前の会話を忘れる問題（WS 再接続後の会話履歴の競合消失）を修正 (2026-10-29)
 
 Windows 機の Devin プロジェクトで、プラン相談の途中のターンに前の会話が一切渡らず

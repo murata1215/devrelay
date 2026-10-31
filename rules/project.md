@@ -2762,3 +2762,23 @@ WebUI のチャット本文に Markdown レンダリング（テーブル対応�
    無限ループ→ OOM になる（実装中に `node --test` の SIGABRT で検出）。`String.prototype.matchAll()`
    は呼び出しごとに正規表現を複製する（spec 上の挙動）ため、再帰呼び出しがあるインライン解析では
    必ず `matchAll` を使う。
+
+## スレッド引継ぎ `n`: 元スレッドの AI に書かせ、ファイルと DB の二重で持つ（2026-10-31）
+
+仕様は `doc/thread-management-spec.md` §11。設計判断の要点:
+
+1. **引継ぎ書は元スレッドの AI 自身に書かせる**（サーバー側 LLM 要約ではない）。全文脈（resume 中のセッション・
+   触ったファイル）を知っているのは元スレッドの AI だけで、追加の API キーも要らない。裏ターンは
+   `pendingCrossQueries` 方式で、元スレッドの `agentScopeId` で `server:session:start` してから送る
+   （一時セッションを作る `executeCrossProjectQuery` とは違い、実在スレッドの文脈を使う）。
+2. **裏ターンは project 単位の副作用を止める**: Agent は毎ターン `.devrelay-output/` を消すため
+   `handoverTurn: true` で抑止し、`finalizeProgress` の通知は `setSessionNotifySuppressed` で 1 回だけ止める。
+   進捗トラッキングも開始しない（今のチャットに元スレッドの途中経過を流さない）。
+3. **保存は `doc/handover/`（git 管理）＋ DB（`handoverNote` / `handoverDoc`）＋ scope dir の `handover.json`**。
+   ファイルは人が読み `w` でコミットされる履歴、DB は使い回し判定と控え、`handover.json` は Agent が毎ターン
+   注入に使う控えと pending 印。ファイルが消されても注入は続く。
+4. **注入は conversation.json に混ぜない**。exec マーカーで履歴が切られても引継ぎは残る。条件は
+   「履歴を注入する条件」または pending（引継ぎ・差し替え直後の 1 回。resume 中の Claude にも確実に届けるため）。
+5. **使い回し判定の時刻は AI 応答の Message 行が保存されてから記録する**。`handleAiOutput` は pending を
+   resolve した後に非同期で行を作るので、先に `handoverDocAt` を書くと「作成以降に会話あり」と常に誤判定される。
+6. **Windows Electron Agent は capability `thread-handover` を申告しない**（未実装を申告しない。raw-completion と同じ流儀）。

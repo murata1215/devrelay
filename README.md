@@ -335,6 +335,8 @@ Bot: 🤖 Working on it...
 | `u` / `update` | Check agent version / remote update (requires double confirmation) |
 | `k` / `kill` | Cancel running AI process |
 | `x` | Clear conversation history (requires double confirmation) |
+| `n` | Thread handover (next thread): in a new thread, list other threads of the same project (up to 9, newest first) |
+| `n 1` | Have that thread's AI write a handover note, save it to `doc/handover/YYYYMMDD_HHmmss_<sourceThreadId>_<newThreadId>.md` and inject it into this thread (the source thread is kept; reuses the saved note if nothing changed). Kill switch: `DEVRELAY_THREAD_HANDOVER=0` |
 | `q` | Disconnect |
 | `ask <project>: <question>` | Ask another project's agent a question |
 | `teamexec <project>: <instruction>` | Send exec request to another project's agent |

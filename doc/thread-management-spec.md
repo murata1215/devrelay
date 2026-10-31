@@ -177,5 +177,34 @@ plan ファイルの S1〜S8 を全て **sessionId キー**に直す。
 - スレッド名の自動生成（初回応答後に AI が 1 行タイトルを付ける。v1 は先頭メッセージで代替）
 - Discord / Telegram からのスレッド操作（`t` 一覧、`t 2` 切替）
 - MCP `submit_instruction` の `threadId` 指定
-- スレッド間の要約引継ぎ（新規作成時に前スレッドの要約を初期文脈に）
+- ~~スレッド間の要約引継ぎ（新規作成時に前スレッドの要約を初期文脈に）~~ → 2026-10-31 `n` コマンドとして実装（下記 §11）
 - 案 B への昇格（Session 1:1 で Thread 行を生成。A → B は無停止で可能）
+
+## 11. スレッド引継ぎ（`n` = next thread、2026-10-31）
+
+長くなったスレッドから新しいスレッドへ乗り換えるとき、元スレッドの AI に「引継ぎ書」を書かせて新スレッドに渡す。
+
+### 操作
+- 新しいスレッドで `n` → 同じプロジェクトの他スレッドを最大 9 件、新しい順に表示（今のスレッド・メッセージ 0 件・MCP 質問ターン・使用中の引継ぎ元は除く）。使用中の引継ぎがあれば「別の引継ぎを使うと元の引継ぎは消えます」を添える
+- `n 1`（または一覧直後の `1`）→ 元スレッドの AI に引継ぎ書を書かせて（裏で 1 ターン、読み取り専用）、今のスレッドに設定。「引継ぎを完了しました」＋冒頭プレビューを返す
+- 元スレッドで前回の引継ぎ書作成以降に会話が無ければ、保存済みの引継ぎ書を使い回す（AI を呼ばない）
+- 元スレッドは終了させない（残す）。確認・編集画面は未実装
+
+### 保存先（`<projectPath>/doc/handover/`、git 管理）
+- 未使用: `YYYYMMDD_HHmmss_<元スレッドID>.md` / 使用中: `YYYYMMDD_HHmmss_<元スレッドID>_<新スレッドID>.md`（ID は全桁、要約はファイル名に入れない。日時は作成時刻でリネームしても変えない）
+- 同じ引継ぎ書を別スレッドでも使う場合は `_<新スレッドID>` 違いのファイルを作る（コピー相当）
+- 差し替えで外したファイルは未使用名に戻す。ただし同じ元スレッドの未使用ファイルか、他スレッドで使用中のコピーが既にあれば削除
+- 未使用ファイルは元スレッドごとに最新 1 つだけ（古い未使用は消す）
+- 引継ぎ先スレッドの scope dir（`.devrelay/sessions/<scope>/`、旧スレッドは `.devrelay/`）には使用中ポインタ `handover.json`（本文の控え・pending/replaced 印）だけを置く
+
+### AI への注入（Agent `handleAiPrompt` → `composeFullPrompt`）
+- 【前スレッドからの引継ぎ】ブロックを、履歴を注入する条件（Devin/Gemini/Codex は毎回、Claude は resume ID が無い間）**または** pending（引継ぎ直後・差し替え直後の 1 回）のときに付ける。差し替え時は「以前の引継ぎは破棄し、以下に置き換えます」を添える
+- conversation.json には混ぜないので exec マーカーで消えない。ターミナルモードと引継ぎ書作成ターン自身には付けない
+
+### 実装
+- server: `thread-handover-rules.ts`（純関数）、`command-handler.ts`（`handleHandoverList` / `handleHandoverPick` / `performHandover`）、`agent-manager.ts`（`runHandoverTurn` / `applyHandoverOnAgent`）、`session-manager.ts`（`setSessionNotifySuppressed` で裏ターン完了時のプッシュ通知を抑止）
+- 裏ターンは `pendingCrossQueries` 方式で、元スレッドの `agentScopeId` で `server:session:start` → `server:ai:prompt`（`handoverTurn: true`、`.devrelay-output/` を消さない）。進捗トラッキングは開始しないので今のチャットに途中経過は流れない
+- WS: `server:handover:apply` / `agent:handover:applied`。capability `thread-handover`（linux/macos が申告、Windows Electron 版は未実装のため申告しない）
+- agent: `handover-store.ts`（linux/macos で byte-for-byte 同一）
+- DB: Session に `handoverFromSessionId` / `handoverNote` / `handoverStamp`（引継ぎ先）、`handoverDoc` / `handoverDocAt` / `handoverDocStamp`（引継ぎ元・使い回し用）。すべて nullable・FK なし・backfill なし
+- 断るケース: 今のスレッドか元スレッドが実行中、ターミナルモード、Agent オフライン／未対応、キルスイッチ `DEVRELAY_THREAD_HANDOVER=0`（このとき `n` は従来どおり AI へのプロンプト）

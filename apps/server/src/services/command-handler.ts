@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import type { UserCommand, UserContext, Platform, FileAttachment, AiTool, ModelSelectableAiTool, Language, ChatMessageKey } from '@devrelay/shared';
-import { STATUS_EMOJI, AI_TOOL_NAMES, AI_MODEL_CATALOG, isModelSelectableAiTool, isUnsafeModelId, DEFAULT_CHAT_LANGUAGE, isLanguage, tChat, W_COMMAND_PROMPT_PREFIXES } from '@devrelay/shared';
+import { STATUS_EMOJI, AI_TOOL_NAMES, AI_MODEL_CATALOG, isModelSelectableAiTool, isUnsafeModelId, DEFAULT_CHAT_LANGUAGE, isLanguage, tChat, W_COMMAND_PROMPT_PREFIXES, getHandoverPrompt } from '@devrelay/shared';
 import { Machine, Project, Session, Message } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import {
@@ -26,6 +26,8 @@ import {
   submitClaudeLoginCode,
   cancelClaudeLogin,
   agentHasCapability,
+  runHandoverTurn,
+  applyHandoverOnAgent,
 } from './agent-manager.js';
 import { getMachineBusyState } from './auto-updater.js';
 import { decideClearDispatch } from './thread-clear-guard.js';
@@ -41,11 +43,28 @@ import {
   sendMessage,
   getActiveSessions,
   resolveScopeOptionsForSession,
-  touchSessionActivity
+  touchSessionActivity,
+  isSessionRunning,
+  setSessionNotifySuppressed,
 } from './session-manager.js';
 import { decideConnectTarget, resolvePreferredThreadId } from './thread-routing.js';
 import { decideSessionReactivation, decideEndedRevival } from './thread-reestablish.js';
 import { getHelpText } from './command-parser.js';
+import { sanitizeAiAnswer } from './progress-markers.js';
+import {
+  isThreadHandoverEnabled,
+  selectHandoverCandidates,
+  handoverThreadLabel,
+  canReuseHandoverDoc,
+  buildHandoverDocument,
+  buildHandoverStamp,
+  isValidHandoverStamp,
+  buildHandoverPreview,
+  extractHandoverTitle,
+  HANDOVER_TURN_TIMEOUT_MS,
+  HANDOVER_APPLY_TIMEOUT_MS,
+  type HandoverThreadRow,
+} from './thread-handover-rules.js';
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
@@ -316,6 +335,12 @@ export async function executeCommand(
     case 'ai:switch':
       return handleAiSwitch(context, command.tool);
 
+    case 'handover:list':
+      return handleHandoverList(context);
+
+    case 'handover:pick':
+      return handleHandoverPick(command.number, context);
+
     case 'model:list':
       return handleModelList(context, command.tool);
 
@@ -439,6 +464,8 @@ async function handleSelect(number: number, context: UserContext): Promise<strin
     return handleRecentConnect(selectedId, context);
   } else if (listType === 'ai') {
     return handleAiSwitch(context, selectedId);
+  } else if (listType === 'handover') {
+    return performHandover(context, selectedId);
   }
 
   return tChat(lang, 'select.unknown');
@@ -2456,6 +2483,294 @@ async function handleLoginCancel(context: UserContext): Promise<string> {
     return tChat(lang, 'claudeLogin.noFlow');
   }
   return tChat(lang, 'claudeLogin.cancelled');
+}
+
+// -----------------------------------------------------------------------------
+// スレッド引継ぎ（`n` = next thread）
+//
+// `n`   : 同じプロジェクトの他スレッド（引継ぎ元候補）を最大 9 件、新しい順に一覧表示
+// `n 1` : 選んだスレッドの AI に引継ぎ書を書かせ（裏で 1 ターン、読み取り専用）、
+//         Agent が doc/handover/ に保存 → 今のスレッドに設定する。元スレッドはそのまま残す。
+// -----------------------------------------------------------------------------
+
+/** 引継ぎ処理中の引継ぎ先スレッド（同じスレッドで `n 1` が二重に走るのを防ぐ） */
+const handoverInFlight = new Set<string>();
+
+/** 引継ぎ元候補を集める。`n` と、一覧を忘れた後の `n 1` の両方で使う */
+async function collectHandoverCandidates(currentSession: {
+  id: string;
+  projectId: string;
+  userId: string;
+  handoverFromSessionId: string | null;
+}): Promise<HandoverThreadRow[]> {
+  const rows = await prisma.session.findMany({
+    where: {
+      projectId: currentSession.projectId,
+      userId: currentSession.userId,
+      id: { not: currentSession.id },
+      // MCP の質問ターン（ask_project）はスレッドではないので除く
+      OR: [{ kind: null }, { kind: { not: 'question' } }],
+    },
+    orderBy: [{ lastActiveAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
+    take: 50,
+    select: {
+      id: true,
+      title: true,
+      lastActiveAt: true,
+      startedAt: true,
+      _count: { select: { messages: true } },
+      messages: { where: { role: 'user' }, orderBy: { createdAt: 'asc' }, take: 1, select: { content: true } },
+    },
+  });
+  const mapped: HandoverThreadRow[] = rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    lastActiveAt: r.lastActiveAt,
+    startedAt: r.startedAt,
+    messageCount: r._count.messages,
+    firstUserMessage: r.messages[0]?.content ?? null,
+  }));
+  // 使用中の引継ぎ元は一覧から外す（「別の引継ぎを使うと元の引継ぎは消えます」の運用）
+  const withoutCurrentSource = currentSession.handoverFromSessionId
+    ? mapped.filter((r) => r.id !== currentSession.handoverFromSessionId)
+    : mapped;
+  return selectHandoverCandidates(withoutCurrentSource, currentSession.id);
+}
+
+async function handleHandoverList(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  if (!isThreadHandoverEnabled(process.env.DEVRELAY_THREAD_HANDOVER)) {
+    return tChat(lang, 'handover.disabled');
+  }
+  if (!context.currentSessionId) {
+    return tChat(lang, 'handover.notConnected');
+  }
+  const session = await prisma.session.findUnique({
+    where: { id: context.currentSessionId },
+    include: { project: true },
+  });
+  if (!session) {
+    return tChat(lang, 'common.sessionNotFound');
+  }
+
+  const candidates = await collectHandoverCandidates(session);
+  const projectName = session.project.displayName || session.project.name;
+
+  let currentNote = '';
+  if (session.handoverFromSessionId) {
+    const src = await prisma.session.findUnique({
+      where: { id: session.handoverFromSessionId },
+      select: { id: true, title: true },
+    });
+    const title = src
+      ? handoverThreadLabel({ id: src.id, title: src.title })
+      : (extractHandoverTitle(session.handoverNote) ?? session.handoverFromSessionId);
+    currentNote = tChat(lang, 'handover.currentNote', { title }) + '\n';
+  }
+
+  if (candidates.length === 0) {
+    return (currentNote ? currentNote + '\n' : '') + tChat(lang, 'handover.empty');
+  }
+
+  const list = candidates
+    .map((c, i) => `${i + 1}. ${handoverThreadLabel(c)}（${formatRelativeDate(c.lastActiveAt ?? c.startedAt, lang)}）`)
+    .join('\n');
+
+  await updateUserContext(context.userId, context.platform, context.chatId, {
+    lastListType: 'handover',
+    lastListItems: candidates.map((c) => c.id),
+  });
+
+  return tChat(lang, 'handover.listHeader', { project: projectName, current: currentNote, list });
+}
+
+async function handleHandoverPick(number: number, context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  if (!isThreadHandoverEnabled(process.env.DEVRELAY_THREAD_HANDOVER)) {
+    return tChat(lang, 'handover.disabled');
+  }
+  if (!context.currentSessionId) {
+    return tChat(lang, 'handover.notConnected');
+  }
+
+  let items = context.lastListType === 'handover' ? context.lastListItems : undefined;
+  if (!items) {
+    // サーバー再起動等で直前の一覧を忘れている → 同じ条件で作り直す
+    const session = await prisma.session.findUnique({ where: { id: context.currentSessionId } });
+    if (!session) return tChat(lang, 'common.sessionNotFound');
+    items = (await collectHandoverCandidates(session)).map((c) => c.id);
+  }
+  if (items.length === 0) {
+    return tChat(lang, 'handover.empty');
+  }
+  const index = number - 1;
+  if (index < 0 || index >= items.length) {
+    return tChat(lang, 'select.outOfRange', { number, max: items.length });
+  }
+  return performHandover(context, items[index]);
+}
+
+/**
+ * 引継ぎ本体。引継ぎ元 `sourceSessionId` の引継ぎ書を用意し（使い回し or AI に書かせる）、
+ * Agent に doc/handover/ への保存と使用中ポインタの書き込みを依頼して、今のスレッドに設定する。
+ */
+async function performHandover(context: UserContext, sourceSessionId: string): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  const targetSessionId = context.currentSessionId;
+  if (!targetSessionId) {
+    return tChat(lang, 'handover.notConnected');
+  }
+  if (handoverInFlight.has(targetSessionId)) {
+    return tChat(lang, 'handover.busy');
+  }
+  handoverInFlight.add(targetSessionId);
+  try {
+    const target = await prisma.session.findUnique({
+      where: { id: targetSessionId },
+      include: { project: true },
+    });
+    if (!target) return tChat(lang, 'common.sessionNotFound');
+
+    const machineId = target.machineId;
+    if (!isAgentConnected(machineId)) return tChat(lang, 'handover.offline');
+    if (!agentHasCapability(machineId, 'thread-handover')) return tChat(lang, 'handover.agentOutdated');
+    if (target.project.terminalMode) return tChat(lang, 'handover.terminalMode');
+    if (isSessionRunning(targetSessionId)) return tChat(lang, 'handover.currentRunning');
+
+    const source = await prisma.session.findFirst({
+      where: { id: sourceSessionId, projectId: target.projectId, userId: target.userId },
+    });
+    if (!source || source.id === targetSessionId) return tChat(lang, 'select.unknown');
+    const sourceTitle = handoverThreadLabel({ id: source.id, title: source.title });
+    if (isSessionRunning(source.id)) return tChat(lang, 'handover.sourceRunning', { title: sourceTitle });
+
+    const notify = (text: string) =>
+      sendMessage(context.platform, context.chatId, text, undefined, target.projectId, targetSessionId).catch(() => {});
+
+    // 1. 引継ぎ書を用意する（元スレッドで作成以降に会話が無ければ使い回す）
+    const lastMessage = await prisma.message.findFirst({
+      where: { sessionId: source.id },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    let doc: string;
+    let stamp: string;
+    if (
+      source.handoverDoc &&
+      source.handoverDocStamp &&
+      isValidHandoverStamp(source.handoverDocStamp) &&
+      canReuseHandoverDoc({
+        handoverDoc: source.handoverDoc,
+        handoverDocAt: source.handoverDocAt,
+        lastMessageAt: lastMessage?.createdAt ?? null,
+      })
+    ) {
+      doc = source.handoverDoc;
+      stamp = source.handoverDocStamp;
+      await notify(tChat(lang, 'handover.reusing', { title: sourceTitle }));
+    } else {
+      await notify(tChat(lang, 'handover.generating', { title: sourceTitle }));
+      const prompt = getHandoverPrompt(lang);
+      const turnStartedAt = new Date();
+      // 元スレッドの会話として記録する（そのスレッドを開けば何を頼んだか分かるように）
+      await prisma.message.create({
+        data: { sessionId: source.id, role: 'user', content: `[handover]\n${prompt}`, platform: context.platform },
+      });
+      setSessionNotifySuppressed(source.id, true);
+      let output: string;
+      try {
+        const scope = await resolveScopeOptionsForSession(source.id);
+        const result = await runHandoverTurn({
+          machineId,
+          sessionId: source.id,
+          projectName: target.project.name,
+          projectPath: target.project.path,
+          aiTool: source.aiTool as AiTool,
+          agentScopeId: scope.agentScopeId,
+          prompt,
+          userId: target.userId,
+          language: lang,
+          timeoutMs: HANDOVER_TURN_TIMEOUT_MS,
+        });
+        output = result.output;
+      } catch (err) {
+        setSessionNotifySuppressed(source.id, false);
+        return tChat(lang, 'handover.failed', { error: (err as Error).message });
+      }
+
+      const createdAt = new Date();
+      const built = buildHandoverDocument(sanitizeAiAnswer(output), {
+        sourceSessionId: source.id,
+        createdAt,
+        aiTool: source.aiTool,
+        defaultTitle: sourceTitle,
+      });
+      if (!built) {
+        return tChat(lang, 'handover.failed', { error: tChat(lang, 'handover.emptyOutput') });
+      }
+      doc = built;
+      stamp = buildHandoverStamp(createdAt);
+
+      // AI 応答の Message 行（handleAiOutput が resolve 後に非同期で保存する）が入るのを少し待ってから
+      // handoverDocAt を記録する。先に記録すると「作成以降に会話がある」と誤判定され使い回しが効かない。
+      for (let i = 0; i < 20; i++) {
+        const saved = await prisma.message.findFirst({
+          where: { sessionId: source.id, role: 'ai', createdAt: { gte: turnStartedAt } },
+          select: { id: true },
+        });
+        if (saved) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      await prisma.session.update({
+        where: { id: source.id },
+        data: { handoverDoc: doc, handoverDocAt: new Date(), handoverDocStamp: stamp },
+      });
+    }
+
+    // 2. Agent に doc/handover/ への保存と使用中ポインタの書き込みを依頼する
+    const targetScope = await resolveScopeOptionsForSession(targetSessionId);
+    const previous =
+      target.handoverFromSessionId && target.handoverStamp && isValidHandoverStamp(target.handoverStamp)
+        ? { sourceSessionId: target.handoverFromSessionId, stamp: target.handoverStamp }
+        : undefined;
+    let applied;
+    try {
+      applied = await applyHandoverOnAgent(
+        machineId,
+        {
+          requestId: crypto.randomUUID(),
+          projectPath: target.project.path,
+          sourceSessionId: source.id,
+          targetSessionId,
+          targetAgentScopeId: targetScope.agentScopeId,
+          stamp,
+          content: doc,
+          previous,
+        },
+        HANDOVER_APPLY_TIMEOUT_MS,
+      );
+    } catch (err) {
+      return tChat(lang, 'handover.failed', { error: (err as Error).message });
+    }
+    if (!applied.ok) {
+      return tChat(lang, 'handover.failed', { error: applied.error ?? 'unknown error' });
+    }
+
+    // 3. 今のスレッドに設定する
+    await prisma.session.update({
+      where: { id: targetSessionId },
+      data: { handoverFromSessionId: source.id, handoverNote: doc, handoverStamp: stamp },
+    });
+    console.log(`🔁 Handover applied: ${source.id} → ${targetSessionId} (${applied.fileName})`);
+
+    return tChat(lang, 'handover.done', {
+      title: extractHandoverTitle(doc) ?? sourceTitle,
+      file: applied.fileName ?? '',
+      preview: buildHandoverPreview(doc),
+    });
+  } finally {
+    handoverInFlight.delete(targetSessionId);
+  }
 }
 
 // -----------------------------------------------------------------------------

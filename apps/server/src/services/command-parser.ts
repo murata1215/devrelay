@@ -9,6 +9,7 @@ import {
 } from './natural-language-parser.js';
 import { isNaturalLanguageEnabled } from './user-settings.js';
 import { prisma } from '../db/client.js';
+import { isThreadHandoverEnabled } from './thread-handover-rules.js';
 
 /**
  * 「w」コマンドのワンショット exec プロンプト。
@@ -219,6 +220,15 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     return { type: 'update', force: true };
   }
 
+  // 0.96. 「n <番号>」: スレッド引継ぎ（next thread）の候補選択。キルスイッチ OFF 時は従来どおり AI プロンプト
+  const handoverPickMatch = normalized.match(/^n\s+(\d+)$/);
+  if (handoverPickMatch) {
+    if (!isThreadHandoverEnabled(process.env.DEVRELAY_THREAD_HANDOVER)) {
+      return { type: 'ai:prompt', text: input };
+    }
+    return { type: 'handover:pick', number: parseInt(handoverPickMatch[1]) };
+  }
+
   // 1. Check shortcuts
   if (normalized in SHORTCUTS) {
     return parseShortcut(normalized, context);
@@ -338,6 +348,12 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
       return { type: 'link' };
     case 'a':
       return { type: 'ai:list' };
+    case 'n':
+      // スレッド引継ぎ（next thread）。キルスイッチ OFF 時は従来どおり AI プロンプトとして扱う
+      if (!isThreadHandoverEnabled(process.env.DEVRELAY_THREAD_HANDOVER)) {
+        return { type: 'ai:prompt', text: shortcut };
+      }
+      return { type: 'handover:list' };
     case 'ag':
     case 'agreement':
       return { type: 'agreement' };
@@ -423,6 +439,10 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
 \`testflight info <name>\` - Service details
 \`testflight help\` - Detailed help
 
+**Thread handover**
+\`n\` - In a new thread, list other threads of this project to hand over from
+\`n 1\` - Have that thread's AI write a handover note (saved in doc/handover/) and use it in this thread
+
 **Team**
 \`ask <project>: <question>\` - Ask another project
 
@@ -489,6 +509,10 @@ Any other message is treated as an instruction to the AI
 \`testflight rm <name>\` - サービスをアーカイブ
 \`testflight info <name>\` - サービス詳細
 \`testflight help\` - 詳細ヘルプ
+
+**スレッド引継ぎ**
+\`n\` - 新しいスレッドで、同じプロジェクトの他スレッド（引継ぎ元）を一覧表示
+\`n 1\` - そのスレッドの AI に引継ぎ書を書かせ（doc/handover/ に保存）、今のスレッドで使う
 
 **チーム**
 \`ask <project>: <質問>\` - 他プロジェクトに質問

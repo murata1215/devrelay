@@ -32,6 +32,8 @@ import {
   type RawPromptPayload,
   type RawResultPayload,
   type RepoAuthRequestPayload,
+  type HandoverApplyPayload,
+  type HandoverAppliedPayload,
 } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
 import { resolveAgentRepoAuthFromEnv, decideRepoAuthRateLimit } from './agent-repo-rules.js';
@@ -121,6 +123,9 @@ const pendingScaffolds = new Map<string, HistoryRequest<{ name: string; path: st
  * `agent:raw:result` の送受信のみをこの Map が担う。
  */
 const pendingRawCompletions = new Map<string, HistoryRequest<RawResultPayload>>();
+
+/** スレッド引継ぎ（`n`）: `server:handover:apply` の応答待ち（requestId キー） */
+const pendingHandoverApplies = new Map<string, HistoryRequest<HandoverAppliedPayload>>();
 
 /**
  * クロスプロジェクトクエリの待機をキャンセルする（HTTP 切断時のクリーンアップ用）
@@ -432,6 +437,16 @@ export function setupAgentWebSocket(connection: { socket: WebSocket }, req: Fast
           // requestId の Promise を解決するのみ（`handleAiOutput` は一切変更しない）
           handleRawResult(message.payload);
           break;
+        case 'agent:handover:applied': {
+          // スレッド引継ぎ（`n`）: doc/handover/ への書き込み結果
+          const pending = pendingHandoverApplies.get(message.payload.requestId);
+          if (pending) {
+            clearTimeout(pending.timeout);
+            pendingHandoverApplies.delete(message.payload.requestId);
+            pending.resolve(message.payload);
+          }
+          break;
+        }
         case 'agent:repo:auth:request':
           // 読取PATのサーバー配布サイクル: WS upgrade 時の req から転送路（HTTPS/WSS）を判定する
           // （`agent-repo-auth-api.ts` の `isSecureRequest` と同じ考え方。`trustProxy: true` のため
@@ -1467,7 +1482,7 @@ export async function sendPromptToAgent(
    * core#336: 会話セッション境界。MCP 経由のみ渡す（対話経路は未指定=従来のプロジェクト単位 resume）。
    * 位置引数がすでに多いため、これ以上は増やさずオプション束にまとめる。
    */
-  scopeOptions?: { agentScopeId?: string; resumeSessionId?: string; turnId?: string },
+  scopeOptions?: { agentScopeId?: string; resumeSessionId?: string; turnId?: string; handoverTurn?: boolean },
 ) {
   // #316/#320: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
   // outdatedAgents チェックのエラーメッセージでも使うため、先に解決しておく
@@ -1556,6 +1571,7 @@ export async function sendPromptToAgent(
       agentScopeId: scopeOptions?.agentScopeId,
       resumeSessionId: scopeOptions?.resumeSessionId,
       turnId: scopeOptions?.turnId,
+      ...(scopeOptions?.handoverTurn ? { handoverTurn: true } : {}),
     }
   });
 }
@@ -1685,6 +1701,90 @@ export function executeCrossProjectExec(
     setTimeout(() => {
       execConversation(machineId, sessionId, projectPath, userId, instruction);
     }, 500);
+  });
+}
+
+/**
+ * スレッド引継ぎ（`n`）: 引継ぎ元スレッドで引継ぎ書を書かせる裏ターンを 1 回走らせ、最終出力を返す。
+ *
+ * `executeCrossProjectQuery` と同じ `pendingCrossQueries` 方式だが、一時セッションではなく
+ * **実在のスレッド**を、そのスレッドの `agentScopeId` で `server:session:start` してから送る。
+ * これで Agent はそのスレッドの resume ID・会話履歴（scope dir）を使って答える。
+ *
+ * - 進捗トラッキングは開始しない（今のチャットに途中経過を流さない）
+ * - 権限は ask と同じ読み取り専用ポリシー（`resolvePermissionPolicy('ask')`）
+ * - `handoverTurn: true` で Agent に `.devrelay-output/` を消させない
+ * - 完了時のプッシュ通知の抑止は呼び出し側（`setSessionNotifySuppressed`）が行う
+ */
+export function runHandoverTurn(params: {
+  machineId: string;
+  sessionId: string;
+  projectName: string;
+  projectPath: string;
+  aiTool: AiTool;
+  agentScopeId?: string;
+  prompt: string;
+  userId: string;
+  language?: Language;
+  timeoutMs: number;
+}): Promise<{ output: string; files?: FileAttachment[] }> {
+  const { machineId, sessionId } = params;
+  return new Promise((resolve, reject) => {
+    if (pendingCrossQueries.has(sessionId)) {
+      reject(new Error('handover turn already running for this thread'));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      pendingCrossQueries.delete(sessionId);
+      reject(new Error('handover turn timed out'));
+    }, params.timeoutMs);
+    pendingCrossQueries.set(sessionId, { resolve, reject, timeout });
+
+    startSession(machineId, sessionId, params.projectName, params.projectPath, params.aiTool, params.agentScopeId);
+    // session:start の登録を待ってから送る（executeCrossProjectQuery と同じ間合い）
+    setTimeout(() => {
+      sendPromptToAgent(
+        machineId,
+        sessionId,
+        params.prompt,
+        params.userId,
+        undefined, // files
+        undefined, // missedMessages
+        params.projectPath,
+        params.aiTool,
+        undefined, // forceNewSession: 元スレッドの文脈（resume）を使うため指定しない
+        undefined, // model: UserSettings の plan モデルで補完
+        params.language,
+        resolvePermissionPolicy('ask'),
+        { agentScopeId: params.agentScopeId, handoverTurn: true },
+      ).catch((err: Error) => {
+        const pending = pendingCrossQueries.get(sessionId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          pendingCrossQueries.delete(sessionId);
+          pending.reject(err);
+        }
+      });
+    }, 500);
+  });
+}
+
+/**
+ * スレッド引継ぎ（`n`）: Agent に引継ぎ書の書き込み（doc/handover/）と、引継ぎ先スレッドの
+ * scope dir への使用中ポインタ書き込みを依頼し、結果を待つ。
+ */
+export function applyHandoverOnAgent(
+  machineId: string,
+  payload: HandoverApplyPayload,
+  timeoutMs: number,
+): Promise<HandoverAppliedPayload> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingHandoverApplies.delete(payload.requestId);
+      reject(new Error('handover apply timed out'));
+    }, timeoutMs);
+    pendingHandoverApplies.set(payload.requestId, { resolve, reject, timeout });
+    sendToAgent(machineId, { type: 'server:handover:apply', payload });
   });
 }
 

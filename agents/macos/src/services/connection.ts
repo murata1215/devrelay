@@ -32,7 +32,8 @@ import type {
   RawPromptPayload,
   RawResultPayload,
   AiUsageData,
-  RepoAuthResponsePayload
+  RepoAuthResponsePayload,
+  HandoverApplyPayload,
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -108,6 +109,7 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // projectPath 上の永続状態（conversation.json / claude-session-id / .devrelay-output）を
 // 読み書きしないようにするための判定（層 B: Agent 側の直交化）
 import { isEphemeralSession } from './session-scope.js';
+import { applyHandover, loadActiveHandover, markHandoverInjected, formatHandoverForPrompt } from './handover-store.js';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -561,6 +563,40 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
       // 読取PATのサーバー配布サイクル: `refreshRepoAuthFromServer()` が待っている Promise を解決する
       resolveRepoAuthRequest(message.payload);
       break;
+
+    case 'server:handover:apply':
+      // スレッド引継ぎ（`n`）: doc/handover/ への保存と使用中ポインタの書き込み
+      void handleHandoverApply(message.payload);
+      break;
+  }
+}
+
+/**
+ * スレッド引継ぎ（`n`）: 引継ぎ書を doc/handover/ に保存し、引継ぎ先スレッドの scope dir に
+ * 使用中ポインタ（handover.json）を書いて、結果をサーバーへ返す。
+ */
+async function handleHandoverApply(payload: HandoverApplyPayload): Promise<void> {
+  if (!currentConfig) return;
+  try {
+    const { fileName } = await applyHandover({
+      projectPath: payload.projectPath,
+      sourceSessionId: payload.sourceSessionId,
+      targetSessionId: payload.targetSessionId,
+      targetAgentScopeId: payload.targetAgentScopeId,
+      stamp: payload.stamp,
+      content: payload.content,
+      previous: payload.previous,
+    });
+    sendMessage({
+      type: 'agent:handover:applied',
+      payload: { machineId: currentConfig.machineId, requestId: payload.requestId, ok: true, fileName },
+    });
+  } catch (err) {
+    console.error(`❌ Handover apply failed:`, (err as Error).message);
+    sendMessage({
+      type: 'agent:handover:applied',
+      payload: { machineId: currentConfig.machineId, requestId: payload.requestId, ok: false, error: (err as Error).message },
+    });
   }
 }
 
@@ -1302,7 +1338,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string; handoverTurn?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   // #348: 一時セッションは projectPath 上の状態（conversation.json / .devrelay-output）を読み書きしない
   const isEphemeral = isEphemeralSession(sessionId);
@@ -1416,7 +1452,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Clear output directory before running
   // #348: 一時セッションは呼ばない（対話セッションが書きかけの .devrelay-output/ 成果物を
   // cross-query 開始のたびに rm -rf されてしまう事故を防ぐ）
-  if (!isEphemeral) {
+  // スレッド引継ぎ（`n`）の裏ターンも呼ばない（引継ぎ先スレッド等の成果物を巻き込まないため）
+  if (!isEphemeral && !payload.handoverTurn) {
     await clearOutputDir(sessionInfo.projectPath);
   }
 
@@ -1488,8 +1525,24 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   //   1. Claude: resumeSessionId がない（SDK の --resume でセッション引き継ぎするため通常は不要）
   //   2. Claude: missed messages がある（SDK 内部履歴にない新規メッセージ）
   //   3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かずプロンプトが唯一のコンテキスト）
+  // スレッド引継ぎ（`n`）: このスレッドに使用中の引継ぎがあれば【前スレッドからの引継ぎ】ブロックを作る。
+  // 付ける条件は「履歴を注入する条件（includeHistory）」または pending（引継ぎ直後・差し替え直後の 1 回）。
+  // conversation.json には混ぜないので exec マーカーで消えない。引継ぎ書を書かせる裏ターン自身には付けない。
+  let handoverBlock = '';
+  let handoverPending = false;
+  if (!isEphemeral && !payload.handoverTurn) {
+    const activeHandover = await loadActiveHandover(sessionInfo.projectPath, sessionInfo.agentScopeId);
+    if (activeHandover) {
+      handoverBlock = formatHandoverForPrompt(activeHandover, payload.language);
+      handoverPending = activeHandover.pending || activeHandover.replaced;
+    }
+  }
+  let handoverInjected = false;
+
   const composeFullPrompt = (includeHistory: boolean): string => {
-    const basePrompt = effectiveModeInstruction + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+    const handoverPart = handoverBlock && (includeHistory || handoverPending) ? handoverBlock : '';
+    if (handoverPart) handoverInjected = true;
+    const basePrompt = effectiveModeInstruction + handoverPart + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
     if (!(sessionInfo.history.length > 1 && includeHistory)) {
       historyContextSize = 0;
       return basePrompt;
@@ -1512,7 +1565,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
     historyContextSize = historyContext.length;
-    return `${effectiveModeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
+    return `${effectiveModeInstruction}${handoverPart}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
   };
 
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
@@ -1520,6 +1573,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const needsHistoryInPrompt = !isClaudeSdk || !sessionInfo.claudeResumeSessionId || hasMissedMessages;
   // 通常実行は従来どおり（needsHistoryInPrompt に従う）。挙動は不変。
   let fullPrompt = composeFullPrompt(!!needsHistoryInPrompt);
+
+  // 引継ぎ（pending）を注入したら印を落とす（以後は履歴を注入する条件のときだけ付く）
+  if (handoverInjected && handoverPending) {
+    await markHandoverInjected(sessionInfo.projectPath, sessionInfo.agentScopeId).catch((err) =>
+      console.warn(`⚠️ Could not update handover pointer:`, (err as Error).message));
+  }
+  if (handoverInjected) {
+    console.log(`📋 Including thread handover in prompt (${handoverBlock.length} chars${handoverPending ? ', pending' : ''})`);
+  }
 
   // #291-B: コンテキスト使用率が閾値超過なら1回だけ警告（x で履歴クリア誘導）。
   // 使用率が閾値未満に戻ったら（x 後など）フラグをリセットして再警告を許可する。

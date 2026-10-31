@@ -32,10 +32,10 @@ export const PROTOCOL_VERSION = 1;
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'thread-handover';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'thread-handover'];
 
 // -----------------------------------------------------------------------------
 // Capability 配布基盤（サイクルP1）
@@ -214,7 +214,8 @@ export type AgentMessage =
   | { type: 'agent:claude:login:result'; payload: ClaudeLoginResultPayload }
   | { type: 'agent:capability:sync'; payload: AgentCapabilitySyncPayload }
   | { type: 'agent:raw:result'; payload: RawResultPayload }
-  | { type: 'agent:repo:auth:request'; payload: RepoAuthRequestPayload };
+  | { type: 'agent:repo:auth:request'; payload: RepoAuthRequestPayload }
+  | { type: 'agent:handover:applied'; payload: HandoverAppliedPayload };
 
 export interface SessionRestorePayload {
   machineId: string;
@@ -410,7 +411,45 @@ export type ServerToAgentMessage =
   | { type: 'server:claude:login:cancel'; payload: ClaudeLoginCancelPayload }
   | { type: 'server:capability:sync'; payload: { trigger?: 'idle' | 'manual' } }
   | { type: 'server:raw:prompt'; payload: RawPromptPayload }
-  | { type: 'server:repo:auth'; payload: RepoAuthResponsePayload };
+  | { type: 'server:repo:auth'; payload: RepoAuthResponsePayload }
+  | { type: 'server:handover:apply'; payload: HandoverApplyPayload };
+
+/**
+ * スレッド引継ぎ（`n` コマンド）: 引継ぎ書を `<projectPath>/doc/handover/` に置き、
+ * 引継ぎ先スレッドの scope dir に「使用中の引継ぎ」ポインタ（handover.json）を書く。
+ *
+ * ファイル名（全桁のスレッド ID、要約は入れない）:
+ * - 未使用: `<stamp>_<sourceSessionId>.md`
+ * - 使用中: `<stamp>_<sourceSessionId>_<targetSessionId>.md`
+ *
+ * `'thread-handover'` capability を申告した Agent にのみ送る。同じ payload を 2 回受けても結果は同じ（冪等）。
+ */
+export interface HandoverApplyPayload {
+  requestId: string;
+  projectPath: string;
+  /** 引継ぎ元スレッド（= 引継ぎ書を書いたスレッド）の Session.id */
+  sourceSessionId: string;
+  /** 引継ぎ先スレッド（= `n` を打ったスレッド）の Session.id */
+  targetSessionId: string;
+  /** 引継ぎ先スレッドの agentScopeId（null の旧スレッドは未指定 = `.devrelay/` 直下） */
+  targetAgentScopeId?: string;
+  /** 引継ぎ書の作成日時（`YYYYMMDD_HHmmss`、サーバーがローカル時刻で採番） */
+  stamp: string;
+  /** 引継ぎ書の本文（Markdown） */
+  content: string;
+  /** 差し替え前に使っていた引継ぎ（あれば未使用名に戻す／削除する） */
+  previous?: { sourceSessionId: string; stamp: string };
+}
+
+/** `server:handover:apply` の結果 */
+export interface HandoverAppliedPayload {
+  machineId: string;
+  requestId: string;
+  ok: boolean;
+  /** 書き込んだ使用中ファイル名（`doc/handover/` からの相対） */
+  fileName?: string;
+  error?: string;
+}
 
 /**
  * 読取PATのサーバー配布サイクル: Agent が自分の origin URL（`.git/config` の `remote.origin.url`）を
@@ -801,6 +840,11 @@ export interface AiPromptPayload {
   resumeSessionId?: string;
   /** core#336: correlation ID。ConversationExecPayload.turnId の JSDoc を参照 */
   turnId?: string;
+  /**
+   * スレッド引継ぎ（`n`）: 引継ぎ書を書かせる裏ターン。true のとき Agent は
+   * `.devrelay-output/` を消さない（他スレッドの成果物を巻き込まないため）・引継ぎブロックを注入しない。
+   */
+  handoverTurn?: boolean;
 }
 
 // -----------------------------------------------------------------------------
@@ -914,6 +958,8 @@ export type UserCommand =
   | { type: 'quit' }
   | { type: 'help' }
   | { type: 'ai:list' }   // AI ツール一覧
+  | { type: 'handover:list' }                  // スレッド引継ぎ: 引継ぎ元候補の一覧（`n`）
+  | { type: 'handover:pick'; number: number }  // スレッド引継ぎ: 候補を選んで引継ぐ（`n 1`）
   | { type: 'ai:switch'; tool: AiTool }
   | { type: 'model:list'; tool?: ModelSelectableAiTool }  // AI モデル一覧（#309: tool 省略時は現在セッションのツール）
   | { type: 'model:set'; target: 'both' | 'plan' | 'exec'; model: string; tool?: ModelSelectableAiTool }  // モデル設定（#309）
@@ -942,7 +988,7 @@ export interface UserContext {
   userId: string;
   platform: Platform;
   chatId: string;
-  lastListType?: 'machine' | 'project' | 'recent' | 'ai';
+  lastListType?: 'machine' | 'project' | 'recent' | 'ai' | 'handover';
   lastListItems?: string[];
   currentMachineId?: string;
   currentMachineName?: string;

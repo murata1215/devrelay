@@ -269,6 +269,9 @@ export function isTraditionalCommand(input: string): boolean {
   // `a`/`l`/`login` と同じ個別パターンで明示的に拾う）
   if (/^u(?:pdate)?(?:\s+force|!)$/i.test(trimmed)) return true;
 
+  // 'n 1' 等（スレッド引継ぎの候補選択）- 1文字キーの特殊パターン
+  if (/^n\s+\d+$/i.test(trimmed)) return true;
+
   // 'l' (モデル一覧), 'l sonnet', 'l plan:haiku', 'l exec:opus' 等（モデル選択）
   if (trimmed === 'l' || /^l\s+.+$/i.test(trimmed)) return true;
 
