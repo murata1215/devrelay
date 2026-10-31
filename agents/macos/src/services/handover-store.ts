@@ -70,7 +70,8 @@ export interface ActiveHandover {
 export interface ApplyHandoverInput {
   projectPath: string;
   sourceSessionId: string;
-  targetSessionId: string;
+  /** 省略時は `n make`: 未使用ファイルとして保存するだけ（ポインタは書かない） */
+  targetSessionId?: string;
   targetAgentScopeId?: string;
   stamp: string;
   content: string;
@@ -122,8 +123,12 @@ export async function markHandoverInjected(projectPath: string, agentScopeId?: s
 }
 
 /**
- * 引継ぎ書を doc/handover/ に保存し、引継ぎ先スレッドの使用中ポインタを書く。
+ * 引継ぎ書を doc/handover/ に保存する。
  *
+ * `targetSessionId` が無いとき（`n make`）: 未使用ファイル `<stamp>_<元ID>.md` を書き、
+ * 同じ元スレッドの古い未使用ファイルを消すだけ（ポインタは書かない）。
+ *
+ * `targetSessionId` があるとき（`n 1`）: 引継ぎ先スレッドの使用中ポインタも書く。
  * 1. 差し替え前の引継ぎ（previous）がこのスレッドで使用中なら外す:
  *    同じ元スレッドの未使用ファイルか、他スレッドで使用中のコピーが既にあれば削除、無ければ未使用名に戻す
  * 2. 今回の未使用ファイルがあれば使用中名にリネームし、本文を書き込む（無ければ新規作成＝コピー相当）
@@ -134,7 +139,7 @@ export async function markHandoverInjected(projectPath: string, agentScopeId?: s
  */
 export async function applyHandover(input: ApplyHandoverInput): Promise<{ fileName: string }> {
   const { projectPath, sourceSessionId, targetSessionId, targetAgentScopeId, stamp, content, previous } = input;
-  if (!isSafeHandoverId(sourceSessionId) || !isSafeHandoverId(targetSessionId)) {
+  if (!isSafeHandoverId(sourceSessionId) || (targetSessionId !== undefined && !isSafeHandoverId(targetSessionId))) {
     throw new Error('invalid session id');
   }
   if (!isValidHandoverStamp(stamp)) {
@@ -145,11 +150,26 @@ export async function applyHandover(input: ApplyHandoverInput): Promise<{ fileNa
   }
 
   const dir = join(projectPath, ...HANDOVER_DIR_SEGMENTS);
-  const usedName = handoverFileName(stamp, sourceSessionId, targetSessionId);
   const unusedName = handoverFileName(stamp, sourceSessionId);
 
   return withPathLock(normalizeLockKey(dir), async () => {
     await mkdir(dir, { recursive: true });
+
+    // `n make`: 未使用ファイルとして保存し、同じ元スレッドの古い未使用ファイルを消す
+    if (targetSessionId === undefined) {
+      await writeFileAtomic(join(dir, unusedName), content);
+      for (const n of await readdir(dir)) {
+        const s = unusedHandoverStamp(n, sourceSessionId);
+        if (s !== null && s < stamp) {
+          await unlink(join(dir, n)).catch(() => {});
+          console.log(`🗑️ Old unused handover removed: ${n}`);
+        }
+      }
+      console.log(`📝 Handover note saved: doc/handover/${unusedName}`);
+      return { fileName: unusedName };
+    }
+
+    const usedName = handoverFileName(stamp, sourceSessionId, targetSessionId);
 
     // 1. 差し替え前の引継ぎを外す
     if (previous && !(previous.sourceSessionId === sourceSessionId && previous.stamp === stamp)) {

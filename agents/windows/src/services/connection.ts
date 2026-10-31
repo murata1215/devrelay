@@ -194,8 +194,9 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           // @anthropic-ai/claude-agent-sdk を import しておらず claude CLI を直接 spawn する実装のため、
           // system prompt 完全置換を原理的に実装できない。「できないのに申告する」状態を避けるため、
           // capability 一覧から raw-completion のみ除外する（申告しなければサーバーは raw を投げない）。
-          // スレッド引継ぎ（thread-handover）も未実装のため申告しない（サーバーは `n 1` を「未対応」で断る）。
-          capabilities: AGENT_CAPABILITIES.filter((c) => c !== 'raw-completion' && c !== 'thread-handover'),
+          // スレッド引継ぎ（thread-handover / thread-handover-make）も未実装のため申告しない
+          // （サーバーは `n make` / `n 1` を「未対応」で断る）。
+          capabilities: AGENT_CAPABILITIES.filter((c) => c !== 'raw-completion' && c !== 'thread-handover' && c !== 'thread-handover-make'),
         },
       });
 

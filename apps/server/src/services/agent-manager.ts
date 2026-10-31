@@ -1705,16 +1705,15 @@ export function executeCrossProjectExec(
 }
 
 /**
- * スレッド引継ぎ（`n`）: 引継ぎ元スレッドで引継ぎ書を書かせる裏ターンを 1 回走らせ、最終出力を返す。
+ * スレッド引継ぎ（`n make`）: スレッドの AI に引継ぎ書を書かせるターンを 1 回走らせ、最終出力を返す。
  *
  * `executeCrossProjectQuery` と同じ `pendingCrossQueries` 方式だが、一時セッションではなく
  * **実在のスレッド**を、そのスレッドの `agentScopeId` で `server:session:start` してから送る。
  * これで Agent はそのスレッドの resume ID・会話履歴（scope dir）を使って答える。
  *
- * - 進捗トラッキングは開始しない（今のチャットに途中経過を流さない）
+ * - 進捗トラッキングは開始しない（完了時は通常の応答と同じくスレッドの参加者へ配信・通知される）
  * - 権限は ask と同じ読み取り専用ポリシー（`resolvePermissionPolicy('ask')`）
- * - `handoverTurn: true` で Agent に `.devrelay-output/` を消させない
- * - 完了時のプッシュ通知の抑止は呼び出し側（`setSessionNotifySuppressed`）が行う
+ * - `handoverTurn: true` で Agent に `.devrelay-output/` を消させない・引継ぎブロックを注入させない
  */
 export function runHandoverTurn(params: {
   machineId: string;

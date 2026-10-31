@@ -11,6 +11,7 @@ import {
   selectHandoverCandidates,
   handoverThreadLabel,
   canReuseHandoverDoc,
+  formatHandoverCreated,
   buildHandoverDocument,
   extractHandoverTitle,
   buildHandoverPreview,
@@ -39,25 +40,25 @@ test('ファイル名: 全桁の ID、未使用と使用中', () => {
   assert.equal(buildHandoverFileName('20261031_105130', src, tgt), `20261031_105130_${src}_${tgt}.md`);
 });
 
-test('候補: 今のスレッドとメッセージ 0 件を除き、新しい順に最大 9 件', () => {
+test('候補: n make 済みだけを、作成が新しい順に最大 9 件（今のスレッドと使用中の引継ぎ元は除く）', () => {
   const base = new Date('2026-10-01T00:00:00Z').getTime();
   const rows = [];
   for (let i = 0; i < 12; i++) {
-    rows.push({ id: `s${i}`, title: null, lastActiveAt: new Date(base + i * 1000), startedAt: new Date(base), messageCount: 1 });
+    rows.push({ id: `s${i}`, title: null, lastActiveAt: null, handoverDocAt: new Date(base + i * 1000), hasHandoverDoc: true });
   }
-  rows.push({ id: 'empty', title: null, lastActiveAt: new Date(base + 99999), startedAt: new Date(base), messageCount: 0 });
-  const result = selectHandoverCandidates(rows, 's11');
+  rows.push({ id: 'nodoc', title: null, lastActiveAt: null, handoverDocAt: null, hasHandoverDoc: false });
+  const result = selectHandoverCandidates(rows, 's11', undefined, ['s10']);
   assert.equal(result.length, HANDOVER_CANDIDATE_MAX);
-  assert.equal(result[0].id, 's10');
-  assert.ok(!result.some((r) => r.id === 's11' || r.id === 'empty'));
+  assert.equal(result[0].id, 's9');
+  assert.ok(!result.some((r) => r.id === 's11' || r.id === 's10' || r.id === 'nodoc'));
 });
 
-test('候補: lastActiveAt が null なら startedAt で並べる', () => {
-  const rows = [
-    { id: 'a', title: null, lastActiveAt: null, startedAt: new Date('2026-10-03T00:00:00Z'), messageCount: 2 },
-    { id: 'b', title: null, lastActiveAt: new Date('2026-10-02T00:00:00Z'), startedAt: new Date('2026-10-01T00:00:00Z'), messageCount: 2 },
-  ];
-  assert.deepEqual(selectHandoverCandidates(rows, 'x').map((r) => r.id), ['a', 'b']);
+test('作成日時の表示: 今日 / 昨日 / MM/DD', () => {
+  const now = new Date(2026, 9, 31, 15, 0, 0);
+  assert.equal(formatHandoverCreated(new Date(2026, 9, 31, 13, 20, 0), now, 'ja'), '今日 13:20');
+  assert.equal(formatHandoverCreated(new Date(2026, 9, 30, 9, 5, 0), now, 'ja'), '昨日 09:05');
+  assert.equal(formatHandoverCreated(new Date(2026, 9, 28, 9, 5, 0), now, 'ja'), '10/28 09:05');
+  assert.equal(formatHandoverCreated(new Date(2026, 9, 31, 13, 20, 0), now, 'en'), 'today 13:20');
 });
 
 test('表示名: title → 先頭ユーザー発言 → ID、40 文字で切る', () => {
@@ -67,13 +68,14 @@ test('表示名: title → 先頭ユーザー発言 → ID、40 文字で切る'
   assert.equal(handoverThreadLabel({ id: 'id1', title: 'あ'.repeat(50) }), 'あ'.repeat(40) + '…');
 });
 
-test('使い回し: 作成以降に会話が無いときだけ', () => {
+test('最新判定: 作成以降にプロンプト（lastActiveAt）が無いときだけ', () => {
   const at = new Date('2026-10-31T10:00:00Z');
-  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: at, lastMessageAt: new Date('2026-10-31T09:59:00Z') }), true);
-  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: at, lastMessageAt: at }), true);
-  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: at, lastMessageAt: new Date('2026-10-31T10:00:01Z') }), false);
-  assert.equal(canReuseHandoverDoc({ handoverDoc: null, handoverDocAt: at, lastMessageAt: null }), false);
-  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: null, lastMessageAt: null }), false);
+  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: at, lastActiveAt: new Date('2026-10-31T09:59:00Z') }), true);
+  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: at, lastActiveAt: at }), true);
+  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: at, lastActiveAt: new Date('2026-10-31T10:00:01Z') }), false);
+  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: at, lastActiveAt: null }), true);
+  assert.equal(canReuseHandoverDoc({ handoverDoc: null, handoverDocAt: at, lastActiveAt: null }), false);
+  assert.equal(canReuseHandoverDoc({ handoverDoc: '# x', handoverDocAt: null, lastActiveAt: null }), false);
 });
 
 test('引継ぎ書: 前置きを落とし、見出し直後にメタ行を入れる', () => {

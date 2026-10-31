@@ -64,22 +64,25 @@ export interface HandoverThreadRow {
   id: string;
   title: string | null;
   lastActiveAt: Date | null;
-  startedAt: Date;
-  messageCount: number;
+  /** `n make` で引継ぎ書を作った日時（null = 未作成） */
+  handoverDocAt: Date | null;
+  hasHandoverDoc: boolean;
   firstUserMessage?: string | null;
 }
 
 /**
- * 引継ぎ元候補を選ぶ: 今のスレッドとメッセージ 0 件のスレッドを除き、新しい順に最大 `max` 件。
+ * 引継ぎ元候補を選ぶ: `n make` 済み（引継ぎ書あり）のスレッドだけを、作成が新しい順に最大 `max` 件。
+ * 今のスレッドと `excludeIds`（使用中の引継ぎ元）は除く。
  */
 export function selectHandoverCandidates(
   rows: HandoverThreadRow[],
   currentSessionId: string,
   max: number = HANDOVER_CANDIDATE_MAX,
+  excludeIds: string[] = [],
 ): HandoverThreadRow[] {
   return rows
-    .filter((r) => r.id !== currentSessionId && r.messageCount > 0)
-    .sort((a, b) => (b.lastActiveAt ?? b.startedAt).getTime() - (a.lastActiveAt ?? a.startedAt).getTime())
+    .filter((r) => r.id !== currentSessionId && !excludeIds.includes(r.id) && r.hasHandoverDoc && r.handoverDocAt)
+    .sort((a, b) => b.handoverDocAt!.getTime() - a.handoverDocAt!.getTime())
     .slice(0, max);
 }
 
@@ -91,17 +94,32 @@ export function handoverThreadLabel(row: { id: string; title: string | null; fir
 }
 
 /**
- * 保存済みの引継ぎ書を使い回せるか。
- * 元スレッドで引継ぎ書作成以降に会話（Message）が増えていなければ使い回す（AI は呼ばない）。
+ * 保存済みの引継ぎ書がまだ最新か（作成以降に会話が進んでいないか）。
+ * - `n make` の再実行時: true なら AI を呼ばず前回の引継ぎ書のままにする
+ * - `n` の一覧: false なら「⚠️ 作成後に会話あり」を付ける
+ *
+ * 判定には `Session.lastActiveAt`（プロンプト送信時に `touchSessionActivity` が更新）を使う。
+ * Message の時刻で判定すると、`n make` 自身のコマンド行・AI 応答行（作成後に保存される）を
+ * 「会話あり」と誤判定するため。
  */
 export function canReuseHandoverDoc(input: {
   handoverDoc: string | null;
   handoverDocAt: Date | null;
-  lastMessageAt: Date | null;
+  lastActiveAt: Date | null;
 }): boolean {
   if (!input.handoverDoc || !input.handoverDocAt) return false;
-  if (!input.lastMessageAt) return true;
-  return input.lastMessageAt.getTime() <= input.handoverDocAt.getTime();
+  if (!input.lastActiveAt) return true;
+  return input.lastActiveAt.getTime() <= input.handoverDocAt.getTime();
+}
+
+/** 一覧用の作成日時（今日 13:20 / 昨日 13:20 / 10/29 13:20、ローカル時刻） */
+export function formatHandoverCreated(date: Date, now: Date, lang: 'ja' | 'en'): string {
+  const hm = `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(now) - startOfDay(date)) / (24 * 60 * 60 * 1000));
+  if (days === 0) return lang === 'en' ? `today ${hm}` : `今日 ${hm}`;
+  if (days === 1) return lang === 'en' ? `yesterday ${hm}` : `昨日 ${hm}`;
+  return `${pad2(date.getMonth() + 1)}/${pad2(date.getDate())} ${hm}`;
 }
 
 /**

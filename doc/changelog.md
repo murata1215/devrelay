@@ -6,6 +6,38 @@
 
 ## 実装済み機能
 
+### スレッド引継ぎを「元スレッドで `n make` → 新スレッドで `n` / `n 1`」に変更 (2026-10-31)
+
+初版（87af6a0）は新スレッドの `n` で既存スレッド全部を一覧し、`n 1` の時点で元スレッドの AI に裏で書かせていた。
+`n` の一覧を見ても「引継ぎデータがもうできている」ように見えて分かりにくかったため、作る操作を元スレッドに移した。
+
+- `n make`（元スレッド）: そのスレッドの AI に引継ぎ書を書かせ、`doc/handover/<stamp>_<ID>.md`（未使用）に保存。
+  本文は通常の AI 応答としてチャットに表示・通知される。前回以降に会話が無ければ AI を呼ばない
+- `n`（新スレッド）: `n make` 済みの引継ぎ書だけを作成が新しい順に一覧。作成後に会話が進んだものに「⚠️ 作成後に会話あり」
+- `n 1`: 保存済みの引継ぎ書を設定するだけ（AI を呼ばない）
+- 最新判定を Message の時刻から `Session.lastActiveAt` に変更（`n make` 自身の行で誤判定しないため）
+- `HandoverApplyPayload.targetSessionId` を省略可に（省略 = 未使用ファイルとして保存）、capability `thread-handover-make` を追加
+- 裏ターン用の通知抑止（`setSessionNotifySuppressed`）は不要になったので削除
+
+### ヘルプ（`h`）の最新化とコマンドマニュアル作成 (2026-10-31)
+
+`getHelpText()`（command-parser.ts）がパーサの実装に追随していなかったのを修正（ja/en 両方）。
+- `ag` の版数をハードコード v4 から `AGREEMENT_VERSION`（現 v6）参照に変更
+- 日本語版に欠けていた `u force` を追加（`u!` 別名も明記）
+- 未掲載だった `teamexec` / `te`・`d` / `disconnect`・`testflight cp`・`login cancel`・`l <tool>:<model>`・長形式（`kill`/`session`/`build`/`update`/`agreement`/`exec,`）を追加
+- `sum` は未実装（comingSoon）のため「（準備中）」と明記
+- tests/help-text.test.mjs に回帰テスト 2 件追加（4/4 pass）
+- 社内向け「社内DevRelay コマンドマニュアル.docx」を既存マニュアルの書式で作成（.devrelay-output/）
+
+### 添付ファイルの取り違え対策 (2026-10-31)
+
+Windows の Devin が `20260817 _任意保険….xlsx` を開けず、`Get-ChildItem .devrelay-files -Filter *.xlsx | Select -First 1` で
+代用して古い別の xlsx（入札参加資格マニュアル）を読んだ事故の再発防止。DB の MessageFile で、届いたファイル自体は正しかったことを確認済み。
+
+- `sanitizeSavedFilename`: 空白（全角含む）を `_` に置換（日本語は残す）
+- `buildPromptWithFiles`: パスを `"…"` で囲み、サイズ（例: 73.2 KB）を併記。「このフルパスだけを使い、ワイルドカードや別ファイルで代用しない・開けなければ報告する・PowerShell は -LiteralPath」の注意書きを追加
+- 対象: agents/{linux,macos,windows}/src/services/file-handler.ts。反映は各機で `u`
+
 ### スレッド引継ぎ `n`（next thread）を追加 (2026-10-31)
 
 長くなったスレッドから新しいスレッドへ乗り換えるとき、元スレッドの AI に引継ぎ書を書かせて新スレッドに渡すコマンド。

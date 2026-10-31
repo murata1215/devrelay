@@ -29,3 +29,23 @@ test('getHelpText: `k` の出現位置が「その他」/「Other」見出しよ
   assert.ok(enOtherIndex >= 0, 'en: 「Other」見出しが見つかること');
   assert.ok(enKillIndex < enOtherIndex, 'en: `k` が「Other」より前にあること');
 });
+
+// 2026-10-31: コマンドマニュアル作成サイクル。ヘルプがパーサの実装に追随していることを固定する。
+import { AGREEMENT_VERSION } from '../dist/services/agreement-template.js';
+
+test('getHelpText: ja/en 双方に teamexec・d・u force・login cancel・testflight cp が載っている', () => {
+  for (const lang of ['ja', 'en']) {
+    const t = getHelpText(lang);
+    for (const s of ['`teamexec ', '`d`', '`u force`', '`login cancel`', '`testflight cp ']) {
+      assert.ok(t.includes(s), `${lang}: ${s} が含まれること`);
+    }
+  }
+});
+
+test('getHelpText: Agreement の版数が AGREEMENT_VERSION と一致（ハードコード v4 への回帰防止）', () => {
+  for (const lang of ['ja', 'en']) {
+    const t = getHelpText(lang);
+    assert.ok(t.includes(`Agreement ${AGREEMENT_VERSION}`), `${lang}: Agreement ${AGREEMENT_VERSION}`);
+    assert.ok(!t.includes('Agreement v4'), `${lang}: v4 が残っていないこと`);
+  }
+});

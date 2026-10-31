@@ -32,10 +32,10 @@ export const PROTOCOL_VERSION = 1;
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'thread-handover';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'thread-handover' | 'thread-handover-make';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'thread-handover'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'thread-handover', 'thread-handover-make'];
 
 // -----------------------------------------------------------------------------
 // Capability 配布基盤（サイクルP1）
@@ -429,8 +429,12 @@ export interface HandoverApplyPayload {
   projectPath: string;
   /** 引継ぎ元スレッド（= 引継ぎ書を書いたスレッド）の Session.id */
   sourceSessionId: string;
-  /** 引継ぎ先スレッド（= `n` を打ったスレッド）の Session.id */
-  targetSessionId: string;
+  /**
+   * 引継ぎ先スレッド（= `n 1` を打ったスレッド）の Session.id。
+   * 省略時は「元スレッドで `n make` した引継ぎ書を未使用ファイルとして保存する」だけ
+   * （ポインタは書かない。`'thread-handover-make'` capability を申告した Agent のみ対応）。
+   */
+  targetSessionId?: string;
   /** 引継ぎ先スレッドの agentScopeId（null の旧スレッドは未指定 = `.devrelay/` 直下） */
   targetAgentScopeId?: string;
   /** 引継ぎ書の作成日時（`YYYYMMDD_HHmmss`、サーバーがローカル時刻で採番） */
@@ -958,7 +962,8 @@ export type UserCommand =
   | { type: 'quit' }
   | { type: 'help' }
   | { type: 'ai:list' }   // AI ツール一覧
-  | { type: 'handover:list' }                  // スレッド引継ぎ: 引継ぎ元候補の一覧（`n`）
+  | { type: 'handover:make' }                  // スレッド引継ぎ: 今のスレッドの引継ぎ書を作る（`n make`、元スレッドで）
+  | { type: 'handover:list' }                  // スレッド引継ぎ: 作成済み引継ぎ書の一覧（`n`、新スレッドで）
   | { type: 'handover:pick'; number: number }  // スレッド引継ぎ: 候補を選んで引継ぐ（`n 1`）
   | { type: 'ai:switch'; tool: AiTool }
   | { type: 'model:list'; tool?: ModelSelectableAiTool }  // AI モデル一覧（#309: tool 省略時は現在セッションのツール）

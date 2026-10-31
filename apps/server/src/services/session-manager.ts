@@ -38,18 +38,6 @@ import { isUpdateBusyGuardEnabled } from './update-busy-rules.js';
 // Active sessions: sessionId -> Session participants
 const sessionParticipants = new Map<string, Array<{ platform: Platform; chatId: string }>>();
 
-/**
- * スレッド引継ぎ（`n`）: 引継ぎ書を書かせる裏ターンの完了時に、プッシュ通知・FCM・通知レコードを
- * 出さないセッション。finalizeProgress が 1 回使ったら消す（失敗・タイムアウト時は呼び出し側が消す）。
- */
-const notifySuppressedSessions = new Set<string>();
-
-/** 次の finalizeProgress で通知を出さない（on=false で取り消し） */
-export function setSessionNotifySuppressed(sessionId: string, on: boolean): void {
-  if (on) notifySuppressedSessions.add(sessionId);
-  else notifySuppressedSessions.delete(sessionId);
-}
-
 /** 指定セッションの参加者一覧を取得 */
 export function getSessionParticipants(sessionId: string): Array<{ platform: Platform; chatId: string }> {
   return sessionParticipants.get(sessionId) || [];
@@ -839,11 +827,6 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
         // 配信は失敗してもターンは完了扱いにする（でなければ running が恒久的に true のまま張り付く）。
         console.error(`[SessionManager] finalizeProgress: failed to deliver to ${platform}/${chatId} for session ${sessionId}:`, (err as Error).message);
       }
-    }
-
-    // スレッド引継ぎ（`n`）の裏ターンは通知しない（ユーザーは引継ぎ先スレッドで結果を受け取る）
-    if (notifySuppressedSessions.delete(sessionId)) {
-      return;
     }
 
     // プッシュ通知（タブが閉じていても届く）

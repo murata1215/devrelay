@@ -271,6 +271,8 @@ export function isTraditionalCommand(input: string): boolean {
 
   // 'n 1' 等（スレッド引継ぎの候補選択）- 1文字キーの特殊パターン
   if (/^n\s+\d+$/i.test(trimmed)) return true;
+  // 'n make'（スレッド引継ぎの引継ぎ書作成）
+  if (/^n\s+make$/i.test(trimmed)) return true;
 
   // 'l' (モデル一覧), 'l sonnet', 'l plan:haiku', 'l exec:opus' 等（モデル選択）
   if (trimmed === 'l' || /^l\s+.+$/i.test(trimmed)) return true;

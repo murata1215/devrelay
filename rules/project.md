@@ -2767,18 +2767,29 @@ WebUI のチャット本文に Markdown レンダリング（テーブル対応�
 
 仕様は `doc/thread-management-spec.md` §11。設計判断の要点:
 
-1. **引継ぎ書は元スレッドの AI 自身に書かせる**（サーバー側 LLM 要約ではない）。全文脈（resume 中のセッション・
-   触ったファイル）を知っているのは元スレッドの AI だけで、追加の API キーも要らない。裏ターンは
-   `pendingCrossQueries` 方式で、元スレッドの `agentScopeId` で `server:session:start` してから送る
-   （一時セッションを作る `executeCrossProjectQuery` とは違い、実在スレッドの文脈を使う）。
-2. **裏ターンは project 単位の副作用を止める**: Agent は毎ターン `.devrelay-output/` を消すため
-   `handoverTurn: true` で抑止し、`finalizeProgress` の通知は `setSessionNotifySuppressed` で 1 回だけ止める。
-   進捗トラッキングも開始しない（今のチャットに元スレッドの途中経過を流さない）。
+1. **引継ぎ書は元スレッドの AI 自身に書かせ、作るのは元スレッドの `n make`**（2026-10-31 改訂。初版は新スレッドの
+   `n 1` の時点で元スレッドに裏ターンを走らせていた）。全文脈（resume 中のセッション・触ったファイル）を知っているのは
+   元スレッドの AI だけで、追加の API キーも要らない。作る操作を元スレッドに置くことで、ユーザーは書かれた本文を
+   その場で読めるし、新スレッドの `n 1` は AI を呼ばずに即座に終わる。ターンは `pendingCrossQueries` 方式で、
+   スレッドの `agentScopeId` で `server:session:start` してから送る。
+2. **ターンは project 単位の副作用を止める**: Agent は毎ターン `.devrelay-output/` を消すため `handoverTurn: true` で
+   抑止する。通知は抑止しない（今いるスレッドでの操作なので、他の AI 返答と同じく完了を通知する）。
 3. **保存は `doc/handover/`（git 管理）＋ DB（`handoverNote` / `handoverDoc`）＋ scope dir の `handover.json`**。
-   ファイルは人が読み `w` でコミットされる履歴、DB は使い回し判定と控え、`handover.json` は Agent が毎ターン
+   ファイルは人が読み `w` でコミットされる履歴、DB は一覧・最新判定と控え、`handover.json` は Agent が毎ターン
    注入に使う控えと pending 印。ファイルが消されても注入は続く。
 4. **注入は conversation.json に混ぜない**。exec マーカーで履歴が切られても引継ぎは残る。条件は
    「履歴を注入する条件」または pending（引継ぎ・差し替え直後の 1 回。resume 中の Claude にも確実に届けるため）。
-5. **使い回し判定の時刻は AI 応答の Message 行が保存されてから記録する**。`handleAiOutput` は pending を
-   resolve した後に非同期で行を作るので、先に `handoverDocAt` を書くと「作成以降に会話あり」と常に誤判定される。
-6. **Windows Electron Agent は capability `thread-handover` を申告しない**（未実装を申告しない。raw-completion と同じ流儀）。
+5. **「作成後に会話が進んだか」は `Session.lastActiveAt` で判定する**（Message の時刻ではない）。`n make` 自身の
+   コマンド行（WebUI の永続化）と AI 応答行は作成後に保存されるため、Message で判定すると常に「会話あり」になる。
+   `lastActiveAt` はプロンプト送信時（`touchSessionActivity`）にしか動かず、`n make` のターンでは更新されない。
+6. **Windows Electron Agent は capability `thread-handover` / `thread-handover-make` を申告しない**（未実装を申告しない。raw-completion と同じ流儀）。
+
+## 添付ファイルのパスは「AI が代用できない形」で渡す（2026-10-31）
+
+Windows の Devin が空白入りの xlsx 名を開けず、`Get-ChildItem .devrelay-files -Filter *.xlsx | Select -First 1` で
+古い別ファイルを読んだ事故の対策（`agents/{linux,macos,windows}/src/services/file-handler.ts`）。
+
+- 保存名の空白（全角含む）は `_` に置換する（日本語は残す）。シェルの引用漏れで開けなくなる余地を減らす
+- `buildPromptWithFiles` はパスを `"…"` で囲みサイズを併記し、「このフルパスだけを使う・ワイルドカードや別ファイルで
+  代用しない・開けなければ報告する・PowerShell は -LiteralPath」を明記する。`.devrelay-files/` には過去の添付が
+  残るため、AI が「それらしいファイル」で代用すると静かに誤答する（#325 静かなフォールバック禁止と同じ考え方）

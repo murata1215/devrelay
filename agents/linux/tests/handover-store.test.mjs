@@ -128,6 +128,22 @@ test('applyHandover: 同じ元スレッドの古い未使用ファイルを消�
   });
 });
 
+test('applyHandover（n make）: 未使用ファイルを書き、古い未使用を消し、ポインタは書かない', async () => {
+  await withProject(async (project) => {
+    const first = await applyHandover({ projectPath: project, sourceSessionId: SRC, stamp: '20261031_105130', content: 'v1' });
+    assert.equal(first.fileName, `20261031_105130_${SRC}.md`);
+    const second = await applyHandover({ projectPath: project, sourceSessionId: SRC, stamp: '20261031_130000', content: 'v2' });
+    assert.equal(second.fileName, `20261031_130000_${SRC}.md`);
+    assert.deepEqual(await listHandover(project), [`20261031_130000_${SRC}.md`]);
+    assert.equal(await readFile(join(project, 'doc', 'handover', second.fileName), 'utf-8'), 'v2');
+    assert.equal(await loadActiveHandover(project, SRC), null);
+
+    // その後 n 1 で使うと、未使用ファイルが使用中名にリネームされる
+    await applyHandover({ projectPath: project, sourceSessionId: SRC, targetSessionId: TGT, targetAgentScopeId: TGT, stamp: '20261031_130000', content: 'v2' });
+    assert.deepEqual(await listHandover(project), [`20261031_130000_${SRC}_${TGT}.md`]);
+  });
+});
+
 test('applyHandover: 旧スレッド（agentScopeId 無し）は .devrelay/ 直下にポインタを書く', async () => {
   await withProject(async (project) => {
     await applyHandover({ projectPath: project, sourceSessionId: SRC, targetSessionId: TGT, stamp: '20261031_105130', content: 'A' });

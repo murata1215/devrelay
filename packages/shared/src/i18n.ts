@@ -76,12 +76,33 @@ export const chatMessages = {
     ja: '⚠️ 現在「{title}」の引継ぎを使っています。別の引継ぎを使うと元の引継ぎは消えます。',
   },
   'handover.empty': {
-    en: '📋 There are no other threads in this project to hand over from.',
-    ja: '📋 このプロジェクトには引継ぎ元にできる他のスレッドがありません。',
+    en: '📋 There are no handover notes yet. Send `n make` in the original thread to create one.',
+    ja: '📋 引継ぎ書がありません。元のスレッドで `n make` を送って作ってください。',
   },
+  'handover.listItem': {
+    en: '{index}. {title} (created: {created}){stale}',
+    ja: '{index}. {title}（作成: {created}）{stale}',
+  },
+  'handover.staleMark': { en: ' ⚠️ conversation continued after it was created', ja: ' ⚠️ 作成後に会話あり' },
   'handover.notConnected': {
-    en: '⚠️ Not connected to a thread. Open the new thread first, then send `n`.',
-    ja: '⚠️ スレッドに接続していません。引継ぎ先の新しいスレッドを開いてから `n` を送ってください。',
+    en: '⚠️ Not connected to a thread. Open the thread first, then send `n` / `n make`.',
+    ja: '⚠️ スレッドに接続していません。スレッドを開いてから `n` / `n make` を送ってください。',
+  },
+  'handover.makeAgentOutdated': {
+    en: '⚠️ This agent does not support `n make` yet. Update it with `u`.',
+    ja: '⚠️ このエージェントは `n make` に未対応です。`u` で更新してください。',
+  },
+  'handover.makeEmptyThread': {
+    en: '⚠️ This thread has no conversation yet, so there is nothing to hand over.',
+    ja: '⚠️ このスレッドにはまだ会話が無いので、引継ぐ内容がありません。',
+  },
+  'handover.made': {
+    en: '✅ Handover note created: `doc/handover/{file}`\nSend `n` in the new thread and pick it.',
+    ja: '✅ 引継ぎ書を作成しました: `doc/handover/{file}`\n新しいスレッドで `n` を送って選んでください。',
+  },
+  'handover.makeUnchanged': {
+    en: '♻️ No new conversation since the last handover note, so it stays as is: `doc/handover/{file}`\nSend `n` in the new thread and pick it.',
+    ja: '♻️ 前回の引継ぎ書の作成以降に会話が無いので、そのまま使えます: `doc/handover/{file}`\n新しいスレッドで `n` を送って選んでください。',
   },
   'handover.disabled': { en: '⚠️ Thread handover is disabled on this server.', ja: '⚠️ このサーバーではスレッド引継ぎが無効になっています。' },
   'handover.offline': { en: '⚠️ The agent is offline.', ja: '⚠️ エージェントがオフラインです。' },
@@ -106,12 +127,8 @@ export const chatMessages = {
     ja: '⚠️ 引継ぎ処理が進行中です。少しお待ちください。',
   },
   'handover.generating': {
-    en: '📝 Asking the AI of "{title}" to write a handover note...',
-    ja: '📝 「{title}」の AI に引継ぎ書を書いてもらっています...',
-  },
-  'handover.reusing': {
-    en: '♻️ No new conversation in "{title}" since the last handover note, so it is reused.',
-    ja: '♻️ 「{title}」は前回の引継ぎ書の作成以降に会話が無いので、保存済みの引継ぎ書を使います。',
+    en: '📝 Asking the AI of this thread to write a handover note...',
+    ja: '📝 このスレッドの AI に引継ぎ書を書いてもらっています...',
   },
   'handover.done': {
     en: '✅ Handover complete.\nFrom: {title}\nFile: `doc/handover/{file}`\n\n{preview}',

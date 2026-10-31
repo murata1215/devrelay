@@ -328,15 +328,16 @@ Bot: 🤖 Working on it...
 | `e` / `exec` | Switch to execute mode (approve plan) |
 | `e, <instruction>` | Execute custom instruction directly |
 | `w` | Wrap up: update docs + commit + push (post-implementation only; reports "nothing to commit" if the tree is clean). Outside a git repo it skips commit/push and only updates docs, creating README.md / MEMORY.md if missing |
-| `se` / `session` | Show session info |
+| `s` / `session` | Show session info |
 | `ag` / `agreement` | Apply DevRelay Agreement v6 (creates `rules/devrelay.md`) |
 | `link` | Link Discord/Telegram account to WebUI |
 | `1`, `2`, `3`... | Select from list |
 | `u` / `update` | Check agent version / remote update (requires double confirmation) |
 | `k` / `kill` | Cancel running AI process |
 | `x` | Clear conversation history (requires double confirmation) |
-| `n` | Thread handover (next thread): in a new thread, list other threads of the same project (up to 9, newest first) |
-| `n 1` | Have that thread's AI write a handover note, save it to `doc/handover/YYYYMMDD_HHmmss_<sourceThreadId>_<newThreadId>.md` and inject it into this thread (the source thread is kept; reuses the saved note if nothing changed). Kill switch: `DEVRELAY_THREAD_HANDOVER=0` |
+| `n make` | Thread handover (next thread): in the original thread, have its AI write a handover note and save it to `doc/handover/YYYYMMDD_HHmmss_<sourceThreadId>.md` (no AI call if nothing changed since the last `n make`) |
+| `n` | In the new thread, list the handover notes created in this project (up to 9, newest first; ⚠️ marks notes whose thread continued afterwards) |
+| `n 1` | Use that note in this thread: renamed to `..._<newThreadId>.md` and injected into the AI's context (the source thread is kept). Kill switch: `DEVRELAY_THREAD_HANDOVER=0` |
 | `q` | Disconnect |
 | `ask <project>: <question>` | Ask another project's agent a question |
 | `teamexec <project>: <instruction>` | Send exec request to another project's agent |

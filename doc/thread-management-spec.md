@@ -184,11 +184,12 @@ plan ファイルの S1〜S8 を全て **sessionId キー**に直す。
 
 長くなったスレッドから新しいスレッドへ乗り換えるとき、元スレッドの AI に「引継ぎ書」を書かせて新スレッドに渡す。
 
-### 操作
-- 新しいスレッドで `n` → 同じプロジェクトの他スレッドを最大 9 件、新しい順に表示（今のスレッド・メッセージ 0 件・MCP 質問ターン・使用中の引継ぎ元は除く）。使用中の引継ぎがあれば「別の引継ぎを使うと元の引継ぎは消えます」を添える
-- `n 1`（または一覧直後の `1`）→ 元スレッドの AI に引継ぎ書を書かせて（裏で 1 ターン、読み取り専用）、今のスレッドに設定。「引継ぎを完了しました」＋冒頭プレビューを返す
-- 元スレッドで前回の引継ぎ書作成以降に会話が無ければ、保存済みの引継ぎ書を使い回す（AI を呼ばない）
+### 操作（2026-10-31 改訂: 作るのは元スレッドの `n make`、新スレッドの `n 1` は選ぶだけ）
+- **元スレッドで `n make`** → そのスレッドの AI に引継ぎ書を書かせる（読み取り専用の 1 ターン）。AI の返答（本文）は通常の応答と同じくチャットに表示・プッシュ通知され、続けて「✅ 引継ぎ書を作成しました: `doc/handover/<stamp>_<ID>.md`」を返す。前回の `n make` 以降に会話（`Session.lastActiveAt`）が進んでいなければ AI を呼ばず「そのまま使えます」と返す。会話の無いスレッドでは断る
+- **新しいスレッドで `n`** → このプロジェクトの `n make` 済みスレッドを、作成が新しい順に最大 9 件表示（今のスレッド・使用中の引継ぎ元は除く）。各行に作成日時、作成後に元スレッドで会話が進んでいれば「⚠️ 作成後に会話あり」（選ぶことはできる）。0 件なら「元のスレッドで `n make` を送って作ってください」。使用中の引継ぎがあれば「別の引継ぎを使うと元の引継ぎは消えます」を添える
+- **`n 1`**（または一覧直後の `1`）→ 保存済みの引継ぎ書を今のスレッドに設定（AI は呼ばない）。「引継ぎを完了しました」＋冒頭プレビューを返す
 - 元スレッドは終了させない（残す）。確認・編集画面は未実装
+- 「会話が進んだか」は `lastActiveAt`（プロンプト送信時に `touchSessionActivity` が更新）で判定する。Message の時刻だと `n make` 自身のコマンド行・AI 応答行を「会話あり」と誤判定するため
 
 ### 保存先（`<projectPath>/doc/handover/`、git 管理）
 - 未使用: `YYYYMMDD_HHmmss_<元スレッドID>.md` / 使用中: `YYYYMMDD_HHmmss_<元スレッドID>_<新スレッドID>.md`（ID は全桁、要約はファイル名に入れない。日時は作成時刻でリネームしても変えない）
@@ -202,9 +203,9 @@ plan ファイルの S1〜S8 を全て **sessionId キー**に直す。
 - conversation.json には混ぜないので exec マーカーで消えない。ターミナルモードと引継ぎ書作成ターン自身には付けない
 
 ### 実装
-- server: `thread-handover-rules.ts`（純関数）、`command-handler.ts`（`handleHandoverList` / `handleHandoverPick` / `performHandover`）、`agent-manager.ts`（`runHandoverTurn` / `applyHandoverOnAgent`）、`session-manager.ts`（`setSessionNotifySuppressed` で裏ターン完了時のプッシュ通知を抑止）
-- 裏ターンは `pendingCrossQueries` 方式で、元スレッドの `agentScopeId` で `server:session:start` → `server:ai:prompt`（`handoverTurn: true`、`.devrelay-output/` を消さない）。進捗トラッキングは開始しないので今のチャットに途中経過は流れない
-- WS: `server:handover:apply` / `agent:handover:applied`。capability `thread-handover`（linux/macos が申告、Windows Electron 版は未実装のため申告しない）
+- server: `thread-handover-rules.ts`（純関数）、`command-handler.ts`（`handleHandoverMake` / `handleHandoverList` / `handleHandoverPick` / `performHandover`）、`agent-manager.ts`（`runHandoverTurn` / `applyHandoverOnAgent`）
+- `n make` のターンは `pendingCrossQueries` 方式で、スレッドの `agentScopeId` で `server:session:start` → `server:ai:prompt`（`handoverTurn: true`、`.devrelay-output/` を消さない・引継ぎブロックを注入しない）。完了後、AI 応答の Message 行が保存されるのを待ってから完了メッセージを返す（本文の表示が先になるように）
+- WS: `server:handover:apply`（`targetSessionId` 省略 = `n make` の未使用ファイル保存、あり = `n 1` の適用）/ `agent:handover:applied`。capability `thread-handover`（`n 1`）と `thread-handover-make`（`n make`）を linux/macos が申告、Windows Electron 版は未実装のため申告しない
 - agent: `handover-store.ts`（linux/macos で byte-for-byte 同一）
 - DB: Session に `handoverFromSessionId` / `handoverNote` / `handoverStamp`（引継ぎ先）、`handoverDoc` / `handoverDocAt` / `handoverDocStamp`（引継ぎ元・使い回し用）。すべて nullable・FK なし・backfill なし
-- 断るケース: 今のスレッドか元スレッドが実行中、ターミナルモード、Agent オフライン／未対応、キルスイッチ `DEVRELAY_THREAD_HANDOVER=0`（このとき `n` は従来どおり AI へのプロンプト）
+- 断るケース: 今のスレッドが実行中、ターミナルモード、Agent オフライン／未対応、`n make` で会話の無いスレッド、キルスイッチ `DEVRELAY_THREAD_HANDOVER=0`（このとき `n` / `n make` / `n 1` は従来どおり AI へのプロンプト）
