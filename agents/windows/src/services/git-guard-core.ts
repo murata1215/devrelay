@@ -33,10 +33,13 @@ export interface PorcelainEntry {
 export type RestoreAction = 'checkout' | 'quarantine' | 'skip';
 
 /**
- * 復元対象から除外するディレクトリ（DevRelay 自身の作業領域・成果物出力先・.git 内部）。
+ * 復元対象から除外するディレクトリ（DevRelay 自身の作業領域・成果物出力先・.git 内部・Devin 自身のセッション状態）。
  * `.devrelay-output/` はユーザー向け成果物の出力先のため、誤って巻き戻すと成果物が消える。
+ * `.devin/` は Devin CLI 自身のセッション状態・設定ディレクトリ（Devin ガードレール調査サイクルで判明した潜在バグ:
+ * 除外対象に無かったため、plan ターン終了時に未追跡の `.devin/` 配下が `.devrelay/reverted/` へ quarantine される
+ * リスクがあった。Devin 自身の管理領域を DevRelay が巻き戻す必要は無いため除外する）。
  */
-const GUARD_EXCLUDED_PATTERN = /(^|\/)(\.git|\.devrelay|\.devrelay-output)(\/|$)/;
+const GUARD_EXCLUDED_PATTERN = /(^|\/)(\.git|\.devrelay|\.devrelay-output|\.devin)(\/|$)/;
 
 /**
  * `git status --porcelain=v1 -z --untracked-files=all` の生出力（NUL 区切り）をパースする。

@@ -6,6 +6,45 @@
 
 ## 実装済み機能
 
+### Devin CLI ガードレール サイクル1: 純関数エンジン + Phase 0 手順書（未配線） (2026-11-05)
+
+ユーザー要望「Devin CLI にガードレールを作りたい（`rm` 禁止/承認制・本番 IP レンジ参照不可）」への
+対応サイクル1。`doc/devin_gate_investigation.md`（サイクル D0）が残した「#362〜#368 の6サイクルの
+失敗は allow-list 方式に構造的に起因していた（allow に書き漏れたコマンドが『承認待ち』に落ち無音
+exit 0 になる）」という教訓を踏まえ、**allow/ask を一切生成しない deny-only の構成**に限定した
+純関数モジュール `devin-guard-rules.ts`（`agents/{linux,macos,windows}/src/services/`、外部 import
+ゼロ・3 OS byte-for-byte 同一）を新設した。`isValidDevinPermissionRule()` が `Exec()` 内の glob
+（`Exec(**)` 等、公式ドキュメント実測で無効ルールと判明済み）を構造的に拒否し、
+`buildDevinGuardOrgPolicy()` が Devin 組織ダッシュボード（Terminal Permissions）に貼り付ける
+`{deny, ask:[], allow:[]}` を生成する。`rm` は「プロジェクト外のみ禁止」の条件付き表現が
+`Exec()` のプレフィックス一致では原理的に不可能なため意図的に未収録（ユーザー判断事項として
+`doc/devin_guardrail_phase0.md` に記録）。
+
+併せて独立した潜在バグを修正: `git-guard-core.ts` の `GUARD_EXCLUDED_PATTERN` に `.devin` を追加
+（3 OS）。Devin 自身のセッション状態ディレクトリが除外対象に無く、plan ターン終了時に
+`.devrelay/reverted/` へ quarantine されるリスクがあった。
+
+**本サイクルでは `ai-runner.ts` の devin spawn 分岐への配線は行っていない**（`--permission-mode
+dangerous` が user/project レベルの `deny` を上書きしないか等、実機でしか確定できない Phase 0 の
+検証が未完了のため）。対象機（`DESKTOP-Q43QT7L/fwjg2` の `TestClock`）は Team ページ未登録で
+`devrelay-ask-member` 経由の指示も送れず、本セッションからは検証を実行できなかった。Phase 0 の
+手順・組織ダッシュボード貼り付け用 JSON（ビルド済みモジュールから生成し記録、手書きではない）・
+残課題は `doc/devin_guardrail_phase0.md` を参照。
+
+検証: `pnpm build` 6 workspace green。`node --test` で `agents/linux` 1275/1275・`agents/macos`
+757/757（新規 `devin-guard-rules.test.mjs` 26 ケース含む、既存含め非退行）、3 OS 間
+byte-for-byte 同一性を `diff` で確認。新規モジュールは未配線のため挙動変更ゼロ、`git-guard-core.ts`
+の修正は除外対象を広げるだけで既存挙動を狭めない。
+
+#### 変更ファイル
+新規 `agents/{linux,macos,windows}/src/services/devin-guard-rules.ts`、
+`agents/{linux,macos}/tests/devin-guard-rules.test.mjs`、`doc/devin_guardrail_phase0.md`。
+既存 `agents/{linux,macos,windows}/src/services/git-guard-core.ts`、
+`agents/{linux,macos}/tests/git-guard-core.test.mjs`。`apps/server`/`apps/web`/DB 無変更のため
+server 再起動不要。**Agent の `u` は本サイクル単独では不要**（新規モジュールは未配線、
+`git-guard-core.ts` の修正は Devin の plan ターンを使うマシンでのみ意味を持つ軽微な修正）。
+
+
 ### gemini plan→exec resume（MCP approve_implementation の planAiSessionMissing 根治） (2026-10-27)
 
 MCP `submit_instruction` → `get_plan` → `approve_implementation` 経路が gemini プロジェクトだけ
