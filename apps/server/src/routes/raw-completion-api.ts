@@ -141,7 +141,16 @@ export function registerRawCompletionRoutes(app: FastifyInstance) {
     }
 
     // #295 と同じ Team 登録チェック（クロスプロジェクト系と同じ「宛先は Team 登録済みのみ」の原則）
-    const allowed = await checkCrossTargetAllowed(auth.machineId, auth.userId, targetProjectId);
+    // クロスユーザー非対応で据え置き（やらないこと §6: seat/流量制御が userId 単位で課金直結のため）。
+    // 139 の所有者チェックで同一ユーザーのみここまで到達するため allowCrossUser は常に false。
+    const allowed = await checkCrossTargetAllowed({
+      callerMachineId: auth.machineId,
+      callerUserId: auth.userId,
+      targetProjectId,
+      targetMachineUserId: targetProject.machine.userId,
+      mode: 'ask',
+      allowCrossUser: false,
+    });
     if (!allowed.allowed) {
       return reply.status(403).send({ error: 'Target project is not registered in a team', code: 'notAllowed' });
     }

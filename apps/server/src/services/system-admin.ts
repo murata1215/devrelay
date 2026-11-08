@@ -50,8 +50,15 @@ export function parseSystemAdminEmails(raw: string | undefined): string[] {
  * 現在の環境変数からシステム管理者 allowlist を読み出す。
  *
  * モジュールロード時にキャッシュせず、呼び出しごとに `process.env` を読む
- * （`.env` は `dotenv/config` によりプロセス起動のたびにディスクから読み直されるため、
- * サーバー再起動のみで allowlist の更新が反映される想定 — #340 と同じ考え方）。
+ * （`.env` は `dotenv/config`（`src/index.ts:1`）によりプロセス起動のたびに
+ * ディスクから読み直されるため、サーバー再起動のみで allowlist の更新が反映される想定 —
+ * #340 と同じ考え方）。
+ *
+ * ⚠️ 2026-11-08 判明: `dotenv/config` はパス指定なしなので `process.cwd()` 基準で
+ * `.env` を探す。pm2 の `devrelay-server` は `exec cwd=/opt/devrelay`（= リポジトリルート、
+ * `apps/server` ではない）で起動するため、実際に読まれるのは
+ * **`/opt/devrelay/.env`**（`apps/server/.env` へのシンボリックリンク）。
+ * `apps/server/.env` を直接編集しても、symlink 経由でしか本番に反映されない。
  */
 export function getSystemAdminAllowlist(): string[] {
   return parseSystemAdminEmails(process.env.DEVRELAY_SYSTEM_ADMIN_EMAILS);

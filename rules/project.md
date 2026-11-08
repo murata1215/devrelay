@@ -1437,6 +1437,117 @@ Agent 接続成功時に `~/.claude/skills/devrelay-docs/` を作成・更新:
 - `TeamMember`: Team に属するプロジェクト（`@@unique([teamId, projectId])`、`onDelete: Cascade`）
 - 旧 `ProjectMember` モデル（プロジェクト→プロジェクトの1対多）は #160 で廃止
 
+### クロスユーザー Team（別ユーザーのエージェントと ask で連携、Phase 0 + Phase 1, 2026-11-05）
+
+通常の Team/TeamMember は単一ユーザー所有（`Team.userId` 1 つ）。別ユーザーのプロジェクトを
+ask の宛先にするには「招待 → 受入側が自分のプロジェクトを選んで承認」の経路が必要で、
+`api.ts` の `POST /api/teams/:teamId/members` の所有者チェック（`project.machine.userId !== userId
+→ 404`）は**一切変更しない**（クロスの TeamMember 行はこの経路を一切通らず、下記の専用経路
+だけが作る。2 キー方式をアプリロジックではなく経路で強制する設計）。
+
+**新規テーブル**:
+- `CrossTeamInvite`: pending の持ち場。`status`（pending/accepted/declined/revoked）は**認可判定には
+  一切使わない**
+- `CrossTeamGrant`: 認可の唯一の根拠。「行が存在し `revokedAt IS NULL`」の 2 条件のみで
+  deny-by-default を構造的に保証する。`teamMemberId` に `onDelete: Cascade`（TeamMember を
+  外せば grant も消える。ゴースト権限を残さない判断を「権限系は FK を張らない」規約より優先）
+- `CrossTeamAuditLog`: append-only、FK 無し（`SupervisionAuditLog`/`KnowledgeChunk` と同じ規約）
+- `Session.requestedByUserId`（nullable, FK 無し）: 既存行は全て NULL（backfill 絶対禁止）
+
+**2 つの userId の分離**（最重要の設計判断）:
+- `executorUserId` = 宛先マシン所有者（`targetProject.machine.userId`）。AI 実行・モデル・言語・
+  課金・`Session.userId`・BuildLog・KnowledgeChunk の帰属先に使う
+- `requesterUserId` = 依頼者（machine token の持ち主、または chat の dbUserId）。監査・レート
+  制限・`Session.requestedByUserId`・HTTP 回答配信に使う
+- `sendPromptToAgent`（`agent-manager.ts`）には**常に executorUserId を渡す**。依頼者 userId を
+  渡すと、他人の API キー・モデル設定が宛先マシンで使われ、組織 AI デフォルト統制
+  （`Organization.aiModelDefaults`）も迂回されてしまうため
+- 同一ユーザー経路では両者が常に同値 → 既存クエリ結果・ログ・DB 書き込みは 1 件も変わらない
+
+**単一の拡張点**: `document-api.ts` の `checkCrossTargetAllowed()` をオブジェクト引数化し、
+`targetMachineUserId === callerUserId`（同一ユーザー）なら既存ロジックに完全委譲、別ユーザー
+なら `allowCrossUser: true` かつ `DEVRELAY_CROSS_TEAM` が有効なときのみ
+`cross-team-authz.ts` の `resolveCrossTeamAccess()` → `cross-team-guard.ts` の純関数
+`decideCrossTeamAccess()`（DB 非依存）で判定する。判定順: キルスイッチ →
+組織境界（`OrganizationMember.organizationId` 一致、実行時に毎回再検証。grant のスナップショット
+ではない）→ 宛先所有者スナップショット一致 → revoked → 第三者ブリッジ禁止（発信者が
+その Team のオーナー本人であること。A のチームに B・C が個別同意しても B→C は到達不可）→
+mode フラグ（ask/exec）。**クロスの拒否は常に 404**（存在を漏らさない。同一ユーザーの
+「Team 未登録」403 案内とは経路を分離）。`ask-member` のみ `allowCrossUser: true`。
+`teamexec-member`/`GET /api/agent/messages`/`raw-completion-api.ts` は明示的に
+`allowCrossUser: false` で据え置き（teamexec は Phase 2、他 2 つはスコープ外）。
+
+**情報漏えい対策**: `GET /api/agent/members` と `buildUnregisteredTargetMessage()`（403 未登録
+案内）は、auth.machineId が属する Team の全メンバーを無条件で返す実装だったため、クロス行が
+1 つでもあると「自分が Team オーナーでない単なる grantee」の立場でも他メンバーのプロジェクト名
+が見えてしまう。`team.userId === auth.userId || project.machine.userId === auth.userId` で
+フィルタし、OFF 状態（全行が同一所有者）では何も除外しない形にした。
+
+**キルスイッチ**: `DEVRELAY_CROSS_TEAM`（既定 `0` = OFF。既存キルスイッチの多数派と逆方向。
+新しい信頼境界を黙って開けないため）、`DEVRELAY_CROSS_TEAM_EXEC`（既定 `0`、Phase 2 用の
+先行配線。3 条件 AND でのみ teamexec が通る）。
+
+**Phase 2 で必須の対応（未実装）**: teamexec を解禁する際、ツール承認カード
+（`ToolApproval`/`AskUserQuestion`）の配信先を現状の「発信元セッションの participants コピー」
+から「宛先マシン所有者への push 通知」に変更する必要がある。依頼者が他人のマシンのツール承認を
+押せるのは越権のため。
+
+**2026-11-08 実機テスト（個人組織・gmail+yahoo）で確認・修正した 2 件**:
+1. `resolveCrossTargetByName()` の同名衝突エラーが案内する「表示名を変えて一意にする」が
+   機能しないバグ。照合が `label(p) === needle || p.name === needle` という OR 条件で、
+   `name`（ディレクトリ名、リネームしても不変）を `displayName`（表示名、変更可）の副次キー
+   として混ぜていた。照合ロジックを `services/cross-target-name-match.ts` の
+   `matchCrossTargetCandidates()`（照合キーは表示名ひとつに統一）に切り出して修正
+2. 本番 `apps/server/.env` が `dotenv/config`（cwd 基準、パス指定なし）に実際には読まれて
+   いなかった問題。pm2 の `devrelay-server` の `exec cwd` は `/opt/devrelay`（リポジトリ
+   ルート）であり `apps/server` ではないため。`/opt/devrelay/.env → apps/server/.env` の
+   symlink で解決（詳細は CLAUDE.md の環境変数セクション参照）
+
+実機テストでは招待 → 承認 → `CrossTeamGrant` 発行 → ask 往復 → `CrossTeamAuditLog`
+（request/completed）→ コスト計上（`Session.userId`=執行者側に `costUSD` が付く）まで
+設計どおり動くことを確認した。詳細は `doc/devlog/2026-11-08_cross_team_phase1_real_world_test.md`。
+
+実機テストで一連のサイクル（招待の複数選択・再招待の行き止まり修正・招待候補フィルタ修正）
+をフル往復テストし、全て設計どおり動作することを DB で確認した（複数選択の承認が単一
+トランザクションで 3ms 差の 2 行を作成、監査ログがプロジェクト 1 件につき 1 行記録される、等）。
+`ask` の宛先解決も、同一プロジェクトが複数チームに公開されるケースで `projectId` ベースの
+重複排除により候補が 1 件に収束することを確認済み（同名衝突は起きない）。
+詳細は `doc/devlog/2026-11-08_cross_team_shared_list_team_name.md`。
+
+**実機テストで見つかった UX 課題のうち 5 件を解消済み**:
+- （2026-11-08、`doc/devlog/2026-11-08_cross_team_sharing_ux.md`）招待 UI の文言が過剰共有を
+  招く問題 → 「チームへの参加を依頼」→「あなたのプロジェクトへの質問（ask）許可を求めて
+  います」に変更 + 契約消費の警告を追加
+- （同上）貸す側（grantee）が「自分のどのプロジェクトが誰に公開されているか」を見る UI が
+  無い問題 → 新規 `GET /api/teams/shared-by-me` + WebUI「公開中のプロジェクト」セクションで
+  解消（公開型＝Team を公開し同一組織内の利用者が選んで組み込む、を実装する前の必須条件だった）
+- （2026-11-08、`doc/devlog/2026-11-08_cross_team_multi_accept.md`）招待の承認が単一プロジェクト
+  選択（クリック即確定）だった問題 → チェックボックス方式の複数選択 + 「選択した N 件を公開
+  して承認」ボタンに変更。併せて「承認 → 公開を停止 → 再招待」が永久に 409 で拒否される
+  行き止まりバグ（`invite.status` が `accepted` のまま放置される一方、招待作成側に
+  `status === 'accepted'` 時の 409 ガードがあったため）を修正し、常に再招待できるようにした
+- （2026-11-08、`doc/devlog/2026-11-08_cross_team_invite_candidates_ui_fix.md`）上記の
+  サーバー側修正をデプロイ後、実機で「再招待できない」が再発。原因はサーバーではなく
+  `TeamPage.tsx` の招待候補フィルタが既存クロスメンバーの所有者を候補から除外したまま
+  だったため（1 招待=1 プロジェクトだった旧モデル用の除外が、サーバー側で広げた
+  「再招待=プロジェクト追加」の道を UI 側で塞いでいた）。新規純関数
+  `cross-team-invite-rules.ts` の `selectInvitableCandidates()` に切り出し、既存メンバーは
+  `alreadyContributing: true` の注釈付きで候補に残すよう修正。**教訓**: サーバー側の権限
+  モデルを広げる変更をしたときは、同じ理由で書かれた UI 側の対称な除外ロジックがないか
+  必ず確認する
+- （2026-11-08、`doc/devlog/2026-11-08_cross_team_shared_list_team_name.md`）同一プロジェクト
+  を複数チームへ公開すると「公開中のプロジェクト」に同じ名前が複数行並び重複登録に見える
+  問題 → 各行にチーム名を追加（API は既に `teamName` を返していたが描画が未使用だった）。
+  併せて「公開を停止」の確認文言が「相手は以後このプロジェクトに ask できなくなります」と
+  断言していたが、他チーム経由の grant が生きていれば引き続き ask できるため不正確だった
+  問題 → 対象チームを明示し、他チームにも公開がある場合だけ残存の注記を出すよう修正
+
+**残っている未解決の UX 課題**（次サイクルで対応予定）:
+- プロジェクトのリネーム UI が Team ページにしか無く、Team を持たないユーザーはリネーム
+  できない
+- 同名衝突の解決手段が弱い（`ask <project>@<machine>:` 形式や候補への採番などが必要）
+- 公開型本体（`Team.visibility` + `TeamSubscription`）は未実装
+
 ### API 構成
 - **WebUI 向け**: `GET/POST/DELETE /api/teams`、`POST/DELETE /api/teams/:teamId/members`
 - **Agent 向け**: `GET /api/agent/members`（チームメイト一覧）、`POST /api/agent/ask-member`（質問送信）、`POST /api/agent/teamexec-member`（実行依頼送信）

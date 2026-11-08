@@ -806,6 +806,13 @@ export interface TeamMemberInfo {
   machineName: string;
   machineId: string;
   machineStatus: string;
+  // クロスユーザー Team（Phase 1: ask のみ）: DEVRELAY_CROSS_TEAM が OFF、または同一ユーザーの
+  // 行では一切付与されない（既存レスポンスと構造的に同一）。
+  crossUser?: boolean;
+  ownerUserId?: string;
+  ownerName?: string;
+  askAllowed?: boolean;
+  execAllowed?: boolean;
 }
 
 export interface TeamInfo {
@@ -817,6 +824,45 @@ export interface TeamInfo {
 
 export interface TeamsResponse {
   teams: TeamInfo[];
+}
+
+export interface OrgCandidate {
+  userId: string;
+  name: string;
+  email: string | null;
+}
+
+export interface CrossTeamInviteInfo {
+  id: string;
+  teamId: string;
+  teamName: string;
+  status: 'pending' | 'accepted' | 'declined' | 'revoked';
+  askRequested: boolean;
+  createdAt: string;
+}
+
+export interface CrossTeamInboxInvite extends CrossTeamInviteInfo {
+  inviterUserId: string;
+  inviterName: string;
+}
+
+export interface CrossTeamOutboxInvite extends CrossTeamInviteInfo {
+  inviteeUserId: string;
+  inviteeName: string;
+}
+
+/** クロスユーザー Team（Phase 1）: 自分が公開している（grantee 側の）プロジェクト 1 件 */
+export interface CrossTeamShare {
+  teamMemberId: string;
+  teamId: string; // #複数選択対応: 招待ピッカーで公開済みプロジェクトを除外するためのキー
+  projectId: string; // 同上
+  teamName: string;
+  requesterName: string;
+  projectName: string;
+  machineName: string;
+  askAllowed: boolean;
+  execAllowed: boolean;
+  createdAt: string;
 }
 
 export const teams = {
@@ -843,6 +889,49 @@ export const teams = {
   /** メンバー削除 */
   async removeMember(teamId: string, memberId: string): Promise<void> {
     await request('DELETE', `/teams/${teamId}/members/${memberId}`);
+  },
+
+  // --- クロスユーザー Team（Phase 1: ask のみ）。DEVRELAY_CROSS_TEAM が OFF の環境では
+  // サーバー側が全て 404 を返すため、呼び出し側（TeamPage.tsx）は 404 を「機能無効」として扱う ---
+
+  /** 同一組織内の招待候補ユーザー一覧（プロジェクト名は返らない） */
+  async orgCandidates(): Promise<{ candidates: OrgCandidate[] }> {
+    return request('GET', '/teams/org-candidates');
+  },
+
+  /** 自分宛・自分発のクロスユーザー Team 招待一覧 */
+  async listInvites(): Promise<{ inbox: CrossTeamInboxInvite[]; outbox: CrossTeamOutboxInvite[] }> {
+    return request('GET', '/teams/invites');
+  },
+
+  /** チームオーナーが同一組織内の別ユーザーを招待する */
+  async invite(teamId: string, inviteeUserId: string): Promise<{ id: string; status: string }> {
+    return request('POST', `/teams/${teamId}/invites`, { inviteeUserId });
+  },
+
+  /** 受入側が招待を承認し、自分のプロジェクトを（複数）選ぶ */
+  async acceptInvite(inviteId: string, projectIds: string[]): Promise<{ teamMemberIds: string[]; skipped: number }> {
+    return request('POST', `/teams/invites/${inviteId}/accept`, { projectIds });
+  },
+
+  /** 受入側が招待を辞退する */
+  async declineInvite(inviteId: string): Promise<void> {
+    await request('POST', `/teams/invites/${inviteId}/decline`);
+  },
+
+  /** 送信側が未承認の招待を取り消す */
+  async revokeInvite(inviteId: string): Promise<void> {
+    await request('DELETE', `/teams/invites/${inviteId}`);
+  },
+
+  /** クロスユーザー Team の同意を取り消す（Team オーナー・grantee どちらからでも） */
+  async revokeGrant(memberId: string): Promise<void> {
+    await request('DELETE', `/teams/members/${memberId}/grant`);
+  },
+
+  /** 自分が公開している（grantee 側の）プロジェクト一覧（「誰に何を公開しているか」の確認用） */
+  async sharedByMe(): Promise<{ shares: CrossTeamShare[] }> {
+    return request('GET', '/teams/shared-by-me');
   },
 };
 

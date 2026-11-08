@@ -225,6 +225,7 @@ model Team {
   name      String
   createdAt DateTime     @default(now())
   members   TeamMember[]
+  crossTeamInvites CrossTeamInvite[] // クロスユーザー Team の招待（送信側）
 
   @@unique([userId, name])
 }
@@ -238,7 +239,83 @@ model TeamMember {
   project   Project  @relation(fields: [projectId], references: [id])
   createdAt DateTime @default(now())
 
+  // クロスユーザー Team（別ユーザーのプロジェクトを招待・承認して Team に入れる機能）の同意行。
+  // 同一ユーザー内の TeamMember には存在しない（null）。
+  crossTeamGrant CrossTeamGrant?
+
   @@unique([teamId, projectId])
+}
+
+// クロスユーザー Team の招待（pending 状態の持ち場。認可判定には一切使わない。
+// 認可の根拠は常に CrossTeamGrant の存在のみ）
+model CrossTeamInvite {
+  id             String    @id @default(cuid())
+  teamId         String
+  team           Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  inviterUserId  String    // Team オーナー（= team.userId のスナップショット、監査用）
+  inviteeUserId  String    // 受入側ユーザー（同一組織メンバー）
+  organizationId String    // 招待時点の組織（監査用スナップショット。実行時は OrganizationMember を再検証する）
+  status         String    @default("pending") // 'pending' | 'accepted' | 'declined' | 'revoked'
+  askRequested   Boolean   @default(true)  // 招待側の要求（受入側は下げられるが上げられない）
+  execRequested  Boolean   @default(false) // 既定不可（Phase 2 で解禁）
+  projectId      String?   // 受入側が承認時に選んだ自分のプロジェクト
+  teamMemberId   String?   @unique // 承認で生成した TeamMember 行
+  decidedAt      DateTime?
+  note           String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([teamId, inviteeUserId])
+  @@index([inviteeUserId, status])
+  @@index([teamId])
+}
+
+// クロスユーザー Team の認可の唯一の根拠（行が存在し revokedAt IS NULL ⇔ 承認済み。
+// status 文字列を認可判定に使わない。deny-by-default を構造的に保証するため）
+model CrossTeamGrant {
+  id              String     @id @default(cuid())
+  teamMemberId    String     @unique
+  teamMember      TeamMember @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
+  teamId          String     // 冗長保持（索引・監査用）
+  projectId       String     // 冗長保持
+  requesterUserId String     // Team オーナー（発信側の代表）
+  granteeUserId   String     // projectId の所有者（machine.userId のスナップショット）
+  organizationId  String     // 承認時点の組織（実行時に再検証する）
+  askAllowed      Boolean    @default(false)
+  execAllowed     Boolean    @default(false) // 既定不可（Phase 2 で解禁）
+  revokedAt       DateTime?
+  inviteId        String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([granteeUserId])
+  @@index([projectId])
+  @@index([requesterUserId])
+}
+
+// クロスユーザー Team の監査ログ（append-only）。ユーザー削除後も監査証跡として残すため
+// FK は張らない（SupervisionAuditLog / KnowledgeChunk と同じ規約）
+model CrossTeamAuditLog {
+  id              String   @id @default(cuid())
+  // 'denied' の一部（組織不一致・組織未所属）は共通の組織が存在しないため null を許容する。
+  // 'request'/'completed'/'failed' は常に非 null（authz 通過済み = 組織一致が確定している）。
+  organizationId  String?
+  requesterUserId String
+  executorUserId  String
+  teamId          String?
+  // 'invite_sent' の時点では受入側がまだプロジェクトを選んでいないため null を許容する
+  projectId       String?
+  sessionId       String?  // crossquery_ / teamexec_ セッション ID
+  mode            String   // 'ask' | 'exec'
+  action          String   // 'request' | 'denied' | 'completed' | 'failed' |
+                            // 'invite_sent' | 'invite_accepted' | 'invite_declined' | 'grant_revoked'
+  grantId         String?
+  detail          String?  // JSON 文字列（denyReason, 所要ms 等）
+  createdAt       DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([executorUserId, createdAt])
+  @@index([requesterUserId, createdAt])
 }
 
 // セッション
@@ -282,6 +359,12 @@ model Session {
   // クライアントから値を受け取らず POST /api/sessions/:id/seen がサーバー側で書く（古い値送信による
   // 既読の巻き戻り防止、および閲覧中に届いた応答の自動既読化のため）。
   lastSeenAiAt DateTime?
+  // クロスユーザー Team（ask のみ、Phase 1）: 依頼者の User.id。null = 従来どおり
+  // 「依頼者 = userId（所有者）」で、既存行は全て NULL のまま（backfill 絶対禁止）。
+  // FK は張らない（権限・監査用の列は User 削除時に Session を壊さない方針。
+  // KnowledgeChunk / SupervisionAuditLog と同じ規約）。
+  // userId は常に「宛先マシン所有者（= AI 実行・モデル・言語・課金・BuildLog・KnowledgeChunk の帰属先）」。
+  requestedByUserId String?
 
   messages       Message[]
   buildLogs      BuildLog[]
@@ -536,8 +619,11 @@ model Notification {
   userId      String
   user        User     @relation(fields: [userId], references: [id])
   type        String   // 'response' | 'approval' | 'error'
-  projectId   String
-  project     Project  @relation(fields: [projectId], references: [id])
+  // 2026-11-02: iPhone SE3 無音故障の再発防止で 'error' 型の一部（FCM トークン削除・
+  // 配信先0件スキップ）は特定の Project に紐づかない（userId スコープのみ）ため null 許容にした。
+  // project が null の行は projectName に固定ラベル（例: "プッシュ通知"）を入れる。
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id])
   projectName String   // 非正規化（表示用、JOIN 不要にするため）
   title       String
   body        String   @default("")

@@ -55,6 +55,10 @@ import { resolvePermissionPolicy } from './permission-policy.js';
 import { decideUpdateAction, decideUpdateFlow } from './agent-update-decision.js';
 import { isUpdateBusyGuardEnabled, decideManualUpdate, resolveDeferredBusyMessage, formatBusyReason } from './update-busy-rules.js';
 import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag, fenceIfHuman, buildHumanTextMeta } from './human-text-fence.js';
+import { isChatCtxPerUserEnabled, reconcileUserContext } from './chat-context-rules.js';
+import { listCrossTeamAskCandidateProjects } from './cross-team-authz.js';
+import { recordCrossTeamAudit } from './cross-team-audit.js';
+import { matchCrossTargetCandidates } from './cross-target-name-match.js';
 import {
   createTestflightService,
   listTestflightServices,
@@ -105,8 +109,11 @@ const TEAMEXEC_INSTRUCTION_MAX_LENGTH = 4000;
  */
 async function resolveDbUserId(context: UserContext): Promise<string | null> {
   if (context.platform === 'web') return context.userId;
-  const link = await prisma.platformLink.findFirst({
-    where: { platformUserId: context.userId },
+  // #Phase0-3: platformUserId だけで検索すると、別プラットフォームの同一文字列の
+  // platformUserId を取り違える余地がある（PlatformLink は @@unique([platform, platformUserId])
+  // で platform 込みで一意なため、findUnique で platform も条件に含める）。
+  const link = await prisma.platformLink.findUnique({
+    where: { platform_platformUserId: { platform: context.platform, platformUserId: context.userId } },
     select: { userId: true, linkedAt: true }
   });
   return link?.linkedAt ? link.userId : null;
@@ -121,8 +128,9 @@ async function resolveOrCreateUser(context: UserContext) {
   if (context.platform === 'web') {
     return prisma.user.findUnique({ where: { id: context.userId } });
   }
+  // #Phase0-3: resolveDbUserId と同じ理由で platform も条件に含める
   let user = await prisma.user.findFirst({
-    where: { platformLinks: { some: { platformUserId: context.userId } } }
+    where: { platformLinks: { some: { platform: context.platform, platformUserId: context.userId } } }
   });
   if (!user) {
     user = await prisma.user.create({
@@ -174,6 +182,14 @@ export async function getUserContext(userId: string, platform: Platform, chatId:
       currentMachineId: channelSession?.currentMachineId ?? undefined
     };
     userContexts.set(key, context);
+  } else if (isChatCtxPerUserEnabled(process.env.DEVRELAY_CHAT_CTX_PER_USER)) {
+    // Phase 0-2: 共有チャンネルで発言者が変わった場合、前の発言者の接続状態を
+    // 引き継がないよう再解決する（詳細は chat-context-rules.ts のコメント参照）
+    const reconciled = reconcileUserContext(context, userId);
+    if (reconciled) {
+      context = reconciled;
+      userContexts.set(key, context);
+    }
   }
 
   // #316: 言語設定は毎回軽量に再解決する（WebUI で切り替えた直後のメッセージから反映させるため）
@@ -2068,7 +2084,9 @@ Vite + Phaser 3 + TypeScript のゲーム開発環境を自動構築します。
 
 /** #295: ask / teamexec の宛先候補（マシン情報付きプロジェクト） */
 type CrossTargetProject = Project & {
-  machine: { id: string; name: string; displayName: string | null; status: string };
+  machine: { id: string; name: string; displayName: string | null; status: string; userId: string };
+  /** クロスユーザー Team（Phase 1: ask のみ）経由の候補の場合のみ付与される */
+  crossTeam?: { teamId: string; grantId: string };
 };
 
 /**
@@ -2080,17 +2098,21 @@ type CrossTargetProject = Project & {
  *
  * @param dbUserId ユーザー ID
  * @param targetProjectName 指定されたプロジェクト名
+ * @param includeCrossTeam true の場合のみ、クロスユーザー Team の ask 候補も母集団に加える
+ *   （DEVRELAY_CROSS_TEAM が有効な場合のみ実際に候補が増える）。teamexec（exec）経路からは
+ *   常に false で呼ぶ — Phase 1 では teamexec は同一ユーザーのみに留める。
  * @returns 解決できたプロジェクト、または呼び出し元がそのまま返すエラーメッセージ
  */
 async function resolveCrossTargetByName(
   dbUserId: string,
-  targetProjectName: string
+  targetProjectName: string,
+  includeCrossTeam: boolean = false,
 ): Promise<{ ok: false; error: string } | { ok: true; project: CrossTargetProject; legacy: boolean }> {
-  const includeMachine = { machine: { select: { id: true, name: true, displayName: true, status: true } } } as const;
+  const includeMachine = { machine: { select: { id: true, name: true, displayName: true, status: true, userId: true } } } as const;
 
   // 移行措置: Team を 1 つも作っていないユーザーは従来どおり全プロジェクトを対象にする
   const teamCount = await prisma.team.count({ where: { userId: dbUserId } });
-  const candidates = await prisma.project.findMany({
+  const ownCandidates: CrossTargetProject[] = await prisma.project.findMany({
     where: {
       deletedAt: null,
       machine: { userId: dbUserId, deletedAt: null },
@@ -2099,15 +2121,20 @@ async function resolveCrossTargetByName(
     include: includeMachine,
   });
 
-  const needle = targetProjectName.trim().toLowerCase();
-  const label = (p: typeof candidates[number]) => p.displayName ?? p.name;
-  const matches = (() => {
-    const exact = candidates.filter(p => label(p).toLowerCase() === needle || p.name.toLowerCase() === needle);
-    if (exact.length > 0) return exact;
-    return candidates.filter(p => label(p).toLowerCase().includes(needle) || p.name.toLowerCase().includes(needle));
-  })();
+  // クロスユーザー Team（Phase 1: ask のみ）の候補を母集団に加える。キルスイッチ OFF なら
+  // 常に空配列が返るため、この行自体は既存の候補集合に一切影響しない。
+  const crossCandidates: CrossTargetProject[] = includeCrossTeam
+    ? await listCrossTeamAskCandidateProjects(dbUserId)
+    : [];
+  const candidates: CrossTargetProject[] = [...ownCandidates, ...crossCandidates];
 
-  const format = (list: typeof candidates) => list
+  const label = (p: CrossTargetProject) => p.displayName ?? p.name;
+  // #Phase1-bug: 照合は matchCrossTargetCandidates() に一本化する（表示名のみを見る。
+  // name を副次キーにすると「表示名を変えて一意にする」という案内が機能しなくなるバグがあった。
+  // 2026-11-08 実機テストで発見、詳細は cross-target-name-match.ts のコメント参照）
+  const matches = matchCrossTargetCandidates(candidates, targetProjectName);
+
+  const format = (list: CrossTargetProject[]) => list
     .map(p => `  - ${label(p)} (${p.machine.displayName ?? p.machine.name})${p.machine.status === 'online' ? '' : ' ⏸ offline'}`)
     .join('\n');
 
@@ -2156,8 +2183,9 @@ async function handleAskMember(
     return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
   }
 
-  // #295: Team に登録済みの宛先から解決（同名が複数あれば候補を提示して中止）
-  const resolved = await resolveCrossTargetByName(dbUserId, targetProjectName);
+  // #295 / クロスユーザー Team（Phase 1）: Team に登録済みの宛先から解決
+  // （同名が複数あれば候補を提示して中止。includeCrossTeam=true でクロス候補も対象にする）
+  const resolved = await resolveCrossTargetByName(dbUserId, targetProjectName, true);
   if (!resolved.ok) return resolved.error;
   const targetProject = resolved.project;
 
@@ -2166,22 +2194,37 @@ async function handleAskMember(
     return `⚠️ ${targetProject.name} のエージェント (${machineName}) はオフラインです。`;
   }
 
+  // クロスユーザー時の 2 つの userId（document-api.ts §2 と同じ分離）:
+  // executorUserId = 宛先マシン所有者、requesterUserId = 依頼者（= dbUserId）。
+  // 同一ユーザー経路では両者は常に dbUserId と同値（挙動不変）。
+  const isCrossUser = !!targetProject.crossTeam;
+  const executorUserId = targetProject.machine.userId;
+  const requesterUserId = dbUserId;
+
   // フィードバック送信（非同期で先に表示）
   await sendMessage(context.platform, context.chatId, `🔗 ${targetProject.name} に質問中...`);
 
-  // 一時セッション作成
+  // 一時セッション作成（userId は宛先マシン所有者。requestedByUserId はクロス時のみ記録する）
   const tempSessionId = `crossquery_${crypto.randomUUID()}`;
   await prisma.session.create({
     data: {
       id: tempSessionId,
-      userId: dbUserId,
+      userId: executorUserId,
       machineId: targetProject.machine.id,
       projectId: targetProject.id,
       aiTool: targetProject.defaultAi,
       status: 'active',
       lastActiveAt: new Date(),
+      ...(isCrossUser ? { requestedByUserId: requesterUserId } : {}),
     },
   });
+  if (isCrossUser) {
+    recordCrossTeamAudit({
+      requesterUserId, executorUserId, teamId: targetProject.crossTeam!.teamId,
+      projectId: targetProject.id, sessionId: tempSessionId, mode: 'ask', action: 'request',
+      grantId: targetProject.crossTeam!.grantId,
+    });
+  }
 
   // ユーザーの質問を DB に保存（Conversations ページで表示するため）
   // 送信元プロジェクト名を保存（クロスクエリの送信元表示用）
@@ -2210,6 +2253,7 @@ async function handleAskMember(
     // #335: AI に渡すのは provenance fence（human-input タグ）で囲んだ文字列。
     // fence はセキュリティ境界ではなく「人間由来のデータである」ことを示す目印
     // （権限制御は #332/#333 の permissionPolicy / decidePlanPermission() が担う、#334 と同方針）。
+    // userId は executorUserId を渡す（モデル/言語/API キー解決を宛先マシン所有者の文脈で行う）。
     const result = await executeCrossProjectQuery(
       targetProject.machine.id,
       tempSessionId,
@@ -2217,7 +2261,7 @@ async function handleAskMember(
       targetProject.path,
       targetProject.defaultAi as AiTool,
       fenceIfHuman('ask', question, 'human'),
-      dbUserId,
+      executorUserId,
     );
 
     await prisma.session.update({
@@ -2225,12 +2269,28 @@ async function handleAskMember(
       data: { status: 'ended', endedAt: new Date() },
     });
 
+    if (isCrossUser) {
+      recordCrossTeamAudit({
+        requesterUserId, executorUserId, teamId: targetProject.crossTeam!.teamId,
+        projectId: targetProject.id, sessionId: tempSessionId, mode: 'ask', action: 'completed',
+        grantId: targetProject.crossTeam!.grantId,
+      });
+    }
+
     return `💬 **${targetProject.name}** の回答:\n\n${result.output}`;
   } catch (error: any) {
     await prisma.session.update({
       where: { id: tempSessionId },
       data: { status: 'ended', endedAt: new Date() },
     }).catch(() => {});
+
+    if (isCrossUser) {
+      recordCrossTeamAudit({
+        requesterUserId, executorUserId, teamId: targetProject.crossTeam!.teamId,
+        projectId: targetProject.id, sessionId: tempSessionId, mode: 'ask', action: 'failed',
+        grantId: targetProject.crossTeam!.grantId, detail: { message: error?.message },
+      });
+    }
 
     return `❌ ${targetProject.name} への質問が失敗しました: ${error.message}`;
   }

@@ -24,6 +24,9 @@ import { getSessionParticipants, addParticipant } from '../services/session-mana
 import type { AiTool, ManagementInfo } from '@devrelay/shared';
 import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef, AI_TOOL_NAMES } from '@devrelay/shared';
 import { decideCrossTarget, pickInflightCrossSession, buildCrossTargetRejectionMessage, resolveCrossSourceLabel, ASK_INFLIGHT_WINDOW_MS } from '../services/cross-query-guard.js';
+import { resolveCrossTeamAccess } from '../services/cross-team-authz.js';
+import { buildCrossTeamDenyLog } from '../services/cross-team-guard.js';
+import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
 
 /**
  * #294: クロスプロジェクト連携のループ防止パラメータ
@@ -108,12 +111,19 @@ async function resolveCrossSourceProjectName(
  */
 async function countRecentCrossSessions(
   prefix: string,
-  userId: string,
+  requesterUserId: string,
   targetProjectId?: string
 ): Promise<number> {
   return prisma.session.count({
     where: {
-      userId,
+      // クロスユーザー Team（Phase 1）: クロスの Session.userId は宛先マシン所有者（executorUserId）
+      // に寄るため、依頼者基準で数えるには新列 requestedByUserId を見る必要がある。
+      // 既存行は全て requestedByUserId=NULL のため、2本目の条件（従来の userId 一致）が
+      // 同一ユーザー経路の行集合をそのまま再現する（OR で追加しただけ。既存の集計結果は不変）。
+      OR: [
+        { requestedByUserId: requesterUserId },
+        { requestedByUserId: null, userId: requesterUserId },
+      ],
       id: { startsWith: prefix },
       startedAt: { gte: new Date(Date.now() - CROSS_RATE_WINDOW_MS) },
       ...(targetProjectId ? { projectId: targetProjectId } : {}),
@@ -122,53 +132,114 @@ async function countRecentCrossSessions(
 }
 
 /**
- * #295: ask / teamexec の宛先は「Team に事前登録されたプロジェクト」だけに限定する
+ * #295 / クロスユーザー Team（Phase 1）: ask / teamexec の宛先認可の単一の拡張点。
  *
- * 従来は所有者チェックのみで、ユーザーの全プロジェクト（実運用で 330 件）が宛先になり得た。
- * 一覧が見づらいうえ、名前解決の誤爆が #294 の暴走の起点になったため、
- * 許可集合を `/api/agent/members` が返すもの（＝発信元マシンと同じ Team のメンバー）と一致させる。
+ * 同一ユーザー（`targetMachineUserId === callerUserId`）の場合は #295 の既存ロジックに
+ * 完全に委譲する（1 バイトも変えない）。別ユーザーの場合は `allowCrossUser` が true かつ
+ * `DEVRELAY_CROSS_TEAM` が有効なときのみ、`CrossTeamGrant` の有無で判定する
+ * （`cross-team-authz.ts` の `resolveCrossTeamAccess` に委譲）。
  *
- * @param machineId 発信元マシン ID
- * @param userId 発信元ユーザー ID
- * @param targetProjectId 宛先プロジェクト ID
- * @returns allowed=許可するか / legacy=Team 未作成ユーザーの移行措置で通したか
+ * 404 規約: クロスユーザーの拒否は呼び出し側で必ず 404（存在を漏らさない）にすること。
+ * 同一ユーザーの「Team 未登録」403 案内（`buildUnregisteredTargetMessage`）とは経路を分ける。
  */
-export async function checkCrossTargetAllowed(
-  machineId: string,
-  userId: string,
-  targetProjectId: string
-): Promise<{ allowed: boolean; legacy: boolean }> {
-  // 発信元マシンのプロジェクトが属する Team に、宛先プロジェクトも属しているか
-  // （/api/agent/members の絞り込み条件と同形。一覧に出るものだけが送れる状態を保証する）
-  const registered = await prisma.teamMember.count({
-    where: {
-      projectId: targetProjectId,
-      team: { members: { some: { project: { machineId } } } },
-    },
+export interface CrossTargetAccessInput {
+  callerMachineId: string;
+  callerUserId: string;
+  targetProjectId: string;
+  /** 宛先マシンの現在の所有者（呼び出し側が既に取得済みの targetProject.machine.userId をそのまま渡す） */
+  targetMachineUserId: string;
+  mode: 'ask' | 'exec';
+  /**
+   * true の場合のみ、別ユーザー宛の grant 判定を試みる。false（既定）のエンドポイントでは、
+   * 別ユーザー宛は常に拒否される（従来の 404/403 と同じ）。
+   * GET /api/agent/messages・raw-completion-api.ts は意図的に false のまま
+   * （やらないこと §6: クロスユーザー非対応で据え置き）。
+   */
+  allowCrossUser?: boolean;
+}
+
+export interface CrossTargetAccessResult {
+  allowed: boolean;
+  /** Team 未作成ユーザーの移行措置で通したか（同一ユーザー経路のみ true になり得る） */
+  legacy: boolean;
+  /** true = targetMachineUserId !== callerUserId（クロスユーザー経路） */
+  crossUser: boolean;
+  /** AI 実行・モデル・言語・課金・Session.userId に使う（宛先マシン所有者） */
+  executorUserId: string;
+  /** 監査・レート制限・Session.requestedByUserId に使う（依頼者） */
+  requesterUserId: string;
+  grantId?: string;
+  teamId?: string;
+}
+
+export async function checkCrossTargetAllowed(input: CrossTargetAccessInput): Promise<CrossTargetAccessResult> {
+  const { callerMachineId, callerUserId, targetProjectId, targetMachineUserId, mode, allowCrossUser = false } = input;
+
+  if (targetMachineUserId === callerUserId) {
+    // 同一ユーザー: #295 の既存ロジックを一切変更しない
+    const registered = await prisma.teamMember.count({
+      where: {
+        projectId: targetProjectId,
+        team: { members: { some: { project: { machineId: callerMachineId } } } },
+      },
+    });
+    if (registered > 0) {
+      return { allowed: true, legacy: false, crossUser: false, executorUserId: callerUserId, requesterUserId: callerUserId };
+    }
+    const teamCount = await prisma.team.count({ where: { userId: callerUserId } });
+    if (teamCount === 0) {
+      return { allowed: true, legacy: true, crossUser: false, executorUserId: callerUserId, requesterUserId: callerUserId };
+    }
+    return { allowed: false, legacy: false, crossUser: false, executorUserId: callerUserId, requesterUserId: callerUserId };
+  }
+
+  // クロスユーザー: allowCrossUser が false のエンドポイントは判定すら試みず常に拒否
+  if (!allowCrossUser) {
+    return { allowed: false, legacy: false, crossUser: true, executorUserId: targetMachineUserId, requesterUserId: callerUserId };
+  }
+
+  const decision = await resolveCrossTeamAccess({
+    callerMachineId,
+    callerUserId,
+    targetProjectId,
+    targetOwnerUserId: targetMachineUserId,
+    mode,
   });
-  if (registered > 0) return { allowed: true, legacy: false };
-
-  // 移行措置: Team を 1 つも作っていないユーザーは従来どおり通す
-  // （Team を 1 つでも作った時点で厳格モードに切り替わる）
-  const teamCount = await prisma.team.count({ where: { userId } });
-  if (teamCount === 0) return { allowed: true, legacy: true };
-
-  return { allowed: false, legacy: false };
+  if (!decision.allowed) {
+    console.log(buildCrossTeamDenyLog({
+      callerMachineId,
+      targetProjectName: targetProjectId,
+      mode,
+      denyReason: decision.denyReason ?? 'noGrant',
+    }));
+  }
+  return {
+    allowed: decision.allowed,
+    legacy: false,
+    crossUser: true,
+    executorUserId: targetMachineUserId,
+    requesterUserId: callerUserId,
+    grantId: decision.grantId,
+    teamId: decision.teamId,
+  };
 }
 
 /**
  * #295: 未登録の宛先を拒否する際の案内文を組み立てる
  * 登録済みの宛先一覧を添えて、AI が別プロジェクトへ当てずっぽうに送り直さないようにする
  */
-async function buildUnregisteredTargetMessage(machineId: string, targetName: string): Promise<string> {
+async function buildUnregisteredTargetMessage(machineId: string, targetName: string, callerUserId: string): Promise<string> {
   const allowed = await prisma.teamMember.findMany({
     where: { team: { members: { some: { project: { machineId } } } } },
     include: {
-      team: { select: { name: true } },
-      project: { include: { machine: { select: { name: true, displayName: true } } } },
+      team: { select: { name: true, userId: true } },
+      project: { include: { machine: { select: { name: true, displayName: true, userId: true } } } },
     },
   });
+  // クロスユーザー Team（Phase 1）の情報漏えい対策: GET /api/agent/members と同じ理由で、
+  // 自分が Team オーナーでも自分の行でもないメンバーは案内文に含めない（キルスイッチ OFF では無影響）。
   const list = allowed
+    .filter(m => m.team.userId === callerUserId || m.project.machine.userId === callerUserId)
     .map(m => `  - ${m.project.displayName ?? m.project.name} (${m.project.machine.displayName || m.project.machine.name}) [${m.team.name}]`)
     .join('\n');
   return `未登録の宛先です: ${targetName}\n`
@@ -386,15 +457,25 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         },
       },
       include: {
-        team: { select: { name: true } },
+        team: { select: { name: true, userId: true } },
         project: {
-          include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+          include: { machine: { select: { id: true, name: true, displayName: true, status: true, userId: true } } },
         },
       },
     });
 
+    // クロスユーザー Team（Phase 1）の情報漏えい対策: このクエリは「auth.machineId のプロジェクトが
+    // 属する Team」の全メンバーを返すため、自分がその Team のオーナーでない単なる招待先
+    // （grantee）の立場で呼んだ場合、同じ Team に居る他の招待メンバーのプロジェクト名・マシン名まで
+    // 見えてしまう。Team オーナー本人、または自分自身の行（自分のプロジェクト）以外は除外する。
+    // キルスイッチ OFF の既存データでは Team の全メンバーが同一所有者（#295 の単一ユーザー gate）
+    // のため、この filter は何も除外せず挙動不変。
+    const visibleTeamMembers = teamMembers.filter(
+      (m) => m.team.userId === auth.userId || m.project.machine.userId === auth.userId,
+    );
+
     // 同一マシン上の別プロジェクトも表示（isSameMachine マーク付き）
-    return reply.send(teamMembers
+    return reply.send(visibleTeamMembers
       .map(m => ({
         teamName: m.team.name,
         memberProjectName: m.project.displayName ?? m.project.name,
@@ -463,10 +544,20 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     }
 
     // #295: Team 登録済みの宛先だけ（ask-member と同じゲート。読み取りにも最小権限として適用）
-    const gate = await checkCrossTargetAllowed(auth.machineId, auth.userId, projectId);
+    // クロスユーザー非対応（やらないこと §6）: allowCrossUser は常に false。
+    // 474 の所有者チェックで既に targetProject.machine.userId === auth.userId が確定しているため
+    // 同一ユーザー経路のみを通る（#295 の既存ロジックは 1 バイトも変わらない）。
+    const gate = await checkCrossTargetAllowed({
+      callerMachineId: auth.machineId,
+      callerUserId: auth.userId,
+      targetProjectId: projectId,
+      targetMachineUserId: targetProject.machine.userId,
+      mode: 'ask',
+      allowCrossUser: false,
+    });
     if (!gate.allowed) {
       return reply.status(403).send({
-        error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name),
+        error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name, auth.userId),
       });
     }
 
@@ -521,25 +612,50 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'targetProjectId and question are required' });
     }
 
-    // ターゲットプロジェクトの存在確認と所有権チェック
+    // ターゲットプロジェクトの存在確認（所有権チェックは下の checkCrossTargetAllowed に一本化）
     const targetProject = await prisma.project.findUnique({
       where: { id: targetProjectId },
       include: { machine: { select: { id: true, userId: true, status: true, deletedAt: true, name: true, displayName: true } } },
     });
 
-    if (!targetProject || targetProject.machine.userId !== auth.userId || targetProject.machine.deletedAt) {
+    if (!targetProject || targetProject.machine.deletedAt) {
       return reply.status(404).send({ error: 'Target project not found' });
     }
 
-    // #295: 宛先は Team に登録済みのものだけ（Team 未作成ユーザーは移行措置で従来どおり）
-    const askAllowed = await checkCrossTargetAllowed(auth.machineId, auth.userId, targetProjectId);
+    // #295 / クロスユーザー Team（Phase 1）: 単一の拡張点。同一ユーザーなら既存ロジックのまま、
+    // 別ユーザーなら DEVRELAY_CROSS_TEAM が有効かつ CrossTeamGrant（askAllowed）が有効な場合のみ許可する。
+    const askAllowed = await checkCrossTargetAllowed({
+      callerMachineId: auth.machineId,
+      callerUserId: auth.userId,
+      targetProjectId,
+      targetMachineUserId: targetProject.machine.userId,
+      mode: 'ask',
+      allowCrossUser: true,
+    });
     if (!askAllowed.allowed) {
+      if (askAllowed.crossUser) {
+        // 404 規約: クロスユーザーの拒否は存在を漏らさない（同一ユーザーの 403 未登録案内とは別経路）
+        recordCrossTeamAudit({
+          requesterUserId: askAllowed.requesterUserId,
+          executorUserId: askAllowed.executorUserId,
+          projectId: targetProjectId,
+          mode: 'ask',
+          action: 'denied',
+        });
+        return reply.status(404).send({ error: 'Target project not found' });
+      }
       console.log(`🚫 Cross-query target not registered: ${auth.machineId} → ${targetProject.name}`);
-      return reply.status(403).send({ error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name) });
+      return reply.status(403).send({ error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name, auth.userId) });
     }
     if (askAllowed.legacy) {
       console.log(`⚠️ Cross-query allowed without team registration (no teams yet): → ${targetProject.name}`);
     }
+    // クロスユーザー時の 2 つの userId（§2 の分離。設計判断は rules/project.md 参照）:
+    // executorUserId = 宛先マシン所有者（AI 実行・モデル・言語・課金・Session.userId に使う）
+    // requesterUserId = 依頼者（監査・レート制限・Session.requestedByUserId に使う）
+    // 同一ユーザー経路では両者は常に auth.userId と同値（挙動不変）。
+    const executorUserId = askAllowed.executorUserId;
+    const requesterUserId = askAllowed.requesterUserId;
 
     // #348: 入口の防御（自己宛 → 400 / 実行中の宛先 → 429）。旧 Agent（callerProjectPath 未送信）は
     // fail-open で通す（decideCrossTarget 内部の unverified 判定）
@@ -632,19 +748,33 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     // 送信元マシンのプロジェクト名を取得（クロスクエリの送信元表示用。2026-10-22 TruckBoard 誤表示の根治）
     const { label: sourceProjectName, source: sourceProjectNameSource } = await resolveCrossSourceProjectName(auth.machineId, callerProjectPath);
 
-    // 一時セッションを作成
+    // 一時セッションを作成（userId は宛先マシン所有者 = executorUserId。同一ユーザー経路では
+    // auth.userId と同値のため既存行と完全に同じ。requestedByUserId はクロスユーザー時のみ記録する）
     const tempSessionId = `crossquery_${crypto.randomUUID()}`;
     const tempSession = await prisma.session.create({
       data: {
         id: tempSessionId,
-        userId: auth.userId,
+        userId: executorUserId,
         machineId: targetProject.machine.id,
         projectId: targetProjectId,
         aiTool: effectiveAi,
         status: 'active',
         lastActiveAt: new Date(),
+        ...(askAllowed.crossUser ? { requestedByUserId: requesterUserId } : {}),
       },
     });
+    if (askAllowed.crossUser) {
+      recordCrossTeamAudit({
+        requesterUserId,
+        executorUserId,
+        teamId: askAllowed.teamId ?? null,
+        projectId: targetProjectId,
+        sessionId: tempSessionId,
+        mode: 'ask',
+        action: 'request',
+        grantId: askAllowed.grantId ?? null,
+      });
+    }
 
     // ユーザーメッセージを保存（Conversations ページで表示するため）
     await prisma.message.create({
@@ -689,6 +819,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
 
     try {
       // エージェントにセッション開始 + プロンプト送信し、完了を待つ
+      // userId は executorUserId を渡す（§2: モデル/言語/API キー解決は宛先マシン所有者の文脈で行う。
+      // 依頼者の設定を他人のマシンに適用しない。同一ユーザー経路では auth.userId と同値で無変更）
       const result = await executeCrossProjectQuery(
         targetProject.machine.id,
         tempSessionId,
@@ -696,7 +828,7 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         targetProject.path,
         effectiveAi,
         question,
-        auth.userId,
+        executorUserId,
       );
 
       if (clientDisconnected) return;
@@ -707,6 +839,14 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         data: { status: 'ended', endedAt: new Date() },
       });
 
+      if (askAllowed.crossUser) {
+        recordCrossTeamAudit({
+          requesterUserId, executorUserId, teamId: askAllowed.teamId ?? null,
+          projectId: targetProjectId, sessionId: tempSessionId, mode: 'ask', action: 'completed',
+          grantId: askAllowed.grantId ?? null,
+        });
+      }
+
       return reply.send({ answer: result.output });
     } catch (error: any) {
       // 一時セッションを終了（エラー時も）
@@ -714,6 +854,14 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         where: { id: tempSessionId },
         data: { status: 'ended', endedAt: new Date() },
       }).catch(() => {});
+
+      if (askAllowed.crossUser) {
+        recordCrossTeamAudit({
+          requesterUserId, executorUserId, teamId: askAllowed.teamId ?? null,
+          projectId: targetProjectId, sessionId: tempSessionId, mode: 'ask', action: 'failed',
+          grantId: askAllowed.grantId ?? null, detail: { message: error?.message },
+        });
+      }
 
       if (clientDisconnected) return;
       console.error(`🔗 Cross-project query failed: ${error.message}`);
@@ -752,10 +900,19 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
     }
 
     // #295: 宛先は Team に登録済みのものだけ（Team 未作成ユーザーは移行措置で従来どおり）
-    const execAllowed = await checkCrossTargetAllowed(auth.machineId, auth.userId, targetProjectId);
+    // クロスユーザー teamexec は Phase 2 で解禁する（898 の所有者チェックで同一ユーザーのみ
+    // ここまで到達するため allowCrossUser は常に false。構造的に到達不可）
+    const execAllowed = await checkCrossTargetAllowed({
+      callerMachineId: auth.machineId,
+      callerUserId: auth.userId,
+      targetProjectId,
+      targetMachineUserId: targetProject.machine.userId,
+      mode: 'exec',
+      allowCrossUser: false,
+    });
     if (!execAllowed.allowed) {
       console.log(`🚫 Team exec target not registered: ${auth.machineId} → ${targetProject.name}`);
-      return reply.status(403).send({ error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name) });
+      return reply.status(403).send({ error: await buildUnregisteredTargetMessage(auth.machineId, targetProject.name, auth.userId) });
     }
     if (execAllowed.legacy) {
       console.log(`⚠️ Team exec allowed without team registration (no teams yet): → ${targetProject.name}`);

@@ -69,6 +69,13 @@ pm2 restart devrelay-server
 
 ## 環境変数（apps/server/.env）
 
+> ⚠️ **2026-11-08 判明**: `apps/server/dist/index.js` の `import 'dotenv/config'` はパス指定なしなので
+> `process.cwd()` 基準で `.env` を探す。pm2 の `devrelay-server` は `exec cwd=/opt/devrelay`
+> （リポジトリルート）で起動するため、**実際に読まれるのは `/opt/devrelay/.env`**（`apps/server/.env`
+> へのシンボリックリンク）。`apps/server/.env` 自体は編集しても symlink 経由でしか本番に反映されない。
+> 新しいキーを追記したら `pm2 restart devrelay-server`（`--update-env` は使わない。現在のシェルの
+> env で丸ごと置き換わり既存キーが消える危険があるため）。
+
 | 変数 | 説明 |
 |------|------|
 | DATABASE_URL | PostgreSQL 接続 |
@@ -103,6 +110,9 @@ pm2 restart devrelay-server
 | DEVRELAY_FCM_TEST_API | 設定画面の「テスト通知を送る」が使う `POST /api/push/fcm/test` を有効にするか（既定 `1`。`0` で 404。`GET /api/push/fcm/devices`・`POST /api/push/fcm/verify`・`DELETE /api/push/fcm/devices/:tokenPrefix` には影響しない） |
 | DEVRELAY_AGENT_REPO_URL | 会社 private リポジトリ clone 対応サイクル: `GET /api/machines/:id/token` が WebUI に返す、Agent インストール一行コマンドに付与する clone 先 URL（`https://` 必須・userinfo 付き URL は拒否して無視）。**未設定時は WebUI のコマンドが現行と完全に同じ文字列になる**（実質的なキルスイッチ）。PAT は**本変数には**一切乗せられない（userinfo 付き URL は拒否）。PAT の配布方式は下記 `DEVRELAY_AGENT_REPO_TOKEN` 参照。詳細 `doc/company-repo-sync.md` |
 | DEVRELAY_AGENT_REPO_TOKEN | 読取PATのサーバー配布サイクル: 上記 `DEVRELAY_AGENT_REPO_URL` とセットのときのみ有効な読取 PAT。DB には一切保存しない（env のみ）。`POST /api/agent/repo-auth`（HTTP、インストール時）・WS `agent:repo:auth:request`（`u` 実行前のローテーション）のどちらも**マシントークンで認証済みの Agent にのみ**配布する（値は `Authorization: Basic <base64>` 形式でのみ渡し、WebUI・ログ・DB には一切出さない）。未設定時は Agent 側で一切の新規通信が発生しない（既存の個人 devrelay.io 含む全環境は無変更）。前サイクルの「PAT をサーバーに送らない」方針を本サイクルで**サーバー env に限り**見直した判断（`Machine.token` 平文保存 ⇒ DB 侵害時のリスクを明示的に受容。前提は Fine-grained・対象リポジトリのみ・`Contents: Read-only`・有効期限必須）。詳細・優先順位・ローテーション手順は `doc/company-repo-sync.md` §9 |
+| DEVRELAY_CROSS_TEAM | 別ユーザーのエージェントとチームを組む機能（クロスユーザー ask・招待 API・WebUI 招待 UI）を有効にするか。**既定 `0` = OFF**（既存キルスイッチの多数派と逆方向。新しい信頼境界を黙って開けないため）。`1` で有効化。OFF 時は authz がクロス判定に入らず従来の 404・新設 API（`/api/teams/org-candidates`・`/api/teams/invites` 等）は全て 404・`GET /api/teams`/`GET /api/agent/members` の応答は旧構造と完全同一（新フィールドはキーごと省略）。対象は同一 Organization 内のみ（組織未所属ユーザー同士は不可）。teamexec（exec）は本変数だけでは動かない（下記 `DEVRELAY_CROSS_TEAM_EXEC` 参照、Phase 1 では構造的に到達不可） |
+| DEVRELAY_CROSS_TEAM_EXEC | クロスユーザー `teamexec`（他ユーザーのプロジェクトでの exec = コード改変）を有効にするか。既定 `0`。`DEVRELAY_CROSS_TEAM=1` かつ本変数 `1` かつ受入側が `CrossTeamGrant.execAllowed=true` にしている、の 3 条件 AND でのみ通る設計（Phase 1 時点では受入側 UI に exec 許可トグル自体が無く execAllowed は常に false のため、本変数を `1` にしても何も変わらない。Phase 2 で解禁予定） |
+| DEVRELAY_CHAT_CTX_PER_USER | Discord/Telegram の共有チャンネルで、同じ chatId に複数ユーザーが発言したときキャッシュ済み `UserContext` の `userId` を発言者ごとに再解決するか（既定 `1`。`0` で「そのチャンネルで最初に話した人の userId に全員の操作が固定される」旧挙動に戻すキルスイッチ。2026-11-05 に発見・修正、詳細は `doc/changelog.md` のクロスユーザー Team サイクル参照） |
 
 ## DB テーブル（概要）
 
@@ -124,6 +134,9 @@ pm2 restart devrelay-server
 | Notification | プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理。`projectId`/`project` は null 許容＝2026-11-02 以降、FCM トークン削除・配信先0件スキップ等 Project に紐づかない `type='error'` 通知に使う） |
 | KnowledgeChunk | 高辻ナレッジ: 会話ターン（AI 応答＋直前の人間入力）の検索用チャンク（キーワード ILIKE + pgvector ベクトルのハイブリッド検索。FK は張らない） |
 | UserClearance | 高辻ナレッジ サイクル2: 人の権限（`readLevel`/`writeLevel` 0〜10、`compartments String[]`。行が無ければ既定値 0/0/[]。`userId` unique、FK なし） |
+| CrossTeamInvite | クロスユーザー Team（Phase 1）: 別ユーザーへの招待（pending の持ち場。`status` は認可判定には使わない、認可は常に CrossTeamGrant の存在のみ） |
+| CrossTeamGrant | クロスユーザー Team（Phase 1）: 認可の唯一の根拠（行が存在し `revokedAt IS NULL` ⇔ 承認済み。`askAllowed`/`execAllowed` 既定 false。TeamMember 削除で Cascade） |
+| CrossTeamAuditLog | クロスユーザー Team（Phase 1）: 監査ログ（append-only、FK 無し。`action`: request/denied/completed/failed/invite_*/grant_revoked） |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`

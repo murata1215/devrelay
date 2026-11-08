@@ -6,6 +6,270 @@
 
 ## 実装済み機能
 
+### クロスユーザー Team: 「公開中のプロジェクト」にチーム名を表示 + 停止確認文言の正確化 (2026-11-08)
+
+直前までの一連のサイクル（招待の複数選択・再招待の行き止まり修正・招待候補フィルタ修正）を
+実機でフル往復テストしたところ、全て設計どおり動作することを DB で確認した
+（複数選択の承認が単一トランザクションで 3ms 差の 2 行を作成、監査ログがプロジェクト
+1 件につき 1 行記録される、等）。その過程で UI 表示の問題を 2 件発見・修正。
+
+#### ① 「公開中のプロジェクト」が重複登録に見える
+同一プロジェクトを複数チームへ公開すると「公開中のプロジェクト」に同じプロジェクト名が
+複数行並ぶが、どのチーム経由の公開かが表示されておらず、ユーザーには**重複登録に見えた**。
+`GET /api/teams/shared-by-me` は既に `teamName` を返していたが、`TeamPage.tsx` の描画が
+使っていなかっただけだった。各行にチーム名を追加して解消。
+
+なお `ask` の宛先解決は影響を受けない。`listCrossTeamAskCandidateProjects()` が
+`projectId` をキーにした `Map` で重複を畳むため、同一プロジェクトが複数チームに
+公開されていても候補は 1 件に収束することを SQL で確認済み。
+
+#### ② 「公開を停止」の確認文言が不正確だった
+旧文言「相手は以後このプロジェクトに ask できなくなります」は、同一プロジェクトが
+複数チームに公開されているケースでは**誤り**（1 つの grant を切っても他チーム経由の
+grant が生きていれば引き続き ask できる）。対象チーム名を明示し、同じプロジェクトが
+他チームにも公開されている場合だけ「そちらは残ります」と注記するように変更。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 931/931（既存のみ・非退行。純関数の切り出しは対象外の
+変更のため新規テストなし）。
+
+#### 変更ファイル
+既存 `apps/web/src/pages/TeamPage.tsx` のみ。**サーバー側の変更なし**
+（`teamName`/`projectId` とも既にレスポンスに含まれていた）。
+DB スキーマ変更なし・新規キルスイッチなし。
+
+### クロスユーザー Team: 再招待が WebUI から到達できないバグの修正（招待候補フィルタ） (2026-11-08)
+
+直前のサイクル（招待の複数プロジェクト選択 + サーバー側の再招待行き止まり修正）をデプロイ・
+実機確認したところ、yahoo を `pixterm` チームへ再招待しようとすると
+「招待できる組織メンバーがいません」と表示され、やはり再招待できないことが判明。
+
+#### 原因: サーバーは直っていたが、WebUI のフィルタが候補を隠していた
+調査の結果、サーバー（`POST /api/teams/:teamId/invites`）・`GET /api/teams/org-candidates`
+はいずれも正しく動作しており、yahoo は候補として返っていた。犯人は
+`TeamPage.tsx` の `getInvitableCandidates()`（旧実装）:
+
+```ts
+const existingOwnerIds = new Set(team.members.filter(m => m.crossUser).map(m => m.ownerUserId));
+return orgCandidates.filter(c => !existingOwnerIds.has(c.userId) && !pendingInviteeIds.has(c.userId));
+```
+
+`existingOwnerIds` による除外は「1 招待 = 1 プロジェクト」だった旧モデルでは正しかった
+（一度プロジェクトを出してもらったら再招待する意味が無かったため）。しかし直前のサイクルで
+「再招待 = プロジェクト追加の唯一の導線」にサーバー側を変更したため、この除外が
+**サーバー側で開けた道を UI が塞いでいる**状態になっていた。`pixterm` には yahoo の
+`MyApplication` が既に公開済みで、組織の他メンバーが yahoo しかいなかったため、候補が
+ゼロ件になり「招待できる組織メンバーがいません」と表示されていた。
+
+#### 修正
+新規 `apps/web/src/lib/cross-team-invite-rules.ts`（既存の `push-device-rules.ts` 等
+22 件と同じ、外部 import ゼロの純粋関数 + `tsconfig.test.json` 経由で `node --test` する
+パターン）に `selectInvitableCandidates()` を切り出し、`crossMemberOwnerIds` では除外せず
+`alreadyContributing: true` の注釈を付けて候補に残すよう修正。`pendingInviteeIds`（承認待ち
+の宛先）による除外は維持（同じ行を pending のまま上書きするだけで意味が無いため）。
+WebUI は候補チップに「（追加依頼）」を補足表示し、空状態も「組織に他メンバーがいない」
+「全員に依頼済み（承認待ち）」の 2 パターンに出し分けた。
+
+回帰テストには `cross-target-name-match.test.mjs` と同じ流儀で、旧ロジックを手元で
+再現して新旧を直接比較するアサーション（旧 0 件 → 新 1 件）を入れ、同じ見落としが
+再発したら即座に落ちるようにした。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 931/931（新規 7 ケース含む非退行）、`apps/server` の
+`node --test` 1458/1458（サーバー変更なし・非退行）。
+
+#### 変更ファイル
+新規 `apps/web/src/lib/cross-team-invite-rules.ts`、
+`apps/web/tests/cross-team-invite-rules.test.mjs`。既存 `apps/web/tsconfig.test.json`
+（include に追加）、`apps/web/src/pages/TeamPage.tsx`。**サーバー側の変更なし**
+（既にある修正が UI から到達可能になるだけ）。DB スキーマ変更なし・新規キルスイッチなし。
+
+### クロスユーザー Team: 招待の複数プロジェクト選択 + 再招待の行き止まりバグ修正 (2026-11-08)
+
+前サイクル（招待 UI 文言修正 + 「公開中のプロジェクト」可視化）をデプロイ・実機確認した
+ユーザーから「プロジェクトの選択は一個だけ？複数選択できない？」という指摘を受けて調査。
+実際に単一選択だったことに加え、**一度承認すると二度と招待できなくなる恒久的な行き止まり**
+を発見したため、まとめて修正した。
+
+#### ① 承認の複数選択化
+旧実装は `handleAcceptInvite(inviteId, projectId)` — プロジェクトのチップを**クリックした
+瞬間に承認が確定**する単一選択だった。`POST /api/teams/invites/:id/accept` のボディを
+`projectIds: string[]` に変更し（旧 `projectId` 単数もフォールバックで受け付ける。デプロイ
+直後に開きっぱなしのタブ対策）、`$transaction` 内で N 組の `TeamMember` + `CrossTeamGrant`
+をまとめて作成する。所有権チェックは全件に対して行い、1 件でも他人のプロジェクトが
+混ざっていたら全体を 404 で拒否する（部分適用しない）。既にそのチームのメンバーになっている
+`projectId` はスキップし（バッチ全体を 409 で落とさない）、全件スキップのときのみ 409。
+監査ログ（`CrossTeamAuditLog`）はプロジェクト 1 件につき 1 行記録する。
+WebUI は「クリック即確定」をやめ、チェックボックス方式 + 「選択した N 件を公開して承認」
+ボタンに変更（選択ゼロの状態から開始＝誤爆防止）。このチームに既に公開済みの自分のプロジェクト
+はピッカーから除外する。
+
+#### ② 再招待の行き止まりバグの修正
+`CrossTeamInvite` は `@@unique([teamId, inviteeUserId])`（status を含まない）で、招待作成側に
+`existing.status === 'accepted'` のとき 409 を返すガードがあった。一方 `DELETE /api/teams/
+members/:memberId/grant`（前サイクルで UI 導線を追加した「公開を停止」）は `TeamMember` を
+削除するだけで **`invite.status` を `accepted` のまま放置する**
+（`CrossTeamInvite.teamMemberId` は `@relation` を持たない素の `String?` なので Cascade も
+効かず、宙ぶらりんの ID が残る）。この結果「承認 → 公開を停止 → 再招待」が**永久に 409 で
+拒否される**行き止まりになっていた（前サイクルの検証手順に書いた「確認後、必要なら再度招待
+して grant を戻す」は実際には失敗する手順だった）。
+`existing.status === 'accepted'` による 409 ガードを削除し、`declined`/`revoked` からの
+再招待と同形（常に `pending` へ戻す）にした。既存の `CrossTeamGrant` は revoke しない —
+権限の根拠は Grant の存在のみ、という設計原則（`decideCrossTeamAccess()`）は不変。これにより
+「後からプロジェクトを追加」が「再招待 → 追加分だけチェック」で成立するようになった。
+
+`invite.projectId` / `teamMemberId` カラムは複数件を保持できないため今回から更新しなくなった
+（null のまま）。両方とも他のどこからも読まれていないことを `grep` で確認済み（監査は
+`CrossTeamAuditLog` 側が持つ）。カラム自体は残す。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/server` の `node --test` 1458/1458（新規 4 ケース含む、既存含め非退行）。
+
+#### 変更ファイル
+既存 `apps/server/src/routes/api.ts`（accept ハンドラの複数対応・invite 作成の 409 削除・
+`shared-by-me` に `teamId`/`projectId` 追加）、`apps/web/src/lib/api.ts`
+（`acceptInvite` 配列化・`CrossTeamShare` に `teamId`/`projectId` 追加）、
+`apps/web/src/pages/TeamPage.tsx`（チェックボックス選択 UI・公開済み除外）、
+`apps/server/tests/cross-team-api-wiring.test.mjs`。
+DB スキーマ変更なし・新規キルスイッチなし（既存 `DEVRELAY_CROSS_TEAM` の配下）。
+
+### クロスユーザー Team: 招待 UI の文言修正 + 貸す側の「公開中のプロジェクト」可視化 (2026-11-08)
+
+実機テストで見つかった UX の欠落 2 件を解消した（公開型 = Team を公開し同一組織内の利用者が
+選んで組み込む、を実装する前の前提条件）。
+
+#### ① 招待 UI の文言が過剰共有を招く問題の修正
+「{inviter} さんが『{team}』**チームへの参加を依頼**しています」という文言は、実際の意味
+（自分のプロジェクトを差し出し、相手の質問を自分の契約で実行する）と乖離しており、実機
+テストでユーザー自身が誤解を示した。「{inviter} さんが、**あなたのプロジェクトへの質問
+（ask）許可**を求めています」に変更し、承認時の選択欄にも「選んだプロジェクトの AI は
+あなたの契約で実行されます（質問のたびに利用枠を消費）。コード変更はできません。
+あとから取り消せます」という amber 系の警告を追加した。送信側の文言も
+「招待を送信中」→「プロジェクトの公開を依頼中」に変え、依頼の向きを明示した。
+
+#### ② 貸す側（grantee）の「公開中のプロジェクト」可視化・取り消し UI
+`DELETE /api/teams/members/:memberId/grant` は以前から grantee も呼べる実装だったが
+（`isOwner || isGrantee`）、UI 導線が存在せず、貸す側は自分の何が誰に公開されているかを
+確認する手段がなかった。新規 `GET /api/teams/shared-by-me` で `granteeUserId=自分 AND
+revokedAt IS NULL` の grant 一覧を返し（キルスイッチ OFF 時は 404 ではなく
+`{shares: []}` を返す — `/api/teams/invites` と同じ流儀）、WebUI に「公開中のプロジェクト」
+セクションを新設した。各行に相手の表示名・プロジェクト名・ask/exec チップ・「公開を停止」
+ボタンを表示する。取り消しはサーバー側が既に実装済みの `revokeGrant()` をそのまま使う
+（新規実装はサーバー側 GET 1 本のみ）。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なしを確認）、
+`apps/server` の `node --test` 1454/1454（新規 3 ケース含む、既存含め非退行）。
+
+#### 変更ファイル
+既存 `apps/server/src/routes/api.ts`（`GET /api/teams/shared-by-me` 新設）、
+`apps/web/src/lib/api.ts`（`CrossTeamShare` 型・`teams.sharedByMe()`）、
+`apps/web/src/pages/TeamPage.tsx`（招待文言修正・公開中セクション新設）、
+`apps/server/tests/cross-team-api-wiring.test.mjs`。
+DB スキーマ変更なし・新規キルスイッチなし（既存 `DEVRELAY_CROSS_TEAM` の配下）。
+
+### クロスユーザー Team Phase 1 実機テスト: 2 件のバグ修正（宛先名解決・本番 .env 未読み込み） (2026-11-08)
+
+2026-11-05 実装のクロスユーザー Team（ask のみ）を個人組織（gmail + yahoo の 2 アカウント、
+同一組織）で実機テストし、招待 → 承認 → `CrossTeamGrant` 発行 → ask 往復 →
+`CrossTeamAuditLog`（request/completed）→ コスト計上（`Session.userId`=執行者側に
+`costUSD` が付く）まで設計どおりに動くことを確認した。その過程で 2 件のバグを発見・修正。
+
+#### バグ1: `resolveCrossTargetByName()` の同名衝突エラーが案内する解決策が機能しない
+`command-handler.ts` の照合ロジックが `label(p) === needle || p.name === needle` という
+OR 条件で、`name`（ディレクトリ名、不変）を `displayName`（表示名、変更可）の副次キーとして
+混ぜていた。そのため「プロジェクトの表示名を変えて一意にする」というエラー案内（#294）どおりに
+`displayName` を変更しても、`name` 側で一致し続け衝突が解消しなかった。実機で
+`mimamori-flutter` が 3 件（gmail 所有 2 件・yahoo 所有 1 件）ある状態で発見。
+
+新規純関数 `services/cross-target-name-match.ts`（`matchCrossTargetCandidates()`）に
+照合キーを「表示名（`displayName ?? name`）ひとつ」に統一して切り出した。
+`displayName` 未設定のプロジェクトは `label === name` のため挙動は完全に不変。
+`handleAskMember`・`handleTeamExec` の両呼び出し元に効く。
+
+#### バグ2: 本番 `apps/server/.env` が `dotenv/config` に読まれていなかった
+`dist/index.js` の `import 'dotenv/config'` はパス指定なしで `process.cwd()` 基準だが、
+pm2 の `devrelay-server` は `exec cwd=/opt/devrelay`（リポジトリルート）で起動しており、
+`/opt/devrelay/.env` は存在しなかった（`dotenv.config()` を cwd=`/opt/devrelay` で実行し
+`ENOENT` を実測で確認）。つまり `.env` への新規キー追記は**再起動しても一切反映されない**
+状態だった（既存キーは pm2 の env スナップショットから来ていたため気づきにくかった）。
+`/opt/devrelay/.env → apps/server/.env` のシンボリックリンクを作成して解決
+（dotenv の既定 `override:false` のため既存のスナップショット値は上書きされず無影響。
+`.gitignore` の `.env` パターンでカバー済みを確認）。`DEVRELAY_CROSS_TEAM=1` が
+12 キー中に含まれて読み込まれることを再起動後に検証した。
+
+CLAUDE.md の環境変数セクションと `system-admin.ts` のコメントに、実際に読まれるパスが
+`/opt/devrelay/.env`（symlink）である旨を追記した。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1451/1451
+（新規 10 ケース含む、既存含め非退行。新規ケースは旧ロジックを手元で再現し
+「旧ロジックは3件一致／新ロジックは2件」の比較アサーションで退行を直接検知する）。
+
+#### 変更ファイル
+新規 `apps/server/src/services/cross-target-name-match.ts`、
+`apps/server/tests/cross-target-name-match.test.mjs`。
+既存 `apps/server/src/services/command-handler.ts`（照合ロジックの呼び出し元を差し替え）、
+`apps/server/src/services/system-admin.ts`（コメント修正）、`CLAUDE.md`（環境変数セクション）。
+インフラ変更（git 管理外）: `/opt/devrelay/.env` シンボリックリンクを新規作成。
+DB マイグレーション不要。
+
+### クロスユーザー Team（別ユーザーのエージェントと ask で連携）Phase 0 + Phase 1 (2026-11-05)
+
+ユーザー要望「別のユーザーのエージェントとチームを組むみたいなことできるかな？」への対応。
+既存の `ask` / `teamexec`（クロスプロジェクト連携）は宛先解決・Team ゲート・ループ検出まで完成
+していたが、全経路が同一ユーザーに構造的に閉じていた（`TeamMember` を作る唯一の砦
+`api.ts` の `project.machine.userId !== userId → 404` 他、Agent REST 4 箇所・チャット宛先解決の
+`machine: { userId: dbUserId }`）。本サイクルで同一組織内に限り、招待制で別ユーザーのプロジェクトを
+ask の宛先にできるようにした（teamexec は Phase 2 で別途解禁、本サイクルでは構造的に到達不可）。
+
+#### Phase 0: 既知バグ 3 件の修正（クロス機能に一切触れない、単独で安全）
+1. `api.ts` の `DELETE /api/teams/:teamId/members/:memberId` が `teamId` でスコープせず
+   `teamMember.delete({ where: { id: memberId } })` していたため、他ユーザーの Team に属する
+   TeamMember 行を memberId 推測で削除できた（`.catch(() => null)` でエラーも出ない）。
+   `deleteMany({ where: { id, teamId } })` に修正。
+2. Discord/Telegram の共有チャンネルで `userContexts`（キー=`platform:chatId`）がキャッシュヒット時に
+   `userId` を更新せず、「そのチャンネルで最初に話した人」の身元に全員の操作が固定されていた
+   （権限モデル・監査・レート制限を一切通らない事実上のクロスユーザー実行）。新規純関数
+   `chat-context-rules.ts` の `reconcileUserContext()` で発言者が変わったら接続状態
+   （マシン/セッション/teamexec 接続先/一覧キャッシュ）を破棄するよう修正。
+   キルスイッチ `DEVRELAY_CHAT_CTX_PER_USER`（既定 `1`）。
+3. `resolveDbUserId()` / `resolveOrCreateUser()` が `platformUserId` だけで検索し `platform` を
+   見ていなかった（`PlatformLink` は `@@unique([platform, platformUserId])`）。
+
+#### Phase 1: クロスユーザー ask（招待制）
+- 新規テーブル `CrossTeamInvite`（pending の持ち場、認可には使わない）/ `CrossTeamGrant`
+  （認可の唯一の根拠。行が存在し `revokedAt IS NULL` の 2 条件のみで判定）/
+  `CrossTeamAuditLog`（append-only、FK 無し）。`Session.requestedByUserId`
+  （既存行は全て NULL=backfill 無し=「依頼者=所有者」のまま不変）。
+- 2 つの userId を分離: `executorUserId`（宛先マシン所有者。AI/モデル/言語/課金/`Session.userId`
+  に使う）と `requesterUserId`（依頼者。監査/レート制限/`requestedByUserId` に使う）。
+  `sendPromptToAgent` には executorUserId のみを渡す（依頼者の API キー・モデル設定が
+  他人のマシンで使われる事故、組織 AI デフォルト統制の迂回を防ぐため）。
+- `document-api.ts` の `checkCrossTargetAllowed()` をオブジェクト引数に統一し単一の拡張点に
+  （同一ユーザー経路は 1 バイトも変えない。クロスは `allowCrossUser: true` の ask-member のみ有効、
+  teamexec-member/raw-completion-api/GET messages は明示的に `allowCrossUser: false` で据え置き）。
+  判定本体は新規純関数 `cross-team-guard.ts` の `decideCrossTeamAccess()`
+  （組織境界 → 宛先所有者スナップショット一致 → revoked → 第三者ブリッジ禁止 → mode フラグ、の順）。
+  クロスの拒否は常に 404（存在を漏らさない。同一ユーザーの Team 未登録 403 案内とは経路を分離）。
+  `GET /api/agent/members` と 403 案内文に、Team 内の自分以外のオーナー/メンバー情報が漏れる
+  経路があったため情報漏えいフィルタも追加。
+- WebUI は招待制（`GET /api/teams/org-candidates` はプロジェクト名を一切返さず組織メンバー一覧のみ）。
+  `TeamPage.tsx` に「あなたへの招待」「送信済み招待」セクションと招待/承認/辞退/取消 UI を追加。
+- 新キルスイッチ `DEVRELAY_CROSS_TEAM`（既定 `0` = OFF。既存キルスイッチの多数派と逆方向。
+  新しい信頼境界を黙って開けないため）、`DEVRELAY_CROSS_TEAM_EXEC`（既定 `0`、Phase 2 用の先行配線）。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1441/1441（新規 71 ケース
+含む、既存含め非退行）。OFF 状態での不変性を `SELECT count(*) FROM "Session" WHERE
+"requestedByUserId" IS NOT NULL` 等で確認（すべて 0）。
+
+#### 変更ファイル
+新規 `apps/server/src/services/{chat-context-rules,cross-team-guard,cross-team-authz,cross-team-audit}.ts`、
+`apps/server/tests/{chat-context-rules,cross-team-guard,cross-team-api-wiring,team-member-delete-guard}.test.mjs`、
+`apps/server/prisma/migrations/20261105000000_add_cross_team_grant/`。
+既存 `apps/server/prisma/schema.prisma`、`apps/server/src/routes/{api,document-api,raw-completion-api}.ts`、
+`apps/server/src/services/command-handler.ts`、`apps/web/src/{lib/api.ts,pages/TeamPage.tsx}`。
+**DB マイグレーション適用済み**（新規 3 テーブル + `Session.requestedByUserId` 列。
+`npx prisma db execute --stdin` で直接適用、SQL で検証済み、`npx prisma generate` 実行済み）。
+
 ### Devin CLI ガードレール サイクル1: 純関数エンジン + Phase 0 手順書（未配線） (2026-11-05)
 
 ユーザー要望「Devin CLI にガードレールを作りたい（`rm` 禁止/承認制・本番 IP レンジ参照不可）」への
@@ -43,7 +307,6 @@ byte-for-byte 同一性を `diff` で確認。新規モジュールは未配線�
 `agents/{linux,macos}/tests/git-guard-core.test.mjs`。`apps/server`/`apps/web`/DB 無変更のため
 server 再起動不要。**Agent の `u` は本サイクル単独では不要**（新規モジュールは未配線、
 `git-guard-core.ts` の修正は Devin の plan ターンを使うマシンでのみ意味を持つ軽微な修正）。
-
 
 ### gemini plan→exec resume（MCP approve_implementation の planAiSessionMissing 根治） (2026-10-27)
 
