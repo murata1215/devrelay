@@ -21,6 +21,14 @@ export interface FcmUserMetrics {
   lastPersistAt: string | null;
   /** テスト送信 API のレートリミット用 */
   lastTestAt: string | null;
+  /**
+   * 「配信先0件のため破棄」を最後に Notification として通知した時刻。
+   * 2026-11-02 の無音故障対策: 同じ事象で 80 件もの Notification が積まれると
+   * 気づく導線としてむしろ埋没するため、`recordFcmDropNoToken` のたびに毎回
+   * createNotification するのではなく、この時刻を見てクールダウン後にだけ再通知する
+   * （`fcm-service.ts` の `DROP_NOTIFY_COOLDOWN_MS` 参照）。
+   */
+  lastDropNotifiedAt: string | null;
 }
 
 const EMPTY_METRICS: FcmUserMetrics = {
@@ -34,6 +42,7 @@ const EMPTY_METRICS: FcmUserMetrics = {
   lastErrorAt: null,
   lastPersistAt: null,
   lastTestAt: null,
+  lastDropNotifiedAt: null,
 };
 
 /** プロセス起動時刻（`since` としてレスポンスに出す） */
@@ -99,6 +108,12 @@ export function recordFcmPersist(userId: string, nowIso: string): void {
 export function recordFcmTestCall(userId: string, nowIso: string): void {
   const m = touch(userId);
   m.lastTestAt = nowIso;
+}
+
+/** 「配信先0件のため破棄」の Notification 通知を行ったことを記録（クールダウン判定用） */
+export function recordFcmDropNotified(userId: string, nowIso: string): void {
+  const m = touch(userId);
+  m.lastDropNotifiedAt = nowIso;
 }
 
 /** 現在のメトリクスを取得（無ければ空値） */

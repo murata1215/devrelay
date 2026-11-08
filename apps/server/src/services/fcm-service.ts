@@ -26,9 +26,25 @@ import {
 import {
   getFcmMetrics,
   recordFcmDropNoToken,
+  recordFcmDropNotified,
   recordFcmPersist,
   recordFcmSendResult,
 } from './fcm-metrics.js';
+import { createNotification } from './notification-service.js';
+
+/**
+ * プッシュ通知関連の Notification（type: 'error'）はどの Project にも紐づかない
+ * （userId スコープのみ）ため、projectName には固定ラベルを入れる（schema.prisma の
+ * Notification.projectId は 2026-11-02 の本サイクルで null 許容にした）。
+ */
+const PUSH_NOTIFICATION_PROJECT_LABEL = 'プッシュ通知';
+
+/**
+ * 「配信先0件のため破棄」を Notification として再通知するまでのクールダウン。
+ * 2026-11-02 の事故（80 件の破棄が約17時間続いた）で、毎回通知すると埋没するため、
+ * 初回は即時・以後はこの間隔でのみ再通知する。
+ */
+const DROP_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
 
 /** 送信理由（ログ・メトリクスでの分類用） */
 export type FcmSendReason = 'response' | 'tool_approval' | 'test' | 'other';
@@ -179,6 +195,27 @@ export async function sendFcmNotification(
         `⚠️ FCM: 配信先トークン 0 件のため破棄 user=${userId} reason=${reason}（累計 ${m.dropNoToken} 件）`
       );
     }
+
+    // 2026-11-02 の事故（配信先0件のまま80件が無音で捨てられ、誰も気づけなかった）の再発防止:
+    // stderr ログに加えて DB にも残す（DEVRELAY_PUSH_DIAG の設定に関わらず常に行う。
+    // これはログ出力の verbosity 切替ではなく、ユーザーに見える永続記録のため）。
+    // 毎回作ると同じ障害で何十件も積まれて埋没するため、初回 + クールダウン後のみ通知する。
+    const sinceLastNotifyMs = m.lastDropNotifiedAt
+      ? new Date(nowIso).getTime() - new Date(m.lastDropNotifiedAt).getTime()
+      : Infinity;
+    if (sinceLastNotifyMs >= DROP_NOTIFY_COOLDOWN_MS) {
+      recordFcmDropNotified(userId, nowIso);
+      createNotification(
+        userId,
+        'error',
+        null,
+        PUSH_NOTIFICATION_PROJECT_LABEL,
+        '🔴 プッシュ通知が届いていません',
+        `登録済みの端末がないため通知を送信できませんでした（reason=${reason}、累計 ${m.dropNoToken} 件）。` +
+          'アプリを開いて通知を再登録してください。'
+      ).catch(() => {});
+    }
+
     return { summary: { total: 0, success: 0, failed: 0, byCode: {} }, outcomes: [] };
   }
 
@@ -268,12 +305,29 @@ export async function sendFcmNotification(
 
       if (removal.loud) {
         console.error(
-          `🔔 FCM: 全滅ガード発動 user=${userId} reason=${reason} — 全トークンが同一エラーで失敗したため ` +
-            `削除を中止しました（codes=${JSON.stringify(summary.byCode)}）`
+          `🔔 FCM: 全滅ガード発動 user=${userId} reason=${reason} — 削除すると配信先が0件になる、または ` +
+            `全トークンが同一エラーで失敗したため削除を中止しました（codes=${JSON.stringify(summary.byCode)}）`
         );
       }
       for (const r of removal.removals) {
         console.log(`🔔 FCM token expired/invalid (${r.code}), removing: ${maskFcmToken(r.token)}`);
+      }
+
+      if (removal.removals.length > 0) {
+        // 2026-11-02 の事故（トークン削除が stderr ログだけで、誰にも気づかれなかった）の
+        // 再発防止: 削除した時点でユーザー向けに Notification（DB 永続）を残す。
+        const detail = removal.removals
+          .map((r) => `${maskFcmToken(r.token)}（${r.code ?? r.reason}）`)
+          .join(' / ');
+        createNotification(
+          userId,
+          'error',
+          null,
+          PUSH_NOTIFICATION_PROJECT_LABEL,
+          '🔴 プッシュ通知の宛先を削除しました',
+          `無効と判定された端末のプッシュ通知トークンを削除しました: ${detail}。` +
+            '通知が届かなくなった場合はアプリを再起動して再登録してください。'
+        ).catch(() => {});
       }
 
       return { next: removal.next, result: undefined };

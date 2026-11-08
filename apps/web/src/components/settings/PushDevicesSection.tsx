@@ -102,6 +102,18 @@ export function PushDevicesSection() {
         </p>
       )}
 
+      {/* 2026-11-02: iPhone SE3 無音故障の再発防止。トークン削除・配信先0件スキップは
+          DB（Notification）に永続化されるため、サーバー再起動後でも直近1件をここに出せる。 */}
+      {data.lastError && (
+        <div className="p-2 rounded bg-[var(--bg-tertiary)] border border-amber-500/40 text-xs">
+          <p className="font-medium text-amber-500">⚠️ {data.lastError.title}</p>
+          <p className="mt-0.5 text-[var(--text-muted)]">{data.lastError.body}</p>
+          <p className="mt-0.5 text-[var(--text-muted)]">
+            {formatRelativeTime(data.lastError.createdAt, nowIso) ?? data.lastError.createdAt}
+          </p>
+        </div>
+      )}
+
       {devices.length > 0 && (
         <div className="overflow-x-auto">
           <table className="min-w-full text-xs">

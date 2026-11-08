@@ -174,14 +174,49 @@ describe('summarizeSendResult', () => {
 });
 
 describe('decideTokenRemovals', () => {
-  test('registration-token-not-registered は即削除される', () => {
-    const records = [record()];
-    const outcomes = [{ token: 'tokenA', ok: false, code: 'messaging/registration-token-not-registered' }];
+  test('registration-token-not-registered は、他に端末があれば即削除される', () => {
+    const records = [record({ token: 't1' }), record({ token: 't2' })];
+    const outcomes = [
+      { token: 't1', ok: false, code: 'messaging/registration-token-not-registered' },
+      { token: 't2', ok: true },
+    ];
     const { next, removals, loud } = decideTokenRemovals({ records, outcomes, nowIso: NOW });
-    assert.equal(next.length, 0);
+    assert.equal(next.length, 1);
     assert.equal(removals.length, 1);
     assert.equal(removals[0].reason, 'unregistered');
     assert.equal(loud, false);
+  });
+
+  // 2026-11-02 iPhone SE3 無音故障の再発防止: 削除すると配信先が 0 件になる場合は
+  // 削除理由を問わず（たとえ registration-token-not-registered のような明確な無効サインでも）
+  // 削除をブロックする「ゼロ件ガード」の回帰テスト。端末 1 台だけのユーザーはここで守られる。
+  test('ゼロ件ガード: 唯一の端末が registration-token-not-registered でも削除せず keep する', () => {
+    const records = [record()];
+    const outcomes = [{ token: 'tokenA', ok: false, code: 'messaging/registration-token-not-registered' }];
+    const { next, removals, loud } = decideTokenRemovals({ records, outcomes, nowIso: NOW });
+    assert.equal(removals.length, 0);
+    assert.equal(next.length, 1);
+    assert.equal(next[0].lastErrorCode, 'messaging/registration-token-not-registered');
+    assert.equal(next[0].consecutiveFailures, 1);
+    assert.equal(loud, true);
+  });
+
+  // 2026-11-02 の事故本体の回帰テスト: 削除後に同じトークンを再登録したら問題なく配信できた
+  // ＝ invalid-argument は誤判定だったことが判明したため、既定では connection 回数に関わらず
+  // 一切削除しない（strictDelete を明示しない限り、consecutiveFailures が何回積み上がっても削除されない）。
+  test('invalid-argument は既定では何回失敗しても削除されない（旧: 5回で削除していたバグの回帰テスト）', () => {
+    const records = [record({ consecutiveFailures: 4 })];
+    const outcomes = [{ token: 'tokenA', ok: false, code: 'messaging/invalid-argument' }];
+    const { next, removals } = decideTokenRemovals({ records, outcomes, nowIso: NOW });
+    assert.equal(removals.length, 0);
+    assert.equal(next.length, 1);
+    assert.equal(next[0].consecutiveFailures, 5);
+
+    // さらに失敗を積んでも（旧閾値をはるかに超えても）削除されないことを確認
+    const records2 = [record({ consecutiveFailures: 50 })];
+    const result2 = decideTokenRemovals({ records: records2, outcomes, nowIso: NOW });
+    assert.equal(result2.removals.length, 0);
+    assert.equal(result2.loud, false);
   });
 
   test('invalid-argument 1件では削除されず consecutiveFailures が 1 になる', () => {
@@ -191,22 +226,6 @@ describe('decideTokenRemovals', () => {
     assert.equal(removals.length, 0);
     assert.equal(next.length, 1);
     assert.equal(next[0].consecutiveFailures, 1);
-  });
-
-  test('invalid-argument が閾値（既定5）に到達すると削除される', () => {
-    const records = [record({ consecutiveFailures: 4 })];
-    const outcomes = [{ token: 'tokenA', ok: false, code: 'messaging/invalid-argument' }];
-    const { next, removals } = decideTokenRemovals({ records, outcomes, nowIso: NOW });
-    assert.equal(removals.length, 1);
-    assert.equal(next.length, 0);
-  });
-
-  test('invalid-argument が閾値未満（4回目）ではまだ削除されない', () => {
-    const records = [record({ consecutiveFailures: 3 })];
-    const outcomes = [{ token: 'tokenA', ok: false, code: 'messaging/invalid-argument' }];
-    const { next, removals } = decideTokenRemovals({ records, outcomes, nowIso: NOW });
-    assert.equal(removals.length, 0);
-    assert.equal(next[0].consecutiveFailures, 4);
   });
 
   test('全滅ガード: 2件以上すべてが同一の invalid-argument で失敗したら削除0件・loud', () => {
@@ -222,12 +241,12 @@ describe('decideTokenRemovals', () => {
     assert.equal(loud, true);
   });
 
-  test('全滅ガード: total===1 のときは発動しない（比較対象が無い）', () => {
+  test('total===1 で invalid-argument が何回積んでいても strictDelete 無しでは削除・loud ともに発動しない', () => {
     const records = [record({ consecutiveFailures: 10 })];
     const outcomes = [{ token: 'tokenA', ok: false, code: 'messaging/invalid-argument' }];
     const { removals, loud } = decideTokenRemovals({ records, outcomes, nowIso: NOW });
     assert.equal(loud, false);
-    assert.equal(removals.length, 1); // 閾値超過で通常どおり削除される
+    assert.equal(removals.length, 0);
   });
 
   test('全滅ガード: コードが揃っていない場合は発動しない', () => {
@@ -272,11 +291,26 @@ describe('decideTokenRemovals', () => {
     assert.equal(next[0].lastSuccessAt, NOW);
   });
 
-  test('strictDelete: true なら invalid-argument も即削除される（旧挙動の互換性）', () => {
+  test('strictDelete: true でも、唯一の端末ならゼロ件ガードで削除されない', () => {
     const records = [record()];
     const outcomes = [{ token: 'tokenA', ok: false, code: 'messaging/invalid-argument' }];
-    const { removals } = decideTokenRemovals({ records, outcomes, nowIso: NOW, strictDelete: true });
+    const { removals, next, loud } = decideTokenRemovals({ records, outcomes, nowIso: NOW, strictDelete: true });
+    assert.equal(removals.length, 0);
+    assert.equal(next.length, 1);
+    assert.equal(loud, true);
+  });
+
+  test('strictDelete: true かつ他に端末があれば invalid-argument も即削除される（旧挙動の互換性）', () => {
+    const records = [record({ token: 't1' }), record({ token: 't2' })];
+    const outcomes = [
+      { token: 't1', ok: false, code: 'messaging/invalid-argument' },
+      { token: 't2', ok: true },
+    ];
+    const { removals, next } = decideTokenRemovals({ records, outcomes, nowIso: NOW, strictDelete: true });
     assert.equal(removals.length, 1);
+    assert.equal(removals[0].token, 't1');
+    assert.equal(next.length, 1);
+    assert.equal(next[0].token, 't2');
   });
 
   test('allowRemoval: false なら削除条件を満たしても削除しない（テスト送信用）', () => {

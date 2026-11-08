@@ -16,8 +16,11 @@ type NotificationType = 'response' | 'approval' | 'error';
  *
  * @param userId 通知の宛先ユーザー ID
  * @param type 通知タイプ（response / approval / error）
- * @param projectId 対象プロジェクト ID
- * @param projectName プロジェクト名（非正規化、表示用）
+ * @param projectId 対象プロジェクト ID。特定の Project に紐づかない通知（2026-11-02 の
+ *   FCM 無音故障対策: トークン削除・配信先0件スキップ等、userId スコープのみの 'error' 通知）
+ *   では null を渡す（schema.prisma の Notification.projectId は null 許容）
+ * @param projectName プロジェクト名（非正規化、表示用）。projectId が null の場合は
+ *   呼び出し元が固定ラベル（例: "プッシュ通知"）を渡すこと
  * @param title 通知タイトル
  * @param body 通知本文（200文字に切り詰め）
  * @param sessionId 通知一覧からスレッド直行するための対象 Session.id（省略可。
@@ -26,7 +29,7 @@ type NotificationType = 'response' | 'approval' | 'error';
 export async function createNotification(
   userId: string,
   type: NotificationType,
-  projectId: string,
+  projectId: string | null,
   projectName: string,
   title: string,
   body: string,
