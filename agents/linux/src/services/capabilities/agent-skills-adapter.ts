@@ -27,6 +27,10 @@
  * 一切触らない。
  * サイクル P3-B §5-6: ランタイム検出（Devin `--version` / Codex 設定有無）は**配布判断から完全に
  * 切り離し**、`CapabilityResult.runtimeVersion` に表示専用の診断文字列を入れるだけに使う。
+ *
+ * サイクル P4-A: marketplace リポジトリの clone/fetch ロジック（`ensureMarketplaceClone()`）を
+ * `marketplace-clone.ts` に移設し、新設の `devin-plugin-adapter.ts`（`devin:plugin`）と共有する。
+ * git 呼び出しの引数列は移設前と1文字も変えていない。
  */
 import { existsSync } from 'fs';
 import { writeFile } from 'fs/promises';
@@ -37,6 +41,7 @@ import { resolveSystemDevin, resolveDevinRuntimeVersion } from '../devin-path.js
 import type { CapabilityAdapter, CapabilityCtx } from '../capability-sync.js';
 import { getConfigDir } from '../config.js';
 import { execFileGitRunner, resolveSystemGit, type GitCliRunner } from './git-cli.js';
+import { ensureMarketplaceClone } from './marketplace-clone.js';
 import {
   copyTreeSafe,
   hashTree,
@@ -58,8 +63,6 @@ import {
   resolvePluginSourceRelPath,
   sanitizeMarketplaceDirName,
   stripMarketplaceSuffix,
-  allocateGitTimeoutMs,
-  GIT_TOTAL_BUDGET_MS,
   parseMarketplaceManifest,
   parsePluginManifest,
   isOwnedAgentSkillsMarker,
@@ -326,54 +329,6 @@ async function buildDiagnostics(deps: AgentSkillsDeps): Promise<string> {
     { label: 'Devin', detected: Boolean(devinPath), basis: 'runtime-detection', version: devinVersion },
     { label: 'Codex', detected: codexConfigured, basis: 'config-presence' },
   ]);
-}
-
-// -----------------------------------------------------------------------------
-// marketplace リポジトリの clone/fetch（P3-A §3-1）
-// -----------------------------------------------------------------------------
-
-/**
- * marketplace リポジトリを `<cloneParentDir>/<dirName>` に shallow clone し、無ければ作成・
- * 既にあれば fetch + reset --hard + clean -fdx でリセットする。失敗したら `ok:false`
- * （呼び出し側は既存 managed skill を last-known-good として保持し、撤去しない）。
- * 存在確認は `deps.listDirNames()` のみで行う（fake deps でも spawn ゼロで検証できるようにするため）。
- */
-async function ensureMarketplaceClone(
-  deps: AgentSkillsDeps,
-  cloneParentDir: string,
-  dirName: string,
-  gitPath: string,
-  url: string,
-): Promise<{ ok: true; cloneDir: string; commit: string | null } | { ok: false }> {
-  const cloneDir = join(cloneParentDir, dirName);
-  const parentNames = await deps.listDirNames(cloneParentDir);
-  const cloneExists = parentNames.includes(dirName);
-
-  if (!cloneExists) {
-    const timeoutMs = allocateGitTimeoutMs(GIT_TOTAL_BUDGET_MS, 2);
-    const cloneResult = await deps.runGit(gitPath, ['clone', '--depth', '1', '--single-branch', '--', url, cloneDir], cloneParentDir, timeoutMs);
-    if (!cloneResult.ok) {
-      await deps.removeManagedDir(cloneDir).catch(() => {}); // 部分 clone の残骸を掃除し次回リトライを新規 clone にする
-      return { ok: false };
-    }
-  } else {
-    const timeoutMs = allocateGitTimeoutMs(GIT_TOTAL_BUDGET_MS, 5);
-    const steps: string[][] = [
-      ['remote', 'set-url', 'origin', url],
-      ['fetch', '--depth', '1', 'origin', 'HEAD'],
-      ['reset', '--hard', 'FETCH_HEAD'],
-      ['clean', '-fdx'],
-    ];
-    for (const args of steps) {
-      const stepResult = await deps.runGit(gitPath, args, cloneDir, timeoutMs);
-      if (!stepResult.ok) return { ok: false };
-    }
-  }
-
-  const revParseTimeout = allocateGitTimeoutMs(GIT_TOTAL_BUDGET_MS, 1);
-  const revParseResult = await deps.runGit(gitPath, ['rev-parse', 'HEAD'], cloneDir, revParseTimeout);
-  const commit = revParseResult.ok ? (revParseResult.stdout.trim() || null) : null;
-  return { ok: true, cloneDir, commit };
 }
 
 // -----------------------------------------------------------------------------

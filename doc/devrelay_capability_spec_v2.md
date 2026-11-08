@@ -1,9 +1,76 @@
-# DevRelay Capability 配布基盤 指示書 v2.4（サイクル P1〜P3-C）
+# DevRelay Capability 配布基盤 指示書 v2.5（サイクル P1〜P4-A）
 
-- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）／改訂: 2026-09-15（v2.2、サイクル P3-A）／改訂: 2026-09-15（v2.3、サイクル P3-B）／改訂: 2026-09-17（v2.4、サイクル P3-C）
+- 作成日: 2026-09-13（v2）／改訂: 2026-09-13（v2.1、サイクル P1.3）／改訂: 2026-09-15（v2.2、サイクル P3-A）／改訂: 2026-09-15（v2.3、サイクル P3-B）／改訂: 2026-09-17（v2.4、サイクル P3-C）／改訂: 2026-10-31（v2.5、サイクル P4-A）
 - 対象: devrelay 本体（`/opt/devrelay`, projectId `cmm5tpzil0042f3p2ieotnow4`）
-- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの。v2.2 はサイクル P3-A で 2 つ目の provider×kind 実装（`devin:skill`）を追加し、provider×kind 抽象を実証したもの。v2.3 はサイクル P3-B で `devin:skill` を「配布フォーマット単位」の `agent-skills:standard` に昇格し、ツール別 opt-in（`providers.devin` チェックボックス）を廃止したもの。v2.4 はサイクル P3-C で P3-B 実機 E2E 後の運用上の粗（空 staging 残置・skill 無しプラグインの誤表示・診断文字列の重複）を掃除し、調査中に見つかった「skill の update が構造的に必ず失敗するバグ」を根治したもの
+- ステータス: v2 は実装済み（サイクル P1〜P1.2）。v2.1 は hp630g9/fwjg2 実機検証（claude 2.1.266）で判明した「配布が実質機能していない」不具合（cwd 未指定 / install scope 不一致）の根治とあわせ、§7.4・§8.2・§12 E2E-4 を実装済み挙動に合わせて改訂したもの。v2.2 はサイクル P3-A で 2 つ目の provider×kind 実装（`devin:skill`）を追加し、provider×kind 抽象を実証したもの。v2.3 はサイクル P3-B で `devin:skill` を「配布フォーマット単位」の `agent-skills:standard` に昇格し、ツール別 opt-in（`providers.devin` チェックボックス）を廃止したもの。v2.4 はサイクル P3-C で P3-B 実機 E2E 後の運用上の粗（空 staging 残置・skill 無しプラグインの誤表示・診断文字列の重複）を掃除し、調査中に見つかった「skill の update が構造的に必ず失敗するバグ」を根治したもの。v2.5 はサイクル P4-A で、Devin CLI に公式 plugin 機能が実装されたこと（2026-10 時点の docs.devin.ai で確認）を受け、3 つ目の provider×kind `devin:plugin` を新設したもの。**Agent 側実装のみ完了。web の plugin id 登録 UI 配線（Phase 2）と install 自体の実機検証は未実施**（詳細は devlog 参照）
 - 置き換え: 本書は同日の「Plugin 配布機能 指示書 v1」を Capability 抽象化で改訂したもの。2026-09-03 の「Toolkit 配布機能（レシピ実行基盤）」案は破棄
+
+## v2.5 改訂差分（サイクル P4-A、2026-10-31）
+
+2026-09-15（P3-B）時点では Devin CLI に plugin 概念が無く、Claude plugin の `skills/<name>/` だけを
+`~/.agents/skills/` に抜き出す `agent-skills:standard` が唯一の配布手段だった。2026-10 時点の Devin CLI
+公式ドキュメント（docs.devin.ai）で `devin plugins install/list/info/update/remove/prune` の実在と、
+manifest 優先順 `.devin-plugin/plugin.json` > `.claude-plugin/plugin.json` > `plugin.json`（＝ Claude
+plugin がそのまま読める）ことが確認できたため、3 つ目の provider×kind `devin:plugin` を新設した。
+詳細な調査過程・設計判断・実機確認ログはサイクル devlog `doc/devlog/2026-10-31_160000_devin_plugin_adapter.md`
+を参照。仕様書としての差分は以下:
+
+1. **新 adapter `devin:plugin`**（registry key `devin:plugin`）。`capabilities/devin-plugin-{rules,adapter}.ts` +
+   専用 CLI ヘルパー `capabilities/devin-cli.ts`（`claude-cli.ts`/`git-cli.ts` の鏡写し、cwd 必須・90 秒
+   timeout）。`connection.ts` に無条件登録（キルスイッチは adapter 内部で判定するため、登録自体は常時行う）。
+2. **パーサ非依存設計**（最重要）: `devin plugins list` の標準出力には chisel のログ行が混ざることを実機
+   確認済みで、将来のバージョンでも機械可読性は保証されない。本 adapter は list 出力を一切パースしない。
+   代わりに DevRelay 独自のサイドカー state（`<configDir>/capabilities/devin-plugins.json`。**Devin の
+   install 先ディレクトリには置かない**＝所有権侵害を避け `devin plugins prune` にも消されない）と
+   `devin plugins info <id>` の **exit code のみ**で冪等性を判定する。
+3. **索引解決**: `agent-skills:standard` が既に維持している marketplace clone
+   （`<configDir>/capabilities/marketplaces/<name>`）を shared ヘルパー `marketplace-clone.ts`
+   （`agent-skills-adapter.ts` の private `ensureMarketplaceClone()` を移設、git 引数列は無変更）経由で
+   **索引としてだけ**読み、`plugins[].source`（例 `./plugins/context7`）を `owner/repo#plugins/context7`
+   に翻訳して `devin plugins install <source> --yes` に渡す。配布物のコピーはしない（Devin が自前で
+   fetch する）。v1 は `marketplaceSource` が `owner/repo` または `https://github.com/...` 形式のときのみ
+   対応（GitHub 限定。`buildDevinInstallSource()`）。
+4. **action 判定**（`decideDevinPluginAction()`、パーサ非依存）:
+   - state 無し & `info` ok（Devin に実在）→ 人間が手で入れた plugin とみなし一切触らない
+     （`conflict-unmanaged`。`agent-skills` 承認ノート#9 と同じ思想）
+   - state 無し & `info` NG → `install`
+   - state あり & `info` NG（Devin 側から消えている）→ self-heal として `install`（desired-state への回復）
+   - state あり & `info` ok & commit 一致 → `present`（何もしない）
+   - それ以外（commit 不一致または取得不能）→ `update`（`devin plugins update <id> --yes`）
+5. **CRITICAL RULE の複製**（P3-A 承認ノート#8 と同じ）: marketplace の clone/fetch/manifest 解析が失敗
+   した reconcile では撤去判定を一切行わず、既存 state を last-known-good として保持し `failed` を報告する。
+6. **予算管理**: adapter 全体 3 分枠（common 層 `ADAPTER_TIMEOUT_MS` と同値を `devin-plugin-rules.ts` に
+   手動同期）のうち、残り 10 秒を切ったら自発的に処理を打ち切り、未処理 item は `failed:budget-exhausted`
+   として state を last-known-good のまま保持する（outer timeout に巻き取られて進捗を丸ごと失うのを防ぐ）。
+7. **`agent-skills:standard` との関係**: **廃止せず併存**させる。`~/.agents/skills` は Codex も読む共有
+   ディレクトリであり Devin 都合で消せない。二重露出（同じ skill が `~/.agents/skills` と Devin plugin の
+   両方から見える）が有害かどうかは本サイクルでは未検証（install 自体の実機検証が未実施のため）。有害と
+   判明した場合のみ `DEVRELAY_DEVIN_PLUGIN_EXCLUSIVE`（本サイクル未実装）で `agent-skills:standard` を
+   その機体だけ cleanup-only に切り替える想定とし、Phase 3 として先送りした。
+8. **診断文字列**: `runtimeVersion` に `Devin <版> 検出 / plugins: 対応|非対応` を入れる（配布判断には
+   使わない、表示専用）。`agent-skills-rules.ts` の `formatRuntimeVersion()`（80 文字上限）は触らず、
+   `devin-plugin-rules.ts` に独自実装（240 文字上限）を複製した（zero-import 規約のため）。
+9. **キルスイッチ** `DEVRELAY_DEVIN_PLUGIN`（既定 `1`）。`0` で adapter 内部が no-op（`hasManagedState()`
+   も false ＝ 破壊操作ゼロ）。registry への登録自体はキルスイッチに関わらず常時行う（登録しないと
+   `devin:plugin` items が `unsupported-provider` で毎回 error 表示になるため）。
+10. **Web（Phase 2・本サイクル未実施）**: `apps/web/src/lib/capability-config-rules.ts` の
+    `validateCapabilityForm()` に `{provider:'devin', kind:'plugin', id}` の items 生成を追加する予定だが
+    未着手。ロールアウト順序（P3-A の教訓）: Agent 側を先に commit → 全機体 `u` → Devin 機で手動
+    `capabilityConfig` 投入 + Sync now で E2E 確認 → 最後に web の items 生成を commit。この順序なら
+    「新 DB 値 → 旧 Agent」で `unsupported-provider` の error 表示が出る窓を作らない。
+11. **やらないこと（v1 外、追記）**: project scope / prelaunch 経由の Devin plugin 配布、`--local` install、
+    `devin plugins prune`、`.devin/config.json`（Repo スコープ）の生成・編集、Devin の install 先
+    ディレクトリの直接走査・ドリフト検知、`plugins list` 出力のパース（意図的に非対応）、
+    `plugins[].source` のオブジェクト形式（`git-subdir`）対応、GitHub 以外のホスト、private リポ認証、
+    macos/windows agent ツリーへの移植。
+
+**変更ファイル**: `agents/linux/src/services/capabilities/{devin-plugin-rules,devin-cli,devin-plugin-adapter,marketplace-clone}.ts`（新規）、
+`agents/linux/src/services/connection.ts`（adapter 登録1行）、
+`agents/linux/src/services/capabilities/agent-skills-adapter.ts`（clone 呼び出しを委譲するだけ）。
+**無変更**: `apps/server/**`、`prisma/**`、`packages/shared/**`、`apps/web/**`（Phase 2 未着手）、
+`agents/macos/**`、`agents/windows/**`。
+
+---
 
 ## v2.4 改訂差分（サイクル P3-C、2026-09-17）
 

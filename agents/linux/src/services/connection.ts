@@ -121,11 +121,16 @@ import { setCapabilityConfig, setCapabilitySyncSender, requestReconcile, registe
 import { claudePluginAdapter } from './capabilities/claude-plugin-adapter.js';
 // サイクルP3-B: devin:skill から agent-skills:standard へ昇格（配布フォーマット単位の adapter）
 import { agentSkillsAdapter, setAiToolsSnapshot } from './capabilities/agent-skills-adapter.js';
+// サイクルP4-A: Devin CLI 公式 plugin 機能向け adapter（agent-skills:standard とは併存。
+// `DEVRELAY_DEVIN_PLUGIN=0` で no-op になるキルスイッチは adapter 内部で判定するため、
+// registry への登録はキルスイッチに関わらず無条件で行う）
+import { devinPluginAdapter } from './capabilities/devin-plugin-adapter.js';
 import type { AgentCapabilitySyncPayload } from '@devrelay/shared';
 
 // Capability adapter の登録（起動時 1 回。将来 Codex adapter を足すときはここに 1 行追加するだけでよい）
 registerCapabilityAdapter(claudePluginAdapter);
 registerCapabilityAdapter(agentSkillsAdapter);
+registerCapabilityAdapter(devinPluginAdapter);
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
