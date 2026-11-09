@@ -5,7 +5,7 @@ import { redactChatInput } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext, handleProjectConnect } from '../services/command-handler.js';
 import { getActiveProgressForChatId, getSessionParticipants, removeWebParticipantFromAllSessions } from '../services/session-manager.js';
-import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession } from '../services/agent-manager.js';
+import { handleToolApprovalUserResponse, getPendingToolApprovalsForSession, isAgentConnected } from '../services/agent-manager.js';
 import { handleVoiceAssist } from '../services/voice-assist.js';
 import { buildSessionInfoPayload } from '../services/thread-routing.js';
 import { decideSessionInfoPush } from '../services/thread-reestablish.js';
@@ -19,6 +19,10 @@ import {
 } from '../services/web-command-persistence.js';
 import { prisma } from '../db/client.js';
 import crypto from 'crypto';
+import { isCrossTeamEnabled, isCrossTeamChatEnabled } from '../services/cross-team-guard.js';
+import { findCrossTeamAskProjectById } from '../services/cross-team-authz.js';
+import { runCrossProjectAsk } from '../services/cross-ask-runner.js';
+import { decideCrossAskInput } from '../services/cross-ask-rules.js';
 
 /** 接続中の Web クライアント: chatId -> WebSocket */
 const webClients = new Map<string, WebSocket>();
@@ -314,6 +318,59 @@ export async function setupWebClientWebSocket(
           // hintProjectId フォールバック（handleProjectConnect）や handleContinue 経由の
           // 自動再接続でセッションが暗黙に切り替わっていた場合、tab.sessionId を最新化する。
           await emitSessionInfoIfChanged(userId, chatId, beforeSessionId);
+          break;
+        }
+        case 'web:cross:ask': {
+          // クロスユーザー Team Phase C: 購読/借用プロジェクトへの質問専用フレーム。
+          // parseCommandWithNLP() / executeCommand() / handleProjectConnect() を一切呼ばない
+          // （e/k/a/testflight/`//connect` 等が文字列として宛先に渡るだけで到達不能になる）。
+          // context.lastProjectId も読み書きしない（自分のタブの文脈を汚さない）。
+          const { projectId: crossProjectId, text: crossText } = msg.payload;
+          if (!crossProjectId || !crossText) break;
+
+          const crossChatEnabled = isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)
+            && isCrossTeamChatEnabled(process.env.DEVRELAY_CROSS_TEAM_CHAT);
+          if (!crossChatEnabled) {
+            sendJson(ws, { type: 'web:error', payload: { error: 'クロスユーザー Team のチャット機能は現在無効です。' } });
+            break;
+          }
+
+          const inputCheck = decideCrossAskInput({ text: crossText });
+          if (!inputCheck.ok) {
+            sendJson(ws, { type: 'web:error', payload: { error: '質問が空です。' } });
+            break;
+          }
+
+          // 宛先解決は「既に ask 候補として認可済みの集合」から該当 1 件を探すだけ
+          // （新しい認可クエリを書かない。ツリーに出る集合と ask できる集合を一致させ続けるため）。
+          const crossTarget = await findCrossTeamAskProjectById(userId, crossProjectId);
+          if (!crossTarget) {
+            await sendWebMessage(chatId, '❌ このプロジェクトへの質問は現在利用できません（購読/招待が取り消された可能性があります）。', undefined, crossProjectId);
+            break;
+          }
+
+          if (crossTarget.machine.status !== 'online' || !isAgentConnected(crossTarget.machine.id)) {
+            const machineName = crossTarget.machine.displayName ?? crossTarget.machine.name;
+            await sendWebMessage(chatId, `⚠️ ${crossTarget.name} のエージェント (${machineName}) はオフラインです。`, undefined, crossProjectId);
+            break;
+          }
+
+          const crossResult = await runCrossProjectAsk({
+            targetProject: crossTarget,
+            requesterUserId: userId,
+            question: crossText,
+            platform: 'web',
+          });
+
+          if (crossResult.ok) {
+            await sendWebMessage(chatId, crossResult.output, undefined, crossProjectId);
+          } else if (crossResult.kind === 'tooLong') {
+            await sendWebMessage(chatId, `❌ 質問が長すぎます（${crossResult.rawLength}文字、上限${crossResult.limit}文字）。`, undefined, crossProjectId);
+          } else if (crossResult.kind === 'busy') {
+            await sendWebMessage(chatId, `⚠️ ${crossResult.message}`, undefined, crossProjectId);
+          } else {
+            await sendWebMessage(chatId, `❌ ${crossTarget.name} への質問が失敗しました: ${crossResult.message}`, undefined, crossProjectId);
+          }
           break;
         }
         case 'web:tool:approval:response':

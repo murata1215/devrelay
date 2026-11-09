@@ -1601,6 +1601,73 @@ Phase A の実機検証がブラウザコンソールに JS を貼る必要が�
 （`cross-team-guard.ts` / `cross-team-publish.ts` / `cross-team-authz.ts`）は一切変更
 していない。**
 
+### クロスユーザー Team Phase C（購読/借用プロジェクトを Agents ツリーから直接 ask、2026-11-10）
+
+Phase A/B で「購読する」ところまで到達したが、宛先に到達する手段がチャットへの手打ち
+（`ask <project>: <question>`）しか無く、かつ依頼者側には質問・回答が一切残らなかった
+（`crossquery_` セッションの `userId` は宛先マシン所有者のため）。本サイクルで
+右レール Agents ツリーへの表示・質問専用タブ・履歴 API までを実装した。
+
+**前提として塞いだ既存の穴**: `handleProjectConnect()`/`handleMachineConnect()`/
+`handleProjectList()`（`command-handler.ts`）はチャット（WS）経路でのみ所有者チェックを
+していなかった（REST/MCP は全て `machine: { userId }` で絞っている）。任意の projectId で
+他人のマシンにセッションを張り `exec`/`k`/`x`/`u` まで届かせられる状態で、クロスユーザー
+Team のメンバー行には既に他人の projectId が入っているため実害があった。
+`thread-api-guard.ts` の既存純関数 `evaluateProjectOwnership()` を再利用して修正
+（キルスイッチの外、常時有効）。
+
+**設計の肝: 送信フレームを別種にする**。購読/借用プロジェクトは「質問専用タブ」として開き、
+`//connect` も `executeCommand()`（`parseCommandWithNLP` 経由のコマンド実行）も一切通さない。
+新設 WS フレーム `web:cross:ask`（`platforms/web.ts`）のハンドラは
+`handleProjectConnect`/`parseCommandWithNLP`/`executeCommand` を**一切呼ばない**ため、
+入力欄に `e`/`k`/`testflight`/`//connect` と打っても宛先への質問文字列として渡るだけで
+構造的に到達不能になる（UI 側のガードが漏れても exec にならない）。
+
+宛先一覧（`GET /api/cross-team/ask-targets`）・projectId 直接指定の宛先解決
+（`findCrossTeamAskProjectById()`）は、どちらも既存 `listCrossTeamAskCandidateProjects()`
+を呼ぶだけで新しい認可クエリを一切書いていない。「ツリーに出る集合」と「ask できる集合」が
+将来ずれないようにするための意図的な設計。
+
+実行本体はチャット `ask`（`handleAskMember`）と共用の `services/cross-ask-runner.ts`
+`runCrossProjectAsk()` に抽出した（既存チャット ask の挙動は完全に不変）。宛先プロジェクトに
+実行中の `crossquery_` があれば `targetBusy` で即断る同時実行ガードを新たに追加（既存チャット
+`ask` にも波及する唯一の挙動変更）。応答配信は `sendWebMessage()`（`sendJson` ではない。
+最大 15 分かかる間に WS が切れても再接続時にキューからフラッシュされる）を使い、`sessionId`
+は乗せない（`crossquery_` は質問ごとに使い捨てのため、タブに sessionId を持たせると次の
+回答が `shouldRouteToTab()` に `session-mismatch` で捨てられる）。`addParticipant()` は
+絶対に呼ばない（呼ぶと `broadcastToolApprovalToWeb()` 経由で他人のマシンのツール承認カードが
+依頼者に飛び、押せてしまう）。
+
+**会話の継続性（案 B、セルフレビューで案 C から差し替え）**: 当初「新セッション ID
+プレフィックス `crossask_` を足すだけで、サーバー側は一時扱い・Agent 側
+（`session-scope.ts` の `classifySessionScope()`）は未知プレフィックスを `interactive` と
+判定するので resume が効く」という案を採用しかけたが、セルフレビューで撤回した。Agent の
+「interactive 扱い」は会話の読み書きだけでなく `clearOutputDir()`（質問のたびに所有者の
+`.devrelay-output/` を rm -rf）・`savePlanFile()`（質問のたびに所有者の `.devrelay/plans/`
+が増殖）も同時に有効化してしまい、#348 で修正したはずの「cross-query のたびに対話セッションの
+書きかけ成果物が消える事故」をそのまま再発させる。さらに未更新の Agent（`u` を打っていない機）
+では新プレフィックスを認識できず同じ事故が起きる。代わりに `cross-ask-runner.ts` 内で、同一
+(依頼者, プロジェクト) の過去ログから直近 3 往復（最大 6,000 文字、truncate 済み・
+`neutralizeHumanInputTag()` で無害化済み）を `fenceIfHuman()` の外側に「これまでのやりとり
+（参考）」として前置する案 B を採用した。Agent 改修ゼロ・セッションは従来どおり
+`crossquery_<uuid>` の使い捨てのまま ＝ #348 のガードも監査の 1:1 対応もレート制限の
+数え方も一切壊さない。本物の resume（案 C′）は、Agent 側に「会話は resume する・
+`.devrelay-output/`/`savePlanFile`/workState 注入はしない」という第三の種別
+（`classifySessionScope()` に `'crossAsk'` を追加）を実装し、`AgentCapability` で
+対応 Agent にのみ使う形で次サイクル以降に先送りした。
+
+**G-2（併せて修正した既存バグ）**: `connection.ts` の `loadWorkState(projectPath)` が
+`isEphemeral` を見ずに無条件で呼ばれており、**現行のクロスユーザー ask でも既に**
+所有者の作業途中メモ（work state）が借り手向けのプロンプトに混入し、
+`archiveWorkState()` で所有者の auto-continue を消費してしまっていた。
+`agents/{linux,macos,windows}` の 3 箇所を同一内容で修正（反映には貸す側の `u` が必要、
+未更新機は現状維持で degrade しない）。
+
+履歴 API（`GET /api/cross-team/projects/:id/messages`）の認可は
+`requestedByUserId === userId` の 1 条件のみ（projectId の存在確認をしない。購読/招待を
+切られても自分が書いた本文は読める——ツリーからは消えるので新規の質問はできなくなるだけ）。
+詳細は `doc/devlog/2026-11-10_cross_team_chat_phase_c.md`。
+
 ### API 構成
 - **WebUI 向け**: `GET/POST/DELETE /api/teams`、`POST/DELETE /api/teams/:teamId/members`
 - **Agent 向け**: `GET /api/agent/members`（チームメイト一覧）、`POST /api/agent/ask-member`（質問送信）、`POST /api/agent/teamexec-member`（実行依頼送信）

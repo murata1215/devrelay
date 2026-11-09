@@ -408,7 +408,11 @@ async function handleSessionStart(
   const history = isEphemeral ? [] : await loadConversation(projectPath, agentScopeId);
 
   // Check for pending work state (auto-continue feature)
-  const pendingWorkState = await loadWorkState(projectPath);
+  // G-2（Phase C 既存バグ修正、agents/linux と同一内容。byte-for-byte 同一を維持すること）:
+  // 一時セッション（crossquery_ 等）は所有者の作業途中メモを読んではならない。無条件に読むと、
+  // 借り手向けのプロンプトに所有者のメモが混入し（クロスユーザーのデータ露出）、かつ下の
+  // handleAiPrompt 側で archiveWorkState() が呼ばれて所有者の auto-continue が消費されてしまう。
+  const pendingWorkState = isEphemeral ? null : await loadWorkState(projectPath);
   if (pendingWorkState) {
     log.info(`Found pending work state: ${pendingWorkState.summary}`);
   }

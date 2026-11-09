@@ -19,7 +19,6 @@ import {
   cancelAiProcess,
   checkAgentVersion,
   updateAgent,
-  executeCrossProjectQuery,
   executeCrossProjectExec,
   isAgentConnected,
   startClaudeLogin,
@@ -57,7 +56,6 @@ import { isUpdateBusyGuardEnabled, decideManualUpdate, resolveDeferredBusyMessag
 import { fenceHumanText, validateHumanTextLength, neutralizeHumanInputTag, fenceIfHuman, buildHumanTextMeta } from './human-text-fence.js';
 import { isChatCtxPerUserEnabled, reconcileUserContext } from './chat-context-rules.js';
 import { listCrossTeamAskCandidateProjects } from './cross-team-authz.js';
-import { recordCrossTeamAudit } from './cross-team-audit.js';
 import { matchCrossTargetCandidates } from './cross-target-name-match.js';
 import {
   createTestflightService,
@@ -67,6 +65,8 @@ import {
   getTestflightServiceInfo,
   isTestflightEnabled,
 } from './testflight-manager.js';
+import { evaluateProjectOwnership } from './thread-api-guard.js';
+import { runCrossProjectAsk } from './cross-ask-runner.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
 // This allows different channels to have different active sessions
@@ -410,8 +410,16 @@ async function handleProjectList(context: UserContext): Promise<string> {
     return tChat(lang, 'common.agentNotConnected');
   }
 
+  // 既存の権限昇格の穴の修正（Phase C 前提）: 従来は machineId だけで絞っており、
+  // context.currentMachineId が他人のマシンを指していれば他人のプロジェクト名を
+  // 全列挙できてしまっていた。dbUserId が解決できない（未リンク）場合も一覧を返さない。
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) {
+    return tChat(lang, 'common.agentNotConnected');
+  }
+
   const projects = await prisma.project.findMany({
-    where: { machineId: context.currentMachineId, deletedAt: null }
+    where: { machineId: context.currentMachineId, deletedAt: null, machine: { userId: dbUserId } }
   });
 
   if (projects.length === 0) {
@@ -462,7 +470,12 @@ async function handleSelect(number: number, context: UserContext): Promise<strin
 
 async function handleMachineConnect(machineId: string, context: UserContext): Promise<string> {
   const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
-  const machine = await prisma.machine.findFirst({ where: { id: machineId, deletedAt: null } });
+  // 既存の権限昇格の穴の修正（Phase C 前提）: userId を where に含め、他人のマシンへは
+  // 「見つからない」として扱う（存在有無を漏らさない 404 規約と同じ思想）。
+  const dbUserId = await resolveDbUserId(context);
+  const machine = dbUserId
+    ? await prisma.machine.findFirst({ where: { id: machineId, deletedAt: null, userId: dbUserId } })
+    : null;
 
   if (!machine) {
     return tChat(lang, 'machine.notFound');
@@ -495,14 +508,19 @@ export async function handleProjectConnect(
     include: { machine: true }
   });
 
-  if (!project) {
-    return tChat(lang, 'project.notFound');
-  }
-
   // Get or create user
   const user = await resolveOrCreateUser(context);
   if (!user) {
     return tChat(lang, 'project.userInfoFailed');
+  }
+
+  // 既存の権限昇格の穴の修正（Phase C 前提）: 所有者チェック（evaluateProjectOwnership、
+  // thread-api-guard.ts の既存純関数を再利用）。他人のプロジェクトは「存在しない」場合と
+  // 同一文言を返す（404 規約のチャット版。project.machine.userId !== user.id を自前で
+  // 書かないこと — 同ファイルの警告コメント参照）。
+  const ownership = evaluateProjectOwnership({ project, requestUserId: user.id });
+  if (!ownership.ok || !project) {
+    return tChat(lang, 'project.notFound');
   }
 
   // 既存のアクティブセッション（＝スレッド）を検索（同一ユーザー・同一プロジェクト・同一マシン）。
@@ -2169,7 +2187,9 @@ async function handleAskMember(
   const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
 
   // #335（ゲート⑤）: 長さ検証は関数の先頭、いかなる状態変更（sendMessage/session.create/
-  // message.create/AIへの送信）よりも前に行う。切り詰めず明示エラーで拒否する（#325）。
+  // message.create/AIへの送信）よりも前に行う。`runCrossProjectAsk()` 内でも同じ検証を行うが
+  // （新 web:cross:ask 経路の単独防御のため）、チャット経路はそれより前の sendMessage 等の
+  // 副作用も避ける必要があるため、ここでも先頭で検証する（冗長だが安全側）。
   const askLengthCheck = validateHumanTextLength(question, ASK_QUESTION_MAX_LENGTH);
   if (!askLengthCheck.ok) {
     return tChat(lang, 'humanText.questionTooLong', {
@@ -2194,106 +2214,33 @@ async function handleAskMember(
     return `⚠️ ${targetProject.name} のエージェント (${machineName}) はオフラインです。`;
   }
 
-  // クロスユーザー時の 2 つの userId（document-api.ts §2 と同じ分離）:
-  // executorUserId = 宛先マシン所有者、requesterUserId = 依頼者（= dbUserId）。
-  // 同一ユーザー経路では両者は常に dbUserId と同値（挙動不変）。
-  const isCrossUser = !!targetProject.crossTeam;
-  const executorUserId = targetProject.machine.userId;
-  const requesterUserId = dbUserId;
-
   // フィードバック送信（非同期で先に表示）
   await sendMessage(context.platform, context.chatId, `🔗 ${targetProject.name} に質問中...`);
 
-  // 一時セッション作成（userId は宛先マシン所有者。requestedByUserId はクロス時のみ記録する）
-  const tempSessionId = `crossquery_${crypto.randomUUID()}`;
-  await prisma.session.create({
-    data: {
-      id: tempSessionId,
-      userId: executorUserId,
-      machineId: targetProject.machine.id,
-      projectId: targetProject.id,
-      aiTool: targetProject.defaultAi,
-      status: 'active',
-      lastActiveAt: new Date(),
-      ...(isCrossUser ? { requestedByUserId: requesterUserId } : {}),
-    },
-  });
-  if (isCrossUser) {
-    recordCrossTeamAudit({
-      requesterUserId, executorUserId, teamId: targetProject.crossTeam!.teamId,
-      projectId: targetProject.id, sessionId: tempSessionId, mode: 'ask', action: 'request',
-      grantId: targetProject.crossTeam!.grantId,
-    });
-  }
-
-  // ユーザーの質問を DB に保存（Conversations ページで表示するため）
-  // 送信元プロジェクト名を保存（クロスクエリの送信元表示用）
-  // #335: content は raw text を無切り詰めで保存し、humanTextMeta で監査メタのみ記録する
-  // （rawRef='message.content' で本行が raw の所在であることを示す。①②③ と同じ設計）
-  const { count: askNeutralizedCount } = neutralizeHumanInputTag(question);
-  const askHumanTextMeta = buildHumanTextMeta({
-    kind: 'ask',
-    rawLength: askLengthCheck.rawLength,
-    limit: ASK_QUESTION_MAX_LENGTH,
-    neutralized: askNeutralizedCount,
-    rawRef: 'message.content',
-  });
-  await prisma.message.create({
-    data: {
-      sessionId: tempSessionId,
-      role: 'user',
-      content: question,
-      platform: context.platform,
-      sourceProjectName: context.currentProjectName ?? undefined,
-      humanTextMeta: askHumanTextMeta,
-    },
+  // Phase C: 実行本体は cross-ask-runner.ts に抽出済み（WebUI の web:cross:ask と共用）。
+  // #335 の長さ検証・humanTextMeta・Session 作成・監査記録・executorUserId/requesterUserId の
+  // 分離は全てそちら側の責務。ここでは結果をチャット向けの文言に整形するだけ。
+  const result = await runCrossProjectAsk({
+    targetProject,
+    requesterUserId: dbUserId,
+    question,
+    platform: context.platform,
+    sourceProjectName: context.currentProjectName,
   });
 
-  try {
-    // #335: AI に渡すのは provenance fence（human-input タグ）で囲んだ文字列。
-    // fence はセキュリティ境界ではなく「人間由来のデータである」ことを示す目印
-    // （権限制御は #332/#333 の permissionPolicy / decidePlanPermission() が担う、#334 と同方針）。
-    // userId は executorUserId を渡す（モデル/言語/API キー解決を宛先マシン所有者の文脈で行う）。
-    const result = await executeCrossProjectQuery(
-      targetProject.machine.id,
-      tempSessionId,
-      targetProject.name,
-      targetProject.path,
-      targetProject.defaultAi as AiTool,
-      fenceIfHuman('ask', question, 'human'),
-      executorUserId,
-    );
-
-    await prisma.session.update({
-      where: { id: tempSessionId },
-      data: { status: 'ended', endedAt: new Date() },
-    });
-
-    if (isCrossUser) {
-      recordCrossTeamAudit({
-        requesterUserId, executorUserId, teamId: targetProject.crossTeam!.teamId,
-        projectId: targetProject.id, sessionId: tempSessionId, mode: 'ask', action: 'completed',
-        grantId: targetProject.crossTeam!.grantId,
-      });
-    }
-
+  if (result.ok) {
     return `💬 **${targetProject.name}** の回答:\n\n${result.output}`;
-  } catch (error: any) {
-    await prisma.session.update({
-      where: { id: tempSessionId },
-      data: { status: 'ended', endedAt: new Date() },
-    }).catch(() => {});
-
-    if (isCrossUser) {
-      recordCrossTeamAudit({
-        requesterUserId, executorUserId, teamId: targetProject.crossTeam!.teamId,
-        projectId: targetProject.id, sessionId: tempSessionId, mode: 'ask', action: 'failed',
-        grantId: targetProject.crossTeam!.grantId, detail: { message: error?.message },
-      });
-    }
-
-    return `❌ ${targetProject.name} への質問が失敗しました: ${error.message}`;
   }
+  if (result.kind === 'tooLong') {
+    return tChat(lang, 'humanText.questionTooLong', {
+      rawLength: String(result.rawLength),
+      limit: String(result.limit),
+    });
+  }
+  if (result.kind === 'busy') {
+    return `⚠️ ${result.message}`;
+  }
+  return `❌ ${targetProject.name} への質問が失敗しました: ${result.message}`;
 }
 
 /**

@@ -6,6 +6,36 @@
 
 ## 実装済み機能
 
+### クロスユーザー Team Phase C: 購読/借用プロジェクトを Agents ツリーに出して会話する (2026-11-10)
+
+ユーザー要望「購読したプロジェクトをagentツリーに出して、現状のプロジェクトのように会話
+できるようにならない？」への対応。公開型 Team（Phase A/B）で「購読する」ところまで到達した
+が、宛先に到達する手段はチャットへの手打ちしかなく、依頼者側には質問・回答が一切残らな
+かった。
+
+#### 前提として塞いだ既存の穴（チャット経路限定の権限昇格）
+`handleProjectConnect`/`handleMachineConnect`/`handleProjectList`（`command-handler.ts`）が
+チャット（WS）経路でのみ所有者チェックをしておらず、任意の projectId で他人のマシンに
+セッションを張り `exec`/`k`/`x`/`u` まで届かせられた（REST/MCP は全て `machine: { userId }`
+で絞っているので無傷）。既存純関数 `evaluateProjectOwnership()` を再利用して修正。
+
+#### 実装
+購読/借用プロジェクトを「質問専用タブ」として開き、`//connect`/`executeCommand()` を一切
+通さない専用 WS フレーム `web:cross:ask` を新設。実行本体は既存チャット `ask` と共用の
+`cross-ask-runner.ts` `runCrossProjectAsk()` に抽出（挙動不変、宛先プロジェクトへの同時実行
+ガードを新規追加）。宛先一覧・解決は既存 `listCrossTeamAskCandidateProjects()` を呼ぶだけで
+新しい認可クエリを書かない。会話の継続性はユーザー要望で追加実装（案 B: 直近 3 往復を
+プロンプトに前置。安定セッション再利用による本物の resume は自己レビューで「#348 の
+`.devrelay-output/` 全消し事故の再発リスクあり」と判断し撤回、別サイクルへ）。併せて既存
+バグ（クロス ask が所有者の work state を無条件に読む・消費する）も Agent 3 機種で修正。
+
+検証: `pnpm build` 全 6 workspace green。`apps/server` 1540/1540・`apps/web` 971/971・
+`agents/linux` 1275/1275・`agents/macos` 756/756・`agents/windows` 155/155（新規テスト
+60 ケース含め非退行）。詳細は `doc/devlog/2026-11-10_cross_team_chat_phase_c.md`。
+
+新規キルスイッチ `DEVRELAY_CROSS_TEAM_CHAT`・`DEVRELAY_CROSS_TEAM_CHAT_CONTEXT`
+（両方既定 ON、`DEVRELAY_CROSS_TEAM` との AND）。DB スキーマ変更なし。
+
 ### 公開型 Team: 純粋な購読者の ask が常に候補なしになるバグの根治 (2026-11-09)
 
 body 無し POST バグの修正後、yahoo が公開型チーム（`pixterm`）を購読できたが、続けて

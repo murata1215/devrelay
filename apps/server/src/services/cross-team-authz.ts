@@ -353,3 +353,20 @@ export async function listCrossTeamAskCandidateProjects(callerUserId: string): P
       return { ...p, crossTeam: { teamId: g.teamId, grantId: g.id } };
     });
 }
+
+/**
+ * Phase C（WebUI チャット経路）: projectId を直接指定してクロス ask の宛先を解決する。
+ *
+ * `resolveCrossTeamAccess()` は `callerMachineId` を要求するためチャット経路では使えない
+ * （チャットには「発信に使ったマシン」という概念が無い、`listCrossTeamAskCandidateProjects`
+ * の docstring と同じ理由）。新しい認可クエリを書かず、**既に ask 候補として認可済みの集合**
+ * （`listCrossTeamAskCandidateProjects`）から該当 1 件を探すだけにすることで、
+ * 「ツリーに出る集合」と「ask できる集合」が将来ずれないようにする。
+ */
+export async function findCrossTeamAskProjectById(
+  callerUserId: string,
+  projectId: string,
+): Promise<CrossTeamAskCandidateProject | null> {
+  const candidates = await listCrossTeamAskCandidateProjects(callerUserId);
+  return candidates.find((p) => p.id === projectId) ?? null;
+}

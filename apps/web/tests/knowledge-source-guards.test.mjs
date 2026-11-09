@@ -258,10 +258,15 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // `components/lite/LiteMessageList.tsx` のみ変更）のため行数ピン（682）は据え置き。
 // renderMarkdown 出現数（DocPanel 専用、チャット本文とは別経路）・components/lite/* のファイル数も
 // いずれも本サイクルで無変更のため据え置き。
+//
+// クロスユーザー Team Phase C（購読/借用プロジェクトを Agents ツリーに出し質問専用タブとして
+// 開く機能、2026-11-10）で ChatPage.tsx に大きく手を入れたため、行数ピンを実測値
+// （3911 → 4190）に更新した。LitePage.tsx・renderMarkdown 出現数・components/lite/* は
+// 本サイクルでも無変更のため据え置き。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 3911, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4190, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

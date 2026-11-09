@@ -58,6 +58,21 @@ export function buildEphemeralSessionIdExclusion(): EphemeralSessionIdExclusion 
   };
 }
 
+/** `buildCrossAskSessionIdFilter()` の戻り値型。Prisma の `SessionWhereInput` は import しない。 */
+export interface CrossAskSessionIdFilter {
+  OR: Array<{ id: { startsWith: string } }>;
+}
+
+/**
+ * Phase C: クロス ask の履歴 API（`GET /api/cross-team/projects/:id/messages`）が対象とする
+ * セッション ID のプレフィックス条件を返す（現時点では `crossquery_` のみ。将来 resume を
+ * 本実装する際に `crossask_` を足す場合はこの OR に 1 行足すだけで済む形にしてある）。
+ * プレフィックス文字列をこのファイル以外に書かない規約を維持するための単一情報源。
+ */
+export function buildCrossAskSessionIdFilter(): CrossAskSessionIdFilter {
+  return { OR: [{ id: { startsWith: 'crossquery_' } }] };
+}
+
 /** 対話経路でのスレッド新規作成時に agentScopeId をどう決めるかの入力。 */
 export interface DecideNewSessionScopeIdInput {
   /** 新規作成される Session 自身の id（scope dir 名として使う） */

@@ -32,6 +32,23 @@ export function isCrossTeamExecEnabled(raw: string | undefined): boolean {
   return raw === '1';
 }
 
+/**
+ * `DEVRELAY_CROSS_TEAM_CHAT` の既定値解決（Phase C: 購読/借用プロジェクトを Agents ツリーに
+ * 出し WebUI から直接 ask する機能。既定 ON。`DEVRELAY_CROSS_TEAM` との AND で呼び出し側が
+ * 判定するため、このモジュール単体では `DEVRELAY_CROSS_TEAM` を見ない）。
+ */
+export function isCrossTeamChatEnabled(raw: string | undefined): boolean {
+  return raw !== '0';
+}
+
+/**
+ * `DEVRELAY_CROSS_TEAM_CHAT_CONTEXT` の既定値解決（Phase C 案 B: クロス ask のプロンプトに
+ * 直近の往復を前置して会話の継続性を持たせる機能。既定 ON。`0` で完全な 1 問 1 答に戻す）。
+ */
+export function isCrossTeamChatContextEnabled(raw: string | undefined): boolean {
+  return raw !== '0';
+}
+
 /** 受入側を守るクロスユーザー専用のレート閾値（5 分窓）。既存の依頼者基準の閾値とは別に加算する。 */
 export const CROSS_USER_ASK_TARGET_LIMIT = 4;
 export const CROSS_USER_ASK_EXECUTOR_LIMIT = 6;

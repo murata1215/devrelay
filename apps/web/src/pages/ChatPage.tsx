@@ -19,6 +19,16 @@ import { ConversationRail } from '../components/ConversationRail';
 import { useConversationFeed, type ConversationFeedItem } from '../hooks/useConversationFeed';
 import { SIDEBAR_MODE_STORAGE_KEY, readSidebarMode, type SidebarMode } from '../lib/conversation-rail-rules';
 import { getTabId } from '../lib/tab-id';
+import { crossTeamChat, type CrossAskOwnerGroup } from '../lib/api';
+import {
+  isCrossTab,
+  shouldSendConnect,
+  decideComposerCapabilities,
+  buildCrossTabBanner,
+  buildCrossTabBadge,
+  resolveCrossHistorySource,
+  flattenCrossAskGroups,
+} from '../lib/cross-ask-rules';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -59,6 +69,11 @@ interface Tab {
   /** 停止ボタンの操作状態（null = 未操作）。cancel-request-rules.ts の sessionId 照合で
    *  スレッド切替時に自動無効化される（2026-09-30 停止手段の発見可能性改善サイクル） */
   cancel?: CancelUiState;
+  /** クロスユーザー Team Phase C: 購読/借用プロジェクトの質問専用タブか（省略時 'own' = 自分の
+   *  タブと同じ扱い。既存タブとの互換性のため省略可能にしている、cross-ask-rules.ts 参照）。 */
+  kind?: 'own' | 'cross';
+  /** `kind === 'cross'` のときのみ有効。ツリー表示・バナー文言に使う。 */
+  crossMeta?: { ownerLabel: string; teamName: string; origin: 'invite' | 'subscription' };
 }
 
 /** File → base64 FileAttachment 変換 */
@@ -1049,6 +1064,8 @@ function Sidebar({
   variant,
   headerAction,
   conversationsSlot,
+  crossGroups,
+  onSelectCrossProject,
 }: {
   machineList: Machine[];
   openTabIds: Set<string>;
@@ -1077,6 +1094,12 @@ function Sidebar({
    *  表示専用コンポーネント自体は ChatPage 側で1つだけ生成し、両インスタンス（drawer/rail）に渡す
    *  （`useConversationFeed` のポーリングを二重化しないため）。 */
   conversationsSlot?: React.ReactNode;
+  /** クロスユーザー Team Phase C: 購読/借用プロジェクト一覧（Agents モード末尾に表示。
+   *  0 件ならセクションごと非表示。取得は ChatPage 側で1つだけ行い両インスタンスに渡す
+   *  （独立 30 秒ポーリング、machinesApi.list() の 10 秒ポーリングには混ぜない）。 */
+  crossGroups: CrossAskOwnerGroup[];
+  /** クロス行クリック（`//connect` を送らず質問専用タブを開く）。 */
+  onSelectCrossProject: (projectId: string, meta: { label: string; ownerLabel: string; machineName: string; teamName: string; origin: 'invite' | 'subscription' }) => void;
 }) {
   const { t } = useLanguage();
   const sidebarConversationsLabel = t('sidebar.conversations');
@@ -1269,6 +1292,69 @@ function Sidebar({
                   </div>
                 );
               })}
+
+              {/* クロスユーザー Team Phase C: 購読・共有されたプロジェクト（0 件なら非表示、
+                  既存ツリーの見た目は 1px も変えない）。owner → machine → project の 3 段。 */}
+              {crossGroups.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-[var(--border-color)]">
+                  <div className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                    🔗 購読・共有されたプロジェクト
+                  </div>
+                  {crossGroups.map(owner => (
+                    <div key={owner.ownerLabel} className="ml-1">
+                      <div className="px-3 py-1 text-xs text-[var(--text-muted)] truncate">{owner.ownerLabel}</div>
+                      {owner.machines.map(machine => (
+                        <div key={machine.machineId} className="ml-2">
+                          <div className="px-3 py-0.5 flex items-center gap-1.5 text-[11px] text-[var(--text-faint)]">
+                            <span className={`w-1.5 h-1.5 rounded-full ${machine.status === 'online' ? 'bg-green-500' : 'bg-[var(--bg-selected)]'}`} />
+                            <span className="truncate">{machine.machineName}</span>
+                          </div>
+                          {machine.projects.map(project => {
+                            const isActive = project.projectId === activeTabId;
+                            const hasTab = openTabIds.has(project.projectId);
+                            return (
+                              <button
+                                key={project.projectId}
+                                onClick={() => {
+                                  onSelectCrossProject(project.projectId, {
+                                    label: project.label,
+                                    ownerLabel: owner.ownerLabel,
+                                    machineName: machine.machineName,
+                                    teamName: project.teamName,
+                                    origin: project.origin,
+                                  });
+                                  if (variant === 'drawer' && window.innerWidth < 768) onToggle();
+                                }}
+                                disabled={machine.status !== 'online'}
+                                className={`
+                                  w-full text-left flex items-center gap-1.5 px-3 py-1 rounded-md mx-1 text-sm
+                                  ${isActive
+                                    ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                                    : hasTab
+                                      ? 'text-[var(--text-primary)] font-semibold hover:bg-[var(--bg-hover)]'
+                                      : machine.status === 'online'
+                                        ? 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                                        : 'text-[var(--text-faint)] cursor-not-allowed'
+                                  }
+                                `}
+                                title={`${project.teamName} 経由`}
+                              >
+                                <span className={hasTab ? 'text-yellow-400' : 'text-[var(--text-faint)]'}>
+                                  {hasTab ? '★' : '#'}
+                                </span>
+                                <span className="truncate flex-1">{project.label}</span>
+                                <span className="text-[10px] text-[var(--text-faint)] shrink-0">
+                                  {buildCrossTabBadge(project.origin)}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
 
@@ -2019,6 +2105,11 @@ export function ChatPage() {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([]);
   const [machineList, setMachineList] = useState<Machine[]>([]);
+  /** クロスユーザー Team Phase C: 購読・借用プロジェクト一覧（Agents ツリー末尾用）。
+   *  machineList とは独立した state・independent try/catch で持つ（Phase B の教訓:
+   *  同じ Promise.all/try に混ぜると片方のキルスイッチ OFF で両方消える）。404 は
+   *  「機能 OFF」として空配列に握り潰す。 */
+  const [crossAskGroups, setCrossAskGroups] = useState<CrossAskOwnerGroup[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   /** サーバー（タブグループ）定義 */
   const [servers, setServers] = useState<ChatServer[]>([]);
@@ -2232,12 +2323,20 @@ export function ChatPage() {
       t.projectId === projectId ? { ...t, loadingHistory: true } : t
     ));
 
-    const source = resolveHistorySource({ sessionId, projectId });
+    // クロスタブ（購読/借用プロジェクトの質問専用タブ）: /api/cross-team/projects/:id/messages
+    // から読む。resolveHistorySource()（自分のタブ専用）は使わない。
+    const isCrossHistory = isCrossTab(tabsRef.current.find(t => t.projectId === projectId));
+    const source = isCrossHistory ? resolveCrossHistorySource({ projectId }) : resolveHistorySource({ sessionId, projectId });
 
     try {
-      const { messages, hasMore } = source.kind === 'session'
-        ? await sessionsApi.getMessages(source.id, { limit: 10 })
-        : await projectsApi.getMessages(source.id, { limit: 10 });
+      const { messages, hasMore } = isCrossHistory
+        ? await crossTeamChat.getMessages(projectId, { limit: 10 })
+        : source.kind === 'session'
+          ? await sessionsApi.getMessages(source.id, { limit: 10 })
+          : source.kind === 'project'
+            ? await projectsApi.getMessages(source.id, { limit: 10 })
+            // 到達しないはずの分岐（isCrossHistory=false のときは起き得ない）。TS の網羅性のため。
+            : await crossTeamChat.getMessages(projectId, { limit: 10 });
       const chatMessages: ChatMessage[] = messages.map(m => ({
         id: m.id,
         role: m.role === 'ai' ? 'system' as const : m.role,
@@ -2254,7 +2353,8 @@ export function ChatPage() {
         autoScrollingUntilRef.current = Date.now() + 1000;
       }
 
-      const historySessionId = source.kind === 'session' ? source.id : null;
+      // クロスタブは historySessionId を常に null 扱いにする（セッション概念が無いため）。
+      const historySessionId = !isCrossHistory && source.kind === 'session' ? source.id : null;
 
       setTabs(prev => prev.map(t => {
         if (t.projectId !== projectId) return t;
@@ -2600,16 +2700,22 @@ export function ChatPage() {
     const activeId = activeTabIdRef.current;
     if (!activeId) return;
 
-    // アクティブタブの //connect を再送（セッション参加者として再登録）
-    suppressConnectRef.current = true;
-    sendCommandRef.current(`//connect ${activeId}`);
-
     // 最新メッセージでリフレッシュ（DB から再取得してマージ）
     const activeTab = tabsRef.current.find(t => t.projectId === activeId);
+
+    // クロスタブは //connect を送らない（その projectId は他人のマシンのもので、
+    // 自分の machine token/userId のセッション再登録という概念自体が無いため）。
+    // 履歴は kind === 'cross' の分岐（loadHistory 内）が自前で再取得する。
+    if (shouldSendConnect(activeTab)) {
+      // アクティブタブの //connect を再送（セッション参加者として再登録）
+      suppressConnectRef.current = true;
+      sendCommandRef.current(`//connect ${activeId}`);
+    }
+
     loadHistory(activeId, activeTab?.sessionId, 'refresh');
   }, [loadHistory]);
 
-  const { connected, sendCommand, sendToolApprovalResponse } = useWebSocket({
+  const { connected, sendCommand, sendToolApprovalResponse, sendCrossAsk } = useWebSocket({
     onMessage: addMessageToTab,
     onProgress: updateProgressOnTab,
     onProgressClear: clearProgressOnTab,
@@ -2689,6 +2795,25 @@ export function ChatPage() {
     return () => { active = false; clearInterval(interval); };
   }, []);
 
+  // クロスユーザー Team Phase C: 購読・借用プロジェクト一覧取得 + 独立ポーリング（30秒）。
+  // machineList のポーリングとは意図的に別の useEffect/try-catch にする（Phase B の教訓を踏襲）。
+  // 件数が少なく変化も遅いため 10 秒より長い間隔にする。404（キルスイッチ OFF）は
+  // セクション非表示として扱うだけでエラー表示はしない。
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const { groups } = await crossTeamChat.listTargets();
+        if (active) setCrossAskGroups(groups);
+      } catch {
+        if (active) setCrossAskGroups([]);
+      }
+    };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => { active = false; clearInterval(interval); };
+  }, []);
+
   // マウント時にアクティブセッションを取得してタブを復元
   useEffect(() => {
     if (restoredRef.current) return;
@@ -2747,9 +2872,30 @@ export function ChatPage() {
           }
         } catch { /* ignore */ }
 
+        // クロスユーザー Team Phase C: 購読/借用プロジェクトも TAB_ORDER から復元できるよう
+        // マージする（projectInfoMap に無い projectId を単に捨てる従来実装のままだと、
+        // リロードのたびにクロスタブが消える）。機能 OFF（404）は catch して空扱いにする。
+        let crossProjectInfoMap = new Map<string, { name: string; machineDisplayName: string; ownerLabel: string; teamName: string; origin: 'invite' | 'subscription' }>();
+        try {
+          const { groups } = await crossTeamChat.listTargets();
+          for (const row of flattenCrossAskGroups(groups)) {
+            crossProjectInfoMap.set(row.projectId, {
+              name: row.label,
+              machineDisplayName: row.machineName,
+              ownerLabel: row.ownerLabel,
+              teamName: row.teamName,
+              origin: row.origin,
+            });
+          }
+        } catch { /* 404 = DEVRELAY_CROSS_TEAM_CHAT が OFF。機能を単に使わないだけ */ }
+
         // TAB_ORDER がある場合: 保存された順序でタブを復元（セッションがなくてもプロジェクトが存在すれば復元）
         // TAB_ORDER がない場合: 従来通りピン止めタブのみ復元
-        type RestorableEntry = { projectId: string; projectName: string; machineDisplayName: string; sessionId?: string; messageCount: number };
+        type RestorableEntry = {
+          projectId: string; projectName: string; machineDisplayName: string; sessionId?: string; messageCount: number;
+          kind?: 'own' | 'cross';
+          crossMeta?: { ownerLabel: string; teamName: string; origin: 'invite' | 'subscription' };
+        };
         let restorable: RestorableEntry[];
         if (tabOrder.length > 0) {
           restorable = tabOrder
@@ -2759,6 +2905,18 @@ export function ChatPage() {
               // セッションがなくてもプロジェクトが存在すれば空タブとして復元
               const info = projectInfoMap.get(id);
               if (info) return { projectId: id, projectName: info.name, machineDisplayName: info.machineDisplayName, messageCount: 0 };
+              // own 側に無ければクロス側を見る（購読/借用プロジェクト）
+              const crossInfo = crossProjectInfoMap.get(id);
+              if (crossInfo) {
+                return {
+                  projectId: id,
+                  projectName: crossInfo.name,
+                  machineDisplayName: crossInfo.machineDisplayName,
+                  messageCount: 0,
+                  kind: 'cross' as const,
+                  crossMeta: { ownerLabel: crossInfo.ownerLabel, teamName: crossInfo.teamName, origin: crossInfo.origin },
+                };
+              }
               return null;
             })
             .filter((s): s is NonNullable<typeof s> => s != null);
@@ -2792,6 +2950,8 @@ export function ChatPage() {
           completed: false,
           inputText: '',
           cancel: null,
+          kind: 'kind' in s ? s.kind : undefined,
+          crossMeta: 'crossMeta' in s ? s.crossMeta : undefined,
         }));
 
         setTabs(newTabs);
@@ -2810,8 +2970,12 @@ export function ChatPage() {
         activeTabIdRef.current = initialTab.projectId;
 
         // 最初のタブの履歴を読み込み + サーバーコンテキスト同期
-        sendCommand(`//connect ${initialTab.projectId}`);
-        suppressConnectRef.current = true;
+        // クロスタブは //connect を送らない（他人のマシンの projectId のため、
+        // 自分のセッション再登録という概念自体が無い）。
+        if (shouldSendConnect(initialTab)) {
+          sendCommand(`//connect ${initialTab.projectId}`);
+          suppressConnectRef.current = true;
+        }
         loadHistory(initialTab.projectId, initialTab.sessionId ?? undefined);
       } catch {
         // 復元失敗は無視
@@ -2999,15 +3163,23 @@ export function ChatPage() {
     const tab = tabsRef.current.find(t => t.projectId === tabId);
     if (!tab || !tab.hasMoreHistory || tab.loadingHistory) return;
 
+    // クロスタブ（購読/借用プロジェクトの質問専用タブ）: historySessionId は常に null 相当として
+    // 扱い、resolveOlderMessagesSource()/isSameHistorySource()（自分のタブ専用のロジック）を
+    // 通さない。projectId は不変（クロスタブは 1 プロジェクト = 1 固定会話、スレッド切替が
+    // 無い）ため、レースガードは「このタブが依然クロスタブのままか」だけで十分。
+    const isCrossHistory = isCrossTab(tab);
+
     // バグ修正: スクロールバック時は、表示中の履歴と同じ取得元（スレッド単位 or プロジェクト横断）
     // を踏襲する。以前は常にプロジェクト横断で取得しており、スレッド表示中に上スクロールすると
     // 別スレッドのメッセージが混入していた（スレッド表示中に上スクロール→下に戻ると別スレッドの
     // 内容が表示されるバグの直接原因）。
-    const source = resolveOlderMessagesSource({
-      historySessionId: tab.historySessionId,
-      tabSessionId: tab.sessionId,
-      projectId: tabId,
-    });
+    const source = isCrossHistory
+      ? resolveCrossHistorySource({ projectId: tabId })
+      : resolveOlderMessagesSource({
+          historySessionId: tab.historySessionId,
+          tabSessionId: tab.sessionId,
+          projectId: tabId,
+        });
 
     // before カーソルは DB 由来 ID のみ有効（クライアント生成 ID だとサーバがカーソル条件を
     // 無視して最新 N 件を返してしまう）。見つからなければページネーションを打ち切る。
@@ -3030,9 +3202,15 @@ export function ChatPage() {
       t.projectId === tabId ? { ...t, loadingHistory: true } : t
     ));
 
-    const fetchPromise = source.kind === 'session'
-      ? sessionsApi.getMessages(source.id, { before: cursorId, limit: 20 })
-      : projectsApi.getMessages(source.id, { before: cursorId, limit: 20 });
+    const fetchPromise = isCrossHistory
+      ? crossTeamChat.getMessages(tabId, { before: cursorId, limit: 20 })
+      : source.kind === 'session'
+        ? sessionsApi.getMessages(source.id, { before: cursorId, limit: 20 })
+        : source.kind === 'project'
+          ? projectsApi.getMessages(source.id, { before: cursorId, limit: 20 })
+          // 到達しないはずの分岐（isCrossHistory=false なのに source.kind==='cross' は起き得ない）。
+          // TS の網羅性のためだけに残す。仮に起きても呼び先は正しい（クロス取得にフォールバック）。
+          : crossTeamChat.getMessages(tabId, { before: cursorId, limit: 20 });
 
     fetchPromise.then(({ messages, hasMore }) => {
       const chatMessages: ChatMessage[] = messages.map(m => ({
@@ -3047,15 +3225,23 @@ export function ChatPage() {
       setTabs(prev => prev.map(t => {
         if (t.projectId !== tabId) return t;
         // レースガード: フェッチ中にスレッドが切り替わっていたら stale response を破棄
-        // （別スレッドへの流し込み防止）
-        const current = resolveOlderMessagesSource({
-          historySessionId: t.historySessionId,
-          tabSessionId: t.sessionId,
-          projectId: t.projectId,
-        });
-        if (!isSameHistorySource(current, source)) {
-          console.log(`[loadOlderMessages] discarded stale response: requested=${source.kind}:${source.id.substring(0, 8)}, current=${current.kind}:${current.id.substring(0, 8)}`);
-          return { ...t, loadingHistory: false };
+        // （別スレッドへの流し込み防止）。クロスタブは projectId が不変のタブ単位固定会話
+        // なので、依然クロスタブのままであることだけを確認する。
+        if (isCrossHistory) {
+          if (!isCrossTab(t)) {
+            console.log('[loadOlderMessages] discarded stale response: tab is no longer cross');
+            return { ...t, loadingHistory: false };
+          }
+        } else {
+          const current = resolveOlderMessagesSource({
+            historySessionId: t.historySessionId,
+            tabSessionId: t.sessionId,
+            projectId: t.projectId,
+          });
+          if (source.kind !== 'cross' && !isSameHistorySource(current, source)) {
+            console.log(`[loadOlderMessages] discarded stale response: requested=${source.kind}:${'id' in source ? source.id.substring(0, 8) : ''}, current=${current.kind}:${current.id.substring(0, 8)}`);
+            return { ...t, loadingHistory: false };
+          }
         }
         const existingIds = new Set(t.messages.map(m => m.id));
         const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
@@ -3218,6 +3404,16 @@ export function ChatPage() {
 
     setActiveTabId(projectId);
 
+    // 既存のクロスタブ（購読/借用プロジェクト）が TabBar 等から再選択された場合、このまま進むと
+    // `//connect` を他人のプロジェクトへ送ってしまう（最もこぼれやすい穴。#370 由来の汎用ハンドラが
+    // クロスタブと自分のタブを区別しないため、ここで必ずガードする）。
+    if (!shouldSendConnect(existingTab)) {
+      if (!existingTab!.historyLoaded && !existingTab!.loadingHistory) {
+        loadHistory(projectId, undefined);
+      }
+      return;
+    }
+
     if (!opts?.skipConnect) {
       // サーバーにコンテキスト切り替えを通知
       suppressConnectRef.current = true;
@@ -3229,6 +3425,53 @@ export function ChatPage() {
       }
     }
   }, [machineList, sendCommand, loadHistory]);
+
+  /**
+   * クロスユーザー Team Phase C: 購読/借用プロジェクトの質問専用タブを開く。
+   * `handleSelectProject` と意図的に別関数にする（`//connect` を一切送らない・
+   * アクティブサーバーへの自動登録もしない＝クロスタブは Servers タブのグループ化対象外）。
+   */
+  const handleSelectCrossProject = useCallback((
+    projectId: string,
+    meta: { label: string; ownerLabel: string; machineName: string; teamName: string; origin: 'invite' | 'subscription' },
+  ) => {
+    if (activeTabIdRef.current === projectId) return;
+
+    const existingTab = tabsRef.current.find(t => t.projectId === projectId);
+    if (!existingTab) {
+      const newTab: Tab = {
+        projectId,
+        projectName: meta.label,
+        machineDisplayName: meta.machineName,
+        customName: getTabNames()[projectId],
+        messages: [],
+        progress: null,
+        sessionId: null,
+        historyLoaded: false,
+        hasMoreHistory: false,
+        loadingHistory: false,
+        pinned: false,
+        completed: false,
+        inputText: '',
+        cancel: null,
+        kind: 'cross',
+        crossMeta: { ownerLabel: meta.ownerLabel, teamName: meta.teamName, origin: meta.origin },
+      };
+      setTabs(prev => {
+        const updated = [...prev, newTab];
+        settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
+        return updated;
+      });
+    }
+
+    setActiveTabId(projectId);
+
+    // //connect は送らない。履歴は crossTeamChat.getMessages 経由（loadHistory 内の
+    // isCrossTab 分岐が自動的に正しいエンドポイントを選ぶ）。
+    if (!existingTab?.historyLoaded && !existingTab?.loadingHistory) {
+      loadHistory(projectId, undefined);
+    }
+  }, [loadHistory]);
 
   /**
    * 会話履歴レール: 行クリックでそのスレッドへ遷移する。
@@ -3267,16 +3510,18 @@ export function ChatPage() {
         const nextTab = newTabs[Math.min(closedIdx, newTabs.length - 1)] ?? null;
         const nextId = nextTab?.projectId ?? null;
         setActiveTabId(nextId);
-        if (nextId) {
+        if (nextId && shouldSendConnect(nextTab)) {
           suppressConnectRef.current = true;
           sendCommand(`//connect ${nextId}`);
+        } else if (nextId && nextTab && !nextTab.historyLoaded && !nextTab.loadingHistory) {
+          loadHistory(nextId, undefined);
         }
       }
       // サーバーにタブ順序を保存（fire-and-forget）
       settingsApi.saveTabOrder(newTabs.map(t => t.projectId)).catch(() => {});
       return newTabs;
     });
-  }, [sendCommand]);
+  }, [sendCommand, loadHistory]);
 
   /** タブのピン止めを切り替え（サーバーにも永続化） */
   const handleTogglePin = useCallback((projectId: string) => {
@@ -3358,10 +3603,16 @@ export function ChatPage() {
 
     setActiveTabId(nextTab.projectId);
     activeTabIdRef.current = nextTab.projectId;
-    suppressConnectRef.current = true;
-    sendCommand(`//connect ${nextTab.projectId}`);
-    if (nextTab.sessionId && !nextTab.historyLoaded && !nextTab.loadingHistory) {
-      loadHistory(nextTab.projectId, nextTab.sessionId);
+    // クロスタブは構造的に Server グループへ登録されない想定だが、念のため同じガードを通す
+    // （#370 由来の汎用ハンドラ群のうち `//connect` を撃つ 5 箇所は全てガードする方針）。
+    if (shouldSendConnect(nextTab)) {
+      suppressConnectRef.current = true;
+      sendCommand(`//connect ${nextTab.projectId}`);
+      if (nextTab.sessionId && !nextTab.historyLoaded && !nextTab.loadingHistory) {
+        loadHistory(nextTab.projectId, nextTab.sessionId);
+      }
+    } else if (!nextTab.historyLoaded && !nextTab.loadingHistory) {
+      loadHistory(nextTab.projectId, undefined);
     }
   }, [sendCommand, loadHistory]);
 
@@ -3431,8 +3682,9 @@ export function ChatPage() {
     ? tabs.filter(t => activeServer.projectIds.includes(t.projectId))
     : tabs;
 
-  /** ファイルを pendingFiles に追加 */
+  /** ファイルを pendingFiles に追加（クロスタブは添付非対応。decideComposerCapabilities 参照） */
   const addFiles = async (fileList: File[]) => {
+    if (!decideComposerCapabilities(activeTab).allowFiles) return;
     const attachments = await Promise.all(fileList.map(fileToAttachment));
     setPendingFiles(prev => [...prev, ...attachments]);
   };
@@ -3441,7 +3693,10 @@ export function ChatPage() {
     // 二重送信防止（React の state 更新バッチにより input がクリアされる前に再呼び出しされるのを防止）
     if (sendingRef.current) return;
     const text = input.trim();
-    const hasFiles = pendingFiles.length > 0;
+    const isCross = isCrossTab(activeTab);
+    // クロスタブはファイル添付非対応（decideComposerCapabilities().allowFiles=false で UI 側は
+    // 既に添付ボタンを無効化しているが、念のため送信側でも hasFiles を見ない）。
+    const hasFiles = !isCross && pendingFiles.length > 0;
     if ((!text && !hasFiles) || !connected) return;
     sendingRef.current = true;
     const sendText = text || pendingFiles.map(f => f.filename).join(', ');
@@ -3462,7 +3717,13 @@ export function ChatPage() {
     }
 
     playNotificationSound();
-    sendCommand(sendText, hasFiles ? pendingFiles : undefined, activeTabId || undefined);
+    if (isCross && activeTabId) {
+      // クロスタブ: web:cross:ask（専用フレーム）で送る。parseCommandWithNLP/executeCommand を
+      // 一切通らないため e/k/a/testflight/`//connect` 等は文字列として宛先に渡るだけになる。
+      sendCrossAsk(activeTabId, sendText);
+    } else {
+      sendCommand(sendText, hasFiles ? pendingFiles : undefined, activeTabId || undefined);
+    }
     setInput('');
     setPendingFiles([]);
     // 次フレームで送信ガードを解除
@@ -3477,6 +3738,9 @@ export function ChatPage() {
    */
   const handleCancelClick = () => {
     if (!activeTabId || !activeTab?.progress) return;
+    // クロスタブは停止ボタンを提供しない（他人のマシンへの制御コマンドは exec と同格のレビュー対象。
+    // v1 では 15 分タイムアウトで打ち切る設計、decideComposerCapabilities().allowCancel も false）。
+    if (!decideComposerCapabilities(activeTab).allowCancel) return;
     const decision = decideCancelClick({
       state: activeTab.cancel ?? null,
       sessionId: activeTab.sessionId,
@@ -3610,6 +3874,8 @@ export function ChatPage() {
           onReorderServerProjects={handleReorderServerProjects}
           variant="drawer"
           conversationsSlot={conversationsSlot}
+          crossGroups={crossAskGroups}
+          onSelectCrossProject={handleSelectCrossProject}
         />
       )}
 
@@ -3683,20 +3949,31 @@ export function ChatPage() {
           onRenameTab={handleRenameTab}
         />
 
-        {/* スレッド管理 サイクル3: TabBar 下に flex 行を挿入し ThreadList を左に配置（単独ステップ） */}
+        {/* スレッド管理 サイクル3: TabBar 下に flex 行を挿入し ThreadList を左に配置（単独ステップ）。
+            クロスタブ（購読/借用プロジェクトの質問専用タブ）は会話が 1 本固定でスレッド切替の
+            概念が無いため ThreadPane/ThreadList ごと非表示にする（`/api/threads?projectId=` は
+            他人のプロジェクトに対して所有者チェックで 404 になるため、呼んでも無意味）。 */}
         <div className="flex-1 flex min-h-0">
-          <ThreadPane collapsed={threadPanelCollapsed}>
-            <ThreadList
-              projectId={activeTab?.projectId}
-              currentSessionId={activeTab?.sessionId ?? null}
-              onSelect={handleThreadSelect}
-              onCreate={handleThreadCreate}
-              refreshToken={threadRefreshToken}
-              collapsed={threadPanelCollapsed}
-              onToggleCollapse={toggleThreadPanelCollapsed}
-            />
-          </ThreadPane>
+          {!isCrossTab(activeTab) && (
+            <ThreadPane collapsed={threadPanelCollapsed}>
+              <ThreadList
+                projectId={activeTab?.projectId}
+                currentSessionId={activeTab?.sessionId ?? null}
+                onSelect={handleThreadSelect}
+                onCreate={handleThreadCreate}
+                refreshToken={threadRefreshToken}
+                collapsed={threadPanelCollapsed}
+                onToggleCollapse={toggleThreadPanelCollapsed}
+              />
+            </ThreadPane>
+          )}
           <div className="flex-1 flex flex-col min-w-0">
+            {/* クロスタブの常時バナー */}
+            {isCrossTab(activeTab) && activeTab?.crossMeta && (
+              <div className="px-4 py-1.5 text-xs text-[var(--text-muted)] bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
+                {buildCrossTabBanner(activeTab.crossMeta.ownerLabel)}
+              </div>
+            )}
             {/* メッセージエリア */}
             <div
               ref={messagesContainerRef}
@@ -3797,7 +4074,7 @@ export function ChatPage() {
               <div className="flex gap-2 items-end">
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={!connected || !activeTab}
+                  disabled={!connected || !activeTab || !decideComposerCapabilities(activeTab).allowFiles}
                   className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors"
                   title={t('chat.attachFile')}
                 >
@@ -3874,6 +4151,8 @@ export function ChatPage() {
               onReorderServerProjects={handleReorderServerProjects}
               variant="rail"
               conversationsSlot={conversationsSlot}
+              crossGroups={crossAskGroups}
+              onSelectCrossProject={handleSelectCrossProject}
               headerAction={
                 <button
                   onClick={toggleRailCollapsed}

@@ -131,6 +131,10 @@ interface UseWebSocketReturn {
   sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>, projectId?: string) => boolean;
   /** ツール承認応答を送信（ユーザーが許可/拒否を選択） */
   sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => void;
+  /** クロスユーザー Team Phase C: 購読/借用プロジェクトへの質問専用フレーム（`web:cross:ask`）。
+   * `sendCommand` とは意図的に別関数にする（`parseCommandWithNLP`/`executeCommand` を通らない
+   * ことを型レベルでも明示するため。files を受け取らない＝クロス ask はファイル添付非対応）。 */
+  sendCrossAsk: (projectId: string, text: string) => boolean;
 }
 
 /** WebSocket URL を構築 */
@@ -331,5 +335,15 @@ export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSoc
     }));
   }, []);
 
-  return { connected, sendCommand, sendToolApprovalResponse };
+  const sendCrossAsk = useCallback((projectId: string, text: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'web:cross:ask',
+      payload: { projectId, text },
+    }));
+    return true;
+  }, []);
+
+  return { connected, sendCommand, sendToolApprovalResponse, sendCrossAsk };
 }

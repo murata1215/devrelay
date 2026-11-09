@@ -257,8 +257,20 @@ describe('routes/document-api.ts: checkCrossTargetAllowed のオブジェクト�
     assert.match(body, /m\.team\.userId === auth\.userId \|\| m\.project\.machine\.userId === auth\.userId/);
   });
 
-  test('countRecentCrossSessions は requestedByUserId の OR 条件で依頼者を集計する', () => {
-    const idx = source.indexOf('async function countRecentCrossSessions');
+  test('countRecentCrossSessions は services/cross-session-stats.ts からの import に一本化されている', () => {
+    // クロスユーザー Team Phase C（購読/借用プロジェクトの WebUI ask）で
+    // cross-ask-runner.ts と共用するため services/cross-session-stats.ts に抽出済み。
+    // document-api.ts 内に同名の private 関数が復活していないことを固定する。
+    assert.match(source, /import\s*\{\s*countRecentCrossSessions\s*\}\s*from\s*'\.\.\/services\/cross-session-stats\.js'/);
+    assert.doesNotMatch(source, /async function countRecentCrossSessions/);
+  });
+});
+
+describe('services/cross-session-stats.ts: countRecentCrossSessions は requestedByUserId の OR 条件で依頼者を集計する', () => {
+  const source = readServerSource('src/services/cross-session-stats.ts');
+
+  test('OR 条件（requestedByUserId 一致 / 旧行の userId 一致）を持つ', () => {
+    const idx = source.indexOf('export async function countRecentCrossSessions');
     assert.ok(idx > 0);
     const body = source.slice(idx, idx + 600);
     assert.match(body, /requestedByUserId:\s*requesterUserId/);

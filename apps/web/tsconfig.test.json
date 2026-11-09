@@ -38,6 +38,7 @@
     "src/lib/markdown-rules.ts",
     "src/lib/cross-team-invite-rules.ts",
     "src/lib/cross-team-publish-rules.ts",
-    "src/lib/request-headers-rules.ts"
+    "src/lib/request-headers-rules.ts",
+    "src/lib/cross-ask-rules.ts"
   ]
 }

@@ -26,9 +26,12 @@ import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
-import { isCrossTeamEnabled } from '../services/cross-team-guard.js';
+import { isCrossTeamEnabled, isCrossTeamChatEnabled } from '../services/cross-team-guard.js';
 import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
 import { isCrossTeamPublishEnabled, selectPublishableMembers } from '../services/cross-team-publish.js';
+import { listCrossTeamAskCandidateProjects } from '../services/cross-team-authz.js';
+import { buildCrossAskTargetGroups, resolveCrossAskOrigin, type CrossAskTargetRow } from '../services/cross-ask-rules.js';
+import { buildCrossAskSessionIdFilter } from '../services/thread-scope.js';
 import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
@@ -145,6 +148,9 @@ export async function apiRoutes(app: FastifyInstance) {
       projects: m.projects.map((p: Project) => ({
         id: p.id,
         name: p.name,
+        // Phase C 併せて直すバグ: displayName を返していなかったため、Agents ツリー/Pulse で
+        // リネーム（PUT /api/projects/:id/display-name）が反映されない表示不整合があった。
+        displayName: p.displayName ?? null,
         path: p.path,
         lastUsedAt: p.lastUsedAt,
       })),
@@ -3422,6 +3428,125 @@ export async function apiRoutes(app: FastifyInstance) {
         execAllowed: g.execAllowed,
         createdAt: g.createdAt,
       })),
+    });
+  });
+
+  // ==========================================================================
+  // クロスユーザー Team Phase C: 購読/借用プロジェクトを Agents ツリーに出し WebUI から
+  // 直接 ask する機能。DEVRELAY_CROSS_TEAM と DEVRELAY_CROSS_TEAM_CHAT の両方が ON の
+  // ときのみ有効（AND）。どちらか OFF なら以下 2 ルートが 404。
+  // 認可本体は listCrossTeamAskCandidateProjects() に一本化（新しい認可クエリを書かない）。
+  // ==========================================================================
+
+  const crossTeamChatFeatureEnabled = () =>
+    isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM) &&
+    isCrossTeamChatEnabled(process.env.DEVRELAY_CROSS_TEAM_CHAT);
+
+  /**
+   * Phase C: Agents ツリーに出す購読/借用プロジェクト一覧。
+   * 中身は listCrossTeamAskCandidateProjects() を呼ぶだけ（招待型＋購読型の合流・組織境界の
+   * 実行時再検証・又貸し防止は既にこの関数に閉じている。別の絞り込みを書くと「ツリーに出る集合」
+   * と「ask できる集合」が将来ずれるため、ここでは行わない）。
+   */
+  app.get('/api/cross-team/ask-targets', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    if (!crossTeamChatFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const candidates = await listCrossTeamAskCandidateProjects(userId);
+    if (candidates.length === 0) {
+      return reply.send({ groups: [] });
+    }
+
+    // status は DB 値ではなく実接続状態で上書きする（GET /api/machines と同じ根拠に揃える）
+    const connectedAgents = getConnectedAgents();
+
+    const teamIds = [...new Set(candidates.map(c => c.crossTeam.teamId))];
+    const teams = await prisma.team.findMany({ where: { id: { in: teamIds } }, select: { id: true, name: true } });
+    const teamNameById = new Map(teams.map(t => [t.id, t.name]));
+
+    const ownerUserIds = [...new Set(candidates.map(c => c.machine.userId))];
+    const owners = ownerUserIds.length > 0
+      ? await prisma.user.findMany({ where: { id: { in: ownerUserIds } }, select: { id: true, name: true, email: true } })
+      : [];
+    const ownerLabelById = new Map(owners.map(u => [u.id, u.name ?? maskEmailForDisplay(u.email) ?? u.id]));
+
+    const rows: CrossAskTargetRow[] = candidates.map(c => ({
+      ownerLabel: ownerLabelById.get(c.machine.userId) ?? c.machine.userId,
+      machineId: c.machine.id,
+      machineName: c.machine.displayName ?? c.machine.name,
+      status: connectedAgents.has(c.machine.id) ? 'online' : 'offline',
+      projectId: c.id,
+      label: c.displayName ?? c.name,
+      teamId: c.crossTeam.teamId,
+      teamName: teamNameById.get(c.crossTeam.teamId) ?? c.crossTeam.teamId,
+      origin: resolveCrossAskOrigin(c.crossTeam.grantId),
+    }));
+
+    return reply.send({ groups: buildCrossAskTargetGroups(rows) });
+  });
+
+  /**
+   * Phase C: クロス ask の履歴（自分が投げた質問と自分に返ってきた回答だけ。他人の依頼・
+   * 所有者自身の作業は構造的に混ざらない）。認可は requestedByUserId === userId の 1 条件のみ。
+   * projectId の存在確認はしない（存在オラクルをゼロにする。購読を切られても自分が書いた
+   * 本文は読める設計 — ツリーからは消えるので新規の質問はできなくなる）。
+   */
+  app.get('/api/cross-team/projects/:projectId/messages', async (request: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string; before?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { projectId } = request.params;
+    const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '30', 10) || 30));
+    const before = request.query.before || undefined;
+
+    if (!crossTeamChatFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const whereClause: any = {
+      session: { projectId, requestedByUserId: userId, ...buildCrossAskSessionIdFilter() },
+    };
+    if (before) {
+      const cursorMsg = await prisma.message.findUnique({
+        where: { id: before },
+        select: { createdAt: true },
+      });
+      if (cursorMsg) {
+        whereClause.createdAt = { lt: cursorMsg.createdAt };
+      }
+    }
+
+    const messages = await prisma.message.findMany({
+      where: whereClause,
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      select: {
+        id: true,
+        role: true,
+        content: true,
+        createdAt: true,
+        sourceProjectName: true,
+        files: {
+          select: { id: true, filename: true, mimeType: true, size: true, direction: true },
+        },
+      },
+    });
+
+    const hasMore = messages.length > limit;
+    const result = hasMore ? messages.slice(0, limit) : messages;
+    result.reverse();
+
+    reply.header('Cache-Control', 'no-store');
+    return reply.send({
+      messages: result.map(m => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        createdAt: m.createdAt.toISOString(),
+        files: m.files,
+        sourceProjectName: m.sourceProjectName ?? undefined,
+      })),
+      hasMore,
     });
   });
 

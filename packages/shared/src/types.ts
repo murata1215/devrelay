@@ -1071,7 +1071,12 @@ export type WebClientMessage =
   | { type: 'web:command'; payload: { text: string; files?: FileAttachment[]; projectId?: string } }
   | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean; alwaysAllow?: boolean; answers?: Record<string, string> } }
   | { type: 'web:assist'; payload: VoiceAssistRequestPayload }
-  | { type: 'web:ping' };
+  | { type: 'web:ping' }
+  // クロスユーザー Team Phase C: 購読/借用プロジェクトへの質問専用フレーム。
+  // `web:command` とは意図的に別種にする（executeCommand()/parseCommandWithNLP()/
+  // handleProjectConnect() を一切通さないことで e/k/a/testflight/`//connect` を構造的に
+  // 到達不能にする。files を持たない＝クロス ask はファイル添付非対応）。
+  | { type: 'web:cross:ask'; payload: { projectId: string; text: string } };
 
 /**
  * サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示。

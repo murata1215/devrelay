@@ -27,6 +27,7 @@ import { decideCrossTarget, pickInflightCrossSession, buildCrossTargetRejectionM
 import { resolveCrossTeamAccess } from '../services/cross-team-authz.js';
 import { buildCrossTeamDenyLog } from '../services/cross-team-guard.js';
 import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
+import { countRecentCrossSessions } from '../services/cross-session-stats.js';
 
 /**
  * #294: クロスプロジェクト連携のループ防止パラメータ
@@ -100,35 +101,6 @@ async function resolveCrossSourceProjectName(
   });
   const machineLabel = machine?.displayName ?? machine?.name ?? 'unknown';
   return resolveCrossSourceLabel({ callerProjectPath, candidates, machineLabel });
-}
-
-/**
- * #294: 直近 5 分のクロスプロジェクトセッション数を数える（マシン横断の backstop）
- *
- * @param prefix セッション ID プレフィックス（'teamexec_' / 'crossquery_'）
- * @param userId 集計対象ユーザー
- * @param targetProjectId 指定時はそのプロジェクト宛のみ集計
- */
-async function countRecentCrossSessions(
-  prefix: string,
-  requesterUserId: string,
-  targetProjectId?: string
-): Promise<number> {
-  return prisma.session.count({
-    where: {
-      // クロスユーザー Team（Phase 1）: クロスの Session.userId は宛先マシン所有者（executorUserId）
-      // に寄るため、依頼者基準で数えるには新列 requestedByUserId を見る必要がある。
-      // 既存行は全て requestedByUserId=NULL のため、2本目の条件（従来の userId 一致）が
-      // 同一ユーザー経路の行集合をそのまま再現する（OR で追加しただけ。既存の集計結果は不変）。
-      OR: [
-        { requestedByUserId: requesterUserId },
-        { requestedByUserId: null, userId: requesterUserId },
-      ],
-      id: { startsWith: prefix },
-      startedAt: { gte: new Date(Date.now() - CROSS_RATE_WINDOW_MS) },
-      ...(targetProjectId ? { projectId: targetProjectId } : {}),
-    },
-  });
 }
 
 /**

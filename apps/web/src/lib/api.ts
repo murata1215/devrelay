@@ -987,6 +987,48 @@ export const teams = {
 };
 
 // ========================================
+// クロスユーザー Team Phase C（購読/借用プロジェクトへの質問）API
+// ========================================
+
+/** `GET /api/cross-team/ask-targets` の 1 プロジェクト分。 */
+export interface CrossAskProject {
+  projectId: string;
+  label: string;
+  teamId: string;
+  teamName: string;
+  origin: 'invite' | 'subscription';
+  execAllowed: false;
+}
+
+export interface CrossAskMachineGroup {
+  machineId: string;
+  machineName: string;
+  status: 'online' | 'offline';
+  projects: CrossAskProject[];
+}
+
+export interface CrossAskOwnerGroup {
+  ownerLabel: string;
+  machines: CrossAskMachineGroup[];
+}
+
+export const crossTeamChat = {
+  /** 購読/借用プロジェクト一覧（Agents ツリー用）。機能 OFF なら 404（呼び出し側で catch して空扱いにする）。 */
+  async listTargets(): Promise<{ groups: CrossAskOwnerGroup[] }> {
+    return request('GET', '/cross-team/ask-targets');
+  },
+
+  /** クロス ask の履歴（自分が投げた質問と自分に返ってきた回答だけ）。既存 getMessages と同形。 */
+  async getMessages(projectId: string, opts?: { before?: string; limit?: number }): Promise<{ messages: SessionMessage[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (opts?.before) params.set('before', opts.before);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const q = params.toString() ? `?${params.toString()}` : '';
+    return request('GET', `/cross-team/projects/${projectId}/messages${q}`);
+  },
+};
+
+// ========================================
 // 組織（エンタープライズモード）API
 // ========================================
 
