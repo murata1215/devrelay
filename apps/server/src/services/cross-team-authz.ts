@@ -284,6 +284,15 @@ export async function listCrossTeamAskCandidateProjects(callerUserId: string): P
     return [];
   }
 
+  // 公開型 Team（Phase A）: 招待型の grant が 0 件でも購読があれば候補が存在し得るため、
+  // 下の早期 return は publishEnabled との AND にする。OFF 時は従来どおり無条件の早期
+  // return（挙動・クエリ数とも完全に不変）。
+  // 2026-11-09 実機バグの修正: この早期 return が無条件だったため、招待の grant を一切
+  // 持たない「純粋な購読者」の候補が常に空配列になっていた（loadSubscriptionAskCandidateEntries
+  // が呼ばれる手前で return していた）。招待型の Team オーナーで試すと grant が 4 件あり
+  // 早期 return されないため再現しなかった。
+  const publishEnabled = isCrossTeamPublishEnabled(process.env.DEVRELAY_CROSS_TEAM_PUBLISH);
+
   // requesterUserId は grant 作成時点の Team オーナーのスナップショット（= この関数の呼び出し元の
   // 文脈では「自分がオーナーとして発行した grant」を絞り込む条件として十分。Team に直接の
   // relation を張っていない CrossTeamGrant.teamId の代わりにこちらを使う）
@@ -291,10 +300,12 @@ export async function listCrossTeamAskCandidateProjects(callerUserId: string): P
     where: { askAllowed: true, revokedAt: null, requesterUserId: callerUserId },
     select: { id: true, teamId: true, projectId: true, granteeUserId: true },
   });
-  if (grants.length === 0) return [];
+  if (grants.length === 0 && !publishEnabled) return [];
 
   // 組織境界の実行時再検証（grant の organizationId スナップショットではなく現在の
-  // OrganizationMember を見る。どちらかが組織を抜けた直後に即座に候補から外れる）
+  // OrganizationMember を見る。どちらかが組織を抜けた直後に即座に候補から外れる）。
+  // 招待型・公開型のどちらの経路でも callerMembership が無ければ候補は無いため、
+  // この早期 return は無条件のままでよい。
   const callerMembership = await prisma.organizationMember.findUnique({
     where: { userId: callerUserId },
     select: { organizationId: true },
@@ -302,10 +313,12 @@ export async function listCrossTeamAskCandidateProjects(callerUserId: string): P
   if (!callerMembership) return [];
 
   const granteeUserIds = [...new Set(grants.map((g) => g.granteeUserId))];
-  const granteeMemberships = await prisma.organizationMember.findMany({
-    where: { userId: { in: granteeUserIds } },
-    select: { userId: true, organizationId: true },
-  });
+  const granteeMemberships = granteeUserIds.length > 0
+    ? await prisma.organizationMember.findMany({
+        where: { userId: { in: granteeUserIds } },
+        select: { userId: true, organizationId: true },
+      })
+    : [];
   const sameOrgGranteeIds = new Set(
     granteeMemberships.filter((m) => m.organizationId === callerMembership.organizationId).map((m) => m.userId),
   );

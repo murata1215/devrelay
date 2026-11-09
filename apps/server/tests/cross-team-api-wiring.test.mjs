@@ -294,6 +294,36 @@ describe('cross-team-guard.ts: 公開型 Team（Phase A）追加後も認可の�
   });
 });
 
+describe('cross-team-authz.ts: 2026-11-09 の実機バグ（純粋な購読者の ask 候補が常に空になる）の再発防止', () => {
+  const source = readServerSource('src/services/cross-team-authz.ts');
+
+  test('listCrossTeamAskCandidateProjects は招待 grant 0 件でも publishEnabled なら早期 return しない（AND 条件）', () => {
+    const idx = source.indexOf('export async function listCrossTeamAskCandidateProjects');
+    assert.ok(idx > 0);
+    const body = source.slice(idx, idx + 3000);
+    assert.match(body, /grants\.length === 0 && !publishEnabled/);
+  });
+
+  test('listCrossTeamAskCandidateProjects に無条件の early return（grants.length === 0 のみ）が復活していない（2026-11-09 バグの再発防止）', () => {
+    const idx = source.indexOf('export async function listCrossTeamAskCandidateProjects');
+    const body = source.slice(idx, idx + 3000);
+    assert.doesNotMatch(body, /if \(grants\.length === 0\) return \[\];/);
+  });
+
+  test('listCrossTeamAskCandidateProjects は loadSubscriptionAskCandidateEntries( を呼んでいる（購読経路への到達性）', () => {
+    const idx = source.indexOf('export async function listCrossTeamAskCandidateProjects');
+    const body = source.slice(idx, idx + 3000);
+    assert.match(body, /loadSubscriptionAskCandidateEntries\(/);
+  });
+
+  test('loadCrossTeamCandidates（Agent REST 経路）は招待・購読を Promise.all で独立に集めている（片方 0 件で他方を塞がない構造の固定）', () => {
+    const idx = source.indexOf('export async function loadCrossTeamCandidates');
+    assert.ok(idx > 0);
+    const body = source.slice(idx, idx + 500);
+    assert.match(body, /Promise\.all\(\[\s*loadInviteGrantCandidates\(input\),\s*loadSubscriptionCandidates\(input\),\s*\]\)/);
+  });
+});
+
 describe('command-handler.ts: resolveCrossTargetByName は ask のみクロス候補を含める', () => {
   const source = readServerSource('src/services/command-handler.ts');
 

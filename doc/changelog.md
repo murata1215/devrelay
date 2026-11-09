@@ -6,6 +6,42 @@
 
 ## 実装済み機能
 
+### 公開型 Team: 純粋な購読者の ask が常に候補なしになるバグの根治 (2026-11-09)
+
+body 無し POST バグの修正後、yahoo が公開型チーム（`pixterm`）を購読できたが、続けて
+`ask pixterm-server:` を実行すると「宛先として登録されていません」になり、候補一覧に
+yahoo 自身のプロジェクトしか出なかった。
+
+#### 原因（Phase A 実装時の見落とし）
+`cross-team-authz.ts` の `listCrossTeamAskCandidateProjects()`（チャット経路）で、
+招待型 grant を取得した直後の早期 return `if (grants.length === 0) return [];` が、
+購読候補を合流させるコード（`loadSubscriptionAskCandidateEntries()`）より**前**に
+あったため、招待の grant を 1 件も持たない「純粋な購読者」は常に空配列を返されていた。
+
+この早期 return は招待型だけの世界では正しかった（grant が 0 件＝宛先なし）が、公開型
+導入後は「招待の grant が 0 件でも購読があれば宛先がある」ため前提が崩れていた。
+DB で確認したところ、yahoo（純粋な購読者）は requester 側の有効な ask grant が 0 件で
+早期 return に即座に引っかかる一方、gmail（招待型の Team オーナー）は 4 件持っていて
+早期 return されなかった。実装者（gmail）が自分の経路で試すと再現しないバグだった。
+
+Agent REST 経路（`loadCrossTeamCandidates()`）は招待・購読を `Promise.all` で独立に
+集めていたため、同種の問題は発生していなかった（修正不要）。
+
+#### 修正
+早期 return を公開型キルスイッチとの AND にした: `if (grants.length === 0 &&
+!publishEnabled) return [];`。公開型 OFF 時の挙動・クエリ数は完全に不変。併せて
+`grants` が空のときに無意味な `organizationMember.findMany({ where: { userId: {
+in: [] } } })` を投げないようガードした。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1499/1499
+（新規 4 ケース含む非退行）。
+
+#### 変更ファイル
+既存 `apps/server/src/services/cross-team-authz.ts`、
+`apps/server/tests/cross-team-api-wiring.test.mjs`。**WebUI の変更なし。
+`cross-team-guard.ts`（認可の純関数）・`cross-team-publish.ts`・新設 6 ルートは
+一切変更していない。** DB スキーマ変更なし・新規キルスイッチなし。
+
 ### body 無し POST が常に 400 になる既存バグの根治（WebUI 共通ヘッダー） (2026-11-08)
 
 公開型 Team Phase B の実機テストで、yahoo が「購読する」を押すと Bad Request になった。
