@@ -6,6 +6,51 @@
 
 ## 実装済み機能
 
+### body 無し POST が常に 400 になる既存バグの根治（WebUI 共通ヘッダー） (2026-11-08)
+
+公開型 Team Phase B の実機テストで、yahoo が「購読する」を押すと Bad Request になった。
+調査の結果、**今回追加した購読機能のバグではなく、WebUI 共通の HTTP ヘルパーに以前から
+潜んでいたバグ**で、新機能がそれを踏み抜いた形だった。
+
+#### 原因
+サーバーログに `FST_ERR_CTP_EMPTY_JSON_BODY`（"Body cannot be empty when content-type
+is set to 'application/json'"）が記録されていた。`apps/web/src/lib/api.ts` の共通
+HTTP ヘルパー `request()` が、body の有無に関わらず常に `Content-Type:
+application/json` を付けていたため、body 無しの POST が「JSON を送る」と宣言しながら
+本文が空、という不正なリクエストになり、Fastify の既定 JSON パーサが**認証フックより
+前のボディパース段階で**弾いていた（ハンドラは一度も実行されない）。
+
+本番サーバーへの無害な実証: `Content-Type: application/json` 付き・body なしの
+`POST /api/teams/.../subscribe` は **400**（認証前に弾かれる）、`Content-Type` 無しなら
+**401**（認証まで到達）。
+
+#### 影響範囲: 同じ条件の呼び出しが 5 箇所、すべて以前から壊れていた
+`POST /push/fcm/test`（設定画面の「テスト通知を送る」）、
+`POST /teams/invites/:id/decline`（招待の「辞退」）、
+`POST /teams/:teamId/subscribe`（「購読する」、今回発覚）、
+`POST /org/leave`（「組織を抜ける」）、
+`POST /sites/:host/health-check`（Sites のヘルスチェック）。
+
+#### 修正
+ヘッダ組み立てを新規 `apps/web/src/lib/request-headers-rules.ts`（外部 import ゼロの
+純関数）に切り出し、`buildRequestHeaders({ token, hasBody })` が **body があるときだけ**
+`Content-Type` を付けるようにした。挙動が変わるのは body 無しのリクエストだけで、
+body ありの呼び出し（大多数）は完全に不変。
+
+サーバー側で空 JSON を許容する案は採らなかった（ボディパースの挙動をサーバー全体で
+変えるため影響範囲が広く、本当に壊れたリクエストまで通してしまう。原因はクライアントが
+「JSON を送る」と嘘の宣言をしていることなので、そこを直すのが筋と判断）。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 951/951（新規 7 ケース含む非退行）、`apps/server` の
+`node --test` 1495/1495（サーバー側変更なし・非退行）。
+
+#### 変更ファイル
+新規 `apps/web/src/lib/request-headers-rules.ts`、
+`apps/web/tests/request-headers-rules.test.mjs`。既存 `apps/web/tsconfig.test.json`
+（include 追加）、`apps/web/src/lib/api.ts`（`request()` のヘッダ組み立てを差し替え）。
+**サーバー側の変更なし。** DB スキーマ変更なし・新規キルスイッチなし。
+
 ### 公開型クロスユーザー Team Phase B（WebUI: 操作画面） (2026-11-08)
 
 Phase A（サーバー + 認可）の実機検証がブラウザコンソールに JS を貼る必要があり実用的で

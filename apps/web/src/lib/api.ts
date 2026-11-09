@@ -9,6 +9,9 @@ const API_BASE = apiUrl('');
 import type { CapabilityConfigLike, CapabilitySyncStatusLike } from './capability-config-rules';
 // 2026-10-23: FCM プッシュ通知診断の型も同様に純ロジックモジュール側で定義済みのものを再利用する
 import type { PushDevicesResponse, PushTestResponse } from './push-device-rules';
+// 2026-11-08: リクエストヘッダの組み立てを純関数に切り出す（body 無し POST が常に
+// Content-Type: application/json を付けて Fastify に 400 で弾かれていたバグの修正）
+import { buildRequestHeaders } from './request-headers-rules';
 
 // トークンをlocalStorageに保存
 export function getToken(): string | null {
@@ -30,13 +33,7 @@ async function request<T>(
   body?: object
 ): Promise<T> {
   const token = getToken();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
+  const headers = buildRequestHeaders({ token, hasBody: body !== undefined });
 
   const response = await fetch(`${API_BASE}${path}`, {
     method,
