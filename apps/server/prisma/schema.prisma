@@ -226,6 +226,11 @@ model Team {
   createdAt DateTime     @default(now())
   members   TeamMember[]
   crossTeamInvites CrossTeamInvite[] // クロスユーザー Team の招待（送信側）
+  // 公開型クロスユーザー Team（Phase A）: 'private'（既定） | 'organization'。
+  // 'organization' でも公開対象は selectPublishableMembers() でオーナー自身の所有プロジェクトに
+  // 絞り込む（招待型で受け入れた他人のプロジェクトを又貸しで再公開しないため）
+  visibility    String             @default("private")
+  subscriptions TeamSubscription[] // 公開型の購読（CrossTeamGrant とは別テーブル。実 grant 行は作らない）
 
   @@unique([userId, name])
 }
@@ -308,7 +313,9 @@ model CrossTeamAuditLog {
   sessionId       String?  // crossquery_ / teamexec_ セッション ID
   mode            String   // 'ask' | 'exec'
   action          String   // 'request' | 'denied' | 'completed' | 'failed' |
-                            // 'invite_sent' | 'invite_accepted' | 'invite_declined' | 'grant_revoked'
+                            // 'invite_sent' | 'invite_accepted' | 'invite_declined' | 'grant_revoked' |
+                            // 'team_published' | 'team_unpublished' | 'subscribed' | 'unsubscribed' |
+                            // 'subscription_revoked'
   grantId         String?
   detail          String?  // JSON 文字列（denyReason, 所要ms 等）
   createdAt       DateTime @default(now())
@@ -316,6 +323,27 @@ model CrossTeamAuditLog {
   @@index([organizationId, createdAt])
   @@index([executorUserId, createdAt])
   @@index([requesterUserId, createdAt])
+}
+
+// 公開型クロスユーザー Team（Phase A）の購読。認可の根拠は「行が存在し revokedAt IS NULL」の
+// 2 条件のみ（CrossTeamGrant と同じ設計原則）。CrossTeamGrant とは別テーブル — 購読のたびに
+// 実 grant 行を作らない（購読者数 × チーム規模の行の増殖とチーム編集時の同期処理を避けるため）。
+// 認可時は cross-team-publish.ts の buildSubscriptionCandidates() でその場で
+// CrossTeamCandidateGrant[] に合成し、decideCrossTeamAccess()（無改造）にそのまま渡す。
+model TeamSubscription {
+  id               String    @id @default(cuid())
+  teamId           String
+  team             Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  subscriberUserId String
+  organizationId   String    // 購読時点のスナップショット（実行時は OrganizationMember を再検証する）
+  askAllowed       Boolean   @default(true)
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([teamId, subscriberUserId])
+  @@index([subscriberUserId])
+  @@index([teamId])
 }
 
 // セッション

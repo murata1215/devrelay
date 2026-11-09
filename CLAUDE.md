@@ -112,6 +112,7 @@ pm2 restart devrelay-server
 | DEVRELAY_AGENT_REPO_TOKEN | 読取PATのサーバー配布サイクル: 上記 `DEVRELAY_AGENT_REPO_URL` とセットのときのみ有効な読取 PAT。DB には一切保存しない（env のみ）。`POST /api/agent/repo-auth`（HTTP、インストール時）・WS `agent:repo:auth:request`（`u` 実行前のローテーション）のどちらも**マシントークンで認証済みの Agent にのみ**配布する（値は `Authorization: Basic <base64>` 形式でのみ渡し、WebUI・ログ・DB には一切出さない）。未設定時は Agent 側で一切の新規通信が発生しない（既存の個人 devrelay.io 含む全環境は無変更）。前サイクルの「PAT をサーバーに送らない」方針を本サイクルで**サーバー env に限り**見直した判断（`Machine.token` 平文保存 ⇒ DB 侵害時のリスクを明示的に受容。前提は Fine-grained・対象リポジトリのみ・`Contents: Read-only`・有効期限必須）。詳細・優先順位・ローテーション手順は `doc/company-repo-sync.md` §9 |
 | DEVRELAY_CROSS_TEAM | 別ユーザーのエージェントとチームを組む機能（クロスユーザー ask・招待 API・WebUI 招待 UI）を有効にするか。**既定 `0` = OFF**（既存キルスイッチの多数派と逆方向。新しい信頼境界を黙って開けないため）。`1` で有効化。OFF 時は authz がクロス判定に入らず従来の 404・新設 API（`/api/teams/org-candidates`・`/api/teams/invites` 等）は全て 404・`GET /api/teams`/`GET /api/agent/members` の応答は旧構造と完全同一（新フィールドはキーごと省略）。対象は同一 Organization 内のみ（組織未所属ユーザー同士は不可）。teamexec（exec）は本変数だけでは動かない（下記 `DEVRELAY_CROSS_TEAM_EXEC` 参照、Phase 1 では構造的に到達不可） |
 | DEVRELAY_CROSS_TEAM_EXEC | クロスユーザー `teamexec`（他ユーザーのプロジェクトでの exec = コード改変）を有効にするか。既定 `0`。`DEVRELAY_CROSS_TEAM=1` かつ本変数 `1` かつ受入側が `CrossTeamGrant.execAllowed=true` にしている、の 3 条件 AND でのみ通る設計（Phase 1 時点では受入側 UI に exec 許可トグル自体が無く execAllowed は常に false のため、本変数を `1` にしても何も変わらない。Phase 2 で解禁予定） |
+| DEVRELAY_CROSS_TEAM_PUBLISH | 公開型クロスユーザー Team（Phase A: サーバー + 認可のみ、2026-11-08。WebUI は Phase B 未実装）を有効にするか。既定 `0` = OFF。`DEVRELAY_CROSS_TEAM=1` と本変数 `1` の両方が揃って初めて新設 6 ルート（`PATCH /api/teams/:teamId/visibility`・`GET /api/teams/published`・`POST/DELETE /api/teams/:teamId/subscribe`・`GET /api/teams/:teamId/subscribers`・`DELETE /api/teams/:teamId/subscribers/:userId`）が有効になる（どちらか OFF なら全て 404）。認可本体 `decideCrossTeamAccess()` は無改造 — `TeamSubscription`（購読）から `cross-team-publish.ts` がその場で候補を合成して渡すだけ。公開対象は招待型で受け入れた他人のプロジェクトを除外し、チームオーナー自身が所有するプロジェクトに限定する（又貸し防止） |
 | DEVRELAY_CHAT_CTX_PER_USER | Discord/Telegram の共有チャンネルで、同じ chatId に複数ユーザーが発言したときキャッシュ済み `UserContext` の `userId` を発言者ごとに再解決するか（既定 `1`。`0` で「そのチャンネルで最初に話した人の userId に全員の操作が固定される」旧挙動に戻すキルスイッチ。2026-11-05 に発見・修正、詳細は `doc/changelog.md` のクロスユーザー Team サイクル参照） |
 
 ## DB テーブル（概要）
@@ -136,7 +137,8 @@ pm2 restart devrelay-server
 | UserClearance | 高辻ナレッジ サイクル2: 人の権限（`readLevel`/`writeLevel` 0〜10、`compartments String[]`。行が無ければ既定値 0/0/[]。`userId` unique、FK なし） |
 | CrossTeamInvite | クロスユーザー Team（Phase 1）: 別ユーザーへの招待（pending の持ち場。`status` は認可判定には使わない、認可は常に CrossTeamGrant の存在のみ） |
 | CrossTeamGrant | クロスユーザー Team（Phase 1）: 認可の唯一の根拠（行が存在し `revokedAt IS NULL` ⇔ 承認済み。`askAllowed`/`execAllowed` 既定 false。TeamMember 削除で Cascade） |
-| CrossTeamAuditLog | クロスユーザー Team（Phase 1）: 監査ログ（append-only、FK 無し。`action`: request/denied/completed/failed/invite_*/grant_revoked） |
+| CrossTeamAuditLog | クロスユーザー Team（Phase 1）: 監査ログ（append-only、FK 無し。`action`: request/denied/completed/failed/invite_*/grant_revoked/team_published/team_unpublished/subscribed/unsubscribed/subscription_revoked。公開型追加分は Phase A） |
+| TeamSubscription | 公開型クロスユーザー Team（Phase A、2026-11-08）: 購読。認可の根拠は「行が存在し `revokedAt IS NULL`」の2条件のみ（`CrossTeamGrant` と同じ設計原則）。`CrossTeamGrant` とは別テーブルで実 grant 行は作らない（購読のたびに合成するだけ。`Team.visibility='organization'` が前提） |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`

@@ -28,6 +28,7 @@ import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportCo
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
 import { isCrossTeamEnabled } from '../services/cross-team-guard.js';
 import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
+import { isCrossTeamPublishEnabled, selectPublishableMembers } from '../services/cross-team-publish.js';
 import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
@@ -3403,6 +3404,262 @@ export async function apiRoutes(app: FastifyInstance) {
         createdAt: g.createdAt,
       })),
     });
+  });
+
+  // ==========================================================================
+  // 公開型クロスユーザー Team（Phase A: サーバー + 認可のみ。WebUI は Phase B）。
+  // DEVRELAY_CROSS_TEAM と DEVRELAY_CROSS_TEAM_PUBLISH の両方が ON のときのみ有効（AND）。
+  // どちらか OFF なら以下の全ルートが 404。認可本体（decideCrossTeamAccess）は無改造 —
+  // cross-team-authz.ts が購読（TeamSubscription）から候補をその場で合成して渡すだけ。
+  // ==========================================================================
+
+  /** このブロック共通のキルスイッチ判定（2 つの ON が AND 条件）。 */
+  const publishFeatureEnabled = () =>
+    isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM) &&
+    isCrossTeamPublishEnabled(process.env.DEVRELAY_CROSS_TEAM_PUBLISH);
+
+  /**
+   * 公開型 Team（Phase A）: チームの公開設定を変更する（Team オーナーのみ）。
+   * 公開対象は `selectPublishableMembers()` で「チームオーナー自身が所有するプロジェクト」に
+   * 限定する（又貸し防止の核心。招待型で受け入れた他人のプロジェクトは公開対象から除外する）。
+   * 公開可能プロジェクトが 0 件のまま公開しようとした場合は 400 で拒否する。
+   */
+  app.patch('/api/teams/:teamId/visibility', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    const { visibility } = (request.body || {}) as { visibility?: string };
+
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+    if (visibility !== 'private' && visibility !== 'organization') {
+      return reply.status(400).send({ error: 'visibility must be "private" or "organization"' });
+    }
+
+    const team = await prisma.team.findUnique({
+      where: { id: teamId },
+      include: { members: { include: { project: { include: { machine: { select: { userId: true } } } } } } },
+    });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const publishableCount = selectPublishableMembers(
+      team.members.map((m) => ({
+        teamId: team.id,
+        teamOwnerUserId: team.userId,
+        projectId: m.projectId,
+        ownerUserId: m.project.machine.userId,
+      })),
+    ).length;
+
+    const membership = await prisma.organizationMember.findUnique({
+      where: { userId }, select: { organizationId: true },
+    });
+
+    if (visibility === 'organization') {
+      if (!membership) {
+        return reply.status(400).send({ error: 'You must belong to an organization to publish a team' });
+      }
+      if (publishableCount === 0) {
+        return reply.status(400).send({
+          error: 'Team has no publishable projects (projects borrowed via invite cannot be published)',
+        });
+      }
+    }
+
+    await prisma.team.update({ where: { id: teamId }, data: { visibility } });
+
+    recordCrossTeamAudit({
+      requesterUserId: userId, executorUserId: userId,
+      organizationId: membership?.organizationId ?? null,
+      teamId, mode: 'ask',
+      action: visibility === 'organization' ? 'team_published' : 'team_unpublished',
+      allowSelfAudit: true,
+    });
+
+    return reply.send({ visibility, publishableCount });
+  });
+
+  /**
+   * 公開型 Team（Phase A）: 同一組織内で公開されているチーム一覧（自分が所有するチームは除く）。
+   * プロジェクト名は一切返さない（`GET /api/teams/org-candidates` と同じ情報漏えい対策）。
+   */
+  app.get('/api/teams/published', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const membership = await prisma.organizationMember.findUnique({
+      where: { userId }, select: { organizationId: true },
+    });
+    if (!membership) {
+      return reply.send({ teams: [] });
+    }
+
+    const orgMembers = await prisma.organizationMember.findMany({
+      where: { organizationId: membership.organizationId },
+      select: { userId: true },
+    });
+    const orgUserIds = orgMembers.map((m) => m.userId);
+
+    const teams = await prisma.team.findMany({
+      where: { visibility: 'organization', userId: { in: orgUserIds, not: userId } },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+        members: { include: { project: { include: { machine: { select: { userId: true } } } } } },
+        subscriptions: { where: { subscriberUserId: userId, revokedAt: null }, select: { id: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const result = teams
+      .map((t) => {
+        const publishableCount = selectPublishableMembers(
+          t.members.map((m) => ({
+            teamId: t.id, teamOwnerUserId: t.userId, projectId: m.projectId, ownerUserId: m.project.machine.userId,
+          })),
+        ).length;
+        return {
+          teamId: t.id,
+          teamName: t.name,
+          publisherName: t.user.name ?? maskEmailForDisplay(t.user.email) ?? t.userId,
+          projectCount: publishableCount,
+          subscribed: t.subscriptions.length > 0,
+        };
+      })
+      .filter((t) => t.projectCount > 0);
+
+    return reply.send({ teams: result });
+  });
+
+  /** 公開型 Team（Phase A）: チームを購読する（同一組織・非オーナーのみ。他組織/他人のチームは常に 404）。 */
+  app.post('/api/teams/:teamId/subscribe', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const team = await prisma.team.findUnique({
+      where: { id: teamId }, select: { id: true, userId: true, visibility: true },
+    });
+    if (!team || team.visibility !== 'organization' || team.userId === userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const [callerMembership, ownerMembership] = await Promise.all([
+      prisma.organizationMember.findUnique({ where: { userId }, select: { organizationId: true } }),
+      prisma.organizationMember.findUnique({ where: { userId: team.userId }, select: { organizationId: true } }),
+    ]);
+    if (!callerMembership || !ownerMembership || callerMembership.organizationId !== ownerMembership.organizationId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const subscription = await prisma.teamSubscription.upsert({
+      where: { teamId_subscriberUserId: { teamId, subscriberUserId: userId } },
+      create: { teamId, subscriberUserId: userId, organizationId: callerMembership.organizationId, askAllowed: true },
+      update: { revokedAt: null },
+    });
+
+    recordCrossTeamAudit({
+      requesterUserId: userId, executorUserId: userId,
+      organizationId: callerMembership.organizationId,
+      teamId, mode: 'ask', action: 'subscribed', allowSelfAudit: true,
+    });
+
+    return reply.send({ subscriptionId: subscription.id });
+  });
+
+  /** 公開型 Team（Phase A）: 自分の購読を解除する（購読者本人のみ）。 */
+  app.delete('/api/teams/:teamId/subscribe', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const subscription = await prisma.teamSubscription.findUnique({
+      where: { teamId_subscriberUserId: { teamId, subscriberUserId: userId } },
+    });
+    if (!subscription || subscription.revokedAt) {
+      return reply.status(404).send({ error: 'Subscription not found' });
+    }
+
+    await prisma.teamSubscription.update({ where: { id: subscription.id }, data: { revokedAt: new Date() } });
+
+    recordCrossTeamAudit({
+      requesterUserId: userId, executorUserId: userId,
+      organizationId: subscription.organizationId,
+      teamId, mode: 'ask', action: 'unsubscribed', allowSelfAudit: true,
+    });
+
+    return reply.send({ success: true });
+  });
+
+  /** 公開型 Team（Phase A）: 購読者一覧（Team オーナーのみ）。 */
+  app.get('/api/teams/:teamId/subscribers', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const team = await prisma.team.findUnique({ where: { id: teamId }, select: { id: true, userId: true } });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const subscriptions = await prisma.teamSubscription.findMany({
+      where: { teamId, revokedAt: null },
+      orderBy: { createdAt: 'asc' },
+    });
+    const subscriberIds = subscriptions.map((s) => s.subscriberUserId);
+    const users = subscriberIds.length > 0
+      ? await prisma.user.findMany({ where: { id: { in: subscriberIds } }, select: { id: true, name: true, email: true } })
+      : [];
+    const nameOf = (id: string) => {
+      const u = users.find((x) => x.id === id);
+      return u?.name ?? maskEmailForDisplay(u?.email ?? null) ?? id;
+    };
+
+    return reply.send({
+      subscribers: subscriptions.map((s) => ({
+        userId: s.subscriberUserId, name: nameOf(s.subscriberUserId), createdAt: s.createdAt,
+      })),
+    });
+  });
+
+  /** 公開型 Team（Phase A）: Team オーナーが特定の購読者を強制的に取り消す。 */
+  app.delete('/api/teams/:teamId/subscribers/:userId', async (request, reply) => {
+    const ownerUserId = (request as any).user.id as string;
+    const { teamId, userId: subscriberUserId } = request.params as { teamId: string; userId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const team = await prisma.team.findUnique({ where: { id: teamId }, select: { id: true, userId: true } });
+    if (!team || team.userId !== ownerUserId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const subscription = await prisma.teamSubscription.findUnique({
+      where: { teamId_subscriberUserId: { teamId, subscriberUserId } },
+    });
+    if (!subscription || subscription.revokedAt) {
+      return reply.status(404).send({ error: 'Subscription not found' });
+    }
+
+    await prisma.teamSubscription.update({ where: { id: subscription.id }, data: { revokedAt: new Date() } });
+
+    recordCrossTeamAudit({
+      requesterUserId: ownerUserId, executorUserId: subscriberUserId,
+      organizationId: subscription.organizationId,
+      teamId, mode: 'ask', action: 'subscription_revoked',
+    });
+
+    return reply.send({ success: true });
   });
 }
 

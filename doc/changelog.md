@@ -6,6 +6,81 @@
 
 ## 実装済み機能
 
+### 公開型クロスユーザー Team Phase A（サーバー + 認可のみ。WebUI は Phase B 未実装） (2026-11-08)
+
+招待型（Phase 1）に続く公開型 — 「特定ユーザーがチームを公開設定し、同一組織の利用者が
+選んで組み込む」の実装。公開する側が貸す側（＝自分の契約で AI が動き、課金を負担する）。
+
+#### 設計の核心: 認可の純関数は無改造
+
+招待型の `decideCrossTeamAccess()`（`cross-team-guard.ts`）は `teamMemberId` に一切依存せず、
+`CrossTeamCandidateGrant`（`teamId / grantId / granteeUserId / askAllowed / execAllowed /
+revoked / callerQualified`）だけを受け取る設計だった。ただし `callerQualified` の計算
+（`loadCrossTeamCandidates` の「Team オーナー本人であること」）は、招待型が「借りる側が
+Team オーナー」なのに対し公開型は「貸す側が Team オーナー」で関係が逆転するため、素朴には
+購読者全員が `callerNotQualified` で弾かれる。解決策として、`decideCrossTeamAccess()` は
+1 バイトも変更せず、新規 `TeamSubscription` から `CrossTeamCandidateGrant[]` をその場で
+合成して渡す方式を採った（`cross-team-publish.ts` の `buildSubscriptionCandidates()`）。
+`CrossTeamGrant` は変更なし（`teamMemberId @unique` も維持）。購読者数 × チーム規模の
+行の増殖やチーム編集時の同期処理が不要になる（TISA は 8 名・最大 13 プロジェクトの
+チームがあり、実体化方式だと 91 行＋同期処理が必要だった）。
+
+#### 最重要の安全要件: 又貸し防止
+
+`Team` は招待型で受け入れた他人のプロジェクトも同じ `TeamMember` として保持するため、
+素朴に「チームを公開」すると、招待で借りているプロジェクトが所有者の同意なく組織全体に
+再公開され、所有者の契約で課金が走る事故になる。新規 `selectPublishableMembers()` で
+公開対象を「チームオーナー自身が所有するプロジェクト」に限定し、`buildSubscriptionCandidates()`
+でもオーナー不一致の行を捨てて二重に防ぐ。テストでは「招待で借りたプロジェクトを含む
+チームを公開しても、借り物は候補に残らず `decideCrossTeamAccess()` も `denyReason: noGrant`
+になる」ことを固定した。
+
+#### 購読は承認を挟まないセルフサービス方式（ユーザー確認済み）
+
+「公開」という行為自体が組織への同意であるとの判断。歯止めは「公開者はいつでも公開停止
+できる」「購読者一覧を見て個別に取り消せる」「既存のクロスユーザー専用レート制限
+（`CROSS_USER_ASK_TARGET_LIMIT=4` 等）が同じ経路を通るので自動的に効く」の 3 つ。
+
+#### 実装内容
+- 新規 `apps/server/prisma/migrations/20261108000000_add_team_subscription/`:
+  `Team.visibility`（既定 `'private'`）+ `TeamSubscription`（`@@unique([teamId,
+  subscriberUserId])`、認可根拠は「行が存在し `revokedAt IS NULL`」の 2 条件のみ）
+- 新規 `apps/server/src/services/cross-team-publish.ts`（外部 import ゼロの純関数。
+  `cross-team-guard.ts` と同じ流儀）: `isCrossTeamPublishEnabled()` / `selectPublishableMembers()`
+  / `buildSubscriptionCandidates()`
+- `cross-team-authz.ts`: Agent REST 経路（`loadCrossTeamCandidates`）とチャット経路
+  （`listCrossTeamAskCandidateProjects`）の両方に購読候補を合流させる
+  （既存の実 grant 候補と同じ `projectId` dedup に合流。招待型を優先し、既に実 grant が
+  ある projectId は上書きしない）
+- `cross-team-audit.ts`: `team_published / team_unpublished / subscribed / unsubscribed /
+  subscription_revoked` を追加。公開/購読は本人の単独操作が正規ケースのため、既存の
+  「同一ユーザー経路は 1 行も増えない」不変性を崩さないよう `allowSelfAudit: true`
+  を明示したときだけ記録する（既存呼び出しは引数を足さないので挙動不変）
+- `api.ts`: 新設 6 ルート（`PATCH /api/teams/:teamId/visibility`、`GET /api/teams/published`、
+  `POST/DELETE /api/teams/:teamId/subscribe`、`GET /api/teams/:teamId/subscribers`、
+  `DELETE /api/teams/:teamId/subscribers/:userId`）。`GET /api/teams/published` は
+  プロジェクト名を一切返さない（`org-candidates` と同じ情報漏えい対策）。公開可能
+  プロジェクトが 0 件（＝又貸し分しか無いチーム）の公開操作は 400 で拒否
+
+新キルスイッチ `DEVRELAY_CROSS_TEAM_PUBLISH`（既定 `0` = OFF。`DEVRELAY_CROSS_TEAM` と
+AND 条件、どちらか OFF なら新 6 ルートは全て 404）。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1493/1493
+（新規 35 ケース含む、既存含め非退行）。OFF 状態（現在の本番環境）で `Team.visibility`
+が全て `'private'` のまま・`TeamSubscription` 行数 0 であることを SQL で確認。
+
+#### 変更ファイル
+新規 `apps/server/prisma/migrations/20261108000000_add_team_subscription/`、
+`apps/server/src/services/cross-team-publish.ts`、
+`apps/server/tests/cross-team-publish.test.mjs`。既存 `apps/server/prisma/schema.prisma`、
+`apps/server/src/services/{cross-team-authz,cross-team-audit}.ts`、
+`apps/server/src/routes/api.ts`、`apps/server/tests/cross-team-api-wiring.test.mjs`、
+`CLAUDE.md`。**`cross-team-guard.ts`（認可の純関数）は変更なし。** WebUI は Phase B
+（又貸し防止が効いているかをサーバー単体で切り分けるため、今回は含めない）。
+DB マイグレーション適用済み（`npx prisma db execute --stdin` で直接適用・SQL 検証・
+`npx prisma generate` 実行済み）。ソースコード変更ありのため `pnpm build` 実行済み、
+再起動が必要。
+
 ### クロスユーザー Team: 「公開中のプロジェクト」にチーム名を表示 + 停止確認文言の正確化 (2026-11-08)
 
 直前までの一連のサイクル（招待の複数選択・再招待の行き止まり修正・招待候補フィルタ修正）を

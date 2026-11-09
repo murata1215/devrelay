@@ -21,7 +21,14 @@ export type CrossTeamAuditAction =
   | 'invite_sent'
   | 'invite_accepted'
   | 'invite_declined'
-  | 'grant_revoked';
+  | 'grant_revoked'
+  // 公開型 Team（Phase A）: いずれも本人の単独操作（requesterUserId === executorUserId）が
+  // 正規のケースのため、記録には `allowSelfAudit: true` の指定が必要（下記参照）
+  | 'team_published'
+  | 'team_unpublished'
+  | 'subscribed'
+  | 'unsubscribed'
+  | 'subscription_revoked';
 
 export interface RecordCrossTeamAuditInput {
   requesterUserId: string;
@@ -37,6 +44,14 @@ export interface RecordCrossTeamAuditInput {
   grantId?: string | null;
   /** JSON.stringify して保存する（denyReason, 所要 ms 等） */
   detail?: Record<string, unknown> | null;
+  /**
+   * 公開型 Team（Phase A）向け: 公開/非公開・購読/購読解除は本人の単独操作であり
+   * `requesterUserId === executorUserId` が正規のケースになる。既定の自己操作スキップ
+   * （招待型の「同一ユーザー経路は 1 行も増えない」不変性）を崩さないよう、これらの
+   * action を記録したいときだけ明示的に `true` を渡す（既存呼び出しは引数を足さないので
+   * 挙動不変）。
+   */
+  allowSelfAudit?: boolean;
 }
 
 /**
@@ -44,7 +59,7 @@ export interface RecordCrossTeamAuditInput {
  * DB 書き込みが失敗しても呼び出し元の処理（ask/teamexec の応答）は止めない。
  */
 export function recordCrossTeamAudit(input: RecordCrossTeamAuditInput): void {
-  if (input.requesterUserId === input.executorUserId) {
+  if (input.requesterUserId === input.executorUserId && !input.allowSelfAudit) {
     return;
   }
   prisma.crossTeamAuditLog

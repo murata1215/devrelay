@@ -1545,8 +1545,37 @@ mode フラグ（ask/exec）。**クロスの拒否は常に 404**（存在を�
 **残っている未解決の UX 課題**（次サイクルで対応予定）:
 - プロジェクトのリネーム UI が Team ページにしか無く、Team を持たないユーザーはリネーム
   できない
-- 同名衝突の解決手段が弱い（`ask <project>@<machine>:` 形式や候補への採番などが必要）
-- 公開型本体（`Team.visibility` + `TeamSubscription`）は未実装
+- 同名衝突の解決手段が弱い（`ask <project>@<machine>:` 形式や候補への採番などが必要。
+  公開型で他人のプロジェクトが大量に候補へ入ると必須級になる）
+
+### 公開型クロスユーザー Team（Phase A: サーバー + 認可のみ、2026-11-08）
+
+招待型（Phase 1）に続く公開型。公開する側が貸す側（自分の契約で AI が動き、課金を
+負担する）。詳細は `doc/devlog/2026-11-08_cross_team_publish_phase_a.md`。
+
+**設計の核心**: `decideCrossTeamAccess()`（`cross-team-guard.ts`）は 1 バイトも変更しない。
+招待型の `callerQualified` 判定（「Team オーナー本人であること」）は公開型では
+Team オーナーと貸す側の関係が逆転するため使えないが、`cross-team-authz.ts` 側の
+DB ラッパだけを拡張し、新規 `TeamSubscription`（認可根拠は招待型の `CrossTeamGrant`
+と同じ「行が存在し `revokedAt IS NULL`」の 2 条件）から `CrossTeamCandidateGrant[]`
+をその場で合成して渡す方式にした（新規純関数 `cross-team-publish.ts` の
+`buildSubscriptionCandidates()`）。`CrossTeamGrant` のスキーマは変更せず、購読のたびに
+実 grant 行を作らない（既存 Team の最大規模＝13 プロジェクト × 組織最大 7 名で
+行が増殖する実体化方式を避けた）。
+
+**最重要の安全要件（又貸し防止）**: `Team` は招待型で受け入れた他人のプロジェクトも
+同じ `TeamMember` として保持するため、素朴に公開すると招待で借りたプロジェクトが
+所有者の同意なく組織全体に再公開される事故になる。新規 `selectPublishableMembers()`
+で公開対象を「チームオーナー自身が所有するプロジェクト」に限定し、
+`buildSubscriptionCandidates()` でもオーナー不一致を二重にチェックする。
+
+**購読は承認を挟まないセルフサービス方式**（ユーザー確認済み）。歯止めは
+「公開停止」「購読者の個別取り消し」「既存のクロスユーザー専用レート制限」の 3 つ。
+
+新キルスイッチ `DEVRELAY_CROSS_TEAM_PUBLISH`（既定 `0` = OFF、`DEVRELAY_CROSS_TEAM` と
+AND）。新設 6 ルート（`PATCH /api/teams/:teamId/visibility`、`GET /api/teams/published`、
+`POST/DELETE /api/teams/:teamId/subscribe`、`GET /api/teams/:teamId/subscribers`、
+`DELETE /api/teams/:teamId/subscribers/:userId`）。
 
 ### API 構成
 - **WebUI 向け**: `GET/POST/DELETE /api/teams`、`POST/DELETE /api/teams/:teamId/members`

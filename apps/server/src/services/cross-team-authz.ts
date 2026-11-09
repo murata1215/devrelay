@@ -21,6 +21,11 @@ import {
   type CrossTeamCandidateGrant,
   type CrossTeamDecision,
 } from './cross-team-guard.js';
+import {
+  isCrossTeamPublishEnabled,
+  selectPublishableMembers,
+  buildSubscriptionCandidates,
+} from './cross-team-publish.js';
 
 /**
  * 宛先プロジェクトに紐づく `CrossTeamGrant` 候補をすべて取得し、各候補について
@@ -29,7 +34,7 @@ import {
  * revoked・宛先所有者不一致の行も除外せずそのまま返す
  * （`decideCrossTeamAccess` 側で denyReason を区別できるようにするため）。
  */
-export async function loadCrossTeamCandidates(input: {
+async function loadInviteGrantCandidates(input: {
   callerMachineId: string;
   callerUserId: string;
   targetProjectId: string;
@@ -77,6 +82,72 @@ export async function loadCrossTeamCandidates(input: {
   }));
 }
 
+/**
+ * 公開型 Team（Phase A）: 宛先プロジェクトを公開可能メンバーとして持つチームの購読から
+ * 候補を合成する。キルスイッチ（`DEVRELAY_CROSS_TEAM_PUBLISH`）OFF 時は DB を一切読まない。
+ *
+ * 又貸し防止: `selectPublishableMembers()` で「チームオーナー自身が所有するプロジェクト」に
+ * 限定した上で、`buildSubscriptionCandidates()` でもオーナー不一致を二重にチェックする。
+ */
+async function loadSubscriptionCandidates(input: {
+  callerUserId: string;
+  targetProjectId: string;
+  targetOwnerUserId: string;
+}): Promise<CrossTeamCandidateGrant[]> {
+  if (!isCrossTeamPublishEnabled(process.env.DEVRELAY_CROSS_TEAM_PUBLISH)) return [];
+
+  const members = await prisma.teamMember.findMany({
+    where: { projectId: input.targetProjectId, team: { visibility: 'organization' } },
+    select: {
+      team: { select: { id: true, userId: true } },
+      project: { select: { machine: { select: { userId: true } } } },
+    },
+  });
+  if (members.length === 0) return [];
+
+  const publishable = selectPublishableMembers(
+    members.map((m) => ({
+      teamId: m.team.id,
+      teamOwnerUserId: m.team.userId,
+      projectId: input.targetProjectId,
+      ownerUserId: m.project.machine.userId,
+    })),
+  );
+  if (publishable.length === 0) return [];
+
+  const teamIds = publishable.map((m) => m.teamId);
+  const subscriptions = await prisma.teamSubscription.findMany({
+    where: { teamId: { in: teamIds }, subscriberUserId: input.callerUserId },
+    select: { id: true, teamId: true, subscriberUserId: true, askAllowed: true, revokedAt: true },
+  });
+  if (subscriptions.length === 0) return [];
+
+  return buildSubscriptionCandidates({
+    callerUserId: input.callerUserId,
+    targetOwnerUserId: input.targetOwnerUserId,
+    subscriptions,
+    publishedTeams: publishable.map((m) => ({ teamId: m.teamId, teamOwnerUserId: m.teamOwnerUserId })),
+  });
+}
+
+/**
+ * 宛先プロジェクトへの候補を全て集める（招待型の実 grant + 公開型の購読合成）。
+ * `decideCrossTeamAccess()` はどちらの由来かを区別しない（`CrossTeamCandidateGrant` という
+ * 共通の形に揃えて渡すだけ）。
+ */
+export async function loadCrossTeamCandidates(input: {
+  callerMachineId: string;
+  callerUserId: string;
+  targetProjectId: string;
+  targetOwnerUserId: string;
+}): Promise<CrossTeamCandidateGrant[]> {
+  const [inviteCandidates, subscriptionCandidates] = await Promise.all([
+    loadInviteGrantCandidates(input),
+    loadSubscriptionCandidates(input),
+  ]);
+  return [...inviteCandidates, ...subscriptionCandidates];
+}
+
 export interface ResolveCrossTeamAccessInput {
   callerMachineId: string;
   callerUserId: string;
@@ -106,6 +177,7 @@ export async function resolveCrossTeamAccess(input: ResolveCrossTeamAccessInput)
       callerMachineId: input.callerMachineId,
       callerUserId: input.callerUserId,
       targetProjectId: input.targetProjectId,
+      targetOwnerUserId: input.targetOwnerUserId,
     }),
     prisma.organizationMember.findUnique({
       where: { userId: input.callerUserId },
@@ -133,6 +205,67 @@ export type CrossTeamAskCandidateProject = Project & {
   machine: { id: string; name: string; displayName: string | null; status: string; userId: string };
   crossTeam: { teamId: string; grantId: string };
 };
+
+/**
+ * 公開型 Team（Phase A）: チャット経路向けに、自分の有効な購読から公開可能なプロジェクトを
+ * `projectId → { id, teamId, projectId, granteeUserId }` の Map で返す（招待型の
+ * `grantByProjectId` と同じ形に揃え、呼び出し側で同じ dedup ロジックに合流させる）。
+ * キルスイッチ OFF 時は DB を一切読まない。
+ */
+async function loadSubscriptionAskCandidateEntries(
+  callerUserId: string,
+  callerOrganizationId: string,
+): Promise<Map<string, { id: string; teamId: string; projectId: string; granteeUserId: string }>> {
+  const empty = new Map<string, { id: string; teamId: string; projectId: string; granteeUserId: string }>();
+  if (!isCrossTeamPublishEnabled(process.env.DEVRELAY_CROSS_TEAM_PUBLISH)) return empty;
+
+  const subscriptions = await prisma.teamSubscription.findMany({
+    where: { subscriberUserId: callerUserId, askAllowed: true, revokedAt: null },
+    select: { id: true, teamId: true },
+  });
+  if (subscriptions.length === 0) return empty;
+
+  const teams = await prisma.team.findMany({
+    where: { id: { in: subscriptions.map((s) => s.teamId) }, visibility: 'organization' },
+    select: {
+      id: true,
+      userId: true,
+      members: { select: { projectId: true, project: { select: { machine: { select: { userId: true } } } } } },
+    },
+  });
+  if (teams.length === 0) return empty;
+
+  // 組織境界の実行時再検証: 公開者（team.userId）が caller と同じ組織か確認
+  const ownerMemberships = await prisma.organizationMember.findMany({
+    where: { userId: { in: [...new Set(teams.map((t) => t.userId))] } },
+    select: { userId: true, organizationId: true },
+  });
+  const sameOrgOwnerIds = new Set(
+    ownerMemberships.filter((m) => m.organizationId === callerOrganizationId).map((m) => m.userId),
+  );
+
+  const subscriptionByTeamId = new Map(subscriptions.map((s) => [s.teamId, s]));
+  const result = empty;
+  for (const team of teams) {
+    if (!sameOrgOwnerIds.has(team.userId)) continue;
+    const sub = subscriptionByTeamId.get(team.id);
+    if (!sub) continue;
+    const publishable = selectPublishableMembers(
+      team.members.map((m) => ({
+        teamId: team.id,
+        teamOwnerUserId: team.userId,
+        projectId: m.projectId,
+        ownerUserId: m.project.machine.userId,
+      })),
+    );
+    for (const m of publishable) {
+      if (!result.has(m.projectId)) {
+        result.set(m.projectId, { id: `sub:${sub.id}`, teamId: team.id, projectId: m.projectId, granteeUserId: team.userId });
+      }
+    }
+  }
+  return result;
+}
 
 /**
  * チャット経路（ask コマンド、`command-handler.ts` の `resolveCrossTargetByName`）向け:
@@ -180,6 +313,17 @@ export async function listCrossTeamAskCandidateProjects(callerUserId: string): P
   const grantByProjectId = new Map(
     grants.filter((g) => sameOrgGranteeIds.has(g.granteeUserId)).map((g) => [g.projectId, g]),
   );
+
+  // 公開型 Team（Phase A）: 自分の有効な購読から公開可能なプロジェクトを同じ Map に合流させる
+  // （既に招待型の grant がある projectId は上書きしない＝招待型を優先）
+  const subscriptionCandidates = await loadSubscriptionAskCandidateEntries(
+    callerUserId,
+    callerMembership.organizationId,
+  );
+  for (const [projectId, cand] of subscriptionCandidates) {
+    if (!grantByProjectId.has(projectId)) grantByProjectId.set(projectId, cand);
+  }
+
   if (grantByProjectId.size === 0) return [];
 
   const projects = await prisma.project.findMany({
