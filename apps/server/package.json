@@ -15,7 +15,8 @@
     "db:studio": "prisma studio",
     "db:bootstrap": "prisma db push && node -e \"const{execSync}=require('child_process');const fs=require('fs');const sql=fs.readFileSync('prisma/bootstrap.sql','utf8');execSync('npx prisma db execute --stdin',{input:sql,stdio:['pipe','inherit','inherit']})\"",
     "setup:service": "./scripts/setup-service.sh",
-    "knowledge:backfill": "node dist/scripts/knowledge-backfill.js"
+    "knowledge:backfill": "node dist/scripts/knowledge-backfill.js",
+    "devin:cost-report": "node dist/scripts/devin-cost-report.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

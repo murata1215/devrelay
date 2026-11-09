@@ -218,6 +218,48 @@ export function estimateCostUsd(price: ModelPrice, tokens: UsageTokenCounts): nu
   );
 }
 
+/**
+ * Devin（ATIF 由来）の `usage` を、Devin の実請求と同じ課金区分のトークン数に変換する。
+ *
+ * 【2026-11-09 請求照合で確定】Devin の `input_tokens` は**キャッシュ読み込み分を内包した総入力**
+ * （全ターンで `cache_read_input_tokens <= input_tokens`）。旧実装は総入力を通常入力単価で数えた
+ * うえでキャッシュ読み込みを別途足していたため二重計上になり、画面の推定が請求の約 5 倍に出ていた。
+ * Devin の請求は「キャッシュに乗っていない新規入力（総入力 − キャッシュ読み込み）を全量
+ * キャッシュ書き込み単価（入力単価 × 1.25）」で計上しており、次の 2 件で 1 セント単位まで一致した:
+ * - sa-makino 2026-11-04 08:00 UTC 〜 11-09 の 20 ターン合計 $9.58（Devin CLI 請求 $9.58）
+ * - 300z0285（exuser40 機）2026-11-03 PST の 1 ターン $3.43（同日の請求増分 $3.43）
+ * Devin の請求サイクル境界は米国太平洋時間 0 時（= 08:00 UTC）。
+ *
+ * `cache_creation_input_tokens` が将来 Devin から報告された場合は、それを書き込み分として採用し、
+ * 残り（総入力 − 読み込み − 書き込み）を通常入力として扱う。
+ * @param usage `usageData.usage`（Claude 互換キー）
+ */
+export function devinUsageToTokenCounts(usage: {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}): UsageTokenCounts {
+  const input = usage.input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  const reportedCreation = usage.cache_creation_input_tokens ?? 0;
+  const fresh = Math.max(input - cacheRead, 0);
+  if (reportedCreation > 0) {
+    return {
+      inputTokens: Math.max(fresh - reportedCreation, 0),
+      outputTokens: usage.output_tokens ?? 0,
+      cacheReadTokens: cacheRead,
+      cacheCreationTokens: reportedCreation,
+    };
+  }
+  return {
+    inputTokens: 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheReadTokens: cacheRead,
+    cacheCreationTokens: fresh,
+  };
+}
+
 /** コストの出所。`enterprise` は Devin Enterprise API 連携（未実装）用に予約済み */
 export type CostSource = 'sdk' | 'estimate' | 'enterprise' | 'unknown';
 
@@ -265,13 +307,9 @@ export function resolveMessageCost(usageData: AiUsageData | null | undefined): R
   if (usageData.tool === 'devin' && model) {
     const price = resolveDevinModelPrice(model);
     if (price) {
-      const usage = usageData.usage ?? {};
-      const usd = estimateCostUsd(price, {
-        inputTokens: usage.input_tokens ?? 0,
-        outputTokens: usage.output_tokens ?? 0,
-        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-        cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-      });
+      // 総入力からキャッシュ読み込みを差し引き、新規入力はキャッシュ書き込み単価で計上する
+      // （Devin 請求と一致することを実データで確認済み。`devinUsageToTokenCounts` 参照）
+      const usd = estimateCostUsd(price, devinUsageToTokenCounts(usageData.usage ?? {}));
       return { usd, source: 'estimate', model };
     }
   }

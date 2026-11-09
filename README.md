@@ -612,6 +612,7 @@ agents/windows/
 - [x] Discord-style chat layout - left-aligned messages, colored usernames, avatar images, chat display settings
 - [x] Image attachment preview - inline preview with lightbox, history image display via `/api/files/:id`
 - [x] Non-ASCII (e.g. Japanese) attachment filenames download correctly — `Content-Disposition` now sends an ASCII `filename` fallback plus RFC 5987 `filename*=UTF-8''…` (previously Node.js rejected the raw header with `ERR_INVALID_CHAR` → HTTP 500)
+- [x] Devin cost estimate matches Devin's actual billing — `input_tokens` from Devin already includes cache reads, so the estimate now bills `(input − cacheRead)` at the cache-write rate (input × 1.25) instead of double-counting (previously ~5× too high; verified to the cent against Devin's per-user CLI billing). Added a read-only reconciliation CLI `node apps/server/dist/scripts/devin-cost-report.js --from YYYY-MM-DD --to YYYY-MM-DD [--daily]` that aggregates per machine on Devin's billing-day boundary (US Pacific midnight)
 - [x] Testflight command - automated service creation
 - [x] Agent Doc Folder - file sync from DocPanel to agent local filesystem (`~/.devrelay/docs/`) via WebSocket
 - [x] Resume startup timeout - auto-retry without `--resume` when Claude Code hangs on stale sessions

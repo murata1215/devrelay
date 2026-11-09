@@ -2568,6 +2568,11 @@ closed` で全滅する（Read/読み取り専用 Bash だけ動く）不具合�
    Devin モデルにも初期値として適用した。**Anthropic 公式のドキュメントで裏付けたものではなく
    1サンプルからの逆算**であり、UI では推定値であることを明示する
    （`~$0.42` のようにチルダを付ける）。より正確な値が判明したら差し替えること。
+   **【2026-11-09 追記】Devin の請求照合で確定**: Devin の `input_tokens` はキャッシュ読み込みを
+   内包する総入力であり、Devin は「総入力 − 読み込み」を全量 cache-write 単価（入力単価 × 1.25）で
+   課金している（`devinUsageToTokenCounts()`。sa-makino $9.58・300z0285 $3.43 の 2 件で 1 セント一致）。
+   Devin 行で `input_tokens` をそのまま通常入力単価に掛けてはいけない（二重計上で約 5 倍になる）。
+   Devin の請求サイクル・日付の境界は米国太平洋時間 0 時。照合は `devin-cost-report` CLI で行う。
 6. **Devin の実額（ACU）取得は自前実装を諦め、Enterprise API 連携を将来課題として
    分離した**。ACU 取得系エンドポイント（`GET /v3/enterprise/consumption/daily` 等）は
    全て Enterprise 契約 + service user token が必要で、self-serve/Team プランでは

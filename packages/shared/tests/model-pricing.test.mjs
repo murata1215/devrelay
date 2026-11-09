@@ -15,6 +15,7 @@ import {
   resolveMessageCost,
   detectDevinModelMismatch,
   DEVIN_MODEL_TRACKING_ALIASES,
+  devinUsageToTokenCounts,
 } from '../dist/model-pricing.js';
 
 // --- 二重管理防止: description の $a/$b/$c per MTok 表記と DEVIN_MODEL_PRICING の数値一致 ---
@@ -130,6 +131,52 @@ test('estimateCostUsd: トークン数×単価（cache-write は入力単価×1.
   });
   // 2 + 10 + 0.2 + (2*1.25) = 14.7
   assert.ok(Math.abs(usd - 14.7) < 1e-9, `usd=${usd}`);
+});
+
+// --- Devin 請求照合（2026-11-09）: input_tokens はキャッシュ読み込みを内包する総入力 ---
+
+test('devinUsageToTokenCounts: 新規入力（総入力−読み込み）を書き込み分として扱い二重計上しない', () => {
+  const counts = devinUsageToTokenCounts({
+    input_tokens: 30514, output_tokens: 114, cache_read_input_tokens: 17505, cache_creation_input_tokens: 0,
+  });
+  assert.deepEqual(counts, { inputTokens: 0, outputTokens: 114, cacheReadTokens: 17505, cacheCreationTokens: 13009 });
+});
+
+test('devinUsageToTokenCounts: 書き込み分が報告されたらそれを採用し残りを通常入力にする', () => {
+  const counts = devinUsageToTokenCounts({
+    input_tokens: 1000, output_tokens: 10, cache_read_input_tokens: 600, cache_creation_input_tokens: 300,
+  });
+  assert.deepEqual(counts, { inputTokens: 100, outputTokens: 10, cacheReadTokens: 600, cacheCreationTokens: 300 });
+});
+
+test('devinUsageToTokenCounts: 読み込みが総入力を超える異常値でも負にならない', () => {
+  const counts = devinUsageToTokenCounts({ input_tokens: 10, cache_read_input_tokens: 50 });
+  assert.equal(counts.cacheCreationTokens, 0);
+  assert.equal(counts.inputTokens, 0);
+});
+
+const devinRow = ([i, c, o]) => ({
+  model: 'claude-opus-5-5-medium',
+  tool: 'devin',
+  usage: { input_tokens: i, cache_read_input_tokens: c, output_tokens: o, cache_creation_input_tokens: 0 },
+});
+
+test('resolveMessageCost: Devin 実請求と一致する（sa-makino 2026-11-04 08:00 UTC〜 の 20 ターン = $9.58）', () => {
+  // 実 DB から採取（[input, cacheRead, output]）。Devin 管理画面 CLI 請求 sa-makino $9.58 と照合済み。
+  const rows = [
+    [85999, 62482, 2034], [21210, 0, 816], [386544, 348445, 9796], [351525, 315636, 4777],
+    [371292, 320855, 6730], [231685, 188782, 3967], [2682436, 2546378, 28301], [832565, 741727, 8452],
+    [896759, 830520, 18656], [482493, 439263, 6685], [918432, 862738, 6750], [1904268, 1830916, 15453],
+    [23372, 17505, 1906], [204953, 196227, 2750], [262448, 216182, 4796], [897836, 839765, 8394],
+    [162269, 139160, 4194], [385510, 321355, 12815], [60894, 46971, 1264], [30514, 17505, 114],
+  ];
+  const total = rows.reduce((sum, r) => sum + resolveMessageCost(devinRow(r)).usd, 0);
+  assert.equal(Math.round(total * 100) / 100, 9.58, `total=${total}`);
+});
+
+test('resolveMessageCost: Devin 実請求と一致する（300z0285 2026-11-03 PST の 1 ターン = $3.43）', () => {
+  const usd = resolveMessageCost(devinRow([2859393, 2354561, 21721])).usd;
+  assert.equal(Math.round(usd * 100) / 100, 3.43, `usd=${usd}`);
 });
 
 // --- resolveMessageCost: 優先順位（sdk > estimate > unknown） ---

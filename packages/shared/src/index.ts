@@ -68,6 +68,7 @@ export {
   resolveDevinModelPrice,
   type UsageTokenCounts,
   estimateCostUsd,
+  devinUsageToTokenCounts,
   type CostSource,
   type ResolvedMessageCost,
   resolveMessageCost,

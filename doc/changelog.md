@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+### Devin の推定コストを実請求に一致させ、照合用集計 CLI を追加 (2026-11-09)
+
+Devin の `input_tokens` はキャッシュ読み込みを内包する総入力なのに、`resolveMessageCost()` は総入力を通常入力単価で数えたうえで読み込みを別途足しており、画面の推定が請求の約 5 倍に出ていた。
+Devin 管理画面の CLI 請求（ユーザー別 CSV）と照合し、請求式を確定した:
+`(総入力 − キャッシュ読み込み) × 入力単価 × 1.25 ＋ 読み込み × 読み込み単価 ＋ 出力 × 出力単価`、請求サイクル境界は米国太平洋時間 0 時。
+
+- `packages/shared/src/model-pricing.ts`: `devinUsageToTokenCounts()` を追加し、Devin 分岐で使用（`cache_creation_input_tokens` が報告されたらそれを優先）。表示時計算なので過去行にも遡及、各機 `u` 不要
+- 照合結果: sa-makino 11/4〜 の 20 ターン $9.58（請求 $9.58）、300z0285 の 11/3 の 1 ターン $3.43（請求増分 $3.43）。この 2 件を `model-pricing.test.mjs` に実データ固定テストとして追加
+- `apps/server/src/scripts/devin-cost-report.ts`（`pnpm --filter server devin:cost-report`）: 読み取り専用。マシン別（`--daily` で日別）に CSV 出力し、Devin の CSV エクスポートと並べて照合する
+- 未解明（今後データで検証）: 10 月サイクルは同式でも請求が約 2 倍、miyazawa 機は計算が請求の約 3 倍
+
 ### 日本語ファイル名の添付がダウンロードできない不具合を修正 (2026-10-31)
 
 `GET /api/files/:id` が `Content-Disposition: inline; filename="社内….docx"` を日本語のまま返しており、Node.js の `ERR_INVALID_CHAR` で 500 → ブラウザが「ダウンロードできませんでした」になっていた。
