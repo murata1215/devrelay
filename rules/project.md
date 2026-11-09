@@ -1577,6 +1577,30 @@ AND）。新設 6 ルート（`PATCH /api/teams/:teamId/visibility`、`GET /api/
 `POST/DELETE /api/teams/:teamId/subscribe`、`GET /api/teams/:teamId/subscribers`、
 `DELETE /api/teams/:teamId/subscribers/:userId`）。
 
+### 公開型クロスユーザー Team Phase B（WebUI: 操作画面、2026-11-08）
+
+Phase A の実機検証がブラウザコンソールに JS を貼る必要があり実用的でなかったため、
+ユーザー要望を受けて操作画面を実装。詳細は
+`doc/devlog/2026-11-08_cross_team_publish_phase_b.md`。
+
+**UX の肝**: サーバー側の又貸し防止（`selectPublishableMembers()`）の実態をユーザーに
+見せる。チームの公開ボタンを押すと、確認ダイアログで「公開されるプロジェクト N 件」
+「他ユーザーから借りている M 件は公開されません（又貸しになるため）」を明示する
+（`cross-team-publish-rules.ts` の `buildPublishConfirmMessage()`）。借りているプロジェクト
+が無いチームでは除外の注記を省略する。文言生成を純関数に集約したのは、前サイクル
+（招待型の「公開を停止」確認文言が他チーム経由の grant が残るのに断言してしまった事故）
+の教訓を踏まえた判断。
+
+**見つけた退行の種**: 招待型の `fetchCrossTeamData` は 3 本の API を 1 つの try/catch で
+囲んでおり、ここに公開型の `/teams/published` を混ぜると公開キルスイッチだけ OFF の
+環境で招待 UI まで巻き込んで消える退行になることが実装前に判明。公開系データ取得は
+独立した関数・独立した try/catch・独立した state にして分離した。
+
+サーバー側の変更は最小限（`GET /api/teams` に ON のときだけ `visibility`/
+`subscriberCount` を追加。OFF 時はキーごと省略）。**Phase A の 6 ルート・認可まわり
+（`cross-team-guard.ts` / `cross-team-publish.ts` / `cross-team-authz.ts`）は一切変更
+していない。**
+
 ### API 構成
 - **WebUI 向け**: `GET/POST/DELETE /api/teams`、`POST/DELETE /api/teams/:teamId/members`
 - **Agent 向け**: `GET /api/agent/members`（チームメイト一覧）、`POST /api/agent/ask-member`（質問送信）、`POST /api/agent/teamexec-member`（実行依頼送信）

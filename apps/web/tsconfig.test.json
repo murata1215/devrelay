@@ -36,6 +36,7 @@
     "src/lib/conversation-rail-rules.ts",
     "src/lib/push-device-rules.ts",
     "src/lib/markdown-rules.ts",
-    "src/lib/cross-team-invite-rules.ts"
+    "src/lib/cross-team-invite-rules.ts",
+    "src/lib/cross-team-publish-rules.ts"
   ]
 }

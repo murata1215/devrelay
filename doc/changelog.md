@@ -6,6 +6,62 @@
 
 ## 実装済み機能
 
+### 公開型クロスユーザー Team Phase B（WebUI: 操作画面） (2026-11-08)
+
+Phase A（サーバー + 認可）の実機検証がブラウザコンソールに JS を貼る必要があり実用的で
+なかったため、「操作する画面を用意してほしい」というユーザー要望を受けて WebUI を実装。
+コンソールを一切使わず、画面だけで公開 → 購読 → ask → 取り消しが回せるようにした。
+
+#### UX の肝: 又貸し防止を画面に見せる
+サーバー側の又貸し防止（`selectPublishableMembers()`）は Phase A で実装済みだったが、
+その実態が UI 操作時に見えなかった。チームの公開ボタンを押すと、何が公開され何が
+除外されるかを確認ダイアログで明示する:
+
+> チーム「pixterm」を組織に公開しますか？
+> 公開されるプロジェクト: 2 件（あなたが所有するもの）
+> 他ユーザーから借りている 3 件は公開されません（又貸しになるため）
+> 同じ組織のメンバーが購読すると、あなたの契約で AI が実行されます。
+
+借りているプロジェクトが無いチームでは除外の注記を出さない（無関係な注記で混乱させない）。
+確認ダイアログの文言生成は新規 `cross-team-publish-rules.ts`（外部 import ゼロの純関数）
+に集約し、テストで固定した。前サイクル（招待型の「公開を停止」確認文言）で他チーム経由の
+grant が残るのに断言してしまう事故を起こしたことの教訓を踏まえた設計。
+
+#### 退行の作り込みを未然に防いだ点
+実装中に見つけた落とし穴: 既存 `fetchCrossTeamData` は招待型の 3 本の API を 1 つの
+try/catch で囲っており、ここに公開型の `/teams/published` を混ぜると**公開キルスイッチ
+OFF の環境で招待 UI まで巻き込んで非表示になる退行**になることが分かった。
+公開系データ取得（`fetchPublishedTeams`）は独立した関数・独立した try/catch・独立した
+state（`crossTeamPublishEnabled`）にして、キルスイッチの効き方が互いに干渉しないように
+した。
+
+#### 実装内容
+- `GET /api/teams` に公開キルスイッチ ON のときだけ `visibility` / `subscriberCount` を
+  追加（OFF 時はキーごと省略し旧レスポンスと構造的に同一を維持。購読者数の集計クエリも
+  ON のときだけ実行し、既定状態での負荷ゼロを保つ）
+- チームヘッダーに公開トグル（`🔒 非公開` ⇄ `🌐 公開中 (N)`）。公開中のボタンを押すと
+  購読者一覧が展開し、各行に強制取消、下部に「公開を停止」
+- 新セクション「組織で公開中のチーム」（他ユーザーが公開したチームを一覧表示、
+  `購読する` / `購読中 + 解除`）
+- 公開対象の件数（公開可能 / 又貸しで除外）は既存の `GET /api/teams` のレスポンスが
+  既に `crossUser` フラグで区別しているため、クライアント側に追加のクエリは不要
+  （`team.members.filter(m => !m.crossUser)` / `filter(m => m.crossUser)` で算出）
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 944/944（新規 13 ケース含む非退行）、`apps/server` の
+`node --test` 1495/1495（新規 2 ケース含む非退行）。
+
+#### 変更ファイル
+新規 `apps/web/src/lib/cross-team-publish-rules.ts`、
+`apps/web/tests/cross-team-publish-rules.test.mjs`。既存
+`apps/web/tsconfig.test.json`（include 追加）、`apps/web/src/lib/api.ts`（型 2 つ +
+`TeamInfo` 拡張 + 6 メソッド）、`apps/web/src/pages/TeamPage.tsx`（公開トグル・
+購読者一覧・新セクション）、`apps/server/src/routes/api.ts`（`GET /api/teams` に
+条件付きフィールド追加）、`apps/server/tests/cross-team-api-wiring.test.mjs`。
+**Phase A の 6 ルート・認可まわり（`cross-team-guard.ts` / `cross-team-publish.ts` /
+`cross-team-authz.ts`）は一切変更していない。** DB スキーマ変更なし・新規キルスイッチなし
+（既存 `DEVRELAY_CROSS_TEAM_PUBLISH` の配下）。
+
 ### 公開型クロスユーザー Team Phase A（サーバー + 認可のみ。WebUI は Phase B 未実装） (2026-11-08)
 
 招待型（Phase 1）に続く公開型 — 「特定ユーザーがチームを公開設定し、同一組織の利用者が

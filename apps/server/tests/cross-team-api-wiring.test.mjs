@@ -205,6 +205,25 @@ describe('routes/api.ts: 公開型 Team（Phase A）の新ルート一式が両�
     const unsubscribeIdx = source.indexOf(`action: 'unsubscribed'`);
     assert.match(source.slice(unsubscribeIdx - 50, unsubscribeIdx + 100), /allowSelfAudit:\s*true/);
   });
+
+  test('GET /api/teams は visibility/subscriberCount を publishEnabled の条件スプレッド内でのみ返す（OFF 時は旧レスポンスと構造的に同一）', () => {
+    const idx = source.indexOf(`app.get('/api/teams'`);
+    assert.ok(idx > 0);
+    const body = source.slice(idx, idx + 2300);
+    assert.match(body, /const publishEnabled = publishFeatureEnabled\(\)/);
+    // visibility/subscriberCount が `...(publishEnabled ? { ... } : {})` の中にあること
+    const spreadIdx = body.indexOf('...(publishEnabled ?');
+    assert.ok(spreadIdx > 0, 'publishEnabled の条件スプレッドが見つからない');
+    const spreadBody = body.slice(spreadIdx, spreadIdx + 150);
+    assert.match(spreadBody, /visibility:\s*t\.visibility/);
+    assert.match(spreadBody, /subscriberCount:/);
+  });
+
+  test('GET /api/teams は publishEnabled が false のとき TeamSubscription の集計クエリを実行しない（既定状態での負荷ゼロ）', () => {
+    const idx = source.indexOf(`app.get('/api/teams'`);
+    const body = source.slice(idx, idx + 2300);
+    assert.match(body, /if \(publishEnabled && teams\.length > 0\)/);
+  });
 });
 
 describe('routes/document-api.ts: checkCrossTargetAllowed のオブジェクト引数シグネチャに移行済み', () => {

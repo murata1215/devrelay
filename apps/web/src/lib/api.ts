@@ -819,6 +819,10 @@ export interface TeamInfo {
   id: string;
   name: string;
   createdAt: string;
+  // 公開型 Team（Phase B）: DEVRELAY_CROSS_TEAM_PUBLISH が OFF の環境では一切付与されない
+  // （既存レスポンスと構造的に同一）。付与時は 'private' | 'organization'。
+  visibility?: 'private' | 'organization';
+  subscriberCount?: number;
   members: TeamMemberInfo[];
 }
 
@@ -862,6 +866,23 @@ export interface CrossTeamShare {
   machineName: string;
   askAllowed: boolean;
   execAllowed: boolean;
+  createdAt: string;
+}
+
+/** 公開型 Team（Phase B）: `GET /api/teams/published` の 1 件 */
+export interface PublishedTeam {
+  teamId: string;
+  teamName: string;
+  publisherName: string;
+  /** 公開可能メンバーの件数（又貸し防止で絞り込んだ後の件数。プロジェクト名は含まない） */
+  projectCount: number;
+  subscribed: boolean;
+}
+
+/** 公開型 Team（Phase B）: `GET /api/teams/:teamId/subscribers` の 1 件 */
+export interface TeamSubscriber {
+  userId: string;
+  name: string;
   createdAt: string;
 }
 
@@ -932,6 +953,39 @@ export const teams = {
   /** 自分が公開している（grantee 側の）プロジェクト一覧（「誰に何を公開しているか」の確認用） */
   async sharedByMe(): Promise<{ shares: CrossTeamShare[] }> {
     return request('GET', '/teams/shared-by-me');
+  },
+
+  // --- 公開型 Team（Phase B: WebUI）。DEVRELAY_CROSS_TEAM_PUBLISH が OFF の環境では
+  // サーバー側が全て 404 を返すため、呼び出し側（TeamPage.tsx）は 404 を「機能無効」として扱う ---
+
+  /** チームの公開設定を変更する（Team オーナーのみ） */
+  async setVisibility(teamId: string, visibility: 'private' | 'organization'): Promise<{ visibility: string; publishableCount: number }> {
+    return request('PATCH', `/teams/${teamId}/visibility`, { visibility });
+  },
+
+  /** 同一組織内で公開されているチーム一覧（自分が所有するチームは除く） */
+  async listPublished(): Promise<{ teams: PublishedTeam[] }> {
+    return request('GET', '/teams/published');
+  },
+
+  /** チームを購読する */
+  async subscribe(teamId: string): Promise<{ subscriptionId: string }> {
+    return request('POST', `/teams/${teamId}/subscribe`);
+  },
+
+  /** 自分の購読を解除する */
+  async unsubscribe(teamId: string): Promise<void> {
+    await request('DELETE', `/teams/${teamId}/subscribe`);
+  },
+
+  /** 購読者一覧（Team オーナーのみ） */
+  async listSubscribers(teamId: string): Promise<{ subscribers: TeamSubscriber[] }> {
+    return request('GET', `/teams/${teamId}/subscribers`);
+  },
+
+  /** Team オーナーが特定の購読者を強制的に取り消す */
+  async removeSubscriber(teamId: string, userId: string): Promise<void> {
+    await request('DELETE', `/teams/${teamId}/subscribers/${userId}`);
   },
 };
 

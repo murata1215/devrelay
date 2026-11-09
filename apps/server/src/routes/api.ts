@@ -2846,11 +2846,30 @@ export async function apiRoutes(app: FastifyInstance) {
       return u?.name ?? maskEmailForDisplay(u?.email ?? null) ?? ownerId;
     };
 
+    // 公開型 Team（Phase B）: キルスイッチ OFF 時はこのクエリ自体を実行しない
+    // （既定状態での負荷ゼロを維持。publishFeatureEnabled() は DEVRELAY_CROSS_TEAM と
+    // DEVRELAY_CROSS_TEAM_PUBLISH の AND）。ON のときだけ visibility/subscriberCount を
+    // レスポンスに足す（OFF 時はキーごと省略し旧レスポンスと構造的に同一を保つ）。
+    const publishEnabled = publishFeatureEnabled();
+    const subscriberCountByTeamId = new Map<string, number>();
+    if (publishEnabled && teams.length > 0) {
+      const counts = await prisma.teamSubscription.groupBy({
+        by: ['teamId'],
+        where: { teamId: { in: teams.map(t => t.id) }, revokedAt: null },
+        _count: true,
+      });
+      for (const c of counts) subscriberCountByTeamId.set(c.teamId, c._count);
+    }
+
     return reply.send({
       teams: teams.map(t => ({
         id: t.id,
         name: t.name,
         createdAt: t.createdAt,
+        ...(publishEnabled ? {
+          visibility: t.visibility,
+          subscriberCount: subscriberCountByTeamId.get(t.id) ?? 0,
+        } : {}),
         members: t.members.map(m => {
           const isCrossUser = m.project.machine.userId !== userId;
           return {
