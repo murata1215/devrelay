@@ -22,6 +22,7 @@ import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-rea
 import { resolveBackgroundTaskConfig, createBackgroundTaskState, observeBackgroundTaskEvent, decideResultDeferral } from './sdk-background-tasks.js';
 import { buildSdkPromptStream } from './sdk-prompt-stream.js';
 import { decideResume, type ResumeSource } from './resume-priority.js';
+import { isEphemeralSession } from './session-scope.js';
 import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
 // サイクル SDK-1 コミット①: resolveSystemClaude() は claude-path.ts（linux と byte-identical な最小モジュール）へ移設し、
 // ここでは re-export のみ行う（claude-auth.ts の既存 import 経路を維持するため）。
@@ -584,8 +585,12 @@ export async function startAiSession(
   onOutput: OutputCallback
 ): Promise<void> {
   // 新しい会話（Claude Code インスタンス）開始時に「以降すべて許可」モードをリセット
-  // 前の会話で approveAllMode が有効でも、新会話では改めて承認を要求する
-  resetApproveAllMode();
+  // 前の会話で approveAllMode が有効でも、新会話では改めて承認を要求する。
+  // サイクルG（G-8）: 一時セッションではこの機体グローバル状態に触らない
+  // （一時セッションの開始が対話セッションの「以降すべて許可」を消す既存バグの根治）。
+  if (!isEphemeralSession(sessionId)) {
+    resetApproveAllMode();
+  }
 
   // Check if session already exists
   if (activeSessions.has(sessionId)) {
@@ -689,7 +694,13 @@ function matchesToolRule(rule: string, toolName: string, input: Record<string, u
   return false;
 }
 
-function isToolSessionApproved(toolName: string, input: Record<string, unknown>): boolean {
+/**
+ * サイクルG（G-8）: 一時セッション（ask-member/teamexec-member 等）は機体プロセス全体の
+ * 「📌 常に許可」状態を読んではならない（他人・他プロジェクトの一時的な質問 1 通が
+ * 対話セッションの許可ルールを継承して自動承認されてしまう既存バグの根治）。
+ */
+function isToolSessionApproved(sessionId: string, toolName: string, input: Record<string, unknown>): boolean {
+  if (isEphemeralSession(sessionId)) return false;
   if (sessionApprovedTools.size === 0) return false;
   for (const rule of sessionApprovedTools) {
     if (matchesToolRule(rule, toolName, input)) return true;
@@ -710,8 +721,12 @@ function isAllowedByRules(rules: string[] | undefined, toolName: string, input: 
   return false;
 }
 
-/** 「以降すべて許可」モードかどうかを確認する（canUseTool コールバック内で使用） */
-export function isApproveAllMode(): boolean {
+/**
+ * 「以降すべて許可」モードかどうかを確認する（canUseTool コールバック内で使用）。
+ * サイクルG（G-8）: 一時セッションには常に false を返す（上記 `isToolSessionApproved` と同じ理由）。
+ */
+export function isApproveAllMode(sessionId: string): boolean {
+  if (isEphemeralSession(sessionId)) return false;
   return approveAllMode;
 }
 
@@ -723,12 +738,17 @@ export function resetApproveAllMode(): void {
 
 /**
  * 保留中のツール承認リクエストを管理する Map
- * requestId → { resolve, reject, input }
+ * requestId → { resolve, reject, input, sessionId }
+ *
+ * サイクルG（G-8）: `sessionId` を追加（ToolApprovalResponsePayload 自体には乗らないため、
+ * 要求時にここへ記録しておき、応答が来たときに「以降すべて許可」を立ててよいセッションか
+ * 判定する）。
  */
 const pendingToolApprovals = new Map<string, {
   resolve: (value: PermissionResult) => void;
   reject: (reason: Error) => void;
   input: Record<string, unknown>;
+  sessionId: string;
 }>();
 
 /**
@@ -744,13 +764,16 @@ export function resolveToolApproval(requestId: string, response: ToolApprovalRes
   pendingToolApprovals.delete(requestId);
 
   // 「以降すべて許可」フラグを設定
-  if (response.approveAll) {
+  // サイクルG（G-8）: 一時セッション（ask-member/teamexec-member 等）からの応答では
+  // 機体プロセス全体の「以降すべて許可」を立てない（他人・他プロジェクトの質問 1 通が
+  // 対話セッションへグローバルに影響する既存バグの根治）。
+  if (response.approveAll && !isEphemeralSession(pending.sessionId)) {
     approveAllMode = true;
     console.log(`🔓 Approve-all mode activated (all subsequent tools will be auto-approved)`);
   }
 
-  // 「📌 常に許可」ルールをセッション許可ツールに追加
-  if (response.alwaysAllowRule) {
+  // 「📌 常に許可」ルールをセッション許可ツールに追加（同上の理由で一時セッションでは追加しない）
+  if (response.alwaysAllowRule && !isEphemeralSession(pending.sessionId)) {
     sessionApprovedTools.add(response.alwaysAllowRule);
     console.log(`📌 Session-approved tool rule added: "${response.alwaysAllowRule}" (total: ${sessionApprovedTools.size})`);
   }
@@ -874,8 +897,18 @@ export interface SendPromptOptions {
    * #348: projectPath 上の永続状態（claude-session-id / context-usage）を書き込むかどうか。
    * 既定 true（従来どおり）。一時セッション（ask-member/teamexec-member/askDesc）は
    * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
+   * サイクルG（G-5）: Codex/Devin のセッション ID・モデル・ATIF オフセット・パーミッションモードの
+   * 保存・削除も本フィールドでガードする（従来は未ガードで、一時セッションが所有者の
+   * Codex/Devin 状態を上書き・削除していた既存バグ）。
    */
   persistProjectState?: boolean;
+  /**
+   * サイクルG（G-5b）: Codex/Devin のセッション ID 等の**読み出し**を許可するか。
+   * 既定 true（従来どおり。未指定時は `options.projectStateRead !== false` で判定するため
+   * 既存の呼び出し元は変更不要）。isolated（クロスユーザー ask）のときだけ false になり、
+   * 所有者の Codex/Devin 会話を resume して覗けないようにする。
+   */
+  projectStateRead?: boolean;
   /** MCP 経由の新規 submit: 前回セッションの resume をスキップ */
   forceNewSession?: boolean;
   /**
@@ -1078,7 +1111,7 @@ async function sendPromptToAiSdk(
           });
 
           return new Promise<PermissionResult>((resolve, reject) => {
-            pendingToolApprovals.set(requestId, { resolve, reject, input });
+            pendingToolApprovals.set(requestId, { resolve, reject, input, sessionId });
 
             if (opts.signal.aborted) {
               pendingToolApprovals.delete(requestId);
@@ -1158,14 +1191,16 @@ async function sendPromptToAiSdk(
         // AskUserQuestion は常にユーザーに聞く（approveAllMode や自動承認をスキップ）
         if (!isQuestion) {
           // セッション内で「📌 常に許可」されたツールルールにマッチする場合は即座に allow
-          if (isToolSessionApproved(toolName, input)) {
+          if (isToolSessionApproved(sessionId, toolName, input)) {
             console.log(`📌 [SDK] Auto-approved (session tool rule): ${toolName}`);
             options.onAutoApproved?.({ toolName, toolInput: input });
             return { behavior: 'allow', updatedInput: input };
           }
 
           // 「以降すべて許可」モードなら即座に allow + 通知送信
-          if (approveAllMode) {
+          // サイクルG（G-8）: 一時セッションはこの module-level 変数を直接見ず、
+          // isEphemeralSession で常に false になる経路（isApproveAllMode 相当）を通す。
+          if (!isEphemeralSession(sessionId) && approveAllMode) {
             console.log(`🔓 [SDK] Auto-approved (approve-all mode): ${toolName}`);
             options.onAutoApproved?.({ toolName, toolInput: input });
             return { behavior: 'allow', updatedInput: input };
@@ -1188,7 +1223,7 @@ async function sendPromptToAiSdk(
 
         // ユーザーの応答を待つ Promise を作成
         return new Promise<PermissionResult>((resolve, reject) => {
-          pendingToolApprovals.set(requestId, { resolve, reject, input });
+          pendingToolApprovals.set(requestId, { resolve, reject, input, sessionId });
 
           // AbortSignal を監視（SDK 側からのキャンセル）
           if (opts.signal.aborted) {
@@ -1975,15 +2010,21 @@ async function sendPromptToAiImpl(
     // ATIF 読み取り時にこれを渡し「今回のターンで新たに実行されたステップ」だけに絞り込む。
     // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
     // offset<=0 は全件返しにフォールバックする二重防御）。
-    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0;
+    // サイクルG（G-5b）: isolated（クロスユーザー ask）では所有者の Devin 状態を読まない。
+    devinAtifStepOffsetAtStart = options.projectStateRead !== false
+      ? ((await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0)
+      : 0;
 
     // #368 Phase2a: Devin は常に exec 相当（dangerous）で起動する。
     const devinTurnPermissionMode: string | null = devinHasPermissionMode ? 'dangerous' : null;
 
     // 保存済み Devin セッション ID があれば -r で resume（前回と同じ権限モードのときのみ、
-    // モードが変わっていたら resume せず新規セッションで開始する）
-    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath, options.agentScopeId);
-    const devinSessionId = devinSavedPermissionMode === devinTurnPermissionMode
+    // モードが変わっていたら resume せず新規セッションで開始する）。
+    // サイクルG（G-5b）: isolated では resume 判定自体を行わず、常に新規セッションで開始する。
+    const devinSavedPermissionMode = options.projectStateRead !== false
+      ? await loadDevinPermissionMode(projectPath, options.agentScopeId)
+      : null;
+    const devinSessionId = options.projectStateRead !== false && devinSavedPermissionMode === devinTurnPermissionMode
       ? await loadDevinSessionId(projectPath, options.agentScopeId)
       : null;
     // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
@@ -2072,7 +2113,11 @@ async function sendPromptToAiImpl(
     let promptFilePath: string | null = null;
     if (devinHasPromptFile) {
       promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-      fs.writeFileSync(promptFilePath, prompt, 'utf-8');
+      // サイクルG（G-9）: 質問全文（クロスユーザー ask ではクロス ask の質問文も含む）が
+      // 他ユーザーにも読めるパーミッションで /tmp に残る既存の情報露出を根治する。
+      // writeFileSync の mode は既存ファイルには効かないため、先に unlink してから 0600 で作り直す。
+      try { fs.unlinkSync(promptFilePath); } catch {}
+      fs.writeFileSync(promptFilePath, prompt, { encoding: 'utf-8', mode: 0o600 });
       args.push('--prompt-file', promptFilePath);
     } else {
       console.error(`[devin] --prompt-file unsupported, aborting (unsafe argv fallback removed in #344)`);
@@ -2155,7 +2200,10 @@ async function sendPromptToAiImpl(
       args.push('-c', `model="${codexModel}"`);
     }
 
-    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath, options.agentScopeId) : null;
+    // サイクルG（G-5b）: isolated では所有者の Codex スレッドを resume しない。
+    const codexThreadIdToResume = caps.resume && options.projectStateRead !== false
+      ? await loadCodexSessionId(projectPath, options.agentScopeId)
+      : null;
     if (codexThreadIdToResume) {
       args.push('resume', codexThreadIdToResume);
       codexResumedThreadId = codexThreadIdToResume;
@@ -2463,9 +2511,12 @@ async function sendPromptToAiImpl(
                 codexThreadId = threadId;
                 result.extractedSessionId = threadId;
                 console.log(`[codex] 📋 Thread ID: ${threadId}`);
-                saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
-                  console.error(`Failed to save Codex session ID:`, err);
-                });
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を書かない。
+                if (options.persistProjectState !== false) {
+                  saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
+                    console.error(`Failed to save Codex session ID:`, err);
+                  });
+                }
               }
               break;
             }
@@ -2833,7 +2884,10 @@ async function sendPromptToAiImpl(
           (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence)) ||
           (fullOutput.trim().length === 0 && code === 0);
         const devinPromptTempPath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-        if (devinTurnFailed) {
+        // サイクルG（G-9）: 一時セッション（isolated/legacy とも）は失敗ターンでも調査用に
+        // 残さず必ず消す（借り手の質問文を所有者機の /tmp に残さない）。対話セッションのみ
+        // 従来どおり事後調査のために残す。
+        if (devinTurnFailed && options.persistProjectState !== false) {
           console.log(`[devin] ⚠️ Turn failed, keeping temp files for inspection: ${devinPromptTempPath}${devinExportPath ? ` / ${devinExportPath}` : ''}`);
         } else {
           try { fs.unlinkSync(devinPromptTempPath); } catch {}
@@ -2865,7 +2919,8 @@ async function sendPromptToAiImpl(
               const latest = sessions
                 .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
                 .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
-              if (latest?.id) {
+              // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない。
+              if (latest?.id && options.persistProjectState !== false) {
                 saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
                 const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
                 if (devinActualModelForSave) {
@@ -2890,23 +2945,27 @@ async function sendPromptToAiImpl(
                 },
               });
               if (pick.id) {
-                saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
                 console.log(`[devin] Session ID decided: ${pick.id} (reason=${pick.reason}, scope=${currentScopeKey})`);
-                // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
-                // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
-                // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
-                // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
-                // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
-                // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
-                const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
-                if (devinActualModelForSave) {
-                  saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない
+                // （decided ログ自体は機体ローカルの診断用途のため常に出す）。
+                if (options.persistProjectState !== false) {
+                  saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
+                  // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
+                  // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
+                  // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
+                  // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
+                  // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
+                  // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
+                  const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
+                  if (devinActualModelForSave) {
+                    saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                  }
+                  // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
+                  // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
+                  saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
+                  // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
+                  saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
                 }
-                // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
-                // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
-                // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
-                saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
               } else if (pick.reason !== 'none') {
                 // 'ambiguous'/'ownedByOtherScope': 誤った ID を固定化するより未保存のほうが安全。
                 // 次ターンは新規セッションになるが、Devin は会話履歴を常にプロンプトへ注入するため
@@ -3117,7 +3176,12 @@ async function sendPromptToAiImpl(
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を削除しない。
+        if (options.persistProjectState !== false) {
+          Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 
@@ -3127,7 +3191,12 @@ async function sendPromptToAiImpl(
       if (codexResumeEmpty) {
         console.log(`[codex] ⚠️ Resumed thread produced no output (code ${code}), clearing session ID and retrying fresh`);
         result.resumeFailed = true;
-        clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を削除しない。
+        if (options.persistProjectState !== false) {
+          clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 

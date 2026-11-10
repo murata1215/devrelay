@@ -597,6 +597,16 @@ export const chatMessages = {
     ja: '⚠️ プランターンガード: {failed} 件のファイル復元に失敗しました: {detail}',
   },
 
+  // --- サイクルG: クロスユーザー ask（別ユーザーのプロジェクトへの質問）は、読み取り専用を
+  // 権限で強制できない実効 AI（devin / gemini / claude+terminalMode）への質問を Agent 側で
+  // 開始前に拒否する（G-7: Devin の git 自動復元ガードが所有者の未コミット作業を巻き戻す事故の
+  // 根治。サーバー側の事前拒否が主防御、これは resolveEffectiveAiTool 等で実効 AI が変わった
+  // 場合の最後の砦）。同一ユーザーの ask には影響しない。 ---
+  'ask.crossUserUnsafeAiRefused': {
+    en: '❌ This question could not be answered: the destination project runs {aiTool}, which cannot be forced into read-only mode for a cross-user question. Please ask the project owner directly.',
+    ja: '❌ この質問には応答できません: 宛先プロジェクトは {aiTool} を使用しており、クロスユーザーの質問に対して読み取り専用を強制できません。プロジェクトの所有者に直接確認してください。',
+  },
+
   // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---
   'humanText.tooLong': {
     en: '❌ Instruction is too long ({rawLength} chars, limit {limit} chars). Please shorten it and try again (not truncated automatically).',

@@ -66,6 +66,7 @@ import {
   isTestflightEnabled,
 } from './testflight-manager.js';
 import { evaluateProjectOwnership } from './thread-api-guard.js';
+import { buildEphemeralSessionIdExclusion } from './thread-scope.js';
 import { runCrossProjectAsk } from './cross-ask-runner.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
@@ -531,12 +532,18 @@ export async function handleProjectConnect(
   let sessionId: string;
   let isResumed = false;
 
+  // G-12（サイクルG）: `buildEphemeralSessionIdExclusion()` で crossquery_/teamexec_/askdesc_/raw_ を
+  // 除外する。これが無いと、他ユーザーからのクロス ask で作られた実行中の `crossquery_` セッション
+  // （userId は宛先マシン所有者 = この関数の呼び出し元ユーザーと同一）を、所有者が自分のプロジェクトへ
+  // `//connect` した際に誤って「再利用対象のスレッド」として拾ってしまう（`document-api.ts:764` 等の
+  // 既存の見本と同じ理由）。
   const activeSessions = await prisma.session.findMany({
     where: {
       userId: user.id,
       projectId: project.id,
       machineId: project.machineId,
       status: 'active',
+      ...buildEphemeralSessionIdExclusion(),
     },
   });
   // スレッド管理 cycle4: `explicitSessionId`（呼び出し側が対象を確定できている場合）優先、
@@ -576,12 +583,17 @@ export async function handleProjectConnect(
     // ②判定に到達しないため、クエリ発行の有無こそ変わるが復活可否の判定結果は
     // 69bcd3e と数学的に同一（オンライン経路には副作用ゼロ）。
     let revivedSessionId: string | null = null;
+    // G-12（サイクルG）: ended 復活候補にも同じ除外を入れる。クロス ask の一時セッションは
+    // `cross-ask-runner.ts`/`document-api.ts` 側で completed/failed のたびに `ended` へ更新される
+    // ため（監査ログ用途）、除外しないと「直近アクティブだった ended」の復活候補（②）として
+    // 拾われ得る。
     const endedSessions = await prisma.session.findMany({
       where: {
         userId: user.id,
         projectId: project.id,
         machineId: project.machineId,
         status: 'ended',
+        ...buildEphemeralSessionIdExclusion(),
       },
       select: { id: true },
       // 「直近アクティブだった ended」を②の候補にするための並び。①（preferredThreadId 一致）が
@@ -2239,6 +2251,10 @@ async function handleAskMember(
   }
   if (result.kind === 'busy') {
     return `⚠️ ${result.message}`;
+  }
+  if (result.kind === 'denied') {
+    // サイクルG: 宛先 Agent 未更新 or 読み取り専用を強制できない AI のため拒否
+    return result.message;
   }
   return `❌ ${targetProject.name} への質問が失敗しました: ${result.message}`;
 }

@@ -1,5 +1,5 @@
-// 案C′（クロス ask のセッション継続）サイクルC1: 一時セッションの状態ポリシー
-// （session-scope.ts の resolveSessionStatePolicy）の単体テスト。
+// 案C′（クロス ask のセッション継続）サイクルC1 + サイクルG（既存バグ修正）: 一時セッションの
+// 状態ポリシー（session-scope.ts の resolveSessionStatePolicy）の単体テスト。
 // 外部 import ゼロの純粋関数をコンパイル済み dist から直接 import する
 // （既存の session-scope.test.mjs / scope-dir.test.mjs と同じ流儀）。
 //
@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveSessionStatePolicy } from '../dist/services/session-scope.js';
+import { resolveSessionStatePolicy, isAiToolReadOnlyEnforceable } from '../dist/services/session-scope.js';
 
 const INTERACTIVE_POLICY = {
   scopedConversation: true,
@@ -21,6 +21,10 @@ const INTERACTIVE_POLICY = {
   projectRescan: true,
   forcePlanTurn: false,
   outputDirInstruction: true,
+  projectStateRead: true,
+  approveAllState: true,
+  refuseUnsafeAiTool: false,
+  reportAiToolSubstitution: true,
 };
 
 const LEGACY_EPHEMERAL_POLICY = {
@@ -34,6 +38,10 @@ const LEGACY_EPHEMERAL_POLICY = {
   projectRescan: true,
   forcePlanTurn: false,
   outputDirInstruction: true,
+  projectStateRead: true,
+  approveAllState: false,
+  refuseUnsafeAiTool: false,
+  reportAiToolSubstitution: true,
 };
 
 const RESUMABLE_SCOPED_POLICY = {
@@ -47,6 +55,27 @@ const RESUMABLE_SCOPED_POLICY = {
   projectRescan: false,
   forcePlanTurn: true,
   outputDirInstruction: false,
+  projectStateRead: true,
+  approveAllState: false,
+  refuseUnsafeAiTool: false,
+  reportAiToolSubstitution: false,
+};
+
+const ISOLATED_POLICY = {
+  scopedConversation: false,
+  outputDirClear: false,
+  outputFileCollect: false,
+  planFile: false,
+  workState: false,
+  storageContext: false,
+  receivedFiles: false,
+  projectRescan: false,
+  forcePlanTurn: false,
+  outputDirInstruction: false,
+  projectStateRead: false,
+  approveAllState: false,
+  refuseUnsafeAiTool: true,
+  reportAiToolSubstitution: false,
 };
 
 const VALID_SCOPE_ID = 'crossask-abc123_XYZ-789';
@@ -64,14 +93,16 @@ test('resolveSessionStatePolicy: interactive は opts 省略（デフォルト�
   assert.deepEqual(policy, INTERACTIVE_POLICY);
 });
 
-test('resolveSessionStatePolicy: interactive は statePolicy/agentScopeId を渡しても常に全許可のまま（resumable 分岐より先に短絡する）', () => {
+test('resolveSessionStatePolicy: interactive は statePolicy/agentScopeId を渡しても常に全許可のまま（resumable/isolated 分岐より先に短絡する）', () => {
   // interactive 判定が最優先のため、誤ってサーバーが statePolicy を送っても
-  // 対話セッションが resumable の制限付きポリシーに縮退することは構造的に起き得ない。
-  const policy = resolveSessionStatePolicy('normal-session-id', {
-    statePolicy: 'resumable-scoped',
-    agentScopeId: VALID_SCOPE_ID,
-  });
-  assert.deepEqual(policy, INTERACTIVE_POLICY);
+  // 対話セッションが制限付きポリシーに縮退することは構造的に起き得ない。
+  for (const statePolicy of ['resumable-scoped', 'isolated']) {
+    const policy = resolveSessionStatePolicy('normal-session-id', {
+      statePolicy,
+      agentScopeId: VALID_SCOPE_ID,
+    });
+    assert.deepEqual(policy, INTERACTIVE_POLICY, `statePolicy=${statePolicy}`);
+  }
 });
 
 // --- 従来の一時セッション（statePolicy 未指定、既存の isEphemeral=true 分岐と一致） ---
@@ -98,6 +129,13 @@ test('resolveSessionStatePolicy: teamExec/askDesc/raw は statePolicy+agentScope
   }
 });
 
+test('resolveSessionStatePolicy: teamExec/askDesc/raw は statePolicy=isolated を送っても isolated にならない（crossQuery 限定）', () => {
+  for (const prefix of ['teamexec_', 'askdesc_', 'raw_']) {
+    const policy = resolveSessionStatePolicy(`${prefix}abc123`, { statePolicy: 'isolated' });
+    assert.deepEqual(policy, LEGACY_EPHEMERAL_POLICY, `prefix=${prefix} が isolated に縮退してはいけない`);
+  }
+});
+
 // --- resumable（第3区分）: crossQuery かつ statePolicy==='resumable-scoped' かつ agentScopeId 有効の3条件AND ---
 
 test('resolveSessionStatePolicy: crossQuery + statePolicy=resumable-scoped + 有効な agentScopeId → resumable', () => {
@@ -108,13 +146,14 @@ test('resolveSessionStatePolicy: crossQuery + statePolicy=resumable-scoped + 有
   assert.deepEqual(policy, RESUMABLE_SCOPED_POLICY);
 });
 
-test('resolveSessionStatePolicy: resumable では conversation 以外が全て deny（savePlanFile/clearOutputDir/workState 等への影響を固定）', () => {
+test('resolveSessionStatePolicy: resumable では conversation 系以外が全て deny（savePlanFile/clearOutputDir/workState 等への影響を固定）', () => {
   const policy = resolveSessionStatePolicy('crossquery_abc123', {
     statePolicy: 'resumable-scoped',
     agentScopeId: VALID_SCOPE_ID,
   });
   assert.equal(policy.scopedConversation, true);
   assert.equal(policy.forcePlanTurn, true);
+  assert.equal(policy.projectStateRead, true);
   assert.equal(policy.outputDirClear, false);
   assert.equal(policy.outputFileCollect, false);
   assert.equal(policy.planFile, false);
@@ -123,6 +162,9 @@ test('resolveSessionStatePolicy: resumable では conversation 以外が全て d
   assert.equal(policy.receivedFiles, false);
   assert.equal(policy.projectRescan, false);
   assert.equal(policy.outputDirInstruction, false);
+  assert.equal(policy.approveAllState, false);
+  assert.equal(policy.refuseUnsafeAiTool, false);
+  assert.equal(policy.reportAiToolSubstitution, false);
 });
 
 test('resolveSessionStatePolicy: crossQuery + agentScopeId 未指定 → statePolicy=resumable-scoped でも従来扱い', () => {
@@ -158,6 +200,46 @@ test('resolveSessionStatePolicy: agentScopeId は 128 文字まで有効（境�
   assert.deepEqual(policy, RESUMABLE_SCOPED_POLICY);
 });
 
+// --- isolated（第4区分、サイクルG）: crossQuery かつ statePolicy==='isolated'。agentScopeId は不要 ---
+
+test('resolveSessionStatePolicy: crossQuery + statePolicy=isolated → isolated（agentScopeId 不要）', () => {
+  const policy = resolveSessionStatePolicy('crossquery_abc123', { statePolicy: 'isolated' });
+  assert.deepEqual(policy, ISOLATED_POLICY);
+});
+
+test('resolveSessionStatePolicy: crossQuery + statePolicy=isolated は agentScopeId を渡しても結果が変わらない', () => {
+  const policy = resolveSessionStatePolicy('crossquery_abc123', {
+    statePolicy: 'isolated',
+    agentScopeId: VALID_SCOPE_ID,
+  });
+  assert.deepEqual(policy, ISOLATED_POLICY);
+});
+
+test('resolveSessionStatePolicy: isolated では conversation も含めて全て deny、refuseUnsafeAiTool のみ true', () => {
+  const policy = resolveSessionStatePolicy('crossquery_abc123', { statePolicy: 'isolated' });
+  assert.equal(policy.scopedConversation, false);
+  assert.equal(policy.outputDirClear, false);
+  assert.equal(policy.outputFileCollect, false);
+  assert.equal(policy.planFile, false);
+  assert.equal(policy.workState, false);
+  assert.equal(policy.storageContext, false);
+  assert.equal(policy.receivedFiles, false);
+  assert.equal(policy.projectRescan, false);
+  assert.equal(policy.forcePlanTurn, false);
+  assert.equal(policy.outputDirInstruction, false);
+  assert.equal(policy.projectStateRead, false);
+  assert.equal(policy.approveAllState, false);
+  assert.equal(policy.reportAiToolSubstitution, false);
+  assert.equal(policy.refuseUnsafeAiTool, true);
+});
+
+test('resolveSessionStatePolicy: statePolicy の大文字小文字違い・別文字列は isolated にならない', () => {
+  for (const statePolicy of ['Isolated', 'ISOLATED', 'isolated-scoped', ' isolated']) {
+    const policy = resolveSessionStatePolicy('crossquery_abc123', { statePolicy });
+    assert.deepEqual(policy, LEGACY_EPHEMERAL_POLICY, `statePolicy=${JSON.stringify(statePolicy)} は isolated にならない`);
+  }
+});
+
 // --- 戻り値の独立性（呼び出しごとに新しいオブジェクトを返す） ---
 
 test('resolveSessionStatePolicy: 戻り値は呼び出しごとに新しいオブジェクト（ミューテーションが他の呼び出しに影響しない）', () => {
@@ -165,4 +247,27 @@ test('resolveSessionStatePolicy: 戻り値は呼び出しごとに新しいオ�
   policy1.scopedConversation = false;
   const policy2 = resolveSessionStatePolicy('normal-session-id', {});
   assert.equal(policy2.scopedConversation, true, 'policy1 への変更が policy2 に漏れてはいけない');
+});
+
+// --- isAiToolReadOnlyEnforceable（サイクルG, G-7 の一般化） ---
+
+test('isAiToolReadOnlyEnforceable: claude/codex は terminalMode=false で強制可能', () => {
+  assert.equal(isAiToolReadOnlyEnforceable('claude', false), true);
+  assert.equal(isAiToolReadOnlyEnforceable('codex', false), true);
+});
+
+test('isAiToolReadOnlyEnforceable: claude + terminalMode=true は強制不可（PTY 経由では --permission-mode plan が適用されない）', () => {
+  assert.equal(isAiToolReadOnlyEnforceable('claude', true), false);
+  assert.equal(isAiToolReadOnlyEnforceable('codex', true), false);
+});
+
+test('isAiToolReadOnlyEnforceable: devin/gemini は terminalMode の値に関わらず強制不可', () => {
+  for (const terminalMode of [false, true]) {
+    assert.equal(isAiToolReadOnlyEnforceable('devin', terminalMode), false);
+    assert.equal(isAiToolReadOnlyEnforceable('gemini', terminalMode), false);
+  }
+});
+
+test('isAiToolReadOnlyEnforceable: 未知の AI ツール名は強制不可（deny-by-default）', () => {
+  assert.equal(isAiToolReadOnlyEnforceable('unknown-tool', false), false);
 });

@@ -49,6 +49,24 @@ export function isCrossTeamChatContextEnabled(raw: string | undefined): boolean 
   return raw !== '0';
 }
 
+/**
+ * サイクルG（クロス ask の既存バグ修正）: `DEVRELAY_CROSS_ASK_ISOLATION` の既定値解決
+ * （既定 ON=`!== '0'`。既存キルスイッチの多数派と同じ方向——新しい安全策は黙って ON）。
+ *
+ * `1` のとき、クロスユーザー ask（別ユーザーのプロジェクトへの質問）に対して:
+ * - サーバー側: 宛先 Agent が `'cross-ask-isolation'` capability を未申告なら ask 自体を断る
+ *   （Agent 側の隔離コードが無い旧 Agent を黙って通さない）。読み取り専用を権限で強制できない
+ *   実効 AI（devin/gemini、または claude+terminalMode）への ask も同様に断る。
+ * - Agent へは `statePolicy: 'isolated'` を送る（session-scope.ts の `resolveSessionStatePolicy()`
+ *   が解釈し、所有者プロジェクトの状態を一切読み書きしない許可リストに切り替える）。
+ *
+ * `0` にすると、Agent の隔離コードは常に通りうる旧挙動（`statePolicy` を送らない。同一ユーザー
+ * ask と見分けが付かない legacy 扱い）に戻る。同一ユーザー ask にはこのフラグは一切影響しない。
+ */
+export function isCrossAskIsolationEnabled(raw: string | undefined): boolean {
+  return raw !== '0';
+}
+
 /** 受入側を守るクロスユーザー専用のレート閾値（5 分窓）。既存の依頼者基準の閾値とは別に加算する。 */
 export const CROSS_USER_ASK_TARGET_LIMIT = 4;
 export const CROSS_USER_ASK_EXECUTOR_LIMIT = 6;

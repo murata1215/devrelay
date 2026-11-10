@@ -115,7 +115,7 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // 読み書きしないようにするための判定（層 B: Agent 側の直交化）
 // 案C′ サイクルC1: resolveSessionStatePolicy() は第3区分（resumable-scoped）の許可リストを返す
 // （サーバーが statePolicy を送らない限り isEphemeral の二値判定と完全に同じ結果になる）
-import { isEphemeralSession, resolveSessionStatePolicy } from './session-scope.js';
+import { isEphemeralSession, resolveSessionStatePolicy, isAiToolReadOnlyEnforceable } from './session-scope.js';
 import { buildDependencyProbeBlock, buildArtifactFreshnessGate, buildPnpmInstallCommand, AGENT_INSTALL_FILTER } from './update-script.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
 // サイクルP1: Capability 配布基盤（共通層への配線。connection.ts は Claude 固有処理を一切知らない）
@@ -932,6 +932,18 @@ async function handleSessionStart(
   config: AgentConfig
 ) {
   const { sessionId, projectName, projectPath, aiTool: requestedAiTool, agentScopeId } = payload;
+
+  // #348: crossquery_/teamexec_/askdesc_ は一時セッション（projectPath 上の状態を読み書きしない）。
+  // 旧 isCrossQuery（crossquery_/teamexec_ のみ）は askdesc_ を含んでいなかったが、
+  // WebUI のプロジェクト説明生成も同じ理由で一時扱いにすべきため isEphemeralSession に統一する。
+  const isEphemeral = isEphemeralSession(sessionId);
+  // 案C′ サイクルC1 + サイクルG: 一時セッションが projectPath 上の状態をどこまで読み書きしてよいか、
+  // および機体グローバル状態（approve-all）・サーバーへの報告（Project.defaultAi）を触ってよいかの
+  // 許可リスト。サーバーが statePolicy を送らない限り（isolated 未配線の経路）、
+  // isEphemeral の二値判定と完全に同じ結果になる。resolveEffectiveAiTool/resetApproveAllMode の
+  // ガードに使うため、両方より前に計算する（サイクルG: 計算順序を前倒し）。
+  const statePolicy = resolveSessionStatePolicy(sessionId, { statePolicy: payload.statePolicy, agentScopeId });
+
   // Devin 専用端末等でサーバー指定の AI が未インストールなら、実際に使えるツールへ差し替える
   const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
   if (aiTool !== requestedAiTool) {
@@ -940,22 +952,23 @@ async function handleSessionStart(
     // handleSessionAiTool() を利用）。これが無いと Session.aiTool / Project.defaultAi が
     // 要求値（例: claude）のまま残り、サーバーは要求ツール用のモデル設定を解決し続けてしまい、
     // 実際に動くツール（例: devin）へモデル未指定のまま渡ってしまう（組織 AI デフォルト無視事故）。
-    sendMessage({
-      type: 'agent:session:aiTool',
-      payload: { machineId: config.machineId, sessionId, aiTool },
-    });
+    // サイクルG: isolated（クロスユーザー ask）では報告しない — 他人の質問 1 通で所有者の
+    // Project.defaultAi が書き換わる既存バグ（`handleSessionAiTool` 参照）を再発させないため。
+    if (statePolicy.reportAiToolSubstitution) {
+      sendMessage({
+        type: 'agent:session:aiTool',
+        payload: { machineId: config.machineId, sessionId, aiTool },
+      });
+    }
   }
 
-  // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）
-  resetApproveAllMode();
+  // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）。
+  // サイクルG（G-8）: 一時セッション全般（legacy/isolated とも）ではこの機体グローバル状態に
+  // 触らない（一時セッションの開始/終了が対話セッションの「以降すべて許可」を消す既存バグの根治）。
+  if (statePolicy.approveAllState) {
+    resetApproveAllMode();
+  }
 
-  // #348: crossquery_/teamexec_/askdesc_ は一時セッション（projectPath 上の状態を読み書きしない）。
-  // 旧 isCrossQuery（crossquery_/teamexec_ のみ）は askdesc_ を含んでいなかったが、
-  // WebUI のプロジェクト説明生成も同じ理由で一時扱いにすべきため isEphemeralSession に統一する。
-  const isEphemeral = isEphemeralSession(sessionId);
-  // 案C′ サイクルC1: 一時セッションが projectPath 上の状態をどこまで読み書きしてよいかの許可リスト。
-  // サーバーが statePolicy を送らない限り（現時点の全経路）、isEphemeral の二値判定と完全に同じ結果になる。
-  const statePolicy = resolveSessionStatePolicy(sessionId, { statePolicy: payload.statePolicy, agentScopeId });
   const crossLabel = sessionId.startsWith('teamexec_') ? 'TEAM-EXEC' : sessionId.startsWith('askdesc_') ? 'ASK-DESC' : 'CROSS-QUERY';
   console.log(`🚀 Starting session: ${sessionId}${isEphemeral ? ` [${crossLabel}]` : ''}`);
   console.log(`   Project: ${projectName} (${projectPath})`);
@@ -980,11 +993,10 @@ async function handleSessionStart(
   // 呼ばれて所有者の auto-continue が消費されてしまう（ask は何度でも繰り返せるため、
   // 最初の ask で auto-continue が「使われた」ことになり、対話セッション側で本来
   // 続くはずだった work state が失われる）。
-  // 案C′: resumable でも workState は常に false（statePolicy.workState と isEphemeral は常に同値。
-  // RESUMABLE_SCOPED_STATE_POLICY.workState も false のため）。既存の静的ガード
-  // （apps/server/tests/cross-team-chat-wiring.test.mjs）が isEphemeral による排他を直接検証しているため、
-  // ここは意図的に isEphemeral のまま変更しない。
-  const pendingWorkState = isEphemeral ? null : await loadWorkState(projectPath);
+  // サイクルG（Q5）: 静的ガード（apps/server/tests/cross-team-chat-wiring.test.mjs）も
+  // statePolicy.workState の判定へ更新したため、`isEphemeral` 直書きから切り替える
+  // （legacy/resumable/isolated は全て workState:false のため挙動は不変）。
+  const pendingWorkState = statePolicy.workState ? await loadWorkState(projectPath) : null;
   if (pendingWorkState) {
     console.log(`📂 Found pending work state: ${pendingWorkState.summary}`);
   }
@@ -1160,8 +1172,17 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
-  // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット
-  resetApproveAllMode();
+  // #348: 一時セッションは exec マーカーも projectPath 上のファイルに書かない
+  // （対話セッションと conversation.json を共有しているため、書くと相互汚染する）
+  const isEphemeral = isEphemeralSession(sessionId);
+
+  // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット。
+  // サイクルG（G-8）: 一時セッション（teamexec_ 等）ではこの機体グローバル状態に触らない
+  // （teamexec の exec 1 回が対話セッションの「以降すべて許可」を消す既存バグの根治。
+  // cross ask は本関数自体を呼ばないため isolated はここに到達しない）。
+  if (!isEphemeral) {
+    resetApproveAllMode();
+  }
 
   // exec 開始時に skipPermissions / disableAsk を同期（server:config:update 配信失敗のフォールバック）
   if (payload.skipPermissions !== undefined) {
@@ -1172,10 +1193,6 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     serverDisableAsk = payload.disableAsk;
     console.log(`🚫 Disable AskUserQuestion synced on exec: ${serverDisableAsk}`);
   }
-
-  // #348: 一時セッションは exec マーカーも projectPath 上のファイルに書かない
-  // （対話セッションと conversation.json を共有しているため、書くと相互汚染する）
-  const isEphemeral = isEphemeralSession(sessionId);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
 
@@ -1365,9 +1382,29 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     agentScopeId: sessionInfo.agentScopeId,
   });
 
+  // サイクルG（G-7 の一般化）: isolated（クロスユーザー ask）は、読み取り専用を権限で
+  // 強制できない実効 AI（devin / gemini、または claude+terminalMode）への質問を AI を一切
+  // 起動せずに拒否する。サーバー側（cross-ask-runner.ts/document-api.ts）の事前拒否が主防御、
+  // これは resolveEffectiveAiTool 等で実効 AI が変わった場合の最後の砦のため、
+  // statePolicy 解決の直後・他の一時セッション副作用（saveReceivedFiles 以降）より前に置く。
+  if (statePolicy.refuseUnsafeAiTool && !isAiToolReadOnlyEnforceable(sessionInfo.aiTool, !!sessionInfo.terminalMode)) {
+    console.log(`🚫 [isolated] Refusing cross-user ask: aiTool=${sessionInfo.aiTool} terminalMode=${!!sessionInfo.terminalMode} is not read-only enforceable`);
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig.machineId,
+        sessionId,
+        output: tChat(payload.language ?? DEFAULT_CHAT_LANGUAGE, 'ask.crossUserUnsafeAiRefused', { aiTool: sessionInfo.aiTool }),
+        isComplete: true,
+      },
+    });
+    return;
+  }
+
   // Save received files and get their paths
+  // サイクルG（G-4 相当）: isolated では所有者プロジェクトへの添付保存を一切行わない。
   let promptWithFiles = prompt;
-  if (files && files.length > 0) {
+  if (statePolicy.receivedFiles && files && files.length > 0) {
     const savedPaths = await saveReceivedFiles(sessionInfo.projectPath, files);
     if (savedPaths.length > 0) {
       promptWithFiles = buildPromptWithFiles(prompt, savedPaths);
@@ -1431,8 +1468,10 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   }
 
   // Load storage context if exists
+  // サイクルG（G-3）: isolated では所有者の storage-context.md をプロンプトに注入しない
+  // （クロスユーザーの情報漏れ）。同一ユーザーの ask（legacy）は既存どおり注入する。
   let storageContextPrompt = '';
-  const storageContext = await loadStorageContext(sessionInfo.projectPath);
+  const storageContext = statePolicy.storageContext ? await loadStorageContext(sessionInfo.projectPath) : null;
   if (storageContext) {
     console.log(`📂 Including storage context in prompt (${storageContext.length} chars)`);
     storageContextPrompt = '\n\n--- Storage Context ---\n' + storageContext + '\n--- End Storage Context ---';
@@ -1447,11 +1486,31 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.aiTool = resolvedAiTool;
       // 2026-10-02 修正: handleSessionStart と同じ理由でサーバーへ報告する（既存の
       // agent:session:aiTool メッセージを利用。Session.aiTool / Project.defaultAi を実態に揃える）
-      sendMessage({
-        type: 'agent:session:aiTool',
-        payload: { machineId: currentConfig.machineId, sessionId, aiTool: resolvedAiTool },
-      });
+      // サイクルG: isolated では報告しない（所有者の Project.defaultAi を書き換えないため）。
+      if (statePolicy.reportAiToolSubstitution) {
+        sendMessage({
+          type: 'agent:session:aiTool',
+          payload: { machineId: currentConfig.machineId, sessionId, aiTool: resolvedAiTool },
+        });
+      }
     }
+  }
+
+  // サイクルG: 直前の実行直前差し替えで実効 AI が変わった場合の二段目の拒否チェック
+  // （冒頭の判定は handleSessionStart 時点の aiTool を見ているため、ここで初めて devin 等へ
+  // 化けるケースを取り落とさないための最後の砦）。AI プロセスはまだ起動していない。
+  if (statePolicy.refuseUnsafeAiTool && !isAiToolReadOnlyEnforceable(sessionInfo.aiTool, !!sessionInfo.terminalMode)) {
+    console.log(`🚫 [isolated] Refusing cross-user ask after late aiTool substitution: aiTool=${sessionInfo.aiTool}`);
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig!.machineId,
+        sessionId,
+        output: tChat(payload.language ?? DEFAULT_CHAT_LANGUAGE, 'ask.crossUserUnsafeAiRefused', { aiTool: sessionInfo.aiTool }),
+        isComplete: true,
+      },
+    });
+    return;
   }
 
   // #368 Phase2a-C: Devin はプランモードを使わない（常に dangerous で起動し、
@@ -1677,6 +1736,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     // #348: 一時セッションは claude-session-id / context-usage を projectPath 上に書かない
     // 案C′: resumable（statePolicy.scopedConversation）なら scope dir には書いてよい
     persistProjectState: statePolicy.scopedConversation,
+    // サイクルG（G-5b）: Codex/Devin のセッション ID 等の読み出しを許可するか
+    // （書き込み・削除は persistProjectState が別途ガードする。既存の仕組みと対にする）
+    projectStateRead: statePolicy.projectStateRead,
     // core#336: MCP submission 単位のスコープ識別子 / plan-exec 対応付け correlation ID
     agentScopeId: sessionInfo.agentScopeId,
     turnId: payload.turnId,
@@ -1886,7 +1948,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           }
 
           // Collect files from the output directory
-          const files = await collectOutputFiles(sessionInfo.projectPath);
+          // サイクルG（G-4）: isolated では所有者の .devrelay-output/ を一切添付しない
+          // （クロスユーザーの成果物漏洩。同一ユーザー ask は既存どおり添付する）。
+          const files = statePolicy.outputFileCollect ? await collectOutputFiles(sessionInfo.projectPath) : [];
           if (files.length > 0) {
             console.log(`📎 Sending ${files.length} file(s) from output directory`);
           }
@@ -2031,7 +2095,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             }
             completionSent = true;
 
-            const files = await collectOutputFiles(sessionInfo.projectPath);
+            // サイクルG（G-4）: isolated では所有者の .devrelay-output/ を一切添付しない。
+            const files = statePolicy.outputFileCollect ? await collectOutputFiles(sessionInfo.projectPath) : [];
             if (files.length > 0) {
               console.log(`📎 Sending ${files.length} file(s) from output directory`);
             }

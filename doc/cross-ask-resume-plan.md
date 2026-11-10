@@ -444,23 +444,29 @@ Phase C の `cross-team-chat-wiring.test.mjs` 方式（ソース静的ガード�
 案C′ は resumable 経路でこれらを全て deny にするので**悪化はさせない**が、
 非 resumable 経路（旧 Agent / Devin / terminalMode / 同一ユーザー ask）では残る。
 
-| # | 内容 | 場所 | 深刻度 |
-|---|---|---|---|
-| G-3 | 所有者の `storage-context.md` が借り手向けプロンプトに注入される | `connection.ts:1397` | 情報漏れ |
-| G-4 | 所有者の `.devrelay-output/` の中身が借り手へ添付転送される | `connection.ts:1844,1985` | 情報漏れ |
-| G-5 | **Codex / Devin のセッション ID 永続化が `persistProjectState` を見ていない** → クロス ask が所有者の `codex-session-id` / `devin-*` を上書き・削除する | `ai-runner.ts:2856,3263-3303,3514,3524` | **実害（所有者の resume 先が壊れる）** |
-| G-6 | terminalMode でも同様に所有者の `claude-session-id` を上書きする | `terminal-runner.ts:451,1265` | 実害 |
-| G-7 | Devin plan ターンの `git-guard` が所有者の作業ツリーを `git checkout`/`reset` で巻き戻す | `connection.ts:2087-2099` | **実害（最重大）** |
-| G-8 | `resetApproveAllMode()` が無条件で所有者の「以降すべて許可」を解除 | `connection.ts:942` | 挙動汚染 |
-| G-9 | Devin 経路が `/tmp/devrelay-prompt-<sid>.txt`（0644）に質問全文を残し、失敗ターンでは削除しない | `ai-runner.ts:2447-2448,3230-3234` | 情報露出 |
-| G-10 | `savePlanFile` が scope 分離されておらず、並行スレッドが `.devrelay/plans/` を共有して 20 件超で互いのプランを `unlink` する | `plan-file-store.ts:13,25,84` | 既存の非対称（resume とは無関係） |
+> **2026-11-10 サイクルG で G-3/G-4/G-5/G-6/G-7/G-8/G-9/G-12 を実施済み**
+> （`doc/devlog/2026-11-10_151128.md`）。G-10/G-11 は対象外のまま（下表参照）。
+> 実施版の設計は `rules/project.md` の「G サイクル（既存バグ修正一式、2026-11-10）」節、
+> wire 設計は `EphemeralStatePolicy='isolated'`（本ドキュメントの `'resumable-scoped'` とは
+> 別の第4区分。resume は未配線のまま）。
+
+| # | 内容 | 場所 | 深刻度 | 状態 |
+|---|---|---|---|---|
+| G-3 | 所有者の `storage-context.md` が借り手向けプロンプトに注入される | `connection.ts:1397` | 情報漏れ | ✅ 実施済み（`statePolicy.storageContext` でガード、isolated のみ deny） |
+| G-4 | 所有者の `.devrelay-output/` の中身が借り手へ添付転送される | `connection.ts:1844,1985` | 情報漏れ | ✅ 実施済み（`statePolicy.outputFileCollect` でガード） |
+| G-5 | **Codex / Devin のセッション ID 永続化が `persistProjectState` を見ていない** → クロス ask が所有者の `codex-session-id` / `devin-*` を上書き・削除する | `ai-runner.ts:2856,3263-3303,3514,3524` | **実害（所有者の resume 先が壊れる）** | ✅ 実施済み（legacy も含め一時セッション全般で deny。読み出しのみ isolated だけ deny ＝ G-5b、新たに判明した別軸） |
+| G-6 | terminalMode でも同様に所有者の `claude-session-id` を上書きする | `terminal-runner.ts:451,1265` | 実害 | ✅ 実施済み（`TerminalRunOptions.persistProjectState` を新設、linux のみ） |
+| G-7 | Devin plan ターンの `git-guard` が所有者の作業ツリーを `git checkout`/`reset` で巻き戻す | `connection.ts:2087-2099` | **実害（最重大）** | ✅ 実施済み（巻き戻しは変更せず、読み取り専用を権限で強制できない実効 AI——devin/gemini/claude+terminalMode——へのクロスユーザー ask 自体を AI 起動前に拒否する設計に一般化。サーバー側が主防御、Agent 側 2 箇所が最後の砦） |
+| G-8 | `resetApproveAllMode()` が無条件で所有者の「以降すべて許可」を解除 | `connection.ts:942` | 挙動汚染 | ✅ 実施済み（一時セッション全般——legacy 含む——で機体グローバル状態の読み書きを遮断。windows には当該機構が無いため対象外） |
+| G-9 | Devin 経路が `/tmp/devrelay-prompt-<sid>.txt`（0644）に質問全文を残し、失敗ターンでは削除しない | `ai-runner.ts:2447-2448,3230-3234` | 情報露出 | ✅ 実施済み（0600 で作り直し、一時セッションは失敗ターンでも必ず削除） |
+| G-10 | `savePlanFile` が scope 分離されておらず、並行スレッドが `.devrelay/plans/` を共有して 20 件超で互いのプランを `unlink` する | `plan-file-store.ts:13,25,84` | 既存の非対称（resume とは無関係） | 対象外（別サイクル） |
 
 加えてサーバー側:
 
-| # | 内容 | 場所 |
-|---|---|---|
-| G-11 | **WebUI/チャットのクロス ask に 5 分窓のレート制限が無い**（宛先単位の inflight ガードのみ）。Agent REST 経路（`document-api.ts:705,712`）だけが持っている。**resume で会話が長期化する前に C2 で足す** | `cross-ask-runner.ts:90-112` に `countRecentCrossSessions()` を追加 |
-| G-12 | `handleProjectConnect` の active 候補 where に `crossquery_` 除外が無く、宛先所有者が自分のプロジェクトを `//connect` すると実行中のクロス ask セッションを拾い得る（`document-api.ts:764` が既存の見本） | `command-handler.ts:534-541` |
+| # | 内容 | 場所 | 状態 |
+|---|---|---|---|
+| G-11 | **WebUI/チャットのクロス ask に 5 分窓のレート制限が無い**（宛先単位の inflight ガードのみ）。Agent REST 経路（`document-api.ts:705,712`）だけが持っている。**resume で会話が長期化する前に C2 で足す** | `cross-ask-runner.ts:90-112` に `countRecentCrossSessions()` を追加 | 対象外（C2 で実施） |
+| G-12 | `handleProjectConnect` の active 候補 where に `crossquery_` 除外が無く、宛先所有者が自分のプロジェクトを `//connect` すると実行中のクロス ask セッションを拾い得る（`document-api.ts:764` が既存の見本） | `command-handler.ts:534-541` | ✅ 実施済み（active と ended 復活候補の両方に `buildEphemeralSessionIdExclusion()` を適用。調査で ended 側も同じ穴と判明） |
 
 ---
 

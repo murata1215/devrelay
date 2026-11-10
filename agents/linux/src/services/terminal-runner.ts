@@ -184,6 +184,14 @@ export interface TerminalRunOptions {
    * `.devrelay/sessions/<agentScopeId>/` 配下に書く（対話経路は未指定 = 従来どおり）。
    */
   agentScopeId?: string;
+  /**
+   * サイクルG（G-6）: projectPath 上の永続状態（claude-session-id）を書き込むかどうか。
+   * 既定 true（従来どおり。未指定時は `opts.persistProjectState !== false` で判定するため
+   * 既存の呼び出し元は変更不要）。`ai-runner.ts` の `SendPromptOptions.persistProjectState` と
+   * 同じ意味——一時セッション（ask-member/teamexec-member/isolated）が所有者の
+   * claude-session-id を上書きしていた既存バグの根治。
+   */
+  persistProjectState?: boolean;
 }
 
 export interface TerminalRunResult {
@@ -447,7 +455,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
         // 起動時に --resume で会話継続できるようにする（SDK Claude と同じファイルを共有）
         // promptSent=false の場合は保存しない（壊れたセッション ID の残留防止, #237）
         const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
-        if (claudeSessionId && promptSent) {
+        // サイクルG（G-6）: isolated/legacy の一時セッションは所有者の claude-session-id を書かない。
+        if (claudeSessionId && promptSent && opts.persistProjectState !== false) {
           saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode, opts.agentScopeId).catch(err => {
             console.warn(`⚠️ [terminal-mode] failed to save Claude session id: ${(err as Error).message}`);
           });
@@ -1259,7 +1268,8 @@ export async function runTerminalClaude(opts: TerminalRunOptions): Promise<Termi
       // ただし promptSent=false（起動失敗等）の場合は保存しない — 壊れた/空のセッション ID で
       // 次回 --resume すると不安定な挙動になる（#237: bypass "No, exit" の session ID が残留した事故）
       const claudeSessionId = extractClaudeSessionIdFromBuffer(finalOutput);
-      if (claudeSessionId && promptSent) {
+      // サイクルG（G-6）: isolated/legacy の一時セッションは所有者の claude-session-id を書かない。
+      if (claudeSessionId && promptSent && opts.persistProjectState !== false) {
         // core#383: agentScopeId が抜けていたバグを修正（finish() 側の同等コードには元々あった）。
         // 抜けたままだと非スコープの `.devrelay/` に書かれ、MCP submission スコープ（core#336）の分離が破られる。
         saveClaudeSessionId(opts.projectPath, claudeSessionId, opts.sessionMode, opts.agentScopeId).catch(err => {

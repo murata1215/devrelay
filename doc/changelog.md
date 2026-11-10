@@ -6,6 +6,45 @@
 
 ## 実装済み機能
 
+### サイクルG: クロス ask の既存バグ修正（所有者プロジェクトの隔離） (2026-11-10)
+
+クロスユーザー Team Phase C（上記）・サイクルC1（`doc/cross-ask-resume-plan.md`）の調査で
+見つかった、クロスユーザー ask（別ユーザーのプロジェクトへの質問）の既存バグ G-3/G-4/G-5/
+G-5b/G-6/G-7/G-8/G-9/G-12 を修正。
+
+#### 設計
+`EphemeralStatePolicy` に `'isolated'` を追加（`'resumable-scoped'` と並ぶ第4区分。
+クロスユーザー ask にのみサーバーが送る。同一ユーザーの ask の既存の使い方——成果物添付・
+storageContext・Codex/Devin 会話継続——は壊さない）。Agent 側 `session-scope.ts`
+（3 機種 byte-for-byte 同一）の `SessionStatePolicy` を 10 項目から 14 項目に拡張し、
+`connection.ts`/`ai-runner.ts`（linux のみ `terminal-runner.ts` も）の既存の無条件実行箇所を
+全てガード化。G-7 は「Devin の git 自動復元ガードの巻き戻しを止める」のではなく、読み取り
+専用を権限で強制できない実効 AI（devin/gemini/claude+`Project.terminalMode`）へのクロス
+ユーザー ask 自体を AI 起動前に拒否する設計に一般化（巻き戻しを止めると Devin の変更が
+所有者ツリーに残り次の commit に混入する方が悪化すると判断）。サーバー側
+`cross-ask-isolation-rules.ts`（新設、外部 import ゼロ）で、Session 作成前に (a) 宛先 Agent の
+`'cross-ask-isolation'` capability 申告 (b) `ask-guard.ts` の `decideAskReadOnlyEnforcement()`
+を検証し、未更新 Agent・読み取り専用を強制できない AI へのクロスユーザー ask は
+`denied`（監査記録あり）として断る（fail-closed）。`agent-manager.ts` の
+`startSession`/`sendPromptToAgent`/`executeCrossProjectQuery` に `statePolicy` を追加して配線。
+
+#### 併せて修正した既存バグ
+- G-12: `command-handler.ts` の `//connect`（active・ended 復活候補の両方）が `crossquery_` 等の
+  一時セッションを除外しておらず、所有者が自分のプロジェクトへ接続すると実行中のクロス ask
+  セッションを拾い得た。既存 `buildEphemeralSessionIdExclusion()` を両方の `where` に適用。
+- `agent:session:aiTool` 報告（`resolveEffectiveAiTool` 差し替え時にサーバーへ送る通知）が
+  無条件に `Project.defaultAi` を書き換えており、クロスユーザー ask が所有者のプロジェクト
+  既定 AI を恒常的に書き換えてしまう実害を新たに発見（isolated のみ報告しないよう修正）。
+
+#### キルスイッチ
+`DEVRELAY_CROSS_ASK_ISOLATION`（既定 ON）はサーバー側のみ。G-5/G-6/G-8/G-9 は「クロスユーザー
+かどうか」に関係なく一時セッション全般に効く構造的な修正のため Agent 側に env フックは
+作らなかった（緊急ロールバックは `git revert` + 該当機 `u` を想定）。
+
+テスト: server 1562/1562（新規22）・linux 1311/1311・macos 791 pass+1skip/792・windows 189/189
+（新規計約72）・shared 143/143・web 971/971（0行変更）、6 workspace build green。
+apps/web・prisma は無変更・DB マイグレーション不要。詳細 `doc/devlog/2026-11-10_151128.md`。
+
 ### クロスユーザー Team Phase C: 購読/借用プロジェクトを Agents ツリーに出して会話する (2026-11-10)
 
 ユーザー要望「購読したプロジェクトをagentツリーに出して、現状のプロジェクトのように会話

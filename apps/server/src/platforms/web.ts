@@ -368,6 +368,9 @@ export async function setupWebClientWebSocket(
             await sendWebMessage(chatId, `❌ 質問が長すぎます（${crossResult.rawLength}文字、上限${crossResult.limit}文字）。`, undefined, crossProjectId);
           } else if (crossResult.kind === 'busy') {
             await sendWebMessage(chatId, `⚠️ ${crossResult.message}`, undefined, crossProjectId);
+          } else if (crossResult.kind === 'denied') {
+            // サイクルG: 宛先 Agent 未更新 or 読み取り専用を強制できない AI のため拒否
+            await sendWebMessage(chatId, crossResult.message, undefined, crossProjectId);
           } else {
             await sendWebMessage(chatId, `❌ ${crossTarget.name} への質問が失敗しました: ${crossResult.message}`, undefined, crossProjectId);
           }

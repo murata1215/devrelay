@@ -568,8 +568,18 @@ export interface SendPromptOptions {
    * #348: projectPath 上の永続状態（claude-session-id / context-usage）を書き込むかどうか。
    * 既定 true（従来どおり）。一時セッション（ask-member/teamexec-member/askDesc）は
    * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
+   * サイクルG（G-5）: Codex/Devin のセッション ID・モデル・ATIF オフセット・パーミッションモードの
+   * 保存・削除も本フィールドでガードする（従来は未ガードで、一時セッションが所有者の
+   * Codex/Devin 状態を上書き・削除していた既存バグ）。
    */
   persistProjectState?: boolean;
+  /**
+   * サイクルG（G-5b）: Codex/Devin のセッション ID 等の**読み出し**を許可するか。
+   * 既定 true（従来どおり。未指定時は `options.projectStateRead !== false` で判定するため
+   * 既存の呼び出し元は変更不要）。isolated（クロスユーザー ask）のときだけ false になり、
+   * 所有者の Codex/Devin 会話を resume して覗けないようにする。
+   */
+  projectStateRead?: boolean;
   /**
    * core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を
    * セッションストア／会話履歴ストアの読み書き先として使う（対話経路は未指定のまま = 従来どおり）。
@@ -938,7 +948,10 @@ export async function sendPromptToAi(
     // ATIF 読み取り時にこれを渡し「今回のターンで新たに実行されたステップ」だけに絞り込む。
     // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
     // offset<=0 は全件返しにフォールバックする二重防御）。
-    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0;
+    // サイクルG（G-5b）: isolated（クロスユーザー ask）では所有者の Devin 状態を読まない。
+    devinAtifStepOffsetAtStart = options.projectStateRead !== false
+      ? ((await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0)
+      : 0;
 
     // #368 Phase2a-C: Devin は常に exec 相当（dangerous）で起動する。
     // 下の plan 系分岐（①〜④）は usePlanMode が Devin では常に false になったため
@@ -949,9 +962,12 @@ export async function sendPromptToAi(
     // ただし exec モードでは新規セッションを開始する（--permission-mode dangerous を
     // CLI で指定しても、resume したセッションは元の auto モードを保持して
     // 書き込みが拒否されるため）
-    // フォールバック時（#274）は resume しない（壊れたセッション回避）
-    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath, options.agentScopeId);
-    const devinSessionId = devinSavedPermissionMode === devinTurnPermissionMode
+    // フォールバック時（#274）は resume しない（壊れたセッション回避）。
+    // サイクルG（G-5b）: isolated では resume 判定自体を行わず、常に新規セッションで開始する。
+    const devinSavedPermissionMode = options.projectStateRead !== false
+      ? await loadDevinPermissionMode(projectPath, options.agentScopeId)
+      : null;
+    const devinSessionId = options.projectStateRead !== false && devinSavedPermissionMode === devinTurnPermissionMode
       ? await loadDevinSessionId(projectPath, options.agentScopeId)
       : null;
     // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
@@ -1040,7 +1056,11 @@ export async function sendPromptToAi(
     let promptFilePath: string | null = null;
     if (devinHasPromptFile) {
       promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-      fs.writeFileSync(promptFilePath, prompt, 'utf-8');
+      // サイクルG（G-9）: 質問全文（クロスユーザー ask ではクロス ask の質問文も含む）が
+      // 他ユーザーにも読めるパーミッションで一時ディレクトリに残る既存の情報露出を根治する。
+      // writeFileSync の mode は既存ファイルには効かないため、先に unlink してから 0600 で作り直す。
+      try { fs.unlinkSync(promptFilePath); } catch {}
+      fs.writeFileSync(promptFilePath, prompt, { encoding: 'utf-8', mode: 0o600 });
       args.push('--prompt-file', promptFilePath);
     } else {
       log.error(`[devin] --prompt-file unsupported, aborting (unsafe argv fallback removed in #344)`);
@@ -1140,7 +1160,10 @@ export async function sendPromptToAi(
     }
 
     // 保存済み thread_id があれば resume で継続（フラグを全部書いた"後"に置く必要がある）
-    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath, options.agentScopeId) : null;
+    // サイクルG（G-5b）: isolated では所有者の Codex スレッドを resume しない。
+    const codexThreadIdToResume = caps.resume && options.projectStateRead !== false
+      ? await loadCodexSessionId(projectPath, options.agentScopeId)
+      : null;
     if (codexThreadIdToResume) {
       args.push('resume', codexThreadIdToResume);
       codexResumedThreadId = codexThreadIdToResume;
@@ -1441,9 +1464,12 @@ export async function sendPromptToAi(
                 codexThreadId = threadId;
                 result.extractedSessionId = threadId;
                 log.info(`[codex] Thread ID: ${threadId}`);
-                saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
-                  log.error(`Failed to save Codex session ID: ${err}`);
-                });
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を書かない。
+                if (options.persistProjectState !== false) {
+                  saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
+                    log.error(`Failed to save Codex session ID: ${err}`);
+                  });
+                }
               }
               break;
             }
@@ -1821,7 +1847,10 @@ export async function sendPromptToAi(
           (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence)) ||
           (fullOutput.trim().length === 0 && code === 0);
         const devinPromptTempPath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-        if (devinTurnFailed) {
+        // サイクルG（G-9）: 一時セッション（isolated/legacy とも）は失敗ターンでも調査用に
+        // 残さず必ず消す（借り手の質問文を所有者機の一時ディレクトリに残さない）。対話セッションのみ
+        // 従来どおり事後調査のために残す。
+        if (devinTurnFailed && options.persistProjectState !== false) {
           log.info(`[devin] ⚠️ Turn failed, keeping temp files for inspection: ${devinPromptTempPath}${devinExportPath ? ` / ${devinExportPath}` : ''}`);
         } else {
           try { fs.unlinkSync(devinPromptTempPath); } catch {}
@@ -1853,7 +1882,8 @@ export async function sendPromptToAi(
               const latest = sessions
                 .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
                 .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
-              if (latest?.id) {
+              // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない。
+              if (latest?.id && options.persistProjectState !== false) {
                 saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
                 const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
                 if (devinActualModelForSave) {
@@ -1878,23 +1908,27 @@ export async function sendPromptToAi(
                 },
               });
               if (pick.id) {
-                saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
                 log.info(`[devin] Session ID decided: ${pick.id} (reason=${pick.reason}, scope=${currentScopeKey})`);
-                // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
-                // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
-                // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
-                // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
-                // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
-                // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
-                const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
-                if (devinActualModelForSave) {
-                  saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない
+                // （decided ログ自体は機体ローカルの診断用途のため常に出す）。
+                if (options.persistProjectState !== false) {
+                  saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
+                  // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
+                  // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
+                  // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
+                  // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
+                  // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
+                  // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
+                  const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
+                  if (devinActualModelForSave) {
+                    saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                  }
+                  // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
+                  // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
+                  saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
+                  // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
+                  saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
                 }
-                // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
-                // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
-                // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
-                saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
               } else if (pick.reason !== 'none') {
                 // 'ambiguous'/'ownedByOtherScope': 誤った ID を固定化するより未保存のほうが安全。
                 // 次ターンは新規セッションになるが、Devin は会話履歴を常にプロンプトへ注入するため
@@ -2094,7 +2128,12 @@ export async function sendPromptToAi(
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を削除しない。
+        if (options.persistProjectState !== false) {
+          Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 
@@ -2104,7 +2143,12 @@ export async function sendPromptToAi(
       if (codexResumeEmpty) {
         log.info(`[codex] Resumed thread produced no output (code ${code}), clearing session ID and retrying fresh`);
         result.resumeFailed = true;
-        clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を削除しない。
+        if (options.persistProjectState !== false) {
+          clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 

@@ -11,14 +11,15 @@
 import crypto from 'crypto';
 import type { AiTool, Platform } from '@devrelay/shared';
 import { prisma } from '../db/client.js';
-import { executeCrossProjectQuery } from './agent-manager.js';
+import { executeCrossProjectQuery, agentHasCapability, getAgentAvailableAiTools } from './agent-manager.js';
+import { pickAvailableAiTool } from './ai-tool-availability.js';
 import {
   validateHumanTextLength,
   neutralizeHumanInputTag,
   buildHumanTextMeta,
   fenceIfHuman,
 } from './human-text-fence.js';
-import { ASK_QUESTION_MAX_LENGTH, ASK_ANSWER_TIMEOUT_MS } from './ask-guard.js';
+import { ASK_QUESTION_MAX_LENGTH, ASK_ANSWER_TIMEOUT_MS, decideAskReadOnlyEnforcement } from './ask-guard.js';
 import { recordCrossTeamAudit } from './cross-team-audit.js';
 import { findInflightCrossQueryRows } from './cross-session-stats.js';
 import {
@@ -28,7 +29,8 @@ import {
   ASK_INFLIGHT_WINDOW_MS,
 } from './cross-query-guard.js';
 import { buildCrossAskContextPrefix, type CrossAskHistoryMessage } from './cross-ask-rules.js';
-import { isCrossTeamChatContextEnabled } from './cross-team-guard.js';
+import { isCrossTeamChatContextEnabled, isCrossAskIsolationEnabled } from './cross-team-guard.js';
+import { decideCrossAskIsolation, buildCrossAskIsolationDenialMessage, buildCrossAskIsolationDenyLog } from './cross-ask-isolation-rules.js';
 import { buildCrossAskSessionIdFilter } from './thread-scope.js';
 
 /** `runCrossProjectAsk()` が受け取る宛先プロジェクト（チャット経路・WebUI 経路のどちらの解決結果も代入可能な最小形）。 */
@@ -37,6 +39,8 @@ export interface CrossAskTargetProject {
   name: string;
   path: string;
   defaultAi: string;
+  /** サイクルG（G-7 の一般化）: claude + terminalMode は読み取り専用を権限で強制できないため隔離判定に必要 */
+  terminalMode: boolean;
   machine: { id: string; name: string; displayName: string | null; status: string; userId: string };
   crossTeam?: { teamId: string; grantId: string };
 }
@@ -57,6 +61,7 @@ export type RunCrossProjectAskResult =
   | { ok: true; output: string; sessionId: string }
   | { ok: false; kind: 'tooLong'; rawLength: number; limit: number }
   | { ok: false; kind: 'busy'; message: string }
+  | { ok: false; kind: 'denied'; message: string; reason: 'agent_outdated' | 'ai_unsafe' }
   | { ok: false; kind: 'failed'; message: string; sessionId: string };
 
 /**
@@ -109,6 +114,42 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
         }),
       };
     }
+  }
+
+  // 2.5. サイクルG（クロス ask の既存バグ修正）: クロスユーザー ask に限り、
+  // (a) 宛先 Agent が 'cross-ask-isolation' capability を申告しているか、
+  // (b) 読み取り専用を権限で強制できる実効 AI か（devin/gemini/claude+terminalMode は不可）
+  // を Session 作成より前に検証する。許可されれば Agent へ送る statePolicy（'isolated' か
+  // undefined）が決まる。DEVRELAY_CROSS_ASK_ISOLATION=0 なら常に許可（旧挙動）。
+  let crossAskStatePolicy: 'isolated' | undefined;
+  {
+    const availableAiTools = isCrossUser ? getAgentAvailableAiTools(targetProject.machine.id) : [];
+    const resolvedAiTool = isCrossUser
+      ? pickAvailableAiTool(targetProject.defaultAi as AiTool, availableAiTools, [])
+      : (targetProject.defaultAi as AiTool);
+    const isolation = decideCrossAskIsolation({
+      isCrossUser,
+      isolationEnabled: isCrossAskIsolationEnabled(process.env.DEVRELAY_CROSS_ASK_ISOLATION),
+      agentHasIsolationCapability: agentHasCapability(targetProject.machine.id, 'cross-ask-isolation'),
+      readOnlyEnforced: decideAskReadOnlyEnforcement({ aiTool: resolvedAiTool, terminalMode: targetProject.terminalMode }).readOnlyEnforced,
+    });
+    if (!isolation.allowed) {
+      console.log(buildCrossAskIsolationDenyLog({ requesterUserId, targetProjectName: targetProject.name, reason: isolation.reason }));
+      if (isCrossUser) {
+        recordCrossTeamAudit({
+          requesterUserId, executorUserId, teamId: targetProject.crossTeam!.teamId,
+          projectId: targetProject.id, mode: 'ask', action: 'denied',
+          grantId: targetProject.crossTeam!.grantId, detail: { reason: isolation.reason },
+        });
+      }
+      return {
+        ok: false,
+        kind: 'denied',
+        reason: isolation.reason,
+        message: buildCrossAskIsolationDenialMessage(isolation, targetProject.name),
+      };
+    }
+    crossAskStatePolicy = isolation.statePolicy ?? undefined;
   }
 
   // 3. 一時セッション作成（userId は宛先マシン所有者。requestedByUserId はクロス時のみ記録する）
@@ -193,6 +234,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
       fullPrompt,
       executorUserId,
       ASK_ANSWER_TIMEOUT_MS,
+      crossAskStatePolicy,
     );
 
     await prisma.session.update({

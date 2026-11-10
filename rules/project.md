@@ -1663,6 +1663,39 @@ Team のメンバー行には既に他人の projectId が入っているため�
 `agents/{linux,macos,windows}` の 3 箇所を同一内容で修正（反映には貸す側の `u` が必要、
 未更新機は現状維持で degrade しない）。
 
+**G サイクル（既存バグ修正一式、2026-11-10）**: `doc/cross-ask-resume-plan.md` の調査で見つかった
+G-3〜G-9/G-12 を修正した（G-10/G-11 は対象外、resume の配線は未実装のまま）。設計の核は
+`EphemeralStatePolicy` に `'isolated'` を追加し（`'resumable-scoped'` と並ぶ第4区分）、
+`session-scope.ts` の `SessionStatePolicy` を 10 項目から 14 項目に拡張したこと。
+`'isolated'` は **クロスユーザー ask にのみ**サーバーが送る値で、同一ユーザーの ask
+（スキル／MCP／`ask` コマンド）の既存の使い方（成果物添付・storageContext・Codex/Devin
+会話継続）は一切変えない——この区別が無いと「所有者プロジェクトを隔離する」という本来の
+目的と「同一ユーザーの ask は資料を参照し続けられる」という既存の正常機能が衝突するため。
+一方で G-8（approve-all モードの読み書き）は同一ユーザー・別ユーザーを問わず一時セッション
+全般（legacy 含む）で遮断した——これは「他人の質問」ではなく「一時的で短命なセッションが
+機体プロセス全体の状態を触ってよいか」という別の軸の既存バグのため。
+
+G-7 は当初「Devin の git 自動復元ガードの巻き戻しを止める」案を検討したが、Devin が書いた
+変更が所有者の作業ツリーに残り次の commit に混入する「静かな汚染」の方が現状より悪化すると
+判断し、採用しなかった。代わりに、読み取り専用を**権限で強制できる**実効 AI
+（`ask-guard.ts` の `ENFORCED_READONLY_AI_TOOLS` = claude/codex のみ、かつ
+`Project.terminalMode` でないこと）を基準にし、それ以外（devin/gemini/claude+terminalMode）
+へのクロスユーザー ask を AI 起動前にサーバー側で断る設計に一般化した
+（`cross-ask-isolation-rules.ts` の `decideCrossAskIsolation()`）。サーバー側の拒否が主防御、
+Agent 側（`isAiToolReadOnlyEnforceable()`、`session-scope.ts` に同一判定を意図的に複製）は
+`resolveEffectiveAiTool()` が実行直前に AI を差し替えるケースを捕まえる最後の砦。
+
+未更新 Agent（`'cross-ask-isolation'` capability 未申告）はクロスユーザー ask 自体を
+Session 作成前に断る（fail-closed。`statePolicy:'isolated'` を解釈できない旧 Agent を
+黙らせて通さないため）。同一ユーザーの ask には capability 要件を課さない。
+
+キルスイッチ `DEVRELAY_CROSS_ASK_ISOLATION`（既定 ON）はサーバー側のみに置いた。
+G-5（Codex/Devin 状態の無断書き込み）・G-6（terminalMode の claude-session-id）・
+G-8（approve-all）・G-9（`/tmp` プロンプトファイル）は「クロスユーザーかどうか」に関係なく
+一時セッション全般に無条件で効く構造的な修正のため、Agent 側に対応する env フックは
+意図的に作らなかった（全呼び出し箇所に逆方向の OR 条件を加える複雑化のコストが見合わない。
+実運用での緊急ロールバックは `git revert` + 該当機 `u` を想定）。
+
 履歴 API（`GET /api/cross-team/projects/:id/messages`）の認可は
 `requestedByUserId === userId` の 1 条件のみ（projectId の存在確認をしない。購読/招待を
 切られても自分が書いた本文は読める——ツリーからは消えるので新規の質問はできなくなるだけ）。

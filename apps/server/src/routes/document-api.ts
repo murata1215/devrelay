@@ -19,13 +19,16 @@ import crypto from 'crypto';
 import { prisma } from '../db/client.js';
 import { searchSimilarDocuments } from '../services/embedding-service.js';
 import { getOpenAiApiKey } from '../services/user-settings.js';
-import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery, executeScaffold, getConnectedAgents, getAiToolList } from '../services/agent-manager.js';
+import { executeCrossProjectQuery, executeCrossProjectExec, isAgentConnected, cancelPendingCrossQuery, executeScaffold, getConnectedAgents, getAiToolList, agentHasCapability, getAgentAvailableAiTools } from '../services/agent-manager.js';
+import { pickAvailableAiTool } from '../services/ai-tool-availability.js';
 import { getSessionParticipants, addParticipant } from '../services/session-manager.js';
 import type { AiTool, ManagementInfo } from '@devrelay/shared';
 import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef, AI_TOOL_NAMES } from '@devrelay/shared';
 import { decideCrossTarget, pickInflightCrossSession, buildCrossTargetRejectionMessage, resolveCrossSourceLabel, ASK_INFLIGHT_WINDOW_MS } from '../services/cross-query-guard.js';
 import { resolveCrossTeamAccess } from '../services/cross-team-authz.js';
-import { buildCrossTeamDenyLog } from '../services/cross-team-guard.js';
+import { buildCrossTeamDenyLog, isCrossAskIsolationEnabled } from '../services/cross-team-guard.js';
+import { decideAskReadOnlyEnforcement } from '../services/ask-guard.js';
+import { decideCrossAskIsolation, buildCrossAskIsolationDenialMessage, buildCrossAskIsolationDenyLog } from '../services/cross-ask-isolation-rules.js';
 import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
 import { countRecentCrossSessions } from '../services/cross-session-stats.js';
 
@@ -685,6 +688,38 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
       effectiveAi = ai as AiTool;
     }
 
+    // サイクルG（クロス ask の既存バグ修正）: クロスユーザー ask に限り、
+    // (a) 宛先 Agent が 'cross-ask-isolation' capability を申告しているか、
+    // (b) 読み取り専用を権限で強制できる実効 AI か（devin/gemini/claude+terminalMode は不可）
+    // を Session 作成より前に検証する（`cross-ask-runner.ts` の `runCrossProjectAsk()` と同じ判定。
+    // 本エンドポイントはそちらを経由しないため個別に検証する）。
+    let askStatePolicy: 'isolated' | undefined;
+    {
+      // ai 未指定（defaultAi のまま）のときだけ Agent 側の無断差し替えを先読みする
+      // （ai 明示指定時は直前のブロックで対象機に実在することを確認済みのため不要）。
+      const resolvedAiToolForIsolation = ai !== undefined
+        ? effectiveAi
+        : pickAvailableAiTool(effectiveAi, getAgentAvailableAiTools(targetProject.machine.id), []);
+      const isolation = decideCrossAskIsolation({
+        isCrossUser: askAllowed.crossUser,
+        isolationEnabled: isCrossAskIsolationEnabled(process.env.DEVRELAY_CROSS_ASK_ISOLATION),
+        agentHasIsolationCapability: agentHasCapability(targetProject.machine.id, 'cross-ask-isolation'),
+        readOnlyEnforced: decideAskReadOnlyEnforcement({ aiTool: resolvedAiToolForIsolation, terminalMode: targetProject.terminalMode }).readOnlyEnforced,
+      });
+      if (!isolation.allowed) {
+        console.log(buildCrossAskIsolationDenyLog({ requesterUserId, targetProjectName: targetProject.name, reason: isolation.reason }));
+        if (askAllowed.crossUser) {
+          recordCrossTeamAudit({
+            requesterUserId, executorUserId, teamId: askAllowed.teamId ?? null,
+            projectId: targetProjectId, mode: 'ask', action: 'denied',
+            grantId: askAllowed.grantId ?? null, detail: { reason: isolation.reason },
+          });
+        }
+        return reply.status(403).send({ error: buildCrossAskIsolationDenialMessage(isolation, targetProject.name) });
+      }
+      askStatePolicy = isolation.statePolicy ?? undefined;
+    }
+
     // ループ検出: 同一マシンから同一ターゲットへの直近5分以内の crossquery セッションが3回以上あれば拒否
     if (targetProject.machine.id === auth.machineId) {
       const recentCount = await prisma.session.count({
@@ -801,6 +836,8 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         effectiveAi,
         question,
         executorUserId,
+        undefined, // timeoutMs: 既定（12時間）を維持
+        askStatePolicy,
       );
 
       if (clientDisconnected) return;

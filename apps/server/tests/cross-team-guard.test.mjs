@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   isCrossTeamEnabled,
   isCrossTeamExecEnabled,
+  isCrossAskIsolationEnabled,
   decideCrossTeamAccess,
   buildCrossTeamDenyLog,
   CROSS_USER_ASK_TARGET_LIMIT,
@@ -54,6 +55,20 @@ describe('isCrossTeamEnabled / isCrossTeamExecEnabled: 既定 OFF（既存キル
   });
   test("isCrossTeamExecEnabled: '1' のときだけ true", () => {
     assert.equal(isCrossTeamExecEnabled('1'), true);
+  });
+});
+
+describe('isCrossAskIsolationEnabled（サイクルG）: 既定 ON（既存キルスイッチの多数派と同方向）', () => {
+  test('未設定は true（既定 ON）', () => {
+    assert.equal(isCrossAskIsolationEnabled(undefined), true);
+  });
+  test("'0' のときだけ false", () => {
+    assert.equal(isCrossAskIsolationEnabled('0'), false);
+  });
+  test("'0' 以外の値は true のまま", () => {
+    assert.equal(isCrossAskIsolationEnabled('1'), true);
+    assert.equal(isCrossAskIsolationEnabled(''), true);
+    assert.equal(isCrossAskIsolationEnabled('false'), true);
   });
 });
 

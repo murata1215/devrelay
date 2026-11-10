@@ -185,13 +185,17 @@ describe('routes/api.ts: 新 2 ルートが独自の認可クエリを持たな�
 });
 
 describe('Agent 3機種: G-2（クロス ask が所有者の work state を食う既存バグ）の修正', () => {
+  // サイクルG（Q5）: G-2 のガードは `isEphemeral` 直書きから `statePolicy.workState` へ移行した
+  // （許可リストの単一情報源化。legacy/resumable/isolated は全て workState:false のため
+  // 挙動は不変。`isEphemeral` という識別子自体は本ピンでは検証しない——`resolveSessionStatePolicy`
+  // の`session-state-policy.test.mjs` 側で真理値表として固定している）。
   for (const os of ['linux', 'macos', 'windows']) {
-    test(`agents/${os}: loadWorkState は isEphemeral でガードされている`, () => {
+    test(`agents/${os}: loadWorkState は statePolicy.workState でガードされている`, () => {
       const source = readRepoSource(`agents/${os}/src/services/connection.ts`);
       const idx = source.indexOf('loadWorkState(projectPath)');
       assert.ok(idx > 0, `loadWorkState call not found in agents/${os}`);
       const before = source.slice(Math.max(0, idx - 200), idx);
-      assert.match(before, /isEphemeral\s*\?\s*null\s*:/, `agents/${os} loadWorkState call is not guarded by isEphemeral`);
+      assert.match(before, /statePolicy\.workState\s*\?/, `agents/${os} loadWorkState call is not guarded by statePolicy.workState`);
     });
   }
 });

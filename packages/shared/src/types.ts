@@ -31,11 +31,17 @@ export const PROTOCOL_VERSION = 1;
  * `PROTOCOL_VERSION` とは別軸。protocolVersion は「ワイヤフォーマットに追従できるか」、
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
+ *
+ * 'cross-ask-isolation' = サイクルG: `resolveSessionStatePolicy()` が `'isolated'` を解釈し、
+ * クロスユーザー ask で所有者プロジェクトの状態を隔離できる（session-scope.ts 参照）。
+ * サーバーはこの capability を未申告の宛先 Agent へはクロスユーザー ask 自体を断る
+ * （`statePolicy:'isolated'` を解釈できない旧 Agent を黙らせて通さないため。fail-open ではなく
+ * fail-closed — クロスユーザー ask のみが対象で、同一ユーザーの ask は影響を受けない）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume', 'cross-ask-isolation'];
 
 /**
  * 案C′（クロス ask のセッション継続）サイクルC1: 一時セッションの状態ポリシー。
@@ -45,8 +51,15 @@ export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', '
  * `clearOutputDir`/`savePlanFile`/work state/storageContext 等、projectPath 直下への副作用は
  * このポリシーだけでは一切解禁しない（session-scope.ts の `resolveSessionStatePolicy()` 参照）。
  * サーバーがこのフィールドを送らない限り Agent の挙動は完全に不変（C1 単体では無効化のまま）。
+ *
+ * 'isolated' = サイクルG（クロス ask の既存バグ修正）: クロスユーザー ask（別ユーザーの
+ * プロジェクトへの質問）に限り送る値。所有者プロジェクトの状態を一切読み書きせず
+ * （storageContext 注入 / 成果物添付 / Codex・Devin セッション resume を全て deny）、
+ * 読み取り専用を権限で強制できない実効 AI（devin / gemini / claude+terminalMode）への
+ * ターンは Agent 側で開始前に拒否する。同一ユーザーの ask（スキル / MCP / `ask` コマンド）には
+ * 送らない（既存の添付・storageContext の使い方を壊さないため）。
  */
-export type EphemeralStatePolicy = 'resumable-scoped';
+export type EphemeralStatePolicy = 'resumable-scoped' | 'isolated';
 
 // -----------------------------------------------------------------------------
 // Capability 配布基盤（サイクルP1）
