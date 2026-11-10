@@ -65,3 +65,151 @@ export function sessionScopeLabel(scope: SessionScope): string {
       return 'INTERACTIVE';
   }
 }
+
+/**
+ * 案C′（クロス ask のセッション継続）サイクルC1: 一時セッションが projectPath 上のどの状態を
+ * 読み書きしてよいかを表す許可リスト。既定は全項目 deny（下記 `resolveSessionStatePolicy` 参照）。
+ *
+ * 各フィールドが呼び出し元のどのガードに対応するかは `connection.ts` 側のコメントで明示する。
+ * - scopedConversation: conversation.json / claude-session-id / codex-session-id / context-usage
+ *   （scope dir = `.devrelay/sessions/<agentScopeId>/` 内のみ。projectPath 直下には一切出ない）
+ * - outputDirClear: `clearOutputDir()`（`.devrelay-output/` の rm -rf + mkdir）
+ * - outputFileCollect: `collectOutputFiles()`（`.devrelay-output/` の内容を呼び出し元へ転送）
+ * - planFile: `savePlanFile()`（`.devrelay/plans/` への書込・古いファイルの unlink）
+ * - workState: `loadWorkState()`/`archiveWorkState()`（work state の読み出し・消費）
+ * - storageContext: `loadStorageContext()` の内容をプロンプトに注入するか
+ * - receivedFiles: `saveReceivedFiles()`（添付ファイルの `.devrelay-files/` への保存）
+ * - projectRescan: `rescanProjectsAndSync()`（`CLAUDE.md` / `~/.devrelay/projects.yaml` の書込）
+ * - forcePlanTurn: true の場合、履歴に `exec` マーカーが混入していても plan ターンに固定する
+ *   （`strictReadonly` が必ず効くことの構造的保証。resumable 以外では false = 従来どおり
+ *   履歴末尾の `exec` マーカーで判定する）
+ * - outputDirInstruction: `OUTPUT_DIR_INSTRUCTION`（成果物を `.devrelay-output/` に置くよう AI へ
+ *   促す文言）をプロンプトに付与するか。resumable では付与しない
+ *   （所有者プロジェクトへの書き込みを AI に勧める必要が無く、strictReadonly の無駄な deny ログを避ける）
+ */
+export interface SessionStatePolicy {
+  scopedConversation: boolean;
+  outputDirClear: boolean;
+  outputFileCollect: boolean;
+  planFile: boolean;
+  workState: boolean;
+  storageContext: boolean;
+  receivedFiles: boolean;
+  projectRescan: boolean;
+  forcePlanTurn: boolean;
+  outputDirInstruction: boolean;
+}
+
+/** 対話セッション（既存の `!isEphemeral` 分岐と完全一致。全許可・forcePlanTurn のみ false） */
+const INTERACTIVE_STATE_POLICY: SessionStatePolicy = {
+  scopedConversation: true,
+  outputDirClear: true,
+  outputFileCollect: true,
+  planFile: true,
+  workState: true,
+  storageContext: true,
+  receivedFiles: true,
+  projectRescan: true,
+  forcePlanTurn: false,
+  outputDirInstruction: true,
+};
+
+/**
+ * 従来の一時セッション（crossQuery/teamExec/askDesc/raw、resumable 未指定）。
+ * 既存コードの `isEphemeral` 分岐をそのまま許可リストへ落とし込んだもの（挙動不変）。
+ * `outputFileCollect`/`storageContext`/`receivedFiles`/`projectRescan`/`outputDirInstruction` は
+ * 既存コードが `isEphemeral` を見ずに無条件実行している箇所にそのまま対応する
+ * （既知の挙動。本サイクルでは変更しない。resume とは独立の別課題）。
+ */
+const LEGACY_EPHEMERAL_STATE_POLICY: SessionStatePolicy = {
+  scopedConversation: false,
+  outputDirClear: false,
+  outputFileCollect: true,
+  planFile: false,
+  workState: false,
+  storageContext: true,
+  receivedFiles: true,
+  projectRescan: true,
+  forcePlanTurn: false,
+  outputDirInstruction: true,
+};
+
+/**
+ * 案C′ の第3区分（resumable）。crossQuery セッションに限り、scope dir 内の会話状態だけを
+ * 読み書きしてよい。他の全項目は deny（許可リスト方式）。
+ */
+const RESUMABLE_SCOPED_STATE_POLICY: SessionStatePolicy = {
+  scopedConversation: true,
+  outputDirClear: false,
+  outputFileCollect: false,
+  planFile: false,
+  workState: false,
+  storageContext: false,
+  receivedFiles: false,
+  projectRescan: false,
+  forcePlanTurn: true,
+  outputDirInstruction: false,
+};
+
+/**
+ * `agentScopeId` が安全な識別子かどうかを検証する正規表現。
+ *
+ * `scope-dir.ts` の `isValidAgentScopeId()` と意図的に重複させている（import しない）。
+ * 本ファイルは「外部 import ゼロの純関数のみで構成する」規約を持ち、`scope-dir.ts` はまさに
+ * この規約を守るために `path` を要する処理を分離した別ファイルであるため（同ファイルの JSDoc
+ * 参照）、本ファイルから `scope-dir.ts` を import すると規約が崩れる。1 行の正規表現なので
+ * 重複のコストは小さい。両方を変更する場合は必ずセットで直すこと。
+ */
+const AGENT_SCOPE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * `resolveSessionStatePolicy` が受け取るオプション。
+ * `statePolicy` は wire 上の `EphemeralStatePolicy`（`@devrelay/shared`）と同じ意味だが、
+ * 本ファイルは外部 import ゼロのため共有パッケージの型は import せず、プレーンな
+ * `string | undefined` として受け取り、リテラル比較でのみ判定する
+ * （`permission-policy.ts` の `PermissionPolicySource` と同じ流儀）。
+ */
+export interface ResolveSessionStatePolicyOptions {
+  /** `'resumable-scoped'` 以外の値・未指定はすべて「resume 不可」として扱う */
+  statePolicy?: string;
+  /** scope dir の識別子。resumable と判定するには `AGENT_SCOPE_ID_PATTERN` を満たす必要がある */
+  agentScopeId?: string;
+}
+
+/**
+ * sessionId と呼び出し時オプションから `SessionStatePolicy`（許可リスト）を決定する。
+ *
+ * 判定順序（許可は明示的に 1 段ずつ、既定は deny）:
+ * 1. `classifySessionScope(sessionId) === 'interactive'` → 全許可（既存挙動と完全一致）
+ * 2. `scope === 'crossQuery'` かつ `statePolicy === 'resumable-scoped'` かつ `agentScopeId` が
+ *    `AGENT_SCOPE_ID_PATTERN` を満たす → resumable（scope dir の会話状態のみ許可）
+ * 3. それ以外（現行の全一時セッション。teamExec/askDesc/raw、または resumable 条件を
+ *    満たさない crossQuery） → 従来どおりの一時セッション扱い（挙動不変）
+ *
+ * `agentScopeId` が不正・未指定の場合は②に落ちず③になるため、`<projectPath>/.devrelay/` 直下を
+ * resumable 扱いで触ることは構造的に起き得ない。
+ *
+ * @param sessionId 判定対象のセッション ID
+ * @param opts `server:session:start`/`server:ai:prompt` から渡される statePolicy/agentScopeId
+ */
+export function resolveSessionStatePolicy(
+  sessionId: string,
+  opts: ResolveSessionStatePolicyOptions = {},
+): SessionStatePolicy {
+  const scope = classifySessionScope(sessionId);
+
+  if (scope === 'interactive') {
+    return { ...INTERACTIVE_STATE_POLICY };
+  }
+
+  if (
+    scope === 'crossQuery' &&
+    opts.statePolicy === 'resumable-scoped' &&
+    opts.agentScopeId !== undefined &&
+    AGENT_SCOPE_ID_PATTERN.test(opts.agentScopeId)
+  ) {
+    return { ...RESUMABLE_SCOPED_STATE_POLICY };
+  }
+
+  return { ...LEGACY_EPHEMERAL_STATE_POLICY };
+}

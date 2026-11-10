@@ -113,7 +113,9 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // #348: 一時セッション（ask-member/teamexec-member/WebUI プロジェクト説明生成）が
 // projectPath 上の永続状態（conversation.json / claude-session-id / .devrelay-output）を
 // 読み書きしないようにするための判定（層 B: Agent 側の直交化）
-import { isEphemeralSession } from './session-scope.js';
+// 案C′ サイクルC1: resolveSessionStatePolicy() は第3区分（resumable-scoped）の許可リストを返す
+// （サーバーが statePolicy を送らない限り isEphemeral の二値判定と完全に同じ結果になる）
+import { isEphemeralSession, resolveSessionStatePolicy } from './session-scope.js';
 import { buildDependencyProbeBlock, buildArtifactFreshnessGate, buildPnpmInstallCommand, AGENT_INSTALL_FILTER } from './update-script.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
 // サイクルP1: Capability 配布基盤（共通層への配線。connection.ts は Claude 固有処理を一切知らない）
@@ -248,6 +250,12 @@ interface SessionInfo {
   memoryIndexWarned?: boolean;
   /** core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を使う（対話経路は未指定のまま = 従来どおり） */
   agentScopeId?: string;
+  /**
+   * 案C′ サイクルC1: 一時セッションの状態ポリシー（wire 上の `EphemeralStatePolicy` と同じ値）。
+   * `server:session:start` で受け取った値を保持し、以降のターン（`server:ai:prompt`）で
+   * payload 側が省略された場合のフォールバックに使う（`resolveSessionStatePolicy()` に渡す）。
+   */
+  statePolicy?: string;
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -920,7 +928,7 @@ async function handleClaudeLoginCode(requestId: string, authorizationCode: strin
 }
 
 async function handleSessionStart(
-  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool; agentScopeId?: string },
+  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool; agentScopeId?: string; statePolicy?: string },
   config: AgentConfig
 ) {
   const { sessionId, projectName, projectPath, aiTool: requestedAiTool, agentScopeId } = payload;
@@ -945,6 +953,9 @@ async function handleSessionStart(
   // 旧 isCrossQuery（crossquery_/teamexec_ のみ）は askdesc_ を含んでいなかったが、
   // WebUI のプロジェクト説明生成も同じ理由で一時扱いにすべきため isEphemeralSession に統一する。
   const isEphemeral = isEphemeralSession(sessionId);
+  // 案C′ サイクルC1: 一時セッションが projectPath 上の状態をどこまで読み書きしてよいかの許可リスト。
+  // サーバーが statePolicy を送らない限り（現時点の全経路）、isEphemeral の二値判定と完全に同じ結果になる。
+  const statePolicy = resolveSessionStatePolicy(sessionId, { statePolicy: payload.statePolicy, agentScopeId });
   const crossLabel = sessionId.startsWith('teamexec_') ? 'TEAM-EXEC' : sessionId.startsWith('askdesc_') ? 'ASK-DESC' : 'CROSS-QUERY';
   console.log(`🚀 Starting session: ${sessionId}${isEphemeral ? ` [${crossLabel}]` : ''}`);
   console.log(`   Project: ${projectName} (${projectPath})`);
@@ -956,7 +967,11 @@ async function handleSessionStart(
 
   // #348: 一時セッションは conversation.json を読まない（全セッション共有の resume/履歴汚染を防ぐ）
   // core#336: agentScopeId 指定時はスコープ専用ディレクトリを読む（対話経路は agentScopeId 未指定 = 従来どおり）
-  const history = isEphemeral ? [] : await loadConversation(projectPath, agentScopeId);
+  // 案C′: resumable（statePolicy.scopedConversation）なら scope dir から読む
+  const loadedHistory = statePolicy.scopedConversation ? await loadConversation(projectPath, agentScopeId) : [];
+  // 案C′ 二段防御（④）: forcePlanTurn のときは load 時点で exec マーカーを取り除き、
+  // isExecTriggered 系の判定（rescanProjectsAndSync 等）に一切影響させない。
+  const history = statePolicy.forcePlanTurn ? loadedHistory.filter(h => h.role !== 'exec') : loadedHistory;
 
   // Check for pending work state (auto-continue feature)
   // G-2（Phase C 既存バグ修正）: 一時セッション（crossquery_ 等）は所有者の作業途中メモを
@@ -965,6 +980,10 @@ async function handleSessionStart(
   // 呼ばれて所有者の auto-continue が消費されてしまう（ask は何度でも繰り返せるため、
   // 最初の ask で auto-continue が「使われた」ことになり、対話セッション側で本来
   // 続くはずだった work state が失われる）。
+  // 案C′: resumable でも workState は常に false（statePolicy.workState と isEphemeral は常に同値。
+  // RESUMABLE_SCOPED_STATE_POLICY.workState も false のため）。既存の静的ガード
+  // （apps/server/tests/cross-team-chat-wiring.test.mjs）が isEphemeral による排他を直接検証しているため、
+  // ここは意図的に isEphemeral のまま変更しない。
   const pendingWorkState = isEphemeral ? null : await loadWorkState(projectPath);
   if (pendingWorkState) {
     console.log(`📂 Found pending work state: ${pendingWorkState.summary}`);
@@ -984,7 +1003,8 @@ async function handleSessionStart(
   // Load existing Claude session ID for --resume
   // #348: 一時セッションは resume しない（対話セッションと同じ --resume を共有すると輻輳の原因になる）
   // core#336: agentScopeId 指定時はスコープ専用ディレクトリから読む
-  const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath, agentScopeId);
+  // 案C′: resumable（statePolicy.scopedConversation）なら scope dir から resume できる
+  const claudeResumeSessionId = statePolicy.scopedConversation ? await loadClaudeSessionId(projectPath, agentScopeId) : undefined;
   if (claudeResumeSessionId) {
     console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
   }
@@ -998,7 +1018,8 @@ async function handleSessionStart(
     claudeResumeSessionId: claudeResumeSessionId || undefined,
     history,
     pendingWorkState: pendingWorkState || undefined,
-    agentScopeId
+    agentScopeId,
+    statePolicy: payload.statePolicy
   });
   console.log(`📋 Session ${sessionId} -> Claude Session ${claudeSessionId}`);
 
@@ -1244,10 +1265,10 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string; statePolicy?: string }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
-  // #348: 一時セッションは projectPath 上の状態（conversation.json / .devrelay-output）を読み書きしない
-  const isEphemeral = isEphemeralSession(sessionId);
+  // #348/案C′: 一時セッションが projectPath 上の状態をどこまで読み書きしてよいかは、
+  // sessionInfo 確定後に statePolicy（resolveSessionStatePolicy）として解決する（下記参照）。
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (crossQueryStart) {
@@ -1274,8 +1295,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Agent 再起動で sessionInfoMap が消失した場合、payload の projectPath/aiTool で自動初期化
   if (!sessionInfo && payload.projectPath && payload.aiTool && currentConfig) {
     console.log(`🔄 Auto-initializing session ${sessionId} (agent may have restarted)`);
-    const history = isEphemeral ? [] : await loadConversation(payload.projectPath, payload.agentScopeId);
-    const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(payload.projectPath, payload.agentScopeId);
+    // 案C′ サイクルC1: sessionInfoMap 消失時は payload 側の statePolicy/agentScopeId から再解決する
+    // （正常経路の statePolicy は下の guard 後に sessionInfo から改めて解決する）
+    const autoInitStatePolicy = resolveSessionStatePolicy(sessionId, { statePolicy: payload.statePolicy, agentScopeId: payload.agentScopeId });
+    const autoInitLoadedHistory = autoInitStatePolicy.scopedConversation ? await loadConversation(payload.projectPath, payload.agentScopeId) : [];
+    // 案C′ 二段防御（④）: forcePlanTurn のときは load 時点で exec マーカーを取り除く
+    const history = autoInitStatePolicy.forcePlanTurn ? autoInitLoadedHistory.filter(h => h.role !== 'exec') : autoInitLoadedHistory;
+    const claudeResumeSessionId = autoInitStatePolicy.scopedConversation ? await loadClaudeSessionId(payload.projectPath, payload.agentScopeId) : undefined;
     if (claudeResumeSessionId) {
       console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
     }
@@ -1287,6 +1313,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       history,
       // core#336: MCP submission 単位のスコープ識別子（未指定 = 対話経路 = 従来どおり）
       agentScopeId: payload.agentScopeId,
+      statePolicy: payload.statePolicy,
     };
     sessionInfoMap.set(sessionId, sessionInfo);
 
@@ -1331,6 +1358,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     return;
   }
 
+  // 案C′ サイクルC1: handleSessionStart が解決した statePolicy を引き継ぐ
+  // （payload 側が省略された場合は sessionInfo に保存済みの値へフォールバックする）。
+  const statePolicy = resolveSessionStatePolicy(sessionId, {
+    statePolicy: payload.statePolicy ?? sessionInfo.statePolicy,
+    agentScopeId: sessionInfo.agentScopeId,
+  });
+
   // Save received files and get their paths
   let promptWithFiles = prompt;
   if (files && files.length > 0) {
@@ -1360,14 +1394,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     timestamp: new Date().toISOString()
   });
   // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
-  if (!isEphemeral) {
+  // 案C′: resumable（statePolicy.scopedConversation）なら scope dir に書く
+  if (statePolicy.scopedConversation) {
     await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
   }
 
   // Clear output directory before running
   // #348: 一時セッションは呼ばない（対話セッションが書きかけの .devrelay-output/ 成果物を
   // cross-query 開始のたびに rm -rf されてしまう事故を防ぐ）
-  if (!isEphemeral) {
+  // 案C′: resumable でも outputDirClear は常に false（所有者プロジェクトへの副作用を一切許可しない）
+  if (statePolicy.outputDirClear) {
     await clearOutputDir(sessionInfo.projectPath);
   }
 
@@ -1378,7 +1414,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const lastEntry = historyBeforeThisMessage[historyBeforeThisMessage.length - 1];
   const isExecTriggered = lastEntry?.role === 'exec';
   // Plan モード: permissionMode 'plan' + allowedTools、Exec モード: canUseTool コールバックで承認
-  const isPlanTurn = !isExecTriggered;
+  // 案C′ 二段防御（④）: forcePlanTurn のときは履歴の exec マーカーを無視して plan ターンに固定する
+  // （strictReadonly が必ず効くことの構造的保証。resumable 以外では従来どおり isExecTriggered で判定）
+  const isPlanTurn = statePolicy.forcePlanTurn ? true : !isExecTriggered;
   console.log(`📋 Mode: ${isExecTriggered ? 'EXEC (canUseTool approval)' : 'PLAN (permissionMode plan)'}`);
 
   // Check for pending work state (auto-continue feature)
@@ -1466,8 +1504,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   //   3. 非 Claude（Devin/Gemini 等）: 常に含める（--resume が効かずプロンプトが唯一のコンテキスト）
   //   Claude terminal mode は除外: Claude CLI 自身が JSONL でセッション管理するため注入不要
   //   （注入すると過去文脈に引きずられ新規質問を無視する症状。2026-05-27 実機 mviewer で確認）
+  // 案C′: resumable では OUTPUT_DIR_INSTRUCTION（成果物を .devrelay-output/ に置くよう AI へ促す
+  // 文言）を付与しない（所有者プロジェクトへの書き込みを AI に勧める必要が無く、strictReadonly の
+  // 無駄な deny ログを避けるため）。resumable 以外（現状の全経路）は従来どおり常に付与する。
+  const outputDirInstructionText = statePolicy.outputDirInstruction ? OUTPUT_DIR_INSTRUCTION : '';
   const composeFullPrompt = (includeHistory: boolean): string => {
-    const basePrompt = effectiveModeInstruction + prevExecSummary + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+    const basePrompt = effectiveModeInstruction + prevExecSummary + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + outputDirInstructionText;
     if (!(sessionInfo.history.length > 1 && includeHistory)) {
       historyContextSize = 0;
       return basePrompt;
@@ -1490,7 +1532,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
     historyContextSize = historyContext.length;
-    return `${effectiveModeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
+    return `${effectiveModeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${outputDirInstructionText}`;
   };
 
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
@@ -1571,7 +1613,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   console.log(`   - User prompt: ${promptWithFiles.length} chars`);
   console.log(`   - Work state: ${workStatePrompt.length} chars`);
   console.log(`   - Storage context: ${storageContextPrompt.length} chars`);
-  console.log(`   - Output instruction: ${OUTPUT_DIR_INSTRUCTION.length} chars`);
+  console.log(`   - Output instruction: ${outputDirInstructionText.length} chars`);
   if (historyContextSize > 0) {
     console.log(`   - History context: ${historyContextSize} chars`);
   }
@@ -1633,7 +1675,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     // #316: チャット表示言語（'en' の場合のみ AI への英語応答指示が付与される）
     language: payload.language,
     // #348: 一時セッションは claude-session-id / context-usage を projectPath 上に書かない
-    persistProjectState: !isEphemeral,
+    // 案C′: resumable（statePolicy.scopedConversation）なら scope dir には書いてよい
+    persistProjectState: statePolicy.scopedConversation,
     // core#336: MCP submission 単位のスコープ識別子 / plan-exec 対応付け correlation ID
     agentScopeId: sessionInfo.agentScopeId,
     turnId: payload.turnId,
@@ -1766,7 +1809,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // 全ツール共通でここに保存する。保存失敗は savePlanFile 内部で握り潰される
   // （プラン保存の失敗で AI 応答自体を壊さないため throw しない設計）。
   const persistPlanFile = async (text: string) => {
-    if (!isPlanTurn || isEphemeral) return;
+    // 案C′: resumable でも planFile は常に false（`.devrelay/plans/` は scope 分離されておらず
+    // 他スレッドと共有されているため、一時セッションには一切書かせない）
+    if (!isPlanTurn || !statePolicy.planFile) return;
     const body = stripProgressMarkers(text).trim();
     const saved = await savePlanFile(sessionInfo.projectPath, body);
     if (saved) console.log(`📋 Plan file saved: ${saved}`);
@@ -1885,7 +1930,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               content: stripProgressMarkers(responseText).trim() || responseText.trim(),
               timestamp: new Date().toISOString()
             });
-            if (!isEphemeral) {
+            // 案C′: resumable（statePolicy.scopedConversation）なら scope dir に書く
+            if (statePolicy.scopedConversation) {
               await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
               console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
             }
@@ -1893,7 +1939,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 
           // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）
           // 生の `flutter create` 等で作られた新規プロジェクトを即座に DevRelay へ反映する
-          if (isExecTriggered) {
+          // 案C′: resumable では projectRescan は常に false（所有者の CLAUDE.md / projects.yaml を
+          // 一時セッションが書き換えないよう、isExecTriggered に加えて policy でも二重に防ぐ）
+          if (isExecTriggered && statePolicy.projectRescan) {
             await rescanProjectsAndSync(currentConfig!);
           }
         } else {
@@ -1919,7 +1967,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.claudeResumeSessionId = undefined;
       // #348: 一時セッションは projectPath 上の claude-session-id ファイルを消さない
       // （そもそも読んでいないため = undefined のはずだが、念のため書き込み経路も揃えておく）
-      if (!isEphemeral) {
+      // 案C′: resumable（statePolicy.scopedConversation）なら scope dir のファイルは消してよい
+      if (statePolicy.scopedConversation) {
         await clearClaudeSessionId(sessionInfo.projectPath, sessionInfo.agentScopeId);
       }
 
@@ -2017,14 +2066,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 content: stripProgressMarkers(responseText).trim() || responseText.trim(),
                 timestamp: new Date().toISOString()
               });
-              if (!isEphemeral) {
+              // 案C′: resumable（statePolicy.scopedConversation）なら scope dir に書く
+              if (statePolicy.scopedConversation) {
                 await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
                 console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
               }
             }
 
             // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）
-            if (isExecTriggered) {
+            // 案C′: resumable では projectRescan は常に false（二段防御、理由は通常経路と同じ）
+            if (isExecTriggered && statePolicy.projectRescan) {
               await rescanProjectsAndSync(currentConfig!);
             }
           } else {

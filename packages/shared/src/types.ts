@@ -32,10 +32,21 @@ export const PROTOCOL_VERSION = 1;
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume'];
+
+/**
+ * 案C′（クロス ask のセッション継続）サイクルC1: 一時セッションの状態ポリシー。
+ * 未指定 = 従来挙動（完全な使い捨て。conversation.json 等を一切読み書きしない）。
+ * 'resumable-scoped' = crossQuery セッションに限り、scope dir（`.devrelay/sessions/<agentScopeId>/`）
+ * 内の会話状態（conversation.json / claude-session-id / context-usage）だけを読み書きしてよい。
+ * `clearOutputDir`/`savePlanFile`/work state/storageContext 等、projectPath 直下への副作用は
+ * このポリシーだけでは一切解禁しない（session-scope.ts の `resolveSessionStatePolicy()` 参照）。
+ * サーバーがこのフィールドを送らない限り Agent の挙動は完全に不変（C1 単体では無効化のまま）。
+ */
+export type EphemeralStatePolicy = 'resumable-scoped';
 
 // -----------------------------------------------------------------------------
 // Capability 配布基盤（サイクルP1）
@@ -621,6 +632,11 @@ export interface SessionStartPayload {
   aiTool: AiTool;
   /** core#336: 会話セッションのスコープ ID。ConversationExecPayload.agentScopeId の JSDoc を参照 */
   agentScopeId?: string;
+  /**
+   * 案C′ サイクルC1: 一時セッションの状態ポリシー。未指定 = 従来挙動。詳細は `EphemeralStatePolicy` の JSDoc参照。
+   * 'cross-ask-resume' capability を申告していない Agent はこのフィールドを無視して従来動作になる。
+   */
+  statePolicy?: EphemeralStatePolicy;
 }
 
 // AI ツール切り替え関連
@@ -801,6 +817,12 @@ export interface AiPromptPayload {
   resumeSessionId?: string;
   /** core#336: correlation ID。ConversationExecPayload.turnId の JSDoc を参照 */
   turnId?: string;
+  /**
+   * 案C′ サイクルC1: 一時セッションの状態ポリシー。SessionStartPayload.statePolicy と同じ意味。
+   * `server:session:start` と `server:ai:prompt` の両方に載せるが、片方欠落でも整合するよう
+   * Agent 側は `payload.statePolicy ?? sessionInfo.statePolicy` で解決する。
+   */
+  statePolicy?: EphemeralStatePolicy;
 }
 
 // -----------------------------------------------------------------------------
