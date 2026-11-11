@@ -1701,6 +1701,54 @@ G-8（approve-all）・G-9（`/tmp` プロンプトファイル）は「クロ�
 切られても自分が書いた本文は読める——ツリーからは消えるので新規の質問はできなくなるだけ）。
 詳細は `doc/devlog/2026-11-10_cross_team_chat_phase_c.md`。
 
+**C2 サイクル（resume のサーバー配線、2026-11-11）**: G サイクルの `statePolicy:'isolated'` に
+加えて、第3の値 `'resumable-scoped'`（C1 で Agent 側だけ先行実装済み）をサーバーが初めて送る
+ようにした。設計の肝は **resume 可否の判定を G の `decideCrossAskIsolation()` の出力ではなく
+入力から独立に行う**こと——`isolated` を送る条件（capability・読み取り専用強制可否）を
+満たした ask のうち、さらに `'cross-ask-resume-strict'` capability（C1 時点の緩い
+`'cross-ask-resume'` とは別名。fail-closed のため新設）を申告する Agent にだけ
+`'isolated'` を `'resumable-scoped'` に**昇格**させる。`decideCrossAskSessionPlan()`
+（`cross-ask-resume-rules.ts`）がこの昇格判定と、resume する場合に割り当てる scope id
+（`crossask-<digest32>-g<世代>`。digest は `sha256(requesterUserId+projectId)` で決定論的、
+projectPath 上に PII を残さない）を決める。
+
+**世代（generation）という発想**: 安定した長命 Session 行は作らない（Phase C 撤回案と同じ
+教訓——1 ターン 1 行の `crossquery_<uuid>` 構造を崩すと既存ガード・監査・レート制限が全部
+壊れる）。代わりに `Session.agentScopeId`（既存列）に世代付き scope id を記録し、
+次の ask の直前に**過去の Session 行から最大世代を読み直す**ことで Agent 側に一切状態を
+持たせずに同じ scope を再現する。世代は **単調増加のみ**（巻き戻らない）——起動時スイープ
+（`index.ts`）は `teamexec_`/`crossquery_` を `status:'ended'` に変えるだけで `Session` 行を
+削除しないため（`Session` の削除経路自体が存在しない）、世代解決クエリが `status` を見ない
+限り世代が後退することは構造的に起きない。TTL（既定14日）または上限ターン（既定40）を
+超えたら世代を +1 して新しい scope dir に切り替え、その初回だけ案Bの前置を1回許可する
+（型で `mode:'resumable'` のときは `includeContextPrefix` が `false` リテラルしか取れない
+ようにして、resume と案B前置が同時に効くこと＝二重注入を構造的に禁止した）。
+
+**Agent 側の2つの既存バグ修正（A-1/A-2、C2 で同梱）**: C1 時点の `RESUMABLE_SCOPED_STATE_POLICY`
+は `refuseUnsafeAiTool:false` の暫定値のままだった（isolated は `true`）。サーバー側の
+`readOnlyEnforced` 判定が主防御だが、Agent 側 `resolveEffectiveAiTool()` が実行直前に
+AI を差し替えるケースの最後の砦として isolated と同じ `true` に揃えた（A-1）。また、
+resume 失敗時の retry（`--resume` 無しでの再試行）が `projectStateRead` を引き継いでいない
+既存バグを発見・修正した（A-2）——`isolated`（`projectStateRead:false`）のターンが resume
+失敗で retry に入ると、`agentScopeId` が未指定扱いになり Codex/Devin のセッション状態読み出し
+ガードが所有者の `projectPath` 直下を向いてしまう実害があった。
+
+**レート制限（G-11、同時に実施）**: G サイクルで `document-api.ts`（Agent REST/スキル経路）
+だけが持っていた5分窓レート制限（`ASK_PROJECT_LIMIT=8`/`ASK_USER_LIMIT=20`）が、チャット
+`ask`・WebUI クロスタブ（`cross-ask-runner.ts` 経由）には無かった既存の穴を塞いだ。
+`countRecentCrossSessions()`/`decideAskRateLimit()`（既存の純関数）をそのまま流用。
+
+**キルスイッチ**: `DEVRELAY_CROSS_ASK_RESUME`（既定 **OFF**。`DEVRELAY_CROSS_TEAM` 等と同方向
+——`DEVRELAY_CROSS_ASK_ISOLATION` の既定 ON とは逆）。`DEVRELAY_CROSS_ASK_ISOLATION=0`
+（G の緊急ロールバック）のときは resume も明示的に止める（偶然の連動ではなく
+`decideCrossAskSessionPlan()` の入力として扱う設計判断）。
+
+**対象外**: `routes/document-api.ts`（ask-member REST/スキル経路）は resume を配線していない
+（独立実装で runner を経由しないため。isolated のまま scope dir を一切触らず実害はないが、
+同一ペアでも経路によって resume の有無が混在する UX 上の非対称が残る）。C3（WebUI の
+「会話をリセット」ボタン・旧世代 scope dir の明示削除・購読解除時の best-effort クリア）は
+未実装のまま。詳細は `doc/devlog/2026-11-11_144009.md`。
+
 ### API 構成
 - **WebUI 向け**: `GET/POST/DELETE /api/teams`、`POST/DELETE /api/teams/:teamId/members`
 - **Agent 向け**: `GET /api/agent/members`（チームメイト一覧）、`POST /api/agent/ask-member`（質問送信）、`POST /api/agent/teamexec-member`（実行依頼送信）

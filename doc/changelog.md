@@ -6,6 +6,52 @@
 
 ## 実装済み機能
 
+### サイクルC2: クロス ask のセッション継続（resume、サーバー配線） (2026-11-11)
+
+サイクルC1（Agent 側土台、`b8f1bdf`）・サイクルG（既存バグ修正、`34f5228`）に続き、
+サーバーから `statePolicy:'resumable-scoped'` を配線して resume を実稼働させる
+（`doc/cross-ask-resume-plan.md` の C2 節）。
+
+#### 設計
+新規 `cross-ask-resume-rules.ts`（外部 import ゼロ）に決定論的 scope id
+（`crossask-<digest32>-g<世代>`、digest は `sha256(requesterUserId+projectId)`）と
+`decideCrossAskSessionPlan()` を実装。resume 可否は G の `decideCrossAskIsolation()` の
+**出力**ではなく、その**入力**（`'cross-ask-resume-strict'` capability・
+`decideAskReadOnlyEnforcement()` の結果）を直接受け取って独立に判定するが、
+`DEVRELAY_CROSS_ASK_ISOLATION=0`（G の緊急ロールバック）のときは resume も意図的に止める
+（偶然の連動ではなく明示的な従属）。TTL（`DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS`、既定14日）
+または上限ターン（`DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS`、既定40）超過で世代を +1 し、
+新世代の初回だけ案B前置を1回許可する（`mode:'resumable'` は型で `includeContextPrefix:false`
+を強制して二重注入を禁止）。`cross-ask-runner.ts` に G の isolation 判定の直後（Session 作成
+より前）で resume 判定と、G-11（チャット/WebUI 経路に無かった5分窓レート制限。
+`ASK_PROJECT_LIMIT=8`/`ASK_USER_LIMIT=20` を ask-member から流用、キルスイッチ無し）を追加。
+`agent-manager.ts` の `executeCrossProjectQuery` に `agentScopeId` 引数を追加し
+`startSession` へ配線（従来 `undefined` 固定）。ゲート用に新 capability
+`'cross-ask-resume-strict'` を新設（C1 時点の緩い `'cross-ask-resume'` は認可に使わない、
+fail-closed、G の `'cross-ask-isolation'` と同じ設計）。Agent 側（linux/macos/windows
+byte-identical）2点: A-1 `RESUMABLE_SCOPED_STATE_POLICY.refuseUnsafeAiTool` を isolated と
+同じ `true` に変更、A-2 resume 失敗時の retry で `projectStateRead` の引き継ぎ漏れを修正
+（isolated が retry 時に所有者の本物の codex/devin セッションを読んでしまう既存バグ）。
+世代の単調増加は `index.ts` の起動時スイープが Session を `status:'ended'` に変えるだけで
+削除しないこと（`deleteMany` 対象外）を確認し、世代解決クエリが `status` を見ないことで
+構造的に保証した。対象は `cross-ask-runner.ts` 経由（チャット `ask`・WebUI クロスタブ）のみ、
+`routes/document-api.ts`（ask-member REST/スキル経路）は resume 対象外のまま
+（isolated のまま。scope dir を一切触らないため実害なし）。
+
+#### キルスイッチ
+`DEVRELAY_CROSS_ASK_RESUME`（既定 **OFF**。`DEVRELAY_CROSS_TEAM` 等と同方向）・
+`DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS`（既定14日）・
+`DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS`（既定40）。
+
+#### 検証
+`pnpm build` 6 workspace green、`require(` 混入なし。テスト（`--test-concurrency=1`）:
+shared 143/143（0変更）・server 1604/1604（新規51）・web 971/971（0変更）・
+linux 1312/1312（新規1）・macos 792 pass+1skip/793（新規1）・windows 190/190（新規1）green。
+`apps/web`・`prisma`・`routes/document-api.ts` は無変更。DB マイグレーション不要
+（`Session.agentScopeId` は既存列）。commit `b47cb0b`（main 直接）push 済み。
+
+C3（WebUI 操作 UI・「会話をリセット」・旧世代 scope dir の明示削除）は未実装。
+
 ### サイクルG: クロス ask の既存バグ修正（所有者プロジェクトの隔離） (2026-11-10)
 
 クロスユーザー Team Phase C（上記）・サイクルC1（`doc/cross-ask-resume-plan.md`）の調査で

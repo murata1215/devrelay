@@ -9,6 +9,23 @@
 > C1 単体では挙動は完全に不変（resume は未稼働）。**C2（サーバー配線）・C3（WebUI）・G（既存バグ修正）は
 > 未実装**。後続サイクルは下記本文の該当セクションをそのまま使ってよい。詳細は
 > `doc/devlog/INDEX.md` の該当エントリを参照。
+>
+> **実装状況（2026-11-10 追記2）**: **G（既存バグ修正一式、`34f5228`）を実装済み**。
+> `EphemeralStatePolicy` に第4区分 `'isolated'` を追加し、`decideCrossAskIsolation()` で
+> capability + 読み取り専用強制可否を検証して deny-closed にした。G-11（レート制限）は
+> C2 送りのまま。詳細は `doc/devlog/2026-11-10_151128.md`。
+>
+> **実装状況（2026-11-11 追記）**: **C2（サーバー配線、`b47cb0b`）を実装済み**。
+> `cross-ask-resume-rules.ts` 新設・`cross-ask-runner.ts`/`agent-manager.ts` 配線・
+> `DEVRELAY_CROSS_ASK_RESUME`（既定OFF）/`_TTL_DAYS`（既定14）/`_MAX_TURNS`（既定40）・
+> G-11（レート制限）・Agent 側 A-1（`refuseUnsafeAiTool:true`）/A-2（retry の
+> `projectStateRead` 引き継ぎ修正）を実装。本文中の「③ resume 失敗時に案Bへ落とす」
+> 「④ strictReadonly が毎回効くことの確認」「⑤ 二重注入を避ける」は実装時に型レベルの
+> 排他（`mode:'resumable'` ⇒ `includeContextPrefix:false`）で解決し、`decideCrossAskIsolation()`
+> の「出力」ではなく「入力」を resume 判定が直接受け取る設計に変更した点が本文の提案と異なる
+> （`isolated` という中間状態を経由しない）。**C3（WebUI の「会話をリセット」・旧世代 scope dir
+> の明示削除）は未実装**。`document-api.ts`（ask-member REST/スキル経路）は resume 対象外の
+> ままという本文の想定どおりの割り切りを維持した。詳細は `doc/devlog/2026-11-11_144009.md`。
 
 ## Context（なぜやるか）
 
