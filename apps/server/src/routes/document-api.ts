@@ -26,7 +26,7 @@ import type { AiTool, ManagementInfo } from '@devrelay/shared';
 import { SCAFFOLD_TEMPLATE_DEFS, getScaffoldTemplateDef, AI_TOOL_NAMES } from '@devrelay/shared';
 import { decideCrossTarget, pickInflightCrossSession, buildCrossTargetRejectionMessage, resolveCrossSourceLabel, ASK_INFLIGHT_WINDOW_MS } from '../services/cross-query-guard.js';
 import { resolveCrossTeamAccess } from '../services/cross-team-authz.js';
-import { buildCrossTeamDenyLog, isCrossAskIsolationEnabled } from '../services/cross-team-guard.js';
+import { buildCrossTeamDenyLog, isCrossAskIsolationEnabled, isPlanGateCapabilityCheckEnabled } from '../services/cross-team-guard.js';
 import { decideAskReadOnlyEnforcement } from '../services/ask-guard.js';
 import { decideCrossAskIsolation, buildCrossAskIsolationDenialMessage, buildCrossAskIsolationDenyLog } from '../services/cross-ask-isolation-rules.js';
 import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
@@ -706,7 +706,9 @@ export function registerDocumentApiRoutes(app: FastifyInstance) {
         agentHasIsolationCapability: agentHasCapability(targetProject.machine.id, 'cross-ask-isolation'),
         // サイクルS1（2026-11-12）: プランモードの Bash ゲートを PreToolUse フックで実装済みの
         // Agent（linux/macos）かを見る。未申告（旧 Agent・windows）は fail-closed で断る。
-        agentHasPlanGateCapability: agentHasCapability(targetProject.machine.id, 'plan-gate-hook'),
+        // DEVRELAY_PLAN_GATE_CAPABILITY=0 なら常に true（このチェックだけの緊急ロールバック）。
+        agentHasPlanGateCapability: !isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY)
+          || agentHasCapability(targetProject.machine.id, 'plan-gate-hook'),
         readOnlyEnforced: decideAskReadOnlyEnforcement({ aiTool: resolvedAiToolForIsolation, terminalMode: targetProject.terminalMode }).readOnlyEnforced,
       });
       if (!isolation.allowed) {

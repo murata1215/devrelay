@@ -119,6 +119,27 @@ describe('サイクルS1（2026-11-12）: decideCrossAskIsolation( の呼び出�
   });
 });
 
+describe('サイクルS1（2026-11-12）: DEVRELAY_PLAN_GATE_CAPABILITY キルスイッチが agentHasPlanGateCapability の解決側に配線されている', () => {
+  // cross-ask-target-state.ts は agentHasPlanGateCapability を受け取るだけで自身は
+  // process.env を見ない（呼び出し元の api.ts が解決して渡す）ため、このキルスイッチの
+  // 配線確認は実際に process.env.DEVRELAY_PLAN_GATE_CAPABILITY を読む 3 ファイル
+  // （cross-ask-runner.ts / document-api.ts / api.ts）に対してのみ行う。
+  test('cross-ask-runner.ts が isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY) を使っている', () => {
+    const source = readServerSource('src/services/cross-ask-runner.ts');
+    assert.match(source, /isPlanGateCapabilityCheckEnabled\(process\.env\.DEVRELAY_PLAN_GATE_CAPABILITY\)/);
+  });
+
+  test('document-api.ts が isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY) を使っている', () => {
+    const source = readServerSource('src/routes/document-api.ts');
+    assert.match(source, /isPlanGateCapabilityCheckEnabled\(process\.env\.DEVRELAY_PLAN_GATE_CAPABILITY\)/);
+  });
+
+  test('api.ts（cross-ask-target-state.ts の呼び出し元）が isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY) を使っている', () => {
+    const source = readServerSource('src/routes/api.ts');
+    assert.match(source, /isPlanGateCapabilityCheckEnabled\(process\.env\.DEVRELAY_PLAN_GATE_CAPABILITY\)/);
+  });
+});
+
 describe('cross-team-guard.ts: DEVRELAY_CROSS_ASK_ISOLATION の極性（既定 ON）', () => {
   const source = readServerSource('src/services/cross-team-guard.ts');
 

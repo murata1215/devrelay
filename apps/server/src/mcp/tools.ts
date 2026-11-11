@@ -57,6 +57,7 @@ import {
   buildCancelClaimWhere,
   isMcpAskEnabled,
 } from '../services/ask-guard.js';
+import { isPlanGateCapabilityCheckEnabled } from '../services/cross-team-guard.js';
 import { searchKnowledge, getKnowledgeThread, setThreadClassification } from '../services/knowledge-service.js';
 import { isKnowledgeEnabled } from '../services/knowledge-rank.js';
 import { answerKnowledge, type AnswerSink, type KnowledgeAnswerDoneResult } from '../services/knowledge-answer.js';
@@ -1315,7 +1316,9 @@ export function registerMcpTools(server: McpServer, userId: string) {
         const { readOnlyEnforced } = decideEffectiveAskReadOnlyEnforcement({
           aiTool,
           terminalMode: project.terminalMode,
-          agentHasPlanGateCapability: agentHasCapability(project.machineId, 'plan-gate-hook'),
+          // DEVRELAY_PLAN_GATE_CAPABILITY=0 なら常に true（capability チェックだけの緊急ロールバック）。
+          agentHasPlanGateCapability: !isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY)
+            || agentHasCapability(project.machineId, 'plan-gate-hook'),
         });
 
         // セッション作成（origin:'mcp' で agentScopeId=sessionId が DB に記録される）
@@ -1455,7 +1458,8 @@ export function registerMcpTools(server: McpServer, userId: string) {
         const { readOnlyEnforced } = decideEffectiveAskReadOnlyEnforcement({
           aiTool: session.aiTool,
           terminalMode: !!session.project?.terminalMode,
-          agentHasPlanGateCapability: agentHasCapability(session.machineId, 'plan-gate-hook'),
+          agentHasPlanGateCapability: !isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY)
+            || agentHasCapability(session.machineId, 'plan-gate-hook'),
         });
 
         const base = { askId, state, elapsedSeconds, readOnlyEnforced, aiTool: session.aiTool };

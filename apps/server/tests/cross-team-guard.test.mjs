@@ -8,6 +8,7 @@ import {
   isCrossTeamEnabled,
   isCrossTeamExecEnabled,
   isCrossAskIsolationEnabled,
+  isPlanGateCapabilityCheckEnabled,
   isCrossAskResumeEnabled,
   decideCrossTeamAccess,
   buildCrossTeamDenyLog,
@@ -70,6 +71,21 @@ describe('isCrossAskIsolationEnabled（サイクルG）: 既定 ON（既存キ�
     assert.equal(isCrossAskIsolationEnabled('1'), true);
     assert.equal(isCrossAskIsolationEnabled(''), true);
     assert.equal(isCrossAskIsolationEnabled('false'), true);
+  });
+});
+
+// サイクルS1（2026-11-12）
+describe('isPlanGateCapabilityCheckEnabled（サイクルS1）: 既定 ON（isCrossAskIsolationEnabled と同方向）', () => {
+  test('未設定は true（既定 ON）', () => {
+    assert.equal(isPlanGateCapabilityCheckEnabled(undefined), true);
+  });
+  test("'0' のときだけ false", () => {
+    assert.equal(isPlanGateCapabilityCheckEnabled('0'), false);
+  });
+  test("'0' 以外の値は true のまま", () => {
+    assert.equal(isPlanGateCapabilityCheckEnabled('1'), true);
+    assert.equal(isPlanGateCapabilityCheckEnabled(''), true);
+    assert.equal(isPlanGateCapabilityCheckEnabled('false'), true);
   });
 });
 

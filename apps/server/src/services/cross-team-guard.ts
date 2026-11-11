@@ -68,6 +68,23 @@ export function isCrossAskIsolationEnabled(raw: string | undefined): boolean {
 }
 
 /**
+ * サイクルS1（2026-11-12）: `DEVRELAY_PLAN_GATE_CAPABILITY` の既定値解決（既定 ON、
+ * `DEVRELAY_CROSS_ASK_ISOLATION` と同じ極性）。
+ *
+ * `1`（既定）のとき、`decideCrossAskIsolation()` の呼び出し元は宛先 Agent の実際の
+ * `'plan-gate-hook'` capability を渡す（未申告なら fail-closed で ask を断る）。
+ *
+ * `0` にすると、呼び出し元は `agentHasPlanGateCapability` を常に `true` として渡す
+ * （= この capability チェックだけを無効化する緊急ロールバック。`'cross-ask-isolation'`
+ * capability のチェックには影響しない。PreToolUse フック自体にはキルスイッチを置かない方針
+ * のため、Agent 側の挙動はこのフラグの値に関わらず不変——これはサーバー側の
+ * fail-closed 判定だけを戻すスイッチ）。
+ */
+export function isPlanGateCapabilityCheckEnabled(raw: string | undefined): boolean {
+  return raw !== '0';
+}
+
+/**
  * サイクルC2: `DEVRELAY_CROSS_ASK_RESUME` の既定値解決（既定 **OFF**=`raw === '1'`。
  * 新しい信頼境界を黙って開けないため `DEVRELAY_CROSS_TEAM`/`DEVRELAY_CROSS_TEAM_EXEC` と
  * 同じ極性にする——`DEVRELAY_CROSS_ASK_ISOLATION` の既定 ON とは逆方向）。

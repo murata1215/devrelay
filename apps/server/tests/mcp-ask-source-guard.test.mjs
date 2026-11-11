@@ -59,7 +59,8 @@ describe('mcp-ask-source-guard: ask_project の実装が読み取り専用強制
   // （旧 Agent では readOnlyEnforced が嘘になるため）。
   test('ask_project は decideEffectiveAskReadOnlyEnforcement を呼んでいる（plan-gate-hook capability 込み）', () => {
     assert.match(askProjectBody, /decideEffectiveAskReadOnlyEnforcement\(/);
-    assert.match(askProjectBody, /agentHasPlanGateCapability:\s*agentHasCapability\([^,]+,\s*'plan-gate-hook'\)/);
+    assert.match(askProjectBody, /agentHasCapability\([^,]+,\s*'plan-gate-hook'\)/);
+    assert.match(askProjectBody, /isPlanGateCapabilityCheckEnabled\(process\.env\.DEVRELAY_PLAN_GATE_CAPABILITY\)/);
   });
 
   test('ask_project は buildAskPromptPrefix をプロンプトに合成している', () => {
@@ -120,6 +121,7 @@ describe('mcp-ask-source-guard: ask_project の実装が読み取り専用強制
   // サイクルS1（2026-11-12）: get_answer も ask_project と同じ実効判定（capability 込み）を使う。
   test('get_answer は decideEffectiveAskReadOnlyEnforcement を呼んでいる（plan-gate-hook capability 込み）', () => {
     assert.match(getAnswerBody, /decideEffectiveAskReadOnlyEnforcement\(/);
-    assert.match(getAnswerBody, /agentHasPlanGateCapability:\s*agentHasCapability\([^,]+,\s*'plan-gate-hook'\)/);
+    assert.match(getAnswerBody, /agentHasCapability\([^,]+,\s*'plan-gate-hook'\)/);
+    assert.match(getAnswerBody, /isPlanGateCapabilityCheckEnabled\(process\.env\.DEVRELAY_PLAN_GATE_CAPABILITY\)/);
   });
 });

@@ -26,7 +26,7 @@ import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
-import { isCrossTeamEnabled, isCrossTeamChatEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled, isCrossAskResetEnabled } from '../services/cross-team-guard.js';
+import { isCrossTeamEnabled, isCrossTeamChatEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled, isCrossAskResetEnabled, isPlanGateCapabilityCheckEnabled } from '../services/cross-team-guard.js';
 import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
 import { isCrossTeamPublishEnabled, selectPublishableMembers } from '../services/cross-team-publish.js';
 import { listCrossTeamAskCandidateProjects, findCrossTeamAskProjectById } from '../services/cross-team-authz.js';
@@ -3526,7 +3526,10 @@ export async function apiRoutes(app: FastifyInstance) {
           isolationEnabled,
           resumeEnabled,
           agentHasIsolationCapability: agentHasCapability(c.machine.id, 'cross-ask-isolation'),
-          agentHasPlanGateCapability: agentHasCapability(c.machine.id, 'plan-gate-hook'),
+          // サイクルS1（2026-11-12）: DEVRELAY_PLAN_GATE_CAPABILITY=0 なら常に true
+          // （このチェックだけの緊急ロールバック。cross-ask-runner.ts/document-api.ts と同じ）。
+          agentHasPlanGateCapability: !isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY)
+            || agentHasCapability(c.machine.id, 'plan-gate-hook'),
           agentHasResumeCapability: agentHasCapability(c.machine.id, 'cross-ask-resume-strict'),
           readOnlyEnforced,
         });
