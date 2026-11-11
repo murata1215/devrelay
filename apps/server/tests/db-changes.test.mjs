@@ -232,25 +232,34 @@ describe('各 SQL ファイルの自己整合・冪等性・ガード・ヘッ�
         assert.equal(Number.parseInt(m[2], 10), no);
       });
 
-      test('CREATE TABLE / ADD COLUMN / CREATE INDEX は全て IF NOT EXISTS 付き', () => {
-        assert.ok(!/CREATE TABLE(?! IF NOT EXISTS)/.test(codeOnly), 'IF NOT EXISTS の無い CREATE TABLE がある');
-        assert.ok(!/ADD COLUMN(?! IF NOT EXISTS)/.test(codeOnly), 'IF NOT EXISTS の無い ADD COLUMN がある');
-        assert.ok(!/CREATE (UNIQUE )?INDEX(?! IF NOT EXISTS)/.test(codeOnly), 'IF NOT EXISTS の無い CREATE INDEX がある');
+      // "_existed" ガード（IF NOT column_existed THEN ... END IF;）の内側は、SQL レベルの
+      // IF NOT EXISTS の代わりに PL/pgSQL の分岐そのものが冪等性を保証する（0027 のパターン）。
+      // そのため冪等性 lint はガードの外側だけに適用する。
+      const outsideExistedGuard = codeOnly.replace(/IF NOT \w+_existed THEN[\s\S]*?END IF;/g, '');
+
+      test('CREATE TABLE / ADD COLUMN / CREATE INDEX は全て IF NOT EXISTS 付き（column_existed ガード内は対象外）', () => {
+        assert.ok(!/CREATE TABLE(?! IF NOT EXISTS)/.test(outsideExistedGuard), 'IF NOT EXISTS の無い CREATE TABLE がある');
+        assert.ok(!/ADD COLUMN(?! IF NOT EXISTS)/.test(outsideExistedGuard), 'IF NOT EXISTS の無い ADD COLUMN がある');
+        assert.ok(!/CREATE (UNIQUE )?INDEX(?! IF NOT EXISTS)/.test(outsideExistedGuard), 'IF NOT EXISTS の無い CREATE INDEX がある');
       });
 
-      test('backfill（UPDATE/DELETE）がある場合、ALTER 前の列存在チェックで「今回新規追加したときだけ」実行するガードを持つ（台帳の記録状態に依存せず、既存データを書き換えない）', () => {
-        if (!/\b(UPDATE|DELETE)\b/.test(codeOnly)) return; // backfill を持たないファイルは対象外
+      // backfill（実データを書き換える UPDATE/DELETE FROM）の検出。
+      // "ON DELETE CASCADE/RESTRICT"（FK の参照動作）・"ON UPDATE CASCADE" は対象外にする
+      // （これらは `\bUPDATE\b`/`\bDELETE\b` に単純一致するが backfill ではない）。
+      const hasBackfillDml = /\bUPDATE\s+"/.test(codeOnly) || /\bDELETE\s+FROM\b/i.test(codeOnly);
+
+      test('backfill（UPDATE/DELETE FROM）がある場合、ALTER 前の列存在チェックで「今回新規追加したときだけ」実行するガードを持つ（台帳の記録状態に依存せず、既存データを書き換えない）', () => {
+        if (!hasBackfillDml) return; // backfill を持たないファイルは対象外
 
         assert.match(source, /information_schema\.columns/, 'backfill の前に列の存在チェック（information_schema.columns）が無い');
         assert.match(source, /IF NOT \w+_existed THEN/, '"_existed" 系フラグで分岐する IF NOT ガードが無い');
 
-        // "_existed" ガード（IF NOT ... THEN ... END IF;）の外側に UPDATE/DELETE が無いこと
-        // （= backfill が必ずガードの内側にある。状態不明の DB で頭から全ファイルを流しても
-        //  既に列がある DB では書き換えが起きないことを構造的に保証する）
-        const outsideGuard = codeOnly.replace(/IF NOT \w+_existed THEN[\s\S]*?END IF;/g, '');
+        // "_existed" ガードの外側に backfill の UPDATE/DELETE FROM が無いこと（= 必ずガードの内側にある。
+        // 状態不明の DB で頭から全ファイルを流しても、既に列がある DB では書き換えが起きないことを
+        // 構造的に保証する）
         assert.ok(
-          !/\b(UPDATE|DELETE)\b/.test(outsideGuard),
-          'backfill の UPDATE/DELETE が "_existed" ガードの外にある',
+          !(/\bUPDATE\s+"/.test(outsideExistedGuard) || /\bDELETE\s+FROM\b/i.test(outsideExistedGuard)),
+          'backfill の UPDATE/DELETE FROM が "_existed" ガードの外にある',
         );
       });
 
@@ -307,15 +316,55 @@ function getTrackedOrStagedFiles() {
 }
 
 describe('apps/server/db/changes/ の全ファイルが追跡済み or stage 済みであること', () => {
-  test('INDEX.tsv・SCHEMA.sha256・README.md・全 NNNN_*.sql が git ls-files ∪ staged に含まれる', () => {
+  test('INDEX.tsv・SCHEMA.sha256・README.md・zz1/zz2・全 NNNN_*.sql が git ls-files ∪ staged に含まれる', () => {
     const trackedOrStaged = getTrackedOrStagedFiles();
-    const expected = ['INDEX.tsv', 'SCHEMA.sha256', 'README.md', ...changeSqlFiles].map(
-      (f) => `apps/server/db/changes/${f}`,
-    );
+    const expected = [
+      'INDEX.tsv', 'SCHEMA.sha256', 'README.md',
+      'zz1_verify.sql', 'zz2_mark_baseline_applied.sql',
+      ...changeSqlFiles,
+    ].map((f) => `apps/server/db/changes/${f}`);
     const missing = expected.filter((p) => !trackedOrStaged.has(p));
     if (missing.length > 0) {
       assert.fail(`git add し忘れのファイルがあります（commit すると索引だけが届く恐れ）:\n${missing.map((m) => `  ${m}`).join('\n')}`);
     }
+  });
+});
+
+// ============================================================
+// zz1/zz2: baseline 系補助 SQL の安全性（サイクルM1b）
+// ============================================================
+
+describe('zz1_verify.sql は読み取り専用（DDL・DML を一切含まない）', () => {
+  const source = readFileSync(path.join(changesDir, 'zz1_verify.sql'), 'utf8');
+  const codeOnly = source.replace(/--.*$/gm, '');
+
+  test('CREATE/ALTER/DROP/INSERT/UPDATE/DELETE FROM を含まない', () => {
+    assert.ok(!/\b(CREATE|ALTER|DROP|INSERT)\b/i.test(codeOnly), 'DDL/INSERT を含んでいる');
+    assert.ok(!/\bUPDATE\s+"/.test(codeOnly), 'UPDATE 文を含んでいる');
+    assert.ok(!/\bDELETE\s+FROM\b/i.test(codeOnly), 'DELETE FROM 文を含んでいる');
+  });
+});
+
+describe('zz2_mark_baseline_applied.sql は台帳への INSERT 以外の書き込みを行わない', () => {
+  const source = readFileSync(path.join(changesDir, 'zz2_mark_baseline_applied.sql'), 'utf8');
+  const codeOnly = source.replace(/--.*$/gm, '');
+
+  test('3段の誤爆ガード + 突合ゲート + 台帳作成を持つ', () => {
+    assert.match(source, /to_regclass\('public\."Machine"'\)/);
+    assert.match(source, /usesuper/);
+    assert.match(source, /pg_tables/);
+    assert.match(source, /CREATE TABLE IF NOT EXISTS "DbChange"/);
+  });
+
+  test('UPDATE/DELETE FROM を含まない（INSERT ... ON CONFLICT DO NOTHING のみで既存データに触れない）', () => {
+    assert.ok(!/\bUPDATE\s+"/.test(codeOnly), 'UPDATE 文を含んでいる');
+    assert.ok(!/\bDELETE\s+FROM\b/i.test(codeOnly), 'DELETE FROM 文を含んでいる');
+    assert.match(codeOnly, /ON CONFLICT \("name"\) DO NOTHING/);
+  });
+
+  test('CREATE TABLE は "DbChange" のみ（他テーブルを新設しない）', () => {
+    const matches = [...codeOnly.matchAll(/CREATE TABLE IF NOT EXISTS "(\w+)"/g)].map((m) => m[1]);
+    assert.deepEqual(matches, ['DbChange']);
   });
 });
 

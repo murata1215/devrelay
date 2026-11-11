@@ -11,4 +11,35 @@
 #           baseline とし個別ファイル化しない（_prisma_migrations に記録済み・prisma/migrations/ は凍結）。
 # pgvector: embedding 列と HNSW/ivfflat 索引は apps/server/prisma/bootstrap.sql の担当。ここには複製しない。
 #no	date	commit	file	summary	ref
+0001	2026-03-29	5da2879	0001_machine_disable_ask.sql	Machine.disableAsk 追加（AskUserQuestion 無効化トグル）	-
+0002	2026-03-29	635a134	0002_tool_approval_is_question.sql	ToolApproval.isQuestion 追加（AskUserQuestion の場合 true）	-
+0003	2026-04-01	53fd99c	0003_project_description.sql	Project.description 追加	-
+0004	2026-04-01	1bdee10	0004_project_display_name.sql	Project.displayName 追加	prisma/migrations/20260401_add_project_display_name
+0005	2026-04-07	d80a18a	0005_notification_table.sql	CREATE TABLE Notification（9列）+ FK×2 + 索引×2	-
+0006	2026-05-23	a975560	0006_project_terminal_mode.sql	Project.terminalMode 追加（既定false）	prisma/migrations/20260523_add_project_terminal_mode
+0007	2026-06-21	0b32c83	0007_project_terminal_mode_default_true.sql	Project.terminalMode の既定値を true に変更	-
+0008	2026-07-18	878429a	0008_project_terminal_mode_default_false.sql	Project.terminalMode の既定値を false に戻す（0007のrevert）	-
+0009	2026-07-20	1152120	0009_organization_tables.sql	CREATE TABLE Organization/OrganizationMember + FK + 索引	-
+0010	2026-07-25	b17975b	0010_manager_pat_supervision.sql	CREATE TABLE ManagerAssignment/PersonalAccessToken/SupervisionAuditLog + Organization.allowedIpRanges + Session.summary/summarizedAt + 索引	-
+0011	2026-08-14	13c7446	0011_machine_auto_update.sql	Machine に autoUpdate 系5列を追加	-
+0012	2026-08-14	3d6a6ee	0012_machine_version_check.sql	Machine に localCommit/remoteCommit 系5列を追加	-
+0013	2026-08-15	009cf1c	0013_machine_running_code_stale.sql	Machine.runningCodeMtime/runningCodeStale 追加	-
+0014	2026-08-23	7dfe61e	0014_project_deleted_at.sql	Project.deletedAt 追加（ソフトデリート）	-
+0015	2026-08-28	03c2c4c	0015_machine_claude_auth.sql	Machine に claudeAuthOk 系3列を追加	-
+0016	2026-08-29	641ec0a	0016_session_council_mode.sql	Session.councilMode/approvalNote 追加	-
+0017	2026-08-29	add09f4	0017_tool_approval_reason.sql	ToolApproval.reason 追加	doc/migrations/332_tool_approval_reason.md
+0018	2026-08-30	a4afb4a	0018_message_human_text_meta.sql	Message.humanTextMeta 追加	doc/migrations/334_message_human_text_meta.md
+0019	2026-09-08	9c49644	0019_org_ai_defaults_session_scope.sql	Organization.aiModelDefaults + OrganizationMember.canOverrideAiSettings + Session のplan系4列	doc/migrations/372_org_ai_defaults.md,doc/migrations/376_session_scope.md
+0020	2026-09-08	8c1dc69	0020_build_log_stop_reason.sql	BuildLog.stopReason 追加	doc/migrations/377_sdk_max_turns_stop_reason.md
+0021	2026-09-09	93b0e91	0021_session_thread_management.sql	Session に title/lastActiveAt/agentScopeId 追加 + 索引	doc/devlog/2026-09-09_202517.md
+0022	2026-09-13	4552776	0022_machine_capability_config.sql	Machine.capabilityConfig/capabilitySyncStatus 追加	-
+0023	2026-09-26	a3c91aa	0023_session_kind_cancelled_at.sql	Session.kind/cancelledAt 追加	-
+0024	2026-10-10	6ae9c8e	0024_knowledge_chunk_table.sql	CREATE TABLE KnowledgeChunk（14列）+ 索引4（embedding列/HNSW索引はbootstrap.sqlの担当）	prisma/bootstrap.sql
+0025	2026-10-11	815c504	0025_knowledge_clearance.sql	Project/Session に機密度列追加 + CREATE TABLE UserClearance	doc/migrations/knowledge2_classification.md
+0026	2026-10-18	a3f4254	-	TestflightService.port のコメントのみ変更（DDL 不要）	-
+0027	2026-10-22	d3f3979	0027_session_last_seen_ai_at.sql	Session.lastSeenAiAt + Notification.sessionId 追加（既読のサーバー管理化、backfill あり）	doc/devlog/2026-10-22_conversation_seen_server_managed.md
+0028	2026-11-02	9f1990a	0028_notification_project_optional.sql	Notification.projectId を NULL 許容に変更	prisma/migrations/20261102000000_notification_project_optional
+0029	2026-11-05	9f1990a	0029_cross_team_grant.sql	CREATE TABLE CrossTeamInvite/CrossTeamGrant/CrossTeamAuditLog + Session.requestedByUserId	prisma/migrations/20261105000000_add_cross_team_grant
+0030	2026-11-09	24df6bb	0030_team_subscription.sql	Team.visibility 追加 + CREATE TABLE TeamSubscription	prisma/migrations/20261108000000_add_team_subscription
+0031	2026-11-11	582c42f	0031_cross_ask_reset.sql	CREATE TABLE CrossAskReset + unique索引	doc/devlog/2026-11-11_201901.md
 0032	2026-11-12	-	0032_db_change_ledger.sql	DB 変更台帳 "DbChange" を新設（model DbChange 追加）	-
