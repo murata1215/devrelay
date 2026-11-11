@@ -2252,6 +2252,10 @@ async function handleAskMember(
   if (result.kind === 'busy') {
     return `⚠️ ${result.message}`;
   }
+  if (result.kind === 'rateLimited') {
+    // サイクルC2（G-11）: 5分窓のレート制限
+    return `⚠️ ${result.message}`;
+  }
   if (result.kind === 'denied') {
     // サイクルG: 宛先 Agent 未更新 or 読み取り専用を強制できない AI のため拒否
     return result.message;

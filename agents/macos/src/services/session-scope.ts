@@ -177,11 +177,17 @@ const LEGACY_EPHEMERAL_STATE_POLICY: SessionStatePolicy = {
  * 案C′ の第3区分（resumable）。crossQuery セッションに限り、scope dir 内の会話状態だけを
  * 読み書きしてよい。他の全項目は deny（許可リスト方式）。
  * `projectStateRead` は `scopedConversation` と連動して true にする
- * （scope dir 内の Codex/Devin セッション状態は resumable 自身が読み書きしてよい対象のため）。
- * `approveAllState`/`refuseUnsafeAiTool`/`reportAiToolSubstitution` は C2（サーバー配線）が
- * resume の実際のユースケース（同一ユーザー想定か cross ユーザー想定か）を決めるまでの
- * 暫定値として false にしておく（現時点でサーバーは `'resumable-scoped'` を一切送らないため
- * 挙動には影響しない。C2 実装時に本コメントと合わせて見直すこと）。
+ * （scope dir 内の Codex/Devin セッション状態は resumable 自身が読み書きしてよい対象のため。
+ * `ai-runner.ts` の全読み出し箇所が `options.agentScopeId` を伴って `resolveScopeDir()` 経由で
+ * 呼ばれるため、resumable の必須条件である有効な `agentScopeId` が無い限り projectPath 直下
+ * ＝所有者の対話セッションの状態を読む経路は構造的に存在しない）。
+ * `approveAllState`/`reportAiToolSubstitution` は C2 でも暫定値のまま false を維持する
+ * （機体グローバル状態・`Project.defaultAi` 書き換えは resume のユースケースに不要なため）。
+ * `refuseUnsafeAiTool`（サイクルC2, A-1）: C1 時点では false の暫定値だったが、ここを true に
+ * 変更する。サーバー側 `decideCrossAskSessionPlan()` が `readOnlyEnforced`（G の
+ * `decideAskReadOnlyEnforcement()` と同じ判定）を満たす宛先にしか resumable を送らないため主防御は
+ * サーバー側にあるが、Agent 側の `resolveEffectiveAiTool()` がサーバーの availability 申告と
+ * 食い違って devin/gemini 等へ差し替えた場合の最後の砦として isolated と同じ `true` に揃える。
  */
 const RESUMABLE_SCOPED_STATE_POLICY: SessionStatePolicy = {
   scopedConversation: true,
@@ -196,7 +202,7 @@ const RESUMABLE_SCOPED_STATE_POLICY: SessionStatePolicy = {
   outputDirInstruction: false,
   projectStateRead: true,
   approveAllState: false,
-  refuseUnsafeAiTool: false,
+  refuseUnsafeAiTool: true,
   reportAiToolSubstitution: false,
 };
 

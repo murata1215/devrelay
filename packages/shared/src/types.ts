@@ -37,11 +37,19 @@ export const PROTOCOL_VERSION = 1;
  * サーバーはこの capability を未申告の宛先 Agent へはクロスユーザー ask 自体を断る
  * （`statePolicy:'isolated'` を解釈できない旧 Agent を黙らせて通さないため。fail-open ではなく
  * fail-closed — クロスユーザー ask のみが対象で、同一ユーザーの ask は影響を受けない）。
+ *
+ * 'cross-ask-resume' は C1（本サイクルの前段）が申告した名前だが、サーバー側の resume 認可ゲート
+ * としては**使わない**（C1 時点の `RESUMABLE_SCOPED_STATE_POLICY` は `refuseUnsafeAiTool:false` の
+ * ままで、C2 の `refuseUnsafeAiTool:true` 化より緩いポリシーしか保証しないため）。
+ * 'cross-ask-resume-strict' = サイクルC2: `refuseUnsafeAiTool:true` 化・retry 時の
+ * `projectStateRead` 引き継ぎ修正を含む版であることをサーバーに保証する。サーバーの resume 判定
+ * （`decideCrossAskSessionPlan()`）はこちらの capability のみを見る（fail-closed。'cross-ask-isolation'
+ * と同じ理由で新設した）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation' | 'cross-ask-resume-strict';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume', 'cross-ask-isolation'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume', 'cross-ask-isolation', 'cross-ask-resume-strict'];
 
 /**
  * 案C′（クロス ask のセッション継続）サイクルC1: 一時セッションの状態ポリシー。

@@ -8,6 +8,7 @@ import {
   isCrossTeamEnabled,
   isCrossTeamExecEnabled,
   isCrossAskIsolationEnabled,
+  isCrossAskResumeEnabled,
   decideCrossTeamAccess,
   buildCrossTeamDenyLog,
   CROSS_USER_ASK_TARGET_LIMIT,
@@ -69,6 +70,20 @@ describe('isCrossAskIsolationEnabled（サイクルG）: 既定 ON（既存キ�
     assert.equal(isCrossAskIsolationEnabled('1'), true);
     assert.equal(isCrossAskIsolationEnabled(''), true);
     assert.equal(isCrossAskIsolationEnabled('false'), true);
+  });
+});
+
+describe('isCrossAskResumeEnabled（サイクルC2）: 既定 OFF（DEVRELAY_CROSS_TEAM 等と同方向、isolation とは逆方向）', () => {
+  test('未設定は false（既定 OFF）', () => {
+    assert.equal(isCrossAskResumeEnabled(undefined), false);
+  });
+  test("'1' のときだけ true", () => {
+    assert.equal(isCrossAskResumeEnabled('1'), true);
+  });
+  test("'1' 以外の値は false のまま", () => {
+    assert.equal(isCrossAskResumeEnabled('0'), false);
+    assert.equal(isCrossAskResumeEnabled(''), false);
+    assert.equal(isCrossAskResumeEnabled('true'), false);
   });
 });
 

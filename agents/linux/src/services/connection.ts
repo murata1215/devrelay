@@ -2061,6 +2061,12 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         language: sendOptions.language,
         // #348: persistProjectState も retry で引き継ぐ
         persistProjectState: sendOptions.persistProjectState,
+        // サイクルC2（A-2）: projectStateRead が retry で引き継がれていなかった既存バグの修正。
+        // 未指定だと ai-runner.ts 側で `!== false` 判定により true 扱いになり、isolated
+        // （projectStateRead:false）のターンが resume 失敗 retry に入った際に Codex/Devin の
+        // セッション状態読み出しガードが外れてしまう（agentScopeId が無指定だと
+        // resolveScopeDir() が所有者の projectPath 直下を指すため実害になる）。
+        projectStateRead: sendOptions.projectStateRead,
         // core#336: スコープ識別子 / turnId も retry で引き継ぐ（resumeSessionId は意図的に undefined のまま）
         agentScopeId: sendOptions.agentScopeId,
         turnId: sendOptions.turnId,

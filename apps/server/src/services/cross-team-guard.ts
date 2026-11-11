@@ -67,6 +67,25 @@ export function isCrossAskIsolationEnabled(raw: string | undefined): boolean {
   return raw !== '0';
 }
 
+/**
+ * サイクルC2: `DEVRELAY_CROSS_ASK_RESUME` の既定値解決（既定 **OFF**=`raw === '1'`。
+ * 新しい信頼境界を黙って開けないため `DEVRELAY_CROSS_TEAM`/`DEVRELAY_CROSS_TEAM_EXEC` と
+ * 同じ極性にする——`DEVRELAY_CROSS_ASK_ISOLATION` の既定 ON とは逆方向）。
+ *
+ * `1` のとき、クロスユーザー ask のうち (a) 宛先 Agent が `'cross-ask-resume-strict'`
+ * capability を申告し (b) 読み取り専用を権限で強制できる実効 AI（`decideAskReadOnlyEnforcement()`
+ * が true を返す宛先）に限り、`statePolicy:'resumable-scoped'` を送って scope dir
+ * （`.devrelay/sessions/crossask-<digest>-g<N>/`）内の会話状態を継続させる
+ * （`cross-ask-resume-rules.ts` の `decideCrossAskSessionPlan()` が決定）。
+ * それ以外は従来どおり `statePolicy:'isolated'`（G）+ 案B 前置に縮退する。
+ *
+ * `isCrossAskIsolationEnabled()` が false（G の緊急ロールバック）のときは resume も
+ * 意図的に止める（`decideCrossAskSessionPlan()` 側で明示的に判定する。偶然の連動ではない）。
+ */
+export function isCrossAskResumeEnabled(raw: string | undefined): boolean {
+  return raw === '1';
+}
+
 /** 受入側を守るクロスユーザー専用のレート閾値（5 分窓）。既存の依頼者基準の閾値とは別に加算する。 */
 export const CROSS_USER_ASK_TARGET_LIMIT = 4;
 export const CROSS_USER_ASK_EXECUTOR_LIMIT = 6;

@@ -19,9 +19,9 @@ import {
   buildHumanTextMeta,
   fenceIfHuman,
 } from './human-text-fence.js';
-import { ASK_QUESTION_MAX_LENGTH, ASK_ANSWER_TIMEOUT_MS, decideAskReadOnlyEnforcement } from './ask-guard.js';
+import { ASK_QUESTION_MAX_LENGTH, ASK_ANSWER_TIMEOUT_MS, decideAskReadOnlyEnforcement, decideAskRateLimit } from './ask-guard.js';
 import { recordCrossTeamAudit } from './cross-team-audit.js';
-import { findInflightCrossQueryRows } from './cross-session-stats.js';
+import { findInflightCrossQueryRows, countRecentCrossSessions } from './cross-session-stats.js';
 import {
   pickInflightCrossSession,
   decideCrossTarget,
@@ -29,9 +29,20 @@ import {
   ASK_INFLIGHT_WINDOW_MS,
 } from './cross-query-guard.js';
 import { buildCrossAskContextPrefix, type CrossAskHistoryMessage } from './cross-ask-rules.js';
-import { isCrossTeamChatContextEnabled, isCrossAskIsolationEnabled } from './cross-team-guard.js';
+import { isCrossTeamChatContextEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled } from './cross-team-guard.js';
 import { decideCrossAskIsolation, buildCrossAskIsolationDenialMessage, buildCrossAskIsolationDenyLog } from './cross-ask-isolation-rules.js';
+import {
+  buildCrossAskScopeIdBase,
+  parseCrossAskScopeGeneration,
+  decideCrossAskSessionPlan,
+  resolveCrossAskResumeTtlMs,
+  resolveCrossAskResumeMaxTurns,
+  buildCrossAskResumeLog,
+} from './cross-ask-resume-rules.js';
 import { buildCrossAskSessionIdFilter } from './thread-scope.js';
+
+/** 同じ依頼を再送しないよう促す注記（document-api.ts の `NO_RETRY_NOTE` と同文）。 */
+const RUNNER_NO_RETRY_NOTE = '同じ依頼を文面を変えて再送しないでください。ユーザーに状況を報告して停止してください。';
 
 /** `runCrossProjectAsk()` が受け取る宛先プロジェクト（チャット経路・WebUI 経路のどちらの解決結果も代入可能な最小形）。 */
 export interface CrossAskTargetProject {
@@ -61,6 +72,7 @@ export type RunCrossProjectAskResult =
   | { ok: true; output: string; sessionId: string }
   | { ok: false; kind: 'tooLong'; rawLength: number; limit: number }
   | { ok: false; kind: 'busy'; message: string }
+  | { ok: false; kind: 'rateLimited'; message: string }
   | { ok: false; kind: 'denied'; message: string; reason: 'agent_outdated' | 'ai_unsafe' }
   | { ok: false; kind: 'failed'; message: string; sessionId: string };
 
@@ -71,7 +83,10 @@ export type RunCrossProjectAskResult =
  * 1. 長さ検証（#335 ゲート⑤。いかなる DB 書き込みより前）
  * 2. 同時実行ガード（宛先プロジェクトに実行中の `crossquery_` があれば targetBusy で即返す。
  *    DB 書き込みより前に行う — セッション作成後に弾くと ended セッションのゴミが残るため）
- * 3. 一時セッション（`crossquery_<uuid>`）作成 + audit `request`
+ * 2.3. サイクルC2（G-11）: 直近 5 分のクロス ask 件数によるレート制限（DB 読みのみ、書き込みより前）
+ * 2.5. サイクルG: 既存バグ修正の隔離判定（capability + 読み取り専用強制可否）
+ * 2.7. サイクルC2: resume 昇格判定（世代解決。DB 読みのみ、書き込みより前）
+ * 3. 一時セッション（`crossquery_<uuid>`）作成 + audit `request`（`agentScopeId` も記録）
  * 4. 質問メッセージの保存（humanTextMeta 付き）
  * 5. 文脈前置（案 B、有効時のみ）の組み立て + fence
  * 6. `executeCrossProjectQuery()`（15 分タイムアウト）
@@ -116,22 +131,53 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
     }
   }
 
+  // 2.3. サイクルC2（G-11）: チャット/WebUI 経路には直近 5 分のレート制限が無かった
+  // （document-api.ts の REST 経路だけが持っていた）既存の穴を塞ぐ。DB 書き込みより前。
+  // 既存の ask-member 実績値（ASK_PROJECT_LIMIT/ASK_USER_LIMIT）をそのまま流用する。
+  {
+    const [projectRecentCount, userRecentCount] = await Promise.all([
+      countRecentCrossSessions('crossquery_', requesterUserId, targetProject.id),
+      countRecentCrossSessions('crossquery_', requesterUserId),
+    ]);
+    const rateDecision = decideAskRateLimit({ projectRecentCount, userRecentCount, inflightAskSessionId: null });
+    if (!rateDecision.allowed) {
+      if (rateDecision.reason === 'projectRate') {
+        return {
+          ok: false,
+          kind: 'rateLimited',
+          message: `レート制限: ${targetProject.name} への問い合わせが5分以内に${rateDecision.count}回発生しています（上限${rateDecision.limit}回）。問い合わせがループしている可能性があります。${RUNNER_NO_RETRY_NOTE}`,
+        };
+      }
+      if (rateDecision.reason === 'userRate') {
+        return {
+          ok: false,
+          kind: 'rateLimited',
+          message: `レート制限: 問い合わせが5分以内に${rateDecision.count}回発生しています（全プロジェクト合計の上限${rateDecision.limit}回）。問い合わせがプロジェクト間でループしている可能性があります。${RUNNER_NO_RETRY_NOTE}`,
+        };
+      }
+      // projectBusy は上の同時実行ガード（step 2）が inflightAskSessionId:null で渡しているため
+      // 到達しないが、型の完全性のため busy として扱う。
+      return { ok: false, kind: 'busy', message: `⚠️ ${targetProject.name} は現在処理中です。${RUNNER_NO_RETRY_NOTE}` };
+    }
+  }
+
   // 2.5. サイクルG（クロス ask の既存バグ修正）: クロスユーザー ask に限り、
   // (a) 宛先 Agent が 'cross-ask-isolation' capability を申告しているか、
   // (b) 読み取り専用を権限で強制できる実効 AI か（devin/gemini/claude+terminalMode は不可）
   // を Session 作成より前に検証する。許可されれば Agent へ送る statePolicy（'isolated' か
   // undefined）が決まる。DEVRELAY_CROSS_ASK_ISOLATION=0 なら常に許可（旧挙動）。
-  let crossAskStatePolicy: 'isolated' | undefined;
+  const availableAiTools = isCrossUser ? getAgentAvailableAiTools(targetProject.machine.id) : [];
+  const resolvedAiTool = isCrossUser
+    ? pickAvailableAiTool(targetProject.defaultAi as AiTool, availableAiTools, [])
+    : (targetProject.defaultAi as AiTool);
+  const readOnlyEnforced = decideAskReadOnlyEnforcement({ aiTool: resolvedAiTool, terminalMode: targetProject.terminalMode }).readOnlyEnforced;
+  let crossAskStatePolicy: 'isolated' | 'resumable-scoped' | undefined;
   {
-    const availableAiTools = isCrossUser ? getAgentAvailableAiTools(targetProject.machine.id) : [];
-    const resolvedAiTool = isCrossUser
-      ? pickAvailableAiTool(targetProject.defaultAi as AiTool, availableAiTools, [])
-      : (targetProject.defaultAi as AiTool);
     const isolation = decideCrossAskIsolation({
       isCrossUser,
       isolationEnabled: isCrossAskIsolationEnabled(process.env.DEVRELAY_CROSS_ASK_ISOLATION),
       agentHasIsolationCapability: agentHasCapability(targetProject.machine.id, 'cross-ask-isolation'),
-      readOnlyEnforced: decideAskReadOnlyEnforcement({ aiTool: resolvedAiTool, terminalMode: targetProject.terminalMode }).readOnlyEnforced,
+      readOnlyEnforced,
     });
     if (!isolation.allowed) {
       console.log(buildCrossAskIsolationDenyLog({ requesterUserId, targetProjectName: targetProject.name, reason: isolation.reason }));
@@ -152,6 +198,73 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
     crossAskStatePolicy = isolation.statePolicy ?? undefined;
   }
 
+  // 2.7. サイクルC2: resume 昇格判定。G の isolation 判定に通った（denied されなかった）
+  // クロスユーザー ask のうち、resume 対応 Agent + 読み取り専用強制可能な宛先に限り、
+  // statePolicy を 'isolated' から 'resumable-scoped' へ昇格させ、決定論的な agentScopeId
+  // （世代付き）を割り当てる。DB 書き込みより前（世代解決は読み取りのみ）。
+  let resumeAgentScopeId: string | undefined;
+  let includeResumeContextPrefix = true;
+  {
+    const resumeEnabled = isCrossAskResumeEnabled(process.env.DEVRELAY_CROSS_ASK_RESUME);
+    const isolationEnabled = isCrossAskIsolationEnabled(process.env.DEVRELAY_CROSS_ASK_ISOLATION);
+    const agentSupportsResume = isCrossUser && agentHasCapability(targetProject.machine.id, 'cross-ask-resume-strict');
+
+    let latestGeneration: number | null = null;
+    let currentGenerationTurns = 0;
+    let lastTurnAgeMs: number | null = null;
+    let scopeIdBase = '';
+
+    if (isCrossUser && resumeEnabled) {
+      scopeIdBase = buildCrossAskScopeIdBase(
+        crypto.createHash('sha256').update(`${requesterUserId}\0${targetProject.id}`).digest('hex'),
+      );
+      // 世代解決: 既存の agentScopeId 群から最大世代を取る。Session 行は起動時スイープで
+      // status が 'ended' に変わるだけで削除されないため、status を見ない本クエリの結果は
+      // 単調増加のみ（巻き戻らない）。projectId を条件に含めるのは既存 index
+      // （@@index([projectId, status, lastActiveAt])）を効かせるため（agentScopeId/
+      // requestedByUserId には index が無く、プレフィックス一致のみでは全件スキャンになる）。
+      // `take` は時間が経つほど増える旧世代分までは見る必要が無い（新しい世代ほど startedAt が
+      // 必ず大きいため desc 先頭から読めば最新世代が先に出る）ための安全上限。
+      const rows = await prisma.session.findMany({
+        where: { projectId: targetProject.id, agentScopeId: { startsWith: `${scopeIdBase}-g` } },
+        select: { agentScopeId: true, startedAt: true },
+        orderBy: { startedAt: 'desc' },
+        take: 1000,
+      });
+      for (const row of rows) {
+        const gen = parseCrossAskScopeGeneration(row.agentScopeId ?? '', scopeIdBase);
+        if (gen === null) continue;
+        if (latestGeneration === null || gen > latestGeneration) {
+          latestGeneration = gen;
+          currentGenerationTurns = 0;
+          lastTurnAgeMs = Date.now() - row.startedAt.getTime();
+        }
+        if (gen === latestGeneration) {
+          currentGenerationTurns += 1;
+        }
+      }
+    }
+
+    const plan = decideCrossAskSessionPlan({
+      resumeEnabled,
+      isolationEnabled,
+      isCrossUser,
+      agentSupportsResume,
+      readOnlyEnforced,
+      isolationStatePolicy: crossAskStatePolicy === 'isolated' ? 'isolated' : null,
+      scopeIdBase,
+      latestGeneration,
+      currentGenerationTurns,
+      lastTurnAgeMs,
+      ttlMs: resolveCrossAskResumeTtlMs(process.env.DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS),
+      maxTurns: resolveCrossAskResumeMaxTurns(process.env.DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS),
+    });
+    console.log(buildCrossAskResumeLog(plan, targetProject.name));
+    crossAskStatePolicy = plan.statePolicy;
+    resumeAgentScopeId = plan.agentScopeId;
+    includeResumeContextPrefix = plan.includeContextPrefix;
+  }
+
   // 3. 一時セッション作成（userId は宛先マシン所有者。requestedByUserId はクロス時のみ記録する）
   const tempSessionId = `crossquery_${crypto.randomUUID()}`;
   await prisma.session.create({
@@ -164,6 +277,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
       status: 'active',
       lastActiveAt: new Date(),
       ...(isCrossUser ? { requestedByUserId: requesterUserId } : {}),
+      ...(resumeAgentScopeId ? { agentScopeId: resumeAgentScopeId } : {}),
     },
   });
   if (isCrossUser) {
@@ -198,7 +312,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
   try {
     // 5. 文脈前置（案 B）: 同一 (依頼者, プロジェクト) の過去ログから直近 3 往復を取り、
     // fence の外側に「これまでのやりとり（参考）」として前置する。Agent 改修ゼロ・配布不要。
-    const contextEnabled = input.includeContextPrefix ?? isCrossTeamChatContextEnabled(process.env.DEVRELAY_CROSS_TEAM_CHAT_CONTEXT);
+    const contextEnabled = (input.includeContextPrefix ?? isCrossTeamChatContextEnabled(process.env.DEVRELAY_CROSS_TEAM_CHAT_CONTEXT)) && includeResumeContextPrefix;
     let contextPrefix = '';
     if (contextEnabled && isCrossUser) {
       const pastMessages = await prisma.message.findMany({
@@ -235,6 +349,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
       executorUserId,
       ASK_ANSWER_TIMEOUT_MS,
       crossAskStatePolicy,
+      resumeAgentScopeId,
     );
 
     await prisma.session.update({

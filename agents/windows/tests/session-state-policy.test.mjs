@@ -57,7 +57,8 @@ const RESUMABLE_SCOPED_POLICY = {
   outputDirInstruction: false,
   projectStateRead: true,
   approveAllState: false,
-  refuseUnsafeAiTool: false,
+  // サイクルC2（A-1）: isolated と同じ true に揃えた（C1 時点の暫定値 false から変更）。
+  refuseUnsafeAiTool: true,
   reportAiToolSubstitution: false,
 };
 
@@ -163,7 +164,8 @@ test('resolveSessionStatePolicy: resumable では conversation 系以外が全�
   assert.equal(policy.projectRescan, false);
   assert.equal(policy.outputDirInstruction, false);
   assert.equal(policy.approveAllState, false);
-  assert.equal(policy.refuseUnsafeAiTool, false);
+  // サイクルC2（A-1）: resumable も isolated と同じ true（C1 時点の false から変更）。
+  assert.equal(policy.refuseUnsafeAiTool, true);
   assert.equal(policy.reportAiToolSubstitution, false);
 });
 
@@ -270,4 +272,23 @@ test('isAiToolReadOnlyEnforceable: devin/gemini は terminalMode の値に関わ
 
 test('isAiToolReadOnlyEnforceable: 未知の AI ツール名は強制不可（deny-by-default）', () => {
   assert.equal(isAiToolReadOnlyEnforceable('unknown-tool', false), false);
+});
+
+// --- サイクルC2: resumable と isolated の差分を不変条件として固定 ---
+
+test('【不変条件】resumable が isolated より緩いのは scopedConversation と projectStateRead の2項目だけ', () => {
+  // `forcePlanTurn` は true=厳格（常にプランターンに固定する制約フラグ）という逆極性のため、
+  // 「true かどうか」で緩さを比較する本テストの対象から明示的に除外する
+  // （resumable=true/isolated=false だが、これは resumable の方が厳しい側であり緩さの逆行ではない。
+  // `refuseUnsafeAiTool` は両方 true で既に対象外）。
+  const POLARITY_INVERTED_KEYS = new Set(['forcePlanTurn']);
+  const keys = Object.keys(RESUMABLE_SCOPED_POLICY).filter((k) => !POLARITY_INVERTED_KEYS.has(k));
+  const looserKeys = keys.filter((k) => RESUMABLE_SCOPED_POLICY[k] === true && ISOLATED_POLICY[k] === false);
+  assert.deepEqual(looserKeys.sort(), ['projectStateRead', 'scopedConversation'].sort());
+  // 逆方向（isolated が resumable より緩い項目）が無いことも確認する。
+  const reverseLooserKeys = keys.filter((k) => ISOLATED_POLICY[k] === true && RESUMABLE_SCOPED_POLICY[k] === false);
+  assert.deepEqual(reverseLooserKeys, []);
+  // forcePlanTurn 自体は resumable=true/isolated=false（resumable の方が厳格側）であることを別途固定する。
+  assert.equal(RESUMABLE_SCOPED_POLICY.forcePlanTurn, true);
+  assert.equal(ISOLATED_POLICY.forcePlanTurn, false);
 });

@@ -1622,12 +1622,19 @@ export function executeCrossProjectQuery(
   userId: string,
   timeoutMs: number = 43200000,
   /**
-   * サイクルG/案C′: クロスユーザー ask にのみ `'isolated'` を渡す
-   * （`cross-ask-isolation-rules.ts` の `decideCrossAskIsolation()` が決定。同一ユーザー ask は
+   * サイクルG/案C′: クロスユーザー ask にのみ `'isolated'`/`'resumable-scoped'` を渡す
+   * （`cross-ask-isolation-rules.ts`/`cross-ask-resume-rules.ts` の判定が決定。同一ユーザー ask は
    * 未指定のまま＝従来挙動）。`startSession`/`sendPromptToAgent` の両方に同じ値を渡す
    * （Agent 側は両方が揃っていなくても `sessionInfo.statePolicy` で補完するが、念のため揃える）。
    */
   statePolicy?: EphemeralStatePolicy,
+  /**
+   * サイクルC2: resume（`statePolicy:'resumable-scoped'`）のときに割り当てる scope dir 識別子
+   * （`cross-ask-resume-rules.ts` の `buildCrossAskScopeId()` が決定論的に組み立てる）。
+   * 未指定（同一ユーザー ask / isolated / 非 resume のクロス ask）の場合は従来どおり
+   * `.devrelay/` 直下を共有しない一時セッション扱いのまま（`agentScopeId` を一切送らない）。
+   */
+  agentScopeId?: string,
 ): Promise<{ output: string; files?: FileAttachment[] }> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1639,7 +1646,7 @@ export function executeCrossProjectQuery(
     pendingCrossQueries.set(sessionId, { resolve, reject, timeout });
 
     // セッション開始 → プロンプト送信
-    startSession(machineId, sessionId, projectName, projectPath, aiTool, undefined, statePolicy);
+    startSession(machineId, sessionId, projectName, projectPath, aiTool, agentScopeId, statePolicy);
     // 少し待ってからプロンプト送信（セッション登録のタイミング確保）
     setTimeout(() => {
       // プランモード書き込みゲート穴の根治: ask（クロスプロジェクトクエリ）経由も
@@ -1657,7 +1664,7 @@ export function executeCrossProjectQuery(
         undefined, // model
         undefined, // language
         resolvePermissionPolicy('ask'),
-        statePolicy ? { statePolicy } : undefined,
+        statePolicy || agentScopeId ? { statePolicy, agentScopeId } : undefined,
       );
     }, 500);
   });
