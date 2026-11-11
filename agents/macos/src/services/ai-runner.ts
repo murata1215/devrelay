@@ -32,7 +32,7 @@ import { resolveSystemClaude } from './claude-path.js';
 // ここでは re-export のみ行う（呼び出し元は無変更）。
 import { getClaudeExecutableFallback, logClaudeExecutableStatus } from './sdk-executable.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, PermissionResult, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 // raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
 import { buildRawSdkOverrides, buildRawEnv, isRawToolDenied, buildRawDenyMessage, resolveRawUsedModel } from './raw-completion-mode.js';
 import { isTurnStale } from './update-guard-rules.js';
@@ -936,6 +936,28 @@ export interface SendPromptOptions {
 }
 
 /**
+ * サイクルS1（2026-11-12）: `settingSources: ['user','project']` で SDK が読む設定ファイルに
+ * `permissions` キーがあれば 1 行警告を出す（読むだけ・挙動は変えない）。
+ * `permissions.allow` は DevRelay の `allowedTools` と同じ `alwaysAllowRules` 経路で CLI 内蔵の
+ * bare-allow ルールとして解釈され、PreToolUse フック／canUseTool より前に allow を確定させ得る
+ * （CLAUDE_SDK_CAN_USE_TOOL_SHADOWED 警告と同種の shadow）。現時点でこの機体には該当ファイルが
+ * 存在しないが、将来誰かが `.claude/settings.json` を置くだけで黙って穴が開くため、
+ * 気づけるようにするための可視化のみ（fail-open。読めない・JSON でない場合は無視する）。
+ */
+function warnIfSettingsFileHasPermissions(label: string, filePath: string): void {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && 'permissions' in parsed) {
+      console.warn(`⚠️ [SDK] ${label} (${filePath}) に permissions キーがあります。allow ルールが PreToolUse フック／canUseTool より前に CLI 側で解決され得ます（サイクルS1、doc/sdk-0.3-migration-findings.md 参照）。`);
+    }
+  } catch {
+    // 読めない・JSON でない場合は無視（挙動を変えない警告のみの機能のため fail-open）
+  }
+}
+
+/**
  * Agent SDK を使用して Claude Code にプロンプトを送信する
  * spawn('claude', ['-p', ...]) の代わりに SDK の query() を使用
  *
@@ -968,6 +990,16 @@ async function sendPromptToAiSdk(
   // （診断用ログにのみ使用。Write/Edit 等が呼ばれたのに一度もログが出ない場合、
   // CLI↔SDK の承認用コントロールチャネルが死んでいる兆候として切り分けに使える）。
   let canUseToolEnteredOnce = false;
+  // サイクルS1: plan モードの PreToolUse フック到達状況の観測カウンタ（診断用ログにのみ使用）。
+  // 2026-11-12 実測: SDK 0.3 系は permissionMode:'plan' を CLI 内部で auto モードに変換し、
+  // auto-mode classifier が canUseTool より前に Bash を allow/deny してしまう
+  // （useAutoModeDuringPlan ゲート。サイクルS1 Step 0 で確認）。PreToolUse フックは
+  // classifier より前に解決するため、Bash がフックに来ているかをここで観測する。
+  let planHookReachedCount = 0;
+  let planHookDeniedCount = 0;
+  // フック到達 0 件のまま Bash が実行された（= ゲートが無言で素通りしている）ことを検知するための
+  // カウンタ。plan モードでのみ加算する（exec では意味を持たない）。
+  let planBashToolUseCount = 0;
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -1065,80 +1097,67 @@ async function sendPromptToAiSdk(
     console.log(`🎮 [SDK] Using raw-completion mode (tools disabled, systemPrompt replaced, auto-memory disabled, maxTurns=${sdkOptions.maxTurns})`);
   } else if (options.usePlanMode) {
     sdkOptions.permissionMode = 'plan';
-    if (options.allowedTools && options.allowedTools.length > 0) {
+    // サイクルS1（2026-11-12）: strictReadonly のときは sdkOptions.allowedTools を SDK に渡さない。
+    // 渡した bare エントリ（裸の mcp__... など）が CLI 側の bare-allow ルールとして
+    // 下記 PreToolUse フック／canUseTool より前に allow を確定させてしまうため
+    // （CLAUDE_SDK_CAN_USE_TOOL_SHADOWED 警告が指す挙動。実測: 所有者の allowedTools:linux に
+    // 保存済みの裸の context7 MCP 2件が実際に shadow していた）。DevRelay 自身の判定
+    // （decidePlanPermission、下記フック内）には options.allowedTools をそのまま渡すため、
+    // ユーザーが追加した許可リスト（裸の MCP エントリ含む）は変わらず有効。
+    // strictReadonly=false（旧来の interactive plan）は現状維持で SDK にも allowedTools を渡す。
+    if (!options.strictReadonly && options.allowedTools && options.allowedTools.length > 0) {
       sdkOptions.allowedTools = options.allowedTools;
       console.log(`📋 [SDK] Using plan mode with ${options.allowedTools.length} allowed tools`);
     } else {
-      console.log(`📋 [SDK] Using plan mode`);
+      console.log(`📋 [SDK] Using plan mode${options.strictReadonly ? ' (strictReadonly: allowedTools withheld from SDK, enforced via PreToolUse hook)' : ''}`);
     }
 
-    // plan モードでも skipPermissions と AskUserQuestion をインターセプト
-    if (options.onToolApprovalRequest) {
-      const onApprovalRequest = options.onToolApprovalRequest;
-      sdkOptions.canUseTool = async (toolName, input, opts) => {
-        // #303: disallowedTools を素通りするケースへの保険。ExitPlanMode は skip-permissions
-        // モードでも絶対に許可しない（自動承認＝編集の許可であって、プラン解除の許可ではない）
-        if (toolName === 'ExitPlanMode') {
-          console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
-          return {
-            behavior: 'deny',
-            message: 'プランモードは ExitPlanMode では解除できません。ユーザーが e / exec を送信するまで実装を開始せず、プランの提示のみ行ってください。',
-          };
-        }
+    // サイクルS1（2026-11-12）: PreToolUse フックを唯一の権威とする。
+    // 2026-11-12 実測（サイクルS1 Step 0）: SDK 0.3 系は permissionMode:'plan' を CLI 内部で
+    // auto モードに変換する機能ゲート（useAutoModeDuringPlan）を持ち、有効な場合 auto-mode
+    // classifier が canUseTool より前に Bash 等の allow/deny を確定してしまう
+    // （DevRelay の allowlist・decidePlanPermission が一切適用されない）。このゲートは
+    // 遠隔で切り替わり得るため、SDK の挙動に依存しない防御として PreToolUse フックを導入する
+    // （SDK の型定義 `sdk.d.ts` が「PreToolUse hook denies は canUseTool より前に解決する」と明記。
+    // Step 0 の実測でも hook が classifier より前に 2/2 回呼ばれ、deny/allow 判定が honored された）。
+    // 下の canUseTool は「フックが判定を返さなかった場合」（AskUserQuestion、将来の SDK 変化で
+    // フック自体が無効化された場合）の第 2 防衛線として残す。
+    sdkOptions.hooks = {
+      PreToolUse: [{
+        hooks: [async (hookInput): Promise<HookJSONOutput> => {
+          if (hookInput.hook_event_name !== 'PreToolUse') return {};
+          const toolName = hookInput.tool_name;
+          const input = (hookInput.tool_input ?? {}) as Record<string, unknown>;
+          planHookReachedCount++;
 
-        const isQuestion = toolName === 'AskUserQuestion';
+          // #303: ExitPlanMode はプランモードの正規の脱出ハッチではない。ユーザーが e/exec を
+          // 送信するまで常に deny する（disallowedTools の保険として、フック段でも明示 deny）。
+          if (toolName === 'ExitPlanMode') {
+            console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
+            planHookDeniedCount++;
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'deny',
+                permissionDecisionReason: 'プランモードは ExitPlanMode では解除できません。ユーザーが e / exec を送信するまで実装を開始せず、プランの提示のみ行ってください。',
+              },
+            };
+          }
 
-        // #332: strictReadonly（MCP submit_instruction 経由）の場合、skipPermissions による
-        // 無条件 allow を行わない。allowlist 判定は下の isQuestion 分岐の後に一本化する
-        if (!isQuestion && !options.strictReadonly && getServerSkipPermissions()) {
-          console.log(`⚡ [SDK] Auto-approved (skip-permissions, plan mode): ${toolName}`);
-          options.onAutoApproved?.({ toolName, toolInput: input });
-          return { behavior: 'allow', updatedInput: input };
-        }
+          // AskUserQuestion はフックでは判定しない。従来どおり下の canUseTool（WS 経由で
+          // 人間に聞く経路）に委譲する（{} を返すとパイプラインは継続する）。
+          if (toolName === 'AskUserQuestion') {
+            return {};
+          }
 
-        if (isQuestion) {
-          const requestId = crypto.randomUUID();
-          console.log(`❓ [SDK] User question (plan mode): ${toolName} (${requestId.substring(0, 8)}...)`);
-
-          onApprovalRequest({
-            requestId,
-            toolName,
-            toolInput: input,
-            title: opts.title,
-            description: opts.description,
-            decisionReason: opts.decisionReason,
-            isQuestion: true,
-          });
-
-          return new Promise<PermissionResult>((resolve, reject) => {
-            pendingToolApprovals.set(requestId, { resolve, reject, input, sessionId });
-
-            if (opts.signal.aborted) {
-              pendingToolApprovals.delete(requestId);
-              resolve({ behavior: 'deny', message: 'Aborted' });
-              return;
-            }
-            opts.signal.addEventListener('abort', () => {
-              if (pendingToolApprovals.has(requestId)) {
-                pendingToolApprovals.delete(requestId);
-                resolve({ behavior: 'deny', message: 'Aborted' });
-              }
-            }, { once: true });
-          });
-        }
-
-        // #332: strictReadonly の場合、PLAN_READONLY_TOOLS または allowedTools（Bash パターン）に
-        // マッチしないツールは聞かずに deny する（allowlist 外は allow ではなく deny 側に倒す設計）。
-        // 判定ロジックは plan-permission.ts の decidePlanPermission に集約（node --test で検証済み）。
-        // #333: defaultAllowedTools（DEFAULT_ALLOWED_TOOLS_LINUX）を渡し、ユーザーカスタム allowedTools
-        // との和集合で判定する（カスタム保存があると default 追加が効かない問題への対策。人間承認時の
-        // 追記で明示された方針。strictReadonly のこの判定にのみ適用し options.allowedTools 自体は
-        // 書き換えないため、この直下の isToolSessionApproved（exec 用インライン複製）には影響しない）。
-        if (options.strictReadonly) {
+          // #332/#333: strictReadonly の場合、PLAN_READONLY_TOOLS または allowedTools（Bash パターン）
+          // にマッチしないツールは deny する。判定ロジックは plan-permission.ts の
+          // decidePlanPermission に集約（node --test で検証済み）。defaultAllowedTools
+          // （DEFAULT_ALLOWED_TOOLS_LINUX）とユーザーカスタム allowedTools の和集合で判定する。
           const decision = decidePlanPermission({
             toolName,
             input,
-            strictReadonly: true,
+            strictReadonly: !!options.strictReadonly,
             allowedTools: options.allowedTools,
             defaultAllowedTools: DEFAULT_ALLOWED_TOOLS_LINUX,
             readonlyTools: PLAN_READONLY_TOOLS,
@@ -1147,26 +1166,121 @@ async function sendPromptToAiSdk(
             writeTools: PLAN_WRITE_TOOLS,
             skipPermissions: !!getServerSkipPermissions(),
           });
-          if (decision.behavior === 'allow') {
-            return { behavior: 'allow', updatedInput: input };
+          if (decision.behavior === 'deny') {
+            console.warn(`🛑 [SDK] Denied by PreToolUse gate (plan mode): ${toolName} [${decision.reason}]`);
+            planHookDeniedCount++;
+            options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'deny',
+                permissionDecisionReason: `プランモードでは使用できません（理由: ${decision.detail ?? decision.reason}）。必要な操作は承認後のexecで行ってください。`,
+              },
+            };
           }
-          console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode): ${toolName} [${decision.reason}]`);
-          options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
-          return {
-            behavior: 'deny',
-            message: `プランモードでは使用できません（理由: ${decision.detail ?? decision.reason}）。必要な操作は承認後のexecで行ってください。`,
-          };
-        }
 
-        // AskUserQuestion 以外は plan モードのデフォルト動作（allowedTools で制御済み）
-        // プランモード書き込みゲート穴の根治: decidePlanPermission が deny を返さない全ケース
-        // （strictReadonly=true の allowlist 内許可、strictReadonly=false の従来allow）で
-        // onAutoApproved を呼び、Approvals タブ監査ログの不可視ギャップを塞ぐ
-        // （connection.ts 側の onAutoApproved 無条件配線とセットで初めて成立する）。
+          // プランモード書き込みゲート穴の根治（旧 canUseTool 実装から継承）: decidePlanPermission が
+          // deny を返さない全ケースで onAutoApproved を呼び、Approvals タブ監査ログの
+          // 不可視ギャップを塞ぐ（connection.ts 側の onAutoApproved 無条件配線とセットで成立）。
+          options.onAutoApproved?.({ toolName, toolInput: input });
+          return {
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+          };
+        }],
+      }],
+    };
+    console.log('🪝 [SDK] PreToolUse gate enabled (plan mode)');
+    // サイクルS1: 設定ファイル由来の shadow の可視化（挙動は変えない、読むだけ）。
+    warnIfSettingsFileHasPermissions('user settings', path.join(os.homedir(), '.claude', 'settings.json'));
+    warnIfSettingsFileHasPermissions('project settings', path.join(projectPath, '.claude', 'settings.json'));
+
+    // サイクルS1: canUseTool は onToolApprovalRequest の有無に関わらず常に設定する
+    // （以前は未設定時に canUseTool ごと消え、判定が SDK 既定に委ねられていた構造的欠陥。
+    // 修正対象として明記していたもの。第 2 防衛線として、上記フックが判定を返さなかった
+    // 場合＝基本的に AskUserQuestion のときだけここに来る）。
+    const onApprovalRequest = options.onToolApprovalRequest;
+    sdkOptions.canUseTool = async (toolName, input, opts) => {
+      // #303: disallowedTools / フックを素通りするケースへの保険。
+      if (toolName === 'ExitPlanMode') {
+        console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
+        return {
+          behavior: 'deny',
+          message: 'プランモードは ExitPlanMode では解除できません。ユーザーが e / exec を送信するまで実装を開始せず、プランの提示のみ行ってください。',
+        };
+      }
+
+      const isQuestion = toolName === 'AskUserQuestion';
+
+      // #332: strictReadonly（MCP submit_instruction 経由）の場合、skipPermissions による
+      // 無条件 allow を行わない。
+      if (!isQuestion && !options.strictReadonly && getServerSkipPermissions()) {
+        console.log(`⚡ [SDK] Auto-approved (skip-permissions, plan mode): ${toolName}`);
         options.onAutoApproved?.({ toolName, toolInput: input });
         return { behavior: 'allow', updatedInput: input };
-      };
-    }
+      }
+
+      if (isQuestion) {
+        if (!onApprovalRequest) {
+          // サイクルS1: onToolApprovalRequest 未設定時の安全側 deny（人間に聞く手段が無い）。
+          console.warn('🛑 [SDK] AskUserQuestion denied: no approval channel configured (onToolApprovalRequest missing)');
+          return { behavior: 'deny', message: 'AskUserQuestion is unavailable (no approval channel configured).' };
+        }
+        const requestId = crypto.randomUUID();
+        console.log(`❓ [SDK] User question (plan mode): ${toolName} (${requestId.substring(0, 8)}...)`);
+
+        onApprovalRequest({
+          requestId,
+          toolName,
+          toolInput: input,
+          title: opts.title,
+          description: opts.description,
+          decisionReason: opts.decisionReason,
+          isQuestion: true,
+        });
+
+        return new Promise<PermissionResult>((resolve, reject) => {
+          pendingToolApprovals.set(requestId, { resolve, reject, input, sessionId });
+
+          if (opts.signal.aborted) {
+            pendingToolApprovals.delete(requestId);
+            resolve({ behavior: 'deny', message: 'Aborted' });
+            return;
+          }
+          opts.signal.addEventListener('abort', () => {
+            if (pendingToolApprovals.has(requestId)) {
+              pendingToolApprovals.delete(requestId);
+              resolve({ behavior: 'deny', message: 'Aborted' });
+            }
+          }, { once: true });
+        });
+      }
+
+      // #332/#333: 通常はここに到達しない（上記フックで確定済み）。フックが判定を返さなかった
+      // 稀な経路に対する第 2 防衛線として同じ decidePlanPermission を適用する。
+      const decision = decidePlanPermission({
+        toolName,
+        input,
+        strictReadonly: !!options.strictReadonly,
+        allowedTools: options.allowedTools,
+        defaultAllowedTools: DEFAULT_ALLOWED_TOOLS_LINUX,
+        readonlyTools: PLAN_READONLY_TOOLS,
+        readonlyBashCommands: PLAN_READONLY_BASH_COMMANDS,
+        writeBashCommands: PLAN_WRITE_BASH_COMMANDS,
+        writeTools: PLAN_WRITE_TOOLS,
+        skipPermissions: !!getServerSkipPermissions(),
+      });
+      if (decision.behavior === 'deny') {
+        console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode, canUseTool fallback): ${toolName} [${decision.reason}]`);
+        options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+        return {
+          behavior: 'deny',
+          message: `プランモードでは使用できません（理由: ${decision.detail ?? decision.reason}）。必要な操作は承認後のexecで行ってください。`,
+        };
+      }
+
+      options.onAutoApproved?.({ toolName, toolInput: input });
+      return { behavior: 'allow', updatedInput: input };
+    };
   } else {
     // Exec モード: canUseTool でパーミッション制御
     sdkOptions.permissionMode = 'default';
@@ -1455,6 +1569,11 @@ async function sendPromptToAiSdk(
             observeLoopGuardEvent(loopGuardState, { kind: 'text', text: block.text, nowMs: Date.now() }, loopGuardConfig);
           } else if (block.type === 'tool_use' && block.name) {
             console.log(`[claude/sdk] 🔧 Using tool: ${block.name}`);
+            // サイクルS1: plan モードで Bash が使われた回数を観測する（フック到達 0 件のまま
+            // Bash が実行された場合の無言故障検知用。exec では加算しない）。
+            if (options.usePlanMode && block.name === 'Bash') {
+              planBashToolUseCount++;
+            }
             onOutput(`\n${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.usingTool', { tool: block.name })}\n`, false);
             // #355: 「進捗あり」の証拠として P2（異なるツール種別）を loop-guard に通知、
             // 同一ツール連打（層2）も同時に検知する
@@ -1656,6 +1775,18 @@ async function sendPromptToAiSdk(
     return result;
   } finally {
     clearBgIdleTimer();
+    // サイクルS1: plan モードのターン終了時にフック到達状況を1行ログする（すべての return 経路
+    // ─正常終了・catch・abort─で必ず通る finally に置くことで取り逃しを防ぐ）。
+    // 到達 0 件のまま Bash が実行されていたら、ゲートが無言で素通りしている回帰として
+    // 強調ログを出す（2026-09-20〜2026-11-12 に実際に起きた故障と同じ形。本件はサーバーへの
+    // 通知配線まではせず agent.log 上の可視化に留める。将来 WS 経由の通知に昇格させる場合は
+    // 新しいメッセージ型と Approvals 表示の追加が必要になるため別サイクル）。
+    if (options.usePlanMode && !options.rawMode) {
+      console.log(`🪝 [SDK] PreToolUse gate summary: reached=${planHookReachedCount} denied=${planHookDeniedCount} bashToolUses=${planBashToolUseCount}`);
+      if (planBashToolUseCount > 0 && planHookReachedCount === 0) {
+        console.error(`🚨 [SDK] PLAN GATE REGRESSION: Bash was used ${planBashToolUseCount} time(s) this turn but PreToolUse hook reached 0 times — the gate is likely being bypassed (see doc/sdk-0.3-migration-findings.md).`);
+      }
+    }
     // sdk-prompt-stream: 入力ストリームを解放して SDK 側の transport.endInput()（stdin close）を進行させる。
     // ここに到達するのは正常終了・catch・abort のいずれの経路でも必ず通るため、
     // release() 漏れは起きない（release() 自体は冪等）。

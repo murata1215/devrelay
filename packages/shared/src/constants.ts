@@ -291,7 +291,12 @@ export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
  * #332: plan モードの strictReadonly ポリシー時に Bash 以外で常時許可するツール名。
  * 判断基準: 「読み取り専用か判断に迷うものは deny ではなく allow 側に倒す」（人間承認時の追記）。
  * - Read/Glob/Grep/NotebookRead: ファイル読み取り専用
- * - Task: サブエージェント起動（内部ツール呼び出しは親の canUseTool を経由する前提。実機 E2E で要確認）
+ * - Task: サブエージェント起動（内部ツール呼び出しは親の canUseTool を経由する前提）。
+ * - Agent: サイクルS1（2026-11-12）で追加。SDK 0.3 系（Claude Code 2.1.282 系）はサブエージェント
+ *   起動ツールの名称を `Task` から `Agent` に変更している（稼働ログ実測 `Using tool: Agent`）。
+ *   サブエージェント発のツール呼び出しも同一の `canUseTool`/PreToolUse フックに `agentID` 付きで
+ *   ルーティングされる（SDK 型定義 `CanUseTool.agentID?`・PreToolUse hook input の `agent_id` で確認）
+ *   ため、ツール起動自体を deny 側に倒す必要はない。`Task` は旧 SDK 互換のため残す。
  * - ToolSearch/TaskOutput/TaskStop: 前サイクルの調査ログで実使用を確認済みの読み取り/制御系ツール
  *   （TaskStop は実行中タスクの停止で書き込みではないため allow 側）
  * - TodoWrite: ファイル書き込みではなくセッション内タスクリストの更新のみのため allow 側
@@ -304,6 +309,7 @@ export const PLAN_READONLY_TOOLS: string[] = [
   'Grep',
   'NotebookRead',
   'Task',
+  'Agent',
   'ToolSearch',
   'TaskOutput',
   'TaskStop',

@@ -353,3 +353,83 @@ test('matchesBashRuleByTokens: Bash(git log *) は git -C <dir> log の正規化
   const tokens = ['git', '-C', '/opt/devrelay', 'log', '--oneline'];
   assert.equal(matchesBashRuleByTokens('Bash(git log *)', tokens), true);
 });
+
+// ---- サイクルS1（2026-11-12）: PreToolUse フック導入に伴う回帰テスト。 ----
+// 2026-11-11 夜のクロスユーザー ask ターンで実際に通過したコマンド群（python3 / node / 複合コマンド）を
+// decidePlanPermission に通した場合の期待結果を固定する（フック側も canUseTool 側も同じ
+// decidePlanPermission を呼ぶため、ここでの固定がフック導入後のゲート全体の正しさを保証する）。
+
+test('S1-1: python3 -c "print(1)" は許可コマンド一覧になく deny/notInAllowlist になる', () => {
+  const decision = decideBash('python3 -c "print(1)"');
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:notInAllowlist');
+});
+
+test('S1-2: node -e "console.log(1)" は許可コマンド一覧になく deny/notInAllowlist になる', () => {
+  const decision = decideBash('node -e "console.log(1)"');
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:notInAllowlist');
+});
+
+test('S1-3: cd /opt/devrelay && grep -c foo bar.txt （全セグメント読み取り専用の複合コマンド）は allow になる', () => {
+  const decision = decideBash('cd /opt/devrelay && grep -c foo bar.txt');
+  assert.equal(decision.behavior, 'allow');
+});
+
+test('S1-4: echo a > b （書き込みリダイレクト）は deny/writeTool になる', () => {
+  const decision = decideBash('echo a > b');
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:writeTool');
+});
+
+test('S1-5: Agent ツール名（SDK 0.3 系のサブエージェント起動ツール）は readonlyTools に含まれていれば allow になる', () => {
+  const decision = decidePlanPermission({
+    toolName: 'Agent',
+    input: {},
+    strictReadonly: true,
+    allowedTools: ALLOWED_TOOLS,
+    readonlyTools: [...READONLY_TOOLS, 'Agent'],
+    readonlyBashCommands: READONLY_BASH_COMMANDS,
+    writeBashCommands: WRITE_BASH_COMMANDS,
+    skipPermissions: false,
+  });
+  assert.equal(decision.behavior, 'allow');
+});
+
+test('S1-6: 利用者が Allowed Tools (Plan Mode) に追加した裸の MCP エントリ（context7 の2ツール）は strictReadonly でも allow になる', () => {
+  const userAllowedTools = [
+    'Bash(pm2 logs)', 'Bash(git log *)',
+    'mcp__plugin_context7_context7__resolve-library-id',
+    'mcp__plugin_context7_context7__query-docs',
+  ];
+  for (const toolName of ['mcp__plugin_context7_context7__resolve-library-id', 'mcp__plugin_context7_context7__query-docs']) {
+    const decision = decidePlanPermission({
+      toolName,
+      input: {},
+      strictReadonly: true,
+      allowedTools: userAllowedTools,
+      readonlyTools: READONLY_TOOLS,
+      readonlyBashCommands: READONLY_BASH_COMMANDS,
+      writeBashCommands: WRITE_BASH_COMMANDS,
+      skipPermissions: false,
+    });
+    assert.equal(decision.behavior, 'allow', `${toolName} が deny された`);
+  }
+});
+
+test('S1-7: プランターンで通常使う読み取り専用ツール（Read/Grep/Glob/Agent/ToolSearch/TodoWrite/WebFetch/WebSearch）は拒否されない', () => {
+  const commonTools = ['Read', 'Grep', 'Glob', 'Agent', 'ToolSearch', 'TodoWrite', 'WebFetch', 'WebSearch'];
+  for (const toolName of commonTools) {
+    const decision = decidePlanPermission({
+      toolName,
+      input: {},
+      strictReadonly: true,
+      allowedTools: ALLOWED_TOOLS,
+      readonlyTools: [...READONLY_TOOLS, 'Agent'],
+      readonlyBashCommands: READONLY_BASH_COMMANDS,
+      writeBashCommands: WRITE_BASH_COMMANDS,
+      skipPermissions: false,
+    });
+    assert.equal(decision.behavior, 'allow', `${toolName} が deny された`);
+  }
+});
