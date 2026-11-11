@@ -1,11 +1,11 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted } from '../services/agent-manager.js';
+import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted, getAgentAvailableAiTools } from '../services/agent-manager.js';
 import { getMachineBusyState } from '../services/auto-updater.js';
 import { isUpdateBusyGuardEnabled, decideManualUpdate, buildBusyHoldApiMessage, formatBusyReason } from '../services/update-busy-rules.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
@@ -26,12 +26,17 @@ import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
-import { isCrossTeamEnabled, isCrossTeamChatEnabled } from '../services/cross-team-guard.js';
+import { isCrossTeamEnabled, isCrossTeamChatEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled, isCrossAskResetEnabled } from '../services/cross-team-guard.js';
 import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
 import { isCrossTeamPublishEnabled, selectPublishableMembers } from '../services/cross-team-publish.js';
-import { listCrossTeamAskCandidateProjects } from '../services/cross-team-authz.js';
+import { listCrossTeamAskCandidateProjects, findCrossTeamAskProjectById } from '../services/cross-team-authz.js';
 import { buildCrossAskTargetGroups, resolveCrossAskOrigin, type CrossAskTargetRow } from '../services/cross-ask-rules.js';
 import { buildCrossAskSessionIdFilter } from '../services/thread-scope.js';
+import { pickAvailableAiTool } from '../services/ai-tool-availability.js';
+import { decideAskReadOnlyEnforcement } from '../services/ask-guard.js';
+import { buildCrossAskScopeIdBase, CROSS_ASK_SCOPE_ID_PREFIX, resolveCrossAskResumeMaxTurns } from '../services/cross-ask-resume-rules.js';
+import { decideCrossAskTargetMemoryState, countLatestGenerationTurns } from '../services/cross-ask-target-state.js';
+import { resetCrossAskMemory, purgeCrossAskScopesForRevokedGrant } from '../services/cross-ask-reset.js';
 import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
@@ -3352,7 +3357,7 @@ export async function apiRoutes(app: FastifyInstance) {
       where: { id: memberId },
       include: {
         team: { select: { id: true, userId: true } },
-        project: { include: { machine: { select: { userId: true } } } },
+        project: { include: { machine: { select: { id: true, userId: true } } } },
         crossTeamGrant: true,
       },
     });
@@ -3374,6 +3379,19 @@ export async function apiRoutes(app: FastifyInstance) {
       grantId: member.crossTeamGrant.id,
       mode: 'ask',
       action: 'grant_revoked',
+    });
+
+    // サイクルC3a-1: grant 取消で記憶も後片付け（best-effort、取消の成否は待たせない）。
+    purgeCrossAskScopesForRevokedGrant({
+      requesterUserId: member.crossTeamGrant.requesterUserId,
+      executorUserId: member.crossTeamGrant.granteeUserId,
+      projectId: member.projectId,
+      projectPath: member.project.path,
+      machineId: member.project.machine.id,
+      organizationId: member.crossTeamGrant.organizationId,
+      teamId: member.team.id,
+      grantId: member.crossTeamGrant.id,
+      trigger: 'grantRevoked',
     });
 
     await prisma.teamMember.delete({ where: { id: memberId } });
@@ -3447,6 +3465,10 @@ export async function apiRoutes(app: FastifyInstance) {
    * 中身は listCrossTeamAskCandidateProjects() を呼ぶだけ（招待型＋購読型の合流・組織境界の
    * 実行時再検証・又貸し防止は既にこの関数に閉じている。別の絞り込みを書くと「ツリーに出る集合」
    * と「ask できる集合」が将来ずれるため、ここでは行わない）。
+   *
+   * サイクルC3a-1: `DEVRELAY_CROSS_ASK_RESET`（既定 ON）が有効なときだけ各 project 行に
+   * `memory`（remembers/askable/turns）を足す。OFF のときはキーごと省略し、旧レスポンスと
+   * 構造同一にする（テストで固定: cross-ask-reset-wiring.test.mjs）。
    */
   app.get('/api/cross-team/ask-targets', async (request, reply) => {
     const userId = (request as any).user.id as string;
@@ -3472,6 +3494,54 @@ export async function apiRoutes(app: FastifyInstance) {
       : [];
     const ownerLabelById = new Map(owners.map(u => [u.id, u.name ?? maskEmailForDisplay(u.email) ?? u.id]));
 
+    // サイクルC3a-1: memory フィールドの解決（キルスイッチ OFF なら一切 DB を読まずスキップ）。
+    const resetEnabled = isCrossAskResetEnabled(process.env.DEVRELAY_CROSS_ASK_RESET);
+    const memoryByProjectId = new Map<string, CrossAskTargetRow['memory']>();
+    if (resetEnabled) {
+      const isolationEnabled = isCrossAskIsolationEnabled(process.env.DEVRELAY_CROSS_ASK_ISOLATION);
+      const resumeEnabled = isCrossAskResumeEnabled(process.env.DEVRELAY_CROSS_ASK_RESUME);
+      const maxTurns = resolveCrossAskResumeMaxTurns(process.env.DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS);
+
+      // 候補数ぶんのクエリを出さず 1 クエリで全候補分の crossask- scope 行を取得し、
+      // JS 側で projectId → scopeIdBase の突合を行う（cross-ask-target-state.ts の docstring参照）。
+      const scopeIdBaseByProjectId = new Map(
+        candidates.map((c) => [c.id, buildCrossAskScopeIdBase(createHash('sha256').update(`${userId}\0${c.id}`).digest('hex'))]),
+      );
+      const scopeRows = await prisma.session.findMany({
+        where: { projectId: { in: candidates.map((c) => c.id) }, agentScopeId: { startsWith: CROSS_ASK_SCOPE_ID_PREFIX } },
+        select: { projectId: true, agentScopeId: true },
+      });
+      const scopeRowsByProjectId = new Map<string, { agentScopeId: string | null }[]>();
+      for (const row of scopeRows) {
+        const list = scopeRowsByProjectId.get(row.projectId) ?? [];
+        list.push({ agentScopeId: row.agentScopeId });
+        scopeRowsByProjectId.set(row.projectId, list);
+      }
+
+      for (const c of candidates) {
+        const availableAiTools = getAgentAvailableAiTools(c.machine.id);
+        const resolvedAiTool = pickAvailableAiTool(c.defaultAi as AiTool, availableAiTools, []);
+        const readOnlyEnforced = decideAskReadOnlyEnforcement({ aiTool: resolvedAiTool, terminalMode: c.terminalMode }).readOnlyEnforced;
+        const state = decideCrossAskTargetMemoryState({
+          isolationEnabled,
+          resumeEnabled,
+          agentHasIsolationCapability: agentHasCapability(c.machine.id, 'cross-ask-isolation'),
+          agentHasResumeCapability: agentHasCapability(c.machine.id, 'cross-ask-resume-strict'),
+          readOnlyEnforced,
+        });
+        const scopeIdBase = scopeIdBaseByProjectId.get(c.id)!;
+        const { turns } = countLatestGenerationTurns(scopeRowsByProjectId.get(c.id) ?? [], scopeIdBase);
+        memoryByProjectId.set(c.id, {
+          remembers: state.remembers,
+          reason: state.reason,
+          askable: state.askable,
+          askDenyReason: state.askDenyReason,
+          turns,
+          maxTurns,
+        });
+      }
+    }
+
     const rows: CrossAskTargetRow[] = candidates.map(c => ({
       ownerLabel: ownerLabelById.get(c.machine.userId) ?? c.machine.userId,
       machineId: c.machine.id,
@@ -3482,9 +3552,39 @@ export async function apiRoutes(app: FastifyInstance) {
       teamId: c.crossTeam.teamId,
       teamName: teamNameById.get(c.crossTeam.teamId) ?? c.crossTeam.teamId,
       origin: resolveCrossAskOrigin(c.crossTeam.grantId),
+      ...(resetEnabled ? { memory: memoryByProjectId.get(c.id) } : {}),
     }));
 
     return reply.send({ groups: buildCrossAskTargetGroups(rows) });
+  });
+
+  /**
+   * サイクルC3a-1: クロス ask の記憶をリセットする（WebUI 用。C3a-2 でクロスタブのバナーから配線）。
+   * 認可は既存 `findCrossTeamAskProjectById()`（Phase C の ask 候補集合と同一）を再利用し、
+   * null は 404（存在オラクルを作らない既存流儀。`GET /api/cross-team/projects/:id/messages` と同じ）。
+   * body は一切使わない（body なし POST。`apps/web/src/lib/api.ts` の `request()` 経由で呼ぶこと）。
+   */
+  app.post('/api/cross-team/projects/:projectId/reset', async (request: FastifyRequest<{ Params: { projectId: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id as string;
+    const { projectId } = request.params;
+
+    if (!crossTeamChatFeatureEnabled() || !isCrossAskResetEnabled(process.env.DEVRELAY_CROSS_ASK_RESET)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const project = await findCrossTeamAskProjectById(userId, projectId);
+    if (!project) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const result = await resetCrossAskMemory(userId, project);
+    if (!result.ok) {
+      // notCrossUser は findCrossTeamAskProjectById が常にクロス候補のみを返すため構造的に起きないが、
+      // 型の完全性のため 400 で返す（ここに来るのはバグ）。
+      return reply.status(400).send({ error: 'Not a cross-user ask target' });
+    }
+
+    return reply.send({ success: true, hadMemory: result.hadMemory, purgedGenerations: result.purgedGenerations });
   });
 
   /**
@@ -3716,6 +3816,43 @@ export async function apiRoutes(app: FastifyInstance) {
     return reply.send({ subscriptionId: subscription.id });
   });
 
+  /**
+   * 購読系（本エンドポイント・次の `subscribers/:userId` 削除）のクロス ask 後片付け共通処理。
+   * teamId 単位で projectId を持たないため `TeamMember → project.machine` を 1 クエリ足して
+   * 公開可能プロジェクト（又貸し防止: `selectPublishableMembers`）だけに後片付けを送る
+   * （fire-and-forget。購読解除の応答は待たせない）。
+   */
+  const purgeCrossAskScopesForUnsubscribe = async (params: {
+    teamId: string; teamOwnerUserId: string; subscriberUserId: string; organizationId: string | null; trigger: 'unsubscribed' | 'subscriptionRevoked';
+  }) => {
+    const teamMembers = await prisma.teamMember.findMany({
+      where: { teamId: params.teamId },
+      select: { projectId: true, project: { select: { path: true, machine: { select: { id: true, userId: true } } } } },
+    });
+    const publishable = selectPublishableMembers(
+      teamMembers.map((m) => ({
+        teamId: params.teamId,
+        teamOwnerUserId: params.teamOwnerUserId,
+        projectId: m.projectId,
+        ownerUserId: m.project.machine.userId,
+        projectPath: m.project.path,
+        machineId: m.project.machine.id,
+      })),
+    );
+    for (const m of publishable) {
+      purgeCrossAskScopesForRevokedGrant({
+        requesterUserId: params.subscriberUserId,
+        executorUserId: m.ownerUserId,
+        projectId: m.projectId,
+        projectPath: m.projectPath,
+        machineId: m.machineId,
+        organizationId: params.organizationId,
+        teamId: params.teamId,
+        trigger: params.trigger,
+      });
+    }
+  };
+
   /** 公開型 Team（Phase A）: 自分の購読を解除する（購読者本人のみ）。 */
   app.delete('/api/teams/:teamId/subscribe', async (request, reply) => {
     const userId = (request as any).user.id as string;
@@ -3731,6 +3868,8 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Subscription not found' });
     }
 
+    const team = await prisma.team.findUnique({ where: { id: teamId }, select: { userId: true } });
+
     await prisma.teamSubscription.update({ where: { id: subscription.id }, data: { revokedAt: new Date() } });
 
     recordCrossTeamAudit({
@@ -3738,6 +3877,14 @@ export async function apiRoutes(app: FastifyInstance) {
       organizationId: subscription.organizationId,
       teamId, mode: 'ask', action: 'unsubscribed', allowSelfAudit: true,
     });
+
+    // サイクルC3a-1: 後片付け（best-effort、取消の成否は待たせない）。
+    if (team) {
+      purgeCrossAskScopesForUnsubscribe({
+        teamId, teamOwnerUserId: team.userId, subscriberUserId: userId,
+        organizationId: subscription.organizationId, trigger: 'unsubscribed',
+      });
+    }
 
     return reply.send({ success: true });
   });
@@ -3801,6 +3948,13 @@ export async function apiRoutes(app: FastifyInstance) {
       requesterUserId: ownerUserId, executorUserId: subscriberUserId,
       organizationId: subscription.organizationId,
       teamId, mode: 'ask', action: 'subscription_revoked',
+    });
+
+    // サイクルC3a-1: 後片付け（best-effort、取消の成否は待たせない）。requesterUserId は
+    // 記憶の持ち主である購読者（subscriberUserId）であって、取消を行ったオーナーではない。
+    purgeCrossAskScopesForUnsubscribe({
+      teamId, teamOwnerUserId: team.userId, subscriberUserId,
+      organizationId: subscription.organizationId, trigger: 'subscriptionRevoked',
     });
 
     return reply.send({ success: true });

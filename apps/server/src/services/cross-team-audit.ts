@@ -28,7 +28,11 @@ export type CrossTeamAuditAction =
   | 'team_unpublished'
   | 'subscribed'
   | 'unsubscribed'
-  | 'subscription_revoked';
+  | 'subscription_revoked'
+  // サイクルC3a-1: クロス ask の記憶リセット・後片付け（いずれも requesterUserId（操作者）
+  // === executorUserId（宛先所有者）になりうる本人操作のため allowSelfAudit を渡す）
+  | 'cross_ask_reset'
+  | 'cross_ask_cleanup';
 
 export interface RecordCrossTeamAuditInput {
   requesterUserId: string;

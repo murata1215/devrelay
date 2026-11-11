@@ -29,16 +29,19 @@ import {
   ASK_INFLIGHT_WINDOW_MS,
 } from './cross-query-guard.js';
 import { buildCrossAskContextPrefix, type CrossAskHistoryMessage } from './cross-ask-rules.js';
-import { isCrossTeamChatContextEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled } from './cross-team-guard.js';
+import { isCrossTeamChatContextEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled, isCrossAskResetEnabled } from './cross-team-guard.js';
 import { decideCrossAskIsolation, buildCrossAskIsolationDenialMessage, buildCrossAskIsolationDenyLog } from './cross-ask-isolation-rules.js';
 import {
   buildCrossAskScopeIdBase,
+  buildCrossAskScopeId,
   parseCrossAskScopeGeneration,
   decideCrossAskSessionPlan,
+  decideCrossAskResetRequested,
   resolveCrossAskResumeTtlMs,
   resolveCrossAskResumeMaxTurns,
   buildCrossAskResumeLog,
 } from './cross-ask-resume-rules.js';
+import { purgeCrossAskScopes } from './cross-ask-scope-cleanup.js';
 import { buildCrossAskSessionIdFilter } from './thread-scope.js';
 
 /** 同じ依頼を再送しないよう促す注記（document-api.ts の `NO_RETRY_NOTE` と同文）。 */
@@ -198,6 +201,24 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
     crossAskStatePolicy = isolation.statePolicy ?? undefined;
   }
 
+  // サイクルC3a-1: 明示リセット（`CrossAskReset.resetAt`）の読み取り。キルスイッチ OFF
+  // （既定 ON）または同一ユーザー ask では一切読まない。テーブル未作成（DB マイグレーション未適用）
+  // でも既存のクロス ask を壊さないよう fail-open（読み取り失敗時は「リセットなし」として続行し、
+  // 1 回だけ警告ログを出す）。
+  const resetEnabled = isCrossUser && isCrossAskResetEnabled(process.env.DEVRELAY_CROSS_ASK_RESET);
+  let crossAskResetAtMs: number | null = null;
+  if (resetEnabled) {
+    try {
+      const resetRow = await prisma.crossAskReset.findUnique({
+        where: { requesterUserId_projectId: { requesterUserId, projectId: targetProject.id } },
+        select: { resetAt: true },
+      });
+      crossAskResetAtMs = resetRow?.resetAt.getTime() ?? null;
+    } catch (err: unknown) {
+      console.error('⚠️ CrossAskReset read failed (table not migrated yet? falling back to no-reset):', err instanceof Error ? err.message : err);
+    }
+  }
+
   // 2.7. サイクルC2: resume 昇格判定。G の isolation 判定に通った（denied されなかった）
   // クロスユーザー ask のうち、resume 対応 Agent + 読み取り専用強制可能な宛先に限り、
   // statePolicy を 'isolated' から 'resumable-scoped' へ昇格させ、決定論的な agentScopeId
@@ -211,7 +232,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
 
     let latestGeneration: number | null = null;
     let currentGenerationTurns = 0;
-    let lastTurnAgeMs: number | null = null;
+    let lastTurnAtMs: number | null = null;
     let scopeIdBase = '';
 
     if (isCrossUser && resumeEnabled) {
@@ -237,7 +258,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
         if (latestGeneration === null || gen > latestGeneration) {
           latestGeneration = gen;
           currentGenerationTurns = 0;
-          lastTurnAgeMs = Date.now() - row.startedAt.getTime();
+          lastTurnAtMs = row.startedAt.getTime();
         }
         if (gen === latestGeneration) {
           currentGenerationTurns += 1;
@@ -245,6 +266,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
       }
     }
 
+    const resetRequested = resetEnabled && decideCrossAskResetRequested(crossAskResetAtMs, lastTurnAtMs);
     const plan = decideCrossAskSessionPlan({
       resumeEnabled,
       isolationEnabled,
@@ -255,14 +277,38 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
       scopeIdBase,
       latestGeneration,
       currentGenerationTurns,
-      lastTurnAgeMs,
+      lastTurnAgeMs: lastTurnAtMs !== null ? Date.now() - lastTurnAtMs : null,
       ttlMs: resolveCrossAskResumeTtlMs(process.env.DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS),
       maxTurns: resolveCrossAskResumeMaxTurns(process.env.DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS),
+      resetRequested,
     });
     console.log(buildCrossAskResumeLog(plan, targetProject.name));
     crossAskStatePolicy = plan.statePolicy;
     resumeAgentScopeId = plan.agentScopeId;
     includeResumeContextPrefix = plan.includeContextPrefix;
+
+    // サイクルC3a-1: 世代が +1 された（旧世代が存在した上で新世代に切り替わった）ときだけ、
+    // 旧世代 1 件を対象に後片付けを fire-and-forget で送る（ask 本体は待たせない）。
+    if (plan.mode === 'resumableFresh' && latestGeneration !== null) {
+      const oldScopeId = buildCrossAskScopeId(scopeIdBase, latestGeneration);
+      const ttlExceeded = resolveCrossAskResumeTtlMs(process.env.DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS) > 0
+        && lastTurnAtMs !== null && (Date.now() - lastTurnAtMs) > resolveCrossAskResumeTtlMs(process.env.DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS);
+      const turnsExceeded = resolveCrossAskResumeMaxTurns(process.env.DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS) > 0
+        && currentGenerationTurns >= resolveCrossAskResumeMaxTurns(process.env.DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS);
+      purgeCrossAskScopes({
+        machineId: targetProject.machine.id,
+        projectPath: targetProject.path,
+        scopeIds: [oldScopeId],
+        trigger: resetRequested ? 'manual' : ttlExceeded ? 'ttl' : turnsExceeded ? 'maxTurns' : 'manual',
+        requesterUserId,
+        executorUserId,
+        teamId: targetProject.crossTeam?.teamId,
+        projectId: targetProject.id,
+        grantId: targetProject.crossTeam?.grantId,
+      }).catch((err: unknown) => {
+        console.error('🧹 purgeCrossAskScopes (generation rollover) failed:', err instanceof Error ? err.message : err);
+      });
+    }
   }
 
   // 3. 一時セッション作成（userId は宛先マシン所有者。requestedByUserId はクロス時のみ記録する）
@@ -322,6 +368,11 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
             requestedByUserId: requesterUserId,
             ...buildCrossAskSessionIdFilter(),
           },
+          // サイクルC3a-1: 明示リセット以前のメッセージは前置に含めない（旧 Agent・gemini/devin・
+          // RESUME=0 では案B前置が唯一の記憶のため、ここを切らないと「リセットしたのに
+          // 前の話を覚えている」になる）。resetEnabled=false（キルスイッチ OFF）なら
+          // crossAskResetAtMs は常に null なので、この条件自体が付かず挙動は完全に不変。
+          ...(crossAskResetAtMs !== null ? { createdAt: { gt: new Date(crossAskResetAtMs) } } : {}),
         },
         orderBy: { createdAt: 'asc' },
         select: { role: true, content: true },

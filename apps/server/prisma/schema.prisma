@@ -346,6 +346,23 @@ model TeamSubscription {
   @@index([teamId])
 }
 
+// サイクルC3a-1: クロス ask の記憶リセット。行の存在は「このペア（依頼者, 宛先プロジェクト）を
+// 最後にいつリセットしたか」の記録のみ（state の持ち場）。CrossTeamAuditLog の
+// action='cross_ask_reset' 行（監査証跡、fire-and-forget）とは意図的に分離する
+// （cross-ask-resume-rules.ts のコメント参照: 監査は順序保証が無いため state には使わない）。
+// User/Project を削除しても残らないよう FK は張らない（UserClearance / KnowledgeChunk と同じ規約）。
+model CrossAskReset {
+  id              String   @id @default(cuid())
+  requesterUserId String
+  projectId       String
+  resetAt         DateTime @default(now())
+  resetCount      Int      @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([requesterUserId, projectId])
+}
+
 // セッション
 model Session {
   id            String    @id @default(cuid())

@@ -5,6 +5,25 @@
  * `services/cross-ask-runner.ts`）が行を集めてここに渡す）。
  */
 
+/**
+ * サイクルC3a-1: `GET /api/cross-team/ask-targets` の project 行に足す記憶状態
+ * （`DEVRELAY_CROSS_ASK_RESET` が OFF のときはキーごと省略 — 旧レスポンスと構造同一にするため、
+ * 呼び出し側は `memory` プロパティ自体を付けないこと。`undefined` を明示的にセットしても
+ * JSON.stringify で落ちるが、構造的な一貫性のため型も optional にしておく）。
+ */
+export interface CrossAskTargetMemory {
+  /** resume が効く見込み（宛先が覚えている） */
+  remembers: boolean;
+  reason?: 'featureOff' | 'isolationOff' | 'agentOutdated' | 'aiUnsafe';
+  /** false = 質問自体が G の隔離判定で断られる見込み */
+  askable: boolean;
+  askDenyReason?: 'agent_outdated' | 'ai_unsafe';
+  /** 現世代の往復数（Session 行数）。世代が無ければ 0 */
+  turns?: number;
+  /** `DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS` の解決値（自動リセットの目安） */
+  maxTurns?: number;
+}
+
 /** `buildCrossAskTargetGroups()` が受け取る 1 行（フラット。呼び出し側が DB から組み立てる）。 */
 export interface CrossAskTargetRow {
   ownerLabel: string;
@@ -17,6 +36,8 @@ export interface CrossAskTargetRow {
   teamId: string;
   teamName: string;
   origin: 'invite' | 'subscription';
+  /** `DEVRELAY_CROSS_ASK_RESET` が OFF のときは省略する（省略時は `CrossAskTargetProject.memory` も省略される） */
+  memory?: CrossAskTargetMemory;
 }
 
 export interface CrossAskTargetProject {
@@ -27,6 +48,7 @@ export interface CrossAskTargetProject {
   origin: 'invite' | 'subscription';
   /** Phase C 時点では常に false（Phase 2 で exec を解禁するまでの型レベルの約束） */
   execAllowed: false;
+  memory?: CrossAskTargetMemory;
 }
 
 export interface CrossAskTargetMachineGroup {
@@ -69,6 +91,8 @@ export function buildCrossAskTargetGroups(rows: CrossAskTargetRow[]): CrossAskTa
       teamName: row.teamName,
       origin: row.origin,
       execAllowed: false,
+      // row.memory が undefined（キルスイッチ OFF）なら、キー自体を付けず旧レスポンスと構造同一にする。
+      ...(row.memory ? { memory: row.memory } : {}),
     });
   }
 

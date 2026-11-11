@@ -86,6 +86,20 @@ export function isCrossAskResumeEnabled(raw: string | undefined): boolean {
   return raw === '1';
 }
 
+/**
+ * サイクルC3a-1: `DEVRELAY_CROSS_ASK_RESET` の既定値解決（既定 ON=`!== '0'`。
+ * `DEVRELAY_CROSS_TEAM` × `DEVRELAY_CROSS_TEAM_CHAT` との AND は呼び出し側が判定する——
+ * 本モジュール単体では `DEVRELAY_CROSS_TEAM`/`DEVRELAY_CROSS_TEAM_CHAT` を見ない
+ * （`isCrossTeamChatEnabled()` と同じ流儀）。
+ *
+ * `0` のとき: 新ルート（`POST /api/cross-team/projects/:projectId/reset`）が 404、
+ * `askreset` コマンドは未対応応答、`GET /api/cross-team/ask-targets` の `memory` フィールドは
+ * キーごと省略（旧レスポンスと構造同一）、世代+1/明示リセット時の後片付け送信も行わない。
+ */
+export function isCrossAskResetEnabled(raw: string | undefined): boolean {
+  return raw !== '0';
+}
+
 /** 受入側を守るクロスユーザー専用のレート閾値（5 分窓）。既存の依頼者基準の閾値とは別に加算する。 */
 export const CROSS_USER_ASK_TARGET_LIMIT = 4;
 export const CROSS_USER_ASK_EXECUTOR_LIMIT = 6;

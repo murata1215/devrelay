@@ -68,6 +68,8 @@ import {
 import { evaluateProjectOwnership } from './thread-api-guard.js';
 import { buildEphemeralSessionIdExclusion } from './thread-scope.js';
 import { runCrossProjectAsk } from './cross-ask-runner.js';
+import { isCrossAskResetEnabled } from './cross-team-guard.js';
+import { resetCrossAskMemory } from './cross-ask-reset.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
 // This allows different channels to have different active sessions
@@ -347,6 +349,9 @@ export async function executeCommand(
 
     case 'ask:member':
       return handleAskMember(context, command.targetProject, command.question);
+
+    case 'ask:reset':
+      return handleAskReset(context, command.targetProject);
 
     case 'teamexec:member':
       return handleTeamExec(context, command.targetProject, command.instruction);
@@ -2261,6 +2266,56 @@ async function handleAskMember(
     return result.message;
   }
   return `❌ ${targetProject.name} への質問が失敗しました: ${result.message}`;
+}
+
+/**
+ * サイクルC3a-1: `askreset <project>` コマンド。クロス ask の記憶をリセットする
+ * （WebUI の `POST /api/cross-team/projects/:projectId/reset` と同じ `resetCrossAskMemory()` を
+ * 呼ぶ共用ロジック）。`x`（会話クリア）と異なり 2 段確認はしない——失うのは相手 AI の記憶だけで、
+ * 所有者側のファイル・プランは一切変更されないため。
+ */
+async function handleAskReset(context: UserContext, targetProjectName: string): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) {
+    return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
+  }
+
+  // #295 / クロスユーザー Team（Phase 1）: ask と同じ母集団解決（includeCrossTeam=true）
+  const resolved = await resolveCrossTargetByName(dbUserId, targetProjectName, true);
+  if (!resolved.ok) return resolved.error;
+  const targetProject = resolved.project;
+
+  if (!isCrossAskResetEnabled(process.env.DEVRELAY_CROSS_ASK_RESET)) {
+    return lang === 'ja'
+      ? '⚠️ askreset は現在無効化されています（DEVRELAY_CROSS_ASK_RESET=0）。'
+      : '⚠️ askreset is currently disabled (DEVRELAY_CROSS_ASK_RESET=0).';
+  }
+
+  if (!targetProject.crossTeam) {
+    // 同一ユーザー宛は記憶機構そのものが無い（resume/案B前置はクロスユーザー ask 限定）
+    return lang === 'ja'
+      ? `ℹ️ ${targetProject.name} は自分のプロジェクトのため、リセットは不要です。`
+      : `ℹ️ ${targetProject.name} is your own project; no reset is needed.`;
+  }
+
+  const result = await resetCrossAskMemory(dbUserId, {
+    id: targetProject.id,
+    path: targetProject.path,
+    machine: { id: targetProject.machine.id, userId: targetProject.machine.userId },
+    crossTeam: targetProject.crossTeam,
+  });
+
+  if (!result.ok) {
+    // targetProject.crossTeam が有るのに notCrossUser が返るのは構造的に起きない（呼び出し側の
+    // バグ）。素直に失敗として報告する。
+    return `❌ ${targetProject.name} のリセットに失敗しました。`;
+  }
+
+  return lang === 'ja'
+    ? `🧹 ${targetProject.name} への質問の記憶をリセットしました。次の質問から覚えていません。`
+    : `🧹 Reset the conversation memory for ${targetProject.name}. It will not remember past questions starting with the next ask.`;
 }
 
 /**

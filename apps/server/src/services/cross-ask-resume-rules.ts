@@ -29,8 +29,13 @@
  *  （「外部 import ゼロ」規約を維持するため。1 行の正規表現なので重複コストは小さい）。 */
 const AGENT_SCOPE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
-/** scope id のプレフィックス（既存の `crossquery_`（アンダースコア）ピンとは意図的に別記号系＝ハイフン）。 */
-const SCOPE_ID_PREFIX = 'crossask-';
+/**
+ * scope id のプレフィックス（既存の `crossquery_`（アンダースコア）ピンとは意図的に別記号系＝ハイフン）。
+ * サイクルC3a-1: `GET /api/cross-team/ask-targets` が「どの projectId 配下の Session 行が
+ * クロス ask の scope を持つか」を 1 クエリで絞り込むために export する（base 突合は呼び出し側で行う）。
+ */
+export const CROSS_ASK_SCOPE_ID_PREFIX = 'crossask-';
+const SCOPE_ID_PREFIX = CROSS_ASK_SCOPE_ID_PREFIX;
 
 /**
  * digest（呼び出し側が `sha256(requesterUserId + '\0' + projectId)` で計算した16進文字列）から
@@ -78,6 +83,23 @@ export function resolveCrossAskResumeMaxTurns(raw: string | undefined): number {
   return Math.min(500, Math.max(2, Math.floor(n)));
 }
 
+/**
+ * サイクルC3a-1: `decideCrossAskSessionPlan` に渡す `resetRequested` を算出する。
+ * 「明示リセット（`CrossAskReset.resetAt`）が現世代の最終ターンより新しいか」だけを見る
+ * 純関数（ミリ秒の number で比較。呼び出し側が Date → number への変換を行う）。
+ *
+ * - `resetAtMs` が null（リセット行が無い、または対象外）→ 常に false
+ * - `lastTurnAtMs` が null（新規ペア、まだ世代が無い）→ リセット行があれば true
+ *   （次に見る `noExistingGeneration` と結果的に同じ分岐へ合流するが、意味としては
+ *   「リセットされているので新規に作る」を明示するため独立した入力として扱う）
+ * - それ以外は `resetAtMs > lastTurnAtMs` のときのみ true
+ */
+export function decideCrossAskResetRequested(resetAtMs: number | null, lastTurnAtMs: number | null): boolean {
+  if (resetAtMs === null) return false;
+  if (lastTurnAtMs === null) return true;
+  return resetAtMs > lastTurnAtMs;
+}
+
 /** `decideCrossAskSessionPlan` の入力。 */
 export interface DecideCrossAskSessionPlanInput {
   /** `isCrossAskResumeEnabled(process.env.DEVRELAY_CROSS_ASK_RESUME)` の結果 */
@@ -105,6 +127,14 @@ export interface DecideCrossAskSessionPlanInput {
   ttlMs: number;
   /** `resolveCrossAskResumeMaxTurns()` の結果（0 = 無効） */
   maxTurns: number;
+  /**
+   * サイクルC3a-1: `CrossAskReset.resetAt` が現世代の最終ターンより新しい（= 明示リセットが
+   * 最後のターンより後に起きた）かどうか。呼び出し側が
+   * `resetAt !== null && (lastTurnAt === null || resetAt > lastTurnAt)` で算出して渡す。
+   * true のとき TTL・上限ターンと同じ扱いで強制的に世代を +1 する
+   * （`resumable` に落ちることは絶対にない——リセットしたのに前の世代を継続する事故を防ぐ）。
+   */
+  resetRequested: boolean;
 }
 
 export type CrossAskSessionPlan =
@@ -149,7 +179,7 @@ export function decideCrossAskSessionPlan(input: DecideCrossAskSessionPlanInput)
   const turnsExceeded = input.maxTurns > 0 && input.currentGenerationTurns >= input.maxTurns;
   const noExistingGeneration = input.latestGeneration === null;
 
-  if (noExistingGeneration || ttlExceeded || turnsExceeded) {
+  if (noExistingGeneration || ttlExceeded || turnsExceeded || input.resetRequested) {
     const nextGeneration = (input.latestGeneration ?? 0) + 1;
     const agentScopeId = buildCrossAskScopeId(input.scopeIdBase, nextGeneration);
     return { mode: 'resumableFresh', agentScopeId, statePolicy: 'resumable-scoped', includeContextPrefix: true };

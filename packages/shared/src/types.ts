@@ -970,6 +970,7 @@ export type UserCommand =
   | { type: 'testflight'; subcommand: 'copy'; srcName: string; destName: string }
   | { type: 'testflight'; subcommand: 'help' }
   | { type: 'ask:member'; targetProject: string; question: string }
+  | { type: 'ask:reset'; targetProject: string }   // クロス ask の記憶リセット（サイクルC3a-1）
   | { type: 'teamexec:member'; targetProject: string; instruction: string }
   | { type: 'disconnect' }  // 接続プロジェクト解除（Manager 用）
   // Claude リモート再ログイン（#326 Phase2）。platform === 'web' 以外は command-handler.ts で即拒否する
