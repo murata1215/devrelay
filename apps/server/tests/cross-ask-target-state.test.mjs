@@ -14,6 +14,7 @@ function baseState(overrides = {}) {
     isolationEnabled: true,
     resumeEnabled: true,
     agentHasIsolationCapability: true,
+    agentHasPlanGateCapability: true,
     agentHasResumeCapability: true,
     readOnlyEnforced: true,
     ...overrides,
@@ -45,6 +46,15 @@ describe('decideCrossAskTargetMemoryState: askable（G の隔離判定と同じ�
     assert.equal(state.reason, 'agentOutdated');
   });
 
+  // サイクルS1（2026-11-12）: plan-gate-hook capability 未申告（旧 Agent・agents/windows）。
+  test('agentHasPlanGateCapability=false（プランモードゲート未対応 Agent）→ askable=false/agent_outdated', () => {
+    const state = decideCrossAskTargetMemoryState(baseState({ agentHasPlanGateCapability: false }));
+    assert.equal(state.askable, false);
+    assert.equal(state.askDenyReason, 'agent_outdated');
+    assert.equal(state.remembers, false);
+    assert.equal(state.reason, 'agentOutdated');
+  });
+
   test('readOnlyEnforced=false（devin/gemini/claude+terminalMode）→ askable=false/ai_unsafe', () => {
     const state = decideCrossAskTargetMemoryState(baseState({ readOnlyEnforced: false }));
     assert.equal(state.askable, false);
@@ -69,30 +79,34 @@ describe('decideCrossAskTargetMemoryState: remembers（C2 の resume 判定と�
     assert.equal(state.reason, 'agentOutdated');
   });
 
-  test('真理値表: 4条件 × askable/remembers の全組み合わせで askDenyReason/reason が一貫する', () => {
+  test('真理値表: 6条件（plan-gate-hook capability 追加）× askable/remembers の全組み合わせで askDenyReason/reason が一貫する', () => {
     for (const isolationEnabled of [true, false]) {
       for (const resumeEnabled of [true, false]) {
         for (const agentHasIsolationCapability of [true, false]) {
-          for (const agentHasResumeCapability of [true, false]) {
-            for (const readOnlyEnforced of [true, false]) {
-              const state = decideCrossAskTargetMemoryState({
-                isolationEnabled, resumeEnabled, agentHasIsolationCapability, agentHasResumeCapability, readOnlyEnforced,
-              });
-              // askable=false は常に isolationEnabled=true のときのみ発生する。
-              // また askable=false のとき runner.ts では resume 判定自体に到達しないため、
-              // remembers は常に false に強制される（isolation の拒否理由がそのまま reason になる）。
-              if (!state.askable) {
-                assert.equal(isolationEnabled, true);
-                assert.ok(state.askDenyReason === 'agent_outdated' || state.askDenyReason === 'ai_unsafe');
-                assert.equal(state.remembers, false);
-                assert.equal(state.reason, state.askDenyReason === 'agent_outdated' ? 'agentOutdated' : 'aiUnsafe');
-              }
-              // remembers=true は 5 条件すべてクリアのときだけ
-              if (state.remembers) {
-                assert.equal(resumeEnabled, true);
-                assert.equal(isolationEnabled, true);
-                assert.equal(agentHasResumeCapability, true);
-                assert.equal(readOnlyEnforced, true);
+          for (const agentHasPlanGateCapability of [true, false]) {
+            for (const agentHasResumeCapability of [true, false]) {
+              for (const readOnlyEnforced of [true, false]) {
+                const state = decideCrossAskTargetMemoryState({
+                  isolationEnabled, resumeEnabled, agentHasIsolationCapability, agentHasPlanGateCapability, agentHasResumeCapability, readOnlyEnforced,
+                });
+                // askable=false は常に isolationEnabled=true のときのみ発生する。
+                // また askable=false のとき runner.ts では resume 判定自体に到達しないため、
+                // remembers は常に false に強制される（isolation の拒否理由がそのまま reason になる）。
+                if (!state.askable) {
+                  assert.equal(isolationEnabled, true);
+                  assert.ok(state.askDenyReason === 'agent_outdated' || state.askDenyReason === 'ai_unsafe');
+                  assert.equal(state.remembers, false);
+                  assert.equal(state.reason, state.askDenyReason === 'agent_outdated' ? 'agentOutdated' : 'aiUnsafe');
+                }
+                // remembers=true は 6 条件すべてクリアのときだけ
+                if (state.remembers) {
+                  assert.equal(resumeEnabled, true);
+                  assert.equal(isolationEnabled, true);
+                  assert.equal(agentHasIsolationCapability, true);
+                  assert.equal(agentHasPlanGateCapability, true);
+                  assert.equal(agentHasResumeCapability, true);
+                  assert.equal(readOnlyEnforced, true);
+                }
               }
             }
           }

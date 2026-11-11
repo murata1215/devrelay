@@ -16,6 +16,7 @@ import {
   startSession as startAgentSession,
   clearAgentRestarted,
   cancelAiProcess,
+  agentHasCapability,
 } from '../services/agent-manager.js';
 import {
   createSession,
@@ -47,7 +48,7 @@ import {
   ASK_QUESTION_MAX_LENGTH,
   ASK_RATE_WINDOW_MS,
   ASK_ANSWER_TIMEOUT_MS,
-  decideAskReadOnlyEnforcement,
+  decideEffectiveAskReadOnlyEnforcement,
   buildAskPromptPrefix,
   pickInflightAskSession,
   decideAskRateLimit,
@@ -1306,9 +1307,16 @@ export function registerMcpTools(server: McpServer, userId: string) {
         }
 
         // 読み取り専用の強制可否を判定（2026-09-26 承認サイクル: AI の差し替えは行わず、
-        // そのままの AI で実行する。強制できない経路はプロンプトの固定禁止文で補う）
+        // そのままの AI で実行する。強制できない経路はプロンプトの固定禁止文で補う）。
+        // サイクルS1（2026-11-12）: claude の強制は PreToolUse フック（'plan-gate-hook' capability）
+        // の実装が前提のため、宛先 Agent が未申告（旧 Agent）なら readOnlyEnforced を false に
+        // 縮退させる（嘘をつかない。buildAskPromptPrefix() の固定禁止文が自動的に付く）。
         const aiTool = project.defaultAi || 'claude';
-        const { readOnlyEnforced } = decideAskReadOnlyEnforcement({ aiTool, terminalMode: project.terminalMode });
+        const { readOnlyEnforced } = decideEffectiveAskReadOnlyEnforcement({
+          aiTool,
+          terminalMode: project.terminalMode,
+          agentHasPlanGateCapability: agentHasCapability(project.machineId, 'plan-gate-hook'),
+        });
 
         // セッション作成（origin:'mcp' で agentScopeId=sessionId が DB に記録される）
         const sessionId = await createSession(userId, project.machineId, project.id, aiTool, {
@@ -1410,7 +1418,7 @@ export function registerMcpTools(server: McpServer, userId: string) {
         const session = await prisma.session.findUnique({
           where: { id: askId },
           select: {
-            userId: true, kind: true, cancelledAt: true, startedAt: true, aiTool: true,
+            userId: true, kind: true, cancelledAt: true, startedAt: true, aiTool: true, machineId: true,
             project: { select: { terminalMode: true } },
           },
         });
@@ -1443,9 +1451,11 @@ export function registerMcpTools(server: McpServer, userId: string) {
           timeoutMs: ASK_ANSWER_TIMEOUT_MS,
         });
 
-        const { readOnlyEnforced } = decideAskReadOnlyEnforcement({
+        // サイクルS1（2026-11-12）: ask_project と同じ実効判定（capability 込み）を使う。
+        const { readOnlyEnforced } = decideEffectiveAskReadOnlyEnforcement({
           aiTool: session.aiTool,
           terminalMode: !!session.project?.terminalMode,
+          agentHasPlanGateCapability: agentHasCapability(session.machineId, 'plan-gate-hook'),
         });
 
         const base = { askId, state, elapsedSeconds, readOnlyEnforced, aiTool: session.aiTool };

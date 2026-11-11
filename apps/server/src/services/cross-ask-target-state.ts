@@ -25,6 +25,8 @@ export interface DecideCrossAskTargetMemoryStateInput {
   resumeEnabled: boolean;
   /** `agentHasCapability(machineId, 'cross-ask-isolation')` の結果 */
   agentHasIsolationCapability: boolean;
+  /** サイクルS1（2026-11-12）: `agentHasCapability(machineId, 'plan-gate-hook')` の結果 */
+  agentHasPlanGateCapability: boolean;
   /** `agentHasCapability(machineId, 'cross-ask-resume-strict')` の結果 */
   agentHasResumeCapability: boolean;
   /** `decideAskReadOnlyEnforcement({ aiTool, terminalMode }).readOnlyEnforced` */
@@ -67,6 +69,7 @@ export function decideCrossAskTargetMemoryState(
     isCrossUser: true,
     isolationEnabled: input.isolationEnabled,
     agentHasIsolationCapability: input.agentHasIsolationCapability,
+    agentHasPlanGateCapability: input.agentHasPlanGateCapability,
     readOnlyEnforced: input.readOnlyEnforced,
   });
 

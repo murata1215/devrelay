@@ -180,6 +180,9 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
       isCrossUser,
       isolationEnabled: isCrossAskIsolationEnabled(process.env.DEVRELAY_CROSS_ASK_ISOLATION),
       agentHasIsolationCapability: agentHasCapability(targetProject.machine.id, 'cross-ask-isolation'),
+      // サイクルS1（2026-11-12）: プランモードの Bash ゲートを PreToolUse フックで実装済みの
+      // Agent（linux/macos）かを見る。未申告（旧 Agent・windows）は fail-closed で断る。
+      agentHasPlanGateCapability: agentHasCapability(targetProject.machine.id, 'plan-gate-hook'),
       readOnlyEnforced,
     });
     if (!isolation.allowed) {

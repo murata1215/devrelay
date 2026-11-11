@@ -54,8 +54,12 @@ describe('mcp-ask-source-guard: ask_project の実装が読み取り専用強制
     assert.ok(!askProjectBody.includes('buildTurnId('));
   });
 
-  test('ask_project は decideAskReadOnlyEnforcement を呼んでいる', () => {
-    assert.match(askProjectBody, /decideAskReadOnlyEnforcement\(/);
+  // サイクルS1（2026-11-12）: decideAskReadOnlyEnforcement の素の結果ではなく、
+  // 'plan-gate-hook' capability を合成した decideEffectiveAskReadOnlyEnforcement を呼ぶ
+  // （旧 Agent では readOnlyEnforced が嘘になるため）。
+  test('ask_project は decideEffectiveAskReadOnlyEnforcement を呼んでいる（plan-gate-hook capability 込み）', () => {
+    assert.match(askProjectBody, /decideEffectiveAskReadOnlyEnforcement\(/);
+    assert.match(askProjectBody, /agentHasPlanGateCapability:\s*agentHasCapability\([^,]+,\s*'plan-gate-hook'\)/);
   });
 
   test('ask_project は buildAskPromptPrefix をプロンプトに合成している', () => {
@@ -111,5 +115,11 @@ describe('mcp-ask-source-guard: ask_project の実装が読み取り専用強制
   test('get_plan/get_answer は DEVRELAY_MCP_ANSWER_RAW キルスイッチで原文へ戻せる', () => {
     assert.match(getPlanBody, /isMcpAnswerRawMode\(process\.env\)/);
     assert.match(getAnswerBody, /isMcpAnswerRawMode\(process\.env\)/);
+  });
+
+  // サイクルS1（2026-11-12）: get_answer も ask_project と同じ実効判定（capability 込み）を使う。
+  test('get_answer は decideEffectiveAskReadOnlyEnforcement を呼んでいる（plan-gate-hook capability 込み）', () => {
+    assert.match(getAnswerBody, /decideEffectiveAskReadOnlyEnforcement\(/);
+    assert.match(getAnswerBody, /agentHasPlanGateCapability:\s*agentHasCapability\([^,]+,\s*'plan-gate-hook'\)/);
   });
 });

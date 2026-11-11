@@ -45,11 +45,19 @@ export const PROTOCOL_VERSION = 1;
  * `projectStateRead` 引き継ぎ修正を含む版であることをサーバーに保証する。サーバーの resume 判定
  * （`decideCrossAskSessionPlan()`）はこちらの capability のみを見る（fail-closed。'cross-ask-isolation'
  * と同じ理由で新設した）。
+ *
+ * 'plan-gate-hook' = サイクルS1（2026-11-12）: plan モードの strictReadonly ゲートを
+ * PreToolUse フック（SDK 0.3 系の auto-mode classifier が canUseTool より前に Bash を
+ * allow/deny してしまう既知の回帰、2026-09-20〜2026-11-12 への対策）で実装している版であることを
+ * サーバーに保証する。`agents/linux`・`agents/macos` のみ申告する（Agent SDK を使い
+ * `hooks.PreToolUse` を実装できるため）。`agents/windows` は `claude` CLI を直接 spawn する構造の
+ * ため in-process フックを実装できず、申告しない（'cross-ask-isolation' と同じ fail-closed 方針で、
+ * サーバーは未申告 Agent へのクロスユーザー ask を断る。`cross-ask-isolation-rules.ts` 参照）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation' | 'cross-ask-resume-strict';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation' | 'cross-ask-resume-strict' | 'plan-gate-hook';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume', 'cross-ask-isolation', 'cross-ask-resume-strict'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume', 'cross-ask-isolation', 'cross-ask-resume-strict', 'plan-gate-hook'];
 
 /**
  * 案C′（クロス ask のセッション継続）サイクルC1: 一時セッションの状態ポリシー。

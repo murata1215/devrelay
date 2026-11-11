@@ -57,6 +57,35 @@ export function decideAskReadOnlyEnforcement(input: { aiTool: string; terminalMo
 }
 
 /**
+ * サイクルS1（2026-11-12）: `decideAskReadOnlyEnforcement()` の結果に、宛先 Agent が実際に
+ * プランモードの Bash ゲートを PreToolUse フックで実装しているか（'plan-gate-hook' capability）
+ * を合成した実効値を返す。
+ *
+ * 背景: `claude` の「権限レベルで構造的に強制される」という前提は Agent SDK の
+ * `canUseTool`/PreToolUse フックに依存するが、2026-09-20 の SDK 0.3 系バンプ以降、
+ * PreToolUse フックが無い旧 Agent では実際には Bash が canUseTool を経由せず実行されていた
+ * （サイクルS1 の根治対象そのもの）。旧 Agent に対して `readOnlyEnforced: true` を返し続けると、
+ * MCP 呼び出し元・WebUI が「権限で保証されている」と誤認する。
+ *
+ * `codex` の強制は CLI の `-c sandbox_mode="read-only"`（SDK フックと無関係のプロセス外機構）
+ * のため、capability の有無に関係なく `decideAskReadOnlyEnforcement()` の結果をそのまま使う
+ * （codex Agent は 'plan-gate-hook' を申告しないため、ここで capability を見ると誤って
+ * false に縮退してしまう）。
+ */
+export function decideEffectiveAskReadOnlyEnforcement(input: {
+  aiTool: string;
+  terminalMode: boolean;
+  agentHasPlanGateCapability: boolean;
+}): { readOnlyEnforced: boolean } {
+  const { readOnlyEnforced: toolEnforced } = decideAskReadOnlyEnforcement({ aiTool: input.aiTool, terminalMode: input.terminalMode });
+  if (!toolEnforced) return { readOnlyEnforced: false };
+  if (input.aiTool === 'claude' && !input.agentHasPlanGateCapability) {
+    return { readOnlyEnforced: false };
+  }
+  return { readOnlyEnforced: true };
+}
+
+/**
  * 質問プロンプトの先頭に付与する固定の禁止文（権限で強制できない経路専用）。
  * 2026-09-26 承認サイクルでの人間指示の文言をそのまま使う。
  */

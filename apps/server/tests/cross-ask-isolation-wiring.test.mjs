@@ -32,7 +32,7 @@ describe('cross-ask-runner.ts: 隔離判定が Session 作成より前にある'
 
   test('拒否時に action: \'denied\' で監査を記録する', () => {
     const isolationIdx = source.indexOf('decideCrossAskIsolation(');
-    const body = source.slice(isolationIdx, isolationIdx + 800);
+    const body = source.slice(isolationIdx, isolationIdx + 1400);
     assert.match(body, /action:\s*'denied'/);
   });
 
@@ -55,7 +55,7 @@ describe('document-api.ts: ask-member エンドポイントも同じ 2 点を検
 
   test('拒否時に action: \'denied\' で監査を記録する', () => {
     const isolationIdx = source.indexOf('decideCrossAskIsolation(');
-    const body = source.slice(isolationIdx, isolationIdx + 1000);
+    const body = source.slice(isolationIdx, isolationIdx + 1400);
     assert.match(body, /action:\s*'denied'/);
   });
 
@@ -88,6 +88,34 @@ describe('command-handler.ts: G-12（実行中のクロス ask セッション�
     const body = source.slice(idx, idx + 400);
     assert.match(body, /status:\s*'ended'/);
     assert.match(body, /\.\.\.buildEphemeralSessionIdExclusion\(\)/);
+  });
+});
+
+describe('サイクルS1（2026-11-12）: decideCrossAskIsolation( の呼び出しが全て agentHasPlanGateCapability を渡している', () => {
+  // decideCrossAskIsolation( の呼び出し箇所ごとに、直後 600 文字以内に
+  // `agentHasPlanGateCapability:` フィールドがあることを確認する（1 箇所でも渡し忘れると
+  // プランモードのゲート未対応 Agent へのクロスユーザー ask が fail-open に後退する）。
+  // `decideCrossAskIsolation\(\{` で絞る（JSDoc コメント中の `decideCrossAskIsolation()`
+  // ＝括弧が空の言及と、実際の呼び出し＝オブジェクトリテラルの `{` を区別するため）。
+  function assertAllCallsPassPlanGateCapability(source, label) {
+    const matches = [...source.matchAll(/decideCrossAskIsolation\(\{/g)];
+    assert.ok(matches.length > 0, `${label}: decideCrossAskIsolation({ の呼び出しが見つからない`);
+    for (const m of matches) {
+      const body = source.slice(m.index, m.index + 600);
+      assert.match(body, /agentHasPlanGateCapability:/, `${label}: decideCrossAskIsolation( の呼び出し（index=${m.index}）に agentHasPlanGateCapability が渡っていない`);
+    }
+  }
+
+  test('cross-ask-runner.ts', () => {
+    assertAllCallsPassPlanGateCapability(readServerSource('src/services/cross-ask-runner.ts'), 'cross-ask-runner.ts');
+  });
+
+  test('document-api.ts', () => {
+    assertAllCallsPassPlanGateCapability(readServerSource('src/routes/document-api.ts'), 'document-api.ts');
+  });
+
+  test('cross-ask-target-state.ts（decideCrossAskIsolation を直接呼ぶ唯一の第3呼び出し元）', () => {
+    assertAllCallsPassPlanGateCapability(readServerSource('src/services/cross-ask-target-state.ts'), 'cross-ask-target-state.ts');
   });
 });
 

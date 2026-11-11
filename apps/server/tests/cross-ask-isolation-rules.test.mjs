@@ -15,6 +15,7 @@ function baseInput(overrides = {}) {
     isCrossUser: true,
     isolationEnabled: true,
     agentHasIsolationCapability: true,
+    agentHasPlanGateCapability: true,
     readOnlyEnforced: true,
     ...overrides,
   };
@@ -40,8 +41,9 @@ describe('decideCrossAskIsolation: キルスイッチ OFF は常に許可（旧�
     for (const overrides of [
       {},
       { agentHasIsolationCapability: false },
+      { agentHasPlanGateCapability: false },
       { readOnlyEnforced: false },
-      { agentHasIsolationCapability: false, readOnlyEnforced: false },
+      { agentHasIsolationCapability: false, agentHasPlanGateCapability: false, readOnlyEnforced: false },
     ]) {
       const decision = decideCrossAskIsolation(baseInput({ isolationEnabled: false, ...overrides }));
       assert.deepEqual(decision, { allowed: true, statePolicy: null });
@@ -49,24 +51,36 @@ describe('decideCrossAskIsolation: キルスイッチ OFF は常に許可（旧�
   });
 });
 
-describe('decideCrossAskIsolation: クロスユーザー + キルスイッチ ON のときだけ 2 点を検証する', () => {
+describe('decideCrossAskIsolation: クロスユーザー + キルスイッチ ON のときだけ 3 点を検証する', () => {
   test('全条件 OK なら allowed=true, statePolicy=isolated', () => {
     const decision = decideCrossAskIsolation(baseInput());
     assert.deepEqual(decision, { allowed: true, statePolicy: 'isolated' });
   });
 
-  test('capability 未申告なら agent_outdated で拒否（readOnlyEnforced の値に関わらず capability を先に見る）', () => {
+  test('cross-ask-isolation capability 未申告なら agent_outdated で拒否（他の値に関わらず capability を先に見る）', () => {
     assert.deepEqual(
       decideCrossAskIsolation(baseInput({ agentHasIsolationCapability: false })),
       { allowed: false, reason: 'agent_outdated' },
     );
     assert.deepEqual(
-      decideCrossAskIsolation(baseInput({ agentHasIsolationCapability: false, readOnlyEnforced: false })),
+      decideCrossAskIsolation(baseInput({ agentHasIsolationCapability: false, agentHasPlanGateCapability: false, readOnlyEnforced: false })),
       { allowed: false, reason: 'agent_outdated' },
     );
   });
 
-  test('capability はあるが readOnlyEnforced=false（devin/gemini/claude+terminalMode）なら ai_unsafe で拒否', () => {
+  // サイクルS1（2026-11-12）: plan-gate-hook capability 未申告（旧 Agent・agents/windows）のテスト。
+  test('plan-gate-hook capability 未申告なら agent_outdated で拒否（cross-ask-isolation capability はある）', () => {
+    assert.deepEqual(
+      decideCrossAskIsolation(baseInput({ agentHasPlanGateCapability: false })),
+      { allowed: false, reason: 'agent_outdated' },
+    );
+    assert.deepEqual(
+      decideCrossAskIsolation(baseInput({ agentHasPlanGateCapability: false, readOnlyEnforced: false })),
+      { allowed: false, reason: 'agent_outdated' },
+    );
+  });
+
+  test('両 capability はあるが readOnlyEnforced=false（devin/gemini/claude+terminalMode）なら ai_unsafe で拒否', () => {
     assert.deepEqual(
       decideCrossAskIsolation(baseInput({ readOnlyEnforced: false })),
       { allowed: false, reason: 'ai_unsafe' },

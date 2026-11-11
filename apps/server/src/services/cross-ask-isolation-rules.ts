@@ -3,17 +3,21 @@
  * に限って適用する隔離判定を外部 import ゼロの純関数として切り出したモジュール
  * （`ask-guard.ts` / `cross-query-guard.ts` / `cross-team-guard.ts` と同じ流儀）。
  *
- * 判定の芯（3 条件 AND、既定は許可——同一ユーザー ask とキルスイッチ OFF は常に通す）:
+ * 判定の芯（4 条件 AND、既定は許可——同一ユーザー ask とキルスイッチ OFF は常に通す）:
  * 1. `isCrossUser`（クロスユーザー ask か）が false なら無条件で許可（`statePolicy` は送らない）。
  *    同一ユーザーの ask-member / teamexec-member / MCP `ask_project` の既存の使い方
  *    （成果物添付・storageContext・Codex/Devin 会話継続）を一切変えないため。
  * 2. `isolationEnabled`（`DEVRELAY_CROSS_ASK_ISOLATION`）が false なら無条件で許可
  *    （キルスイッチ OFF ＝旧挙動に戻す）。
- * 3. クロスユーザー ask かつキルスイッチ ON のときのみ、以下 2 点を順に検証する:
+ * 3. クロスユーザー ask かつキルスイッチ ON のときのみ、以下 3 点を順に検証する:
  *    a. 宛先 Agent が `'cross-ask-isolation'` capability を申告しているか
  *       （申告していない旧 Agent は `statePolicy: 'isolated'` を解釈できず legacy 扱いに
  *       縮退してしまうため、サーバー側で明示的に断る＝ fail-closed）。
- *    b. 読み取り専用を権限で強制できる実効 AI か（`ask-guard.ts` の
+ *    b. サイクルS1（2026-11-12）: 宛先 Agent が `'plan-gate-hook'` capability を申告しているか
+ *       （申告していない旧 Agent はプランモードの Bash ゲートが SDK 0.3 系の auto-mode classifier
+ *       に乗っ取られたまま＝「読み取り専用のはずの質問ターン」で実際には書き込み・外部送信が
+ *       可能な状態。cross-ask-isolation と同じ fail-closed 方針で断る）。
+ *    c. 読み取り専用を権限で強制できる実効 AI か（`ask-guard.ts` の
  *       `decideAskReadOnlyEnforcement()` の結果を呼び出し側が渡す。devin/gemini/
  *       claude+terminalMode は false になる）。
  */
@@ -26,6 +30,13 @@ export interface DecideCrossAskIsolationInput {
   isolationEnabled: boolean;
   /** `agentHasCapability(machineId, 'cross-ask-isolation')` の結果 */
   agentHasIsolationCapability: boolean;
+  /**
+   * サイクルS1（2026-11-12）: `agentHasCapability(machineId, 'plan-gate-hook')` の結果。
+   * 未申告（旧 Agent または `agents/windows`）なら `agentHasIsolationCapability` と同じ
+   * `reason:'agent_outdated'` で断る（プランモードの Bash ゲートが機能していない宛先へ
+   * クロスユーザー ask を通さないため）。
+   */
+  agentHasPlanGateCapability: boolean;
   /** `decideAskReadOnlyEnforcement({ aiTool, terminalMode }).readOnlyEnforced`（ask-guard.ts） */
   readOnlyEnforced: boolean;
 }
@@ -38,12 +49,13 @@ export type CrossAskIsolationDecision =
 /**
  * クロスユーザー ask を実行してよいか、実行する場合は Agent へ送る `statePolicy` を決定する。
  * 既定は許可（`statePolicy: null` ＝従来どおり送らない）。許可は明示的に 1 段ずつ、
- * 拒否理由は最初に当たった条件（capability 不足を先に見る）。
+ * 拒否理由は最初に当たった条件（capability 不足を先に見る。isolation → plan-gate-hook → AI 安全性）。
  */
 export function decideCrossAskIsolation(input: DecideCrossAskIsolationInput): CrossAskIsolationDecision {
   if (!input.isCrossUser) return { allowed: true, statePolicy: null };
   if (!input.isolationEnabled) return { allowed: true, statePolicy: null };
   if (!input.agentHasIsolationCapability) return { allowed: false, reason: 'agent_outdated' };
+  if (!input.agentHasPlanGateCapability) return { allowed: false, reason: 'agent_outdated' };
   if (!input.readOnlyEnforced) return { allowed: false, reason: 'ai_unsafe' };
   return { allowed: true, statePolicy: 'isolated' };
 }

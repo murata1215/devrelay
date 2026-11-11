@@ -3526,6 +3526,7 @@ export async function apiRoutes(app: FastifyInstance) {
           isolationEnabled,
           resumeEnabled,
           agentHasIsolationCapability: agentHasCapability(c.machine.id, 'cross-ask-isolation'),
+          agentHasPlanGateCapability: agentHasCapability(c.machine.id, 'plan-gate-hook'),
           agentHasResumeCapability: agentHasCapability(c.machine.id, 'cross-ask-resume-strict'),
           readOnlyEnforced,
         });

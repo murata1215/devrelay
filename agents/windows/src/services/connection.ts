@@ -201,8 +201,13 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           // raw-completion（実装プラン D4）: Windows Electron agent の ai-runner.ts は
           // @anthropic-ai/claude-agent-sdk を import しておらず claude CLI を直接 spawn する実装のため、
           // system prompt 完全置換を原理的に実装できない。「できないのに申告する」状態を避けるため、
-          // capability 一覧から raw-completion のみ除外する（申告しなければサーバーは raw を投げない）。
-          capabilities: AGENT_CAPABILITIES.filter((c) => c !== 'raw-completion'),
+          // capability 一覧から raw-completion を除外する（申告しなければサーバーは raw を投げない）。
+          // サイクルS1: 同じ理由で plan-gate-hook も除外する（Agent SDK 非依存のため in-process
+          // PreToolUse フックを実装できない。DevRelay のプランモード書き込みゲート自体は
+          // windows でも `--permission-mode plan` + `--disallowedTools ExitPlanMode` で一定機能するが、
+          // Bash の allowlist 強制（本サイクルの対象）は未対応のまま。サーバーはこの capability を
+          // 見てクロスユーザー ask を未申告 Agent に対して断る）。
+          capabilities: AGENT_CAPABILITIES.filter((c) => c !== 'raw-completion' && c !== 'plan-gate-hook'),
         },
       });
 

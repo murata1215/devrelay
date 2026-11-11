@@ -12,6 +12,7 @@ import {
   ASK_ANSWER_TIMEOUT_MS,
   ENFORCED_READONLY_AI_TOOLS,
   decideAskReadOnlyEnforcement,
+  decideEffectiveAskReadOnlyEnforcement,
   ASK_MODE_PROHIBITION_TEXT,
   buildAskPromptPrefix,
   pickInflightAskSession,
@@ -55,6 +56,51 @@ test('decideAskReadOnlyEnforcement: devin → not enforced（terminalMode に関
 
 test('decideAskReadOnlyEnforcement: gemini → not enforced', () => {
   assert.deepEqual(decideAskReadOnlyEnforcement({ aiTool: 'gemini', terminalMode: false }), { readOnlyEnforced: false });
+});
+
+// --- decideEffectiveAskReadOnlyEnforcement（サイクルS1、2026-11-12） ---
+
+test('decideEffectiveAskReadOnlyEnforcement: claude + plan-gate-hook capability あり → enforced（従来どおり）', () => {
+  assert.deepEqual(
+    decideEffectiveAskReadOnlyEnforcement({ aiTool: 'claude', terminalMode: false, agentHasPlanGateCapability: true }),
+    { readOnlyEnforced: true },
+  );
+});
+
+test('decideEffectiveAskReadOnlyEnforcement: claude + plan-gate-hook capability 無し（旧 Agent・windows）→ not enforced（嘘をつかない）', () => {
+  assert.deepEqual(
+    decideEffectiveAskReadOnlyEnforcement({ aiTool: 'claude', terminalMode: false, agentHasPlanGateCapability: false }),
+    { readOnlyEnforced: false },
+  );
+});
+
+test('decideEffectiveAskReadOnlyEnforcement: codex は capability の有無に関わらず decideAskReadOnlyEnforcement の結果をそのまま使う（SDK フックと無関係のプロセス外機構）', () => {
+  assert.deepEqual(
+    decideEffectiveAskReadOnlyEnforcement({ aiTool: 'codex', terminalMode: false, agentHasPlanGateCapability: false }),
+    { readOnlyEnforced: true },
+  );
+  assert.deepEqual(
+    decideEffectiveAskReadOnlyEnforcement({ aiTool: 'codex', terminalMode: false, agentHasPlanGateCapability: true }),
+    { readOnlyEnforced: true },
+  );
+});
+
+test('decideEffectiveAskReadOnlyEnforcement: claude + terminalMode=true は capability に関わらず not enforced（PTY 経路のため元から対象外）', () => {
+  assert.deepEqual(
+    decideEffectiveAskReadOnlyEnforcement({ aiTool: 'claude', terminalMode: true, agentHasPlanGateCapability: true }),
+    { readOnlyEnforced: false },
+  );
+});
+
+test('decideEffectiveAskReadOnlyEnforcement: devin/gemini は capability に関わらず not enforced（元から対象外）', () => {
+  assert.deepEqual(
+    decideEffectiveAskReadOnlyEnforcement({ aiTool: 'devin', terminalMode: false, agentHasPlanGateCapability: true }),
+    { readOnlyEnforced: false },
+  );
+  assert.deepEqual(
+    decideEffectiveAskReadOnlyEnforcement({ aiTool: 'gemini', terminalMode: false, agentHasPlanGateCapability: true }),
+    { readOnlyEnforced: false },
+  );
 });
 
 // --- buildAskPromptPrefix ---
