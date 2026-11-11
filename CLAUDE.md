@@ -128,6 +128,7 @@ pm2 restart devrelay-server
 | DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS | 上記 resume の世代 TTL（既定 `14` 日、clamp 1〜365、`0` で無効）。最終ターンからこの日数を超えたら ask 前に新しい世代（`-g<N+1>`）へ切り替え、旧世代の scope dir は残したまま新規に案B前置を1回だけ載せて継続する |
 | DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS | 上記 resume の世代あたり上限往復数（既定 `40`、clamp 2〜500、`0` で無効）。超過時も TTL と同じ世代切り替えで対応（会話が伸び続けてトークン消費が無制限に増える歯止め。課金主体は所有者のまま変更なし） |
 | DEVRELAY_DB_CHANGE_WARN | サイクルM1（2026-11-12）: 起動時（`app.listen()` より前）に `apps/server/db/changes/` の未適用 DB 変更を検査し、起動ログに警告を出すか（既定 `1`。`0` で検査自体を無効化するキルスイッチ。fail-open＝台帳なし・権限不足・DB 接続不能のいずれでも起動は続行する）。詳細 `doc/db-changes.md` |
+| DEVRELAY_PLAN_GATE_CAPABILITY | サイクルS1（2026-11-12）: プランモードの既存バグ根治（下記 `'plan-gate-hook'` capability）に伴うサーバー側 fail-closed 判定のキルスイッチ。既定 `1`。`1` のとき、クロスユーザー ask（`cross-ask-runner.ts`・`document-api.ts`・`api.ts`/`cross-ask-target-state.ts`）と MCP `ask_project`/`get_answer` の `readOnlyEnforced` 判定が、宛先 Agent の `'plan-gate-hook'` capability 申告を見る（未申告なら ask を断る／`readOnlyEnforced:false` を返す）。`0` にすると、この capability チェックだけを無効化し常に申告済み扱いにする（`'cross-ask-isolation'` capability のチェックには影響しない）。PreToolUse フック自体（Agent 側の実装）にはキルスイッチを置かない方針のため、本変数は Agent の実際の挙動を変えない — サーバー側の判定だけを戻す緊急ロールバック用（真因・配布判断の詳細は `doc/plan-gate-hook-plan.md`） |
 
 ## DB テーブル（概要）
 

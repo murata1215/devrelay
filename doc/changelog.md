@@ -6,6 +6,60 @@
 
 ## 実装済み機能
 
+### サイクルS1: プランモードの Bash ゲート既存バグの根治（PreToolUse フック） (2026-11-12)
+
+プランモード（strictReadonly）の Bash 許可判定が、2026-09-20 の SDK `0.2.80 → 0.3.278` バンプ
+（`d87d003`）以降、無言のまま素通りしていた既存バグの調査・根治。詳細な調査記録・プラン全文は
+`doc/plan-gate-hook-plan.md`、設計判断は `rules/project.md`「プランモードの Bash ゲートが SDK 0.3
+系で無言に崩れた問題の根治」セクション参照。
+
+#### 原因
+
+SDK 0.3 系の同梱ネイティブ CLI は `permissionMode:'plan'` を内部で `'auto'` モードへ変換する
+機能ゲート（`useAutoModeDuringPlan`）を持ち、有効な場合 auto-mode classifier（モデル自身の判断）が
+`canUseTool` より前に Bash の allow/deny を確定してしまう。DevRelay 側の実装（`decidePlanPermission()`
+等）は 2026-09-12（`#332`/`#333`）以降 1 行も変わっておらず、SDK 側の挙動変化のみが原因。
+
+#### 設計
+
+- `agents/{linux,macos}/src/services/ai-runner.ts` の plan 分岐に `hooks.PreToolUse` を新設し
+  唯一の権威とする（SDK の型定義が「PreToolUse hook denies は canUseTool より前に解決する」と
+  明記。実機プローブで classifier より前に確実に呼ばれることを確認済み）。既存の
+  `decidePlanPermission()` をそのまま呼び、判定ロジックは変更しない
+- `canUseTool` は `onToolApprovalRequest` の有無に関わらず常に設定する（未設定時に `canUseTool`
+  ごと消える構造的欠陥の根治、第2防衛線として残す）
+- strictReadonly のときは `sdkOptions.allowedTools` を SDK に渡さない（裸 `mcp__` エントリ等が
+  CLI の bare-allow ルールとしてフックより前に allow を確定させる shadow を回避。DevRelay 自身の
+  `decidePlanPermission()` には `options.allowedTools` をそのまま渡すためユーザー追加の許可リストは
+  不変）
+- `PLAN_READONLY_TOOLS`（`packages/shared/src/constants.ts`）に `'Agent'` を追加（SDK 0.3 系は
+  サブエージェント起動ツール名を `Task` から `Agent` に変更している）
+- `AgentCapability` に `'plan-gate-hook'` を追加。`agents/windows`（`claude` CLI を直接 spawn する
+  構造のため in-process フックを実装できない）はこれを除外して申告する
+- サーバー側: `cross-ask-isolation-rules.ts` の `decideCrossAskIsolation()` に
+  `agentHasPlanGateCapability` 条件を追加し、未申告 Agent へのクロスユーザー ask を fail-closed で
+  断る（`'cross-ask-isolation'` capability と同じ判定順）。`ask-guard.ts` に
+  `decideEffectiveAskReadOnlyEnforcement()` を新設し、MCP `ask_project`/`get_answer` の
+  `readOnlyEnforced` が宛先 Agent の capability を見て実態に合わせる（未申告なら `false` を返し
+  `buildAskPromptPrefix()` の固定禁止文が自動的に付く）
+- `DEVRELAY_PLAN_GATE_CAPABILITY`（既定 `1`）: 上記サーバー側 fail-closed 判定のみのキルスイッチ
+  （PreToolUse フック自体にはキルスイッチを置かない方針。詳細 `CLAUDE.md`）
+
+#### テスト・検証
+
+- Step 0（実装前）・実装後の 2 回、一時ディレクトリ・読み取り専用コマンドのみで実 SDK を起動する
+  プローブで実測: PreToolUse フック 2/2 回到達・`canUseTool` 0 回・`python3` deny・`ls` allow を
+  確認（`agents/{linux,macos}/tests/plan-gate-live.test.mjs`、既定 skip、
+  `DEVRELAY_PLAN_GATE_LIVE=1` で実行）
+- 静的配線テスト（`plan-gate-wiring.test.mjs`）・`decidePlanPermission` 回帰テスト（python3/node/
+  複合コマンド/リダイレクト/`Agent`ツール名/裸MCPエントリ/プランターン常用ツール）・capability
+  配線テスト・キルスイッチテストを新設
+- テスト件数: linux 1331/1332・macos 811/813（各 1 件は実機プローブの既定 skip）・
+  shared 148/148・server 1945/1945・windows 192/192、6 workspace build green
+- `agents/windows` は capability 除外のみで機能変更なし（DevRelay の Bash ゲート強制は元から
+  未対応のまま。CLI フック配布は次サイクル候補）
+- DB 変更なし
+
 ### サイクルM1: DB 変更履歴の一元化 (2026-11-12)
 
 DB スキーマ変更の適用履歴が `prisma/migrations`（20件）・`bootstrap.sql`・`doc/migrations`（8件）・

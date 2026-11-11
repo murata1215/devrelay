@@ -3115,3 +3115,45 @@ WebUI のチャット本文に Markdown レンダリング（テーブル対応�
    無限ループ→ OOM になる（実装中に `node --test` の SIGABRT で検出）。`String.prototype.matchAll()`
    は呼び出しごとに正規表現を複製する（spec 上の挙動）ため、再帰呼び出しがあるインライン解析では
    必ず `matchAll` を使う。
+
+## プランモードの Bash ゲートが SDK 0.3 系で無言に崩れた問題の根治（サイクルS1、2026-11-12）
+
+2026-09-12 の「プランモード書き込みゲート穴の根治（chat 経路）」（上記セクション、`#332`/`#333`）
+で導入した `decidePlanPermission()` は、2026-09-20 の SDK `0.2.80 → 0.3.278` バンプ
+（`d87d003`）以降、**Bash について一度も呼ばれなくなっていた**（実装・テストは無傷のまま、
+SDK の内部動作が変わったことで到達経路が失われた）。原因・修正の詳細な調査記録は
+`doc/plan-gate-hook-plan.md` に全文を保存している。ここには再発防止のための設計判断だけを残す。
+
+1. **`permissionMode:'plan'` は SDK 0.3 系の CLI 内部で `'auto'` モードに変換される**
+   （機能ゲート `useAutoModeDuringPlan` が有効な場合。バイナリ内 minified 関数名で
+   `function UKt(e){ if(!zEn()) return null; return VR(!0), L1(e) }` のような形。`zEn()`/`VR()`
+   はいずれも非公開の内部実装）。変換後は auto-mode classifier（モデル自身の判断）が
+   `canUseTool`/フックより前に allow/deny を確定させる経路に入り、DevRelay 側のどの防御
+   （`allowedTools`・`decidePlanPermission`）も素通りする。この経路は **SDK の公開ドキュメントに
+   記載が無く、バージョンや機能フラグの状態で黙って挙動が変わり得る**。
+2. **教訓: SDK のバージョンバンプ（0.2→0.3 系のような major 相当の変更）では、権限
+   （`permissionMode`/`allowedTools`/`canUseTool`）の意味変更を明示的に検証対象に入れること。**
+   0.3 移行時の調査サイクル（SDK-0/SDK-1/SDK-2、`doc/sdk-0.3-migration-findings.md`）は型定義差分と
+   実行ファイル検出だけを検証し、権限層の実機動作検証を行わなかったため、2 ヶ月近く気づかれなかった
+   （deny 記録の断絶は `d87d003` の約2時間後から）。SDK バンプのたびに「plan モードで
+   book-keeping 用の非許可コマンド（例: `python3 -c "print(1)"`）が実際に deny されるか」を
+   実機で 1 回確認する運用を次回以降のバンプ手順に加える。
+3. **対策は『SDK の挙動には依存しない』防御層を置くこと**: `permissionMode` の意味解釈が
+   SDK 側で変わっても影響されない唯一の層が `hooks.PreToolUse`（SDK の型定義が「PreToolUse
+   hook denies は canUseTool より前に解決する」と明記する、ドキュメント化された契約）。
+   `agents/{linux,macos}/src/services/ai-runner.ts` の plan 分岐では、この PreToolUse フックを
+   唯一の権威とし、既存の `decidePlanPermission()`（ロジックは変更していない）をそのまま呼ぶ。
+   `canUseTool` は「フックが判定を返さなかった場合」（`AskUserQuestion` 等）の第 2 防衛線として
+   残すが、Bash の実効防御としては当てにしない。
+4. **実機確認の方法**: 一時ディレクトリ・読み取り専用コマンドのみで実 SDK を起動し、
+   PreToolUse フックの呼び出し回数と `canUseTool` の呼び出し回数を記録するプローブ
+   （`agents/{linux,macos}/tests/plan-gate-live.test.mjs`、既定 skip・
+   `DEVRELAY_PLAN_GATE_LIVE=1` で実行）を用意した。フック呼び出し 0 件のまま Bash が
+   実行されたターンは `agent.log` に `🚨 PLAN GATE REGRESSION` を出す（`ai-runner.ts` の
+   `finally` ブロック）。
+5. **`agents/windows`（Electron GUI 版）は `claude` CLI を直接 spawn する構造のため
+   in-process フックを実装できない**。DevRelay のプランモード書き込みゲート自体は windows でも
+   `--permission-mode plan` + `--disallowedTools ExitPlanMode` で一定機能するが、Bash の
+   allowlist 強制（本サイクルの対象）は未対応のまま。サーバー側は `'plan-gate-hook'` capability
+   の有無でこれを見分け、未申告 Agent へのクロスユーザー ask を fail-closed で断る
+   （`cross-ask-isolation-rules.ts`）。CLI フック配布（windows 対応）は次サイクル候補。
