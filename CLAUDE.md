@@ -48,12 +48,19 @@ pm2 restart devrelay-server
 - **ソースコード（.ts ファイル等）を変更して `pnpm build` を実際に実行した場合のみ**「ビルド完了。以下のコマンドで再起動してください」と案内する
 - ドキュメント（.md）のみの変更ではビルド・再起動案内は不要
 
-## DB スキーマ変更時の必須手順
+## DB スキーマ変更時の必須手順（サイクルM1、2026-11-12）
+
+`prisma migrate dev` / `migrate deploy` / `db push` は使わない（`db push` は pgvector の
+`embedding` 列を DROP するため永久禁止。`apps/server/prisma/bootstrap.sql` 冒頭の警告参照）。
+
 1. `schema.prisma` を変更
-2. `cd apps/server && npx prisma migrate dev` を試行 → 失敗時は `npx prisma db execute --stdin` で直接 SQL 適用
-3. **カラム存在を SQL で検証**: `npx prisma db execute --stdin <<< "SELECT column_name FROM information_schema.columns WHERE table_name='テーブル名' AND column_name='カラム名';"`
-4. `npx prisma generate` で Prisma Client 再生成
-5. `pnpm build` でビルド
+2. `apps/server/db/changes/NNNN_xxx.sql` を新規作成し、`INDEX.tsv` に 1 行・`SCHEMA.sha256` を
+   更新する（**この4点を同じコミットに入れる**。テンプレートは `apps/server/db/changes/README.md`、
+   詳細手順は `doc/db-changes.md` 参照）
+3. `npx prisma generate` で Prisma Client 再生成
+4. `pnpm build` でビルド（`node --test tests/db-changes.test.mjs` が green であることを確認）
+5. **DB への適用は人間が `psql` で行う**（アプリと同じロール、postgres 等の superuser では流さない）。
+   適用後は `information_schema.columns` でカラム存在を検証する
 6. 再起動案内時に「DB マイグレーション適用済み」を明記する
 
 ## ポート割り当て規約（90xx 番台）
@@ -120,6 +127,7 @@ pm2 restart devrelay-server
 | DEVRELAY_CROSS_ASK_RESUME | サイクルC2（2026-11-11）: クロスユーザー ask のセッション継続（resume）を有効にするか。既定 **`0`（OFF）**（`DEVRELAY_CROSS_TEAM` 等と同じ方向。`DEVRELAY_CROSS_ASK_ISOLATION` の既定 ON とは逆）。`1` のとき、G の隔離判定を通過した ask のうち、宛先 Agent が `'cross-ask-resume-strict'` capability を申告し、かつ読み取り専用を権限で強制できる実効 AI（`decideAskReadOnlyEnforcement()`、devin/gemini/claude+terminalMode は不可）に限り、`statePolicy:'isolated'` の代わりに `statePolicy:'resumable-scoped'` と決定論的な `agentScopeId`（`crossask-<digest32>-g<世代>`。digest は `sha256(requesterUserId+projectId)`）を送る。Agent 側は `.devrelay/sessions/<agentScopeId>/` という scope dir 内の会話状態（conversation.json・claude-session-id 等）のみを読み書きしてよい許可リストに切り替わり（C1 実装、`session-scope.ts`）、他の全項目は deny のまま。`0` のときはサーバーが `statePolicy:'resumable-scoped'`/`agentScopeId` を一切送らず、G 時点（`'isolated'` + 案B前置）と完全同一の挙動になる。`DEVRELAY_CROSS_ASK_ISOLATION=0`（G の緊急ロールバック）のときは本変数の値に関わらず resume も止まる（偶然ではなく明示的な従属）。対象は `cross-ask-runner.ts` 経由（チャット `ask`・WebUI クロスタブ）のみ、`routes/document-api.ts`（ask-member REST/スキル経路）は対象外（isolated のまま。scope dir を触らないため実害なし） |
 | DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS | 上記 resume の世代 TTL（既定 `14` 日、clamp 1〜365、`0` で無効）。最終ターンからこの日数を超えたら ask 前に新しい世代（`-g<N+1>`）へ切り替え、旧世代の scope dir は残したまま新規に案B前置を1回だけ載せて継続する |
 | DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS | 上記 resume の世代あたり上限往復数（既定 `40`、clamp 2〜500、`0` で無効）。超過時も TTL と同じ世代切り替えで対応（会話が伸び続けてトークン消費が無制限に増える歯止め。課金主体は所有者のまま変更なし） |
+| DEVRELAY_DB_CHANGE_WARN | サイクルM1（2026-11-12）: 起動時（`app.listen()` より前）に `apps/server/db/changes/` の未適用 DB 変更を検査し、起動ログに警告を出すか（既定 `1`。`0` で検査自体を無効化するキルスイッチ。fail-open＝台帳なし・権限不足・DB 接続不能のいずれでも起動は続行する）。詳細 `doc/db-changes.md` |
 
 ## DB テーブル（概要）
 
@@ -145,10 +153,12 @@ pm2 restart devrelay-server
 | CrossTeamGrant | クロスユーザー Team（Phase 1）: 認可の唯一の根拠（行が存在し `revokedAt IS NULL` ⇔ 承認済み。`askAllowed`/`execAllowed` 既定 false。TeamMember 削除で Cascade） |
 | CrossTeamAuditLog | クロスユーザー Team（Phase 1）: 監査ログ（append-only、FK 無し。`action`: request/denied/completed/failed/invite_*/grant_revoked/team_published/team_unpublished/subscribed/unsubscribed/subscription_revoked。公開型追加分は Phase A） |
 | TeamSubscription | 公開型クロスユーザー Team（Phase A、2026-11-08）: 購読。認可の根拠は「行が存在し `revokedAt IS NULL`」の2条件のみ（`CrossTeamGrant` と同じ設計原則）。`CrossTeamGrant` とは別テーブルで実 grant 行は作らない（購読のたびに合成するだけ。`Team.visibility='organization'` が前提） |
+| DbChange | サイクルM1（2026-11-12）: DB 変更の適用台帳。`apps/server/db/changes/NNNN_*.sql` の各ファイルが末尾で自分のファイル名（`name`、主キー）を記録する。行の存在 ⇔ そのファイルが適用済み。詳細 `doc/db-changes.md` |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`
 - サイクル別 devlog: `doc/devlog/`（1 サイクル = 1 ファイル + `INDEX.md` 索引）
+- DB 変更履歴の一元化（サイクルM1）: `doc/db-changes.md`
 - 設計・アーキテクチャ: `rules/project.md`
 - マイグレーションガイド: `doc/devrelay-claudemd-migration.md`
 - 会社 private リポジトリ clone 対応: `doc/company-repo-sync.md`

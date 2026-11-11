@@ -6,6 +6,46 @@
 
 ## 実装済み機能
 
+### サイクルM1: DB 変更履歴の一元化 (2026-11-12)
+
+DB スキーマ変更の適用履歴が `prisma/migrations`（20件）・`bootstrap.sql`・`doc/migrations`（8件）・
+`doc/devlog`・`doc/changelog` の5箇所に分散し、「どこから適用が必要か」を判定する手段が無かった
+問題への対応。詳細手順は `doc/db-changes.md`、実装プラン原本は `doc/db-change-ledger-plan.md`。
+
+#### 設計
+
+- `apps/server/db/changes/` を新設（1変更=1SQLファイル、`INDEX.tsv` 索引、`SCHEMA.sha256` 指紋）。
+  `apps/server/prisma/migrations/` は凍結（新規 DB 変更はここに置かない）
+- DB 側の適用台帳 `model DbChange`（`name` ファイル名を主キー。会社リポとの merge/cherry-pick で
+  同じ番号を採っても `ON CONFLICT` で片方だけ記録される事故を整数 PK を避けて構造的に回避）
+- 各 SQL ファイルのヘッダに3段の誤爆ガード（`Machine` 存在確認・superuser 拒否・所有者一致確認）を
+  必須化（2026-11-11 の `CrossAskReset` 所有者ずれ事故の再発防止）
+- backfill を含むファイルは `ALTER` 前に `information_schema.columns` で列の存在を確認し、
+  「この実行で今まさに列を新規追加したときだけ」`UPDATE` を実行する構造を必須化（台帳の記録状態に
+  依存しない。状態不明の DB で `0001` から全ファイルを機械的に流しても既存データを書き換えない）
+- `pnpm --filter @devrelay/server db:status`（読み取り専用 CLI）+ 起動時の fail-open 警告
+  （台帳なし/権限不足/接続不能の3状態を分離）+ `/health` の `dbChanges` フィールド
+  （`DEVRELAY_DB_CHANGE_WARN` でキルスイッチ）
+- `tests/db-changes.test.mjs`: schema.prisma 変更時の `SCHEMA.sha256` 更新忘れを検知する指紋照合、
+  各 SQL ファイルの自己整合・冪等性・ガード・ヘッダ必須項目、git 追跡漏れ検知、禁止コマンド封じ込め
+- 永久禁止コマンドの封じ込め: `package.json` から `db:push` を削除、`db:bootstrap` を
+  `db:bootstrap:new-db-only` に改名（新規 DB 構築専用であることを名前で明示。参照していた
+  README.md・HANDOFF_UBUNTU.md・onprem-windows-setup-guide.md・rules/project.md を同一コミットで修正）
+
+#### 遡及
+
+`schema.prisma` を変えた直近30コミットの差分を全件精査し、手動適用前提だった DDL 29件
+（+ `9f1990a` の日付分割で +1 = 31件、1件は DDL 不要）を `apps/server/db/changes/0001`〜`0031`
+として記録。`zz1_verify.sql`（読み取り専用）で全列・全索引・テーブル所有者が本番 DB の実際の
+構造と一致することを確認済み。`zz2_mark_baseline_applied.sql` で既に適用済みの DB に一括記録する
+（突合ゲート付き。未適用の DB に誤って流すと変更が永久に隠れるため、構造的に誤爆を防ぐ）。
+
+#### 文書
+
+`doc/db-changes.md` 新設（運用手順書）。`doc/company-repo-sync.md` §5・`CLAUDE.md`・
+`rules/devrelay.md`（DB スキーマ変更時の必須手順・`w` コマンド手順）・`doc/HANDOFF_UBUNTU.md`
+（ルート + `doc/` の2系統）を改訂。
+
 ### サイクルC2: クロス ask のセッション継続（resume、サーバー配線） (2026-11-11)
 
 サイクルC1（Agent 側土台、`b8f1bdf`）・サイクルG（既存バグ修正、`34f5228`）に続き、

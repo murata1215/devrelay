@@ -75,12 +75,26 @@ git push origin main
 
 ## 5. 同期後の反映
 
-- 社内サーバー（手動、`pm2 restart` は人間が実行）:
+- 社内サーバー（手動、DB 適用・`pm2 restart` は人間が実行。**サイクルM1、2026-11-12**:
+  `git pull` 後は DB 変更の確認を先に行う。詳細は `doc/db-changes.md` 参照）:
   ```bash
-  cd /opt/devrelay && git pull && pnpm build
-  # pm2 restart devrelay-server は人間が実行
+  cd /opt/devrelay
+  git rev-parse HEAD > /tmp/devrelay-before   # ← pull の前に取る
+  git pull
+  pnpm build
+  # ① 増えた DB 変更を確認（何も出なければ DB 作業なし）
+  git diff --name-only --diff-filter=AM "$(cat /tmp/devrelay-before)" HEAD -- apps/server/db/changes/
+  # ② 出たファイルを番号順に、アプリと同じロール（postgres 等の superuser では流さない）で 1 つずつ適用
+  export DATABASE_URL="$(sed -n 's/^DATABASE_URL=\"\{0,1\}\(.*[^\"]\)\"\{0,1\}$/\1/p' .env | tail -1)"
+  psql "$DATABASE_URL" -1 -v ON_ERROR_STOP=1 -f apps/server/db/changes/00NN_xxx.sql
+  # ③ npx prisma generate（apps/server で）→ pnpm build は既に実施済みなら不要
+  # ④ pm2 restart devrelay-server は人間が実行（--update-env は使わない）
   ```
-- 社員 PC: チャットで `u`（`autoUpdate` が ON なら自動）
+  初回導入時（`pnpm --filter @devrelay/server db:status` が「台帳なし」と出る場合）は
+  `doc/db-changes.md` §5「新規 DB の構築」の手順（`zz1_verify.sql` → 欠落が無ければ
+  `zz2_mark_baseline_applied.sql`、欠落があれば `0001` から番号順に適用）に従うこと。
+- 社員 PC: チャットで `u`（`autoUpdate` が ON なら自動）。DB は社内サーバー側でのみ管理するため、
+  社員 PC 側で DB 変更の適用操作は発生しない
 
 ## 6. 既存インストール機の切替
 

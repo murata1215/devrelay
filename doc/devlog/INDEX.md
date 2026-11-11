@@ -146,3 +146,4 @@
 - 2026-11-10_151128 | サイクルG | クロス ask の既存バグ G-3/4/5/5b/6/7/8/9/12 を修正し、所有者プロジェクトの状態を隔離（`DEVRELAY_CROSS_ASK_ISOLATION`、既定ON） | [詳細](2026-11-10_151128.md)
 - 2026-11-11_144009 | サイクルC2 | クロス ask のセッション継続をサーバー配線（`DEVRELAY_CROSS_ASK_RESUME`、既定OFF）+ G-11（チャット/WebUI経路のレート制限）を追加 | [詳細](2026-11-11_144009.md)
 - 2026-11-11_201901 | サイクルC3a-1 | クロス ask の記憶リセット導線をサーバーのみ実装（`CrossAskReset`・`askreset`コマンド・REST・ask-targetsのmemory・後片付け、`DEVRELAY_CROSS_ASK_RESET`既定ON） | [詳細](2026-11-11_201901.md)
+- 2026-11-12_015622 | サイクルM1 | DB 変更履歴の一元化（`apps/server/db/changes/`新設+遡及31件+`model DbChange`台帳+`db:status`+起動時警告+`db:push`削除、`doc/db-changes.md`新設） | [詳細](2026-11-12_015622.md)

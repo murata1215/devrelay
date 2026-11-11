@@ -391,6 +391,14 @@ describe('禁止コマンドの封じ込め', () => {
     assert.ok('db:status' in pkg.scripts);
   });
 
+  test('CLAUDE.md / rules/devrelay.md の DB 手順が migrate dev を実行コマンドとして案内していない（サイクルM1c）', () => {
+    const claudeMd = readFileSync(path.join(repoRoot, 'CLAUDE.md'), 'utf8');
+    const rulesDevrelay = readFileSync(path.join(repoRoot, 'rules', 'devrelay.md'), 'utf8');
+    for (const [name, text] of [['CLAUDE.md', claudeMd], ['rules/devrelay.md', rulesDevrelay]]) {
+      assert.ok(!/npx prisma migrate (dev|deploy)/.test(text), `${name} が migrate dev/deploy を実行コマンドとして案内している`);
+    }
+  });
+
   test('apps/server/prisma/migrations/ は凍結済み（ディレクトリ数が20のまま）', () => {
     const entries = readdirSync(path.join(serverRoot, 'prisma', 'migrations'));
     const dirs = entries.filter((e) => statSync(path.join(serverRoot, 'prisma', 'migrations', e)).isDirectory());
