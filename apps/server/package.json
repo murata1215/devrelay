@@ -11,9 +11,9 @@
     "test": "node --test tests/",
     "start": "node dist/index.js",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "db:push": "prisma db push",
     "db:studio": "prisma studio",
-    "db:bootstrap": "prisma db push && node -e \"const{execSync}=require('child_process');const fs=require('fs');const sql=fs.readFileSync('prisma/bootstrap.sql','utf8');execSync('npx prisma db execute --stdin',{input:sql,stdio:['pipe','inherit','inherit']})\"",
+    "db:bootstrap:new-db-only": "prisma db push && node -e \"const{execSync}=require('child_process');const fs=require('fs');const sql=fs.readFileSync('prisma/bootstrap.sql','utf8');execSync('npx prisma db execute --stdin',{input:sql,stdio:['pipe','inherit','inherit']})\"",
+    "db:status": "node dist/scripts/db-status.js",
     "setup:service": "./scripts/setup-service.sh",
     "knowledge:backfill": "node dist/scripts/knowledge-backfill.js"
   },

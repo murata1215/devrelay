@@ -368,9 +368,10 @@ pnpm install
 cp apps/server/.env.example apps/server/.env
 # Edit .env with your tokens
 
-# Initialize database
+# Initialize database (new DB only; see apps/server/db/changes/ for schema changes
+# on an existing DB — `db:push` was removed because it drops the pgvector embedding columns)
 cd apps/server
-pnpm db:push
+pnpm db:bootstrap:new-db-only
 
 # Start development
 pnpm dev:server   # Start server
@@ -454,9 +455,10 @@ registration, Agent rollout). Notes:
   URI) — use local email/password login instead.
 - The Claude.ai MCP connector requires inbound access from Anthropic's cloud, so it isn't usable
   from a fully internal instance (PAT-based access to `/mcp` from inside the network still works).
-- `apps/server/prisma/bootstrap.sql` (run via `pnpm db:bootstrap`) creates the pgvector extension
-  and `embedding` columns that aren't tracked in `prisma/migrations/` — required for a fresh DB to
-  match the hosted instance's schema.
+- `apps/server/prisma/bootstrap.sql` (run via `pnpm db:bootstrap:new-db-only`) creates the pgvector
+  extension and `embedding` columns that aren't tracked in `prisma/migrations/` — required for a
+  fresh DB to match the hosted instance's schema. For DB changes on an *existing* DB, see
+  `apps/server/db/changes/` and `doc/db-changes.md` (`pnpm --filter @devrelay/server db:status`).
 
 ### Version Management
 

@@ -1,0 +1,14 @@
+# DB 変更の索引。1 行 = 1 変更。append-only（既存行の番号・内容を書き換えない）。
+# プル前後の差分で「増えた行」= 適用が必要な変更。正本は DB 側の台帳 "DbChange"（pnpm db:status）。
+# no      変更番号（= ファイル名の NNNN、= "DbChange".no）。欠番は revert/cherry-pick で起こり得る（情報として表示するだけ）
+# date    変更が生まれた日付（元サイクルの日付。適用日ではない）
+# commit  元コミットの短ハッシュ。新規追加時は未確定なので `-`（README.md の git コマンドで引ける）
+# file    SQL ファイル名。`-` = DDL 不要（コメント・@default のみの schema 変更）
+# summary 1 行要約
+# ref     元の記録（doc/migrations/*.md・prisma/migrations/*・doc/devlog/*.md・bootstrap.sql）。無ければ `-`
+#
+# baseline: 0001 より前（2026-03-28 以前）は apps/server/prisma/migrations/ の 17 件 + bootstrap.sql を
+#           baseline とし個別ファイル化しない（_prisma_migrations に記録済み・prisma/migrations/ は凍結）。
+# pgvector: embedding 列と HNSW/ivfflat 索引は apps/server/prisma/bootstrap.sql の担当。ここには複製しない。
+#no	date	commit	file	summary	ref
+0032	2026-11-12	-	0032_db_change_ledger.sql	DB 変更台帳 "DbChange" を新設（model DbChange 追加）	-

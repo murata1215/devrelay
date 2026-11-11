@@ -868,8 +868,10 @@ DevRelay ハブは `devrelay.io`（VPS/Ubuntu、個人利用として存続）�
   （既定は pm2 のまま。Windows は NSSM 等のコマンドに置き換える）
 - **PostgreSQL + pgvector は既存インスタンスに相乗り**。`CREATE EXTENSION vector` は DB 単位かつ
   superuser 権限が必要（DB サーバー全体に入っていても新規 DB では改めて必要）。
-  `apps/server/prisma/bootstrap.sql` + `pnpm db:bootstrap` で pgvector 拡張と embedding
-  カラム・索引を冪等に作成する（`prisma/migrations/` には含まれていない手作業オブジェクトのため）
+  `apps/server/prisma/bootstrap.sql` + `pnpm db:bootstrap:new-db-only`（サイクルM1 で
+  `db:bootstrap` から改名。新規 DB 構築専用）で pgvector 拡張と embedding カラム・索引を
+  冪等に作成する（`prisma/migrations/` には含まれていない手作業オブジェクトのため）。
+  既存 DB への DB 変更は `apps/server/db/changes/`（`doc/db-changes.md`）を参照
 - WebUI の静的配信は Fastify 側に実装が無い（`@fastify/static` 未使用）ため、
   Windows でもリバースプロキシ（Caddy for Windows 等）による配信が必須
 - 詳細手順は `doc/onprem-windows-setup-guide.md` を参照

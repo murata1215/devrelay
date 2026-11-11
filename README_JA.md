@@ -215,9 +215,10 @@ pnpm install
 cp apps/server/.env.example apps/server/.env
 # Edit .env with your tokens
 
-# Initialize database
+# Initialize database (new DB only; see apps/server/db/changes/ for schema changes
+# on an existing DB — `db:push` was removed because it drops the pgvector embedding columns)
 cd apps/server
-pnpm db:push
+pnpm db:bootstrap:new-db-only
 
 # Start development
 pnpm dev:server   # Start server

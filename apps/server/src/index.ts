@@ -28,6 +28,7 @@ import { startSiteHealthChecker } from './services/sites/health-checker.js';
 import { startAccessLogAggregator } from './services/sites/access-aggregator.js';
 import { mcpRoutes } from './mcp/server.js';
 import { initProxyDispatcher } from './services/proxy-dispatcher.js';
+import { warnOnPendingDbChanges, computeDbChangeStatus } from './services/db-change-index.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -160,6 +161,11 @@ async function main() {
     }
   });
 
+  // サイクルM1: apps/server/db/changes/ の未適用 DB 変更を検査し、起動ログに警告を出す（fail-open）。
+  // 台帳 "DbChange" が無い・権限不足・DB 接続不能のいずれでも起動は続行する。
+  // DEVRELAY_DB_CHANGE_WARN=0 で検査自体を無効化できる。詳細: doc/db-changes.md
+  await runStartupInitWithTimeout('DB 変更履歴の検査', () => warnOnPendingDbChanges());
+
   // Restore session participants from ChannelSession
   // (So users can continue conversations after server restart)
   await runStartupInitWithTimeout('セッション復元', () => restoreSessionParticipants());
@@ -193,7 +199,19 @@ async function main() {
   // Health check
   // bot（discord/telegram）の状態を追加（常に 200 を返す。scripts/install-agent.sh が
   // curl -fsS で疎通判定に使っているため、bot 不調で 500 にしてはならない）。
-  app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString(), bots: getBotsHealth() }));
+  app.get('/health', async () => {
+    // サイクルM1: 未適用の DB 変更件数（会社サーバー等、pm2 logs を誰も見ない環境向けの HTTP 経由の出口）。
+    // /health は常に 200 を返す契約（install-agent.sh の疎通判定）があるため、
+    // computeDbChangeStatus() が想定外に例外を投げても握りつぶして 'unknown-error' にフォールバックする。
+    let dbChanges: { state: string; pending: number } = { state: 'unknown-error', pending: 0 };
+    try {
+      const dbChangeStatus = await computeDbChangeStatus();
+      dbChanges = { state: dbChangeStatus.state, pending: dbChangeStatus.diff?.pending.length ?? 0 };
+    } catch (err) {
+      console.error('⚠️  /health: computeDbChangeStatus failed:', err);
+    }
+    return { status: 'ok', timestamp: new Date().toISOString(), bots: getBotsHealth(), dbChanges };
+  });
 
   // API routes
   await app.register(publicApiRoutes);  // 認証不要のパブリック API（インストーラー用トークン検証など）

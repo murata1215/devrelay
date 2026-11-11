@@ -681,3 +681,16 @@ model Notification {
   @@index([userId, createdAt])
   @@index([userId, isRead])
 }
+
+/// DB 変更の適用台帳（サイクルM1）。apps/server/db/changes/NNNN_*.sql の各ファイルが
+/// 末尾で自分のファイル名を記録する。行の存在 ⇔ そのファイルが適用済み。
+/// 適用は人間が psql で行う（migrate dev / migrate deploy / db push は使わない）。
+/// name を主キーにしているのは、会社リポとの同期（company-repo-sync.md §3/§4 の merge・
+/// cherry-pick）で両側が同じ番号を採ったとき、整数 PK では一方が
+/// ON CONFLICT DO NOTHING で黙って「適用済み」になってしまうため。
+model DbChange {
+  name      String   @id // ファイル名（例: 0032_db_change_ledger.sql）
+  no        Int // 表示・並び順用の番号（unique にしない）
+  appliedAt DateTime @default(now())
+  appliedBy String? // 適用時の current_user（所有者ずれ調査用）
+}
