@@ -148,3 +148,4 @@
 - 2026-11-11_201901 | サイクルC3a-1 | クロス ask の記憶リセット導線をサーバーのみ実装（`CrossAskReset`・`askreset`コマンド・REST・ask-targetsのmemory・後片付け、`DEVRELAY_CROSS_ASK_RESET`既定ON） | [詳細](2026-11-11_201901.md)
 - 2026-11-12_015622 | サイクルM1 | DB 変更履歴の一元化（`apps/server/db/changes/`新設+遡及31件+`model DbChange`台帳+`db:status`+起動時警告+`db:push`削除、`doc/db-changes.md`新設） | [詳細](2026-11-12_015622.md)
 - 2026-11-12_063253 | サイクルS1 | プランモードのBashゲート既存バグ根治（SDK0.3系のplan→auto変換が真因、PreToolUseフック導入+`plan-gate-hook`capability+`DEVRELAY_PLAN_GATE_CAPABILITY`、`agents/windows`は未対応） | [詳細](2026-11-12_063253.md)
+- 2026-11-12_215108 | サイクルS2a+S2b | クロスユーザー askの読める範囲・使えるツール制限（新ゲート+client_composed+既存バイパス2件根治、S2c以降は先送り） | [詳細](2026-11-12_215108.md)

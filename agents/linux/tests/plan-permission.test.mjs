@@ -14,6 +14,7 @@ import {
   hasWriteRedirect,
   hasCommandSubstitution,
   tokenizeSegment,
+  hasGitScopeEscapeFlag,
 } from '../dist/services/plan-permission.js';
 
 const READONLY_TOOLS = ['Read', 'Glob', 'Grep', 'NotebookRead', 'Task', 'ToolSearch', 'TaskOutput', 'TaskStop', 'TodoWrite', 'WebFetch', 'WebSearch'];
@@ -243,8 +244,13 @@ test('#333-7: ls -la doc 2>&1 は allow になる（2>&1 は fd 複製でリダ�
   assert.equal(decideBash('ls -la doc 2>&1').behavior, 'allow');
 });
 
-test('#333-8: git -C /opt/devrelay log --oneline は allow になる（グローバルフラグの読み飛ばし）', () => {
-  assert.equal(decideBash('git -C /opt/devrelay log --oneline').behavior, 'allow');
+test('#333-8→S2b: git -C /opt/devrelay log --oneline は deny になる（サイクルS2bで方針変更）', () => {
+  // #333 時点では「グローバルフラグの読み飛ばし」で allow としていたが、サイクルS2b（新発見②）で
+  // これが `git -C <任意のパス> log` を allowedTools の Bash(git log *) に一致させてしまう
+  // 既存バイパスだと判明し、方針を反転した（`hasGitScopeEscapeFlag()` 参照）。
+  // ルール一致の「読み飛ばし」自体は write 判定（isWriteBashCommand）専用に限定し、
+  // allowedTools のルール一致判定には使わない。
+  assert.equal(decideBash('git -C /opt/devrelay log --oneline').behavior, 'deny');
 });
 
 test('#333-9: ls doc/* | head は allow になる（パイプ先が read-only なら許可する方針）', () => {
@@ -432,4 +438,67 @@ test('S1-7: プランターンで通常使う読み取り専用ツール（Read/
     });
     assert.equal(decision.behavior, 'allow', `${toolName} が deny された`);
   }
+});
+
+// --- サイクルS2b（新発見②）: git の経路またぎフラグは allowedTools ルールに関わらず deny ---
+
+test('hasGitScopeEscapeFlag: -C/-c/--git-dir/--work-tree/--exec-path/--namespace を検出する', () => {
+  assert.equal(hasGitScopeEscapeFlag(['git', '-C', '/tmp', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '-c', 'core.pager=cat', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--git-dir=/tmp/.git', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--work-tree', '/tmp', 'status']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--exec-path', '/usr/lib/git', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--namespace', 'foo', 'log']), true);
+});
+
+test('hasGitScopeEscapeFlag: フラグが無い通常の git コマンドは false', () => {
+  assert.equal(hasGitScopeEscapeFlag(['git', 'log']), false);
+  assert.equal(hasGitScopeEscapeFlag(['git', 'status']), false);
+  assert.equal(hasGitScopeEscapeFlag(['git', 'diff', '--stat']), false);
+});
+
+test('hasGitScopeEscapeFlag: git 以外のコマンドは常に false', () => {
+  assert.equal(hasGitScopeEscapeFlag(['ls', '-C', '/tmp']), false);
+  assert.equal(hasGitScopeEscapeFlag([]), false);
+});
+
+test('【実機再現】strictReadonly: git -C <他プロジェクト> log は Bash(git log *) に一致しても deny（本サイクルの発見事例）', () => {
+  // サイクルS2 Step 0/Plan フェーズで実測: 修正前はこのコマンドが Bash(git log *) に一致して
+  // allow されていた（この会話自身のプランモードで `git -C /opt/devrelay status` が通った）。
+  const decision = decideBash('git -C /opt/devrelay status');
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:notInAllowlist');
+  assert.match(decision.detail, /経路変更フラグ/);
+});
+
+test('strictReadonly: git -c core.pager=... log は deny（設定注入の防止）', () => {
+  const decision = decideBash('git -c core.pager=cat log');
+  assert.equal(decision.behavior, 'deny');
+});
+
+test('strictReadonly: git --git-dir/--work-tree を使った log/status/diff/show は deny', () => {
+  for (const cmd of [
+    'git --git-dir=/tmp/other/.git log',
+    'git --work-tree=/tmp/other status',
+    'git -C /tmp/other diff',
+    'git -C /tmp/other show HEAD',
+  ]) {
+    const decision = decideBash(cmd);
+    assert.equal(decision.behavior, 'deny', `${cmd} should be denied`);
+  }
+});
+
+test('strictReadonly: フラグ無しの通常の git log/status/diff/show は従来どおり allow（回帰確認）', () => {
+  for (const cmd of ['git log', 'git log --oneline', 'git status', 'git diff', 'git show HEAD']) {
+    // show は DEFAULT_ALLOWED_TOOLS_LINUX の Bash(git show *) ルールを使うため allowedTools に追加
+    const decision = decideBash(cmd, { allowedTools: [...ALLOWED_TOOLS, 'Bash(git status)', 'Bash(git diff)', 'Bash(git show *)'] });
+    assert.equal(decision.behavior, 'allow', `${cmd} should still be allowed`);
+  }
+});
+
+test('write 判定（isWriteBashCommand 相当）は git -C があっても正しく write と判定する（回帰確認）', () => {
+  // -C 等のフラグを剥がして write 判定するロジック（isWriteBashCommand）自体は変更していない。
+  const decision = decideBash('git -C /tmp commit -m "x"');
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:writeTool');
 });

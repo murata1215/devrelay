@@ -1257,6 +1257,11 @@ async function sendPromptToAiSdk(
     // サイクルS1: 設定ファイル由来の shadow の可視化（挙動は変えない、読むだけ）。
     warnIfSettingsFileHasPermissions('user settings', path.join(os.homedir(), '.claude', 'settings.json'));
     warnIfSettingsFileHasPermissions('project settings', path.join(projectPath, '.claude', 'settings.json'));
+    // サイクルS2b（新発見③）: `.claude/settings.local.json` は "local" 設定ソース（CLI 実装を
+    // 実測確認: `<cwd>/.claude/settings.local.json` に解決される。ホームディレクトリ直下の
+    // 同名ファイルは別物で、cwd がプロジェクトパスである通常の Agent 実行では読まれない）。
+    // 従来の警告対象から漏れていたため追加する（挙動は変えない、読むだけ）。
+    warnIfSettingsFileHasPermissions('project local settings', path.join(projectPath, '.claude', 'settings.local.json'));
     // サイクルS1: canUseTool は onToolApprovalRequest の有無に関わらず常に設定する
     // （以前は未設定時に canUseTool ごと消え、判定が SDK 既定に委ねられていた構造的欠陥。
     // 修正対象として明記していたもの。第 2 防衛線として、上記フックが判定を返さなかった

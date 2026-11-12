@@ -1,8 +1,7 @@
-// #332: plan モードの canUseTool 判定の単体テスト（macOS 版）。
+// #332: plan モードの canUseTool 判定の単体テスト。
 // #333: strictReadonly の Bash 判定をセグメント分割＋トークン判定に変更したことに伴い拡張。
-// linux 版（agents/linux/tests/plan-permission.test.mjs）と同一の 26+ ケースを、
-// macOS 自己完結方針で複製した plan-permission.ts の dist に対して実行する（#333 でテストが
-// 0 件だった穴を塞ぐ）。外部 import ゼロの純粋関数をコンパイル済み dist から直接 import する。
+// 外部 import ゼロの純粋関数（agents/linux/src/services/plan-permission.ts）を
+// コンパイル済み dist から直接 import する（apps/server の approval-prompt.test.mjs と同じ流儀）。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,12 +14,16 @@ import {
   hasWriteRedirect,
   hasCommandSubstitution,
   tokenizeSegment,
+  hasGitScopeEscapeFlag,
 } from '../dist/services/plan-permission.js';
 
 const READONLY_TOOLS = ['Read', 'Glob', 'Grep', 'NotebookRead', 'Task', 'ToolSearch', 'TaskOutput', 'TaskStop', 'TodoWrite', 'WebFetch', 'WebSearch'];
 const ALLOWED_TOOLS = ['Bash(git log *)', 'Bash(pnpm test)'];
 const WRITE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
 
+// packages/shared/src/constants.ts の PLAN_READONLY_BASH_COMMANDS / PLAN_WRITE_BASH_COMMANDS と
+// 同じ内容をこのテストファイル内に複製する（このテストは dist の純関数のみを対象にするため、
+// production 定数への依存を持たせない。#332 の既存 ALLOWED_TOOLS 定義と同じ方針）。
 const READONLY_BASH_COMMANDS = [
   'ls', 'cat', 'head', 'tail', 'wc',
   'grep', 'egrep', 'fgrep', 'rg',
@@ -63,6 +66,8 @@ function decideBash(command, overrides = {}) {
   });
 }
 
+// ---- 既存9件（#332）。うち2件は #333 でコマンド/ツールが書き込み系と判定できるようになったため reason が具体化される ----
+
 test('strictReadonly × allowlist 外の書き込みコマンド（Bash(rm -rf /)）は deny/writeTool になる', () => {
   const decision = decideBash('rm -rf /');
   assert.equal(decision.behavior, 'deny');
@@ -100,10 +105,9 @@ test('strictReadonly × Write は deny/writeTool になる（skipPermissions=tru
   assert.equal(decision.reason, 'planPolicy:writeTool');
 });
 
-// プランモード書き込みゲート穴の根治サイクル: write tool 早期 deny の回帰テスト。
+// ---- プランモード書き込みゲート穴の根治サイクル: write tool 早期 deny の回帰テスト ----
 // 旧テスト「interactive（strictReadonly=false）は Write でも allow になる」はこのサイクルの
-// 修正対象そのもの（09:41 の無承認 Write 成功）を assert していたため削除し、以下に置換する
-// （linux 版 tests/plan-permission.test.mjs と同一内容）。
+// 修正対象そのもの（09:41 の無承認 Write 成功）を assert していたため削除し、以下に置換する。
 
 test('#根治-1: strictReadonly=false でも Write は planPolicy:writeTool で deny になる（最終防衛線）', () => {
   const decision = decidePlanPermission({
@@ -210,6 +214,8 @@ test('isAllowedByRules: いずれかのルールにマッチすれば true', () 
   assert.equal(isAllowedByRules(undefined, 'Bash', { command: 'git log' }), false);
 });
 
+// ---- #333 新規: グロブ false positive 修正の回帰テスト ----
+
 test('#333-1: ls doc/* はグロブがあっても allow になる（読み取り専用コマンド表）', () => {
   assert.equal(decideBash('ls doc/*').behavior, 'allow');
 });
@@ -238,8 +244,13 @@ test('#333-7: ls -la doc 2>&1 は allow になる（2>&1 は fd 複製でリダ�
   assert.equal(decideBash('ls -la doc 2>&1').behavior, 'allow');
 });
 
-test('#333-8: git -C /opt/devrelay log --oneline は allow になる（グローバルフラグの読み飛ばし）', () => {
-  assert.equal(decideBash('git -C /opt/devrelay log --oneline').behavior, 'allow');
+test('#333-8→S2b: git -C /opt/devrelay log --oneline は deny になる（サイクルS2bで方針変更）', () => {
+  // #333 時点では「グローバルフラグの読み飛ばし」で allow としていたが、サイクルS2b（新発見②）で
+  // これが `git -C <任意のパス> log` を allowedTools の Bash(git log *) に一致させてしまう
+  // 既存バイパスだと判明し、方針を反転した（`hasGitScopeEscapeFlag()` 参照）。
+  // ルール一致の「読み飛ばし」自体は write 判定（isWriteBashCommand）専用に限定し、
+  // allowedTools のルール一致判定には使わない。
+  assert.equal(decideBash('git -C /opt/devrelay log --oneline').behavior, 'deny');
 });
 
 test('#333-9: ls doc/* | head は allow になる（パイプ先が read-only なら許可する方針）', () => {
@@ -294,6 +305,8 @@ test('#333-17: ls $(cat x) は deny/compoundCommand になる（コマンド置�
   assert.equal(decision.reason, 'planPolicy:compoundCommand');
 });
 
+// ---- #333 追加: 人間承認時の追記（allowedTools ∪ defaultAllowedTools の和集合）の検証 ----
+
 test('#333-18: カスタム allowedTools のみに存在するルールは引き続き allow になる（default より緩い差分を尊重）', () => {
   const decision = decideBash('curl https://example.com', {
     allowedTools: [...ALLOWED_TOOLS, 'Bash(curl *)'],
@@ -318,6 +331,8 @@ test('#333-20: defaultAllowedTools を渡さない場合は #333-19 と同じコ
   assert.equal(decision.behavior, 'deny');
   assert.equal(decision.reason, 'planPolicy:notInAllowlist');
 });
+
+// ---- #333 補助関数の直接テスト ----
 
 test('splitShellSegments: クォート内の ; & | は分割対象にならない', () => {
   assert.deepEqual(splitShellSegments('echo "a;b" && echo c'), ['echo "a;b"', 'echo c']);
@@ -423,4 +438,67 @@ test('S1-7: プランターンで通常使う読み取り専用ツール（Read/
     });
     assert.equal(decision.behavior, 'allow', `${toolName} が deny された`);
   }
+});
+
+// --- サイクルS2b（新発見②）: git の経路またぎフラグは allowedTools ルールに関わらず deny ---
+
+test('hasGitScopeEscapeFlag: -C/-c/--git-dir/--work-tree/--exec-path/--namespace を検出する', () => {
+  assert.equal(hasGitScopeEscapeFlag(['git', '-C', '/tmp', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '-c', 'core.pager=cat', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--git-dir=/tmp/.git', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--work-tree', '/tmp', 'status']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--exec-path', '/usr/lib/git', 'log']), true);
+  assert.equal(hasGitScopeEscapeFlag(['git', '--namespace', 'foo', 'log']), true);
+});
+
+test('hasGitScopeEscapeFlag: フラグが無い通常の git コマンドは false', () => {
+  assert.equal(hasGitScopeEscapeFlag(['git', 'log']), false);
+  assert.equal(hasGitScopeEscapeFlag(['git', 'status']), false);
+  assert.equal(hasGitScopeEscapeFlag(['git', 'diff', '--stat']), false);
+});
+
+test('hasGitScopeEscapeFlag: git 以外のコマンドは常に false', () => {
+  assert.equal(hasGitScopeEscapeFlag(['ls', '-C', '/tmp']), false);
+  assert.equal(hasGitScopeEscapeFlag([]), false);
+});
+
+test('【実機再現】strictReadonly: git -C <他プロジェクト> log は Bash(git log *) に一致しても deny（本サイクルの発見事例）', () => {
+  // サイクルS2 Step 0/Plan フェーズで実測: 修正前はこのコマンドが Bash(git log *) に一致して
+  // allow されていた（この会話自身のプランモードで `git -C /opt/devrelay status` が通った）。
+  const decision = decideBash('git -C /opt/devrelay status');
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:notInAllowlist');
+  assert.match(decision.detail, /経路変更フラグ/);
+});
+
+test('strictReadonly: git -c core.pager=... log は deny（設定注入の防止）', () => {
+  const decision = decideBash('git -c core.pager=cat log');
+  assert.equal(decision.behavior, 'deny');
+});
+
+test('strictReadonly: git --git-dir/--work-tree を使った log/status/diff/show は deny', () => {
+  for (const cmd of [
+    'git --git-dir=/tmp/other/.git log',
+    'git --work-tree=/tmp/other status',
+    'git -C /tmp/other diff',
+    'git -C /tmp/other show HEAD',
+  ]) {
+    const decision = decideBash(cmd);
+    assert.equal(decision.behavior, 'deny', `${cmd} should be denied`);
+  }
+});
+
+test('strictReadonly: フラグ無しの通常の git log/status/diff/show は従来どおり allow（回帰確認）', () => {
+  for (const cmd of ['git log', 'git log --oneline', 'git status', 'git diff', 'git show HEAD']) {
+    // show は DEFAULT_ALLOWED_TOOLS_LINUX の Bash(git show *) ルールを使うため allowedTools に追加
+    const decision = decideBash(cmd, { allowedTools: [...ALLOWED_TOOLS, 'Bash(git status)', 'Bash(git diff)', 'Bash(git show *)'] });
+    assert.equal(decision.behavior, 'allow', `${cmd} should still be allowed`);
+  }
+});
+
+test('write 判定（isWriteBashCommand 相当）は git -C があっても正しく write と判定する（回帰確認）', () => {
+  // -C 等のフラグを剥がして write 判定するロジック（isWriteBashCommand）自体は変更していない。
+  const decision = decideBash('git -C /tmp commit -m "x"');
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.reason, 'planPolicy:writeTool');
 });

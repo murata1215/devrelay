@@ -1719,6 +1719,26 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // strictReadonly は plan モードでのみ意味を持つ（exec には一切影響しない）
   const strictReadonly = permissionPolicy === 'strictReadonly' && usePlanMode;
 
+  // サイクルS2b（新発見④）: statePolicy.crossAskScope が true なのに strictReadonly が立たない
+  // 経路（permissionPolicy 未配線・旧サーバー・Devin 等で usePlanMode=false）では、
+  // ai-runner.ts の新ゲート（`options.crossAskScope` 条件で発火）も decidePlanPermission も
+  // 作用しない。`refuseUnsafeAiTool` と同じ「AI を起動せず拒否する」形でここで検出する
+  // （strictReadonly/usePlanMode という別系統の値に statePolicy.crossAskScope の実効性を
+  // 依存させないための最終防衛線）。
+  if (statePolicy.crossAskScope && !strictReadonly) {
+    console.log(`🚫 [cross-ask-scope] Refusing: strictReadonly did not activate (permissionPolicy=${permissionPolicy}, usePlanMode=${usePlanMode})`);
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig!.machineId,
+        sessionId,
+        output: 'この質問には応答できません（安全設定を有効化できませんでした）。プロジェクトの所有者に確認してください。',
+        isComplete: true,
+      },
+    });
+    return;
+  }
+
   // core#336: resume 優先順位（PTY 経路・SDK 経路と統一）。判定ロジックは resume-priority.ts に集約。
   const resumeDecision = decideResume({
     explicitResumeSessionId: payload.resumeSessionId,
