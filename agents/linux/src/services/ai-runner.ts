@@ -37,6 +37,10 @@ import { reconcileForRunner } from './capability-sync.js';
 // raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
 import { buildRawSdkOverrides, buildRawEnv, isRawToolDenied, buildRawDenyMessage, resolveRawUsedModel } from './raw-completion-mode.js';
 import { isTurnStale } from './update-guard-rules.js';
+// サイクルS2a: クロス ask スコープ（isolated/resumable-scoped）の読める範囲・使えるツール制限。
+// SDK オプション上書き・deny 判定の純関数群（外部 import ゼロ）+ fs を要する実体パス判定。
+import { decideCrossAskToolPermission, buildCrossAskSdkOverrides, buildCrossAskEnv, decideCrossAskInitAssertion, CROSS_ASK_AUTO_MEMORY_DIR } from './cross-ask-scope-rules.js';
+import { resolveProjectRootReal, checkCrossAskPath } from './cross-ask-path-guard.js';
 // core#383: 旧 Claude CLI（--session-id 未対応）を検出した場合のプロセス内フォールバックフラグ。
 // 一度 true になったら、この Agent プロセスが再起動されるまで以後の全ターンで
 // --session-id を渡さない（legacy argv = 画面スクレイプによる旧来のセッション ID 取得に戻す）。
@@ -992,6 +996,14 @@ export interface SendPromptOptions {
    */
   onPolicyDenied?: (info: { toolName: string; toolInput: Record<string, unknown>; reason: string }) => void;
   /**
+   * サイクルS2a（2026-11-12）: クロスユーザー ask の読める範囲・使えるツールを限定する新ゲートを
+   * 適用するか。`statePolicy.crossAskScope`（`session-scope.ts`）から直接渡される値で、
+   * `strictReadonly`/`usePlanMode` という別系統の値には依存しない（新発見④: 両者が食い違う
+   * フェイルオープン経路を `connection.ts` 側で別途検出・拒否する。本フィールド自体は
+   * `usePlanMode` の分岐内でのみ参照するため、exec モードには一切影響しない）。
+   */
+  crossAskScope?: boolean;
+  /**
    * #348: projectPath 上の永続状態（claude-session-id / context-usage）を書き込むかどうか。
    * 既定 true（従来どおり）。一時セッション（ask-member/teamexec-member/askDesc）は
    * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
@@ -1115,6 +1127,14 @@ async function sendPromptToAiSdk(
   // #377: maxTurns は env DEVRELAY_SDK_MAX_TURNS で上書き可能（既定 400、plan/exec 共通）
   const sdkMaxTurns = resolveSdkMaxTurns(process.env);
 
+  // サイクルS2a: クロス ask スコープのプロジェクトルート realpath。plan 分岐内で設定し、
+  // PreToolUse フック・canUseTool・下記 for-await の init アサートの3箇所から参照するため、
+  // 関数スコープ（`else if` ブロックの外）で宣言する（ブロックスコープだと for-await から
+  // 参照できない）。
+  let crossAskProjectRootReal: string | undefined;
+  // サイクルS2a: system/init の実行時アサートを1ターンに1回だけ行うためのガード。
+  let crossAskInitAssertionChecked = false;
+
   /** SDK query のオプション構築 */
   const sdkOptions: Parameters<typeof query>[0]['options'] = {
     cwd: projectPath,
@@ -1193,19 +1213,33 @@ async function sendPromptToAiSdk(
     console.log(`🎮 [SDK] Using raw-completion mode (tools disabled, systemPrompt replaced, auto-memory disabled, maxTurns=${sdkOptions.maxTurns})`);
   } else if (options.usePlanMode) {
     sdkOptions.permissionMode = 'plan';
-    // サイクルS1（2026-11-12）: strictReadonly のときは sdkOptions.allowedTools を SDK に渡さない。
-    // 渡した bare エントリ（裸の mcp__... など）が CLI 側の bare-allow ルールとして
-    // 下記 PreToolUse フック／canUseTool より前に allow を確定させてしまうため
-    // （CLAUDE_SDK_CAN_USE_TOOL_SHADOWED 警告が指す挙動。実測: 所有者の allowedTools:linux に
-    // 保存済みの裸の context7 MCP 2件が実際に shadow していた）。DevRelay 自身の判定
-    // （decidePlanPermission、下記フック内）には options.allowedTools をそのまま渡すため、
-    // ユーザーが追加した許可リスト（裸の MCP エントリ含む）は変わらず有効。
-    // strictReadonly=false（旧来の interactive plan）は現状維持で SDK にも allowedTools を渡す。
-    if (!options.strictReadonly && options.allowedTools && options.allowedTools.length > 0) {
-      sdkOptions.allowedTools = options.allowedTools;
-      console.log(`📋 [SDK] Using plan mode with ${options.allowedTools.length} allowed tools`);
+
+    // サイクルS2a（2026-11-12）: クロス ask スコープ（isolated/resumable-scoped）では、読める
+    // 範囲・使えるツールを「貸されたプロジェクトの中身（秘密を除く）」に限定する SDK オプション
+    // 上書きを適用する（`raw-completion-mode.ts` と同じ多層防御の考え方。詳細は
+    // `cross-ask-scope-rules.ts` の `buildCrossAskSdkOverrides()` JSDoc と
+    // `doc/cross-ask-scope-plan.md` 参照）。`crossAskProjectRootReal`（関数スコープで宣言済み）に
+    // 代入し、下記 PreToolUse フック・canUseTool・init アサートの3箇所から参照する。
+    if (options.crossAskScope) {
+      crossAskProjectRootReal = resolveProjectRootReal(projectPath);
+      Object.assign(sdkOptions, buildCrossAskSdkOverrides(CROSS_ASK_AUTO_MEMORY_DIR));
+      sdkOptions.env = buildCrossAskEnv(sdkOptions.env ?? {});
+      console.log('🔒 [SDK] Using cross-ask scope mode (tools=Read,Grep,Glob; settingSources=[]; mcpServers={}; strictMcpConfig=true)');
     } else {
-      console.log(`📋 [SDK] Using plan mode${options.strictReadonly ? ' (strictReadonly: allowedTools withheld from SDK, enforced via PreToolUse hook)' : ''}`);
+      // サイクルS1（2026-11-12）: strictReadonly のときは sdkOptions.allowedTools を SDK に渡さない。
+      // 渡した bare エントリ（裸の mcp__... など）が CLI 側の bare-allow ルールとして
+      // 下記 PreToolUse フック／canUseTool より前に allow を確定させてしまうため
+      // （CLAUDE_SDK_CAN_USE_TOOL_SHADOWED 警告が指す挙動。実測: 所有者の allowedTools:linux に
+      // 保存済みの裸の context7 MCP 2件が実際に shadow していた）。DevRelay 自身の判定
+      // （decidePlanPermission、下記フック内）には options.allowedTools をそのまま渡すため、
+      // ユーザーが追加した許可リスト（裸の MCP エントリ含む）は変わらず有効。
+      // strictReadonly=false（旧来の interactive plan）は現状維持で SDK にも allowedTools を渡す。
+      if (!options.strictReadonly && options.allowedTools && options.allowedTools.length > 0) {
+        sdkOptions.allowedTools = options.allowedTools;
+        console.log(`📋 [SDK] Using plan mode with ${options.allowedTools.length} allowed tools`);
+      } else {
+        console.log(`📋 [SDK] Using plan mode${options.strictReadonly ? ' (strictReadonly: allowedTools withheld from SDK, enforced via PreToolUse hook)' : ''}`);
+      }
     }
 
     // サイクルS1（2026-11-12）: PreToolUse フックを唯一の権威とする。
@@ -1225,6 +1259,36 @@ async function sendPromptToAiSdk(
           const toolName = hookInput.tool_name;
           const input = (hookInput.tool_input ?? {}) as Record<string, unknown>;
           planHookReachedCount++;
+
+          // サイクルS2a: クロス ask スコープでは新ゲートが唯一の権威。ExitPlanMode/AskUserQuestion
+          // の既存特別扱い・decidePlanPermission には一切委譲しない（deny-only で判定し、
+          // 1つでも deny があればそこで確定する。allow の場合も含め必ずここで return する）。
+          if (options.crossAskScope) {
+            const decision = decideCrossAskToolPermission({
+              toolName,
+              input,
+              hasMcpServer: (hookInput as { mcp_server?: unknown }).mcp_server !== undefined,
+              hasAgentId: (hookInput as { agent_id?: string }).agent_id !== undefined,
+              isPathAllowed: (rawValue: string) =>
+                !!crossAskProjectRootReal && checkCrossAskPath(crossAskProjectRootReal, rawValue).allowed,
+            });
+            if (decision.behavior === 'deny') {
+              console.warn(`🛑 [SDK] Denied by cross-ask scope gate: ${toolName} [${decision.reason}]`);
+              planHookDeniedCount++;
+              options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: `この質問では使用できません（理由: ${decision.detail ?? decision.reason}）。`,
+                },
+              };
+            }
+            options.onAutoApproved?.({ toolName, toolInput: input });
+            return {
+              hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+            };
+          }
 
           // #303: ExitPlanMode はプランモードの正規の脱出ハッチではない。ユーザーが e/exec を
           // 送信するまで常に deny する（disallowedTools の保険として、フック段でも明示 deny）。
@@ -1289,13 +1353,36 @@ async function sendPromptToAiSdk(
     // サイクルS1: 設定ファイル由来の shadow の可視化（挙動は変えない、読むだけ）。
     warnIfSettingsFileHasPermissions('user settings', path.join(os.homedir(), '.claude', 'settings.json'));
     warnIfSettingsFileHasPermissions('project settings', path.join(projectPath, '.claude', 'settings.json'));
-
     // サイクルS1: canUseTool は onToolApprovalRequest の有無に関わらず常に設定する
     // （以前は未設定時に canUseTool ごと消え、判定が SDK 既定に委ねられていた構造的欠陥。
     // 修正対象として明記していたもの。第 2 防衛線として、上記フックが判定を返さなかった
     // 場合＝基本的に AskUserQuestion のときだけここに来る）。
     const onApprovalRequest = options.onToolApprovalRequest;
     sdkOptions.canUseTool = async (toolName, input, opts) => {
+      // サイクルS2a: クロス ask スコープでは通常ここに到達しないはず（上記フックが必ず判定を
+      // 返すため）。第2防衛線として同じ判定を適用し、ExitPlanMode/AskUserQuestion/
+      // skipPermissions/decidePlanPermission のロジックには一切進まない（disableAsk 前提の
+      // クロス ask は AskUserQuestion 自体を仕様上使わない）。
+      if (options.crossAskScope) {
+        const decision = decideCrossAskToolPermission({
+          toolName,
+          input,
+          // canUseTool には mcp_server/agent_id 情報が渡らないため、ツール名・引数のみで判定する
+          // （上記フックが先に確定させるため、ここに到達する時点でこの2項目は安全側で false 扱い）。
+          hasMcpServer: false,
+          hasAgentId: false,
+          isPathAllowed: (rawValue: string) =>
+            !!crossAskProjectRootReal && checkCrossAskPath(crossAskProjectRootReal, rawValue).allowed,
+        });
+        if (decision.behavior === 'deny') {
+          console.warn(`🛑 [SDK] Denied by cross-ask scope gate (canUseTool fallback): ${toolName} [${decision.reason}]`);
+          options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+          return { behavior: 'deny', message: `この質問では使用できません（理由: ${decision.detail ?? decision.reason}）。` };
+        }
+        options.onAutoApproved?.({ toolName, toolInput: input });
+        return { behavior: 'allow', updatedInput: input };
+      }
+
       // #303: disallowedTools / フックを素通りするケースへの保険。
       if (toolName === 'ExitPlanMode') {
         console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
@@ -1579,7 +1666,10 @@ async function sendPromptToAiSdk(
   // 最初の result を受けた瞬間に CLI への stdin を閉じる（canUseTool の応答経路も道連れで死ぬ）。
   // 「途中 result」を延期して読み続ける bg-task 判定（下記 for-await 内）と衝突するため、
   // ターン完了まで閉じない AsyncIterable を渡す（詳細は sdk-prompt-stream.ts 冒頭コメント参照）。
-  const promptStream = buildSdkPromptStream(prompt);
+  // サイクルS2a（新発見①）: クロス ask スコープでは client_composed:true を付け、質問文中の
+  // @パス 記法の自動展開・スラッシュコマンドのディスパッチを CLI に行わせない（PreToolUse フックの
+  // 射程外のため、ツール呼び出しを経由しない唯一の漏洩経路をここで塞ぐ）。
+  const promptStream = buildSdkPromptStream(prompt, !!options.crossAskScope);
   const sdkQuery = query({ prompt: promptStream.stream, options: sdkOptions });
   try {
     for await (const message of sdkQuery) {
@@ -1594,6 +1684,25 @@ async function sendPromptToAiSdk(
       const loopGuardWallClock = checkWallClock(loopGuardState, Date.now(), loopGuardConfig);
       if (loopGuardWallClock.abort) {
         return await abortForLoopGuard('wallClock', loopGuardWallClock.detail);
+      }
+
+      // サイクルS2a（新発見⑤）: クロス ask スコープでは system/init メッセージの内容を実行時に
+      // 検証し、`settings` インライン注入が静かに無視された・SDK バージョン変化で想定外の構成に
+      // なっていた等のケースを機械検出する最後の砦。1つでも外れたら即座にターンを中断する
+      // （SDK の挙動に依存しない防御という S1 と同じ思想。`decideCrossAskInitAssertion()` 参照）。
+      if (options.crossAskScope && m.type === 'system' && m.subtype === 'init' && !crossAskInitAssertionChecked) {
+        crossAskInitAssertionChecked = true;
+        const assertion = decideCrossAskInitAssertion(
+          { tools: m.tools, mcp_servers: m.mcp_servers, permissionMode: m.permissionMode, cwd: m.cwd },
+          crossAskProjectRootReal ?? projectPath,
+        );
+        if (!assertion.ok) {
+          console.error(`🚨 [SDK] CROSS-ASK GATE REGRESSION: ${assertion.reason}`);
+          onOutput('この質問には応答できません（設定の検証に失敗しました。管理者に連絡してください）。', true, undefined, result.extractedSessionId, 'aborted');
+          sdkAbortController.abort();
+          return result;
+        }
+        console.log('🔒 [SDK] cross-ask scope init assertion passed');
       }
 
       // セッション ID 抽出（system/init または result から）

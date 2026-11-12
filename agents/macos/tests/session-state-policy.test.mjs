@@ -25,6 +25,7 @@ const INTERACTIVE_POLICY = {
   approveAllState: true,
   refuseUnsafeAiTool: false,
   reportAiToolSubstitution: true,
+  crossAskScope: false,
 };
 
 const LEGACY_EPHEMERAL_POLICY = {
@@ -42,6 +43,7 @@ const LEGACY_EPHEMERAL_POLICY = {
   approveAllState: false,
   refuseUnsafeAiTool: false,
   reportAiToolSubstitution: true,
+  crossAskScope: false,
 };
 
 const RESUMABLE_SCOPED_POLICY = {
@@ -60,6 +62,7 @@ const RESUMABLE_SCOPED_POLICY = {
   // サイクルC2（A-1）: isolated と同じ true に揃えた（C1 時点の暫定値 false から変更）。
   refuseUnsafeAiTool: true,
   reportAiToolSubstitution: false,
+  crossAskScope: true,
 };
 
 const ISOLATED_POLICY = {
@@ -71,12 +74,15 @@ const ISOLATED_POLICY = {
   storageContext: false,
   receivedFiles: false,
   projectRescan: false,
-  forcePlanTurn: false,
+  // サイクルS2a（新発見④）: C2 時点の暫定値 false から true に変更。resumable にある
+  // 「履歴に exec マーカーが混入していても plan ターンに固定する」構造的保証を isolated にも揃える。
+  forcePlanTurn: true,
   outputDirInstruction: false,
   projectStateRead: false,
   approveAllState: false,
   refuseUnsafeAiTool: true,
   reportAiToolSubstitution: false,
+  crossAskScope: true,
 };
 
 const VALID_SCOPE_ID = 'crossask-abc123_XYZ-789';
@@ -217,7 +223,7 @@ test('resolveSessionStatePolicy: crossQuery + statePolicy=isolated は agentScop
   assert.deepEqual(policy, ISOLATED_POLICY);
 });
 
-test('resolveSessionStatePolicy: isolated では conversation も含めて全て deny、refuseUnsafeAiTool のみ true', () => {
+test('resolveSessionStatePolicy: isolated では conversation も含めて全て deny、refuseUnsafeAiTool/forcePlanTurn/crossAskScope のみ true', () => {
   const policy = resolveSessionStatePolicy('crossquery_abc123', { statePolicy: 'isolated' });
   assert.equal(policy.scopedConversation, false);
   assert.equal(policy.outputDirClear, false);
@@ -227,12 +233,13 @@ test('resolveSessionStatePolicy: isolated では conversation も含めて全て
   assert.equal(policy.storageContext, false);
   assert.equal(policy.receivedFiles, false);
   assert.equal(policy.projectRescan, false);
-  assert.equal(policy.forcePlanTurn, false);
+  assert.equal(policy.forcePlanTurn, true);
   assert.equal(policy.outputDirInstruction, false);
   assert.equal(policy.projectStateRead, false);
   assert.equal(policy.approveAllState, false);
   assert.equal(policy.reportAiToolSubstitution, false);
   assert.equal(policy.refuseUnsafeAiTool, true);
+  assert.equal(policy.crossAskScope, true);
 });
 
 test('resolveSessionStatePolicy: statePolicy の大文字小文字違い・別文字列は isolated にならない', () => {
@@ -277,18 +284,26 @@ test('isAiToolReadOnlyEnforceable: 未知の AI ツール名は強制不可（de
 // --- サイクルC2: resumable と isolated の差分を不変条件として固定 ---
 
 test('【不変条件】resumable が isolated より緩いのは scopedConversation と projectStateRead の2項目だけ', () => {
-  // `forcePlanTurn` は true=厳格（常にプランターンに固定する制約フラグ）という逆極性のため、
-  // 「true かどうか」で緩さを比較する本テストの対象から明示的に除外する
-  // （resumable=true/isolated=false だが、これは resumable の方が厳しい側であり緩さの逆行ではない。
-  // `refuseUnsafeAiTool` は両方 true で既に対象外）。
-  const POLARITY_INVERTED_KEYS = new Set(['forcePlanTurn']);
-  const keys = Object.keys(RESUMABLE_SCOPED_POLICY).filter((k) => !POLARITY_INVERTED_KEYS.has(k));
+  // サイクルS2a: isolated の forcePlanTurn を true に揃えたため、両者とも true/true で等しくなり
+  // 「true かどうか」の比較から自然に除外される（POLARITY_INVERTED_KEYS の特別扱いは不要になった）。
+  const keys = Object.keys(RESUMABLE_SCOPED_POLICY);
   const looserKeys = keys.filter((k) => RESUMABLE_SCOPED_POLICY[k] === true && ISOLATED_POLICY[k] === false);
   assert.deepEqual(looserKeys.sort(), ['projectStateRead', 'scopedConversation'].sort());
   // 逆方向（isolated が resumable より緩い項目）が無いことも確認する。
   const reverseLooserKeys = keys.filter((k) => ISOLATED_POLICY[k] === true && RESUMABLE_SCOPED_POLICY[k] === false);
   assert.deepEqual(reverseLooserKeys, []);
-  // forcePlanTurn 自体は resumable=true/isolated=false（resumable の方が厳格側）であることを別途固定する。
+  // forcePlanTurn/crossAskScope は resumable=isolated=true（両者とも厳格側で等しい）であることを固定する。
   assert.equal(RESUMABLE_SCOPED_POLICY.forcePlanTurn, true);
-  assert.equal(ISOLATED_POLICY.forcePlanTurn, false);
+  assert.equal(ISOLATED_POLICY.forcePlanTurn, true);
+  assert.equal(RESUMABLE_SCOPED_POLICY.crossAskScope, true);
+  assert.equal(ISOLATED_POLICY.crossAskScope, true);
+});
+
+// --- サイクルS2a: crossAskScope フィールドの固定 ---
+
+test('【不変条件】crossAskScope が true なのは isolated/resumable-scoped の2区分だけ', () => {
+  assert.equal(INTERACTIVE_POLICY.crossAskScope, false);
+  assert.equal(LEGACY_EPHEMERAL_POLICY.crossAskScope, false);
+  assert.equal(RESUMABLE_SCOPED_POLICY.crossAskScope, true);
+  assert.equal(ISOLATED_POLICY.crossAskScope, true);
 });

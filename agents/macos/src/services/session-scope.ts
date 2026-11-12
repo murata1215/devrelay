@@ -11,6 +11,13 @@
  * 外部 import ゼロの純関数のみで構成する（#332 `permission-policy.ts` / #337 `progress-timeout.ts` /
  * #339 `claude-login-code.ts` / #348 `cross-query-guard.ts` と同じ流儀）。
  * `agents/linux` と `agents/macos` と `agents/windows` で byte-for-byte 同一内容を維持すること。
+ *
+ * 【サイクルS2a/S2b の例外】`crossAskScope` フィールドの追加と `ISOLATED_STATE_POLICY.forcePlanTurn`
+ * の変更は、人間の明示指示により **linux/macos のみ**に適用し `agents/windows` は変更していない
+ * （windows Agent は SDK の `hooks.PreToolUse` を実装できず、クロス ask の新ゲート自体を
+ * 持たないため、`crossAskScope` フィールドを読む経路が存在せず実害は無い）。
+ * 3 OS byte-identical の原則から外れるこの例外は本サイクル限定であり、windows 対応は別サイクルの
+ * 課題として残す（`doc/cross-ask-scope-plan.md` 参照）。
  */
 
 export type SessionScope = 'interactive' | 'crossQuery' | 'teamExec' | 'askDesc' | 'raw';
@@ -109,6 +116,14 @@ export function sessionScopeLabel(scope: SessionScope): string {
  *   ツールへ差し替えたとき、`agent:session:aiTool` でサーバーへ報告するか。報告すると
  *   サーバー側は `Project.defaultAi` を実態へ書き換える（#309 の既存挙動）。isolated では
  *   他人の質問 1 通で所有者のプロジェクト既定 AI が書き換わってしまうため false にする。
+ * - crossAskScope（サイクルS2a, 2026-11-12）: クロスユーザー ask の読める範囲・使えるツールを
+ *   制限する新ゲート（`cross-ask-scope-rules.ts` の `decideCrossAskToolPermission()`・
+ *   `buildCrossAskSdkOverrides()`）を適用するか。isolated/resumable-scoped でのみ true。
+ *   `refuseUnsafeAiTool` とは意図的に別フィールドにしている（新発見④: 両者は現状すべて
+ *   一致するが、`strictReadonly`/`usePlanMode` という別系統の値に依存させず `statePolicy` だけで
+ *   新ゲートを発火させるため。`connection.ts` 側で `statePolicy.crossAskScope` が true なのに
+ *   `strictReadonly` が立たない経路（permissionPolicy 未配線・Devin 等）を検出し、AI を起動せず
+ *   拒否するフェイルクローズを別途実装する）。
  */
 export interface SessionStatePolicy {
   scopedConversation: boolean;
@@ -125,6 +140,7 @@ export interface SessionStatePolicy {
   approveAllState: boolean;
   refuseUnsafeAiTool: boolean;
   reportAiToolSubstitution: boolean;
+  crossAskScope: boolean;
 }
 
 /** 対話セッション（既存の `!isEphemeral` 分岐と完全一致。全許可・forcePlanTurn/refuseUnsafeAiTool のみ false） */
@@ -143,6 +159,7 @@ const INTERACTIVE_STATE_POLICY: SessionStatePolicy = {
   approveAllState: true,
   refuseUnsafeAiTool: false,
   reportAiToolSubstitution: true,
+  crossAskScope: false,
 };
 
 /**
@@ -171,6 +188,7 @@ const LEGACY_EPHEMERAL_STATE_POLICY: SessionStatePolicy = {
   approveAllState: false,
   refuseUnsafeAiTool: false,
   reportAiToolSubstitution: true,
+  crossAskScope: false,
 };
 
 /**
@@ -204,6 +222,7 @@ const RESUMABLE_SCOPED_STATE_POLICY: SessionStatePolicy = {
   approveAllState: false,
   refuseUnsafeAiTool: true,
   reportAiToolSubstitution: false,
+  crossAskScope: true,
 };
 
 /**
@@ -212,6 +231,13 @@ const RESUMABLE_SCOPED_STATE_POLICY: SessionStatePolicy = {
  * 漏洩させず、読み取り専用を権限で強制できない実効 AI へのターンは開始前に拒否する
  * （`refuseUnsafeAiTool`）。resumable と異なり会話状態も持たない（`scopedConversation: false`）
  * — 本サイクルでは resume を配線しないため。
+ *
+ * `forcePlanTurn`（サイクルS2a, 新発見④）: C2 時点では false の暫定値だったが、ここを true に
+ * 変更する。resumable には既にある「履歴に exec マーカーが混入していても plan ターンに固定する」
+ * 構造的保証が isolated には無かった（Plan フェーズの敵対的レビューで発見）。isolated は
+ * `scopedConversation:false` のため履歴に exec マーカーが残ること自体は無いはずだが、
+ * `forcePlanTurn` を他の防御と無関係に true へ揃えておくことで、万一の経路違いでも
+ * plan ターン固定が保証される（resumable と同じ最終防衛線）。
  */
 const ISOLATED_STATE_POLICY: SessionStatePolicy = {
   scopedConversation: false,
@@ -222,12 +248,13 @@ const ISOLATED_STATE_POLICY: SessionStatePolicy = {
   storageContext: false,
   receivedFiles: false,
   projectRescan: false,
-  forcePlanTurn: false,
+  forcePlanTurn: true,
   outputDirInstruction: false,
   projectStateRead: false,
   approveAllState: false,
   refuseUnsafeAiTool: true,
   reportAiToolSubstitution: false,
+  crossAskScope: true,
 };
 
 /**

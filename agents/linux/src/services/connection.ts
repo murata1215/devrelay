@@ -116,6 +116,9 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // 案C′ サイクルC1: resolveSessionStatePolicy() は第3区分（resumable-scoped）の許可リストを返す
 // （サーバーが statePolicy を送らない限り isEphemeral の二値判定と完全に同じ結果になる）
 import { isEphemeralSession, resolveSessionStatePolicy, isAiToolReadOnlyEnforceable } from './session-scope.js';
+// サイクルS2a: クロス ask スコープのプロジェクトルート realpath 解決 + CLAUDE.md 安全注入
+import { resolveProjectRootReal } from './cross-ask-path-guard.js';
+import { buildCrossAskClaudeMdPrompt } from './cross-ask-claude-md.js';
 import { buildDependencyProbeBlock, buildArtifactFreshnessGate, buildPnpmInstallCommand, AGENT_INSTALL_FILTER } from './update-script.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
 // サイクルP1: Capability 配布基盤（共通層への配線。connection.ts は Claude 固有処理を一切知らない）
@@ -1477,6 +1480,18 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     storageContextPrompt = '\n\n--- Storage Context ---\n' + storageContext + '\n--- End Storage Context ---';
   }
 
+  // サイクルS2a: クロス ask スコープは `settingSources: []` のため SDK 自身はプロジェクトの
+  // CLAUDE.md を読まない（`cross-ask-sdk-overrides` 参照）。代わりに Agent 側で安全化（パスゲート
+  // 通過・`@` 取り込み行の除去・サイズ上限 ${CROSS_ASK_CLAUDE_MD_MAX_CHARS} 文字）して注入する。
+  let claudeMdPrompt = '';
+  if (statePolicy.crossAskScope) {
+    const crossAskRootReal = resolveProjectRootReal(sessionInfo.projectPath);
+    claudeMdPrompt = buildCrossAskClaudeMdPrompt(crossAskRootReal);
+    if (claudeMdPrompt) {
+      console.log(`📄 [cross-ask-scope] Including project CLAUDE.md in prompt (${claudeMdPrompt.length} chars)`);
+    }
+  }
+
   // Devin 専用端末等でサーバー指定の AI が未インストールなら、実行直前に使えるツールへ差し替える
   // （新規セッションの defaultAi 継承や古い active セッションの再利用で claude が渡されるケースを救済）
   if (currentConfig) {
@@ -1568,7 +1583,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // 無駄な deny ログを避けるため）。resumable 以外（現状の全経路）は従来どおり常に付与する。
   const outputDirInstructionText = statePolicy.outputDirInstruction ? OUTPUT_DIR_INSTRUCTION : '';
   const composeFullPrompt = (includeHistory: boolean): string => {
-    const basePrompt = effectiveModeInstruction + prevExecSummary + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + outputDirInstructionText;
+    const basePrompt = effectiveModeInstruction + prevExecSummary + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + claudeMdPrompt + outputDirInstructionText;
     if (!(sessionInfo.history.length > 1 && includeHistory)) {
       historyContextSize = 0;
       return basePrompt;
@@ -1591,7 +1606,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
     historyContextSize = historyContext.length;
-    return `${effectiveModeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${outputDirInstructionText}`;
+    return `${effectiveModeInstruction}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${claudeMdPrompt}${outputDirInstructionText}`;
   };
 
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
@@ -1672,6 +1687,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   console.log(`   - User prompt: ${promptWithFiles.length} chars`);
   console.log(`   - Work state: ${workStatePrompt.length} chars`);
   console.log(`   - Storage context: ${storageContextPrompt.length} chars`);
+  console.log(`   - Project CLAUDE.md (cross-ask): ${claudeMdPrompt.length} chars`);
   console.log(`   - Output instruction: ${outputDirInstructionText.length} chars`);
   if (historyContextSize > 0) {
     console.log(`   - History context: ${historyContextSize} chars`);
@@ -1742,6 +1758,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     // core#336: MCP submission 単位のスコープ識別子 / plan-exec 対応付け correlation ID
     agentScopeId: sessionInfo.agentScopeId,
     turnId: payload.turnId,
+    // サイクルS2a: クロス ask スコープの読める範囲・使えるツール制限ゲートを有効化するか。
+    // `statePolicy.crossAskScope` をそのまま渡す（`strictReadonly`/`usePlanMode` には依存しない）。
+    crossAskScope: statePolicy.crossAskScope,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）
