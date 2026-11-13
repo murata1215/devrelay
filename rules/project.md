@@ -3157,3 +3157,35 @@ SDK の内部動作が変わったことで到達経路が失われた）。原�
    allowlist 強制（本サイクルの対象）は未対応のまま。サーバー側は `'plan-gate-hook'` capability
    の有無でこれを見分け、未申告 Agent へのクロスユーザー ask を fail-closed で断る
    （`cross-ask-isolation-rules.ts`）。CLI フック配布（windows 対応）は次サイクル候補。
+
+## Agent 再接続ロジックの設計判断（2026-11-14）
+
+自宅PC（fwjg2507-FMVD34003）が pong タイムアウト切断後、DNS エラーの再接続を約13回くり返した末に
+`Connecting...` を最後に3日間沈黙した事故の根治（`doc/devlog/2026-11-14_072449.md`）で、
+`agents/{linux,macos,windows}/src/services/connection.ts` の再接続ロジックに2つの設計判断を入れた。
+将来の改修でこの判断の理由を忘れて「シンプルに戻す」方向のリファクタをしないよう、ここに残す。
+
+1. **安定判定は「open で即リセット」ではなく「60秒 OPEN を維持できたらリセット」にした。**
+   windows の旧実装は `ws.on('open')` で無条件に `reconnectAttempts = 0` していたが、これを
+   linux/macos にもそのまま揃えると、本ドキュメント冒頭の警告（Agent を pm2 に登録すると
+   同一 machineId で二重起動し、サーバーが新接続のたびに旧 WebSocket を切断するため無限
+   再接続ループになる。`doc/agent_noresponse_20260814.md`）の状況で **2秒間隔の接続嵐が
+   無期限に続く**。open は毎回成功するため、open 即リセットは「毎回 attempt 1 の2秒固定」を
+   固定化してしまう。そのため `connectToServer()` の `open` ハンドラで `stableConnectionTimer`
+   （`DEFAULTS.reconnectStableThreshold`=60000ms）を張り、**60秒 OPEN を維持できたときだけ**
+   `reconnectAttempts = 0` にする方式にした。長時間安定していた接続が切れた直後はまだ 0 のままなので
+   正しくバックオフが効き、フラップ（open 直後に close）時は 60 秒に届かず効かないためホットループを
+   起こさない。旧 `scheduleReconnect()` 内の「`lastConnectedAt` からの経過時間で判定」方式
+   （長時間安定後の切断で**毎回**真になりバックオフが無効化されていた、本サイクルの直接原因）は
+   削除した。
+2. **`maxAttempts` による打ち切りは撤廃し、無期限リトライ＋`maxDelay`（30秒）の遅延上限のみにした。**
+   旧実装は 30 回到達でログを出して `return` するだけで `process.exit` もせず、プロセスが生きたまま
+   永久に沈黙していた。`process.exit` を主軸にしなかったのは、crontab `@reboot` の nohup 起動機
+   （pm2 に登録できない運用、本ドキュメント冒頭参照）では終了すると自動復帰しないため。
+   代わりに `computeReconnectDelay()`（`packages/shared/src/reconnect.ts`）で指数部を 30 で clamp
+   し、attempt が無限に増えても `maxDelay` で頭打ちになり Infinity/NaN にならないようにした。
+   加えて60秒間隔の常駐監視（`startReconnectSupervisor()`）を新設し、「ws が生きていないのに
+   `reconnectTimer` も無い」状態を検出したら復帰させる保険を置いた（通常の
+   `close`→`scheduleReconnect`、watchdog タイムアウト→`terminate()`→`close` の経路で必ず
+   戻るはずだが、将来の改修でその経路が壊れた場合の二重の保険）。`disconnect()`（SIGINT 等の
+   意図した終了）では `shuttingDown` フラグで supervisor 自身を止める。

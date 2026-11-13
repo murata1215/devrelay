@@ -38,7 +38,7 @@ import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync, existsSync, appendFileSync } from 'fs';
 import { chmod } from 'fs/promises';
-import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE, computeReconnectDelay, CONNECT_TIMEOUT_MS, CONNECT_WATCHDOG_MS } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { writeFileAtomic } from './atomic-write.js';
@@ -145,6 +145,14 @@ let claudeAuthCheckTimer: NodeJS.Timeout | null = null;
 /** 直前に送信した Claude ログイン状態（'unknown' は未送信扱い。状態が変化したときだけ通知するため） */
 let lastReportedClaudeAuthOk: boolean | null = null;
 let pongCheckInterval: NodeJS.Timeout | null = null;
+/** 接続タイムアウトの自前監視タイマー（原因A: handshakeTimeout が効かない場合の保険） */
+let connectWatchdogTimer: NodeJS.Timeout | null = null;
+/** 安定接続判定タイマー（open から60秒 OPEN を維持できたら reconnectAttempts をリセット） */
+let stableConnectionTimer: NodeJS.Timeout | null = null;
+/** 最後の砦: ws が死んでいて reconnectTimer も無い状態を検出する常駐監視（60秒間隔） */
+let supervisorTimer: NodeJS.Timeout | null = null;
+/** disconnect() 呼び出し後（SIGINT 等）は supervisor / scheduleReconnect を一切発動しない */
+let shuttingDown = false;
 let currentConfig: AgentConfig | null = null;
 let currentMachineId: string | null = null;
 /** Server から配信されたプランモード許可ツール（null = デフォルト使用） */
@@ -175,10 +183,26 @@ export function getServerDisableAsk(): boolean {
 
 // 再接続状態（バックオフ管理）
 let reconnectAttempts = 0;
-/** 最後に WebSocket 接続が確立した時刻（安定接続判定用） */
+/** 最後に WebSocket 接続が確立した時刻（ログの接続継続時間表示用） */
 let lastConnectedAt = 0;
 /** サーバーがプロトコルバージョン不足で接続拒否した場合 true（再接続ループを停止） */
 let protocolUpdateRequired = false;
+
+/** 接続監視タイマーを解除する（open / close / error / disconnect の各経路で呼ぶ） */
+function clearConnectWatchdog() {
+  if (connectWatchdogTimer) {
+    clearTimeout(connectWatchdogTimer);
+    connectWatchdogTimer = null;
+  }
+}
+
+/** 安定接続判定タイマーを解除する（close / error / disconnect の各経路で呼ぶ） */
+function clearStableConnectionTimer() {
+  if (stableConnectionTimer) {
+    clearTimeout(stableConnectionTimer);
+    stableConnectionTimer = null;
+  }
+}
 
 /** 最後に更新を開始した時刻（二重更新防止用、60秒で自動解除） */
 let updateStartedAt = 0;
@@ -298,9 +322,14 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
   // Agent 起動時にログローテーション（agent.log + 承認ログ）
   setupLogRotation().catch(err => console.error('Log rotation setup failed:', err));
   rotateApprovalLog().catch(err => console.error('Approval log rotation failed:', err));
+  // 最後の砦: ws が死んでいて reconnectTimer も無い状態を検出する常駐監視を起動する
+  // （通常は不要だが、何らかの経路でタイマーが1つも残らず沈黙する状態に落ちた場合の保険）
+  startReconnectSupervisor(config, projects);
+
   return new Promise<void>((resolve, reject) => {
     // Build WebSocket options with optional proxy
-    const wsOptions: WebSocket.ClientOptions = {};
+    // handshakeTimeout（原因A）: ws 自身のタイムアウトで CONNECTING のまま止まるのを防ぐ
+    const wsOptions: WebSocket.ClientOptions = { handshakeTimeout: CONNECT_TIMEOUT_MS };
 
     if (config.proxy?.url && shouldBypassProxy(config.serverUrl, config.proxy.noProxy)) {
       // noProxy に一致 → サーバー接続だけ直結する。社内に Server を置き AI API だけ
@@ -323,12 +352,40 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     }
 
     ws = new WebSocket(config.serverUrl, wsOptions);
+    // 以降のハンドラは全て thisWs に対して登録する（close/error の「置き換え済みなら無視」判定と
+    // 揃えるため。ここから handler 登録までは同期的なので ws と thisWs は常に同一オブジェクト）。
+    const thisWs = ws;
 
-    ws.on('open', () => {
+    // 自前の接続監視タイマー（原因A の保険）: handshakeTimeout が何らかの理由で効かず
+    // CONNECTING のまま止まった場合に terminate() する。terminate() は ws v8 では
+    // CONNECTING 中でも abortHandshake() 経由で error → close を必ず発火するため、
+    // 既存の close → scheduleReconnect の経路にそのまま戻る。
+    clearConnectWatchdog();
+    connectWatchdogTimer = setTimeout(() => {
+      connectWatchdogTimer = null;
+      if (thisWs.readyState === WebSocket.CONNECTING) {
+        console.error(`⚠️ Connect watchdog fired (stuck CONNECTING for ${CONNECT_WATCHDOG_MS}ms), terminating...`);
+        thisWs.terminate();
+      }
+    }, CONNECT_WATCHDOG_MS);
+
+    thisWs.on('open', () => {
+      clearConnectWatchdog();
       console.log('✅ Connected to server');
 
-      // 接続時刻を記録（安定接続判定用。リセットは scheduleReconnect で行う）
+      // 接続時刻を記録（ログ表示用）
       lastConnectedAt = Date.now();
+
+      // 安定接続判定（原因B の修正）: open した瞬間に reconnectAttempts を 0 に戻すと、
+      // Agent 二重起動によるホットループ（サーバーが新接続のたびに旧 WS を切断する既知の事故。
+      // doc/agent_noresponse_20260814.md）で 2 秒間隔のまま無限に接続嵐を起こしてしまう。
+      // そのため「60秒 OPEN を維持できたら」リセットする（長時間安定していた接続が切れた
+      // 直後は 0 のままなので、正しくバックオフが効く）。
+      clearStableConnectionTimer();
+      stableConnectionTimer = setTimeout(() => {
+        stableConnectionTimer = null;
+        reconnectAttempts = 0;
+      }, DEFAULTS.reconnectStableThreshold);
 
       // Note: currentMachineId will be set when server:connect:ack is received
 
@@ -363,11 +420,11 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       resolve();
     });
 
-    ws.on('pong', () => {
+    thisWs.on('pong', () => {
       lastPongReceived = Date.now();
     });
 
-    ws.on('message', (data) => {
+    thisWs.on('message', (data) => {
       try {
         const message: ServerToAgentMessage = JSON.parse(data.toString());
         // デバッグ: pong 以外の受信メッセージタイプをログ出力
@@ -381,13 +438,16 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     });
 
     // close ハンドラ: この WS が既に置き換えられていたら再接続をスキップ
-    const thisWs = ws;
     thisWs.on('close', () => {
       if (ws !== thisWs) {
         console.log('🔌 Old WebSocket closed (replaced), skipping reconnect');
         return;
       }
-      console.log('🔌 Disconnected from server');
+      clearConnectWatchdog();
+      clearStableConnectionTimer();
+      const connectedForMs = lastConnectedAt > 0 ? Date.now() - lastConnectedAt : null;
+      const connectedForSuffix = connectedForMs !== null ? ` (was connected for ${(connectedForMs / 1000).toFixed(1)}s)` : '';
+      console.log(`🔌 Disconnected from server${connectedForSuffix}`);
       stopPing();
       stopAppPing();
       stopClaudeAuthCheck();
@@ -400,10 +460,40 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     });
 
     thisWs.on('error', (err) => {
+      clearConnectWatchdog();
       console.error('WebSocket error:', err.message);
       reject(err);
     });
   });
+}
+
+/**
+ * 最後の砦: 60秒ごとに「ws が生きていない（OPEN/CONNECTING でない）のに reconnectTimer も無い」
+ * 状態を検出し、復帰のために scheduleReconnect() を呼ぶ常駐監視ループ。
+ *
+ * 通常の経路（close → scheduleReconnect、watchdog → terminate → close → scheduleReconnect）で
+ * 必ず再接続に戻るはずだが、将来の改修でその経路が壊れた場合でも「タイマーが1つも残らず
+ * 永久に沈黙する」という 2026-11-11 の事故の型を構造的に防ぐための二重の保険。
+ * disconnect() 後（shuttingDown）やプロトコル不足での意図した停止では発動しない。
+ */
+function startReconnectSupervisor(config: AgentConfig, projects: Project[]) {
+  if (supervisorTimer) return; // 多重起動しない
+  shuttingDown = false;
+  supervisorTimer = setInterval(() => {
+    if (shuttingDown || protocolUpdateRequired) return;
+    const wsAlive = ws !== null && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+    if (!wsAlive && !reconnectTimer) {
+      console.error('⚠️ Reconnect supervisor: no live connection and no pending reconnect timer, recovering...');
+      scheduleReconnect(config, projects);
+    }
+  }, 60000);
+}
+
+function stopReconnectSupervisor() {
+  if (supervisorTimer) {
+    clearInterval(supervisorTimer);
+    supervisorTimer = null;
+  }
 }
 
 function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig) {
@@ -2451,38 +2541,28 @@ function stopClaudeAuthCheck() {
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
 
-  // プロトコルバージョン不足で拒否された場合は再接続しない
+  // プロトコルバージョン不足で拒否された場合は再接続しない（意図した停止）
   if (protocolUpdateRequired) {
     console.log('⛔ Agent の更新が必要です。再接続をスキップします。`u` コマンドで更新するか、再インストールしてください。');
     return;
   }
 
-  const { baseDelay, maxDelay, maxAttempts, jitterRange } = DEFAULTS.reconnect;
+  const { baseDelay, maxDelay, jitterRange } = DEFAULTS.reconnect;
 
-  // 前回接続が安定していた（60秒以上）場合のみバックオフカウンタをリセット
-  // 即切断ループ時はリセットせず、バックオフを効かせる
-  const connectionDuration = Date.now() - lastConnectedAt;
-  if (lastConnectedAt > 0 && connectionDuration > DEFAULTS.reconnectStableThreshold) {
-    reconnectAttempts = 0;
-  }
+  // 2026-11-14: 旧実装はここで「前回接続からの経過時間」でバックオフカウンタをリセットしていたが、
+  // lastConnectedAt は最後に成功した接続時刻のままなので、長時間安定した接続が切れた後は
+  // 毎回この判定が真になり reconnectAttempts が毎回0に戻り、バックオフが一切効かなかった
+  // （常に attempt 1・2秒固定で再接続嵐）。安定判定は connectToServer() の open ハンドラ側
+  // （60秒 OPEN を維持できたらリセット）に移したので、ここでは何もしない。
 
-  // Check max attempts
-  if (reconnectAttempts >= maxAttempts) {
-    console.error(`❌ Max reconnect attempts (${maxAttempts}) reached. Giving up.`);
-    console.error('💡 Restart the agent manually or check if the server is running.');
-    return;
-  }
-
-  // Calculate delay with exponential backoff + jitter
-  const exponentialDelay = Math.min(
-    baseDelay * Math.pow(2, reconnectAttempts),
-    maxDelay
-  );
-  const jitter = Math.random() * jitterRange;
-  const delay = exponentialDelay + jitter;
+  // 2026-11-14: maxAttempts による打ち切りを撤廃した（無期限リトライ）。旧実装は上限到達で
+  // ログを出して return するだけで process.exit もせず、プロセスが生きたまま永久に沈黙し、
+  // systemd の Restart=always も crontab @reboot も効かない事故（3日間沈黙）があったため。
+  // 遅延は maxDelay(30秒) で頭打ちになるので無限にリトライし続けても問題ない。
+  const delay = computeReconnectDelay({ attempt: reconnectAttempts + 1, baseDelay, maxDelay, jitterRange });
 
   reconnectAttempts++;
-  console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts}/${maxAttempts})...`);
+  console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts})...`);
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -2561,9 +2641,14 @@ async function handleStorageClear(payload: StorageClearPayload) {
 }
 
 export function disconnect() {
+  // 意図した切断（SIGINT 等）: supervisor / scheduleReconnect を一切発動しない
+  shuttingDown = true;
+  stopReconnectSupervisor();
   stopPing();
   stopAppPing();
   stopClaudeAuthCheck();
+  clearConnectWatchdog();
+  clearStableConnectionTimer();
   if (pongCheckInterval) {
     clearInterval(pongCheckInterval);
     pongCheckInterval = null;

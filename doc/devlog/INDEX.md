@@ -149,3 +149,4 @@
 - 2026-11-12_015622 | サイクルM1 | DB 変更履歴の一元化（`apps/server/db/changes/`新設+遡及31件+`model DbChange`台帳+`db:status`+起動時警告+`db:push`削除、`doc/db-changes.md`新設） | [詳細](2026-11-12_015622.md)
 - 2026-11-12_063253 | サイクルS1 | プランモードのBashゲート既存バグ根治（SDK0.3系のplan→auto変換が真因、PreToolUseフック導入+`plan-gate-hook`capability+`DEVRELAY_PLAN_GATE_CAPABILITY`、`agents/windows`は未対応） | [詳細](2026-11-12_063253.md)
 - 2026-11-12_215108 | サイクルS2a+S2b | クロスユーザー askの読める範囲・使えるツール制限（新ゲート+client_composed+既存バイパス2件根治、S2c以降は先送り） | [詳細](2026-11-12_215108.md)
+- 2026-11-14_072449 | エージェント再接続3不具合修正 | `agents/{linux,macos,windows}`: 接続タイムアウト（`handshakeTimeout`+自前監視タイマー）導入・安定判定を「60秒OPEN維持でリセット」に修正（旧実装は毎回リセットでバックオフ無効化）・`maxAttempts`打ち切り撤廃で無期限リトライ化+常駐supervisor新設。自宅PC3日間沈黙事故の根治、`packages/shared/src/reconnect.ts`新設、windows旧ソケット後片付けギャップは範囲外 | [詳細](2026-11-14_072449.md)

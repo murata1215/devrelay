@@ -504,10 +504,12 @@ export const DEFAULTS = {
   websocketPingInterval: 30000,
   websocketReconnectDelay: 5000,
   // 再接続設定（baseDelay × 2^attempts でバックオフ、maxDelay で上限）
+  // 2026-11-14: maxAttempts（旧: 30回で打ち切り）は撤廃した。打ち切ると process.exit もせず
+  // プロセスが生きたまま永久に沈黙し、systemd/crontab の自動復旧も効かない事故があったため、
+  // 無期限リトライ + maxDelay による遅延上限のみにする（詳細 doc/devlog/ 参照）。
   reconnect: {
     baseDelay: 2000,      // 初回遅延: 2秒
     maxDelay: 30000,      // 最大遅延: 30秒
-    maxAttempts: 30,      // 最大試行回数
     jitterRange: 1000,    // 0-1秒のランダムジッター（複数 Agent の同時再接続を分散）
   },
   /** 接続がこの時間以上安定していたら reconnectAttempts をリセット（ミリ秒） */

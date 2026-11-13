@@ -91,3 +91,11 @@ export {
   type GeminiSessionFailureKind,
   classifyGeminiSessionFailure,
 } from './gemini-args.js';
+// エージェント再接続根治サイクル（2026-11-14）: 接続タイムアウト定数 + バックオフ計算の純関数
+// （同じ理由で明示的 named export）
+export {
+  CONNECT_TIMEOUT_MS,
+  CONNECT_WATCHDOG_MS,
+  type ReconnectDelayInput,
+  computeReconnectDelay,
+} from './reconnect.js';

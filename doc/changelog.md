@@ -6,6 +6,29 @@
 
 ## 実装済み機能
 
+### エージェント再接続の3つの不具合修正 (2026-11-14)
+
+自宅PC（fwjg2507-FMVD34003）が pong タイムアウト切断後、DNS エラーの再接続を約13回くり返した末に
+3日間沈黙した事故の根治。原因は3点: A) `connectToServer()` に接続タイムアウトが無く CONNECTING の
+まま止まると生きたタイマーが1つも残らない、B) `scheduleReconnect()` の安定判定が「最後に成功した
+接続から60秒以上」で、長時間安定していた接続が切れた後は毎回リセットされバックオフが効かない、
+C) `maxAttempts`(30) 到達で `process.exit` もせず無言で `return` し続ける。
+
+`packages/shared/src/reconnect.ts` 新設（`CONNECT_TIMEOUT_MS`/`CONNECT_WATCHDOG_MS`/
+`computeReconnectDelay()`）。`agents/{linux,macos,windows}/src/services/connection.ts` の3ファイルに
+① `handshakeTimeout` + 自前監視タイマー（CONNECTING 継続時に `terminate()`）、② 安定判定を「open
+即リセット」ではなく「60秒 OPEN を維持できたらリセット」に変更（Agent二重起動のホットループ事故
+`doc/agent_noresponse_20260814.md` を踏まないための判断）、③ `maxAttempts` 打ち切りを撤廃し無期限
+リトライ＋`maxDelay`(30秒)上限化、を実装。加えて60秒間隔の常駐監視（supervisor）を新設し、タイマーが
+1つも残らず沈黙する型の事故を構造的に防止。windows は構造が異なるため watchdog 用の最小限の参照のみ
+追加し、旧ソケット後片付け／`thisWs` ガードの既存ギャップは範囲外（別サイクル候補）。
+
+検証: `pnpm build` 6 workspace green。新規テスト: `packages/shared/tests/reconnect.test.mjs`、
+`agents/{linux,macos,windows}/tests/reconnect-wiring.test.mjs`（静的ガード）、
+`agents/linux/tests/reconnect-connect-timeout.test.mjs`（live、ws v8 の terminate()→close 前提を実証）。
+テスト件数: shared 154/154・linux 1418/1420・macos 896/899・windows 206/206（既存スキップは無関係）。
+サーバー側変更なし・DB変更なし。詳細 `doc/devlog/2026-11-14_072449.md`。
+
 ### サイクルS1: プランモードの Bash ゲート既存バグの根治（PreToolUse フック） (2026-11-12)
 
 プランモード（strictReadonly）の Bash 許可判定が、2026-09-20 の SDK `0.2.80 → 0.3.278` バンプ
