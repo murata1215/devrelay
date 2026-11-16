@@ -263,10 +263,16 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // 開く機能、2026-11-10）で ChatPage.tsx に大きく手を入れたため、行数ピンを実測値
 // （3911 → 4190）に更新した。LitePage.tsx・renderMarkdown 出現数・components/lite/* は
 // 本サイクルでも無変更のため据え置き。
+//
+// クロスタブ会話の区切り可視化サイクル（2026-11-16）で、クロス ask の記憶状態バナー・
+// 「新しい会話を始める」ボタン・世代の区切り線を ChatPage.tsx に追加したため、行数ピンを
+// 実測値（4190 → 4262。`countLines()` は split('\n').length なので末尾改行込みで wc -l + 1）
+// に更新した。LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも
+// 無変更のため据え置き。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4190, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4262, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

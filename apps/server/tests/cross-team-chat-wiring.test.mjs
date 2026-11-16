@@ -184,6 +184,39 @@ describe('routes/api.ts: 新 2 ルートが独自の認可クエリを持たな�
   });
 });
 
+// 会話の区切り可視化サイクル（2026-11-16）: 履歴ルートが各メッセージに resume 世代番号
+// （`generation`）を付与する配線のソース静的ガード。
+// これが無いと、将来のリファクタで以下が黙って外れても気づけない:
+// - `session.agentScopeId` を select し忘れ、generation が常に undefined に戻る
+//   （WebUI の区切り線・記憶状態バナーが無言で全消えする）
+// - digest の式が ask-targets ハンドラ（3508 行）・cross-ask-runner.ts と食い違い、
+//   生成される scope id の base がずれて generation が常に null になる
+// - resume 未成立（generation === null）のときにキー自体を省略せず、
+//   旧レスポンス（通常スレッドの履歴 API）との構造互換を崩す
+describe('routes/api.ts: クロス履歴ルートの generation 配線', () => {
+  const source = readServerSource('src/routes/api.ts');
+  const idx = source.indexOf(`'/api/cross-team/projects/:projectId/messages'`);
+  const routeBody = source.slice(idx, source.indexOf('\n  });', idx) + 10);
+
+  test('ルートが存在する', () => {
+    assert.ok(idx > 0, 'messages route not found');
+  });
+
+  test('message の select に session.agentScopeId がある', () => {
+    assert.match(routeBody, /session:\s*\{\s*select:\s*\{\s*agentScopeId:\s*true\s*\}\s*\}/);
+  });
+
+  test('scopeIdBase の digest が userId と projectId から計算される（ask-targets ハンドラと同じ式）', () => {
+    assert.match(routeBody, /createHash\('sha256'\)\.update\(`\$\{userId\}\\0\$\{projectId\}`\)\.digest\('hex'\)/);
+    assert.match(routeBody, /buildCrossAskScopeIdBase\(/);
+  });
+
+  test('generation は parseCrossAskScopeGeneration で解決し、null のときはキー自体を省略する', () => {
+    assert.match(routeBody, /parseCrossAskScopeGeneration\(/);
+    assert.match(routeBody, /generation !== null \? \{ generation \} : \{\}/);
+  });
+});
+
 describe('Agent 3機種: G-2（クロス ask が所有者の work state を食う既存バグ）の修正', () => {
   // サイクルG（Q5）: G-2 のガードは `isEphemeral` 直書きから `statePolicy.workState` へ移行した
   // （許可リストの単一情報源化。legacy/resumable/isolated は全て workState:false のため

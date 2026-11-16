@@ -34,7 +34,7 @@ import { buildCrossAskTargetGroups, resolveCrossAskOrigin, type CrossAskTargetRo
 import { buildCrossAskSessionIdFilter } from '../services/thread-scope.js';
 import { pickAvailableAiTool } from '../services/ai-tool-availability.js';
 import { decideAskReadOnlyEnforcement } from '../services/ask-guard.js';
-import { buildCrossAskScopeIdBase, CROSS_ASK_SCOPE_ID_PREFIX, resolveCrossAskResumeMaxTurns } from '../services/cross-ask-resume-rules.js';
+import { buildCrossAskScopeIdBase, parseCrossAskScopeGeneration, CROSS_ASK_SCOPE_ID_PREFIX, resolveCrossAskResumeMaxTurns } from '../services/cross-ask-resume-rules.js';
 import { decideCrossAskTargetMemoryState, countLatestGenerationTurns } from '../services/cross-ask-target-state.js';
 import { resetCrossAskMemory, purgeCrossAskScopesForRevokedGrant } from '../services/cross-ask-reset.js';
 import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
@@ -3596,6 +3596,13 @@ export async function apiRoutes(app: FastifyInstance) {
    * 所有者自身の作業は構造的に混ざらない）。認可は requestedByUserId === userId の 1 条件のみ。
    * projectId の存在確認はしない（存在オラクルをゼロにする。購読を切られても自分が書いた
    * 本文は読める設計 — ツリーからは消えるので新規の質問はできなくなる）。
+   *
+   * 会話の区切り可視化サイクル: 各メッセージに `generation`（`crossask-<base>-g<N>` の N）を
+   * 付与する。resume が成立していないターン（resume OFF / isolation のみ / agentScopeId が
+   * null）は `parseCrossAskScopeGeneration` が null を返すため、その場合はキー自体を省略する
+   * （旧レスポンスと構造同一。`/api/cross-team/ask-targets` の scopeIdBase 計算と同じ式を使う —
+   * `cross-ask-runner.ts` の digest 生成と合わせて 3 箇所目の重複だが、本ファイル内では
+   * 既に ask-targets ハンドラが同じ式を直書きしており、その流儀に揃える）。
    */
   app.get('/api/cross-team/projects/:projectId/messages', async (request: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string; before?: string } }>, reply: FastifyReply) => {
     const userId = (request as any).user.id;
@@ -3630,6 +3637,7 @@ export async function apiRoutes(app: FastifyInstance) {
         content: true,
         createdAt: true,
         sourceProjectName: true,
+        session: { select: { agentScopeId: true } },
         files: {
           select: { id: true, filename: true, mimeType: true, size: true, direction: true },
         },
@@ -3640,16 +3648,22 @@ export async function apiRoutes(app: FastifyInstance) {
     const result = hasMore ? messages.slice(0, limit) : messages;
     result.reverse();
 
+    const scopeIdBase = buildCrossAskScopeIdBase(createHash('sha256').update(`${userId}\0${projectId}`).digest('hex'));
+
     reply.header('Cache-Control', 'no-store');
     return reply.send({
-      messages: result.map(m => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        createdAt: m.createdAt.toISOString(),
-        files: m.files,
-        sourceProjectName: m.sourceProjectName ?? undefined,
-      })),
+      messages: result.map(m => {
+        const generation = parseCrossAskScopeGeneration(m.session.agentScopeId ?? '', scopeIdBase);
+        return {
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          createdAt: m.createdAt.toISOString(),
+          files: m.files,
+          sourceProjectName: m.sourceProjectName ?? undefined,
+          ...(generation !== null ? { generation } : {}),
+        };
+      }),
       hasMore,
     });
   });

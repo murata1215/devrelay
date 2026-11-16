@@ -32,6 +32,9 @@ export interface ComposerCapabilities {
   allowCancel: boolean;
   allowExec: boolean;
   allowThreadList: boolean;
+  /** 会話の区切り可視化サイクル: 「新しい会話を始める」ボタンを出してよいか。
+   *  他の項目と逆方向（own=false, cross=true）— この機能はクロスタブにしか存在しないため。 */
+  allowMemoryReset: boolean;
 }
 
 const OWN_TAB_CAPABILITIES: ComposerCapabilities = {
@@ -39,6 +42,7 @@ const OWN_TAB_CAPABILITIES: ComposerCapabilities = {
   allowCancel: true,
   allowExec: true,
   allowThreadList: true,
+  allowMemoryReset: false,
 };
 
 const CROSS_TAB_CAPABILITIES: ComposerCapabilities = {
@@ -46,6 +50,7 @@ const CROSS_TAB_CAPABILITIES: ComposerCapabilities = {
   allowCancel: false,
   allowExec: false,
   allowThreadList: false,
+  allowMemoryReset: true,
 };
 
 /** タブの種別から、入力欄・停止ボタン・スレッド一覧等の有効/無効をまとめて判定する。 */
@@ -63,6 +68,16 @@ export function buildCrossTabBadge(origin: 'invite' | 'subscription'): string {
   return origin === 'subscription' ? '購読' : '借用';
 }
 
+/** サイクルC3a-1 相当の記憶状態（`lib/api.ts` の `CrossAskMemory` と同じ形）。 */
+export interface CrossAskMemoryLike {
+  remembers: boolean;
+  reason?: 'featureOff' | 'isolationOff' | 'agentOutdated' | 'aiUnsafe';
+  askable: boolean;
+  askDenyReason?: 'agent_outdated' | 'ai_unsafe';
+  turns?: number;
+  maxTurns?: number;
+}
+
 /** `GET /api/cross-team/ask-targets` のレスポンス 1 プロジェクト分（API の形をそのまま使う）。 */
 export interface CrossAskApiProject {
   projectId: string;
@@ -71,6 +86,7 @@ export interface CrossAskApiProject {
   teamName: string;
   origin: 'invite' | 'subscription';
   execAllowed: false;
+  memory?: CrossAskMemoryLike;
 }
 
 export interface CrossAskApiMachineGroup {
@@ -107,6 +123,41 @@ export interface CrossHistorySource {
 
 export function resolveCrossHistorySource(tab: { projectId: string }): CrossHistorySource {
   return { kind: 'cross', projectId: tab.projectId };
+}
+
+/**
+ * クロスタブの常時バナーに添える「記憶状態」の 1 行。
+ * `memory` が無い（サーバーが `DEVRELAY_CROSS_ASK_RESET=0`、または未提供）ときは null を返し、
+ * 呼び出し側は行自体を描画しない。
+ */
+export function buildCrossMemoryLabel(memory: CrossAskMemoryLike | null | undefined): string | null {
+  if (!memory) return null;
+  if (!memory.askable) {
+    return memory.askDenyReason === 'agent_outdated'
+      ? '⚠️ 相手の Agent が古いため質問できません（相手側の更新が必要です）'
+      : '⚠️ 相手の AI では読み取り専用を保証できないため質問できません';
+  }
+  if (!memory.remembers) {
+    return '💭 毎回ゼロから回答します（この相手は会話を覚えません）';
+  }
+  const turns = memory.turns ?? 0;
+  const maxTurns = memory.maxTurns;
+  return maxTurns
+    ? `💬 直前までの会話を覚えています（${turns}/${maxTurns} 往復）`
+    : `💬 直前までの会話を覚えています（${turns} 往復）`;
+}
+
+/**
+ * 隣り合う 2 件のメッセージの間に「ここから新しい会話」の区切り線を出すべきか判定する。
+ * 両方とも世代番号（`generation`）を持ち、かつ値が異なるときだけ true。
+ * 片方でも undefined（resume 未成立 / 通常スレッド）なら false ＝ 何も描画しない（旧挙動）。
+ */
+export function shouldShowGenerationDivider(
+  prevGeneration: number | undefined,
+  currentGeneration: number | undefined,
+): boolean {
+  if (prevGeneration === undefined || currentGeneration === undefined) return false;
+  return prevGeneration !== currentGeneration;
 }
 
 /** owner → machine → project のグループ構造を、ツリー描画用の平坦な行リストに変換する（表示順は API 側で確定済みのため並べ替えはしない）。 */

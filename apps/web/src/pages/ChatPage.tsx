@@ -1,5 +1,5 @@
 import { apiUrl } from '../lib/base';
-import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, Fragment, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved, type ToolApprovalAuto } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -25,6 +25,8 @@ import {
   shouldSendConnect,
   decideComposerCapabilities,
   buildCrossTabBanner,
+  buildCrossMemoryLabel,
+  shouldShowGenerationDivider,
   buildCrossTabBadge,
   resolveCrossHistorySource,
   flattenCrossAskGroups,
@@ -2344,6 +2346,7 @@ export function ChatPage() {
         timestamp: new Date(m.createdAt),
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
+        generation: m.generation,
       }));
       console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, source=${source.kind}, mode=${mode}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
 
@@ -2799,6 +2802,17 @@ export function ChatPage() {
   // machineList のポーリングとは意図的に別の useEffect/try-catch にする（Phase B の教訓を踏襲）。
   // 件数が少なく変化も遅いため 10 秒より長い間隔にする。404（キルスイッチ OFF）は
   // セクション非表示として扱うだけでエラー表示はしない。
+  // `refreshCrossAskGroups` は「新しい会話を始める」実行直後にも呼ぶ（ポーリング30秒を待たずに
+  // 記憶状態バナーを即時更新するため）。
+  const refreshCrossAskGroups = useCallback(async () => {
+    try {
+      const { groups } = await crossTeamChat.listTargets();
+      setCrossAskGroups(groups);
+    } catch {
+      setCrossAskGroups([]);
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     const load = async () => {
@@ -2985,6 +2999,37 @@ export function ChatPage() {
 
   // アクティブタブ取得
   const activeTab = tabs.find(t => t.projectId === activeTabId) ?? null;
+
+  /** アクティブタブ（クロスタブのみ）の記憶状態。`crossAskGroups` から projectId で引く。 */
+  const activeCrossMemory = useMemo(() => {
+    if (!activeTab || !isCrossTab(activeTab)) return undefined;
+    for (const owner of crossAskGroups) {
+      for (const machine of owner.machines) {
+        const project = machine.projects.find(p => p.projectId === activeTab.projectId);
+        if (project) return project.memory;
+      }
+    }
+    return undefined;
+  }, [activeTab, crossAskGroups]);
+
+  /** 「新しい会話を始める」ボタンのハンドラ。確認ダイアログ → reset API → 記憶状態と履歴を更新。 */
+  const handleCrossMemoryReset = useCallback(async () => {
+    if (!activeTabId || !activeTab) return;
+    const ownerLabel = activeTab.crossMeta?.ownerLabel ?? '相手';
+    const confirmed = window.confirm(
+      `${ownerLabel} さんはここまでの会話を忘れます。これまでの履歴はあなたの画面に残ります。新しい会話を始めますか？`
+    );
+    if (!confirmed) return;
+    try {
+      await crossTeamChat.resetMemory(activeTabId);
+    } catch (err) {
+      console.error('[handleCrossMemoryReset] failed', err);
+      return;
+    }
+    await refreshCrossAskGroups();
+    // 履歴を再読み込みして区切り線を反映する（次に取得するメッセージから新しい世代になる）。
+    loadHistory(activeTabId, undefined, 'replace');
+  }, [activeTabId, activeTab, refreshCrossAskGroups, loadHistory]);
 
   // 会話履歴レール: 自ブラウザの tab.progress から「今実行中とみなす sessionId の集合」を導出する
   // （サーバーの10秒ポーリングより速く反映するための即時性の補完。`conversation-rail-rules.ts` の
@@ -3220,6 +3265,7 @@ export function ChatPage() {
         timestamp: new Date(m.createdAt),
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
+        generation: m.generation,
       }));
 
       setTabs(prev => prev.map(t => {
@@ -3970,8 +4016,20 @@ export function ChatPage() {
           <div className="flex-1 flex flex-col min-w-0">
             {/* クロスタブの常時バナー */}
             {isCrossTab(activeTab) && activeTab?.crossMeta && (
-              <div className="px-4 py-1.5 text-xs text-[var(--text-muted)] bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
-                {buildCrossTabBanner(activeTab.crossMeta.ownerLabel)}
+              <div className="px-4 py-1.5 text-xs text-[var(--text-muted)] bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center justify-between gap-2">
+                <span>{buildCrossTabBanner(activeTab.crossMeta.ownerLabel)}</span>
+                {buildCrossMemoryLabel(activeCrossMemory) && (
+                  <span className="whitespace-nowrap">{buildCrossMemoryLabel(activeCrossMemory)}</span>
+                )}
+                {decideComposerCapabilities(activeTab).allowMemoryReset && activeCrossMemory?.remembers && (
+                  <button
+                    type="button"
+                    onClick={handleCrossMemoryReset}
+                    className="whitespace-nowrap underline hover:no-underline text-[var(--text-muted)]"
+                  >
+                    新しい会話を始める
+                  </button>
+                )}
               </div>
             )}
             {/* メッセージエリア */}
@@ -4013,19 +4071,33 @@ export function ChatPage() {
                   </div>
                 </div>
               )}
-              {activeTab?.messages.map((msg) => (
-                <MessageRow
-                  key={msg.id}
-                  message={msg}
-                  userName={chatDisplay.userName}
-                  userColor={chatDisplay.userColor}
-                  userAvatar={chatDisplay.userAvatar}
-                  aiName={chatDisplay.aiName}
-                  aiColor={chatDisplay.aiColor}
-                  aiAvatar={chatDisplay.aiAvatar}
-                  onImageClick={setLightboxImage}
-                />
-              ))}
+              {activeTab?.messages.map((msg, idx) => {
+                // 会話の区切り可視化: クロスタブの履歴にのみ `generation` が付く（通常スレッドは
+                // 常に undefined のため shouldShowGenerationDivider が常に false を返す＝無害）。
+                const prevGeneration = idx > 0 ? activeTab.messages[idx - 1].generation : undefined;
+                const showGenerationDivider = shouldShowGenerationDivider(prevGeneration, msg.generation);
+                return (
+                  <Fragment key={msg.id}>
+                    {showGenerationDivider && (
+                      <div className="flex items-center gap-2 my-3 text-xs text-[var(--text-faint)]">
+                        <div className="flex-1 border-t border-[var(--border-color)]" />
+                        <span>── ここから新しい会話 ──</span>
+                        <div className="flex-1 border-t border-[var(--border-color)]" />
+                      </div>
+                    )}
+                    <MessageRow
+                      message={msg}
+                      userName={chatDisplay.userName}
+                      userColor={chatDisplay.userColor}
+                      userAvatar={chatDisplay.userAvatar}
+                      aiName={chatDisplay.aiName}
+                      aiColor={chatDisplay.aiColor}
+                      aiAvatar={chatDisplay.aiAvatar}
+                      onImageClick={setLightboxImage}
+                    />
+                  </Fragment>
+                );
+              })}
               {/* ツール承認カード / 質問カード（アクティブタブの projectId に一致するもののみ表示） */}
               {Array.from(toolApprovals.values())
                 .filter(a => !a.projectId || a.projectId === activeTabId || a.originProjectId === activeTabId)

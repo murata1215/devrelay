@@ -612,6 +612,9 @@ export interface SessionMessage {
   createdAt: string;
   files: MessageFileMeta[];
   sourceProjectName?: string;  // クロスプロジェクトクエリの送信元プロジェクト名
+  /** クロスタブ専用: resume が成立した世代番号（`crossask-<base>-g<N>` の N）。
+   *  通常スレッドのメッセージ、または resume 未成立のクロスメッセージには付かない。 */
+  generation?: number;
 }
 
 export const sessions = {
@@ -990,6 +993,21 @@ export const teams = {
 // クロスユーザー Team Phase C（購読/借用プロジェクトへの質問）API
 // ========================================
 
+/** サイクルC3a-1: `GET /api/cross-team/ask-targets` の project 行に乗る記憶状態。
+ *  `DEVRELAY_CROSS_ASK_RESET` が OFF のサーバーではキー自体が付かない（省略時は「未提供」扱い）。 */
+export interface CrossAskMemory {
+  /** resume が効く見込み（宛先が覚えている） */
+  remembers: boolean;
+  reason?: 'featureOff' | 'isolationOff' | 'agentOutdated' | 'aiUnsafe';
+  /** false = 質問自体が断られる見込み */
+  askable: boolean;
+  askDenyReason?: 'agent_outdated' | 'ai_unsafe';
+  /** 現世代の往復数。世代が無ければ 0 */
+  turns?: number;
+  /** 自動リセットの目安（`DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS` の解決値） */
+  maxTurns?: number;
+}
+
 /** `GET /api/cross-team/ask-targets` の 1 プロジェクト分。 */
 export interface CrossAskProject {
   projectId: string;
@@ -998,6 +1016,7 @@ export interface CrossAskProject {
   teamName: string;
   origin: 'invite' | 'subscription';
   execAllowed: false;
+  memory?: CrossAskMemory;
 }
 
 export interface CrossAskMachineGroup {
@@ -1025,6 +1044,16 @@ export const crossTeamChat = {
     if (opts?.limit) params.set('limit', String(opts.limit));
     const q = params.toString() ? `?${params.toString()}` : '';
     return request('GET', `/cross-team/projects/${projectId}/messages${q}`);
+  },
+
+  /**
+   * クロス ask の記憶をリセットする（新しい会話を始める）。body なし POST のため
+   * 第三引数（body）を渡さないこと（`request()` が `hasBody` を自動判定するため、渡すと
+   * 空オブジェクトでも Content-Type が付き、body 無し POST の規約から外れる）。
+   * 機能 OFF（`DEVRELAY_CROSS_ASK_RESET=0`）なら 404。
+   */
+  async resetMemory(projectId: string): Promise<{ success: true; hadMemory: boolean; purgedGenerations: number }> {
+    return request('POST', `/cross-team/projects/${projectId}/reset`);
   },
 };
 

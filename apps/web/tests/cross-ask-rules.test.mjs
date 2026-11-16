@@ -12,6 +12,8 @@ import {
   buildCrossTabBadge,
   resolveCrossHistorySource,
   flattenCrossAskGroups,
+  buildCrossMemoryLabel,
+  shouldShowGenerationDivider,
 } from '../dist-test/lib/cross-ask-rules.js';
 
 describe('isCrossTab / shouldSendConnect: 既存タブとの互換境界', () => {
@@ -35,19 +37,70 @@ describe('isCrossTab / shouldSendConnect: 既存タブとの互換境界', () =>
 });
 
 describe('decideComposerCapabilities', () => {
-  test('own タブは全て許可', () => {
+  test('own タブは allowMemoryReset 以外すべて許可', () => {
     const caps = decideComposerCapabilities({ kind: 'own' });
-    assert.deepEqual(caps, { allowFiles: true, allowCancel: true, allowExec: true, allowThreadList: true });
+    assert.deepEqual(caps, { allowFiles: true, allowCancel: true, allowExec: true, allowThreadList: true, allowMemoryReset: false });
   });
 
-  test('未定義（既存タブ互換）も全て許可', () => {
+  test('未定義（既存タブ互換）も allowMemoryReset 以外すべて許可', () => {
     const caps = decideComposerCapabilities(undefined);
-    assert.deepEqual(caps, { allowFiles: true, allowCancel: true, allowExec: true, allowThreadList: true });
+    assert.deepEqual(caps, { allowFiles: true, allowCancel: true, allowExec: true, allowThreadList: true, allowMemoryReset: false });
   });
 
-  test('cross タブは全て禁止', () => {
+  test('cross タブは allowMemoryReset のみ許可', () => {
     const caps = decideComposerCapabilities({ kind: 'cross' });
-    assert.deepEqual(caps, { allowFiles: false, allowCancel: false, allowExec: false, allowThreadList: false });
+    assert.deepEqual(caps, { allowFiles: false, allowCancel: false, allowExec: false, allowThreadList: false, allowMemoryReset: true });
+  });
+});
+
+describe('buildCrossMemoryLabel', () => {
+  test('memory が無ければ null', () => {
+    assert.equal(buildCrossMemoryLabel(undefined), null);
+    assert.equal(buildCrossMemoryLabel(null), null);
+  });
+
+  test('askable=false かつ agent_outdated は専用文言', () => {
+    const label = buildCrossMemoryLabel({ askable: false, askDenyReason: 'agent_outdated', remembers: false });
+    assert.match(label, /古い/);
+  });
+
+  test('askable=false かつ ai_unsafe は専用文言', () => {
+    const label = buildCrossMemoryLabel({ askable: false, askDenyReason: 'ai_unsafe', remembers: false });
+    assert.match(label, /読み取り専用/);
+  });
+
+  test('askable=true かつ remembers=false は「覚えません」文言', () => {
+    const label = buildCrossMemoryLabel({ askable: true, remembers: false });
+    assert.match(label, /覚えません/);
+  });
+
+  test('remembers=true は往復数つきの文言（maxTurns あり）', () => {
+    const label = buildCrossMemoryLabel({ askable: true, remembers: true, turns: 12, maxTurns: 40 });
+    assert.match(label, /12\/40/);
+  });
+
+  test('remembers=true は往復数つきの文言（maxTurns なし）', () => {
+    const label = buildCrossMemoryLabel({ askable: true, remembers: true, turns: 3 });
+    assert.match(label, /3 往復/);
+  });
+});
+
+describe('shouldShowGenerationDivider', () => {
+  test('両方 undefined は false', () => {
+    assert.equal(shouldShowGenerationDivider(undefined, undefined), false);
+  });
+
+  test('片方だけ undefined は false', () => {
+    assert.equal(shouldShowGenerationDivider(1, undefined), false);
+    assert.equal(shouldShowGenerationDivider(undefined, 1), false);
+  });
+
+  test('同じ世代番号は false', () => {
+    assert.equal(shouldShowGenerationDivider(1, 1), false);
+  });
+
+  test('異なる世代番号は true', () => {
+    assert.equal(shouldShowGenerationDivider(1, 2), true);
   });
 });
 

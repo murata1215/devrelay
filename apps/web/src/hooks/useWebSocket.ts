@@ -92,6 +92,9 @@ export interface ChatMessage {
   files?: Array<{ id?: string; filename: string; content?: string; mimeType: string; size?: number }>;
   timestamp: Date;
   sourceProjectName?: string;  // クロスプロジェクトクエリの送信元プロジェクト名
+  /** クロスタブ専用: resume が成立した世代番号。履歴 API（REST）経由のメッセージにのみ付く
+   *  （WS でライブ配信されるメッセージには付かない。区切り線はベストエフォート表示）。 */
+  generation?: number;
 }
 
 /** 進捗情報 */
