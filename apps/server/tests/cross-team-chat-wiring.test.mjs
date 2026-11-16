@@ -142,6 +142,24 @@ describe('cross-ask-runner.ts: executorUserId/requesterUserId の分離が守ら
     const prefixIdx = source.indexOf('contextPrefix ?');
     assert.ok(fenceIdx > 0 && prefixIdx > 0, 'fence/prefix composition not found');
   });
+
+  // 会話の区切り可視化サイクル（2026-11-16）で見つけた既存バグの修正: 文脈前置クエリが
+  // ステップ4で保存した「今回の質問」自身も拾ってしまい、直近3往復の末尾を食って二重送信・
+  // リセット直後の「前置が1行しかない」誤認を起こしていた。これが無いと、将来のリファクタで
+  // `id: { not: ... }` 除外が無言で外れても気づけない。
+  test('文脈前置クエリは今回保存した質問メッセージ自身を除外する', () => {
+    const idx = source.indexOf('buildCrossAskContextPrefix(');
+    const before = source.slice(Math.max(0, idx - 1200), idx);
+    assert.match(before, /id:\s*\{\s*not:\s*currentQuestionMessage\.id\s*\}/);
+  });
+
+  test('文脈前置クエリは take + desc + reverse で直近 N 往復だけを取る（全件フェッチしない）', () => {
+    const idx = source.indexOf('buildCrossAskContextPrefix(');
+    const before = source.slice(Math.max(0, idx - 1200), idx);
+    assert.match(before, /orderBy:\s*\{\s*createdAt:\s*'desc'\s*\}/);
+    assert.match(before, /take:\s*CROSS_ASK_CONTEXT_PREFIX_TURNS\s*\*\s*2/);
+    assert.match(before, /pastMessages\.reverse\(\)/);
+  });
 });
 
 describe('services/thread-scope.ts: クロス履歴フィルタの単一情報源', () => {

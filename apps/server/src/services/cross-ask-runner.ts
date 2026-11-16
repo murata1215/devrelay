@@ -28,7 +28,7 @@ import {
   buildCrossTargetRejectionMessage,
   ASK_INFLIGHT_WINDOW_MS,
 } from './cross-query-guard.js';
-import { buildCrossAskContextPrefix, type CrossAskHistoryMessage } from './cross-ask-rules.js';
+import { buildCrossAskContextPrefix, CROSS_ASK_CONTEXT_PREFIX_TURNS, type CrossAskHistoryMessage } from './cross-ask-rules.js';
 import { isCrossTeamChatContextEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled, isCrossAskResetEnabled, isPlanGateCapabilityCheckEnabled } from './cross-team-guard.js';
 import { decideCrossAskIsolation, buildCrossAskIsolationDenialMessage, buildCrossAskIsolationDenyLog } from './cross-ask-isolation-rules.js';
 import {
@@ -349,7 +349,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
     neutralized: askNeutralizedCount,
     rawRef: 'message.content',
   });
-  await prisma.message.create({
+  const currentQuestionMessage = await prisma.message.create({
     data: {
       sessionId: tempSessionId,
       role: 'user',
@@ -358,6 +358,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
       sourceProjectName: sourceProjectName ?? undefined,
       humanTextMeta: askHumanTextMeta,
     },
+    select: { id: true },
   });
 
   try {
@@ -366,8 +367,15 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
     const contextEnabled = (input.includeContextPrefix ?? isCrossTeamChatContextEnabled(process.env.DEVRELAY_CROSS_TEAM_CHAT_CONTEXT)) && includeResumeContextPrefix;
     let contextPrefix = '';
     if (contextEnabled && isCrossUser) {
+      // 既存バグ修正: ステップ4で保存した「今回の質問」自身が、ここでの検索条件（同一
+      // (依頼者, プロジェクト) の全メッセージ）に一致してしまい、直近6件（3往復）の末尾を
+      // 食って二重送信・リセット直後の「1行しかない」誤認を引き起こしていた
+      // （`id: { not: ... }` で明示的に除外する）。
+      // あわせて、無制限フェッチしてから JS で slice(-6) していたのを `take` + desc + reverse に
+      // 変え、会話が伸びるほど全件スキャンになる既存の非効率も解消する。
       const pastMessages = await prisma.message.findMany({
         where: {
+          id: { not: currentQuestionMessage.id },
           session: {
             projectId: targetProject.id,
             requestedByUserId: requesterUserId,
@@ -379,9 +387,11 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
           // crossAskResetAtMs は常に null なので、この条件自体が付かず挙動は完全に不変。
           ...(crossAskResetAtMs !== null ? { createdAt: { gt: new Date(crossAskResetAtMs) } } : {}),
         },
-        orderBy: { createdAt: 'asc' },
+        orderBy: { createdAt: 'desc' },
+        take: CROSS_ASK_CONTEXT_PREFIX_TURNS * 2,
         select: { role: true, content: true },
       });
+      pastMessages.reverse();
       const normalized: CrossAskHistoryMessage[] = pastMessages.map((m) => ({
         role: m.role,
         // 過去の AI 出力を再入力する経路になるため無害化を適用する
