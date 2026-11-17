@@ -269,10 +269,15 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // 実測値（4190 → 4262。`countLines()` は split('\n').length なので末尾改行込みで wc -l + 1）
 // に更新した。LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも
 // 無変更のため据え置き。
+//
+// alt+tab 復帰時のスクロール位置保持サイクル（2026-11-17）で、`apps/web/src/lib/chat-scroll-rules.ts`
+// を新設し、`loadHistory`/`handleReconnect`/visibilitychange ハンドラ/`handleScroll` を
+// ChatPage.tsx 側で配線したため、行数ピンを実測値（4262 → 4365）に更新した。
+// LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも無変更のため据え置き。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4262, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4365, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

@@ -6,6 +6,36 @@
 
 ## 実装済み機能
 
+### WebUI チャットの alt+tab 復帰でスクロール位置が最下部に飛ぶ既存バグの根治 (2026-11-17)
+
+ユーザー報告「alt+tab で devrelay を再描画すると画面が一番下までスクロールしちゃう」。チャット画面
+で過去メッセージを上にスクロールして読んでいる最中に alt+tab で離脱→復帰すると、表示が最下部へ
+スナップし、かつ読んでいた過去メッセージ自体が DOM から消える。
+
+原因は `ChatPage.tsx` の2段重ね: ① `visibilitychange`（visible 復帰時）・WS 再接続
+（`handleReconnect`）が無条件に `loadHistory(..., 'refresh')`（`limit: 10` 固定）を呼んでいた
+（ユーザーのスクロール位置を一切見ていない）。② `'refresh'` モードは `m.timestamp < oldestApiTime`
+のフィルタで「API 最古より古い WS 専用メッセージ」を破棄する仕様のため、上スクロールページネーション
+（`loadOlderMessages`）で読み込んだ過去履歴が復帰のたび全部捨てられていた。さらに完了後に
+`rAF`+`100/500/1000ms` の4連で無条件に最下部へ強制スクロールしていた。
+
+新規 `apps/web/src/lib/chat-scroll-rules.ts`（外部 import ゼロの純関数、既存
+`conversation-rail-rules.ts` と同じ流儀）: `decideHistoryRefresh()` の核心は「visible 復帰時に
+WS が生存していれば refresh 自体をスキップする」（hidden 中の新着は WS 経由で既に state に
+入っているため、再取得しなければ再描画が起きずスクロール位置が完全に保持される）。WS 切断中や
+WS 再接続時は `'keep-position'` で refresh するが、`resolveRestoredScrollTop()` で `scrollHeight`
+差分補正して位置を復元する。`ChatPage.tsx` 側は `loadHistory` に `scrollPolicy` 引数を追加
+（既定 `'stick-bottom'`=従来どおりなので既存呼び出し元は挙動不変）、`handleReconnect`/
+`visibilitychange` ハンドラを新ルールへ配線、`handleScroll` の下端判定を対称化（従来は下端から
+離れたら無効化するだけの片方向で、手動で下端に戻しても新着受信まで追従が復帰しなかった）。
+
+検証: 新規 `apps/web/tests/chat-scroll-rules.test.mjs`（`isAtBottom` 境界・`decideHistoryRefresh`
+5分岐・`resolveRestoredScrollTop` クランプ）。既存 `knowledge-source-guards.test.mjs` の
+ChatPage.tsx 行数ピン（トリップワイヤ）を実測値 4262→4365 に更新。`pnpm test`（apps/web）997/997
+green。ルート `pnpm build` 6 workspace green、`dist/assets/index-*.js` に `require(` が0件である
+ことも確認（CJS 混入白画面事故の再発チェック）。サーバー側（`apps/server`）は無変更・DB変更なし・
+新規キルスイッチなし（WebUI 静的アセットのみのためサーバー env が届かない）。
+
 ### エージェント再接続の3つの不具合修正 (2026-11-14)
 
 自宅PC（fwjg2507-FMVD34003）が pong タイムアウト切断後、DNS エラーの再接続を約13回くり返した末に

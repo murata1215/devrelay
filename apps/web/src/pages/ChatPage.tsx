@@ -31,6 +31,7 @@ import {
   resolveCrossHistorySource,
   flattenCrossAskGroups,
 } from '../lib/cross-ask-rules';
+import { isAtBottom, decideHistoryRefresh, resolveRestoredScrollTop } from '../lib/chat-scroll-rules';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -2307,8 +2308,17 @@ export function ChatPage() {
    * @param mode 'initial'=スクロールバック用に既存メッセージの前に prepend（既定・従来の refresh=false と同一動作）
    *             'refresh'=最新メッセージで既存メッセージと時系列マージ（WS 再接続時用・従来の refresh=true と同一動作）
    *             'replace'=既存メッセージを丸ごと置換（スレッド切替時専用。他モードの重複排除ロジックを一切通さない）
+   * @param scrollPolicy 'stick-bottom'（既定・従来の挙動）=完了後に無条件で最下部へ強制スクロール。
+   *             'keep-position'=ユーザーが読んでいた位置を保持する（最下部へは飛ばさない）。
+   *             alt+tab 復帰・WS 再接続時に、ユーザーが上をスクロールして読んでいる最中の
+   *             位置喪失を防ぐために使う（`decideHistoryRefresh()` 参照）。
    */
-  const loadHistory = useCallback(async (projectId: string, sessionId?: string | null, mode: 'initial' | 'refresh' | 'replace' = 'initial') => {
+  const loadHistory = useCallback(async (
+    projectId: string,
+    sessionId?: string | null,
+    mode: 'initial' | 'refresh' | 'replace' = 'initial',
+    scrollPolicy: 'stick-bottom' | 'keep-position' = 'stick-bottom',
+  ) => {
     // 履歴読み込み中はスクロールを抑制
     shouldAutoScrollRef.current = false;
     // レースガード用スナップショット: リクエスト開始時点の historySessionId を保持する。
@@ -2348,12 +2358,22 @@ export function ChatPage() {
         sourceProjectName: m.sourceProjectName,
         generation: m.generation,
       }));
-      console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, source=${source.kind}, mode=${mode}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
+      console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, source=${source.kind}, mode=${mode}, scrollPolicy=${scrollPolicy}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
 
       // 自動スクロールガードを setTabs より前に同期セット
       // React の DOM 更新で handleScroll が発火 → loadOlderMessages の連鎖発火を防止
       if (activeTabIdRef.current === projectId) {
         autoScrollingUntilRef.current = Date.now() + 1000;
+      }
+
+      // keep-position: DOM 更新（setTabs）前に現在のスクロール位置を記録しておく
+      // （更新後に scrollHeight の変化分を差し引いて復元するため）
+      let restoreScroll: { prevScrollTop: number; prevScrollHeight: number } | null = null;
+      if (scrollPolicy === 'keep-position' && activeTabIdRef.current === projectId) {
+        const container = messagesContainerRef.current;
+        if (container) {
+          restoreScroll = { prevScrollTop: container.scrollTop, prevScrollHeight: container.scrollHeight };
+        }
       }
 
       // クロスタブは historySessionId を常に null 扱いにする（セッション概念が無いため）。
@@ -2426,34 +2446,53 @@ export function ChatPage() {
         };
       }));
 
-      // 履歴読み込み完了後、アクティブタブなら自動スクロールを有効化
-      // rAF 内だと React の useEffect より後に実行されるため、同期的にセットする
+      // 履歴読み込み完了後の処理（アクティブタブの場合のみ）
       if (activeTabIdRef.current === projectId) {
-        historyJustLoadedRef.current = true;
-        shouldAutoScrollRef.current = true;
-        // DOM 更新後に直接スクロール（複数タイミングで試行して確実にスクロール）
-        const scrollToBottom = () => {
-          autoScrollingUntilRef.current = Date.now() + 500;
-          const container = messagesContainerRef.current;
-          if (container) container.scrollTop = container.scrollHeight;
-        };
-        requestAnimationFrame(scrollToBottom);
-        setTimeout(scrollToBottom, 100);
-        setTimeout(scrollToBottom, 500);
-        setTimeout(scrollToBottom, 1000);
-        // auto-scroll が確実に完了してから loadOlderMessages を許可
-        setTimeout(() => {
-          initialLoadCompleteRef.current = true;
-          console.log('[loadHistory] initialLoadComplete set to true');
-        }, 2000);
+        if (scrollPolicy === 'keep-position' && restoreScroll) {
+          // ユーザーが読んでいた位置を保持する（最下部へは飛ばさない）。
+          // shouldAutoScrollRef/historyJustLoadedRef は変更しない
+          // （既存の「下端にいるか」の状態を壊さないため）。
+          const snapshot = restoreScroll;
+          const restorePosition = () => {
+            autoScrollingUntilRef.current = Date.now() + 500;
+            const container = messagesContainerRef.current;
+            if (!container) return;
+            container.scrollTop = resolveRestoredScrollTop({
+              prevScrollTop: snapshot.prevScrollTop,
+              prevScrollHeight: snapshot.prevScrollHeight,
+              nextScrollHeight: container.scrollHeight,
+            });
+          };
+          requestAnimationFrame(restorePosition);
+          setTimeout(restorePosition, 100);
+        } else {
+          // rAF 内だと React の useEffect より後に実行されるため、同期的にセットする
+          historyJustLoadedRef.current = true;
+          shouldAutoScrollRef.current = true;
+          // DOM 更新後に直接スクロール（複数タイミングで試行して確実にスクロール）
+          const scrollToBottom = () => {
+            autoScrollingUntilRef.current = Date.now() + 500;
+            const container = messagesContainerRef.current;
+            if (container) container.scrollTop = container.scrollHeight;
+          };
+          requestAnimationFrame(scrollToBottom);
+          setTimeout(scrollToBottom, 100);
+          setTimeout(scrollToBottom, 500);
+          setTimeout(scrollToBottom, 1000);
+          // auto-scroll が確実に完了してから loadOlderMessages を許可
+          setTimeout(() => {
+            initialLoadCompleteRef.current = true;
+            console.log('[loadHistory] initialLoadComplete set to true');
+          }, 2000);
+        }
       }
     } catch {
       setTabs(prev => prev.map(t =>
         t.projectId === projectId ? { ...t, historyLoaded: true, loadingHistory: false } : t
       ));
 
-      // エラー時もスクロール復元
-      if (activeTabIdRef.current === projectId) {
+      // エラー時もスクロール復元（keep-position の場合は位置を保持したいので何もしない）
+      if (activeTabIdRef.current === projectId && scrollPolicy !== 'keep-position') {
         historyJustLoadedRef.current = true;
         shouldAutoScrollRef.current = true;
       }
@@ -2697,6 +2736,34 @@ export function ChatPage() {
   /** sendCommand の最新値を保持する ref（再接続ハンドラから参照するため） */
   const sendCommandRef = useRef<(text: string) => void>(() => {});
 
+  /**
+   * WS 接続状態の最新値を保持する ref（visibilitychange/再接続ハンドラから参照するため）。
+   * sendCommandRef と同じ流儀＝ useCallback の依存配列に state を入れず、古いクロージャで
+   * 判定しないようにする。
+   */
+  const connectedRef = useRef(false);
+
+  /**
+   * タブが非表示（hidden）になった時点で下端にいたかを記録する。
+   * 復帰直後は環境によって DOM 計測（scrollTop/scrollHeight/clientHeight）が不安定なことがあり
+   * （iOS Safari 等）、その場合の保険として使う（`decideHistoryRefresh` の `atBottom` 引数）。
+   */
+  const wasAtBottomOnHideRef = useRef<boolean | null>(null);
+
+  /**
+   * 現在のアクティブタブのスクロールコンテナが下端にいるかを計測する。
+   * コンテナが無ければ（未マウント等）null を返す（`decideHistoryRefresh` が安全側に扱う）。
+   */
+  const readActiveTabAtBottom = (): boolean | null => {
+    const container = messagesContainerRef.current;
+    if (!container) return null;
+    return isAtBottom({
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+    });
+  };
+
   /** WS 再接続時: セッション参加者を再登録し、最新メッセージをリフレッシュ */
   const handleReconnect = useCallback(() => {
     console.log(`[handleReconnect] triggered! activeTab=${activeTabIdRef.current?.substring(0, 8) ?? 'null'}`);
@@ -2715,7 +2782,18 @@ export function ChatPage() {
       sendCommandRef.current(`//connect ${activeId}`);
     }
 
-    loadHistory(activeId, activeTab?.sessionId, 'refresh');
+    // WS が切れていた可能性があるため refresh は必須。ユーザーが上を読んでいた場合は
+    // 最下部へは飛ばさず位置を保持する（decideHistoryRefresh の 'reconnect' 分岐）。
+    const decision = decideHistoryRefresh({
+      trigger: 'reconnect',
+      hasActiveTab: true,
+      atBottom: readActiveTabAtBottom(),
+      wsConnected: connectedRef.current,
+    });
+    console.log(`[handleReconnect] decision=${decision.kind}${decision.kind === 'refresh' ? `/${decision.scroll}` : ''}`);
+    if (decision.kind === 'refresh') {
+      loadHistory(activeId, activeTab?.sessionId, 'refresh', decision.scroll);
+    }
   }, [loadHistory]);
 
   const { connected, sendCommand, sendToolApprovalResponse, sendCrossAsk } = useWebSocket({
@@ -2729,20 +2807,41 @@ export function ChatPage() {
     onReconnect: handleReconnect,
   });
 
-  // sendCommand が確定したら ref を更新（handleReconnect から参照可能にする）
+  // sendCommand/connected が確定したら ref を更新（handleReconnect/visibilitychange から参照可能にする）
   sendCommandRef.current = sendCommand;
+  connectedRef.current = connected;
 
-  // ページ復帰時にメッセージ履歴をリフレッシュ（iOS Safari 等でタブがバックグラウンドから戻った際に対応）
+  // ページ復帰時にメッセージ履歴をリフレッシュ（iOS Safari 等でタブがバックグラウンドから戻った際に対応）。
+  //
+  // 既存バグ: 以前はここで無条件に loadHistory('refresh')（最新10件のみ取得）を呼び、かつ完了後に
+  // 無条件で最下部へ強制スクロールしていたため、alt+tab 等でタブを離れて戻ると、上にスクロールして
+  // 読んでいた過去メッセージが画面から消え、表示が最下部へスナップしていた。
+  // WS が生きている限り hidden 中の新着は WS 経由で既に state に入っているため、
+  // 「visible かつ WS 生存」の場合は refresh 自体を行わない（= 再描画が起きず、スクロール位置が
+  // 完全に保持される）。WS が切れていた場合のみ refresh するが、上を読んでいたなら位置を復元する
+  // （`decideHistoryRefresh` 参照）。
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        const activeId = activeTabIdRef.current;
-        if (activeId) {
-          console.log(`[visibilitychange] page visible, refreshing history for ${activeId.substring(0, 8)}`);
-          const activeTab = tabsRef.current.find(t => t.projectId === activeId);
-          loadHistory(activeId, activeTab?.sessionId, 'refresh');
-        }
+      if (document.visibilityState === 'hidden') {
+        // 離脱時点の下端判定を記録しておく（復帰直後の DOM 計測が不安定な環境の保険）
+        wasAtBottomOnHideRef.current = readActiveTabAtBottom();
+        return;
       }
+      if (document.visibilityState !== 'visible') return;
+      const activeId = activeTabIdRef.current;
+      if (!activeId) return;
+      const measured = readActiveTabAtBottom();
+      const atBottom = measured !== null ? measured : wasAtBottomOnHideRef.current;
+      const decision = decideHistoryRefresh({
+        trigger: 'visible',
+        hasActiveTab: true,
+        atBottom,
+        wsConnected: connectedRef.current,
+      });
+      console.log(`[visibilitychange] page visible, decision=${decision.kind}${decision.kind === 'refresh' ? `/${decision.scroll}` : ''} (atBottom=${atBottom}, wsConnected=${connectedRef.current})`);
+      if (decision.kind === 'skip') return;
+      const activeTab = tabsRef.current.find(t => t.projectId === activeId);
+      loadHistory(activeId, activeTab?.sessionId, 'refresh', decision.scroll);
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -3322,11 +3421,15 @@ export function ChatPage() {
     if (!container) return;
     // プログラムによるスムーズスクロールアニメーション中は shouldAutoScrollRef を変更しない
     if (Date.now() < autoScrollingUntilRef.current) return;
-    // ユーザーが下端から離れたら自動スクロールを無効化（Agent 実行中の snap-back 防止）
-    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
-    if (!atBottom) {
-      shouldAutoScrollRef.current = false;
-    }
+    // ユーザーが下端から離れたら自動スクロールを無効化（Agent 実行中の snap-back 防止）。
+    // 逆に手動で下端まで戻した場合も true に復帰させる（従来は片方向のみで、新着受信
+    // （addMessageToTab）まで無効のままだった）。
+    const atBottom = isAtBottom({
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+    });
+    shouldAutoScrollRef.current = atBottom;
 
     const tabId = activeTabIdRef.current;
     if (!tabId) return;

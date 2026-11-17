@@ -3189,3 +3189,39 @@ SDK の内部動作が変わったことで到達経路が失われた）。原�
    `close`→`scheduleReconnect`、watchdog タイムアウト→`terminate()`→`close` の経路で必ず
    戻るはずだが、将来の改修でその経路が壊れた場合の二重の保険）。`disconnect()`（SIGINT 等の
    意図した終了）では `shuttingDown` フラグで supervisor 自身を止める。
+
+## チャット履歴の alt+tab 復帰リフレッシュ: 「取り直す」ではなく「取り直さない」を既定にした判断（2026-11-17）
+
+WebUI チャットで上にスクロールして過去を読んでいる最中に alt+tab で離脱→復帰すると、表示が
+最下部へスナップし読んでいた過去メッセージ自体が消える既存バグ（`doc/changelog.md` 2026-11-17
+参照）の根治で、`ChatPage.tsx` の `visibilitychange`/WS 再接続ハンドラに入れた判断を残す。
+将来の改修で「取りこぼし対策なら素直に毎回取り直せばいい」と単純化したくなった時のための記録。
+
+1. **「visible かつ WS 生存中」は refresh 自体を行わない（鮮度より位置保持を優先）。**
+   既存のタブ復帰 refresh は「iOS Safari 等で WS ごと切られた場合の取りこぼし保険」として
+   書かれていたが、実装は WS の生死を見ずに常に `loadHistory('refresh')`（`limit: 10`）を呼んでいた。
+   WS が生きている限り hidden 中の新着は WS 経由で `addMessageToTab()` が既に state に入れているため、
+   この条件下での refresh は「取りこぼしの無い状態を、わざわざ最新10件に縮めてから作り直す」だけの
+   有害な操作になっていた。`decideHistoryRefresh()`（`apps/web/src/lib/chat-scroll-rules.ts`）は
+   この場合 `skip` を返し、呼び出し側は本当に何もしない。「何もしない」を選んだのは、DOM を
+   一切触らなければ `scrollTop` は再描画無しでブラウザがそのまま保持してくれるため、スクロール
+   位置復元ロジックより確実だから（復元は「ズレの発生源を無くす」より一段弱い対策）。
+2. **WS が切れていた場合（`reconnect` トリガ、または `visible` だが `wsConnected=false`）は
+   refresh を続行するが、位置は保持する（`scrollPolicy: 'keep-position'`）。** この経路では
+   実際に取りこぼしが起こり得るので鮮度を諦めるわけにはいかない。その代わり `loadHistory` 側で
+   `setTabs` 直前に `scrollTop`/`scrollHeight` を記録し、更新後に `resolveRestoredScrollTop()`
+   （`scrollHeight` の変化分を差し引くだけ。`loadOlderMessages` の既存手法と同じ）で復元する。
+   既存の `stick-bottom` 経路（4連 `scrollToBottom` + `shouldAutoScrollRef=true`）とは完全に
+   分岐させ、`keep-position` では `shouldAutoScrollRef`/`historyJustLoadedRef` を一切変更しない
+   （「今ユーザーが下端にいるか」という既存の状態を、位置保持のための一時的な処理で壊さないため）。
+3. **`atBottom` の計測は「今測る」を優先し、「離脱時点の記憶」（`wasAtBottomOnHideRef`）は
+   フォールバックに留めた。** 復帰直後は環境によって `scrollHeight`/`clientHeight` の DOM 計測が
+   一瞬不安定なことがある（既存コメント「iOS Safari 等でタブがバックグラウンドから戻った際に対応」
+   が示す経験則）。今測った値が取れればそれを信じ、コンテナ未マウント等で測れない場合のみ
+   離脱時点の記憶で代替する（両方失敗した場合は `null` → `decideHistoryRefresh` が安全側
+   （`stick-bottom`）にフォールバックする）。
+4. **`handleScroll` の `shouldAutoScrollRef` 判定を片方向から双方向に変えた。** 従来は「下端から
+   離れたら無効化」のみで、手動で下端まで戻しても新着受信（`addMessageToTab`）まで有効化されな
+   かった。`keep-position` の導入で「無効化されている時間」が延びる方向の変更をする以上、ユーザーが
+   自分で下端に戻した操作には即座に応答すべきと判断し対称化した（`addMessageToTab` 側の「新着受信で
+   無条件に有効化」は今回は対象外。Agent 実行中に上を読んでいると新着で引き戻される別問題のため）。
