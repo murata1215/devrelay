@@ -2238,7 +2238,10 @@ push する。
   ときだけ `buildDevinPlanPreamble()`（A で用意）を `modeInstruction` の前に連結。同条件でターン実行の
   `try` 直前に `captureBaseline()`、`finally` で `restoreToBaseline()`（retry 経路の早期 return でも必ず
   拾う設計）を実行し、復元/退避に応じて `devin.planGuardRestored`/`devin.planGuardFailed` を、非 git
-  リポジトリでは `devin.planGuardUnavailable` を通知して**続行**する（#325 静かなフォールバック禁止）。
+  リポジトリでは**続行**する。（当初は #325 に従い `devin.planGuardUnavailable` をチャット通知していたが、
+  毎ターン出てノイズになるため 2026-11-17 にユーザー判断で廃止し、Agent ログ
+  `Devin plan guard skipped (not a git repo)` のみに変更。非 git プロジェクトではプランターンの変更は巻き戻されない。
+  ガードを効かせたい場合はそのプロジェクトで `git init` する。）
   `ai-runner.ts`（3 OS）では `resumeFailed` 判定を「プランモードかどうか」から「前回と同じパーミッション
   モードかどうか」（`devinSavedPermissionMode === devinTurnPermissionMode && !options.devinAutoPermFallback`）
   に切り替え、`devinTurnPermissionMode` はサブサイクル C 以降 Devin では常に `'dangerous'` に決定論的に

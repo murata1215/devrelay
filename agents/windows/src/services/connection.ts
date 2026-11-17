@@ -902,8 +902,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     if (await isGitRepo(sessionInfo.projectPath)) {
       devinGuardBaseline = await captureBaseline(sessionInfo.projectPath);
     } else {
-      // 静かなフォールバック禁止（#325）: ガードが効かないことを必ず可視化する
-      sendGuardNotice(tChat(lang, 'devin.planGuardUnavailable', { path: sessionInfo.projectPath }));
+      // 非 git ではガードが効かない。毎ターンのチャット警告はノイズになるためユーザー判断で廃止し、
+      // Agent ログにのみ残す（ガードが効かない事実は rules/project.md に明記）。
+      console.log(`ℹ️ Devin plan guard skipped (not a git repo): ${sessionInfo.projectPath}`);
     }
   }
 

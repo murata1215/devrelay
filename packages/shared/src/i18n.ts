@@ -593,12 +593,8 @@ export const chatMessages = {
 
   // --- #368 Phase2a-C: Devin はプランモードを廃止し常に dangerous で起動する。
   // その代わりターン前後の git 差分を自動で巻き戻す安全網（git-guard.ts）を追加した。
-  // 非 git リポジトリではこのガードが効かないため、静かなフォールバックにせず1回だけ警告する
-  // （#325 静かなフォールバック禁止）。 ---
-  'devin.planGuardUnavailable': {
-    en: '⚠️ {path} is not a git repository, so the automatic restore guard for Devin plan turns is unavailable this turn. Any changes made will not be automatically reverted.',
-    ja: '⚠️ {path} は git リポジトリではないため、Devin のプランターン向け自動復元ガードが今回は使えません。行われた変更は自動では巻き戻されません。',
-  },
+  // 非 git リポジトリではこのガードが効かない（2026-11-17 以降は毎ターンの警告がノイズのため
+  // チャット通知を廃止し Agent ログのみ。旧キー devin.planGuardUnavailable は削除済み）。 ---
   'devin.planGuardRestored': {
     en: '🛡️ Plan-turn guard: reverted {restored} tracked file(s), quarantined {quarantined} untracked file(s) into {dir}.',
     ja: '🛡️ プランターンガード: 追跡済みファイル {restored} 件を復元、未追跡ファイル {quarantined} 件を {dir} へ退避しました。',

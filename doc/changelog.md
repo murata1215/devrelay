@@ -6,6 +6,15 @@
 
 ## 実装済み機能
 
+### Devin プランターンの「git リポジトリではない」警告を廃止 (2026-11-17)
+
+非 git プロジェクト（例: `d:\Programs\devin`）で Devin のプランターンを送るたびに「自動復元ガードが今回は使えません」がチャットに出てノイズだったため廃止。
+
+- `agents/{windows,linux,macos}/src/services/connection.ts`: 非 git 時の `sendGuardNotice(devin.planGuardUnavailable)` を Agent ログ `ℹ️ Devin plan guard skipped (not a git repo): <path>` に置き換え
+- `packages/shared/src/i18n.ts`: 未使用になった `devin.planGuardUnavailable` を削除
+- 挙動: git プロジェクトのガード（巻き戻し・退避・失敗通知）は従来どおり。非 git では従来どおり巻き戻されない（通知が消えるだけ）。ガードを効かせたい場合は `git init`
+- 反映には各機で `u`
+
 ### Devin の推定コストを実請求に一致させ、照合用集計 CLI を追加 (2026-11-09)
 
 Devin の `input_tokens` はキャッシュ読み込みを内包する総入力なのに、`resolveMessageCost()` は総入力を通常入力単価で数えたうえで読み込みを別途足しており、画面の推定が請求の約 5 倍に出ていた。
