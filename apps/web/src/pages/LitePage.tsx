@@ -1,4 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+// Usage 案件必須サイクル: 入力欄の上の案件欄と、案件が空なら AI プロンプトを止める判定
+import { CaseTagBar, useThreadCase } from '../components/CaseTagBar';
+import { decideCaseGuard } from '../lib/usage-case-rules';
+import { isTraditionalCommand } from '@devrelay/shared';
+import { usage as usageApi } from '../lib/api';
 import { useSearchParams } from 'react-router-dom';
 import {
   projects as projectsApi,
@@ -162,6 +167,11 @@ export function LitePage() {
   /** 送信の二重発火防止（React state 更新の非同期性を跨いで即座に判定する必要があるため ref を使う。
    * classic `ChatPage.tsx` の `sendingRef` と同じ流儀）。 */
   const sendingRef = useRef(false);
+  // Usage 案件必須サイクル: 選択中スレッドの案件（未作成なら手元に持ち、作成直後に保存する）
+  const { state: caseState, save: saveCase } = useThreadCase(selectedSessionId, { allowPending: true });
+  const caseInputRef = useRef<HTMLInputElement>(null);
+  const [caseHighlight, setCaseHighlight] = useState(false);
+  useEffect(() => { setCaseHighlight(false); }, [selectedSessionId, caseState.caseName]);
 
   /** L5 D4: 承認応答の二重送信防止。`entry.status` は `setState` 経由の非同期反映のため同一 tick の
    * 2 回目クリックには古い値のまま見える。`sendingRef` と同じ流儀で同期的な ref を使う。 */
@@ -488,6 +498,22 @@ export function LitePage() {
   const handleSend = useCallback(() => {
     if (sendingRef.current) return;
     const text = composerBody.trim();
+    // Usage 案件必須サイクル: 必須モードで案件が空なら AI プロンプトを送らない（コマンドは通す）。
+    // スレッド未作成（最初の送信で作る）ときは、入力済みの案件（pending）で判定し、作成直後に保存する。
+    const caseGuard = decideCaseGuard({
+      required: caseState.required && !caseState.unavailable,
+      loaded: caseState.loaded,
+      caseName: caseState.caseName,
+      text,
+      hasFiles: false,
+      isCommand: isTraditionalCommand,
+    });
+    if (caseGuard !== 'ok') {
+      setCaseHighlight(true);
+      if (caseGuard === 'need-case') caseInputRef.current?.focus();
+      return;
+    }
+    const pendingCase = selectedSessionId ? null : caseState.caseName;
     const inFlight = resolveSendInFlight({
       sending: sendingRef.current,
       creatingThread: creatingThreadRef.current,
@@ -537,6 +563,10 @@ export function LitePage() {
           // `selectedSessionId` の変化を検知して冪等に switchThread を呼ぶが、ここでも明示的に
           // 待って直後の送信の一貫性を保つ（B4 の tabId 絶対規則: 同一 tabId で呼ぶ）。
           await sessionsApi.switchThread(targetSessionId, tabId);
+          // Usage 案件必須サイクル: 新しいスレッドに、送信前に入力済みの案件を保存する
+          if (pendingCase) {
+            await usageApi.setCase(targetSessionId, pendingCase).catch(() => {});
+          }
         } else {
           targetSessionId = action.sessionId;
           targetProjectId = action.sendProjectIdHint;
@@ -568,7 +598,7 @@ export function LitePage() {
         sendingRef.current = false;
         setSending(false);
       });
-  }, [composerBody, selectedSessionId, resolvedSelectedThreadProjectId, selectedProjectId, tabId, selectedProjectOnline, connected, messages, sendCommand, setSearchParams, threadProjectConfirmation, requestThreadRefresh]);
+  }, [caseState, composerBody, selectedSessionId, resolvedSelectedThreadProjectId, selectedProjectId, tabId, selectedProjectOnline, connected, messages, sendCommand, setSearchParams, threadProjectConfirmation, requestThreadRefresh]);
 
   /** B4: 「＋新規」ボタン。B3 と同じ経路（作成のみ。送信はしない）。作成リクエストは B3 と同じ唯一の
    * factory `buildThreadCreateRequest()` を通す（R8: tabId 必須を型と実行時の両方で保証する）。 */
@@ -661,6 +691,7 @@ export function LitePage() {
             </div>
           )}
           <LiteComposer
+            caseSlot={<CaseTagBar state={caseState} onSave={saveCase} highlight={caseHighlight} inputRef={caseInputRef} />}
             options={projectOptions}
             selectedProjectId={selectedProjectId}
             onProjectChange={handleProjectChange}

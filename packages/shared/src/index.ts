@@ -99,3 +99,5 @@ export {
   usageChangeRatio,
   usageRowsToCsv,
 } from './usage-aggregate.js';
+// Usage 案件必須サイクル: コマンド判定（server の natural-language-parser から移設。同じ理由で明示的 named export）
+export { isTraditionalCommand } from './command-classify.js';

@@ -641,6 +641,14 @@ export const usage = {
   async setGroup(userId: string, group: string | null): Promise<{ userId: string; group: string | null }> {
     return request('PUT', `/usage/groups/${encodeURIComponent(userId)}`, { group });
   },
+  /** スレッド未作成でも使える設定（必須か・候補） */
+  async getCaseSettings(): Promise<{ options: string[]; required: boolean }> {
+    return request('GET', '/usage/case-settings');
+  },
+  /** チャット入力欄の上の案件欄用（required = DEVRELAY_USAGE_CASE_REQUIRED=1） */
+  async getCase(sessionId: string): Promise<{ sessionId: string; caseName: string | null; options: string[]; required: boolean; editable: boolean }> {
+    return request('GET', `/usage/sessions/${encodeURIComponent(sessionId)}/case`);
+  },
   async setCase(sessionId: string, caseName: string | null): Promise<{ sessionId: string; caseName: string | null }> {
     return request('PUT', `/usage/cases/${encodeURIComponent(sessionId)}`, { caseName });
   },
@@ -755,6 +763,8 @@ export interface ThreadSummary {
    * 旧サーバー応答・キルスイッチ OFF 時にはキー自体が無い（`undefined`）。
    * `running`/`lastAiAt` と同じ流儀で `conversation-rail-rules.ts` 側が解釈する。 */
   seenAt?: string | null;
+  /** Usage 案件必須サイクル: スレッドの案件名（null = 案件なし。旧サーバーは undefined） */
+  usageCase?: string | null;
 }
 
 /** POST /api/sessions/:id/switch のレスポンス */

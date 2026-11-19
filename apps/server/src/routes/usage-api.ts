@@ -31,7 +31,7 @@ import {
   totalUsage,
   USAGE_TIME_ZONE,
 } from '@devrelay/shared';
-import { isUsageEnabled, isPlausibleSignageToken, parseSignageInnerAxis, USAGE_SIGNAGE_CACHE_MS } from '../services/usage-rules.js';
+import { isUsageEnabled, isUsageCaseRequired, isPlausibleSignageToken, parseSignageInnerAxis, USAGE_SIGNAGE_CACHE_MS } from '../services/usage-rules.js';
 import {
   resolveUsageScope,
   orgMemberUserIds,
@@ -120,6 +120,54 @@ export async function usageApiRoutes(app: FastifyInstance) {
     }
     clearUsageCache();
     return { userId: targetUserId, group: normalized.value };
+  });
+
+  // ========================================
+  // GET /api/usage/case-settings — スレッド未作成でも必須か・候補を知るため（Lite の初回送信で新規作成する経路）
+  // ========================================
+  app.get('/api/usage/case-settings', async (request, reply) => {
+    if (!isUsageEnabled(process.env.DEVRELAY_USAGE)) return sendUsageDisabled(reply);
+    // @ts-ignore
+    const viewerUserId = request.user.id as string;
+    const scope = await resolveUsageScope(viewerUserId);
+    const options = await loadUsageLabelOptions(scope.userIds);
+    return { options: options.cases, required: isUsageCaseRequired(process.env.DEVRELAY_USAGE_CASE_REQUIRED) };
+  });
+
+  // ========================================
+  // GET /api/usage/sessions/:sessionId/case — チャット入力欄の上の案件欄用
+  // 見られるのはスレッドの持ち主と同じ組織のメンバー。editable は持ち主 or 同組織 admin。
+  // required は DEVRELAY_USAGE_CASE_REQUIRED=1 のとき true（WebUI だけが送信を止める）
+  // ========================================
+  app.get('/api/usage/sessions/:sessionId/case', async (request, reply) => {
+    if (!isUsageEnabled(process.env.DEVRELAY_USAGE)) return sendUsageDisabled(reply);
+    // @ts-ignore
+    const viewerUserId = request.user.id as string;
+    const { sessionId } = request.params as { sessionId: string };
+
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true, usageCase: true } });
+    if (!session) return reply.status(404).send({ error: 'スレッドが見つかりません' });
+
+    let editable = session.userId === viewerUserId;
+    if (!editable) {
+      const [viewer, owner] = await Promise.all([
+        prisma.organizationMember.findUnique({ where: { userId: viewerUserId }, select: { organizationId: true, role: true } }),
+        prisma.organizationMember.findUnique({ where: { userId: session.userId }, select: { organizationId: true } }),
+      ]);
+      const sameOrg = !!viewer && !!owner && viewer.organizationId === owner.organizationId;
+      if (!sameOrg) return reply.status(403).send({ error: 'このスレッドは見られません' });
+      editable = viewer!.role === 'admin';
+    }
+
+    const scope = await resolveUsageScope(viewerUserId);
+    const options = await loadUsageLabelOptions(scope.userIds);
+    return {
+      sessionId,
+      caseName: session.usageCase ?? null,
+      options: options.cases,
+      required: isUsageCaseRequired(process.env.DEVRELAY_USAGE_CASE_REQUIRED),
+      editable,
+    };
   });
 
   // ========================================

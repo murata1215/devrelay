@@ -2827,3 +2827,10 @@ Node.js の HTTP ヘッダーは Latin-1 範囲外の文字を受け付けず、
 - 優先順位: ステップ metrics の全合計が `final_metrics` と一致するとき → offset 以降の合計 ／ 前ターン累計以上 → 差分 ／ それ以外 → そのまま。前ターン累計は step offset と同じ寿命のファイルに保存する。
 - 記録済み行の補正は自動判定せず、機体を人が選んで CLI で行う（dry-run で機体ごとの単調増加率と補正後金額を見てから）。元の累計は `cumulativeUsage` に残し、再実行しても結果が変わらないようにする。
 - Devin のフルシート利用者は請求画面（オンデマンドコスト）に定額分が出ないため、DevRelay の金額の方が大きくなる。これは不具合ではないので補正しない。
+
+## 案件必須はクライアント（WebUI）だけで止める・コマンド判定は shared で共用（2026-11-19）
+
+- 「案件（`Session.usageCase`）が空なら AI プロンプトを送らせない」は WebUI（ChatPage・Lite）の送信前判定（`lib/usage-case-rules.ts` `decideCaseGuard()`）だけで行う。サーバーで拒否すると、入力欄の無い Discord / Telegram / MCP から一切送れなくなるため。
+- 止めるのは AI プロンプトだけ。コマンドかどうかはサーバーと同じ `isTraditionalCommand()` で判定するため、本体を `packages/shared/src/command-classify.ts` に移し、サーバーは再エクスポートにした（基準が二重管理でずれると、WebUI では止まるのにサーバーではコマンド扱い、のような食い違いが起きる）。
+- 案件の状態がまだ読めていない（スレッド未確定）ときは止める側に倒す。案件の取得自体に失敗した（Usage 無効・旧サーバー）ときは欄を出さず止めない。
+- 必須モード `DEVRELAY_USAGE_CASE_REQUIRED` は既定 OFF（同じコードを使う他環境の挙動を変えないため）。会社環境だけ `.env` で ON にする。

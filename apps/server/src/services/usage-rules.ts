@@ -47,3 +47,11 @@ export function usageThreadTitle(title: string | null, firstUserMessage: string 
   if (!head) return `(無題) ${md}`;
   return `${head.length > 40 ? head.slice(0, 40) + '…' : head} (${md})`;
 }
+
+/**
+ * Usage 案件必須サイクル: WebUI のチャットで「案件が空のスレッドでは AI プロンプトを送らせない」か
+ * （`DEVRELAY_USAGE_CASE_REQUIRED`、既定 OFF。`'1'` のときだけ ON。他環境の挙動を変えないため既定は OFF）。
+ */
+export function isUsageCaseRequired(raw: string | undefined): boolean {
+  return raw === '1';
+}

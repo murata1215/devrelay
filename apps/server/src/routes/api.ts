@@ -1870,6 +1870,8 @@ export async function apiRoutes(app: FastifyInstance) {
         // 従来の localStorage（devrelay-conversation-seen）に代わる出どころ。
         // running/lastAiAt と同じキルスイッチ・同じ流儀（OFF 時はキー自体を省略する）。
         seenAt: railEnabled ? (s.lastSeenAiAt?.toISOString() ?? null) : undefined,
+        // Usage 案件必須サイクル: スレッド一覧に案件名を表示するため（null = 案件なし）
+        usageCase: s.usageCase ?? null,
       };
     });
 

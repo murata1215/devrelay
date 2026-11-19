@@ -307,8 +307,10 @@ describe('command-parser.ts / natural-language-parser.ts: `u force` / `u!`', () 
     assert.match(source, /type:\s*'update',\s*force:\s*true/);
   });
 
-  test('natural-language-parser.ts の isTraditionalCommand が `u force`/`u!` を拾う', () => {
-    const source = readServerSource('src/services/natural-language-parser.ts');
+  // Usage 案件必須サイクル（2026-11-19）: isTraditionalCommand は WebUI と共用するため
+  // packages/shared/src/command-classify.ts へ移した（natural-language-parser.ts は再エクスポートのみ）
+  test('isTraditionalCommand（shared/command-classify.ts）が `u force`/`u!` を拾う', () => {
+    const source = readRepoFile('packages/shared/src/command-classify.ts');
     const fnIdx = source.indexOf('export function isTraditionalCommand');
     assert.ok(fnIdx > 0);
     const body = source.slice(fnIdx, fnIdx + 2000);

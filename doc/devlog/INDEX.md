@@ -1,5 +1,6 @@
 # Devlog INDEX
 
+- 2026-11-19_usage_case_in_chat | チャットの入力欄で案件タグ・案件が空なら AI に送れない | 入力欄の上に「🏷 案件」欄（ChatPage/Lite）、スレッド一覧に案件ラベル、`DEVRELAY_USAGE_CASE_REQUIRED=1` で案件が空なら AI プロンプトを止める（コマンドは通す）。`isTraditionalCommand` を shared へ移設 | [詳細](2026-11-19_usage_case_in_chat.md)
 - 2026-11-19_devin_cumulative_usage | Devin コストの累計記録による過大計上を修正 | resume で ATIF の final_metrics がセッション累計になる環境（PC45/exuser59）を Agent の `resolveAtifTurnUsage()` でターン分に、既存行は `devin:cumulative-fix` で補正（土橋 11 月 $1,090 → $82.39、実請求 $83.06）。miyazawa の約 $100 差は Devin フルシートの定額分（不具合ではない、Usage 画面に注記） | [詳細](2026-11-19_devin_cumulative_usage.md)
 - 2026-11-19_usage_cost_aggregation | Usage（コスト集計）とサイネージ画面 | `/usage`（グループ/利用者/プロジェクト/案件/スレッド・JST 暦月・当月/前月・CSV・その場編集）と `/signage/usage?token=`（ログイン不要・5 分更新）。DB: UserUsageGroup / Session.usageCase / Organization.usageSignageToken。`DEVRELAY_USAGE`。sa-makino 11/4〜11/17 = $53.03 で会話履歴と一致 | [詳細](2026-11-19_usage_cost_aggregation.md)
 - 2026-11-18_help_by_environment | ヘルプ（h）を環境に合わせて出し分け | `getHelpText(lang, { platform })`: `DEVRELAY_TESTFLIGHT=0` でテストフライト節、`DEVRELAY_THREAD_HANDOVER=0` で引継ぎ節を非表示、web では `link`・Discord/Telegram では `login` を非表示、未実装 `sum` を削除。テスト 8/8 green。サーバー再起動のみ | [詳細](2026-11-18_help_by_environment.md)

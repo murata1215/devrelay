@@ -258,14 +258,18 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // `components/lite/LiteMessageList.tsx` のみ変更）のため行数ピン（682）は据え置き。
 // renderMarkdown 出現数（DocPanel 専用、チャット本文とは別経路）・components/lite/* のファイル数も
 // いずれも本サイクルで無変更のため据え置き。
+//
+// Usage 案件必須サイクル（2026-11-19）で、ChatPage.tsx / LitePage.tsx の入力欄の上に案件欄（CaseTagBar）と
+// 「案件が空なら AI プロンプトを止める」判定を追加したため、両方の行数ピンを実測値に更新した
+// （ChatPage 3911 → 3938、LitePage 682 → 713。renderMarkdown 出現数は無変更のため据え置き）。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 3911, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 3938, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/LitePage.tsx'), 682, 'LitePage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/LitePage.tsx'), 713, 'LitePage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('ChatPage.tsx 内の renderMarkdown 出現数が変わっていない', () => {

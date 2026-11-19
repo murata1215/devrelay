@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import type { ProjectSelectorOption, ComposerPlaceholderReason } from './lite-shell-rules';
 import type { TranslationKey } from '../../i18n/messages';
@@ -32,6 +32,8 @@ export interface LiteComposerProps {
   sending: boolean;
   /** A3: 非 null なら「送信すると <projectLabel> に新しいスレッドを作ります」を表示する */
   newThreadNoticeProjectLabel: string | null;
+  /** Usage 案件必須サイクル: 入力欄の上に出す案件欄（CaseTagBar）。無ければ何も出さない */
+  caseSlot?: ReactNode;
 }
 
 const PLACEHOLDER_KEY_BY_REASON: Record<ComposerPlaceholderReason, TranslationKey> = {
@@ -54,6 +56,7 @@ export function LiteComposer({
   sendDisabled,
   sending,
   newThreadNoticeProjectLabel,
+  caseSlot,
 }: LiteComposerProps) {
   const { t } = useLanguage();
 
@@ -90,6 +93,7 @@ export function LiteComposer({
           {t('lite.newThreadNoticePrefix')}{newThreadNoticeProjectLabel}{t('lite.newThreadNoticeSuffix')}
         </div>
       )}
+      {caseSlot}
       <div className="flex items-center gap-2">
         <textarea
           value={body}

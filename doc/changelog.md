@@ -6,6 +6,16 @@
 
 ## 実装済み機能
 
+### チャットの入力欄で案件タグを付ける・案件が空なら AI に送れなくする (2026-11-19)
+
+案件タグ（`Session.usageCase`）を /usage の明細でしか付けられず気づきにくかったため、チャット側で付けられるようにした。
+
+- ChatPage / Lite の入力欄の上に「🏷 案件」欄（`components/CaseTagBar.tsx`。候補表示・Enter かフォーカス外しで保存、スレッド切替・`x`・`n` に追従）。左のスレッド一覧に案件ラベル表示（`GET /api/threads` に `usageCase`）
+- 必須モード `DEVRELAY_USAGE_CASE_REQUIRED=1`（既定 OFF。このマシンは `.env` で ON）: 案件が空のスレッドで AI プロンプトを送ると止めて案件欄を赤枠＋フォーカス（文章は消さない）。コマンドと `//` は通す。判定は `lib/usage-case-rules.ts` `decideCaseGuard()`
+- `isTraditionalCommand()` を server から `packages/shared/src/command-classify.ts` に移し WebUI と共用（判定は無変更、server は再エクスポート）
+- API: `GET /api/usage/sessions/:sessionId/case`、`GET /api/usage/case-settings`（Lite の最初の送信でスレッドを作る経路は、作成直後・送信前に案件を保存）
+- テスト: web usage-case-rules 6 件、shared command-classify 2 件。ChatPage/LitePage の行数ピン・`u force` 配線テストを実測値／移設先に更新
+
 ### Devin のコストが累計で記録され過大になる不具合を修正 (2026-11-19)
 
 Usage 画面で 土橋（PC45/exuser59）の 11 月が $1,090（実請求 $83.06）。resume で ATIF（`devin --export`）が過去ターンを含む環境では `final_metrics` がセッション累計になり、Agent がそれを 1 ターン分として記録していたため。

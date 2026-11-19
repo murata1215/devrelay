@@ -350,6 +350,12 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
                 {isCancelledThread(item) && (
                   <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)]">{t('thread.cancelled')}</span>
                 )}
+                {item.usageCase && (
+                  // Usage 案件必須サイクル: スレッドの案件（コスト集計用）
+                  <span className="text-[10px] px-1 rounded bg-sky-500/15 text-sky-600 truncate max-w-[8rem]" title={`案件: ${item.usageCase}`}>
+                    🏷 {item.usageCase}
+                  </span>
+                )}
                 {!projectId && (
                   <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)] truncate">
                     {resolveProjectLabel ? resolveProjectLabel(item.projectId, item.projectName) : item.projectName}

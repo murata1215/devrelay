@@ -19,6 +19,10 @@ import { ConversationRail } from '../components/ConversationRail';
 import { useConversationFeed, type ConversationFeedItem } from '../hooks/useConversationFeed';
 import { SIDEBAR_MODE_STORAGE_KEY, readSidebarMode, type SidebarMode } from '../lib/conversation-rail-rules';
 import { getTabId } from '../lib/tab-id';
+// Usage 案件必須サイクル: 入力欄の上の案件欄と、案件が空なら AI プロンプトを止める判定
+import { CaseTagBar, useThreadCase } from '../components/CaseTagBar';
+import { decideCaseGuard } from '../lib/usage-case-rules';
+import { isTraditionalCommand } from '@devrelay/shared';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -2946,6 +2950,11 @@ export function ChatPage() {
   const shouldAutoScrollRef = useRef(true);
   /** handleSend の二重送信防止フラグ */
   const sendingRef = useRef(false);
+  // Usage 案件必須サイクル: アクティブなスレッドの案件（sessionId が変わるたびに取り直す）
+  const { state: caseState, save: saveCase } = useThreadCase(activeTab?.sessionId ?? null);
+  const caseInputRef = useRef<HTMLInputElement>(null);
+  const [caseHighlight, setCaseHighlight] = useState(false);
+  useEffect(() => { setCaseHighlight(false); }, [activeTab?.sessionId, caseState.caseName]);
   /** プログラムによるスムーズスクロール中のガードタイムスタンプ */
   const autoScrollingUntilRef = useRef(0);
   /** 初回 loadHistory + auto-scroll 完了フラグ（loadOlderMessages の連鎖発火防止） */
@@ -3443,6 +3452,21 @@ export function ChatPage() {
     const text = input.trim();
     const hasFiles = pendingFiles.length > 0;
     if ((!text && !hasFiles) || !connected) return;
+    // Usage 案件必須サイクル: 必須モードで案件が空のスレッドには AI プロンプトを送らない（コマンドは通す）。
+    // 入力した文章は消さず、案件欄を赤枠にしてフォーカスを移す。
+    const caseGuard = decideCaseGuard({
+      required: caseState.required && !caseState.unavailable,
+      loaded: caseState.loaded,
+      caseName: caseState.caseName,
+      text,
+      hasFiles,
+      isCommand: isTraditionalCommand,
+    });
+    if (caseGuard !== 'ok') {
+      setCaseHighlight(true);
+      if (caseGuard === 'need-case') caseInputRef.current?.focus();
+      return;
+    }
     sendingRef.current = true;
     const sendText = text || pendingFiles.map(f => f.filename).join(', ');
 
@@ -3794,6 +3818,9 @@ export function ChatPage() {
             {/* 入力エリア */}
             <div className="px-4 py-3 bg-[var(--bg-secondary)] border-t border-[var(--border-color)]">
               <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+              {activeTab && (
+                <CaseTagBar state={caseState} onSave={saveCase} highlight={caseHighlight} inputRef={caseInputRef} disabled={!connected} />
+              )}
               <div className="flex gap-2 items-end">
                 <button
                   onClick={() => fileInputRef.current?.click()}
