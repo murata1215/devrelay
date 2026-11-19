@@ -44,6 +44,11 @@ export interface AtifDigest {
   /** `steps[].extra.generation_model`（機械可読、ステップレベルの値を優先） */
   modelId: string | null;
   usage: AtifUsageTotals | null;
+  /**
+   * Usage 累計補正サイクル: 各ステップの `metrics`（prompt/completion/cached）。エントリと同じ並び・同じ長さ
+   * （metrics の無いステップは null）。1 つも無ければ全要素 null。
+   */
+  stepMetrics: (AtifUsageTotals | null)[];
   /** 実際のステップ数（`extractAtifEntries()` の長さ。誤カウント是正の中核） */
   totalSteps: number;
   /** `agent.extra.permission_mode`（console ログ専用、チャットには出さない） */
@@ -255,6 +260,83 @@ export function extractAtifUsage(parsed: unknown): AtifUsageTotals | null {
 }
 
 /**
+ * Usage 累計補正サイクル: ATIF 1 ステップの `metrics` を Claude 互換キーへマップする
+ * （ATIF の per-step metrics: `prompt_tokens` / `completion_tokens` / `cached_tokens`）。
+ * metrics が無い・既知キーが 1 つも無いステップは null（0 埋めしない）。
+ */
+export function extractAtifStepMetrics(entry: unknown): AtifUsageTotals | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const metrics = (entry as Record<string, unknown>).metrics;
+  if (!metrics || typeof metrics !== 'object') return null;
+  const m = metrics as Record<string, unknown>;
+  if (!['prompt_tokens', 'completion_tokens', 'cached_tokens'].some((k) => k in m)) return null;
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return {
+    input_tokens: num(m.prompt_tokens),
+    output_tokens: num(m.completion_tokens),
+    cache_read_input_tokens: num(m.cached_tokens),
+    cache_creation_input_tokens: 0,
+  };
+}
+
+/** このターンの使用量をどう求めたか（`usageData.usageMode` に記録する）。 */
+export type AtifTurnUsageMode = 'total' | 'steps' | 'delta';
+
+const USAGE_KEYS: (keyof AtifUsageTotals)[] = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
+
+function sumUsage(list: (AtifUsageTotals | null)[]): AtifUsageTotals | null {
+  let any = false;
+  const out: AtifUsageTotals = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  for (const u of list) {
+    if (!u) continue;
+    any = true;
+    for (const k of USAGE_KEYS) out[k] += u[k];
+  }
+  return any ? out : null;
+}
+
+/**
+ * Usage 累計補正サイクル（2026-11-19）: 「このターンの」使用量を決める。
+ *
+ * 背景: `final_metrics` は ATIF（= トラジェクトリ全体）の合計。devin セッションを `-r` で resume すると
+ * `--export` は過去ターンを含む全トラジェクトリを書き直す（#365）ため、その環境では `final_metrics` が
+ * **セッション開始からの累計**になる。旧実装はこれをそのまま 1 ターン分として記録しており、
+ * 累計をターンごとに合算した金額が実請求の十数倍になっていた（PC45/exuser59、$1,090 vs 実請求 $83.06）。
+ *
+ * 判定（ATIF が過去ターンを含むと言える場合だけ補正する。それ以外は従来どおり）:
+ * 1. resume していない / オフセットが無い・壊れている（`!(0 < stepOffset < totalSteps)`）→ `total`（そのまま）
+ * 2. 全ステップの metrics 合計が `final_metrics` と一致する（＝ per-step metrics の意味が確認できた）→
+ *    オフセット以降のステップの合計 → `steps`
+ * 3. 前ターン終了時の累計（`prevTotals`）があり、全項目が前回以上 → 差分 → `delta`
+ * 4. それ以外（前回累計が無い・減っている＝別トラジェクトリ）→ `total`
+ */
+export function resolveAtifTurnUsage(input: {
+  totals: AtifUsageTotals;
+  stepMetrics: (AtifUsageTotals | null)[];
+  resumed: boolean;
+  stepOffset: number;
+  totalSteps: number;
+  prevTotals: AtifUsageTotals | null;
+}): { usage: AtifUsageTotals; mode: AtifTurnUsageMode } {
+  const { totals, stepMetrics, resumed, stepOffset, totalSteps, prevTotals } = input;
+  const includesPreviousTurns = resumed && Number.isFinite(stepOffset) && stepOffset > 0 && stepOffset < totalSteps;
+  if (!includesPreviousTurns) return { usage: { ...totals }, mode: 'total' };
+
+  const all = sumUsage(stepMetrics);
+  if (all && all.input_tokens === totals.input_tokens && all.output_tokens === totals.output_tokens) {
+    const since = sumUsage(stepMetrics.slice(stepOffset));
+    if (since) return { usage: since, mode: 'steps' };
+  }
+
+  if (prevTotals && USAGE_KEYS.every((k) => totals[k] >= prevTotals[k])) {
+    const usage = { ...totals };
+    for (const k of USAGE_KEYS) usage[k] = totals[k] - prevTotals[k];
+    return { usage, mode: 'delta' };
+  }
+  return { usage: { ...totals }, mode: 'total' };
+}
+
+/**
  * ATIF ファイルの生テキストからダイジェストを構築する。
  * ATIF-v1.7 は「ターン終了時に一括書き出しされる pretty-print された単一 JSON」であるため
  * 単一 JSON としてのパースを優先し、失敗した場合のみ JSONL（1行1エントリ、旧形式）にフォールバックする。
@@ -326,6 +408,7 @@ export function buildAtifDigest(content: string): AtifDigest | null {
     modelName,
     modelId,
     usage,
+    stepMetrics: entries.map(extractAtifStepMetrics),
     totalSteps: entries.length,
     permissionMode,
     blockedCommands: extractBlockedCommands(entries),

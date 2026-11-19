@@ -1,7 +1,9 @@
 import { apiUrl } from '../lib/base';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { auth } from '../lib/api';
+import { sanitizeNextPath } from '../lib/portal-rules';
 import { useLanguage } from '../contexts/LanguageContext';
 import { resolveNextTarget, maybeRedirectAfterLogin, LOGIN_NEXT_STORAGE_KEY } from '../lib/managerRedirect';
 
@@ -14,7 +16,22 @@ export function LoginPage() {
   const { t } = useLanguage();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const nextTarget = resolveNextTarget(searchParams.get('next'));
+  const rawNext = searchParams.get('next');
+  const nextTarget = resolveNextTarget(rawNext);
+  // ポータル等から渡された WebUI 内の戻り先（例: /knowledge）。manager 指定とは排他
+  const nextPath = sanitizeNextPath(rawNext);
+  // Google OAuth が未設定の環境（社内オンプレ等）ではボタンを出さない。判定中は出さずに待つ
+  const [googleEnabled, setGoogleEnabled] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void auth.providers().then((p) => {
+      if (alive) setGoogleEnabled(p.google);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +41,7 @@ export function LoginPage() {
     try {
       await login(email, password);
       if (await maybeRedirectAfterLogin(nextTarget)) return;
-      navigate('/');
+      navigate(nextPath ?? '/');
     } catch (err) {
       setError(err instanceof Error ? err.message : t('auth.loginFailed'));
     } finally {
@@ -35,8 +52,9 @@ export function LoginPage() {
   // Google OAuth はページ全体が離脱するため、next をラウンドトリップ間 sessionStorage に退避する
   // （コールバック側 AuthCallbackPage で回収・削除する）
   const handleGoogleSignIn = () => {
-    if (nextTarget) {
-      sessionStorage.setItem(LOGIN_NEXT_STORAGE_KEY, nextTarget);
+    const stash = nextTarget ?? nextPath;
+    if (stash) {
+      sessionStorage.setItem(LOGIN_NEXT_STORAGE_KEY, stash);
     } else {
       sessionStorage.removeItem(LOGIN_NEXT_STORAGE_KEY);
     }
@@ -53,6 +71,7 @@ export function LoginPage() {
           </p>
         </div>
 
+        {googleEnabled && (<>
         {/* Google OAuth ボタン */}
         <div className="mt-6">
           <button
@@ -79,6 +98,7 @@ export function LoginPage() {
             <span className="px-2 bg-[var(--bg-secondary)] text-[var(--text-faint)]">{t('auth.or')}</span>
           </div>
         </div>
+        </>)}
 
         <form className="mt-6 space-y-6" onSubmit={handleSubmit}>
           {error && (
@@ -135,6 +155,12 @@ export function LoginPage() {
             {t('auth.noAccount')}{' '}
             <Link to="/register" className="text-[var(--text-link)] hover:opacity-80">
               {t('auth.signUp')}
+            </Link>
+          </p>
+
+          <p className="text-center text-sm">
+            <Link to="/portal" className="text-[var(--text-link)] hover:opacity-80">
+              {t('portal.backToPortal')}
             </Link>
           </p>
         </form>

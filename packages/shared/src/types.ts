@@ -318,6 +318,15 @@ export interface AiUsageData {
    * optional のため旧 Agent（未設定）との後方互換は維持される。
    */
   tool?: AiTool;
+  /**
+   * Usage 累計補正サイクル（Devin のみ）: `usage` の求め方。
+   * 'total' = ATIF の final_metrics そのまま / 'steps' = 今回ターンのステップ metrics 合計 /
+   * 'delta' = 累計 − 前ターン終了時の累計。未設定 = 旧 Agent（'total' 相当）。
+   * サーバーの `devin:cumulative-fix` で補正した行は 'delta-fixed'。
+   */
+  usageMode?: 'total' | 'steps' | 'delta' | 'delta-fixed';
+  /** 'total' 以外のとき、補正前の累計値（final_metrics をそのままマップしたもの。監査・再計算用） */
+  cumulativeUsage?: Record<string, number>;
   /** レートリミット情報（Agent SDK の rate_limit_event から取得） */
   rateLimits?: {
     fiveHour?: { utilization: number; resetsAt?: number; status: string };

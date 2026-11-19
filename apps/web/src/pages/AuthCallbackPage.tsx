@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { setToken } from '../lib/api';
 import { resolveNextTarget, maybeRedirectAfterLogin, LOGIN_NEXT_STORAGE_KEY } from '../lib/managerRedirect';
+import { sanitizeNextPath } from '../lib/portal-rules';
 
 /**
  * Google OAuth コールバックページ
@@ -22,7 +23,10 @@ export function AuthCallbackPage() {
 
     setToken(token);
     // ログイン画面（LoginPage）で退避しておいた next を回収する。使い捨てのため即座に削除する。
-    const stashedNext = resolveNextTarget(sessionStorage.getItem(LOGIN_NEXT_STORAGE_KEY));
+    const rawStashed = sessionStorage.getItem(LOGIN_NEXT_STORAGE_KEY);
+    const stashedNext = resolveNextTarget(rawStashed);
+    // ポータル経由の WebUI 内戻り先（例: /knowledge）
+    const stashedPath = sanitizeNextPath(rawStashed);
     sessionStorage.removeItem(LOGIN_NEXT_STORAGE_KEY);
     // token の保存が確実に反映されてからフルリロードする。
     // 即時リロードだと（PWA Service Worker の有効化と競合して）
@@ -31,7 +35,7 @@ export function AuthCallbackPage() {
     // タイミングを揃えるため同じ 200ms 待ちに乗せる。
     const timer = setTimeout(() => {
       void maybeRedirectAfterLogin(stashedNext).then((moved) => {
-        if (!moved) window.location.replace(withBase('/'));
+        if (!moved) window.location.replace(withBase(stashedPath ?? '/'));
       });
     }, 200);
     return () => clearTimeout(timer);

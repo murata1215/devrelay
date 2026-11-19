@@ -42,6 +42,8 @@ export function Layout({ children }: LayoutProps) {
     { name: t('nav.knowledge'), href: '/knowledge' },
     // Activity は監督者（admin/manager）のみ表示
     ...(canSupervise ? [{ name: t('nav.activity'), href: '/activity' }] : []),
+    // Usage（コスト集計）は全員に表示（組織全体を閲覧できる。ユーザー決定）
+    { name: t('nav.usage'), href: '/usage' },
     { name: t('nav.agents'), href: '/machines' },
     { name: t('nav.team'), href: '/team' },
   ];
@@ -56,6 +58,7 @@ export function Layout({ children }: LayoutProps) {
     ...(user?.isSystemAdmin ? [{ name: t('nav.sites'), href: '/sites' }] : []),
     { name: t('nav.settings'), href: '/settings' },
     { name: t('nav.liteUi'), href: '/lite' },
+    { name: t('nav.portal'), href: '/portal' },
   ];
 
   const isActive = (href: string) => {

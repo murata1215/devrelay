@@ -11,6 +11,8 @@ const DEVIN_SESSION_FILE = 'devin-session-id';
 const DEVIN_MODEL_FILE = 'devin-model';
 /** #365: 前ターン終了時点の ATIF 累計ステップ数を記録するファイル（今回分だけの表示に使う差分の基準） */
 const DEVIN_ATIF_STEP_OFFSET_FILE = 'devin-atif-step-offset';
+/** Usage 累計補正サイクル: 前ターン終了時点の ATIF final_metrics（累計）。step offset と同じ寿命で保存・削除する */
+const DEVIN_ATIF_USAGE_OFFSET_FILE = 'devin-atif-usage-offset.json';
 /** #368 Phase2a: Devin セッション作成時に使用したパーミッションモードを記録するファイル（resume 時のモード一致判定用） */
 const DEVIN_PERMISSION_MODE_FILE = 'devin-permission-mode';
 const CODEX_SESSION_FILE = 'codex-session-id';
@@ -333,16 +335,54 @@ export async function loadDevinAtifStepOffset(projectPath: string, agentScopeId?
 /**
  * 今回ターン終了時点の ATIF 累計ステップ数を保存（次回ターンのオフセットとして使われる）
  */
-export async function saveDevinAtifStepOffset(projectPath: string, offset: number, agentScopeId?: string): Promise<void> {
+export async function saveDevinAtifStepOffset(
+  projectPath: string,
+  offset: number,
+  agentScopeId?: string,
+  usageTotals?: Record<string, number> | null,
+): Promise<void> {
   const dirPath = resolveScopeDir(projectPath, agentScopeId);
   const filePath = getDevinAtifStepOffsetPath(projectPath, agentScopeId);
+  const usagePath = join(dirPath, DEVIN_ATIF_USAGE_OFFSET_FILE);
   try {
     if (!existsSync(dirPath)) {
       await mkdir(dirPath, { recursive: true });
     }
     await writeFile(filePath, String(offset), 'utf-8');
+    // Usage 累計補正サイクル: 今回ターン終了時点の累計（final_metrics）を次ターンの差分基準として保存する。
+    // 取れなかったターンは古い値を残さず消す（別トラジェクトリの値と誤って差し引かないため）
+    if (usageTotals) {
+      await writeFile(usagePath, JSON.stringify(usageTotals), 'utf-8');
+    } else if (existsSync(usagePath)) {
+      await unlink(usagePath);
+    }
   } catch (err) {
     console.error(`❌ Could not save Devin ATIF step offset:`, (err as Error).message);
+  }
+}
+
+/**
+ * Usage 累計補正サイクル: 前ターン終了時点の ATIF 累計使用量を読み込む（未保存・不正は null）
+ */
+export async function loadDevinAtifUsageOffset(projectPath: string, agentScopeId?: string): Promise<{
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+} | null> {
+  const usagePath = join(resolveScopeDir(projectPath, agentScopeId), DEVIN_ATIF_USAGE_OFFSET_FILE);
+  try {
+    if (!existsSync(usagePath)) return null;
+    const v = JSON.parse(await readFile(usagePath, 'utf-8')) as Record<string, unknown>;
+    const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : null);
+    const input = n(v.input_tokens);
+    const output = n(v.output_tokens);
+    const cacheRead = n(v.cache_read_input_tokens);
+    const cacheCreation = n(v.cache_creation_input_tokens) ?? 0;
+    if (input === null || output === null || cacheRead === null) return null;
+    return { input_tokens: input, output_tokens: output, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheCreation };
+  } catch {
+    return null;
   }
 }
 
@@ -352,12 +392,16 @@ export async function saveDevinAtifStepOffset(projectPath: string, offset: numbe
  */
 export async function clearDevinAtifStepOffset(projectPath: string, agentScopeId?: string): Promise<void> {
   const filePath = getDevinAtifStepOffsetPath(projectPath, agentScopeId);
-  try {
-    if (existsSync(filePath)) {
-      await unlink(filePath);
+  // Usage 累計補正サイクル: 累計使用量の差分基準もステップオフセットと同じ寿命で消す
+  const usagePath = join(resolveScopeDir(projectPath, agentScopeId), DEVIN_ATIF_USAGE_OFFSET_FILE);
+  for (const p of [filePath, usagePath]) {
+    try {
+      if (existsSync(p)) {
+        await unlink(p);
+      }
+    } catch {
+      // 無視
     }
-  } catch {
-    // 無視
   }
 }
 

@@ -212,6 +212,15 @@ export async function authRoutes(app: FastifyInstance) {
   const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 
   /**
+   * 利用可能なログイン方式（認証不要）。
+   * WebUI のログイン画面が Google ボタンを出すか判定するのに使う。
+   * 社内オンプレ等 Google OAuth 未設定の環境では押しても 501 になるボタンを隠すため。
+   */
+  app.get('/api/auth/providers', async () => {
+    return { google: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) };
+  });
+
+  /**
    * リダイレクト URI を動的に構築（リクエストの Host ヘッダーから）
    * Caddy プロキシ経由の場合は X-Forwarded-Proto/Host を考慮
    */

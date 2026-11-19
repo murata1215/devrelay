@@ -75,3 +75,27 @@ export {
   detectDevinModelMismatch,
   DEVIN_MODEL_TRACKING_ALIASES,
 } from './model-pricing.js';
+// Usage（コスト集計）サイクル: 人別・グループ別・案件別の集計純関数（同じ理由で明示的 named export）
+export {
+  USAGE_TIME_ZONE,
+  USAGE_LABEL_MAX_LENGTH,
+  type UsageThreadRow,
+  type UsageAxis,
+  USAGE_AXES,
+  isUsageAxis,
+  type UsageBucket,
+  type UsageTotals,
+  type UsageNestedBucket,
+  usageAxisKey,
+  totalUsage,
+  summarizeUsage,
+  summarizeUsageNested,
+  isValidMonthKey,
+  jstMonthKey,
+  shiftMonthKey,
+  jstMonthRange,
+  normalizeUsageLabel,
+  formatUsageUsd,
+  usageChangeRatio,
+  usageRowsToCsv,
+} from './usage-aggregate.js';

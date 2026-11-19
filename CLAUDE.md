@@ -102,6 +102,7 @@ pm2 restart devrelay-server
 | DEVRELAY_FCM_STRICT_DELETE | FCM トークン削除ポリシーを旧挙動（`invalid-argument` を即削除）に戻すキルスイッチ（既定 `0` ＝安全側。`1` で旧挙動。`invalid-argument` は別 Firebase プロジェクト発行トークン等でも返るため、既定では連続5回失敗するまで削除しない） |
 | DEVRELAY_FCM_TEST_API | 設定画面の「テスト通知を送る」が使う `POST /api/push/fcm/test` を有効にするか（既定 `1`。`0` で 404。`GET /api/push/fcm/devices`・`POST /api/push/fcm/verify`・`DELETE /api/push/fcm/devices/:tokenPrefix` には影響しない） |
 | DEVRELAY_THREAD_HANDOVER | スレッド引継ぎ `n`（next thread）を有効にするか（既定 `1`。`0` で `n make` / `n` / `n 1` を従来どおり AI へのプロンプトとして扱うキルスイッチ）。元スレッドで `n make` を送るとその AI が引継ぎ書を書いて `<projectPath>/doc/handover/` に保存し、新スレッドで `n` で作成済み引継ぎ書を一覧、`n 1` で選んで今のスレッドに注入する。詳細 `doc/thread-management-spec.md` §11 |
+| DEVRELAY_USAGE | Usage（コスト集計）画面 `/usage` とその API（`/api/usage*`）、ログイン不要のサイネージ `/signage/usage?token=…`（`GET /api/public/usage-signage`）を有効にするか（既定 `1`。`0` で全 API が 404 になるキルスイッチ）。金額は会話履歴のコスト列と同じ `resolveMessageCost()`、月は日本時間の暦月。閲覧は組織全員、グループ（人のタグ）は本人と管理者、案件（スレッドのタグ）はスレッドの持ち主と管理者が変更でき、サイネージ URL の発行・停止は管理者のみ。詳細 `doc/devlog/2026-11-19_usage_cost_aggregation.md` |
 | DEVRELAY_AGENT_REPO_URL | 会社 private リポジトリ clone 対応サイクル: `GET /api/machines/:id/token` が WebUI に返す、Agent インストール一行コマンドに付与する clone 先 URL（`https://` 必須・userinfo 付き URL は拒否して無視）。**未設定時は WebUI のコマンドが現行と完全に同じ文字列になる**（実質的なキルスイッチ）。PAT は**本変数には**一切乗せられない（userinfo 付き URL は拒否）。PAT の配布方式は下記 `DEVRELAY_AGENT_REPO_TOKEN` 参照。詳細 `doc/company-repo-sync.md` |
 | DEVRELAY_AGENT_REPO_TOKEN | 読取PATのサーバー配布サイクル: 上記 `DEVRELAY_AGENT_REPO_URL` とセットのときのみ有効な読取 PAT。DB には一切保存しない（env のみ）。`POST /api/agent/repo-auth`（HTTP、インストール時）・WS `agent:repo:auth:request`（`u` 実行前のローテーション）のどちらも**マシントークンで認証済みの Agent にのみ**配布する（値は `Authorization: Basic <base64>` 形式でのみ渡し、WebUI・ログ・DB には一切出さない）。未設定時は Agent 側で一切の新規通信が発生しない（既存の個人 devrelay.io 含む全環境は無変更）。前サイクルの「PAT をサーバーに送らない」方針を本サイクルで**サーバー env に限り**見直した判断（`Machine.token` 平文保存 ⇒ DB 侵害時のリスクを明示的に受容。前提は Fine-grained・対象リポジトリのみ・`Contents: Read-only`・有効期限必須）。詳細・優先順位・ローテーション手順は `doc/company-repo-sync.md` §9 |
 
@@ -125,6 +126,7 @@ pm2 restart devrelay-server
 | Notification | プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理） |
 | KnowledgeChunk | 高辻ナレッジ: 会話ターン（AI 応答＋直前の人間入力）の検索用チャンク（キーワード ILIKE + pgvector ベクトルのハイブリッド検索。FK は張らない） |
 | UserClearance | 高辻ナレッジ サイクル2: 人の権限（`readLevel`/`writeLevel` 0〜10、`compartments String[]`。行が無ければ既定値 0/0/[]。`userId` unique、FK なし） |
+| UserUsageGroup | Usage サイクル: 人のグループ（CIT / BIT 等、1人1つ。`userId` unique、FK なし。行が無ければ「タグなし」）。スレッドの案件は `Session.usageCase`、サイネージ URL の鍵は `Organization.usageSignageToken` |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`

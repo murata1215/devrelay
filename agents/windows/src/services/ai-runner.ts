@@ -7,10 +7,10 @@ import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch
 import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
-import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId, listDevinSessionOwners } from './session-store.js';
+import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, loadDevinAtifUsageOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId, listDevinSessionOwners } from './session-store.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
 import { buildDevinCapabilityDetail, formatDevinFlagList, isDevinBannerLine, isDevinToolRejectionText } from './devin-diagnostics.js';
-import { buildAtifDigest, summarizeAtifEntry, endedWithoutAnswer, extractRejectionEvidence, sliceStepsFromOffset, type AtifStepSummary } from './devin-atif.js';
+import { buildAtifDigest, resolveAtifTurnUsage, summarizeAtifEntry, endedWithoutAnswer, extractRejectionEvidence, sliceStepsFromOffset, type AtifStepSummary } from './devin-atif.js';
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
 import { parseDevinSessionList, pickDevinSessionId, type DevinSessionEntry } from './devin-session-pick.js';
 import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
@@ -329,6 +329,8 @@ interface DevinTurnDigest {
   modelName: string | null;
   modelId: string | null;
   usage: import('./devin-atif.js').AtifUsageTotals | null;
+  /** Usage 累計補正サイクル: 各ステップの metrics（`resolveAtifTurnUsage()` に渡す） */
+  stepMetrics: (import('./devin-atif.js').AtifUsageTotals | null)[];
   totalSteps: number;
   permissionMode: string | null;
   /** 欠陥1対策: 最後のステップがツール呼び出しで終わっている（＝テキスト応答が無い無言終了）か */
@@ -400,6 +402,7 @@ function readDevinTurnDigest(exportPath: string, lang: Language = DEFAULT_CHAT_L
     modelName: digest.modelName,
     modelId: digest.modelId,
     usage: digest.usage,
+    stepMetrics: digest.stepMetrics,
     totalSteps: digest.totalSteps,
     permissionMode: digest.permissionMode,
     endedWithoutAnswer: endedWithoutAnswer(digest.steps),
@@ -650,6 +653,10 @@ export async function sendPromptToAi(
   // #365: 今回のターン開始時点でのオフセット（前ターン終了時点の累計ステップ数）。
   // devin プロセスを起動する前に読み込んでおき、close ハンドラでの digest 読み取りに渡す。
   let devinAtifStepOffsetAtStart = 0;
+  // Usage 累計補正サイクル: 前ターン終了時点の ATIF 累計使用量（差分の基準）と、今回ターン終了時点の累計
+  // （次ターンの基準として step offset と一緒に保存する）。どちらも取れなければ null。
+  let devinAtifUsageOffsetAtStart: import('./devin-atif.js').AtifUsageTotals | null = null;
+  let devinAtifCumulativeUsage: import('./devin-atif.js').AtifUsageTotals | null = null;
   // #282: CHISEL_LOG_STDERR=1 で stderr に流れる devin 内部ログの分類用
   let devinToolRejectedInLog = false;   // ログ形式で検出したツール拒否（#274 検出の置き換え）
   let devinStderrLineBuffer = '';       // stderr の行バッファ（改行区切り処理の残り）
@@ -849,6 +856,7 @@ export async function sendPromptToAi(
     // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
     // offset<=0 は全件返しにフォールバックする二重防御）。
     devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0;
+    devinAtifUsageOffsetAtStart = await loadDevinAtifUsageOffset(projectPath, options.agentScopeId);
 
     // #368 Phase2a-C: Devin は常に exec 相当（dangerous）で起動する。
     // 下の plan 系分岐（①〜④）は usePlanMode が Devin では常に false になったため
@@ -1650,12 +1658,28 @@ export async function sendPromptToAi(
             const devinDurationMs = Date.now() - devinTurnStartedAt;
             if (digest.usage) {
               const modelKey = digest.modelId ?? digest.modelName ?? 'devin';
+              // Usage 累計補正サイクル: resume で ATIF が過去ターンを含む場合、final_metrics はセッション累計になる。
+              // 今回ターン分だけを usage に記録し、累計は cumulativeUsage に残す（devin-atif.ts resolveAtifTurnUsage）。
+              devinAtifCumulativeUsage = digest.usage;
+              const turnUsage = resolveAtifTurnUsage({
+                totals: digest.usage,
+                stepMetrics: digest.stepMetrics,
+                resumed: !!devinResumedSessionId,
+                stepOffset: devinAtifStepOffsetAtStart,
+                totalSteps: digest.totalSteps,
+                prevTotals: devinAtifUsageOffsetAtStart,
+              });
+              if (turnUsage.mode !== 'total') {
+                log.info(`[devin] usage mode=${turnUsage.mode} turn(in=${turnUsage.usage.input_tokens}, out=${turnUsage.usage.output_tokens}) cumulative(in=${digest.usage.input_tokens}, out=${digest.usage.output_tokens})`);
+              }
               result.usageData = {
-                usage: { ...digest.usage },
-                modelUsage: { [modelKey]: { ...digest.usage } },
+                usage: { ...turnUsage.usage },
+                modelUsage: { [modelKey]: { ...turnUsage.usage } },
                 model: modelKey,
                 durationMs: devinDurationMs,
                 tool: 'devin',
+                usageMode: turnUsage.mode,
+                ...(turnUsage.mode !== 'total' ? { cumulativeUsage: { ...digest.usage } } : {}),
               };
             } else {
               // usage は取れなかったが、モデル名自体は agent.model_name 等から取れている場合がある
@@ -1757,7 +1781,7 @@ export async function sendPromptToAi(
                 if (devinActualModelForSave) {
                   saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
                 }
-                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
+                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId, devinAtifCumulativeUsage as Record<string, number> | null).catch(() => {});
                 saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
               }
             } else {
@@ -1790,7 +1814,7 @@ export async function sendPromptToAi(
                 }
                 // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
                 // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId).catch(() => {});
+                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId, devinAtifCumulativeUsage as Record<string, number> | null).catch(() => {});
                 // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
                 saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
               } else if (pick.reason !== 'none') {

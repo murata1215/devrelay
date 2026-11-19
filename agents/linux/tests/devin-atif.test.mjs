@@ -770,3 +770,82 @@ test('extractAtifModel: 複数ステップで generation_model が異なると�
   const { modelId } = extractAtifModel(parsed);
   assert.equal(modelId, 'swe-1-7-medium');
 });
+
+// ---------------------------------------------------------------------------
+// Usage 累計補正サイクル（2026-11-19）: resume で ATIF が過去ターンを含むと final_metrics が
+// セッション累計になり、ターンごとに合算すると実請求の十数倍になっていた（PC45/exuser59 の実例）。
+// ---------------------------------------------------------------------------
+import { resolveAtifTurnUsage, extractAtifStepMetrics } from '../dist/services/devin-atif.js';
+
+const U = (i, o, c) => ({ input_tokens: i, output_tokens: o, cache_read_input_tokens: c, cache_creation_input_tokens: 0 });
+
+test('resolveAtifTurnUsage: resume で過去ターンを含む累計は前回累計との差分（delta）', () => {
+  // PC45/exuser59 の実測 2 ターン（同一 devin セッション）
+  const r = resolveAtifTurnUsage({
+    totals: U(3428769, 30043, 2939246),
+    stepMetrics: new Array(30).fill(null),
+    resumed: true,
+    stepOffset: 20,
+    totalSteps: 30,
+    prevTotals: U(3231312, 28367, 2939246),
+  });
+  assert.equal(r.mode, 'delta');
+  assert.deepEqual(r.usage, U(197457, 1676, 0));
+});
+
+test('resolveAtifTurnUsage: resume していない / オフセット無しは従来どおり（total）', () => {
+  const base = { totals: U(100, 10, 50), stepMetrics: [], prevTotals: U(10, 1, 5) };
+  assert.equal(resolveAtifTurnUsage({ ...base, resumed: false, stepOffset: 5, totalSteps: 10 }).mode, 'total');
+  assert.equal(resolveAtifTurnUsage({ ...base, resumed: true, stepOffset: 0, totalSteps: 10 }).mode, 'total');
+  // offset がステップ総数以上（別トラジェクトリ・圧縮）
+  assert.equal(resolveAtifTurnUsage({ ...base, resumed: true, stepOffset: 10, totalSteps: 10 }).mode, 'total');
+});
+
+test('resolveAtifTurnUsage: 前回累計が無い・どれかが減っている（別トラジェクトリ）なら差し引かない', () => {
+  const base = { stepMetrics: [], resumed: true, stepOffset: 3, totalSteps: 8 };
+  const a = resolveAtifTurnUsage({ ...base, totals: U(100, 10, 50), prevTotals: null });
+  assert.equal(a.mode, 'total');
+  assert.deepEqual(a.usage, U(100, 10, 50));
+  const b = resolveAtifTurnUsage({ ...base, totals: U(100, 10, 50), prevTotals: U(200, 5, 20) });
+  assert.equal(b.mode, 'total');
+});
+
+test('resolveAtifTurnUsage: ステップ metrics の合計が final_metrics と一致すればオフセット以降の合計（steps）', () => {
+  const steps = [U(10, 1, 0), null, U(20, 2, 5), U(30, 3, 10)];
+  const r = resolveAtifTurnUsage({
+    totals: U(60, 6, 15),
+    stepMetrics: steps,
+    resumed: true,
+    stepOffset: 2,
+    totalSteps: 4,
+    prevTotals: U(10, 1, 0),
+  });
+  assert.equal(r.mode, 'steps');
+  assert.deepEqual(r.usage, U(50, 5, 15));
+});
+
+test('resolveAtifTurnUsage: ステップ metrics が final_metrics と合わなければ使わず delta に倒す', () => {
+  const r = resolveAtifTurnUsage({
+    totals: U(1000, 60, 500),
+    stepMetrics: [U(10, 1, 0), U(20, 2, 0), U(30, 3, 0)],
+    resumed: true,
+    stepOffset: 2,
+    totalSteps: 3,
+    prevTotals: U(400, 20, 200),
+  });
+  assert.equal(r.mode, 'delta');
+  assert.deepEqual(r.usage, U(600, 40, 300));
+});
+
+test('extractAtifStepMetrics / buildAtifDigest.stepMetrics', () => {
+  assert.deepEqual(extractAtifStepMetrics({ metrics: { prompt_tokens: 5, completion_tokens: 2, cached_tokens: 1 } }), U(5, 2, 1));
+  assert.equal(extractAtifStepMetrics({ metrics: {} }), null);
+  assert.equal(extractAtifStepMetrics({ source: 'agent' }), null);
+  const d = buildAtifDigest(JSON.stringify({
+    steps: [{ source: 'user', message: 'x' }, { source: 'agent', message: 'y', metrics: { prompt_tokens: 7, completion_tokens: 3 } }],
+    final_metrics: { total_prompt_tokens: 7, total_completion_tokens: 3 },
+  }));
+  assert.equal(d.stepMetrics.length, 2);
+  assert.equal(d.stepMetrics[0], null);
+  assert.deepEqual(d.stepMetrics[1], U(7, 3, 0));
+});

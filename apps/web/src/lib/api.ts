@@ -9,6 +9,8 @@ const API_BASE = apiUrl('');
 import type { CapabilityConfigLike, CapabilitySyncStatusLike } from './capability-config-rules';
 // 2026-10-23: FCM プッシュ通知診断の型も同様に純ロジックモジュール側で定義済みのものを再利用する
 import type { PushDevicesResponse, PushTestResponse } from './push-device-rules';
+// Usage（コスト集計）サイクル: 集計行の型はサーバーと共通（@devrelay/shared）
+import type { UsageThreadRow } from '@devrelay/shared';
 
 // トークンをlocalStorageに保存
 export function getToken(): string | null {
@@ -87,6 +89,18 @@ export const auth = {
 
   async me(): Promise<{ user: User }> {
     return request('GET', '/auth/me');
+  },
+
+  /** 利用可能なログイン方式（認証不要）。旧サーバーで 404 の場合は Google 有りとみなす */
+  async providers(): Promise<{ google: boolean }> {
+    try {
+      const res = await fetch(`${API_BASE}/auth/providers`);
+      if (!res.ok) return { google: true };
+      const data = await res.json();
+      return { google: data?.google !== false };
+    } catch {
+      return { google: true };
+    }
   },
 };
 
@@ -593,6 +607,48 @@ export const conversations = {
   async list(offset = 0, limit = 50, targetUserId?: string): Promise<ConversationsResponse> {
     const userParam = targetUserId ? `&userId=${encodeURIComponent(targetUserId)}` : '';
     return request('GET', `/conversations?offset=${offset}&limit=${limit}${userParam}`);
+  },
+};
+
+// Usage（コスト集計）API
+export interface UsageMember {
+  userId: string;
+  userName: string;
+  group: string | null;
+}
+
+export interface UsageResponse {
+  month: string;
+  prevMonth: string;
+  currentMonth: string;
+  timeZone: string;
+  myUserId: string;
+  isAdmin: boolean;
+  inOrganization: boolean;
+  rows: UsageThreadRow[];
+  prevRows: UsageThreadRow[];
+  groupOptions: string[];
+  caseOptions: string[];
+  members: UsageMember[];
+  /** admin のときだけ返る（null = サイネージ停止中） */
+  signageToken?: string | null;
+}
+
+export const usage = {
+  async get(month?: string): Promise<UsageResponse> {
+    return request('GET', `/usage${month ? `?month=${encodeURIComponent(month)}` : ''}`);
+  },
+  async setGroup(userId: string, group: string | null): Promise<{ userId: string; group: string | null }> {
+    return request('PUT', `/usage/groups/${encodeURIComponent(userId)}`, { group });
+  },
+  async setCase(sessionId: string, caseName: string | null): Promise<{ sessionId: string; caseName: string | null }> {
+    return request('PUT', `/usage/cases/${encodeURIComponent(sessionId)}`, { caseName });
+  },
+  async issueSignageToken(): Promise<{ signageToken: string }> {
+    return request('POST', '/usage/signage-token', {});
+  },
+  async stopSignage(): Promise<{ signageToken: null }> {
+    return request('DELETE', '/usage/signage-token');
   },
 };
 

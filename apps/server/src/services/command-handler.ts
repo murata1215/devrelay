@@ -328,7 +328,7 @@ export async function executeCommand(
       return handleQuit(context);
 
     case 'help':
-      return getHelpText(lang);
+      return getHelpText(lang, { platform: context.platform });
 
     case 'ai:list':
       return handleAiList(context);

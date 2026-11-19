@@ -2810,3 +2810,20 @@ Node.js の HTTP ヘッダーは Latin-1 範囲外の文字を受け付けず、
 `contentDisposition(type, filename)` を使い、ASCII フォールバックの `filename` と RFC 5987 の
 `filename*=UTF-8''…` を併記する（`/api/files/:id`・エージェントドキュメント配信・履歴 ZIP で適用済み）。
 新しいダウンロード系エンドポイントを足すときもテンプレート文字列で直接組み立てないこと。
+
+## Usage（コスト集計）: 金額は都度計算・案件タグは compartment と分ける（2026-11-19）
+
+- 金額は保存せず、`Message.usageData` から会話履歴と同じ `resolveMessageCost()` で毎回計算する（計算式の修正が過去分にもそのまま効く。二重管理しない）。集計の純関数は `packages/shared/src/usage-aggregate.ts` に置き、サーバー（API・サイネージ）と WebUI（小計・CSV）で共用する。
+- 月は日本時間の暦月。Devin の請求期間（4日〜・太平洋時間）とは一致しないことを画面に明記し、合わせない。
+- グループ（人）は 1 人 1 つ。複数を許すとグループ集計で同じ人のコストが二重に入るため。
+- 案件（スレッド）はナレッジの `compartment` を流用しない。`compartment` は閲覧制限の壁なので、集計用に付け替えると見える範囲まで変わる。`Session.usageCase` を別に持つ。
+- 金額不明（`resolveMessageCost` が null）のターンは 0 円で足し、件数を併記する（「-」を $0.00 と誤解させない方針の延長）。
+- サイネージはログイン不要なので、URL の token（`Organization.usageSignageToken`、`randomBytes(24)`）で守り、返すのは名前・タグ・金額・回数だけ（スレッド名・メール・本文は返さない）。形式不正な token は DB を引かずに 404。
+
+## Devin の usage は「このターン分」を記録する — ATIF final_metrics は累計になりうる（2026-11-19）
+
+- resume で `--export` が過去ターンを含む全トラジェクトリを書き直す環境では、`final_metrics` はセッション累計になる。そのまま記録すると合算が実請求の十数倍になる（PC45/exuser59: $1,090 vs $83.06）。
+- 補正は「ATIF が過去ターンを含むと言えるとき（resume かつ `0 < stepOffset < totalSteps`）」だけ行う。ターン分が来る機体（大半）を誤って差し引かないため、単調増加だけでは判定しない（ターン分でも約半分は偶然増える）。
+- 優先順位: ステップ metrics の全合計が `final_metrics` と一致するとき → offset 以降の合計 ／ 前ターン累計以上 → 差分 ／ それ以外 → そのまま。前ターン累計は step offset と同じ寿命のファイルに保存する。
+- 記録済み行の補正は自動判定せず、機体を人が選んで CLI で行う（dry-run で機体ごとの単調増加率と補正後金額を見てから）。元の累計は `cumulativeUsage` に残し、再実行しても結果が変わらないようにする。
+- Devin のフルシート利用者は請求画面（オンデマンドコスト）に定額分が出ないため、DevRelay の金額の方が大きくなる。これは不具合ではないので補正しない。

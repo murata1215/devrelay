@@ -20,9 +20,13 @@ import { TeamPage } from './pages/TeamPage';
 import { SitesPage } from './pages/SitesPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { LitePage } from './pages/LitePage';
+import { PortalPage } from './pages/PortalPage';
+import { UsagePage } from './pages/UsagePage';
+import { UsageSignagePage } from './pages/UsageSignagePage';
 import { NotificationBanner } from './components/NotificationBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { resolveNextTarget, redirectToManager } from './lib/managerRedirect';
+import { sanitizeNextPath, buildLoginPath } from './lib/portal-rules';
 
 /**
  * 認証済みページのコンテンツ
@@ -54,6 +58,7 @@ function ProtectedContent() {
             <Route path="/conversations" element={<ConversationsPage />} />
             <Route path="/knowledge" element={<KnowledgePage />} />
             <Route path="/activity" element={<MemberActivityPage />} />
+            <Route path="/usage" element={<UsagePage />} />
             <Route path="/dev-reports" element={<DevReportsPage />} />
             <Route path="/machines" element={<MachinesPage />} />
             <Route path="/sites" element={<SitesPage />} />
@@ -72,6 +77,7 @@ function ProtectedContent() {
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const { t } = useLanguage();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -82,7 +88,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (!user) {
-    return <Navigate to="/login" replace />;
+    // トップ（/）を未ログインで開いたらポータルへ。深いリンク（/knowledge 等）は
+    // ログイン後に元の場所へ戻れるよう next 付きでログイン画面へ送る。
+    if (location.pathname === '/' || location.pathname === '') {
+      return <Navigate to="/portal" replace />;
+    }
+    return <Navigate to={buildLoginPath(location.pathname + location.search)} replace />;
   }
 
   return <>{children}</>;
@@ -93,6 +104,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   const { t } = useLanguage();
   const [searchParams] = useSearchParams();
   const nextTarget = resolveNextTarget(searchParams.get('next'));
+  const nextPath = sanitizeNextPath(searchParams.get('next'));
 
   // ログイン済みで /login?next=manager を開いた場合も即座に manager へ遷移する。
   // managerRedirect トグルはここでは見ない（「ログイン成功の瞬間だけ」発火させ、
@@ -120,7 +132,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
         </div>
       );
     }
-    return <Navigate to="/" replace />;
+    return <Navigate to={nextPath ?? '/'} replace />;
   }
 
   return <>{children}</>;
@@ -143,6 +155,24 @@ function AppRoutes() {
           <PublicRoute>
             <RegisterPage />
           </PublicRoute>
+        }
+      />
+      {/* ポータル（ログイン不要）。マニュアル・インストール案内・各機能への入口。ログイン状態で表示を出し分ける */}
+      <Route
+        path="/portal"
+        element={
+          <ErrorBoundary>
+            <PortalPage />
+          </ErrorBoundary>
+        }
+      />
+      {/* Usage サイネージ（ログイン不要・token 必須）。ProtectedContent の外に置き、ヘッダー・ChatPage の WebSocket を持たない全画面表示にする */}
+      <Route
+        path="/signage/usage"
+        element={
+          <ErrorBoundary>
+            <UsageSignagePage />
+          </ErrorBoundary>
         }
       />
       {/* Google OAuth コールバック（認証状態に関係なくアクセス可能） */}

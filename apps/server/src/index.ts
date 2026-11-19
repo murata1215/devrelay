@@ -24,6 +24,7 @@ import { startCapabilitySweep } from './services/capability-sweep.js';
 import { sitesApiRoutes } from './routes/sites-api.js';
 import { knowledgeApiRoutes } from './routes/knowledge-api.js';
 import { knowledgeAdminApiRoutes } from './routes/knowledge-admin-api.js';
+import { usageApiRoutes, usagePublicRoutes } from './routes/usage-api.js';
 import { startSiteHealthChecker } from './services/sites/health-checker.js';
 import { startAccessLogAggregator } from './services/sites/access-aggregator.js';
 import { mcpRoutes } from './mcp/server.js';
@@ -208,6 +209,8 @@ async function main() {
   await app.register(sitesApiRoutes);  // DevRelay Sites Phase 1-A: 公開 site 一覧・ヘルス（管理者限定・read-only）
   await app.register(knowledgeApiRoutes);  // 高辻ナレッジ サイクル1: 会話ターンのハイブリッド検索 API
   await app.register(knowledgeAdminApiRoutes);  // 高辻ナレッジ サイクル2: 人の権限・案件/スレッドの機密度・スレッド閲覧 API
+  await app.register(usageApiRoutes);  // Usage: 人別・グループ別・案件別のコスト集計（ログイン必須）
+  await app.register(usagePublicRoutes);  // Usage: サイネージ用（ログイン不要・token 必須・1分キャッシュ）
 
   // Agent WebSocket endpoint
   app.register(async (fastify) => {

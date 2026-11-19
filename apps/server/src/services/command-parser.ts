@@ -11,6 +11,7 @@ import { isNaturalLanguageEnabled } from './user-settings.js';
 import { prisma } from '../db/client.js';
 import { isThreadHandoverEnabled } from './thread-handover-rules.js';
 import { AGREEMENT_VERSION } from './agreement-template.js';
+import { isTestflightEnabled } from './testflight-manager.js';
 
 /**
  * 「w」コマンドのワンショット exec プロンプト。
@@ -394,37 +395,66 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
   }
 }
 
+export interface HelpTextOptions {
+  /** 現在のチャットのプラットフォーム（'web' / 'discord' / 'telegram' 等）。未指定なら全節を出す */
+  platform?: string;
+}
+
 /**
  * Generate help text
  * #316: チャット表示言語（context.language）に応じて en/ja を切り替える。
+ * 2026-11-18: 環境に合わせて節を出し分ける（会社 devrelay は testflight 無効・WebUI のみのため）。
+ * - テストフライト節: `DEVRELAY_TESTFLIGHT=0` なら出さない（isTestflightEnabled と同じ判定）
+ * - スレッド引継ぎ節: `DEVRELAY_THREAD_HANDOVER=0` なら出さない（パーサ側の判定と揃える）
+ * - `link`: platform が web のときは出さない（web では「不要」を返すだけ）
+ * - `login`: platform が web 以外のときは出さない（web 専用コマンド）
+ * - `sum` は未実装（準備中）のためヘルプには載せない（コマンド自体は残す）
  */
-export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
-  if (lang === 'en') {
-    return `
-📖 **DevRelay Command List**
+export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE, opts: HelpTextOptions = {}): string {
+  const platform = opts.platform;
+  const showTestflight = isTestflightEnabled(process.env.DEVRELAY_TESTFLIGHT);
+  const showHandover = isThreadHandoverEnabled(process.env.DEVRELAY_THREAD_HANDOVER);
+  const showLink = platform !== 'web';
+  const showLogin = platform === undefined || platform === 'web';
 
-**Basics**
+  const en = lang === 'en';
+  const sections: (string | false)[] = [];
+
+  sections.push(en ? `📖 **DevRelay Command List**` : `📖 **DevRelay コマンド一覧**`);
+
+  sections.push(en ? `**Basics**
 \`m\` - List agents
 \`p\` - List projects
 \`c\` - Reconnect to the last project
 \`s\` or \`session\` - Session info
-\`1\`, \`2\`, \`3\`... - Select from a list
+\`1\`, \`2\`, \`3\`... - Select from a list` : `**基本操作**
+\`m\` - エージェント一覧
+\`p\` - プロジェクト一覧
+\`c\` - 前回の接続先に再接続
+\`s\` または \`session\` - セッション情報
+\`1\`, \`2\`, \`3\`... - 一覧から選択`);
 
-**Stop a running turn**
-\`k\` or \`kill\` - Stop the running AI turn now (or use the Stop button in the WebUI progress box)
+  sections.push(en ? `**Stop a running turn**
+\`k\` or \`kill\` - Stop the running AI turn now (or use the Stop button in the WebUI progress box)` : `**実行中の停止**
+\`k\` または \`kill\` - 実行中の AI を今すぐ停止（WebUI は進捗表示の「停止」ボタンでも可）`);
 
-**Plan execution**
+  sections.push(en ? `**Plan execution**
 \`e\` or \`exec\` - Start executing the plan
 \`e, <instruction>\` or \`exec, <instruction>\` - Execute with an extra instruction (e.g. \`e, commit it\`)
-\`w\` - Update docs + commit + push (wrap up)
+\`w\` - Update docs + commit + push (wrap up)` : `**プラン実行**
+\`e\` または \`exec\` - プラン実行開始
+\`e, <指示>\` または \`exec, <指示>\` - 指示を添えて実行（例: \`e, コミットして\`）
+\`w\` - ドキュメント更新＋コミット＋プッシュ（wrap up）`);
 
-**History**
+  sections.push(en ? `**History**
 \`r\` - Recent work
 \`log\` - Conversation log (last 10)
-\`log20\` - Conversation log (20)
-\`sum\` - Summary of the last session (coming soon)
+\`log20\` - Conversation log (20)` : `**履歴**
+\`r\` - 直近の作業一覧
+\`log\` - 会話ログ (直近10件)
+\`log20\` - 会話ログ (20件)`);
 
-**AI switching**
+  sections.push(en ? `**AI switching**
 \`a\` - List/switch AI tools
 \`a 1\`, \`a 2\` - Select from the list by number
 \`l\` - Model list (shows settings for the current session's tool)
@@ -433,75 +463,7 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE): string {
 \`l exec:opus\` - Change Exec only (current tool)
 \`l devin\` / \`l codex\` - Show model settings of the given tool
 \`l devin:<model>\` - Change both Plan/Exec models of the given tool
-\`l codex:plan:gpt-5.6-terra\` - Change the given tool's Plan only
-
-**Account linking**
-\`link\` - Link with your WebUI account
-
-**Build log**
-\`b\` or \`build\` - Build log (exec history, per-machine build diffs)
-
-**TestFlight**
-\`testflight\` - List services
-\`testflight <name>\` - Create a new service
-\`testflight <name> --phaser\` - Create a Phaser game project
-\`testflight rm <name>\` - Archive a service
-\`testflight info <name>\` - Service details
-\`testflight cp <src> <dest>\` - Copy a service
-\`testflight help\` - Detailed help
-
-**Thread handover**
-\`n make\` - In the original thread, have its AI write a handover note (saved in doc/handover/)
-\`n\` - In the new thread, list the handover notes created in this project
-\`n 1\` - Use that handover note in this thread
-
-**Team**
-\`ask <project>: <question>\` - Ask another project
-\`teamexec <project>: <instruction>\` or \`te ...\` - Have another project execute work (\`e\` / \`w\` are then forwarded there)
-\`d\` or \`disconnect\` - Release the teamexec target (\`e\` / \`w\` return to your own project)
-
-**Claude re-login (WebUI only)**
-\`login\` - Start remote re-login when Claude login has expired
-\`login <code>\` - Submit the authorization code shown after logging in
-\`login cancel\` - Cancel the re-login
-
-**Other**
-\`ag\` or \`agreement\` - Apply DevRelay Agreement ${AGREEMENT_VERSION} (creates rules/devrelay.md)
-\`u\` or \`update\` - Check/update the agent version (send twice in a row to update)
-\`u force\` or \`u!\` - Update now without waiting, even if an AI turn is in progress (connection is briefly interrupted)
-\`x\` - Clear conversation history (send twice in a row)
-\`q\` - Disconnect
-\`h\` - This help
-
-**Work instructions**
-Any other message is treated as an instruction to the AI
-`.trim();
-  }
-  return `
-📖 **DevRelay コマンド一覧**
-
-**基本操作**
-\`m\` - エージェント一覧
-\`p\` - プロジェクト一覧
-\`c\` - 前回の接続先に再接続
-\`s\` または \`session\` - セッション情報
-\`1\`, \`2\`, \`3\`... - 一覧から選択
-
-**実行中の停止**
-\`k\` または \`kill\` - 実行中の AI を今すぐ停止（WebUI は進捗表示の「停止」ボタンでも可）
-
-**プラン実行**
-\`e\` または \`exec\` - プラン実行開始
-\`e, <指示>\` または \`exec, <指示>\` - 指示を添えて実行（例: \`e, コミットして\`）
-\`w\` - ドキュメント更新＋コミット＋プッシュ（wrap up）
-
-**履歴**
-\`r\` - 直近の作業一覧
-\`log\` - 会話ログ (直近10件)
-\`log20\` - 会話ログ (20件)
-\`sum\` - 直近セッションの要約（準備中）
-
-**AI切り替え**
+\`l codex:plan:gpt-5.6-terra\` - Change the given tool's Plan only` : `**AI切り替え**
 \`a\` - AI ツール一覧・切り替え
 \`a 1\`, \`a 2\` - 一覧から番号で選択
 \`l\` - AI モデル一覧（現在セッションのツールの設定を表示）
@@ -510,47 +472,73 @@ Any other message is treated as an instruction to the AI
 \`l exec:opus\` - Exec のみ変更（現在のツール）
 \`l devin\` / \`l codex\` - 指定したツールのモデル設定を表示
 \`l devin:<モデル>\` - 指定したツールの Plan/Exec 両方を変更
-\`l codex:plan:gpt-5.6-terra\` - 指定したツールの Plan のみ変更
+\`l codex:plan:gpt-5.6-terra\` - 指定したツールの Plan のみ変更`);
 
-**アカウント連携**
-\`link\` - WebUI アカウントとリンク
+  sections.push(showLink && (en ? `**Account linking**
+\`link\` - Link with your WebUI account` : `**アカウント連携**
+\`link\` - WebUI アカウントとリンク`));
 
-**ビルドログ**
-\`b\` または \`build\` - ビルドログ（exec 実行履歴・各マシンのビルド差分）
+  sections.push(en ? `**Build log**
+\`b\` or \`build\` - Build log (exec history, per-machine build diffs)` : `**ビルドログ**
+\`b\` または \`build\` - ビルドログ（exec 実行履歴・各マシンのビルド差分）`);
 
-**テストフライト**
+  sections.push(showTestflight && (en ? `**TestFlight**
+\`testflight\` - List services
+\`testflight <name>\` - Create a new service
+\`testflight <name> --phaser\` - Create a Phaser game project
+\`testflight rm <name>\` - Archive a service
+\`testflight info <name>\` - Service details
+\`testflight cp <src> <dest>\` - Copy a service
+\`testflight help\` - Detailed help` : `**テストフライト**
 \`testflight\` - サービス一覧
 \`testflight <name>\` - 新規サービス作成
 \`testflight <name> --phaser\` - Phaser ゲームプロジェクト作成
 \`testflight rm <name>\` - サービスをアーカイブ
 \`testflight info <name>\` - サービス詳細
 \`testflight cp <src> <dest>\` - サービスを複製
-\`testflight help\` - 詳細ヘルプ
+\`testflight help\` - 詳細ヘルプ`));
 
-**スレッド引継ぎ**
+  sections.push(showHandover && (en ? `**Thread handover**
+\`n make\` - In the original thread, have its AI write a handover note (saved in doc/handover/)
+\`n\` - In the new thread, list the handover notes created in this project
+\`n 1\` - Use that handover note in this thread` : `**スレッド引継ぎ**
 \`n make\` - 元のスレッドで、AI に引継ぎ書を書かせる（doc/handover/ に保存）
 \`n\` - 新しいスレッドで、このプロジェクトの作成済み引継ぎ書を一覧表示
-\`n 1\` - その引継ぎ書を今のスレッドで使う
+\`n 1\` - その引継ぎ書を今のスレッドで使う`));
 
-**チーム**
+  sections.push(en ? `**Team**
+\`ask <project>: <question>\` - Ask another project
+\`teamexec <project>: <instruction>\` or \`te ...\` - Have another project execute work (\`e\` / \`w\` are then forwarded there)
+\`d\` or \`disconnect\` - Release the teamexec target (\`e\` / \`w\` return to your own project)` : `**チーム**
 \`ask <project>: <質問>\` - 他プロジェクトに質問
 \`teamexec <project>: <指示>\` または \`te ...\` - 他プロジェクトに作業を実行させる（以後 \`e\` / \`w\` はそのプロジェクトに転送）
-\`d\` または \`disconnect\` - teamexec の接続先を解除（\`e\` / \`w\` が自分のプロジェクトに戻る）
+\`d\` または \`disconnect\` - teamexec の接続先を解除（\`e\` / \`w\` が自分のプロジェクトに戻る）`);
 
-**Claude 再ログイン（WebUI のみ）**
+  sections.push(showLogin && (en ? `**Claude re-login (WebUI only)**
+\`login\` - Start remote re-login when Claude login has expired
+\`login <code>\` - Submit the authorization code shown after logging in
+\`login cancel\` - Cancel the re-login` : `**Claude 再ログイン（WebUI のみ）**
 \`login\` - Claude のログインが切れたときにリモート再ログインを開始
 \`login <コード>\` - ログイン後に表示された認可コードを送信
-\`login cancel\` - 再ログインを中止
+\`login cancel\` - 再ログインを中止`));
 
-**その他**
+  sections.push(en ? `**Other**
+\`ag\` or \`agreement\` - Apply DevRelay Agreement ${AGREEMENT_VERSION} (creates rules/devrelay.md)
+\`u\` or \`update\` - Check/update the agent version (send twice in a row to update)
+\`u force\` or \`u!\` - Update now without waiting, even if an AI turn is in progress (connection is briefly interrupted)
+\`x\` - Clear conversation history (send twice in a row)
+\`q\` - Disconnect
+\`h\` - This help` : `**その他**
 \`ag\` または \`agreement\` - DevRelay Agreement ${AGREEMENT_VERSION} を適用（rules/devrelay.md 作成）
 \`u\` または \`update\` - Agent バージョン確認・更新（2回連続で更新実行）
 \`u force\` または \`u!\` - AI 実行中でも待たずにすぐ更新（接続が一時的に切断されます）
 \`x\` - 会話履歴をクリア（2回連続で実行）
 \`q\` - 切断
-\`h\` - このヘルプ
+\`h\` - このヘルプ`);
 
-**作業指示**
-上記以外のメッセージは AI への指示として処理されます
-`.trim();
+  sections.push(en ? `**Work instructions**
+Any other message is treated as an instruction to the AI` : `**作業指示**
+上記以外のメッセージは AI への指示として処理されます`);
+
+  return sections.filter((s): s is string => typeof s === 'string' && s.length > 0).join('\n\n');
 }

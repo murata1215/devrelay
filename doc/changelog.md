@@ -6,6 +6,34 @@
 
 ## 実装済み機能
 
+### Devin のコストが累計で記録され過大になる不具合を修正 (2026-11-19)
+
+Usage 画面で 土橋（PC45/exuser59）の 11 月が $1,090（実請求 $83.06）。resume で ATIF（`devin --export`）が過去ターンを含む環境では `final_metrics` がセッション累計になり、Agent がそれを 1 ターン分として記録していたため。
+
+- Agent（3 OS）`devin-atif.ts` `resolveAtifTurnUsage()`: resume かつ ATIF が過去ターンを含む（`0 < stepOffset < totalSteps`）ときだけ、ステップ metrics（final_metrics と一致する場合）または「累計 − 前ターン累計」を今回分にする。それ以外は従来どおり。`usageData.usageMode` / `cumulativeUsage` を追加。前ターン累計は `session-store.ts` の `devin-atif-usage-offset.json`（step offset と同じ寿命）
+- 既存データ補正 CLI `pnpm --filter @devrelay/server devin:cumulative-fix`（既定 dry-run で機体ごとの単調増加率と補正後金額、`--machine` 指定 + `--apply` で書き換え。元値は `cumulativeUsage` に退避・再実行しても同じ）
+- PC45/exuser59 に適用済み（140 行、$3,322.50 → $224.65。11 月 $82.39）。反映には各機 `u`。詳細 `doc/devlog/2026-11-19_devin_cumulative_usage.md`
+- miyazawa の差（DevRelay $156.97 vs 請求 $55.83）は Devin のフルシート（定額分は請求画面のオンデマンドコストに出ない）が原因で不具合ではない。Usage 画面に注記を追加
+
+### Usage（人別・グループ別・案件別のコスト集計）とサイネージ画面を追加 (2026-11-19)
+
+会話履歴のコスト列と同じ金額を、グループ → 利用者 → プロジェクト → 案件 → スレッド の軸で月ごとに集計する画面と、ログイン不要で大きく表示するサイネージ画面。
+
+- WebUI `/usage`（メニュー「活動」の右、全員に表示・組織全体を閲覧）: 月切替（当月/前月/◀▶）、合計・前月・前月比、切り口（グループ/利用者/プロジェクト/案件）別の小計、1 行 1 スレッドの明細（絞り込み・並べ替え・CSV）、グループ・案件のその場編集（候補つき）、メンバーのグループ設定、管理者向けサイネージ URL の発行・コピー・再発行・停止
+- WebUI `/signage/usage?token=…[&by=user]`（ログイン不要）: 当月合計・前月合計・前月比、グループごとのカード（中は案件別の横棒。`by=user` で利用者別）、5 分ごと自動更新
+- API: `GET /api/usage`、`PUT /api/usage/groups/:userId`、`PUT /api/usage/cases/:sessionId`、`POST|DELETE /api/usage/signage-token`、`GET /api/public/usage-signage`（1 分キャッシュ、token 不一致は 404）
+- 集計: `packages/shared/src/usage-aggregate.ts`（JST 暦月・小計・入れ子集計・CSV）。金額不明ターンは 0 円で足し件数を併記
+- DB: 新規 `UserUsageGroup`、`Session.usageCase`、`Organization.usageSignageToken`（`doc/migrations/usage_cost_aggregation.md`）
+- キルスイッチ `DEVRELAY_USAGE`（既定 `1`）。詳細 `doc/devlog/2026-11-19_usage_cost_aggregation.md`
+
+### ヘルプ（h）を環境に合わせて出し分け (2026-11-18)
+
+会社 devrelay（testflight 無効・WebUI のみ）で使えない項目がヘルプに出ていたのを整理。
+
+- `getHelpText(lang, { platform })`（command-parser.ts）: `DEVRELAY_TESTFLIGHT=0` ならテストフライト節、`DEVRELAY_THREAD_HANDOVER=0` ならスレッド引継ぎ節を出さない。WebUI では `link` を、Discord/Telegram では `login`（WebUI 専用）を出さない。未実装の `sum（準備中）` はヘルプから削除（コマンドは残す）
+- `command-handler.ts` から `context.platform` を渡す。テスト `tests/help-text.test.mjs` に出し分けの 4 件追加
+- 反映はサーバー再起動のみ。詳細 `doc/devlog/2026-11-18_help_by_environment.md`
+
 ### Devin プランターンの「git リポジトリではない」警告を廃止 (2026-11-17)
 
 非 git プロジェクト（例: `d:\Programs\devin`）で Devin のプランターンを送るたびに「自動復元ガードが今回は使えません」がチャットに出てノイズだったため廃止。
@@ -14,6 +42,17 @@
 - `packages/shared/src/i18n.ts`: 未使用になった `devin.planGuardUnavailable` を削除
 - 挙動: git プロジェクトのガード（巻き戻し・退避・失敗通知）は従来どおり。非 git では従来どおり巻き戻されない（通知が消えるだけ）。ガードを効かせたい場合は `git init`
 - 反映には各機で `u`
+
+### ポータル（/portal）を追加し、未ログイン時のトップをポータルに (2026-11-11)
+
+社内 IIS 配置で、ログイン画面しか入口がなく使い方が分からない／Google ログインが未設定なのにボタンが出る（押すと 501）問題への対応。
+
+- `apps/web/src/pages/PortalPage.tsx`（新規・ログイン不要）: ヒーロー（ログイン / DevRelay を開く）、高辻ナレッジ・チャット・エージェントのカード、PDF マニュアル一覧、インストール手順、リンク
+- 掲載内容は配信先の `<base>portal-files/portal.json` から読む（会社固有の PDF をリポジトリに入れない）。無い・壊れている場合は既定内容。正規化と安全判定は `src/lib/portal-rules.ts`（ファイル名は `portal-files/` 配下のみ、`..`・スキーム拒否）
+- 未ログインで `/` を開くと `/portal`、それ以外の保護ページは `/login?next=<元のパス>` へ送り、ログイン後に元のパスへ戻す（`/` 始まりの内部パスのみ許可＝オープンリダイレクト防止。従来の `next=manager` はそのまま）
+- `GET /api/auth/providers`（認証不要）→ `{ google }`。`GOOGLE_CLIENT_ID`/`SECRET` が揃わない環境ではログイン画面の Google ボタンと区切りを出さない（旧サーバーで 404 の場合は従来どおり表示）
+- ログイン画面に「← ポータルへ」、設定メニューに「ポータル・マニュアル」を追加
+- portal.json の書式: `title` / `subtitle` / `notices[{date,text}]` / `manuals[{title,description,file|url}]` / `installSteps[]` / `links[{title,description,href}]`
 
 ### Devin の推定コストを実請求に一致させ、照合用集計 CLI を追加 (2026-11-09)
 

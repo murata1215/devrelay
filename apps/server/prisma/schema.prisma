@@ -47,6 +47,7 @@ model Organization {
   logoMimeType     String?             // ロゴの MIME タイプ（image/png 等）
   allowedIpRanges  String?             // IP アクセス制限（#285）: 許可 CIDR の JSON 配列文字列。null/空配列=制限なし
   aiModelDefaults  String?             // 組織AIデフォルト（#372）: <tool>_model_<mode> キーの JSON マップ文字列。null=未設定
+  usageSignageToken String?  @unique  // Usage サイクル: ログイン不要のサイネージ URL の鍵。null=サイネージ無効
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -291,6 +292,9 @@ model Session {
   handoverDoc           String?
   handoverDocAt         DateTime?
   handoverDocStamp      String?   // 上記のファイル名スタンプ
+  // Usage（コスト集計）サイクル: このスレッドの案件名（コスト集計専用。ナレッジの compartment とは別物で
+  // 閲覧制限には一切使わない）。null = 案件なし。backfill しない。
+  usageCase             String?
 
   messages       Message[]
   buildLogs      BuildLog[]
@@ -354,6 +358,17 @@ model UserClearance {
   updatedBy    String?  // 設定した admin の userId（監査用。FK なし）
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+}
+
+// Usage（コスト集計）サイクル: 人のグループ（CIT / BIT 等。1人1つ）。行が無ければ「タグなし」。
+// UserClearance と同じく FK は張らない（ユーザー削除後に残っても集計対象から外れるだけ）。
+model UserUsageGroup {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  groupName String
+  updatedBy String?  // 設定した userId（監査用。FK なし）
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // メッセージ履歴
