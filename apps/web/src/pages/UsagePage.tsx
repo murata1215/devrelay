@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
   summarizeUsage,
   totalUsage,
@@ -33,6 +33,9 @@ const AXIS_LABELS: Record<UsageAxis, string> = {
 const AXES: UsageAxis[] = ['group', 'user', 'project', 'case'];
 
 type SortKey = 'group' | 'user' | 'project' | 'case' | 'thread' | 'cost' | 'turns' | 'lastAt';
+
+/** 明細の 1 ページあたりの件数（全件を一度に出すと縦に長すぎるため改ページする） */
+const PAGE_SIZE = 50;
 
 function formatMonth(key: string): string {
   const [y, m] = key.split('-');
@@ -126,7 +129,8 @@ export function UsagePage() {
   const [error, setError] = useState('');
   const [axis, setAxis] = useState<UsageAxis>('group');
   const [filters, setFilters] = useState<Record<UsageAxis, string>>({ group: '', user: '', project: '', case: '' });
-  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'cost', desc: true });
+  // 既定の並びは会話日時（スレッドの当月最終応答）の新しい順。見出しクリックで従来どおり切り替えられる
+  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'lastAt', desc: true });
   const [showMembers, setShowMembers] = useState(false);
   const [signageMsg, setSignageMsg] = useState('');
 
@@ -212,6 +216,28 @@ export function UsagePage() {
       return sort.desc ? -c : c;
     });
   }, [filtered, sort]);
+
+  // ---- 明細の改ページ（画面内だけで分ける。データは全件取得済み・CSV は全件のまま） ----
+  /** 表示中のページ（1 始まり） */
+  const [page, setPage] = useState(1);
+  /** ページ送り時に明細の見出しまでスクロールで戻すための参照 */
+  const detailRef = useRef<HTMLDivElement | null>(null);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  // 絞り込み・並び替え・月の切り替えをしたら 1 ページ目に戻す（前の条件のページ番号を引きずらない）
+  useEffect(() => {
+    setPage(1);
+  }, [filters, sort, month]);
+  // 再取得等で件数が減り、今のページが存在しなくなった場合は最終ページに丸める
+  const currentPage = Math.min(page, pageCount);
+  const pageRows = useMemo(
+    () => sorted.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [sorted, currentPage],
+  );
+  /** ページを移動し、明細の見出しが見える位置までスクロールする */
+  const goPage = (p: number) => {
+    setPage(Math.min(Math.max(1, p), pageCount));
+    detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   const canEditGroup = (userId: string) => !!data && (data.isAdmin || userId === data.myUserId);
   const canEditCase = (row: UsageThreadRow) => !!data && (data.isAdmin || row.userId === data.myUserId);
@@ -317,6 +343,8 @@ export function UsagePage() {
 
   const thCls = 'text-left text-[var(--text-muted)] text-xs font-medium px-3 py-2 cursor-pointer select-none whitespace-nowrap';
   const selectCls = 'px-2 py-1 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded text-[var(--text-primary)] text-sm max-w-[11rem]';
+  /** 明細のページ送りボタン（端のページでは押せない見た目にする） */
+  const pagerBtnCls = 'px-3 py-1 rounded border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-40 disabled:cursor-default disabled:hover:bg-transparent';
 
   return (
     <div className="p-6 space-y-6">
@@ -467,7 +495,7 @@ export function UsagePage() {
       </div>
 
       {/* 明細（1 行 1 スレッド） */}
-      <div className="bg-[var(--bg-secondary)] rounded-lg p-4">
+      <div ref={detailRef} className="bg-[var(--bg-secondary)] rounded-lg p-4 scroll-mt-4">
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <h2 className="text-lg font-semibold text-[var(--text-primary)] mr-2">明細</h2>
           {AXES.map((a) => (
@@ -493,7 +521,12 @@ export function UsagePage() {
             </button>
           )}
           <div className="flex-1" />
-          <span className="text-xs text-[var(--text-muted)]">{sorted.length} 件</span>
+          {/* 複数ページのときは「今どこを見ているか」も出す（例: 51–100 / 221 件） */}
+          <span className="text-xs text-[var(--text-muted)] tabular-nums">
+            {pageCount > 1
+              ? `${(currentPage - 1) * PAGE_SIZE + 1}–${Math.min(currentPage * PAGE_SIZE, sorted.length)} / ${sorted.length} 件`
+              : `${sorted.length} 件`}
+          </span>
           <button
             onClick={downloadCsv}
             className="px-3 py-1 rounded border border-[var(--border-color)] text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
@@ -508,6 +541,8 @@ export function UsagePage() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-[var(--border-color)]">
+                {/* 日時は以前は右端（lg 以上のみ表示）で画面幅に収まらず見えなかったため、左端に常時表示する */}
+                <th className={thCls} onClick={() => toggleSort('lastAt')}>日時{sortMark('lastAt')}</th>
                 <th className={thCls} onClick={() => toggleSort('group')}>グループ{sortMark('group')}</th>
                 <th className={thCls} onClick={() => toggleSort('user')}>利用者{sortMark('user')}</th>
                 <th className={thCls} onClick={() => toggleSort('project')}>プロジェクト{sortMark('project')}</th>
@@ -515,12 +550,18 @@ export function UsagePage() {
                 <th className={thCls} onClick={() => toggleSort('thread')}>スレッド{sortMark('thread')}</th>
                 <th className={`${thCls} text-right`} onClick={() => toggleSort('cost')}>金額{sortMark('cost')}</th>
                 <th className={`${thCls} text-right`} onClick={() => toggleSort('turns')}>ターン{sortMark('turns')}</th>
-                <th className={`${thCls} text-right hidden lg:table-cell`} onClick={() => toggleSort('lastAt')}>最終応答{sortMark('lastAt')}</th>
               </tr>
             </thead>
             <tbody>
-              {sorted.map((r) => (
+              {pageRows.map((r) => (
                 <tr key={r.sessionId} className="border-b border-[var(--border-color)]/50 hover:bg-[var(--bg-tertiary)]/20">
+                  {/* 日時: スレッドの当月最後の応答（JST）。マウスを乗せると年付きで出す */}
+                  <td
+                    className="px-3 py-1.5 text-xs text-[var(--text-muted)] tabular-nums whitespace-nowrap"
+                    title={`最終応答 ${new Date(r.lastAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`}
+                  >
+                    {new Date(r.lastAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </td>
                   <td className="px-3 py-1.5 text-sm">
                     <LabelEditor
                       value={r.group}
@@ -541,20 +582,35 @@ export function UsagePage() {
                       onSave={(c) => saveCase(r.sessionId, c)}
                     />
                   </td>
-                  <td className="px-3 py-1.5 text-sm text-[var(--text-secondary)] max-w-[22rem] truncate" title={r.threadTitle}>{r.threadTitle}</td>
+                  <td className="px-3 py-1.5 text-sm text-[var(--text-secondary)] max-w-[18rem] truncate" title={r.threadTitle}>{r.threadTitle}</td>
                   <td className="px-3 py-1.5 text-sm text-right font-semibold text-[var(--text-primary)] tabular-nums whitespace-nowrap">{formatUsageUsd(r.costUsd)}</td>
                   <td className="px-3 py-1.5 text-sm text-right text-[var(--text-secondary)] tabular-nums whitespace-nowrap">
                     {r.turns}
                     {r.unknownTurns > 0 && <span className="text-xs text-[var(--text-muted)]" title="金額不明のターン数"> (不明{r.unknownTurns})</span>}
-                  </td>
-                  <td className="px-3 py-1.5 text-xs text-right text-[var(--text-muted)] whitespace-nowrap hidden lg:table-cell">
-                    {new Date(r.lastAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {/* ページ送り（1 ページに収まるときは出さない） */}
+        {pageCount > 1 && (
+          <div className="flex items-center justify-center gap-1 mt-3 text-sm">
+            {([
+              ['« 最初', 1],
+              ['‹ 前へ', currentPage - 1],
+            ] as const).map(([label, p]) => (
+              <button key={label} onClick={() => goPage(p)} disabled={currentPage === 1} className={pagerBtnCls}>{label}</button>
+            ))}
+            <span className="px-3 text-[var(--text-secondary)] tabular-nums">{currentPage} / {pageCount}</span>
+            {([
+              ['次へ ›', currentPage + 1],
+              ['最後 »', pageCount],
+            ] as const).map(([label, p]) => (
+              <button key={label} onClick={() => goPage(p)} disabled={currentPage === pageCount} className={pagerBtnCls}>{label}</button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* メンバーのグループ設定（利用実績が無い人も設定できる） */}

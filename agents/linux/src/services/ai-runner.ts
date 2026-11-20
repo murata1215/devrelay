@@ -2086,7 +2086,7 @@ async function sendPromptToAiImpl(
   let devinRuntimeLimitHit = false; // 実行時間上限で kill したか
   let devinStepLimitHit = false;    // ステップ数上限で kill したか
   let devinStepCount = 0;           // ATIF ステップ数カウンタ
-  const devinMaxRuntimeMin = config.aiTools.devin?.maxRuntimeMinutes ?? 30; // 0=無制限（今サイクル: 既定 15→30分に変更、ユーザー指示）
+  const devinMaxRuntimeMin = config.aiTools.devin?.maxRuntimeMinutes ?? 60; // 0=無制限（2026-11-20: 既定 30→60分に変更、ユーザー指示。過去: 15→30分）
   const devinMaxSteps = config.aiTools.devin?.maxSteps ?? 0;                 // 0=無効
   // #281: Devin の作業中ファイル変更ウォッチ（「内部で何をしているか」のライブ表示）。
   // ATIF は turn 終了時にしか書かれずライブ tail 不可のため、ファイル操作を監視して補完する。

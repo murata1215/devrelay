@@ -262,10 +262,13 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // Usage 案件必須サイクル（2026-11-19）で、ChatPage.tsx / LitePage.tsx の入力欄の上に案件欄（CaseTagBar）と
 // 「案件が空なら AI プロンプトを止める」判定を追加したため、両方の行数ピンを実測値に更新した
 // （ChatPage 3911 → 3938、LitePage 682 → 713。renderMarkdown 出現数は無変更のため据え置き）。
+//
+// メッセージ時刻の日付表示サイクル（2026-11-19）で、ChatPage.tsx のメッセージ横の時刻を
+// `formatMessageTime()`（今日以外は日付付き）に差し替えたため、ChatPage の行数ピンのみ実測値（3938 → 3941）に更新した。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 3938, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 3941, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

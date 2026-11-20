@@ -6,6 +6,11 @@
 
 ## 実装済み機能
 
+### Devin の実行時間上限の既定を 30 分 → 60 分に変更 (2026-11-20)
+
+- `aiTools.devin.maxRuntimeMinutes` 未設定時の既定値を 30 → 60 分に（agents/linux・windows・macos の `ai-runner.ts`）。config.yaml に明示値がある機はその値が優先（`0` = 無制限は従来どおり）
+- 反映は各機の `u`（会社リポジトリから取得）。README の古い「default 15 min」表記も 60 min に修正
+
 ### チャットの入力欄で案件タグを付ける・案件が空なら AI に送れなくする (2026-11-19)
 
 案件タグ（`Session.usageCase`）を /usage の明細でしか付けられず気づきにくかったため、チャット側で付けられるようにした。

@@ -64,9 +64,9 @@ import { isAiToolPresent } from './ai-tool-probe.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
 import { saveReceivedFiles, buildPromptWithFiles } from './file-handler.js';
 import {
-  clearOutputDir,
-  collectOutputFiles,
-  OUTPUT_DIR_INSTRUCTION,
+  beginOutputTurn,
+  collectTurnOutputFiles,
+  buildOutputDirInstruction,
   PLAN_MODE_INSTRUCTION,
   EXEC_MODE_INSTRUCTION,
   DEVRELAY_AGREEMENT_MARKER,
@@ -1449,13 +1449,18 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
   }
 
-  // Clear output directory before running
-  // #348: 一時セッションは呼ばない（対話セッションが書きかけの .devrelay-output/ 成果物を
-  // cross-query 開始のたびに rm -rf されてしまう事故を防ぐ）
-  // スレッド引継ぎ（`n`）の裏ターンも呼ばない（引継ぎ先スレッド等の成果物を巻き込まないため）
-  if (!isEphemeral && !payload.handoverTurn) {
-    await clearOutputDir(sessionInfo.projectPath);
-  }
+  // 出力フォルダの準備（ターン専用フォルダ `.devrelay-output/turn_<turnId>/` を作る）
+  // 以前は共通の `.devrelay-output/` を丸ごと消していたため、同じプロジェクトで並行して動く別スレッドの
+  // 作りかけ成果物まで消え、完了時には別スレッドのファイルまで送ってしまっていた。ターンごとにフォルダを分け、
+  // 直下を消す処理はやめる（24 時間以上前の古いものだけ片付ける）。
+  // #348: 一時セッション・スレッド引継ぎ（`n`）の裏ターンは片付け（prune）をしない
+  // （対話セッションの成果物を巻き込まないため）。ただし自分専用フォルダは作るので混線もしない。
+  const outputTurn = await beginOutputTurn(
+    sessionInfo.projectPath,
+    payload.turnId || `${Date.now().toString(36)}_${payload.sessionId}`,
+    { prune: !isEphemeral && !payload.handoverTurn },
+  );
+  const outputDirInstruction = buildOutputDirInstruction(outputTurn);
 
   // Check if the last entry (before current user message) is an exec marker
   // This means exec was just sent, so this prompt should run in exec mode
@@ -1542,7 +1547,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const composeFullPrompt = (includeHistory: boolean): string => {
     const handoverPart = handoverBlock && (includeHistory || handoverPending) ? handoverBlock : '';
     if (handoverPart) handoverInjected = true;
-    const basePrompt = effectiveModeInstruction + handoverPart + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + OUTPUT_DIR_INSTRUCTION;
+    const basePrompt = effectiveModeInstruction + handoverPart + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + outputDirInstruction;
     if (!(sessionInfo.history.length > 1 && includeHistory)) {
       historyContextSize = 0;
       return basePrompt;
@@ -1565,7 +1570,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
     historyContextSize = historyContext.length;
-    return `${effectiveModeInstruction}${handoverPart}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${OUTPUT_DIR_INSTRUCTION}`;
+    return `${effectiveModeInstruction}${handoverPart}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${outputDirInstruction}`;
   };
 
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
@@ -1615,7 +1620,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   console.log(`   - User prompt: ${promptWithFiles.length} chars`);
   console.log(`   - Work state: ${workStatePrompt.length} chars`);
   console.log(`   - Storage context: ${storageContextPrompt.length} chars`);
-  console.log(`   - Output instruction: ${OUTPUT_DIR_INSTRUCTION.length} chars`);
+  console.log(`   - Output instruction: ${outputDirInstruction.length} chars`);
   if (historyContextSize > 0) {
     console.log(`   - History context: ${historyContextSize} chars`);
   }
@@ -1820,7 +1825,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           }
 
           // Collect files from the output directory
-          const files = await collectOutputFiles(sessionInfo.projectPath);
+          const files = await collectTurnOutputFiles(outputTurn);
           if (files.length > 0) {
             console.log(`📎 Sending ${files.length} file(s) from output directory`);
           }
@@ -1948,7 +1953,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             }
             completionSent = true;
 
-            const files = await collectOutputFiles(sessionInfo.projectPath);
+            const files = await collectTurnOutputFiles(outputTurn);
             if (files.length > 0) {
               console.log(`📎 Sending ${files.length} file(s) from output directory`);
             }

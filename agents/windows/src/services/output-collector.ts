@@ -157,6 +157,236 @@ export const OUTPUT_DIR_INSTRUCTION = `
 For deliverable files (HTML/PDF/images/scripts/etc.), save them in the \`${OUTPUT_DIR_NAME}/\` directory unless the user specifies a different path explicitly. Files placed there are automatically sent to the user.
 If the user explicitly specifies a save location (e.g. "in the root folder", "to ~/foo", "in the current directory"), follow that instruction instead.`;
 
+// ============================================================================
+// ターン単位の出力フォルダ（複数スレッド同時実行時の成果物の混線防止）
+//
+// 背景: 以前は同じプロジェクトの全スレッドが `.devrelay-output/` 直下を共有しており、
+//   - ターン開始時の clearOutputDir() が、実行中の別スレッドの作りかけ成果物まで消す
+//   - ターン完了時の collectOutputFiles() が、別スレッドが置いたファイルまで送ってしまう
+// という混線が起きていた。そこでターンごとに `.devrelay-output/turn_<ID>/` を用意して AI に案内し、
+// 送信対象は「そのターン専用フォルダの中身」＋「ターン開始後に直下へ新規作成/更新されたファイル」
+// （古いルールに従って直下に置く AI 向けの後方互換）に限定する。
+// 直下を丸ごと消す処理はやめ、24 時間以上前のターン専用フォルダ・直下ファイルだけを履歴へ退避して片付ける。
+// ============================================================================
+
+/** ターン専用フォルダ名の接頭辞。片付け（prune）はこの接頭辞のフォルダだけを対象にする */
+export const TURN_DIR_PREFIX = 'turn_';
+
+/** これより古いターン専用フォルダ・直下ファイルを、次のターン開始時に履歴へ退避して片付ける */
+const STALE_OUTPUT_MS = 24 * 60 * 60 * 1000;
+
+/** 1 ターン分の出力フォルダ情報（beginOutputTurn が作り、collectTurnOutputFiles が使う） */
+export interface OutputTurn {
+  /** プロジェクトのルートパス */
+  projectPath: string;
+  /** ターン専用フォルダ名（例: `turn_abc123`） */
+  turnDirName: string;
+  /** AI に案内する相対パス（区切りは常に `/`。例: `.devrelay-output/turn_abc123`） */
+  relDir: string;
+  /** ターン開始時点の直下ファイル一覧（ファイル名 → `mtimeMs:size`）。差分検出に使う */
+  rootSnapshot: Map<string, string>;
+}
+
+/**
+ * ターンを識別するキーから、ファイル名として安全なターン専用フォルダ名を作る。
+ * パス区切りやドット等は除去し（`..` によるフォルダ外への脱出を防ぐ）、長さも 40 文字に制限する。
+ * @param turnKey ターン識別子（通常は server が採番する turnId）
+ * @returns `turn_` で始まるフォルダ名
+ */
+export function makeTurnDirName(turnKey: string): string {
+  const safe = (turnKey || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+  // 何も残らなかった場合は時刻ベースの名前で代用する（空のフォルダ名を作らない）
+  return TURN_DIR_PREFIX + (safe || Date.now().toString(36));
+}
+
+/**
+ * 1 ファイルを `.devrelay-output-history/` に日時プレフィックス付きでコピーする。
+ * @param projectPath プロジェクトのルートパス
+ * @param srcPath コピー元の絶対パス
+ * @param destName 履歴側のファイル名（日時プレフィックスの後ろに付く部分）
+ */
+async function archiveOneFile(projectPath: string, srcPath: string, destName: string): Promise<void> {
+  const historyDir = join(projectPath, OUTPUT_HISTORY_DIR_NAME);
+  await mkdir(historyDir, { recursive: true });
+  const now = new Date();
+  const prefix = now.getFullYear().toString() +
+    String(now.getMonth() + 1).padStart(2, '0') +
+    String(now.getDate()).padStart(2, '0') + '_' +
+    String(now.getHours()).padStart(2, '0') +
+    String(now.getMinutes()).padStart(2, '0') +
+    String(now.getSeconds()).padStart(2, '0');
+  await copyFile(srcPath, join(historyDir, `${prefix}_${destName}`));
+}
+
+/**
+ * 24 時間以上前のターン専用フォルダと直下ファイルを履歴に退避してから削除する。
+ * 実行中の別スレッドのものを消さないよう、新しいものには一切触れない。
+ * 失敗しても AI 実行は止めない（ログのみ）。
+ * @param projectPath プロジェクトのルートパス
+ * @param nowMs 現在時刻（ミリ秒）
+ */
+async function pruneStaleOutputs(projectPath: string, nowMs: number): Promise<void> {
+  const outputDir = join(projectPath, OUTPUT_DIR_NAME);
+  let entries: string[];
+  try {
+    entries = await readdir(outputDir);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    const entryPath = join(outputDir, name);
+    try {
+      const st = await stat(entryPath);
+      if (nowMs - st.mtimeMs < STALE_OUTPUT_MS) continue;
+      if (st.isFile()) {
+        // 直下の古いファイル（以前のターンの成果物）
+        await archiveOneFile(projectPath, entryPath, name);
+        await rm(entryPath, { force: true });
+      } else if (st.isDirectory() && name.startsWith(TURN_DIR_PREFIX)) {
+        // 古いターン専用フォルダ: 中のファイルを退避してからフォルダごと削除
+        // （ユーザーや AI が作った turn_ 以外のフォルダには触れない）
+        for (const child of await readdir(entryPath)) {
+          const childPath = join(entryPath, child);
+          try {
+            if ((await stat(childPath)).isFile()) await archiveOneFile(projectPath, childPath, `${name}_${child}`);
+          } catch (err: any) {
+            console.error(`Failed to archive ${name}/${child}:`, err.message);
+          }
+        }
+        await rm(entryPath, { recursive: true, force: true });
+      }
+    } catch (err: any) {
+      console.error(`Failed to prune output entry ${name}:`, err.message);
+    }
+  }
+}
+
+/**
+ * 直下のファイル一覧（ファイル名 → `mtimeMs:size`）を取る。
+ * @param outputDir `.devrelay-output` の絶対パス
+ */
+async function snapshotRootFiles(outputDir: string): Promise<Map<string, string>> {
+  const snap = new Map<string, string>();
+  try {
+    for (const name of await readdir(outputDir)) {
+      try {
+        const st = await stat(join(outputDir, name));
+        if (st.isFile()) snap.set(name, `${st.mtimeMs}:${st.size}`);
+      } catch {
+        // 読み取り中に消えたファイル等は無視
+      }
+    }
+  } catch {
+    // フォルダが無ければ空のスナップショット
+  }
+  return snap;
+}
+
+/**
+ * ターン開始時の準備: ターン専用フォルダを作り、直下ファイルのスナップショットを取る。
+ * 例外は投げない（準備に失敗しても AI 実行は続ける）。
+ * @param projectPath プロジェクトのルートパス
+ * @param turnKey ターン識別子（turnId。無ければ呼び出し側で時刻+sessionId 等を渡す）
+ * @param options.prune 古い出力の片付けを行うか（一時セッションでは false にする）
+ * @returns このターンの出力フォルダ情報
+ */
+export async function beginOutputTurn(
+  projectPath: string,
+  turnKey: string,
+  options: { prune: boolean } = { prune: true },
+): Promise<OutputTurn> {
+  const turnDirName = makeTurnDirName(turnKey);
+  const outputDir = join(projectPath, OUTPUT_DIR_NAME);
+  try {
+    await mkdir(outputDir, { recursive: true });
+    if (options.prune) await pruneStaleOutputs(projectPath, Date.now());
+  } catch (err: any) {
+    console.error('Failed to prepare output directory:', err.message);
+  }
+  const rootSnapshot = await snapshotRootFiles(outputDir);
+  try {
+    await mkdir(join(outputDir, turnDirName), { recursive: true });
+  } catch (err: any) {
+    console.error('Failed to create turn output directory:', err.message);
+  }
+  return { projectPath, turnDirName, relDir: `${OUTPUT_DIR_NAME}/${turnDirName}`, rootSnapshot };
+}
+
+/**
+ * 1 ファイルを読み込んで添付形式にする（大きすぎるファイル・フォルダは null）。
+ * @param filePath 絶対パス
+ * @param filename 送信時のファイル名
+ */
+async function readAttachment(filePath: string, filename: string): Promise<FileAttachment | null> {
+  try {
+    const stats = await stat(filePath);
+    if (!stats.isFile()) return null;
+    if (stats.size > MAX_FILE_SIZE) {
+      console.log(`File too large to transfer: ${filename} (${stats.size} bytes)`);
+      return null;
+    }
+    const content = await readFile(filePath);
+    const mimeType = MIME_TYPES[extname(filename).toLowerCase()] || 'application/octet-stream';
+    console.log(`Collected output file: ${filename} (${stats.size} bytes)`);
+    return { filename, content: content.toString('base64'), mimeType, size: stats.size };
+  } catch (err: any) {
+    console.error(`Failed to read file ${filename}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * このターンでユーザーに送るファイルを集める。
+ * 1. ターン専用フォルダ直下のファイル
+ * 2. `.devrelay-output/` 直下のうち、ターン開始時のスナップショットに無い（新規）か、更新されたファイル
+ * 同名がある場合は 1 を優先する。別スレッドのターン専用フォルダは見ないので混線しない。
+ * @param turn beginOutputTurn の戻り値
+ */
+export async function collectTurnOutputFiles(turn: OutputTurn): Promise<FileAttachment[]> {
+  const outputDir = join(turn.projectPath, OUTPUT_DIR_NAME);
+  const turnDir = join(outputDir, turn.turnDirName);
+  const attachments: FileAttachment[] = [];
+  const seen = new Set<string>();
+
+  // 1. ターン専用フォルダ
+  try {
+    for (const name of await readdir(turnDir)) {
+      const att = await readAttachment(join(turnDir, name), name);
+      if (att) {
+        attachments.push(att);
+        seen.add(name);
+      }
+    }
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') console.error('Failed to read turn output directory:', err.message);
+  }
+
+  // 2. 直下の新規・更新ファイル（後方互換）
+  const current = await snapshotRootFiles(outputDir);
+  for (const [name, sig] of current) {
+    if (seen.has(name)) continue;
+    // ターン開始前から変わっていないファイルは前のターン（または別スレッド）の物なので送らない
+    if (turn.rootSnapshot.get(name) === sig) continue;
+    const att = await readAttachment(join(outputDir, name), name);
+    if (att) attachments.push(att);
+  }
+  return attachments;
+}
+
+/**
+ * ターン専用フォルダを案内する「ファイル出力」指示文を作る（OUTPUT_DIR_INSTRUCTION の置き換え）。
+ * @param turn beginOutputTurn の戻り値
+ */
+export function buildOutputDirInstruction(turn: OutputTurn): string {
+  return `
+
+[File Output]
+For deliverable files (HTML/PDF/images/scripts/etc.), save them in the \`${turn.relDir}/\` directory unless the user specifies a different path explicitly. Files placed there are automatically sent to the user.
+(This folder is dedicated to this exchange. Put files here rather than directly under \`${OUTPUT_DIR_NAME}/\` so they do not get mixed with other conversations in the same project.)
+If the user explicitly specifies a save location (e.g. "in the root folder", "to ~/foo", "in the current directory"), follow that instruction instead.`;
+}
+
+
 // Instruction for plan mode (when user hasn't sent 'exec' yet)
 export const PLAN_MODE_INSTRUCTION = `
 

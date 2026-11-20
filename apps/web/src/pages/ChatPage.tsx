@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { playNotificationSound } from '../utils/notification-sound';
 import { getDocPanelSettings, isAnyDocPanelTabEnabled, DOC_PANEL_SETTINGS_EVENT, type DocPanelSettings } from '../utils/doc-panel-settings';
 import { useLanguage } from '../contexts/LanguageContext';
+import { formatMessageTime, formatMessageTimeFull } from '../i18n/format';
 import { shouldRouteToTab, resolveHistorySource, resolveOlderMessagesSource, pickOlderCursorId, isSameHistorySource } from '../lib/thread-routing-client';
 import { buildThreadSwitchPatch } from '../lib/thread-switch-rules';
 import { resolveCancelPhase, decideCancelClick, type CancelUiState, type CancelPhase } from '../lib/cancel-request-rules';
@@ -692,8 +693,10 @@ function MessageRow({
               🔗 {message.sourceProjectName}
             </span>
           )}
-          <span className="text-xs text-[var(--text-faint)]">
-            {message.timestamp.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}
+          {/* 今日以外のメッセージは日付も付ける（過去の会話がどの日か分かるように）。
+              マウスを乗せると曜日・秒まで出す */}
+          <span className="text-xs text-[var(--text-faint)]" title={formatMessageTimeFull(message.timestamp, locale)}>
+            {formatMessageTime(message.timestamp, locale)}
           </span>
         </div>
         <div className="text-sm text-[var(--text-primary)] leading-relaxed">
