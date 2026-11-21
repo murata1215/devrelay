@@ -8,12 +8,18 @@
 
 ### Backlog 連携（課題の選択・内容確認・状態変更） (2026-11-21)
 
-- 設定画面（AI タブ）に「Backlog 連携」: スペース URL（既定は `DEVRELAY_BACKLOG_SPACE`）・**個人の** API キー（暗号化）・キーで見えるプロジェクトから使うものをチェック・段階（着手/テスト/完了報告）と状態の対応（名前から自動推測、直せる）。保存先は UserSettings のみ（DB 変更なし）
+- 設定画面（🔗 連携タブの先頭）に「Backlog 連携」: スペース URL（既定は `DEVRELAY_BACKLOG_SPACE`）・**個人の** API キー（暗号化）・キーで見えるプロジェクトから使うものをチェック・段階（着手/テスト/完了報告）と状態の対応（名前から自動推測、直せる）。保存先は UserSettings のみ（DB 変更なし）
 - チャットの「🏷 案件」欄の右に `Backlog▼`: 課題一覧（既定は自分が担当の未対応＋着手中）から選ぶと案件に課題キーが入り、右に件名と状態（Backlog の色）。状態をクリックで人間が直接変更できる
 - 案件が課題キーのスレッドでは、AI へのプロンプト先頭に【Backlog課題】1 行を付ける（端末モード・クロス ask・引継ぎターンは除く）
 - スキル `devrelay-backlog`（`list` / `show` / `current` / `statuses` / `move start|test|done|状態名 [--comment] [--force]`）。プランモードでも使える（`plan-permission.ts` の `isBacklogSkillInvocation`）。逆戻りは `--force` 必須、`start` でスレッドの案件に課題キーを自動設定
 - 1 人で複数の Backlog スペースを使える「接続」形式（UserSettings `backlog_connections`、暗号化。旧 1 件形式は自動で読み替え）。課題キーから接続を自動判定、スキルは `list --space`。`DEVRELAY_BACKLOG_SPACE` は接続追加時の初期値
+- 課題一覧の初期表示を「自分＋担当なし」に（担当プルダウン: 自分＋担当なし / 自分のみ / 担当なしのみ / 全員。`assignee=` クエリ、旧 `everyone=1` 互換）。Backlog API に担当なし指定が無いため最大 100 件取ってサーバー側で絞る。スキル `list` に `--mine` / `--unassigned`
+- 設定欄は「🔗 連携」タブの先頭（当初の AI タブから移動）
 - キルスイッチ `DEVRELAY_BACKLOG=0`。詳細 `doc/devlog/2026-11-21_backlog.md`
+
+### チャット画面左上を「# マシン名/プロジェクト名」表示に (2026-11-21)
+
+- 同名プロジェクトが別マシンにあっても区別できるよう、左上を `# ホスト名/プロジェクト名` に（マシン名の `/` より前＝ホスト名のみ、MachinesPage と同じ規則。マシン名の無い古いタブは従来どおりプロジェクト名のみ）。`ChatPage.tsx` のみ
 
 ### スレッドタイトルを AI が会話の節目で付け直す (2026-11-21)
 

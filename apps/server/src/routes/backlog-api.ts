@@ -52,6 +52,7 @@ import {
   nextConnectionId,
   isPlausibleBacklogApiKey,
   MAX_BACKLOG_CONNECTIONS,
+  parseAssigneeScope,
 } from '../services/backlog.js';
 import { clearUsageCache } from '../services/usage-service.js';
 
@@ -69,7 +70,8 @@ function parseListQuery(q: Record<string, string | undefined>) {
   return {
     project: q.project || undefined,
     status: q.status || undefined,
-    everyone: q.everyone === '1' || q.everyone === 'true',
+    // assignee=mine_unassigned|mine|unassigned|everyone（未指定は自分＋担当なし）。旧 everyone=1 は「全員」として受ける
+    assignee: parseAssigneeScope(q.assignee, q.everyone === '1' || q.everyone === 'true'),
     keyword: q.keyword || undefined,
     count: q.count ? Number(q.count) : undefined,
     space: q.space || undefined,
@@ -265,7 +267,7 @@ type StatusesResult = Awaited<ReturnType<typeof getProjectStatuses>>;
 
 export function formatIssueListText(r: ListResult): string {
   const multi = r.spaces.length > 1;
-  const head = `=== Backlog 課題一覧（${r.mine ? '自分が担当' : '全員'}・${r.statusLabel}・${r.projects.join(', ')}${multi ? `・スペース ${r.spaces.join(', ')}` : ''}）${r.issues.length} 件 ===`;
+  const head = `=== Backlog 課題一覧（${r.assigneeLabel}・${r.statusLabel}・${r.projects.join(', ')}${multi ? `・スペース ${r.spaces.join(', ')}` : ''}）${r.issues.length} 件 ===`;
   const warn = r.errors.map((e) => `⚠ 取得できなかったスペース: ${e}`);
   if (r.issues.length === 0) return [head, ...warn, '該当する課題はありません。'].join('\n');
   const lines = r.issues.map((i) =>

@@ -1499,13 +1499,12 @@ export function SettingsPage() {
             </div>
           ))}
         </div>
-
-        {/* Backlog 連携（2026-11-21）: 個人の API キー・使うプロジェクト・段階と状態の対応 */}
-        <BacklogSettingsSection />
       </div>
 
       {/* API Tokens Section — Personal Access Token (#271) */}
       <div id="settings-panel-integrations" role="tabpanel" aria-labelledby="settings-tab-integrations" hidden={activeTab !== 'integrations'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        {/* Backlog 連携（2026-11-21）: 外部サービス連携なので「連携」タブの先頭に置く（接続・使うプロジェクト・段階と状態の対応） */}
+        <BacklogSettingsSection />
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">API Tokens</h2>
         <p className="text-[var(--text-muted)] text-sm mb-4">
           Personal Access Tokens for MCP endpoints. Use these for scripts, CI/CD, or automation.

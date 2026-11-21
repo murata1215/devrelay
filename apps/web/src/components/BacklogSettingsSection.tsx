@@ -244,7 +244,7 @@ export function BacklogSettingsSection() {
   };
 
   return (
-    <div className="mt-10 pt-6 border-t border-[var(--border-color)]">
+    <div className="mb-10 pb-6 border-b border-[var(--border-color)]">
       <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Backlog 連携</h2>
       <p className="text-[var(--text-muted)] text-sm mb-4">
         自分の Backlog API キーで、チャットの「案件」欄から課題を選んだり、AI に課題の確認・状態の変更を頼めるようになります。

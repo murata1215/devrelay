@@ -24,6 +24,7 @@ import {
   BacklogError, isBacklogEnabled, isBacklogIssueKey, projectKeyOfIssue, normalizeBacklogSpace, guessPhaseMap,
   resolveTargetStatus, FIXED_OPEN_ID, FIXED_CLOSED_ID,
   parseConnections, serializeConnections, legacyToConnections, pickConnectionForProject,
+  type BacklogAssigneeScope, assigneeScopeLabel, filterByAssignee,
 } from './backlog-rules.js';
 export * from './backlog-rules.js';
 
@@ -192,7 +193,7 @@ interface RawIssue {
   description?: string | null;
   status: { id: number; name: string; color?: string };
   issueType?: { name: string; color?: string } | null;
-  assignee?: { name: string } | null;
+  assignee?: { id?: number; name: string } | null;
   priority?: { name: string } | null;
   dueDate?: string | null;
   updated?: string | null;
@@ -208,6 +209,7 @@ function toSummary(space: string, i: RawIssue): BacklogIssueSummary {
     status: { id: i.status.id, name: i.status.name, color: i.status.color || '#888888' },
     issueType: i.issueType ? { name: i.issueType.name, color: i.issueType.color || '#888888' } : null,
     assignee: i.assignee?.name ?? null,
+    assigneeId: typeof i.assignee?.id === 'number' ? i.assignee.id : null,
     priority: i.priority?.name ?? null,
     dueDate: i.dueDate ? i.dueDate.slice(0, 10) : null,
     updated: i.updated ?? null,
@@ -224,13 +226,15 @@ export interface ListIssuesOptions {
    * それ以外はカンマ区切りの状態名（例: '未対応,処理中'）
    */
   status?: string;
-  /** true なら担当者で絞らない（既定は自分が担当） */
-  everyone?: boolean;
+  /** 担当者の絞り込み（既定 mine_unassigned = 自分＋担当なし） */
+  assignee?: BacklogAssigneeScope;
   keyword?: string;
   count?: number;
 }
 
-export async function listIssues(ctx: BacklogContext, opts: ListIssuesOptions): Promise<{ issues: BacklogIssueSummary[]; projects: string[]; statusLabel: string; mine: boolean }> {
+export async function listIssues(ctx: BacklogContext, opts: ListIssuesOptions): Promise<{ issues: BacklogIssueSummary[]; projects: string[]; statusLabel: string; assigneeLabel: string }> {
+  const scope: BacklogAssigneeScope = opts.assignee ?? 'mine_unassigned';
+  const assigneeLabel = assigneeScopeLabel(scope);
   let projects = ctx.setting.projects;
   if (projects.length === 0) throw new BacklogError(400, '使ってよい Backlog プロジェクトが選ばれていません（設定画面 → Backlog 連携でチェックを付けてください）');
   if (opts.project) {
@@ -255,7 +259,7 @@ export async function listIssues(ctx: BacklogContext, opts: ListIssuesOptions): 
     for (const p of projects) {
       for (const s of await fetchStatuses(ctx, p.projectKey)) if (names.some((n) => s.name === n || s.name.includes(n))) statusIds.add(s.id);
     }
-    if (statusIds.size === 0) return { issues: [], projects: projects.map((p) => p.projectKey), statusLabel, mine: !opts.everyone };
+    if (statusIds.size === 0) return { issues: [], projects: projects.map((p) => p.projectKey), statusLabel, assigneeLabel };
   } else {
     statusLabel = '未対応・着手';
     statusIds.add(FIXED_OPEN_ID);
@@ -273,9 +277,15 @@ export async function listIssues(ctx: BacklogContext, opts: ListIssuesOptions): 
     sort: 'updated',
     order: 'desc',
   };
-  if (!opts.everyone) params.assigneeId = [(await fetchMyself(ctx)).id];
+  // 「自分のみ」は Backlog 側で絞れる。「担当なし」を含む指定は Backlog API に該当パラメータが無いため、
+  // 担当者を指定せずに最大 100 件取ってからサーバー側で絞る（更新の新しい順なので、漏れるのは古いものだけ）
+  let myId: number | null = null;
+  if (scope !== 'everyone') myId = (await fetchMyself(ctx)).id;
+  if (scope === 'mine') params.assigneeId = [myId as number];
+  else if (scope !== 'everyone') params.count = 100;
   const list = await backlogFetch<RawIssue[]>(ctx, 'GET', '/issues', params);
-  return { issues: list.map((i) => toSummary(ctx.space, i)), projects: projects.map((p) => p.projectKey), statusLabel, mine: !opts.everyone };
+  const issues = filterByAssignee(list.map((i) => toSummary(ctx.space, i)), scope, myId).slice(0, Math.min(Math.max(opts.count ?? 50, 1), 100));
+  return { issues, projects: projects.map((p) => p.projectKey), statusLabel, assigneeLabel };
 }
 
 export interface ListIssuesForUserOptions extends ListIssuesOptions {
@@ -289,7 +299,7 @@ export interface ListIssuesForUserOptions extends ListIssuesOptions {
  * 全接続の課題一覧をまとめて返す（更新の新しい順）。1 つの接続がエラーでも残りは返し、エラーは errors に入れる。
  * すべての接続がエラーなら最初のエラーを投げる。
  */
-export async function listIssuesForUser(userId: string, opts: ListIssuesForUserOptions): Promise<{ issues: BacklogIssueSummary[]; projects: string[]; statusLabel: string; mine: boolean; errors: string[]; spaces: string[] }> {
+export async function listIssuesForUser(userId: string, opts: ListIssuesForUserOptions): Promise<{ issues: BacklogIssueSummary[]; projects: string[]; statusLabel: string; assigneeLabel: string; errors: string[]; spaces: string[] }> {
   let list = (await loadConnections(userId)).filter((c) => c.apiKey && c.projects.length > 0);
   if (list.length === 0) throw new BacklogError(400, '使ってよい Backlog プロジェクトが選ばれていません（設定画面 → Backlog 連携で接続を追加し、プロジェクトにチェックを付けてください）');
   if (opts.conn) list = list.filter((c) => c.id === opts.conn);
@@ -324,7 +334,7 @@ export async function listIssuesForUser(userId: string, opts: ListIssuesForUserO
     throw first instanceof BacklogError ? first : new BacklogError(502, errors[0]);
   }
   issues.sort((a, b) => (b.updated ?? '').localeCompare(a.updated ?? ''));
-  return { issues, projects, statusLabel, mine: !opts.everyone, errors, spaces: list.map((c) => c.space) };
+  return { issues, projects, statusLabel, assigneeLabel: assigneeScopeLabel(opts.assignee ?? 'mine_unassigned'), errors, spaces: list.map((c) => c.space) };
 }
 
 export async function getIssue(ctx: BacklogContext, issueKey: string, opts: { comments?: number; timeoutMs?: number } = {}): Promise<BacklogIssueDetail> {

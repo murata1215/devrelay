@@ -663,6 +663,8 @@ export const usage = {
 export interface BacklogPhaseMap { start: number | null; test: number | null; done: number | null }
 export interface BacklogProjectSetting { projectId: number; projectKey: string; name: string; map: BacklogPhaseMap }
 export interface BacklogStatus { id: number; name: string; color: string; displayOrder: number }
+/** 課題一覧の担当者の絞り込み（既定 mine_unassigned = 自分＋担当なし） */
+export type BacklogAssigneeScope = 'mine_unassigned' | 'mine' | 'unassigned' | 'everyone';
 /** 1 つの接続 = 1 つの Backlog スペース（API キーは返らない） */
 export interface BacklogConnection {
   id: string;
@@ -684,6 +686,7 @@ export interface BacklogIssueSummary {
   status: { id: number; name: string; color: string };
   issueType: { name: string; color: string } | null;
   assignee: string | null;
+  assigneeId: number | null;
   priority: string | null;
   dueDate: string | null;
   updated: string | null;
@@ -724,12 +727,12 @@ export const backlog = {
   async getStatuses(connId: string, projectKey: string): Promise<{ statuses: BacklogStatus[]; guessed: BacklogPhaseMap }> {
     return request('GET', `/backlog/connections/${encodeURIComponent(connId)}/projects/${encodeURIComponent(projectKey)}/statuses`);
   },
-  async listIssues(q: { conn?: string; project?: string; status?: string; everyone?: boolean; keyword?: string }): Promise<{ issues: BacklogIssueSummary[]; projects: string[]; statusLabel: string; mine: boolean; errors: string[]; spaces: string[] }> {
+  async listIssues(q: { conn?: string; project?: string; status?: string; assignee?: BacklogAssigneeScope; keyword?: string }): Promise<{ issues: BacklogIssueSummary[]; projects: string[]; statusLabel: string; assigneeLabel: string; errors: string[]; spaces: string[] }> {
     const p = new URLSearchParams();
     if (q.conn) p.set('conn', q.conn);
     if (q.project) p.set('project', q.project);
     if (q.status) p.set('status', q.status);
-    if (q.everyone) p.set('everyone', '1');
+    if (q.assignee) p.set('assignee', q.assignee);
     if (q.keyword) p.set('keyword', q.keyword);
     const qs = p.toString();
     return request('GET', `/backlog/issues${qs ? `?${qs}` : ''}`);

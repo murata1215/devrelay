@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   backlog as backlogApi,
   isBacklogIssueKey,
+  type BacklogAssigneeScope,
   type BacklogConfig,
   type BacklogIssueBrief,
   type BacklogIssueSummary,
@@ -64,6 +65,14 @@ export function StatusPill({ name, color, onClick, title }: { name: string; colo
   );
 }
 
+// 初期表示は「自分＋担当なし」（自分の課題と、まだ誰も持っていない課題）
+const ASSIGNEE_OPTIONS: { value: BacklogAssigneeScope; label: string }[] = [
+  { value: 'mine_unassigned', label: '自分＋担当なし' },
+  { value: 'mine', label: '自分のみ' },
+  { value: 'unassigned', label: '担当なしのみ' },
+  { value: 'everyone', label: '全員' },
+];
+
 const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: '', label: '未対応・着手中' },
   { value: '未対応', label: '未対応' },
@@ -73,7 +82,7 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
 
 function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig; onPick: (key: string) => void; onClose: () => void }) {
   const [status, setStatus] = useState('');
-  const [everyone, setEveryone] = useState(false);
+  const [assignee, setAssignee] = useState<BacklogAssigneeScope>('mine_unassigned');
   const [project, setProject] = useState('');
   const [keyword, setKeyword] = useState('');
   const [issues, setIssues] = useState<BacklogIssueSummary[] | null>(null);
@@ -90,7 +99,7 @@ function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig;
     // project は「接続ID:プロジェクトキー」（別スペースに同じキーがあっても区別するため）
     const [conn, projectKey] = project ? project.split(':') : [undefined, undefined];
     try {
-      const r = await backlogApi.listIssues({ status: status || undefined, everyone, conn, project: projectKey, keyword: kw || undefined });
+      const r = await backlogApi.listIssues({ status: status || undefined, assignee, conn, project: projectKey, keyword: kw || undefined });
       if (req === reqRef.current) {
         setIssues(r.issues);
         setWarn(r.errors ?? []);
@@ -103,7 +112,7 @@ function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig;
     } finally {
       if (req === reqRef.current) setLoading(false);
     }
-  }, [status, everyone, project]);
+  }, [status, assignee, project]);
 
   // 絞り込み（キーワード以外）が変わったら取り直す。キーワードは Enter / 検索ボタンで
   const keywordRef = useRef(keyword);
@@ -151,10 +160,11 @@ function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig;
               ))}
             </select>
           )}
-          <label className="flex items-center gap-1 text-[var(--text-secondary)] whitespace-nowrap">
-            <input type="checkbox" checked={everyone} onChange={(e) => setEveryone(e.target.checked)} />
-            全員分（担当者で絞らない）
-          </label>
+          <select value={assignee} onChange={(e) => setAssignee(e.target.value as BacklogAssigneeScope)} className={selectCls} title="担当者で絞る">
+            {ASSIGNEE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
           <input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
@@ -193,7 +203,13 @@ function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig;
                       {i.summary}
                       {multiSpace && <span className="ml-2 text-xs text-[var(--text-faint)]">{i.space}</span>}
                     </td>
-                    <td className="px-2 py-2 whitespace-nowrap text-xs text-[var(--text-muted)]">{i.assignee ?? '担当なし'}</td>
+                    <td className="px-2 py-2 whitespace-nowrap text-xs">
+                      {i.assignee ? (
+                        <span className="text-[var(--text-muted)]">{i.assignee}</span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded border border-amber-500 text-amber-600">担当なし</span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 whitespace-nowrap text-xs text-[var(--text-muted)]">{i.dueDate ?? ''}</td>
                   </tr>
                 ))}

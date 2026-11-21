@@ -41,6 +41,8 @@ export interface BacklogIssueSummary {
   status: { id: number; name: string; color: string };
   issueType: { name: string; color: string } | null;
   assignee: string | null;
+  /** 担当者の Backlog ユーザー ID（担当なしは null。「自分＋担当なし」の絞り込みに使う） */
+  assigneeId: number | null;
   priority: string | null;
   dueDate: string | null;
   updated: string | null;
@@ -318,4 +320,41 @@ export function pickConnectionForProject(
   const hits = list.filter((c) => c.apiKey && c.projects.some((p) => p.projectKey === projectKey));
   if (hits.length === 1) return { ok: true, conn: hits[0] };
   return { ok: false, reason: hits.length === 0 ? 'none' : 'ambiguous', spaces: hits.map((c) => c.space) };
+}
+
+// ========================================
+// 担当者の絞り込み（2026-11-21 追加: 初期表示を「自分＋担当なし」に）
+// ========================================
+
+/**
+ * - mine_unassigned: 自分が担当 + 担当者なし（既定）
+ * - mine: 自分が担当のみ
+ * - unassigned: 担当者なしのみ
+ * - everyone: 担当者で絞らない
+ */
+export type BacklogAssigneeScope = 'mine_unassigned' | 'mine' | 'unassigned' | 'everyone';
+export const BACKLOG_ASSIGNEE_SCOPES: BacklogAssigneeScope[] = ['mine_unassigned', 'mine', 'unassigned', 'everyone'];
+
+/** クエリの assignee（新）と everyone=1（旧・互換）から決める。未指定は mine_unassigned */
+export function parseAssigneeScope(raw: unknown, everyoneFlag?: boolean): BacklogAssigneeScope {
+  if (typeof raw === 'string' && (BACKLOG_ASSIGNEE_SCOPES as string[]).includes(raw)) return raw as BacklogAssigneeScope;
+  return everyoneFlag ? 'everyone' : 'mine_unassigned';
+}
+
+export function assigneeScopeLabel(scope: BacklogAssigneeScope): string {
+  return { mine_unassigned: '自分＋担当なし', mine: '自分が担当', unassigned: '担当なし', everyone: '全員' }[scope];
+}
+
+/** 担当者で絞る（Backlog API に「担当者なし」の指定が無いため、取ってきた後にサーバー側で絞る） */
+export function filterByAssignee<T extends { assigneeId: number | null }>(list: T[], scope: BacklogAssigneeScope, myId: number | null): T[] {
+  switch (scope) {
+    case 'everyone':
+      return list;
+    case 'mine':
+      return list.filter((i) => myId !== null && i.assigneeId === myId);
+    case 'unassigned':
+      return list.filter((i) => i.assigneeId === null);
+    default:
+      return list.filter((i) => i.assigneeId === null || (myId !== null && i.assigneeId === myId));
+  }
 }

@@ -4122,9 +4122,20 @@ export function ChatPage() {
               </svg>
             </button>
             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-            <span className="text-sm text-[var(--text-muted)]">
-              {activeTab ? `# ${activeTab.customName || activeTab.projectName}` : connected ? t('chat.connected') : t('chat.disconnected')}
-            </span>
+            {(() => {
+              // 「マシン名/プロジェクト名」を表示（同名プロジェクトが別マシンにあっても区別できるように）。
+              // マシン名が無いタブ（古い保存データ等）は従来どおりプロジェクト名のみ。
+              // マシン名は Agent 既定で「ホスト名/OSユーザー名」なので、MachinesPage と同じく '/' より前（ホスト名）だけを使う。
+              const machineHost = (activeTab?.machineDisplayName ?? '').split('/')[0];
+              const headerLabel = activeTab
+                ? `# ${machineHost ? `${machineHost}/` : ''}${activeTab.customName || activeTab.projectName}`
+                : connected ? t('chat.connected') : t('chat.disconnected');
+              return (
+                <span className="text-sm text-[var(--text-muted)] truncate max-w-[40vw]" title={headerLabel}>
+                  {headerLabel}
+                </span>
+              );
+            })()}
             {/* Skip Permissions トグルスイッチ（Agent 単位） */}
             {activeMachineId && skipPermissionsMap[activeMachineId] !== undefined && (
               <label className="flex items-center gap-1 cursor-pointer ml-1" title={`Skip Permissions: ${skipPermissionsMap[activeMachineId] ? 'ON' : 'OFF'}`}>

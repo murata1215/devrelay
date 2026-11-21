@@ -225,7 +225,8 @@ ${windowsInvocationNote('devrelay-backlog', opts)}
 bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh list
 \`\`\`
 
-- 既定は「自分が担当」の「未対応＋着手中（処理中など）」です
+- 既定は「自分が担当＋担当者なし」の「未対応＋着手中（処理中など）」です（担当者なし＝まだ誰も持っていない課題）
+- \`--mine\`: 自分が担当の課題だけ / \`--unassigned\`: 担当者なしの課題だけ
 - \`--status 未対応\` / \`--status 未対応,処理中\`（状態名、カンマ区切り）/ \`--status open\`（完了以外）/ \`--status all\`
 - \`--all\`: 担当者で絞らない（全員分）
 - \`--project <プロジェクトキー>\` / \`--keyword <語>\`
@@ -291,7 +292,7 @@ SELF_SESSION="\${DEVRELAY_SESSION_ID:-}"
 
 usage() {
   echo "使い方:"
-  echo "  bash $0 list [--status 未対応,処理中|open|all] [--all] [--project KEY] [--keyword 語] [--space スペース]"
+  echo "  bash $0 list [--status 未対応,処理中|open|all] [--mine|--unassigned|--all] [--project KEY] [--keyword 語] [--space スペース]"
   echo "  bash $0 show <課題キー> [--comments N]"
   echo "  bash $0 current"
   echo "  bash $0 statuses <プロジェクトキー>"
@@ -346,7 +347,9 @@ case "$CMD" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --status) param status "$2"; shift 2 ;;
-        --all) param everyone 1; shift ;;
+        --all) param assignee everyone; shift ;;
+        --mine) param assignee mine; shift ;;
+        --unassigned) param assignee unassigned; shift ;;
         --project) param project "$2"; shift 2 ;;
         --keyword) param keyword "$2"; shift 2 ;;
         --space) param space "$2"; shift 2 ;;

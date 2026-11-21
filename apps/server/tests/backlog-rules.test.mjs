@@ -18,6 +18,9 @@ import {
   pickConnectionForProject,
   toConnectionView,
   isPlausibleBacklogApiKey,
+  parseAssigneeScope,
+  assigneeScopeLabel,
+  filterByAssignee,
 } from '../dist/services/backlog-rules.js';
 
 const st = (id, name, displayOrder) => ({ id, name, color: '#888888', displayOrder });
@@ -158,4 +161,29 @@ test('接続 ID の採番と API キー形式', () => {
   assert.equal(isPlausibleBacklogApiKey(KEY), true);
   assert.equal(isPlausibleBacklogApiKey('short'), false);
   assert.equal(isPlausibleBacklogApiKey('has space '.repeat(5)), false);
+});
+
+// ---- 担当者の絞り込み（初期表示 = 自分＋担当なし） ----
+test('担当者の絞り込み: 自分＋担当なし / 自分のみ / 担当なしのみ / 全員', () => {
+  const ME = 10;
+  const list = [
+    { key: 'mine', assigneeId: ME },
+    { key: 'none', assigneeId: null },
+    { key: 'other', assigneeId: 99 },
+  ];
+  const keys = (scope) => filterByAssignee(list, scope, ME).map((i) => i.key);
+  assert.deepEqual(keys('mine_unassigned'), ['mine', 'none']);
+  assert.deepEqual(keys('mine'), ['mine']);
+  assert.deepEqual(keys('unassigned'), ['none']);
+  assert.deepEqual(keys('everyone'), ['mine', 'none', 'other']);
+  // 自分の ID が分からないときは「自分」に当てない
+  assert.deepEqual(filterByAssignee(list, 'mine_unassigned', null).map((i) => i.key), ['none']);
+});
+
+test('担当者指定の読み取り: 未指定は自分＋担当なし、旧 everyone=1 は全員、不正値は既定', () => {
+  assert.equal(parseAssigneeScope(undefined), 'mine_unassigned');
+  assert.equal(parseAssigneeScope('unassigned'), 'unassigned');
+  assert.equal(parseAssigneeScope(undefined, true), 'everyone');
+  assert.equal(parseAssigneeScope('bogus'), 'mine_unassigned');
+  assert.equal(assigneeScopeLabel('mine_unassigned'), '自分＋担当なし');
 });
