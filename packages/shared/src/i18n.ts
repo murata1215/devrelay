@@ -513,10 +513,73 @@ export const chatMessages = {
     en: '⚠️ This machine\'s Gemini CLI does not support `--approval-mode yolo` or `--yolo`, so shell commands in exec mode will still wait for confirmation that nobody can answer (they will likely fail silently). Please update the gemini CLI on this machine.',
     ja: '⚠️ この端末の Gemini CLI は `--approval-mode yolo` / `--yolo` に対応していないため、exec モードでもシェルコマンドは誰も答えられない確認待ちのままになります（無言で失敗する可能性があります）。この端末の gemini CLI を更新してください。',
   },
+  // --- 2026-10-27: Gemini CLI が `--approval-mode` 自体に非対応（旧版）の場合、plan/exec とも
+  // フラグを渡さず CLI 既定の承認モードで起動する（gemini-user 機体で `Unknown arguments:
+  // approval-mode, approvalMode` により会話が一度も成立しなかった事故の根治、プロセス寿命中 1 回だけ） ---
+  'gemini.approvalModeUnsupported': {
+    en: '⚠️ This machine\'s Gemini CLI does not support `--approval-mode` at all, so it is starting with the CLI\'s own default approval mode instead. Run `gemini --version` to check, and update the gemini CLI on this machine.',
+    ja: '⚠️ この端末の Gemini CLI は `--approval-mode` 自体に対応していないため、CLI 既定の承認モードで起動します。`gemini --version` で確認し、この端末の gemini CLI を更新してください。',
+  },
+  // --- 2026-10-27: `gemini --help` の実行自体に失敗した場合、承認モードフラグを一切渡さずに起動する
+  // （フラグを渡して Unknown arguments で全滅するより安全側に倒す） ---
+  'gemini.probeFailed': {
+    en: '⚠️ Failed to run `gemini --help` on this machine, so no approval-mode flags will be passed and Gemini CLI will start with its own default behavior.',
+    ja: '⚠️ この端末で `gemini --help` の実行に失敗したため、承認モード関連のフラグを一切渡さずに Gemini CLI を起動します（CLI 既定の挙動になります）。',
+  },
+  // --- 2026-10-27 Phase 2: #329 と同じ流儀の自動リトライ安全網。probe 誤判定で `Unknown arguments`
+  // になった場合、該当フラグを1つ落として最大2回まで自動リトライする ---
+  'gemini.unknownFlagRetry': {
+    en: '⚠️ Gemini CLI rejected the `{flag}` flag as unknown. Retrying without it.',
+    ja: '⚠️ Gemini CLI がフラグ `{flag}` を未知の引数として拒否しました。このフラグを外して再試行します。',
+  },
+  'gemini.unknownFlagFailed': {
+    en: '❌ Gemini CLI still rejects the `{flag}` flag as unknown after retrying. This machine\'s gemini CLI may be a version DevRelay does not yet support.\n\n[stderr]\n{stderr}',
+    ja: '❌ 再試行しても Gemini CLI がフラグ `{flag}` を未知の引数として拒否します。この端末の gemini CLI は DevRelay が未対応のバージョンの可能性があります。\n\n[stderr]\n{stderr}',
+  },
+  // --- 2026-10-27: Gemini API がモデル廃止/提供終了（404）を返した場合、二重エスケープされた
+  // 生 JSON ではなく次の一手を提示する（gemini-user 機体で発覚。旧 CLI の既定モデル
+  // `gemini-2.5-pro` が Google 側で提供終了されていた） ---
+  'gemini.modelUnavailable': {
+    en: '❌ Gemini CLI tried to use model `{model}`, which Google has discontinued (recommended replacement: `{suggestedModel}`).\n\n① Update this machine\'s gemini CLI — newer versions auto-resolve to an available model, so this stops happening when no model flag is passed.\n② To fix this right away, run `l {suggestedModel}` to pin an explicit model.',
+    ja: '❌ Gemini CLI が使おうとしたモデル `{model}` は Google 側で提供終了しています（推奨移行先: `{suggestedModel}`）。\n\n① この端末の gemini CLI を更新してください — 新しい CLI は自動で有効なモデルに解決するため、モデル未指定の起動ではこの問題が起きなくなります。\n② 今すぐ直したい場合は `l {suggestedModel}` でモデルを明示指定してください。',
+  },
   // --- #345: workspace trust 拒否（devin --respect-workspace-trust）への対処案内 ---
   'devin.workspaceUntrusted': {
     en: '❌ Devin CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `--respect-workspace-trust false` automatically (restores Devin\'s own documented default for non-interactive/print mode).\n② If it still happens, run `devin` interactively once in that directory on that machine to trust it.\n③ Or set `respect_workspace_trust: false` in the Devin CLI config on that machine.',
     ja: '❌ Devin CLI がこのワークスペース（{path}）を信頼していないため実行を拒否しました。\n\n① Agent が未更新の場合は `u` を実行してください — DevRelay は `--respect-workspace-trust false` を自動的に付与するようになりました（Devin 自身が文書化している非対話/print モードの既定値に戻すだけです）。\n② それでも発生する場合は、そのマシンでそのディレクトリで一度 `devin` を対話起動して trust してください。\n③ または、そのマシンの Devin CLI の config で `respect_workspace_trust: false` を設定してください。',
+  },
+  // --- 2026-10-27: workspace trust 拒否（gemini GEMINI_CLI_TRUST_WORKSPACE）への対処案内。
+  // DevRelay は spawn env に GEMINI_CLI_TRUST_WORKSPACE=true を自動付与するためこの安全網に
+  // 到達するのは DEVRELAY_GEMINI_TRUST_WORKSPACE=0 設定時、または環境変数非対応の旧 CLI のみ ---
+  'gemini.workspaceUntrusted': {
+    en: '❌ Gemini CLI refused to run because it does not trust this workspace ({path}).\n\n① If your Agent is not yet updated, run `u` — DevRelay now passes `GEMINI_CLI_TRUST_WORKSPACE=true` automatically (Gemini\'s own documented setting for headless/automated environments).\n② If `DEVRELAY_GEMINI_TRUST_WORKSPACE=0` is set on this machine, unset it, or run `gemini` interactively once in that directory to trust it.',
+    ja: '❌ Gemini CLI がこのワークスペース（{path}）を信頼していないため実行を拒否しました。\n\n① Agent が未更新の場合は `u` を実行してください — DevRelay は `GEMINI_CLI_TRUST_WORKSPACE=true` を自動的に付与するようになりました（Gemini 自身が headless/automated 環境向けに文書化している設定です）。\n② この端末で `DEVRELAY_GEMINI_TRUST_WORKSPACE=0` を設定している場合は解除するか、そのディレクトリで一度 `gemini` を対話起動して trust してください。',
+  },
+  // --- 2026-10-27 サイクル2（plan→exec resume）: `--session-id` 自体が無い旧 CLI の場合、
+  // MCP の approve_implementation が使えないことを実バージョン入りで案内する（#325 静かなフォールバック禁止、
+  // プロセス寿命中 1 回だけ） ---
+  'gemini.sessionIdUnsupported': {
+    en: '⚠️ This machine\'s Gemini CLI ({version}) does not support `--session-id`, so MCP `approve_implementation` (plan→exec handoff) cannot work for this tool yet. Please send `e` from the chat screen instead, or update this machine\'s gemini CLI to 0.65.0 or later.',
+    ja: '⚠️ この端末の Gemini CLI（{version}）は `--session-id` に対応していないため、MCP の `approve_implementation`（plan→exec の引き継ぎ）はまだ使えません。チャット画面から `e` を送って実行するか、この端末の gemini CLI を 0.65.0 以降に更新してください。',
+  },
+  // --- 2026-10-27 サイクル2: `--resume` 自体が無い旧 CLI の場合、exec ターンはプラン本文を
+  // プロンプトに再注入して実行する（resume できないだけで実行自体は続行できる） ---
+  'gemini.resumeUnsupported': {
+    en: '⚠️ This machine\'s Gemini CLI ({version}) does not support `--resume`, so this exec turn will re-send the plan as part of the prompt instead of resuming the previous session.',
+    ja: '⚠️ この端末の Gemini CLI（{version}）は `--resume` に対応していないため、このターンは前回セッションの再開ではなくプラン内容をプロンプトに含めて実行します。',
+  },
+  // --- 2026-10-27 サイクル2: `--resume` が exit 42 + `Error resuming session` で失敗した場合
+  // （plan 時のセッションが壊れている/見当たらない）、resumeFailed に乗せて履歴（プラン）を
+  // 再注入した新規セッションでリトライする（connection.ts の既存リトライ機構に合流） ---
+  'gemini.resumeInvalid': {
+    en: '⚠️ Gemini CLI could not find the plan session to resume. Retrying as a new session with the plan included in the prompt.',
+    ja: '⚠️ Gemini CLI が resume 先のプランセッションを見つけられませんでした。プラン内容をプロンプトに含めた新規セッションとして再試行します。',
+  },
+  // --- 2026-10-27 サイクル2: 採番した UUID が既に使用中だった場合（通常は起きないが、クラッシュ後の
+  // 再送信等）、別 UUID を採番し直して再試行する ---
+  'gemini.sessionIdCollision': {
+    en: '⚠️ Gemini CLI reported the generated session ID was already in use. Retrying with a new ID.',
+    ja: '⚠️ Gemini CLI が、採番したセッション ID は既に使用中だと報告しました。別の ID を採番して再試行します。',
   },
 
   // --- Devin モデル選択サイクル・サイクル B（変更5）: ATIF から読み取った実モデル名の1行通知 ---
@@ -602,6 +665,16 @@ export const chatMessages = {
   'devin.planGuardFailed': {
     en: '⚠️ Plan-turn guard: failed to restore {failed} file(s): {detail}',
     ja: '⚠️ プランターンガード: {failed} 件のファイル復元に失敗しました: {detail}',
+  },
+
+  // --- サイクルG: クロスユーザー ask（別ユーザーのプロジェクトへの質問）は、読み取り専用を
+  // 権限で強制できない実効 AI（devin / gemini / claude+terminalMode）への質問を Agent 側で
+  // 開始前に拒否する（G-7: Devin の git 自動復元ガードが所有者の未コミット作業を巻き戻す事故の
+  // 根治。サーバー側の事前拒否が主防御、これは resolveEffectiveAiTool 等で実効 AI が変わった
+  // 場合の最後の砦）。同一ユーザーの ask には影響しない。 ---
+  'ask.crossUserUnsafeAiRefused': {
+    en: '❌ This question could not be answered: the destination project runs {aiTool}, which cannot be forced into read-only mode for a cross-user question. Please ask the project owner directly.',
+    ja: '❌ この質問には応答できません: 宛先プロジェクトは {aiTool} を使用しており、クロスユーザーの質問に対して読み取り専用を強制できません。プロジェクトの所有者に直接確認してください。',
   },
 
   // --- #334: 人間入力テキストの長さ上限（ゲート②: チャット `e,<指示>`） ---

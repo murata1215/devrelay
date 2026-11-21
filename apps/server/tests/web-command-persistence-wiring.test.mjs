@@ -43,11 +43,23 @@ describe('command-handler.ts: SELF_PERSISTING_TYPES 対応ハンドラが自前�
   };
 
   for (const [commandType, functionName] of Object.entries(handlersByType)) {
+    if (commandType === 'ask:member') continue; // 下の describe で個別に（委譲先を含めて）検証する
     test(`${commandType} → ${functionName} は prisma.message.create を自前で呼ぶ`, () => {
       const body = extractFunctionBody(source, functionName);
       assert.match(body, /prisma\.message\.create\(/, `${functionName} 内に prisma.message.create が見つからない`);
     });
   }
+
+  // クロスユーザー Team Phase C: handleAskMember の宛先解決後の処理（質問メッセージの保存を含む）は
+  // services/cross-ask-runner.ts の runCrossProjectAsk() に抽出済み（既存チャット ask と
+  // 新設 web:cross:ask が同じ関数を通ることで #335 の保証を二重実装しないため）。
+  // そのため「自前で呼ぶ」の判定は handleAskMember → runCrossProjectAsk の委譲を含めて行う。
+  test('ask:member → handleAskMember は runCrossProjectAsk() に委譲し、その中で prisma.message.create を呼ぶ', () => {
+    const callerBody = extractFunctionBody(source, 'handleAskMember');
+    assert.match(callerBody, /runCrossProjectAsk\(/, 'handleAskMember が runCrossProjectAsk を呼んでいない');
+    const runnerSource = readServerSource('src/services/cross-ask-runner.ts');
+    assert.match(runnerSource, /prisma\.message\.create\(/, 'cross-ask-runner.ts 内に prisma.message.create が見つからない');
+  });
 });
 
 describe('web-command-persistence.ts: SELF_PERSISTING_TYPES の宣言', () => {

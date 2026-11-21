@@ -101,3 +101,29 @@ export {
 } from './usage-aggregate.js';
 // Usage 案件必須サイクル: コマンド判定（server の natural-language-parser から移設。同じ理由で明示的 named export）
 export { isTraditionalCommand } from './command-classify.js';
+// 2026-10-27: Gemini CLI `--approval-mode` probe 駆動化（同じ理由で明示的 named export）
+// 2026-10-27 サイクル2: plan→exec resume（--session-id / --resume）の決定関数を追加
+export {
+  type GeminiCapabilities,
+  GEMINI_CAPABILITIES_NONE,
+  parseGeminiCapabilities,
+  type GeminiDegradeReason,
+  type GeminiApprovalArgsResult,
+  buildGeminiApprovalArgs,
+  detectGeminiModelUnavailable,
+  isUuidLike,
+  type GeminiSessionDegradeReason,
+  type GeminiSessionArgsResult,
+  buildGeminiSessionArgs,
+  resolveGeminiAiSessionId,
+  type GeminiSessionFailureKind,
+  classifyGeminiSessionFailure,
+} from './gemini-args.js';
+// エージェント再接続根治サイクル（2026-11-14）: 接続タイムアウト定数 + バックオフ計算の純関数
+// （同じ理由で明示的 named export）
+export {
+  CONNECT_TIMEOUT_MS,
+  CONNECT_WATCHDOG_MS,
+  type ReconnectDelayInput,
+  computeReconnectDelay,
+} from './reconnect.js';

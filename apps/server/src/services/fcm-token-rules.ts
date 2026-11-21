@@ -174,20 +174,23 @@ export function summarizeSendResult(outcomes: FcmSendOutcome[]): FcmSendSummary 
   return { total: outcomes.length, success, failed: outcomes.length - success, byCode };
 }
 
-/** `consecutiveFailures` が削除閾値に到達したとみなす回数（既定5） */
-const DEFAULT_AMBIGUOUS_DELETE_THRESHOLD = 5;
-
 export interface DecideTokenRemovalsInput {
   /** 送信前のトークン一覧 */
   records: FcmTokenRecord[];
   /** 送信結果（records と同じ token を参照） */
   outcomes: FcmSendOutcome[];
   nowIso: string;
-  /** `ambiguous` 分類の連続失敗が何回で削除するか（既定 5） */
-  threshold?: number;
   /**
-   * true のとき、`ambiguous`（invalid-argument）も旧挙動どおり即削除する
+   * true のとき、`ambiguous`（invalid-argument）も即削除する
    * （`DEVRELAY_FCM_STRICT_DELETE=1` 用。既定は false ＝安全側）。
+   *
+   * 2026-11-02 の iPhone SE3 無音故障（唯一の iOS トークンが `invalid-argument` の
+   * 5 連続失敗で自動削除され、削除後に同じトークンを再登録したら問題なく配信できた＝
+   * 誤判定だったことが判明）を受けて、`ambiguous` 分類は「連続失敗回数が閾値に達したら
+   * 削除する」という既定の自動削除経路を廃止した。既定では `ambiguous` は何回失敗しても
+   * 削除されない（`consecutiveFailures` は記録・表示のためだけに増え続ける）。
+   * 削除したい場合は本フラグを明示的に true にする必要があり、かつ下記の全滅ガードは
+   * strictDelete の場合も必ず適用される。
    */
   strictDelete?: boolean;
   /**
@@ -204,25 +207,44 @@ export interface DecideTokenRemovalsResult {
   /** 削除されたトークン（ログ用） */
   removals: { token: string; reason: FcmErrorClass; code?: string }[];
   /**
-   * true のとき「全滅ガード」が発動した（= 本来削除すべきだったトークンがあっても削除を止めた）。
+   * true のとき「全滅ガード」または「ゼロ件ガード」が発動した
+   * （= 本来削除すべきだったトークンがあっても削除を止めた）。
    * 呼び出し元はこれを見て loud なログ・通知を出すこと。
    */
   loud: boolean;
 }
 
+/** 削除予定だったトークンを「削除せず keep する」ときの復元用レコードを作る */
+function toKeptAfterBlockedRemoval(record: FcmTokenRecord, nowIso: string, code?: string): FcmTokenRecord {
+  return {
+    ...record,
+    lastFailureAt: nowIso,
+    lastErrorCode: code,
+    consecutiveFailures: (record.consecutiveFailures ?? 0) + 1,
+  };
+}
+
 /**
  * 送信結果からトークンの削除・更新を決定する（要件3の本体）。
  *
- * 「全滅ガード」: 2 件以上のトークン全てが同一の ambiguous/environment/unknown コードで失敗した場合、
- * 個々のトークンの問題ではなく payload 不正・サービスアカウント差し替え・Firebase プロジェクトのズレの
- * 署名とみなし、削除件数を 0 に落として loud フラグを立てる。これにより「環境ズレで正しいトークンまで
- * 消える」事故を構造的に防ぐ。`total === 1` のときは比較対象が無いため全滅ガードは発動しない。
+ * 2 段階で判定する:
+ * 1. 個々のトークンについて、分類（`classifyFcmError`）に応じて「削除 or keep」を仮決定する
+ *    （`unregistered`/`malformedToken` は削除、`environment`/`transient` は常に keep、
+ *    `ambiguous`/`unknown` は `strictDelete` のときだけ削除候補、それ以外は keep）。
+ * 2. 「ゼロ件ガード」: 仮決定の削除を全部実行すると、そのユーザーの配信先トークンが
+ *    0 件になる場合は、削除を一切実行しない（代わりに keep して失敗情報だけ記録する）。
+ *    2026-11-02 の事故は「端末 1 台しか登録していないユーザーは全滅ガード（旧: 2件以上
+ *    かつ同一コード全滅のときだけ発動）の保護を受けられない」ことが構造的原因だったため、
+ *    件数・コードの種類を問わず無条件に適用する（端末が 1 台でも機能する）。
+ *
+ * 「全滅ガード」（旧来の診断用シグナル）: 2 件以上のトークン全てが同一の
+ * ambiguous/environment/unknown コードで失敗した場合、個々のトークンの問題ではなく
+ * payload 不正・サービスアカウント差し替え・Firebase プロジェクトのズレの署名とみなし、
+ * `strictDelete` 時の削除も含めて削除件数を 0 に落として loud フラグを立てる。
  */
 export function decideTokenRemovals(input: DecideTokenRemovalsInput): DecideTokenRemovalsResult {
   const { records, outcomes, nowIso, strictDelete = false, allowRemoval = true } = input;
-  const threshold = input.threshold ?? DEFAULT_AMBIGUOUS_DELETE_THRESHOLD;
 
-  const byToken = new Map(records.map((r) => [r.token, r]));
   const outcomeByToken = new Map(outcomes.map((o) => [o.token, o]));
 
   // 全滅ガードの判定: 2件以上・全失敗・全て同一コードの ambiguous/environment/unknown
@@ -239,20 +261,20 @@ export function decideTokenRemovals(input: DecideTokenRemovalsInput): DecideToke
     }
   }
 
-  const removals: DecideTokenRemovalsResult['removals'] = [];
-  const next: FcmTokenRecord[] = [];
+  // Pass 1: 個々のトークンについて keep / remove を仮決定する
+  type Decision =
+    | { kind: 'keep'; record: FcmTokenRecord }
+    | { kind: 'remove'; token: string; reason: FcmErrorClass; code?: string; fallback: FcmTokenRecord };
 
-  for (const record of records) {
+  const decisions: Decision[] = records.map((record): Decision => {
     const outcome = outcomeByToken.get(record.token);
     if (!outcome) {
       // 今回送信対象でなかったトークン（ありえないが安全側で保持）
-      next.push(record);
-      continue;
+      return { kind: 'keep', record };
     }
 
     if (outcome.ok) {
-      next.push({ ...record, lastSuccessAt: nowIso, consecutiveFailures: 0 });
-      continue;
+      return { kind: 'keep', record: { ...record, lastSuccessAt: nowIso, consecutiveFailures: 0 } };
     }
 
     const cls = classifyFcmError(outcome.code);
@@ -264,44 +286,70 @@ export function decideTokenRemovals(input: DecideTokenRemovalsInput): DecideToke
 
     if (cls === 'unregistered' || cls === 'malformedToken') {
       if (allowRemoval) {
-        removals.push({ token: record.token, reason: cls, code: outcome.code });
-        continue; // next に積まない = 削除
+        return {
+          kind: 'remove',
+          token: record.token,
+          reason: cls,
+          code: outcome.code,
+          fallback: toKeptAfterBlockedRemoval(record, nowIso, outcome.code),
+        };
       }
-      next.push(failureRecord);
-      continue;
+      return { kind: 'keep', record: failureRecord };
     }
 
     if (cls === 'environment') {
       // 絶対に削除しない。カウントも増やさない（この端末固有の問題ではないため）
-      next.push(failureRecord);
-      continue;
+      return { kind: 'keep', record: failureRecord };
     }
 
     if (cls === 'transient') {
       // 削除も失敗カウントもしない（一時障害で閾値を食い潰さない）
-      next.push(failureRecord);
-      continue;
+      return { kind: 'keep', record: failureRecord };
     }
 
     // ambiguous または unknown
     if (massFailureGuard) {
       // 全滅ガード発動中は削除せず、カウントも増やさない（loud ログで気づかせる）
-      next.push(failureRecord);
-      continue;
+      return { kind: 'keep', record: failureRecord };
+    }
+
+    if (allowRemoval && cls === 'ambiguous' && strictDelete) {
+      // strictDelete（旧挙動の互換キルスイッチ）のときだけ ambiguous を削除候補にする。
+      // 既定（strictDelete=false）では連続失敗回数に関わらず一切削除しない。
+      return {
+        kind: 'remove',
+        token: record.token,
+        reason: cls,
+        code: outcome.code,
+        fallback: toKeptAfterBlockedRemoval(record, nowIso, outcome.code),
+      };
     }
 
     const consecutive = (record.consecutiveFailures ?? 0) + 1;
-    if (allowRemoval && cls === 'ambiguous' && (strictDelete || consecutive >= threshold)) {
-      removals.push({ token: record.token, reason: cls, code: outcome.code });
+    return { kind: 'keep', record: { ...failureRecord, consecutiveFailures: consecutive } };
+  });
+
+  // Pass 2: ゼロ件ガード。仮決定の削除を全部実行すると配信先が 0 件になる場合は、
+  // 件数・理由を問わず削除を一切実行しない（端末 1 台のユーザーもここで守られる）。
+  const willZeroOutDevices = records.length > 0 && decisions.every((d) => d.kind === 'remove');
+
+  const removals: DecideTokenRemovalsResult['removals'] = [];
+  const next: FcmTokenRecord[] = [];
+
+  for (const d of decisions) {
+    if (d.kind === 'keep') {
+      next.push(d.record);
       continue;
     }
-    next.push({ ...failureRecord, consecutiveFailures: consecutive });
+    if (willZeroOutDevices) {
+      // 削除をブロックし、失敗情報だけ反映して keep する
+      next.push(d.fallback);
+      continue;
+    }
+    removals.push({ token: d.token, reason: d.reason, code: d.code });
   }
 
-  // records に無いが byToken 経由で参照だけした場合（理論上到達しないが型安全のため）
-  void byToken;
-
-  return { next, removals, loud: massFailureGuard };
+  return { next, removals, loud: massFailureGuard || willZeroOutDevices };
 }
 
 /**

@@ -52,21 +52,40 @@ plan モードでは AskUserQuestion は使用せず、テキストで質問し�
 
 ---
 
-## DB スキーマ変更時の必須手順
+## DB スキーマ変更時の必須手順（サイクルM1、2026-11-12 改訂）
 
 `schema.prisma` を変更した場合、**必ず以下の全ステップを実行**すること。
 マイグレーション未適用のままビルド・再起動すると、Prisma Client が存在しないカラムを参照して API が 500 エラーになる。
 
+`prisma migrate dev` / `migrate deploy` / `db push` は**使わない**（`db push` は schema.prisma に
+書けない pgvector の `embedding` 列を DROP するため永久禁止。`apps/server/prisma/bootstrap.sql`
+冒頭の警告参照）。DB スキーマ変更は人間が `psql` で手動適用する運用で、変更履歴は
+`apps/server/db/changes/` に一元管理する（詳細: `doc/db-changes.md`）。
+
 1. `schema.prisma` を変更
-2. `cd apps/server && npx prisma migrate dev --name <名前>` を試行
-   - シャドウ DB エラー等で失敗した場合: `npx prisma db execute --stdin` で直接 SQL を適用
-3. **カラム存在を SQL で検証**（必須）:
+2. `apps/server/db/changes/NNNN_xxx.sql` を新規作成する（既存ファイルの番号の次を使う。
+   テンプレートは `apps/server/db/changes/README.md`「各 SQL ファイルの共通フォーマット」参照。
+   DDL 不要な変更なら SQL ファイルは作らない）
+3. `INDEX.tsv` に 1 行追記し、`SCHEMA.sha256` を更新する:
+   ```bash
+   sha256sum apps/server/prisma/schema.prisma | cut -c1-16
+   ```
+   **この3点（SQL ファイル・INDEX.tsv・SCHEMA.sha256）と `schema.prisma` の変更を同じコミットに入れる**
+   （足し忘れると `tests/db-changes.test.mjs` の指紋照合が落ちる）
+4. `npx prisma generate` で Prisma Client 再生成
+5. `pnpm build` でビルド。`cd apps/server && node --test tests/db-changes.test.mjs` が green であることを確認
+6. **DB への適用は人間が `psql` で行う**（アプリと同じロール、`postgres` 等の superuser では流さない。
+   各 SQL ファイルのヘッダの誤爆ガードが superuser・所有者不一致を検出すると自動的に中断する）:
+   ```bash
+   psql "$DATABASE_URL" -1 -v ON_ERROR_STOP=1 -f apps/server/db/changes/NNNN_xxx.sql
+   ```
+7. **カラム存在を SQL で検証**（必須）:
    ```bash
    cd apps/server && npx prisma db execute --stdin <<< "SELECT column_name FROM information_schema.columns WHERE table_name='テーブル名' AND column_name='カラム名';"
    ```
-4. `npx prisma generate` で Prisma Client 再生成
-5. `pnpm build` でビルド
-6. 再起動案内時に「**DB マイグレーション適用済み**」を明記する
+8. 再起動案内時に「**DB マイグレーション適用済み**」を明記する
+
+「どこから適用が必要か」は `pnpm --filter @devrelay/server db:status`（読み取り専用）で確認できる。
 
 ---
 
@@ -145,9 +164,11 @@ CLAUDE.md は **毎回のプロンプトでコンテキストに全文載る**�
 2. **rules/project.md** に設計判断・ルールの追加/変更があれば追記
 3. **doc/issues.md** に今回の作業に関連する Issue があればステータスを更新
 4. **CLAUDE.md** は技術スタック・DB テーブル・環境変数に変更があった場合**のみ**更新
-5. **MEMORY.md** があれば更新（下記ルール参照）
-6. README.md を必要に応じて更新
-7. コミット & プッシュ
+5. **DB 変更があれば `apps/server/db/changes/` の SQL ファイル・`INDEX.tsv`・`SCHEMA.sha256` を
+   schema.prisma の変更と同じコミットに含める**（サイクルM1。詳細 `doc/db-changes.md`）
+6. **MEMORY.md** があれば更新（下記ルール参照）
+7. README.md を必要に応じて更新
+8. コミット & プッシュ
 
 ### 判断に迷ったら
 

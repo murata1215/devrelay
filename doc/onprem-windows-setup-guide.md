@@ -199,13 +199,14 @@ HTTPS_PROXY=http://proxy.corp.example:8080
 
 DB スキーマ作成（`prisma/migrations/` だけでは pgvector 関連オブジェクトが作られない上、
 **migrations 自体が最新の `schema.prisma` に対して古い**ため、`prisma migrate deploy` は
-使用しないこと。必ず `db:bootstrap` を使う。詳細は `apps/server/prisma/bootstrap.sql` のコメント参照）:
+使用しないこと。必ず `db:bootstrap:new-db-only` を使う。詳細は `apps/server/prisma/bootstrap.sql`
+のコメント参照）:
 
 ```powershell
 cd C:\devrelay
 pnpm --filter @devrelay/shared build
 cd apps\server
-pnpm db:bootstrap
+pnpm db:bootstrap:new-db-only
 ```
 
 ビルド（社内サーバーではサーバー運用に必要なパッケージだけに絞る）:
@@ -217,7 +218,7 @@ pnpm --filter @devrelay/server --filter web build
 ```
 
 - [ ] `.env` を作成し、上表の項目をすべて埋めた
-- [ ] `pnpm db:bootstrap` が成功した（`information_schema.columns` で `MessageFile.embedding` /
+- [ ] `pnpm db:bootstrap:new-db-only` が成功した（`information_schema.columns` で `MessageFile.embedding` /
       `AgentDocument.embedding` の存在を確認するとなお良い）
 - [ ] ビルドが成功する
 

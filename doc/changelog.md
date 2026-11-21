@@ -6,6 +6,17 @@
 
 ## 実装済み機能
 
+### 本家（origin）をマージし、会社独自の DB 変更を TISA 系列で管理 (2026-11-21)
+
+本家 b57e78c（クロスユーザー Team・クロス ask・プランモード Bash ゲート・Agent 再接続修正・Gemini 修正・DB 変更履歴の一元化 等 32 コミット）を取り込んだ。
+
+- 衝突 19 ファイルは両方の変更を残して解消。Agent の connection.ts では、ターン専用の出力フォルダ（会社側）と statePolicy（本家）を合わせた: resumable/isolated（他人の ask）は成果物フォルダを作らず添付もしない、引継ぎ `n` はクロス ask スコープでは注入しない、片付けは対話セッションだけ
+- WebUI: クロスタブ（他人のプロジェクトへの質問）では案件欄を出さず、案件必須でも止めない（スレッドは所有者のもので案件を付けられないため）
+- DB: 会社独自の変更は本家の連番を使わず `apps/server/db/changes/tisa/TISA<4桁>_*.sql`（`TISA0001` 引継ぎ列、`TISA0002` Usage）。`db:status`・起動時警告は本家と TISA の両方の索引を見る（`services/db-change-tisa.ts`、テスト `tests/db-changes-tisa.test.mjs`）。運用は `doc/db-changes-tisa.md`
+- この機体の DB: 本家 0028〜0032 と TISA0001/0002 を適用し、0001〜0027 を適用済みとして記録（`db:status` = 未適用なし）。適用前のバックアップ `D:\backup\devrelay_db_20261121_premerge.dump`
+- 本家の `zz2_mark_baseline_applied.sql` は `RAISE EXCEPTION '…' || '…'` が PL/pgSQL の構文エラーになるため、該当行だけ直した一時コピーで流した（リポジトリのファイルは本家のまま）
+- 反映にはサーバー再起動と各 Agent 機の `u` が必要
+
 ### Devin の実行時間上限の既定を 30 分 → 60 分に変更 (2026-11-20)
 
 - `aiTools.devin.maxRuntimeMinutes` 未設定時の既定値を 30 → 60 分に（agents/linux・windows・macos の `ai-runner.ts`）。config.yaml に明示値がある機はその値が優先（`0` = 無制限は従来どおり）
@@ -149,6 +160,937 @@ WS 再接続後、サーバーは次のプロンプトの直前に `server:sessi
 - `saveConversation()` を `writeFileAtomic` 経由に変更
 - `loadConversation()` は parse 失敗時に 100ms 後 1 回読み直し、駄目なら `conversation.json.corrupt-<ts>` に退避してから `[]`
 - テスト `tests/conversation-race.test.mjs` を追加
+### WebUI チャットの alt+tab 復帰でスクロール位置が最下部に飛ぶ既存バグの根治 (2026-11-17)
+
+ユーザー報告「alt+tab で devrelay を再描画すると画面が一番下までスクロールしちゃう」。チャット画面
+で過去メッセージを上にスクロールして読んでいる最中に alt+tab で離脱→復帰すると、表示が最下部へ
+スナップし、かつ読んでいた過去メッセージ自体が DOM から消える。
+
+原因は `ChatPage.tsx` の2段重ね: ① `visibilitychange`（visible 復帰時）・WS 再接続
+（`handleReconnect`）が無条件に `loadHistory(..., 'refresh')`（`limit: 10` 固定）を呼んでいた
+（ユーザーのスクロール位置を一切見ていない）。② `'refresh'` モードは `m.timestamp < oldestApiTime`
+のフィルタで「API 最古より古い WS 専用メッセージ」を破棄する仕様のため、上スクロールページネーション
+（`loadOlderMessages`）で読み込んだ過去履歴が復帰のたび全部捨てられていた。さらに完了後に
+`rAF`+`100/500/1000ms` の4連で無条件に最下部へ強制スクロールしていた。
+
+新規 `apps/web/src/lib/chat-scroll-rules.ts`（外部 import ゼロの純関数、既存
+`conversation-rail-rules.ts` と同じ流儀）: `decideHistoryRefresh()` の核心は「visible 復帰時に
+WS が生存していれば refresh 自体をスキップする」（hidden 中の新着は WS 経由で既に state に
+入っているため、再取得しなければ再描画が起きずスクロール位置が完全に保持される）。WS 切断中や
+WS 再接続時は `'keep-position'` で refresh するが、`resolveRestoredScrollTop()` で `scrollHeight`
+差分補正して位置を復元する。`ChatPage.tsx` 側は `loadHistory` に `scrollPolicy` 引数を追加
+（既定 `'stick-bottom'`=従来どおりなので既存呼び出し元は挙動不変）、`handleReconnect`/
+`visibilitychange` ハンドラを新ルールへ配線、`handleScroll` の下端判定を対称化（従来は下端から
+離れたら無効化するだけの片方向で、手動で下端に戻しても新着受信まで追従が復帰しなかった）。
+
+検証: 新規 `apps/web/tests/chat-scroll-rules.test.mjs`（`isAtBottom` 境界・`decideHistoryRefresh`
+5分岐・`resolveRestoredScrollTop` クランプ）。既存 `knowledge-source-guards.test.mjs` の
+ChatPage.tsx 行数ピン（トリップワイヤ）を実測値 4262→4365 に更新。`pnpm test`（apps/web）997/997
+green。ルート `pnpm build` 6 workspace green、`dist/assets/index-*.js` に `require(` が0件である
+ことも確認（CJS 混入白画面事故の再発チェック）。サーバー側（`apps/server`）は無変更・DB変更なし・
+新規キルスイッチなし（WebUI 静的アセットのみのためサーバー env が届かない）。
+
+### エージェント再接続の3つの不具合修正 (2026-11-14)
+
+自宅PC（fwjg2507-FMVD34003）が pong タイムアウト切断後、DNS エラーの再接続を約13回くり返した末に
+3日間沈黙した事故の根治。原因は3点: A) `connectToServer()` に接続タイムアウトが無く CONNECTING の
+まま止まると生きたタイマーが1つも残らない、B) `scheduleReconnect()` の安定判定が「最後に成功した
+接続から60秒以上」で、長時間安定していた接続が切れた後は毎回リセットされバックオフが効かない、
+C) `maxAttempts`(30) 到達で `process.exit` もせず無言で `return` し続ける。
+
+`packages/shared/src/reconnect.ts` 新設（`CONNECT_TIMEOUT_MS`/`CONNECT_WATCHDOG_MS`/
+`computeReconnectDelay()`）。`agents/{linux,macos,windows}/src/services/connection.ts` の3ファイルに
+① `handshakeTimeout` + 自前監視タイマー（CONNECTING 継続時に `terminate()`）、② 安定判定を「open
+即リセット」ではなく「60秒 OPEN を維持できたらリセット」に変更（Agent二重起動のホットループ事故
+`doc/agent_noresponse_20260814.md` を踏まないための判断）、③ `maxAttempts` 打ち切りを撤廃し無期限
+リトライ＋`maxDelay`(30秒)上限化、を実装。加えて60秒間隔の常駐監視（supervisor）を新設し、タイマーが
+1つも残らず沈黙する型の事故を構造的に防止。windows は構造が異なるため watchdog 用の最小限の参照のみ
+追加し、旧ソケット後片付け／`thisWs` ガードの既存ギャップは範囲外（別サイクル候補）。
+
+検証: `pnpm build` 6 workspace green。新規テスト: `packages/shared/tests/reconnect.test.mjs`、
+`agents/{linux,macos,windows}/tests/reconnect-wiring.test.mjs`（静的ガード）、
+`agents/linux/tests/reconnect-connect-timeout.test.mjs`（live、ws v8 の terminate()→close 前提を実証）。
+テスト件数: shared 154/154・linux 1418/1420・macos 896/899・windows 206/206（既存スキップは無関係）。
+サーバー側変更なし・DB変更なし。詳細 `doc/devlog/2026-11-14_072449.md`。
+
+### サイクルS1: プランモードの Bash ゲート既存バグの根治（PreToolUse フック） (2026-11-12)
+
+プランモード（strictReadonly）の Bash 許可判定が、2026-09-20 の SDK `0.2.80 → 0.3.278` バンプ
+（`d87d003`）以降、無言のまま素通りしていた既存バグの調査・根治。詳細な調査記録・プラン全文は
+`doc/plan-gate-hook-plan.md`、設計判断は `rules/project.md`「プランモードの Bash ゲートが SDK 0.3
+系で無言に崩れた問題の根治」セクション参照。
+
+#### 原因
+
+SDK 0.3 系の同梱ネイティブ CLI は `permissionMode:'plan'` を内部で `'auto'` モードへ変換する
+機能ゲート（`useAutoModeDuringPlan`）を持ち、有効な場合 auto-mode classifier（モデル自身の判断）が
+`canUseTool` より前に Bash の allow/deny を確定してしまう。DevRelay 側の実装（`decidePlanPermission()`
+等）は 2026-09-12（`#332`/`#333`）以降 1 行も変わっておらず、SDK 側の挙動変化のみが原因。
+
+#### 設計
+
+- `agents/{linux,macos}/src/services/ai-runner.ts` の plan 分岐に `hooks.PreToolUse` を新設し
+  唯一の権威とする（SDK の型定義が「PreToolUse hook denies は canUseTool より前に解決する」と
+  明記。実機プローブで classifier より前に確実に呼ばれることを確認済み）。既存の
+  `decidePlanPermission()` をそのまま呼び、判定ロジックは変更しない
+- `canUseTool` は `onToolApprovalRequest` の有無に関わらず常に設定する（未設定時に `canUseTool`
+  ごと消える構造的欠陥の根治、第2防衛線として残す）
+- strictReadonly のときは `sdkOptions.allowedTools` を SDK に渡さない（裸 `mcp__` エントリ等が
+  CLI の bare-allow ルールとしてフックより前に allow を確定させる shadow を回避。DevRelay 自身の
+  `decidePlanPermission()` には `options.allowedTools` をそのまま渡すためユーザー追加の許可リストは
+  不変）
+- `PLAN_READONLY_TOOLS`（`packages/shared/src/constants.ts`）に `'Agent'` を追加（SDK 0.3 系は
+  サブエージェント起動ツール名を `Task` から `Agent` に変更している）
+- `AgentCapability` に `'plan-gate-hook'` を追加。`agents/windows`（`claude` CLI を直接 spawn する
+  構造のため in-process フックを実装できない）はこれを除外して申告する
+- サーバー側: `cross-ask-isolation-rules.ts` の `decideCrossAskIsolation()` に
+  `agentHasPlanGateCapability` 条件を追加し、未申告 Agent へのクロスユーザー ask を fail-closed で
+  断る（`'cross-ask-isolation'` capability と同じ判定順）。`ask-guard.ts` に
+  `decideEffectiveAskReadOnlyEnforcement()` を新設し、MCP `ask_project`/`get_answer` の
+  `readOnlyEnforced` が宛先 Agent の capability を見て実態に合わせる（未申告なら `false` を返し
+  `buildAskPromptPrefix()` の固定禁止文が自動的に付く）
+- `DEVRELAY_PLAN_GATE_CAPABILITY`（既定 `1`）: 上記サーバー側 fail-closed 判定のみのキルスイッチ
+  （PreToolUse フック自体にはキルスイッチを置かない方針。詳細 `CLAUDE.md`）
+
+#### テスト・検証
+
+- Step 0（実装前）・実装後の 2 回、一時ディレクトリ・読み取り専用コマンドのみで実 SDK を起動する
+  プローブで実測: PreToolUse フック 2/2 回到達・`canUseTool` 0 回・`python3` deny・`ls` allow を
+  確認（`agents/{linux,macos}/tests/plan-gate-live.test.mjs`、既定 skip、
+  `DEVRELAY_PLAN_GATE_LIVE=1` で実行）
+- 静的配線テスト（`plan-gate-wiring.test.mjs`）・`decidePlanPermission` 回帰テスト（python3/node/
+  複合コマンド/リダイレクト/`Agent`ツール名/裸MCPエントリ/プランターン常用ツール）・capability
+  配線テスト・キルスイッチテストを新設
+- テスト件数: linux 1331/1332・macos 811/813（各 1 件は実機プローブの既定 skip）・
+  shared 148/148・server 1945/1945・windows 192/192、6 workspace build green
+- `agents/windows` は capability 除外のみで機能変更なし（DevRelay の Bash ゲート強制は元から
+  未対応のまま。CLI フック配布は次サイクル候補）
+- DB 変更なし
+
+### サイクルM1: DB 変更履歴の一元化 (2026-11-12)
+
+DB スキーマ変更の適用履歴が `prisma/migrations`（20件）・`bootstrap.sql`・`doc/migrations`（8件）・
+`doc/devlog`・`doc/changelog` の5箇所に分散し、「どこから適用が必要か」を判定する手段が無かった
+問題への対応。詳細手順は `doc/db-changes.md`、実装プラン原本は `doc/db-change-ledger-plan.md`。
+
+#### 設計
+
+- `apps/server/db/changes/` を新設（1変更=1SQLファイル、`INDEX.tsv` 索引、`SCHEMA.sha256` 指紋）。
+  `apps/server/prisma/migrations/` は凍結（新規 DB 変更はここに置かない）
+- DB 側の適用台帳 `model DbChange`（`name` ファイル名を主キー。会社リポとの merge/cherry-pick で
+  同じ番号を採っても `ON CONFLICT` で片方だけ記録される事故を整数 PK を避けて構造的に回避）
+- 各 SQL ファイルのヘッダに3段の誤爆ガード（`Machine` 存在確認・superuser 拒否・所有者一致確認）を
+  必須化（2026-11-11 の `CrossAskReset` 所有者ずれ事故の再発防止）
+- backfill を含むファイルは `ALTER` 前に `information_schema.columns` で列の存在を確認し、
+  「この実行で今まさに列を新規追加したときだけ」`UPDATE` を実行する構造を必須化（台帳の記録状態に
+  依存しない。状態不明の DB で `0001` から全ファイルを機械的に流しても既存データを書き換えない）
+- `pnpm --filter @devrelay/server db:status`（読み取り専用 CLI）+ 起動時の fail-open 警告
+  （台帳なし/権限不足/接続不能の3状態を分離）+ `/health` の `dbChanges` フィールド
+  （`DEVRELAY_DB_CHANGE_WARN` でキルスイッチ）
+- `tests/db-changes.test.mjs`: schema.prisma 変更時の `SCHEMA.sha256` 更新忘れを検知する指紋照合、
+  各 SQL ファイルの自己整合・冪等性・ガード・ヘッダ必須項目、git 追跡漏れ検知、禁止コマンド封じ込め
+- 永久禁止コマンドの封じ込め: `package.json` から `db:push` を削除、`db:bootstrap` を
+  `db:bootstrap:new-db-only` に改名（新規 DB 構築専用であることを名前で明示。参照していた
+  README.md・HANDOFF_UBUNTU.md・onprem-windows-setup-guide.md・rules/project.md を同一コミットで修正）
+
+#### 遡及
+
+`schema.prisma` を変えた直近30コミットの差分を全件精査し、手動適用前提だった DDL 29件
+（+ `9f1990a` の日付分割で +1 = 31件、1件は DDL 不要）を `apps/server/db/changes/0001`〜`0031`
+として記録。`zz1_verify.sql`（読み取り専用）で全列・全索引・テーブル所有者が本番 DB の実際の
+構造と一致することを確認済み。`zz2_mark_baseline_applied.sql` で既に適用済みの DB に一括記録する
+（突合ゲート付き。未適用の DB に誤って流すと変更が永久に隠れるため、構造的に誤爆を防ぐ）。
+
+#### 文書
+
+`doc/db-changes.md` 新設（運用手順書）。`doc/company-repo-sync.md` §5・`CLAUDE.md`・
+`rules/devrelay.md`（DB スキーマ変更時の必須手順・`w` コマンド手順）・`doc/HANDOFF_UBUNTU.md`
+（ルート + `doc/` の2系統）を改訂。
+
+### サイクルC2: クロス ask のセッション継続（resume、サーバー配線） (2026-11-11)
+
+サイクルC1（Agent 側土台、`b8f1bdf`）・サイクルG（既存バグ修正、`34f5228`）に続き、
+サーバーから `statePolicy:'resumable-scoped'` を配線して resume を実稼働させる
+（`doc/cross-ask-resume-plan.md` の C2 節）。
+
+#### 設計
+新規 `cross-ask-resume-rules.ts`（外部 import ゼロ）に決定論的 scope id
+（`crossask-<digest32>-g<世代>`、digest は `sha256(requesterUserId+projectId)`）と
+`decideCrossAskSessionPlan()` を実装。resume 可否は G の `decideCrossAskIsolation()` の
+**出力**ではなく、その**入力**（`'cross-ask-resume-strict'` capability・
+`decideAskReadOnlyEnforcement()` の結果）を直接受け取って独立に判定するが、
+`DEVRELAY_CROSS_ASK_ISOLATION=0`（G の緊急ロールバック）のときは resume も意図的に止める
+（偶然の連動ではなく明示的な従属）。TTL（`DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS`、既定14日）
+または上限ターン（`DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS`、既定40）超過で世代を +1 し、
+新世代の初回だけ案B前置を1回許可する（`mode:'resumable'` は型で `includeContextPrefix:false`
+を強制して二重注入を禁止）。`cross-ask-runner.ts` に G の isolation 判定の直後（Session 作成
+より前）で resume 判定と、G-11（チャット/WebUI 経路に無かった5分窓レート制限。
+`ASK_PROJECT_LIMIT=8`/`ASK_USER_LIMIT=20` を ask-member から流用、キルスイッチ無し）を追加。
+`agent-manager.ts` の `executeCrossProjectQuery` に `agentScopeId` 引数を追加し
+`startSession` へ配線（従来 `undefined` 固定）。ゲート用に新 capability
+`'cross-ask-resume-strict'` を新設（C1 時点の緩い `'cross-ask-resume'` は認可に使わない、
+fail-closed、G の `'cross-ask-isolation'` と同じ設計）。Agent 側（linux/macos/windows
+byte-identical）2点: A-1 `RESUMABLE_SCOPED_STATE_POLICY.refuseUnsafeAiTool` を isolated と
+同じ `true` に変更、A-2 resume 失敗時の retry で `projectStateRead` の引き継ぎ漏れを修正
+（isolated が retry 時に所有者の本物の codex/devin セッションを読んでしまう既存バグ）。
+世代の単調増加は `index.ts` の起動時スイープが Session を `status:'ended'` に変えるだけで
+削除しないこと（`deleteMany` 対象外）を確認し、世代解決クエリが `status` を見ないことで
+構造的に保証した。対象は `cross-ask-runner.ts` 経由（チャット `ask`・WebUI クロスタブ）のみ、
+`routes/document-api.ts`（ask-member REST/スキル経路）は resume 対象外のまま
+（isolated のまま。scope dir を一切触らないため実害なし）。
+
+#### キルスイッチ
+`DEVRELAY_CROSS_ASK_RESUME`（既定 **OFF**。`DEVRELAY_CROSS_TEAM` 等と同方向）・
+`DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS`（既定14日）・
+`DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS`（既定40）。
+
+#### 検証
+`pnpm build` 6 workspace green、`require(` 混入なし。テスト（`--test-concurrency=1`）:
+shared 143/143（0変更）・server 1604/1604（新規51）・web 971/971（0変更）・
+linux 1312/1312（新規1）・macos 792 pass+1skip/793（新規1）・windows 190/190（新規1）green。
+`apps/web`・`prisma`・`routes/document-api.ts` は無変更。DB マイグレーション不要
+（`Session.agentScopeId` は既存列）。commit `b47cb0b`（main 直接）push 済み。
+
+C3（WebUI 操作 UI・「会話をリセット」・旧世代 scope dir の明示削除）は未実装。
+
+### サイクルG: クロス ask の既存バグ修正（所有者プロジェクトの隔離） (2026-11-10)
+
+クロスユーザー Team Phase C（上記）・サイクルC1（`doc/cross-ask-resume-plan.md`）の調査で
+見つかった、クロスユーザー ask（別ユーザーのプロジェクトへの質問）の既存バグ G-3/G-4/G-5/
+G-5b/G-6/G-7/G-8/G-9/G-12 を修正。
+
+#### 設計
+`EphemeralStatePolicy` に `'isolated'` を追加（`'resumable-scoped'` と並ぶ第4区分。
+クロスユーザー ask にのみサーバーが送る。同一ユーザーの ask の既存の使い方——成果物添付・
+storageContext・Codex/Devin 会話継続——は壊さない）。Agent 側 `session-scope.ts`
+（3 機種 byte-for-byte 同一）の `SessionStatePolicy` を 10 項目から 14 項目に拡張し、
+`connection.ts`/`ai-runner.ts`（linux のみ `terminal-runner.ts` も）の既存の無条件実行箇所を
+全てガード化。G-7 は「Devin の git 自動復元ガードの巻き戻しを止める」のではなく、読み取り
+専用を権限で強制できない実効 AI（devin/gemini/claude+`Project.terminalMode`）へのクロス
+ユーザー ask 自体を AI 起動前に拒否する設計に一般化（巻き戻しを止めると Devin の変更が
+所有者ツリーに残り次の commit に混入する方が悪化すると判断）。サーバー側
+`cross-ask-isolation-rules.ts`（新設、外部 import ゼロ）で、Session 作成前に (a) 宛先 Agent の
+`'cross-ask-isolation'` capability 申告 (b) `ask-guard.ts` の `decideAskReadOnlyEnforcement()`
+を検証し、未更新 Agent・読み取り専用を強制できない AI へのクロスユーザー ask は
+`denied`（監査記録あり）として断る（fail-closed）。`agent-manager.ts` の
+`startSession`/`sendPromptToAgent`/`executeCrossProjectQuery` に `statePolicy` を追加して配線。
+
+#### 併せて修正した既存バグ
+- G-12: `command-handler.ts` の `//connect`（active・ended 復活候補の両方）が `crossquery_` 等の
+  一時セッションを除外しておらず、所有者が自分のプロジェクトへ接続すると実行中のクロス ask
+  セッションを拾い得た。既存 `buildEphemeralSessionIdExclusion()` を両方の `where` に適用。
+- `agent:session:aiTool` 報告（`resolveEffectiveAiTool` 差し替え時にサーバーへ送る通知）が
+  無条件に `Project.defaultAi` を書き換えており、クロスユーザー ask が所有者のプロジェクト
+  既定 AI を恒常的に書き換えてしまう実害を新たに発見（isolated のみ報告しないよう修正）。
+
+#### キルスイッチ
+`DEVRELAY_CROSS_ASK_ISOLATION`（既定 ON）はサーバー側のみ。G-5/G-6/G-8/G-9 は「クロスユーザー
+かどうか」に関係なく一時セッション全般に効く構造的な修正のため Agent 側に env フックは
+作らなかった（緊急ロールバックは `git revert` + 該当機 `u` を想定）。
+
+テスト: server 1562/1562（新規22）・linux 1311/1311・macos 791 pass+1skip/792・windows 189/189
+（新規計約72）・shared 143/143・web 971/971（0行変更）、6 workspace build green。
+apps/web・prisma は無変更・DB マイグレーション不要。詳細 `doc/devlog/2026-11-10_151128.md`。
+
+### クロスユーザー Team Phase C: 購読/借用プロジェクトを Agents ツリーに出して会話する (2026-11-10)
+
+ユーザー要望「購読したプロジェクトをagentツリーに出して、現状のプロジェクトのように会話
+できるようにならない？」への対応。公開型 Team（Phase A/B）で「購読する」ところまで到達した
+が、宛先に到達する手段はチャットへの手打ちしかなく、依頼者側には質問・回答が一切残らな
+かった。
+
+#### 前提として塞いだ既存の穴（チャット経路限定の権限昇格）
+`handleProjectConnect`/`handleMachineConnect`/`handleProjectList`（`command-handler.ts`）が
+チャット（WS）経路でのみ所有者チェックをしておらず、任意の projectId で他人のマシンに
+セッションを張り `exec`/`k`/`x`/`u` まで届かせられた（REST/MCP は全て `machine: { userId }`
+で絞っているので無傷）。既存純関数 `evaluateProjectOwnership()` を再利用して修正。
+
+#### 実装
+購読/借用プロジェクトを「質問専用タブ」として開き、`//connect`/`executeCommand()` を一切
+通さない専用 WS フレーム `web:cross:ask` を新設。実行本体は既存チャット `ask` と共用の
+`cross-ask-runner.ts` `runCrossProjectAsk()` に抽出（挙動不変、宛先プロジェクトへの同時実行
+ガードを新規追加）。宛先一覧・解決は既存 `listCrossTeamAskCandidateProjects()` を呼ぶだけで
+新しい認可クエリを書かない。会話の継続性はユーザー要望で追加実装（案 B: 直近 3 往復を
+プロンプトに前置。安定セッション再利用による本物の resume は自己レビューで「#348 の
+`.devrelay-output/` 全消し事故の再発リスクあり」と判断し撤回、別サイクルへ）。併せて既存
+バグ（クロス ask が所有者の work state を無条件に読む・消費する）も Agent 3 機種で修正。
+
+検証: `pnpm build` 全 6 workspace green。`apps/server` 1540/1540・`apps/web` 971/971・
+`agents/linux` 1275/1275・`agents/macos` 756/756・`agents/windows` 155/155（新規テスト
+60 ケース含め非退行）。詳細は `doc/devlog/2026-11-10_cross_team_chat_phase_c.md`。
+
+新規キルスイッチ `DEVRELAY_CROSS_TEAM_CHAT`・`DEVRELAY_CROSS_TEAM_CHAT_CONTEXT`
+（両方既定 ON、`DEVRELAY_CROSS_TEAM` との AND）。DB スキーマ変更なし。
+
+### 公開型 Team: 純粋な購読者の ask が常に候補なしになるバグの根治 (2026-11-09)
+
+body 無し POST バグの修正後、yahoo が公開型チーム（`pixterm`）を購読できたが、続けて
+`ask pixterm-server:` を実行すると「宛先として登録されていません」になり、候補一覧に
+yahoo 自身のプロジェクトしか出なかった。
+
+#### 原因（Phase A 実装時の見落とし）
+`cross-team-authz.ts` の `listCrossTeamAskCandidateProjects()`（チャット経路）で、
+招待型 grant を取得した直後の早期 return `if (grants.length === 0) return [];` が、
+購読候補を合流させるコード（`loadSubscriptionAskCandidateEntries()`）より**前**に
+あったため、招待の grant を 1 件も持たない「純粋な購読者」は常に空配列を返されていた。
+
+この早期 return は招待型だけの世界では正しかった（grant が 0 件＝宛先なし）が、公開型
+導入後は「招待の grant が 0 件でも購読があれば宛先がある」ため前提が崩れていた。
+DB で確認したところ、yahoo（純粋な購読者）は requester 側の有効な ask grant が 0 件で
+早期 return に即座に引っかかる一方、gmail（招待型の Team オーナー）は 4 件持っていて
+早期 return されなかった。実装者（gmail）が自分の経路で試すと再現しないバグだった。
+
+Agent REST 経路（`loadCrossTeamCandidates()`）は招待・購読を `Promise.all` で独立に
+集めていたため、同種の問題は発生していなかった（修正不要）。
+
+#### 修正
+早期 return を公開型キルスイッチとの AND にした: `if (grants.length === 0 &&
+!publishEnabled) return [];`。公開型 OFF 時の挙動・クエリ数は完全に不変。併せて
+`grants` が空のときに無意味な `organizationMember.findMany({ where: { userId: {
+in: [] } } })` を投げないようガードした。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1499/1499
+（新規 4 ケース含む非退行）。
+
+#### 変更ファイル
+既存 `apps/server/src/services/cross-team-authz.ts`、
+`apps/server/tests/cross-team-api-wiring.test.mjs`。**WebUI の変更なし。
+`cross-team-guard.ts`（認可の純関数）・`cross-team-publish.ts`・新設 6 ルートは
+一切変更していない。** DB スキーマ変更なし・新規キルスイッチなし。
+
+### body 無し POST が常に 400 になる既存バグの根治（WebUI 共通ヘッダー） (2026-11-08)
+
+公開型 Team Phase B の実機テストで、yahoo が「購読する」を押すと Bad Request になった。
+調査の結果、**今回追加した購読機能のバグではなく、WebUI 共通の HTTP ヘルパーに以前から
+潜んでいたバグ**で、新機能がそれを踏み抜いた形だった。
+
+#### 原因
+サーバーログに `FST_ERR_CTP_EMPTY_JSON_BODY`（"Body cannot be empty when content-type
+is set to 'application/json'"）が記録されていた。`apps/web/src/lib/api.ts` の共通
+HTTP ヘルパー `request()` が、body の有無に関わらず常に `Content-Type:
+application/json` を付けていたため、body 無しの POST が「JSON を送る」と宣言しながら
+本文が空、という不正なリクエストになり、Fastify の既定 JSON パーサが**認証フックより
+前のボディパース段階で**弾いていた（ハンドラは一度も実行されない）。
+
+本番サーバーへの無害な実証: `Content-Type: application/json` 付き・body なしの
+`POST /api/teams/.../subscribe` は **400**（認証前に弾かれる）、`Content-Type` 無しなら
+**401**（認証まで到達）。
+
+#### 影響範囲: 同じ条件の呼び出しが 5 箇所、すべて以前から壊れていた
+`POST /push/fcm/test`（設定画面の「テスト通知を送る」）、
+`POST /teams/invites/:id/decline`（招待の「辞退」）、
+`POST /teams/:teamId/subscribe`（「購読する」、今回発覚）、
+`POST /org/leave`（「組織を抜ける」）、
+`POST /sites/:host/health-check`（Sites のヘルスチェック）。
+
+#### 修正
+ヘッダ組み立てを新規 `apps/web/src/lib/request-headers-rules.ts`（外部 import ゼロの
+純関数）に切り出し、`buildRequestHeaders({ token, hasBody })` が **body があるときだけ**
+`Content-Type` を付けるようにした。挙動が変わるのは body 無しのリクエストだけで、
+body ありの呼び出し（大多数）は完全に不変。
+
+サーバー側で空 JSON を許容する案は採らなかった（ボディパースの挙動をサーバー全体で
+変えるため影響範囲が広く、本当に壊れたリクエストまで通してしまう。原因はクライアントが
+「JSON を送る」と嘘の宣言をしていることなので、そこを直すのが筋と判断）。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 951/951（新規 7 ケース含む非退行）、`apps/server` の
+`node --test` 1495/1495（サーバー側変更なし・非退行）。
+
+#### 変更ファイル
+新規 `apps/web/src/lib/request-headers-rules.ts`、
+`apps/web/tests/request-headers-rules.test.mjs`。既存 `apps/web/tsconfig.test.json`
+（include 追加）、`apps/web/src/lib/api.ts`（`request()` のヘッダ組み立てを差し替え）。
+**サーバー側の変更なし。** DB スキーマ変更なし・新規キルスイッチなし。
+
+### 公開型クロスユーザー Team Phase B（WebUI: 操作画面） (2026-11-08)
+
+Phase A（サーバー + 認可）の実機検証がブラウザコンソールに JS を貼る必要があり実用的で
+なかったため、「操作する画面を用意してほしい」というユーザー要望を受けて WebUI を実装。
+コンソールを一切使わず、画面だけで公開 → 購読 → ask → 取り消しが回せるようにした。
+
+#### UX の肝: 又貸し防止を画面に見せる
+サーバー側の又貸し防止（`selectPublishableMembers()`）は Phase A で実装済みだったが、
+その実態が UI 操作時に見えなかった。チームの公開ボタンを押すと、何が公開され何が
+除外されるかを確認ダイアログで明示する:
+
+> チーム「pixterm」を組織に公開しますか？
+> 公開されるプロジェクト: 2 件（あなたが所有するもの）
+> 他ユーザーから借りている 3 件は公開されません（又貸しになるため）
+> 同じ組織のメンバーが購読すると、あなたの契約で AI が実行されます。
+
+借りているプロジェクトが無いチームでは除外の注記を出さない（無関係な注記で混乱させない）。
+確認ダイアログの文言生成は新規 `cross-team-publish-rules.ts`（外部 import ゼロの純関数）
+に集約し、テストで固定した。前サイクル（招待型の「公開を停止」確認文言）で他チーム経由の
+grant が残るのに断言してしまう事故を起こしたことの教訓を踏まえた設計。
+
+#### 退行の作り込みを未然に防いだ点
+実装中に見つけた落とし穴: 既存 `fetchCrossTeamData` は招待型の 3 本の API を 1 つの
+try/catch で囲っており、ここに公開型の `/teams/published` を混ぜると**公開キルスイッチ
+OFF の環境で招待 UI まで巻き込んで非表示になる退行**になることが分かった。
+公開系データ取得（`fetchPublishedTeams`）は独立した関数・独立した try/catch・独立した
+state（`crossTeamPublishEnabled`）にして、キルスイッチの効き方が互いに干渉しないように
+した。
+
+#### 実装内容
+- `GET /api/teams` に公開キルスイッチ ON のときだけ `visibility` / `subscriberCount` を
+  追加（OFF 時はキーごと省略し旧レスポンスと構造的に同一を維持。購読者数の集計クエリも
+  ON のときだけ実行し、既定状態での負荷ゼロを保つ）
+- チームヘッダーに公開トグル（`🔒 非公開` ⇄ `🌐 公開中 (N)`）。公開中のボタンを押すと
+  購読者一覧が展開し、各行に強制取消、下部に「公開を停止」
+- 新セクション「組織で公開中のチーム」（他ユーザーが公開したチームを一覧表示、
+  `購読する` / `購読中 + 解除`）
+- 公開対象の件数（公開可能 / 又貸しで除外）は既存の `GET /api/teams` のレスポンスが
+  既に `crossUser` フラグで区別しているため、クライアント側に追加のクエリは不要
+  （`team.members.filter(m => !m.crossUser)` / `filter(m => m.crossUser)` で算出）
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 944/944（新規 13 ケース含む非退行）、`apps/server` の
+`node --test` 1495/1495（新規 2 ケース含む非退行）。
+
+#### 変更ファイル
+新規 `apps/web/src/lib/cross-team-publish-rules.ts`、
+`apps/web/tests/cross-team-publish-rules.test.mjs`。既存
+`apps/web/tsconfig.test.json`（include 追加）、`apps/web/src/lib/api.ts`（型 2 つ +
+`TeamInfo` 拡張 + 6 メソッド）、`apps/web/src/pages/TeamPage.tsx`（公開トグル・
+購読者一覧・新セクション）、`apps/server/src/routes/api.ts`（`GET /api/teams` に
+条件付きフィールド追加）、`apps/server/tests/cross-team-api-wiring.test.mjs`。
+**Phase A の 6 ルート・認可まわり（`cross-team-guard.ts` / `cross-team-publish.ts` /
+`cross-team-authz.ts`）は一切変更していない。** DB スキーマ変更なし・新規キルスイッチなし
+（既存 `DEVRELAY_CROSS_TEAM_PUBLISH` の配下）。
+
+### 公開型クロスユーザー Team Phase A（サーバー + 認可のみ。WebUI は Phase B 未実装） (2026-11-08)
+
+招待型（Phase 1）に続く公開型 — 「特定ユーザーがチームを公開設定し、同一組織の利用者が
+選んで組み込む」の実装。公開する側が貸す側（＝自分の契約で AI が動き、課金を負担する）。
+
+#### 設計の核心: 認可の純関数は無改造
+
+招待型の `decideCrossTeamAccess()`（`cross-team-guard.ts`）は `teamMemberId` に一切依存せず、
+`CrossTeamCandidateGrant`（`teamId / grantId / granteeUserId / askAllowed / execAllowed /
+revoked / callerQualified`）だけを受け取る設計だった。ただし `callerQualified` の計算
+（`loadCrossTeamCandidates` の「Team オーナー本人であること」）は、招待型が「借りる側が
+Team オーナー」なのに対し公開型は「貸す側が Team オーナー」で関係が逆転するため、素朴には
+購読者全員が `callerNotQualified` で弾かれる。解決策として、`decideCrossTeamAccess()` は
+1 バイトも変更せず、新規 `TeamSubscription` から `CrossTeamCandidateGrant[]` をその場で
+合成して渡す方式を採った（`cross-team-publish.ts` の `buildSubscriptionCandidates()`）。
+`CrossTeamGrant` は変更なし（`teamMemberId @unique` も維持）。購読者数 × チーム規模の
+行の増殖やチーム編集時の同期処理が不要になる（TISA は 8 名・最大 13 プロジェクトの
+チームがあり、実体化方式だと 91 行＋同期処理が必要だった）。
+
+#### 最重要の安全要件: 又貸し防止
+
+`Team` は招待型で受け入れた他人のプロジェクトも同じ `TeamMember` として保持するため、
+素朴に「チームを公開」すると、招待で借りているプロジェクトが所有者の同意なく組織全体に
+再公開され、所有者の契約で課金が走る事故になる。新規 `selectPublishableMembers()` で
+公開対象を「チームオーナー自身が所有するプロジェクト」に限定し、`buildSubscriptionCandidates()`
+でもオーナー不一致の行を捨てて二重に防ぐ。テストでは「招待で借りたプロジェクトを含む
+チームを公開しても、借り物は候補に残らず `decideCrossTeamAccess()` も `denyReason: noGrant`
+になる」ことを固定した。
+
+#### 購読は承認を挟まないセルフサービス方式（ユーザー確認済み）
+
+「公開」という行為自体が組織への同意であるとの判断。歯止めは「公開者はいつでも公開停止
+できる」「購読者一覧を見て個別に取り消せる」「既存のクロスユーザー専用レート制限
+（`CROSS_USER_ASK_TARGET_LIMIT=4` 等）が同じ経路を通るので自動的に効く」の 3 つ。
+
+#### 実装内容
+- 新規 `apps/server/prisma/migrations/20261108000000_add_team_subscription/`:
+  `Team.visibility`（既定 `'private'`）+ `TeamSubscription`（`@@unique([teamId,
+  subscriberUserId])`、認可根拠は「行が存在し `revokedAt IS NULL`」の 2 条件のみ）
+- 新規 `apps/server/src/services/cross-team-publish.ts`（外部 import ゼロの純関数。
+  `cross-team-guard.ts` と同じ流儀）: `isCrossTeamPublishEnabled()` / `selectPublishableMembers()`
+  / `buildSubscriptionCandidates()`
+- `cross-team-authz.ts`: Agent REST 経路（`loadCrossTeamCandidates`）とチャット経路
+  （`listCrossTeamAskCandidateProjects`）の両方に購読候補を合流させる
+  （既存の実 grant 候補と同じ `projectId` dedup に合流。招待型を優先し、既に実 grant が
+  ある projectId は上書きしない）
+- `cross-team-audit.ts`: `team_published / team_unpublished / subscribed / unsubscribed /
+  subscription_revoked` を追加。公開/購読は本人の単独操作が正規ケースのため、既存の
+  「同一ユーザー経路は 1 行も増えない」不変性を崩さないよう `allowSelfAudit: true`
+  を明示したときだけ記録する（既存呼び出しは引数を足さないので挙動不変）
+- `api.ts`: 新設 6 ルート（`PATCH /api/teams/:teamId/visibility`、`GET /api/teams/published`、
+  `POST/DELETE /api/teams/:teamId/subscribe`、`GET /api/teams/:teamId/subscribers`、
+  `DELETE /api/teams/:teamId/subscribers/:userId`）。`GET /api/teams/published` は
+  プロジェクト名を一切返さない（`org-candidates` と同じ情報漏えい対策）。公開可能
+  プロジェクトが 0 件（＝又貸し分しか無いチーム）の公開操作は 400 で拒否
+
+新キルスイッチ `DEVRELAY_CROSS_TEAM_PUBLISH`（既定 `0` = OFF。`DEVRELAY_CROSS_TEAM` と
+AND 条件、どちらか OFF なら新 6 ルートは全て 404）。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1493/1493
+（新規 35 ケース含む、既存含め非退行）。OFF 状態（現在の本番環境）で `Team.visibility`
+が全て `'private'` のまま・`TeamSubscription` 行数 0 であることを SQL で確認。
+
+#### 変更ファイル
+新規 `apps/server/prisma/migrations/20261108000000_add_team_subscription/`、
+`apps/server/src/services/cross-team-publish.ts`、
+`apps/server/tests/cross-team-publish.test.mjs`。既存 `apps/server/prisma/schema.prisma`、
+`apps/server/src/services/{cross-team-authz,cross-team-audit}.ts`、
+`apps/server/src/routes/api.ts`、`apps/server/tests/cross-team-api-wiring.test.mjs`、
+`CLAUDE.md`。**`cross-team-guard.ts`（認可の純関数）は変更なし。** WebUI は Phase B
+（又貸し防止が効いているかをサーバー単体で切り分けるため、今回は含めない）。
+DB マイグレーション適用済み（`npx prisma db execute --stdin` で直接適用・SQL 検証・
+`npx prisma generate` 実行済み）。ソースコード変更ありのため `pnpm build` 実行済み、
+再起動が必要。
+
+### クロスユーザー Team: 「公開中のプロジェクト」にチーム名を表示 + 停止確認文言の正確化 (2026-11-08)
+
+直前までの一連のサイクル（招待の複数選択・再招待の行き止まり修正・招待候補フィルタ修正）を
+実機でフル往復テストしたところ、全て設計どおり動作することを DB で確認した
+（複数選択の承認が単一トランザクションで 3ms 差の 2 行を作成、監査ログがプロジェクト
+1 件につき 1 行記録される、等）。その過程で UI 表示の問題を 2 件発見・修正。
+
+#### ① 「公開中のプロジェクト」が重複登録に見える
+同一プロジェクトを複数チームへ公開すると「公開中のプロジェクト」に同じプロジェクト名が
+複数行並ぶが、どのチーム経由の公開かが表示されておらず、ユーザーには**重複登録に見えた**。
+`GET /api/teams/shared-by-me` は既に `teamName` を返していたが、`TeamPage.tsx` の描画が
+使っていなかっただけだった。各行にチーム名を追加して解消。
+
+なお `ask` の宛先解決は影響を受けない。`listCrossTeamAskCandidateProjects()` が
+`projectId` をキーにした `Map` で重複を畳むため、同一プロジェクトが複数チームに
+公開されていても候補は 1 件に収束することを SQL で確認済み。
+
+#### ② 「公開を停止」の確認文言が不正確だった
+旧文言「相手は以後このプロジェクトに ask できなくなります」は、同一プロジェクトが
+複数チームに公開されているケースでは**誤り**（1 つの grant を切っても他チーム経由の
+grant が生きていれば引き続き ask できる）。対象チーム名を明示し、同じプロジェクトが
+他チームにも公開されている場合だけ「そちらは残ります」と注記するように変更。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 931/931（既存のみ・非退行。純関数の切り出しは対象外の
+変更のため新規テストなし）。
+
+#### 変更ファイル
+既存 `apps/web/src/pages/TeamPage.tsx` のみ。**サーバー側の変更なし**
+（`teamName`/`projectId` とも既にレスポンスに含まれていた）。
+DB スキーマ変更なし・新規キルスイッチなし。
+
+### クロスユーザー Team: 再招待が WebUI から到達できないバグの修正（招待候補フィルタ） (2026-11-08)
+
+直前のサイクル（招待の複数プロジェクト選択 + サーバー側の再招待行き止まり修正）をデプロイ・
+実機確認したところ、yahoo を `pixterm` チームへ再招待しようとすると
+「招待できる組織メンバーがいません」と表示され、やはり再招待できないことが判明。
+
+#### 原因: サーバーは直っていたが、WebUI のフィルタが候補を隠していた
+調査の結果、サーバー（`POST /api/teams/:teamId/invites`）・`GET /api/teams/org-candidates`
+はいずれも正しく動作しており、yahoo は候補として返っていた。犯人は
+`TeamPage.tsx` の `getInvitableCandidates()`（旧実装）:
+
+```ts
+const existingOwnerIds = new Set(team.members.filter(m => m.crossUser).map(m => m.ownerUserId));
+return orgCandidates.filter(c => !existingOwnerIds.has(c.userId) && !pendingInviteeIds.has(c.userId));
+```
+
+`existingOwnerIds` による除外は「1 招待 = 1 プロジェクト」だった旧モデルでは正しかった
+（一度プロジェクトを出してもらったら再招待する意味が無かったため）。しかし直前のサイクルで
+「再招待 = プロジェクト追加の唯一の導線」にサーバー側を変更したため、この除外が
+**サーバー側で開けた道を UI が塞いでいる**状態になっていた。`pixterm` には yahoo の
+`MyApplication` が既に公開済みで、組織の他メンバーが yahoo しかいなかったため、候補が
+ゼロ件になり「招待できる組織メンバーがいません」と表示されていた。
+
+#### 修正
+新規 `apps/web/src/lib/cross-team-invite-rules.ts`（既存の `push-device-rules.ts` 等
+22 件と同じ、外部 import ゼロの純粋関数 + `tsconfig.test.json` 経由で `node --test` する
+パターン）に `selectInvitableCandidates()` を切り出し、`crossMemberOwnerIds` では除外せず
+`alreadyContributing: true` の注釈を付けて候補に残すよう修正。`pendingInviteeIds`（承認待ち
+の宛先）による除外は維持（同じ行を pending のまま上書きするだけで意味が無いため）。
+WebUI は候補チップに「（追加依頼）」を補足表示し、空状態も「組織に他メンバーがいない」
+「全員に依頼済み（承認待ち）」の 2 パターンに出し分けた。
+
+回帰テストには `cross-target-name-match.test.mjs` と同じ流儀で、旧ロジックを手元で
+再現して新旧を直接比較するアサーション（旧 0 件 → 新 1 件）を入れ、同じ見落としが
+再発したら即座に落ちるようにした。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/web` の `node --test` 931/931（新規 7 ケース含む非退行）、`apps/server` の
+`node --test` 1458/1458（サーバー変更なし・非退行）。
+
+#### 変更ファイル
+新規 `apps/web/src/lib/cross-team-invite-rules.ts`、
+`apps/web/tests/cross-team-invite-rules.test.mjs`。既存 `apps/web/tsconfig.test.json`
+（include に追加）、`apps/web/src/pages/TeamPage.tsx`。**サーバー側の変更なし**
+（既にある修正が UI から到達可能になるだけ）。DB スキーマ変更なし・新規キルスイッチなし。
+
+### クロスユーザー Team: 招待の複数プロジェクト選択 + 再招待の行き止まりバグ修正 (2026-11-08)
+
+前サイクル（招待 UI 文言修正 + 「公開中のプロジェクト」可視化）をデプロイ・実機確認した
+ユーザーから「プロジェクトの選択は一個だけ？複数選択できない？」という指摘を受けて調査。
+実際に単一選択だったことに加え、**一度承認すると二度と招待できなくなる恒久的な行き止まり**
+を発見したため、まとめて修正した。
+
+#### ① 承認の複数選択化
+旧実装は `handleAcceptInvite(inviteId, projectId)` — プロジェクトのチップを**クリックした
+瞬間に承認が確定**する単一選択だった。`POST /api/teams/invites/:id/accept` のボディを
+`projectIds: string[]` に変更し（旧 `projectId` 単数もフォールバックで受け付ける。デプロイ
+直後に開きっぱなしのタブ対策）、`$transaction` 内で N 組の `TeamMember` + `CrossTeamGrant`
+をまとめて作成する。所有権チェックは全件に対して行い、1 件でも他人のプロジェクトが
+混ざっていたら全体を 404 で拒否する（部分適用しない）。既にそのチームのメンバーになっている
+`projectId` はスキップし（バッチ全体を 409 で落とさない）、全件スキップのときのみ 409。
+監査ログ（`CrossTeamAuditLog`）はプロジェクト 1 件につき 1 行記録する。
+WebUI は「クリック即確定」をやめ、チェックボックス方式 + 「選択した N 件を公開して承認」
+ボタンに変更（選択ゼロの状態から開始＝誤爆防止）。このチームに既に公開済みの自分のプロジェクト
+はピッカーから除外する。
+
+#### ② 再招待の行き止まりバグの修正
+`CrossTeamInvite` は `@@unique([teamId, inviteeUserId])`（status を含まない）で、招待作成側に
+`existing.status === 'accepted'` のとき 409 を返すガードがあった。一方 `DELETE /api/teams/
+members/:memberId/grant`（前サイクルで UI 導線を追加した「公開を停止」）は `TeamMember` を
+削除するだけで **`invite.status` を `accepted` のまま放置する**
+（`CrossTeamInvite.teamMemberId` は `@relation` を持たない素の `String?` なので Cascade も
+効かず、宙ぶらりんの ID が残る）。この結果「承認 → 公開を停止 → 再招待」が**永久に 409 で
+拒否される**行き止まりになっていた（前サイクルの検証手順に書いた「確認後、必要なら再度招待
+して grant を戻す」は実際には失敗する手順だった）。
+`existing.status === 'accepted'` による 409 ガードを削除し、`declined`/`revoked` からの
+再招待と同形（常に `pending` へ戻す）にした。既存の `CrossTeamGrant` は revoke しない —
+権限の根拠は Grant の存在のみ、という設計原則（`decideCrossTeamAccess()`）は不変。これにより
+「後からプロジェクトを追加」が「再招待 → 追加分だけチェック」で成立するようになった。
+
+`invite.projectId` / `teamMemberId` カラムは複数件を保持できないため今回から更新しなくなった
+（null のまま）。両方とも他のどこからも読まれていないことを `grep` で確認済み（監査は
+`CrossTeamAuditLog` 側が持つ）。カラム自体は残す。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なし確認）、
+`apps/server` の `node --test` 1458/1458（新規 4 ケース含む、既存含め非退行）。
+
+#### 変更ファイル
+既存 `apps/server/src/routes/api.ts`（accept ハンドラの複数対応・invite 作成の 409 削除・
+`shared-by-me` に `teamId`/`projectId` 追加）、`apps/web/src/lib/api.ts`
+（`acceptInvite` 配列化・`CrossTeamShare` に `teamId`/`projectId` 追加）、
+`apps/web/src/pages/TeamPage.tsx`（チェックボックス選択 UI・公開済み除外）、
+`apps/server/tests/cross-team-api-wiring.test.mjs`。
+DB スキーマ変更なし・新規キルスイッチなし（既存 `DEVRELAY_CROSS_TEAM` の配下）。
+
+### クロスユーザー Team: 招待 UI の文言修正 + 貸す側の「公開中のプロジェクト」可視化 (2026-11-08)
+
+実機テストで見つかった UX の欠落 2 件を解消した（公開型 = Team を公開し同一組織内の利用者が
+選んで組み込む、を実装する前の前提条件）。
+
+#### ① 招待 UI の文言が過剰共有を招く問題の修正
+「{inviter} さんが『{team}』**チームへの参加を依頼**しています」という文言は、実際の意味
+（自分のプロジェクトを差し出し、相手の質問を自分の契約で実行する）と乖離しており、実機
+テストでユーザー自身が誤解を示した。「{inviter} さんが、**あなたのプロジェクトへの質問
+（ask）許可**を求めています」に変更し、承認時の選択欄にも「選んだプロジェクトの AI は
+あなたの契約で実行されます（質問のたびに利用枠を消費）。コード変更はできません。
+あとから取り消せます」という amber 系の警告を追加した。送信側の文言も
+「招待を送信中」→「プロジェクトの公開を依頼中」に変え、依頼の向きを明示した。
+
+#### ② 貸す側（grantee）の「公開中のプロジェクト」可視化・取り消し UI
+`DELETE /api/teams/members/:memberId/grant` は以前から grantee も呼べる実装だったが
+（`isOwner || isGrantee`）、UI 導線が存在せず、貸す側は自分の何が誰に公開されているかを
+確認する手段がなかった。新規 `GET /api/teams/shared-by-me` で `granteeUserId=自分 AND
+revokedAt IS NULL` の grant 一覧を返し（キルスイッチ OFF 時は 404 ではなく
+`{shares: []}` を返す — `/api/teams/invites` と同じ流儀）、WebUI に「公開中のプロジェクト」
+セクションを新設した。各行に相手の表示名・プロジェクト名・ask/exec チップ・「公開を停止」
+ボタンを表示する。取り消しはサーバー側が既に実装済みの `revokeGrant()` をそのまま使う
+（新規実装はサーバー側 GET 1 本のみ）。
+
+検証: `pnpm build` 全 6 workspace green（web バンドルに CJS `require(` 混入なしを確認）、
+`apps/server` の `node --test` 1454/1454（新規 3 ケース含む、既存含め非退行）。
+
+#### 変更ファイル
+既存 `apps/server/src/routes/api.ts`（`GET /api/teams/shared-by-me` 新設）、
+`apps/web/src/lib/api.ts`（`CrossTeamShare` 型・`teams.sharedByMe()`）、
+`apps/web/src/pages/TeamPage.tsx`（招待文言修正・公開中セクション新設）、
+`apps/server/tests/cross-team-api-wiring.test.mjs`。
+DB スキーマ変更なし・新規キルスイッチなし（既存 `DEVRELAY_CROSS_TEAM` の配下）。
+
+### クロスユーザー Team Phase 1 実機テスト: 2 件のバグ修正（宛先名解決・本番 .env 未読み込み） (2026-11-08)
+
+2026-11-05 実装のクロスユーザー Team（ask のみ）を個人組織（gmail + yahoo の 2 アカウント、
+同一組織）で実機テストし、招待 → 承認 → `CrossTeamGrant` 発行 → ask 往復 →
+`CrossTeamAuditLog`（request/completed）→ コスト計上（`Session.userId`=執行者側に
+`costUSD` が付く）まで設計どおりに動くことを確認した。その過程で 2 件のバグを発見・修正。
+
+#### バグ1: `resolveCrossTargetByName()` の同名衝突エラーが案内する解決策が機能しない
+`command-handler.ts` の照合ロジックが `label(p) === needle || p.name === needle` という
+OR 条件で、`name`（ディレクトリ名、不変）を `displayName`（表示名、変更可）の副次キーとして
+混ぜていた。そのため「プロジェクトの表示名を変えて一意にする」というエラー案内（#294）どおりに
+`displayName` を変更しても、`name` 側で一致し続け衝突が解消しなかった。実機で
+`mimamori-flutter` が 3 件（gmail 所有 2 件・yahoo 所有 1 件）ある状態で発見。
+
+新規純関数 `services/cross-target-name-match.ts`（`matchCrossTargetCandidates()`）に
+照合キーを「表示名（`displayName ?? name`）ひとつ」に統一して切り出した。
+`displayName` 未設定のプロジェクトは `label === name` のため挙動は完全に不変。
+`handleAskMember`・`handleTeamExec` の両呼び出し元に効く。
+
+#### バグ2: 本番 `apps/server/.env` が `dotenv/config` に読まれていなかった
+`dist/index.js` の `import 'dotenv/config'` はパス指定なしで `process.cwd()` 基準だが、
+pm2 の `devrelay-server` は `exec cwd=/opt/devrelay`（リポジトリルート）で起動しており、
+`/opt/devrelay/.env` は存在しなかった（`dotenv.config()` を cwd=`/opt/devrelay` で実行し
+`ENOENT` を実測で確認）。つまり `.env` への新規キー追記は**再起動しても一切反映されない**
+状態だった（既存キーは pm2 の env スナップショットから来ていたため気づきにくかった）。
+`/opt/devrelay/.env → apps/server/.env` のシンボリックリンクを作成して解決
+（dotenv の既定 `override:false` のため既存のスナップショット値は上書きされず無影響。
+`.gitignore` の `.env` パターンでカバー済みを確認）。`DEVRELAY_CROSS_TEAM=1` が
+12 キー中に含まれて読み込まれることを再起動後に検証した。
+
+CLAUDE.md の環境変数セクションと `system-admin.ts` のコメントに、実際に読まれるパスが
+`/opt/devrelay/.env`（symlink）である旨を追記した。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1451/1451
+（新規 10 ケース含む、既存含め非退行。新規ケースは旧ロジックを手元で再現し
+「旧ロジックは3件一致／新ロジックは2件」の比較アサーションで退行を直接検知する）。
+
+#### 変更ファイル
+新規 `apps/server/src/services/cross-target-name-match.ts`、
+`apps/server/tests/cross-target-name-match.test.mjs`。
+既存 `apps/server/src/services/command-handler.ts`（照合ロジックの呼び出し元を差し替え）、
+`apps/server/src/services/system-admin.ts`（コメント修正）、`CLAUDE.md`（環境変数セクション）。
+インフラ変更（git 管理外）: `/opt/devrelay/.env` シンボリックリンクを新規作成。
+DB マイグレーション不要。
+
+### クロスユーザー Team（別ユーザーのエージェントと ask で連携）Phase 0 + Phase 1 (2026-11-05)
+
+ユーザー要望「別のユーザーのエージェントとチームを組むみたいなことできるかな？」への対応。
+既存の `ask` / `teamexec`（クロスプロジェクト連携）は宛先解決・Team ゲート・ループ検出まで完成
+していたが、全経路が同一ユーザーに構造的に閉じていた（`TeamMember` を作る唯一の砦
+`api.ts` の `project.machine.userId !== userId → 404` 他、Agent REST 4 箇所・チャット宛先解決の
+`machine: { userId: dbUserId }`）。本サイクルで同一組織内に限り、招待制で別ユーザーのプロジェクトを
+ask の宛先にできるようにした（teamexec は Phase 2 で別途解禁、本サイクルでは構造的に到達不可）。
+
+#### Phase 0: 既知バグ 3 件の修正（クロス機能に一切触れない、単独で安全）
+1. `api.ts` の `DELETE /api/teams/:teamId/members/:memberId` が `teamId` でスコープせず
+   `teamMember.delete({ where: { id: memberId } })` していたため、他ユーザーの Team に属する
+   TeamMember 行を memberId 推測で削除できた（`.catch(() => null)` でエラーも出ない）。
+   `deleteMany({ where: { id, teamId } })` に修正。
+2. Discord/Telegram の共有チャンネルで `userContexts`（キー=`platform:chatId`）がキャッシュヒット時に
+   `userId` を更新せず、「そのチャンネルで最初に話した人」の身元に全員の操作が固定されていた
+   （権限モデル・監査・レート制限を一切通らない事実上のクロスユーザー実行）。新規純関数
+   `chat-context-rules.ts` の `reconcileUserContext()` で発言者が変わったら接続状態
+   （マシン/セッション/teamexec 接続先/一覧キャッシュ）を破棄するよう修正。
+   キルスイッチ `DEVRELAY_CHAT_CTX_PER_USER`（既定 `1`）。
+3. `resolveDbUserId()` / `resolveOrCreateUser()` が `platformUserId` だけで検索し `platform` を
+   見ていなかった（`PlatformLink` は `@@unique([platform, platformUserId])`）。
+
+#### Phase 1: クロスユーザー ask（招待制）
+- 新規テーブル `CrossTeamInvite`（pending の持ち場、認可には使わない）/ `CrossTeamGrant`
+  （認可の唯一の根拠。行が存在し `revokedAt IS NULL` の 2 条件のみで判定）/
+  `CrossTeamAuditLog`（append-only、FK 無し）。`Session.requestedByUserId`
+  （既存行は全て NULL=backfill 無し=「依頼者=所有者」のまま不変）。
+- 2 つの userId を分離: `executorUserId`（宛先マシン所有者。AI/モデル/言語/課金/`Session.userId`
+  に使う）と `requesterUserId`（依頼者。監査/レート制限/`requestedByUserId` に使う）。
+  `sendPromptToAgent` には executorUserId のみを渡す（依頼者の API キー・モデル設定が
+  他人のマシンで使われる事故、組織 AI デフォルト統制の迂回を防ぐため）。
+- `document-api.ts` の `checkCrossTargetAllowed()` をオブジェクト引数に統一し単一の拡張点に
+  （同一ユーザー経路は 1 バイトも変えない。クロスは `allowCrossUser: true` の ask-member のみ有効、
+  teamexec-member/raw-completion-api/GET messages は明示的に `allowCrossUser: false` で据え置き）。
+  判定本体は新規純関数 `cross-team-guard.ts` の `decideCrossTeamAccess()`
+  （組織境界 → 宛先所有者スナップショット一致 → revoked → 第三者ブリッジ禁止 → mode フラグ、の順）。
+  クロスの拒否は常に 404（存在を漏らさない。同一ユーザーの Team 未登録 403 案内とは経路を分離）。
+  `GET /api/agent/members` と 403 案内文に、Team 内の自分以外のオーナー/メンバー情報が漏れる
+  経路があったため情報漏えいフィルタも追加。
+- WebUI は招待制（`GET /api/teams/org-candidates` はプロジェクト名を一切返さず組織メンバー一覧のみ）。
+  `TeamPage.tsx` に「あなたへの招待」「送信済み招待」セクションと招待/承認/辞退/取消 UI を追加。
+- 新キルスイッチ `DEVRELAY_CROSS_TEAM`（既定 `0` = OFF。既存キルスイッチの多数派と逆方向。
+  新しい信頼境界を黙って開けないため）、`DEVRELAY_CROSS_TEAM_EXEC`（既定 `0`、Phase 2 用の先行配線）。
+
+検証: `pnpm build` 全 6 workspace green、`apps/server` の `node --test` 1441/1441（新規 71 ケース
+含む、既存含め非退行）。OFF 状態での不変性を `SELECT count(*) FROM "Session" WHERE
+"requestedByUserId" IS NOT NULL` 等で確認（すべて 0）。
+
+#### 変更ファイル
+新規 `apps/server/src/services/{chat-context-rules,cross-team-guard,cross-team-authz,cross-team-audit}.ts`、
+`apps/server/tests/{chat-context-rules,cross-team-guard,cross-team-api-wiring,team-member-delete-guard}.test.mjs`、
+`apps/server/prisma/migrations/20261105000000_add_cross_team_grant/`。
+既存 `apps/server/prisma/schema.prisma`、`apps/server/src/routes/{api,document-api,raw-completion-api}.ts`、
+`apps/server/src/services/command-handler.ts`、`apps/web/src/{lib/api.ts,pages/TeamPage.tsx}`。
+**DB マイグレーション適用済み**（新規 3 テーブル + `Session.requestedByUserId` 列。
+`npx prisma db execute --stdin` で直接適用、SQL で検証済み、`npx prisma generate` 実行済み）。
+
+### Devin CLI ガードレール サイクル1: 純関数エンジン + Phase 0 手順書（未配線） (2026-11-05)
+
+ユーザー要望「Devin CLI にガードレールを作りたい（`rm` 禁止/承認制・本番 IP レンジ参照不可）」への
+対応サイクル1。`doc/devin_gate_investigation.md`（サイクル D0）が残した「#362〜#368 の6サイクルの
+失敗は allow-list 方式に構造的に起因していた（allow に書き漏れたコマンドが『承認待ち』に落ち無音
+exit 0 になる）」という教訓を踏まえ、**allow/ask を一切生成しない deny-only の構成**に限定した
+純関数モジュール `devin-guard-rules.ts`（`agents/{linux,macos,windows}/src/services/`、外部 import
+ゼロ・3 OS byte-for-byte 同一）を新設した。`isValidDevinPermissionRule()` が `Exec()` 内の glob
+（`Exec(**)` 等、公式ドキュメント実測で無効ルールと判明済み）を構造的に拒否し、
+`buildDevinGuardOrgPolicy()` が Devin 組織ダッシュボード（Terminal Permissions）に貼り付ける
+`{deny, ask:[], allow:[]}` を生成する。`rm` は「プロジェクト外のみ禁止」の条件付き表現が
+`Exec()` のプレフィックス一致では原理的に不可能なため意図的に未収録（ユーザー判断事項として
+`doc/devin_guardrail_phase0.md` に記録）。
+
+併せて独立した潜在バグを修正: `git-guard-core.ts` の `GUARD_EXCLUDED_PATTERN` に `.devin` を追加
+（3 OS）。Devin 自身のセッション状態ディレクトリが除外対象に無く、plan ターン終了時に
+`.devrelay/reverted/` へ quarantine されるリスクがあった。
+
+**本サイクルでは `ai-runner.ts` の devin spawn 分岐への配線は行っていない**（`--permission-mode
+dangerous` が user/project レベルの `deny` を上書きしないか等、実機でしか確定できない Phase 0 の
+検証が未完了のため）。対象機（`DESKTOP-Q43QT7L/fwjg2` の `TestClock`）は Team ページ未登録で
+`devrelay-ask-member` 経由の指示も送れず、本セッションからは検証を実行できなかった。Phase 0 の
+手順・組織ダッシュボード貼り付け用 JSON（ビルド済みモジュールから生成し記録、手書きではない）・
+残課題は `doc/devin_guardrail_phase0.md` を参照。
+
+検証: `pnpm build` 6 workspace green。`node --test` で `agents/linux` 1275/1275・`agents/macos`
+757/757（新規 `devin-guard-rules.test.mjs` 26 ケース含む、既存含め非退行）、3 OS 間
+byte-for-byte 同一性を `diff` で確認。新規モジュールは未配線のため挙動変更ゼロ、`git-guard-core.ts`
+の修正は除外対象を広げるだけで既存挙動を狭めない。
+
+#### 変更ファイル
+新規 `agents/{linux,macos,windows}/src/services/devin-guard-rules.ts`、
+`agents/{linux,macos}/tests/devin-guard-rules.test.mjs`、`doc/devin_guardrail_phase0.md`。
+既存 `agents/{linux,macos,windows}/src/services/git-guard-core.ts`、
+`agents/{linux,macos}/tests/git-guard-core.test.mjs`。`apps/server`/`apps/web`/DB 無変更のため
+server 再起動不要。**Agent の `u` は本サイクル単独では不要**（新規モジュールは未配線、
+`git-guard-core.ts` の修正は Devin の plan ターンを使うマシンでのみ意味を持つ軽微な修正）。
+
+### gemini plan→exec resume（MCP approve_implementation の planAiSessionMissing 根治） (2026-10-27)
+
+MCP `submit_instruction` → `get_plan` → `approve_implementation` 経路が gemini プロジェクトだけ
+必ず `planAiSessionMissing` で弾かれる問題を根治した。詳細は
+[devlog](devlog/2026-10-27_122303_gemini_session_resume.md) 参照。
+
+#### 真因
+サーバー側は本当にツール非依存（`aiSessionId` が完了報告に乗りさえすれば無改造で保存・resume
+できる）だが、`agents/{linux,macos,windows}/src/services/ai-runner.ts` の gemini 分岐が
+**AI セッション ID の概念を一切持たず**、`result.extractedSessionId` に一度も代入していなかった
+（claude SDK は `m.session_id`、codex は `thread.started` イベントから拾う）。
+
+#### 対応
+claude 端末モード core#383 と同じ「resume するなら `--resume`、しないなら UUID を事前採番して
+`--session-id`」パターンを移植した。本日の実機検証（gemini-cli 0.65.0）で `--session-id`/`--resume`
+の両対応・ヘッドレスでの resume 継続・ID 重複/resume 先なしは exit 42 + 明確な stderr になることを
+確認した上で、`packages/shared/src/gemini-args.ts` に `buildGeminiSessionArgs()` /
+`resolveGeminiAiSessionId()` / `classifyGeminiSessionFailure()` を追加し、3 エージェントの gemini
+分岐に配線した。新規採番は MCP plan ターン限定（chat ターンの argv は無変化）、resume はサーバー
+明示指定（`decideResume()` の `source === 'explicit'`）のときのみ使う。60 秒 resume watchdog は
+gemini の対象外にした（実測で初回出力に約 23 秒かかるため）。
+
+サーバー側は `apps/server/src/services/submission-guard.ts` に `PLAN_RESUME_CAPABLE_AI_TOOLS`
+を新設し、`planAiSessionMissing` のエラー文言を出し分けた（devin/aider 等の resume 未対応ツールは
+「plan→exec の引き継ぎに未対応、`e` を送ってください」という誤解のない文言に切り替え）。
+
+新キルスイッチ `DEVRELAY_GEMINI_SESSION_ID`（既定 `1`）。DB スキーマ変更なし。
+`submission-guard.ts`/`i18n.ts` を変更したため `pm2 restart devrelay-server` が必要、
+gemini を使用する各機体は `u` が必須。
+
+---
+
+### Gemini のワークスペース信頼を DevRelay 側で付与する（exec の yolo が黙って無効化されていた問題の根治） (2026-10-27)
+
+`gemini-user` 機体の障害調査（3 サイクル連続）の最終局面。前サイクルまでで `--approval-mode`
+無視・モデルカタログの死んだ ID・CLI の古さ・Node 18/20 混同・probe キャッシュの陳腐化を解消し、
+Agent 再起動後の再テストで `gemini CLI が出力なしで終了しました（exit 55）[stderr] Gemini CLI
+is not running in a trusted directory.` が発生した。詳細は
+[devlog](devlog/2026-10-27_072248_gemini_workspace_trust.md) 参照。
+
+#### 真因
+Gemini CLI は**未信頼ディレクトリでは承認モードを問答無用で `default` に落とす**。plan ターンは
+exit 55 で即死（今回の症状）、exec ターンは `--approval-mode yolo` を渡しても**黙って降格**され
+`run_shell_command` が誰も答えられない確認待ちになる。これは **2026-10-26 サイクル（exec の
+yolo 化）が未信頼ディレクトリでは最初から無効化されていた**ことを意味する（あのサイクルの元の症状
+「シェル実行権限が付与されていない」と完全に一致）。母艦で当時効いて見えたのは過去の対話起動で
+信頼済みだったからに過ぎず、新規プロジェクトディレクトリでは全マシンで同じ穴が開いていた。
+DevRelay は Devin には既に同じ手当てをしていた（#345 `--respect-workspace-trust false`）が、
+Gemini にだけ無かった。
+
+#### 対応
+3 エージェントの gemini spawn env に `GEMINI_CLI_TRUST_WORKSPACE=true`（Gemini 公式が
+headless/automated 環境向けに文書化している環境変数）を追加。`--skip-trust` フラグではなく
+環境変数を選んだのは、旧 CLI で `Unknown arguments` にならないため（2 サイクル前の
+`--approval-mode` 無条件付与事故を繰り返さない）。非対話実行では誰も信頼プロンプトに答えられず
+付与しても安全性は下がらないため、今回は意図的な既定変更と判断し、前 2 サイクルと異なり
+キルスイッチ `DEVRELAY_GEMINI_TRUST_WORKSPACE`（既定 `1`）を新設した。安全網として
+`isWorkspaceTrustError()` に Gemini の拒否文言を追加し、`gemini.workspaceUntrusted`（新規）で
+対処手順を案内する。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `agents/{linux,macos,windows}/src/services/ai-runner.ts` | gemini spawn env に `GEMINI_CLI_TRUST_WORKSPACE`、信頼エラー分岐の追加 |
+| `agents/{linux,macos,windows}/src/services/cli-failure.ts` | `isWorkspaceTrustError()` に Gemini 文言を追加 |
+| `packages/shared/src/i18n.ts` | `gemini.workspaceUntrusted` 追加 |
+| `agents/{linux,macos}/tests/cli-failure.test.mjs` | 実機 stderr を fixture にしたテスト3件追加 |
+
+`agents/*` のみの変更のため Gemini 使用機は各機 `u` が必要。`apps/server`・`apps/web` は無変更の
+ため `pm2 restart devrelay-server` は不要。DB マイグレーション不要。
+
+### Gemini モデルカタログの死んだ ID 2 件の修正 + 廃止モデル 404 の診断メッセージ化 (2026-10-27)
+
+前サイクル（`--approval-mode` 根治、下記エントリ）反映後 `gemini-user` 機体で再テストしたところ、
+警告 1 行つきで CLI 起動まで進んだが、`[API Error: ...]` 形式の二重エスケープ JSON で
+`This model models/gemini-2.5-pro is no longer available to new users.` 404 が発生した。
+詳細は [devlog](devlog/2026-10-27_063526_gemini_model_catalog_404.md) 参照。
+
+#### 真因
+サーバーログで `model resolved: (default)` を確認し、DevRelay は `-m` を渡していない —
+旧 CLI 自前の既定モデル `gemini-2.5-pro` が Google 側で廃止されたことが原因で、DevRelay 側の
+不具合ではなかった（母艦の新 CLI はサーバー側ルーティングで回避するため無害）。
+
+調査の過程で `AI_MODEL_CATALOG.gemini`（`constants.ts`）の全 6 ID を母艦の実 API で実測したところ、
+**本物の DevRelay バグ**を発見した: `gemini-3.1-pro`（カタログ先頭＝最も選ばれやすい「最新
+フラッグシップ」表記）と `gemini-2.5-pro` の 2 件が全ユーザー・全マシンで hard 404 だった
+（`gemini-3.1-pro` の正しい ID は `gemini-3.1-pro-preview`、pro 系は `-preview` サフィックス必須）。
+`constants.ts` 冒頭 JSDoc が自ら警告する「実機未検証で追加するな」の罠の 3 度目
+（`gemini-3.1-pro` は #309 で未検証のまま追加された ID）。
+
+#### 対応
+カタログを実測結果で差し替え（死んだ 2 件 → `gemini-3.1-pro-preview` 修正 + `gemini-2.5-pro`
+削除、新たに有効と確認した `gemini-3.8-flash`/`gemini-3.5-flash-lite` を追加。`gemini-2.5-pro`
+削除は codex カタログの「旧 CLI のために残置する」慣習の例外 — サーバー側永久廃止は CLI 更新
+でも直らないため）。Phase 2 として `gemini-args.ts` に純粋関数 `detectGeminiModelUnavailable()`
+を追加し 3 エージェントの終了ハンドラに 1 分岐追加、廃止モデル 404 を生 JSON でなく
+「① CLI 更新 ② `l <モデル>` で今すぐ直す」の診断メッセージ（`gemini.modelUnavailable` 新設）に
+変換。Devin 側カタログの `gemini-3.1-pro`（別名前空間、Devin 自身の slug）は変更していない。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `packages/shared/src/constants.ts` | `AI_MODEL_CATALOG.gemini` 差し替え + 実測ログコメント |
+| `packages/shared/src/gemini-args.ts` | `detectGeminiModelUnavailable()` 追加 |
+| `packages/shared/src/i18n.ts` | `gemini.modelUnavailable` 追加 |
+| `packages/shared/tests/gemini-args.test.mjs` | 実 stderr fixture 2 種のテスト追加（3件） |
+| `agents/{linux,macos,windows}/src/services/ai-runner.ts` | 404 検出分岐を1つ追加、JSDoc 例示を修正 |
+
+前サイクルと異なり `packages/shared` のカタログ/i18n を `apps/server`・`apps/web` が参照するため
+**本サイクルは `pm2 restart devrelay-server` が必要**。`agents/*` 変更分は Gemini 使用機の各機
+`u` が必要。DB マイグレーション不要、新規キルスイッチなし。
+
+### Gemini CLI の plan ターンが probe 結果を無視し `--approval-mode` 非対応機で会話不能になる問題の根治 (2026-10-27)
+
+`gemini-user` 機体で「こんにちは」と送っただけで `gemini CLI が出力なしで終了しました（exit 1）`
+`[stderr] Unknown arguments: approval-mode, approvalMode` となり、plan ターン（通常のチャット）が
+一度も成立しなかった。詳細は [devlog](devlog/2026-10-27_061134_gemini_approval_mode_probe.md) 参照。
+
+#### 真因
+2026-10-26 サイクル（exec の yolo 化）で追加した `usePlanMode` 分岐の else 節（plan ターン、または
+yolo 系フラグに非対応の場合）が、`probeGeminiCapabilities()` の判定結果を一切見ずに
+`--approval-mode auto_edit` をハードコードしていた。`--approval-mode` フラグ自体を持たない旧 CLI
+では yargs の `strict()` が `Unknown arguments` で exit 1・stdout 空になる。これは 2026-10-26 サイクル
+の退行ではなく、plan ターンの argv はそのサイクルの前後で変わっていない — この機体の Gemini は
+DevRelay 導入以来一度も会話が成立していなかった（母艦の Gemini 0.65.0 は全 choices 対応のため無回帰）。
+
+#### 対応
+承認モード argv の決定ロジックを `packages/shared/src/gemini-args.ts`（新規）の純粋関数
+`parseGeminiCapabilities()` / `buildGeminiApprovalArgs()` に切り出し、3 エージェントの個別
+ハードコードを廃止（`capability-rules.ts` と同方針）。**`--approval-mode` 非対応時は plan ターンでも
+フラグ無しで起動する**ようになった点が根治の核心。probe 失敗時の「それでも auto_edit を渡す」
+楽観フォールバックも廃止（未検証フラグで全滅するより CLI 既定起動が安全）。i18n に
+`gemini.approvalModeUnsupported` / `gemini.probeFailed` を追加（既存 `gemini.yoloUnsupported` は維持）。
+
+Phase 2 として #329 の `devinUnknownFlagMatch` と同じ流儀で、`Unknown arguments` を実行時に検出し
+フラグを 1 つ外して最大 2 回まで自動リトライする安全網も追加（`geminiDroppedFlags`、
+`gemini.unknownFlagRetry` / `gemini.unknownFlagFailed`）。probe の誤判定があってもヘルプ全文の
+エラーをユーザーに見せない最後の砦。
+
+新しいキルスイッチは追加していない。既存 `DEVRELAY_GEMINI_YOLO`（既定 `1`）は維持。
+
+#### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `packages/shared/src/gemini-args.ts` | 新規。`parseGeminiCapabilities` / `buildGeminiApprovalArgs` |
+| `packages/shared/src/index.ts` | 上記の named export 追加 |
+| `packages/shared/src/i18n.ts` | `gemini.approvalModeUnsupported` / `gemini.probeFailed` / `gemini.unknownFlagRetry` / `gemini.unknownFlagFailed` 追加 |
+| `packages/shared/tests/gemini-args.test.mjs` | 新規14テスト（決定表 + droppedFlags） |
+| `agents/{linux,macos,windows}/src/services/ai-runner.ts` | probe 委譲 + gemini 分岐差し替え + Phase 2 リトライ |
+
+`apps/server`・`apps/web` のランタイムコードは無変更のため `pm2 restart devrelay-server` は不要。
+Gemini 使用機は各機 `u` 必須。DB マイグレーション不要。
 
 ### `chatgpt-user` 障害の根治: AI CLI 検出が絶対パスを捨てて spawn ENOENT になる問題 (2026-10-27)
 

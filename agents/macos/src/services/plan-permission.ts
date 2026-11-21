@@ -232,6 +232,44 @@ function normalizeGitTokens(tokens: string[]): string[] {
 }
 
 /**
+ * サイクルS2b（2026-11-12、新発見②）: git の経路またぎフラグ（`-C`/`-c`/`--git-dir`/
+ * `--work-tree`/`--exec-path`/`--namespace`）がサブコマンドより前に含まれているかを判定する。
+ *
+ * `normalizeGitTokens()` はこれらのフラグを値ごと読み飛ばしてから `['git', <subcommand>, ...]`
+ * に正規化するため、`matchesBashRuleByTokens()`（allowedTools ルール一致判定）に使うと
+ * `git -C /home/other-user/project log -p` が `Bash(git log *)` に一致して **allow** されてしまう
+ * （本サイクルの Step 0 で実機確認済み: この会話自身のプランモードで `git -C /opt/devrelay status`
+ * が通った）。`-C`/`--git-dir`/`--work-tree` は「別の作業ツリー・別のリポジトリで git を実行する」
+ * ための経路変更フラグで、allowedTools の `Bash(git log *)` 等が想定する「現在の作業ツリーへの
+ * 読み取り」から逸脱する。`-c core.pager=...`/`-c alias.*` のような設定注入、`--exec-path` による
+ * 実行パス差し替えも同様の理由で危険。
+ *
+ * 用途を分離する: `isWriteBashCommand()`（write 判定）はこれらのフラグを読み飛ばした正規化を
+ * 使い続ける（`git -C foo commit` を書き込みと正しく判定するために必要）。一方 allowedTools の
+ * **ルール一致判定**（`matchesBashRuleByTokens()`）はこの関数の結果を先にチェックし、フラグが
+ * あれば allowedTools の内容に関わらず無条件 deny する（`decideSingleBashSegment()` 参照）。
+ */
+export function hasGitScopeEscapeFlag(tokens: string[]): boolean {
+  if (tokens[0] !== 'git') return false;
+  let i = 1;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (GIT_GLOBAL_FLAGS_WITH_VALUE.has(t)) return true;
+    // `--git-dir=/path` のような `--flag=value` 結合形も検出する（`normalizeGitTokens()` の
+    // 読み飛ばしは対象外だが、本関数は allowedTools ルール一致の前段 deny なので別途検査する）。
+    if ([...GIT_GLOBAL_FLAGS_WITH_VALUE].some((flag) => flag.startsWith('--') && t.startsWith(`${flag}=`))) {
+      return true;
+    }
+    if (t.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return false;
+}
+
+/**
  * "Bash(cmd)" / "Bash(cmd *)" ルールをトークン列で判定する（#333）。
  * 文字列全体の前方一致ではなくトークン単位で比較するため、引数にグロブが
  * 含まれていても（グロブ自体は1トークンとして扱われるため）誤って不一致にならない。
@@ -301,6 +339,17 @@ function decideSingleBashSegment(
 
   if (isWriteBashCommand(tokens, writeBashCommands)) {
     return { behavior: 'deny', reason: 'planPolicy:writeTool', detail: `書き込み系コマンド: ${tokens[0]}` };
+  }
+
+  // サイクルS2b（新発見②）: git の経路またぎフラグは allowedTools ルールの内容に関わらず
+  // 無条件 deny する（`matchesBashRuleByTokens()` に到達する前に落とす。`hasGitScopeEscapeFlag()`
+  // の JSDoc 参照）。
+  if (hasGitScopeEscapeFlag(tokens)) {
+    return {
+      behavior: 'deny',
+      reason: 'planPolicy:notInAllowlist',
+      detail: `git の経路変更フラグ（-C/-c/--git-dir/--work-tree/--exec-path/--namespace）は使用できません: ${segment}`,
+    };
   }
 
   const commandName = normalizeGitTokens(tokens)[0];

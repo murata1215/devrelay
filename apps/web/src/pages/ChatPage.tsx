@@ -1,5 +1,5 @@
 import { apiUrl } from '../lib/base';
-import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, Fragment, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved, type ToolApprovalAuto } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -24,6 +24,19 @@ import { getTabId } from '../lib/tab-id';
 import { CaseTagBar, useThreadCase } from '../components/CaseTagBar';
 import { decideCaseGuard } from '../lib/usage-case-rules';
 import { isTraditionalCommand } from '@devrelay/shared';
+import { crossTeamChat, type CrossAskOwnerGroup } from '../lib/api';
+import {
+  isCrossTab,
+  shouldSendConnect,
+  decideComposerCapabilities,
+  buildCrossTabBanner,
+  buildCrossMemoryLabel,
+  shouldShowGenerationDivider,
+  buildCrossTabBadge,
+  resolveCrossHistorySource,
+  flattenCrossAskGroups,
+} from '../lib/cross-ask-rules';
+import { isAtBottom, decideHistoryRefresh, resolveRestoredScrollTop } from '../lib/chat-scroll-rules';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -64,6 +77,11 @@ interface Tab {
   /** 停止ボタンの操作状態（null = 未操作）。cancel-request-rules.ts の sessionId 照合で
    *  スレッド切替時に自動無効化される（2026-09-30 停止手段の発見可能性改善サイクル） */
   cancel?: CancelUiState;
+  /** クロスユーザー Team Phase C: 購読/借用プロジェクトの質問専用タブか（省略時 'own' = 自分の
+   *  タブと同じ扱い。既存タブとの互換性のため省略可能にしている、cross-ask-rules.ts 参照）。 */
+  kind?: 'own' | 'cross';
+  /** `kind === 'cross'` のときのみ有効。ツリー表示・バナー文言に使う。 */
+  crossMeta?: { ownerLabel: string; teamName: string; origin: 'invite' | 'subscription' };
 }
 
 /** File → base64 FileAttachment 変換 */
@@ -1056,6 +1074,8 @@ function Sidebar({
   variant,
   headerAction,
   conversationsSlot,
+  crossGroups,
+  onSelectCrossProject,
 }: {
   machineList: Machine[];
   openTabIds: Set<string>;
@@ -1084,6 +1104,12 @@ function Sidebar({
    *  表示専用コンポーネント自体は ChatPage 側で1つだけ生成し、両インスタンス（drawer/rail）に渡す
    *  （`useConversationFeed` のポーリングを二重化しないため）。 */
   conversationsSlot?: React.ReactNode;
+  /** クロスユーザー Team Phase C: 購読/借用プロジェクト一覧（Agents モード末尾に表示。
+   *  0 件ならセクションごと非表示。取得は ChatPage 側で1つだけ行い両インスタンスに渡す
+   *  （独立 30 秒ポーリング、machinesApi.list() の 10 秒ポーリングには混ぜない）。 */
+  crossGroups: CrossAskOwnerGroup[];
+  /** クロス行クリック（`//connect` を送らず質問専用タブを開く）。 */
+  onSelectCrossProject: (projectId: string, meta: { label: string; ownerLabel: string; machineName: string; teamName: string; origin: 'invite' | 'subscription' }) => void;
 }) {
   const { t } = useLanguage();
   const sidebarConversationsLabel = t('sidebar.conversations');
@@ -1276,6 +1302,69 @@ function Sidebar({
                   </div>
                 );
               })}
+
+              {/* クロスユーザー Team Phase C: 購読・共有されたプロジェクト（0 件なら非表示、
+                  既存ツリーの見た目は 1px も変えない）。owner → machine → project の 3 段。 */}
+              {crossGroups.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-[var(--border-color)]">
+                  <div className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                    🔗 購読・共有されたプロジェクト
+                  </div>
+                  {crossGroups.map(owner => (
+                    <div key={owner.ownerLabel} className="ml-1">
+                      <div className="px-3 py-1 text-xs text-[var(--text-muted)] truncate">{owner.ownerLabel}</div>
+                      {owner.machines.map(machine => (
+                        <div key={machine.machineId} className="ml-2">
+                          <div className="px-3 py-0.5 flex items-center gap-1.5 text-[11px] text-[var(--text-faint)]">
+                            <span className={`w-1.5 h-1.5 rounded-full ${machine.status === 'online' ? 'bg-green-500' : 'bg-[var(--bg-selected)]'}`} />
+                            <span className="truncate">{machine.machineName}</span>
+                          </div>
+                          {machine.projects.map(project => {
+                            const isActive = project.projectId === activeTabId;
+                            const hasTab = openTabIds.has(project.projectId);
+                            return (
+                              <button
+                                key={project.projectId}
+                                onClick={() => {
+                                  onSelectCrossProject(project.projectId, {
+                                    label: project.label,
+                                    ownerLabel: owner.ownerLabel,
+                                    machineName: machine.machineName,
+                                    teamName: project.teamName,
+                                    origin: project.origin,
+                                  });
+                                  if (variant === 'drawer' && window.innerWidth < 768) onToggle();
+                                }}
+                                disabled={machine.status !== 'online'}
+                                className={`
+                                  w-full text-left flex items-center gap-1.5 px-3 py-1 rounded-md mx-1 text-sm
+                                  ${isActive
+                                    ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
+                                    : hasTab
+                                      ? 'text-[var(--text-primary)] font-semibold hover:bg-[var(--bg-hover)]'
+                                      : machine.status === 'online'
+                                        ? 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                                        : 'text-[var(--text-faint)] cursor-not-allowed'
+                                  }
+                                `}
+                                title={`${project.teamName} 経由`}
+                              >
+                                <span className={hasTab ? 'text-yellow-400' : 'text-[var(--text-faint)]'}>
+                                  {hasTab ? '★' : '#'}
+                                </span>
+                                <span className="truncate flex-1">{project.label}</span>
+                                <span className="text-[10px] text-[var(--text-faint)] shrink-0">
+                                  {buildCrossTabBadge(project.origin)}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
 
@@ -2026,6 +2115,11 @@ export function ChatPage() {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([]);
   const [machineList, setMachineList] = useState<Machine[]>([]);
+  /** クロスユーザー Team Phase C: 購読・借用プロジェクト一覧（Agents ツリー末尾用）。
+   *  machineList とは独立した state・independent try/catch で持つ（Phase B の教訓:
+   *  同じ Promise.all/try に混ぜると片方のキルスイッチ OFF で両方消える）。404 は
+   *  「機能 OFF」として空配列に握り潰す。 */
+  const [crossAskGroups, setCrossAskGroups] = useState<CrossAskOwnerGroup[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   /** サーバー（タブグループ）定義 */
   const [servers, setServers] = useState<ChatServer[]>([]);
@@ -2221,8 +2315,17 @@ export function ChatPage() {
    * @param mode 'initial'=スクロールバック用に既存メッセージの前に prepend（既定・従来の refresh=false と同一動作）
    *             'refresh'=最新メッセージで既存メッセージと時系列マージ（WS 再接続時用・従来の refresh=true と同一動作）
    *             'replace'=既存メッセージを丸ごと置換（スレッド切替時専用。他モードの重複排除ロジックを一切通さない）
+   * @param scrollPolicy 'stick-bottom'（既定・従来の挙動）=完了後に無条件で最下部へ強制スクロール。
+   *             'keep-position'=ユーザーが読んでいた位置を保持する（最下部へは飛ばさない）。
+   *             alt+tab 復帰・WS 再接続時に、ユーザーが上をスクロールして読んでいる最中の
+   *             位置喪失を防ぐために使う（`decideHistoryRefresh()` 参照）。
    */
-  const loadHistory = useCallback(async (projectId: string, sessionId?: string | null, mode: 'initial' | 'refresh' | 'replace' = 'initial') => {
+  const loadHistory = useCallback(async (
+    projectId: string,
+    sessionId?: string | null,
+    mode: 'initial' | 'refresh' | 'replace' = 'initial',
+    scrollPolicy: 'stick-bottom' | 'keep-position' = 'stick-bottom',
+  ) => {
     // 履歴読み込み中はスクロールを抑制
     shouldAutoScrollRef.current = false;
     // レースガード用スナップショット: リクエスト開始時点の historySessionId を保持する。
@@ -2239,12 +2342,20 @@ export function ChatPage() {
       t.projectId === projectId ? { ...t, loadingHistory: true } : t
     ));
 
-    const source = resolveHistorySource({ sessionId, projectId });
+    // クロスタブ（購読/借用プロジェクトの質問専用タブ）: /api/cross-team/projects/:id/messages
+    // から読む。resolveHistorySource()（自分のタブ専用）は使わない。
+    const isCrossHistory = isCrossTab(tabsRef.current.find(t => t.projectId === projectId));
+    const source = isCrossHistory ? resolveCrossHistorySource({ projectId }) : resolveHistorySource({ sessionId, projectId });
 
     try {
-      const { messages, hasMore } = source.kind === 'session'
-        ? await sessionsApi.getMessages(source.id, { limit: 10 })
-        : await projectsApi.getMessages(source.id, { limit: 10 });
+      const { messages, hasMore } = isCrossHistory
+        ? await crossTeamChat.getMessages(projectId, { limit: 10 })
+        : source.kind === 'session'
+          ? await sessionsApi.getMessages(source.id, { limit: 10 })
+          : source.kind === 'project'
+            ? await projectsApi.getMessages(source.id, { limit: 10 })
+            // 到達しないはずの分岐（isCrossHistory=false のときは起き得ない）。TS の網羅性のため。
+            : await crossTeamChat.getMessages(projectId, { limit: 10 });
       const chatMessages: ChatMessage[] = messages.map(m => ({
         id: m.id,
         role: m.role === 'ai' ? 'system' as const : m.role,
@@ -2252,8 +2363,9 @@ export function ChatPage() {
         timestamp: new Date(m.createdAt),
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
+        generation: m.generation,
       }));
-      console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, source=${source.kind}, mode=${mode}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
+      console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, source=${source.kind}, mode=${mode}, scrollPolicy=${scrollPolicy}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
 
       // 自動スクロールガードを setTabs より前に同期セット
       // React の DOM 更新で handleScroll が発火 → loadOlderMessages の連鎖発火を防止
@@ -2261,7 +2373,18 @@ export function ChatPage() {
         autoScrollingUntilRef.current = Date.now() + 1000;
       }
 
-      const historySessionId = source.kind === 'session' ? source.id : null;
+      // keep-position: DOM 更新（setTabs）前に現在のスクロール位置を記録しておく
+      // （更新後に scrollHeight の変化分を差し引いて復元するため）
+      let restoreScroll: { prevScrollTop: number; prevScrollHeight: number } | null = null;
+      if (scrollPolicy === 'keep-position' && activeTabIdRef.current === projectId) {
+        const container = messagesContainerRef.current;
+        if (container) {
+          restoreScroll = { prevScrollTop: container.scrollTop, prevScrollHeight: container.scrollHeight };
+        }
+      }
+
+      // クロスタブは historySessionId を常に null 扱いにする（セッション概念が無いため）。
+      const historySessionId = !isCrossHistory && source.kind === 'session' ? source.id : null;
 
       setTabs(prev => prev.map(t => {
         if (t.projectId !== projectId) return t;
@@ -2330,34 +2453,53 @@ export function ChatPage() {
         };
       }));
 
-      // 履歴読み込み完了後、アクティブタブなら自動スクロールを有効化
-      // rAF 内だと React の useEffect より後に実行されるため、同期的にセットする
+      // 履歴読み込み完了後の処理（アクティブタブの場合のみ）
       if (activeTabIdRef.current === projectId) {
-        historyJustLoadedRef.current = true;
-        shouldAutoScrollRef.current = true;
-        // DOM 更新後に直接スクロール（複数タイミングで試行して確実にスクロール）
-        const scrollToBottom = () => {
-          autoScrollingUntilRef.current = Date.now() + 500;
-          const container = messagesContainerRef.current;
-          if (container) container.scrollTop = container.scrollHeight;
-        };
-        requestAnimationFrame(scrollToBottom);
-        setTimeout(scrollToBottom, 100);
-        setTimeout(scrollToBottom, 500);
-        setTimeout(scrollToBottom, 1000);
-        // auto-scroll が確実に完了してから loadOlderMessages を許可
-        setTimeout(() => {
-          initialLoadCompleteRef.current = true;
-          console.log('[loadHistory] initialLoadComplete set to true');
-        }, 2000);
+        if (scrollPolicy === 'keep-position' && restoreScroll) {
+          // ユーザーが読んでいた位置を保持する（最下部へは飛ばさない）。
+          // shouldAutoScrollRef/historyJustLoadedRef は変更しない
+          // （既存の「下端にいるか」の状態を壊さないため）。
+          const snapshot = restoreScroll;
+          const restorePosition = () => {
+            autoScrollingUntilRef.current = Date.now() + 500;
+            const container = messagesContainerRef.current;
+            if (!container) return;
+            container.scrollTop = resolveRestoredScrollTop({
+              prevScrollTop: snapshot.prevScrollTop,
+              prevScrollHeight: snapshot.prevScrollHeight,
+              nextScrollHeight: container.scrollHeight,
+            });
+          };
+          requestAnimationFrame(restorePosition);
+          setTimeout(restorePosition, 100);
+        } else {
+          // rAF 内だと React の useEffect より後に実行されるため、同期的にセットする
+          historyJustLoadedRef.current = true;
+          shouldAutoScrollRef.current = true;
+          // DOM 更新後に直接スクロール（複数タイミングで試行して確実にスクロール）
+          const scrollToBottom = () => {
+            autoScrollingUntilRef.current = Date.now() + 500;
+            const container = messagesContainerRef.current;
+            if (container) container.scrollTop = container.scrollHeight;
+          };
+          requestAnimationFrame(scrollToBottom);
+          setTimeout(scrollToBottom, 100);
+          setTimeout(scrollToBottom, 500);
+          setTimeout(scrollToBottom, 1000);
+          // auto-scroll が確実に完了してから loadOlderMessages を許可
+          setTimeout(() => {
+            initialLoadCompleteRef.current = true;
+            console.log('[loadHistory] initialLoadComplete set to true');
+          }, 2000);
+        }
       }
     } catch {
       setTabs(prev => prev.map(t =>
         t.projectId === projectId ? { ...t, historyLoaded: true, loadingHistory: false } : t
       ));
 
-      // エラー時もスクロール復元
-      if (activeTabIdRef.current === projectId) {
+      // エラー時もスクロール復元（keep-position の場合は位置を保持したいので何もしない）
+      if (activeTabIdRef.current === projectId && scrollPolicy !== 'keep-position') {
         historyJustLoadedRef.current = true;
         shouldAutoScrollRef.current = true;
       }
@@ -2601,22 +2743,67 @@ export function ChatPage() {
   /** sendCommand の最新値を保持する ref（再接続ハンドラから参照するため） */
   const sendCommandRef = useRef<(text: string) => void>(() => {});
 
+  /**
+   * WS 接続状態の最新値を保持する ref（visibilitychange/再接続ハンドラから参照するため）。
+   * sendCommandRef と同じ流儀＝ useCallback の依存配列に state を入れず、古いクロージャで
+   * 判定しないようにする。
+   */
+  const connectedRef = useRef(false);
+
+  /**
+   * タブが非表示（hidden）になった時点で下端にいたかを記録する。
+   * 復帰直後は環境によって DOM 計測（scrollTop/scrollHeight/clientHeight）が不安定なことがあり
+   * （iOS Safari 等）、その場合の保険として使う（`decideHistoryRefresh` の `atBottom` 引数）。
+   */
+  const wasAtBottomOnHideRef = useRef<boolean | null>(null);
+
+  /**
+   * 現在のアクティブタブのスクロールコンテナが下端にいるかを計測する。
+   * コンテナが無ければ（未マウント等）null を返す（`decideHistoryRefresh` が安全側に扱う）。
+   */
+  const readActiveTabAtBottom = (): boolean | null => {
+    const container = messagesContainerRef.current;
+    if (!container) return null;
+    return isAtBottom({
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+    });
+  };
+
   /** WS 再接続時: セッション参加者を再登録し、最新メッセージをリフレッシュ */
   const handleReconnect = useCallback(() => {
     console.log(`[handleReconnect] triggered! activeTab=${activeTabIdRef.current?.substring(0, 8) ?? 'null'}`);
     const activeId = activeTabIdRef.current;
     if (!activeId) return;
 
-    // アクティブタブの //connect を再送（セッション参加者として再登録）
-    suppressConnectRef.current = true;
-    sendCommandRef.current(`//connect ${activeId}`);
-
     // 最新メッセージでリフレッシュ（DB から再取得してマージ）
     const activeTab = tabsRef.current.find(t => t.projectId === activeId);
-    loadHistory(activeId, activeTab?.sessionId, 'refresh');
+
+    // クロスタブは //connect を送らない（その projectId は他人のマシンのもので、
+    // 自分の machine token/userId のセッション再登録という概念自体が無いため）。
+    // 履歴は kind === 'cross' の分岐（loadHistory 内）が自前で再取得する。
+    if (shouldSendConnect(activeTab)) {
+      // アクティブタブの //connect を再送（セッション参加者として再登録）
+      suppressConnectRef.current = true;
+      sendCommandRef.current(`//connect ${activeId}`);
+    }
+
+    // WS が切れていた可能性があるため refresh は必須。ユーザーが上を読んでいた場合は
+    // 最下部へは飛ばさず位置を保持する（decideHistoryRefresh の 'reconnect' 分岐）。
+    const decision = decideHistoryRefresh({
+      trigger: 'reconnect',
+      hasActiveTab: true,
+      atBottom: readActiveTabAtBottom(),
+      wsConnected: connectedRef.current,
+    });
+    console.log(`[handleReconnect] decision=${decision.kind}${decision.kind === 'refresh' ? `/${decision.scroll}` : ''}`);
+    if (decision.kind === 'refresh') {
+      loadHistory(activeId, activeTab?.sessionId, 'refresh', decision.scroll);
+    }
   }, [loadHistory]);
 
-  const { connected, sendCommand, sendToolApprovalResponse } = useWebSocket({
+  const { connected, sendCommand, sendToolApprovalResponse, sendCrossAsk } = useWebSocket({
     onMessage: addMessageToTab,
     onProgress: updateProgressOnTab,
     onProgressClear: clearProgressOnTab,
@@ -2627,20 +2814,41 @@ export function ChatPage() {
     onReconnect: handleReconnect,
   });
 
-  // sendCommand が確定したら ref を更新（handleReconnect から参照可能にする）
+  // sendCommand/connected が確定したら ref を更新（handleReconnect/visibilitychange から参照可能にする）
   sendCommandRef.current = sendCommand;
+  connectedRef.current = connected;
 
-  // ページ復帰時にメッセージ履歴をリフレッシュ（iOS Safari 等でタブがバックグラウンドから戻った際に対応）
+  // ページ復帰時にメッセージ履歴をリフレッシュ（iOS Safari 等でタブがバックグラウンドから戻った際に対応）。
+  //
+  // 既存バグ: 以前はここで無条件に loadHistory('refresh')（最新10件のみ取得）を呼び、かつ完了後に
+  // 無条件で最下部へ強制スクロールしていたため、alt+tab 等でタブを離れて戻ると、上にスクロールして
+  // 読んでいた過去メッセージが画面から消え、表示が最下部へスナップしていた。
+  // WS が生きている限り hidden 中の新着は WS 経由で既に state に入っているため、
+  // 「visible かつ WS 生存」の場合は refresh 自体を行わない（= 再描画が起きず、スクロール位置が
+  // 完全に保持される）。WS が切れていた場合のみ refresh するが、上を読んでいたなら位置を復元する
+  // （`decideHistoryRefresh` 参照）。
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        const activeId = activeTabIdRef.current;
-        if (activeId) {
-          console.log(`[visibilitychange] page visible, refreshing history for ${activeId.substring(0, 8)}`);
-          const activeTab = tabsRef.current.find(t => t.projectId === activeId);
-          loadHistory(activeId, activeTab?.sessionId, 'refresh');
-        }
+      if (document.visibilityState === 'hidden') {
+        // 離脱時点の下端判定を記録しておく（復帰直後の DOM 計測が不安定な環境の保険）
+        wasAtBottomOnHideRef.current = readActiveTabAtBottom();
+        return;
       }
+      if (document.visibilityState !== 'visible') return;
+      const activeId = activeTabIdRef.current;
+      if (!activeId) return;
+      const measured = readActiveTabAtBottom();
+      const atBottom = measured !== null ? measured : wasAtBottomOnHideRef.current;
+      const decision = decideHistoryRefresh({
+        trigger: 'visible',
+        hasActiveTab: true,
+        atBottom,
+        wsConnected: connectedRef.current,
+      });
+      console.log(`[visibilitychange] page visible, decision=${decision.kind}${decision.kind === 'refresh' ? `/${decision.scroll}` : ''} (atBottom=${atBottom}, wsConnected=${connectedRef.current})`);
+      if (decision.kind === 'skip') return;
+      const activeTab = tabsRef.current.find(t => t.projectId === activeId);
+      loadHistory(activeId, activeTab?.sessionId, 'refresh', decision.scroll);
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -2693,6 +2901,36 @@ export function ChatPage() {
     };
     load();
     const interval = setInterval(load, 10000);
+    return () => { active = false; clearInterval(interval); };
+  }, []);
+
+  // クロスユーザー Team Phase C: 購読・借用プロジェクト一覧取得 + 独立ポーリング（30秒）。
+  // machineList のポーリングとは意図的に別の useEffect/try-catch にする（Phase B の教訓を踏襲）。
+  // 件数が少なく変化も遅いため 10 秒より長い間隔にする。404（キルスイッチ OFF）は
+  // セクション非表示として扱うだけでエラー表示はしない。
+  // `refreshCrossAskGroups` は「新しい会話を始める」実行直後にも呼ぶ（ポーリング30秒を待たずに
+  // 記憶状態バナーを即時更新するため）。
+  const refreshCrossAskGroups = useCallback(async () => {
+    try {
+      const { groups } = await crossTeamChat.listTargets();
+      setCrossAskGroups(groups);
+    } catch {
+      setCrossAskGroups([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const { groups } = await crossTeamChat.listTargets();
+        if (active) setCrossAskGroups(groups);
+      } catch {
+        if (active) setCrossAskGroups([]);
+      }
+    };
+    load();
+    const interval = setInterval(load, 30000);
     return () => { active = false; clearInterval(interval); };
   }, []);
 
@@ -2754,9 +2992,30 @@ export function ChatPage() {
           }
         } catch { /* ignore */ }
 
+        // クロスユーザー Team Phase C: 購読/借用プロジェクトも TAB_ORDER から復元できるよう
+        // マージする（projectInfoMap に無い projectId を単に捨てる従来実装のままだと、
+        // リロードのたびにクロスタブが消える）。機能 OFF（404）は catch して空扱いにする。
+        let crossProjectInfoMap = new Map<string, { name: string; machineDisplayName: string; ownerLabel: string; teamName: string; origin: 'invite' | 'subscription' }>();
+        try {
+          const { groups } = await crossTeamChat.listTargets();
+          for (const row of flattenCrossAskGroups(groups)) {
+            crossProjectInfoMap.set(row.projectId, {
+              name: row.label,
+              machineDisplayName: row.machineName,
+              ownerLabel: row.ownerLabel,
+              teamName: row.teamName,
+              origin: row.origin,
+            });
+          }
+        } catch { /* 404 = DEVRELAY_CROSS_TEAM_CHAT が OFF。機能を単に使わないだけ */ }
+
         // TAB_ORDER がある場合: 保存された順序でタブを復元（セッションがなくてもプロジェクトが存在すれば復元）
         // TAB_ORDER がない場合: 従来通りピン止めタブのみ復元
-        type RestorableEntry = { projectId: string; projectName: string; machineDisplayName: string; sessionId?: string; messageCount: number };
+        type RestorableEntry = {
+          projectId: string; projectName: string; machineDisplayName: string; sessionId?: string; messageCount: number;
+          kind?: 'own' | 'cross';
+          crossMeta?: { ownerLabel: string; teamName: string; origin: 'invite' | 'subscription' };
+        };
         let restorable: RestorableEntry[];
         if (tabOrder.length > 0) {
           restorable = tabOrder
@@ -2766,6 +3025,18 @@ export function ChatPage() {
               // セッションがなくてもプロジェクトが存在すれば空タブとして復元
               const info = projectInfoMap.get(id);
               if (info) return { projectId: id, projectName: info.name, machineDisplayName: info.machineDisplayName, messageCount: 0 };
+              // own 側に無ければクロス側を見る（購読/借用プロジェクト）
+              const crossInfo = crossProjectInfoMap.get(id);
+              if (crossInfo) {
+                return {
+                  projectId: id,
+                  projectName: crossInfo.name,
+                  machineDisplayName: crossInfo.machineDisplayName,
+                  messageCount: 0,
+                  kind: 'cross' as const,
+                  crossMeta: { ownerLabel: crossInfo.ownerLabel, teamName: crossInfo.teamName, origin: crossInfo.origin },
+                };
+              }
               return null;
             })
             .filter((s): s is NonNullable<typeof s> => s != null);
@@ -2799,6 +3070,8 @@ export function ChatPage() {
           completed: false,
           inputText: '',
           cancel: null,
+          kind: 'kind' in s ? s.kind : undefined,
+          crossMeta: 'crossMeta' in s ? s.crossMeta : undefined,
         }));
 
         setTabs(newTabs);
@@ -2817,8 +3090,12 @@ export function ChatPage() {
         activeTabIdRef.current = initialTab.projectId;
 
         // 最初のタブの履歴を読み込み + サーバーコンテキスト同期
-        sendCommand(`//connect ${initialTab.projectId}`);
-        suppressConnectRef.current = true;
+        // クロスタブは //connect を送らない（他人のマシンの projectId のため、
+        // 自分のセッション再登録という概念自体が無い）。
+        if (shouldSendConnect(initialTab)) {
+          sendCommand(`//connect ${initialTab.projectId}`);
+          suppressConnectRef.current = true;
+        }
         loadHistory(initialTab.projectId, initialTab.sessionId ?? undefined);
       } catch {
         // 復元失敗は無視
@@ -2828,6 +3105,37 @@ export function ChatPage() {
 
   // アクティブタブ取得
   const activeTab = tabs.find(t => t.projectId === activeTabId) ?? null;
+
+  /** アクティブタブ（クロスタブのみ）の記憶状態。`crossAskGroups` から projectId で引く。 */
+  const activeCrossMemory = useMemo(() => {
+    if (!activeTab || !isCrossTab(activeTab)) return undefined;
+    for (const owner of crossAskGroups) {
+      for (const machine of owner.machines) {
+        const project = machine.projects.find(p => p.projectId === activeTab.projectId);
+        if (project) return project.memory;
+      }
+    }
+    return undefined;
+  }, [activeTab, crossAskGroups]);
+
+  /** 「新しい会話を始める」ボタンのハンドラ。確認ダイアログ → reset API → 記憶状態と履歴を更新。 */
+  const handleCrossMemoryReset = useCallback(async () => {
+    if (!activeTabId || !activeTab) return;
+    const ownerLabel = activeTab.crossMeta?.ownerLabel ?? '相手';
+    const confirmed = window.confirm(
+      `${ownerLabel} さんはここまでの会話を忘れます。これまでの履歴はあなたの画面に残ります。新しい会話を始めますか？`
+    );
+    if (!confirmed) return;
+    try {
+      await crossTeamChat.resetMemory(activeTabId);
+    } catch (err) {
+      console.error('[handleCrossMemoryReset] failed', err);
+      return;
+    }
+    await refreshCrossAskGroups();
+    // 履歴を再読み込みして区切り線を反映する（次に取得するメッセージから新しい世代になる）。
+    loadHistory(activeTabId, undefined, 'replace');
+  }, [activeTabId, activeTab, refreshCrossAskGroups, loadHistory]);
 
   // 会話履歴レール: 自ブラウザの tab.progress から「今実行中とみなす sessionId の集合」を導出する
   // （サーバーの10秒ポーリングより速く反映するための即時性の補完。`conversation-rail-rules.ts` の
@@ -2954,7 +3262,7 @@ export function ChatPage() {
   /** handleSend の二重送信防止フラグ */
   const sendingRef = useRef(false);
   // Usage 案件必須サイクル: アクティブなスレッドの案件（sessionId が変わるたびに取り直す）
-  const { state: caseState, save: saveCase } = useThreadCase(activeTab?.sessionId ?? null);
+  const { state: caseState, save: saveCase } = useThreadCase(activeTab && !isCrossTab(activeTab) ? (activeTab.sessionId ?? null) : null);
   const caseInputRef = useRef<HTMLInputElement>(null);
   const [caseHighlight, setCaseHighlight] = useState(false);
   useEffect(() => { setCaseHighlight(false); }, [activeTab?.sessionId, caseState.caseName]);
@@ -3011,15 +3319,23 @@ export function ChatPage() {
     const tab = tabsRef.current.find(t => t.projectId === tabId);
     if (!tab || !tab.hasMoreHistory || tab.loadingHistory) return;
 
+    // クロスタブ（購読/借用プロジェクトの質問専用タブ）: historySessionId は常に null 相当として
+    // 扱い、resolveOlderMessagesSource()/isSameHistorySource()（自分のタブ専用のロジック）を
+    // 通さない。projectId は不変（クロスタブは 1 プロジェクト = 1 固定会話、スレッド切替が
+    // 無い）ため、レースガードは「このタブが依然クロスタブのままか」だけで十分。
+    const isCrossHistory = isCrossTab(tab);
+
     // バグ修正: スクロールバック時は、表示中の履歴と同じ取得元（スレッド単位 or プロジェクト横断）
     // を踏襲する。以前は常にプロジェクト横断で取得しており、スレッド表示中に上スクロールすると
     // 別スレッドのメッセージが混入していた（スレッド表示中に上スクロール→下に戻ると別スレッドの
     // 内容が表示されるバグの直接原因）。
-    const source = resolveOlderMessagesSource({
-      historySessionId: tab.historySessionId,
-      tabSessionId: tab.sessionId,
-      projectId: tabId,
-    });
+    const source = isCrossHistory
+      ? resolveCrossHistorySource({ projectId: tabId })
+      : resolveOlderMessagesSource({
+          historySessionId: tab.historySessionId,
+          tabSessionId: tab.sessionId,
+          projectId: tabId,
+        });
 
     // before カーソルは DB 由来 ID のみ有効（クライアント生成 ID だとサーバがカーソル条件を
     // 無視して最新 N 件を返してしまう）。見つからなければページネーションを打ち切る。
@@ -3042,9 +3358,15 @@ export function ChatPage() {
       t.projectId === tabId ? { ...t, loadingHistory: true } : t
     ));
 
-    const fetchPromise = source.kind === 'session'
-      ? sessionsApi.getMessages(source.id, { before: cursorId, limit: 20 })
-      : projectsApi.getMessages(source.id, { before: cursorId, limit: 20 });
+    const fetchPromise = isCrossHistory
+      ? crossTeamChat.getMessages(tabId, { before: cursorId, limit: 20 })
+      : source.kind === 'session'
+        ? sessionsApi.getMessages(source.id, { before: cursorId, limit: 20 })
+        : source.kind === 'project'
+          ? projectsApi.getMessages(source.id, { before: cursorId, limit: 20 })
+          // 到達しないはずの分岐（isCrossHistory=false なのに source.kind==='cross' は起き得ない）。
+          // TS の網羅性のためだけに残す。仮に起きても呼び先は正しい（クロス取得にフォールバック）。
+          : crossTeamChat.getMessages(tabId, { before: cursorId, limit: 20 });
 
     fetchPromise.then(({ messages, hasMore }) => {
       const chatMessages: ChatMessage[] = messages.map(m => ({
@@ -3054,20 +3376,29 @@ export function ChatPage() {
         timestamp: new Date(m.createdAt),
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
+        generation: m.generation,
       }));
 
       setTabs(prev => prev.map(t => {
         if (t.projectId !== tabId) return t;
         // レースガード: フェッチ中にスレッドが切り替わっていたら stale response を破棄
-        // （別スレッドへの流し込み防止）
-        const current = resolveOlderMessagesSource({
-          historySessionId: t.historySessionId,
-          tabSessionId: t.sessionId,
-          projectId: t.projectId,
-        });
-        if (!isSameHistorySource(current, source)) {
-          console.log(`[loadOlderMessages] discarded stale response: requested=${source.kind}:${source.id.substring(0, 8)}, current=${current.kind}:${current.id.substring(0, 8)}`);
-          return { ...t, loadingHistory: false };
+        // （別スレッドへの流し込み防止）。クロスタブは projectId が不変のタブ単位固定会話
+        // なので、依然クロスタブのままであることだけを確認する。
+        if (isCrossHistory) {
+          if (!isCrossTab(t)) {
+            console.log('[loadOlderMessages] discarded stale response: tab is no longer cross');
+            return { ...t, loadingHistory: false };
+          }
+        } else {
+          const current = resolveOlderMessagesSource({
+            historySessionId: t.historySessionId,
+            tabSessionId: t.sessionId,
+            projectId: t.projectId,
+          });
+          if (source.kind !== 'cross' && !isSameHistorySource(current, source)) {
+            console.log(`[loadOlderMessages] discarded stale response: requested=${source.kind}:${'id' in source ? source.id.substring(0, 8) : ''}, current=${current.kind}:${current.id.substring(0, 8)}`);
+            return { ...t, loadingHistory: false };
+          }
         }
         const existingIds = new Set(t.messages.map(m => m.id));
         const newMsgs = chatMessages.filter(m => !existingIds.has(m.id));
@@ -3102,11 +3433,15 @@ export function ChatPage() {
     if (!container) return;
     // プログラムによるスムーズスクロールアニメーション中は shouldAutoScrollRef を変更しない
     if (Date.now() < autoScrollingUntilRef.current) return;
-    // ユーザーが下端から離れたら自動スクロールを無効化（Agent 実行中の snap-back 防止）
-    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
-    if (!atBottom) {
-      shouldAutoScrollRef.current = false;
-    }
+    // ユーザーが下端から離れたら自動スクロールを無効化（Agent 実行中の snap-back 防止）。
+    // 逆に手動で下端まで戻した場合も true に復帰させる（従来は片方向のみで、新着受信
+    // （addMessageToTab）まで無効のままだった）。
+    const atBottom = isAtBottom({
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+    });
+    shouldAutoScrollRef.current = atBottom;
 
     const tabId = activeTabIdRef.current;
     if (!tabId) return;
@@ -3230,6 +3565,16 @@ export function ChatPage() {
 
     setActiveTabId(projectId);
 
+    // 既存のクロスタブ（購読/借用プロジェクト）が TabBar 等から再選択された場合、このまま進むと
+    // `//connect` を他人のプロジェクトへ送ってしまう（最もこぼれやすい穴。#370 由来の汎用ハンドラが
+    // クロスタブと自分のタブを区別しないため、ここで必ずガードする）。
+    if (!shouldSendConnect(existingTab)) {
+      if (!existingTab!.historyLoaded && !existingTab!.loadingHistory) {
+        loadHistory(projectId, undefined);
+      }
+      return;
+    }
+
     if (!opts?.skipConnect) {
       // サーバーにコンテキスト切り替えを通知
       suppressConnectRef.current = true;
@@ -3241,6 +3586,53 @@ export function ChatPage() {
       }
     }
   }, [machineList, sendCommand, loadHistory]);
+
+  /**
+   * クロスユーザー Team Phase C: 購読/借用プロジェクトの質問専用タブを開く。
+   * `handleSelectProject` と意図的に別関数にする（`//connect` を一切送らない・
+   * アクティブサーバーへの自動登録もしない＝クロスタブは Servers タブのグループ化対象外）。
+   */
+  const handleSelectCrossProject = useCallback((
+    projectId: string,
+    meta: { label: string; ownerLabel: string; machineName: string; teamName: string; origin: 'invite' | 'subscription' },
+  ) => {
+    if (activeTabIdRef.current === projectId) return;
+
+    const existingTab = tabsRef.current.find(t => t.projectId === projectId);
+    if (!existingTab) {
+      const newTab: Tab = {
+        projectId,
+        projectName: meta.label,
+        machineDisplayName: meta.machineName,
+        customName: getTabNames()[projectId],
+        messages: [],
+        progress: null,
+        sessionId: null,
+        historyLoaded: false,
+        hasMoreHistory: false,
+        loadingHistory: false,
+        pinned: false,
+        completed: false,
+        inputText: '',
+        cancel: null,
+        kind: 'cross',
+        crossMeta: { ownerLabel: meta.ownerLabel, teamName: meta.teamName, origin: meta.origin },
+      };
+      setTabs(prev => {
+        const updated = [...prev, newTab];
+        settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
+        return updated;
+      });
+    }
+
+    setActiveTabId(projectId);
+
+    // //connect は送らない。履歴は crossTeamChat.getMessages 経由（loadHistory 内の
+    // isCrossTab 分岐が自動的に正しいエンドポイントを選ぶ）。
+    if (!existingTab?.historyLoaded && !existingTab?.loadingHistory) {
+      loadHistory(projectId, undefined);
+    }
+  }, [loadHistory]);
 
   /**
    * 会話履歴レール: 行クリックでそのスレッドへ遷移する。
@@ -3279,16 +3671,18 @@ export function ChatPage() {
         const nextTab = newTabs[Math.min(closedIdx, newTabs.length - 1)] ?? null;
         const nextId = nextTab?.projectId ?? null;
         setActiveTabId(nextId);
-        if (nextId) {
+        if (nextId && shouldSendConnect(nextTab)) {
           suppressConnectRef.current = true;
           sendCommand(`//connect ${nextId}`);
+        } else if (nextId && nextTab && !nextTab.historyLoaded && !nextTab.loadingHistory) {
+          loadHistory(nextId, undefined);
         }
       }
       // サーバーにタブ順序を保存（fire-and-forget）
       settingsApi.saveTabOrder(newTabs.map(t => t.projectId)).catch(() => {});
       return newTabs;
     });
-  }, [sendCommand]);
+  }, [sendCommand, loadHistory]);
 
   /** タブのピン止めを切り替え（サーバーにも永続化） */
   const handleTogglePin = useCallback((projectId: string) => {
@@ -3370,10 +3764,16 @@ export function ChatPage() {
 
     setActiveTabId(nextTab.projectId);
     activeTabIdRef.current = nextTab.projectId;
-    suppressConnectRef.current = true;
-    sendCommand(`//connect ${nextTab.projectId}`);
-    if (nextTab.sessionId && !nextTab.historyLoaded && !nextTab.loadingHistory) {
-      loadHistory(nextTab.projectId, nextTab.sessionId);
+    // クロスタブは構造的に Server グループへ登録されない想定だが、念のため同じガードを通す
+    // （#370 由来の汎用ハンドラ群のうち `//connect` を撃つ 5 箇所は全てガードする方針）。
+    if (shouldSendConnect(nextTab)) {
+      suppressConnectRef.current = true;
+      sendCommand(`//connect ${nextTab.projectId}`);
+      if (nextTab.sessionId && !nextTab.historyLoaded && !nextTab.loadingHistory) {
+        loadHistory(nextTab.projectId, nextTab.sessionId);
+      }
+    } else if (!nextTab.historyLoaded && !nextTab.loadingHistory) {
+      loadHistory(nextTab.projectId, undefined);
     }
   }, [sendCommand, loadHistory]);
 
@@ -3443,8 +3843,9 @@ export function ChatPage() {
     ? tabs.filter(t => activeServer.projectIds.includes(t.projectId))
     : tabs;
 
-  /** ファイルを pendingFiles に追加 */
+  /** ファイルを pendingFiles に追加（クロスタブは添付非対応。decideComposerCapabilities 参照） */
   const addFiles = async (fileList: File[]) => {
+    if (!decideComposerCapabilities(activeTab).allowFiles) return;
     const attachments = await Promise.all(fileList.map(fileToAttachment));
     setPendingFiles(prev => [...prev, ...attachments]);
   };
@@ -3453,12 +3854,16 @@ export function ChatPage() {
     // 二重送信防止（React の state 更新バッチにより input がクリアされる前に再呼び出しされるのを防止）
     if (sendingRef.current) return;
     const text = input.trim();
-    const hasFiles = pendingFiles.length > 0;
+    const isCross = isCrossTab(activeTab);
+    // クロスタブはファイル添付非対応（decideComposerCapabilities().allowFiles=false で UI 側は
+    // 既に添付ボタンを無効化しているが、念のため送信側でも hasFiles を見ない）。
+    const hasFiles = !isCross && pendingFiles.length > 0;
     if ((!text && !hasFiles) || !connected) return;
     // Usage 案件必須サイクル: 必須モードで案件が空のスレッドには AI プロンプトを送らない（コマンドは通す）。
     // 入力した文章は消さず、案件欄を赤枠にしてフォーカスを移す。
+    // クロスタブ（他人のプロジェクトへの質問）のスレッドは所有者のもので案件を付けられないため止めない。
     const caseGuard = decideCaseGuard({
-      required: caseState.required && !caseState.unavailable,
+      required: !isCross && caseState.required && !caseState.unavailable,
       loaded: caseState.loaded,
       caseName: caseState.caseName,
       text,
@@ -3489,7 +3894,13 @@ export function ChatPage() {
     }
 
     playNotificationSound();
-    sendCommand(sendText, hasFiles ? pendingFiles : undefined, activeTabId || undefined);
+    if (isCross && activeTabId) {
+      // クロスタブ: web:cross:ask（専用フレーム）で送る。parseCommandWithNLP/executeCommand を
+      // 一切通らないため e/k/a/testflight/`//connect` 等は文字列として宛先に渡るだけになる。
+      sendCrossAsk(activeTabId, sendText);
+    } else {
+      sendCommand(sendText, hasFiles ? pendingFiles : undefined, activeTabId || undefined);
+    }
     setInput('');
     setPendingFiles([]);
     // 次フレームで送信ガードを解除
@@ -3504,6 +3915,9 @@ export function ChatPage() {
    */
   const handleCancelClick = () => {
     if (!activeTabId || !activeTab?.progress) return;
+    // クロスタブは停止ボタンを提供しない（他人のマシンへの制御コマンドは exec と同格のレビュー対象。
+    // v1 では 15 分タイムアウトで打ち切る設計、decideComposerCapabilities().allowCancel も false）。
+    if (!decideComposerCapabilities(activeTab).allowCancel) return;
     const decision = decideCancelClick({
       state: activeTab.cancel ?? null,
       sessionId: activeTab.sessionId,
@@ -3637,6 +4051,8 @@ export function ChatPage() {
           onReorderServerProjects={handleReorderServerProjects}
           variant="drawer"
           conversationsSlot={conversationsSlot}
+          crossGroups={crossAskGroups}
+          onSelectCrossProject={handleSelectCrossProject}
         />
       )}
 
@@ -3710,20 +4126,43 @@ export function ChatPage() {
           onRenameTab={handleRenameTab}
         />
 
-        {/* スレッド管理 サイクル3: TabBar 下に flex 行を挿入し ThreadList を左に配置（単独ステップ） */}
+        {/* スレッド管理 サイクル3: TabBar 下に flex 行を挿入し ThreadList を左に配置（単独ステップ）。
+            クロスタブ（購読/借用プロジェクトの質問専用タブ）は会話が 1 本固定でスレッド切替の
+            概念が無いため ThreadPane/ThreadList ごと非表示にする（`/api/threads?projectId=` は
+            他人のプロジェクトに対して所有者チェックで 404 になるため、呼んでも無意味）。 */}
         <div className="flex-1 flex min-h-0">
-          <ThreadPane collapsed={threadPanelCollapsed}>
-            <ThreadList
-              projectId={activeTab?.projectId}
-              currentSessionId={activeTab?.sessionId ?? null}
-              onSelect={handleThreadSelect}
-              onCreate={handleThreadCreate}
-              refreshToken={threadRefreshToken}
-              collapsed={threadPanelCollapsed}
-              onToggleCollapse={toggleThreadPanelCollapsed}
-            />
-          </ThreadPane>
+          {!isCrossTab(activeTab) && (
+            <ThreadPane collapsed={threadPanelCollapsed}>
+              <ThreadList
+                projectId={activeTab?.projectId}
+                currentSessionId={activeTab?.sessionId ?? null}
+                onSelect={handleThreadSelect}
+                onCreate={handleThreadCreate}
+                refreshToken={threadRefreshToken}
+                collapsed={threadPanelCollapsed}
+                onToggleCollapse={toggleThreadPanelCollapsed}
+              />
+            </ThreadPane>
+          )}
           <div className="flex-1 flex flex-col min-w-0">
+            {/* クロスタブの常時バナー */}
+            {isCrossTab(activeTab) && activeTab?.crossMeta && (
+              <div className="px-4 py-1.5 text-xs text-[var(--text-muted)] bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center justify-between gap-2">
+                <span>{buildCrossTabBanner(activeTab.crossMeta.ownerLabel)}</span>
+                {buildCrossMemoryLabel(activeCrossMemory) && (
+                  <span className="whitespace-nowrap">{buildCrossMemoryLabel(activeCrossMemory)}</span>
+                )}
+                {decideComposerCapabilities(activeTab).allowMemoryReset && activeCrossMemory?.remembers && (
+                  <button
+                    type="button"
+                    onClick={handleCrossMemoryReset}
+                    className="whitespace-nowrap underline hover:no-underline text-[var(--text-muted)]"
+                  >
+                    新しい会話を始める
+                  </button>
+                )}
+              </div>
+            )}
             {/* メッセージエリア */}
             <div
               ref={messagesContainerRef}
@@ -3763,19 +4202,33 @@ export function ChatPage() {
                   </div>
                 </div>
               )}
-              {activeTab?.messages.map((msg) => (
-                <MessageRow
-                  key={msg.id}
-                  message={msg}
-                  userName={chatDisplay.userName}
-                  userColor={chatDisplay.userColor}
-                  userAvatar={chatDisplay.userAvatar}
-                  aiName={chatDisplay.aiName}
-                  aiColor={chatDisplay.aiColor}
-                  aiAvatar={chatDisplay.aiAvatar}
-                  onImageClick={setLightboxImage}
-                />
-              ))}
+              {activeTab?.messages.map((msg, idx) => {
+                // 会話の区切り可視化: クロスタブの履歴にのみ `generation` が付く（通常スレッドは
+                // 常に undefined のため shouldShowGenerationDivider が常に false を返す＝無害）。
+                const prevGeneration = idx > 0 ? activeTab.messages[idx - 1].generation : undefined;
+                const showGenerationDivider = shouldShowGenerationDivider(prevGeneration, msg.generation);
+                return (
+                  <Fragment key={msg.id}>
+                    {showGenerationDivider && (
+                      <div className="flex items-center gap-2 my-3 text-xs text-[var(--text-faint)]">
+                        <div className="flex-1 border-t border-[var(--border-color)]" />
+                        <span>── ここから新しい会話 ──</span>
+                        <div className="flex-1 border-t border-[var(--border-color)]" />
+                      </div>
+                    )}
+                    <MessageRow
+                      message={msg}
+                      userName={chatDisplay.userName}
+                      userColor={chatDisplay.userColor}
+                      userAvatar={chatDisplay.userAvatar}
+                      aiName={chatDisplay.aiName}
+                      aiColor={chatDisplay.aiColor}
+                      aiAvatar={chatDisplay.aiAvatar}
+                      onImageClick={setLightboxImage}
+                    />
+                  </Fragment>
+                );
+              })}
               {/* ツール承認カード / 質問カード（アクティブタブの projectId に一致するもののみ表示） */}
               {Array.from(toolApprovals.values())
                 .filter(a => !a.projectId || a.projectId === activeTabId || a.originProjectId === activeTabId)
@@ -3821,13 +4274,13 @@ export function ChatPage() {
             {/* 入力エリア */}
             <div className="px-4 py-3 bg-[var(--bg-secondary)] border-t border-[var(--border-color)]">
               <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-              {activeTab && (
+              {activeTab && !isCrossTab(activeTab) && (
                 <CaseTagBar state={caseState} onSave={saveCase} highlight={caseHighlight} inputRef={caseInputRef} disabled={!connected} />
               )}
               <div className="flex gap-2 items-end">
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={!connected || !activeTab}
+                  disabled={!connected || !activeTab || !decideComposerCapabilities(activeTab).allowFiles}
                   className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors"
                   title={t('chat.attachFile')}
                 >
@@ -3904,6 +4357,8 @@ export function ChatPage() {
               onReorderServerProjects={handleReorderServerProjects}
               variant="rail"
               conversationsSlot={conversationsSlot}
+              crossGroups={crossAskGroups}
+              onSelectCrossProject={handleSelectCrossProject}
               headerAction={
                 <button
                   onClick={toggleRailCollapsed}

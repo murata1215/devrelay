@@ -22,6 +22,17 @@ export type ApproveRejectCode =
   | 'planAiSessionMissing';
 
 /**
+ * 2026-10-27 サイクル2（gemini plan→exec resume）: plan→exec の resume（`Session.planAiSessionId`
+ * による引き継ぎ）に対応しているツール。この一覧に無いツール（devin/aider 等）は Agent 側が
+ * `result.extractedSessionId` を一度も設定しないため、`planAiSessionId` が構造的に埋まることがなく、
+ * 「agent が未更新か plan が未完了」という文言は誤解を招く（更新しても直らない）。
+ *
+ * gemini は本サイクルで Agent 側（`agents/*\/src/services/ai-runner.ts` の gemini 分岐）が
+ * `--session-id` / `--resume` を使った resume に対応したため、claude/codex と同じ「対応済み」側に含めた。
+ */
+export const PLAN_RESUME_CAPABLE_AI_TOOLS: readonly string[] = ['claude', 'codex', 'gemini'];
+
+/**
  * approve_implementation の所有検証（core#336 で新設）。
  * submissionId が本当にこの projectId / userId の Session かどうか、plan が完了しているか、
  * plan ターンの AI セッション ID が記録されているかを判定する。
@@ -42,6 +53,12 @@ export function evaluateApproveGuard(input: {
     planAiSessionId: string | null;
     kind?: string | null;
     cancelledAt?: Date | null;
+    /**
+     * 2026-10-27 サイクル2: `planAiSessionMissing` の文言を出し分けるためのツール種別。
+     * 省略時（既存呼び出し元・旧テスト）は resume 対応ツールとして扱い、従来の文言を維持する
+     * （この一覧に未加入の aiTool 値だけが新文言の対象）。
+     */
+    aiTool?: string | null;
   } | null;
   requestedProjectId: string;
   requestedUserId: string;
@@ -72,6 +89,16 @@ export function evaluateApproveGuard(input: {
     return { ok: false, code: 'planNotReady', message: 'Plan is not ready yet. Call get_plan first.' };
   }
   if (!session.planAiSessionId) {
+    // 2026-10-27 サイクル2: aiTool 未指定（既存呼び出し元・旧テスト）または resume 対応ツール
+    // （claude/codex/gemini）は従来文言のまま。明示的に非対応ツール（devin/aider 等）と分かる場合のみ
+    // 「このツールは resume 未対応」という誤解を招かない文言に出し分ける。
+    if (session.aiTool && !PLAN_RESUME_CAPABLE_AI_TOOLS.includes(session.aiTool)) {
+      return {
+        ok: false,
+        code: 'planAiSessionMissing',
+        message: `この AI ツール（${session.aiTool}）は plan→exec の引き継ぎ（resume）にまだ対応していません。DevRelay の画面/チャットから \`e\` を送って実行してください。`,
+      };
+    }
     return {
       ok: false,
       code: 'planAiSessionMissing',

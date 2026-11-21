@@ -226,6 +226,12 @@ model Team {
   name      String
   createdAt DateTime     @default(now())
   members   TeamMember[]
+  crossTeamInvites CrossTeamInvite[] // クロスユーザー Team の招待（送信側）
+  // 公開型クロスユーザー Team（Phase A）: 'private'（既定） | 'organization'。
+  // 'organization' でも公開対象は selectPublishableMembers() でオーナー自身の所有プロジェクトに
+  // 絞り込む（招待型で受け入れた他人のプロジェクトを又貸しで再公開しないため）
+  visibility    String             @default("private")
+  subscriptions TeamSubscription[] // 公開型の購読（CrossTeamGrant とは別テーブル。実 grant 行は作らない）
 
   @@unique([userId, name])
 }
@@ -239,7 +245,123 @@ model TeamMember {
   project   Project  @relation(fields: [projectId], references: [id])
   createdAt DateTime @default(now())
 
+  // クロスユーザー Team（別ユーザーのプロジェクトを招待・承認して Team に入れる機能）の同意行。
+  // 同一ユーザー内の TeamMember には存在しない（null）。
+  crossTeamGrant CrossTeamGrant?
+
   @@unique([teamId, projectId])
+}
+
+// クロスユーザー Team の招待（pending 状態の持ち場。認可判定には一切使わない。
+// 認可の根拠は常に CrossTeamGrant の存在のみ）
+model CrossTeamInvite {
+  id             String    @id @default(cuid())
+  teamId         String
+  team           Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  inviterUserId  String    // Team オーナー（= team.userId のスナップショット、監査用）
+  inviteeUserId  String    // 受入側ユーザー（同一組織メンバー）
+  organizationId String    // 招待時点の組織（監査用スナップショット。実行時は OrganizationMember を再検証する）
+  status         String    @default("pending") // 'pending' | 'accepted' | 'declined' | 'revoked'
+  askRequested   Boolean   @default(true)  // 招待側の要求（受入側は下げられるが上げられない）
+  execRequested  Boolean   @default(false) // 既定不可（Phase 2 で解禁）
+  projectId      String?   // 受入側が承認時に選んだ自分のプロジェクト
+  teamMemberId   String?   @unique // 承認で生成した TeamMember 行
+  decidedAt      DateTime?
+  note           String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([teamId, inviteeUserId])
+  @@index([inviteeUserId, status])
+  @@index([teamId])
+}
+
+// クロスユーザー Team の認可の唯一の根拠（行が存在し revokedAt IS NULL ⇔ 承認済み。
+// status 文字列を認可判定に使わない。deny-by-default を構造的に保証するため）
+model CrossTeamGrant {
+  id              String     @id @default(cuid())
+  teamMemberId    String     @unique
+  teamMember      TeamMember @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
+  teamId          String     // 冗長保持（索引・監査用）
+  projectId       String     // 冗長保持
+  requesterUserId String     // Team オーナー（発信側の代表）
+  granteeUserId   String     // projectId の所有者（machine.userId のスナップショット）
+  organizationId  String     // 承認時点の組織（実行時に再検証する）
+  askAllowed      Boolean    @default(false)
+  execAllowed     Boolean    @default(false) // 既定不可（Phase 2 で解禁）
+  revokedAt       DateTime?
+  inviteId        String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([granteeUserId])
+  @@index([projectId])
+  @@index([requesterUserId])
+}
+
+// クロスユーザー Team の監査ログ（append-only）。ユーザー削除後も監査証跡として残すため
+// FK は張らない（SupervisionAuditLog / KnowledgeChunk と同じ規約）
+model CrossTeamAuditLog {
+  id              String   @id @default(cuid())
+  // 'denied' の一部（組織不一致・組織未所属）は共通の組織が存在しないため null を許容する。
+  // 'request'/'completed'/'failed' は常に非 null（authz 通過済み = 組織一致が確定している）。
+  organizationId  String?
+  requesterUserId String
+  executorUserId  String
+  teamId          String?
+  // 'invite_sent' の時点では受入側がまだプロジェクトを選んでいないため null を許容する
+  projectId       String?
+  sessionId       String?  // crossquery_ / teamexec_ セッション ID
+  mode            String   // 'ask' | 'exec'
+  action          String   // 'request' | 'denied' | 'completed' | 'failed' |
+                            // 'invite_sent' | 'invite_accepted' | 'invite_declined' | 'grant_revoked' |
+                            // 'team_published' | 'team_unpublished' | 'subscribed' | 'unsubscribed' |
+                            // 'subscription_revoked'
+  grantId         String?
+  detail          String?  // JSON 文字列（denyReason, 所要ms 等）
+  createdAt       DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([executorUserId, createdAt])
+  @@index([requesterUserId, createdAt])
+}
+
+// 公開型クロスユーザー Team（Phase A）の購読。認可の根拠は「行が存在し revokedAt IS NULL」の
+// 2 条件のみ（CrossTeamGrant と同じ設計原則）。CrossTeamGrant とは別テーブル — 購読のたびに
+// 実 grant 行を作らない（購読者数 × チーム規模の行の増殖とチーム編集時の同期処理を避けるため）。
+// 認可時は cross-team-publish.ts の buildSubscriptionCandidates() でその場で
+// CrossTeamCandidateGrant[] に合成し、decideCrossTeamAccess()（無改造）にそのまま渡す。
+model TeamSubscription {
+  id               String    @id @default(cuid())
+  teamId           String
+  team             Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  subscriberUserId String
+  organizationId   String    // 購読時点のスナップショット（実行時は OrganizationMember を再検証する）
+  askAllowed       Boolean   @default(true)
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([teamId, subscriberUserId])
+  @@index([subscriberUserId])
+  @@index([teamId])
+}
+
+// サイクルC3a-1: クロス ask の記憶リセット。行の存在は「このペア（依頼者, 宛先プロジェクト）を
+// 最後にいつリセットしたか」の記録のみ（state の持ち場）。CrossTeamAuditLog の
+// action='cross_ask_reset' 行（監査証跡、fire-and-forget）とは意図的に分離する
+// （cross-ask-resume-rules.ts のコメント参照: 監査は順序保証が無いため state には使わない）。
+// User/Project を削除しても残らないよう FK は張らない（UserClearance / KnowledgeChunk と同じ規約）。
+model CrossAskReset {
+  id              String   @id @default(cuid())
+  requesterUserId String
+  projectId       String
+  resetAt         DateTime @default(now())
+  resetCount      Int      @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([requesterUserId, projectId])
 }
 
 // セッション
@@ -295,6 +417,12 @@ model Session {
   // Usage（コスト集計）サイクル: このスレッドの案件名（コスト集計専用。ナレッジの compartment とは別物で
   // 閲覧制限には一切使わない）。null = 案件なし。backfill しない。
   usageCase             String?
+  // クロスユーザー Team（ask のみ、Phase 1）: 依頼者の User.id。null = 従来どおり
+  // 「依頼者 = userId（所有者）」で、既存行は全て NULL のまま（backfill 絶対禁止）。
+  // FK は張らない（権限・監査用の列は User 削除時に Session を壊さない方針。
+  // KnowledgeChunk / SupervisionAuditLog と同じ規約）。
+  // userId は常に「宛先マシン所有者（= AI 実行・モデル・言語・課金・BuildLog・KnowledgeChunk の帰属先）」。
+  requestedByUserId String?
 
   messages       Message[]
   buildLogs      BuildLog[]
@@ -560,8 +688,11 @@ model Notification {
   userId      String
   user        User     @relation(fields: [userId], references: [id])
   type        String   // 'response' | 'approval' | 'error'
-  projectId   String
-  project     Project  @relation(fields: [projectId], references: [id])
+  // 2026-11-02: iPhone SE3 無音故障の再発防止で 'error' 型の一部（FCM トークン削除・
+  // 配信先0件スキップ）は特定の Project に紐づかない（userId スコープのみ）ため null 許容にした。
+  // project が null の行は projectName に固定ラベル（例: "プッシュ通知"）を入れる。
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id])
   projectName String   // 非正規化（表示用、JOIN 不要にするため）
   title       String
   body        String   @default("")
@@ -573,4 +704,17 @@ model Notification {
 
   @@index([userId, createdAt])
   @@index([userId, isRead])
+}
+
+/// DB 変更の適用台帳（サイクルM1）。apps/server/db/changes/NNNN_*.sql の各ファイルが
+/// 末尾で自分のファイル名を記録する。行の存在 ⇔ そのファイルが適用済み。
+/// 適用は人間が psql で行う（migrate dev / migrate deploy / db push は使わない）。
+/// name を主キーにしているのは、会社リポとの同期（company-repo-sync.md §3/§4 の merge・
+/// cherry-pick）で両側が同じ番号を採ったとき、整数 PK では一方が
+/// ON CONFLICT DO NOTHING で黙って「適用済み」になってしまうため。
+model DbChange {
+  name      String   @id // ファイル名（例: 0032_db_change_ledger.sql）
+  no        Int // 表示・並び順用の番号（unique にしない）
+  appliedAt DateTime @default(now())
+  appliedBy String? // 適用時の current_user（所有者ずれ調査用）
 }

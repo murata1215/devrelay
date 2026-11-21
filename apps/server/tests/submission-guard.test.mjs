@@ -12,6 +12,7 @@ import {
   shouldRecordPlanAiSession,
   buildPlanAiSessionWhere,
   buildTurnId,
+  PLAN_RESUME_CAPABLE_AI_TOOLS,
 } from '../dist/services/submission-guard.js';
 
 // --- buildTurnId（MCP submit_instruction 経路 vs 対話経路） ---
@@ -142,6 +143,82 @@ test('evaluateApproveGuard: planAiSessionMissing（plan 完了だが agent 未�
   assert.equal(result.ok, false);
   assert.equal(result.code, 'planAiSessionMissing');
   assert.match(result.message, /plan のセッション ID が記録されていません/);
+});
+
+// --- 2026-10-27 サイクル2（gemini plan→exec resume）: planAiSessionMissing の文言出し分け ---
+
+test('PLAN_RESUME_CAPABLE_AI_TOOLS: claude/codex/gemini を含む（gemini は本サイクルで対応済みに追加）', () => {
+  assert.deepEqual(PLAN_RESUME_CAPABLE_AI_TOOLS, ['claude', 'codex', 'gemini']);
+});
+
+test('evaluateApproveGuard: planAiSessionMissing + aiTool: \'gemini\'（resume 対応ツール）は従来文言のまま', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, aiTool: 'gemini' },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'planAiSessionMissing');
+  assert.match(result.message, /plan のセッション ID が記録されていません/);
+});
+
+test('evaluateApproveGuard: planAiSessionMissing + aiTool: \'claude\'（resume 対応ツール）は従来文言のまま', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, aiTool: 'claude' },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /plan のセッション ID が記録されていません/);
+});
+
+test('evaluateApproveGuard: planAiSessionMissing + aiTool 未指定（既存呼び出し元・旧テスト互換）は従来文言のまま', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, aiTool: undefined },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /plan のセッション ID が記録されていません/);
+});
+
+test('evaluateApproveGuard: planAiSessionMissing + aiTool: \'devin\'（resume 未対応ツール）は新文言に出し分ける', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, aiTool: 'devin' },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'planAiSessionMissing');
+  assert.match(result.message, /この AI ツール（devin）は plan→exec の引き継ぎ（resume）にまだ対応していません/);
+  assert.match(result.message, /`e`/);
+  // 誤解を招く「agent が未更新か plan が未完了」の旧文言は含まれない
+  assert.equal(/agent が未更新/.test(result.message), false);
+});
+
+test('evaluateApproveGuard: planAiSessionMissing + aiTool: \'aider\'（resume 未対応ツール）も新文言に出し分ける', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: null, aiTool: 'aider' },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /この AI ツール（aider）は plan→exec の引き継ぎ/);
+});
+
+test('evaluateApproveGuard: aiTool が設定されていても planAiSessionId があれば ok:true（文言分岐は未記録時のみ）', () => {
+  const result = evaluateApproveGuard({
+    session: { projectId: 'proj-1', userId: 'user-1', planAiSessionId: 'sess-x', aiTool: 'devin' },
+    requestedProjectId: 'proj-1',
+    requestedUserId: 'user-1',
+    hasPlanMessage: true,
+  });
+  assert.deepEqual(result, { ok: true });
 });
 
 test('evaluateApproveGuard: すべて満たす場合は ok:true', () => {

@@ -95,11 +95,19 @@ function isCommandNotFoundMessage(stderr: string): boolean {
  * `respect_workspace_trust` の config 案内）で即死したかどうかを判定する。
  * `classifyCliFailure()` 自体（#344）は判定順序を含め一切変更しない。この関数はその外側で
  * 呼び出し側（ai-runner.ts）が `emptyNonZero` の中身をさらに細分類するために使う。
+ *
+ * 2026-10-27: Gemini CLI の workspace trust 拒否文言（`not running in a trusted directory` /
+ * `folder is not trusted`）も同じ関数に追加した。spawn env に `GEMINI_CLI_TRUST_WORKSPACE=true`
+ * を付与するようになった（ai-runner.ts）ためユーザーが直接これを踏むことは稀になったが、
+ * キルスイッチ `DEVRELAY_GEMINI_TRUST_WORKSPACE=0` や、環境変数を解さない版の CLI では
+ * 依然として発生しうる安全網として残す。
  * @param stderr 子プロセスの stderr 全文
  */
 export function isWorkspaceTrustError(stderr: string): boolean {
   return (
     /Refusing to run in an untrusted workspace/i.test(stderr) ||
-    /respect_workspace_trust/i.test(stderr)
+    /respect_workspace_trust/i.test(stderr) ||
+    /not running in a trusted directory/i.test(stderr) ||
+    /folder is not trusted/i.test(stderr)
   );
 }

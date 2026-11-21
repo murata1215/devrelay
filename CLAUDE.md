@@ -48,13 +48,25 @@ pm2 restart devrelay-server
 - **ソースコード（.ts ファイル等）を変更して `pnpm build` を実際に実行した場合のみ**「ビルド完了。以下のコマンドで再起動してください」と案内する
 - ドキュメント（.md）のみの変更ではビルド・再起動案内は不要
 
-## DB スキーマ変更時の必須手順
+## DB スキーマ変更時の必須手順（サイクルM1、2026-11-12）
+
+`prisma migrate dev` / `migrate deploy` / `db push` は使わない（`db push` は pgvector の
+`embedding` 列を DROP するため永久禁止。`apps/server/prisma/bootstrap.sql` 冒頭の警告参照）。
+
 1. `schema.prisma` を変更
-2. `cd apps/server && npx prisma migrate dev` を試行 → 失敗時は `npx prisma db execute --stdin` で直接 SQL 適用
-3. **カラム存在を SQL で検証**: `npx prisma db execute --stdin <<< "SELECT column_name FROM information_schema.columns WHERE table_name='テーブル名' AND column_name='カラム名';"`
-4. `npx prisma generate` で Prisma Client 再生成
-5. `pnpm build` でビルド
+2. `apps/server/db/changes/NNNN_xxx.sql` を新規作成し、`INDEX.tsv` に 1 行・`SCHEMA.sha256` を
+   更新する（**この4点を同じコミットに入れる**。テンプレートは `apps/server/db/changes/README.md`、
+   詳細手順は `doc/db-changes.md` 参照）
+3. `npx prisma generate` で Prisma Client 再生成
+4. `pnpm build` でビルド（`node --test tests/db-changes.test.mjs` が green であることを確認）
+5. **DB への適用は人間が `psql` で行う**（アプリと同じロール、postgres 等の superuser では流さない）。
+   適用後は `information_schema.columns` でカラム存在を検証する
 6. 再起動案内時に「DB マイグレーション適用済み」を明記する
+
+> **会社リポジトリ（TISA）独自の DB 変更は本家の連番を使わない。** 手順 2 の代わりに
+> `apps/server/db/changes/tisa/TISA<4桁>_xxx.sql` を作り `tisa/INDEX.tsv` に 1 行足す。
+> `SCHEMA.sha256` は 1 列目（指紋）だけ更新し、2 列目は本家の最大番号のファイル名のまま。
+> テストは `tests/db-changes-tisa.test.mjs`。詳細は `doc/db-changes-tisa.md`。
 
 ## ポート割り当て規約（90xx 番台）
 
@@ -68,6 +80,13 @@ pm2 restart devrelay-server
 **新規に手動で Caddy サイトを作る場合は 9001-9299 側からポートを選ぶこと。** `testflight` コマンドは常に 9300-9499 からのみ採番するため、この規約を守れば両者は交わらない。
 
 ## 環境変数（apps/server/.env）
+
+> ⚠️ **2026-11-08 判明**: `apps/server/dist/index.js` の `import 'dotenv/config'` はパス指定なしなので
+> `process.cwd()` 基準で `.env` を探す。pm2 の `devrelay-server` は `exec cwd=/opt/devrelay`
+> （リポジトリルート）で起動するため、**実際に読まれるのは `/opt/devrelay/.env`**（`apps/server/.env`
+> へのシンボリックリンク）。`apps/server/.env` 自体は編集しても symlink 経由でしか本番に反映されない。
+> 新しいキーを追記したら `pm2 restart devrelay-server`（`--update-env` は使わない。現在のシェルの
+> env で丸ごと置き換わり既存キーが消える危険があるため）。
 
 | 変数 | 説明 |
 |------|------|
@@ -99,13 +118,25 @@ pm2 restart devrelay-server
 | DEVRELAY_BOT_RETRY_MAX_MS | bot 起動リトライ間隔の上限（既定 `300000`、clamp 10000〜3600000） |
 | DEVRELAY_CONVERSATION_RAIL | 右レール第3タブ「会話履歴」（直近20スレッド横断・実行中スピナー・未確認緑✓）向けに `GET /api/threads` が `running`/`lastAiAt` フィールドを返すか（既定 `1`。`0` で両フィールドを一切出さない＝旧レスポンスと構造的に同一になるキルスイッチ。DB 変更なし・既読状態はブラウザの localStorage 管理） |
 | DEVRELAY_PUSH_DIAG | 2026-10-22 の FCM 無音故障（アプリ再インストール後、配信先の無いトークンへ送信し続けエラーも出ないまま無音で壊れた）の再発防止として追加した診断ログ（配信先 0 件の警告・送信結果1行ログ）を出すか（既定 `1`。`0` で従来どおり無言。`fcm-service.ts`） |
-| DEVRELAY_FCM_STRICT_DELETE | FCM トークン削除ポリシーを旧挙動（`invalid-argument` を即削除）に戻すキルスイッチ（既定 `0` ＝安全側。`1` で旧挙動。`invalid-argument` は別 Firebase プロジェクト発行トークン等でも返るため、既定では連続5回失敗するまで削除しない） |
+| DEVRELAY_FCM_STRICT_DELETE | FCM トークン削除ポリシーを `invalid-argument` も削除対象にする旧挙動に戻すキルスイッチ（既定 `0` ＝安全側）。2026-11-02 の iPhone SE3 無音故障（唯一のトークンが `invalid-argument` 5連続失敗で誤って自動削除された）を受けて、既定では `invalid-argument` は連続失敗回数に関わらず一切削除しない（旧: 5回で削除）。`1` にすると即削除の対象になるが、それでも「削除すると配信先が0件になる場合は削除しない」ゼロ件ガードは常に先に適用される（端末1台しか無いユーザーでは `1` でも削除されない） |
 | DEVRELAY_FCM_TEST_API | 設定画面の「テスト通知を送る」が使う `POST /api/push/fcm/test` を有効にするか（既定 `1`。`0` で 404。`GET /api/push/fcm/devices`・`POST /api/push/fcm/verify`・`DELETE /api/push/fcm/devices/:tokenPrefix` には影響しない） |
 | DEVRELAY_THREAD_HANDOVER | スレッド引継ぎ `n`（next thread）を有効にするか（既定 `1`。`0` で `n make` / `n` / `n 1` を従来どおり AI へのプロンプトとして扱うキルスイッチ）。元スレッドで `n make` を送るとその AI が引継ぎ書を書いて `<projectPath>/doc/handover/` に保存し、新スレッドで `n` で作成済み引継ぎ書を一覧、`n 1` で選んで今のスレッドに注入する。詳細 `doc/thread-management-spec.md` §11 |
 | DEVRELAY_USAGE | Usage（コスト集計）画面 `/usage` とその API（`/api/usage*`）、ログイン不要のサイネージ `/signage/usage?token=…`（`GET /api/public/usage-signage`）を有効にするか（既定 `1`。`0` で全 API が 404 になるキルスイッチ）。金額は会話履歴のコスト列と同じ `resolveMessageCost()`、月は日本時間の暦月。閲覧は組織全員、グループ（人のタグ）は本人と管理者、案件（スレッドのタグ）はスレッドの持ち主と管理者が変更でき、サイネージ URL の発行・停止は管理者のみ。詳細 `doc/devlog/2026-11-19_usage_cost_aggregation.md` |
 | DEVRELAY_USAGE_CASE_REQUIRED | WebUI（チャット・Lite）で案件（`Session.usageCase`）が空のスレッドには AI プロンプトを送らせないか（既定 `0`＝送れる。`1` のときだけ必須。コマンド（`e`/`x`/`h`/`n make`/`u`/数字選択 等、`isTraditionalCommand()`）と `//` 内部コマンドは止めない。Discord/Telegram/MCP は対象外）。入力欄の上の「🏷 案件」欄で設定する。詳細 `doc/devlog/2026-11-19_usage_case_in_chat.md` |
 | DEVRELAY_AGENT_REPO_URL | 会社 private リポジトリ clone 対応サイクル: `GET /api/machines/:id/token` が WebUI に返す、Agent インストール一行コマンドに付与する clone 先 URL（`https://` 必須・userinfo 付き URL は拒否して無視）。**未設定時は WebUI のコマンドが現行と完全に同じ文字列になる**（実質的なキルスイッチ）。PAT は**本変数には**一切乗せられない（userinfo 付き URL は拒否）。PAT の配布方式は下記 `DEVRELAY_AGENT_REPO_TOKEN` 参照。詳細 `doc/company-repo-sync.md` |
 | DEVRELAY_AGENT_REPO_TOKEN | 読取PATのサーバー配布サイクル: 上記 `DEVRELAY_AGENT_REPO_URL` とセットのときのみ有効な読取 PAT。DB には一切保存しない（env のみ）。`POST /api/agent/repo-auth`（HTTP、インストール時）・WS `agent:repo:auth:request`（`u` 実行前のローテーション）のどちらも**マシントークンで認証済みの Agent にのみ**配布する（値は `Authorization: Basic <base64>` 形式でのみ渡し、WebUI・ログ・DB には一切出さない）。未設定時は Agent 側で一切の新規通信が発生しない（既存の個人 devrelay.io 含む全環境は無変更）。前サイクルの「PAT をサーバーに送らない」方針を本サイクルで**サーバー env に限り**見直した判断（`Machine.token` 平文保存 ⇒ DB 侵害時のリスクを明示的に受容。前提は Fine-grained・対象リポジトリのみ・`Contents: Read-only`・有効期限必須）。詳細・優先順位・ローテーション手順は `doc/company-repo-sync.md` §9 |
+| DEVRELAY_CROSS_TEAM | 別ユーザーのエージェントとチームを組む機能（クロスユーザー ask・招待 API・WebUI 招待 UI）を有効にするか。**既定 `0` = OFF**（既存キルスイッチの多数派と逆方向。新しい信頼境界を黙って開けないため）。`1` で有効化。OFF 時は authz がクロス判定に入らず従来の 404・新設 API（`/api/teams/org-candidates`・`/api/teams/invites` 等）は全て 404・`GET /api/teams`/`GET /api/agent/members` の応答は旧構造と完全同一（新フィールドはキーごと省略）。対象は同一 Organization 内のみ（組織未所属ユーザー同士は不可）。teamexec（exec）は本変数だけでは動かない（下記 `DEVRELAY_CROSS_TEAM_EXEC` 参照、Phase 1 では構造的に到達不可） |
+| DEVRELAY_CROSS_TEAM_EXEC | クロスユーザー `teamexec`（他ユーザーのプロジェクトでの exec = コード改変）を有効にするか。既定 `0`。`DEVRELAY_CROSS_TEAM=1` かつ本変数 `1` かつ受入側が `CrossTeamGrant.execAllowed=true` にしている、の 3 条件 AND でのみ通る設計（Phase 1 時点では受入側 UI に exec 許可トグル自体が無く execAllowed は常に false のため、本変数を `1` にしても何も変わらない。Phase 2 で解禁予定） |
+| DEVRELAY_CROSS_TEAM_PUBLISH | 公開型クロスユーザー Team（Phase A: サーバー + 認可のみ、2026-11-08。WebUI は Phase B 未実装）を有効にするか。既定 `0` = OFF。`DEVRELAY_CROSS_TEAM=1` と本変数 `1` の両方が揃って初めて新設 6 ルート（`PATCH /api/teams/:teamId/visibility`・`GET /api/teams/published`・`POST/DELETE /api/teams/:teamId/subscribe`・`GET /api/teams/:teamId/subscribers`・`DELETE /api/teams/:teamId/subscribers/:userId`）が有効になる（どちらか OFF なら全て 404）。認可本体 `decideCrossTeamAccess()` は無改造 — `TeamSubscription`（購読）から `cross-team-publish.ts` がその場で候補を合成して渡すだけ。公開対象は招待型で受け入れた他人のプロジェクトを除外し、チームオーナー自身が所有するプロジェクトに限定する（又貸し防止） |
+| DEVRELAY_CROSS_TEAM_CHAT | クロスユーザー Team Phase C（2026-11-10）: 購読/借用プロジェクトを WebUI の Agents ツリーに出し、質問専用タブとして直接 ask できるようにする機能を有効にするか。既定 `1`（`DEVRELAY_CROSS_TEAM=1` との AND でのみ実際に有効＝既定 OFF 環境では何も起きない）。`0` で新設 2 ルート（`GET /api/cross-team/ask-targets`・`GET /api/cross-team/projects/:id/messages`）が 404、WS `web:cross:ask` は `web:error` を返し**いかなる DB 書き込みもしない**、ツリーのセクションも非表示になる。認可は既存 `listCrossTeamAskCandidateProjects()` を再利用するだけで新しい認可クエリは持たない。送信は `web:command`（`parseCommandWithNLP`/`executeCommand`/`handleProjectConnect`）を一切通らない専用 WS フレームのため、クロスタブでは `e`/`k`/`a`/`testflight`/`//connect` 等が文字列として宛先に渡るだけで構造的に exec へ到達できない。本機能の前提として、チャット（WS）経路のみに存在していた既存の権限昇格の穴（`handleProjectConnect`/`handleMachineConnect`/`handleProjectList` が所有者チェックをしていなかった）を同サイクルで修正済み（キルスイッチの外、常時有効） |
+| DEVRELAY_CROSS_TEAM_CHAT_CONTEXT | 上記 Phase C の会話継続（案 B）: クロス ask のプロンプト先頭に、同一依頼者×プロジェクトの直近 3 往復（最大 6,000 文字、truncate 済み）を「これまでのやりとり（参考）」として前置するか。既定 `1`。`0` で前置をやめ、完全な 1 問 1 答に戻す（履歴 API の表示には影響しない）。Agent 側の改修は無し（セッションは従来どおり `crossquery_<uuid>` の使い捨てのまま。安定セッション再利用による本物の resume はセルフレビューで撤回——`.devrelay-output/` 全消し事故の再発リスクがあったため——別サイクルで capability ゲート付きの案 C′ として再検討） |
+| DEVRELAY_CHAT_CTX_PER_USER | Discord/Telegram の共有チャンネルで、同じ chatId に複数ユーザーが発言したときキャッシュ済み `UserContext` の `userId` を発言者ごとに再解決するか（既定 `1`。`0` で「そのチャンネルで最初に話した人の userId に全員の操作が固定される」旧挙動に戻すキルスイッチ。2026-11-05 に発見・修正、詳細は `doc/changelog.md` のクロスユーザー Team サイクル参照） |
+| DEVRELAY_CROSS_ASK_ISOLATION | サイクルG（2026-11-10）: クロスユーザー ask（別ユーザーのプロジェクトへの質問）で所有者プロジェクトの状態を隔離するか。既定 `1`。`1` のとき、Session 作成前に (a) 宛先 Agent が `'cross-ask-isolation'` capability を申告しているか、(b) 読み取り専用を権限で強制できる実効 AI か（devin/gemini/claude+`Project.terminalMode` は不可）を検証し、どちらか NG なら ask 自体を断る（`denied`、監査記録あり）。許可されれば Agent へ `statePolicy:'isolated'` を送り、所有者の storageContext 注入・`.devrelay-output/` 添付・Codex/Devin セッション resume を一切行わせない。`0` で検証自体を行わず旧挙動（`statePolicy` を送らない）に戻すキルスイッチ。同一ユーザーの ask（スキル／MCP／`ask` コマンド）には一切影響しない。Agent 側の他の既存バグ修正（Codex/Devin 状態の書き込み禁止・approve-all 状態の遮断・`/tmp` プロンプトファイルの権限・クリーンアップ）は一時セッション全般に無条件で効くため本変数の対象外（ロールバックは `git revert` + 該当機 `u`） |
+| DEVRELAY_CROSS_ASK_RESUME | サイクルC2（2026-11-11）: クロスユーザー ask のセッション継続（resume）を有効にするか。既定 **`0`（OFF）**（`DEVRELAY_CROSS_TEAM` 等と同じ方向。`DEVRELAY_CROSS_ASK_ISOLATION` の既定 ON とは逆）。`1` のとき、G の隔離判定を通過した ask のうち、宛先 Agent が `'cross-ask-resume-strict'` capability を申告し、かつ読み取り専用を権限で強制できる実効 AI（`decideAskReadOnlyEnforcement()`、devin/gemini/claude+terminalMode は不可）に限り、`statePolicy:'isolated'` の代わりに `statePolicy:'resumable-scoped'` と決定論的な `agentScopeId`（`crossask-<digest32>-g<世代>`。digest は `sha256(requesterUserId+projectId)`）を送る。Agent 側は `.devrelay/sessions/<agentScopeId>/` という scope dir 内の会話状態（conversation.json・claude-session-id 等）のみを読み書きしてよい許可リストに切り替わり（C1 実装、`session-scope.ts`）、他の全項目は deny のまま。`0` のときはサーバーが `statePolicy:'resumable-scoped'`/`agentScopeId` を一切送らず、G 時点（`'isolated'` + 案B前置）と完全同一の挙動になる。`DEVRELAY_CROSS_ASK_ISOLATION=0`（G の緊急ロールバック）のときは本変数の値に関わらず resume も止まる（偶然ではなく明示的な従属）。対象は `cross-ask-runner.ts` 経由（チャット `ask`・WebUI クロスタブ）のみ、`routes/document-api.ts`（ask-member REST/スキル経路）は対象外（isolated のまま。scope dir を触らないため実害なし） |
+| DEVRELAY_CROSS_ASK_RESUME_TTL_DAYS | 上記 resume の世代 TTL（既定 `14` 日、clamp 1〜365、`0` で無効）。最終ターンからこの日数を超えたら ask 前に新しい世代（`-g<N+1>`）へ切り替え、旧世代の scope dir は残したまま新規に案B前置を1回だけ載せて継続する |
+| DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS | 上記 resume の世代あたり上限往復数（既定 `40`、clamp 2〜500、`0` で無効）。超過時も TTL と同じ世代切り替えで対応（会話が伸び続けてトークン消費が無制限に増える歯止め。課金主体は所有者のまま変更なし） |
+| DEVRELAY_DB_CHANGE_WARN | サイクルM1（2026-11-12）: 起動時（`app.listen()` より前）に `apps/server/db/changes/` の未適用 DB 変更を検査し、起動ログに警告を出すか（既定 `1`。`0` で検査自体を無効化するキルスイッチ。fail-open＝台帳なし・権限不足・DB 接続不能のいずれでも起動は続行する）。詳細 `doc/db-changes.md` |
+| DEVRELAY_PLAN_GATE_CAPABILITY | サイクルS1（2026-11-12）: プランモードの既存バグ根治（下記 `'plan-gate-hook'` capability）に伴うサーバー側 fail-closed 判定のキルスイッチ。既定 `1`。`1` のとき、クロスユーザー ask（`cross-ask-runner.ts`・`document-api.ts`・`api.ts`/`cross-ask-target-state.ts`）と MCP `ask_project`/`get_answer` の `readOnlyEnforced` 判定が、宛先 Agent の `'plan-gate-hook'` capability 申告を見る（未申告なら ask を断る／`readOnlyEnforced:false` を返す）。`0` にすると、この capability チェックだけを無効化し常に申告済み扱いにする（`'cross-ask-isolation'` capability のチェックには影響しない）。PreToolUse フック自体（Agent 側の実装）にはキルスイッチを置かない方針のため、本変数は Agent の実際の挙動を変えない — サーバー側の判定だけを戻す緊急ロールバック用（真因・配布判断の詳細は `doc/plan-gate-hook-plan.md`） |
 
 ## DB テーブル（概要）
 
@@ -124,14 +155,20 @@ pm2 restart devrelay-server
 | Team | 名前付きチーム（クロスプロジェクトクエリ用グループ） |
 | TeamMember | チーム内プロジェクト（Team → Project 参照） |
 | ToolApproval | ツール承認履歴（exec モードの canUseTool 記録） |
-| Notification | プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理） |
+| Notification | プッシュ通知履歴（モバイルアプリの通知一覧・バッジ管理。`projectId`/`project` は null 許容＝2026-11-02 以降、FCM トークン削除・配信先0件スキップ等 Project に紐づかない `type='error'` 通知に使う） |
 | KnowledgeChunk | 高辻ナレッジ: 会話ターン（AI 応答＋直前の人間入力）の検索用チャンク（キーワード ILIKE + pgvector ベクトルのハイブリッド検索。FK は張らない） |
 | UserClearance | 高辻ナレッジ サイクル2: 人の権限（`readLevel`/`writeLevel` 0〜10、`compartments String[]`。行が無ければ既定値 0/0/[]。`userId` unique、FK なし） |
 | UserUsageGroup | Usage サイクル: 人のグループ（CIT / BIT 等、1人1つ。`userId` unique、FK なし。行が無ければ「タグなし」）。スレッドの案件は `Session.usageCase`、サイネージ URL の鍵は `Organization.usageSignageToken` |
+| CrossTeamInvite | クロスユーザー Team（Phase 1）: 別ユーザーへの招待（pending の持ち場。`status` は認可判定には使わない、認可は常に CrossTeamGrant の存在のみ） |
+| CrossTeamGrant | クロスユーザー Team（Phase 1）: 認可の唯一の根拠（行が存在し `revokedAt IS NULL` ⇔ 承認済み。`askAllowed`/`execAllowed` 既定 false。TeamMember 削除で Cascade） |
+| CrossTeamAuditLog | クロスユーザー Team（Phase 1）: 監査ログ（append-only、FK 無し。`action`: request/denied/completed/failed/invite_*/grant_revoked/team_published/team_unpublished/subscribed/unsubscribed/subscription_revoked。公開型追加分は Phase A） |
+| TeamSubscription | 公開型クロスユーザー Team（Phase A、2026-11-08）: 購読。認可の根拠は「行が存在し `revokedAt IS NULL`」の2条件のみ（`CrossTeamGrant` と同じ設計原則）。`CrossTeamGrant` とは別テーブルで実 grant 行は作らない（購読のたびに合成するだけ。`Team.visibility='organization'` が前提） |
+| DbChange | サイクルM1（2026-11-12）: DB 変更の適用台帳。`apps/server/db/changes/NNNN_*.sql` の各ファイルが末尾で自分のファイル名（`name`、主キー）を記録する。行の存在 ⇔ そのファイルが適用済み。詳細 `doc/db-changes.md` |
 
 ## 詳細ドキュメント
 - 変更履歴: `doc/changelog.md`
 - サイクル別 devlog: `doc/devlog/`（1 サイクル = 1 ファイル + `INDEX.md` 索引）
+- DB 変更履歴の一元化（サイクルM1）: `doc/db-changes.md`
 - 設計・アーキテクチャ: `rules/project.md`
 - マイグレーションガイド: `doc/devrelay-claudemd-migration.md`
 - 会社 private リポジトリ clone 対応: `doc/company-repo-sync.md`

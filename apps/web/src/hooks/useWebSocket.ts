@@ -92,6 +92,9 @@ export interface ChatMessage {
   files?: Array<{ id?: string; filename: string; content?: string; mimeType: string; size?: number }>;
   timestamp: Date;
   sourceProjectName?: string;  // クロスプロジェクトクエリの送信元プロジェクト名
+  /** クロスタブ専用: resume が成立した世代番号。履歴 API（REST）経由のメッセージにのみ付く
+   *  （WS でライブ配信されるメッセージには付かない。区切り線はベストエフォート表示）。 */
+  generation?: number;
 }
 
 /** 進捗情報 */
@@ -131,6 +134,10 @@ interface UseWebSocketReturn {
   sendCommand: (text: string, files?: Array<{ filename: string; content: string; mimeType: string; size?: number }>, projectId?: string) => boolean;
   /** ツール承認応答を送信（ユーザーが許可/拒否を選択） */
   sendToolApprovalResponse: (requestId: string, behavior: 'allow' | 'deny', approveAll?: boolean, alwaysAllow?: boolean, answers?: Record<string, string>) => void;
+  /** クロスユーザー Team Phase C: 購読/借用プロジェクトへの質問専用フレーム（`web:cross:ask`）。
+   * `sendCommand` とは意図的に別関数にする（`parseCommandWithNLP`/`executeCommand` を通らない
+   * ことを型レベルでも明示するため。files を受け取らない＝クロス ask はファイル添付非対応）。 */
+  sendCrossAsk: (projectId: string, text: string) => boolean;
 }
 
 /** WebSocket URL を構築 */
@@ -331,5 +338,15 @@ export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSoc
     }));
   }, []);
 
-  return { connected, sendCommand, sendToolApprovalResponse };
+  const sendCrossAsk = useCallback((projectId: string, text: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'web:cross:ask',
+      payload: { projectId, text },
+    }));
+    return true;
+  }, []);
+
+  return { connected, sendCommand, sendToolApprovalResponse, sendCrossAsk };
 }

@@ -1,6 +1,14 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { teams, machines, projects as projectsApi } from '../lib/api';
-import type { TeamInfo, TeamsResponse, Machine } from '../lib/api';
+import type { TeamInfo, TeamsResponse, Machine, OrgCandidate, CrossTeamInboxInvite, CrossTeamOutboxInvite, CrossTeamShare, PublishedTeam, TeamSubscriber } from '../lib/api';
+import { selectInvitableCandidates } from '../lib/cross-team-invite-rules';
+import {
+  buildPublishConfirmMessage,
+  buildUnpublishConfirmMessage,
+  buildUnsubscribeConfirmMessage,
+  buildRemoveSubscriberConfirmMessage,
+  describePublishState,
+} from '../lib/cross-team-publish-rules';
 import { useLanguage } from '../contexts/LanguageContext';
 
 export function TeamPage() {
@@ -28,6 +36,33 @@ export function TeamPage() {
   /** リネーム入力の ref */
   const renameInputRef = useRef<HTMLInputElement>(null);
 
+  // --- クロスユーザー Team（Phase 1: ask のみ）。DEVRELAY_CROSS_TEAM が OFF の環境では
+  // /teams/org-candidates が 404 を返す。その場合は機能自体を非表示にする（UI 側のキルスイッチ対称）。
+  const [crossTeamEnabled, setCrossTeamEnabled] = useState(false);
+  const [orgCandidates, setOrgCandidates] = useState<OrgCandidate[]>([]);
+  const [inbox, setInbox] = useState<CrossTeamInboxInvite[]>([]);
+  const [outbox, setOutbox] = useState<CrossTeamOutboxInvite[]>([]);
+  /** 自分が公開している（grantee 側の）プロジェクト一覧（「誰に何を公開しているか」の確認用） */
+  const [sharedByMe, setSharedByMe] = useState<CrossTeamShare[]>([]);
+  /** 招待ダイアログを開いているチームID */
+  const [invitingTo, setInvitingTo] = useState<string | null>(null);
+  /** 承認ダイアログを開いている招待ID（自分のプロジェクトを選ぶ） */
+  const [acceptingInviteId, setAcceptingInviteId] = useState<string | null>(null);
+  /** #複数選択対応: 承認ダイアログで選択中のプロジェクト ID（チェックボックス方式、選択ゼロから開始） */
+  const [acceptingSelectedIds, setAcceptingSelectedIds] = useState<Set<string>>(new Set());
+
+  // --- 公開型 Team（Phase B）。DEVRELAY_CROSS_TEAM_PUBLISH が OFF の環境では
+  // /teams/published が 404 を返す。fetchCrossTeamData とは独立した try/catch にする
+  // （同じ Promise.all に混ぜると、公開機能だけ OFF の環境で招待 UI まで巻き込んで
+  // 非表示になる退行を起こすため）。
+  const [crossTeamPublishEnabled, setCrossTeamPublishEnabled] = useState(false);
+  /** 組織内で公開されているチーム一覧（自分が所有するチームは含まない） */
+  const [publishedTeams, setPublishedTeams] = useState<PublishedTeam[]>([]);
+  /** 購読者一覧を展開しているチームID（Team オーナー視点） */
+  const [subscribersOpenFor, setSubscribersOpenFor] = useState<string | null>(null);
+  const [subscribers, setSubscribers] = useState<TeamSubscriber[]>([]);
+  const [subscribersLoading, setSubscribersLoading] = useState(false);
+
   /** チーム一覧を取得 */
   const fetchTeams = useCallback(async () => {
     try {
@@ -40,10 +75,265 @@ export function TeamPage() {
     }
   }, []);
 
+  /** クロスユーザー Team 関連データを取得(機能 OFF なら黒く握り潰して非表示にする) */
+  const fetchCrossTeamData = useCallback(async () => {
+    try {
+      const [candidatesResult, invitesResult, sharedResult] = await Promise.all([
+        teams.orgCandidates(),
+        teams.listInvites(),
+        teams.sharedByMe(),
+      ]);
+      setOrgCandidates(candidatesResult.candidates);
+      setInbox(invitesResult.inbox);
+      setOutbox(invitesResult.outbox);
+      setSharedByMe(sharedResult.shares);
+      setCrossTeamEnabled(true);
+    } catch {
+      // 404 = DEVRELAY_CROSS_TEAM が OFF。エラー表示はせず機能を非表示にするだけ
+      setCrossTeamEnabled(false);
+    }
+  }, []);
+
+  /** 公開型 Team 関連データを取得（機能 OFF なら黒く握り潰して非表示にする。fetchCrossTeamData とは独立） */
+  const fetchPublishedTeams = useCallback(async () => {
+    try {
+      const result = await teams.listPublished();
+      setPublishedTeams(result.teams);
+      setCrossTeamPublishEnabled(true);
+    } catch {
+      // 404 = DEVRELAY_CROSS_TEAM_PUBLISH が OFF。エラー表示はせず機能を非表示にするだけ
+      setCrossTeamPublishEnabled(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchTeams();
+    fetchCrossTeamData();
+    fetchPublishedTeams();
     machines.list().then(setAllMachines).catch(() => {});
-  }, [fetchTeams]);
+  }, [fetchTeams, fetchCrossTeamData, fetchPublishedTeams]);
+
+  /** 招待を送る */
+  const handleInvite = async (teamId: string, inviteeUserId: string) => {
+    setError('');
+    try {
+      await teams.invite(teamId, inviteeUserId);
+      setInvitingTo(null);
+      await fetchCrossTeamData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send invite');
+    }
+  };
+
+  /** 送信済み招待を取り消す */
+  const handleRevokeInvite = async (inviteId: string) => {
+    setError('');
+    try {
+      await teams.revokeInvite(inviteId);
+      setOutbox(prev => prev.filter(i => i.id !== inviteId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke invite');
+    }
+  };
+
+  /** 招待を辞退する */
+  const handleDeclineInvite = async (inviteId: string) => {
+    setError('');
+    try {
+      await teams.declineInvite(inviteId);
+      setInbox(prev => prev.filter(i => i.id !== inviteId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to decline invite');
+    }
+  };
+
+  /** 招待を承認し、選択した（複数の）自分のプロジェクトを公開する */
+  const handleAcceptInvite = async (inviteId: string, projectIds: string[]) => {
+    if (projectIds.length === 0) return;
+    setError('');
+    try {
+      await teams.acceptInvite(inviteId, projectIds);
+      setAcceptingInviteId(null);
+      setAcceptingSelectedIds(new Set());
+      setInbox(prev => prev.filter(i => i.id !== inviteId));
+      await Promise.all([fetchTeams(), fetchCrossTeamData()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to accept invite');
+    }
+  };
+
+  /** 承認ダイアログの開閉（開くときは選択をゼロからリセットする＝誤爆防止） */
+  const toggleAcceptingInvite = (inviteId: string) => {
+    if (acceptingInviteId === inviteId) {
+      setAcceptingInviteId(null);
+      setAcceptingSelectedIds(new Set());
+    } else {
+      setAcceptingInviteId(inviteId);
+      setAcceptingSelectedIds(new Set());
+    }
+  };
+
+  /** 承認ダイアログ内のプロジェクト選択をトグルする */
+  const toggleAcceptingProject = (projectId: string) => {
+    setAcceptingSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
+
+  /** クロスユーザー Team の同意を取り消す（Team オーナー視点: 自分の Team から外す） */
+  const handleRevokeGrant = async (teamId: string, memberId: string) => {
+    setError('');
+    try {
+      await teams.revokeGrant(memberId);
+      setData(prev => prev.map(t =>
+        t.id === teamId
+          ? { ...t, members: t.members.filter(m => m.id !== memberId) }
+          : t
+      ));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke grant');
+    }
+  };
+
+  /**
+   * クロスユーザー Team の公開を停止する（grantee 視点: 自分が公開しているプロジェクトを止める）。
+   * 2026-11-08: 同一プロジェクトを複数チームへ公開しているケースで「相手は以後このプロジェクトに
+   * ask できなくなります」と断言するのは誤り（他チーム経由の grant が生きていれば引き続き ask
+   * できる）。対象チームを明示し、他チームにも公開がある場合だけ残存の注記を出す。
+   */
+  const handleStopSharing = (share: CrossTeamShare) => {
+    const otherTeamsCount = sharedByMe.filter(
+      s => s.projectId === share.projectId && s.teamMemberId !== share.teamMemberId
+    ).length;
+    const message = `チーム「${share.teamName}」への「${share.projectName}」の公開を停止しますか？\n`
+      + `${share.requesterName} さんはこのチーム経由では ask できなくなります。`
+      + (otherTeamsCount > 0 ? '\n（同じプロジェクトを他のチームにも公開しているため、そちらは残ります）' : '');
+    if (!window.confirm(message)) {
+      return;
+    }
+    (async () => {
+      setError('');
+      try {
+        await teams.revokeGrant(share.teamMemberId);
+        setSharedByMe(prev => prev.filter(s => s.teamMemberId !== share.teamMemberId));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to stop sharing');
+      }
+    })();
+  };
+
+  /**
+   * チームを組織に公開する（Team オーナーのみ）。又貸し防止: `team.members` のうち
+   * `crossUser` が付いている行（招待型で他人から借りているプロジェクト）は
+   * サーバー側の `selectPublishableMembers()` が公開対象から除外するため、ここでも
+   * 同じ区分で件数を計算し、確認ダイアログに「何件が公開され、何件が除外されるか」を
+   * 明示する（`cross-team-publish-rules.ts` の `buildPublishConfirmMessage()`）。
+   */
+  const handlePublishTeam = async (team: TeamInfo) => {
+    const publishableCount = team.members.filter(m => !m.crossUser).length;
+    const borrowedCount = team.members.filter(m => m.crossUser).length;
+    const message = buildPublishConfirmMessage({ teamName: team.name, publishableCount, borrowedCount });
+    if (!window.confirm(message)) return;
+    setError('');
+    try {
+      await teams.setVisibility(team.id, 'organization');
+      await fetchTeams();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish team');
+    }
+  };
+
+  /** チームの公開を停止する（Team オーナーのみ）。停止すると全購読者が即座に ask できなくなる */
+  const handleUnpublishTeam = async (team: TeamInfo) => {
+    const message = buildUnpublishConfirmMessage({ teamName: team.name, subscriberCount: team.subscriberCount ?? 0 });
+    if (!window.confirm(message)) return;
+    setError('');
+    try {
+      await teams.setVisibility(team.id, 'private');
+      setSubscribersOpenFor(prev => (prev === team.id ? null : prev));
+      await fetchTeams();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unpublish team');
+    }
+  };
+
+  /** 購読者一覧の開閉（開くときだけ取得する） */
+  const toggleSubscribers = async (teamId: string) => {
+    if (subscribersOpenFor === teamId) {
+      setSubscribersOpenFor(null);
+      return;
+    }
+    setSubscribersOpenFor(teamId);
+    setSubscribersLoading(true);
+    setError('');
+    try {
+      const result = await teams.listSubscribers(teamId);
+      setSubscribers(result.subscribers);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load subscribers');
+    } finally {
+      setSubscribersLoading(false);
+    }
+  };
+
+  /** Team オーナーが特定の購読者を強制的に取り消す */
+  const handleRemoveSubscriber = async (team: TeamInfo, subscriber: TeamSubscriber) => {
+    const message = buildRemoveSubscriberConfirmMessage({ teamName: team.name, subscriberName: subscriber.name });
+    if (!window.confirm(message)) return;
+    setError('');
+    try {
+      await teams.removeSubscriber(team.id, subscriber.userId);
+      setSubscribers(prev => prev.filter(s => s.userId !== subscriber.userId));
+      setData(prev => prev.map(t =>
+        t.id === team.id ? { ...t, subscriberCount: Math.max(0, (t.subscriberCount ?? 1) - 1) } : t
+      ));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove subscriber');
+    }
+  };
+
+  /** 公開中のチームを購読する */
+  const handleSubscribe = async (pt: PublishedTeam) => {
+    setError('');
+    try {
+      await teams.subscribe(pt.teamId);
+      setPublishedTeams(prev => prev.map(x => x.teamId === pt.teamId ? { ...x, subscribed: true } : x));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to subscribe');
+    }
+  };
+
+  /** 購読を解除する（購読者本人視点） */
+  const handleUnsubscribe = async (pt: PublishedTeam) => {
+    const message = buildUnsubscribeConfirmMessage({ teamName: pt.teamName, publisherName: pt.publisherName });
+    if (!window.confirm(message)) return;
+    setError('');
+    try {
+      await teams.unsubscribe(pt.teamId);
+      setPublishedTeams(prev => prev.map(x => x.teamId === pt.teamId ? { ...x, subscribed: false } : x));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unsubscribe');
+    }
+  };
+
+  /**
+   * 招待ピッカーに出す組織メンバー候補（承認待ちの宛先は除外、既に公開済みの相手は
+   * 「追加依頼」として残す）。2026-11-08: 旧実装は既存クロスメンバーの所有者も除外して
+   * おり、サーバー側で解禁した「再招待 = プロジェクト追加」が UI から到達できなかった
+   * バグがあった（`cross-team-invite-rules.ts` 参照）。
+   */
+  const getInvitableCandidates = (team: TeamInfo) => {
+    const crossMemberOwnerIds = team.members
+      .map(m => m.crossUser ? m.ownerUserId : undefined)
+      .filter((id): id is string => !!id);
+    const pendingInviteeIds = outbox
+      .filter(i => i.teamId === team.id && i.status === 'pending')
+      .map(i => i.inviteeUserId);
+    return selectInvitableCandidates({ orgCandidates, crossMemberOwnerIds, pendingInviteeIds });
+  };
 
   /** 指定チームに追加可能なプロジェクト一覧（既存メンバーを除外、マシン別グループ） */
   const getAvailableByMachine = (teamMembers: TeamInfo['members']) => {
@@ -217,6 +507,201 @@ export function TeamPage() {
         </div>
       )}
 
+      {/* クロスユーザー Team（Phase 1: ask のみ）: 受信した招待（DEVRELAY_CROSS_TEAM が OFF なら非表示） */}
+      {/* 文言は「チームへの参加」ではなく「自分のプロジェクトへの質問許可を求められている」ことを
+          明示する（2026-11-08 実機テストで、旧文言が過剰共有の誤解を招くことが判明したため修正）。 */}
+      {crossTeamEnabled && inbox.filter(i => i.status === 'pending').length > 0 && (
+        <div className="bg-[var(--bg-secondary)] rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-[var(--border-color)]">
+            <span className="font-medium text-[var(--text-primary)]">あなたへの招待</span>
+          </div>
+          <div className="divide-y divide-[var(--border-color)]">
+            {inbox.filter(i => i.status === 'pending').map(invite => (
+              <div key={invite.id} className="px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-[var(--text-secondary)]">
+                    <span className="font-medium">{invite.inviterName}</span> さんが、
+                    <span className="font-medium">あなたのプロジェクトへの質問（ask）許可</span>を求めています
+                    <span className="ml-1 text-[var(--text-faint)] text-xs">（チーム「{invite.teamName}」）</span>
+                    <span className="ml-2 text-[var(--text-faint)] text-xs">(ask 権限のみ)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => toggleAcceptingInvite(invite.id)}
+                      className="text-xs px-2 py-1 rounded bg-[var(--accent-blue)] text-white hover:opacity-90 transition-opacity"
+                    >
+                      承認
+                    </button>
+                    <button
+                      onClick={() => handleDeclineInvite(invite.id)}
+                      className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                    >
+                      辞退
+                    </button>
+                  </div>
+                </div>
+                {acceptingInviteId === invite.id && (() => {
+                  // #複数選択対応: このチームに既に公開済みの自分のプロジェクトはピッカーから除外する
+                  // （再招待で「追加分だけ選ぶ」運用のため、重複候補を見せない）
+                  const alreadySharedProjectIds = new Set(
+                    sharedByMe.filter(s => s.teamId === invite.teamId).map(s => s.projectId)
+                  );
+                  const candidates = allMachines.flatMap(m =>
+                    m.projects.filter(p => !alreadySharedProjectIds.has(p.id)).map(p => ({ project: p, machine: m }))
+                  );
+                  return (
+                    <div className="mt-2 pt-2 border-t border-[var(--border-color)]">
+                      <p className="text-xs text-[var(--text-faint)] mb-2">質問を受け付けるプロジェクトを選んでください（複数選択可）:</p>
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {candidates.map(({ project: p, machine: m }) => {
+                          const selected = acceptingSelectedIds.has(p.id);
+                          return (
+                            <button
+                              key={p.id}
+                              onClick={() => toggleAcceptingProject(p.id)}
+                              className={`flex items-center gap-1 text-xs px-2 py-1 rounded border transition-colors ${
+                                selected
+                                  ? 'bg-[var(--accent-blue)]/20 border-[var(--accent-blue)] text-[var(--text-primary)]'
+                                  : 'bg-[var(--bg-tertiary)] border-transparent hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]'
+                              }`}
+                            >
+                              <span className={`w-3 h-3 rounded-sm border flex items-center justify-center text-[8px] ${
+                                selected ? 'bg-[var(--accent-blue)] border-[var(--accent-blue)] text-white' : 'border-[var(--text-faint)]'
+                              }`}>
+                                {selected ? '✓' : ''}
+                              </span>
+                              <span className={`w-1.5 h-1.5 rounded-full ${m.status === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
+                              {p.displayName ?? p.name} <span className="text-[var(--text-faint)]">({m.displayName ?? m.name})</span>
+                            </button>
+                          );
+                        })}
+                        {candidates.length === 0 && (
+                          <span className="text-[var(--text-faint)] text-xs">
+                            {allMachines.every(m => m.projects.length === 0)
+                              ? '質問を受け付けられるプロジェクトがありません'
+                              : 'すべてのプロジェクトを既に公開済みです'}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-amber-500 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1.5 mb-2">
+                        ⚠ 選んだプロジェクトの AI は<span className="font-medium">あなたの契約</span>で実行されます
+                        （相手が質問するたびに、あなたの利用枠を消費します）。
+                        コードの変更はできません（質問への回答のみ）。あとから「公開中のプロジェクト」一覧で取り消せます。
+                      </p>
+                      <button
+                        onClick={() => handleAcceptInvite(invite.id, [...acceptingSelectedIds])}
+                        disabled={acceptingSelectedIds.size === 0}
+                        className="text-xs px-3 py-1.5 rounded bg-[var(--accent-blue)] text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+                      >
+                        選択した{acceptingSelectedIds.size}件を公開して承認
+                      </button>
+                    </div>
+                  );
+                })()}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* クロスユーザー Team: 送信済み招待 */}
+      {crossTeamEnabled && outbox.filter(i => i.status === 'pending').length > 0 && (
+        <div className="bg-[var(--bg-secondary)] rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-[var(--border-color)]">
+            <span className="font-medium text-[var(--text-primary)]">送信済みの招待</span>
+          </div>
+          <div className="divide-y divide-[var(--border-color)]">
+            {outbox.filter(i => i.status === 'pending').map(invite => (
+              <div key={invite.id} className="px-4 py-2 flex items-center justify-between">
+                <div className="text-sm text-[var(--text-secondary)]">
+                  <span className="font-medium">{invite.inviteeName}</span> さんに「{invite.teamName}」へのプロジェクトの公開を依頼中（承認待ち）
+                </div>
+                <button
+                  onClick={() => handleRevokeInvite(invite.id)}
+                  className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                >
+                  取り消す
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* クロスユーザー Team: 自分が公開しているプロジェクト（貸す側視点。公開型の前提条件として追加。
+          2026-11-08 実機テストで「自分の何が誰に公開されているか見る手段がない」ことが判明したため新設） */}
+      {crossTeamEnabled && sharedByMe.length > 0 && (
+        <div className="bg-[var(--bg-secondary)] rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-[var(--border-color)]">
+            <span className="font-medium text-[var(--text-primary)]">公開中のプロジェクト</span>
+            <span className="ml-2 text-[var(--text-faint)] text-xs">（あなたの契約で質問に応答します）</span>
+          </div>
+          <div className="divide-y divide-[var(--border-color)]">
+            {sharedByMe.map(share => (
+              <div key={share.teamMemberId} className="px-4 py-2 flex items-center justify-between">
+                <div className="text-sm text-[var(--text-secondary)]">
+                  <span className="font-medium">{share.projectName}</span>
+                  <span className="text-[var(--text-faint)] text-xs"> ({share.machineName})</span>
+                  <span className="ml-2 text-[var(--text-faint)] text-xs">
+                    — チーム「{share.teamName}」の <span className="font-medium">{share.requesterName}</span> さんが質問できます
+                  </span>
+                  <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-green-900/30 text-green-400">ask</span>
+                  {share.execAllowed && (
+                    <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-red-900/30 text-red-400">exec</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => handleStopSharing(share)}
+                  className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-danger)] transition-colors"
+                >
+                  公開を停止
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 公開型 Team（Phase B）: 組織内で公開されているチーム一覧（自分が所有するチームは含まない） */}
+      {crossTeamPublishEnabled && publishedTeams.length > 0 && (
+        <div className="bg-[var(--bg-secondary)] rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-[var(--border-color)]">
+            <span className="font-medium text-[var(--text-primary)]">組織で公開中のチーム</span>
+            <span className="ml-2 text-[var(--text-faint)] text-xs">（購読すると ask できるようになります）</span>
+          </div>
+          <div className="divide-y divide-[var(--border-color)]">
+            {publishedTeams.map(pt => (
+              <div key={pt.teamId} className="px-4 py-2 flex items-center justify-between">
+                <div className="text-sm text-[var(--text-secondary)]">
+                  <span className="font-medium">{pt.teamName}</span>
+                  <span className="ml-2 text-[var(--text-faint)] text-xs">
+                    {pt.publisherName} さんが公開・{pt.projectCount} 件
+                  </span>
+                </div>
+                {pt.subscribed ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-900/30 text-green-400">購読中</span>
+                    <button
+                      onClick={() => handleUnsubscribe(pt)}
+                      className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                    >
+                      購読を解除
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => handleSubscribe(pt)}
+                    className="text-xs px-2 py-1 rounded bg-[var(--accent-blue)] text-white hover:opacity-90 transition-opacity"
+                  >
+                    購読する
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* チーム一覧 */}
       {data.length === 0 ? (
         <div className="bg-[var(--bg-secondary)] rounded-lg p-6 text-center">
@@ -244,6 +729,34 @@ export function TeamPage() {
                   >
                     + Add
                   </button>
+                  {crossTeamEnabled && (
+                    <button
+                      onClick={() => setInvitingTo(invitingTo === t.id ? null : t.id)}
+                      className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                      title="別ユーザーのプロジェクトを招待する"
+                    >
+                      + Invite
+                    </button>
+                  )}
+                  {crossTeamPublishEnabled && (
+                    describePublishState({ visibility: t.visibility, subscriberCount: t.subscriberCount }).published ? (
+                      <button
+                        onClick={() => toggleSubscribers(t.id)}
+                        className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                        title="購読者一覧を表示 / 公開を停止"
+                      >
+                        {describePublishState({ visibility: t.visibility, subscriberCount: t.subscriberCount }).label}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handlePublishTeam(t)}
+                        className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                        title="組織に公開する"
+                      >
+                        🔒 非公開
+                      </button>
+                    )
+                  )}
                   <button
                     onClick={() => handleDeleteTeam(t.id)}
                     className="text-[var(--text-faint)] hover:text-[var(--text-danger)] transition-colors"
@@ -296,6 +809,68 @@ export function TeamPage() {
                 </div>
               )}
 
+              {/* 招待ダイアログ（クロスユーザー Team） */}
+              {invitingTo === t.id && (() => {
+                const candidates = getInvitableCandidates(t);
+                return (
+                  <div className="px-4 py-2 border-b border-[var(--border-color)] bg-[var(--bg-tertiary)]/50">
+                    <p className="text-xs text-[var(--text-faint)] mb-2">同じ組織のメンバーを招待します（承認されると ask で質問できるようになります。既に公開済みの相手は追加のプロジェクトを依頼できます）:</p>
+                    <div className="flex flex-wrap gap-1">
+                      {candidates.map(c => (
+                        <button
+                          key={c.userId}
+                          onClick={() => handleInvite(t.id, c.userId)}
+                          className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                        >
+                          {c.name}{c.email ? <span className="text-[var(--text-faint)]"> ({c.email})</span> : null}
+                          {c.alreadyContributing && (
+                            <span className="text-[var(--text-faint)]">（追加依頼）</span>
+                          )}
+                        </button>
+                      ))}
+                      {candidates.length === 0 && (
+                        <span className="text-[var(--text-faint)] text-xs">
+                          {orgCandidates.length === 0
+                            ? '同じ組織に他のメンバーがいません'
+                            : '全員に依頼済みです（承認待ち）'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* 購読者一覧（公開型 Team、Team オーナー視点。「🌐 公開中」ボタンから展開） */}
+              {subscribersOpenFor === t.id && (
+                <div className="px-4 py-2 border-b border-[var(--border-color)] bg-[var(--bg-tertiary)]/50">
+                  <p className="text-xs text-[var(--text-faint)] mb-2">
+                    購読者{subscribersLoading ? '（読み込み中...）' : ` (${subscribers.length})`}:
+                  </p>
+                  <div className="space-y-1 mb-2">
+                    {subscribers.map(s => (
+                      <div key={s.userId} className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
+                        <span>{s.name}</span>
+                        <button
+                          onClick={() => handleRemoveSubscriber(t, s)}
+                          className="text-[var(--text-faint)] hover:text-[var(--text-danger)] transition-colors"
+                        >
+                          取り消す
+                        </button>
+                      </div>
+                    ))}
+                    {!subscribersLoading && subscribers.length === 0 && (
+                      <span className="text-[var(--text-faint)] text-xs">まだ購読者はいません</span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleUnpublishTeam(t)}
+                    className="text-xs px-3 py-1.5 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--bg-hover)] text-[var(--text-danger)] transition-colors"
+                  >
+                    公開を停止
+                  </button>
+                </div>
+              )}
+
               {/* メンバーリスト */}
               {t.members.length === 0 ? (
                 <div className="px-4 py-3 text-[var(--text-faint)] text-sm">No members</div>
@@ -309,7 +884,7 @@ export function TeamPage() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span className={`w-1.5 h-1.5 rounded-full ${member.machineStatus === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
-                          {renamingProjectId === member.projectId ? (
+                          {!member.crossUser && renamingProjectId === member.projectId ? (
                             <input
                               ref={renameInputRef}
                               className="text-[var(--text-secondary)] text-sm bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded px-1 py-0.5 w-40 outline-none focus:border-blue-400"
@@ -322,6 +897,8 @@ export function TeamPage() {
                               onBlur={() => handleConfirmRename(member.projectId)}
                               placeholder="表示名（空で元の名前に戻す）"
                             />
+                          ) : member.crossUser ? (
+                            <span className="text-[var(--text-secondary)] text-sm">{member.projectName}</span>
                           ) : (
                             <span
                               className="text-[var(--text-secondary)] text-sm cursor-pointer hover:text-blue-400 transition-colors"
@@ -332,14 +909,24 @@ export function TeamPage() {
                             </span>
                           )}
                           <span className="text-[var(--text-faint)] text-xs">({member.machineName})</span>
+                          {member.crossUser && (
+                            <>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-faint)]">
+                                外部: {member.ownerName}
+                              </span>
+                              {member.askAllowed && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-900/30 text-green-400">ask</span>
+                              )}
+                            </>
+                          )}
                           {askingProjectIds.has(member.projectId) && (
                             <span className="text-[var(--text-faint)] text-xs animate-pulse">取得中...</span>
                           )}
                         </div>
                         <button
-                          onClick={() => handleRemoveMember(t.id, member.id)}
+                          onClick={() => member.crossUser ? handleRevokeGrant(t.id, member.id) : handleRemoveMember(t.id, member.id)}
                           className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
-                          title="Remove member"
+                          title={member.crossUser ? 'クロスユーザーの同意を取り消す' : 'Remove member'}
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

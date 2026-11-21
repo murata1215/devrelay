@@ -116,12 +116,24 @@ export const AI_MODEL_CATALOG: Record<ModelSelectableAiTool, ModelOption[]> = {
     { id: 'gpt-5.4', name: 'GPT-5.4', description: '旧世代・日常コーディング' },
     { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', description: '旧世代・小型高速' },
   ],
+  // 2026-10-27: gemini-user 機体の 404 調査（`Unknown arguments: approval-mode` 根治サイクルの続き）で
+  // 旧カタログ6件を母艦（gemini-cli 0.65.0、`gemini --skip-trust --approval-mode plan -m <id> -p "..."`
+  // で API v1beta に対して実測）にかけたところ、2件が全ユーザー・全マシンで hard 404 と判明:
+  //   - `gemini-3.1-pro`（旧カタログ先頭＝最も選ばれやすかった）→ 正しい ID は `gemini-3.1-pro-preview`
+  //     （`-preview` サフィックス必須。pro 系はこのサフィックスが無いと存在しない）
+  //   - `gemini-2.5-pro` → Google 側で提供終了済み（CLI バージョンに関係なく 404。#309 でも
+  //     「残置する」慣習にしていた codex と異なり、サーバー側廃止は CLI を更新しても直らないため
+  //     本件は例外として削除する）
+  // 同時にカタログ外だった `gemini-3.8-flash`（現行世代）・`gemini-3.5-flash-lite` も有効と確認したため追加。
+  // `gemini-3.1-pro` は #309 実装時に実機未検証のまま入った ID だった（`constants.ts` 冒頭 JSDoc が
+  // 警告する「実機で試してから追加」の罠の3度目）。
   gemini: [
-    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', description: '最新フラッグシップ' },
-    { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', description: '高速（最新）' },
-    { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', description: '高速' },
-    { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite', description: '軽量・低コスト' },
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: '旧世代・実績重視' },
+    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', description: '最新フラッグシップ（pro 系で唯一有効、-preview 必須）' },
+    { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: '高速（現行世代）' },
+    { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', description: '高速' },
+    { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', description: '高速（旧世代）' },
+    { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite', description: '軽量・低コスト' },
+    { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite', description: '軽量・低コスト（旧世代）' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: '旧世代・高速' },
   ],
   // Devin モデルカタログ更新サイクル（2026-09-28）: devin 3000.6.14 実機で
@@ -280,7 +292,12 @@ export const DEFAULT_ALLOWED_TOOLS_LINUX: string[] = [
  * #332: plan モードの strictReadonly ポリシー時に Bash 以外で常時許可するツール名。
  * 判断基準: 「読み取り専用か判断に迷うものは deny ではなく allow 側に倒す」（人間承認時の追記）。
  * - Read/Glob/Grep/NotebookRead: ファイル読み取り専用
- * - Task: サブエージェント起動（内部ツール呼び出しは親の canUseTool を経由する前提。実機 E2E で要確認）
+ * - Task: サブエージェント起動（内部ツール呼び出しは親の canUseTool を経由する前提）。
+ * - Agent: サイクルS1（2026-11-12）で追加。SDK 0.3 系（Claude Code 2.1.282 系）はサブエージェント
+ *   起動ツールの名称を `Task` から `Agent` に変更している（稼働ログ実測 `Using tool: Agent`）。
+ *   サブエージェント発のツール呼び出しも同一の `canUseTool`/PreToolUse フックに `agentID` 付きで
+ *   ルーティングされる（SDK 型定義 `CanUseTool.agentID?`・PreToolUse hook input の `agent_id` で確認）
+ *   ため、ツール起動自体を deny 側に倒す必要はない。`Task` は旧 SDK 互換のため残す。
  * - ToolSearch/TaskOutput/TaskStop: 前サイクルの調査ログで実使用を確認済みの読み取り/制御系ツール
  *   （TaskStop は実行中タスクの停止で書き込みではないため allow 側）
  * - TodoWrite: ファイル書き込みではなくセッション内タスクリストの更新のみのため allow 側
@@ -293,6 +310,7 @@ export const PLAN_READONLY_TOOLS: string[] = [
   'Grep',
   'NotebookRead',
   'Task',
+  'Agent',
   'ToolSearch',
   'TaskOutput',
   'TaskStop',
@@ -487,10 +505,12 @@ export const DEFAULTS = {
   websocketPingInterval: 30000,
   websocketReconnectDelay: 5000,
   // 再接続設定（baseDelay × 2^attempts でバックオフ、maxDelay で上限）
+  // 2026-11-14: maxAttempts（旧: 30回で打ち切り）は撤廃した。打ち切ると process.exit もせず
+  // プロセスが生きたまま永久に沈黙し、systemd/crontab の自動復旧も効かない事故があったため、
+  // 無期限リトライ + maxDelay による遅延上限のみにする（詳細 doc/devlog/ 参照）。
   reconnect: {
     baseDelay: 2000,      // 初回遅延: 2秒
     maxDelay: 30000,      // 最大遅延: 30秒
-    maxAttempts: 30,      // 最大試行回数
     jitterRange: 1000,    // 0-1秒のランダムジッター（複数 Agent の同時再接続を分散）
   },
   /** 接続がこの時間以上安定していたら reconnectAttempts をリセット（ミリ秒） */

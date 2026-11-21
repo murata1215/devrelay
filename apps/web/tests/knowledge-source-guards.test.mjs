@@ -259,16 +259,35 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // renderMarkdown 出現数（DocPanel 専用、チャット本文とは別経路）・components/lite/* のファイル数も
 // いずれも本サイクルで無変更のため据え置き。
 //
+// クロスユーザー Team Phase C（購読/借用プロジェクトを Agents ツリーに出し質問専用タブとして
+// 開く機能、2026-11-10）で ChatPage.tsx に大きく手を入れたため、行数ピンを実測値
+// （3911 → 4190）に更新した。LitePage.tsx・renderMarkdown 出現数・components/lite/* は
+// 本サイクルでも無変更のため据え置き。
+//
+// クロスタブ会話の区切り可視化サイクル（2026-11-16）で、クロス ask の記憶状態バナー・
+// 「新しい会話を始める」ボタン・世代の区切り線を ChatPage.tsx に追加したため、行数ピンを
+// 実測値（4190 → 4262。`countLines()` は split('\n').length なので末尾改行込みで wc -l + 1）
+// に更新した。LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも
+// 無変更のため据え置き。
+//
+// alt+tab 復帰時のスクロール位置保持サイクル（2026-11-17）で、`apps/web/src/lib/chat-scroll-rules.ts`
+// を新設し、`loadHistory`/`handleReconnect`/visibilitychange ハンドラ/`handleScroll` を
+// ChatPage.tsx 側で配線したため、行数ピンを実測値（4262 → 4365）に更新した。
+// LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも無変更のため据え置き。
+//
 // Usage 案件必須サイクル（2026-11-19）で、ChatPage.tsx / LitePage.tsx の入力欄の上に案件欄（CaseTagBar）と
 // 「案件が空なら AI プロンプトを止める」判定を追加したため、両方の行数ピンを実測値に更新した
 // （ChatPage 3911 → 3938、LitePage 682 → 713。renderMarkdown 出現数は無変更のため据え置き）。
 //
 // メッセージ時刻の日付表示サイクル（2026-11-19）で、ChatPage.tsx のメッセージ横の時刻を
 // `formatMessageTime()`（今日以外は日付付き）に差し替えたため、ChatPage の行数ピンのみ実測値（3938 → 3941）に更新した。
+//
+// 本家（origin）とのマージ（2026-11-21）で、本家側（4365 行）と会社側の追加（案件欄・日付表示 +30 行）が
+// 合わさり、さらにクロスタブでは案件欄を出さない分岐を足したため、ChatPage の行数ピンを実測値（4396）に更新した。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 3941, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4396, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

@@ -10,8 +10,9 @@
 --   5. 列          KnowledgeChunk.embedding vector(1536)
 --   6. 索引        idx_knowledgechunk_embedding (hnsw, vector_cosine_ops, m=16, ef_construction=64)
 --
--- 実行方法: `pnpm db:bootstrap`（package.json の db:bootstrap スクリプトが
--- `prisma db push` → 本ファイルの適用 → を行う）。
+-- 実行方法: `pnpm db:bootstrap:new-db-only`（package.json の db:bootstrap:new-db-only スクリプトが
+-- `prisma db push` → 本ファイルの適用 → を行う。サイクルM1 で `db:bootstrap` から改名
+-- ＝新規 DB 構築専用であることを名前で明示した）。
 -- 前提条件: `CREATE EXTENSION vector` は superuser 権限が必要。
 -- 社内で既存 PostgreSQL インスタンスに相乗りする場合、DB 作成後にまず DBA へ本ファイルの
 -- 冒頭（拡張作成）だけ先に依頼するか、DevRelay 専用ロールに一時的に superuser を付与して
@@ -20,12 +21,13 @@
 -- 冪等性: 本ファイルは既存本番 DB に対して再実行しても差分ゼロであること（検証済み）。
 -- AgentDocument.embedding には現行本番と同じくインデックスを追加しない（非対称のまま揃える）。
 --
--- ⚠️ 稼働中 DB への注意（高辻ナレッジ サイクル1 で実証）: `pnpm db:bootstrap` は内部で
+-- ⚠️ 稼働中 DB への注意（高辻ナレッジ サイクル1 で実証）: `pnpm db:bootstrap:new-db-only` は内部で
 -- `prisma db push` を実行する。これは schema.prisma に書けない `embedding` 列（Prisma 非対応型）
 -- を「スキーマに無い列」と見なして **DROP COLUMN する**（`prisma migrate diff` で実証済み）。
--- 既に稼働している DB に対して本ファイルの 2〜6 を追加・変更する場合は、`pnpm db:bootstrap`
+-- 既に稼働している DB に対して本ファイルの 2〜6 を追加・変更する場合は、`pnpm db:bootstrap:new-db-only`
 -- （`prisma db push` 経由）ではなく `npx prisma db execute --stdin` で本ファイルの該当セクションだけ
--- 直接適用すること（`db:bootstrap` は新規 DB 構築専用）。
+-- 直接適用すること（新規 DB 構築専用。`db:push` は package.json から削除済み、本体の DB 変更は
+-- `apps/server/db/changes/` を参照。詳細: `doc/db-changes.md`）。
 
 -- 1. pgvector 拡張の有効化（DB 単位。サーバーに pgvector が入っていても DB ごとに必要）
 CREATE EXTENSION IF NOT EXISTS vector;

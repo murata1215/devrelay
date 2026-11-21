@@ -41,12 +41,24 @@ export interface PushMetrics {
   since: string;
 }
 
+/**
+ * `GET /api/push/fcm/devices` の `lastError` フィールド（2026-11-02: iPhone SE3 無音故障の
+ * 再発防止で追加）。トークン削除・配信先0件スキップ時に DB（Notification）へ永続化された
+ * 直近1件。サーバー再起動後も確認できる（`metrics` はプロセス寿命のみ）。
+ */
+export interface PushLastError {
+  title: string;
+  body: string;
+  createdAt: string;
+}
+
 /** `GET /api/push/fcm/devices` のレスポンス全体 */
 export interface PushDevicesResponse {
   enabled: boolean;
   health: PushHealth;
   devices: PushDevice[];
   metrics: PushMetrics;
+  lastError: PushLastError | null;
 }
 
 /** `POST /api/push/fcm/test` の端末ごとの結果 */

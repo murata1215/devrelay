@@ -1,0 +1,7 @@
+# TISA（会社リポジトリ独自）の DB 変更の索引。本家の ../INDEX.tsv と同じ 6 列・同じ規則（append-only）。
+# 本家の 4 桁連番とは共有しない。ファイル名は TISA<4桁>_snake_case.sql、no 列はその 4 桁（DbChange.no にも同じ値）。
+# 台帳 "DbChange" の主キーはファイル名なので、本家の同じ番号（0001 等）とは衝突しない。
+# 運用は doc/db-changes-tisa.md 参照。
+#no	date	commit	file	summary	ref
+0001	2026-10-31	87af6a0	TISA0001_session_handover.sql	Session に handover* 6 列を追加（スレッド引継ぎ n）	doc/thread-management-spec.md
+0002	2026-11-19	d158f8f	TISA0002_usage_cost_aggregation.sql	Organization.usageSignageToken + Session.usageCase + CREATE TABLE UserUsageGroup（Usage）	doc/migrations/usage_cost_aggregation.md

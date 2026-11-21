@@ -3,8 +3,9 @@ import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue } from '@devrelay/shared';
-import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
+import crypto from 'crypto';
+import { isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue, parseGeminiCapabilities, buildGeminiApprovalArgs, GEMINI_CAPABILITIES_NONE, detectGeminiModelUnavailable, buildGeminiSessionArgs, resolveGeminiAiSessionId, classifyGeminiSessionFailure } from '@devrelay/shared';
+import type { AiTool, AiUsageData, Language, GeminiCapabilities, GeminiDegradeReason, GeminiSessionDegradeReason } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { saveClaudeSessionId, saveContextUsage, loadDevinSessionId, saveDevinSessionId, clearDevinSessionId, loadDevinModel, saveDevinModel, clearDevinModel, loadDevinAtifStepOffset, loadDevinAtifUsageOffset, saveDevinAtifStepOffset, clearDevinAtifStepOffset, loadDevinPermissionMode, saveDevinPermissionMode, clearDevinPermissionMode, loadCodexSessionId, saveCodexSessionId, clearCodexSessionId, listDevinSessionOwners } from './session-store.js';
@@ -14,6 +15,7 @@ import { buildAtifDigest, resolveAtifTurnUsage, summarizeAtifEntry, endedWithout
 import { isNoisyChangedPath, DEFAULT_FILE_WATCH_NOTICE_LIMIT } from './devin-file-watch.js';
 import { parseDevinSessionList, pickDevinSessionId, type DevinSessionEntry } from './devin-session-pick.js';
 import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
+import type { ResumeSource } from './resume-priority.js';
 import log from './logger.js';
 
 interface AiSession {
@@ -74,9 +76,18 @@ function probeCodexCapabilities(command: string): { json: boolean; resume: boole
 // #309: Gemini CLI / Devin CLI の `--model` フラグ対応可否キャッシュ（plan/exec モデル分離用）。
 // 2026-10-26: exec ターンでシェル実行を自動承認するための `--approval-mode`（choices に yolo を含むか）/
 // `--yolo` 対応可否もここに追加。
-let geminiCapabilitiesCache: { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } | null = null;
-// Gemini exec ターンで yolo 系フラグが渡せなかった場合の警告をプロセス寿命中 1 回だけ出すためのラッチ
-let geminiYoloDegradedWarned = false;
+// 2026-10-27: 判定本体は `@devrelay/shared` の `parseGeminiCapabilities()`（純粋関数）に委譲。
+// ここでは probe 結果のキャッシュのみ保持する。
+let geminiCapabilitiesCache: GeminiCapabilities | null = null;
+// `gemini --help` 自体の実行に失敗したかどうか（all-false キャッシュと区別して警告文言を切り替えるため）
+let geminiProbeFailed = false;
+// Gemini で劣化が起きた場合の警告をプロセス寿命中 1 回だけ出すためのラッチ（理由ごと）
+const geminiDegradeWarned = new Set<GeminiDegradeReason>();
+// 2026-10-27 サイクル2: probe 時に取得した `gemini --version` の結果をモジュール変数に保持する。
+// `gemini.sessionIdUnsupported` 等の警告文言に実バージョンを埋め込むために使う。
+let geminiVersionCache = 'unknown';
+// セッション関連（--session-id / --resume）の劣化警告をプロセス寿命中 1 回だけ出すためのラッチ
+const geminiSessionDegradeWarned = new Set<GeminiSessionDegradeReason>();
 
 // #344: `ok:false`（probe 失敗）の場合は全フラグ true と楽観的に仮定して cache する（理由は関数 JSDoc 参照）。
 // 楽観キャッシュは TTL 付き（devinCapabilitiesFailedAt と併用）で、devin が後から PATH に現れても
@@ -167,24 +178,32 @@ function isDevinSessionPickLegacy(): boolean {
 }
 
 /**
- * Gemini CLI が `-m/--model`・`--approval-mode`（yolo choice 付き）・`--yolo` フラグに
- * 対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
- * 失敗時は全て false に倒し、CLI デフォルト（auto_edit 相当）へ劣化させる。
+ * Gemini CLI が `-m/--model`・`--approval-mode`（auto_edit/yolo choice 付き）・`--yolo` フラグに
+ * 対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。判定本体は
+ * `@devrelay/shared` の `parseGeminiCapabilities()`（純粋関数、テスト済み）に委譲する。
+ * 失敗時は全て false に倒す。2026-10-27: 旧版は未検証フラグを渡して全滅する方が悪いため、
+ * 「それでも --approval-mode auto_edit を渡す」という従来の楽観フォールバックは廃止した
+ * （`buildGeminiApprovalArgs()` 側がフラグ無し起動に倒す）。
  * @param command gemini コマンドのフルパス
- * @returns `{ model, approvalModeYolo, yoloFlag }` 対応可否
+ * @returns 対応可否（`GeminiCapabilities`）
  */
-function probeGeminiCapabilities(command: string): { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } {
+function probeGeminiCapabilities(command: string): GeminiCapabilities {
   if (geminiCapabilitiesCache !== null) return geminiCapabilitiesCache;
   try {
     const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
-    const model = /-m,?\s*--model\b|--model\b/.test(help);
-    const approvalModeYolo = /--approval-mode\b/.test(help) && /"?yolo"?/.test(help);
-    const yoloFlag = /-y,?\s*--yolo\b|--yolo\b/.test(help);
-    geminiCapabilitiesCache = { model, approvalModeYolo, yoloFlag };
-    log.info(`[gemini] capabilities: --model=${model} --approval-mode(yolo)=${approvalModeYolo} --yolo=${yoloFlag}`);
+    geminiCapabilitiesCache = parseGeminiCapabilities(help);
+    // 「どの版か」が切り分けの第一手になるよう、version も 1 回だけ取得してログに残す（probe 失敗は無視）。
+    // 2026-10-27 サイクル2: モジュール変数にも保持し、gemini.sessionIdUnsupported 等の警告文言に
+    // 実バージョンを埋め込めるようにする。
+    try {
+      geminiVersionCache = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000 }).trim();
+    } catch { /* バージョン取得失敗は致命的ではないため無視 */ }
+    const c = geminiCapabilitiesCache;
+    log.info(`[gemini] version=${geminiVersionCache} capabilities: --model=${c.model} --approval-mode=${c.approvalMode}(auto_edit=${c.approvalModeAutoEdit},yolo=${c.approvalModeYolo}) --yolo=${c.yoloFlag} --session-id=${c.sessionId} --resume=${c.resume}`);
   } catch (err) {
-    geminiCapabilitiesCache = { model: false, approvalModeYolo: false, yoloFlag: false };
-    log.warn(`[gemini] --help probe failed, disabling --model/--approval-mode(yolo)/--yolo: ${(err as Error).message}`);
+    geminiCapabilitiesCache = GEMINI_CAPABILITIES_NONE;
+    geminiProbeFailed = true;
+    log.warn(`[gemini] --help probe failed, disabling all approval-mode/model flags: ${(err as Error).message}`);
   }
   return geminiCapabilitiesCache;
 }
@@ -504,6 +523,12 @@ export async function startAiSession(
 export interface SendPromptOptions {
   /** Claude session ID to resume (from previous execution) */
   resumeSessionId?: string;
+  /**
+   * 2026-10-27 サイクル2（plan→exec resume）: `resumeSessionId` の出所（`decideResume()` の判定結果）。
+   * gemini 分岐は `resumeSource === 'explicit'`（= サーバーが approve_implementation 等で明示指定した ID）
+   * のときのみ `--resume` に使う。claude/codex/devin には影響しない（既存の `resumeSessionId` 読み取りのまま）。
+   */
+  resumeSource?: ResumeSource;
   /** Use plan mode (--permission-mode plan) instead of skip-permissions */
   usePlanMode?: boolean;
   /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
@@ -514,10 +539,17 @@ export interface SendPromptOptions {
    */
   devinDroppedFlags?: string[];
   /**
+   * 2026-10-27 Phase 2: 「Unknown arguments」で拒否された Gemini CLI フラグ名のリスト
+   * （`--approval-mode` / `--yolo`。2026-10-27 サイクル2で `--session-id` / `--resume` も同じリストに
+   * 追加するようになった）。#329 の devinDroppedFlags と同じ仕組みで、probe の誤判定時にも
+   * 自動リトライで復旧できるようにする（上限2個、承認モード系・セッション系合わせて共通の枠）。
+   */
+  geminiDroppedFlags?: string[];
+  /**
    * AI モデル指定（#309: claude/codex/gemini/devin 共通）。`l` コマンド／Settings で設定される。
    * claude: `--model` で渡す（例: 'sonnet', 'opus'）
    * codex: `-c model="..."` で渡す（例: 'gpt-5.5'）
-   * gemini: `-m` で渡す（例: 'gemini-3.1-pro'）
+   * gemini: `-m` で渡す（例: 'gemini-3.1-pro-preview'。pro 系は -preview サフィックス必須、2026-10-27 実測）
    * devin: `--model` で渡す（fuzzy 名可、例: 'opus'）
    * 未指定なら各 CLI のデフォルト
    */
@@ -539,8 +571,18 @@ export interface SendPromptOptions {
    * #348: projectPath 上の永続状態（claude-session-id / context-usage）を書き込むかどうか。
    * 既定 true（従来どおり）。一時セッション（ask-member/teamexec-member/askDesc）は
    * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
+   * サイクルG（G-5）: Codex/Devin のセッション ID・モデル・ATIF オフセット・パーミッションモードの
+   * 保存・削除も本フィールドでガードする（従来は未ガードで、一時セッションが所有者の
+   * Codex/Devin 状態を上書き・削除していた既存バグ）。
    */
   persistProjectState?: boolean;
+  /**
+   * サイクルG（G-5b）: Codex/Devin のセッション ID 等の**読み出し**を許可するか。
+   * 既定 true（従来どおり。未指定時は `options.projectStateRead !== false` で判定するため
+   * 既存の呼び出し元は変更不要）。isolated（クロスユーザー ask）のときだけ false になり、
+   * 所有者の Codex/Devin 会話を resume して覗けないようにする。
+   */
+  projectStateRead?: boolean;
   /**
    * core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を
    * セッションストア／会話履歴ストアの読み書き先として使う（対話経路は未指定のまま = 従来どおり）。
@@ -670,6 +712,12 @@ export async function sendPromptToAi(
   let codexTurnFailed = false;
   let codexTurnFailedMessage = '';
 
+  // 2026-10-27 サイクル2（plan→exec resume）: Gemini CLI 用のセッション状態（close ハンドラから参照する）。
+  // このターンで実際に `--session-id` / `--resume` に渡した ID を保持し、close ハンドラで
+  // `resolveGeminiAiSessionId()` に渡して `result.extractedSessionId` を確定する。
+  let geminiSessionIdUsed: string | undefined;
+  let geminiResumedSessionId: string | undefined;
+
   // ---- 今サイクル: ターン終了の単一関門 + kill エスカレーション状態 ----
   // 孫プロセス（Gradle/Kotlin デーモン等）がパイプを握ったまま devin.exe が終了すると
   // 'close' が永久に来ず、ターンが確定しない（実測: 92分ハング）。'exit' を独立に観測し、
@@ -766,26 +814,67 @@ export async function sendPromptToAi(
     // 2026-10-26: exec ターンのみシェル実行を自動承認する（従来は plan/exec とも auto_edit 固定で、
     // 非対話起動では run_shell_command の確認プロンプトに誰も答えられず exec が機能していなかった）。
     // キルスイッチ DEVRELAY_GEMINI_YOLO=0 で従来挙動（常に auto_edit）に戻せる。
+    // 2026-10-27: 承認モード関連 argv の決定自体は `buildGeminiApprovalArgs()`（純粋関数、テスト済み）に
+    // 委譲する。plan ターンでも probe 結果を必ず見るようになった点が今回の修正（事故ケースの根治）。
     const geminiYoloEnabled = process.env.DEVRELAY_GEMINI_YOLO !== '0';
-    const wantYolo = !options.usePlanMode && geminiYoloEnabled;
-    let args: string[];
-    if (wantYolo && geminiCaps.approvalModeYolo) {
-      args = ['--approval-mode', 'yolo'];
-    } else if (wantYolo && geminiCaps.yoloFlag) {
-      args = ['--yolo']; // --approval-mode 非対応の旧 CLI 向けフォールバック
-    } else {
-      args = ['--approval-mode', 'auto_edit']; // plan ターン、または yolo 系フラグに非対応の旧 CLI
-      if (wantYolo && !geminiYoloDegradedWarned) {
-        // #325 静かなフォールバック禁止: exec なのに yolo 化できなかった場合は 1 回だけ知らせる
-        geminiYoloDegradedWarned = true;
-        onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'gemini.yoloUnsupported')}\n`, false);
+    const { args: approvalArgs, degraded } = buildGeminiApprovalArgs(geminiCaps, {
+      usePlanMode: !!options.usePlanMode,
+      yoloEnabled: geminiYoloEnabled,
+      droppedFlags: options.geminiDroppedFlags,
+    });
+    const args: string[] = [...approvalArgs];
+    // #325 静かなフォールバック禁止: 希望どおりに動けなかった場合は理由ごとに 1 回だけ知らせる
+    if (degraded !== 'none' && !geminiDegradeWarned.has(degraded)) {
+      geminiDegradeWarned.add(degraded);
+      const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+      if (degraded === 'execAutoEdit') {
+        onOutput(`${tChat(lang, 'gemini.yoloUnsupported')}\n`, false);
+      } else if (degraded === 'execNoFlag' || degraded === 'planNoFlag') {
+        // probe 自体が失敗していた場合は原因が異なるため文言を分ける
+        onOutput(`${tChat(lang, geminiProbeFailed ? 'gemini.probeFailed' : 'gemini.approvalModeUnsupported')}\n`, false);
       }
+      // 'execYoloFlag'（旧 --yolo へのフォールバック）は正常劣化のため警告しない
     }
     // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
     const geminiModel = safeModelArg(options.model);
     if (geminiModel && geminiCaps.model) {
       args.push('-m', geminiModel);
     }
+
+    // 2026-10-27 サイクル2（plan→exec resume）: `--resume` / `--session-id` の argv を決定する。
+    // D1: 新規セッション採番は MCP plan ターン（`options.turnId` がある場合）のみ行う。
+    //   → chat ターン（turnId 無し）は argv が従来と 1 バイトも変わらない。
+    // D2: resume は `options.resumeSource === 'explicit'`（サーバーが approve_implementation 等で
+    //   明示指定した ID）のときのみ使う。`'stored'`（チャット前ターンの保存 ID）まで使うと、
+    //   同一チャットで claude → gemini とツールを切り替えた場合に別ツールの ID を渡してしまい exit 42 になる。
+    const geminiSessionEnabled = process.env.DEVRELAY_GEMINI_SESSION_ID !== '0';
+    const geminiExplicitResume = (geminiSessionEnabled && options.resumeSource === 'explicit')
+      ? options.resumeSessionId : undefined;
+    // リトライのたびに採り直すため、ここで randomUUID する（options 経由で持ち回さない。
+    // 同じ ID を再 spawn で使い回すと「Session ID ... already exists」で exit 42 になる）。
+    const geminiNewSessionId = (geminiSessionEnabled && !geminiExplicitResume && options.turnId)
+      ? crypto.randomUUID() : undefined;
+    const geminiSessionResult = buildGeminiSessionArgs({
+      caps: geminiCaps,
+      resumeSessionId: geminiExplicitResume,
+      newSessionId: geminiNewSessionId,
+      droppedFlags: options.geminiDroppedFlags,
+    });
+    args.push(...geminiSessionResult.args);
+    geminiSessionIdUsed = geminiSessionResult.sessionId;
+    geminiResumedSessionId = geminiSessionResult.resumeId;
+    // #325 静かなフォールバック禁止: 希望どおりに動けなかった場合は理由ごとに 1 回だけ知らせる
+    if (geminiSessionResult.degraded !== 'none' && !geminiSessionDegradeWarned.has(geminiSessionResult.degraded)) {
+      geminiSessionDegradeWarned.add(geminiSessionResult.degraded);
+      const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+      if (geminiSessionResult.degraded === 'sessionIdUnsupported') {
+        onOutput(`${tChat(lang, 'gemini.sessionIdUnsupported', { version: geminiVersionCache })}\n`, false);
+      } else if (geminiSessionResult.degraded === 'resumeUnsupported') {
+        onOutput(`${tChat(lang, 'gemini.resumeUnsupported', { version: geminiVersionCache })}\n`, false);
+      }
+      // 'invalidId'（UUID 形式でない）は通常到達しない防御的分岐のため警告しない
+    }
+
     log.info(`Running: ${command} ${args.join(' ')} (prompt via stdin)`);
 
     // Extract directory from gemini command path and add to PATH
@@ -811,6 +900,16 @@ export async function sendPromptToAi(
       }
     }
 
+    // 2026-10-27: 未信頼ディレクトリでは Gemini CLI が承認モードを問答無用で `default` に落とす
+    // （plan は exit 55 で即死、exec は `--approval-mode yolo` を渡しても黙って降格され
+    // run_shell_command が誰も答えられない確認待ちになる＝2026-10-26 サイクルが無効化される）。
+    // DevRelay はユーザーが明示的に接続したマシン・プロジェクトで非対話実行するため、workspace trust
+    // プロンプトに答えられる人間がそもそもおらず、付与しても安全性は下がらない（Devin の
+    // `--respect-workspace-trust false`、#345 と同じ判断）。Gemini 公式が headless/automated 環境向けに
+    // 文書化している環境変数を使う（`--skip-trust` フラグだと旧 CLI で Unknown arguments になりうるため
+    // 避ける。未知の環境変数は CLI 側が黙って無視するだけで安全）。
+    const geminiTrustWorkspace = process.env.DEVRELAY_GEMINI_TRUST_WORKSPACE !== '0';
+
     proc = spawn(command, args, {
       cwd: projectPath,
       shell: true,  // Windows needs shell: true for .cmd files
@@ -819,6 +918,7 @@ export async function sendPromptToAi(
         ...process.env,
         ...geminiProxyEnv,
         PATH: envPath,  // Add gemini's directory to PATH so node can be found
+        ...(geminiTrustWorkspace ? { GEMINI_CLI_TRUST_WORKSPACE: 'true' } : {}),
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
@@ -855,8 +955,13 @@ export async function sendPromptToAi(
     // ATIF 読み取り時にこれを渡し「今回のターンで新たに実行されたステップ」だけに絞り込む。
     // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
     // offset<=0 は全件返しにフォールバックする二重防御）。
-    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0;
-    devinAtifUsageOffsetAtStart = await loadDevinAtifUsageOffset(projectPath, options.agentScopeId);
+    // サイクルG（G-5b）: isolated（クロスユーザー ask）では所有者の Devin 状態を読まない。
+    devinAtifStepOffsetAtStart = options.projectStateRead !== false
+      ? ((await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0)
+      : 0;
+    devinAtifUsageOffsetAtStart = options.projectStateRead !== false
+      ? await loadDevinAtifUsageOffset(projectPath, options.agentScopeId)
+      : null;
 
     // #368 Phase2a-C: Devin は常に exec 相当（dangerous）で起動する。
     // 下の plan 系分岐（①〜④）は usePlanMode が Devin では常に false になったため
@@ -867,9 +972,12 @@ export async function sendPromptToAi(
     // ただし exec モードでは新規セッションを開始する（--permission-mode dangerous を
     // CLI で指定しても、resume したセッションは元の auto モードを保持して
     // 書き込みが拒否されるため）
-    // フォールバック時（#274）は resume しない（壊れたセッション回避）
-    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath, options.agentScopeId);
-    const devinSessionId = devinSavedPermissionMode === devinTurnPermissionMode
+    // フォールバック時（#274）は resume しない（壊れたセッション回避）。
+    // サイクルG（G-5b）: isolated では resume 判定自体を行わず、常に新規セッションで開始する。
+    const devinSavedPermissionMode = options.projectStateRead !== false
+      ? await loadDevinPermissionMode(projectPath, options.agentScopeId)
+      : null;
+    const devinSessionId = options.projectStateRead !== false && devinSavedPermissionMode === devinTurnPermissionMode
       ? await loadDevinSessionId(projectPath, options.agentScopeId)
       : null;
     // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
@@ -958,7 +1066,11 @@ export async function sendPromptToAi(
     let promptFilePath: string | null = null;
     if (devinHasPromptFile) {
       promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-      fs.writeFileSync(promptFilePath, prompt, 'utf-8');
+      // サイクルG（G-9）: 質問全文（クロスユーザー ask ではクロス ask の質問文も含む）が
+      // 他ユーザーにも読めるパーミッションで一時ディレクトリに残る既存の情報露出を根治する。
+      // writeFileSync の mode は既存ファイルには効かないため、先に unlink してから 0600 で作り直す。
+      try { fs.unlinkSync(promptFilePath); } catch {}
+      fs.writeFileSync(promptFilePath, prompt, { encoding: 'utf-8', mode: 0o600 });
       args.push('--prompt-file', promptFilePath);
     } else {
       log.error(`[devin] --prompt-file unsupported, aborting (unsafe argv fallback removed in #344)`);
@@ -1058,7 +1170,10 @@ export async function sendPromptToAi(
     }
 
     // 保存済み thread_id があれば resume で継続（フラグを全部書いた"後"に置く必要がある）
-    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath, options.agentScopeId) : null;
+    // サイクルG（G-5b）: isolated では所有者の Codex スレッドを resume しない。
+    const codexThreadIdToResume = caps.resume && options.projectStateRead !== false
+      ? await loadCodexSessionId(projectPath, options.agentScopeId)
+      : null;
     if (codexThreadIdToResume) {
       args.push('resume', codexThreadIdToResume);
       codexResumedThreadId = codexThreadIdToResume;
@@ -1359,9 +1474,12 @@ export async function sendPromptToAi(
                 codexThreadId = threadId;
                 result.extractedSessionId = threadId;
                 log.info(`[codex] Thread ID: ${threadId}`);
-                saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
-                  log.error(`Failed to save Codex session ID: ${err}`);
-                });
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を書かない。
+                if (options.persistProjectState !== false) {
+                  saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
+                    log.error(`Failed to save Codex session ID: ${err}`);
+                  });
+                }
               }
               break;
             }
@@ -1624,6 +1742,18 @@ export async function sendPromptToAi(
       clearTurnTimers();
       log.info(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
+      // 2026-10-27 サイクル2（plan→exec resume）: gemini は claude SDK/codex と異なり JSONL 出力から
+      // セッション ID を拾えないため、このターンで実際に --session-id / --resume に渡した ID から
+      // 確定する。以降の全完了経路（onOutput(..., result.extractedSessionId)）が自動的に運ぶ。
+      // fullOutput が空（起動失敗・早期終了等）のターンでは常に undefined（fail-closed、core#383 と同じ方針）。
+      if (aiTool === 'gemini') {
+        result.extractedSessionId = resolveGeminiAiSessionId({
+          producedOutput: fullOutput.trim().length > 0,
+          newSessionId: geminiSessionIdUsed,
+          resumeSessionId: geminiResumedSessionId,
+        });
+      }
+
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
       if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
       if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
@@ -1743,7 +1873,10 @@ export async function sendPromptToAi(
           (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence)) ||
           (fullOutput.trim().length === 0 && code === 0);
         const devinPromptTempPath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-        if (devinTurnFailed) {
+        // サイクルG（G-9）: 一時セッション（isolated/legacy とも）は失敗ターンでも調査用に
+        // 残さず必ず消す（借り手の質問文を所有者機の一時ディレクトリに残さない）。対話セッションのみ
+        // 従来どおり事後調査のために残す。
+        if (devinTurnFailed && options.persistProjectState !== false) {
           log.info(`[devin] ⚠️ Turn failed, keeping temp files for inspection: ${devinPromptTempPath}${devinExportPath ? ` / ${devinExportPath}` : ''}`);
         } else {
           try { fs.unlinkSync(devinPromptTempPath); } catch {}
@@ -1775,7 +1908,8 @@ export async function sendPromptToAi(
               const latest = sessions
                 .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
                 .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
-              if (latest?.id) {
+              // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない。
+              if (latest?.id && options.persistProjectState !== false) {
                 saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
                 const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
                 if (devinActualModelForSave) {
@@ -1800,23 +1934,27 @@ export async function sendPromptToAi(
                 },
               });
               if (pick.id) {
-                saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
                 log.info(`[devin] Session ID decided: ${pick.id} (reason=${pick.reason}, scope=${currentScopeKey})`);
-                // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
-                // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
-                // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
-                // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
-                // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
-                // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
-                const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
-                if (devinActualModelForSave) {
-                  saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない
+                // （decided ログ自体は機体ローカルの診断用途のため常に出す）。
+                if (options.persistProjectState !== false) {
+                  saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
+                  // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
+                  // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
+                  // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
+                  // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
+                  // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
+                  // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
+                  const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
+                  if (devinActualModelForSave) {
+                    saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                  }
+                  // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
+                  // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
+                  saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId, devinAtifCumulativeUsage as Record<string, number> | null).catch(() => {});
+                  // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
+                  saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
                 }
-                // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
-                // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId, devinAtifCumulativeUsage as Record<string, number> | null).catch(() => {});
-                // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
-                saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
               } else if (pick.reason !== 'none') {
                 // 'ambiguous'/'ownedByOtherScope': 誤った ID を固定化するより未保存のほうが安全。
                 // 次ターンは新規セッションになるが、Devin は会話履歴を常にプロンプトへ注入するため
@@ -1924,6 +2062,90 @@ export async function sendPromptToAi(
         return;
       }
 
+      // 2026-10-27 Phase 2: Gemini CLI が `--approval-mode`/`--yolo` を未知の引数として拒否した場合
+      // （probe が誤判定していた、または probe 自体が通っていてもバージョンにより実際は非対応等）、
+      // yargs が `Unknown arguments: approval-mode, approvalMode` 等で exit 1・stdout 空になる。
+      // #329 の devinUnknownFlagMatch と同じ流儀でフラグを1つ外して最大2回まで自動リトライする。
+      // 2026-10-27 サイクル2: `--session-id`/`--resume` も同じ機構（同じ geminiDroppedFlags・同じ上限2個）
+      // に乗せる（probe 誤判定時の自己修復、D1/D2 のセッション引数も対象）。
+      const geminiUnknownArgMatch = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? stderrOutput.match(/Unknown arguments?:\s*([^\n]+)/i)
+        : null;
+      if (geminiUnknownArgMatch) {
+        const rawArgs = geminiUnknownArgMatch[1];
+        const droppedFlag = /approval-?mode/i.test(rawArgs) ? '--approval-mode'
+          : /\byolo\b/i.test(rawArgs) ? '--yolo'
+          : /session-?id/i.test(rawArgs) ? '--session-id'
+          : /\bresume\b/i.test(rawArgs) ? '--resume'
+          : null;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        if (droppedFlag) {
+          const alreadyDropped = options.geminiDroppedFlags ?? [];
+          if (!alreadyDropped.includes(droppedFlag) && alreadyDropped.length < 2) {
+            log.info(`[gemini] Unknown flag '${droppedFlag}' rejected by CLI (code ${code}), retrying without it`);
+            completionSent = true;
+            onOutput(`${tChat(lang, 'gemini.unknownFlagRetry', { flag: droppedFlag })}\n`, false);
+            const fallbackOptions: SendPromptOptions = {
+              ...options,
+              geminiDroppedFlags: [...alreadyDropped, droppedFlag],
+            };
+            sendPromptToAi(sessionId, prompt, projectPath, aiTool, claudeSessionId, config, onOutput, fallbackOptions)
+              .then((fallbackResult) => resolve(fallbackResult))
+              .catch((err) => {
+                log.error(`[gemini] unknown-flag retry failed: ${(err as Error).message}`);
+                if (fullOutput.length === 0) {
+                  onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
+                }
+                resolve(result);
+              });
+            return;
+          }
+          // リトライ済みでも解消しない → 「(No response from AI)」ではなく実際の stderr を明示して停止
+          if (!completionSent) {
+            completionSent = true;
+            const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
+            onOutput(tChat(lang, 'gemini.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData, result.extractedSessionId);
+          }
+          resolve(result);
+          return;
+        }
+        // 未知のフラグ名をマッピングできない場合は通常の ai.cliFailed 経路へフォールスルーする
+      }
+
+      // 2026-10-27 サイクル2（D3、plan→exec resume）: Gemini CLI がセッション関連エラー（exit code 42）
+      // で終了した場合の分類。静かなフォールバック禁止（#325）: `resumeFailed` に乗せて
+      // connection.ts の既存リトライ機構（プラン本文の再注入 + --resume 無しでの再実行）に合流しつつ、
+      // 1 行だけ理由を知らせる。リトライは別の UUID を採番し直すため（分岐内で crypto.randomUUID()
+      // している）、同じ argv で再 spawn して 42 を繰り返すことはない。
+      const geminiSessionFailure = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? classifyGeminiSessionFailure({ exitCode: code, stderr: stderrOutput })
+        : 'none';
+      if (geminiSessionFailure !== 'none' && !completionSent) {
+        completionSent = true;
+        result.resumeFailed = true;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const key = geminiSessionFailure === 'resumeInvalid' ? 'gemini.resumeInvalid' : 'gemini.sessionIdCollision';
+        onOutput(`${tChat(lang, key)}\n`, false);
+        resolve(result);
+        return;
+      }
+
+      // 2026-10-27: Gemini API が「このモデルは廃止/提供終了」と 404 を返した場合、二重エスケープされた
+      // 生 JSON ではなく次の一手を提示する（gemini-user 機体で発覚。旧 CLI の既定モデル
+      // `gemini-2.5-pro` が Google 側で提供終了されていた。DevRelay 側が `-m` を明示指定していない
+      // ケースでも CLI 自身の既定モデルが廃止されていれば起きるため、`--approval-mode` 根治後も残る）。
+      const geminiModelUnavailable = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? detectGeminiModelUnavailable(stderrOutput)
+        : null;
+      if (geminiModelUnavailable && !completionSent) {
+        completionSent = true;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const suggestedModel = geminiModelUnavailable.recommendedModel ?? 'gemini-3.1-pro-preview';
+        onOutput(tChat(lang, 'gemini.modelUnavailable', { model: geminiModelUnavailable.model, suggestedModel }), true, result.usageData, result.extractedSessionId);
+        resolve(result);
+        return;
+      }
+
       // Devin: resume（-r）が出力ゼロで終了（exit code 不問）→ セッション ID を破棄して新規セッションでリトライ
       // -r + -p/--agent-config の組み合わせで CLI がエラーも出力も出さず正常終了扱いで空振りするケースの対処
       if (devinResumeEmpty) {
@@ -1932,7 +2154,12 @@ export async function sendPromptToAi(
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を削除しない。
+        if (options.persistProjectState !== false) {
+          Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 
@@ -1942,7 +2169,12 @@ export async function sendPromptToAi(
       if (codexResumeEmpty) {
         log.info(`[codex] Resumed thread produced no output (code ${code}), clearing session ID and retrying fresh`);
         result.resumeFailed = true;
-        clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を削除しない。
+        if (options.persistProjectState !== false) {
+          clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 
@@ -2041,6 +2273,10 @@ export async function sendPromptToAi(
           } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'devin' && isWorkspaceTrustError(stderrOutput)) {
             // #345: devin が workspace trust 拒否で即死したケース。生 stderr のダンプではなく対処手順を出す。
             onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
+          } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'gemini' && isWorkspaceTrustError(stderrOutput)) {
+            // 2026-10-27: gemini が workspace trust 拒否で即死したケース（GEMINI_CLI_TRUST_WORKSPACE
+            // キルスイッチ無効化時、または環境変数を解さない旧 CLI でのみ到達する安全網）。
+            onOutput(tChat(lang, 'gemini.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
           } else if (cliFailure.kind === 'emptyNonZero') {
             onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData, result.extractedSessionId);
           } else {

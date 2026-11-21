@@ -11,6 +11,9 @@ import type { CapabilityConfigLike, CapabilitySyncStatusLike } from './capabilit
 import type { PushDevicesResponse, PushTestResponse } from './push-device-rules';
 // Usage（コスト集計）サイクル: 集計行の型はサーバーと共通（@devrelay/shared）
 import type { UsageThreadRow } from '@devrelay/shared';
+// 2026-11-08: リクエストヘッダの組み立てを純関数に切り出す（body 無し POST が常に
+// Content-Type: application/json を付けて Fastify に 400 で弾かれていたバグの修正）
+import { buildRequestHeaders } from './request-headers-rules';
 
 // トークンをlocalStorageに保存
 export function getToken(): string | null {
@@ -32,13 +35,7 @@ async function request<T>(
   body?: object
 ): Promise<T> {
   const token = getToken();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
+  const headers = buildRequestHeaders({ token, hasBody: body !== undefined });
 
   const response = await fetch(`${API_BASE}${path}`, {
     method,
@@ -679,6 +676,9 @@ export interface SessionMessage {
   createdAt: string;
   files: MessageFileMeta[];
   sourceProjectName?: string;  // クロスプロジェクトクエリの送信元プロジェクト名
+  /** クロスタブ専用: resume が成立した世代番号（`crossask-<base>-g<N>` の N）。
+   *  通常スレッドのメッセージ、または resume 未成立のクロスメッセージには付かない。 */
+  generation?: number;
 }
 
 export const sessions = {
@@ -872,17 +872,84 @@ export interface TeamMemberInfo {
   machineName: string;
   machineId: string;
   machineStatus: string;
+  // クロスユーザー Team（Phase 1: ask のみ）: DEVRELAY_CROSS_TEAM が OFF、または同一ユーザーの
+  // 行では一切付与されない（既存レスポンスと構造的に同一）。
+  crossUser?: boolean;
+  ownerUserId?: string;
+  ownerName?: string;
+  askAllowed?: boolean;
+  execAllowed?: boolean;
 }
 
 export interface TeamInfo {
   id: string;
   name: string;
   createdAt: string;
+  // 公開型 Team（Phase B）: DEVRELAY_CROSS_TEAM_PUBLISH が OFF の環境では一切付与されない
+  // （既存レスポンスと構造的に同一）。付与時は 'private' | 'organization'。
+  visibility?: 'private' | 'organization';
+  subscriberCount?: number;
   members: TeamMemberInfo[];
 }
 
 export interface TeamsResponse {
   teams: TeamInfo[];
+}
+
+export interface OrgCandidate {
+  userId: string;
+  name: string;
+  email: string | null;
+}
+
+export interface CrossTeamInviteInfo {
+  id: string;
+  teamId: string;
+  teamName: string;
+  status: 'pending' | 'accepted' | 'declined' | 'revoked';
+  askRequested: boolean;
+  createdAt: string;
+}
+
+export interface CrossTeamInboxInvite extends CrossTeamInviteInfo {
+  inviterUserId: string;
+  inviterName: string;
+}
+
+export interface CrossTeamOutboxInvite extends CrossTeamInviteInfo {
+  inviteeUserId: string;
+  inviteeName: string;
+}
+
+/** クロスユーザー Team（Phase 1）: 自分が公開している（grantee 側の）プロジェクト 1 件 */
+export interface CrossTeamShare {
+  teamMemberId: string;
+  teamId: string; // #複数選択対応: 招待ピッカーで公開済みプロジェクトを除外するためのキー
+  projectId: string; // 同上
+  teamName: string;
+  requesterName: string;
+  projectName: string;
+  machineName: string;
+  askAllowed: boolean;
+  execAllowed: boolean;
+  createdAt: string;
+}
+
+/** 公開型 Team（Phase B）: `GET /api/teams/published` の 1 件 */
+export interface PublishedTeam {
+  teamId: string;
+  teamName: string;
+  publisherName: string;
+  /** 公開可能メンバーの件数（又貸し防止で絞り込んだ後の件数。プロジェクト名は含まない） */
+  projectCount: number;
+  subscribed: boolean;
+}
+
+/** 公開型 Team（Phase B）: `GET /api/teams/:teamId/subscribers` の 1 件 */
+export interface TeamSubscriber {
+  userId: string;
+  name: string;
+  createdAt: string;
 }
 
 export const teams = {
@@ -909,6 +976,150 @@ export const teams = {
   /** メンバー削除 */
   async removeMember(teamId: string, memberId: string): Promise<void> {
     await request('DELETE', `/teams/${teamId}/members/${memberId}`);
+  },
+
+  // --- クロスユーザー Team（Phase 1: ask のみ）。DEVRELAY_CROSS_TEAM が OFF の環境では
+  // サーバー側が全て 404 を返すため、呼び出し側（TeamPage.tsx）は 404 を「機能無効」として扱う ---
+
+  /** 同一組織内の招待候補ユーザー一覧（プロジェクト名は返らない） */
+  async orgCandidates(): Promise<{ candidates: OrgCandidate[] }> {
+    return request('GET', '/teams/org-candidates');
+  },
+
+  /** 自分宛・自分発のクロスユーザー Team 招待一覧 */
+  async listInvites(): Promise<{ inbox: CrossTeamInboxInvite[]; outbox: CrossTeamOutboxInvite[] }> {
+    return request('GET', '/teams/invites');
+  },
+
+  /** チームオーナーが同一組織内の別ユーザーを招待する */
+  async invite(teamId: string, inviteeUserId: string): Promise<{ id: string; status: string }> {
+    return request('POST', `/teams/${teamId}/invites`, { inviteeUserId });
+  },
+
+  /** 受入側が招待を承認し、自分のプロジェクトを（複数）選ぶ */
+  async acceptInvite(inviteId: string, projectIds: string[]): Promise<{ teamMemberIds: string[]; skipped: number }> {
+    return request('POST', `/teams/invites/${inviteId}/accept`, { projectIds });
+  },
+
+  /** 受入側が招待を辞退する */
+  async declineInvite(inviteId: string): Promise<void> {
+    await request('POST', `/teams/invites/${inviteId}/decline`);
+  },
+
+  /** 送信側が未承認の招待を取り消す */
+  async revokeInvite(inviteId: string): Promise<void> {
+    await request('DELETE', `/teams/invites/${inviteId}`);
+  },
+
+  /** クロスユーザー Team の同意を取り消す（Team オーナー・grantee どちらからでも） */
+  async revokeGrant(memberId: string): Promise<void> {
+    await request('DELETE', `/teams/members/${memberId}/grant`);
+  },
+
+  /** 自分が公開している（grantee 側の）プロジェクト一覧（「誰に何を公開しているか」の確認用） */
+  async sharedByMe(): Promise<{ shares: CrossTeamShare[] }> {
+    return request('GET', '/teams/shared-by-me');
+  },
+
+  // --- 公開型 Team（Phase B: WebUI）。DEVRELAY_CROSS_TEAM_PUBLISH が OFF の環境では
+  // サーバー側が全て 404 を返すため、呼び出し側（TeamPage.tsx）は 404 を「機能無効」として扱う ---
+
+  /** チームの公開設定を変更する（Team オーナーのみ） */
+  async setVisibility(teamId: string, visibility: 'private' | 'organization'): Promise<{ visibility: string; publishableCount: number }> {
+    return request('PATCH', `/teams/${teamId}/visibility`, { visibility });
+  },
+
+  /** 同一組織内で公開されているチーム一覧（自分が所有するチームは除く） */
+  async listPublished(): Promise<{ teams: PublishedTeam[] }> {
+    return request('GET', '/teams/published');
+  },
+
+  /** チームを購読する */
+  async subscribe(teamId: string): Promise<{ subscriptionId: string }> {
+    return request('POST', `/teams/${teamId}/subscribe`);
+  },
+
+  /** 自分の購読を解除する */
+  async unsubscribe(teamId: string): Promise<void> {
+    await request('DELETE', `/teams/${teamId}/subscribe`);
+  },
+
+  /** 購読者一覧（Team オーナーのみ） */
+  async listSubscribers(teamId: string): Promise<{ subscribers: TeamSubscriber[] }> {
+    return request('GET', `/teams/${teamId}/subscribers`);
+  },
+
+  /** Team オーナーが特定の購読者を強制的に取り消す */
+  async removeSubscriber(teamId: string, userId: string): Promise<void> {
+    await request('DELETE', `/teams/${teamId}/subscribers/${userId}`);
+  },
+};
+
+// ========================================
+// クロスユーザー Team Phase C（購読/借用プロジェクトへの質問）API
+// ========================================
+
+/** サイクルC3a-1: `GET /api/cross-team/ask-targets` の project 行に乗る記憶状態。
+ *  `DEVRELAY_CROSS_ASK_RESET` が OFF のサーバーではキー自体が付かない（省略時は「未提供」扱い）。 */
+export interface CrossAskMemory {
+  /** resume が効く見込み（宛先が覚えている） */
+  remembers: boolean;
+  reason?: 'featureOff' | 'isolationOff' | 'agentOutdated' | 'aiUnsafe';
+  /** false = 質問自体が断られる見込み */
+  askable: boolean;
+  askDenyReason?: 'agent_outdated' | 'ai_unsafe';
+  /** 現世代の往復数。世代が無ければ 0 */
+  turns?: number;
+  /** 自動リセットの目安（`DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS` の解決値） */
+  maxTurns?: number;
+}
+
+/** `GET /api/cross-team/ask-targets` の 1 プロジェクト分。 */
+export interface CrossAskProject {
+  projectId: string;
+  label: string;
+  teamId: string;
+  teamName: string;
+  origin: 'invite' | 'subscription';
+  execAllowed: false;
+  memory?: CrossAskMemory;
+}
+
+export interface CrossAskMachineGroup {
+  machineId: string;
+  machineName: string;
+  status: 'online' | 'offline';
+  projects: CrossAskProject[];
+}
+
+export interface CrossAskOwnerGroup {
+  ownerLabel: string;
+  machines: CrossAskMachineGroup[];
+}
+
+export const crossTeamChat = {
+  /** 購読/借用プロジェクト一覧（Agents ツリー用）。機能 OFF なら 404（呼び出し側で catch して空扱いにする）。 */
+  async listTargets(): Promise<{ groups: CrossAskOwnerGroup[] }> {
+    return request('GET', '/cross-team/ask-targets');
+  },
+
+  /** クロス ask の履歴（自分が投げた質問と自分に返ってきた回答だけ）。既存 getMessages と同形。 */
+  async getMessages(projectId: string, opts?: { before?: string; limit?: number }): Promise<{ messages: SessionMessage[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (opts?.before) params.set('before', opts.before);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const q = params.toString() ? `?${params.toString()}` : '';
+    return request('GET', `/cross-team/projects/${projectId}/messages${q}`);
+  },
+
+  /**
+   * クロス ask の記憶をリセットする（新しい会話を始める）。body なし POST のため
+   * 第三引数（body）を渡さないこと（`request()` が `hasBody` を自動判定するため、渡すと
+   * 空オブジェクトでも Content-Type が付き、body 無し POST の規約から外れる）。
+   * 機能 OFF（`DEVRELAY_CROSS_ASK_RESET=0`）なら 404。
+   */
+  async resetMemory(projectId: string): Promise<{ success: true; hadMemory: boolean; purgedGenerations: number }> {
+    return request('POST', `/cross-team/projects/${projectId}/reset`);
   },
 };
 

@@ -373,6 +373,25 @@ good SHA を記録。bake time 120分 = push 後2時間の暗黙の中断窓。
   不十分であるという追加の知見も得られた（SDK-1 のドキュメントに明記すべき事項）。
 - 以上により、SDK-1（実装サイクル）に進むための技術的な障害は見当たらない。
 
+## 13. 追記（サイクルS1、2026-11-12）: 本サイクルで見落とした権限意味変更
+
+本サイクル（SDK-0）とその後の SDK-1/SDK-2（実装・④b バンプ）は、`query()` の API 面
+（オプション・メッセージ型）と実行ファイル解決だけを検証対象とし、**`permissionMode`/
+`allowedTools`/`canUseTool` の意味そのものが 0.2→0.3 系で変わっていないかは検証していなかった**。
+
+実際には `permissionMode:'plan'` は 0.3 系の CLI 内部で機能ゲート `useAutoModeDuringPlan` により
+`'auto'` モードへ変換され得る（本サイクルの調査で確定）。変換されると auto-mode classifier が
+`canUseTool`/PreToolUse フックより前に Bash の allow/deny を確定するため、DevRelay 側の
+plan モード権限ゲート（`decidePlanPermission()`、本ドキュメント §2 の表に未記載）が 2026-09-20
+（④b バンプ、`d87d003`）以降 Bash について一度も呼ばれなくなっていた。deny 記録が実際に
+途絶えた時刻（16:45 JST）は、稼働 Agent への適用時刻（18:49 JST）とも整合する。
+
+**次回 SDK バンプでの再発防止**: `getClaudeExecutableFallback()` 等の実行ファイル解決・型定義差分の
+検証に加え、**plan モードで非許可コマンド（例 `python3 -c "print(1)"`）が実機で実際に deny
+されるかの 1 回の実機確認**をバンプ手順（`doc/sdk-executable-runbook.md`）に追加すべき
+（本サイクルでは別途 `doc/plan-gate-hook-plan.md` に調査・修正を記録し、SDK の挙動に依存しない
+`hooks.PreToolUse` を唯一の権威とする設計に変更した。`rules/project.md` の該当セクション参照）。
+
 ## 検証（本サイクル）
 
 - `git diff --stat -- apps/ agents/ packages/ prisma/ package.json pnpm-lock.yaml` は空

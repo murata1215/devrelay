@@ -137,3 +137,52 @@ test('D2: 複数の独立したストリームが互いに干渉しない', asyn
   assert.equal(await isPending(it2.next()), true);
   h2.release();
 });
+
+// ============================================================
+// E. サイクルS2a: clientComposed パラメータ（新発見①、@パス展開の抑止）
+// ============================================================
+
+test('E1: clientComposed 未指定（既定）では client_composed フィールドが付与されない（従来挙動）', async () => {
+  const handle = buildSdkPromptStream('@/etc/hostname を見て');
+  const it = handle.stream[Symbol.asyncIterator]();
+  const { value } = await it.next();
+  assert.equal('client_composed' in value, false);
+  handle.release();
+});
+
+test('E2: clientComposed=false を明示しても client_composed フィールドが付与されない', async () => {
+  const handle = buildSdkPromptStream('p', false);
+  const it = handle.stream[Symbol.asyncIterator]();
+  const { value } = await it.next();
+  assert.equal('client_composed' in value, false);
+  handle.release();
+});
+
+test('E3: clientComposed=true のとき client_composed:true が付与される', async () => {
+  const handle = buildSdkPromptStream('@/etc/hostname を見て', true);
+  const it = handle.stream[Symbol.asyncIterator]();
+  const { value } = await it.next();
+  assert.equal(value.client_composed, true);
+  assert.deepEqual(value, {
+    type: 'user',
+    session_id: '',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: '@/etc/hostname を見て' }],
+    },
+    parent_tool_use_id: null,
+    client_composed: true,
+  });
+  handle.release();
+});
+
+test('E4: clientComposed=true でも release()/完了のタイミングは変わらない（B系の回帰確認）', async () => {
+  const handle = buildSdkPromptStream('p', true);
+  const it = handle.stream[Symbol.asyncIterator]();
+  await it.next();
+  const second = it.next();
+  assert.equal(await isPending(second), true);
+  handle.release();
+  const { done } = await second;
+  assert.equal(done, true);
+});

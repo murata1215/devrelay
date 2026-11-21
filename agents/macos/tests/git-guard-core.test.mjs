@@ -98,6 +98,11 @@ test('isGuardExcludedPath: .devrelay-output配下は除外（成果物保護）'
   assert.equal(isGuardExcludedPath('.devrelay-output/result.md'), true);
 });
 
+test('isGuardExcludedPath: .devin配下は除外（Devin自身のセッション状態を巻き戻さない）', () => {
+  assert.equal(isGuardExcludedPath('.devin/config.json'), true);
+  assert.equal(isGuardExcludedPath('.devin/hooks.v1.json'), true);
+});
+
 test('isGuardExcludedPath: 通常のソースファイルは除外されない', () => {
   assert.equal(isGuardExcludedPath('src/services/foo.ts'), false);
 });

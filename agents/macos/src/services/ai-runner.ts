@@ -4,8 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue } from '@devrelay/shared';
-import type { AiTool, AiUsageData, Language } from '@devrelay/shared';
+import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_COMMANDS, PLAN_WRITE_BASH_COMMANDS, PLAN_WRITE_TOOLS, isUnsafeModelId, tChat, DEFAULT_CHAT_LANGUAGE, detectDevinModelMismatch, toNoProxyEnvValue, parseGeminiCapabilities, buildGeminiApprovalArgs, GEMINI_CAPABILITIES_NONE, detectGeminiModelUnavailable, buildGeminiSessionArgs, resolveGeminiAiSessionId, classifyGeminiSessionFailure } from '@devrelay/shared';
+import type { AiTool, AiUsageData, Language, GeminiCapabilities, GeminiDegradeReason, GeminiSessionDegradeReason } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
@@ -21,7 +21,8 @@ import { resolveLoopGuardConfig, createLoopGuardState, observeLoopGuardEvent, ch
 import { resolveSdkMaxTurns, mapResultSubtypeToStopReason } from './sdk-stop-reason.js';
 import { resolveBackgroundTaskConfig, createBackgroundTaskState, observeBackgroundTaskEvent, decideResultDeferral } from './sdk-background-tasks.js';
 import { buildSdkPromptStream } from './sdk-prompt-stream.js';
-import { decideResume } from './resume-priority.js';
+import { decideResume, type ResumeSource } from './resume-priority.js';
+import { isEphemeralSession } from './session-scope.js';
 import { buildKillPlan, resolveKillTimings, shouldEmitHeartbeat, type KillStage } from './process-tree-kill.js';
 // サイクル SDK-1 コミット①: resolveSystemClaude() は claude-path.ts（linux と byte-identical な最小モジュール）へ移設し、
 // ここでは re-export のみ行う（claude-auth.ts の既存 import 経路を維持するため）。
@@ -31,10 +32,14 @@ import { resolveSystemClaude } from './claude-path.js';
 // ここでは re-export のみ行う（呼び出し元は無変更）。
 import { getClaudeExecutableFallback, logClaudeExecutableStatus } from './sdk-executable.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, PermissionResult, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 // raw-completion（ゲーム席用の素の completion API）: SDK オプション上書き・deny 判定の純関数群
 import { buildRawSdkOverrides, buildRawEnv, isRawToolDenied, buildRawDenyMessage, resolveRawUsedModel } from './raw-completion-mode.js';
 import { isTurnStale } from './update-guard-rules.js';
+// サイクルS2a: クロス ask スコープ（isolated/resumable-scoped）の読める範囲・使えるツール制限。
+// SDK オプション上書き・deny 判定の純関数群（外部 import ゼロ）+ fs を要する実体パス判定。
+import { decideCrossAskToolPermission, buildCrossAskSdkOverrides, buildCrossAskEnv, decideCrossAskInitAssertion, CROSS_ASK_AUTO_MEMORY_DIR } from './cross-ask-scope-rules.js';
+import { resolveProjectRootReal, checkCrossAskPath } from './cross-ask-path-guard.js';
 
 interface AiSession {
   sessionId: string;
@@ -57,9 +62,18 @@ let codexCapabilitiesCache: { json: boolean; resume: boolean } | null = null;
 // #309: Gemini CLI / Devin CLI の `--model` フラグ対応可否キャッシュ（plan/exec モデル分離用）。
 // 2026-10-26: exec ターンでシェル実行を自動承認するための `--approval-mode`（choices に yolo を含むか）/
 // `--yolo` 対応可否もここに追加。
-let geminiCapabilitiesCache: { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } | null = null;
-// Gemini exec ターンで yolo 系フラグが渡せなかった場合の警告をプロセス寿命中 1 回だけ出すためのラッチ
-let geminiYoloDegradedWarned = false;
+// 2026-10-27: 判定本体は `@devrelay/shared` の `parseGeminiCapabilities()`（純粋関数）に委譲。
+// ここでは probe 結果のキャッシュのみ保持する。
+let geminiCapabilitiesCache: GeminiCapabilities | null = null;
+// `gemini --help` 自体の実行に失敗したかどうか（all-false キャッシュと区別して警告文言を切り替えるため）
+let geminiProbeFailed = false;
+// Gemini で劣化が起きた場合の警告をプロセス寿命中 1 回だけ出すためのラッチ（理由ごと）
+const geminiDegradeWarned = new Set<GeminiDegradeReason>();
+// 2026-10-27 サイクル2: probe 時に取得した `gemini --version` の結果をモジュール変数に保持する。
+// `gemini.sessionIdUnsupported` 等の警告文言に実バージョンを埋め込むために使う。
+let geminiVersionCache = 'unknown';
+// セッション関連（--session-id / --resume）の劣化警告をプロセス寿命中 1 回だけ出すためのラッチ
+const geminiSessionDegradeWarned = new Set<GeminiSessionDegradeReason>();
 
 // #344: `ok:false`（probe 失敗）の場合は全フラグ true と楽観的に仮定して cache する（理由は関数 JSDoc 参照）。
 // 楽観キャッシュは TTL 付き（devinCapabilitiesFailedAt と併用）で、devin が後から PATH に現れても
@@ -180,24 +194,32 @@ function probeCodexCapabilities(command: string): { json: boolean; resume: boole
 }
 
 /**
- * Gemini CLI が `-m/--model`・`--approval-mode`（yolo choice 付き）・`--yolo` フラグに
- * 対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。
- * 失敗時は全て false に倒し、CLI デフォルト（auto_edit 相当）へ劣化させる。
+ * Gemini CLI が `-m/--model`・`--approval-mode`（auto_edit/yolo choice 付き）・`--yolo` フラグに
+ * 対応しているか `gemini --help` の出力で判定する（結果はキャッシュ）。判定本体は
+ * `@devrelay/shared` の `parseGeminiCapabilities()`（純粋関数、テスト済み）に委譲する。
+ * 失敗時は全て false に倒す。2026-10-27: 旧版は未検証フラグを渡して全滅する方が悪いため、
+ * 「それでも --approval-mode auto_edit を渡す」という従来の楽観フォールバックは廃止した
+ * （`buildGeminiApprovalArgs()` 側がフラグ無し起動に倒す）。
  * @param command gemini コマンドのフルパス
- * @returns `{ model, approvalModeYolo, yoloFlag }` 対応可否
+ * @returns 対応可否（`GeminiCapabilities`）
  */
-function probeGeminiCapabilities(command: string): { model: boolean; approvalModeYolo: boolean; yoloFlag: boolean } {
+function probeGeminiCapabilities(command: string): GeminiCapabilities {
   if (geminiCapabilitiesCache !== null) return geminiCapabilitiesCache;
   try {
     const help = execSync(`${command} --help`, { encoding: 'utf-8', timeout: 10000 });
-    const model = /-m,?\s*--model\b|--model\b/.test(help);
-    const approvalModeYolo = /--approval-mode\b/.test(help) && /"?yolo"?/.test(help);
-    const yoloFlag = /-y,?\s*--yolo\b|--yolo\b/.test(help);
-    geminiCapabilitiesCache = { model, approvalModeYolo, yoloFlag };
-    console.log(`[gemini] 🔎 capabilities: --model=${model} --approval-mode(yolo)=${approvalModeYolo} --yolo=${yoloFlag}`);
+    geminiCapabilitiesCache = parseGeminiCapabilities(help);
+    // 「どの版か」が切り分けの第一手になるよう、version も 1 回だけ取得してログに残す（probe 失敗は無視）。
+    // 2026-10-27 サイクル2: モジュール変数にも保持し、gemini.sessionIdUnsupported 等の警告文言に
+    // 実バージョンを埋め込めるようにする。
+    try {
+      geminiVersionCache = execSync(`${command} --version`, { encoding: 'utf-8', timeout: 10000 }).trim();
+    } catch { /* バージョン取得失敗は致命的ではないため無視 */ }
+    const c = geminiCapabilitiesCache;
+    console.log(`[gemini] 🔎 version=${geminiVersionCache} capabilities: --model=${c.model} --approval-mode=${c.approvalMode}(auto_edit=${c.approvalModeAutoEdit},yolo=${c.approvalModeYolo}) --yolo=${c.yoloFlag} --session-id=${c.sessionId} --resume=${c.resume}`);
   } catch (err) {
-    geminiCapabilitiesCache = { model: false, approvalModeYolo: false, yoloFlag: false };
-    console.warn(`[gemini] --help probe failed, disabling --model/--approval-mode(yolo)/--yolo:`, (err as Error).message);
+    geminiCapabilitiesCache = GEMINI_CAPABILITIES_NONE;
+    geminiProbeFailed = true;
+    console.warn(`[gemini] --help probe failed, disabling all approval-mode/model flags:`, (err as Error).message);
   }
   return geminiCapabilitiesCache;
 }
@@ -570,8 +592,12 @@ export async function startAiSession(
   onOutput: OutputCallback
 ): Promise<void> {
   // 新しい会話（Claude Code インスタンス）開始時に「以降すべて許可」モードをリセット
-  // 前の会話で approveAllMode が有効でも、新会話では改めて承認を要求する
-  resetApproveAllMode();
+  // 前の会話で approveAllMode が有効でも、新会話では改めて承認を要求する。
+  // サイクルG（G-8）: 一時セッションではこの機体グローバル状態に触らない
+  // （一時セッションの開始が対話セッションの「以降すべて許可」を消す既存バグの根治）。
+  if (!isEphemeralSession(sessionId)) {
+    resetApproveAllMode();
+  }
 
   // Check if session already exists
   if (activeSessions.has(sessionId)) {
@@ -675,7 +701,13 @@ function matchesToolRule(rule: string, toolName: string, input: Record<string, u
   return false;
 }
 
-function isToolSessionApproved(toolName: string, input: Record<string, unknown>): boolean {
+/**
+ * サイクルG（G-8）: 一時セッション（ask-member/teamexec-member 等）は機体プロセス全体の
+ * 「📌 常に許可」状態を読んではならない（他人・他プロジェクトの一時的な質問 1 通が
+ * 対話セッションの許可ルールを継承して自動承認されてしまう既存バグの根治）。
+ */
+function isToolSessionApproved(sessionId: string, toolName: string, input: Record<string, unknown>): boolean {
+  if (isEphemeralSession(sessionId)) return false;
   if (sessionApprovedTools.size === 0) return false;
   for (const rule of sessionApprovedTools) {
     if (matchesToolRule(rule, toolName, input)) return true;
@@ -696,8 +728,12 @@ function isAllowedByRules(rules: string[] | undefined, toolName: string, input: 
   return false;
 }
 
-/** 「以降すべて許可」モードかどうかを確認する（canUseTool コールバック内で使用） */
-export function isApproveAllMode(): boolean {
+/**
+ * 「以降すべて許可」モードかどうかを確認する（canUseTool コールバック内で使用）。
+ * サイクルG（G-8）: 一時セッションには常に false を返す（上記 `isToolSessionApproved` と同じ理由）。
+ */
+export function isApproveAllMode(sessionId: string): boolean {
+  if (isEphemeralSession(sessionId)) return false;
   return approveAllMode;
 }
 
@@ -709,12 +745,17 @@ export function resetApproveAllMode(): void {
 
 /**
  * 保留中のツール承認リクエストを管理する Map
- * requestId → { resolve, reject, input }
+ * requestId → { resolve, reject, input, sessionId }
+ *
+ * サイクルG（G-8）: `sessionId` を追加（ToolApprovalResponsePayload 自体には乗らないため、
+ * 要求時にここへ記録しておき、応答が来たときに「以降すべて許可」を立ててよいセッションか
+ * 判定する）。
  */
 const pendingToolApprovals = new Map<string, {
   resolve: (value: PermissionResult) => void;
   reject: (reason: Error) => void;
   input: Record<string, unknown>;
+  sessionId: string;
 }>();
 
 /**
@@ -730,13 +771,16 @@ export function resolveToolApproval(requestId: string, response: ToolApprovalRes
   pendingToolApprovals.delete(requestId);
 
   // 「以降すべて許可」フラグを設定
-  if (response.approveAll) {
+  // サイクルG（G-8）: 一時セッション（ask-member/teamexec-member 等）からの応答では
+  // 機体プロセス全体の「以降すべて許可」を立てない（他人・他プロジェクトの質問 1 通が
+  // 対話セッションへグローバルに影響する既存バグの根治）。
+  if (response.approveAll && !isEphemeralSession(pending.sessionId)) {
     approveAllMode = true;
     console.log(`🔓 Approve-all mode activated (all subsequent tools will be auto-approved)`);
   }
 
-  // 「📌 常に許可」ルールをセッション許可ツールに追加
-  if (response.alwaysAllowRule) {
+  // 「📌 常に許可」ルールをセッション許可ツールに追加（同上の理由で一時セッションでは追加しない）
+  if (response.alwaysAllowRule && !isEphemeralSession(pending.sessionId)) {
     sessionApprovedTools.add(response.alwaysAllowRule);
     console.log(`📌 Session-approved tool rule added: "${response.alwaysAllowRule}" (total: ${sessionApprovedTools.size})`);
   }
@@ -789,6 +833,12 @@ function formatAiErrorMessage(message: string, lang: Language = DEFAULT_CHAT_LAN
 export interface SendPromptOptions {
   /** Claude session ID to resume (from previous execution) */
   resumeSessionId?: string;
+  /**
+   * 2026-10-27 サイクル2（plan→exec resume）: `resumeSessionId` の出所（`decideResume()` の判定結果）。
+   * gemini 分岐は `resumeSource === 'explicit'`（= サーバーが approve_implementation 等で明示指定した ID）
+   * のときのみ `--resume` に使う。claude/codex/devin には影響しない（既存の `resumeSessionId` 読み取りのまま）。
+   */
+  resumeSource?: ResumeSource;
   /** Use plan mode (--permission-mode plan) instead of skip-permissions */
   usePlanMode?: boolean;
   /** プランモード中に許可する読み取り専用ツール（--allowedTools） */
@@ -801,7 +851,7 @@ export interface SendPromptOptions {
    * AI モデル指定（#309: claude/codex/gemini/devin 共通）。#251 の `l` コマンド／Settings で設定される。
    * claude: 'sonnet', 'opus', 'claude-fable-5' 等（Claude SDK にそのまま渡す）
    * codex: `-c model="..."` で渡す（例: 'gpt-5.5'）
-   * gemini: `-m` で渡す（例: 'gemini-3.1-pro'）
+   * gemini: `-m` で渡す（例: 'gemini-3.1-pro-preview'。pro 系は -preview サフィックス必須、2026-10-27 実測）
    * devin: `--model` で渡す（fuzzy 名可、例: 'opus'）
    * 未指定なら各 CLI のデフォルト
    */
@@ -819,6 +869,13 @@ export interface SendPromptOptions {
    * close ハンドラの自動リトライでのみ設定され、無限ループを防ぐガード（上限2個）も兼ねる。
    */
   devinDroppedFlags?: string[];
+  /**
+   * 2026-10-27 Phase 2: 「Unknown arguments」で拒否された Gemini CLI フラグ名のリスト
+   * （`--approval-mode` / `--yolo`。2026-10-27 サイクル2で `--session-id` / `--resume` も同じリストに
+   * 追加するようになった）。#329 の devinDroppedFlags と同じ仕組みで、probe の誤判定時にも
+   * 自動リトライで復旧できるようにする（上限2個、承認モード系・セッション系合わせて共通の枠）。
+   */
+  geminiDroppedFlags?: string[];
   /**
    * w コマンド（ドキュメント更新 + git commit/push）実行フラグ（#312）。
    * Codex の workspace-write サンドボックスは .git を read-only にするため commit が
@@ -844,11 +901,29 @@ export interface SendPromptOptions {
    */
   onPolicyDenied?: (info: { toolName: string; toolInput: Record<string, unknown>; reason: string }) => void;
   /**
+   * サイクルS2a（2026-11-12）: クロスユーザー ask の読める範囲・使えるツールを限定する新ゲートを
+   * 適用するか。`statePolicy.crossAskScope`（`session-scope.ts`）から直接渡される値で、
+   * `strictReadonly`/`usePlanMode` という別系統の値には依存しない（新発見④: 両者が食い違う
+   * フェイルオープン経路を `connection.ts` 側で別途検出・拒否する。本フィールド自体は
+   * `usePlanMode` の分岐内でのみ参照するため、exec モードには一切影響しない）。
+   */
+  crossAskScope?: boolean;
+  /**
    * #348: projectPath 上の永続状態（claude-session-id / context-usage）を書き込むかどうか。
    * 既定 true（従来どおり）。一時セッション（ask-member/teamexec-member/askDesc）は
    * connection.ts 側で false を渡し、他セッションの resume 先やコンテキスト表示を汚染しないようにする。
+   * サイクルG（G-5）: Codex/Devin のセッション ID・モデル・ATIF オフセット・パーミッションモードの
+   * 保存・削除も本フィールドでガードする（従来は未ガードで、一時セッションが所有者の
+   * Codex/Devin 状態を上書き・削除していた既存バグ）。
    */
   persistProjectState?: boolean;
+  /**
+   * サイクルG（G-5b）: Codex/Devin のセッション ID 等の**読み出し**を許可するか。
+   * 既定 true（従来どおり。未指定時は `options.projectStateRead !== false` で判定するため
+   * 既存の呼び出し元は変更不要）。isolated（クロスユーザー ask）のときだけ false になり、
+   * 所有者の Codex/Devin 会話を resume して覗けないようにする。
+   */
+  projectStateRead?: boolean;
   /** MCP 経由の新規 submit: 前回セッションの resume をスキップ */
   forceNewSession?: boolean;
   /**
@@ -873,6 +948,28 @@ export interface SendPromptOptions {
   rawMode?: boolean;
   /** rawMode: true の場合に使う system prompt（完全置換。未指定時は空文字列扱い） */
   systemPrompt?: string;
+}
+
+/**
+ * サイクルS1（2026-11-12）: `settingSources: ['user','project']` で SDK が読む設定ファイルに
+ * `permissions` キーがあれば 1 行警告を出す（読むだけ・挙動は変えない）。
+ * `permissions.allow` は DevRelay の `allowedTools` と同じ `alwaysAllowRules` 経路で CLI 内蔵の
+ * bare-allow ルールとして解釈され、PreToolUse フック／canUseTool より前に allow を確定させ得る
+ * （CLAUDE_SDK_CAN_USE_TOOL_SHADOWED 警告と同種の shadow）。現時点でこの機体には該当ファイルが
+ * 存在しないが、将来誰かが `.claude/settings.json` を置くだけで黙って穴が開くため、
+ * 気づけるようにするための可視化のみ（fail-open。読めない・JSON でない場合は無視する）。
+ */
+function warnIfSettingsFileHasPermissions(label: string, filePath: string): void {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && 'permissions' in parsed) {
+      console.warn(`⚠️ [SDK] ${label} (${filePath}) に permissions キーがあります。allow ルールが PreToolUse フック／canUseTool より前に CLI 側で解決され得ます（サイクルS1、doc/sdk-0.3-migration-findings.md 参照）。`);
+    }
+  } catch {
+    // 読めない・JSON でない場合は無視（挙動を変えない警告のみの機能のため fail-open）
+  }
 }
 
 /**
@@ -908,6 +1005,16 @@ async function sendPromptToAiSdk(
   // （診断用ログにのみ使用。Write/Edit 等が呼ばれたのに一度もログが出ない場合、
   // CLI↔SDK の承認用コントロールチャネルが死んでいる兆候として切り分けに使える）。
   let canUseToolEnteredOnce = false;
+  // サイクルS1: plan モードの PreToolUse フック到達状況の観測カウンタ（診断用ログにのみ使用）。
+  // 2026-11-12 実測: SDK 0.3 系は permissionMode:'plan' を CLI 内部で auto モードに変換し、
+  // auto-mode classifier が canUseTool より前に Bash を allow/deny してしまう
+  // （useAutoModeDuringPlan ゲート。サイクルS1 Step 0 で確認）。PreToolUse フックは
+  // classifier より前に解決するため、Bash がフックに来ているかをここで観測する。
+  let planHookReachedCount = 0;
+  let planHookDeniedCount = 0;
+  // フック到達 0 件のまま Bash が実行された（= ゲートが無言で素通りしている）ことを検知するための
+  // カウンタ。plan モードでのみ加算する（exec では意味を持たない）。
+  let planBashToolUseCount = 0;
 
   /** config.proxy がある場合、AI プロセスにもプロキシ環境変数を注入 */
   const proxyEnv: Record<string, string> = {};
@@ -926,6 +1033,14 @@ async function sendPromptToAiSdk(
 
   // #377: maxTurns は env DEVRELAY_SDK_MAX_TURNS で上書き可能（既定 400、plan/exec 共通）
   const sdkMaxTurns = resolveSdkMaxTurns(process.env);
+
+  // サイクルS2a: クロス ask スコープのプロジェクトルート realpath。plan 分岐内で設定し、
+  // PreToolUse フック・canUseTool・下記 for-await の init アサートの3箇所から参照するため、
+  // 関数スコープ（`else if` ブロックの外）で宣言する（ブロックスコープだと for-await から
+  // 参照できない）。
+  let crossAskProjectRootReal: string | undefined;
+  // サイクルS2a: system/init の実行時アサートを1ターンに1回だけ行うためのガード。
+  let crossAskInitAssertionChecked = false;
 
   /** SDK query のオプション構築 */
   const sdkOptions: Parameters<typeof query>[0]['options'] = {
@@ -1005,80 +1120,111 @@ async function sendPromptToAiSdk(
     console.log(`🎮 [SDK] Using raw-completion mode (tools disabled, systemPrompt replaced, auto-memory disabled, maxTurns=${sdkOptions.maxTurns})`);
   } else if (options.usePlanMode) {
     sdkOptions.permissionMode = 'plan';
-    if (options.allowedTools && options.allowedTools.length > 0) {
-      sdkOptions.allowedTools = options.allowedTools;
-      console.log(`📋 [SDK] Using plan mode with ${options.allowedTools.length} allowed tools`);
+
+    // サイクルS2a（2026-11-12）: クロス ask スコープ（isolated/resumable-scoped）では、読める
+    // 範囲・使えるツールを「貸されたプロジェクトの中身（秘密を除く）」に限定する SDK オプション
+    // 上書きを適用する（`raw-completion-mode.ts` と同じ多層防御の考え方。詳細は
+    // `cross-ask-scope-rules.ts` の `buildCrossAskSdkOverrides()` JSDoc と
+    // `doc/cross-ask-scope-plan.md` 参照）。`crossAskProjectRootReal`（関数スコープで宣言済み）に
+    // 代入し、下記 PreToolUse フック・canUseTool・init アサートの3箇所から参照する。
+    if (options.crossAskScope) {
+      crossAskProjectRootReal = resolveProjectRootReal(projectPath);
+      Object.assign(sdkOptions, buildCrossAskSdkOverrides(CROSS_ASK_AUTO_MEMORY_DIR));
+      sdkOptions.env = buildCrossAskEnv(sdkOptions.env ?? {});
+      console.log('🔒 [SDK] Using cross-ask scope mode (tools=Read,Grep,Glob; settingSources=[]; mcpServers={}; strictMcpConfig=true)');
     } else {
-      console.log(`📋 [SDK] Using plan mode`);
+      // サイクルS1（2026-11-12）: strictReadonly のときは sdkOptions.allowedTools を SDK に渡さない。
+      // 渡した bare エントリ（裸の mcp__... など）が CLI 側の bare-allow ルールとして
+      // 下記 PreToolUse フック／canUseTool より前に allow を確定させてしまうため
+      // （CLAUDE_SDK_CAN_USE_TOOL_SHADOWED 警告が指す挙動。実測: 所有者の allowedTools:linux に
+      // 保存済みの裸の context7 MCP 2件が実際に shadow していた）。DevRelay 自身の判定
+      // （decidePlanPermission、下記フック内）には options.allowedTools をそのまま渡すため、
+      // ユーザーが追加した許可リスト（裸の MCP エントリ含む）は変わらず有効。
+      // strictReadonly=false（旧来の interactive plan）は現状維持で SDK にも allowedTools を渡す。
+      if (!options.strictReadonly && options.allowedTools && options.allowedTools.length > 0) {
+        sdkOptions.allowedTools = options.allowedTools;
+        console.log(`📋 [SDK] Using plan mode with ${options.allowedTools.length} allowed tools`);
+      } else {
+        console.log(`📋 [SDK] Using plan mode${options.strictReadonly ? ' (strictReadonly: allowedTools withheld from SDK, enforced via PreToolUse hook)' : ''}`);
+      }
     }
 
-    // plan モードでも skipPermissions と AskUserQuestion をインターセプト
-    if (options.onToolApprovalRequest) {
-      const onApprovalRequest = options.onToolApprovalRequest;
-      sdkOptions.canUseTool = async (toolName, input, opts) => {
-        // #303: disallowedTools を素通りするケースへの保険。ExitPlanMode は skip-permissions
-        // モードでも絶対に許可しない（自動承認＝編集の許可であって、プラン解除の許可ではない）
-        if (toolName === 'ExitPlanMode') {
-          console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
-          return {
-            behavior: 'deny',
-            message: 'プランモードは ExitPlanMode では解除できません。ユーザーが e / exec を送信するまで実装を開始せず、プランの提示のみ行ってください。',
-          };
-        }
+    // サイクルS1（2026-11-12）: PreToolUse フックを唯一の権威とする。
+    // 2026-11-12 実測（サイクルS1 Step 0）: SDK 0.3 系は permissionMode:'plan' を CLI 内部で
+    // auto モードに変換する機能ゲート（useAutoModeDuringPlan）を持ち、有効な場合 auto-mode
+    // classifier が canUseTool より前に Bash 等の allow/deny を確定してしまう
+    // （DevRelay の allowlist・decidePlanPermission が一切適用されない）。このゲートは
+    // 遠隔で切り替わり得るため、SDK の挙動に依存しない防御として PreToolUse フックを導入する
+    // （SDK の型定義 `sdk.d.ts` が「PreToolUse hook denies は canUseTool より前に解決する」と明記。
+    // Step 0 の実測でも hook が classifier より前に 2/2 回呼ばれ、deny/allow 判定が honored された）。
+    // 下の canUseTool は「フックが判定を返さなかった場合」（AskUserQuestion、将来の SDK 変化で
+    // フック自体が無効化された場合）の第 2 防衛線として残す。
+    sdkOptions.hooks = {
+      PreToolUse: [{
+        hooks: [async (hookInput): Promise<HookJSONOutput> => {
+          if (hookInput.hook_event_name !== 'PreToolUse') return {};
+          const toolName = hookInput.tool_name;
+          const input = (hookInput.tool_input ?? {}) as Record<string, unknown>;
+          planHookReachedCount++;
 
-        const isQuestion = toolName === 'AskUserQuestion';
-
-        // #332: strictReadonly（MCP submit_instruction 経由）の場合、skipPermissions による
-        // 無条件 allow を行わない。allowlist 判定は下の isQuestion 分岐の後に一本化する
-        if (!isQuestion && !options.strictReadonly && getServerSkipPermissions()) {
-          console.log(`⚡ [SDK] Auto-approved (skip-permissions, plan mode): ${toolName}`);
-          options.onAutoApproved?.({ toolName, toolInput: input });
-          return { behavior: 'allow', updatedInput: input };
-        }
-
-        if (isQuestion) {
-          const requestId = crypto.randomUUID();
-          console.log(`❓ [SDK] User question (plan mode): ${toolName} (${requestId.substring(0, 8)}...)`);
-
-          onApprovalRequest({
-            requestId,
-            toolName,
-            toolInput: input,
-            title: opts.title,
-            description: opts.description,
-            decisionReason: opts.decisionReason,
-            isQuestion: true,
-          });
-
-          return new Promise<PermissionResult>((resolve, reject) => {
-            pendingToolApprovals.set(requestId, { resolve, reject, input });
-
-            if (opts.signal.aborted) {
-              pendingToolApprovals.delete(requestId);
-              resolve({ behavior: 'deny', message: 'Aborted' });
-              return;
+          // サイクルS2a: クロス ask スコープでは新ゲートが唯一の権威。ExitPlanMode/AskUserQuestion
+          // の既存特別扱い・decidePlanPermission には一切委譲しない（deny-only で判定し、
+          // 1つでも deny があればそこで確定する。allow の場合も含め必ずここで return する）。
+          if (options.crossAskScope) {
+            const decision = decideCrossAskToolPermission({
+              toolName,
+              input,
+              hasMcpServer: (hookInput as { mcp_server?: unknown }).mcp_server !== undefined,
+              hasAgentId: (hookInput as { agent_id?: string }).agent_id !== undefined,
+              isPathAllowed: (rawValue: string) =>
+                !!crossAskProjectRootReal && checkCrossAskPath(crossAskProjectRootReal, rawValue).allowed,
+            });
+            if (decision.behavior === 'deny') {
+              console.warn(`🛑 [SDK] Denied by cross-ask scope gate: ${toolName} [${decision.reason}]`);
+              planHookDeniedCount++;
+              options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: `この質問では使用できません（理由: ${decision.detail ?? decision.reason}）。`,
+                },
+              };
             }
-            opts.signal.addEventListener('abort', () => {
-              if (pendingToolApprovals.has(requestId)) {
-                pendingToolApprovals.delete(requestId);
-                resolve({ behavior: 'deny', message: 'Aborted' });
-              }
-            }, { once: true });
-          });
-        }
+            options.onAutoApproved?.({ toolName, toolInput: input });
+            return {
+              hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+            };
+          }
 
-        // #332: strictReadonly の場合、PLAN_READONLY_TOOLS または allowedTools（Bash パターン）に
-        // マッチしないツールは聞かずに deny する（allowlist 外は allow ではなく deny 側に倒す設計）。
-        // 判定ロジックは plan-permission.ts の decidePlanPermission に集約（node --test で検証済み）。
-        // #333: defaultAllowedTools（DEFAULT_ALLOWED_TOOLS_LINUX）を渡し、ユーザーカスタム allowedTools
-        // との和集合で判定する（カスタム保存があると default 追加が効かない問題への対策。人間承認時の
-        // 追記で明示された方針。strictReadonly のこの判定にのみ適用し options.allowedTools 自体は
-        // 書き換えないため、この直下の isToolSessionApproved（exec 用インライン複製）には影響しない）。
-        if (options.strictReadonly) {
+          // #303: ExitPlanMode はプランモードの正規の脱出ハッチではない。ユーザーが e/exec を
+          // 送信するまで常に deny する（disallowedTools の保険として、フック段でも明示 deny）。
+          if (toolName === 'ExitPlanMode') {
+            console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
+            planHookDeniedCount++;
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'deny',
+                permissionDecisionReason: 'プランモードは ExitPlanMode では解除できません。ユーザーが e / exec を送信するまで実装を開始せず、プランの提示のみ行ってください。',
+              },
+            };
+          }
+
+          // AskUserQuestion はフックでは判定しない。従来どおり下の canUseTool（WS 経由で
+          // 人間に聞く経路）に委譲する（{} を返すとパイプラインは継続する）。
+          if (toolName === 'AskUserQuestion') {
+            return {};
+          }
+
+          // #332/#333: strictReadonly の場合、PLAN_READONLY_TOOLS または allowedTools（Bash パターン）
+          // にマッチしないツールは deny する。判定ロジックは plan-permission.ts の
+          // decidePlanPermission に集約（node --test で検証済み）。defaultAllowedTools
+          // （DEFAULT_ALLOWED_TOOLS_LINUX）とユーザーカスタム allowedTools の和集合で判定する。
           const decision = decidePlanPermission({
             toolName,
             input,
-            strictReadonly: true,
+            strictReadonly: !!options.strictReadonly,
             allowedTools: options.allowedTools,
             defaultAllowedTools: DEFAULT_ALLOWED_TOOLS_LINUX,
             readonlyTools: PLAN_READONLY_TOOLS,
@@ -1087,26 +1233,149 @@ async function sendPromptToAiSdk(
             writeTools: PLAN_WRITE_TOOLS,
             skipPermissions: !!getServerSkipPermissions(),
           });
-          if (decision.behavior === 'allow') {
-            return { behavior: 'allow', updatedInput: input };
+          if (decision.behavior === 'deny') {
+            console.warn(`🛑 [SDK] Denied by PreToolUse gate (plan mode): ${toolName} [${decision.reason}]`);
+            planHookDeniedCount++;
+            options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'deny',
+                permissionDecisionReason: `プランモードでは使用できません（理由: ${decision.detail ?? decision.reason}）。必要な操作は承認後のexecで行ってください。`,
+              },
+            };
           }
-          console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode): ${toolName} [${decision.reason}]`);
-          options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
-          return {
-            behavior: 'deny',
-            message: `プランモードでは使用できません（理由: ${decision.detail ?? decision.reason}）。必要な操作は承認後のexecで行ってください。`,
-          };
-        }
 
-        // AskUserQuestion 以外は plan モードのデフォルト動作（allowedTools で制御済み）
-        // プランモード書き込みゲート穴の根治: decidePlanPermission が deny を返さない全ケース
-        // （strictReadonly=true の allowlist 内許可、strictReadonly=false の従来allow）で
-        // onAutoApproved を呼び、Approvals タブ監査ログの不可視ギャップを塞ぐ
-        // （connection.ts 側の onAutoApproved 無条件配線とセットで初めて成立する）。
+          // プランモード書き込みゲート穴の根治（旧 canUseTool 実装から継承）: decidePlanPermission が
+          // deny を返さない全ケースで onAutoApproved を呼び、Approvals タブ監査ログの
+          // 不可視ギャップを塞ぐ（connection.ts 側の onAutoApproved 無条件配線とセットで成立）。
+          options.onAutoApproved?.({ toolName, toolInput: input });
+          return {
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+          };
+        }],
+      }],
+    };
+    console.log('🪝 [SDK] PreToolUse gate enabled (plan mode)');
+    // サイクルS1: 設定ファイル由来の shadow の可視化（挙動は変えない、読むだけ）。
+    warnIfSettingsFileHasPermissions('user settings', path.join(os.homedir(), '.claude', 'settings.json'));
+    warnIfSettingsFileHasPermissions('project settings', path.join(projectPath, '.claude', 'settings.json'));
+    // サイクルS2b（新発見③）: `.claude/settings.local.json` は "local" 設定ソース（CLI 実装を
+    // 実測確認: `<cwd>/.claude/settings.local.json` に解決される。ホームディレクトリ直下の
+    // 同名ファイルは別物で、cwd がプロジェクトパスである通常の Agent 実行では読まれない）。
+    // 従来の警告対象から漏れていたため追加する（挙動は変えない、読むだけ）。
+    warnIfSettingsFileHasPermissions('project local settings', path.join(projectPath, '.claude', 'settings.local.json'));
+    // サイクルS1: canUseTool は onToolApprovalRequest の有無に関わらず常に設定する
+    // （以前は未設定時に canUseTool ごと消え、判定が SDK 既定に委ねられていた構造的欠陥。
+    // 修正対象として明記していたもの。第 2 防衛線として、上記フックが判定を返さなかった
+    // 場合＝基本的に AskUserQuestion のときだけここに来る）。
+    const onApprovalRequest = options.onToolApprovalRequest;
+    sdkOptions.canUseTool = async (toolName, input, opts) => {
+      // サイクルS2a: クロス ask スコープでは通常ここに到達しないはず（上記フックが必ず判定を
+      // 返すため）。第2防衛線として同じ判定を適用し、ExitPlanMode/AskUserQuestion/
+      // skipPermissions/decidePlanPermission のロジックには一切進まない（disableAsk 前提の
+      // クロス ask は AskUserQuestion 自体を仕様上使わない）。
+      if (options.crossAskScope) {
+        const decision = decideCrossAskToolPermission({
+          toolName,
+          input,
+          // canUseTool には mcp_server/agent_id 情報が渡らないため、ツール名・引数のみで判定する
+          // （上記フックが先に確定させるため、ここに到達する時点でこの2項目は安全側で false 扱い）。
+          hasMcpServer: false,
+          hasAgentId: false,
+          isPathAllowed: (rawValue: string) =>
+            !!crossAskProjectRootReal && checkCrossAskPath(crossAskProjectRootReal, rawValue).allowed,
+        });
+        if (decision.behavior === 'deny') {
+          console.warn(`🛑 [SDK] Denied by cross-ask scope gate (canUseTool fallback): ${toolName} [${decision.reason}]`);
+          options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+          return { behavior: 'deny', message: `この質問では使用できません（理由: ${decision.detail ?? decision.reason}）。` };
+        }
         options.onAutoApproved?.({ toolName, toolInput: input });
         return { behavior: 'allow', updatedInput: input };
-      };
-    }
+      }
+
+      // #303: disallowedTools / フックを素通りするケースへの保険。
+      if (toolName === 'ExitPlanMode') {
+        console.warn('🛑 [SDK] Blocked ExitPlanMode in plan mode (user must send e/exec)');
+        return {
+          behavior: 'deny',
+          message: 'プランモードは ExitPlanMode では解除できません。ユーザーが e / exec を送信するまで実装を開始せず、プランの提示のみ行ってください。',
+        };
+      }
+
+      const isQuestion = toolName === 'AskUserQuestion';
+
+      // #332: strictReadonly（MCP submit_instruction 経由）の場合、skipPermissions による
+      // 無条件 allow を行わない。
+      if (!isQuestion && !options.strictReadonly && getServerSkipPermissions()) {
+        console.log(`⚡ [SDK] Auto-approved (skip-permissions, plan mode): ${toolName}`);
+        options.onAutoApproved?.({ toolName, toolInput: input });
+        return { behavior: 'allow', updatedInput: input };
+      }
+
+      if (isQuestion) {
+        if (!onApprovalRequest) {
+          // サイクルS1: onToolApprovalRequest 未設定時の安全側 deny（人間に聞く手段が無い）。
+          console.warn('🛑 [SDK] AskUserQuestion denied: no approval channel configured (onToolApprovalRequest missing)');
+          return { behavior: 'deny', message: 'AskUserQuestion is unavailable (no approval channel configured).' };
+        }
+        const requestId = crypto.randomUUID();
+        console.log(`❓ [SDK] User question (plan mode): ${toolName} (${requestId.substring(0, 8)}...)`);
+
+        onApprovalRequest({
+          requestId,
+          toolName,
+          toolInput: input,
+          title: opts.title,
+          description: opts.description,
+          decisionReason: opts.decisionReason,
+          isQuestion: true,
+        });
+
+        return new Promise<PermissionResult>((resolve, reject) => {
+          pendingToolApprovals.set(requestId, { resolve, reject, input, sessionId });
+
+          if (opts.signal.aborted) {
+            pendingToolApprovals.delete(requestId);
+            resolve({ behavior: 'deny', message: 'Aborted' });
+            return;
+          }
+          opts.signal.addEventListener('abort', () => {
+            if (pendingToolApprovals.has(requestId)) {
+              pendingToolApprovals.delete(requestId);
+              resolve({ behavior: 'deny', message: 'Aborted' });
+            }
+          }, { once: true });
+        });
+      }
+
+      // #332/#333: 通常はここに到達しない（上記フックで確定済み）。フックが判定を返さなかった
+      // 稀な経路に対する第 2 防衛線として同じ decidePlanPermission を適用する。
+      const decision = decidePlanPermission({
+        toolName,
+        input,
+        strictReadonly: !!options.strictReadonly,
+        allowedTools: options.allowedTools,
+        defaultAllowedTools: DEFAULT_ALLOWED_TOOLS_LINUX,
+        readonlyTools: PLAN_READONLY_TOOLS,
+        readonlyBashCommands: PLAN_READONLY_BASH_COMMANDS,
+        writeBashCommands: PLAN_WRITE_BASH_COMMANDS,
+        writeTools: PLAN_WRITE_TOOLS,
+        skipPermissions: !!getServerSkipPermissions(),
+      });
+      if (decision.behavior === 'deny') {
+        console.warn(`🛑 [SDK] Denied by strictReadonly policy (plan mode, canUseTool fallback): ${toolName} [${decision.reason}]`);
+        options.onPolicyDenied?.({ toolName, toolInput: input, reason: decision.reason });
+        return {
+          behavior: 'deny',
+          message: `プランモードでは使用できません（理由: ${decision.detail ?? decision.reason}）。必要な操作は承認後のexecで行ってください。`,
+        };
+      }
+
+      options.onAutoApproved?.({ toolName, toolInput: input });
+      return { behavior: 'allow', updatedInput: input };
+    };
   } else {
     // Exec モード: canUseTool でパーミッション制御
     sdkOptions.permissionMode = 'default';
@@ -1131,14 +1400,16 @@ async function sendPromptToAiSdk(
         // AskUserQuestion は常にユーザーに聞く（approveAllMode や自動承認をスキップ）
         if (!isQuestion) {
           // セッション内で「📌 常に許可」されたツールルールにマッチする場合は即座に allow
-          if (isToolSessionApproved(toolName, input)) {
+          if (isToolSessionApproved(sessionId, toolName, input)) {
             console.log(`📌 [SDK] Auto-approved (session tool rule): ${toolName}`);
             options.onAutoApproved?.({ toolName, toolInput: input });
             return { behavior: 'allow', updatedInput: input };
           }
 
           // 「以降すべて許可」モードなら即座に allow + 通知送信
-          if (approveAllMode) {
+          // サイクルG（G-8）: 一時セッションはこの module-level 変数を直接見ず、
+          // isEphemeralSession で常に false になる経路（isApproveAllMode 相当）を通す。
+          if (!isEphemeralSession(sessionId) && approveAllMode) {
             console.log(`🔓 [SDK] Auto-approved (approve-all mode): ${toolName}`);
             options.onAutoApproved?.({ toolName, toolInput: input });
             return { behavior: 'allow', updatedInput: input };
@@ -1161,7 +1432,7 @@ async function sendPromptToAiSdk(
 
         // ユーザーの応答を待つ Promise を作成
         return new Promise<PermissionResult>((resolve, reject) => {
-          pendingToolApprovals.set(requestId, { resolve, reject, input });
+          pendingToolApprovals.set(requestId, { resolve, reject, input, sessionId });
 
           // AbortSignal を監視（SDK 側からのキャンセル）
           if (opts.signal.aborted) {
@@ -1298,7 +1569,10 @@ async function sendPromptToAiSdk(
   // 最初の result を受けた瞬間に CLI への stdin を閉じる（canUseTool の応答経路も道連れで死ぬ）。
   // 「途中 result」を延期して読み続ける bg-task 判定（下記 for-await 内）と衝突するため、
   // ターン完了まで閉じない AsyncIterable を渡す（詳細は sdk-prompt-stream.ts 冒頭コメント参照）。
-  const promptStream = buildSdkPromptStream(prompt);
+  // サイクルS2a（新発見①）: クロス ask スコープでは client_composed:true を付け、質問文中の
+  // @パス 記法の自動展開・スラッシュコマンドのディスパッチを CLI に行わせない（PreToolUse フックの
+  // 射程外のため、ツール呼び出しを経由しない唯一の漏洩経路をここで塞ぐ）。
+  const promptStream = buildSdkPromptStream(prompt, !!options.crossAskScope);
   const sdkQuery = query({ prompt: promptStream.stream, options: sdkOptions });
   try {
     for await (const message of sdkQuery) {
@@ -1313,6 +1587,25 @@ async function sendPromptToAiSdk(
       const loopGuardWallClock = checkWallClock(loopGuardState, Date.now(), loopGuardConfig);
       if (loopGuardWallClock.abort) {
         return await abortForLoopGuard('wallClock', loopGuardWallClock.detail);
+      }
+
+      // サイクルS2a（新発見⑤）: クロス ask スコープでは system/init メッセージの内容を実行時に
+      // 検証し、`settings` インライン注入が静かに無視された・SDK バージョン変化で想定外の構成に
+      // なっていた等のケースを機械検出する最後の砦。1つでも外れたら即座にターンを中断する
+      // （SDK の挙動に依存しない防御という S1 と同じ思想。`decideCrossAskInitAssertion()` 参照）。
+      if (options.crossAskScope && m.type === 'system' && m.subtype === 'init' && !crossAskInitAssertionChecked) {
+        crossAskInitAssertionChecked = true;
+        const assertion = decideCrossAskInitAssertion(
+          { tools: m.tools, mcp_servers: m.mcp_servers, permissionMode: m.permissionMode, cwd: m.cwd },
+          crossAskProjectRootReal ?? projectPath,
+        );
+        if (!assertion.ok) {
+          console.error(`🚨 [SDK] CROSS-ASK GATE REGRESSION: ${assertion.reason}`);
+          onOutput('この質問には応答できません（設定の検証に失敗しました。管理者に連絡してください）。', true, undefined, result.extractedSessionId, 'aborted');
+          sdkAbortController.abort();
+          return result;
+        }
+        console.log('🔒 [SDK] cross-ask scope init assertion passed');
       }
 
       // セッション ID 抽出（system/init または result から）
@@ -1393,6 +1686,11 @@ async function sendPromptToAiSdk(
             observeLoopGuardEvent(loopGuardState, { kind: 'text', text: block.text, nowMs: Date.now() }, loopGuardConfig);
           } else if (block.type === 'tool_use' && block.name) {
             console.log(`[claude/sdk] 🔧 Using tool: ${block.name}`);
+            // サイクルS1: plan モードで Bash が使われた回数を観測する（フック到達 0 件のまま
+            // Bash が実行された場合の無言故障検知用。exec では加算しない）。
+            if (options.usePlanMode && block.name === 'Bash') {
+              planBashToolUseCount++;
+            }
             onOutput(`\n${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.usingTool', { tool: block.name })}\n`, false);
             // #355: 「進捗あり」の証拠として P2（異なるツール種別）を loop-guard に通知、
             // 同一ツール連打（層2）も同時に検知する
@@ -1594,6 +1892,18 @@ async function sendPromptToAiSdk(
     return result;
   } finally {
     clearBgIdleTimer();
+    // サイクルS1: plan モードのターン終了時にフック到達状況を1行ログする（すべての return 経路
+    // ─正常終了・catch・abort─で必ず通る finally に置くことで取り逃しを防ぐ）。
+    // 到達 0 件のまま Bash が実行されていたら、ゲートが無言で素通りしている回帰として
+    // 強調ログを出す（2026-09-20〜2026-11-12 に実際に起きた故障と同じ形。本件はサーバーへの
+    // 通知配線まではせず agent.log 上の可視化に留める。将来 WS 経由の通知に昇格させる場合は
+    // 新しいメッセージ型と Approvals 表示の追加が必要になるため別サイクル）。
+    if (options.usePlanMode && !options.rawMode) {
+      console.log(`🪝 [SDK] PreToolUse gate summary: reached=${planHookReachedCount} denied=${planHookDeniedCount} bashToolUses=${planBashToolUseCount}`);
+      if (planBashToolUseCount > 0 && planHookReachedCount === 0) {
+        console.error(`🚨 [SDK] PLAN GATE REGRESSION: Bash was used ${planBashToolUseCount} time(s) this turn but PreToolUse hook reached 0 times — the gate is likely being bypassed (see doc/sdk-0.3-migration-findings.md).`);
+      }
+    }
     // sdk-prompt-stream: 入力ストリームを解放して SDK 側の transport.endInput()（stdin close）を進行させる。
     // ここに到達するのは正常終了・catch・abort のいずれの経路でも必ず通るため、
     // release() 漏れは起きない（release() 自体は冪等）。
@@ -1781,6 +2091,12 @@ async function sendPromptToAiImpl(
   let codexTurnFailed = false;
   let codexTurnFailedMessage = '';
 
+  // 2026-10-27 サイクル2（plan→exec resume）: Gemini CLI 用のセッション状態（close ハンドラから参照する）。
+  // このターンで実際に `--session-id` / `--resume` に渡した ID を保持し、close ハンドラで
+  // `resolveGeminiAiSessionId()` に渡して `result.extractedSessionId` を確定する。
+  let geminiSessionIdUsed: string | undefined;
+  let geminiResumedSessionId: string | undefined;
+
   // ---- 今サイクル: ターン終了の単一関門 + kill エスカレーション状態 ----
   // 孫プロセス（Gradle/Kotlin デーモン等）がパイプを握ったまま devin.exe が終了すると
   // 'close' が永久に来ず、ターンが確定しない（実測: 92分ハング）。'exit' を独立に観測し、
@@ -1818,26 +2134,67 @@ async function sendPromptToAiImpl(
     // 2026-10-26: exec ターンのみシェル実行を自動承認する（従来は plan/exec とも auto_edit 固定で、
     // 非対話起動では run_shell_command の確認プロンプトに誰も答えられず exec が機能していなかった）。
     // キルスイッチ DEVRELAY_GEMINI_YOLO=0 で従来挙動（常に auto_edit）に戻せる。
+    // 2026-10-27: 承認モード関連 argv の決定自体は `buildGeminiApprovalArgs()`（純粋関数、テスト済み）に
+    // 委譲する。plan ターンでも probe 結果を必ず見るようになった点が今回の修正（事故ケースの根治）。
     const geminiYoloEnabled = process.env.DEVRELAY_GEMINI_YOLO !== '0';
-    const wantYolo = !options.usePlanMode && geminiYoloEnabled;
-    let args: string[];
-    if (wantYolo && geminiCaps.approvalModeYolo) {
-      args = ['--approval-mode', 'yolo'];
-    } else if (wantYolo && geminiCaps.yoloFlag) {
-      args = ['--yolo']; // --approval-mode 非対応の旧 CLI 向けフォールバック
-    } else {
-      args = ['--approval-mode', 'auto_edit']; // plan ターン、または yolo 系フラグに非対応の旧 CLI
-      if (wantYolo && !geminiYoloDegradedWarned) {
-        // #325 静かなフォールバック禁止: exec なのに yolo 化できなかった場合は 1 回だけ知らせる
-        geminiYoloDegradedWarned = true;
-        onOutput(`${tChat(options.language ?? DEFAULT_CHAT_LANGUAGE, 'gemini.yoloUnsupported')}\n`, false);
+    const { args: approvalArgs, degraded } = buildGeminiApprovalArgs(geminiCaps, {
+      usePlanMode: !!options.usePlanMode,
+      yoloEnabled: geminiYoloEnabled,
+      droppedFlags: options.geminiDroppedFlags,
+    });
+    const args: string[] = [...approvalArgs];
+    // #325 静かなフォールバック禁止: 希望どおりに動けなかった場合は理由ごとに 1 回だけ知らせる
+    if (degraded !== 'none' && !geminiDegradeWarned.has(degraded)) {
+      geminiDegradeWarned.add(degraded);
+      const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+      if (degraded === 'execAutoEdit') {
+        onOutput(`${tChat(lang, 'gemini.yoloUnsupported')}\n`, false);
+      } else if (degraded === 'execNoFlag' || degraded === 'planNoFlag') {
+        // probe 自体が失敗していた場合は原因が異なるため文言を分ける
+        onOutput(`${tChat(lang, geminiProbeFailed ? 'gemini.probeFailed' : 'gemini.approvalModeUnsupported')}\n`, false);
       }
+      // 'execYoloFlag'（旧 --yolo へのフォールバック）は正常劣化のため警告しない
     }
     // #309: plan/exec モデル分離。旧 CLI で `--model` 非対応の場合は引数を付けずデフォルトへ劣化させる。
     const geminiModel = safeModelArg(options.model);
     if (geminiModel && geminiCaps.model) {
       args.push('-m', geminiModel);
     }
+
+    // 2026-10-27 サイクル2（plan→exec resume）: `--resume` / `--session-id` の argv を決定する。
+    // D1: 新規セッション採番は MCP plan ターン（`options.turnId` がある場合）のみ行う。
+    //   → chat ターン（turnId 無し）は argv が従来と 1 バイトも変わらない。
+    // D2: resume は `options.resumeSource === 'explicit'`（サーバーが approve_implementation 等で
+    //   明示指定した ID）のときのみ使う。`'stored'`（チャット前ターンの保存 ID）まで使うと、
+    //   同一チャットで claude → gemini とツールを切り替えた場合に別ツールの ID を渡してしまい exit 42 になる。
+    const geminiSessionEnabled = process.env.DEVRELAY_GEMINI_SESSION_ID !== '0';
+    const geminiExplicitResume = (geminiSessionEnabled && options.resumeSource === 'explicit')
+      ? options.resumeSessionId : undefined;
+    // リトライのたびに採り直すため、ここで randomUUID する（options 経由で持ち回さない。
+    // 同じ ID を再 spawn で使い回すと「Session ID ... already exists」で exit 42 になる）。
+    const geminiNewSessionId = (geminiSessionEnabled && !geminiExplicitResume && options.turnId)
+      ? crypto.randomUUID() : undefined;
+    const geminiSessionResult = buildGeminiSessionArgs({
+      caps: geminiCaps,
+      resumeSessionId: geminiExplicitResume,
+      newSessionId: geminiNewSessionId,
+      droppedFlags: options.geminiDroppedFlags,
+    });
+    args.push(...geminiSessionResult.args);
+    geminiSessionIdUsed = geminiSessionResult.sessionId;
+    geminiResumedSessionId = geminiSessionResult.resumeId;
+    // #325 静かなフォールバック禁止: 希望どおりに動けなかった場合は理由ごとに 1 回だけ知らせる
+    if (geminiSessionResult.degraded !== 'none' && !geminiSessionDegradeWarned.has(geminiSessionResult.degraded)) {
+      geminiSessionDegradeWarned.add(geminiSessionResult.degraded);
+      const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+      if (geminiSessionResult.degraded === 'sessionIdUnsupported') {
+        onOutput(`${tChat(lang, 'gemini.sessionIdUnsupported', { version: geminiVersionCache })}\n`, false);
+      } else if (geminiSessionResult.degraded === 'resumeUnsupported') {
+        onOutput(`${tChat(lang, 'gemini.resumeUnsupported', { version: geminiVersionCache })}\n`, false);
+      }
+      // 'invalidId'（UUID 形式でない）は通常到達しない防御的分岐のため警告しない
+    }
+
     console.log(`🔧 Running: ${command} ${args.join(' ')} (prompt via stdin)`);
 
     // Gemini コマンドのディレクトリを PATH に追加（systemd 実行時に node が見つからない問題を回避）
@@ -1849,6 +2206,16 @@ async function sendPromptToAiImpl(
       ? (process.env.PATH ?? geminiDir)
       : (process.env.PATH ? `${geminiDir}${pathSep}${process.env.PATH}` : geminiDir);
 
+    // 2026-10-27: 未信頼ディレクトリでは Gemini CLI が承認モードを問答無用で `default` に落とす
+    // （plan は exit 55 で即死、exec は `--approval-mode yolo` を渡しても黙って降格され
+    // run_shell_command が誰も答えられない確認待ちになる＝2026-10-26 サイクルが無効化される）。
+    // DevRelay はユーザーが明示的に接続したマシン・プロジェクトで非対話実行するため、workspace trust
+    // プロンプトに答えられる人間がそもそもおらず、付与しても安全性は下がらない（Devin の
+    // `--respect-workspace-trust false`、#345 と同じ判断）。Gemini 公式が headless/automated 環境向けに
+    // 文書化している環境変数を使う（`--skip-trust` フラグだと旧 CLI で Unknown arguments になりうるため
+    // 避ける。未知の環境変数は CLI 側が黙って無視するだけで安全）。
+    const geminiTrustWorkspace = process.env.DEVRELAY_GEMINI_TRUST_WORKSPACE !== '0';
+
     proc = spawn(command, args, {
       cwd: projectPath,
       shell: true,
@@ -1857,6 +2224,7 @@ async function sendPromptToAiImpl(
         ...process.env,
         ...proxyEnv,
         PATH: envPath,  // Add gemini's directory to PATH so node can be found
+        ...(geminiTrustWorkspace ? { GEMINI_CLI_TRUST_WORKSPACE: 'true' } : {}),
         DEVRELAY: '1',
         DEVRELAY_SESSION_ID: sessionId,
         DEVRELAY_PROJECT: projectPath,
@@ -1894,16 +2262,24 @@ async function sendPromptToAiImpl(
     // ATIF 読み取り時にこれを渡し「今回のターンで新たに実行されたステップ」だけに絞り込む。
     // 未保存・不正値（null）はフォールバックとして 0 を使う（sliceStepsFromOffset() 側でも
     // offset<=0 は全件返しにフォールバックする二重防御）。
-    devinAtifStepOffsetAtStart = (await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0;
-    devinAtifUsageOffsetAtStart = await loadDevinAtifUsageOffset(projectPath, options.agentScopeId);
+    // サイクルG（G-5b）: isolated（クロスユーザー ask）では所有者の Devin 状態を読まない。
+    devinAtifStepOffsetAtStart = options.projectStateRead !== false
+      ? ((await loadDevinAtifStepOffset(projectPath, options.agentScopeId)) ?? 0)
+      : 0;
+    devinAtifUsageOffsetAtStart = options.projectStateRead !== false
+      ? await loadDevinAtifUsageOffset(projectPath, options.agentScopeId)
+      : null;
 
     // #368 Phase2a: Devin は常に exec 相当（dangerous）で起動する。
     const devinTurnPermissionMode: string | null = devinHasPermissionMode ? 'dangerous' : null;
 
     // 保存済み Devin セッション ID があれば -r で resume（前回と同じ権限モードのときのみ、
-    // モードが変わっていたら resume せず新規セッションで開始する）
-    const devinSavedPermissionMode = await loadDevinPermissionMode(projectPath, options.agentScopeId);
-    const devinSessionId = devinSavedPermissionMode === devinTurnPermissionMode
+    // モードが変わっていたら resume せず新規セッションで開始する）。
+    // サイクルG（G-5b）: isolated では resume 判定自体を行わず、常に新規セッションで開始する。
+    const devinSavedPermissionMode = options.projectStateRead !== false
+      ? await loadDevinPermissionMode(projectPath, options.agentScopeId)
+      : null;
+    const devinSessionId = options.projectStateRead !== false && devinSavedPermissionMode === devinTurnPermissionMode
       ? await loadDevinSessionId(projectPath, options.agentScopeId)
       : null;
     // このサイクル（G3 実測で確定）: devin -r はモデル指定を無視し、セッション作成時のモデルを
@@ -1992,7 +2368,11 @@ async function sendPromptToAiImpl(
     let promptFilePath: string | null = null;
     if (devinHasPromptFile) {
       promptFilePath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-      fs.writeFileSync(promptFilePath, prompt, 'utf-8');
+      // サイクルG（G-9）: 質問全文（クロスユーザー ask ではクロス ask の質問文も含む）が
+      // 他ユーザーにも読めるパーミッションで /tmp に残る既存の情報露出を根治する。
+      // writeFileSync の mode は既存ファイルには効かないため、先に unlink してから 0600 で作り直す。
+      try { fs.unlinkSync(promptFilePath); } catch {}
+      fs.writeFileSync(promptFilePath, prompt, { encoding: 'utf-8', mode: 0o600 });
       args.push('--prompt-file', promptFilePath);
     } else {
       console.error(`[devin] --prompt-file unsupported, aborting (unsafe argv fallback removed in #344)`);
@@ -2075,7 +2455,10 @@ async function sendPromptToAiImpl(
       args.push('-c', `model="${codexModel}"`);
     }
 
-    const codexThreadIdToResume = caps.resume ? await loadCodexSessionId(projectPath, options.agentScopeId) : null;
+    // サイクルG（G-5b）: isolated では所有者の Codex スレッドを resume しない。
+    const codexThreadIdToResume = caps.resume && options.projectStateRead !== false
+      ? await loadCodexSessionId(projectPath, options.agentScopeId)
+      : null;
     if (codexThreadIdToResume) {
       args.push('resume', codexThreadIdToResume);
       codexResumedThreadId = codexThreadIdToResume;
@@ -2326,9 +2709,14 @@ async function sendPromptToAiImpl(
   let promptTooLong = false;
 
   // --resume 使用時のスタートアップタイムアウト（ハング検出・自動リトライ用）
+  // 2026-10-27 サイクル2（D4）: gemini はこの watchdog の対象外にする。実機計測で gemini は
+  // 初回出力まで約23秒かかり（ツール実行を伴う exec ならさらに無音が延びうる）、「60秒無音」は
+  // gemini にとって異常の証拠にならない。resume 失敗は exit code 42 で即座に、明確な stderr 付きで
+  // 検出できる（classifyGeminiSessionFailure()）ため、この watchdog を armすると実行中の exec ターンを
+  // 誤って kill してしまう危険がある。claude/codex/devin には一切影響しない。
   const RESUME_STARTUP_TIMEOUT = 60000; // 60秒
   let startupTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-  if (options.resumeSessionId) {
+  if (options.resumeSessionId && aiTool !== 'gemini') {
     startupTimeoutTimer = setTimeout(() => {
       if (fullOutput.length === 0 && !completionSent) {
         console.log(`[${aiTool}] ⚠️ --resume startup timeout (${RESUME_STARTUP_TIMEOUT / 1000}s), killing process for retry`);
@@ -2378,9 +2766,12 @@ async function sendPromptToAiImpl(
                 codexThreadId = threadId;
                 result.extractedSessionId = threadId;
                 console.log(`[codex] 📋 Thread ID: ${threadId}`);
-                saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
-                  console.error(`Failed to save Codex session ID:`, err);
-                });
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を書かない。
+                if (options.persistProjectState !== false) {
+                  saveCodexSessionId(projectPath, threadId, options.agentScopeId).catch(err => {
+                    console.error(`Failed to save Codex session ID:`, err);
+                  });
+                }
               }
               break;
             }
@@ -2633,6 +3024,18 @@ async function sendPromptToAiImpl(
       clearTurnTimers();
       console.log(`[${aiTool}] Process exited with code ${code}, signal ${signal}`);
 
+      // 2026-10-27 サイクル2（plan→exec resume）: gemini は claude SDK/codex と異なり JSONL 出力から
+      // セッション ID を拾えないため、このターンで実際に --session-id / --resume に渡した ID から
+      // 確定する。以降の全完了経路（onOutput(..., result.extractedSessionId)）が自動的に運ぶ。
+      // fullOutput が空（起動失敗・早期終了等）のターンでは常に undefined（fail-closed、core#383 と同じ方針）。
+      if (aiTool === 'gemini') {
+        result.extractedSessionId = resolveGeminiAiSessionId({
+          producedOutput: fullOutput.trim().length > 0,
+          newSessionId: geminiSessionIdUsed,
+          resumeSessionId: geminiResumedSessionId,
+        });
+      }
+
       // #276: 進捗タイマー停止 + ATIF エクスポートファイルの後始末
       if (devinHeartbeatTimer) { clearInterval(devinHeartbeatTimer); devinHeartbeatTimer = null; }
       if (devinExportPollTimer) { clearInterval(devinExportPollTimer); devinExportPollTimer = null; }
@@ -2752,7 +3155,10 @@ async function sendPromptToAiImpl(
           (devinAtifRejectionEvidence !== null && isDevinToolRejectionText(devinAtifRejectionEvidence)) ||
           (fullOutput.trim().length === 0 && code === 0);
         const devinPromptTempPath = path.join(os.tmpdir(), `devrelay-prompt-${sessionId}.txt`);
-        if (devinTurnFailed) {
+        // サイクルG（G-9）: 一時セッション（isolated/legacy とも）は失敗ターンでも調査用に
+        // 残さず必ず消す（借り手の質問文を所有者機の /tmp に残さない）。対話セッションのみ
+        // 従来どおり事後調査のために残す。
+        if (devinTurnFailed && options.persistProjectState !== false) {
           console.log(`[devin] ⚠️ Turn failed, keeping temp files for inspection: ${devinPromptTempPath}${devinExportPath ? ` / ${devinExportPath}` : ''}`);
         } else {
           try { fs.unlinkSync(devinPromptTempPath); } catch {}
@@ -2784,7 +3190,8 @@ async function sendPromptToAiImpl(
               const latest = sessions
                 .filter((s: any) => s.working_directory?.replace(/\\/g, '/').toLowerCase() === normalizedPath)
                 .sort((a: any, b: any) => (b.last_activity_at || 0) - (a.last_activity_at || 0))[0];
-              if (latest?.id) {
+              // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない。
+              if (latest?.id && options.persistProjectState !== false) {
                 saveDevinSessionId(projectPath, latest.id, options.agentScopeId).catch(() => {});
                 const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
                 if (devinActualModelForSave) {
@@ -2809,23 +3216,27 @@ async function sendPromptToAiImpl(
                 },
               });
               if (pick.id) {
-                saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
                 console.log(`[devin] Session ID decided: ${pick.id} (reason=${pick.reason}, scope=${currentScopeKey})`);
-                // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
-                // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
-                // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
-                // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
-                // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
-                // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
-                const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
-                if (devinActualModelForSave) {
-                  saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を書かない
+                // （decided ログ自体は機体ローカルの診断用途のため常に出す）。
+                if (options.persistProjectState !== false) {
+                  saveDevinSessionId(projectPath, pick.id, options.agentScopeId).catch(() => {});
+                  // 2026-10-02 修正: 次回のモデル一致判定のため、今回「要求した」モデルではなく
+                  // ATIF で実測できた「実際に動いた」モデルをセッション ID と並べて保存する。
+                  // 要求値を保存すると、Devin が要求モデルを黙って別モデルへ振り替えた場合に
+                  // 「要求は毎回同じだから一致」と誤判定し続け、誤ったモデルのまま resume が
+                  // 永久に固定されてしまう（2026-10-02 実機事故）。実測できなかった場合は保存を
+                  // スキップする（前回までの実測値をそのまま残し、未知の値で上書きしない）。
+                  const devinActualModelForSave = devinAtifModelId ?? devinAtifModelName;
+                  if (devinActualModelForSave) {
+                    saveDevinModel(projectPath, devinActualModelForSave, options.agentScopeId).catch(() => {});
+                  }
+                  // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
+                  // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
+                  saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId, devinAtifCumulativeUsage as Record<string, number> | null).catch(() => {});
+                  // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
+                  saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
                 }
-                // #365: 今回ターン終了時点の累計ステップ数を次ターンのオフセットとして保存する。
-                // devinOutputEmpty（resume 空振りを含む）ガードの内側のため、失敗ターンでは保存されない。
-                saveDevinAtifStepOffset(projectPath, devinAtifTotalSteps, options.agentScopeId, devinAtifCumulativeUsage as Record<string, number> | null).catch(() => {});
-                // #368 Phase2a: 次回の resume 時にパーミッションモードの一致を判定するため、今回使ったモードも並べて保存する
-                saveDevinPermissionMode(projectPath, devinEffectivePermissionMode ?? '', options.agentScopeId).catch(() => {});
               } else if (pick.reason !== 'none') {
                 // 'ambiguous'/'ownedByOtherScope': 誤った ID を固定化するより未保存のほうが安全。
                 // 次ターンは新規セッションになるが、Devin は会話履歴を常にプロンプトへ注入するため
@@ -2944,6 +3355,90 @@ async function sendPromptToAiImpl(
         return;
       }
 
+      // 2026-10-27 Phase 2: Gemini CLI が `--approval-mode`/`--yolo` を未知の引数として拒否した場合
+      // （probe が誤判定していた、または probe 自体が通っていてもバージョンにより実際は非対応等）、
+      // yargs が `Unknown arguments: approval-mode, approvalMode` 等で exit 1・stdout 空になる。
+      // #329 の devinUnknownFlagMatch と同じ流儀でフラグを1つ外して最大2回まで自動リトライする。
+      // 2026-10-27 サイクル2: `--session-id`/`--resume` も同じ機構（同じ geminiDroppedFlags・同じ上限2個）
+      // に乗せる（probe 誤判定時の自己修復、D1/D2 のセッション引数も対象）。
+      const geminiUnknownArgMatch = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? stderrOutput.match(/Unknown arguments?:\s*([^\n]+)/i)
+        : null;
+      if (geminiUnknownArgMatch) {
+        const rawArgs = geminiUnknownArgMatch[1];
+        const droppedFlag = /approval-?mode/i.test(rawArgs) ? '--approval-mode'
+          : /\byolo\b/i.test(rawArgs) ? '--yolo'
+          : /session-?id/i.test(rawArgs) ? '--session-id'
+          : /\bresume\b/i.test(rawArgs) ? '--resume'
+          : null;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        if (droppedFlag) {
+          const alreadyDropped = options.geminiDroppedFlags ?? [];
+          if (!alreadyDropped.includes(droppedFlag) && alreadyDropped.length < 2) {
+            console.log(`[gemini] ⚠️ Unknown flag '${droppedFlag}' rejected by CLI (code ${code}), retrying without it`);
+            completionSent = true;
+            onOutput(`${tChat(lang, 'gemini.unknownFlagRetry', { flag: droppedFlag })}\n`, false);
+            const fallbackOptions: SendPromptOptions = {
+              ...options,
+              geminiDroppedFlags: [...alreadyDropped, droppedFlag],
+            };
+            sendPromptToAi(sessionId, prompt, projectPath, aiTool, claudeSessionId, config, onOutput, fallbackOptions)
+              .then((fallbackResult) => resolve(fallbackResult))
+              .catch((err) => {
+                console.error(`[gemini] unknown-flag retry failed: ${(err as Error).message}`);
+                if (fullOutput.length === 0) {
+                  onOutput('(No response from AI)', true, result.usageData, result.extractedSessionId);
+                }
+                resolve(result);
+              });
+            return;
+          }
+          // リトライ済みでも解消しない → 「(No response from AI)」ではなく実際の stderr を明示して停止
+          if (!completionSent) {
+            completionSent = true;
+            const stderrTail = stderrOutput.trim().split('\n').slice(-5).join('\n');
+            onOutput(tChat(lang, 'gemini.unknownFlagFailed', { flag: droppedFlag, stderr: stderrTail }), true, result.usageData, result.extractedSessionId);
+          }
+          resolve(result);
+          return;
+        }
+        // 未知のフラグ名をマッピングできない場合は通常の ai.cliFailed 経路へフォールスルーする
+      }
+
+      // 2026-10-27 サイクル2（D3、plan→exec resume）: Gemini CLI がセッション関連エラー（exit code 42）
+      // で終了した場合の分類。静かなフォールバック禁止（#325）: `resumeFailed` に乗せて
+      // connection.ts の既存リトライ機構（プラン本文の再注入 + --resume 無しでの再実行）に合流しつつ、
+      // 1 行だけ理由を知らせる。リトライは別の UUID を採番し直すため（分岐内で crypto.randomUUID()
+      // している）、同じ argv で再 spawn して 42 を繰り返すことはない。
+      const geminiSessionFailure = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? classifyGeminiSessionFailure({ exitCode: code, stderr: stderrOutput })
+        : 'none';
+      if (geminiSessionFailure !== 'none' && !completionSent) {
+        completionSent = true;
+        result.resumeFailed = true;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const key = geminiSessionFailure === 'resumeInvalid' ? 'gemini.resumeInvalid' : 'gemini.sessionIdCollision';
+        onOutput(`${tChat(lang, key)}\n`, false);
+        resolve(result);
+        return;
+      }
+
+      // 2026-10-27: Gemini API が「このモデルは廃止/提供終了」と 404 を返した場合、二重エスケープされた
+      // 生 JSON ではなく次の一手を提示する（gemini-user 機体で発覚。旧 CLI の既定モデル
+      // `gemini-2.5-pro` が Google 側で提供終了されていた。DevRelay 側が `-m` を明示指定していない
+      // ケースでも CLI 自身の既定モデルが廃止されていれば起きるため、`--approval-mode` 根治後も残る）。
+      const geminiModelUnavailable = aiTool === 'gemini' && fullOutput.trim().length === 0
+        ? detectGeminiModelUnavailable(stderrOutput)
+        : null;
+      if (geminiModelUnavailable && !completionSent) {
+        completionSent = true;
+        const lang = options.language ?? DEFAULT_CHAT_LANGUAGE;
+        const suggestedModel = geminiModelUnavailable.recommendedModel ?? 'gemini-3.1-pro-preview';
+        onOutput(tChat(lang, 'gemini.modelUnavailable', { model: geminiModelUnavailable.model, suggestedModel }), true, result.usageData, result.extractedSessionId);
+        resolve(result);
+        return;
+      }
+
       // Devin: resume（-r）が出力ゼロで終了（exit code 不問）→ セッション ID を破棄して新規セッションでリトライ
       // -r + -p/--agent-config の組み合わせで CLI がエラーも出力も出さず正常終了扱いで空振りするケースの対処
       if (devinResumeEmpty) {
@@ -2952,7 +3447,12 @@ async function sendPromptToAiImpl(
         // クリア完了後に resolve（後続リトライの loadDevinSessionId と競合させない）。onOutput は呼ばずリトライに完了通知を任せる
         // このサイクル(S1): セッションIDとモデルは常に対で扱う不変条件のため、モデルも一緒にクリアする
         // #365: ATIF 累計ステップ数オフセットも三つ目の要素として同時にクリアする（新規セッションでは0から数え直す）
-        Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の Devin 状態を削除しない。
+        if (options.persistProjectState !== false) {
+          Promise.all([clearDevinSessionId(projectPath, options.agentScopeId), clearDevinModel(projectPath, options.agentScopeId), clearDevinAtifStepOffset(projectPath, options.agentScopeId), clearDevinPermissionMode(projectPath, options.agentScopeId)]).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 
@@ -2962,7 +3462,12 @@ async function sendPromptToAiImpl(
       if (codexResumeEmpty) {
         console.log(`[codex] ⚠️ Resumed thread produced no output (code ${code}), clearing session ID and retrying fresh`);
         result.resumeFailed = true;
-        clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        // サイクルG（G-5）: isolated/legacy の一時セッションは所有者の codex-session-id を削除しない。
+        if (options.persistProjectState !== false) {
+          clearCodexSessionId(projectPath, options.agentScopeId).finally(() => resolve(result));
+        } else {
+          resolve(result);
+        }
         return;
       }
 
@@ -3075,6 +3580,10 @@ async function sendPromptToAiImpl(
           } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'devin' && isWorkspaceTrustError(stderrOutput)) {
             // #345: devin が workspace trust 拒否で即死したケース。生 stderr のダンプではなく対処手順を出す。
             onOutput(tChat(lang, 'devin.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
+          } else if (cliFailure.kind === 'emptyNonZero' && aiTool === 'gemini' && isWorkspaceTrustError(stderrOutput)) {
+            // 2026-10-27: gemini が workspace trust 拒否で即死したケース（GEMINI_CLI_TRUST_WORKSPACE
+            // キルスイッチ無効化時、または環境変数を解さない旧 CLI でのみ到達する安全網）。
+            onOutput(tChat(lang, 'gemini.workspaceUntrusted', { path: projectPath }), true, result.usageData, result.extractedSessionId);
           } else if (cliFailure.kind === 'emptyNonZero') {
             onOutput(tChat(lang, 'ai.cliFailed', { tool: aiTool, code: String(code ?? 'null'), stderr: cliFailure.stderrTail || '(empty)' }), true, result.usageData, result.extractedSessionId);
           } else {

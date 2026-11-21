@@ -31,11 +31,51 @@ export const PROTOCOL_VERSION = 1;
  * `PROTOCOL_VERSION` とは別軸。protocolVersion は「ワイヤフォーマットに追従できるか」、
  * capabilities は「個々の機能に対応しているか」を表す（後方互換な機能追加ごとに
  * protocolVersion を上げずに済ませるための仕組み）。
+ *
+ * 'cross-ask-isolation' = サイクルG: `resolveSessionStatePolicy()` が `'isolated'` を解釈し、
+ * クロスユーザー ask で所有者プロジェクトの状態を隔離できる（session-scope.ts 参照）。
+ * サーバーはこの capability を未申告の宛先 Agent へはクロスユーザー ask 自体を断る
+ * （`statePolicy:'isolated'` を解釈できない旧 Agent を黙らせて通さないため。fail-open ではなく
+ * fail-closed — クロスユーザー ask のみが対象で、同一ユーザーの ask は影響を受けない）。
+ *
+ * 'cross-ask-resume' は C1（本サイクルの前段）が申告した名前だが、サーバー側の resume 認可ゲート
+ * としては**使わない**（C1 時点の `RESUMABLE_SCOPED_STATE_POLICY` は `refuseUnsafeAiTool:false` の
+ * ままで、C2 の `refuseUnsafeAiTool:true` 化より緩いポリシーしか保証しないため）。
+ * 'cross-ask-resume-strict' = サイクルC2: `refuseUnsafeAiTool:true` 化・retry 時の
+ * `projectStateRead` 引き継ぎ修正を含む版であることをサーバーに保証する。サーバーの resume 判定
+ * （`decideCrossAskSessionPlan()`）はこちらの capability のみを見る（fail-closed。'cross-ask-isolation'
+ * と同じ理由で新設した）。
+ *
+ * 'plan-gate-hook' = サイクルS1（2026-11-12）: plan モードの strictReadonly ゲートを
+ * PreToolUse フック（SDK 0.3 系の auto-mode classifier が canUseTool より前に Bash を
+ * allow/deny してしまう既知の回帰、2026-09-20〜2026-11-12 への対策）で実装している版であることを
+ * サーバーに保証する。`agents/linux`・`agents/macos` のみ申告する（Agent SDK を使い
+ * `hooks.PreToolUse` を実装できるため）。`agents/windows` は `claude` CLI を直接 spawn する構造の
+ * ため in-process フックを実装できず、申告しない（'cross-ask-isolation' と同じ fail-closed 方針で、
+ * サーバーは未申告 Agent へのクロスユーザー ask を断る。`cross-ask-isolation-rules.ts` 参照）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'thread-handover' | 'thread-handover-make';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation' | 'cross-ask-resume-strict' | 'plan-gate-hook' | 'thread-handover' | 'thread-handover-make';
 
 /** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
-export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'thread-handover', 'thread-handover-make'];
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume', 'cross-ask-isolation', 'cross-ask-resume-strict', 'plan-gate-hook', 'thread-handover', 'thread-handover-make'];
+
+/**
+ * 案C′（クロス ask のセッション継続）サイクルC1: 一時セッションの状態ポリシー。
+ * 未指定 = 従来挙動（完全な使い捨て。conversation.json 等を一切読み書きしない）。
+ * 'resumable-scoped' = crossQuery セッションに限り、scope dir（`.devrelay/sessions/<agentScopeId>/`）
+ * 内の会話状態（conversation.json / claude-session-id / context-usage）だけを読み書きしてよい。
+ * `clearOutputDir`/`savePlanFile`/work state/storageContext 等、projectPath 直下への副作用は
+ * このポリシーだけでは一切解禁しない（session-scope.ts の `resolveSessionStatePolicy()` 参照）。
+ * サーバーがこのフィールドを送らない限り Agent の挙動は完全に不変（C1 単体では無効化のまま）。
+ *
+ * 'isolated' = サイクルG（クロス ask の既存バグ修正）: クロスユーザー ask（別ユーザーの
+ * プロジェクトへの質問）に限り送る値。所有者プロジェクトの状態を一切読み書きせず
+ * （storageContext 注入 / 成果物添付 / Codex・Devin セッション resume を全て deny）、
+ * 読み取り専用を権限で強制できない実効 AI（devin / gemini / claude+terminalMode）への
+ * ターンは Agent 側で開始前に拒否する。同一ユーザーの ask（スキル / MCP / `ask` コマンド）には
+ * 送らない（既存の添付・storageContext の使い方を壊さないため）。
+ */
+export type EphemeralStatePolicy = 'resumable-scoped' | 'isolated';
 
 // -----------------------------------------------------------------------------
 // Capability 配布基盤（サイクルP1）
@@ -673,6 +713,11 @@ export interface SessionStartPayload {
   aiTool: AiTool;
   /** core#336: 会話セッションのスコープ ID。ConversationExecPayload.agentScopeId の JSDoc を参照 */
   agentScopeId?: string;
+  /**
+   * 案C′ サイクルC1: 一時セッションの状態ポリシー。未指定 = 従来挙動。詳細は `EphemeralStatePolicy` の JSDoc参照。
+   * 'cross-ask-resume' capability を申告していない Agent はこのフィールドを無視して従来動作になる。
+   */
+  statePolicy?: EphemeralStatePolicy;
 }
 
 // AI ツール切り替え関連
@@ -858,6 +903,12 @@ export interface AiPromptPayload {
    * `.devrelay-output/` を消さない（他スレッドの成果物を巻き込まないため）・引継ぎブロックを注入しない。
    */
   handoverTurn?: boolean;
+  /**
+   * 案C′ サイクルC1: 一時セッションの状態ポリシー。SessionStartPayload.statePolicy と同じ意味。
+   * `server:session:start` と `server:ai:prompt` の両方に載せるが、片方欠落でも整合するよう
+   * Agent 側は `payload.statePolicy ?? sessionInfo.statePolicy` で解決する。
+   */
+  statePolicy?: EphemeralStatePolicy;
 }
 
 // -----------------------------------------------------------------------------
@@ -987,6 +1038,7 @@ export type UserCommand =
   | { type: 'testflight'; subcommand: 'copy'; srcName: string; destName: string }
   | { type: 'testflight'; subcommand: 'help' }
   | { type: 'ask:member'; targetProject: string; question: string }
+  | { type: 'ask:reset'; targetProject: string }   // クロス ask の記憶リセット（サイクルC3a-1）
   | { type: 'teamexec:member'; targetProject: string; instruction: string }
   | { type: 'disconnect' }  // 接続プロジェクト解除（Manager 用）
   // Claude リモート再ログイン（#326 Phase2）。platform === 'web' 以外は command-handler.ts で即拒否する
@@ -1131,7 +1183,12 @@ export type WebClientMessage =
   | { type: 'web:command'; payload: { text: string; files?: FileAttachment[]; projectId?: string } }
   | { type: 'web:tool:approval:response'; payload: { requestId: string; behavior: 'allow' | 'deny'; approveAll?: boolean; alwaysAllow?: boolean; answers?: Record<string, string> } }
   | { type: 'web:assist'; payload: VoiceAssistRequestPayload }
-  | { type: 'web:ping' };
+  | { type: 'web:ping' }
+  // クロスユーザー Team Phase C: 購読/借用プロジェクトへの質問専用フレーム。
+  // `web:command` とは意図的に別種にする（executeCommand()/parseCommandWithNLP()/
+  // handleProjectConnect() を一切通さないことで e/k/a/testflight/`//connect` を構造的に
+  // 到達不能にする。files を持たない＝クロス ask はファイル添付非対応）。
+  | { type: 'web:cross:ask'; payload: { projectId: string; text: string } };
 
 /**
  * サーバー → ブラウザ（projectId: タブルーティング用、省略時はアクティブタブに表示。

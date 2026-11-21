@@ -47,6 +47,14 @@
  * （`{type:"user",session_id:"",message:{role:"user",content:[{type:"text",text}]},parent_tool_use_id:null}`）
  * と完全に同形にしている（`verbatimPrompts` は DevRelay 側で未設定＝既定 false のため
  * `client_composed` フィールドは付与しない）。
+ *
+ * サイクルS2a（2026-11-12、新発見①）: `buildSdkPromptStream()` の第2引数 `clientComposed` が
+ * true の場合のみ `client_composed: true` を付与する（クロス ask スコープ専用）。SDK 型定義は
+ * 「`client_composed: true` を付けると CLI は `@path` のファイル展開とスラッシュコマンドの
+ * ディスパッチを行わず、文字どおり渡す」と明記しており、質問文に埋め込まれた
+ * `@/home/other/.claude/history.jsonl` のようなパスがツール呼び出しを一切経由せずに
+ * コンテキストへ展開される経路を塞ぐ唯一の手段（PreToolUse フックの射程外）。
+ * 通常利用（client_composed 未指定）では挙動を一切変えない。
  */
 export interface SdkPromptStreamMessage {
   type: 'user';
@@ -56,6 +64,7 @@ export interface SdkPromptStreamMessage {
     content: Array<{ type: 'text'; text: string }>;
   };
   parent_tool_use_id: null;
+  client_composed?: true;
 }
 
 /** buildSdkPromptStream() の戻り値 */
@@ -77,8 +86,12 @@ export interface SdkPromptStreamHandle {
  * `prompt` を 1 件だけ含む「終了しない」AsyncIterable を組み立てる。
  * 呼び出し元は SDK の `for await (const message of query({ prompt: handle.stream, ... }))` が
  * 終わったら（正常終了・catch・abort のいずれでも）必ず `finally` で `handle.release()` を呼ぶこと。
+ *
+ * @param promptText プロンプト本文
+ * @param clientComposed true の場合、yield するメッセージに `client_composed: true` を付与する
+ *   （既定 false・未指定時は付与しない＝従来どおりの挙動。クロス ask スコープ専用）
  */
-export function buildSdkPromptStream(promptText: string): SdkPromptStreamHandle {
+export function buildSdkPromptStream(promptText: string, clientComposed: boolean = false): SdkPromptStreamHandle {
   let releaseResolve: (() => void) | undefined;
   let released = false;
   const releaseSignal = new Promise<void>((resolve) => {
@@ -86,7 +99,7 @@ export function buildSdkPromptStream(promptText: string): SdkPromptStreamHandle 
   });
 
   async function* generate(): AsyncGenerator<SdkPromptStreamMessage> {
-    yield {
+    const message: SdkPromptStreamMessage = {
       type: 'user',
       session_id: '',
       message: {
@@ -95,6 +108,10 @@ export function buildSdkPromptStream(promptText: string): SdkPromptStreamHandle 
       },
       parent_tool_use_id: null,
     };
+    if (clientComposed) {
+      message.client_composed = true;
+    }
+    yield message;
     // release() が呼ばれるまでここで待機する。SDK の Query.streamInput() は
     // この for-await が完了する（＝このジェネレータが return する）まで
     // transport.endInput()（stdin close）を呼ばない。

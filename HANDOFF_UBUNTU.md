@@ -54,10 +54,16 @@ cp .env.example .env
 
 ### 4. データベース初期化
 
+新規 DB の構築のみ（稼働中の DB には流さないこと。`db:push` は pgvector の `embedding` 列を
+DROP するため package.json から削除済み）:
+
 ```bash
 cd apps/server
-pnpm db:push
+pnpm db:bootstrap:new-db-only
 ```
+
+既存 DB への追加の DB 変更は `apps/server/db/changes/` を参照（`pnpm --filter @devrelay/server db:status`
+で未適用を確認。詳細: `doc/db-changes.md`）。
 
 ### 5. 開発サーバー起動
 
@@ -191,8 +197,10 @@ curl -fsSL https://your-server/install.sh | bash
 
 ### Prismaエラー
 ```
-原因: スキーマ変更後のマイグレーション未実行
-対処: pnpm db:push
+原因: スキーマ変更後の DB 変更が未適用（`column ... does not exist` 等）
+対処: `pnpm --filter @devrelay/server db:status` で未適用の変更を確認し、
+      `apps/server/db/changes/` の該当 SQL を番号順に psql で適用する
+      （`prisma db push` は稼働中 DB の embedding 列を削除するため使用しないこと）
 ```
 
 ---

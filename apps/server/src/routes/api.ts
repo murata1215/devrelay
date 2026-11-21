@@ -1,11 +1,11 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
-import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted } from '../services/agent-manager.js';
+import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted, getAgentAvailableAiTools } from '../services/agent-manager.js';
 import { getMachineBusyState } from '../services/auto-updater.js';
 import { isUpdateBusyGuardEnabled, decideManualUpdate, buildBusyHoldApiMessage, formatBusyReason } from '../services/update-busy-rules.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
@@ -26,6 +26,17 @@ import { pushSessionInfoToChat } from '../platforms/web.js';
 import { isModelSettingLocked } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
+import { isCrossTeamEnabled, isCrossTeamChatEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled, isCrossAskResetEnabled, isPlanGateCapabilityCheckEnabled } from '../services/cross-team-guard.js';
+import { recordCrossTeamAudit } from '../services/cross-team-audit.js';
+import { isCrossTeamPublishEnabled, selectPublishableMembers } from '../services/cross-team-publish.js';
+import { listCrossTeamAskCandidateProjects, findCrossTeamAskProjectById } from '../services/cross-team-authz.js';
+import { buildCrossAskTargetGroups, resolveCrossAskOrigin, type CrossAskTargetRow } from '../services/cross-ask-rules.js';
+import { buildCrossAskSessionIdFilter } from '../services/thread-scope.js';
+import { pickAvailableAiTool } from '../services/ai-tool-availability.js';
+import { decideAskReadOnlyEnforcement } from '../services/ask-guard.js';
+import { buildCrossAskScopeIdBase, parseCrossAskScopeGeneration, CROSS_ASK_SCOPE_ID_PREFIX, resolveCrossAskResumeMaxTurns } from '../services/cross-ask-resume-rules.js';
+import { decideCrossAskTargetMemoryState, countLatestGenerationTurns } from '../services/cross-ask-target-state.js';
+import { resetCrossAskMemory, purgeCrossAskScopesForRevokedGrant } from '../services/cross-ask-reset.js';
 import { requireSystemAdmin, type MinimalRequest } from '../services/system-admin.js';
 import archiver from 'archiver';
 import { DEFAULT_RULES_TEMPLATE } from '../services/agreement-template.js';
@@ -143,6 +154,9 @@ export async function apiRoutes(app: FastifyInstance) {
       projects: m.projects.map((p: Project) => ({
         id: p.id,
         name: p.name,
+        // Phase C 併せて直すバグ: displayName を返していなかったため、Agents ツリー/Pulse で
+        // リネーム（PUT /api/projects/:id/display-name）が反映されない表示不整合があった。
+        displayName: p.displayName ?? null,
         path: p.path,
         lastUsedAt: p.lastUsedAt,
       })),
@@ -2645,6 +2659,15 @@ export async function apiRoutes(app: FastifyInstance) {
     const health = summarizePushHealth(tokens, nowIso, DEFAULT_PUSH_HEALTH_STALE_DAYS);
     const metrics = getFcmMetrics(userId);
 
+    // 2026-11-02 の無音故障対策: トークン削除・配信先0件スキップは createNotification で
+    // DB（Notification, type='error', projectId=null）に永続化している。サーバー再起動後も
+    // 「直近で何が起きたか」を設定画面に出せるよう、直近1件をここで取得して返す。
+    const lastPushError = await prisma.notification.findFirst({
+      where: { userId, type: 'error', projectId: null },
+      orderBy: { createdAt: 'desc' },
+      select: { title: true, body: true, createdAt: true },
+    });
+
     return reply.send({
       enabled: isFcmEnabled(),
       health,
@@ -2668,6 +2691,13 @@ export async function apiRoutes(app: FastifyInstance) {
         // サーバー再起動でリセットされる値であることをクライアント側が示せるように起動時刻を返す
         since: FCM_METRICS_SINCE,
       },
+      lastError: lastPushError
+        ? {
+            title: lastPushError.title,
+            body: lastPushError.body,
+            createdAt: lastPushError.createdAt.toISOString(),
+          }
+        : null,
     });
   });
 
@@ -2805,8 +2835,12 @@ export async function apiRoutes(app: FastifyInstance) {
         members: {
           include: {
             project: {
-              include: { machine: { select: { id: true, name: true, displayName: true, status: true } } },
+              include: { machine: { select: { id: true, name: true, displayName: true, status: true, userId: true } } },
             },
+            // クロスユーザー Team（Phase 1）: 同一ユーザー内の行には存在しない（undefined/null）ため
+            // キルスイッチ OFF の環境・既存データでは以下の include は常に空振りし、
+            // レスポンスの追加フィールドも一切付与されない（構造的に旧レスポンスと同一）。
+            crossTeamGrant: true,
           },
           orderBy: { createdAt: 'asc' },
         },
@@ -2814,21 +2848,63 @@ export async function apiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'asc' },
     });
 
+    // クロスユーザー行の所有者名解決（表示用。該当行が無ければ空クエリで即終了）
+    const crossOwnerIds = [...new Set(
+      teams.flatMap(t => t.members).filter(m => m.project.machine.userId !== userId).map(m => m.project.machine.userId)
+    )];
+    const crossOwners = crossOwnerIds.length > 0
+      ? await prisma.user.findMany({ where: { id: { in: crossOwnerIds } }, select: { id: true, name: true, email: true } })
+      : [];
+    const crossOwnerName = (ownerId: string) => {
+      const u = crossOwners.find(x => x.id === ownerId);
+      return u?.name ?? maskEmailForDisplay(u?.email ?? null) ?? ownerId;
+    };
+
+    // 公開型 Team（Phase B）: キルスイッチ OFF 時はこのクエリ自体を実行しない
+    // （既定状態での負荷ゼロを維持。publishFeatureEnabled() は DEVRELAY_CROSS_TEAM と
+    // DEVRELAY_CROSS_TEAM_PUBLISH の AND）。ON のときだけ visibility/subscriberCount を
+    // レスポンスに足す（OFF 時はキーごと省略し旧レスポンスと構造的に同一を保つ）。
+    const publishEnabled = publishFeatureEnabled();
+    const subscriberCountByTeamId = new Map<string, number>();
+    if (publishEnabled && teams.length > 0) {
+      const counts = await prisma.teamSubscription.groupBy({
+        by: ['teamId'],
+        where: { teamId: { in: teams.map(t => t.id) }, revokedAt: null },
+        _count: true,
+      });
+      for (const c of counts) subscriberCountByTeamId.set(c.teamId, c._count);
+    }
+
     return reply.send({
       teams: teams.map(t => ({
         id: t.id,
         name: t.name,
         createdAt: t.createdAt,
-        members: t.members.map(m => ({
-          id: m.id,
-          projectId: m.project.id,
-          projectName: m.project.displayName ?? m.project.name,
-          projectOriginalName: m.project.name,
-          description: m.project.description ?? undefined,
-          machineName: m.project.machine.displayName ?? m.project.machine.name,
-          machineId: m.project.machine.id,
-          machineStatus: m.project.machine.status,
-        })),
+        ...(publishEnabled ? {
+          visibility: t.visibility,
+          subscriberCount: subscriberCountByTeamId.get(t.id) ?? 0,
+        } : {}),
+        members: t.members.map(m => {
+          const isCrossUser = m.project.machine.userId !== userId;
+          return {
+            id: m.id,
+            projectId: m.project.id,
+            projectName: m.project.displayName ?? m.project.name,
+            projectOriginalName: m.project.name,
+            description: m.project.description ?? undefined,
+            machineName: m.project.machine.displayName ?? m.project.machine.name,
+            machineId: m.project.machine.id,
+            machineStatus: m.project.machine.status,
+            // 以下はクロスユーザー行のみ付与する（同一ユーザー行では一切キーを付けない）
+            ...(isCrossUser ? {
+              crossUser: true,
+              ownerUserId: m.project.machine.userId,
+              ownerName: crossOwnerName(m.project.machine.userId),
+              askAllowed: m.crossTeamGrant?.askAllowed ?? false,
+              execAllowed: m.crossTeamGrant?.execAllowed ?? false,
+            } : {}),
+          };
+        }),
       })),
     });
   });
@@ -2977,9 +3053,941 @@ export async function apiRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Team not found' });
     }
 
-    await prisma.teamMember.delete({ where: { id: memberId } }).catch(() => null);
+    // #Phase0-1: teamId でスコープせず id だけで delete すると、他ユーザーの Team に属する
+    // TeamMember 行を memberId 推測で削除できてしまう（2988-2991 は「自分が Team を持っているか」
+    // しか確認しておらず、memberId がどの teamId に属するかは見ていなかった）。
+    // deleteMany + teamId 一致 で自分の Team 配下のみに限定する。
+    await prisma.teamMember.deleteMany({ where: { id: memberId, teamId } });
     return reply.send({ success: true });
   });
+
+  // ========================================
+  // クロスユーザー Team（Phase 1: ask のみ）— 招待 API
+  // 全ルートがキルスイッチ DEVRELAY_CROSS_TEAM に従う（既定 OFF = 404。
+  // OFF のときは何も新設されていないのと構造的に同一にする）
+  // ========================================
+
+  /** 同一組織内の招待候補ユーザー一覧（プロジェクト名は一切返さない。情報漏えい対策） */
+  app.get('/api/teams/org-candidates', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const membership = await prisma.organizationMember.findUnique({
+      where: { userId },
+      select: { organizationId: true },
+    });
+    if (!membership) {
+      return reply.send({ candidates: [] });
+    }
+
+    const members = await prisma.organizationMember.findMany({
+      where: { organizationId: membership.organizationId, userId: { not: userId } },
+      include: { user: { select: { id: true, name: true, email: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return reply.send({
+      candidates: members.map(m => ({
+        userId: m.user.id,
+        name: m.user.name ?? maskEmailForDisplay(m.user.email) ?? m.user.id,
+        email: maskEmailForDisplay(m.user.email),
+      })),
+    });
+  });
+
+  /** 自分宛・自分発のクロスユーザー Team 招待一覧 */
+  app.get('/api/teams/invites', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.send({ inbox: [], outbox: [] });
+    }
+
+    const [inbox, outbox] = await Promise.all([
+      prisma.crossTeamInvite.findMany({
+        where: { inviteeUserId: userId },
+        include: { team: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.crossTeamInvite.findMany({
+        where: { inviterUserId: userId },
+        include: { team: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    const otherUserIds = [...new Set([...inbox.map(i => i.inviterUserId), ...outbox.map(i => i.inviteeUserId)])];
+    const otherUsers = await prisma.user.findMany({
+      where: { id: { in: otherUserIds } },
+      select: { id: true, name: true, email: true },
+    });
+    const nameOf = (id: string) => {
+      const u = otherUsers.find(x => x.id === id);
+      return u?.name ?? maskEmailForDisplay(u?.email ?? null) ?? id;
+    };
+
+    return reply.send({
+      inbox: inbox.map(i => ({
+        id: i.id, teamId: i.teamId, teamName: i.team.name,
+        inviterUserId: i.inviterUserId, inviterName: nameOf(i.inviterUserId), status: i.status,
+        askRequested: i.askRequested, createdAt: i.createdAt,
+      })),
+      outbox: outbox.map(i => ({
+        id: i.id, teamId: i.teamId, teamName: i.team.name,
+        inviteeUserId: i.inviteeUserId, inviteeName: nameOf(i.inviteeUserId), status: i.status,
+        askRequested: i.askRequested, createdAt: i.createdAt,
+      })),
+    });
+  });
+
+  /** チームオーナーが同一組織内の別ユーザーを招待する */
+  app.post('/api/teams/:teamId/invites', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    const { inviteeUserId } = (request.body || {}) as { inviteeUserId?: string };
+
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+    if (!inviteeUserId) {
+      return reply.status(400).send({ error: 'inviteeUserId is required' });
+    }
+    if (inviteeUserId === userId) {
+      return reply.status(400).send({ error: 'Cannot invite yourself' });
+    }
+
+    // チーム所有権チェック（#295 の既存ゲートと同形。他人の Team には招待を作れない）
+    const team = await prisma.team.findUnique({ where: { id: teamId } });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const [inviterMembership, inviteeMembership] = await Promise.all([
+      prisma.organizationMember.findUnique({ where: { userId }, select: { organizationId: true } }),
+      prisma.organizationMember.findUnique({ where: { userId: inviteeUserId }, select: { organizationId: true } }),
+    ]);
+    if (!inviterMembership || !inviteeMembership || inviterMembership.organizationId !== inviteeMembership.organizationId) {
+      return reply.status(400).send({ error: 'Invitee must be in the same organization' });
+    }
+
+    const existing = await prisma.crossTeamInvite.findUnique({
+      where: { teamId_inviteeUserId: { teamId, inviteeUserId } },
+    });
+    // #複数選択対応: 'accepted' でも再招待できる（プロジェクト追加の唯一の導線）。
+    // 既存の CrossTeamGrant は revoke しない — 権限の根拠は Grant の存在のみ、という
+    // 設計原則（decideCrossTeamAccess()）は不変。招待はあくまで「追加依頼」。
+    // （2026-11-08: 以前はここで 409 を返しており、「公開を停止」後に invite.status が
+    // 'accepted' のまま残ることと組み合わさって永久に再招待できなくなる行き止まりだった）
+
+    const invite = existing
+      ? await prisma.crossTeamInvite.update({
+          where: { id: existing.id },
+          data: { status: 'pending', decidedAt: null, projectId: null, teamMemberId: null },
+        })
+      : await prisma.crossTeamInvite.create({
+          data: {
+            teamId, inviterUserId: userId, inviteeUserId,
+            organizationId: inviterMembership.organizationId, status: 'pending',
+          },
+        });
+
+    recordCrossTeamAudit({
+      requesterUserId: userId, executorUserId: inviteeUserId,
+      organizationId: inviterMembership.organizationId, teamId,
+      mode: 'ask', action: 'invite_sent',
+    });
+
+    return reply.send({ id: invite.id, status: invite.status });
+  });
+
+  /**
+   * 受入側が招待を承認し、自分のプロジェクトを選んで CrossTeamGrant を発行する。
+   * #複数選択対応（2026-11-08）: 1 回の承認で複数プロジェクトを選べる。
+   * 旧クライアント（単数の `projectId`）もフォールバックで受け付ける
+   * （デプロイ直後に開きっぱなしのタブが旧 JS を使っているケースのため）。
+   */
+  app.post('/api/teams/invites/:id/accept', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { id } = request.params as { id: string };
+    const body = (request.body || {}) as { projectIds?: string[]; projectId?: string };
+    const projectIds = Array.isArray(body.projectIds)
+      ? [...new Set(body.projectIds.filter((p): p is string => typeof p === 'string' && p.length > 0))]
+      : (typeof body.projectId === 'string' && body.projectId ? [body.projectId] : []);
+
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+    if (projectIds.length === 0) {
+      return reply.status(400).send({ error: 'projectIds is required' });
+    }
+
+    const invite = await prisma.crossTeamInvite.findUnique({ where: { id } });
+    if (!invite || invite.inviteeUserId !== userId) {
+      return reply.status(404).send({ error: 'Invite not found' });
+    }
+    if (invite.status !== 'pending') {
+      return reply.status(409).send({ error: `Invite is already ${invite.status}` });
+    }
+
+    // プロジェクト所有権チェック（#Phase0-1 と同じ所有者チェック。他人のプロジェクトは選べない）。
+    // 1 件でも他人のものが混ざっていたら全体を拒否する（部分適用しない）。
+    const projects = await prisma.project.findMany({
+      where: { id: { in: projectIds } },
+      include: { machine: { select: { userId: true } } },
+    });
+    if (projects.length !== projectIds.length || projects.some((project) => project.machine.userId !== userId)) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    // 招待時点から組織関係が変わっていないか再確認
+    const [inviteeMembership, inviterMembership] = await Promise.all([
+      prisma.organizationMember.findUnique({ where: { userId }, select: { organizationId: true } }),
+      prisma.organizationMember.findUnique({ where: { userId: invite.inviterUserId }, select: { organizationId: true } }),
+    ]);
+    if (!inviteeMembership || !inviterMembership || inviteeMembership.organizationId !== inviterMembership.organizationId) {
+      return reply.status(400).send({ error: 'Organization mismatch' });
+    }
+
+    // 既にこのチームのメンバーになっている projectId はスキップする（バッチ全体を 409 で落とさない。
+    // 再招待での「追加分だけ選ぶ」運用を成立させるため）。全件スキップなら 409。
+    const existingMembers = await prisma.teamMember.findMany({
+      where: { teamId: invite.teamId, projectId: { in: projectIds } },
+      select: { projectId: true },
+    });
+    const alreadyMemberIds = new Set(existingMembers.map((m) => m.projectId));
+    const toAccept = projectIds.filter((p) => !alreadyMemberIds.has(p));
+    if (toAccept.length === 0) {
+      return reply.status(409).send({ error: 'All selected projects are already members of this team' });
+    }
+
+    const teamMemberIds = await prisma.$transaction(async (tx) => {
+      const ids: string[] = [];
+      for (const projectId of toAccept) {
+        const member = await tx.teamMember.create({ data: { teamId: invite.teamId, projectId } });
+        await tx.crossTeamGrant.create({
+          data: {
+            teamMemberId: member.id,
+            teamId: invite.teamId,
+            projectId,
+            requesterUserId: invite.inviterUserId,
+            granteeUserId: userId,
+            organizationId: inviteeMembership.organizationId,
+            askAllowed: invite.askRequested,
+            execAllowed: false, // Phase 2 で解禁。Phase 1 では常に false
+          },
+        });
+        ids.push(member.id);
+      }
+      // invite.projectId / teamMemberId は複数件を保持できないため更新しない（null のまま）。
+      // どちらも他のどこからも読まれていない（監査は CrossTeamAuditLog 側が持つ）。
+      await tx.crossTeamInvite.update({
+        where: { id },
+        data: { status: 'accepted', decidedAt: new Date() },
+      });
+      return ids;
+    });
+
+    for (const projectId of toAccept) {
+      recordCrossTeamAudit({
+        requesterUserId: invite.inviterUserId, executorUserId: userId,
+        organizationId: inviteeMembership.organizationId, teamId: invite.teamId, projectId,
+        mode: 'ask', action: 'invite_accepted',
+      });
+    }
+
+    return reply.send({ teamMemberIds, skipped: projectIds.length - toAccept.length });
+  });
+
+  /** 受入側が招待を辞退する */
+  app.post('/api/teams/invites/:id/decline', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { id } = request.params as { id: string };
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const invite = await prisma.crossTeamInvite.findUnique({ where: { id } });
+    if (!invite || invite.inviteeUserId !== userId) {
+      return reply.status(404).send({ error: 'Invite not found' });
+    }
+    if (invite.status !== 'pending') {
+      return reply.status(409).send({ error: `Invite is already ${invite.status}` });
+    }
+
+    await prisma.crossTeamInvite.update({ where: { id }, data: { status: 'declined', decidedAt: new Date() } });
+    recordCrossTeamAudit({
+      requesterUserId: invite.inviterUserId, executorUserId: userId,
+      organizationId: invite.organizationId, teamId: invite.teamId,
+      mode: 'ask', action: 'invite_declined',
+    });
+    return reply.send({ success: true });
+  });
+
+  /** 送信側が未承認の招待を取り消す */
+  app.delete('/api/teams/invites/:id', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { id } = request.params as { id: string };
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const invite = await prisma.crossTeamInvite.findUnique({ where: { id } });
+    if (!invite || invite.inviterUserId !== userId) {
+      return reply.status(404).send({ error: 'Invite not found' });
+    }
+    if (invite.status !== 'pending') {
+      return reply.status(409).send({ error: `Invite is already ${invite.status}` });
+    }
+
+    await prisma.crossTeamInvite.update({ where: { id }, data: { status: 'revoked', decidedAt: new Date() } });
+    return reply.send({ success: true });
+  });
+
+  /**
+   * クロスユーザー Team の同意を取り消す（TeamMember を削除し、CrossTeamGrant も Cascade で消える）。
+   * Team オーナー・招待された側（grantee）のどちらからでも解消できる
+   * （ゴースト権限を残さないため、grant だけを revoked にするのではなく TeamMember ごと削除する）。
+   */
+  app.delete('/api/teams/members/:memberId/grant', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { memberId } = request.params as { memberId: string };
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const member = await prisma.teamMember.findUnique({
+      where: { id: memberId },
+      include: {
+        team: { select: { id: true, userId: true } },
+        project: { include: { machine: { select: { id: true, userId: true } } } },
+        crossTeamGrant: true,
+      },
+    });
+    if (!member || !member.crossTeamGrant) {
+      return reply.status(404).send({ error: 'Cross-team member not found' });
+    }
+    const isOwner = member.team.userId === userId;
+    const isGrantee = member.project.machine.userId === userId;
+    if (!isOwner && !isGrantee) {
+      return reply.status(404).send({ error: 'Cross-team member not found' });
+    }
+
+    recordCrossTeamAudit({
+      requesterUserId: member.crossTeamGrant.requesterUserId,
+      executorUserId: member.crossTeamGrant.granteeUserId,
+      organizationId: member.crossTeamGrant.organizationId,
+      teamId: member.team.id,
+      projectId: member.projectId,
+      grantId: member.crossTeamGrant.id,
+      mode: 'ask',
+      action: 'grant_revoked',
+    });
+
+    // サイクルC3a-1: grant 取消で記憶も後片付け（best-effort、取消の成否は待たせない）。
+    purgeCrossAskScopesForRevokedGrant({
+      requesterUserId: member.crossTeamGrant.requesterUserId,
+      executorUserId: member.crossTeamGrant.granteeUserId,
+      projectId: member.projectId,
+      projectPath: member.project.path,
+      machineId: member.project.machine.id,
+      organizationId: member.crossTeamGrant.organizationId,
+      teamId: member.team.id,
+      grantId: member.crossTeamGrant.id,
+      trigger: 'grantRevoked',
+    });
+
+    await prisma.teamMember.delete({ where: { id: memberId } });
+    return reply.send({ success: true });
+  });
+
+  /**
+   * クロスユーザー Team（Phase 1）: 自分が公開している（grantee 側の）プロジェクト一覧。
+   * 「自分の何が誰に公開されているか」を貸す側が確認できる唯一の画面（公開型を入れる前提条件）。
+   * キルスイッチ OFF 時は 404 ではなく `{ shares: [] }` を返す（`/api/teams/invites` と同じ流儀。
+   * `crossTeamEnabled` の判定自体は `GET /api/teams/org-candidates` の 404 が担うため、
+   * ここで 404 にすると WebUI 側の判定ロジックが二重になる）。
+   */
+  app.get('/api/teams/shared-by-me', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    if (!isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM)) {
+      return reply.send({ shares: [] });
+    }
+
+    const grants = await prisma.crossTeamGrant.findMany({
+      where: { granteeUserId: userId, revokedAt: null },
+      include: {
+        teamMember: {
+          include: {
+            team: { select: { name: true } },
+            project: { include: { machine: { select: { name: true, displayName: true } } } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const requesterIds = [...new Set(grants.map(g => g.requesterUserId))];
+    const requesters = requesterIds.length > 0
+      ? await prisma.user.findMany({ where: { id: { in: requesterIds } }, select: { id: true, name: true, email: true } })
+      : [];
+    const requesterName = (id: string) => {
+      const u = requesters.find(x => x.id === id);
+      return u?.name ?? maskEmailForDisplay(u?.email ?? null) ?? id;
+    };
+
+    return reply.send({
+      shares: grants.map(g => ({
+        teamMemberId: g.teamMemberId,
+        teamId: g.teamId, // #複数選択対応: 招待ピッカーで「公開済みのプロジェクト」を除外するためのキー
+        projectId: g.projectId, // 同上
+        teamName: g.teamMember.team.name,
+        requesterName: requesterName(g.requesterUserId),
+        projectName: g.teamMember.project.displayName ?? g.teamMember.project.name,
+        machineName: g.teamMember.project.machine.displayName ?? g.teamMember.project.machine.name,
+        askAllowed: g.askAllowed,
+        execAllowed: g.execAllowed,
+        createdAt: g.createdAt,
+      })),
+    });
+  });
+
+  // ==========================================================================
+  // クロスユーザー Team Phase C: 購読/借用プロジェクトを Agents ツリーに出し WebUI から
+  // 直接 ask する機能。DEVRELAY_CROSS_TEAM と DEVRELAY_CROSS_TEAM_CHAT の両方が ON の
+  // ときのみ有効（AND）。どちらか OFF なら以下 2 ルートが 404。
+  // 認可本体は listCrossTeamAskCandidateProjects() に一本化（新しい認可クエリを書かない）。
+  // ==========================================================================
+
+  const crossTeamChatFeatureEnabled = () =>
+    isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM) &&
+    isCrossTeamChatEnabled(process.env.DEVRELAY_CROSS_TEAM_CHAT);
+
+  /**
+   * Phase C: Agents ツリーに出す購読/借用プロジェクト一覧。
+   * 中身は listCrossTeamAskCandidateProjects() を呼ぶだけ（招待型＋購読型の合流・組織境界の
+   * 実行時再検証・又貸し防止は既にこの関数に閉じている。別の絞り込みを書くと「ツリーに出る集合」
+   * と「ask できる集合」が将来ずれるため、ここでは行わない）。
+   *
+   * サイクルC3a-1: `DEVRELAY_CROSS_ASK_RESET`（既定 ON）が有効なときだけ各 project 行に
+   * `memory`（remembers/askable/turns）を足す。OFF のときはキーごと省略し、旧レスポンスと
+   * 構造同一にする（テストで固定: cross-ask-reset-wiring.test.mjs）。
+   */
+  app.get('/api/cross-team/ask-targets', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    if (!crossTeamChatFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const candidates = await listCrossTeamAskCandidateProjects(userId);
+    if (candidates.length === 0) {
+      return reply.send({ groups: [] });
+    }
+
+    // status は DB 値ではなく実接続状態で上書きする（GET /api/machines と同じ根拠に揃える）
+    const connectedAgents = getConnectedAgents();
+
+    const teamIds = [...new Set(candidates.map(c => c.crossTeam.teamId))];
+    const teams = await prisma.team.findMany({ where: { id: { in: teamIds } }, select: { id: true, name: true } });
+    const teamNameById = new Map(teams.map(t => [t.id, t.name]));
+
+    const ownerUserIds = [...new Set(candidates.map(c => c.machine.userId))];
+    const owners = ownerUserIds.length > 0
+      ? await prisma.user.findMany({ where: { id: { in: ownerUserIds } }, select: { id: true, name: true, email: true } })
+      : [];
+    const ownerLabelById = new Map(owners.map(u => [u.id, u.name ?? maskEmailForDisplay(u.email) ?? u.id]));
+
+    // サイクルC3a-1: memory フィールドの解決（キルスイッチ OFF なら一切 DB を読まずスキップ）。
+    const resetEnabled = isCrossAskResetEnabled(process.env.DEVRELAY_CROSS_ASK_RESET);
+    const memoryByProjectId = new Map<string, CrossAskTargetRow['memory']>();
+    if (resetEnabled) {
+      const isolationEnabled = isCrossAskIsolationEnabled(process.env.DEVRELAY_CROSS_ASK_ISOLATION);
+      const resumeEnabled = isCrossAskResumeEnabled(process.env.DEVRELAY_CROSS_ASK_RESUME);
+      const maxTurns = resolveCrossAskResumeMaxTurns(process.env.DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS);
+
+      // 候補数ぶんのクエリを出さず 1 クエリで全候補分の crossask- scope 行を取得し、
+      // JS 側で projectId → scopeIdBase の突合を行う（cross-ask-target-state.ts の docstring参照）。
+      const scopeIdBaseByProjectId = new Map(
+        candidates.map((c) => [c.id, buildCrossAskScopeIdBase(createHash('sha256').update(`${userId}\0${c.id}`).digest('hex'))]),
+      );
+      const scopeRows = await prisma.session.findMany({
+        where: { projectId: { in: candidates.map((c) => c.id) }, agentScopeId: { startsWith: CROSS_ASK_SCOPE_ID_PREFIX } },
+        select: { projectId: true, agentScopeId: true },
+      });
+      const scopeRowsByProjectId = new Map<string, { agentScopeId: string | null }[]>();
+      for (const row of scopeRows) {
+        const list = scopeRowsByProjectId.get(row.projectId) ?? [];
+        list.push({ agentScopeId: row.agentScopeId });
+        scopeRowsByProjectId.set(row.projectId, list);
+      }
+
+      for (const c of candidates) {
+        const availableAiTools = getAgentAvailableAiTools(c.machine.id);
+        const resolvedAiTool = pickAvailableAiTool(c.defaultAi as AiTool, availableAiTools, []);
+        const readOnlyEnforced = decideAskReadOnlyEnforcement({ aiTool: resolvedAiTool, terminalMode: c.terminalMode }).readOnlyEnforced;
+        const state = decideCrossAskTargetMemoryState({
+          isolationEnabled,
+          resumeEnabled,
+          agentHasIsolationCapability: agentHasCapability(c.machine.id, 'cross-ask-isolation'),
+          // サイクルS1（2026-11-12）: DEVRELAY_PLAN_GATE_CAPABILITY=0 なら常に true
+          // （このチェックだけの緊急ロールバック。cross-ask-runner.ts/document-api.ts と同じ）。
+          agentHasPlanGateCapability: !isPlanGateCapabilityCheckEnabled(process.env.DEVRELAY_PLAN_GATE_CAPABILITY)
+            || agentHasCapability(c.machine.id, 'plan-gate-hook'),
+          agentHasResumeCapability: agentHasCapability(c.machine.id, 'cross-ask-resume-strict'),
+          readOnlyEnforced,
+        });
+        const scopeIdBase = scopeIdBaseByProjectId.get(c.id)!;
+        const { turns } = countLatestGenerationTurns(scopeRowsByProjectId.get(c.id) ?? [], scopeIdBase);
+        memoryByProjectId.set(c.id, {
+          remembers: state.remembers,
+          reason: state.reason,
+          askable: state.askable,
+          askDenyReason: state.askDenyReason,
+          turns,
+          maxTurns,
+        });
+      }
+    }
+
+    const rows: CrossAskTargetRow[] = candidates.map(c => ({
+      ownerLabel: ownerLabelById.get(c.machine.userId) ?? c.machine.userId,
+      machineId: c.machine.id,
+      machineName: c.machine.displayName ?? c.machine.name,
+      status: connectedAgents.has(c.machine.id) ? 'online' : 'offline',
+      projectId: c.id,
+      label: c.displayName ?? c.name,
+      teamId: c.crossTeam.teamId,
+      teamName: teamNameById.get(c.crossTeam.teamId) ?? c.crossTeam.teamId,
+      origin: resolveCrossAskOrigin(c.crossTeam.grantId),
+      ...(resetEnabled ? { memory: memoryByProjectId.get(c.id) } : {}),
+    }));
+
+    return reply.send({ groups: buildCrossAskTargetGroups(rows) });
+  });
+
+  /**
+   * サイクルC3a-1: クロス ask の記憶をリセットする（WebUI 用。C3a-2 でクロスタブのバナーから配線）。
+   * 認可は既存 `findCrossTeamAskProjectById()`（Phase C の ask 候補集合と同一）を再利用し、
+   * null は 404（存在オラクルを作らない既存流儀。`GET /api/cross-team/projects/:id/messages` と同じ）。
+   * body は一切使わない（body なし POST。`apps/web/src/lib/api.ts` の `request()` 経由で呼ぶこと）。
+   */
+  app.post('/api/cross-team/projects/:projectId/reset', async (request: FastifyRequest<{ Params: { projectId: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id as string;
+    const { projectId } = request.params;
+
+    if (!crossTeamChatFeatureEnabled() || !isCrossAskResetEnabled(process.env.DEVRELAY_CROSS_ASK_RESET)) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const project = await findCrossTeamAskProjectById(userId, projectId);
+    if (!project) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const result = await resetCrossAskMemory(userId, project);
+    if (!result.ok) {
+      // notCrossUser は findCrossTeamAskProjectById が常にクロス候補のみを返すため構造的に起きないが、
+      // 型の完全性のため 400 で返す（ここに来るのはバグ）。
+      return reply.status(400).send({ error: 'Not a cross-user ask target' });
+    }
+
+    return reply.send({ success: true, hadMemory: result.hadMemory, purgedGenerations: result.purgedGenerations });
+  });
+
+  /**
+   * Phase C: クロス ask の履歴（自分が投げた質問と自分に返ってきた回答だけ。他人の依頼・
+   * 所有者自身の作業は構造的に混ざらない）。認可は requestedByUserId === userId の 1 条件のみ。
+   * projectId の存在確認はしない（存在オラクルをゼロにする。購読を切られても自分が書いた
+   * 本文は読める設計 — ツリーからは消えるので新規の質問はできなくなる）。
+   *
+   * 会話の区切り可視化サイクル: 各メッセージに `generation`（`crossask-<base>-g<N>` の N）を
+   * 付与する。resume が成立していないターン（resume OFF / isolation のみ / agentScopeId が
+   * null）は `parseCrossAskScopeGeneration` が null を返すため、その場合はキー自体を省略する
+   * （旧レスポンスと構造同一。`/api/cross-team/ask-targets` の scopeIdBase 計算と同じ式を使う —
+   * `cross-ask-runner.ts` の digest 生成と合わせて 3 箇所目の重複だが、本ファイル内では
+   * 既に ask-targets ハンドラが同じ式を直書きしており、その流儀に揃える）。
+   */
+  app.get('/api/cross-team/projects/:projectId/messages', async (request: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string; before?: string } }>, reply: FastifyReply) => {
+    const userId = (request as any).user.id;
+    const { projectId } = request.params;
+    const limit = Math.min(100, Math.max(1, parseInt(request.query.limit || '30', 10) || 30));
+    const before = request.query.before || undefined;
+
+    if (!crossTeamChatFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const whereClause: any = {
+      session: { projectId, requestedByUserId: userId, ...buildCrossAskSessionIdFilter() },
+    };
+    if (before) {
+      const cursorMsg = await prisma.message.findUnique({
+        where: { id: before },
+        select: { createdAt: true },
+      });
+      if (cursorMsg) {
+        whereClause.createdAt = { lt: cursorMsg.createdAt };
+      }
+    }
+
+    const messages = await prisma.message.findMany({
+      where: whereClause,
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      select: {
+        id: true,
+        role: true,
+        content: true,
+        createdAt: true,
+        sourceProjectName: true,
+        session: { select: { agentScopeId: true } },
+        files: {
+          select: { id: true, filename: true, mimeType: true, size: true, direction: true },
+        },
+      },
+    });
+
+    const hasMore = messages.length > limit;
+    const result = hasMore ? messages.slice(0, limit) : messages;
+    result.reverse();
+
+    const scopeIdBase = buildCrossAskScopeIdBase(createHash('sha256').update(`${userId}\0${projectId}`).digest('hex'));
+
+    reply.header('Cache-Control', 'no-store');
+    return reply.send({
+      messages: result.map(m => {
+        const generation = parseCrossAskScopeGeneration(m.session.agentScopeId ?? '', scopeIdBase);
+        return {
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          createdAt: m.createdAt.toISOString(),
+          files: m.files,
+          sourceProjectName: m.sourceProjectName ?? undefined,
+          ...(generation !== null ? { generation } : {}),
+        };
+      }),
+      hasMore,
+    });
+  });
+
+  // ==========================================================================
+  // 公開型クロスユーザー Team（Phase A: サーバー + 認可のみ。WebUI は Phase B）。
+  // DEVRELAY_CROSS_TEAM と DEVRELAY_CROSS_TEAM_PUBLISH の両方が ON のときのみ有効（AND）。
+  // どちらか OFF なら以下の全ルートが 404。認可本体（decideCrossTeamAccess）は無改造 —
+  // cross-team-authz.ts が購読（TeamSubscription）から候補をその場で合成して渡すだけ。
+  // ==========================================================================
+
+  /** このブロック共通のキルスイッチ判定（2 つの ON が AND 条件）。 */
+  const publishFeatureEnabled = () =>
+    isCrossTeamEnabled(process.env.DEVRELAY_CROSS_TEAM) &&
+    isCrossTeamPublishEnabled(process.env.DEVRELAY_CROSS_TEAM_PUBLISH);
+
+  /**
+   * 公開型 Team（Phase A）: チームの公開設定を変更する（Team オーナーのみ）。
+   * 公開対象は `selectPublishableMembers()` で「チームオーナー自身が所有するプロジェクト」に
+   * 限定する（又貸し防止の核心。招待型で受け入れた他人のプロジェクトは公開対象から除外する）。
+   * 公開可能プロジェクトが 0 件のまま公開しようとした場合は 400 で拒否する。
+   */
+  app.patch('/api/teams/:teamId/visibility', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    const { visibility } = (request.body || {}) as { visibility?: string };
+
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+    if (visibility !== 'private' && visibility !== 'organization') {
+      return reply.status(400).send({ error: 'visibility must be "private" or "organization"' });
+    }
+
+    const team = await prisma.team.findUnique({
+      where: { id: teamId },
+      include: { members: { include: { project: { include: { machine: { select: { userId: true } } } } } } },
+    });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const publishableCount = selectPublishableMembers(
+      team.members.map((m) => ({
+        teamId: team.id,
+        teamOwnerUserId: team.userId,
+        projectId: m.projectId,
+        ownerUserId: m.project.machine.userId,
+      })),
+    ).length;
+
+    const membership = await prisma.organizationMember.findUnique({
+      where: { userId }, select: { organizationId: true },
+    });
+
+    if (visibility === 'organization') {
+      if (!membership) {
+        return reply.status(400).send({ error: 'You must belong to an organization to publish a team' });
+      }
+      if (publishableCount === 0) {
+        return reply.status(400).send({
+          error: 'Team has no publishable projects (projects borrowed via invite cannot be published)',
+        });
+      }
+    }
+
+    await prisma.team.update({ where: { id: teamId }, data: { visibility } });
+
+    recordCrossTeamAudit({
+      requesterUserId: userId, executorUserId: userId,
+      organizationId: membership?.organizationId ?? null,
+      teamId, mode: 'ask',
+      action: visibility === 'organization' ? 'team_published' : 'team_unpublished',
+      allowSelfAudit: true,
+    });
+
+    return reply.send({ visibility, publishableCount });
+  });
+
+  /**
+   * 公開型 Team（Phase A）: 同一組織内で公開されているチーム一覧（自分が所有するチームは除く）。
+   * プロジェクト名は一切返さない（`GET /api/teams/org-candidates` と同じ情報漏えい対策）。
+   */
+  app.get('/api/teams/published', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const membership = await prisma.organizationMember.findUnique({
+      where: { userId }, select: { organizationId: true },
+    });
+    if (!membership) {
+      return reply.send({ teams: [] });
+    }
+
+    const orgMembers = await prisma.organizationMember.findMany({
+      where: { organizationId: membership.organizationId },
+      select: { userId: true },
+    });
+    const orgUserIds = orgMembers.map((m) => m.userId);
+
+    const teams = await prisma.team.findMany({
+      where: { visibility: 'organization', userId: { in: orgUserIds, not: userId } },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+        members: { include: { project: { include: { machine: { select: { userId: true } } } } } },
+        subscriptions: { where: { subscriberUserId: userId, revokedAt: null }, select: { id: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const result = teams
+      .map((t) => {
+        const publishableCount = selectPublishableMembers(
+          t.members.map((m) => ({
+            teamId: t.id, teamOwnerUserId: t.userId, projectId: m.projectId, ownerUserId: m.project.machine.userId,
+          })),
+        ).length;
+        return {
+          teamId: t.id,
+          teamName: t.name,
+          publisherName: t.user.name ?? maskEmailForDisplay(t.user.email) ?? t.userId,
+          projectCount: publishableCount,
+          subscribed: t.subscriptions.length > 0,
+        };
+      })
+      .filter((t) => t.projectCount > 0);
+
+    return reply.send({ teams: result });
+  });
+
+  /** 公開型 Team（Phase A）: チームを購読する（同一組織・非オーナーのみ。他組織/他人のチームは常に 404）。 */
+  app.post('/api/teams/:teamId/subscribe', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const team = await prisma.team.findUnique({
+      where: { id: teamId }, select: { id: true, userId: true, visibility: true },
+    });
+    if (!team || team.visibility !== 'organization' || team.userId === userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const [callerMembership, ownerMembership] = await Promise.all([
+      prisma.organizationMember.findUnique({ where: { userId }, select: { organizationId: true } }),
+      prisma.organizationMember.findUnique({ where: { userId: team.userId }, select: { organizationId: true } }),
+    ]);
+    if (!callerMembership || !ownerMembership || callerMembership.organizationId !== ownerMembership.organizationId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const subscription = await prisma.teamSubscription.upsert({
+      where: { teamId_subscriberUserId: { teamId, subscriberUserId: userId } },
+      create: { teamId, subscriberUserId: userId, organizationId: callerMembership.organizationId, askAllowed: true },
+      update: { revokedAt: null },
+    });
+
+    recordCrossTeamAudit({
+      requesterUserId: userId, executorUserId: userId,
+      organizationId: callerMembership.organizationId,
+      teamId, mode: 'ask', action: 'subscribed', allowSelfAudit: true,
+    });
+
+    return reply.send({ subscriptionId: subscription.id });
+  });
+
+  /**
+   * 購読系（本エンドポイント・次の `subscribers/:userId` 削除）のクロス ask 後片付け共通処理。
+   * teamId 単位で projectId を持たないため `TeamMember → project.machine` を 1 クエリ足して
+   * 公開可能プロジェクト（又貸し防止: `selectPublishableMembers`）だけに後片付けを送る
+   * （fire-and-forget。購読解除の応答は待たせない）。
+   */
+  const purgeCrossAskScopesForUnsubscribe = async (params: {
+    teamId: string; teamOwnerUserId: string; subscriberUserId: string; organizationId: string | null; trigger: 'unsubscribed' | 'subscriptionRevoked';
+  }) => {
+    const teamMembers = await prisma.teamMember.findMany({
+      where: { teamId: params.teamId },
+      select: { projectId: true, project: { select: { path: true, machine: { select: { id: true, userId: true } } } } },
+    });
+    const publishable = selectPublishableMembers(
+      teamMembers.map((m) => ({
+        teamId: params.teamId,
+        teamOwnerUserId: params.teamOwnerUserId,
+        projectId: m.projectId,
+        ownerUserId: m.project.machine.userId,
+        projectPath: m.project.path,
+        machineId: m.project.machine.id,
+      })),
+    );
+    for (const m of publishable) {
+      purgeCrossAskScopesForRevokedGrant({
+        requesterUserId: params.subscriberUserId,
+        executorUserId: m.ownerUserId,
+        projectId: m.projectId,
+        projectPath: m.projectPath,
+        machineId: m.machineId,
+        organizationId: params.organizationId,
+        teamId: params.teamId,
+        trigger: params.trigger,
+      });
+    }
+  };
+
+  /** 公開型 Team（Phase A）: 自分の購読を解除する（購読者本人のみ）。 */
+  app.delete('/api/teams/:teamId/subscribe', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const subscription = await prisma.teamSubscription.findUnique({
+      where: { teamId_subscriberUserId: { teamId, subscriberUserId: userId } },
+    });
+    if (!subscription || subscription.revokedAt) {
+      return reply.status(404).send({ error: 'Subscription not found' });
+    }
+
+    const team = await prisma.team.findUnique({ where: { id: teamId }, select: { userId: true } });
+
+    await prisma.teamSubscription.update({ where: { id: subscription.id }, data: { revokedAt: new Date() } });
+
+    recordCrossTeamAudit({
+      requesterUserId: userId, executorUserId: userId,
+      organizationId: subscription.organizationId,
+      teamId, mode: 'ask', action: 'unsubscribed', allowSelfAudit: true,
+    });
+
+    // サイクルC3a-1: 後片付け（best-effort、取消の成否は待たせない）。
+    if (team) {
+      purgeCrossAskScopesForUnsubscribe({
+        teamId, teamOwnerUserId: team.userId, subscriberUserId: userId,
+        organizationId: subscription.organizationId, trigger: 'unsubscribed',
+      });
+    }
+
+    return reply.send({ success: true });
+  });
+
+  /** 公開型 Team（Phase A）: 購読者一覧（Team オーナーのみ）。 */
+  app.get('/api/teams/:teamId/subscribers', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const team = await prisma.team.findUnique({ where: { id: teamId }, select: { id: true, userId: true } });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const subscriptions = await prisma.teamSubscription.findMany({
+      where: { teamId, revokedAt: null },
+      orderBy: { createdAt: 'asc' },
+    });
+    const subscriberIds = subscriptions.map((s) => s.subscriberUserId);
+    const users = subscriberIds.length > 0
+      ? await prisma.user.findMany({ where: { id: { in: subscriberIds } }, select: { id: true, name: true, email: true } })
+      : [];
+    const nameOf = (id: string) => {
+      const u = users.find((x) => x.id === id);
+      return u?.name ?? maskEmailForDisplay(u?.email ?? null) ?? id;
+    };
+
+    return reply.send({
+      subscribers: subscriptions.map((s) => ({
+        userId: s.subscriberUserId, name: nameOf(s.subscriberUserId), createdAt: s.createdAt,
+      })),
+    });
+  });
+
+  /** 公開型 Team（Phase A）: Team オーナーが特定の購読者を強制的に取り消す。 */
+  app.delete('/api/teams/:teamId/subscribers/:userId', async (request, reply) => {
+    const ownerUserId = (request as any).user.id as string;
+    const { teamId, userId: subscriberUserId } = request.params as { teamId: string; userId: string };
+    if (!publishFeatureEnabled()) {
+      return reply.status(404).send({ error: 'Not found' });
+    }
+
+    const team = await prisma.team.findUnique({ where: { id: teamId }, select: { id: true, userId: true } });
+    if (!team || team.userId !== ownerUserId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    const subscription = await prisma.teamSubscription.findUnique({
+      where: { teamId_subscriberUserId: { teamId, subscriberUserId } },
+    });
+    if (!subscription || subscription.revokedAt) {
+      return reply.status(404).send({ error: 'Subscription not found' });
+    }
+
+    await prisma.teamSubscription.update({ where: { id: subscription.id }, data: { revokedAt: new Date() } });
+
+    recordCrossTeamAudit({
+      requesterUserId: ownerUserId, executorUserId: subscriberUserId,
+      organizationId: subscription.organizationId,
+      teamId, mode: 'ask', action: 'subscription_revoked',
+    });
+
+    // サイクルC3a-1: 後片付け（best-effort、取消の成否は待たせない）。requesterUserId は
+    // 記憶の持ち主である購読者（subscriberUserId）であって、取消を行ったオーナーではない。
+    purgeCrossAskScopesForUnsubscribe({
+      teamId, teamOwnerUserId: team.userId, subscriberUserId,
+      organizationId: subscription.organizationId, trigger: 'subscriptionRevoked',
+    });
+
+    return reply.send({ success: true });
+  });
+}
+
+/** メールアドレスを表示用にマスクする（ローカル部の先頭2文字のみ残す）。 */
+function maskEmailForDisplay(email: string | null | undefined): string | null {
+  if (!email) return null;
+  const at = email.indexOf('@');
+  if (at <= 2) return email;
+  return `${email.slice(0, 2)}***${email.slice(at)}`;
 }
 
 // API キーをマスク表示

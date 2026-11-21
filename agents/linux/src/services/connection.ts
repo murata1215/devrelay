@@ -39,7 +39,7 @@ import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { readdirSync, mkdirSync, writeFileSync, existsSync, appendFileSync } from 'fs';
 import { chmod } from 'fs/promises';
-import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
+import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE, computeReconnectDelay, CONNECT_TIMEOUT_MS, CONNECT_WATCHDOG_MS } from '@devrelay/shared';
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { writeFileAtomic } from './atomic-write.js';
@@ -115,7 +115,12 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // #348: 一時セッション（ask-member/teamexec-member/WebUI プロジェクト説明生成）が
 // projectPath 上の永続状態（conversation.json / claude-session-id / .devrelay-output）を
 // 読み書きしないようにするための判定（層 B: Agent 側の直交化）
-import { isEphemeralSession } from './session-scope.js';
+// 案C′ サイクルC1: resolveSessionStatePolicy() は第3区分（resumable-scoped）の許可リストを返す
+// （サーバーが statePolicy を送らない限り isEphemeral の二値判定と完全に同じ結果になる）
+import { isEphemeralSession, resolveSessionStatePolicy, isAiToolReadOnlyEnforceable } from './session-scope.js';
+// サイクルS2a: クロス ask スコープのプロジェクトルート realpath 解決 + CLAUDE.md 安全注入
+import { resolveProjectRootReal } from './cross-ask-path-guard.js';
+import { buildCrossAskClaudeMdPrompt } from './cross-ask-claude-md.js';
 import { applyHandover, loadActiveHandover, markHandoverInjected, formatHandoverForPrompt } from './handover-store.js';
 import { buildDependencyProbeBlock, buildArtifactFreshnessGate, buildPnpmInstallCommand, AGENT_INSTALL_FILTER } from './update-script.js';
 import { decideRunningCodeStale, buildRunningCodeTargets, type RunningCodeFile } from './running-code-stale.js';
@@ -124,11 +129,16 @@ import { setCapabilityConfig, setCapabilitySyncSender, requestReconcile, registe
 import { claudePluginAdapter } from './capabilities/claude-plugin-adapter.js';
 // サイクルP3-B: devin:skill から agent-skills:standard へ昇格（配布フォーマット単位の adapter）
 import { agentSkillsAdapter, setAiToolsSnapshot } from './capabilities/agent-skills-adapter.js';
+// サイクルP4-A: Devin CLI 公式 plugin 機能向け adapter（agent-skills:standard とは併存。
+// `DEVRELAY_DEVIN_PLUGIN=0` で no-op になるキルスイッチは adapter 内部で判定するため、
+// registry への登録はキルスイッチに関わらず無条件で行う）
+import { devinPluginAdapter } from './capabilities/devin-plugin-adapter.js';
 import type { AgentCapabilitySyncPayload } from '@devrelay/shared';
 
 // Capability adapter の登録（起動時 1 回。将来 Codex adapter を足すときはここに 1 行追加するだけでよい）
 registerCapabilityAdapter(claudePluginAdapter);
 registerCapabilityAdapter(agentSkillsAdapter);
+registerCapabilityAdapter(devinPluginAdapter);
 
 let ws: WebSocket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -138,6 +148,14 @@ let claudeAuthCheckTimer: NodeJS.Timeout | null = null;
 /** 直前に送信した Claude ログイン状態（'unknown' は未送信扱い。状態が変化したときだけ通知するため） */
 let lastReportedClaudeAuthOk: boolean | null = null;
 let pongCheckInterval: NodeJS.Timeout | null = null;
+/** 接続タイムアウトの自前監視タイマー（原因A: handshakeTimeout が効かない場合の保険） */
+let connectWatchdogTimer: NodeJS.Timeout | null = null;
+/** 安定接続判定タイマー（open から60秒 OPEN を維持できたら reconnectAttempts をリセット） */
+let stableConnectionTimer: NodeJS.Timeout | null = null;
+/** 最後の砦: ws が死んでいて reconnectTimer も無い状態を検出する常駐監視（60秒間隔） */
+let supervisorTimer: NodeJS.Timeout | null = null;
+/** disconnect() 呼び出し後（SIGINT 等）は supervisor / scheduleReconnect を一切発動しない */
+let shuttingDown = false;
 let currentConfig: AgentConfig | null = null;
 let currentMachineId: string | null = null;
 /** Server から配信されたプランモード許可ツール（null = デフォルト使用） */
@@ -168,10 +186,26 @@ export function getServerDisableAsk(): boolean {
 
 // 再接続状態（バックオフ管理）
 let reconnectAttempts = 0;
-/** 最後に WebSocket 接続が確立した時刻（安定接続判定用） */
+/** 最後に WebSocket 接続が確立した時刻（ログの接続継続時間表示用） */
 let lastConnectedAt = 0;
 /** サーバーがプロトコルバージョン不足で接続拒否した場合 true（再接続ループを停止） */
 let protocolUpdateRequired = false;
+
+/** 接続監視タイマーを解除する（open / close / error / disconnect の各経路で呼ぶ） */
+function clearConnectWatchdog() {
+  if (connectWatchdogTimer) {
+    clearTimeout(connectWatchdogTimer);
+    connectWatchdogTimer = null;
+  }
+}
+
+/** 安定接続判定タイマーを解除する（close / error / disconnect の各経路で呼ぶ） */
+function clearStableConnectionTimer() {
+  if (stableConnectionTimer) {
+    clearTimeout(stableConnectionTimer);
+    stableConnectionTimer = null;
+  }
+}
 
 /** 最後に更新を開始した時刻（二重更新防止用、60秒で自動解除） */
 let updateStartedAt = 0;
@@ -246,6 +280,12 @@ interface SessionInfo {
   memoryIndexWarned?: boolean;
   /** core#336: MCP submission 単位のスコープ識別子。指定時は `.devrelay/sessions/<agentScopeId>/` を使う（対話経路は未指定のまま = 従来どおり） */
   agentScopeId?: string;
+  /**
+   * 案C′ サイクルC1: 一時セッションの状態ポリシー（wire 上の `EphemeralStatePolicy` と同じ値）。
+   * `server:session:start` で受け取った値を保持し、以降のターン（`server:ai:prompt`）で
+   * payload 側が省略された場合のフォールバックに使う（`resolveSessionStatePolicy()` に渡す）。
+   */
+  statePolicy?: string;
 }
 const sessionInfoMap = new Map<string, SessionInfo>();
 
@@ -285,9 +325,14 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
   // Agent 起動時にログローテーション（agent.log + 承認ログ）
   setupLogRotation().catch(err => console.error('Log rotation setup failed:', err));
   rotateApprovalLog().catch(err => console.error('Approval log rotation failed:', err));
+  // 最後の砦: ws が死んでいて reconnectTimer も無い状態を検出する常駐監視を起動する
+  // （通常は不要だが、何らかの経路でタイマーが1つも残らず沈黙する状態に落ちた場合の保険）
+  startReconnectSupervisor(config, projects);
+
   return new Promise<void>((resolve, reject) => {
     // Build WebSocket options with optional proxy
-    const wsOptions: WebSocket.ClientOptions = {};
+    // handshakeTimeout（原因A）: ws 自身のタイムアウトで CONNECTING のまま止まるのを防ぐ
+    const wsOptions: WebSocket.ClientOptions = { handshakeTimeout: CONNECT_TIMEOUT_MS };
 
     if (config.proxy?.url && shouldBypassProxy(config.serverUrl, config.proxy.noProxy)) {
       // noProxy に一致 → サーバー接続だけ直結する。社内に Server を置き AI API だけ
@@ -310,12 +355,40 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     }
 
     ws = new WebSocket(config.serverUrl, wsOptions);
+    // 以降のハンドラは全て thisWs に対して登録する（close/error の「置き換え済みなら無視」判定と
+    // 揃えるため。ここから handler 登録までは同期的なので ws と thisWs は常に同一オブジェクト）。
+    const thisWs = ws;
 
-    ws.on('open', () => {
+    // 自前の接続監視タイマー（原因A の保険）: handshakeTimeout が何らかの理由で効かず
+    // CONNECTING のまま止まった場合に terminate() する。terminate() は ws v8 では
+    // CONNECTING 中でも abortHandshake() 経由で error → close を必ず発火するため、
+    // 既存の close → scheduleReconnect の経路にそのまま戻る。
+    clearConnectWatchdog();
+    connectWatchdogTimer = setTimeout(() => {
+      connectWatchdogTimer = null;
+      if (thisWs.readyState === WebSocket.CONNECTING) {
+        console.error(`⚠️ Connect watchdog fired (stuck CONNECTING for ${CONNECT_WATCHDOG_MS}ms), terminating...`);
+        thisWs.terminate();
+      }
+    }, CONNECT_WATCHDOG_MS);
+
+    thisWs.on('open', () => {
+      clearConnectWatchdog();
       console.log('✅ Connected to server');
 
-      // 接続時刻を記録（安定接続判定用。リセットは scheduleReconnect で行う）
+      // 接続時刻を記録（ログ表示用）
       lastConnectedAt = Date.now();
+
+      // 安定接続判定（原因B の修正）: open した瞬間に reconnectAttempts を 0 に戻すと、
+      // Agent 二重起動によるホットループ（サーバーが新接続のたびに旧 WS を切断する既知の事故。
+      // doc/agent_noresponse_20260814.md）で 2 秒間隔のまま無限に接続嵐を起こしてしまう。
+      // そのため「60秒 OPEN を維持できたら」リセットする（長時間安定していた接続が切れた
+      // 直後は 0 のままなので、正しくバックオフが効く）。
+      clearStableConnectionTimer();
+      stableConnectionTimer = setTimeout(() => {
+        stableConnectionTimer = null;
+        reconnectAttempts = 0;
+      }, DEFAULTS.reconnectStableThreshold);
 
       // Note: currentMachineId will be set when server:connect:ack is received
 
@@ -350,11 +423,11 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
       resolve();
     });
 
-    ws.on('pong', () => {
+    thisWs.on('pong', () => {
       lastPongReceived = Date.now();
     });
 
-    ws.on('message', (data) => {
+    thisWs.on('message', (data) => {
       try {
         const message: ServerToAgentMessage = JSON.parse(data.toString());
         // デバッグ: pong 以外の受信メッセージタイプをログ出力
@@ -368,13 +441,16 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     });
 
     // close ハンドラ: この WS が既に置き換えられていたら再接続をスキップ
-    const thisWs = ws;
     thisWs.on('close', () => {
       if (ws !== thisWs) {
         console.log('🔌 Old WebSocket closed (replaced), skipping reconnect');
         return;
       }
-      console.log('🔌 Disconnected from server');
+      clearConnectWatchdog();
+      clearStableConnectionTimer();
+      const connectedForMs = lastConnectedAt > 0 ? Date.now() - lastConnectedAt : null;
+      const connectedForSuffix = connectedForMs !== null ? ` (was connected for ${(connectedForMs / 1000).toFixed(1)}s)` : '';
+      console.log(`🔌 Disconnected from server${connectedForSuffix}`);
       stopPing();
       stopAppPing();
       stopClaudeAuthCheck();
@@ -387,10 +463,40 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
     });
 
     thisWs.on('error', (err) => {
+      clearConnectWatchdog();
       console.error('WebSocket error:', err.message);
       reject(err);
     });
   });
+}
+
+/**
+ * 最後の砦: 60秒ごとに「ws が生きていない（OPEN/CONNECTING でない）のに reconnectTimer も無い」
+ * 状態を検出し、復帰のために scheduleReconnect() を呼ぶ常駐監視ループ。
+ *
+ * 通常の経路（close → scheduleReconnect、watchdog → terminate → close → scheduleReconnect）で
+ * 必ず再接続に戻るはずだが、将来の改修でその経路が壊れた場合でも「タイマーが1つも残らず
+ * 永久に沈黙する」という 2026-11-11 の事故の型を構造的に防ぐための二重の保険。
+ * disconnect() 後（shuttingDown）やプロトコル不足での意図した停止では発動しない。
+ */
+function startReconnectSupervisor(config: AgentConfig, projects: Project[]) {
+  if (supervisorTimer) return; // 多重起動しない
+  shuttingDown = false;
+  supervisorTimer = setInterval(() => {
+    if (shuttingDown || protocolUpdateRequired) return;
+    const wsAlive = ws !== null && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+    if (!wsAlive && !reconnectTimer) {
+      console.error('⚠️ Reconnect supervisor: no live connection and no pending reconnect timer, recovering...');
+      scheduleReconnect(config, projects);
+    }
+  }, 60000);
+}
+
+function stopReconnectSupervisor() {
+  if (supervisorTimer) {
+    clearInterval(supervisorTimer);
+    supervisorTimer = null;
+  }
 }
 
 function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig) {
@@ -952,10 +1058,22 @@ async function handleClaudeLoginCode(requestId: string, authorizationCode: strin
 }
 
 async function handleSessionStart(
-  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool; agentScopeId?: string },
+  payload: { sessionId: string; projectName: string; projectPath: string; aiTool: AiTool; agentScopeId?: string; statePolicy?: string },
   config: AgentConfig
 ) {
   const { sessionId, projectName, projectPath, aiTool: requestedAiTool, agentScopeId } = payload;
+
+  // #348: crossquery_/teamexec_/askdesc_ は一時セッション（projectPath 上の状態を読み書きしない）。
+  // 旧 isCrossQuery（crossquery_/teamexec_ のみ）は askdesc_ を含んでいなかったが、
+  // WebUI のプロジェクト説明生成も同じ理由で一時扱いにすべきため isEphemeralSession に統一する。
+  const isEphemeral = isEphemeralSession(sessionId);
+  // 案C′ サイクルC1 + サイクルG: 一時セッションが projectPath 上の状態をどこまで読み書きしてよいか、
+  // および機体グローバル状態（approve-all）・サーバーへの報告（Project.defaultAi）を触ってよいかの
+  // 許可リスト。サーバーが statePolicy を送らない限り（isolated 未配線の経路）、
+  // isEphemeral の二値判定と完全に同じ結果になる。resolveEffectiveAiTool/resetApproveAllMode の
+  // ガードに使うため、両方より前に計算する（サイクルG: 計算順序を前倒し）。
+  const statePolicy = resolveSessionStatePolicy(sessionId, { statePolicy: payload.statePolicy, agentScopeId });
+
   // Devin 専用端末等でサーバー指定の AI が未インストールなら、実際に使えるツールへ差し替える
   const aiTool = await resolveEffectiveAiTool(requestedAiTool, config);
   if (aiTool !== requestedAiTool) {
@@ -964,19 +1082,23 @@ async function handleSessionStart(
     // handleSessionAiTool() を利用）。これが無いと Session.aiTool / Project.defaultAi が
     // 要求値（例: claude）のまま残り、サーバーは要求ツール用のモデル設定を解決し続けてしまい、
     // 実際に動くツール（例: devin）へモデル未指定のまま渡ってしまう（組織 AI デフォルト無視事故）。
-    sendMessage({
-      type: 'agent:session:aiTool',
-      payload: { machineId: config.machineId, sessionId, aiTool },
-    });
+    // サイクルG: isolated（クロスユーザー ask）では報告しない — 他人の質問 1 通で所有者の
+    // Project.defaultAi が書き換わる既存バグ（`handleSessionAiTool` 参照）を再発させないため。
+    if (statePolicy.reportAiToolSubstitution) {
+      sendMessage({
+        type: 'agent:session:aiTool',
+        payload: { machineId: config.machineId, sessionId, aiTool },
+      });
+    }
   }
 
-  // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）
-  resetApproveAllMode();
+  // 新セッション開始時に「以降すべて許可」モードをリセット（前セッションの状態を引き継がない）。
+  // サイクルG（G-8）: 一時セッション全般（legacy/isolated とも）ではこの機体グローバル状態に
+  // 触らない（一時セッションの開始/終了が対話セッションの「以降すべて許可」を消す既存バグの根治）。
+  if (statePolicy.approveAllState) {
+    resetApproveAllMode();
+  }
 
-  // #348: crossquery_/teamexec_/askdesc_ は一時セッション（projectPath 上の状態を読み書きしない）。
-  // 旧 isCrossQuery（crossquery_/teamexec_ のみ）は askdesc_ を含んでいなかったが、
-  // WebUI のプロジェクト説明生成も同じ理由で一時扱いにすべきため isEphemeralSession に統一する。
-  const isEphemeral = isEphemeralSession(sessionId);
   const crossLabel = sessionId.startsWith('teamexec_') ? 'TEAM-EXEC' : sessionId.startsWith('askdesc_') ? 'ASK-DESC' : 'CROSS-QUERY';
   console.log(`🚀 Starting session: ${sessionId}${isEphemeral ? ` [${crossLabel}]` : ''}`);
   console.log(`   Project: ${projectName} (${projectPath})`);
@@ -994,10 +1116,24 @@ async function handleSessionStart(
 
   // #348: 一時セッションは conversation.json を読まない（全セッション共有の resume/履歴汚染を防ぐ）
   // core#336: agentScopeId 指定時はスコープ専用ディレクトリを読む（対話経路は agentScopeId 未指定 = 従来どおり）
-  const history = reuseSessionInfo || isEphemeral ? [] : await loadConversation(projectPath, agentScopeId);
+  // 案C′: resumable（statePolicy.scopedConversation）なら scope dir から読む
+  // 2026-10-29: 同じ会話の SessionInfo を使い回すときはファイルを読み直さない（reuseSessionInfo）
+  const loadedHistory = !reuseSessionInfo && statePolicy.scopedConversation ? await loadConversation(projectPath, agentScopeId) : [];
+  // 案C′ 二段防御（④）: forcePlanTurn のときは load 時点で exec マーカーを取り除き、
+  // isExecTriggered 系の判定（rescanProjectsAndSync 等）に一切影響させない。
+  const history = statePolicy.forcePlanTurn ? loadedHistory.filter(h => h.role !== 'exec') : loadedHistory;
 
   // Check for pending work state (auto-continue feature)
-  const pendingWorkState = await loadWorkState(projectPath);
+  // G-2（Phase C 既存バグ修正）: 一時セッション（crossquery_ 等）は所有者の作業途中メモを
+  // 読んではならない。無条件に読むと、借り手向けのプロンプトに所有者のメモが混入し
+  // （クロスユーザーのデータ露出）、かつ下の handleAiPrompt 側で archiveWorkState() が
+  // 呼ばれて所有者の auto-continue が消費されてしまう（ask は何度でも繰り返せるため、
+  // 最初の ask で auto-continue が「使われた」ことになり、対話セッション側で本来
+  // 続くはずだった work state が失われる）。
+  // サイクルG（Q5）: 静的ガード（apps/server/tests/cross-team-chat-wiring.test.mjs）も
+  // statePolicy.workState の判定へ更新したため、`isEphemeral` 直書きから切り替える
+  // （legacy/resumable/isolated は全て workState:false のため挙動は不変）。
+  const pendingWorkState = statePolicy.workState ? await loadWorkState(projectPath) : null;
   if (pendingWorkState) {
     console.log(`📂 Found pending work state: ${pendingWorkState.summary}`);
   }
@@ -1017,6 +1153,7 @@ async function handleSessionStart(
     // 履歴・resume ID・端末モード等はメモリ上の値をそのまま引き継ぐ（並行中のターンが同じオブジェクトを使っているため）。
     // サーバー指定の AI ツールと保留中の作業状態だけ最新に合わせる。
     existingSessionInfo.aiTool = aiTool;
+    existingSessionInfo.statePolicy = payload.statePolicy;
     if (pendingWorkState) {
       existingSessionInfo.pendingWorkState = pendingWorkState;
     }
@@ -1025,7 +1162,8 @@ async function handleSessionStart(
     // Load existing Claude session ID for --resume
     // #348: 一時セッションは resume しない（対話セッションと同じ --resume を共有すると輻輳の原因になる）
     // core#336: agentScopeId 指定時はスコープ専用ディレクトリから読む
-    const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(projectPath, agentScopeId);
+    // 案C′: resumable（statePolicy.scopedConversation）なら scope dir から resume できる
+    const claudeResumeSessionId = statePolicy.scopedConversation ? await loadClaudeSessionId(projectPath, agentScopeId) : undefined;
     if (claudeResumeSessionId) {
       console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
     }
@@ -1039,7 +1177,8 @@ async function handleSessionStart(
       claudeResumeSessionId: claudeResumeSessionId || undefined,
       history,
       pendingWorkState: pendingWorkState || undefined,
-      agentScopeId
+      agentScopeId,
+      statePolicy: payload.statePolicy
     });
     console.log(`📋 Session ${sessionId} -> Claude Session ${claudeSessionId}`);
   }
@@ -1181,8 +1320,17 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
-  // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット
-  resetApproveAllMode();
+  // #348: 一時セッションは exec マーカーも projectPath 上のファイルに書かない
+  // （対話セッションと conversation.json を共有しているため、書くと相互汚染する）
+  const isEphemeral = isEphemeralSession(sessionId);
+
+  // exec = 新しい会話の開始 → 「以降すべて許可」モードをリセット。
+  // サイクルG（G-8）: 一時セッション（teamexec_ 等）ではこの機体グローバル状態に触らない
+  // （teamexec の exec 1 回が対話セッションの「以降すべて許可」を消す既存バグの根治。
+  // cross ask は本関数自体を呼ばないため isolated はここに到達しない）。
+  if (!isEphemeral) {
+    resetApproveAllMode();
+  }
 
   // exec 開始時に skipPermissions / disableAsk を同期（server:config:update 配信失敗のフォールバック）
   if (payload.skipPermissions !== undefined) {
@@ -1193,10 +1341,6 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     serverDisableAsk = payload.disableAsk;
     console.log(`🚫 Disable AskUserQuestion synced on exec: ${serverDisableAsk}`);
   }
-
-  // #348: 一時セッションは exec マーカーも projectPath 上のファイルに書かない
-  // （対話セッションと conversation.json を共有しているため、書くと相互汚染する）
-  const isEphemeral = isEphemeralSession(sessionId);
 
   let sessionInfo = sessionInfoMap.get(sessionId);
 
@@ -1286,10 +1430,10 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string; handoverTurn?: boolean }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string; statePolicy?: string; handoverTurn?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
-  // #348: 一時セッションは projectPath 上の状態（conversation.json / .devrelay-output）を読み書きしない
-  const isEphemeral = isEphemeralSession(sessionId);
+  // #348/案C′: 一時セッションが projectPath 上の状態をどこまで読み書きしてよいかは、
+  // sessionInfo 確定後に statePolicy（resolveSessionStatePolicy）として解決する（下記参照）。
   const crossQueryStart = sessionTimings.get(sessionId);
   console.log(`📝 Received prompt for session ${sessionId}: ${prompt.slice(0, 50)}...`);
   if (crossQueryStart) {
@@ -1316,8 +1460,13 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // Agent 再起動で sessionInfoMap が消失した場合、payload の projectPath/aiTool で自動初期化
   if (!sessionInfo && payload.projectPath && payload.aiTool && currentConfig) {
     console.log(`🔄 Auto-initializing session ${sessionId} (agent may have restarted)`);
-    const history = isEphemeral ? [] : await loadConversation(payload.projectPath, payload.agentScopeId);
-    const claudeResumeSessionId = isEphemeral ? undefined : await loadClaudeSessionId(payload.projectPath, payload.agentScopeId);
+    // 案C′ サイクルC1: sessionInfoMap 消失時は payload 側の statePolicy/agentScopeId から再解決する
+    // （正常経路の statePolicy は下の guard 後に sessionInfo から改めて解決する）
+    const autoInitStatePolicy = resolveSessionStatePolicy(sessionId, { statePolicy: payload.statePolicy, agentScopeId: payload.agentScopeId });
+    const autoInitLoadedHistory = autoInitStatePolicy.scopedConversation ? await loadConversation(payload.projectPath, payload.agentScopeId) : [];
+    // 案C′ 二段防御（④）: forcePlanTurn のときは load 時点で exec マーカーを取り除く
+    const history = autoInitStatePolicy.forcePlanTurn ? autoInitLoadedHistory.filter(h => h.role !== 'exec') : autoInitLoadedHistory;
+    const claudeResumeSessionId = autoInitStatePolicy.scopedConversation ? await loadClaudeSessionId(payload.projectPath, payload.agentScopeId) : undefined;
     if (claudeResumeSessionId) {
       console.log(`📋 Found existing Claude session: ${claudeResumeSessionId.substring(0, 8)}...`);
     }
@@ -1329,6 +1478,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       history,
       // core#336: MCP submission 単位のスコープ識別子（未指定 = 対話経路 = 従来どおり）
       agentScopeId: payload.agentScopeId,
+      statePolicy: payload.statePolicy,
     };
     sessionInfoMap.set(sessionId, sessionInfo);
 
@@ -1373,9 +1523,36 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     return;
   }
 
+  // 案C′ サイクルC1: handleSessionStart が解決した statePolicy を引き継ぐ
+  // （payload 側が省略された場合は sessionInfo に保存済みの値へフォールバックする）。
+  const statePolicy = resolveSessionStatePolicy(sessionId, {
+    statePolicy: payload.statePolicy ?? sessionInfo.statePolicy,
+    agentScopeId: sessionInfo.agentScopeId,
+  });
+
+  // サイクルG（G-7 の一般化）: isolated（クロスユーザー ask）は、読み取り専用を権限で
+  // 強制できない実効 AI（devin / gemini、または claude+terminalMode）への質問を AI を一切
+  // 起動せずに拒否する。サーバー側（cross-ask-runner.ts/document-api.ts）の事前拒否が主防御、
+  // これは resolveEffectiveAiTool 等で実効 AI が変わった場合の最後の砦のため、
+  // statePolicy 解決の直後・他の一時セッション副作用（saveReceivedFiles 以降）より前に置く。
+  if (statePolicy.refuseUnsafeAiTool && !isAiToolReadOnlyEnforceable(sessionInfo.aiTool, !!sessionInfo.terminalMode)) {
+    console.log(`🚫 [isolated] Refusing cross-user ask: aiTool=${sessionInfo.aiTool} terminalMode=${!!sessionInfo.terminalMode} is not read-only enforceable`);
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig.machineId,
+        sessionId,
+        output: tChat(payload.language ?? DEFAULT_CHAT_LANGUAGE, 'ask.crossUserUnsafeAiRefused', { aiTool: sessionInfo.aiTool }),
+        isComplete: true,
+      },
+    });
+    return;
+  }
+
   // Save received files and get their paths
+  // サイクルG（G-4 相当）: isolated では所有者プロジェクトへの添付保存を一切行わない。
   let promptWithFiles = prompt;
-  if (files && files.length > 0) {
+  if (statePolicy.receivedFiles && files && files.length > 0) {
     const savedPaths = await saveReceivedFiles(sessionInfo.projectPath, files);
     if (savedPaths.length > 0) {
       promptWithFiles = buildPromptWithFiles(prompt, savedPaths);
@@ -1402,7 +1579,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     timestamp: new Date().toISOString()
   });
   // #348: 一時セッションは conversation.json を書かない（メモリ内 history のみで完結させる）
-  if (!isEphemeral) {
+  // 案C′: resumable（statePolicy.scopedConversation）なら scope dir に書く
+  if (statePolicy.scopedConversation) {
     await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
   }
 
@@ -1412,12 +1590,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // 直下を消す処理はやめる（24 時間以上前の古いものだけ片付ける）。
   // #348: 一時セッション・スレッド引継ぎ（`n`）の裏ターンは片付け（prune）をしない
   // （対話セッションの成果物を巻き込まないため）。ただし自分専用フォルダは作るので混線もしない。
-  const outputTurn = await beginOutputTurn(
+  // 案C′/サイクルG: 成果物の案内も回収もしない区分（resumable/isolated）は所有者プロジェクトにフォルダを作らない。
+  // 片付け（prune）は対話セッション（statePolicy.outputDirClear）かつ引継ぎの裏ターン以外のときだけ。
+  const outputTurn = statePolicy.outputDirInstruction || statePolicy.outputFileCollect
+    ? await beginOutputTurn(
     sessionInfo.projectPath,
     payload.turnId || `${Date.now().toString(36)}_${payload.sessionId}`,
-    { prune: !isEphemeral && !payload.handoverTurn },
-  );
-  const outputDirInstruction = buildOutputDirInstruction(outputTurn);
+    { prune: statePolicy.outputDirClear && !payload.handoverTurn },
+      )
+    : null;
+  // 案C′: resumable では成果物フォルダの案内文を付けない（所有者プロジェクトへの書き込みを勧めない）
+  const outputDirInstruction = outputTurn && statePolicy.outputDirInstruction ? buildOutputDirInstruction(outputTurn) : '';
 
   // Check if the last entry (before current user message) is an exec marker
   // This means exec was just sent, so this prompt should run in exec mode
@@ -1426,7 +1609,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const lastEntry = historyBeforeThisMessage[historyBeforeThisMessage.length - 1];
   const isExecTriggered = lastEntry?.role === 'exec';
   // Plan モード: permissionMode 'plan' + allowedTools、Exec モード: canUseTool コールバックで承認
-  const isPlanTurn = !isExecTriggered;
+  // 案C′ 二段防御（④）: forcePlanTurn のときは履歴の exec マーカーを無視して plan ターンに固定する
+  // （strictReadonly が必ず効くことの構造的保証。resumable 以外では従来どおり isExecTriggered で判定）
+  const isPlanTurn = statePolicy.forcePlanTurn ? true : !isExecTriggered;
   console.log(`📋 Mode: ${isExecTriggered ? 'EXEC (canUseTool approval)' : 'PLAN (permissionMode plan)'}`);
 
   // Check for pending work state (auto-continue feature)
@@ -1441,11 +1626,25 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   }
 
   // Load storage context if exists
+  // サイクルG（G-3）: isolated では所有者の storage-context.md をプロンプトに注入しない
+  // （クロスユーザーの情報漏れ）。同一ユーザーの ask（legacy）は既存どおり注入する。
   let storageContextPrompt = '';
-  const storageContext = await loadStorageContext(sessionInfo.projectPath);
+  const storageContext = statePolicy.storageContext ? await loadStorageContext(sessionInfo.projectPath) : null;
   if (storageContext) {
     console.log(`📂 Including storage context in prompt (${storageContext.length} chars)`);
     storageContextPrompt = '\n\n--- Storage Context ---\n' + storageContext + '\n--- End Storage Context ---';
+  }
+
+  // サイクルS2a: クロス ask スコープは `settingSources: []` のため SDK 自身はプロジェクトの
+  // CLAUDE.md を読まない（`cross-ask-sdk-overrides` 参照）。代わりに Agent 側で安全化（パスゲート
+  // 通過・`@` 取り込み行の除去・サイズ上限 ${CROSS_ASK_CLAUDE_MD_MAX_CHARS} 文字）して注入する。
+  let claudeMdPrompt = '';
+  if (statePolicy.crossAskScope) {
+    const crossAskRootReal = resolveProjectRootReal(sessionInfo.projectPath);
+    claudeMdPrompt = buildCrossAskClaudeMdPrompt(crossAskRootReal);
+    if (claudeMdPrompt) {
+      console.log(`📄 [cross-ask-scope] Including project CLAUDE.md in prompt (${claudeMdPrompt.length} chars)`);
+    }
   }
 
   // Devin 専用端末等でサーバー指定の AI が未インストールなら、実行直前に使えるツールへ差し替える
@@ -1457,11 +1656,31 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.aiTool = resolvedAiTool;
       // 2026-10-02 修正: handleSessionStart と同じ理由でサーバーへ報告する（既存の
       // agent:session:aiTool メッセージを利用。Session.aiTool / Project.defaultAi を実態に揃える）
-      sendMessage({
-        type: 'agent:session:aiTool',
-        payload: { machineId: currentConfig.machineId, sessionId, aiTool: resolvedAiTool },
-      });
+      // サイクルG: isolated では報告しない（所有者の Project.defaultAi を書き換えないため）。
+      if (statePolicy.reportAiToolSubstitution) {
+        sendMessage({
+          type: 'agent:session:aiTool',
+          payload: { machineId: currentConfig.machineId, sessionId, aiTool: resolvedAiTool },
+        });
+      }
     }
+  }
+
+  // サイクルG: 直前の実行直前差し替えで実効 AI が変わった場合の二段目の拒否チェック
+  // （冒頭の判定は handleSessionStart 時点の aiTool を見ているため、ここで初めて devin 等へ
+  // 化けるケースを取り落とさないための最後の砦）。AI プロセスはまだ起動していない。
+  if (statePolicy.refuseUnsafeAiTool && !isAiToolReadOnlyEnforceable(sessionInfo.aiTool, !!sessionInfo.terminalMode)) {
+    console.log(`🚫 [isolated] Refusing cross-user ask after late aiTool substitution: aiTool=${sessionInfo.aiTool}`);
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig!.machineId,
+        sessionId,
+        output: tChat(payload.language ?? DEFAULT_CHAT_LANGUAGE, 'ask.crossUserUnsafeAiRefused', { aiTool: sessionInfo.aiTool }),
+        isComplete: true,
+      },
+    });
+    return;
   }
 
   // #368 Phase2a-C: Devin はプランモードを使わない（常に dangerous で起動し、
@@ -1519,7 +1738,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // conversation.json には混ぜないので exec マーカーで消えない。引継ぎ書を書かせる裏ターン自身には付けない。
   let handoverBlock = '';
   let handoverPending = false;
-  if (!isEphemeral && !payload.handoverTurn && !isClaudeTerminalMode) {
+  if (!isEphemeralSession(payload.sessionId) && !statePolicy.crossAskScope && !payload.handoverTurn && !isClaudeTerminalMode) {
     const activeHandover = await loadActiveHandover(sessionInfo.projectPath, sessionInfo.agentScopeId);
     if (activeHandover) {
       handoverBlock = formatHandoverForPrompt(activeHandover, payload.language);
@@ -1531,7 +1750,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   const composeFullPrompt = (includeHistory: boolean): string => {
     const handoverPart = handoverBlock && (includeHistory || handoverPending) ? handoverBlock : '';
     if (handoverPart) handoverInjected = true;
-    const basePrompt = effectiveModeInstruction + prevExecSummary + handoverPart + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + outputDirInstruction;
+    const basePrompt = effectiveModeInstruction + prevExecSummary + handoverPart + '\n\n' + promptWithFiles + workStatePrompt + storageContextPrompt + claudeMdPrompt + outputDirInstruction;
     if (!(sessionInfo.history.length > 1 && includeHistory)) {
       historyContextSize = 0;
       return basePrompt;
@@ -1554,7 +1773,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       { includePlanBeforeExec: isFirstMessageAfterExec }
     );
     historyContextSize = historyContext.length;
-    return `${effectiveModeInstruction}${handoverPart}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${outputDirInstruction}`;
+    return `${effectiveModeInstruction}${handoverPart}\n\nPrevious conversation:\n${historyContext}\n\nUser: ${promptWithFiles}${workStatePrompt}${claudeMdPrompt}${outputDirInstruction}`;
   };
 
   const hasMissedMessages = missedMessages && missedMessages.length > 0;
@@ -1644,6 +1863,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   console.log(`   - User prompt: ${promptWithFiles.length} chars`);
   console.log(`   - Work state: ${workStatePrompt.length} chars`);
   console.log(`   - Storage context: ${storageContextPrompt.length} chars`);
+  console.log(`   - Project CLAUDE.md (cross-ask): ${claudeMdPrompt.length} chars`);
   console.log(`   - Output instruction: ${outputDirInstruction.length} chars`);
   if (historyContextSize > 0) {
     console.log(`   - History context: ${historyContextSize} chars`);
@@ -1675,16 +1895,41 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // strictReadonly は plan モードでのみ意味を持つ（exec には一切影響しない）
   const strictReadonly = permissionPolicy === 'strictReadonly' && usePlanMode;
 
+  // サイクルS2b（新発見④）: statePolicy.crossAskScope が true なのに strictReadonly が立たない
+  // 経路（permissionPolicy 未配線・旧サーバー・Devin 等で usePlanMode=false）では、
+  // ai-runner.ts の新ゲート（`options.crossAskScope` 条件で発火）も decidePlanPermission も
+  // 作用しない。`refuseUnsafeAiTool` と同じ「AI を起動せず拒否する」形でここで検出する
+  // （strictReadonly/usePlanMode という別系統の値に statePolicy.crossAskScope の実効性を
+  // 依存させないための最終防衛線）。
+  if (statePolicy.crossAskScope && !strictReadonly) {
+    console.log(`🚫 [cross-ask-scope] Refusing: strictReadonly did not activate (permissionPolicy=${permissionPolicy}, usePlanMode=${usePlanMode})`);
+    sendMessage({
+      type: 'agent:ai:output',
+      payload: {
+        machineId: currentConfig!.machineId,
+        sessionId,
+        output: 'この質問には応答できません（安全設定を有効化できませんでした）。プロジェクトの所有者に確認してください。',
+        isComplete: true,
+      },
+    });
+    return;
+  }
+
   // core#336: resume 優先順位（PTY 経路・SDK 経路と統一）。判定ロジックは resume-priority.ts に集約。
-  const effectiveResumeSessionId = decideResume({
+  const resumeDecision = decideResume({
     explicitResumeSessionId: payload.resumeSessionId,
     forceNewSession: payload.forceNewSession,
     storedSessionId: sessionInfo.claudeResumeSessionId,
-  }).resumeSessionId;
+  });
+  const effectiveResumeSessionId = resumeDecision.resumeSessionId;
 
   // Prepare send options
   const sendOptions: SendPromptOptions = {
     resumeSessionId: effectiveResumeSessionId,
+    // 2026-10-27 サイクル2（D2、plan→exec resume）: gemini 分岐は resumeSource === 'explicit'
+    // （サーバーが approve_implementation 等で明示指定した ID）のときのみ --resume に使う。
+    // claude/codex/devin は resumeSessionId のみ参照し resumeSource を見ないため無影響。
+    resumeSource: resumeDecision.source,
     usePlanMode,
     allowedTools: usePlanMode ? (serverAllowedTools ?? DEFAULT_ALLOWED_TOOLS_LINUX) : undefined,
     // #332: skipPermissions は permissionPolicy から導出する（forceNewSession はもう使わない）。
@@ -1701,10 +1946,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     // #316: チャット表示言語（'en' の場合のみ AI への英語応答指示が付与される）
     language: payload.language,
     // #348: 一時セッションは claude-session-id / context-usage を projectPath 上に書かない
-    persistProjectState: !isEphemeral,
+    // 案C′: resumable（statePolicy.scopedConversation）なら scope dir には書いてよい
+    persistProjectState: statePolicy.scopedConversation,
+    // サイクルG（G-5b）: Codex/Devin のセッション ID 等の読み出しを許可するか
+    // （書き込み・削除は persistProjectState が別途ガードする。既存の仕組みと対にする）
+    projectStateRead: statePolicy.projectStateRead,
     // core#336: MCP submission 単位のスコープ識別子 / plan-exec 対応付け correlation ID
     agentScopeId: sessionInfo.agentScopeId,
     turnId: payload.turnId,
+    // サイクルS2a: クロス ask スコープの読める範囲・使えるツール制限ゲートを有効化するか。
+    // `statePolicy.crossAskScope` をそのまま渡す（`strictReadonly`/`usePlanMode` には依存しない）。
+    crossAskScope: statePolicy.crossAskScope,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）
@@ -1834,7 +2086,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   // 全ツール共通でここに保存する。保存失敗は savePlanFile 内部で握り潰される
   // （プラン保存の失敗で AI 応答自体を壊さないため throw しない設計）。
   const persistPlanFile = async (text: string) => {
-    if (!isPlanTurn || isEphemeral) return;
+    // 案C′: resumable でも planFile は常に false（`.devrelay/plans/` は scope 分離されておらず
+    // 他スレッドと共有されているため、一時セッションには一切書かせない）
+    if (!isPlanTurn || !statePolicy.planFile) return;
     const body = stripProgressMarkers(text).trim();
     const saved = await savePlanFile(sessionInfo.projectPath, body);
     if (saved) console.log(`📋 Plan file saved: ${saved}`);
@@ -1910,7 +2164,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           }
 
           // Collect files from the output directory
-          const files = await collectTurnOutputFiles(outputTurn);
+          // サイクルG（G-4）: isolated では所有者の .devrelay-output/ を一切添付しない
+          // （クロスユーザーの成果物漏洩。同一ユーザー ask は既存どおり添付する）。
+          const files = outputTurn && statePolicy.outputFileCollect ? await collectTurnOutputFiles(outputTurn) : [];
           if (files.length > 0) {
             console.log(`📎 Sending ${files.length} file(s) from output directory`);
           }
@@ -1954,7 +2210,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               content: stripProgressMarkers(responseText).trim() || responseText.trim(),
               timestamp: new Date().toISOString()
             });
-            if (!isEphemeral) {
+            // 案C′: resumable（statePolicy.scopedConversation）なら scope dir に書く
+            if (statePolicy.scopedConversation) {
               await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
               console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
             }
@@ -1962,7 +2219,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
 
           // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）
           // 生の `flutter create` 等で作られた新規プロジェクトを即座に DevRelay へ反映する
-          if (isExecTriggered) {
+          // 案C′: resumable では projectRescan は常に false（所有者の CLAUDE.md / projects.yaml を
+          // 一時セッションが書き換えないよう、isExecTriggered に加えて policy でも二重に防ぐ）
+          if (isExecTriggered && statePolicy.projectRescan) {
             await rescanProjectsAndSync(currentConfig!);
           }
         } else {
@@ -1988,7 +2247,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       sessionInfo.claudeResumeSessionId = undefined;
       // #348: 一時セッションは projectPath 上の claude-session-id ファイルを消さない
       // （そもそも読んでいないため = undefined のはずだが、念のため書き込み経路も揃えておく）
-      if (!isEphemeral) {
+      // 案C′: resumable（statePolicy.scopedConversation）なら scope dir のファイルは消してよい
+      if (statePolicy.scopedConversation) {
         await clearClaudeSessionId(sessionInfo.projectPath, sessionInfo.agentScopeId);
       }
 
@@ -2017,9 +2277,17 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         language: sendOptions.language,
         // #348: persistProjectState も retry で引き継ぐ
         persistProjectState: sendOptions.persistProjectState,
+        // サイクルC2（A-2）: projectStateRead が retry で引き継がれていなかった既存バグの修正。
+        // 未指定だと ai-runner.ts 側で `!== false` 判定により true 扱いになり、isolated
+        // （projectStateRead:false）のターンが resume 失敗 retry に入った際に Codex/Devin の
+        // セッション状態読み出しガードが外れてしまう（agentScopeId が無指定だと
+        // resolveScopeDir() が所有者の projectPath 直下を指すため実害になる）。
+        projectStateRead: sendOptions.projectStateRead,
         // core#336: スコープ識別子 / turnId も retry で引き継ぐ（resumeSessionId は意図的に undefined のまま）
         agentScopeId: sendOptions.agentScopeId,
         turnId: sendOptions.turnId,
+        // 2026-10-27 サイクル2（D2）: resumeSource は意図的に渡さない（undefined = 新規セッション扱い）。
+        // resumeSessionId: undefined と対で、gemini 分岐が壊れた ID を --resume に使わないようにする。
       };
 
       // #291-A: retry は --resume を捨てるため、履歴（＝プラン）を含めて再構築する。
@@ -2049,7 +2317,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             }
             completionSent = true;
 
-            const files = await collectTurnOutputFiles(outputTurn);
+            // サイクルG（G-4）: isolated では所有者の .devrelay-output/ を一切添付しない。
+            const files = outputTurn && statePolicy.outputFileCollect ? await collectTurnOutputFiles(outputTurn) : [];
             if (files.length > 0) {
               console.log(`📎 Sending ${files.length} file(s) from output directory`);
             }
@@ -2084,14 +2353,16 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
                 content: stripProgressMarkers(responseText).trim() || responseText.trim(),
                 timestamp: new Date().toISOString()
               });
-              if (!isEphemeral) {
+              // 案C′: resumable（statePolicy.scopedConversation）なら scope dir に書く
+              if (statePolicy.scopedConversation) {
                 await saveConversation(sessionInfo.projectPath, sessionInfo.history, sessionInfo.agentScopeId);
                 console.log(`💾 Conversation saved (${sessionInfo.history.length} messages)`);
               }
             }
 
             // exec 完了時はプロジェクトを再スキャンして一覧を同期（#255）
-            if (isExecTriggered) {
+            // 案C′: resumable では projectRescan は常に false（二段防御、理由は通常経路と同じ）
+            if (isExecTriggered && statePolicy.projectRescan) {
               await rescanProjectsAndSync(currentConfig!);
             }
           } else {
@@ -2357,38 +2628,28 @@ function stopClaudeAuthCheck() {
 function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   if (reconnectTimer) return;
 
-  // プロトコルバージョン不足で拒否された場合は再接続しない
+  // プロトコルバージョン不足で拒否された場合は再接続しない（意図した停止）
   if (protocolUpdateRequired) {
     console.log('⛔ Agent の更新が必要です。再接続をスキップします。`u` コマンドで更新するか、再インストールしてください。');
     return;
   }
 
-  const { baseDelay, maxDelay, maxAttempts, jitterRange } = DEFAULTS.reconnect;
+  const { baseDelay, maxDelay, jitterRange } = DEFAULTS.reconnect;
 
-  // 前回接続が安定していた（60秒以上）場合のみバックオフカウンタをリセット
-  // 即切断ループ時はリセットせず、バックオフを効かせる
-  const connectionDuration = Date.now() - lastConnectedAt;
-  if (lastConnectedAt > 0 && connectionDuration > DEFAULTS.reconnectStableThreshold) {
-    reconnectAttempts = 0;
-  }
+  // 2026-11-14: 旧実装はここで「前回接続からの経過時間」でバックオフカウンタをリセットしていたが、
+  // lastConnectedAt は最後に成功した接続時刻のままなので、長時間安定した接続が切れた後は
+  // 毎回この判定が真になり reconnectAttempts が毎回0に戻り、バックオフが一切効かなかった
+  // （常に attempt 1・2秒固定で再接続嵐）。安定判定は connectToServer() の open ハンドラ側
+  // （60秒 OPEN を維持できたらリセット）に移したので、ここでは何もしない。
 
-  // Check max attempts
-  if (reconnectAttempts >= maxAttempts) {
-    console.error(`❌ Max reconnect attempts (${maxAttempts}) reached. Giving up.`);
-    console.error('💡 Restart the agent manually or check if the server is running.');
-    return;
-  }
-
-  // Calculate delay with exponential backoff + jitter
-  const exponentialDelay = Math.min(
-    baseDelay * Math.pow(2, reconnectAttempts),
-    maxDelay
-  );
-  const jitter = Math.random() * jitterRange;
-  const delay = exponentialDelay + jitter;
+  // 2026-11-14: maxAttempts による打ち切りを撤廃した（無期限リトライ）。旧実装は上限到達で
+  // ログを出して return するだけで process.exit もせず、プロセスが生きたまま永久に沈黙し、
+  // systemd の Restart=always も crontab @reboot も効かない事故（3日間沈黙）があったため。
+  // 遅延は maxDelay(30秒) で頭打ちになるので無限にリトライし続けても問題ない。
+  const delay = computeReconnectDelay({ attempt: reconnectAttempts + 1, baseDelay, maxDelay, jitterRange });
 
   reconnectAttempts++;
-  console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts}/${maxAttempts})...`);
+  console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts})...`);
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -2467,9 +2728,14 @@ async function handleStorageClear(payload: StorageClearPayload) {
 }
 
 export function disconnect() {
+  // 意図した切断（SIGINT 等）: supervisor / scheduleReconnect を一切発動しない
+  shuttingDown = true;
+  stopReconnectSupervisor();
   stopPing();
   stopAppPing();
   stopClaudeAuthCheck();
+  clearConnectWatchdog();
+  clearStableConnectionTimer();
   if (pongCheckInterval) {
     clearInterval(pongCheckInterval);
     pongCheckInterval = null;

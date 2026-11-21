@@ -63,7 +63,7 @@ export const SettingKeys = {
   CODEX_MODEL_PLAN: 'codex_model_plan',
   /** Codex CLI モデル — Exec モード用。#309 */
   CODEX_MODEL_EXEC: 'codex_model_exec',
-  /** Gemini CLI モデル — Plan モード用（例: 'gemini-3.1-pro'）。#309 */
+  /** Gemini CLI モデル — Plan モード用（例: 'gemini-3.1-pro-preview'）。#309 */
   GEMINI_MODEL_PLAN: 'gemini_model_plan',
   /** Gemini CLI モデル — Exec モード用。#309 */
   GEMINI_MODEL_EXEC: 'gemini_model_exec',

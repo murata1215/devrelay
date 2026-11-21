@@ -47,6 +47,14 @@ export async function parseCommandWithNLP(
     return cmd;
   }
 
+  // 1.45. サイクルC3a-1: askreset コマンド（クロス ask の記憶リセット）。コロンを含まないため
+  // 下の askMatchNlp（コロン必須）とは構造的に競合しない。ask 規則より前に置く
+  // （「ask」で始まる文字列を askMatchNlp に先取りされないため。セッション状態に関わらず検出）。
+  const askResetMatchNlp = trimmed.match(/^ask-?reset\s+(.+)$/i);
+  if (askResetMatchNlp) {
+    return { type: 'ask:reset', targetProject: askResetMatchNlp[1].trim() };
+  }
+
   // 1.5. ask コマンド: セッション状態に関わらず検出（AI プロンプトに流さない）
   const askMatchNlp = trimmed.match(/^ask\s+([^:]+):\s*(.+)$/is);
   if (askMatchNlp) {
@@ -179,6 +187,13 @@ export function parseCommand(input: string, context: UserContext): UserCommand {
     const nameArg = parts.filter(p => !p.startsWith('--'))[0] || arg;
     const template = flags.includes('--phaser') ? 'phaser' : undefined;
     return { type: 'testflight', subcommand: 'create', name: nameArg, template };
+  }
+
+  // 0.65. サイクルC3a-1: 「askreset <project>」「ask-reset <project>」パターン: クロス ask の記憶リセット
+  // （0.7 の ask パターンより前に置く。コロンを含まないため構造的に競合しない）
+  const askResetMatch = input.trim().match(/^ask-?reset\s+(.+)$/i);
+  if (askResetMatch) {
+    return { type: 'ask:reset', targetProject: askResetMatch[1].trim() };
   }
 
   // 0.7. 「ask <project>: <question>」パターン: 他プロジェクトに質問
@@ -508,9 +523,11 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE, opts: HelpTe
 
   sections.push(en ? `**Team**
 \`ask <project>: <question>\` - Ask another project
+\`askreset <project>\` - Reset the conversation memory of a cross-user ask target
 \`teamexec <project>: <instruction>\` or \`te ...\` - Have another project execute work (\`e\` / \`w\` are then forwarded there)
 \`d\` or \`disconnect\` - Release the teamexec target (\`e\` / \`w\` return to your own project)` : `**チーム**
 \`ask <project>: <質問>\` - 他プロジェクトに質問
+\`askreset <project>\` - クロスユーザー ask 宛先の記憶をリセット
 \`teamexec <project>: <指示>\` または \`te ...\` - 他プロジェクトに作業を実行させる（以後 \`e\` / \`w\` はそのプロジェクトに転送）
 \`d\` または \`disconnect\` - teamexec の接続先を解除（\`e\` / \`w\` が自分のプロジェクトに戻る）`);
 
