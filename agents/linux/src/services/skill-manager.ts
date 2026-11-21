@@ -321,8 +321,12 @@ call() {
   local method="$1"; shift
   local path="$1"; shift
   local resp code body
+  # 値は -G で URL に載せるため POST の本文は空。curl は空本文に Content-Length を付けず、
+  # IIS 等の前段が 411 Length Required で拒否するので、POST のときは明示的に 0 を付ける
+  local extra=()
+  if [ "$method" = "POST" ]; then extra=(-H "Content-Length: 0"); fi
   resp=$(curl -s -w "\\n%{http_code}" -X "$method" -G \\
-    -H "Authorization: Bearer $TOKEN" \\
+    -H "Authorization: Bearer $TOKEN" \${extra[@]+"\${extra[@]}"} \\
     --data-urlencode "format=text" "$@" \\
     "\${API_URL}\${path}") || { echo "エラー: DevRelay サーバーに接続できません"; exit 1; }
   code=$(printf '%s' "$resp" | tail -n 1)

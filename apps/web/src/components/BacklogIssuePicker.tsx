@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   backlog as backlogApi,
   isBacklogIssueKey,
   type BacklogAssigneeScope,
   type BacklogConfig,
   type BacklogIssueBrief,
+  type BacklogIssueDetail,
   type BacklogIssueSummary,
 } from '../lib/api';
 
@@ -80,6 +81,44 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: 'すべて' },
 ];
 
+interface DetailState {
+  loading: boolean;
+  data?: BacklogIssueDetail;
+  error?: string;
+}
+
+/** 課題一覧で開いた行の中身（依頼内容・納期など本文をそのまま）と「この課題を案件にする」 */
+function IssueDetailPane({ state, onPick, onClose }: { state: DetailState | undefined; onPick: () => void; onClose: () => void }) {
+  if (!state || state.loading) return <div className="text-xs text-[var(--text-muted)]">読み込み中…</div>;
+  if (state.error || !state.data) return <div className="text-xs text-[var(--text-danger)]">⚠ {state.error ?? '取得できませんでした'}</div>;
+  const d = state.data;
+  const meta = [
+    d.issueType?.name,
+    d.createdUser ? `登録: ${d.createdUser}${d.created ? ` ${d.created.slice(0, 10).replace(/-/g, '/')}` : ''}` : null,
+    `期限: ${d.dueDate ? d.dueDate.replace(/-/g, '/') : '-'}`,
+    `担当: ${d.assignee ?? 'なし'}`,
+  ].filter(Boolean);
+  return (
+    <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
+      <div className="text-xs text-[var(--text-muted)]">{meta.join(' ・ ')}</div>
+      <div className="max-h-60 overflow-y-auto whitespace-pre-wrap break-words text-sm text-[var(--text-primary)] bg-[var(--bg-secondary)] rounded border border-[var(--border-color)] px-3 py-2">
+        {d.description.trim() || '（本文なし）'}
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <a href={d.url} target="_blank" rel="noreferrer" className="px-3 py-1 rounded border border-[var(--border-color)] text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]">
+          Backlog で開く ↗
+        </a>
+        <button onClick={onClose} className="px-3 py-1 rounded border border-[var(--border-color)] text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]">
+          閉じる
+        </button>
+        <button onClick={onPick} className="px-3 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700">
+          この課題を案件にする
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig; onPick: (key: string) => void; onClose: () => void }) {
   const [status, setStatus] = useState('');
   const [assignee, setAssignee] = useState<BacklogAssigneeScope>('mine_unassigned');
@@ -90,12 +129,31 @@ function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig;
   const [warn, setWarn] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const reqRef = useRef(0);
+  // 行を押すとその下に中身（本文・期限など）を開く。確認して「この課題を案件にする」で初めて取得する
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, DetailState>>({});
+
+  const toggle = (key: string) => {
+    if (openKey === key) {
+      setOpenKey(null);
+      return;
+    }
+    setOpenKey(key);
+    // 一度取った中身は覚えておく（エラーのときだけ取り直す）
+    if (details[key] && !details[key].error) return;
+    setDetails((d) => ({ ...d, [key]: { loading: true } }));
+    backlogApi
+      .getIssueDetail(key)
+      .then((r) => setDetails((d) => ({ ...d, [key]: { loading: false, data: r } })))
+      .catch((e) => setDetails((d) => ({ ...d, [key]: { loading: false, error: e instanceof Error ? e.message : '取得できませんでした' } })));
+  };
 
   const load = useCallback(async (kw: string) => {
     const req = ++reqRef.current;
     setLoading(true);
     setErr('');
     setWarn([]);
+    setOpenKey(null);
     // project は「接続ID:プロジェクトキー」（別スペースに同じキーがあっても区別するため）
     const [conn, projectKey] = project ? project.split(':') : [undefined, undefined];
     try {
@@ -192,10 +250,11 @@ function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig;
             <table className="w-full text-sm">
               <tbody>
                 {issues.map((i) => (
+                  <Fragment key={i.issueKey}>
                   <tr
-                    key={i.issueKey}
-                    onClick={() => onPick(i.issueKey)}
-                    className="cursor-pointer border-b border-[var(--border-color)] hover:bg-[var(--bg-hover)]"
+                    onClick={() => toggle(i.issueKey)}
+                    title="押すと中身を表示（もう一度押すと閉じる）"
+                    className={`cursor-pointer border-b border-[var(--border-color)] hover:bg-[var(--bg-hover)] ${openKey === i.issueKey ? 'bg-[var(--bg-selected)]' : ''}`}
                   >
                     <td className="px-3 py-2 whitespace-nowrap font-mono text-xs text-[var(--text-secondary)]">{i.issueKey}</td>
                     <td className="px-1 py-2"><StatusPill name={i.status.name} color={i.status.color} /></td>
@@ -212,6 +271,18 @@ function IssuePickerDialog({ config, onPick, onClose }: { config: BacklogConfig;
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap text-xs text-[var(--text-muted)]">{i.dueDate ?? ''}</td>
                   </tr>
+                  {openKey === i.issueKey && (
+                    <tr className="border-b border-[var(--border-color)]">
+                      <td colSpan={5} className="px-4 py-3 bg-[var(--bg-tertiary)]">
+                        <IssueDetailPane
+                          state={details[i.issueKey]}
+                          onPick={() => onPick(i.issueKey)}
+                          onClose={() => setOpenKey(null)}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -253,7 +324,7 @@ export function BacklogPickButton({ onPick, disabled }: { onPick: (issueKey: str
 }
 
 /** 案件が課題キーのとき、件名と状態を表示する（状態クリックで変更） */
-export function BacklogIssueBadge({ caseName }: { caseName: string | null }) {
+export function BacklogIssueBadge({ caseName, onClear }: { caseName: string | null; onClear?: () => void }) {
   const config = useBacklogConfig();
   const [issue, setIssue] = useState<BacklogIssueBrief | null>(null);
   const [err, setErr] = useState('');
@@ -301,8 +372,24 @@ export function BacklogIssueBadge({ caseName }: { caseName: string | null }) {
   }, [active, load]);
 
   if (!active) return null;
-  if (err) return <span className="text-xs text-[var(--text-danger)] truncate max-w-xs" title={err}>⚠ {err}</span>;
-  if (!issue) return <span className="text-xs text-[var(--text-muted)]">読み込み中…</span>;
+
+  // 間違えて取った課題を案件から外す（Backlog の状態は変えない）。取得エラー時も外せるよう常に出す
+  const clearBtn = onClear ? (
+    <button
+      type="button"
+      onClick={() => {
+        if (window.confirm(`${caseName} を案件から外しますか？（Backlog の状態は変えません）`)) onClear();
+      }}
+      title="この課題を案件から外す"
+      aria-label="案件から外す"
+      className="w-5 h-5 flex items-center justify-center rounded-full text-xs text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-danger)]"
+    >
+      ✕
+    </button>
+  ) : null;
+
+  if (err) return <span className="flex items-center gap-1 min-w-0"><span className="text-xs text-[var(--text-danger)] truncate max-w-xs" title={err}>⚠ {err}</span>{clearBtn}</span>;
+  if (!issue) return <span className="flex items-center gap-1"><span className="text-xs text-[var(--text-muted)]">読み込み中…</span>{clearBtn}</span>;
 
   const change = async (statusId: number) => {
     setMenu(false);
@@ -335,6 +422,7 @@ export function BacklogIssueBadge({ caseName }: { caseName: string | null }) {
         onClick={busy ? undefined : () => setMenu((m) => !m)}
         title="クリックで状態を変更"
       />
+      {clearBtn}
       {menu && (
         <>
           <span className="fixed inset-0 z-40" onClick={() => setMenu(false)} />

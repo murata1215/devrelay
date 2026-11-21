@@ -702,6 +702,13 @@ export interface BacklogIssueBrief {
   space: string;
   statuses: BacklogStatus[];
 }
+export interface BacklogIssueDetail extends BacklogIssueBrief {
+  description: string;
+  issueType: { name: string; color: string } | null;
+  createdUser: string | null;
+  created: string | null;
+  dueDate: string | null;
+}
 
 /** 課題キー（例: ATG_39_P_0002-1167）か */
 export function isBacklogIssueKey(v: unknown): v is string {
@@ -739,6 +746,10 @@ export const backlog = {
   },
   async getIssue(issueKey: string): Promise<BacklogIssueBrief> {
     return request('GET', `/backlog/issues/${encodeURIComponent(issueKey)}`);
+  },
+  /** 課題一覧で行を開いたときの中身（本文・種別・登録者・期限付き） */
+  async getIssueDetail(issueKey: string): Promise<BacklogIssueDetail> {
+    return request('GET', `/backlog/issues/${encodeURIComponent(issueKey)}?detail=1`);
   },
   async setStatus(issueKey: string, statusId: number): Promise<{ to: { id: number; name: string; color: string } }> {
     return request('POST', `/backlog/issues/${encodeURIComponent(issueKey)}/status`, { statusId });

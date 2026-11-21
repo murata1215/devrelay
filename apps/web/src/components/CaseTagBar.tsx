@@ -32,6 +32,11 @@ const INITIAL: ThreadCaseState = { loaded: false, caseName: null, options: [], r
 export function useThreadCase(sessionId: string | null | undefined, opts: { allowPending?: boolean } = {}) {
   const [state, setState] = useState<ThreadCaseState>(INITIAL);
   const reqRef = useRef(0);
+  // 保存と静かな取り直しの行き違い対策（2026-11-21）: ✕ の確認ダイアログを閉じると window の focus が発火し、
+  // 取り直し（GET）が保存（PUT）と同時に走る。GET が保存前の値を読んで後から届くと、外した案件が画面に戻っていた。
+  // 保存のたびに番号を進め、保存中は取り直さず、取り直し開始後に保存が始まっていたらその結果は捨てる。
+  const saveSeqRef = useRef(0);
+  const savingRef = useRef(0);
   const allowPending = !!opts.allowPending;
 
   useEffect(() => {
@@ -73,11 +78,14 @@ export function useThreadCase(sessionId: string | null | undefined, opts: { allo
   useEffect(() => {
     if (!sessionId) return;
     const refresh = () => {
+      if (savingRef.current > 0) return;
       const req = reqRef.current;
+      const seq = saveSeqRef.current;
       usageApi
         .getCase(sessionId)
         .then((r) => {
           if (req !== reqRef.current) return;
+          if (seq !== saveSeqRef.current || savingRef.current > 0) return;
           setState((s) => (s.loaded && !s.unavailable && s.caseName !== r.caseName ? { ...s, caseName: r.caseName } : s));
         })
         .catch(() => {});
@@ -100,7 +108,14 @@ export function useThreadCase(sessionId: string | null | undefined, opts: { allo
         if (allowPending) setState((s) => ({ ...s, caseName: next }));
         return;
       }
-      const r = await usageApi.setCase(sessionId, next);
+      saveSeqRef.current++;
+      savingRef.current++;
+      let r: Awaited<ReturnType<typeof usageApi.setCase>>;
+      try {
+        r = await usageApi.setCase(sessionId, next);
+      } finally {
+        savingRef.current--;
+      }
       setState((s) => ({
         ...s,
         caseName: r.caseName,
@@ -138,8 +153,11 @@ export function CaseTagBar({
 
   if (state.unavailable) return null;
 
-  const commit = async () => {
-    const next = text.replace(/[\s　]+/g, ' ').trim() || null;
+  const commit = () => saveValue(text.replace(/[\s　]+/g, ' ').trim() || null);
+
+  /** 入力欄の確定・Backlog の課題選択・✕（案件から外す）で共通の保存処理 */
+  async function saveValue(next: string | null) {
+    setText(next ?? '');
     if (next === (state.caseName ?? null)) return;
     setSaving(true);
     setErr('');
@@ -153,7 +171,7 @@ export function CaseTagBar({
     } finally {
       setSaving(false);
     }
-  };
+  }
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -183,6 +201,14 @@ export function CaseTagBar({
         ref={inputRef}
         value={text}
         list={listId}
+        // ブラウザ（Edge/Chrome）がログイン ID 欄と誤認して保存済みパスワードを出さないように（2026-11-21）。
+        // datalist（自分の案件候補）は autoComplete="off" でも出る
+        type="text"
+        name="devrelay-usage-case"
+        autoComplete="off"
+        data-1p-ignore=""
+        data-lpignore="true"
+        data-bwignore=""
         maxLength={40}
         placeholder={placeholder}
         disabled={disabled || saving || !state.loaded || !state.editable}
@@ -197,25 +223,13 @@ export function CaseTagBar({
       {state.editable && state.loaded && (
         <BacklogPickButton
           disabled={disabled || saving}
-          onPick={(key) => {
-            setText(key);
-            void (async () => {
-              if (key === (state.caseName ?? null)) return;
-              setSaving(true);
-              setErr('');
-              try {
-                await onSave(key);
-              } catch (e) {
-                setErr(e instanceof Error ? e.message : '保存に失敗しました');
-                setText(state.caseName ?? '');
-              } finally {
-                setSaving(false);
-              }
-            })();
-          }}
+          onPick={(key) => void saveValue(key)}
         />
       )}
-      <BacklogIssueBadge caseName={state.caseName} />
+      <BacklogIssueBadge
+        caseName={state.caseName}
+        onClear={state.editable && !disabled && !saving ? () => void saveValue(null) : undefined}
+      />
       {saved && <span className="text-xs text-green-600">保存しました</span>}
       {err && <span className="text-xs text-[var(--text-danger)]">{err}</span>}
       {highlight && !err && <span className="text-xs text-[var(--text-danger)]">案件を入力してから送信してください</span>}

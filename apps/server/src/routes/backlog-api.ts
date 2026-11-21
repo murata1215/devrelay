@@ -233,6 +233,16 @@ export async function backlogUserRoutes(app: FastifyInstance) {
         url: issue.url,
         space: issue.space,
         statuses,
+        // ?detail=1: 課題一覧で行を開いたときの中身（本文・種別・登録者・期限）。コメントは返さない
+        ...(((request.query as { detail?: string }).detail === '1')
+          ? {
+              description: issue.description,
+              issueType: issue.issueType,
+              createdUser: issue.createdUser,
+              created: issue.created,
+              dueDate: issue.dueDate,
+            }
+          : {}),
       };
     } catch (err) {
       return sendError(reply, err);
