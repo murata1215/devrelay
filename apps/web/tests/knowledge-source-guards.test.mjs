@@ -302,10 +302,15 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 //
 // スレッドタイトル自動命名（0033、2026-11-21）で、AI 応答受信の 8 秒後にスレッド一覧を取り直す
 // `handleWsMessage` を追加したため、ChatPage の行数ピンを実測値（4422 → 4439）に更新した。
+//
+// Backlog 課題一覧の担当プルダウン・チャット左上の「# ホスト名/プロジェクト名」表示（2026-11-21、
+// commit 96a1f47）で ChatPage.tsx が変更されたが、このピンの更新が漏れていた（機能側は無関係・
+// 本家 pull 後の `pnpm test` で発覚）。実測値（4439 → 4454）に更新した。
+// LitePage.tsx・renderMarkdown 出現数・components/lite/* は無変更のため据え置き。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4439, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4454, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {
