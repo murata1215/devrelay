@@ -37,6 +37,7 @@ import {
   flattenCrossAskGroups,
 } from '../lib/cross-ask-rules';
 import { isAtBottom, decideHistoryRefresh, resolveRestoredScrollTop } from '../lib/chat-scroll-rules';
+import { reorderTabsById, resolveDropSide, type DropSide } from '../lib/tab-order-rules';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -919,14 +920,16 @@ function TabBar({
   onSelectTab: (projectId: string) => void;
   onCloseTab: (projectId: string) => void;
   onTogglePin: (projectId: string) => void;
-  onReorder: (fromIndex: number, toIndex: number) => void;
+  onReorder: (fromId: string, toId: string, side: DropSide) => void;
   onDoubleClickTab: () => void;
   onRenameTab: (projectId: string, newName: string) => void;
 }) {
-  /** ドラッグ中のタブ index */
-  const dragIndexRef = useRef<number | null>(null);
-  /** ドロップ先のタブ index */
-  const dragOverIndexRef = useRef<number | null>(null);
+  /** ドラッグ中のタブ projectId */
+  const dragIdRef = useRef<string | null>(null);
+  /** ドロップ先のタブ projectId + どちら側（前/後ろ）に入るか。
+   *  青い棒の表示にもこの判定結果をそのまま使うため、線の位置と実際の着地点が必ず一致する
+   *  （旧実装は方向から挿入位置を推測し、ハイライトは常に左端固定だったため不一致が起きていた）。 */
+  const [dragOver, setDragOver] = useState<{ id: string; side: DropSide } | null>(null);
   /** 編集中のタブ projectId */
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
@@ -940,15 +943,13 @@ function TabBar({
 
   if (tabs.length === 0) return null;
 
-  /** ピン止めタブを先頭に、通常タブを後ろに表示 */
-  const pinnedTabs = tabs.filter(t => t.pinned);
-  const unpinnedTabs = tabs.filter(t => !t.pinned);
-  const orderedTabs = [...pinnedTabs, ...unpinnedTabs];
+  // 並び順は保存済み tab_order（= tabs 配列そのもの）のみで決める。
+  // ★（pinned）は並び順には一切関与しない（「閉じられない」印としてのみ機能する。
+  // 旧実装はここでピン優先に再ソートしており、D&D の結果が毎描画で巻き戻る既存バグの真因だった）。
 
   return (
     <div className="flex items-center bg-[var(--bg-secondary)] border-b border-[var(--border-color)] overflow-x-auto scrollbar-thin">
-      {orderedTabs.map((tab) => {
-        const globalIndex = tabs.indexOf(tab);
+      {tabs.map((tab) => {
         const isActive = tab.projectId === activeTabId;
         const isEditing = editingTabId === tab.projectId;
         const displayName = tab.customName || tab.projectName;
@@ -957,23 +958,34 @@ function TabBar({
             key={tab.projectId}
             draggable={!isEditing}
             onDragStart={(e) => {
-              dragIndexRef.current = globalIndex;
+              dragIdRef.current = tab.projectId;
               e.dataTransfer.setData('text/x-devrelay-project', tab.projectId);
             }}
-            onDragOver={(e) => { e.preventDefault(); dragOverIndexRef.current = globalIndex; }}
-            onDrop={() => {
-              if (dragIndexRef.current !== null && dragOverIndexRef.current !== null && dragIndexRef.current !== dragOverIndexRef.current) {
-                onReorder(dragIndexRef.current, dragOverIndexRef.current);
-              }
-              dragIndexRef.current = null;
-              dragOverIndexRef.current = null;
+            onDragOver={(e) => {
+              e.preventDefault();
+              const side = resolveDropSide(e.clientX, e.currentTarget.getBoundingClientRect());
+              // side/id が変わらない限り setState しない（dragover は高頻度で発火するため）
+              setDragOver(prev => (prev?.id === tab.projectId && prev.side === side) ? prev : { id: tab.projectId, side });
             }}
-            onDragEnd={() => { dragIndexRef.current = null; dragOverIndexRef.current = null; }}
+            onDrop={(e) => {
+              if (dragIdRef.current !== null && dragIdRef.current !== tab.projectId) {
+                const side = resolveDropSide(e.clientX, e.currentTarget.getBoundingClientRect());
+                onReorder(dragIdRef.current, tab.projectId, side);
+              }
+              dragIdRef.current = null;
+              setDragOver(null);
+            }}
+            onDragEnd={() => { dragIdRef.current = null; setDragOver(null); }}
             className={`
               group flex items-center gap-1.5 px-3 py-1.5 text-sm cursor-pointer border-b-2 shrink-0 select-none
+              border-l-2 border-r-2
               ${isActive
-                ? 'border-blue-500 text-[var(--text-primary)] bg-[var(--bg-hover)]'
-                : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                ? 'border-b-blue-500 text-[var(--text-primary)] bg-[var(--bg-hover)]'
+                : 'border-b-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+              }
+              ${dragOver?.id === tab.projectId && dragIdRef.current !== tab.projectId
+                ? (dragOver.side === 'before' ? 'border-l-blue-400 border-r-transparent' : 'border-l-transparent border-r-blue-400')
+                : 'border-l-transparent border-r-transparent'
               }
             `}
             onClick={() => onSelectTab(tab.projectId)}
@@ -3718,12 +3730,15 @@ export function ChatPage() {
     });
   }, []);
 
-  /** タブの並べ替え（ドラッグ&ドロップ） */
-  const handleReorderTabs = useCallback((fromIndex: number, toIndex: number) => {
+  /** タブの並べ替え（ドラッグ&ドロップ）。
+   *  projectId ベースで並べ替えるため、TabBar が絞り込み表示（visibleTabs）中でも
+   *  全タブ配列（tabs state）に対して正しい位置へ移動できる（#386 index 不一致バグの根治）。
+   *  side（対象タブの前/後ろ）は TabBar 側でカーソル位置から明示的に判定したものを
+   *  そのまま受け取る（方向からの推測をやめ、青い棒の表示と着地点を一致させる）。 */
+  const handleReorderTabs = useCallback((fromId: string, toId: string, side: DropSide) => {
     setTabs(prev => {
-      const updated = [...prev];
-      const [moved] = updated.splice(fromIndex, 1);
-      updated.splice(toIndex, 0, moved);
+      const updated = reorderTabsById(prev, fromId, toId, side);
+      if (updated === prev) return prev;
       // サーバーにタブ順序を保存（fire-and-forget）
       settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
       return updated;

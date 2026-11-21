@@ -284,10 +284,21 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 //
 // 本家（origin）とのマージ（2026-11-21）で、本家側（4365 行）と会社側の追加（案件欄・日付表示 +30 行）が
 // 合わさり、さらにクロスタブでは案件欄を出さない分岐を足したため、ChatPage の行数ピンを実測値（4396）に更新した。
+//
+// ★（ピン止め）タブが並べ替えできない既存バグ根治サイクル（2026-11-18、本家側で作業・2026-11-21 に
+// 本家からの会社リポ pull に合わせてリベース）で、`TabBar` の描画をピン優先再ソートから `tabs` 配列
+// そのもの（保存済み tab_order）に変更し、D&D の受け渡しを index ベースから projectId ベース
+// （`apps/web/src/lib/tab-order-rules.ts` 新設）に変更。同日の第2弾（青い棒の位置とドロップ先がずれる
+// 既存バグ根治）でドロップ位置の判定を方向からの推測から「カーソルが対象タブの左半分/右半分のどちらに
+// あるか」（`resolveDropSide`）による明示判定に変更。第3弾（第2弾の自動スクロール/effectAllowed/
+// dropEffect/絶対配置の棒がD&D自体を壊していた退行の根治）でそれらを撤去し、ハイライトを border 方式
+// （左右に常時2px確保し色だけ切替、DOM増減なし）に戻した（resolveDropSide による側判定は維持）。
+// 以上を会社側マージ後の 4396 行に適用した結果、ChatPage の行数ピンを実測値（4411）に更新した。
+// LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも無変更のため据え置き。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4396, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4411, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {
