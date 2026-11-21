@@ -358,3 +358,50 @@ export function filterByAssignee<T extends { assigneeId: number | null }>(list: 
       return list.filter((i) => i.assigneeId === null || (myId !== null && i.assigneeId === myId));
   }
 }
+
+// ========================================
+// 状態変更時の自動コメント・担当者（2026-11-21 追加）
+// ========================================
+
+/** 日本時間の 'YYYY/MM/DD HH:mm:ss' */
+export function formatJstTimestamp(d: Date): string {
+  const p = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const g = (t: string) => p.find((x) => x.type === t)?.value ?? '00';
+  const hh = g('hour') === '24' ? '00' : g('hour');
+  return `${g('year')}/${g('month')}/${g('day')} ${hh}:${g('minute')}:${g('second')}`;
+}
+
+/** note が無いときの段階ごとの既定文 */
+export function defaultMoveNote(phase: BacklogPhase | null, statusName: string): string {
+  if (phase === 'start') return '着手しました';
+  if (phase === 'test') return `テストを開始しました（状態: ${statusName}）`;
+  if (phase === 'done') return `完了報告：${statusName}にしました`;
+  return `状態を「${statusName}」に変更しました`;
+}
+
+/**
+ * 状態変更と一緒に付けるコメント。
+ * - AI（スキル）: `*AI自動追記 2026/11/21 18:29:30：内容`
+ * - 人間（画面の状態バッジ）: `*DevRelay 2026/11/21 18:29:30：内容`
+ */
+export function formatAutoComment(source: 'ai' | 'human', at: Date, text: string): string {
+  const head = source === 'ai' ? '*AI自動追記' : '*DevRelay';
+  const body = text.replace(/\r\n?/g, '\n').trim();
+  return `${head} ${formatJstTimestamp(at)}：${body}`.slice(0, 10_000);
+}
+
+/**
+ * 着手（start）にするとき担当者をどうするか。
+ * - assign: 担当者が空なので自分にする
+ * - already_mine: もう自分が担当
+ * - keep_other: 他の人が担当なので上書きしない
+ * - skip: 着手以外の変更（担当者は触らない）
+ */
+export function decideAssignee(isStart: boolean, currentAssigneeId: number | null, myId: number | null): 'assign' | 'already_mine' | 'keep_other' | 'skip' {
+  if (!isStart || myId === null) return 'skip';
+  if (currentAssigneeId === null) return 'assign';
+  return currentAssigneeId === myId ? 'already_mine' : 'keep_other';
+}

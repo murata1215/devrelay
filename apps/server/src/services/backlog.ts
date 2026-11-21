@@ -25,6 +25,7 @@ import {
   resolveTargetStatus, FIXED_OPEN_ID, FIXED_CLOSED_ID,
   parseConnections, serializeConnections, legacyToConnections, pickConnectionForProject,
   type BacklogAssigneeScope, assigneeScopeLabel, filterByAssignee,
+  formatAutoComment, defaultMoveNote, decideAssignee,
 } from './backlog-rules.js';
 export * from './backlog-rules.js';
 
@@ -371,12 +372,25 @@ export async function getProjectStatuses(ctx: BacklogContext, projectKey: string
  * 課題の状態を変える。
  * - to: 段階（start/test/done）または状態名、もしくは statusId
  * - 段階が逆戻りする変更（並び順で前の状態へ）は force が無い限り断る（AI の取り違え防止。画面からの変更は force 扱い）
+ * - 着手（start）にするとき、担当者が空なら自分を担当者にする（他の人が担当なら上書きしない）
+ * - 状態の変更と同じ 1 回の送信でコメントを付ける（`*AI自動追記 日時：内容` / 画面からは `*DevRelay 日時：内容`）。
+ *   本文（依頼内容）には一切触らない＝どのプロジェクトのテンプレートでも同じ形で経過が残る
  */
 export async function moveIssue(
   ctx: BacklogContext,
   issueKey: string,
-  input: { to?: string; statusId?: number; comment?: string; force?: boolean },
-): Promise<{ issueKey: string; from: { id: number; name: string }; to: { id: number; name: string; color: string }; phase: BacklogPhase | null; changed: boolean; url: string; summary: string }> {
+  input: { to?: string; statusId?: number; note?: string; force?: boolean; source?: 'ai' | 'human' },
+): Promise<{
+  issueKey: string;
+  from: { id: number; name: string };
+  to: { id: number; name: string; color: string };
+  phase: BacklogPhase | null;
+  changed: boolean;
+  url: string;
+  summary: string;
+  assignee: { action: 'assign' | 'already_mine' | 'keep_other' | 'skip'; name: string | null };
+  commented: string | null;
+}> {
   const proj = requireAllowedIssue(ctx, issueKey);
   const statuses = await fetchStatuses(ctx, proj.projectKey);
   let target: BacklogStatus | undefined;
@@ -392,25 +406,41 @@ export async function moveIssue(
   } else {
     throw new BacklogError(400, '変更先（to または statusId）を指定してください');
   }
+  // 状態名・statusId で着手の状態を指定した場合も「着手」として扱う
+  if (!phase && proj.map.start !== null && target.id === proj.map.start) phase = 'start';
 
   const current = await backlogFetch<RawIssue>(ctx, 'GET', `/issues/${encodeURIComponent(issueKey)}`);
   const from = { id: current.status.id, name: current.status.name };
   const url = `https://${ctx.space}/view/${issueKey}`;
-  if (from.id === target.id && !input.comment?.trim()) {
-    return { issueKey, from, to: { id: target.id, name: target.name, color: target.color }, phase, changed: false, url, summary: current.summary };
+  const toView = { id: target.id, name: target.name, color: target.color };
+
+  const me = phase === 'start' ? await fetchMyself(ctx) : null;
+  const currentAssigneeId = typeof current.assignee?.id === 'number' ? current.assignee.id : null;
+  const assignAction = decideAssignee(phase === 'start', currentAssigneeId, me?.id ?? null);
+  const assignee = {
+    action: assignAction,
+    name: assignAction === 'assign' || assignAction === 'already_mine' ? (me?.name ?? null) : (current.assignee?.name ?? null),
+  };
+
+  const note = input.note?.trim() ?? '';
+  const statusChanged = from.id !== target.id;
+  // 何も変わらず、書くこともないなら送らない
+  if (!statusChanged && assignAction !== 'assign' && !note) {
+    return { issueKey, from, to: toView, phase, changed: false, url, summary: current.summary, assignee, commented: null };
   }
-  if (!input.force && from.id !== target.id) {
+  if (!input.force && statusChanged) {
     const order = (id: number) => statuses.find((s) => s.id === id)?.displayOrder ?? 0;
     if (order(target.id) < order(from.id)) {
       throw new BacklogError(409, `「${from.name}」から前の状態「${target.name}」へ戻す変更です。人間に確認したうえで --force を付けてください`);
     }
   }
-  const comment = input.comment?.trim() ? input.comment.trim().slice(0, 10_000) : undefined;
+  const comment = formatAutoComment(input.source ?? 'ai', new Date(), note || defaultMoveNote(phase, target.name));
   await backlogFetch<RawIssue>(ctx, 'PATCH', `/issues/${encodeURIComponent(issueKey)}`, {
-    ...(from.id !== target.id ? { statusId: target.id } : {}),
+    ...(statusChanged ? { statusId: target.id } : {}),
+    ...(assignAction === 'assign' && me ? { assigneeId: me.id } : {}),
     comment,
   });
-  return { issueKey, from, to: { id: target.id, name: target.name, color: target.color }, phase, changed: from.id !== target.id, url, summary: current.summary };
+  return { issueKey, from, to: toView, phase, changed: statusChanged, url, summary: current.summary, assignee, commented: comment };
 }
 
 /**

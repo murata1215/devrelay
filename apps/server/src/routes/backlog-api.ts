@@ -259,7 +259,7 @@ export async function backlogUserRoutes(app: FastifyInstance) {
     try {
       const ctx = await resolveIssueContext(userId, key);
       // 人間が画面で選んだ変更なので逆戻りも許可する
-      return await moveIssue(ctx, key, { statusId, force: true });
+      return await moveIssue(ctx, key, { statusId, force: true, source: 'human' });
     } catch (err) {
       return sendError(reply, err);
     }
@@ -308,7 +308,17 @@ export function formatMoveText(r: MoveResult): string {
   const head = r.changed
     ? `${r.issueKey} の状態を「${r.from.name}」→「${r.to.name}」に変更しました。`
     : `${r.issueKey} はすでに「${r.to.name}」です（状態は変えていません）。`;
-  return [head, r.linkedToThread ? 'このスレッドの案件にも課題キーを設定しました。' : null, r.url].filter(Boolean).join('\n');
+  const assignee =
+    r.assignee.action === 'assign' ? `担当者を ${r.assignee.name ?? '自分'} にしました。`
+    : r.assignee.action === 'keep_other' ? `担当者は ${r.assignee.name ?? '他の人'} のままです（上書きしていません）。人間に伝えてください。`
+    : null;
+  return [
+    head,
+    assignee,
+    r.commented ? `Backlog にコメントを付けました: ${r.commented}` : null,
+    r.linkedToThread ? 'このスレッドの案件にも課題キーを設定しました。' : null,
+    r.url,
+  ].filter(Boolean).join('\n');
 }
 
 export function formatStatusesText(projectKey: string, r: StatusesResult): string {
@@ -405,7 +415,8 @@ export function registerBacklogAgentRoutes(app: FastifyInstance) {
     const query = (request.query ?? {}) as Record<string, unknown>;
     const pick = (k: string) => (body[k] !== undefined ? body[k] : query[k]);
     const to = pick('to');
-    const comment = pick('comment');
+    // note = 自動コメントに書く「やったこと」。旧スキルの comment も同じ扱い
+    const note = pick('note') ?? pick('comment');
     const force = pick('force');
     const sessionId = pick('sessionId');
     try {
@@ -413,8 +424,9 @@ export function registerBacklogAgentRoutes(app: FastifyInstance) {
       const ctx = await resolveIssueContext(a.userId, key);
       const r = await moveIssue(ctx, key, {
         to,
-        comment: typeof comment === 'string' ? comment : undefined,
+        note: typeof note === 'string' ? note : undefined,
         force: force === true || force === '1' || force === 'true',
+        source: 'ai',
       });
       let linked = false;
       // 着手（段階 start、または状態名で着手の状態を指定した場合）ならスレッドの案件を課題キーにする

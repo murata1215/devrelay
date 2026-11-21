@@ -252,10 +252,13 @@ bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh current
 ### 状態の変更
 
 \`\`\`bash
-bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> start
-bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> test
-bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> done --comment "コミット abc1234: 〜を修正"
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> start --note "発注書の税率計算の調査を始めました"
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> test --note "税率計算を修正し、結合テストを開始しました"
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> done --note "発注書の税率を 8% に対応し帳票出力を修正しました（コミット abc1234）"
 \`\`\`
+
+- 状態を変えるたびに、Backlog に \`*AI自動追記 2026/11/21 18:29:30：<--note の内容>\` というコメントが 1 件付きます（本文は変えません）。\`--note\` を省くと「着手しました」等の決まり文句になります
+- \`start\` にすると、担当者が空なら自分（API キーの持ち主）が担当者になります。他の人が担当なら上書きしません（結果にそう出たら人間に伝える）
 
 - 段階: \`start\`（着手。例: 処理中）/ \`test\`（テスト。例: 結合テスト）/ \`done\`（完了報告。例: リリース待ち・処理済み）。プロジェクトごとの実際の状態は自動で選ばれます
 - 状態名を直接書くこともできます（例: \`move ABC-12 検証依頼中\`）
@@ -267,9 +270,9 @@ bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> do
 1. **状態は人間の同意を得てから変える**。ただし「この課題をやろう」「コミットして」のように意図がはっきりした発言は同意とみなしてよい
 2. 変更したら「処理中に変更しました」のように 1 行で報告する
 3. テスト段階が無いプロジェクト（statuses で test が「なし」）ではテストへの変更を提案しない
-4. コミット後の完了報告（done）には \`--comment\` でコミットハッシュと変更の要約を付ける
+4. 状態を変えるときは \`--note\` に「やったこと」を 1〜2 文で書く。コミットした後ならコミット番号（短いハッシュ）を必ず入れる
 5. 前の状態に戻す変更は断られます。人間に確認してから \`--force\` を付けてください
-6. 課題の担当者・期限・本文などは変えられません（状態とコメントだけ）
+6. 変えられるのは状態・コメント・（着手時の）担当者だけです。期限・本文などは変えません
 `;
 }
 
@@ -296,7 +299,7 @@ usage() {
   echo "  bash $0 show <課題キー> [--comments N]"
   echo "  bash $0 current"
   echo "  bash $0 statuses <プロジェクトキー>"
-  echo "  bash $0 move <課題キー> start|test|done|<状態名> [--comment \\"…\\"] [--force]"
+  echo "  bash $0 move <課題キー> start|test|done|<状態名> [--note \\"やったこと\\"] [--force]"
   exit 1
 }
 
@@ -392,7 +395,7 @@ case "$CMD" in
     param sessionId "\${SELF_SESSION}"
     while [ $# -gt 0 ]; do
       case "$1" in
-        --comment) param comment "$2"; shift 2 ;;
+        --note|--comment) param note "$2"; shift 2 ;;
         --force) param force 1; shift ;;
         *) echo "不明な引数: $1"; usage ;;
       esac

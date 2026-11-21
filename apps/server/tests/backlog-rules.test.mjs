@@ -21,6 +21,10 @@ import {
   parseAssigneeScope,
   assigneeScopeLabel,
   filterByAssignee,
+  formatJstTimestamp,
+  formatAutoComment,
+  defaultMoveNote,
+  decideAssignee,
 } from '../dist/services/backlog-rules.js';
 
 const st = (id, name, displayOrder) => ({ id, name, color: '#888888', displayOrder });
@@ -186,4 +190,29 @@ test('担当者指定の読み取り: 未指定は自分＋担当なし、旧 ev
   assert.equal(parseAssigneeScope(undefined, true), 'everyone');
   assert.equal(parseAssigneeScope('bogus'), 'mine_unassigned');
   assert.equal(assigneeScopeLabel('mine_unassigned'), '自分＋担当なし');
+});
+
+// ---- 状態変更時の自動コメント・担当者 ----
+test('日本時間の日時と自動コメントの書式', () => {
+  const at = new Date('2026-11-21T09:29:30Z'); // JST 18:29:30
+  assert.equal(formatJstTimestamp(at), '2026/11/21 18:29:30');
+  assert.equal(formatJstTimestamp(new Date('2026-11-21T15:05:09Z')), '2026/11/22 00:05:09');
+  assert.equal(formatAutoComment('ai', at, '発注書を直しました（コミット abc1234）'), '*AI自動追記 2026/11/21 18:29:30：発注書を直しました（コミット abc1234）');
+  assert.equal(formatAutoComment('human', at, '状態を「処理中」に変更しました'), '*DevRelay 2026/11/21 18:29:30：状態を「処理中」に変更しました');
+  assert.equal(formatAutoComment('ai', at, '  1行目\r\n2行目  '), '*AI自動追記 2026/11/21 18:29:30：1行目\n2行目');
+});
+
+test('note が無いときの既定文', () => {
+  assert.equal(defaultMoveNote('start', '処理中'), '着手しました');
+  assert.equal(defaultMoveNote('test', '結合テスト'), 'テストを開始しました（状態: 結合テスト）');
+  assert.equal(defaultMoveNote('done', 'リリース待ち'), '完了報告：リリース待ちにしました');
+  assert.equal(defaultMoveNote(null, '検証依頼中'), '状態を「検証依頼中」に変更しました');
+});
+
+test('着手時の担当者: 空なら自分、他人なら上書きしない、着手以外は触らない', () => {
+  assert.equal(decideAssignee(true, null, 10), 'assign');
+  assert.equal(decideAssignee(true, 10, 10), 'already_mine');
+  assert.equal(decideAssignee(true, 99, 10), 'keep_other');
+  assert.equal(decideAssignee(false, null, 10), 'skip');
+  assert.equal(decideAssignee(true, null, null), 'skip');
 });
