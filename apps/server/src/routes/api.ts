@@ -17,7 +17,8 @@ import { validateThreadTitle } from '../services/thread-title.js';
 import { buildSessionInfoPayload, sortThreadsDesc } from '../services/thread-routing.js';
 import { buildEphemeralSessionIdExclusion } from '../services/thread-scope.js';
 import { buildEmptyEndedThreadExclusion, isHideEmptyEndedEnabled } from '../services/thread-list-filter.js';
-import { stripCommandTag, stripAiNoise } from '../services/thread-label-source.js';
+import { stripAiNoise, pickFirstLabelUserMessage } from '../services/thread-label-source.js';
+import { isThreadAutoTitleEnabled } from '../services/thread-auto-title-rules.js';
 import { isConversationRailEnabled, resolveRunning } from '../services/thread-activity.js';
 import { isDebugTurnsEnabled } from '../services/debug-turns-rules.js';
 import { resolveAgentRepoUrl, isAgentRepoTokenConfigured } from '../services/agent-repo-rules.js';
@@ -46,7 +47,7 @@ import {
   validateAndConsumeLinkCode,
   unlinkPlatform,
 } from '../services/platform-link.js';
-import { encodeToken } from '@devrelay/shared';
+import { encodeToken, isTraditionalCommand } from '@devrelay/shared';
 import { buildAgentWsUrl } from '../services/agent-token-url.js';
 import {
   getVapidPublicKey,
@@ -1025,6 +1026,8 @@ export async function apiRoutes(app: FastifyInstance) {
       // 素の値のまま WebUI に流れていた（WebUI 側は未使用）。専用 API
       // （GET /api/push/fcm/devices、マスク済み）で見せるため汎用設定レスポンスからは除外する
       if (s.key === SettingKeys.FCM_TOKENS || s.key === SettingKeys.PUSH_SUBSCRIPTIONS) continue;
+      // Backlog 連携（複数接続）: 接続一覧の JSON には API キーが入っているため返さない（専用 API GET /api/backlog/config で伏せて返す）
+      if (s.key === SettingKeys.BACKLOG_CONNECTIONS) continue;
       // 暗号化された値は復号化
       result[s.key] = s.encrypted ? decrypt(s.value) : s.value;
     }
@@ -1044,6 +1047,10 @@ export async function apiRoutes(app: FastifyInstance) {
     }
     if (result.telegram_bot_token) {
       result.telegram_bot_token = maskApiKey(result.telegram_bot_token);
+    }
+    // Backlog 連携（2026-11-21）: 個人の Backlog API キーも素の値を返さない
+    if (result.backlog_api_key) {
+      result.backlog_api_key = maskApiKey(result.backlog_api_key);
     }
 
     return result;
@@ -1806,19 +1813,56 @@ export async function apiRoutes(app: FastifyInstance) {
     // 最初のメッセージを同時に取得する（`@@index([sessionId, createdAt])` で高速）。
     // ids.length===0（sessions が空）のときは早期 return し、無意味な IN () クエリを避ける。
     const ids = sorted.map((s) => s.id);
+    //
+    // スレッドタイトル自動命名（0033）: role='user' は先頭 1 件ではなく先頭 FIRST_USER_ROWS 件を取り、
+    // `n` / `n 1` / `e` 等のコマンドだけの発言を飛ばした最初の発言をラベル材料にする
+    // （引継ぎスレッドが「n」と表示される問題の対策）。ai は従来どおり先頭 1 件。
+    // ラベル材料にしか使わないため content は先頭 500 字だけ取る（巨大な貼り付けで転送量を増やさない）。
+    const FIRST_USER_ROWS = 8;
     type FirstMessageRow = { sessionId: string; role: string; content: string };
+    // 性能（2026-11-21 WebUI 重い件）: ROW_NUMBER() 窓関数版は対象スレッドの「全メッセージ」を読み
+    // 1 行ずつ LEFT(content) を計算していたため、スレッドが長いほど一覧取得が遅くなった。
+    // スレッドごとに `@@index([sessionId, createdAt])` を先頭から読んで LIMIT で打ち切る LATERAL 形にする。
     const firstMessageRows: FirstMessageRow[] = ids.length === 0 ? [] : await prisma.$queryRaw<FirstMessageRow[]>`
-      SELECT DISTINCT ON ("sessionId", role) "sessionId", role, content
-      FROM "Message"
-      WHERE "sessionId" IN (${Prisma.join(ids)}) AND role IN ('user', 'ai')
-      ORDER BY "sessionId", role, "createdAt" ASC
+      SELECT s.id AS "sessionId", m.role, m.content
+      FROM unnest(ARRAY[${Prisma.join(ids)}]::text[]) AS s(id)
+      CROSS JOIN LATERAL (
+        (SELECT 'user'::text AS role, LEFT(content, 500) AS content, "createdAt"
+           FROM "Message" WHERE "sessionId" = s.id AND role = 'user'
+           ORDER BY "createdAt" ASC LIMIT ${FIRST_USER_ROWS})
+        UNION ALL
+        (SELECT 'ai'::text AS role, LEFT(content, 500) AS content, "createdAt"
+           FROM "Message" WHERE "sessionId" = s.id AND role = 'ai'
+           ORDER BY "createdAt" ASC LIMIT 1)
+      ) m
+      ORDER BY s.id, m.role, m."createdAt" ASC
     `;
-    const firstBySessionRole = new Map<string, { user?: string; ai?: string }>();
+    const firstBySessionRole = new Map<string, { user?: string; users: string[]; ai?: string }>();
     for (const row of firstMessageRows) {
-      const entry = firstBySessionRole.get(row.sessionId) ?? {};
-      if (row.role === 'user') entry.user = row.content;
-      else if (row.role === 'ai') entry.ai = row.content;
+      const entry = firstBySessionRole.get(row.sessionId) ?? { users: [] };
+      if (row.role === 'user') {
+        if (entry.user === undefined) entry.user = row.content;
+        entry.users.push(row.content);
+      } else if (row.role === 'ai') entry.ai = row.content;
       firstBySessionRole.set(row.sessionId, entry);
+    }
+
+    // スレッドタイトル自動命名（0033）: 引継ぎスレッド（handoverFromSessionId あり）の引継ぎ元の題名。
+    // autoTitle がまだ無い間は WebUI が「↪ 元の題名」と表示する。キルスイッチ OFF 時はクエリ自体を行わない。
+    const autoTitleEnabled = isThreadAutoTitleEnabled(process.env.DEVRELAY_THREAD_AUTO_TITLE);
+    const handoverSourceIds = autoTitleEnabled
+      ? [...new Set(sorted.map((s) => s.handoverFromSessionId).filter((v): v is string => !!v))]
+      : [];
+    const handoverSourceTitle = new Map<string, string>();
+    if (handoverSourceIds.length > 0) {
+      const srcRows = await prisma.session.findMany({
+        where: { id: { in: handoverSourceIds }, userId },
+        select: { id: true, title: true, autoTitle: true },
+      });
+      for (const r of srcRows) {
+        const t = (r.title && r.title.trim()) || (r.autoTitle && r.autoTitle.trim()) || null;
+        if (t) handoverSourceTitle.set(r.id, t);
+      }
     }
 
     // 会話履歴レール: 「未確認（緑✓）」判定用に、`role='ai'` の最新 createdAt をスレッドごとに
@@ -1846,11 +1890,17 @@ export async function apiRoutes(app: FastifyInstance) {
       // 新規: タイトル導出のための追加ラベル材料（DB へは永続化せず、都度導出）。
       // labelFromUser: `[exec]`/`[w]`/`[teamexec]` タグを剥がしたユーザーメッセージ。
       // labelFromAi: 📊 contextInfo / 🔧 進捗マーカー行を除いた AI 応答の残り。
-      const labelFromUser = first?.user ? stripCommandTag(first.user) : null;
+      const labelFromUser = first ? pickFirstLabelUserMessage(first.users, isTraditionalCommand) : null;
       const labelFromAi = first?.ai ? stripAiNoise(first.ai) : null;
       return {
         sessionId: s.id,
         title: s.title,
+        // スレッドタイトル自動命名（0033）: AI が付けた題名（表示優先は title > autoTitle）と、
+        // 引継ぎ元の題名。キルスイッチ OFF 時はキーごと省略（旧レスポンスと構造的に同一）。
+        autoTitle: autoTitleEnabled ? (s.autoTitle ?? null) : undefined,
+        handoverFromTitle: autoTitleEnabled
+          ? (s.handoverFromSessionId ? (handoverSourceTitle.get(s.handoverFromSessionId) ?? null) : null)
+          : undefined,
         projectId: s.project.id,
         projectName: s.project.name,
         machineName: s.machine.displayName ?? s.machine.name,

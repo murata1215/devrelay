@@ -49,6 +49,7 @@ import { buildAgreementApplyPrompt } from './agreement-template.js';
 import { buildToolApprovalPromptPayload, type ToolApprovalPromptPayloadWithSession } from './tool-approval-payload.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
+import { buildBacklogPromptLine } from './backlog.js';
 import { pickAvailableAiTool } from './ai-tool-availability.js';
 import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import OpenAI from 'openai';
@@ -56,6 +57,7 @@ import { generateToolRule } from './tool-format.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { processTurnKnowledge } from './knowledge-service.js';
 import { isKnowledgeEnabled } from './knowledge-rank.js';
+import { maybeGenerateThreadAutoTitle } from './thread-auto-title.js';
 import { checkIpAllowed } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
 import type { ManagementInfo } from '@devrelay/shared';
@@ -905,6 +907,13 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
         console.error('[Knowledge] fire-and-forget error:', err.message));
     }
 
+    // スレッドタイトル自動命名（0033）: AI 応答 1・3・8 回目に autoTitle を付け直す（fire-and-forget）。
+    // クロスプロジェクトクエリ（一時セッション）は対象外。キルスイッチ等の判定は関数内。
+    if (!pendingQuery) {
+      maybeGenerateThreadAutoTitle(sessionId).catch(err =>
+        console.error('[AutoTitle] fire-and-forget error:', err.message));
+    }
+
     if (usageData) {
       const models = usageData.modelUsage ? Object.keys(usageData.modelUsage).join(', ') : 'unknown';
       console.log(`💾 Usage data saved: duration=${usageData.durationMs}ms, models=${models}`);
@@ -1518,12 +1527,14 @@ export async function sendPromptToAgent(
   let resolvedAiTool: AiTool = aiTool ?? 'claude';
   let sessionAiToolForFallback: AiTool | undefined;
   let projectDefaultAiForFallback: AiTool | undefined;
+  let backlogUsageCase: string | null = null;
   try {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { aiTool: true, project: { select: { terminalMode: true, defaultAi: true } } },
+      select: { aiTool: true, usageCase: true, project: { select: { terminalMode: true, defaultAi: true } } },
     });
     terminalMode = !!session?.project?.terminalMode;
+    backlogUsageCase = session?.usageCase ?? null;
     if (!aiTool && session?.aiTool) {
       resolvedAiTool = session.aiTool as AiTool;
     }
@@ -1561,6 +1572,15 @@ export async function sendPromptToAgent(
   // #332: permissionPolicy 未指定時は 'interactive' に解決して常に明示値を送る
   const resolvedPermissionPolicy = permissionPolicy ?? 'interactive';
 
+  // Backlog 連携（2026-11-21）: スレッドの案件が課題キーなら、AI に「このスレッドの課題」を 1 行で知らせる。
+  // クロスユーザー ask（statePolicy あり）と引継ぎターンには付けない。失敗しても送信は続ける。
+  let promptToSend = prompt;
+  // 端末モード（PTY へ打ち込む）にも付けない。
+  if (backlogUsageCase && !terminalMode && !scopeOptions?.statePolicy && !scopeOptions?.handoverTurn) {
+    const line = await buildBacklogPromptLine(userId, backlogUsageCase).catch(() => null);
+    if (line) promptToSend = `${line}\n\n${prompt}`;
+  }
+
   // サイクル3.1: 実行中ターン台帳に登録。解除は handleAiOutput(isComplete) / handleAiCancelled /
   // handleAgentDisconnect（切断時 clearMachine）のいずれかで行う（単一の try/finally にできない
   // 非同期・別メッセージでの完了報告のため、送信直前の start のみここで行う）。
@@ -1575,7 +1595,7 @@ export async function sendPromptToAgent(
       // 未インストールの要求ツールを別ツールへ無断で差し替えた後も、サーバーは古いツール名を
       // 送り続けてしまう。Agent 再起動直後の sessionInfoMap 消失時の自動初期化でも resolveEffectiveAiTool()
       // を経ずに payload.aiTool がそのまま採用されるため、ここで実態に合わせておく必要がある）
-      sessionId, prompt, userId, files, missedMessages, projectPath, aiTool: resolvedAiTool, terminalMode, forceNewSession,
+      sessionId, prompt: promptToSend, userId, files, missedMessages, projectPath, aiTool: resolvedAiTool, terminalMode, forceNewSession,
       model: resolvedModel, language: resolvedLanguage, permissionPolicy: resolvedPermissionPolicy,
       agentScopeId: scopeOptions?.agentScopeId,
       resumeSessionId: scopeOptions?.resumeSessionId,

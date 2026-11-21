@@ -326,7 +326,7 @@ export function UsagePage() {
   if (loading && !data) {
     return (
       <div className="p-6">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Usage</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">利用料</h1>
         <div className="text-[var(--text-muted)]">読み込み中...</div>
       </div>
     );
@@ -334,7 +334,7 @@ export function UsagePage() {
   if (error && !data) {
     return (
       <div className="p-6">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">Usage</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-6">利用料</h1>
         <div className="text-[var(--text-danger)]">{error}</div>
       </div>
     );
@@ -358,7 +358,7 @@ export function UsagePage() {
       {/* 見出し + 月の切替 */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--text-primary)]">Usage</h1>
+          <h1 className="text-2xl font-bold text-[var(--text-primary)]">利用料</h1>
           <p className="text-xs text-[var(--text-muted)] mt-1">
             日本時間の暦月で集計（金額は会話履歴のコスト列と同じ計算。「~」付きの推定値を含む）
             {!data.inOrganization && ' ・組織に未所属のため自分の分だけを表示'}

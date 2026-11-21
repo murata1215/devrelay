@@ -324,13 +324,17 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
                     className="flex-1 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded px-1 py-0.5 text-[var(--text-primary)] min-w-0"
                   />
                 ) : (
-                  <span className={`text-xs truncate flex-1 ${isActive ? 'font-semibold text-[var(--text-primary)]' : 'text-[var(--text-secondary)]'}`}>
+                  <span
+                    className={`text-xs truncate flex-1 ${isActive ? 'font-semibold text-[var(--text-primary)]' : 'text-[var(--text-secondary)]'}`}
+                    title={label.kind === 'autoTitle' ? t('thread.autoTitleHint') : undefined}
+                  >
+                    {label.kind === 'autoTitle' && <span className="mr-0.5 opacity-60" aria-hidden="true">✨</span>}
                     {displayText}
                   </span>
                 )}
                 {!isRenaming && !readOnly && (
                   <button
-                    onClick={(e) => startRename(e, item.sessionId, item.title)}
+                    onClick={(e) => startRename(e, item.sessionId, item.title ?? item.autoTitle ?? null)}
                     title={t('thread.rename')}
                     className="opacity-0 group-hover:opacity-100 text-[var(--text-faint)] hover:text-[var(--text-primary)] shrink-0"
                   >

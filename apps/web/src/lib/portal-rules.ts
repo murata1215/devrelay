@@ -149,3 +149,157 @@ export function normalizePortalConfig(raw: unknown, base: string): PortalConfig 
     links,
   };
 }
+
+// ============================================================
+// ポータル サイクル P1: 3 カラム化（資料・ニュース・課題・TODO）
+// サーバーの応答も「信用しない入力」として正規化する（壊れていても画面を落とさない）。
+// ============================================================
+
+export interface PortalDocItem {
+  title: string;
+  /** `DEVRELAY_PORTAL_DIR` からの相対パス（`/` 区切り） */
+  path: string;
+  size: number;
+  updatedAt: string;
+}
+
+export interface PortalDocCategory {
+  name: string;
+  /** true なら DIR 直下の PDF（方針） */
+  root: boolean;
+  docs: PortalDocItem[];
+}
+
+export type PortalNewsCategory = 'update' | 'notice' | 'mail' | 'other';
+
+export interface PortalNewsItem {
+  id: string;
+  date: string;
+  category: PortalNewsCategory;
+  title: string;
+  body: string;
+  link?: string;
+}
+
+export interface PortalIssue {
+  title: string;
+  owner?: string;
+  due?: string;
+  status?: string;
+  link?: string;
+}
+
+export type PortalNewsTab = 'latest' | 'update';
+
+function arrOf(raw: unknown, key: string, max: number): unknown[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const v = (raw as Record<string, unknown>)[key];
+  return Array.isArray(v) ? v.slice(0, max) : [];
+}
+
+function rec(v: unknown): Record<string, unknown> {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+/** `GET /api/portal/docs` の応答を正規化する。 */
+export function normalizePortalDocs(raw: unknown): PortalDocCategory[] {
+  const out: PortalDocCategory[] = [];
+  for (const c0 of arrOf(raw, 'categories', 100)) {
+    const c = rec(c0);
+    const name = str(c.name, 200);
+    if (!name) continue;
+    const docs: PortalDocItem[] = [];
+    for (const d0 of Array.isArray(c.docs) ? c.docs.slice(0, 500) : []) {
+      const d = rec(d0);
+      const title = str(d.title, 300);
+      const p = str(d.path, 600);
+      if (!title || !p) continue;
+      docs.push({ title, path: p, size: typeof d.size === 'number' ? d.size : 0, updatedAt: str(d.updatedAt, 40) });
+    }
+    if (docs.length > 0) out.push({ name, root: c.root === true, docs });
+  }
+  return out;
+}
+
+/** PDF を開く URL（`<base>api/portal/docs/file?path=…`）。`base` は `import.meta.env.BASE_URL`。 */
+export function portalDocFileHref(docPath: string, base: string): string {
+  const b = base.endsWith('/') ? base : `${base}/`;
+  return `${b}api/portal/docs/file?path=${encodeURIComponent(docPath)}`;
+}
+
+/** 資料ページ（`/portal/docs?c=<分類>`）のパス。 */
+export function portalDocsPagePath(category?: string | null): string {
+  return category ? `/portal/docs?c=${encodeURIComponent(category)}` : '/portal/docs';
+}
+
+/** `GET /api/portal/news` の応答を正規化する（新しい順）。 */
+export function normalizePortalNews(raw: unknown): PortalNewsItem[] {
+  const out: PortalNewsItem[] = [];
+  for (const r0 of arrOf(raw, 'items', 300)) {
+    const r = rec(r0);
+    const title = str(r.title, 300);
+    const date = str(r.date, 10);
+    if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    const c = str(r.category, 20);
+    const category: PortalNewsCategory = c === 'update' || c === 'notice' || c === 'mail' ? c : 'other';
+    const link = str(r.link, 1000);
+    out.push({
+      id: str(r.id, 200) || `${date}-${title}`,
+      date,
+      category,
+      title,
+      body: str(r.body, 4000),
+      ...(link && isHttpUrl(link) ? { link } : {}),
+    });
+  }
+  return out.sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1));
+}
+
+/** portal.json のお知らせをニュース（notice）に混ぜる。日付の無いお知らせは最新扱いにしない（末尾）。 */
+export function mergeNoticesIntoNews(notices: readonly PortalNotice[], news: readonly PortalNewsItem[]): PortalNewsItem[] {
+  const fromNotices: PortalNewsItem[] = notices.map((n, i) => ({
+    id: `notice-${i}-${n.date}`,
+    date: /^\d{4}-\d{2}-\d{2}$/.test(n.date) ? n.date : '0000-00-00',
+    category: 'notice',
+    title: n.text,
+    body: '',
+  }));
+  return [...news, ...fromNotices].sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1));
+}
+
+/** タブで絞る（最新 = 全部、アップデート = update のみ）。 */
+export function filterPortalNews(items: readonly PortalNewsItem[], tab: PortalNewsTab): PortalNewsItem[] {
+  return tab === 'update' ? items.filter((i) => i.category === 'update') : [...items];
+}
+
+/** `GET /api/portal/issues` の応答を正規化する。 */
+export function normalizePortalIssues(raw: unknown): PortalIssue[] {
+  const out: PortalIssue[] = [];
+  for (const r0 of arrOf(raw, 'items', 200)) {
+    const r = rec(r0);
+    const title = str(r.title, 300);
+    if (!title) continue;
+    const link = str(r.link, 1000);
+    out.push({
+      title,
+      ...(str(r.owner, 100) ? { owner: str(r.owner, 100) } : {}),
+      ...(str(r.due, 20) ? { due: str(r.due, 20) } : {}),
+      ...(str(r.status, 40) ? { status: str(r.status, 40) } : {}),
+      ...(link && isHttpUrl(link) ? { link } : {}),
+    });
+  }
+  return out;
+}
+
+/** ナレッジ検索のパス（空なら検索画面そのもの）。 */
+export function buildKnowledgeSearchPath(q: string): string {
+  const s = q.trim().slice(0, 500);
+  return s ? `/knowledge?q=${encodeURIComponent(s)}` : '/knowledge';
+}
+
+/** ファイルサイズの表示（KB / MB）。 */
+export function formatPortalFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}

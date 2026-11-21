@@ -657,6 +657,91 @@ export const usage = {
   },
 };
 
+// ========================================
+// Backlog 連携（2026-11-21）
+// ========================================
+export interface BacklogPhaseMap { start: number | null; test: number | null; done: number | null }
+export interface BacklogProjectSetting { projectId: number; projectKey: string; name: string; map: BacklogPhaseMap }
+export interface BacklogStatus { id: number; name: string; color: string; displayOrder: number }
+/** 1 つの接続 = 1 つの Backlog スペース（API キーは返らない） */
+export interface BacklogConnection {
+  id: string;
+  space: string;
+  hasKey: boolean;
+  projects: BacklogProjectSetting[];
+}
+export interface BacklogConfig {
+  enabled: boolean;
+  configured?: boolean;
+  /** 組織既定のスペース（接続追加時の初期値。未設定なら null） */
+  defaultSpace?: string | null;
+  connections?: BacklogConnection[];
+}
+export interface BacklogIssueSummary {
+  issueKey: string;
+  projectKey: string;
+  summary: string;
+  status: { id: number; name: string; color: string };
+  issueType: { name: string; color: string } | null;
+  assignee: string | null;
+  priority: string | null;
+  dueDate: string | null;
+  updated: string | null;
+  url: string;
+  space: string;
+}
+export interface BacklogIssueBrief {
+  issueKey: string;
+  summary: string;
+  status: { id: number; name: string; color: string };
+  assignee: string | null;
+  url: string;
+  space: string;
+  statuses: BacklogStatus[];
+}
+
+/** 課題キー（例: ATG_39_P_0002-1167）か */
+export function isBacklogIssueKey(v: unknown): v is string {
+  return typeof v === 'string' && /^[A-Z][A-Z0-9_]*-\d+$/.test(v);
+}
+
+export const backlog = {
+  async getConfig(): Promise<BacklogConfig> {
+    return request('GET', '/backlog/config');
+  },
+  async addConnection(space: string, apiKey: string): Promise<BacklogConnection> {
+    return request('POST', '/backlog/connections', { space, apiKey });
+  },
+  async updateConnection(id: string, input: { space?: string; apiKey?: string; projects?: BacklogProjectSetting[] }): Promise<BacklogConnection> {
+    return request('PUT', `/backlog/connections/${encodeURIComponent(id)}`, input);
+  },
+  async deleteConnection(id: string): Promise<{ success: boolean }> {
+    return request('DELETE', `/backlog/connections/${encodeURIComponent(id)}`);
+  },
+  async listProjects(connId: string): Promise<{ projects: { projectId: number; projectKey: string; name: string }[]; me: string }> {
+    return request('GET', `/backlog/connections/${encodeURIComponent(connId)}/projects`);
+  },
+  async getStatuses(connId: string, projectKey: string): Promise<{ statuses: BacklogStatus[]; guessed: BacklogPhaseMap }> {
+    return request('GET', `/backlog/connections/${encodeURIComponent(connId)}/projects/${encodeURIComponent(projectKey)}/statuses`);
+  },
+  async listIssues(q: { conn?: string; project?: string; status?: string; everyone?: boolean; keyword?: string }): Promise<{ issues: BacklogIssueSummary[]; projects: string[]; statusLabel: string; mine: boolean; errors: string[]; spaces: string[] }> {
+    const p = new URLSearchParams();
+    if (q.conn) p.set('conn', q.conn);
+    if (q.project) p.set('project', q.project);
+    if (q.status) p.set('status', q.status);
+    if (q.everyone) p.set('everyone', '1');
+    if (q.keyword) p.set('keyword', q.keyword);
+    const qs = p.toString();
+    return request('GET', `/backlog/issues${qs ? `?${qs}` : ''}`);
+  },
+  async getIssue(issueKey: string): Promise<BacklogIssueBrief> {
+    return request('GET', `/backlog/issues/${encodeURIComponent(issueKey)}`);
+  },
+  async setStatus(issueKey: string, statusId: number): Promise<{ to: { id: number; name: string; color: string } }> {
+    return request('POST', `/backlog/issues/${encodeURIComponent(issueKey)}/status`, { statusId });
+  },
+};
+
 // セッション履歴API（Chat タブ復元・メッセージ履歴用）
 export interface ActiveSession {
   sessionId: string;
@@ -741,6 +826,10 @@ export interface ThreadSummary {
   /** 「(無題)」大量発生の根治 サイクルB: 📊 contextInfo / 🔧 進捗マーカー行を除いた AI 応答の先頭60字。
    * サーバー都度導出・DB非永続化。 */
   labelFromAi?: string | null;
+  /** スレッドタイトル自動命名（0033）: AI が付けた題名（表示は title > autoTitle）。旧サーバー・キルスイッチ OFF 時は無い。 */
+  autoTitle?: string | null;
+  /** スレッドタイトル自動命名（0033）: 引継ぎ元スレッドの題名（引継ぎスレッドのみ）。 */
+  handoverFromTitle?: string | null;
   messageCount: number;
   isScoped: boolean;
   /** MCP ask サイクル: 'instruction'（従来の submit_instruction 経由）| 'question'（ask_project の質問）。
@@ -1794,5 +1883,40 @@ export const clearance = {
     patch: { level?: number | null; compartment?: string | null }
   ): Promise<ClassificationChangeResult<ThreadClassification>> {
     return request('PUT', `/threads/${encodeURIComponent(sessionId)}/classification`, patch);
+  },
+};
+
+// ポータル サイクル P1: 資料・ニュース・全体課題（ログイン不要）と自分の TODO（ログイン必須）
+export interface PortalTodo {
+  id: string;
+  text: string;
+  done: boolean;
+  doneAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const portal = {
+  /** 応答は portal-rules の normalize* で正規化して使う */
+  async docs(): Promise<unknown> {
+    return request('GET', '/portal/docs');
+  },
+  async news(): Promise<unknown> {
+    return request('GET', '/portal/news');
+  },
+  async issues(): Promise<unknown> {
+    return request('GET', '/portal/issues');
+  },
+  async listTodos(): Promise<{ items: PortalTodo[] }> {
+    return request('GET', '/portal/todos');
+  },
+  async addTodo(text: string): Promise<{ item: PortalTodo }> {
+    return request('POST', '/portal/todos', { text });
+  },
+  async updateTodo(id: string, patch: { text?: string; done?: boolean }): Promise<{ item: PortalTodo }> {
+    return request('PATCH', `/portal/todos/${encodeURIComponent(id)}`, patch);
+  },
+  async deleteTodo(id: string): Promise<{ ok: boolean }> {
+    return request('DELETE', `/portal/todos/${encodeURIComponent(id)}`);
   },
 };

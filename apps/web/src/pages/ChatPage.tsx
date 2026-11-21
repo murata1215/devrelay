@@ -1,5 +1,5 @@
 import { apiUrl } from '../lib/base';
-import { useState, useRef, useEffect, useCallback, useMemo, Fragment, type KeyboardEvent, type ClipboardEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo, Fragment, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved, type ToolApprovalAuto } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -38,6 +38,9 @@ import {
 } from '../lib/cross-ask-rules';
 import { isAtBottom, decideHistoryRefresh, resolveRestoredScrollTop } from '../lib/chat-scroll-rules';
 import { reorderTabsById, resolveDropSide, type DropSide } from '../lib/tab-order-rules';
+import { decideEnterAction } from '../lib/enter-send-rules';
+import { useEnterSendLock } from '../lib/useEnterSendLock';
+import { EnterLockToggle } from '../components/EnterLockToggle';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
 const MAX_MESSAGES = 50;
@@ -673,8 +676,12 @@ function QuestionCard({
   );
 }
 
-/** Discord 風メッセージ行 */
-function MessageRow({
+/**
+ * Discord 風メッセージ行。
+ * 性能（2026-11-21）: ChatPage は入力 1 文字・進捗 1 秒ごとに再描画されるため memo で包み、
+ * props（message オブジェクト・表示名/色・setLightboxImage）が同じ行は描き直さない。
+ */
+const MessageRow = memo(function MessageRow({
   message,
   userName,
   userColor,
@@ -731,7 +738,7 @@ function MessageRow({
       </div>
     </div>
   );
-}
+});
 
 /**
  * Discord 風進捗インジケーター。
@@ -2276,6 +2283,8 @@ export function ChatPage() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Enter 送信ロック（2026-11-21、localStorage 永続化） */
+  const [enterLocked, toggleEnterLock] = useEnterSendLock();
   /** tabs/activeTabId の最新値を参照する ref */
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -2815,8 +2824,25 @@ export function ChatPage() {
     }
   }, [loadHistory]);
 
+  // スレッドタイトル自動命名（0033）: AI 応答の後にサーバーが裏で題名を付けるため、
+  // 応答受信から少し待ってスレッド一覧を 1 回だけ取り直す（連続受信はまとめる）。
+  const autoTitleRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (autoTitleRefreshTimerRef.current) clearTimeout(autoTitleRefreshTimerRef.current);
+  }, []);
+  const handleWsMessage = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'> & { messageId?: string }, projectId?: string, sessionId?: string) => {
+    addMessageToTab(msg, projectId, sessionId);
+    if (msg.role === 'system') {
+      if (autoTitleRefreshTimerRef.current) clearTimeout(autoTitleRefreshTimerRef.current);
+      autoTitleRefreshTimerRef.current = setTimeout(() => {
+        autoTitleRefreshTimerRef.current = null;
+        setThreadRefreshToken(c => c + 1);
+      }, 8000);
+    }
+  }, [addMessageToTab]);
+
   const { connected, sendCommand, sendToolApprovalResponse, sendCrossAsk } = useWebSocket({
-    onMessage: addMessageToTab,
+    onMessage: handleWsMessage,
     onProgress: updateProgressOnTab,
     onProgressClear: clearProgressOnTab,
     onSessionInfo: handleSessionInfo,
@@ -3949,7 +3975,12 @@ export function ChatPage() {
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Enter 送信ロック（2026-11-21）: ロック中は Enter=改行、送信はボタンか Ctrl/⌘+Enter。IME 変換中は送らない
+    const action = decideEnterAction({
+      key: e.key, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey,
+      isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode,
+    }, enterLocked);
+    if (action === 'send') {
       e.preventDefault();
       handleSend();
     }
@@ -4309,7 +4340,7 @@ export function ChatPage() {
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
-                  placeholder={!activeTab ? t('chat.selectProject') : connected ? t('chat.enterMessage') : t('chat.connecting')}
+                  placeholder={!activeTab ? t('chat.selectProject') : connected ? (enterLocked ? t('chat.enterLockPlaceholder') : t('chat.enterMessage')) : t('chat.connecting')}
                   disabled={!connected || !activeTab}
                   rows={1}
                   className="flex-1 bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg px-4 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 placeholder-[var(--text-faint)]"
@@ -4320,6 +4351,7 @@ export function ChatPage() {
                     target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
                   }}
                 />
+                <EnterLockToggle locked={enterLocked} onToggle={toggleEnterLock} />
                 <button
                   onClick={handleSend}
                   disabled={!connected || !activeTab || (!input.trim() && pendingFiles.length === 0)}

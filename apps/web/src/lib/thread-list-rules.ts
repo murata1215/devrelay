@@ -22,6 +22,10 @@ export interface ThreadListItem {
   labelFromUser?: string | null;
   /** 「(無題)」大量発生の根治 サイクルB: 📊 contextInfo / 🔧 進捗マーカー行を除いた AI 応答。同上 optional。 */
   labelFromAi?: string | null;
+  /** スレッドタイトル自動命名（0033）: AI が会話の節目で付けた題名。旧サーバー応答・キルスイッチ OFF 時は無い。 */
+  autoTitle?: string | null;
+  /** スレッドタイトル自動命名（0033）: 引継ぎスレッドの引継ぎ元の題名（autoTitle が付くまで「↪ 元の題名」で表示）。 */
+  handoverFromTitle?: string | null;
   /** false の場合は agentScopeId = NULL（既定スレッド） */
   isScoped: boolean;
   /** ISO 文字列。サーバー側で `lastActiveAt ?? startedAt` に解決済み（常に non-null） */
@@ -54,7 +58,7 @@ export function truncateDisplay(text: string, max: number): string {
 
 /**
  * スレッドの表示ラベルを導出する。
- * 優先順位: `title`（空白のみは無視） → `labelFromUser ?? firstUserMessage` の先頭 `max` 字
+ * 優先順位: `title`（空白のみは無視） → `autoTitle` → `↪ handoverFromTitle` → `labelFromUser ?? firstUserMessage` の先頭 `max` 字
  * （既定 40, 空白のみは無視） → `labelFromAi` の先頭 `max` 字 → fallback
  *
  * 「(無題)」大量発生の根治 サイクルB: `labelFromUser`/`labelFromAi` は
@@ -70,10 +74,16 @@ export function truncateDisplay(text: string, max: number): string {
  * それを優先表示する（ユーザーが明示的に改名した場合はその意図を尊重する）。
  */
 export function deriveThreadLabel(
-  item: Pick<ThreadListItem, 'title' | 'firstUserMessage' | 'labelFromUser' | 'labelFromAi'>,
+  item: Pick<ThreadListItem, 'title' | 'firstUserMessage' | 'labelFromUser' | 'labelFromAi' | 'autoTitle' | 'handoverFromTitle'>,
   max: number = 40
-): { text: string; kind: 'title' | 'firstMessage' | 'aiMessage' | 'fallback' } {
+): { text: string; kind: 'title' | 'autoTitle' | 'handover' | 'firstMessage' | 'aiMessage' | 'fallback' } {
   if (item.title && item.title.trim()) return { text: item.title, kind: 'title' };
+  // スレッドタイトル自動命名（0033）: ユーザー命名（title）の次に AI の題名。
+  // まだ AI の題名が無い引継ぎスレッドは「↪ 引継ぎ元の題名」（最初の入力 `n` 等が題名にならないように）。
+  if (item.autoTitle && item.autoTitle.trim()) return { text: truncateDisplay(item.autoTitle, max), kind: 'autoTitle' };
+  if (item.handoverFromTitle && item.handoverFromTitle.trim()) {
+    return { text: truncateDisplay(`↪ ${item.handoverFromTitle}`, max), kind: 'handover' };
+  }
   // `labelFromUser` キー自体が無い（旧サーバー応答）場合のみ `firstUserMessage` にフォールバックする。
   // `labelFromUser: null`（コマンドタグ単体などラベルの材料が無いとサーバーが判定済み）のときは
   // `firstUserMessage`（タグ除去前の生テキスト、例: "[exec]"）に巻き戻さず、次点の `labelFromAi` へ進む

@@ -1,5 +1,7 @@
 # Devlog INDEX
 
+- 2026-11-21_backlog | Backlog 連携（課題の選択・内容確認・状態変更） | 個人の API キー＋使うプロジェクトを本人が選ぶ（UserSettings のみ・DB 変更なし）。段階（着手/テスト/完了報告）→ 状態をプロジェクトごとに自動推測・設定画面で修正。案件欄の `Backlog▼` で課題を選ぶと案件 = 課題キー、右に件名と状態（クリックで変更）。スキル `devrelay-backlog`（プランモード可、`start` で案件に自動設定）、AI に【Backlog課題】1 行。Git bash curl の Shift_JIS 化を一時ファイル経由で回避。`DEVRELAY_BACKLOG` / `DEVRELAY_BACKLOG_SPACE` | [詳細](2026-11-21_backlog.md)
+- 2026-11-21_portal_p1 | ポータルを Yahoo 風 3 カラムに作り替え | 上にナレッジ検索、左に使い方（`D:\portal` の PDF を分類ごとに `/portal/docs`）・方針・座席表・端末台帳、中にニュース（最新/アップデート）、右に課題一覧（自分の TODO = PortalTodo/TISA0003、全体課題 = issues.json、Backlog は準備中）。`portal:news` がコミット歴を `news/commits/*.jsonl` に書き出し AI（ANSWER 鍵流用）で要約して `items.json` へ。`DEVRELAY_PORTAL` / `DEVRELAY_PORTAL_DIR` | [詳細](2026-11-21_portal_p1.md)
 - 2026-11-19_usage_case_in_chat | チャットの入力欄で案件タグ・案件が空なら AI に送れない | 入力欄の上に「🏷 案件」欄（ChatPage/Lite）、スレッド一覧に案件ラベル、`DEVRELAY_USAGE_CASE_REQUIRED=1` で案件が空なら AI プロンプトを止める（コマンドは通す）。`isTraditionalCommand` を shared へ移設 | [詳細](2026-11-19_usage_case_in_chat.md)
 - 2026-11-19_devin_cumulative_usage | Devin コストの累計記録による過大計上を修正 | resume で ATIF の final_metrics がセッション累計になる環境（PC45/exuser59）を Agent の `resolveAtifTurnUsage()` でターン分に、既存行は `devin:cumulative-fix` で補正（土橋 11 月 $1,090 → $82.39、実請求 $83.06）。miyazawa の約 $100 差は Devin フルシートの定額分（不具合ではない、Usage 画面に注記） | [詳細](2026-11-19_devin_cumulative_usage.md)
 - 2026-11-19_usage_cost_aggregation | Usage（コスト集計）とサイネージ画面 | `/usage`（グループ/利用者/プロジェクト/案件/スレッド・JST 暦月・当月/前月・CSV・その場編集）と `/signage/usage?token=`（ログイン不要・5 分更新）。DB: UserUsageGroup / Session.usageCase / Organization.usageSignageToken。`DEVRELAY_USAGE`。sa-makino 11/4〜11/17 = $53.03 で会話履歴と一致 | [詳細](2026-11-19_usage_cost_aggregation.md)
@@ -155,3 +157,4 @@
 - 2026-11-12_063253 | サイクルS1 | プランモードのBashゲート既存バグ根治（SDK0.3系のplan→auto変換が真因、PreToolUseフック導入+`plan-gate-hook`capability+`DEVRELAY_PLAN_GATE_CAPABILITY`、`agents/windows`は未対応） | [詳細](2026-11-12_063253.md)
 - 2026-11-12_215108 | サイクルS2a+S2b | クロスユーザー askの読める範囲・使えるツール制限（新ゲート+client_composed+既存バイパス2件根治、S2c以降は先送り） | [詳細](2026-11-12_215108.md)
 - 2026-11-14_072449 | エージェント再接続3不具合修正 | `agents/{linux,macos,windows}`: 接続タイムアウト（`handshakeTimeout`+自前監視タイマー）導入・安定判定を「60秒OPEN維持でリセット」に修正（旧実装は毎回リセットでバックオフ無効化）・`maxAttempts`打ち切り撤廃で無期限リトライ化+常駐supervisor新設。自宅PC3日間沈黙事故の根治、`packages/shared/src/reconnect.ts`新設、windows旧ソケット後片付けギャップは範囲外 | [詳細](2026-11-14_072449.md)
+- 2026-11-21_thread_auto_title | スレッドタイトル自動命名 | AI 応答 1・3・8 回目に `Session.autoTitle`（0033）を AI で付け直し、表示は title > autoTitle > ↪ 引継ぎ元 > コマンド除外の最初の発言。`DEVRELAY_THREAD_AUTO_TITLE` | [詳細](2026-11-21_thread_auto_title.md)

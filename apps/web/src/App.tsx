@@ -21,6 +21,7 @@ import { SitesPage } from './pages/SitesPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { LitePage } from './pages/LitePage';
 import { PortalPage } from './pages/PortalPage';
+import { PortalDocsPage } from './pages/PortalDocsPage';
 import { UsagePage } from './pages/UsagePage';
 import { UsageSignagePage } from './pages/UsageSignagePage';
 import { NotificationBanner } from './components/NotificationBanner';
@@ -163,6 +164,15 @@ function AppRoutes() {
         element={
           <ErrorBoundary>
             <PortalPage />
+          </ErrorBoundary>
+        }
+      />
+      {/* ポータル P1: 資料ページ（ログイン不要）。DEVRELAY_PORTAL_DIR の PDF を分類ごとに一覧 */}
+      <Route
+        path="/portal/docs"
+        element={
+          <ErrorBoundary>
+            <PortalDocsPage />
           </ErrorBoundary>
         }
       />

@@ -12,6 +12,7 @@ import { getDocPanelSettings, setDocPanelSettings, type DocPanelSettings } from 
 import { useLanguage } from '../contexts/LanguageContext';
 import { ClearanceAdminSection } from '../components/knowledge/ClearanceAdminSection';
 import { PushDevicesSection } from '../components/settings/PushDevicesSection';
+import { BacklogSettingsSection } from '../components/BacklogSettingsSection';
 
 type SettingsTab = 'general' | 'ai' | 'agent' | 'integrations' | 'organization' | 'system';
 
@@ -1498,6 +1499,9 @@ export function SettingsPage() {
             </div>
           ))}
         </div>
+
+        {/* Backlog 連携（2026-11-21）: 個人の API キー・使うプロジェクト・段階と状態の対応 */}
+        <BacklogSettingsSection />
       </div>
 
       {/* API Tokens Section — Personal Access Token (#271) */}

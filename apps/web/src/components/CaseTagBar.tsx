@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import { usage as usageApi } from '../lib/api';
+import { BacklogIssueBadge, BacklogPickButton } from './BacklogIssuePicker';
 
 /**
  * Usage 案件必須サイクル（2026-11-19）: チャット入力欄の上に出す「🏷 案件」欄。
@@ -66,6 +67,31 @@ export function useThreadCase(sessionId: string | null | undefined, opts: { allo
         setState({ ...INITIAL, loaded: true, unavailable: true });
       });
   }, [sessionId, allowPending]);
+
+  // Backlog 連携: AI が課題に着手すると（スキルの move start）サーバー側で案件が課題キーに変わるため、
+  // 画面に戻ったときと 20 秒ごと（表示中のみ）に静かに取り直す（読み込み中表示にはしない）
+  useEffect(() => {
+    if (!sessionId) return;
+    const refresh = () => {
+      const req = reqRef.current;
+      usageApi
+        .getCase(sessionId)
+        .then((r) => {
+          if (req !== reqRef.current) return;
+          setState((s) => (s.loaded && !s.unavailable && s.caseName !== r.caseName ? { ...s, caseName: r.caseName } : s));
+        })
+        .catch(() => {});
+    };
+    const onFocus = () => refresh();
+    window.addEventListener('focus', onFocus);
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') refresh();
+    }, 20_000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      clearInterval(t);
+    };
+  }, [sessionId]);
 
   const save = useCallback(
     async (next: string | null) => {
@@ -144,7 +170,7 @@ export function CaseTagBar({
   const listId = 'chat-case-options';
 
   return (
-    <div className="flex items-center gap-2 mb-2 text-sm">
+    <div className="flex flex-wrap items-center gap-2 mb-2 text-sm min-w-0">
       <span className="text-[var(--text-muted)] whitespace-nowrap" title="このスレッドの案件（Usage 画面のコスト集計に使います）">
         🏷 案件
       </span>
@@ -168,6 +194,28 @@ export function CaseTagBar({
           highlight || (state.required && state.loaded && empty) ? 'border-red-500' : 'border-[var(--border-color)]'
         }`}
       />
+      {state.editable && state.loaded && (
+        <BacklogPickButton
+          disabled={disabled || saving}
+          onPick={(key) => {
+            setText(key);
+            void (async () => {
+              if (key === (state.caseName ?? null)) return;
+              setSaving(true);
+              setErr('');
+              try {
+                await onSave(key);
+              } catch (e) {
+                setErr(e instanceof Error ? e.message : '保存に失敗しました');
+                setText(state.caseName ?? '');
+              } finally {
+                setSaving(false);
+              }
+            })();
+          }}
+        />
+      )}
+      <BacklogIssueBadge caseName={state.caseName} />
       {saved && <span className="text-xs text-green-600">保存しました</span>}
       {err && <span className="text-xs text-[var(--text-danger)]">{err}</span>}
       {highlight && !err && <span className="text-xs text-[var(--text-danger)]">案件を入力してから送信してください</span>}

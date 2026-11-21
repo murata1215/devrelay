@@ -310,6 +310,19 @@ function isWriteBashCommand(tokens: string[], writeBashCommands: string[]): bool
   return false;
 }
 
+/**
+ * `bash <…>/.claude/skills/devrelay-backlog/scripts/backlog.sh …` の呼び出しか（Backlog 連携）。
+ * 先頭は `bash` 固定、スクリプトのパスは ~ / 絶対パス（/mnt/c/…・/c/…・C:\…）のいずれかで、
+ * `.claude/skills/devrelay-backlog/scripts/backlog.sh` で終わるものに限る（相対パスや別名のファイルは不可）。
+ */
+export function isBacklogSkillInvocation(tokens: string[]): boolean {
+  if (tokens.length < 2 || tokens[0] !== 'bash') return false;
+  const p = tokens[1].replace(/\\/g, '/');
+  if (!/^(~|\/|[A-Za-z]:\/)/.test(p)) return false;
+  if (p.includes('/../') || p.includes('/./')) return false;
+  return /\/\.claude\/skills\/devrelay-backlog\/scripts\/backlog\.sh$/.test(p);
+}
+
 /** decidePlanPermission / decideBashCommand の判定結果 */
 export type PlanPermissionDecision =
   | { behavior: 'allow' }
@@ -353,6 +366,14 @@ function decideSingleBashSegment(
 
   const commandName = normalizeGitTokens(tokens)[0];
   if (readonlyBashCommands.includes(commandName)) {
+    return { behavior: 'allow' };
+  }
+
+  // Backlog 連携（2026-11-21、ユーザー決定）: devrelay-backlog スキルはプランモードでも使える
+  // （課題の一覧・閲覧に加え、人間の同意を得た状態変更も含む）。スクリプトはサーバー API を呼ぶだけで
+  // リポジトリを書き換えない。Windows では ~ 形ではなく /mnt/c/... や /c/... の絶対パスで呼ばれるため、
+  // パスの末尾（.claude/skills/devrelay-backlog/scripts/backlog.sh）で判定する。
+  if (isBacklogSkillInvocation(tokens)) {
     return { behavior: 'allow' };
   }
 

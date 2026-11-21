@@ -29,6 +29,24 @@ export function stripCommandTag(raw: string | null): string | null {
 }
 
 /**
+ * スレッドタイトル自動命名（0033）: 先頭からのユーザーメッセージ群（古い順）のうち、
+ * コマンドタグを剥がした結果がコマンドだけの発言（`n` / `n 1` / `e` 等。判定は呼び出し側が
+ * `isTraditionalCommand` を `isCommand` として渡す＝本モジュールの外部 import ゼロ規約を維持）を
+ * 飛ばして、最初のラベル材料を返す。全部コマンドなら null。
+ * 引継ぎスレッドが最初の入力 `n` をそのまま題名にしてしまう問題の対策。
+ */
+export function pickFirstLabelUserMessage(
+  contents: readonly (string | null)[],
+  isCommand: (text: string) => boolean,
+): string | null {
+  for (const raw of contents) {
+    const stripped = stripCommandTag(raw);
+    if (stripped && !isCommand(stripped)) return stripped;
+  }
+  return null;
+}
+
+/**
  * 進捗マーカー行のパターン（ja / en 両対応）。
  * `services/progress-markers.ts` の `PROGRESS_LINE_PATTERNS` の複製。
  * 本モジュールは「外部 import ゼロ」規約（`thread-list-filter.ts` 等と同じ）を維持するため

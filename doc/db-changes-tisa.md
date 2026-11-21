@@ -17,6 +17,7 @@
 |---|---|---|
 | 0001 | `TISA0001_session_handover.sql` | Session に handover* 6 列（スレッド引継ぎ `n`） |
 | 0002 | `TISA0002_usage_cost_aggregation.sql` | Organization.usageSignageToken・Session.usageCase・UserUsageGroup（Usage） |
+| 0003 | `TISA0003_portal_todo.sql` | PortalTodo（ポータルの自分の TODO） |
 
 正本はフォルダ内の `INDEX.tsv`。
 

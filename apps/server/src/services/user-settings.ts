@@ -77,6 +77,17 @@ export const SettingKeys = {
   AUTO_UPDATE_ENABLED: 'auto_update_enabled',
   /** ログイン後に manager.devrelay.io へ自動遷移するかどうか（'true'|'false'、未設定＝無効） */
   MANAGER_REDIRECT: 'managerRedirect',
+  /** Backlog 連携（2026-11-21）: 個人の Backlog API キー（暗号化） */
+  BACKLOG_API_KEY: 'backlog_api_key',
+  /** Backlog 連携: スペースのホスト名（例: 'xxx.backlog.jp'。未設定なら DEVRELAY_BACKLOG_SPACE） */
+  BACKLOG_SPACE: 'backlog_space',
+  /** Backlog 連携: 使ってよいプロジェクトと段階→状態の対応（JSON。services/backlog.ts の BacklogProjectsSetting） */
+  BACKLOG_PROJECTS: 'backlog_projects',
+  /**
+   * Backlog 連携（複数接続）: 接続の一覧（スペース・API キー・使うプロジェクト・段階の対応）の JSON。全体を暗号化。
+   * これがあれば上の 3 キー（旧形式・1 人 1 件）は読まない。保存時に旧形式のキーは消す。
+   */
+  BACKLOG_CONNECTIONS: 'backlog_connections',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];
@@ -88,6 +99,8 @@ const ENCRYPTED_KEYS: SettingKey[] = [
   SettingKeys.GEMINI_API_KEY,
   SettingKeys.DISCORD_BOT_TOKEN,
   SettingKeys.TELEGRAM_BOT_TOKEN,
+  SettingKeys.BACKLOG_API_KEY,
+  SettingKeys.BACKLOG_CONNECTIONS,
 ];
 
 // 暗号化キー（環境変数から取得、なければデフォルト）

@@ -417,6 +417,12 @@ model Session {
   // Usage（コスト集計）サイクル: このスレッドの案件名（コスト集計専用。ナレッジの compartment とは別物で
   // 閲覧制限には一切使わない）。null = 案件なし。backfill しない。
   usageCase             String?
+  // スレッドタイトル自動命名（0033）: AI が会話の節目（AI 応答 1・3・8 回目）で付ける表示名。
+  // ユーザーが付けた `title` とは別列（title には自動値を書かない不変条件。thread-label-source.ts 参照）。
+  // 表示優先は title > autoTitle。autoTitleTurns = 生成時点の AI 応答数（同じ節目での二重生成防止）。
+  autoTitle             String?
+  autoTitleAt           DateTime?
+  autoTitleTurns        Int?
   // クロスユーザー Team（ask のみ、Phase 1）: 依頼者の User.id。null = 従来どおり
   // 「依頼者 = userId（所有者）」で、既存行は全て NULL のまま（backfill 絶対禁止）。
   // FK は張らない（権限・監査用の列は User 削除時に Session を壊さない方針。
@@ -497,6 +503,19 @@ model UserUsageGroup {
   updatedBy String?  // 設定した userId（監査用。FK なし）
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ポータル サイクル P1（TISA0003）: ポータル右カラム「自分の TODO」。本人のみ読み書き。FK なし
+model PortalTodo {
+  id        String    @id @default(cuid())
+  userId    String
+  text      String
+  done      Boolean   @default(false)
+  doneAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([userId])
 }
 
 // メッセージ履歴

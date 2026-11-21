@@ -254,3 +254,18 @@ describe('resolveCreateTargetProjectId（Lite シェル L1: ThreadList の作成
     assert.equal(resolveCreateTargetProjectId('', 'p2'), '');
   });
 });
+
+describe('deriveThreadLabel（スレッドタイトル自動命名 0033: title > autoTitle > ↪ 引継ぎ元 > 発言）', () => {
+  test('title があれば autoTitle より優先', () => {
+    assert.equal(deriveThreadLabel({ title: '手動', autoTitle: 'AI', firstUserMessage: 'x' }).kind, 'title');
+  });
+  test('title が無ければ autoTitle', () => {
+    assert.deepEqual(deriveThreadLabel({ title: null, autoTitle: 'AI の題名', firstUserMessage: 'n', labelFromUser: null }), { text: 'AI の題名', kind: 'autoTitle' });
+  });
+  test('autoTitle が無い引継ぎスレッドは ↪ 引継ぎ元の題名', () => {
+    assert.deepEqual(deriveThreadLabel({ title: null, autoTitle: null, handoverFromTitle: '元の題名', firstUserMessage: 'n', labelFromUser: '続きの話' }), { text: '↪ 元の題名', kind: 'handover' });
+  });
+  test('どちらも無ければ従来どおり発言', () => {
+    assert.equal(deriveThreadLabel({ title: null, autoTitle: null, handoverFromTitle: null, firstUserMessage: 'n', labelFromUser: '続きの話' }).text, '続きの話');
+  });
+});

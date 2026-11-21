@@ -295,10 +295,17 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // （左右に常時2px確保し色だけ切替、DOM増減なし）に戻した（resolveDropSide による側判定は維持）。
 // 以上を会社側マージ後の 4396 行に適用した結果、ChatPage の行数ピンを実測値（4411）に更新した。
 // LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも無変更のため据え置き。
+//
+// Enter 送信ロック（2026-11-21）で、ChatPage の handleKeyDown を `decideEnterAction()`（lib/enter-send-rules.ts）に
+// 差し替え、送信ボタンの左に `EnterLockToggle` を置いたため、ChatPage の行数ピンを実測値（4411 → 4422）に更新した。
+// LitePage.tsx・renderMarkdown 出現数・components/lite/* のファイル数は無変更のため据え置き。
+//
+// スレッドタイトル自動命名（0033、2026-11-21）で、AI 応答受信の 8 秒後にスレッド一覧を取り直す
+// `handleWsMessage` を追加したため、ChatPage の行数ピンを実測値（4422 → 4439）に更新した。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4411, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4439, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

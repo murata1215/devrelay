@@ -65,6 +65,10 @@ const CREATE_SCRIPTS_DIR = path.join(CREATE_SKILL_DIR, 'scripts');
 const FLUTTER_DEPLOY_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-flutter-deploy');
 const FLUTTER_DEPLOY_SCRIPTS_DIR = path.join(FLUTTER_DEPLOY_SKILL_DIR, 'scripts');
 
+/** devrelay-backlog スキルディレクトリ（Backlog 連携、2026-11-21） */
+const BACKLOG_SKILL_DIR = path.join(SKILLS_BASE, 'devrelay-backlog');
+const BACKLOG_SCRIPTS_DIR = path.join(BACKLOG_SKILL_DIR, 'scripts');
+
 /**
  * WebSocket URL を HTTP URL に変換
  * ws:// → http://, wss:// → https://, /ws/agent パスを除去
@@ -97,6 +101,7 @@ export const SKILL_INVOCATIONS: readonly SkillInvocation[] = [
   { name: 'devrelay-list-inventory', script: 'scripts/list.sh', readonly: true },
   { name: 'devrelay-create-project', script: 'scripts/create.sh', readonly: false },
   { name: 'devrelay-flutter-deploy', script: 'scripts/deploy.sh', readonly: false },
+  { name: 'devrelay-backlog', script: 'scripts/backlog.sh', readonly: false },
 ];
 
 function skillInvocationCommand(inv: SkillInvocation): string {
@@ -194,7 +199,204 @@ export function getSkillMarkdownBodies(opts?: {
     'devrelay-list-inventory': generateInventorySkillMd(opts),
     'devrelay-create-project': generateCreateProjectSkillMd(opts),
     'devrelay-flutter-deploy': generateFlutterDeploySkillMd(opts),
+    'devrelay-backlog': generateBacklogSkillMd(opts),
   };
+}
+
+/**
+ * devrelay-backlog SKILL.md（Backlog 連携、2026-11-21）
+ * 課題の一覧・内容確認・状態変更。API キーはサーバー側（本人の設定）にあり、AI には渡らない。
+ */
+function generateBacklogSkillMd(opts?: SkillMdOptions): string {
+  return `---
+name: devrelay-backlog
+description: Backlog の課題を一覧・確認し、状態（未対応→処理中→テスト→リリース待ち 等）を変更します。「未対応一覧だして」「この課題の内容は？」「この課題をやろう」「テスト中にして」「コミットしてリリース待ちに」など Backlog 課題を扱うときに使用します。
+allowed-tools: Bash(bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh *)
+---
+
+## DevRelay Backlog 連携
+${windowsInvocationNote('devrelay-backlog', opts)}
+使う人の Backlog API キー（DevRelay の設定画面で登録）で動きます。対象は設定画面でチェックを付けたプロジェクトだけです。
+プランモード中でも使えます。
+
+### 課題一覧
+
+\`\`\`bash
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh list
+\`\`\`
+
+- 既定は「自分が担当」の「未対応＋着手中（処理中など）」です
+- \`--status 未対応\` / \`--status 未対応,処理中\`（状態名、カンマ区切り）/ \`--status open\`（完了以外）/ \`--status all\`
+- \`--all\`: 担当者で絞らない（全員分）
+- \`--project <プロジェクトキー>\` / \`--keyword <語>\`
+- \`--space <スペース>\`: Backlog のスペースが複数登録されているとき、1 つに絞る（例: \`--space tisahansys\`）。省略時は全スペースをまとめて出します
+- \`show\` / \`move\` は課題キーからスペースが自動で決まるので指定不要です
+
+### 課題の内容
+
+\`\`\`bash
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh show <課題キー>
+\`\`\`
+
+本文と直近のコメント（既定 10 件、\`--comments N\`）が出ます。内容を聞かれたら、要約・何を直してほしい要望か・関係しそうなリポジトリのファイルを、実際にコードを読んで説明してください。
+
+### このスレッドの課題
+
+\`\`\`bash
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh current
+\`\`\`
+
+プロンプト先頭に【Backlog課題】の行があれば、それがこのスレッドの課題です。
+
+### 状態の変更
+
+\`\`\`bash
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> start
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> test
+bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh move <課題キー> done --comment "コミット abc1234: 〜を修正"
+\`\`\`
+
+- 段階: \`start\`（着手。例: 処理中）/ \`test\`（テスト。例: 結合テスト）/ \`done\`（完了報告。例: リリース待ち・処理済み）。プロジェクトごとの実際の状態は自動で選ばれます
+- 状態名を直接書くこともできます（例: \`move ABC-12 検証依頼中\`）
+- プロジェクトの状態と段階の対応は \`bash ~/.claude/skills/devrelay-backlog/scripts/backlog.sh statuses <プロジェクトキー>\` で確認できます
+- \`start\` にすると、このスレッドの案件欄にも課題キーが入ります
+
+### 守ること（重要）
+
+1. **状態は人間の同意を得てから変える**。ただし「この課題をやろう」「コミットして」のように意図がはっきりした発言は同意とみなしてよい
+2. 変更したら「処理中に変更しました」のように 1 行で報告する
+3. テスト段階が無いプロジェクト（statuses で test が「なし」）ではテストへの変更を提案しない
+4. コミット後の完了報告（done）には \`--comment\` でコミットハッシュと変更の要約を付ける
+5. 前の状態に戻す変更は断られます。人間に確認してから \`--force\` を付けてください
+6. 課題の担当者・期限・本文などは変えられません（状態とコメントだけ）
+`;
+}
+
+/**
+ * backlog.sh（Backlog 連携、2026-11-21）
+ * jq の無い Windows 端末（WSL / Git bash）でも動くよう、サーバーに format=text を頼んで平文をそのまま表示する。
+ * 日本語のコメントは curl --data-urlencode でクエリに載せる（JSON 組み立てを避ける）。
+ */
+function generateBacklogScript(serverUrl: string, token: string): string {
+  const httpUrl = wsToHttpUrl(serverUrl);
+  return `#!/bin/bash
+# DevRelay Backlog 連携スクリプト
+# Agent が自動生成。手動編集は次回起動時に上書きされます。
+
+set -uo pipefail
+
+API_URL="${httpUrl}"
+TOKEN="${token}"
+SELF_SESSION="\${DEVRELAY_SESSION_ID:-}"
+
+usage() {
+  echo "使い方:"
+  echo "  bash $0 list [--status 未対応,処理中|open|all] [--all] [--project KEY] [--keyword 語] [--space スペース]"
+  echo "  bash $0 show <課題キー> [--comments N]"
+  echo "  bash $0 current"
+  echo "  bash $0 statuses <プロジェクトキー>"
+  echo "  bash $0 move <課題キー> start|test|done|<状態名> [--comment \\"…\\"] [--force]"
+  exit 1
+}
+
+# 日本語の値は一時ファイル経由で渡す（Windows の Git bash 版 curl は引数の日本語を Shift_JIS に
+# 変えてしまうため。ファイルの中身は UTF-8 のまま URL エンコードされる）
+TMPD=$(mktemp -d 2>/dev/null || echo "/tmp/devrelay-backlog-$$")
+mkdir -p "$TMPD"
+trap 'rm -rf "$TMPD"' EXIT
+NPARAM=0
+ARGS=()
+param() {
+  NPARAM=$((NPARAM + 1))
+  local f="$TMPD/p$NPARAM"
+  printf '%s' "$2" > "$f"
+  # Git bash の curl は Windows のプログラムなので /tmp/… を読めない。C:/… 形に直して渡す
+  if command -v cygpath >/dev/null 2>&1; then f=$(cygpath -m "$f"); fi
+  ARGS+=(--data-urlencode "$1@$f")
+}
+
+# call METHOD PATH [curl の --data-urlencode 引数...]
+call() {
+  local method="$1"; shift
+  local path="$1"; shift
+  local resp code body
+  resp=$(curl -s -w "\\n%{http_code}" -X "$method" -G \\
+    -H "Authorization: Bearer $TOKEN" \\
+    --data-urlencode "format=text" "$@" \\
+    "\${API_URL}\${path}") || { echo "エラー: DevRelay サーバーに接続できません"; exit 1; }
+  code=$(printf '%s' "$resp" | tail -n 1)
+  body=$(printf '%s' "$resp" | sed '$d')
+  printf '%s\\n' "$body"
+  if [ "$code" != "200" ]; then exit 1; fi
+}
+
+# 課題キーの形式（例: ABC_1-123）。URL のパスに入れるため形式を確かめる
+check_key() {
+  if ! printf '%s' "$1" | grep -Eq '^[A-Z][A-Z0-9_]*-[0-9]+$'; then
+    echo "エラー: 課題キーの形式が正しくありません: $1（例: ABC-123）"
+    exit 1
+  fi
+}
+
+[ $# -eq 0 ] && usage
+CMD="$1"; shift
+
+case "$CMD" in
+  list)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --status) param status "$2"; shift 2 ;;
+        --all) param everyone 1; shift ;;
+        --project) param project "$2"; shift 2 ;;
+        --keyword) param keyword "$2"; shift 2 ;;
+        --space) param space "$2"; shift 2 ;;
+        --count) param count "$2"; shift 2 ;;
+        *) echo "不明な引数: $1"; usage ;;
+      esac
+    done
+    call GET "/api/agent/backlog/issues" \${ARGS[@]+"\${ARGS[@]}"}
+    ;;
+  show)
+    [ $# -ge 1 ] || usage
+    KEY="$1"; shift
+    check_key "$KEY"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --comments) param comments "$2"; shift 2 ;;
+        *) echo "不明な引数: $1"; usage ;;
+      esac
+    done
+    call GET "/api/agent/backlog/issues/\${KEY}" \${ARGS[@]+"\${ARGS[@]}"}
+    ;;
+  current)
+    param sessionId "\${SELF_SESSION}"
+    call GET "/api/agent/backlog/current" "\${ARGS[@]}"
+    ;;
+  statuses)
+    [ $# -ge 1 ] || usage
+    if ! printf '%s' "$1" | grep -Eq '^[A-Z][A-Z0-9_]*$'; then echo "エラー: プロジェクトキーの形式が正しくありません: $1"; exit 1; fi
+    call GET "/api/agent/backlog/projects/$1/statuses"
+    ;;
+  move)
+    [ $# -ge 2 ] || usage
+    KEY="$1"; TO="$2"; shift 2
+    check_key "$KEY"
+    param to "$TO"
+    param sessionId "\${SELF_SESSION}"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --comment) param comment "$2"; shift 2 ;;
+        --force) param force 1; shift ;;
+        *) echo "不明な引数: $1"; usage ;;
+      esac
+    done
+    call POST "/api/agent/backlog/issues/\${KEY}/move" "\${ARGS[@]}"
+    ;;
+  *)
+    usage
+    ;;
+esac
+`;
 }
 
 /**
@@ -1453,7 +1655,15 @@ export async function ensureSkillFiles(config: AgentConfig): Promise<void> {
       mode: 0o755,
     });
 
-    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,read-messages,list-inventory,create-project,flutter-deploy}/');
+    // devrelay-backlog スキル（Backlog 連携、2026-11-21。サーバー API を呼ぶだけ）
+    await fs.mkdir(BACKLOG_SCRIPTS_DIR, { recursive: true });
+    await fs.writeFile(path.join(BACKLOG_SKILL_DIR, 'SKILL.md'), generateBacklogSkillMd(skillMdOpts), 'utf-8');
+    await fs.writeFile(path.join(BACKLOG_SCRIPTS_DIR, 'backlog.sh'), generateBacklogScript(config.serverUrl, config.token), {
+      encoding: 'utf-8',
+      mode: 0o755,
+    });
+
+    console.log('🔧 Claude Code skill files updated: ~/.claude/skills/devrelay-{docs,ask-member,read-messages,list-inventory,create-project,flutter-deploy,backlog}/');
   } catch (error: any) {
     console.error('Failed to create skill files:', error.message);
   }

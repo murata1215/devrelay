@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { tokenizeMarkdown, type MdBlock, type MdInline } from '../lib/markdown-rules';
 
 /**
@@ -164,7 +165,13 @@ function renderBlock(block: MdBlock, index: number) {
   }
 }
 
-export function MarkdownBody({ text }: MarkdownBodyProps) {
+function MarkdownBodyImpl({ text }: MarkdownBodyProps) {
   const blocks = tokenizeMarkdown(text);
   return <div>{blocks.map((block, index) => renderBlock(block, index))}</div>;
 }
+
+/**
+ * 性能（2026-11-21）: 親（ChatPage 等）は入力 1 文字・進捗 1 秒ごとに再描画されるため、
+ * text が同じなら Markdown の再トークナイズ・再描画をしない。
+ */
+export const MarkdownBody = memo(MarkdownBodyImpl);

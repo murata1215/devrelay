@@ -115,7 +115,7 @@ export function UsageSignagePage() {
 
   useEffect(() => {
     const prev = document.title;
-    document.title = 'Usage サイネージ';
+    document.title = '利用料 サイネージ';
     return () => {
       document.title = prev;
     };

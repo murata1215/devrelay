@@ -6,6 +6,31 @@
 
 ## 実装済み機能
 
+### Backlog 連携（課題の選択・内容確認・状態変更） (2026-11-21)
+
+- 設定画面（AI タブ）に「Backlog 連携」: スペース URL（既定は `DEVRELAY_BACKLOG_SPACE`）・**個人の** API キー（暗号化）・キーで見えるプロジェクトから使うものをチェック・段階（着手/テスト/完了報告）と状態の対応（名前から自動推測、直せる）。保存先は UserSettings のみ（DB 変更なし）
+- チャットの「🏷 案件」欄の右に `Backlog▼`: 課題一覧（既定は自分が担当の未対応＋着手中）から選ぶと案件に課題キーが入り、右に件名と状態（Backlog の色）。状態をクリックで人間が直接変更できる
+- 案件が課題キーのスレッドでは、AI へのプロンプト先頭に【Backlog課題】1 行を付ける（端末モード・クロス ask・引継ぎターンは除く）
+- スキル `devrelay-backlog`（`list` / `show` / `current` / `statuses` / `move start|test|done|状態名 [--comment] [--force]`）。プランモードでも使える（`plan-permission.ts` の `isBacklogSkillInvocation`）。逆戻りは `--force` 必須、`start` でスレッドの案件に課題キーを自動設定
+- 1 人で複数の Backlog スペースを使える「接続」形式（UserSettings `backlog_connections`、暗号化。旧 1 件形式は自動で読み替え）。課題キーから接続を自動判定、スキルは `list --space`。`DEVRELAY_BACKLOG_SPACE` は接続追加時の初期値
+- キルスイッチ `DEVRELAY_BACKLOG=0`。詳細 `doc/devlog/2026-11-21_backlog.md`
+
+### スレッドタイトルを AI が会話の節目で付け直す (2026-11-21)
+
+- スレッド一覧の題名が最初の一言で決まる・引継ぎスレッドが「n」になる問題の対策
+- AI 応答 1・3・8 回目に `DEVRELAY_ANSWER_API_KEY`（gpt-4o-mini）で短い題名を作り `Session.autoTitle` に保存（DB 変更 `0033`）。ユーザーが ✏️ で付けた名前は上書きしない
+- 表示: title > autoTitle（✨）> ↪ 引継ぎ元の題名 > `n`/`n 1` 等のコマンドを除いた最初の発言
+- キルスイッチ `DEVRELAY_THREAD_AUTO_TITLE`。詳細: `doc/devlog/2026-11-21_thread_auto_title.md`
+
+### ポータルを Yahoo 風 3 カラムに作り替え・D:\portal の PDF・コミット歴ニュース・自分の TODO (2026-11-21)
+
+- `/portal` を「上: ナレッジ検索 / 左: リンク / 中: ニュース（最新・アップデート）/ 右: 課題一覧」に作り替え。資料ページ `/portal/docs?c=<分類>` を新設
+- 資料: `DEVRELAY_PORTAL_DIR`（この機は `D:\portal`）配下の **PDF のみ** をログイン不要で一覧・配信（直下フォルダ = 分類、直下ファイル = 方針）。パス脱出は文字列判定 + realpath の 2 重で拒否
+- ニュース: 新 CLI `portal:news` がコミット歴を `news/commits/YYYY-MM-DD.jsonl` に書き出し、AI（`DEVRELAY_ANSWER_API_KEY` 流用、無ければ件名整形）で 1 件にまとめて `news/items.json` へ。毎日 `C:\tools\portal-news.cmd`（タスク スケジューラ）
+- 課題一覧: 自分の TODO（DB `PortalTodo`、TISA0003）・全体課題（`D:\portal\issues.json`）・Backlog（準備中）
+- 左リンクに座席表・端末台帳（portal.json）。キルスイッチ `DEVRELAY_PORTAL`
+- 詳細: `doc/devlog/2026-11-21_portal_p1.md`
+
 ### 本家（origin）をマージし、会社独自の DB 変更を TISA 系列で管理 (2026-11-21)
 
 本家 b57e78c（クロスユーザー Team・クロス ask・プランモード Bash ゲート・Agent 再接続修正・Gemini 修正・DB 変更履歴の一元化 等 32 コミット）を取り込んだ。

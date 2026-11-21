@@ -43,6 +43,8 @@
     "src/lib/request-headers-rules.ts",
     "src/lib/cross-ask-rules.ts",
     "src/lib/chat-scroll-rules.ts",
-    "src/lib/tab-order-rules.ts"
+    "src/lib/tab-order-rules.ts",
+    "src/lib/theme-rules.ts",
+    "src/lib/enter-send-rules.ts"
   ]
 }

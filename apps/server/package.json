@@ -17,7 +17,8 @@
     "setup:service": "./scripts/setup-service.sh",
     "knowledge:backfill": "node dist/scripts/knowledge-backfill.js",
     "devin:cost-report": "node dist/scripts/devin-cost-report.js",
-    "devin:cumulative-fix": "node dist/scripts/devin-cumulative-fix.js"
+    "devin:cumulative-fix": "node dist/scripts/devin-cumulative-fix.js",
+    "portal:news": "node dist/scripts/portal-news.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

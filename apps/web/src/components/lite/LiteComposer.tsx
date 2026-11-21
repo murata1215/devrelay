@@ -2,6 +2,9 @@ import type { KeyboardEvent, ReactNode } from 'react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import type { ProjectSelectorOption, ComposerPlaceholderReason } from './lite-shell-rules';
 import type { TranslationKey } from '../../i18n/messages';
+import { decideEnterAction } from '../../lib/enter-send-rules';
+import { useEnterSendLock } from '../../lib/useEnterSendLock';
+import { EnterLockToggle } from '../EnterLockToggle';
 
 /**
  * Lite シェル L4: 入力欄 + プロジェクトセレクタ。
@@ -9,7 +12,7 @@ import type { TranslationKey } from '../../i18n/messages';
  * L2/L3 では送信機能が無く常に disabled だったが、L4 で送信可能にする。このコンポーネント自身は
  * 状態を持たない（`body`/送信可否/プレースホルダ理由はすべて `LitePage` から渡される）。
  * Enter = 送信 / Shift+Enter = 改行は classic（`ChatPage.tsx` の `handleKeyDown`）と同一挙動
- * （IME 変換中判定は classic 側にも無いため、ここでも追加しない）。
+ * 2026-11-21: Enter 送信ロック・IME 変換中の送信抑止を classic と同じ判定（`decideEnterAction`）で入れた。
  *
  * B6: テキストエリアは送信中も disabled にしない。送信ボタンのみ `sendDisabled` で disabled にする。
  */
@@ -59,9 +62,14 @@ export function LiteComposer({
   caseSlot,
 }: LiteComposerProps) {
   const { t } = useLanguage();
+  const [enterLocked, toggleEnterLock] = useEnterSendLock();
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    const action = decideEnterAction({
+      key: e.key, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey,
+      isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode,
+    }, enterLocked);
+    if (action === 'send') {
       e.preventDefault();
       onSend();
     }
@@ -100,9 +108,10 @@ export function LiteComposer({
           onChange={(e) => onBodyChange(e.target.value)}
           onKeyDown={handleKeyDown}
           rows={2}
-          placeholder={t(PLACEHOLDER_KEY_BY_REASON[placeholderReason])}
+          placeholder={enterLocked && placeholderReason === 'ready' ? t('chat.enterLockPlaceholder') : t(PLACEHOLDER_KEY_BY_REASON[placeholderReason])}
           className="flex-1 text-sm bg-[var(--bg-primary)] border border-[var(--border-color)] rounded px-2 py-1 text-[var(--text-primary)] resize-none disabled:opacity-50"
         />
+        <EnterLockToggle locked={enterLocked} onToggle={toggleEnterLock} compact />
         <button
           onClick={onSend}
           disabled={sendDisabled}

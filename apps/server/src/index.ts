@@ -25,6 +25,8 @@ import { sitesApiRoutes } from './routes/sites-api.js';
 import { knowledgeApiRoutes } from './routes/knowledge-api.js';
 import { knowledgeAdminApiRoutes } from './routes/knowledge-admin-api.js';
 import { usageApiRoutes, usagePublicRoutes } from './routes/usage-api.js';
+import { portalPublicRoutes, portalTodoRoutes } from './routes/portal-api.js';
+import { backlogUserRoutes, registerBacklogAgentRoutes } from './routes/backlog-api.js';
 import { startSiteHealthChecker } from './services/sites/health-checker.js';
 import { startAccessLogAggregator } from './services/sites/access-aggregator.js';
 import { mcpRoutes } from './mcp/server.js';
@@ -229,6 +231,10 @@ async function main() {
   await app.register(knowledgeAdminApiRoutes);  // 高辻ナレッジ サイクル2: 人の権限・案件/スレッドの機密度・スレッド閲覧 API
   await app.register(usageApiRoutes);  // Usage: 人別・グループ別・案件別のコスト集計（ログイン必須）
   await app.register(usagePublicRoutes);  // Usage: サイネージ用（ログイン不要・token 必須・1分キャッシュ）
+  await app.register(portalPublicRoutes);  // ポータル P1: DEVRELAY_PORTAL_DIR の PDF・ニュース・全体課題（ログイン不要）
+  await app.register(portalTodoRoutes);  // ポータル P1: 自分の TODO（ログイン必須）
+  await app.register(backlogUserRoutes);  // Backlog 連携: 設定・課題一覧・状態表示（ログイン必須）
+  registerBacklogAgentRoutes(app);  // Backlog 連携: スキル devrelay-backlog 用（マシントークン認証）
 
   // Agent WebSocket endpoint
   app.register(async (fastify) => {
