@@ -10,6 +10,9 @@
 //   4. 各 SQL ファイル末尾の INSERT INTO "DbChange" が自分のファイル名・番号と一致
 //   5. 冪等性 lint（IF NOT EXISTS・backfill のガード）
 //   6. 誤爆ガード必須 + 禁止キーワード（OWNER TO / SET ROLE / CREATE EXTENSION / sudo）不在
+//   6.5. RAISE EXCEPTION/WARNING/… の message が `||` で文字列連結されていない
+//        （PL/pgSQL の RAISE は format が単一の文字列リテラル必須。2026-11-21、zz2 の本番適用時に
+//        これで DO ブロックのコンパイルごと失敗し、トランザクション全体がロールバックした実例あり）
 //   7. ヘッダ必須項目
 //   8. 追跡漏れ検知（git ls-files ∪ staged）
 //   9. 禁止コマンドの封じ込め（package.json に db:push 等が無い・prisma/migrations/ 凍結）
@@ -36,6 +39,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const serverRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(serverRoot, '../..');
 const changesDir = path.join(serverRoot, 'db', 'changes');
+
+/** PL/pgSQL の RAISE は format 部分が単一の文字列リテラルでなければならず、`||` による
+ *  文字列連結は構文エラーになる（DO ブロックのコンパイル時に失敗するため、対象列・テーブルの
+ *  有無に関わらず常に落ちる）。2026-11-21、zz2_mark_baseline_applied.sql の本番適用時にこれで
+ *  発覚した（psql -1 の単一トランザクションごとロールバック）。 */
+const RAISE_STRING_CONCAT = /RAISE\s+(?:EXCEPTION|WARNING|NOTICE|INFO|LOG|DEBUG)\b[^;]*\|\|/;
 
 function readServerFile(relPath) {
   return readFileSync(path.join(serverRoot, relPath), 'utf8');
@@ -280,6 +289,10 @@ describe('各 SQL ファイルの自己整合・冪等性・ガード・ヘッ�
         assert.ok(!/\bsudo\b/i.test(source), 'sudo を含む');
       });
 
+      test('RAISE の message が || で文字列連結されていない（PL/pgSQL の構文エラーになる）', () => {
+        assert.ok(!RAISE_STRING_CONCAT.test(source), 'RAISE EXCEPTION/WARNING/… の message が || 連結になっている（単一の文字列リテラルに直すこと）');
+      });
+
       test('ヘッダ必須項目（日付・commit・サイクル・内容・注意・適用ロール・適用コマンド）が揃っている', () => {
         assert.match(source, /^-- \d{4} \/ \d{4}-\d{2}-\d{2} \/ commit/m);
         assert.match(source, /サイクル: /);
@@ -365,6 +378,10 @@ describe('zz2_mark_baseline_applied.sql は台帳への INSERT 以外の書き�
   test('CREATE TABLE は "DbChange" のみ（他テーブルを新設しない）', () => {
     const matches = [...codeOnly.matchAll(/CREATE TABLE IF NOT EXISTS "(\w+)"/g)].map((m) => m[1]);
     assert.deepEqual(matches, ['DbChange']);
+  });
+
+  test('RAISE の message が || で文字列連結されていない（PL/pgSQL の構文エラーになる）', () => {
+    assert.ok(!RAISE_STRING_CONCAT.test(source), 'RAISE EXCEPTION/WARNING/… の message が || 連結になっている（単一の文字列リテラルに直すこと）');
   });
 });
 

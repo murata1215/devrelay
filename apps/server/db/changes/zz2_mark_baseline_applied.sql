@@ -47,8 +47,7 @@ BEGIN
     SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'public' AND table_name = 'Session' AND column_name = 'lastSeenAiAt'
   ) THEN
-    RAISE EXCEPTION '"Session"."lastSeenAiAt" が存在しません。0001〜0031 が未適用の可能性があります。' ||
-      ' 先に zz1_verify.sql で全列を確認し、欠落があれば 0001 から番号順に適用してください（中断）';
+    RAISE EXCEPTION '"Session"."lastSeenAiAt" が存在しません。0001〜0031 が未適用の可能性があります。先に zz1_verify.sql で全列を確認し、欠落があれば 0001 から番号順に適用してください（中断）';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'CrossAskReset') THEN
     RAISE EXCEPTION '"CrossAskReset" テーブルが存在しません。0031 が未適用の可能性があります（中断）';

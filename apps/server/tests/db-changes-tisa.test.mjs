@@ -141,6 +141,13 @@ describe('tisa/ の各 SQL ファイルの自己整合・冪等性・ガード�
         assert.ok(!/\bsudo\b/i.test(source));
       });
 
+      // PL/pgSQL の RAISE は format が単一の文字列リテラル必須（|| 連結は構文エラー）。
+      // 2026-11-21、本家側 zz2_mark_baseline_applied.sql の本番適用時にこれで発覚した実例があるため、
+      // TISA 系列にも同じガードを置く（本家テストの変更ではないのでマージ衝突にはならない）。
+      test('RAISE の message が || で文字列連結されていない（PL/pgSQL の構文エラーになる）', () => {
+        assert.ok(!/RAISE\s+(?:EXCEPTION|WARNING|NOTICE|INFO|LOG|DEBUG)\b[^;]*\|\|/.test(source));
+      });
+
       test('ヘッダ必須項目が揃い、適用コマンドが tisa/ のパスを指している', () => {
         assert.match(source, /^-- TISA\d{4} \/ \d{4}-\d{2}-\d{2} \/ commit/m);
         assert.match(source, /サイクル: /);
