@@ -88,6 +88,11 @@ export const SettingKeys = {
    * これがあれば上の 3 キー（旧形式・1 人 1 件）は読まない。保存時に旧形式のキーは消す。
    */
   BACKLOG_CONNECTIONS: 'backlog_connections',
+  /**
+   * Backlog 連携: 最後に分かった課題の状態（課題キー → 状態名・色・件名・確認日時の JSON、最大 300 件）。
+   * DevRelay が Backlog とやり取りしたついでに更新し、スレッド一覧はこれを表示するだけ（一覧で Backlog に問い合わせない）
+   */
+  BACKLOG_STATUS_CACHE: 'backlog_status_cache',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];

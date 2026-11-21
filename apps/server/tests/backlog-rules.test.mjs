@@ -28,6 +28,8 @@ import {
   jstDateString,
   shouldSetStartDate,
   formatAiWorkSuffix,
+  parseKnownStatuses,
+  updateKnownStatuses,
 } from '../dist/services/backlog-rules.js';
 
 const st = (id, name, displayOrder) => ({ id, name, color: '#888888', displayOrder });
@@ -234,4 +236,26 @@ test('完了報告の AI 作業回数（利用料は出さない）', () => {
   assert.equal(formatAiWorkSuffix(0), '');
   assert.equal(formatAiWorkSuffix(null), '');
   assert.equal(formatAiWorkSuffix(undefined), '');
+});
+
+// ---- 最後に分かった課題の状態の控え（スレッド一覧用） ----
+test('状態の控え: 追加・同じ内容は 10 分以内なら書かない・変われば書く・上限で古い順に消す', () => {
+  const t0 = new Date('2026-11-21T10:00:00Z');
+  const e = { name: '処理中', color: '#4488c5', summary: 'バックログテスト' };
+  const c1 = updateKnownStatuses({}, 'ABC-1', e, t0);
+  assert.equal(c1['ABC-1'].name, '処理中');
+  assert.equal(updateKnownStatuses(c1, 'ABC-1', e, new Date(t0.getTime() + 5 * 60_000)), null);
+  assert.notEqual(updateKnownStatuses(c1, 'ABC-1', e, new Date(t0.getTime() + 11 * 60_000)), null);
+  const c2 = updateKnownStatuses(c1, 'ABC-1', { ...e, name: '完了' }, new Date(t0.getTime() + 60_000));
+  assert.equal(c2['ABC-1'].name, '完了');
+  let c = {};
+  for (let i = 1; i <= 4; i++) c = updateKnownStatuses(c, `ABC-${i}`, e, new Date(t0.getTime() + i * 1000), 3);
+  assert.deepEqual(Object.keys(c).sort(), ['ABC-2', 'ABC-3', 'ABC-4']);
+});
+
+test('状態の控えの読み取り: 壊れた JSON・課題キーでないものは捨てる', () => {
+  assert.deepEqual(parseKnownStatuses('{broken'), {});
+  assert.deepEqual(parseKnownStatuses(null), {});
+  const raw = JSON.stringify({ 'ABC-1': { name: '処理中', color: '#123456', summary: 's', at: '2026-11-21T10:00:00.000Z' }, 'Devrelay基盤': { name: 'x', at: 'y' }, 'ABC-2': { color: '#fff' } });
+  assert.deepEqual(Object.keys(parseKnownStatuses(raw)), ['ABC-1']);
 });

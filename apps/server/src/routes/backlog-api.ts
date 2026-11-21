@@ -53,6 +53,8 @@ import {
   isPlausibleBacklogApiKey,
   MAX_BACKLOG_CONNECTIONS,
   parseAssigneeScope,
+  rememberIssueStatus,
+  loadKnownStatuses,
 } from '../services/backlog.js';
 import { clearUsageCache } from '../services/usage-service.js';
 
@@ -222,6 +224,14 @@ export async function backlogUserRoutes(app: FastifyInstance) {
     }
   });
 
+  // スレッド一覧用: 最後に分かった課題の状態（DevRelay に控えたものを返すだけ。Backlog には問い合わせない）
+  app.get('/api/backlog/known-statuses', async (request, reply) => {
+    if (!isBacklogEnabled()) return reply.send({ statuses: {} });
+    // @ts-ignore
+    const userId = request.user.id as string;
+    return { statuses: await loadKnownStatuses(userId) };
+  });
+
   app.get('/api/backlog/issues', async (request, reply) => {
     if (!isBacklogEnabled()) return sendDisabled(reply);
     // @ts-ignore
@@ -241,6 +251,7 @@ export async function backlogUserRoutes(app: FastifyInstance) {
     try {
       const ctx = await resolveIssueContext(userId, key);
       const issue = await getIssue(ctx, key);
+      void rememberIssueStatus(userId, issue);
       const { statuses } = await getProjectStatuses(ctx, issue.projectKey);
       return {
         issueKey: issue.issueKey,
@@ -276,7 +287,9 @@ export async function backlogUserRoutes(app: FastifyInstance) {
     try {
       const ctx = await resolveIssueContext(userId, key);
       // 人間が画面で選んだ変更なので逆戻りも許可する
-      return await moveIssue(ctx, key, { statusId, force: true, source: 'human' });
+      const r = await moveIssue(ctx, key, { statusId, force: true, source: 'human' });
+      void rememberIssueStatus(userId, { issueKey: key, summary: r.summary, status: r.to });
+      return r;
     } catch (err) {
       return sendError(reply, err);
     }
@@ -402,6 +415,7 @@ export function registerBacklogAgentRoutes(app: FastifyInstance) {
     try {
       const ctx = await resolveIssueContext(a.userId, key);
       const r = await getIssue(ctx, key, { comments: q.comments ? Number(q.comments) : 10 });
+      void rememberIssueStatus(a.userId, r);
       return ok(request, reply, r, () => formatIssueDetailText(r));
     } catch (err) {
       return fail(request, reply, err);
@@ -455,6 +469,7 @@ export function registerBacklogAgentRoutes(app: FastifyInstance) {
         linked = await linkSessionToIssue(a.userId, sid, key).catch(() => false);
       }
       console.log(`📋 Backlog move: ${key} ${r.from.name} → ${r.to.name}${r.changed ? '' : ' (no change)'} by user ${a.userId}`);
+      void rememberIssueStatus(a.userId, { issueKey: key, summary: r.summary, status: r.to });
       const result = { ...r, linkedToThread: linked };
       return ok(request, reply, result, () => formatMoveText(result));
     } catch (err) {

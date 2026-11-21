@@ -747,6 +747,10 @@ export const backlog = {
   async getIssue(issueKey: string): Promise<BacklogIssueBrief> {
     return request('GET', `/backlog/issues/${encodeURIComponent(issueKey)}`);
   },
+  /** スレッド一覧用: 最後に分かった課題の状態（DevRelay の控え。Backlog には問い合わせない） */
+  async getKnownStatuses(): Promise<{ statuses: Record<string, { name: string; color: string; summary: string; at: string }> }> {
+    return request('GET', '/backlog/known-statuses');
+  },
   /** 課題一覧で行を開いたときの中身（本文・種別・登録者・期限付き） */
   async getIssueDetail(issueKey: string): Promise<BacklogIssueDetail> {
     return request('GET', `/backlog/issues/${encodeURIComponent(issueKey)}?detail=1`);

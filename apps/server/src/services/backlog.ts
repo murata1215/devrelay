@@ -27,6 +27,7 @@ import {
   type BacklogAssigneeScope, assigneeScopeLabel, filterByAssignee,
   formatAutoComment, defaultMoveNote, decideAssignee,
   jstDateString, shouldSetStartDate, formatAiWorkSuffix,
+  type KnownIssueStatus, parseKnownStatuses, updateKnownStatuses,
 } from './backlog-rules.js';
 export * from './backlog-rules.js';
 
@@ -469,8 +470,42 @@ export async function buildBacklogPromptLine(userId: string, usageCase: string |
   const how = '内容の確認や状態の変更は devrelay-backlog スキル（使い方は ~/.claude/skills/devrelay-backlog/SKILL.md）で行ってください。';
   try {
     const i = await getIssue(ctx, usageCase, { timeoutMs: 3000 });
+    void rememberIssueStatus(userId, i);
     return `【Backlog課題】このスレッドの課題は ${i.issueKey}「${i.summary}」（状態: ${i.status.name}）です。${how}`;
   } catch {
     return `【Backlog課題】このスレッドの課題は ${usageCase} です。${how}`;
   }
+}
+
+// ========================================
+// 最後に分かった課題の状態の控え（スレッド一覧用）
+// ========================================
+
+// 同じ人の控えの書き込みを順番に行う（読み→書きの間に別の更新が入って消えないように）
+const knownStatusQueue = new Map<string, Promise<void>>();
+
+/**
+ * Backlog から状態を受け取ったついでに控えておく。失敗しても呼び出し元の処理は止めない（await 不要）。
+ */
+export function rememberIssueStatus(userId: string, issue: { issueKey: string; summary: string; status: { name: string; color: string } }): Promise<void> {
+  const prev = knownStatusQueue.get(userId) ?? Promise.resolve();
+  const next = prev
+    .then(async () => {
+      const cache = parseKnownStatuses(await getUserSetting(userId, SettingKeys.BACKLOG_STATUS_CACHE));
+      const updated = updateKnownStatuses(cache, issue.issueKey, { name: issue.status.name, color: issue.status.color, summary: issue.summary }, new Date());
+      if (updated) await setUserSetting(userId, SettingKeys.BACKLOG_STATUS_CACHE, JSON.stringify(updated));
+    })
+    .catch((err) => {
+      console.warn('⚠️ Backlog status cache update failed:', (err as Error)?.message);
+    });
+  knownStatusQueue.set(userId, next);
+  void next.finally(() => {
+    if (knownStatusQueue.get(userId) === next) knownStatusQueue.delete(userId);
+  });
+  return next;
+}
+
+/** 控えを返す（Backlog には問い合わせない） */
+export async function loadKnownStatuses(userId: string): Promise<Record<string, KnownIssueStatus>> {
+  return parseKnownStatuses(await getUserSetting(userId, SettingKeys.BACKLOG_STATUS_CACHE));
 }

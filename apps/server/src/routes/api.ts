@@ -1028,6 +1028,8 @@ export async function apiRoutes(app: FastifyInstance) {
       if (s.key === SettingKeys.FCM_TOKENS || s.key === SettingKeys.PUSH_SUBSCRIPTIONS) continue;
       // Backlog 連携（複数接続）: 接続一覧の JSON には API キーが入っているため返さない（専用 API GET /api/backlog/config で伏せて返す）
       if (s.key === SettingKeys.BACKLOG_CONNECTIONS) continue;
+      // 課題の状態の控え（スレッド一覧用、専用 API GET /api/backlog/known-statuses で返す）
+      if (s.key === SettingKeys.BACKLOG_STATUS_CACHE) continue;
       // 暗号化された値は復号化
       result[s.key] = s.encrypted ? decrypt(s.value) : s.value;
     }

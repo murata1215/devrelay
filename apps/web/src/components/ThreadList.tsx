@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, type MouseEvent } from 'react';
-import { threads as threadsApi, sessions as sessionsApi, type ThreadSummary, type ThreadSwitchResult, type ThreadCreateResult } from '../lib/api';
+import { threads as threadsApi, sessions as sessionsApi, backlog as backlogApi, type ThreadSummary, type ThreadSwitchResult, type ThreadCreateResult } from '../lib/api';
 import { getTabId } from '../lib/tab-id';
 import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, isQuestionThread, isCancelledThread, applyThreadRename, upsertThread, resolveCreateTargetProjectId } from '../lib/thread-list-rules';
 import { decideThreadRowAction, decideThreadCreateButton } from './lite/lite-shell-rules';
@@ -13,6 +13,47 @@ import { useLanguage } from '../contexts/LanguageContext';
  * 分岐を散らさない）。全 API 呼び出しは try/catch で握り、例外を親へ伝播させない
  * （一覧取得が失敗してもチャット本体は壊さない）。
  */
+
+type KnownStatus = { name: string; color: string; summary: string; at: string };
+
+/**
+ * Backlog 連携: 最後に分かった課題の状態（課題キー → 状態）。
+ * DevRelay サーバーの控えを読むだけで Backlog には問い合わせない（一覧表示のたびに外部 API を叩かないため）。
+ * 一覧の再取得（refreshToken）・画面に戻ったとき・1 分ごと（表示中のみ）に読み直す。未設定・無効なら空。
+ */
+function useKnownBacklogStatuses(refreshToken: unknown): Record<string, KnownStatus> {
+  const [statuses, setStatuses] = useState<Record<string, KnownStatus>>({});
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      backlogApi
+        .getKnownStatuses()
+        .then((r) => alive && setStatuses(r.statuses ?? {}))
+        .catch(() => {});
+    };
+    load();
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, 60_000);
+    return () => {
+      alive = false;
+      window.removeEventListener('focus', onFocus);
+      clearInterval(t);
+    };
+  }, [refreshToken]);
+  return statuses;
+}
+
+/** 背景色に対して読みやすい文字色 */
+function textOnColor(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return '#fff';
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? '#222' : '#fff';
+}
 
 /** 相対時刻表示（`Intl.RelativeTimeFormat` を使用。純モジュール `thread-list-rules.ts` には
  * i18n 補間の都合で置けないため、このコンポーネント内だけの非純関数として保持する）。
@@ -99,6 +140,8 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
    * 一覧取得（横断表示かどうか）は生の `projectId` のまま判定するため、ここでは分けて扱う。 */
   const createTargetProjectId = resolveCreateTargetProjectId(projectId, createProjectId);
   const { t, locale } = useLanguage();
+  // Backlog 連携: 案件が課題キーのスレッドに、最後に分かった状態を出す（DevRelay の控えを読むだけ。Backlog には問い合わせない）
+  const knownStatuses = useKnownBacklogStatuses(refreshToken);
   const [items, setItems] = useState<ThreadSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
@@ -360,6 +403,19 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
                     🏷 {item.usageCase}
                   </span>
                 )}
+                {item.usageCase && knownStatuses[item.usageCase] && (() => {
+                  const s = knownStatuses[item.usageCase];
+                  const at = new Date(s.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                  return (
+                    <span
+                      className="text-[10px] px-1.5 rounded-full whitespace-nowrap"
+                      style={{ backgroundColor: s.color, color: textOnColor(s.color) }}
+                      title={`${s.summary}（${at} 時点の Backlog の状態）`}
+                    >
+                      {s.name}
+                    </span>
+                  );
+                })()}
                 {!projectId && (
                   <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)] truncate">
                     {resolveProjectLabel ? resolveProjectLabel(item.projectId, item.projectName) : item.projectName}

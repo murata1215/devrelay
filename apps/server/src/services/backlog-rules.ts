@@ -424,3 +424,66 @@ export function shouldSetStartDate(isStart: boolean, currentStartDate: string | 
 export function formatAiWorkSuffix(turns: number | null | undefined): string {
   return typeof turns === 'number' && turns > 0 ? `（AI 作業: このスレッドで ${turns} 回）` : '';
 }
+
+// ========================================
+// 最後に分かった課題の状態の控え（スレッド一覧用。2026-11-21 追加）
+// 一覧を表示するたびに Backlog へ問い合わせないよう、DevRelay が Backlog とやり取りしたついでに覚えておく
+// ========================================
+
+export interface KnownIssueStatus {
+  name: string;
+  color: string;
+  summary: string;
+  /** 確認した日時（ISO 文字列） */
+  at: string;
+}
+
+export const MAX_KNOWN_STATUSES = 300;
+
+export function parseKnownStatuses(raw: string | null | undefined): Record<string, KnownIssueStatus> {
+  if (!raw) return {};
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  const out: Record<string, KnownIssueStatus> = {};
+  for (const [k, e] of Object.entries(v as Record<string, unknown>)) {
+    if (!isBacklogIssueKey(k) || !e || typeof e !== 'object') continue;
+    const o = e as Record<string, unknown>;
+    if (typeof o.name !== 'string' || typeof o.at !== 'string') continue;
+    out[k] = {
+      name: o.name,
+      color: typeof o.color === 'string' ? o.color : '#888888',
+      summary: typeof o.summary === 'string' ? o.summary : '',
+      at: o.at,
+    };
+  }
+  return out;
+}
+
+/**
+ * 控えを 1 件更新する。内容が同じなら null（書き込み不要）。
+ * 上限を超えたら確認日時の古いものから消す。
+ */
+export function updateKnownStatuses(
+  cache: Record<string, KnownIssueStatus>,
+  issueKey: string,
+  entry: Omit<KnownIssueStatus, 'at'>,
+  at: Date,
+  max = MAX_KNOWN_STATUSES,
+): Record<string, KnownIssueStatus> | null {
+  const prev = cache[issueKey];
+  // 同じ状態・件名なら、確認日時が 10 分以内は書き直さない（表示のたびの書き込みを減らす）
+  if (prev && prev.name === entry.name && prev.color === entry.color && prev.summary === entry.summary
+    && at.getTime() - Date.parse(prev.at) < 10 * 60_000) return null;
+  const next: Record<string, KnownIssueStatus> = { ...cache, [issueKey]: { ...entry, summary: entry.summary.slice(0, 200), at: at.toISOString() } };
+  const keys = Object.keys(next);
+  if (keys.length > max) {
+    keys.sort((a, b) => Date.parse(next[a].at) - Date.parse(next[b].at));
+    for (const k of keys.slice(0, keys.length - max)) delete next[k];
+  }
+  return next;
+}
