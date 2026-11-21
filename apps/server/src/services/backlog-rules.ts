@@ -405,3 +405,22 @@ export function decideAssignee(isStart: boolean, currentAssigneeId: number | nul
   if (currentAssigneeId === null) return 'assign';
   return currentAssigneeId === myId ? 'already_mine' : 'keep_other';
 }
+
+// ========================================
+// 着手時の開始日・完了報告の AI 作業回数（2026-11-21 追加）
+// ========================================
+
+/** 日本時間の 'YYYY-MM-DD'（Backlog の startDate の形式） */
+export function jstDateString(d: Date): string {
+  return formatJstTimestamp(d).slice(0, 10).replace(/\//g, '-');
+}
+
+/** 着手のとき、開始日が空なら入れる（入っていれば触らない） */
+export function shouldSetStartDate(isStart: boolean, currentStartDate: string | null | undefined): boolean {
+  return isStart && !currentStartDate;
+}
+
+/** 完了報告のコメント末尾に付ける回数（利用料は書かない＝ユーザー決定）。不明・0 以下なら空文字 */
+export function formatAiWorkSuffix(turns: number | null | undefined): string {
+  return typeof turns === 'number' && turns > 0 ? `（AI 作業: このスレッドで ${turns} 回）` : '';
+}

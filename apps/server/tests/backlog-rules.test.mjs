@@ -25,6 +25,9 @@ import {
   formatAutoComment,
   defaultMoveNote,
   decideAssignee,
+  jstDateString,
+  shouldSetStartDate,
+  formatAiWorkSuffix,
 } from '../dist/services/backlog-rules.js';
 
 const st = (id, name, displayOrder) => ({ id, name, color: '#888888', displayOrder });
@@ -215,4 +218,20 @@ test('着手時の担当者: 空なら自分、他人なら上書きしない、
   assert.equal(decideAssignee(true, 99, 10), 'keep_other');
   assert.equal(decideAssignee(false, null, 10), 'skip');
   assert.equal(decideAssignee(true, null, null), 'skip');
+});
+
+// ---- 着手時の開始日・完了報告の AI 作業回数 ----
+test('開始日: 着手で空なら入れる、入っていれば・着手以外は入れない。日付は日本時間', () => {
+  assert.equal(shouldSetStartDate(true, null), true);
+  assert.equal(shouldSetStartDate(true, ''), true);
+  assert.equal(shouldSetStartDate(true, '2026-11-01T00:00:00Z'), false);
+  assert.equal(shouldSetStartDate(false, null), false);
+  assert.equal(jstDateString(new Date('2026-11-21T16:30:00Z')), '2026-11-22'); // JST 01:30
+});
+
+test('完了報告の AI 作業回数（利用料は出さない）', () => {
+  assert.equal(formatAiWorkSuffix(12), '（AI 作業: このスレッドで 12 回）');
+  assert.equal(formatAiWorkSuffix(0), '');
+  assert.equal(formatAiWorkSuffix(null), '');
+  assert.equal(formatAiWorkSuffix(undefined), '');
 });

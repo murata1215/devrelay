@@ -26,6 +26,7 @@ import {
   parseConnections, serializeConnections, legacyToConnections, pickConnectionForProject,
   type BacklogAssigneeScope, assigneeScopeLabel, filterByAssignee,
   formatAutoComment, defaultMoveNote, decideAssignee,
+  jstDateString, shouldSetStartDate, formatAiWorkSuffix,
 } from './backlog-rules.js';
 export * from './backlog-rules.js';
 
@@ -197,6 +198,7 @@ interface RawIssue {
   assignee?: { id?: number; name: string } | null;
   priority?: { name: string } | null;
   dueDate?: string | null;
+  startDate?: string | null;
   updated?: string | null;
   created?: string | null;
   createdUser?: { name: string } | null;
@@ -379,7 +381,7 @@ export async function getProjectStatuses(ctx: BacklogContext, projectKey: string
 export async function moveIssue(
   ctx: BacklogContext,
   issueKey: string,
-  input: { to?: string; statusId?: number; note?: string; force?: boolean; source?: 'ai' | 'human' },
+  input: { to?: string; statusId?: number; note?: string; force?: boolean; source?: 'ai' | 'human'; aiTurns?: number | null },
 ): Promise<{
   issueKey: string;
   from: { id: number; name: string };
@@ -389,6 +391,8 @@ export async function moveIssue(
   url: string;
   summary: string;
   assignee: { action: 'assign' | 'already_mine' | 'keep_other' | 'skip'; name: string | null };
+  /** 着手で開始日を入れたときその日付（YYYY-MM-DD）、入れなければ null */
+  startDateSet: string | null;
   commented: string | null;
 }> {
   const proj = requireAllowedIssue(ctx, issueKey);
@@ -422,11 +426,14 @@ export async function moveIssue(
     name: assignAction === 'assign' || assignAction === 'already_mine' ? (me?.name ?? null) : (current.assignee?.name ?? null),
   };
 
+  // 着手のとき開始日が空なら今日（日本時間）を入れる
+  const startDateSet = shouldSetStartDate(phase === 'start', current.startDate) ? jstDateString(new Date()) : null;
+
   const note = input.note?.trim() ?? '';
   const statusChanged = from.id !== target.id;
   // 何も変わらず、書くこともないなら送らない
-  if (!statusChanged && assignAction !== 'assign' && !note) {
-    return { issueKey, from, to: toView, phase, changed: false, url, summary: current.summary, assignee, commented: null };
+  if (!statusChanged && assignAction !== 'assign' && !startDateSet && !note) {
+    return { issueKey, from, to: toView, phase, changed: false, url, summary: current.summary, assignee, startDateSet: null, commented: null };
   }
   if (!input.force && statusChanged) {
     const order = (id: number) => statuses.find((s) => s.id === id)?.displayOrder ?? 0;
@@ -434,13 +441,16 @@ export async function moveIssue(
       throw new BacklogError(409, `「${from.name}」から前の状態「${target.name}」へ戻す変更です。人間に確認したうえで --force を付けてください`);
     }
   }
-  const comment = formatAutoComment(input.source ?? 'ai', new Date(), note || defaultMoveNote(phase, target.name));
+  // 完了報告にはこのスレッドでの AI 作業回数を添える（利用料は書かない）
+  const suffix = phase === 'done' ? formatAiWorkSuffix(input.aiTurns) : '';
+  const comment = formatAutoComment(input.source ?? 'ai', new Date(), (note || defaultMoveNote(phase, target.name)) + suffix);
   await backlogFetch<RawIssue>(ctx, 'PATCH', `/issues/${encodeURIComponent(issueKey)}`, {
     ...(statusChanged ? { statusId: target.id } : {}),
     ...(assignAction === 'assign' && me ? { assigneeId: me.id } : {}),
+    ...(startDateSet ? { startDate: startDateSet } : {}),
     comment,
   });
-  return { issueKey, from, to: toView, phase, changed: statusChanged, url, summary: current.summary, assignee, commented: comment };
+  return { issueKey, from, to: toView, phase, changed: statusChanged, url, summary: current.summary, assignee, startDateSet, commented: comment };
 }
 
 /**

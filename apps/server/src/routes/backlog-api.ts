@@ -94,6 +94,23 @@ async function linkSessionToIssue(userId: string, sessionId: string | undefined,
   return true;
 }
 
+/**
+ * このスレッドで AI が応答した回数（完了報告のコメントに添える。利用料は出さない）。
+ * スキルは AI の応答の途中で呼ばれ、その応答はまだ保存されていないため +1 する。
+ * スレッドが無い・持ち主が違う・取得失敗なら null（何も添えない）
+ */
+async function countAiTurns(userId: string, sessionId: string | undefined): Promise<number | null> {
+  if (!sessionId) return null;
+  try {
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true } });
+    if (!session || session.userId !== userId) return null;
+    const n = await prisma.message.count({ where: { sessionId, role: 'ai' } });
+    return n + 1;
+  } catch {
+    return null;
+  }
+}
+
 const SPACE_ERROR = 'スペース URL は xxx.backlog.jp / xxx.backlog.com 形式で入力してください';
 
 // ========================================
@@ -315,6 +332,7 @@ export function formatMoveText(r: MoveResult): string {
   return [
     head,
     assignee,
+    r.startDateSet ? `開始日を ${r.startDateSet.replace(/-/g, '/')} にしました。` : null,
     r.commented ? `Backlog にコメントを付けました: ${r.commented}` : null,
     r.linkedToThread ? 'このスレッドの案件にも課題キーを設定しました。' : null,
     r.url,
@@ -422,17 +440,19 @@ export function registerBacklogAgentRoutes(app: FastifyInstance) {
     try {
       if (typeof to !== 'string' || !to.trim()) throw new BacklogError(400, 'to（start / test / done または状態名）が必要です');
       const ctx = await resolveIssueContext(a.userId, key);
+      const sid = typeof sessionId === 'string' && sessionId ? sessionId : undefined;
       const r = await moveIssue(ctx, key, {
         to,
         note: typeof note === 'string' ? note : undefined,
         force: force === true || force === '1' || force === 'true',
         source: 'ai',
+        aiTurns: await countAiTurns(a.userId, sid),
       });
       let linked = false;
       // 着手（段階 start、または状態名で着手の状態を指定した場合）ならスレッドの案件を課題キーにする
       const startId = ctx.setting.projects.find((p) => p.projectKey === projectKeyOfIssue(key))?.map.start;
       if (r.phase === 'start' || (startId != null && r.to.id === startId)) {
-        linked = await linkSessionToIssue(a.userId, typeof sessionId === 'string' && sessionId ? sessionId : undefined, key).catch(() => false);
+        linked = await linkSessionToIssue(a.userId, sid, key).catch(() => false);
       }
       console.log(`📋 Backlog move: ${key} ${r.from.name} → ${r.to.name}${r.changed ? '' : ' (no change)'} by user ${a.userId}`);
       const result = { ...r, linkedToThread: linked };
