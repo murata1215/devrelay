@@ -129,8 +129,8 @@ export async function usageApiRoutes(app: FastifyInstance) {
     if (!isUsageEnabled(process.env.DEVRELAY_USAGE)) return sendUsageDisabled(reply);
     // @ts-ignore
     const viewerUserId = request.user.id as string;
-    const scope = await resolveUsageScope(viewerUserId);
-    const options = await loadUsageLabelOptions(scope.userIds);
+    // 候補は自分が付けた案件だけ（組織全員分を出すと他人の案件で埋まるため。Usage 画面の絞り込みは組織全体のまま）
+    const options = await loadUsageLabelOptions([viewerUserId]);
     return { options: options.cases, required: isUsageCaseRequired(process.env.DEVRELAY_USAGE_CASE_REQUIRED) };
   });
 
@@ -159,8 +159,8 @@ export async function usageApiRoutes(app: FastifyInstance) {
       editable = viewer!.role === 'admin';
     }
 
-    const scope = await resolveUsageScope(viewerUserId);
-    const options = await loadUsageLabelOptions(scope.userIds);
+    // 候補は閲覧者自身が付けた案件だけ
+    const options = await loadUsageLabelOptions([viewerUserId]);
     return {
       sessionId,
       caseName: session.usageCase ?? null,
