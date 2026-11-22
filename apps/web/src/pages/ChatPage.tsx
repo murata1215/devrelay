@@ -1,4 +1,5 @@
 import { apiUrl } from '../lib/base';
+import { outputFileBaseName } from '@devrelay/shared';
 import { useState, useRef, useEffect, useCallback, useMemo, memo, Fragment, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { useWebSocket, type ChatMessage, type ProgressInfo, type ToolApprovalPrompt, type ToolApprovalResolved, type ToolApprovalAuto } from '../hooks/useWebSocket';
 import { machines as machinesApi, sessions as sessionsApi, projects as projectsApi, settings as settingsApi, agentDocuments, getToken, type Machine, type AgentDocMeta, type ChatServer } from '../lib/api';
@@ -38,6 +39,8 @@ import {
 } from '../lib/cross-ask-rules';
 import { isAtBottom, decideHistoryRefresh, resolveRestoredScrollTop } from '../lib/chat-scroll-rules';
 import { reorderTabsById, resolveDropSide, type DropSide } from '../lib/tab-order-rules';
+import { openPreviewTab, promoteTabById, collectPersistedTabIds } from '../lib/tab-preview-rules';
+import { resolveTabClose, clampContextMenuPosition, type CloseScope } from '../lib/tab-close-rules';
 import { decideEnterAction } from '../lib/enter-send-rules';
 import { useEnterSendLock } from '../lib/useEnterSendLock';
 import { EnterLockToggle } from '../components/EnterLockToggle';
@@ -86,6 +89,11 @@ interface Tab {
   kind?: 'own' | 'cross';
   /** `kind === 'cross'` のときのみ有効。ツリー表示・バナー文言に使う。 */
   crossMeta?: { ownerLabel: string; teamName: string; origin: 'invite' | 'subscription' };
+  /** VS Code のプレビュータブ相当（2026-11-22、Pulse タブ増殖バグの根治）。true の間は
+   *  Pulse（会話履歴レール）から別の会話を開くと差し替えられ、tab_order にも保存されない
+   *  （= リロードで消える）。入力・送信・ピン止め・リネーム・D&D・サイドバーからの明示的な
+   *  再選択のいずれかで通常タブへ昇格する（tab-preview-rules.ts 参照）。省略時は通常タブ扱い。 */
+  preview?: boolean;
 }
 
 /** File → base64 FileAttachment 変換 */
@@ -335,7 +343,7 @@ function TextPreviewCard({ file, fileUrl }: {
         {sizeStr && <span className="text-xs text-[var(--text-faint)] shrink-0">{sizeStr}</span>}
         <a
           href={fileUrl}
-          download={file.filename}
+          download={outputFileBaseName(file.filename)}
           className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors shrink-0"
           title="ダウンロード"
           onClick={(e) => e.stopPropagation()}
@@ -361,7 +369,7 @@ function BinaryFileCard({ file, fileUrl }: {
   return (
     <a
       href={fileUrl}
-      download={file.filename}
+      download={outputFileBaseName(file.filename)}
       className="flex items-center gap-3 max-w-md rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 hover:bg-[var(--bg-hover)] transition-colors no-underline"
     >
       <svg className="w-8 h-8 text-[var(--text-muted)] shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
@@ -384,7 +392,9 @@ function FilePreviewCard({ file, onImageClick }: {
   onImageClick?: (src: string) => void;
 }) {
   const isImage = file.mimeType.startsWith('image/');
-  const isText = !isImage && isTextPreviewable(file.mimeType, file.filename);
+  const isVideo = !isImage && file.mimeType.startsWith('video/');
+  const isAudio = !isImage && !isVideo && file.mimeType.startsWith('audio/');
+  const isText = !isImage && !isVideo && !isAudio && isTextPreviewable(file.mimeType, file.filename);
 
   const fileUrl = file.content
     ? URL.createObjectURL(
@@ -404,6 +414,24 @@ function FilePreviewCard({ file, onImageClick }: {
           className="max-w-xs max-h-60 rounded-lg border border-[var(--border-color)] cursor-pointer hover:opacity-90 transition-opacity"
           onClick={() => onImageClick?.(fileUrl)}
         />
+        <span className="block text-xs text-[var(--text-faint)] mt-0.5">{file.filename}</span>
+      </div>
+    );
+  }
+
+  // 2026-11-22: 動画・音声（.devrelay-output の MIME 追加に伴い WebUI でもインライン再生できるようにする）
+  if (isVideo) {
+    return (
+      <div>
+        <video src={fileUrl} controls className="max-w-md rounded-lg border border-[var(--border-color)]" />
+        <span className="block text-xs text-[var(--text-faint)] mt-0.5">{file.filename}</span>
+      </div>
+    );
+  }
+  if (isAudio) {
+    return (
+      <div>
+        <audio src={fileUrl} controls className="max-w-md" />
         <span className="block text-xs text-[var(--text-faint)] mt-0.5">{file.filename}</span>
       </div>
     );
@@ -912,11 +940,17 @@ function AttachmentPreview({ files, onRemove, onImageClick }: { files: FileAttac
 // タブバー
 // ---------------------------------------------------------------------------
 
+/** 右クリックメニューの推定サイズ（`clampContextMenuPosition` の画面内クランプ計算用）。
+ *  実測ではなく固定値だが、4項目・compact な行高のメニューには十分な余裕を持たせてある。 */
+const TAB_CONTEXT_MENU_WIDTH = 200;
+const TAB_CONTEXT_MENU_HEIGHT = 170;
+
 function TabBar({
   tabs,
   activeTabId,
   onSelectTab,
   onCloseTab,
+  onCloseTabs,
   onTogglePin,
   onReorder,
   onDoubleClickTab,
@@ -926,6 +960,9 @@ function TabBar({
   activeTabId: string | null;
   onSelectTab: (projectId: string) => void;
   onCloseTab: (projectId: string) => void;
+  /** 一括クローズ（右クリックメニュー）。scopeIds には現在表示中のタブ（= この `tabs` prop
+   *  そのもの）の projectId 列を渡す（サーバー絞り込み中に隠れたタブを巻き込まないため）。 */
+  onCloseTabs: (scope: CloseScope, targetId: string, scopeIds: string[]) => void;
   onTogglePin: (projectId: string) => void;
   onReorder: (fromId: string, toId: string, side: DropSide) => void;
   onDoubleClickTab: () => void;
@@ -940,6 +977,9 @@ function TabBar({
   /** 編集中のタブ projectId */
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
+  /** 右クリックメニュー（他のタブ/以降のタブ/すべて閉じる）。多段折り返し・画面端に対応するため
+   *  `position: fixed` + クリック座標で開く（`clampContextMenuPosition` で画面内に収める）。 */
+  const [menu, setMenu] = useState<{ projectId: string; left: number; top: number } | null>(null);
 
   /** 編集確定 */
   const commitEdit = useCallback((projectId: string) => {
@@ -948,6 +988,23 @@ function TabBar({
     setEditingTabId(null);
   }, [onRenameTab]);
 
+  // 右クリックメニューを外側クリック・Escape・リサイズ・タブバーのスクロールで閉じる。
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKeyDown = (e: globalThis.KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [menu]);
+
   if (tabs.length === 0) return null;
 
   // 並び順は保存済み tab_order（= tabs 配列そのもの）のみで決める。
@@ -955,7 +1012,13 @@ function TabBar({
   // 旧実装はここでピン優先に再ソートしており、D&D の結果が毎描画で巻き戻る既存バグの真因だった）。
 
   return (
-    <div className="flex items-center bg-[var(--bg-secondary)] border-b border-[var(--border-color)] overflow-x-auto scrollbar-thin">
+    <>
+    {/* タブは1行固定の横スクロールではなく、右端まで来たら次の段へ折り返す（flex-wrap）。
+       旧実装は overflow-x-auto で、タブが増えると右端のタブが画面外に出たまま
+       アクティブタブへの自動スクロールも無く、事実上到達できないタブが生まれていた。
+       max-h + overflow-y-auto は「タブが極端に多いときにチャット本文を潰さない」ための
+       安全弁であり、通常のタブ数（〜30個程度）では発動しない。 */}
+    <div className="flex flex-wrap items-center content-start shrink-0 max-h-[30vh] overflow-y-auto bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
       {tabs.map((tab) => {
         const isActive = tab.projectId === activeTabId;
         const isEditing = editingTabId === tab.projectId;
@@ -983,6 +1046,17 @@ function TabBar({
               setDragOver(null);
             }}
             onDragEnd={() => { dragIdRef.current = null; setDragOver(null); }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const { left, top } = clampContextMenuPosition({
+                x: e.clientX, y: e.clientY,
+                width: TAB_CONTEXT_MENU_WIDTH, height: TAB_CONTEXT_MENU_HEIGHT,
+                viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+                margin: 8,
+              });
+              setMenu({ projectId: tab.projectId, left, top });
+            }}
             className={`
               group flex items-center gap-1.5 px-3 py-1.5 text-sm cursor-pointer border-b-2 shrink-0 select-none
               border-l-2 border-r-2
@@ -1038,12 +1112,14 @@ function TabBar({
               />
             ) : (
               <span
-                className={isActive ? 'font-semibold' : ''}
+                className={`${isActive ? 'font-semibold' : ''} ${tab.preview ? 'italic' : ''}`}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   setEditingTabId(tab.projectId);
                 }}
-                title="ダブルクリックで名前を変更"
+                title={tab.preview
+                  ? 'プレビュー: 別の会話を開くと置き換わります。入力・送信・ピン止め等で固定されます'
+                  : 'ダブルクリックで名前を変更'}
               >
                 {displayName}
               </span>
@@ -1064,6 +1140,40 @@ function TabBar({
         );
       })}
     </div>
+    {/* 右クリックメニュー: このタブ/他のタブ/以降のタブ/すべて閉じる（ピン止めは常に除外）。
+        `position: fixed` で開く（多段折り返し・`overflow-y-auto` のタブ行コンテナ内に絶対配置で
+        差し込むとスクロールで一緒に流れクリップされるため、タブ行コンテナの兄弟として置く）。 */}
+    {menu && (() => {
+      const scopeIds = tabs.map(t => t.projectId);
+      const idx = scopeIds.indexOf(menu.projectId);
+      const targetTab = tabs.find(t => t.projectId === menu.projectId);
+      const hasOthers = tabs.some(t => t.projectId !== menu.projectId && !t.pinned);
+      const hasRight = idx !== -1 && tabs.slice(idx + 1).some(t => !t.pinned);
+      const hasAnyClosable = tabs.some(t => !t.pinned);
+      const run = (scope: CloseScope) => { onCloseTabs(scope, menu.projectId, scopeIds); setMenu(null); };
+      const itemClass = 'w-full text-left px-3 py-1.5 hover:bg-[var(--bg-hover)] disabled:opacity-40 disabled:cursor-not-allowed text-[var(--text-primary)]';
+      return (
+        <div
+          className="fixed z-50 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] shadow-lg text-sm min-w-[180px]"
+          style={{ left: menu.left, top: menu.top }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button className={itemClass} disabled={!!targetTab?.pinned} onClick={() => run('self')}>
+            タブを閉じる
+          </button>
+          <button className={itemClass} disabled={!hasOthers} onClick={() => run('others')}>
+            他のタブを閉じる
+          </button>
+          <button className={itemClass} disabled={!hasRight} onClick={() => run('right')}>
+            以降のタブを閉じる
+          </button>
+          <button className={itemClass} disabled={!hasAnyClosable} onClick={() => run('all')}>
+            すべてのタブを閉じる
+          </button>
+        </div>
+      );
+    })()}
+    </>
   );
 }
 
@@ -2293,6 +2403,26 @@ export function ChatPage() {
   /** servers/activeServerId の最新値を参照する ref（handleSelectProject の stale closure 対策） */
   const serversRef = useRef(servers);
   serversRef.current = servers;
+
+  /** tab_order をサーバーへ保存する唯一の経路（2026-11-22、Pulse タブ増殖バグの根治）。
+   *  プレビュータブ（preview: true）は常に除外する（collectPersistedTabIds 参照）。
+   *  旧実装は `updated.map(t => t.projectId)` を複数箇所に重複させており、新しい除外条件を
+   *  1箇所書き忘れるとプレビュータブが永続化され増殖が再発する構造だった。
+   *  呼び出し側は `setTabs` の外（updater の外）でこれを呼ぶこと。 */
+  const persistTabOrder = useCallback((next: Tab[]) => {
+    settingsApi.saveTabOrder(collectPersistedTabIds(next)).catch(() => {});
+  }, []);
+
+  /** プレビュータブを通常タブへ昇格させる（ユーザーが「このタブを使う」と意思表示した瞬間に呼ぶ）。
+   *  対象がプレビューでなければ完全な no-op（setState も保存も発生しない）。
+   *  `setTabs` は関数更新（`prev => ...`）で行うため、同じハンドラ内で先に発行した
+   *  別の `setTabs` 呼び出し（例: handleSend のメッセージ追加）を上書きしない。 */
+  const promoteTab = useCallback((projectId: string | null) => {
+    if (!projectId) return;
+    if (!tabsRef.current.some(t => t.projectId === projectId && t.preview)) return;
+    setTabs(prev => promoteTabById(prev, projectId));
+    persistTabOrder(promoteTabById(tabsRef.current, projectId));
+  }, [persistTabOrder]);
   const activeServerIdRef = useRef(activeServerId);
   activeServerIdRef.current = activeServerId;
   /** 初回タブ復元済みフラグ */
@@ -3198,10 +3328,12 @@ export function ChatPage() {
   /** タブごとの入力テキスト（グローバル state ではなくタブデータから派生） */
   const input = activeTab?.inputText ?? '';
   const setInput = useCallback((text: string) => {
+    // 入力欄に何か打った = 「このタブを使う」という意思表示（プレビュータブの昇格条件①）
+    if (text.trim()) promoteTab(activeTabId);
     setTabs(prev => prev.map(t =>
       t.projectId === activeTabId ? { ...t, inputText: text } : t
     ));
-  }, [activeTabId]);
+  }, [activeTabId, promoteTab]);
 
   // アクティブタブの machineId を machineList から導出（DocPanel 用）
   const activeMachineId = (() => {
@@ -3512,21 +3644,25 @@ export function ChatPage() {
     });
   }, [activeTab?.historyLoaded, activeTab?.hasMoreHistory, activeTab?.loadingHistory, loadOlderMessages]);
 
-  /** プロジェクト選択（サイドバー or タブクリック）。
-   *  registerToActiveServer=true のときのみ、アクティブサーバーへの自動登録を行う（#370）。
-   *  Servers タブの行クリックや TabBar のタブ切り替えは「開く／切り替える」だけで登録は行わず、
-   *  Agents タブの行クリック（onSelectProject(project.id, true)）だけが登録の起点となる。
-   *
-   *  `opts.skipConnect`（会話履歴レール サイクル）: true のとき `//connect` の送信（＝サーバー側で
-   *  「このプロジェクトの最新 active スレッド」を選び直す処理）をスキップする。タブを開く・
-   *  activeServerId を追従させる（#371）処理はそのまま実行する。会話履歴レールから特定スレッドへ
-   *  遷移する際、`//connect` が送ったあとに非同期で届く `web:session_info` が意図したスレッドを
-   *  上書きしてしまうレースを避けるために使う（`handleConversationSelect` 専用、既存呼び出し元は
-   *  第3引数を渡さないため挙動は不変）。 */
-  const handleSelectProject = useCallback((projectId: string, registerToActiveServer = false, opts?: { skipConnect?: boolean }) => {
+  /** プロジェクトの表示名・マシン表示名を machineList から解決する（タブ新規作成時の共通処理。
+   *  `handleSelectProject` / `handleSelectPreviewProject` の両方で使う）。 */
+  const resolveProjectLabel = useCallback((projectId: string): { projectName: string; machineDisplayName: string } => {
+    for (const m of machineList) {
+      const p = m.projects.find(p => p.id === projectId);
+      if (p) {
+        return { projectName: p.displayName ?? p.name, machineDisplayName: m.displayName ?? m.name };
+      }
+    }
+    return { projectName: projectId, machineDisplayName: '' };
+  }, [machineList]);
+
+  /** アクティブサーバーへの自動登録（#370）・タブグループへの追従（#371）。
+   *  `handleSelectProject` / `handleSelectPreviewProject` の共通処理（ロジックは移動のみ、変更なし）。
+   *  早期return・新規タブ判定より前に必ず呼ぶこと（ref から最新値を読み stale closure を回避）。 */
+  const followActiveServerForProject = useCallback((projectId: string, registerToActiveServer: boolean) => {
     // アクティブサーバーがある場合はプロジェクトを自動登録。
     // 既にタブが開いている（★）場合やアクティブタブ自身のクリックでも登録されるよう、
-    // 早期return・新規タブ判定より前に必ず実行する（ref から最新値を読み stale closure を回避）。
+    // 呼び出し元の早期return・新規タブ判定より前に必ず実行される想定。
     const currentServerId = activeServerIdRef.current;
     if (registerToActiveServer && currentServerId) {
       const currentServers = serversRef.current;
@@ -3541,8 +3677,6 @@ export function ChatPage() {
         settingsApi.saveServers(next).catch(() => {});
       }
     }
-
-    if (activeTabIdRef.current === projectId) return;
 
     // 選択したプロジェクトが現在のアクティブサーバー（非空）に属さない場合、
     // そのプロジェクトを含むサーバーへ切り替える（無ければ「すべて」に落とす）。
@@ -3563,20 +3697,27 @@ export function ChatPage() {
         }
       }
     }
+  }, []);
+
+  /** プロジェクト選択（サイドバー or タブクリック）。
+   *  registerToActiveServer=true のときのみ、アクティブサーバーへの自動登録を行う（#370）。
+   *  Servers タブの行クリックや TabBar のタブ切り替えは「開く／切り替える」だけで登録は行わず、
+   *  Agents タブの行クリック（onSelectProject(project.id, true)）だけが登録の起点となる。
+   *
+   *  `opts.skipConnect`（会話履歴レール サイクル）: true のとき `//connect` の送信（＝サーバー側で
+   *  「このプロジェクトの最新 active スレッド」を選び直す処理）をスキップする。タブを開く・
+   *  activeServerId を追従させる（#371）処理はそのまま実行する。会話履歴レールから特定スレッドへ
+   *  遷移する際、`//connect` が送ったあとに非同期で届く `web:session_info` が意図したスレッドを
+   *  上書きしてしまうレースを避けるために使う（`handleConversationSelect` 専用、既存呼び出し元は
+   *  第3引数を渡さないため挙動は不変）。 */
+  const handleSelectProject = useCallback((projectId: string, registerToActiveServer = false, opts?: { skipConnect?: boolean }) => {
+    followActiveServerForProject(projectId, registerToActiveServer);
+
+    if (activeTabIdRef.current === projectId) return;
 
     const existingTab = tabsRef.current.find(t => t.projectId === projectId);
     if (!existingTab) {
-      let projectName = projectId;
-      let machineDisplayName = '';
-      for (const m of machineList) {
-        const p = m.projects.find(p => p.id === projectId);
-        if (p) {
-          projectName = p.displayName ?? p.name;
-          machineDisplayName = m.displayName ?? m.name;
-          break;
-        }
-      }
-
+      const { projectName, machineDisplayName } = resolveProjectLabel(projectId);
       const newTab: Tab = {
         projectId,
         projectName,
@@ -3593,12 +3734,9 @@ export function ChatPage() {
         inputText: '',
         cancel: null,
       };
-      setTabs(prev => {
-        const updated = [...prev, newTab];
-        // サーバーにタブ順序を保存（fire-and-forget）
-        settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
-        return updated;
-      });
+      const next = [...tabsRef.current, newTab];
+      setTabs(next);
+      persistTabOrder(next);
     }
 
     setActiveTabId(projectId);
@@ -3623,7 +3761,57 @@ export function ChatPage() {
         loadHistory(projectId, existingTab.sessionId);
       }
     }
-  }, [machineList, sendCommand, loadHistory]);
+  }, [followActiveServerForProject, resolveProjectLabel, persistTabOrder, sendCommand, loadHistory]);
+
+  /**
+   * Pulse（会話履歴レール）から1件開く。VS Code のプレビュータブ方式（tab-preview-rules.ts）。
+   * `handleSelectProject` を使わない理由:
+   *  - 早期 return（activeTabIdRef.current === projectId）より前にプレビュー整理を
+   *    走らせたい（同じプロジェクトの別スレッドをクリックしたときも、別プロジェクトに
+   *    残った古いプレビューを確実に回収したい）
+   *  - `//connect` を送らない・registerToActiveServer を持たない（#370 と同じ方針:
+   *    会話履歴のクリックでサーバー＝タブグループのメンバーシップを勝手に書き換えない）
+   *  - 履歴ロードは呼ばない（直後に `handleConversationSelect` が `switchTabToThread` を呼ぶ）
+   * Pulse を何度クリックしても `tab_order` への保存は発生しない（差し替え・新規追加だけでは
+   * 保存しない。差し替え不可で既存プレビューを昇格させたときだけ保存する）。
+   */
+  const handleSelectPreviewProject = useCallback((projectId: string) => {
+    followActiveServerForProject(projectId, false);
+
+    const { projectName, machineDisplayName } = resolveProjectLabel(projectId);
+    const newTab: Tab = {
+      projectId,
+      projectName,
+      machineDisplayName,
+      customName: getTabNames()[projectId],
+      messages: [],
+      progress: null,
+      sessionId: null,
+      historyLoaded: false,
+      hasMoreHistory: false,
+      loadingHistory: false,
+      pinned: false,
+      completed: false,
+      inputText: '',
+      cancel: null,
+      preview: true,
+    };
+    const { tabs: next, mode, promotedId } = openPreviewTab(tabsRef.current, newTab);
+    if (mode !== 'focus') setTabs(next);
+    if (promotedId) persistTabOrder(next);
+
+    setActiveTabId(projectId);
+    activeTabIdRef.current = projectId;
+  }, [followActiveServerForProject, resolveProjectLabel, persistTabOrder]);
+
+  /** サイドバー（Agents/Servers）からの明示的な選択。クリック対象のタブがプレビューであれば
+   *  先に昇格させる（「サイドバーから明示的に開いた」はプレビューを使う意思表示とみなす、
+   *  昇格条件⑥、tab-preview-rules.ts 参照）。対象がまだタブとして存在しない場合は
+   *  `promoteTab` が no-op になり、`handleSelectProject` が通常タブとして新規作成する。 */
+  const handleSelectProjectExplicit = useCallback((projectId: string, registerToActiveServer?: boolean) => {
+    promoteTab(projectId);
+    handleSelectProject(projectId, registerToActiveServer);
+  }, [promoteTab, handleSelectProject]);
 
   /**
    * クロスユーザー Team Phase C: 購読/借用プロジェクトの質問専用タブを開く。
@@ -3656,11 +3844,9 @@ export function ChatPage() {
         kind: 'cross',
         crossMeta: { ownerLabel: meta.ownerLabel, teamName: meta.teamName, origin: meta.origin },
       };
-      setTabs(prev => {
-        const updated = [...prev, newTab];
-        settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
-        return updated;
-      });
+      const next = [...tabsRef.current, newTab];
+      setTabs(next);
+      persistTabOrder(next);
     }
 
     setActiveTabId(projectId);
@@ -3670,23 +3856,24 @@ export function ChatPage() {
     if (!existingTab?.historyLoaded && !existingTab?.loadingHistory) {
       loadHistory(projectId, undefined);
     }
-  }, [loadHistory]);
+  }, [loadHistory, persistTabOrder]);
 
   /**
    * 会話履歴レール: 行クリックでそのスレッドへ遷移する。
-   * `//connect` を送らない（`handleSelectProject` の `skipConnect` 参照）。`//connect` は
+   * `//connect` を送らない（`handleSelectPreviewProject` 参照）。`//connect` は
    * サーバー側で「このプロジェクトの最新 active スレッド」を選び直してしまうため、順序をどう
    * 入れ替えても意図したスレッドが別スレッドに上書きされるレースが残る。
    * 一方 `switchChatToThread`（サーバー側 `POST /api/sessions/:id/switch`）は
    * `currentSessionId`/`currentProjectName`/`currentMachineId`/`lastProjectId`/`addParticipant` を
    * すべて設定する＝`//connect` がやることを内包しているため、これだけで context 確立が完結する。
    * 失敗時は切替前の状態を維持する（`ThreadList.tsx` の `handleSelect` と同じ fail-soft 方針）。
-   * `registerToActiveServer` は false 固定（#370: 登録の起点は Agents タブの行クリックだけ。
-   * 会話履歴のクリックでサーバー＝タブグループのメンバーシップを勝手に書き換えない）。
+   * タブは `handleSelectPreviewProject`（VS Code のプレビュータブ方式）で開く。Pulse は
+   * 全プロジェクト横断の直近20件を出すため、`handleSelectProject` でタブを作ると開くたびに
+   * tab_order へ永続化され無制限にタブが増殖していた（2026-11-22 根治、tab-preview-rules.ts）。
    */
   const handleConversationSelect = useCallback(async (item: ConversationFeedItem) => {
-    // 1) タブを開く/アクティブ化/activeServerId 貼り替え（#371 の visibleTabs 整合。//connect は送らない）
-    handleSelectProject(item.projectId, false, { skipConnect: true });
+    // 1) プレビュータブを開く/差し替える（#371 の visibleTabs 整合。//connect は送らない）
+    handleSelectPreviewProject(item.projectId);
     try {
       // 2) サーバー側 current スレッドを差し替える（context 確立の唯一の経路）
       const result = await sessionsApi.switchThread(item.sessionId, getTabId());
@@ -3696,80 +3883,111 @@ export function ChatPage() {
       // 失敗時は何もしない（切替前の状態を維持）
     }
     markConversationSeen(item.sessionId);
-  }, [handleSelectProject, switchTabToThread, markConversationSeen]);
+  }, [handleSelectPreviewProject, switchTabToThread, markConversationSeen]);
 
-  /** タブを閉じる（ピン止めタブは閉じない） */
-  const handleCloseTab = useCallback((projectId: string) => {
-    setTabs(prev => {
-      const tab = prev.find(t => t.projectId === projectId);
-      if (tab?.pinned) return prev;
-      const newTabs = prev.filter(t => t.projectId !== projectId);
-      if (activeTabIdRef.current === projectId) {
-        const closedIdx = prev.findIndex(t => t.projectId === projectId);
-        const nextTab = newTabs[Math.min(closedIdx, newTabs.length - 1)] ?? null;
-        const nextId = nextTab?.projectId ?? null;
-        setActiveTabId(nextId);
-        if (nextId && shouldSendConnect(nextTab)) {
-          suppressConnectRef.current = true;
-          sendCommand(`//connect ${nextId}`);
-        } else if (nextId && nextTab && !nextTab.historyLoaded && !nextTab.loadingHistory) {
-          loadHistory(nextId, undefined);
-        }
-      }
-      // サーバーにタブ順序を保存（fire-and-forget）
-      settingsApi.saveTabOrder(newTabs.map(t => t.projectId)).catch(() => {});
-      return newTabs;
-    });
+  /** クローズ後のアクティブタブ確定と付随する副作用（`//connect` または履歴ロード）。
+   *  `handleCloseTab` / `handleCloseTabs` の両方から呼ぶ唯一の経路（クロスタブへ `//connect` を
+   *  送らない `shouldSendConnect` ガードもここ1箇所に集約される）。 */
+  const activateTabAfterClose = useCallback((nextTab: Tab | null) => {
+    const nextId = nextTab?.projectId ?? null;
+    setActiveTabId(nextId);
+    activeTabIdRef.current = nextId;
+    if (!nextId || !nextTab) return;
+    if (shouldSendConnect(nextTab)) {
+      suppressConnectRef.current = true;
+      sendCommand(`//connect ${nextId}`);
+    } else if (!nextTab.historyLoaded && !nextTab.loadingHistory) {
+      loadHistory(nextId, undefined);
+    }
   }, [sendCommand, loadHistory]);
 
-  /** タブのピン止めを切り替え（サーバーにも永続化） */
-  const handleTogglePin = useCallback((projectId: string) => {
-    setTabs(prev => {
-      const updated = prev.map(t =>
-        t.projectId === projectId ? { ...t, pinned: !t.pinned } : t
-      );
-      savePinnedTabIds(updated);
-      // サーバーにも保存（fire-and-forget）
-      const pinnedIds = updated.filter(t => t.pinned).map(t => t.projectId);
-      settingsApi.savePinnedTabs(pinnedIds).catch(() => {});
-      settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
-      return updated;
+  /** タブを閉じる（ピン止めタブは閉じない）。一括クローズ（`handleCloseTabs`）と同じ
+   *  `resolveTabClose` 判定・`activateTabAfterClose` 副作用を共有する。 */
+  const handleCloseTab = useCallback((projectId: string) => {
+    const current = tabsRef.current;
+    const result = resolveTabClose({
+      tabs: current,
+      scopeIds: current.map(t => t.projectId),
+      scope: 'self',
+      targetId: projectId,
+      activeTabId: activeTabIdRef.current,
     });
-  }, []);
+    if (result.closedIds.length === 0) return;
+    setTabs(result.tabs);
+    persistTabOrder(result.tabs);
+    if (result.nextActiveTabId !== activeTabIdRef.current) {
+      activateTabAfterClose(result.tabs.find(t => t.projectId === result.nextActiveTabId) ?? null);
+    }
+  }, [persistTabOrder, activateTabAfterClose]);
 
-  /** タブ名の変更（空文字の場合はリセット） */
-  const handleRenameTab = useCallback((projectId: string, newName: string) => {
-    setTabs(prev => {
-      const updated = prev.map(t =>
-        t.projectId === projectId
-          ? { ...t, customName: newName || undefined }
-          : t
-      );
-      saveTabNames(updated);
-      // サーバーにもカスタム名を保存（fire-and-forget）
-      const names: Record<string, string> = {};
-      for (const t of updated) {
-        if (t.customName) names[t.projectId] = t.customName;
-      }
-      settingsApi.saveTabNames(names).catch(() => {});
-      return updated;
+  /** タブの一括クローズ（右クリックメニュー: このタブ/他のタブ/以降のタブ/すべて閉じる）。
+   *  ピン止めは常に除外する。`scopeIds` は TabBar が表示していたタブ（= visibleTabs）の
+   *  projectId 列を渡してもらう（サーバー絞り込み中に隠れたタブを巻き込まない WYSIWYG のため）。 */
+  const handleCloseTabs = useCallback((scope: CloseScope, targetId: string, scopeIds: string[]) => {
+    const current = tabsRef.current;
+    const result = resolveTabClose({
+      tabs: current,
+      scopeIds,
+      scope,
+      targetId,
+      activeTabId: activeTabIdRef.current,
     });
-  }, []);
+    if (result.closedIds.length === 0) return;
+    setTabs(result.tabs);
+    persistTabOrder(result.tabs);
+    if (result.nextActiveTabId !== activeTabIdRef.current) {
+      activateTabAfterClose(result.tabs.find(t => t.projectId === result.nextActiveTabId) ?? null);
+    }
+  }, [persistTabOrder, activateTabAfterClose]);
+
+  /** タブのピン止めを切り替え（サーバーにも永続化）。ピン止め＝「このタブを使う」の
+   *  意思表示でもあるため、同時にプレビュー状態も解除する（昇格条件③）。 */
+  const handleTogglePin = useCallback((projectId: string) => {
+    const updated = tabsRef.current.map(t =>
+      t.projectId === projectId ? { ...t, pinned: !t.pinned, preview: false } : t
+    );
+    setTabs(updated);
+    savePinnedTabIds(updated);
+    // サーバーにも保存（fire-and-forget）
+    const pinnedIds = updated.filter(t => t.pinned).map(t => t.projectId);
+    settingsApi.savePinnedTabs(pinnedIds).catch(() => {});
+    persistTabOrder(updated);
+  }, [persistTabOrder]);
+
+  /** タブ名の変更（空文字の場合はリセット）。リネーム＝「このタブを使う」の意思表示でもある
+   *  ため、同時にプレビュー状態も解除する（昇格条件④）。 */
+  const handleRenameTab = useCallback((projectId: string, newName: string) => {
+    const updated = tabsRef.current.map(t =>
+      t.projectId === projectId
+        ? { ...t, customName: newName || undefined, preview: false }
+        : t
+    );
+    setTabs(updated);
+    saveTabNames(updated);
+    // サーバーにもカスタム名を保存（fire-and-forget）
+    const names: Record<string, string> = {};
+    for (const t of updated) {
+      if (t.customName) names[t.projectId] = t.customName;
+    }
+    settingsApi.saveTabNames(names).catch(() => {});
+    // プレビュー解除が tab_order に反映されるよう保存する
+    persistTabOrder(updated);
+  }, [persistTabOrder]);
 
   /** タブの並べ替え（ドラッグ&ドロップ）。
    *  projectId ベースで並べ替えるため、TabBar が絞り込み表示（visibleTabs）中でも
    *  全タブ配列（tabs state）に対して正しい位置へ移動できる（#386 index 不一致バグの根治）。
    *  side（対象タブの前/後ろ）は TabBar 側でカーソル位置から明示的に判定したものを
-   *  そのまま受け取る（方向からの推測をやめ、青い棒の表示と着地点を一致させる）。 */
+   *  そのまま受け取る（方向からの推測をやめ、青い棒の表示と着地点を一致させる）。
+   *  D&D で動かした＝「このタブを使う」の意思表示でもあるため、同時にプレビュー状態も
+   *  解除する（昇格条件⑤）。 */
   const handleReorderTabs = useCallback((fromId: string, toId: string, side: DropSide) => {
-    setTabs(prev => {
-      const updated = reorderTabsById(prev, fromId, toId, side);
-      if (updated === prev) return prev;
-      // サーバーにタブ順序を保存（fire-and-forget）
-      settingsApi.saveTabOrder(updated.map(t => t.projectId)).catch(() => {});
-      return updated;
-    });
-  }, []);
+    const reordered = reorderTabsById(tabsRef.current, fromId, toId, side);
+    if (reordered === tabsRef.current) return;
+    const updated = promoteTabById(reordered, fromId);
+    setTabs(updated);
+    persistTabOrder(updated);
+  }, [persistTabOrder]);
 
   // -----------------------------------------------------------------------
   // サーバー（タブグループ）管理
@@ -3932,6 +4150,8 @@ export function ChatPage() {
       setTabs(prev => prev.map(t =>
         t.projectId === activeTabId ? { ...t, messages: [...t.messages, userMsg], completed: false, cancel: null } : t
       ));
+      // 送信した＝「このタブを使う」の意思表示（プレビュータブの昇格条件②）
+      promoteTab(activeTabId);
     }
 
     playNotificationSound();
@@ -4080,7 +4300,7 @@ export function ChatPage() {
           machineList={machineList}
           openTabIds={openTabIds}
           activeTabId={activeTabId}
-          onSelectProject={handleSelectProject}
+          onSelectProject={handleSelectProjectExplicit}
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed(prev => !prev)}
           mode={sidebarMode}
@@ -4177,6 +4397,7 @@ export function ChatPage() {
           activeTabId={activeTabId}
           onSelectTab={handleSelectProject}
           onCloseTab={handleCloseTab}
+          onCloseTabs={handleCloseTabs}
           onTogglePin={handleTogglePin}
           onReorder={handleReorderTabs}
           onDoubleClickTab={() => setMaximized(prev => !prev)}
@@ -4398,7 +4619,7 @@ export function ChatPage() {
               machineList={machineList}
               openTabIds={openTabIds}
               activeTabId={activeTabId}
-              onSelectProject={handleSelectProject}
+              onSelectProject={handleSelectProjectExplicit}
               collapsed={false}
               onToggle={() => {}}
               mode={sidebarMode}

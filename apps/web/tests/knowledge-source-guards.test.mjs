@@ -307,10 +307,18 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // commit 96a1f47）で ChatPage.tsx が変更されたが、このピンの更新が漏れていた（機能側は無関係・
 // 本家 pull 後の `pnpm test` で発覚）。実測値（4439 → 4454）に更新した。
 // LitePage.tsx・renderMarkdown 出現数・components/lite/* は無変更のため据え置き。
+//
+// Pulse（会話履歴レール）タブ増殖バグの根治サイクル（2026-11-22）で、プロジェクトタブバーの
+// 多段折り返し化（flex-wrap）・VS Code 方式のプレビュータブ（tab-preview-rules.ts 新設）・
+// タブの一括クローズ（tab-close-rules.ts 新設・右クリックメニュー）・出力ファイル表示の
+// basename 化・動画/音声インライン再生（.devrelay-output サブフォルダ収集サイクル由来）を
+// ChatPage.tsx に追加したため、行数ピンを実測値（4454 → 4675）に更新した（前回のピン更新
+// 4654 はこのサイクルのコミット前に既に古くなっていた＝更新漏れ）。
+// LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも無変更のため据え置き。
 
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4454, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4675, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

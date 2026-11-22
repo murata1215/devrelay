@@ -38,6 +38,11 @@ export type DropSide = 'before' | 'after';
  * カーソルの X 座標が対象タブの左半分・右半分のどちらにあるかを判定する。
  * DOM に依存しないよう、`getBoundingClientRect()` 相当の最小限の数値だけを受け取る。
  * ちょうど中央（`clientX === left + width/2`）は 'after' 側に倒す（`<` 判定のため）。
+ *
+ * タブバーが多段（flex-wrap）になっていても、Y 座標（どの段か）を見る必要はない。
+ * `dragover`/`drop` イベントはブラウザがカーソル直下の要素（＝対象タブ）に対して
+ * 発火するため、「どの段のタブが対象か」はブラウザ側が既に決めてくれている。
+ * 本関数はその対象タブの中で前/後ろのどちらに挿入するかだけを X 座標で判定する。
  */
 export function resolveDropSide(clientX: number, rect: { left: number; width: number }): DropSide {
   const midpoint = rect.left + rect.width / 2;
