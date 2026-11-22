@@ -197,7 +197,12 @@ async function main() {
 
   // Plugins
   await app.register(cors, { origin: true });
-  await app.register(websocket);
+  // 2026-11-22: maxPayload を明示指定（値は ws の既定 100MiB と同値）。
+  // agent:ai:output は出力ファイルを base64 で1フレームに積む構造のため、
+  // Agent 側の MAX_TOTAL_SIZE（40MB。output-collector.ts）との関係を
+  // コード上に残す目的で「暗黙の既定」から明示値に変える。超過時は
+  // ws が close code 1009 で切断する（エラー応答ではなく接続断）。
+  await app.register(websocket, { options: { maxPayload: 100 * 1024 * 1024 } });
 
   // Health check
   // bot（discord/telegram）の状態を追加（常に 200 を返す。scripts/install-agent.sh が

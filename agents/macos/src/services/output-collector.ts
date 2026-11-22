@@ -8,8 +8,21 @@ const OUTPUT_HISTORY_DIR_NAME = '.devrelay-output-history';
 // Directory name for files to be sent to user
 export const OUTPUT_DIR_NAME = '.devrelay-output';
 
-// Max file size to transfer (5MB)
-const MAX_FILE_SIZE = 5 * 1024 * 1024;
+// Max file size to transfer（25MB。base64化で約1.37倍に膨張してもサーバーWSの既定maxPayload
+// 100MiBに対して十分な余裕を残す値。2026-11-22: 旧5MBは動画等の成果物が通らず無言で消える
+// 根本原因の一つだったため緩和した）
+const MAX_FILE_SIZE = 25 * 1024 * 1024;
+
+// 1ターンで送る添付の合計サイズ上限（40MB）。WS 1フレームに全ファイルのbase64が載るため、
+// 個々が上限以下でも合計が膨らむとサーバー側maxPayload（既定100MiB）超過でAgent接続ごと
+// 切断される。それを避けるための安全弁（2026-11-22）
+const MAX_TOTAL_SIZE = 40 * 1024 * 1024;
+
+// 1ターンで送るファイル件数の上限（暴走防止）
+const MAX_FILE_COUNT = 50;
+
+// ターン専用フォルダ配下で許容するサブフォルダの深さ（暴走・symlinkループ対策の保険）
+const MAX_DEPTH = 5;
 
 // MIME types for common file extensions
 const MIME_TYPES: Record<string, string> = {
@@ -30,8 +43,21 @@ const MIME_TYPES: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
+  '.webp': 'image/webp',
   '.pdf': 'application/pdf',
   '.zip': 'application/zip',
+  // 2026-11-22: 動画・音声・Office形式が未登録で octet-stream になっていたため追加
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.ogg': 'audio/ogg',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 };
 
 export async function ensureOutputDir(projectPath: string): Promise<string> {
@@ -313,64 +339,192 @@ export async function beginOutputTurn(
 }
 
 /**
- * 1 ファイルを読み込んで添付形式にする（大きすぎるファイル・フォルダは null）。
- * @param filePath 絶対パス
- * @param filename 送信時のファイル名
+ * 収集時にスキップされた 1 件の情報（上限超過・読み取り失敗等、ユーザーに伝えるため）。
  */
-async function readAttachment(filePath: string, filename: string): Promise<FileAttachment | null> {
+export interface SkippedOutput {
+  /** 表示用の相対パス（ターン専用フォルダ基準。`/` 区切り） */
+  path: string;
+  /** この機体上の絶対パス（ユーザーが直接確認できるように） */
+  absPath: string;
+  /** バイトサイズ（取得できた場合のみ） */
+  size?: number;
+  /** スキップ理由 */
+  reason: 'too-large' | 'total-limit' | 'count-limit' | 'depth-limit' | 'read-error';
+}
+
+/** collectTurnOutputFiles() の戻り値 */
+export interface CollectedOutput {
+  /** 送信する添付ファイル */
+  attachments: FileAttachment[];
+  /** 上限超過・読み取り失敗等でスキップされたファイル */
+  skipped: SkippedOutput[];
+}
+
+/**
+ * 1 ファイルを読み込んで添付形式にする。
+ * 大きすぎる・読み取れない場合は理由付きの skip を返す（2026-11-22: 以前は null を返すだけで
+ * ユーザーに一切伝わらなかった「無言の失敗」を解消するための変更）。
+ * @param filePath 絶対パス
+ * @param relPath 送信時のファイル名（相対パス。サブフォルダ経由なら `/` を含む）
+ */
+async function readAttachment(filePath: string, relPath: string): Promise<{ ok: FileAttachment } | { skip: SkippedOutput }> {
   try {
     const stats = await stat(filePath);
-    if (!stats.isFile()) return null;
+    if (!stats.isFile()) {
+      // 呼び出し元は基本ファイルのみ渡すが、競合でディレクトリ化した等の保険
+      return { skip: { path: relPath, absPath: filePath, reason: 'read-error' } };
+    }
     if (stats.size > MAX_FILE_SIZE) {
-      console.log(`File too large to transfer: ${filename} (${stats.size} bytes)`);
-      return null;
+      console.log(`File too large to transfer: ${relPath} (${stats.size} bytes)`);
+      return { skip: { path: relPath, absPath: filePath, size: stats.size, reason: 'too-large' } };
     }
     const content = await readFile(filePath);
-    const mimeType = MIME_TYPES[extname(filename).toLowerCase()] || 'application/octet-stream';
-    console.log(`Collected output file: ${filename} (${stats.size} bytes)`);
-    return { filename, content: content.toString('base64'), mimeType, size: stats.size };
+    const mimeType = MIME_TYPES[extname(relPath).toLowerCase()] || 'application/octet-stream';
+    console.log(`Collected output file: ${relPath} (${stats.size} bytes)`);
+    return { ok: { filename: relPath, content: content.toString('base64'), mimeType, size: stats.size } };
   } catch (err: any) {
-    console.error(`Failed to read file ${filename}:`, err.message);
-    return null;
+    console.error(`Failed to read file ${relPath}:`, err.message);
+    return { skip: { path: relPath, absPath: filePath, reason: 'read-error' } };
+  }
+}
+
+/**
+ * ターン専用フォルダを再帰的に走査し、ファイル一覧とスキップ情報を集める。
+ * シンボリックリンクは辿らない（フォルダ外への脱出防止）。件数・合計サイズ・深さの
+ * 上限に達したエントリは skipped に記録して以降は読み取らない。
+ * @param dir 現在探索中のディレクトリ（絶対パス）
+ * @param relBase dir の turnDir からの相対パス（`/` 区切り。ルートは空文字）
+ * @param state 件数・合計サイズの集計状態（再帰全体で共有する可変オブジェクト）
+ * @param depth 現在の深さ（turnDir 自身が 0）
+ * @param attachments 収集済み添付（呼び出し側と共有、push で追加）
+ * @param skipped スキップ一覧（呼び出し側と共有、push で追加）
+ */
+async function walkTurnFiles(
+  dir: string,
+  relBase: string,
+  state: { count: number; totalSize: number },
+  depth: number,
+  attachments: FileAttachment[],
+  skipped: SkippedOutput[],
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') console.error(`Failed to read directory ${dir}:`, err.message);
+    return;
+  }
+  // 名前順に処理する（上限に達したときどのファイルが送られたかが実行環境に依存しないようにする）
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const entry of entries) {
+    const relPath = relBase ? `${relBase}/${entry.name}` : entry.name;
+    const absPath = join(dir, entry.name);
+
+    // シンボリックリンクはフォルダ外への脱出・循環参照を防ぐため辿らない（ファイルでも無視）
+    if (entry.isSymbolicLink()) continue;
+
+    if (entry.isDirectory()) {
+      if (depth + 1 > MAX_DEPTH) {
+        skipped.push({ path: relPath, absPath, reason: 'depth-limit' });
+        continue;
+      }
+      await walkTurnFiles(absPath, relPath, state, depth + 1, attachments, skipped);
+      continue;
+    }
+
+    if (!entry.isFile()) continue; // ソケット・デバイスファイル等は無視
+
+    if (state.count >= MAX_FILE_COUNT) {
+      skipped.push({ path: relPath, absPath, reason: 'count-limit' });
+      continue;
+    }
+
+    const result = await readAttachment(absPath, relPath);
+    if ('skip' in result) {
+      skipped.push(result.skip);
+      continue;
+    }
+    if (state.totalSize + result.ok.size > MAX_TOTAL_SIZE) {
+      skipped.push({ path: relPath, absPath, size: result.ok.size, reason: 'total-limit' });
+      continue;
+    }
+
+    attachments.push(result.ok);
+    state.count += 1;
+    state.totalSize += result.ok.size;
   }
 }
 
 /**
  * このターンでユーザーに送るファイルを集める。
- * 1. ターン専用フォルダ直下のファイル
+ * 1. ターン専用フォルダ配下（サブフォルダも含め再帰的に集める。2026-11-22: 以前は直下の
+ *    ファイルしか見ておらず、サブフォルダに整理して置いた成果物が無言で消えていた）
  * 2. `.devrelay-output/` 直下のうち、ターン開始時のスナップショットに無い（新規）か、更新されたファイル
- * 同名がある場合は 1 を優先する。別スレッドのターン専用フォルダは見ないので混線しない。
+ *    （こちらは従来どおり非再帰。直下のサブフォルダは他スレッドのターン専用フォルダ・ユーザーの
+ *    作業用フォルダである可能性があり、再帰すると混線が再発するため対象外のまま維持する）
+ * 同名がある場合は 1 を優先する。
  * @param turn beginOutputTurn の戻り値
  */
-export async function collectTurnOutputFiles(turn: OutputTurn): Promise<FileAttachment[]> {
+export async function collectTurnOutputFiles(turn: OutputTurn): Promise<CollectedOutput> {
   const outputDir = join(turn.projectPath, OUTPUT_DIR_NAME);
   const turnDir = join(outputDir, turn.turnDirName);
   const attachments: FileAttachment[] = [];
-  const seen = new Set<string>();
+  const skipped: SkippedOutput[] = [];
+  const state = { count: 0, totalSize: 0 };
 
-  // 1. ターン専用フォルダ
-  try {
-    for (const name of await readdir(turnDir)) {
-      const att = await readAttachment(join(turnDir, name), name);
-      if (att) {
-        attachments.push(att);
-        seen.add(name);
-      }
-    }
-  } catch (err: any) {
-    if (err.code !== 'ENOENT') console.error('Failed to read turn output directory:', err.message);
-  }
+  // 1. ターン専用フォルダ（再帰）
+  await walkTurnFiles(turnDir, '', state, 0, attachments, skipped);
+  const seen = new Set(attachments.map((a) => a.filename));
 
-  // 2. 直下の新規・更新ファイル（後方互換）
+  // 2. 直下の新規・更新ファイル（後方互換・非再帰）
   const current = await snapshotRootFiles(outputDir);
   for (const [name, sig] of current) {
     if (seen.has(name)) continue;
     // ターン開始前から変わっていないファイルは前のターン（または別スレッド）の物なので送らない
     if (turn.rootSnapshot.get(name) === sig) continue;
-    const att = await readAttachment(join(outputDir, name), name);
-    if (att) attachments.push(att);
+    if (state.count >= MAX_FILE_COUNT) {
+      skipped.push({ path: name, absPath: join(outputDir, name), reason: 'count-limit' });
+      continue;
+    }
+    const result = await readAttachment(join(outputDir, name), name);
+    if ('skip' in result) {
+      skipped.push(result.skip);
+      continue;
+    }
+    if (state.totalSize + result.ok.size > MAX_TOTAL_SIZE) {
+      skipped.push({ path: name, absPath: join(outputDir, name), size: result.ok.size, reason: 'total-limit' });
+      continue;
+    }
+    attachments.push(result.ok);
+    state.count += 1;
+    state.totalSize += result.ok.size;
   }
-  return attachments;
+  return { attachments, skipped };
+}
+
+/**
+ * collectTurnOutputFiles() が返した skipped を、AI 応答本文に追記する注意文に変換する。
+ * スキップが無ければ空文字を返す（呼び出し側はそのまま末尾に連結すればよい）。
+ * 2026-11-22: 以前は console.log のみでユーザーに一切伝わらなかった「無言の失敗」を解消する。
+ * @param skipped collectTurnOutputFiles の戻り値の skipped
+ */
+export function buildSkippedOutputNotice(skipped: SkippedOutput[]): string {
+  if (skipped.length === 0) return '';
+  const reasonLabel: Record<SkippedOutput['reason'], string> = {
+    'too-large': '1ファイルの上限超過',
+    'total-limit': '合計サイズの上限超過',
+    'count-limit': '件数の上限超過',
+    'depth-limit': 'フォルダ階層が深すぎる',
+    'read-error': '読み取り失敗',
+  };
+  const lines = skipped.map((s) => {
+    const sizeStr = s.size != null ? `（${(s.size / (1024 * 1024)).toFixed(1)}MB）` : '';
+    return `- ${s.path}${sizeStr} … ${reasonLabel[s.reason]}（この機体に残っています: ${s.absPath}）`;
+  });
+  const maxFileMb = Math.round(MAX_FILE_SIZE / (1024 * 1024));
+  const maxTotalMb = Math.round(MAX_TOTAL_SIZE / (1024 * 1024));
+  return `\n\n⚠️ 以下のファイルは DevRelay で送信できませんでした（上限: 1ファイル${maxFileMb}MB・合計${maxTotalMb}MB・${MAX_FILE_COUNT}件・階層${MAX_DEPTH}段）:\n${lines.join('\n')}`;
 }
 
 /**
@@ -378,11 +532,14 @@ export async function collectTurnOutputFiles(turn: OutputTurn): Promise<FileAtta
  * @param turn beginOutputTurn の戻り値
  */
 export function buildOutputDirInstruction(turn: OutputTurn): string {
+  const maxFileMb = Math.round(MAX_FILE_SIZE / (1024 * 1024));
+  const maxTotalMb = Math.round(MAX_TOTAL_SIZE / (1024 * 1024));
   return `
 
 【ファイル出力】
 ユーザー向けの成果物ファイル（HTML/PDF/画像/スクリプト等）は、特にパス指定がなければ \`${turn.relDir}/\` ディレクトリに保存してください。このディレクトリに置かれたファイルは自動的にユーザーに送信されます。
 （このやり取り専用のフォルダです。同じプロジェクトの別の会話の成果物と混ざらないよう、\`${OUTPUT_DIR_NAME}/\` 直下ではなくこのフォルダに置いてください）
+サブフォルダを作って整理しても構いません（階層ごと送られます）。ただし 1 ファイル ${maxFileMb}MB・合計 ${maxTotalMb}MB・${MAX_FILE_COUNT} 件が上限です。動画等が超える場合は解像度やビットレートを落として収めてください。
 ただしユーザーが明示的に保存先を指定した場合（例：「ルートフォルダに」「~/foo に」「カレントディレクトリに」等）は、その指示を優先してください。`;
 }
 

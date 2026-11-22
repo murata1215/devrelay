@@ -67,6 +67,7 @@ import {
   beginOutputTurn,
   collectTurnOutputFiles,
   buildOutputDirInstruction,
+  buildSkippedOutputNotice,
   PLAN_MODE_INSTRUCTION,
   EXEC_MODE_INSTRUCTION,
   DEVRELAY_AGREEMENT_MARKER,
@@ -2073,7 +2074,15 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
           // Collect files from the output directory
           // サイクルG（G-4）: isolated では所有者の .devrelay-output/ を一切添付しない
           // （クロスユーザーの成果物漏洩。同一ユーザー ask は既存どおり添付する）。
-          const files = outputTurn && statePolicy.outputFileCollect ? await collectTurnOutputFiles(outputTurn) : [];
+          let files: FileAttachment[] = [];
+          // 2026-11-22: 上限超過・サブフォルダ深すぎ等でスキップされたファイルを、
+          // AI応答本文の末尾に注意文として追記する（以前は console.log のみで無言の失敗だった）
+          let skippedOutputNotice = '';
+          if (outputTurn && statePolicy.outputFileCollect) {
+            const collected = await collectTurnOutputFiles(outputTurn);
+            files = collected.attachments;
+            skippedOutputNotice = buildSkippedOutputNotice(collected.skipped);
+          }
           if (files.length > 0) {
             console.log(`📎 Sending ${files.length} file(s) from output directory`);
           }
@@ -2083,7 +2092,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             payload: {
               machineId: currentConfig!.machineId,
               sessionId,
-              output: responseText,  // Send full accumulated response
+              output: responseText + skippedOutputNotice,  // Send full accumulated response (+ skip notice for the user)
               isComplete,
               files: files.length > 0 ? files : undefined,
               usageData,  // AI 使用量データ（DB 保存用）
@@ -2214,7 +2223,14 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
             completionSent = true;
 
             // サイクルG（G-4）: isolated では所有者の .devrelay-output/ を一切添付しない。
-            const files = outputTurn && statePolicy.outputFileCollect ? await collectTurnOutputFiles(outputTurn) : [];
+            let files: FileAttachment[] = [];
+            // 2026-11-22: 上限超過等でスキップされたファイルを本文末尾に注意文として追記
+            let skippedOutputNotice = '';
+            if (outputTurn && statePolicy.outputFileCollect) {
+              const collected = await collectTurnOutputFiles(outputTurn);
+              files = collected.attachments;
+              skippedOutputNotice = buildSkippedOutputNotice(collected.skipped);
+            }
             if (files.length > 0) {
               console.log(`📎 Sending ${files.length} file(s) from output directory`);
             }
@@ -2224,7 +2240,7 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
               payload: {
                 machineId: currentConfig!.machineId,
                 sessionId,
-                output: responseText,
+                output: responseText + skippedOutputNotice,
                 isComplete,
                 files: files.length > 0 ? files : undefined,
                 usageData,  // AI 使用量データ（DB 保存用）

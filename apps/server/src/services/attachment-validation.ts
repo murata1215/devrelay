@@ -309,3 +309,58 @@ export function validateAttachments(input: RawAttachmentInput[]): ValidateAttach
 
   return { ok: true, files, sanitizedFilenameCount, totalBytes };
 }
+
+// ============================================================================
+// Agent 出力ファイル（agent:ai:output）の filename 正規化
+//
+// 背景（2026-11-22）: サブフォルダ再帰収集に伴い、出力ファイルの filename は
+// `/` 区切りの相対パス（例: `report/best.mp4`）を持つようになった。この経路
+// （agent-manager.ts の handleAiOutput）は従来 filename を一切検証せず DB に
+// そのまま保存していたため、改変・バグのある Agent が `..` を含む filename を
+// 送ってきた場合に dev-report の ZIP 展開（api.ts）等で ZIP Slip 相当の脱出が
+// 成立し得た。上記の sanitizeAttachmentFilename() は MCP submit_instruction
+// 専用で basename 化してしまう（階層を潰す）ため流用できず、「正規な相対パス
+// は通す・`..` 等の脱出要素だけ閉じる」別の関数として用意する。
+// ============================================================================
+
+/** sanitizeOutputRelPath() が許容するフォルダ階層の深さ（ファイル名を含む） */
+const OUTPUT_REL_PATH_MAX_DEPTH = 5;
+
+/** sanitizeOutputRelPath() が許容する正規化後の全長 */
+const OUTPUT_REL_PATH_MAX_LENGTH = 200;
+
+/**
+ * Agent 出力ファイルの filename（相対パス）を正規化する。
+ *
+ * - `\`（Windows機体からの値を想定）は `/` に正規化する
+ * - 各セグメントから NUL・制御文字を除去する
+ * - 空 / `.` / `..` になったセグメントは除去する（フォルダ外への脱出防止）
+ * - セグメント数が上限を超える場合は末尾（ファイル名に近い側）を優先して残す
+ * - 全長が上限を超える場合は basename（最後のセグメント）のみに落とす
+ * - 正規化の結果何も残らなければ `'file'` を返す（空文字列を保存しない）
+ *
+ * @param raw Agent から届いた生の filename
+ */
+export function sanitizeOutputRelPath(raw: string): string {
+  if (typeof raw !== 'string' || raw.length === 0) return 'file';
+
+  const normalized = raw.replace(/\\/g, '/');
+  const segments = normalized
+    .split('/')
+    .map((seg) => seg.replace(/[\u0000-\u001F\u007F]/g, ''))
+    .filter((seg) => seg.length > 0 && seg !== '.' && seg !== '..');
+
+  if (segments.length === 0) return 'file';
+
+  // 深さ上限超過: ファイル名に近い側（末尾）を優先して残す
+  const limited = segments.length > OUTPUT_REL_PATH_MAX_DEPTH
+    ? segments.slice(segments.length - OUTPUT_REL_PATH_MAX_DEPTH)
+    : segments;
+
+  const joined = limited.join('/');
+  if (joined.length <= OUTPUT_REL_PATH_MAX_LENGTH) return joined;
+
+  // 全長超過: フォルダ階層を諦め、basename のみ（さらに長ければ切り詰め）に落とす
+  const base = limited[limited.length - 1];
+  return base.length > OUTPUT_REL_PATH_MAX_LENGTH ? base.slice(0, OUTPUT_REL_PATH_MAX_LENGTH) : base;
+}

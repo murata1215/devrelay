@@ -65,3 +65,24 @@ export function truncateSafe(text: string, maxLength: number, suffix: string = '
   }
   return cleaned.slice(0, cut) + suffix;
 }
+
+/**
+ * `MessageFile.filename` の basename を取り出す。
+ *
+ * 2026-11-22: 出力ファイル（.devrelay-output 配下のターン専用フォルダのサブフォルダ再帰収集）に伴い、
+ * filename は `/` 区切りの相対パス（例: `report/best.mp4`）を持つようになった。
+ * WebUI のファイルリンクは `MessageFile.id` ベースの URL なので影響しないが、
+ * filename をファイルシステムパス・アーカイブエントリ名として使う下流
+ * （Discord/Telegram の添付名、dev-report の画像 src、ZIP エントリ名、
+ * WebUI の `download` 属性）はそのまま使うとフォルダ階層が意図せず露出したり
+ * 相対パスとして解釈され得るため、必ずこの関数で basename 化してから使うこと。
+ *
+ * @param filename `MessageFile.filename`（相対パスの場合も単純なファイル名の場合もある）
+ * @returns 最後の `/` より後ろの部分。空になった場合は `'file'`
+ */
+export function outputFileBaseName(filename: string): string {
+  if (typeof filename !== 'string' || filename.length === 0) return 'file';
+  const parts = filename.split('/');
+  const base = parts[parts.length - 1];
+  return base.length > 0 ? base : 'file';
+}

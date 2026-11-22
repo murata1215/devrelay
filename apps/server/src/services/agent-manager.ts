@@ -63,6 +63,7 @@ import { resolvePermissionPolicy } from './permission-policy.js';
 import type { ManagementInfo } from '@devrelay/shared';
 import { decideClaudeAuthUpdate } from './claude-auth-precedence.js';
 import { validateOAuthCode } from './claude-login-code.js';
+import { sanitizeOutputRelPath } from './attachment-validation.js';
 import { shouldRecordPlanAiSession, buildPlanAiSessionWhere } from './submission-guard.js';
 import { normalizeStopReason, isStopReasonTruncated } from './stop-reason.js';
 import { truncateOnLineBoundary } from './content-truncate.js';
@@ -883,9 +884,13 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
         content: contentWithContext,
         platform: 'system',
         usageData: usageData ?? undefined,
+        // 2026-11-22: filename（サブフォルダ再帰収集により `/` 区切りの相対パスを持つ）を
+        // sanitizeOutputRelPath() で正規化する。agent:ai:output はこれまで filename を
+        // 一切検証せず保存していたため、改変・バグのある Agent が `..` を送った場合に
+        // 下流（dev-report の ZIP 展開等）で脱出が成立し得た境界を閉じる。
         files: files && files.length > 0 ? {
           create: files.map(f => ({
-            filename: f.filename,
+            filename: sanitizeOutputRelPath(f.filename),
             mimeType: f.mimeType,
             size: f.size,
             content: Buffer.from(f.content, 'base64'),

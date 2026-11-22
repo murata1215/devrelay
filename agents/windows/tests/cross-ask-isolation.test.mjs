@@ -29,13 +29,18 @@ test('G-3: loadStorageContext(sessionInfo.projectPath) の直前 100 文字に s
 
 // 本家マージ（2026-11-21）: 会社側のターン専用出力フォルダ化で collectTurnOutputFiles(outputTurn) は
 // collectTurnOutputFiles(outputTurn) に置き換わった（ガードの意味は同じ）。
+// 2026-11-22: サブフォルダ再帰収集・スキップ通知追加に伴い、呼び出し前のガードが
+// 三項演算子（`statePolicy.outputFileCollect ? ... : []`）から if 文
+// （`if (outputTurn && statePolicy.outputFileCollect) { ... }`）に変わった。
+// ガードの論理（outputFileCollect が真でなければ呼ばない）自体は変わっていないため、
+// 下の正規表現は `?`（三項）と `)`（if の条件末尾）のどちらでも通すようにしている。
 test('G-4: collectTurnOutputFiles(outputTurn) が 2 箇所とも statePolicy.outputFileCollect でガードされている', async () => {
   const src = await readFile(CONNECTION_TS, 'utf-8');
   const calls = [...src.matchAll(/collectTurnOutputFiles\(outputTurn\)/g)];
   assert.equal(calls.length, 2, `collectTurnOutputFiles(outputTurn) の出現数が想定(2)と異なる: ${calls.length}`);
   for (const call of calls) {
     const before = src.slice(Math.max(0, call.index - 100), call.index);
-    assert.match(before, /statePolicy\.outputFileCollect\s*\?/, `collectTurnOutputFiles call at ${call.index} にガードが無い`);
+    assert.match(before, /statePolicy\.outputFileCollect\s*[?)]/, `collectTurnOutputFiles call at ${call.index} にガードが無い`);
   }
 });
 

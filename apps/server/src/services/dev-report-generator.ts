@@ -12,7 +12,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { AiProvider } from '@devrelay/shared';
-import { UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
+import { UTILITY_MODEL_ANTHROPIC, outputFileBaseName } from '@devrelay/shared';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { getApiKeyForDevReport } from './user-settings.js';
@@ -559,7 +559,10 @@ export function generateReportHtml(content: ReportContent): string {
     // 画像
     const imagesHtml = section.imageRefs.map((img) => {
       const caption = img.caption ? `<figcaption>${escapeHtml(img.caption)}</figcaption>` : '';
-      return `<figure><img src="images/${escapeHtml(img.filename)}" alt="${escapeHtml(img.caption || img.filename)}" />${caption}</figure>`;
+      // 2026-11-22: filename は `/` 区切りの相対パスを持ちうるため basename 化する
+      // （ZIP ダウンロード側 api.ts も同じ outputFileBaseName() で揃えるので images/ 配下のファイル名は一致する）
+      const imgName = outputFileBaseName(img.filename);
+      return `<figure><img src="images/${escapeHtml(imgName)}" alt="${escapeHtml(img.caption || imgName)}" />${caption}</figure>`;
     }).join('\n');
 
     // 元会話（折りたたみ）

@@ -10,6 +10,7 @@ import {
   decodeStrictBase64,
   detectMimeFromMagicBytes,
   validateAttachments,
+  sanitizeOutputRelPath,
 } from '../dist/services/attachment-validation.js';
 
 // 1x1 透明 PNG（実バイナリ、テストで使い回す）
@@ -317,4 +318,50 @@ test('validateAttachments: allowlist の一覧に想定6種が含まれる', () 
     [...ALLOWED_ATTACHMENT_MIME_TYPES].sort(),
     ['image/gif', 'image/jpeg', 'image/png', 'image/webp', 'text/markdown', 'text/plain'].sort()
   );
+});
+
+// --- sanitizeOutputRelPath (2026-11-22: agent:ai:output の filename 正規化) ---
+
+test('sanitizeOutputRelPath: 通常の相対パスはそのまま通る', () => {
+  assert.equal(sanitizeOutputRelPath('report/best.mp4'), 'report/best.mp4');
+  assert.equal(sanitizeOutputRelPath('top.txt'), 'top.txt');
+});
+
+test('sanitizeOutputRelPath: Windows 区切り(\\\\)は / に正規化される', () => {
+  assert.equal(sanitizeOutputRelPath('sub\\deep\\file.png'), 'sub/deep/file.png');
+});
+
+test('sanitizeOutputRelPath: ".." を含むセグメントは除去される（フォルダ外脱出防止）', () => {
+  assert.equal(sanitizeOutputRelPath('../../etc/passwd'), 'etc/passwd');
+  assert.equal(sanitizeOutputRelPath('a/../b/c.txt'), 'a/b/c.txt');
+});
+
+test('sanitizeOutputRelPath: 空文字・"."だけ・空になる入力は "file" を返す', () => {
+  assert.equal(sanitizeOutputRelPath(''), 'file');
+  assert.equal(sanitizeOutputRelPath('.'), 'file');
+  assert.equal(sanitizeOutputRelPath('../..'), 'file');
+});
+
+test('sanitizeOutputRelPath: 深さ上限を超えると末尾（ファイル名に近い側）を優先して残す', () => {
+  const deep = 'a/b/c/d/e/f/g/leaf.txt';
+  const result = sanitizeOutputRelPath(deep);
+  assert.equal(result.split('/').length, 5);
+  assert.ok(result.endsWith('leaf.txt'));
+});
+
+test('sanitizeOutputRelPath: NUL・制御文字は除去される', () => {
+  assert.equal(sanitizeOutputRelPath('sub/na\u0000me.txt'), 'sub/name.txt');
+});
+
+test('sanitizeOutputRelPath: 全長が上限を超えるとフォルダ階層を諦め basename のみに落ちる', () => {
+  const longDir = 'd'.repeat(250);
+  const result = sanitizeOutputRelPath(`${longDir}/best.txt`);
+  assert.equal(result, 'best.txt');
+});
+
+test('sanitizeOutputRelPath: basename 自体が上限を超える場合は切り詰める', () => {
+  const longName = 'x'.repeat(250);
+  const result = sanitizeOutputRelPath(`sub/${longName}.txt`);
+  assert.equal(result, 'x'.repeat(200));
+  assert.equal(result.length, 200);
 });

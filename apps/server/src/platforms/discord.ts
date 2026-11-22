@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events, Message, AttachmentBuilder, Attachment, Collection, TextChannel, DMChannel, ButtonBuilder, ActionRowBuilder, ButtonStyle, ComponentType } from 'discord.js';
 import type { FileAttachment, ToolApprovalPromptPayload } from '@devrelay/shared';
-import { redactChatInput } from '@devrelay/shared';
+import { redactChatInput, outputFileBaseName } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
 import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
@@ -10,6 +10,11 @@ import type { BotAttempt } from '../services/bot-supervisor.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
+
+// 2026-11-22: Discord の添付上限（無料サーバー 10MB）に対する送信前チェック用の安全マージン値。
+// 以前はサイズチェックが皆無で、超過時に catch(discord.js の例外) に落ちると
+// 同じ send に乗っている本文テキストまで一緒に消えていた（無言の失敗）。
+const DISCORD_ATTACHMENT_SIZE_LIMIT = 9.5 * 1024 * 1024;
 
 // Discord message limit (using 1500 for safety with emojis/multibyte chars)
 const MAX_MESSAGE_LENGTH = 1500;
@@ -358,18 +363,31 @@ export async function sendDiscordMessage(channelId: string, content: string, fil
     const channel = await client.channels.fetch(channelId);
     if (channel && channel.isTextBased() && 'send' in channel) {
       // Build attachments from files
+      // 2026-11-22: filename は `/` 区切りの相対パスを持ちうるため basename 化する
+      // （Discord の添付名としてはフォルダ階層を持つ名前は不自然・一部で拒否されうる）。
+      // また送信前にサイズをチェックし、上限超過分は添付せず本文に注意を1行追記する
+      // （黙って落ちて本文まで消える事故の予防）。
       const attachments: AttachmentBuilder[] = [];
+      const oversizedNotices: string[] = [];
       if (files && files.length > 0) {
         for (const file of files) {
+          if (file.size > DISCORD_ATTACHMENT_SIZE_LIMIT) {
+            console.log(`⚠️ Skipping oversized attachment for Discord: ${file.filename} (${file.size} bytes)`);
+            oversizedNotices.push(`📎 ${outputFileBaseName(file.filename)}（${(file.size / (1024 * 1024)).toFixed(1)}MB）はDiscordの上限を超えるため添付できません。WebUIから取得してください。`);
+            continue;
+          }
           const buffer = Buffer.from(file.content, 'base64');
-          const attachment = new AttachmentBuilder(buffer, { name: file.filename });
+          const attachment = new AttachmentBuilder(buffer, { name: outputFileBaseName(file.filename) });
           attachments.push(attachment);
           console.log(`📎 Attaching file: ${file.filename} (${file.size} bytes)`);
         }
       }
+      const contentWithNotices = oversizedNotices.length > 0
+        ? `${content}\n\n${oversizedNotices.join('\n')}`
+        : content;
 
       // Split content into chunks if needed
-      const chunks = content ? splitMessage(content) : [''];
+      const chunks = contentWithNotices ? splitMessage(contentWithNotices) : [''];
 
       // Send first chunk with attachments
       if (attachments.length > 0) {
@@ -381,7 +399,7 @@ export async function sendDiscordMessage(channelId: string, content: string, fil
         for (let i = 1; i < chunks.length; i++) {
           await (channel as any).send(chunks[i]);
         }
-      } else if (content) {
+      } else if (contentWithNotices) {
         // Send all chunks
         for (const chunk of chunks) {
           await (channel as any).send(chunk);

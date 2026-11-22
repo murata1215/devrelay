@@ -158,3 +158,4 @@
 - 2026-11-12_215108 | サイクルS2a+S2b | クロスユーザー askの読める範囲・使えるツール制限（新ゲート+client_composed+既存バイパス2件根治、S2c以降は先送り） | [詳細](2026-11-12_215108.md)
 - 2026-11-14_072449 | エージェント再接続3不具合修正 | `agents/{linux,macos,windows}`: 接続タイムアウト（`handshakeTimeout`+自前監視タイマー）導入・安定判定を「60秒OPEN維持でリセット」に修正（旧実装は毎回リセットでバックオフ無効化）・`maxAttempts`打ち切り撤廃で無期限リトライ化+常駐supervisor新設。自宅PC3日間沈黙事故の根治、`packages/shared/src/reconnect.ts`新設、windows旧ソケット後片付けギャップは範囲外 | [詳細](2026-11-14_072449.md)
 - 2026-11-21_thread_auto_title | スレッドタイトル自動命名 | AI 応答 1・3・8 回目に `Session.autoTitle`（0033）を AI で付け直し、表示は title > autoTitle > ↪ 引継ぎ元 > コマンド除外の最初の発言。`DEVRELAY_THREAD_AUTO_TITLE` | [詳細](2026-11-21_thread_auto_title.md)
+- 2026-11-22_output_subfolder_collect | .devrelay-output サブフォルダ成果物の無言消失根治 | ターン専用フォルダの再帰収集（symlink不追従・1ファイル25MB/合計40MB/50件/深さ5）+スキップ理由をAI応答末尾に通知+filename相対パス化に伴うサーバー側basename化（outputFileBaseName）・ZIP Slip対策（sanitizeOutputRelPath）・Discord/Telegram送信前サイズチェック、3OS Agent対応 | [詳細](2026-11-22_output_subfolder_collect.md)

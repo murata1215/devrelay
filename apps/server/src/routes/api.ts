@@ -47,7 +47,7 @@ import {
   validateAndConsumeLinkCode,
   unlinkPlatform,
 } from '../services/platform-link.js';
-import { encodeToken, isTraditionalCommand } from '@devrelay/shared';
+import { encodeToken, isTraditionalCommand, outputFileBaseName } from '@devrelay/shared';
 import { buildAgentWsUrl } from '../services/agent-token-url.js';
 import {
   getVapidPublicKey,
@@ -2595,12 +2595,16 @@ export async function apiRoutes(app: FastifyInstance) {
     archive.append(JSON.stringify(content, null, 2), { name: `${folderName}/report.json` });
 
     // 画像ファイル
+    // 2026-11-22: file.filename は `/` 区切りの相対パスを持ちうるため basename 化する
+    // （ZIP エントリ名としてそのまま連結すると `..` 等でフォルダ外への脱出が成立しうる。
+    // HTML 側（dev-report-generator.ts）も同じ outputFileBaseName() で揃えており、
+    // images/ 配下のファイル名は一致する）
     for (const section of content.sections) {
       for (const imgRef of section.imageRefs) {
         const file = imageMap.get(imgRef.fileId);
         if (file) {
           archive.append(Buffer.from(file.content), {
-            name: `${folderName}/images/${file.filename}`,
+            name: `${folderName}/images/${outputFileBaseName(file.filename)}`,
           });
         }
       }

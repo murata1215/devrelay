@@ -1,6 +1,6 @@
 import TelegramBot, { Message } from 'node-telegram-bot-api';
 import type { FileAttachment, ToolApprovalPromptPayload } from '@devrelay/shared';
-import { redactChatInput } from '@devrelay/shared';
+import { redactChatInput, outputFileBaseName } from '@devrelay/shared';
 import { parseCommandWithNLP } from '../services/command-parser.js';
 import { executeCommand, getUserContext } from '../services/command-handler.js';
 import { handleToolApprovalUserResponse } from '../services/agent-manager.js';
@@ -9,6 +9,11 @@ import type { BotAttempt } from '../services/bot-supervisor.js';
 
 // Max file size to download (5MB)
 const MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024;
+
+// 2026-11-22: Telegram の sendDocument 上限（50MB）に対する送信前チェック用の安全マージン値。
+// 以前はサイズチェックが皆無で、超過時に例外が飛ぶと同じ try 内の本文テキスト送信まで
+// スキップされていた（無言の失敗）。
+const TELEGRAM_ATTACHMENT_SIZE_LIMIT = 45 * 1024 * 1024;
 
 // bot: getMe() 成功 + startPolling() 完了後のみ非 null。既存の送信系関数群（sendTelegramMessage 等）は
 // すべて `if (!bot)` でガードしているため、代入を成功後まで遅らせるだけで
@@ -216,23 +221,35 @@ export async function sendTelegramMessage(chatId: string, content: string, files
 
   try {
     // Send files first if present
+    // 2026-11-22: filename は `/` 区切りの相対パスを持ちうるため basename 化する。
+    // 送信前にサイズをチェックし、上限超過分は送らず本文に注意を1行追記する
+    // （黙って例外が飛んで本文テキストまで送られなくなる事故の予防）。
+    const oversizedNotices: string[] = [];
     if (files && files.length > 0) {
       for (const file of files) {
+        if (file.size > TELEGRAM_ATTACHMENT_SIZE_LIMIT) {
+          console.log(`⚠️ Skipping oversized attachment for Telegram: ${file.filename} (${file.size} bytes)`);
+          oversizedNotices.push(`📎 ${outputFileBaseName(file.filename)}（${(file.size / (1024 * 1024)).toFixed(1)}MB）はTelegramの上限を超えるため送信できません。WebUIから取得してください。`);
+          continue;
+        }
         const buffer = Buffer.from(file.content, 'base64');
         console.log(`📎 Sending file: ${file.filename} (${file.size} bytes)`);
-        await bot.sendDocument(chatId, buffer, {}, { filename: file.filename, contentType: file.mimeType });
+        await bot.sendDocument(chatId, buffer, {}, { filename: outputFileBaseName(file.filename), contentType: file.mimeType });
       }
     }
 
     // Send text message if present
-    if (content) {
+    const contentWithNotices = oversizedNotices.length > 0
+      ? `${content}\n\n${oversizedNotices.join('\n')}`
+      : content;
+    if (contentWithNotices) {
       // Telegram has 4096 character limit per message
       const MAX_LENGTH = 4096;
-      if (content.length <= MAX_LENGTH) {
-        await bot.sendMessage(chatId, content);
+      if (contentWithNotices.length <= MAX_LENGTH) {
+        await bot.sendMessage(chatId, contentWithNotices);
       } else {
         // Split long messages
-        const chunks = splitMessage(content, MAX_LENGTH);
+        const chunks = splitMessage(contentWithNotices, MAX_LENGTH);
         for (const chunk of chunks) {
           await bot.sendMessage(chatId, chunk);
         }
