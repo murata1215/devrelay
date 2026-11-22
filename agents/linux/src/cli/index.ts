@@ -8,6 +8,7 @@ import { projectsCommand } from './commands/projects.js';
 import { startCommand } from './commands/start.js';
 import { logsCommand } from './commands/logs.js';
 import { uninstallCommand } from './commands/uninstall.js';
+import { sandboxStatusCommand, sandboxPrepCommand, sandboxSetTokenCommand, sandboxSelftestCommand } from './commands/sandbox.js';
 
 // package.json からバージョンを動的に取得
 const require = createRequire(import.meta.url);
@@ -94,5 +95,36 @@ program
   .command('uninstall')
   .description('Uninstall DevRelay Agent')
   .action(uninstallCommand);
+
+// サイクル SB-1a-1: Sandbox 実行（仮想アカウント + 外向き通信制限、Windows + claude のみ）。
+// ai-runner.ts / connection.ts には未配線（既存の実行経路は一切変更しない）。
+const sandbox = program
+  .command('sandbox')
+  .description('Sandbox 実行（Windows + Claude Code 専用、未配線の単独検証用）');
+
+sandbox
+  .command('status')
+  .description('Sandbox 実行前確認の結果を表示する')
+  .option('--project <path>', 'プロジェクトパス（未指定なら現在のディレクトリ）')
+  .action(sandboxStatusCommand);
+
+sandbox
+  .command('prep')
+  .description('プロジェクトフォルダ・node_modules への ACL を設定する（Windows のみ）')
+  .option('--project <path>', 'プロジェクトパス')
+  .action(sandboxPrepCommand);
+
+sandbox
+  .command('set-token')
+  .description('claude setup-token で発行したトークンを登録する（stdin から入力）')
+  .action(sandboxSetTokenCommand);
+
+sandbox
+  .command('selftest')
+  .description('Sandbox Host への接続・実行前確認・簡易プロセス起動を検証する')
+  .option('--project <path>', 'プロジェクトパス（未指定なら現在のディレクトリ）')
+  .option('--spawn', 'ホスト経由で簡単なコマンドを実行して確認する')
+  .option('--network-probe', 'ネットワーク遮断の確認プローブ（curl / bitsadmin）を実行する')
+  .action(sandboxSelftestCommand);
 
 program.parse();

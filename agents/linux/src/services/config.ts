@@ -42,6 +42,19 @@ export interface AgentConfig {
    * 一覧送信の対象から除外する。false にすると従来どおり yaml の内容をそのまま送信する。
    */
   projectExistenceFilter?: boolean;
+  /**
+   * サイクル SB-1a-1: Sandbox 実行（仮想アカウント + 外向き通信制限、Windows + claude のみ）の
+   * ローカル設定。SB-1a-1 は未配線（ai-runner.ts / connection.ts を変更しない）なので、ここは
+   * `devrelay sandbox status` / `selftest` が読むだけ。SB-1a-2 でチャット経路に配線する際、
+   * `selftestProjects` に改名して selftest 専用に縮退させる予定（SB-1b で `Project.sandbox`
+   * （DB）が唯一の根拠になるため）。
+   */
+  sandbox?: {
+    /** selftest / 将来のローカル検証で対象にするプロジェクトパス */
+    projects?: string[];
+    /** `host` または `host:port` 形式。未指定なら `DEFAULT_SANDBOX_ALLOWLIST` を使う */
+    allowlist?: string[];
+  };
 }
 
 export interface ProjectConfig {
@@ -116,6 +129,7 @@ export async function loadConfig(): Promise<AgentConfig> {
       proxy: config.proxy,  // プロキシ設定を読み込み
       projectOwnerFilter: config.projectOwnerFilter,  // 未設定なら undefined（呼び出し側で !== false 判定 → 既定 true）
       projectExistenceFilter: config.projectExistenceFilter,  // 未設定なら undefined（呼び出し側で !== false 判定 → 既定 true）
+      sandbox: config.sandbox,  // サイクル SB-1a-1: Sandbox 実行のローカル設定（未配線）
     };
   } catch (err) {
     // Return default config
@@ -239,4 +253,32 @@ export function getLogDir() {
  */
 export function getBinDir() {
   return path.join(CONFIG_DIR, 'bin');
+}
+
+/**
+ * サイクル SB-1a-1: Sandbox トークン（`claude setup-token` で発行した専用トークン）の保存先。
+ * 書き込み後は `icacls /inheritance:r /grant <本人>:(R,W)` で開発者本人のみに制限する
+ * （`devrelay sandbox set-token` が行う）。
+ */
+export function getSandboxTokenPath() {
+  return path.join(CONFIG_DIR, 'sandbox-token');
+}
+
+/**
+ * サイクル SB-1a-1: Sandbox Host（管理者用インストールスクリプトが作成）の共有ディレクトリ。
+ * 秘密鍵は仮想アカウントのみが読める DACL、公開鍵は誰でも読める（Agent はここから公開鍵だけ読む）。
+ * win32 専用パス固定（Sandbox は Windows 専用機能のため、他 OS での呼び出しは呼び出し側の誤り）。
+ */
+export function getSandboxProgramDataDir() {
+  return 'C:\\ProgramData\\devrelay\\sandbox';
+}
+
+/** Sandbox Host の公開鍵ファイルパス（署名検証に使う。誰でも読める） */
+export function getSandboxPublicKeyPath() {
+  return `${getSandboxProgramDataDir()}\\host-key.pub`;
+}
+
+/** 仮想アカウント専用の固定ホームディレクトリ（HOME/APPDATA/TEMP 等を固定する先） */
+export function getSandboxHomeDir() {
+  return `${getSandboxProgramDataDir()}\\home`;
 }
