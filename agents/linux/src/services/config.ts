@@ -59,6 +59,13 @@ export interface AgentConfig {
     projects?: string[];
     /** `host` または `host:port` 形式。未指定なら `DEFAULT_SANDBOX_ALLOWLIST` を使う */
     allowlist?: string[];
+    /**
+     * サイクル SB-2.1: Sandbox から直接 TCP で通信してよい宛先（`"ip:port"` 形式、`/32` の IPv4
+     * のみ、上限 20 件）。`sandbox.allowlist`（ドメイン宛・中継プロキシ経由）とは別物で、
+     * テスト DB 等への直接通信をファイアウォールのルールとして PC 単位で許可する。
+     * 未設定/空なら従来どおり何も通さない（既定）。
+     */
+    allowDestinations?: string[];
   };
 }
 
@@ -286,4 +293,20 @@ export function getSandboxPublicKeyPath() {
 /** 仮想アカウント専用の固定ホームディレクトリ（HOME/APPDATA/TEMP 等を固定する先） */
 export function getSandboxHomeDir() {
   return `${getSandboxProgramDataDir()}\\home`;
+}
+
+/**
+ * サイクル SB-2.1: 許可リスト（IP とポート）の要求ファイル置き場。開発者（本人）が書ける
+ * ACL（インストールスクリプトが設定）。Sandbox の身元には ACE を与えない。
+ */
+export function getSandboxAllowRequestPath() {
+  return `${getSandboxProgramDataDir()}\\allowlist-request\\request.json`;
+}
+
+/**
+ * サイクル SB-2.1: 許可リスト（IP とポート）の反映結果ファイル。SYSTEM と管理者のみが書ける
+ * ACL（開発者は読み取りのみ）。Agent はここを読んで設定との一致を判定する。
+ */
+export function getSandboxAllowStatePath() {
+  return `${getSandboxProgramDataDir()}\\allowlist-result\\state.json`;
 }

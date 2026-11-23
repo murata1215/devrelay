@@ -1,16 +1,32 @@
-// サイクル SB-1a-1.1: scripts/install-sandbox-host.ps1 / uninstall-sandbox-host.ps1 に対する
-// 静的ガード（node:fs のみ、スクリプトを実行しない。apps/server の
-// install-agent-repo-auth-guard.test.mjs と同じ手口）。
+// サイクル SB-1a-1.1 / SB-2.1: scripts/install-sandbox-host.ps1 / uninstall-sandbox-host.ps1 /
+// apply-sandbox-allowlist.ps1 に対する静的ガード（node:fs のみ、スクリプトを実行しない。
+// apps/server の install-agent-repo-auth-guard.test.mjs と同じ手口）。
 //
 // これが無いと、将来の編集で以下が黙って再発しても気づけない:
 // - A1: 非 ASCII 文字が混入し、Windows PowerShell 5.1 が BOM なし UTF-8 を ANSI として誤読して
 //   ParserError になる（hp630g9 実機で発生した既存バグ）
 // - A2: `sc.exe create` に `password=` が残り、PowerShell 5.1 で引数が欠落して exit=1639 になる
 // - A3: IPv6 ブロックに無効な `"::/0"` が残る
-// - A4: ファイアウォールのルールが未検証の `-Service` 形式に戻る
+// - A4: ファイアウォールのルールが未検証の `-Service` 形式に戻る、または -Group/-Name を失う
+//   （サイクル SB-2.1 で install 側のルールは 3 本→2 本に変わった。IPv4 の Block ルールは
+//   apply-sandbox-allowlist.ps1 が digest 付きで管理するため、install 側は静的な2本
+//   （IPv6 Block・loopback Allow）のみを作る）
 // - A5: 鍵生成が P-256 にならない `NamedCurves` 形式に戻る、または blob 検査が失われる
 // - A6(a): サービス停止・削除がビルドより後に戻り、再インストールで exe がロックされる
 // - A6(b): 秘密鍵の ACL 戻しが削除より後に戻り、再インストールでアクセス拒否になる
+// - B1: apply-sandbox-allowlist.ps1 がタスクの引数置換 `$(ArgN)` に依存する形に戻る
+//   （schtasks /Run は引数を渡せないため、依存すると静かに壊れる）
+// - B2: `netsh` / `Invoke-Expression` による文字列組み立てが紛れ込む
+// - B3: `Get-NetFirewallRule` が `-Group` 無しで呼ばれ、無関係なルールまで対象にしてしまう
+// - B4: `Remove-NetFirewallRule` が `-DisplayName` ワイルドカードのみで呼ばれ、意図しないルールを
+//   消してしまう（apply 側は常に -Name か -Group 経由で削除対象を絞ること）
+// - B5: `New-NetFirewallRule` が `-LocalUser`/`-Group`/`-Name` のいずれかを欠くか `-Service` を使う
+// - B6: IPv4 補集合の自己検査関数（Test-Ipv4ComplementSelfCheck）が失われる
+// - B7: request.json のリパースポイント確認が、内容を読む（Get-Content）より後に戻る
+// - B8: 拒否エントリの原文（ip/port 等の値）が state.json の rejected に書き戻されるようになる
+//   （index と固定の reason コードのみであるべき）
+// - C1: install/uninstall のタスク登録・削除が非対称になる（install が登録したのと同じ
+//   /TN を uninstall が消さない）
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -44,7 +60,17 @@ function findFirstNonAsciiByte(buf) {
   return null;
 }
 
-const SANDBOX_PS1_FILES = ['scripts/install-sandbox-host.ps1', 'scripts/uninstall-sandbox-host.ps1'];
+/** コメント行（# で始まる行）を除いた実行コード行のみを返す（旧バグの説明としてコメント内に
+ *  引用される文字列を実行コードと誤認しないため、A3/A5/B6 等で使う既存の手口）。 */
+function codeLinesOf(source) {
+  return source.split('\n').filter((line) => !line.trim().startsWith('#'));
+}
+
+const SANDBOX_PS1_FILES = [
+  'scripts/install-sandbox-host.ps1',
+  'scripts/uninstall-sandbox-host.ps1',
+  'scripts/apply-sandbox-allowlist.ps1',
+];
 
 describe('sandbox .ps1: ASCII のみ（A1: PowerShell 5.1 の ANSI 誤読によるParserError再発防止）', () => {
   for (const relPath of SANDBOX_PS1_FILES) {
@@ -82,31 +108,37 @@ describe('install-sandbox-host.ps1', () => {
   });
 
   test('A3: IPv6 ブロックは "::/1","8000::/1" を使い、"::/0" は使わない', () => {
-    // コメント（旧バグの説明として `"::/0"` を引用する行）は許可する。実行されるコード行
-    // （# で始まらない行）にのみ現れていないことを確認する。
-    const codeLines = source.split('\n').filter((line) => !line.trim().startsWith('#'));
-    const codeWithOldRange = codeLines.filter((line) => line.includes('"::/0"'));
+    const codeWithOldRange = codeLinesOf(source).filter((line) => line.includes('"::/0"'));
     assert.deepEqual(codeWithOldRange, [], 'コード行（コメント以外）に "::/0" が無いこと');
     assert.match(source, /"::\/1"\s*,\s*"8000::\/1"/);
   });
 
-  test('A4: ファイアウォールのルール3本すべて -LocalUser を使い、-Service は使わない', () => {
+  test('A4: ファイアウォールのルールは2本（静的な IPv6 Block・loopback Allow のみ）', () => {
     // 行頭から始まる実呼び出しのみを対象にする（コメント内の "New-NetFirewallRule" という
     // 言及（例: "rejected by New-NetFirewallRule with ..."）を実呼び出しと誤認しないため）。
     const ruleBlocks = [...source.matchAll(/^New-NetFirewallRule[\s\S]*?\| Out-Null/gm)];
-    assert.equal(ruleBlocks.length, 3, 'New-NetFirewallRule の呼び出しは3本であること');
+    assert.equal(
+      ruleBlocks.length,
+      2,
+      'install-sandbox-host.ps1 が直接作る New-NetFirewallRule の呼び出しは2本であること' +
+        '（IPv4 の動的 Block ルールは apply-sandbox-allowlist.ps1 が digest 付きで管理する）',
+    );
     for (const block of ruleBlocks) {
       assert.match(block[0], /-LocalUser/, `-LocalUser を使うこと: ${block[0].slice(0, 80)}...`);
+      assert.match(block[0], /-Group \$FirewallGroup/, `-Group を使うこと: ${block[0].slice(0, 80)}...`);
+      assert.match(block[0], /-Name "DevRelay-SandboxStatic-/, `-Name を使うこと: ${block[0].slice(0, 80)}...`);
       assert.ok(!/-Service\b/.test(block[0]), `-Service を使わないこと: ${block[0].slice(0, 80)}...`);
     }
   });
 
+  test('A4: ファイアウォールのルール削除は DisplayName ワイルドカード と Group の両方を見る（旧スキーム・新スキームの両方を一掃する）', () => {
+    assert.match(source, /Get-NetFirewallRule -DisplayName "DevRelay Sandbox\*"/);
+    assert.match(source, /Get-NetFirewallRule -Group \$FirewallGroup/);
+  });
+
   test('A5: 鍵生成は ECDsaCng(256) を使い、コード本体では NamedCurves を使わない', () => {
     assert.match(source, /New-Object System\.Security\.Cryptography\.ECDsaCng\(256\)/);
-    // コメント（旧バグの説明として `NamedCurves` を引用する行）は許可する。実行されるコード行
-    // （# で始まらない行）にのみ現れていないことを確認する。
-    const codeLines = source.split('\n').filter((line) => !line.trim().startsWith('#'));
-    const codeWithNamedCurves = codeLines.filter((line) => line.includes('NamedCurves'));
+    const codeWithNamedCurves = codeLinesOf(source).filter((line) => line.includes('NamedCurves'));
     assert.deepEqual(codeWithNamedCurves, [], 'コード行（コメント以外）に NamedCurves が無いこと');
   });
 
@@ -142,6 +174,38 @@ describe('install-sandbox-host.ps1', () => {
     // sandbox-token の内容を読む・表示する処理がないこと（このスクリプトはトークンを扱わない）
     assert.ok(!source.includes('sandbox-token'), 'このスクリプトは sandbox-token を直接扱わないこと');
   });
+
+  test('C1: 許可リスト反映タスク（\\DevRelay\\apply-sandbox-allowlist）を ONSTART / SYSTEM / HIGHEST で登録する', () => {
+    const createIdx = source.indexOf('schtasks /Create /TN $TaskPath');
+    assert.ok(createIdx !== -1, 'schtasks /Create 行が見つかること');
+    const line = source.slice(createIdx, source.indexOf('\n', createIdx));
+    assert.match(line, /\/SC ONSTART/);
+    assert.match(line, /\/RU "SYSTEM"/);
+    assert.match(line, /\/RL HIGHEST/);
+    assert.match(line, /\/F\b/);
+  });
+
+  test('C1: apply-allowlist.ps1 の起動コマンドが引数置換 $(ArgN) に依存しない', () => {
+    const codeWithArgToken = codeLinesOf(source).filter((line) => line.includes('$(Arg'));
+    assert.deepEqual(codeWithArgToken, [], 'コード行（コメント以外）に $(Arg が無いこと');
+  });
+
+  test('allowlist-bin\\ のACLは developer に実行(RX)のみで変更権限(M/W)を与えない', () => {
+    const idx = source.indexOf('& icacls $AllowlistBinDir /grant "*$($DeveloperSid)');
+    assert.ok(idx !== -1, 'AllowlistBinDir への developer ACL 付与行が見つかること');
+    const line = source.slice(idx, source.indexOf('\n', idx));
+    assert.match(line, /\(RX\)/);
+    assert.ok(!/\(M\)|\(W\)|\(F\)/.test(line), 'developer には Modify/Write/Full を与えないこと');
+  });
+
+  test('allowlist-request\\ / allowlist-result\\ / allowlist-deny\\ のいずれにもサービス SID への ACE を与えない', () => {
+    const section = source.slice(
+      source.indexOf('# --- Step 11b'),
+      source.indexOf('Write-Host "[OK] Created allow-destinations directories and ACLs"'),
+    );
+    assert.ok(section.length > 0, 'Step 11b の本文が見つかること');
+    assert.ok(!section.includes('$ServiceSid'), 'Step 11b の ACL 設定にサービス SID への言及が無いこと');
+  });
 });
 
 describe('uninstall-sandbox-host.ps1', () => {
@@ -157,5 +221,116 @@ describe('uninstall-sandbox-host.ps1', () => {
   test('A7/B1: 案内が devrelay コマンドを前提にしていない', () => {
     assert.ok(!/devrelay\s+sandbox/.test(source));
     assert.match(source, /sandbox set-token/);
+  });
+
+  test('A4: ファイアウォールのルール削除は DisplayName ワイルドカード と Group の両方を見る', () => {
+    assert.match(source, /Get-NetFirewallRule -DisplayName "DevRelay Sandbox\*"/);
+    assert.match(source, /Get-NetFirewallRule -Group \$FirewallGroup/);
+  });
+
+  test('C1: install が登録したタスク（\\DevRelay\\apply-sandbox-allowlist）を削除する', () => {
+    assert.match(source, /schtasks \/Delete \/TN \$TaskPath \/F/);
+    assert.match(source, /\$TaskPath = "\$TaskFolder\\\$TaskName"/);
+  });
+});
+
+describe('apply-sandbox-allowlist.ps1', () => {
+  const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+
+  test('B1: 引数置換 $(ArgN) に依存しない（schtasks /Run は引数を渡せないため）', () => {
+    const codeWithArgToken = codeLinesOf(source).filter((line) => line.includes('$(Arg'));
+    assert.deepEqual(codeWithArgToken, [], 'コード行（コメント以外）に $(Arg が無いこと');
+  });
+
+  test('B1: トップレベルの param() を持たない（ゼロ引数スクリプト）', () => {
+    assert.ok(!/^param\(/m.test(source), 'トップレベルの param() が無いこと');
+  });
+
+  test('B2: netsh / Invoke-Expression を使わない', () => {
+    assert.ok(!source.includes('netsh'), 'netsh を使わないこと');
+    assert.ok(!source.includes('Invoke-Expression'), 'Invoke-Expression を使わないこと');
+  });
+
+  test('B3: Get-NetFirewallRule の呼び出しは常に -Group 付き', () => {
+    const calls = [...source.matchAll(/Get-NetFirewallRule[^\n]*/g)];
+    assert.ok(calls.length > 0, 'Get-NetFirewallRule の呼び出しが見つかること');
+    for (const call of calls) {
+      assert.match(call[0], /-(Group|Name)\b/, `-Group か -Name を使うこと: ${call[0]}`);
+    }
+  });
+
+  test('B4: Remove-NetFirewallRule は -DisplayName ワイルドカード指定で呼ばない（-Name 絞り込み経由のみ）', () => {
+    assert.ok(!/Remove-NetFirewallRule[^\n]*-DisplayName/.test(source), '-DisplayName 指定の Remove-NetFirewallRule が無いこと');
+  });
+
+  test('B5: New-NetFirewallRule はすべて -LocalUser/-Group/-Name 付きで -Service は使わない', () => {
+    const ruleBlocks = [...source.matchAll(/New-NetFirewallRule[\s\S]*?\| Out-Null/g)];
+    assert.ok(ruleBlocks.length >= 2, 'New-NetFirewallRule の呼び出しが2本以上見つかること（ipv4 + tcp か udp）');
+    for (const block of ruleBlocks) {
+      assert.match(block[0], /-LocalUser/, `-LocalUser を使うこと: ${block[0].slice(0, 80)}...`);
+      assert.match(block[0], /-Group \$FirewallGroup/, `-Group を使うこと: ${block[0].slice(0, 80)}...`);
+      assert.match(block[0], /-Name \$\w*RuleName\b/, `-Name を使うこと: ${block[0].slice(0, 80)}...`);
+      assert.ok(!/-Service\b/.test(block[0]), `-Service を使わないこと: ${block[0].slice(0, 80)}...`);
+    }
+  });
+
+  test('ルール名がすべて "DevRelay-SandboxGen-<digest>-" プレフィックスを使う（generation 切替の対象と一致させる）', () => {
+    assert.match(source, /\$ipv4RuleName\s*=\s*"DevRelay-SandboxGen-\$gen-ipv4"/);
+    assert.match(source, /\$tcpRuleName\s*=\s*"DevRelay-SandboxGen-\$gen-tcp-\$tcpIndex"/);
+    assert.match(source, /\$udpRuleName\s*=\s*"DevRelay-SandboxGen-\$gen-udp"/);
+  });
+
+  test('決定1（追加4で訂正）: ICMPv4（ping）の Block ルールを作らない', () => {
+    assert.ok(!source.includes('-Protocol ICMPv4'), 'ICMPv4 の Block ルールが無いこと（OS が代行し身元単位では止まらない）');
+  });
+
+  test('コード行に "::/0" が無い（IPv4 専用スクリプトだが、将来の IPv6 誤操作を防ぐ）', () => {
+    const codeWithOldRange = codeLinesOf(source).filter((line) => line.includes('"::/0"'));
+    assert.deepEqual(codeWithOldRange, []);
+  });
+
+  test('B6: IPv4 補集合の自己検査関数が存在し、違反時は firewall を変更せずに abort する', () => {
+    assert.match(source, /function Test-Ipv4ComplementSelfCheck/);
+    const idx = source.indexOf('if (-not (Test-Ipv4ComplementSelfCheck');
+    assert.ok(idx !== -1, '自己検査の呼び出しが見つかること');
+    const body = source.slice(idx, source.indexOf('exit 1', idx) + 'exit 1'.length);
+    assert.match(body, /Write-SandboxAllowState/, '自己検査失敗時に state.json を書くこと');
+    assert.ok(!/New-NetFirewallRule/.test(body), '自己検査失敗時のブロックが New-NetFirewallRule を呼ばないこと');
+  });
+
+  test('B7: request.json のリパースポイント確認が内容を読む（Get-Content）より前にある', () => {
+    const reparseIdx = source.indexOf('[System.IO.FileAttributes]::ReparsePoint');
+    const getContentIdx = source.indexOf('Get-Content -Path $RequestJsonPath -Raw');
+    assert.ok(reparseIdx !== -1 && getContentIdx !== -1, '2箇所とも見つかること');
+    assert.ok(reparseIdx < getContentIdx, 'リパースポイント確認が内容読み込みより前であること');
+  });
+
+  test('B8: 拒否エントリ（violations）は index と reason のみで、原文の値を含むキーを持たない', () => {
+    const violationAdds = [...source.matchAll(/\$violations\.Add\(@\{[^}]*\}\)/g)];
+    assert.ok(violationAdds.length > 0, '$violations.Add(...) の呼び出しが見つかること');
+    for (const call of violationAdds) {
+      // "index = ..." と "reason = ..." の2キーのみであること（ip / port / raw 等を含まない）
+      assert.match(call[0], /index\s*=/, `index キーを持つこと: ${call[0]}`);
+      assert.match(call[0], /reason\s*=/, `reason キーを持つこと: ${call[0]}`);
+      assert.ok(!/\bip\s*=|\bport\s*=|\braw\s*=/.test(call[0]), `原文の値を含まないこと: ${call[0]}`);
+    }
+  });
+
+  test('state.json は一時ファイルに書いてから Move-Item で置き換える（Agent が書きかけを読まない）', () => {
+    assert.match(source, /\.tmp-\$PID-/);
+    assert.match(source, /Move-Item -Path \$tmpPath -Destination \$StateJsonPath -Force/);
+  });
+
+  test('サービス SID は自前解決し、host.json を読む行は無い（コメントでの言及のみ許可）', () => {
+    const codeWithHostJson = codeLinesOf(source).filter((line) => line.includes('host.json'));
+    assert.deepEqual(codeWithHostJson, [], 'コード行（コメント以外）に host.json が無いこと');
+    assert.match(source, /NTAccount\(\$ServiceAccountName\)/);
+  });
+
+  test('ルール作成に失敗した場合、このラン内で新規作成した分だけロールバックする（旧世代は残す）', () => {
+    const idx = source.indexOf('} catch {\n        # Roll back only what THIS run created');
+    assert.ok(idx !== -1, 'ロールバック処理のコメントが見つかること');
+    const body = source.slice(idx, idx + 400);
+    assert.match(body, /Remove-NetFirewallRule -Name \$name/);
   });
 });

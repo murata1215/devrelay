@@ -49,6 +49,10 @@ import { probeSdkExecutable } from './sdk-executable.js';
 import { buildSandboxChildEnv } from './sandbox-env.js';
 import { acquireSandboxProxy } from './sandbox-proxy-session.js';
 import { shouldDeclareSandboxHostCapability } from './sandbox-target.js';
+import {
+  reconcileSandboxAllowDestinations,
+  type SandboxAllowReconcileResult,
+} from './sandbox-allow-apply.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -66,6 +70,8 @@ export interface SandboxPreflightCheckResult {
   currentUserSid: string | null;
   pipeConnected: boolean;
   connectError: string | null;
+  /** サイクル SB-2.1: 直接通信の許可リスト（IP とポート）の検証・反映結果（`status` の表示用） */
+  allowDestinations: SandboxAllowReconcileResult;
 }
 
 export interface SandboxPreflightCheckOptions {
@@ -75,6 +81,8 @@ export interface SandboxPreflightCheckOptions {
   terminalMode?: boolean;
   /** `config.yaml` の `sandbox.allowlist`（未指定なら既定値） */
   allowlist?: string[];
+  /** サイクル SB-2.1: `config.yaml` の `sandbox.allowDestinations`（未指定なら空集合扱い） */
+  allowDestinations?: string[];
 }
 
 async function readSandboxPublicKey(): Promise<string> {
@@ -98,6 +106,9 @@ export async function runSandboxPreflightCheck(
   const claudeExecutableFallbackActive = probe.form === 'none' || probe.form === 'unresolved';
 
   const allowlistResolution = resolveSandboxAllowlist(options.allowlist);
+  // サイクル SB-2.1: 直接通信の許可リスト（IP とポート）の検証・反映確認。パイプ接続より前に
+  // 行う（高コストなハンドシェイクを、どうせ拒否になる設定不一致の後に払わないため）。
+  const allowDestinations = await reconcileSandboxAllowDestinations(options.allowDestinations);
 
   let projectPathUnderUserProfile = true; // 判定できない場合は fail-closed（配下とみなす）
   try {
@@ -150,6 +161,8 @@ export async function runSandboxPreflightCheck(
     capabilityDeclared: shouldDeclareSandboxHostCapability(process.platform),
     claudeExecutableFallbackActive,
     allowlistValid: allowlistResolution.ok,
+    allowDestinationsValid: allowDestinations.valid,
+    allowDestinationsApplied: allowDestinations.applied,
     pipeConnected,
     protocolVersionMatch: handshake ? handshake.protocolVersion === SANDBOX_PROTOCOL_VERSION : false,
     signatureValid: handshake ? handshake.signatureValid : false,
@@ -173,6 +186,7 @@ export async function runSandboxPreflightCheck(
     currentUserSid,
     pipeConnected,
     connectError,
+    allowDestinations,
   };
 }
 
@@ -213,6 +227,7 @@ export async function prepareSandboxLaunch(input: PrepareSandboxLaunchInput): Pr
       effectiveAiTool: 'claude',
       terminalMode: false,
       allowlist: input.sandboxSettings?.allowlist,
+      allowDestinations: input.sandboxSettings?.allowDestinations,
     });
     if (!check.decision.allowed) {
       input.onOutput(buildSandboxDenialMessage(check.decision.reason), true);

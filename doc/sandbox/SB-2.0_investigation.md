@@ -83,7 +83,8 @@ New-NetFirewallRule -DisplayName "DevRelay Sandbox - Allow loopback" `
 - 非管理者が FW ルールを変える方法は無い（MpsSvc / FirewallRules は管理者専用）。
 - 生ソケット（任意 IP プロトコルの送信）は管理者権限が必要。
 
-### B-2. 推奨するルールの組み方（決定1により確定: TCP の許可ポート以外・UDP・ping を塞ぐ）
+### B-2. 推奨するルールの組み方（決定1により確定: TCP の許可ポート以外・UDP・ping を塞ぐ。
+**追加4により ping は対象外に訂正**。以下のルール 6（ICMPv4）は SB-2.1 では実装しない）
 
 許可エントリ集合 E = {(ip, tcpPort)}、A = E に現れる IP の集合、P(ip) = その IP の許可ポート集合。
 
@@ -94,7 +95,7 @@ New-NetFirewallRule -DisplayName "DevRelay Sandbox - Allow loopback" `
 | 3 | Allow / Protocol Any | `127.0.0.0/8`（**変更なし**） |
 | 4 | Block / **TCP** | RemoteAddress = 同じ P をもつ IP 群、RemotePort = **P の補集合**（例 `1521` 許可 → `"1-1520,1522-65535"`） |
 | 5 | Block / **UDP** | RemoteAddress = A（全ポート） |
-| 6 | Block / **ICMPv4**（ping） | RemoteAddress = A |
+| 6 | Block / **ICMPv4**（ping） | RemoteAddress = A（**追加4により不実装**: ICMP は OS が代行し身元単位では止まらないため、作っても無意味） |
 
 実効: `127.0.0.0/8` 全部 ＋ 各 (ip, 許可 TCP ポート) のみ通る。それ以外は従来どおり遮断。GRE・ESP 等の他 IP プロトコルは生ソケット＝管理者権限が必要なためこの身元からは到達できず（**[公式]**）、個別の Block は置かない（決定1は TCP 以外・UDP・ping のみを対象にしており、ここで言う範囲と一致）。
 
@@ -308,7 +309,8 @@ Agent が `127.0.0.1:<port>` で受けてテスト DB へ TCP 中継する案。
 2. **追加3 の確認**: 再実行前後でサービス SID（`host.json.sid`）が変わるかを比較する。変わらなければ `sandbox prep` の再実行は不要（本文 F の注記を確定させる）。変わるなら各プロジェクトで `sandbox prep` を再実行する
 3. 指定した開発者アカウントのシェルで `schtasks /Run /TN "\DevRelay\apply-sandbox-allowlist"` が**成功**する（決定5・追加2 の SDDL が効いている）。**別アカウント**では失敗することも確認する
 4. `config.yaml` に `allowDestinations: [ "10.1.200.1:1521" ]` → `sandbox status` が「一致」「最終反映時刻」を表示
-5. Sandbox ON のチャットから `10.1.200.1:1521` へ**届く** / `10.1.200.1:1522` が**止まる**（決定1の TCP ポート外） / `10.1.1.1:1521` が**止まる** / `10.1.200.1` への ping が**止まる**（決定1） / `api.anthropic.com:443` 直結が**従来どおり止まる**
+5. Sandbox ON のチャットから `10.1.200.1:1521` へ**届く** / `10.1.200.1:1522` が**止まる**（決定1の TCP ポート外） / `10.1.1.1:1521` が**止まる** / `api.anthropic.com:443` 直結が**従来どおり止まる**
+   （**追加4により ping の確認項目は削除**: ICMP は身元単位で止まらないため確認対象外）
 6. `config.yaml` から当該行を削除 → 反映後に `10.1.200.1:1521` が**止まる**
 7. 不正な値（`10.1.200.0/24`、`10.1.200.1:0`、`example.com:443`、21 件）: Agent が受け付けない、または `state.json` の `rejected` に **index と理由コードのみ**が出て（原文は出ない）**ルールは一切変わらない**
 8. 要求ファイルをリンクに差し替える（`mklink` 等）→ 読み込まれず `state.json` に専用の理由が出る（追加1）
@@ -336,7 +338,11 @@ Agent が `127.0.0.1:<port>` で受けてテスト DB へ TCP 中継する案。
 （E-1・E-2・E-3・F）うえで、この決定事項を正とする。
 
 - **決定0**: 許可先は開発者が自由に書ける（会社が決める上限は置かない）
-- **決定1**: 許可した IP 宛は、TCP の許可ポート以外・UDP・ping を塞ぐ
+- **決定1**: 許可した IP 宛は、TCP の許可ポート以外・UDP を塞ぐ。
+  **追加4（SB-2.1 実装時の訂正）**: ping（ICMPv4）は対象外とする。SB-1 の実機確認
+  （`doc/sandbox/SB-1_verification.md`）で ICMP は OS が代行し身元単位のファイアウォール
+  ルールでは止まらないことが分かっているため、ICMPv4 の Block ルールは作らない
+  （作っても実際には効かない）
 - **決定2**: 最初のサイクルの編集は `config.yaml` のみ。CLI（`sandbox allow …`）は作らない
 - **決定3**: 設定と実ルールが不一致なら再反映を 1 回試み、解消できなければ実行を拒否する
   （厳しい側・緩い側の区別はしない）。未設定かつ結果ファイルなしは一致として扱う
@@ -353,3 +359,8 @@ Agent が `127.0.0.1:<port>` で受けてテスト DB へ TCP 中継する案。
 - **追加3**: 「再インストールでサービス SID が変わるので `sandbox prep` の再実行が要る」は
   要再確認（SID はサービス名から決まるはず）。SB-2.1 で `sandbox prep` の再実行を
   不要にできるか確認する
+- **追加5（SB-2.1 承認時）**: `state.json` も（`request.json` と同様に）一時ファイルへ
+  書いてから rename で置き換える（Agent が書きかけの内容を読まないようにする）
+- **追加6（SB-2.1 承認時）**: `apply-allowlist.ps1` は専用フォルダ
+  `C:\ProgramData\devrelay\sandbox\allowlist-bin\` に置き、`icacls /inheritance:r` で
+  `SYSTEM:(F)` `Administrators:(F)` `<開発者>:(RX)` のみにする（タスクはこのパスを指す）

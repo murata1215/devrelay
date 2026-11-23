@@ -120,7 +120,10 @@ export async function sandboxStatusCommand(options: { project?: string }): Promi
     console.log(chalk.yellow(`  ⚠️ 現在の OS: ${process.platform}（Sandbox は Windows 専用です）`));
   }
 
-  const result = await withSandboxProxy(() => runSandboxPreflightCheck(projectPath));
+  const config = await loadConfig();
+  const result = await withSandboxProxy(() =>
+    runSandboxPreflightCheck(projectPath, { allowDestinations: config.sandbox?.allowDestinations }),
+  );
 
   printCheck(`DEVRELAY_SANDBOX_DISABLE が設定されていない`, !isSandboxDisabledBySwitch());
   printCheck(`OS が Windows`, process.platform === 'win32');
@@ -140,6 +143,37 @@ export async function sandboxStatusCommand(options: { project?: string }): Promi
     printCheck(`loopback 中継プロキシへ到達できた`, result.handshake.loopbackReachable);
     printCheck(`claude 実行ファイルをホストが読める`, result.handshake.claudeExecutableReadable);
     printCheck(`プロジェクトフォルダにホストが書ける`, result.handshake.projectFolderWritable);
+  }
+
+  // サイクル SB-2.1: 直接通信の許可リスト（IP とポート）の節
+  const allow = result.allowDestinations;
+  console.log();
+  console.log(chalk.blue('🔌 直接通信の許可リスト（IP とポート）'));
+  if (!allow.valid) {
+    console.log(chalk.red(`  ❌ config.yaml の sandbox.allowDestinations が不正です: ${allow.invalidReason}`));
+  } else {
+    const configuredCount = allow.expectedDigest !== null && allow.state ? allow.state.applied.length : undefined;
+    console.log(chalk.gray(`  設定ファイルの digest: ${allow.expectedDigest ?? '(未設定)'}`));
+    if (allow.state) {
+      console.log(chalk.gray(`  反映済みの digest: ${allow.state.digest ?? '(なし)'}`));
+      console.log(chalk.gray(`  最終反映時刻: ${allow.state.appliedAt ?? '(なし)'}`));
+      console.log(chalk.gray(`  reconcilerVersion: ${allow.state.reconcilerVersion}`));
+      if (allow.state.rejectedCount > 0) {
+        console.log(chalk.yellow(`  拒否件数: ${allow.state.rejectedCount}`));
+        for (const r of allow.state.rejected) {
+          console.log(chalk.gray(`    index=${r.index} reason=${r.reason}`));
+        }
+      }
+      if (configuredCount !== undefined) {
+        console.log(chalk.gray(`  適用件数: ${configuredCount}`));
+      }
+    } else {
+      console.log(chalk.gray(`  反映結果ファイル: (なし。未設定/空の場合は一致として扱われます)`));
+    }
+    if (allow.taskRunError) {
+      console.log(chalk.yellow(`  タスク起動エラー: ${allow.taskRunError}`));
+    }
+    printCheck(`設定と実際のファイアウォールのルールが一致`, allow.applied);
   }
 
   console.log();
@@ -358,8 +392,11 @@ export async function sandboxSelftestCommand(options: {
   // 時点でプロキシが閉じ、2 本目の確認が始まる前には待ち受けが無い状態になっていた
   // （「中継プロキシ: 自分で一時起動しました」が複数回表示され、2 本目が「未確認（curl exit=7）」
   // になっていた既存バグの根治点）。
+  const selftestConfig = await loadConfig();
   await withSandboxProxy(async (session) => {
-    const result = await runSandboxPreflightCheck(projectPath);
+    const result = await runSandboxPreflightCheck(projectPath, {
+      allowDestinations: selftestConfig.sandbox?.allowDestinations,
+    });
     if (!result.decision.allowed) {
       printDenialWithHint(result.decision.reason, projectPath);
       return;

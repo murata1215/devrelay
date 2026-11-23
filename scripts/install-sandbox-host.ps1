@@ -55,6 +55,20 @@
 
 #Requires -RunAsAdministrator
 
+# Cycle SB-2.1: -DeveloperAccount names the single non-administrator account that
+# may trigger the allow-destinations reconciler task (schtasks /Run, from the
+# Agent). Defaults to whoever is running this install script (common case: a
+# single-developer machine where the developer is also the local administrator).
+# -DenyDestination is an administrator-set denylist (upstream proxy etc.); it is
+# recorded into allowlist-deny\deny.json and is never readable by the developer
+# account, let alone the Sandbox identity. Both are optional; omitting them keeps
+# this script's behavior unchanged from before cycle SB-2.1 except for the
+# allow-destinations plumbing itself (which defaults to "nothing allowed").
+param(
+    [string]$DeveloperAccount = "",
+    [string[]]$DenyDestination = @()
+)
+
 $ErrorActionPreference = "Stop"
 
 # --- constants ---
@@ -67,16 +81,55 @@ $PrivKeyPath = Join-Path $ProgramDataDir "host-key.priv.blob"
 $PubKeyPath = Join-Path $ProgramDataDir "host-key.pub"
 $HostJsonPath = Join-Path $ProgramDataDir "host.json"
 
+# Cycle SB-2.1: allow-destinations (IP and port) plumbing.
+$AllowlistRequestDir = Join-Path $ProgramDataDir "allowlist-request"
+$AllowlistResultDir = Join-Path $ProgramDataDir "allowlist-result"
+$AllowlistDenyDir = Join-Path $ProgramDataDir "allowlist-deny"
+$AllowlistBinDir = Join-Path $ProgramDataDir "allowlist-bin"
+$RequestJsonPath = Join-Path $AllowlistRequestDir "request.json"
+$StateJsonPath = Join-Path $AllowlistResultDir "state.json"
+$DenyJsonPath = Join-Path $AllowlistDenyDir "deny.json"
+$ApplyScriptDestPath = Join-Path $AllowlistBinDir "apply-allowlist.ps1"
+$FirewallGroup = "DevRelay Sandbox"
+$TaskFolder = "\DevRelay"
+$TaskName = "apply-sandbox-allowlist"
+$TaskPath = "$TaskFolder\$TaskName"
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SourcePath = Join-Path $RepoRoot "agents\sandbox-host\SandboxHost.cs"
 $CliEntry = Join-Path $RepoRoot "agents\linux\dist\cli\index.js"
+$ApplyScriptSourcePath = Join-Path $RepoRoot "scripts\apply-sandbox-allowlist.ps1"
 
 if (-not (Test-Path $SourcePath)) {
     Write-Error "SandboxHost.cs not found: $SourcePath (run this script from the repo's scripts\ directory)"
     exit 1
 }
+if (-not (Test-Path $ApplyScriptSourcePath)) {
+    Write-Error "apply-sandbox-allowlist.ps1 not found: $ApplyScriptSourcePath (run this script from the repo's scripts\ directory)"
+    exit 1
+}
 
 Write-Host "=== DevRelay Sandbox Host install ===" -ForegroundColor Cyan
+
+# --- resolve the developer account that may trigger the allow-destinations task ---
+if ($DeveloperAccount) {
+    try {
+        $DeveloperSid = (New-Object System.Security.Principal.NTAccount($DeveloperAccount)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        Write-Error "Could not resolve -DeveloperAccount '$DeveloperAccount': $_"
+        exit 1
+    }
+} else {
+    try {
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $DeveloperAccount = $currentIdentity.Name
+        $DeveloperSid = $currentIdentity.User.Value
+    } catch {
+        Write-Error "Could not resolve the current user as the default developer account: $_"
+        exit 1
+    }
+}
+Write-Host "[OK] Developer account for the allow-destinations task: $DeveloperAccount ($DeveloperSid)" -ForegroundColor Green
 
 # --- Step 1: stop and remove any existing service BEFORE building ---
 # Must happen before the build step: if the service is running, SandboxHost.exe is
@@ -266,10 +319,14 @@ Write-Host "[OK] Saved private key, restricted to the service identity: $PrivKey
 Write-Host "[OK] Saved public key: $PubKeyPath" -ForegroundColor Green
 
 # --- Step 9: host.json (read by the Agent's `sandbox prep` command for the SID) ---
+# reconcilerVersion (cycle SB-2.1) lets the Agent detect a stale apply-allowlist.ps1
+# copy under allowlist-bin\ (see sandbox-protocol.ts) independently of this
+# protocolVersion, which covers the Sandbox Host handshake only.
 $hostJson = @{
-    serviceName     = $ServiceAccountName
-    sid             = $ServiceSid
-    protocolVersion = 1
+    serviceName       = $ServiceAccountName
+    sid               = $ServiceSid
+    protocolVersion   = 1
+    reconcilerVersion = 1
 } | ConvertTo-Json
 [System.IO.File]::WriteAllText($HostJsonPath, $hostJson)
 Write-Host "[OK] Saved host.json: $HostJsonPath" -ForegroundColor Green
@@ -280,39 +337,143 @@ Write-Host "[OK] Saved host.json: $HostJsonPath" -ForegroundColor Green
 # --- Step 11: firewall rules ---
 # Windows Firewall applies Block rules before Allow rules regardless of rule order,
 # so a naive "Allow loopback + Block everything" pair risks blocking loopback too.
-# This script instead excludes loopback (127.0.0.0/8) from the Block rule's own
-# address range (split into two IPv4 ranges).
 #
-# All three rules target the service identity via -LocalUser with an explicit SDDL
-# string (not -Service). -LocalUser "D:(A;;CC;;;<service SID>)" was verified on
-# hp630g9 to actually block outbound traffic from the service's child AND
+# Rule ownership (cycle SB-2.1): the IPv4 "block everything except loopback" rule
+# is now owned exclusively by apply-sandbox-allowlist.ps1 (see that script's header
+# comment for why: it must be able to carve out allowed destinations, and Windows
+# Firewall ORs all matching Block rules, so a second, independent "block all IPv4"
+# rule here would silently defeat anything the allow list permits). This script
+# creates only the two STATIC rules below, whose content never depends on the
+# allow list, then invokes apply-sandbox-allowlist.ps1 once (as a child process,
+# below) to materialize the IPv4 rule for whatever is configured right now
+# (nothing, the first time).
+#
+# Both static rules target the service identity via -LocalUser with an explicit
+# SDDL string (not -Service). -LocalUser "D:(A;;CC;;;<service SID>)" was verified
+# on hp630g9 to actually block outbound traffic from the service's child AND
 # grandchild processes (status showed the positive control probe blocked). The
 # -Service form was never verified and is not used here.
-$existingRules = Get-NetFirewallRule -DisplayName "DevRelay Sandbox*" -ErrorAction SilentlyContinue
+#
+# Full reset on every (re)install: remove rules matched by the old DisplayName-only
+# scheme (pre-SB-2.1 installs had no -Name/-Group) AND by the current Group, so a
+# re-install always starts from a clean slate before anything below re-creates them.
+$existingRules = @(Get-NetFirewallRule -DisplayName "DevRelay Sandbox*" -ErrorAction SilentlyContinue) +
+                 @(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue)
 if ($existingRules) {
-    $existingRules | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    $existingRules | Sort-Object -Property Name -Unique | Remove-NetFirewallRule -ErrorAction SilentlyContinue
 }
 
 $LocalUserSddl = "D:(A;;CC;;;$ServiceSid)"
 
-New-NetFirewallRule -DisplayName "DevRelay Sandbox - Block IPv4 (except loopback)" `
-    -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol Any `
-    -RemoteAddress "0.0.0.0-126.255.255.255","128.0.0.0-255.255.255.255" | Out-Null
-
 # IPv6: "::/0" is rejected by New-NetFirewallRule ("one or more address prefixes are
-# invalid", HRESULT 0x80070057 on hp630g9). Two half-ranges work instead.
-New-NetFirewallRule -DisplayName "DevRelay Sandbox - Block IPv6 (all)" `
-    -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol Any `
+# invalid", HRESULT 0x80070057 on hp630g9). Two half-ranges work instead. This rule's
+# content never depends on the allow list (cycle SB-2.1 only adds IPv4 destinations).
+New-NetFirewallRule -Name "DevRelay-SandboxStatic-ipv6-block" -DisplayName "DevRelay Sandbox - Block IPv6 (all)" `
+    -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol Any `
     -RemoteAddress "::/1","8000::/1" | Out-Null
 
-# Explicit Allow rule (technically redundant since the Block rule above never covers
-# loopback, but documents intent and is a safety net if someone widens the Block
-# rule's range in the future).
-New-NetFirewallRule -DisplayName "DevRelay Sandbox - Allow loopback" `
-    -Direction Outbound -LocalUser $LocalUserSddl -Action Allow -Protocol Any `
+# Explicit Allow rule (technically redundant since the dynamic IPv4 Block rule never
+# covers loopback either, but documents intent and is a safety net).
+New-NetFirewallRule -Name "DevRelay-SandboxStatic-loopback-allow" -DisplayName "DevRelay Sandbox - Allow loopback" `
+    -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Allow -Protocol Any `
     -RemoteAddress "127.0.0.0/8" | Out-Null
 
-Write-Host "[OK] Created firewall rules" -ForegroundColor Green
+Write-Host "[OK] Created static firewall rules (IPv6 block, loopback allow)" -ForegroundColor Green
+
+# --- Step 11b (cycle SB-2.1): allow-destinations directories, ACLs, deny list ---
+New-Item -ItemType Directory -Path $AllowlistRequestDir -Force | Out-Null
+New-Item -ItemType Directory -Path $AllowlistResultDir -Force | Out-Null
+New-Item -ItemType Directory -Path $AllowlistDenyDir -Force | Out-Null
+New-Item -ItemType Directory -Path $AllowlistBinDir -Force | Out-Null
+
+# request.json: the developer may create/replace it (Modify); nobody else may,
+# and the Sandbox identity gets no ACE at all.
+& icacls $AllowlistRequestDir /inheritance:r | Out-Null
+& icacls $AllowlistRequestDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null       # SYSTEM
+& icacls $AllowlistRequestDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null  # Administrators
+& icacls $AllowlistRequestDir /grant "*$($DeveloperSid):(OI)(CI)(M)" | Out-Null
+
+# state.json: only SYSTEM/Administrators may write; the developer may only read.
+& icacls $AllowlistResultDir /inheritance:r | Out-Null
+& icacls $AllowlistResultDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null
+& icacls $AllowlistResultDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
+& icacls $AllowlistResultDir /grant "*$($DeveloperSid):(OI)(CI)(R)" | Out-Null
+
+# deny.json: administrator-set; the developer gets no access at all (not even read).
+& icacls $AllowlistDenyDir /inheritance:r | Out-Null
+& icacls $AllowlistDenyDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null
+& icacls $AllowlistDenyDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
+
+# allowlist-bin\: holds the privileged script itself. The developer may read and
+# execute it (so `schtasks /Run` can launch it) but never modify it -- the task
+# must never run a file the developer (and so, transitively, a prompt-injected AI
+# running under the developer's own shell) can edit.
+& icacls $AllowlistBinDir /inheritance:r | Out-Null
+& icacls $AllowlistBinDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null
+& icacls $AllowlistBinDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
+& icacls $AllowlistBinDir /grant "*$($DeveloperSid):(OI)(CI)(RX)" | Out-Null
+
+Write-Host "[OK] Created allow-destinations directories and ACLs" -ForegroundColor Green
+
+Copy-Item -Path $ApplyScriptSourcePath -Destination $ApplyScriptDestPath -Force
+Write-Host "[OK] Copied apply-sandbox-allowlist.ps1 to $ApplyScriptDestPath" -ForegroundColor Green
+
+# Administrator-set upstream-proxy denylist (decision 4; default empty).
+$denyJson = @{ version = 1; destinations = @($DenyDestination) } | ConvertTo-Json
+[System.IO.File]::WriteAllText($DenyJsonPath, $denyJson)
+Write-Host "[OK] Saved deny.json ($($DenyDestination.Count) entr(y/ies))" -ForegroundColor Green
+
+# --- Step 11c (cycle SB-2.1): register the allow-destinations reconciler task ---
+# No arguments: schtasks /Run has no mechanism to pass arguments, so the action
+# below must never reference "$(ArgN)" (see apply-sandbox-allowlist.ps1 header).
+& schtasks /Delete /TN $TaskPath /F 2>$null | Out-Null
+$taskAction = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ApplyScriptDestPath`""
+& schtasks /Create /TN $TaskPath /TR $taskAction /SC ONSTART /RU "SYSTEM" /RL HIGHEST /F | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "schtasks /Create failed for $TaskPath (exit=$LASTEXITCODE)"
+    exit 1
+}
+Write-Host "[OK] Registered scheduled task: $TaskPath (ONSTART, runs as SYSTEM)" -ForegroundColor Green
+
+# Grant the developer account permission to trigger the task on demand
+# (`schtasks /Run /TN "$TaskPath"`) without needing to be an administrator.
+# This uses the Schedule.Service COM object's SetSecurityDescriptor, which has
+# no prior use in this repository and could not be verified without real
+# Windows hardware; see doc/sandbox/SB-2.0_investigation.md C-1 for the
+# documented fallbacks (manual ACE append, numeric access mask, or an
+# ONEVENT-trigger-based alternative) if this does not work as expected. Until
+# confirmed, the ONSTART trigger above is the guaranteed fallback: the rule
+# still reconciles every boot even if the developer can never trigger it early.
+try {
+    $scheduleService = New-Object -ComObject "Schedule.Service"
+    $scheduleService.Connect()
+    $taskFolderObj = $scheduleService.GetFolder($TaskFolder)
+    $taskObj = $taskFolderObj.GetTask($TaskName)
+    # D:P = protected DACL (do not merge with inherited ACEs). SY = SYSTEM (Full),
+    # BA = Administrators (Full), the developer SID gets Read + Generic Execute.
+    $taskSddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;$DeveloperSid)"
+    $taskObj.SetSecurityDescriptor($taskSddl, 0)
+    Write-Host "[OK] Granted $DeveloperAccount permission to run the task on demand" -ForegroundColor Green
+} catch {
+    Write-Host "[WARN] Could not grant $DeveloperAccount permission to run the task on demand: $_" -ForegroundColor Yellow
+    Write-Host "[WARN] The task will still run at every boot (ONSTART). Until this is fixed, an" -ForegroundColor Yellow
+    Write-Host "[WARN] administrator can reconcile on demand with: schtasks /Run /TN `"$TaskPath`"" -ForegroundColor Yellow
+}
+
+# Materialize the current generation right now (as a separate process, exactly
+# like the scheduled task itself will run it, so `exit` inside the child script
+# never terminates this installer). The first time this runs, request.json
+# usually does not exist yet, so this reproduces the pre-SB-2.1 behavior exactly
+# (block everything except loopback) rather than leaving IPv4 unmanaged until the
+# task next fires.
+$applyProcess = Start-Process -FilePath "powershell.exe" `
+    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ApplyScriptDestPath`"") `
+    -Wait -PassThru -WindowStyle Hidden
+if ($applyProcess.ExitCode -ne 0) {
+    Write-Host "[WARN] apply-sandbox-allowlist.ps1 reported exit code $($applyProcess.ExitCode). Check $StateJsonPath." -ForegroundColor Yellow
+} else {
+    Write-Host "[OK] Applied the current allow-destinations generation (see $StateJsonPath)" -ForegroundColor Green
+}
 
 # --- Step 12: start the service ---
 Start-Service -Name $ServiceName

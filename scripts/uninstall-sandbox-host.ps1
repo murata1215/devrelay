@@ -14,6 +14,10 @@
 $ServiceName = "devrelay-sandbox"
 $ProgramDataDir = "C:\ProgramData\devrelay\sandbox"
 $PrivKeyPath = Join-Path $ProgramDataDir "host-key.priv.blob"
+$FirewallGroup = "DevRelay Sandbox"
+$TaskFolder = "\DevRelay"
+$TaskName = "apply-sandbox-allowlist"
+$TaskPath = "$TaskFolder\$TaskName"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $CliEntry = Join-Path $RepoRoot "agents\linux\dist\cli\index.js"
@@ -31,9 +35,32 @@ if ($existing) {
     Write-Host "[OK] Service does not exist" -ForegroundColor Gray
 }
 
-$rules = Get-NetFirewallRule -DisplayName "DevRelay Sandbox*" -ErrorAction SilentlyContinue
+# Cycle SB-2.1: remove the allow-destinations reconciler task before removing the
+# firewall rules it manages, so nothing can re-trigger it mid-uninstall.
+& schtasks /Delete /TN $TaskPath /F 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "[OK] Removed scheduled task: $TaskPath" -ForegroundColor Green
+} else {
+    Write-Host "[OK] Scheduled task does not exist: $TaskPath" -ForegroundColor Gray
+}
+try {
+    $scheduleService = New-Object -ComObject "Schedule.Service"
+    $scheduleService.Connect()
+    $rootFolder = $scheduleService.GetFolder("\")
+    $rootFolder.DeleteFolder($TaskFolder.TrimStart('\'), 0)
+    Write-Host "[OK] Removed task folder: $TaskFolder" -ForegroundColor Green
+} catch {
+    # Best-effort only: the folder may not exist, may still contain other tasks,
+    # or COM may be unavailable. None of these are failures worth stopping for.
+}
+
+# Full removal: DisplayName wildcard catches pre-SB-2.1 installs (no -Name/-Group
+# was ever set on their rules); -Group catches every rule from cycle SB-2.1 onward
+# (the two static rules AND any apply-sandbox-allowlist.ps1 generation still live).
+$rules = @(Get-NetFirewallRule -DisplayName "DevRelay Sandbox*" -ErrorAction SilentlyContinue) +
+         @(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue)
 if ($rules) {
-    $rules | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    $rules | Sort-Object -Property Name -Unique | Remove-NetFirewallRule -ErrorAction SilentlyContinue
     Write-Host "[OK] Removed firewall rules" -ForegroundColor Green
 } else {
     Write-Host "[OK] No firewall rules to remove" -ForegroundColor Gray

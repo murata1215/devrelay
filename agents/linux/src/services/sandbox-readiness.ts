@@ -26,6 +26,9 @@ export type SandboxDenyReason =
   | 'loopback_probe_failed'
   | 'claude_executable_unreadable'
   | 'project_folder_not_writable'
+  // サイクル SB-2.1: 許可リスト（IP とポート）の検証・反映
+  | 'allow_destinations_invalid'
+  | 'allow_destinations_not_applied'
   // サイクル SB-1a-2: チャット経路のターン単位の拒否理由（`decideSandboxTurnEligibility()`）
   | 'target_undecidable'
   | 'raw_mode_unsupported'
@@ -53,6 +56,12 @@ export interface SandboxPreflightInput {
   claudeExecutableFallbackActive: boolean;
   /** 許可リストが妥当か（`resolveSandboxAllowlist()` の結果） */
   allowlistValid: boolean;
+  /** サイクル SB-2.1: 直接通信の許可リスト（IP とポート）が妥当か
+   *  （`resolveSandboxAllowDestinations()` の結果） */
+  allowDestinationsValid: boolean;
+  /** サイクル SB-2.1: 直接通信の許可リストが実際のファイアウォールのルールに反映済みか
+   *  （`reconcileSandboxAllowDestinations()` の結果。未設定/空かつ結果ファイル無しも true） */
+  allowDestinationsApplied: boolean;
   /** 名前付きパイプへの接続が成功したか */
   pipeConnected: boolean;
   /** ハンドシェイクのプロトコル版が一致したか */
@@ -83,7 +92,8 @@ export interface SandboxPreflightInput {
 /**
  * Sandbox 実行を許可してよいか判定する。既定は拒否。全項目を満たしたときのみ許可する。
  * 判定順序: 構造判定（コスト0） → capability → 実行ファイル健全性 → 許可リスト妥当性
- *   → パイプ接続 → プロトコル版 → 署名 → 身元 → プローブ → ホスト側読み書き確認。
+ *   → 直接通信許可リスト（IP とポート）の妥当性・反映済みか → パイプ接続 → プロトコル版
+ *   → 署名 → 身元 → プローブ → ホスト側読み書き確認。
  */
 export function decideSandboxPreflight(input: SandboxPreflightInput): SandboxPreflightDecision {
   if (input.disabledBySwitch) return { allowed: false, reason: 'disabled_by_switch' };
@@ -94,6 +104,8 @@ export function decideSandboxPreflight(input: SandboxPreflightInput): SandboxPre
   if (!input.capabilityDeclared) return { allowed: false, reason: 'capability_not_declared' };
   if (input.claudeExecutableFallbackActive) return { allowed: false, reason: 'claude_executable_fallback_active' };
   if (!input.allowlistValid) return { allowed: false, reason: 'allowlist_invalid' };
+  if (!input.allowDestinationsValid) return { allowed: false, reason: 'allow_destinations_invalid' };
+  if (!input.allowDestinationsApplied) return { allowed: false, reason: 'allow_destinations_not_applied' };
   if (!input.pipeConnected) return { allowed: false, reason: 'pipe_unreachable' };
   if (!input.protocolVersionMatch) return { allowed: false, reason: 'protocol_version_mismatch' };
   if (!input.signatureValid) return { allowed: false, reason: 'signature_invalid' };
@@ -129,6 +141,8 @@ const SANDBOX_DENIAL_MESSAGES: Record<SandboxDenyReason, string> = {
   capability_not_declared: '❌ この Agent は Sandbox 実行に対応していません。更新してください。',
   claude_executable_fallback_active: '❌ 同梱の claude 実行ファイルが見つからず代替パスを使っているため、Sandbox 実行を拒否しました。',
   allowlist_invalid: '❌ Sandbox の許可リスト設定が不正なため、実行を拒否しました。',
+  allow_destinations_invalid: '❌ Sandbox の許可する接続先（config.yaml の sandbox.allowDestinations）が不正なため、実行を拒否しました。',
+  allow_destinations_not_applied: '❌ Sandbox の許可する接続先をファイアウォールへ反映できませんでした。管理者で install-sandbox-host.ps1 を再実行してください。',
   pipe_unreachable: '❌ Sandbox Host に接続できません。サービスが起動しているか確認してください。',
   protocol_version_mismatch: '❌ Sandbox Host のプロトコル版が一致しません。インストールスクリプトを再実行してください。',
   signature_invalid: '❌ Sandbox Host の署名検証に失敗しました。実行を拒否しました。',
