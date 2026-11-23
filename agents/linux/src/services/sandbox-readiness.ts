@@ -25,7 +25,13 @@ export type SandboxDenyReason =
   | 'block_probe_failed'
   | 'loopback_probe_failed'
   | 'claude_executable_unreadable'
-  | 'project_folder_not_writable';
+  | 'project_folder_not_writable'
+  // サイクル SB-1a-2: チャット経路のターン単位の拒否理由（`decideSandboxTurnEligibility()`）
+  | 'target_undecidable'
+  | 'raw_mode_unsupported'
+  | 'ephemeral_session_unsupported'
+  | 'handover_turn_unsupported'
+  | 'sandbox_token_missing';
 
 export type SandboxPreflightDecision = { allowed: true } | { allowed: false; reason: SandboxDenyReason };
 
@@ -131,11 +137,62 @@ const SANDBOX_DENIAL_MESSAGES: Record<SandboxDenyReason, string> = {
   loopback_probe_failed: '❌ 中継プロキシへの到達を確認できなかったため、実行を拒否しました。',
   claude_executable_unreadable: '❌ Sandbox Host が claude 実行ファイルを読み取れません。`devrelay sandbox prep` を実行してください。',
   project_folder_not_writable: '❌ Sandbox Host がプロジェクトフォルダに書き込めません。`devrelay sandbox prep` を実行してください。',
+  target_undecidable: '❌ Sandbox 対象の設定（config.yaml の sandbox.projects）が不正なため、このマシンの Sandbox 対象ターンを拒否しました。',
+  raw_mode_unsupported: '❌ Sandbox 実行はこのターンの種別（raw）に対応していません。',
+  ephemeral_session_unsupported: '❌ Sandbox 実行は一時セッション（クロス ask・引継ぎ生成等）に対応していません。',
+  handover_turn_unsupported: '❌ Sandbox 実行は引継ぎターンに対応していません。',
+  sandbox_token_missing: '❌ Sandbox 用のトークンが登録されていません。`devrelay sandbox set-token` を実行してください。',
 };
 
 /** 拒否理由に対応する日本語メッセージを返す。 */
 export function buildSandboxDenialMessage(reason: SandboxDenyReason): string {
   return SANDBOX_DENIAL_MESSAGES[reason];
+}
+
+// -----------------------------------------------------------------------------
+// チャット経路のターン単位の拒否判定（サイクル SB-1a-2、I/O ゼロの安いふるい）
+// -----------------------------------------------------------------------------
+
+export interface SandboxTurnEligibilityInput {
+  /** `decideSandboxTarget()` が `undecidable` を返した（設定ミス等で判定不能） */
+  targetUndecidable: boolean;
+  /** `DEVRELAY_SANDBOX_DISABLE` キルスイッチ */
+  disabledBySwitch: boolean;
+  /** `process.platform` */
+  platform: string;
+  /** すり替え解決後の実効 AI ツール名 */
+  effectiveAiTool: string;
+  /** 端末インタフェースモード（PTY 経由）が ON か */
+  terminalMode: boolean;
+  /** raw-completion（rawMode）ターンか */
+  rawMode: boolean;
+  /** 一時セッション（クロス ask・teamexec・askdesc・raw、`isEphemeralSession()`）か */
+  isEphemeralSession: boolean;
+  /** クロス ask スコープが設定されているか（`isEphemeralSession` と重複する場合があるが、
+   *  どちらか一方だけでも拒否するため独立したフィールドとして持つ） */
+  crossAskScope: boolean;
+  /** スレッド引継ぎ（`n`）の引継ぎ書生成ターンか */
+  handoverTurn: boolean;
+}
+
+/**
+ * チャット経路のターンが Sandbox 実行の対象として成立するか判定する（`decideSandboxTarget()` で
+ * `target` と判定された後に呼ぶ、I/O ゼロの安いふるい）。これを通過した後にのみ
+ * `decideSandboxPreflight()`（実際にホストへ接続する高コストな確認）を呼ぶこと。
+ *
+ * 判定順序: 設定不正（最優先・fail-closed） → キルスイッチ → 構造判定（OS/AI ツール/端末モード/
+ *   raw/一時セッション/引継ぎ）。
+ */
+export function decideSandboxTurnEligibility(input: SandboxTurnEligibilityInput): SandboxPreflightDecision {
+  if (input.targetUndecidable) return { allowed: false, reason: 'target_undecidable' };
+  if (input.disabledBySwitch) return { allowed: false, reason: 'disabled_by_switch' };
+  if (input.platform !== 'win32') return { allowed: false, reason: 'unsupported_platform' };
+  if (input.effectiveAiTool !== 'claude') return { allowed: false, reason: 'unsupported_ai_tool' };
+  if (input.terminalMode) return { allowed: false, reason: 'terminal_mode_unsupported' };
+  if (input.rawMode) return { allowed: false, reason: 'raw_mode_unsupported' };
+  if (input.isEphemeralSession || input.crossAskScope) return { allowed: false, reason: 'ephemeral_session_unsupported' };
+  if (input.handoverTurn) return { allowed: false, reason: 'handover_turn_unsupported' };
+  return { allowed: true };
 }
 
 // -----------------------------------------------------------------------------

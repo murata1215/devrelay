@@ -44,13 +44,18 @@ export interface AgentConfig {
   projectExistenceFilter?: boolean;
   /**
    * サイクル SB-1a-1: Sandbox 実行（仮想アカウント + 外向き通信制限、Windows + claude のみ）の
-   * ローカル設定。SB-1a-1 は未配線（ai-runner.ts / connection.ts を変更しない）なので、ここは
-   * `devrelay sandbox status` / `selftest` が読むだけ。SB-1a-2 でチャット経路に配線する際、
-   * `selftestProjects` に改名して selftest 専用に縮退させる予定（SB-1b で `Project.sandbox`
-   * （DB）が唯一の根拠になるため）。
+   * マシン単位のローカル設定。
+   *
+   * サイクル SB-1a-2 でチャット経路（`ai-runner.ts` の単一判定点、`decideSandboxTarget()`）にも
+   * 配線した。`projects` は「このマシンで Sandbox 実行の対象にするプロジェクトの絶対パス」を
+   * 兼ねる（`devrelay sandbox status`/`selftest` の対象確認にも、チャットでの実際の起動判定にも
+   * 同じキーを使う。SB-1a-1 時点で検討した `selftestProjects` への改名は行わない — selftest は
+   * `--project` で明示指定するため改名の必要が無く、キー名を増やすと混乱するため）。
+   * 空/未設定なら全ターンが対象外（既定）。SB-1b で `Project.sandbox`（DB・プロジェクト単位）を
+   * 導入する際は、本フィールドと DB のどちらが優先かを別途 Plan で決める。
    */
   sandbox?: {
-    /** selftest / 将来のローカル検証で対象にするプロジェクトパス */
+    /** このマシンで Sandbox 実行の対象にするプロジェクトの絶対パス一覧（未設定/空なら対象外） */
     projects?: string[];
     /** `host` または `host:port` 形式。未指定なら `DEFAULT_SANDBOX_ALLOWLIST` を使う */
     allowlist?: string[];

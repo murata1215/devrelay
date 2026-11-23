@@ -20,6 +20,7 @@ import {
   verifySandboxAttestationSignature,
   fingerprintSandboxPublicKey,
 } from './sandbox-attest.js';
+import { buildSandboxSpawnEnv } from './sandbox-env.js';
 
 export interface SandboxHandshakeResult {
   protocolVersion: number;
@@ -418,4 +419,66 @@ export function awaitSandboxProcessResult(
     }
     proc.on('exit', onExit);
   });
+}
+
+// -----------------------------------------------------------------------------
+// Claude Agent SDK `spawnClaudeCodeProcess` フック（サイクル SB-1a-2）
+// -----------------------------------------------------------------------------
+
+/** SDK の `(options: SpawnOptions) => SpawnedProcess` 契約に合わせた最小の型（本体は SDK 側が定義）。 */
+export interface SandboxSdkSpawnOptions {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env: Record<string, string | undefined>;
+  signal: AbortSignal;
+}
+
+export interface CreateSandboxSpawnFunctionInput {
+  /** Sandbox Host の名前付きパイプ（`buildSandboxPipePath()`） */
+  pipePath: string;
+  /** `buildSandboxChildEnv()` の結果（トークン・プロキシ・HOME 固定等。常に優先される） */
+  baseEnv: Record<string, string>;
+  /** 比較対象となる Agent プロセス自身の env（通常 `process.env`） */
+  agentEnv: Record<string, string | undefined>;
+}
+
+/**
+ * Claude Agent SDK の `Options.spawnClaudeCodeProcess` に渡す同期関数を作る（サイクル SB-1a-2）。
+ *
+ * SDK はこの関数を**同期**に呼び、返り値の `SpawnedProcess` が後から非同期にイベントを発火する
+ * ことを期待する（`sdk.d.ts:2441`）。`net.connect(pipePath)` は接続の完了を待たず Socket を
+ * 同期的に返し、書き込みは接続確立まで内部バッファされるため、この契約のまま
+ * `SandboxSpawnedProcess` を構築できる（接続失敗は socket の `'error'` イベント経由で
+ * `SpawnedProcess.on('error', ...)` に伝わる。既存の `handleData`/`emitError()` がそのまま使える）。
+ *
+ * `opts.signal`（SDK が転送する abort signal。stdin EOF 後の猶予を経て発火する）を
+ * `kill('SIGTERM')`（= KILL フレーム送信、ホストが Job Object でプロセスツリーごと終了させる）
+ * に結びつける。
+ *
+ * 承認ゲート（`canUseTool`/`PreToolUse`/`disallowedTools`/`permissionMode`/abort）はこの関数の
+ * 外（Agent プロセス内）に残る。本関数は `{command,args,cwd,env}` と stdio・kill・exit code の
+ * 6 項目だけを Sandbox Host との境界の向こう側へ委譲する。
+ */
+export function createSandboxSpawnFunction(
+  input: CreateSandboxSpawnFunctionInput,
+): (opts: SandboxSdkSpawnOptions) => SandboxSpawnedProcess {
+  return function sandboxSpawn(opts: SandboxSdkSpawnOptions): SandboxSpawnedProcess {
+    const env = buildSandboxSpawnEnv({ base: input.baseEnv, sdkEnv: opts.env, agentEnv: input.agentEnv });
+    const socket = net.connect(input.pipePath);
+    const proc = new SandboxSpawnedProcess(socket, {
+      command: opts.command,
+      args: opts.args,
+      cwd: opts.cwd,
+      env,
+    });
+    const onAbort = (): void => {
+      proc.kill('SIGTERM');
+    };
+    opts.signal.addEventListener('abort', onAbort, { once: true });
+    proc.once('exit', () => {
+      opts.signal.removeEventListener('abort', onAbort);
+    });
+    return proc;
+  };
 }

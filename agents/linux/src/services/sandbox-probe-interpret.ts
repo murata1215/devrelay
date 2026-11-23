@@ -18,6 +18,14 @@ export interface SandboxHostProbeInput {
   spawnFailed: boolean;
   /** このプローブのために自分でプロキシを起動した場合、プロキシが実際に拒否ログを記録したか */
   proxyDeniedObserved?: boolean;
+  /**
+   * サイクル SB-1a-2（a 対応）: 同じ中継プロキシ経由で許可リスト内のホストへ陽性対照を試した結果。
+   * `false` の場合、中継プロキシ自体に到達できていないため、拒否プローブの結果（exit=7 等）は
+   * 「遮断できた」ではなく「未確認」と解釈する（SB-1a-1.1 時点のバグ: プロキシのリースが
+   * プローブごとに再生成され、2 本目の確認が始まる前に閉じてしまっていたため、拒否と
+   * 未到達が exit=7 で混同されていた）。未確認（陽性対照を試していない）なら `undefined`。
+   */
+  proxyControlReachable?: boolean;
 }
 
 export interface SandboxProbeInterpretation {
@@ -51,6 +59,15 @@ export function interpretSandboxDirectBlockProbe(input: SandboxHostProbeInput): 
 
 /** 確認 2: 中継プロキシ経由で、許可リスト外のホストが拒否されたか */
 export function interpretSandboxProxyDenyProbe(input: SandboxHostProbeInput): SandboxProbeInterpretation {
+  // a 対応: 陽性対照（許可リスト内のホストへ、同じ中継プロキシ経由）を先に確認する。
+  // 到達できていなければ、拒否プローブの結果が「拒否されたから失敗した」のか
+  // 「プロキシ自体に繋がらなかったから失敗した」のか区別できないため、未確認とする。
+  if (input.proxyControlReachable === false) {
+    return {
+      outcome: 'inconclusive',
+      evidence: '中継プロキシへの陽性対照（許可リスト内のホストへの到達）が失敗したため確認できませんでした。',
+    };
+  }
   if (input.spawnFailed) {
     return { outcome: 'inconclusive', evidence: 'ホスト経由でのプロセス起動に失敗したため確認できませんでした。' };
   }
@@ -98,17 +115,52 @@ export interface SandboxReadProbeInterpretation {
 }
 
 /**
- * `cmd.exe /c type <path> >nul` の終了コードから読み取り可否を判定する（C1 `--acl-audit`）。
- * 対象が存在しない場合も `type` は exit=1 を返すため、「読めなかった」と「存在しない」は
- * この終了コードだけでは区別できない（いずれも期待どおり読めていないことには変わらないため、
- * 両者を区別する追加プローブは本サイクルの範囲外とする）。
+ * `%APPDATA%\devrelay` の列挙確認（exit コードのみで判定、existence/control の区別は不要。
+ * Agent が実行中である以上このディレクトリは必ず存在するため「存在しない」との混同が起きない）。
  */
-export function interpretSandboxReadProbe(exitCode: number | null): SandboxReadProbeInterpretation {
+export function interpretSandboxDirListProbe(exitCode: number | null): SandboxReadProbeInterpretation {
   if (exitCode === 0) {
-    return { outcome: 'readable', evidence: '読み取りに成功しました（exit=0）。' };
+    return { outcome: 'readable', evidence: '列挙に成功しました（exit=0）。' };
   }
   if (exitCode === 1) {
-    return { outcome: 'not-readable', evidence: '読み取りに失敗しました（exit=1。アクセス拒否または対象が存在しない）。' };
+    return { outcome: 'not-readable', evidence: '列挙に失敗しました（exit=1）。' };
   }
   return { outcome: 'inconclusive', evidence: `未知の結果です（exit=${exitCode ?? 'null'}）。` };
+}
+
+export interface SandboxFileReadProbeInput {
+  /** `cmd.exe /c type "<path>" >nul` の終了コード */
+  exitCode: number | null;
+  /** 対象ファイルが Agent 側（開発者身元）の `fs.stat()` で存在確認できたか */
+  targetExists: boolean;
+  /** 対照ファイル（プロジェクト内の既存ファイル）が同じ方法で「読めた」になったか */
+  controlReadable: boolean;
+}
+
+/**
+ * `cmd.exe /c type "<path>" >nul` の終了コードから読み取り可否を判定する（C1/b 対応の
+ * `--acl-audit`）。SB-1a-1.1 時点は「読めなかった」と「対象が存在しない」が exit=1 で
+ * 区別できなかった（両方「期待どおり読めていない」にしか見えなかった）既存の制約を、
+ * 2 点で補強する:
+ *   1. 対象は Agent 側で存在確認できたものだけに絞る（`targetExists=false` なら未確認）
+ *   2. 対照（プロジェクト内の既存ファイル、同じ方法で読む）が読めなければ全体を未確認とする
+ *      （「読めない」のが ACL の効果だと言えなくなるため）
+ */
+export function interpretSandboxFileReadProbe(input: SandboxFileReadProbeInput): SandboxReadProbeInterpretation {
+  if (!input.targetExists) {
+    return { outcome: 'inconclusive', evidence: '対象ファイルが存在しない（Agent 側で確認済み）ため、読み取り不可を ACL の効果と判定できません。' };
+  }
+  if (!input.controlReadable) {
+    return {
+      outcome: 'inconclusive',
+      evidence: '対照（プロジェクト内の既存ファイル）が同じ方法で読めなかったため、ACL の効果か切り分けできず全体を未確認とします。',
+    };
+  }
+  if (input.exitCode === 0) {
+    return { outcome: 'readable', evidence: '読み取りに成功しました（exit=0）。対照は読めているため ACL の効果ではありません。' };
+  }
+  if (input.exitCode === 1) {
+    return { outcome: 'not-readable', evidence: '読み取りに失敗しました（exit=1）。対象は存在し対照は読めているため ACL による拒否と判定します。' };
+  }
+  return { outcome: 'inconclusive', evidence: `未知の結果です（exit=${input.exitCode ?? 'null'}）。` };
 }

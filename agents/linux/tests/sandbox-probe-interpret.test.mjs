@@ -4,7 +4,8 @@ import {
   interpretSandboxDirectBlockProbe,
   interpretSandboxProxyDenyProbe,
   interpretSandboxKnownBypassProbe,
-  interpretSandboxReadProbe,
+  interpretSandboxDirListProbe,
+  interpretSandboxFileReadProbe,
 } from '../dist/services/sandbox-probe-interpret.js';
 
 describe('sandbox-probe-interpret: interpretSandboxDirectBlockProbe（B6 確認1: プロキシ無し直結）', () => {
@@ -60,6 +61,23 @@ describe('sandbox-probe-interpret: interpretSandboxProxyDenyProbe（B6 確認2: 
     const result = interpretSandboxProxyDenyProbe({ exitCode: 1, timedOut: false, spawnFailed: false });
     assert.equal(result.outcome, 'inconclusive');
   });
+
+  // サイクル SB-1a-2（a 対応）: プロキシ経由の陽性対照（許可リスト内ホストへの到達確認）
+  test('proxyControlReachable=false のときは exit コードに関わらず inconclusive（プロキシ自体への未到達を拒否と混同しない）', () => {
+    const result = interpretSandboxProxyDenyProbe({ exitCode: 7, timedOut: false, spawnFailed: false, proxyControlReachable: false });
+    assert.equal(result.outcome, 'inconclusive');
+    assert.match(result.evidence, /陽性対照/);
+  });
+
+  test('proxyControlReachable=true のときは従来どおり exit=56 を blocked と判定する', () => {
+    const result = interpretSandboxProxyDenyProbe({ exitCode: 56, timedOut: false, spawnFailed: false, proxyControlReachable: true });
+    assert.equal(result.outcome, 'blocked');
+  });
+
+  test('proxyControlReachable 未指定（プローブしていない）なら従来どおりの判定になる', () => {
+    const result = interpretSandboxProxyDenyProbe({ exitCode: 56, timedOut: false, spawnFailed: false });
+    assert.equal(result.outcome, 'blocked');
+  });
 });
 
 describe('sandbox-probe-interpret: interpretSandboxKnownBypassProbe（既知の回避経路は blocked と言わない）', () => {
@@ -80,17 +98,47 @@ describe('sandbox-probe-interpret: interpretSandboxKnownBypassProbe（既知の�
   });
 });
 
-describe('sandbox-probe-interpret: interpretSandboxReadProbe（C1: --acl-audit）', () => {
+describe('sandbox-probe-interpret: interpretSandboxDirListProbe（C1: --acl-audit のディレクトリ列挙）', () => {
   test('exit=0 は readable', () => {
-    assert.equal(interpretSandboxReadProbe(0).outcome, 'readable');
+    assert.equal(interpretSandboxDirListProbe(0).outcome, 'readable');
   });
 
   test('exit=1 は not-readable', () => {
-    assert.equal(interpretSandboxReadProbe(1).outcome, 'not-readable');
+    assert.equal(interpretSandboxDirListProbe(1).outcome, 'not-readable');
   });
 
   test('未知の exit・null は inconclusive', () => {
-    assert.equal(interpretSandboxReadProbe(99).outcome, 'inconclusive');
-    assert.equal(interpretSandboxReadProbe(null).outcome, 'inconclusive');
+    assert.equal(interpretSandboxDirListProbe(99).outcome, 'inconclusive');
+    assert.equal(interpretSandboxDirListProbe(null).outcome, 'inconclusive');
+  });
+});
+
+// サイクル SB-1a-2（b 対応）: ファイル単位の読み取り確認（存在確認・対照ファイルで区別する）
+describe('sandbox-probe-interpret: interpretSandboxFileReadProbe（C1/b: --acl-audit のファイル確認）', () => {
+  test('対象が存在しない場合は inconclusive（「存在しない」を ACL 拒否と混同しない）', () => {
+    const result = interpretSandboxFileReadProbe({ exitCode: 1, targetExists: false, controlReadable: true });
+    assert.equal(result.outcome, 'inconclusive');
+    assert.match(result.evidence, /存在しない/);
+  });
+
+  test('対照が読めなかった場合は全体を inconclusive（ACL の効果か切り分けできない）', () => {
+    const result = interpretSandboxFileReadProbe({ exitCode: 1, targetExists: true, controlReadable: false });
+    assert.equal(result.outcome, 'inconclusive');
+    assert.match(result.evidence, /対照/);
+  });
+
+  test('対象が存在し対照も読める状態で exit=1 なら not-readable（ACL による拒否と判定）', () => {
+    const result = interpretSandboxFileReadProbe({ exitCode: 1, targetExists: true, controlReadable: true });
+    assert.equal(result.outcome, 'not-readable');
+  });
+
+  test('対象が存在し対照も読める状態で exit=0 なら readable', () => {
+    const result = interpretSandboxFileReadProbe({ exitCode: 0, targetExists: true, controlReadable: true });
+    assert.equal(result.outcome, 'readable');
+  });
+
+  test('未知の exit コードは inconclusive', () => {
+    const result = interpretSandboxFileReadProbe({ exitCode: 99, targetExists: true, controlReadable: true });
+    assert.equal(result.outcome, 'inconclusive');
   });
 });

@@ -86,3 +86,50 @@ export function redactSandboxSecrets(text: string, secrets: readonly string[]): 
 export function describeSandboxEnvKeys(env: Record<string, string>): string[] {
   return Object.keys(env).sort();
 }
+
+/**
+ * SDK（`query()`）が組み立てた env のうち、Sandbox の子プロセスへ安全に引き渡してよいものだけを
+ * `base`（`buildSandboxChildEnv()` の結果）に merge する（サイクル SB-1a-2、純関数）。
+ *
+ * 設計: SDK は CLI 起動のために自分で env キーを追加・書き換える（`CLAUDE_CODE_*` 等）。これを
+ * 全く渡さないと SDK 経由の 1 往復が成立しない恐れがあるため、「`agentEnv`（Agent プロセスの
+ * `process.env`）と比べて SDK が足した／書き換えたキー」かつ「閉じた接頭辞リストに合致するキー」
+ * だけを通す。`base` 側（トークン・プロキシ・HOME 固定）は常に勝たせ、禁止キーは最後に `null`
+ * （= ホスト側で削除）として明示送信する。Agent の `process.env` を丸ごと渡さない（既存の
+ * `buildSandboxChildEnv()` と同じ設計原則）。
+ */
+const SANDBOX_SPAWN_ENV_ALLOWED_PREFIXES: readonly string[] = ['CLAUDE_CODE_', 'CLAUDE_AGENT_', 'CLAUDE_SDK_', 'DEVRELAY_'];
+
+export interface BuildSandboxSpawnEnvInput {
+  /** `buildSandboxChildEnv()` の結果（トークン・プロキシ・HOME 固定等） */
+  base: Record<string, string>;
+  /** SDK の `SpawnOptions.env`（Agent プロセスの env をベースに SDK が追加・書き換えたもの） */
+  sdkEnv: Record<string, string | undefined>;
+  /** 比較対象となる Agent プロセス自身の env（通常 `process.env`） */
+  agentEnv: Record<string, string | undefined>;
+}
+
+/**
+ * @returns Sandbox Host へ送る「上書き env」（`null` はキー削除を表す）。
+ */
+export function buildSandboxSpawnEnv(input: BuildSandboxSpawnEnvInput): Record<string, string | null> {
+  const result: Record<string, string | null> = {};
+  for (const [key, value] of Object.entries(input.sdkEnv)) {
+    if (value === undefined) continue;
+    if (input.agentEnv[key] === value) continue; // Agent 自身の env から変わっていない → 渡す必要がない
+    if (!SANDBOX_SPAWN_ENV_ALLOWED_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
+    if (SANDBOX_FORBIDDEN_ENV_KEYS.includes(key)) continue; // base 側を常に勝たせる
+    result[key] = value;
+  }
+  // base（トークン・プロキシ・HOME 固定等）を上書き適用（常に勝つ）
+  for (const [key, value] of Object.entries(input.base)) {
+    result[key] = value;
+  }
+  // 禁止キーは最後に明示 null（ホスト側で削除）。base 側に含まれていても確実に削除する。
+  for (const forbidden of SANDBOX_FORBIDDEN_ENV_KEYS) {
+    if (!(forbidden in input.base)) {
+      result[forbidden] = null;
+    }
+  }
+  return result;
+}

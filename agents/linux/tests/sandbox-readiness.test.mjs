@@ -7,6 +7,7 @@ import {
   buildSandboxCacheKey,
   isSandboxProbeCacheFresh,
   SANDBOX_BLOCK_ERROR_CODES,
+  decideSandboxTurnEligibility,
 } from '../dist/services/sandbox-readiness.js';
 
 /** 全項目を満たした基準入力（表駆動テストの出発点） */
@@ -173,5 +174,69 @@ describe('sandbox-readiness: キャッシュキー・TTL', () => {
 
   test('isSandboxProbeCacheFresh: ttlMs が 0 以下なら常に false（キャッシュ無効化）', () => {
     assert.equal(isSandboxProbeCacheFresh(1000, 1001, 0), false);
+  });
+});
+
+// サイクル SB-1a-2: チャット経路のターン単位の拒否判定（decideSandboxTurnEligibility）
+function baseEligibilityInput(overrides = {}) {
+  return {
+    targetUndecidable: false,
+    disabledBySwitch: false,
+    platform: 'win32',
+    effectiveAiTool: 'claude',
+    terminalMode: false,
+    rawMode: false,
+    isEphemeralSession: false,
+    crossAskScope: false,
+    handoverTurn: false,
+    ...overrides,
+  };
+}
+
+describe('sandbox-readiness: decideSandboxTurnEligibility（チャット経路の安いふるい）', () => {
+  test('全項目 OK なら許可する', () => {
+    assert.deepEqual(decideSandboxTurnEligibility(baseEligibilityInput()), { allowed: true });
+  });
+
+  const eligibilityCases = [
+    [{ targetUndecidable: true }, 'target_undecidable'],
+    [{ disabledBySwitch: true }, 'disabled_by_switch'],
+    [{ platform: 'linux' }, 'unsupported_platform'],
+    [{ effectiveAiTool: 'devin' }, 'unsupported_ai_tool'],
+    [{ effectiveAiTool: 'gemini' }, 'unsupported_ai_tool'],
+    [{ terminalMode: true }, 'terminal_mode_unsupported'],
+    [{ rawMode: true }, 'raw_mode_unsupported'],
+    [{ isEphemeralSession: true }, 'ephemeral_session_unsupported'],
+    [{ crossAskScope: true }, 'ephemeral_session_unsupported'],
+    [{ handoverTurn: true }, 'handover_turn_unsupported'],
+  ];
+
+  for (const [overrides, expectedReason] of eligibilityCases) {
+    test(`1項目のみ NG: ${JSON.stringify(overrides)} → ${expectedReason}`, () => {
+      const decision = decideSandboxTurnEligibility(baseEligibilityInput(overrides));
+      assert.deepEqual(decision, { allowed: false, reason: expectedReason });
+    });
+  }
+
+  test('判定不能（targetUndecidable）が最優先で、キルスイッチより先に当たる', () => {
+    const decision = decideSandboxTurnEligibility(baseEligibilityInput({ targetUndecidable: true, disabledBySwitch: true }));
+    assert.deepEqual(decision, { allowed: false, reason: 'target_undecidable' });
+  });
+
+  test('isEphemeralSession と crossAskScope が両方 true でも ephemeral_session_unsupported を返す', () => {
+    const decision = decideSandboxTurnEligibility(baseEligibilityInput({ isEphemeralSession: true, crossAskScope: true }));
+    assert.deepEqual(decision, { allowed: false, reason: 'ephemeral_session_unsupported' });
+  });
+
+  test('新しい拒否理由（SB-1a-2 追加分）の文言も resume 失敗 retry の誤判定トリガー文字列を含まない', () => {
+    const newReasons = ['target_undecidable', 'raw_mode_unsupported', 'ephemeral_session_unsupported', 'handover_turn_unsupported', 'sandbox_token_missing'];
+    for (const reason of newReasons) {
+      const message = buildSandboxDenialMessage(reason);
+      assert.equal(typeof message, 'string');
+      assert.ok(message.length > 0);
+      assert.equal(message.includes('session'), false, `reason=${reason}`);
+      assert.equal(message.includes('resume'), false, `reason=${reason}`);
+      assert.equal(message.includes('Prompt is too long'), false, `reason=${reason}`);
+    }
   });
 });

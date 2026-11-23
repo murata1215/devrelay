@@ -170,4 +170,37 @@ describe('sandbox-proxy: CONNECT allow/deny', () => {
     await handle.close();
     await assert.rejects(() => sendRawConnect(port, 'allowed.example:443'));
   });
+
+  // サイクル SB-1a-2（c 対応）: 中継中（CONNECT トンネルが開いたまま）に close() を呼んでも
+  // プロセスが終了しない既存バグの回帰テスト。`--claude-roundtrip` が成功表示の後に戻らない
+  // 症状の根治点（トンネル中の socket を追跡・destroy するよう sandbox-proxy.ts を修正した）。
+  test('CONNECT 中継中（クライアント側 socket を開いたまま）でも close() が速やかに resolve する', async () => {
+    const { server: echoServer, port: echoPort } = await createEchoServer();
+    const { handle, port } = await startProxyOnEphemeralPort([{ host: '127.0.0.1', ports: [echoPort] }]);
+    try {
+      const { statusLine, socket } = await sendRawConnect(port, `127.0.0.1:${echoPort}`);
+      assert.match(statusLine, /200/);
+      // クライアント側 socket を destroy せず「中継中」のまま close() を呼ぶ。
+      // 修正前はここで server.close() の callback が永久に呼ばれなかった。
+      const closed = await Promise.race([
+        handle.close().then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timed-out'), 2_000)),
+      ]);
+      assert.equal(closed, 'closed', 'close() が 2 秒以内に resolve しなかった（中継中の socket が残っている）');
+      socket.destroy();
+    } finally {
+      echoServer.close();
+    }
+  });
+
+  test('CONNECT 中継中に close() すると、中継していた socket 自体も destroy される', async () => {
+    const { server: echoServer, port: echoPort } = await createEchoServer();
+    const { handle, port } = await startProxyOnEphemeralPort([{ host: '127.0.0.1', ports: [echoPort] }]);
+    const { statusLine, socket } = await sendRawConnect(port, `127.0.0.1:${echoPort}`);
+    assert.match(statusLine, /200/);
+    await handle.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(socket.destroyed, true, 'close() 後もクライアント側 socket が開いたままになっている');
+    echoServer.close();
+  });
 });

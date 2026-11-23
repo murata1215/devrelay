@@ -1958,6 +1958,8 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
     // サイクルS2a: クロス ask スコープの読める範囲・使えるツール制限ゲートを有効化するか。
     // `statePolicy.crossAskScope` をそのまま渡す（`strictReadonly`/`usePlanMode` には依存しない）。
     crossAskScope: statePolicy.crossAskScope,
+    // サイクル SB-1a-2: Sandbox 実行の拒否条件（引継ぎ書生成ターンは対象外）に使う。
+    handoverTurn: payload.handoverTurn,
   };
 
   // ツール承認リクエストのコールバック（plan/exec 両モードで設定。plan モードでは AskUserQuestion のみ使用）
@@ -2295,6 +2297,9 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
         // core#336: スコープ識別子 / turnId も retry で引き継ぐ（resumeSessionId は意図的に undefined のまま）
         agentScopeId: sendOptions.agentScopeId,
         turnId: sendOptions.turnId,
+        // サイクル SB-1a-2: handoverTurn も retry で引き継ぐ（新規フィールドを最初から落とさない。
+        // 既存の crossAskScope/terminalMode の取りこぼしには手を入れない）。
+        handoverTurn: sendOptions.handoverTurn,
         // 2026-10-27 サイクル2（D2）: resumeSource は意図的に渡さない（undefined = 新規セッション扱い）。
         // resumeSessionId: undefined と対で、gemini 分岐が壊れた ID を --resume に使わないようにする。
       };

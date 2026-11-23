@@ -41,6 +41,12 @@ import { isTurnStale } from './update-guard-rules.js';
 // SDK オプション上書き・deny 判定の純関数群（外部 import ゼロ）+ fs を要する実体パス判定。
 import { decideCrossAskToolPermission, buildCrossAskSdkOverrides, buildCrossAskEnv, decideCrossAskInitAssertion, CROSS_ASK_AUTO_MEMORY_DIR } from './cross-ask-scope-rules.js';
 import { resolveProjectRootReal, checkCrossAskPath } from './cross-ask-path-guard.js';
+// サイクル SB-1a-2: チャット経路の Sandbox 実行（Windows + Claude Code 専用）。判定は本ファイルの
+// 単一のチョークポイント（`sendPromptToAiImpl()`、端末モード/SDK 分岐より前）のみで行う。
+import { decideSandboxTarget } from './sandbox-target.js';
+import { decideSandboxTurnEligibility, buildSandboxDenialMessage } from './sandbox-readiness.js';
+import { isSandboxDisabledBySwitch, prepareSandboxLaunch, type SandboxLaunch } from './sandbox-preflight.js';
+import { loadConfig as loadAgentConfigFresh } from './config.js';
 // core#383: 旧 Claude CLI（--session-id 未対応）を検出した場合のプロセス内フォールバックフラグ。
 // 一度 true になったら、この Agent プロセスが再起動されるまで以後の全ターンで
 // --session-id を渡さない（legacy argv = 画面スクレイプによる旧来のセッション ID 取得に戻す）。
@@ -1044,6 +1050,14 @@ export interface SendPromptOptions {
   rawMode?: boolean;
   /** rawMode: true の場合に使う system prompt（完全置換。未指定時は空文字列扱い） */
   systemPrompt?: string;
+  /**
+   * サイクル SB-1a-2: スレッド引継ぎ（`n make`）の引継ぎ書生成ターンか。
+   * `connection.ts` の `payload.handoverTurn` から渡される（本番呼び出し・retryOptions の
+   * 両方に同じ 1 行を追加しただけで、既存の `crossAskScope`/`terminalMode` の取りこぼし
+   * （`connection.ts:2267-2300` 付近、別サイクルで対応予定）には手を入れない）。
+   * Sandbox 実行の対象判定（`decideSandboxTurnEligibility()`）だけが参照する。
+   */
+  handoverTurn?: boolean;
 }
 
 /**
@@ -1088,7 +1102,12 @@ async function sendPromptToAiSdk(
   claudeSessionId: string,
   config: AgentConfig,
   onOutput: OutputCallback,
-  options: SendPromptOptions = {}
+  options: SendPromptOptions = {},
+  /** サイクル SB-1a-2: 呼び出し元（`sendPromptToAiImpl()`）の単一判定点が通過・起動準備済みの
+   *  場合のみ渡される。設定時は `sdkOptions.spawnClaudeCodeProcess` に差し替える（SDK 公式オプション）。
+   *  承認ゲート（`canUseTool`/`hooks.PreToolUse`/`disallowedTools`/`permissionMode`/abort）は
+   *  このファイル内のコードが引き続き担う（1 行も Sandbox Host 側へ移動しない）。 */
+  sandboxLaunch?: SandboxLaunch
 ): Promise<AiRunResult> {
   const result: AiRunResult = {};
   let fullOutput = '';
@@ -1171,6 +1190,16 @@ async function sendPromptToAiSdk(
   if (claudeFallback) {
     sdkOptions.pathToClaudeCodeExecutable = claudeFallback;
     console.log(`🩹 [SDK] Using fallback Claude executable: ${claudeFallback}`);
+  }
+
+  // サイクル SB-1a-2: Sandbox 実行（呼び出し元の単一判定点を通過済み）。SDK の公式オプション
+  // `spawnClaudeCodeProcess` を差し替えるだけで、承認ゲート（`canUseTool`/`hooks.PreToolUse`/
+  // `disallowedTools`/`permissionMode`/abort）はこのファイル内に残る。
+  // 実行前確認が `claude_executable_fallback_active` を拒否理由にしているため、
+  // `claudeFallback`（同梱実行ファイル欠落）と `sandboxLaunch` が両方 truthy になることは無い。
+  if (sandboxLaunch) {
+    sdkOptions.spawnClaudeCodeProcess = sandboxLaunch.spawn;
+    console.log(`🛡️ [SDK] Using Sandbox Host spawn for Claude Code`);
   }
 
   // ツール除去（SDK レベル）: AskUserQuestion（disableAsk）/ ExitPlanMode（plan モード時）
@@ -2032,6 +2061,11 @@ async function sendPromptToAiSdk(
     // した後で abort() が呼ばれた等の稀なレース）でも、次ターンに誤って持ち越されないよう必ず消す
     // （残存すると次ターンの無関係なエラーを「ユーザーキャンセル」と誤判定してしまう）。
     userCancelRequested.delete(sessionId);
+    // サイクル SB-1a-2: Sandbox 実行の中継プロキシのリースを解放する（正常終了・catch・abort の
+    // いずれの経路でも必ず通る finally に置き、取り逃しを防ぐ）。
+    if (sandboxLaunch) {
+      await sandboxLaunch.dispose();
+    }
   }
 
   // 完了シグナル送信（フォールバック）
@@ -2351,6 +2385,52 @@ async function sendPromptToAiImpl(
     prompt = `${prompt}\n\n---\nIMPORTANT: Respond to the user in English from now on, regardless of the language used in any instructions above.`;
   }
 
+  // サイクル SB-1a-2: Sandbox 実行の単一判定点（端末モード/SDK/非 claude の spawn 経路の
+  // いずれより前。claude 以外のツールが選ばれた対象プロジェクトも拒否できるようにするため）。
+  // `sandbox.projects` は呼び出し元から引き回さず、判定のたびに `config.yaml` を読み直す
+  // （人間の追加指示 2026-11-23: `u` はビルド成果物の鮮度ゲートで「変更が無ければ再起動しない」
+  // ことがあり、起動時にキャッシュされた `AgentConfig` をそのまま使うと設定変更が反映されない
+  // まま古い判定が続く恐れがあるため）。対象外（既定）のときは I/O 1 回（config.yaml 読み直し）
+  // 以外、既存処理に一切影響しない。
+  let sandboxLaunch: SandboxLaunch | undefined;
+  {
+    const freshSandboxSettings = (await loadAgentConfigFresh()).sandbox;
+    const sandboxTarget = decideSandboxTarget({
+      configuredProjects: freshSandboxSettings?.projects,
+      projectPath,
+      platform: process.platform,
+    });
+    if (sandboxTarget.kind !== 'not-target') {
+      const gate = decideSandboxTurnEligibility({
+        targetUndecidable: sandboxTarget.kind === 'undecidable',
+        disabledBySwitch: isSandboxDisabledBySwitch(),
+        platform: process.platform,
+        effectiveAiTool: aiTool,
+        terminalMode: !!options.terminalMode,
+        rawMode: !!options.rawMode,
+        isEphemeralSession: isEphemeralSession(sessionId),
+        crossAskScope: !!options.crossAskScope,
+        handoverTurn: !!options.handoverTurn,
+      });
+      if (!gate.allowed) {
+        onOutput(buildSandboxDenialMessage(gate.reason), true);
+        return {};
+      }
+      const launch = await prepareSandboxLaunch({
+        sessionId,
+        projectPath,
+        sandboxSettings: freshSandboxSettings,
+        upstreamProxyUrl: config.proxy?.url,
+        onOutput,
+      });
+      if (!launch) {
+        // 拒否理由は prepareSandboxLaunch() 内で onOutput 済み。制限なしで実行しない。
+        return {};
+      }
+      sandboxLaunch = launch;
+    }
+  }
+
   // サイクルP1: runner 起動直前の唯一のチョークポイント（PTY/SDK 両分岐より前）。
   // provider 判定は共通層の表で行うため、ai-runner は provider を一切知らない。
   // 失敗・timeout しても起動をブロックしない（例外を投げない設計、reconcileForRunner 内で担保）。
@@ -2362,13 +2442,14 @@ async function sendPromptToAiImpl(
 
   // 端末インタフェースモード（PTY 経由で claude --continue 起動）
   // aiTool が claude かつ terminalMode フラグが立っている場合のみ分岐
+  // （sandboxLaunch は上記ゲートで terminalMode なら拒否済みのため、ここでは常に undefined）
   if (aiTool === 'claude' && options.terminalMode) {
     return sendPromptToTerminalClaude(sessionId, prompt, projectPath, onOutput, options);
   }
 
   // Claude は Agent SDK を使用（spawn の代わり）
   if (aiTool === 'claude') {
-    return sendPromptToAiSdk(sessionId, prompt, projectPath, claudeSessionId, config, onOutput, options);
+    return sendPromptToAiSdk(sessionId, prompt, projectPath, claudeSessionId, config, onOutput, options, sandboxLaunch);
   }
 
   const command = getAiCommand(aiTool, config);

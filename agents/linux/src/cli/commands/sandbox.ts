@@ -15,9 +15,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import * as net from 'node:net';
 import chalk from 'chalk';
-import { loadConfig, getConfigDir, getSandboxTokenPath, getSandboxProgramDataDir, getSandboxPublicKeyPath, getSandboxHomeDir } from '../../services/config.js';
+import { loadConfig, getConfigDir, getSandboxTokenPath, getSandboxProgramDataDir, getSandboxHomeDir } from '../../services/config.js';
 import {
   SANDBOX_PROTOCOL_VERSION,
   SANDBOX_PROXY_PORT,
@@ -28,21 +27,9 @@ import {
   SANDBOX_KNOWN_PRIVILEGED_SIDS,
   buildSandboxPipePath,
 } from '../../services/sandbox-protocol.js';
-import {
-  connectToSandboxHost,
-  performSandboxHandshake,
-  awaitSandboxProcessResult,
-  SandboxSpawnedProcess,
-  type SandboxHandshakeResult,
-} from '../../services/sandbox-launcher.js';
-import { generateSandboxNonce } from '../../services/sandbox-attest.js';
+import { connectToSandboxHost, awaitSandboxProcessResult, SandboxSpawnedProcess } from '../../services/sandbox-launcher.js';
 import { resolveSandboxAllowlist, hashSandboxAllowlist } from '../../services/sandbox-allowlist.js';
-import {
-  decideSandboxPreflight,
-  buildSandboxDenialMessage,
-  type SandboxPreflightInput,
-  type SandboxDenyReason,
-} from '../../services/sandbox-readiness.js';
+import { buildSandboxDenialMessage, type SandboxDenyReason } from '../../services/sandbox-readiness.js';
 import {
   buildSandboxPrepPlan,
   buildSandboxTokenLockdownStep,
@@ -51,10 +38,9 @@ import {
   buildSandboxPrepPrecheckMessage,
   type SandboxPrepStep,
 } from '../../services/sandbox-prep-commands.js';
-import { resolveCurrentUserSid } from '../../services/sandbox-identity.js';
 import { probeSdkExecutable } from '../../services/sdk-executable.js';
-import { createSandboxConnectProxy, type SandboxProxyDenial, type SandboxProxyHandle } from '../../services/sandbox-proxy.js';
-import { decideSandboxProxyMode } from '../../services/sandbox-proxy-mode.js';
+import { runSandboxPreflightCheck, isSandboxDisabledBySwitch } from '../../services/sandbox-preflight.js';
+import { withSandboxProxy as withSandboxProxySession, type SandboxProxySession } from '../../services/sandbox-proxy-session.js';
 import { buildSandboxChildEnv, redactSandboxSecrets } from '../../services/sandbox-env.js';
 import { buildSandboxCliCommand } from '../../services/sandbox-cli-hint.js';
 import { decodeWindowsConsoleText } from '../../services/sandbox-console-text.js';
@@ -62,16 +48,12 @@ import {
   interpretSandboxDirectBlockProbe,
   interpretSandboxProxyDenyProbe,
   interpretSandboxKnownBypassProbe,
-  interpretSandboxReadProbe,
+  interpretSandboxDirListProbe,
+  interpretSandboxFileReadProbe,
   type SandboxProbeInterpretation,
 } from '../../services/sandbox-probe-interpret.js';
 
 const execFileAsync = promisify(execFile);
-
-/** `DEVRELAY_SANDBOX_DISABLE` キルスイッチ（既定 `0`）。`1` なら sandbox 要求ターンを全部拒否する。 */
-function isSandboxDisabledBySwitch(): boolean {
-  return process.env.DEVRELAY_SANDBOX_DISABLE === '1';
-}
 
 /** `devrelay sandbox <subcommand>` の実際に打てるコマンドを表示する（B1 対応: Windows に `devrelay` コマンドは無い）。 */
 function printSandboxCliHint(subcommand: string, projectPath?: string): void {
@@ -83,113 +65,6 @@ function printSandboxCliHint(subcommand: string, projectPath?: string): void {
     projectPath,
   });
   console.log(chalk.gray(`  ${command}`));
-}
-
-interface SandboxPreflightCheckResult {
-  decision: { allowed: true } | { allowed: false; reason: SandboxDenyReason };
-  handshake: SandboxHandshakeResult | null;
-  claudeExecutablePath: string | null;
-  /** 同梱実行ファイル欠落でシステム claude を使っている（B4 対応: 以前は handshake の成否と
-   *  混同して表示していたため、別途保持して正しく表示する） */
-  claudeExecutableFallbackActive: boolean;
-  projectPath: string;
-  currentUserSid: string | null;
-  pipeConnected: boolean;
-  connectError: string | null;
-}
-
-/**
- * `status` / `selftest` で共有する実行前確認ロジック。
- * ホストへ接続・ハンドシェイク・署名検証を行い、`decideSandboxPreflight()` に渡す完全な入力を
- * 組み立てて判定する。呼び出し側は事前に `withSandboxProxy()` で中継プロキシを用意しておくこと
- * （B3 対応。本関数自体はプロキシの起動は行わない）。
- */
-async function runSandboxPreflightCheck(projectPath: string): Promise<SandboxPreflightCheckResult> {
-  const config = await loadConfig();
-  const probe = probeSdkExecutable();
-  const claudeExecutablePath = probe.path; // clijs/native のみ非 null（それ以外は fallback 扱い）
-  const claudeExecutableFallbackActive = probe.form === 'none' || probe.form === 'unresolved';
-
-  const allowlistResolution = resolveSandboxAllowlist(config.sandbox?.allowlist);
-
-  let projectPathUnderUserProfile = true; // 判定できない場合は fail-closed（配下とみなす）
-  try {
-    const realProject = await fs.realpath(projectPath);
-    const realHome = await fs.realpath(os.homedir());
-    projectPathUnderUserProfile = realProject === realHome || realProject.startsWith(realHome + path.sep);
-  } catch {
-    // projectPath が存在しない等。判定できないため true のまま（fail-closed）
-  }
-
-  const currentUserSid = await resolveCurrentUserSid();
-
-  let socket;
-  let pipeConnected = false;
-  let connectError: string | null = null;
-  let handshake: SandboxHandshakeResult | null = null;
-  try {
-    socket = await connectToSandboxHost(buildSandboxPipePath(), SANDBOX_HANDSHAKE_TIMEOUT_MS);
-    pipeConnected = true;
-  } catch (err) {
-    connectError = err instanceof Error ? err.message : String(err);
-  }
-
-  if (socket) {
-    try {
-      const nonce = generateSandboxNonce();
-      handshake = await performSandboxHandshake(
-        socket,
-        {
-          nonce,
-          claudeExecutablePath: claudeExecutablePath ?? '',
-          projectPath,
-        },
-        await readSandboxPublicKey(),
-      );
-    } catch (err) {
-      connectError = err instanceof Error ? err.message : String(err);
-    } finally {
-      socket.destroy();
-    }
-  }
-
-  const input: SandboxPreflightInput = {
-    disabledBySwitch: isSandboxDisabledBySwitch(),
-    platform: process.platform,
-    effectiveAiTool: 'claude', // SB-1a-1 は未配線のため CLI は claude 固定で確認する
-    terminalMode: false,
-    projectPathUnderUserProfile,
-    capabilityDeclared: true, // SB-1a-1 は capability 申告自体が未配線（SB-1a-2 で配線）。CLI 単独確認用に true とする
-    claudeExecutableFallbackActive,
-    allowlistValid: allowlistResolution.ok,
-    pipeConnected,
-    protocolVersionMatch: handshake ? handshake.protocolVersion === SANDBOX_PROTOCOL_VERSION : false,
-    signatureValid: handshake ? handshake.signatureValid : false,
-    identityServiceNameMatches: handshake ? handshake.serviceName === EXPECTED_SANDBOX_SERVICE_NAME : false,
-    identitySidHasServicePrefix: handshake ? handshake.sid.startsWith(SANDBOX_SERVICE_SID_PREFIX) : false,
-    identitySidDiffersFromAgent:
-      handshake !== null && currentUserSid !== null ? handshake.sid !== currentUserSid : false,
-    identitySidNotKnownPrivileged: handshake ? !SANDBOX_KNOWN_PRIVILEGED_SIDS.includes(handshake.sid) : false,
-    blockProbePositiveControlBlocked: handshake ? handshake.positiveControlBlocked : false,
-    blockProbeLoopbackReachable: handshake ? handshake.loopbackReachable : false,
-    hostCanReadClaudeExecutable: handshake ? handshake.claudeExecutableReadable : false,
-    hostCanWriteProjectFolder: handshake ? handshake.projectFolderWritable : false,
-  };
-
-  return {
-    decision: decideSandboxPreflight(input),
-    handshake,
-    claudeExecutablePath,
-    claudeExecutableFallbackActive,
-    projectPath,
-    currentUserSid,
-    pipeConnected,
-    connectError,
-  };
-}
-
-async function readSandboxPublicKey(): Promise<string> {
-  return fs.readFile(getSandboxPublicKeyPath(), 'utf-8');
 }
 
 function printCheck(label: string, ok: boolean | null): void {
@@ -209,82 +84,27 @@ function printDenialWithHint(reason: SandboxDenyReason, projectPath: string): vo
 }
 
 // -----------------------------------------------------------------------------
-// 中継プロキシ（127.0.0.1:48711）の用意（B3 対応）
+// 中継プロキシ（127.0.0.1:48711）の用意（B3 対応、SB-1a-2 で `sandbox-proxy-session.ts` へ移設）
 // -----------------------------------------------------------------------------
 
-/** 48711 への接続試行（500ms タイムアウト）で既存の中継プロキシの待ち受けを検出する */
-function detectExistingSandboxProxyListener(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host: '127.0.0.1', port: SANDBOX_PROXY_PORT });
-    const timer = setTimeout(() => {
-      socket.destroy();
-      resolve(false);
-    }, 500);
-    socket.once('connect', () => {
-      clearTimeout(timer);
-      socket.end();
-      resolve(true);
-    });
-    socket.once('error', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-  });
-}
-
-interface SandboxProxySession {
-  /** 自分で起動したプロキシが拒否した宛先の記録（既存の待ち受けを再利用した場合は常に空） */
-  deniedTargets: SandboxProxyDenial[];
-}
-
 /**
- * `status` / `selftest` の前提として中継プロキシ（127.0.0.1:48711）を用意する。
+ * `status` / `selftest` の前提として中継プロキシ（127.0.0.1:48711）を用意する（CLI 用の薄い
+ * ラッパー）。実体は `sandbox-proxy-session.ts` の参照カウント付き共有実装
+ * （`withSandboxProxySession()`）。SB-1a-1 時点では status/selftest が中継プロキシを一切
+ * 起動せず、Sandbox Host の `ProbeLoopbackReachable()` が必ず失敗していた
+ * （実機確認済み、`loopback_probe_failed`）。
  *
- * SB-1a-1 時点では status/selftest が中継プロキシを一切起動せず、Sandbox Host の
- * `ProbeLoopbackReachable()` が必ず失敗していた（実機確認済み、`loopback_probe_failed`）。
- * 既存の待ち受けがあれば再利用し、無ければ自分で一時起動して `fn()` の実行中だけ維持し、
- * 終了時に必ず閉じる。上位プロキシが socks の場合は起動せず、fail-closed のまま
- * （`loopback_probe_failed` で拒否される）表示だけ行う。
+ * SB-1a-2 で selftest 側の呼び出しを「実行前確認 + 有効な全プローブ」をまとめて 1 回
+ * `withSandboxProxy()` で包む形に変更した（a 対応: 以前はプローブ関数ごとに個別リースを
+ * 取っていたため、1 本目が終わった時点でプロキシが閉じ、2 本目が「未確認（curl exit=7）」に
+ * なっていた既存バグの根治点）。
  */
 async function withSandboxProxy<T>(fn: (session: SandboxProxySession) => Promise<T>): Promise<T> {
-  const listenerDetected = await detectExistingSandboxProxyListener();
   const config = await loadConfig();
-  let upstreamProxyScheme: string | undefined;
-  if (config.proxy?.url) {
-    try {
-      upstreamProxyScheme = new URL(config.proxy.url).protocol.replace(/:$/, '');
-    } catch {
-      upstreamProxyScheme = undefined;
-    }
-  }
-  const decision = decideSandboxProxyMode({ listenerDetected, upstreamProxyScheme });
-  console.log(chalk.gray(`  ${decision.message}`));
-
-  const session: SandboxProxySession = { deniedTargets: [] };
-  if (decision.mode !== 'start-own') {
-    return fn(session);
-  }
-
-  const allowlistResolution = resolveSandboxAllowlist(config.sandbox?.allowlist);
-  const allowlist = allowlistResolution.ok ? allowlistResolution.allowlist : [];
-  let handle: SandboxProxyHandle | null = null;
-  try {
-    handle = await createSandboxConnectProxy({
-      port: SANDBOX_PROXY_PORT,
-      allowlist,
-      upstreamProxyUrl: config.proxy?.url,
-      onDenied: (denial) => {
-        session.deniedTargets.push(denial);
-      },
-    });
-  } catch (err) {
-    console.log(chalk.red(`  ❌ 中継プロキシの起動に失敗しました: ${err instanceof Error ? err.message : String(err)}`));
-  }
-  try {
-    return await fn(session);
-  } finally {
-    if (handle) await handle.close();
-  }
+  return withSandboxProxySession(
+    { allowlist: config.sandbox?.allowlist, upstreamProxyUrl: config.proxy?.url, log: (message) => console.log(chalk.gray(`  ${message}`)) },
+    fn,
+  );
 }
 
 // -----------------------------------------------------------------------------
@@ -533,47 +353,54 @@ export async function sandboxSelftestCommand(options: {
   const projectPath = options.project ? path.resolve(options.project) : process.cwd();
   console.log(chalk.blue(`🛡️  Sandbox selftest: ${projectPath}`));
 
-  const result = await withSandboxProxy(() => runSandboxPreflightCheck(projectPath));
-  if (!result.decision.allowed) {
-    printDenialWithHint(result.decision.reason, projectPath);
-    return;
-  }
-  console.log(chalk.green('✅ 実行前確認を通過しました。'));
+  // a 対応（サイクル SB-1a-2）: 実行前確認 + 有効な全プローブを 1 本の中継プロキシのリースで
+  // 包む。以前はプローブごとに個別に `withSandboxProxy()` を呼んでいたため、1 本目が終わった
+  // 時点でプロキシが閉じ、2 本目の確認が始まる前には待ち受けが無い状態になっていた
+  // （「中継プロキシ: 自分で一時起動しました」が複数回表示され、2 本目が「未確認（curl exit=7）」
+  // になっていた既存バグの根治点）。
+  await withSandboxProxy(async (session) => {
+    const result = await runSandboxPreflightCheck(projectPath);
+    if (!result.decision.allowed) {
+      printDenialWithHint(result.decision.reason, projectPath);
+      return;
+    }
+    console.log(chalk.green('✅ 実行前確認を通過しました。'));
 
-  const anyFlag = options.spawn || options.networkProbe || options.aclAudit || options.claudeRoundtrip || options.bitsProbe;
-  if (!anyFlag) {
-    console.log(
-      chalk.gray(
-        '  --spawn / --network-probe / --acl-audit / --claude-roundtrip / --bits-probe を指定すると実際に確認します。',
-      ),
-    );
-    return;
-  }
+    const anyFlag = options.spawn || options.networkProbe || options.aclAudit || options.claudeRoundtrip || options.bitsProbe;
+    if (!anyFlag) {
+      console.log(
+        chalk.gray(
+          '  --spawn / --network-probe / --acl-audit / --claude-roundtrip / --bits-probe を指定すると実際に確認します。',
+        ),
+      );
+      return;
+    }
 
-  const config = await loadConfig();
-  const allowlistResolution = resolveSandboxAllowlist(config.sandbox?.allowlist);
-  if (!allowlistResolution.ok) {
-    console.log(chalk.red(`❌ 許可リストが不正です: ${allowlistResolution.reason}`));
-    return;
-  }
-  console.log(chalk.gray(`  許可リストハッシュ: ${hashSandboxAllowlist(allowlistResolution.allowlist)}`));
-  console.log(chalk.gray(`  中継プロキシ固定ポート: ${SANDBOX_PROXY_PORT}`));
+    const config = await loadConfig();
+    const allowlistResolution = resolveSandboxAllowlist(config.sandbox?.allowlist);
+    if (!allowlistResolution.ok) {
+      console.log(chalk.red(`❌ 許可リストが不正です: ${allowlistResolution.reason}`));
+      return;
+    }
+    console.log(chalk.gray(`  許可リストハッシュ: ${hashSandboxAllowlist(allowlistResolution.allowlist)}`));
+    console.log(chalk.gray(`  中継プロキシ固定ポート: ${SANDBOX_PROXY_PORT}`));
 
-  if (options.spawn) {
-    await runSandboxEchoSpawn(projectPath);
-  }
-  if (options.networkProbe) {
-    await runSandboxNetworkProbes(projectPath);
-  }
-  if (options.aclAudit) {
-    await runSandboxAclAudit(projectPath);
-  }
-  if (options.claudeRoundtrip) {
-    await runSandboxClaudeRoundtrip(projectPath);
-  }
-  if (options.bitsProbe) {
-    await runSandboxBitsProbe(projectPath);
-  }
+    if (options.spawn) {
+      await runSandboxEchoSpawn(projectPath);
+    }
+    if (options.networkProbe) {
+      await runSandboxNetworkProbes(projectPath, session);
+    }
+    if (options.aclAudit) {
+      await runSandboxAclAudit(projectPath);
+    }
+    if (options.claudeRoundtrip) {
+      await runSandboxClaudeRoundtrip(projectPath);
+    }
+    if (options.bitsProbe) {
+      await runSandboxBitsProbe(projectPath);
+    }
+  });
 }
 
 /** ホスト経由でコマンドを実行する共通ヘルパ。接続・spawn いずれかの失敗は `spawnFailed:true` にまとめる。 */
@@ -640,47 +467,102 @@ function buildCurlProxyDenyArgs(): string[] {
   return ['-sS', '-o', 'NUL', '-w', '%{http_code}', '--max-time', '5', 'https://example.com/'];
 }
 
+/** a 対応: 中継プロキシ経由で許可リスト内のホスト（陽性対照）へつなぐ */
+function buildCurlProxyControlArgs(): string[] {
+  return ['-sS', '-o', 'NUL', '-w', '%{http_code}', '--max-time', '5', `https://${SANDBOX_POSITIVE_CONTROL_HOST}/`];
+}
+
 /**
  * ネットワーク遮断の実機確認を**ホスト経由（Sandbox 身元）**で行う（B6 対応）。
  * SB-1a-1 時点では開発者身元で直接 `cmd.exe` を実行していたため、ファイアウォールの制限の
- * 外で測っていた（実機確認済みの既存バグ）。確認は 2 本:
+ * 外で測っていた（実機確認済みの既存バグ）。確認は 3 本:
  *   1. プロキシを通さない直結が遮断されること（陽性対照: 許可リストの実ホストへ）
- *   2. 中継プロキシ経由で、許可リスト外のホストが拒否されること
+ *   2. 中継プロキシ経由で許可リスト内のホストへ到達できること（a 対応の陽性対照。
+ *      これが失敗する場合、プロキシ自体に到達できていないので、確認 3 の結果は
+ *      「拒否された」ではなく「未確認」と解釈する）
+ *   3. 中継プロキシ経由で、許可リスト外のホストが拒否されること
+ *
+ * 呼び出し元（`sandboxSelftestCommand`）が 1 本だけ確保した中継プロキシのリース（`session`）を
+ * 受け取る。本関数自身はリースの確保・解放を行わない（a 対応: 以前は本関数が個別に
+ * `withSandboxProxy()` を呼んでいたため、確認 1 本目が終わった時点でプロキシが閉じていた）。
  */
-async function runSandboxNetworkProbes(projectPath: string): Promise<void> {
+async function runSandboxNetworkProbes(projectPath: string, session: SandboxProxySession): Promise<void> {
   console.log(chalk.blue('  ▶ ネットワーク遮断の確認プローブを実行します（ホスト経由）...'));
 
-  await withSandboxProxy(async (session) => {
-    const directRaw = await runHostRoutedCommand(projectPath, 'curl.exe', buildCurlDirectArgs(), {
-      HTTPS_PROXY: null,
-      HTTP_PROXY: null,
-      https_proxy: null,
-      http_proxy: null,
-      ALL_PROXY: null,
-      all_proxy: null,
-    });
-    const directInterpretation = interpretSandboxDirectBlockProbe(directRaw);
-    console.log(`     直結（プロキシ無し、許可リストの実ホストへ）: ${describeProbeOutcomeLine(directInterpretation)}`);
-
-    const proxyUrl = `http://127.0.0.1:${SANDBOX_PROXY_PORT}`;
-    const viaProxyRaw = await runHostRoutedCommand(projectPath, 'curl.exe', buildCurlProxyDenyArgs(), {
-      HTTPS_PROXY: proxyUrl,
-      HTTP_PROXY: proxyUrl,
-      https_proxy: proxyUrl,
-      http_proxy: proxyUrl,
-    });
-    const proxyInterpretation = interpretSandboxProxyDenyProbe({
-      ...viaProxyRaw,
-      proxyDeniedObserved: session.deniedTargets.length > 0,
-    });
-    console.log(`     プロキシ経由（許可リスト外のホストへ）: ${describeProbeOutcomeLine(proxyInterpretation)}`);
+  const directRaw = await runHostRoutedCommand(projectPath, 'curl.exe', buildCurlDirectArgs(), {
+    HTTPS_PROXY: null,
+    HTTP_PROXY: null,
+    https_proxy: null,
+    http_proxy: null,
+    ALL_PROXY: null,
+    all_proxy: null,
   });
+  const directInterpretation = interpretSandboxDirectBlockProbe(directRaw);
+  console.log(`     直結（プロキシ無し、許可リストの実ホストへ）: ${describeProbeOutcomeLine(directInterpretation)}`);
+
+  const proxyUrl = `http://127.0.0.1:${SANDBOX_PROXY_PORT}`;
+  const proxyControlRaw = await runHostRoutedCommand(projectPath, 'curl.exe', buildCurlProxyControlArgs(), {
+    HTTPS_PROXY: proxyUrl,
+    HTTP_PROXY: proxyUrl,
+    https_proxy: proxyUrl,
+    http_proxy: proxyUrl,
+  });
+  const proxyControlReachable = !proxyControlRaw.spawnFailed && !proxyControlRaw.timedOut && proxyControlRaw.exitCode === 0;
+  console.log(
+    `     プロキシ経由の陽性対照（許可リスト内のホストへ）: ${proxyControlReachable ? '到達できた' : '到達できなかった'}（curl exit=${proxyControlRaw.exitCode ?? 'null'}）`,
+  );
+
+  const viaProxyRaw = await runHostRoutedCommand(projectPath, 'curl.exe', buildCurlProxyDenyArgs(), {
+    HTTPS_PROXY: proxyUrl,
+    HTTP_PROXY: proxyUrl,
+    https_proxy: proxyUrl,
+    http_proxy: proxyUrl,
+  });
+  const proxyInterpretation = interpretSandboxProxyDenyProbe({
+    ...viaProxyRaw,
+    proxyDeniedObserved: session.deniedTargets.length > 0,
+    proxyControlReachable,
+  });
+  console.log(`     プロキシ経由（許可リスト外のホストへ）: ${describeProbeOutcomeLine(proxyInterpretation)}`);
+}
+
+/** 確認対象が Agent 側（開発者身元）の `fs.stat()` で存在するかどうか */
+async function probeSandboxAclAuditTargetExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.stat(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 対照（プロジェクト内の既存ファイル）を探す（b 対応）。`.git\HEAD` があれば使い、無ければ
+ * プロジェクト直下の任意の 1 ファイルを使う。見つからなければ `null`（呼び出し側は全体を
+ * 未確認とする）。
+ */
+async function findSandboxAclAuditControlFile(projectPath: string): Promise<string | null> {
+  const gitHead = path.join(projectPath, '.git', 'HEAD');
+  if (await probeSandboxAclAuditTargetExists(gitHead)) return gitHead;
+  try {
+    const entries = await fs.readdir(projectPath, { withFileTypes: true });
+    const firstFile = entries.find((entry) => entry.isFile());
+    if (firstFile) return path.join(projectPath, firstFile.name);
+  } catch {
+    // プロジェクトフォルダが列挙できない等
+  }
+  return null;
 }
 
 /**
  * Sandbox 身元から Agent の設定・トークン・リポジトリ資格情報が読めないことを確認する（C1 対応）。
  * `cmd.exe /c type <path> >nul` の**終了コードだけ**で判定する（stdout は `>nul` で捨てるため、
  * トークン等の値はホストからもパイプ上にも一切現れない）。
+ *
+ * b 対応（サイクル SB-1a-2）: SB-1a-1.1 時点では「読めなかった（ACL 拒否）」と「対象が存在しない」
+ * が exit=1 で区別できなかった。本サイクルで (1) 確認に使う絶対パスを表示し、(2) Agent 側
+ * （開発者身元）で存在確認できたファイルだけを対象にし、(3) プロジェクト内の既存ファイルを
+ * 同じ方法で読む対照を 1 つ足し、対照が失敗したら全体を未確認とする。
  */
 async function runSandboxAclAudit(projectPath: string): Promise<void> {
   console.log(chalk.blue('  ▶ Sandbox 身元からの読み取り可否を確認します（exit コードのみで判定。内容は表示しません）...'));
@@ -691,9 +573,26 @@ async function runSandboxAclAudit(projectPath: string): Promise<void> {
     { label: 'agent\\.git\\config', path: path.join(agentDir, '.git', 'config') },
   ];
 
+  const controlPath = await findSandboxAclAuditControlFile(projectPath);
+  let controlReadable = false;
+  if (controlPath) {
+    console.log(chalk.gray(`     対照（プロジェクト内の既存ファイル、絶対パス）: ${controlPath}`));
+    const controlRaw = await runHostRoutedCommand(projectPath, 'cmd.exe', ['/c', 'type', controlPath, '>', 'nul']);
+    controlReadable = !controlRaw.spawnFailed && controlRaw.exitCode === 0;
+    console.log(chalk.gray(`     対照の読み取り: ${controlReadable ? '読めた（期待どおり）' : '読めなかった'}`));
+  } else {
+    console.log(chalk.yellow('     対照にできるファイルがプロジェクト内に見つかりませんでした（全体を未確認とします）。'));
+  }
+
   for (const target of targets) {
+    console.log(chalk.gray(`     確認対象（絶対パス）: ${target.path}`));
+    const targetExists = await probeSandboxAclAuditTargetExists(target.path);
     const raw = await runHostRoutedCommand(projectPath, 'cmd.exe', ['/c', 'type', target.path, '>', 'nul']);
-    const interpretation = interpretSandboxReadProbe(raw.spawnFailed ? null : raw.exitCode);
+    const interpretation = interpretSandboxFileReadProbe({
+      exitCode: raw.spawnFailed ? null : raw.exitCode,
+      targetExists,
+      controlReadable,
+    });
     const label =
       interpretation.outcome === 'readable'
         ? '読めてしまった（危険）'
@@ -703,8 +602,9 @@ async function runSandboxAclAudit(projectPath: string): Promise<void> {
     console.log(`     ${target.label}: ${label}（${interpretation.evidence}）`);
   }
 
+  console.log(chalk.gray(`     確認対象（絶対パス）: ${getConfigDir()}`));
   const dirRaw = await runHostRoutedCommand(projectPath, 'cmd.exe', ['/c', 'dir', getConfigDir(), '>', 'nul']);
-  const dirInterpretation = interpretSandboxReadProbe(dirRaw.spawnFailed ? null : dirRaw.exitCode);
+  const dirInterpretation = interpretSandboxDirListProbe(dirRaw.spawnFailed ? null : dirRaw.exitCode);
   const dirLabel =
     dirInterpretation.outcome === 'readable'
       ? '列挙できてしまった（危険）'
@@ -759,25 +659,25 @@ async function runSandboxClaudeRoundtrip(projectPath: string): Promise<void> {
     projectPath,
   });
 
-  await withSandboxProxy(async () => {
-    const raw = await runHostRoutedCommand(projectPath, command, args, env, 120_000);
-    if (raw.spawnFailed) {
-      console.log(chalk.red('  ❌ ホスト経由での起動に失敗しました。'));
-      return;
-    }
-    if (raw.timedOut) {
-      console.log(chalk.yellow('  ⚠ タイムアウトしました（120 秒）。'));
-      return;
-    }
-    const safeOutput = redactSandboxSecrets(raw.stdout.slice(0, 200), [oauthToken]);
-    console.log(chalk.gray(`     exitCode: ${raw.exitCode ?? 'null'}`));
-    console.log(chalk.gray(`     出力（先頭200文字）: ${safeOutput.trim()}`));
-    if (raw.exitCode === 0) {
-      console.log(chalk.green('  ✅ claude 本体が 1 往復しました。'));
-    } else {
-      console.log(chalk.yellow('  ⚠ claude の実行が正常終了しませんでした。'));
-    }
-  });
+  // c 対応（サイクル SB-1a-2）: 中継プロキシは呼び出し元（`sandboxSelftestCommand`）が 1 本だけ
+  // 確保済みのリースを使う（本関数自身は個別に `withSandboxProxy()` を呼ばない）。
+  const raw = await runHostRoutedCommand(projectPath, command, args, env, 120_000);
+  if (raw.spawnFailed) {
+    console.log(chalk.red('  ❌ ホスト経由での起動に失敗しました。'));
+    return;
+  }
+  if (raw.timedOut) {
+    console.log(chalk.yellow('  ⚠ タイムアウトしました（120 秒）。'));
+    return;
+  }
+  const safeOutput = redactSandboxSecrets(raw.stdout.slice(0, 200), [oauthToken]);
+  console.log(chalk.gray(`     exitCode: ${raw.exitCode ?? 'null'}`));
+  console.log(chalk.gray(`     出力（先頭200文字）: ${safeOutput.trim()}`));
+  if (raw.exitCode === 0) {
+    console.log(chalk.green('  ✅ claude 本体が 1 往復しました。'));
+  } else {
+    console.log(chalk.yellow('  ⚠ claude の実行が正常終了しませんでした。'));
+  }
 }
 
 /**

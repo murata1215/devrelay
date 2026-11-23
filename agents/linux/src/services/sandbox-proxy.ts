@@ -44,6 +44,18 @@ export function createSandboxConnectProxy(options: SandboxProxyOptions): Promise
     }
   }
 
+  // c 対応（SB-1a-2）: CONNECT 中継中の socket（クライアント側・上位側の両方）を追跡する。
+  // `http.Server.close()` は既存の接続が自然に終わるまで callback を呼ばない。CONNECT で
+  // ハイジャックした TCP パイプはクライアント側が明示的に切断するまで「接続中」のままなので、
+  // 中継中に `close()` を呼ぶとプロセスが終了しない既存バグがあった（SB-1a-1.1 時点で未解決、
+  // `--claude-roundtrip` が成功表示の後に戻らない症状）。`close()` 側で追跡中の socket を
+  // 全て `destroy()` してから `server.close()` することで確実に終了させる。
+  const activeSockets = new Set<net.Socket>();
+  function track(socket: net.Socket): void {
+    activeSockets.add(socket);
+    socket.once('close', () => activeSockets.delete(socket));
+  }
+
   const server = http.createServer((_req, res) => {
     // CONNECT 以外は全部 403（このプロキシは CONNECT 中継専用）
     res.writeHead(403, { 'Content-Type': 'text/plain' });
@@ -55,8 +67,9 @@ export function createSandboxConnectProxy(options: SandboxProxyOptions): Promise
     // （http サーバーの TCP 接続由来のため）。CONNECT 中継では Socket 固有の API（pipe 先の
     // 再利用等）を使わないため安全にキャストする。
     const socket = clientSocket as net.Socket;
+    track(socket);
     try {
-      handleConnect(req, socket, head, options);
+      handleConnect(req, socket, head, options, track);
     } catch {
       try {
         socket.end('HTTP/1.1 500 Internal Server Error\r\n\r\n');
@@ -72,7 +85,18 @@ export function createSandboxConnectProxy(options: SandboxProxyOptions): Promise
       server.removeListener('error', reject);
       resolve({
         port: options.port,
-        close: () => new Promise<void>((res) => server.close(() => res())),
+        close: () =>
+          new Promise<void>((res) => {
+            for (const socket of activeSockets) {
+              try {
+                socket.destroy();
+              } catch {
+                /* ignore */
+              }
+            }
+            activeSockets.clear();
+            server.close(() => res());
+          }),
       });
     });
   });
@@ -86,11 +110,15 @@ function parseConnectTarget(url: string): { host: string; port: number } | null 
   return { host: match[1], port };
 }
 
+/** 中継中の socket を `createSandboxConnectProxy()` の追跡 Set へ登録する関数の型 */
+type TrackSocket = (socket: net.Socket) => void;
+
 function handleConnect(
   req: http.IncomingMessage,
   clientSocket: net.Socket,
   head: Buffer,
   options: SandboxProxyOptions,
+  track: TrackSocket,
 ): void {
   const target = parseConnectTarget(req.url ?? '');
   if (!target) {
@@ -108,9 +136,9 @@ function handleConnect(
   });
 
   if (options.upstreamProxyUrl) {
-    chainThroughUpstreamProxy(options.upstreamProxyUrl, target, clientSocket, head, options);
+    chainThroughUpstreamProxy(options.upstreamProxyUrl, target, clientSocket, head, options, track);
   } else {
-    connectDirect(target, clientSocket, head, options);
+    connectDirect(target, clientSocket, head, options, track);
   }
 }
 
@@ -119,6 +147,7 @@ function connectDirect(
   clientSocket: net.Socket,
   head: Buffer,
   options: SandboxProxyOptions,
+  track: TrackSocket,
 ): void {
   const upstream = net.connect(target.port, target.host, () => {
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -127,6 +156,7 @@ function connectDirect(
     clientSocket.pipe(upstream);
     options.onAllowed?.(target.host, target.port);
   });
+  track(upstream);
   upstream.on('error', () => {
     try {
       clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
@@ -142,11 +172,13 @@ function chainThroughUpstreamProxy(
   clientSocket: net.Socket,
   head: Buffer,
   options: SandboxProxyOptions,
+  track: TrackSocket,
 ): void {
   const upstream = new URL(upstreamProxyUrl);
   const socket = net.connect(Number(upstream.port) || 80, upstream.hostname, () => {
     socket.write(`CONNECT ${target.host}:${target.port} HTTP/1.1\r\nHost: ${target.host}:${target.port}\r\n\r\n`);
   });
+  track(socket);
   let responded = false;
   socket.on('data', function onData(chunk: Buffer) {
     if (responded) return;

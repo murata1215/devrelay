@@ -5,6 +5,7 @@ import {
   redactSandboxSecrets,
   describeSandboxEnvKeys,
   SANDBOX_FORBIDDEN_ENV_KEYS,
+  buildSandboxSpawnEnv,
 } from '../dist/services/sandbox-env.js';
 
 function baseInput(overrides = {}) {
@@ -92,5 +93,71 @@ describe('sandbox-env', () => {
     }
     // 値（トークン本体）が文字列化結果に含まれていないことを確認
     assert.equal(JSON.stringify(keys).includes('SECRET-VALUE'), false);
+  });
+});
+
+// サイクル SB-1a-2: buildSandboxSpawnEnv（SDK が足した env のうち安全なものだけ merge する）
+describe('sandbox-env: buildSandboxSpawnEnv', () => {
+  const base = buildSandboxChildEnv({
+    oauthToken: 'sk-ant-oat01-SECRET-VALUE',
+    proxyUrl: 'http://127.0.0.1:48711',
+    homeDir: 'C:\\ProgramData\\devrelay\\sandbox\\home',
+    sessionId: 'sess-123',
+    projectPath: 'C:\\dev\\repo',
+  });
+
+  test('SDK が足しても禁止キー（ANTHROPIC_API_KEY 等）は絶対に通らない', () => {
+    const agentEnv = { PATH: '/usr/bin' };
+    const sdkEnv = { ...agentEnv, ANTHROPIC_API_KEY: 'sdk-leaked-key', NO_PROXY: 'evil.example.com' };
+    const result = buildSandboxSpawnEnv({ base, sdkEnv, agentEnv });
+    assert.equal(result.ANTHROPIC_API_KEY, null);
+    assert.equal(result.NO_PROXY, null);
+  });
+
+  test('プロキシ・トークンは base 側が常に優先される（SDK が書き換えても上書きされない）', () => {
+    const agentEnv = {};
+    const sdkEnv = {
+      HTTPS_PROXY: 'http://attacker.example.com:9999',
+      CLAUDE_CODE_OAUTH_TOKEN: 'sdk-overwritten-token',
+    };
+    const result = buildSandboxSpawnEnv({ base, sdkEnv, agentEnv });
+    assert.equal(result.HTTPS_PROXY, 'http://127.0.0.1:48711');
+    assert.equal(result.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat01-SECRET-VALUE');
+  });
+
+  test('SDK が追加した CLAUDE_CODE_* キー（Agent の process.env には無い新規キー）は通る', () => {
+    const agentEnv = { PATH: '/usr/bin' };
+    const sdkEnv = { ...agentEnv, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' };
+    const result = buildSandboxSpawnEnv({ base, sdkEnv, agentEnv });
+    assert.equal(result.CLAUDE_CODE_ENTRYPOINT, 'sdk-cli');
+  });
+
+  test('Agent の process.env 由来のキー（接頭辞が合っていても agentEnv と同値）は通らない', () => {
+    const agentEnv = { CLAUDE_CODE_SOMETHING: 'same-value', PATH: '/usr/bin' };
+    const sdkEnv = { ...agentEnv };
+    const result = buildSandboxSpawnEnv({ base, sdkEnv, agentEnv });
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'CLAUDE_CODE_SOMETHING'), false);
+  });
+
+  test('接頭辞が合わないキー（Agent の process.env 由来の一般的な変数）は通らない', () => {
+    const agentEnv = { PATH: '/usr/bin' };
+    const sdkEnv = { ...agentEnv, PATH: '/usr/bin:/sdk/bin', RANDOM_ENV_VAR: 'leak' };
+    const result = buildSandboxSpawnEnv({ base, sdkEnv, agentEnv });
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'PATH'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'RANDOM_ENV_VAR'), false);
+  });
+
+  test('sdkEnv の値が undefined のキーは無視される', () => {
+    const agentEnv = {};
+    const sdkEnv = { CLAUDE_CODE_UNSET: undefined };
+    const result = buildSandboxSpawnEnv({ base, sdkEnv, agentEnv });
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'CLAUDE_CODE_UNSET'), false);
+  });
+
+  test('base のキーは全て結果に含まれる（トークン・プロキシ・HOME 固定等）', () => {
+    const result = buildSandboxSpawnEnv({ base, sdkEnv: {}, agentEnv: {} });
+    for (const key of Object.keys(base)) {
+      assert.equal(result[key], base[key]);
+    }
   });
 });
