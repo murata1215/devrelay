@@ -46,3 +46,4 @@
 0033	2026-11-21	-	0033_session_auto_title.sql	Session.autoTitle/autoTitleAt/autoTitleTurns 追加（スレッドタイトル自動命名）	doc/devlog/2026-11-21_thread_auto_title.md
 0034	2026-11-23	-	0034_message_share_token.sql	Message.shareToken(unique)/shareExpiresAt 追加（応答の書式サイクル: 公開共有リンク）	-
 0035	2026-11-23	-	0035_message_summary.sql	Message.summary 追加（AI回答契約サイクル第3版: 境界行が無い場合のAI要約キャッシュ）	-
+0036	2026-11-23	-	0036_project_sandbox_enabled.sql	Project.sandboxEnabled 追加（Sandbox 実行対象かどうかのプロジェクト単位設定。既定 false）	-

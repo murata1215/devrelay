@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideSandboxTarget, normalizeSandboxProjectPath } from '../dist/services/sandbox-target.js';
+import { decideSandboxTarget, normalizeSandboxProjectPath, shouldDeclareSandboxHostCapability } from '../dist/services/sandbox-target.js';
 
 describe('sandbox-target: normalizeSandboxProjectPath', () => {
   test('スラッシュをバックスラッシュに統一する', () => {
@@ -117,5 +117,91 @@ describe('sandbox-target: decideSandboxTarget', () => {
       platform: 'win32',
     });
     assert.deepEqual(result, { kind: 'target' });
+  });
+});
+
+// サイクルSB-1b: サーバーが伝えた serverEnabled との OR 合成（サーバーの ON を手元で OFF にはできない）
+describe('sandbox-target: decideSandboxTarget（サイクルSB-1b: serverEnabled との合成）', () => {
+  test('サーバー ON のみ（手元の sandbox.projects は未設定）→ 対象', () => {
+    const result = decideSandboxTarget({
+      configuredProjects: undefined,
+      projectPath: 'C:\\dev\\repo',
+      platform: 'win32',
+      serverEnabled: true,
+    });
+    assert.deepEqual(result, { kind: 'target' });
+  });
+
+  test('手元の設定のみ（serverEnabled 未指定）→ 従来どおり一致判定で対象', () => {
+    const result = decideSandboxTarget({
+      configuredProjects: ['C:\\dev\\repo'],
+      projectPath: 'C:\\dev\\repo',
+      platform: 'win32',
+    });
+    assert.deepEqual(result, { kind: 'target' });
+  });
+
+  test('両方（サーバー ON かつ手元の設定にも一致）→ 対象', () => {
+    const result = decideSandboxTarget({
+      configuredProjects: ['C:\\dev\\repo'],
+      projectPath: 'C:\\dev\\repo',
+      platform: 'win32',
+      serverEnabled: true,
+    });
+    assert.deepEqual(result, { kind: 'target' });
+  });
+
+  test('サーバー ON だが手元の設定には一致しない項目のみ → それでも対象（OR 合成）', () => {
+    const result = decideSandboxTarget({
+      configuredProjects: ['C:\\dev\\other'],
+      projectPath: 'C:\\dev\\repo',
+      platform: 'win32',
+      serverEnabled: true,
+    });
+    assert.deepEqual(result, { kind: 'target' });
+  });
+
+  test('どちらも無し（serverEnabled=false かつ手元未設定）→ 対象外', () => {
+    const result = decideSandboxTarget({
+      configuredProjects: undefined,
+      projectPath: 'C:\\dev\\repo',
+      platform: 'win32',
+      serverEnabled: false,
+    });
+    assert.deepEqual(result, { kind: 'not-target' });
+  });
+
+  test('サーバー ON だが projectPath が絶対パスでない（win32） → 判定不能（サーバーの ON でも fail-closed）', () => {
+    const result = decideSandboxTarget({
+      configuredProjects: undefined,
+      projectPath: 'relative\\path',
+      platform: 'win32',
+      serverEnabled: true,
+    });
+    assert.equal(result.kind, 'undecidable');
+  });
+
+  test('サーバー ON だが手元の sandbox.projects に不正な項目がある → 判定不能（手元の設定ミスが優先）', () => {
+    const result = decideSandboxTarget({
+      configuredProjects: ['relative\\other'],
+      projectPath: 'C:\\dev\\repo',
+      platform: 'win32',
+      serverEnabled: true,
+    });
+    assert.equal(result.kind, 'undecidable');
+  });
+});
+
+describe('sandbox-target: shouldDeclareSandboxHostCapability', () => {
+  test('win32 のみ true', () => {
+    assert.equal(shouldDeclareSandboxHostCapability('win32'), true);
+  });
+
+  test('linux は false', () => {
+    assert.equal(shouldDeclareSandboxHostCapability('linux'), false);
+  });
+
+  test('darwin は false', () => {
+    assert.equal(shouldDeclareSandboxHostCapability('darwin'), false);
   });
 });

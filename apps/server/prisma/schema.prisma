@@ -202,6 +202,7 @@ model Project {
   description  String?
   lastUsedAt   DateTime?
   terminalMode Boolean   @default(false)  // 端末インタフェースモード（PTY 経由で claude 起動）。新規プロジェクトはデフォルト無効
+  sandboxEnabled Boolean @default(false)  // サイクルSB-1b: Sandbox 実行（仮想アカウント+外向き通信制限、Windows+claude のみ）。既定無効
   createdAt    DateTime  @default(now())
   deletedAt    DateTime? // ソフトデリート（#322）。Agent が projects.yaml で送ってこなくなったプロジェクトを非表示化。再出現で自動復活（null に戻る）
   // 高辻ナレッジ サイクル2: この案件で始まる会話の既定値（null = level 0・壁なし。D3）。

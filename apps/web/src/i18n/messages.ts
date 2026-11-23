@@ -182,6 +182,12 @@ export const messages = {
   'chat.autoApprove': { en: 'Auto-approve', ja: '自動承認' },
   'chat.disableAsk': { en: 'Disable Ask', ja: 'Ask無効' },
   'chat.terminal': { en: 'Terminal', ja: '端末' },
+  // サイクルSB-1b: Sandbox スイッチ（Project 単位）
+  'chat.sandbox': { en: 'Sandbox', ja: 'Sandbox' },
+  'chat.sandboxOn': { en: 'Sandbox: ON', ja: 'Sandbox: ON' },
+  'chat.sandboxOff': { en: 'Sandbox: OFF', ja: 'Sandbox: OFF' },
+  'chat.sandboxOffline': { en: 'Sandbox: the agent is offline', ja: 'Sandbox: この Agent はオフラインです' },
+  'chat.sandboxUnsupported': { en: 'Sandbox: this agent does not support it', ja: 'Sandbox: この Agent は対応していません' },
   'thread.panelTitle': { en: 'Threads', ja: 'スレッド' },
   'thread.new': { en: '+ New', ja: '＋ 新規' },
   'thread.creating': { en: 'Creating...', ja: '作成中...' },

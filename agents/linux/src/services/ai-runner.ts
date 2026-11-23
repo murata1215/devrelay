@@ -47,6 +47,9 @@ import { decideSandboxTarget } from './sandbox-target.js';
 import { decideSandboxTurnEligibility, buildSandboxDenialMessage } from './sandbox-readiness.js';
 import { isSandboxDisabledBySwitch, prepareSandboxLaunch, type SandboxLaunch } from './sandbox-preflight.js';
 import { loadConfig as loadAgentConfigFresh } from './config.js';
+// サイクルSB-1b: サーバーが伝えた Project.sandboxEnabled を sessionId 単位で引く（retryOptions の
+// 取りこぼしに頼らない。sandbox-session-flag.ts 参照）。
+import { getServerSandboxEnabled } from './sandbox-session-flag.js';
 // core#383: 旧 Claude CLI（--session-id 未対応）を検出した場合のプロセス内フォールバックフラグ。
 // 一度 true になったら、この Agent プロセスが再起動されるまで以後の全ターンで
 // --session-id を渡さない（legacy argv = 画面スクレイプによる旧来のセッション ID 取得に戻す）。
@@ -2399,6 +2402,8 @@ async function sendPromptToAiImpl(
       configuredProjects: freshSandboxSettings?.projects,
       projectPath,
       platform: process.platform,
+      // サイクルSB-1b: サーバーが Project.sandboxEnabled として伝えた値（OR 合成。手元で OFF にはできない）
+      serverEnabled: getServerSandboxEnabled(sessionId),
     });
     if (sandboxTarget.kind !== 'not-target') {
       const gate = decideSandboxTurnEligibility({

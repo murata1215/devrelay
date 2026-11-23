@@ -53,10 +53,22 @@ export const PROTOCOL_VERSION = 1;
  * `hooks.PreToolUse` を実装できるため）。`agents/windows` は `claude` CLI を直接 spawn する構造の
  * ため in-process フックを実装できず、申告しない（'cross-ask-isolation' と同じ fail-closed 方針で、
  * サーバーは未申告 Agent へのクロスユーザー ask を断る。`cross-ask-isolation-rules.ts` 参照）。
+ *
+ * 'sandbox-host' = サイクルSB-1b（2026-11-23）: Sandbox 実行（Claude Agent SDK の
+ * `spawnClaudeCodeProcess` で起動を Windows サービス `NT SERVICE\devrelay-sandbox` に委譲し、
+ * 外向き通信を許可リストに限定する機能、SB-1a-1/1a-2）に対応していることをサーバーに保証する。
+ * **実行時に `process.platform === 'win32'` のときだけ申告する**（`agents/linux` パッケージは
+ * Linux でもビルド・実行されるため、他の capability と異なりパッケージ単位の固定リストでは
+ * 表現できない。`shouldDeclareSandboxHostCapability()` 参照）。`agents/macos`・`agents/windows`
+ * （Electron 版）は常に申告しない（Sandbox Host 自体が Windows + `agents/linux` 専用のため）。
+ * サーバーは `Project.sandboxEnabled=true` のプロジェクトへの指示を、宛先 Agent が本 capability を
+ * 未申告の場合は送信せず拒否する（'cross-ask-isolation' と同じ fail-closed 方針。制限なしで
+ * 実行してしまう事故を防ぐため）。
  */
-export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation' | 'cross-ask-resume-strict' | 'plan-gate-hook' | 'thread-handover' | 'thread-handover-make';
+export type AgentCapability = 'scoped-clear' | 'capability-sync' | 'raw-completion' | 'raw-completion-codex' | 'cross-ask-resume' | 'cross-ask-isolation' | 'cross-ask-resume-strict' | 'plan-gate-hook' | 'thread-handover' | 'thread-handover-make' | 'sandbox-host';
 
-/** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源） */
+/** この版の Agent が申告する capability 一覧（agent/server 双方が参照する単一情報源）。
+ *  'sandbox-host' は実行時条件付きのため、ここには含めず各 Agent の接続処理側で個別に扱う。 */
 export const AGENT_CAPABILITIES: readonly AgentCapability[] = ['scoped-clear', 'capability-sync', 'raw-completion', 'raw-completion-codex', 'cross-ask-resume', 'cross-ask-isolation', 'cross-ask-resume-strict', 'plan-gate-hook', 'thread-handover', 'thread-handover-make'];
 
 /**
@@ -628,6 +640,8 @@ export interface ConversationExecPayload {
   disableAsk?: boolean;
   /** 端末インタフェースモード（PTY 経由で claude --continue 起動、Project 単位） */
   terminalMode?: boolean;
+  /** サイクルSB-1b: Sandbox 実行対象かどうか（Project.sandboxEnabled をサーバーが転送、Project 単位） */
+  sandboxEnabled?: boolean;
   /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'） */
   model?: string;
   /**
@@ -881,6 +895,8 @@ export interface AiPromptPayload {
   aiTool?: AiTool;
   /** 端末インタフェースモード（Project.terminalMode をサーバーが転送、Project 単位の設定） */
   terminalMode?: boolean;
+  /** サイクルSB-1b: Sandbox 実行対象かどうか（Project.sandboxEnabled をサーバーが転送、Project 単位の設定） */
+  sandboxEnabled?: boolean;
   /** MCP 経由の新規 submit: 前回セッションの JSONL 注入・resume をスキップ */
   forceNewSession?: boolean;
   /** Claude SDK モデル指定（例: 'sonnet', 'opus', 'haiku'）。省略時は SDK デフォルト */

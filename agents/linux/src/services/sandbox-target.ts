@@ -5,6 +5,10 @@
  * SB-1a-1 時点ではこのキーはどこからも読まれていなかった（読まれていたのは `sandbox.allowlist`
  * だけ）。既定は「対象外」（リスト空/未設定）で、既存の全ターンに影響しない。
  *
+ * サイクル SB-1b: サーバーが `Project.sandboxEnabled` を `serverEnabled` として伝えるようになった。
+ * 対象は「サーバーが ON」**または**「`config.yaml` の `sandbox.projects` に入っている」の OR 合成。
+ * サーバーの ON を手元の設定で OFF にはできない（`serverEnabled` が true なら必ず `target`）。
+ *
  * 判定できない場合は fail-closed（`undecidable`）とし、呼び出し側はそのマシンの Sandbox 対象
  * ターン全体を拒否する。「設定ミスで対象外に紛れ込み、制限なしで動く」事故を避けるため。
  */
@@ -21,6 +25,8 @@ export interface SandboxTargetInput {
   projectPath: string;
   /** `process.platform` */
   platform: string;
+  /** サイクルSB-1b: サーバーがこのターンで伝えた `Project.sandboxEnabled`（未指定/false なら不参加） */
+  serverEnabled?: boolean;
 }
 
 /**
@@ -47,16 +53,20 @@ function isAbsoluteWindowsPath(value: string): boolean {
  * このターンが Sandbox 実行の対象かどうかを判定する。
  *
  * 判定順序（コストの低い判定から先に、既定は対象外）:
- * 1. `configuredProjects` が空/未設定 → `not-target`（他 OS・未設定機はここで即終了。I/O ゼロ）
+ * 1. `serverEnabled` が true でなく、かつ `configuredProjects` が空/未設定 → `not-target`
+ *    （他 OS・未設定機・未指定プロジェクトはここで即終了。I/O ゼロ、既存経路に影響なし）
  * 2. `projectPath` が空、または絶対パスでない → `undecidable`
  * 3. `configuredProjects` に絶対パスでない項目が 1 つでもある → `undecidable`
- *    （設定ミスを黙って「対象外」に倒さない。そのマシンの Sandbox 対象ターン全体を拒否させるため）
- * 4. 正規化して一致するものがあれば `target`
- * 5. それ以外は `not-target`
+ *    （設定ミスを黙って「対象外」に倒さない。そのマシンの Sandbox 対象ターン全体を拒否させるため。
+ *    `serverEnabled` の値に関わらず適用する＝手元の設定ミスがあるマシンはサーバー指定分も拒否する）
+ * 4. `serverEnabled` が true → `target`（サーバーの ON を手元の設定で OFF にはできない）
+ * 5. 正規化して `configuredProjects` に一致するものがあれば `target`
+ * 6. それ以外は `not-target`
  */
 export function decideSandboxTarget(input: SandboxTargetInput): SandboxTargetDecision {
   const configured = input.configuredProjects;
-  if (!configured || configured.length === 0) {
+  const hasConfiguredProjects = !!configured && configured.length > 0;
+  if (!input.serverEnabled && !hasConfiguredProjects) {
     return { kind: 'not-target' };
   }
 
@@ -67,17 +77,33 @@ export function decideSandboxTarget(input: SandboxTargetInput): SandboxTargetDec
     return { kind: 'undecidable', detail: `projectPath が絶対パスではありません: ${input.projectPath}` };
   }
 
-  const invalidEntries = configured.filter(
-    (entry) => typeof entry !== 'string' || entry.trim().length === 0 || (input.platform === 'win32' && !isAbsoluteWindowsPath(entry)),
-  );
-  if (invalidEntries.length > 0) {
-    return {
-      kind: 'undecidable',
-      detail: `sandbox.projects に絶対パスでない項目があります: ${JSON.stringify(invalidEntries)}`,
-    };
+  if (hasConfiguredProjects) {
+    const invalidEntries = configured!.filter(
+      (entry) => typeof entry !== 'string' || entry.trim().length === 0 || (input.platform === 'win32' && !isAbsoluteWindowsPath(entry)),
+    );
+    if (invalidEntries.length > 0) {
+      return {
+        kind: 'undecidable',
+        detail: `sandbox.projects に絶対パスでない項目があります: ${JSON.stringify(invalidEntries)}`,
+      };
+    }
+  }
+
+  if (input.serverEnabled) {
+    return { kind: 'target' };
   }
 
   const normalizedTarget = normalizeSandboxProjectPath(input.projectPath, input.platform);
-  const match = configured.some((entry) => normalizeSandboxProjectPath(entry, input.platform) === normalizedTarget);
+  const match = configured!.some((entry) => normalizeSandboxProjectPath(entry, input.platform) === normalizedTarget);
   return match ? { kind: 'target' } : { kind: 'not-target' };
+}
+
+/**
+ * サイクルSB-1b: この版の Agent が `'sandbox-host'` capability を申告してよいか判定する。
+ * Sandbox Host は Windows サービスのため、`agents/linux` パッケージが Windows 上で実行されている
+ * ときだけ申告する（同パッケージは Linux でも動くため、実行時の `process.platform` で判定する。
+ * 他の capability と異なりパッケージ単位の固定リストでは表現できない）。
+ */
+export function shouldDeclareSandboxHostCapability(platform: string): boolean {
+  return platform === 'win32';
 }

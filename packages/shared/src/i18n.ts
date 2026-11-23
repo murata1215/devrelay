@@ -201,6 +201,12 @@ export const chatMessages = {
   'update.agentOffline': { en: 'Agent is offline', ja: 'Agent がオフラインです' },
   'update.versionCheckTimeout': { en: 'Timed out', ja: 'タイムアウト' },
   'update.required': { en: '⚠️ This agent needs an update. Send `u` to update.', ja: '⚠️ この Agent は更新が必要です。`u` コマンドで更新してください。' },
+  // サイクルSB-1b: Sandbox が ON のプロジェクトだが、宛先 Agent が 'sandbox-host' capability を
+  // 未申告（Windows 以外・古い版）のため送信を拒否した
+  'sandbox.capabilityMissing': {
+    en: '⚠️ Sandbox is ON for this project, but this agent does not support Sandbox execution (Windows + a recent agent version required).',
+    ja: '⚠️ このプロジェクトは Sandbox が ON ですが、この Agent は Sandbox 実行に対応していません（Windows かつ最新版の Agent が必要です）。',
+  },
   // サイクル3.1: 実行中 AI ターンがあるため更新を保留した（D4）。force=true の `u force` で無視できる
   // 2026-10-24: 未知の busy 理由のフォールバック専用に残す（通常は下の理由別キーが使われる）
   'update.deferredBusy': {

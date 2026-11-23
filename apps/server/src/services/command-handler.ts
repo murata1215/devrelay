@@ -1150,18 +1150,26 @@ async function handleExec(
   // スレッド管理 cycle1: このスレッドの scope（agentScopeId）を解決して agent へ渡す。
   // 従来スレッド（agentScopeId=null）は resolveScopeOptionsForSession が {} を返すため無変更。
   const execScopeOptions = await resolveScopeOptionsForSession(context.currentSessionId);
-  await execConversation(
-    context.currentMachineId,
-    context.currentSessionId,
-    session.project.path,
-    context.userId,
-    promptForAgent,
-    undefined,
-    isWCommand,
-    undefined, // language: 未指定（UserSettings から補完）
-    execScopeOptions,
-  );
-  touchSessionActivity(context.currentSessionId);
+  // サイクルSB-1b: execConversation が Sandbox capability 未申告で throw する経路が増えたため、
+  // handleAiPrompt（chat 経路、:2040 付近）と同じく try/catch でトラッカーを後始末する
+  // （無いと進捗表示（処理中...）が残り続ける）。
+  try {
+    await execConversation(
+      context.currentMachineId,
+      context.currentSessionId,
+      session.project.path,
+      context.userId,
+      promptForAgent,
+      undefined,
+      isWCommand,
+      undefined, // language: 未指定（UserSettings から補完）
+      execScopeOptions,
+    );
+    touchSessionActivity(context.currentSessionId);
+  } catch (error) {
+    stopProgressTracking(context.currentSessionId);
+    throw error;
+  }
 
   // Return empty since progress message is already sent
   return '';

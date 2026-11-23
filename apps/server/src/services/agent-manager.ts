@@ -51,6 +51,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
 import { buildBacklogPromptLine } from './backlog.js';
 import { isBriefReplyEnabled, shouldPrependBriefReplyLine, BRIEF_REPLY_PROMPT_LINE } from './brief-reply-rules.js';
+import { decideSandboxDispatch } from './sandbox-dispatch-rules.js';
 import { pickAvailableAiTool } from './ai-tool-availability.js';
 import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import OpenAI from 'openai';
@@ -1530,6 +1531,7 @@ export async function sendPromptToAgent(
   // #309: aiTool 引数が未指定（ask/teamexec/MCP 経由）の場合、DB の Session.aiTool にフォールバックする。
   // これが無いと model 解決がツール判定できず常に claude 用キーを読んでしまう（#306 時点の潜在バグ）。
   let terminalMode = false;
+  let sandboxEnabled = false;
   let resolvedAiTool: AiTool = aiTool ?? 'claude';
   let sessionAiToolForFallback: AiTool | undefined;
   let projectDefaultAiForFallback: AiTool | undefined;
@@ -1537,9 +1539,10 @@ export async function sendPromptToAgent(
   try {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { aiTool: true, usageCase: true, project: { select: { terminalMode: true, defaultAi: true } } },
+      select: { aiTool: true, usageCase: true, project: { select: { terminalMode: true, sandboxEnabled: true, defaultAi: true } } },
     });
     terminalMode = !!session?.project?.terminalMode;
+    sandboxEnabled = !!session?.project?.sandboxEnabled;
     backlogUsageCase = session?.usageCase ?? null;
     if (!aiTool && session?.aiTool) {
       resolvedAiTool = session.aiTool as AiTool;
@@ -1548,6 +1551,13 @@ export async function sendPromptToAgent(
     projectDefaultAiForFallback = session?.project?.defaultAi as AiTool | undefined;
   } catch {
     // DB 失敗時は false / デフォルト aiTool のまま（既存挙動を維持）
+  }
+
+  // サイクルSB-1b: Sandbox が ON のプロジェクトだが、宛先 Agent が 'sandbox-host' capability を
+  // 未申告（Windows 以外・古い版）なら送信を拒否する（fail-closed。sandboxEnabled=false のときは
+  // このチェック自体が常に許可するため、既存の全ターンに影響しない）。
+  if (!decideSandboxDispatch({ sandboxEnabled, capabilityDeclared: agentHasCapability(machineId, 'sandbox-host') }).allowed) {
+    throw new Error(tChat(resolvedLanguage, 'sandbox.capabilityMissing'));
   }
 
   // 2026-10-02 実機事故の対策: Agent が resolveEffectiveAiTool() で要求ツールを未インストールの
@@ -1612,7 +1622,7 @@ export async function sendPromptToAgent(
       // 未インストールの要求ツールを別ツールへ無断で差し替えた後も、サーバーは古いツール名を
       // 送り続けてしまう。Agent 再起動直後の sessionInfoMap 消失時の自動初期化でも resolveEffectiveAiTool()
       // を経ずに payload.aiTool がそのまま採用されるため、ここで実態に合わせておく必要がある）
-      sessionId, prompt: promptToSend, userId, files, missedMessages, projectPath, aiTool: resolvedAiTool, terminalMode, forceNewSession,
+      sessionId, prompt: promptToSend, userId, files, missedMessages, projectPath, aiTool: resolvedAiTool, terminalMode, sandboxEnabled, forceNewSession,
       model: resolvedModel, language: resolvedLanguage, permissionPolicy: resolvedPermissionPolicy,
       agentScopeId: scopeOptions?.agentScopeId,
       resumeSessionId: scopeOptions?.resumeSessionId,
@@ -1718,7 +1728,17 @@ export function executeCrossProjectQuery(
         undefined, // language
         resolvePermissionPolicy('ask'),
         statePolicy || agentScopeId ? { statePolicy, agentScopeId } : undefined,
-      );
+      ).catch((err: Error) => {
+        // サイクルSB-1b: sendPromptToAgent が同期 throw ではなく reject で失敗を返す経路が
+        // 増えたため（Sandbox capability 未申告の拒否）、runHandoverTurn と同じく確実に
+        // pendingCrossQueries を解放して呼び出し元へ伝える（無いと timeoutMs まで無言で待つ）。
+        const pending = pendingCrossQueries.get(sessionId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          pendingCrossQueries.delete(sessionId);
+          pending.reject(err);
+        }
+      });
     }, 500);
   });
 }
@@ -1761,7 +1781,17 @@ export function executeCrossProjectExec(
     startSession(machineId, sessionId, projectName, projectPath, aiTool);
     // 少し待ってから exec 送信（セッション登録のタイミング確保）
     setTimeout(() => {
-      execConversation(machineId, sessionId, projectPath, userId, instruction);
+      // サイクルSB-1b: execConversation が reject で失敗を返す経路が増えたため
+      // （Sandbox capability 未申告の拒否）、runHandoverTurn と同じく確実に
+      // pendingCrossQueries を解放して呼び出し元へ伝える（無いと timeoutMs まで無言で待つ）。
+      execConversation(machineId, sessionId, projectPath, userId, instruction).catch((err: Error) => {
+        const pending = pendingCrossQueries.get(sessionId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          pendingCrossQueries.delete(sessionId);
+          pending.reject(err);
+        }
+      });
     }, 500);
   });
 }
@@ -2319,11 +2349,30 @@ export async function execConversation(
   // `a` で選択した AI ツール（例: Devin CLI）が無視されてしまう。
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
-    select: { aiTool: true, project: { select: { terminalMode: true, defaultAi: true } } },
+    select: { aiTool: true, project: { select: { terminalMode: true, sandboxEnabled: true, defaultAi: true } } },
   });
   const terminalMode = !!session?.project?.terminalMode;
+  const sandboxEnabled = !!session?.project?.sandboxEnabled;
   // #309: aiTool 対応の model 解決に使う（未取得時は 'claude' フォールバック、Agent 側の既定と一致させる）
   const requestedAiTool = (session?.aiTool as AiTool | undefined) ?? 'claude';
+
+  // #316: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
+  // サイクルSB-1b: 下の Sandbox 拒否メッセージでも使うため、model 解決より前に出す。
+  let resolvedLanguage = language;
+  if (resolvedLanguage === undefined) {
+    try {
+      const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
+      resolvedLanguage = isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
+    } catch {
+      resolvedLanguage = DEFAULT_CHAT_LANGUAGE;
+    }
+  }
+
+  // サイクルSB-1b: Sandbox が ON のプロジェクトだが、宛先 Agent が 'sandbox-host' capability を
+  // 未申告なら送信を拒否する（sendPromptToAgent と同じ判定。sandboxEnabled=false のときは常に許可）。
+  if (!decideSandboxDispatch({ sandboxEnabled, capabilityDeclared: agentHasCapability(machineId, 'sandbox-host') }).allowed) {
+    throw new Error(tChat(resolvedLanguage, 'sandbox.capabilityMissing'));
+  }
 
   // 2026-10-02 実機事故の対策: sendPromptToAgent と同じく、Agent が resolveEffectiveAiTool() で
   // 未インストールの要求ツールを別ツールへ差し替える場合に備え、サーバー側も申告された
@@ -2341,16 +2390,6 @@ export async function execConversation(
       resolvedModel = await resolveModelForTool(userId, resolvedAiTool, 'exec');
     } catch {
       // 取得失敗時は従来どおり undefined = SDK/CLI デフォルト
-    }
-  }
-  // #316: language 未指定時は UserSettings.language で補完する（単一情報源方式、#306 と同じ設計）
-  let resolvedLanguage = language;
-  if (resolvedLanguage === undefined) {
-    try {
-      const stored = await getUserSetting(userId, SettingKeys.LANGUAGE);
-      resolvedLanguage = isLanguage(stored) ? stored : DEFAULT_CHAT_LANGUAGE;
-    } catch {
-      resolvedLanguage = DEFAULT_CHAT_LANGUAGE;
     }
   }
 
@@ -2372,6 +2411,7 @@ export async function execConversation(
       skipPermissions: machine?.skipPermissions ?? false,
       disableAsk: machine?.disableAsk ?? false,
       terminalMode,
+      sandboxEnabled,
       model: resolvedModel,
       // 2026-10-02 修正: 差し替え後の resolvedAiTool を送る（生の session.aiTool のままだと
       // Agent が実際に使うツールと食い違ったログ・診断になる。Agent 側は handleConversationExec で

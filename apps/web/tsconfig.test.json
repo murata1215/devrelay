@@ -47,6 +47,7 @@
     "src/lib/tab-preview-rules.ts",
     "src/lib/tab-close-rules.ts",
     "src/lib/theme-rules.ts",
-    "src/lib/enter-send-rules.ts"
+    "src/lib/enter-send-rules.ts",
+    "src/lib/sandbox-toggle-rules.ts"
   ]
 }

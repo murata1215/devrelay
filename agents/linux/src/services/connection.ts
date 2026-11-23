@@ -119,6 +119,8 @@ import { startClaudeLogin, submitClaudeLoginCode, cancelClaudeLogin } from './cl
 // 案C′ サイクルC1: resolveSessionStatePolicy() は第3区分（resumable-scoped）の許可リストを返す
 // （サーバーが statePolicy を送らない限り isEphemeral の二値判定と完全に同じ結果になる）
 import { isEphemeralSession, resolveSessionStatePolicy, isAiToolReadOnlyEnforceable } from './session-scope.js';
+import { shouldDeclareSandboxHostCapability } from './sandbox-target.js';
+import { setServerSandboxEnabled, clearServerSandboxEnabled } from './sandbox-session-flag.js';
 // サイクルS2a: クロス ask スコープのプロジェクトルート realpath 解決 + CLAUDE.md 安全注入
 import { resolveProjectRootReal } from './cross-ask-path-guard.js';
 import { buildCrossAskClaudeMdPrompt } from './cross-ask-claude-md.js';
@@ -405,7 +407,11 @@ export async function connectToServer(config: AgentConfig, projects: Project[]) 
           managementInfo: generateManagementInfo(),
           projectsDirs: config.projectsDirs,
           protocolVersion: PROTOCOL_VERSION,
-          capabilities: [...AGENT_CAPABILITIES],
+          // サイクルSB-1b: 'sandbox-host' は実行時に process.platform === 'win32' のときだけ加える
+          // （agents/linux パッケージは Linux でも動くため、固定リストでは表現できない）。
+          capabilities: shouldDeclareSandboxHostCapability(process.platform)
+            ? [...AGENT_CAPABILITIES, 'sandbox-host']
+            : [...AGENT_CAPABILITIES],
         },
       });
 
@@ -1224,6 +1230,9 @@ async function handleSessionStart(
 async function handleSessionEnd(sessionId: string) {
   console.log(`⏹️ Ending session: ${sessionId}`);
   await stopAiSession(sessionId);
+  // サイクルSB-1b: セッション終了時にサーバー伝達の Sandbox フラグも消す（次回同じ sessionId が
+  // 再利用される場合に古い値が残らないようにする。消しても次ターンの payload で再設定される）
+  clearServerSandboxEnabled(sessionId);
   // #348: 一時セッション（ask-member/teamexec-member/askDesc）は二度と再利用されないため、
   // sessionInfoMap に残したままだとメモリリークになる（対話セッションは同じ sessionId を
   // 再利用し続けるため削除しない）
@@ -1317,7 +1326,7 @@ function markExecPointInMemory(history: ConversationEntry[]): ConversationEntry[
   }];
 }
 
-async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; terminalMode?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string }) {
+async function handleConversationExec(payload: { sessionId: string; projectPath: string; userId: string; prompt?: string; skipPermissions?: boolean; disableAsk?: boolean; terminalMode?: boolean; sandboxEnabled?: boolean; model?: string; aiTool?: AiTool; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string }) {
   const { sessionId, projectPath, userId, prompt: customPrompt } = payload;
   console.log(`🚀 Marking exec point for session ${sessionId}${customPrompt ? ` (custom prompt: ${customPrompt})` : ''}`);
 
@@ -1408,6 +1417,7 @@ async function handleConversationExec(payload: { sessionId: string; projectPath:
     files: undefined,
     execPrompt,  // BuildLog AI 要約のコンテキスト用に exec プロンプトを伝搬
     terminalMode: payload.terminalMode,  // 端末モード継承
+    sandboxEnabled: payload.sandboxEnabled,  // サイクルSB-1b: Sandbox 対象フラグ継承
     model: payload.model,  // Claude SDK モデル継承
     isWCommand: payload.isWCommand,  // #312: Codex w コマンドのサンドボックス切替判定に使用
     language: payload.language,  // #316: チャット表示言語を継承
@@ -1431,7 +1441,7 @@ async function handleWorkStateSave(payload: WorkStateSavePayload) {
   }
 }
 
-async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string; statePolicy?: string; handoverTurn?: boolean }) {
+async function handleAiPrompt(payload: { sessionId: string; prompt: string; userId: string; files?: FileAttachment[]; missedMessages?: MissedMessage[]; execPrompt?: string; projectPath?: string; aiTool?: AiTool; terminalMode?: boolean; sandboxEnabled?: boolean; forceNewSession?: boolean; model?: string; isWCommand?: boolean; language?: Language; permissionPolicy?: string; agentScopeId?: string; resumeSessionId?: string; turnId?: string; statePolicy?: string; handoverTurn?: boolean }) {
   const { sessionId, prompt, userId, files, missedMessages, execPrompt: callerExecPrompt } = payload;
   // #348/案C′: 一時セッションが projectPath 上の状態をどこまで読み書きしてよいかは、
   // sessionInfo 確定後に statePolicy（resolveSessionStatePolicy）として解決する（下記参照）。
@@ -1506,6 +1516,10 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
       console.log(`🖥️ Terminal mode enabled for session ${sessionId}`);
     }
   }
+
+  // サイクルSB-1b: サーバーが伝えた Sandbox 対象フラグを sessionId 単位のレジストリに反映
+  // （SendPromptOptions/retryOptions には乗せない。sandbox-session-flag.ts 参照）。
+  setServerSandboxEnabled(sessionId, payload.sandboxEnabled);
 
   if (!sessionInfo || !currentConfig) {
     console.error(`Session info not found for ${sessionId} after waiting`);

@@ -43,6 +43,7 @@ import { openPreviewTab, promoteTabById, collectPersistedTabIds } from '../lib/t
 import { resolveTabClose, clampContextMenuPosition, type CloseScope } from '../lib/tab-close-rules';
 import { decideEnterAction } from '../lib/enter-send-rules';
 import { useEnterSendLock } from '../lib/useEnterSendLock';
+import { decideSandboxToggle, type SandboxToggleState } from '../lib/sandbox-toggle-rules';
 import { EnterLockToggle } from '../components/EnterLockToggle';
 
 /** 1タブあたりの最大メッセージ保持数（超過分は古い方から除去） */
@@ -2279,6 +2280,8 @@ export function ChatPage() {
   const [disableAskMap, setDisableAskMap] = useState<Record<string, boolean>>({});
   /** Project ごとの terminalMode キャッシュ（projectId → boolean） */
   const [terminalModeMap, setTerminalModeMap] = useState<Record<string, boolean>>({});
+  /** サイクルSB-1b: Project ごとの Sandbox 状態キャッシュ（projectId → SandboxToggleState） */
+  const [sandboxStateMap, setSandboxStateMap] = useState<Record<string, SandboxToggleState>>({});
   /** セッション情報パネル再取得トリガー（将来の拡張用） */
   const [, setSessionRefreshCount] = useState(0);
   /** スレッド管理 サイクル3: ThreadList 再取得トリガー（session_info 受信時等にインクリメント） */
@@ -3376,6 +3379,18 @@ export function ChatPage() {
     }
   }, [activeTabId]);
 
+  // サイクルSB-1b: activeTabId 変更時に Sandbox 状態を取得（Project 単位、キャッシュがなければ）
+  useEffect(() => {
+    if (!activeTabId) return;
+    if (sandboxStateMap[activeTabId] === undefined) {
+      fetch(apiUrl(`/projects/${activeTabId}/sandbox`), {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      }).then(r => r.json()).then(data => {
+        setSandboxStateMap(prev => ({ ...prev, [activeTabId]: { sandboxEnabled: data.sandboxEnabled, supported: data.supported, reason: data.reason } }));
+      }).catch(() => {});
+    }
+  }, [activeTabId]);
+
   /** Skip Permissions トグル（チャットヘッダーの ⚡ ボタン用） */
   const handleToggleSkipPermissions = async () => {
     if (!activeMachineId) return;
@@ -3425,6 +3440,27 @@ export function ChatPage() {
     } catch {
       // 失敗時はロールバック
       setTerminalModeMap(prev => ({ ...prev, [projectId]: !newValue }));
+    }
+  };
+
+  /** サイクルSB-1b: Sandbox トグル（Project 単位）。押せない状態（decideSandboxToggle）なら送らない */
+  const handleToggleSandbox = async () => {
+    if (!activeTabId) return;
+    const projectId = activeTabId;
+    const current = sandboxStateMap[projectId];
+    if (!current || !decideSandboxToggle(current).clickable) return;
+    const newValue = !current.sandboxEnabled;
+    setSandboxStateMap(prev => ({ ...prev, [projectId]: { ...current, sandboxEnabled: newValue } }));
+    try {
+      const res = await fetch(apiUrl(`/projects/${projectId}/sandbox`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+        body: JSON.stringify({ sandboxEnabled: newValue }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      // 失敗時（409 含む）はロールバック
+      setSandboxStateMap(prev => ({ ...prev, [projectId]: current }));
     }
   };
 
@@ -4388,6 +4424,20 @@ export function ChatPage() {
                 </div>
               </label>
             )}
+            {/* サイクルSB-1b: Sandbox トグルスイッチ（Project 単位）。非対応時は押せない表示 + title に理由 */}
+            {activeTabId && sandboxStateMap[activeTabId] !== undefined && (() => {
+              const sandboxState = sandboxStateMap[activeTabId];
+              const { clickable, titleKey } = decideSandboxToggle(sandboxState);
+              return (
+                <label className={`flex items-center gap-1 ml-1 ${clickable ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`} title={t(titleKey)}>
+                  <span className={`text-xs ${sandboxState.sandboxEnabled ? 'text-[var(--text-secondary)]' : 'text-[var(--text-faint)]'}`}>{t('chat.sandbox')}</span>
+                  <div className="relative" onClick={clickable ? handleToggleSandbox : undefined}>
+                    <div className={`w-8 h-4 rounded-full transition-colors ${sandboxState.sandboxEnabled ? 'bg-slate-500' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
+                    <div className={`absolute left-[2px] top-[2px] bg-white w-3 h-3 rounded-full transition-transform ${sandboxState.sandboxEnabled ? 'translate-x-4' : ''}`}></div>
+                  </div>
+                </label>
+              );
+            })()}
           </div>
           <div className="flex items-center gap-2">
           </div>

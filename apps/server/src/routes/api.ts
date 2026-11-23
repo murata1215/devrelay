@@ -783,6 +783,61 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ========================================
+  // Sandbox 実行対象（sandboxEnabled）の取得・更新（サイクルSB-1b）
+  // Project 単位の設定。terminal-mode と同形。次回メッセージ送信時から反映される（即時 push はしない）。
+  // ON にするには宛先 Agent が 'sandbox-host' capability を申告していること（未申告なら 409）。
+  // OFF へはいつでも変更できる（非対応になった後も行き止まりにしない）。
+  // ========================================
+  app.get('/api/projects/:projectId/sandbox', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId } = request.params as { projectId: string };
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+      select: { sandboxEnabled: true, machineId: true },
+    });
+    if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+    const online = isAgentConnected(project.machineId);
+    const capable = online && agentHasCapability(project.machineId, 'sandbox-host');
+    const reason: 'ok' | 'offline' | 'unsupported' = !online ? 'offline' : !capable ? 'unsupported' : 'ok';
+
+    return { sandboxEnabled: project.sandboxEnabled, supported: capable, reason };
+  });
+
+  app.put('/api/projects/:projectId/sandbox', async (request, reply) => {
+    // @ts-ignore
+    const userId = request.user.id;
+    const { projectId } = request.params as { projectId: string };
+    const { sandboxEnabled } = (request.body || {}) as { sandboxEnabled?: boolean };
+
+    if (typeof sandboxEnabled !== 'boolean') {
+      return reply.status(400).send({ error: 'sandboxEnabled must be a boolean' });
+    }
+
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, machine: { userId } },
+      select: { machineId: true },
+    });
+    if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+    // ON にする場合のみ、宛先 Agent が対応しているかを確認する（OFF へはいつでも変更できる）。
+    if (sandboxEnabled) {
+      const capable = isAgentConnected(project.machineId) && agentHasCapability(project.machineId, 'sandbox-host');
+      if (!capable) {
+        return reply.status(409).send({ error: 'This agent does not support Sandbox execution' });
+      }
+    }
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { sandboxEnabled },
+    });
+
+    return { success: true, sandboxEnabled };
+  });
+
+  // ========================================
   // プロジェクトのビルドログ一覧
   // ========================================
   app.get('/api/projects/:projectId/builds', async (request, reply) => {

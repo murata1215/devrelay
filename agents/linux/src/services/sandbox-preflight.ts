@@ -48,6 +48,7 @@ import { resolveCurrentUserSid } from './sandbox-identity.js';
 import { probeSdkExecutable } from './sdk-executable.js';
 import { buildSandboxChildEnv } from './sandbox-env.js';
 import { acquireSandboxProxy } from './sandbox-proxy-session.js';
+import { shouldDeclareSandboxHostCapability } from './sandbox-target.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -145,7 +146,8 @@ export async function runSandboxPreflightCheck(
     effectiveAiTool,
     terminalMode,
     projectPathUnderUserProfile,
-    capabilityDeclared: true, // SB-1a-2 時点でも capability 申告自体は未配線（SB-1b で配線）
+    // サイクルSB-1b: capability 申告の配線完了（agents/linux は Windows 実行時のみ申告する）
+    capabilityDeclared: shouldDeclareSandboxHostCapability(process.platform),
     claudeExecutableFallbackActive,
     allowlistValid: allowlistResolution.ok,
     pipeConnected,
