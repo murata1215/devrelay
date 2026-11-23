@@ -56,6 +56,16 @@
 # firewall rule is changed at all (the previous generation stays exactly as
 # it was) and state.json records only the index and a fixed reason code per
 # rejected entry -- never the raw rejected value.
+#
+# Cycle SB-2.1.1 note: this script calls zero external commands (every
+# firewall and ACL operation below uses a cmdlet, not an .exe), so it was
+# never exposed to the NativeCommandError bug fixed in install/uninstall
+# -sandbox-host.ps1 (see those files' headers). If a future change needs to
+# invoke an external .exe-style command from this script, copy the
+# Invoke-NativeCommand helper from install-sandbox-host.ps1 rather than
+# calling the command bare with "2>$null" under $ErrorActionPreference =
+# "Stop" -- that redirect does not prevent PowerShell 5.1 from turning
+# stderr output into a terminating error.
 # =============================================================================
 
 $ErrorActionPreference = "Stop"

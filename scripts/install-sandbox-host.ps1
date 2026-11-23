@@ -131,6 +131,67 @@ if ($DeveloperAccount) {
 }
 Write-Host "[OK] Developer account for the allow-destinations task: $DeveloperAccount ($DeveloperSid)" -ForegroundColor Green
 
+# =============================================================================
+# Cycle SB-2.1.1: shared native-command helper.
+#
+# Windows PowerShell 5.1 turns an external command's stderr output into a
+# terminating NativeCommandError whenever $ErrorActionPreference = "Stop" is
+# in effect (set above). Redirecting with "2>$null" does NOT prevent this --
+# the ErrorRecord is produced before the redirect discards it. This exact bug
+# was hit on hp630g9: "schtasks /Delete" on a non-existent task (the normal
+# case on first install) terminated the whole script right after the
+# "[OK] Saved deny.json" message, before the task was ever registered.
+#
+# Fix: every external command in this file is invoked through this helper,
+# which temporarily sets $ErrorActionPreference = "Continue" around the call,
+# resets $LASTEXITCODE first (a stale value survives if the command is not
+# found), and collects both streams via "2>&1" manually instead of relying on
+# ErrorActionPreference to decide what counts as fatal. -AllowFailure marks
+# calls where a non-zero exit is an expected, non-fatal outcome (for example:
+# deleting a service or task that may not exist yet). Calls made without
+# -AllowFailure stop the script on failure (matching the original intent of
+# $ErrorActionPreference = "Stop", but now only for conditions that actually
+# warrant stopping).
+#
+# Must stay byte-identical between install-sandbox-host.ps1 and
+# uninstall-sandbox-host.ps1 (see sandbox-scripts-guard.test.mjs D4). Not
+# dot-sourced from a shared file because apply-sandbox-allowlist.ps1 is copied
+# standalone into allowlist-bin\ and cannot depend on a sibling file.
+# =============================================================================
+# >>> SB-2.1.1 shared helper (keep byte-identical in install/uninstall-sandbox-host.ps1) >>>
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][scriptblock]$Command,
+        [switch]$AllowFailure
+    )
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $global:LASTEXITCODE = 0
+    $lines = New-Object System.Collections.Generic.List[string]
+    $code = 0
+    try {
+        & $Command 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $lines.Add($_.ToString()) }
+            else { $lines.Add([string]$_) }
+        }
+        $code = $LASTEXITCODE
+    } catch {
+        $lines.Add("EXCEPTION: $($_.Exception.Message)")
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($null -eq $code) { $code = 0 }
+    if ($code -ne 0 -and -not $AllowFailure) {
+        Write-Host "ERROR: $Label failed (exit=$code)" -ForegroundColor Red
+        foreach ($line in $lines) { Write-Host "  $line" }
+        exit 1
+    }
+    return [pscustomobject]@{ ExitCode = $code; Output = @($lines) }
+}
+# <<< SB-2.1.1 shared helper <<<
+
 # --- Step 1: stop and remove any existing service BEFORE building ---
 # Must happen before the build step: if the service is running, SandboxHost.exe is
 # locked and csc.exe fails with CS0016 (observed on hp630g9 during re-install).
@@ -140,7 +201,21 @@ if ($existingService) {
     if ($existingService.Status -eq "Running") {
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
     }
-    & sc.exe delete $ServiceName | Out-Null
+    $null = Invoke-NativeCommand -Label "sc.exe delete (pre-build)" -AllowFailure -Command { & sc.exe delete $ServiceName }
+}
+
+# Wait for the service itself to be fully removed (not just stopped). A
+# service left in "pending deletion" state makes the later "sc create" call
+# fail with exit code 1073. Best-effort: warn and continue if it never clears,
+# since "sc create" below will fail loudly on its own if this was the cause.
+$serviceWaited = 0
+while ($serviceWaited -lt 15) {
+    if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Seconds 1
+    $serviceWaited++
+}
+if ($serviceWaited -ge 15 -and (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+    Write-Host "WARNING: service $ServiceName still present after deletion wait. The create step may fail." -ForegroundColor Yellow
 }
 
 # Wait for the SandboxHost.exe process to actually exit. Service stop does not
@@ -202,11 +277,7 @@ $buildArgs = @(
     "/r:System.Core.dll",
     $SourcePath
 )
-& $CscPath $buildArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Build failed (exit=$LASTEXITCODE)"
-    exit 1
-}
+$null = Invoke-NativeCommand -Label "csc.exe build" -Command { & $CscPath $buildArgs }
 Write-Host "[OK] Build complete: $ExePath" -ForegroundColor Green
 
 # --- Step 5: create the service (virtual account) ---
@@ -216,10 +287,10 @@ Write-Host "[OK] Build complete: $ExePath" -ForegroundColor Green
 # every argument after it and makes sc.exe fail with exit code 1639 (invalid command
 # line argument). Virtual accounts do not need a password (LSA manages them), so the
 # fix is simply not to pass the argument at all (verified working on hp630g9).
-$scCreateOutput = & sc.exe create $ServiceName binPath= "`"$ExePath`"" obj= "$ServiceAccountName" start= auto DisplayName= "DevRelay Sandbox Host" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: sc create failed (exit=$LASTEXITCODE)" -ForegroundColor Red
-    $scCreateOutput | ForEach-Object { Write-Host $_ }
+$scCreateResult = Invoke-NativeCommand -Label "sc.exe create" -AllowFailure -Command { & sc.exe create $ServiceName binPath= "`"$ExePath`"" obj= "$ServiceAccountName" start= auto DisplayName= "DevRelay Sandbox Host" }
+if ($scCreateResult.ExitCode -ne 0) {
+    Write-Host "ERROR: sc create failed (exit=$($scCreateResult.ExitCode))" -ForegroundColor Red
+    $scCreateResult.Output | ForEach-Object { Write-Host $_ }
     exit 1
 }
 Write-Host "[OK] Created service $ServiceName (identity: $ServiceAccountName)" -ForegroundColor Green
@@ -302,7 +373,7 @@ $pubPem = ConvertTo-Pem -Der $derBytes -Label "PUBLIC KEY"
 # hp630g9: this unblocks re-install on a machine with a running service and a
 # locked key file).
 if (Test-Path $PrivKeyPath) {
-    & icacls $PrivKeyPath /grant "*S-1-5-32-544:(F)" | Out-Null
+    $null = Invoke-NativeCommand -Label "icacls /grant (reset old private key ACL)" -AllowFailure -Command { & icacls $PrivKeyPath /grant "*S-1-5-32-544:(F)" }
     Remove-Item -Path $PrivKeyPath -Force
 }
 
@@ -311,10 +382,10 @@ if (Test-Path $PrivKeyPath) {
 
 # Private key: strip inheritance and restrict to the service SID only (not even the
 # developer or Administrators can read it after this point).
-& icacls $PrivKeyPath /inheritance:r | Out-Null
-& icacls $PrivKeyPath /grant "*$($ServiceSid):(R)" | Out-Null
-& icacls $PrivKeyPath /remove:g "*S-1-5-32-545" | Out-Null   # BUILTIN\Users
-& icacls $PrivKeyPath /remove:g "*S-1-5-32-544" | Out-Null   # BUILTIN\Administrators (explicit removal after breaking inheritance)
+$null = Invoke-NativeCommand -Label "icacls /inheritance:r (private key)" -Command { & icacls $PrivKeyPath /inheritance:r }
+$null = Invoke-NativeCommand -Label "icacls /grant service SID (private key)" -Command { & icacls $PrivKeyPath /grant "*$($ServiceSid):(R)" }
+$null = Invoke-NativeCommand -Label "icacls /remove:g Users (private key)" -AllowFailure -Command { & icacls $PrivKeyPath /remove:g "*S-1-5-32-545" }   # BUILTIN\Users
+$null = Invoke-NativeCommand -Label "icacls /remove:g Administrators (private key)" -AllowFailure -Command { & icacls $PrivKeyPath /remove:g "*S-1-5-32-544" }   # BUILTIN\Administrators (explicit removal after breaking inheritance)
 Write-Host "[OK] Saved private key, restricted to the service identity: $PrivKeyPath" -ForegroundColor Green
 Write-Host "[OK] Saved public key: $PubKeyPath" -ForegroundColor Green
 
@@ -332,7 +403,7 @@ $hostJson = @{
 Write-Host "[OK] Saved host.json: $HostJsonPath" -ForegroundColor Green
 
 # --- Step 10: home directory ACL (Modify for the service identity) ---
-& icacls $HomeDir /grant "*$($ServiceSid):(OI)(CI)(M)" | Out-Null
+$null = Invoke-NativeCommand -Label "icacls /grant (home dir)" -Command { & icacls $HomeDir /grant "*$($ServiceSid):(OI)(CI)(M)" }
 
 # --- Step 11: firewall rules ---
 # Windows Firewall applies Block rules before Allow rules regardless of rule order,
@@ -388,30 +459,30 @@ New-Item -ItemType Directory -Path $AllowlistBinDir -Force | Out-Null
 
 # request.json: the developer may create/replace it (Modify); nobody else may,
 # and the Sandbox identity gets no ACE at all.
-& icacls $AllowlistRequestDir /inheritance:r | Out-Null
-& icacls $AllowlistRequestDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null       # SYSTEM
-& icacls $AllowlistRequestDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null  # Administrators
-& icacls $AllowlistRequestDir /grant "*$($DeveloperSid):(OI)(CI)(M)" | Out-Null
+$null = Invoke-NativeCommand -Label "icacls /inheritance:r (allowlist-request)" -Command { & icacls $AllowlistRequestDir /inheritance:r }
+$null = Invoke-NativeCommand -Label "icacls /grant SYSTEM (allowlist-request)" -Command { & icacls $AllowlistRequestDir /grant "*S-1-5-18:(OI)(CI)(F)" }       # SYSTEM
+$null = Invoke-NativeCommand -Label "icacls /grant Administrators (allowlist-request)" -Command { & icacls $AllowlistRequestDir /grant "*S-1-5-32-544:(OI)(CI)(F)" }  # Administrators
+$null = Invoke-NativeCommand -Label "icacls /grant developer (allowlist-request)" -Command { & icacls $AllowlistRequestDir /grant "*$($DeveloperSid):(OI)(CI)(M)" }
 
 # state.json: only SYSTEM/Administrators may write; the developer may only read.
-& icacls $AllowlistResultDir /inheritance:r | Out-Null
-& icacls $AllowlistResultDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null
-& icacls $AllowlistResultDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
-& icacls $AllowlistResultDir /grant "*$($DeveloperSid):(OI)(CI)(R)" | Out-Null
+$null = Invoke-NativeCommand -Label "icacls /inheritance:r (allowlist-result)" -Command { & icacls $AllowlistResultDir /inheritance:r }
+$null = Invoke-NativeCommand -Label "icacls /grant SYSTEM (allowlist-result)" -Command { & icacls $AllowlistResultDir /grant "*S-1-5-18:(OI)(CI)(F)" }
+$null = Invoke-NativeCommand -Label "icacls /grant Administrators (allowlist-result)" -Command { & icacls $AllowlistResultDir /grant "*S-1-5-32-544:(OI)(CI)(F)" }
+$null = Invoke-NativeCommand -Label "icacls /grant developer (allowlist-result)" -Command { & icacls $AllowlistResultDir /grant "*$($DeveloperSid):(OI)(CI)(R)" }
 
 # deny.json: administrator-set; the developer gets no access at all (not even read).
-& icacls $AllowlistDenyDir /inheritance:r | Out-Null
-& icacls $AllowlistDenyDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null
-& icacls $AllowlistDenyDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
+$null = Invoke-NativeCommand -Label "icacls /inheritance:r (allowlist-deny)" -Command { & icacls $AllowlistDenyDir /inheritance:r }
+$null = Invoke-NativeCommand -Label "icacls /grant SYSTEM (allowlist-deny)" -Command { & icacls $AllowlistDenyDir /grant "*S-1-5-18:(OI)(CI)(F)" }
+$null = Invoke-NativeCommand -Label "icacls /grant Administrators (allowlist-deny)" -Command { & icacls $AllowlistDenyDir /grant "*S-1-5-32-544:(OI)(CI)(F)" }
 
 # allowlist-bin\: holds the privileged script itself. The developer may read and
 # execute it (so `schtasks /Run` can launch it) but never modify it -- the task
 # must never run a file the developer (and so, transitively, a prompt-injected AI
 # running under the developer's own shell) can edit.
-& icacls $AllowlistBinDir /inheritance:r | Out-Null
-& icacls $AllowlistBinDir /grant "*S-1-5-18:(OI)(CI)(F)" | Out-Null
-& icacls $AllowlistBinDir /grant "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
-& icacls $AllowlistBinDir /grant "*$($DeveloperSid):(OI)(CI)(RX)" | Out-Null
+$null = Invoke-NativeCommand -Label "icacls /inheritance:r (allowlist-bin)" -Command { & icacls $AllowlistBinDir /inheritance:r }
+$null = Invoke-NativeCommand -Label "icacls /grant SYSTEM (allowlist-bin)" -Command { & icacls $AllowlistBinDir /grant "*S-1-5-18:(OI)(CI)(F)" }
+$null = Invoke-NativeCommand -Label "icacls /grant Administrators (allowlist-bin)" -Command { & icacls $AllowlistBinDir /grant "*S-1-5-32-544:(OI)(CI)(F)" }
+$null = Invoke-NativeCommand -Label "icacls /grant developer RX (allowlist-bin)" -Command { & icacls $AllowlistBinDir /grant "*$($DeveloperSid):(OI)(CI)(RX)" }
 
 Write-Host "[OK] Created allow-destinations directories and ACLs" -ForegroundColor Green
 
@@ -426,13 +497,9 @@ Write-Host "[OK] Saved deny.json ($($DenyDestination.Count) entr(y/ies))" -Foreg
 # --- Step 11c (cycle SB-2.1): register the allow-destinations reconciler task ---
 # No arguments: schtasks /Run has no mechanism to pass arguments, so the action
 # below must never reference "$(ArgN)" (see apply-sandbox-allowlist.ps1 header).
-& schtasks /Delete /TN $TaskPath /F 2>$null | Out-Null
+$null = Invoke-NativeCommand -Label "schtasks /Delete (pre-register)" -AllowFailure -Command { & schtasks /Delete /TN $TaskPath /F }
 $taskAction = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ApplyScriptDestPath`""
-& schtasks /Create /TN $TaskPath /TR $taskAction /SC ONSTART /RU "SYSTEM" /RL HIGHEST /F | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "schtasks /Create failed for $TaskPath (exit=$LASTEXITCODE)"
-    exit 1
-}
+$null = Invoke-NativeCommand -Label "schtasks /Create" -Command { & schtasks /Create /TN $TaskPath /TR $taskAction /SC ONSTART /RU "SYSTEM" /RL HIGHEST /F }
 Write-Host "[OK] Registered scheduled task: $TaskPath (ONSTART, runs as SYSTEM)" -ForegroundColor Green
 
 # Grant the developer account permission to trigger the task on demand
@@ -494,11 +561,11 @@ if ($nodeCmd) {
 }
 if ($NodeExe) {
     $nodeCheckScript = 'require(''crypto'').createPublicKey(require(''fs'').readFileSync(process.argv[1],''utf8'')); console.log(''OK'')'
-    $nodeCheckOutput = & $NodeExe -e $nodeCheckScript $PubKeyPath 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    $nodeCheckResult = Invoke-NativeCommand -Label "node public key check" -AllowFailure -Command { & $NodeExe -e $nodeCheckScript $PubKeyPath }
+    if ($nodeCheckResult.ExitCode -eq 0) {
         Write-Host "[OK] Verified the public key is readable by Node.js crypto.createPublicKey()" -ForegroundColor Green
     } else {
-        Write-Host "[WARN] Node.js could not read the generated public key: $nodeCheckOutput" -ForegroundColor Yellow
+        Write-Host "[WARN] Node.js could not read the generated public key: $($nodeCheckResult.Output -join ' ')" -ForegroundColor Yellow
     }
 } else {
     Write-Host "[--] Skipped Node.js public-key verification (node.exe not found)" -ForegroundColor Gray
