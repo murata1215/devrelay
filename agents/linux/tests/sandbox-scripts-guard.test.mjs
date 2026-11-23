@@ -1,6 +1,6 @@
-// サイクル SB-1a-1.1 / SB-2.1: scripts/install-sandbox-host.ps1 / uninstall-sandbox-host.ps1 /
-// apply-sandbox-allowlist.ps1 に対する静的ガード（node:fs のみ、スクリプトを実行しない。
-// apps/server の install-agent-repo-auth-guard.test.mjs と同じ手口）。
+// サイクル SB-1a-1.1 / SB-2.1 / SB-2.1.2: scripts/install-sandbox-host.ps1 /
+// uninstall-sandbox-host.ps1 / apply-sandbox-allowlist.ps1 に対する静的ガード（node:fs のみ、
+// スクリプトを実行しない。apps/server の install-agent-repo-auth-guard.test.mjs と同じ手口）。
 //
 // これが無いと、将来の編集で以下が黙って再発しても気づけない:
 // - A1: 非 ASCII 文字が混入し、Windows PowerShell 5.1 が BOM なし UTF-8 を ANSI として誤読して
@@ -40,6 +40,21 @@
 // - D5: 「存在しなくても成功」であるべき削除系コマンドが -AllowFailure を失って無関係な初回
 //   インストールまで失敗させる、または逆に失敗を握りつぶすべきでない ACL 付与が
 //   -AllowFailure 付きになる
+//
+// サイクル SB-2.1.2 で追加（hp630g9 実機: apply-sandbox-allowlist.ps1 が
+// `$destinations = @($validDestinations)` で毎回 System.ArgumentException を投げ、
+// IPv4 の遮断ルールが 1 本も作られない状態になっていた不具合の根治。真因は
+// Windows PowerShell 5.1 が List[object] 変数に対する `@()` 演算子を特別扱いし、
+// 型が合わない式を組み立てて例外を投げること。空集合・1件・複数件のいずれでも発生する）:
+// - E1: List[object] 変数に対して `@($変数)` または `$変数 |` が復活する（List[string] は対象外。
+//   このバグは List<object> 固有で、install/uninstall の Invoke-NativeCommand 内 `Output = @($lines)`
+//   （List[string]）は実機で動作実証済みのため触らない）
+// - E2: install が反映スクリプト呼び出しより前に fail-closed の IPv4 全遮断ルールを作らなくなる、
+//   または範囲・ルール名・-Group が一致しなくなる（反映が失敗した場合に IPv4 が無防備になる）
+// - E3: apply が fail-closed ルールを削除する位置が新世代の作成完了より前に戻る、または
+//   rollback（失敗時）のブロック内に紛れ込む（緩む瞬間を作ってしまう）
+// - E4: state.json の error にローカライズされた例外本文（Exception.Message）がそのまま
+//   書き戻される（ASCII の型名＋行番号のみであるべき）
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -128,20 +143,21 @@ describe('install-sandbox-host.ps1', () => {
     assert.match(source, /"::\/1"\s*,\s*"8000::\/1"/);
   });
 
-  test('A4: ファイアウォールのルールは2本（静的な IPv6 Block・loopback Allow のみ）', () => {
+  test('A4: ファイアウォールのルールは3本（fail-closed IPv4・静的な IPv6 Block・loopback Allow のみ）', () => {
     // 行頭から始まる実呼び出しのみを対象にする（コメント内の "New-NetFirewallRule" という
     // 言及（例: "rejected by New-NetFirewallRule with ..."）を実呼び出しと誤認しないため）。
     const ruleBlocks = [...source.matchAll(/^New-NetFirewallRule[\s\S]*?\| Out-Null/gm)];
     assert.equal(
       ruleBlocks.length,
-      2,
-      'install-sandbox-host.ps1 が直接作る New-NetFirewallRule の呼び出しは2本であること' +
-        '（IPv4 の動的 Block ルールは apply-sandbox-allowlist.ps1 が digest 付きで管理する）',
+      3,
+      'install-sandbox-host.ps1 が直接作る New-NetFirewallRule の呼び出しは3本であること' +
+        '（IPv4 の許可リスト反映 Block ルールは apply-sandbox-allowlist.ps1 が digest 付きで管理する。' +
+        '3本目はサイクル SB-2.1.2 の fail-closed ルール）',
     );
     for (const block of ruleBlocks) {
       assert.match(block[0], /-LocalUser/, `-LocalUser を使うこと: ${block[0].slice(0, 80)}...`);
       assert.match(block[0], /-Group \$FirewallGroup/, `-Group を使うこと: ${block[0].slice(0, 80)}...`);
-      assert.match(block[0], /-Name "DevRelay-SandboxStatic-/, `-Name を使うこと: ${block[0].slice(0, 80)}...`);
+      assert.match(block[0], /-Name ("DevRelay-Sandbox|\$FailClosedRuleName)/, `-Name を使うこと: ${block[0].slice(0, 80)}...`);
       assert.ok(!/-Service\b/.test(block[0]), `-Service を使わないこと: ${block[0].slice(0, 80)}...`);
     }
   });
@@ -347,6 +363,106 @@ describe('apply-sandbox-allowlist.ps1', () => {
     assert.ok(idx !== -1, 'ロールバック処理のコメントが見つかること');
     const body = source.slice(idx, idx + 400);
     assert.match(body, /Remove-NetFirewallRule -Name \$name/);
+  });
+});
+
+describe('サイクル SB-2.1.2: List[object] に @() を使わない（hp630g9 実機バグ「Argument types do not match」の再発防止）', () => {
+  const SANDBOX_PS1_RELPATHS = [
+    'scripts/install-sandbox-host.ps1',
+    'scripts/uninstall-sandbox-host.ps1',
+    'scripts/apply-sandbox-allowlist.ps1',
+  ];
+
+  for (const relPath of SANDBOX_PS1_RELPATHS) {
+    test(`E1: ${relPath} の List[object] 変数は @() も "変数 | ..." も使わず、.ToArray() か foreach でのみスコープ外に出す`, () => {
+      const source = readScript(relPath);
+      // List[string] は対象外（install/uninstall の $lines は実機で @($lines) が動作実証済み。
+      // バグは List<object> 固有であり List<string> には無い）。
+      const declRe = /\$(\w+)\s*=\s*New-Object System\.Collections\.Generic\.List\[object\]/g;
+      const varNames = new Set();
+      let m;
+      while ((m = declRe.exec(source)) !== null) {
+        varNames.add(m[1]);
+      }
+      const codeLines = codeLinesOf(source);
+      for (const varName of varNames) {
+        const arrayWrapRe = new RegExp(`@\\(\\s*\\$${varName}\\b`);
+        const pipeRe = new RegExp(`\\$${varName}\\b\\s*\\|`);
+        for (const line of codeLines) {
+          assert.ok(!arrayWrapRe.test(line), `${relPath}: "@($${varName})" が無いこと（List[object] への @() は ArgumentException を投げる）: ${line.trim()}`);
+          assert.ok(!pipeRe.test(line), `${relPath}: "$${varName} |" が無いこと（.ToArray() してからパイプする方針で統一）: ${line.trim()}`);
+        }
+      }
+    });
+  }
+
+  test('E1: apply-sandbox-allowlist.ps1 の List[object] 宣言が1個以上見つかる（検査対象が空で素通りしていないこと）', () => {
+    const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+    const declCount = (source.match(/New-Object System\.Collections\.Generic\.List\[object\]/g) || []).length;
+    assert.ok(declCount >= 5, `List[object] 宣言が5個以上見つかること（holeList/merged x2/complement x2/violations/validDestinations）: ${declCount}`);
+  });
+
+  test('E2: install が fail-closed の IPv4 全遮断ルールを apply 呼び出しより前に作る', () => {
+    const source = readScript('scripts/install-sandbox-host.ps1');
+    const failClosedIdx = source.indexOf('New-NetFirewallRule -Name $FailClosedRuleName');
+    const applyInvokeIdx = source.indexOf('-ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ApplyScriptDestPath`"")');
+    assert.ok(failClosedIdx !== -1, 'fail-closed ルール作成が見つかること');
+    assert.ok(applyInvokeIdx !== -1, 'apply-sandbox-allowlist.ps1 の呼び出しが見つかること');
+    assert.ok(failClosedIdx < applyInvokeIdx, 'fail-closed ルール作成が apply 呼び出しより前であること');
+
+    const block = source.slice(failClosedIdx, failClosedIdx + 400);
+    assert.match(block, /-RemoteAddress "0\.0\.0\.0-126\.255\.255\.255","128\.0\.0\.0-255\.255\.255\.255"/, '範囲が旧静的 IPv4 ルールと同一であること');
+    assert.match(block, /-Group \$FirewallGroup/);
+    assert.match(block, /DisplayName "DevRelay Sandbox - /, 'uninstall の削除条件（DisplayName ワイルドカード）に当たること');
+  });
+
+  test('E2: install と apply のルール名リテラルが一致する', () => {
+    const installSource = readScript('scripts/install-sandbox-host.ps1');
+    const applySource = readScript('scripts/apply-sandbox-allowlist.ps1');
+    assert.match(installSource, /\$FailClosedRuleName = "DevRelay-SandboxFailClosed-ipv4"/);
+    assert.match(applySource, /\$FailClosedRuleName = "DevRelay-SandboxFailClosed-ipv4"/);
+  });
+
+  test('E3: apply の fail-closed ルール削除が、新世代の最後の New-NetFirewallRule より後にある', () => {
+    const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+    const lastRuleCreateIdx = source.lastIndexOf('New-NetFirewallRule');
+    const failClosedRemoveIdx = source.indexOf('Remove-NetFirewallRule -Name $FailClosedRuleName');
+    assert.ok(lastRuleCreateIdx !== -1 && failClosedRemoveIdx !== -1, '両方が見つかること');
+    assert.ok(failClosedRemoveIdx > lastRuleCreateIdx, 'fail-closed ルールの削除は最後のルール作成より後であること');
+  });
+
+  test('E3: apply の fail-closed ルール削除は rollback（失敗時）のブロック内に無い', () => {
+    const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+    const rollbackIdx = source.indexOf('} catch {\n        # Roll back only what THIS run created');
+    assert.ok(rollbackIdx !== -1, 'ロールバック処理のコメントが見つかること');
+    const rollbackBody = source.slice(rollbackIdx, source.indexOf('exit 1', rollbackIdx) + 'exit 1'.length);
+    assert.ok(!rollbackBody.includes('Remove-NetFirewallRule -Name $FailClosedRuleName'), 'rollback ブロックは fail-closed ルールを消さないこと（旧世代同様、残すべき）');
+  });
+
+  test('E4: state.json の error にローカライズされた例外本文（Exception.Message）が書き戻されない', () => {
+    const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+    const errorAssignments = [...source.matchAll(/error\s*=\s*"[^"\n]*"/g)];
+    assert.ok(errorAssignments.length > 0, 'error = "..." の割り当てが見つかること');
+    for (const call of errorAssignments) {
+      assert.ok(!call[0].includes('Exception.Message'), `state.json の error に Exception.Message を直接書かないこと: ${call[0]}`);
+    }
+  });
+
+  test('E4: Format-ErrorCode は型名(.NET FullName)と行番号のみを使う', () => {
+    const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+    assert.match(source, /function Format-ErrorCode/);
+    const idx = source.indexOf('function Format-ErrorCode');
+    const body = source.slice(idx, source.indexOf('return "$ascii at line $line"', idx) + 40);
+    assert.match(body, /\.GetType\(\)\.FullName/);
+    assert.match(body, /InvocationInfo\.ScriptLineNumber/);
+  });
+
+  test('E4: 画面の Write-Error は行番号を含める', () => {
+    const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+    const writeErrorCalls = [...source.matchAll(/Write-Error "[^\n]*"/g)];
+    assert.ok(writeErrorCalls.length > 0, 'Write-Error 呼び出しが見つかること');
+    const withLineNumber = writeErrorCalls.filter((c) => c[0].includes('ScriptLineNumber'));
+    assert.ok(withLineNumber.length > 0, '少なくとも1つの Write-Error が行番号 (ScriptLineNumber) を含むこと');
   });
 });
 

@@ -66,6 +66,28 @@
 # calling the command bare with "2>$null" under $ErrorActionPreference =
 # "Stop" -- that redirect does not prevent PowerShell 5.1 from turning
 # stderr output into a terminating error.
+#
+# Cycle SB-2.1.2 note (hp630g9 real-machine bug): on Windows PowerShell 5.1,
+# applying the array-subexpression operator "@( )" directly to a variable
+# holding a System.Collections.Generic.List[object] throws
+# "System.ArgumentException: Argument types do not match" (the binder's
+# List<object>-only fast path builds an expression typed for the struct
+# enumerator, which a downstream IEnumerator-typed helper then rejects).
+# This is specific to List[object] held in a variable -- List[string]
+# variables and @() applied to a pipeline/function-return value are both
+# unaffected. Rule followed everywhere below: a List[object] never leaves
+# the scope it was created in via "@($list)" or "$list | ..."; convert with
+# ".ToArray()" (or keep it inside the same function) instead. Do not
+# reintroduce "@($someListObjectVariable)" for a List[object] variable.
+#
+# Cycle SB-2.1.2 note (fail-closed): install-sandbox-host.ps1 creates a
+# fixed-name rule, "DevRelay-SandboxFailClosed-ipv4", that blocks all IPv4
+# except loopback, BEFORE it ever invokes this script. This script's job is
+# to remove that rule -- but only once the new generation's rules (below)
+# have been fully created. If anything in this script fails partway
+# through, the fail-closed rule (and the previous generation) are left in
+# place, so a broken reconciliation can never result in IPv4 being wide
+# open. This script never creates DevRelay-SandboxFailClosed-ipv4 itself.
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
@@ -79,6 +101,9 @@ $RequestJsonPath = Join-Path $ProgramDataDir "allowlist-request\request.json"
 $StateJsonPath = Join-Path $ProgramDataDir "allowlist-result\state.json"
 $DenyJsonPath = Join-Path $ProgramDataDir "allowlist-deny\deny.json"
 $FirewallGroup = "DevRelay Sandbox"
+# Must stay byte-identical to the same literal in install-sandbox-host.ps1
+# (guarded by sandbox-scripts-guard.test.mjs E2/E3).
+$FailClosedRuleName = "DevRelay-SandboxFailClosed-ipv4"
 $SupportedRequestVersion = 1
 $ReconcilerVersion = 1
 $MaxDestinations = 20
@@ -159,13 +184,18 @@ function Get-Ipv4Complement {
     foreach ($v in $AllowedValues) {
         $holeList.Add(@{ Start = $v; End = $v })
     }
-    $sorted = $holeList | Sort-Object { $_['Start'] }
+    # .ToArray() before the pipe: piping a List[object] variable directly is not
+    # known to trigger the @() bug described above, but this script keeps a
+    # single, simple rule (never hand a List[object] variable to anything outside
+    # the function that created it except via .ToArray()) rather than relying on
+    # a second, unverified claim about what PowerShell 5.1's pipeline does with it.
+    $sorted = $holeList.ToArray() | Sort-Object { $_['Start'] }
     $merged = New-Object System.Collections.Generic.List[object]
     foreach ($r in $sorted) {
-        if ($merged.Count -gt 0 -and $r['Start'] -le ($merged[$merged.Count - 1]['End'] + 1)) {
-            if ($r['End'] -gt $merged[$merged.Count - 1]['End']) {
-                $merged[$merged.Count - 1]['End'] = $r['End']
-            }
+        $last = $null
+        if ($merged.Count -gt 0) { $last = $merged[$merged.Count - 1] }
+        if ($null -ne $last -and $r['Start'] -le ($last['End'] + 1)) {
+            if ($r['End'] -gt $last['End']) { $last['End'] = $r['End'] }
         } else {
             $merged.Add(@{ Start = $r['Start']; End = $r['End'] })
         }
@@ -183,7 +213,11 @@ function Get-Ipv4Complement {
         $complement.Add(@{ Start = $cursor; End = [uint64]4294967295 })
     }
 
-    return @{ Merged = $merged; Complement = $complement }
+    # SB-2.1.2: never hand a List[object] variable to the caller via "@()"
+    # (see header note) -- .ToArray() instead. Merged/Complement are plain
+    # object[] from here on; callers only ever foreach over them or read
+    # .Count, so no caller change is needed.
+    return @{ Merged = $merged.ToArray(); Complement = $complement.ToArray() }
 }
 
 # Self-check (B-4 safety net, mirrors the public-key blob validation in
@@ -226,8 +260,10 @@ function Get-PortComplementRanges {
     $sorted = @($AllowedPorts | Sort-Object -Unique)
     $merged = New-Object System.Collections.Generic.List[object]
     foreach ($p in $sorted) {
-        if ($merged.Count -gt 0 -and $p -le ($merged[$merged.Count - 1]['End'] + 1)) {
-            if ($p -gt $merged[$merged.Count - 1]['End']) { $merged[$merged.Count - 1]['End'] = $p }
+        $last = $null
+        if ($merged.Count -gt 0) { $last = $merged[$merged.Count - 1] }
+        if ($null -ne $last -and $p -le ($last['End'] + 1)) {
+            if ($p -gt $last['End']) { $last['End'] = $p }
         } else {
             $merged.Add(@{ Start = $p; End = $p })
         }
@@ -269,7 +305,9 @@ function Get-Sha256HexLower {
 function Get-ManagedRuleNames {
     $rules = Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue
     if (-not $rules) { return @() }
-    return @($rules | Where-Object { $_.Name -like 'DevRelay-SandboxGen-*' } | Select-Object -ExpandProperty Name)
+    # SB-2.1.2: also report the fail-closed rule's survival (diagnostic only;
+    # the Agent never validates or displays ruleNames shapes).
+    return @($rules | Where-Object { $_.Name -like 'DevRelay-SandboxGen-*' -or $_.Name -eq $FailClosedRuleName } | Select-Object -ExpandProperty Name)
 }
 
 # state.json is written to a temp file in the same directory, then moved into
@@ -281,6 +319,28 @@ function Write-SandboxAllowState {
     $tmpPath = "$StateJsonPath.tmp-$PID-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
     [System.IO.File]::WriteAllText($tmpPath, $json)
     Move-Item -Path $tmpPath -Destination $StateJsonPath -Force
+}
+
+# SB-2.1.2: state.json's "error" field must be ASCII-only and must never
+# contain the localized exception message or any input value -- only the
+# exception's .NET type name (never localized) and the script line number
+# it was thrown from, e.g. "System.ArgumentException at line 426". The
+# on-screen Write-Error calls separately still show the full (possibly
+# localized) message for human diagnosis; only state.json is restricted.
+function Format-ErrorCode {
+    param($ErrorRecord)
+    $typeName = "UnknownException"
+    $line = 0
+    try {
+        if ($ErrorRecord -and $ErrorRecord.Exception) { $typeName = $ErrorRecord.Exception.GetType().FullName }
+        if ($ErrorRecord -and $ErrorRecord.InvocationInfo) { $line = [int]$ErrorRecord.InvocationInfo.ScriptLineNumber }
+    } catch {
+        # Even inspecting the error record failed; fall back to the defaults above.
+    }
+    $ascii = ($typeName -replace '[^A-Za-z0-9_.+]', '')
+    if ($ascii.Length -gt 120) { $ascii = $ascii.Substring(0, 120) }
+    if (-not $ascii) { $ascii = "UnknownException" }
+    return "$ascii at line $line"
 }
 
 # -----------------------------------------------------------------------------
@@ -412,7 +472,7 @@ try {
             digest            = $null
             applied           = @()
             rejectedCount     = $violations.Count
-            rejected          = @($violations)
+            rejected          = $violations.ToArray()
             ruleNames         = @(Get-ManagedRuleNames)
             error             = $null
         }
@@ -423,7 +483,10 @@ try {
     # --- compute the desired generation from the validated set (source of
     #     truth; the canonical/digest fields the Agent sent are informational
     #     only and are not trusted here) ---
-    $destinations = @($validDestinations)
+    # SB-2.1.2: $validDestinations is a List[object]; "@($validDestinations)"
+    # is exactly the pattern that threw "Argument types do not match" on
+    # hp630g9 (see header note). .ToArray() instead.
+    $destinations = $validDestinations.ToArray()
     $canonical = Build-CanonicalString -Destinations $destinations
     $digest = Get-Sha256HexLower -Text $canonical
     $gen = $digest.Substring(0, 12)
@@ -447,7 +510,11 @@ try {
         Write-Error "IPv4 complement self-check failed. Aborting without changing any firewall rule."
         exit 1
     }
-    $ipv4RangeStrings = Format-Ipv4RangeStrings -Ranges $ipv4['Complement']
+    # Wrap the function result with @() at the call site: PowerShell's
+    # "return $array" unrolls a single-element array onto the output stream,
+    # so a 1-range complement would otherwise arrive here as a bare scalar
+    # string instead of a 1-element array (0 and 2+ elements are unaffected).
+    $ipv4RangeStrings = @(Format-Ipv4RangeStrings -Ranges $ipv4['Complement'])
 
     # --- create the new generation's rules (idempotent: skip any rule whose
     #     exact Name already exists). Track what THIS run actually created so
@@ -467,7 +534,8 @@ try {
         $tcpIndex = 0
         foreach ($group in $byIp) {
             $ports = @($group.Group | Select-Object -ExpandProperty port)
-            $portComplement = Get-PortComplementRanges -AllowedPorts $ports
+            # See the @() note above Format-Ipv4RangeStrings: same reason.
+            $portComplement = @(Get-PortComplementRanges -AllowedPorts $ports)
             if ($portComplement.Count -gt 0) {
                 $tcpRuleName = "DevRelay-SandboxGen-$gen-tcp-$tcpIndex"
                 if (-not (Get-NetFirewallRule -Name $tcpRuleName -ErrorAction SilentlyContinue)) {
@@ -505,18 +573,23 @@ try {
             rejectedCount     = 0
             rejected          = @()
             ruleNames         = @(Get-ManagedRuleNames)
-            error             = "rule_creation_failed: $($_.Exception.Message)"
+            error             = "rule_creation_failed: $(Format-ErrorCode $_)"
         }
-        Write-Error "Firewall rule creation failed; rolled back this run's new rules. Previous generation left unchanged."
+        Write-Error "Firewall rule creation failed (line $($_.InvocationInfo.ScriptLineNumber)); rolled back this run's new rules. Previous generation left unchanged. $_"
         exit 1
     }
 
-    # --- new generation fully created: delete any OTHER generation now ---
+    # --- new generation fully created: delete any OTHER generation now, AND
+    #     remove the fail-closed rule install-sandbox-host.ps1 created before
+    #     ever invoking this script (SB-2.1.2). Both removals happen only
+    #     here, after every new-generation rule above succeeded -- never
+    #     before, and never inside the catch block above. ---
     $staleRules = Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like 'DevRelay-SandboxGen-*' -and $_.Name -notlike "DevRelay-SandboxGen-$gen-*" }
     if ($staleRules) {
         $staleRules | Remove-NetFirewallRule -ErrorAction SilentlyContinue
     }
+    Remove-NetFirewallRule -Name $FailClosedRuleName -ErrorAction SilentlyContinue
 
     Write-SandboxAllowState @{
         reconcilerVersion = $ReconcilerVersion
@@ -544,11 +617,11 @@ try {
             rejectedCount     = 0
             rejected          = @()
             ruleNames         = @(Get-ManagedRuleNames)
-            error             = "unexpected_error: $($_.Exception.Message)"
+            error             = "unexpected_error: $(Format-ErrorCode $_)"
         }
     } catch {
         # Even state.json could not be written; nothing more we can do here.
     }
-    Write-Error "Unexpected error in apply-sandbox-allowlist.ps1: $($_.Exception.Message)"
+    Write-Error "Unexpected error in apply-sandbox-allowlist.ps1 (line $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
     exit 1
 }

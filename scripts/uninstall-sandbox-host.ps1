@@ -110,7 +110,10 @@ try {
 
 # Full removal: DisplayName wildcard catches pre-SB-2.1 installs (no -Name/-Group
 # was ever set on their rules); -Group catches every rule from cycle SB-2.1 onward
-# (the two static rules AND any apply-sandbox-allowlist.ps1 generation still live).
+# (the static IPv6-block/loopback-allow rules, the SB-2.1.2 fail-closed IPv4 rule
+# if it is still present, AND any apply-sandbox-allowlist.ps1 generation still
+# live). No change needed here for SB-2.1.2: the fail-closed rule carries the
+# same -Group as everything else, so it is already covered.
 $rules = @(Get-NetFirewallRule -DisplayName "DevRelay Sandbox*" -ErrorAction SilentlyContinue) +
          @(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue)
 if ($rules) {

@@ -91,6 +91,12 @@ $StateJsonPath = Join-Path $AllowlistResultDir "state.json"
 $DenyJsonPath = Join-Path $AllowlistDenyDir "deny.json"
 $ApplyScriptDestPath = Join-Path $AllowlistBinDir "apply-allowlist.ps1"
 $FirewallGroup = "DevRelay Sandbox"
+# Cycle SB-2.1.2: fixed name for the fail-closed IPv4 rule this script
+# creates before ever invoking apply-sandbox-allowlist.ps1, and that script
+# removes once (and only once) its own new generation is fully created.
+# Must stay byte-identical to the same literal in apply-sandbox-allowlist.ps1
+# (guarded by sandbox-scripts-guard.test.mjs E2/E3).
+$FailClosedRuleName = "DevRelay-SandboxFailClosed-ipv4"
 $TaskFolder = "\DevRelay"
 $TaskName = "apply-sandbox-allowlist"
 $TaskPath = "$TaskFolder\$TaskName"
@@ -409,19 +415,34 @@ $null = Invoke-NativeCommand -Label "icacls /grant (home dir)" -Command { & icac
 # Windows Firewall applies Block rules before Allow rules regardless of rule order,
 # so a naive "Allow loopback + Block everything" pair risks blocking loopback too.
 #
-# Rule ownership (cycle SB-2.1): the IPv4 "block everything except loopback" rule
-# is now owned exclusively by apply-sandbox-allowlist.ps1 (see that script's header
-# comment for why: it must be able to carve out allowed destinations, and Windows
-# Firewall ORs all matching Block rules, so a second, independent "block all IPv4"
-# rule here would silently defeat anything the allow list permits). This script
-# creates only the two STATIC rules below, whose content never depends on the
-# allow list, then invokes apply-sandbox-allowlist.ps1 once (as a child process,
-# below) to materialize the IPv4 rule for whatever is configured right now
-# (nothing, the first time).
+# Rule ownership (cycle SB-2.1): the IPv4 "block everything except loopback and the
+# currently allowed destinations" rule is owned by apply-sandbox-allowlist.ps1 (see
+# that script's header comment for why: it must be able to carve out allowed
+# destinations, and Windows Firewall ORs all matching Block rules, so a second,
+# independent "block all IPv4" rule here would silently defeat anything the allow
+# list permits).
 #
-# Both static rules target the service identity via -LocalUser with an explicit
-# SDDL string (not -Service). -LocalUser "D:(A;;CC;;;<service SID>)" was verified
-# on hp630g9 to actually block outbound traffic from the service's child AND
+# Cycle SB-2.1.2 (fail-closed): apply-sandbox-allowlist.ps1 can itself fail (it was
+# found doing so on every run on hp630g9 -- see that script's SB-2.1.2 header note
+# for the PowerShell 5.1 bug that caused it), and when it fails it leaves the
+# PREVIOUS IPv4 rule in place rather than widening it -- except the very first time
+# it ever runs, when there IS no previous IPv4 rule yet. Without a rule of its own,
+# THIS script's install window would leave IPv4 completely open until that first
+# run of apply-sandbox-allowlist.ps1 succeeds. So this script creates one more
+# static rule below, $FailClosedRuleName, that blocks all non-loopback IPv4 --
+# BEFORE invoking apply-sandbox-allowlist.ps1 (below). apply-sandbox-allowlist.ps1
+# removes this rule itself, but only once its own new generation's rules have all
+# been created successfully (see that script's "new generation fully created"
+# comment) -- so if it fails at any point, this fail-closed rule (and whatever
+# generation already existed) is left standing instead of nothing being blocked.
+# This script therefore creates three STATIC-or-fail-closed rules whose content
+# never depends on the allow list, then invokes apply-sandbox-allowlist.ps1 once
+# (as a child process, below) to materialize the IPv4 allow-list rule for whatever
+# is configured right now (nothing, the first time) and remove the fail-closed rule.
+#
+# All rules target the service identity via -LocalUser with an explicit SDDL
+# string (not -Service). -LocalUser "D:(A;;CC;;;<service SID>)" was verified on
+# hp630g9 to actually block outbound traffic from the service's child AND
 # grandchild processes (status showed the positive control probe blocked). The
 # -Service form was never verified and is not used here.
 #
@@ -436,6 +457,15 @@ if ($existingRules) {
 
 $LocalUserSddl = "D:(A;;CC;;;$ServiceSid)"
 
+# Fail-closed (cycle SB-2.1.2): created FIRST, immediately after the reset above,
+# so the window with no IPv4 rule at all (between the reset and this line) is as
+# short as possible. Same two half-open ranges the pre-SB-2.1 static IPv4 rule
+# used (verified on hp630g9 in cycle SB-1) -- removed by
+# apply-sandbox-allowlist.ps1 once its own generation is up, never by this script.
+New-NetFirewallRule -Name $FailClosedRuleName -DisplayName "DevRelay Sandbox - Block IPv4 (fail-closed, except loopback)" `
+    -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol Any `
+    -RemoteAddress "0.0.0.0-126.255.255.255","128.0.0.0-255.255.255.255" | Out-Null
+
 # IPv6: "::/0" is rejected by New-NetFirewallRule ("one or more address prefixes are
 # invalid", HRESULT 0x80070057 on hp630g9). Two half-ranges work instead. This rule's
 # content never depends on the allow list (cycle SB-2.1 only adds IPv4 destinations).
@@ -449,7 +479,7 @@ New-NetFirewallRule -Name "DevRelay-SandboxStatic-loopback-allow" -DisplayName "
     -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Allow -Protocol Any `
     -RemoteAddress "127.0.0.0/8" | Out-Null
 
-Write-Host "[OK] Created static firewall rules (IPv6 block, loopback allow)" -ForegroundColor Green
+Write-Host "[OK] Created static firewall rules (fail-closed IPv4, IPv6 block, loopback allow)" -ForegroundColor Green
 
 # --- Step 11b (cycle SB-2.1): allow-destinations directories, ACLs, deny list ---
 New-Item -ItemType Directory -Path $AllowlistRequestDir -Force | Out-Null
@@ -530,14 +560,32 @@ try {
 # Materialize the current generation right now (as a separate process, exactly
 # like the scheduled task itself will run it, so `exit` inside the child script
 # never terminates this installer). The first time this runs, request.json
-# usually does not exist yet, so this reproduces the pre-SB-2.1 behavior exactly
-# (block everything except loopback) rather than leaving IPv4 unmanaged until the
-# task next fires.
+# usually does not exist yet, so on success this reproduces the pre-SB-2.1
+# behavior exactly (block everything except loopback). If this fails, the
+# fail-closed rule created above is left standing (see Step 11), so IPv4 is
+# never left unmanaged -- but it then stays at "block everything" rather than
+# picking up any allowDestinations until the failure is fixed and the task
+# (or this installer) is run again.
 $applyProcess = Start-Process -FilePath "powershell.exe" `
     -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ApplyScriptDestPath`"") `
     -Wait -PassThru -WindowStyle Hidden
 if ($applyProcess.ExitCode -ne 0) {
     Write-Host "[WARN] apply-sandbox-allowlist.ps1 reported exit code $($applyProcess.ExitCode). Check $StateJsonPath." -ForegroundColor Yellow
+    Write-Host "[WARN] IPv4 remains fully blocked (except loopback) via the fail-closed rule until this is fixed." -ForegroundColor Yellow
+    # Best-effort: surface state.json's ASCII-only error code so the WARN above is
+    # actionable without opening the file by hand. Never let a read/parse failure
+    # here affect the installer's own exit code.
+    try {
+        if (Test-Path $StateJsonPath) {
+            $stateForWarn = Get-Content -Path $StateJsonPath -Raw | ConvertFrom-Json
+            if ($stateForWarn.error) {
+                Write-Host "[WARN] state.json error: $($stateForWarn.error)" -ForegroundColor Yellow
+            }
+        }
+    } catch {
+        # state.json could not be read/parsed; the WARN lines above already told
+        # the administrator where to look by hand.
+    }
 } else {
     Write-Host "[OK] Applied the current allow-destinations generation (see $StateJsonPath)" -ForegroundColor Green
 }
