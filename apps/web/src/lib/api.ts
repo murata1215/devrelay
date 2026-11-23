@@ -1467,13 +1467,22 @@ export const org = {
     return request('PUT', '/org/ip-ranges', { allowedIpRanges, force });
   },
 
-  /** 組織AIデフォルト取得（メンバー全員が閲覧可、#372）。自分がロック中かどうかも返る */
-  async getAiDefaults(): Promise<{ aiModelDefaults: OrgAiModelDefaults; canOverrideAiSettings: boolean; role: OrgRole }> {
+  /** 組織AIデフォルト取得（メンバー全員が閲覧可、#372）。自分がロック中かどうかも返る。
+   * 組織プロバイダー強制サイクル: `providerControlEnabled` が false のときはキルスイッチ OFF
+   * なので、プロバイダー側のロック表示（🔒 組織既定・disabled）を一切出してはいけない。 */
+  async getAiDefaults(): Promise<{
+    aiModelDefaults: OrgAiModelDefaults;
+    canOverrideAiSettings: boolean;
+    role: OrgRole;
+    providerControlEnabled: boolean;
+  }> {
     return request('GET', '/org/ai-defaults');
   },
 
-  /** 組織AIデフォルト設定（admin のみ、#372）。値を空文字にするとそのキーをクリアする */
-  async updateAiDefaults(aiModelDefaults: OrgAiModelDefaults): Promise<{ ok: boolean; aiModelDefaults: OrgAiModelDefaults }> {
+  /** 組織AIデフォルト設定（admin のみ、#372。プロバイダー7キーにも対応）。値を空文字にするとそのキーをクリアする */
+  async updateAiDefaults(
+    aiModelDefaults: OrgAiModelDefaults,
+  ): Promise<{ ok: boolean; aiModelDefaults: OrgAiModelDefaults; providerControlEnabled: boolean }> {
     return request('PUT', '/org/ai-defaults', { aiModelDefaults });
   },
 };

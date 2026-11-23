@@ -841,6 +841,10 @@ export function SettingsPage() {
   const [orgAiDefaults, setOrgAiDefaults] = useState<OrgAiModelDefaults>({});
   const [orgAiCanOverride, setOrgAiCanOverride] = useState(true);
   const [orgAiLoaded, setOrgAiLoaded] = useState(false);
+  // 組織プロバイダー強制サイクル: キルスイッチ（DEVRELAY_ORG_PROVIDER_DEFAULTS）の状態。
+  // false のときはプロバイダー側のロック表示（🔒 組織既定・disabled）を一切出してはいけない
+  // （実際には効いていないロックを画面が表示する嘘を防ぐ）。モデル側には影響しない。
+  const [orgProviderControlEnabled, setOrgProviderControlEnabled] = useState(true);
   // 組織デフォルト編集（admin のみ）のカスタム入力ドラフト
   const [orgModelCustomDrafts, setOrgModelCustomDrafts] = useState<Record<string, string>>({});
 
@@ -849,10 +853,12 @@ export function SettingsPage() {
       const r = await orgApi.getAiDefaults();
       setOrgAiDefaults(r.aiModelDefaults);
       setOrgAiCanOverride(r.canOverrideAiSettings);
+      setOrgProviderControlEnabled(r.providerControlEnabled);
     } catch {
       // 組織未所属（404）等はロック無しとして扱う
       setOrgAiDefaults({});
       setOrgAiCanOverride(true);
+      setOrgProviderControlEnabled(true);
     } finally {
       setOrgAiLoaded(true);
     }
@@ -863,6 +869,15 @@ export function SettingsPage() {
 
   /** 表示・編集に使う実効値（ロック中は組織既定を優先表示） */
   const effectiveModelValue = (key: string): string => (isModelKeyLocked(key) ? orgAiDefaults[key] : (data[key] || ''));
+
+  /** 指定の AI プロバイダー設定キーが組織AIデフォルトでロックされているか（組織プロバイダー強制サイクル）。
+   * キルスイッチが OFF のときは常に false（モデル側の isModelKeyLocked とは別に判定する）。 */
+  const isProviderKeyLocked = (key: string): boolean => orgProviderControlEnabled && isModelKeyLocked(key);
+
+  /** プロバイダー選択の表示・編集に使う実効値（ロック中は組織既定を優先表示、PROVIDER_OPTIONS に
+   * 無い値にならないよう常に 'none' にフォールバックする） */
+  const effectiveProviderValue = (key: string): string =>
+    (isProviderKeyLocked(key) ? orgAiDefaults[key] : data[key]) || 'none';
 
   // Bot Token 入力
   const [discordToken, setDiscordToken] = useState('');
@@ -1669,33 +1684,103 @@ export function SettingsPage() {
         )}
       </div>
 
-      {/* AI Provider Settings Section — 機能ごとのプロバイダー選択 */}
+      {/* AI Provider Settings Section — 機能ごとのプロバイダー選択 + 組織デフォルト2カラム化（組織プロバイダー強制サイクル） */}
       <div hidden={activeTab !== 'ai'} className="bg-[var(--bg-secondary)] rounded-lg p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">AI Provider Settings</h2>
-        <p className="text-[var(--text-muted)] text-sm mb-6">
+        <p className="text-[var(--text-muted)] text-sm mb-4">
           Select which AI provider to use for each feature. The corresponding API key must be configured above.
         </p>
 
-        <div className="space-y-6">
-          {PROVIDER_SELECTS.map((field) => (
-            <div key={field.key}>
-              <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
-                {field.label}
-              </label>
-              <p className="text-[var(--text-faint)] text-xs mb-2">{field.description}</p>
-              <select
-                value={data[field.key] || 'none'}
-                onChange={(e) => handleProviderChange(field.key, e.target.value)}
-                className="w-full sm:w-64 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
-              >
-                {PROVIDER_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+        {orgProviderControlEnabled && orgAiLoaded && !!orgInfo && !orgAiCanOverride && (
+          <div className="mb-6 px-3 py-2 rounded bg-[var(--bg-base)] border border-[var(--border-color)] text-xs text-[var(--text-muted)]">
+            🔒 この組織では AI プロバイダー設定が管理者によりロックされています。組織デフォルトが設定されている項目は変更できません。個別に変更を許可するよう管理者に依頼してください。
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* 左カラム: 個人設定 */}
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">個人設定</h3>
+            <div className="space-y-6">
+              {PROVIDER_SELECTS.map((field) => {
+                const locked = isProviderKeyLocked(field.key);
+                return (
+                  <div key={field.key}>
+                    <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
+                      {field.label}
+                      {locked && <span className="ml-2 text-xs text-[var(--text-faint)]">🔒 組織既定</span>}
+                    </label>
+                    <p className="text-[var(--text-faint)] text-xs mb-2">{field.description}</p>
+                    <select
+                      value={effectiveProviderValue(field.key)}
+                      disabled={locked}
+                      onChange={(e) => handleProviderChange(field.key, e.target.value)}
+                      className="w-full sm:w-64 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {PROVIDER_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
             </div>
-          ))}
+          </div>
+
+          {/* 右カラム: 組織デフォルト（組織プロバイダー強制サイクル） */}
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">組織デフォルト</h3>
+            {!orgInfo ? (
+              <p className="text-sm text-[var(--text-faint)]">組織に所属していないため、組織デフォルトは適用されません。</p>
+            ) : !orgProviderControlEnabled ? (
+              <p className="text-sm text-[var(--text-faint)]">このサーバーでは AI プロバイダーの組織強制が無効化されています（管理者向け: `DEVRELAY_ORG_PROVIDER_DEFAULTS=0`）。</p>
+            ) : orgInfo.role === 'admin' ? (
+              <>
+                <p className="text-[var(--text-faint)] text-xs mb-4">
+                  ここで設定した値が、個別許可のないメンバーの既定値になります（未設定のメンバーにも適用されます）。メンバーごとの個別許可は Enterprise タブから設定できます。
+                </p>
+                <div className="space-y-6">
+                  {PROVIDER_SELECTS.map((field) => (
+                    <div key={field.key}>
+                      <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">{field.label}</label>
+                      <select
+                        value={orgAiDefaults[field.key] || ''}
+                        onChange={(e) => handleOrgAiDefaultChange(field.key, e.target.value)}
+                        className="w-full sm:w-64 px-3 py-2 bg-[var(--input-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+                      >
+                        <option value="">(未設定) — 個人設定に従う</option>
+                        {PROVIDER_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-[var(--text-faint)] text-xs mb-4">
+                  組織管理者が設定したデフォルトです。
+                  {orgAiCanOverride ? '個別に上書きが許可されているため、左の個人設定が優先されます。' : '変更するには管理者に個別許可を依頼してください。'}
+                </p>
+                <div className="space-y-1 text-sm">
+                  {PROVIDER_SELECTS.map((field) => {
+                    const v = orgAiDefaults[field.key];
+                    return (
+                      <div key={field.key} className="flex items-center justify-between gap-4 text-[var(--text-secondary)]">
+                        <span>{field.label}</span>
+                        <span className="text-[var(--text-faint)] truncate">{v || '(未設定)'}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 

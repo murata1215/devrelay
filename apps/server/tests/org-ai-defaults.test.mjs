@@ -1,12 +1,16 @@
-// #372: 組織 AI デフォルト設定の純粋関数（apps/server/src/services/org-ai-defaults.ts）の単体テスト。
+// #372 + 組織プロバイダー強制サイクル: 組織 AI デフォルト設定の純粋関数
+// （apps/server/src/services/org-ai-defaults.ts）の単体テスト。
 // コンパイル済み dist から直接 import する（#308/#331〜#334 と同じ流儀）。
-// resolveOrgAiContext / isModelSettingLocked は prisma に依存するため対象外
+// resolveOrgAiContext / isAiSettingLocked は prisma に依存するため対象外
 // （isOrgAiDefaultKey のキー判定ロジックでロック対象/対象外の分岐は検証できる）。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isOrgAiDefaultKey,
+  isOrgAiProviderKey,
+  isValidOrgAiDefaultValue,
+  isOrgProviderControlEnabled,
   parseOrgAiDefaults,
   serializeOrgAiDefaults,
   decideEffectiveModel,
@@ -31,6 +35,72 @@ test('isOrgAiDefaultKey: モデル設定キー以外は false', () => {
   assert.equal(isOrgAiDefaultKey('theme'), false);
   assert.equal(isOrgAiDefaultKey('claude_model_planX'), false);
   assert.equal(isOrgAiDefaultKey('aider_model_plan'), false);
+});
+
+// --- isOrgAiProviderKey / isOrgAiDefaultKey（プロバイダー7キー、組織プロバイダー強制サイクル） ---
+
+test('isOrgAiProviderKey: プロバイダー7キーすべてを true と判定する', () => {
+  const keys = [
+    'build_summary_provider', 'chat_ai_provider', 'dev_report_provider',
+    'terminal_ai_provider', 'voice_assist_provider', 'org_summary_provider', 'reply_summary_provider',
+  ];
+  for (const key of keys) {
+    assert.equal(isOrgAiProviderKey(key), true, `${key} は true であるべき`);
+    assert.equal(isOrgAiDefaultKey(key), true, `${key} は isOrgAiDefaultKey でも true であるべき`);
+  }
+});
+
+test('isOrgAiProviderKey: 似ているが一致しないキーは false', () => {
+  assert.equal(isOrgAiProviderKey('foo_provider'), false);
+  assert.equal(isOrgAiProviderKey('build_summary_providerX'), false);
+  assert.equal(isOrgAiProviderKey('build_summary'), false);
+  assert.equal(isOrgAiProviderKey('claude_model_plan'), false);
+});
+
+test('isOrgAiDefaultKey: モデルキー8種・プロバイダーキー7種の既存判定は変わらない', () => {
+  assert.equal(isOrgAiDefaultKey('claude_model_plan'), true);
+  assert.equal(isOrgAiDefaultKey('language'), false);
+});
+
+// --- isValidOrgAiDefaultValue ---
+
+test('isValidOrgAiDefaultValue: プロバイダーキーは openai/anthropic/gemini/none のみ許可', () => {
+  assert.equal(isValidOrgAiDefaultValue('chat_ai_provider', 'openai'), true);
+  assert.equal(isValidOrgAiDefaultValue('chat_ai_provider', 'anthropic'), true);
+  assert.equal(isValidOrgAiDefaultValue('chat_ai_provider', 'gemini'), true);
+  assert.equal(isValidOrgAiDefaultValue('chat_ai_provider', 'none'), true);
+  assert.equal(isValidOrgAiDefaultValue('chat_ai_provider', 'gpt-4o'), false);
+  assert.equal(isValidOrgAiDefaultValue('chat_ai_provider', 'OpenAI'), false);
+  assert.equal(isValidOrgAiDefaultValue('chat_ai_provider', ''), false);
+});
+
+test('isValidOrgAiDefaultValue: モデルキーは危険文字・空白のみ拒否（enum 制限なし）', () => {
+  assert.equal(isValidOrgAiDefaultValue('claude_model_plan', 'claude-sonnet-5'), true);
+  assert.equal(isValidOrgAiDefaultValue('claude_model_plan', 'sonnet; rm -rf /'), false);
+  assert.equal(isValidOrgAiDefaultValue('claude_model_plan', 'has space'), false);
+  assert.equal(isValidOrgAiDefaultValue('claude_model_plan', 'openai'), true);
+});
+
+test('isValidOrgAiDefaultValue: trim 前提（呼び出し側が trim 済みの値を渡す想定）', () => {
+  // 末尾・先頭の空白自体が /\s/ にマッチするため、trim していない値は拒否される
+  assert.equal(isValidOrgAiDefaultValue('claude_model_plan', ' sonnet '), false);
+  assert.equal(isValidOrgAiDefaultValue('claude_model_plan', 'sonnet'), true);
+});
+
+// --- isOrgProviderControlEnabled（キルスイッチ） ---
+
+test('isOrgProviderControlEnabled: 既定（undefined）は有効', () => {
+  assert.equal(isOrgProviderControlEnabled(undefined), true);
+});
+
+test('isOrgProviderControlEnabled: "0" のときのみ無効', () => {
+  assert.equal(isOrgProviderControlEnabled('0'), false);
+});
+
+test('isOrgProviderControlEnabled: "0" 以外の値は有効のまま', () => {
+  assert.equal(isOrgProviderControlEnabled('1'), true);
+  assert.equal(isOrgProviderControlEnabled(''), true);
+  assert.equal(isOrgProviderControlEnabled('false'), true);
 });
 
 // --- parseOrgAiDefaults ---
@@ -73,6 +143,15 @@ test('parseOrgAiDefaults: 非文字列の値・空文字列の値は除外する
   assert.deepEqual(parseOrgAiDefaults(raw), { gemini_model_plan: 'ok' });
 });
 
+test('parseOrgAiDefaults: プロバイダーキーは enum 値のみ採用し、それ以外は除外する', () => {
+  const raw = JSON.stringify({
+    chat_ai_provider: 'anthropic',
+    reply_summary_provider: 'gpt-4o', // enum 外 → 除外
+    terminal_ai_provider: 'none',
+  });
+  assert.deepEqual(parseOrgAiDefaults(raw), { chat_ai_provider: 'anthropic', terminal_ai_provider: 'none' });
+});
+
 // --- serializeOrgAiDefaults ---
 
 test('serializeOrgAiDefaults: 空オブジェクトは null', () => {
@@ -90,6 +169,17 @@ test('serializeOrgAiDefaults: モデル設定キー以外は除外してシリ�
 
 test('serializeOrgAiDefaults → parseOrgAiDefaults: ラウンドトリップで一致する', () => {
   const input = { claude_model_plan: 'sonnet', devin_model_exec: 'opus' };
+  const serialized = serializeOrgAiDefaults(input);
+  assert.deepEqual(parseOrgAiDefaults(serialized), input);
+});
+
+test('serializeOrgAiDefaults: プロバイダーキーは enum 値のみシリアライズし、enum 外は除外する', () => {
+  const result = serializeOrgAiDefaults({ chat_ai_provider: 'openai', reply_summary_provider: 'gpt-4o' });
+  assert.deepEqual(JSON.parse(result), { chat_ai_provider: 'openai' });
+});
+
+test('serializeOrgAiDefaults → parseOrgAiDefaults: プロバイダーキーのラウンドトリップ', () => {
+  const input = { chat_ai_provider: 'anthropic', terminal_ai_provider: 'none' };
   const serialized = serializeOrgAiDefaults(input);
   assert.deepEqual(parseOrgAiDefaults(serialized), input);
 });

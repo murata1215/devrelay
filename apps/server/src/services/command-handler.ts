@@ -68,7 +68,7 @@ import {
 import { createLinkCode } from './platform-link.js';
 import { processMessageFilesEmbedding } from './embedding-service.js';
 import { getUserSetting, setUserSetting, SettingKeys, modelSettingKey } from './user-settings.js';
-import { resolveOrgAiContext, decideEffectiveModel, isModelSettingLocked } from './org-ai-defaults.js';
+import { resolveOrgAiContext, decideEffectiveModel, isAiSettingLocked, isOrgProviderControlEnabled, isOrgAiProviderKey } from './org-ai-defaults.js';
 import { checkCommandPermission, hasIpRestriction } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
 import { decideUpdateAction, decideUpdateFlow } from './agent-update-decision.js';
@@ -1739,8 +1739,22 @@ async function handleModelList(context: UserContext, tool?: ModelSelectableAiToo
   lines.push(`Plan: **${planModel}**${planWarning}${sourceLabel(planEffective.source)}`);
   lines.push(`Exec: **${execModel}**${execWarning}${sourceLabel(execEffective.source)}\n`);
   if (!canOverride) {
-    lines.push('⚠️ この組織では AI モデル設定が管理者によりロックされています（管理者に個別許可を依頼してください）\n');
+    lines.push('⚠️ この組織では AI モデル設定・AI プロバイダー設定が管理者によりロックされています（管理者に個別許可を依頼してください）\n');
   }
+
+  // 組織プロバイダー強制サイクル: 組織既定の AI プロバイダーがあれば一覧表示する
+  // （Discord/Telegram には画面が無く、`l` が唯一の確認手段のため）
+  if (isOrgProviderControlEnabled(process.env.DEVRELAY_ORG_PROVIDER_DEFAULTS)) {
+    const forcedProviders = Object.entries(orgDefaults).filter(([key]) => isOrgAiProviderKey(key));
+    if (forcedProviders.length > 0) {
+      lines.push('🔒 **組織既定の AI プロバイダー**（個別許可が無い場合は未設定の人にも適用されます）:');
+      for (const [key, value] of forcedProviders) {
+        lines.push(`  \`${key}\` = ${value}`);
+      }
+      lines.push('');
+    }
+  }
+
   lines.push('**候補モデル**（カタログ外の ID も指定可能）:');
   for (const m of catalog) {
     lines.push(`  \`${m.id}\` — ${m.name}（${m.description}）`);
@@ -1769,7 +1783,7 @@ async function handleModelSet(context: UserContext, target: 'both' | 'plan' | 'e
   const execKey = modelSettingKey(targetTool, 'exec');
   const keysToCheck = target === 'both' ? [planKey, execKey] : [target === 'plan' ? planKey : execKey];
   for (const key of keysToCheck) {
-    if (await isModelSettingLocked(context.userId, key)) {
+    if (await isAiSettingLocked(context.userId, key, process.env.DEVRELAY_ORG_PROVIDER_DEFAULTS)) {
       return `🔒 ${toolLabel} のモデル設定は組織管理者によりロックされています。変更するには管理者に個別許可を依頼してください。`;
     }
   }

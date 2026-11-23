@@ -26,7 +26,7 @@ import { isDebugTurnsEnabled } from '../services/debug-turns-rules.js';
 import { resolveAgentRepoUrl, isAgentRepoTokenConfigured } from '../services/agent-repo-rules.js';
 import { inFlightTurns } from '../services/in-flight-turns.js';
 import { pushSessionInfoToChat } from '../platforms/web.js';
-import { isModelSettingLocked } from '../services/org-ai-defaults.js';
+import { isAiSettingLocked, isOrgAiProviderKey, isValidOrgAiDefaultValue } from '../services/org-ai-defaults.js';
 import { getUnprocessedCounts, generateReport, generateReportHtml, type ReportContent } from '../services/dev-report-generator.js';
 import { canViewMemberHistory, recordSupervisionAudit } from '../services/org-control.js';
 import { isCrossTeamEnabled, isCrossTeamChatEnabled, isCrossAskIsolationEnabled, isCrossAskResumeEnabled, isCrossAskResetEnabled, isPlanGateCapabilityCheckEnabled } from '../services/cross-team-guard.js';
@@ -1171,8 +1171,14 @@ export async function apiRoutes(app: FastifyInstance) {
       }
     }
 
-    // #372: 組織AIデフォルトでロックされているモデル設定キーは変更を拒否する
-    if (await isModelSettingLocked(userId, key)) {
+    // 組織プロバイダー強制サイクル: AI プロバイダー設定キーは enum 値のみ許可する
+    // （既存バグ修正: 不正な値を保存すると機能が黙って止まっていた）
+    if (isOrgAiProviderKey(key) && !isValidOrgAiDefaultValue(key, value.trim())) {
+      return reply.status(400).send({ error: `${key} には openai / anthropic / gemini / none のいずれかを指定してください` });
+    }
+
+    // #372: 組織AIデフォルトでロックされているモデル設定キー・AI プロバイダー設定キーは変更を拒否する
+    if (await isAiSettingLocked(userId, key, process.env.DEVRELAY_ORG_PROVIDER_DEFAULTS)) {
       return reply.status(403).send({ error: 'この設定は組織管理者によりロックされています' });
     }
 
@@ -1195,10 +1201,10 @@ export async function apiRoutes(app: FastifyInstance) {
     const userId = request.user.id;
     const { key } = request.params as { key: string };
 
-    // #372: 組織AIデフォルトでロックされているモデル設定キーは削除も拒否する
+    // #372: 組織AIデフォルトでロックされているモデル設定キー・AI プロバイダー設定キーは削除も拒否する
     // （削除すると undefined になり decideEffectiveModel の org フォールバックは効くが、
     //  ロック中に個人操作を受理したように見せない明示拒否のほうが挙動が分かりやすいため）
-    if (await isModelSettingLocked(userId, key)) {
+    if (await isAiSettingLocked(userId, key, process.env.DEVRELAY_ORG_PROVIDER_DEFAULTS)) {
       return reply.status(403).send({ error: 'この設定は組織管理者によりロックされています' });
     }
 

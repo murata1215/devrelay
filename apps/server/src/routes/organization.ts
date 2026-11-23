@@ -12,8 +12,14 @@ import {
   clearIpRangeCache,
 } from '../services/org-control.js';
 import { summarizeSessionActivity } from '../services/conversation-summarizer.js';
-import { parseOrgAiDefaults, serializeOrgAiDefaults, isOrgAiDefaultKey } from '../services/org-ai-defaults.js';
-import { isUnsafeModelId } from '@devrelay/shared';
+import {
+  parseOrgAiDefaults,
+  serializeOrgAiDefaults,
+  isOrgAiDefaultKey,
+  isOrgAiProviderKey,
+  isValidOrgAiDefaultValue,
+  isOrgProviderControlEnabled,
+} from '../services/org-ai-defaults.js';
 
 /**
  * エンタープライズモード（組織）API。
@@ -365,12 +371,18 @@ export async function organizationRoutes(app: FastifyInstance) {
       aiModelDefaults: parseOrgAiDefaults(membership.organization.aiModelDefaults),
       canOverrideAiSettings: membership.role === 'admin' || membership.canOverrideAiSettings,
       role: membership.role,
+      // 組織プロバイダー強制サイクル: キルスイッチが OFF のとき、WebUI はプロバイダー側の
+      // ロック表示（🔒 組織既定・disabled）を一切出してはいけない（実際には効いていない
+      // ロックを表示する UI の嘘を防ぐ）。モデル側のロックは本フラグの影響を受けない。
+      providerControlEnabled: isOrgProviderControlEnabled(process.env.DEVRELAY_ORG_PROVIDER_DEFAULTS),
     };
   });
 
   // ========================================
-  // PUT /api/org/ai-defaults — 組織AIデフォルト設定（admin のみ、#372）
-  // body: { aiModelDefaults: Record<string, string> }（キーは <tool>_model_<plan|exec> の8種、値は空文字でクリア）
+  // PUT /api/org/ai-defaults — 組織AIデフォルト設定（admin のみ、#372。
+  // 組織プロバイダー強制サイクルで AI プロバイダー設定キー 7 種にも対応）
+  // body: { aiModelDefaults: Record<string, string> }
+  // （キーは <tool>_model_<plan|exec> の8種 + <feature>_provider の7種、値は空文字でクリア）
   // ========================================
   app.put('/api/org/ai-defaults', async (request, reply) => {
     // @ts-ignore
@@ -384,28 +396,45 @@ export async function organizationRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'aiModelDefaults はオブジェクトで指定してください' });
     }
 
+    const providerControlEnabled = isOrgProviderControlEnabled(process.env.DEVRELAY_ORG_PROVIDER_DEFAULTS);
+    // キルスイッチ OFF 時に備え、既存のプロバイダー既定値を保持しておく（下记参照）
+    const existingDefaults = parseOrgAiDefaults(membership.organization.aiModelDefaults);
+
     const map: Record<string, string> = {};
     for (const [key, value] of Object.entries(raw)) {
       if (!isOrgAiDefaultKey(key)) {
         return reply.status(400).send({ error: `不正な設定キーです: ${key}` });
       }
+      // キルスイッチ OFF 時はプロバイダーキーの変更を黙って無視し、既存値をそのまま保持する。
+      // WebUI の組織デフォルト編集はマップ全体を再送するため、ここで 400 にすると
+      // 管理者のモデル既定編集そのものが失敗してしまう（UI をブリックしない）。
+      if (isOrgAiProviderKey(key) && !providerControlEnabled) {
+        const existingValue = existingDefaults[key];
+        if (existingValue) map[key] = existingValue;
+        continue;
+      }
       // 空文字・null・undefined はそのキーを未設定（クリア）にする
       if (value === '' || value === null || value === undefined) continue;
       if (typeof value !== 'string') {
-        return reply.status(400).send({ error: `モデル ID は文字列で指定してください: ${key}` });
+        return reply.status(400).send({ error: `値は文字列で指定してください: ${key}` });
       }
-      if (isUnsafeModelId(value)) {
-        return reply.status(400).send({ error: `モデル ID に使用できない文字が含まれています: ${key}` });
+      const trimmed = value.trim();
+      if (!isValidOrgAiDefaultValue(key, trimmed)) {
+        const hint = isOrgAiProviderKey(key) ? 'openai / anthropic / gemini / none のいずれか' : '使用できない文字を含まない値';
+        return reply.status(400).send({ error: `${key} には${hint}を指定してください` });
       }
-      map[key] = value.trim();
+      map[key] = trimmed;
     }
+
+    // 監査: 誰がどのキーをどう変えたか（DB 変更なしの縛りのため console.log のみ）
+    console.log(`🔧 組織AIデフォルト更新: org=${membership.organizationId} by user=${userId} keys=${Object.keys(map).join(',')}`);
 
     await prisma.organization.update({
       where: { id: membership.organizationId },
       data: { aiModelDefaults: serializeOrgAiDefaults(map) },
     });
 
-    return { ok: true, aiModelDefaults: map };
+    return { ok: true, aiModelDefaults: map, providerControlEnabled };
   });
 
   // ========================================

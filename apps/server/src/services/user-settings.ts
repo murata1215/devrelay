@@ -9,7 +9,7 @@ import { prisma } from '../db/client.js';
 import crypto from 'crypto';
 import type { AiProvider, ModelSelectableAiTool, Language } from '@devrelay/shared';
 import { isLanguage, DEFAULT_CHAT_LANGUAGE } from '@devrelay/shared';
-import { resolveOrgAiContext, decideEffectiveModel } from './org-ai-defaults.js';
+import { resolveOrgAiContext, decideEffectiveModel, isOrgProviderControlEnabled } from './org-ai-defaults.js';
 
 // 設定キーの定義
 export const SettingKeys = {
@@ -241,6 +241,41 @@ export async function resolveModelForTool(
 }
 
 /**
+ * AI プロバイダー設定キー（`*_provider`）の実効値を解決する（組織プロバイダー強制サイクル）。
+ * `resolveModelForTool` と同じ形：個人設定・組織既定・上書き許可フラグから単一の実効値を返す。
+ *
+ * `DEVRELAY_ORG_PROVIDER_DEFAULTS` キルスイッチ（既定で有効）が無効（'0'）のときは
+ * 組織既定を一切考慮せず、個人設定の生値のみを返す（source は常に 'user'。モデル強制には
+ * このキルスイッチは影響しない＝`resolveModelForTool` は無改造）。
+ *
+ * `decideEffectiveModel` の戻り値 `string | undefined` は `null` に正規化する
+ * （呼び出し元7関数の既存の `as AiProvider | null` 分岐と型を一致させるため）。
+ */
+export async function resolveProviderSetting(
+  userId: string,
+  key: SettingKey,
+): Promise<{ value: string | null; source: import('./org-ai-defaults.js').EffectiveModelSource }> {
+  const userValue = (await getUserSetting(userId, key)) || undefined;
+  if (!isOrgProviderControlEnabled(process.env.DEVRELAY_ORG_PROVIDER_DEFAULTS)) {
+    return { value: userValue ?? null, source: 'user' };
+  }
+  const { orgDefaults, canOverride } = await resolveOrgAiContext(userId);
+  const { value, source } = decideEffectiveModel({ userValue, orgDefault: orgDefaults[key], canOverride });
+  return { value: value ?? null, source };
+}
+
+/**
+ * 組織既定のプロバイダーが選ばれているが、本人（または環境変数）に該当する API キーが
+ * 無く機能が停止したときの警告ログ（`source === 'org'` のときだけ呼ぶ）。
+ * 鍵の材料は出さない。Discord/Telegram 等では画面表示が無いため、原因追跡の唯一の手段。
+ */
+function warnOrgProviderKeyMissing(userId: string, key: string, provider: AiProvider): void {
+  console.warn(
+    `⚠️ 組織既定の AI プロバイダー（${key}=${provider}）が有効ですが、ユーザー ${userId} の API キーが見つからないため機能が停止します`,
+  );
+}
+
+/**
  * ユーザーの全設定を取得
  */
 export async function getAllUserSettings(userId: string): Promise<Record<string, string>> {
@@ -340,11 +375,15 @@ export async function getApiKeyForProvider(userId: string, provider: AiProvider)
  * @returns { provider, apiKey } のペア。使用不可の場合は null
  */
 export async function getApiKeyForBuildSummary(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
-  const provider = (await getUserSetting(userId, SettingKeys.BUILD_SUMMARY_PROVIDER) || 'none') as AiProvider;
+  const { value, source } = await resolveProviderSetting(userId, SettingKeys.BUILD_SUMMARY_PROVIDER);
+  const provider = (value || 'none') as AiProvider;
   if (provider === 'none') return null;
 
   const apiKey = await getApiKeyForProvider(userId, provider);
-  if (!apiKey) return null;
+  if (!apiKey) {
+    if (source === 'org') warnOrgProviderKeyMissing(userId, SettingKeys.BUILD_SUMMARY_PROVIDER, provider);
+    return null;
+  }
 
   return { provider, apiKey };
 }
@@ -359,10 +398,12 @@ export async function getApiKeyForBuildSummary(userId: string): Promise<{ provid
  */
 export async function getApiKeyForOrgSummary(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
   // まず ORG_SUMMARY_PROVIDER を確認
-  const orgProvider = (await getUserSetting(userId, SettingKeys.ORG_SUMMARY_PROVIDER) || 'none') as AiProvider;
+  const { value, source } = await resolveProviderSetting(userId, SettingKeys.ORG_SUMMARY_PROVIDER);
+  const orgProvider = (value || 'none') as AiProvider;
   if (orgProvider !== 'none') {
     const apiKey = await getApiKeyForProvider(userId, orgProvider);
     if (apiKey) return { provider: orgProvider, apiKey };
+    if (source === 'org') warnOrgProviderKeyMissing(userId, SettingKeys.ORG_SUMMARY_PROVIDER, orgProvider);
     return null;
   }
   // フォールバック: BuildLog 要約の設定を流用
@@ -380,10 +421,12 @@ export async function getApiKeyForOrgSummary(userId: string): Promise<{ provider
  * @returns { provider, apiKey } のペア。使用不可の場合は null
  */
 export async function getApiKeyForReplySummary(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
-  const summaryProvider = (await getUserSetting(userId, SettingKeys.REPLY_SUMMARY_PROVIDER) || 'none') as AiProvider;
+  const { value, source } = await resolveProviderSetting(userId, SettingKeys.REPLY_SUMMARY_PROVIDER);
+  const summaryProvider = (value || 'none') as AiProvider;
   if (summaryProvider !== 'none') {
     const apiKey = await getApiKeyForProvider(userId, summaryProvider);
     if (apiKey) return { provider: summaryProvider, apiKey };
+    if (source === 'org') warnOrgProviderKeyMissing(userId, SettingKeys.REPLY_SUMMARY_PROVIDER, summaryProvider);
     return null;
   }
   // フォールバック: Build Summary の設定を流用
@@ -397,11 +440,15 @@ export async function getApiKeyForReplySummary(userId: string): Promise<{ provid
  * @returns { provider, apiKey } のペア。使用不可の場合は null
  */
 export async function getApiKeyForDevReport(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
-  const provider = (await getUserSetting(userId, SettingKeys.DEV_REPORT_PROVIDER) || 'none') as AiProvider;
+  const { value, source } = await resolveProviderSetting(userId, SettingKeys.DEV_REPORT_PROVIDER);
+  const provider = (value || 'none') as AiProvider;
   if (provider === 'none') return null;
 
   const apiKey = await getApiKeyForProvider(userId, provider);
-  if (!apiKey) return null;
+  if (!apiKey) {
+    if (source === 'org') warnOrgProviderKeyMissing(userId, SettingKeys.DEV_REPORT_PROVIDER, provider);
+    return null;
+  }
 
   return { provider, apiKey };
 }
@@ -414,12 +461,14 @@ export async function getApiKeyForDevReport(userId: string): Promise<{ provider:
  * @returns { provider, apiKey } のペア。使用不可の場合は null
  */
 export async function getApiKeyForChatAi(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
-  const provider = await getUserSetting(userId, SettingKeys.CHAT_AI_PROVIDER) as AiProvider | null;
+  const { value, source } = await resolveProviderSetting(userId, SettingKeys.CHAT_AI_PROVIDER);
+  const provider = value as AiProvider | null;
 
-  // CHAT_AI_PROVIDER が明示設定されている場合
+  // CHAT_AI_PROVIDER が明示設定されている場合（組織既定で強制されている場合を含む）
   if (provider && provider !== 'none') {
     const apiKey = await getApiKeyForProvider(userId, provider);
     if (apiKey) return { provider, apiKey };
+    if (source === 'org') warnOrgProviderKeyMissing(userId, SettingKeys.CHAT_AI_PROVIDER, provider);
     return null;
   }
 
@@ -440,12 +489,14 @@ export async function getApiKeyForChatAi(userId: string): Promise<{ provider: Ai
  * @returns { provider, apiKey } のペア。使用不可の場合は null
  */
 export async function getApiKeyForTerminalAi(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
-  const provider = await getUserSetting(userId, SettingKeys.TERMINAL_AI_PROVIDER) as AiProvider | null;
+  const { value, source } = await resolveProviderSetting(userId, SettingKeys.TERMINAL_AI_PROVIDER);
+  const provider = value as AiProvider | null;
 
-  // TERMINAL_AI_PROVIDER が明示設定されている場合
+  // TERMINAL_AI_PROVIDER が明示設定されている場合（組織既定で強制されている場合を含む）
   if (provider && provider !== 'none') {
     const apiKey = await getApiKeyForProvider(userId, provider);
     if (apiKey) return { provider, apiKey };
+    if (source === 'org') warnOrgProviderKeyMissing(userId, SettingKeys.TERMINAL_AI_PROVIDER, provider);
     return null;
   }
 
@@ -508,11 +559,13 @@ export async function resolveSessionLanguage(sessionId: string): Promise<Languag
  * 未設定の場合は OpenAI → Anthropic の順でフォールバック
  */
 export async function getApiKeyForVoiceAssist(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
-  const provider = await getUserSetting(userId, SettingKeys.VOICE_ASSIST_PROVIDER) as AiProvider | null;
+  const { value, source } = await resolveProviderSetting(userId, SettingKeys.VOICE_ASSIST_PROVIDER);
+  const provider = value as AiProvider | null;
 
   if (provider && provider !== 'none') {
     const apiKey = await getApiKeyForProvider(userId, provider);
     if (apiKey) return { provider, apiKey };
+    if (source === 'org') warnOrgProviderKeyMissing(userId, SettingKeys.VOICE_ASSIST_PROVIDER, provider);
     return null;
   }
 
