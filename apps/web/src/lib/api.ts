@@ -782,6 +782,9 @@ export interface SessionMessage {
   /** クロスタブ専用: resume が成立した世代番号（`crossask-<base>-g<N>` の N）。
    *  通常スレッドのメッセージ、または resume 未成立のクロスメッセージには付かない。 */
   generation?: number;
+  /** AI 回答契約サイクル（2026-11-23）: AI が「詳細」を分けて書いた場合の詳細ページ URL
+   *  （ログイン不要・新しいタブで開く。無ければ undefined/null＝詳細なし/機能OFF）。 */
+  shareUrl?: string | null;
 }
 
 export const sessions = {

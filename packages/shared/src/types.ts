@@ -1198,7 +1198,7 @@ export type WebClientMessage =
  * apps/web/src/hooks/useWebSocket.ts 側で独自に再宣言されていた型ドリフトを解消）
  */
 export type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string; sessionId?: string; messageId?: string } }
+  | { type: 'web:response'; payload: { message: string; files?: FileAttachment[]; projectId?: string; sessionId?: string; messageId?: string; shareUrl?: string } }
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string; sessionId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string; title?: string; agentScopeId?: string } }
   | { type: 'web:user_message'; payload: { content: string; files?: FileAttachment[]; projectId?: string; sessionId?: string; messageId?: string } }

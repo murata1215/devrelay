@@ -18,6 +18,8 @@ import { buildSessionInfoPayload, sortThreadsDesc } from '../services/thread-rou
 import { buildEphemeralSessionIdExclusion } from '../services/thread-scope.js';
 import { buildEmptyEndedThreadExclusion, isHideEmptyEndedEnabled } from '../services/thread-list-filter.js';
 import { stripAiNoise, pickFirstLabelUserMessage } from '../services/thread-label-source.js';
+import { resolveStoredDeliveryContent } from '../services/response-split.js';
+import { buildShareSuffix } from '../services/response-share-rules.js';
 import { isThreadAutoTitleEnabled } from '../services/thread-auto-title-rules.js';
 import { isConversationRailEnabled, resolveRunning } from '../services/thread-activity.js';
 import { isDebugTurnsEnabled } from '../services/debug-turns-rules.js';
@@ -103,6 +105,23 @@ type SessionWithRelations = Session & {
   project: { name: string };
   machine: { name: string; displayName: string | null };
 };
+
+/**
+ * AI 回答契約サイクル（2026-11-23 第3版）: メッセージ履歴 API（`GET /api/sessions/:id/messages` 等）の
+ * 1 行を、AI 応答なら「人間向け本文 + 詳細ページへの案内行」に変換する。user/system 行はそのまま返す
+ * （split 対象は role==='ai' のみ。履歴なので新規トークン発行・新規要約は行わない＝
+ * `resolveStoredDeliveryContent`）。
+ *
+ * リンクは本文に markdown 形式で埋め込む（`shareUrl` フィールドだけに頼ると、そのフィールドを
+ * 知らないクライアント（モバイルアプリ等）でリンクが消えてしまう事故が実機で発覚したため）。
+ * `shareUrl` フィールド自体も互換のため引き続き返す。
+ */
+function applyResponseSplitForHistoryRow(m: { role: string; content: string; summary: string | null; shareToken: string | null; shareExpiresAt: Date | null }): { content: string; shareUrl: string | null } {
+  if (m.role !== 'ai') return { content: m.content, shareUrl: null };
+  const delivery = resolveStoredDeliveryContent({ content: m.content, summary: m.summary, shareToken: m.shareToken, shareExpiresAt: m.shareExpiresAt });
+  const content = delivery.shareUrl ? delivery.chatText + buildShareSuffix('markdown', delivery.shareUrl, delivery.ttlDays ?? 0) : delivery.chatText;
+  return { content, shareUrl: delivery.shareUrl };
+}
 
 export async function apiRoutes(app: FastifyInstance) {
   // すべてのルートに認証を適用
@@ -913,6 +932,9 @@ export async function apiRoutes(app: FastifyInstance) {
         content: true,
         createdAt: true,
         sourceProjectName: true,
+        summary: true,
+        shareToken: true,
+        shareExpiresAt: true,
         files: {
           select: { id: true, filename: true, mimeType: true, size: true, direction: true },
         },
@@ -927,14 +949,18 @@ export async function apiRoutes(app: FastifyInstance) {
 
     reply.header('Cache-Control', 'no-store');
     return reply.send({
-      messages: result.map(m => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        createdAt: m.createdAt.toISOString(),
-        files: m.files,
-        sourceProjectName: m.sourceProjectName ?? undefined,
-      })),
+      messages: result.map(m => {
+        const split = applyResponseSplitForHistoryRow(m);
+        return {
+          id: m.id,
+          role: m.role,
+          content: split.content,
+          shareUrl: split.shareUrl,
+          createdAt: m.createdAt.toISOString(),
+          files: m.files,
+          sourceProjectName: m.sourceProjectName ?? undefined,
+        };
+      }),
       hasMore,
     });
   });
@@ -1079,6 +1105,15 @@ export async function apiRoutes(app: FastifyInstance) {
     // manager.devrelay.io へのログイン後リダイレクト設定も同様に文字列 'true'/'false' のみ許可する
     if (key === SettingKeys.MANAGER_REDIRECT && value !== 'true' && value !== 'false') {
       return reply.status(400).send({ error: 'managerRedirect must be true or false' });
+    }
+
+    // 応答の書式サイクル: 共有リンクの保存期間（日数）は 1〜365 の整数文字列のみ許可する
+    // （不正値は resolveShareTtlDays() 側でも既定値にフォールバックするが、保存時点で弾いておく）
+    if (key === SettingKeys.RESPONSE_SHARE_TTL_DAYS) {
+      const n = Number.parseInt(value, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 365 || String(n) !== value.trim()) {
+        return reply.status(400).send({ error: 'response_share_ttl_days must be an integer between 1 and 365' });
+      }
     }
 
     // #372: 組織AIデフォルトでロックされているモデル設定キーは変更を拒否する
@@ -1710,6 +1745,9 @@ export async function apiRoutes(app: FastifyInstance) {
         role: true,
         content: true,
         createdAt: true,
+        summary: true,
+        shareToken: true,
+        shareExpiresAt: true,
         files: {
           select: { id: true, filename: true, mimeType: true, size: true, direction: true },
         },
@@ -1723,13 +1761,17 @@ export async function apiRoutes(app: FastifyInstance) {
     result.reverse();
 
     return reply.send({
-      messages: result.map(m => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        createdAt: m.createdAt.toISOString(),
-        files: m.files,
-      })),
+      messages: result.map(m => {
+        const split = applyResponseSplitForHistoryRow(m);
+        return {
+          id: m.id,
+          role: m.role,
+          content: split.content,
+          shareUrl: split.shareUrl,
+          createdAt: m.createdAt.toISOString(),
+          files: m.files,
+        };
+      }),
       hasMore,
     });
   });
@@ -3696,6 +3738,9 @@ export async function apiRoutes(app: FastifyInstance) {
         content: true,
         createdAt: true,
         sourceProjectName: true,
+        summary: true,
+        shareToken: true,
+        shareExpiresAt: true,
         session: { select: { agentScopeId: true } },
         files: {
           select: { id: true, filename: true, mimeType: true, size: true, direction: true },
@@ -3713,10 +3758,12 @@ export async function apiRoutes(app: FastifyInstance) {
     return reply.send({
       messages: result.map(m => {
         const generation = parseCrossAskScopeGeneration(m.session.agentScopeId ?? '', scopeIdBase);
+        const split = applyResponseSplitForHistoryRow(m);
         return {
           id: m.id,
           role: m.role,
-          content: m.content,
+          content: split.content,
+          shareUrl: split.shareUrl,
           createdAt: m.createdAt.toISOString(),
           files: m.files,
           sourceProjectName: m.sourceProjectName ?? undefined,

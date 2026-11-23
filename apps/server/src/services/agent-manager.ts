@@ -50,6 +50,7 @@ import { buildToolApprovalPromptPayload, type ToolApprovalPromptPayloadWithSessi
 import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
 import { buildBacklogPromptLine } from './backlog.js';
+import { isBriefReplyEnabled, shouldPrependBriefReplyLine, BRIEF_REPLY_PROMPT_LINE } from './brief-reply-rules.js';
 import { pickAvailableAiTool } from './ai-tool-availability.js';
 import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
 import OpenAI from 'openai';
@@ -1577,13 +1578,24 @@ export async function sendPromptToAgent(
   // #332: permissionPolicy 未指定時は 'interactive' に解決して常に明示値を送る
   const resolvedPermissionPolicy = permissionPolicy ?? 'interactive';
 
+  let promptToSend = prompt;
+
+  // 応答の書式サイクル（2026-11-23）: チャット本文を短く・結論先出しにするための暫定前置き
+  // （サーバー側、Agent 更新 `u` 不要）。terminalMode / クロスユーザー ask（statePolicy あり）/
+  // 引継ぎターンには付けない。既定 ON（DEVRELAY_BRIEF_REPLY=0 で無効化）。
+  if (
+    isBriefReplyEnabled(process.env.DEVRELAY_BRIEF_REPLY) &&
+    shouldPrependBriefReplyLine({ terminalMode, hasStatePolicy: !!scopeOptions?.statePolicy, handoverTurn: !!scopeOptions?.handoverTurn })
+  ) {
+    promptToSend = `${BRIEF_REPLY_PROMPT_LINE}\n\n${promptToSend}`;
+  }
+
   // Backlog 連携（2026-11-21）: スレッドの案件が課題キーなら、AI に「このスレッドの課題」を 1 行で知らせる。
   // クロスユーザー ask（statePolicy あり）と引継ぎターンには付けない。失敗しても送信は続ける。
-  let promptToSend = prompt;
   // 端末モード（PTY へ打ち込む）にも付けない。
   if (backlogUsageCase && !terminalMode && !scopeOptions?.statePolicy && !scopeOptions?.handoverTurn) {
     const line = await buildBacklogPromptLine(userId, backlogUsageCase).catch(() => null);
-    if (line) promptToSend = `${line}\n\n${prompt}`;
+    if (line) promptToSend = `${line}\n\n${promptToSend}`;
   }
 
   // サイクル3.1: 実行中ターン台帳に登録。解除は handleAiOutput(isComplete) / handleAiCancelled /

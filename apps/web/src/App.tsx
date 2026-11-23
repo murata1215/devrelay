@@ -24,6 +24,7 @@ import { PortalPage } from './pages/PortalPage';
 import { PortalDocsPage } from './pages/PortalDocsPage';
 import { UsagePage } from './pages/UsagePage';
 import { UsageSignagePage } from './pages/UsageSignagePage';
+import { ResponseSharePage } from './pages/ResponseSharePage';
 import { NotificationBanner } from './components/NotificationBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { resolveNextTarget, redirectToManager } from './lib/managerRedirect';
@@ -182,6 +183,16 @@ function AppRoutes() {
         element={
           <ErrorBoundary>
             <UsageSignagePage />
+          </ErrorBoundary>
+        }
+      />
+      {/* 応答の書式サイクル: AI 応答の公開共有リンク（ログイン不要）。ProtectedContent の外に置き、
+          ヘッダー・ChatPage の WebSocket を持たない全画面表示にする（UsageSignagePage と同じ理由） */}
+      <Route
+        path="/s/:token"
+        element={
+          <ErrorBoundary>
+            <ResponseSharePage />
           </ErrorBoundary>
         }
       />

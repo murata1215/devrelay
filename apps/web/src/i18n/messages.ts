@@ -114,6 +114,12 @@ export const messages = {
   'settings.managerRedirect.description': { en: 'When enabled, you will be redirected to the Manager app automatically right after signing in.', ja: '有効にすると、ログイン成功直後に自動的に Manager アプリへ遷移します。' },
   'settings.managerRedirect.saved': { en: 'Saved', ja: '保存しました' },
   'settings.managerRedirect.saveFailed': { en: 'Failed to save this setting', ja: 'この設定の保存に失敗しました' },
+  'settings.shareTtl.title': { en: 'Share link expiry (Discord/Telegram)', ja: '共有リンクの保存期間（Discord/Telegram）' },
+  'settings.shareTtl.description': { en: 'How many days the public "full text" link attached to Discord/Telegram replies stays valid. Leave blank to use the organization default.', ja: 'Discord/Telegram の返信に添える「全文はこちら」公開リンクを何日間有効にするか。空にすると組織の既定値を使います。' },
+  'settings.shareTtl.placeholder': { en: '30 (default)', ja: '30（既定）' },
+  'settings.shareTtl.unit': { en: 'days', ja: '日間' },
+  'settings.shareTtl.saved': { en: 'Saved', ja: '保存しました' },
+  'settings.shareTtl.saveFailed': { en: 'Failed to save this setting', ja: 'この設定の保存に失敗しました' },
   'settings.title': { en: 'Settings', ja: '設定' },
   'settings.tabs.general': { en: 'General', ja: '一般' },
   'settings.tabs.ai': { en: 'AI', ja: 'AI' },
@@ -159,6 +165,7 @@ export const messages = {
   'chat.connected': { en: 'Connected', ja: '接続中' },
   'chat.disconnected': { en: 'Disconnected...', ja: '切断中...' },
   'chat.processing': { en: 'Processing...', ja: '処理中...' },
+  'chat.detailLink': { en: 'View details', ja: '詳細を見る' },
   // 2026-09-30: 進捗表示の停止ボタン（ProgressIndicator）。confirm は誤クリック防止の2回目確認、
   // requesting は送信済みで応答待ち、stalled は45秒待っても応答が無い場合の再試行案内。
   'chat.stop': { en: 'Stop', ja: '停止' },

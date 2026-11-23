@@ -32,6 +32,8 @@ import { startAccessLogAggregator } from './services/sites/access-aggregator.js'
 import { mcpRoutes } from './mcp/server.js';
 import { initProxyDispatcher } from './services/proxy-dispatcher.js';
 import { warnOnPendingDbChanges, computeDbChangeStatus } from './services/db-change-index.js';
+import { responseShareRoutes } from './routes/response-share-api.js';
+import { cleanupExpiredShareTokens } from './services/response-share.js';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -86,6 +88,27 @@ function startExpiredSessionCleanup() {
   // 起動時に1回実行（await しない fire-and-forget）
   void runCleanup();
   // 以降24時間間隔で実行。unref でプロセス終了を妨げない
+  const timer = setInterval(() => void runCleanup(), 24 * 60 * 60 * 1000);
+  timer.unref();
+}
+
+/**
+ * 応答の書式サイクル: 期限切れの共有トークンを定期的に無効化する（`shareToken`/`shareExpiresAt`
+ * を null に戻すだけで `Message.content` 本体には触れない）。
+ * `startExpiredSessionCleanup()` と同じ流儀（起動直後に1回 + 以降24時間間隔、失敗は握りつぶす）。
+ */
+function startExpiredShareTokenCleanup() {
+  const runCleanup = async () => {
+    try {
+      const count = await cleanupExpiredShareTokens();
+      if (count > 0) {
+        console.log(`🧹 Invalidated ${count} expired response share token(s)`);
+      }
+    } catch (err) {
+      console.error('⚠️  Expired share token cleanup failed:', err);
+    }
+  };
+  void runCleanup();
   const timer = setInterval(() => void runCleanup(), 24 * 60 * 60 * 1000);
   timer.unref();
 }
@@ -236,6 +259,7 @@ async function main() {
   await app.register(knowledgeAdminApiRoutes);  // 高辻ナレッジ サイクル2: 人の権限・案件/スレッドの機密度・スレッド閲覧 API
   await app.register(usageApiRoutes);  // Usage: 人別・グループ別・案件別のコスト集計（ログイン必須）
   await app.register(usagePublicRoutes);  // Usage: サイネージ用（ログイン不要・token 必須・1分キャッシュ）
+  await app.register(responseShareRoutes);  // 応答の書式サイクル: AI 応答の公開共有リンク（ログイン不要・token 必須・1分キャッシュ・既定OFF）
   await app.register(portalPublicRoutes);  // ポータル P1: DEVRELAY_PORTAL_DIR の PDF・ニュース・全体課題（ログイン不要）
   await app.register(portalTodoRoutes);  // ポータル P1: 自分の TODO（ログイン必須）
   await app.register(backlogUserRoutes);  // Backlog 連携: 設定・課題一覧・状態表示（ログイン必須）
@@ -260,6 +284,9 @@ async function main() {
 
   // 期限切れ AuthSession の定期クリーンアップ（起動時 + 24時間間隔）
   startExpiredSessionCleanup();
+
+  // 応答の書式サイクル: 期限切れの共有トークンの定期クリーンアップ（起動時 + 24時間間隔）
+  startExpiredShareTokenCleanup();
 
   // Start server
   try {

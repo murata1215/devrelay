@@ -9,7 +9,7 @@ import { appendMessage, mergeHistory } from '../dist-test/lib/lite-message-log.j
 describe('lite-message-log: appendMessage', () => {
   test('ログが空なら重複排除を一切かけずに追加する', () => {
     const result = appendMessage([], { role: 'user', content: 'hello' }, 1000);
-    assert.deepEqual(result, [{ role: 'user', content: 'hello', timestampMs: 1000, messageId: undefined }]);
+    assert.deepEqual(result, [{ role: 'user', content: 'hello', timestampMs: 1000, messageId: undefined, shareUrl: undefined }]);
   });
 
   test('messageId が一致する行があれば追加せず既存の log 参照をそのまま返す（配列全体を走査）', () => {

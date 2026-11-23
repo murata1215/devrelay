@@ -265,7 +265,7 @@ export function LitePage() {
   }, []);
 
   const handleMessage = useCallback(
-    (msg: { role: 'user' | 'system' | 'ai'; content: string; messageId?: string }, projectId?: string, sessionId?: string) => {
+    (msg: { role: 'user' | 'system' | 'ai'; content: string; messageId?: string; shareUrl?: string }, projectId?: string, sessionId?: string) => {
       // L4.1 項目2: 選択中スレッド以外宛のメッセージでも一覧の lastActiveAt/タイトルは変わりうるため、
       // 表示可否の判定（decideInboundDisplay の early-return）より前で一覧再取得を要求する。
       requestThreadRefresh();
@@ -276,7 +276,7 @@ export function LitePage() {
         tabProjectId: viewRef.current.projectId,
       });
       if (!decision.display) return;
-      setMessages((prev) => appendMessage(prev, { role: msg.role, content: msg.content, messageId: msg.messageId }, Date.now()));
+      setMessages((prev) => appendMessage(prev, { role: msg.role, content: msg.content, messageId: msg.messageId, shareUrl: msg.shareUrl }, Date.now()));
     },
     [requestThreadRefresh]
   );
@@ -392,6 +392,7 @@ export function LitePage() {
           content: m.content,
           timestampMs: Date.parse(m.createdAt),
           messageId: m.id,
+          shareUrl: m.shareUrl ?? undefined,
         }));
         const mode = isSameSession ? 'refresh' : 'replace';
         setMessages((prev) => mergeHistory(prev, normalized, mode, Date.now()));

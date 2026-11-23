@@ -30,6 +30,8 @@ import { decideProgressTimeoutAction } from './progress-timeout.js';
 import { resolveProgressRecipients } from './progress-recipients.js';
 import { shouldShowCancelHint } from './progress-cancel-hint.js';
 import { isEphemeralSessionId, decideNewSessionScopeId, resolveOutboundAgentScopeId, inheritScopeForReestablishedSession } from './thread-scope.js';
+import { buildShareSuffix } from './response-share-rules.js';
+import { resolveLiveDeliveryContent } from './response-split.js';
 import { resolveChatSessionId } from './thread-routing.js';
 import { inFlightTurns } from './in-flight-turns.js';
 import { isUpdateBusyGuardEnabled } from './update-busy-rules.js';
@@ -783,6 +785,27 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       messageToSend = tracker.contextInfo + finalMessage;
     }
 
+    // AI 回答契約サイクル（2026-11-23 第3版）: AI が境界行で区切った「詳細」（境界行が無ければ
+    // 個人の AI プロバイダー設定で生成した要約）を、WebUI・Discord・Telegram 共通で詳細ページへ
+    // 切り出す（プラットフォームでの出し分けはしない。詳細の有無だけで決まる）。chatText は
+    // 人間向け本文、shareUrl は詳細ページの URL。push/FCM/通知も chatText を使う（🔧 等の進捗
+    // ノイズが混じらない・詳細の技術情報で埋まらない）。
+    const delivery = await resolveLiveDeliveryContent(messageToSend, sessionId, messageId);
+    const chatText = delivery.chatText;
+    // リンクは本文に埋め込む（Discord/Telegram は専用の装飾、WebUI/Lite は markdown リンク）。
+    // `shareUrl` を別フィールドだけに頼ると、そのフィールドを知らないクライアント（モバイル
+    // アプリ等）でリンクが消えてしまう事故が実機で発覚したため、本文内にも必ず入れる
+    // （`shareUrl` フィールド自体は将来の専用 UI 用に引き続き渡す）。
+    const discordMessageToSend = delivery.shareUrl
+      ? chatText + buildShareSuffix('discord', delivery.shareUrl, delivery.ttlDays ?? 0)
+      : chatText;
+    const telegramMessageToSend = delivery.shareUrl
+      ? chatText + buildShareSuffix('telegram', delivery.shareUrl, delivery.ttlDays ?? 0)
+      : chatText;
+    const webMessageToSend = delivery.shareUrl
+      ? chatText + buildShareSuffix('markdown', delivery.shareUrl, delivery.ttlDays ?? 0)
+      : chatText;
+
     // Delete progress messages and send final response
     for (const { platform, chatId } of participants) {
       const msgInfo = tracker?.messages.get(chatId);
@@ -794,13 +817,13 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
           // Edit progress message to show completion, or send new message
           if (msgInfo && !files?.length) {
             // Edit existing message with final content
-            await editDiscordMessage(chatId, msgInfo.messageId as string, messageToSend);
+            await editDiscordMessage(chatId, msgInfo.messageId as string, discordMessageToSend);
           } else {
             // Delete progress message and send new one with files
             if (msgInfo) {
               await editDiscordMessage(chatId, msgInfo.messageId as string, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
             }
-            await sendDiscordMessage(chatId, messageToSend, files);
+            await sendDiscordMessage(chatId, discordMessageToSend, files);
           }
         } else if (platform === 'telegram') {
           stopTelegramTyping(chatId);
@@ -808,19 +831,19 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
           // Edit progress message to show completion, or send new message
           if (msgInfo && !files?.length) {
             // Edit existing message with final content
-            await editTelegramMessage(chatId, msgInfo.messageId as number, messageToSend);
+            await editTelegramMessage(chatId, msgInfo.messageId as number, telegramMessageToSend);
           } else {
             // Delete progress message and send new one with files
             if (msgInfo) {
               await editTelegramMessage(chatId, msgInfo.messageId as number, tChat(tracker?.language ?? DEFAULT_CHAT_LANGUAGE, 'progress.complete'));
             }
-            await sendTelegramMessage(chatId, messageToSend, files);
+            await sendTelegramMessage(chatId, telegramMessageToSend, files);
           }
         } else if (platform === 'web') {
           stopWebTyping(chatId);
           // tracker の projectId がない場合は sessionProjectMap からフォールバック
           const finalProjectId = tracker?.projectId ?? sessionProjectMap.get(sessionId);
-          await sendWebMessage(chatId, messageToSend, files, finalProjectId, messageId, sessionId);
+          await sendWebMessage(chatId, webMessageToSend, files, finalProjectId, messageId, sessionId, delivery.shareUrl ?? undefined);
         }
       } catch (err) {
         // D1: 1 participant への配信失敗（例: Discord 到達不可）で tracker 回収自体を止めない。
@@ -829,10 +852,11 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
       }
     }
 
-    // プッシュ通知（タブが閉じていても届く）
-    sendPushNotificationForSession(sessionId, messageToSend).catch(() => {});
+    // プッシュ通知（タブが閉じていても届く）。chatText を使う（詳細側の技術情報・進捗ノイズで
+    // 通知本文が埋まらないようにする。truncateSafe 等での切り詰め前提と相性がよい）。
+    sendPushNotificationForSession(sessionId, chatText).catch(() => {});
     // FCM プッシュ通知（モバイルアプリ用）
-    sendFcmNotificationForSession(sessionId, messageToSend).catch(() => {});
+    sendFcmNotificationForSession(sessionId, chatText).catch(() => {});
 
     // 通知レコード作成（モバイルアプリの通知一覧用）
     prisma.session.findUnique({ where: { id: sessionId }, include: { project: true } })
@@ -841,7 +865,7 @@ export async function finalizeProgress(sessionId: string, finalMessage: string, 
           const projectName = session.project?.displayName || session.project?.name || 'Unknown';
           // 切り詰めは createNotification 側（truncateSafe）に任せる。ここで slice すると絵文字を分断する
           // 依頼2: 通知一覧からスレッド直行できるよう対象 sessionId を記録する
-          createNotification(session.userId, 'response', session.projectId, projectName, `✅ ${projectName}`, messageToSend, sessionId).catch(() => {});
+          createNotification(session.userId, 'response', session.projectId, projectName, `✅ ${projectName}`, chatText, sessionId).catch(() => {});
         }
       })
       .catch(() => {});

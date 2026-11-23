@@ -44,3 +44,5 @@
 0031	2026-11-11	582c42f	0031_cross_ask_reset.sql	CREATE TABLE CrossAskReset + unique索引	doc/devlog/2026-11-11_201901.md
 0032	2026-11-12	-	0032_db_change_ledger.sql	DB 変更台帳 "DbChange" を新設（model DbChange 追加）	-
 0033	2026-11-21	-	0033_session_auto_title.sql	Session.autoTitle/autoTitleAt/autoTitleTurns 追加（スレッドタイトル自動命名）	doc/devlog/2026-11-21_thread_auto_title.md
+0034	2026-11-23	-	0034_message_share_token.sql	Message.shareToken(unique)/shareExpiresAt 追加（応答の書式サイクル: 公開共有リンク）	-
+0035	2026-11-23	-	0035_message_summary.sql	Message.summary 追加（AI回答契約サイクル第3版: 境界行が無い場合のAI要約キャッシュ）	-

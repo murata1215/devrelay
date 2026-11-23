@@ -93,6 +93,13 @@ export const SettingKeys = {
    * DevRelay が Backlog とやり取りしたついでに更新し、スレッド一覧はこれを表示するだけ（一覧で Backlog に問い合わせない）
    */
   BACKLOG_STATUS_CACHE: 'backlog_status_cache',
+  /** 応答の書式サイクル（2026-11-23）: Discord/Telegram へ付ける公開共有リンクの保存期間（日数、文字列）。
+   *  未設定なら `DEVRELAY_SHARE_TTL_DAYS`（既定 30 日）が使われる。 */
+  RESPONSE_SHARE_TTL_DAYS: 'response_share_ttl_days',
+  /** AI 回答契約サイクル（2026-11-23 第3版）: AI 応答を人間向けに要約する機能に使う AI プロバイダー
+   *  （'openai' | 'anthropic' | 'gemini' | 'none'）。未設定時は `BUILD_SUMMARY_PROVIDER` を流用する
+   *  （`getApiKeyForOrgSummary` と同じフォールバック方式）。 */
+  REPLY_SUMMARY_PROVIDER: 'reply_summary_provider',
 } as const;
 
 export type SettingKey = typeof SettingKeys[keyof typeof SettingKeys];
@@ -359,6 +366,27 @@ export async function getApiKeyForOrgSummary(userId: string): Promise<{ provider
     return null;
   }
   // フォールバック: BuildLog 要約の設定を流用
+  return getApiKeyForBuildSummary(userId);
+}
+
+/**
+ * AI 回答契約サイクル（2026-11-23 第3版）: AI 応答を人間向けに要約する機能用の
+ * AI プロバイダーと API キーを取得。
+ *
+ * REPLY_SUMMARY_PROVIDER 設定を優先し、未設定（none 含む）の場合は
+ * BUILD_SUMMARY_PROVIDER にフォールバックする（`getApiKeyForOrgSummary` と同じ方式。
+ * Build Summary を既に設定済みの人は追加設定なしで使える）。
+ *
+ * @returns { provider, apiKey } のペア。使用不可の場合は null
+ */
+export async function getApiKeyForReplySummary(userId: string): Promise<{ provider: AiProvider; apiKey: string } | null> {
+  const summaryProvider = (await getUserSetting(userId, SettingKeys.REPLY_SUMMARY_PROVIDER) || 'none') as AiProvider;
+  if (summaryProvider !== 'none') {
+    const apiKey = await getApiKeyForProvider(userId, summaryProvider);
+    if (apiKey) return { provider: summaryProvider, apiKey };
+    return null;
+  }
+  // フォールバック: Build Summary の設定を流用
   return getApiKeyForBuildSummary(userId);
 }
 

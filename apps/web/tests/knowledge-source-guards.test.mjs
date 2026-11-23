@@ -316,13 +316,19 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // 4654 はこのサイクルのコミット前に既に古くなっていた＝更新漏れ）。
 // LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも無変更のため据え置き。
 
+// AI 回答契約サイクル（2026-11-23 第3版）: 当初 `MessageRow` に `message.shareUrl` 用の専用リンクを
+// 追加した（4675 → 4689）が、本文に markdown 形式でリンクを埋め込む方式に変更したため撤去し、
+// 実測値（4689 → 4677）に更新した。LitePage.tsx は REST 履歴の `normalized` マッピングに
+// `shareUrl` を1行追加したままのため 714 で据え置き。renderMarkdown 出現数・components/lite/* の
+// ファイル数は無変更のため据え置き（LiteMessageList.tsx も専用リンクを撤去したが対象外）。
+
 describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4675, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4677, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/LitePage.tsx'), 713, 'LitePage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/LitePage.tsx'), 714, 'LitePage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
   });
 
   test('ChatPage.tsx 内の renderMarkdown 出現数が変わっていない', () => {

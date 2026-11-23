@@ -2515,6 +2515,7 @@ export function ChatPage() {
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
         generation: m.generation,
+        shareUrl: m.shareUrl ?? undefined,
       }));
       console.log(`[loadHistory] projectId=${projectId.substring(0, 8)}, source=${source.kind}, mode=${mode}, scrollPolicy=${scrollPolicy}, msgs=${chatMessages.length}, range=${chatMessages[0]?.timestamp.toISOString() ?? 'N/A'} ~ ${chatMessages.at(-1)?.timestamp.toISOString() ?? 'N/A'}`);
 
@@ -3547,6 +3548,7 @@ export function ChatPage() {
         files: m.files && m.files.length > 0 ? m.files : undefined,
         sourceProjectName: m.sourceProjectName,
         generation: m.generation,
+        shareUrl: m.shareUrl ?? undefined,
       }));
 
       setTabs(prev => prev.map(t => {

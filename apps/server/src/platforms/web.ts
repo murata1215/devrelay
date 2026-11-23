@@ -31,7 +31,7 @@ const webClients = new Map<string, WebSocket>();
 const typingStates = new Map<string, boolean>();
 
 /** WS 不在時の未送信レスポンスキュー: chatId -> メッセージ配列 */
-const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string; messageId?: string; sessionId?: string }>>();
+const pendingMessages = new Map<string, Array<{ message: string; files?: FileAttachment[]; projectId?: string; messageId?: string; sessionId?: string; shareUrl?: string }>>();
 
 /**
  * スレッド管理 サイクル6（事象2対策）: `web:command` 処理の前後で `context.currentSessionId` が
@@ -441,15 +441,18 @@ export async function setupWebClientWebSocket(
  * @param sessionId スレッド管理 cycle1: クライアント側ルーティング用（サイクル3で使用。追加のみ、配送先自体は
  *   従来どおり participant ベース。packages/shared の型は cycle3 で追従するため、ここでは
  *   sendJson の unknown 型を経由して追加プロパティとして載せる）
+ * @param shareUrl AI 回答契約サイクル（2026-11-23）: 詳細ページの URL（AI が「詳細」を分けて
+ *   書いた場合のみ）。`message` 本文には混ぜず別フィールドで渡し、WebUI がリンク/ボタンとして
+ *   描画する（Discord/Telegram は本文にテキストで連結するため扱いが異なる）。
  */
-export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[], projectId?: string | null, messageId?: string, sessionId?: string) {
+export async function sendWebMessage(chatId: string, message: string, files?: FileAttachment[], projectId?: string | null, messageId?: string, sessionId?: string, shareUrl?: string) {
   const ws = webClients.get(chatId);
   if (ws && ws.readyState === ws.OPEN) {
-    sendJson(ws, { type: 'web:response', payload: { message, files, projectId: projectId ?? undefined, messageId, sessionId } });
+    sendJson(ws, { type: 'web:response', payload: { message, files, projectId: projectId ?? undefined, messageId, sessionId, shareUrl } });
   } else {
     // WS 不在 → キューに保存（再接続時にフラッシュ）
     const queue = pendingMessages.get(chatId) || [];
-    queue.push({ message, files, projectId: projectId ?? undefined, messageId, sessionId });
+    queue.push({ message, files, projectId: projectId ?? undefined, messageId, sessionId, shareUrl });
     pendingMessages.set(chatId, queue);
     console.log(`📥 Queued message for offline client ${chatId} (${queue.length} pending)`);
   }

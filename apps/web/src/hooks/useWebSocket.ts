@@ -70,7 +70,7 @@ export interface KnowledgeAnswerDonePayload {
 
 /** サーバー → ブラウザ WebSocket メッセージ型（projectId: タブルーティング用、sessionId: スレッドルーティング用） */
 type ServerToWebMessage =
-  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; sessionId?: string; messageId?: string } }
+  | { type: 'web:response'; payload: { message: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; sessionId?: string; messageId?: string; shareUrl?: string } }
   | { type: 'web:progress'; payload: { output: string; elapsed: number; projectId?: string; sessionId?: string } }
   | { type: 'web:session_info'; payload: { projectId: string; sessionId: string; title?: string; agentScopeId?: string } }
   | { type: 'web:user_message'; payload: { content: string; files?: Array<{ filename: string; content: string; mimeType: string }>; projectId?: string; sessionId?: string; messageId?: string } }
@@ -95,6 +95,9 @@ export interface ChatMessage {
   /** クロスタブ専用: resume が成立した世代番号。履歴 API（REST）経由のメッセージにのみ付く
    *  （WS でライブ配信されるメッセージには付かない。区切り線はベストエフォート表示）。 */
   generation?: number;
+  /** AI 回答契約サイクル（2026-11-23）: AI が「詳細」を分けて書いた場合の詳細ページ URL
+   *  （ログイン不要・新しいタブで開く。無ければ undefined＝詳細なし/機能OFF）。 */
+  shareUrl?: string;
 }
 
 /** 進捗情報 */
@@ -230,7 +233,7 @@ export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSoc
             case 'web:response':
               cb?.onProgressClear?.(msg.payload.projectId, msg.payload.sessionId);
               if (msg.payload.message) {
-                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files, messageId: msg.payload.messageId }, msg.payload.projectId, msg.payload.sessionId);
+                cb?.onMessage?.({ role: 'system', content: msg.payload.message, files: msg.payload.files, messageId: msg.payload.messageId, shareUrl: msg.payload.shareUrl }, msg.payload.projectId, msg.payload.sessionId);
               }
               break;
             case 'web:progress':

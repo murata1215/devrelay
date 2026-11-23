@@ -535,6 +535,15 @@ model Message {
   humanTextMeta      String?
   createdAt          DateTime      @default(now())
   files              MessageFile[] // 添付ファイル（入力 or 出力）
+  // 応答の書式サイクル（2026-11-23）: 公開共有リンク（ログイン不要、期限付き）。
+  // 発行は Discord/Telegram へ配信する AI 応答のみ（session-manager.ts finalizeProgress）。
+  // 期限切れは定期清掃で null に戻す（Message.content 本体は消さない）。
+  shareToken         String?       @unique
+  shareExpiresAt     DateTime?
+  // AI 回答契約サイクル（2026-11-23 第3版）: AI が境界行を書かなかった場合に、個人の AI
+  // プロバイダー設定で生成した人間向け要約（services/reply-summary.ts）。再取得のたびに
+  // 再要約しないためのキャッシュ。Message.content（全文）は書き換えない。
+  summary            String?
 
   @@index([sessionId, createdAt]) // MCP get_conversation_history 用（#272）
 }

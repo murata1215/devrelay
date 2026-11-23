@@ -114,6 +114,11 @@ const PROVIDER_SELECTS: ProviderSelectDef[] = [
     label: 'Org Summary（統制）',
     description: '配下メンバーの活動要約に使用（未設定時は Build Summary の設定を流用）',
   },
+  {
+    key: 'reply_summary_provider',
+    label: '返事の要約',
+    description: 'AI の返事を人間向けに要約し、詳細をリンクに分ける（未設定時は Build Summary の設定を流用）',
+  },
 ];
 
 /**
@@ -1432,6 +1437,43 @@ export function SettingsPage() {
           />
           {data.managerRedirect === 'true' ? t('common.enabled') : t('common.disabled')}
         </label>
+      </div>
+      <div className="bg-[var(--bg-secondary)] rounded-lg p-6">
+        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">{t('settings.shareTtl.title')}</h2>
+        <p className="text-[var(--text-muted)] text-sm mb-4">{t('settings.shareTtl.description')}</p>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            max={365}
+            placeholder={t('settings.shareTtl.placeholder')}
+            aria-label={t('settings.shareTtl.title')}
+            defaultValue={data.response_share_ttl_days ?? ''}
+            disabled={saving === 'response_share_ttl_days'}
+            onBlur={async (event) => {
+              const raw = event.target.value.trim();
+              setError('');
+              setSuccess('');
+              setSaving('response_share_ttl_days');
+              try {
+                if (!raw) {
+                  await settings.delete('response_share_ttl_days');
+                  setData((prev) => ({ ...prev, response_share_ttl_days: '' }));
+                } else {
+                  await settings.update('response_share_ttl_days', raw);
+                  setData((prev) => ({ ...prev, response_share_ttl_days: raw }));
+                }
+                setSuccess(t('settings.shareTtl.saved'));
+              } catch {
+                setError(t('settings.shareTtl.saveFailed'));
+              } finally {
+                setSaving(null);
+              }
+            }}
+            className="w-28 bg-[var(--input-bg)] text-[var(--text-primary)] rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)] disabled:opacity-50"
+          />
+          <span className="text-sm text-[var(--text-muted)]">{t('settings.shareTtl.unit')}</span>
+        </div>
       </div>
       </div>
 

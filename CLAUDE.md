@@ -142,6 +142,11 @@ pm2 restart devrelay-server
 | DEVRELAY_CROSS_ASK_RESUME_MAX_TURNS | 上記 resume の世代あたり上限往復数（既定 `40`、clamp 2〜500、`0` で無効）。超過時も TTL と同じ世代切り替えで対応（会話が伸び続けてトークン消費が無制限に増える歯止め。課金主体は所有者のまま変更なし） |
 | DEVRELAY_DB_CHANGE_WARN | サイクルM1（2026-11-12）: 起動時（`app.listen()` より前）に `apps/server/db/changes/` の未適用 DB 変更を検査し、起動ログに警告を出すか（既定 `1`。`0` で検査自体を無効化するキルスイッチ。fail-open＝台帳なし・権限不足・DB 接続不能のいずれでも起動は続行する）。詳細 `doc/db-changes.md` |
 | DEVRELAY_PLAN_GATE_CAPABILITY | サイクルS1（2026-11-12）: プランモードの既存バグ根治（下記 `'plan-gate-hook'` capability）に伴うサーバー側 fail-closed 判定のキルスイッチ。既定 `1`。`1` のとき、クロスユーザー ask（`cross-ask-runner.ts`・`document-api.ts`・`api.ts`/`cross-ask-target-state.ts`）と MCP `ask_project`/`get_answer` の `readOnlyEnforced` 判定が、宛先 Agent の `'plan-gate-hook'` capability 申告を見る（未申告なら ask を断る／`readOnlyEnforced:false` を返す）。`0` にすると、この capability チェックだけを無効化し常に申告済み扱いにする（`'cross-ask-isolation'` capability のチェックには影響しない）。PreToolUse フック自体（Agent 側の実装）にはキルスイッチを置かない方針のため、本変数は Agent の実際の挙動を変えない — サーバー側の判定だけを戻す緊急ロールバック用（真因・配布判断の詳細は `doc/plan-gate-hook-plan.md`） |
+| DEVRELAY_BRIEF_REPLY | AI 回答契約サイクル（2026-11-23 改訂）: AI に「人間向け本文」と「詳細」を分けて書かせる契約をプロンプト先頭に前置するか（`sendPromptToAgent()` が Backlog 行と同じ場所で差し込む。Agent 更新 `u` 不要）。振り分け基準は行数・書式ではなく「人間が仕事を進めるために必要か」の一点（`rules/devrelay.md` の「回答の書き方」節が本文）。本変数は前置に加えて、配信側の分割処理（`services/response-split.ts`）全体のキルスイッチも兼ねる＝既定 `1`。`0` のとき: 前置をやめ、かつ配信側も分割せず `Message.content` をそのまま出す（AI が境界行 `<!-- devrelay:detail -->` を書いても無視される。情報を落とさない方針のため、分割だけ止めて詳細を隠すことはしない）。terminalMode・クロスユーザー ask・引継ぎターンには前置自体を元々付けない。恒久版の Agreement テンプレート統合は別サイクルの follow-up |
+| DEVRELAY_RESPONSE_SHARE | AI 回答契約サイクル: AI が分けて書いた（または `DEVRELAY_REPLY_SUMMARY` が生成した）「詳細」をログイン不要の公開ページ（`GET /api/public/response/:token`・WebUI `/s/:token`）に置くか。**既定 `0`（OFF）**（`DEVRELAY_CROSS_TEAM` 等と同じ方向。新しい信頼境界を黙って開けないため）。`1` のとき、詳細があるターンは WebUI・Discord・Telegram **共通**で本文から詳細を切り出し、詳細ページへのリンクを本文内に `markdown` 形式（`[詳細を見る（N日間有効）](URL)`）で埋め込む（2026-11-23 実機検証で発覚: `shareUrl` を別フィールドだけで渡す設計だとモバイルアプリ等そのフィールドを知らないクライアントでリンクが消える事故があったため、本文埋め込みに統一）。公開されるのは応答本文のテキストのみ（添付ファイル・ユーザー入力・他メッセージは出さない）。`DEVRELAY_BRIEF_REPLY=0`・`messageId` が無い経路（タイムアウト finalize 等）・一時セッション（`teamexec_`/`crossquery_` 等）・トークン発行失敗・要約失敗では、詳細を隠さずそのまま本文に含めて送る（情報を落とさない）。リンク先ホストは `PUBLIC_URL`（未設定時は既定 `https://app.devrelay.io`、`mcp/oauth.ts` と同じ既定値） |
+| DEVRELAY_SHARE_TTL_DAYS | 上記詳細ページの組織既定の保存期間（日、既定 `30`、clamp 1〜365）。devrelay.io はこの変数に `3` を設定する。本人の個人設定（設定画面「共有リンクの保存期間」、`UserSettings` の `response_share_ttl_days`）があればそちらが優先される。期限切れのリンクは 24 時間ごとの定期清掃で `shareToken`/`shareExpiresAt` を null に戻す（`Message.content` 本体は消さない） |
+| DEVRELAY_REPLY_SUMMARY | AI 回答契約サイクル第3版（2026-11-23）: AI が境界行 `<!-- devrelay:detail -->` を書かなかった場合に、サーバー側で AI に要約させて「人間向け本文＋詳細リンク」を作る保険機能（`services/reply-summary.ts`）。既定 `1`。`0` で要約を呼ばず `Message.content` をそのまま出す。使う AI プロバイダー・キーは**本人（セッションの持ち主）の個人設定**（設定画面 AI Provider Settings の「返事の要約」、未設定時は「Build Summary」を流用、`SettingKeys.REPLY_SUMMARY_PROVIDER`・`getApiKeyForReplySummary()`）。組織共通キー（`DEVRELAY_ANSWER_API_KEY`）にはフォールバックしない（費用は各自の作業を各自の設定したキーで負担する方針）。本文が `DEVRELAY_REPLY_SUMMARY_MIN_CHARS` 未満・一時セッション・鍵未設定・要約失敗のいずれかなら何もしない（情報を落とさない。元の本文をそのまま出す）。要約結果は `Message.summary` に保存し、履歴の再取得では再要約しない |
+| DEVRELAY_REPLY_SUMMARY_MIN_CHARS | 上記要約を試みる本文長の下限（文字、既定 `800`、clamp 100〜20000）。これ未満の本文は要約 AI を呼ばずそのまま出す（短い返事に課金しない） |
 
 ## DB テーブル（概要）
 
@@ -151,7 +156,7 @@ pm2 restart devrelay-server
 | Machine | Agent マシン（deletedAt でソフトデリート、autoUpdate で自動更新、localCommit 等でバージョン表示） |
 | Project | プロジェクト（displayName でリネーム可能、terminalMode で PTY 経由 claude 起動） |
 | Session | 作業セッション（= MCP submission。`autoTitle` は AI が付けたスレッド表示名（0033、ユーザー命名の `title` が優先）。`kind`='question' で ask_project の質問ターン、`cancelledAt` で cancel_submission の取消 claim。`handover*` 列でスレッド引継ぎ `n` の引継ぎ元・引継ぎ書を保持） |
-| Message | 会話メッセージ |
+| Message | 会話メッセージ（`shareToken`/`shareExpiresAt` は AI 回答契約サイクルの公開共有リンク、既定 OFF。`summary` は境界行が無い場合の AI 要約キャッシュ） |
 | BuildLog | ビルド履歴 |
 | MessageFile | メッセージ添付ファイル（bytea BLOB + pgvector embedding） |
 | UserSettings | ユーザー設定（API キー等） |

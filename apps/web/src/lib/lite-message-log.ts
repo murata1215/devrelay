@@ -34,6 +34,9 @@ export interface LiteMessage {
   timestampMs: number;
   /** DB 上のメッセージ ID。REST は常に持つ。WS ライブ受信（特に AI 応答）は無いことがある。 */
   messageId?: string;
+  /** AI 回答契約サイクル（2026-11-23）: AI が「詳細」を分けて書いた場合の詳細ページ URL
+   *  （ログイン不要・新しいタブで開く。無ければ undefined＝詳細なし/機能OFF）。 */
+  shareUrl?: string;
 }
 
 /** `appendMessage` に渡す新着メッセージ記述子（`timestampMs` は `nowMs` から決まるため持たない）。 */
@@ -41,6 +44,7 @@ export interface IncomingLiteMessage {
   role: LiteMessageRole;
   content: string;
   messageId?: string;
+  shareUrl?: string;
 }
 
 const RECENT_WINDOW = 5;
@@ -73,6 +77,7 @@ export function appendMessage(
     content: incoming.content,
     timestampMs: nowMs,
     messageId: incoming.messageId,
+    shareUrl: incoming.shareUrl,
   };
 
   if (log.length === 0) {
