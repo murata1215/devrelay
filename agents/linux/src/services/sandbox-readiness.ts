@@ -51,8 +51,10 @@ export interface SandboxPreflightInput {
   pipeConnected: boolean;
   /** ハンドシェイクのプロトコル版が一致したか */
   protocolVersionMatch: boolean;
-  /** ed25519 署名が公開鍵で検証できたか（これが false の間は、以下の身元・プローブ結果は
-   *  自己申告に過ぎず証拠にならない） */
+  /** ECDSA（P-256 / SHA-256）署名が公開鍵で検証できたか（これが false の間は、以下の身元・
+   *  プローブ結果は自己申告に過ぎず証拠にならない。Plan は ed25519 を前提にしていたが、
+   *  Sandbox Host を in-box csc.exe でビルドする制約上 ECDSA P-256 に変更した。
+   *  詳細は `sandbox-attest.ts` のコメント参照） */
   signatureValid: boolean;
   /** 署名検証後の申告内容: サービス名が期待値と一致 */
   identityServiceNameMatches: boolean;

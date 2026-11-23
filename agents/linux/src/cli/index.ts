@@ -124,7 +124,10 @@ sandbox
   .description('Sandbox Host への接続・実行前確認・簡易プロセス起動を検証する')
   .option('--project <path>', 'プロジェクトパス（未指定なら現在のディレクトリ）')
   .option('--spawn', 'ホスト経由で簡単なコマンドを実行して確認する')
-  .option('--network-probe', 'ネットワーク遮断の確認プローブ（curl / bitsadmin）を実行する')
+  .option('--network-probe', 'ネットワーク遮断の確認プローブ（curl、ホスト経由）を実行する')
+  .option('--acl-audit', 'Sandbox 身元から Agent の設定・トークン等が読めないことを確認する（exit コードのみで判定）')
+  .option('--claude-roundtrip', 'claude 本体をホスト経由で 1 往復させて確認する')
+  .option('--bits-probe', '既知の回避経路（bitsadmin）の確認プローブを実行する（ウイルス対策ソフトに検知される可能性あり。既定では実行しない）')
   .action(sandboxSelftestCommand);
 
 program.parse();

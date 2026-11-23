@@ -17,6 +17,43 @@ export interface SandboxPrepStep {
   args: string[];
 }
 
+export type SandboxPrepPrecheckReason = 'not_found' | 'not_a_directory' | 'no_git';
+
+export type SandboxPrepPrecheckResult = { ok: true } | { ok: false; reason: SandboxPrepPrecheckReason };
+
+export interface SandboxPrepPrecheckInput {
+  /** 対象パスが存在するか */
+  exists: boolean;
+  /** 存在する場合、ディレクトリか（ファイルなら false） */
+  isDirectory: boolean;
+  /** `<projectPath>/.git` が存在するか */
+  hasGit: boolean;
+}
+
+/**
+ * `devrelay sandbox prep --project <path>` の事前確認（B2 対応）。
+ * 存在しない・ディレクトリでない・`.git` が無いパスに対しては ACL を一切変更せずに拒否する
+ * （SB-1a-1 時点では存在確認をせず、存在しないパスでも祖先ディレクトリへの traverse 付与まで
+ * 進んでから失敗していた。実機確認済みの既存バグ）。
+ */
+export function decideSandboxPrepPrecheck(input: SandboxPrepPrecheckInput): SandboxPrepPrecheckResult {
+  if (!input.exists) return { ok: false, reason: 'not_found' };
+  if (!input.isDirectory) return { ok: false, reason: 'not_a_directory' };
+  if (!input.hasGit) return { ok: false, reason: 'no_git' };
+  return { ok: true };
+}
+
+const SANDBOX_PREP_PRECHECK_MESSAGES: Record<SandboxPrepPrecheckReason, string> = {
+  not_found: '❌ 指定されたプロジェクトパスが存在しません。ACL は変更していません。',
+  not_a_directory: '❌ 指定されたプロジェクトパスはディレクトリではありません。ACL は変更していません。',
+  no_git: '❌ 指定されたプロジェクトパスに .git がありません（git リポジトリではありません）。ACL は変更していません。',
+};
+
+/** 事前確認の拒否理由に対応する日本語メッセージを返す。 */
+export function buildSandboxPrepPrecheckMessage(reason: SandboxPrepPrecheckReason): string {
+  return SANDBOX_PREP_PRECHECK_MESSAGES[reason];
+}
+
 /** `icacls <path> /grant <principal>:(OI)(CI)(RX)`（継承あり・読み取り+実行） */
 export function buildIcaclsGrantReadExecuteArgs(targetPath: string, principal: string): string[] {
   return [targetPath, '/grant', `${principal}:(OI)(CI)(RX)`];

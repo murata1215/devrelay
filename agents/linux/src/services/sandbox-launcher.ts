@@ -175,7 +175,13 @@ export interface SandboxSpawnRequest {
   command: string;
   args: string[];
   cwd?: string;
-  env: Record<string, string | undefined>;
+  /**
+   * `undefined` ではなく `null` で「このキーを削除する」ことを表す。`JSON.stringify()` は
+   * `undefined` 値のプロパティを丸ごと省略してしまい、ワイヤー上で「このキーを明示的に消す」
+   * という意図が伝わらない（SB-1a-1.1 で判明。`SandboxHost.cs` の `HandleSpawn()` は
+   * `kv.Value == null` の場合のみ `EnvironmentVariables.Remove()` する）。
+   */
+  env: Record<string, string | null>;
 }
 
 type ExitListener = (code: number | null, signal: NodeJS.Signals | null) => void;
@@ -194,6 +200,7 @@ export class SandboxSpawnedProcess {
   readonly stderr: Readable;
 
   private _killed = false;
+  private _exited = false;
   private _exitCode: number | null = null;
   private _signalCode: NodeJS.Signals | null = null;
   private exitListeners: ExitListener[] = [];
@@ -244,6 +251,14 @@ export class SandboxSpawnedProcess {
 
   get signalCode(): NodeJS.Signals | null | undefined {
     return this._signalCode;
+  }
+
+  /**
+   * EXIT フレームを既に受け取ったか（`awaitSandboxProcessResult()` が取りこぼし無く結果を
+   * 返せるようにするためのフラグ。B5 対応）。
+   */
+  get exited(): boolean {
+    return this._exited;
   }
 
   /** `KILL` フレームを送る。ホストはプロセスツリー全体（Job Object）を落とす責務を持つ */
@@ -313,6 +328,7 @@ export class SandboxSpawnedProcess {
           };
           this._exitCode = info.code;
           this._signalCode = info.signal;
+          this._exited = true;
           this.stdout.push(null);
           this.stderr.push(null);
           for (const l of [...this.exitListeners]) l(info.code, info.signal);
@@ -337,4 +353,69 @@ export class SandboxSpawnedProcess {
   private emitError(error: Error): void {
     for (const l of [...this.errorListeners]) l(error);
   }
+}
+
+export interface SandboxProcessResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+}
+
+/**
+ * `SandboxSpawnedProcess` の実行結果（stdout/stderr の全量・終了コード・signal）を 1 回の await で
+ * 取得する（サイクル SB-1a-1.1、B5 対応の既存バグ回帰防止）。
+ *
+ * **背景**: SB-1a-1 の `cli/commands/sandbox.ts` の `runSandboxEchoSpawn()` は
+ * `collectStdout()`（stdout の `end` を待つ）→ `waitForExit()`（`exit` イベントを待つ）という
+ * 逐次 await だった。これは `SandboxHost.cs` の `HandleSpawn()` が「Agent が切断するまで
+ * stdin/kill の読み取りループを抜けない」実装だったため成立していた（EXIT が切断後にしか
+ * 書かれない）。本サイクルで `HandleSpawn()` を修正し、子プロセス終了時に EXIT を即送る
+ * ようにしたが、Agent 側も「EXIT が stdout の `end` より前に届く」ことを前提にした実装に
+ * 合わせておく必要がある。
+ *
+ * 本関数はリスナーを**同期的に先に登録**してから `exit` イベントを待つため、呼び出し時点で
+ * 既に EXIT 済み（`proc.exited`）であれば取りこぼさず即座に解決する。
+ */
+export function awaitSandboxProcessResult(
+  proc: SandboxSpawnedProcess,
+  timeoutMs: number,
+): Promise<SandboxProcessResult> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const onStdoutData = (chunk: Buffer) => {
+      stdout += chunk.toString('utf-8');
+    };
+    const onStderrData = (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8');
+    };
+    proc.stdout.on('data', onStdoutData);
+    proc.stderr.on('data', onStderrData);
+
+    const timer = setTimeout(() => finish(null, null, true), timeoutMs);
+
+    function finish(exitCode: number | null, signal: NodeJS.Signals | null, timedOut: boolean): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      proc.stdout.off('data', onStdoutData);
+      proc.stderr.off('data', onStderrData);
+      proc.off('exit', onExit);
+      resolve({ stdout, stderr, exitCode, signal, timedOut });
+    }
+    function onExit(code: number | null, signal: NodeJS.Signals | null): void {
+      finish(code, signal, false);
+    }
+
+    // 既に EXIT 済みなら、以降 'exit' イベントは発火しないため即座に解決する（取りこぼし防止）。
+    if (proc.exited) {
+      finish(proc.exitCode, proc.signalCode ?? null, false);
+      return;
+    }
+    proc.on('exit', onExit);
+  });
 }

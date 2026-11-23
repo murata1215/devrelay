@@ -245,6 +245,15 @@ namespace DevRelaySandboxHost
 
         private readonly IntPtr _handle;
 
+        // SB-1a-1.1 (B5) で HandleSpawn() を背景スレッド構成に変更したため、KILL 受信スレッドと
+        // 子プロセス終了を待つメインスレッドの双方が Dispose() を呼び得る（従来は同一スレッド内の
+        // 逐次呼び出しだったため実害が無かったが、並行呼び出しになると同じハンドル値への
+        // CloseHandle() の二重呼び出し＝ハンドル再利用時の破壊的競合になり得る）。
+        // そのため Dispose() 自体に一度だけ実行するガードを置く（破棄の順序はどちらのスレッドが
+        // 先でも安全になるようにする）。
+        private readonly object _disposeLock = new object();
+        private bool _disposed;
+
         public SandboxJobObject()
         {
             _handle = CreateJobObject(IntPtr.Zero, null);
@@ -269,11 +278,19 @@ namespace DevRelaySandboxHost
             }
         }
 
+        /// <summary>
+        /// 一度だけ実行される（2 回目以降の呼び出しは no-op）。どのスレッドから呼ばれても安全。
+        /// </summary>
         public void Dispose()
         {
-            if (_handle != IntPtr.Zero)
+            lock (_disposeLock)
             {
-                CloseHandle(_handle); // KillOnJobClose により、ここで子プロセスツリーも終了する
+                if (_disposed) return;
+                _disposed = true;
+                if (_handle != IntPtr.Zero)
+                {
+                    CloseHandle(_handle); // KillOnJobClose により、ここで子プロセスツリーも終了する
+                }
             }
         }
     }
@@ -530,44 +547,75 @@ namespace DevRelaySandboxHost
             stdoutThread.Start();
             stderrThread.Start();
 
-            // Agent → ホスト: STDIN_DATA / STDIN_EOF / KILL を読み続ける
-            while (true)
+            // Agent → ホスト: STDIN_DATA / STDIN_EOF / KILL を読み続けるスレッド。
+            //
+            // **SB-1a-1.1 (B5) で背景スレッド化した**: 旧実装はこのループをメインスレッドで回し、
+            // ループを抜けてから初めて process.WaitForExit() を呼んでいた。ループの脱出条件は
+            // 「例外」「Agent 側の切断（frame == null）」「KILL 受信」のいずれかであり、子プロセスが
+            // 自然終了しても Agent が切断するまでループは抜けない。そのため Agent（selftest 等）が
+            // stdin を閉じず・KILL も送らずに一定時間待ってから切断する使い方をすると、子プロセス
+            // 自体はもっと前に終了していても EXIT フレームが届かず exitCode が取得できなかった
+            // （実機確認済み: selftest --spawn で exitCode が常に null）。
+            //
+            // 本スレッドは「Agent → ホストの中継」の責務のみを持ち、子プロセスの終了判定はメイン
+            // スレッドが process.WaitForExit() で独立に行う。KILL を受けたときだけ本スレッドが
+            // job.Dispose() を呼び（KillOnJobClose でプロセスツリーを終了させる）、それを合図に
+            // メインスレッドの WaitForExit() が返る。job.Dispose() は二重呼び出しに対して安全
+            // （SandboxJobObject.Dispose() 側でガード済み。本スレッドが KILL 経由で先に Dispose
+            // しても、メインスレッド側で後始末のため再度呼んでも no-op になる）。
+            Thread stdinThread = new Thread(delegate ()
             {
-                Frame frame;
-                try
+                while (true)
                 {
-                    frame = Frames.ReadFrame(_pipe);
-                }
-                catch (Exception)
-                {
-                    break;
-                }
-                if (frame == null) break; // Agent 側が切断
-
-                if (frame.Type == FrameType.StdinData)
-                {
+                    Frame frame;
                     try
                     {
-                        process.StandardInput.BaseStream.Write(frame.Payload, 0, frame.Payload.Length);
-                        process.StandardInput.BaseStream.Flush();
+                        frame = Frames.ReadFrame(_pipe);
                     }
-                    catch (Exception) { }
-                }
-                else if (frame.Type == FrameType.StdinEof)
-                {
-                    // stdin EOF は「正常終了の機会を与える」ための signal であり、kill ではない
-                    // （改訂版 Plan レビュー指摘 B-4）。
-                    try { process.StandardInput.Close(); } catch (Exception) { }
-                }
-                else if (frame.Type == FrameType.Kill)
-                {
-                    lock (killLock) { killed = true; }
-                    job.Dispose(); // KillOnJobClose によりプロセスツリーごと終了
-                    break;
-                }
-            }
+                    catch (Exception)
+                    {
+                        break; // パイプが閉じられた（Agent 切断 or メインスレッドの後始末）
+                    }
+                    if (frame == null) break; // Agent 側が切断
 
+                    if (frame.Type == FrameType.StdinData)
+                    {
+                        try
+                        {
+                            process.StandardInput.BaseStream.Write(frame.Payload, 0, frame.Payload.Length);
+                            process.StandardInput.BaseStream.Flush();
+                        }
+                        catch (Exception) { }
+                    }
+                    else if (frame.Type == FrameType.StdinEof)
+                    {
+                        // stdin EOF は「正常終了の機会を与える」ための signal であり、kill ではない
+                        // （改訂版 Plan レビュー指摘 B-4）。
+                        try { process.StandardInput.Close(); } catch (Exception) { }
+                    }
+                    else if (frame.Type == FrameType.Kill)
+                    {
+                        lock (killLock) { killed = true; }
+                        try { job.Dispose(); } catch (Exception) { } // KillOnJobClose によりプロセスツリーごと終了
+                        break;
+                    }
+                    // 未知のフレーム種別は無視する（spawn 中は HANDSHAKE/SPAWN 系は来ない想定）。
+                }
+            });
+            stdinThread.IsBackground = true;
+            stdinThread.Start();
+
+            // メインスレッドは子プロセス自身の終了だけを待つ（Agent の切断は待たない）。
+            // KILL 経由の場合は上記スレッドの job.Dispose() がプロセスツリーを終了させるため、
+            // ここはそのタイミングで返る。
             process.WaitForExit();
+
+            // 子の終了直後、stdin 中継スレッドの後始末を短時間だけ試みる（自然終了の場合、
+            // 当該スレッドはまだ Agent からの次フレームをブロック読みしている可能性があるため
+            // 長くは待たない。IsBackground のため、残っても後続の _pipe.Dispose()（Run() の
+            // finally）で読み取りが例外化し自然に終了する）。
+            stdinThread.Join(100);
+
             stdoutThread.Join(2000);
             stderrThread.Join(2000);
 
@@ -596,7 +644,9 @@ namespace DevRelaySandboxHost
             }
             catch (Exception) { }
 
-            job.Dispose();
+            // 自然終了時はまだ Dispose されていないのでここで行う（KILL 経由なら既に Dispose
+            // 済みだが、二重呼び出しは安全なので無条件に呼ぶ）。
+            try { job.Dispose(); } catch (Exception) { }
         }
 
         private void RelayStream(Stream source, byte frameType)

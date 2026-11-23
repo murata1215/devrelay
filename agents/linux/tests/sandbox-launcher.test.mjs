@@ -14,6 +14,7 @@ import {
   connectToSandboxHost,
   performSandboxHandshake,
   SandboxSpawnedProcess,
+  awaitSandboxProcessResult,
 } from '../dist/services/sandbox-launcher.js';
 import { encodeSandboxFrame, createSandboxFrameDecoder } from '../dist/services/sandbox-frames.js';
 import { SandboxFrameType, SANDBOX_KNOWN_FRAME_TYPES } from '../dist/services/sandbox-protocol.js';
@@ -325,6 +326,131 @@ describe('sandbox-launcher: SandboxSpawnedProcess（SpawnedProcess 契約）', (
         proc.stdin.end();
       });
       assert.equal(calls, 0, 'off() 後は呼ばれない');
+      socket.destroy();
+    } finally {
+      server.close();
+      fs.rmSync(socketPath, { force: true });
+    }
+  });
+});
+
+// サイクル SB-1a-1.1（B5 回帰防止）: SandboxHost.cs の HandleSpawn() が「Agent が切断するまで
+// EXIT を送らない」実装だったため、selftest --spawn のように Agent 側が stdin を閉じず・KILL も
+// 送らずに待つ使い方をすると exitCode が常に null になっていた。本サイクルで HandleSpawn() を
+// 背景スレッド化し、子プロセス終了と同時に EXIT を送るよう修正した。以下はその Agent 側契約
+// （awaitSandboxProcessResult() が EXIT を取りこぼさないこと）の回帰テスト。
+describe('sandbox-launcher: awaitSandboxProcessResult（B5 回帰防止）', () => {
+  test('クライアントが何も送らなくても、ホストが SPAWN_REQUEST 直後に STDOUT_DATA -> EXIT{code:0} を送れば exitCode が返る', async () => {
+    const socketPath = tmpSocketPath();
+    const server = net.createServer((socket) => {
+      const decoder = createSandboxFrameDecoder(SANDBOX_KNOWN_FRAME_TYPES);
+      socket.on('data', (chunk) => {
+        const frames = decoder.push(chunk);
+        for (const frame of frames) {
+          if (frame.type === SandboxFrameType.SPAWN_REQUEST) {
+            socket.write(encodeSandboxFrame(SandboxFrameType.STDOUT_DATA, Buffer.from('ok\n', 'utf-8')));
+            socket.write(encodeSandboxFrame(SandboxFrameType.EXIT, Buffer.from(JSON.stringify({ code: 0, signal: null }))));
+          }
+        }
+      });
+    });
+    await new Promise((resolve) => server.listen(socketPath, resolve));
+    try {
+      const socket = await connectToSandboxHost(socketPath, 2000);
+      const proc = new SandboxSpawnedProcess(socket, { command: 'cmd.exe', args: [], cwd: 'C:\\dev', env: {} });
+      // クライアント側は stdin に何も書かず・EOF も KILL も送らない（selftest --spawn の実際の
+      // 使い方を模す）。それでも EXIT を取りこぼさず exitCode:0 が返ること。
+      const result = await awaitSandboxProcessResult(proc, 2000);
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.signal, null);
+      assert.equal(result.timedOut, false);
+      assert.equal(result.stdout, 'ok\n');
+      socket.destroy();
+    } finally {
+      server.close();
+      fs.rmSync(socketPath, { force: true });
+    }
+  });
+
+  test('呼び出し前に既に EXIT 済みでも取りこぼさず即座に解決する', async () => {
+    const socketPath = tmpSocketPath();
+    const server = await createFakeSpawnHost(socketPath);
+    try {
+      const socket = await connectToSandboxHost(socketPath, 2000);
+      const proc = new SandboxSpawnedProcess(socket, { command: 'cmd.exe', args: [], cwd: 'C:\\dev', env: {} });
+      const exitPromise = new Promise((resolve) => proc.once('exit', resolve));
+      proc.stdin.end();
+      await exitPromise;
+      assert.equal(proc.exited, true);
+
+      const result = await awaitSandboxProcessResult(proc, 2000);
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.timedOut, false);
+      socket.destroy();
+    } finally {
+      server.close();
+      fs.rmSync(socketPath, { force: true });
+    }
+  });
+
+  test('応答が無ければ timedOut:true になる', async () => {
+    const socketPath = tmpSocketPath();
+    const server = net.createServer(() => {
+      // 何も送らない
+    });
+    await new Promise((resolve) => server.listen(socketPath, resolve));
+    try {
+      const socket = await connectToSandboxHost(socketPath, 2000);
+      const proc = new SandboxSpawnedProcess(socket, { command: 'cmd.exe', args: [], cwd: 'C:\\dev', env: {} });
+      const result = await awaitSandboxProcessResult(proc, 300);
+      assert.equal(result.timedOut, true);
+      assert.equal(result.exitCode, null);
+      socket.destroy();
+    } finally {
+      server.close();
+      fs.rmSync(socketPath, { force: true });
+    }
+  });
+
+  test('KILL 経由の EXIT(null, SIGTERM) も正しく反映される', async () => {
+    const socketPath = tmpSocketPath();
+    const server = await createFakeSpawnHost(socketPath);
+    try {
+      const socket = await connectToSandboxHost(socketPath, 2000);
+      const proc = new SandboxSpawnedProcess(socket, { command: 'cmd.exe', args: [], cwd: 'C:\\dev', env: {} });
+      const resultPromise = awaitSandboxProcessResult(proc, 2000);
+      proc.kill('SIGTERM');
+      const result = await resultPromise;
+      assert.equal(result.exitCode, null);
+      assert.equal(result.signal, 'SIGTERM');
+      socket.destroy();
+    } finally {
+      server.close();
+      fs.rmSync(socketPath, { force: true });
+    }
+  });
+
+  test('stderr も収集される', async () => {
+    const socketPath = tmpSocketPath();
+    const server = net.createServer((socket) => {
+      const decoder = createSandboxFrameDecoder(SANDBOX_KNOWN_FRAME_TYPES);
+      socket.on('data', (chunk) => {
+        const frames = decoder.push(chunk);
+        for (const frame of frames) {
+          if (frame.type === SandboxFrameType.SPAWN_REQUEST) {
+            socket.write(encodeSandboxFrame(SandboxFrameType.STDERR_DATA, Buffer.from('warn!\n', 'utf-8')));
+            socket.write(encodeSandboxFrame(SandboxFrameType.EXIT, Buffer.from(JSON.stringify({ code: 1, signal: null }))));
+          }
+        }
+      });
+    });
+    await new Promise((resolve) => server.listen(socketPath, resolve));
+    try {
+      const socket = await connectToSandboxHost(socketPath, 2000);
+      const proc = new SandboxSpawnedProcess(socket, { command: 'cmd.exe', args: [], cwd: 'C:\\dev', env: {} });
+      const result = await awaitSandboxProcessResult(proc, 2000);
+      assert.equal(result.stderr, 'warn!\n');
+      assert.equal(result.exitCode, 1);
       socket.destroy();
     } finally {
       server.close();
