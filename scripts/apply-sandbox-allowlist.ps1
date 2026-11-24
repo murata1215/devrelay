@@ -88,6 +88,29 @@
 # through, the fail-closed rule (and the previous generation) are left in
 # place, so a broken reconciliation can never result in IPv4 being wide
 # open. This script never creates DevRelay-SandboxFailClosed-ipv4 itself.
+#
+# Cycle SB-2.1.3 note (hp630g9 real-machine bug, two independent failures):
+# (1) ConvertFrom-Ipv4Value had a rounding bug (see that function's header)
+# that made every IPv4 range string this script ever produced wrong; for the
+# empty-allow-list case it produced an end-before-start range that
+# New-NetFirewallRule rejected with CimException 0x80070057. (2) When that
+# CimException was hit via a direct "&" invocation (as opposed to the
+# "-File" invocation this script's own catch block was tested against), it
+# did NOT terminate the script -- so the rest of the script treated the
+# failed call as if it had succeeded and went on to delete the previous
+# generation and the fail-closed rule, leaving IPv4 fully open. Fixed by (1)
+# computing each octet independently instead of chaining divisions, (2) a
+# round-trip self-check of every range string before use (Test-Ipv4RangeStringsSelfCheck),
+# (3) pinning -ErrorAction Stop on every firewall-rule create/remove/query
+# call so the outcome no longer depends on how this script was invoked, and
+# (4) verifying every rule this generation needs is actually present (a
+# fresh query, not trust in a cmdlet's own success) before deleting the
+# previous generation or the
+# fail-closed rule. Write-Error is no longer used anywhere in this script
+# (see Format-ErrorCode's comment) because under $ErrorActionPreference =
+# "Stop" it is itself a terminating error, which on hp630g9 masked the
+# original CimException behind a WriteErrorException referencing the
+# Write-Error call's own line number.
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
@@ -112,7 +135,14 @@ $MaxRequestFileBytes = 65536
 # Required directories must already exist with the correct ACLs (created by
 # install-sandbox-host.ps1). This script never creates or widens them.
 if (-not (Test-Path (Split-Path $StateJsonPath))) {
-    Write-Error "allowlist-result directory is missing: $(Split-Path $StateJsonPath). Re-run install-sandbox-host.ps1."
+    # Cycle SB-2.1.3: Write-Error is never used in this script (see the F5 guard
+    # and the "main" catch blocks below) -- under $ErrorActionPreference = "Stop"
+    # it becomes a terminating WriteErrorException itself, which then masks
+    # whatever the real problem was in any surrounding catch block. Write-Host
+    # + an explicit exit code reports the same information without that risk.
+    # (No exception was thrown here, so there is no InvocationInfo to report a
+    # line number from; the message text itself identifies the exact check.)
+    Write-Host "[ERROR] allowlist-result directory is missing: $(Split-Path $StateJsonPath). Re-run install-sandbox-host.ps1." -ForegroundColor Red
     exit 1
 }
 
@@ -143,11 +173,21 @@ function ConvertTo-Ipv4Value {
 
 function ConvertFrom-Ipv4Value {
     param([uint64]$Value)
-    $v = $Value
-    $o4 = $v % 256; $v = [uint64]($v / 256)
-    $o3 = $v % 256; $v = [uint64]($v / 256)
-    $o2 = $v % 256; $v = [uint64]($v / 256)
-    $o1 = $v % 256
+    # Cycle SB-2.1.3 (hp630g9 real-machine bug): the previous implementation chained
+    # three "$v = [uint64]($v / 256)" steps. PowerShell's "/" returns a Double when
+    # the division is not exact, and Double -> [uint64] rounds to the nearest integer
+    # (banker's rounding), not truncate -- so a remainder above 128 in one octet
+    # carries a +1 into the next one. Example: 4294967295 (255.255.255.255) produced
+    # "0.0.0.255" instead, which combined with the complement computation to emit a
+    # "128.0.0.0-0.0.0.255" range string (end < start), rejected by New-NetFirewallRule
+    # with CimException 0x80070057 on hp630g9. Each octet below is computed
+    # independently via integer division ([math]::Floor on a Double that is always
+    # exactly representable for inputs <= 4294967295, i.e. 2^32-1), so no octet's
+    # rounding can ever affect another.
+    $o1 = [uint64]([math]::Floor($Value / 16777216)) % 256
+    $o2 = [uint64]([math]::Floor($Value / 65536)) % 256
+    $o3 = [uint64]([math]::Floor($Value / 256)) % 256
+    $o4 = $Value % 256
     return "$o1.$o2.$o3.$o4"
 }
 
@@ -254,6 +294,36 @@ function Format-Ipv4RangeStrings {
     return $result
 }
 
+# Cycle SB-2.1.3 (hp630g9 real-machine bug): round-trip every range string this
+# script is about to hand to New-NetFirewallRule back through
+# Test-StrictIpv4String + ConvertTo-Ipv4Value and verify it reconstructs the exact
+# same Start/End the range math produced, with Start <= End. This is the only
+# gate standing between a future formatting bug (of any kind, not just the
+# specific rounding bug fixed above) and a malformed -RemoteAddress string, so it
+# must run before the first New-NetFirewallRule call. On any mismatch, no
+# firewall rule is touched.
+function Test-Ipv4RangeStringsSelfCheck {
+    param([string[]]$RangeStrings, $Ranges)
+    if ($RangeStrings.Count -ne $Ranges.Count) { return $false }
+    for ($i = 0; $i -lt $RangeStrings.Count; $i++) {
+        $s = $RangeStrings[$i]
+        $r = $Ranges[$i]
+        if ($s -match '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$') {
+            $startStr = $Matches[1]; $endStr = $Matches[2]
+        } elseif ($s -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+            $startStr = $s; $endStr = $s
+        } else {
+            return $false
+        }
+        if (-not (Test-StrictIpv4String $startStr) -or -not (Test-StrictIpv4String $endStr)) { return $false }
+        $startVal = ConvertTo-Ipv4Value $startStr
+        $endVal = ConvertTo-Ipv4Value $endStr
+        if ($startVal -gt $endVal) { return $false }
+        if ($startVal -ne $r['Start'] -or $endVal -ne $r['End']) { return $false }
+    }
+    return $true
+}
+
 # Port complement over [1, 65535] for a single IP's allowed TCP ports.
 function Get-PortComplementRanges {
     param([int[]]$AllowedPorts)
@@ -302,9 +372,38 @@ function Get-Sha256HexLower {
     }
 }
 
+# Cycle SB-2.1.3 (hp630g9 real-machine bug): a bare "Get-NetFirewallRule -Name
+# $x -ErrorAction SilentlyContinue" was found, on at least one real-world call
+# path, to not reliably stop script execution on a genuine query failure (the
+# NetSecurity module's cmdlets resolve $ErrorActionPreference against their own
+# module scope, not this script's scope, so the script-level "Stop" setting is
+# not guaranteed to apply). Every firewall query in this script now goes
+# through one of these two helpers, which both pin -ErrorAction Stop on the
+# call itself (not relying on any ambient preference) and treat "the query
+# itself failed" the same as "not found" -- i.e. fail closed: callers of
+# Test-FirewallRuleExists must not delete anything a failed query could not
+# positively rule out.
+function Test-FirewallRuleExists {
+    param([string]$Name)
+    try {
+        $rule = Get-NetFirewallRule -Name $Name -ErrorAction Stop
+        return ($null -ne $rule)
+    } catch {
+        return $false
+    }
+}
+
+function Get-FirewallRulesInGroup {
+    try {
+        return @(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction Stop)
+    } catch {
+        return @()
+    }
+}
+
 function Get-ManagedRuleNames {
-    $rules = Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue
-    if (-not $rules) { return @() }
+    $rules = Get-FirewallRulesInGroup
+    if (-not $rules -or $rules.Count -eq 0) { return @() }
     # SB-2.1.2: also report the fail-closed rule's survival (diagnostic only;
     # the Agent never validates or displays ruleNames shapes).
     return @($rules | Where-Object { $_.Name -like 'DevRelay-SandboxGen-*' -or $_.Name -eq $FailClosedRuleName } | Select-Object -ExpandProperty Name)
@@ -325,8 +424,9 @@ function Write-SandboxAllowState {
 # contain the localized exception message or any input value -- only the
 # exception's .NET type name (never localized) and the script line number
 # it was thrown from, e.g. "System.ArgumentException at line 426". The
-# on-screen Write-Error calls separately still show the full (possibly
-# localized) message for human diagnosis; only state.json is restricted.
+# on-screen Write-Host calls (SB-2.1.3: never Write-Error, see that cycle's
+# header note) separately still show the full (possibly localized) message
+# for human diagnosis; only state.json is restricted.
 function Format-ErrorCode {
     param($ErrorRecord)
     $typeName = "UnknownException"
@@ -507,7 +607,7 @@ try {
             ruleNames         = @(Get-ManagedRuleNames)
             error             = "self_check_failed"
         }
-        Write-Error "IPv4 complement self-check failed. Aborting without changing any firewall rule."
+        Write-Host "[ERROR] IPv4 complement self-check failed. Aborting without changing any firewall rule." -ForegroundColor Red
         exit 1
     }
     # Wrap the function result with @() at the call site: PowerShell's
@@ -516,17 +616,42 @@ try {
     # string instead of a 1-element array (0 and 2+ elements are unaffected).
     $ipv4RangeStrings = @(Format-Ipv4RangeStrings -Ranges $ipv4['Complement'])
 
+    # Cycle SB-2.1.3 (hp630g9 real-machine bug): round-trip every range string
+    # before it is ever handed to New-NetFirewallRule (see the function's header
+    # comment). This must run before the FIRST New-NetFirewallRule call below.
+    if (-not (Test-Ipv4RangeStringsSelfCheck -RangeStrings $ipv4RangeStrings -Ranges $ipv4['Complement'])) {
+        Write-SandboxAllowState @{
+            reconcilerVersion = $ReconcilerVersion
+            result            = "error"
+            appliedAt         = [DateTimeOffset]::UtcNow.ToString("o")
+            digest            = $null
+            applied           = @()
+            rejectedCount     = 0
+            rejected          = @()
+            ruleNames         = @(Get-ManagedRuleNames)
+            error             = "range_format_self_check_failed"
+        }
+        Write-Host "[ERROR] IPv4 range string self-check failed. Aborting without changing any firewall rule." -ForegroundColor Red
+        exit 1
+    }
+
     # --- create the new generation's rules (idempotent: skip any rule whose
     #     exact Name already exists). Track what THIS run actually created so
     #     a failure partway through can be rolled back without touching the
-    #     previous generation. ---
+    #     previous generation. $expectedRuleNames collects every rule name this
+    #     generation needs regardless of whether it was created just now or
+    #     already existed -- verified to actually exist (via a fresh firewall
+    #     query, not by trusting the New-NetFirewallRule call's own return)
+    #     before anything is deleted below. ---
     $createdThisRun = New-Object System.Collections.Generic.List[string]
+    $expectedRuleNames = New-Object System.Collections.Generic.List[string]
     try {
         $ipv4RuleName = "DevRelay-SandboxGen-$gen-ipv4"
-        if (-not (Get-NetFirewallRule -Name $ipv4RuleName -ErrorAction SilentlyContinue)) {
+        $expectedRuleNames.Add($ipv4RuleName)
+        if (-not (Test-FirewallRuleExists -Name $ipv4RuleName)) {
             New-NetFirewallRule -Name $ipv4RuleName -DisplayName "DevRelay Sandbox - Block IPv4 except allowed (gen $gen)" `
                 -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol Any `
-                -RemoteAddress $ipv4RangeStrings | Out-Null
+                -RemoteAddress $ipv4RangeStrings -ErrorAction Stop | Out-Null
             $createdThisRun.Add($ipv4RuleName)
         }
 
@@ -538,10 +663,11 @@ try {
             $portComplement = @(Get-PortComplementRanges -AllowedPorts $ports)
             if ($portComplement.Count -gt 0) {
                 $tcpRuleName = "DevRelay-SandboxGen-$gen-tcp-$tcpIndex"
-                if (-not (Get-NetFirewallRule -Name $tcpRuleName -ErrorAction SilentlyContinue)) {
+                $expectedRuleNames.Add($tcpRuleName)
+                if (-not (Test-FirewallRuleExists -Name $tcpRuleName)) {
                     New-NetFirewallRule -Name $tcpRuleName -DisplayName "DevRelay Sandbox - Block TCP except allowed ports for $($group.Name) (gen $gen)" `
                         -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol TCP `
-                        -RemoteAddress $group.Name -RemotePort $portComplement | Out-Null
+                        -RemoteAddress $group.Name -RemotePort $portComplement -ErrorAction Stop | Out-Null
                     $createdThisRun.Add($tcpRuleName)
                 }
             }
@@ -550,19 +676,22 @@ try {
 
         if ($destinations.Count -gt 0) {
             $udpRuleName = "DevRelay-SandboxGen-$gen-udp"
-            if (-not (Get-NetFirewallRule -Name $udpRuleName -ErrorAction SilentlyContinue)) {
+            $expectedRuleNames.Add($udpRuleName)
+            if (-not (Test-FirewallRuleExists -Name $udpRuleName)) {
                 $allIps = @($destinations | Select-Object -ExpandProperty ip -Unique)
                 New-NetFirewallRule -Name $udpRuleName -DisplayName "DevRelay Sandbox - Block UDP to allowed destinations (gen $gen)" `
                     -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol UDP `
-                    -RemoteAddress $allIps | Out-Null
+                    -RemoteAddress $allIps -ErrorAction Stop | Out-Null
                 $createdThisRun.Add($udpRuleName)
             }
         }
     } catch {
         # Roll back only what THIS run created; the previous generation is
-        # left exactly as it was (never a widening moment).
+        # left exactly as it was (never a widening moment). $err is captured
+        # first so rollback's own swallowed removals can't overwrite it.
+        $err = $_
         foreach ($name in $createdThisRun) {
-            Remove-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
+            try { Remove-NetFirewallRule -Name $name -ErrorAction Stop } catch { }
         }
         Write-SandboxAllowState @{
             reconcilerVersion = $ReconcilerVersion
@@ -573,23 +702,51 @@ try {
             rejectedCount     = 0
             rejected          = @()
             ruleNames         = @(Get-ManagedRuleNames)
-            error             = "rule_creation_failed: $(Format-ErrorCode $_)"
+            error             = "rule_creation_failed: $(Format-ErrorCode $err)"
         }
-        Write-Error "Firewall rule creation failed (line $($_.InvocationInfo.ScriptLineNumber)); rolled back this run's new rules. Previous generation left unchanged. $_"
+        Write-Host "[ERROR] Firewall rule creation failed (line $($err.InvocationInfo.ScriptLineNumber)); rolled back this run's new rules. Previous generation left unchanged. $err" -ForegroundColor Red
         exit 1
     }
 
-    # --- new generation fully created: delete any OTHER generation now, AND
-    #     remove the fail-closed rule install-sandbox-host.ps1 created before
-    #     ever invoking this script (SB-2.1.2). Both removals happen only
-    #     here, after every new-generation rule above succeeded -- never
-    #     before, and never inside the catch block above. ---
-    $staleRules = Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like 'DevRelay-SandboxGen-*' -and $_.Name -notlike "DevRelay-SandboxGen-$gen-*" }
-    if ($staleRules) {
-        $staleRules | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    # Cycle SB-2.1.3 (hp630g9 real-machine bug): verify every rule this
+    # generation needs is actually present -- via a fresh firewall query, not
+    # by trusting that the New-NetFirewallRule calls above didn't silently
+    # fail -- BEFORE deleting the stale generation or the fail-closed
+    # rule below. If even one is missing, delete nothing except what this run
+    # just created; the previous generation and the fail-closed rule are left
+    # standing exactly as they were.
+    $missingRuleNames = @($expectedRuleNames.ToArray() | Where-Object { -not (Test-FirewallRuleExists -Name $_) })
+    if ($missingRuleNames.Count -gt 0) {
+        foreach ($name in $createdThisRun) {
+            try { Remove-NetFirewallRule -Name $name -ErrorAction Stop } catch { }
+        }
+        Write-SandboxAllowState @{
+            reconcilerVersion = $ReconcilerVersion
+            result            = "error"
+            appliedAt         = [DateTimeOffset]::UtcNow.ToString("o")
+            digest            = $null
+            applied           = @()
+            rejectedCount     = 0
+            rejected          = @()
+            ruleNames         = @(Get-ManagedRuleNames)
+            error             = "rule_verification_failed: $($missingRuleNames.Count) missing"
+        }
+        Write-Host "[ERROR] Rule verification failed after creation: $($missingRuleNames.Count) expected rule(s) not found. Rolled back this run's new rules; previous generation and fail-closed rule left unchanged." -ForegroundColor Red
+        exit 1
     }
-    Remove-NetFirewallRule -Name $FailClosedRuleName -ErrorAction SilentlyContinue
+
+    # --- new generation fully created AND verified present: delete any OTHER
+    #     generation now, AND remove the fail-closed rule install-sandbox-host.ps1
+    #     created before ever invoking this script (SB-2.1.2). Both removals
+    #     happen only here, after every new-generation rule above was confirmed
+    #     to exist -- never before, and never inside a catch block above. ---
+    $staleRules = @(Get-FirewallRulesInGroup | Where-Object { $_.Name -like 'DevRelay-SandboxGen-*' -and $_.Name -notlike "DevRelay-SandboxGen-$gen-*" })
+    if ($staleRules.Count -gt 0) {
+        $staleRules | Remove-NetFirewallRule -ErrorAction Stop
+    }
+    if (Test-FirewallRuleExists -Name $FailClosedRuleName) {
+        Remove-NetFirewallRule -Name $FailClosedRuleName -ErrorAction Stop
+    }
 
     Write-SandboxAllowState @{
         reconcilerVersion = $ReconcilerVersion
@@ -603,10 +760,16 @@ try {
         error             = $null
     }
     Write-Host "[OK] Applied generation $gen ($($destinations.Count) destination(s))." -ForegroundColor Green
+    exit 0
 } catch {
-    # Last-resort catch: an unexpected exception anywhere above. Always try
-    # to leave a state.json behind so the Agent can fail closed instead of
-    # waiting indefinitely for a file that never appears.
+    # Last-resort catch: an unexpected exception anywhere above (including a
+    # failure to delete the stale generation / fail-closed rule just above,
+    # which is intentionally NOT swallowed -- the new generation's rules are
+    # already verified present at that point, so the overall state stays safe
+    # even if this report is "error" rather than "ok"). $err is captured
+    # immediately so the best-effort inner Write-SandboxAllowState attempt
+    # below can never overwrite it.
+    $err = $_
     try {
         Write-SandboxAllowState @{
             reconcilerVersion = $ReconcilerVersion
@@ -617,11 +780,17 @@ try {
             rejectedCount     = 0
             rejected          = @()
             ruleNames         = @(Get-ManagedRuleNames)
-            error             = "unexpected_error: $(Format-ErrorCode $_)"
+            error             = "unexpected_error: $(Format-ErrorCode $err)"
         }
     } catch {
         # Even state.json could not be written; nothing more we can do here.
     }
-    Write-Error "Unexpected error in apply-sandbox-allowlist.ps1 (line $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
+    # Cycle SB-2.1.3: Write-Error is never used in this script -- under
+    # $ErrorActionPreference = "Stop" it becomes a terminating
+    # WriteErrorException itself, which previously masked the real exception
+    # (hp630g9: state.json recorded "WriteErrorException at line 578" instead
+    # of the actual CimException). Write-Host reports the same information
+    # without that risk.
+    Write-Host "[ERROR] Unexpected error in apply-sandbox-allowlist.ps1 (line $($err.InvocationInfo.ScriptLineNumber)): $($err.Exception.Message)" -ForegroundColor Red
     exit 1
 }

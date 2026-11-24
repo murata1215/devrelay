@@ -55,6 +55,28 @@
 //   rollback（失敗時）のブロック内に紛れ込む（緩む瞬間を作ってしまう）
 // - E4: state.json の error にローカライズされた例外本文（Exception.Message）がそのまま
 //   書き戻される（ASCII の型名＋行番号のみであるべき）
+//
+// サイクル SB-2.1.3 で追加（hp630g9 実機: 2つの独立した不具合の根治。
+// (1) ConvertFrom-Ipv4Value の桁あふれにより IPv4 範囲文字列が常に誤っており、
+// 許可先が空のときに終了アドレス < 開始アドレスの文字列を生成して
+// New-NetFirewallRule が CimException 0x80070057 で拒否した。
+// (2) そのエラーが `&` 直接実行では非終了エラーとして握りつぶされ、
+// スクリプトが「作成できた」とみなして旧世代と全遮断ルールを削除し、
+// IPv4 が全開になった）:
+// - F1: New-NetFirewallRule / Remove-NetFirewallRule / Get-NetFirewallRule の
+//   呼び出しに -ErrorAction Stop が無くなる（呼び出し方や $ErrorActionPreference
+//   に依存する挙動が復活する）
+// - F2: ConvertFrom-Ipv4Value が桁連鎖する除算（"$v = [uint64]($v / 256)" 型）に
+//   戻る（丸めが上位桁に混入する既存バグの再発）
+// - F3: 範囲文字列の往復自己検査（Test-Ipv4RangeStringsSelfCheck）が無くなる、
+//   または最初の New-NetFirewallRule 呼び出しより後に移動する
+// - F4: 新世代に必要なルール名の実在確認が、旧世代・fail-closed ルールの削除より
+//   後に移動する、または削除前に確認しなくなる
+// - F5: コード行に Write-Error が復活する（$ErrorActionPreference = "Stop" の下では
+//   Write-Error 自体が終端エラーになり、元の例外を隠す）
+// - F6: 例外を再利用する catch（ロールバック＋ Format-ErrorCode 報告の両方を行う
+//   もの）が、先頭で $err = $_ に退避せず $_ を直接使う（ロールバック中の
+//   入れ子 catch が $_ を上書きして元のエラーを消してしまう）
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -457,12 +479,134 @@ describe('サイクル SB-2.1.2: List[object] に @() を使わない（hp630g9 
     assert.match(body, /InvocationInfo\.ScriptLineNumber/);
   });
 
-  test('E4: 画面の Write-Error は行番号を含める', () => {
+  test('F5: コード行に Write-Error が無く、catch 内の画面表示（Write-Host）が行番号を含む', () => {
     const source = readScript('scripts/apply-sandbox-allowlist.ps1');
-    const writeErrorCalls = [...source.matchAll(/Write-Error "[^\n]*"/g)];
-    assert.ok(writeErrorCalls.length > 0, 'Write-Error 呼び出しが見つかること');
-    const withLineNumber = writeErrorCalls.filter((c) => c[0].includes('ScriptLineNumber'));
-    assert.ok(withLineNumber.length > 0, '少なくとも1つの Write-Error が行番号 (ScriptLineNumber) を含むこと');
+    const codeWithWriteError = codeLinesOf(source).filter((line) => line.includes('Write-Error'));
+    assert.deepEqual(
+      codeWithWriteError,
+      [],
+      'コード行（コメント以外）に Write-Error が無いこと（$ErrorActionPreference = "Stop" の下では' +
+        'Write-Error 自体が終端エラーになり元の例外を隠すため、サイクル SB-2.1.3 で全廃した）',
+    );
+    const writeHostErrorCalls = [...source.matchAll(/Write-Host "\[ERROR\][^\n]*"/g)];
+    assert.ok(writeHostErrorCalls.length > 0, 'Write-Host "[ERROR] ..." の呼び出しが見つかること');
+    const withLineNumber = writeHostErrorCalls.filter((c) => c[0].includes('ScriptLineNumber'));
+    assert.ok(withLineNumber.length > 0, '少なくとも1つの [ERROR] Write-Host が行番号 (ScriptLineNumber) を含むこと');
+  });
+});
+
+describe('サイクル SB-2.1.3: apply-sandbox-allowlist.ps1 がルール作成失敗時に全遮断ルールを消す不具合の根治（hp630g9 実機）', () => {
+  const source = readScript('scripts/apply-sandbox-allowlist.ps1');
+
+  test('F1: New-NetFirewallRule の呼び出しは全て -ErrorAction Stop 付き', () => {
+    const ruleBlocks = [...source.matchAll(/New-NetFirewallRule[\s\S]*?\| Out-Null/g)];
+    assert.ok(ruleBlocks.length >= 2, 'New-NetFirewallRule の呼び出しが見つかること');
+    for (const block of ruleBlocks) {
+      assert.match(block[0], /-ErrorAction Stop/, `-ErrorAction Stop を使うこと: ${block[0].slice(0, 80)}...`);
+    }
+  });
+
+  test('F1: Remove-NetFirewallRule の呼び出しは全て -ErrorAction Stop 付き（-ErrorAction SilentlyContinue は無い）', () => {
+    const codeWithSilentRemove = codeLinesOf(source).filter(
+      (line) => line.includes('Remove-NetFirewallRule') && line.includes('-ErrorAction SilentlyContinue'),
+    );
+    assert.deepEqual(codeWithSilentRemove, [], 'Remove-NetFirewallRule が -ErrorAction SilentlyContinue で呼ばれていないこと');
+    const removeLines = codeLinesOf(source).filter((line) => line.includes('Remove-NetFirewallRule'));
+    assert.ok(removeLines.length > 0, 'Remove-NetFirewallRule の呼び出しが見つかること');
+    for (const line of removeLines) {
+      assert.match(line, /-ErrorAction Stop/, `-ErrorAction Stop を使うこと: ${line.trim()}`);
+    }
+  });
+
+  test('F1: Get-NetFirewallRule の直接呼び出しは全て -ErrorAction Stop 付き（SilentlyContinue は無い。存在確認・取得は専用ヘルパー経由）', () => {
+    // コメント行（Get-NetFirewallRule への言及）を実呼び出しと誤認しないよう、
+    // codeLinesOf でコメント行を除いてから判定する（A3/A5/B6 等と同じ既存の手口）。
+    const calls = codeLinesOf(source).filter((line) => line.includes('Get-NetFirewallRule'));
+    assert.ok(calls.length > 0, 'Get-NetFirewallRule の呼び出しが見つかること');
+    for (const call of calls) {
+      assert.ok(!call.includes('SilentlyContinue'), `-ErrorAction SilentlyContinue を使わないこと: ${call.trim()}`);
+      assert.match(call, /-ErrorAction Stop/, `-ErrorAction Stop を使うこと: ${call.trim()}`);
+    }
+  });
+
+  test('F1: 存在確認・グループ取得は Test-FirewallRuleExists / Get-FirewallRulesInGroup ヘルパー経由のみ（直接呼び出しはヘルパー定義内の2箇所だけ）', () => {
+    const directCalls = codeLinesOf(source).filter((line) => line.includes('Get-NetFirewallRule'));
+    assert.equal(directCalls.length, 2, `Get-NetFirewallRule の直接呼び出しは2箇所（ヘルパー定義内）のみであること: 実際 ${directCalls.length} 箇所`);
+    assert.match(source, /function Test-FirewallRuleExists/);
+    assert.match(source, /function Get-FirewallRulesInGroup/);
+  });
+
+  test('F2: ConvertFrom-Ipv4Value は桁を独立計算する（連鎖する "[uint64]($v / 256)" 型の除算に戻っていない）', () => {
+    const idx = source.indexOf('function ConvertFrom-Ipv4Value');
+    assert.ok(idx !== -1, 'ConvertFrom-Ipv4Value が見つかること');
+    const body = source.slice(idx, source.indexOf('\n}', idx));
+    // コメント中の旧バグの説明文字列（ドキュメント目的の引用）をコード行と誤認しないよう、
+    // codeLinesOf でコメント行を除いてから判定する。
+    const codeBody = codeLinesOf(body).join('\n');
+    assert.ok(!/\$v\s*=\s*\[uint64\]\(\$v\s*\/\s*256\)/.test(codeBody), '桁連鎖する除算パターンが無いこと（丸めの混入バグの再発防止）');
+    assert.match(codeBody, /\[math\]::Floor/, '[math]::Floor による独立計算を使うこと');
+  });
+
+  test('F3: 範囲文字列の往復自己検査（Test-Ipv4RangeStringsSelfCheck）が存在し、最初の New-NetFirewallRule 呼び出しより前で呼ばれる', () => {
+    assert.match(source, /function Test-Ipv4RangeStringsSelfCheck/);
+    const checkCallIdx = source.indexOf('Test-Ipv4RangeStringsSelfCheck -RangeStrings');
+    const firstRuleCreateIdx = source.indexOf('New-NetFirewallRule -Name $ipv4RuleName');
+    assert.ok(checkCallIdx !== -1 && firstRuleCreateIdx !== -1, '両方が見つかること');
+    assert.ok(checkCallIdx < firstRuleCreateIdx, '自己検査の呼び出しが最初の New-NetFirewallRule より前であること');
+  });
+
+  test('F4: 新世代に必要なルール名の実在確認が、旧世代削除・fail-closed ルール削除より前にある', () => {
+    const verifyIdx = source.indexOf('$missingRuleNames');
+    const staleDeleteIdx = source.indexOf('$staleRules = @(Get-FirewallRulesInGroup');
+    const failClosedDeleteIdx = source.indexOf('Remove-NetFirewallRule -Name $FailClosedRuleName -ErrorAction Stop');
+    assert.ok(verifyIdx !== -1 && staleDeleteIdx !== -1 && failClosedDeleteIdx !== -1, '3箇所とも見つかること');
+    assert.ok(verifyIdx < staleDeleteIdx, '実在確認が旧世代削除より前であること');
+    assert.ok(verifyIdx < failClosedDeleteIdx, '実在確認が fail-closed ルール削除より前であること');
+  });
+
+  test('F4: 実在確認で1本でも欠けていれば、このランで作った分だけ削除して firewall の他の変更は行わない', () => {
+    const idx = source.indexOf('if ($missingRuleNames.Count -gt 0) {');
+    assert.ok(idx !== -1, '実在確認の分岐が見つかること');
+    const body = source.slice(idx, source.indexOf('exit 1', idx) + 'exit 1'.length);
+    assert.match(body, /Remove-NetFirewallRule -Name \$name/, 'createdThisRun のみを削除すること');
+    assert.ok(!body.includes('$staleRules'), '旧世代の削除を行わないこと');
+    assert.ok(!body.includes('$FailClosedRuleName'), 'fail-closed ルールの削除を行わないこと');
+  });
+
+  test('F6: ロールバック + Format-ErrorCode 報告を両方行う catch は、先頭で $err = $_ に退避する', () => {
+    // 候補を "} catch {" の全出現から探すが、ロールバック内の使い捨て
+    // "try { Remove-NetFirewallRule ... } catch { }" のような trivial な catch を
+    // 誤検出しないよう、ウィンドウ内に Remove-NetFirewallRule / Format-ErrorCode /
+    // Write-SandboxAllowState の3つ全てがあることを要求する（rule_creation_failed を
+    // 報告する本物の catch はこの3つを全て含む唯一の候補になる）。
+    const catchStarts = [...source.matchAll(/\}\s*catch\s*\{/g)].map((m) => m.index);
+    const catchesWithRollbackAndFormat = catchStarts.filter((start) => {
+      const body = source.slice(start, start + 1400);
+      return (
+        body.includes('Remove-NetFirewallRule') &&
+        body.includes('Format-ErrorCode') &&
+        body.includes('Write-SandboxAllowState')
+      );
+    });
+    assert.ok(catchesWithRollbackAndFormat.length > 0, 'ロールバック+Format-ErrorCode を行う catch が見つかること');
+    for (const start of catchesWithRollbackAndFormat) {
+      const body = source.slice(start, start + 400);
+      assert.match(body, /\$err\s*=\s*\$_/, `catch の先頭付近で $err = $_ に退避すること: ${body.slice(0, 120)}`);
+    }
+  });
+
+  test('F6: 最後の catch（unexpected error）も先頭で $err = $_ に退避し、Format-ErrorCode と画面表示の両方がそれを使う', () => {
+    // "} catch {" の最後の出現（lastIndexOf）は、ロールバック内の trivial な
+    // "catch { }" に当たってしまうため使わない。"unexpected_error: ..." という
+    // 固有のマーカー文字列から逆方向に検索して、それを含む catch の開始位置を特定する。
+    const markerIdx = source.indexOf('unexpected_error: $(Format-ErrorCode $err)');
+    assert.ok(markerIdx !== -1, 'unexpected_error マーカーが見つかること');
+    const idx = source.lastIndexOf('} catch {', markerIdx);
+    assert.ok(idx !== -1);
+    const body = source.slice(idx, idx + 1700);
+    assert.match(body, /\$err\s*=\s*\$_/);
+    assert.match(body, /Format-ErrorCode \$err/);
+    assert.match(body, /\$err\.InvocationInfo\.ScriptLineNumber/);
   });
 });
 
