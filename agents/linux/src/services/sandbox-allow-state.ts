@@ -63,6 +63,117 @@ export function parseSandboxAllowState(raw: string | null): SandboxAllowState | 
 
 export type SandboxAllowReconcileDecision = 'match' | 'apply-needed' | 'mismatch';
 
+// -----------------------------------------------------------------------------
+// サイクル SB-2.1.5: 反映待ちの時間判定（純関数）
+//
+// hp630g9（SB-2.1.4、commit 992ae26）実機確認で発覚: `reconcileSandboxAllowDestinations()`
+// はタスク起動後 10 秒しか `state.json` を待たず、実機のファイアウォール操作（
+// Remove-NetFirewallRule / New-NetFirewallRule）はそれより時間がかかるため、Agent がタスクを
+// 起動して待つ経路は一度も成功していなかった（直後に確認すると反映自体は成功していた）。
+// 「基本 60 秒・タスクが実行中なら最大 180 秒まで待つ」判定をここに集約する。
+// -----------------------------------------------------------------------------
+
+/** 基本の待ち時間（決定3の「最大 10 秒」を撤回し 60 秒へ。SB-2.1.5） */
+export const SANDBOX_ALLOW_APPLY_WAIT_MS = 60_000;
+/** タスクが実行中と観測できている間だけ延長してよい上限（SB-2.1.5） */
+export const SANDBOX_ALLOW_APPLY_MAX_WAIT_MS = 180_000;
+/** `schtasks /Run` 直後はタスクの State がまだ `Ready` に見える可能性があるため、
+ *  この猶予の間は「終了済み」という probe 結果を信用しない（SB-2.1.5） */
+export const SANDBOX_ALLOW_TASK_START_GRACE_MS = 5_000;
+
+export type SandboxAllowTaskState = 'running' | 'finished' | 'unknown';
+
+/**
+ * `Get-ScheduledTask ... | Select State` の出力（`State` 列挙名、英語固定）を解釈する。
+ * `schtasks /Query` の「状態: 実行中」は日本語 Windows で localize されるため使わない
+ * （probe コマンド自体は `sandbox-allow-apply.ts` 側で `Get-ScheduledTask` を使う設計にする）。
+ * 失敗・空・未知の文字列は `'unknown'`（fail-open: probe 失敗は待ち続ける側に倒す。
+ * 全体の可否は digest 一致のみで決める fail-closed のまま変わらない）。
+ */
+export function interpretSandboxAllowTaskState(stdout: string): SandboxAllowTaskState {
+  const trimmed = stdout.trim();
+  if (trimmed === 'Running' || trimmed === 'Queued') return 'running';
+  if (trimmed === 'Ready' || trimmed === 'Disabled') return 'finished';
+  return 'unknown';
+}
+
+/** `state.json` の `appliedAt`（ISO 文字列）が `sinceMs` より後に書かれたものかどうか。
+ *  パース不能・null は false（fail-closed: 「新しい結果が出た」と誤認して早期に諦めない）。 */
+export function isSandboxAllowStateFresherThan(state: SandboxAllowState | null, sinceMs: number): boolean {
+  if (state === null || state.appliedAt === null) return false;
+  const appliedAtMs = Date.parse(state.appliedAt);
+  if (Number.isNaN(appliedAtMs)) return false;
+  return appliedAtMs > sinceMs;
+}
+
+export type SandboxAllowWaitDecision = 'done' | 'wait' | 'give-up';
+
+export interface SandboxAllowWaitInput {
+  /** 今回の判定が `decideSandboxAllowReconcile()` で `match` になるか（digest 一致 かつ `result: 'ok'`） */
+  stateMatched: boolean;
+  /** `state.json` の `appliedAt` が今回 `request.json` を書いた時刻より後か
+   *  （`isSandboxAllowStateFresherThan()`。新しい結果が出たのに不一致なら、待っても変わらない） */
+  stateFresh: boolean;
+  /** タスク起動後の経過時間（ms） */
+  elapsedMs: number;
+  /** タスク状態の probe 結果（`'unknown'` は probe 失敗または未実施） */
+  taskState: SandboxAllowTaskState;
+  /** これまでに `taskState === 'running'` を一度でも観測したか
+   *  （`/Run` 直後の「まだ Ready に見える」誤判定を区別するため） */
+  observedRunning: boolean;
+}
+
+/**
+ * タスク起動後、結果ファイルの反映を待ち続けるべきかを判定する（SB-2.1.5）。
+ * 優先順位: 一致 → 新しい結果が出たのに不一致（待っても変わらない） → 最大待ち超過 →
+ *   タスク終了済み（起動直後の猶予は除く） → 基本待ち超過かつ実行中でない → それ以外は待つ。
+ */
+export function decideSandboxAllowWait(input: SandboxAllowWaitInput): SandboxAllowWaitDecision {
+  if (input.stateMatched) return 'done';
+  if (input.stateFresh) return 'give-up';
+  if (input.elapsedMs >= SANDBOX_ALLOW_APPLY_MAX_WAIT_MS) return 'give-up';
+  if (
+    input.taskState === 'finished' &&
+    (input.observedRunning || input.elapsedMs >= SANDBOX_ALLOW_TASK_START_GRACE_MS)
+  ) {
+    return 'give-up';
+  }
+  if (input.elapsedMs >= SANDBOX_ALLOW_APPLY_WAIT_MS && input.taskState !== 'running') {
+    return 'give-up';
+  }
+  return 'wait';
+}
+
+export type SandboxAllowApplyOutcome = 'applied' | 'pending' | 'failed';
+
+export interface SandboxAllowApplyOutcomeInput {
+  /** 最終的な一致判定（`decideSandboxAllowReconcile()` の結果が `'match'` か） */
+  matched: boolean;
+  /** 読み取れた最新の `state.json` */
+  state: SandboxAllowState | null;
+  /** `state.json` の `appliedAt` が今回の要求より後か（`isSandboxAllowStateFresherThan()`） */
+  stateFresh: boolean;
+  /** タスク起動コマンド自体の失敗（`schtasks`/`/Run` が例外を投げた） */
+  taskRunError: string | null;
+  /** 待っている間に `taskState === 'running'` を一度でも観測したか */
+  observedRunning: boolean;
+}
+
+/**
+ * 反映結果を「成功」「反映中（まだ分からない。再送を促す）」「失敗（これ以上待っても無駄）」の
+ * 3 つに分類する（SB-2.1.5）。チャット向けの拒否文言を 2 種類に分けるための判定。
+ */
+export function classifySandboxAllowApplyOutcome(input: SandboxAllowApplyOutcomeInput): SandboxAllowApplyOutcome {
+  if (input.matched) return 'applied';
+  if (input.state !== null && (input.state.result === 'error' || input.state.result === 'rejected')) {
+    // 今回の要求に対する結果だと確信できる場合のみ failed とする（古い error が残っているだけの
+    // 可能性があるなら pending 側に倒す）。
+    if (input.stateFresh) return 'failed';
+  }
+  if (input.taskRunError !== null && !input.observedRunning) return 'failed';
+  return 'pending';
+}
+
 export interface SandboxAllowReconcileInput {
   /** `resolveSandboxAllowDestinations()` が返した件数（0 なら未設定/空） */
   configuredCount: number;

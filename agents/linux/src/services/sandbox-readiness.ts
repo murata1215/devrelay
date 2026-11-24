@@ -28,6 +28,8 @@ export type SandboxDenyReason =
   | 'project_folder_not_writable'
   // サイクル SB-2.1: 許可リスト（IP とポート）の検証・反映
   | 'allow_destinations_invalid'
+  // サイクル SB-2.1.5: 反映中（まだ分からない。再送を促す）と、反映に失敗したと確信できる場合を区別
+  | 'allow_destinations_apply_pending'
   | 'allow_destinations_not_applied'
   // サイクル SB-1a-2: チャット経路のターン単位の拒否理由（`decideSandboxTurnEligibility()`）
   | 'target_undecidable'
@@ -62,6 +64,9 @@ export interface SandboxPreflightInput {
   /** サイクル SB-2.1: 直接通信の許可リストが実際のファイアウォールのルールに反映済みか
    *  （`reconcileSandboxAllowDestinations()` の結果。未設定/空かつ結果ファイル無しも true） */
   allowDestinationsApplied: boolean;
+  /** サイクル SB-2.1.5: 反映がまだ完了していないが、失敗したとは確信できない状態か
+   *  （`outcome === 'pending'`。`allowDestinationsApplied` が false の場合のみ意味を持つ） */
+  allowDestinationsPending: boolean;
   /** 名前付きパイプへの接続が成功したか */
   pipeConnected: boolean;
   /** ハンドシェイクのプロトコル版が一致したか */
@@ -92,8 +97,8 @@ export interface SandboxPreflightInput {
 /**
  * Sandbox 実行を許可してよいか判定する。既定は拒否。全項目を満たしたときのみ許可する。
  * 判定順序: 構造判定（コスト0） → capability → 実行ファイル健全性 → 許可リスト妥当性
- *   → 直接通信許可リスト（IP とポート）の妥当性・反映済みか → パイプ接続 → プロトコル版
- *   → 署名 → 身元 → プローブ → ホスト側読み書き確認。
+ *   → 直接通信許可リスト（IP とポート）の妥当性・反映済みか（反映中 pending と失敗を区別、SB-2.1.5）
+ *   → パイプ接続 → プロトコル版 → 署名 → 身元 → プローブ → ホスト側読み書き確認。
  */
 export function decideSandboxPreflight(input: SandboxPreflightInput): SandboxPreflightDecision {
   if (input.disabledBySwitch) return { allowed: false, reason: 'disabled_by_switch' };
@@ -105,7 +110,11 @@ export function decideSandboxPreflight(input: SandboxPreflightInput): SandboxPre
   if (input.claudeExecutableFallbackActive) return { allowed: false, reason: 'claude_executable_fallback_active' };
   if (!input.allowlistValid) return { allowed: false, reason: 'allowlist_invalid' };
   if (!input.allowDestinationsValid) return { allowed: false, reason: 'allow_destinations_invalid' };
-  if (!input.allowDestinationsApplied) return { allowed: false, reason: 'allow_destinations_not_applied' };
+  if (!input.allowDestinationsApplied) {
+    return input.allowDestinationsPending
+      ? { allowed: false, reason: 'allow_destinations_apply_pending' }
+      : { allowed: false, reason: 'allow_destinations_not_applied' };
+  }
   if (!input.pipeConnected) return { allowed: false, reason: 'pipe_unreachable' };
   if (!input.protocolVersionMatch) return { allowed: false, reason: 'protocol_version_mismatch' };
   if (!input.signatureValid) return { allowed: false, reason: 'signature_invalid' };
@@ -131,6 +140,9 @@ export function decideSandboxPreflight(input: SandboxPreflightInput): SandboxPre
  * 文言には `session` / `resume` / `Prompt is too long` を含めない（ai-runner.ts の
  * resume 失敗 retry 誤判定 (`:1987-1995`) に紛れ込ませないため。SB-1a-1 では配線しないが、
  * SB-1a-2 以降の配線を見据えて今のうちに固定する）。
+ * また `⏳` で始めてはならない（`connection.ts` の `output.startsWith('⏳')` 判定で進捗専用
+ * チャンクとして扱われ、最終回答から除外されてしまうため。SB-2.1.5 で追加した
+ * `allow_destinations_apply_pending` も含め、全拒否文言はこの制約を満たす）。
  */
 const SANDBOX_DENIAL_MESSAGES: Record<SandboxDenyReason, string> = {
   disabled_by_switch: '❌ Sandbox 実行はこのマシンで無効化されています（DEVRELAY_SANDBOX_DISABLE）。',
@@ -142,7 +154,8 @@ const SANDBOX_DENIAL_MESSAGES: Record<SandboxDenyReason, string> = {
   claude_executable_fallback_active: '❌ 同梱の claude 実行ファイルが見つからず代替パスを使っているため、Sandbox 実行を拒否しました。',
   allowlist_invalid: '❌ Sandbox の許可リスト設定が不正なため、実行を拒否しました。',
   allow_destinations_invalid: '❌ Sandbox の許可する接続先（config.yaml の sandbox.allowDestinations）が不正なため、実行を拒否しました。',
-  allow_destinations_not_applied: '❌ Sandbox の許可する接続先をファイアウォールへ反映できませんでした。管理者で install-sandbox-host.ps1 を再実行してください。',
+  allow_destinations_apply_pending: '❌ Sandbox の許可する接続先をファイアウォールへ反映中です（時間がかかっています）。少し待ってからもう一度送ってください。',
+  allow_destinations_not_applied: '❌ Sandbox の許可する接続先をファイアウォールへ反映できませんでした（反映処理がエラーを記録しています）。管理者で install-sandbox-host.ps1 を再実行してください。',
   pipe_unreachable: '❌ Sandbox Host に接続できません。サービスが起動しているか確認してください。',
   protocol_version_mismatch: '❌ Sandbox Host のプロトコル版が一致しません。インストールスクリプトを再実行してください。',
   signature_invalid: '❌ Sandbox Host の署名検証に失敗しました。実行を拒否しました。',

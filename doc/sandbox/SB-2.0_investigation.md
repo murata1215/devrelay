@@ -230,6 +230,15 @@ sandbox:
 
 この形は「設定は書いたがまだ一度も反映されていない PC」を壊さずに保ちつつ、ずれが解消しない場合は常に安全側（拒否）に倒す。
 
+> **サイクル SB-2.1.5 で「最大 10 秒」を撤回**: hp630g9（commit 992ae26）実機確認で、実際のファイア
+> ウォール操作（`Remove-NetFirewallRule` / `New-NetFirewallRule`）が 10 秒を超え、Agent がタスクを
+> 起動して待つ経路が一度も成功していなかったことが発覚（直後の確認では反映自体は成功していた）。
+> 基本の待ちを 60 秒へ延ばし、`Get-ScheduledTask` でタスクが実行中と観測できている間は最大 180 秒
+> まで延長する方式に変更した（`sandbox-allow-state.ts` の `decideSandboxAllowWait()`）。あわせて
+> タイムアウト時の拒否を「反映中（再送を促す, pending）」と「反映失敗が確定（failed）」に分離した
+> （`classifySandboxAllowApplyOutcome()`、`sandbox-readiness.ts` の `allow_destinations_apply_pending`）。
+> 詳細は `doc/devlog/` の SB-2.1.5 エントリ参照。
+
 ---
 
 ## F. 既存インストール（hp630g9）の移行とアンインストール

@@ -122,7 +122,10 @@ export async function sandboxStatusCommand(options: { project?: string }): Promi
 
   const config = await loadConfig();
   const result = await withSandboxProxy(() =>
-    runSandboxPreflightCheck(projectPath, { allowDestinations: config.sandbox?.allowDestinations }),
+    runSandboxPreflightCheck(projectPath, {
+      allowDestinations: config.sandbox?.allowDestinations,
+      onProgress: (message) => console.log(chalk.gray(`  ${message}`)),
+    }),
   );
 
   printCheck(`DEVRELAY_SANDBOX_DISABLE が設定されていない`, !isSandboxDisabledBySwitch());
@@ -172,6 +175,10 @@ export async function sandboxStatusCommand(options: { project?: string }): Promi
     }
     if (allow.taskRunError) {
       console.log(chalk.yellow(`  タスク起動エラー: ${allow.taskRunError}`));
+    }
+    if (!allow.applied) {
+      // SB-2.1.5: 反映中（pending）と失敗（failed）を区別して表示する
+      console.log(chalk.gray(`  反映結果の分類: ${allow.outcome}`));
     }
     printCheck(`設定と実際のファイアウォールのルールが一致`, allow.applied);
   }
@@ -396,6 +403,7 @@ export async function sandboxSelftestCommand(options: {
   await withSandboxProxy(async (session) => {
     const result = await runSandboxPreflightCheck(projectPath, {
       allowDestinations: selftestConfig.sandbox?.allowDestinations,
+      onProgress: (message) => console.log(chalk.gray(`  ${message}`)),
     });
     if (!result.decision.allowed) {
       printDenialWithHint(result.decision.reason, projectPath);

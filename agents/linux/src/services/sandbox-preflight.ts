@@ -83,6 +83,8 @@ export interface SandboxPreflightCheckOptions {
   allowlist?: string[];
   /** サイクル SB-2.1: `config.yaml` の `sandbox.allowDestinations`（未指定なら空集合扱い） */
   allowDestinations?: string[];
+  /** サイクル SB-2.1.5: 許可リストの反映待ち中に呼ばれる進捗通知（呼び出し側が表示手段を選ぶ） */
+  onProgress?: (message: string) => void;
 }
 
 async function readSandboxPublicKey(): Promise<string> {
@@ -108,7 +110,11 @@ export async function runSandboxPreflightCheck(
   const allowlistResolution = resolveSandboxAllowlist(options.allowlist);
   // サイクル SB-2.1: 直接通信の許可リスト（IP とポート）の検証・反映確認。パイプ接続より前に
   // 行う（高コストなハンドシェイクを、どうせ拒否になる設定不一致の後に払わないため）。
-  const allowDestinations = await reconcileSandboxAllowDestinations(options.allowDestinations);
+  const allowDestinations = await reconcileSandboxAllowDestinations(
+    options.allowDestinations,
+    undefined,
+    options.onProgress,
+  );
 
   let projectPathUnderUserProfile = true; // 判定できない場合は fail-closed（配下とみなす）
   try {
@@ -163,6 +169,7 @@ export async function runSandboxPreflightCheck(
     allowlistValid: allowlistResolution.ok,
     allowDestinationsValid: allowDestinations.valid,
     allowDestinationsApplied: allowDestinations.applied,
+    allowDestinationsPending: allowDestinations.outcome === 'pending',
     pipeConnected,
     protocolVersionMatch: handshake ? handshake.protocolVersion === SANDBOX_PROTOCOL_VERSION : false,
     signatureValid: handshake ? handshake.signatureValid : false,
@@ -228,6 +235,9 @@ export async function prepareSandboxLaunch(input: PrepareSandboxLaunchInput): Pr
       terminalMode: false,
       allowlist: input.sandboxSettings?.allowlist,
       allowDestinations: input.sandboxSettings?.allowDestinations,
+      // サイクル SB-2.1.5: 反映待ちの間、チャットへ 1 行出す（`⏳` prefix で進捗専用チャンクとして
+      // 扱われ、最終回答には混ざらない。connection.ts の `output.startsWith('⏳')` 規約）。
+      onProgress: (message) => input.onOutput(`⏳ ${message}\n`, false),
     });
     if (!check.decision.allowed) {
       input.onOutput(buildSandboxDenialMessage(check.decision.reason), true);

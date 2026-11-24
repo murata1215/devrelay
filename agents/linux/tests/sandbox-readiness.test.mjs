@@ -23,6 +23,7 @@ function baseInput(overrides = {}) {
     allowlistValid: true,
     allowDestinationsValid: true,
     allowDestinationsApplied: true,
+    allowDestinationsPending: false,
     pipeConnected: true,
     protocolVersionMatch: true,
     signatureValid: true,
@@ -56,6 +57,7 @@ describe('sandbox-readiness: decideSandboxPreflight（表駆動 fail-closed）',
     [{ allowlistValid: false }, 'allowlist_invalid'],
     [{ allowDestinationsValid: false }, 'allow_destinations_invalid'],
     [{ allowDestinationsApplied: false }, 'allow_destinations_not_applied'],
+    [{ allowDestinationsApplied: false, allowDestinationsPending: true }, 'allow_destinations_apply_pending'],
     [{ pipeConnected: false }, 'pipe_unreachable'],
     [{ protocolVersionMatch: false }, 'protocol_version_mismatch'],
     [{ signatureValid: false }, 'signature_invalid'],
@@ -92,6 +94,18 @@ describe('sandbox-readiness: decideSandboxPreflight（表駆動 fail-closed）',
   test('複数項目が同時に NG でも最初に当たった理由（判定順序どおり）を返す', () => {
     const decision = decideSandboxPreflight(baseInput({ platform: 'linux', pipeConnected: false }));
     assert.deepEqual(decision, { allowed: false, reason: 'unsupported_platform' });
+  });
+
+  test('SB-2.1.5: 許可リスト構文が不正なら、未反映かつ pending でも allow_destinations_invalid が先に当たる', () => {
+    const decision = decideSandboxPreflight(
+      baseInput({ allowlistValid: true, allowDestinationsValid: false, allowDestinationsApplied: false, allowDestinationsPending: true }),
+    );
+    assert.deepEqual(decision, { allowed: false, reason: 'allow_destinations_invalid' });
+  });
+
+  test('SB-2.1.5: allowDestinationsApplied が true なら allowDestinationsPending の値は無視される', () => {
+    const decision = decideSandboxPreflight(baseInput({ allowDestinationsApplied: true, allowDestinationsPending: true }));
+    assert.deepEqual(decision, { allowed: true });
   });
 
   test('全ての SandboxDenyReason に対応するメッセージが存在し、空文字でない', () => {
