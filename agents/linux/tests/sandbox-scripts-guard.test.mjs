@@ -120,6 +120,7 @@ const SANDBOX_PS1_FILES = [
   'scripts/install-sandbox-host.ps1',
   'scripts/uninstall-sandbox-host.ps1',
   'scripts/apply-sandbox-allowlist.ps1',
+  'scripts/tests/test-apply-sandbox-allowlist.ps1',
 ];
 
 describe('sandbox .ps1: ASCII のみ（A1: PowerShell 5.1 の ANSI 誤読によるParserError再発防止）', () => {
@@ -393,6 +394,7 @@ describe('サイクル SB-2.1.2: List[object] に @() を使わない（hp630g9 
     'scripts/install-sandbox-host.ps1',
     'scripts/uninstall-sandbox-host.ps1',
     'scripts/apply-sandbox-allowlist.ps1',
+    'scripts/tests/test-apply-sandbox-allowlist.ps1',
   ];
 
   for (const relPath of SANDBOX_PS1_RELPATHS) {
@@ -705,5 +707,41 @@ describe('SB-2.1.1: Invoke-NativeCommand 共有ヘルパー（hp630g9 の schtas
     for (const line of inheritanceLines) {
       assert.ok(!line.includes('-AllowFailure'), `/inheritance:r は -AllowFailure 無しであること: ${line.trim()}`);
     }
+  });
+});
+
+describe('サイクル SB-2.1.4: apply-sandbox-allowlist.ps1 が Group-Object / -ExpandProperty をハッシュテーブルに使わない（hp630g9 実機バグ「プロパティ "port" が見つかりません」の再発防止）', () => {
+  const applySource = readScript('scripts/apply-sandbox-allowlist.ps1');
+
+  test('G1: コード行に Group-Object が無い（$destinations はハッシュテーブル配列であり、Windows PowerShell 5.1 ではキーがプロパティとして解決されない）', () => {
+    const codeWithGroupObject = codeLinesOf(applySource).filter((line) => line.includes('Group-Object'));
+    assert.deepEqual(
+      codeWithGroupObject,
+      [],
+      'コード行（コメント以外）に Group-Object が無いこと（hp630g9 実機バグの原因箇所）',
+    );
+  });
+
+  test('G2: -ExpandProperty は本物の CIM オブジェクト相手の "-ExpandProperty Name" 以外に使わない', () => {
+    const calls = codeLinesOf(applySource).filter((line) => line.includes('-ExpandProperty'));
+    assert.ok(calls.length > 0, '-ExpandProperty の呼び出しが見つかること（Get-ManagedRuleNames 内の安全な1箇所）');
+    for (const call of calls) {
+      assert.match(call, /-ExpandProperty Name\b/, `-ExpandProperty は Name のみに使うこと（ハッシュテーブル相手には使わない）: ${call.trim()}`);
+    }
+  });
+
+  test('G3: このテスト群が置き換える3つのアンカー文字列が apply-sandbox-allowlist.ps1 に存在する（test-apply-sandbox-allowlist.ps1 が将来の変更で静かに無意味化しないこと）', () => {
+    assert.ok(
+      applySource.includes('$ProgramDataDir = "C:\\ProgramData\\devrelay\\sandbox"'),
+      'test-apply-sandbox-allowlist.ps1 が置き換える $ProgramDataDir の初期値リテラルが見つかること',
+    );
+    assert.ok(
+      applySource.includes(
+        '$sidObj = (New-Object System.Security.Principal.NTAccount($ServiceAccountName)).Translate([System.Security.Principal.SecurityIdentifier])',
+      ),
+      'test-apply-sandbox-allowlist.ps1 が置き換えるサービス SID 解決行が見つかること',
+    );
+    const idx = applySource.indexOf('$ErrorActionPreference = "Stop"');
+    assert.ok(idx !== -1, 'test-apply-sandbox-allowlist.ps1 がスタブの dot-source を挿入する $ErrorActionPreference = "Stop" が見つかること');
   });
 });

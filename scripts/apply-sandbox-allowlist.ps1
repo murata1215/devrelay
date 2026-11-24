@@ -89,6 +89,26 @@
 # place, so a broken reconciliation can never result in IPv4 being wide
 # open. This script never creates DevRelay-SandboxFailClosed-ipv4 itself.
 #
+# Cycle SB-2.1.4 note (hp630g9 real-machine bug): on Windows PowerShell 5.1,
+# "Group-Object -Property ip" and "Select-Object -ExpandProperty port" (or
+# "-ExpandProperty ip") against an array of PLAIN HASHTABLES (the shape
+# $destinations always is -- see "@{ ip = $ip; port = $port }" below) do NOT
+# resolve the hashtable's keys as properties. Group-Object silently produces
+# one group with an empty Name (no exception); Select-Object -ExpandProperty
+# throws "PSArgumentException: Property ... port ... cannot be found" (this
+# was the exact error reported from hp630g9 -- it happens to be the second of
+# the two calls, so the first one's silent wrong answer was never seen). This
+# is specific to Hashtable; it does not affect [pscustomobject] or real CIM
+# objects (see the safe "-ExpandProperty Name" call against a real rule
+# object returned by Get-NetFirewallRule -Group, elsewhere in this script).
+# The per-destination TCP/UDP rule-building loop below therefore never uses Group-Object or
+# -ExpandProperty on $destinations; it aggregates ports per IP with a plain
+# foreach and direct ".ip" / ".port" member access instead (that member
+# access DOES work on a hashtable in both PowerShell 5.1 and 7 -- only the
+# cmdlet-level property *resolution* used by Group-Object/-ExpandProperty is
+# the part that fails). Do not reintroduce Group-Object or -ExpandProperty
+# against $destinations or anything derived from it.
+#
 # Cycle SB-2.1.3 note (hp630g9 real-machine bug, two independent failures):
 # (1) ConvertFrom-Ipv4Value had a rounding bug (see that function's header)
 # that made every IPv4 range string this script ever produced wrong; for the
@@ -655,19 +675,41 @@ try {
             $createdThisRun.Add($ipv4RuleName)
         }
 
-        $byIp = $destinations | Group-Object -Property ip
+        # SB-2.1.4: aggregate ports per IP with a plain foreach and direct
+        # ".ip" / ".port" member access instead of Group-Object -Property /
+        # Select-Object -ExpandProperty (see the cycle note at the top of
+        # this file for why those two do not work against $destinations'
+        # hashtable elements on Windows PowerShell 5.1). IPs are then
+        # processed in ascending numeric order so that "tcp-<N>" is
+        # deterministic for a given destination set, regardless of the order
+        # entries appeared in request.json.
+        $ipOrder = New-Object System.Collections.Generic.List[string]
+        $portsByIp = @{}
+        foreach ($d in $destinations) {
+            if (-not $portsByIp.ContainsKey($d.ip)) {
+                $portsByIp[$d.ip] = New-Object System.Collections.Generic.List[int]
+                $ipOrder.Add($d.ip)
+            }
+            $portsByIp[$d.ip].Add($d.port)
+        }
+        # .ToArray() before Sort-Object: same "never hand a List[...] variable
+        # to a pipeline via @() or |" rule as the SB-2.1.2 note above (applied
+        # consistently even though List[string] itself is not known to be
+        # affected by the underlying @() bug).
+        $sortedIps = @($ipOrder.ToArray() | Sort-Object { ConvertTo-Ipv4Value $_ })
+
         $tcpIndex = 0
-        foreach ($group in $byIp) {
-            $ports = @($group.Group | Select-Object -ExpandProperty port)
+        foreach ($ipKey in $sortedIps) {
+            $ports = $portsByIp[$ipKey].ToArray()
             # See the @() note above Format-Ipv4RangeStrings: same reason.
             $portComplement = @(Get-PortComplementRanges -AllowedPorts $ports)
             if ($portComplement.Count -gt 0) {
                 $tcpRuleName = "DevRelay-SandboxGen-$gen-tcp-$tcpIndex"
                 $expectedRuleNames.Add($tcpRuleName)
                 if (-not (Test-FirewallRuleExists -Name $tcpRuleName)) {
-                    New-NetFirewallRule -Name $tcpRuleName -DisplayName "DevRelay Sandbox - Block TCP except allowed ports for $($group.Name) (gen $gen)" `
+                    New-NetFirewallRule -Name $tcpRuleName -DisplayName "DevRelay Sandbox - Block TCP except allowed ports for $ipKey (gen $gen)" `
                         -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol TCP `
-                        -RemoteAddress $group.Name -RemotePort $portComplement -ErrorAction Stop | Out-Null
+                        -RemoteAddress $ipKey -RemotePort $portComplement -ErrorAction Stop | Out-Null
                     $createdThisRun.Add($tcpRuleName)
                 }
             }
@@ -678,10 +720,12 @@ try {
             $udpRuleName = "DevRelay-SandboxGen-$gen-udp"
             $expectedRuleNames.Add($udpRuleName)
             if (-not (Test-FirewallRuleExists -Name $udpRuleName)) {
-                $allIps = @($destinations | Select-Object -ExpandProperty ip -Unique)
+                # $sortedIps already holds each IP exactly once (it was built
+                # from $portsByIp's keys above), so no further de-dup is
+                # needed here.
                 New-NetFirewallRule -Name $udpRuleName -DisplayName "DevRelay Sandbox - Block UDP to allowed destinations (gen $gen)" `
                     -Group $FirewallGroup -Direction Outbound -LocalUser $LocalUserSddl -Action Block -Protocol UDP `
-                    -RemoteAddress $allIps -ErrorAction Stop | Out-Null
+                    -RemoteAddress $sortedIps -ErrorAction Stop | Out-Null
                 $createdThisRun.Add($udpRuleName)
             }
         }
