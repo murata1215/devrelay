@@ -4,6 +4,7 @@ import { connectToServer } from './services/connection.js';
 import { loadProjects, autoDiscoverProjects } from './services/projects.js';
 import { logClaudeExecutableStatus, resolveSystemClaude } from './services/ai-runner.js';
 import { prependBinDir } from './services/node-bin-path.js';
+import { buildClaudeWrapperCmd } from './services/win-script-file.js';
 import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import os from 'os';
@@ -63,7 +64,7 @@ function ensureDevrelaySymlinks() {
 
     if (isWindows) {
       // Windows: .cmd バッチファイルを作成
-      writeFileSync(devrelayClaude, `@echo off\r\n"${claudePath}" %*\r\n`);
+      writeFileSync(devrelayClaude, buildClaudeWrapperCmd(claudePath));
     } else {
       // Linux: シンボリックリンクを作成
       symlinkSync(claudePath, devrelayClaude);

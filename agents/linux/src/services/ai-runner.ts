@@ -8,6 +8,7 @@ import { DEFAULT_ALLOWED_TOOLS_LINUX, PLAN_READONLY_TOOLS, PLAN_READONLY_BASH_CO
 import type { AiTool, AiUsageData, ScreenAnalysis, Language, GeminiCapabilities, GeminiDegradeReason, GeminiSessionDegradeReason } from '@devrelay/shared';
 import type { AgentConfig } from './config.js';
 import { getBinDir } from './config.js';
+import { buildClaudeWrapperCmd } from './win-script-file.js';
 import { parseStreamJsonLine, formatContextUsage, isContextWarning, getContextWarningMessage, type ContextUsage } from './output-parser.js';
 import { matchesToolRule, isAllowedByRules, decidePlanPermission } from './plan-permission.js';
 import { classifyCliFailure, isWorkspaceTrustError } from './cli-failure.js';
@@ -4299,7 +4300,7 @@ export function resolveClaudePath(): string {
       fs.mkdirSync(devrelayBinDir, { recursive: true });
       if (isWindows) {
         // Windows: .cmd バッチファイルを作成（管理者権限不要）
-        fs.writeFileSync(devrelayClaudePath, `@echo off\r\n"${claudePath}" %*\r\n`);
+        fs.writeFileSync(devrelayClaudePath, buildClaudeWrapperCmd(claudePath));
       } else {
         // Linux: シンボリックリンクを作成
         fs.symlinkSync(claudePath, devrelayClaudePath);

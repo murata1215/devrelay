@@ -43,6 +43,7 @@ import { DEFAULTS, DEFAULT_ALLOWED_TOOLS_LINUX, tChat, DEFAULT_CHAT_LANGUAGE, co
 import { saveConfig, getConfigDir, getBinDir, type AgentConfig } from './config.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resolveScreenAnalysis, registerScreenAnalysisResolver, unregisterScreenAnalysisResolver, resolveResponseSummary, registerResponseSummaryResolver, unregisterResponseSummaryResolver, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { writeFileAtomic } from './atomic-write.js';
+import { writeVbsFile, writePs1File } from './win-script-file.js';
 import { decideAgentUpdateAction } from './update-guard-rules.js';
 import { buildFixCrontabCommand } from './crontab-fix-rules.js';
 import { prependBinDir } from './node-bin-path.js';
@@ -694,11 +695,11 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           const cmdPath = join(getBinDir(), 'start-agent.cmd');
           if (existsSync(cmdPath)) {
             const restartVbsPath = join(getConfigDir(), 'logs', 'restart-agent.vbs');
-            writeFileSync(restartVbsPath,
+            // UTF-16LE + BOM で書く（日本語ユーザー名のパスが wscript で化けないように、2026-11-25）
+            writeVbsFile(restartVbsPath,
               `WScript.Sleep 2000\r\n` +
               `Set WshShell = CreateObject("WScript.Shell")\r\n` +
-              `WshShell.Run """${cmdPath}""", 0, False\r\n`,
-              'utf-8'
+              `WshShell.Run """${cmdPath}""", 0, False\r\n`
             );
             const child = spawn('wscript.exe', [restartVbsPath], {
               detached: true,
@@ -3833,7 +3834,8 @@ async function handleAgentUpdate() {
     ];
 
     const scriptPath = join(logsDir, 'update.ps1');
-    writeFileSync(scriptPath, scriptLines.join('\n'), 'utf-8');
+    // UTF-8 + BOM で書く（Windows PowerShell 5.1 が日本語パスを ANSI と誤読しないように、2026-11-25）
+    writePs1File(scriptPath, scriptLines.join('\n'));
 
     // VBS ラッパーで PowerShell を起動（DETACHED_PROCESS 問題を回避）
     // .Run の第2引数 0 = 非表示、第3引数 False = 完了を待たない
@@ -3842,7 +3844,7 @@ async function handleAgentUpdate() {
       `objShell.Run "powershell -ExecutionPolicy Bypass -NoProfile -File ""${scriptPath}""", 0, False`,
     ].join('\r\n');
     const vbsPath = join(logsDir, 'update.vbs');
-    writeFileSync(vbsPath, vbsContent, 'utf-8');
+    writeVbsFile(vbsPath, vbsContent);
 
     console.log(`📝 Update script: ${scriptPath}`);
     console.log(`📝 Update VBS wrapper: ${vbsPath}`);
