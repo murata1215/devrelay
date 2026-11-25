@@ -9,6 +9,8 @@
  * （fail-closed。「制限なしで実行してしまう」経路を作らない）。
  */
 
+import { buildSandboxCliCommand } from './sandbox-cli-hint.js';
+
 export type SandboxDenyReason =
   | 'disabled_by_switch'
   | 'unsupported_platform'
@@ -135,45 +137,133 @@ export function decideSandboxPreflight(input: SandboxPreflightInput): SandboxPre
 }
 
 /**
- * 拒否理由ごとの日本語メッセージ（固定の `Record` なので、`SandboxDenyReason` に新しい値を
- * 追加するとコンパイルエラーで検知できる＝書き忘れを防ぐ）。
- * 文言には `session` / `resume` / `Prompt is too long` を含めない（ai-runner.ts の
- * resume 失敗 retry 誤判定 (`:1987-1995`) に紛れ込ませないため。SB-1a-1 では配線しないが、
- * SB-1a-2 以降の配線を見据えて今のうちに固定する）。
- * また `⏳` で始めてはならない（`connection.ts` の `output.startsWith('⏳')` 判定で進捗専用
- * チャンクとして扱われ、最終回答から除外されてしまうため。SB-2.1.5 で追加した
- * `allow_destinations_apply_pending` も含め、全拒否文言はこの制約を満たす）。
+ * チャットの拒否文に埋め込む実行環境のパス。呼び出し側で収集して渡すことで、文言生成自体は
+ * I/O を持たない純関数に保つ。
  */
-const SANDBOX_DENIAL_MESSAGES: Record<SandboxDenyReason, string> = {
-  disabled_by_switch: '❌ Sandbox 実行はこのマシンで無効化されています（DEVRELAY_SANDBOX_DISABLE）。',
-  unsupported_platform: '❌ Sandbox 実行は Windows 専用です。',
-  unsupported_ai_tool: '❌ Sandbox 実行は Claude Code 専用です（実際に使う AI ツールが異なります）。',
-  terminal_mode_unsupported: '❌ Sandbox 実行は端末インタフェースモードに対応していません。',
-  project_path_under_user_profile: '❌ プロジェクトの場所が開発者のホーム配下のため、Sandbox 実行を拒否しました。別の場所へ移してください。',
-  capability_not_declared: '❌ この Agent は Sandbox 実行に対応していません。更新してください。',
-  claude_executable_fallback_active: '❌ 同梱の claude 実行ファイルが見つからず代替パスを使っているため、Sandbox 実行を拒否しました。',
-  allowlist_invalid: '❌ Sandbox の許可リスト設定が不正なため、実行を拒否しました。',
-  allow_destinations_invalid: '❌ Sandbox の許可する接続先（config.yaml の sandbox.allowDestinations）が不正なため、実行を拒否しました。',
-  allow_destinations_apply_pending: '❌ Sandbox の許可する接続先をファイアウォールへ反映中です（時間がかかっています）。少し待ってからもう一度送ってください。',
-  allow_destinations_not_applied: '❌ Sandbox の許可する接続先をファイアウォールへ反映できませんでした（反映処理がエラーを記録しています）。管理者で install-sandbox-host.ps1 を再実行してください。',
-  pipe_unreachable: '❌ Sandbox Host に接続できません。サービスが起動しているか確認してください。',
-  protocol_version_mismatch: '❌ Sandbox Host のプロトコル版が一致しません。インストールスクリプトを再実行してください。',
-  signature_invalid: '❌ Sandbox Host の署名検証に失敗しました。実行を拒否しました。',
-  identity_mismatch: '❌ Sandbox Host の身元が期待と異なります。実行を拒否しました。',
-  block_probe_failed: '❌ 外向き通信の遮断を確認できなかったため、実行を拒否しました。',
-  loopback_probe_failed: '❌ 中継プロキシへの到達を確認できなかったため、実行を拒否しました。',
-  claude_executable_unreadable: '❌ Sandbox Host が claude 実行ファイルを読み取れません。`devrelay sandbox prep` を実行してください。',
-  project_folder_not_writable: '❌ Sandbox Host がプロジェクトフォルダに書き込めません。`devrelay sandbox prep` を実行してください。',
-  target_undecidable: '❌ Sandbox 対象の設定（config.yaml の sandbox.projects）が不正なため、このマシンの Sandbox 対象ターンを拒否しました。',
-  raw_mode_unsupported: '❌ Sandbox 実行はこのターンの種別（raw）に対応していません。',
-  ephemeral_session_unsupported: '❌ Sandbox 実行は一時セッション（クロス ask・引継ぎ生成等）に対応していません。',
-  handover_turn_unsupported: '❌ Sandbox 実行は引継ぎターンに対応していません。',
-  sandbox_token_missing: '❌ Sandbox 用のトークンが登録されていません。`devrelay sandbox set-token` を実行してください。',
-};
+export interface SandboxDenialMessageContext {
+  platform: string;
+  nodeExe: string;
+  cliEntry: string;
+  projectPath: string;
+  /** 管理者が実行する Host インストーラーの絶対パス。配布 Agent で不明なら省略する。 */
+  installScriptPath?: string;
+  /** 開発者の設定ファイルの絶対パス。 */
+  configPath?: string;
+}
 
-/** 拒否理由に対応する日本語メッセージを返す。 */
-export function buildSandboxDenialMessage(reason: SandboxDenyReason): string {
-  return SANDBOX_DENIAL_MESSAGES[reason];
+function cliCommand(context: SandboxDenialMessageContext, subcommand: string, includeProject = false): string {
+  return buildSandboxCliCommand({
+    platform: context.platform,
+    nodeExe: context.nodeExe,
+    cliEntry: context.cliEntry,
+    subcommand,
+    projectPath: includeProject ? context.projectPath : undefined,
+  });
+}
+
+function setupGuideLine(): string {
+  return '全体の手順は doc/sandbox/SETUP.md';
+}
+
+function installHostLines(context: SandboxDenialMessageContext): string[] {
+  if (context.installScriptPath) {
+    return [
+      '管理者: 管理者 PowerShell で次を実行してください。',
+      `& "${context.installScriptPath}"`,
+    ];
+  }
+  return ['管理者: DevRelay のクローンで scripts\\install-sandbox-host.ps1 を実行してください。'];
+}
+
+/**
+ * 拒否理由ごとの日本語メッセージ。準備が不足する理由では、判定順で最初に見つかった 1 件だけの
+ * 次の手順を 3〜6 行で返す。`context` を省略する旧来の CLI 呼び出しにも短い説明を返す。
+ *
+ * 文言には `session` / `resume` / `Prompt is too long` を含めない（ai-runner.ts の
+ * resume 失敗 retry 誤判定 (`:1987-1995`) に紛れ込ませないため）。
+ * また `⏳` で始めてはならない（`connection.ts` の `output.startsWith('⏳')` 判定で進捗専用
+ * チャンクとして扱われ、最終回答から除外されてしまうため）。
+ */
+export function buildSandboxDenialMessage(reason: SandboxDenyReason, context?: SandboxDenialMessageContext): string {
+  if (!context) return '❌ Sandbox で実行できません。doc/sandbox/SETUP.md を確認してください。';
+
+  let lines: string[];
+  switch (reason) {
+    case 'pipe_unreachable':
+      lines = ['❌ Sandbox で実行できません: Sandbox Host が準備・起動されていません。', ...installHostLines(context)];
+      break;
+    case 'protocol_version_mismatch':
+    case 'signature_invalid':
+    case 'identity_mismatch':
+    case 'block_probe_failed':
+    case 'loopback_probe_failed':
+      lines = ['❌ Sandbox で実行できません: Sandbox Host の確認に失敗しました。', ...installHostLines(context)];
+      break;
+    case 'sandbox_token_missing':
+      lines = [
+        '❌ Sandbox で実行できません: Sandbox 用トークンが未登録です。',
+        '開発者: 通常の PowerShell で次を実行し、claude setup-token の値を貼り付けてください。',
+        cliCommand(context, 'sandbox set-token'),
+      ];
+      break;
+    case 'claude_executable_unreadable':
+    case 'project_folder_not_writable':
+      lines = [
+        '❌ Sandbox で実行できません: プロジェクトへの Sandbox 権限が未準備です。',
+        '開発者: 通常の PowerShell で次を実行してください。',
+        cliCommand(context, 'sandbox prep', true),
+      ];
+      break;
+    case 'project_path_under_user_profile':
+      lines = [
+        '❌ Sandbox で実行できません: プロジェクトが開発者のホーム配下にあります。',
+        '開発者: プロジェクトを C:\\dev などホーム外へ移してから、次を実行してください。',
+        cliCommand(context, 'sandbox prep', true),
+      ];
+      break;
+    case 'allowlist_invalid':
+    case 'allow_destinations_invalid':
+    case 'target_undecidable':
+      lines = [
+        '❌ Sandbox で実行できません: Sandbox の設定が正しくありません。',
+        `開発者: ${context.configPath ?? '%APPDATA%\\devrelay\\config.yaml'} の sandbox 設定を修正してください。`,
+        cliCommand(context, 'sandbox status', true),
+      ];
+      break;
+    case 'allow_destinations_apply_pending':
+      lines = [
+        '❌ Sandbox で実行できません: 許可リストをファイアウォールへ反映中です。',
+        '開発者: 少し待ってから同じメッセージをもう一度送ってください。',
+      ];
+      break;
+    case 'allow_destinations_not_applied':
+      lines = ['❌ Sandbox で実行できません: 許可リストの反映に失敗しました。', ...installHostLines(context)];
+      break;
+    case 'disabled_by_switch':
+      lines = ['❌ Sandbox で実行できません: この PC で Sandbox が無効化されています。', '開発者: DEVRELAY_SANDBOX_DISABLE=1 を解除して Agent を再起動してください。'];
+      break;
+    case 'unsupported_platform':
+      lines = ['❌ Sandbox で実行できません: Sandbox は Windows 専用です。', '開発者: Windows の Agent で実行してください。'];
+      break;
+    case 'unsupported_ai_tool':
+      lines = ['❌ Sandbox で実行できません: Sandbox は Claude Code 専用です。', '開発者: AI ツールを Claude Code に変更して再実行してください。'];
+      break;
+    case 'terminal_mode_unsupported':
+      lines = ['❌ Sandbox で実行できません: 端末インタフェースモードには対応していません。', '開発者: 端末インタフェースモードを OFF にして再実行してください。'];
+      break;
+    case 'capability_not_declared':
+      lines = ['❌ Sandbox で実行できません: この Agent は Sandbox に対応していません。', '開発者: Windows 用の最新 Agent に更新して再接続してください。'];
+      break;
+    case 'claude_executable_fallback_active':
+      lines = ['❌ Sandbox で実行できません: 同梱の Claude Code 実行ファイルがありません。', '開発者: Agent を更新してから再実行してください。'];
+      break;
+    case 'raw_mode_unsupported':
+    case 'ephemeral_session_unsupported':
+    case 'handover_turn_unsupported':
+      lines = ['❌ Sandbox で実行できません: この種類のチャット実行には対応していません。', '開発者: 通常のチャットで再実行してください。'];
+      break;
+  }
+  return [...lines, setupGuideLine()].join('\n');
 }
 
 // -----------------------------------------------------------------------------

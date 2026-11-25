@@ -126,6 +126,57 @@ describe('sandbox-readiness: decideSandboxPreflight（表駆動 fail-closed）',
   });
 });
 
+describe('sandbox-readiness: 拒否文の準備手順（SB-2.2）', () => {
+  const context = {
+    platform: 'win32',
+    nodeExe: 'C:\\Users\\keisuke\\AppData\\Roaming\\devrelay\\node\\node.exe',
+    cliEntry: 'C:\\Users\\keisuke\\AppData\\Roaming\\devrelay\\agent\\dist\\cli\\index.js',
+    projectPath: 'C:\\dev\\new-sandbox-project',
+    installScriptPath: 'C:\\dev\\devrelay\\scripts\\install-sandbox-host.ps1',
+    configPath: 'C:\\Users\\keisuke\\AppData\\Roaming\\devrelay\\config.yaml',
+  };
+  const allReasons = [
+    'disabled_by_switch', 'unsupported_platform', 'unsupported_ai_tool', 'terminal_mode_unsupported',
+    'project_path_under_user_profile', 'capability_not_declared', 'claude_executable_fallback_active',
+    'allowlist_invalid', 'pipe_unreachable', 'protocol_version_mismatch', 'signature_invalid',
+    'identity_mismatch', 'block_probe_failed', 'loopback_probe_failed', 'claude_executable_unreadable',
+    'project_folder_not_writable', 'allow_destinations_invalid', 'allow_destinations_apply_pending',
+    'allow_destinations_not_applied', 'target_undecidable', 'raw_mode_unsupported',
+    'ephemeral_session_unsupported', 'handover_turn_unsupported', 'sandbox_token_missing',
+  ];
+
+  for (const reason of allReasons) {
+    test(`${reason}: 短い拒否文に SETUP.md と秘密でない案内がある`, () => {
+      const message = buildSandboxDenialMessage(reason, context);
+      const lines = message.split('\n');
+      assert.ok(lines.length >= 3 && lines.length <= 6, `reason=${reason} lines=${lines.length}`);
+      assert.match(lines[0], /^❌ Sandbox で実行できません:/);
+      assert.equal(lines.at(-1), '全体の手順は doc/sandbox/SETUP.md');
+      assert.equal(message.startsWith('⏳'), false);
+      assert.equal(message.includes('sk-ant-secret-value'), false);
+      assert.equal(message.includes('session'), false);
+      assert.equal(message.includes('resume'), false);
+      assert.equal(message.includes('Prompt is too long'), false);
+    });
+  }
+
+  test('prep 未実施なら開発者向けの実パス入りコマンドだけを示す', () => {
+    const message = buildSandboxDenialMessage('project_folder_not_writable', context);
+    assert.match(message, /開発者: 通常の PowerShell/);
+    assert.match(message, /C:\\Users\\keisuke\\AppData\\Roaming\\devrelay\\node\\node\.exe/);
+    assert.match(message, /C:\\Users\\keisuke\\AppData\\Roaming\\devrelay\\agent\\dist\\cli\\index\.js/);
+    assert.match(message, /sandbox prep --project "C:\\dev\\new-sandbox-project"/);
+    assert.equal(message.includes('管理者:'), false);
+  });
+
+  test('Host 未導入なら管理者向けの実パス入りインストールだけを示す', () => {
+    const message = buildSandboxDenialMessage('pipe_unreachable', context);
+    assert.match(message, /管理者: 管理者 PowerShell/);
+    assert.match(message, /& "C:\\dev\\devrelay\\scripts\\install-sandbox-host\.ps1"/);
+    assert.equal(message.includes('sandbox prep'), false);
+  });
+});
+
 describe('sandbox-readiness: interpretSandboxBlockProbe（陽性対照・fail-closed）', () => {
   test('connected=true は reachable', () => {
     assert.equal(interpretSandboxBlockProbe({ connected: true, timedOut: false }), 'reachable');

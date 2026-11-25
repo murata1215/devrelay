@@ -45,7 +45,7 @@ import { resolveProjectRootReal, checkCrossAskPath } from './cross-ask-path-guar
 // 単一のチョークポイント（`sendPromptToAiImpl()`、端末モード/SDK 分岐より前）のみで行う。
 import { decideSandboxTarget } from './sandbox-target.js';
 import { decideSandboxTurnEligibility, buildSandboxDenialMessage } from './sandbox-readiness.js';
-import { isSandboxDisabledBySwitch, prepareSandboxLaunch, type SandboxLaunch } from './sandbox-preflight.js';
+import { isSandboxDisabledBySwitch, prepareSandboxLaunch, buildRuntimeSandboxDenialContext, type SandboxLaunch } from './sandbox-preflight.js';
 import { loadConfig as loadAgentConfigFresh } from './config.js';
 // サイクルSB-1b: サーバーが伝えた Project.sandboxEnabled を sessionId 単位で引く（retryOptions の
 // 取りこぼしに頼らない。sandbox-session-flag.ts 参照）。
@@ -2418,7 +2418,7 @@ async function sendPromptToAiImpl(
         handoverTurn: !!options.handoverTurn,
       });
       if (!gate.allowed) {
-        onOutput(buildSandboxDenialMessage(gate.reason), true);
+        onOutput(buildSandboxDenialMessage(gate.reason, buildRuntimeSandboxDenialContext(projectPath)), true);
         return {};
       }
       const launch = await prepareSandboxLaunch({

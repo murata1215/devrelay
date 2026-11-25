@@ -13,10 +13,12 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import {
   getSandboxTokenPath,
   getSandboxPublicKeyPath,
   getSandboxHomeDir,
+  getConfigDir,
   type AgentConfig,
 } from './config.js';
 import {
@@ -41,6 +43,7 @@ import { resolveSandboxAllowlist } from './sandbox-allowlist.js';
 import {
   decideSandboxPreflight,
   buildSandboxDenialMessage,
+  type SandboxDenialMessageContext,
   type SandboxPreflightInput,
   type SandboxDenyReason,
 } from './sandbox-readiness.js';
@@ -55,6 +58,21 @@ import {
 } from './sandbox-allow-apply.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+/** チャットの拒否文へ渡す、この Agent で実行可能な実パスを組み立てる。 */
+export function buildRuntimeSandboxDenialContext(projectPath: string): SandboxDenialMessageContext {
+  const cliEntry = process.argv[1] ?? '';
+  const repoInstallScript = path.resolve(path.dirname(cliEntry), '../../../..', 'scripts', 'install-sandbox-host.ps1');
+  return {
+    platform: process.platform,
+    nodeExe: process.execPath,
+    cliEntry,
+    projectPath,
+    // Agent がリポジトリ外へ配布されている場合は、存在しない推測パスを表示しない。
+    installScriptPath: existsSync(repoInstallScript) ? repoInstallScript : undefined,
+    configPath: path.join(getConfigDir(), 'config.yaml'),
+  };
+}
 
 /** `DEVRELAY_SANDBOX_DISABLE` キルスイッチ（既定 `0`）。`1` なら sandbox 要求ターンを全部拒否する。 */
 export function isSandboxDisabledBySwitch(): boolean {
@@ -240,7 +258,7 @@ export async function prepareSandboxLaunch(input: PrepareSandboxLaunchInput): Pr
       onProgress: (message) => input.onOutput(`⏳ ${message}\n`, false),
     });
     if (!check.decision.allowed) {
-      input.onOutput(buildSandboxDenialMessage(check.decision.reason), true);
+      input.onOutput(buildSandboxDenialMessage(check.decision.reason, buildRuntimeSandboxDenialContext(input.projectPath)), true);
       return null;
     }
 
@@ -248,11 +266,11 @@ export async function prepareSandboxLaunch(input: PrepareSandboxLaunchInput): Pr
     try {
       oauthToken = (await fs.readFile(getSandboxTokenPath(), 'utf-8')).trim();
     } catch {
-      input.onOutput(buildSandboxDenialMessage('sandbox_token_missing'), true);
+      input.onOutput(buildSandboxDenialMessage('sandbox_token_missing', buildRuntimeSandboxDenialContext(input.projectPath)), true);
       return null;
     }
     if (!oauthToken) {
-      input.onOutput(buildSandboxDenialMessage('sandbox_token_missing'), true);
+      input.onOutput(buildSandboxDenialMessage('sandbox_token_missing', buildRuntimeSandboxDenialContext(input.projectPath)), true);
       return null;
     }
 
