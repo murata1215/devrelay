@@ -4,6 +4,7 @@ import { getTabId } from '../lib/tab-id';
 import { sortThreadsDesc, deriveThreadLabel, isDefaultThread, isQuestionThread, isCancelledThread, applyThreadRename, upsertThread, resolveCreateTargetProjectId } from '../lib/thread-list-rules';
 import { decideThreadRowAction, decideThreadCreateButton } from './lite/lite-shell-rules';
 import { useLanguage } from '../contexts/LanguageContext';
+import { ThreadStateBadge } from './ThreadStateBadge';
 
 /**
  * スレッド管理 サイクル3（WebUI）: プロジェクト内（または `projectId` 省略時はユーザーの全プロジェクト
@@ -397,6 +398,7 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
                 {isCancelledThread(item) && (
                   <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)]">{t('thread.cancelled')}</span>
                 )}
+                <ThreadStateBadge item={item} />
                 {item.usageCase && (
                   // Usage 案件必須サイクル: スレッドの案件（コスト集計用）
                   <span className="text-[10px] px-1 rounded bg-sky-500/15 text-sky-600 truncate max-w-[8rem]" title={`案件: ${item.usageCase}`}>

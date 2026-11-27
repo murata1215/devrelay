@@ -430,6 +430,15 @@ model Session {
   // KnowledgeChunk / SupervisionAuditLog と同じ規約）。
   // userId は常に「宛先マシン所有者（= AI 実行・モデル・言語・課金・BuildLog・KnowledgeChunk の帰属先）」。
   requestedByUserId String?
+  // スレッド状態バッジ（プラン作成済み/実行済み/回答済み）: AI の文章を読まず、サーバー自身が
+  // 検知した事実だけを記録する（thread-state-rules.ts 参照）。どちらも「最初に到達した時刻」で
+  // 以後上書きしない（一度 exec したスレッドが後の雑談で巻き戻らないようにするため、
+  // コードは常に「既に値がある場合は更新しない」で運用する。列自体は上書き可能）。
+  // execCompletedAt: isExec な AI 応答が完了した時刻。null = まだ実行していない。
+  execCompletedAt DateTime?
+  // planReadyAt: AI 応答にプラン提示マーカー行（PLAN_MARKER_LINE）があった時刻。
+  // null = まだプランが提示されていない（または exec 済みで意味を持たない）。
+  planReadyAt     DateTime?
 
   messages       Message[]
   buildLogs      BuildLog[]

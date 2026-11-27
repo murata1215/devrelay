@@ -51,6 +51,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getUserSetting, getApiKeyForProvider, getApiKeyForTerminalAi, SettingKeys, resolveModelForTool, resolveSessionLanguage } from './user-settings.js';
 import { buildBacklogPromptLine } from './backlog.js';
 import { isBriefReplyEnabled, shouldPrependBriefReplyLine, BRIEF_REPLY_PROMPT_LINE } from './brief-reply-rules.js';
+import { isThreadStateBadgeEnabled, hasPlanMarkerLine, stripPlanMarkerLine, PLAN_MARKER_PROMPT_LINE } from './thread-state-rules.js';
 import { decideSandboxDispatch } from './sandbox-dispatch-rules.js';
 import { pickAvailableAiTool } from './ai-tool-availability.js';
 import { isModelSelectableAiTool, isLanguage, DEFAULT_CHAT_LANGUAGE, tChat, type Language, UTILITY_MODEL_ANTHROPIC } from '@devrelay/shared';
@@ -875,10 +876,17 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
     const lang = await resolveSessionLanguage(sessionId);
     const mark = truncated ? tChat(lang, 'buildStatus.truncatedMark', { stopReason: sr }) : '';
 
+    // スレッド状態バッジ（プラン作成済み/実行済み/回答済み）: 保存前にプラン印の行を取り除く
+    // （画面に生の HTML コメント行がそのまま出ないようにする。exec ターンには印を前置していない
+    // ため通常は no-op）。印の有無の判定は取り除く前の raw `output` に対して行う。
+    const stateBadgeEnabled = isThreadStateBadgeEnabled(process.env.DEVRELAY_THREAD_STATE_BADGE);
+    const planMarkerPresent = stateBadgeEnabled && !isExec && hasPlanMarkerLine(output);
+    const outputForSave = stateBadgeEnabled ? stripPlanMarkerLine(output) : output;
+
     // Save final output to DB（usageData がある場合は JSON として保存、出力ファイルも同時保存）
     // contextInfo（📊 Rate Limit 等）を含めて保存（WS 配信内容と DB 内容を一致させる）
     const contextPrefix = getSessionContextInfo(sessionId);
-    const contentWithContext = contextPrefix + mark + output;
+    const contentWithContext = contextPrefix + mark + outputForSave;
     const aiMessage = await prisma.message.create({
       data: {
         sessionId,
@@ -901,6 +909,34 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
         } : undefined,
       }
     });
+
+    // スレッド状態バッジ（プラン作成済み/実行済み/回答済み）: サーバー自身が検知した事実のみを
+    // 記録する。`execCompletedAt`/`planReadyAt`=null のときだけ更新する atomic claim
+    // （`shouldRecordPlanAiSession` と同じ「最初に到達した時刻」規約。既に `executed` なら
+    // `planReadyAt` を立てても表示状態は変わらないため、書き込みを省くついでに判定も先に行う）。
+    if (stateBadgeEnabled) {
+      if (isExec) {
+        try {
+          const updated = await prisma.session.updateMany({
+            where: { id: sessionId, execCompletedAt: null },
+            data: { execCompletedAt: new Date() },
+          });
+          if (updated.count > 0) console.log(`🟢 execCompletedAt recorded: session=${sessionId}`);
+        } catch (err) {
+          console.error('❌ Could not save execCompletedAt:', (err as Error).message);
+        }
+      } else if (planMarkerPresent) {
+        try {
+          const updated = await prisma.session.updateMany({
+            where: { id: sessionId, execCompletedAt: null, planReadyAt: null },
+            data: { planReadyAt: new Date() },
+          });
+          if (updated.count > 0) console.log(`🟡 planReadyAt recorded: session=${sessionId}`);
+        } catch (err) {
+          console.error('❌ Could not save planReadyAt:', (err as Error).message);
+        }
+      }
+    }
 
     // 出力ファイルの埋め込みを非同期生成（fire-and-forget）
     if (files && files.length > 0) {
@@ -1598,6 +1634,17 @@ export async function sendPromptToAgent(
     shouldPrependBriefReplyLine({ terminalMode, hasStatePolicy: !!scopeOptions?.statePolicy, handoverTurn: !!scopeOptions?.handoverTurn })
   ) {
     promptToSend = `${BRIEF_REPLY_PROMPT_LINE}\n\n${promptToSend}`;
+  }
+
+  // スレッド状態バッジ（プラン作成済み/実行済み/回答済み）: この送信経路は常に plan ターン
+  // （exec は execConversation() が別経路で送るため、ここを通らない）。AI 自身に
+  // 「計画の提示か、質問の回答か」を機械可読な印で申告させる（文章の意味は読まない）。
+  // ガード条件は BRIEF_REPLY と同じ（terminalMode へは書式指示を打ち込ませない等）。
+  if (
+    isThreadStateBadgeEnabled(process.env.DEVRELAY_THREAD_STATE_BADGE) &&
+    shouldPrependBriefReplyLine({ terminalMode, hasStatePolicy: !!scopeOptions?.statePolicy, handoverTurn: !!scopeOptions?.handoverTurn })
+  ) {
+    promptToSend = `${PLAN_MARKER_PROMPT_LINE}\n\n${promptToSend}`;
   }
 
   // Backlog 連携（2026-11-21）: スレッドの案件が課題キーなら、AI に「このスレッドの課題」を 1 行で知らせる。

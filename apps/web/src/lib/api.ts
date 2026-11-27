@@ -875,6 +875,10 @@ export interface ThreadSummary {
   seenAt?: string | null;
   /** Usage 案件必須サイクル: スレッドの案件名（null = 案件なし。旧サーバーは undefined） */
   usageCase?: string | null;
+  /** スレッド状態バッジ: 'executed'（exec 実行済み）| 'planned'（プラン提示済み・exec 待ち）|
+   * 'answered'（質問に答えただけ）。AI 応答が1件も無ければ `null`（バッジなし）。
+   * 旧サーバー応答・キルスイッチ OFF 時にはキー自体が無い（`undefined`）。 */
+  turnState?: 'executed' | 'planned' | 'answered' | null;
 }
 
 /** POST /api/sessions/:id/switch のレスポンス */

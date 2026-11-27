@@ -22,6 +22,7 @@ import { resolveStoredDeliveryContent } from '../services/response-split.js';
 import { buildShareSuffix } from '../services/response-share-rules.js';
 import { isThreadAutoTitleEnabled } from '../services/thread-auto-title-rules.js';
 import { isConversationRailEnabled, resolveRunning } from '../services/thread-activity.js';
+import { isThreadStateBadgeEnabled, resolveThreadState } from '../services/thread-state-rules.js';
 import { isDebugTurnsEnabled } from '../services/debug-turns-rules.js';
 import { resolveAgentRepoUrl, isAgentRepoTokenConfigured } from '../services/agent-repo-rules.js';
 import { inFlightTurns } from '../services/in-flight-turns.js';
@@ -1975,6 +1976,9 @@ export async function apiRoutes(app: FastifyInstance) {
     // ため、未読判定には使えない。詳細は thread-activity.ts のコメント参照）。
     // キルスイッチ OFF 時はクエリ自体を実行しない（レスポンス構造を旧実装と完全に一致させる）。
     const railEnabled = isConversationRailEnabled(process.env.DEVRELAY_CONVERSATION_RAIL);
+    // スレッド状態バッジ: 追加クエリ不要（`Session.execCompletedAt`/`planReadyAt` は既に
+    // 取得済みの `sorted` に含まれ、AI 応答の有無は下の `firstBySessionRole`（既存クエリ）で分かる）。
+    const stateBadgeEnabled = isThreadStateBadgeEnabled(process.env.DEVRELAY_THREAD_STATE_BADGE);
     const nowMs = Date.now();
     type LastAiRow = { sessionId: string; lastAiAt: Date };
     const lastAiRows: LastAiRow[] = !railEnabled || ids.length === 0 ? [] : await prisma.$queryRaw<LastAiRow[]>`
@@ -2041,6 +2045,14 @@ export async function apiRoutes(app: FastifyInstance) {
         seenAt: railEnabled ? (s.lastSeenAiAt?.toISOString() ?? null) : undefined,
         // Usage 案件必須サイクル: スレッド一覧に案件名を表示するため（null = 案件なし）
         usageCase: s.usageCase ?? null,
+        // スレッド状態バッジ: 'executed' > 'planned' > 'answered'（到達した最上位）。
+        // AI の文章は読まない（thread-state-rules.ts 参照）。キルスイッチ OFF 時は undefined（キー省略）。
+        turnState: resolveThreadState({
+          enabled: stateBadgeEnabled,
+          hasAiMessage: first?.ai !== undefined,
+          execCompletedAt: s.execCompletedAt,
+          planReadyAt: s.planReadyAt,
+        }),
       };
     });
 

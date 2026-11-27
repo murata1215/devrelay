@@ -10,6 +10,7 @@ import {
   applyThreadRename,
   upsertThread,
   resolveCreateTargetProjectId,
+  resolveThreadStateBadge,
 } from '../dist-test/lib/thread-list-rules.js';
 
 const mkItem = (sessionId, overrides = {}) => ({
@@ -189,6 +190,34 @@ describe('isCancelledThread（MCP ask サイクル: cancel_submission で取消�
 
   test('cancelled キー自体が無い（旧サーバー応答）場合は false（従来表示）', () => {
     assert.equal(isCancelledThread({}), false);
+  });
+});
+
+describe('resolveThreadStateBadge（スレッド状態バッジ: プラン作成済み/実行済み/回答済み）', () => {
+  test("turnState: 'executed' は tone 'executed'", () => {
+    assert.deepEqual(resolveThreadStateBadge({ turnState: 'executed' }), {
+      tone: 'executed', labelKey: 'thread.stateExecuted', hintKey: 'thread.stateExecutedHint',
+    });
+  });
+
+  test("turnState: 'planned' は tone 'planned'", () => {
+    assert.deepEqual(resolveThreadStateBadge({ turnState: 'planned' }), {
+      tone: 'planned', labelKey: 'thread.statePlanned', hintKey: 'thread.statePlannedHint',
+    });
+  });
+
+  test("turnState: 'answered' は tone 'answered'", () => {
+    assert.deepEqual(resolveThreadStateBadge({ turnState: 'answered' }), {
+      tone: 'answered', labelKey: 'thread.stateAnswered', hintKey: 'thread.stateAnsweredHint',
+    });
+  });
+
+  test('turnState: null（AI 応答がまだ無い）はバッジなし', () => {
+    assert.equal(resolveThreadStateBadge({ turnState: null }), null);
+  });
+
+  test('turnState キー自体が無い（旧サーバー応答・キルスイッチ OFF）場合もバッジなし', () => {
+    assert.equal(resolveThreadStateBadge({}), null);
   });
 });
 

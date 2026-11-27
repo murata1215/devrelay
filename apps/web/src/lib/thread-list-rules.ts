@@ -35,6 +35,9 @@ export interface ThreadListItem {
   kind?: string;
   /** MCP ask サイクル: cancel_submission で取り消し済みかどうか。旧サーバー応答には無いため optional。 */
   cancelled?: boolean;
+  /** スレッド状態バッジ: 'executed' | 'planned' | 'answered'。旧サーバー応答・キルスイッチ OFF 時は無い
+   * （`resolveThreadStateBadge` 側で未定義時は null 扱い＝バッジなし）。 */
+  turnState?: 'executed' | 'planned' | 'answered' | null;
 }
 
 /**
@@ -121,6 +124,31 @@ export function isQuestionThread(item: Pick<ThreadListItem, 'kind'>): boolean {
  */
 export function isCancelledThread(item: Pick<ThreadListItem, 'cancelled'>): boolean {
   return item.cancelled === true;
+}
+
+/** `resolveThreadStateBadge` の戻り値（純モジュール規約により文字列ではなく i18n キーを返す。
+ *  実際の文言・色は呼び出し側（`ThreadStateBadge.tsx`）が解決する）。 */
+export interface ThreadStateBadgeInfo {
+  tone: 'executed' | 'planned' | 'answered';
+  labelKey: 'thread.stateExecuted' | 'thread.statePlanned' | 'thread.stateAnswered';
+  hintKey: 'thread.stateExecutedHint' | 'thread.statePlannedHint' | 'thread.stateAnsweredHint';
+}
+
+/**
+ * スレッド状態バッジの表示情報を導出する。`turnState` キー自体が無い（旧サーバー応答）、
+ * または `null`（AI 応答がまだ無い）場合は `null`（バッジなし）。
+ */
+export function resolveThreadStateBadge(item: Pick<ThreadListItem, 'turnState'>): ThreadStateBadgeInfo | null {
+  if (item.turnState === 'executed') {
+    return { tone: 'executed', labelKey: 'thread.stateExecuted', hintKey: 'thread.stateExecutedHint' };
+  }
+  if (item.turnState === 'planned') {
+    return { tone: 'planned', labelKey: 'thread.statePlanned', hintKey: 'thread.statePlannedHint' };
+  }
+  if (item.turnState === 'answered') {
+    return { tone: 'answered', labelKey: 'thread.stateAnswered', hintKey: 'thread.stateAnsweredHint' };
+  }
+  return null;
 }
 
 /**

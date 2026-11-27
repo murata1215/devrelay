@@ -3,6 +3,7 @@ import type { ConversationFeedItem } from '../hooks/useConversationFeed';
 import { deriveThreadLabel, isQuestionThread, isCancelledThread } from '../lib/thread-list-rules';
 import { deriveAgentLabel, formatConversationScope } from '../lib/conversation-rail-rules';
 import { formatRelativeTime } from './ThreadList';
+import { ThreadStateBadge } from './ThreadStateBadge';
 
 /**
  * 会話履歴レール（右レール第3タブ・`Servers`/`Agents` の隣）の表示専用コンポーネント。
@@ -98,6 +99,7 @@ export function ConversationRail({ items, loading, error, onRetry, currentSessio
                   {isCancelledThread(item) && (
                     <span className="text-[10px] px-1 rounded bg-[var(--bg-hover)] text-[var(--text-faint)] shrink-0">{t('thread.cancelled')}</span>
                   )}
+                  <ThreadStateBadge item={item} />
                 </div>
               </div>
             </div>

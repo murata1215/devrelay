@@ -148,6 +148,7 @@ pm2 restart devrelay-server
 | DEVRELAY_REPLY_SUMMARY | AI 回答契約サイクル第3版（2026-11-23）: AI が境界行 `<!-- devrelay:detail -->` を書かなかった場合に、サーバー側で AI に要約させて「人間向け本文＋詳細リンク」を作る保険機能（`services/reply-summary.ts`）。既定 `1`。`0` で要約を呼ばず `Message.content` をそのまま出す。使う AI プロバイダー・キーは**本人（セッションの持ち主）の個人設定**（設定画面 AI Provider Settings の「返事の要約」、未設定時は「Build Summary」を流用、`SettingKeys.REPLY_SUMMARY_PROVIDER`・`getApiKeyForReplySummary()`）。組織共通キー（`DEVRELAY_ANSWER_API_KEY`）にはフォールバックしない（費用は各自の作業を各自の設定したキーで負担する方針）。本文が `DEVRELAY_REPLY_SUMMARY_MIN_CHARS` 未満・一時セッション・鍵未設定・要約失敗のいずれかなら何もしない（情報を落とさない。元の本文をそのまま出す）。要約結果は `Message.summary` に保存し、履歴の再取得では再要約しない |
 | DEVRELAY_REPLY_SUMMARY_MIN_CHARS | 上記要約を試みる本文長の下限（文字、既定 `800`、clamp 100〜20000）。これ未満の本文は要約 AI を呼ばずそのまま出す（短い返事に課金しない） |
 | DEVRELAY_ORG_PROVIDER_DEFAULTS | 組織プロバイダー強制サイクル（2026-11-24）: AI プロバイダー設定（`build_summary`/`chat_ai`/`dev_report`/`terminal_ai`/`voice_assist`/`org_summary`/`reply_summary` の7つの `*_provider` 設定）を、既存の組織AIモデル強制（#372、`Organization.aiModelDefaults` + `OrganizationMember.canOverrideAiSettings`）と同じ仕組みで組織が強制できるようにするか。既定 `1`。`0` で従来どおり各自が自由に設定できるキルスイッチ（モデル8キーの強制には影響しない）。API キーは各自のまま（費用は各自）。判定ロジック（`decideEffectiveModel`）・上書き許可フラグは**モデルと共通の1本**＝モデルの上書きを許可されたメンバーはプロバイダーも上書きできる。管理者は設定画面 AI タブの「組織デフォルト」からプロバイダー7件を設定でき、未設定のメンバーにもロック中は組織既定が適用される（＝未設定だった人の機能が組織既定で ON になり各自のキーで課金が始まる点に注意。使いたくない人は個人設定で明示的に「なし」を選べば上書きできる）。組織既定が効いていて個人の API キーが無く機能が止まった場合はサーバーログに警告が1行出る（鍵の材料は出さない）。`l` コマンドの出力にも組織既定のプロバイダー一覧が出る（Discord/Telegram には画面が無いため）。embedding・ナレッジ検索・`DEVRELAY_ANSWER_API_KEY` 系（ナレッジ回答・スレッド自動命名・ポータル要約）は対象外（別のキー解決経路のため） |
+| DEVRELAY_THREAD_STATE_BADGE | スレッド状態バッジサイクル（2026-11-24）: スレッド一覧（WebUI 左ペイン・`/lite`・右レール「会話履歴」）に「実行済/プラン/回答済」の3色バッジを出すか。既定 `1`。`0` で `GET /api/threads` が `turnState` を一切出さず（キー省略、旧レスポンスと構造的に同一）、`sendPromptToAgent()` もプラン提示マーカー（`<!-- devrelay:plan -->`）の指示文を前置しない。AI の文章は判定に使わない: 「実行済」は exec ターン完了をサーバー自身が検知した事実（`Session.execCompletedAt`）、「プラン」は AI が機械可読な印を書いたという事実（`Session.planReadyAt`）のみを見る（`services/thread-state-rules.ts`）。印は DB 保存・ライブ配信の両方で表示前に取り除かれる。優先順位は executed > planned > answered（到達した最上位で後退しない）。導入前の既存スレッドは「実行済」のみ既存 `BuildLog` から一度だけ復元済み（0037 マイグレーション）、「プラン」は文章からの推測が危険なため backfill しない（新しいプランから正しく記録される） |
 
 ## DB テーブル（概要）
 
@@ -156,7 +157,7 @@ pm2 restart devrelay-server
 | User | ユーザー |
 | Machine | Agent マシン（deletedAt でソフトデリート、autoUpdate で自動更新、localCommit 等でバージョン表示） |
 | Project | プロジェクト（displayName でリネーム可能、terminalMode で PTY 経由 claude 起動） |
-| Session | 作業セッション（= MCP submission。`autoTitle` は AI が付けたスレッド表示名（0033、ユーザー命名の `title` が優先）。`kind`='question' で ask_project の質問ターン、`cancelledAt` で cancel_submission の取消 claim。`handover*` 列でスレッド引継ぎ `n` の引継ぎ元・引継ぎ書を保持） |
+| Session | 作業セッション（= MCP submission。`autoTitle` は AI が付けたスレッド表示名（0033、ユーザー命名の `title` が優先）。`kind`='question' で ask_project の質問ターン、`cancelledAt` で cancel_submission の取消 claim。`handover*` 列でスレッド引継ぎ `n` の引継ぎ元・引継ぎ書を保持。`execCompletedAt`/`planReadyAt`（0037）はスレッド状態バッジ用。サーバーが検知した事実のみを記録） |
 | Message | 会話メッセージ（`shareToken`/`shareExpiresAt` は AI 回答契約サイクルの公開共有リンク、既定 OFF。`summary` は境界行が無い場合の AI 要約キャッシュ） |
 | BuildLog | ビルド履歴 |
 | MessageFile | メッセージ添付ファイル（bytea BLOB + pgvector embedding） |

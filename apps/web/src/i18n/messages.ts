@@ -210,6 +210,13 @@ export const messages = {
   'thread.switchFailed': { en: 'Failed to switch thread', ja: 'スレッドの切替に失敗しました' },
   'thread.renameFailed': { en: 'Failed to rename thread', ja: 'スレッド名の変更に失敗しました' },
   'thread.timeJustNow': { en: 'just now', ja: 'たった今' },
+  // スレッド状態バッジ（プラン作成済み/実行済み/回答済み）
+  'thread.stateExecuted': { en: 'Executed', ja: '実行済' },
+  'thread.stateExecutedHint': { en: 'exec has run in this thread', ja: 'このスレッドで exec を実行しました' },
+  'thread.statePlanned': { en: 'Plan', ja: 'プラン' },
+  'thread.statePlannedHint': { en: 'A plan was proposed, waiting for exec', ja: 'プランが提示されました（exec 待ち）' },
+  'thread.stateAnswered': { en: 'Answered', ja: '回答済' },
+  'thread.stateAnsweredHint': { en: 'Answered a question (nothing to execute)', ja: '質問に答えました（実行するものはありません）' },
   // 会話履歴レール（右レール第3タブ）。既存の 'Servers'/'Agents' タブラベルは
   // ハードコード英語のまま据え置き（日本語化は要望外の見た目変更になるため別途判断に委ねる）、
   // 新タブのみ i18n キーを使う。

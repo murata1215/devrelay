@@ -47,3 +47,4 @@
 0034	2026-11-23	-	0034_message_share_token.sql	Message.shareToken(unique)/shareExpiresAt 追加（応答の書式サイクル: 公開共有リンク）	-
 0035	2026-11-23	-	0035_message_summary.sql	Message.summary 追加（AI回答契約サイクル第3版: 境界行が無い場合のAI要約キャッシュ）	-
 0036	2026-11-23	-	0036_project_sandbox_enabled.sql	Project.sandboxEnabled 追加（Sandbox 実行対象かどうかのプロジェクト単位設定。既定 false）	-
+0037	2026-11-24	-	0037_session_turn_state.sql	Session.execCompletedAt/planReadyAt 追加（スレッド状態バッジ: 実行済み/プラン提示の事実記録、execCompletedAtのみBuildLogからbackfill）	-
