@@ -162,7 +162,9 @@ pnpm --filter @devrelay/server restart:when-idle
 | DEVRELAY_SHUTDOWN_MARKER | 再起動耐性サイクル: 停止処理の自己診断（`apps/server/.runtime/shutdown.json`）を有効にするか。既定 `1`。停止開始時にマーカーを書き、正常完走したら消す。次回起動時にマーカーが残っていれば「前回の停止は途中で強制終了された」警告を起動ログに出す（fail-open）。`0` で診断自体を無効化 |
 | DEVRELAY_TURN_RECOVERY | 再起動耐性サイクル: 起動の先頭で「再起動前から実行中だったセッション」を DB から見つけ、①破壊的な起動時メンテナンス（`teamexec_`/`crossquery_`/`raw_` の無条件 ended 化・24h stale 掃除）から除外し、②実行中ターン台帳・進捗トラッカーを復元するか。既定 `1`。`0` で従来どおりの無条件掃除・出力ロストに戻るキルスイッチ（`services/turn-recovery.ts`） |
 | DEVRELAY_PROGRESS_REARM | 再起動耐性サイクル: tracker が無いセッションに出力を受けたとき（サーバー再起動後の late output 等）に進捗トラッカーを作り直すか（`ensureTrackerForLateOutput()`、`session-manager.ts`）。既定 `1`。`0` で従来どおり出力を捨てて「⚠️ No tracker found」のログのみに戻す |
-| DEVRELAY_INFLIGHT_STATE_FILE | 再起動耐性サイクル: 実行中の会話件数を `apps/server/.runtime/inflight.json` に5秒間隔で書き出すか（既定 `1`）。`pnpm --filter @devrelay/server restart:when-idle` CLI がこれを読んで「会話が終わるまで待ってから再起動」を判断する（認証無しのローカルファイル読み取りのみ。新しい HTTP エンドポイントは増やさない）。`0` で書き出しを止める（CLI は「状況不明」として扱い、待たずに再起動コマンドを実行する） |
+| DEVRELAY_INFLIGHT_STATE_FILE | 再起動耐性サイクル: 実行中の会話件数を `apps/server/.runtime/inflight.json` に5秒間隔で書き出すか（既定 `1`）。`pnpm --filter @devrelay/server restart:when-idle` CLI がこれを読んで「会話が終わるまで待ってから再起動」を判断する（認証無しのローカルファイル読み取りのみ。新しい HTTP エンドポイントは増やさない）。`0` で書き出しを止める（CLI は「状況不明」として扱い、待たずに再起動コマンドを実行する）。ファイルは所有者のみ読み書き（0o600） |
+| DEVRELAY_RESTART_IDLE_COOLDOWN_MS | 再起動耐性サイクル 追補（2026-11-28）: 会話中ガードの3段目（実行中ターン・進捗トラッカーのどちらにも該当しないが、直近に AI 応答があっただけの冷却期間）の長さ（既定 `10000`＝10秒、clamp 0〜600000）。`0` でこの段の判定自体を行わない。`u`（Agent 自己更新）側の10分判定（`getMachineBusyState()`）とは完全に独立しており無改造（あちらは応答直後に Agent プロセスを触らないための妥当な長さのため）。チャットで再起動を頼むと、その応答自体が再起動を長時間止め続ける使用感の悪さを解消するために分離した |
+| DEVRELAY_INFLIGHT_DETAIL | 再起動耐性サイクル 追補（2026-11-28）: `inflight.json`・`restart-when-idle` CLI の待機表示・`--status` に、busy の根拠となっているマシン名・プロジェクト名・スレッド見出し（`sessions` キー）を含めるか。`off`（件数のみ、旧挙動）/ `id`（マシン名・プロジェクト名・経過時間のみ、会話の内容は出さない）/ `label`（既定。上記に加えスレッド見出し最大60字）。実機で「誰も会話していないはずなのに busy と出る」という誤解（正体は別マシンの会話だった）を受けて追加 |
 
 ## DB テーブル（概要）
 

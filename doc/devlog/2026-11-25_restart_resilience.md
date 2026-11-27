@@ -124,3 +124,52 @@ DB 変更なし。
 - `agents/windows`: node --test 232/232 green（新規 `outbox-rules.test.mjs` 含む）。
 - web バンドルに `require(` の CJS 混入なし（`grep -c 'require(' apps/web/dist/assets/index-*.js` = 0）。
 - 実機検証（強制再起動でも応答が届くこと等）は未実施。次回の実機再起動時に確認する。
+
+## 追補（2026-11-28）: 実機で見つかった2つの不具合とその修正
+
+実機で `pnpm --filter @devrelay/server restart:when-idle` を試したところ、2つの使い勝手の問題が見つかった。
+
+1. **「誰も会話していないはず」なのに busy と出る**: 実際には3段目の判定（直近 N 分以内に
+   `role='ai'` の Message があるだけで busy とみなす冷却期間）が、チャットでこの CLI について
+   質問している会話自身に反応していた。さらに別の実機確認では、本当に別マシン（`shiren-ai`）が
+   会話中だったが、件数表示（`busy (in-flight turn: 1)`）だけでは「誰か」が分からず、
+   Pulse 画面と見比べて初めて正体が分かった。
+2. **冷却期間 10 分が長すぎる**: この3段目はもともと `u`（Agent 自己更新）が「AI 応答直後は
+   Agent プロセスを触らない」ための安全マージンとして持っていた `RECENT_ACTIVITY_MS`（10分）を
+   そのまま流用していたため、チャットから再起動を頼むと、その応答自体が再起動を10分間
+   止め続けてしまう罠になっていた。
+
+### 対応
+
+- `restart-gate-rules.ts` に `resolveRestartIdleCooldownMs()` を追加。再起動ガード専用の
+  冷却期間を `DEVRELAY_RESTART_IDLE_COOLDOWN_MS`（既定 **10000ms＝10秒**。ユーザー指定）に
+  分離した。`getGlobalBusyState()` の3段目だけがこれを使い、`getMachineBusyState()`（`u` 用、
+  10分のまま）は無改造。
+- `inflight-busy-detail.ts` を新設。`getGlobalBusyDetails()` が `getGlobalBusyState()` と
+  同じ優先順位（①実行中ターン台帳→②進捗トラッカー→③直近AI出力）で、busy の根拠となっている
+  マシン名・プロジェクト名・スレッド見出し（`title` ?? `autoTitle` ?? 直近メッセージの先頭）を
+  解決する。判定ロジック自体（busy かどうか）は複製せず、表示専用の追加情報だけを作る。
+- `inflight-detail-rules.ts` を新設（外部 import ゼロの純関数）。`DEVRELAY_INFLIGHT_DETAIL`
+  （`off`/`id`/`label`、既定 `label`）の解釈・経過時間の整形・見出しの切り詰め・CLI 表示1行の
+  組み立てを持つ。
+- `inflight.json` に `sessions` キーを追加（既存キーは無改造＝後方互換）。合わせてファイル
+  権限を **0o600**（所有者のみ読み書き）に変更した。これまで誰でも読める 644 だったため、
+  スレッド見出し（会話の内容）を載せる前に締める必要があった（既存ファイルへも書き込みの
+  たびに `chmodSync` で揃える）。
+- `restart-when-idle.ts` の `--status`・待機表示を内訳一覧に対応。`sessions` が無い（旧ファイル・
+  `off` レベル）場合は従来の件数表示にフォールバックする。待機中は経過時間だけが進む5秒ごとの
+  連打を避けるため、内訳（マシン名・プロジェクト名・見出し）が変化したときだけ再表示する。
+
+### 検証
+
+```
+cd /opt/devrelay
+pnpm build
+node --test apps/server/tests/inflight-detail-rules.test.mjs
+node --test apps/server/tests/inflight-state-file-wiring.test.mjs
+node --test apps/server/tests/restart-gate-rules.test.mjs
+```
+
+`getGlobalBusyDetails()`/`resolveSessionLabels()` は DB に依存するため、`turn-recovery.ts` と
+同じ方針で単体テストは置かず、実機確認に委ねる（`inflight-state-file-wiring.test.mjs` は
+ファイル権限・`off`/`id`/`label` の出し分けをソースコードから静的に固定するのみ）。

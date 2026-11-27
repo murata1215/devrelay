@@ -26,6 +26,7 @@ import {
   isUpdateBusyGuardEnabled, resolveBusyState, formatBusyReason, resolveCooldownMs,
   buildRecentAiActivityWhere, type BusyState,
 } from './update-busy-rules.js';
+import { resolveRestartIdleCooldownMs } from './restart-gate-rules.js';
 
 /** 同一コミットへの試行上限（超えたらそのマシンの自動更新を停止する） */
 const MAX_ATTEMPTS_PER_COMMIT = 2;
@@ -247,17 +248,23 @@ export async function getGlobalBusyState(): Promise<BusyState | null> {
     return resolveBusyState({ inFlightTurnCount: 0, sessionRunning: true, recentActivity: false });
   }
 
-  // 直近 10 分以内に role='ai' の Message が作られた active セッションがあるか（全マシン横断）
-  const recent = await prisma.message.findFirst({
-    where: {
-      role: 'ai',
-      createdAt: { gte: new Date(now - RECENT_ACTIVITY_MS) },
-      session: { status: 'active' },
-    },
-    select: { id: true },
-  });
-  if (recent !== null) {
-    return resolveBusyState({ inFlightTurnCount: 0, sessionRunning: false, recentActivity: true });
+  // 追補（2026-11-28）: 3段目の冷却期間は `RECENT_ACTIVITY_MS`（10分、`u` 自己更新専用）ではなく
+  // `DEVRELAY_RESTART_IDLE_COOLDOWN_MS`（既定10秒）を使う。チャットで再起動を頼むとその応答
+  // 自体が再起動を止め続ける使用感の悪さを解消するため、再起動ガードだけ短い値に分離した
+  // （`getMachineBusyState()` 側の 10 分判定は無改造）。`0` ならこの段のクエリ自体を行わない。
+  const idleCooldownMs = resolveRestartIdleCooldownMs(process.env.DEVRELAY_RESTART_IDLE_COOLDOWN_MS);
+  if (idleCooldownMs > 0) {
+    const recent = await prisma.message.findFirst({
+      where: {
+        role: 'ai',
+        createdAt: { gte: new Date(now - idleCooldownMs) },
+        session: { status: 'active' },
+      },
+      select: { id: true },
+    });
+    if (recent !== null) {
+      return resolveBusyState({ inFlightTurnCount: 0, sessionRunning: false, recentActivity: true });
+    }
   }
   return null;
 }
