@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { tokenizeMarkdown, type MdBlock, type MdInline } from '../lib/markdown-rules';
 
 /**
@@ -78,16 +78,102 @@ function alignClass(align: 'left' | 'center' | 'right' | null): string {
   return ALIGN_CLASS[align ?? 'left'];
 }
 
+/**
+ * 指定した文字列をクリップボードへコピーする。
+ *
+ * 通常は Clipboard API を使う。HTTP 接続などで API を使えないブラウザでも、
+ * 従来方式へフォールバックしてコードブロックをコピーできるようにする。
+ *
+ * @param text コピーするコード全文
+ * @returns コピーに成功したときは true、失敗時は false
+ */
+async function copyCodeToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Clipboard API が権限・接続方式で使えない場合は、下の互換方式を試す。
+  }
+
+  try {
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.setAttribute('readonly', '');
+    textArea.style.position = 'fixed';
+    textArea.style.opacity = '0';
+    document.body.appendChild(textArea);
+    textArea.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textArea);
+    return copied;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * コードフェンスを表示し、右上のボタンで全文をコピーできるようにする。
+ * コピー成功時だけチェック印を一時表示し、失敗時に成功したようには見せない。
+ *
+ * @param code コードフェンスの本文
+ * @returns コード表示とコピー操作の React 要素
+ */
+function CodeBlock({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // 画面遷移後にタイマーが state を更新しないよう、破棄時に必ず解除する。
+    return () => {
+      if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
+    };
+  }, []);
+
+  /** コードをコピーし、成功が確認できた場合だけ完了表示を出す。 */
+  const handleCopy = async () => {
+    if (!(await copyCodeToClipboard(code))) return;
+
+    setCopied(true);
+    if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = setTimeout(() => {
+      setCopied(false);
+      resetTimerRef.current = null;
+    }, 2000);
+  };
+
+  return (
+    <pre className="relative bg-[var(--bg-base)] rounded p-3 pr-12 my-2 overflow-x-auto text-sm">
+      <button
+        type="button"
+        onClick={handleCopy}
+        className="absolute right-2 top-2 rounded p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]"
+        aria-label={copied ? 'コードをコピーしました' : 'コードをコピー'}
+        title={copied ? 'コピーしました' : 'コピー'}
+      >
+        {copied ? (
+          <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="m5 12 4 4L19 6" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="9" y="9" width="11" height="11" rx="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+        )}
+      </button>
+      <code>{code}</code>
+    </pre>
+  );
+}
+
 function renderBlock(block: MdBlock, index: number) {
   switch (block.kind) {
     case 'blank':
       return <div key={index} className="h-3" aria-hidden="true" />;
     case 'code':
-      return (
-        <pre key={index} className="bg-[var(--bg-base)] rounded p-3 my-2 overflow-x-auto text-sm">
-          <code>{block.code}</code>
-        </pre>
-      );
+      return <CodeBlock key={index} code={block.code} />;
     case 'heading':
       return (
         <div key={index} className={`mt-2 mb-1 ${HEADING_CLASS[block.level]}`}>
