@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { decodeTokenUrl } from '@devrelay/shared';
 import { loadConfig, saveConfig, ensureConfigDir, getConfigDir, getBinDir } from '../../services/config.js';
 import { buildServicePath } from '../../services/service-path-rules.js';
+import { buildClaudeWrapperCmd, buildStartAgentCmd, encodeVbs } from '../../services/win-script-file.js';
 
 export async function setupCommand() {
   console.log(chalk.blue(`
@@ -192,14 +193,15 @@ async function installWindowsAutoStart(machineName: string) {
 
   // CMD バッチファイルを作成（node 実行 + ログリダイレクト担当）
   const cmdPath = path.join(binDir, 'start-agent.cmd');
-  const cmdContent = `@echo off\r\n"${nodePath}" "${agentIndex}" >> "${logFile}" 2>&1\r\n`;
-  await fs.writeFile(cmdPath, cmdContent, 'utf-8');
+  // パスは %APPDATA% 等に置き換えて ASCII だけにする（日本語ユーザー名対策、2026-11-25）
+  await fs.writeFile(cmdPath, buildStartAgentCmd(nodePath, agentIndex, logFile));
 
   // VBS ランチャースクリプトを作成（CMD を非表示で起動するだけ）
   // WScript.Shell.Run の第2引数=0 でウィンドウなし、第3引数=False で非同期実行
+  // UTF-16LE + BOM で書く（BOM なしだと wscript が ANSI として読み日本語パスが化ける）
   const vbsPath = path.join(binDir, 'start-agent.vbs');
   const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run """${cmdPath}""", 0, False\r\n`;
-  await fs.writeFile(vbsPath, vbsContent, 'utf-8');
+  await fs.writeFile(vbsPath, encodeVbs(vbsContent));
 
   // Startup フォルダにコピーして自動起動を登録
   try {
@@ -374,7 +376,7 @@ async function ensureDevrelaySymlinks() {
 
     if (isWindows) {
       // Windows: .cmd バッチファイルを作成
-      await fs.writeFile(devrelayClaude, `@echo off\r\n"${claudePath}" %*\r\n`);
+      await fs.writeFile(devrelayClaude, buildClaudeWrapperCmd(claudePath));
     } else {
       // Linux: シンボリックリンクを作成
       await fs.symlink(claudePath, devrelayClaude);

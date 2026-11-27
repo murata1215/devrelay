@@ -6,6 +6,13 @@
 
 ## 実装済み機能
 
+### 修正: ユーザー名が日本語の Windows で Agent が起動しない (2026-11-25)
+
+- 症状: `C:\Users\神野嘉高` の PC でインストールは「完了」と出るが Agent が起動せず `agent.log` も作られない。手動起動で wscript が「指定されたファイルが見つかりません (80070002)」
+- 原因: `install-agent.ps1` が `start-agent.cmd` / `.vbs` を `-Encoding ASCII` で書き、日本語が `?` に化けていた。Agent 側も restart-agent.vbs・update.vbs・update.ps1・start-agent.cmd/.vbs・devrelay-claude.cmd を BOM なし UTF-8 で書いており、wscript / PowerShell 5.1 / cmd.exe が ANSI として読むため `u`・再起動でも同様に壊れる状態だった
+- 修正: `.vbs` は UTF-16LE + BOM、`.ps1` は UTF-8 + BOM、`.cmd` はパス先頭を `%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` に置き換えて ASCII のみ（置き換えきれない非 ASCII が残るときだけ `chcp 65001` + UTF-8）。Agent 側は `agents/linux/src/services/win-script-file.ts` に集約、インストーラーは同等の PowerShell 関数（`ConvertTo-CmdPath` / `Write-CmdFile` / `Write-VbsFile`）
+- 該当 PC はインストールのやり直しで直る（インストーラーは本家 main から取得するため本家 origin への push が必要）
+- テスト: `agents/linux/tests/win-script-file.test.mjs`。日本語名フォルダで wscript → cmd → node の起動を実機確認
 ### Pulse（会話履歴レール）タブ増殖バグの根治 (2026-11-22)
 
 - Pulse から別スレッドを開くたびに新規タブが増殖していた問題を、VS Code 方式のプレビュータブで根治。Pulse からの選択は仮タブ（`Tab.preview`、イタリック表示）として開き、同じ会話のプレビュータブは差し替え。入力・送信・ピン止め・リネーム・D&D・サイドバーからの明示選択で通常タブへ昇格（`tab-preview-rules.ts`）

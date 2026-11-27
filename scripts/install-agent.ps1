@@ -1395,11 +1395,44 @@ Write-Host ""
 # =============================================================================
 Write-Host "[5/6] Claude Code ラッパーを作成中..."
 
+# --- Windows 用スクリプトを「Windows が読める文字コード」で書くための小物（2026-11-25）---
+# ユーザー名が日本語（C:\Users\神野嘉高）の PC で、-Encoding ASCII だとパスが ? に化けて
+# wscript が「指定されたファイルが見つかりません (80070002)」で落ち Agent が起動しなかった。
+# - .cmd: パス先頭を %LOCALAPPDATA% / %APPDATA% / %USERPROFILE% に置き換えて ASCII だけにする
+#         （それでも非 ASCII が残るときだけ chcp 65001 + UTF-8）
+# - .vbs: UTF-16LE + BOM（wscript は BOM で Unicode と判別する）
+# Agent 側の同じ処理: agents/linux/src/services/win-script-file.ts
+function ConvertTo-CmdPath([string]$p) {
+    $cands = @()
+    foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'USERPROFILE')) {
+        $v = [Environment]::GetEnvironmentVariable($name)
+        if ($v) { $cands += [pscustomobject]@{ Name = $name; Value = $v.TrimEnd('\', '/') } }
+    }
+    foreach ($c in ($cands | Sort-Object { $_.Value.Length } -Descending)) {
+        if ($p -ieq $c.Value -or $p.StartsWith($c.Value + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return "%$($c.Name)%" + $p.Substring($c.Value.Length)
+        }
+    }
+    return $p
+}
+function Write-CmdFile([string]$Path, [string]$Body) {
+    if ($Body -match '[^\x00-\x7F]') {
+        $text = "@echo off`r`nchcp 65001 >nul`r`n$Body`r`n"
+    } else {
+        $text = "@echo off`r`n$Body`r`n"
+    }
+    [System.IO.File]::WriteAllText($Path, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
+function Write-VbsFile([string]$Path, [string]$Content) {
+    # UnicodeEncoding = UTF-16LE。WriteAllText は BOM（FF FE）を先頭に付ける
+    [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UnicodeEncoding($false, $true)))
+}
+
 $ClaudeCmd = Get-Command claude -ErrorAction SilentlyContinue
 if ($ClaudeCmd) {
     $ClaudePath = $ClaudeCmd.Source
     $WrapperPath = Join-Path $BinDir "devrelay-claude.cmd"
-    Set-Content -Path $WrapperPath -Value "@echo off`r`n`"$ClaudePath`" %*`r`n" -Encoding ASCII
+    Write-CmdFile -Path $WrapperPath -Body "`"$(ConvertTo-CmdPath $ClaudePath)`" %*"
     Write-Host "  OK devrelay-claude.cmd -> $ClaudePath" -ForegroundColor Green
 } else {
     Write-Host "  -- Claude Code 未インストール（後からインストール可能）" -ForegroundColor Gray
@@ -1418,21 +1451,14 @@ $LogFile = Join-Path $LogDir "agent.log"
 
 # --- CMD バッチファイルを作成（node 実行 + ログリダイレクト担当）---
 $CmdPath = Join-Path $BinDir "start-agent.cmd"
-$CmdContent = @"
-@echo off
-"$NodePath" "$AgentEntry" >> "$LogFile" 2>&1
-"@
-Set-Content -Path $CmdPath -Value $CmdContent -Encoding ASCII
+Write-CmdFile -Path $CmdPath -Body "`"$(ConvertTo-CmdPath $NodePath)`" `"$(ConvertTo-CmdPath $AgentEntry)`" >> `"$(ConvertTo-CmdPath $LogFile)`" 2>&1"
 Write-Host "  OK バッチファイル作成: $CmdPath" -ForegroundColor Green
 
 # --- VBS ランチャースクリプトを作成（CMD を非表示で起動するだけ）---
 # VBS の """path""" は VBS側で "path" に展開される（VBSの文字列エスケープ）
 $VbsPath = Join-Path $BinDir "start-agent.vbs"
-$VbsContent = @"
-Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """$CmdPath""", 0, False
-"@
-Set-Content -Path $VbsPath -Value $VbsContent -Encoding ASCII
+$VbsContent = "Set WshShell = CreateObject(`"WScript.Shell`")`r`nWshShell.Run `"`"`"$CmdPath`"`"`", 0, False`r`n"
+Write-VbsFile -Path $VbsPath -Content $VbsContent
 Write-Host "  OK ランチャー作成: $VbsPath" -ForegroundColor Green
 
 # --- 自動起動登録（Startup フォルダにコピー）---
