@@ -14,7 +14,8 @@
  * ユーザーメッセージ先頭に付くコマンドタグのパターン（`command-handler.ts` が
  * `Message.content` に書き込む形式: `[exec] <指示>` / `[w] ...` / `[teamexec] ...`）。
  */
-const COMMAND_TAG_PATTERN = /^\[(exec|w|teamexec)\]\s*/;
+const COMMAND_TAG_PATTERN = /^\[(exec|w|teamexec|review)\]\s*/;
+const REVIEW_TAG_PATTERN = /^\[review\]\s*/;
 
 /**
  * ユーザーメッセージ先頭のコマンドタグ（`[exec] `/`[w] `/`[teamexec] ` 等）を取り除く。
@@ -24,6 +25,8 @@ const COMMAND_TAG_PATTERN = /^\[(exec|w|teamexec)\]\s*/;
  */
 export function stripCommandTag(raw: string | null): string | null {
   if (typeof raw !== 'string') return null;
+  // レビューの保存見出しは利用者の指示ではなく内部メタデータなので、題名候補にしない。
+  if (REVIEW_TAG_PATTERN.test(raw)) return null;
   const stripped = raw.replace(COMMAND_TAG_PATTERN, '').trim();
   return stripped === '' ? null : stripped;
 }

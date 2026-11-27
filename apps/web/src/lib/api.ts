@@ -986,6 +986,7 @@ export interface TeamMemberInfo {
   machineName: string;
   machineId: string;
   machineStatus: string;
+  isReviewer: boolean;
   // クロスユーザー Team（Phase 1: ask のみ）: DEVRELAY_CROSS_TEAM が OFF、または同一ユーザーの
   // 行では一切付与されない（既存レスポンスと構造的に同一）。
   crossUser?: boolean;
@@ -1090,6 +1091,11 @@ export const teams = {
   /** メンバー削除 */
   async removeMember(teamId: string, memberId: string): Promise<void> {
     await request('DELETE', `/teams/${teamId}/members/${memberId}`);
+  },
+
+  /** Team の一回レビュー担当を設定する（memberId=null で解除） */
+  async setReviewer(teamId: string, memberId: string | null): Promise<void> {
+    await request('PUT', `/teams/${teamId}/reviewer`, { memberId });
   },
 
   // --- クロスユーザー Team（Phase 1: ask のみ）。DEVRELAY_CROSS_TEAM が OFF の環境では

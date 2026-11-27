@@ -61,6 +61,7 @@ import { processMessageFilesEmbedding } from './embedding-service.js';
 import { processTurnKnowledge } from './knowledge-service.js';
 import { isKnowledgeEnabled } from './knowledge-rank.js';
 import { maybeGenerateThreadAutoTitle } from './thread-auto-title.js';
+import { endReviewRun } from './review-run-state.js';
 import { checkIpAllowed } from './org-control.js';
 import { resolvePermissionPolicy } from './permission-policy.js';
 import type { ManagementInfo } from '@devrelay/shared';
@@ -1011,7 +1012,10 @@ async function handleAiOutput(payload: { machineId: string; sessionId: string; o
     // Finalize progress with final message（DB メッセージ ID を付与して WS 配信）
     // #377: マークは DB 保存内容（contentWithContext）と同様にここでも先頭に付与する
     // （mark + contextPrefix... にすると DB と Discord/Web で並び順が食い違うため、常に mark を output 側に付ける）
-    await finalizeProgress(sessionId, mark + output, files, aiMessage.id);
+    // スレッド状態バッジ: ライブ配信にも DB と同じ outputForSave（プラン印除去済み）を使う
+    // （DB 保存内容と配信内容を一致させる既存方針。印が生のまま画面に出る事故を防ぐ）。
+    await finalizeProgress(sessionId, mark + outputForSave, files, aiMessage.id);
+    endReviewRun(sessionId);
   } else {
     // Append partial output to progress buffer
     appendSessionOutput(sessionId, output);

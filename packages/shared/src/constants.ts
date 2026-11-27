@@ -7,7 +7,8 @@ export const SHORTCUTS: Record<string, string> = {
   'm': 'machine:list',
   'p': 'project:list',
   // 's': 'status',  // 現在未使用
-  'r': 'recent',
+  'r': 'review',
+  'recent': 'recent', // r はレビューに譲り、作業履歴は明示コマンドで維持する
   'c': 'continue',  // 前回の接続先に再接続
   'x': 'clear',     // 会話履歴をクリア
   'e': 'exec',      // プラン実行開始

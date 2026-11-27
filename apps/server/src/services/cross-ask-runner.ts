@@ -69,6 +69,8 @@ export interface RunCrossProjectAskInput {
   sourceProjectName?: string | null;
   /** 文脈前置（案 B）を有効にするか。未指定時は env から解決（呼び出し側が未解決なら true 相当） */
   includeContextPrefix?: boolean;
+  /** サーバー内部の限定用途だけが MCP ask の 4,000 字上限を上書きできる。 */
+  internalQuestionMaxLength?: number;
 }
 
 export type RunCrossProjectAskResult =
@@ -97,9 +99,10 @@ export type RunCrossProjectAskResult =
  */
 export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promise<RunCrossProjectAskResult> {
   const { targetProject, requesterUserId, question, platform, sourceProjectName } = input;
+  const questionMaxLength = input.internalQuestionMaxLength ?? ASK_QUESTION_MAX_LENGTH;
 
   // 1. #335（ゲート⑤）: 長さ検証は関数の先頭、いかなる状態変更よりも前。
-  const askLengthCheck = validateHumanTextLength(question, ASK_QUESTION_MAX_LENGTH);
+  const askLengthCheck = validateHumanTextLength(question, questionMaxLength);
   if (!askLengthCheck.ok) {
     return { ok: false, kind: 'tooLong', rawLength: askLengthCheck.rawLength, limit: askLengthCheck.limit };
   }
@@ -345,7 +348,7 @@ export async function runCrossProjectAsk(input: RunCrossProjectAskInput): Promis
   const askHumanTextMeta = buildHumanTextMeta({
     kind: 'ask',
     rawLength: askLengthCheck.rawLength,
-    limit: ASK_QUESTION_MAX_LENGTH,
+    limit: questionMaxLength,
     neutralized: askNeutralizedCount,
     rawRef: 'message.content',
   });

@@ -30,7 +30,7 @@ export function isWebCommandPersistEnabled(raw: string | undefined): boolean {
  * handleExec / handleAgreement / handleAiPrompt / handleAskMember / handleTeamExec）。
  * ここで保存すると二重保存になるため除外する。
  */
-const SELF_PERSISTING_TYPES = ['exec', 'agreement', 'ai:prompt', 'ask:member', 'teamexec:member'] satisfies readonly UserCommand['type'][];
+const SELF_PERSISTING_TYPES = ['exec', 'agreement', 'ai:prompt', 'ask:member', 'teamexec:member', 'review'] satisfies readonly UserCommand['type'][];
 
 /**
  * 保存してはいけないコマンド type。

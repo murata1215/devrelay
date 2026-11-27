@@ -3077,6 +3077,7 @@ export async function apiRoutes(app: FastifyInstance) {
             machineName: m.project.machine.displayName ?? m.project.machine.name,
             machineId: m.project.machine.id,
             machineStatus: m.project.machine.status,
+            isReviewer: m.isReviewer,
             // 以下はクロスユーザー行のみ付与する（同一ユーザー行では一切キーを付けない）
             ...(isCrossUser ? {
               crossUser: true,
@@ -3223,6 +3224,34 @@ export async function apiRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ id: member.id });
+  });
+
+  /** Team の一回レビュー担当を設定する。Team ごとに 1 プロジェクトだけ選べる。 */
+  app.put('/api/teams/:teamId/reviewer', async (request, reply) => {
+    const userId = (request as any).user.id as string;
+    const { teamId } = request.params as { teamId: string };
+    const { memberId } = request.body as { memberId?: string | null };
+
+    const team = await prisma.team.findUnique({ where: { id: teamId } });
+    if (!team || team.userId !== userId) {
+      return reply.status(404).send({ error: 'Team not found' });
+    }
+
+    if (memberId !== null && memberId !== undefined) {
+      // レビューは所有者自身の独立プロジェクトだけに限定する。クロスユーザー共有のプロジェクトへ
+      // 会話ログを渡さないため、UI を迂回した呼び出しでもここで止める。
+      const member = await prisma.teamMember.findFirst({
+        where: { id: memberId, teamId, project: { machine: { userId } } },
+        select: { id: true },
+      });
+      if (!member) return reply.status(400).send({ error: 'Reviewer must be a project owned by this user in this team' });
+    }
+
+    await prisma.$transaction([
+      prisma.teamMember.updateMany({ where: { teamId }, data: { isReviewer: false } }),
+      ...(memberId ? [prisma.teamMember.update({ where: { id: memberId }, data: { isReviewer: true } })] : []),
+    ]);
+    return reply.send({ success: true, reviewerMemberId: memberId ?? null });
   });
 
   /** チームからメンバー削除 */

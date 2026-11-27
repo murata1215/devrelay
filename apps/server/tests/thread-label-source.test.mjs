@@ -28,6 +28,9 @@ describe('stripCommandTag', () => {
   test('[teamexec] タグ付きも剥がす', () => {
     assert.equal(stripCommandTag('[teamexec] 他プロジェクトに聞いて'), '他プロジェクトに聞いて');
   });
+  test('[review] 見出しはスレッド名候補にしない', () => {
+    assert.equal(stripCommandTag('[review] Reviewer のレビューを受けて再考'), null);
+  });
   test('タグ単体（本文なし）は null', () => {
     assert.equal(stripCommandTag('[exec]'), null);
   });

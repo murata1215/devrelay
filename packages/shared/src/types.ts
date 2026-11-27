@@ -1035,6 +1035,7 @@ export type UserCommand =
   | { type: 'select'; number: number }
   | { type: 'status' }
   | { type: 'recent' }
+  | { type: 'review' }  // Team のレビュアーへ一度だけ ask し、元の AI に再考させる
   | { type: 'continue' }  // 前回の接続先に再接続
   | { type: 'clear' }     // 会話履歴をクリア
   // プラン実行（会話履歴リセットポイント）。prompt 付きで直接指示も可

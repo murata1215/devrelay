@@ -408,6 +408,17 @@ export function TeamPage() {
     }
   };
 
+  /** 一回レビューを担当する独立プロジェクトを選ぶ */
+  const handleSetReviewer = async (teamId: string, memberId: string | null) => {
+    setError('');
+    try {
+      await teams.setReviewer(teamId, memberId);
+      await fetchTeams();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to set reviewer');
+    }
+  };
+
   /** メンバー名をリネーム開始 */
   const handleStartRename = (projectId: string, currentName: string) => {
     setRenamingProjectId(projectId);
@@ -909,6 +920,9 @@ export function TeamPage() {
                             </span>
                           )}
                           <span className="text-[var(--text-faint)] text-xs">({member.machineName})</span>
+                          {member.isReviewer && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-900/30 text-purple-300">レビュアー</span>
+                          )}
                           {member.crossUser && (
                             <>
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-faint)]">
@@ -923,15 +937,26 @@ export function TeamPage() {
                             <span className="text-[var(--text-faint)] text-xs animate-pulse">取得中...</span>
                           )}
                         </div>
-                        <button
-                          onClick={() => member.crossUser ? handleRevokeGrant(t.id, member.id) : handleRemoveMember(t.id, member.id)}
-                          className="text-[var(--text-faint)] hover:text-[var(--text-danger)] opacity-0 group-hover:opacity-100 transition-opacity"
-                          title={member.crossUser ? 'クロスユーザーの同意を取り消す' : 'Remove member'}
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
+                        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          {!member.crossUser && (
+                            <button
+                              onClick={() => handleSetReviewer(t.id, member.isReviewer ? null : member.id)}
+                              className="text-[var(--text-faint)] hover:text-purple-300 text-xs"
+                              title={member.isReviewer ? 'レビュアーを解除' : 'このプロジェクトをレビュアーに設定'}
+                            >
+                              {member.isReviewer ? '解除' : 'レビュアーにする'}
+                            </button>
+                          )}
+                          <button
+                            onClick={() => member.crossUser ? handleRevokeGrant(t.id, member.id) : handleRemoveMember(t.id, member.id)}
+                            className="text-[var(--text-faint)] hover:text-[var(--text-danger)]"
+                            title={member.crossUser ? 'クロスユーザーの同意を取り消す' : 'Remove member'}
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
                       </div>
                       {member.description && (
                         <div className="ml-4 mt-1 text-[var(--text-faint)] text-xs leading-relaxed">

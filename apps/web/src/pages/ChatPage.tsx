@@ -14,6 +14,7 @@ import { resolveCancelPhase, decideCancelClick, type CancelUiState, type CancelP
 import { ThreadList } from '../components/ThreadList';
 import { ThreadPane } from '../components/ThreadPane';
 import { MarkdownBody } from '../components/MarkdownBody';
+import { ReviewMessageBody } from '../components/ReviewMessageBody';
 import type { ThreadSwitchResult, ThreadCreateResult } from '../lib/api';
 import { RightRail } from '../components/RightRail';
 import { RAIL_COLLAPSED_STORAGE_KEY, readRailCollapsed, serializeRailCollapsed, countPendingApprovals, resolveSidebarShellClass } from '../lib/right-rail-rules';
@@ -755,7 +756,7 @@ const MessageRow = memo(function MessageRow({
           </span>
         </div>
         <div className="text-sm text-[var(--text-primary)] leading-relaxed">
-          <MarkdownBody text={message.content} />
+          {isUser ? <ReviewMessageBody text={message.content} /> : <MarkdownBody text={message.content} />}
         </div>
         {message.files && message.files.length > 0 && (
           <div className="mt-2 space-y-2">

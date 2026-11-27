@@ -90,6 +90,8 @@ import { buildEphemeralSessionIdExclusion } from './thread-scope.js';
 import { runCrossProjectAsk } from './cross-ask-runner.js';
 import { isCrossAskResetEnabled } from './cross-team-guard.js';
 import { resetCrossAskMemory } from './cross-ask-reset.js';
+import { REVIEW_QUESTION_MAX_LENGTH, buildReviewQuestion, buildReconsiderPrompt, buildReviewStoredMessage } from './review-prompt.js';
+import { beginReviewRun, endReviewRun, getReviewRunPhase, setReviewRunPhase } from './review-run-state.js';
 
 // User context storage (in-memory, keyed by chatId for channel-based sessions)
 // This allows different channels to have different active sessions
@@ -309,6 +311,9 @@ export async function executeCommand(
 
     case 'recent':
       return handleRecent(context);
+
+    case 'review':
+      return handleReview(context);
 
     case 'continue':
       return handleContinue(context);
@@ -872,6 +877,127 @@ async function handleRecent(context: UserContext): Promise<string> {
   });
 
   return tChat(lang, 'recent.header', { list });
+}
+
+/**
+ * `r`: Team に設定された独立レビュアーへ、現在の会話だけを 1 回 ask する。
+ * レビュアーの回答は元の AI へ再考材料として渡すだけで、レビュアーへ再質問したり、
+ * 元プロジェクトのコード・資料を渡したりしない。
+ */
+async function handleReview(context: UserContext): Promise<string> {
+  const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
+  if (!context.currentSessionId || !context.currentMachineId) {
+    return lang === 'ja'
+      ? '⚠️ レビューする会話が選択されていません。先にプロジェクトの会話を開いてください。'
+      : '⚠️ No conversation is selected to review. Open a project conversation first.';
+  }
+
+  if (isSessionRunning(context.currentSessionId)) {
+    return lang === 'ja' ? '⚠️ AI が処理中です。完了してからレビューを依頼してください。' : '⚠️ The AI is still working. Request a review after it finishes.';
+  }
+  if (!beginReviewRun(context.currentSessionId)) {
+    return lang === 'ja' ? '⚠️ この会話はレビュー中です。完了後にもう一度お試しください。' : '⚠️ This conversation is already under review. Try again after it finishes.';
+  }
+
+  let reconsiderationStarted = false;
+  try {
+
+  const dbUserId = await resolveDbUserId(context);
+  if (!dbUserId) return '⚠️ WebUI アカウントに連携されていません。`link` コマンドでリンクしてください。';
+
+  // context はクライアント由来の可能性があるため、現スレッドの所有者とプロジェクトを DB で確定する。
+  const sourceSession = await prisma.session.findFirst({
+    where: { id: context.currentSessionId, userId: dbUserId },
+    select: { projectId: true, project: { select: { name: true } } },
+  });
+  if (!sourceSession) {
+    return lang === 'ja' ? '⚠️ 現在の会話を確認できませんでした。' : '⚠️ The current conversation could not be verified.';
+  }
+
+  // 現在のプロジェクトと同じ Team にいる reviewer を求める。部分 unique index により Team ごとは
+  // 1人だけだが、複数 Team が別々の reviewer を指す構成は誤送信を避けるため明示エラーにする。
+  const reviewerMembers = await prisma.teamMember.findMany({
+    where: {
+      isReviewer: true,
+      projectId: { not: sourceSession.projectId },
+      team: { userId: dbUserId, members: { some: { projectId: sourceSession.projectId } } },
+    },
+    select: {
+      project: {
+        select: {
+          id: true, name: true, path: true, defaultAi: true, terminalMode: true,
+          machine: { select: { id: true, name: true, displayName: true, status: true, userId: true } },
+        },
+      },
+    },
+  });
+  const reviewers = reviewerMembers.map(m => m.project);
+  if (reviewers.length === 0) {
+    return lang === 'ja'
+      ? '⚠️ この Team にレビュアーが設定されていません。Team ページで独立プロジェクトを「レビュアーにする」に設定してください。'
+      : '⚠️ No reviewer is configured for this Team. Set an independent project as reviewer on the Team page.';
+  }
+  if (reviewers.length > 1) {
+    return lang === 'ja'
+      ? '⚠️ この会話に対するレビュアーが複数あります。重なる Team のレビュアー設定を1つにしてください。'
+      : '⚠️ More than one reviewer matches this conversation. Keep only one reviewer across its Teams.';
+  }
+  const reviewer = reviewers[0];
+  if (reviewer.machine.status !== 'online' || !isAgentConnected(reviewer.machine.id)) {
+    const machineName = reviewer.machine.displayName ?? reviewer.machine.name;
+    return lang === 'ja'
+      ? `⚠️ レビュアー ${reviewer.name} のエージェント (${machineName}) はオフラインです。`
+      : `⚠️ Reviewer ${reviewer.name} is offline (${machineName}).`;
+  }
+
+  // r 自体は Web の Message に保存しない。直近10メッセージは元の会話だけで確定する。
+  const rows = await getSessionMessages(context.currentSessionId, 10);
+  if (rows.length === 0) {
+    return lang === 'ja' ? '⚠️ レビューできる会話履歴がありません。' : '⚠️ There is no conversation history to review.';
+  }
+  const question = buildReviewQuestion(rows.reverse().map(row => ({ role: row.role, content: row.content })));
+
+  await sendMessage(context.platform, context.chatId,
+    lang === 'ja' ? `🔍 ${reviewer.name} に一回レビューを依頼中...` : `🔍 Asking ${reviewer.name} for a one-time review...`);
+
+  const reviewResult = await runCrossProjectAsk({
+    targetProject: reviewer,
+    requesterUserId: dbUserId,
+    question,
+    platform: context.platform,
+    sourceProjectName: sourceSession.project.name,
+    // レビュアーには以前の ask の記憶を足さない。常に今回の会話だけを見せる。
+    includeContextPrefix: false,
+    internalQuestionMaxLength: REVIEW_QUESTION_MAX_LENGTH,
+  });
+  if (!reviewResult.ok) {
+    console.error(`[review] failed: kind=${reviewResult.kind}${'message' in reviewResult ? ` message=${reviewResult.message}` : ''}`);
+    const reason = reviewResult.kind === 'busy'
+      ? (lang === 'ja' ? 'レビュアー側が処理中です' : 'the reviewer is busy')
+      : reviewResult.kind === 'tooLong'
+        ? (lang === 'ja' ? '会話が大きすぎます' : 'the conversation is too large')
+        : (lang === 'ja' ? 'レビュアー側で失敗またはタイムアウトしました' : 'the reviewer failed or timed out');
+    return `⚠️ ${lang === 'ja' ? 'レビューを実行できませんでした' : 'Review could not be completed'}: ${reason}`;
+  }
+
+  // 外部レビューは一度で終わり。以後は元スレッドの通常 AI に再考させ、利用者への最終回答を返す。
+  setReviewRunPhase(context.currentSessionId, 'reconsidering');
+  const reconsideration = await handleAiPrompt(context, buildReconsiderPrompt(reviewer.name, reviewResult.output), undefined, undefined, {
+    bypassReviewGuard: true,
+    persistedUserContent: buildReviewStoredMessage(reviewer.name, reviewResult.output),
+    permissionPolicy: 'strictReadonly',
+  });
+  reconsiderationStarted = true;
+  return reconsideration;
+  } catch (error) {
+    console.error('[review] unexpected failure:', error);
+    return lang === 'ja'
+      ? '⚠️ レビューを実行できませんでした: サーバー側で失敗しました。'
+      : '⚠️ Review could not be completed: the server failed.';
+  } finally {
+    // 再考を Agent へ渡せた後だけは、最終出力/タイムアウト側が解除する。
+    if (!reconsiderationStarted) endReviewRun(context.currentSessionId);
+  }
 }
 
 async function handleContinue(context: UserContext): Promise<string> {
@@ -1881,7 +2007,12 @@ async function handleAiPrompt(
   context: UserContext,
   text: string,
   files?: FileAttachment[],
-  missedMessages?: MissedMessage[]
+  missedMessages?: MissedMessage[],
+  options: {
+    bypassReviewGuard?: boolean;
+    persistedUserContent?: string;
+    permissionPolicy?: 'interactive' | 'strictReadonly';
+  } = {},
 ): Promise<string> {
   const lang: Language = context.language ?? DEFAULT_CHAT_LANGUAGE;
   console.log(`📝 handleAiPrompt called with text: ${text.substring(0, 50)}...`);
@@ -1891,6 +2022,10 @@ async function handleAiPrompt(
   }
   if (missedMessages && missedMessages.length > 0) {
     console.log(`   Missed messages: ${missedMessages.length}`);
+  }
+
+  if (context.currentSessionId && !options.bypassReviewGuard && getReviewRunPhase(context.currentSessionId)) {
+    return lang === 'ja' ? '⚠️ レビュー中です。完了後に送ってください。' : '⚠️ A review is in progress. Send your message after it finishes.';
   }
 
   // プロジェクト未接続の場合、自動再接続を試みる
@@ -1921,7 +2056,7 @@ async function handleAiPrompt(
           await sendMessage(updatedContext.platform, updatedContext.chatId, reconnectMessage);
 
           // AI にプロンプト送信（再帰呼び出し）- 結果をそのまま返す
-          return handleAiPrompt(updatedContext, text, files, missedMessages);
+          return handleAiPrompt(updatedContext, text, files, missedMessages, options);
         }
       }
       // 再接続失敗（オフラインなど）→ エラーメッセージを返す
@@ -2002,7 +2137,7 @@ async function handleAiPrompt(
     data: {
       sessionId: context.currentSessionId,
       role: 'user',
-      content: text,
+      content: options.persistedUserContent ?? text,
       platform: context.platform,
       files: files && files.length > 0 ? {
         create: files.map(f => ({
@@ -2055,7 +2190,7 @@ async function handleAiPrompt(
       undefined, // language: 未指定（UserSettings から補完）
       // プランモード書き込みゲート穴の根治: chat 経路のプランターンにも strictReadonly を適用する。
       // キルスイッチ DEVRELAY_PLAN_STRICT_CHAT=0 で従来の 'interactive' に戻せる（chat のみに作用）。
-      resolvePermissionPolicy('chat', { strictChatPlan: process.env.DEVRELAY_PLAN_STRICT_CHAT !== '0' }),
+      options.permissionPolicy ?? resolvePermissionPolicy('chat', { strictChatPlan: process.env.DEVRELAY_PLAN_STRICT_CHAT !== '0' }),
       promptScopeOptions,
     );
     touchSessionActivity(context.currentSessionId);

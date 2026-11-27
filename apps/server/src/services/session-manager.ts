@@ -32,6 +32,7 @@ import { shouldShowCancelHint } from './progress-cancel-hint.js';
 import { isEphemeralSessionId, decideNewSessionScopeId, resolveOutboundAgentScopeId, inheritScopeForReestablishedSession } from './thread-scope.js';
 import { buildShareSuffix } from './response-share-rules.js';
 import { resolveLiveDeliveryContent } from './response-split.js';
+import { endReviewRun } from './review-run-state.js';
 import { resolveChatSessionId } from './thread-routing.js';
 import { inFlightTurns } from './in-flight-turns.js';
 import { isUpdateBusyGuardEnabled } from './update-busy-rules.js';
@@ -591,12 +592,52 @@ async function onProgressTimeout(sessionId: string): Promise<void> {
 
   console.warn(`⏱️ Progress timeout for session ${sessionId} (${PROGRESS_TIMEOUT / 1000}s since last output, reason=${decision.reason})`);
   const minElapsed = Math.round(PROGRESS_TIMEOUT / 60000);
-  finalizeProgress(sessionId, tChat(tracker.language, 'progress.timeout', { min: minElapsed }));
+  await finalizeProgress(sessionId, tChat(tracker.language, 'progress.timeout', { min: minElapsed }));
+  endReviewRun(sessionId);
+}
+
+/**
+ * 再起動耐性サイクル（2026-11-25）: tracker が無いセッションに出力を受けたときに作り直す。
+ *
+ * サーバー再起動（または `finalizeProgress`/Agent 切断時の回収漏れ）で `progressTrackers` から
+ * 消えた後も、Agent 側は同じターンの出力を送り続ける。従来はここで「⚠️ No tracker found」と
+ * ログに出すだけで出力を捨てていたため、再起動後に届いた途中出力は蓄積されず、進捗表示
+ * （実行中... N分経過）も無応答タイムアウトの安全網も再武装されなかった。
+ *
+ * `startProgressTracking()` と異なり、ここでは初回進捗メッセージを送らない
+ * （この関数は「出力が届いた後」に呼ばれる反応的な再構築であり、まだ誰も接続していない
+ * 可能性がある起動直後でも安全に呼べるようにするため。次の `updateProgressMessages()` の
+ * 定期実行時点でその時の `sessionParticipants` に配信される）。
+ *
+ * `DEVRELAY_PROGRESS_REARM=0` で無効化できる（従来どおり出力を捨てるだけに戻すキルスイッチ）。
+ */
+export async function ensureTrackerForLateOutput(sessionId: string): Promise<ProgressTracker | null> {
+  if (process.env.DEVRELAY_PROGRESS_REARM === '0') return null;
+  const existing = progressTrackers.get(sessionId);
+  if (existing) return existing;
+
+  const tracker = await buildTrackerSkeleton(sessionId);
+  // この間に別経路（通常の ai:output 連打等）が先に tracker を作っていたら、それを尊重する
+  // （上書きすると出力を取りこぼす可能性があるため）。
+  const raced = progressTrackers.get(sessionId);
+  if (raced) return raced;
+
+  tracker.updateInterval = setInterval(() => {
+    updateProgressMessages(sessionId);
+  }, PROGRESS_UPDATE_INTERVAL);
+  progressTrackers.set(sessionId, tracker);
+  armProgressTimeout(sessionId);
+  console.log(`🔁 Re-armed progress tracker for session ${sessionId} (late output after tracker loss)`);
+  return tracker;
 }
 
 // Add output to the buffer
-export function appendSessionOutput(sessionId: string, output: string) {
-  const tracker = progressTrackers.get(sessionId);
+export async function appendSessionOutput(sessionId: string, output: string): Promise<void> {
+  let tracker = progressTrackers.get(sessionId);
+  if (!tracker) {
+    console.log(`⚠️ No tracker found for session ${sessionId} — attempting to re-arm`);
+    tracker = await ensureTrackerForLateOutput(sessionId) ?? undefined;
+  }
   if (tracker) {
     // タイムアウトタイマーをリセット（最後の出力から PROGRESS_TIMEOUT に延長、#337 で一本化）
     armProgressTimeout(sessionId);

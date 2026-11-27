@@ -244,6 +244,8 @@ model TeamMember {
   team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
   projectId String
   project   Project  @relation(fields: [projectId], references: [id])
+  // この Team の一回限りレビューを担当する独立プロジェクト。Team ごとに最大 1 件（DB の部分 unique index）。
+  isReviewer Boolean @default(false)
   createdAt DateTime @default(now())
 
   // クロスユーザー Team（別ユーザーのプロジェクトを招待・承認して Team に入れる機能）の同意行。

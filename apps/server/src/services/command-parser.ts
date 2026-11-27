@@ -353,6 +353,8 @@ function parseShortcut(shortcut: string, context: UserContext): UserCommand {
     // case 's': 現在未使用
     //   return { type: 'status' };
     case 'r':
+      return { type: 'review' };
+    case 'recent':
       return { type: 'recent' };
     case 'c':
       return { type: 'continue' };
@@ -462,10 +464,10 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE, opts: HelpTe
 \`w\` - ドキュメント更新＋コミット＋プッシュ（wrap up）`);
 
   sections.push(en ? `**History**
-\`r\` - Recent work
+\`recent\` - Recent work
 \`log\` - Conversation log (last 10)
 \`log20\` - Conversation log (20)` : `**履歴**
-\`r\` - 直近の作業一覧
+\`recent\` - 直近の作業一覧
 \`log\` - 会話ログ (直近10件)
 \`log20\` - 会話ログ (20件)`);
 
@@ -523,10 +525,12 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE, opts: HelpTe
 
   sections.push(en ? `**Team**
 \`ask <project>: <question>\` - Ask another project
+\`r\` - Ask this Team's reviewer to check the current conversation once, then reconsider the answer
 \`askreset <project>\` - Reset the conversation memory of a cross-user ask target
 \`teamexec <project>: <instruction>\` or \`te ...\` - Have another project execute work (\`e\` / \`w\` are then forwarded there)
 \`d\` or \`disconnect\` - Release the teamexec target (\`e\` / \`w\` return to your own project)` : `**チーム**
 \`ask <project>: <質問>\` - 他プロジェクトに質問
+\`r\` - Team のレビュアーに現在の会話を1回だけ確認させ、回答を再考
 \`askreset <project>\` - クロスユーザー ask 宛先の記憶をリセット
 \`teamexec <project>: <指示>\` または \`te ...\` - 他プロジェクトに作業を実行させる（以後 \`e\` / \`w\` はそのプロジェクトに転送）
 \`d\` または \`disconnect\` - teamexec の接続先を解除（\`e\` / \`w\` が自分のプロジェクトに戻る）`);
@@ -544,12 +548,14 @@ export function getHelpText(lang: Language = DEFAULT_CHAT_LANGUAGE, opts: HelpTe
 \`u\` or \`update\` - Check/update the agent version (send twice in a row to update)
 \`u force\` or \`u!\` - Update now without waiting, even if an AI turn is in progress (connection is briefly interrupted)
 \`x\` - Clear conversation history (send twice in a row)
+\`recent\` - Show recent work
 \`q\` - Disconnect
 \`h\` - This help` : `**その他**
 \`ag\` または \`agreement\` - DevRelay Agreement ${AGREEMENT_VERSION} を適用（rules/devrelay.md 作成）
 \`u\` または \`update\` - Agent バージョン確認・更新（2回連続で更新実行）
 \`u force\` または \`u!\` - AI 実行中でも待たずにすぐ更新（接続が一時的に切断されます）
 \`x\` - 会話履歴をクリア（2回連続で実行）
+\`recent\` - 直近の作業を表示
 \`q\` - 切断
 \`h\` - このヘルプ`);
 
