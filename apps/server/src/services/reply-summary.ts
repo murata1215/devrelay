@@ -1,7 +1,6 @@
 /**
- * AI 回答契約サイクル（2026-11-23 第3版）: AI 応答が境界行を書かなかった場合に、
- * 個人の AI プロバイダー設定（設定画面「返事の要約」、未設定なら Build Summary を流用）を使って
- * サーバー側で要約する I/O 本体。判定・プロンプトは `reply-summary-rules.ts`（純関数）。
+ * AI 回答契約サイクル（2026-11-27）: 保存された AI 応答の元文から、個人の AI プロバイダー設定
+ * （設定画面「返事の要約」、未設定なら Build Summary を流用）で本文用要約を作る I/O 本体。
  *
  * - 鍵は本人（セッションの持ち主）の個人設定のみ（`getApiKeyForReplySummary`）。
  *   組織共通キー（`DEVRELAY_ANSWER_API_KEY`）にはフォールバックしない
@@ -22,7 +21,7 @@ const SUMMARY_MAX_TOKENS = 1500;
 let loggedNoKey = false;
 
 /**
- * AI 応答（進捗ノイズ除去済み・境界行分割後の summary 部分）を人間向けに要約する。
+ * AI 応答の元文（進捗ノイズ除去済み）を人間向けに要約する。
  *
  * @param input.messageId 要約を保存する対象の `Message.id`
  * @param input.sessionId セッションの持ち主（個人キー解決用）

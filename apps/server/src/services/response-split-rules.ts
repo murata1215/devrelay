@@ -23,6 +23,16 @@ export interface SplitAiResponseResult {
   detail: string | null;
 }
 
+/**
+ * 保存した AI 応答を「元文」として表示できる形にする。
+ *
+ * 進捗表示だけは最終回答ではないため除去するが、本文・詳細マーカーを含む回答の内容は
+ * 一切組み替えない。共有ページはこの値を使い、本文用の要約を再掲しない。
+ */
+export function cleanAiResponse(raw: unknown): string {
+  return stripAiProgressNoise(typeof raw === 'string' ? raw : '').trim();
+}
+
 /** 行全体が境界マーカーと一致するか（前後の空白は許容）。 */
 function isBoundaryLine(line: string): boolean {
   return line.trim() === DETAIL_BOUNDARY_MARKER;
@@ -38,7 +48,7 @@ function isBoundaryLine(line: string): boolean {
  * - 境界後が空白のみなら detail は null（分割なしと同じ扱いにする）。
  */
 export function splitAiResponse(raw: string): SplitAiResponseResult {
-  const cleaned = stripAiProgressNoise(typeof raw === 'string' ? raw : '');
+  const cleaned = cleanAiResponse(raw);
   const lines = cleaned.split('\n');
 
   let inFence = false;

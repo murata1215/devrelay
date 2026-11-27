@@ -17,8 +17,8 @@ export function isReplySummaryEnabled(raw: string | undefined): boolean {
   return raw !== '0';
 }
 
-/** 要約を試みる本文長の既定下限（文字）。これ未満は要約を呼ばずそのまま返す。 */
-export const DEFAULT_SUMMARY_MIN_CHARS = 800;
+/** 要約を試みる本文長の既定下限（文字）。短い挨拶等以外は本文を要約して詳細へ元文を残す。 */
+export const DEFAULT_SUMMARY_MIN_CHARS = 100;
 export const MIN_SUMMARY_MIN_CHARS = 100;
 export const MAX_SUMMARY_MIN_CHARS = 20000;
 

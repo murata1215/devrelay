@@ -28,11 +28,18 @@ describe('response-split.ts: 配線', () => {
     assert.ok(!fnBody.includes('generateReplySummary('), 'resolveStoredDeliveryContent 内で generateReplySummary を呼んでいる');
   });
 
-  test('要約 AI 呼び出しは境界行が無い場合（!hasDetailSection）のみに置かれている', () => {
+  test('要約 AI 呼び出しは元文全体を対象にし、AI 境界行による本文再利用をしない', () => {
     const fnStart = source.indexOf('export async function resolveLiveDeliveryContent');
     const fnBody = source.slice(fnStart);
-    const hasDetailIdx = fnBody.indexOf('if (hasDetailSection(result))');
-    const summaryIdx = fnBody.indexOf('generateReplySummary(');
-    assert.ok(hasDetailIdx > 0 && summaryIdx > hasDetailIdx, '境界行分岐より後ろ（= else 相当）に要約呼び出しがあること');
+    assert.match(fnBody, /const original = cleanAiResponse\(rawContent\)/);
+    assert.match(fnBody, /generateReplySummary\(\{ messageId, sessionId, content: original \}\)/);
+    assert.ok(!fnBody.includes('splitAiResponse('), '本文の組み立てに AI 境界行を使わないこと');
+  });
+
+  test('保存済み要約と有効な共有リンクが揃った場合だけ、本文を要約に置き換える', () => {
+    const fnStart = source.indexOf('export function resolveStoredDeliveryContent');
+    const fnBody = source.slice(fnStart);
+    assert.match(fnBody, /if \(message\.summary && shareable\)/);
+    assert.match(fnBody, /return \{ chatText: cleanAiResponse\(message\.content\), shareUrl: null, ttlDays: null \}/);
   });
 });

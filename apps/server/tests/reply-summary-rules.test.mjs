@@ -35,10 +35,10 @@ test('clampSummaryMinChars: 範囲外・不正値は既定値 or クランプ', 
   assert.equal(clampSummaryMinChars(999999), 20000);
 });
 
-test('resolveSummaryMinChars: 未設定・不正値は既定 800', () => {
-  assert.equal(resolveSummaryMinChars(undefined), 800);
-  assert.equal(resolveSummaryMinChars('abc'), 800);
-  assert.equal(resolveSummaryMinChars('0'), 800);
+test('resolveSummaryMinChars: 未設定・不正値は既定 100', () => {
+  assert.equal(resolveSummaryMinChars(undefined), 100);
+  assert.equal(resolveSummaryMinChars('abc'), 100);
+  assert.equal(resolveSummaryMinChars('0'), 100);
 });
 test('resolveSummaryMinChars: 設定値を使う', () => {
   assert.equal(resolveSummaryMinChars('500'), 500);
@@ -46,11 +46,11 @@ test('resolveSummaryMinChars: 設定値を使う', () => {
 });
 
 test('shouldSummarize: 下限未満は false', () => {
-  assert.equal(shouldSummarize({ length: 799, minChars: 800 }), false);
+  assert.equal(shouldSummarize({ length: 99, minChars: 100 }), false);
 });
 test('shouldSummarize: 下限以上は true', () => {
-  assert.equal(shouldSummarize({ length: 800, minChars: 800 }), true);
-  assert.equal(shouldSummarize({ length: 5000, minChars: 800 }), true);
+  assert.equal(shouldSummarize({ length: 100, minChars: 100 }), true);
+  assert.equal(shouldSummarize({ length: 5000, minChars: 100 }), true);
 });
 
 test('normalizeSummary: 非文字列は null', () => {

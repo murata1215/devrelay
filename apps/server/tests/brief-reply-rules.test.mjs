@@ -8,7 +8,6 @@ import {
   shouldPrependBriefReplyLine,
   BRIEF_REPLY_PROMPT_LINE,
 } from '../dist/services/brief-reply-rules.js';
-import { DETAIL_BOUNDARY_MARKER } from '../dist/services/response-split-rules.js';
 
 test('isBriefReplyEnabled: 既定（未設定）は true', () => {
   assert.equal(isBriefReplyEnabled(undefined), true);
@@ -31,10 +30,11 @@ test('shouldPrependBriefReplyLine: handoverTurn は false', () => {
   assert.equal(shouldPrependBriefReplyLine({ handoverTurn: true }), false);
 });
 
-test('BRIEF_REPLY_PROMPT_LINE: 空でない文字列で、境界マーカーの記法を案内している', () => {
+test('BRIEF_REPLY_PROMPT_LINE: 空でない文字列で、元文を保存することを案内している', () => {
   assert.equal(typeof BRIEF_REPLY_PROMPT_LINE, 'string');
   assert.ok(BRIEF_REPLY_PROMPT_LINE.length > 0);
-  assert.ok(BRIEF_REPLY_PROMPT_LINE.includes(DETAIL_BOUNDARY_MARKER), '境界マーカーの記法そのものを案内していること');
+  assert.ok(BRIEF_REPLY_PROMPT_LINE.includes('要約前の元文'), '元文として保存されることを案内していること');
+  assert.ok(BRIEF_REPLY_PROMPT_LINE.includes('サーバー側で別に作る'), '本文用要約はサーバー側で作ることを案内していること');
 });
 
 test('BRIEF_REPLY_PROMPT_LINE: 振り分け基準が行数・書式でないことを明示している', () => {
@@ -48,6 +48,6 @@ test('BRIEF_REPLY_PROMPT_LINE: 人間が実行する手順を省略しないこ�
   assert.ok(BRIEF_REPLY_PROMPT_LINE.includes('省略しない'));
 });
 
-test('BRIEF_REPLY_PROMPT_LINE: 分割不要な場合はそのまま返してよいことを明示している', () => {
-  assert.ok(BRIEF_REPLY_PROMPT_LINE.includes('そのまま返してください'));
+test('BRIEF_REPLY_PROMPT_LINE: 境界マーカーで回答を二分しないことを明示している', () => {
+  assert.ok(BRIEF_REPLY_PROMPT_LINE.includes('回答を二分したりしない'));
 });

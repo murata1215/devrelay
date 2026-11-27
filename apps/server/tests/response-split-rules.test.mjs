@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   splitAiResponse,
+  cleanAiResponse,
   hasDetailSection,
   joinWithoutLink,
   DETAIL_BOUNDARY_MARKER,
@@ -15,6 +16,11 @@ test('境界行が無ければ全文が summary、detail は null', () => {
   assert.equal(r.summary, '結論です。\n次の手順をお願いします。');
   assert.equal(r.detail, null);
   assert.equal(hasDetailSection(r), false);
+});
+
+test('cleanAiResponse: 詳細画面用に進捗だけを除き、元文の境界マーカーや内容は保持する', () => {
+  const raw = `🔧 Bashを使用中...\n本文\n${DETAIL_BOUNDARY_MARKER}\n詳細`;
+  assert.equal(cleanAiResponse(raw), `本文\n${DETAIL_BOUNDARY_MARKER}\n詳細`);
 });
 
 test('境界行で summary/detail に分かれる', () => {

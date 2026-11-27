@@ -3,21 +3,20 @@
  * 実際に配信する本文と詳細ページの URL を決定するサービス層（DB アクセス・トークン発行・
  * 要約 AI 呼び出しを含む）。
  *
- * 方針: **情報を落とさない**。詳細ページへのリンクが作れない場合（キルスイッチ OFF・
- * messageId 無し・一時セッション・トークン発行失敗・要約失敗）は、詳細を隠さずそのまま
- * 本文に含めて返す。
+ * 方針: **情報を落とさない**。DB の `Message.content` は要約前の元文として保持し、
+ * 本文用の要約は `Message.summary` に別保存する。詳細ページへのリンクが作れない場合
+ * （キルスイッチ OFF・messageId 無し・一時セッション・トークン発行失敗・要約失敗）は、
+ * 元文をそのまま本文に含めて返す。
  *
- * 2段構え:
- * 1. AI が境界行（`<!-- devrelay:detail -->`）を書いていれば、それに従って分ける（無料・即時）
- * 2. 書いていなければ、本文が十分長い場合に限り、個人の AI プロバイダー設定で要約する
- *    （`reply-summary.ts`。境界行を書かない AI ツールでも同じ体験になる保険）
+ * 本文と詳細の二重表示を防ぐため、AI が書いた境界行の前半を本文として再利用しない。
+ * 十分長い元文は常に個人の AI プロバイダー設定で要約し、共有ページには元文を出す。
  */
 
 import { isEphemeralSessionId } from './thread-scope.js';
 import { isBriefReplyEnabled } from './brief-reply-rules.js';
 import { isResponseShareEnabled, isShareExpired, buildShareUrl, daysRemaining } from './response-share-rules.js';
 import { ensureShareToken, resolveShareTtlDaysForSession } from './response-share.js';
-import { splitAiResponse, hasDetailSection, joinWithoutLink } from './response-split-rules.js';
+import { cleanAiResponse } from './response-split-rules.js';
 import { isReplySummaryEnabled, resolveSummaryMinChars, shouldSummarize } from './reply-summary-rules.js';
 import { generateReplySummary } from './reply-summary.js';
 
@@ -31,7 +30,7 @@ export interface DeliveryContent {
 }
 
 /**
- * ライブ配信用（`finalizeProgress()` から呼ぶ）。詳細があり条件が揃っていれば
+ * ライブ配信用（`finalizeProgress()` から呼ぶ）。元文の要約が作れて条件が揃っていれば
  * 共有トークンを新規発行する（既存トークンがあれば再利用、`ensureShareToken` 参照）。
  */
 export async function resolveLiveDeliveryContent(
@@ -43,35 +42,16 @@ export async function resolveLiveDeliveryContent(
     return { chatText: rawContent, shareUrl: null, ttlDays: null };
   }
 
-  const result = splitAiResponse(rawContent);
+  const original = cleanAiResponse(rawContent);
   const ephemeral = isEphemeralSessionId(sessionId);
-
-  if (hasDetailSection(result)) {
-    // 1. AI が境界行を書いていた場合（無料の近道）
-    if (isResponseShareEnabled(process.env.DEVRELAY_RESPONSE_SHARE) && messageId && !ephemeral) {
-      try {
-        const ttlDays = await resolveShareTtlDaysForSession(sessionId);
-        const token = await ensureShareToken(messageId, ttlDays);
-        if (token) {
-          return { chatText: result.summary, shareUrl: buildShareUrl(token, process.env), ttlDays };
-        }
-      } catch (err) {
-        console.error('[ResponseSplit] resolveLiveDeliveryContent: failed to issue share link:', (err as Error).message);
-      }
-    }
-    // リンクを作れない場合は詳細を隠さない（情報を落とさないことを優先する）
-    return { chatText: joinWithoutLink(result), shareUrl: null, ttlDays: null };
-  }
-
-  // 2. 境界行が無かった場合: 十分長ければ要約 AI で保険をかける
   const minChars = resolveSummaryMinChars(process.env.DEVRELAY_REPLY_SUMMARY_MIN_CHARS);
   if (
     isReplySummaryEnabled(process.env.DEVRELAY_REPLY_SUMMARY) &&
     messageId &&
     !ephemeral &&
-    shouldSummarize({ length: result.summary.length, minChars })
+    shouldSummarize({ length: original.length, minChars })
   ) {
-    const summary = await generateReplySummary({ messageId, sessionId, content: result.summary });
+    const summary = await generateReplySummary({ messageId, sessionId, content: original });
     if (summary) {
       if (isResponseShareEnabled(process.env.DEVRELAY_RESPONSE_SHARE)) {
         try {
@@ -84,11 +64,11 @@ export async function resolveLiveDeliveryContent(
           console.error('[ResponseSplit] resolveLiveDeliveryContent: failed to issue share link for AI summary:', (err as Error).message);
         }
       }
-      // リンクを作れない場合、要約だけを見せると詳細が消えるため、元の本文をそのまま使う
+      // リンクを作れない場合、要約だけを見せると元文が読めなくなるため、元文を使う
     }
   }
 
-  return { chatText: result.summary, shareUrl: null, ttlDays: null };
+  return { chatText: original, shareUrl: null, ttlDays: null };
 }
 
 /**
@@ -105,22 +85,12 @@ export function resolveStoredDeliveryContent(message: {
     return { chatText: message.content, shareUrl: null, ttlDays: null };
   }
 
-  const result = splitAiResponse(message.content);
   const shareable = isResponseShareEnabled(process.env.DEVRELAY_RESPONSE_SHARE) && !!message.shareToken && !isShareExpired(message.shareExpiresAt);
-
-  if (hasDetailSection(result)) {
-    if (shareable) {
-      const ttlDays = daysRemaining(message.shareExpiresAt);
-      return { chatText: result.summary, shareUrl: buildShareUrl(message.shareToken as string, process.env), ttlDays };
-    }
-    return { chatText: joinWithoutLink(result), shareUrl: null, ttlDays: null };
-  }
-
-  // 境界行が無い場合: 保存済みの AI 要約（summary 列）があればそれを使う
+  // 保存済みの AI 要約があり、元文を開ける場合だけ本文を短くする。
   if (message.summary && shareable) {
     const ttlDays = daysRemaining(message.shareExpiresAt);
     return { chatText: message.summary, shareUrl: buildShareUrl(message.shareToken as string, process.env), ttlDays };
   }
 
-  return { chatText: message.content, shareUrl: null, ttlDays: null };
+  return { chatText: cleanAiResponse(message.content), shareUrl: null, ttlDays: null };
 }

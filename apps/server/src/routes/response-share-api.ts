@@ -3,7 +3,7 @@
  *
  * GET /api/public/response/:token
  *   token が `Message.shareToken` と一致し、かつ `shareExpiresAt` が未来であれば、
- *   そのメッセージの「人間向け本文 + 詳細」（境界行は取り除き、進捗ノイズも除去済み）・
+ *   そのメッセージの要約前の元文（進捗ノイズのみ除去）・
  *   作成日時・プロジェクト名を返す。添付ファイル・ユーザーの入力・他メッセージは一切返さない
  *   （公開面の最小化）。token 不一致・期限切れ・キルスイッチ OFF は一律 404
  *   （Usage サイネージと同じ作法）。結果は 1 分キャッシュ。
@@ -14,7 +14,7 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../db/client.js';
 import { isResponseShareEnabled, isPlausibleShareToken, isShareExpired } from '../services/response-share-rules.js';
-import { splitAiResponse, hasDetailSection } from '../services/response-split-rules.js';
+import { cleanAiResponse } from '../services/response-split-rules.js';
 
 interface SharedResponseBody {
   content: string;
@@ -53,12 +53,9 @@ export async function responseShareRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Not found' });
     }
 
-    // 境界行より前（人間向け本文）＋後（詳細）を見出しで繋いで、読む人が全体を把握できるようにする。
-    // 境界行が無ければ全文がそのまま summary に入る（splitAiResponse の仕様）。
-    const split = splitAiResponse(message.content);
-    const content = hasDetailSection(split)
-      ? `${split.summary}\n\n---\n\n## 詳細\n\n${split.detail}`
-      : split.summary;
+    // 詳細画面は本文用要約を再掲せず、保存された元文をそのまま返す。
+    // `<!-- devrelay:detail -->` は Markdown コメントのため表示には現れない。
+    const content = cleanAiResponse(message.content);
 
     const body: SharedResponseBody = {
       content,
