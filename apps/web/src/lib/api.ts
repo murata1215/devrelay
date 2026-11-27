@@ -838,6 +838,8 @@ export interface ThreadSummary {
   machineName: string;
   machineOnline: boolean;
   aiTool: string;
+  /** 作成元。旧サーバー応答では未定義のため UI は interactive として扱う。 */
+  origin?: 'interactive' | 'mcp';
   status: 'active' | 'ended';
   lastActiveAt: string;
   firstUserMessage: string | null;
@@ -902,10 +904,11 @@ export interface ThreadCreateResult {
 // スレッド管理 サイクル3: /api/threads（一覧・新規作成）
 export const threads = {
   /** スレッド一覧を取得（projectId 省略時はユーザーの全スレッド。Lite シェル v2 で使用） */
-  async list(projectId?: string, limit?: number): Promise<{ threads: ThreadSummary[] }> {
+  async list(projectId?: string, limit?: number, origin?: 'interactive' | 'mcp'): Promise<{ threads: ThreadSummary[] }> {
     const params = new URLSearchParams();
     if (projectId) params.set('projectId', projectId);
     if (limit) params.set('limit', String(limit));
+    if (origin) params.set('origin', origin);
     const q = params.toString() ? `?${params.toString()}` : '';
     return request('GET', `/threads${q}`);
   },

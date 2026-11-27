@@ -327,9 +327,18 @@ describe('ナレッジ画面の新規文字列はハードコード日本語ゼ�
 // （4677 → 4727）に更新した。LitePage.tsx・renderMarkdown 出現数・components/lite/* は
 // 本サイクルでも無変更のため据え置き（Sandbox スイッチは classic のみ、Lite には置かない）。
 
-describe('ChatPage.tsx / LitePage.tsx は本サイクルで無変更（プラン制約。0 行変更）', () => {
+// MCP スレッド分離（2026-11-26）: MCP の分類はプロジェクト内のスレッド欄で扱い、Pulse は
+// リアルタイムの会話・稼働状態を追うため従来どおり維持する。
+//
+// 再起動耐性サイクル（2026-11-25）: サーバー再起動予告バナー（`web:server:restarting` 受信時の
+// `serverRestarting` state・ヘッダー直下のバナー表示）を追加したため、行数ピンを実測値
+// （countLines は split('\n').length＝末尾改行込みで wc -l + 1。4728 → 4683）に更新した。
+// LitePage.tsx・renderMarkdown 出現数・components/lite/* は本サイクルでも無変更のため据え置き
+// （予告バナーは classic のみ、Lite には置かない）。
+
+describe('ChatPage.tsx / LitePage.tsx の構造ガード', () => {
   test('ChatPage.tsx の行数が変わっていない', () => {
-    assert.equal(countLines('src/pages/ChatPage.tsx'), 4727, 'ChatPage.tsx の行数が変わっている。本サイクルは 0 行変更の制約');
+    assert.equal(countLines('src/pages/ChatPage.tsx'), 4683, 'ChatPage.tsx の行数が変わっている。構造ガードを更新してください');
   });
 
   test('LitePage.tsx の行数が変わっていない', () => {

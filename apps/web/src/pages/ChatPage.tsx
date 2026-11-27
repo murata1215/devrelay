@@ -1231,9 +1231,7 @@ function Sidebar({
   variant: 'drawer' | 'rail';
   /** rail インスタンスのみ: 右レールの折りたたみボタン等をヘッダー行に追加表示する */
   headerAction?: React.ReactNode;
-  /** `mode === 'conversations'` のとき描画する中身（`ConversationRail`）。
-   *  表示専用コンポーネント自体は ChatPage 側で1つだけ生成し、両インスタンス（drawer/rail）に渡す
-   *  （`useConversationFeed` のポーリングを二重化しないため）。 */
+  /** Pulse モードで表示する会話一覧。取得は ChatPage 側で一度だけ行う。 */
   conversationsSlot?: React.ReactNode;
   /** クロスユーザー Team Phase C: 購読/借用プロジェクト一覧（Agents モード末尾に表示。
    *  0 件ならセクションごと非表示。取得は ChatPage 側で1つだけ行い両インスタンスに渡す
@@ -1243,7 +1241,6 @@ function Sidebar({
   onSelectCrossProject: (projectId: string, meta: { label: string; ownerLabel: string; machineName: string; teamName: string; origin: 'invite' | 'subscription' }) => void;
 }) {
   const { t } = useLanguage();
-  const sidebarConversationsLabel = t('sidebar.conversations');
   const [expandedMachines, setExpandedMachines] = useState<Set<string>>(new Set());
   /** サーバー内プロジェクトの展開状態 */
   const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
@@ -1318,9 +1315,7 @@ function Sidebar({
       )}
 
       <aside className={`${drawerTranslateClass} ${resolveSidebarShellClass(variant)}`}>
-        {/* ヘッダー: Agents / Servers / 会話履歴 切り替え。会話履歴レール追加で3タブになったため
-            （会話履歴レール サイクル）、160px（RAIL_WIDTH_MIN）でも折り返さないよう
-            padding を詰め、コンテナに min-w-0 + overflow-hidden を付けている。 */}
+        {/* ヘッダー: Agents / Servers / Pulse 切り替え。 */}
         <div className="flex items-center justify-between px-2 py-2 border-b border-[var(--border-color)] min-w-0">
           <div className="flex gap-0.5 min-w-0 overflow-hidden">
             <button
@@ -1346,7 +1341,7 @@ function Sidebar({
                   ? 'bg-[var(--bg-selected)] text-[var(--text-primary)] font-semibold'
                   : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
               }`}
-            >{sidebarConversationsLabel}</button>
+            >{t('sidebar.conversations')}</button>
           </div>
           <div className="flex items-center gap-1">
             <button onClick={onToggle} className="md:hidden text-[var(--text-muted)] hover:text-[var(--text-primary)]">
@@ -1358,9 +1353,7 @@ function Sidebar({
           </div>
         </div>
 
-        {/* ===== 会話履歴モード（表示専用。中身は ChatPage が1つだけ生成して渡す） ===== */}
         {mode === 'conversations' && conversationsSlot}
-
         <div className={`flex-1 overflow-y-auto py-1 ${mode === 'conversations' ? 'hidden' : ''}`}>
           {/* ===== Agents モード ===== */}
           {mode === 'agents' && (
@@ -2256,7 +2249,7 @@ export function ChatPage() {
   const [servers, setServers] = useState<ChatServer[]>([]);
   /** アクティブサーバー ID（null = 「すべて」表示） */
   const [activeServerId, setActiveServerId] = useState<string | null>(null);
-  /** サイドバーモード切り替え（Servers/Agents/会話履歴の3値。localStorage に永続化する） */
+  /** サイドバーモード切り替え。Pulse を含めて端末内に保持する。 */
   const [sidebarMode, setSidebarModeRaw] = useState<SidebarMode>(() => {
     try {
       return readSidebarMode(localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY));
@@ -2264,13 +2257,12 @@ export function ChatPage() {
       return 'servers';
     }
   });
-  /** `setSidebarMode` のラッパ（`toggleRailCollapsed` と同じ流儀で localStorage へ永続化） */
   const setSidebarMode = useCallback((mode: SidebarMode) => {
     setSidebarModeRaw(mode);
     try {
       localStorage.setItem(SIDEBAR_MODE_STORAGE_KEY, mode);
     } catch {
-      // localStorage 不可（プライベートモード等）でも動作を継続
+      // localStorage 不可でも画面内の切り替えは継続する
     }
   }, []);
   /** ライトボックス表示用の画像 URL */
@@ -3318,11 +3310,8 @@ export function ChatPage() {
     loadHistory(activeTabId, undefined, 'replace');
   }, [activeTabId, activeTab, refreshCrossAskGroups, loadHistory]);
 
-  // 会話履歴レール: 自ブラウザの tab.progress から「今実行中とみなす sessionId の集合」を導出する
-  // （サーバーの10秒ポーリングより速く反映するための即時性の補完。`conversation-rail-rules.ts` の
-  // `resolveConversationStatus` 側で `running` と OR される）。
   const localRunningSessionIds = new Set(
-    tabs.filter(t => t.progress !== null && t.sessionId).map(t => t.sessionId as string)
+    tabs.filter((tab) => tab.progress !== null && tab.sessionId).map((tab) => tab.sessionId as string),
   );
   const conversationFeed = useConversationFeed({
     refreshToken: threadRefreshToken,
@@ -3330,12 +3319,6 @@ export function ChatPage() {
     activeSessionId: activeTab?.sessionId ?? null,
     enabled: sidebarMode === 'conversations',
   });
-  // 単純な識別子として分割代入しておく（`handleConversationSelect` の依存配列に
-  // `conversationFeed.markConversationSeen` という member access を渡すと、
-  // react-hooks/exhaustive-deps が「`conversationFeed` オブジェクト自体を依存に入れろ」と
-  // 要求してしまう。`conversationFeed` 自体は毎レンダー新しいオブジェクトのため、それに従うと
-  // 逆に不要な再生成を招く。関数自体は `useConversationFeed` 内部で安定しているため、
-  // 分割代入した識別子を直接依存配列に渡すのが正しい）。
   const { markConversationSeen } = conversationFeed;
 
   /** タブごとの入力テキスト（グローバル state ではなくタブデータから派生） */
@@ -3691,8 +3674,7 @@ export function ChatPage() {
     });
   }, [activeTab?.historyLoaded, activeTab?.hasMoreHistory, activeTab?.loadingHistory, loadOlderMessages]);
 
-  /** プロジェクトの表示名・マシン表示名を machineList から解決する（タブ新規作成時の共通処理。
-   *  `handleSelectProject` / `handleSelectPreviewProject` の両方で使う）。 */
+  /** プロジェクトの表示名・マシン表示名を machineList から解決する（タブ新規作成時の共通処理）。 */
   const resolveProjectLabel = useCallback((projectId: string): { projectName: string; machineDisplayName: string } => {
     for (const m of machineList) {
       const p = m.projects.find(p => p.id === projectId);
@@ -3704,7 +3686,6 @@ export function ChatPage() {
   }, [machineList]);
 
   /** アクティブサーバーへの自動登録（#370）・タブグループへの追従（#371）。
-   *  `handleSelectProject` / `handleSelectPreviewProject` の共通処理（ロジックは移動のみ、変更なし）。
    *  早期return・新規タブ判定より前に必ず呼ぶこと（ref から最新値を読み stale closure を回避）。 */
   const followActiveServerForProject = useCallback((projectId: string, registerToActiveServer: boolean) => {
     // アクティブサーバーがある場合はプロジェクトを自動登録。
@@ -3750,13 +3731,7 @@ export function ChatPage() {
    *  registerToActiveServer=true のときのみ、アクティブサーバーへの自動登録を行う（#370）。
    *  Servers タブの行クリックや TabBar のタブ切り替えは「開く／切り替える」だけで登録は行わず、
    *  Agents タブの行クリック（onSelectProject(project.id, true)）だけが登録の起点となる。
-   *
-   *  `opts.skipConnect`（会話履歴レール サイクル）: true のとき `//connect` の送信（＝サーバー側で
-   *  「このプロジェクトの最新 active スレッド」を選び直す処理）をスキップする。タブを開く・
-   *  activeServerId を追従させる（#371）処理はそのまま実行する。会話履歴レールから特定スレッドへ
-   *  遷移する際、`//connect` が送ったあとに非同期で届く `web:session_info` が意図したスレッドを
-   *  上書きしてしまうレースを避けるために使う（`handleConversationSelect` 専用、既存呼び出し元は
-   *  第3引数を渡さないため挙動は不変）。 */
+   */
   const handleSelectProject = useCallback((projectId: string, registerToActiveServer = false, opts?: { skipConnect?: boolean }) => {
     followActiveServerForProject(projectId, registerToActiveServer);
 
@@ -3798,33 +3773,21 @@ export function ChatPage() {
       return;
     }
 
+    // サーバーにコンテキスト切り替えを通知（Pulse のプレビュー選択中は切り替えない）。
     if (!opts?.skipConnect) {
-      // サーバーにコンテキスト切り替えを通知
       suppressConnectRef.current = true;
       sendCommand(`//connect ${projectId}`);
+    }
 
-      // 既存タブでセッションIDがあり、履歴未読み込みなら読み込み開始
-      if (existingTab?.sessionId && !existingTab.historyLoaded && !existingTab.loadingHistory) {
-        loadHistory(projectId, existingTab.sessionId);
-      }
+    // 既存タブでセッションIDがあり、履歴未読み込みなら読み込み開始
+    if (existingTab?.sessionId && !existingTab.historyLoaded && !existingTab.loadingHistory) {
+      loadHistory(projectId, existingTab.sessionId);
     }
   }, [followActiveServerForProject, resolveProjectLabel, persistTabOrder, sendCommand, loadHistory]);
 
-  /**
-   * Pulse（会話履歴レール）から1件開く。VS Code のプレビュータブ方式（tab-preview-rules.ts）。
-   * `handleSelectProject` を使わない理由:
-   *  - 早期 return（activeTabIdRef.current === projectId）より前にプレビュー整理を
-   *    走らせたい（同じプロジェクトの別スレッドをクリックしたときも、別プロジェクトに
-   *    残った古いプレビューを確実に回収したい）
-   *  - `//connect` を送らない・registerToActiveServer を持たない（#370 と同じ方針:
-   *    会話履歴のクリックでサーバー＝タブグループのメンバーシップを勝手に書き換えない）
-   *  - 履歴ロードは呼ばない（直後に `handleConversationSelect` が `switchTabToThread` を呼ぶ）
-   * Pulse を何度クリックしても `tab_order` への保存は発生しない（差し替え・新規追加だけでは
-   * 保存しない。差し替え不可で既存プレビューを昇格させたときだけ保存する）。
-   */
+  /** Pulse から会話を開くためのプレビュータブ。別の会話を選ぶまで通常タブには保存しない。 */
   const handleSelectPreviewProject = useCallback((projectId: string) => {
     followActiveServerForProject(projectId, false);
-
     const { projectName, machineDisplayName } = resolveProjectLabel(projectId);
     const newTab: Tab = {
       projectId,
@@ -3846,7 +3809,6 @@ export function ChatPage() {
     const { tabs: next, mode, promotedId } = openPreviewTab(tabsRef.current, newTab);
     if (mode !== 'focus') setTabs(next);
     if (promotedId) persistTabOrder(next);
-
     setActiveTabId(projectId);
     activeTabIdRef.current = projectId;
   }, [followActiveServerForProject, resolveProjectLabel, persistTabOrder]);
@@ -3905,29 +3867,14 @@ export function ChatPage() {
     }
   }, [loadHistory, persistTabOrder]);
 
-  /**
-   * 会話履歴レール: 行クリックでそのスレッドへ遷移する。
-   * `//connect` を送らない（`handleSelectPreviewProject` 参照）。`//connect` は
-   * サーバー側で「このプロジェクトの最新 active スレッド」を選び直してしまうため、順序をどう
-   * 入れ替えても意図したスレッドが別スレッドに上書きされるレースが残る。
-   * 一方 `switchChatToThread`（サーバー側 `POST /api/sessions/:id/switch`）は
-   * `currentSessionId`/`currentProjectName`/`currentMachineId`/`lastProjectId`/`addParticipant` を
-   * すべて設定する＝`//connect` がやることを内包しているため、これだけで context 確立が完結する。
-   * 失敗時は切替前の状態を維持する（`ThreadList.tsx` の `handleSelect` と同じ fail-soft 方針）。
-   * タブは `handleSelectPreviewProject`（VS Code のプレビュータブ方式）で開く。Pulse は
-   * 全プロジェクト横断の直近20件を出すため、`handleSelectProject` でタブを作ると開くたびに
-   * tab_order へ永続化され無制限にタブが増殖していた（2026-11-22 根治、tab-preview-rules.ts）。
-   */
+  /** Pulse の会話をプレビュータブで開き、対象スレッドへ切り替える。 */
   const handleConversationSelect = useCallback(async (item: ConversationFeedItem) => {
-    // 1) プレビュータブを開く/差し替える（#371 の visibleTabs 整合。//connect は送らない）
     handleSelectPreviewProject(item.projectId);
     try {
-      // 2) サーバー側 current スレッドを差し替える（context 確立の唯一の経路）
       const result = await sessionsApi.switchThread(item.sessionId, getTabId());
-      // 3) タブへ反映＋履歴を 'replace' で丸ごと差し替え
       switchTabToThread(result.projectId, result.sessionId, result.title);
     } catch {
-      // 失敗時は何もしない（切替前の状態を維持）
+      // 切り替え失敗時も Pulse の既読化は行う
     }
     markConversationSeen(item.sessionId);
   }, [handleSelectPreviewProject, switchTabToThread, markConversationSeen]);
@@ -4310,23 +4257,16 @@ export function ChatPage() {
   }, [addFiles]);
 
   const openTabIds = new Set(tabs.map(t => t.projectId));
-
-  // 会話履歴レール 2026-10-22 見た目改修: 主役行（エージェント名/プロジェクト名）に
-  // 改名・タブのカスタム名を反映させるための projectId → 表示名マップ。
-  // `Sidebar` 内の `projectNameMap`（1169行付近）と同じロジック（displayName 優先）。
   const conversationProjectNameMap = new Map<string, string>();
-  for (const m of machineList) {
-    for (const p of m.projects) {
-      conversationProjectNameMap.set(p.id, p.displayName ?? p.name);
+  for (const machine of machineList) {
+    for (const project of machine.projects) {
+      conversationProjectNameMap.set(project.id, project.displayName ?? project.name);
     }
   }
   const resolveConversationProjectLabel = (projectId: string, fallbackName: string) => {
     const tab = tabsRef.current.find(t => t.projectId === projectId);
     return tab?.customName || conversationProjectNameMap.get(projectId) || fallbackName;
   };
-
-  // 会話履歴レール: 表示専用コンポーネントは ChatPage が1つだけ生成し、drawer/rail 両方の
-  // Sidebar インスタンスへ同じものを渡す（`useConversationFeed` のポーリングを二重化しないため）。
   const conversationsSlot = (
     <ConversationRail
       items={conversationFeed.items}

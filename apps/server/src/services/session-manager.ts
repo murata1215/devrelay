@@ -271,6 +271,7 @@ export async function createSession(
       machineId,
       projectId,
       aiTool,
+      origin: options?.origin ?? 'interactive',
       status: 'active',
       title: options?.title ?? undefined,
       // スレッド一覧（GET /api/threads）は `lastActiveAt desc nulls last` で DB 側ソートするため、

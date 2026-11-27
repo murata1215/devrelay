@@ -49,3 +49,4 @@
 0036	2026-11-23	-	0036_project_sandbox_enabled.sql	Project.sandboxEnabled 追加（Sandbox 実行対象かどうかのプロジェクト単位設定。既定 false）	-
 0037	2026-11-24	-	0037_session_turn_state.sql	Session.execCompletedAt/planReadyAt 追加（スレッド状態バッジ: 実行済み/プラン提示の事実記録、execCompletedAtのみBuildLogからbackfill）	-
 0038	2026-11-26	-	0038_team_member_reviewer.sql	TeamMember.isReviewer 追加 + Team ごとにレビュー担当は1人	-
+0039	2026-11-26	-	0039_session_origin.sql	Session.origin 追加（interactive / mcp のスレッド作成元を保存）	-

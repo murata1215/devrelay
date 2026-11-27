@@ -377,6 +377,9 @@ model Session {
   projectId     String
   project       Project   @relation(fields: [projectId], references: [id])
   aiTool        String    @default("claude")
+  // 作成元。既存行と Web UI で作る通常スレッドは interactive、MCP の submit/ask は mcp。
+  // 既存データを推測で分類しないため、マイグレーションでは interactive を既定値として保存する。
+  origin        String    @default("interactive") // 'interactive' | 'mcp'
   status        String    @default("active") // active, ended
   startedAt     DateTime  @default(now())
   endedAt       DateTime?

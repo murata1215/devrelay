@@ -6,6 +6,8 @@ import { decideThreadRowAction, decideThreadCreateButton } from './lite/lite-she
 import { useLanguage } from '../contexts/LanguageContext';
 import { ThreadStateBadge } from './ThreadStateBadge';
 
+type ThreadOriginFilter = 'interactive' | 'mcp';
+
 /**
  * スレッド管理 サイクル3（WebUI）: プロジェクト内（または `projectId` 省略時はユーザーの全プロジェクト
  * 横断、Lite シェル v2 用）のスレッド一覧パネル。
@@ -150,6 +152,8 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  /** 通常スレッドと MCP 経由スレッドをプロジェクト内で切り替える。 */
+  const [originFilter, setOriginFilter] = useState<ThreadOriginFilter>('interactive');
   const renameInputRef = useRef<HTMLInputElement>(null);
   /** stale closure 防止（並行フェッチ時に古い projectId の結果を捨てる） */
   const requestSeqRef = useRef(0);
@@ -160,7 +164,7 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
     setLoading(true);
     setError(false);
     try {
-      const { threads } = await threadsApi.list(projectId);
+      const { threads } = await threadsApi.list(projectId, undefined, originFilter);
       if (requestSeqRef.current !== seq) return; // stale response
       setItems(sortThreadsDesc(threads));
     } catch {
@@ -169,7 +173,7 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
     } finally {
       if (requestSeqRef.current === seq) setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, originFilter]);
 
   useEffect(() => {
     fetchThreads();
@@ -194,6 +198,7 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
         machineName: '',
         machineOnline: true,
         aiTool: '',
+        origin: 'interactive',
         status: 'active',
         lastActiveAt: new Date().toISOString(),
         firstUserMessage: null,
@@ -299,15 +304,26 @@ export function ThreadList({ projectId, createProjectId, currentSessionId, onSel
   return (
     <div className="w-56 h-full shrink-0 border-r border-[var(--border-color)] bg-[var(--bg-secondary)] flex flex-col z-[35] md:z-auto">
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
-        <span className="text-xs font-semibold text-[var(--text-muted)]">{t('thread.panelTitle')}</span>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 min-w-0">
           <button
-            onClick={handleCreateClick}
-            disabled={createButtonState.disabled}
-            className="text-xs px-2 py-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
-          >
-            {createButtonState.label === 'creating' ? t('thread.creating') : t('thread.new')}
-          </button>
+            onClick={() => setOriginFilter('interactive')}
+            className={`text-xs font-semibold px-1 py-0.5 rounded ${originFilter === 'interactive' ? 'bg-[var(--bg-selected)] text-[var(--text-primary)]' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'}`}
+          >{t('thread.panelTitle')}</button>
+          <button
+            onClick={() => setOriginFilter('mcp')}
+            className={`text-xs font-semibold px-1 py-0.5 rounded ${originFilter === 'mcp' ? 'bg-[var(--bg-selected)] text-[var(--text-primary)]' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'}`}
+          >MCP</button>
+        </div>
+        <div className="flex items-center gap-1">
+          {originFilter === 'interactive' && (
+            <button
+              onClick={handleCreateClick}
+              disabled={createButtonState.disabled}
+              className="text-xs px-2 py-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
+            >
+              {createButtonState.label === 'creating' ? t('thread.creating') : t('thread.new')}
+            </button>
+          )}
           {onToggleCollapse && (
             <button onClick={onToggleCollapse} title={t('thread.collapse')} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">

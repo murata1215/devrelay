@@ -38,6 +38,7 @@ import { isCrossTeamPublishEnabled, selectPublishableMembers } from '../services
 import { listCrossTeamAskCandidateProjects, findCrossTeamAskProjectById } from '../services/cross-team-authz.js';
 import { buildCrossAskTargetGroups, resolveCrossAskOrigin, type CrossAskTargetRow } from '../services/cross-ask-rules.js';
 import { buildCrossAskSessionIdFilter } from '../services/thread-scope.js';
+import { parseThreadOrigin } from '../services/thread-origin.js';
 import { pickAvailableAiTool } from '../services/ai-tool-availability.js';
 import { decideAskReadOnlyEnforcement } from '../services/ask-guard.js';
 import { buildCrossAskScopeIdBase, parseCrossAskScopeGeneration, CROSS_ASK_SCOPE_ID_PREFIX, resolveCrossAskResumeMaxTurns } from '../services/cross-ask-resume-rules.js';
@@ -1462,15 +1463,40 @@ export async function apiRoutes(app: FastifyInstance) {
   // サービス再起動（PM2 で管理）
   // ========================================
 
-  // サーバー再起動（システム管理者のみ、#367）
+  /**
+   * サーバー再起動（システム管理者のみ、#367）。
+   *
+   * 再起動耐性サイクル（2026-11-25）: 会話中なら 409 で断る（`force:true` で越えられる。
+   * `POST /api/machines/:id/restart` と同じパターン・同じ純関数を再利用）。通過したら、
+   * まだ正常稼働しているうちに全 WebUI・全 Agent へ予告を配信してから再起動コマンドを叩く
+   * （`restart-notice.ts`）。pm2/nssm の停止猶予設定には一切依存しない。
+   */
   app.post('/api/services/restart/server', async (request, reply) => {
     // FastifyRequest 型は request.user を宣言していない（他ハンドラも @ts-ignore で参照）ため、
     // MinimalRequest への構造的キャストには一段 unknown を挟む必要がある。
     if (!requireSystemAdmin(request as unknown as MinimalRequest, reply)) return;
     try {
-      // バックグラウンドで再起動（レスポンスを返してから再起動）
+      const body = (request.body ?? {}) as { force?: boolean };
+      const query = (request.query ?? {}) as { force?: string };
+      const force = body.force === true || query.force === '1' || query.force === 'true';
+
+      if (isRestartGateEnabled(process.env.DEVRELAY_RESTART_GATE)) {
+        const busyState = await getGlobalBusyState();
+        if (decideManualUpdate({ busy: busyState !== null, force }) === 'hold') {
+          console.log(`⏸️ [restart:server] held: ${formatBusyReason(busyState)} (force=${force})`);
+          return reply.status(409).send({ error: buildBusyHoldApiMessage(busyState) });
+        }
+      }
+
+      const noticeMs = resolveRestartNoticeWaitMs(process.env.DEVRELAY_RESTART_NOTICE_WAIT_MS);
+
+      // バックグラウンドで再起動（レスポンスを返してから再起動）。予告はまだプロセスが正常に
+      // 稼働している今のうちに配信し、その後 noticeMs 待ってから再起動コマンドを叩く。
       setTimeout(async () => {
         try {
+          const sent = broadcastRestartingNotice(noticeMs);
+          console.log(`📢 [restart:server] notice sent: web=${sent.web}, agents=${sent.agents}`);
+          await new Promise(resolve => setTimeout(resolve, noticeMs));
           await execAsync(SERVICE_RESTART_CMD);
         } catch (err) {
           console.error('Failed to restart server:', err);
@@ -1888,6 +1914,7 @@ export async function apiRoutes(app: FastifyInstance) {
         userId,
         status: { in: ['active', 'ended'] },
         ...(projectId ? { projectId } : {}),
+        ...(origin ? { origin } : {}),
         // ソフトデリート済みのプロジェクト / マシンに属するスレッドは一覧に出さない。
         // machine は Session.machineId 側で見る（表示する machineName / machineOnline が
         // s.machine 由来のため。project.machine とは別カラムで、乖離しうる）。
@@ -2026,6 +2053,7 @@ export async function apiRoutes(app: FastifyInstance) {
         machineName: s.machine.displayName ?? s.machine.name,
         machineOnline: connectedAgents.has(s.machineId),
         aiTool: s.aiTool,
+        origin: s.origin,
         status: s.status,
         lastActiveAt: (s.lastActiveAt ?? s.startedAt).toISOString(),
         firstUserMessage,
