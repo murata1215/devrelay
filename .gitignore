@@ -32,6 +32,9 @@ id_rsa.pub
 *.log
 logs/
 
+# 再起動耐性サイクル: 停止マーカー・実行中ターン一覧（apps/server/.runtime/）
+.runtime/
+
 # OS
 .DS_Store
 Thumbs.db

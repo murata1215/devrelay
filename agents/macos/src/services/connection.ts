@@ -34,6 +34,7 @@ import type {
   AiUsageData,
   RepoAuthResponsePayload,
   HandoverApplyPayload,
+  ServerRestartingPayload,
 } from '@devrelay/shared';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
@@ -45,6 +46,7 @@ import { writeFileAtomic } from './atomic-write.js';
 import { buildPnpmInstallCommand, AGENT_INSTALL_FILTER, WIN32_AGENT_INSTALL_FILTER } from './update-script.js';
 import { startAiSession, sendPromptToAi, stopAiSession, cancelAiSession, resolveToolApproval, resetApproveAllMode, getActiveAiTurnCount, type SendPromptOptions } from './ai-runner.js';
 import { decideAgentUpdateAction } from './update-guard-rules.js';
+import { decideOutboxAction, trimOutbox, type OutboxEntry } from './outbox-rules.js';
 import { prependBinDir } from './node-bin-path.js';
 import { buildCheckedBuildSteps, buildRecordPrevHead, buildRestartGate, buildRollbackOnBuildFailure, buildRunAndLog } from './update-script-rules.js';
 import { GIT_NONINTERACTIVE_ENV, classifyGitRemoteFailure, buildRepoAuthFailureMessage, redactSecrets, shouldRequestServerRepoAuth, readExtraHeaderFromGitConfig, upsertExtraHeaderInGitConfig } from './repo-auth-rules.js';
@@ -158,6 +160,12 @@ let reconnectAttempts = 0;
 let lastConnectedAt = 0;
 /** サーバーがプロトコルバージョン不足で接続拒否した場合 true（再接続ループを停止） */
 let protocolUpdateRequired = false;
+/**
+ * 再起動耐性サイクル（2026-11-25）: `server:restarting` を受けたら true にし、次の close で
+ * 指数バックオフを使わず短い固定待ちで再接続する（サーバーはもう予告どおり落ちることが
+ * 分かっているため、通常の切断と違って「少し待って様子を見る」必要が無い）。
+ */
+let expectRestart = false;
 
 /** 接続監視タイマーを解除する（open / close / error / disconnect の各経路で呼ぶ） */
 function clearConnectWatchdog() {
@@ -471,6 +479,10 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
           console.log(`✅ Authentication successful (machineId: ${currentMachineId})`);
           // machineId が確定した時点で初回チェックを実行（appPing と違い、ここまで待たないと常にスキップされるため）
           checkAndReportClaudeAuth().catch((err) => console.error('[claude-auth] check failed:', err));
+          // 再起動耐性サイクル: サーバーが参加者を復元済み（agent-manager.ts の
+          // restoreSessionParticipantsForMachine()）になったこの時点で、切断中に積んだ
+          // outbox をフラッシュする（完了報告・ツール承認要求がここで初めて再送される）。
+          flushOutbox();
         } else {
           console.log('✅ Authentication successful');
         }
@@ -669,6 +681,13 @@ function handleServerMessage(message: ServerToAgentMessage, config: AgentConfig)
     case 'server:handover:apply':
       // スレッド引継ぎ（`n`）: doc/handover/ への保存と使用中ポインタの書き込み
       void handleHandoverApply(message.payload);
+      break;
+
+    case 'server:restarting':
+      // 再起動耐性サイクル: サーバーがまだ正常稼働しているうちに届く予告。次の close で
+      // 即再接続する（バックオフを進めない）。届かなくても無期限リトライが代わりに復帰させる。
+      console.log(`📢 Server is restarting (notice=${(message.payload as ServerRestartingPayload).noticeMs}ms), will reconnect promptly`);
+      expectRestart = true;
       break;
   }
 }
@@ -2349,9 +2368,60 @@ async function handleAiPrompt(payload: { sessionId: string; prompt: string; user
   }
 }
 
+/**
+ * 再起動耐性サイクル（2026-11-25）: WS 非 OPEN 時に黙って捨てていたメッセージを outbox に積む。
+ * `server:connect:ack`（machineId 確定）受信後にフラッシュする（`flushOutbox()`）。
+ *
+ * 重複送信は構造的に起きない: ここで積むのは「OPEN でなかった」場合だけであり、OPEN なら
+ * 即座に送信して outbox には積まない。同じメッセージが2回積まれる経路も無い。
+ */
+const outbox: OutboxEntry[] = [];
+/** outbox の上限（既定200件・50MB）。溢れたら outbox-rules.ts の優先順位で間引く。 */
+const OUTBOX_MAX_ENTRIES = 200;
+const OUTBOX_MAX_BYTES = 50 * 1024 * 1024;
+
 function sendMessage(message: AgentMessage) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
+    return;
+  }
+
+  const isComplete = message.type === 'agent:ai:output'
+    ? (message as { payload: { isComplete?: boolean } }).payload.isComplete
+    : undefined;
+  const decision = decideOutboxAction({ type: message.type, isComplete });
+  if (decision === 'drop') return;
+
+  const json = JSON.stringify(message);
+  outbox.push({ json, sizeBytes: Buffer.byteLength(json, 'utf8'), mustKeep: decision === 'queue-must' });
+  const { kept, droppedMust, droppedBestEffort } = trimOutbox(outbox, { maxEntries: OUTBOX_MAX_ENTRIES, maxBytes: OUTBOX_MAX_BYTES });
+  outbox.length = 0;
+  outbox.push(...kept);
+  if (droppedBestEffort > 0) {
+    console.warn(`⚠️ Outbox full: dropped ${droppedBestEffort} best-effort message(s)`);
+  }
+  if (droppedMust > 0) {
+    console.error(`❌ Outbox full even after dropping best-effort messages: dropped ${droppedMust} must-keep message(s) (completion report / tool approval may be lost)`);
+  }
+  console.log(`📥 Queued message (ws not open): type=${message.type}, outbox size=${outbox.length}`);
+}
+
+/**
+ * `server:connect:ack` 受信後（machineId 確定 = サーバー側の参加者復元も完了済み）に呼ぶ。
+ * outbox に積まれた全メッセージを順番に送信する（届かなかったものは再度 outbox に積み直される。
+ * `sendMessage()` を再利用するため、送信失敗時の扱いは通常のメッセージと完全に同じ）。
+ */
+function flushOutbox(): void {
+  if (outbox.length === 0) return;
+  const pending = outbox.splice(0, outbox.length);
+  console.log(`📤 Flushing ${pending.length} queued message(s) after reconnect`);
+  for (const entry of pending) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(entry.json);
+    } else {
+      // 送信できなければそのまま戻す（mustKeep は維持される）
+      outbox.push(entry);
+    }
   }
 }
 
@@ -2538,6 +2608,22 @@ function scheduleReconnect(config: AgentConfig, projects: Project[]) {
   // プロトコルバージョン不足で拒否された場合は再接続しない（意図した停止）
   if (protocolUpdateRequired) {
     console.log('⛔ Agent の更新が必要です。再接続をスキップします。`u` コマンドで更新するか、再インストールしてください。');
+    return;
+  }
+
+  // 再起動耐性サイクル: `server:restarting` 予告を受けていた切断は、通常のバックオフを
+  // 使わず短い固定待ちで即再接続する（reconnectAttempts は進めない。予告無しの切断と
+  // 区別するため、消費したらすぐにリセットする）。
+  if (expectRestart) {
+    expectRestart = false;
+    const delay = 1000;
+    console.log(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (server restart notice)...`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectToServer(config, projects).catch((err) => {
+        console.error('Reconnection failed:', err.message);
+      });
+    }, delay);
     return;
   }
 

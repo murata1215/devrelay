@@ -164,6 +164,8 @@ export const messages = {
   'chat.connecting': { en: 'Connecting...', ja: '接続中...' },
   'chat.connected': { en: 'Connected', ja: '接続中' },
   'chat.disconnected': { en: 'Disconnected...', ja: '切断中...' },
+  // 再起動耐性サイクル（2026-11-25）: サーバー再起動予告バナー
+  'chat.serverRestarting': { en: 'Server is restarting… reconnecting automatically.', ja: 'サーバー再起動中… 自動で戻ります。' },
   'chat.processing': { en: 'Processing...', ja: '処理中...' },
   'chat.detailLink': { en: 'View details', ja: '詳細を見る' },
   // 2026-09-30: 進捗表示の停止ボタン（ProgressIndicator）。confirm は誤クリック防止の2回目確認、

@@ -14,6 +14,7 @@
     "db:studio": "prisma studio",
     "db:bootstrap:new-db-only": "prisma db push && node -e \"const{execSync}=require('child_process');const fs=require('fs');const sql=fs.readFileSync('prisma/bootstrap.sql','utf8');execSync('npx prisma db execute --stdin',{input:sql,stdio:['pipe','inherit','inherit']})\"",
     "db:status": "node dist/scripts/db-status.js",
+    "restart:when-idle": "node dist/scripts/restart-when-idle.js",
     "setup:service": "./scripts/setup-service.sh",
     "knowledge:backfill": "node dist/scripts/knowledge-backfill.js",
     "devin:cost-report": "node dist/scripts/devin-cost-report.js",

@@ -473,7 +473,20 @@ export type ServerToAgentMessage =
   | { type: 'server:capability:sync'; payload: { trigger?: 'idle' | 'manual' } }
   | { type: 'server:raw:prompt'; payload: RawPromptPayload }
   | { type: 'server:repo:auth'; payload: RepoAuthResponsePayload }
-  | { type: 'server:handover:apply'; payload: HandoverApplyPayload };
+  | { type: 'server:handover:apply'; payload: HandoverApplyPayload }
+  | { type: 'server:restarting'; payload: ServerRestartingPayload };
+
+/**
+ * サーバー再起動の予告（再起動資産性サイクル、2026-11-25）。
+ * サーバーがまだ正常稼働しているうち（停止信号を受ける前）に送る best-effort な予告で、
+ * Agent はこれを受けて次の再接続を早める（バックオフをリセットし、初回待ちを短くする）。
+ * 届かなくても実害はない（Agent の既存の無期限リトライが代わりに復帰させる）ため、
+ * 新しい capability は設けない（未対応の旧 Agent は単に無視する）。
+ */
+export interface ServerRestartingPayload {
+  /** 予告からプロセス終了までのおおよその待ち時間（ms）。Agent 側の表示用（UI は持たないため現状未使用） */
+  noticeMs: number;
+}
 
 /**
  * スレッド引継ぎ（`n` コマンド）: 引継ぎ書を `<projectPath>/doc/handover/` に置き、
@@ -1228,7 +1241,8 @@ export type ServerToWebMessage =
   // 回答（新しい検索で前の回答が破棄される場合等）を区別する。
   | { type: 'knowledge:answer:delta'; payload: { answerId: string; text: string } }
   | { type: 'knowledge:answer:done'; payload: KnowledgeAnswerDonePayload }
-  | { type: 'knowledge:answer:error'; payload: { answerId: string; message: string } };
+  | { type: 'knowledge:answer:error'; payload: { answerId: string; message: string } }
+  | { type: 'web:server:restarting'; payload: ServerRestartingPayload };
 
 /**
  * `knowledge:answer:done` の payload（1 件の根拠ソース）。`sourceType` は D7: ソース非依存の契約。

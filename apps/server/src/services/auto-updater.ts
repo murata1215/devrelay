@@ -17,7 +17,7 @@
 
 import { prisma } from '../db/client.js';
 import { checkAgentVersion, updateAgentAuto, isAgentConnected, getConnectedAgents } from './agent-manager.js';
-import { getProgressTrackerAgeMs } from './session-manager.js';
+import { getProgressTrackerAgeMs, listProgressTrackers } from './session-manager.js';
 import { RUNNING_FRESHNESS_MS } from './thread-activity.js';
 import { getUserSetting, SettingKeys } from './user-settings.js';
 import { decideReconcileOutcome } from './auto-update-reconcile.js';
@@ -219,6 +219,47 @@ export async function isMachineBusyWithReason(machineId: string): Promise<string
  */
 export async function isMachineBusy(machineId: string): Promise<boolean> {
   return (await isMachineBusyWithReason(machineId)) !== null;
+}
+
+/**
+ * 再起動耐性サイクル（2026-11-25）: `getMachineBusyState()` のマシン単位判定を
+ * 「全マシン」に集約した版。サーバー再起動は全 Agent に影響するため、マシン ID を
+ * 固定せずに同じ 3 段判定（① 実行中ターン台帳 ② 進捗トラッカーの鮮度 ③ 直近 10 分の AI 出力）を
+ * システム全体に適用する。
+ *
+ * `POST /api/services/restart/server` の会話中ガードに使う。`getMachineBusyState()` と
+ * 判定の優先順位・純関数（`resolveBusyState`/`formatBusyReason`/`decideManualUpdate`/
+ * `buildBusyHoldApiMessage`）はそのまま再利用する（新しい純関数を増やさない）。
+ */
+export async function getGlobalBusyState(): Promise<BusyState | null> {
+  const now = Date.now();
+
+  if (isUpdateBusyGuardEnabled(process.env.DEVRELAY_UPDATE_BUSY_GUARD)) {
+    const inFlightTurnCount = inFlightTurns.countAll(now);
+    if (inFlightTurnCount > 0) {
+      return resolveBusyState({ inFlightTurnCount, sessionRunning: false, recentActivity: false });
+    }
+  }
+
+  // 進捗トラッカーの鮮度（全セッション横断）
+  const sessionRunning = listProgressTrackers(now).some(t => t.ageMs < RUNNING_FRESHNESS_MS);
+  if (sessionRunning) {
+    return resolveBusyState({ inFlightTurnCount: 0, sessionRunning: true, recentActivity: false });
+  }
+
+  // 直近 10 分以内に role='ai' の Message が作られた active セッションがあるか（全マシン横断）
+  const recent = await prisma.message.findFirst({
+    where: {
+      role: 'ai',
+      createdAt: { gte: new Date(now - RECENT_ACTIVITY_MS) },
+      session: { status: 'active' },
+    },
+    select: { id: true },
+  });
+  if (recent !== null) {
+    return resolveBusyState({ inFlightTurnCount: 0, sessionRunning: false, recentActivity: true });
+  }
+  return null;
 }
 
 /**

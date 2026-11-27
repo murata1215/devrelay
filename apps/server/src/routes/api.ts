@@ -6,7 +6,9 @@ import { Prisma, Machine, Project, Session } from '@prisma/client';
 import { prisma } from '../db/client.js';
 import { authenticate } from './auth.js';
 import { getConnectedAgents, sendToAgent, requestHistoryDates, requestHistoryExport, requestProjectFileRead, requestLatestPlanFile, pushConfigUpdate, getAgentLocalProjectsDirs, pushAllowedToolsToAgents, executeCrossProjectQuery, isAgentConnected, startSession as startAgentSession, agentHasCapability, clearAgentRestarted, getAgentAvailableAiTools } from '../services/agent-manager.js';
-import { getMachineBusyState } from '../services/auto-updater.js';
+import { getMachineBusyState, getGlobalBusyState } from '../services/auto-updater.js';
+import { broadcastRestartingNotice, resolveRestartNoticeWaitMs } from '../services/restart-notice.js';
+import { isRestartGateEnabled } from '../services/restart-gate-rules.js';
 import { isUpdateBusyGuardEnabled, decideManualUpdate, buildBusyHoldApiMessage, formatBusyReason } from '../services/update-busy-rules.js';
 import { validateCapabilityConfigInput } from '../services/capability-config-rules.js';
 import { encrypt, decrypt, getUserSetting, SettingKeys } from '../services/user-settings.js';
@@ -1502,8 +1504,13 @@ export async function apiRoutes(app: FastifyInstance) {
         () => 'inactive'
       );
 
+      // 再起動耐性サイクル: 会話中ガードの判断材料を一緒に返す（`restart-when-idle` CLI の
+      // `--status` 表示用。busy 判定自体は会話中ガードと同じ `getGlobalBusyState()` を使う）。
+      const busyState = await getGlobalBusyState();
       return {
         server: serverStatus,
+        busy: busyState !== null,
+        busyReason: formatBusyReason(busyState),
       };
     } catch (err) {
       console.error('Failed to get service status:', err);
@@ -1846,9 +1853,13 @@ export async function apiRoutes(app: FastifyInstance) {
    * プロジェクト横断のスレッド一覧（1 project 1 active 前提の解消）
    * @route GET /api/threads?projectId=&limit=
    */
-  app.get('/api/threads', async (request: FastifyRequest<{ Querystring: { projectId?: string; limit?: string } }>, reply: FastifyReply) => {
+  app.get('/api/threads', async (request: FastifyRequest<{ Querystring: { projectId?: string; limit?: string; origin?: string } }>, reply: FastifyReply) => {
     const userId = (request as any).user.id;
     const { projectId } = request.query;
+    const origin = parseThreadOrigin(request.query.origin);
+    if (origin === null) {
+      return reply.status(400).send({ error: 'origin must be interactive or mcp' });
+    }
     const limit = Math.min(50, Math.max(1, parseInt(request.query.limit || '50', 10) || 50));
 
     if (projectId) {

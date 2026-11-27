@@ -28,9 +28,15 @@ Discord/Telegram/LINE から Claude Code/Gemini CLI/Devin CLI をリモート操
 
 ```bash
 pnpm build
-# 再起動はユーザーが実行:
-pm2 restart devrelay-server
+# 再起動はユーザーが実行（会話が終わるまで自動で待つ。Linux/Windows 共通コマンド）:
+pnpm --filter @devrelay/server restart:when-idle
+# 状況だけ見る: --status を付ける。待たずに今すぐ再起動: --force を付ける
 ```
+
+再起動耐性サイクル（2026-11-25）により、`pm2 restart devrelay-server` を直接打っても
+（会話中ガードは効かないが）予告配信・graceful shutdown・Agent 側の送信キューで応答消失は
+防げる。設定変更（`kill_timeout` 等）は不要（pm2/NSSM どちらの既定値でも収まるよう
+サーバー側の停止処理を予算化してある）。詳細 `doc/devlog/2026-11-25_restart_resilience.md`。
 
 > **Agent を pm2 に登録しないこと。** この機体の Agent は crontab `@reboot` による nohup 起動が正
 > （`~/.devrelay/agent/agents/linux/dist/index.js`）。pm2 に `devrelay-agent` を登録すると同一 machineId で
@@ -149,6 +155,14 @@ pm2 restart devrelay-server
 | DEVRELAY_REPLY_SUMMARY_MIN_CHARS | 上記要約を試みる本文長の下限（文字、既定 `800`、clamp 100〜20000）。これ未満の本文は要約 AI を呼ばずそのまま出す（短い返事に課金しない） |
 | DEVRELAY_ORG_PROVIDER_DEFAULTS | 組織プロバイダー強制サイクル（2026-11-24）: AI プロバイダー設定（`build_summary`/`chat_ai`/`dev_report`/`terminal_ai`/`voice_assist`/`org_summary`/`reply_summary` の7つの `*_provider` 設定）を、既存の組織AIモデル強制（#372、`Organization.aiModelDefaults` + `OrganizationMember.canOverrideAiSettings`）と同じ仕組みで組織が強制できるようにするか。既定 `1`。`0` で従来どおり各自が自由に設定できるキルスイッチ（モデル8キーの強制には影響しない）。API キーは各自のまま（費用は各自）。判定ロジック（`decideEffectiveModel`）・上書き許可フラグは**モデルと共通の1本**＝モデルの上書きを許可されたメンバーはプロバイダーも上書きできる。管理者は設定画面 AI タブの「組織デフォルト」からプロバイダー7件を設定でき、未設定のメンバーにもロック中は組織既定が適用される（＝未設定だった人の機能が組織既定で ON になり各自のキーで課金が始まる点に注意。使いたくない人は個人設定で明示的に「なし」を選べば上書きできる）。組織既定が効いていて個人の API キーが無く機能が止まった場合はサーバーログに警告が1行出る（鍵の材料は出さない）。`l` コマンドの出力にも組織既定のプロバイダー一覧が出る（Discord/Telegram には画面が無いため）。embedding・ナレッジ検索・`DEVRELAY_ANSWER_API_KEY` 系（ナレッジ回答・スレッド自動命名・ポータル要約）は対象外（別のキー解決経路のため） |
 | DEVRELAY_THREAD_STATE_BADGE | スレッド状態バッジサイクル（2026-11-24）: スレッド一覧（WebUI 左ペイン・`/lite`・右レール「会話履歴」）に「実行済/プラン/回答済」の3色バッジを出すか。既定 `1`。`0` で `GET /api/threads` が `turnState` を一切出さず（キー省略、旧レスポンスと構造的に同一）、`sendPromptToAgent()` もプラン提示マーカー（`<!-- devrelay:plan -->`）の指示文を前置しない。AI の文章は判定に使わない: 「実行済」は exec ターン完了をサーバー自身が検知した事実（`Session.execCompletedAt`）、「プラン」は AI が機械可読な印を書いたという事実（`Session.planReadyAt`）のみを見る（`services/thread-state-rules.ts`）。印は DB 保存・ライブ配信の両方で表示前に取り除かれる。優先順位は executed > planned > answered（到達した最上位で後退しない）。導入前の既存スレッドは「実行済」のみ既存 `BuildLog` から一度だけ復元済み（0037 マイグレーション）、「プラン」は文章からの推測が危険なため backfill しない（新しいプランから正しく記録される） |
+| DEVRELAY_RESTART_GATE | 再起動耐性サイクル（2026-11-25）: `POST /api/services/restart/server` に会話中ガードを付けるか。既定 `1`。`1` のとき実行中の会話（`getGlobalBusyState()`、`/api/machines/:id/restart` と同じ判定ロジック）があれば 409 で断る（body/query の `force:true` で越えられる）。`0` で従来どおり即時再起動。pm2/NSSM の設定変更は不要（予告配信は `services/restart-notice.ts` が担い、停止処理自体の予算に収める方針のため） |
+| DEVRELAY_RESTART_NOTICE | 再起動耐性サイクル: サーバー再起動の予告（`web:server:restarting`/`server:restarting`）を全 WebUI・全 Agent へ配信するか。既定 `1`。`0` で配信しない（従来どおり無予告で切断される。クライアント側の無期限リトライによる自力復帰は変わらず効く） |
+| DEVRELAY_RESTART_NOTICE_WAIT_MS | `POST /api/services/restart/server` が予告を配信してから実際に再起動コマンドを叩くまでの待ち（既定 `800`、clamp 0〜5000）。WS フレームが OS のネットワークスタックに渡るまでの猶予 |
+| DEVRELAY_SHUTDOWN_GRACE_MS | 再起動耐性サイクル: `shutdown()`（SIGINT/SIGTERM/SIGBREAK）全体の予算（既定 `1200`ms、clamp 300〜30000）。pm2 の `kill_timeout`（既定1600ms）・NSSM の停止猶予（既定1500ms）のどちらにも収まる値を既定にしている（設定を伸ばすのではなく処理側を既定値に収める方針）。予算を超えたステップは打ち切って次に進む |
+| DEVRELAY_SHUTDOWN_MARKER | 再起動耐性サイクル: 停止処理の自己診断（`apps/server/.runtime/shutdown.json`）を有効にするか。既定 `1`。停止開始時にマーカーを書き、正常完走したら消す。次回起動時にマーカーが残っていれば「前回の停止は途中で強制終了された」警告を起動ログに出す（fail-open）。`0` で診断自体を無効化 |
+| DEVRELAY_TURN_RECOVERY | 再起動耐性サイクル: 起動の先頭で「再起動前から実行中だったセッション」を DB から見つけ、①破壊的な起動時メンテナンス（`teamexec_`/`crossquery_`/`raw_` の無条件 ended 化・24h stale 掃除）から除外し、②実行中ターン台帳・進捗トラッカーを復元するか。既定 `1`。`0` で従来どおりの無条件掃除・出力ロストに戻るキルスイッチ（`services/turn-recovery.ts`） |
+| DEVRELAY_PROGRESS_REARM | 再起動耐性サイクル: tracker が無いセッションに出力を受けたとき（サーバー再起動後の late output 等）に進捗トラッカーを作り直すか（`ensureTrackerForLateOutput()`、`session-manager.ts`）。既定 `1`。`0` で従来どおり出力を捨てて「⚠️ No tracker found」のログのみに戻す |
+| DEVRELAY_INFLIGHT_STATE_FILE | 再起動耐性サイクル: 実行中の会話件数を `apps/server/.runtime/inflight.json` に5秒間隔で書き出すか（既定 `1`）。`pnpm --filter @devrelay/server restart:when-idle` CLI がこれを読んで「会話が終わるまで待ってから再起動」を判断する（認証無しのローカルファイル読み取りのみ。新しい HTTP エンドポイントは増やさない）。`0` で書き出しを止める（CLI は「状況不明」として扱い、待たずに再起動コマンドを実行する） |
 
 ## DB テーブル（概要）
 

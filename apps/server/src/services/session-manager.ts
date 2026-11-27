@@ -118,8 +118,11 @@ const MAX_OUTPUT_LINES = 15;
  */
 const PROGRESS_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_TIMEOUT_MS) || 300_000;
 /** #337: ハードタイムアウト（既定150分）。マシンが online でも無条件でタイムアウト確定する安全網。
- *  #366: Agent 側 loop-guard の wall-clock（既定120分）より必ず後に発火させること。 */
-const PROGRESS_HARD_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_HARD_TIMEOUT_MS) || 9_000_000;
+ *  #366: Agent 側 loop-guard の wall-clock（既定120分）より必ず後に発火させること。
+ *  再起動耐性サイクル: `turn-recovery.ts` が「サーバー再起動前から実行中だったターン」を
+ *  見分ける基準としても再利用するため export する（同じ「まだ実行中とみなせる期間」の定義を
+ *  2箇所に複製しないため）。 */
+export const PROGRESS_HARD_TIMEOUT = Number(process.env.DEVRELAY_PROGRESS_HARD_TIMEOUT_MS) || 9_000_000;
 
 // Restore session participants from ChannelSession on server startup
 export async function restoreSessionParticipants() {
@@ -452,12 +455,12 @@ export async function startTypingForSession(sessionId: string) {
 }
 
 // Start progress tracking for a session
-export async function startProgressTracking(sessionId: string) {
-  const participants = sessionParticipants.get(sessionId) || [];
-
-  // Clean up any existing tracker
-  stopProgressTracking(sessionId);
-
+/**
+ * `ProgressTracker` の骨格を作る（projectId/machineId/language の解決のみ。I/O あり）。
+ * `startProgressTracking()`（新規ターン開始）と `ensureTrackerForLateOutput()`（再起動耐性
+ * サイクル: tracker 不在で出力を受けたときの再構築）の共通部分をここに一本化する。
+ */
+async function buildTrackerSkeleton(sessionId: string): Promise<ProgressTracker> {
   // projectId / machineId をキャッシュから取得（どちらか欠けていれば DB から同時に解決、#337）
   let projectId = sessionProjectMap.get(sessionId) ?? null;
   let machineId = sessionMachineMap.get(sessionId) ?? null;
@@ -479,7 +482,7 @@ export async function startProgressTracking(sessionId: string) {
   const language: Language = await resolveSessionLanguage(sessionId);
 
   const now = Date.now();
-  const tracker: ProgressTracker = {
+  return {
     messages: new Map(),
     outputBuffer: '',
     contextInfo: '',
@@ -491,6 +494,16 @@ export async function startProgressTracking(sessionId: string) {
     machineId,
     lastOutputAt: now,
   };
+}
+
+export async function startProgressTracking(sessionId: string) {
+  const participants = sessionParticipants.get(sessionId) || [];
+
+  // Clean up any existing tracker
+  stopProgressTracking(sessionId);
+
+  const tracker = await buildTrackerSkeleton(sessionId);
+  const { projectId, language } = tracker;
 
   // Send initial progress message to all participants
   // 2026-09-30: 開始直後は elapsed=0 のため shouldShowCancelHint() は常に false（案内行なし）。
@@ -599,7 +612,7 @@ export function appendSessionOutput(sessionId: string, output: string) {
       console.log(`📝 Buffer updated: ${tracker.outputBuffer.length} chars total`);
     }
   } else {
-    console.log(`⚠️ No tracker found for session ${sessionId}`);
+    console.log(`⚠️ Could not re-arm tracker for session ${sessionId}, output dropped`);
   }
 }
 

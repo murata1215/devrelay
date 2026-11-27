@@ -93,6 +93,19 @@ export class InFlightTurnRegistry {
   }
 
   /**
+   * 再起動耐性サイクル（2026-11-25）: 全マシン合計の TTL 内エントリ件数。
+   * `count(machineId, now)` のマシン単位版を全体に広げただけ（判定ロジックは複製しない）。
+   * `GET /api/services/status` の `runningTurns` 表示・会話中ガードの集計に使う。
+   */
+  countAll(nowMs: number): number {
+    let total = 0;
+    for (const machineId of this.byMachine.keys()) {
+      total += this.count(machineId, nowMs);
+    }
+    return total;
+  }
+
+  /**
    * TTL を超過した全エントリを削除する（取りこぼし経路の保険）。
    * @returns 削除した件数（全マシン合計）
    */

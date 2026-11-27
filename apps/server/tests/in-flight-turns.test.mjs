@@ -180,3 +180,33 @@ describe('InFlightTurnRegistry: listAll（GET /api/debug/turns 向けの読み�
     assert.deepEqual(reg.listAll(1000), []);
   });
 });
+
+describe('InFlightTurnRegistry: countAll（再起動耐性サイクル: 全マシン合計）', () => {
+  test('空なら 0', () => {
+    const reg = new InFlightTurnRegistry();
+    assert.equal(reg.countAll(1000), 0);
+  });
+
+  test('複数マシンのエントリを合算する', () => {
+    const reg = new InFlightTurnRegistry();
+    reg.start('m1', 's1', 1000);
+    reg.start('m1', 's2', 1000);
+    reg.start('m2', 's3', 1000);
+    assert.equal(reg.countAll(1000), 3);
+  });
+
+  test('TTL 超過分は数えない（count() と同じ TTL 判定を使う）', () => {
+    const reg = new InFlightTurnRegistry(1000); // TTL=1000ms
+    reg.start('m1', 's1', 0); // 失効予定
+    reg.start('m2', 's2', 5000); // まだ有効
+    assert.equal(reg.countAll(5500), 1);
+  });
+
+  test('end 後はそのマシンの分が減る', () => {
+    const reg = new InFlightTurnRegistry();
+    reg.start('m1', 's1', 1000);
+    reg.start('m2', 's2', 1000);
+    reg.end('m1', 's1');
+    assert.equal(reg.countAll(1000), 1);
+  });
+});

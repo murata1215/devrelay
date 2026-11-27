@@ -407,6 +407,24 @@ nssm set devrelay-server AppEnvironmentExtra "HTTPS_PROXY= " "HTTP_PROXY= " "htt
 `apps/server/src/index.ts` は `SIGINT` / `SIGTERM` に加え、Windows サービスが送る
 `SIGBREAK` も捕捉して graceful shutdown する実装になっている。
 
+**再起動耐性サイクル（2026-11-25）: NSSM の停止猶予（`AppStopMethodConsole` 等、既定1.5秒）は
+変更不要。** サーバー側の停止処理（予告配信 → `app.close()` → bot 破棄 → DB 切断）は
+`DEVRELAY_SHUTDOWN_GRACE_MS`（既定1200ms）で予算管理されており、NSSM・pm2 どちらの既定の
+停止猶予にも収まるよう作られている。会社サーバーでこの env を追加設定する必要は無い。
+万一、停止処理の途中で強制終了された場合は次回起動時のログに警告が1行出る
+（`apps/server/.runtime/shutdown.json` が消えていない＝正常完走していない証拠）。その場合に
+限り `DEVRELAY_SHUTDOWN_GRACE_MS` を伸ばすか、NSSM 側の停止猶予を伸ばすことを検討する。
+
+再起動そのものは、会話が終わるまで自動で待つ CLI を使う（Linux/Windows 共通コマンド。
+`DEVRELAY_SERVICE_RESTART_CMD` をそのまま使うため `.env` の追加設定は不要）:
+
+```powershell
+cd C:\devrelay\apps\server
+node dist\scripts\restart-when-idle.js
+```
+
+`--status` で待たずに状況だけ見る、`--force` で待たずに今すぐ再起動する。
+
 `.env` の `DEVRELAY_SERVICE_STATUS_CMD` は `nssm status devrelay-server` でよい
 （`SERVICE_RUNNING` を返し、WebUI には `active` と表示される）。
 
@@ -437,6 +455,8 @@ WebUI のサービス再起動ボタン（システム管理者限定）を実�
 
 - [ ] サービスとして起動・自動起動設定が完了している
 - [ ] WebUI からサービス再起動を実行し、正常に反映される
+- [ ] `restart-when-idle.js --status` が動く（`.env` を正しく読めている確認。会話中でなければ「実行中の会話はありません」と出る）
+- [ ] NSSM の `AppStopMethod*`（停止猶予）は変更していない（既定のままで良い。上記コールアウト参照）
 
 ---
 

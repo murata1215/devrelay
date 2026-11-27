@@ -34,9 +34,33 @@ import { initProxyDispatcher } from './services/proxy-dispatcher.js';
 import { warnOnPendingDbChanges, computeDbChangeStatus } from './services/db-change-index.js';
 import { responseShareRoutes } from './routes/response-share-api.js';
 import { cleanupExpiredShareTokens } from './services/response-share.js';
+import { findInFlightCandidates, recoverInFlightTurns } from './services/turn-recovery.js';
+import { writeShutdownMarker, clearShutdownMarker, checkPreviousShutdown } from './services/shutdown-marker.js';
+import { startInflightStateFile, stopInflightStateFile } from './services/inflight-state-file.js';
+import { broadcastRestartingNotice } from './services/restart-notice.js';
+import type { FastifyInstance } from 'fastify';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
+
+/** `shutdown()` から `app.close()` を呼べるようにするための module scope 参照（再起動耐性サイクル）。 */
+let fastifyAppRef: FastifyInstance | null = null;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/**
+ * `DEVRELAY_SHUTDOWN_GRACE_MS` の解決（既定1200ms、clamp 300〜30000）。
+ * pm2 の `kill_timeout`（既定1600ms）・NSSM の停止猶予（既定1500ms）のどちらにも収まる値を
+ * 既定にしている（`shutdown()` 全体の予算。設定を伸ばすようユーザーに頼むのではなく、
+ * 処理側をその既定値に収める方針）。
+ */
+function resolveShutdownGraceMs(raw: string | undefined): number {
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(parsed)) return 1200;
+  return Math.min(30000, Math.max(300, parsed));
+}
 
 /**
  * `app.listen()` より前に行う初期化処理（DB メンテナンス・セッション復元・FCM 初期化）を、
@@ -128,6 +152,22 @@ async function main() {
 
   // trustProxy: Caddy 経由の X-Forwarded-For を信頼し request.ip を実クライアント IP にする（#285 IP 制限用）
   const app = Fastify({ logger: true, trustProxy: true });
+  fastifyAppRef = app;
+
+  // 再起動耐性サイクル（2026-11-25）: 前回の停止が途中で強制終了されていないか確認する
+  // （fail-open。警告のみで起動は妨げない）。
+  const shutdownWarning = checkPreviousShutdown();
+  if (shutdownWarning) console.warn(shutdownWarning);
+
+  // 再起動耐性サイクル: 破壊的な起動時メンテナンス（下記）より前に、「再起動前から
+  // 実行中だったとみなせる」セッションを DB だけから見つけておく。これより下の
+  // teamexec_/crossquery_/raw_ の無条件 ended 化・24h stale 掃除から除外するために使う
+  // （DEVRELAY_TURN_RECOVERY=0 のときは常に空配列＝従来どおりの無条件掃除に戻る）。
+  const inFlightCandidates = await findInFlightCandidates().catch((err) => {
+    console.error('⚠️  in-flight 候補の検出に失敗しました（従来どおり無条件掃除します）:', err);
+    return [];
+  });
+  const inFlightSessionIds = inFlightCandidates.map(c => c.sessionId);
 
   // 起動前の DB メンテナンス（全マシン offline 化・stale セッション掃除）。
   // マシン再起動直後に PostgreSQL がまだ上がっていないケースに備え、非致命・20s 上限で実行する
@@ -147,20 +187,24 @@ async function main() {
       WHERE s.status = 'active'
       AND COALESCE((SELECT MAX(m."createdAt") FROM "Message" m WHERE m."sessionId" = s.id), s."startedAt") < ${staleThreshold}
     `;
-    if (staleSessions.length > 0) {
-      const staleIds = staleSessions.map(s => s.id);
+    const staleIds = staleSessions.map(s => s.id).filter(id => !inFlightSessionIds.includes(id));
+    if (staleIds.length > 0) {
       await prisma.session.updateMany({ where: { id: { in: staleIds } }, data: { status: 'ended' } });
       // stale セッションの ChannelSession も削除
       await prisma.channelSession.deleteMany({ where: { currentSessionId: { in: staleIds } } });
-      console.log(`🧹 Cleaned up ${staleSessions.length} stale active sessions (24h+ inactive)`);
+      console.log(`🧹 Cleaned up ${staleIds.length} stale active sessions (24h+ inactive)`);
     }
-    // #294: 取り残されたクロスプロジェクトセッション（teamexec_ / crossquery_）を ended に
-    // これらは HTTP リクエストの生存期間しか意味を持たず、サーバー再起動をまたいで active のままだと
-    // document-api.ts の転送ホップ判定（findInflightTeamExec）が誤検知するため確実に閉じる
+    // #294: 取り残されたクロスプロジェクトセッション（teamexec_ / crossquery_）を ended に。
+    // 再起動耐性サイクル: 再起動前から本当に実行中だったもの（inFlightSessionIds）は除外する
+    // （以前は無条件で ended にしており、実行中のクロス ask / MCP exec が再起動のたびに
+    // 「終了済み」として巻き戻る既存バグがあった）。
+    // これらは本来 HTTP リクエストの生存期間しか意味を持たない一時セッションの残骸掃除が目的で、
+    // document-api.ts の転送ホップ判定（findInflightTeamExec）が誤検知しないよう確実に閉じる。
     const crossResult = await prisma.session.updateMany({
       where: {
         status: 'active',
         OR: [{ id: { startsWith: 'teamexec_' } }, { id: { startsWith: 'crossquery_' } }],
+        id: { notIn: inFlightSessionIds },
       },
       data: { status: 'ended' },
     });
@@ -168,9 +212,10 @@ async function main() {
       console.log(`🧹 Closed ${crossResult.count} stale cross-project session(s) (teamexec/crossquery)`);
     }
 
-    // raw-completion: 取り残された raw_ セッションを ended に（クラッシュ時の active 残骸の掃除）
+    // raw-completion: 取り残された raw_ セッションを ended に（クラッシュ時の active 残骸の掃除）。
+    // 同様に inFlightSessionIds は除外する。
     const rawResult = await prisma.session.updateMany({
-      where: { status: 'active', id: { startsWith: 'raw_' } },
+      where: { status: 'active', id: { startsWith: 'raw_', notIn: inFlightSessionIds } },
       data: { status: 'ended' },
     });
     if (rawResult.count > 0) {
@@ -196,6 +241,10 @@ async function main() {
   // (So users can continue conversations after server restart)
   await runStartupInitWithTimeout('セッション復元', () => restoreSessionParticipants());
 
+  // 再起動耐性サイクル: 上で見つけた「再起動前から実行中だったセッション」の実行中ターン台帳・
+  // 進捗トラッカーを復元する（参加者復元の後。配信自体は Agent 再接続時の参加者復元後に行われる）。
+  await runStartupInitWithTimeout('実行中ターンの復元', () => recoverInFlightTurns(inFlightCandidates));
+
   // Web Push 通知の VAPID キー初期化
   initVapid();
 
@@ -217,6 +266,10 @@ async function main() {
   // B1 時点では Caddy 側にログ設定が無いため実質 no-op（cold scan がファイル無しで完了するだけ）。
   // DEVRELAY_SITES_ACCESS_LOG=0 で無効化可。
   startAccessLogAggregator();
+
+  // 再起動耐性サイクル: 実行中ターンの状況を `apps/server/.runtime/inflight.json` に定期書き出し
+  // （`restart:when-idle` CLI が認証無しでローカルから読むため）。DEVRELAY_INFLIGHT_STATE_FILE=0 で無効化可。
+  startInflightStateFile();
 
   // Plugins
   await app.register(cors, { origin: true });
@@ -329,17 +382,60 @@ async function main() {
 // SIGINT: Ctrl+C（開発時・Linux/macOS 手動停止）
 // SIGTERM: pm2/systemd 等の一般的なプロセスマネージャによる停止
 // SIGBREAK: Windows サービス（NSSM 等）が送る停止シグナル。Windows には SIGTERM が無いため必須
+//
+// 再起動耐性サイクル（2026-11-25）: 従来はここで何の予告もせず、WS を正しい close code で
+// 閉じることもなく `process.exit(0)` していたため、クライアントからは異常切断（1006）に見えていた。
+// `POST /api/services/restart/server` 経由だけでなく、手打ちの `pm2 restart` でもバナーが出るよう、
+// 予告配信は HTTP ハンドラ側（事前通知）とこの SIGTERM ハンドラ側（最終通知）の二重にしている
+// （どちらも best-effort。WS 送信自体はミリ秒単位で終わるため、停止処理全体の予算
+// `DEVRELAY_SHUTDOWN_GRACE_MS`（既定1200ms）を圧迫しない）。
+//
+// 停止処理全体は pm2 の kill_timeout（既定1600ms）・NSSM の停止猶予（既定1500ms）のどちらにも
+// 収まるよう、各ステップを予算の範囲内でレースさせる（設定を伸ばすよう頼むのではなく、
+// 処理側をその既定値に収める方針。詳細は `doc/devlog/2026-11-25_restart_resilience.md`）。
 let shuttingDown = false;
 const shutdown = async (signal: string) => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n👋 Shutting down (${signal})...`);
+  writeShutdownMarker(signal);
+
+  const graceMs = resolveShutdownGraceMs(process.env.DEVRELAY_SHUTDOWN_GRACE_MS);
+  const deadline = Date.now() + graceMs;
+  const remaining = () => Math.max(0, deadline - Date.now());
+
+  // 1. 予告配信（同期的に WS バッファへ積むだけなので実質 0ms）
+  try {
+    const sent = broadcastRestartingNotice(0);
+    console.log(`📢 [shutdown] notice sent: web=${sent.web}, agents=${sent.agents}`);
+  } catch (err) {
+    console.error('⚠️  Failed to broadcast shutdown notice:', err);
+  }
+
   stopHeartbeatMonitor();
-  // pm2 restart 等のオーバーラップで旧プロセスが Telegram の long poll / Discord gateway を
-  // 掴んだままだと 409 Conflict や二重応答になるため、bot を確実に破棄する。
-  // ただし shutdown 自体が hang しないよう 3 秒で打ち切る（stopBotSupervisors 内部でも race 済み）。
-  await stopBotSupervisors();
-  await prisma.$disconnect();
+  stopInflightStateFile();
+
+  // 2. app.close()（@fastify/websocket の preClose フックが全 WS クライアントを
+  //    close code 1000 で閉じ、HTTP サーバーも閉じる）。予算内でレース。
+  if (fastifyAppRef) {
+    await Promise.race([
+      fastifyAppRef.close().catch((err) => console.error('⚠️  app.close() failed:', err)),
+      sleep(remaining()),
+    ]);
+  }
+
+  // 3. bot 破棄（pm2 restart 等のオーバーラップで旧プロセスが Telegram の long poll /
+  //    Discord gateway を掴んだままだと 409 Conflict や二重応答になるため）。残り予算でレース
+  //    （stopBotSupervisors 内部で Promise.race 済みなので二重に安全）。
+  await stopBotSupervisors(Math.max(100, remaining()));
+
+  // 4. Prisma 切断。残り予算でレース（失敗・タイムアウトしても exit は続行する）
+  await Promise.race([
+    prisma.$disconnect().catch(() => {}),
+    sleep(remaining()),
+  ]);
+
+  clearShutdownMarker();
   process.exit(0);
 };
 process.on('SIGINT', () => void shutdown('SIGINT'));

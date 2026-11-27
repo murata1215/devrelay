@@ -2975,6 +2975,10 @@ export function ChatPage() {
     }
   }, [addMessageToTab]);
 
+  // 再起動耐性サイクル（2026-11-25）: サーバー再起動予告バナー表示状態。
+  // 再接続（onReconnect）が成立したら消す（handleReconnect の後に自分で false にする）。
+  const [serverRestarting, setServerRestarting] = useState(false);
+
   const { connected, sendCommand, sendToolApprovalResponse, sendCrossAsk } = useWebSocket({
     onMessage: handleWsMessage,
     onProgress: updateProgressOnTab,
@@ -2983,7 +2987,11 @@ export function ChatPage() {
     onToolApproval: handleToolApproval,
     onToolApprovalResolved: handleToolApprovalResolved,
     onToolApprovalAuto: handleToolApprovalAuto,
-    onReconnect: handleReconnect,
+    onReconnect: () => {
+      setServerRestarting(false);
+      handleReconnect();
+    },
+    onServerRestarting: () => setServerRestarting(true),
   });
 
   // sendCommand/connected が確定したら ref を更新（handleReconnect/visibilitychange から参照可能にする）
@@ -4442,6 +4450,13 @@ export function ChatPage() {
           <div className="flex items-center gap-2">
           </div>
         </div>
+
+        {/* 再起動耐性サイクル（2026-11-25）: サーバー再起動予告バナー。再接続が成立したら消える。 */}
+        {serverRestarting && (
+          <div className="px-4 py-1.5 bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200 text-xs text-center border-b border-[var(--border-color)]">
+            {t('chat.serverRestarting')}
+          </div>
+        )}
 
         {/* タブバー */}
         <TabBar

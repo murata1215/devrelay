@@ -82,7 +82,9 @@ type ServerToWebMessage =
   // 高辻ナレッジ サイクル4: ナレッジ回答（RAG）のストリーミング配信。既存 9 種は無変更（純加算）。
   | { type: 'knowledge:answer:delta'; payload: { answerId: string; text: string } }
   | { type: 'knowledge:answer:done'; payload: KnowledgeAnswerDonePayload }
-  | { type: 'knowledge:answer:error'; payload: { answerId: string; message: string } };
+  | { type: 'knowledge:answer:error'; payload: { answerId: string; message: string } }
+  // 再起動耐性サイクル（2026-11-25）: サーバーがまだ正常稼働しているうちに送る再起動予告。
+  | { type: 'web:server:restarting'; payload: { noticeMs: number } };
 
 /** チャットメッセージ */
 export interface ChatMessage {
@@ -126,6 +128,8 @@ export interface WebSocketCallbacks {
   onKnowledgeAnswerDone?: (payload: KnowledgeAnswerDonePayload) => void;
   /** 高辻ナレッジ サイクル4: ナレッジ回答のエラー受信時のコールバック */
   onKnowledgeAnswerError?: (payload: { answerId: string; message: string }) => void;
+  /** 再起動耐性サイクル（2026-11-25）: サーバー再起動予告の受信時コールバック（バナー表示用）。 */
+  onServerRestarting?: (payload: { noticeMs: number }) => void;
 }
 
 /** WebSocket フックの戻り値 */
@@ -181,6 +185,10 @@ export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSoc
    * 再接続ストームになり、そのたびにサーバーで `removeWebParticipantFromAllSessions` が走る）。 */
   const tabIdOverrideRef = useRef(options?.tabId);
   tabIdOverrideRef.current = options?.tabId;
+  /** 再起動耐性サイクル（2026-11-25）: `web:server:restarting` を受けたら true にし、
+   * 次の close で指数バックオフを使わず短い固定待ちで再接続する（サーバーはもう予告どおり
+   * 落ちることが分かっているため、通常の切断と違って「少し待って様子を見る」必要が無い）。 */
+  const expectRestartRef = useRef(false);
 
   const connect = useCallback(() => {
     const token = getToken();
@@ -269,6 +277,12 @@ export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSoc
             case 'knowledge:answer:error':
               cb?.onKnowledgeAnswerError?.(msg.payload);
               break;
+            case 'web:server:restarting':
+              // 再起動耐性サイクル: サーバーがまだ正常稼働しているうちに届く予告。
+              // 直後の close で指数バックオフに積ませず、短い固定待ちで即再接続させる。
+              expectRestartRef.current = true;
+              cb?.onServerRestarting?.(msg.payload);
+              break;
           }
         } catch {
           // JSON パースエラーは無視
@@ -285,9 +299,12 @@ export function useWebSocket(callbacks?: WebSocketCallbacks, options?: UseWebSoc
           pingTimerRef.current = null;
         }
 
-        // 自動再接続（exponential backoff: 2s, 4s, 8s, ... max 30s）
-        const delay = Math.min(2000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-        reconnectAttemptsRef.current++;
+        // 再起動耐性サイクル: 予告を受けていた切断は 1 秒固定で即再接続（バックオフを進めない）。
+        // それ以外は従来どおりの自動再接続（exponential backoff: 2s, 4s, 8s, ... max 30s）。
+        const expectedRestart = expectRestartRef.current;
+        expectRestartRef.current = false;
+        const delay = expectedRestart ? 1000 : Math.min(2000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+        if (!expectedRestart) reconnectAttemptsRef.current++;
         reconnectTimerRef.current = setTimeout(() => {
           if (mountedRef.current) connect();
         }, delay);
